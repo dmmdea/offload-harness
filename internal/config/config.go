@@ -48,8 +48,10 @@ type Config struct {
 	ThresholdsPath    string             `json:"thresholds_path,omitempty"`     // Phase 2: per-task conformal margin thresholds
 	TierOverridesPath string             `json:"tier_overrides_path,omitempty"` // Phase 4: health-driven entry-tier bumps + P95 timeouts
 	RouterWeightsPath string             `json:"router_weights_path,omitempty"` // Phase 5: logistic entry-tier router
-	ConfHeadPath       string            `json:"confhead_path,omitempty"`        // Phase 2: logistic correctness head
-	ConfHeadLabelsPath string            `json:"confhead_labels_path,omitempty"` // Phase 2: cascade-agreement correctness-label sidecar (classify/triage)
+	ConfHeadPath           string         `json:"confhead_path,omitempty"`            // Phase 2: logistic correctness head
+	ConfHeadLabelsPath     string         `json:"confhead_labels_path,omitempty"`     // Phase 2: cascade-agreement correctness-label sidecar (classify/triage)
+	ConfHeadThresholdsPath string         `json:"confhead_thresholds_path,omitempty"` // Phase 2: per-task conformal p(correct) escalation thresholds (Task 3)
+	ConfHeadEnabled        bool           `json:"confhead_enabled,omitempty"`         // Phase 2 Task 4: opt-in — gate ADOPT tasks on the head's p(correct). Default false.
 	ExemplarsDir      string             `json:"exemplars_dir,omitempty"`       // Phase 6: few-shot exemplar sidecar + selected pool
 	ExemplarShots     int                `json:"exemplar_shots,omitempty"`      // Phase 6: 0 = disabled
 	AutoHeal          bool               `json:"auto_heal,omitempty"`           // Phase 7: opt-in autonomous tier reload
@@ -80,8 +82,9 @@ func Default() Config {
 		ThresholdsPath:        filepath.Join(base, "thresholds.json"),
 		TierOverridesPath:     filepath.Join(base, "tier_overrides.json"),
 		RouterWeightsPath:     filepath.Join(base, "router-weights.json"),
-		ConfHeadPath:          filepath.Join(base, "confhead-weights.json"),
-		ConfHeadLabelsPath:    filepath.Join(base, "confhead-labels.jsonl"),
+		ConfHeadPath:           filepath.Join(base, "confhead-weights.json"),
+		ConfHeadLabelsPath:     filepath.Join(base, "confhead-labels.jsonl"),
+		ConfHeadThresholdsPath: filepath.Join(base, "confhead-thresholds.json"),
 		ExemplarsDir:          filepath.Join(base, "exemplars"),
 		ExemplarShots:         0, // off until the pool is built + measured
 		AutoHeal:              false,
@@ -135,7 +138,7 @@ func warnUnknownKeys(b []byte) {
 
 // EnsureDirs creates the parent dirs for the store files.
 func (c Config) EnsureDirs() error {
-	for _, p := range []string{c.CachePath, c.LedgerPath, c.ThresholdsPath, c.RouterWeightsPath, c.TierOverridesPath, c.ConfHeadPath, c.ConfHeadLabelsPath} {
+	for _, p := range []string{c.CachePath, c.LedgerPath, c.ThresholdsPath, c.RouterWeightsPath, c.TierOverridesPath, c.ConfHeadPath, c.ConfHeadLabelsPath, c.ConfHeadThresholdsPath} {
 		if p == "" {
 			continue
 		}

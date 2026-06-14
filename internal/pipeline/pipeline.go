@@ -15,6 +15,7 @@ import (
 
 	"github.com/dmmdea/local-offload-pp-cli/internal/breaker"
 	"github.com/dmmdea/local-offload-pp-cli/internal/cache"
+	"github.com/dmmdea/local-offload-pp-cli/internal/confhead"
 	"github.com/dmmdea/local-offload-pp-cli/internal/confidence"
 	"github.com/dmmdea/local-offload-pp-cli/internal/config"
 	"github.com/dmmdea/local-offload-pp-cli/internal/contextbudget"
@@ -46,6 +47,10 @@ type Pipeline struct {
 	overrides  *tierOverrides     // health-driven per-tier timeouts/degraded (Phase 4); nil = none
 	healMu     sync.Mutex         // Phase 7 autoheal rate-limit
 	lastHeal   map[string]time.Time
+	// Phase 2 Task 4: opt-in correctness head + per-task p(correct) thresholds.
+	// Both nil/empty unless cfg.ConfHeadEnabled — the gate is inert otherwise.
+	confhead       *confhead.Model    // nil = no head (gate off)
+	confThresholds map[string]float64 // per-task p(correct) escalation thresholds
 }
 
 func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Ledger) *Pipeline {
@@ -54,6 +59,13 @@ func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Le
 	p.router = router.Load(cfg.RouterWeightsPath)              // Phase 5
 	p.overrides = loadOverrides(cfg.TierOverridesPath)         // Phase 4
 	p.breakers = breaker.NewGroup(5, 10, 20*time.Second)       // Phase 3: 5 infra-fails / 10-window, 20s cooldown
+	// Phase 2 Task 4: opt-in correctness gate. Loading is graceful — a missing
+	// weights/thresholds file leaves the head nil / map empty, so the gate is
+	// inert. Off entirely unless cfg.ConfHeadEnabled.
+	if cfg.ConfHeadEnabled {
+		p.confhead = confhead.Load(cfg.ConfHeadPath)
+		p.confThresholds = confhead.LoadThresholds(cfg.ConfHeadThresholdsPath)
+	}
 	return p
 }
 
@@ -216,6 +228,22 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 			if v.OK {
 				reason, margin, low := p.confidenceGate(req, data, gen.Logprobs)
 				meta.Margin = margin
+				// Confhead correctness gate (opt-in, ADOPT tasks only): if the head
+				// predicts a low p(correct) for this call, treat it as low-confidence
+				// so Run escalates to a larger tier. Only fires when (a) enabled + head
+				// loaded, (b) the task has a learned threshold, and (c) a larger tier
+				// exists to escalate to (never on the escalation tier itself — the head
+				// does not model it). Never touches grammar.
+				if !low && p.confhead != nil && len(p.confThresholds) > 0 && p.cfg.EscalationModel != "" && model != p.cfg.EscalationModel {
+					if tau, ok := p.confThresholds[string(req.Task)]; ok {
+						e := entryFrom(req.Task, meta, false, len(req.Input))
+						pc := p.confhead.Predict(string(req.Task), confhead.FeatureRow(e))
+						if pc >= 0 && pc < tau {
+							low = true
+							reason = fmt.Sprintf("low confhead p(correct)=%.3f < threshold %.3f", pc, tau)
+						}
+					}
+				}
 				if low {
 					meta.LatencyMs = time.Since(start).Milliseconds()
 					// a larger, more decisive tier may clear the threshold

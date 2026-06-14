@@ -150,7 +150,14 @@ type row struct {
 // directly with fold-split slices instead of going through Train.
 // Entries that are cache hits or lack a correctness label are skipped.
 // Tasks with fewer than minRows labelled rows are omitted from the returned Model.
-func Fit(entries []ledger.Entry) *Model {
+func Fit(entries []ledger.Entry) *Model { return FitWithMinRows(entries, minRows) }
+
+// FitWithMinRows is Fit parameterized by the minimum labeled-row threshold.
+// Production (Fit) uses minRows=100; Task 2's out-of-fold validation passes a
+// lower threshold so a head can still train on a ~80-row training fold (the
+// paired-bootstrap CI is the real adoption guard). Behavior is otherwise
+// identical to Fit.
+func FitWithMinRows(entries []ledger.Entry, minRowsArg int) *Model {
 	byTask := map[string][]row{}
 	for _, e := range entries {
 		if e.CacheHit {
@@ -166,7 +173,7 @@ func Fit(entries []ledger.Entry) *Model {
 
 	tasks := map[string]taskWeights{}
 	for task, rows := range byTask {
-		if len(rows) < minRows {
+		if len(rows) < minRowsArg {
 			continue
 		}
 

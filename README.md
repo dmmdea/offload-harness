@@ -133,6 +133,18 @@ local-offload optimize      # mine verified-good calls into BM25 few-shot exempl
 
 The pipeline loads the resulting JSON at startup. All four are idempotent and safe to re‑run.
 
+### Learned correctness head (opt‑in)
+
+`summarize`/`extract` have no decision‑token margin, so they get a separate pure‑Go logistic **correctness head** that predicts `p(correct)` from the call's features. It is adopted **only if it provably helps**, validated with a rigorous, leakage‑free gate:
+
+```bash
+local-offload confhead-eval       # out-of-fold AURC + AUGRC vs incumbent, paired-bootstrap CI -> ADOPT/REJECT per task
+local-offload train-confhead      # fit the head over labeled ledger rows -> confhead-weights.json
+local-offload confhead-calibrate  # conformal p(correct) thresholds at the target error rate -> confhead-thresholds.json
+```
+
+The adoption gate reports a per‑task verdict (ADOPT only when the 95% CI on ΔAURC excludes zero). When a head is adopted and you set `"confhead_enabled": true`, a call whose predicted `p(correct)` falls below its learned threshold escalates to the larger tier instead of being accepted — catching the inputs the workhorse is likely to get wrong. **Default off**; inert unless a head + threshold are present.
+
 ## Notes & limitations
 
 - **bbolt cache is single‑writer**: when the long‑running MCP server holds it, a concurrent CLI run degrades to cache‑less automatically. The JSONL ledger has no such limit (both append concurrently).

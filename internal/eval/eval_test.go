@@ -140,6 +140,60 @@ func TestRiskCoverageAURC(t *testing.T) {
 	}
 }
 
+// TestRiskCoverageTieDeterminism pins the averaged-ties convention: RiskCoverage
+// and AUGRC sort by confidence DESC (stable, no correctness tiebreaker) and
+// replace each loss within a maximal run of equal confidence with the run's MEAN
+// loss. This makes the metric equal the EXPECTED value over random tie orderings,
+// so the point estimate is independent of input row order even when confidences
+// tie. Constructed input: 6 points all Confidence=0.0 (every point tied), 3
+// correct + 3 wrong => base error 0.5.
+func TestRiskCoverageTieDeterminism(t *testing.T) {
+	// "Natural" order interleaves correct/wrong; the shuffled copy reverses it.
+	// An unstable sort with no tiebreaker would let these diverge.
+	base := []RCPoint{
+		{Confidence: 0.0, Correct: true}, {Confidence: 0.0, Correct: false},
+		{Confidence: 0.0, Correct: true}, {Confidence: 0.0, Correct: false},
+		{Confidence: 0.0, Correct: true}, {Confidence: 0.0, Correct: false},
+	}
+	shuffled := []RCPoint{
+		{Confidence: 0.0, Correct: false}, {Confidence: 0.0, Correct: false},
+		{Confidence: 0.0, Correct: true}, {Confidence: 0.0, Correct: true},
+		{Confidence: 0.0, Correct: false}, {Confidence: 0.0, Correct: true},
+	}
+
+	_, _, aurc, _ := RiskCoverage(base)
+	_, _, aurcShuf, _ := RiskCoverage(shuffled)
+	if aurc != aurcShuf {
+		t.Fatalf("AURC must be order-independent under ties: %v vs %v", aurc, aurcShuf)
+	}
+	augrc := AUGRC(base)
+	augrcShuf := AUGRC(shuffled)
+	if augrc != augrcShuf {
+		t.Fatalf("AUGRC must be order-independent under ties: %v vs %v", augrc, augrcShuf)
+	}
+
+	// Under tie-averaging, every point's loss is replaced by the tie-group mean =
+	// base error 0.5. Selective risk = cumLoss/k = 0.5 at every k, so AURC == base
+	// error rate exactly (the fair no-skill value, vs the pessimistic 0.808 the
+	// old wrong-first tiebreaker reported).
+	const baseError = 0.5
+	const wantAURC = baseError // constant-confidence AURC == base error rate
+	if d := aurc - wantAURC; d < -1e-9 || d > 1e-9 {
+		t.Fatalf("constant-confidence AURC: want %v (==base error), got %v", wantAURC, aurc)
+	}
+	// Assert the headline identity directly: AURC of a constant-confidence
+	// (no-skill) predictor equals its base error rate.
+	if d := aurc - baseError; d < -1e-9 || d > 1e-9 {
+		t.Fatalf("constant-confidence AURC must equal base error %v, got %v", baseError, aurc)
+	}
+	// AUGRC uses JOINT risk (cumLoss/N) with smoothed loss 0.5 each:
+	// genRisk[k]=0.5*k/6, mean over k=1..6 = e*(N+1)/(2N) = 0.5*7/12 = 0.291667.
+	const wantAUGRC = baseError * (6.0 + 1.0) / (2.0 * 6.0) // 0.2916667
+	if d := augrc - wantAUGRC; d < -1e-9 || d > 1e-9 {
+		t.Fatalf("constant-confidence AUGRC: want %v, got %v", wantAUGRC, augrc)
+	}
+}
+
 func TestDeferralCurve(t *testing.T) {
 	pts := []OpPoint{
 		{Label: "entry", Cost: 10, Quality: 0.6},

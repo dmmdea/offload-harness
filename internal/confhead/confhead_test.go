@@ -103,3 +103,22 @@ func TestPredictNilSafe(t *testing.T) {
 		t.Fatal("nil model should return -1")
 	}
 }
+
+// TestFitWithMinRows trains a task that the production Fit (minRows=100) skips.
+// With 60 labeled rows, Fit yields no head but FitWithMinRows(rows,40) does.
+func TestFitWithMinRows(t *testing.T) {
+	var es []ledger.Entry
+	for i := 0; i < 60; i++ {
+		good := i%2 == 0
+		es = append(es, ledger.Entry{Task: "summarize", Margin: 0, Retries: 0, InputChars: 50,
+			Feat:     map[string]float64{"len_chars": 50, "n_words": 9, "n_numbers": 0, "n_caps": 1, "has_code": 0, "has_url": 0},
+			Grounded: bptr(good)})
+	}
+	if p := Fit(es).Predict("summarize", FeatureRow(es[0])); p != -1 {
+		t.Fatalf("Fit (minRows=100) should skip 60-row task, got p=%v", p)
+	}
+	p := FitWithMinRows(es, 40).Predict("summarize", FeatureRow(es[0]))
+	if p < 0 || p > 1 {
+		t.Fatalf("FitWithMinRows(40) should train the 60-row task, got p=%v", p)
+	}
+}
