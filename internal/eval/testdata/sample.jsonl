@@ -1,0 +1,2 @@
+{"task":"triage","input":"Build failed: ERROR cannot find module './x'. exit code 1.","params":{"question":"Does this indicate an error?"},"expect":"yes"}
+{"task":"classify","input":"The invoice total is overdue by 30 days.","params":{"labels":["billing","support","sales"]},"expect":"billing"}

@@ -1,0 +1,22 @@
+{"task":"triage","input":"npm ERR! code ELIFECYCLE\nnpm ERR! build script failed with exit code 1","params":{"question":"Does this text indicate an error or failure?"},"expect":"yes"}
+{"task":"triage","input":"All 42 tests passed in 3.1s. Coverage 91%.","params":{"question":"Does this text indicate an error or failure?"},"expect":"no"}
+{"task":"triage","input":"panic: runtime error: index out of range [3] with length 3","params":{"question":"Does this text indicate an error or failure?"},"expect":"yes"}
+{"task":"triage","input":"Deploy succeeded. 0 errors, 0 warnings.","params":{"question":"Does this text indicate an error or failure?"},"expect":"no"}
+{"task":"triage","input":"Traceback (most recent call last): FileNotFoundError: config.yaml not found","params":{"question":"Does this text indicate an error or failure?"},"expect":"yes"}
+{"task":"triage","input":"Build complete. Artifacts written to dist/. 0 TypeScript errors.","params":{"question":"Does this text indicate an error or failure?"},"expect":"no"}
+{"task":"triage","input":"ERROR: connection refused to postgres://localhost:5432/mydb","params":{"question":"Does this text indicate an error or failure?"},"expect":"yes"}
+{"task":"triage","input":"Migration applied successfully. 3 tables updated.","params":{"question":"Does this text indicate an error or failure?"},"expect":"no"}
+{"task":"triage","input":"FATAL: segmentation fault (core dumped) in worker process 1042","params":{"question":"Does this text indicate an error or failure?"},"expect":"yes"}
+{"task":"triage","input":"Backup completed: 14.2 GB written to s3://backups/2026-06-14. Verified OK.","params":{"question":"Does this text indicate an error or failure?"},"expect":"no"}
+{"task":"triage","input":"Warning: deprecated API 'cipher.update' will be removed in v4. Build completed successfully in 8.2s.","params":{"question":"Does this text indicate an error or failure?"},"expect":"no"}
+{"task":"triage","input":"Process exited 0. stderr: ERROR retrying connection (attempt 1/3)... reconnected; continuing.","params":{"question":"Does this text indicate an error or failure?"},"expect":"no"}
+{"task":"triage","input":"Job finished. Exit status: 137.","params":{"question":"Does this text indicate an error or failure?"},"expect":"yes"}
+{"task":"triage","input":"Lint passed: 0 errors, 14 warnings.","params":{"question":"Does this text indicate an error or failure?"},"expect":"no"}
+{"task":"triage","input":"fatal: not a git repository (or any of the parent directories): .git","params":{"question":"Does this text indicate an error or failure?"},"expect":"yes"}
+{"task":"triage","input":"HealthCheck: /readyz returned 503 Service Unavailable.","params":{"question":"Does this text indicate an error or failure?"},"expect":"yes"}
+{"task":"triage","input":"Tests: 41 passed, 1 skipped, 0 failed.","params":{"question":"Does this text indicate an error or failure?"},"expect":"no"}
+{"task":"triage","input":"Connection to db timed out after 30s. Aborting startup.","params":{"question":"Does this text indicate an error or failure?"},"expect":"yes"}
+{"task":"triage","input":"Notice: cache miss for key user:42; fetched from origin.","params":{"question":"Does this text indicate an error or failure?"},"expect":"no"}
+{"task":"triage","input":"Segmentation fault (core dumped)","params":{"question":"Does this text indicate an error or failure?"},"expect":"yes"}
+{"task":"triage","input":"All migrations up to date. Nothing to apply.","params":{"question":"Does this text indicate an error or failure?"},"expect":"no"}
+{"task":"triage","input":"npm warn deprecated har-validator@5.1.5: no longer supported. added 312 packages in 9s.","params":{"question":"Does this text indicate an error or failure?"},"expect":"no"}

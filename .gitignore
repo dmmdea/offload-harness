@@ -1,0 +1,16 @@
+/local-offload
+/local-offload.exe
+local-offload.exe~
+/.run/
+/.testrun/
+/.testrun2/
+*.db
+
+# machine-specific working configs — use config.example.json as the template
+config.json
+config-*.json
+test-config.json
+
+# setup.sh-generated artifacts (written into the harness source dir)
+/offload-family.llama-swap.yaml
+/serve-offload.sh

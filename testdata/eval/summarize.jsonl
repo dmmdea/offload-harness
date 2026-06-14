@@ -1,0 +1,16 @@
+{"task":"summarize","input":"The Q2 report shows revenue of 1200000, up 18 percent from Q1. Headcount grew from 45 to 52. Churn fell to 3 percent.","params":{"max_points":3}}
+{"task":"summarize","input":"The outage lasted 47 minutes and affected 2 regions. Root cause was a config change at 14:03. 3 services were degraded.","params":{"max_points":3}}
+{"task":"summarize","input":"The load test ran 500 concurrent users for 10 minutes. P95 latency was 320ms. Error rate was 0.4 percent. Throughput peaked at 1200 requests per second.","params":{"max_points":3}}
+{"task":"summarize","input":"Audit found 14 open vulnerabilities: 2 critical, 5 high, 7 medium. 3 issues were remediated within 48 hours. 11 remain pending.","params":{"max_points":3}}
+{"task":"summarize","input":"Sprint 22 closed 38 tickets. Velocity was 84 points, up from 71 last sprint. 3 tickets were carried over. Team size was 6 engineers.","params":{"max_points":3}}
+{"task":"summarize","input":"Database migration took 4 hours and moved 2.1 TB of data across 17 tables. Downtime was 12 minutes. 0 rows were lost.","params":{"max_points":3}}
+{"task":"summarize","input":"Customer survey results: 1200 responses, NPS score 62, up 8 points from last quarter. Top complaint was slow support response time cited by 340 respondents.","params":{"max_points":3}}
+{"task":"summarize","input":"Deployment pipeline ran in 9 minutes. 4 stages completed: lint, test (92 percent pass), build (docker 1.2 GB image), and deploy to 3 nodes.","params":{"max_points":3}}
+{"task":"summarize","input":"Revenue rose from 800000 to 1000000 this quarter, a 25 percent increase. Operating margin held at 12 percent.","params":{"max_points":3}}
+{"task":"summarize","input":"The team of 8 engineers shipped 3 features across 6 weeks. Two incidents occurred, each resolved within 45 minutes.","params":{"max_points":3}}
+{"task":"summarize","input":"Daily active users grew from 12000 to 15000, up 3000. Day-30 retention was 41 percent, up from 38.","params":{"max_points":3}}
+{"task":"summarize","input":"The build pipeline runs 1240 tests in 4.2 minutes; the flaky rate dropped to 0.8 percent from 2.1.","params":{"max_points":3}}
+{"task":"summarize","input":"The cluster has 6 nodes and 192 GB RAM total, 78 percent utilized at peak; 2 nodes were added last month.","params":{"max_points":3}}
+{"task":"summarize","input":"The survey had 540 respondents; 63 percent preferred option A, 29 percent option B, the rest undecided.","params":{"max_points":3}}
+{"task":"summarize","input":"Latency p50 is 120 ms, p95 is 480 ms, p99 is 1.2 seconds across 3 regions.","params":{"max_points":3}}
+{"task":"summarize","input":"Costs fell from 90000 to 72000 per month after migrating 14 services, a saving of 18000.","params":{"max_points":3}}
