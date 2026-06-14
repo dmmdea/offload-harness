@@ -1,0 +1,25 @@
+{
+  "endpoint": "http://127.0.0.1:11436",
+  "completion_path": "/v1/chat/completions",
+  "model": "offload-e4b",
+  "triage_model": "gemma4-e2b",
+  "escalation_model": "gemma4-26b-a4b",
+  "temperature": 0,
+  "max_retries": 1,
+  "classify_min_confidence": 0.45,
+  "confidence_margin_threshold": 0.35,
+  "max_input_chars": 24000,
+  "cache_path": "~/.local-offload/cache.db",
+  "ledger_path": "~/.local-offload/ledger.jsonl",
+
+  "thresholds_path": "~/.local-offload/thresholds.json",
+  "tier_overrides_path": "~/.local-offload/tier_overrides.json",
+  "router_weights_path": "~/.local-offload/router-weights.json",
+  "exemplars_dir": "~/.local-offload/exemplars",
+  "exemplar_shots": 0,
+  "auto_heal": false,
+  "target_error_rate": { "triage": 0.05, "classify": 0.05, "summarize": 0.15, "extract": 0.10 },
+
+  "opus_input_price_per_mtok": 15.0,
+  "request_timeout_sec": 120
+}

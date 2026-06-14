@@ -1,0 +1,654 @@
+// Command local-offload delegates short-context grunt work (summarize, classify,
+// extract, triage) to a free local model, exposed as both a CLI and an MCP
+// server. It never calls a cloud model: on failure it returns a structured
+// defer so the caller (Claude) handles the task itself.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/dmmdea/local-offload-pp-cli/internal/cache"
+	"github.com/dmmdea/local-offload-pp-cli/internal/calibration"
+	"github.com/dmmdea/local-offload-pp-cli/internal/config"
+	"github.com/dmmdea/local-offload-pp-cli/internal/core"
+	"github.com/dmmdea/local-offload-pp-cli/internal/eval"
+	"github.com/dmmdea/local-offload-pp-cli/internal/exemplars"
+	"github.com/dmmdea/local-offload-pp-cli/internal/health"
+	"github.com/dmmdea/local-offload-pp-cli/internal/ledger"
+	"github.com/dmmdea/local-offload-pp-cli/internal/llamaclient"
+	"github.com/dmmdea/local-offload-pp-cli/internal/mcpserver"
+	"github.com/dmmdea/local-offload-pp-cli/internal/pipeline"
+	"github.com/dmmdea/local-offload-pp-cli/internal/report"
+	"github.com/dmmdea/local-offload-pp-cli/internal/confhead"
+	"github.com/dmmdea/local-offload-pp-cli/internal/router"
+)
+
+const version = "0.1.0"
+
+func main() {
+	sub, args, ok := hoistGlobalConfig(os.Args[1:])
+	if !ok {
+		usage()
+		os.Exit(2)
+	}
+	var err error
+	switch sub {
+	case "summarize", "classify", "extract", "triage":
+		err = runTask(sub, args)
+	case "mcp":
+		err = runMCP(args)
+	case "ledger":
+		err = runLedger(args)
+	case "doctor":
+		err = runDoctor(args)
+	case "models":
+		err = runModels(args)
+	case "calibrate":
+		err = runCalibrate(args)
+	case "health":
+		err = runHealth(args)
+	case "train-router":
+		err = runTrainRouter(args)
+	case "train-confhead":
+		err = runTrainConfHead(args)
+	case "optimize":
+		err = runOptimize(args)
+	case "audit-sample":
+		err = runAuditSample(args)
+	case "eval":
+		err = runEval(args)
+	case "stats":
+		err = runStats(args)
+	case "version", "--version", "-v":
+		fmt.Println("local-offload", version)
+	default:
+		usage()
+		os.Exit(2)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+// hoistGlobalConfig pulls a global "--config <path>" / "--config=<path>" (or the
+// single-dash forms) that appears BEFORE the subcommand and re-attaches it to
+// the subcommand's args, so the subcommand's own flag parser handles it. Without
+// this, `local-offload --config x triage ...` dispatches on "--config" and falls
+// through to usage. A --config placed AFTER the subcommand is left untouched
+// (already parsed there). Returns ok=false when no subcommand is present.
+func hoistGlobalConfig(in []string) (sub string, args []string, ok bool) {
+	var cfg string
+	i := 0
+loop:
+	for i < len(in) {
+		a := in[i]
+		switch {
+		case a == "--config" || a == "-config":
+			if i+1 < len(in) {
+				cfg = in[i+1]
+				i += 2
+			} else {
+				i++ // dangling flag, no value
+			}
+		case strings.HasPrefix(a, "--config="):
+			cfg = strings.TrimPrefix(a, "--config=")
+			i++
+		case strings.HasPrefix(a, "-config="):
+			cfg = strings.TrimPrefix(a, "-config=")
+			i++
+		default:
+			break loop // first non-config token is the subcommand
+		}
+	}
+	rest := in[i:]
+	if len(rest) == 0 {
+		return "", nil, false
+	}
+	sub = rest[0]
+	args = rest[1:]
+	if cfg != "" {
+		args = append([]string{"--config", cfg}, args...)
+	}
+	return sub, args, true
+}
+
+func usage() {
+	fmt.Fprint(os.Stderr, `local-offload `+version+` — delegate grunt work to a free local model
+
+Usage:
+  local-offload summarize <file|-> [--max-points N] [--json]
+  local-offload classify  <file|-> --labels a,b,c [--json]
+  local-offload extract   <file|-> --schema schema.json [--json]
+  local-offload triage    <file|-> --question "..." [--json]
+  local-offload mcp                      run as an MCP server (stdio)
+  local-offload ledger [--since DAYS]    token-savings report
+  local-offload doctor                   check endpoint health + config
+  local-offload models                   show configured offload model
+  local-offload eval [--dir DIR]         code-based quality eval (AURC, deferral-curve AUDC/QNC)
+  local-offload stats                    observational per-task ledger telemetry
+  local-offload version
+
+Global: --config <path> (or $LOCAL_OFFLOAD_CONFIG)
+
+extract --schema expects a JSON Schema object with a "properties" map, e.g.
+  {"properties":{"name":{"type":"string"},"amount":{"type":"number"}}}
+A bare {"field":"string"} map has no usable properties and is deferred.
+`)
+}
+
+func loadCfg(fs *flag.FlagSet) config.Config {
+	path := fs.Lookup("config").Value.String()
+	if path == "" {
+		path = os.Getenv("LOCAL_OFFLOAD_CONFIG")
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "warning: config load failed, using defaults:", err)
+	}
+	return cfg
+}
+
+func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
+	if err := cfg.EnsureDirs(); err != nil {
+		return nil, nil, err
+	}
+	client := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, time.Duration(cfg.RequestTimeoutSec)*time.Second)
+	// Cache + ledger are bbolt (single-writer, exclusive file lock). When the
+	// long-running MCP server holds the lock, a CLI invocation degrades to
+	// cache-less rather than aborting — they speed things up / report savings,
+	// they are not required for correctness.
+	ca, err := cache.Open(cfg.CachePath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "note: cache unavailable (held by the MCP server?); continuing without cache")
+		ca = nil
+	}
+	led, err := ledger.Open(cfg.LedgerPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "note: ledger unavailable (held by the MCP server?); continuing without ledger")
+		led = nil
+	}
+	return pipeline.New(cfg, client, ca, led), func() {
+		if ca != nil {
+			ca.Close()
+		}
+		if led != nil {
+			led.Close()
+		}
+	}, nil
+}
+
+func runTask(task string, args []string) error {
+	fs := flag.NewFlagSet(task, flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	maxPoints := fs.Int("max-points", 5, "summarize: max bullet points")
+	labels := fs.String("labels", "", "classify: comma-separated labels")
+	question := fs.String("question", "", "triage: the yes/no/unsure question")
+	schemaPath := fs.String("schema", "", "extract: path to a JSON schema file")
+	// Go's flag pkg stops at the first positional, so split the input arg out
+	// first and parse the remaining flags (allows `summarize <file> --json`).
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "labels": true, "question": true, "schema": true, "max-points": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	input, err := readInput(positional)
+	if err != nil {
+		return err
+	}
+	params := map[string]any{}
+	switch core.TaskType(task) {
+	case core.TaskSummarize:
+		params["max_points"] = *maxPoints
+	case core.TaskClassify:
+		if *labels == "" {
+			return fmt.Errorf("classify requires --labels a,b,c")
+		}
+		params["labels"] = splitCSV(*labels)
+	case core.TaskTriage:
+		if *question == "" {
+			return fmt.Errorf("triage requires --question")
+		}
+		params["question"] = *question
+	case core.TaskExtract:
+		if *schemaPath == "" {
+			return fmt.Errorf("extract requires --schema schema.json")
+		}
+		sb, err := os.ReadFile(*schemaPath)
+		if err != nil {
+			return err
+		}
+		var sch map[string]any
+		if err := json.Unmarshal(sb, &sch); err != nil {
+			return fmt.Errorf("parse schema: %w", err)
+		}
+		params["schema"] = sch
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	res := p.Run(context.Background(), core.Request{Task: core.TaskType(task), Input: input, Params: params})
+	if *asJSON {
+		b, _ := json.MarshalIndent(res, "", "  ")
+		fmt.Println(string(b))
+		return nil
+	}
+	printHuman(res)
+	return nil
+}
+
+func printHuman(res core.Result) {
+	if res.Deferred {
+		fmt.Printf("DEFERRED (%s) — handle this yourself.\n", res.Reason)
+		if res.Partial != "" {
+			fmt.Println("partial:", truncate(res.Partial, 400))
+		}
+		return
+	}
+	var pretty any
+	_ = json.Unmarshal(res.Data, &pretty)
+	b, _ := json.MarshalIndent(pretty, "", "  ")
+	fmt.Println(string(b))
+	fmt.Printf("[%d in / %d out tok, %.0f tok/s, %dms%s]\n",
+		res.Meta.TokensIn, res.Meta.TokensOut, res.Meta.TokPerSec, res.Meta.LatencyMs,
+		map[bool]string{true: ", cache hit", false: ""}[res.Meta.CacheHit])
+}
+
+func runMCP(args []string) error {
+	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	return mcpserver.New(p).Run(context.Background(), version)
+}
+
+func runLedger(args []string) error {
+	fs := flag.NewFlagSet("ledger", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	since := fs.Int("since", 0, "only count entries from the last N days")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+	var sinceTS int64
+	if *since > 0 {
+		sinceTS = time.Now().AddDate(0, 0, -*since).Unix()
+	}
+	// Lock-free read: works even while the MCP server is appending to the ledger.
+	s, err := ledger.SummarizeFile(cfg.LedgerPath, sinceTS, cfg.OpusInputPricePerMTok)
+	if err != nil {
+		return err
+	}
+	b, _ := json.MarshalIndent(s, "", "  ")
+	fmt.Println(string(b))
+	return nil
+}
+
+func runDoctor(args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+	fmt.Printf("endpoint:   %s%s\nmodel:      %s\ncache:      %s\nledger:     %s\n",
+		cfg.Endpoint, cfg.CompletionPath, cfg.Model, cfg.CachePath, cfg.LedgerPath)
+	client := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Health(ctx); err != nil {
+		fmt.Println("health:     DOWN -", err)
+		return nil
+	}
+	fmt.Println("health:     OK")
+	return nil
+}
+
+func runModels(args []string) error {
+	fs := flag.NewFlagSet("models", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+	fmt.Printf("endpoint: %s\n\n", cfg.Endpoint)
+	fmt.Println("Gemma-4 QAT family cascade (ascending capability; climbs on quality failure):")
+	fmt.Printf("  fast   triage,classify -> %s  (~120 tok/s, entry tier)\n", orDash(cfg.TriageModel))
+	fmt.Printf("  work   summarize,extract -> %s  (~83 tok/s, default workhorse)\n", orDash(cfg.Model))
+	fmt.Printf("  escal  on validation/low-confidence -> %s  (MoE, ~16 tok/s, near-frontier)\n", orDash(cfg.EscalationModel))
+	fmt.Println("  defer  all local tiers fail -> Opus (structured defer; harness never calls cloud)")
+	fmt.Println()
+	fmt.Println("Per-tier llama-server flags are grammar-reliable (NO MTP; MTP breaks GBNF):")
+	fmt.Println("  -ngl 99|48|999(+--cpu-moe) --ctx-size 8192 --flash-attn on \\")
+	fmt.Println("  --cache-type-k f16 --cache-type-v f16 --jinja --reasoning off")
+	fmt.Println("served by llama-swap on :11436 (see ~/llama-swap/config.yaml)")
+	return nil
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "(unset -> falls back to workhorse)"
+	}
+	return s
+}
+
+// --- self-learning offline subcommands (run by offload-dream.ps1 or by hand) ---
+
+func runCalibrate(args []string) error {
+	fs := flag.NewFlagSet("calibrate", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	out := fs.String("out", "", "output thresholds.json (default: config thresholds_path)")
+	alpha := fs.Float64("alpha", 0.10, "default target error rate (per-task overrides via config target_error_rate)")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+	_ = cfg.EnsureDirs()
+	dst := *out
+	if dst == "" {
+		dst = cfg.ThresholdsPath
+	}
+	_, report, err := calibration.Run(cfg.LedgerPath, *alpha, cfg.TargetErrorRate, dst)
+	if err != nil {
+		return err
+	}
+	fmt.Println(report)
+	fmt.Println("wrote", dst)
+	return nil
+}
+
+func runHealth(args []string) error {
+	fs := flag.NewFlagSet("health", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	out := fs.String("out", "", "output tier_overrides.json (default: config tier_overrides_path)")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+	dst := *out
+	if dst == "" {
+		dst = cfg.TierOverridesPath
+	}
+	rep, err := health.Run(cfg.LedgerPath, dst)
+	if err != nil {
+		return err
+	}
+	b, _ := json.MarshalIndent(rep, "", "  ")
+	fmt.Println(string(b))
+	fmt.Println("wrote", dst)
+	return nil
+}
+
+func runTrainRouter(args []string) error {
+	fs := flag.NewFlagSet("train-router", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	out := fs.String("out", "", "output router-weights.json (default: config router_weights_path)")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+	dst := *out
+	if dst == "" {
+		dst = cfg.RouterWeightsPath
+	}
+	rep, err := router.Train(cfg.LedgerPath, dst)
+	if err != nil {
+		return err
+	}
+	fmt.Println(rep)
+	fmt.Println("wrote", dst)
+	return nil
+}
+
+func runTrainConfHead(args []string) error {
+	fs := flag.NewFlagSet("train-confhead", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	out := fs.String("out", "", "output confhead-weights.json (default: config confhead_path)")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+	dst := *out
+	if dst == "" {
+		dst = cfg.ConfHeadPath
+	}
+	rep, err := confhead.Train(cfg.LedgerPath, cfg.ConfHeadLabelsPath, dst)
+	if err != nil {
+		return err
+	}
+	fmt.Println(rep)
+	fmt.Println("wrote", dst)
+	return nil
+}
+
+func runOptimize(args []string) error {
+	fs := flag.NewFlagSet("optimize", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+	for _, t := range []string{"summarize", "classify", "extract", "triage"} {
+		rep, err := exemplars.Select(cfg.ExemplarsDir, t)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, t+":", err)
+			continue
+		}
+		fmt.Println(rep)
+	}
+	return nil
+}
+
+func runAuditSample(args []string) error {
+	fs := flag.NewFlagSet("audit-sample", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	n := fs.Int("n", 20, "number of cases to surface")
+	hard := fs.Bool("hard", false, "only hard cases (deferred / ungrounded / low margin)")
+	asJSON := fs.Bool("json", false, "emit JSON (for codex/Opus review)")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+	entries, err := ledger.ReadAll(cfg.LedgerPath)
+	if err != nil {
+		return err
+	}
+	var picked []ledger.Entry
+	for _, e := range entries {
+		if e.CacheHit {
+			continue
+		}
+		isHard := e.Deferred || (e.Grounded != nil && !*e.Grounded) || (e.Margin > 0 && e.Margin < cfg.ConfidenceMarginThreshold)
+		if !*hard || isHard {
+			picked = append(picked, e)
+		}
+	}
+	if len(picked) > *n {
+		picked = picked[len(picked)-*n:]
+	}
+	if *asJSON {
+		b, _ := json.MarshalIndent(picked, "", "  ")
+		fmt.Println(string(b))
+		return nil
+	}
+	for _, e := range picked {
+		g := "-"
+		if e.Grounded != nil {
+			g = fmt.Sprintf("%v", *e.Grounded)
+		}
+		fmt.Printf("[%-9s] tier=%-14s margin=%.2f deferred=%v grounded=%s err=%s\n", e.Task, e.ModelTier, e.Margin, e.Deferred, g, e.ErrClass)
+	}
+	fmt.Printf("(%d cases)\n", len(picked))
+	return nil
+}
+
+func readInput(arg string) (string, error) {
+	if arg == "" || arg == "-" {
+		b, err := io.ReadAll(os.Stdin)
+		return string(b), err
+	}
+	b, err := os.ReadFile(arg)
+	return string(b), err
+}
+
+// splitArgs separates the first positional (input path) from flags, treating
+// the named value-flags as consuming the following token. This lets the input
+// path appear before flags on the command line.
+func splitArgs(args []string, valueFlags map[string]bool) (positional string, flags []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "-" { // stdin indicator is a positional, not a flag
+			if positional == "" {
+				positional = a
+			} else {
+				flags = append(flags, a)
+			}
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			flags = append(flags, a)
+			name := strings.TrimLeft(a, "-")
+			if strings.ContainsRune(name, '=') {
+				continue
+			}
+			if valueFlags[name] && i+1 < len(args) {
+				i++
+				flags = append(flags, args[i])
+			}
+			continue
+		}
+		if positional == "" {
+			positional = a
+		} else {
+			flags = append(flags, a)
+		}
+	}
+	return positional, flags
+}
+
+func splitCSV(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
+}
+
+func runEval(args []string) error {
+	fs := flag.NewFlagSet("eval", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	dir := fs.String("dir", "testdata/eval", "gold-set dir of <task>.jsonl files")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+
+	var cases []eval.Case
+	for _, t := range []string{"summarize", "classify", "extract", "triage"} {
+		cs, err := eval.LoadCases(filepath.Join(*dir, t+".jsonl"))
+		if err != nil {
+			return err
+		}
+		cases = append(cases, cs...)
+	}
+	if len(cases) == 0 {
+		return fmt.Errorf("no gold cases under %s", *dir)
+	}
+
+	run := func(c config.Config) []eval.Outcome {
+		p, cleanup, err := openPipeline(c)
+		if err != nil {
+			return nil
+		}
+		defer cleanup()
+		return eval.Run(context.Background(), p, cases)
+	}
+
+	// Operating point 1: entry-tier only (escalation off) — the cheap point.
+	entryCfg := cfg
+	entryCfg.EscalationModel = ""
+	entryOut := run(entryCfg)
+	// Operating point 2: full cascade — the expensive point.
+	fullOut := run(cfg)
+	// Answer-always (escalation off + confidence gates off) so every triage/
+	// classify case yields a (Margin, correct) pair for the AURC ranking.
+	ansCfg := cfg
+	ansCfg.EscalationModel = ""
+	ansCfg.ConfidenceMarginThreshold = 0
+	ansCfg.ClassifyMinConfidence = 0
+	ansOut := run(ansCfg)
+
+	entryRep := eval.Aggregate(entryOut)
+	fullRep := eval.Aggregate(fullOut)
+	avgCost := func(r eval.Report) float64 {
+		if r.N == 0 {
+			return 0
+		}
+		return float64(r.TokensOut) / float64(r.N)
+	}
+
+	type taskMetrics struct {
+		Coverage     float64 `json:"coverage"`      // 1 - defer_rate (full cascade)
+		SelectiveAcc float64 `json:"selective_acc"` // accuracy among answered (full)
+		AUDC         float64 `json:"audc"`          // cascade cost-quality area
+		QNC          float64 `json:"qnc"`           // min norm cost to match peak quality
+		PeakQuality  float64 `json:"peak_quality"`
+		AURC         float64 `json:"aurc,omitempty"`  // selective prediction (triage/classify)
+		EAURC        float64 `json:"eaurc,omitempty"`
+		AURCApplies  bool    `json:"aurc_applies"`
+	}
+
+	out := map[string]taskMetrics{}
+	for _, task := range eval.SortedTasks(fullRep) {
+		fr, er := fullRep[task], entryRep[task]
+		audc, qnc, peak := eval.DeferralCurve([]eval.OpPoint{
+			{Label: "entry", Cost: avgCost(er), Quality: er.AccuracyAccepted},
+			{Label: "full", Cost: avgCost(fr), Quality: fr.AccuracyAccepted},
+		})
+		tm := taskMetrics{
+			Coverage: 1 - fr.DeferRate, SelectiveAcc: fr.AccuracyAccepted,
+			AUDC: audc, QNC: qnc, PeakQuality: peak,
+		}
+		if task == string(core.TaskTriage) || task == string(core.TaskClassify) {
+			var rc []eval.RCPoint
+			for _, o := range ansOut {
+				if o.Case.Task == task && o.Accepted && o.Margin > 0 {
+					rc = append(rc, eval.RCPoint{Confidence: o.Margin, Correct: o.Correct})
+				}
+			}
+			if len(rc) > 0 {
+				_, _, aurc, eaurc := eval.RiskCoverage(rc)
+				tm.AURC, tm.EAURC, tm.AURCApplies = aurc, eaurc, true
+			}
+		}
+		out[task] = tm
+	}
+
+	b, _ := json.MarshalIndent(out, "", "  ")
+	fmt.Println(string(b))
+	return nil
+}
+
+func runStats(args []string) error {
+	fs := flag.NewFlagSet("stats", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+	entries, err := ledger.ReadAll(cfg.LedgerPath)
+	if err != nil {
+		return err
+	}
+	m := report.Summarize(entries, cfg.ConfidenceMarginThreshold)
+	b, _ := json.MarshalIndent(m, "", "  ")
+	fmt.Println(string(b))
+	return nil
+}

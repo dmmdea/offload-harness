@@ -1,0 +1,20 @@
+{"task":"classify","input":"My card was charged twice this month, please refund the duplicate.","params":{"labels":["billing","technical","account"]},"expect":"billing"}
+{"task":"classify","input":"The app crashes every time I open the settings page.","params":{"labels":["billing","technical","account"]},"expect":"technical"}
+{"task":"classify","input":"How do I change the email address on my profile?","params":{"labels":["billing","technical","account"]},"expect":"account"}
+{"task":"classify","input":"I was billed in USD but my account is set to EUR.","params":{"labels":["billing","technical","account"]},"expect":"billing"}
+{"task":"classify","input":"The API returns a 500 error when I POST to /orders with a large payload.","params":{"labels":["billing","technical","account"]},"expect":"technical"}
+{"task":"classify","input":"I need to cancel my subscription and delete all my data.","params":{"labels":["billing","technical","account"]},"expect":"account"}
+{"task":"classify","input":"I was charged for the Pro plan but I only signed up for Free.","params":{"labels":["billing","technical","account"]},"expect":"billing"}
+{"task":"classify","input":"Images fail to load on the dashboard; the console shows CORS errors.","params":{"labels":["billing","technical","account"]},"expect":"technical"}
+{"task":"classify","input":"How do I add a second user to my organization?","params":{"labels":["billing","technical","account"]},"expect":"account"}
+{"task":"classify","input":"My invoice for March shows a charge of 99 but the plan page says 49.","params":{"labels":["billing","technical","account"]},"expect":"billing"}
+{"task":"classify","input":"I was charged for the Pro plan even though I downgraded to Basic last month.","params":{"labels":["billing","technical","account"]},"expect":"billing"}
+{"task":"classify","input":"My two-factor codes stopped working after I switched phones.","params":{"labels":["billing","technical","account"]},"expect":"account"}
+{"task":"classify","input":"The CSV export button returns a 500 error every time.","params":{"labels":["billing","technical","account"]},"expect":"technical"}
+{"task":"classify","input":"I need an invoice that includes my company's VAT number.","params":{"labels":["billing","technical","account"]},"expect":"billing"}
+{"task":"classify","input":"Can you merge my personal and work accounts into one?","params":{"labels":["billing","technical","account"]},"expect":"account"}
+{"task":"classify","input":"The dashboard loads blank on Safari but is fine on Chrome.","params":{"labels":["billing","technical","account"]},"expect":"technical"}
+{"task":"classify","input":"Why was I billed in USD when my region is set to EU?","params":{"labels":["billing","technical","account"]},"expect":"billing"}
+{"task":"classify","input":"I can't remember which email address I used to sign up.","params":{"labels":["billing","technical","account"]},"expect":"account"}
+{"task":"classify","input":"File uploads fail for anything over 10 MB.","params":{"labels":["billing","technical","account"]},"expect":"technical"}
+{"task":"classify","input":"Please cancel my subscription and stop the renewal next week.","params":{"labels":["billing","technical","account"]},"expect":"billing"}

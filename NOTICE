@@ -1,0 +1,15 @@
+local-offload
+Copyright 2026 dmmdea
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This software is designed to build against and run with third-party
+components that are NOT distributed in this repository:
+
+  - llama.cpp (https://github.com/ggml-org/llama.cpp), MIT License —
+    built locally by the installer; used as the inference server.
+
+  - Google Gemma model weights (Gemma-4 QAT GGUFs, packaged by Unsloth),
+    downloaded at install time from Hugging Face and used at runtime under
+    the Gemma Terms of Use (https://ai.google.dev/gemma/terms). No model
+    weights are included in or distributed by this repository.

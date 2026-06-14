@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "company": { "type": "string" },
+    "product": { "type": "string" },
+    "price_usd": { "type": "integer" },
+    "ceo": { "type": "string" },
+    "city": { "type": "string" }
+  },
+  "required": ["company", "product", "price_usd", "ceo", "city"]
+}
