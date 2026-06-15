@@ -138,6 +138,8 @@ llama-server --model Qwen3VL-4B-Instruct-Q4_K_M.gguf --mmproj mmproj-Qwen3VL-4B-
 
 **Gotchas:** use the **Instruct** build (Thinking bypasses GBNF, llama.cpp #20345); GBNF works WITH an image but never `--json-schema` (#22396) — use the raw `grammar` field; keep **mmproj F16** for OCR (Q8 hallucinates); OCR fine‑detail on `llama-server` has an open regression (#22785) — fine for short text, validate dense docs.
 
+Image **generation** lives in [`render/`](render/) — a general ComfyUI runner (run any workflow via `--graph`, or a parameterized SDXL text2img with neutral defaults; nothing project‑specific baked in). Generate, then QA the result with `assess-image`.
+
 ## Structured output (important)
 
 Gemma‑4 **crashes** on llama.cpp `--json-schema` / `json_schema` / `response_format` ([#22396](https://github.com/ggml-org/llama.cpp/issues/22396)). This harness instead enforces a **GBNF grammar** via the `grammar` field, then forgivingly parses + schema‑validates the result in Go. Grammars are generated per request (no external dependency).
