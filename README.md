@@ -108,7 +108,35 @@ Or in your MCP client config under `mcpServers`:
 }
 ```
 
-Tools: `offload_summarize`, `offload_classify`, `offload_extract`, `offload_triage`. Each returns the result JSON or `{deferred:true, ...}`.
+Tools: `offload_summarize`, `offload_classify`, `offload_extract`, `offload_triage` (plus the vision tools below). Each returns the result JSON or `{deferred:true, ...}`.
+
+## Vision (image understanding / OCR)
+
+The harness can also READ images. Four image subcommands / MCP tools route to a local **Qwen3-VL-4B-Instruct** tier instead of the Gemma text cascade — same never‑call‑cloud, defer‑to‑Opus philosophy:
+
+```
+local-offload vqa           img.png --question "What number is shown?" --json     # -> {answer}
+local-offload ocr           scan.png --json                                        # -> {text}
+local-offload extract-image invoice.png --schema fields.json --json                # -> grounded fields
+local-offload assess-image  render.png --brief "a red sports car at sunset" --json # -> {has_people,...}
+```
+
+- **`vqa`** → `{answer}`: free‑text visual Q&A / describe.
+- **`ocr`** → `{text}`: transcribes the text in the image.
+- **`extract-image --schema f.json`** → grounded fields: it OCRs the image, then runs the **existing** text `extract` over the OCR text — inheriting the same GBNF grammar, verbatim grounding (values must appear in the OCR text), and schema validation.
+- **`assess-image [--brief "..."]`** → GBNF‑constrained `{has_people, has_text, matches_brief, notes}`: QA an image against hard exclusions (no‑people / no‑text) and an optional brief.
+
+Served by **Qwen3-VL-4B-Instruct** (`vision_model`, default `qwen3vl-4b`) on the **same** llama-swap `:11436`, **swap‑exclusive** with the Gemma cascade (one model on the GPU at a time). Image input is a **local file path or a `data:` URI — never a remote URL** (no egress). MCP tools: `offload_vqa`, `offload_ocr`, `offload_extract_image`, `offload_assess_image`.
+
+Verified serving recipe (fits 8GB):
+
+```
+llama-server --model Qwen3VL-4B-Instruct-Q4_K_M.gguf --mmproj mmproj-Qwen3VL-4B-Instruct-F16.gguf \
+  -ngl 99 -c 4096 --image-max-tokens 1024 --no-context-shift --flash-attn on \
+  --cache-type-k q8_0 --cache-type-v q8_0 --jinja
+```
+
+**Gotchas:** use the **Instruct** build (Thinking bypasses GBNF, llama.cpp #20345); GBNF works WITH an image but never `--json-schema` (#22396) — use the raw `grammar` field; keep **mmproj F16** for OCR (Q8 hallucinates); OCR fine‑detail on `llama-server` has an open regression (#22785) — fine for short text, validate dense docs.
 
 ## Structured output (important)
 

@@ -4,6 +4,8 @@
   "model": "offload-e4b",
   "triage_model": "gemma4-e2b",
   "escalation_model": "gemma4-26b-a4b",
+  "vision_model": "qwen3vl-4b",
+  "vision_max_image_bytes": 6000000,
   "temperature": 0,
   "max_retries": 1,
   "classify_min_confidence": 0.45,

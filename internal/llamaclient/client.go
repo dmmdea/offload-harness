@@ -79,6 +79,34 @@ type chatReq struct {
 	Stream      bool      `json:"stream"`
 }
 
+// --- multimodal (vision) request types ---
+// The vision path sends OpenAI-style array content (text + image_url parts) so a
+// VLM (e.g. qwen3vl-4b) can attach images. Text Generate keeps its plain-string
+// content; these types are vision-only and never touch the text path.
+type imageURL struct {
+	URL string `json:"url"`
+}
+type contentPart struct {
+	Type     string    `json:"type"` // "text" | "image_url"
+	Text     string    `json:"text,omitempty"`
+	ImageURL *imageURL `json:"image_url,omitempty"`
+}
+type mmMsg struct {
+	Role    string        `json:"role"`
+	Content []contentPart `json:"content"`
+}
+type mmChatReq struct {
+	Model       string  `json:"model,omitempty"`
+	Messages    []mmMsg `json:"messages"`
+	Temperature float64 `json:"temperature"`
+	MaxTokens   int     `json:"max_tokens,omitempty"`
+	Grammar     string  `json:"grammar,omitempty"`
+	Logprobs    bool    `json:"logprobs,omitempty"`
+	TopLogprobs int     `json:"top_logprobs,omitempty"`
+	CachePrompt bool    `json:"cache_prompt"`
+	Stream      bool    `json:"stream"`
+}
+
 type respAlt struct {
 	Token   string  `json:"token"`
 	Logprob float64 `json:"logprob"`
@@ -148,6 +176,63 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 	if err != nil {
 		return GenResult{}, err
 	}
+	return decodeGenResult(resp, start)
+}
+
+// GenerateVision sends a multimodal chat request: the user message carries the
+// prompt text plus one image_url part per data URI in imageDataURIs (each a full
+// data:image/...;base64,... URI). model overrides the client default ("" = use
+// it); grammar may be empty. It shares decodeGenResult with Generate, so
+// telemetry/logprob handling is identical. CachePrompt is forced OFF on the
+// vision path (llama.cpp #17200: consecutive-image KV reuse can corrupt output).
+func (c *Client) GenerateVision(ctx context.Context, model, system, user string, imageDataURIs []string, grammar string, maxTokens int, temperature float64, topLogprobs int) (GenResult, error) {
+	if model == "" {
+		model = c.model
+	}
+	userParts := make([]contentPart, 0, 1+len(imageDataURIs))
+	userParts = append(userParts, contentPart{Type: "text", Text: user})
+	for _, uri := range imageDataURIs {
+		userParts = append(userParts, contentPart{Type: "image_url", ImageURL: &imageURL{URL: uri}})
+	}
+	body := mmChatReq{
+		Model:       model,
+		Temperature: temperature,
+		MaxTokens:   maxTokens,
+		Grammar:     grammar,
+		CachePrompt: false, // vision: KV reuse across images can corrupt (llama.cpp #17200)
+		Messages:    []mmMsg{},
+	}
+	if topLogprobs > 0 {
+		body.Logprobs = true
+		body.TopLogprobs = topLogprobs
+	}
+	if system != "" {
+		body.Messages = append(body.Messages, mmMsg{Role: "system", Content: []contentPart{{Type: "text", Text: system}}})
+	}
+	body.Messages = append(body.Messages, mmMsg{Role: "user", Content: userParts})
+
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return GenResult{}, err
+	}
+	start := time.Now()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+c.path, bytes.NewReader(buf))
+	if err != nil {
+		return GenResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return GenResult{}, err
+	}
+	return decodeGenResult(resp, start)
+}
+
+// decodeGenResult turns a llama-server chat response into a GenResult. It owns
+// status handling, body decode, and per-call telemetry (incl. raw logprobs), so
+// both Generate (text) and GenerateVision (multimodal) share one decode path.
+// It closes resp.Body.
+func decodeGenResult(resp *http.Response, start time.Time) (GenResult, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)

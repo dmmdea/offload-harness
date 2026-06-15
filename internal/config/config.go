@@ -27,6 +27,12 @@ type Config struct {
 	// EscalationModel is tried once when the primary defers (validation fail / low
 	// confidence) BEFORE deferring to Opus. Empty = no escalation (defer directly).
 	EscalationModel string `json:"escalation_model"`
+	// VisionModel is the VLM alias used for the vqa task (multimodal). Empty = no
+	// vision route (vqa defers).
+	VisionModel string `json:"vision_model,omitempty"`
+	// VisionMaxImageBytes caps a single decoded image before it is rejected
+	// (guards context/VRAM blowups). 0 = use the loader default.
+	VisionMaxImageBytes int `json:"vision_max_image_bytes,omitempty"`
 	// Temperature for deterministic structured output (default 0).
 	Temperature float64 `json:"temperature"`
 	// MaxRetries is how many correction re-prompts before deferring.
@@ -72,6 +78,8 @@ func Default() Config {
 		Model:                 "offload-e4b",
 		TriageModel:           "gemma4-e2b",     // fast tier for triage/classify
 		EscalationModel:       "gemma4-26b-a4b", // near-frontier MoE, tried before defer-to-Opus
+		VisionModel:           "qwen3vl-4b",     // VLM for the vqa task
+		VisionMaxImageBytes:   6000000,          // ~6MB cap per image
 		Temperature:               0,
 		MaxRetries:                1,
 		ClassifyMinConfidence:     0.45,

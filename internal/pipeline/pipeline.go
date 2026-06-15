@@ -5,6 +5,8 @@ package pipeline
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -22,6 +24,7 @@ import (
 	"github.com/dmmdea/local-offload-pp-cli/internal/core"
 	"github.com/dmmdea/local-offload-pp-cli/internal/exemplars"
 	"github.com/dmmdea/local-offload-pp-cli/internal/grounding"
+	"github.com/dmmdea/local-offload-pp-cli/internal/imageio"
 	"github.com/dmmdea/local-offload-pp-cli/internal/ledger"
 	"github.com/dmmdea/local-offload-pp-cli/internal/llamaclient"
 	"github.com/dmmdea/local-offload-pp-cli/internal/parser"
@@ -85,6 +88,26 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	if !req.Task.Valid() {
 		return core.Deferf("unknown task "+string(req.Task), "", meta)
 	}
+
+	// extract_image is a COMPOSITE that builds its own sub-requests (an ocr task +
+	// an extract task), so it dispatches BEFORE tasks.Build — there is no single
+	// prompt/grammar to build here. It reuses the proven extract pipeline verbatim.
+	if req.Task == core.TaskExtractImage {
+		return p.runExtractImage(ctx, req, meta, start)
+	}
+
+	// Vision tasks (vqa) take a SEPARATE branch: the input is an image, not text,
+	// so they skip the trivial-input gate, the context-budget trim, and the whole
+	// text model cascade. The text path below stays byte-identical for non-vision
+	// tasks. Build the prompt here so a bad request still defers cleanly.
+	if isVisionTask(req.Task) {
+		built, err := tasks.Build(req)
+		if err != nil {
+			return core.Deferf("build error: "+err.Error(), "", meta)
+		}
+		return p.runVision(ctx, req, built, meta, start)
+	}
+
 	if contextbudget.IsTrivial(req.Input) {
 		return core.Deferf("input too small to offload", "", meta)
 	}
@@ -160,6 +183,149 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	}
 	p.recordDefer(req.Task, last.Meta, len(req.Input))
 	return last
+}
+
+// isVisionTask reports whether a task runs on the vision branch (single VLM tier,
+// image input, no text cascade). Extensible as extract-image/assess land.
+func isVisionTask(t core.TaskType) bool {
+	return t == core.TaskVQA || t == core.TaskOCR || t == core.TaskAssessImage
+}
+
+// visionResultKey returns the JSON key under which a vision task's success output
+// is wrapped: vqa answers a question ("answer"); ocr transcribes text ("text").
+// vqa stays byte-identical to its original behavior.
+func visionResultKey(t core.TaskType) string {
+	if t == core.TaskOCR {
+		return "text"
+	}
+	return "answer"
+}
+
+// runVision handles a single multimodal call on the VLM tier. It mirrors the
+// text path's cache + ledger + defer machinery but uses GenerateVision and has
+// NO grammar/grounding/confidence-margin gate — vqa is free-text, so it rides
+// only empty-output, truncation, and infra defers. A bigger local tier is not
+// available, so any defer goes straight to Opus (itself a strong VLM).
+func (p *Pipeline) runVision(ctx context.Context, req core.Request, built tasks.Built, meta core.Meta, start time.Time) core.Result {
+	// An empty VisionModel means "no vision route configured" (documented in
+	// config.VisionModel). Guard FIRST: GenerateVision(ctx, "", ...) would fall back
+	// to the TEXT model alias, misrouting an image request onto a text tier. Defer
+	// to Opus (itself a strong VLM) instead — never call the model.
+	if p.cfg.VisionModel == "" {
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		p.recordDefer(req.Task, meta, len(req.Input))
+		return core.Deferf("no vision model configured", "", meta)
+	}
+	meta.Model = p.cfg.VisionModel
+
+	// Resolve the image (local path or data URI -> data:image/...;base64 URI).
+	// A load failure is a user/input error, not infra: leave ErrClass empty.
+	dataURI, err := imageio.LoadImageB64(req.Image, p.cfg.VisionMaxImageBytes)
+	if err != nil {
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		p.recordDefer(req.Task, meta, len(req.Input))
+		return core.Deferf("image load: "+err.Error(), "", meta)
+	}
+
+	// Cache key includes a hash of the image so distinct images never collide.
+	ck := cache.Key(string(req.Task), req.Input+"|img:"+sha256hex(dataURI), tasks.StableParamsKey(req.Params), p.cfg.VisionModel, built.Grammar)
+	if p.cache != nil {
+		if raw, ok := p.cache.Get(ck); ok {
+			var cv cacheVal
+			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 {
+				meta.CacheHit = true
+				meta.TokensIn = cv.TokensIn
+				meta.LatencyMs = time.Since(start).Milliseconds()
+				p.record(req.Task, meta, len(req.Input))
+				return core.Result{OK: true, Data: cv.Data, Meta: meta}
+			}
+		}
+	}
+
+	gen, gerr := p.client.GenerateVision(ctx, p.cfg.VisionModel, built.System, built.User, []string{dataURI}, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0)
+	if gerr != nil {
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		meta.ErrClass = classifyErr(gerr)
+		p.recordDefer(req.Task, meta, len(req.Input))
+		return core.Deferf("vision model call failed: "+gerr.Error(), "", meta)
+	}
+	meta.TokensIn = gen.TokensIn
+	meta.TokensOut = gen.TokensOut
+	meta.TokPerSec = gen.TokPerSec
+	meta.Truncated = gen.Truncated
+	meta.LatencyMs = time.Since(start).Milliseconds()
+
+	answer := strings.TrimSpace(gen.Content)
+	if answer == "" {
+		p.recordDefer(req.Task, meta, len(req.Input))
+		return core.Deferf("empty vision output", gen.Content, meta)
+	}
+	if gen.Truncated {
+		// A larger local tier shares the 8GB ceiling; defer to Opus instead.
+		p.recordDefer(req.Task, meta, len(req.Input))
+		return core.Deferf("vision output truncated", gen.Content, meta)
+	}
+
+	// A grammar-constrained vision task (assess_image) already returns a JSON
+	// object — surface it as Data verbatim, NOT wrapped in {key: content}. A
+	// free-text vision task (vqa/ocr) wraps its answer under a task-specific key.
+	var data json.RawMessage
+	if built.Grammar != "" {
+		if !json.Valid([]byte(answer)) {
+			// Shouldn't happen with a grammar active; defer rather than emit garbage.
+			p.recordDefer(req.Task, meta, len(req.Input))
+			return core.Deferf("non-JSON output from grammar vision task", gen.Content, meta)
+		}
+		data = json.RawMessage(answer)
+	} else {
+		data, _ = json.Marshal(map[string]string{visionResultKey(req.Task): answer})
+	}
+	if p.cache != nil {
+		if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn}); e == nil {
+			_ = p.cache.Put(ck, b)
+		}
+	}
+	p.record(req.Task, meta, len(req.Input))
+	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// sha256hex returns the hex-encoded SHA-256 of s (used to fold an image into the
+// vision cache key without storing the whole data URI).
+func sha256hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// runExtractImage is the COMPOSITE extract_image flow: it OCRs the image via the
+// existing ocr task, then feeds the OCR text into the EXISTING text extract task.
+// This reuses the proven extract path unchanged — GBNF object grammar, verbatim
+// grounding (extracted values must appear in the OCR text), schema validation,
+// and the escalation/defer ladder all come for free. There is no new extraction
+// logic here; runExtractImage only composes ocr + extract.
+//
+// Telemetry: the two sub-calls each record their own ledger row (an `ocr` vision
+// row + an `extract` text row). That is the correct, honest accounting, so
+// runExtractImage adds NO recording of its own — meta/start are unused here.
+func (p *Pipeline) runExtractImage(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+	_ = meta
+	_ = start
+	// 1. OCR the image via the existing ocr task (reuses runVision + the vision
+	//    tier). A propagated defer covers image-load, empty-output, and model-fail.
+	ocrRes := p.Run(ctx, core.Request{Task: core.TaskOCR, Image: req.Image})
+	if !ocrRes.OK {
+		return ocrRes
+	}
+	// 2. Pull the OCR text out of ocrRes.Data ({"text": "..."}).
+	var m map[string]string
+	_ = json.Unmarshal(ocrRes.Data, &m)
+	ocrText := m["text"]
+	if strings.TrimSpace(ocrText) == "" {
+		return core.Deferf("empty OCR text for extract_image", "", ocrRes.Meta)
+	}
+	// 3. Run the EXISTING extract on the OCR text — grammar + grounding (against
+	//    ocrText) + schema validation, all reused. The caller's schema rides in
+	//    req.Params exactly as offload_extract passes it.
+	return p.Run(ctx, core.Request{Task: core.TaskExtract, Input: ocrText, Params: req.Params})
 }
 
 // attempt runs the grammar+retry loop for ONE model tier. It returns the result

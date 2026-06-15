@@ -78,6 +78,61 @@ func (s *Server) Run(ctx context.Context, version string) error {
 		return result(s.p.Run(ctx, core.Request{Task: core.TaskTriage, Input: in.Text, Params: map[string]any{"question": in.Question}}))
 	})
 
+	srv.AddTool(&mcp.Tool{
+		Name:        "offload_vqa",
+		Description: "Answer a question about an IMAGE on a free local vision model (VQA). image is a local file path or a data:image/... URI; question is what to ask about it. Returns {answer}; if it can't answer confidently it returns deferred:true and you should look at the image yourself.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local image file path or a data:image/...;base64 URI"},"question":{"type":"string","description":"the question to answer about the image"}},"required":["image","question"]}`),
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var in struct {
+			Image    string `json:"image"`
+			Question string `json:"question"`
+		}
+		_ = json.Unmarshal(req.Params.Arguments, &in)
+		return result(s.p.Run(ctx, core.Request{Task: core.TaskVQA, Image: in.Image, Params: map[string]any{"question": in.Question}}))
+	})
+
+	srv.AddTool(&mcp.Tool{
+		Name:        "offload_extract_image",
+		Description: "Extract structured fields from an IMAGE on a free local model: it OCRs the image, then extracts the fields from the transcribed text constrained to the provided JSON schema (values are grounded against the OCR text). image is a local file path or a data:image/... URI; schema is a JSON schema with a properties object. Returns the extracted object or defers.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local image file path or a data:image/...;base64 URI"},"schema":{"type":"object","description":"JSON schema with a properties object describing the fields to extract"}},"required":["image","schema"]}`),
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var in struct {
+			Image  string         `json:"image"`
+			Schema map[string]any `json:"schema"`
+		}
+		_ = json.Unmarshal(req.Params.Arguments, &in)
+		return result(s.p.Run(ctx, core.Request{Task: core.TaskExtractImage, Image: in.Image, Params: map[string]any{"schema": in.Schema}}))
+	})
+
+	srv.AddTool(&mcp.Tool{
+		Name:        "offload_assess_image",
+		Description: "QA a generated IMAGE against hard exclusions on a free local vision model. Emits a grammar-constrained {has_people, has_text, matches_brief, notes}: has_people=true if any person/face/body part is visible, has_text=true if any readable letters/words/numbers are rendered, matches_brief=whether it matches the optional brief (true if no brief), notes=one short phrase. image is a local file path or a data:image/... URI; brief is optional. Returns the object or deferred:true.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local image file path or a data:image/...;base64 URI"},"brief":{"type":"string","description":"optional description the image should match"}},"required":["image"]}`),
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var in struct {
+			Image string `json:"image"`
+			Brief string `json:"brief"`
+		}
+		_ = json.Unmarshal(req.Params.Arguments, &in)
+		params := map[string]any{}
+		if in.Brief != "" {
+			params["brief"] = in.Brief
+		}
+		return result(s.p.Run(ctx, core.Request{Task: core.TaskAssessImage, Image: in.Image, Params: params}))
+	})
+
+	srv.AddTool(&mcp.Tool{
+		Name:        "offload_ocr",
+		Description: "Transcribe ALL text in an IMAGE on a free local vision model (OCR). image is a local file path or a data:image/... URI. Returns {text} with the transcribed text in reading order; if it can't transcribe confidently it returns deferred:true and you should read the image yourself.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local image file path or a data:image/...;base64 URI"}},"required":["image"]}`),
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var in struct {
+			Image string `json:"image"`
+		}
+		_ = json.Unmarshal(req.Params.Arguments, &in)
+		return result(s.p.Run(ctx, core.Request{Task: core.TaskOCR, Image: in.Image}))
+	})
+
 	return srv.Run(ctx, &mcp.StdioTransport{})
 }
 

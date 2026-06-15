@@ -30,9 +30,70 @@ func Build(req core.Request) (Built, error) {
 		return buildTriage(req)
 	case core.TaskExtract:
 		return buildExtract(req)
+	case core.TaskVQA:
+		return buildVQA(req)
+	case core.TaskOCR:
+		return buildOCR(req)
+	case core.TaskAssessImage:
+		return buildAssessImage(req)
 	default:
 		return Built{}, fmt.Errorf("unknown task %q", req.Task)
 	}
+}
+
+// buildVQA builds a free-text visual-question-answering request: the question is
+// the user prompt and the image rides alongside on the vision path (pipeline
+// resolves req.Image). No grammar — VQA answers are natural language.
+func buildVQA(req core.Request) (Built, error) {
+	q := paramString(req.Params, "question")
+	if q == "" {
+		return Built{}, fmt.Errorf("vqa requires a question")
+	}
+	return Built{
+		System:    "You are a precise visual assistant. Answer ONLY from what is visible in the image. If the image does not contain the answer, say you cannot tell.",
+		User:      q,
+		Grammar:   "",
+		MaxTokens: 256,
+	}, nil
+}
+
+// buildOCR builds a free-text OCR (image-to-text transcription) request. Unlike
+// vqa there is no question param — the task is fixed: transcribe everything. No
+// grammar (the output is free-form text), and a generous token budget since a
+// dense page transcribes to many tokens.
+func buildOCR(req core.Request) (Built, error) {
+	return Built{
+		System:    "You are an OCR engine. Transcribe ALL text in the image EXACTLY, preserving reading order and line breaks. Output ONLY the transcribed text — no commentary, no markdown fences.",
+		User:      "Transcribe the text in this image.",
+		Grammar:   "",
+		MaxTokens: 1024,
+	}, nil
+}
+
+// buildAssessImage builds a GBNF-constrained QA over a generated image: it forces
+// exactly {has_people:bool, has_text:bool, matches_brief:bool, notes:string} so a
+// ComfyUI/RealVisXL render can be checked against hard exclusions (no people / no
+// text). The grammar is reused from internal/gbnf (3 booleans + 1 string in a
+// fixed-order object). An optional brief (Params["brief"]) is woven into the user
+// prompt; with no brief, matches_brief is instructed to true. Grammar+image is
+// proven to coexist on this build.
+func buildAssessImage(req core.Request) (Built, error) {
+	grammar := gbnf.Object([]gbnf.Field{
+		{Name: "has_people", Type: gbnf.TBool},
+		{Name: "has_text", Type: gbnf.TBool},
+		{Name: "matches_brief", Type: gbnf.TBool},
+		{Name: "notes", Type: gbnf.TString},
+	})
+	user := "Assess the image."
+	if brief := paramString(req.Params, "brief"); brief != "" {
+		user = fmt.Sprintf("Brief: %s. Assess the image.", brief)
+	}
+	return Built{
+		System:    "You are a strict image QA assistant. Report exactly what is VISIBLE. has_people=true if any person/face/body part is visible. has_text=true if any readable letters/words/numbers are rendered in the image. matches_brief: if a brief is given, whether the image matches it; if no brief, set true. notes: one short phrase.",
+		User:      user,
+		Grammar:   grammar,
+		MaxTokens: 128,
+	}, nil
 }
 
 func buildSummarize(req core.Request) (Built, error) {

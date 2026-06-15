@@ -11,12 +11,24 @@ const (
 	TaskClassify  TaskType = "classify"
 	TaskExtract   TaskType = "extract"
 	TaskTriage    TaskType = "triage"
+	TaskVQA       TaskType = "vqa"
+	TaskOCR       TaskType = "ocr"
+	// TaskExtractImage is a COMPOSITE: OCR the image, then run the existing text
+	// extract over the OCR text (its GBNF grammar + verbatim grounding + schema).
+	// It is NOT a vision task (it composes ocr + extract, each of which dispatches
+	// itself), so it is deliberately excluded from isVisionTask.
+	TaskExtractImage TaskType = "extract_image"
+	// TaskAssessImage is a GBNF-constrained QA over an image: emit
+	// {has_people, has_text, matches_brief, notes} so a generated render can be
+	// checked against hard exclusions (no people / no text). It IS a vision task
+	// (single multimodal call with a grammar), so it is in isVisionTask.
+	TaskAssessImage TaskType = "assess_image"
 )
 
 // Valid reports whether t is a known task type.
 func (t TaskType) Valid() bool {
 	switch t {
-	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage:
+	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage:
 		return true
 	}
 	return false
@@ -26,6 +38,7 @@ func (t TaskType) Valid() bool {
 type Request struct {
 	Task   TaskType       `json:"task"`
 	Input  string         `json:"input"`            // the text to operate on
+	Image  string         `json:"image,omitempty"`  // vqa: a local image path or a data:image/... URI
 	Params map[string]any `json:"params,omitempty"` // labels []string, schema map, question string, max_points int
 }
 

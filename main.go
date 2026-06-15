@@ -44,6 +44,14 @@ func main() {
 	switch sub {
 	case "summarize", "classify", "extract", "triage":
 		err = runTask(sub, args)
+	case "vqa":
+		err = runVQA(args)
+	case "ocr":
+		err = runOCR(args)
+	case "extract-image":
+		err = runExtractImage(args)
+	case "assess-image":
+		err = runAssessImage(args)
 	case "mcp":
 		err = runMCP(args)
 	case "ledger":
@@ -134,6 +142,10 @@ Usage:
   local-offload classify  <file|-> --labels a,b,c [--json]
   local-offload extract   <file|-> --schema schema.json [--json]
   local-offload triage    <file|-> --question "..." [--json]
+  local-offload vqa       <image-path> --question "..." [--json]
+  local-offload ocr       <image-path> [--json]
+  local-offload extract-image <image-path> --schema schema.json [--json]
+  local-offload assess-image <image-path> [--brief "..."] [--json]
   local-offload mcp                      run as an MCP server (stdio)
   local-offload ledger [--since DAYS]    token-savings report
   local-offload doctor                   check endpoint health + config
@@ -230,13 +242,9 @@ func runTask(task string, args []string) error {
 		if *schemaPath == "" {
 			return fmt.Errorf("extract requires --schema schema.json")
 		}
-		sb, err := os.ReadFile(*schemaPath)
+		sch, err := readSchemaFile(*schemaPath)
 		if err != nil {
 			return err
-		}
-		var sch map[string]any
-		if err := json.Unmarshal(sb, &sch); err != nil {
-			return fmt.Errorf("parse schema: %w", err)
 		}
 		params["schema"] = sch
 	}
@@ -249,6 +257,187 @@ func runTask(task string, args []string) error {
 	defer cleanup()
 
 	res := p.Run(context.Background(), core.Request{Task: core.TaskType(task), Input: input, Params: params})
+	if *asJSON {
+		b, _ := json.MarshalIndent(res, "", "  ")
+		fmt.Println(string(b))
+		return nil
+	}
+	printHuman(res)
+	return nil
+}
+
+// runVQA handles `local-offload vqa <image-path> --question "..." [--json]`.
+// Unlike the text tasks, the positional argument is an IMAGE PATH (or data URI),
+// not stdin text; it is passed through Request.Image and resolved in the pipeline.
+func runVQA(args []string) error {
+	fs := flag.NewFlagSet("vqa", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	question := fs.String("question", "", "the question to ask about the image")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "question": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	if positional == "" || positional == "-" {
+		return fmt.Errorf("vqa requires an image path (not stdin): local-offload vqa <image> --question \"...\"")
+	}
+	if *question == "" {
+		return fmt.Errorf("vqa requires --question \"...\"")
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskVQA,
+		Image:  positional,
+		Params: map[string]any{"question": *question},
+	})
+	if *asJSON {
+		b, _ := json.MarshalIndent(res, "", "  ")
+		fmt.Println(string(b))
+		return nil
+	}
+	printHuman(res)
+	return nil
+}
+
+// runOCR handles `local-offload ocr <image-path> [--json]`. Like vqa the
+// positional argument is an IMAGE PATH (or data URI), not stdin text; there is no
+// question — the task is fixed (transcribe all text). It returns {text:...}.
+func runOCR(args []string) error {
+	fs := flag.NewFlagSet("ocr", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	if positional == "" || positional == "-" {
+		return fmt.Errorf("ocr requires an image path (not stdin): local-offload ocr <image>")
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	res := p.Run(context.Background(), core.Request{
+		Task:  core.TaskOCR,
+		Image: positional,
+	})
+	if *asJSON {
+		b, _ := json.MarshalIndent(res, "", "  ")
+		fmt.Println(string(b))
+		return nil
+	}
+	printHuman(res)
+	return nil
+}
+
+// readSchemaFile reads + parses a --schema file into the {properties:{...}} JSON
+// Schema map the extract task expects. Shared by the `extract` and `extract-image`
+// subcommands so they parse the schema identically.
+func readSchemaFile(path string) (map[string]any, error) {
+	sb, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var sch map[string]any
+	if err := json.Unmarshal(sb, &sch); err != nil {
+		return nil, fmt.Errorf("parse schema: %w", err)
+	}
+	return sch, nil
+}
+
+// runExtractImage handles `local-offload extract-image <image-path> --schema f.json
+// [--json]`. The positional argument is an IMAGE PATH (or data URI), not stdin
+// text; the schema is read exactly like the `extract` subcommand. The pipeline
+// composes OCR -> the existing text-extract over the OCR text.
+func runExtractImage(args []string) error {
+	fs := flag.NewFlagSet("extract-image", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	schemaPath := fs.String("schema", "", "path to a JSON schema file")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "schema": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	if positional == "" || positional == "-" {
+		return fmt.Errorf("extract-image requires an image path (not stdin): local-offload extract-image <image> --schema schema.json")
+	}
+	if *schemaPath == "" {
+		return fmt.Errorf("extract-image requires --schema schema.json")
+	}
+	sch, err := readSchemaFile(*schemaPath)
+	if err != nil {
+		return err
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskExtractImage,
+		Image:  positional,
+		Params: map[string]any{"schema": sch},
+	})
+	if *asJSON {
+		b, _ := json.MarshalIndent(res, "", "  ")
+		fmt.Println(string(b))
+		return nil
+	}
+	printHuman(res)
+	return nil
+}
+
+// runAssessImage handles `local-offload assess-image <image-path> [--brief "..."]
+// [--json]`. The positional argument is an IMAGE PATH (or data URI); the optional
+// --brief is woven into the prompt. The pipeline runs a grammar-constrained QA and
+// returns {has_people, has_text, matches_brief, notes}.
+func runAssessImage(args []string) error {
+	fs := flag.NewFlagSet("assess-image", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	brief := fs.String("brief", "", "optional description the image should match")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "brief": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	if positional == "" || positional == "-" {
+		return fmt.Errorf("assess-image requires an image path (not stdin): local-offload assess-image <image> [--brief \"...\"]")
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	params := map[string]any{}
+	if *brief != "" {
+		params["brief"] = *brief
+	}
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskAssessImage,
+		Image:  positional,
+		Params: params,
+	})
 	if *asJSON {
 		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))
