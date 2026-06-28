@@ -74,6 +74,8 @@ type Config struct {
 	// MediaDir is where transcribe writes .srt/.txt/.segments.json. Default
 	// <base>/media.
 	MediaDir string `json:"media_dir,omitempty"`
+	// SVGDir is where generate_svg writes rendered .svg files. Default <base>/svg.
+	SVGDir string `json:"svg_dir,omitempty"`
 	// --- image generation (generate_image) ---
 	// ImageGenScript is the absolute path to render/comfy-generate.mjs (the Node
 	// lifecycle wrapper around comfy-render.mjs). Empty = no image route (the task
@@ -109,6 +111,7 @@ type Config struct {
 	TierOverridesPath      string             `json:"tier_overrides_path,omitempty"`      // Phase 4: health-driven entry-tier bumps + P95 timeouts
 	RouterWeightsPath      string             `json:"router_weights_path,omitempty"`      // Phase 5: logistic entry-tier router
 	ConfHeadPath           string             `json:"confhead_path,omitempty"`            // Phase 2: logistic correctness head
+	RouterLabelsPath       string             `json:"router_labels_path,omitempty"`       // Phase B: synthesized E2B-counterfactual router label sidecar
 	ConfHeadLabelsPath     string             `json:"confhead_labels_path,omitempty"`     // Phase 2: cascade-agreement correctness-label sidecar (classify/triage)
 	ConfHeadThresholdsPath string             `json:"confhead_thresholds_path,omitempty"` // Phase 2: per-task conformal p(correct) escalation thresholds (Task 3)
 	ConfHeadEnabled        bool               `json:"confhead_enabled,omitempty"`         // Phase 2 Task 4: opt-in — gate ADOPT tasks on the head's p(correct). Default false.
@@ -120,6 +123,42 @@ type Config struct {
 	OpusInputPricePerMTok float64 `json:"opus_input_price_per_mtok"`
 	// RequestTimeoutSec for a single model call.
 	RequestTimeoutSec int `json:"request_timeout_sec"`
+	// --- shadow-labeling flywheel (Phase A.3) ---
+	// ShadowEnabled gates sampled capture of non-escalated classify/triage/extract
+	// entry-tier rows to the shadow queue for nightly counterfactual labeling.
+	// Default false (off by default; never affects request latency or behavior).
+	ShadowEnabled bool `json:"shadow_enabled,omitempty"`
+	// ShadowRate is the fraction of eligible rows to capture (0.0–1.0).
+	// Default 0.10 (10 %). A value of 0 disables capture even when ShadowEnabled.
+	ShadowRate float64 `json:"shadow_rate,omitempty"`
+	// ShadowQueuePath is the append-only JSONL file for captured shadow items.
+	// Default <DataDir>/shadow-queue.jsonl.
+	ShadowQueuePath string `json:"shadow_queue_path,omitempty"`
+	// SummarizeSimThreshold is the minimum cosine similarity (0..1) between the
+	// entry-tier and escalation-tier summary embeddings to count as "agreed".
+	// Used by the B2 summarize judge in shadow-label. Default 0.80.
+	SummarizeSimThreshold float64 `json:"summarize_sim_threshold,omitempty"`
+	// --- zero-training kNN entry-tier pre-filter (meta-router v2) ---
+	// KNNPreFilterEnabled gates the kNN pre-filter — a bridge before the LR
+	// router (router_weights) is trained. When on, classify/triage inputs are
+	// embedded and matched against KNNIndexPath to decide whether to skip the
+	// E2B tier; it yields to the LR router once that task is trained. Default
+	// false; with it off the request path is byte-identical to the prior build.
+	KNNPreFilterEnabled bool `json:"knn_prefilter_enabled,omitempty"`
+	// KNNIndexPath is the JSONL substrate (task, vec, accept) appended by the
+	// nightly shadow-label drain. Default <base>/knn-index.jsonl.
+	KNNIndexPath string `json:"knn_index_path,omitempty"`
+	// KNNPreFilterK is how many nearest neighbors to poll. Default 7.
+	KNNPreFilterK int `json:"knn_prefilter_k,omitempty"`
+	// KNNMinNeighbors is the minimum usable rows-per-task before the kNN acts
+	// (guards against a too-thin substrate). Default 20.
+	KNNMinNeighbors int `json:"knn_min_neighbors,omitempty"`
+	// KNNPreFilterThreshold: skip E2B when the fraction of the k nearest
+	// neighbors that accepted at E2B is below this. Default 0.5.
+	KNNPreFilterThreshold float64 `json:"knn_prefilter_threshold,omitempty"`
+	// KNNEmbedTimeoutMs bounds the request-path embedding call (fail-open on
+	// timeout). Default 2000.
+	KNNEmbedTimeoutMs int `json:"knn_embed_timeout_ms,omitempty"`
 }
 
 // Default returns a config suitable for the verified E4B-QAT+MTP setup.
@@ -130,11 +169,11 @@ func Default() Config {
 		Endpoint:                  "http://127.0.0.1:11436",
 		CompletionPath:            "/v1/chat/completions", // chat route: server applies the Gemma template; we pass a raw "grammar" field
 		Model:                     "offload-e4b",
-		TriageModel:               "gemma4-e2b",     // fast tier for triage/classify
-		EscalationModel:           "qwythos", // Qwen3.5-9B SFT; ties gemma4-26b-a4b on mechanical, smaller/faster (2026-06-21). gemma4-26b-a4b kept in llama-swap for rollback.
-		ReasoningModel:            "qwythos", // terminal local reasoning tier (think-wrapped grammar) before defer-to-Opus. Eval (29 hard cases): reclaims deferred classify 2/2 correctly (cov 88->100%, acc held 100%); never hurt. "" disables.
-		VisionModel:               "qwen3vl-4b",     // VLM for the vqa task
-		VisionMaxImageBytes:       6000000,          // ~6MB cap per image
+		TriageModel:               "gemma4-e2b", // fast tier for triage/classify
+		EscalationModel:           "qwythos",    // Qwen3.5-9B SFT; ties gemma4-26b-a4b on mechanical, smaller/faster (2026-06-21). gemma4-26b-a4b kept in llama-swap for rollback.
+		ReasoningModel:            "qwythos",    // terminal local reasoning tier (think-wrapped grammar) before defer-to-Opus. Eval (29 hard cases): reclaims deferred classify 2/2 correctly (cov 88->100%, acc held 100%); never hurt. "" disables.
+		VisionModel:               "qwen3vl-4b", // VLM for the vqa task
+		VisionMaxImageBytes:       6000000,      // ~6MB cap per image
 		VideoFPS:                  2.0,
 		VideoMaxFrames:            12,
 		VideoFrameWidth:           512,
@@ -147,7 +186,8 @@ func Default() Config {
 		STTUnloadAfter:            true,
 		STTRequestTimeoutSec:      1800,
 		MediaDir:                  filepath.Join(base, "media"),
-		ImageGenScript:            "render/comfy-generate.mjs",
+		SVGDir:                    filepath.Join(base, "svg"),
+		ImageGenScript:            "D:/repos/local-offload/render/comfy-generate.mjs",
 		NodePath:                  "node",
 		ComfyDir:                  "C:/ComfyUI",
 		ImageGenTimeoutSec:        720,
@@ -161,6 +201,7 @@ func Default() Config {
 		ThresholdsPath:            filepath.Join(base, "thresholds.json"),
 		TierOverridesPath:         filepath.Join(base, "tier_overrides.json"),
 		RouterWeightsPath:         filepath.Join(base, "router-weights.json"),
+		RouterLabelsPath:          filepath.Join(base, "router-labels.jsonl"),
 		ConfHeadPath:              filepath.Join(base, "confhead-weights.json"),
 		ConfHeadLabelsPath:        filepath.Join(base, "confhead-labels.jsonl"),
 		ConfHeadThresholdsPath:    filepath.Join(base, "confhead-thresholds.json"),
@@ -169,6 +210,16 @@ func Default() Config {
 		AutoHeal:                  false,
 		OpusInputPricePerMTok:     15.0,
 		RequestTimeoutSec:         120,
+		ShadowEnabled:             false,
+		ShadowRate:                0.10,
+		ShadowQueuePath:           filepath.Join(base, "shadow-queue.jsonl"),
+		SummarizeSimThreshold:     0.80,
+		KNNPreFilterEnabled:       false,
+		KNNIndexPath:              filepath.Join(base, "knn-index.jsonl"),
+		KNNPreFilterK:             7,
+		KNNMinNeighbors:           20,
+		KNNPreFilterThreshold:     0.5,
+		KNNEmbedTimeoutMs:         2000,
 	}
 }
 
@@ -217,7 +268,7 @@ func warnUnknownKeys(b []byte) {
 
 // EnsureDirs creates the parent dirs for the store files.
 func (c Config) EnsureDirs() error {
-	for _, p := range []string{c.CachePath, c.LedgerPath, c.ThresholdsPath, c.RouterWeightsPath, c.TierOverridesPath, c.ConfHeadPath, c.ConfHeadLabelsPath, c.ConfHeadThresholdsPath} {
+	for _, p := range []string{c.CachePath, c.LedgerPath, c.ThresholdsPath, c.RouterWeightsPath, c.TierOverridesPath, c.ConfHeadPath, c.ConfHeadLabelsPath, c.ConfHeadThresholdsPath, c.KNNIndexPath} {
 		if p == "" {
 			continue
 		}
@@ -232,6 +283,11 @@ func (c Config) EnsureDirs() error {
 	}
 	if c.MediaDir != "" { // a directory, not a file
 		if err := os.MkdirAll(c.MediaDir, 0o755); err != nil {
+			return err
+		}
+	}
+	if c.SVGDir != "" { // a directory, not a file
+		if err := os.MkdirAll(c.SVGDir, 0o755); err != nil {
 			return err
 		}
 	}

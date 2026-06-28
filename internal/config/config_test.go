@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestDefaultVideoFields(t *testing.T) {
 	c := Default()
@@ -40,5 +43,27 @@ func TestDefaultSTTFields(t *testing.T) {
 	}
 	if c.MediaDir == "" {
 		t.Error("MediaDir should default to a non-empty path")
+	}
+}
+
+func TestKNNDefaults(t *testing.T) {
+	c := Default()
+	if c.KNNPreFilterEnabled {
+		t.Fatal("kNN must be OFF by default")
+	}
+	if c.KNNPreFilterK != 7 {
+		t.Fatalf("KNNPreFilterK default: want 7, got %d", c.KNNPreFilterK)
+	}
+	if c.KNNMinNeighbors != 20 {
+		t.Fatalf("KNNMinNeighbors default: want 20, got %d", c.KNNMinNeighbors)
+	}
+	if c.KNNPreFilterThreshold != 0.5 {
+		t.Fatalf("KNNPreFilterThreshold default: want 0.5, got %v", c.KNNPreFilterThreshold)
+	}
+	if c.KNNEmbedTimeoutMs != 2000 {
+		t.Fatalf("KNNEmbedTimeoutMs default: want 2000, got %d", c.KNNEmbedTimeoutMs)
+	}
+	if filepath.Base(c.KNNIndexPath) != "knn-index.jsonl" {
+		t.Fatalf("KNNIndexPath default basename: want knn-index.jsonl, got %q", c.KNNIndexPath)
 	}
 }

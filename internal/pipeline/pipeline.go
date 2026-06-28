@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,11 +33,15 @@ import (
 	"github.com/dmmdea/local-offload-pp-cli/internal/grounding"
 	"github.com/dmmdea/local-offload-pp-cli/internal/imagegen"
 	"github.com/dmmdea/local-offload-pp-cli/internal/imageio"
+	"github.com/dmmdea/local-offload-pp-cli/internal/judge"
+	"github.com/dmmdea/local-offload-pp-cli/internal/knn"
 	"github.com/dmmdea/local-offload-pp-cli/internal/ledger"
 	"github.com/dmmdea/local-offload-pp-cli/internal/llamaclient"
 	"github.com/dmmdea/local-offload-pp-cli/internal/parser"
 	"github.com/dmmdea/local-offload-pp-cli/internal/router"
+	"github.com/dmmdea/local-offload-pp-cli/internal/shadow"
 	"github.com/dmmdea/local-offload-pp-cli/internal/sttclient"
+	"github.com/dmmdea/local-offload-pp-cli/internal/svgkit"
 	"github.com/dmmdea/local-offload-pp-cli/internal/tasks"
 	"github.com/dmmdea/local-offload-pp-cli/internal/validator"
 	"github.com/dmmdea/local-offload-pp-cli/internal/verifier"
@@ -64,6 +69,10 @@ type Pipeline struct {
 	// Both nil/empty unless cfg.ConfHeadEnabled — the gate is inert otherwise.
 	confhead       *confhead.Model    // nil = no head (gate off)
 	confThresholds map[string]float64 // per-task p(correct) escalation thresholds
+	// meta-router v2: zero-training kNN entry-tier pre-filter (bridge before the
+	// LR router trains). Both nil unless cfg.KNNPreFilterEnabled.
+	knn   *knn.Index                      // nil = disabled / no substrate
+	embed func(string) ([]float64, error) // nil = disabled; set to judge.Embedder.Embed
 }
 
 func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Ledger) *Pipeline {
@@ -79,6 +88,13 @@ func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Le
 	if cfg.ConfHeadEnabled {
 		p.confhead = confhead.Load(cfg.ConfHeadPath)
 		p.confThresholds = confhead.LoadThresholds(cfg.ConfHeadThresholdsPath)
+	}
+	// meta-router v2: kNN entry-tier pre-filter. Off unless enabled; a missing
+	// substrate leaves p.knn nil (fail-open). The embedder uses a short timeout
+	// so a slow/down embeddinggemma fails open fast on the request path.
+	if cfg.KNNPreFilterEnabled {
+		p.knn = knn.Load(cfg.KNNIndexPath)
+		p.embed = judge.NewEmbedder(cfg.Endpoint, time.Duration(cfg.KNNEmbedTimeoutMs)*time.Millisecond).Embed
 	}
 	return p
 }
@@ -128,6 +144,13 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 		return p.runGenerateImage(ctx, req, meta, start)
 	}
 
+	// generate_svg renders a brand-agnostic parametric SVG component (kind + spec in
+	// params) via internal/svgkit. Its own branch — pure Go, no text cascade, no
+	// grammar, no GPU lock.
+	if req.Task == core.TaskGenerateSVG {
+		return p.runGenerateSVG(ctx, req, meta, start)
+	}
+
 	// Vision tasks (vqa) take a SEPARATE branch: the input is an image, not text,
 	// so they skip the trivial-input gate, the context-budget trim, and the whole
 	// text model cascade. The text path below stays byte-identical for non-vision
@@ -174,7 +197,14 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 		}
 	}
 
-	chain := p.modelChain(req.Task, meta.Feat)
+	// kNN entry-tier pre-filter is off unless configured (p.knn set only under
+	// cfg.KNNPreFilterEnabled); skip the call entirely when off so the request path
+	// is literally — not just behaviorally — unchanged.
+	knnSkip := false
+	if p.knn != nil {
+		knnSkip = p.knnPreferLargerEntry(req.Task, req.Input)
+	}
+	chain := p.modelChain(req.Task, meta.Feat, knnSkip)
 	var last core.Result
 	// Task 1.5: entry-tier (ci==0) snapshot + candidate, so a later agreeing tier
 	// can record a cascade-agreement correctness-proxy label for classify/triage.
@@ -183,7 +213,7 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	for ci, model := range chain {
 		meta.Model = model
 		meta.Escalations = ci
-		res, escalatable := p.attempt(ctx, req, built, ck, model, meta, start)
+		res, escalatable := p.attempt(ctx, req, built, ck, model, meta, start, true)
 		// Phase 3/7: the breaker tracks INFRA health only (ErrClass set); a quality
 		// defer means the tier physically worked. Autoheal fires on infra failure.
 		if p.breakers != nil {
@@ -597,6 +627,53 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	return core.Result{OK: true, Data: data, Meta: meta}
 }
 
+// runGenerateSVG renders a brand-agnostic parametric SVG component (kind + spec
+// in params) via internal/svgkit and writes it to a .svg under cfg.SVGDir. Pure
+// Go — no model, no grammar, no GPU lock, no cascade. Any bad kind/spec/write
+// defers (Claude makes the asset another way). params: kind (string), spec
+// (object/JSON), out (string). Returns {svg_path, width, height}.
+func (p *Pipeline) runGenerateSVG(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+	meta.Model = "svgkit"
+	kind := paramStr(req.Params, "kind")
+	if kind == "" {
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		p.recordDefer(req.Task, meta, len(req.Input))
+		return core.Deferf("generate_svg: missing kind", "", meta)
+	}
+	var specRaw json.RawMessage
+	if raw, ok := req.Params["spec"]; ok {
+		b, mErr := json.Marshal(raw) // spec arrives as a decoded map/any; re-marshal to JSON for svgkit
+		if mErr != nil {
+			meta.LatencyMs = time.Since(start).Milliseconds()
+			p.recordDefer(req.Task, meta, len(req.Input))
+			return core.Deferf("generate_svg: bad spec: "+mErr.Error(), "", meta)
+		}
+		specRaw = b
+	} else {
+		specRaw = json.RawMessage("{}")
+	}
+	svg, w, h, rErr := svgkit.Render(kind, specRaw)
+	if rErr != nil {
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		p.recordDefer(req.Task, meta, len(req.Input))
+		return core.Deferf("generate_svg: "+rErr.Error(), "", meta)
+	}
+	out := paramStr(req.Params, "out")
+	if out == "" {
+		_ = os.MkdirAll(p.cfg.SVGDir, 0o755)
+		out = filepath.Join(p.cfg.SVGDir, kind+"-"+sha256hex(string(specRaw))[:8]+".svg")
+	}
+	if wErr := os.WriteFile(out, []byte(svg), 0o644); wErr != nil {
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		p.recordDefer(req.Task, meta, len(req.Input))
+		return core.Deferf("generate_svg: write: "+wErr.Error(), "", meta)
+	}
+	meta.LatencyMs = time.Since(start).Milliseconds()
+	data, _ := json.Marshal(map[string]any{"svg_path": out, "width": w, "height": h})
+	p.record(req.Task, meta, len(specRaw))
+	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
 // mintSeed returns a random positive seed (1..1e9) so an unspecified-seed render is still
 // reproducible — the value is threaded into the render and reported back to the caller.
 func mintSeed() int {
@@ -725,7 +802,12 @@ func (p *Pipeline) runExtractImage(ctx context.Context, req core.Request, meta c
 // (escalatable). Infra failures return escalatable=false (defer straight out).
 // Success is cached + recorded here; a defer is NOT recorded (Run records the
 // final one once, so escalation does not double-count).
-func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Built, ck, model string, meta core.Meta, start time.Time) (core.Result, bool) {
+//
+// record gates ALL persistent side-effects on a successful result: the savings
+// ledger, the cache write, the shadow-queue capture, and the exemplar harvest.
+// Pass true for normal Run calls; pass false for shadow/counterfactual RunTier
+// calls that must produce a gradeable result but write NO production side-effects.
+func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Built, ck, model string, meta core.Meta, start time.Time, record bool) (core.Result, bool) {
 	attempts := p.cfg.MaxRetries + 1
 	if attempts < 1 {
 		attempts = 1
@@ -812,15 +894,22 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 
 		if v.OK {
 			meta.LatencyMs = time.Since(start).Milliseconds()
-			if p.cache != nil {
-				if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn}); e == nil {
-					_ = p.cache.Put(ck, b)
+			// record gates ALL persistent side-effects: ledger, cache, shadow queue,
+			// and exemplar harvest. Pass record=false for counterfactual RunTier calls
+			// that must produce a gradeable result without any production side-effects.
+			if record {
+				if p.cache != nil {
+					if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn}); e == nil {
+						_ = p.cache.Put(ck, b)
+					}
 				}
-			}
-			p.record(req.Task, meta, len(req.Input))
-			// Phase 6: harvest a verified-good (input, output) exemplar for the sidecar.
-			if p.cfg.ExemplarsDir != "" && goodExemplar(meta) {
-				_ = exemplars.Append(p.cfg.ExemplarsDir, string(req.Task), tasks.StableParamsKey(req.Params), req.Input, data, meta.Margin)
+				p.record(req.Task, meta, len(req.Input))
+				// Phase A.3: sampled shadow-queue capture (non-escalated classify/triage/extract; config-gated, off by default).
+				p.captureShadow(req, entryFrom(req.Task, meta, false, len(req.Input)), core.Result{OK: true, Data: data, Meta: meta})
+				// Phase 6: harvest a verified-good (input, output) exemplar for the sidecar.
+				if p.cfg.ExemplarsDir != "" && goodExemplar(meta) {
+					_ = exemplars.Append(p.cfg.ExemplarsDir, string(req.Task), tasks.StableParamsKey(req.Params), req.Input, data, meta.Margin)
+				}
 			}
 			return core.Result{OK: true, Data: data, Meta: meta}, false
 		}
@@ -905,7 +994,7 @@ func (p *Pipeline) attemptReasoning(ctx context.Context, req core.Request, built
 // input (Phase 5) or health marked it degraded (Phase 4), in which case the
 // entry is bumped to E4B. Tiers whose circuit breaker is OPEN (Phase 3) are
 // skipped (routed around). Duplicates collapse; order preserved.
-func (p *Pipeline) modelChain(task core.TaskType, feat map[string]float64) []string {
+func (p *Pipeline) modelChain(task core.TaskType, feat map[string]float64, knnSkip bool) []string {
 	var tiers []string
 	add := func(m string) {
 		if m == "" {
@@ -922,7 +1011,7 @@ func (p *Pipeline) modelChain(task core.TaskType, feat map[string]float64) []str
 		tiers = append(tiers, m)
 	}
 	if task == core.TaskTriage || task == core.TaskClassify {
-		if entry := p.cfg.TriageModel; entry != "" && !p.skipSmallEntry(task, entry, feat) {
+		if entry := p.cfg.TriageModel; entry != "" && !p.skipSmallEntry(task, entry, feat, knnSkip) {
 			add(entry)
 		}
 	}
@@ -936,8 +1025,11 @@ func (p *Pipeline) modelChain(task core.TaskType, feat map[string]float64) []str
 
 // skipSmallEntry decides whether to bypass the small (E2B) entry tier: the
 // learned router predicts it won't handle this input, or health flagged it.
-func (p *Pipeline) skipSmallEntry(task core.TaskType, entry string, feat map[string]float64) bool {
-	if p.router.PreferLargerEntry(string(task), feat) { // nil-safe receiver
+func (p *Pipeline) skipSmallEntry(task core.TaskType, entry string, feat map[string]float64, knnSkip bool) bool {
+	if p.router.PreferLargerEntry(string(task), feat) { // nil-safe receiver; trained router wins
+		return true
+	}
+	if knnSkip { // zero-training kNN bridge (only set when the router isn't trained)
 		return true
 	}
 	if p.overrides != nil {
@@ -948,6 +1040,32 @@ func (p *Pipeline) skipSmallEntry(task core.TaskType, entry string, feat map[str
 		}
 	}
 	return false
+}
+
+// knnPreferLargerEntry consults the zero-training kNN entry-tier pre-filter:
+// true => skip the E2B tier and enter larger. It is a BRIDGE before the LR
+// router has data — once the router is trained for this task, the router owns the
+// decision and the kNN is skipped (no request-path embedding cost). Off unless
+// KNNPreFilterEnabled loaded a substrate + embedder. Fail-open: any miss => false.
+func (p *Pipeline) knnPreferLargerEntry(task core.TaskType, input string) bool {
+	if p.knn == nil || p.embed == nil {
+		return false
+	}
+	if task != core.TaskClassify && task != core.TaskTriage {
+		return false
+	}
+	if p.router.HasTask(string(task)) { // nil-safe: false when no router yet
+		return false // the trained router decides; don't pay the embed
+	}
+	vec, err := p.embed(input)
+	if err != nil {
+		return false
+	}
+	skip, ok := p.knn.PreferLargerEntry(string(task), vec, p.cfg.KNNPreFilterK, p.cfg.KNNMinNeighbors, p.cfg.KNNPreFilterThreshold)
+	if !ok {
+		return false
+	}
+	return skip
 }
 
 // entryFrom builds a ledger entry from per-call meta + the enriched signals.
@@ -1224,6 +1342,14 @@ func answersAgree(task core.TaskType, candidate string, finalData []byte) (agree
 	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b)), true
 }
 
+// AnswersAgree is a thin exported wrapper around answersAgree for use by the
+// shadow-labeling flywheel (which lives in a separate package and cannot call the
+// unexported function directly). task is a task-type string (e.g. "classify").
+// Behavior is identical to answersAgree.
+func AnswersAgree(task string, candidate string, finalData []byte) (agreed bool, ok bool) {
+	return answersAgree(core.TaskType(task), candidate, finalData)
+}
+
 // jsonStringField returns the string value of `field` in a JSON object, or "" if
 // the JSON is unparseable, the field is absent, or its value is not a string.
 func jsonStringField(raw []byte, field string) string {
@@ -1255,4 +1381,55 @@ func (p *Pipeline) labelAgreement(task core.TaskType, entry ledger.Entry, candid
 	entry.Grounded = nil
 	entry.EscalatedAgreed = &agreed
 	_ = ledger.AppendLabel(p.cfg.ConfHeadLabelsPath, entry)
+}
+
+// shadowCaptureTasks are the tasks whose non-escalated rows are captured into
+// the shadow queue for nightly counterfactual labeling. Phase A judges
+// classify/triage/extract with the existing in-process judges (answersAgree /
+// grounding.Check); Phase B adds summarize (judged by the B2 summarize judge).
+var shadowCaptureTasks = map[string]bool{"classify": true, "triage": true, "extract": true, "summarize": true}
+
+// captureShadow appends a sampled, non-escalated entry-tier row to the shadow
+// queue for nightly counterfactual labeling. Cheap (one append, no inference);
+// best-effort (a queue error never affects the request). Capture is off by
+// default (ShadowEnabled=false) and never touches the grammar/generation path.
+func (p *Pipeline) captureShadow(req core.Request, e ledger.Entry, res core.Result) {
+	if !p.cfg.ShadowEnabled || p.cfg.ShadowQueuePath == "" {
+		return
+	}
+	if e.Escalations != 0 || !shadowCaptureTasks[strings.ToLower(e.Task)] {
+		return
+	}
+	if rand.Float64() >= p.cfg.ShadowRate {
+		return
+	}
+	_ = shadow.Enqueue(p.cfg.ShadowQueuePath, shadow.Item{
+		TS:          e.TS,
+		Task:        e.Task,
+		Input:       req.Input,
+		Params:      req.Params,
+		EntryTier:   e.ModelTier,
+		EntryOutput: string(res.Data),
+		Feat:        e.Feat,
+	})
+}
+
+// RunTier runs req through exactly the named tier (bypassing modelChain), with
+// the full quality gate (grammar/verify/validate/ground/confidence) that attempt
+// applies. It records NOTHING to the savings ledger — used by the offline
+// shadow-labeling flywheel to evaluate a counterfactual tier without polluting
+// the savings stats. Returns the tier's result and whether it was accepted.
+func (p *Pipeline) RunTier(ctx context.Context, req core.Request, model string) (core.Result, bool) {
+	start := time.Now()
+
+	built, err := tasks.Build(req)
+	if err != nil {
+		return core.Result{}, false
+	}
+	feat := featurize(req.Task, req.Input)
+	ck := cache.Key(string(req.Task), req.Input, tasks.StableParamsKey(req.Params), p.cfg.Model, built.Grammar)
+	meta := core.Meta{Model: model, Feat: feat}
+	res, _ := p.attempt(ctx, req, built, ck, model, meta, start, false /* record=false: no persistent side-effects */)
+	// escalatable ignored: RunTier never escalates
+	return res, res.OK
 }

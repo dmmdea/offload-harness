@@ -1,187 +1,336 @@
-# local-offload
+<div align="center">
 
-A local **offload harness** for [Claude Code](https://claude.com/claude-code) (and any MCP client): delegate short‑context, low‑judgment grunt work — **summarize / classify / extract / triage** — to a **free local Gemma‑4 cascade** served by [llama.cpp](https://github.com/ggml-org/llama.cpp). Your cloud model keeps all the judgment; the harness **never calls a cloud model**. When it can't do a task confidently it returns a structured **defer** so the caller handles it.
+# offload-harness
 
-The point: bulk summarize/classify/extract/triage tokens never enter your cloud context. The built‑in `ledger` proves the savings over time.
+**Delegate the grunt work to a free local model — keep your cloud tokens for judgment.**
 
-```
-┌─ Claude (Opus, etc.) ──────────────────────────────┐
-│  "summarize this 40-page log"                       │
-│        │  MCP call: offload_summarize               │
-│        ▼                                             │
-│   local-offload  ──►  Gemma-4 cascade (local, free) │
-│        ▲                  E2B → E4B → 26B-A4B        │
-│        └── result JSON, or {deferred:true} ─────────┘
-```
+A local-first harness that offloads short-context, low-judgment work — **summarize · classify · extract · triage** (plus vision, OCR, transcription, and image/SVG generation) — to a free **Gemma-family cascade** served by [llama.cpp](https://github.com/ggml-org/llama.cpp). It runs as a Go CLI and as an **MCP server** for AI coding agents. It **never calls a cloud model**: when it can't do a task confidently, it returns a structured **defer** so your agent handles it.
 
-## The cascade
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Go Reference](https://pkg.go.dev/badge/github.com/dmmdea/local-offload-pp-cli.svg)](https://pkg.go.dev/github.com/dmmdea/local-offload-pp-cli)
+[![Go Report Card](https://goreportcard.com/badge/github.com/dmmdea/local-offload-pp-cli)](https://goreportcard.com/report/github.com/dmmdea/local-offload-pp-cli)
+[![CI](https://img.shields.io/github/actions/workflow/status/dmmdea/local-offload-pp-cli/ci.yml?branch=main)](../../actions)
+[![MCP](https://img.shields.io/badge/MCP-stdio-purple.svg)](https://modelcontextprotocol.io)
 
-Fast tasks enter at the small tier and climb only when genuinely uncertain:
+</div>
 
-- **triage / classify** → `gemma4-e2b` (~120 tok/s) — fast entry tier
-- **summarize / extract** → `offload-e4b` (~83 tok/s) — the workhorse
-- on a validation failure **or a low decision‑confidence signal** → escalate to `gemma4-26b-a4b` (MoE, ~16 tok/s, experts in RAM — near‑frontier quality)
-- all local tiers fail → **defer** to the caller (the harness has no cloud credentials)
+---
 
-For triage/classify the harness requests per‑token logprobs and computes a **class‑mass margin** at the decision token; a margin below a learned threshold means the model was genuinely torn → escalate instead of guessing.
+## What & why
 
-## Requirements
+When an agent (or you) needs to summarize a log, label a ticket, pull fields out of a document, or answer a yes/no question about some text, that work is **mechanical and low-judgment** — but it still costs context window and cloud tokens. `offload-harness` runs those tasks on a **free local model** so the bulk, low-value tokens never enter your expensive context. A built-in **ledger** reports exactly how many tokens you saved.
 
-- **A bash environment**: Linux, macOS, or Windows + WSL2. (The installer scripts are POSIX/bash; native‑Windows building is out of scope.)
-- **NVIDIA GPU, ≥ 8 GB VRAM** (all three tiers fit on 8 GB — one model on the GPU at a time, swap‑exclusive).
-- **≥ 32 GB system RAM** (≥ 64 GB ideal — the 26B‑A4B MoE keeps its experts in RAM via `--cpu-moe`).
-- **CUDA toolkit 12.x** with `nvcc` (avoid 13.x — an MMQ crash falls back to cuBLAS and regresses decode).
-- **Go 1.26+**, plus `git`, `cmake`, `python3`, and the Hugging Face CLI (`pip install huggingface_hub`).
-- ~20 GB free SSD (E4B ~4 GB + E2B ~2.5 GB + 26B‑A4B ~14 GB + build).
+The design rule is simple: **the local model does grunt work; your agent keeps all judgment.** Every task either returns a verified, schema-valid result or **defers** — a structured `{"deferred": true, ...}` that tells the caller "do this one yourself." There is no cloud fallback inside the harness, and it holds no cloud credentials.
 
-> **Models & license:** the cascade uses Google's **Gemma‑4** weights (Unsloth QAT `UD‑Q4_K_XL` GGUFs). Their use is governed by the [Gemma Terms of Use](https://ai.google.dev/gemma/terms); accept them on Hugging Face before downloading. This repository ships **no** model weights.
+It's for anyone running an AI coding agent or pipeline who wants to **cut token spend on bulk text work** while keeping data on the box.
 
-## Install
+## Features
 
-### Guided (recommended) — via the bundled Claude Code skill
+- **Free & fully local** — all inference runs on your GPU via llama.cpp; no API keys, no metering, nothing leaves the machine.
+- **Never calls cloud, always defers** — low confidence returns a structured defer instead of guessing. The harness has no cloud credentials by design.
+- **Self-learning cascade** — fast tasks enter at a small tier and escalate to a larger model only when genuinely uncertain (logprob decision margin + self-reported confidence).
+- **Reliable structured output** — enforces a generated **GBNF grammar** + Go schema validation, working around the model's JSON-schema crashes.
+- **Single static binary** — one Go executable; CLI and MCP server in the same build.
+- **MCP-native** — exposes 12 tools over stdio for any MCP client (Claude Code and friends).
+- **Beyond text** — local **vision** (VQA / OCR / image-field-extract / render-QA), **speech-to-text** (whisper.cpp), **image generation** (SDXL via ComfyUI), and a dependency-free **SVG data-viz kit**.
+- **Token ledger** — append-only JSONL accounting of every offloaded call and the cloud tokens it saved.
 
-This repo bundles a [`skill/`](skill/) that walks Claude Code through the whole install (hardware gate → build llama.cpp → pull models → build the CLI → wire serving → register MCP), baking in every hard‑won gotcha so the install is turnkey.
+## Quickstart
 
 ```bash
-git clone https://github.com/dmmdea/local-offload.git ~/local-offload
-# make the skill available to Claude Code (copy or symlink):
-cp -r ~/local-offload/skill ~/.claude/skills/local-offload-setup
+# 1. Build (Go 1.26+)
+go build -o offload-harness .
+
+# 2. Point at your local llama.cpp endpoint (defaults assume http://127.0.0.1:11436)
+cp config.example.json config.json
+
+# 3. Run a task — input is a file path or "-" for stdin
+./offload-harness summarize notes.md --max-points 5 --json
+./offload-harness triage log.txt --question "Does this contain an error?" --json
+
+# 4. See what you saved
+./offload-harness ledger
 ```
 
-Then in Claude Code: **"set up the local-offload harness"**. The skill is operator‑driven — every install location is a prompt/env var with a sensible `$HOME`‑relative default; nothing is hardcoded.
+First output in under five commands. If the local model is unreachable or unsure, you'll get `{"deferred": true, "reason": "..."}` — that's expected, not a failure.
 
-### Manual
+## Installation
+
+**Build from source** (recommended):
 
 ```bash
-git clone https://github.com/dmmdea/local-offload.git ~/local-offload
-cd ~/local-offload
-bash skill/scripts/detect.sh          # checks GPU / CUDA / Go / RAM / disk
-HARNESS_SRC=$PWD bash skill/scripts/setup.sh   # idempotent: build + pull family + configure
-go build -o local-offload .           # (setup.sh also does this)
+git clone https://github.com/dmmdea/local-offload-pp-cli.git
+cd local-offload-pp-cli
+go build -o offload-harness .       # or: go build -o offload-harness.exe . on Windows
 ```
 
-Override any install path via env var before `setup.sh`:
-`MODELS_ROOT`, `LLAMACPP_DIR`, `HARNESS_SRC`, `CONFIG_OUT`, `LLAMASWAP_PORT`, `WITH_FAMILY` (set `0` for E4B‑only, no cascade), `GPU_ARCH`, `CUDA_HOME`.
+**Go install:**
 
-## Serving (the model)
-
-Verified **grammar‑reliable** serving — common flags per tier (**no MTP**, see below):
-
-```
---ctx-size 8192 --flash-attn on --cache-type-k f16 --cache-type-v f16 --jinja --reasoning off
-# E2B    : --n-gpu-layers 99
-# E4B    : --n-gpu-layers 99 --parallel 1
-# 26B-A4B: --cpu-moe --n-gpu-layers 999 --parallel 1   + env GGML_CUDA_DISABLE_GRAPHS=1
+```bash
+go install github.com/dmmdea/local-offload-pp-cli@latest
 ```
 
-`setup.sh` emits an `offload-family.llama-swap.yaml` snippet (3 model defs + a swap‑exclusive group) to merge into your [llama-swap](https://github.com/mostlygeek/llama-swap) config. Without llama‑swap it writes a single‑model E4B launcher (`serve-offload.sh`, no cascade).
+Requires **Go 1.26+** and a running **llama.cpp server** (see [Serving the models](#serving-the-models)).
 
 ## Usage (CLI)
 
 ```bash
-local-offload summarize notes.md --max-points 5 --json
-local-offload classify ticket.txt --labels bug,feature,question --json
-local-offload extract  invoice.txt --schema fields.json --json
-local-offload triage   log.txt --question "Does this contain an error?" --json
-local-offload ledger                 # token-savings report
-local-offload doctor                 # endpoint health + config
-local-offload models                 # show the active cascade
-local-offload eval --dir testdata/eval   # code-based quality eval (selective accuracy, AURC, deferral-curve AUDC/QNC)
-local-offload stats                  # observational per-task ledger telemetry
-local-offload mcp                    # run as an MCP server (stdio)
+# Text — the four core tasks
+offload-harness summarize <file|-> [--max-points N] [--json]
+offload-harness classify  <file|-> --labels bug,feature,question [--json]
+offload-harness extract   <file|-> --schema fields.json [--json]
+offload-harness triage    <file|-> --question "Is this a refund request?" [--json]
+
+# Vision (image understanding)
+offload-harness vqa           image.png --question "What number is shown?" --json
+offload-harness ocr           scan.png --json
+offload-harness extract-image invoice.png --schema fields.json --json
+offload-harness assess-image  render.png --brief "a red sports car at sunset" --json
+
+# Speech-to-text (audio or video)
+offload-harness transcribe    clip.mp4 --language es --json
+offload-harness transcribe    noisy.m4a --language es --hq        # high-quality model for hard audio
+
+# Video understanding (samples frames)
+offload-harness video-describe clip.mp4 --question "What happens here?" --json
+
+# Generate (free, local GPU)
+offload-harness generate-image "a product photo of a coffee mug on white" --negative "people, text, watermark"
+offload-harness generate-svg gauge '{"value":72,"max":100,"label":"Score","unit":"%"}'
+
+# Operate & inspect
+offload-harness mcp                      # run as an MCP server (stdio)
+offload-harness ledger [--since DAYS]    # token-savings report
+offload-harness doctor                   # endpoint health + config check
+offload-harness models                   # show configured models + serving flags
+offload-harness eval [--dir DIR]         # code-based quality eval (AURC, deferral-curve AUDC/QNC)
+offload-harness stats                    # per-task ledger telemetry
 ```
 
-Input is a file path or `-` for stdin. Config via `--config <path>` or `$LOCAL_OFFLOAD_CONFIG`.
+Input is a **file path** or `-` for stdin. Add `--json` for the full result object, `--select a,b,c` to keep only certain top-level fields, and `--compact` to minify. Configuration is read from `--config <path>` or `$LOCAL_OFFLOAD_CONFIG`.
 
-## Usage (MCP)
+<details>
+<summary><b>Example: extract structured fields</b></summary>
 
-```bash
-claude mcp add local-offload --scope user -- "$HOME/local-offload/local-offload" mcp
-```
-
-Or in your MCP client config under `mcpServers`:
+`fields.json` is a JSON Schema with a `properties` map:
 
 ```json
-"local-offload": {
-  "command": "/absolute/path/to/local-offload",
-  "args": ["mcp"]
+{ "properties": { "name": { "type": "string" }, "amount": { "type": "number" }, "date": { "type": "string" } } }
+```
+
+```bash
+offload-harness extract invoice.txt --schema fields.json --json
+# -> {"name":"...","amount":1240.50,"date":"2026-01-15"}   (values grounded in the input text)
+```
+
+A bare `{"field":"string"}` map has no usable properties and is deferred.
+
+</details>
+
+<details>
+<summary><b>Self-learning jobs (offline, inference-free)</b></summary>
+
+These run as a nightly batch over the ledger — pure Go statistics, **zero cloud tokens**:
+
+```bash
+offload-harness calibrate           # per-task conformal escalation thresholds  -> thresholds.json
+offload-harness health              # per-tier EWMA/Page-Hinkley/CUSUM + P95 timeouts -> tier_overrides.json
+offload-harness train-router        # logistic entry-tier router from input features -> router-weights.json
+offload-harness optimize            # mine verified-good calls into few-shot exemplar pools
+offload-harness audit-sample --hard # surface the hardest cases for human/agent review
+```
+
+See [How the cascade learns](#how-the-cascade-learns).
+
+</details>
+
+## Use as an MCP server
+
+Register the binary with your MCP client. The built-in defaults already encode the full cascade, so `--config` is only needed for non-default endpoints or paths.
+
+```bash
+claude mcp add offload-harness --scope user -- /path/to/offload-harness mcp
+```
+
+Or add it to your client's MCP config directly:
+
+```json
+{
+  "mcpServers": {
+    "offload-harness": {
+      "command": "/path/to/offload-harness",
+      "args": ["mcp"]
+    }
+  }
 }
 ```
 
-Tools: `offload_summarize`, `offload_classify`, `offload_extract`, `offload_triage` (plus the vision tools below). Each returns the result JSON or `{deferred:true, ...}`.
+Transport is **stdio**. Every tool returns the full result JSON — and a `{"deferred": true, ...}` defer is a *valid* result, signalling the agent to do that task itself.
 
-## Vision (image understanding / OCR)
+### Exposed MCP tools
 
-The harness can also READ images. Four image subcommands / MCP tools route to a local **Qwen3-VL-4B-Instruct** tier instead of the Gemma text cascade — same never‑call‑cloud, defer‑to‑Opus philosophy:
+| Tool | Arguments | What it does |
+|---|---|---|
+| `offload_summarize` | `text`, `max_points?` | Summarize text → `{summary, bullets}`, or defer. |
+| `offload_classify` | `text`, `labels[]` | Classify into one of the labels → `{label, confidence}`, or defer. |
+| `offload_extract` | `text`, `schema` | Extract schema-constrained fields → object, or defer. Values grounded in the input. |
+| `offload_triage` | `text`, `question` | Yes/no/unsure check → `{decision, reason}`, or defer. |
+| `offload_vqa` | `image`, `question` | Visual Q&A on a local image → `{answer}`, or defer. |
+| `offload_ocr` | `image` | Transcribe all text in an image → `{text}`, or defer. |
+| `offload_extract_image` | `image`, `schema` | OCR then extract grounded fields from the image → object, or defer. |
+| `offload_assess_image` | `image`, `brief?` | QA a render against exclusions → `{has_people, has_text, matches_brief, notes}`. |
+| `offload_video_describe` | `video`, `question` | Sample frames from a local video and answer → `{answer}`, or defer. |
+| `offload_transcribe` | `audio`, `language?`, `hq?`, `select?` | Transcribe local audio/video → `{gist, segments[], srt_path, ...}`, or defer. |
+| `offload_generate_image` | `prompt`, `negative?`, `width?`, `height?`, `steps?`, `seed?`, `out?` | Generate an image on the local GPU (SDXL/ComfyUI) → `{image_path, ...}`, or defer. |
+| `offload_generate_svg` | `kind`, `spec`, `out?` | Render a crisp data-viz SVG (`gauge` · `comparison-bar` · `chromatogram` · `icon`) — no model, no GPU. |
 
+> **Inputs stay local.** Images, audio, and video are accepted as a **local file path** or a `data:` URI — **never a remote URL**, so there is no network egress for media.
+
+## How it works
+
+The pipeline is a confidence-gated cascade. A request enters at a small tier and only climbs when the result is genuinely uncertain; if every local tier is exhausted, it defers to the caller.
+
+```mermaid
+flowchart LR
+    A[Request] --> B[Cache + context-budget trim]
+    B --> C[Build prompt + GBNF grammar]
+    C --> D[Small tier<br/>llama.cpp + grammar]
+    D --> E[Parse → verify → schema-validate]
+    E --> F{Confidence gate}
+    F -->|pass| G[Accept ✓]
+    F -->|low margin /<br/>validation fail| H[Escalate to larger tier]
+    H --> E
+    F -->|all tiers fail /<br/>truncated input| I[Defer to caller ↩]
+    G --> J[Append to token ledger JSONL]
 ```
-local-offload vqa           img.png --question "What number is shown?" --json     # -> {answer}
-local-offload ocr           scan.png --json                                        # -> {text}
-local-offload extract-image invoice.png --schema fields.json --json                # -> grounded fields
-local-offload assess-image  render.png --brief "a red sports car at sunset" --json # -> {has_people,...}
-```
 
-- **`vqa`** → `{answer}`: free‑text visual Q&A / describe.
-- **`ocr`** → `{text}`: transcribes the text in the image.
-- **`extract-image --schema f.json`** → grounded fields: it OCRs the image, then runs the **existing** text `extract` over the OCR text — inheriting the same GBNF grammar, verbatim grounding (values must appear in the OCR text), and schema validation.
-- **`assess-image [--brief "..."]`** → GBNF‑constrained `{has_people, has_text, matches_brief, notes}`: QA an image against hard exclusions (no‑people / no‑text) and an optional brief.
+**The cascade.** Tasks enter at the tier sized to the job and escalate only on a validation failure *or* a low decision-confidence signal:
 
-Served by **Qwen3-VL-4B-Instruct** (`vision_model`, default `qwen3vl-4b`) on the **same** llama-swap `:11436`, **swap‑exclusive** with the Gemma cascade (one model on the GPU at a time). Image input is a **local file path or a `data:` URI — never a remote URL** (no egress). MCP tools: `offload_vqa`, `offload_ocr`, `offload_extract_image`, `offload_assess_image`.
+- **triage / classify** → small fast tier (entry)
+- **summarize / extract** → mid workhorse tier
+- on failure or uncertainty → escalate to a larger near-frontier MoE tier
+- all local tiers fail → **defer** to the caller
 
-Verified serving recipe (fits 8GB):
+**Confidence-based escalation.** For triage/classify the harness requests per-token logprobs and computes a **class-mass margin** at the decision token (the raw pre-grammar distribution, aggregated by legal class so `Yes`/`yes` don't split). A margin below the threshold means the model was torn → escalate instead of accepting a coin-flip. Classify also keeps a self-reported confidence gate (defense in depth).
 
-```
-llama-server --model Qwen3VL-4B-Instruct-Q4_K_M.gguf --mmproj mmproj-Qwen3VL-4B-Instruct-F16.gguf \
-  -ngl 99 -c 4096 --image-max-tokens 1024 --no-context-shift --flash-attn on \
-  --cache-type-k q8_0 --cache-type-v q8_0 --jinja
-```
+**Reliable structured output.** The target model crashes on llama.cpp's `--json-schema` / `response_format`, so the harness instead enforces a **GBNF grammar** (generated per request, no external dependency) via the chat-completions `grammar` field, then forgivingly parses and schema-validates the result in Go. Extracted values must appear verbatim in the source text (grounding).
 
-**Gotchas:** use the **Instruct** build (Thinking bypasses GBNF, llama.cpp #20345); GBNF works WITH an image but never `--json-schema` (#22396) — use the raw `grammar` field; keep **mmproj F16** for OCR (Q8 hallucinates); OCR fine‑detail on `llama-server` has an open regression (#22785) — fine for short text, validate dense docs.
+**State.** The cache is [bbolt](https://github.com/etcd-io/bbolt) (single-writer); the token **ledger is append-only JSONL**, so a CLI run and the long-running MCP server can both append concurrently. If the MCP server holds the cache lock, a concurrent CLI run degrades to cache-less automatically rather than failing.
 
-Image **generation** lives in [`render/`](render/) — a general ComfyUI runner (run any workflow via `--graph`, or a parameterized SDXL text2img with neutral defaults; nothing project‑specific baked in). Generate, then QA the result with `assess-image`.
+### How the cascade learns
 
-## Structured output (important)
+The harness improves itself **offline and inference-free** — pure Go statistics over the ledger, spending **zero cloud tokens**:
 
-Gemma‑4 **crashes** on llama.cpp `--json-schema` / `json_schema` / `response_format` ([#22396](https://github.com/ggml-org/llama.cpp/issues/22396)). This harness instead enforces a **GBNF grammar** via the `grammar` field, then forgivingly parses + schema‑validates the result in Go. Grammars are generated per request (no external dependency).
+- **Conformal thresholds** (`calibrate`) — replaces a guessed margin gate with a per-task threshold that holds a chosen error rate.
+- **Entry-tier router** (`train-router`) — a tiny logistic model on cheap input features bumps the entry tier up when the small tier is predicted to fail, cutting wasted escalation.
+- **Health monitoring + circuit breakers** (`health`) — flags degrading tiers (EWMA / Page-Hinkley / CUSUM), sets P95 timeouts, and routes around a tier that is OOMing or timing out (infra only — never on a quality defer).
+- **Few-shot exemplars** (`optimize`) — harvests verified-good `(input, output)` pairs and BM25-selects them into the prompt (opt-in via `exemplar_shots`).
+- **Shadow-labeling flywheel** — optionally captures a fraction of live calls, replays them counterfactually through other tiers to generate training labels for the router and confidence head, then trains and calibrates them behind an adoption gate that only promotes a change when it **provably lowers error**.
 
-**Three serving rules the harness depends on** (they cost hours to rediscover):
+## Configuration
 
-- **No MTP / speculative decoding.** `--spec-type draft-mtp` + a GBNF `grammar` field → llama.cpp returns a 500 "logits computation" error. Serve with `-fa on`, f16 KV, no draft.
-- **`--reasoning off` is mandatory.** Gemma‑4's thinking mode otherwise eats the short output budget before emitting the answer (empty content, `finish=length`).
-- **Never `--json-schema`** — use the `grammar` field (above).
+Copy `config.example.json` and edit. Config is loaded from `--config <path>` or `$LOCAL_OFFLOAD_CONFIG`; an unknown key warns to stderr rather than being silently dropped.
 
-## Self‑learning (offline, inference‑free)
+| Key | Default | Purpose |
+|---|---|---|
+| `endpoint` | `http://127.0.0.1:11436` | Base URL of the local llama.cpp server. |
+| `completion_path` | `/v1/chat/completions` | Chat-completions path. |
+| `model` | `offload-e4b` | Workhorse text tier (summarize / extract). |
+| `triage_model` | `gemma4-e2b` | Fast entry tier (triage / classify); empty = use `model`. |
+| `escalation_model` | `gemma4-26b-a4b` | Larger tier tried before deferring; empty = no escalation. |
+| `vision_model` | `qwen3vl-4b` | Local vision tier (VQA / OCR / image extract / assess). |
+| `stt_model` / `stt_model_hq` | `whisper-stt` / `whisper-stt-hq` | Speech-to-text upstreams (turbo / high-quality). |
+| `classify_min_confidence` | `0.45` | Self-reported confidence floor for classify. |
+| `confidence_margin_threshold` | `0.35` | Logprob decision margin gate (0 disables). |
+| `max_input_chars` | `24000` | Inputs above this are trimmed; over-long inputs defer. |
+| `max_retries` | `1` | Retries before escalating. |
+| `cache_path` | `~/.local-offload/cache.db` | bbolt cache file. |
+| `ledger_path` | `~/.local-offload/ledger.jsonl` | Append-only token-savings ledger. |
+| `exemplar_shots` | `0` | Few-shot exemplars to inject (0 = off). |
+| `auto_heal` | `false` | Auto-warmup a tripped tier's circuit breaker. |
+| `opus_input_price_per_mtok` | `15.0` | Price used to value tokens saved in the ledger. |
+| `request_timeout_sec` | `120` | Per-request timeout. |
 
-The harness logs rich signals per call (logprob margin, a deterministic grounding check, defer/retry/truncation, per‑tier infra errors, cheap input features) into an append‑only JSONL ledger, then tunes **its own** config from that data — pure Go stats over the ledger, **zero cloud tokens**. Run these on a schedule (cron / Task Scheduler):
+State (cache, ledger, learned weights, exemplars) defaults to `~/.local-offload/`.
+
+## Serving the models
+
+All tiers are served by a local **llama.cpp server** (multiplexed with a model-swapper so only one model occupies the GPU at a time). The harness talks to it over the standard chat-completions API. The text cascade fits comfortably on an 8 GB GPU.
+
+Verified **grammar-reliable** serving flags (per tier):
 
 ```bash
-local-offload calibrate     # per-task conformal margin thresholds -> thresholds.json
-local-offload health        # per-tier EWMA/Page-Hinkley/CUSUM + P95 timeouts -> tier_overrides.json
-local-offload train-router  # logistic entry-tier router from input features -> router-weights.json
-local-offload optimize      # mine verified-good calls into BM25 few-shot exemplar pools
+# common
+--ctx-size 8192 --flash-attn on --cache-type-k f16 --cache-type-v f16 --jinja --reasoning off
+
+# small entry tier:     --n-gpu-layers 99
+# workhorse tier:       --n-gpu-layers 99 --parallel 1
+# large MoE escalation: --cpu-moe --n-gpu-layers 999 --parallel 1   (env GGML_CUDA_DISABLE_GRAPHS=1)
 ```
 
-The pipeline loads the resulting JSON at startup. All four are idempotent and safe to re‑run.
+<details>
+<summary><b>Serving gotchas (load-bearing)</b></summary>
 
-### Learned correctness head (opt‑in)
+- **`--reasoning off` is mandatory** — the model's thinking mode otherwise eats the short output budget and returns empty replies.
+- **No speculative draft (MTP)** — it 500-errors on the grammar field. Serve with flash-attention on, f16 KV, reasoning off.
+- **Never use `--json-schema` / `response_format`** — they crash the model; the harness passes a raw GBNF `grammar` field instead.
+- **Vision: use the Instruct build** of the VLM (the Thinking variant silently bypasses GBNF) and keep the multimodal projector at **F16** for OCR (Q8 hallucinates text).
+- **Speech-to-text: flash-attention OFF** server-side — it degrades non-English / noisy transcription; turbo is still 5–8× realtime.
 
-`summarize`/`extract` have no decision‑token margin, so they get a separate pure‑Go logistic **correctness head** that predicts `p(correct)` from the call's features. It is adopted **only if it provably helps**, validated with a rigorous, leakage‑free gate:
+</details>
 
-```bash
-local-offload confhead-eval       # out-of-fold AURC + AUGRC vs incumbent, paired-bootstrap CI -> ADOPT/REJECT per task
-local-offload train-confhead      # fit the head over labeled ledger rows -> confhead-weights.json
-local-offload confhead-calibrate  # conformal p(correct) thresholds at the target error rate -> confhead-thresholds.json
-```
+## Requirements
 
-The adoption gate reports a per‑task verdict (ADOPT only when the 95% CI on ΔAURC excludes zero). When a head is adopted and you set `"confhead_enabled": true`, a call whose predicted `p(correct)` falls below its learned threshold escalates to the larger tier instead of being accepted — catching the inputs the workhorse is likely to get wrong. **Default off**; inert unless a head + threshold are present.
+| | |
+|---|---|
+| **OS** | Linux, macOS, Windows |
+| **Go** | 1.26+ (to build) |
+| **GPU** | NVIDIA, ~8 GB VRAM for the text + vision cascade |
+| **RAM / disk** | 32 GB+ system RAM and a fast SSD recommended (model weights, MoE CPU offload) |
+| **External** | a running llama.cpp server; `ffmpeg` on PATH for audio/video; a whisper.cpp server for STT; ComfyUI for image generation (all optional per feature) |
 
-## Notes & limitations
+## Troubleshooting
 
-- **bbolt cache is single‑writer**: when the long‑running MCP server holds it, a concurrent CLI run degrades to cache‑less automatically. The JSONL ledger has no such limit (both append concurrently).
-- **Truncated output defers straight to the caller** (does not escalate) — every local tier shares the context window, so a bigger model can't help an over‑long input.
-- A typo'd config key warns to stderr and is ignored rather than silently dropped.
-- `extract` grammars cap at object‑of‑scalars / string‑arrays / enums; deeply nested schemas are not yet supported.
+<details>
+<summary><b>Every call returns <code>deferred: true</code></b></summary>
+
+Check the endpoint with `offload-harness doctor`. The most common cause is the llama.cpp server not running or not reachable at `endpoint`. A defer is also normal for low-confidence, truncated, or over-long inputs — those are meant to go back to the caller.
+
+</details>
+
+<details>
+<summary><b>Empty or truncated model output</b></summary>
+
+You're almost certainly serving with reasoning mode on. Add `--reasoning off` to the llama.cpp server. Also confirm you are **not** passing `--json-schema` / `response_format` — both crash the model and break the grammar path.
+
+</details>
+
+<details>
+<summary><b>OCR or image fields look wrong</b></summary>
+
+Use the **Instruct** vision build (not Thinking) and keep the multimodal projector at **F16**. Validate dense documents before trusting them — fine-detail OCR on the server has a known accuracy regression for very small text.
+
+</details>
+
+<details>
+<summary><b>"cache unavailable (held by the MCP server?)"</b></summary>
+
+Expected. The bbolt cache is single-writer; when the long-running MCP server holds it, a concurrent CLI run continues cache-less. The JSONL ledger is unaffected — both can append.
+
+</details>
+
+## Contributing
+
+Contributions welcome. Run `go test ./...` and `go vet ./...` before opening a PR, and keep changes scoped. See `CONTRIBUTING.md` for build/test details.
+
+## Security
+
+Everything runs **locally** — no cloud calls, no credentials, no media egress (inputs are local paths or `data:` URIs only). To report a vulnerability, please see `SECURITY.md` rather than opening a public issue.
 
 ## License
 
-[Apache License 2.0](LICENSE). The Gemma model weights it uses at runtime are governed separately by the [Gemma Terms of Use](https://ai.google.dev/gemma/terms).
+[Apache 2.0](LICENSE).
+
+## Acknowledgments
+
+Built on [llama.cpp](https://github.com/ggml-org/llama.cpp) and [whisper.cpp](https://github.com/ggml-org/whisper.cpp), the [Gemma](https://ai.google.dev/gemma) and [Qwen-VL](https://github.com/QwenLM/Qwen3-VL) model families, [ComfyUI](https://github.com/comfyanonymous/ComfyUI), the [Model Context Protocol Go SDK](https://github.com/modelcontextprotocol/go-sdk), and [bbolt](https://github.com/etcd-io/bbolt).

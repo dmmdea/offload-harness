@@ -1,5 +1,5 @@
 // wf-acestep.mjs — build the native ComfyUI ACE-Step v1 text-to-music graph.
-// Reconciled against the LIVE /object_info node schema (2026-06-16). Instrumental reel
+// Reconciled against the LIVE /object_info node schema (2026-06-16). Instrumental music
 // beds: tags-only prompt (genre/mood/instruments/BPM), empty lyrics. Needs the all-in-one
 // checkpoint ace_step_v1_3.5b.safetensors (bundles DiT + CLIP text encoder + music VAE) in
 // C:\ComfyUI\models\checkpoints. Apache-2.0 = commercial-safe. Output FLAC via SaveAudio
@@ -7,7 +7,7 @@
 export function buildAceStep({
   prompt, lyrics = "", seconds = 30, steps = 50, cfg = 4.0, shift = 5.0,
   lyricsStrength = 1.0, seed = Math.floor(Math.random() * 1e15),
-  ckpt = "ace_step_v1_3.5b.safetensors", filenamePrefix = "music",
+  ckpt = "ace_step_v1_3.5b.safetensors", filenamePrefix = "render_music",
 } = {}) {
   if (!prompt) throw new Error("buildAceStep: prompt (style tags) is required");
   if (steps === undefined) steps = 50;

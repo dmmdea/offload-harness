@@ -15,5 +15,12 @@ test-config.json
 /offload-family.llama-swap.yaml
 /serve-offload.sh
 
-# local TTS venv (Chatterbox) — weights download on first run, never tracked
+# local TTS venv (Chatterbox) — not tracked
 .tts-venv/
+
+# prep/utility venv + binary rollback backups — never track
+/.prep-venv/
+*.old.exe
+
+# subagent-driven-development scratch
+.superpowers/

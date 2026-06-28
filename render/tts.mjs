@@ -1,9 +1,9 @@
 // tts.mjs — local text-to-speech narration via Chatterbox Multilingual (MIT, commercial-safe,
 // zero-shot voice cloning). Dependency-free Node CLI; spawns a python worker in the .tts-venv.
-// Pass a reference clip with --clone to reproduce that voice + accent; otherwise Chatterbox's
-// built-in default voice is used. GPU-locked (Chatterbox shares the GPU with llama-swap).
-// Mirrors comfy-video.mjs's python auto-detect + lock pattern. The Perth watermark on outputs
-// is provenance-only (MIT allows commercial use).
+// Cloning a reference clip (e.g. a reference speaker's voice) reproduces that voice+accent.
+// GPU-locked (Chatterbox shares the 8GB with llama-swap). Mirrors comfy-video.mjs's python
+// auto-detect + lock pattern. The Perth watermark on outputs is provenance-only (MIT allows
+// commercial use).
 //
 // Usage: node render/tts.mjs <out.wav> "<text>" [--clone <ref.wav>] [--lang es] [--no-lock]
 import { join, dirname } from "node:path";
@@ -39,8 +39,9 @@ async function main() {
   if (!lock) throw new Error("GPU busy (another gen holds the lock); retry or --no-lock");
   try {
     await freeLlamaSwap(); // give Chatterbox the GPU
-    // --clone wins; else fall back to the TTS_REF env (point it at a clean ~10s voice reference
-    // so narration is a one-liner). No ref → Chatterbox's default built-in voice.
+    // --clone wins; else fall back to the TTS_REF env (set it to your canonical
+    // clean voice reference, e.g. ~/.local-offload/refs/voice-ref.wav, so narration is
+    // a one-liner). No ref → Chatterbox's default built-in voice.
     const ref = flags.clone || process.env.TTS_REF;
     const args = [worker, "--out", out, "--text", text, "--lang", flags.lang || "es"];
     if (ref) args.push("--ref", ref);

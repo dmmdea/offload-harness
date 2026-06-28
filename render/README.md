@@ -123,11 +123,11 @@ peak −4 dB), checkpoint loaded on 8 GB (RAM-offloaded), GPU freed cleanly afte
 
 # Voice — narration / TTS (Chatterbox Multilingual, voice-cloning)
 
-Generate Spanish (or 23-language) voiceover with **zero-shot voice cloning** — pass any clean
-~10 s reference clip and Chatterbox reproduces that voice + accent. **Chatterbox Multilingual V3
+Generate Spanish (or 23-language) voiceover that **clones a reference voice** — narrate in a
+reference speaker's voice from a ~10 s sample. **Chatterbox Multilingual V3
 (MIT license = commercial-safe)**, run standalone in a python venv (core ComfyUI has no TTS),
-GPU-locked. *(F5-Spanish was rejected despite strong training — its contradictory CC-BY-NC/CC0
-license is unsafe for commercial use. Same rule as music: Apache/MIT only.)*
+GPU-locked. *(F5-Spanish was rejected despite better Spanish training — its model license is
+contradictory CC-BY-NC/CC0, unsafe for a monetized channel. Same call as music: Apache/MIT only.)*
 
 - **`tts.mjs`** — dep-free Node CLI: acquires the GPU lock → frees llama-swap → runs the worker.
 - **`tts_chatterbox.py`** — worker in `.tts-venv` (`ChatterboxMultilingualTTS.from_pretrained →
@@ -135,7 +135,7 @@ license is unsafe for commercial use. Same rule as music: Apache/MIT only.)*
   watermark (provenance only).
 
 ```bash
-node render/tts.mjs out.wav "Hola, ¿qué tal?" --clone ref.wav --lang es
+node render/tts.mjs out.wav "Hola, bienvenidos a mi canal." --clone ref.wav --lang es
 ```
 
 **Setup** (one-time): the `.tts-venv` is built on ComfyUI's 3.12 python (system 3.14 is too new
@@ -143,16 +143,17 @@ for torch); `pip install chatterbox-tts` then force CUDA torch (`torch==2.6.0 --
 .../cu124` — the package pulls CPU torch). The worker sets `HF_HUB_DISABLE_SYMLINKS=1` (Windows
 blocks symlinks without Developer Mode).
 
-**VERIFIED 2026-06-16:** a Spanish line cloned from a reference clip → a 6.4 s 24 kHz WAV;
-**whisper round-trip transcribes it back word-for-word** (intelligible Spanish), GPU freed after.
-Clone *timbre* quality is best judged by ear — a clean ~10 s solo voice reference improves it.
+**VERIFIED 2026-06-16:** a Spanish line cloned from a reference voice clip → a 6.4 s
+24 kHz WAV; **whisper round-trip transcribes it back word-for-word** (intelligible Spanish),
+GPU freed after. Clone *timbre* quality is best judged by ear — a clean ~10 s solo voice
+reference (vs. a noisy stereo mix) will improve it.
 
 ---
 
 ## Verification status (video)
 
-**VERIFIED 2026-06-16** end-to-end on the 8 GB box. A real photo still (a car hero frame) →
-coherent **480×848 24 fps h264** clips at both **17 frames**
+**VERIFIED 2026-06-16** end-to-end on the 8 GB box. A real source still (a sports-car hero frame
+from a sample reel) → coherent **480×848 24 fps h264** clips at both **17 frames**
 (0.7 s) and **49 frames** (2.0 s, usable b-roll): a smooth cinematic dolly push-in, the car
 photorealistic and intact across all frames (no warping/melting/drift even over 2 s), GPU freed
 cleanly after (`freeComfy`) and the llama-swap memory stack unaffected (embedder still 768).

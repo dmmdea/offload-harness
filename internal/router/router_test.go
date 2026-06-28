@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dmmdea/local-offload-pp-cli/internal/ledger"
@@ -87,7 +88,7 @@ func TestTrainAndLoad(t *testing.T) {
 	ledgerPath := writeLedger(t, entries)
 	outPath := filepath.Join(dir, "router-weights.json")
 
-	report, err := Train(ledgerPath, outPath)
+	report, err := Train(ledgerPath, "", outPath)
 	if err != nil {
 		t.Fatalf("Train failed: %v\nreport:\n%s", err, report)
 	}
@@ -126,7 +127,7 @@ func TestTriageTask(t *testing.T) {
 	lp := writeLedger(t, entries)
 	op := filepath.Join(dir, "w.json")
 
-	report, err := Train(lp, op)
+	report, err := Train(lp, "", op)
 	if err != nil {
 		t.Fatalf("Train: %v\n%s", err, report)
 	}
@@ -152,7 +153,7 @@ func TestInsufficientRows(t *testing.T) {
 	lp := writeLedger(t, entries)
 	op := filepath.Join(dir, "w.json")
 
-	report, err := Train(lp, op)
+	report, err := Train(lp, "", op)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -209,7 +210,7 @@ func TestMalformedLedgerLines(t *testing.T) {
 	f.Close()
 
 	op := filepath.Join(dir, "w.json")
-	_, err := Train(f.Name(), op)
+	_, err := Train(f.Name(), "", op)
 	if err != nil {
 		t.Fatalf("Train with malformed lines: %v", err)
 	}
@@ -222,7 +223,7 @@ func TestEmptyLedger(t *testing.T) {
 	os.WriteFile(lp, []byte{}, 0o600)
 
 	op := filepath.Join(dir, "w.json")
-	report, err := Train(lp, op)
+	report, err := Train(lp, "", op)
 	if err != nil {
 		t.Fatalf("Train on empty ledger: %v\n%s", err, report)
 	}
@@ -236,7 +237,7 @@ func TestPreferLargerEntryUnknownTask(t *testing.T) {
 	dir := t.TempDir()
 	lp := writeLedger(t, entries)
 	op := filepath.Join(dir, "w.json")
-	Train(lp, op)
+	Train(lp, "", op)
 
 	m := Load(op)
 	if m.PreferLargerEntry("extract", makeFeat(2000)) {
@@ -262,5 +263,81 @@ func TestFeatOrderStability(t *testing.T) {
 	// Must start with len_chars (first canonical key present)
 	if len(order1) == 0 || order1[0] != "len_chars" {
 		t.Errorf("expected len_chars first, got %v", order1)
+	}
+}
+
+// TestTrain_MergesRouterLabelSidecar verifies that synthesized E2B rows in a
+// sidecar file are merged into the training set, allowing a task to reach
+// minRows even when the main ledger is empty.
+func TestTrain_MergesRouterLabelSidecar(t *testing.T) {
+	dir := t.TempDir()
+	led := filepath.Join(dir, "ledger.jsonl")
+	side := filepath.Join(dir, "router-labels.jsonl")
+	out := filepath.Join(dir, "router-weights.json")
+
+	// main ledger: 0 usable E2B classify rows
+	os.WriteFile(led, []byte(""), 0o644)
+
+	// sidecar: 250 synthesized gemma4-e2b classify rows (alternating accept/skip)
+	f, err := os.Create(side)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := true
+	fa := false
+	for i := 0; i < 250; i++ {
+		g := &tr
+		if i%2 == 0 {
+			g = &fa
+		}
+		e := ledger.Entry{
+			Task:      "classify",
+			ModelTier: "gemma4-e2b",
+			Grounded:  g,
+			Feat:      map[string]float64{"len_chars": float64(10 + i%5), "n_words": float64(2 + i%3)},
+		}
+		b, _ := json.Marshal(e)
+		f.Write(append(b, '\n'))
+	}
+	f.Close()
+
+	report, err := Train(led, side, out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(report, "classify") || !strings.Contains(report, "trained OK") {
+		t.Fatalf("expected classify trained via sidecar, got: %s", report)
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Fatalf("weights not written: %v", err)
+	}
+}
+
+// TestTrain_MissingSidecarIgnored verifies that a missing sidecar path does not
+// cause an error — Train proceeds with main ledger rows only.
+func TestTrain_MissingSidecarIgnored(t *testing.T) {
+	rng := rand.New(rand.NewSource(42))
+	entries := syntheticEntries("classify", 250, 800, rng)
+	lp := writeLedger(t, entries)
+	op := filepath.Join(t.TempDir(), "w.json")
+
+	// nonexistent sidecar path
+	_, err := Train(lp, filepath.Join(t.TempDir(), "does-not-exist.jsonl"), op)
+	if err != nil {
+		t.Fatalf("missing sidecar should be ignored, got error: %v", err)
+	}
+}
+
+func TestHasTask(t *testing.T) {
+	var nilM *Model
+	if nilM.HasTask("classify") {
+		t.Fatal("nil receiver: want false")
+	}
+	m := &Model{tasks: map[string]taskWeights{"classify": {}}}
+	if !m.HasTask("classify") {
+		t.Fatal("known task: want true")
+	}
+	if m.HasTask("triage") {
+		t.Fatal("unknown task: want false")
 	}
 }

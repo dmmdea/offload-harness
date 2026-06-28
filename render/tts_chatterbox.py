@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # tts_chatterbox.py — Chatterbox Multilingual TTS worker (MIT license, commercial-safe,
 # zero-shot voice cloning). Invoked by render/tts.mjs inside the .tts-venv. Clones the --ref
-# voice if given (reproduces that speaker's accent); lang defaults to 'es'. Reconciled against
-# the real installed API: ChatterboxMultilingualTTS
+# voice if given (reproduces that speaker's accent — e.g. a reference Spanish voice); lang
+# defaults to 'es'. Reconciled against the real installed API: ChatterboxMultilingualTTS
 # .from_pretrained(device) -> .generate(text, language_id, audio_prompt_path=...).
 import os
 # Windows blocks symlinks without Developer Mode/elevation → HF cache os.symlink raises

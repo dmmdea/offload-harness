@@ -47,6 +47,6 @@ export function buildHunyuan15I2V({
     "13": { class_type: "ModelSamplingSD3", inputs: { model: ["2", 0], shift } },
     "10": { class_type: "KSampler", inputs: { seed, steps, cfg, sampler_name: "euler", scheduler: "simple", denoise: 1, model: ["13", 0], positive: ["9", 0], negative: ["9", 1], latent_image: ["9", 2] } },
     "11": { class_type: "VAEDecodeTiled", inputs: { samples: ["10", 0], vae: ["3", 0], tile_size: vaeTileSize, overlap: 64, temporal_size: vaeTemporalSize, temporal_overlap: 8 } },
-    "12": { class_type: "VHS_VideoCombine", inputs: { images: ["11", 0], frame_rate: frameRate, loop_count: 0, filename_prefix: "i2v", format: "video/h264-mp4", pingpong: false, save_output: true } },
+    "12": { class_type: "VHS_VideoCombine", inputs: { images: ["11", 0], frame_rate: frameRate, loop_count: 0, filename_prefix: "render_i2v", format: "video/h264-mp4", pingpong: false, save_output: true } },
   };
 }

@@ -38,12 +38,17 @@ const (
 	// grammar) — it shells out to render/comfy-generate.mjs, which takes the shared
 	// GPU lock and starts/stops ComfyUI. Returns {image_path,width,height,seed}.
 	TaskGenerateImage TaskType = "generate_image"
+	// TaskGenerateSVG renders a brand-agnostic parametric SVG component (gauge,
+	// comparison-bar, chromatogram, icon) from a JSON spec via internal/svgkit —
+	// pure Go, no model/GPU. Its own branch in pipeline.Run. params: kind (string),
+	// spec (object), out (string path). Returns {svg_path, width, height}.
+	TaskGenerateSVG TaskType = "generate_svg"
 )
 
 // Valid reports whether t is a known task type.
 func (t TaskType) Valid() bool {
 	switch t {
-	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage:
+	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage, TaskGenerateSVG:
 		return true
 	}
 	return false

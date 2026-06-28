@@ -60,7 +60,7 @@ export async function acquireGpuLock({ lockPath, waitMs = 5 * 60 * 1000, ttlMs =
   }
 }
 
-// MEMORY_STACK: the always-loaded, CPU-only embedding/rerank models (they hold ZERO GPU VRAM).
+// MEMORY_STACK: the always-loaded, CPU-only mem0 models (they hold ZERO GPU VRAM).
 // freeLlamaSwap must NEVER unload these — the unload-ALL route did, needlessly tearing down
 // the load-bearing memory stack on every gen job for no VRAM benefit. Everything else on
 // llama-swap is GPU-resident + swappable, so freeing it per-model gives the render the GPU.

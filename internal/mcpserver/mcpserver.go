@@ -24,7 +24,7 @@ func (s *Server) Run(ctx context.Context, version string) error {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_summarize",
-		Description: "Summarize text on a free local model. Use for bulk/low-judgment summaries to keep tokens out of your context. Returns {summary, bullets}; if it can't do it confidently it returns deferred:true and you should summarize it yourself.",
+		Description: "Summarize text on a free local model. Use for bulk/low-judgment summaries to keep tokens out of your context. Returns {summary, bullets}; if it can't do it confidently it returns deferred:true and you should summarize it yourself. Triggers: summarize / tl;dr / gist / digest / recap / condense a doc, log, transcript, article, or thread.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to summarize"},"max_points":{"type":"integer","description":"max bullet points (default 5)"}},"required":["text"]}`),
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var in struct {
@@ -41,8 +41,8 @@ func (s *Server) Run(ctx context.Context, version string) error {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_classify",
-		Description: "Classify text into one of the given labels on a free local model. Returns {label, confidence}; low-confidence results are deferred back to you.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string"},"labels":{"type":"array","items":{"type":"string"},"description":"allowed labels (>=2)"}},"required":["text","labels"]}`),
+		Description: "Classify text into one of the given labels on a free local model. Returns {label, confidence}; low-confidence results are deferred back to you. Triggers: classify / categorize / label / tag / bucket / route text into one of a known set.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to classify"},"labels":{"type":"array","items":{"type":"string"},"description":"allowed labels (>=2)"}},"required":["text","labels"]}`),
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var in struct {
 			Text   string   `json:"text"`
@@ -54,8 +54,8 @@ func (s *Server) Run(ctx context.Context, version string) error {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_extract",
-		Description: "Extract structured fields from text on a free local model, constrained to the provided JSON schema. Returns the extracted object or defers.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string"},"schema":{"type":"object","description":"JSON schema with a properties object describing the fields to extract"}},"required":["text","schema"]}`),
+		Description: "Extract structured fields from text on a free local model, constrained to the provided JSON schema. Returns the extracted object or defers. Triggers: extract / parse / pull out structured fields from text into a schema (names, dates, amounts, entities).",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to extract fields from"},"schema":{"type":"object","description":"JSON schema with a properties object describing the fields to extract"}},"required":["text","schema"]}`),
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var in struct {
 			Text   string         `json:"text"`
@@ -67,8 +67,8 @@ func (s *Server) Run(ctx context.Context, version string) error {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_triage",
-		Description: "Answer a yes/no/unsure question about text on a free local model. Returns {decision, reason} or defers.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string"},"question":{"type":"string"}},"required":["text","question"]}`),
+		Description: "Answer a yes/no/unsure question about text on a free local model. Returns {decision, reason} or defers. Triggers: a yes/no/unsure check on text — 'does this contain X?', 'is this relevant/spam/safe?', 'should this be flagged?'.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to evaluate"},"question":{"type":"string","description":"a yes/no question about the text"}},"required":["text","question"]}`),
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var in struct {
 			Text     string `json:"text"`
@@ -207,6 +207,24 @@ func (s *Server) Run(ctx context.Context, version string) error {
 			params["seed"] = in.Seed
 		}
 		return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateImage, Input: in.Prompt, Params: params}))
+	})
+
+	srv.AddTool(&mcp.Tool{
+		Name:        "offload_generate_svg",
+		Description: "Render a crisp, brand-agnostic data-viz SVG locally for FREE (no model, no GPU) — the right tool for precise diagrams/icons SDXL fakes badly. kind is one of: gauge, comparison-bar, chromatogram, icon. spec is the component's JSON (colors/data are inputs; defaults are neutral — pass a theme {fg,bg,accent,muted,font} to brand it). Optional out = .svg path (default under the svg dir). Examples — gauge: {\"value\":72,\"max\":100,\"label\":\"Purity\",\"unit\":\"%\"}; comparison-bar: {\"items\":[{\"label\":\"A\",\"value\":10},{\"label\":\"B\",\"value\":20}],\"highlight\":1}; chromatogram: {\"peaks\":[{\"rt\":2.5,\"height\":80,\"label\":\"API\"}]}; icon: {\"name\":\"check\",\"color\":\"#22c55e\"}. Returns {svg_path, width, height}. Defers only on a bad kind/spec.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"kind":{"type":"string","description":"gauge | comparison-bar | chromatogram | icon"},"spec":{"type":"object","description":"the component spec (see description for fields; include an optional theme object to set colors)"},"out":{"type":"string","description":"output .svg path (optional; default under the svg dir)"}},"required":["kind","spec"]}`),
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var in struct {
+			Kind string         `json:"kind"`
+			Spec map[string]any `json:"spec"`
+			Out  string         `json:"out"`
+		}
+		_ = json.Unmarshal(req.Params.Arguments, &in)
+		params := map[string]any{"kind": in.Kind, "spec": in.Spec}
+		if in.Out != "" {
+			params["out"] = in.Out
+		}
+		return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateSVG, Params: params}))
 	})
 
 	return srv.Run(ctx, &mcp.StdioTransport{})

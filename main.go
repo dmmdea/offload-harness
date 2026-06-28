@@ -23,13 +23,17 @@ import (
 	"github.com/dmmdea/local-offload-pp-cli/internal/core"
 	"github.com/dmmdea/local-offload-pp-cli/internal/eval"
 	"github.com/dmmdea/local-offload-pp-cli/internal/exemplars"
+	"github.com/dmmdea/local-offload-pp-cli/internal/grounding"
 	"github.com/dmmdea/local-offload-pp-cli/internal/health"
+	"github.com/dmmdea/local-offload-pp-cli/internal/judge"
+	"github.com/dmmdea/local-offload-pp-cli/internal/knn"
 	"github.com/dmmdea/local-offload-pp-cli/internal/ledger"
 	"github.com/dmmdea/local-offload-pp-cli/internal/llamaclient"
 	"github.com/dmmdea/local-offload-pp-cli/internal/mcpserver"
 	"github.com/dmmdea/local-offload-pp-cli/internal/pipeline"
 	"github.com/dmmdea/local-offload-pp-cli/internal/report"
 	"github.com/dmmdea/local-offload-pp-cli/internal/router"
+	"github.com/dmmdea/local-offload-pp-cli/internal/shadow"
 )
 
 const version = "0.1.0"
@@ -52,6 +56,8 @@ func main() {
 		err = runTranscribe(args)
 	case "generate-image":
 		err = runGenerateImage(args)
+	case "generate-svg":
+		err = runGenerateSVG(args)
 	case "ocr":
 		err = runOCR(args)
 	case "extract-image":
@@ -72,6 +78,8 @@ func main() {
 		err = runHealth(args)
 	case "train-router":
 		err = runTrainRouter(args)
+	case "shadow-label":
+		err = runShadowLabel(args)
 	case "train-confhead":
 		err = runTrainConfHead(args)
 	case "confhead-eval":
@@ -452,6 +460,53 @@ func runGenerateImage(args []string) error {
 	return nil
 }
 
+// runGenerateSVG handles `local-offload generate-svg <kind> --spec '<json>' [--spec-file path] [--out file.svg] [--json]`.
+// kind is the positional (gauge|comparison-bar|chromatogram|icon). It renders locally for free (no model/GPU).
+func runGenerateSVG(args []string) error {
+	fs := flag.NewFlagSet("generate-svg", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	spec := fs.String("spec", "", "component spec as a JSON string")
+	specFile := fs.String("spec-file", "", "path to a JSON file with the component spec")
+	out := fs.String("out", "", "output .svg path (default under the svg dir)")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "spec": true, "spec-file": true, "out": true,
+	})
+	_ = fs.Parse(flagArgs)
+	if positional == "" || positional == "-" {
+		return fmt.Errorf("generate-svg requires a kind: local-offload generate-svg <gauge|comparison-bar|chromatogram|icon> --spec '<json>'")
+	}
+	specStr := *spec
+	if specStr == "" && *specFile != "" {
+		b, rerr := os.ReadFile(*specFile)
+		if rerr != nil {
+			return rerr
+		}
+		specStr = string(b)
+	}
+	if specStr == "" {
+		specStr = "{}"
+	}
+	var specObj map[string]any
+	if jerr := json.Unmarshal([]byte(specStr), &specObj); jerr != nil {
+		return fmt.Errorf("generate-svg: invalid --spec JSON: %w", jerr)
+	}
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	params := map[string]any{"kind": positional, "spec": specObj}
+	if *out != "" {
+		params["out"] = *out
+	}
+	res := p.Run(context.Background(), core.Request{Task: core.TaskGenerateSVG, Params: params})
+	emitResult(res, *asJSON, "", *compactFlag)
+	return nil
+}
+
 // runOCR handles `local-offload ocr <image-path> [--json]`. Like vqa the
 // positional argument is an IMAGE PATH (or data URI), not stdin text; there is no
 // question — the task is fixed (transcribe all text). It returns {text:...}.
@@ -762,13 +817,83 @@ func runTrainRouter(args []string) error {
 	if dst == "" {
 		dst = cfg.RouterWeightsPath
 	}
-	rep, err := router.Train(cfg.LedgerPath, dst)
+	rep, err := router.Train(cfg.LedgerPath, cfg.RouterLabelsPath, dst)
 	if err != nil {
 		return err
 	}
 	fmt.Println(rep)
 	fmt.Println("wrote", dst)
 	return nil
+}
+
+// runShadowLabel drains the shadow queue, runs the escalation tier on each item
+// (counterfactual), judges agreement vs the stored entry output, and appends a
+// confhead label row to cfg.ConfHeadLabelsPath. It caps processing at --n items
+// (default 200). Only confhead-labels.jsonl is written; the savings ledger is
+// never touched.
+func runShadowLabel(args []string) error {
+	fs := flag.NewFlagSet("shadow-label", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	n := fs.Int("n", 200, "max items to label this run")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return fmt.Errorf("shadow-label: open pipeline: %w", err)
+	}
+	defer cleanup()
+
+	items, err := shadow.Drain(cfg.ShadowQueuePath)
+	if err != nil {
+		return fmt.Errorf("shadow-label: drain queue: %w", err)
+	}
+	if len(items) == 0 {
+		fmt.Println("shadow-label: queue empty")
+		return nil
+	}
+
+	emb := judge.NewEmbedder(cfg.Endpoint, 30*time.Second)
+	deps := shadow.LabelDeps{
+		Escalation:            cfg.EscalationModel,
+		E2B:                   cfg.TriageModel,
+		RunTier:               p.RunTier,
+		AnswersAgree:          pipeline.AnswersAgree,
+		Ground:                grounding.Check,
+		Similar:               emb.Similar,
+		SummarizeSimThreshold: cfg.SummarizeSimThreshold,
+		AppendLabel:           ledger.AppendLabel,
+		LabelsPath:            cfg.ConfHeadLabelsPath,
+		RouterLabelsPath:      cfg.RouterLabelsPath,
+	}
+	// meta-router v2: build the kNN entry-tier substrate during the drain, only
+	// when the feature is enabled (one flag controls the whole feature).
+	if cfg.KNNPreFilterEnabled {
+		deps.Embed = emb.Embed
+		deps.AppendKNN = func(task string, vec []float64, accept bool) error {
+			return knn.Append(cfg.KNNIndexPath, knn.Row{Task: task, Vec: vec, Accept: accept})
+		}
+	}
+	routerBefore := countJSONLLines(cfg.RouterLabelsPath)
+	w := shadow.LabelQueue(context.Background(), items, *n, deps)
+	routerWritten := countJSONLLines(cfg.RouterLabelsPath) - routerBefore
+	fmt.Printf("shadow-label: drained %d items, wrote %d confhead labels -> %s\n", len(items), w, cfg.ConfHeadLabelsPath)
+	fmt.Printf("shadow-label: wrote %d router labels -> %s\n", routerWritten, cfg.RouterLabelsPath)
+	if cfg.KNNPreFilterEnabled {
+		fmt.Printf("shadow-label: kNN substrate now %d rows -> %s\n", countJSONLLines(cfg.KNNIndexPath), cfg.KNNIndexPath)
+	}
+	return nil
+}
+
+// countJSONLLines returns the number of newline-terminated lines in a JSONL file
+// (0 if absent/unreadable). Used to report how many router-sidecar labels a
+// shadow-label run wrote, since LabelQueue's return value counts only confhead labels.
+func countJSONLLines(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	return strings.Count(string(data), "\n")
 }
 
 func runTrainConfHead(args []string) error {

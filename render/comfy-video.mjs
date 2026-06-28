@@ -42,7 +42,7 @@ const j = async (url, opts) => { const r = await fetch(url, opts); if (!r.ok) th
 
 // ComfyUI's LoadImage reads from C:\ComfyUI\input. Stage the still there.
 function stageInput(stillPath) {
-  const name = "i2v_in_" + Date.now() + "_" + basename(stillPath);
+  const name = "render_in_" + Date.now() + "_" + basename(stillPath);
   copyFileSync(stillPath, join(COMFY_DIR, "input", name));
   return name;
 }
