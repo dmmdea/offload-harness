@@ -85,6 +85,12 @@ type Pipeline struct {
 	learnHashes map[string]string
 }
 
+// Cfg exposes the loaded config so callers like the MCP server can build
+// side-channel tools (e.g. the explicit NIM remote tool) from the same
+// configuration without re-loading it. It returns a shallow copy — read-only
+// use only (the slice/map fields share backing with the live config).
+func (p *Pipeline) Cfg() config.Config { return p.cfg }
+
 func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Ledger) *Pipeline {
 	p := &Pipeline{cfg: cfg, client: c, cache: ca, led: l, lastHeal: map[string]time.Time{}, learnHashes: map[string]string{}}
 	p.stt = sttclient.New(cfg.Endpoint, time.Duration(cfg.STTRequestTimeoutSec)*time.Second)

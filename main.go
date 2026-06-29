@@ -31,13 +31,14 @@ import (
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/mcpserver"
+	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/report"
 	"github.com/dmmdea/offload-harness/internal/router"
 	"github.com/dmmdea/offload-harness/internal/shadow"
 )
 
-const version = "0.5.0"
+const version = "0.6.0"
 
 func main() {
 	sub, args, ok := hoistGlobalConfig(os.Args[1:])
@@ -63,6 +64,8 @@ func main() {
 		err = runGenerateAudio(args)
 	case "generate-video":
 		err = runGenerateVideo(args)
+	case "nim":
+		err = runNim(args)
 	case "ocr":
 		err = runOCR(args)
 	case "extract-image":
@@ -169,6 +172,8 @@ Usage:
   local-offload assess-image <image-path> [--brief "..."] [--json]
   local-offload generate-audio <out> "<text>" [--kind voice|music] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
   local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F]
+  local-offload nim <file|-|"text"> [--model id] [--base url] [--system "..."] [--max-tokens N] [--temp F] [--json]
+  local-offload nim --list-models        list a NIM endpoint's model ids (free hosted catalog or self-hosted)
   local-offload mcp                      run as an MCP server (stdio)
   local-offload ledger [--since DAYS]    token-savings report
   local-offload doctor                   check endpoint health + config
@@ -436,6 +441,132 @@ func runTranscribe(args []string) error {
 	})
 	emitResult(res, *asJSON, *selectFlag, *compactFlag)
 	return nil
+}
+
+// runNim handles `local-offload nim <file|-|"literal text"> [--model id] [--base url]
+// [--system "..."] [--max-tokens N] [--temp F] [--json]` and `local-offload nim
+// --list-models`. It is the EXPLICIT remote tool: it calls an OpenAI-compatible
+// NVIDIA NIM endpoint — NVIDIA's hosted build.nvidia.com API by default, or a
+// self-hosted NIM container via --base. The key comes from $NVIDIA_API_KEY /
+// $NGC_API_KEY (never config). NIM calls never touch the savings ledger (they are
+// deliberate experiments/escalations, not defer-avoidance), and the local cascade
+// and its GBNF grammar path are untouched.
+func runNim(args []string) error {
+	fs := flag.NewFlagSet("nim", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	model := fs.String("model", "", "model id (default from config; browse with --list-models)")
+	base := fs.String("base", "", "OpenAI-compatible base URL incl. /v1 (default from config)")
+	system := fs.String("system", "", "optional system prompt")
+	maxTokens := fs.Int("max-tokens", 0, "max completion tokens (0 = config default)")
+	temp := fs.Float64("temp", 0, "sampling temperature")
+	listModels := fs.Bool("list-models", false, "list available model ids and exit")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "model": true, "base": true, "system": true, "max-tokens": true, "temp": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	cfg := loadCfg(fs)
+	baseURL := *base
+	if baseURL == "" {
+		baseURL = cfg.NIMEndpoint
+	}
+	key := nimclient.KeyForBase(baseURL) // env key only for NVIDIA hosts; never transmitted to a non-NVIDIA --base
+	if key == "" && nimclient.IsHostedNVIDIA(baseURL) {
+		return fmt.Errorf("nim: NVIDIA_API_KEY (or NGC_API_KEY) is not set — required for the hosted endpoint %s.\n"+
+			"Get a free key at build.nvidia.com, then: export NVIDIA_API_KEY=nvapi-...\n"+
+			"(A self-hosted NIM via --base http://host:8000/v1 needs no key.)", baseURL)
+	}
+	timeout := time.Duration(cfg.NIMTimeoutSec) * time.Second
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	client := nimclient.New(baseURL, key, timeout)
+	ctx := context.Background()
+
+	if *listModels {
+		ids, err := client.ListModels(ctx)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			b, _ := json.MarshalIndent(ids, "", "  ")
+			fmt.Println(string(b))
+			return nil
+		}
+		for _, id := range ids {
+			fmt.Println(id)
+		}
+		fmt.Fprintf(os.Stderr, "%d models at %s\n", len(ids), baseURL)
+		return nil
+	}
+
+	user, err := readNimInput(positional)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(user) == "" {
+		return fmt.Errorf("nim requires input: a file path, \"-\" for stdin, or literal text (or use --list-models)")
+	}
+
+	mdl := *model
+	if mdl == "" {
+		mdl = cfg.NIMModel
+	}
+	mt := *maxTokens
+	if mt == 0 {
+		mt = cfg.NIMMaxTokens
+	}
+	res, err := client.Chat(ctx, mdl, *system, user, mt, *temp)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		out := map[string]any{
+			"model":             res.Model,
+			"content":           res.Content,
+			"reasoning_content": res.ReasoningContent,
+			"tokens_in":         res.TokensIn,
+			"tokens_out":        res.TokensOut,
+			"truncated":         res.Truncated,
+		}
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(b))
+		return nil
+	}
+	switch {
+	case res.Content != "":
+		fmt.Println(res.Content)
+	case res.ReasoningContent != "":
+		fmt.Println(res.ReasoningContent)
+		fmt.Fprintln(os.Stderr, "note: answer (content) was empty; printed reasoning_content instead — raise --max-tokens")
+	default:
+		fmt.Fprintln(os.Stderr, "note: model returned no content (a stop/content-filter, or --max-tokens too low to reach an answer)")
+	}
+	if res.Truncated {
+		fmt.Fprintln(os.Stderr, "note: output truncated at max-tokens; raise --max-tokens for a full answer")
+	}
+	fmt.Fprintf(os.Stderr, "[%s] tokens in=%d out=%d\n", res.Model, res.TokensIn, res.TokensOut)
+	// Don't report a blank success: an empty content+reasoning response exits non-zero.
+	if res.Content == "" && res.ReasoningContent == "" {
+		return fmt.Errorf("nim: empty response from %s (raise --max-tokens or try another model)", res.Model)
+	}
+	return nil
+}
+
+// readNimInput reads the nim user content: "-"/"" = stdin, an existing file path =
+// its contents, anything else = the literal text itself (so a quick test prompt
+// needs no file). This file-or-literal convenience is unique to the nim tool.
+func readNimInput(arg string) (string, error) {
+	if arg == "" || arg == "-" {
+		b, err := io.ReadAll(os.Stdin)
+		return string(b), err
+	}
+	if info, statErr := os.Stat(arg); statErr == nil && !info.IsDir() {
+		b, err := os.ReadFile(arg)
+		return string(b), err
+	}
+	return arg, nil // literal prompt text
 }
 
 // runGenerateImage handles `local-offload generate-image "<prompt>" [--negative ...]

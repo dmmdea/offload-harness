@@ -8,10 +8,12 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
 
@@ -322,7 +324,80 @@ func (s *Server) Run(ctx context.Context, version string) error {
 		return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateAudio, Input: in.Text, Params: params}))
 	})
 
+	srv.AddTool(&mcp.Tool{
+		Name:        "offload_nim",
+		Description: "Send a prompt to a remote OpenAI-compatible NVIDIA NIM endpoint — NVIDIA's hosted build.nvidia.com catalog (dozens of FREE models: nemotron, llama, gpt-oss, qwen, deepseek, glm, kimi…) by default, or a self-hosted NIM via base. This is the EXPLICIT remote escalation/test tool: it is OPT-IN (the hosted endpoint needs NVIDIA_API_KEY in the server env; a self-hosted NIM via base is keyless), and unlike the local offload tools it calls a cloud model — so use it deliberately for a stronger model than the local cascade, NOT for routine grunt work. The local GBNF grammar path and the savings ledger are untouched (NIM calls are never ledgered). Set list_models=true to browse available model ids. Returns {model, content, reasoning_content, tokens_in, tokens_out, truncated}; on any failure (no key, endpoint down, bad model) it returns deferred:true with a reason and you handle the prompt yourself.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"the user prompt"},"model":{"type":"string","description":"model id (default from config; set list_models=true to browse)"},"system":{"type":"string","description":"optional system prompt"},"base":{"type":"string","description":"override the OpenAI-compatible base URL incl. /v1 (e.g. a self-hosted NIM http://host:8000/v1)"},"max_tokens":{"type":"integer","description":"max completion tokens (default from config; reasoning models need headroom)"},"temperature":{"type":"number","description":"sampling temperature (default 0)"},"list_models":{"type":"boolean","description":"list available model ids instead of generating"}},"required":["prompt"]}`),
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var in struct {
+			Prompt      string  `json:"prompt"`
+			Model       string  `json:"model"`
+			System      string  `json:"system"`
+			Base        string  `json:"base"`
+			MaxTokens   int     `json:"max_tokens"`
+			Temperature float64 `json:"temperature"`
+			ListModels  bool    `json:"list_models"`
+		}
+		_ = json.Unmarshal(req.Params.Arguments, &in)
+		// defer-not-crash: defend against an empty prompt even though the schema marks it required.
+		if !in.ListModels && in.Prompt == "" {
+			return jsonResult(map[string]any{"deferred": true, "reason": "empty prompt"})
+		}
+		cfg := s.p.Cfg()
+		base := in.Base
+		if base == "" {
+			base = cfg.NIMEndpoint
+		}
+		key := nimclient.KeyForBase(base) // env key only for NVIDIA hosts; never transmitted to a non-NVIDIA base
+		// defer-not-crash: a missing key on the hosted endpoint is a clean defer, not an error.
+		if key == "" && nimclient.IsHostedNVIDIA(base) {
+			return jsonResult(map[string]any{"deferred": true, "reason": "NVIDIA_API_KEY (or NGC_API_KEY) not set in the MCP server env — required for the hosted NIM endpoint; a self-hosted NIM via base is keyless"})
+		}
+		timeout := time.Duration(cfg.NIMTimeoutSec) * time.Second
+		if timeout <= 0 {
+			timeout = 120 * time.Second
+		}
+		client := nimclient.New(base, key, timeout)
+		if in.ListModels {
+			ids, err := client.ListModels(ctx)
+			if err != nil {
+				return jsonResult(map[string]any{"deferred": true, "reason": err.Error()})
+			}
+			return jsonResult(map[string]any{"models": ids, "count": len(ids), "endpoint": base})
+		}
+		model := in.Model
+		if model == "" {
+			model = cfg.NIMModel
+		}
+		maxTok := in.MaxTokens
+		if maxTok == 0 {
+			maxTok = cfg.NIMMaxTokens
+		}
+		res, err := client.Chat(ctx, model, in.System, in.Prompt, maxTok, in.Temperature)
+		if err != nil {
+			return jsonResult(map[string]any{"deferred": true, "reason": err.Error()})
+		}
+		return jsonResult(map[string]any{
+			"model":             res.Model,
+			"content":           res.Content,
+			"reasoning_content": res.ReasoningContent,
+			"tokens_in":         res.TokensIn,
+			"tokens_out":        res.TokensOut,
+			"truncated":         res.Truncated,
+		})
+	})
+
 	return srv.Run(ctx, &mcp.StdioTransport{})
+}
+
+// jsonResult marshals an arbitrary payload (NIM is not a core.Result) into a
+// single MCP text-content result.
+func jsonResult(v any) (*mcp.CallToolResult, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(b)}}}, nil
 }
 
 func result(r core.Result) (*mcp.CallToolResult, error) {

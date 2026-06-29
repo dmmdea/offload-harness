@@ -26,12 +26,13 @@ It's for anyone running an AI coding agent or pipeline who wants to **cut token 
 ## Features
 
 - **Free & fully local** — all inference runs on your GPU via llama.cpp; no API keys, no metering, nothing leaves the machine.
-- **Never calls cloud, always defers** — low confidence returns a structured defer instead of guessing. The harness has no cloud credentials by design.
+- **Never calls cloud, always defers** — low confidence returns a structured defer instead of guessing. The core offload path has no cloud credentials by design (the opt-in `nim` remote tool below is the one explicit, deliberate exception).
 - **Self-learning cascade** — fast tasks enter at a small tier and escalate to a larger model only when genuinely uncertain (logprob decision margin + self-reported confidence).
 - **Reliable structured output** — enforces a generated **GBNF grammar** + Go schema validation, working around the model's JSON-schema crashes.
 - **Single static binary** — one Go executable; CLI and MCP server in the same build.
-- **MCP-native** — exposes 12 tools over stdio for any MCP client (Claude Code and friends).
-- **Beyond text** — local **vision** (VQA / OCR / image-field-extract / render-QA), **speech-to-text** (whisper.cpp), **image generation** (SDXL via ComfyUI), and a dependency-free **SVG data-viz kit**.
+- **MCP-native** — exposes 15 tools over stdio for any MCP client (Claude Code and friends).
+- **Beyond text** — local **vision** (VQA / OCR / image-field-extract / render-QA), **speech-to-text** (whisper.cpp), **image/audio/video generation** (SDXL · Chatterbox TTS · ACE-Step · Hunyuan via ComfyUI), and a dependency-free **SVG data-viz kit**.
+- **Optional remote escalation** — an explicit, opt-in `nim` tool reaches any OpenAI-compatible **NVIDIA NIM** endpoint (NVIDIA's hosted [build.nvidia.com](https://build.nvidia.com) free-model catalog, or a self-hosted NIM) for the rare task that needs a frontier model the local GPU can't run. Key from env only; never ledgered; the local cascade is untouched.
 - **Token ledger** — append-only JSONL accounting of every offloaded call and the cloud tokens it saved.
 
 ## Quickstart
@@ -96,6 +97,11 @@ offload-harness video-describe clip.mp4 --question "What happens here?" --json
 # Generate (free, local GPU)
 offload-harness generate-image "a product photo of a coffee mug on white" --negative "people, text, watermark"
 offload-harness generate-svg gauge '{"value":72,"max":100,"label":"Score","unit":"%"}'
+
+# Remote escalation (explicit, opt-in — NVIDIA NIM; needs NVIDIA_API_KEY for the free hosted catalog)
+offload-harness nim --list-models                                            # browse available model ids
+offload-harness nim "Explain MoE routing in 3 bullets" --model nvidia/nemotron-3-ultra-550b-a55b --max-tokens 600
+offload-harness nim "Summarize this" --model meta/llama-3.3-70b-instruct --base http://127.0.0.1:8000/v1  # self-hosted NIM (keyless)
 
 # Operate & inspect
 offload-harness mcp                      # run as an MCP server (stdio)
@@ -182,6 +188,9 @@ Transport is **stdio**. Every tool returns the full result JSON — and a `{"def
 | `offload_transcribe` | `audio`, `language?`, `hq?`, `select?` | Transcribe local audio/video → `{gist, segments[], srt_path, ...}`, or defer. |
 | `offload_generate_image` | `prompt`, `negative?`, `width?`, `height?`, `steps?`, `seed?`, `out?` | Generate an image on the local GPU (SDXL/ComfyUI) → `{image_path, ...}`, or defer. |
 | `offload_generate_svg` | `kind`, `spec`, `out?` | Render a crisp data-viz SVG (`gauge` · `comparison-bar` · `chromatogram` · `icon`) — no model, no GPU. |
+| `offload_generate_audio` | `text`, `kind?`, `clone?`, `lang?`, `seconds?`, `seed?`, `out?` | Synthesize voice (Chatterbox TTS) or music (ACE-Step) on the local GPU → `{audio_path, ...}`, or defer. |
+| `offload_generate_video` | `prompt`, `still?`, `model?`, `frames?`, `seed?`, `out?` | Animate a still into a short clip (Hunyuan I2V) on the local GPU → `{video_path, seed}`, or defer. |
+| `offload_nim` | `prompt`, `model?`, `system?`, `base?`, `max_tokens?`, `temperature?`, `list_models?` | **Opt-in remote.** Call an NVIDIA NIM endpoint (hosted free catalog or self-hosted) → `{model, content, ...}`, or defer. Key from `$NVIDIA_API_KEY` (sent only to NVIDIA hosts); never ledgered. |
 
 > **Inputs stay local.** Images, audio, and video are accepted as a **local file path** or a `data:` URI — **never a remote URL**, so there is no network egress for media.
 

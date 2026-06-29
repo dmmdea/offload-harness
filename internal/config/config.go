@@ -188,6 +188,23 @@ type Config struct {
 	// KNNEmbedTimeoutMs bounds the request-path embedding call (fail-open on
 	// timeout). Default 2000.
 	KNNEmbedTimeoutMs int `json:"knn_embed_timeout_ms,omitempty"`
+	// --- explicit remote NIM tool (`nim` subcommand / offload_nim) ---
+	// An opt-in path to an OpenAI-compatible NVIDIA NIM endpoint, separate from the
+	// local cascade: the GBNF grammar path and the savings ledger are untouched.
+	// NIMEndpoint is the base (with the /v1 segment): NVIDIA's hosted API by
+	// default, or a self-hosted NIM container (e.g. http://127.0.0.1:8000/v1).
+	NIMEndpoint string `json:"nim_endpoint,omitempty"`
+	// NIMModel is the default model id (override per call with --model). The hosted
+	// catalog has dozens of free endpoints — browse with `nim --list-models`.
+	NIMModel string `json:"nim_model,omitempty"`
+	// NIMMaxTokens caps a nim completion when the caller sets none. Reasoning models
+	// need headroom (they spend tokens thinking before answering). Default 1024.
+	NIMMaxTokens int `json:"nim_max_tokens,omitempty"`
+	// NIMTimeoutSec bounds one nim call (large hosted models can be slow). Default 120.
+	NIMTimeoutSec int `json:"nim_timeout_sec,omitempty"`
+	// NOTE: the NIM API key is deliberately NOT a config field — it is read from the
+	// NVIDIA_API_KEY (or NGC_API_KEY) env var so a secret never lands in a tracked
+	// config file or the public repo. A self-hosted NIM needs no key.
 }
 
 // Default returns a config suitable for the verified E4B-QAT+MTP setup.
@@ -257,6 +274,10 @@ func Default() Config {
 		KNNMinNeighbors:           20,
 		KNNPreFilterThreshold:     0.5,
 		KNNEmbedTimeoutMs:         2000,
+		NIMEndpoint:               "https://integrate.api.nvidia.com/v1", // NVIDIA hosted; or a self-hosted NIM /v1 base
+		NIMModel:                  "nvidia/nemotron-3-ultra-550b-a55b",
+		NIMMaxTokens:              1024,
+		NIMTimeoutSec:             120,
 	}
 }
 
