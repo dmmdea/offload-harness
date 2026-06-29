@@ -97,6 +97,33 @@ func LabelQueue(ctx context.Context, items []Item, cap int, d LabelDeps) (writte
 			entry.Grounded = nil
 			entry.EscalatedAgreed = &agreed
 
+			// A4: capture only enqueues E2B-ENTRY rows, so the router/kNN substrate
+			// is fed HERE — from the escalation-agreement (`agreed`) the rerun above
+			// already computed, with zero new inference. The label is `agreed`, NOT a
+			// constant accept: Escalations==0 means only that the runtime gate passed,
+			// not that E2B was correct. The non-E2B B1 block below stays as the
+			// negative-region feeder for rows that entered above E2B.
+			if it.EntryTier == d.E2B {
+				if d.RouterLabelsPath != "" {
+					routerEntry := ledger.Entry{
+						TS:          entry.TS,
+						Task:        it.Task,
+						ModelTier:   d.E2B,
+						Feat:        it.Feat,
+						InputChars:  len(it.Input),
+						Escalations: 0,
+						Deferred:    false,
+						Grounded:    &agreed,
+					}
+					_ = d.AppendLabel(d.RouterLabelsPath, routerEntry)
+				}
+				if d.Embed != nil && d.AppendKNN != nil {
+					if vec, eerr := d.Embed(it.Input); eerr == nil {
+						_ = d.AppendKNN(it.Task, vec, agreed)
+					}
+				}
+			}
+
 		case "extract":
 			// extract uses a different (oracle) label than classify/triage: instead of
 			// entry-vs-escalation agreement, it labels whether the ESCALATION tier's output
@@ -135,14 +162,6 @@ func LabelQueue(ctx context.Context, items []Item, cap int, d LabelDeps) (writte
 			continue
 		}
 		written++
-
-		// kNN substrate (classify/triage): a captured E2B-entry row was, by the
-		// capture filter (non-escalated), accepted at E2B — embed it as accept=true.
-		if (task == "classify" || task == "triage") && d.Embed != nil && d.AppendKNN != nil && it.EntryTier == d.E2B {
-			if vec, eerr := d.Embed(it.Input); eerr == nil {
-				_ = d.AppendKNN(it.Task, vec, true)
-			}
-		}
 
 		// B1: for classify/triage rows that entered at a tier OTHER than E2B, run E2B
 		// as a counterfactual and synthesize a router training label in the router sidecar.

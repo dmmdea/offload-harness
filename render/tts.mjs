@@ -9,9 +9,8 @@
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
-import { acquireGpuLock, freeLlamaSwap } from "./gpu-lock.mjs";
+import { withGpuSlot } from "./gpu-lock.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -32,22 +31,21 @@ const TTS_PY = process.env.TTS_PY
   || "python";
 const worker = join(__dir, "tts_chatterbox.py");
 
-async function main() {
-  if (!existsSync(worker)) throw new Error("missing worker " + worker);
-  const lockPath = process.env.GPU_LOCK || join(tmpdir(), "local-offload-gpu.lock");
-  const lock = flags["no-lock"] ? { release() {} } : await acquireGpuLock({ lockPath });
-  if (!lock) throw new Error("GPU busy (another gen holds the lock); retry or --no-lock");
-  try {
-    await freeLlamaSwap(); // give Chatterbox the GPU
-    // --clone wins; else fall back to the TTS_REF env (set it to your canonical
-    // clean voice reference, e.g. ~/.local-offload/refs/voice-ref.wav, so narration is
-    // a one-liner). No ref → Chatterbox's default built-in voice.
-    const ref = flags.clone || process.env.TTS_REF;
-    const args = [worker, "--out", out, "--text", text, "--lang", flags.lang || "es"];
-    if (ref) args.push("--ref", ref);
-    const code = await new Promise((res) => spawn(TTS_PY, args, { stdio: "inherit" }).on("close", res));
-    if (code !== 0) throw new Error("tts worker exited " + code);
-    console.log("WROTE", out);
-  } finally { lock.release(); }
+async function synth() {
+  // --clone wins; else fall back to the TTS_REF env (set it to your canonical
+  // clean voice reference, e.g. ~/.local-offload/refs/voice-ref.wav, so narration is
+  // a one-liner). No ref → Chatterbox's default built-in voice.
+  const ref = flags.clone || process.env.TTS_REF;
+  const args = [worker, "--out", out, "--text", text, "--lang", flags.lang || "es"];
+  if (ref) args.push("--ref", ref);
+  const code = await new Promise((res) => spawn(TTS_PY, args, { stdio: "inherit" }).on("close", res));
+  if (code !== 0) throw new Error("tts worker exited " + code);
+  console.log("WROTE", out);
 }
-main().catch((e) => { console.error("TTS FAILED:", e.message); process.exit(1); });
+
+if (!existsSync(worker)) { console.error("TTS FAILED: missing worker " + worker); process.exit(1); }
+// Chatterbox is NOT ComfyUI: comfyManaged:false frees llama-swap but never starts/stops
+// ComfyUI. The python worker exits on its own; the Go wrapper process-tree-kills it on
+// timeout (the script-level SIGKILL backstop). GPU-locked (shares the 8GB with llama-swap).
+withGpuSlot({ noLock: flags["no-lock"], comfyManaged: false }, synth)
+  .catch((e) => { console.error("TTS FAILED:", e.message); process.exit(1); });

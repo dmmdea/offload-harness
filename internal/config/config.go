@@ -89,6 +89,35 @@ type Config struct {
 	// ImageGenTimeoutSec bounds one render: ComfyUI cold-start (~4min) + first SDXL
 	// render (~6min) + margin. Default 720 (12min).
 	ImageGenTimeoutSec int `json:"imagegen_timeout_sec,omitempty"`
+	// --- video / audio generation (generate_video / generate_audio) ---
+	// VideoGenScript is the path to render/comfy-video.mjs (the I2V lifecycle wrapper).
+	// Empty = no video route (the task defers cleanly), like an empty ImageGenScript.
+	VideoGenScript string `json:"videogen_script,omitempty"`
+	// VoiceGenScript is the path to render/tts.mjs (Chatterbox TTS; comfyManaged:false).
+	// It serves generate_audio kind=voice. Empty = voice defers.
+	VoiceGenScript string `json:"voicegen_script,omitempty"`
+	// MusicGenScript is the path to the ACE-Step music worker (render/comfy-music.mjs,
+	// ComfyUI). It serves generate_audio kind=music. Default render/comfy-music.mjs (the
+	// B3 worker); set "" to disable (music defers) if the ACE-Step checkpoint isn't present.
+	MusicGenScript string `json:"musicgen_script,omitempty"`
+	// VideoGenTimeoutSec bounds one video render: ComfyUI cold-start + a long I2V
+	// render (Wan native two-stage is slow). Default 1500 (25min).
+	VideoGenTimeoutSec int `json:"videogen_timeout_sec,omitempty"`
+	// AudioGenTimeoutSec bounds one audio synthesis (TTS or ACE-Step). Default 720 (12min).
+	AudioGenTimeoutSec int `json:"audiogen_timeout_sec,omitempty"`
+	// VideoGenWaitMs is how long a queued video job waits for the single GPU slot before
+	// deferring (passed to the runner as GPU_LOCK waitMs). Long because video is the hero
+	// job. Default 1200000 (20min).
+	VideoGenWaitMs int `json:"videogen_wait_ms,omitempty"`
+	// AudioGenWaitMs is how long a queued audio job waits for the GPU slot before deferring.
+	// Kept SHORTER than video so a cheap queued TTS isn't starved by a 20-min video job —
+	// it defers cleanly after this window. Default 120000 (2min).
+	AudioGenWaitMs int `json:"audiogen_wait_ms,omitempty"`
+	// MemoryStack lists the CPU-only, zero-VRAM llama-swap models the GPU-free helper
+	// must NEVER unload (the load-bearing mem0 stack). Sourced here (not a buried const)
+	// so a renamed/added 3rd CPU member is honored. Threaded to the runner via the
+	// MEMORY_STACK env. Default {embeddinggemma, bge-reranker-v2-m3}.
+	MemoryStack []string `json:"memory_stack,omitempty"`
 	// Temperature for deterministic structured output (default 0).
 	Temperature float64 `json:"temperature"`
 	// MaxRetries is how many correction re-prompts before deferring.
@@ -191,6 +220,14 @@ func Default() Config {
 		NodePath:                  "node",
 		ComfyDir:                  "C:/ComfyUI",
 		ImageGenTimeoutSec:        720,
+		VideoGenScript:            "render/comfy-video.mjs",
+		VoiceGenScript:            "render/tts.mjs",
+		MusicGenScript:            "render/comfy-music.mjs", // B3 ACE-Step music worker; "" => music defers
+		VideoGenTimeoutSec:        1500,
+		AudioGenTimeoutSec:        720,
+		VideoGenWaitMs:            1200000, // 20min — video is the hero job
+		AudioGenWaitMs:            120000,  // 2min — a queued TTS defers fast, never starved by a long video
+		MemoryStack:               []string{"embeddinggemma", "bge-reranker-v2-m3"},
 		Temperature:               0,
 		MaxRetries:                1,
 		ClassifyMinConfidence:     0.45,

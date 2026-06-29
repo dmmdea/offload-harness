@@ -32,3 +32,17 @@ func TestTaskTranscribeValid(t *testing.T) {
 		t.Fatal("unknown task must be invalid")
 	}
 }
+
+// TestTaskGenerateVideoAudioValid: the two B1 generation task types are recognized
+// by Valid() alongside the existing tasks; an unknown task is still rejected.
+func TestTaskGenerateVideoAudioValid(t *testing.T) {
+	if !TaskGenerateVideo.Valid() {
+		t.Fatal("TaskGenerateVideo should be Valid()")
+	}
+	if !TaskGenerateAudio.Valid() {
+		t.Fatal("TaskGenerateAudio should be Valid()")
+	}
+	if TaskType("nope-gen").Valid() {
+		t.Fatal("unknown task must be invalid")
+	}
+}

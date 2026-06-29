@@ -43,12 +43,24 @@ const (
 	// pure Go, no model/GPU. Its own branch in pipeline.Run. params: kind (string),
 	// spec (object), out (string path). Returns {svg_path, width, height}.
 	TaskGenerateSVG TaskType = "generate_svg"
+	// TaskGenerateVideo animates a still into a short b-roll clip on the LOCAL
+	// ComfyUI (HunyuanVideo 1.5 480p I2V / Wan 2.2). Its own branch in pipeline.Run
+	// (no text cascade, no grammar) — it shells out to render/comfy-video.mjs via
+	// internal/gpugen, which takes the shared single-slot GPU lock and starts/stops
+	// ComfyUI with process-tree-kill on timeout. Returns {video_path, seed}.
+	TaskGenerateVideo TaskType = "generate_video"
+	// TaskGenerateAudio synthesizes audio on the LOCAL GPU: kind=voice (Chatterbox
+	// TTS via render/tts.mjs, no ComfyUI) or kind=music (ACE-Step via ComfyUI). Its
+	// own branch in pipeline.Run, dispatching by kind to VoiceGenScript/MusicGenScript
+	// through internal/gpugen (shared GPU lock + process-tree-kill). Returns
+	// {audio_path, kind, seed}.
+	TaskGenerateAudio TaskType = "generate_audio"
 )
 
 // Valid reports whether t is a known task type.
 func (t TaskType) Valid() bool {
 	switch t {
-	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage, TaskGenerateSVG:
+	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage, TaskGenerateSVG, TaskGenerateVideo, TaskGenerateAudio:
 		return true
 	}
 	return false

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/exemplars"
 	"github.com/dmmdea/offload-harness/internal/gbnf"
+	"github.com/dmmdea/offload-harness/internal/gpugen"
 	"github.com/dmmdea/offload-harness/internal/grounding"
 	"github.com/dmmdea/offload-harness/internal/imagegen"
 	"github.com/dmmdea/offload-harness/internal/imageio"
@@ -73,10 +75,18 @@ type Pipeline struct {
 	// LR router trains). Both nil unless cfg.KNNPreFilterEnabled.
 	knn   *knn.Index                      // nil = disabled / no substrate
 	embed func(string) ([]float64, error) // nil = disabled; set to judge.Embedder.Embed
+	// A2 hot-reload: learnMu guards every self-learning field that the background
+	// reloader can swap (thresholds, router, overrides, confhead, confThresholds).
+	// The request path reads them ONLY through the *Snap accessors (uncontended
+	// RLock, zero IO/parse). learnHashes records the content hash of each watched
+	// file so a tick only re-loads on a real content change. knn/embed are NOT
+	// poll-reloaded (append-file; see reload.go), so they need no hash entry.
+	learnMu     sync.RWMutex
+	learnHashes map[string]string
 }
 
 func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Ledger) *Pipeline {
-	p := &Pipeline{cfg: cfg, client: c, cache: ca, led: l, lastHeal: map[string]time.Time{}}
+	p := &Pipeline{cfg: cfg, client: c, cache: ca, led: l, lastHeal: map[string]time.Time{}, learnHashes: map[string]string{}}
 	p.stt = sttclient.New(cfg.Endpoint, time.Duration(cfg.STTRequestTimeoutSec)*time.Second)
 	p.thresholds = loadThresholds(cfg.ThresholdsPath)    // Phase 2
 	p.router = router.Load(cfg.RouterWeightsPath)        // Phase 5
@@ -95,6 +105,14 @@ func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Le
 	if cfg.KNNPreFilterEnabled {
 		p.knn = knn.Load(cfg.KNNIndexPath)
 		p.embed = judge.NewEmbedder(cfg.Endpoint, time.Duration(cfg.KNNEmbedTimeoutMs)*time.Millisecond).Embed
+	}
+	// Seed the reloader's content hashes from the files just loaded so the first
+	// poll tick is a no-op for unchanged artifacts (and a transient bad initial
+	// read self-heals: a file that failed to load now hashes to whatever is on
+	// disk, so the NEXT good write differs and reloads). knn is intentionally
+	// absent — it is never poll-reloaded.
+	for _, path := range p.watchedPaths() {
+		p.learnHashes[path] = fileContentHash(path)
 	}
 	return p
 }
@@ -151,6 +169,20 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 		return p.runGenerateSVG(ctx, req, meta, start)
 	}
 
+	// generate_video animates req.Image into a short clip on the local ComfyUI by
+	// shelling out (via internal/gpugen) to comfy-video.mjs (shared GPU lock + ComfyUI
+	// lifecycle + process-tree-kill). Its own branch — no text cascade, no grammar.
+	if req.Task == core.TaskGenerateVideo {
+		return p.runGenerateVideo(ctx, req, meta, start)
+	}
+
+	// generate_audio synthesizes audio on the local GPU: kind=voice (Chatterbox via
+	// tts.mjs, no ComfyUI) or kind=music (ACE-Step via ComfyUI). Its own branch,
+	// dispatching by kind to VoiceGenScript/MusicGenScript through internal/gpugen.
+	if req.Task == core.TaskGenerateAudio {
+		return p.runGenerateAudio(ctx, req, meta, start)
+	}
+
 	// Vision tasks (vqa) take a SEPARATE branch: the input is an image, not text,
 	// so they skip the trivial-input gate, the context-budget trim, and the whole
 	// text model cascade. The text path below stays byte-identical for non-vision
@@ -201,7 +233,7 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	// cfg.KNNPreFilterEnabled); skip the call entirely when off so the request path
 	// is literally — not just behaviorally — unchanged.
 	knnSkip := false
-	if p.knn != nil {
+	if kn, _ := p.knnSnap(); kn != nil {
 		knnSkip = p.knnPreferLargerEntry(req.Task, req.Input)
 	}
 	chain := p.modelChain(req.Task, meta.Feat, knnSkip)
@@ -627,6 +659,211 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	return core.Result{OK: true, Data: data, Meta: meta}
 }
 
+// runGenerateVideo animates req.Image (a still) into a short clip on the LOCAL ComfyUI by
+// shelling out (via internal/gpugen) to comfy-video.mjs, which holds the shared GPU lock,
+// runs the ComfyUI lifecycle, and is now process-tree-killed on timeout. Its own branch —
+// no text models, no grammar. Any failure (no route, empty prompt, render error, timeout)
+// defers to Claude. params: still (string image path), model (hunyuan|wan), frames/width/
+// height/steps/seed (int), negative (string), reserve_vram (float, per-workflow override).
+func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+	if p.cfg.VideoGenScript == "" {
+		return p.deferGen(req, meta, start, len(req.Input), "no video-gen route configured")
+	}
+	prompt := strings.TrimSpace(req.Input)
+	if prompt == "" {
+		return p.deferGen(req, meta, start, len(req.Input), "empty video prompt")
+	}
+	meta.Model = "comfyui-video"
+
+	seed := paramIntOr(req.Params, "seed", 0)
+	if seed <= 0 {
+		seed = mintSeed()
+		if req.Params == nil {
+			req.Params = map[string]any{}
+		}
+		req.Params["seed"] = seed
+	}
+
+	// still: explicit param wins; else req.Image (the I2V input). May be empty for a
+	// text-driven graph — the runner validates and errors (→ defer) if it truly needs one.
+	still := paramStr(req.Params, "still")
+	if still == "" {
+		still = req.Image
+	}
+
+	out := paramStr(req.Params, "out")
+	if out == "" {
+		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
+		out = filepath.Join(p.cfg.MediaDir, "video-"+sha256hex(prompt+tasks.StableParamsKey(req.Params))[:8]+".mp4")
+	}
+
+	// comfy-video.mjs CLI: <out> <still> "<prompt>" [--model ..] [--frames N] ...
+	args := []string{out}
+	if still != "" {
+		args = append(args, still)
+	}
+	args = append(args, prompt)
+	if m := paramStr(req.Params, "model"); m != "" {
+		args = append(args, "--model", m)
+	}
+	if n := paramStr(req.Params, "negative"); n != "" {
+		args = append(args, "--negative", n)
+	}
+	for _, k := range []string{"frames", "width", "height", "steps", "seed"} {
+		if v := paramIntOr(req.Params, k, 0); v > 0 {
+			args = append(args, "--"+k, strconv.Itoa(v))
+		}
+	}
+	// invariant 5: --reserve-vram stays per-workflow-overridable (default lives in the
+	// runner; Wan 14B=2.0, ACE-Step differs). Pass it through ONLY when the caller set it.
+	if rv := paramStr(req.Params, "reserve_vram"); rv != "" {
+		args = append(args, "--reserve-vram", rv)
+	}
+
+	timeout := time.Duration(p.cfg.VideoGenTimeoutSec) * time.Second
+	outPath, gerr := gpugen.Generate(ctx, gpugen.Spec{
+		Exe:     p.cfg.NodePath,
+		Script:  p.cfg.VideoGenScript,
+		Args:    args,
+		Env:     p.genEnv(p.cfg.VideoGenWaitMs),
+		Out:     out,
+		Timeout: timeout,
+	})
+	if gerr != nil {
+		meta.ErrClass = gpugen.ClassifyErr(gerr)
+		return p.deferGen(req, meta, start, len(req.Input), "video generation failed: "+gerr.Error())
+	}
+	meta.LatencyMs = time.Since(start).Milliseconds()
+	data, _ := json.Marshal(map[string]any{"video_path": outPath, "seed": seed})
+	p.record(req.Task, meta, len(prompt))
+	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// runGenerateAudio synthesizes audio on the LOCAL GPU. It reads params["kind"]
+// (voice|music, default voice) and dispatches to VoiceGenScript (Chatterbox TTS, no
+// ComfyUI) or MusicGenScript (ACE-Step via ComfyUI). An empty target script — or an
+// unknown kind — defers cleanly (music defaults empty until B3). Shells out via
+// internal/gpugen so the python/ComfyUI worker is process-tree-killed on timeout
+// (invariant 3). params: kind (voice|music), clone/lang (voice), seconds (music),
+// out (string), seed (int), reserve_vram (float, music only).
+func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+	kind := paramStr(req.Params, "kind")
+	if kind == "" {
+		kind = "voice"
+	}
+	var script string
+	switch kind {
+	case "voice":
+		script = p.cfg.VoiceGenScript
+	case "music":
+		script = p.cfg.MusicGenScript
+	default:
+		return p.deferGen(req, meta, start, len(req.Input), "unknown audio kind "+kind)
+	}
+	if script == "" {
+		return p.deferGen(req, meta, start, len(req.Input), "no audio-gen route configured for kind "+kind)
+	}
+	text := strings.TrimSpace(req.Input)
+	if text == "" {
+		return p.deferGen(req, meta, start, len(req.Input), "empty audio prompt")
+	}
+	meta.Model = "chatterbox-tts"
+	if kind == "music" {
+		meta.Model = "comfyui-acestep"
+	}
+
+	seed := paramIntOr(req.Params, "seed", 0)
+	if seed <= 0 {
+		seed = mintSeed()
+		if req.Params == nil {
+			req.Params = map[string]any{}
+		}
+		req.Params["seed"] = seed
+	}
+
+	ext := ".wav"
+	if kind == "music" {
+		ext = ".flac"
+	}
+	out := paramStr(req.Params, "out")
+	if out == "" {
+		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
+		out = filepath.Join(p.cfg.MediaDir, kind+"-"+sha256hex(text+tasks.StableParamsKey(req.Params))[:8]+ext)
+	}
+
+	// CLI: tts.mjs <out> "<text>" [--clone ref] [--lang es]
+	//      music worker <out> "<style>" --seed N [--seconds N] [--lyrics ..] [--reserve-vram ..]
+	args := []string{out, text}
+	if kind == "voice" {
+		if ref := paramStr(req.Params, "clone"); ref != "" {
+			args = append(args, "--clone", ref)
+		}
+		if lang := paramStr(req.Params, "lang"); lang != "" {
+			args = append(args, "--lang", lang)
+		}
+		// voice path is unchanged: Chatterbox takes no seed, so no --seed flag.
+	} else { // music
+		// ACE-Step IS seed-reproducible, so pass the minted/echoed seed (fixes the B1
+		// gap: the audio path minted a seed but never threaded it to the music worker).
+		args = append(args, "--seed", strconv.Itoa(seed))
+		if s := paramIntOr(req.Params, "seconds", 0); s > 0 {
+			args = append(args, "--seconds", strconv.Itoa(s))
+		}
+		if l := paramStr(req.Params, "lyrics"); l != "" {
+			args = append(args, "--lyrics", l)
+		}
+		if rv := paramStr(req.Params, "reserve_vram"); rv != "" {
+			args = append(args, "--reserve-vram", rv)
+		}
+	}
+
+	timeout := time.Duration(p.cfg.AudioGenTimeoutSec) * time.Second
+	// voice never starts ComfyUI → skip the post-run ComfyUI /free (still tree-kills
+	// the python worker on timeout). music drives ComfyUI → keep the /free.
+	spec := gpugen.Spec{
+		Exe:           p.cfg.NodePath,
+		Script:        script,
+		Args:          args,
+		Env:           p.genEnv(p.cfg.AudioGenWaitMs),
+		Out:           out,
+		Timeout:       timeout,
+		SkipFreeComfy: kind == "voice",
+	}
+	outPath, gerr := gpugen.Generate(ctx, spec)
+	if gerr != nil {
+		meta.ErrClass = gpugen.ClassifyErr(gerr)
+		return p.deferGen(req, meta, start, len(req.Input), "audio generation failed: "+gerr.Error())
+	}
+	meta.LatencyMs = time.Since(start).Milliseconds()
+	data, _ := json.Marshal(map[string]any{"audio_path": outPath, "kind": kind, "seed": seed})
+	p.record(req.Task, meta, len(text))
+	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// genEnv builds the extra env for a GPU-gen child: COMFY_DIR + the per-task GPU-lock
+// wait window (GPU_LOCK_WAIT_MS, so a queued TTS isn't starved by a long video job)
+// + MEMORY_STACK (invariant 1: the CPU-only models freeLlamaSwap must never unload,
+// sourced from config not a buried const). waitMs<=0 omits the wait override (runner
+// default applies).
+func (p *Pipeline) genEnv(waitMs int) []string {
+	env := []string{"COMFY_DIR=" + p.cfg.ComfyDir}
+	if waitMs > 0 {
+		env = append(env, "GPU_LOCK_WAIT_MS="+strconv.Itoa(waitMs))
+	}
+	if len(p.cfg.MemoryStack) > 0 {
+		env = append(env, "MEMORY_STACK="+strings.Join(p.cfg.MemoryStack, ","))
+	}
+	return env
+}
+
+// deferGen records a deferred gen result with latency stamped, keeping the four gen
+// runners' defer paths uniform (defer-not-crash, invariant 4).
+func (p *Pipeline) deferGen(req core.Request, meta core.Meta, start time.Time, inputChars int, reason string) core.Result {
+	meta.LatencyMs = time.Since(start).Milliseconds()
+	p.recordDefer(req.Task, meta, inputChars)
+	return core.Deferf(reason, "", meta)
+}
+
 // runGenerateSVG renders a brand-agnostic parametric SVG component (kind + spec
 // in params) via internal/svgkit and writes it to a .svg under cfg.SVGDir. Pure
 // Go — no model, no grammar, no GPU lock, no cascade. Any bad kind/spec/write
@@ -824,8 +1061,8 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 
 	// Phase 4: a health-derived per-tier timeout (P95×2), if one was learned.
 	actx := ctx
-	if p.overrides != nil {
-		if ms, ok := p.overrides.TierTimeoutsMs[model]; ok && ms > 0 {
+	if ov := p.overridesSnap(); ov != nil {
+		if ms, ok := ov.TierTimeoutsMs[model]; ok && ms > 0 {
 			var cancel context.CancelFunc
 			actx, cancel = context.WithTimeout(ctx, time.Duration(ms)*time.Millisecond)
 			defer cancel()
@@ -874,10 +1111,15 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 				// loaded, (b) the task has a learned threshold, and (c) a larger tier
 				// exists to escalate to (never on the escalation tier itself — the head
 				// does not model it). Never touches grammar.
-				if !low && p.confhead != nil && len(p.confThresholds) > 0 && p.cfg.EscalationModel != "" && model != p.cfg.EscalationModel {
-					if tau, ok := p.confThresholds[string(req.Task)]; ok {
+				// P1 no torn read: snapshot the head AND its thresholds together
+				// under one RLock, then use ONLY these two locals for the gate. A
+				// concurrent reload that swaps both can never yield a crossed
+				// (old-head, new-thresholds) pair here.
+				chHead, chThr := p.confheadSnap()
+				if !low && chHead != nil && len(chThr) > 0 && p.cfg.EscalationModel != "" && model != p.cfg.EscalationModel {
+					if tau, ok := chThr[string(req.Task)]; ok {
 						e := entryFrom(req.Task, meta, false, len(req.Input))
-						pc := p.confhead.Predict(string(req.Task), confhead.FeatureRow(e))
+						pc := chHead.Predict(string(req.Task), confhead.FeatureRow(e))
 						if pc >= 0 && pc < tau {
 							low = true
 							reason = fmt.Sprintf("low confhead p(correct)=%.3f < threshold %.3f", pc, tau)
@@ -1026,14 +1268,14 @@ func (p *Pipeline) modelChain(task core.TaskType, feat map[string]float64, knnSk
 // skipSmallEntry decides whether to bypass the small (E2B) entry tier: the
 // learned router predicts it won't handle this input, or health flagged it.
 func (p *Pipeline) skipSmallEntry(task core.TaskType, entry string, feat map[string]float64, knnSkip bool) bool {
-	if p.router.PreferLargerEntry(string(task), feat) { // nil-safe receiver; trained router wins
+	if p.routerSnap().PreferLargerEntry(string(task), feat) { // nil-safe receiver; trained router wins
 		return true
 	}
 	if knnSkip { // zero-training kNN bridge (only set when the router isn't trained)
 		return true
 	}
-	if p.overrides != nil {
-		for _, d := range p.overrides.Degraded {
+	if ov := p.overridesSnap(); ov != nil {
+		for _, d := range ov.Degraded {
 			if d == entry {
 				return true
 			}
@@ -1048,20 +1290,21 @@ func (p *Pipeline) skipSmallEntry(task core.TaskType, entry string, feat map[str
 // decision and the kNN is skipped (no request-path embedding cost). Off unless
 // KNNPreFilterEnabled loaded a substrate + embedder. Fail-open: any miss => false.
 func (p *Pipeline) knnPreferLargerEntry(task core.TaskType, input string) bool {
-	if p.knn == nil || p.embed == nil {
+	kn, embed := p.knnSnap()
+	if kn == nil || embed == nil {
 		return false
 	}
 	if task != core.TaskClassify && task != core.TaskTriage {
 		return false
 	}
-	if p.router.HasTask(string(task)) { // nil-safe: false when no router yet
+	if p.routerSnap().HasTask(string(task)) { // nil-safe: false when no router yet
 		return false // the trained router decides; don't pay the embed
 	}
-	vec, err := p.embed(input)
+	vec, err := embed(input)
 	if err != nil {
 		return false
 	}
-	skip, ok := p.knn.PreferLargerEntry(string(task), vec, p.cfg.KNNPreFilterK, p.cfg.KNNMinNeighbors, p.cfg.KNNPreFilterThreshold)
+	skip, ok := kn.PreferLargerEntry(string(task), vec, p.cfg.KNNPreFilterK, p.cfg.KNNMinNeighbors, p.cfg.KNNPreFilterThreshold)
 	if !ok {
 		return false
 	}
@@ -1134,8 +1377,8 @@ func (p *Pipeline) confidenceGate(req core.Request, data []byte, lps []llamaclie
 // conformal threshold (Phase 2, loaded from thresholds.json into p.thresholds)
 // when present, else the config constant.
 func (p *Pipeline) marginThreshold(task core.TaskType) float64 {
-	if p.thresholds != nil {
-		if t, ok := p.thresholds[string(task)]; ok {
+	if thr := p.thresholdsSnap(); thr != nil {
+		if t, ok := thr[string(task)]; ok {
 			return t
 		}
 	}

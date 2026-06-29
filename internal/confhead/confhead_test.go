@@ -104,8 +104,41 @@ func TestPredictNilSafe(t *testing.T) {
 	}
 }
 
-// TestFitWithMinRows trains a task that the production Fit (minRows=100) skips.
-// With 60 labeled rows, Fit yields no head but FitWithMinRows(rows,40) does.
+// TestEmissionBoundary60 proves the emission gate is exactly 60 rows:
+// a task with 60 labeled rows TRAINS (Fit returns a valid head) and a task
+// with 59 rows is SKIPPED (Predict returns the sentinel -1).
+// The OOF paired-bootstrap CI is the real adoption guard; this floor only
+// governs whether a weights file entry is emitted at all.
+func TestEmissionBoundary60(t *testing.T) {
+	makeEntries := func(task string, n int) []ledger.Entry {
+		es := make([]ledger.Entry, n)
+		for i := range es {
+			good := i%2 == 0
+			es[i] = ledger.Entry{Task: task, Margin: 0, Retries: 0, InputChars: 50,
+				Feat:     map[string]float64{"len_chars": 50, "n_words": 9, "n_numbers": 0, "n_caps": 1, "has_code": 0, "has_url": 0},
+				Grounded: bptr(good)}
+		}
+		return es
+	}
+
+	// Exactly 60 rows: Fit (emission gate = 60) should TRAIN the head.
+	es60 := makeEntries("summarize", 60)
+	p60 := Fit(es60).Predict("summarize", FeatureRow(es60[0]))
+	if p60 < 0 || p60 > 1 {
+		t.Fatalf("Fit should train at exactly 60 rows (emission gate); got p=%v (sentinel=-1 means skipped)", p60)
+	}
+
+	// 59 rows: one below the floor — must be skipped (sentinel -1).
+	es59 := makeEntries("summarize", 59)
+	p59 := Fit(es59).Predict("summarize", FeatureRow(es59[0]))
+	if p59 != -1 {
+		t.Fatalf("Fit should skip a 59-row task (below emission gate of 60); got p=%v", p59)
+	}
+}
+
+// TestFitWithMinRows confirms FitWithMinRows is parameterized independently of
+// the production emission gate: with minRowsArg=40 a 60-row task trains, and
+// with minRowsArg=61 the same 60-row task is skipped.
 func TestFitWithMinRows(t *testing.T) {
 	var es []ledger.Entry
 	for i := 0; i < 60; i++ {
@@ -114,11 +147,14 @@ func TestFitWithMinRows(t *testing.T) {
 			Feat:     map[string]float64{"len_chars": 50, "n_words": 9, "n_numbers": 0, "n_caps": 1, "has_code": 0, "has_url": 0},
 			Grounded: bptr(good)})
 	}
-	if p := Fit(es).Predict("summarize", FeatureRow(es[0])); p != -1 {
-		t.Fatalf("Fit (minRows=100) should skip 60-row task, got p=%v", p)
-	}
+	// minRowsArg=40: 60 rows >= 40 → trains.
 	p := FitWithMinRows(es, 40).Predict("summarize", FeatureRow(es[0]))
 	if p < 0 || p > 1 {
 		t.Fatalf("FitWithMinRows(40) should train the 60-row task, got p=%v", p)
+	}
+	// minRowsArg=61: 60 rows < 61 → skipped.
+	p61 := FitWithMinRows(es, 61).Predict("summarize", FeatureRow(es[0]))
+	if p61 != -1 {
+		t.Fatalf("FitWithMinRows(61) should skip the 60-row task, got p=%v", p61)
 	}
 }

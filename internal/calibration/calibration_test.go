@@ -136,9 +136,9 @@ func TestRunFullPipeline(t *testing.T) {
 	t.Logf("report:\n%s", report)
 }
 
-// TestRunSkipsSmallTasks: tasks with fewer than 100 labeled rows must be omitted.
+// TestRunSkipsSmallTasks: tasks with fewer than 60 labeled rows must be omitted.
 func TestRunSkipsSmallTasks(t *testing.T) {
-	// 50 summarize entries (< 100) and 150 triage entries (>= 100).
+	// 50 summarize entries (< 60) and 150 triage entries (>= 60).
 	entries := make([]ledger.Entry, 0, 200)
 	for i := 0; i < 50; i++ {
 		entries = append(entries, ledger.Entry{
@@ -163,10 +163,45 @@ func TestRunSkipsSmallTasks(t *testing.T) {
 		t.Fatalf("Run error: %v", err)
 	}
 	if _, ok := thresholds["summarize"]; ok {
-		t.Fatalf("summarize should be omitted (n<100), report:\n%s", report)
+		t.Fatalf("summarize should be omitted (n<60), report:\n%s", report)
 	}
 	if _, ok := thresholds["triage"]; !ok {
-		t.Fatalf("triage should be present (n>=100), report:\n%s", report)
+		t.Fatalf("triage should be present (n>=60), report:\n%s", report)
+	}
+}
+
+// TestCalibrationEmissionBoundary60 proves the calibration emission gate is
+// exactly 60 rows: a task with 60 rows is calibrated; one with 59 is skipped.
+func TestCalibrationEmissionBoundary60(t *testing.T) {
+	makeEntries := func(task string, n int) []ledger.Entry {
+		es := make([]ledger.Entry, n)
+		for i := range es {
+			es[i] = ledger.Entry{
+				Task:     task,
+				Margin:   0.1 + float64(i%9)*0.1, // varied margins so calibration has candidates
+				Grounded: boolPtr(i%2 == 0),
+			}
+		}
+		return es
+	}
+
+	// 60 rows: at the floor — must appear in thresholds.
+	entries60 := makeEntries("classify", 60)
+	// 59 rows under a different task — must be omitted.
+	entries59 := makeEntries("extract", 59)
+
+	ledgerPath := writeLedger(t, append(entries60, entries59...))
+	outPath := filepath.Join(t.TempDir(), "thresholds.json")
+
+	thresholds, report, err := Run(ledgerPath, 0.10, nil, outPath)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if _, ok := thresholds["classify"]; !ok {
+		t.Fatalf("classify (n=60) should be calibrated, report:\n%s", report)
+	}
+	if _, ok := thresholds["extract"]; ok {
+		t.Fatalf("extract (n=59) should be omitted (below 60-row gate), report:\n%s", report)
 	}
 }
 

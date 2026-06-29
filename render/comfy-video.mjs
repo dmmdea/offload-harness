@@ -9,11 +9,10 @@
 //        [--model hunyuan|wan] [--frames 33] [--width 848] [--height 480] \
 //        [--steps N] [--seed N] [--negative "..."] [--api http://127.0.0.1:8188] \
 //        [--no-lock] [--keep-comfy]   |   <out.mp4> --graph wf.json
-import { writeFileSync, copyFileSync, readFileSync, existsSync } from "node:fs";
+import { writeFileSync, copyFileSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import { tmpdir } from "node:os";
-import { spawn } from "node:child_process";
-import { acquireGpuLock, freeLlamaSwap, freeComfy } from "./gpu-lock.mjs";
+import { withGpuSlot } from "./gpu-lock.mjs";
+import { COMFY_DIR } from "./comfy-lifecycle.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { buildHunyuan15I2V } from "./wf-hunyuan15-i2v.mjs";
 import { buildWan22I2V } from "./wf-wan22-i2v.mjs";
@@ -30,12 +29,6 @@ for (let i = 0; i < argv.length; i++) {
 }
 const out = pos[0];
 const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
-const COMFY_DIR = process.env.COMFY_DIR || "C:/ComfyUI";
-// ComfyUI deps live in its venv, not the system python. Auto-detect; override via COMFY_PY.
-const COMFY_PY = process.env.COMFY_PY
-  || [".venv/Scripts/python.exe", "venv/Scripts/python.exe", "python_embeded/python.exe"]
-       .map((p) => join(COMFY_DIR, p)).find((p) => existsSync(p))
-  || "python";
 if (!out) { console.error('usage: node comfy-video.mjs <out.mp4> <still> "<prompt>" [--model hunyuan|wan] [flags]   |   <out.mp4> --graph wf.json'); process.exit(2); }
 
 const j = async (url, opts) => { const r = await fetch(url, opts); if (!r.ok) throw new Error(url + " -> " + r.status + " " + (await r.text()).slice(0, 300)); return r.json(); };
@@ -45,20 +38,6 @@ function stageInput(stillPath) {
   const name = "render_in_" + Date.now() + "_" + basename(stillPath);
   copyFileSync(stillPath, join(COMFY_DIR, "input", name));
   return name;
-}
-
-async function comfyUp() { try { const r = await fetch(API + "/system_stats"); return r.ok; } catch { return false; } }
-
-async function ensureComfy() {
-  if (await comfyUp()) return null; // already running, don't manage it
-  // Launch on-demand, zero-always-warm flags. --reserve-vram holds VRAM back for the
-  // Windows display/WDDM; 1.0 leaves the most for the GGUF model on 8GB (raise via the flag
-  // to 1.5-2.0 only if the display OOMs). Reconciled default per workflow wso07xgs5.
-  const reserve = String(flags["reserve-vram"] || "1.0");
-  const child = spawn(COMFY_PY, ["main.py", "--disable-smart-memory", "--cache-none", "--reserve-vram", reserve], { cwd: COMFY_DIR, stdio: "ignore", detached: false });
-  for (let i = 0; i < 120; i++) { await new Promise((r) => setTimeout(r, 2000)); if (await comfyUp()) return child; }
-  try { child.kill(); } catch {}
-  throw new Error("ComfyUI did not become ready on " + API + " after ~4min");
 }
 
 async function generate() {
@@ -102,19 +81,7 @@ async function generate() {
   console.log("WROTE", out);
 }
 
-async function main() {
-  const lockPath = process.env.GPU_LOCK || join(tmpdir(), "local-offload-gpu.lock");
-  const lock = flags["no-lock"] ? { release() {} } : await acquireGpuLock({ lockPath });
-  if (!lock) throw new Error("GPU is busy (another gen job holds the lock); try again later or --no-lock");
-  let comfyChild = null;
-  try {
-    await freeLlamaSwap();      // give the gen job the whole 8GB
-    comfyChild = await ensureComfy();
-    await generate();
-  } finally {
-    await freeComfy();          // zero-always-warm: drop ComfyUI's VRAM
-    if (comfyChild && !flags["keep-comfy"]) { try { comfyChild.kill(); } catch {} }
-    lock.release();
-  }
-}
-main().catch((e) => { console.error("VIDEO GEN FAILED:", e.message); process.exit(1); });
+withGpuSlot(
+  { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, reserveVram: flags["reserve-vram"] },
+  generate,
+).catch((e) => { console.error("VIDEO GEN FAILED:", e.message); process.exit(1); });

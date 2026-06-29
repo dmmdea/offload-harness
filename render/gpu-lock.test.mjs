@@ -4,7 +4,7 @@ import assert from "node:assert";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmSync, mkdtempSync } from "node:fs";
-import { acquireGpuLock, isStale } from "./gpu-lock.mjs";
+import { acquireGpuLock, isStale, memoryStack } from "./gpu-lock.mjs";
 
 test("acquire is exclusive; second acquire fails fast", async () => {
   const dir = mkdtempSync(join(tmpdir(), "gpulock-"));
@@ -25,6 +25,19 @@ test("a stale lock (old mtime, dead pid) is reclaimable", async () => {
   assert.equal(isStale({ pid: 999999999, mtimeMs: 0 }, { ttlMs: 1000, nowMs: 1_000_000 }), true);
   // A fresh lock by a live pid is NOT stale.
   assert.equal(isStale({ pid: process.pid, mtimeMs: 1_000_000 }, { ttlMs: 1000, nowMs: 1_000_500 }), false);
+});
+
+test("MEMORY_STACK is sourced from env, not a buried const (invariant 1)", () => {
+  // Default (env unset) carries the two canonical CPU-only mem0 models — never unloaded.
+  const def = memoryStack("");
+  assert.ok(def.has("embeddinggemma"), "default keeps embeddinggemma");
+  assert.ok(def.has("bge-reranker-v2-m3"), "default keeps bge-reranker-v2-m3");
+  // The Go harness threads config.MemoryStack as a comma-separated env; a renamed/added
+  // 3rd CPU member is honored (not silently unloaded). Trimming + empties handled.
+  const env = memoryStack("embeddinggemma, bge-reranker-v2-m3 , new-cpu-embedder ,");
+  assert.ok(env.has("new-cpu-embedder"), "an added CPU member from env is honored");
+  assert.equal(env.size, 3);
+  assert.ok(!env.has(""), "empty entries dropped");
 });
 
 test("a dead-pid lock is reclaimable IMMEDIATELY, even when young (no 1h deadlock)", async () => {

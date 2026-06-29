@@ -2,7 +2,10 @@ package shadow
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -216,7 +219,10 @@ func baseDeps(routerL *[]ledger.Entry) LabelDeps {
 		Ground:       func(task core.TaskType, in string, data []byte) (bool, bool) { return true, true },
 		Similar:      func(a, b string) (float64, error) { return 1.0, nil },
 		AppendLabel: func(path string, e ledger.Entry) error {
-			if path == "router.jsonl" {
+			// routerL may be nil for tests that don't inspect router output; in that
+			// case the router label is still produced (A4 feeds it for every E2B
+			// entry) but discarded here so the helper stays nil-safe.
+			if path == "router.jsonl" && routerL != nil {
 				*routerL = append(*routerL, e)
 			}
 			return nil
@@ -256,14 +262,49 @@ func TestLabelQueue_RouterLabelFromE4BEntry(t *testing.T) {
 	}
 }
 
-func TestLabelQueue_NoRouterLabelWhenEnteredAtE2B(t *testing.T) {
-	// already entered at E2B -> the real ledger has it; do NOT shadow a router label
-	items := []Item{{Task: "classify", Input: "x", EntryTier: "gemma4-e2b", EntryOutput: `{"label":"a"}`}}
+// A4: the premise is now INVERTED. An E2B-entry classify/triage row, once judged,
+// MUST emit a router-labels row carrying the escalation-agreement signal — that is
+// the only label the router ever sees in normal operation, because capture only
+// enqueues E2B-entry rows.
+func TestLabelQueue_RouterLabelFromE2BEntry_Agree(t *testing.T) {
+	// Entered at E2B; the escalation rerun AGREES -> router label y=accept (grounded=true).
+	items := []Item{{Task: "classify", Input: "the cat sat", EntryTier: "gemma4-e2b",
+		EntryOutput: `{"label":"animal"}`, Feat: map[string]float64{"len_chars": 11}}}
+	var routerL []ledger.Entry
+	d := baseDeps(&routerL) // baseDeps wires AnswersAgree -> agreed=true, E2B set
+	LabelQueue(context.Background(), items, 10, d)
+	if len(routerL) != 1 {
+		t.Fatalf("E2B-entry row must emit exactly one router label, got %d", len(routerL))
+	}
+	r := routerL[0]
+	if r.ModelTier != "gemma4-e2b" {
+		t.Fatalf("router label ModelTier must be gemma4-e2b, got %q", r.ModelTier)
+	}
+	if r.Escalations != 0 || r.Deferred {
+		t.Fatalf("router label must have Escalations==0 && Deferred==false, got escalations=%d deferred=%v", r.Escalations, r.Deferred)
+	}
+	if r.Grounded == nil || !*r.Grounded {
+		t.Fatalf("agree case: router label Grounded must be true, got %+v", r.Grounded)
+	}
+}
+
+func TestLabelQueue_RouterLabelFromE2BEntry_Disagree(t *testing.T) {
+	// Entered at E2B; the escalation rerun DISAGREES -> router label y=reject (grounded=false).
+	items := []Item{{Task: "triage", Input: "buy now!!!", EntryTier: "gemma4-e2b",
+		EntryOutput: `{"decision":"yes"}`, Feat: map[string]float64{"len_chars": 10}}}
 	var routerL []ledger.Entry
 	d := baseDeps(&routerL)
+	d.AnswersAgree = func(task, a string, b []byte) (bool, bool) { return false, true } // disagree, judgeable
 	LabelQueue(context.Background(), items, 10, d)
-	if len(routerL) != 0 {
-		t.Fatalf("E2B-entry row must not get a shadow router label, got %d", len(routerL))
+	if len(routerL) != 1 {
+		t.Fatalf("E2B-entry row must emit exactly one router label, got %d", len(routerL))
+	}
+	r := routerL[0]
+	if r.ModelTier != "gemma4-e2b" || r.Escalations != 0 || r.Deferred {
+		t.Fatalf("router label shape wrong: %+v", r)
+	}
+	if r.Grounded == nil || *r.Grounded {
+		t.Fatalf("disagree case: router label Grounded must be false, got %+v", r.Grounded)
 	}
 }
 
@@ -285,20 +326,41 @@ func TestLabelQueue_SummarizeViaSimilarity(t *testing.T) {
 	}
 }
 
-func TestLabelQueue_KNNSubstrate_E2BEntryAcceptsTrue(t *testing.T) {
-	var knnRows []knnSub
-	d := baseDeps(nil)
-	d.Embed = func(string) ([]float64, error) { return []float64{1, 0}, nil }
-	d.AppendKNN = func(task string, vec []float64, accept bool) error {
-		knnRows = append(knnRows, knnSub{task, vec, accept})
-		return nil
+// A4: the E2B-entry kNN accept label is the escalation-AGREEMENT, NOT a constant
+// true. Escalations==0 only means the runtime gate passed, not that E2B was right.
+func TestLabelQueue_KNNSubstrate_E2BEntryAcceptMatchesAgreement(t *testing.T) {
+	// Agree case -> accept=true.
+	{
+		var knnRows []knnSub
+		d := baseDeps(nil) // AnswersAgree -> agreed=true
+		d.Embed = func(string) ([]float64, error) { return []float64{1, 0}, nil }
+		d.AppendKNN = func(task string, vec []float64, accept bool) error {
+			knnRows = append(knnRows, knnSub{task, vec, accept})
+			return nil
+		}
+		items := []Item{{Task: "classify", Input: "hi", EntryTier: "gemma4-e2b",
+			EntryOutput: `{"label":"greet"}`, Feat: map[string]float64{"len_chars": 2}}}
+		LabelQueue(context.Background(), items, 10, d)
+		if len(knnRows) != 1 || !knnRows[0].accept || knnRows[0].task != "classify" {
+			t.Fatalf("agree: E2B-entry must yield one accept=true classify kNN row, got %+v", knnRows)
+		}
 	}
-	// An item that ENTERED at E2B and was captured (non-escalated) => E2B accepted.
-	items := []Item{{Task: "classify", Input: "hi", EntryTier: "gemma4-e2b",
-		EntryOutput: `{"label":"greet"}`, Feat: map[string]float64{"len_chars": 2}}}
-	LabelQueue(context.Background(), items, 10, d)
-	if len(knnRows) != 1 || !knnRows[0].accept || knnRows[0].task != "classify" {
-		t.Fatalf("E2B-entry item must yield one accept=true classify kNN row, got %+v", knnRows)
+	// Disagree case -> accept=false.
+	{
+		var knnRows []knnSub
+		d := baseDeps(nil)
+		d.AnswersAgree = func(task, a string, b []byte) (bool, bool) { return false, true }
+		d.Embed = func(string) ([]float64, error) { return []float64{1, 0}, nil }
+		d.AppendKNN = func(task string, vec []float64, accept bool) error {
+			knnRows = append(knnRows, knnSub{task, vec, accept})
+			return nil
+		}
+		items := []Item{{Task: "classify", Input: "hi", EntryTier: "gemma4-e2b",
+			EntryOutput: `{"label":"greet"}`, Feat: map[string]float64{"len_chars": 2}}}
+		LabelQueue(context.Background(), items, 10, d)
+		if len(knnRows) != 1 || knnRows[0].accept || knnRows[0].task != "classify" {
+			t.Fatalf("disagree: E2B-entry must yield one accept=false classify kNN row, got %+v", knnRows)
+		}
 	}
 }
 
@@ -325,13 +387,72 @@ func TestLabelQueue_KNNSubstrate_NonE2BEntryUsesCounterfactual(t *testing.T) {
 }
 
 func TestLabelQueue_KNNSubstrate_DisabledWhenNilDeps(t *testing.T) {
-	d := baseDeps(nil) // Embed + AppendKNN left nil
+	var routerL []ledger.Entry
+	d := baseDeps(&routerL) // Embed + AppendKNN left nil; router sink wired
 	items := []Item{{Task: "classify", Input: "hi", EntryTier: "gemma4-e2b",
 		EntryOutput: `{"label":"greet"}`, Feat: map[string]float64{}}}
 	// Must not panic and must write the normal confhead label.
 	if w := LabelQueue(context.Background(), items, 10, d); w != 1 {
 		t.Fatalf("confhead label still written when kNN deps nil; got %d", w)
 	}
+	// With kNN deps nil, ONLY the router label is emitted — no kNN row, no panic.
+	if len(routerL) != 1 {
+		t.Fatalf("router label must still be emitted with kNN deps nil, got %d", len(routerL))
+	}
+}
+
+// TestLabelQueue_EscalationRerunRecordFalse_NoLedgerWrite is the A4 record=false
+// guard. The drain's counterfactual escalation rerun must use the record=false
+// RunTier contract: LabelQueue must invoke RunTier (the rerun happened) yet write
+// NOTHING to the savings ledger. We assert via a spy (the rerun was called) AND a
+// real ledger file's sha is byte-identical across the drain — LabelQueue has no
+// ledger sink at all, so any drift would be a contract violation.
+func TestLabelQueue_EscalationRerunRecordFalse_NoLedgerWrite(t *testing.T) {
+	ledgerPath := filepath.Join(t.TempDir(), "ledger.jsonl")
+	// Seed a pre-existing ledger so we sha a non-empty file.
+	if err := ledger.AppendLabel(ledgerPath, ledger.Entry{TS: 1, Task: "classify"}); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	shaBefore := fileSHA(t, ledgerPath)
+
+	var runTierCalls int
+	var runTierModels []string
+	var routerL []ledger.Entry
+	d := baseDeps(&routerL)
+	d.RunTier = func(ctx context.Context, req core.Request, model string) (core.Result, bool) {
+		// Spy: the production wiring passes p.RunTier, which is hardcoded
+		// record=false (attempt(..., false)) and therefore writes no ledger row.
+		// A faithful spy mirrors that: it records the call but touches no ledger.
+		runTierCalls++
+		runTierModels = append(runTierModels, model)
+		return core.Result{OK: true, Data: json.RawMessage(`{"label":"a"}`)}, true
+	}
+	items := []Item{{Task: "classify", Input: "x", EntryTier: "gemma4-e2b",
+		EntryOutput: `{"label":"a"}`, Feat: map[string]float64{"len_chars": 1}}}
+	LabelQueue(context.Background(), items, 10, d)
+
+	if runTierCalls == 0 {
+		t.Fatal("escalation rerun never invoked — RunTier spy not called")
+	}
+	// The rerun used the escalation model (the record=false counterfactual tier).
+	if runTierModels[0] != d.Escalation {
+		t.Fatalf("first rerun must target escalation model %q, got %q", d.Escalation, runTierModels[0])
+	}
+	// THE LOAD-BEARING ASSERTION: the ledger is byte-identical — no production
+	// side-effect leaked through this path.
+	if shaAfter := fileSHA(t, ledgerPath); shaAfter != shaBefore {
+		t.Fatalf("ledger.jsonl changed across drain (before=%s after=%s) — record=false contract violated", shaBefore, shaAfter)
+	}
+}
+
+func fileSHA(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 type knnSub struct {

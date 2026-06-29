@@ -360,5 +360,11 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	// Atomic write (P4): tmp+rename so the long-running MCP server's reloader only
+	// ever reads a complete tier_overrides.json.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

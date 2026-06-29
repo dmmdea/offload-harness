@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,7 +37,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/shadow"
 )
 
-const version = "0.4.1"
+const version = "0.5.0"
 
 func main() {
 	sub, args, ok := hoistGlobalConfig(os.Args[1:])
@@ -58,6 +59,10 @@ func main() {
 		err = runGenerateImage(args)
 	case "generate-svg":
 		err = runGenerateSVG(args)
+	case "generate-audio":
+		err = runGenerateAudio(args)
+	case "generate-video":
+		err = runGenerateVideo(args)
 	case "ocr":
 		err = runOCR(args)
 	case "extract-image":
@@ -162,6 +167,8 @@ Usage:
   local-offload ocr       <image-path> [--json]
   local-offload extract-image <image-path> --schema schema.json [--json]
   local-offload assess-image <image-path> [--brief "..."] [--json]
+  local-offload generate-audio <out> "<text>" [--kind voice|music] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
+  local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F]
   local-offload mcp                      run as an MCP server (stdio)
   local-offload ledger [--since DAYS]    token-savings report
   local-offload doctor                   check endpoint health + config
@@ -227,10 +234,14 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 	// long-running MCP server holds the lock, a CLI invocation degrades to
 	// cache-less rather than aborting — they speed things up / report savings,
 	// they are not required for correctness.
-	ca, err := cache.Open(cfg.CachePath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "note: cache unavailable (held by the MCP server?); continuing without cache")
-		ca = nil
+	var ca *cache.Cache
+	if cfg.CachePath != "" { // "" = caller opted out of caching (e.g. the confhead A/B, where a shared cache would cross-contaminate arms)
+		var err error
+		ca, err = cache.Open(cfg.CachePath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "note: cache unavailable (held by the MCP server?); continuing without cache")
+			ca = nil
+		}
 	}
 	led, err := ledger.Open(cfg.LedgerPath)
 	if err != nil {
@@ -533,6 +544,278 @@ func runGenerateSVG(args []string) error {
 	return nil
 }
 
+// audioFlags is the parsed CLI input for `generate-audio`. Factored out so the
+// param-building (buildAudioParams) is unit-testable without a live render.
+type audioFlags struct {
+	kind        string
+	clone       string
+	lang        string
+	out         string
+	seconds     int
+	seed        int
+	reserveVRAM float64
+}
+
+// buildAudioParams maps the parsed CLI flags to the pipeline params map for a
+// generate_audio request. Empty kind defaults to "voice" (matching the pipeline
+// default); zero/empty optional flags are omitted so the pipeline applies its own
+// defaults. reserve_vram is stringified to match the MCP tool's wire shape.
+func buildAudioParams(f audioFlags) map[string]any {
+	kind := f.kind
+	if kind == "" {
+		kind = "voice"
+	}
+	params := map[string]any{"kind": kind}
+	if f.clone != "" {
+		params["clone"] = f.clone
+	}
+	if f.lang != "" {
+		params["lang"] = f.lang
+	}
+	if f.out != "" {
+		params["out"] = f.out
+	}
+	if f.seconds > 0 {
+		params["seconds"] = f.seconds
+	}
+	if f.seed > 0 {
+		params["seed"] = f.seed
+	}
+	if f.reserveVRAM > 0 {
+		params["reserve_vram"] = strconv.FormatFloat(f.reserveVRAM, 'f', -1, 64)
+	}
+	return params
+}
+
+// runGenerateAudio handles `local-offload generate-audio <out> "<text>"
+// [--kind voice|music] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
+// [--reserve-vram F] [--json]`. The TWO positionals are the output path and the
+// text (narration for voice, style prompt for music) — mirroring the raw
+// `node render/tts.mjs out.wav "text"` CLI. It synthesizes on the LOCAL GPU for
+// free via the same runGenerateAudio pipeline branch the MCP tool uses.
+func runGenerateAudio(args []string) error {
+	fs := flag.NewFlagSet("generate-audio", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	kind := fs.String("kind", "voice", "voice (Chatterbox TTS) | music (ACE-Step)")
+	clone := fs.String("clone", "", "voice: local path to a reference .wav for zero-shot voice cloning")
+	lang := fs.String("lang", "", "voice: language code (default es)")
+	seconds := fs.Int("seconds", 0, "music: clip length in seconds")
+	seed := fs.Int("seed", 0, "RNG seed for reproducibility")
+	reserveVRAM := fs.Float64("reserve-vram", 0, "music: VRAM held back for the display")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+
+	// generate-audio takes TWO positionals (out path, text); the rest are flags.
+	out, text, flagArgs := splitTwoArgs(args, map[string]bool{
+		"config": true, "kind": true, "clone": true, "lang": true,
+		"seconds": true, "seed": true, "reserve-vram": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	if out == "" || text == "" {
+		return fmt.Errorf("generate-audio requires an output path and text: local-offload generate-audio <out.wav> \"<text>\" [--kind voice|music] [--lang es]")
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	params := buildAudioParams(audioFlags{
+		kind: *kind, clone: *clone, lang: *lang, out: out,
+		seconds: *seconds, seed: *seed, reserveVRAM: *reserveVRAM,
+	})
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskGenerateAudio,
+		Input:  text,
+		Params: params,
+	})
+	emitResult(res, *asJSON, "", *compactFlag)
+	return nil
+}
+
+// videoFlags is the parsed CLI input for `generate-video`. Factored out so the
+// param-building (buildVideoParams) is unit-testable without a live render.
+type videoFlags struct {
+	model       string
+	still       string
+	negative    string
+	out         string
+	frames      int
+	width       int
+	height      int
+	steps       int
+	seed        int
+	reserveVRAM float64
+}
+
+// buildVideoParams maps the parsed CLI flags to the pipeline params map for a
+// generate_video request. Empty model defaults to "hunyuan" (the PRIMARY 8GB I2V
+// path); the still path is always carried as "still" (Hunyuan I2V needs an input
+// image). Zero/empty optional flags are omitted so the pipeline/runner apply their
+// own defaults (incl. the SETTLED steps=50/shift=5/vaeTemporalSize=16 baked into
+// the workflow builder, and the runner's --reserve-vram). reserve_vram is
+// stringified to match the MCP tool's wire shape.
+func buildVideoParams(f videoFlags) map[string]any {
+	model := f.model
+	if model == "" {
+		model = "hunyuan"
+	}
+	params := map[string]any{"model": model}
+	if f.still != "" {
+		params["still"] = f.still
+	}
+	if f.negative != "" {
+		params["negative"] = f.negative
+	}
+	if f.out != "" {
+		params["out"] = f.out
+	}
+	if f.frames > 0 {
+		params["frames"] = f.frames
+	}
+	if f.width > 0 {
+		params["width"] = f.width
+	}
+	if f.height > 0 {
+		params["height"] = f.height
+	}
+	if f.steps > 0 {
+		params["steps"] = f.steps
+	}
+	if f.seed > 0 {
+		params["seed"] = f.seed
+	}
+	if f.reserveVRAM > 0 {
+		params["reserve_vram"] = strconv.FormatFloat(f.reserveVRAM, 'f', -1, 64)
+	}
+	return params
+}
+
+// runGenerateVideo handles `local-offload generate-video <out.mp4> <still.png>
+// "<prompt>" [--model hunyuan|wan] [--frames 49] [--width N] [--height N]
+// [--steps N] [--seed N] [--negative "..."] [--reserve-vram F] [--json]`. The
+// THREE positionals are the output path, the input still (I2V needs an image),
+// and the prompt — mirroring the raw `node render/comfy-video.mjs out.mp4 still.png
+// "prompt"` CLI. It animates the still into a short clip on the LOCAL ComfyUI for
+// free via the same runGenerateVideo pipeline branch the MCP tool uses. Steps,
+// shift, and VAE temporal tiling are SETTLED inside the workflow builder and are
+// intentionally NOT exposed here so a caller can't regress them.
+func runGenerateVideo(args []string) error {
+	fs := flag.NewFlagSet("generate-video", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	model := fs.String("model", "hunyuan", "hunyuan (default, fast 8GB I2V) | wan (slow photoreal hero)")
+	negative := fs.String("negative", "", "hard exclusions, e.g. 'blurry, distorted'")
+	frames := fs.Int("frames", 0, "frame count (default ~33; realistic ceiling ~49)")
+	width := fs.Int("width", 0, "width px")
+	height := fs.Int("height", 0, "height px")
+	steps := fs.Int("steps", 0, "sampler steps (default 50 — DO NOT lower; 12 = garbage)")
+	seed := fs.Int("seed", 0, "RNG seed for reproducibility")
+	reserveVRAM := fs.Float64("reserve-vram", 0, "VRAM held back for the display (default per-workflow; ~2.0 for Hunyuan/Wan)")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+
+	// generate-video takes THREE positionals (out path, still image, prompt); the
+	// rest are flags.
+	out, still, prompt, flagArgs := splitThreeArgs(args, map[string]bool{
+		"config": true, "model": true, "negative": true, "frames": true,
+		"width": true, "height": true, "steps": true, "seed": true, "reserve-vram": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	if out == "" || prompt == "" {
+		return fmt.Errorf("generate-video requires an output path, a still image, and a prompt: local-offload generate-video <out.mp4> <still.png> \"<prompt>\" [--model hunyuan|wan] [--frames 49]")
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	params := buildVideoParams(videoFlags{
+		model: *model, still: still, negative: *negative, out: out,
+		frames: *frames, width: *width, height: *height, steps: *steps,
+		seed: *seed, reserveVRAM: *reserveVRAM,
+	})
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskGenerateVideo,
+		Input:  prompt,
+		Image:  still,
+		Params: params,
+	})
+	emitResult(res, *asJSON, "", *compactFlag)
+	return nil
+}
+
+// splitThreeArgs separates the FIRST THREE positionals (e.g. out path + still +
+// prompt) from flags, treating the named value-flags as consuming the following
+// token. Used by generate-video, whose CLI shape is `<out> <still> "<prompt>"
+// [flags]`. A fourth+ positional is dropped onto flags (harmless; FlagSet ignores
+// trailing positionals).
+func splitThreeArgs(args []string, valueFlags map[string]bool) (first, second, third string, flags []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "-") && a != "-" {
+			flags = append(flags, a)
+			name := strings.TrimLeft(a, "-")
+			if strings.ContainsRune(name, '=') {
+				continue
+			}
+			if valueFlags[name] && i+1 < len(args) {
+				i++
+				flags = append(flags, args[i])
+			}
+			continue
+		}
+		switch {
+		case first == "":
+			first = a
+		case second == "":
+			second = a
+		case third == "":
+			third = a
+		default:
+			flags = append(flags, a)
+		}
+	}
+	return first, second, third, flags
+}
+
+// splitTwoArgs separates the FIRST TWO positionals (e.g. out path + text) from
+// flags, treating the named value-flags as consuming the following token. Used by
+// generate-audio, whose CLI shape is `<out> "<text>" [flags]`. A third+ positional
+// is dropped onto flags (harmless; FlagSet ignores trailing positionals).
+func splitTwoArgs(args []string, valueFlags map[string]bool) (first, second string, flags []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "-") && a != "-" {
+			flags = append(flags, a)
+			name := strings.TrimLeft(a, "-")
+			if strings.ContainsRune(name, '=') {
+				continue
+			}
+			if valueFlags[name] && i+1 < len(args) {
+				i++
+				flags = append(flags, args[i])
+			}
+			continue
+		}
+		switch {
+		case first == "":
+			first = a
+		case second == "":
+			second = a
+		default:
+			flags = append(flags, a)
+		}
+	}
+	return first, second, flags
+}
+
 // runOCR handles `local-offload ocr <image-path> [--json]`. Like vqa the
 // positional argument is an IMAGE PATH (or data URI), not stdin text; there is no
 // question — the task is fixed (transcribe all text). It returns {text:...}.
@@ -722,6 +1005,14 @@ func runMCP(args []string) error {
 		return err
 	}
 	defer cleanup()
+	// A2 hot-reload: the MCP server is long-running, so a nightly retrain that
+	// rewrites the self-learning artifacts would otherwise never go live without a
+	// manual restart. Start the background poll reloader HERE (only for the MCP
+	// server — CLI one-shots never start it, so they stay byte-identical and leak
+	// no goroutine) and stop it on cleanup. It hot-swaps changed artifacts within
+	// one tick, fail-open, with zero IO/parse added to the request path.
+	stopReloader := p.StartReloader(0) // 0 => default interval
+	defer stopReloader()
 	return mcpserver.New(p).Run(context.Background(), version)
 }
 
@@ -941,6 +1232,17 @@ func runTrainConfHead(args []string) error {
 	return nil
 }
 
+// confheadVerdict returns "ADOPT" when the bootstrap CI lower bound strictly
+// exceeds zero (the head provably lowers AURC), otherwise "REJECT".
+// AUGRC and ECE are DIAGNOSTIC only and must NEVER be passed to or read by
+// this function — the verdict depends solely on lo.
+func confheadVerdict(lo float64) string {
+	if lo > 0 {
+		return "ADOPT"
+	}
+	return "REJECT"
+}
+
 // runConfheadEval is the Phase 2 confhead ADOPTION GATE: a rigorous, leakage-free
 // validation that decides whether the per-task correctness head is good enough to
 // adopt. For each task with enough labeled rows it computes out-of-fold p(correct),
@@ -988,6 +1290,7 @@ func runConfheadEval(args []string) error {
 		AURCIncumbent *float64 `json:"aurc_incumbent,omitempty"`
 		AURCHeadOOF   *float64 `json:"aurc_head_oof,omitempty"`
 		AUGRCHead     *float64 `json:"augrc_head,omitempty"`
+		ECEHead       *float64 `json:"ece_head,omitempty"` // diagnostic only — never read by verdict
 		Delta         *float64 `json:"delta,omitempty"`
 		CILo          *float64 `json:"ci_lo,omitempty"`
 		CIHi          *float64 `json:"ci_hi,omitempty"`
@@ -1054,16 +1357,16 @@ func runConfheadEval(args []string) error {
 		_, _, aurcInc, _ := eval.RiskCoverage(incPts)
 		_, _, aurcHead, _ := eval.RiskCoverage(headPts)
 		augrc := eval.AUGRC(headPts)
+		ece := eval.ECE(headPts, 10) // diagnostic: Expected Calibration Error (10 bins)
 		delta, lo, hi := eval.BootstrapDeltaAURC(margins, oofHead, correct, *b, seed)
 
-		verdict := "REJECT"
-		if lo > 0 {
-			verdict = "ADOPT"
-		}
+		// Verdict is driven solely by the CI lower bound — augrc and ece are
+		// diagnostic outputs and are NEVER passed to confheadVerdict.
+		verdict := confheadVerdict(lo)
 		baseErr := float64(nWrong) / float64(n)
 		out[task] = result{
 			N: n, BaseError: &baseErr,
-			AURCIncumbent: &aurcInc, AURCHeadOOF: &aurcHead, AUGRCHead: &augrc,
+			AURCIncumbent: &aurcInc, AURCHeadOOF: &aurcHead, AUGRCHead: &augrc, ECEHead: &ece,
 			Delta: &delta, CILo: &lo, CIHi: &hi, Verdict: verdict,
 		}
 	}
@@ -1129,6 +1432,16 @@ func runConfheadCalibrate(args []string) error {
 		tasks = append(tasks, t)
 	}
 	sort.Strings(tasks)
+
+	type calibDiag struct {
+		N                   int     `json:"n"`
+		Tau                 float64 `json:"tau"`
+		Target              float64 `json:"target"`
+		RealizedAcceptedErr float64 `json:"realized_accepted_err"` // diagnostic: OOF accepted-set error at tau
+		BaseErr             float64 `json:"base_err"`
+		EscalationRate      float64 `json:"escalation_rate"`
+	}
+	diags := map[string]calibDiag{}
 
 	var sb strings.Builder
 	sb.WriteString("confhead threshold calibration (out-of-fold)\n")
@@ -1196,18 +1509,32 @@ func runConfheadCalibrate(args []string) error {
 		escRate := float64(n-nAccepted) / float64(n)
 		fmt.Fprintf(&sb, "  %-12s  n=%4d  base_err=%.4f  target=%.3f  tau=%.4f  accepted_err=%.4f  escalation_rate=%.4f\n",
 			task, n, baseErr, target, tau, accErr, escRate)
+		diags[task] = calibDiag{N: n, Tau: tau, Target: target, RealizedAcceptedErr: accErr, BaseErr: baseErr, EscalationRate: escRate}
 	}
 
 	raw, err := json.MarshalIndent(thresholds, "", "  ")
 	if err != nil {
 		return fmt.Errorf("confhead-calibrate: marshal thresholds: %w", err)
 	}
-	if err := os.WriteFile(dst, append(raw, '\n'), 0o644); err != nil {
-		return fmt.Errorf("confhead-calibrate: write %s: %w", dst, err)
+	// Atomic write (P4): the long-running MCP server polls confhead-thresholds.json
+	// and must only ever read a COMPLETE file. tmp+rename (atomic on the same
+	// filesystem) so the reloader never sees a half-written threshold map.
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, append(raw, '\n'), 0o644); err != nil {
+		return fmt.Errorf("confhead-calibrate: write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return fmt.Errorf("confhead-calibrate: rename %s: %w", dst, err)
 	}
 
 	fmt.Print(sb.String())
 	fmt.Println("wrote", dst)
+	// Print JSON diagnostics (realized_accepted_err vs target_error_rate per task).
+	// This is a diagnostic-only report; the threshold file written above is unchanged.
+	if len(diags) > 0 {
+		enc, _ := json.MarshalIndent(diags, "", "  ")
+		fmt.Println(string(enc))
+	}
 	return nil
 }
 
@@ -1334,6 +1661,13 @@ func runEval(args []string) error {
 	fs := flag.NewFlagSet("eval", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	dir := fs.String("dir", "testdata/eval", "gold-set dir of <task>.jsonl files")
+	confheadAB := fs.Bool("confhead-ab", false, "A1 decision-gate: paired confhead ON-vs-OFF frontier A/B (read-only; never enables the flag)")
+	stagedDir := fs.String("staged-dir", filepath.FromSlash(".testrun/bootstrap"), "confhead-ab: dir holding staged confhead-weights.json + confhead-thresholds.json")
+	eps := fs.Float64("eps", 0.0, "confhead-ab: max tolerated selective-acc drop for a frontier win")
+	costBudget := fs.Float64("cost-budget", 1.0, "confhead-ab: max ON/OFF avg-cost ratio for a frontier win (1.0 = no increase)")
+	calibTarget := fs.Float64("calib-target", 0.15, "confhead-ab: per-task target error for the calibrated-margin baseline threshold")
+	gate1Adopt := fs.Bool("gate1-adopt", false, "confhead-ab: gate-1 (confhead-eval) ADOPT outcome; ENABLE requires this AND all tasks frontier_win")
+	abForceOffOn := fs.Bool("ab-force-off-on", false, "confhead-ab TEST seam: force the ON arm confhead-OFF (OFF/OFF determinism check)")
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
 
@@ -1347,6 +1681,10 @@ func runEval(args []string) error {
 	}
 	if len(cases) == 0 {
 		return fmt.Errorf("no gold cases under %s", *dir)
+	}
+
+	if *confheadAB {
+		return runConfheadAB(cfg, cases, *stagedDir, *eps, *costBudget, *calibTarget, *gate1Adopt, *abForceOffOn)
 	}
 
 	run := func(c config.Config) []eval.Outcome {

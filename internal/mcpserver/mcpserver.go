@@ -7,6 +7,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -225,6 +226,100 @@ func (s *Server) Run(ctx context.Context, version string) error {
 			params["out"] = in.Out
 		}
 		return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateSVG, Params: params}))
+	})
+
+	srv.AddTool(&mcp.Tool{
+		Name:        "offload_generate_video",
+		Description: "Animate a still image into a short b-roll VIDEO clip on the LOCAL ComfyUI (HunyuanVideo 1.5 480p I2V by default; Wan 2.2 14B via model:wan for slow hero shots) for FREE — no cloud, runs on the local GPU. still (a local image path) + prompt describe the motion; optional: model (hunyuan|wan), frames (default ~33; realistic ceiling ~49), width/height, steps, seed, negative, reserve_vram (per-workflow VRAM hold-back override), out (output .mp4 path; default under the media dir). It auto-starts ComfyUI and takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait up to ~20min for the slot before deferring. A render itself takes minutes. Returns {video_path, seed}. On any failure (GPU busy, ComfyUI down, render error, timeout) it returns deferred:true — then make the clip another way.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"text prompt describing the motion/scene"},"still":{"type":"string","description":"local path to the input still image (I2V)"},"model":{"type":"string","description":"hunyuan (default, fast) | wan (slow photoreal hero)"},"negative":{"type":"string","description":"hard exclusions"},"out":{"type":"string","description":"output .mp4 path (optional; default under the media dir)"},"frames":{"type":"integer","description":"frame count (default ~33; realistic ceiling ~49)"},"width":{"type":"integer","description":"width px"},"height":{"type":"integer","description":"height px"},"steps":{"type":"integer","description":"sampler steps"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"VRAM held back for the display (per-workflow override; default ~1.0, raise for Wan)"}},"required":["prompt"]}`),
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var in struct {
+			Prompt      string  `json:"prompt"`
+			Still       string  `json:"still"`
+			Model       string  `json:"model"`
+			Negative    string  `json:"negative"`
+			Out         string  `json:"out"`
+			Frames      int     `json:"frames"`
+			Width       int     `json:"width"`
+			Height      int     `json:"height"`
+			Steps       int     `json:"steps"`
+			Seed        int     `json:"seed"`
+			ReserveVRAM float64 `json:"reserve_vram"`
+		}
+		_ = json.Unmarshal(req.Params.Arguments, &in)
+		params := map[string]any{}
+		if in.Still != "" {
+			params["still"] = in.Still
+		}
+		if in.Model != "" {
+			params["model"] = in.Model
+		}
+		if in.Negative != "" {
+			params["negative"] = in.Negative
+		}
+		if in.Out != "" {
+			params["out"] = in.Out
+		}
+		if in.Frames > 0 {
+			params["frames"] = in.Frames
+		}
+		if in.Width > 0 {
+			params["width"] = in.Width
+		}
+		if in.Height > 0 {
+			params["height"] = in.Height
+		}
+		if in.Steps > 0 {
+			params["steps"] = in.Steps
+		}
+		if in.Seed > 0 {
+			params["seed"] = in.Seed
+		}
+		if in.ReserveVRAM > 0 {
+			params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
+		}
+		return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateVideo, Input: in.Prompt, Image: in.Still, Params: params}))
+	})
+
+	srv.AddTool(&mcp.Tool{
+		Name:        "offload_generate_audio",
+		Description: "Synthesize AUDIO on the LOCAL GPU for FREE — no cloud. kind=voice (default) is text-to-speech narration via Chatterbox Multilingual (commercial-safe, default Spanish; pass clone=<ref.wav> for zero-shot voice cloning, lang for the language). kind=music is a text-to-music bed via ACE-Step (style-tag prompt; seconds for length; optional lyrics). text is the narration text or the music style prompt. Optional: out (output path; default under the media dir), seed, reserve_vram (music only). It takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait before deferring. Returns {audio_path, kind, seed}. On any failure (GPU busy, no route, worker error, timeout) it returns deferred:true — then synthesize it another way.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"narration text (voice) or music style prompt (music)"},"kind":{"type":"string","description":"voice (default, Chatterbox TTS) | music (ACE-Step)"},"clone":{"type":"string","description":"voice: local path to a reference .wav for zero-shot voice cloning"},"lang":{"type":"string","description":"voice: language code (default es)"},"seconds":{"type":"integer","description":"music: clip length in seconds"},"out":{"type":"string","description":"output audio path (optional; default under the media dir)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"music: VRAM held back for the display (per-workflow override)"}},"required":["text"]}`),
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var in struct {
+			Text        string  `json:"text"`
+			Kind        string  `json:"kind"`
+			Clone       string  `json:"clone"`
+			Lang        string  `json:"lang"`
+			Seconds     int     `json:"seconds"`
+			Out         string  `json:"out"`
+			Seed        int     `json:"seed"`
+			ReserveVRAM float64 `json:"reserve_vram"`
+		}
+		_ = json.Unmarshal(req.Params.Arguments, &in)
+		params := map[string]any{}
+		if in.Kind != "" {
+			params["kind"] = in.Kind
+		}
+		if in.Clone != "" {
+			params["clone"] = in.Clone
+		}
+		if in.Lang != "" {
+			params["lang"] = in.Lang
+		}
+		if in.Seconds > 0 {
+			params["seconds"] = in.Seconds
+		}
+		if in.Out != "" {
+			params["out"] = in.Out
+		}
+		if in.Seed > 0 {
+			params["seed"] = in.Seed
+		}
+		if in.ReserveVRAM > 0 {
+			params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
+		}
+		return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateAudio, Input: in.Text, Params: params}))
 	})
 
 	return srv.Run(ctx, &mcp.StdioTransport{})

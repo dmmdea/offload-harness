@@ -196,8 +196,14 @@ func Train(ledgerPath, labelsPath, outPath string) (string, error) {
 	if err != nil {
 		return sb.String(), fmt.Errorf("router.Train: marshal: %w", err)
 	}
-	if err := os.WriteFile(outPath, data, 0o644); err != nil {
+	// Atomic write (P4): tmp+rename so the long-running MCP server's reloader only
+	// ever reads a complete router-weights.json.
+	tmp := outPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return sb.String(), fmt.Errorf("router.Train: write: %w", err)
+	}
+	if err := os.Rename(tmp, outPath); err != nil {
+		return sb.String(), fmt.Errorf("router.Train: rename: %w", err)
 	}
 	fmt.Fprintf(&sb, "wrote %s\n", outPath)
 	return sb.String(), nil

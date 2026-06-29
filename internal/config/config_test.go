@@ -46,6 +46,51 @@ func TestDefaultSTTFields(t *testing.T) {
 	}
 }
 
+// TestDefaultGenerationFields: the video/audio generation defaults match the
+// brief verbatim — VideoGenScript=render/comfy-video.mjs, VoiceGenScript=render/tts.mjs,
+// MusicGenScript=render/comfy-music.mjs (the B3 ACE-Step worker). Per-task timeouts and
+// waitMs (so a queued TTS isn't starved by a 20-min video job) are present and positive.
+func TestDefaultGenerationFields(t *testing.T) {
+	c := Default()
+	if c.VideoGenScript != "render/comfy-video.mjs" {
+		t.Errorf("VideoGenScript = %q, want \"render/comfy-video.mjs\"", c.VideoGenScript)
+	}
+	if c.VoiceGenScript != "render/tts.mjs" {
+		t.Errorf("VoiceGenScript = %q, want \"render/tts.mjs\"", c.VoiceGenScript)
+	}
+	if c.MusicGenScript != "render/comfy-music.mjs" {
+		t.Errorf("MusicGenScript = %q, want \"render/comfy-music.mjs\" (B3 worker)", c.MusicGenScript)
+	}
+	if c.VideoGenTimeoutSec <= 0 {
+		t.Errorf("VideoGenTimeoutSec = %d, want > 0", c.VideoGenTimeoutSec)
+	}
+	if c.AudioGenTimeoutSec <= 0 {
+		t.Errorf("AudioGenTimeoutSec = %d, want > 0", c.AudioGenTimeoutSec)
+	}
+	if c.VideoGenWaitMs <= 0 {
+		t.Errorf("VideoGenWaitMs = %d, want > 0", c.VideoGenWaitMs)
+	}
+	if c.AudioGenWaitMs <= 0 {
+		t.Errorf("AudioGenWaitMs = %d, want > 0", c.AudioGenWaitMs)
+	}
+}
+
+// TestDefaultMemoryStack: the CPU memory stack the GPU-free helper must never unload
+// is sourced from config (not a buried const) so a renamed/added member is honored.
+// Default carries the two canonical CPU-only members.
+func TestDefaultMemoryStack(t *testing.T) {
+	c := Default()
+	want := map[string]bool{"embeddinggemma": true, "bge-reranker-v2-m3": true}
+	if len(c.MemoryStack) != len(want) {
+		t.Fatalf("MemoryStack = %v, want %v", c.MemoryStack, want)
+	}
+	for _, m := range c.MemoryStack {
+		if !want[m] {
+			t.Errorf("MemoryStack has unexpected member %q", m)
+		}
+	}
+}
+
 func TestKNNDefaults(t *testing.T) {
 	c := Default()
 	if c.KNNPreFilterEnabled {

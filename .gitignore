@@ -21,6 +21,7 @@ test-config.json
 # prep/utility venv + binary rollback backups — never track
 /.prep-venv/
 *.old.exe
+local-offload.exe.bak-*
 
 # subagent-driven-development scratch
 .superpowers/

@@ -130,10 +130,12 @@ func predict(tw taskWeights, feat map[string]float64) float64 {
 // ---- Training --------------------------------------------------------------
 
 const (
-	// minRows is the minimum number of labelled, non-cache-hit rows required to
-	// train a task head. 100 (vs router's 200) is justified by the richer feature
-	// set enabling better sample efficiency; provisional until more data accrues.
-	minRows   = 100
+	// minRows is the emission gate: a task head is only written to the weights
+	// file when it has at least this many labelled, non-cache-hit rows. Lowered
+	// from 100 to 60 so a head can emit on the ~80-120 rows the data bootstrap
+	// produces. The OOF paired-bootstrap CI (ci_lo > 0) is the real adoption
+	// guard — a 60-row head that is marginal will be correctly REJECTED there.
+	minRows   = 60
 	lrDefault = 0.1
 	iters     = 500
 	l2        = 1e-3
@@ -153,10 +155,10 @@ type row struct {
 func Fit(entries []ledger.Entry) *Model { return FitWithMinRows(entries, minRows) }
 
 // FitWithMinRows is Fit parameterized by the minimum labeled-row threshold.
-// Production (Fit) uses minRows=100; Task 2's out-of-fold validation passes a
-// lower threshold so a head can still train on a ~80-row training fold (the
-// paired-bootstrap CI is the real adoption guard). Behavior is otherwise
-// identical to Fit.
+// Production (Fit) uses minRows=60 (the emission gate); Task 2's out-of-fold
+// validation passes a lower threshold so a head can still train on a smaller
+// training fold (the paired-bootstrap CI is the real adoption guard). Behavior
+// is otherwise identical to Fit.
 func FitWithMinRows(entries []ledger.Entry, minRowsArg int) *Model {
 	byTask := map[string][]row{}
 	for _, e := range entries {
@@ -262,8 +264,14 @@ func Train(ledgerPath, labelsPath, outPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("confhead.Train: marshal: %w", err)
 	}
-	if err := os.WriteFile(outPath, data, 0o644); err != nil {
+	// Atomic write (P4): tmp+rename so the long-running MCP server's reloader only
+	// ever reads a complete confhead-weights.json.
+	tmp := outPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return "", fmt.Errorf("confhead.Train: write: %w", err)
+	}
+	if err := os.Rename(tmp, outPath); err != nil {
+		return "", fmt.Errorf("confhead.Train: rename: %w", err)
 	}
 
 	var sb strings.Builder
