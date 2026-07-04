@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dmmdea/local-offload/internal/config"
-	"github.com/dmmdea/local-offload/internal/core"
-	"github.com/dmmdea/local-offload/internal/llamaclient"
+	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/llamaclient"
 )
 
 // minimalPNGDataURI is a valid 1x1 PNG encoded as a data URI, used so the image

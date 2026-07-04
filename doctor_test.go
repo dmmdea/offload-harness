@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/config"
+	"github.com/dmmdea/offload-harness/internal/config"
 )
 
 // fakeSwap serves /health and a /v1/models roster like llama-swap does.

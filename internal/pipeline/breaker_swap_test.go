@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dmmdea/local-offload/internal/breaker"
-	"github.com/dmmdea/local-offload/internal/config"
-	"github.com/dmmdea/local-offload/internal/core"
-	"github.com/dmmdea/local-offload/internal/llamaclient"
+	"github.com/dmmdea/offload-harness/internal/breaker"
+	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/llamaclient"
 )
 
 // TestBreakerFailureGlue (LO-9): only a timeout on a likely-cold-swap call is

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/config"
-	"github.com/dmmdea/local-offload/internal/core"
+	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 func requireNodePipeline(t *testing.T) {

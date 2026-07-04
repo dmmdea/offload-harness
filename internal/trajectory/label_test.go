@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/core"
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 // fakeRunTier returns a triage result with the given decision, or ok=false.

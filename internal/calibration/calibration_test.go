@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/ledger"
+	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
 // ---- helpers ----------------------------------------------------------------

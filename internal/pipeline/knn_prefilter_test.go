@@ -4,10 +4,10 @@ import (
 	"os"
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/config"
-	"github.com/dmmdea/local-offload/internal/core"
-	"github.com/dmmdea/local-offload/internal/knn"
-	"github.com/dmmdea/local-offload/internal/router"
+	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/knn"
+	"github.com/dmmdea/offload-harness/internal/router"
 )
 
 func baseCfg() config.Config {

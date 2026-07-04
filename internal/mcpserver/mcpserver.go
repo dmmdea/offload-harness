@@ -15,10 +15,10 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/dmmdea/local-offload/internal/agent"
-	"github.com/dmmdea/local-offload/internal/core"
-	"github.com/dmmdea/local-offload/internal/nimclient"
-	"github.com/dmmdea/local-offload/internal/pipeline"
+	"github.com/dmmdea/offload-harness/internal/agent"
+	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/nimclient"
+	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
 
 type Server struct{ p *pipeline.Pipeline }

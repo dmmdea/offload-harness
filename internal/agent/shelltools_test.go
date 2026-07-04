@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/sandbox"
+	"github.com/dmmdea/offload-harness/internal/sandbox"
 )
 
 func TestPolicyShellGate(t *testing.T) {

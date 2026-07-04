@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/config"
-	"github.com/dmmdea/local-offload/internal/core"
-	"github.com/dmmdea/local-offload/internal/ledger"
-	"github.com/dmmdea/local-offload/internal/shadow"
+	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/ledger"
+	"github.com/dmmdea/offload-harness/internal/shadow"
 )
 
 func TestCaptureShadow_GatesAndWrites(t *testing.T) {

@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/config"
-	"github.com/dmmdea/local-offload/internal/core"
-	"github.com/dmmdea/local-offload/internal/llamaclient"
+	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/llamaclient"
 )
 
 func TestVideoDescribeNoVisionModelDefers(t *testing.T) {

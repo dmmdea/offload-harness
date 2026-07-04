@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/config"
-	"github.com/dmmdea/local-offload/internal/eval"
+	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/eval"
 )
 
 // TestRedirectWritesNeverHitsLiveBase: every writable path in the redirected

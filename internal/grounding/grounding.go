@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dmmdea/local-offload/internal/core"
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 var (

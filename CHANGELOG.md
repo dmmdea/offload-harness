@@ -18,7 +18,7 @@ Versioning: [SemVer](https://semver.org/).
 - Config gains `nim_endpoint` / `nim_model` / `nim_max_tokens` / `nim_timeout_sec` (all defaulted; the hosted endpoint + nemotron-3-ultra-550b are the defaults). No existing behavior changes.
 
 ### Fixed (packaging & robustness patch, 2026-07-03 — ships in the v0.6.0 tag)
-- **Module path now matches the repository** (`github.com/dmmdea/local-offload`), so `go install github.com/dmmdea/local-offload@latest` works. If you installed under an older module path, reinstall with the command above.
+- **Module path now matches the repository** (`github.com/dmmdea/offload-harness`), so `go install github.com/dmmdea/offload-harness@latest` works. If you installed under an older module path, reinstall with the command above.
 - Relative render-script paths (`videogen_script` etc.) resolve against the executable's directory, so generation tools work from any working directory.
 - `~/` expands in all path-typed config fields, and `./config.json` joined the config search order (`--config` > `$LOCAL_OFFLOAD_CONFIG` > `./config.json` > `~/.local-offload/config.json` > defaults).
 - Bad MCP tool arguments surface as a structured defer with the argument error instead of a generic failure.

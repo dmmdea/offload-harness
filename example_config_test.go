@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/config"
+	"github.com/dmmdea/offload-harness/internal/config"
 )
 
 // TestConfigExampleRoundTrips (LO-17): the committed config.example.json must

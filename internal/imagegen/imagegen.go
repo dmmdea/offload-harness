@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/dmmdea/local-offload/internal/gpugen"
+	"github.com/dmmdea/offload-harness/internal/gpugen"
 )
 
 // Generate runs `node <script> <out> <prompt> [--negative ..] [--width ..] ...` and

@@ -6,7 +6,7 @@ package report
 import (
 	"sort"
 
-	"github.com/dmmdea/local-offload/internal/ledger"
+	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
 type TaskStat struct {

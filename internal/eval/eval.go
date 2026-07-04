@@ -13,8 +13,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dmmdea/local-offload/internal/core"
-	"github.com/dmmdea/local-offload/internal/grounding"
+	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/grounding"
 )
 
 // Case is one gold-set instance with a defined success condition.

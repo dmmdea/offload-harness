@@ -18,7 +18,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/dmmdea/local-offload/internal/config"
+	"github.com/dmmdea/offload-harness/internal/config"
 )
 
 func main() {

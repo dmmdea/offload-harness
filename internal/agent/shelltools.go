@@ -8,7 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/dmmdea/local-offload/internal/sandbox"
+	"github.com/dmmdea/offload-harness/internal/sandbox"
 )
 
 const (

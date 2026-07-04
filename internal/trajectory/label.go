@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dmmdea/local-offload/internal/core"
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 // ReadLabels loads all manufactured labels from the sidecar (corrupt lines skipped).

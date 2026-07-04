@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dmmdea/local-offload/internal/core"
-	"github.com/dmmdea/local-offload/internal/gbnf"
+	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/gbnf"
 )
 
 // Built is everything the pipeline needs to run one task.

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/ledger"
+	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
 // writeLedger serialises a slice of entries to a temp JSONL file.

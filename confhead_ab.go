@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/dmmdea/local-offload/internal/confhead"
-	"github.com/dmmdea/local-offload/internal/config"
-	"github.com/dmmdea/local-offload/internal/eval"
+	"github.com/dmmdea/offload-harness/internal/confhead"
+	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/eval"
 )
 
 // abArmMetrics are the per-task quality/cost summaries for one A/B arm, derived

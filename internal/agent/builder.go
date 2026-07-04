@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dmmdea/local-offload/internal/sandbox"
+	"github.com/dmmdea/offload-harness/internal/sandbox"
 )
 
 // BuildConfig declares everything a drive mode needs to construct the agent loop

@@ -3,7 +3,7 @@ package grounding
 import (
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/core"
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 func TestCheck(t *testing.T) {

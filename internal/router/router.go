@@ -13,7 +13,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/dmmdea/local-offload/internal/ledger"
+	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
 // ---- JSON shapes --------------------------------------------------------

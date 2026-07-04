@@ -30,9 +30,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/dmmdea/local-offload/internal/confhead"
-	"github.com/dmmdea/local-offload/internal/knn"
-	"github.com/dmmdea/local-offload/internal/router"
+	"github.com/dmmdea/offload-harness/internal/confhead"
+	"github.com/dmmdea/offload-harness/internal/knn"
+	"github.com/dmmdea/offload-harness/internal/router"
 )
 
 // defaultReloadInterval is the poll cadence used by runMCP when it starts the

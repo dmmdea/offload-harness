@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/sandbox"
+	"github.com/dmmdea/offload-harness/internal/sandbox"
 )
 
 // TestMain dispatches the OS-sandbox worker role before running tests: when this

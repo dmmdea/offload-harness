@@ -3,7 +3,7 @@ package report
 import (
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/ledger"
+	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
 func b(v bool) *bool { return &v }

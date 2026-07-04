@@ -7,7 +7,7 @@
 A local-first harness that offloads short-context, low-judgment work — **summarize · classify · extract · triage** (plus vision, OCR, transcription, and image/SVG generation) — to a free **Gemma-family cascade** served by [llama.cpp](https://github.com/ggml-org/llama.cpp). It runs as a Go CLI and as an **MCP server** for AI coding agents. It **never calls a cloud model**: when it can't do a task confidently, it returns a structured **defer** so your agent handles it.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Go Reference](https://pkg.go.dev/badge/github.com/dmmdea/local-offload.svg)](https://pkg.go.dev/github.com/dmmdea/local-offload)
+[![Go Reference](https://pkg.go.dev/badge/github.com/dmmdea/offload-harness.svg)](https://pkg.go.dev/github.com/dmmdea/offload-harness)
 [![CI](https://img.shields.io/github/actions/workflow/status/dmmdea/local-offload/ci.yml?branch=main)](../../actions)
 [![MCP](https://img.shields.io/badge/MCP-stdio-purple.svg)](https://modelcontextprotocol.io)
 
@@ -61,7 +61,7 @@ First output in under five commands. If the local model is unreachable or unsure
 **Build from source** (recommended):
 
 ```bash
-git clone https://github.com/dmmdea/local-offload.git
+git clone https://github.com/dmmdea/offload-harness.git
 cd local-offload
 go build -o local-offload .       # or: go build -o local-offload.exe . on Windows
 ```
@@ -69,7 +69,7 @@ go build -o local-offload .       # or: go build -o local-offload.exe . on Windo
 **Go install:**
 
 ```bash
-go install github.com/dmmdea/local-offload@latest
+go install github.com/dmmdea/offload-harness@latest
 ```
 
 Requires **Go 1.26+** and a running **llama.cpp server** (see [Serving the models](#serving-the-models)).

@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/eval"
+	"github.com/dmmdea/offload-harness/internal/eval"
 )
 
 // oc builds a one-task Outcome with the given accepted/correct/escalated/tokens.

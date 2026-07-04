@@ -3,7 +3,7 @@ package tasks
 import (
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/core"
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 // TestBuildVQA: a vqa request with a question yields a non-empty system prompt,

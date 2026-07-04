@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/dmmdea/local-offload/internal/eval"
+	"github.com/dmmdea/offload-harness/internal/eval"
 )
 
 func TestHoistGlobalConfig(t *testing.T) {

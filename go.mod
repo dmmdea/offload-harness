@@ -1,4 +1,4 @@
-module github.com/dmmdea/local-offload
+module github.com/dmmdea/offload-harness
 
 go 1.26.3
 

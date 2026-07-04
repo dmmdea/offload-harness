@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dmmdea/local-offload/internal/confhead"
-	"github.com/dmmdea/local-offload/internal/config"
-	"github.com/dmmdea/local-offload/internal/core"
-	"github.com/dmmdea/local-offload/internal/ledger"
+	"github.com/dmmdea/offload-harness/internal/confhead"
+	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
 // writeAtomic writes a complete file via tmp+rename, mirroring how the artifact
