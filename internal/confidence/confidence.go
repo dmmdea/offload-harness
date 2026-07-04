@@ -13,7 +13,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/dmmdea/local-offload-pp-cli/internal/llamaclient"
+	"github.com/dmmdea/local-offload/internal/llamaclient"
 )
 
 // Margin returns a 0..1 separation between the model's top-1 and top-2 legal

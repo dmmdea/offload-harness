@@ -46,3 +46,26 @@ func TestFromJSONSchemaOrderAndTypes(t *testing.T) {
 		t.Errorf("price_usd should be TInteger, got %v", f[1].Type)
 	}
 }
+
+func TestWrapThinking(t *testing.T) {
+	base := Object([]Field{{Name: "label", Type: TEnum, Enum: []string{"a", "b"}}})
+	g := WrapThinking(base)
+	// a <think>...</think> span is prepended to the root, with a `think` rule added
+	for _, want := range []string{`"<think>"`, `"</think>"`, "think ::=", `"\"a\""`} {
+		if !strings.Contains(g, want) {
+			t.Errorf("think-wrapped grammar missing %q\n%s", want, g)
+		}
+	}
+	// the original common rules survive so JSON terminals still resolve
+	if !strings.Contains(g, "ws ::=") {
+		t.Errorf("think-wrapped grammar lost common rules:\n%s", g)
+	}
+	// the root production must come AFTER the think span (think then JSON object)
+	if !strings.Contains(g, `root ::= "<think>" think "</think>" ws "{"`) {
+		t.Errorf("think span not prepended to root:\n%s", g)
+	}
+	// input that isn't a `root ::=` grammar passes through unchanged (safety guard)
+	if got := WrapThinking("not a grammar"); got != "not a grammar" {
+		t.Errorf("non-root input should pass through unchanged, got %q", got)
+	}
+}

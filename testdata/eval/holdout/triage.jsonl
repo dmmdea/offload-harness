@@ -1,0 +1,40 @@
+{"task": "triage", "input": "RuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "git push rejected: failed to push some refs to origin.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "FATAL: could not open relation mapping file. Server shutting down.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "The build was cancelled after the test stage exited non-zero.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "Error: listen EADDRINUSE: address already in use :::3000", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "ValueError: invalid literal for int() with base 10: 'abc'", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "Pod CrashLoopBackOff: container restarting repeatedly.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "HTTP 504 Gateway Timeout from the upstream API.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "make: *** [build] Error 2", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "Disk write failed: input/output error on /dev/sda1.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "Authentication failed: token expired and refresh was rejected.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "Segfault in libssl.so; the process dumped core and exited.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "The deployment failed health checks and was automatically reverted.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "Error: certificate has expired; TLS handshake aborted.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "Fatal error: allowed memory size exhausted in script.php.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "Connection reset by peer while reading the response body.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "Test suite failed: 2 of 30 assertions did not pass.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "The container exited with code 139 (SIGSEGV).", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "DNS resolution failed for host api.internal; aborting.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "Could not bind to socket: permission denied. Startup aborted.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "yes"}
+{"task": "triage", "input": "Compilation finished. 0 errors. Binary written to ./bin/app.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "All 7 integration checks green. Pipeline succeeded.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Warning: function is deprecated but still works. Tests all passed.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Restarted service cleanly; it is now active and healthy.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Backup verified and uploaded. No issues detected.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Notice: rate limit at 80% of quota; request still served.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Build cached; reused 14 layers. Image ready.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Transient timeout on attempt 1, succeeded on retry. Completed OK.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Linting done: 0 errors, 3 style suggestions.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Database seeded with 500 sample rows successfully.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Deployment promoted to production. All replicas healthy.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Info: skipping unchanged file; nothing to rebuild.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Tests green: 120 passed, 0 failed, 2 skipped.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Heartbeat received. Cluster status: all nodes ready.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Successfully merged branch feature into main. Fast-forward.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Cache invalidated and rebuilt. Serving fresh content.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Job queued and processed without errors in 2.4s.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Update available; current version is still fully supported.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Snapshot restored. Data integrity check passed.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}
+{"task": "triage", "input": "Warning: large bundle size. Build succeeded in 11s.", "params": {"question": "Does this text indicate an error or failure?"}, "expect": "no"}

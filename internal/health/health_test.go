@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dmmdea/local-offload-pp-cli/internal/ledger"
+	"github.com/dmmdea/local-offload/internal/ledger"
 )
 
 // writeLedger serialises a slice of entries to a temp JSONL file.
@@ -256,5 +256,112 @@ func TestEWMADeferRate(t *testing.T) {
 	th := rpt.Tiers["d-tier"]
 	if th.EWMADeferRate < 0.9 {
 		t.Errorf("all-deferred tier: EWMADeferRate=%f want ≥0.9", th.EWMADeferRate)
+	}
+}
+
+// ── drifty-but-healthy tier (the false-degradation regression) ────────────────
+// Margin SHIFTS over time (CUSUM fires → Status=DEGRADED for observability) but
+// never COLLAPSES below baseline, and throughput is steady. Such a tier must NOT
+// land on the routing skip list: skipping an accurate small entry tier to route
+// around it to a larger, slower one is backwards, and it starved the flywheel of
+// E2B-entry data (live E2B: ewma_margin 0.957, but drift flags tripped → skipped).
+
+func driftyButHealthyEntries() []ledger.Entry {
+	var es []ledger.Entry
+	for i := 0; i < 10; i++ {
+		es = append(es, makeEntry("drifty-tier", 0.5, 50.0, 200, false))
+	}
+	for i := 0; i < 20; i++ {
+		// margin RISES to 0.9 (a sustained shift → drift) but never collapses;
+		// throughput steady. Healthy, just non-stationary.
+		es = append(es, makeEntry("drifty-tier", 0.9, 50.0, 200, false))
+	}
+	return es
+}
+
+func TestDriftyTierIsNotRouteSkipped(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "out.json")
+	p := writeLedger(t, driftyButHealthyEntries())
+	rpt, err := Run(p, outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	th := rpt.Tiers["drifty-tier"]
+	// Observability: a shifting margin trips drift detection.
+	if !th.DriftMargin {
+		t.Fatalf("expected DriftMargin=true for a shifting-margin tier, got %+v", th)
+	}
+	// Routing: margin never collapsed, so the tier must NOT be route-skipped.
+	if th.RouteSkip {
+		t.Errorf("drifty-but-healthy tier must not be route-skipped (ewma_margin=%f)", th.EWMAMargin)
+	}
+	var of outFile
+	b, _ := os.ReadFile(outPath)
+	if err := json.Unmarshal(b, &of); err != nil {
+		t.Fatal("outPath invalid JSON:", err)
+	}
+	for _, d := range of.Degraded {
+		if d == "drifty-tier" {
+			t.Errorf("drifty-but-healthy tier must NOT be in the routing skip list, got %v", of.Degraded)
+		}
+	}
+}
+
+// TestCollapsedTierIsRouteSkipped pins the other side: a genuine margin collapse
+// (the correctness proxy falling far below baseline) MUST be route-skipped.
+func TestCollapsedTierIsRouteSkipped(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "out.json")
+	p := writeLedger(t, degradingEntries()) // margin 0.9 → 0.05 collapse
+	rpt, err := Run(p, outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rpt.Tiers["bad-tier"].RouteSkip {
+		t.Errorf("collapsed tier must be route-skipped, got RouteSkip=false (ewma_margin=%f)",
+			rpt.Tiers["bad-tier"].EWMAMargin)
+	}
+}
+
+// tokCollapseHealthyMarginEntries: throughput collapses (60→5 tok/s) but the
+// confidence margin stays high and stable. This isolates the THROUGHPUT axis.
+func tokCollapseHealthyMarginEntries() []ledger.Entry {
+	var es []ledger.Entry
+	for i := 0; i < 10; i++ {
+		es = append(es, makeEntry("slow-tier", 0.9, 60.0, 200, false))
+	}
+	for i := 0; i < 20; i++ {
+		es = append(es, makeEntry("slow-tier", 0.9, 5.0, 1500, false)) // slow, but still accurate
+	}
+	return es
+}
+
+// TestTokCollapseIsNotRouteSkipped pins the deliberate behavior change: a tier
+// that got SLOW (throughput collapse / drift) but stayed accurate (stable margin)
+// is flagged DEGRADED for observability + timeout tuning, but must NOT be
+// route-skipped — routing around a slow entry tier to a larger, slower one is
+// backwards; throughput is governed by the per-tier timeout, not entry routing.
+func TestTokCollapseIsNotRouteSkipped(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "out.json")
+	p := writeLedger(t, tokCollapseHealthyMarginEntries())
+	rpt, err := Run(p, outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	th := rpt.Tiers["slow-tier"]
+	if th.Status != "DEGRADED" {
+		t.Errorf("throughput-collapsed tier should be DEGRADED for observability, got %q", th.Status)
+	}
+	if th.RouteSkip {
+		t.Errorf("throughput-collapsed-but-accurate tier must NOT be route-skipped (ewma_margin=%f)", th.EWMAMargin)
+	}
+	var of outFile
+	b, _ := os.ReadFile(outPath)
+	if err := json.Unmarshal(b, &of); err != nil {
+		t.Fatal("outPath invalid JSON:", err)
+	}
+	for _, d := range of.Degraded {
+		if d == "slow-tier" {
+			t.Errorf("throughput-collapsed tier must NOT be in the routing skip list, got %v", of.Degraded)
+		}
 	}
 }

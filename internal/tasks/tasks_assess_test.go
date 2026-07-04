@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dmmdea/local-offload-pp-cli/internal/core"
+	"github.com/dmmdea/local-offload/internal/core"
 )
 
 // TestBuildAssessImage_NoBrief: assess_image with no brief builds a grammar and

@@ -10,29 +10,42 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 )
 
+// connectTimeout bounds only the TCP dial (LO-9): a dead/unreachable endpoint
+// fails in ~2s instead of consuming the whole request budget, while the total
+// budget stays at the caller's timeout — a llama-swap COLD SWAP holds the
+// request open for the entire model load, so the end-to-end budget must
+// survive it.
+const connectTimeout = 2 * time.Second
+
 type Client struct {
-	base    string
-	path    string
-	model   string
-	http    *http.Client
+	base  string
+	path  string
+	model string
+	http  *http.Client
 }
 
 // New builds a client. path is the generation route (default
 // /v1/chat/completions); model is the llama-swap alias ("" = dedicated server).
+// The HTTP budget is SPLIT: connect gets connectTimeout, the whole request
+// keeps `timeout`. The transport clones http.DefaultTransport so proxy/TLS
+// defaults are preserved.
 func New(base, path, model string, timeout time.Duration) *Client {
 	if path == "" {
 		path = "/v1/chat/completions"
 	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = (&net.Dialer{Timeout: connectTimeout, KeepAlive: 30 * time.Second}).DialContext
 	return &Client{
 		base:  strings.TrimRight(base, "/"),
 		path:  path,
 		model: model,
-		http:  &http.Client{Timeout: timeout},
+		http:  &http.Client{Timeout: timeout, Transport: tr},
 	}
 }
 
@@ -200,6 +213,61 @@ func (c *Client) GenerateVision(ctx context.Context, model, system, user string,
 		MaxTokens:   maxTokens,
 		Grammar:     grammar,
 		CachePrompt: false, // vision: KV reuse across images can corrupt (llama.cpp #17200)
+		Messages:    []mmMsg{},
+	}
+	if topLogprobs > 0 {
+		body.Logprobs = true
+		body.TopLogprobs = topLogprobs
+	}
+	if system != "" {
+		body.Messages = append(body.Messages, mmMsg{Role: "system", Content: []contentPart{{Type: "text", Text: system}}})
+	}
+	body.Messages = append(body.Messages, mmMsg{Role: "user", Content: userParts})
+
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return GenResult{}, err
+	}
+	start := time.Now()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+c.path, bytes.NewReader(buf))
+	if err != nil {
+		return GenResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return GenResult{}, err
+	}
+	return decodeGenResult(resp, start)
+}
+
+// GenerateVisionInterleaved sends a multimodal chat request whose user content
+// INTERLEAVES a text label before each image (frameLabels[i] then image[i]),
+// then appends trailingUser as the final text part. This matches Qwen3-VL's
+// trained "<timestamp> frame" interleaved format (its MRoPE uses the timestamp
+// tokens for temporal localization). frameLabels and imageDataURIs pair by index;
+// a missing/empty label is skipped for that image. Shares decodeGenResult; like
+// GenerateVision, CachePrompt is forced OFF (llama.cpp #17200).
+func (c *Client) GenerateVisionInterleaved(ctx context.Context, model, system string, frameLabels, imageDataURIs []string, trailingUser, grammar string, maxTokens int, temperature float64, topLogprobs int) (GenResult, error) {
+	if model == "" {
+		model = c.model
+	}
+	userParts := make([]contentPart, 0, 2*len(imageDataURIs)+1)
+	for i, uri := range imageDataURIs {
+		if i < len(frameLabels) && frameLabels[i] != "" {
+			userParts = append(userParts, contentPart{Type: "text", Text: frameLabels[i]})
+		}
+		userParts = append(userParts, contentPart{Type: "image_url", ImageURL: &imageURL{URL: uri}})
+	}
+	if trailingUser != "" {
+		userParts = append(userParts, contentPart{Type: "text", Text: trailingUser})
+	}
+	body := mmChatReq{
+		Model:       model,
+		Temperature: temperature,
+		MaxTokens:   maxTokens,
+		Grammar:     grammar,
+		CachePrompt: false,
 		Messages:    []mmMsg{},
 	}
 	if topLogprobs > 0 {

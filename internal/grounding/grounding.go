@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dmmdea/local-offload-pp-cli/internal/core"
+	"github.com/dmmdea/local-offload/internal/core"
 )
 
 var (

@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/dmmdea/local-offload-pp-cli/internal/llamaclient"
+	"github.com/dmmdea/local-offload/internal/llamaclient"
 )
 
 // tok builds a chosen-only token (no alternatives) for string reconstruction.

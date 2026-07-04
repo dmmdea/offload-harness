@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dmmdea/local-offload-pp-cli/internal/core"
-	"github.com/dmmdea/local-offload-pp-cli/internal/gbnf"
+	"github.com/dmmdea/local-offload/internal/core"
+	"github.com/dmmdea/local-offload/internal/gbnf"
 )
 
 // Built is everything the pipeline needs to run one task.
@@ -36,9 +36,29 @@ func Build(req core.Request) (Built, error) {
 		return buildOCR(req)
 	case core.TaskAssessImage:
 		return buildAssessImage(req)
+	case core.TaskVideoDescribe:
+		return buildVideoDescribe(req)
 	default:
 		return Built{}, fmt.Errorf("unknown task %q", req.Task)
 	}
+}
+
+// buildVideoDescribe builds a free-text question over SAMPLED VIDEO FRAMES. The
+// frames ride the multi-image vision path (the pipeline samples req.Video); the
+// system prompt asks the model to note what each numbered frame shows and then
+// answer, so the free-text answer is citation-flavored (which frames matter) for
+// Claude-driven downstream editing. No grammar — the answer is natural language.
+func buildVideoDescribe(req core.Request) (Built, error) {
+	q := paramString(req.Params, "question")
+	if q == "" {
+		return Built{}, fmt.Errorf("video_describe requires a question")
+	}
+	return Built{
+		System:    "You are analyzing a video. The images are frames sampled in chronological order, each preceded by its timestamp (e.g. <0.0 seconds>). Briefly note what the relevant timestamps show, then answer the question using ONLY what is visible across the frames. If the frames do not contain the answer, say you cannot tell.",
+		User:      q,
+		Grammar:   "",
+		MaxTokens: 512,
+	}, nil
 }
 
 // buildVQA builds a free-text visual-question-answering request: the question is

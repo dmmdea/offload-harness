@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dmmdea/local-offload-pp-cli/internal/core"
-	"github.com/dmmdea/local-offload-pp-cli/internal/llamaclient"
+	"github.com/dmmdea/local-offload/internal/core"
+	"github.com/dmmdea/local-offload/internal/llamaclient"
 )
 
 // etestSchema is the {properties:{...}} JSON-schema param the extract task expects.

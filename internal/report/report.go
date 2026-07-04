@@ -6,7 +6,7 @@ package report
 import (
 	"sort"
 
-	"github.com/dmmdea/local-offload-pp-cli/internal/ledger"
+	"github.com/dmmdea/local-offload/internal/ledger"
 )
 
 type TaskStat struct {
@@ -14,6 +14,7 @@ type TaskStat struct {
 	N                  int     `json:"n"`
 	Deferred           int     `json:"deferred"`
 	EscalationResolved int     `json:"escalation_resolved"` // a larger tier produced an accepted answer
+	ReasoningReclaimed int     `json:"reasoning_reclaimed"` // completed via the terminal reasoning tier
 	LabeledGrounded    int     `json:"labeled_grounded"`
 	Grounded           int     `json:"grounded"`
 	LowMarginAccepts   int     `json:"low_margin_accepts"` // accepted but margin in (0, threshold)
@@ -42,7 +43,12 @@ func Summarize(entries []ledger.Entry, marginThreshold float64) map[string]TaskS
 			s.Deferred++
 			continue
 		}
-		if e.Escalations > 0 {
+		// A reclaim carries Escalations>0 (the cascade climbed before deferring to
+		// the reasoning tier), but the escalation tier did NOT produce the answer —
+		// attribute it to reasoning, never double-count it as an escalation resolve.
+		if e.Reasoning {
+			s.ReasoningReclaimed++
+		} else if e.Escalations > 0 {
 			s.EscalationResolved++
 		}
 		if e.Grounded != nil {

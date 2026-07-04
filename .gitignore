@@ -14,3 +14,20 @@ test-config.json
 # setup.sh-generated artifacts (written into the harness source dir)
 /offload-family.llama-swap.yaml
 /serve-offload.sh
+
+# local TTS venv (Chatterbox) — not tracked
+.tts-venv/
+
+# prep/utility venv + binary rollback backups — never track (LO-14: two ~14MB
+# exe backups were tracked; the broader patterns catch every rename variant)
+/.prep-venv/
+*.old.exe
+local-offload.exe.bak-*
+*.exe.bak-*
+*.exe.old-*
+
+# scratch render/probe artifacts
+_tmp-*.svg
+
+# subagent-driven-development scratch
+.superpowers/

@@ -46,3 +46,28 @@ func TestExtractNoJSON(t *testing.T) {
 		t.Error("expected ErrNoJSON")
 	}
 }
+
+func TestStripThink(t *testing.T) {
+	// object output after a think span
+	if got := StripThink("<think>reasoning here</think>\n{\"label\":\"a\"}"); got != `{"label":"a"}` {
+		t.Errorf("object case: got %q", got)
+	}
+	// bare-string output (classify/triage enum) after a think span
+	if got := StripThink("<think>r</think>  \"billing\""); got != `"billing"` {
+		t.Errorf("enum/string case: got %q", got)
+	}
+	// no think span -> unchanged
+	if got := StripThink(`{"label":"a"}`); got != `{"label":"a"}` {
+		t.Errorf("no-think passthrough: got %q", got)
+	}
+	// a </think> INSIDE the JSON answer must be preserved: split on the FIRST close tag
+	// (the grammar guarantees that is the structural separator), not the last.
+	const withTag = `<think>reasoning</think>{"reason":"the log said </think> here"}`
+	if got := StripThink(withTag); got != `{"reason":"the log said </think> here"}` {
+		t.Errorf("answer containing </think>: got %q", got)
+	}
+	// content with no <think> prefix is left alone even if it contains </think>
+	if got := StripThink(`plain text with </think> in it`); got != `plain text with </think> in it` {
+		t.Errorf("no-prefix-with-tag passthrough: got %q", got)
+	}
+}

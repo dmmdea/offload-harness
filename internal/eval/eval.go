@@ -13,8 +13,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dmmdea/local-offload-pp-cli/internal/core"
-	"github.com/dmmdea/local-offload-pp-cli/internal/grounding"
+	"github.com/dmmdea/local-offload/internal/core"
+	"github.com/dmmdea/local-offload/internal/grounding"
 )
 
 // Case is one gold-set instance with a defined success condition.
@@ -246,6 +246,64 @@ func AUGRC(pts []RCPoint) float64 {
 		sum += genRisk
 	}
 	return sum / float64(n)
+}
+
+// ECE computes Expected Calibration Error using nBins equal-width bins over the
+// predicted probability range [0, 1]. For each bin b containing n_b points:
+//
+//	contribution = (n_b / N) * |mean_predicted_b - mean_correct_b|
+//
+// ECE = sum over non-empty bins. Lower = better calibrated. Returns 0 for empty
+// input. If nBins <= 0 it is clamped to 10. pts need not be sorted.
+func ECE(pts []RCPoint, nBins int) float64 {
+	n := len(pts)
+	if n == 0 {
+		return 0
+	}
+	if nBins <= 0 {
+		nBins = 10
+	}
+
+	type bin struct {
+		sumPred    float64
+		sumCorrect float64
+		count      int
+	}
+	bins := make([]bin, nBins)
+
+	for _, p := range pts {
+		// Clamp to [0,1] defensively; map to bin index.
+		conf := p.Confidence
+		if conf < 0 {
+			conf = 0
+		} else if conf > 1 {
+			conf = 1
+		}
+		idx := int(conf * float64(nBins))
+		if idx >= nBins {
+			idx = nBins - 1 // conf==1.0 edge case
+		}
+		bins[idx].sumPred += conf
+		if p.Correct {
+			bins[idx].sumCorrect += 1
+		}
+		bins[idx].count++
+	}
+
+	ece := 0.0
+	for _, b := range bins {
+		if b.count == 0 {
+			continue
+		}
+		meanPred := b.sumPred / float64(b.count)
+		meanCorr := b.sumCorrect / float64(b.count)
+		diff := meanPred - meanCorr
+		if diff < 0 {
+			diff = -diff
+		}
+		ece += float64(b.count) / float64(n) * diff
+	}
+	return ece
 }
 
 // tieAveragedLoss returns the per-point 0/1 loss (1 = incorrect) for points

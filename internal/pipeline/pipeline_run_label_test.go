@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dmmdea/local-offload-pp-cli/internal/config"
-	"github.com/dmmdea/local-offload-pp-cli/internal/core"
-	"github.com/dmmdea/local-offload-pp-cli/internal/ledger"
-	"github.com/dmmdea/local-offload-pp-cli/internal/llamaclient"
+	"github.com/dmmdea/local-offload/internal/config"
+	"github.com/dmmdea/local-offload/internal/core"
+	"github.com/dmmdea/local-offload/internal/ledger"
+	"github.com/dmmdea/local-offload/internal/llamaclient"
 )
 
 // fakeChat is a minimal /v1/chat/completions response matching llamaclient's

@@ -78,6 +78,26 @@ func Object(fields []Field) string {
 	return root + "\n" + commonRules
 }
 
+// WrapThinking turns a grammar G (whose root is "root ::= <prod>") into a reasoning grammar
+// "root ::= \"<think>\" think \"</think>\" ws <prod>" plus a `think` rule. A thinking model
+// then reasons freely inside the <think> span and emits exactly G's structured output after
+// it. `think` matches any run of NON-'<' characters, so the first '<' after the span must
+// begin the literal </think> — reasoning can never derail on stray markup (e.g. </div>). The
+// reasoning span itself therefore cannot contain a literal '<'; the JSON answer still can.
+// Pair with a thinking-OFF server (the grammar — not the chat template — supplies the think
+// tags, so the JSON lands in `content`) and StripThink() on the response. Input that is not a
+// "root ::= " grammar is returned unchanged so the caller can fall back to the plain grammar.
+func WrapThinking(grammar string) string {
+	const thinkRule = "\nthink ::= [^<]*\n"
+	nl := strings.IndexByte(grammar, '\n')
+	if nl < 0 || !strings.HasPrefix(grammar, "root ::= ") {
+		return grammar
+	}
+	prod := strings.TrimPrefix(grammar[:nl], "root ::= ")
+	rest := grammar[nl:]
+	return `root ::= "<think>" think "</think>" ws ` + prod + thinkRule + rest
+}
+
 // FromJSONSchema builds Fields from a minimal JSON-schema object (used by the
 // dynamic `extract` task). It handles type: string/number/integer/boolean,
 // arrays of strings, and string enums. Property order follows the schema's

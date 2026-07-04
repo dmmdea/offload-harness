@@ -13,17 +13,17 @@ import (
 	"os"
 	"strings"
 
-	"github.com/dmmdea/local-offload-pp-cli/internal/ledger"
+	"github.com/dmmdea/local-offload/internal/ledger"
 )
 
 // ---- JSON shapes --------------------------------------------------------
 
 // taskWeights holds everything needed to score one task at inference time.
 type taskWeights struct {
-	Features []string             `json:"features"`  // ordered feature names
-	Weights  []float64            `json:"weights"`   // len = len(Features)+1 (bias last)
-	Means    map[string]float64   `json:"means"`
-	Stds     map[string]float64   `json:"stds"`
+	Features []string           `json:"features"` // ordered feature names
+	Weights  []float64          `json:"weights"`  // len = len(Features)+1 (bias last)
+	Means    map[string]float64 `json:"means"`
+	Stds     map[string]float64 `json:"stds"`
 }
 
 // weightFile is the on-disk router-weights.json.
@@ -69,6 +69,17 @@ func (m *Model) PreferLargerEntry(task string, feat map[string]float64) bool {
 	return p < 0.5
 }
 
+// HasTask reports whether the model has trained weights for task. A caller can
+// use this to prefer the router and skip a more expensive fallback (e.g. the kNN
+// pre-filter). Returns false for a nil receiver or an unknown task.
+func (m *Model) HasTask(task string) bool {
+	if m == nil {
+		return false
+	}
+	_, ok := m.tasks[task]
+	return ok
+}
+
 // predict returns P(accept at E2B) for one feature vector.
 func predict(tw taskWeights, feat map[string]float64) float64 {
 	z := 0.0
@@ -97,14 +108,21 @@ type row struct {
 	y    float64 // 1 = accepted at E2B, 0 = not
 }
 
-// Train reads the JSONL ledger at ledgerPath, fits one logistic-regression
-// model per eligible task (triage/classify with >=minRows labelled rows),
-// writes the results to outPath (router-weights.json), and returns a
-// human-readable report.
-func Train(ledgerPath, outPath string) (string, error) {
+// Train reads the JSONL ledger at ledgerPath, optionally merges a sidecar of
+// synthesized E2B-counterfactual rows at labelsPath (empty string = skip),
+// fits one logistic-regression model per eligible task (triage/classify with
+// >=minRows labelled rows), writes the results to outPath
+// (router-weights.json), and returns a human-readable report.
+func Train(ledgerPath, labelsPath, outPath string) (string, error) {
 	entries, err := readLedger(ledgerPath)
 	if err != nil {
 		return "", fmt.Errorf("router.Train: read ledger: %w", err)
+	}
+	if labelsPath != "" {
+		labels, lerr := readLedger(labelsPath) // same JSONL Entry shape; missing => nil
+		if lerr == nil {
+			entries = append(entries, labels...)
+		}
 	}
 
 	// Partition by task; only E2B entry rows are labelled.
@@ -178,8 +196,14 @@ func Train(ledgerPath, outPath string) (string, error) {
 	if err != nil {
 		return sb.String(), fmt.Errorf("router.Train: marshal: %w", err)
 	}
-	if err := os.WriteFile(outPath, data, 0o644); err != nil {
+	// Atomic write (P4): tmp+rename so the long-running MCP server's reloader only
+	// ever reads a complete router-weights.json.
+	tmp := outPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return sb.String(), fmt.Errorf("router.Train: write: %w", err)
+	}
+	if err := os.Rename(tmp, outPath); err != nil {
+		return sb.String(), fmt.Errorf("router.Train: rename: %w", err)
 	}
 	fmt.Fprintf(&sb, "wrote %s\n", outPath)
 	return sb.String(), nil

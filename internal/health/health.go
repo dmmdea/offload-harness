@@ -12,7 +12,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/dmmdea/local-offload-pp-cli/internal/ledger"
+	"github.com/dmmdea/local-offload/internal/ledger"
 )
 
 // TierHealth holds the computed health metrics for one ModelTier.
@@ -25,7 +25,8 @@ type TierHealth struct {
 	P95LatencyMs    float64 `json:"p95_latency_ms"`
 	DriftMargin     bool    `json:"drift_margin"`
 	DriftTokPerSec  bool    `json:"drift_tok_per_sec"`
-	Status          string  `json:"status"` // "OK" | "DEGRADED"
+	Status          string  `json:"status"`     // "OK" | "DEGRADED" — any anomaly (observability)
+	RouteSkip       bool    `json:"route_skip"` // true ONLY on a genuine quality collapse — the routing signal
 }
 
 // Report is the result returned by Run. It holds per-tier health and any
@@ -70,10 +71,18 @@ func Run(ledgerPath, outPath string) (Report, error) {
 		timeout := int(math.Ceil(th.P95LatencyMs * 2))
 		out.TierTimeoutsMs[tier] = timeout
 
+		// Observability note for ANY degradation (drift or collapse).
 		if th.Status == "DEGRADED" {
-			out.Degraded = append(out.Degraded, tier)
 			report.Notes = append(report.Notes,
 				"tier "+tier+" is DEGRADED (drift or low margin/throughput vs baseline)")
+		}
+		// Routing skip list: ONLY genuine quality collapses. Drift/throughput
+		// degradation is observability-only — it must not route around an
+		// otherwise-accurate entry tier (that starved the flywheel).
+		if th.RouteSkip {
+			out.Degraded = append(out.Degraded, tier)
+			report.Notes = append(report.Notes,
+				"tier "+tier+" is ROUTE-SKIPPED (quality collapse: margin far below baseline)")
 		}
 	}
 
@@ -200,11 +209,21 @@ func analyzeTier(tier string, es []ledger.Entry) TierHealth {
 	driftMargin := cusumDetect(margins)
 	driftTok := pageHinkley(tokPerSecs)
 
-	// DEGRADED if drift detected OR EWMA has fallen significantly below baseline.
-	const degradeThreshold = 0.5 // EWMA < 50 % of baseline → degraded
-	degraded := driftMargin || driftTok ||
-		(baselineMargin > 0 && ewmaMargin < baselineMargin*degradeThreshold) ||
-		(baselineTok > 0 && ewmaTokPerSec < baselineTok*degradeThreshold)
+	const degradeThreshold = 0.5 // EWMA < 50 % of baseline → collapse
+
+	// A genuine QUALITY collapse: the confidence margin (our correctness proxy)
+	// has fallen far below this tier's own early-history baseline. This — and only
+	// this — justifies routing AROUND the tier to a larger one.
+	marginCollapse := baselineMargin > 0 && ewmaMargin < baselineMargin*degradeThreshold
+
+	// Status (observability) flags ANY anomaly: drift (non-stationarity) or a
+	// throughput/margin collapse. Drift and throughput are NOT routing signals —
+	// a tier can be accurate yet non-stationary or merely slower (the live E2B
+	// case: ewma_margin 0.957 but both drift flags tripped). Skipping such a tier
+	// to a bigger, slower one is backwards and starved the flywheel. So they
+	// surface as DEGRADED for visibility/timeout tuning, but do NOT route-skip.
+	tokCollapse := baselineTok > 0 && ewmaTokPerSec < baselineTok*degradeThreshold
+	degraded := driftMargin || driftTok || marginCollapse || tokCollapse
 
 	status := "OK"
 	if degraded {
@@ -221,6 +240,7 @@ func analyzeTier(tier string, es []ledger.Entry) TierHealth {
 		DriftMargin:    driftMargin,
 		DriftTokPerSec: driftTok,
 		Status:         status,
+		RouteSkip:      marginCollapse, // routing skip = quality collapse only
 	}
 }
 
@@ -340,5 +360,11 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	// Atomic write (P4): tmp+rename so the long-running MCP server's reloader only
+	// ever reads a complete tier_overrides.json.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

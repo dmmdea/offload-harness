@@ -1,0 +1,45 @@
+{"task": "classify", "input": "I returned the upgrade but the refund hasn't shown on my statement.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "billing"}
+{"task": "classify", "input": "Why am I paying a processing fee on top of the subscription price?", "params": {"labels": ["billing", "technical", "account"]}, "expect": "billing"}
+{"task": "classify", "input": "Can you move my payment due date to the 15th of each month?", "params": {"labels": ["billing", "technical", "account"]}, "expect": "billing"}
+{"task": "classify", "input": "The invoice lists a seat count higher than what we actually use.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "billing"}
+{"task": "classify", "input": "I need a consolidated bill covering all three of our workspaces.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "billing"}
+{"task": "classify", "input": "My prepaid credits were charged twice for a single purchase.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "billing"}
+{"task": "classify", "input": "Please end the auto-renew so I'm not billed for another year.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "billing"}
+{"task": "classify", "input": "The exchange rate on my charge differs from what was quoted.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "billing"}
+{"task": "classify", "input": "I want to apply the loyalty discount that wasn't on this invoice.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "billing"}
+{"task": "classify", "input": "Refund the partial month after I cancelled mid-cycle.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "billing"}
+{"task": "classify", "input": "Change the billing contact email to our finance department.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "billing"}
+{"task": "classify", "input": "There's a recurring charge for an add-on I never subscribed to.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "billing"}
+{"task": "classify", "input": "Can I prepay the next twelve months in a single invoice?", "params": {"labels": ["billing", "technical", "account"]}, "expect": "billing"}
+{"task": "classify", "input": "The tax rate on my bill looks wrong for my country.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "billing"}
+{"task": "classify", "input": "I was charged the full price despite my nonprofit discount.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "billing"}
+{"task": "classify", "input": "The notification bell shows a count but the panel is empty.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "technical"}
+{"task": "classify", "input": "Exporting a large report times out before the download starts.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "technical"}
+{"task": "classify", "input": "The Slack integration posts duplicate messages for one event.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "technical"}
+{"task": "classify", "input": "Inline editing reverts my changes the moment I click away.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "technical"}
+{"task": "classify", "input": "The login page is stuck in an infinite redirect loop.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "technical"}
+{"task": "classify", "input": "Uploaded avatars appear rotated 90 degrees after saving.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "technical"}
+{"task": "classify", "input": "The dashboard numbers don't match the values in the raw export.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "technical"}
+{"task": "classify", "input": "The webhook retries forever even after we return a 200.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "technical"}
+{"task": "classify", "input": "Keyboard shortcuts stopped responding after the latest release.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "technical"}
+{"task": "classify", "input": "The embedded video player shows a black screen with audio only.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "technical"}
+{"task": "classify", "input": "Filtering by tag returns items that don't have that tag.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "technical"}
+{"task": "classify", "input": "The mobile app logs me out every time I background it.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "technical"}
+{"task": "classify", "input": "The API docs example returns a 400 with the exact payload shown.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "technical"}
+{"task": "classify", "input": "Tooltips render off-screen on the far-right column.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "technical"}
+{"task": "classify", "input": "The bulk delete only removes the first page of selected rows.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "technical"}
+{"task": "classify", "input": "How do I assign a billing-only role without giving full admin?", "params": {"labels": ["billing", "technical", "account"]}, "expect": "account"}
+{"task": "classify", "input": "I need to merge two workspaces that belong to the same team.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "account"}
+{"task": "classify", "input": "Please remove my email from the shared contact directory.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "account"}
+{"task": "classify", "input": "How do I rotate the access token tied to my account?", "params": {"labels": ["billing", "technical", "account"]}, "expect": "account"}
+{"task": "classify", "input": "I want to verify a new domain for my organization's logins.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "account"}
+{"task": "classify", "input": "Can you restore a member I accidentally removed yesterday?", "params": {"labels": ["billing", "technical", "account"]}, "expect": "account"}
+{"task": "classify", "input": "How do I change the owner of a shared folder to someone else?", "params": {"labels": ["billing", "technical", "account"]}, "expect": "account"}
+{"task": "classify", "input": "I need to disable login via password and require SSO only.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "account"}
+{"task": "classify", "input": "Please update my legal name as it appears on my profile.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "account"}
+{"task": "classify", "input": "How do I see the audit trail of who accessed my account?", "params": {"labels": ["billing", "technical", "account"]}, "expect": "account"}
+{"task": "classify", "input": "I want to remove the connected calendar from my profile.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "account"}
+{"task": "classify", "input": "Can you help me recover the email tied to a dormant account?", "params": {"labels": ["billing", "technical", "account"]}, "expect": "account"}
+{"task": "classify", "input": "How do I promote a guest to a full member of the team?", "params": {"labels": ["billing", "technical", "account"]}, "expect": "account"}
+{"task": "classify", "input": "I need to set up a delegate who can manage my profile settings.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "account"}
+{"task": "classify", "input": "Please revoke the invitation I sent to the wrong address.", "params": {"labels": ["billing", "technical", "account"]}, "expect": "account"}

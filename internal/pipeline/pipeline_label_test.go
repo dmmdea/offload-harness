@@ -3,7 +3,7 @@ package pipeline
 import (
 	"testing"
 
-	"github.com/dmmdea/local-offload-pp-cli/internal/core"
+	"github.com/dmmdea/local-offload/internal/core"
 )
 
 func TestAnswersAgree(t *testing.T) {

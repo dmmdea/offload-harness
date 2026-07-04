@@ -1,8 +1,63 @@
 package eval
 
 import (
+	"math"
 	"testing"
 )
+
+// --- ECE --------------------------------------------------------------------
+
+// TestECE_PerfectCalibration: when each prediction equals the fraction correct
+// in its bin, ECE should be ~0.
+func TestECE_PerfectCalibration(t *testing.T) {
+	// Construct 100 points whose predicted confidence equals their correctness
+	// frequency per bin. Ten bins of 10 points each; within each bin all
+	// predictions are identical, and the fraction correct equals the prediction.
+	var pts []RCPoint
+	for b := 0; b < 10; b++ {
+		pred := float64(b)*0.1 + 0.05          // bin centre: 0.05, 0.15, ..., 0.95
+		nCorrect := int(math.Round(pred * 10)) // fraction correct == pred
+		for i := 0; i < 10; i++ {
+			pts = append(pts, RCPoint{Confidence: pred, Correct: i < nCorrect})
+		}
+	}
+	ece := ECE(pts, 10)
+	if ece > 0.05 {
+		t.Fatalf("perfectly-calibrated set: ECE should be ~0, got %.4f", ece)
+	}
+}
+
+// TestECE_Miscalibrated: always predict 0.9 but only 50% correct → ECE ≈ 0.4.
+func TestECE_Miscalibrated(t *testing.T) {
+	// All 100 points predict 0.9; 50 correct, 50 wrong.
+	// They all fall in bin 9 (conf ∈ [0.9,1.0]).
+	// mean_pred = 0.9, mean_correct = 0.5 → |diff| = 0.4.
+	// weight = 100/100 = 1.0 → ECE = 1.0 * 0.4 = 0.4.
+	pts := make([]RCPoint, 100)
+	for i := range pts {
+		pts[i] = RCPoint{Confidence: 0.9, Correct: i < 50}
+	}
+	ece := ECE(pts, 10)
+	if math.Abs(ece-0.4) > 1e-9 {
+		t.Fatalf("miscalibrated set: ECE should be 0.4, got %.6f", ece)
+	}
+}
+
+// TestECE_Empty: empty input returns 0.
+func TestECE_Empty(t *testing.T) {
+	if ECE(nil, 10) != 0 {
+		t.Fatal("empty input should return 0")
+	}
+}
+
+// TestECE_ZeroBinsClamps: nBins<=0 is clamped to 10 and must not panic.
+func TestECE_ZeroBinsClamps(t *testing.T) {
+	pts := []RCPoint{{Confidence: 0.7, Correct: true}}
+	v := ECE(pts, 0)
+	if v < 0 || v > 1 {
+		t.Fatalf("ECE out of [0,1] with nBins=0 clamped: got %v", v)
+	}
+}
 
 // --- AUGRC ------------------------------------------------------------------
 

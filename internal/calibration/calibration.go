@@ -13,7 +13,9 @@
 //	Adjusted rate = (n_accepted * err(t) + 1) / (n_accepted + 1).
 //	Choose the LARGEST t such that the adjusted rate <= alpha.
 //	If no t qualifies, fall back to the most conservative (largest) observed margin.
-//	Tasks with < 100 labeled rows are omitted (pipeline uses its constant instead).
+//	Tasks with < 60 labeled rows are omitted (pipeline uses its constant instead).
+//	The floor was lowered from 100 to 60 to match the confhead emission gate so
+//	the calibration and training steps share the same data-sufficiency criterion.
 package calibration
 
 import (
@@ -25,7 +27,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dmmdea/local-offload-pp-cli/internal/ledger"
+	"github.com/dmmdea/local-offload/internal/ledger"
 )
 
 // point is one labeled (margin, correct) observation.
@@ -39,7 +41,7 @@ type point struct {
 // returns the map plus a human-readable summary report.
 //
 // alphas overrides the per-task target error rate; missing tasks fall back to
-// defaultAlpha. Tasks with fewer than 100 usable labeled rows are omitted from
+// defaultAlpha. Tasks with fewer than 60 usable labeled rows are omitted from
 // the returned map (pipeline falls back to its hardcoded constant).
 func Run(ledgerPath string, defaultAlpha float64, alphas map[string]float64, outPath string) (thresholds map[string]float64, report string, err error) {
 	byTask, err := readLedger(ledgerPath)
@@ -67,8 +69,8 @@ func Run(ledgerPath string, defaultAlpha float64, alphas map[string]float64, out
 			alpha = a
 		}
 
-		if n < 100 {
-			fmt.Fprintf(&sb, "  %-12s  n=%4d  <100 labeled — skipped (pipeline uses constant)\n", task, n)
+		if n < 60 {
+			fmt.Fprintf(&sb, "  %-12s  n=%4d  <60 labeled — skipped (pipeline uses constant)\n", task, n)
 			continue
 		}
 
@@ -83,8 +85,15 @@ func Run(ledgerPath string, defaultAlpha float64, alphas map[string]float64, out
 	if err != nil {
 		return nil, "", fmt.Errorf("calibration: marshal thresholds: %w", err)
 	}
-	if err := os.WriteFile(outPath, append(raw, '\n'), 0o644); err != nil {
-		return nil, "", fmt.Errorf("calibration: write %s: %w", outPath, err)
+	// Atomic write (P4): the long-running MCP server polls this file and must only
+	// ever read a COMPLETE file. Write a sibling .tmp then rename (atomic on the
+	// same filesystem) so a reader never sees a half-written threshold map.
+	tmp := outPath + ".tmp"
+	if err := os.WriteFile(tmp, append(raw, '\n'), 0o644); err != nil {
+		return nil, "", fmt.Errorf("calibration: write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, outPath); err != nil {
+		return nil, "", fmt.Errorf("calibration: rename %s: %w", outPath, err)
 	}
 
 	return thresholds, sb.String(), nil

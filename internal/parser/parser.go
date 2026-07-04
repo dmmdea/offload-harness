@@ -12,6 +12,25 @@ import (
 
 var ErrNoJSON = errors.New("no JSON object found in output")
 
+// StripThink removes a leading <think>…</think> reasoning span (emitted by the reasoning
+// tier's think-prefixed grammar, see gbnf.WrapThinking) so the remainder is the bare JSON
+// that Extract expects — needed for bare-string outputs (classify/triage enums) where the
+// first-object-span fallback can't find the value. The grammar guarantees the output starts
+// with "<think>" and that the FIRST "</think>" is the structural separator (the think rule
+// forbids "</think>" inside reasoning); a later "</think>" therefore belongs to the JSON
+// answer and must be preserved — so split on the FIRST close tag, and only when the content
+// actually opens with <think> (a non-reasoning response that merely contains </think> is left
+// untouched). Returns s unchanged if it is not a think-wrapped response.
+func StripThink(s string) string {
+	if !strings.HasPrefix(strings.TrimSpace(s), "<think>") {
+		return s
+	}
+	if i := strings.Index(s, "</think>"); i >= 0 {
+		return strings.TrimSpace(s[i+len("</think>"):])
+	}
+	return s
+}
+
 // Extract returns the first valid JSON object found in raw, as compact bytes.
 func Extract(raw string) (json.RawMessage, error) {
 	s := strings.TrimSpace(raw)

@@ -115,6 +115,102 @@ func TestGenerateVision(t *testing.T) {
 	}
 }
 
+// TestGenerateVisionInterleaved asserts that GenerateVisionInterleaved POSTs a
+// user message whose content array is, in order: text "<0.0 seconds>", image,
+// text "<0.5 seconds>", image, then text "the question".
+func TestGenerateVisionInterleaved(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(b, &gotBody); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, cannedChatResp)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "/v1/chat/completions", "qwen3vl-4b", 5*time.Second)
+	dataURI1 := "data:image/png;base64,iVBORw0KGgo="
+	dataURI2 := "data:image/png;base64,iVBORw0KGgo="
+
+	res, err := c.GenerateVisionInterleaved(
+		context.Background(),
+		"", "system prompt",
+		[]string{"<0.0 seconds>", "<0.5 seconds>"},
+		[]string{dataURI1, dataURI2},
+		"the question",
+		"", 64, 0, 0,
+	)
+	if err != nil {
+		t.Fatalf("GenerateVisionInterleaved: %v", err)
+	}
+	if res.Content != "a small dog" {
+		t.Errorf("Content = %q, want %q", res.Content, "a small dog")
+	}
+
+	// cache_prompt must be false on the vision path.
+	if cp, ok := gotBody["cache_prompt"].(bool); !ok || cp {
+		t.Errorf("cache_prompt = %#v, want false on the vision path", gotBody["cache_prompt"])
+	}
+
+	msgs, ok := gotBody["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		t.Fatalf("messages not an array: %#v", gotBody["messages"])
+	}
+
+	// Find the user message.
+	var userMsg map[string]any
+	for _, m := range msgs {
+		mm, _ := m.(map[string]any)
+		if mm["role"] == "user" {
+			userMsg = mm
+		}
+	}
+	if userMsg == nil {
+		t.Fatalf("no user message in %#v", msgs)
+	}
+
+	content, ok := userMsg["content"].([]any)
+	if !ok {
+		t.Fatalf("user content is not an ARRAY: %#v", userMsg["content"])
+	}
+
+	// Expected order: text "<0.0 seconds>", image, text "<0.5 seconds>", image, text "the question"
+	if len(content) != 5 {
+		t.Fatalf("expected 5 content parts, got %d: %#v", len(content), content)
+	}
+
+	checkText := func(i int, want string) {
+		t.Helper()
+		p, _ := content[i].(map[string]any)
+		if p["type"] != "text" {
+			t.Errorf("part[%d] type = %v, want \"text\"", i, p["type"])
+		}
+		if p["text"] != want {
+			t.Errorf("part[%d] text = %q, want %q", i, p["text"], want)
+		}
+	}
+	checkImage := func(i int) {
+		t.Helper()
+		p, _ := content[i].(map[string]any)
+		if p["type"] != "image_url" {
+			t.Errorf("part[%d] type = %v, want \"image_url\"", i, p["type"])
+		}
+		iu, _ := p["image_url"].(map[string]any)
+		url, _ := iu["url"].(string)
+		if !strings.HasPrefix(url, "data:image/") {
+			t.Errorf("part[%d] image_url.url = %q, want data:image/ prefix", i, url)
+		}
+	}
+
+	checkText(0, "<0.0 seconds>")
+	checkImage(1)
+	checkText(2, "<0.5 seconds>")
+	checkImage(3)
+	checkText(4, "the question")
+}
+
 // TestGenerateTextContentIsString proves the text path is unchanged: the user
 // message content must be a plain STRING, not an array.
 func TestGenerateTextContentIsString(t *testing.T) {

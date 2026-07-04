@@ -1,0 +1,228 @@
+package config
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func TestDefaultVideoFields(t *testing.T) {
+	c := Default()
+	if c.VideoFPS != 2.0 {
+		t.Errorf("VideoFPS = %v, want 2.0", c.VideoFPS)
+	}
+	if c.VideoMaxFrames != 12 {
+		t.Errorf("VideoMaxFrames = %d, want 12", c.VideoMaxFrames)
+	}
+	if c.VideoFrameWidth != 512 {
+		t.Errorf("VideoFrameWidth = %d, want 512", c.VideoFrameWidth)
+	}
+	if c.FFmpegPath != "ffmpeg" {
+		t.Errorf("FFmpegPath = %q, want \"ffmpeg\"", c.FFmpegPath)
+	}
+}
+
+func TestDefaultSTTFields(t *testing.T) {
+	c := Default()
+	if c.STTModel != "whisper-stt" {
+		t.Errorf("STTModel = %q, want \"whisper-stt\"", c.STTModel)
+	}
+	if c.STTModelHQ != "whisper-stt-hq" {
+		t.Errorf("STTModelHQ = %q, want \"whisper-stt-hq\"", c.STTModelHQ)
+	}
+	if !c.STTVAD {
+		t.Error("STTVAD should default true")
+	}
+	if c.STTMaxInlineSegments != 120 {
+		t.Errorf("STTMaxInlineSegments = %d, want 120", c.STTMaxInlineSegments)
+	}
+	if !c.STTUnloadAfter {
+		t.Error("STTUnloadAfter should default true (zero-always-warm)")
+	}
+	if c.STTRequestTimeoutSec != 1800 {
+		t.Errorf("STTRequestTimeoutSec = %d, want 1800", c.STTRequestTimeoutSec)
+	}
+	if c.MediaDir == "" {
+		t.Error("MediaDir should default to a non-empty path")
+	}
+}
+
+// TestDefaultGenerationFields: the video/audio generation defaults match the
+// brief verbatim — VideoGenScript=render/comfy-video.mjs, VoiceGenScript=render/tts.mjs,
+// MusicGenScript=render/comfy-music.mjs (the B3 ACE-Step worker). Per-task timeouts and
+// waitMs (so a queued TTS isn't starved by a 20-min video job) are present and positive.
+func TestDefaultGenerationFields(t *testing.T) {
+	c := Default()
+	if c.VideoGenScript != "render/comfy-video.mjs" {
+		t.Errorf("VideoGenScript = %q, want \"render/comfy-video.mjs\"", c.VideoGenScript)
+	}
+	if c.VoiceGenScript != "render/tts.mjs" {
+		t.Errorf("VoiceGenScript = %q, want \"render/tts.mjs\"", c.VoiceGenScript)
+	}
+	if c.MusicGenScript != "render/comfy-music.mjs" {
+		t.Errorf("MusicGenScript = %q, want \"render/comfy-music.mjs\" (B3 worker)", c.MusicGenScript)
+	}
+	if c.VideoGenTimeoutSec <= 0 {
+		t.Errorf("VideoGenTimeoutSec = %d, want > 0", c.VideoGenTimeoutSec)
+	}
+	if c.AudioGenTimeoutSec <= 0 {
+		t.Errorf("AudioGenTimeoutSec = %d, want > 0", c.AudioGenTimeoutSec)
+	}
+	if c.VideoGenWaitMs <= 0 {
+		t.Errorf("VideoGenWaitMs = %d, want > 0", c.VideoGenWaitMs)
+	}
+	if c.AudioGenWaitMs <= 0 {
+		t.Errorf("AudioGenWaitMs = %d, want > 0", c.AudioGenWaitMs)
+	}
+}
+
+// TestDefaultMemoryStack: the CPU memory stack the GPU-free helper must never unload
+// is sourced from config (not a buried const) so a renamed/added member is honored.
+// Default carries the two canonical CPU-only members.
+func TestDefaultMemoryStack(t *testing.T) {
+	c := Default()
+	want := map[string]bool{"embeddinggemma": true, "bge-reranker-v2-m3": true}
+	if len(c.MemoryStack) != len(want) {
+		t.Fatalf("MemoryStack = %v, want %v", c.MemoryStack, want)
+	}
+	for _, m := range c.MemoryStack {
+		if !want[m] {
+			t.Errorf("MemoryStack has unexpected member %q", m)
+		}
+	}
+}
+
+func TestKNNDefaults(t *testing.T) {
+	c := Default()
+	if c.KNNPreFilterEnabled {
+		t.Fatal("kNN must be OFF by default")
+	}
+	if c.KNNPreFilterK != 7 {
+		t.Fatalf("KNNPreFilterK default: want 7, got %d", c.KNNPreFilterK)
+	}
+	if c.KNNMinNeighbors != 20 {
+		t.Fatalf("KNNMinNeighbors default: want 20, got %d", c.KNNMinNeighbors)
+	}
+	if c.KNNPreFilterThreshold != 0.5 {
+		t.Fatalf("KNNPreFilterThreshold default: want 0.5, got %v", c.KNNPreFilterThreshold)
+	}
+	if c.KNNEmbedTimeoutMs != 2000 {
+		t.Fatalf("KNNEmbedTimeoutMs default: want 2000, got %d", c.KNNEmbedTimeoutMs)
+	}
+	if filepath.Base(c.KNNIndexPath) != "knn-index.jsonl" {
+		t.Fatalf("KNNIndexPath default basename: want knn-index.jsonl, got %q", c.KNNIndexPath)
+	}
+}
+
+// TestExpandTilde pins the home-shorthand expansion rules (LO-4): "~/x" and a
+// bare "~" expand; "~user/x" and plain relative/absolute paths do not.
+func TestExpandTilde(t *testing.T) {
+	home := filepath.Join("C:", "Users", "u")
+	cases := []struct{ in, want string }{
+		{"~/x/y.json", filepath.Join(home, "x", "y.json")},
+		{`~\x\y.json`, filepath.Join(home, "x", "y.json")},
+		{"~", home},
+		{"~user/x", "~user/x"},   // ambiguous on Windows — untouched
+		{"render/tts.mjs", "render/tts.mjs"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := ExpandTilde(tc.in, home); got != tc.want {
+			t.Errorf("ExpandTilde(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if got := ExpandTilde("~/x", ""); got != "~/x" {
+		t.Errorf("empty home must leave the path untouched, got %q", got)
+	}
+}
+
+// TestLoadExpandsTildeInEveryPathField: a config file using "~/" in every
+// path-typed field loads with each expanded to the real home dir — the
+// shipped config.example.json convention now actually works (LO-4).
+func TestLoadExpandsTildeInEveryPathField(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir on this runner")
+	}
+	// Build a config JSON that sets EVERY enumerated path field to a "~/" path.
+	var c Config
+	fields := pathFields(&c)
+	names := pathFieldJSONNames(t)
+	if len(fields) != len(names) {
+		t.Fatalf("pathFields has %d entries but %d json names enumerated", len(fields), len(names))
+	}
+	m := map[string]string{}
+	for i, n := range names {
+		m[n] = "~/probe/" + n
+		_ = i
+	}
+	b, _ := json.Marshal(m)
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, ptr := range pathFields(&got) {
+		want := filepath.Join(home, "probe", names[i])
+		if *ptr != want {
+			t.Errorf("field %s = %q, want %q", names[i], *ptr, want)
+		}
+	}
+}
+
+// pathFieldJSONNames returns the json key for each pathFields entry, in the
+// same order. Kept as an explicit list so a drift between the two enumerations
+// fails the length check above.
+func pathFieldJSONNames(t *testing.T) []string {
+	t.Helper()
+	return []string{
+		"ffmpeg_path", "media_dir", "svg_dir",
+		"imagegen_script", "node_path", "comfy_dir",
+		"videogen_script", "voicegen_script", "musicgen_script",
+		"cache_path", "ledger_path",
+		"thresholds_path", "tier_overrides_path", "router_weights_path",
+		"confhead_path", "router_labels_path", "confhead_labels_path",
+		"confhead_thresholds_path", "exemplars_dir",
+		"shadow_queue_path", "agent_trajectory_queue_path", "agent_trajectory_labels_path",
+		"knn_index_path",
+	}
+}
+
+// TestPathFieldsCoverEveryPathTypedStructField guards the enumeration: every
+// Config field whose json tag looks path-typed (*_path/_dir/_script or the
+// known executable fields) must be in pathFields, so a new path field cannot
+// silently miss tilde expansion.
+func TestPathFieldsCoverEveryPathTypedStructField(t *testing.T) {
+	var c Config
+	enumerated := map[*string]bool{}
+	for _, p := range pathFields(&c) {
+		enumerated[p] = true
+	}
+	v := reflect.ValueOf(&c).Elem()
+	tp := v.Type()
+	for i := 0; i < tp.NumField(); i++ {
+		f := tp.Field(i)
+		if f.Type.Kind() != reflect.String {
+			continue
+		}
+		tag := strings.SplitN(f.Tag.Get("json"), ",", 2)[0]
+		if tag == "completion_path" {
+			continue // an HTTP route ("/v1/chat/completions"), not a filesystem path
+		}
+		pathish := strings.HasSuffix(tag, "_path") || strings.HasSuffix(tag, "_dir") ||
+			strings.HasSuffix(tag, "_script") || tag == "comfy_dir"
+		if !pathish {
+			continue
+		}
+		ptr := v.Field(i).Addr().Interface().(*string)
+		if !enumerated[ptr] {
+			t.Errorf("path-typed field %s (json %q) missing from pathFields — tilde expansion would skip it", f.Name, tag)
+		}
+	}
+}

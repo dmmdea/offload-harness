@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dmmdea/local-offload-pp-cli/internal/core"
+	"github.com/dmmdea/local-offload/internal/core"
 )
 
 func TestLoadCases(t *testing.T) {

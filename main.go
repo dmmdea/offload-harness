@@ -10,29 +10,41 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/dmmdea/local-offload-pp-cli/internal/cache"
-	"github.com/dmmdea/local-offload-pp-cli/internal/calibration"
-	"github.com/dmmdea/local-offload-pp-cli/internal/config"
-	"github.com/dmmdea/local-offload-pp-cli/internal/core"
-	"github.com/dmmdea/local-offload-pp-cli/internal/eval"
-	"github.com/dmmdea/local-offload-pp-cli/internal/exemplars"
-	"github.com/dmmdea/local-offload-pp-cli/internal/health"
-	"github.com/dmmdea/local-offload-pp-cli/internal/ledger"
-	"github.com/dmmdea/local-offload-pp-cli/internal/llamaclient"
-	"github.com/dmmdea/local-offload-pp-cli/internal/mcpserver"
-	"github.com/dmmdea/local-offload-pp-cli/internal/pipeline"
-	"github.com/dmmdea/local-offload-pp-cli/internal/report"
-	"github.com/dmmdea/local-offload-pp-cli/internal/confhead"
-	"github.com/dmmdea/local-offload-pp-cli/internal/router"
+	"github.com/dmmdea/local-offload/internal/agent"
+	"github.com/dmmdea/local-offload/internal/cache"
+	"github.com/dmmdea/local-offload/internal/calibration"
+	"github.com/dmmdea/local-offload/internal/confhead"
+	"github.com/dmmdea/local-offload/internal/config"
+	"github.com/dmmdea/local-offload/internal/core"
+	"github.com/dmmdea/local-offload/internal/eval"
+	"github.com/dmmdea/local-offload/internal/exemplars"
+	"github.com/dmmdea/local-offload/internal/grounding"
+	"github.com/dmmdea/local-offload/internal/health"
+	"github.com/dmmdea/local-offload/internal/judge"
+	"github.com/dmmdea/local-offload/internal/knn"
+	"github.com/dmmdea/local-offload/internal/ledger"
+	"github.com/dmmdea/local-offload/internal/llamaclient"
+	"github.com/dmmdea/local-offload/internal/mcpserver"
+	"github.com/dmmdea/local-offload/internal/nimclient"
+	"github.com/dmmdea/local-offload/internal/pipeline"
+	"github.com/dmmdea/local-offload/internal/report"
+	"github.com/dmmdea/local-offload/internal/router"
+	"github.com/dmmdea/local-offload/internal/shadow"
+	"github.com/dmmdea/local-offload/internal/trajectory"
 )
 
-const version = "0.1.0"
+const version = "0.6.0"
+
+// Keep config.example.json in lockstep with config.Default() (LO-17):
+//go:generate go run ./cmd/genexample
 
 func main() {
 	sub, args, ok := hoistGlobalConfig(os.Args[1:])
@@ -46,6 +58,20 @@ func main() {
 		err = runTask(sub, args)
 	case "vqa":
 		err = runVQA(args)
+	case "video-describe":
+		err = runVideoDescribe(args)
+	case "transcribe":
+		err = runTranscribe(args)
+	case "generate-image":
+		err = runGenerateImage(args)
+	case "generate-svg":
+		err = runGenerateSVG(args)
+	case "generate-audio":
+		err = runGenerateAudio(args)
+	case "generate-video":
+		err = runGenerateVideo(args)
+	case "nim":
+		err = runNim(args)
 	case "ocr":
 		err = runOCR(args)
 	case "extract-image":
@@ -66,6 +92,12 @@ func main() {
 		err = runHealth(args)
 	case "train-router":
 		err = runTrainRouter(args)
+	case "shadow-label":
+		err = runShadowLabel(args)
+	case "agent-trajectory-label":
+		err = runAgentTrajectoryLabel(args)
+	case "agent-trajectory-gate":
+		err = runAgentTrajectoryGate(args)
 	case "train-confhead":
 		err = runTrainConfHead(args)
 	case "confhead-eval":
@@ -143,9 +175,15 @@ Usage:
   local-offload extract   <file|-> --schema schema.json [--json]
   local-offload triage    <file|-> --question "..." [--json]
   local-offload vqa       <image-path> --question "..." [--json]
+  local-offload video-describe <video-path> --question "..." [--json]
+  local-offload transcribe <audio-path> [--language es] [--hq] [--json]
   local-offload ocr       <image-path> [--json]
   local-offload extract-image <image-path> --schema schema.json [--json]
   local-offload assess-image <image-path> [--brief "..."] [--json]
+  local-offload generate-audio <out> "<text>" [--kind voice|music] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
+  local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F]
+  local-offload nim <file|-|"text"> [--model id] [--base url] [--system "..."] [--max-tokens N] [--temp F] [--json]
+  local-offload nim --list-models        list a NIM endpoint's model ids (free hosted catalog or self-hosted)
   local-offload mcp                      run as an MCP server (stdio)
   local-offload ledger [--since DAYS]    token-savings report
   local-offload doctor                   check endpoint health + config
@@ -165,15 +203,46 @@ A bare {"field":"string"} map has no usable properties and is deferred.
 }
 
 func loadCfg(fs *flag.FlagSet) config.Config {
-	path := fs.Lookup("config").Value.String()
-	if path == "" {
-		path = os.Getenv("LOCAL_OFFLOAD_CONFIG")
-	}
+	home, _ := os.UserHomeDir()
+	path := resolveCfgPath(
+		fs.Lookup("config").Value.String(),
+		os.Getenv("LOCAL_OFFLOAD_CONFIG"),
+		home,
+		func(p string) bool { info, statErr := os.Stat(p); return statErr == nil && !info.IsDir() },
+	)
 	cfg, err := config.Load(path)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "warning: config load failed, using defaults:", err)
 	}
 	return cfg
+}
+
+// resolveCfgPath picks the config file by precedence: explicit --config flag >
+// $LOCAL_OFFLOAD_CONFIG > ./config.json if it exists (LO-4: the README
+// quickstart says `cp config.example.json config.json`, which was never read) >
+// the conventional ~/.local-offload/config.json if it exists > "" (built-in
+// defaults). The conventional-path fallback is the fix for a bare
+// `local-offload mcp` spawned by an MCP host that passes neither flag nor
+// env (as the registration did): without it the server silently ran on defaults
+// with ShadowEnabled=false, so capture never fired and the flywheel starved.
+// exists is injected so the precedence is unit-testable without touching disk.
+func resolveCfgPath(flagPath, envPath, home string, exists func(string) bool) string {
+	if flagPath != "" {
+		return flagPath
+	}
+	if envPath != "" {
+		return envPath
+	}
+	if exists("config.json") { // cwd-relative, the quickstart convention
+		return "config.json"
+	}
+	if home != "" {
+		def := filepath.Join(home, ".local-offload", "config.json")
+		if exists(def) {
+			return def
+		}
+	}
+	return ""
 }
 
 func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
@@ -185,10 +254,14 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 	// long-running MCP server holds the lock, a CLI invocation degrades to
 	// cache-less rather than aborting — they speed things up / report savings,
 	// they are not required for correctness.
-	ca, err := cache.Open(cfg.CachePath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "note: cache unavailable (held by the MCP server?); continuing without cache")
-		ca = nil
+	var ca *cache.Cache
+	if cfg.CachePath != "" { // "" = caller opted out of caching (e.g. the confhead A/B, where a shared cache would cross-contaminate arms)
+		var err error
+		ca, err = cache.Open(cfg.CachePath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "note: cache unavailable (held by the MCP server?); continuing without cache")
+			ca = nil
+		}
 	}
 	led, err := ledger.Open(cfg.LedgerPath)
 	if err != nil {
@@ -213,10 +286,12 @@ func runTask(task string, args []string) error {
 	labels := fs.String("labels", "", "classify: comma-separated labels")
 	question := fs.String("question", "", "triage: the yes/no/unsure question")
 	schemaPath := fs.String("schema", "", "extract: path to a JSON schema file")
+	selectFlag := fs.String("select", "", "comma-separated top-level result fields to keep")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
 	// Go's flag pkg stops at the first positional, so split the input arg out
 	// first and parse the remaining flags (allows `summarize <file> --json`).
 	positional, flagArgs := splitArgs(args, map[string]bool{
-		"config": true, "labels": true, "question": true, "schema": true, "max-points": true,
+		"config": true, "labels": true, "question": true, "schema": true, "max-points": true, "select": true,
 	})
 	_ = fs.Parse(flagArgs)
 
@@ -257,12 +332,7 @@ func runTask(task string, args []string) error {
 	defer cleanup()
 
 	res := p.Run(context.Background(), core.Request{Task: core.TaskType(task), Input: input, Params: params})
-	if *asJSON {
-		b, _ := json.MarshalIndent(res, "", "  ")
-		fmt.Println(string(b))
-		return nil
-	}
-	printHuman(res)
+	emitResult(res, *asJSON, *selectFlag, *compactFlag)
 	return nil
 }
 
@@ -305,6 +375,591 @@ func runVQA(args []string) error {
 	}
 	printHuman(res)
 	return nil
+}
+
+// runVideoDescribe handles `local-offload video-describe <video-path> --question
+// "..." [--json]`. The positional argument is a LOCAL VIDEO PATH (not stdin);
+// the pipeline samples frames from it and runs the vision tier over them.
+func runVideoDescribe(args []string) error {
+	fs := flag.NewFlagSet("video-describe", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	question := fs.String("question", "", "the question to ask about the video")
+	selectFlag := fs.String("select", "", "comma-separated top-level result fields to keep")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "question": true, "select": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	if positional == "" || positional == "-" {
+		return fmt.Errorf("video-describe requires a video path (not stdin): local-offload video-describe <video> --question \"...\"")
+	}
+	if *question == "" {
+		return fmt.Errorf("video-describe requires --question \"...\"")
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskVideoDescribe,
+		Video:  positional,
+		Params: map[string]any{"question": *question},
+	})
+	emitResult(res, *asJSON, *selectFlag, *compactFlag)
+	return nil
+}
+
+// runTranscribe handles `local-offload transcribe <audio-path> [--language es]
+// [--hq] [--json]`. The positional argument is a LOCAL AUDIO/VIDEO PATH (not
+// stdin); the pipeline converts it to 16kHz WAV and runs whisper-server over it.
+func runTranscribe(args []string) error {
+	fs := flag.NewFlagSet("transcribe", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	language := fs.String("language", "", "force language: en, es, or auto (default auto-detect)")
+	hq := fs.Bool("hq", false, "use the higher-quality large-v3 model (slower)")
+	selectFlag := fs.String("select", "", "comma-separated top-level result fields to keep (e.g. gist,language,srt_path — drops the verbose segments[])")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "language": true, "select": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	if positional == "" || positional == "-" {
+		return fmt.Errorf("transcribe requires an audio path (not stdin): local-offload transcribe <audio> [--language es]")
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	params := map[string]any{}
+	if *language != "" {
+		params["language"] = *language
+	}
+	if *hq {
+		params["hq"] = true
+	}
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskTranscribe,
+		Audio:  positional,
+		Params: params,
+	})
+	emitResult(res, *asJSON, *selectFlag, *compactFlag)
+	return nil
+}
+
+// runNim handles `local-offload nim <file|-|"literal text"> [--model id] [--base url]
+// [--system "..."] [--max-tokens N] [--temp F] [--json]` and `local-offload nim
+// --list-models`. It is the EXPLICIT remote tool: it calls an OpenAI-compatible
+// NVIDIA NIM endpoint — NVIDIA's hosted build.nvidia.com API by default, or a
+// self-hosted NIM container via --base. The key comes from $NVIDIA_API_KEY /
+// $NGC_API_KEY (never config). NIM calls never touch the savings ledger (they are
+// deliberate experiments/escalations, not defer-avoidance), and the local cascade
+// and its GBNF grammar path are untouched.
+func runNim(args []string) error {
+	fs := flag.NewFlagSet("nim", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	model := fs.String("model", "", "model id (default from config; browse with --list-models)")
+	base := fs.String("base", "", "OpenAI-compatible base URL incl. /v1 (default from config)")
+	system := fs.String("system", "", "optional system prompt")
+	maxTokens := fs.Int("max-tokens", 0, "max completion tokens (0 = config default)")
+	temp := fs.Float64("temp", 0, "sampling temperature")
+	listModels := fs.Bool("list-models", false, "list available model ids and exit")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "model": true, "base": true, "system": true, "max-tokens": true, "temp": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	cfg := loadCfg(fs)
+	baseURL := *base
+	if baseURL == "" {
+		baseURL = cfg.NIMEndpoint
+	}
+	key := nimclient.KeyForBase(baseURL) // env key only for NVIDIA hosts; never transmitted to a non-NVIDIA --base
+	if key == "" && nimclient.IsHostedNVIDIA(baseURL) {
+		return fmt.Errorf("nim: NVIDIA_API_KEY (or NGC_API_KEY) is not set — required for the hosted endpoint %s.\n"+
+			"Get a free key at build.nvidia.com, then: export NVIDIA_API_KEY=nvapi-...\n"+
+			"(A self-hosted NIM via --base http://host:8000/v1 needs no key.)", baseURL)
+	}
+	timeout := time.Duration(cfg.NIMTimeoutSec) * time.Second
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	client := nimclient.New(baseURL, key, timeout)
+	ctx := context.Background()
+
+	if *listModels {
+		ids, err := client.ListModels(ctx)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			b, _ := json.MarshalIndent(ids, "", "  ")
+			fmt.Println(string(b))
+			return nil
+		}
+		for _, id := range ids {
+			fmt.Println(id)
+		}
+		fmt.Fprintf(os.Stderr, "%d models at %s\n", len(ids), baseURL)
+		return nil
+	}
+
+	user, err := readNimInput(positional)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(user) == "" {
+		return fmt.Errorf("nim requires input: a file path, \"-\" for stdin, or literal text (or use --list-models)")
+	}
+
+	mdl := *model
+	if mdl == "" {
+		mdl = cfg.NIMModel
+	}
+	mt := *maxTokens
+	if mt == 0 {
+		mt = cfg.NIMMaxTokens
+	}
+	res, err := client.Chat(ctx, mdl, *system, user, mt, *temp)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		out := map[string]any{
+			"model":             res.Model,
+			"content":           res.Content,
+			"reasoning_content": res.ReasoningContent,
+			"tokens_in":         res.TokensIn,
+			"tokens_out":        res.TokensOut,
+			"truncated":         res.Truncated,
+		}
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(b))
+		return nil
+	}
+	switch {
+	case res.Content != "":
+		fmt.Println(res.Content)
+	case res.ReasoningContent != "":
+		fmt.Println(res.ReasoningContent)
+		fmt.Fprintln(os.Stderr, "note: answer (content) was empty; printed reasoning_content instead — raise --max-tokens")
+	default:
+		fmt.Fprintln(os.Stderr, "note: model returned no content (a stop/content-filter, or --max-tokens too low to reach an answer)")
+	}
+	if res.Truncated {
+		fmt.Fprintln(os.Stderr, "note: output truncated at max-tokens; raise --max-tokens for a full answer")
+	}
+	fmt.Fprintf(os.Stderr, "[%s] tokens in=%d out=%d\n", res.Model, res.TokensIn, res.TokensOut)
+	// Don't report a blank success: an empty content+reasoning response exits non-zero.
+	if res.Content == "" && res.ReasoningContent == "" {
+		return fmt.Errorf("nim: empty response from %s (raise --max-tokens or try another model)", res.Model)
+	}
+	return nil
+}
+
+// readNimInput reads the nim user content: "-"/"" = stdin, an existing file path =
+// its contents, anything else = the literal text itself (so a quick test prompt
+// needs no file). This file-or-literal convenience is unique to the nim tool.
+func readNimInput(arg string) (string, error) {
+	if arg == "" || arg == "-" {
+		b, err := io.ReadAll(os.Stdin)
+		return string(b), err
+	}
+	if info, statErr := os.Stat(arg); statErr == nil && !info.IsDir() {
+		b, err := os.ReadFile(arg)
+		return string(b), err
+	}
+	return arg, nil // literal prompt text
+}
+
+// runGenerateImage handles `local-offload generate-image "<prompt>" [--negative ...]
+// [--width N] [--height N] [--steps N] [--seed N] [--out path] [--json]`. The positional
+// argument is the PROMPT (not stdin). It renders on the LOCAL ComfyUI for free.
+func runGenerateImage(args []string) error {
+	fs := flag.NewFlagSet("generate-image", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	negative := fs.String("negative", "", "negative prompt (hard exclusions, e.g. 'people, text')")
+	out := fs.String("out", "", "output PNG path (default under the media dir)")
+	width := fs.Int("width", 0, "image width px (default 1024)")
+	height := fs.Int("height", 0, "image height px (default 1024)")
+	steps := fs.Int("steps", 0, "sampler steps (default 30)")
+	seed := fs.Int("seed", 0, "RNG seed (default random)")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "negative": true, "out": true,
+		"width": true, "height": true, "steps": true, "seed": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	if positional == "" || positional == "-" {
+		return fmt.Errorf("generate-image requires a prompt (not stdin): local-offload generate-image \"<prompt>\" [--width 1024]")
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	params := map[string]any{}
+	if *negative != "" {
+		params["negative"] = *negative
+	}
+	if *out != "" {
+		params["out"] = *out
+	}
+	if *width > 0 {
+		params["width"] = *width
+	}
+	if *height > 0 {
+		params["height"] = *height
+	}
+	if *steps > 0 {
+		params["steps"] = *steps
+	}
+	if *seed > 0 {
+		params["seed"] = *seed
+	}
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskGenerateImage,
+		Input:  positional,
+		Params: params,
+	})
+	emitResult(res, *asJSON, "", *compactFlag)
+	return nil
+}
+
+// runGenerateSVG handles `local-offload generate-svg <kind> --spec '<json>' [--spec-file path] [--out file.svg] [--json]`.
+// kind is the positional (gauge|comparison-bar|chromatogram|icon). It renders locally for free (no model/GPU).
+func runGenerateSVG(args []string) error {
+	fs := flag.NewFlagSet("generate-svg", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	spec := fs.String("spec", "", "component spec as a JSON string")
+	specFile := fs.String("spec-file", "", "path to a JSON file with the component spec")
+	out := fs.String("out", "", "output .svg path (default under the svg dir)")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "spec": true, "spec-file": true, "out": true,
+	})
+	_ = fs.Parse(flagArgs)
+	if positional == "" || positional == "-" {
+		return fmt.Errorf("generate-svg requires a kind: local-offload generate-svg <gauge|comparison-bar|chromatogram|icon> --spec '<json>'")
+	}
+	specStr := *spec
+	if specStr == "" && *specFile != "" {
+		b, rerr := os.ReadFile(*specFile)
+		if rerr != nil {
+			return rerr
+		}
+		specStr = string(b)
+	}
+	if specStr == "" {
+		specStr = "{}"
+	}
+	var specObj map[string]any
+	if jerr := json.Unmarshal([]byte(specStr), &specObj); jerr != nil {
+		return fmt.Errorf("generate-svg: invalid --spec JSON: %w", jerr)
+	}
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	params := map[string]any{"kind": positional, "spec": specObj}
+	if *out != "" {
+		params["out"] = *out
+	}
+	res := p.Run(context.Background(), core.Request{Task: core.TaskGenerateSVG, Params: params})
+	emitResult(res, *asJSON, "", *compactFlag)
+	return nil
+}
+
+// audioFlags is the parsed CLI input for `generate-audio`. Factored out so the
+// param-building (buildAudioParams) is unit-testable without a live render.
+type audioFlags struct {
+	kind        string
+	clone       string
+	lang        string
+	out         string
+	seconds     int
+	seed        int
+	reserveVRAM float64
+}
+
+// buildAudioParams maps the parsed CLI flags to the pipeline params map for a
+// generate_audio request. Empty kind defaults to "voice" (matching the pipeline
+// default); zero/empty optional flags are omitted so the pipeline applies its own
+// defaults. reserve_vram is stringified to match the MCP tool's wire shape.
+func buildAudioParams(f audioFlags) map[string]any {
+	kind := f.kind
+	if kind == "" {
+		kind = "voice"
+	}
+	params := map[string]any{"kind": kind}
+	if f.clone != "" {
+		params["clone"] = f.clone
+	}
+	if f.lang != "" {
+		params["lang"] = f.lang
+	}
+	if f.out != "" {
+		params["out"] = f.out
+	}
+	if f.seconds > 0 {
+		params["seconds"] = f.seconds
+	}
+	if f.seed > 0 {
+		params["seed"] = f.seed
+	}
+	if f.reserveVRAM > 0 {
+		params["reserve_vram"] = strconv.FormatFloat(f.reserveVRAM, 'f', -1, 64)
+	}
+	return params
+}
+
+// runGenerateAudio handles `local-offload generate-audio <out> "<text>"
+// [--kind voice|music] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
+// [--reserve-vram F] [--json]`. The TWO positionals are the output path and the
+// text (narration for voice, style prompt for music) — mirroring the raw
+// `node render/tts.mjs out.wav "text"` CLI. It synthesizes on the LOCAL GPU for
+// free via the same runGenerateAudio pipeline branch the MCP tool uses.
+func runGenerateAudio(args []string) error {
+	fs := flag.NewFlagSet("generate-audio", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	kind := fs.String("kind", "voice", "voice (Chatterbox TTS) | music (ACE-Step)")
+	clone := fs.String("clone", "", "voice: local path to a reference .wav for zero-shot voice cloning")
+	lang := fs.String("lang", "", "voice: language code (default es)")
+	seconds := fs.Int("seconds", 0, "music: clip length in seconds")
+	seed := fs.Int("seed", 0, "RNG seed for reproducibility")
+	reserveVRAM := fs.Float64("reserve-vram", 0, "music: VRAM held back for the display")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+
+	// generate-audio takes TWO positionals (out path, text); the rest are flags.
+	out, text, flagArgs := splitTwoArgs(args, map[string]bool{
+		"config": true, "kind": true, "clone": true, "lang": true,
+		"seconds": true, "seed": true, "reserve-vram": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	if out == "" || text == "" {
+		return fmt.Errorf("generate-audio requires an output path and text: local-offload generate-audio <out.wav> \"<text>\" [--kind voice|music] [--lang es]")
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	params := buildAudioParams(audioFlags{
+		kind: *kind, clone: *clone, lang: *lang, out: out,
+		seconds: *seconds, seed: *seed, reserveVRAM: *reserveVRAM,
+	})
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskGenerateAudio,
+		Input:  text,
+		Params: params,
+	})
+	emitResult(res, *asJSON, "", *compactFlag)
+	return nil
+}
+
+// videoFlags is the parsed CLI input for `generate-video`. Factored out so the
+// param-building (buildVideoParams) is unit-testable without a live render.
+type videoFlags struct {
+	model       string
+	still       string
+	negative    string
+	out         string
+	frames      int
+	width       int
+	height      int
+	steps       int
+	seed        int
+	reserveVRAM float64
+}
+
+// buildVideoParams maps the parsed CLI flags to the pipeline params map for a
+// generate_video request. Empty model defaults to "hunyuan" (the PRIMARY 8GB I2V
+// path); the still path is always carried as "still" (Hunyuan I2V needs an input
+// image). Zero/empty optional flags are omitted so the pipeline/runner apply their
+// own defaults (incl. the SETTLED steps=50/shift=5/vaeTemporalSize=16 baked into
+// the workflow builder, and the runner's --reserve-vram). reserve_vram is
+// stringified to match the MCP tool's wire shape.
+func buildVideoParams(f videoFlags) map[string]any {
+	model := f.model
+	if model == "" {
+		model = "hunyuan"
+	}
+	params := map[string]any{"model": model}
+	if f.still != "" {
+		params["still"] = f.still
+	}
+	if f.negative != "" {
+		params["negative"] = f.negative
+	}
+	if f.out != "" {
+		params["out"] = f.out
+	}
+	if f.frames > 0 {
+		params["frames"] = f.frames
+	}
+	if f.width > 0 {
+		params["width"] = f.width
+	}
+	if f.height > 0 {
+		params["height"] = f.height
+	}
+	if f.steps > 0 {
+		params["steps"] = f.steps
+	}
+	if f.seed > 0 {
+		params["seed"] = f.seed
+	}
+	if f.reserveVRAM > 0 {
+		params["reserve_vram"] = strconv.FormatFloat(f.reserveVRAM, 'f', -1, 64)
+	}
+	return params
+}
+
+// runGenerateVideo handles `local-offload generate-video <out.mp4> <still.png>
+// "<prompt>" [--model hunyuan|wan] [--frames 49] [--width N] [--height N]
+// [--steps N] [--seed N] [--negative "..."] [--reserve-vram F] [--json]`. The
+// THREE positionals are the output path, the input still (I2V needs an image),
+// and the prompt — mirroring the raw `node render/comfy-video.mjs out.mp4 still.png
+// "prompt"` CLI. It animates the still into a short clip on the LOCAL ComfyUI for
+// free via the same runGenerateVideo pipeline branch the MCP tool uses. Steps,
+// shift, and VAE temporal tiling are SETTLED inside the workflow builder and are
+// intentionally NOT exposed here so a caller can't regress them.
+func runGenerateVideo(args []string) error {
+	fs := flag.NewFlagSet("generate-video", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	model := fs.String("model", "hunyuan", "hunyuan (default, fast 8GB I2V) | wan (slow photoreal hero)")
+	negative := fs.String("negative", "", "hard exclusions, e.g. 'blurry, distorted'")
+	frames := fs.Int("frames", 0, "frame count (default ~33; realistic ceiling ~49)")
+	width := fs.Int("width", 0, "width px")
+	height := fs.Int("height", 0, "height px")
+	steps := fs.Int("steps", 0, "sampler steps (default 50 — DO NOT lower; 12 = garbage)")
+	seed := fs.Int("seed", 0, "RNG seed for reproducibility")
+	reserveVRAM := fs.Float64("reserve-vram", 0, "VRAM held back for the display (default per-workflow; ~2.0 for Hunyuan/Wan)")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+
+	// generate-video takes THREE positionals (out path, still image, prompt); the
+	// rest are flags.
+	out, still, prompt, flagArgs := splitThreeArgs(args, map[string]bool{
+		"config": true, "model": true, "negative": true, "frames": true,
+		"width": true, "height": true, "steps": true, "seed": true, "reserve-vram": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	if out == "" || prompt == "" {
+		return fmt.Errorf("generate-video requires an output path, a still image, and a prompt: local-offload generate-video <out.mp4> <still.png> \"<prompt>\" [--model hunyuan|wan] [--frames 49]")
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	params := buildVideoParams(videoFlags{
+		model: *model, still: still, negative: *negative, out: out,
+		frames: *frames, width: *width, height: *height, steps: *steps,
+		seed: *seed, reserveVRAM: *reserveVRAM,
+	})
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskGenerateVideo,
+		Input:  prompt,
+		Image:  still,
+		Params: params,
+	})
+	emitResult(res, *asJSON, "", *compactFlag)
+	return nil
+}
+
+// splitThreeArgs separates the FIRST THREE positionals (e.g. out path + still +
+// prompt) from flags, treating the named value-flags as consuming the following
+// token. Used by generate-video, whose CLI shape is `<out> <still> "<prompt>"
+// [flags]`. A fourth+ positional is dropped onto flags (harmless; FlagSet ignores
+// trailing positionals).
+func splitThreeArgs(args []string, valueFlags map[string]bool) (first, second, third string, flags []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "-") && a != "-" {
+			flags = append(flags, a)
+			name := strings.TrimLeft(a, "-")
+			if strings.ContainsRune(name, '=') {
+				continue
+			}
+			if valueFlags[name] && i+1 < len(args) {
+				i++
+				flags = append(flags, args[i])
+			}
+			continue
+		}
+		switch {
+		case first == "":
+			first = a
+		case second == "":
+			second = a
+		case third == "":
+			third = a
+		default:
+			flags = append(flags, a)
+		}
+	}
+	return first, second, third, flags
+}
+
+// splitTwoArgs separates the FIRST TWO positionals (e.g. out path + text) from
+// flags, treating the named value-flags as consuming the following token. Used by
+// generate-audio, whose CLI shape is `<out> "<text>" [flags]`. A third+ positional
+// is dropped onto flags (harmless; FlagSet ignores trailing positionals).
+func splitTwoArgs(args []string, valueFlags map[string]bool) (first, second string, flags []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "-") && a != "-" {
+			flags = append(flags, a)
+			name := strings.TrimLeft(a, "-")
+			if strings.ContainsRune(name, '=') {
+				continue
+			}
+			if valueFlags[name] && i+1 < len(args) {
+				i++
+				flags = append(flags, args[i])
+			}
+			continue
+		}
+		switch {
+		case first == "":
+			first = a
+		case second == "":
+			second = a
+		default:
+			flags = append(flags, a)
+		}
+	}
+	return first, second, flags
 }
 
 // runOCR handles `local-offload ocr <image-path> [--json]`. Like vqa the
@@ -464,6 +1119,28 @@ func printHuman(res core.Result) {
 		map[bool]string{true: ", cache hit", false: ""}[res.Meta.CacheHit])
 }
 
+// emitResult prints a Result, optionally projecting its Data to the --select
+// fields and/or minifying with --compact. This is the harness's fastcontext
+// citation pattern at the output layer: the caller keeps only the fields it
+// needs (e.g. `transcribe --select gist,srt_path` drops the verbose segments[]).
+// selectCSV "" / compact false reproduces the prior plain behavior exactly.
+func emitResult(res core.Result, asJSON bool, selectCSV string, compact bool) {
+	if keys := core.SelectKeys(selectCSV); len(keys) > 0 {
+		res.Data = core.ProjectFields(res.Data, keys)
+	}
+	if asJSON {
+		var b []byte
+		if compact {
+			b, _ = json.Marshal(res)
+		} else {
+			b, _ = json.MarshalIndent(res, "", "  ")
+		}
+		fmt.Println(string(b))
+		return
+	}
+	printHuman(res)
+}
+
 func runMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 	fs.String("config", "", "config file path")
@@ -474,6 +1151,14 @@ func runMCP(args []string) error {
 		return err
 	}
 	defer cleanup()
+	// A2 hot-reload: the MCP server is long-running, so a nightly retrain that
+	// rewrites the self-learning artifacts would otherwise never go live without a
+	// manual restart. Start the background poll reloader HERE (only for the MCP
+	// server — CLI one-shots never start it, so they stay byte-identical and leak
+	// no goroutine) and stop it on cleanup. It hot-swaps changed artifacts within
+	// one tick, fail-open, with zero IO/parse added to the request path.
+	stopReloader := p.StartReloader(0) // 0 => default interval
+	defer stopReloader()
 	return mcpserver.New(p).Run(context.Background(), version)
 }
 
@@ -492,8 +1177,23 @@ func runLedger(args []string) error {
 	if err != nil {
 		return err
 	}
-	b, _ := json.MarshalIndent(s, "", "  ")
+	// LO-8: surface WHY calls deferred — top defer reasons over the last 7 days
+	// (fixed window regardless of --since, so the recent-failure signal is
+	// always visible). Best-effort: a read error must not sink the summary.
+	reasons, rerr := ledger.TopDeferReasons(cfg.LedgerPath, time.Now().AddDate(0, 0, -7).Unix(), 5)
+	if rerr != nil {
+		fmt.Fprintln(os.Stderr, "note: defer-reason aggregation failed:", rerr)
+	}
+	out := struct {
+		ledger.Summary
+		TopDeferReasons7d []ledger.ReasonCount `json:"top_defer_reasons_7d,omitempty"`
+	}{s, reasons}
+	b, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Println(string(b))
+	// LO-12: honest claim — this is the est. Opus-input VALUE of tokens kept
+	// local, not literal billed savings. Math unchanged.
+	fmt.Printf("tokens kept local (est.): %d (~$%.2f Opus-input value — an estimate, not billed savings)\n",
+		s.TokensSaved, s.EstValueKeptLocal)
 	return nil
 }
 
@@ -502,17 +1202,92 @@ func runDoctor(args []string) error {
 	fs.String("config", "", "config file path")
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
-	fmt.Printf("endpoint:   %s%s\nmodel:      %s\ncache:      %s\nledger:     %s\n",
+	return doctorRun(cfg, os.Stdout)
+}
+
+// aliasCheck pairs a config key with its configured llama-swap model alias.
+type aliasCheck struct{ Key, Alias string }
+
+// modelAliases enumerates EVERY llama-swap model alias the config routes to,
+// with its config key. NIMModel is deliberately absent — it is a REMOTE
+// endpoint's model id, never served by the local llama-swap.
+func modelAliases(cfg config.Config) []aliasCheck {
+	return []aliasCheck{
+		{"model", cfg.Model},
+		{"triage_model", cfg.TriageModel},
+		{"escalation_model", cfg.EscalationModel},
+		{"reasoning_model", cfg.ReasoningModel},
+		{"vision_model", cfg.VisionModel},
+		{"stt_model", cfg.STTModel},
+		{"stt_model_hq", cfg.STTModelHQ},
+	}
+}
+
+// doctorRun checks endpoint health, then diffs the LIVE /v1/models roster
+// against every configured model alias (LO-11: doctor used to GET only
+// /health, so a renamed/removed llama-swap alias passed doctor yet every call
+// deferred). Any missing alias prints FAIL and the command exits non-zero.
+func doctorRun(cfg config.Config, w io.Writer) error {
+	fmt.Fprintf(w, "endpoint:   %s%s\nmodel:      %s\ncache:      %s\nledger:     %s\n",
 		cfg.Endpoint, cfg.CompletionPath, cfg.Model, cfg.CachePath, cfg.LedgerPath)
 	client := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, 5*time.Second)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := client.Health(ctx); err != nil {
-		fmt.Println("health:     DOWN -", err)
-		return nil
+		fmt.Fprintln(w, "health:     DOWN -", err)
+		return fmt.Errorf("endpoint down: %w", err)
 	}
-	fmt.Println("health:     OK")
+	fmt.Fprintln(w, "health:     OK")
+	roster, err := fetchModelRoster(ctx, cfg.Endpoint)
+	if err != nil {
+		fmt.Fprintln(w, "roster:     FAIL - cannot list /v1/models:", err)
+		return err
+	}
+	missing := 0
+	for _, a := range modelAliases(cfg) {
+		switch {
+		case a.Alias == "":
+			fmt.Fprintf(w, "%-18s (unset)\n", a.Key+":")
+		case roster[a.Alias]:
+			fmt.Fprintf(w, "%-18s OK    %s\n", a.Key+":", a.Alias)
+		default:
+			fmt.Fprintf(w, "%-18s FAIL  %s — not in the live /v1/models roster\n", a.Key+":", a.Alias)
+			missing++
+		}
+	}
+	if missing > 0 {
+		return fmt.Errorf("%d configured model alias(es) missing from %s/v1/models", missing, cfg.Endpoint)
+	}
 	return nil
+}
+
+// fetchModelRoster GETs <endpoint>/v1/models and returns the served model ids.
+func fetchModelRoster(ctx context.Context, endpoint string) (map[string]bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(endpoint, "/")+"/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET /v1/models: %s", resp.Status)
+	}
+	var body struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	ids := make(map[string]bool, len(body.Data))
+	for _, m := range body.Data {
+		ids[m.ID] = true
+	}
+	return ids, nil
 }
 
 func runModels(args []string) error {
@@ -520,23 +1295,40 @@ func runModels(args []string) error {
 	fs.String("config", "", "config file path")
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
-	fmt.Printf("endpoint: %s\n\n", cfg.Endpoint)
-	fmt.Println("Gemma-4 QAT family cascade (ascending capability; climbs on quality failure):")
-	fmt.Printf("  fast   triage,classify -> %s  (~120 tok/s, entry tier)\n", orDash(cfg.TriageModel))
-	fmt.Printf("  work   summarize,extract -> %s  (~83 tok/s, default workhorse)\n", orDash(cfg.Model))
-	fmt.Printf("  escal  on validation/low-confidence -> %s  (MoE, ~16 tok/s, near-frontier)\n", orDash(cfg.EscalationModel))
-	fmt.Println("  defer  all local tiers fail -> Opus (structured defer; harness never calls cloud)")
-	fmt.Println()
-	fmt.Println("Per-tier llama-server flags are grammar-reliable (NO MTP; MTP breaks GBNF):")
-	fmt.Println("  -ngl 99|48|999(+--cpu-moe) --ctx-size 8192 --flash-attn on \\")
-	fmt.Println("  --cache-type-k f16 --cache-type-v f16 --jinja --reasoning off")
-	fmt.Println("served by llama-swap on :11436 (see ~/llama-swap/config.yaml)")
+	fmt.Print(modelsReport(cfg))
 	return nil
+}
+
+// modelsReport renders the CURRENT configured model routes, built from live
+// config values (LO-11: the old text hardcoded a stale tier roster — the
+// prose still said gemma4-26b-a4b long after the default escalation moved to
+// qwythos — and printed serving flags this binary does not control).
+func modelsReport(cfg config.Config) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "endpoint: %s\n\n", cfg.Endpoint)
+	b.WriteString("Configured model routes (ascending cascade; verify the live roster with `local-offload doctor`):\n")
+	fmt.Fprintf(&b, "  entry   triage,classify          -> %s  (triage_model)\n", orDash(cfg.TriageModel))
+	fmt.Fprintf(&b, "  work    summarize,extract        -> %s  (model)\n", orDash(cfg.Model))
+	fmt.Fprintf(&b, "  escal   on quality failure       -> %s  (escalation_model)\n", orDash(cfg.EscalationModel))
+	fmt.Fprintf(&b, "  reason  grammar defers, pre-Opus -> %s  (reasoning_model)\n", orDash(cfg.ReasoningModel))
+	fmt.Fprintf(&b, "  vision  vqa,ocr,assess_image     -> %s  (vision_model)\n", orUnset(cfg.VisionModel))
+	fmt.Fprintf(&b, "  stt     transcribe               -> %s  (stt_model); hq: %s  (stt_model_hq)\n", orUnset(cfg.STTModel), orUnset(cfg.STTModelHQ))
+	b.WriteString("  defer   all local tiers fail     -> structured defer to the caller (harness never calls cloud)\n")
+	return b.String()
 }
 
 func orDash(s string) string {
 	if s == "" {
 		return "(unset -> falls back to workhorse)"
+	}
+	return s
+}
+
+// orUnset annotates an empty non-cascade route (vision/stt), where unset means
+// the task defers rather than falling back to the workhorse.
+func orUnset(s string) string {
+	if s == "" {
+		return "(unset -> task defers)"
 	}
 	return s
 }
@@ -594,13 +1386,252 @@ func runTrainRouter(args []string) error {
 	if dst == "" {
 		dst = cfg.RouterWeightsPath
 	}
-	rep, err := router.Train(cfg.LedgerPath, dst)
+	rep, err := router.Train(cfg.LedgerPath, cfg.RouterLabelsPath, dst)
 	if err != nil {
 		return err
 	}
 	fmt.Println(rep)
 	fmt.Println("wrote", dst)
 	return nil
+}
+
+// runShadowLabel drains the shadow queue, runs the escalation tier on each item
+// (counterfactual), judges agreement vs the stored entry output, and appends a
+// confhead label row to cfg.ConfHeadLabelsPath. It caps processing at --n items
+// (default 200). Only confhead-labels.jsonl is written; the savings ledger is
+// never touched.
+func runShadowLabel(args []string) error {
+	fs := flag.NewFlagSet("shadow-label", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	n := fs.Int("n", 200, "max items to label this run")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return fmt.Errorf("shadow-label: open pipeline: %w", err)
+	}
+	defer cleanup()
+
+	items, err := shadow.Drain(cfg.ShadowQueuePath)
+	if err != nil {
+		return fmt.Errorf("shadow-label: drain queue: %w", err)
+	}
+	if len(items) == 0 {
+		fmt.Println("shadow-label: queue empty")
+		return nil
+	}
+
+	emb := judge.NewEmbedder(cfg.Endpoint, 30*time.Second)
+	deps := shadow.LabelDeps{
+		Escalation:            cfg.EscalationModel,
+		E2B:                   cfg.TriageModel,
+		RunTier:               p.RunTier,
+		AnswersAgree:          pipeline.AnswersAgree,
+		Ground:                grounding.Check,
+		Similar:               emb.Similar,
+		SummarizeSimThreshold: cfg.SummarizeSimThreshold,
+		AppendLabel:           ledger.AppendLabel,
+		LabelsPath:            cfg.ConfHeadLabelsPath,
+		RouterLabelsPath:      cfg.RouterLabelsPath,
+	}
+	// meta-router v2: build the kNN entry-tier substrate during the drain, only
+	// when the feature is enabled (one flag controls the whole feature).
+	if cfg.KNNPreFilterEnabled {
+		deps.Embed = emb.Embed
+		deps.AppendKNN = func(task string, vec []float64, accept bool) error {
+			return knn.Append(cfg.KNNIndexPath, knn.Row{Task: task, Vec: vec, Accept: accept})
+		}
+	}
+	routerBefore := countJSONLLines(cfg.RouterLabelsPath)
+	w := shadow.LabelQueue(context.Background(), items, *n, deps)
+	routerWritten := countJSONLLines(cfg.RouterLabelsPath) - routerBefore
+	fmt.Printf("shadow-label: drained %d items, wrote %d confhead labels -> %s\n", len(items), w, cfg.ConfHeadLabelsPath)
+	fmt.Printf("shadow-label: wrote %d router labels -> %s\n", routerWritten, cfg.RouterLabelsPath)
+	if cfg.KNNPreFilterEnabled {
+		fmt.Printf("shadow-label: kNN substrate now %d rows -> %s\n", countJSONLLines(cfg.KNNIndexPath), cfg.KNNIndexPath)
+	}
+	return nil
+}
+
+// runAgentTrajectoryLabel drains the P6 agent-trajectory capture queue, judges each
+// trajectory for GOAL SATISFACTION (a local triage — the raw StopReason "done" only
+// means the model stopped calling tools, not that it reached the goal), and appends
+// a label per item to the trajectory-label sidecar. The judge runs on a RECORDLESS
+// pipeline (nil cache + nil ledger): the savings ledger is never opened or written —
+// only the sidecar grows. A single un-judgeable item is skipped, never aborts.
+func runAgentTrajectoryLabel(args []string) error {
+	fs := flag.NewFlagSet("agent-trajectory-label", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	n := fs.Int("n", 500, "max trajectories to label this run (<=0 = no limit)")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+
+	items, err := trajectory.Drain(cfg.AgentTrajectoryQueuePath)
+	if err != nil {
+		return fmt.Errorf("agent-trajectory-label: drain queue: %w", err)
+	}
+	if len(items) == 0 {
+		fmt.Println("agent-trajectory-label: trajectory queue empty")
+		return nil
+	}
+	// A recordless pipeline (nil cache + nil ledger): the judge's RunTier calls write
+	// NOTHING and never open the savings ledger — labels go to the sidecar only. The
+	// single shared constructor keeps the nil-store invariant from drifting.
+	ap := pipeline.NewRecordlessPipeline(cfg, time.Duration(cfg.RequestTimeoutSec)*time.Second)
+	judgeModel := cfg.EscalationModel
+	if judgeModel == "" {
+		judgeModel = cfg.Model
+	}
+	w := trajectory.LabelQueue(context.Background(), items, *n, trajectory.LabelDeps{
+		RunTier:     ap.RunTier,
+		JudgeModel:  judgeModel,
+		AppendLabel: trajectory.AppendLabel,
+		LabelsPath:  cfg.AgentTrajectoryLabelsPath,
+	})
+	fmt.Printf("agent-trajectory-label: drained %d trajectories, wrote %d goal-satisfaction labels -> %s\n", len(items), w, cfg.AgentTrajectoryLabelsPath)
+	return nil
+}
+
+// runAgentTrajectoryGate is the P6 flywheel adoption-gate DRY RUN: it re-runs each
+// labeled READ-ONLY trajectory under a CANDIDATE planner prompt in a side-effect-
+// free replay (a read-only agent.Build — no write/fetch/shell tools registered —
+// with the candidate prompt), judges goal satisfaction, and reports the paired
+// bootstrap delta (candidate − incumbent) + verdict (ADOPT-eligible iff ci_lo>0,
+// BLOCK iff ci_hi<0). It ADOPTS NOTHING and is ledger-pristine (recordless
+// pipelines throughout). Effectful trajectories (write/shell/fetch) are excluded —
+// a side-effect-free replay cannot fairly re-run them.
+func runAgentTrajectoryGate(args []string) error {
+	fs := flag.NewFlagSet("agent-trajectory-gate", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	candidatePath := fs.String("candidate-prompt", "", "path to a candidate planner system-prompt file to evaluate")
+	root := fs.String("root", ".", "read root the replay agent may read (read-only)")
+	n := fs.Int("n", 200, "max labeled trajectories to replay (<=0 = all)")
+	_ = fs.Parse(args)
+	if *candidatePath == "" {
+		return fmt.Errorf("agent-trajectory-gate requires --candidate-prompt <file>")
+	}
+	candidate, err := os.ReadFile(*candidatePath)
+	if err != nil {
+		return fmt.Errorf("read candidate prompt: %w", err)
+	}
+	cfg := loadCfg(fs)
+
+	labels, err := trajectory.ReadLabels(cfg.AgentTrajectoryLabelsPath)
+	if err != nil {
+		return fmt.Errorf("read trajectory labels (%s): %w", cfg.AgentTrajectoryLabelsPath, err)
+	}
+	// Only READ-ONLY trajectories are fairly replayable side-effect-free.
+	var gateable []trajectory.Label
+	for _, l := range labels {
+		if !hasEffectfulCap(l.Envelope) {
+			gateable = append(gateable, l)
+		}
+	}
+	if *n > 0 && len(gateable) > *n {
+		gateable = gateable[:*n]
+	}
+	if len(gateable) < 2 {
+		fmt.Printf("agent-trajectory-gate: need >=2 read-only labeled trajectories to gate; have %d\n", len(gateable))
+		return nil
+	}
+
+	timeout := time.Duration(cfg.RequestTimeoutSec) * time.Second
+	plannerModel := cfg.Model
+	judgeModel := cfg.EscalationModel
+	if judgeModel == "" {
+		judgeModel = cfg.Model
+	}
+	// The replay agent: READ-ONLY (no write/fetch/shell tools => side-effect-free)
+	// with the CANDIDATE prompt. Offload + judge run on recordless (nil-store)
+	// pipelines, so the whole dry run is ledger-pristine.
+	absRoot, _ := filepath.Abs(*root)
+	built, err := agent.Build(agent.BuildConfig{
+		PlannerBase:          cfg.Endpoint,
+		Model:                plannerModel,
+		Timeout:              timeout,
+		ReadRoot:             absRoot,
+		Offload:              pipeline.NewRecordlessOffload(cfg, plannerModel, timeout),
+		SystemPromptOverride: string(candidate),
+	})
+	if err != nil {
+		return fmt.Errorf("build replay agent: %w", err)
+	}
+	judgePipe := pipeline.NewRecordlessPipeline(cfg, timeout)
+
+	var inc, cand []float64
+	incReached, candReached := 0, 0
+	ctx := context.Background()
+	for _, lab := range gateable {
+		res, rerr := built.Loop.Run(ctx, lab.Goal)
+		if rerr != nil {
+			continue // a replay failure drops that pair, never aborts the gate
+		}
+		decision, _, ok := trajectory.JudgeGoalReached(ctx, judgePipe.RunTier, judgeModel, lab.Goal, res.Output)
+		if !ok {
+			continue
+		}
+		reached := decision == "yes"
+		inc = append(inc, b2f(lab.GoalReached))
+		cand = append(cand, b2f(reached))
+		if lab.GoalReached {
+			incReached++
+		}
+		if reached {
+			candReached++
+		}
+	}
+	m := len(inc)
+	if m < 2 {
+		fmt.Printf("agent-trajectory-gate: only %d comparable pairs after replay; need >=2\n", m)
+		return nil
+	}
+	delta, lo, hi := eval.BootstrapDeltaMean(inc, cand, 2000, 42)
+	verdict := "INCONCLUSIVE (95% CI spans 0 — do not adopt)"
+	switch {
+	case lo > 0:
+		verdict = "ADOPT-ELIGIBLE (candidate strictly better; ci_lo>0)"
+	case hi < 0:
+		verdict = "BLOCK (candidate regresses; ci_hi<0)"
+	}
+	fmt.Printf("agent-trajectory-gate DRY RUN (nothing adopted) — %d read-only trajectories replayed under %s\n", m, *candidatePath)
+	fmt.Printf("  incumbent goal-reached: %d/%d (%.0f%%) | candidate: %d/%d (%.0f%%)\n",
+		incReached, m, 100*float64(incReached)/float64(m), candReached, m, 100*float64(candReached)/float64(m))
+	fmt.Printf("  delta (candidate - incumbent) = %+.3f   95%% CI [%+.3f, %+.3f]\n", delta, lo, hi)
+	fmt.Printf("  VERDICT: %s\n", verdict)
+	fmt.Println("  caveats: incumbent = label-time verdict (not re-judged); only read-only trajectories gated; small-N CI is wide")
+	fmt.Println("  (dry run — no prompt adopted; live adoption is P6c, operator-gated)")
+	return nil
+}
+
+// hasEffectfulCap reports whether a captured envelope granted a side-effecting
+// capability (write/fetch/shell) — such trajectories are excluded from the gate
+// because a side-effect-free replay cannot fairly re-run them.
+func hasEffectfulCap(envelope []string) bool {
+	for _, c := range envelope {
+		if c == "write" || c == "fetch" || c == "shell" {
+			return true
+		}
+	}
+	return false
+}
+
+func b2f(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// countJSONLLines returns the number of newline-terminated lines in a JSONL file
+// (0 if absent/unreadable). Used to report how many router-sidecar labels a
+// shadow-label run wrote, since LabelQueue's return value counts only confhead labels.
+func countJSONLLines(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	return strings.Count(string(data), "\n")
 }
 
 func runTrainConfHead(args []string) error {
@@ -620,6 +1651,17 @@ func runTrainConfHead(args []string) error {
 	fmt.Println(rep)
 	fmt.Println("wrote", dst)
 	return nil
+}
+
+// confheadVerdict returns "ADOPT" when the bootstrap CI lower bound strictly
+// exceeds zero (the head provably lowers AURC), otherwise "REJECT".
+// AUGRC and ECE are DIAGNOSTIC only and must NEVER be passed to or read by
+// this function — the verdict depends solely on lo.
+func confheadVerdict(lo float64) string {
+	if lo > 0 {
+		return "ADOPT"
+	}
+	return "REJECT"
 }
 
 // runConfheadEval is the Phase 2 confhead ADOPTION GATE: a rigorous, leakage-free
@@ -669,6 +1711,7 @@ func runConfheadEval(args []string) error {
 		AURCIncumbent *float64 `json:"aurc_incumbent,omitempty"`
 		AURCHeadOOF   *float64 `json:"aurc_head_oof,omitempty"`
 		AUGRCHead     *float64 `json:"augrc_head,omitempty"`
+		ECEHead       *float64 `json:"ece_head,omitempty"` // diagnostic only — never read by verdict
 		Delta         *float64 `json:"delta,omitempty"`
 		CILo          *float64 `json:"ci_lo,omitempty"`
 		CIHi          *float64 `json:"ci_hi,omitempty"`
@@ -735,16 +1778,16 @@ func runConfheadEval(args []string) error {
 		_, _, aurcInc, _ := eval.RiskCoverage(incPts)
 		_, _, aurcHead, _ := eval.RiskCoverage(headPts)
 		augrc := eval.AUGRC(headPts)
+		ece := eval.ECE(headPts, 10) // diagnostic: Expected Calibration Error (10 bins)
 		delta, lo, hi := eval.BootstrapDeltaAURC(margins, oofHead, correct, *b, seed)
 
-		verdict := "REJECT"
-		if lo > 0 {
-			verdict = "ADOPT"
-		}
+		// Verdict is driven solely by the CI lower bound — augrc and ece are
+		// diagnostic outputs and are NEVER passed to confheadVerdict.
+		verdict := confheadVerdict(lo)
 		baseErr := float64(nWrong) / float64(n)
 		out[task] = result{
 			N: n, BaseError: &baseErr,
-			AURCIncumbent: &aurcInc, AURCHeadOOF: &aurcHead, AUGRCHead: &augrc,
+			AURCIncumbent: &aurcInc, AURCHeadOOF: &aurcHead, AUGRCHead: &augrc, ECEHead: &ece,
 			Delta: &delta, CILo: &lo, CIHi: &hi, Verdict: verdict,
 		}
 	}
@@ -810,6 +1853,16 @@ func runConfheadCalibrate(args []string) error {
 		tasks = append(tasks, t)
 	}
 	sort.Strings(tasks)
+
+	type calibDiag struct {
+		N                   int     `json:"n"`
+		Tau                 float64 `json:"tau"`
+		Target              float64 `json:"target"`
+		RealizedAcceptedErr float64 `json:"realized_accepted_err"` // diagnostic: OOF accepted-set error at tau
+		BaseErr             float64 `json:"base_err"`
+		EscalationRate      float64 `json:"escalation_rate"`
+	}
+	diags := map[string]calibDiag{}
 
 	var sb strings.Builder
 	sb.WriteString("confhead threshold calibration (out-of-fold)\n")
@@ -877,18 +1930,32 @@ func runConfheadCalibrate(args []string) error {
 		escRate := float64(n-nAccepted) / float64(n)
 		fmt.Fprintf(&sb, "  %-12s  n=%4d  base_err=%.4f  target=%.3f  tau=%.4f  accepted_err=%.4f  escalation_rate=%.4f\n",
 			task, n, baseErr, target, tau, accErr, escRate)
+		diags[task] = calibDiag{N: n, Tau: tau, Target: target, RealizedAcceptedErr: accErr, BaseErr: baseErr, EscalationRate: escRate}
 	}
 
 	raw, err := json.MarshalIndent(thresholds, "", "  ")
 	if err != nil {
 		return fmt.Errorf("confhead-calibrate: marshal thresholds: %w", err)
 	}
-	if err := os.WriteFile(dst, append(raw, '\n'), 0o644); err != nil {
-		return fmt.Errorf("confhead-calibrate: write %s: %w", dst, err)
+	// Atomic write (P4): the long-running MCP server polls confhead-thresholds.json
+	// and must only ever read a COMPLETE file. tmp+rename (atomic on the same
+	// filesystem) so the reloader never sees a half-written threshold map.
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, append(raw, '\n'), 0o644); err != nil {
+		return fmt.Errorf("confhead-calibrate: write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return fmt.Errorf("confhead-calibrate: rename %s: %w", dst, err)
 	}
 
 	fmt.Print(sb.String())
 	fmt.Println("wrote", dst)
+	// Print JSON diagnostics (realized_accepted_err vs target_error_rate per task).
+	// This is a diagnostic-only report; the threshold file written above is unchanged.
+	if len(diags) > 0 {
+		enc, _ := json.MarshalIndent(diags, "", "  ")
+		fmt.Println(string(enc))
+	}
 	return nil
 }
 
@@ -1015,6 +2082,13 @@ func runEval(args []string) error {
 	fs := flag.NewFlagSet("eval", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	dir := fs.String("dir", "testdata/eval", "gold-set dir of <task>.jsonl files")
+	confheadAB := fs.Bool("confhead-ab", false, "A1 decision-gate: paired confhead ON-vs-OFF frontier A/B (read-only; never enables the flag)")
+	stagedDir := fs.String("staged-dir", filepath.FromSlash(".testrun/bootstrap"), "confhead-ab: dir holding staged confhead-weights.json + confhead-thresholds.json")
+	eps := fs.Float64("eps", 0.0, "confhead-ab: max tolerated selective-acc drop for a frontier win")
+	costBudget := fs.Float64("cost-budget", 1.0, "confhead-ab: max ON/OFF avg-cost ratio for a frontier win (1.0 = no increase)")
+	calibTarget := fs.Float64("calib-target", 0.15, "confhead-ab: per-task target error for the calibrated-margin baseline threshold")
+	gate1Adopt := fs.Bool("gate1-adopt", false, "confhead-ab: gate-1 (confhead-eval) ADOPT outcome; ENABLE requires this AND all tasks frontier_win")
+	abForceOffOn := fs.Bool("ab-force-off-on", false, "confhead-ab TEST seam: force the ON arm confhead-OFF (OFF/OFF determinism check)")
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
 
@@ -1028,6 +2102,10 @@ func runEval(args []string) error {
 	}
 	if len(cases) == 0 {
 		return fmt.Errorf("no gold cases under %s", *dir)
+	}
+
+	if *confheadAB {
+		return runConfheadAB(cfg, cases, *stagedDir, *eps, *costBudget, *calibTarget, *gate1Adopt, *abForceOffOn)
 	}
 
 	run := func(c config.Config) []eval.Outcome {
@@ -1068,7 +2146,7 @@ func runEval(args []string) error {
 		AUDC         float64 `json:"audc"`          // cascade cost-quality area
 		QNC          float64 `json:"qnc"`           // min norm cost to match peak quality
 		PeakQuality  float64 `json:"peak_quality"`
-		AURC         float64 `json:"aurc,omitempty"`  // selective prediction (triage/classify)
+		AURC         float64 `json:"aurc,omitempty"` // selective prediction (triage/classify)
 		EAURC        float64 `json:"eaurc,omitempty"`
 		AURCApplies  bool    `json:"aurc_applies"`
 	}

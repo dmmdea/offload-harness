@@ -15,8 +15,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Entry is one offload call. The self-learning fields (margin..feat) are written
@@ -34,6 +36,7 @@ type Entry struct {
 	Margin          float64            `json:"margin,omitempty"`
 	ModelTier       string             `json:"model_tier,omitempty"`
 	Escalations     int                `json:"escalations,omitempty"`
+	Reasoning       bool               `json:"reasoning,omitempty"` // produced by the terminal reasoning tier (a reclaimed deferral)
 	Retries         int                `json:"retries,omitempty"`
 	Truncated       bool               `json:"truncated,omitempty"`
 	Grounded        *bool              `json:"grounded,omitempty"`
@@ -41,6 +44,27 @@ type Entry struct {
 	ErrClass        string             `json:"err_class,omitempty"`
 	InputChars      int                `json:"input_chars,omitempty"`
 	Feat            map[string]float64 `json:"feat,omitempty"`
+	// Reason is the human-readable defer reason (LO-8), set only on deferred
+	// entries and truncated to maxReasonLen on write. Old ledger lines without
+	// the field parse fine (empty string).
+	Reason string `json:"reason,omitempty"`
+}
+
+// maxReasonLen bounds a recorded defer reason so a long upstream error can't
+// bloat the one-line ledger records (they must stay O_APPEND-atomic-small).
+const maxReasonLen = 120
+
+// truncateReason caps s at maxReasonLen bytes, backing off to a rune boundary
+// so a multibyte character is never split.
+func truncateReason(s string) string {
+	if len(s) <= maxReasonLen {
+		return s
+	}
+	cut := s[:maxReasonLen]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut
 }
 
 // Ledger appends entries to a JSONL file. The mutex serializes in-process
@@ -74,6 +98,7 @@ func (l *Ledger) Record(e Entry) error {
 	if e.TS == 0 {
 		e.TS = time.Now().Unix()
 	}
+	e.Reason = truncateReason(e.Reason)
 	val, err := json.Marshal(e)
 	if err != nil {
 		return err
@@ -132,12 +157,20 @@ func ReadLabelFile(path string) ([]Entry, error) {
 
 // Summary aggregates the ledger.
 type Summary struct {
-	Calls          int            `json:"calls"`
-	CacheHits      int            `json:"cache_hits"`
-	Deferred       int            `json:"deferred"`
-	Completed      int            `json:"completed"`
-	TokensSaved    int            `json:"tokens_saved"` // input tokens kept out of Opus on completed/cache calls
-	TokensOut      int            `json:"tokens_out"`
+	Calls             int            `json:"calls"`
+	CacheHits         int            `json:"cache_hits"`
+	Deferred          int            `json:"deferred"`
+	Completed         int            `json:"completed"`
+	ReasoningReclaims int            `json:"reasoning_reclaims"` // completed via the terminal reasoning tier (deferrals it reclaimed before Opus)
+	TokensSaved       int            `json:"tokens_saved"`       // input tokens kept out of Opus on completed/cache calls
+	TokensOut         int            `json:"tokens_out"`
+	// EstValueKeptLocal is the estimated Opus-INPUT value of the tokens kept
+	// local (tokens_saved x opus_input_price_per_mtok / 1M). It is an estimate
+	// of avoided cloud input pricing, NOT literal billed dollars saved (LO-12:
+	// the old est_dollar_saved name presented it as money in the bank).
+	EstValueKeptLocal float64 `json:"est_value_kept_local"`
+	// Deprecated: the same number under the old, misleading name — kept
+	// emitted for one release for consumers of the JSON; remove in v0.7.
 	EstDollarSaved float64        `json:"est_dollar_saved"`
 	ByTask         map[string]int `json:"by_task"`
 }
@@ -172,6 +205,55 @@ func ReadAll(path string) ([]Entry, error) {
 		}
 	}
 	return out, sc.Err()
+}
+
+// ReasonCount is one aggregated defer reason for the ledger report.
+type ReasonCount struct {
+	Reason string `json:"reason"`
+	Count  int    `json:"count"`
+}
+
+// TopDeferReasons aggregates the defer reasons of entries since `since`
+// (unix; 0 = all) and returns the topN most frequent, ties broken
+// alphabetically for deterministic output. Deferred entries written before
+// the reason field existed count under "(unrecorded)" so the denominator
+// stays honest. Lock-free like SummarizeFile; a missing file returns nil.
+func TopDeferReasons(path string, since int64, topN int) ([]ReasonCount, error) {
+	entries, err := ReadAll(path)
+	if err != nil {
+		return nil, err
+	}
+	counts := map[string]int{}
+	for _, e := range entries {
+		if !e.Deferred || e.CacheHit {
+			continue
+		}
+		if since > 0 && e.TS < since {
+			continue
+		}
+		r := e.Reason
+		if r == "" {
+			r = "(unrecorded)"
+		}
+		counts[r]++
+	}
+	if len(counts) == 0 {
+		return nil, nil // nil (not an empty slice) so the JSON field stays omitempty
+	}
+	out := make([]ReasonCount, 0, len(counts))
+	for r, n := range counts {
+		out = append(out, ReasonCount{Reason: r, Count: n})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Reason < out[j].Reason
+	})
+	if topN > 0 && len(out) > topN {
+		out = out[:topN]
+	}
+	return out, nil
 }
 
 // SummarizeFile reads a JSONL ledger without any lock — safe to call while
@@ -213,8 +295,14 @@ func SummarizeFile(path string, since int64, opusPricePerMTok float64) (Summary,
 			s.Completed++
 			s.TokensSaved += e.TokensIn
 			s.TokensOut += e.TokensOut
+			if e.Reasoning {
+				s.ReasoningReclaims++ // a completed reasoning entry = a deferral reclaimed before Opus
+			}
 		}
 	}
-	s.EstDollarSaved = float64(s.TokensSaved) / 1_000_000 * opusPricePerMTok
+	// Same math as ever — only the CLAIM changed (LO-12): this is the est.
+	// Opus-input value of locally-kept tokens, not billed savings.
+	s.EstValueKeptLocal = float64(s.TokensSaved) / 1_000_000 * opusPricePerMTok
+	s.EstDollarSaved = s.EstValueKeptLocal // Deprecated alias; remove in v0.7
 	return s, sc.Err()
 }
