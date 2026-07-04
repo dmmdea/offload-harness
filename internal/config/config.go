@@ -113,6 +113,18 @@ type Config struct {
 	// Kept SHORTER than video so a cheap queued TTS isn't starved by a 20-min video job —
 	// it defers cleanly after this window. Default 120000 (2min).
 	AudioGenWaitMs int `json:"audiogen_wait_ms,omitempty"`
+	// GPULockPath overrides the single-slot GPU lock DIRECTORY shared with the render
+	// runners (render/gpu-lock.mjs). Empty = the runners' own default (the GPU_LOCK env,
+	// else <os-tmpdir>/local-offload-gpu.lock). When set it is also threaded to every gen
+	// runner as the GPU_LOCK env, so the Go-side vision gate (LO-1) and the Node runners
+	// always contend on the SAME lock.
+	GPULockPath string `json:"gpu_lock_path,omitempty"`
+	// VisionGPUWaitSec is how long a vision call (vqa/ocr/assess_image/video_describe)
+	// waits for the GPU lock held by a generation job before deferring (polled every 2s).
+	// While a gen job owns the GPU, llama-swap cannot (re)load the VLM — calling anyway
+	// just burns an http_5xx defer to the expensive cloud model (LO-1: 295 of the 337
+	// all-time defers landed in ONE such hour). Default 90.
+	VisionGPUWaitSec int `json:"vision_gpu_wait_sec,omitempty"`
 	// MemoryStack lists the CPU-only, zero-VRAM llama-swap models the GPU-free helper
 	// must NEVER unload (the load-bearing mem0 stack). Sourced here (not a buried const)
 	// so a renamed/added 3rd CPU member is honored. Threaded to the runner via the
@@ -259,6 +271,8 @@ func Default() Config {
 		AudioGenTimeoutSec:        720,
 		VideoGenWaitMs:            1200000, // 20min — video is the hero job
 		AudioGenWaitMs:            120000,  // 2min — a queued TTS defers fast, never starved by a long video
+		GPULockPath:               "",      // runners' default (GPU_LOCK env, else <tmpdir>/local-offload-gpu.lock)
+		VisionGPUWaitSec:          90,      // LO-1: bounded wait for the gen lock before a vision call defers
 		MemoryStack:               []string{"embeddinggemma", "bge-reranker-v2-m3"},
 		Temperature:               0,
 		MaxRetries:                1,
@@ -334,7 +348,7 @@ func pathFields(c *Config) []*string {
 	return []*string{
 		&c.FFmpegPath, &c.MediaDir, &c.SVGDir,
 		&c.ImageGenScript, &c.NodePath, &c.ComfyDir,
-		&c.VideoGenScript, &c.VoiceGenScript, &c.MusicGenScript,
+		&c.VideoGenScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath,
 		&c.CachePath, &c.LedgerPath,
 		&c.ThresholdsPath, &c.TierOverridesPath, &c.RouterWeightsPath,
 		&c.ConfHeadPath, &c.RouterLabelsPath, &c.ConfHeadLabelsPath,

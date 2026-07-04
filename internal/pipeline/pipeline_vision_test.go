@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -33,7 +35,9 @@ func minimalPNGDataURI() string {
 }
 
 // baseVisionCfg returns a Default config wired to srv with self-learning paths
-// and stores disabled so only the vision branch under test is active.
+// and stores disabled so only the vision branch under test is active. The GPU
+// lock is pointed at a path that never exists (LO-1) so vision tests are
+// immune to a real gen job / stale lock dir on the host machine's tmpdir.
 func baseVisionCfg(srv *httptest.Server, visionModel string) config.Config {
 	cfg := config.Default()
 	cfg.Endpoint = srv.URL
@@ -44,6 +48,7 @@ func baseVisionCfg(srv *httptest.Server, visionModel string) config.Config {
 	cfg.ConfHeadLabelsPath = ""
 	cfg.CachePath = ""
 	cfg.LedgerPath = ""
+	cfg.GPULockPath = filepath.Join(os.TempDir(), "lo-vision-test-absent", "no.lock")
 	return cfg
 }
 

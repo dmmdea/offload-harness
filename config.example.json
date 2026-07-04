@@ -31,6 +31,8 @@
   "audiogen_timeout_sec": 720,
   "videogen_wait_ms": 1200000,
   "audiogen_wait_ms": 120000,
+  "gpu_lock_path": "",
+  "vision_gpu_wait_sec": 90,
   "memory_stack": ["embeddinggemma","bge-reranker-v2-m3"],
   "temperature": 0,
   "max_retries": 1,

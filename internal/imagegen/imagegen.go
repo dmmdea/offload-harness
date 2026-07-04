@@ -18,9 +18,12 @@ import (
 // Generate runs `node <script> <out> <prompt> [--negative ..] [--width ..] ...` and
 // returns out on success. node is the node executable ("" => "node"); script is the
 // absolute path to comfy-generate.mjs; comfyDir is exported as COMFY_DIR for the script.
-// params may carry negative (string) and width/height/steps/seed (int-ish). A non-zero
-// exit, a timeout, or a missing/empty output file returns an error (the caller defers).
-func Generate(ctx context.Context, node, script, comfyDir, out, prompt string, params map[string]any, timeout time.Duration) (string, error) {
+// params may carry negative (string) and width/height/steps/seed (int-ish). extraEnv
+// appends additional "K=V" entries (LO-1: the pipeline threads a configured GPU_LOCK
+// override so the runner contends on the same lock the Go vision gate watches). A
+// non-zero exit, a timeout, or a missing/empty output file returns an error (the
+// caller defers).
+func Generate(ctx context.Context, node, script, comfyDir, out, prompt string, params map[string]any, timeout time.Duration, extraEnv ...string) (string, error) {
 	args := []string{out, prompt}
 	if n, ok := params["negative"].(string); ok && n != "" {
 		args = append(args, "--negative", n)
@@ -34,7 +37,7 @@ func Generate(ctx context.Context, node, script, comfyDir, out, prompt string, p
 		Exe:     node,
 		Script:  script,
 		Args:    args,
-		Env:     []string{"COMFY_DIR=" + comfyDir},
+		Env:     append([]string{"COMFY_DIR=" + comfyDir}, extraEnv...),
 		Out:     out,
 		Timeout: timeout,
 	})

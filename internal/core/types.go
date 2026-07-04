@@ -98,7 +98,7 @@ type Meta struct {
 	Truncated       bool               `json:"truncated,omitempty"`        // hit token limit
 	Grounded        *bool              `json:"grounded,omitempty"`         // extract/summary values appear in source (nil = N/A)
 	EscalatedAgreed *bool              `json:"escalated_agreed,omitempty"` // higher tier agreed with the smaller (nil = no escalation)
-	ErrClass        string             `json:"err_class,omitempty"`        // oom|timeout|http_5xx|conn_refused on infra failure
+	ErrClass        string             `json:"err_class,omitempty"`        // oom|timeout|http_5xx|conn_refused on infra failure; gpu_busy = vision call skipped, a gen job held the GPU lock (LO-1)
 	Feat            map[string]float64 `json:"feat,omitempty"`             // cheap input features for the entry-tier router
 }
 

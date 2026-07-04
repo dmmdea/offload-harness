@@ -32,6 +32,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/exemplars"
 	"github.com/dmmdea/offload-harness/internal/gbnf"
 	"github.com/dmmdea/offload-harness/internal/gpugen"
+	"github.com/dmmdea/offload-harness/internal/gpulock"
 	"github.com/dmmdea/offload-harness/internal/grounding"
 	"github.com/dmmdea/offload-harness/internal/imagegen"
 	"github.com/dmmdea/offload-harness/internal/imageio"
@@ -90,6 +91,18 @@ type Pipeline struct {
 	swapMu   sync.Mutex
 	tierSeen map[string]time.Time
 	nowFn    func() time.Time
+	// LO-1 GPU-lock gate: vision calls check the render runners' single-slot GPU
+	// lock (internal/gpulock) BEFORE hitting llama-swap — while a generation job
+	// owns the GPU the VLM cannot (re)load, so calling anyway just burns an
+	// http_5xx defer to the expensive cloud model. gpuLockPath is resolved once
+	// in New (config override > GPU_LOCK env > tmpdir default, same as the .mjs
+	// runners); visionGPUWait/visionGPUPoll bound the pre-call wait; and
+	// visionRetryWait is the one-retry backoff on a vision http_5xx. The three
+	// durations are fields (not consts) so tests can shrink them.
+	gpuLockPath     string
+	visionGPUWait   time.Duration
+	visionGPUPoll   time.Duration
+	visionRetryWait time.Duration
 }
 
 // Cfg exposes the loaded config so callers like the MCP server can build
@@ -101,6 +114,12 @@ func (p *Pipeline) Cfg() config.Config { return p.cfg }
 func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Ledger) *Pipeline {
 	p := &Pipeline{cfg: cfg, client: c, cache: ca, led: l, lastHeal: map[string]time.Time{}, learnHashes: map[string]string{}}
 	p.stt = sttclient.New(cfg.Endpoint, time.Duration(cfg.STTRequestTimeoutSec)*time.Second)
+	// LO-1: resolve the shared GPU lock path ONCE, the same way the Node render
+	// runners do, so the vision gate watches the exact lock the gen jobs hold.
+	p.gpuLockPath = gpulock.Path(cfg.GPULockPath)
+	p.visionGPUWait = time.Duration(cfg.VisionGPUWaitSec) * time.Second
+	p.visionGPUPoll = 2 * time.Second
+	p.visionRetryWait = 3 * time.Second
 	p.thresholds = loadThresholds(cfg.ThresholdsPath)    // Phase 2
 	p.router = router.Load(cfg.RouterWeightsPath)        // Phase 5
 	p.overrides = loadOverrides(cfg.TierOverridesPath)   // Phase 4
@@ -355,6 +374,9 @@ func (p *Pipeline) runVision(ctx context.Context, req core.Request, built tasks.
 // video). cacheKeyExtra distinguishes inputs in the cache. No grammar/grounding/
 // confidence gate for the free-text tasks; a grammar-constrained vision task
 // (assess_image) surfaces its JSON verbatim. Any defer goes straight to Opus.
+// LO-1: after the cache check it gates on the render runners' GPU lock (bounded
+// wait, distinct "gpu busy" defer), retries once on http_5xx, and records the
+// final infra outcome into the vision tier's circuit breaker.
 func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tasks.Built, meta core.Meta, start time.Time, cacheKeyExtra string, gen func(context.Context) (llamaclient.GenResult, error)) core.Result {
 	ck := cache.Key(string(req.Task), req.Input+"|"+cacheKeyExtra, tasks.StableParamsKey(req.Params), p.cfg.VisionModel, built.Grammar)
 	if p.cache != nil {
@@ -369,7 +391,45 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 			}
 		}
 	}
+	// LO-1: the VLM shares the 8GB GPU with the generation runners. If a gen job
+	// holds the single-slot lock, llama-swap CANNOT (re)load the vision model —
+	// during the Jul-1 incident every vision call 5xx'd and deferred to the
+	// expensive cloud model (295 of 337 all-time defers in ONE hour). Wait for
+	// the slot (bounded, cheap dir-stat poll) instead of burning a doomed call;
+	// if it never frees, defer with a distinct, actionable reason.
+	if info := gpulock.WaitFree(ctx, p.gpuLockPath, p.visionGPUWait, p.visionGPUPoll); info.Held {
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		meta.ErrClass = "gpu_busy"
+		reason := fmt.Sprintf("gpu busy: generation job holds the lock (%ds)", int(info.Age/time.Second))
+		p.recordDefer(req.Task, meta, len(req.Input), reason)
+		return core.Deferf(reason, "", meta)
+	}
+
+	// LO-9 parity for the vision tier: stamp the call so a cold-swap timeout is
+	// exempt from breaker accounting (http_5xx / warm timeouts still count).
+	likelyColdSwap := p.noteTierCall(p.cfg.VisionModel)
 	gres, gerr := gen(ctx)
+	if gerr != nil && classifyErr(gerr) == "http_5xx" {
+		// LO-1: retry ONCE after a short backoff — a vision 5xx is usually
+		// llama-swap failing a (re)load under transient GPU pressure (e.g. a gen
+		// job grabbed the lock between our gate check and the call), and the
+		// second attempt lands after the pressure passes.
+		select {
+		case <-ctx.Done():
+		case <-time.After(p.visionRetryWait):
+			gres, gerr = gen(ctx)
+		}
+	}
+	// LO-1: the vision tier now records into the per-tier breaker group exactly
+	// like the text tiers — infra failures only (quality defers below mean the
+	// tier physically worked), and only the FINAL outcome after the retry.
+	if p.breakers != nil {
+		ec := ""
+		if gerr != nil {
+			ec = classifyErr(gerr)
+		}
+		p.breakers.Record(p.cfg.VisionModel, !breakerFailure(ec, likelyColdSwap))
+	}
 	if gerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		meta.ErrClass = classifyErr(gerr)
@@ -666,7 +726,7 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second
-	outPath, gerr := imagegen.Generate(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, prompt, req.Params, timeout)
+	outPath, gerr := imagegen.Generate(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, prompt, req.Params, timeout, p.lockEnv()...)
 	if gerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		meta.ErrClass = classifyErr(gerr)
@@ -890,7 +950,18 @@ func (p *Pipeline) genEnv(waitMs int) []string {
 	if len(p.cfg.MemoryStack) > 0 {
 		env = append(env, "MEMORY_STACK="+strings.Join(p.cfg.MemoryStack, ","))
 	}
-	return env
+	return append(env, p.lockEnv()...)
+}
+
+// lockEnv threads a configured GPU-lock override to a render runner as the
+// GPU_LOCK env, so the Go-side vision gate (LO-1) and the Node runners always
+// contend on the SAME lock path. Empty when gpu_lock_path is unset — both
+// sides then resolve the identical GPU_LOCK-env/tmpdir default on their own.
+func (p *Pipeline) lockEnv() []string {
+	if p.cfg.GPULockPath != "" {
+		return []string{"GPU_LOCK=" + p.cfg.GPULockPath}
+	}
+	return nil
 }
 
 // deferGen records a deferred gen result with latency stamped, keeping the four gen

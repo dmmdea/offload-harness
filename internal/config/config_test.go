@@ -184,7 +184,7 @@ func pathFieldJSONNames(t *testing.T) []string {
 	return []string{
 		"ffmpeg_path", "media_dir", "svg_dir",
 		"imagegen_script", "node_path", "comfy_dir",
-		"videogen_script", "voicegen_script", "musicgen_script",
+		"videogen_script", "voicegen_script", "musicgen_script", "gpu_lock_path",
 		"cache_path", "ledger_path",
 		"thresholds_path", "tier_overrides_path", "router_weights_path",
 		"confhead_path", "router_labels_path", "confhead_labels_path",
