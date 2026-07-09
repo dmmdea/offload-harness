@@ -186,6 +186,21 @@ topics; edit+upload alone completes reliably and fast. For anything beyond a nar
 toolset lean (no shell/delete unless needed — each tool adds schema overhead) and the same-tool cap
 low so a stuck model gets its tool disabled quickly.
 
+**Prompting rules of thumb (read before your first prompt):**
+
+1. **ONE bounded task per message.** "Edit index.html to add a pricing section, then upload it" — good.
+   A multi-goal essay ("research X, then build Y, then also refactor Z and…") — the run dies mid-way.
+2. **Never paste long documents into the agent chat.** The whole paste rides in the transcript on
+   every step. To digest a big file, use the harness instead (`local-offload summarize <file>`) and
+   hand the agent the summary or the file *path*.
+3. **Don't chain more than ~3 tool-kinds in one ask** (search → write → upload is the practical
+   ceiling on a 32K model). Split bigger jobs into sequential messages — each run starts fresh.
+4. **If you see `agent error: chat 400 … context`, your prompt was too big or too broad.** Nothing is
+   broken — narrow the ask and send again.
+5. These are guardrails, not conventions: the loop hard-caps at `--max-steps` (12) and disables any
+   tool called more than `--max-same-tool` (3) times per run, so a bad prompt costs one failed run,
+   never the installation.
+
 | Failure | Fix |
 |---|---|
 | `refusing to bind --listen` | You passed a non-loopback address. Use `127.0.0.1`, or `--listen-trusted-network` (only if authorized). |

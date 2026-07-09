@@ -207,6 +207,14 @@ The `local-agent --serve` endpoint is **unauthenticated** and drives write/GitHu
 **loopback-only by default** and **not started by the install**. Only bring it up if the user wants
 the chat-driven coding agent. See `docs/OPERATOR-GUIDE.md` → "Drive the coding agent" and "Chat GUI".
 
+**MANDATORY HANDOFF if you enable the agent:** relay the "Prompting rules of thumb" from
+`docs/OPERATOR-GUIDE.md` → *Context-budget guidance* to the user, verbatim, before their first
+prompt. The planner is a small ~32K-context local model: **one bounded task per message**, **never
+paste long documents into the chat** (use `local-offload summarize <file>` for that), **≤3
+tool-kinds per ask**. An oversized prompt fails one run with `agent error: chat 400 … context` —
+nothing breaks, they just narrow the ask and resend — but relaying these rules up front is the
+difference between a good first impression and a confused user.
+
 - **Token handling:** GitHub tools read `$GITHUB_TOKEN` / `$GITHUB_REPO` from the environment. Put
   them in a **gitignored env file** (`$HOME\.local-agent-github.env`), never in the repo, never on a
   command line that gets logged. Use a **least-privilege** token (only the scopes the task needs).
