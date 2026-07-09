@@ -22,6 +22,7 @@ type BuildConfig struct {
 	Timeout     time.Duration // per planner-call timeout; default 180s
 	MaxSteps    int           // hard step budget; default 12
 	MaxTokens   int           // planner max tokens per call; default 1024
+	MaxSameTool int           // per-run cap on calls to any one tool name; 0 => Loop's default (3); <0 => disabled
 
 	ReadRoot string      // directory the agent may read (P0 scope); required
 	Offload  OffloadFunc // in-process offload (record=false); nil => no offload tools
@@ -39,6 +40,13 @@ type BuildConfig struct {
 	AllowWrite  bool     // P2: write_file/delete_file in the worktree
 	AllowFetch  bool     // P3: web_fetch behind the egress allowlist
 	AllowShell  bool     // P4.6: run_shell in the OS cage (granted only if sandbox.Available)
+
+	AllowOverwrite bool // open-write: allow overwrite of existing files in the worktree
+	AllowDelete    bool // open-write: allow delete of files in the worktree
+	AllowSearch    bool   // web_search (DuckDuckGo); auto-allowlists the search host
+	AllowGitHub    bool   // github_api/create_repo/upload_file; auto-allowlists api.github.com
+	GitHubToken    string // token for the GitHub tools (secret; Authorization header only)
+	GitHubRepo     string // default OWNER/NAME for github_upload_file
 	Worktree    string   // RW worktree for write/shell; default = ReadRoot
 	EgressHosts []string // web_fetch allowlist (AllowFetch)
 
@@ -93,17 +101,25 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 
 	res := &BuildResult{}
 
-	// The single broker governs write+fetch+shell. The egress allowlist is built
-	// only when fetch is enabled (else the zero value is default-deny).
+	// The single broker governs write+fetch+search+github+shell. The egress
+	// allowlist is built when ANY network tool is enabled; enabling web_search or
+	// github auto-allowlists their hosts so the capability flag is self-sufficient.
 	var allow Allowlist
-	if cfg.AllowFetch {
-		a, aerr := NewAllowlist(cfg.EgressHosts)
+	if cfg.AllowFetch || cfg.AllowSearch || cfg.AllowGitHub {
+		hosts := append([]string{}, cfg.EgressHosts...)
+		if cfg.AllowSearch {
+			hosts = append(hosts, "html.duckduckgo.com", "duckduckgo.com", "lite.duckduckgo.com")
+		}
+		if cfg.AllowGitHub {
+			hosts = append(hosts, "api.github.com")
+		}
+		a, aerr := NewAllowlist(hosts)
 		if aerr != nil {
 			return nil, fmt.Errorf("bad egress host: %w", aerr)
 		}
 		allow = a
-		if len(cfg.EgressHosts) == 0 {
-			res.Notes = append(res.Notes, "egress allowlist EMPTY — web_fetch will refuse every URL")
+		if cfg.AllowFetch && len(cfg.EgressHosts) == 0 {
+			res.Notes = append(res.Notes, "web_fetch ON but egress allowlist EMPTY — web_fetch will refuse every URL (search/github hosts are auto-allowlisted separately)")
 		}
 	}
 	var audit *AuditLog
@@ -114,11 +130,13 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 	if cfg.AskQueuePath != "" {
 		pol.WithAskQueue(NewAuditLog(cfg.AskQueuePath))
 	}
+	pol.WithWritePosture(cfg.AllowOverwrite, cfg.AllowDelete)
 	res.Policy = pol
 
-	// The RW worktree is shared by write_file/delete_file (P2) and run_shell (P4.6).
+	// The RW worktree is shared by write_file/delete_file (P2), run_shell (P4.6),
+	// and github_upload_file (which reads the file it uploads from the worktree).
 	var absWt string
-	if cfg.AllowWrite || cfg.AllowShell {
+	if cfg.AllowWrite || cfg.AllowShell || cfg.AllowGitHub {
 		wt := cfg.Worktree
 		if wt == "" {
 			wt = absRoot
@@ -150,11 +168,30 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 			return nil, fmt.Errorf("building write tools: %w", terr)
 		}
 		tools = append(tools, wtools...)
-		res.Notes = append(res.Notes, fmt.Sprintf("write ON — worktree=%s (unattended: new files only; overwrite/delete refused)", absWt))
+		posture := "new files only; overwrite/delete refused"
+		switch {
+		case cfg.AllowOverwrite && cfg.AllowDelete:
+			posture = "OPEN — create/overwrite/delete within the worktree"
+		case cfg.AllowOverwrite:
+			posture = "create/overwrite within the worktree; delete refused"
+		}
+		res.Notes = append(res.Notes, fmt.Sprintf("write ON — worktree=%s (%s)", absWt, posture))
 	}
 	if cfg.AllowFetch {
 		tools = append(tools, FetchTools(pol)...)
 		res.Notes = append(res.Notes, fmt.Sprintf("egress ON — allowlist=%v (only allowlisted hosts; loopback/private/redirect-escape blocked)", cfg.EgressHosts))
+	}
+	if cfg.AllowSearch {
+		tools = append(tools, SearchTools(pol)...)
+		res.Notes = append(res.Notes, "web_search ON (DuckDuckGo; results are UNTRUSTED third-party data)")
+	}
+	if cfg.AllowGitHub {
+		tools = append(tools, GitHubTools(pol, cfg.GitHubToken, cfg.GitHubRepo, absWt)...)
+		tokState := "TOKEN SET"
+		if strings.TrimSpace(cfg.GitHubToken) == "" {
+			tokState = "NO TOKEN — github tools will refuse"
+		}
+		res.Notes = append(res.Notes, fmt.Sprintf("github ON — api/create_repo/upload_file (%s; default repo=%q)", tokState, cfg.GitHubRepo))
 	}
 	if cfg.AllowShell {
 		// Fail-closed: grant the shell ONLY if the OS cage can actually be enforced
@@ -174,11 +211,14 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 	// The system prompt advertises only what was actually granted — ShellGranted,
 	// not the raw flag, so a cage-refused shell is never advertised to the model. A
 	// SystemPromptOverride (P6 flywheel replay of a candidate prompt) replaces it.
-	sys := SystemPrompt(cfg.AllowWrite, cfg.AllowFetch, res.ShellGranted)
+	sys := SystemPrompt(cfg.AllowWrite, cfg.AllowOverwrite, cfg.AllowFetch, res.ShellGranted, cfg.AllowSearch, cfg.AllowGitHub)
 	if cfg.SystemPromptOverride != "" {
 		sys = cfg.SystemPromptOverride
 	}
 	loop := NewLoop(client, tools, maxSteps).WithSystem(sys).WithMaxTokens(maxTokens)
+	if cfg.MaxSameTool != 0 {
+		loop = loop.WithMaxSameTool(cfg.MaxSameTool) // 0 (unset) leaves NewLoop's built-in default (3); negative disables
+	}
 	if cfg.Memory != nil {
 		loop = loop.WithMemory(cfg.Memory)
 	}

@@ -8,6 +8,64 @@ import (
 	"testing"
 )
 
+func editTool(t *testing.T, dir string, pol *Policy) Tool {
+	t.Helper()
+	tools, err := WriteTools(dir, pol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tl := range tools {
+		if tl.Name == "edit_file" {
+			return tl
+		}
+	}
+	t.Fatal("edit_file tool not registered")
+	return Tool{}
+}
+
+func TestEditFileReplacesUniqueSnippet(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello world\nfoo bar\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	edit := editTool(t, dir, NewPolicy(true, nil).WithWritePosture(true, false))
+	out, err := edit.Exec(context.Background(), `{"path":"a.txt","old_string":"foo bar","new_string":"baz qux"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "edited") {
+		t.Fatalf("got %q", out)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "a.txt"))
+	if string(b) != "hello world\nbaz qux\n" {
+		t.Errorf("content = %q", string(b))
+	}
+}
+
+func TestEditFileRefusesNonUnique(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x\nx\n"), 0o644)
+	edit := editTool(t, dir, NewPolicy(true, nil).WithWritePosture(true, false))
+	out, _ := edit.Exec(context.Background(), `{"path":"a.txt","old_string":"x","new_string":"y"}`)
+	if !strings.Contains(out, "NOT performed") {
+		t.Fatalf("want refusal for non-unique match, got %q", out)
+	}
+}
+
+func TestEditFileRefusedWithoutOverwritePosture(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("foo\n"), 0o644)
+	edit := editTool(t, dir, NewPolicy(true, nil)) // no posture → overwrite denied
+	out, _ := edit.Exec(context.Background(), `{"path":"a.txt","old_string":"foo","new_string":"bar"}`)
+	if !strings.Contains(out, "NOT performed") {
+		t.Fatalf("want broker refusal, got %q", out)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "a.txt"))
+	if string(b) != "foo\n" {
+		t.Errorf("file must be untouched, got %q", string(b))
+	}
+}
+
 func TestWriteFileNewFileAllowed(t *testing.T) {
 	wt := t.TempDir()
 	tools, err := WriteTools(wt, NewPolicy(true, nil)) // unattended

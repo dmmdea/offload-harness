@@ -1,4 +1,4 @@
-# Labeling Rubric — local-offload eval gold corpus
+# Labeling Rubric — offload-harness eval gold corpus
 
 This rubric is the **single source of truth** for how every gold case in
 `testdata/eval/` is labeled. It exists so labels are auditable, reproducible,

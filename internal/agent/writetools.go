@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -117,5 +118,62 @@ func WriteTools(worktreeRoot string, pol *Policy) ([]Tool, error) {
 		},
 	}
 
-	return []Tool{write, del}, nil
+	edit := Tool{
+		ToolSpec: ToolSpec{
+			Name:        "edit_file",
+			Description: "Modify an EXISTING file by replacing ONE exact, unique snippet. old_string must appear EXACTLY once in the file (include enough surrounding context to make it unique); it is replaced by new_string. PREFER this over rewriting a whole file. To create a new file use write_file. path is relative to the worktree root.",
+			Schema:      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"file path relative to the worktree root"},"old_string":{"type":"string","description":"exact snippet to find; must be unique in the file"},"new_string":{"type":"string","description":"replacement text"}},"required":["path","old_string","new_string"]}`),
+		},
+		Exec: func(_ context.Context, args string) (string, error) {
+			var in struct {
+				Path      string `json:"path"`
+				OldString string `json:"old_string"`
+				NewString string `json:"new_string"`
+			}
+			_ = json.Unmarshal([]byte(args), &in)
+			if strings.TrimSpace(in.Path) == "" {
+				return "", fmt.Errorf("edit_file requires a path")
+			}
+			if in.OldString == "" {
+				return "NOT performed: old_string is empty; use write_file to create or fully overwrite", nil
+			}
+			r, rel, err := s.open(in.Path)
+			if err != nil {
+				return "", err
+			}
+			defer r.Close()
+			rf, err := r.OpenFile(rel, os.O_RDONLY, 0)
+			if err != nil {
+				return fmt.Sprintf("NOT performed: cannot open %s (%v); use write_file to create it", filepath.ToSlash(rel), err), nil
+			}
+			cur, rerr := io.ReadAll(rf)
+			rf.Close()
+			if rerr != nil {
+				return "", rerr
+			}
+			switch strings.Count(string(cur), in.OldString) {
+			case 0:
+				return "NOT performed: old_string not found in " + filepath.ToSlash(rel) + " — re-read the file and copy an exact snippet", nil
+			case 1:
+				// ok, unique
+			default:
+				return fmt.Sprintf("NOT performed: old_string is not unique in %s — include more surrounding context", filepath.ToSlash(rel)), nil
+			}
+			if d, reason := pol.Decide(Action{Kind: ActWrite, Path: rel, Exists: true}); d != Allow {
+				return fmt.Sprintf("NOT performed (%s): %s", d, reason), nil
+			}
+			updated := strings.Replace(string(cur), in.OldString, in.NewString, 1)
+			wf, werr := r.OpenFile(rel, os.O_WRONLY|os.O_TRUNC, 0o644)
+			if werr != nil {
+				return "", werr
+			}
+			defer wf.Close()
+			if _, werr = wf.WriteString(updated); werr != nil {
+				return "", werr
+			}
+			return fmt.Sprintf("edited %s (1 replacement, %d→%d bytes)", filepath.ToSlash(rel), len(cur), len(updated)), nil
+		},
+	}
+
+	return []Tool{write, del, edit}, nil
 }

@@ -12,13 +12,15 @@ import (
 // recording the messages it was called with so tests can assert the loop fed
 // tool results back correctly.
 type fakeClient struct {
-	script []Completion
-	calls  int
-	seen   [][]Msg
+	script    []Completion
+	calls     int
+	seen      [][]Msg
+	seenSpecs [][]ToolSpec
 }
 
-func (f *fakeClient) Chat(_ context.Context, msgs []Msg, _ []ToolSpec, _ int) (Completion, error) {
+func (f *fakeClient) Chat(_ context.Context, msgs []Msg, specs []ToolSpec, _ int) (Completion, error) {
 	f.seen = append(f.seen, append([]Msg(nil), msgs...))
+	f.seenSpecs = append(f.seenSpecs, append([]ToolSpec(nil), specs...))
 	if f.calls >= len(f.script) {
 		return Completion{}, errors.New("fakeClient: script exhausted")
 	}
@@ -207,6 +209,188 @@ func TestLoopDefersNotCrashesOnToolError(t *testing.T) {
 	}
 	if !sawErr {
 		t.Errorf("tool error not fed back as is_error tool result: %+v", last)
+	}
+}
+
+// TestLoopRefusesExactRepeatCall: a weaker model re-issuing the IDENTICAL tool
+// call (same name + same args) must be refused on the 2nd occurrence — the
+// executor must NOT run twice — and told to move on, not just errored.
+func TestLoopRefusesExactRepeatCall(t *testing.T) {
+	repeat := Completion{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c", "search", `{"query":"x"}`)}}, FinishReason: "tool_calls"}
+	client := &fakeClient{script: []Completion{repeat, repeat, {Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"}}}
+	execs := 0
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "search"}, Exec: func(_ context.Context, _ string) (string, error) {
+		execs++
+		return "result", nil
+	}}}
+	res, err := NewLoop(client, tools, 10).Run(context.Background(), "find x")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if execs != 1 {
+		t.Errorf("tool executed %d times, want exactly 1 (2nd identical call must be refused, not re-run)", execs)
+	}
+	if res.StopReason != "done" {
+		t.Errorf("stop_reason = %q, want done", res.StopReason)
+	}
+	// the refusal (2nd step) must tell the model to move on, not silently re-run.
+	second := client.seen[2] // messages fed into the 3rd Chat call, after 2 tool results
+	var sawRefusal bool
+	for _, m := range second {
+		if m.Role == "tool" && m.IsError && strings.Contains(m.Content, "already called") {
+			sawRefusal = true
+		}
+	}
+	if !sawRefusal {
+		t.Errorf("expected a refusal tool result telling the model to move on; got %+v", second)
+	}
+}
+
+// TestLoopCapsSameToolNameEvenWithVaryingArgs: a model that dodges exact-repeat
+// detection by rewording each call (e.g. slightly different search queries)
+// must still be capped once the SAME TOOL NAME has been called too many times,
+// and told to stop and proceed — the demonstrated real-world failure mode.
+func TestLoopCapsSameToolNameEvenWithVaryingArgs(t *testing.T) {
+	mk := func(q string) Completion {
+		return Completion{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c", "search", `{"query":"`+q+`"}`)}}, FinishReason: "tool_calls"}
+	}
+	client := &fakeClient{script: []Completion{
+		mk("a"), mk("b"), mk("c"), mk("d"), mk("e"), // 5 distinct queries, same tool
+		{Msg: Msg{Role: "assistant", Content: "gave up searching, done"}, FinishReason: "stop"},
+	}}
+	execs := 0
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "search"}, Exec: func(_ context.Context, _ string) (string, error) {
+		execs++
+		return "result", nil
+	}}}
+	loop := NewLoop(client, tools, 10).WithMaxSameTool(3)
+	res, err := loop.Run(context.Background(), "find something")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if execs != 3 {
+		t.Errorf("tool executed %d times, want exactly 3 (cap), even though every call had different args", execs)
+	}
+	if res.StopReason != "done" {
+		t.Errorf("stop_reason = %q, want done", res.StopReason)
+	}
+}
+
+// TestLoopDisablesToolFromSpecsAfterCap: this is the load-bearing guarantee —
+// a text refusal alone is NOT enough (observed live: a 9B model ignored 17
+// consecutive identical refusals and kept re-issuing the same call). Once the
+// cap trips, the tool must be structurally REMOVED from the spec list offered
+// to the model on the NEXT Chat call, not just described as unavailable.
+func TestLoopDisablesToolFromSpecsAfterCap(t *testing.T) {
+	mk := func(q string) Completion {
+		return Completion{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c", "search", `{"q":"`+q+`"}`)}}, FinishReason: "tool_calls"}
+	}
+	client := &fakeClient{script: []Completion{
+		mk("a"), mk("b"), mk("c"), mk("d"),
+		{Msg: Msg{Role: "assistant", Content: "done without search"}, FinishReason: "stop"},
+	}}
+	tools := []Tool{
+		{ToolSpec: ToolSpec{Name: "search"}, Exec: func(_ context.Context, _ string) (string, error) { return "result", nil }},
+		{ToolSpec: ToolSpec{Name: "other"}, Exec: func(_ context.Context, _ string) (string, error) { return "result", nil }},
+	}
+	loop := NewLoop(client, tools, 10).WithMaxSameTool(2)
+	res, err := loop.Run(context.Background(), "find something")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.StopReason != "done" {
+		t.Errorf("stop_reason = %q, want done", res.StopReason)
+	}
+	// step 0 (first Chat call): both tools offered.
+	if got := specNames(client.seenSpecs[0]); len(got) != 2 {
+		t.Errorf("initial specs = %v, want both tools offered", got)
+	}
+	// after 2 execs (cap=2) breach on the 3rd call, the NEXT Chat call (index 3,
+	// after calls at index 0,1,2 consumed a,b,c) must no longer offer "search".
+	last := client.seenSpecs[len(client.seenSpecs)-1]
+	for _, s := range last {
+		if s.Name == "search" {
+			t.Errorf("search should have been removed from specs after the cap tripped; got %v", specNames(last))
+		}
+	}
+	if !containsName(last, "other") {
+		t.Errorf("unrelated tool 'other' must remain offered; got %v", specNames(last))
+	}
+}
+
+func specNames(specs []ToolSpec) []string {
+	out := make([]string, len(specs))
+	for i, s := range specs {
+		out[i] = s.Name
+	}
+	return out
+}
+
+func containsName(specs []ToolSpec, name string) bool {
+	for _, s := range specs {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestLoopDisablesToolEvenOnIdenticalRepeats: the ACTUAL observed live failure
+// — a model that keeps retrying the EXACT SAME call (not a varied one) must
+// still hit the name-cap and get disabled, not stay stuck refused-as-exact-
+// repeat forever. Regression for a real bug: checking exact-repeat before the
+// cap meant identical retries never reached the disable branch.
+func TestLoopDisablesToolEvenOnIdenticalRepeats(t *testing.T) {
+	same := Completion{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c", "search", `{"q":"x"}`)}}, FinishReason: "tool_calls"}
+	client := &fakeClient{script: []Completion{
+		same, same, same, same, same,
+		{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+	}}
+	execs := 0
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "search"}, Exec: func(_ context.Context, _ string) (string, error) {
+		execs++
+		return "result", nil
+	}}}
+	loop := NewLoop(client, tools, 10).WithMaxSameTool(2)
+	res, err := loop.Run(context.Background(), "find x")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if execs != 1 {
+		t.Errorf("tool executed %d times, want exactly 1 (identical repeats must never re-execute)", execs)
+	}
+	if res.StopReason != "done" {
+		t.Errorf("stop_reason = %q, want done (loop must converge, not exhaust the budget stuck refusing)", res.StopReason)
+	}
+	// after the cap trips, "search" must be gone from every later spec list.
+	last := client.seenSpecs[len(client.seenSpecs)-1]
+	if containsName(last, "search") {
+		t.Errorf("search should be disabled from specs after identical-repeat cap trip; got %v", specNames(last))
+	}
+}
+
+// TestLoopMaxSameToolDisabledWhenNonPositive: WithMaxSameTool(0) disables the
+// name-cap (exact-repeat refusal still applies, tested elsewhere).
+func TestLoopMaxSameToolDisabledWhenNonPositive(t *testing.T) {
+	mk := func(q string) Completion {
+		return Completion{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c", "search", `{"q":"`+q+`"}`)}}, FinishReason: "tool_calls"}
+	}
+	client := &fakeClient{script: []Completion{mk("a"), mk("b"), mk("c"), mk("d"), mk("e")}}
+	execs := 0
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "search"}, Exec: func(_ context.Context, _ string) (string, error) {
+		execs++
+		return "result", nil
+	}}}
+	loop := NewLoop(client, tools, 5).WithMaxSameTool(0)
+	res, err := loop.Run(context.Background(), "find something")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if execs != 5 {
+		t.Errorf("tool executed %d times, want 5 (cap disabled -> budget is the only limit)", execs)
+	}
+	if res.StopReason != "budget" {
+		t.Errorf("stop_reason = %q, want budget", res.StopReason)
 	}
 }
 

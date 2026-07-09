@@ -14,8 +14,8 @@ Methodology (per Benchmark-Table addenda): run on a CLEAN GPU only. Check
 with competing VRAM consumers is CONTAMINATED and must be labelled as such.
 
 Usage:
-  python bench_roster.py gemma4-e2b offload-e4b qwythos gemma4-12b gemma4-26b-a4b
-  python bench_roster.py --runs 5 --max-tokens 256 qwythos
+  python bench_roster.py gemma4-e2b offload-e4b gemma4-26b-a4b
+  python bench_roster.py --runs 5 --max-tokens 256 offload-e4b
   python bench_roster.py --out ../.testrun/roster-bench.json <aliases...>
 Each alias is a llama-swap model alias (see ~/llama-swap/config.yaml).
 """

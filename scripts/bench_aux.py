@@ -26,7 +26,7 @@ BASE = "http://127.0.0.1:11436"
 # Realistic short memory-style texts; varied by index so nothing is a trivial dup.
 def texts(n):
     base = [
-        "The escalation tier runs qwythos, a dense 9B model in Q4_K_M.",
+        "The escalation tier runs a dense 9B escalation model in Q4_K_M.",
         "mem0 stores durable decisions and brand context for the ecosystem.",
         "The reasoning tier reclaims a deferral before falling through to Opus.",
         "Embeddings on the memory stack use EmbeddingGemma on the CPU.",

@@ -1302,7 +1302,7 @@ func runModels(args []string) error {
 // modelsReport renders the CURRENT configured model routes, built from live
 // config values (LO-11: the old text hardcoded a stale tier roster — the
 // prose still said gemma4-26b-a4b long after the default escalation moved to
-// qwythos — and printed serving flags this binary does not control).
+// the escalation model — and printed serving flags this binary does not control).
 func modelsReport(cfg config.Config) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "endpoint: %s\n\n", cfg.Endpoint)

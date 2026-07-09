@@ -90,7 +90,7 @@ type Meta struct {
 	Escalations int `json:"escalations,omitempty"`
 	// Reasoning marks a result produced by the terminal local reasoning tier (a
 	// reclaimed cloud deferral). It runs on the SAME model as the escalation tier
-	// (qwythos) and so shares Model — this flag is what tells the two apart in the
+	// (the escalation model) and so shares Model — this flag is what tells the two apart in the
 	// ledger / `stats` reports.
 	Reasoning bool `json:"reasoning,omitempty"`
 	// --- self-learning signals (logged to the ledger; free, no extra inference) ---

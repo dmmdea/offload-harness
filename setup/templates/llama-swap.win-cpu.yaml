@@ -1,0 +1,44 @@
+# llama-swap.win-cpu.yaml — offload-harness family on the llama.cpp CPU backend
+# (native Windows; no GPU offload). Serving invariants (grammar reliability —
+# do NOT change): --jinja, f16 KV, no MTP, reasoning off. All layers run on CPU
+# (no -ngl, no --flash-attn); --threads is set to the physical-core count by
+# install.ps1. The 26b MoE tier is OPTIONAL on CPU: it needs >=48GB RAM — omit
+# it from the group members below if your machine has less.
+healthCheckTimeout: 300
+logLevel: info
+
+macros:
+  common: >-
+    --ctx-size 8192 --cache-type-k f16 --cache-type-v f16
+    --jinja --reasoning off --threads __NTHREADS__ --port ${PORT} --host 127.0.0.1
+
+models:
+  offload-e4b:
+    aliases: [gemma4-e4b]
+    cmd: >-
+      __LLAMA_BIN__\llama-server.exe -m __MODELS__\gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf
+      --parallel 1 ${common}
+    ttl: 300
+  gemma4-e2b:
+    cmd: >-
+      __LLAMA_BIN__\llama-server.exe -m __MODELS__\gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
+      ${common}
+    ttl: 300
+  # gemma4-26b-a4b: OPTIONAL on CPU — needs >=48GB RAM. Also remove from the
+  # offload-family members list below if you do not install this model.
+  gemma4-26b-a4b:
+    cmd: >-
+      __LLAMA_BIN__\llama-server.exe -m __MODELS__\gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
+      --parallel 1 ${common}
+    ttl: 300
+  embeddinggemma:
+    cmd: >-
+      __LLAMA_BIN__\llama-server.exe -m __MODELS__\embeddinggemma-300m-Q8_0.gguf
+      --embedding --pooling mean --ctx-size 2048 --parallel 4 --threads __NTHREADS__ --port ${PORT} --host 127.0.0.1
+    ttl: 600
+
+groups:
+  offload-family:
+    swap: true
+    exclusive: true
+    members: [offload-e4b, gemma4-e2b, gemma4-26b-a4b]

@@ -13,7 +13,7 @@ We will acknowledge your report and work with you on a fix and coordinated discl
 
 ## Security model
 
-local-offload is designed to be safe by default:
+offload-harness is designed to be safe by default:
 
 - **It runs entirely on your machine.** All inference happens against a local llama.cpp server.
 - **It never calls a cloud model and holds no cloud credentials.** There is no cloud fallback
@@ -21,4 +21,4 @@ local-offload is designed to be safe by default:
 - **No media egress.** Images, audio, and video are accepted only as a local file path or a
   `data:` URI — never a remote URL — so there is no network egress for media.
 
-Nothing in local-offload sends your data to a third party.
+Nothing in offload-harness sends your data to a third party.

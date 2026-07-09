@@ -35,7 +35,14 @@ function readMeta(lockPath) {
 }
 
 // acquireGpuLock: returns {release()} on success, or null if held (after waiting waitMs).
-export async function acquireGpuLock({ lockPath, waitMs = 5 * 60 * 1000, ttlMs = DEFAULT_TTL_MS } = {}) {
+// DEFAULT waitMs is a GENEROUS QUEUE WAIT (30min), set 2026-06-30 for the "serialize GPU workloads" goal.
+// The aim is to ORGANIZE concurrent GPU jobs into a serial queue, NOT to cancel them: a job whose slot is
+// busy WAITS its turn and then runs — it never drops its work. 30min covers queuing behind even the longest
+// job (video ~20min) with margin. A CRASHED holder never deadlocks the queue: isStale reclaims a dead-pid
+// lock immediately (and any lock past the 1h TTL). Callers with a different window (video 20min, audio 2min)
+// set GPU_LOCK_WAIT_MS, which withGpuSlot passes through and overrides this default. Sequential gen (the
+// serial hero stage runs one image at a time) never contends, so it acquires instantly.
+export async function acquireGpuLock({ lockPath, waitMs = 30 * 60 * 1000, ttlMs = DEFAULT_TTL_MS } = {}) {
   const deadline = Date.now() + waitMs;
   for (;;) {
     try {

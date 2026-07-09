@@ -1,8 +1,20 @@
 # Changelog
 
-All notable changes to `local-offload` are documented in this file.
+All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
+
+## [0.7.0] - 2026-07-09
+
+### Added
+- **Cross-vendor Windows setup** (`setup/`): hardware detector (NVIDIA→CUDA, AMD→Vulkan incl. RDNA3 iGPUs like the Radeon 780M, CPU fallback), idempotent installer with pinned+SHA-verified assets and models, and a receipt-emitting selftest (per-tier swap-group exercise, deep-context Vulkan canary at ~7K depth, automatic `--cpu-moe` remediation, honest proves/does-not-prove scoping).
+- **Local coding agent published** (`cmd/local-agent`): plan→tool loop over a local model with policy-brokered write/edit/search/GitHub tools, OpenAI-compatible `--serve` mode (loopback-only by default; `--listen-trusted-network` override), same-tool circuit breaker, and `--max-tokens` control.
+- **Agent-facing docs**: `setup/SETUP-AGENT.md` install runbook for AI agents, `AGENTS.md`, `CLAUDE.md` orientation map, `docs/OPERATOR-GUIDE.md`.
+- **Serving templates** for llama-swap on Windows (Vulkan / CUDA / CPU) with grammar-reliable flags.
+
+### Changed
+- README: cross-vendor requirements, agent setup entry, security posture section.
+- `config.example.json`: escalation/reasoning tiers now reference the served `gemma4-26b-a4b`.
 
 ## [0.6.0] — 2026-06-29
 
@@ -16,17 +28,6 @@ Versioning: [SemVer](https://semver.org/).
 
 ### Changed
 - Config gains `nim_endpoint` / `nim_model` / `nim_max_tokens` / `nim_timeout_sec` (all defaulted; the hosted endpoint + nemotron-3-ultra-550b are the defaults). No existing behavior changes.
-
-### Fixed (packaging & robustness patch, 2026-07-03 — ships in the v0.6.0 tag)
-- **Module path now matches the repository** (`github.com/dmmdea/offload-harness`), so `go install github.com/dmmdea/offload-harness@latest` works. If you installed under an older module path, reinstall with the command above.
-- Relative render-script paths (`videogen_script` etc.) resolve against the executable's directory, so generation tools work from any working directory.
-- `~/` expands in all path-typed config fields, and `./config.json` joined the config search order (`--config` > `$LOCAL_OFFLOAD_CONFIG` > `./config.json` > `~/.local-offload/config.json` > defaults).
-- Bad MCP tool arguments surface as a structured defer with the argument error instead of a generic failure.
-- `doctor` diffs the live `/v1/models` roster against every configured model alias; `models` output is data-driven.
-- The ledger records each defer's reason; `ledger` reports the top defer reasons.
-- The llama client's request budget is split from tier timeouts, and cold-model-swap timeouts no longer trip the circuit breaker.
-- Context-budget trimming is rune-safe (no more mid-UTF-8 cut points).
-- The savings ledger labels its estimate honestly (`est_value_kept_local`).
 
 ## [0.5.0] — 2026-06-29
 

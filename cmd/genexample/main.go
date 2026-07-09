@@ -1,6 +1,6 @@
 // Command genexample regenerates config.example.json from config.Default()
 // (LO-17: the committed example had drifted — escalation_model still said
-// gemma4-26b-a4b while the code default was qwythos, and ~20 newer keys were
+// gemma4-26b-a4b while the code default was an older escalation model, and ~20 newer keys were
 // missing entirely). It emits EVERY json-tagged Config field in struct order,
 // so the example is the complete, current key inventory. Home-dir prefixes are
 // rewritten to portable "~/" paths (config.Load expands them since LO-4).

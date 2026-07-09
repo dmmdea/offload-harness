@@ -50,6 +50,9 @@ type Policy struct {
 	allow      Allowlist // P3 egress allowlist; the zero value permits nothing (default-deny)
 	allowShell bool      // P4.6 shell capability; off by default (default-deny)
 	askQueue   *AuditLog // P5b: optional reviewable queue of asks deferred on an unattended run
+
+	allowOverwrite bool // open-write: Allow overwrite of an existing file within the worktree
+	allowDelete    bool // open-write: Allow delete of a file within the worktree
 }
 
 // NewPolicy builds a broker. unattended=true makes every "ask" deny-and-queue.
@@ -71,6 +74,18 @@ func NewPolicyWithEgress(unattended bool, audit *AuditLog, allow Allowlist) *Pol
 // Set once at startup before any Decide, so classify stays deterministic.
 func (p *Policy) WithShell(allowed bool) *Policy {
 	p.allowShell = allowed
+	return p
+}
+
+// WithWritePosture sets the "open-write" posture. When overwrite is true the
+// broker ALLOWS overwriting an existing file within the worktree instead of
+// asking; when del is true it ALLOWS delete. This is the "fully open in the
+// worktree" mode — the worktree boundary (os.Root) and the unconditional .git
+// deny remain the safety rail. Off by default; set once at startup before any
+// Decide so classify stays deterministic.
+func (p *Policy) WithWritePosture(overwrite, del bool) *Policy {
+	p.allowOverwrite = overwrite
+	p.allowDelete = del
 	return p
 }
 
@@ -107,9 +122,15 @@ func (p *Policy) classify(a Action) (Decision, string) {
 	}
 	switch a.Kind {
 	case ActDelete:
+		if p.allowDelete {
+			return Allow, "delete within worktree (open-write posture)"
+		}
 		return Ask, "deleting a file requires approval"
 	case ActWrite:
 		if a.Exists {
+			if p.allowOverwrite {
+				return Allow, "overwrite within worktree (open-write posture)"
+			}
 			return Ask, "overwriting an existing file requires approval"
 		}
 		return Allow, "create a new file within the worktree"

@@ -10,6 +10,8 @@ local-offload.exe~
 config.json
 config-*.json
 test-config.json
+# ...but the installer's shipped config template IS tracked
+!setup/templates/config.json
 
 # setup.sh-generated artifacts (written into the harness source dir)
 /offload-family.llama-swap.yaml
@@ -31,3 +33,5 @@ _tmp-*.svg
 
 # subagent-driven-development scratch
 .superpowers/
+local-agent.exe
+bin/local-agent-linux

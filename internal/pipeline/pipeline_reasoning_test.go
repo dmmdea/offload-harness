@@ -189,7 +189,7 @@ func TestReasoningTierAccepts(t *testing.T) {
 
 // TestReasoningTierMarksMeta: a reclaim must flag Meta.Reasoning so the ledger entry (and the
 // `ledger`/`stats` reports) can tell a reasoning-tier reclaim apart from a plain escalation-tier
-// answer — both run on the SAME model (qwythos) and so share ModelTier.
+// answer — both run on the SAME model (the escalation tier) and so share ModelTier.
 func TestReasoningTierMarksMeta(t *testing.T) {
 	const triage, model, reason = "fake-triage", "fake-model", "fake-reason"
 	hits := 0

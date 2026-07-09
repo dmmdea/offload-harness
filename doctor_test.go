@@ -69,7 +69,7 @@ func TestDoctorRosterMissingAliasFails(t *testing.T) {
 	cfg := config.Default()
 	var served []string
 	for _, id := range defaultAliasIDs() {
-		if id != cfg.EscalationModel { // drop qwythos from the roster
+		if id != cfg.EscalationModel { // drop the escalation model from the roster
 			served = append(served, id)
 		}
 	}
@@ -84,7 +84,7 @@ func TestDoctorRosterMissingAliasFails(t *testing.T) {
 	if !strings.Contains(got, "FAIL") || !strings.Contains(got, cfg.EscalationModel) {
 		t.Fatalf("expected a FAIL line naming %q:\n%s", cfg.EscalationModel, got)
 	}
-	// reasoning_model shares the qwythos alias, so BOTH keys must FAIL.
+	// reasoning_model shares the escalation alias, so BOTH keys must FAIL.
 	if !strings.Contains(got, "escalation_model") || !strings.Contains(got, "reasoning_model") {
 		t.Fatalf("both keys routing to the missing alias must FAIL:\n%s", got)
 	}
@@ -109,15 +109,15 @@ func TestDoctorEndpointDownFails(t *testing.T) {
 
 // TestModelsReportUsesConfigValues (LO-11): `models` renders the CURRENT
 // config — not the old hardcoded tier prose that still claimed
-// gemma4-26b-a4b after the default escalation moved to qwythos.
+// the escalation default changed.
 func TestModelsReportUsesConfigValues(t *testing.T) {
 	got := modelsReport(config.Default())
-	for _, want := range []string{"offload-e4b", "gemma4-e2b", "qwythos", "qwen3vl-4b", "whisper-stt", "whisper-stt-hq"} {
+	for _, want := range []string{"offload-e4b", "gemma4-e2b", "gemma4-26b-a4b", "qwen3vl-4b", "whisper-stt", "whisper-stt-hq"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("report missing configured value %q:\n%s", want, got)
 		}
 	}
-	for _, stale := range []string{"gemma4-26b-a4b", "MTP", "~120 tok/s", "llama-swap on :11436"} {
+	for _, stale := range []string{"MTP", "~120 tok/s", "llama-swap on :11436"} {
 		if strings.Contains(got, stale) {
 			t.Errorf("report still carries hardcoded stale prose %q:\n%s", stale, got)
 		}

@@ -243,8 +243,8 @@ func Default() Config {
 		CompletionPath:            "/v1/chat/completions", // chat route: server applies the Gemma template; we pass a raw "grammar" field
 		Model:                     "offload-e4b",
 		TriageModel:               "gemma4-e2b", // fast tier for triage/classify
-		EscalationModel:           "qwythos",    // Qwen3.5-9B SFT; ties gemma4-26b-a4b on mechanical, smaller/faster (2026-06-21). gemma4-26b-a4b kept in llama-swap for rollback.
-		ReasoningModel:            "qwythos",    // terminal local reasoning tier (think-wrapped grammar) before defer-to-Opus. Eval (29 hard cases): reclaims deferred classify 2/2 correctly (cov 88->100%, acc held 100%); never hurt. "" disables.
+		EscalationModel:           "gemma4-26b-a4b", // MoE escalation tier (experts in RAM via --cpu-moe); part of the served offload family.
+		ReasoningModel:            "gemma4-26b-a4b", // terminal local reasoning tier (think-wrapped grammar) before defer-to-cloud. "" disables.
 		VisionModel:               "qwen3vl-4b", // VLM for the vqa task
 		VisionMaxImageBytes:       6000000,      // ~6MB cap per image
 		VideoFPS:                  2.0,

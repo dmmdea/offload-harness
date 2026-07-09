@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# local-build "<goal>" [dir] — standalone local coding agent (create/modify/run)
+# via the local :11436 endpoint. Fully-open writes within [dir] (default: $PWD).
+set -euo pipefail
+GOAL="${1:?usage: local-build \"<goal>\" [dir]}"
+DIR="${2:-$PWD}"
+BIN="${LOCAL_AGENT_BIN:-$HOME/offload-stack/harness/local-agent}"
+exec "$BIN" \
+  -allow-write -allow-overwrite -allow-delete -allow-shell \
+  -base "${LOCAL_BUILD_BASE:-http://127.0.0.1:11436}" \
+  -model "${LOCAL_BUILD_MODEL:-offload-e4b}" \
+  -root "$DIR" -worktree "$DIR" \
+  -max-steps "${LOCAL_BUILD_STEPS:-20}" \
+  -goal-timeout "${LOCAL_BUILD_TIMEOUT:-600}" \
+  "$GOAL"

@@ -39,6 +39,38 @@ func TestPolicyDeleteAsksThenDeniesUnattended(t *testing.T) {
 	}
 }
 
+func TestPolicyOverwriteAllowedWithPosture(t *testing.T) {
+	// unattended run, but open-write posture ON → overwrite is allowed
+	p := NewPolicy(true, nil).WithWritePosture(true, false)
+	if d, _ := p.Decide(Action{Kind: ActWrite, Path: "a.txt", Exists: true}); d != Allow {
+		t.Errorf("open-write overwrite = %q, want allow", d)
+	}
+	// delete still gated because posture del=false
+	if d, _ := p.Decide(Action{Kind: ActDelete, Path: "a.txt", Exists: true}); d != Deny {
+		t.Errorf("delete without delete-posture (unattended) = %q, want deny", d)
+	}
+}
+
+func TestPolicyDeleteAllowedWithPosture(t *testing.T) {
+	p := NewPolicy(true, nil).WithWritePosture(true, true)
+	if d, _ := p.Decide(Action{Kind: ActDelete, Path: "a.txt", Exists: true}); d != Allow {
+		t.Errorf("open-write delete = %q, want allow", d)
+	}
+}
+
+// GUARDRAIL: .git stays denied even with full open-write posture.
+func TestPolicyGitDeniedEvenWithPosture(t *testing.T) {
+	p := NewPolicy(true, nil).WithWritePosture(true, true)
+	for _, path := range []string{".git/config", "sub/.GIT/hooks/x", ".git.", "a/.GIT"} {
+		if d, _ := p.Decide(Action{Kind: ActWrite, Path: path, Exists: true}); d != Deny {
+			t.Errorf(".git write with posture %q = %q, want deny", path, d)
+		}
+		if d, _ := p.Decide(Action{Kind: ActDelete, Path: path, Exists: true}); d != Deny {
+			t.Errorf(".git delete with posture %q = %q, want deny", path, d)
+		}
+	}
+}
+
 func TestPolicyGitPathDeniedUnconditionally(t *testing.T) {
 	for _, unattended := range []bool{false, true} {
 		p := NewPolicy(unattended, nil)

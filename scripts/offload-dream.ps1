@@ -1,10 +1,10 @@
 # offload-dream.ps1 - nightly self-learning loop for the local-offload harness.
-# Phased, gated adoption. Runs the INFERENCE-FREE stats jobs
-# (calibrate/health/train-router/optimize) directly, uses an optional external
-# reasoning CLI only for the rare GEPA prompt-reflection, and STAGES everything
-# for human review.
+# Mirrors agentic-memory-stack dream-consolidate.ps1: phased, codex-reasoned,
+# codex-lock-coordinated, gated adoption. Runs the INFERENCE-FREE stats jobs
+# (calibrate/health/train-router/optimize) directly, uses CODEX (not Opus) only
+# for the rare GEPA prompt-reflection, and STAGES everything for human review.
 #
-# Register nightly (pick a quiet slot; offset it from any other nightly jobs):
+# Register nightly (offset from the 3am mem0 dream so they never fight for codex):
 #   schtasks /Create /TN "offload-dream" /SC DAILY /ST 03:40 /F ^
 #     /TR "powershell -NoProfile -ExecutionPolicy Bypass -File <repo>\scripts\offload-dream.ps1"
 [CmdletBinding()]
@@ -28,8 +28,8 @@ $marker  = Join-Path $DataDir 'DREAM-PROPOSAL.md'
 $logFile = Join-Path $DataDir 'offload-dream.log'
 New-Item -ItemType Directory -Force -Path $staging, $backup | Out-Null
 
-# Optional shared plumbing (Invoke-CodexSubagent / Acquire-CodexLock / Write-MemoryLog):
-# point $env:MEMORY_COMMON_PS1 at a memory-common.ps1 to enable codex GEPA reflection
+# Reuse the mem0 dream's codex plumbing (Invoke-CodexSubagent / Acquire-CodexLock / Write-MemoryLog).
+# Optional: point $env:MEMORY_COMMON_PS1 at a memory-common.ps1 to enable codex GEPA reflection
 # + shared logging/locking. Unset → the codex/GEPA path is gracefully skipped (stats jobs still run).
 $common = $env:MEMORY_COMMON_PS1
 $haveCommon = $common -and (Test-Path $common)
@@ -70,7 +70,7 @@ if (-not (Test-Path $ledger)) { Log ('no ledger at ' + $ledger + ' - nothing to 
 $gotLock = $false
 if ($Gepa -and $haveCommon) {
   $gotLock = Acquire-CodexLock -Owner 'offload-dream' -MaxAgeMinutes 30
-  if (-not $gotLock) { Log 'skip GEPA: codex lock held by another worker' }
+  if (-not $gotLock) { Log 'skip GEPA: codex lock held by another worker (mem0 dream / L1a)' }
 }
 
 $report = New-Object System.Collections.ArrayList

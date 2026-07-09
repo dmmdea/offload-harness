@@ -1,6 +1,6 @@
-# Contributing to local-offload
+# Contributing to offload-harness
 
-Thanks for your interest in improving local-offload — a local-first harness that offloads
+Thanks for your interest in improving offload-harness — a local-first harness that offloads
 short-context, low-judgment work to a free local Gemma-family cascade. Contributions of all
 sizes are welcome.
 

@@ -13,7 +13,7 @@ import (
 // TestConfigExampleRoundTrips (LO-17): the committed config.example.json must
 // load back into exactly config.Default() — proving it is regenerated from the
 // code (go generate .) and has not drifted (the old file still said
-// gemma4-26b-a4b for escalation_model after the default moved to qwythos).
+// the current escalation_model default after LO-17-class drift).
 func TestConfigExampleRoundTrips(t *testing.T) {
 	cfg, err := config.Load("config.example.json")
 	if err != nil {
@@ -23,8 +23,8 @@ func TestConfigExampleRoundTrips(t *testing.T) {
 	if !reflect.DeepEqual(cfg, def) {
 		t.Fatalf("config.example.json does not round-trip to config.Default() — regenerate with `go generate .`\n got: %+v\nwant: %+v", cfg, def)
 	}
-	if cfg.EscalationModel != "qwythos" {
-		t.Fatalf("escalation_model = %q, want qwythos (the drift LO-17 fixed)", cfg.EscalationModel)
+	if cfg.EscalationModel != "gemma4-26b-a4b" {
+		t.Fatalf("escalation_model = %q, want gemma4-26b-a4b (the drift LO-17 class of bug)", cfg.EscalationModel)
 	}
 }
 

@@ -7,6 +7,25 @@ import (
 	"testing"
 )
 
+func TestBuildOpenWritePosture(t *testing.T) {
+	dir := t.TempDir()
+	res, err := Build(BuildConfig{
+		PlannerBase: "http://127.0.0.1:11436", Model: "m", ReadRoot: dir,
+		Unattended: true, AllowWrite: true, AllowOverwrite: true, AllowDelete: true,
+		Worktree:  dir,
+		AuditPath: filepath.Join(t.TempDir(), "audit.jsonl"), // outside the worktree
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := res.Policy.Decide(Action{Kind: ActWrite, Path: "a.txt", Exists: true}); d != Allow {
+		t.Errorf("built policy overwrite = %q, want allow", d)
+	}
+	if d, _ := res.Policy.Decide(Action{Kind: ActDelete, Path: "a.txt", Exists: true}); d != Allow {
+		t.Errorf("built policy delete = %q, want allow", d)
+	}
+}
+
 func toolNames(tools []Tool) map[string]bool {
 	m := map[string]bool{}
 	for _, t := range tools {
