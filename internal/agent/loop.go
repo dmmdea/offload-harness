@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/dmmdea/offload-harness/internal/contextbudget"
 )
 
 // ToolCall is one tool invocation the model requested.
@@ -79,10 +81,28 @@ type Loop struct {
 	specs       []ToolSpec
 	maxSteps    int
 	maxTokens   int
-	maxSameTool int
-	system      string
-	mem         Memory
+	maxSameTool   int
+	ctxTokens     int // model context window in tokens; input budget derives from it
+	keepRecent    int // most-recent turns kept full during compaction
+	toolResultCap int // max chars of ONE tool result kept in the transcript (0 => derive from window)
+	system        string
+	mem           Memory
 }
+
+// defaultCtxTokens is the model context window the loop budgets against. It
+// matches the shipped serving templates (llama-swap.win-*.yaml: --ctx-size
+// 8192). WithContextTokens overrides it for a differently-served model.
+const defaultCtxTokens = 8192
+
+// compactionMargin is a safety headroom (in tokens) subtracted from the input
+// budget on top of the reserved completion tokens, to absorb the crude
+// token-estimate's error and per-request framing the estimate doesn't model.
+const compactionMargin = 512
+
+// defaultKeepRecent is how many of the most recent turns compaction keeps full
+// by default — enough for the model to see its latest tool result(s) and reason
+// about the next step, while older bodies get elided.
+const defaultKeepRecent = 4
 
 // defaultMaxSameTool caps how many times ANY single tool name may be executed
 // within one Run — the circuit breaker for weaker local models (esp. small
@@ -106,6 +126,8 @@ func NewLoop(c Client, tools []Tool, maxSteps int) *Loop {
 		maxSteps:    maxSteps,
 		maxTokens:   1024,
 		maxSameTool: defaultMaxSameTool,
+		ctxTokens:   defaultCtxTokens,
+		keepRecent:  defaultKeepRecent,
 	}
 	for _, t := range tools {
 		l.tools[t.Name] = t
@@ -132,6 +154,61 @@ func (l *Loop) WithMaxTokens(n int) *Loop {
 // defaultMaxSameTool). n<=0 disables the cap (unlimited) — use only for tests
 // that specifically need to observe unthrottled repeats.
 func (l *Loop) WithMaxSameTool(n int) *Loop { l.maxSameTool = n; return l }
+
+// WithContextTokens sets the model context window (in tokens) that transcript
+// compaction budgets against. Default is defaultCtxTokens (8192, matching the
+// shipped serving templates). A non-positive value is ignored. The derived
+// INPUT budget is ctxTokens - maxTokens - compactionMargin (see inputBudget).
+func (l *Loop) WithContextTokens(n int) *Loop {
+	if n > 0 {
+		l.ctxTokens = n
+	}
+	return l
+}
+
+// WithToolResultCap overrides the per-result character cap applied when a
+// tool's output becomes a transcript Msg (see toolResultCapChars). A
+// non-positive value resets to the window-derived default. Use a large value
+// only in tests that need to observe an uncapped result.
+func (l *Loop) WithToolResultCap(n int) *Loop {
+	l.toolResultCap = n
+	return l
+}
+
+// inputBudget is the estimated-token ceiling for the transcript SENT to the
+// model: the context window minus the reserved completion tokens minus a safety
+// margin. Clamped to a small positive floor so a mis-set tiny window can never
+// drive the budget to zero/negative (which would compact everything away).
+func (l *Loop) inputBudget() int {
+	b := l.ctxTokens - l.maxTokens - compactionMargin
+	if b < 256 {
+		b = 256
+	}
+	return b
+}
+
+// toolResultCapChars is the max CHARACTER length a SINGLE tool result may keep
+// in the transcript. WHY this is needed on top of compaction: compaction elides
+// OLDER tool bodies but keeps the RECENT keepRecent turns full, so one huge
+// fresh result still overflows the window — and the per-tool caps do NOT help
+// (read_file caps at 256 KB, ~16× the entire ~4K-token input budget). Capping
+// here, centrally at the loop boundary, guarantees EVERY tool (present and
+// future) is covered while the tools themselves stay unchanged.
+//
+// Default: half the input budget expressed in BYTES (inputBudget tokens ×
+// bytesPerToken / 2). That leaves room for the rest of the transcript (system,
+// objective, other turns) alongside any single result, and scales with the
+// served window (WithContextTokens). An explicit WithToolResultCap overrides it.
+func (l *Loop) toolResultCapChars() int {
+	if l.toolResultCap > 0 {
+		return l.toolResultCap
+	}
+	cap := l.inputBudget() * bytesPerToken / 2
+	if cap < 1024 {
+		cap = 1024
+	}
+	return cap
+}
 
 // Run executes the loop for objective until the model stops, the step budget is
 // exhausted, or the context is cancelled.
@@ -188,9 +265,29 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				}
 			}
 		}
+		// Proactive compaction: keep the transcript within the input budget so a
+		// multi-step task does not overflow the model's small window and abort.
+		// Under budget, compact is a byte-for-byte no-op (prefix stability =>
+		// the server's KV cache stays warm on the happy path).
+		budget := l.inputBudget()
+		if estimateTokens(msgs) > budget {
+			msgs = compact(msgs, budget, l.keepRecent)
+		}
 		comp, err := l.client.Chat(ctx, msgs, specs, l.maxTokens)
 		if err != nil {
-			return Result{Steps: step, StopReason: "error", Transcript: msgs}, err
+			// Reactive retry (belt-and-suspenders): the token estimate is
+			// approximate, so a request we thought fit can still be rejected for
+			// overflow. On an overflow-looking error, compact HARDER (tighter
+			// budget + fewer recent turns kept) and retry this SAME step ONCE. A
+			// non-overflow error, or a still-overflowing retry, is returned as
+			// before.
+			if isContextOverflowErr(err) {
+				msgs = compact(msgs, budget/2, l.keepRecent/2)
+				comp, err = l.client.Chat(ctx, msgs, specs, l.maxTokens)
+			}
+			if err != nil {
+				return Result{Steps: step, StopReason: "error", Transcript: msgs}, err
+			}
 		}
 		msgs = append(msgs, comp.Msg)
 
@@ -208,6 +305,11 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// Execute every requested tool; defer-not-crash on error/unknown.
 		for _, call := range comp.Msg.ToolCalls {
 			content, isErr := l.dispatchOrThrottle(ctx, call, exactCalls, sameNameCalls, disabledTools)
+			// Cap ONE result at the loop boundary so no single tool output can blow
+			// the small window — the per-tool caps don't protect us here (read_file's
+			// 256 KB is ~16× the whole input budget). Trim no-ops under the cap, so
+			// small results (and tiny refusal strings) pass through byte-for-byte.
+			content, _ = contextbudget.Trim(content, l.toolResultCapChars())
 			msgs = append(msgs, Msg{Role: "tool", ToolCallID: call.ID, Content: content, IsError: isErr})
 		}
 	}
@@ -276,6 +378,27 @@ func (l *Loop) persist(ctx context.Context, objective, output string) {
 	defer cancel()
 	text := "Agent run — objective: " + clip(objective, 500) + "\nOutcome: " + clip(output, 1500)
 	_, _ = l.mem.Persist(pctx, text, map[string]string{"kind": "run-outcome"})
+}
+
+// isContextOverflowErr reports whether a Chat error looks like the server
+// rejecting the request for exceeding the context window. The concrete client
+// surfaces a non-200 as `fmt.Errorf("chat %d: %s", status, body)` (client.go),
+// so we key on: HTTP 400/413 status prefixes it emits, OR the word "context" /
+// common overflow phrasings anywhere in the (lowercased) message. Deliberately
+// broad but anchored — a false positive only costs one extra (harder-compacted)
+// retry, never a wrong answer; a miss reverts to today's abort-on-error.
+func isContextOverflowErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	if strings.Contains(s, "chat 400") || strings.Contains(s, "chat 413") {
+		return true
+	}
+	return strings.Contains(s, "context") ||
+		strings.Contains(s, "too long") ||
+		strings.Contains(s, "too large") ||
+		strings.Contains(s, "exceed")
 }
 
 // clip truncates to at most n bytes at a valid UTF-8 boundary (never splits a

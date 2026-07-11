@@ -394,6 +394,110 @@ func TestLoopMaxSameToolDisabledWhenNonPositive(t *testing.T) {
 	}
 }
 
+// TestLoopCapsToolResultAtBoundary: a single tool result far larger than the
+// input budget (read_file caps at 256 KB — 16× the whole ~4K-token input budget,
+// so the per-tool cap does NOT protect the context) must be trimmed at the loop
+// boundary before it becomes a transcript Msg, so no ONE result can blow the
+// window. The trim uses contextbudget.Trim, which inserts its elision marker.
+func TestLoopCapsToolResultAtBoundary(t *testing.T) {
+	huge := strings.Repeat("A", 200*1024) // 200 KB — well under read_file's 256 KB cap, far over the context budget
+	client := &fakeClient{script: []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "read_file", `{"path":"big.txt"}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+	}}
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) {
+		return huge, nil
+	}}}
+	loop := NewLoop(client, tools, 10).WithToolResultCap(8 * 1024)
+	res, err := loop.Run(context.Background(), "read the big file")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.StopReason != "done" {
+		t.Fatalf("stop_reason = %q, want done", res.StopReason)
+	}
+	// The tool result fed into the 2nd Chat call must be capped, not the full 200 KB.
+	last := client.seen[1]
+	var toolMsg *Msg
+	for i := range last {
+		if last[i].Role == "tool" && last[i].ToolCallID == "c1" {
+			toolMsg = &last[i]
+		}
+	}
+	if toolMsg == nil {
+		t.Fatalf("tool result not fed back: %+v", last)
+	}
+	if len(toolMsg.Content) >= len(huge) {
+		t.Errorf("tool result was NOT capped: got %d bytes, want << %d", len(toolMsg.Content), len(huge))
+	}
+	if len(toolMsg.Content) > 12*1024 {
+		t.Errorf("tool result too large after cap: %d bytes, want ~<= 8 KB + marker", len(toolMsg.Content))
+	}
+	if !strings.Contains(toolMsg.Content, "elided") {
+		t.Errorf("capped result missing the elision marker: %q", toolMsg.Content[:min(200, len(toolMsg.Content))])
+	}
+}
+
+// TestLoopDoesNotCapSmallToolResult: a small result must pass through
+// byte-for-byte (Trim no-ops under the cap) — capping must not perturb the
+// common case (prefix stability / KV cache).
+func TestLoopDoesNotCapSmallToolResult(t *testing.T) {
+	client := &fakeClient{script: []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "read_file", `{"path":"small.txt"}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+	}}
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) {
+		return "small exact content", nil
+	}}}
+	res, err := NewLoop(client, tools, 10).WithToolResultCap(8 * 1024).Run(context.Background(), "read small")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.StopReason != "done" {
+		t.Fatalf("stop_reason = %q, want done", res.StopReason)
+	}
+	last := client.seen[1]
+	var got string
+	var found bool
+	for _, m := range last {
+		if m.Role == "tool" && m.ToolCallID == "c1" {
+			got, found = m.Content, true
+		}
+	}
+	if !found || got != "small exact content" {
+		t.Errorf("small result must pass through unchanged; got %q", got)
+	}
+}
+
+// TestLoopDefaultToolResultCapCapsHugeResult: without an explicit
+// WithToolResultCap, the default (derived from the window) must still cap a
+// result that dwarfs the input budget — the protection is on by default.
+func TestLoopDefaultToolResultCapCapsHugeResult(t *testing.T) {
+	huge := strings.Repeat("B", 200*1024)
+	client := &fakeClient{script: []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "read_file", `{"path":"big.txt"}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+	}}
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) {
+		return huge, nil
+	}}}
+	res, err := NewLoop(client, tools, 10).Run(context.Background(), "read the big file") // NO WithToolResultCap
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.StopReason != "done" {
+		t.Fatalf("stop_reason = %q, want done", res.StopReason)
+	}
+	last := client.seen[1]
+	for _, m := range last {
+		if m.Role == "tool" && m.ToolCallID == "c1" {
+			if len(m.Content) >= len(huge) {
+				t.Errorf("default cap did not trim a 200 KB result: %d bytes", len(m.Content))
+			}
+		}
+	}
+}
+
 func TestLoopUnknownToolDefersNotCrashes(t *testing.T) {
 	client := &fakeClient{script: []Completion{
 		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "ghost", `{}`)}}, FinishReason: "tool_calls"},

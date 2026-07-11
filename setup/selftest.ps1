@@ -24,6 +24,14 @@ $ProgressPreference = 'SilentlyContinue'
 if ($env:OFFLOAD_HOME) { $HOME_DIR = $env:OFFLOAD_HOME } else { $HOME_DIR = Join-Path $HOME 'offload-stack' }
 $SWAP_PORT  = 18801
 $AGENT_PORT = 18802
+# The agent-driving tier: the model an autonomous coding/edit agent actually steers through. Default
+# offload-e4b (present in every install); override with OFFLOAD_AGENT_TIER to bench a different alias.
+if ($env:OFFLOAD_AGENT_TIER) { $AGENT_TIER = $env:OFFLOAD_AGENT_TIER } else { $AGENT_TIER = 'offload-e4b' }
+# Agent context accounting: an agent's usable INPUT budget = served ctx minus the output reservation
+# (max_tokens the agent may generate) minus a safety margin for the chat template + tool scaffolding.
+$AGENT_OUTPUT_RESERVE = 4096
+$AGENT_SAFETY_MARGIN  = 512
+$AGENT_LARGER_CTX     = 16384   # target ctx we attempt to load at, to prove headroom beyond served 8192
 $swapExe    = Join-Path $HOME_DIR 'llama-swap\llama-swap.exe'
 $yamlPath   = Join-Path $HOME_DIR 'llama-swap.yaml'
 $modelDir   = Join-Path $HOME_DIR 'models'
@@ -108,14 +116,16 @@ function Invoke-Chat {
     $lat = [math]::Round($sw.Elapsed.TotalSeconds, 2)
     $ct  = 0
     if ($r.usage -and $r.usage.completion_tokens) { $ct = [int]$r.usage.completion_tokens }
+    $pt  = 0
+    if ($r.usage -and $r.usage.prompt_tokens) { $pt = [int]$r.usage.prompt_tokens }
     $toks = $null
     if ($ct -gt 0 -and $sw.Elapsed.TotalSeconds -gt 0) { $toks = [math]::Round($ct / $sw.Elapsed.TotalSeconds, 1) }
     $text = ''
     if ($r.choices -and $r.choices[0].message) { $text = [string]$r.choices[0].message.content }
-    return @{ ok = $true; latency_s = $lat; tokens = $ct; tok_s = $toks; text = $text; error = $null }
+    return @{ ok = $true; latency_s = $lat; tokens = $ct; prompt_tokens = $pt; tok_s = $toks; text = $text; error = $null }
   } catch {
     $sw.Stop()
-    return @{ ok = $false; latency_s = [math]::Round($sw.Elapsed.TotalSeconds, 2); tokens = 0; tok_s = $null; text = ''; error = $_.Exception.Message }
+    return @{ ok = $false; latency_s = [math]::Round($sw.Elapsed.TotalSeconds, 2); tokens = 0; prompt_tokens = 0; tok_s = $null; text = ''; error = $_.Exception.Message }
   }
 }
 
@@ -199,6 +209,82 @@ function Invoke-Remediate26B {
   return @{ outcome = 'fail'; retry = $retry }
 }
 
+# Read the served chat-tier --ctx-size from the ACTIVE rendered yaml (ground truth: what actually
+# launches). The chat tiers share the 'common' macro whose first '--ctx-size N' is the served window;
+# the embedding model has its own smaller '--ctx-size 2048' further down, so we take the FIRST match.
+# Returns [int] on success, $null if the file is unreadable / has no match (caller falls back to 8192).
+function Get-ServedCtx {
+  param([string]$ConfigPath)
+  try {
+    if (-not (Test-Path $ConfigPath)) { return $null }
+    $raw = Get-Content -Raw -Path $ConfigPath -Encoding UTF8   # explicit UTF8: 5.1 defaults BOM-less to ANSI
+    $m = [regex]::Match($raw, '--ctx-size\s+(\d+)')
+    if ($m.Success) { return [int]$m.Groups[1].Value }
+  } catch { }
+  return $null
+}
+
+# Approx KV-cache size in MB for gemma-4 E4B at a given ctx. f16 KV (2 bytes/elem), K+V (x2).
+# gemma-4 E4B geometry: ~34 layers, GQA num_kv_heads ~4, head_dim 256 -> kv_dim = 4*256 = 1024.
+# bytes = ctx * layers * kv_dim * 2(K+V) * 2(f16). This is a documented ESTIMATE, not a measurement.
+function Get-KvMbApprox {
+  param([int]$Ctx, [int]$Layers = 34, [int]$KvDim = 1024)
+  $bytes = [double]$Ctx * $Layers * $KvDim * 2 * 2
+  return [math]::Round($bytes / 1MB, 0)
+}
+
+# Attempt to load+serve the agent tier at a LARGER ctx than served, purely to measure headroom.
+# We do NOT touch the running swap or its yaml: we spin a standalone llama-server on a spare port,
+# probe /health, then kill it. Returns {ok=$bool; detail=<string>}. A failure here is informational
+# (the served 8192 config is unaffected); we degrade to computed-only if we can't even try.
+function Test-LargerCtxLoad {
+  param([int]$Ctx, [int]$TimeoutSec = 120)
+  $llamaServer = Join-Path $llamaDir 'llama-server.exe'
+  $tierFile = ($TIER_SPEC | Where-Object { $_.id -eq $AGENT_TIER } | Select-Object -First 1).file
+  if (-not $tierFile) { $tierFile = ($TIER_SPEC | Where-Object { $_.id -eq 'offload-e4b' }).file }
+  $modelPath = Join-Path $modelDir $tierFile
+  if (-not (Test-Path $llamaServer)) { return @{ ok = $false; detail = 'llama-server.exe absent' } }
+  if (-not (Test-Path $modelPath))   { return @{ ok = $false; detail = "model gguf absent: $tierFile" } }
+  $probePort = 18803
+  if (-not (Test-PortFree $probePort)) { return @{ ok = $false; detail = "probe port $probePort busy" } }
+  $ngl = if ($backend -eq 'cpu') { 0 } else { 999 }
+  $logFile = Join-Path $env:TEMP ("offload-selftest-ctxprobe-{0}.log" -f $PID)
+  $args = @('-m', $modelPath, '-c', "$Ctx", '-ngl', "$ngl", '--flash-attn', 'on',
+            '--cache-type-k', 'f16', '--cache-type-v', 'f16', '--jinja', '--no-webui',
+            '--port', "$probePort", '--host', '127.0.0.1')
+  $proc = $null
+  try {
+    $proc = Start-Process -FilePath $llamaServer -ArgumentList $args -PassThru -NoNewWindow `
+              -RedirectStandardError $logFile -RedirectStandardOutput "$logFile.out"
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+      if ($proc.HasExited) {
+        $tail = ''
+        try { $tail = (Get-Content -Path $logFile -Tail 4 -ErrorAction SilentlyContinue) -join ' | ' } catch { }
+        return @{ ok = $false; detail = ("server exited early (code {0}) {1}" -f $proc.ExitCode, $tail) }
+      }
+      $h = Invoke-JsonGet "http://127.0.0.1:$probePort/health" 4
+      if ($h) { return @{ ok = $true; detail = "loaded+healthy at ctx=$Ctx on a standalone probe server" } }
+      Start-Sleep -Milliseconds 750
+    }
+    return @{ ok = $false; detail = "no /health within ${TimeoutSec}s at ctx=$Ctx" }
+  } catch {
+    return @{ ok = $false; detail = "probe threw: $($_.Exception.Message)" }
+  } finally {
+    if ($proc -and -not $proc.HasExited) { try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { } }
+    # Kill any lingering llama-server bound to our probe port (child processes can outlive the parent handle).
+    try {
+      $kids = Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandLine -and ($_.CommandLine -match [regex]::Escape("127.0.0.1:$probePort")) }
+      foreach ($k in $kids) { try { Stop-Process -Id $k.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
+    } catch { }
+    # Wait briefly for the probe port to free so a later section never collides with it.
+    $pd = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $pd) { if (Test-PortFree $probePort) { break }; Start-Sleep -Milliseconds 400 }
+    Get-ChildItem $env:TEMP -Filter ("offload-selftest-ctxprobe-{0}*" -f $PID) -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+  }
+}
+
 # ---------------------------------------------------------------------------
 # Receipt accumulator (R4.4 schema)
 # ---------------------------------------------------------------------------
@@ -212,6 +298,21 @@ $receipt = [ordered]@{
   remediations    = @()
   harness_smoke   = 'fail'
   agent_smoke     = 'fail'
+  agent           = [ordered]@{
+    tier            = $AGENT_TIER
+    served_ctx      = $null      # int; measured from the rendered yaml if readable, else computed default
+    served_ctx_src  = 'computed' # 'measured' (read from yaml) | 'computed' (fell back to template default 8192)
+    input_budget    = $null      # int; served_ctx - output-reserve - safety-margin
+    larger_ctx      = $AGENT_LARGER_CTX
+    larger_ctx_ok   = $null      # $true|$false measured load at larger ctx; $null = not attempted this run
+    larger_ctx_src  = 'not-attempted' # 'measured' | 'computed' | 'not-attempted'
+    kv_mb_approx    = $null      # approx KV-cache MB for larger_ctx (computed from ctx*layers*heads est.)
+    microbench_tps  = $null      # generation tok/s of the one warm edit-style call
+    microbench_pp_tps = $null    # prompt-eval (prefill) tok/s if the server reports it, else $null
+    microbench_ok   = $false     # $true iff the call returned a non-empty, well-formed structured answer
+    skipped         = $false     # $true iff the agent tier was absent / unreachable this run
+    notes           = $null
+  }
   verdict         = 'fail'
   proves          = @(
     'installation integrity',
@@ -500,6 +601,93 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
     LogFail "agent smoke section threw: $($_.Exception.Message)"
   }
 
+  # --- Agent telemetry: context headroom + one agentic micro-bench (independent section) -----
+  # NEW telemetry (does not alter eviction/canary/remediation above). Records, for the agent-driving
+  # tier: the served ctx (measured from the rendered yaml when readable), the computed agent INPUT
+  # budget, an OPTIONAL larger-ctx load probe (measured on a standalone server, never touching the
+  # running swap/yaml), and ONE warm edit-style micro-bench through the same llama-swap the tiers use.
+  LogStep "agent telemetry: context headroom + one agentic micro-bench (tier=$AGENT_TIER)"
+  try {
+    # 1a. Served ctx: prefer the value actually in the rendered yaml (measured), else template default.
+    $servedCtx = Get-ServedCtx -ConfigPath $yamlPath
+    if ($null -ne $servedCtx) {
+      $receipt.agent.served_ctx = $servedCtx
+      $receipt.agent.served_ctx_src = 'measured'
+    } else {
+      $servedCtx = 8192
+      $receipt.agent.served_ctx = $servedCtx
+      $receipt.agent.served_ctx_src = 'computed'
+    }
+    # 1b. Agent INPUT budget = served ctx - output reservation - safety margin (always computed).
+    $inputBudget = $servedCtx - $AGENT_OUTPUT_RESERVE - $AGENT_SAFETY_MARGIN
+    if ($inputBudget -lt 0) { $inputBudget = 0 }
+    $receipt.agent.input_budget = $inputBudget
+    LogOk ("served_ctx={0} ({1}) | input_budget={2} = {0}-{3}-{4} (computed)" -f `
+           $servedCtx, $receipt.agent.served_ctx_src, $inputBudget, $AGENT_OUTPUT_RESERVE, $AGENT_SAFETY_MARGIN)
+
+    # Is the agent tier actually installed this run? (file existence, same rule as the tier loop)
+    $agentTierSpec = $TIER_SPEC | Where-Object { $_.id -eq $AGENT_TIER } | Select-Object -First 1
+    $agentTierPresent = $false
+    if ($agentTierSpec) { $agentTierPresent = Test-Path (Join-Path $modelDir $agentTierSpec.file) }
+
+    # 1c. Larger-ctx headroom probe (optional; only meaningful with a GPU backend + the tier present).
+    # OFFLOAD_SELFTEST_SKIP_CTXPROBE=1 skips the load (keeps the run fast); we then record kv_mb as
+    # a pure computation with larger_ctx_ok left $null (not-attempted) - honest about measured vs computed.
+    $kvApprox = Get-KvMbApprox -Ctx $AGENT_LARGER_CTX
+    $receipt.agent.kv_mb_approx = $kvApprox
+    if ($env:OFFLOAD_SELFTEST_SKIP_CTXPROBE -eq '1' -or -not $agentTierPresent -or $backend -eq 'cpu') {
+      $receipt.agent.larger_ctx_ok = $null
+      $receipt.agent.larger_ctx_src = 'computed'
+      $why = if (-not $agentTierPresent) { "$AGENT_TIER gguf absent" } elseif ($backend -eq 'cpu') { 'cpu backend' } else { 'skip flag set' }
+      LogWarn ("larger-ctx load NOT attempted ({0}); kv_mb~{1}MB@{2} is COMPUTED only" -f $why, $kvApprox, $AGENT_LARGER_CTX)
+    } else {
+      $probe = Test-LargerCtxLoad -Ctx $AGENT_LARGER_CTX -TimeoutSec 120
+      $receipt.agent.larger_ctx_ok = [bool]$probe.ok
+      $receipt.agent.larger_ctx_src = 'measured'
+      if ($probe.ok) { LogOk ("larger-ctx load MEASURED ok at {0} (kv~{1}MB approx): {2}" -f $AGENT_LARGER_CTX, $kvApprox, $probe.detail) }
+      else { LogWarn ("larger-ctx load MEASURED fail at {0}: {1} (served {2} unaffected)" -f $AGENT_LARGER_CTX, $probe.detail, $servedCtx) }
+    }
+
+    # 2. Agentic micro-bench: ONE warm edit-style call through llama-swap. The tier loop already
+    # cold-loaded offload-e4b, so this hits a resident model (warm tok/s). Well-formed = the model
+    # returned the corrected line containing the fix, non-empty. Skip honestly if the tier is absent.
+    if (-not $agentTierPresent) {
+      $receipt.agent.microbench_ok = $false
+      $receipt.agent.skipped = $true
+      $receipt.agent.notes = "micro-bench skipped: agent tier '$AGENT_TIER' gguf not installed in this stack"
+      LogWarn "agentic micro-bench SKIPPED: $($receipt.agent.notes)"
+    } else {
+      $editPrompt = "You are a code-editing agent. Here is one line of Python with a bug:`n" +
+                    "    resutl = a + b`n" +
+                    "Reply with ONLY the corrected line, no explanation, no code fence."
+      $mb = Invoke-Chat -Model $AGENT_TIER -UserContent $editPrompt -MaxTokens 64 -TimeoutSec 180
+      if ($mb.ok -and $mb.text -and $mb.text.Trim().Length -gt 0) {
+        $receipt.agent.microbench_tps = $mb.tok_s
+        # pp (prefill) tok/s is NOT separable from the OpenAI usage payload (no per-phase timings),
+        # so we leave microbench_pp_tps null and say so in notes rather than fabricate a number.
+        $receipt.agent.microbench_pp_tps = $null
+        # Well-formed = the reply actually applied the fix (contains the corrected identifier 'result').
+        $wellFormed = [bool]($mb.text -match '(?i)result')
+        $receipt.agent.microbench_ok = $wellFormed
+        $receipt.agent.skipped = $false
+        $receipt.agent.notes = ("edit-bench: gen {0} tok in {1}s ({2} tok/s), prompt_tokens={3}; well_formed={4}; pp_tps=null (llama-server OpenAI usage has no per-phase timing)" -f `
+                                 $mb.tokens, $mb.latency_s, $mb.tok_s, $mb.prompt_tokens, $wellFormed)
+        if ($wellFormed) { LogOk ("agentic micro-bench PASS: {0} tok/s warm, well-formed edit" -f $mb.tok_s) }
+        else { LogWarn ("agentic micro-bench ran ({0} tok/s) but answer not well-formed (no 'result' token): $($mb.text.Trim())" -f $mb.tok_s) }
+      } else {
+        $receipt.agent.microbench_ok = $false
+        $receipt.agent.skipped = $true
+        $receipt.agent.notes = "micro-bench call failed: $($mb.error)"
+        LogFail "agentic micro-bench FAILED: $($mb.error)"
+      }
+    }
+  } catch {
+    $receipt.agent.microbench_ok = $false
+    $receipt.agent.skipped = $true
+    $receipt.agent.notes = "agent telemetry section threw: $($_.Exception.Message)"
+    LogFail "agent telemetry section threw: $($_.Exception.Message) - continuing to verdict"
+  }
+
   # --- Verdict (R4.4 rule) ------------------------------------------------------------------
   # fail iff harness_smoke=fail OR agent_smoke=fail OR ALL tiers failed. A single non-26b tier
   # failing, or 26b failing even after remediation, is WARN (partial capability). The canary
@@ -554,14 +742,29 @@ finally {
 # ---------------------------------------------------------------------------
 # Print the receipt as the LAST stdout line, then exit 0 (pass|warn) or 1 (fail).
 # ---------------------------------------------------------------------------
+# Honesty: if the agentic micro-bench did not actually run, the receipt must NOT imply agent-tier
+# throughput/well-formedness was proven. Append a does_not_prove line (deduped) saying so.
+if ($receipt.agent.skipped -eq $true) {
+  $dnp = "agent-driving tier ($($receipt.agent.tier)) throughput/well-formedness: micro-bench skipped ($($receipt.agent.notes))"
+  if (-not ($receipt.does_not_prove -contains $dnp)) { $receipt.does_not_prove += $dnp }
+}
+# Same discipline as tiers/remediations: if the larger-ctx headroom was computed-only (not loaded),
+# say the receipt does not prove a larger window actually loads on this GPU.
+if ($receipt.agent.larger_ctx_src -ne 'measured') {
+  $dnp2 = "a larger context window ($($receipt.agent.larger_ctx)) actually loads on this GPU: recorded as computed-only ($($receipt.agent.larger_ctx_src))"
+  if (-not ($receipt.does_not_prove -contains $dnp2)) { $receipt.does_not_prove += $dnp2 }
+}
+
 Log ""
 LogStep "verdict: $($receipt.verdict)"
 # Code-enforce the receipt's array-typed fields at serialization time. PS 5.1's ConvertTo-Json
 # has known unwrap/null hazards around empty and 1-element collections depending on how the
 # value was built; forcing [object[]] here makes "tiers":[{...}] (array-of-one, never a bare
 # object) and "remediations":[] (empty array, never null) structural rather than runtime luck.
-$receipt.tiers        = [object[]]@($receipt.tiers)
-$receipt.remediations = [object[]]@($receipt.remediations)
+$receipt.tiers          = [object[]]@($receipt.tiers)
+$receipt.remediations   = [object[]]@($receipt.remediations)
+$receipt.proves         = [object[]]@($receipt.proves)
+$receipt.does_not_prove = [object[]]@($receipt.does_not_prove)
 $json = ([pscustomobject]$receipt) | ConvertTo-Json -Depth 8 -Compress
 Write-Output $json
 if ($receipt.verdict -eq 'fail') { exit 1 } else { exit 0 }

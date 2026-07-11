@@ -66,6 +66,122 @@ func TestEditFileRefusedWithoutOverwritePosture(t *testing.T) {
 	}
 }
 
+// TestEditFileWhitespaceTolerantFallback: a weak local model often reproduces
+// old_string with slightly different per-line indentation than the file. When
+// the EXACT match fails but a whitespace-normalized match is UNIQUE, edit_file
+// should apply the replacement (using the file's actual bytes) and REPORT that
+// the whitespace-tolerant path was used.
+func TestEditFileWhitespaceTolerantFallback(t *testing.T) {
+	dir := t.TempDir()
+	// File uses a tab + trailing space; the model supplies plain spaces / no trailing space.
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("func x() {\n\treturn 1 \n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	edit := editTool(t, dir, NewPolicy(true, nil).WithWritePosture(true, false))
+	// old_string differs only in leading/trailing whitespace per line.
+	out, err := edit.Exec(context.Background(), `{"path":"a.go","old_string":"func x() {\n    return 1\n}","new_string":"func x() {\n\treturn 2\n}"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "edited") {
+		t.Fatalf("expected an edit via whitespace-tolerant fallback, got %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "whitespace") {
+		t.Errorf("result must report the whitespace-tolerant path was used, got %q", out)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "a.go"))
+	if !strings.Contains(string(b), "return 2") {
+		t.Errorf("replacement not applied: %q", string(b))
+	}
+}
+
+// TestEditFileWhitespaceFallbackRefusesAmbiguous: the fallback must apply ONLY
+// when the normalized match is UNIQUE. If normalizing whitespace makes the match
+// ambiguous (>1), edit_file must refuse with the standard guidance — never guess.
+func TestEditFileWhitespaceFallbackRefusesAmbiguous(t *testing.T) {
+	dir := t.TempDir()
+	// Two lines that are identical once whitespace is normalized, and neither
+	// matches old_string EXACTLY (both have extra indentation) — so the exact
+	// pass finds 0 and we enter the whitespace fallback, where the normalized
+	// match is ambiguous (2×) and must be refused.
+	orig := "  foo bar\n\tfoo bar\n"
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	edit := editTool(t, dir, NewPolicy(true, nil).WithWritePosture(true, false))
+	out, _ := edit.Exec(context.Background(), `{"path":"a.txt","old_string":"foo bar","new_string":"baz"}`)
+	if !strings.Contains(out, "NOT performed") {
+		t.Fatalf("ambiguous normalized match must be refused, got %q", out)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "a.txt"))
+	if string(b) != orig {
+		t.Errorf("file must be untouched on ambiguous fallback: %q", string(b))
+	}
+}
+
+// TestEditFileExactMatchStaysPrimary: when the exact match is present and
+// unique, edit_file must take the exact path and NOT report a whitespace
+// fallback (exact stays primary).
+func TestEditFileExactMatchStaysPrimary(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello world\nfoo bar\n"), 0o644)
+	edit := editTool(t, dir, NewPolicy(true, nil).WithWritePosture(true, false))
+	out, err := edit.Exec(context.Background(), `{"path":"a.txt","old_string":"foo bar","new_string":"baz qux"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "edited") {
+		t.Fatalf("got %q", out)
+	}
+	if strings.Contains(strings.ToLower(out), "whitespace") {
+		t.Errorf("exact match must not report a whitespace fallback: %q", out)
+	}
+}
+
+// TestEditFileWhitespaceFallbackHonorsBroker: the whitespace-tolerant path must
+// still go through the policy broker. Without overwrite posture (unattended),
+// even a matched fallback edit must be denied and the file left untouched.
+func TestEditFileWhitespaceFallbackHonorsBroker(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("\tfoo bar\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	edit := editTool(t, dir, NewPolicy(true, nil)) // no posture → overwrite denied
+	out, _ := edit.Exec(context.Background(), `{"path":"a.txt","old_string":"foo bar","new_string":"baz"}`)
+	if !strings.Contains(out, "NOT performed") {
+		t.Fatalf("broker must still deny even on the whitespace path, got %q", out)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "a.txt"))
+	if string(b) != "\tfoo bar\n" {
+		t.Errorf("file must be untouched when broker denies: %q", string(b))
+	}
+}
+
+// TestEditWriteDescriptionsGuideWeakModel: descriptions must steer a weak model
+// to the right tool — write_file for CREATE, edit_file for changing an EXISTING
+// file with unique surrounding context.
+func TestEditWriteDescriptionsGuideWeakModel(t *testing.T) {
+	tools, err := WriteTools(t.TempDir(), NewPolicy(true, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf, ef := findTool(tools, "write_file"), findTool(tools, "edit_file")
+	if wf == nil || ef == nil {
+		t.Fatal("write_file / edit_file missing")
+	}
+	wd := strings.ToLower(wf.Description)
+	if !strings.Contains(wd, "creat") || !strings.Contains(wd, "new file") {
+		t.Errorf("write_file description should emphasize CREATE a new file: %q", wf.Description)
+	}
+	ed := strings.ToLower(ef.Description)
+	if !strings.Contains(ed, "existing") {
+		t.Errorf("edit_file description should emphasize an EXISTING file: %q", ef.Description)
+	}
+	if !strings.Contains(ed, "surrounding context") && !strings.Contains(ed, "unique") {
+		t.Errorf("edit_file description should require unique surrounding context: %q", ef.Description)
+	}
+}
+
 func TestWriteFileNewFileAllowed(t *testing.T) {
 	wt := t.TempDir()
 	tools, err := WriteTools(wt, NewPolicy(true, nil)) // unattended
