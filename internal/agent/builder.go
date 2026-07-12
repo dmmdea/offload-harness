@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -39,7 +40,8 @@ type BuildConfig struct {
 
 	AllowWrite  bool     // P2: write_file/delete_file in the worktree
 	AllowFetch  bool     // P3: web_fetch behind the egress allowlist
-	AllowShell  bool     // P4.6: run_shell in the OS cage (granted only if sandbox.Available)
+	AllowShell  bool     // P4.6: run_shell in the LINUX OS cage (granted only on Linux + sandbox.Available)
+	AllowRun    bool     // C7b: `run` — allowlisted direct-exec runner in the OS sandbox (Linux AND Windows)
 
 	AllowOverwrite bool // open-write: allow overwrite of existing files in the worktree
 	AllowDelete    bool // open-write: allow delete of files in the worktree
@@ -60,8 +62,9 @@ type BuildResult struct {
 	Loop         *Loop
 	Tools        []Tool
 	Policy       *Policy
-	Worktree     string // resolved RW worktree (empty if no write/shell)
+	Worktree     string // resolved RW worktree (empty if no write/shell/run)
 	ShellGranted bool
+	RunGranted   bool
 	Notes        []string
 }
 
@@ -134,9 +137,10 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 	res.Policy = pol
 
 	// The RW worktree is shared by write_file/delete_file (P2), run_shell (P4.6),
-	// and github_upload_file (which reads the file it uploads from the worktree).
+	// the `run` runner (C7b), and github_upload_file (which reads the file it uploads
+	// from the worktree).
 	var absWt string
-	if cfg.AllowWrite || cfg.AllowShell || cfg.AllowGitHub {
+	if cfg.AllowWrite || cfg.AllowShell || cfg.AllowRun || cfg.AllowGitHub {
 		wt := cfg.Worktree
 		if wt == "" {
 			wt = absRoot
@@ -194,16 +198,41 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 		res.Notes = append(res.Notes, fmt.Sprintf("github ON — api/create_repo/upload_file (%s; default repo=%q)", tokState, cfg.GitHubRepo))
 	}
 	if cfg.AllowShell {
-		// Fail-closed: grant the shell ONLY if the OS cage can actually be enforced
-		// here (Linux + Landlock + seccomp + user namespaces). Else refuse.
-		if ok, why := sandbox.Available(); ok {
+		// run_shell is LINUX-ONLY: it runs an ARBITRARY /bin/sh command line, so an
+		// executable allowlist can't meaningfully gate it — the strong Linux cage
+		// (namespaces + Landlock + seccomp) is the boundary. On Windows sandbox.
+		// Available() is true (Job Object + low-IL), but there is no /bin/sh and no
+		// allowlist to constrain an arbitrary command line, so run_shell is NOT
+		// granted; the operator should use --allow-run (the restricted direct-exec
+		// runner) instead. Fail-closed on a non-Linux or unavailable cage.
+		ok, why := sandbox.Available()
+		switch {
+		case ok && runtime.GOOS == "linux":
 			pol.WithShell(true)
 			scratch := filepath.Join(absWt, ".agent-scratch")
 			tools = append(tools, ShellTools(pol, absWt, scratch)...)
 			res.ShellGranted = true
-			res.Notes = append(res.Notes, fmt.Sprintf("shell ON — OS sandbox (%s); worktree=%s (no network, FS-confined, syscall-limited)", why, absWt))
-		} else {
+			res.Notes = append(res.Notes, fmt.Sprintf("shell ON — Linux OS cage (%s); worktree=%s (no network, FS-confined, syscall-limited)", why, absWt))
+		case runtime.GOOS != "linux":
+			res.Notes = append(res.Notes, "shell (run_shell) is Linux-only; use --allow-run for a confined runner on Windows.")
+		default:
 			res.Notes = append(res.Notes, fmt.Sprintf("shell requested but OS sandbox unavailable (%s) — NOT granted (fail-closed)", why))
+		}
+	}
+	if cfg.AllowRun {
+		// The restricted runner: grant on BOTH Linux and Windows whenever the OS
+		// sandbox is available. The tool-layer executable allowlist (runtool.go) is the
+		// primary control (it also covers Linux, where the cage ignores
+		// AllowedExecutables); the sandbox is defense-in-depth. Fail-closed if the OS
+		// sandbox can't be enforced here.
+		if ok, why := sandbox.Available(); ok {
+			pol.WithShell(true) // `run` shares the ActShell broker capability
+			scratch := filepath.Join(absWt, ".agent-scratch")
+			tools = append(tools, RunTools(pol, absWt, scratch)...)
+			res.RunGranted = true
+			res.Notes = append(res.Notes, fmt.Sprintf("run ON — allowlisted direct-exec runner in the OS sandbox (%s); worktree=%s", why, absWt))
+		} else {
+			res.Notes = append(res.Notes, fmt.Sprintf("run requested but OS sandbox unavailable (%s) — NOT granted (fail-closed)", why))
 		}
 	}
 
@@ -211,7 +240,7 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 	// The system prompt advertises only what was actually granted — ShellGranted,
 	// not the raw flag, so a cage-refused shell is never advertised to the model. A
 	// SystemPromptOverride (P6 flywheel replay of a candidate prompt) replaces it.
-	sys := SystemPrompt(cfg.AllowWrite, cfg.AllowOverwrite, cfg.AllowFetch, res.ShellGranted, cfg.AllowSearch, cfg.AllowGitHub)
+	sys := SystemPrompt(cfg.AllowWrite, cfg.AllowOverwrite, cfg.AllowFetch, res.ShellGranted, res.RunGranted, cfg.AllowSearch, cfg.AllowGitHub)
 	if cfg.SystemPromptOverride != "" {
 		sys = cfg.SystemPromptOverride
 	}

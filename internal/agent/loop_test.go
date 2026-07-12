@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -495,6 +497,126 @@ func TestLoopDefaultToolResultCapCapsHugeResult(t *testing.T) {
 				t.Errorf("default cap did not trim a 200 KB result: %d bytes", len(m.Content))
 			}
 		}
+	}
+}
+
+// TestLoopLoadsAgentMDFencedOnStart: an AGENT.md present in the worktree must be
+// loaded on Run start and injected into the FIRST model call as a fenced,
+// newline-flattened USER message (untrusted-data threat model — same treatment
+// as recall). The WORKSPACE sentinel and the flattened content must be present.
+func TestLoopLoadsAgentMDFencedOnStart(t *testing.T) {
+	wt := t.TempDir()
+	// Multi-line content so we can assert newline flattening inside the fence.
+	if err := os.WriteFile(filepath.Join(wt, "AGENT.md"), []byte("PROJECT-FACT-A\nPROJECT-FACT-B"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{script: []Completion{
+		{Msg: Msg{Role: "assistant", Content: "ok"}, FinishReason: "stop"},
+	}}
+	_, err := NewLoop(client, nil, 5).WithSystem("base sys").WithWorktree(wt).Run(context.Background(), "do X")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	first := client.seen[0]
+	var sawWorkspaceUser, inSystem bool
+	for _, m := range first {
+		if m.Role == "user" && strings.Contains(m.Content, "WORKSPACE") &&
+			strings.Contains(m.Content, "PROJECT-FACT-A") && strings.Contains(m.Content, "PROJECT-FACT-B") {
+			sawWorkspaceUser = true
+			// newlines must be flattened: the two facts must NOT be separated by a raw newline.
+			if strings.Contains(m.Content, "PROJECT-FACT-A\nPROJECT-FACT-B") {
+				t.Errorf("AGENT.md newlines were NOT flattened inside the fence: %q", m.Content)
+			}
+		}
+		if m.Role == "system" && strings.Contains(m.Content, "PROJECT-FACT-A") {
+			inSystem = true
+		}
+	}
+	if !sawWorkspaceUser {
+		t.Errorf("AGENT.md not injected as a fenced WORKSPACE user message: %+v", first)
+	}
+	if inSystem {
+		t.Errorf("AGENT.md (untrusted) must NOT be in the system role: %+v", first)
+	}
+}
+
+// TestLoopNoAgentMDNoWorkspaceMessage: absent (or empty) AGENT.md → no workspace
+// message is added.
+func TestLoopNoAgentMDNoWorkspaceMessage(t *testing.T) {
+	wt := t.TempDir() // no AGENT.md written
+	client := &fakeClient{script: []Completion{
+		{Msg: Msg{Role: "assistant", Content: "ok"}, FinishReason: "stop"},
+	}}
+	_, err := NewLoop(client, nil, 5).WithWorktree(wt).Run(context.Background(), "do X")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, m := range client.seen[0] {
+		if strings.Contains(m.Content, "WORKSPACE") {
+			t.Errorf("no AGENT.md but a WORKSPACE message appeared: %+v", m)
+		}
+	}
+}
+
+// TestUpdatePlanToolWritesPlanFile: the update_plan tool must write its input to
+// <worktree>/.agent/plan.md (creating .agent/), confined to the worktree.
+func TestUpdatePlanToolWritesPlanFile(t *testing.T) {
+	wt := t.TempDir()
+	client := &fakeClient{script: []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "update_plan", `{"plan":"1. do A\n2. do B"}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+	}}
+	_, err := NewLoop(client, nil, 5).WithWorktree(wt).Run(context.Background(), "plan the work")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got, rerr := os.ReadFile(filepath.Join(wt, ".agent", "plan.md"))
+	if rerr != nil {
+		t.Fatalf("plan file not written: %v", rerr)
+	}
+	if !strings.Contains(string(got), "1. do A") || !strings.Contains(string(got), "2. do B") {
+		t.Errorf("plan file content = %q, want the given plan", string(got))
+	}
+}
+
+// TestLoopReinjectsPlanOnCadenceNotEveryStep: with a plan file present and a
+// multi-step run, the plan text must be re-injected on the cadence step
+// (planReinjectInterval) but NOT on step 1 (Manus: per-step rewrite wastes ~⅓ of
+// actions).
+func TestLoopReinjectsPlanOnCadenceNotEveryStep(t *testing.T) {
+	wt := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(wt, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".agent", "plan.md"), []byte("PLAN-STEP-XYZ"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A model that keeps asking for a tool so the loop runs several steps.
+	step := Completion{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c", "noop", `{}`)}}, FinishReason: "tool_calls"}
+	client := &fakeClient{script: []Completion{step, step, step, step, step, step}}
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "noop"}, Exec: func(_ context.Context, _ string) (string, error) { return "ok", nil }}}
+	// planReinjectInterval default is 3; run enough steps to cross it.
+	_, err := NewLoop(client, tools, planReinjectInterval+1).WithWorktree(wt).Run(context.Background(), "long task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	planIn := func(msgs []Msg) bool {
+		for _, m := range msgs {
+			if m.Role == "user" && strings.Contains(m.Content, "PLAN-STEP-XYZ") &&
+				strings.Contains(m.Content, "Current plan") {
+				return true
+			}
+		}
+		return false
+	}
+	// Step 1 (index 0): plan must NOT be re-injected.
+	if planIn(client.seen[0]) {
+		t.Errorf("plan was re-injected on step 1 — cadence must skip the first step: %+v", client.seen[0])
+	}
+	// The cadence step (index planReinjectInterval, i.e. step planReinjectInterval+1)
+	// must carry the re-injected plan.
+	if !planIn(client.seen[planReinjectInterval]) {
+		t.Errorf("plan was NOT re-injected at the cadence step %d: %+v", planReinjectInterval, client.seen[planReinjectInterval])
 	}
 }
 

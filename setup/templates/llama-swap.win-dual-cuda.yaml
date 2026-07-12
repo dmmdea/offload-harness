@@ -1,0 +1,70 @@
+# llama-swap.win-dual-cuda.yaml — offload-harness DUAL-GPU profile (configs #3/#4:
+# 5060 Ti + V100 32GB, and the +128GB Optane variant). Native Windows, CUDA.
+#
+# TWO models resident, NO shared exclusive swap group -> the architect/editor
+# two-tier mode runs with ZERO model swap:
+#   * gemma4-26b-a4b (architect) pinned to CUDA_VISIBLE_DEVICES=0, -ngl 99 (full GPU)
+#   * offload-e4b     (editor)    pinned to CUDA_VISIBLE_DEVICES=1, -ngl 99 (full GPU)
+# Research verdict: two-models-resident beats splitting one 26B across both cards
+# (cross-GPU per-token transfer latency); the second card hosts the editor.
+#
+# Serving invariants (grammar reliability — do NOT change): --jinja, no MTP,
+# reasoning off. Context size, KV type, flash-attn, and 26B MoE placement are
+# PROFILE-DRIVEN: install.ps1 (H2) substitutes the CTX / KV-K / KV-V / FLASH-ATTN
+# / MOE-26B tokens from profiles.json (dual-gpu -> 32K/q8_0/FA-on). No --swa-full.
+#
+# OPERATOR CONFIRMS (driver scope, not models): which physical card is device 0
+# vs 1 (nvidia-smi index order), and — for a heterogeneous sm_70 + sm_120 pair —
+# that llama.cpp is a multi-arch build carrying BOTH architectures (Task H4).
+# big_ram (config #4, 128GB+Optane): a 26B --cpu-moe fallback path can host a
+# SECOND 26B for extra ctx; install.ps1 emits that note when big_ram is set.
+healthCheckTimeout: 300
+logLevel: info
+
+macros:
+  common: >-
+    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
+    --jinja --reasoning off --port ${PORT} --host 127.0.0.1
+
+models:
+  # Editor tier (E4B) — device 1. Resident; the agent's default edit model.
+  offload-e4b:
+    aliases: [gemma4-e4b]
+    env: [CUDA_VISIBLE_DEVICES=1]
+    cmd: >-
+      __LLAMA_BIN__\llama-server.exe -m __MODELS__\gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf
+      -ngl 99 --parallel 1 ${common}
+    ttl: 0
+  # E2B fallback — device 1 (shares the editor card; only one of E4B/E2B is used).
+  gemma4-e2b:
+    env: [CUDA_VISIBLE_DEVICES=1]
+    cmd: >-
+      __LLAMA_BIN__\llama-server.exe -m __MODELS__\gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
+      -ngl 99 ${common}
+    ttl: 300
+  # Architect tier (26B-A4B) — device 0, full GPU (-ngl 99). Resident.
+  gemma4-26b-a4b:
+    env: [GGML_CUDA_DISABLE_GRAPHS=1, CUDA_VISIBLE_DEVICES=0]
+    cmd: >-
+      __LLAMA_BIN__\llama-server.exe -m __MODELS__\gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
+      __MOE_26B__ --parallel 1 ${common}
+    ttl: 0
+  # Embeddings — device 1 (small; shares the editor card).
+  embeddinggemma:
+    env: [CUDA_VISIBLE_DEVICES=1]
+    cmd: >-
+      __LLAMA_BIN__\llama-server.exe -m __MODELS__\embeddinggemma-300m-Q8_0.gguf
+      --embedding --pooling mean --ctx-size 2048 --parallel 4 --port ${PORT} --host 127.0.0.1
+    ttl: 600
+
+# Two NON-exclusive groups: neither unloads the other, so the architect (device 0)
+# and editor (device 1) stay resident together for zero-swap two-tier runs.
+groups:
+  architect:
+    swap: false
+    exclusive: false
+    members: [gemma4-26b-a4b]
+  editor:
+    swap: false
+    exclusive: false
+    members: [offload-e4b, gemma4-e2b, embeddinggemma]

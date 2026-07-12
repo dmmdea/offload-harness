@@ -1,14 +1,18 @@
 # llama-swap.win-vulkan.yaml — offload-harness family on the llama.cpp VULKAN backend
 # (native Windows; AMD Radeon incl. 780M/gfx1103, or any Vulkan GPU).
-# Serving invariants (grammar reliability — do NOT change): --jinja, f16 KV, no MTP,
-# reasoning off. MoE tier: full offload first; if the selftest hits allocation
-# failures on your machine, add --cpu-moe to the 26b cmd (experts stay in RAM).
+# Serving invariants (grammar reliability — do NOT change): --jinja, no MTP,
+# reasoning off. Context size, KV type, flash-attn, and the 26B MoE placement are
+# PROFILE-DRIVEN: install.ps1 (H2) substitutes the CTX / KV-K / KV-V / FLASH-ATTN
+# / MOE-26B tokens from setup/templates/profiles.json. amd-rdna3 renders 16K/f16/
+# FA-on CONSERVATIVELY (H3 may raise ctx or switch KV to q8_0 after the Vulkan
+# FA+q8 canary); amd-gcn renders 8K/f16/FA-off (weakest path). If the selftest
+# hits allocation failures, the 26B profile switches to cpu-moe (experts in RAM).
 healthCheckTimeout: 300
 logLevel: info
 
 macros:
   common: >-
-    --ctx-size 8192 --flash-attn on --cache-type-k f16 --cache-type-v f16
+    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
     --jinja --reasoning off --port ${PORT} --host 127.0.0.1
 
 models:
@@ -26,7 +30,7 @@ models:
   gemma4-26b-a4b:
     cmd: >-
       __LLAMA_BIN__\llama-server.exe -m __MODELS__\gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
-      -ngl 999 --parallel 1 ${common}
+      __MOE_26B__ --parallel 1 ${common}
     ttl: 300
   embeddinggemma:
     cmd: >-

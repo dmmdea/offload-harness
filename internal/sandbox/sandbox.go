@@ -37,6 +37,15 @@ type Spec struct {
 	ReadDirs         []string `json:"read_dirs"`         // extra read-only dirs (the system dirs below are always added)
 	ReadFiles        []string `json:"read_files"`        // specific read-only (+executable) files to grant, e.g. a static helper binary
 	ABIFloor         int      `json:"abi_floor"`         // minimum achieved Landlock ABI required, else fail-closed (>=1)
+
+	// AllowedExecutables is the base-name allowlist of programs the caged command
+	// may launch. WINDOWS ENFORCES it: before spawning, the resolved program's base
+	// name (case-insensitive, trailing ".exe" dropped) must be in this list, else
+	// Run returns Result{Refused:true} WITHOUT launching. The LINUX cage IGNORES it
+	// — there the OS-level containment (namespaces + Landlock + seccomp) is the
+	// boundary, not an executable name filter. An empty list on Windows refuses
+	// every command (fail-closed).
+	AllowedExecutables []string `json:"allowed_executables"`
 }
 
 // Result is the outcome of a caged run.

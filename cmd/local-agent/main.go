@@ -51,6 +51,18 @@ func splitObjective(args []string, valueFlags map[string]bool) (objective string
 	return objective, flags
 }
 
+// validateFlagCombo rejects mutually-exclusive flag combinations. --profile and
+// --two-tier conflict: two-tier builds its own architect/editor loops and sets
+// their role-appropriate toolsets itself, so a non-default --profile would be
+// silently ignored (redundant/conflicting). A default profile ("" or "general")
+// is a no-op and coexists fine. Returns nil when the combination is allowed.
+func validateFlagCombo(twoTier bool, profile string) error {
+	if twoTier && profile != "" && profile != "general" {
+		return fmt.Errorf("--profile and --two-tier are mutually exclusive: two-tier sets the architect/editor toolsets itself")
+	}
+	return nil
+}
+
 // multiFlag is a repeatable string flag (each --egress-host appends one value).
 type multiFlag []string
 
@@ -73,6 +85,7 @@ func main() {
 	base := fs.String("base", "", "OpenAI-compatible planner endpoint (default: harness endpoint)")
 	maxSteps := fs.Int("max-steps", 12, "hard step budget (owned in code, not the prompt)")
 	maxTokens := fs.Int("max-tokens", 4096, "planner max tokens per completion — must be large enough for the biggest tool-call argument (e.g. a full file's content) or the model's JSON gets cut off mid-string and the call fails")
+	ctxTokens := fs.Int("ctx-tokens", 16384, "served model context window (tokens) that transcript compaction budgets against — set it to match the tier's --ctx-size (the CUDA tier serves 16384). Default 16384; the derived INPUT budget is ctx-tokens - max-tokens - 512.")
 	maxSameTool := fs.Int("max-same-tool", 3, "cap on calls to any one tool name per run — the circuit breaker for a model that loops instead of progressing (e.g. repeated/reworded web_search calls). Negative disables the cap; 0 falls back to the built-in default (3).")
 	timeoutSec := fs.Int("timeout", 180, "per model call timeout (seconds)")
 	asJSON := fs.Bool("json", false, "print the full result JSON (transcript + telemetry)")
@@ -88,6 +101,7 @@ func main() {
 	var egressHosts multiFlag
 	fs.Var(&egressHosts, "egress-host", "allowlisted egress host for web_fetch (repeatable); bare host or *.host. Default: none (deny-all).")
 	allowShell := fs.Bool("allow-shell", false, "P4.6: enable run_shell inside the OS sandbox (Linux only; no network, FS-confined, syscall-limited). Default off.")
+	allowRun := fs.Bool("allow-run", false, "C7b: enable `run` — an allowlisted program run DIRECTLY (no shell) inside the OS sandbox (Linux AND Windows). The executable allowlist is the primary control. Default off.")
 	allowSearch := fs.Bool("allow-search", false, "enable web_search (DuckDuckGo, keyless; auto-allowlists the search host). Default off.")
 	allowGitHub := fs.Bool("allow-github", false, "enable GitHub tools (github_api/create_repo/upload_file). Token from $GITHUB_TOKEN, default repo from $GITHUB_REPO. Default off.")
 	queuePath := fs.String("queue", "", "P5b standalone: drain a JSONL goal queue UNATTENDED (the capability flags become the pre-authorization envelope) instead of a single objective. No resume — a re-run reprocesses the whole queue.")
@@ -97,19 +111,30 @@ func main() {
 	totalTimeoutSec := fs.Int("total-timeout", 0, "standalone: optional cumulative wall-clock budget for the WHOLE drain in seconds (0 = unbounded; --goal-timeout still bounds each goal)")
 	resume := fs.Bool("resume", false, "standalone: skip goals already completed in the checkpoint (and record completions) so a re-run RESUMES instead of reprocessing. Give each goal an explicit id (bare goals get positional ids that shift if the queue is reordered). Resume is goal-granular, not transactional: an interrupted goal re-runs in full over any partial side effects.")
 	checkpointPath := fs.String("checkpoint", "", "standalone: --resume checkpoint file (default: <traces>/_checkpoint.jsonl)")
+	profile := fs.String("profile", "general", "per-task tool profile: general (all tools, default) | edit | build | research | github. A profile NARROWS the advertised tools to a curated subset (better small-model tool selection) and adds a tuned prompt + few-shot exemplars; it can only narrow, never grant a tool the --allow-* flags didn't enable.")
+	twoTier := fs.Bool("two-tier", false, "architect/editor two-tier mode (aider one-shot handoff): a planning model drafts a complete plan, then a separate edit model executes it as its sole instruction. One cold model swap. Uses --architect-model / --editor-model. --allow-* flags gate the EDITOR's write tools.")
+	architectModel := fs.String("architect-model", "gemma4-26b-a4b", "two-tier: planning model id (read/search tools, no write)")
+	editorModel := fs.String("editor-model", "offload-e4b", "two-tier: edit model id (executes the plan with the write tools your --allow-* flags granted)")
 	serve := fs.Bool("serve", false, "run as an OpenAI-compatible HTTP server (for OpenWebUI etc.) instead of a single objective; each chat request runs the full agent loop")
 	listen := fs.String("listen", "127.0.0.1:18800", "address for --serve")
 	listenTrusted := fs.Bool("listen-trusted-network", false, "allow --listen to bind beyond loopback. The --serve endpoint is UNAUTHENTICATED and drives the agent's write/GitHub tools, so it is loopback-only by default; set this ONLY on a network you fully trust.")
 	objective, flags := splitObjective(os.Args[1:], map[string]bool{
-		"config": true, "root": true, "model": true, "base": true, "max-steps": true, "max-tokens": true, "max-same-tool": true, "timeout": true,
+		"config": true, "root": true, "model": true, "base": true, "max-steps": true, "max-tokens": true, "ctx-tokens": true, "max-same-tool": true, "timeout": true,
 		"mem-base": true, "mem-user": true, "worktree": true, "audit": true, "egress-host": true,
 		"queue": true, "ask-queue": true, "traces": true, "goal-timeout": true, "total-timeout": true, "checkpoint": true,
-		"listen": true,
+		"listen": true, "profile": true,
+		"architect-model": true, "editor-model": true,
 	})
 	_ = fs.Parse(flags)
 
 	if objective == "" && *queuePath == "" && !*serve {
 		fmt.Fprintln(os.Stderr, `usage: local-agent "<objective>" [flags]   |   local-agent --queue goals.jsonl [flags]   |   local-agent --serve [flags]`)
+		os.Exit(2)
+	}
+
+	// Reject mutually-exclusive flags before doing any work (I-3).
+	if err := validateFlagCombo(*twoTier, *profile); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(2)
 	}
 
@@ -135,7 +160,7 @@ func main() {
 	// The broker audit trail must live OUTSIDE any worktree; resolve a default
 	// only when a mutating capability is enabled.
 	auditP := *auditPath
-	if auditP == "" && (*allowWrite || *allowFetch || *allowShell) {
+	if auditP == "" && (*allowWrite || *allowFetch || *allowShell || *allowRun) {
 		if home, e := os.UserHomeDir(); e == nil {
 			auditP = filepath.Join(home, ".local-offload", "agent-audit.jsonl")
 		}
@@ -189,6 +214,7 @@ func main() {
 		AllowDelete:    *allowDelete,
 		AllowFetch:     *allowFetch,
 		AllowShell:     *allowShell,
+		AllowRun:       *allowRun,
 		AllowSearch:    *allowSearch,
 		AllowGitHub:    *allowGitHub,
 		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
@@ -208,6 +234,29 @@ func main() {
 		fmt.Fprintln(os.Stderr, "[local-agent] audit="+auditP)
 	}
 	loop := built.Loop
+	// Durable working memory (Task C5): AGENT.md workspace facts + .agent/plan.md
+	// scratchpad, rooted at the resolved worktree. built.Worktree is "" when no
+	// write/shell/github capability is enabled, in which case WithWorktree is a
+	// no-op (nothing loaded, update_plan not registered).
+	loop.WithWorktree(built.Worktree)
+	// Budget transcript compaction against the ACTUAL served window (default 16384,
+	// matching the CUDA tier's --ctx-size). Applied to the shared loop, so it takes
+	// effect identically across the one-shot, --serve, and --queue drive modes.
+	loop.WithContextTokens(*ctxTokens)
+
+	// Per-task tool profile (Task C6): applied AFTER WithWorktree so a
+	// worktree-registered tool (update_plan) is present for the edit/build/github
+	// subsets to keep. A profile can only NARROW the enabled tool set (safety
+	// invariant in WithProfile) + add a tuned prompt and few-shot exemplars.
+	prof, err := agent.LookupProfile(*profile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(2)
+	}
+	loop.WithProfile(prof)
+	if prof.Name != "general" {
+		fmt.Fprintf(os.Stderr, "[local-agent] profile=%s (tools narrowed to %d; %d exemplars)\n", prof.Name, len(prof.Tools), len(prof.Exemplars))
+	}
 
 	// Ctrl-C cancels cleanly — the loop checks ctx.Err() each iteration.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -257,6 +306,9 @@ func main() {
 		if built.ShellGranted {
 			envelope = append(envelope, "shell")
 		}
+		if built.RunGranted {
+			envelope = append(envelope, "run")
+		}
 		if err := runStandalone(dctx, loop, standaloneOpts{
 			queuePath:        *queuePath,
 			tracesDir:        tracesD,
@@ -272,6 +324,96 @@ func main() {
 		}); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
+		}
+		return
+	}
+
+	// Two-tier drive mode (Task C8): aider's architect/editor one-shot handoff.
+	// The planning model (architect) drafts a complete plan with read/search tools
+	// only; a separate edit model (editor) executes it with the write tools the
+	// --allow-* flags granted, seeing ONLY the plan (no history, not the original
+	// request). One cold model swap. Falls back to a single-model editor run if the
+	// architect produces no usable plan. This replaces the single-loop run above; it
+	// builds its OWN two loops rather than using `built`/`loop`.
+	if *twoTier {
+		// Architect: read/search only (NO write), the planning model, architect prompt.
+		archBuilt, aerr := agent.Build(agent.BuildConfig{
+			PlannerBase:          plannerBase,
+			Model:                *architectModel,
+			Timeout:              timeout,
+			MaxSteps:             *maxSteps,
+			MaxTokens:            *maxTokens,
+			MaxSameTool:          *maxSameTool,
+			ReadRoot:             absRoot,
+			Offload:              offload,
+			Unattended:           true,
+			AuditPath:            auditP,
+			AskQueuePath:         askQ,
+			AllowSearch:          *allowSearch, // read/search only; NO write for the architect
+			GitHubToken:          os.Getenv("GITHUB_TOKEN"),
+			GitHubRepo:           os.Getenv("GITHUB_REPO"),
+			EgressHosts:          egressHosts,
+			Memory:               mem,
+			SystemPromptOverride: agent.ArchitectPrompt,
+		})
+		if aerr != nil {
+			fmt.Fprintln(os.Stderr, "error: building architect:", aerr)
+			os.Exit(1)
+		}
+		// Editor: the edit model with the write tools the --allow-* flags granted,
+		// editor prompt. Same worktree/audit/queue as the normal single-loop build.
+		editBuilt, eerr := agent.Build(agent.BuildConfig{
+			PlannerBase:          plannerBase,
+			Model:                *editorModel,
+			Timeout:              timeout,
+			MaxSteps:             *maxSteps,
+			MaxTokens:            *maxTokens,
+			MaxSameTool:          *maxSameTool,
+			ReadRoot:             absRoot,
+			Offload:              offload,
+			Unattended:           true,
+			AuditPath:            auditP,
+			AskQueuePath:         askQ,
+			AllowWrite:           *allowWrite,
+			AllowOverwrite:       *allowOverwrite,
+			AllowDelete:          *allowDelete,
+			AllowFetch:           *allowFetch,
+			AllowShell:           *allowShell,
+			AllowRun:             *allowRun,
+			AllowSearch:          *allowSearch,
+			AllowGitHub:          *allowGitHub,
+			GitHubToken:          os.Getenv("GITHUB_TOKEN"),
+			GitHubRepo:           os.Getenv("GITHUB_REPO"),
+			Worktree:             *worktree,
+			EgressHosts:          egressHosts,
+			Memory:               mem,
+			SystemPromptOverride: agent.EditorPrompt,
+		})
+		if eerr != nil {
+			fmt.Fprintln(os.Stderr, "error: building editor:", eerr)
+			os.Exit(1)
+		}
+		for _, n := range editBuilt.Notes {
+			fmt.Fprintln(os.Stderr, "[local-agent] "+n)
+		}
+		architect := archBuilt.Loop.WithWorktree(archBuilt.Worktree).WithContextTokens(*ctxTokens)
+		editor := editBuilt.Loop.WithWorktree(editBuilt.Worktree).WithContextTokens(*ctxTokens)
+		fmt.Fprintf(os.Stderr, "[local-agent] two-tier: architect=%s editor=%s (one swap)\n", *architectModel, *editorModel)
+
+		res, err := agent.RunTwoTier(ctx, objective, architect, editor)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		if res.Fallback != agent.FallbackNone {
+			fmt.Fprintf(os.Stderr, "[local-agent] two-tier FELL BACK to a single editor run (%s)\n", res.Fallback)
+		}
+		if *asJSON {
+			b, _ := json.MarshalIndent(res, "", "  ")
+			fmt.Println(string(b))
+		} else {
+			fmt.Println(res.Output)
+			fmt.Fprintf(os.Stderr, "[local-agent] steps=%d stop=%s fallback=%q\n", res.Steps, res.StopReason, res.Fallback)
 		}
 		return
 	}

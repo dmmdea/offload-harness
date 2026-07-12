@@ -1,14 +1,20 @@
 # llama-swap.win-cuda.yaml — offload-harness family on the llama.cpp CUDA backend
 # (native Windows; NVIDIA GPU, verified on 8GB). Serving invariants (grammar
-# reliability — do NOT change): --jinja, f16 KV, no MTP, reasoning off.
-# MoE tier: the verified NVIDIA 8GB config keeps experts in RAM (--cpu-moe)
-# with the non-expert layers on the GPU (-ngl 999), plus GGML_CUDA_DISABLE_GRAPHS=1.
+# reliability — do NOT change): --jinja, --flash-attn on, no MTP, reasoning off.
+# Context size, KV cache type, flash-attn, and the 26B MoE placement are
+# PROFILE-DRIVEN: install.ps1 (H2) substitutes the CTX / KV-K / KV-V / FLASH-ATTN
+# / MOE-26B tokens in the common macro + 26B cmd from setup/templates/profiles.json,
+# keyed on the detected profile id. q8_0 V requires flash-attn on (satisfied
+# whenever a profile picks q8_0). Do NOT add --swa-full. MoE tier: the verified
+# NVIDIA 8GB config keeps experts in RAM (cpu-moe) with the non-expert layers on
+# the GPU; a 16GB+ profile places experts on the GPU (full offload) instead.
+# GGML_CUDA_DISABLE_GRAPHS=1 stays set for the 26B tier.
 healthCheckTimeout: 300
 logLevel: info
 
 macros:
   common: >-
-    --ctx-size 8192 --flash-attn on --cache-type-k f16 --cache-type-v f16
+    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
     --jinja --reasoning off --port ${PORT} --host 127.0.0.1
 
 models:
@@ -27,7 +33,7 @@ models:
     env: [GGML_CUDA_DISABLE_GRAPHS=1]
     cmd: >-
       __LLAMA_BIN__\llama-server.exe -m __MODELS__\gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
-      --cpu-moe -ngl 999 --parallel 1 ${common}
+      __MOE_26B__ --parallel 1 ${common}
     ttl: 300
   embeddinggemma:
     cmd: >-

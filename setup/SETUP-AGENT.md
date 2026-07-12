@@ -53,31 +53,81 @@ pwsh -NoProfile -File setup\detect.ps1     # or: powershell.exe -NoProfile -File
 ```
 
 The last stdout line is JSON. Fields: `os`, `gpu_vendor` (`amd|nvidia|none`), `gpu_name`,
-`vram_dedicated_gb`, `ram_gb`, `disk_free_gb`, `backend` (`vulkan|cuda|cpu`), `warnings[]`.
+`gpu_arch` (`blackwell|ampere|ada|volta|rdna3|gcn|other|none`), `gpu_count`, `vram_dedicated_gb`,
+`ram_gb`, `ram_tier` (`high|mid|low|min`), `disk_free_gb`, `backend` (`vulkan|cuda|cpu`),
+**`profile`** (one of the arch-class ids in the matrix below), `big_ram`, `warnings[]`.
+
+The **`profile`** is the load-bearing new field: `install.ps1` keys the serving template + params
+(context, KV type, 26B placement) off it, and `selftest.ps1` measures against it. It is chosen from
+vendor + arch + VRAM band + GPU count + RAM tier (a heterogeneous NVIDIA pair → `dual-gpu`; RAM ≥
+~56 GB unlocks the 26B via `--cpu-moe`). An unrecognized NVIDIA card falls back to an `ampere-*` band
+by VRAM and **warns** — verify the template fits before relying on it.
 
 Expected shapes:
 
 ```json
-// NVIDIA box
-{"os":"windows","gpu_vendor":"nvidia","gpu_name":"NVIDIA GeForce RTX 3070 ...","backend":"cuda", ...}
+// NVIDIA box (3070 laptop → profile ampere-8)
+{"os":"windows","gpu_vendor":"nvidia","gpu_name":"NVIDIA GeForce RTX 3070 ...","gpu_arch":"ampere","backend":"cuda","profile":"ampere-8","ram_tier":"low", ...}
+// Blackwell box (5060 Ti → profile blackwell-16 — see the Blackwell note below)
+{"os":"windows","gpu_vendor":"nvidia","gpu_name":"NVIDIA GeForce RTX 5060 Ti","gpu_arch":"blackwell","backend":"cuda","profile":"blackwell-16", ...}
 // AMD box (RDNA3 iGPU — this is the intended AMD path)
-{"os":"windows","gpu_vendor":"amd","gpu_name":"AMD Radeon(TM) 780M Graphics","backend":"vulkan","warnings":["AMD path uses the llama.cpp VULKAN backend ...","Keep the AMD Adrenalin driver CURRENT ..."]}
+{"os":"windows","gpu_vendor":"amd","gpu_name":"AMD Radeon(TM) 780M Graphics","gpu_arch":"rdna3","backend":"vulkan","profile":"amd-rdna3","warnings":["AMD path uses the llama.cpp VULKAN backend ...","Keep the AMD Adrenalin driver CURRENT ..."]}
 // No GPU
-{"os":"windows","gpu_vendor":"none","backend":"cpu", ...}
+{"os":"windows","gpu_vendor":"none","backend":"cpu","profile":"cpu", ...}
 ```
 
 **Decision:**
 
 | Signal | Action |
 |---|---|
-| exit 0, `backend` present | Proceed to Step 1. Remember `backend`. |
+| exit 0, `backend` + `profile` present | Proceed to Step 1. Remember `backend` and `profile`. |
+| `profile` is `blackwell-16` or `blackwell-8` | **Blackwell (sm_120).** The stock Windows CUDA prebuilt does **not** work — see [Blackwell note](#blackwell-sm_120--required-cuda-128-build) below. This is REQUIRED before those cards serve. |
 | exit 1 + stderr `Only NGB free ... need >=25GB` | **STOP.** `disk_free_gb < 25` is a hard blocker. Ask the human to free disk on the install-target drive, then re-run. |
 | exit 1 + stderr `targets Windows` | Wrong OS. This runbook is Windows-only. Stop. |
 | `warnings[]` contains a `RAM ...< 32GB` note | Note it. You will set `OFFLOAD_WITH_FAMILY=0` in Step 1 (E4B workhorse only). |
+| `warnings[]` contains `unrecognized NVIDIA GPU ... arch=other` | The card matched no arch regex and was banded into `ampere-*` by VRAM. Note it; verify the served template fits before relying on it. |
 | `gpu_vendor:"amd"` warnings about ROCm/Adrenalin | Informational. Do NOT act on the driver note yourself — see Hard rule 3. |
 
 `vram_dedicated_gb` reads small on an iGPU (a BIOS carve-out); that is **expected** — Vulkan uses
 shared system memory, not the carve-out. Do not treat a small iGPU VRAM number as a blocker.
+
+---
+
+## The hardware-profile matrix (what each profile serves)
+
+`detect.ps1` emits one `profile`; `install.ps1` renders the serving template from it. These are the
+projected per-profile serving choices — `selftest.ps1` measures and refines them on the real box
+(trust the receipt's `profile_measure.tuned` over this table when they differ).
+
+| Profile | Config(s) | Resident/default tier | Ctx | KV | 26B-A4B |
+|---|---|---|---|---|---|
+| `blackwell-16` | #1 (5060 Ti 16 GB) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU — **needs the Blackwell build** |
+| `volta-16` | #2 (V100 16 GB) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU |
+| `ampere-16` | 3090-class ≥12 GB (defensive) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU |
+| `dual-gpu` | #3/#4 (5060 Ti + V100 32 GB) | 26B architect + E4B editor, both resident | 32K | q8_0 | resident, **zero-swap** two-tier |
+| `ampere-8` | #5/#6 (3070 8 GB; +64 GB) | `offload-e4b` | 16K | q8_0 | `--cpu-moe` if RAM ≥ ~56 GB, else dropped |
+| `blackwell-8` | #8/#9 (5060 8 GB; +64 GB) | `offload-e4b` | 16K | q8_0 | `--cpu-moe` if RAM ≥ ~56 GB — **needs the Blackwell build** |
+| `amd-rdna3` | #7 (780M + 64 GB, Vulkan) | `offload-e4b` | 16K | f16 (safe) | `--cpu-moe` very slow, else dropped |
+| `ampere-6` | #10/#11 (3050 6 GB) | `gemma4-e2b` | 16K | q8_0 (**mandatory**) | dropped |
+| `amd-gcn` | #12 (Vega 7 + 32 GB, Vulkan) | `gemma4-e2b` | 8K | f16, FA off | dropped |
+| `cpu` | no GPU | `offload-e4b` (CPU) | 8K | f16, FA off | `--cpu-moe` if RAM ≥ ~56 GB, else dropped |
+
+### Blackwell (sm_120) — REQUIRED CUDA-12.8 build
+
+**If `detect.ps1` reports `gpu_arch:"blackwell"` (RTX 50-series: 5060 / 5060 Ti / 5090 →
+profile `blackwell-16` / `blackwell-8`), the card will NOT serve on either stock Windows CUDA
+prebuilt.** This is a mandatory workstation build step (installer Task H4), not optional:
+
+- The **CUDA-12.4** prebuilt has **no sm_120** — Blackwell is unsupported, it won't run.
+- The **CUDA-13.x** prebuilt **segfaults the Blackwell MMQ kernel** and silently falls back to a
+  cuBLAS FP16 path that is roughly **5.6× slower** (measured elsewhere: ~772 vs ~5611 t/s pp512).
+
+Blackwell needs **CUDA Toolkit 12.8 + driver R570+**, built with
+`-DCMAKE_CUDA_ARCHITECTURES=120` (a heterogeneous `dual-gpu` pair with a V100 needs a multi-arch
+`sm_70 + sm_120` build). Runtime env: `CUDA_VISIBLE_DEVICES=0`, `CUDA_MODULE_LOADING=LAZY`. Note that
+standard Q4_K GGUFs get **no** FP4 tensor-core speedup (NVFP4 MMQ only helps NVFP4-format models) —
+do not expect an FP4 win. **Flag this to the human as a required prerequisite before those cards
+work; do not substitute a stock prebuilt (Hard rule 2).**
 
 ---
 
@@ -95,6 +145,16 @@ pwsh -NoProfile -File setup\install.ps1
 `OK` / `SKIP`. **Duration:** the model pull dominates — expect **several minutes to ~30 min** on a
 normal link for the full family (~21 GB), less for `OFFLOAD_WITH_FAMILY=0`. Progress lines print at
 ≤60 s intervals (bytes/percent), so a quiet gap is not a hang.
+
+**Profile-driven serving (H2).** Install reads the detected `profile` + `ram_tier` and renders the
+llama-swap yaml from `setup/templates/profiles.json` — substituting the profile's `--ctx-size`, KV
+type, flash-attn, and 26B MoE placement (`gpu` / `--cpu-moe` / dropped) into the backend template
+(`dual-gpu` renders the `win-dual-cuda` two-model-resident template). It drops the 26B entirely when
+`ram_tier` is `low`/`min` (no RAM path for `--cpu-moe`). The install step prints the resolved
+`profile | ram_tier | ctx | kv | 26b` and writes `profile`, `ram_tier`, `big_ram`, and
+`agent_ctx_tokens` into `installed.json`. Run the agent with `-model <resident tier>` and
+`-ctx-tokens <agent_ctx_tokens>` — install prints the exact command. An unknown/absent profile falls
+back to the backend template's baked-in defaults.
 
 Last stdout line: `{"installed":true,"backend":"...","home":"...","next":"run selftest.ps1"}`.
 
@@ -143,9 +203,24 @@ Receipt schema (real fields):
 {"schema":1,"backend":"cuda","gpu":"NVIDIA GeForce RTX 3070 ...","driver_version":"32.0.15.xxxx",
  "tiers":[{"id":"offload-e4b","cold_load_s":6.2,"tok_s":81.4,"status":"pass"}],
  "canary":{"depth":7000,"status":"pass","detail":"generated N tokens at depth ~7000 ..."},
- "remediations":[],"harness_smoke":"ok","agent_smoke":"ok","verdict":"pass",
- "proves":[...],"does_not_prove":[...]}
+ "remediations":[],"harness_smoke":"ok","agent_smoke":"ok",
+ "profile_measure":{"profile":"ampere-8","profile_src":"installed.json","ram_tier":"low",
+   "projected":{"ctx_size":16384,"kv_type":"q8_0","moe_26b":"cpu_moe","resident_tier":"offload-e4b"},
+   "ctx":{"projected_ctx":16384,"measured_ctx":16384,"measured_ctx_ok":true,"downshifted":false,"src":"measured"},
+   "moe26b":{"applicable":false,"src":"skipped"},"cold_swap":[{"tier":"offload-e4b","cold_swap_s":6.2}],
+   "tuned":{"ctx_size":16384,"kv_type":"q8_0","source":"measured"}},
+ "verdict":"pass","proves":[...],"does_not_prove":[...]}
 ```
+
+**`profile_measure` (H3 — measured-vs-projected).** selftest reads the active `profile` (from
+`installed.json`), pulls the PROJECTED serving params (`profiles.json`), then MEASURES on THIS box:
+does the projected ctx actually load without OOM (`ctx.measured_ctx_ok`, halving + retry if it
+OOMs → `downshifted:true`); the 26B `--cpu-moe` decode tok/s where applicable (`moe26b`); per-tier
+cold-swap latency (`cold_swap[]`); and whether q8_0 KV held. The **`tuned`** block is the payload:
+`source:"measured"` means at least one value was measured on-device and should be applied OVER the
+projected profile; `source:"projected"` means nothing on this host could measure it (recorded
+honestly, never faked). Dual-GPU / Optane checks are marked `not-applicable-on-this-host` /
+`measure-on-target` on a single-GPU box.
 
 **Verdict decision table:**
 

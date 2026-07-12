@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -157,7 +158,49 @@ func TestBuildShellFailClosed(t *testing.T) {
 	if toolNames(res.Tools)["run_shell"] != res.ShellGranted {
 		t.Errorf("run_shell presence (%v) must match ShellGranted (%v)", toolNames(res.Tools)["run_shell"], res.ShellGranted)
 	}
-	if !res.ShellGranted && !strings.Contains(strings.Join(res.Notes, " | "), "NOT granted") {
-		t.Errorf("a fail-closed shell must note why it was not granted; got %v", res.Notes)
+	notes := strings.Join(res.Notes, " | ")
+	if runtime.GOOS == "linux" {
+		// On Linux run_shell is granted only if the strong cage is available; when it
+		// is not, a fail-closed note must explain why.
+		if !res.ShellGranted && !strings.Contains(notes, "NOT granted") {
+			t.Errorf("a fail-closed shell must note why it was not granted; got %v", res.Notes)
+		}
+	} else {
+		// run_shell is LINUX-ONLY: on a non-Linux host it must NOT be granted, and the
+		// note must steer the operator to --allow-run.
+		if res.ShellGranted {
+			t.Errorf("run_shell must be Linux-only; got ShellGranted=true on %s", runtime.GOOS)
+		}
+		if !strings.Contains(notes, "Linux-only") || !strings.Contains(notes, "--allow-run") {
+			t.Errorf("non-Linux shell request should note run_shell is Linux-only and steer to --allow-run; got %v", res.Notes)
+		}
+	}
+}
+
+// TestBuildRunGranted: --allow-run grants the `run` tool on both Linux and Windows
+// whenever the OS sandbox is available, sets RunGranted, and notes it. On this box
+// (Windows) sandbox.Available() is true, so run must be granted.
+func TestBuildRunGranted(t *testing.T) {
+	wt := t.TempDir()
+	cfg := baseBuild()
+	cfg.ReadRoot, cfg.Worktree = wt, wt
+	cfg.AllowRun = true
+	cfg.AuditPath = filepath.Join(t.TempDir(), "audit.jsonl")
+	res, err := Build(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// run is registered IFF RunGranted (fail-closed if the OS sandbox is unavailable).
+	if toolNames(res.Tools)["run"] != res.RunGranted {
+		t.Errorf("run presence (%v) must match RunGranted (%v)", toolNames(res.Tools)["run"], res.RunGranted)
+	}
+	if res.RunGranted {
+		// run must NOT drag in run_shell.
+		if toolNames(res.Tools)["run_shell"] {
+			t.Errorf("--allow-run must not grant run_shell")
+		}
+		if !strings.Contains(strings.Join(res.Notes, " | "), "run ON") {
+			t.Errorf("a granted runner should be noted; got %v", res.Notes)
+		}
 	}
 }

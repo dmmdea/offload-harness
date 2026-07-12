@@ -72,6 +72,11 @@ type Result struct {
 	Steps      int    // model turns taken
 	StopReason string // "done" (model finished) | "budget" (hit maxSteps) | "error"
 	Transcript []Msg
+
+	// Fallback is set only by RunTwoTier (two-tier drive): it records whether the
+	// architect/editor plan-then-execute path ran (FallbackNone) or a fallback to a
+	// single-model editor run occurred, and why. Empty on ordinary single-loop runs.
+	Fallback FallbackReason
 }
 
 // Loop runs the canonical agent loop over a fixed tool set.
@@ -87,6 +92,8 @@ type Loop struct {
 	toolResultCap int // max chars of ONE tool result kept in the transcript (0 => derive from window)
 	system        string
 	mem           Memory
+	worktree      string // RW worktree root for durable working memory (AGENT.md + .agent/plan.md); "" disables it
+	exemplars     []Msg  // trusted few-shot messages injected after system, before recall/objective (Task C6)
 }
 
 // defaultCtxTokens is the model context window the loop budgets against. It
@@ -143,10 +150,64 @@ func (l *Loop) WithSystem(s string) *Loop { l.system = s; return l }
 // WithMemory attaches a memory layer: the loop recalls relevant context before
 // planning and persists the run outcome when it finishes. nil = no memory.
 func (l *Loop) WithMemory(m Memory) *Loop { l.mem = m; return l }
+
+// WithWorktree gives the loop durable per-workspace working memory rooted at
+// root (Task C5): it loads <root>/AGENT.md once at Run start (fenced as
+// untrusted data), registers the update_plan tool (writes <root>/.agent/plan.md,
+// os.Root-confined), and re-injects the plan on a cadence. An empty root leaves
+// all of that off. Registration of update_plan happens here so the tool appears
+// in the advertised spec set. Safe to call after NewLoop.
+func (l *Loop) WithWorktree(root string) *Loop {
+	l.worktree = root
+	if root != "" {
+		if _, exists := l.tools["update_plan"]; !exists {
+			t := updatePlanTool(root)
+			l.tools[t.Name] = t
+			l.specs = append(l.specs, t.ToolSpec)
+		}
+	}
+	return l
+}
 func (l *Loop) WithMaxTokens(n int) *Loop {
 	if n > 0 {
 		l.maxTokens = n
 	}
+	return l
+}
+
+// WithProfile applies a per-task Profile (Task C6): it NARROWS the advertised
+// tools to the INTERSECTION of p.Tools with what is already enabled, optionally
+// overrides the system prompt, and stores the profile's few-shot exemplars for
+// injection in Run. SAFETY INVARIANT: a profile can only narrow — it can NEVER
+// grant a tool the capability flags didn't enable (a name in p.Tools that is not
+// already present is silently ignored), so selecting a profile can never widen
+// the agent's power beyond what --allow-* granted. An empty p.Tools (the
+// "general" default) leaves the tool set untouched. Safe to call after NewLoop
+// and WithWorktree (call it AFTER so a worktree-registered tool like update_plan
+// is present to be kept).
+func (l *Loop) WithProfile(p Profile) *Loop {
+	if len(p.Tools) > 0 {
+		keep := make(map[string]bool, len(p.Tools))
+		for _, n := range p.Tools {
+			keep[n] = true
+		}
+		newTools := make(map[string]Tool, len(p.Tools))
+		newSpecs := make([]ToolSpec, 0, len(p.Tools))
+		// Walk l.specs (not the profile list) so ordering is preserved and only
+		// tools ACTUALLY present survive — the narrow-only invariant.
+		for _, s := range l.specs {
+			if keep[s.Name] {
+				newSpecs = append(newSpecs, s)
+				newTools[s.Name] = l.tools[s.Name]
+			}
+		}
+		l.specs = newSpecs
+		l.tools = newTools
+	}
+	if p.System != "" {
+		l.system = p.System
+	}
+	l.exemplars = p.Exemplars
 	return l
 }
 
@@ -217,6 +278,12 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 	if l.system != "" {
 		msgs = append(msgs, Msg{Role: "system", Content: l.system})
 	}
+	// Few-shot exemplars (Task C6) go RIGHT after the system message and BEFORE the
+	// untrusted recall/AGENT.md blocks and the objective. They are TRUSTED,
+	// author-provided guidance (a curated worked tool call for this task shape), so
+	// unlike recall they sit high in the transcript; keeping them adjacent to the
+	// system message also makes system+exemplars a stable prefix (cache-friendly).
+	msgs = append(msgs, l.exemplars...)
 	// Recall is best-effort (a memory miss/outage must not block the run) and goes
 	// into a USER message, NOT system: recalled text is untrusted, poisonable data
 	// (anything that ever landed in a readable namespace), so it must not sit in the
@@ -237,7 +304,23 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			msgs = append(msgs, Msg{Role: "user", Content: b.String()})
 		}
 	}
+	// Durable workspace facts (Task C5): AGENT.md is loaded ONCE here, fenced as
+	// UNTRUSTED DATA exactly like recall (same threat model — a file on disk any
+	// process could have written), so it goes into a USER message, never system.
+	// Absent/empty/no-worktree => nothing added.
+	if m, ok := loadAgentMD(l.worktree); ok {
+		msgs = append(msgs, m)
+	}
 	msgs = append(msgs, Msg{Role: "user", Content: objective})
+
+	// preambleLen is everything before the first model turn: system + profile
+	// exemplars + recall + AGENT.md + objective. Compaction protects [0,preambleLen)
+	// contiguously so the OBJECTIVE is never dropped — critical once profile
+	// exemplars precede it (the objective is NOT the "first user message" then).
+	// The preamble is bounded (recall/AGENT.md capped, exemplars a small fixed set);
+	// if it alone exceeds budget, compaction can't shrink it and the run errors
+	// honestly on the next Chat rather than silently dropping the objective.
+	preambleLen := len(msgs)
 
 	// exactCalls counts occurrences of one exact (name, args) pair; sameNameCalls
 	// counts occurrences of a tool NAME regardless of args. disabledTools holds
@@ -265,13 +348,23 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				}
 			}
 		}
+		// Plan recitation (Task C5, Manus recitation): every planReinjectInterval
+		// steps — NOT step 1, NOT every step (per-step rewrite wastes ~1/3 of
+		// actions) — append the current .agent/plan.md as a fresh USER message so
+		// the plan sits near the context tail and a long task doesn't lose it.
+		// Appending here (before compaction) means it is budgeted like any message.
+		if step > 0 && step%planReinjectInterval == 0 {
+			if m, ok := loadPlan(l.worktree); ok {
+				msgs = append(msgs, m)
+			}
+		}
 		// Proactive compaction: keep the transcript within the input budget so a
 		// multi-step task does not overflow the model's small window and abort.
 		// Under budget, compact is a byte-for-byte no-op (prefix stability =>
 		// the server's KV cache stays warm on the happy path).
 		budget := l.inputBudget()
 		if estimateTokens(msgs) > budget {
-			msgs = compact(msgs, budget, l.keepRecent)
+			msgs = compact(msgs, budget, l.keepRecent, preambleLen)
 		}
 		comp, err := l.client.Chat(ctx, msgs, specs, l.maxTokens)
 		if err != nil {
@@ -282,7 +375,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			// non-overflow error, or a still-overflowing retry, is returned as
 			// before.
 			if isContextOverflowErr(err) {
-				msgs = compact(msgs, budget/2, l.keepRecent/2)
+				msgs = compact(msgs, budget/2, l.keepRecent/2, preambleLen)
 				comp, err = l.client.Chat(ctx, msgs, specs, l.maxTokens)
 			}
 			if err != nil {

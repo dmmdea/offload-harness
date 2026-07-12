@@ -234,12 +234,27 @@ local-agent --root . --base http://127.0.0.1:11436 --max-steps 4 "list the files
 
 | Flag | Grants |
 |---|---|
-| *(default)* | `list_dir`, `read_file`, in-process `offload_*` — **no network, no writes**. |
+| *(default)* | `list_dir`, `read_file` (ranged), `search_files`, `summarize_file`, in-process `offload_*` — **no network, no writes**. |
 | `--allow-write` (+ `--allow-overwrite` / `--allow-delete`) | `write_file` / `edit_file` / `delete_file`, **worktree-scoped**. |
 | `--allow-fetch` + `--egress-host` | `web_fetch`, restricted to an **egress allowlist** (deny-all otherwise). |
 | `--allow-search` | `web_search` (DuckDuckGo, keyless). |
-| `--allow-shell` | `run_shell` in an **OS sandbox** (Linux only; no network, FS-confined, syscall-limited). |
+| `--allow-run` | `run` — an **allowlisted program run directly** (no shell) inside the OS sandbox (Linux **and** Windows). See [Security](#security). |
+| `--allow-shell` | `run_shell` in an **OS sandbox** (**Linux only**; no network, FS-confined, syscall-limited). |
 | `--allow-github` | `github_api` / `create_repo` / `upload_file`; token from `$GITHUB_TOKEN`. |
+
+**Built-in tools for reading code** (available by default, read-only):
+
+- **`search_files`** — a ripgrep-style regex search over the worktree (`os.Root`-confined). Output is grouped per file with line numbers and **hard-capped at 100 matches**; a `mode: "files"` variant returns only the paths that contain a match, and a `glob`/`path` narrows the search. It lets a small model *find* code by matching lines instead of reading whole files. Uses `rg` when it's on PATH, else a confined Go walk — identical output either way.
+- **Ranged `read_file`** — optional `offset` (1-indexed start line) + `limit` (lines, default 2000) read just a range as `cat -n`-numbered lines, with a continuation hint (`showing lines X–Y of TOTAL; use offset=Z to continue`) so the model can page a large file. A 256 KB byte backstop still applies.
+- **`summarize_file`** — digests a workspace file on the free local cascade **without pulling its bytes into the transcript** (the file-as-external-memory pattern). On an offload failure it returns a marker telling the model to `read_file` ranged instead, rather than erroring.
+
+**Working memory** (Task C5): if `<worktree>/AGENT.md` exists it is loaded **once** at the start of a run as project facts/conventions (fenced as untrusted data). The `update_plan` tool writes a terse checklist to `<worktree>/.agent/plan.md`, which the loop **re-injects near the context tail every few steps** (not every step) so the plan survives a long task without wasting turns rewriting it. Both paths are fixed and `os.Root`-confined to the worktree.
+
+**Tool profiles** (`--profile`, Task C6): a profile narrows the advertised tools to a curated subset and adds a tuned system prompt + a couple of worked few-shot exemplars — small local models pick tools better with fewer advertised. Ship profiles: `general` (default, all enabled tools), `edit`, `build` (adds the runner), `research` (web + `summarize_file`), `github`. A profile can only **narrow** the enabled set — it can never grant a tool the `--allow-*` flags didn't turn on.
+
+**Two-tier mode** (`--two-tier`, Task C8): an architect/editor split following aider's one-shot handoff. The planning model (`--architect-model`, default `gemma4-26b-a4b`) drafts one complete, standalone plan using read/search tools only; a separate edit model (`--editor-model`, default `offload-e4b`) then executes that plan as its **sole** instruction — it never sees the original request or any history. On a single GPU this is exactly one cold model swap (plan-once, not per-step alternation). A degenerate/empty plan falls back to a single-model run of the original objective. `--two-tier` and `--profile` are **mutually exclusive** (two-tier sets the architect/editor toolsets itself).
+
+**Context & compaction.** `--ctx-tokens` (default **16384**) tells the loop the served window so transcript compaction budgets against it (derived input budget = `ctx-tokens − max-tokens − 512`); set it to match the tier's served `--ctx-size`. The loop resends the full transcript each step, so when it would overflow, compaction keeps the protected preamble (system + exemplars + AGENT.md + objective) and recent turns, elides older tool-result bodies to markers, then drops whole older turns as intact assistant↔tool pairs. Every tool result is also centrally capped.
 
 **Policy broker & confinement.** A single deny→ask→allow broker is the only chokepoint to any tool,
 with an audit trail written **outside** the worktree (`~/.local-offload/agent-audit.jsonl`) so a run
@@ -469,7 +484,22 @@ tool, which sends only to NVIDIA hosts and only when you set `$NVIDIA_API_KEY`.
 The **coding agent** (`local-agent`) is designed **safe-by-default** for a model driving real tools:
 
 - **Every capability is off by default.** All `-allow-*` flags (`write`, `overwrite`, `delete`,
-  `fetch`, `search`, `shell`, `github`) start OFF — the agent is read-only until you opt in.
+  `fetch`, `search`, `run`, `shell`, `github`) start OFF — the agent is read-only until you opt in.
+- **The runner (`--allow-run`) — honest posture.** The `run` tool is **OFF by default**. It runs an
+  **allowlisted program directly, with no shell** (`Argv = [command, args…]`, never `/bin/sh -c`), so
+  the executable allowlist (`go`, `gofmt`, `python`, `python3`, `pytest`, `npm`, `node`, `cargo`,
+  `git`) is the real control; the command must be a **bare name** that resolves on the trusted PATH
+  (a worktree-planted `go.exe` is refused). Every command is broker-gated and audited.
+  - **On Windows** the child is confined by a **Job Object** (kill-on-close, an active-process limit,
+    a per-process memory cap, and a wall-clock timeout) and a **low-integrity token**: the worktree is
+    *temporarily* relabeled low-integrity for the run (so the child can write it) and **reverted
+    afterward**, and writes outside the worktree are blocked by Mandatory Integrity Control. **But
+    reads and network are NOT contained on native Windows** — the low-IL token restricts writes, not
+    reads or sockets — so the Windows cage is a **weaker boundary than Linux**. This matches every
+    shipping tool's stance on native Windows; an AppContainer network-deny layer is future work.
+  - **On Linux** `run` (and `run_shell`, `--allow-shell`, **Linux only**) route through the Landlock +
+    seccomp + user-namespace OS cage: no network, filesystem confined to the worktree, syscalls
+    limited.
 - **Prompt-injection defenses.** Untrusted web content pulled by `web_fetch` is **fenced** before it
   reaches the planner, and fetch is **egress-allowlisted** (deny-all unless you name hosts with
   `--egress-host`), so injected instructions can't redirect the agent to arbitrary endpoints.

@@ -1,6 +1,215 @@
 # setup/detect.ps1 — hardware/OS detection for the offload-harness installer.
 # Prints human-readable findings, then a FINAL machine-readable JSON line.
 # Exit 0 = a viable backend exists; exit 1 = hard blocker (explained on stderr).
+#
+# H1 (arch-class matrix): in addition to the base verdict this now emits
+#   gpu_arch  — blackwell|ampere|ada|volta|rdna3|gcn|other|none  (name-regex match)
+#   gpu_count — number of discrete NVIDIA+AMD GPUs (Intel iGPUs excluded)
+#   profile   — one of the arch-class ids the installer (H2) keys a template off
+#   ram_tier  — high|mid|low|min  (drives the 26B --cpu-moe decision)
+# The full 12-config matrix lives in
+#   docs/superpowers/plans/2026-07-11-agent-capabilities-and-hardware-matrix.md
+#
+# Run modes:
+#   detect.ps1            -> normal detection, JSON on the last line, exit 0/1
+#   detect.ps1 -SelfTest  -> run the classifier self-checks, print PASS/FAIL,
+#                            exit 0 all-pass / 1 any-fail. No hardware detection.
+[CmdletBinding()]
+param([switch]$SelfTest)
+
+# ---------------------------------------------------------------------------
+# Classification helpers (pure functions — no hardware access, so they are
+# unit-testable via -SelfTest and by setup/detect.tests.ps1).
+# ---------------------------------------------------------------------------
+
+# Map a raw GPU name to an arch class. Case-insensitive regex rules; first hit wins.
+# Rules (documented per the matrix's config list):
+#   blackwell : RTX 50-series (5060 / 5060 Ti / 5090 / any "RTX 50xx" / "RTX 50").
+#   ada       : RTX 40-series (4060 / 4090 / any "RTX 40xx").
+#   ampere    : RTX 30-series (3050 / 3070 / 3080 / 3090 / any "RTX 30xx").
+#   volta     : Tesla V100 / bare "V100".
+#   rdna3     : AMD RDNA3 — Radeon 780M/760M iGPU and 7xxx discrete (RX 7900, etc.).
+#   gcn       : older AMD — Vega (e.g. "Vega 7" iGPU) / GCN-era parts.
+#   other     : a GPU we recognise as NVIDIA/AMD but not a class above.
+#   none      : empty / no GPU name.
+function Get-GpuArch {
+  param([string]$Name)
+  if ([string]::IsNullOrWhiteSpace($Name)) { return 'none' }
+  # NVIDIA RTX generations — match the 4-digit model so "RTX 3070" -> ampere.
+  if ($Name -imatch 'RTX\s*50\d{2}' -or $Name -imatch 'RTX\s*50\b') { return 'blackwell' }
+  if ($Name -imatch 'RTX\s*40\d{2}' -or $Name -imatch 'RTX\s*40\b') { return 'ada' }
+  if ($Name -imatch 'RTX\s*30\d{2}' -or $Name -imatch 'RTX\s*30\b') { return 'ampere' }
+  # Tesla / data-center Volta.
+  if ($Name -imatch '\bV100\b') { return 'volta' }
+  # AMD RDNA3: 780M/760M iGPU (Phoenix) and 7000-series discrete.
+  if ($Name -imatch '\b7\d{2}M\b' -or $Name -imatch 'RX\s*7\d{3}' -or $Name -imatch 'RDNA\s*3') { return 'rdna3' }
+  # AMD GCN / Vega (older iGPU + discrete). "Vega 7" is a Ryzen APU iGPU.
+  if ($Name -imatch '\bVega\b' -or $Name -imatch '\bGCN\b') { return 'gcn' }
+  # Recognised vendor but unclassified generation.
+  if ($Name -imatch 'NVIDIA|GeForce|Quadro|Tesla|AMD|Radeon') { return 'other' }
+  return 'other'
+}
+
+# Decide whether an NVIDIA card fell through to the VRAM-banded ampere default
+# without being recognised by any arch regex. When arch=other AND vendor=nvidia,
+# Get-Profile assigns an ampere-16/-8/-6 profile purely by VRAM band with no
+# other signal, so the operator should be warned the card was unidentified.
+# Returns the warning string, or $null when no warning is warranted. Pure fn.
+function Get-UnrecognizedNvidiaWarning {
+  param(
+    [string]$Vendor,      # nvidia|amd|none
+    [string]$GpuArch,     # blackwell|ampere|ada|volta|rdna3|gcn|other|none
+    [string]$GpuName,
+    [string]$ProfileId
+  )
+  if ($Vendor -eq 'nvidia' -and $GpuArch -eq 'other') {
+    return "unrecognized NVIDIA GPU '$GpuName' (arch=other) - using profile '$ProfileId' by VRAM band; verify the serving template fits before relying on it."
+  }
+  return $null
+}
+
+# Map RAM size to a tier. >=120 high (128GB config), >=56 mid (64GB configs
+# unlock 26B via --cpu-moe), >=28 low (32GB), else min (<32GB warns already).
+function Get-RamTier {
+  param([int]$RamGb)
+  if ($RamGb -ge 120) { return 'high' }
+  if ($RamGb -ge 56)  { return 'mid' }
+  if ($RamGb -ge 28)  { return 'low' }
+  return 'min'
+}
+
+# Choose the arch-class profile id from (vendor, arch, vram, gpu_count, ram).
+# Returns @{ profile=<id>; big_ram=<bool> }. big_ram is only meaningful for the
+# dual-gpu profile (config #4 = the 128GB Optane variant) — detect cannot see the
+# Optane drive, so we approximate config-4 by RAM>=120 on a dual-GPU rig.
+function Get-Profile {
+  param(
+    [string]$Vendor,   # nvidia|amd|none
+    [string]$Arch,     # blackwell|ampere|ada|volta|rdna3|gcn|other|none
+    [double]$VramGb,
+    [int]$GpuCount,
+    [int]$RamGb
+  )
+  $bigRam = $false
+
+  # Multi-GPU with at least one NVIDIA -> the 5060 Ti + V100 dual-resident rig
+  # (configs 3-4). Two models resident, no swap. Checked first: a heterogeneous
+  # pair outranks any single-card band.
+  if ($GpuCount -ge 2 -and $Vendor -eq 'nvidia') {
+    if ($RamGb -ge 120) { $bigRam = $true }   # config #4: +128GB (+Optane, unseen)
+    return @{ profile = 'dual-gpu'; big_ram = $bigRam }
+  }
+
+  if ($Vendor -eq 'nvidia') {
+    switch ($Arch) {
+      'blackwell' {
+        if ($VramGb -ge 12) { return @{ profile = 'blackwell-16'; big_ram = $false } }
+        return @{ profile = 'blackwell-8'; big_ram = $false }
+      }
+      'volta' {
+        return @{ profile = 'volta-16'; big_ram = $false }
+      }
+      default {
+        # ampere / ada / other NVIDIA share the ampere-* bands (Ada ~= Ampere here).
+        if ($VramGb -ge 12) { return @{ profile = 'ampere-16'; big_ram = $false } }  # defensive: 3090-class
+        if ($VramGb -ge 7)  { return @{ profile = 'ampere-8';  big_ram = $false } }  # 8GB band (3070/5060 fallback)
+        return @{ profile = 'ampere-6'; big_ram = $false }                            # 6GB band (3050)
+      }
+    }
+  }
+
+  if ($Vendor -eq 'amd') {
+    if ($Arch -eq 'rdna3') { return @{ profile = 'amd-rdna3'; big_ram = $false } }
+    return @{ profile = 'amd-gcn'; big_ram = $false }   # gcn / vega / other AMD -> weakest Vulkan path
+  }
+
+  return @{ profile = 'cpu'; big_ram = $false }   # no usable GPU
+}
+
+# ---------------------------------------------------------------------------
+# Self-test mode: feed synthetic tuples to the classifier and assert profiles.
+# ---------------------------------------------------------------------------
+if ($SelfTest) {
+  $fail = 0
+  function Assert-Arch {
+    param([string]$Name, [string]$Expected)
+    $got = Get-GpuArch -Name $Name
+    if ($got -eq $Expected) { Write-Host "PASS arch  '$Name' -> $got" }
+    else { Write-Host "FAIL arch  '$Name' -> $got (expected $Expected)"; $script:fail++ }
+  }
+  function Assert-Profile {
+    param([string]$Label, [string]$Vendor, [string]$Arch, [double]$Vram, [int]$Count, [int]$Ram, [string]$Expected, [bool]$ExpectBigRam = $false)
+    $r = Get-Profile -Vendor $Vendor -Arch $Arch -VramGb $Vram -GpuCount $Count -RamGb $Ram
+    $ok = ($r.profile -eq $Expected) -and ($r.big_ram -eq $ExpectBigRam)
+    if ($ok) { Write-Host "PASS prof  $Label -> $($r.profile) (big_ram=$($r.big_ram))" }
+    else { Write-Host "FAIL prof  $Label -> $($r.profile) big_ram=$($r.big_ram) (expected $Expected big_ram=$ExpectBigRam)"; $script:fail++ }
+  }
+  function Assert-RamTier {
+    param([int]$Ram, [string]$Expected)
+    $got = Get-RamTier -RamGb $Ram
+    if ($got -eq $Expected) { Write-Host "PASS ram   ${Ram}GB -> $got" }
+    else { Write-Host "FAIL ram   ${Ram}GB -> $got (expected $Expected)"; $script:fail++ }
+  }
+  function Assert-UnrecognizedWarning {
+    param([string]$Label, [string]$Vendor, [string]$Arch, [string]$Name, [string]$ProfileId, [bool]$ExpectWarn)
+    $w = Get-UnrecognizedNvidiaWarning -Vendor $Vendor -GpuArch $Arch -GpuName $Name -ProfileId $ProfileId
+    $got = [bool]$w
+    if ($got -eq $ExpectWarn) { Write-Host "PASS warn  $Label -> warn=$got" }
+    else { Write-Host "FAIL warn  $Label -> warn=$got (expected warn=$ExpectWarn)"; $script:fail++ }
+  }
+
+  Write-Host '== arch name matching =='
+  Assert-Arch 'NVIDIA GeForce RTX 5060 Ti'        'blackwell'
+  Assert-Arch 'NVIDIA GeForce RTX 5090'           'blackwell'
+  Assert-Arch 'NVIDIA GeForce RTX 5060'           'blackwell'
+  Assert-Arch 'NVIDIA GeForce RTX 4090'           'ada'
+  Assert-Arch 'NVIDIA GeForce RTX 3070 Laptop GPU' 'ampere'
+  Assert-Arch 'NVIDIA GeForce RTX 3050'           'ampere'
+  Assert-Arch 'Tesla V100-PCIE-16GB'              'volta'
+  Assert-Arch 'AMD Radeon 780M Graphics'          'rdna3'
+  Assert-Arch 'AMD Radeon RX 7900 XTX'            'rdna3'
+  Assert-Arch 'AMD Radeon Vega 7 Graphics'        'gcn'
+  Assert-Arch ''                                  'none'
+  Assert-Arch 'Intel(R) UHD Graphics'             'other'
+
+  Write-Host '== profile selection (matrix configs) =='
+  Assert-Profile '5060 Ti 16GB (cfg1)'  'nvidia' 'blackwell' 16 1 64  'blackwell-16'
+  Assert-Profile 'V100 16GB (cfg2)'     'nvidia' 'volta'     16 1 64  'volta-16'
+  Assert-Profile 'dual 5060Ti+V100 (cfg3)' 'nvidia' 'blackwell' 16 2 64  'dual-gpu'
+  Assert-Profile 'dual +128GB (cfg4)'   'nvidia' 'blackwell' 16 2 128 'dual-gpu' $true
+  Assert-Profile '3070 8GB (cfg5)'      'nvidia' 'ampere'    8  1 16  'ampere-8'
+  Assert-Profile '3070+64GB (cfg6)'     'nvidia' 'ampere'    8  1 64  'ampere-8'
+  Assert-Profile '780M+64GB (cfg7)'     'amd'    'rdna3'     0.5 1 64 'amd-rdna3'
+  Assert-Profile '5060 8GB (cfg8)'      'nvidia' 'blackwell' 8  1 32  'blackwell-8'
+  Assert-Profile '3050 6GB (cfg10)'     'nvidia' 'ampere'    6  1 16  'ampere-6'
+  Assert-Profile '3090 24GB (defensive)' 'nvidia' 'ampere'   24 1 64  'ampere-16'
+  Assert-Profile 'Vega7+32GB (cfg12)'   'amd'    'gcn'       0.5 1 32 'amd-gcn'
+  Assert-Profile 'no GPU (cpu)'         'none'   'none'      0  0 16  'cpu'
+
+  Write-Host '== ram tiers =='
+  Assert-RamTier 128 'high'
+  Assert-RamTier 64  'mid'
+  Assert-RamTier 56  'mid'
+  Assert-RamTier 32  'low'
+  Assert-RamTier 16  'min'
+
+  Write-Host '== unrecognized-NVIDIA fallback warning =='
+  # A GPU that CIM reports as NVIDIA but whose name matches no arch regex ->
+  # Get-GpuArch returns 'other', Get-Profile bands it into ampere-* by VRAM, and
+  # the operator MUST be warned the card was unidentified.
+  Assert-UnrecognizedWarning 'unknown NVIDIA (arch=other) warns' 'nvidia' 'other' 'NVIDIA GeForce RTX 6070' 'ampere-16' $true
+  # A recognized NVIDIA card (arch=ampere) must NOT get this warning.
+  Assert-UnrecognizedWarning 'recognized ampere does NOT warn' 'nvidia' 'ampere' 'NVIDIA GeForce RTX 3070 Laptop GPU' 'ampere-8' $false
+  # AMD arch=other must NOT trip the NVIDIA-only warning (AMD warns via its own path).
+  Assert-UnrecognizedWarning 'AMD arch=other does NOT warn' 'amd' 'other' 'AMD Radeon Pro Wxxxx' 'amd-gcn' $false
+
+  if ($fail -eq 0) { Write-Host 'ALL PASS'; exit 0 }
+  Write-Host "FAILURES: $fail"; exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Normal detection.
+# ---------------------------------------------------------------------------
 $ErrorActionPreference = 'Stop'
 $warnings = @()
 
@@ -14,6 +223,11 @@ $amd    = $gpus | Where-Object { $_.Name -match 'AMD|Radeon' } | Select-Object -
 # Detection contract: NVIDIA present = CIM name match OR nvidia-smi resolves.
 $nvidiaSmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
 
+# gpu_count = discrete NVIDIA + AMD/Radeon adapters (Intel iGPUs are NOT usable
+# offload targets and are excluded from the count). @() forces array semantics
+# so .Count is reliable even for a single match.
+$gpuCount = @($gpus | Where-Object { $_.Name -match 'NVIDIA|AMD|Radeon' }).Count
+
 $vendor = 'none'; $backend = 'cpu'; $gpuName = ''
 if ($nvidia) { $vendor = 'nvidia'; $backend = 'cuda';   $gpuName = $nvidia.Name }
 elseif ($nvidiaSmi) {
@@ -22,6 +236,8 @@ elseif ($nvidiaSmi) {
   try { $gpuName = (& nvidia-smi --query-gpu=name --format=csv,noheader 2>$null | Select-Object -First 1).Trim() }
   catch { $gpuName = '' }
   if (-not $gpuName) { $gpuName = '' }
+  # nvidia-smi found a card CIM missed -> ensure the count reflects at least one.
+  if ($gpuCount -lt 1) { $gpuCount = 1 }
 }
 elseif ($amd) { $vendor = 'amd';   $backend = 'vulkan'; $gpuName = $amd.Name }
 
@@ -49,6 +265,20 @@ $installRoot = if ($env:OFFLOAD_HOME) { $env:OFFLOAD_HOME } else { $HOME }
 $targetDrive = (Split-Path -Qualifier $installRoot).TrimEnd(':')
 $diskGB = [math]::Round((Get-PSDrive -Name $targetDrive).Free / 1GB)
 
+# Arch class + profile (pure functions above).
+$gpuArch = Get-GpuArch -Name $gpuName
+$ramTier = Get-RamTier -RamGb $ramGB
+# NB: use $profileId, not $profile — $profile is a PowerShell automatic variable.
+$sel       = Get-Profile -Vendor $vendor -Arch $gpuArch -VramGb $vramGB -GpuCount $gpuCount -RamGb $ramGB
+$profileId = $sel.profile
+$bigRam    = [bool]$sel.big_ram
+
+# An NVIDIA card that matched no arch regex (arch=other) fell through to the
+# VRAM-banded ampere default. Make that silence audible (WARNING only — the
+# fallback profile stands and the exit code is unchanged).
+$unrecognizedNvidiaWarning = Get-UnrecognizedNvidiaWarning -Vendor $vendor -GpuArch $gpuArch -GpuName $gpuName -ProfileId $profileId
+if ($unrecognizedNvidiaWarning) { $warnings += $unrecognizedNvidiaWarning }
+
 if ($ramGB -lt 32) { $warnings += "RAM ${ramGB}GB < 32GB: install only the E4B workhorse tier (set OFFLOAD_WITH_FAMILY=0)" }
 if ($diskGB -lt 25) { Write-Error "Only ${diskGB}GB free on ${targetDrive}: (install target drive); need >=25GB for models + binaries."; exit 1 }
 if ($vendor -eq 'amd') {
@@ -57,8 +287,10 @@ if ($vendor -eq 'amd') {
 }
 
 Write-Host "OS: windows | GPUs: $gpuNames"
-Write-Host "Vendor: $vendor | Backend: $backend | Dedicated VRAM: ${vramGB}GB | RAM: ${ramGB}GB | Free disk: ${diskGB}GB on ${targetDrive}: (install target)"
+Write-Host "Vendor: $vendor | Arch: $gpuArch | GPUs(discrete): $gpuCount | Backend: $backend | Dedicated VRAM: ${vramGB}GB | RAM: ${ramGB}GB (tier=$ramTier) | Free disk: ${diskGB}GB on ${targetDrive}: (install target)"
+Write-Host "Profile: $profileId$(if ($bigRam) { ' (big_ram)' } else { '' })"
 $warnings | ForEach-Object { Write-Host "WARN: $_" }
 
-@{ os=$os; gpu_vendor=$vendor; gpu_name=$gpuName; vram_dedicated_gb=$vramGB; ram_gb=$ramGB;
+@{ os=$os; gpu_vendor=$vendor; gpu_name=$gpuName; gpu_arch=$gpuArch; gpu_count=$gpuCount;
+   vram_dedicated_gb=$vramGB; ram_gb=$ramGB; ram_tier=$ramTier; profile=$profileId; big_ram=$bigRam;
    disk_free_gb=$diskGB; backend=$backend; warnings=$warnings } | ConvertTo-Json -Compress

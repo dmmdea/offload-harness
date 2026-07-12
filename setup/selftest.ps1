@@ -40,6 +40,15 @@ $harnessExe = Join-Path $HOME_DIR 'harness\local-offload.exe'
 $agentExe   = Join-Path $HOME_DIR 'harness\local-agent.exe'
 $manifest   = Join-Path $HOME_DIR 'installed.json'
 $swapBase   = "http://127.0.0.1:$SWAP_PORT"
+# H3: the PROJECTED profile map (profiles.json) lives beside this script under templates/.
+# The selftest reads it to know the profile's projected ctx/KV/moe so it can MEASURE against
+# them. OFFLOAD_PROFILES_JSON overrides (tests point at a fixture / a synthetic profile map).
+$scriptDir  = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+if ($env:OFFLOAD_PROFILES_JSON) { $profilesJsonPath = $env:OFFLOAD_PROFILES_JSON }
+else { $profilesJsonPath = Join-Path $scriptDir 'templates\profiles.json' }
+# Optional: a captured detect.ps1 last-line JSON (fallback profile source when installed.json
+# predates H2). OFFLOAD_DETECT_JSON points at a file holding that JSON; absent by default.
+$detectJsonPath = if ($env:OFFLOAD_DETECT_JSON) { $env:OFFLOAD_DETECT_JSON } else { $null }
 
 # The chat tiers, in the fixed order we exercise them. Each maps a llama-swap model alias to the
 # gguf filename the rendered template references. A tier is "installed" iff its gguf is on disk.
@@ -285,6 +294,187 @@ function Test-LargerCtxLoad {
   }
 }
 
+# ===========================================================================
+# H3: measure-at-install helpers. These turn the H2 PROJECTED profile numbers
+# (setup/templates/profiles.json) into MEASUREMENTS on THIS box, honestly marking
+# anything not measurable here as projected/skipped/measure-on-target. All are pure
+# or side-effect-scoped (standalone probe servers on spare ports, torn down here) and
+# NEVER touch the running transient swap, its yaml, or the operator's live :11436.
+# ===========================================================================
+
+# Read the ACTIVE profile the way install.ps1 (H2) resolved it: installed.json wins
+# (it carries profile + agent_ctx_tokens + ram_tier + big_ram written at install), else
+# detect.ps1's last-line JSON, else the OFFLOAD_PROFILE env override. Pure of hardware
+# (only reads files/env), so a test can point it at a synthetic OFFLOAD_HOME. Returns a
+# hashtable; profile=$null when nothing resolves (an off-matrix / pre-H2 stack).
+#   profile, profile_src ('installed.json'|'detect.ps1'|'OFFLOAD_PROFILE'|'none'),
+#   ram_tier, big_ram, agent_ctx_tokens (int or $null)
+function Read-ActiveProfile {
+  param([string]$ManifestPath, [string]$DetectJsonPath = $null)
+  $r = @{ profile = $null; profile_src = 'none'; ram_tier = $null; big_ram = $false; agent_ctx_tokens = $null }
+  # 1) installed.json (the H2 install manifest is the authority).
+  if ($ManifestPath -and (Test-Path $ManifestPath)) {
+    try {
+      $m = Get-Content -Raw -Path $ManifestPath -Encoding UTF8 | ConvertFrom-Json
+      if ($m.PSObject.Properties['profile'] -and $m.profile) {
+        $r.profile = [string]$m.profile
+        $r.profile_src = 'installed.json'
+        if ($m.PSObject.Properties['ram_tier']) { $r.ram_tier = [string]$m.ram_tier }
+        if ($m.PSObject.Properties['big_ram'])  { $r.big_ram = [bool]$m.big_ram }
+        if ($m.PSObject.Properties['agent_ctx_tokens'] -and $m.agent_ctx_tokens) { $r.agent_ctx_tokens = [int]$m.agent_ctx_tokens }
+        return $r
+      }
+    } catch { }
+  }
+  # 2) detect.ps1 JSON (last-line verdict), if a caller captured one to a file.
+  if ($DetectJsonPath -and (Test-Path $DetectJsonPath)) {
+    try {
+      $d = Get-Content -Raw -Path $DetectJsonPath -Encoding UTF8 | ConvertFrom-Json
+      if ($d.PSObject.Properties['profile'] -and $d.profile) {
+        $r.profile = [string]$d.profile
+        $r.profile_src = 'detect.ps1'
+        if ($d.PSObject.Properties['ram_tier']) { $r.ram_tier = [string]$d.ram_tier }
+        if ($d.PSObject.Properties['big_ram'])  { $r.big_ram = [bool]$d.big_ram }
+        return $r
+      }
+    } catch { }
+  }
+  # 3) OFFLOAD_PROFILE env override (last resort; no ram_tier signal).
+  if ($env:OFFLOAD_PROFILE) {
+    $r.profile = $env:OFFLOAD_PROFILE.Trim()
+    $r.profile_src = 'OFFLOAD_PROFILE'
+    if ($env:OFFLOAD_RAM_TIER) { $r.ram_tier = $env:OFFLOAD_RAM_TIER.Trim() }
+    return $r
+  }
+  return $r
+}
+
+# Read the PROJECTED serving params for a profile id from profiles.json. Pure fn of the
+# on-disk file + the id. Returns $null when the file/profile is absent (caller records
+# 'profile not in profiles.json' honestly). Keys mirror the profiles.json schema:
+#   ctx_size(int), kv_type, moe_26b, flash_attn, resident_tier, include_26b(bool),
+#   dual_resident(bool), backend, notes
+function Get-ProjectedProfile {
+  param([string]$ProfileId, [string]$ProfilesJsonPath)
+  if (-not $ProfileId) { return $null }
+  if (-not (Test-Path $ProfilesJsonPath)) { return $null }
+  try {
+    $doc = Get-Content -Raw -Path $ProfilesJsonPath -Encoding UTF8 | ConvertFrom-Json
+  } catch { return $null }
+  if (-not $doc.profiles.PSObject.Properties[$ProfileId]) { return $null }
+  $p = $doc.profiles.$ProfileId
+  $dual = $false
+  if ($p.PSObject.Properties['dual_resident']) { $dual = [bool]$p.dual_resident }
+  return @{
+    ctx_size      = [int]$p.ctx_size
+    kv_type       = [string]$p.kv_type
+    moe_26b       = [string]$p.moe_26b
+    flash_attn    = [string]$p.flash_attn
+    resident_tier = [string]$p.resident_tier
+    include_26b   = [bool]$p.include_26b
+    dual_resident = $dual
+    backend       = [string]$p.backend
+    notes         = [string]$p.notes
+  }
+}
+
+# Load+serve a given model gguf on a standalone probe server at a specific ctx + KV type,
+# probe /health for readiness (records cold-load wall time), then OPTIONALLY run one warm
+# generation through it to measure decode tok/s, then tear it down. This is the H3 workhorse
+# for: the profile ctx-ceiling check (step 2), the 26B --cpu-moe decode tok/s (step 3), and
+# per-tier cold-swap time (step 4). It NEVER touches the running swap/yaml (own port).
+# Returns {ok=$bool; detail; cold_load_s; tps} (tps=$null unless -WarmDecode and it succeeds).
+#   -ModelFile   gguf filename under $modelDir
+#   -Ctx         --ctx-size to load at
+#   -KvType      q8_0|f16 (kept symmetric across K and V)
+#   -CpuMoe      add --cpu-moe (experts in RAM) - the 26B reduce path
+#   -FlashAttn   on|off (default on; the cpu backend template omits it, handled by caller)
+#   -WarmDecode  after /health, issue one chat and time the generation for tok/s
+function Invoke-ProbeLoad {
+  param(
+    [string]$ModelFile,
+    [int]$Ctx,
+    [string]$KvType = 'q8_0',
+    [switch]$CpuMoe,
+    [string]$FlashAttn = 'on',
+    [switch]$WarmDecode,
+    [int]$TimeoutSec = 180
+  )
+  $llamaServer = Join-Path $llamaDir 'llama-server.exe'
+  if (-not $ModelFile) { return @{ ok = $false; detail = 'no model file specified'; cold_load_s = $null; tps = $null } }
+  $modelPath = Join-Path $modelDir $ModelFile
+  if (-not (Test-Path $llamaServer)) { return @{ ok = $false; detail = 'llama-server.exe absent'; cold_load_s = $null; tps = $null } }
+  if (-not (Test-Path $modelPath))   { return @{ ok = $false; detail = "model gguf absent: $ModelFile"; cold_load_s = $null; tps = $null } }
+  $probePort = 18804
+  if (-not (Test-PortFree $probePort)) { return @{ ok = $false; detail = "probe port $probePort busy"; cold_load_s = $null; tps = $null } }
+  # -ngl: cpu backend has none; otherwise offload all non-expert layers (99/999 both mean "all").
+  $ngl = if ($backend -eq 'cpu') { 0 } else { 999 }
+  $logFile = Join-Path $env:TEMP ("offload-selftest-probeload-{0}.log" -f $PID)
+  $svArgs = New-Object System.Collections.Generic.List[string]
+  $svArgs.AddRange([string[]]@('-m', $modelPath, '-c', "$Ctx"))
+  if ($backend -ne 'cpu') { $svArgs.AddRange([string[]]@('-ngl', "$ngl")) }
+  if ($CpuMoe)            { $svArgs.Add('--cpu-moe') }
+  if ($FlashAttn -eq 'on' -and $backend -ne 'cpu') { $svArgs.AddRange([string[]]@('--flash-attn', 'on')) }
+  $svArgs.AddRange([string[]]@('--cache-type-k', $KvType, '--cache-type-v', $KvType,
+                             '--jinja', '--no-webui', '--parallel', '1',
+                             '--port', "$probePort", '--host', '127.0.0.1'))
+  $proc = $null
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  try {
+    $proc = Start-Process -FilePath $llamaServer -ArgumentList ([string[]]$svArgs) -PassThru -NoNewWindow `
+              -RedirectStandardError $logFile -RedirectStandardOutput "$logFile.out"
+    $healthy = $false
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+      if ($proc.HasExited) {
+        $sw.Stop()
+        $tail = ''
+        try { $tail = (Get-Content -Path $logFile -Tail 4 -ErrorAction SilentlyContinue) -join ' | ' } catch { }
+        return @{ ok = $false; detail = ("server exited early (code {0}) {1}" -f $proc.ExitCode, $tail); cold_load_s = $null; tps = $null }
+      }
+      $h = Invoke-JsonGet "http://127.0.0.1:$probePort/health" 4
+      if ($h) { $healthy = $true; break }
+      Start-Sleep -Milliseconds 500
+    }
+    $sw.Stop()
+    if (-not $healthy) { return @{ ok = $false; detail = "no /health within ${TimeoutSec}s at ctx=$Ctx kv=$KvType"; cold_load_s = [math]::Round($sw.Elapsed.TotalSeconds, 2); tps = $null } }
+    $coldS = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+    $tps = $null
+    $detail = "loaded+healthy at ctx=$Ctx kv=$KvType$(if ($CpuMoe){' --cpu-moe'}) on a standalone probe server"
+    if ($WarmDecode) {
+      # One warm generation directly against the probe server's OpenAI endpoint; time the decode.
+      $body = @{ model = 'probe'; messages = @(@{ role = 'user'; content = 'Count from one to forty in words, comma-separated, then stop.' });
+                 max_tokens = 160; temperature = 0; stream = $false } | ConvertTo-Json -Depth 6 -Compress
+      $dsw = [System.Diagnostics.Stopwatch]::StartNew()
+      try {
+        $rr = Invoke-RestMethod -Uri "http://127.0.0.1:$probePort/v1/chat/completions" -Method Post `
+                -ContentType 'application/json' -Body $body -TimeoutSec 300
+        $dsw.Stop()
+        $ct = 0
+        if ($rr.usage -and $rr.usage.completion_tokens) { $ct = [int]$rr.usage.completion_tokens }
+        if ($ct -gt 0 -and $dsw.Elapsed.TotalSeconds -gt 0) { $tps = [math]::Round($ct / $dsw.Elapsed.TotalSeconds, 1) }
+        $detail = "$detail; warm decode $ct tok in $([math]::Round($dsw.Elapsed.TotalSeconds,2))s"
+      } catch {
+        $dsw.Stop()
+        $detail = "$detail; warm decode FAILED: $($_.Exception.Message)"
+      }
+    }
+    return @{ ok = $true; detail = $detail; cold_load_s = $coldS; tps = $tps }
+  } catch {
+    return @{ ok = $false; detail = "probe threw: $($_.Exception.Message)"; cold_load_s = $null; tps = $null }
+  } finally {
+    if ($proc -and -not $proc.HasExited) { try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { } }
+    try {
+      $kids = Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandLine -and ($_.CommandLine -match [regex]::Escape("127.0.0.1:$probePort")) }
+      foreach ($k in $kids) { try { Stop-Process -Id $k.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
+    } catch { }
+    $pd = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $pd) { if (Test-PortFree $probePort) { break }; Start-Sleep -Milliseconds 400 }
+    Get-ChildItem $env:TEMP -Filter ("offload-selftest-probeload-{0}*" -f $PID) -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+  }
+}
+
 # ---------------------------------------------------------------------------
 # Receipt accumulator (R4.4 schema)
 # ---------------------------------------------------------------------------
@@ -312,6 +502,62 @@ $receipt = [ordered]@{
     microbench_ok   = $false     # $true iff the call returned a non-empty, well-formed structured answer
     skipped         = $false     # $true iff the agent tier was absent / unreachable this run
     notes           = $null
+  }
+  # H3: measure-at-install ledger. Turns the PROJECTED profile (profiles.json) into
+  # MEASUREMENTS on THIS box; anything this host cannot measure is marked projected/
+  # skipped/measure-on-target (NEVER reported as measured). The 'tuned' sub-block holds
+  # measured values the operator/installer should apply OVER the projected profile.
+  profile_measure = [ordered]@{
+    profile         = $null       # active profile id (from installed.json / detect / OFFLOAD_PROFILE)
+    profile_src     = 'none'      # where the profile came from
+    ram_tier        = $null       # high|mid|low|min (drives the 26B cpu-moe RAM gate)
+    projected       = [ordered]@{ # the profiles.json PROJECTED values for this profile (unmeasured)
+      ctx_size      = $null
+      kv_type       = $null
+      moe_26b       = $null
+      flash_attn    = $null
+      resident_tier = $null
+      include_26b   = $null
+      dual_resident = $null
+    }
+    ctx             = [ordered]@{ # step 2: does the profile's projected ctx actually load (no OOM)?
+      projected_ctx = $null       # profiles.json ctx_size
+      measured_ctx  = $null       # ctx that actually loaded (== projected, or the downshifted value)
+      measured_ctx_ok = $null     # $true measured OK | $false OOM even after downshift | $null not-attempted
+      downshifted   = $false      # $true iff the projected ctx OOM'd and we halved+retried
+      src           = 'not-attempted' # 'measured' | 'not-attempted'
+      detail        = $null
+    }
+    moe26b          = [ordered]@{ # step 3: 26B --cpu-moe decode tok/s ("reduce not enable" number)
+      applicable    = $false      # profile includes 26B via cpu_moe AND the ram gate passed
+      installed     = $false      # the 26B gguf is on disk
+      moe26b_tps    = $null       # measured decode tok/s; $null if skipped
+      src           = 'skipped'   # 'measured' | 'skipped'
+      detail        = $null
+    }
+    cold_swap       = @()         # step 4: per installed tier {tier, cold_swap_s} (load-from-cold latency)
+    q8_kv           = [ordered]@{ # step 5: q8_0 KV outcome (esp. AMD/Vulkan f16-conservative note)
+      projected_kv  = $null
+      measured_ok   = $null       # $true iff a q8_0 load succeeded this run (from step 2) | $null n/a
+      note          = $null
+    }
+    dual_gpu        = [ordered]@{ # step 6: needs >=2 GPUs - recorded not-applicable on a single-GPU host
+      applicable    = $false
+      status        = 'not-applicable-on-this-host'
+      detail        = $null
+    }
+    optane          = [ordered]@{ # step 6: needs config-#4 Optane hardware - measure-on-target only
+      applicable    = $false
+      status        = 'measure-on-target'
+      detail        = $null
+    }
+    tuned           = [ordered]@{ # step 7: measured overrides the installer should apply (else projected)
+      ctx_size      = $null       # downshifted ctx if OOM, else the projected ctx (confirmed loadable)
+      kv_type       = $null       # confirmed KV type
+      moe26b_tps    = $null       # measured 26B decode tok/s (or $null)
+      source        = 'projected' # 'measured' (at least one value measured this box) | 'projected'
+      notes         = $null
+    }
   }
   verdict         = 'fail'
   proves          = @(
@@ -688,6 +934,239 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
     LogFail "agent telemetry section threw: $($_.Exception.Message) - continuing to verdict"
   }
 
+  # --- H3: profile_measure - turn PROJECTED profile numbers into MEASUREMENTS ----------------
+  # Independent section (own try/catch; records its own status; never affects the verdict rule).
+  # Reads the active profile (installed.json -> detect -> OFFLOAD_PROFILE), then measures ONLY
+  # what THIS box supports and honestly marks the rest projected/skipped/measure-on-target.
+  LogStep "H3 profile_measure: measure projected profile numbers on this box"
+  $pm = $receipt.profile_measure
+  try {
+    # 1. Read the active profile + its PROJECTED serving params.
+    $active = Read-ActiveProfile -ManifestPath $manifest -DetectJsonPath $detectJsonPath
+    $pm.profile     = $active.profile
+    $pm.profile_src = $active.profile_src
+    $pm.ram_tier    = $active.ram_tier
+    $proj = $null
+    if ($active.profile) { $proj = Get-ProjectedProfile -ProfileId $active.profile -ProfilesJsonPath $profilesJsonPath }
+    if ($proj) {
+      $pm.projected.ctx_size      = $proj.ctx_size
+      $pm.projected.kv_type       = $proj.kv_type
+      $pm.projected.moe_26b       = $proj.moe_26b
+      $pm.projected.flash_attn    = $proj.flash_attn
+      $pm.projected.resident_tier = $proj.resident_tier
+      $pm.projected.include_26b   = $proj.include_26b
+      $pm.projected.dual_resident = $proj.dual_resident
+      LogOk ("profile={0} (src={1}, ram_tier={2}) | PROJECTED ctx={3} kv={4} moe_26b={5} resident={6}" -f `
+             $active.profile, $active.profile_src, $active.ram_tier, $proj.ctx_size, $proj.kv_type, $proj.moe_26b, $proj.resident_tier)
+    } else {
+      LogWarn ("no PROJECTED profile resolved (profile='{0}' src='{1}') - profile_measure records measure-on-target only" -f $active.profile, $active.profile_src)
+    }
+
+    # gpu_count: live NVIDIA+AMD discrete-adapter count (matches detect.ps1), for the dual-GPU gate.
+    $gpuCount = 0
+    try {
+      $gpuCount = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match 'NVIDIA|AMD|Radeon' }).Count
+    } catch { $gpuCount = 0 }
+
+    # Which resident-tier gguf to load for the ctx probe (the profile's resident tier, mapped to a file).
+    $residentId = if ($proj) { $proj.resident_tier } else { $AGENT_TIER }
+    $residentSpec = $TIER_SPEC | Where-Object { $_.id -eq $residentId } | Select-Object -First 1
+    if (-not $residentSpec) { $residentSpec = $TIER_SPEC | Where-Object { $_.id -eq 'offload-e4b' } | Select-Object -First 1 }
+    $residentPresent = $false
+    if ($residentSpec) { $residentPresent = Test-Path (Join-Path $modelDir $residentSpec.file) }
+
+    # 2. Measure the projected ctx actually loads (no OOM); DOWNSHIFT (halve, retry once) if it OOMs.
+    $skipProbe = ($env:OFFLOAD_SELFTEST_SKIP_CTXPROBE -eq '1') -or ($backend -eq 'cpu') -or (-not $residentPresent) -or (-not $proj)
+    if ($skipProbe) {
+      $why = if (-not $proj) { 'no projected profile' } elseif (-not $residentPresent) { "$residentId gguf absent" } elseif ($backend -eq 'cpu') { 'cpu backend' } else { 'skip flag set' }
+      $pm.ctx.projected_ctx = if ($proj) { $proj.ctx_size } else { $null }
+      $pm.ctx.src = 'not-attempted'
+      $pm.ctx.detail = "ctx load NOT attempted ($why); projected ctx recorded as measure-on-target"
+      LogWarn $pm.ctx.detail
+    } else {
+      $pm.ctx.projected_ctx = $proj.ctx_size
+      $kv = $proj.kv_type
+      $fa = $proj.flash_attn
+      $tryCtx = $proj.ctx_size
+      $residentIsMoe = ($residentId -eq 'gemma4-26b-a4b')  # if a profile ever made 26B the resident tier
+      LogStep ("  ctx probe: loading {0} at projected ctx={1} kv={2}" -f $residentId, $tryCtx, $kv)
+      $r1 = Invoke-ProbeLoad -ModelFile $residentSpec.file -Ctx $tryCtx -KvType $kv -FlashAttn $fa -CpuMoe:$residentIsMoe -TimeoutSec 180
+      if ($r1.ok) {
+        $pm.ctx.measured_ctx = $tryCtx
+        $pm.ctx.measured_ctx_ok = $true
+        $pm.ctx.downshifted = $false
+        $pm.ctx.src = 'measured'
+        $pm.ctx.detail = $r1.detail
+        LogOk ("ctx MEASURED ok at projected {0} (kv={1}): {2}" -f $tryCtx, $kv, $r1.detail)
+      } elseif (Test-AllocFailure $r1.detail) {
+        # DOWNSHIFT: halve ctx (floor 4096) and retry once, mirroring the Invoke-Remediate26B pattern.
+        $downCtx = [int][math]::Max(4096, [math]::Floor($tryCtx / 2))
+        LogWarn ("projected ctx {0} OOM'd ({1}); DOWNSHIFTING to {2} and retrying once" -f $tryCtx, $r1.detail, $downCtx)
+        $r2 = Invoke-ProbeLoad -ModelFile $residentSpec.file -Ctx $downCtx -KvType $kv -FlashAttn $fa -CpuMoe:$residentIsMoe -TimeoutSec 180
+        $pm.ctx.downshifted = $true
+        $pm.ctx.src = 'measured'
+        $receipt.remediations += ,([ordered]@{ tier = $residentId; action = ("downshift ctx {0}->{1}" -f $tryCtx, $downCtx); outcome = (if ($r2.ok) { 'pass' } else { 'fail' }) })
+        if ($r2.ok) {
+          $pm.ctx.measured_ctx = $downCtx
+          $pm.ctx.measured_ctx_ok = $true
+          $pm.ctx.detail = ("projected {0} OOM'd; downshifted ctx={1} loads OK - operator should use {1}. {2}" -f $tryCtx, $downCtx, $r2.detail)
+          LogOk ("ctx DOWNSHIFTED and MEASURED ok at {0} (operator should use {0}, not projected {1})" -f $downCtx, $tryCtx)
+        } else {
+          $pm.ctx.measured_ctx = $null
+          $pm.ctx.measured_ctx_ok = $false
+          $pm.ctx.detail = ("projected {0} AND downshifted {1} both failed to load: {2}" -f $tryCtx, $downCtx, $r2.detail)
+          LogFail $pm.ctx.detail
+        }
+      } else {
+        # Non-alloc failure (probe port busy, exe absent, model gguf absent, or the probe threw) -
+        # the load NEVER started, so NOTHING was measured. Marking this 'measured' would be dishonest:
+        # it would (a) skip the does_not_prove gate and (b) let tuned.source read 'measured' while
+        # tuned.ctx_size falls back to the PROJECTED value. Record 'not-attempted' - no OOM, no downshift.
+        $pm.ctx.measured_ctx_ok = $false
+        $pm.ctx.src = 'not-attempted'
+        $pm.ctx.detail = ("ctx probe at {0} failed (non-alloc): {1}" -f $tryCtx, $r1.detail)
+        LogWarn $pm.ctx.detail
+      }
+    }
+
+    # 3. 26B --cpu-moe decode tok/s (the "reduce not enable" number). Applicable iff the profile
+    # INCLUDES the 26B via cpu_moe AND the ram gate passed (ram_tier mid|high). Measured only if the
+    # 26B gguf is installed. This box (ampere-8/mid) IS in the cpu_moe-with-RAM-path case.
+    $moe26bId   = 'gemma4-26b-a4b'
+    $moe26bSpec = $TIER_SPEC | Where-Object { $_.id -eq $moe26bId } | Select-Object -First 1
+    $moe26bInstalled = $false
+    if ($moe26bSpec) { $moe26bInstalled = Test-Path (Join-Path $modelDir $moe26bSpec.file) }
+    $pm.moe26b.installed = $moe26bInstalled
+    $ramOk = ($active.ram_tier -in @('mid','high'))
+    $moeApplicable = [bool]($proj -and $proj.include_26b -and ($proj.moe_26b -eq 'cpu_moe') -and $ramOk)
+    $pm.moe26b.applicable = $moeApplicable
+    if ($moeApplicable -and $moe26bInstalled -and $backend -ne 'cpu' -and -not $skipProbe) {
+      LogStep "  26B --cpu-moe decode probe (warm generation for tok/s)"
+      $rm = Invoke-ProbeLoad -ModelFile $moe26bSpec.file -Ctx ([int]$pm.projected.ctx_size) -KvType $proj.kv_type -CpuMoe -FlashAttn $proj.flash_attn -WarmDecode -TimeoutSec 300
+      if ($rm.ok -and $null -ne $rm.tps) {
+        $pm.moe26b.moe26b_tps = $rm.tps
+        $pm.moe26b.src = 'measured'
+        $pm.moe26b.detail = "26B --cpu-moe measured $($rm.tps) tok/s (RAM-speed-bound; this is why 26B is REDUCE not ENABLE on cpu-moe). $($rm.detail)"
+        LogOk ("26B --cpu-moe MEASURED {0} tok/s decode" -f $rm.tps)
+      } else {
+        $pm.moe26b.src = 'skipped'
+        $pm.moe26b.detail = "26B --cpu-moe load/decode did not complete: $($rm.detail)"
+        LogWarn $pm.moe26b.detail
+      }
+    } else {
+      $reason = if (-not $moeApplicable) {
+        if (-not $proj) { 'no projected profile' }
+        elseif (-not $proj.include_26b) { 'profile does not include 26B' }
+        elseif ($proj.moe_26b -ne 'cpu_moe') { "26B placement is '$($proj.moe_26b)', not cpu_moe (measure GPU-resident 26B on the target rig)" }
+        elseif (-not $ramOk) { "ram_tier=$($active.ram_tier) has no RAM path for cpu-moe (needs mid|high)" }
+        else { 'not applicable' }
+      } elseif (-not $moe26bInstalled) { '26B gguf not installed in this stack' }
+      elseif ($skipProbe) {
+        # Honest labeling: name the ACTUAL cause of the skip. The moe-tps probe is currently
+        # coupled to $skipProbe, so OFFLOAD_SELFTEST_SKIP_CTXPROBE=1 skips it as collateral even on
+        # a box that HAS the 26B installed - say so explicitly rather than blaming a generic 'ctx probe'.
+        if ($env:OFFLOAD_SELFTEST_SKIP_CTXPROBE -eq '1') { 'moe-tps probe skipped as collateral of OFFLOAD_SELFTEST_SKIP_CTXPROBE=1 (26B is installed; unset the flag to measure decode tok/s)' }
+        elseif ($backend -eq 'cpu') { 'cpu backend (no GPU cpu-moe measurement)' }
+        elseif (-not $residentPresent) { 'resident-tier gguf absent (ctx probe not attempted)' }
+        else { 'ctx probe not attempted' }
+      }
+      else { 'cpu backend' }
+      $pm.moe26b.src = 'skipped'
+      $pm.moe26b.detail = "26B cpu-moe tok/s SKIPPED: $reason"
+      LogWarn $pm.moe26b.detail
+    }
+
+    # 4. Cold-swap time per installed tier (load-from-cold latency) - feeds the two-tier one-swap cost.
+    if ($skipProbe) {
+      LogWarn "cold-swap timing NOT attempted (ctx probe skipped / cpu backend / no projected profile)"
+    } else {
+      LogStep "  cold-swap timing per installed tier (cold load-from-disk latency)"
+      foreach ($tier in $installedTiers) {
+        $isMoe = ($tier.id -eq 'gemma4-26b-a4b')
+        # 26B loads with the profile's cpu_moe path only if applicable; else plain (GPU) - it just
+        # needs to load to time the cold swap, we don't decode here.
+        $useCpuMoe = ($isMoe -and $moeApplicable)
+        $kvForTier = if ($proj) { $proj.kv_type } else { 'q8_0' }
+        $faForTier = if ($proj) { $proj.flash_attn } else { 'on' }
+        $ctxForTier = if ($proj) { [int]$proj.ctx_size } else { 8192 }
+        $rc = Invoke-ProbeLoad -ModelFile $tier.file -Ctx $ctxForTier -KvType $kvForTier -FlashAttn $faForTier -CpuMoe:$useCpuMoe -TimeoutSec 240
+        $cs = if ($rc.ok) { $rc.cold_load_s } else { $null }
+        $pm.cold_swap += ,([ordered]@{ tier = $tier.id; cold_swap_s = $cs; ok = [bool]$rc.ok })
+        if ($rc.ok) { LogOk ("cold-swap {0}: {1}s (load-from-cold)" -f $tier.id, $cs) }
+        else { LogWarn ("cold-swap {0}: load failed ({1})" -f $tier.id, $rc.detail) }
+      }
+    }
+
+    # 5. q8_0 KV outcome. If the profile projects q8_0, its q8 load was already exercised in step 2
+    # (measured_ctx_ok). For AMD (rdna3/gcn) where profiles.json set f16 conservatively, note that
+    # q8_0 is worth TRYING at install (do NOT force it here).
+    if ($proj) {
+      $pm.q8_kv.projected_kv = $proj.kv_type
+      if ($proj.kv_type -eq 'q8_0') {
+        $pm.q8_kv.measured_ok = $pm.ctx.measured_ctx_ok   # $true iff the q8 load in step 2 succeeded
+        $pm.q8_kv.note = if ($pm.ctx.measured_ctx_ok -eq $true) { 'q8_0 KV load confirmed via the ctx probe (step 2)' }
+                         elseif ($pm.ctx.measured_ctx_ok -eq $false) { 'q8_0 KV load did NOT confirm - see ctx.detail' }
+                         else { 'q8_0 KV load not attempted this run' }
+      } elseif ($proj.kv_type -eq 'f16' -and $active.profile -match '^amd-') {
+        $pm.q8_kv.measured_ok = $null
+        $pm.q8_kv.note = 'profiles.json set f16 CONSERVATIVELY for this AMD/Vulkan profile; q8_0 KV is worth TRYING at install if the Vulkan FA + q8-KV canary is stable (NOT forced here).'
+      } else {
+        $pm.q8_kv.measured_ok = $null
+        $pm.q8_kv.note = "projected kv_type=$($proj.kv_type); no q8 change indicated"
+      }
+      LogOk ("q8_kv: projected={0} note={1}" -f $proj.kv_type, $pm.q8_kv.note)
+    }
+
+    # 6. dual-GPU residency + Optane: this host lacks the hardware. Provide the code PATH (guarded)
+    # but NEVER claim measured. dual-gpu applicable iff >=2 discrete GPUs AND the dual-gpu profile.
+    $dualApplicable = [bool]($gpuCount -ge 2 -and $proj -and $proj.dual_resident)
+    $pm.dual_gpu.applicable = $dualApplicable
+    if ($dualApplicable) {
+      # CODE PATH for the real dual-GPU rig (configs #3/#4): pin 26B to device 0, E4B to device 1,
+      # confirm BOTH stay resident (two standalone servers, CUDA_VISIBLE_DEVICES per server, both
+      # /health simultaneously). Not executed here because this host has <2 GPUs (guarded above).
+      $pm.dual_gpu.status = 'measure-on-target'
+      $pm.dual_gpu.detail = "dual-gpu profile on a >=2-GPU host: run the two-resident residency check (26B->CUDA_VISIBLE_DEVICES=0, E4B->=1, both -ngl 99, both /health at once). NOT measured here."
+      LogWarn "dual-gpu applicable but NOT measured in this pass (code path present; run on the two-card rig)"
+    } else {
+      $pm.dual_gpu.status = 'not-applicable-on-this-host'
+      $pm.dual_gpu.detail = "single-GPU host (gpu_count=$gpuCount) / non-dual profile: two-model residency is measure-on-target (configs #3/#4)."
+      LogOk ("dual-gpu: not-applicable-on-this-host (gpu_count={0})" -f $gpuCount)
+    }
+    # Optane (config #4 staging/mmap): detect cannot see an Optane drive; NEVER claimed measured here.
+    $pm.optane.applicable = $false
+    $pm.optane.status = 'measure-on-target'
+    $pm.optane.detail = 'Optane cold-load/mmap latency vs RAM is config-#4-only hardware; measure on the target rig (staging/mmap, never a resident inference tier).'
+    LogOk "optane: measure-on-target (config #4 hardware absent here)"
+
+    # 7. tuned summary: measured values that should OVERRIDE the projected profile.
+    $anyMeasured = ($pm.ctx.src -eq 'measured') -or ($pm.moe26b.src -eq 'measured')
+    if ($proj) {
+      # ctx: the downshifted value if we downshifted, else the projected ctx CONFIRMED loadable, else projected (unconfirmed).
+      if ($pm.ctx.measured_ctx_ok -eq $true -and $null -ne $pm.ctx.measured_ctx) { $pm.tuned.ctx_size = $pm.ctx.measured_ctx }
+      else { $pm.tuned.ctx_size = $proj.ctx_size }
+      $pm.tuned.kv_type    = $proj.kv_type
+      $pm.tuned.moe26b_tps = $pm.moe26b.moe26b_tps
+      $pm.tuned.source     = if ($anyMeasured) { 'measured' } else { 'projected' }
+      $tunedNotes = New-Object System.Collections.Generic.List[string]
+      if ($pm.ctx.downshifted -and $pm.ctx.measured_ctx_ok -eq $true) { $tunedNotes.Add("apply ctx_size=$($pm.ctx.measured_ctx) (projected $($proj.ctx_size) OOM'd)") }
+      elseif ($pm.ctx.measured_ctx_ok -eq $true) { $tunedNotes.Add("projected ctx_size=$($proj.ctx_size) confirmed loadable") }
+      if ($null -ne $pm.moe26b.moe26b_tps) { $tunedNotes.Add("26B cpu-moe measured $($pm.moe26b.moe26b_tps) tok/s") }
+      if ($tunedNotes.Count -eq 0) { $tunedNotes.Add('nothing measured this run; projected values stand') }
+      $pm.tuned.notes = ($tunedNotes -join '; ')
+      LogOk ("tuned (source={0}): ctx_size={1} kv_type={2} moe26b_tps={3} | {4}" -f `
+             $pm.tuned.source, $pm.tuned.ctx_size, $pm.tuned.kv_type, $(if ($null -ne $pm.tuned.moe26b_tps) { $pm.tuned.moe26b_tps } else { 'null' }), $pm.tuned.notes)
+    } else {
+      $pm.tuned.source = 'projected'
+      $pm.tuned.notes = 'no projected profile resolved; nothing to tune'
+    }
+  } catch {
+    $pm.tuned.source = 'projected'
+    $pm.tuned.notes = "profile_measure section threw: $($_.Exception.Message)"
+    LogFail "profile_measure section threw: $($_.Exception.Message) - continuing to verdict"
+  }
+
   # --- Verdict (R4.4 rule) ------------------------------------------------------------------
   # fail iff harness_smoke=fail OR agent_smoke=fail OR ALL tiers failed. A single non-26b tier
   # failing, or 26b failing even after remediation, is WARN (partial capability). The canary
@@ -754,6 +1233,30 @@ if ($receipt.agent.larger_ctx_src -ne 'measured') {
   $dnp2 = "a larger context window ($($receipt.agent.larger_ctx)) actually loads on this GPU: recorded as computed-only ($($receipt.agent.larger_ctx_src))"
   if (-not ($receipt.does_not_prove -contains $dnp2)) { $receipt.does_not_prove += $dnp2 }
 }
+# H3 honesty: append a does_not_prove line for every profile_measure item NOT measured on THIS box.
+# Anything projected/skipped/measure-on-target must never read as measured.
+$pmf = $receipt.profile_measure
+if (-not $pmf.profile) {
+  $d = 'active hardware profile: none resolved (installed.json pre-H2 / no detect JSON / no OFFLOAD_PROFILE) - profile_measure values are unmeasured'
+  if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
+}
+if ($pmf.ctx.src -ne 'measured') {
+  $d = "the profile's projected ctx ($($pmf.ctx.projected_ctx)) actually loads on this box: $($pmf.ctx.src) ($($pmf.ctx.detail))"
+  if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
+}
+if ($pmf.moe26b.src -ne 'measured') {
+  $d = "26B --cpu-moe decode tok/s on this box: skipped ($($pmf.moe26b.detail))"
+  if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
+}
+# dual-GPU two-model residency + Optane always need hardware this single-GPU laptop lacks.
+if ($pmf.dual_gpu.status -ne 'measured') {
+  $d = "dual-GPU two-model residency (configs #3/#4): $($pmf.dual_gpu.status) - $($pmf.dual_gpu.detail)"
+  if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
+}
+if ($pmf.optane.status -ne 'measured') {
+  $d = "Optane cold-load/mmap latency (config #4): $($pmf.optane.status) - $($pmf.optane.detail)"
+  if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
+}
 
 Log ""
 LogStep "verdict: $($receipt.verdict)"
@@ -765,6 +1268,9 @@ $receipt.tiers          = [object[]]@($receipt.tiers)
 $receipt.remediations   = [object[]]@($receipt.remediations)
 $receipt.proves         = [object[]]@($receipt.proves)
 $receipt.does_not_prove = [object[]]@($receipt.does_not_prove)
+# H3: profile_measure.cold_swap is an array of per-tier records - same [object[]] force so a
+# one-tier install serializes "cold_swap":[{...}] (never a bare object) and an empty run "[]".
+$receipt.profile_measure.cold_swap = [object[]]@($receipt.profile_measure.cold_swap)
 $json = ([pscustomobject]$receipt) | ConvertTo-Json -Depth 8 -Compress
 Write-Output $json
 if ($receipt.verdict -eq 'fail') { exit 1 } else { exit 0 }

@@ -1,15 +1,18 @@
 # llama-swap.win-cpu.yaml — offload-harness family on the llama.cpp CPU backend
 # (native Windows; no GPU offload). Serving invariants (grammar reliability —
-# do NOT change): --jinja, f16 KV, no MTP, reasoning off. All layers run on CPU
+# do NOT change): --jinja, no MTP, reasoning off. All layers run on CPU
 # (no -ngl, no --flash-attn); --threads is set to the physical-core count by
-# install.ps1. The 26b MoE tier is OPTIONAL on CPU: it needs >=48GB RAM — omit
-# it from the group members below if your machine has less.
+# install.ps1. Context size + KV type are PROFILE-DRIVEN: install.ps1 (H2)
+# substitutes the CTX / KV-K / KV-V tokens from setup/templates/profiles.json (the
+# 'cpu' profile projects 8K/f16). The 26b MoE tier is OPTIONAL on CPU: it needs >=48GB
+# RAM, so install.ps1 keeps it when ram_tier is mid OR high (>= ~56GB) and drops it
+# (from both this file and the group members) on low/min.
 healthCheckTimeout: 300
 logLevel: info
 
 macros:
   common: >-
-    --ctx-size 8192 --cache-type-k f16 --cache-type-v f16
+    --ctx-size __CTX__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
     --jinja --reasoning off --threads __NTHREADS__ --port ${PORT} --host 127.0.0.1
 
 models:

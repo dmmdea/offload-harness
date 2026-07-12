@@ -1,0 +1,128 @@
+{
+  "_comment": "H2 profile -> serving-params map. PROJECTED defaults encoding the 12-config hardware matrix (docs/superpowers/plans/2026-07-11-agent-capabilities-and-hardware-matrix.md). install.ps1 Step 6 reads the profile id + ram_tier emitted by detect.ps1 and renders the backend llama-swap template with these values. H3 (selftest.ps1) MEASURES on each real box and refines these numbers; nothing here is measured yet.",
+  "_fields": {
+    "ctx_size": "--ctx-size served window (tokens).",
+    "kv_type": "q8_0|f16 -> --cache-type-k/--cache-type-v (kept symmetric; q8_0 V requires flash-attn on).",
+    "agent_ctx_tokens": "value for the agent's -ctx-tokens (compaction budget); matches ctx_size.",
+    "resident_tier": "the model that stays hot / is the agent's default (gemma4-26b-a4b|offload-e4b|gemma4-e2b).",
+    "include_26b": "whether the 26B-A4B model appears in the rendered yaml + swap group at all.",
+    "moe_26b": "gpu (-ngl 99, experts on GPU) | cpu_moe (--cpu-moe, experts in RAM) | drop (omit 26B). When cpu_moe, install.ps1 drops the 26B if ram_tier is low/min (no RAM path).",
+    "flash_attn": "on|off -> --flash-attn.",
+    "backend": "the llama-swap.win-<backend> template this profile renders from (cuda|vulkan|cpu|dual-cuda).",
+    "dual_resident": "dual-gpu only: render two models resident (no shared exclusive swap group).",
+    "notes": "operator-facing caveats."
+  },
+  "profiles": {
+    "blackwell-16": {
+      "ctx_size": 32768,
+      "kv_type": "q8_0",
+      "agent_ctx_tokens": 32768,
+      "resident_tier": "gemma4-26b-a4b",
+      "include_26b": true,
+      "moe_26b": "gpu",
+      "flash_attn": "on",
+      "backend": "cuda",
+      "notes": "Config #1 (5060 Ti 16GB, Blackwell sm_120). 26B resident full-GPU (-ngl 99). REQUIRES the Blackwell CUDA-12.8 sm_120 build (Task H4) - the pinned 12.4 asset lacks sm_120 and the 13.x asset segfaults the MMQ kernel into a ~5.6x-slower cuBLAS fallback. H3 may push ctx to 64K with q8. PROJECTED."
+    },
+    "ampere-16": {
+      "ctx_size": 32768,
+      "kv_type": "q8_0",
+      "agent_ctx_tokens": 32768,
+      "resident_tier": "gemma4-26b-a4b",
+      "include_26b": true,
+      "moe_26b": "gpu",
+      "flash_attn": "on",
+      "backend": "cuda",
+      "notes": "Ampere >=12GB band (3090-class defensive). 26B resident full-GPU. PROJECTED - H3 confirms OOM ceiling."
+    },
+    "volta-16": {
+      "ctx_size": 32768,
+      "kv_type": "q8_0",
+      "agent_ctx_tokens": 32768,
+      "resident_tier": "gemma4-26b-a4b",
+      "include_26b": true,
+      "moe_26b": "gpu",
+      "flash_attn": "on",
+      "backend": "cuda",
+      "notes": "Config #2 (V100 16GB, Volta sm_70). 26B resident full-GPU. RISK: confirm flash-attn on sm_70 is not a slow fallback (H3 measures). PROJECTED."
+    },
+    "ampere-8": {
+      "ctx_size": 16384,
+      "kv_type": "q8_0",
+      "agent_ctx_tokens": 16384,
+      "resident_tier": "offload-e4b",
+      "include_26b": true,
+      "moe_26b": "cpu_moe",
+      "flash_attn": "on",
+      "backend": "cuda",
+      "notes": "Configs #5/#6 (3070 8GB laptop; +64GB adds the 26B cpu-moe path). E4B resident full-GPU. 26B via --cpu-moe ONLY when ram_tier is mid/high; dropped on low/min (no RAM path). PROJECTED."
+    },
+    "blackwell-8": {
+      "ctx_size": 16384,
+      "kv_type": "q8_0",
+      "agent_ctx_tokens": 16384,
+      "resident_tier": "offload-e4b",
+      "include_26b": true,
+      "moe_26b": "cpu_moe",
+      "flash_attn": "on",
+      "backend": "cuda",
+      "notes": "Configs #8/#9 (5060 8GB Blackwell; +64GB adds 26B cpu-moe). E4B resident full-GPU. REQUIRES the Blackwell CUDA-12.8 sm_120 build (Task H4). 26B cpu-moe only when ram_tier mid/high; else dropped. PROJECTED."
+    },
+    "ampere-6": {
+      "ctx_size": 16384,
+      "kv_type": "q8_0",
+      "agent_ctx_tokens": 16384,
+      "resident_tier": "gemma4-e2b",
+      "include_26b": false,
+      "moe_26b": "drop",
+      "flash_attn": "on",
+      "backend": "cuda",
+      "notes": "Configs #10/#11 (3050 6GB). E2B resident. q8_0 KV is MANDATORY to reach 16K on 6GB. 26B dropped. PROJECTED - H3 confirms the 16K ceiling; may downshift to 8K."
+    },
+    "amd-rdna3": {
+      "ctx_size": 16384,
+      "kv_type": "f16",
+      "agent_ctx_tokens": 16384,
+      "resident_tier": "offload-e4b",
+      "include_26b": true,
+      "moe_26b": "cpu_moe",
+      "flash_attn": "on",
+      "backend": "vulkan",
+      "notes": "Config #7 (780M/gfx1103 + 64GB, Vulkan UMA). CONSERVATIVE: f16 KV + 16K ctx as the safe floor. MEASURE-AT-INSTALL (H3) may raise ctx to 32K and/or switch KV to q8_0 if the Vulkan FA + q8-KV canary is stable. Two-tier DROPPED (one iGPU). 26B cpu-moe (very slow) only when ram_tier mid/high; else dropped. PROJECTED."
+    },
+    "amd-gcn": {
+      "ctx_size": 8192,
+      "kv_type": "f16",
+      "agent_ctx_tokens": 8192,
+      "resident_tier": "gemma4-e2b",
+      "include_26b": false,
+      "moe_26b": "drop",
+      "flash_attn": "off",
+      "backend": "vulkan",
+      "notes": "Config #12 (Vega 7/GCN + 32GB, Vulkan). Weakest path: E2B, 8K f16, flash-attn OFF (older Vulkan FA unreliable), 26B dropped. PROJECTED."
+    },
+    "dual-gpu": {
+      "ctx_size": 32768,
+      "kv_type": "q8_0",
+      "agent_ctx_tokens": 32768,
+      "resident_tier": "gemma4-26b-a4b",
+      "include_26b": true,
+      "moe_26b": "gpu",
+      "flash_attn": "on",
+      "backend": "dual-cuda",
+      "dual_resident": true,
+      "notes": "Configs #3/#4 (5060 Ti + V100 32GB; #4 adds 128GB+Optane). TWO models resident, NO shared exclusive swap group: 26B architect pinned to CUDA_VISIBLE_DEVICES=0, E4B editor pinned to CUDA_VISIBLE_DEVICES=1 - both -ngl 99 -> two-tier with ZERO swap. big_ram (128GB, config #4) adds a 26B --cpu-moe fallback note. Per-GPU device assignment (which physical card is device 0 vs 1) and heterogeneous-arch driver scope (a multi-arch sm_70+sm_120 build - Task H4) are the OPERATOR's to confirm; this profile only places the models. Needs a multi-arch build for heterogeneous pairs. PROJECTED."
+    },
+    "cpu": {
+      "ctx_size": 8192,
+      "kv_type": "f16",
+      "agent_ctx_tokens": 8192,
+      "resident_tier": "offload-e4b",
+      "include_26b": true,
+      "moe_26b": "cpu_moe",
+      "flash_attn": "off",
+      "backend": "cpu",
+      "notes": "No usable GPU. E4B on CPU, 8K f16, flash-attn off (CPU backend has no -ngl/--flash-attn; the cpu template omits both). 26B kept when ram_tier is mid OR high (>= ~56GB); dropped on low/min (no RAM path). On CPU 'cpu_moe' is nominal - all layers already run on CPU. PROJECTED."
+    }
+  }
+}

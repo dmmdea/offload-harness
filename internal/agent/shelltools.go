@@ -19,15 +19,18 @@ const (
 
 // shellRunner runs a command inside the OS sandbox. The seam lets tests inject a
 // fake — the real cage (sandbox.Run) is Linux-only and re-execs the binary into
-// namespaces, so it can't run under the unit-test host.
+// namespaces, so it can't run under the unit-test host. Shared with runtool.go.
 type shellRunner func(ctx context.Context, spec sandbox.Spec) (sandbox.Result, error)
 
-// ShellTools builds the P4.6 run_shell tool: it executes a command inside the OS
-// sandbox (no network, filesystem confined to the worktree (RW) + scratch,
-// dangerous syscalls blocked, i386 ABI closed). It is registered ONLY when the
-// caller has opted in AND sandbox.Available() is true; it is gated AGAIN at
-// runtime by the deny→ask→allow broker, which audits every command. worktree is
-// the RW working directory; scratch is a RW temp dir.
+// ShellTools builds the run_shell tool: it executes an arbitrary /bin/sh command
+// line inside the LINUX OS cage (no network, filesystem confined to the worktree
+// (RW) + scratch, dangerous syscalls blocked, i386 ABI closed). run_shell is
+// LINUX-ONLY — the builder grants it only on Linux (an arbitrary command line
+// makes an executable allowlist meaningless, so on Windows the restricted `run`
+// tool is used instead). It is registered only when the caller opts in AND the
+// Linux cage is available; it is gated AGAIN at runtime by the deny→ask→allow
+// broker, which audits every command. worktree is the RW working directory;
+// scratch is a RW temp dir.
 func ShellTools(pol *Policy, worktree, scratch string) []Tool {
 	return []Tool{shellTool(pol, worktree, scratch, sandbox.Run)}
 }
@@ -37,7 +40,7 @@ func shellTool(pol *Policy, worktree, scratch string, run shellRunner) Tool {
 	return Tool{
 		ToolSpec: ToolSpec{
 			Name:        "run_shell",
-			Description: "Run a shell command (/bin/sh -c) inside an OS sandbox: NO network, filesystem confined to the worktree (writable) plus a scratch dir, dangerous syscalls blocked. Use it for builds, tests, and file manipulation. Returns the exit code, stdout, and stderr.",
+			Description: "Run a shell command (/bin/sh -c) inside the Linux OS cage: NO network egress, filesystem confined to the worktree (writable) plus a scratch dir, dangerous syscalls blocked, the i386 ABI closed. Use it for builds, tests, and file manipulation. Returns the exit code, stdout, and stderr. Off by default; Linux-only.",
 			Schema:      json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"the shell command line to run"}},"required":["command"]}`),
 		},
 		Exec: func(ctx context.Context, args string) (string, error) {

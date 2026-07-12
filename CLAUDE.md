@@ -60,10 +60,28 @@ pwsh -NoProfile -File setup\selftest.ps1    # receipt JSON: verdict pass|warn|fa
 ```bash
 # Coding agent (from repo root, after `go build -o local-agent ./cmd/local-agent`):
 local-agent --root . --base http://127.0.0.1:11436 --max-steps 4 "list the files and summarize README.md"   # read-only one-shot
+local-agent --profile edit --allow-write --allow-overwrite "rename oldName to newName in util.go"            # narrowed toolset + few-shot
+local-agent --two-tier --allow-write "add a pricing section to index.html"                                   # architect(26B)->editor(E4B), one swap
 local-agent --serve --listen 127.0.0.1:18800 --base http://127.0.0.1:11436                                   # OpenAI server
 # Legacy WSL/NVIDIA GUI stack:
 bash scripts/openwebui-stack.sh
 ```
+
+## Agent tools & flags (component map)
+
+Tools live in `internal/agent/`. Read-only by default: `list_dir`, ranged `read_file`
+(`offset`/`limit`, `tools.go`), `search_files` (regex/glob, 100-match cap, `greptool.go`),
+`summarize_file` (offload digest, `tools.go`), the in-process `offload_*` cascade. Opt-in (each
+behind an `--allow-*`): `write_file`/`edit_file`/`delete_file`, `web_fetch`, `web_search`, `run`
+(`runtool.go`), `run_shell` (`shelltools.go`, **Linux only**), the `github_*` tools. Working memory:
+`update_plan` + AGENT.md loading (`worktree_memory.go`, re-inject cadence). Profiles + exemplars in
+`profiles.go`; two-tier architect/editor in `twotier.go`; transcript compaction in `compaction.go`.
+
+Key flags (all `--allow-*` OFF by default): `-ctx-tokens` (default 16384; compaction budget = match
+the served `--ctx-size`), `-profile general|edit|build|research|github` (narrows tools + adds a tuned
+prompt/exemplars; can only narrow), `-allow-run` (the allowlisted direct-exec `run` tool),
+`-allow-shell` (Linux-only `run_shell`), `-two-tier` + `-architect-model` (default `gemma4-26b-a4b`)
+/ `-editor-model` (default `offload-e4b`). `--profile` and `--two-tier` are mutually exclusive.
 
 ## Invariants — DO NOT BREAK
 
@@ -76,7 +94,13 @@ bash scripts/openwebui-stack.sh
    fallback — the harness holds no cloud credentials by design.
 3. **Policy-broker order:** the agent's single broker enforces the step/tool caps (esp.
    `--max-same-tool`, the exact-repeat circuit breaker) *before* executing a tool. Capability flags
-   (`--allow-write/-overwrite/-delete/-fetch/-shell/-search/-github`) are all **OFF by default**.
+   (`--allow-write/-overwrite/-delete/-fetch/-search/-run/-shell/-github`) are all **OFF by default**.
+   The `run` tool (`--allow-run`) execs an **allowlisted program directly, no shell** (`go`, `gofmt`,
+   `python`, `python3`, `pytest`, `npm`, `node`, `cargo`, `git`; bare name only, resolved on the
+   trusted PATH). **Confinement differs by OS:** Linux uses the Landlock+seccomp+userns cage (no
+   network, FS-confined); native Windows uses a Job Object + low-integrity token — **writes** outside
+   the worktree are blocked but **reads and network are NOT contained** (weaker than Linux; the tool
+   description says so). `run_shell` (`--allow-shell`) is **Linux only**.
 4. **Worktree confinement:** writes are confined to `--worktree` (default `--root`); the agent must
    never write outside it or into `.git`.
 5. **Audit trail lives OUTSIDE any worktree** (`~/.local-offload/agent-audit.jsonl`) so a run cannot
@@ -91,7 +115,7 @@ bash scripts/openwebui-stack.sh
 | `main.go` | The `local-offload` CLI + MCP entry (subcommand dispatch, doctor/ledger/models). |
 | `internal/pipeline/` | The offload cascade (tiers, escalation, grounding, recordless path for the agent). |
 | `internal/agent/` | Agent loop, tools, and the policy broker (`Build()` is the shared constructor). |
-| `internal/sandbox/` | OS sandbox for `run_shell` (Linux only). |
+| `internal/sandbox/` | OS cage for the runner: Landlock+seccomp+userns on Linux (`run` + `run_shell`); Job Object + low-integrity token on Windows (`run` only — writes confined, reads/network NOT). |
 | `cmd/local-agent/` | The coding-agent CLI (`main.go`) + OpenAI server (`serve.go`, loopback guard). |
 | `internal/mcpserver/` | MCP tool surface (incl. `agent_run`). |
 | `setup/` | Cross-vendor installer: `detect.ps1`, `install.ps1`, `selftest.ps1`, `templates/`, `SETUP-AGENT.md`. |

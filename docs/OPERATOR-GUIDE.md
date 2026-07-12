@@ -163,9 +163,58 @@ the final answer. The endpoint is **unauthenticated** — keep it loopback-only.
 | `--allow-delete` | `delete_file` | requires `--allow-write`. |
 | `--allow-fetch` | `web_fetch` | egress-allowlist gated; add hosts with repeatable `--egress-host` (bare host or `*.host`). Deny-all by default. |
 | `--allow-search` | `web_search` (DuckDuckGo, keyless) | auto-allowlists the search host. |
+| `--allow-run` | `run` — an allowlisted program run **directly** (no shell) in the OS sandbox | Linux **and** Windows. Allowlist + broker are the control (see "The runner" below). |
 | `--allow-shell` | `run_shell` in the OS sandbox | **Linux only**; no network, FS-confined, syscall-limited. |
 | `--allow-github` | `github_api` / `create_repo` / `upload_file` | token from `$GITHUB_TOKEN`, repo from `$GITHUB_REPO`. Use a least-privilege token. |
 | `--listen-trusted-network` | bind `--serve` beyond loopback | prints a loud warning; only on a trusted LAN. |
+
+### Tool profiles (`--profile`)
+
+`--profile <name>` narrows the advertised tools to a curated subset and adds a tuned prompt + a couple
+of worked few-shot exemplars — a small local model selects tools more reliably with fewer advertised.
+A profile can only **narrow** the enabled set; it never grants a tool your `--allow-*` flags didn't
+turn on.
+
+| Profile | Use it for | Advertised tools (subject to your `--allow-*`) |
+|---|---|---|
+| `general` (default) | anything; today's full capability-gated set | all enabled tools |
+| `edit` | a focused code edit in an existing repo | `list_dir`, `read_file`, `search_files`, `edit_file`, `write_file`, `update_plan` |
+| `build` | edit-then-verify (needs `--allow-run` / `--allow-shell`) | edit set **+ `run` / `run_shell`** |
+| `research` | find + read sources (needs `--allow-search`/`--allow-fetch`) | `web_search`, `web_fetch`, `summarize_file`, `read_file`, `list_dir` |
+| `github` | prepare files then publish (needs `--allow-github`) | edit set **+ `github_api` / `github_create_repo` / `github_upload_file`** |
+
+`--profile` and `--two-tier` are **mutually exclusive** (two-tier picks the architect/editor toolsets
+itself); the CLI rejects the combination.
+
+### The runner (`--allow-run`) + how to extend the allowlist
+
+`run` executes an **allowlisted program directly — no shell**: you pass `command` (a bare executable
+name) and an `args` array that is handed to the program literally (no pipes, globs, redirection, or
+`&&`). The executable allowlist is the real control:
+
+```
+go, gofmt, python, python3, pytest, npm, node, cargo, git
+```
+
+A command must be a **bare name** (a path or `./go` is refused) that resolves on the **trusted system
+PATH** — a `go.exe` planted inside the worktree is not resolvable and is refused. Every accepted
+command is broker-gated and written to the audit log. **On native Windows, reads and network are not
+contained** (Job Object + low-integrity writes only) — see [Diagnose](#6-diagnose) / README Security.
+
+**Extend the allowlist** by editing `runAllowedExecutables` in `internal/agent/runtool.go` and
+rebuilding `local-agent`. It is a compile-time list on purpose (no runtime flag) so the confinement
+surface is auditable in the source.
+
+### Two-tier (`--two-tier`) — plan once, then execute
+
+`--two-tier` runs aider's architect/editor one-shot handoff: the **architect** (`--architect-model`,
+default `gemma4-26b-a4b`) drafts one complete, standalone plan with read/search tools only, then the
+**editor** (`--editor-model`, default `offload-e4b`) executes that plan as its **sole** message — it
+never sees the original request or any history. On a single GPU this is **exactly one cold model
+swap** (plan-once, not per-step alternation); on a dual-GPU box (profile `dual-gpu`) the two models
+are resident on separate cards, so it is **zero swap**. A degenerate/empty architect plan falls back
+to a single-model run of the original objective (logged as `fallback=…`). `--allow-*` flags gate the
+**editor's** write tools; the architect is always read-only.
 
 ### Circuit breakers & budget
 
@@ -175,6 +224,11 @@ the final answer. The endpoint is **unauthenticated** — keep it loopback-only.
 - `--max-tokens` (default 4096) — planner tokens per completion. Must be large enough for the biggest
   tool-call argument (e.g. a whole file's content) or the model's JSON gets cut off mid-string and
   the call fails. 4096 is the tested value; do not lower it for write-heavy runs.
+- `--ctx-tokens` (default 16384) — the served model context window the loop's transcript compaction
+  budgets against. **Set it to match the tier's served `--ctx-size`** (the CUDA tier serves 16384;
+  the install prints the profile's value). The derived usable **input budget** is
+  `ctx-tokens − max-tokens − 512`. Setting it too high lets the transcript overflow the real window
+  (a 400); too low compacts sooner than necessary.
 
 ### Context-budget guidance (why prompt shape matters)
 
@@ -200,6 +254,31 @@ low so a stuck model gets its tool disabled quickly.
 5. These are guardrails, not conventions: the loop hard-caps at `--max-steps` (12) and disables any
    tool called more than `--max-same-tool` (3) times per run, so a bad prompt costs one failed run,
    never the installation.
+
+### Per-hardware-profile serving expectations
+
+The installer resolves a hardware **profile** (`detect.ps1` → `install.ps1`, see
+`setup/SETUP-AGENT.md`) and renders the serving template + writes the profile's `agent_ctx_tokens`
+to `installed.json`. Run the agent with `-model <resident_tier>` and `-ctx-tokens <agent_ctx_tokens>`
+matching the profile. These are **projected defaults**; `selftest.ps1` measures on the real box and
+its `receipt.profile_measure.tuned` block carries any measured override to apply.
+
+| Profile | Resident/default tier | Served ctx (`-ctx-tokens`) | KV | 26B-A4B |
+|---|---|---|---|---|
+| `blackwell-16` / `ampere-16` / `volta-16` | `gemma4-26b-a4b` | 32768 | q8_0 | full-GPU resident |
+| `dual-gpu` | `gemma4-26b-a4b` (architect) + `offload-e4b` (editor), both resident | 32768 | q8_0 | resident (two-tier, **zero swap**) |
+| `ampere-8` / `blackwell-8` | `offload-e4b` | 16384 | q8_0 | via `--cpu-moe` only when RAM ≥ ~56 GB; else dropped |
+| `amd-rdna3` | `offload-e4b` (Vulkan) | 16384 | f16 (conservative) | `--cpu-moe`, very slow; else dropped |
+| `ampere-6` | `gemma4-e2b` | 16384 | q8_0 (**mandatory** for 16K on 6 GB) | dropped |
+| `amd-gcn` | `gemma4-e2b` (Vulkan) | 8192 | f16, flash-attn off | dropped |
+| `cpu` | `offload-e4b` (CPU) | 8192 | f16, flash-attn off | `--cpu-moe` when RAM ≥ ~56 GB; else dropped |
+
+Notes: q8_0 KV keeps the KV cache ~half the size (V-quant needs flash-attn on, which the CUDA/Vulkan
+templates set); the 26B is placed full-GPU only on ≥12 GB single-card profiles, `--cpu-moe` (experts
+in RAM, much slower — "reduce, not enable") on 8 GB + big-RAM boxes, and dropped where there is no
+RAM path. On the dual-GPU profile the two models sit on separate cards so `--two-tier` costs no swap.
+Anything *italic/projected* is refined by the install-time measurement — trust the selftest receipt
+over the projected table when they differ.
 
 | Failure | Fix |
 |---|---|

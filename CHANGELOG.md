@@ -4,6 +4,24 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.8.0] - 2026-07-12
+
+### Added — local coding agent capabilities (survive & drive complex multi-step tasks)
+- **Transcript compaction + tool-result cap**: the agent loop stays within the served window (keep system + objective + recent turns full, elide older tool outputs, cap any single result), with a one-shot harder-compact retry on overflow instead of aborting — long tasks complete instead of crashing.
+- **New tools**: `search_files` (worktree-confined regex grep, per-file grouped, 100-match cap), ranged `read_file` (offset/limit lines + continuation hints), `summarize_file` (digests a big file via the local offload cascade so its bytes never enter the transcript).
+- **Working memory**: a per-workspace `AGENT.md` (loaded fenced-as-untrusted) and an `update_plan` scratchpad the loop re-injects on a cadence.
+- **Per-task tool profiles** (`--profile edit|build|research|github`): a curated tool subset + tuned prompt + worked few-shot exemplars (small models select tools more reliably with fewer advertised); a profile can only narrow, never grant.
+- **Restricted runner** (`--allow-run`, OFF by default): runs an allowlisted program directly (no shell) inside the OS sandbox — Linux (Landlock/seccomp) and **Windows (Job Object + low-integrity token, worktree-write-confined + transient relabel)**. `run_shell` (arbitrary shell) is **Linux-only**. Honest residual risk: on native Windows, writes/resources/allowlist are confined but **reads and network are not** — documented in the security section.
+- **Architect/editor two-tier mode** (`--two-tier`): a planning model drafts a complete plan, a separate edit model executes it (aider-style one-shot handoff) — one cold swap, or zero-swap on a dual-GPU host.
+- **Larger context**: `--ctx-tokens` + a 16K CUDA agent tier with q8_0 KV (measured throughput-neutral).
+
+### Added — per-hardware optimization matrix
+- `detect.ps1` classifies the host into one of 10 arch-profiles (Blackwell/Ampere/Volta/RDNA3/GCN × VRAM band + RAM tier + GPU count); `install.ps1` renders profile-driven serving (context, KV type, 26B-A4B placement, and a dual-GPU two-model-resident config); `selftest.ps1` **measures** the projections on the real box and records measured-vs-projected honestly.
+- Documents the **Blackwell (sm_120) CUDA-12.8 build requirement** — neither stock Windows CUDA prebuilt works (12.4 lacks sm_120; 13.x segfaults the MMQ kernel ~5.6× slower).
+
+### Changed
+- README security section + OPERATOR-GUIDE + SETUP-AGENT + CLAUDE.md updated to document every tool, flag, the runner's honest posture, and the profile matrix.
+
 ## [0.7.0] - 2026-07-09
 
 ### Added

@@ -6,11 +6,21 @@
 #
 # Env overrides:  OFFLOAD_HOME (default $HOME\offload-stack) | OFFLOAD_WITH_FAMILY (default 1)
 #                 OFFLOAD_BACKEND (override detect.ps1: cuda|vulkan|cpu)
+#                 OFFLOAD_PROFILE / OFFLOAD_RAM_TIER / OFFLOAD_BIG_RAM (override the
+#                 detected serving profile — used by -RenderOnly and by testing a synthetic box)
+#
+# -RenderOnly (H2): resolve the profile + render llama-swap.yaml ONLY (Step 1 + Step 6),
+#   then exit. No winget, no downloads, no Go build, no manifest. Requires OFFLOAD_BACKEND
+#   + OFFLOAD_PROFILE (and OFFLOAD_RAM_TIER) set so no hardware detection runs. -RenderOut
+#   overrides the output path (default $OFFLOAD_HOME\llama-swap.yaml). This is the render
+#   self-test / dry-run path — it never touches the network or a real install.
 #
 # installed.json (version manifest, written at $OFFLOAD_HOME\installed.json): each component's
 # SKIP test requires BOTH the artifact to exist on disk AND the manifest to record the pinned
 # version that produced it. Bumping a tag/sha in $PINNED therefore forces a re-download/re-extract
 # of exactly that component on the next run, even though the old artifact is still sitting there.
+[CmdletBinding()]
+param([switch]$RenderOnly, [string]$RenderOut)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is ~10x faster without the progress UI
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -254,6 +264,138 @@ function Get-OldVersion {
 }
 
 # ---------------------------------------------------------------------------
+# H2: resolve profile-driven serving params. Reads setup/templates/profiles.json,
+# looks up $ProfileId, and returns a hashtable of the concrete render values. An
+# UNKNOWN (or null) profile returns @{ known=$false } so Step 6 falls back to the
+# backend template's current per-backend defaults. Pure function of its args +
+# the on-disk profiles.json (no hardware access) — unit-testable.
+#
+# Returned keys:
+#   known       [bool]    profile was found in profiles.json
+#   ctx         [string]  --ctx-size value
+#   kv_k, kv_v  [string]  --cache-type-k / -v (kept symmetric = kv_type)
+#   flash_attn  [string]  on|off
+#   agent_ctx   [int]     the agent's -ctx-tokens (matches ctx)
+#   backend     [string]  cuda|vulkan|cpu|dual-cuda (which template to render)
+#   dual        [bool]    dual-gpu two-resident render
+#   include_26b [bool]    keep the 26B model+group-member AFTER the ram gate
+#   moe_26b     [string]  the __MOE_26B__ substitution string ('' when dropped)
+#   moe_mode    [string]  gpu|cpu_moe|drop (post-gate, for logging)
+#   notes       [string]  operator-facing note
+# ---------------------------------------------------------------------------
+function Resolve-ProfileParams {
+  param([string]$ProfileId, [string]$RamTier, [bool]$BigRam, [string]$ProfilesJsonPath, [string]$Backend)
+  # Sane fallback: an unknown/absent profile renders the backend's ORIGINAL baked
+  # defaults (pre-H2 values), so the config is always valid even off-matrix. The
+  # backend templates are now fully tokenized, so the fallback MUST supply values.
+  $defaults = @{
+    cuda   = @{ ctx = '16384'; kv = 'q8_0'; fa = 'on';  moe = '--cpu-moe -ngl 999'; resident = 'offload-e4b' }
+    vulkan = @{ ctx = '8192';  kv = 'f16';  fa = 'on';  moe = '-ngl 999';          resident = 'offload-e4b' }
+    cpu    = @{ ctx = '8192';  kv = 'f16';  fa = 'off'; moe = '';                  resident = 'offload-e4b' }
+  }
+  function New-Fallback {
+    param([string]$B)
+    $d = $defaults[$B]
+    if (-not $d) { $d = $defaults['cuda'] }
+    return @{ known = $false; ctx = $d.ctx; kv_k = $d.kv; kv_v = $d.kv; flash_attn = $d.fa;
+      agent_ctx = [int]$d.ctx; backend = $B; dual = $false; resident_tier = $d.resident;
+      include_26b = $true; moe_26b = $d.moe; moe_mode = 'template'; notes = 'fallback: backend defaults (unknown profile)' }
+  }
+  if (-not $ProfileId) { return (New-Fallback -B $Backend) }
+  if (-not (Test-Path $ProfilesJsonPath)) { throw "profiles.json not found: $ProfilesJsonPath" }
+  $doc = Get-Content -Raw $ProfilesJsonPath | ConvertFrom-Json
+  if (-not $doc.profiles.PSObject.Properties[$ProfileId]) {
+    return (New-Fallback -B $Backend)   # unknown profile -> backend defaults (sane fallback)
+  }
+  $p = $doc.profiles.$ProfileId
+
+  # --cpu-moe needs a RAM path (>=~48GB). We keep the 26B on cpu_moe ONLY when
+  # ram_tier is mid|high; on low|min there is no RAM path so the 26B is dropped.
+  # 'gpu' placement never depends on RAM; 'drop' is always dropped.
+  $moeMode = $p.moe_26b
+  $include = [bool]$p.include_26b
+  if ($moeMode -eq 'drop') { $include = $false }
+  elseif ($moeMode -eq 'cpu_moe' -and $RamTier -notin @('mid','high')) {
+    $include = $false; $moeMode = 'drop'   # cpu_moe requested but no RAM path -> drop
+  }
+
+  # __MOE_26B__ substitution string for the 26B llama-server cmd.
+  #   gpu     -> experts on GPU, full offload
+  #   cpu_moe -> experts in RAM, non-expert layers on GPU
+  $moeStr = ''
+  if ($include) {
+    if ($moeMode -eq 'gpu') { $moeStr = '-ngl 99' }
+    elseif ($moeMode -eq 'cpu_moe') { $moeStr = '--cpu-moe -ngl 999' }
+  }
+
+  return @{
+    known         = $true
+    ctx           = "$($p.ctx_size)"
+    kv_k          = $p.kv_type
+    kv_v          = $p.kv_type
+    flash_attn    = $p.flash_attn
+    agent_ctx     = [int]$p.ctx_size
+    backend       = $p.backend
+    dual          = [bool]$p.dual_resident
+    resident_tier = $p.resident_tier
+    include_26b   = $include
+    moe_26b       = $moeStr
+    moe_mode      = $moeMode
+    notes         = $p.notes
+  }
+}
+
+# ---------------------------------------------------------------------------
+# H2: drop the gemma4-26b-a4b model block from a rendered llama-swap yaml AND
+# remove it from every group's members list. Operates on the rendered text so it
+# works for all four templates (cuda/vulkan/cpu/dual-cuda). Returns the edited
+# text. Pure string transform — unit-testable.
+#   * Model block: the top-level "  gemma4-26b-a4b:" key through the next
+#     top-level 2-space model key or a 0-indent line (groups:). A leading
+#     comment block immediately above it (the CPU template's OPTIONAL note) is
+#     also removed so no dangling comment is left behind.
+#   * Group members: strip ", gemma4-26b-a4b" / "gemma4-26b-a4b, " / a lone entry
+#     from any "members: [ ... ]" inline list.
+# ---------------------------------------------------------------------------
+function Remove-26bFromYaml {
+  param([string]$Text)
+  $lines = $Text -split "`r?`n"
+  $out = New-Object System.Collections.Generic.List[string]
+  $i = 0
+  while ($i -lt $lines.Count) {
+    $line = $lines[$i]
+    if ($line -match '^\s{2}gemma4-26b-a4b:\s*$') {
+      # Drop any immediately-preceding comment lines we already emitted (the
+      # 2-space "# ..." note that introduces this model).
+      while ($out.Count -gt 0 -and $out[$out.Count - 1] -match '^\s{2}#') {
+        $out.RemoveAt($out.Count - 1)
+      }
+      # Skip this model block: consume lines until the next 2-space top-level key
+      # (another model) or a 0-indent line (e.g. "groups:") or EOF.
+      $i++
+      while ($i -lt $lines.Count) {
+        $l = $lines[$i]
+        if ($l -match '^\s{2}\S' -or $l -match '^\S' ) { break }   # next key / dedent
+        $i++
+      }
+      continue
+    }
+    if ($line -match 'members:\s*\[') {
+      # Remove the 26B entry from the inline members list, tidy separators.
+      $new = $line
+      $new = $new -replace ',\s*gemma4-26b-a4b', ''
+      $new = $new -replace 'gemma4-26b-a4b\s*,\s*', ''
+      $new = $new -replace 'gemma4-26b-a4b', ''
+      $new = $new -replace '\[\s*,', '['
+      $new = $new -replace ',\s*\]', ']'
+      $out.Add($new); $i++; continue
+    }
+    $out.Add($line); $i++
+  }
+  return ($out -join "`n")
+}
+
+# ---------------------------------------------------------------------------
 # Resolve config
 # ---------------------------------------------------------------------------
 if ($env:OFFLOAD_HOME) { $HOME_DIR = $env:OFFLOAD_HOME } else { $HOME_DIR = Join-Path $HOME 'offload-stack' }
@@ -263,29 +405,52 @@ $swapDir  = Join-Path $HOME_DIR 'llama-swap'
 $modelDir = Join-Path $HOME_DIR 'models'
 $harnessDir = Join-Path $HOME_DIR 'harness'
 $stageDir = Join-Path $HOME_DIR '.stage'
-foreach ($d in @($HOME_DIR, $llamaDir, $swapDir, $modelDir, $harnessDir, $stageDir)) {
-  New-Item -ItemType Directory -Force -Path $d | Out-Null
+# -RenderOnly is a side-effect-free dry run: it renders ONE yaml and touches no artifact/build/
+# manifest paths, so creating the full install tree (llama/llama-swap/models/harness/.stage) would
+# just litter $HOME\offload-stack with empty dirs when OFFLOAD_HOME is unset. Under -RenderOnly
+# create ONLY the render's output parent; a normal install still builds the whole tree below.
+if ($RenderOnly) {
+  if ($RenderOut) { $renderOutParent = Split-Path -Parent $RenderOut } else { $renderOutParent = $HOME_DIR }
+  if ($renderOutParent) { New-Item -ItemType Directory -Force -Path $renderOutParent | Out-Null }
+} else {
+  foreach ($d in @($HOME_DIR, $llamaDir, $swapDir, $modelDir, $harnessDir, $stageDir)) {
+    New-Item -ItemType Directory -Force -Path $d | Out-Null
+  }
 }
 
 # R3.3: transcript everything to $OFFLOAD_HOME\install.log from here on.
+# -RenderOnly is a side-effect-free dry run — no transcript, no manifest.
 $logPath = Join-Path $HOME_DIR 'install.log'
-try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
-Start-Transcript -Path $logPath -Append | Out-Null
+if (-not $RenderOnly) {
+  try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
+  Start-Transcript -Path $logPath -Append | Out-Null
+}
 
 # R3.5: load the prior manifest (if any) before doing any work.
 $manifestPath = Join-Path $HOME_DIR 'installed.json'
 $manifestOld = $null
-if (Test-Path $manifestPath) {
+if ((Test-Path $manifestPath) -and (-not $RenderOnly)) {
   try { $manifestOld = Get-Content -Raw $manifestPath | ConvertFrom-Json } catch { $manifestOld = $null }
 }
 $manifestComponents = @{}   # populated as each component completes/confirms this run
 
-Write-Host "==> offload-harness installer | home=$HOME_DIR | with_family=$withFamily" -ForegroundColor White
-Write-Host "    log: $logPath" -ForegroundColor White
+if ($RenderOnly) { Write-Host "==> offload-harness RENDER-ONLY (dry run) | home=$HOME_DIR" -ForegroundColor White }
+else {
+  Write-Host "==> offload-harness installer | home=$HOME_DIR | with_family=$withFamily" -ForegroundColor White
+  Write-Host "    log: $logPath" -ForegroundColor White
+}
 
 # ---------------------------------------------------------------------------
-# Step 1: backend
+# Step 1: backend + hardware profile (H2)
+# detect.ps1 emits backend + profile + ram_tier + big_ram. The backend picks the
+# llama.cpp binary; the profile picks the serving params (Step 6). Both are
+# overridable: OFFLOAD_BACKEND, OFFLOAD_PROFILE, OFFLOAD_RAM_TIER (for testing a
+# synthetic box / a render-only dry run without the real hardware).
 # ---------------------------------------------------------------------------
+$profileId = $null; $ramTier = $null; $bigRam = $false
+if ($RenderOnly -and -not $env:OFFLOAD_BACKEND) {
+  throw "-RenderOnly requires OFFLOAD_BACKEND (and OFFLOAD_PROFILE) set so no hardware detection runs"
+}
 if ($env:OFFLOAD_BACKEND) {
   $backend = $env:OFFLOAD_BACKEND.Trim().ToLower()
   Write-Host "DO    backend: OFFLOAD_BACKEND override = $backend" -ForegroundColor Cyan
@@ -299,16 +464,24 @@ if ($env:OFFLOAD_BACKEND) {
   if ($LASTEXITCODE -ne 0) { throw "detect.ps1 signalled a hard blocker (exit $LASTEXITCODE) - see its stderr above" }
   $jsonLine = ($detectOut | Where-Object { $_ -match '^\s*\{.*\}\s*$' } | Select-Object -Last 1)
   if (-not $jsonLine) { throw "detect.ps1 produced no JSON verdict line" }
-  $backend = ($jsonLine | ConvertFrom-Json).backend
+  $verdictObj = $jsonLine | ConvertFrom-Json
+  $backend   = $verdictObj.backend
+  $profileId = $verdictObj.profile
+  $ramTier   = $verdictObj.ram_tier
+  if ($null -ne $verdictObj.big_ram) { $bigRam = [bool]$verdictObj.big_ram }
 }
+# Overrides win over detect (and cover the OFFLOAD_BACKEND-override path, where
+# detect never ran and $profileId/$ramTier are still null).
+if ($env:OFFLOAD_PROFILE)  { $profileId = $env:OFFLOAD_PROFILE.Trim() }
+if ($env:OFFLOAD_RAM_TIER) { $ramTier   = $env:OFFLOAD_RAM_TIER.Trim().ToLower() }
+if ($null -ne $env:OFFLOAD_BIG_RAM) { $bigRam = ($env:OFFLOAD_BIG_RAM -ne '0') }
 if ($backend -notin @('cuda','vulkan','cpu')) { throw "unsupported backend '$backend' (expected cuda|vulkan|cpu)" }
-Write-Host "OK    backend = $backend" -ForegroundColor Green
+if (-not $ramTier) { $ramTier = 'min' }   # conservative default when unknown (drops the RAM-gated 26B path)
+Write-Host "OK    backend = $backend | profile = $(if ($profileId) { $profileId } else { '(none - backend defaults)' }) | ram_tier = $ramTier$(if ($bigRam) { ' | big_ram' } else { '' })" -ForegroundColor Green
 
-# ---------------------------------------------------------------------------
-# Step 2: prerequisites via winget (Git + Go >=1.26). Never install CUDA/ROCm.
-# R3.1: refresh $env:Path in-process after any install (no new shell available).
-# R3.2: winget installs are silent and pre-accept both agreement prompts.
-# ---------------------------------------------------------------------------
+# -RenderOnly skips all artifact acquisition (Steps 2-5): it renders the config
+# from the templates + profiles.json only. Test-Go126 is defined outside the guard
+# so Step 7 (also guarded) can still reference it in a normal run.
 function Test-Go126 {
   $g = Get-Command go -ErrorAction SilentlyContinue
   if (-not $g) { return $false }
@@ -317,6 +490,7 @@ function Test-Go126 {
   if ($parts.Count -lt 2) { return $false }
   return ([int]$parts[0] -gt 1) -or ([int]$parts[0] -eq 1 -and [int]$parts[1] -ge 26)
 }
+if (-not $RenderOnly) {
 $wingetFlags = @('--accept-package-agreements', '--accept-source-agreements', '--silent')
 Step 'prereq: Git' `
   { [bool](Get-Command git -ErrorAction SilentlyContinue) } `
@@ -391,23 +565,52 @@ foreach ($key in $modelKeys) {
     }
   $manifestComponents[$key] = $m.version
 }
+}  # end if (-not $RenderOnly) — Steps 2-5 (artifact acquisition)
 
 # ---------------------------------------------------------------------------
-# Step 6: render llama-swap.yaml from the backend template (token substitution).
+# Step 6: render llama-swap.yaml PROFILE-DRIVEN (H2). The template is chosen by
+# the profile's backend (cuda|vulkan|cpu|dual-cuda), and the profile's serving
+# params (ctx / KV / flash-attn / 26B MoE placement) are token-substituted on top
+# of the existing __LLAMA_BIN__/__MODELS__/__NTHREADS__ path substitution. When
+# the profile drops the 26B (moe=drop, or cpu_moe with no RAM path), the 26B
+# model block AND its swap-group members are removed. Unknown/absent profile ->
+# the backend template's own baked defaults (sane fallback).
 # R3.6: rendered paths use forward slashes - llama-swap on Windows chokes on backslash
 # escapes inside its YAML string scalars; Windows APIs accept forward slashes natively.
 # ---------------------------------------------------------------------------
-$yamlDest = Join-Path $HOME_DIR 'llama-swap.yaml'
-Step "render llama-swap.yaml ($backend)" `
+$profilesJson = Join-Path (Join-Path $scriptDir 'templates') 'profiles.json'
+$pp = Resolve-ProfileParams -ProfileId $profileId -RamTier $ramTier -BigRam $bigRam -ProfilesJsonPath $profilesJson -Backend $backend
+# The template to render: the profile's backend (dual-gpu -> dual-cuda), else the
+# fallback's backend (= the detected backend). dual-cuda is CUDA-only; guard a stray override.
+$tplBackend = $pp.backend
+if ($tplBackend -eq 'dual-cuda' -and $backend -ne 'cuda') {
+  throw "profile '$profileId' wants the dual-cuda template but the resolved backend is '$backend' (need CUDA binaries)"
+}
+$agentCtxTokens = $pp.agent_ctx   # Deliverable 4 (summary)
+
+if ($RenderOut) { $yamlDest = $RenderOut } else { $yamlDest = Join-Path $HOME_DIR 'llama-swap.yaml' }
+# -RenderOnly always renders fresh: drop any stale output so the Step SKIP test can't short-circuit it.
+if ($RenderOnly -and (Test-Path $yamlDest)) { Remove-Item $yamlDest -Force }
+Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $profileId } else { '(defaults)' }) ctx=$(if ($pp.known) { $pp.ctx } else { 'template' }) kv=$(if ($pp.known) { $pp.kv_k } else { 'template' }) 26b=$(if ($pp.known) { $pp.moe_mode } else { 'template' }))" `
   {
     (Test-Path $yamlDest) -and
-    -not (Select-String -Path $yamlDest -Pattern '__(LLAMA_BIN|MODELS|NTHREADS)__' -Quiet) -and
+    -not (Select-String -Path $yamlDest -Pattern '__(LLAMA_BIN|MODELS|NTHREADS|CTX|KV_K|KV_V|FLASH_ATTN|MOE_26B)__' -Quiet) -and
     -not (Select-String -Path $yamlDest -SimpleMatch -Pattern $llamaDir -Quiet)   # backslash path = stale pre-R3.6 render
   } `
   {
-    $tpl = Join-Path (Join-Path $scriptDir 'templates') "llama-swap.win-$backend.yaml"
+    $tpl = Join-Path (Join-Path $scriptDir 'templates') "llama-swap.win-$tplBackend.yaml"
     if (-not (Test-Path $tpl)) { throw "template not found: $tpl" }
     $text = Get-Content -Raw $tpl
+
+    # Profile-driven serving params. $pp always carries concrete values (a known
+    # profile's, or the backend fallback's), so substitution is unconditional -
+    # the fully-tokenized templates would otherwise leave __CTX__ etc. in a config.
+    $text = $text.Replace('__CTX__', $pp.ctx)
+    $text = $text.Replace('__KV_K__', $pp.kv_k).Replace('__KV_V__', $pp.kv_v)
+    $text = $text.Replace('__FLASH_ATTN__', $pp.flash_attn)
+    $text = $text.Replace('__MOE_26B__', $pp.moe_26b)
+    if (-not $pp.include_26b) { $text = Remove-26bFromYaml -Text $text }
+
     $llamaDirFwd = $llamaDir.Replace('\', '/')
     $modelDirFwd = $modelDir.Replace('\', '/')
     # Replace token+backslash together so the template's own literal '\' path separator
@@ -415,13 +618,27 @@ Step "render llama-swap.yaml ($backend)" `
     # forward-slash - a plain token substitution would leave that literal backslash behind.
     $text = $text.Replace('__LLAMA_BIN__\', "$llamaDirFwd/").Replace('__MODELS__\', "$modelDirFwd/")
     $text = $text.Replace('__LLAMA_BIN__', $llamaDirFwd).Replace('__MODELS__', $modelDirFwd)
-    if ($backend -eq 'cpu') {
+    if ($tplBackend -eq 'cpu') {
       $cores = (Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum
       if (-not $cores -or $cores -lt 1) { $cores = [Environment]::ProcessorCount }
       $text = $text.Replace('__NTHREADS__', "$cores")
     }
-    Set-Content -Path $yamlDest -Value $text -Encoding UTF8
+    # UTF8 without BOM (llama-swap's YAML parser rejects a BOM). PS 5.1's -Encoding
+    # UTF8 writes a BOM, so use an explicit no-BOM encoder for both hosts.
+    $noBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($yamlDest, $text, $noBom)
   }
+
+# -RenderOnly stops here: config rendered, no artifacts/build/manifest. Emit a
+# compact JSON verdict describing the resolved profile so a test can assert on it.
+if ($RenderOnly) {
+  $rv = @{ render_only = $true; backend = $backend; render_backend = $tplBackend;
+    profile = $profileId; ram_tier = $ramTier; big_ram = $bigRam;
+    agent_ctx_tokens = $agentCtxTokens; include_26b = [bool]$pp.include_26b;
+    moe_mode = "$($pp.moe_mode)"; yaml = $yamlDest } | ConvertTo-Json -Compress
+  $rv
+  exit 0
+}
 
 # ---------------------------------------------------------------------------
 # Step 7: build Go harness + agent into $harnessDir
@@ -470,6 +687,11 @@ $manifest = [ordered]@{
   llama_cpp_tag  = $LLAMA_TAG
   llama_swap_tag = $SWAP_TAG
   backend        = $backend
+  profile        = $profileId
+  ram_tier       = $ramTier
+  big_ram        = $bigRam
+  agent_ctx_tokens = $agentCtxTokens
+  render_backend = $tplBackend
   install_date   = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
   components     = $manifestComponents
   models         = @($modelKeys | ForEach-Object { @{ name = $PINNED[$_].name; sha256 = $PINNED[$_].sha } })
@@ -479,10 +701,20 @@ $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding 
 # ---------------------------------------------------------------------------
 # Step 9: start command + JSON verdict
 # ---------------------------------------------------------------------------
+$agentExe = Join-Path $harnessDir 'local-agent.exe'
 Write-Host ""
 Write-Host "Start the stack with:" -ForegroundColor White
 Write-Host "  & '$swapExe' --config '$yamlDest' --listen 127.0.0.1:11436" -ForegroundColor White
 Write-Host ""
-$verdict = @{ installed = $true; backend = $backend; home = $HOME_DIR; next = 'run selftest.ps1' } | ConvertTo-Json -Compress
+# Deliverable 4: the agent's compaction budget must match the served window. The
+# profile's agent_ctx_tokens is the -ctx-tokens value; the served --ctx-size in
+# the rendered yaml matches it. openwebui-stack.sh reads LOCAL_AGENT_* env, so no
+# launcher signature changes here — document the value for the operator instead.
+Write-Host "Run the agent against this profile's served window ($agentCtxTokens tokens):" -ForegroundColor White
+Write-Host "  & '$agentExe' `"<objective>`" -base http://127.0.0.1:11436 -model $($pp.resident_tier) -ctx-tokens $agentCtxTokens" -ForegroundColor White
+Write-Host ""
+$verdict = @{ installed = $true; backend = $backend; render_backend = $tplBackend; profile = $profileId;
+  ram_tier = $ramTier; big_ram = $bigRam; agent_ctx_tokens = $agentCtxTokens; home = $HOME_DIR;
+  next = 'run selftest.ps1' } | ConvertTo-Json -Compress
 try { Stop-Transcript | Out-Null } catch {}
 $verdict

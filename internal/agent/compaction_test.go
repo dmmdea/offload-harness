@@ -66,8 +66,9 @@ func TestCompactUnderBudgetIsNoOp(t *testing.T) {
 		toolResult("c1", 50),
 		{Role: "assistant", Content: "answer"},
 	}
-	// Give a budget far above the estimate so nothing is touched.
-	out := compact(msgs, 100000, 2)
+	// Give a budget far above the estimate so nothing is touched. Preamble =
+	// system + objective = 2.
+	out := compact(msgs, 100000, 2, 2)
 	if len(out) != len(msgs) {
 		t.Fatalf("no-op compaction changed message count: %d -> %d", len(msgs), len(out))
 	}
@@ -94,7 +95,7 @@ func TestCompactElidesOldestToolBodyKeepsSystemObjectiveRecent(t *testing.T) {
 	// Budget that the full transcript exceeds but that fits once the oldest
 	// tool body is elided. Keep the most recent 2 turns full.
 	budget := estimateTokens(msgs) - 800
-	out := compact(msgs, budget, 2)
+	out := compact(msgs, budget, 2, 2) // preamble = system + objective = 2
 
 	// system + objective preserved verbatim.
 	if out[0].Role != "system" || out[0].Content != "SYSTEM-PROMPT" {
@@ -148,7 +149,7 @@ func TestCompactDropsMatchedOlderTurnsAsUnits(t *testing.T) {
 	// alone brings the estimate to ~85 tokens), the estimate must still exceed
 	// this so the assistant framing of older turns is dropped to fit. keepRecent=1.
 	budget := 40
-	out := compact(msgs, budget, 1)
+	out := compact(msgs, budget, 1, 2) // preamble = system + objective = 2
 
 	// system + objective always survive.
 	var sawSys, sawObj bool
@@ -178,6 +179,80 @@ func TestCompactDropsMatchedOlderTurnsAsUnits(t *testing.T) {
 	// and it must have actually shrunk from the original.
 	if len(out) >= len(msgs) {
 		t.Errorf("expected whole older turns dropped; message count %d did not shrink from %d", len(out), len(msgs))
+	}
+}
+
+// I-1: with a profile active, the preamble is system → exemplars → recall →
+// AGENT.md → objective, so the objective is NOT the "first user message" —
+// exemplar #1 is. When a long transcript forces Step-4 turn-dropping, the
+// objective (a bare older user message) must NOT be dropped. RED before the fix:
+// protectedPrefixLen protects only exemplar #1, leaving the objective droppable.
+func TestCompactKeepsObjectiveWhenProfileExemplarsPrecedeIt(t *testing.T) {
+	const objective = "THE-REAL-OBJECTIVE-TEXT-MUST-SURVIVE"
+
+	// A profile with leading exemplars (user/assistant tool-cycle pairs), exactly
+	// like the shipped profiles now inject before recall/AGENT.md/objective.
+	prof := Profile{
+		Name:   "test",
+		System: "profile system prompt",
+		Exemplars: []Msg{
+			{Role: "user", Content: "example question one"},
+			{Role: "assistant", ToolCalls: []ToolCall{tc("ex1", "search", `{"q":"a"}`)}},
+			{Role: "tool", ToolCallID: "ex1", Content: "example result one"},
+			{Role: "user", Content: "example question two"},
+			{Role: "assistant", ToolCalls: []ToolCall{tc("ex2", "search", `{"q":"b"}`)}},
+			{Role: "tool", ToolCallID: "ex2", Content: "example result two"},
+		},
+	}
+
+	// Script many tool-calling turns with big results so the transcript grows past
+	// the input budget and forces Step-4 whole-turn dropping (elision alone won't
+	// fit it), then a final answer.
+	bigArgs := `{"blob":"` + strings.Repeat("A", 3000) + `"}`
+	script := []Completion{}
+	for i := 0; i < 8; i++ {
+		script = append(script, Completion{
+			Msg:          Msg{Role: "assistant", ToolCalls: []ToolCall{tc("call", "bloat", bigArgs)}},
+			FinishReason: "tool_calls",
+		})
+	}
+	script = append(script, Completion{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"})
+	client := &fakeClient{script: script}
+
+	// A tool that returns a large result each call, and no same-tool cap so it can
+	// be called repeatedly to build up the transcript.
+	tools := []Tool{{
+		ToolSpec: ToolSpec{Name: "bloat", Description: "bloat", Schema: []byte(`{"type":"object"}`)},
+		Exec:     func(_ context.Context, _ string) (string, error) { return strings.Repeat("R", 3000), nil },
+	}}
+
+	// Small served window so compaction must drop older turns. AGENT.md via
+	// WithWorktree(dir) would need a file; the exemplars + recall path is enough to
+	// push the objective off the "first user message" position, which is the bug.
+	loop := NewLoop(client, tools, 20).
+		WithContextTokens(2048).
+		WithMaxTokens(512).
+		WithMaxSameTool(0).
+		WithProfile(prof)
+
+	if _, err := loop.Run(context.Background(), objective); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(client.seen) == 0 {
+		t.Fatal("client never called")
+	}
+	// Inspect the LAST (most compacted) transcript the client saw: the objective
+	// text must still be present.
+	last := client.seen[len(client.seen)-1]
+	var sawObjective bool
+	for _, m := range last {
+		if strings.Contains(m.Content, objective) {
+			sawObjective = true
+			break
+		}
+	}
+	if !sawObjective {
+		t.Errorf("objective %q was dropped by compaction (profile exemplars precede it); it must always survive", objective)
 	}
 }
 

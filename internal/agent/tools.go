@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // OffloadFunc is the in-process offload capability injected by cmd/local-agent
@@ -51,17 +52,92 @@ func ReadOnlyTools(root string, offload OffloadFunc) ([]Tool, error) {
 		{
 			ToolSpec: ToolSpec{
 				Name:        "read_file",
-				Description: "Read the contents of a file within the workspace. path is relative to the workspace root. Output is truncated at 256 KB.",
-				Schema:      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"file path relative to the workspace root"}},"required":["path"]}`),
+				Description: "Read a file within the workspace as numbered lines (cat -n style). path is relative to the workspace root. Optional offset (1-indexed start line, default 1) and limit (number of lines, default 2000) read only a line range; a continuation hint tells you the offset for the next chunk. Pair with search_files to read just the lines around a match. Long lines are truncated; output has a 256 KB backstop.",
+				Schema:      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"file path relative to the workspace root"},"offset":{"type":"integer","description":"1-indexed start line (default 1)"},"limit":{"type":"integer","description":"number of lines to read (default 2000)"}},"required":["path"]}`),
 			},
 			Exec: s.readFile,
 		},
 	}
 
+	searchTool, err := SearchTool(absRoot)
+	if err != nil {
+		return nil, err
+	}
+	tools = append(tools, searchTool)
+
 	if offload != nil {
 		tools = append(tools, offloadTools(offload)...)
+		tools = append(tools, summarizeFileTool(s, offload))
 	}
 	return tools, nil
+}
+
+// summarizeFileTool digests a workspace file on the free offload cascade WITHOUT
+// the file's bytes entering the agent transcript (file-as-external-memory): it
+// reads the file under os.Root confinement (bounded by maxReadBytes) and returns
+// only the short summary. Registered ONLY when an offloader is wired (see the
+// offload != nil guard in ReadOnlyTools) since it has no fallback without one.
+//
+// Defer-not-crash: if the offload call fails, it returns a marker string (not an
+// error) telling the agent to read_file ranged instead, so the run degrades
+// gracefully rather than aborting the tool.
+func summarizeFileTool(s *scope, offload OffloadFunc) Tool {
+	return Tool{
+		ToolSpec: ToolSpec{
+			Name:        "summarize_file",
+			Description: "Summarize a workspace file on a free local model WITHOUT reading its bytes into your context — use this to digest a big file. path is relative to the workspace root; optional max_points caps the summary length. Returns a short summary; on failure returns a marker telling you to read_file with offset/limit instead.",
+			Schema:      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"file path relative to the workspace root"},"max_points":{"type":"integer","description":"optional cap on summary bullet points"}},"required":["path"]}`),
+		},
+		Exec: func(ctx context.Context, args string) (string, error) {
+			var in struct {
+				Path      string `json:"path"`
+				MaxPoints int    `json:"max_points"`
+			}
+			_ = json.Unmarshal([]byte(args), &in)
+			if strings.TrimSpace(in.Path) == "" {
+				return "", fmt.Errorf("summarize_file requires a path")
+			}
+			content, err := s.readBounded(in.Path)
+			if err != nil {
+				return "", err // includes os.Root escape rejection (../, absolute, symlink/junction)
+			}
+			if strings.TrimSpace(content) == "" {
+				return fmt.Sprintf("(empty file %s — nothing to summarize)", in.Path), nil
+			}
+			params := map[string]any{}
+			if in.MaxPoints > 0 {
+				params["max_points"] = in.MaxPoints
+			}
+			summary, err := offload(ctx, "summarize", content, params)
+			if err != nil {
+				// Defer-not-crash: hand the agent a graceful fallback instead of a hard error.
+				return fmt.Sprintf("could not summarize %s (%v); use read_file with offset/limit to read it directly instead", in.Path, err), nil
+			}
+			return summary, nil
+		},
+	}
+}
+
+// readBounded reads a workspace file through the os.Root handle, applying the same
+// maxReadBytes ceiling readFile uses (io.LimitReader + io.ReadAll so a short Read
+// can't silently truncate). It returns the escape/IO error unchanged so callers
+// surface os.Root's fail-closed rejection.
+func (s *scope) readBounded(rel string) (string, error) {
+	r, name, err := s.open(rel)
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+	f, err := r.Open(name) // os.Root: fails closed on any escape (.., absolute, symlink/junction)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxReadBytes))
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 // scope confines file access to root using an OS root handle (os.Root).
@@ -119,13 +195,28 @@ func (s *scope) listDir(_ context.Context, args string) (string, error) {
 	return strings.Join(names, "\n"), nil
 }
 
+const (
+	defaultReadLimit = 2000 // default number of lines returned by read_file
+	maxLineChars     = 2000 // per-line character cap (rune-safe); over-long lines get " (line truncated)"
+)
+
 func (s *scope) readFile(_ context.Context, args string) (string, error) {
 	var in struct {
-		Path string `json:"path"`
+		Path   string `json:"path"`
+		Offset int    `json:"offset"` // 1-indexed start line; 0/absent => 1
+		Limit  int    `json:"limit"`  // number of lines; 0/absent => defaultReadLimit
 	}
 	_ = json.Unmarshal([]byte(args), &in)
 	if strings.TrimSpace(in.Path) == "" {
 		return "", fmt.Errorf("read_file requires a path")
+	}
+	offset := in.Offset
+	if offset < 1 {
+		offset = 1
+	}
+	limit := in.Limit
+	if limit < 1 {
+		limit = defaultReadLimit
 	}
 	r, rel, err := s.open(in.Path)
 	if err != nil {
@@ -139,15 +230,61 @@ func (s *scope) readFile(_ context.Context, args string) (string, error) {
 	defer f.Close()
 	// io.LimitReader + io.ReadAll: a single Read may under-fill, silently
 	// truncating a small file; ReadAll loops until EOF or the cap, and a real
-	// read error propagates instead of being swallowed.
+	// read error propagates instead of being swallowed. The 256 KB byte ceiling
+	// stays as a backstop so a single huge line can't blow the context window.
 	data, err := io.ReadAll(io.LimitReader(f, maxReadBytes+1))
 	if err != nil {
 		return "", err
 	}
+	byteTruncated := false
 	if len(data) > maxReadBytes {
-		return string(data[:maxReadBytes]) + "\n…(truncated at 256 KB)", nil
+		data = data[:maxReadBytes]
+		byteTruncated = true
 	}
-	return string(data), nil
+
+	lines := strings.Split(string(data), "\n")
+	total := len(lines)
+
+	// offset past the last line => nothing to show.
+	if offset > total {
+		return fmt.Sprintf("(end of file — %d lines)", total), nil
+	}
+
+	start := offset - 1 // 0-indexed
+	end := start + limit
+	if end > total {
+		end = total
+	}
+
+	var b strings.Builder
+	for i := start; i < end; i++ {
+		line := lines[i]
+		// Per-line rune-safe cap: count runes and cut on a rune boundary.
+		if utf8.RuneCountInString(line) > maxLineChars {
+			cut := 0
+			n := 0
+			for idx := range line { // range over string yields rune-boundary byte indexes
+				if n == maxLineChars {
+					cut = idx
+					break
+				}
+				n++
+			}
+			line = line[:cut] + " (line truncated)"
+		}
+		fmt.Fprintf(&b, "%d: %s", i+1, line)
+		if i < end-1 {
+			b.WriteByte('\n')
+		}
+	}
+	out := b.String()
+
+	// Continuation hint when the line window didn't reach EOF (or the byte
+	// backstop cut the tail): tell the caller the next offset to resume from.
+	if end < total || byteTruncated {
+		out += fmt.Sprintf("\n(showing lines %d–%d of %d; use offset=%d to continue)", offset, end, total, end+1)
+	}
+	return out, nil
 }
 
 // offloadTools wraps the in-process offloader as four local tools. Each returns

@@ -32,6 +32,36 @@ func TestSplitObjectiveFlagsEitherSide(t *testing.T) {
 	}
 }
 
+// I-3: --profile and --two-tier are mutually exclusive. two-tier sets the
+// architect/editor toolsets itself, so a non-default --profile there is silently
+// ignored — reject the combination instead.
+func TestValidateFlagCombo(t *testing.T) {
+	cases := []struct {
+		name    string
+		twoTier bool
+		profile string
+		wantErr bool
+	}{
+		{"two-tier + build profile rejected", true, "build", true},
+		{"two-tier + edit profile rejected", true, "edit", true},
+		{"two-tier + general default ok", true, "general", false},
+		{"two-tier + empty profile ok", true, "", false},
+		{"single-loop + build ok", false, "build", false},
+		{"single-loop + general ok", false, "general", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateFlagCombo(c.twoTier, c.profile)
+			if c.wantErr && err == nil {
+				t.Errorf("validateFlagCombo(%v, %q) = nil, want error", c.twoTier, c.profile)
+			}
+			if !c.wantErr && err != nil {
+				t.Errorf("validateFlagCombo(%v, %q) = %v, want nil", c.twoTier, c.profile, err)
+			}
+		})
+	}
+}
+
 func TestMultiFlag(t *testing.T) {
 	var m multiFlag
 	_ = m.Set("a.com")

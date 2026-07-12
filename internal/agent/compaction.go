@@ -46,33 +46,51 @@ func estimateTokens(msgs []Msg) int {
 //  1. If already under budget, return msgs UNCHANGED (byte-for-byte) — this
 //     preserves prefix stability so the server's KV cache is not invalidated on
 //     the happy path.
-//  2. ALWAYS keep, full and in place: the leading system message(s) and the
-//     first user message (the objective), plus the most recent keepRecent
-//     turns.
+//  2. ALWAYS keep, full and in place: the contiguous protected preamble
+//     [0, protectedPrefix) — the caller passes its real length (system +
+//     profile exemplars + recall + AGENT.md + objective), so the objective is
+//     never guessed at and never dropped even when exemplars precede it — plus
+//     the most recent keepRecent turns.
 //  3. Elide the bodies of OLDER tool-role messages to a compact marker
 //     (preserving Role + ToolCallID so pairing is intact), oldest-first, until
 //     under budget. Eliding a body is preferred over dropping a message.
 //  4. If still over budget, drop whole OLDER turns oldest-first. A turn is an
 //     assistant message that has ToolCalls PLUS all its matching tool results,
-//     dropped as a unit so assistant<->tool pairing is never broken. system and
-//     the objective are never dropped.
+//     dropped as a unit so assistant<->tool pairing is never broken. The
+//     protected preamble (incl. the objective) is never dropped.
 //
 // keepRecent counts assistant/tool turns to keep verbatim from the end; a
 // non-positive value is treated as 0 (nothing pinned as "recent", though the
 // protected prefix is still always kept).
-func compact(msgs []Msg, budget int, keepRecent int) []Msg {
+//
+// protectedPrefix is the length of the contiguous leading preamble the caller
+// guarantees must be kept verbatim: system + profile exemplars + recall +
+// AGENT.md + objective — everything before the first model turn. The loop passes
+// its real preamble length so the objective is never guessed at (it is NOT
+// necessarily the first user message once profile exemplars precede it). It is
+// clamped to [0, len(msgs)]. The preamble is bounded (recall/AGENT.md are capped
+// and exemplars are a small fixed set); if it ALONE exceeds budget, compaction
+// cannot shrink it — the transcript stays over budget and the run errors honestly
+// on the next Chat rather than silently dropping the objective to fit.
+func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int) []Msg {
 	if estimateTokens(msgs) <= budget {
 		return msgs // happy path: untouched, KV cache preserved.
 	}
 	if keepRecent < 0 {
 		keepRecent = 0
 	}
+	if protectedPrefix < 0 {
+		protectedPrefix = 0
+	}
+	if protectedPrefix > len(msgs) {
+		protectedPrefix = len(msgs)
+	}
 
 	// Work on a copy: never mutate the caller's slice or its backing array.
 	out := make([]Msg, len(msgs))
 	copy(out, msgs)
 
-	protectedEnd := protectedPrefixLen(out) // [0,protectedEnd) is always kept.
+	protectedEnd := protectedPrefix // [0,protectedEnd) is always kept.
 	recentStart := len(out) - keepRecent    // [recentStart,len) is always kept.
 	if recentStart < protectedEnd {
 		recentStart = protectedEnd
@@ -119,20 +137,6 @@ func compact(msgs []Msg, budget int, keepRecent int) []Msg {
 		}
 	}
 	return masked(out, keep)
-}
-
-// protectedPrefixLen returns the length of the never-touched leading prefix:
-// all leading system messages, plus the first user message (the objective) if
-// one is present at or right after the system block.
-func protectedPrefixLen(msgs []Msg) int {
-	i := 0
-	for i < len(msgs) && msgs[i].Role == "system" {
-		i++
-	}
-	if i < len(msgs) && msgs[i].Role == "user" {
-		i++ // the objective (first user message)
-	}
-	return i
 }
 
 // masked returns the subslice of msgs whose keep flag is true, in order.
