@@ -63,6 +63,16 @@ func validateFlagCombo(twoTier bool, profile string) error {
 	return nil
 }
 
+// orCfg returns flag if the user set it, else the config fallback — so a model flag
+// left at its empty default resolves to this machine's configured model, never a
+// hardcoded alias. Keeps the CLI hardware/model-agnostic.
+func orCfg(flag, fallback string) string {
+	if flag != "" {
+		return flag
+	}
+	return fallback
+}
+
 // multiFlag is a repeatable string flag (each --egress-host appends one value).
 type multiFlag []string
 
@@ -81,7 +91,7 @@ func main() {
 	fs := flag.NewFlagSet("local-agent", flag.ExitOnError)
 	cfgPath := fs.String("config", "", "harness config file path")
 	root := fs.String("root", ".", "workspace root the agent may read (tools are confined here)")
-	model := fs.String("model", "offload-e4b", "planner model id (must support tool-calling)")
+	model := fs.String("model", "", "planner model id (must support tool-calling; default: the harness's configured model)")
 	base := fs.String("base", "", "OpenAI-compatible planner endpoint (default: harness endpoint)")
 	maxSteps := fs.Int("max-steps", 12, "hard step budget (owned in code, not the prompt)")
 	maxTokens := fs.Int("max-tokens", 4096, "planner max tokens per completion — must be large enough for the biggest tool-call argument (e.g. a full file's content) or the model's JSON gets cut off mid-string and the call fails")
@@ -113,8 +123,8 @@ func main() {
 	checkpointPath := fs.String("checkpoint", "", "standalone: --resume checkpoint file (default: <traces>/_checkpoint.jsonl)")
 	profile := fs.String("profile", "general", "per-task tool profile: general (all tools, default) | edit | build | research | github. A profile NARROWS the advertised tools to a curated subset (better small-model tool selection) and adds a tuned prompt + few-shot exemplars; it can only narrow, never grant a tool the --allow-* flags didn't enable.")
 	twoTier := fs.Bool("two-tier", false, "architect/editor two-tier mode (aider one-shot handoff): a planning model drafts a complete plan, then a separate edit model executes it as its sole instruction. One cold model swap. Uses --architect-model / --editor-model. --allow-* flags gate the EDITOR's write tools.")
-	architectModel := fs.String("architect-model", "gemma4-26b-a4b", "two-tier: planning model id (read/search tools, no write)")
-	editorModel := fs.String("editor-model", "offload-e4b", "two-tier: edit model id (executes the plan with the write tools your --allow-* flags granted)")
+	architectModel := fs.String("architect-model", "", "two-tier: planning model id (read/search tools, no write; default: the configured escalation model)")
+	editorModel := fs.String("editor-model", "", "two-tier: edit model id (executes the plan with the write tools your --allow-* flags granted; default: the configured model)")
 	serve := fs.Bool("serve", false, "run as an OpenAI-compatible HTTP server (for OpenWebUI etc.) instead of a single objective; each chat request runs the full agent loop")
 	listen := fs.String("listen", "127.0.0.1:18800", "address for --serve")
 	listenTrusted := fs.Bool("listen-trusted-network", false, "allow --listen to bind beyond loopback. The --serve endpoint is UNAUTHENTICATED and drives the agent's write/GitHub tools, so it is loopback-only by default; set this ONLY on a network you fully trust.")
@@ -151,11 +161,16 @@ func main() {
 	if plannerBase == "" {
 		plannerBase = cfg.Endpoint
 	}
+	// Resolve model flags against this machine's config (never a hardcoded alias) —
+	// an empty flag falls back to the configured model, so the CLI is model-agnostic.
+	plannerModel := orCfg(*model, cfg.Model)
+	archModel := orCfg(*architectModel, cfg.EscalationModel)
+	edModel := orCfg(*editorModel, cfg.Model)
 	timeout := time.Duration(*timeoutSec) * time.Second
 
 	// In-process offload (record=false, nil cache+ledger) — the SINGLE shared
 	// constructor, so every drive mode's ledger-pristine guarantee is identical.
-	offload := pipeline.NewRecordlessOffload(cfg, *model, timeout)
+	offload := pipeline.NewRecordlessOffload(cfg, plannerModel, timeout)
 
 	// The broker audit trail must live OUTSIDE any worktree; resolve a default
 	// only when a mutating capability is enabled.
@@ -199,7 +214,7 @@ func main() {
 	// CLI, the MCP front door, and standalone (parity by construction).
 	built, err := agent.Build(agent.BuildConfig{
 		PlannerBase:  plannerBase,
-		Model:        *model,
+		Model:        plannerModel,
 		Timeout:      timeout,
 		MaxSteps:     *maxSteps,
 		MaxTokens:    *maxTokens,
@@ -275,7 +290,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "[local-agent] WARNING: --listen-trusted-network set — the UNAUTHENTICATED agent "+
 				"endpoint is exposed beyond loopback on %q. Anyone who can reach it can drive the agent's write/GitHub tools.\n", *listen)
 		}
-		if err := serveOpenAI(*listen, loop, *model); err != nil {
+		if err := serveOpenAI(*listen, loop, plannerModel); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -339,7 +354,7 @@ func main() {
 		// Architect: read/search only (NO write), the planning model, architect prompt.
 		archBuilt, aerr := agent.Build(agent.BuildConfig{
 			PlannerBase:          plannerBase,
-			Model:                *architectModel,
+			Model:                archModel,
 			Timeout:              timeout,
 			MaxSteps:             *maxSteps,
 			MaxTokens:            *maxTokens,
@@ -364,7 +379,7 @@ func main() {
 		// editor prompt. Same worktree/audit/queue as the normal single-loop build.
 		editBuilt, eerr := agent.Build(agent.BuildConfig{
 			PlannerBase:          plannerBase,
-			Model:                *editorModel,
+			Model:                edModel,
 			Timeout:              timeout,
 			MaxSteps:             *maxSteps,
 			MaxTokens:            *maxTokens,
@@ -398,7 +413,7 @@ func main() {
 		}
 		architect := archBuilt.Loop.WithWorktree(archBuilt.Worktree).WithContextTokens(*ctxTokens)
 		editor := editBuilt.Loop.WithWorktree(editBuilt.Worktree).WithContextTokens(*ctxTokens)
-		fmt.Fprintf(os.Stderr, "[local-agent] two-tier: architect=%s editor=%s (one swap)\n", *architectModel, *editorModel)
+		fmt.Fprintf(os.Stderr, "[local-agent] two-tier: architect=%s editor=%s (one swap)\n", archModel, edModel)
 
 		res, err := agent.RunTwoTier(ctx, objective, architect, editor)
 		if err != nil {

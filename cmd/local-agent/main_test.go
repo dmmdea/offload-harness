@@ -5,6 +5,22 @@ import (
 	"testing"
 )
 
+// TestModelFlagFallsBackToConfig guards the model-agnostic CLI defaults: a model
+// flag left at its empty default must resolve to the machine's configured model, not
+// a hardcoded alias. The --model/--architect-model/--editor-model defaults are now ""
+// and go through orCfg(flag, cfgFallback).
+func TestModelFlagFallsBackToConfig(t *testing.T) {
+	if got := orCfg("", "gemma-4-e4b"); got != "gemma-4-e4b" {
+		t.Errorf("empty flag must fall back to config; got %q", got)
+	}
+	if got := orCfg("explicit-model", "gemma-4-e4b"); got != "explicit-model" {
+		t.Errorf("an explicit flag must win over config; got %q", got)
+	}
+	if got := orCfg("", ""); got != "" {
+		t.Errorf("both empty must stay empty; got %q", got)
+	}
+}
+
 func TestSplitObjectiveFlagsEitherSide(t *testing.T) {
 	vf := map[string]bool{"root": true, "model": true, "max-steps": true, "egress-host": true}
 	cases := []struct {

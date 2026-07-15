@@ -136,7 +136,7 @@ func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Le
 	// so a slow/down embeddinggemma fails open fast on the request path.
 	if cfg.KNNPreFilterEnabled {
 		p.knn = knn.Load(cfg.KNNIndexPath)
-		p.embed = judge.NewEmbedder(cfg.Endpoint, time.Duration(cfg.KNNEmbedTimeoutMs)*time.Millisecond).Embed
+		p.embed = judge.NewEmbedder(cfg.Endpoint, cfg.EmbedModel(), time.Duration(cfg.KNNEmbedTimeoutMs)*time.Millisecond).Embed
 	}
 	// Seed the reloader's content hashes from the files just loaded so the first
 	// poll tick is a no-op for unchanged artifacts (and a transient bad initial
@@ -223,6 +223,12 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 		built, err := tasks.Build(req)
 		if err != nil {
 			return core.Deferf("build error: "+err.Error(), "", meta)
+		}
+		// Per-machine OCR output cap: a strong VLM can transcribe a dense page that
+		// exceeds the built-in 1024 default (which otherwise truncates → defers the
+		// whole OCR to cloud). Covers extract_image too — it re-enters via TaskOCR.
+		if req.Task == core.TaskOCR && p.cfg.OCRMaxTokens > 0 {
+			built.MaxTokens = p.cfg.OCRMaxTokens
 		}
 		return p.runVision(ctx, req, built, meta, start)
 	}
@@ -702,7 +708,16 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 		p.recordDefer(req.Task, meta, len(req.Input), serr.Error())
 		return core.Deferf(serr.Error(), "", meta)
 	}
+	// Report the checkpoint this machine actually renders with, not a hardcoded model
+	// family: the ledger would otherwise claim "sdxl" on a box running a DiT (HiDream).
+	// UNBOUND keeps the historical "comfyui-sdxl" label on purpose: with no binding,
+	// comfy-render.mjs really does default to SDXL, so the old label stays accurate —
+	// and an existing machine's ledger/health tiers (health.groupByTier keys on this
+	// string) must not fragment into a second tier just because it pulled this code.
 	meta.Model = "comfyui-sdxl"
+	if p.cfg.ImageGenCkpt != "" {
+		meta.Model = "comfyui:" + p.cfg.ImageGenCkpt
+	}
 
 	// Pin a concrete seed BEFORE the render so the reported seed matches what ComfyUI actually
 	// used: comfy-render picks a RANDOM seed when none is supplied, so without this the result
@@ -726,7 +741,18 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second
-	outPath, gerr := imagegen.Generate(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, prompt, req.Params, timeout, p.lockEnv()...)
+	// This machine's image-model binding (per-machine config; never hardcoded here —
+	// an 8GB box runs SDXL, a 16GB box may run an all-in-one DiT). All fields are
+	// optional: a zero Model passes no flags and the renderer keeps its own defaults.
+	model := imagegen.Model{
+		Ckpt:      p.cfg.ImageGenCkpt,
+		VAE:       p.cfg.ImageGenVAE,
+		Steps:     p.cfg.ImageGenSteps,
+		CFG:       p.cfg.ImageGenCFG,
+		Sampler:   p.cfg.ImageGenSampler,
+		Scheduler: p.cfg.ImageGenScheduler,
+	}
+	outPath, gerr := imagegen.Generate(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, prompt, req.Params, model, timeout, p.lockEnv()...)
 	if gerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		meta.ErrClass = classifyErr(gerr)
@@ -800,8 +826,17 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	if n := paramStr(req.Params, "negative"); n != "" {
 		args = append(args, "--negative", n)
 	}
+	// Per-machine resolution/frame defaults (this box may run 720p; the 8GB laptop
+	// stays at the builder's 480p default). A per-request value always wins; a 0
+	// config default means "use the builder default". steps/seed have no machine
+	// default (map lookup -> 0 -> unaffected).
+	machineDefault := map[string]int{"width": p.cfg.VideoGenWidth, "height": p.cfg.VideoGenHeight, "frames": p.cfg.VideoGenFrames}
 	for _, k := range []string{"frames", "width", "height", "steps", "seed"} {
-		if v := paramIntOr(req.Params, k, 0); v > 0 {
+		v := paramIntOr(req.Params, k, 0)
+		if v <= 0 {
+			v = machineDefault[k]
+		}
+		if v > 0 {
 			args = append(args, "--"+k, strconv.Itoa(v))
 		}
 	}
@@ -809,6 +844,18 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	// runner; Wan 14B=2.0, ACE-Step differs). Pass it through ONLY when the caller set it.
 	if rv := paramStr(req.Params, "reserve_vram"); rv != "" {
 		args = append(args, "--reserve-vram", rv)
+	}
+	// hero: native no-LoRA quality pass (per-request). upscale: use THIS machine's configured
+	// upscale model + target size (per-machine config; a machine with none just skips it).
+	// Both universal -- no model name baked into shared code.
+	if paramBool(req.Params, "hero") {
+		args = append(args, "--hero")
+	}
+	if paramBool(req.Params, "upscale") && p.cfg.VideoGenUpscaleModel != "" {
+		args = append(args, "--upscale-model", p.cfg.VideoGenUpscaleModel)
+		if p.cfg.VideoGenUpscaleWidth > 0 && p.cfg.VideoGenUpscaleHeight > 0 {
+			args = append(args, "--upscale-width", strconv.Itoa(p.cfg.VideoGenUpscaleWidth), "--upscale-height", strconv.Itoa(p.cfg.VideoGenUpscaleHeight))
+		}
 	}
 
 	timeout := time.Duration(p.cfg.VideoGenTimeoutSec) * time.Second

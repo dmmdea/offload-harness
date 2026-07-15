@@ -41,7 +41,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.6.2"
+const version = "0.12.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -795,19 +795,21 @@ type videoFlags struct {
 	steps       int
 	seed        int
 	reserveVRAM float64
+	hero        bool
+	upscale     bool
 }
 
 // buildVideoParams maps the parsed CLI flags to the pipeline params map for a
-// generate_video request. Empty model defaults to "hunyuan" (the PRIMARY 8GB I2V
-// path); the still path is always carried as "still" (Hunyuan I2V needs an input
-// image). Zero/empty optional flags are omitted so the pipeline/runner apply their
-// own defaults (incl. the SETTLED steps=50/shift=5/vaeTemporalSize=16 baked into
-// the workflow builder, and the runner's --reserve-vram). reserve_vram is
-// stringified to match the MCP tool's wire shape.
+// generate_video request. Empty model defaults to "wan" (the PRIMARY I2V path — the
+// best open-weight I2V that fits 16GB, and the only one whose files are complete on
+// this box; Hunyuan 1.5 is the opt-in). The still path is always carried as "still".
+// Zero/empty optional flags are omitted so the pipeline/runner apply their own
+// defaults (the workflow builder's settings + the machine's videogen_* config + the
+// runner's --reserve-vram). reserve_vram is stringified to match the MCP wire shape.
 func buildVideoParams(f videoFlags) map[string]any {
 	model := f.model
 	if model == "" {
-		model = "hunyuan"
+		model = "wan"
 	}
 	params := map[string]any{"model": model}
 	if f.still != "" {
@@ -837,6 +839,12 @@ func buildVideoParams(f videoFlags) map[string]any {
 	if f.reserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(f.reserveVRAM, 'f', -1, 64)
 	}
+	if f.hero {
+		params["hero"] = true
+	}
+	if f.upscale {
+		params["upscale"] = true
+	}
 	return params
 }
 
@@ -853,14 +861,16 @@ func runGenerateVideo(args []string) error {
 	fs := flag.NewFlagSet("generate-video", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "print full result JSON")
-	model := fs.String("model", "hunyuan", "hunyuan (default, fast 8GB I2V) | wan (slow photoreal hero)")
+	model := fs.String("model", "wan", "wan (default; Wan 2.2, 4-step LoRA — best 16GB photoreal I2V) | hunyuan (opt-in; needs Hunyuan 1.5 files)")
 	negative := fs.String("negative", "", "hard exclusions, e.g. 'blurry, distorted'")
 	frames := fs.Int("frames", 0, "frame count (default ~33; realistic ceiling ~49)")
 	width := fs.Int("width", 0, "width px")
 	height := fs.Int("height", 0, "height px")
-	steps := fs.Int("steps", 0, "sampler steps (default 50 — DO NOT lower; 12 = garbage)")
+	steps := fs.Int("steps", 0, "sampler steps (0 = builder default: wan 4 fast / 20 hero)")
 	seed := fs.Int("seed", 0, "RNG seed for reproducibility")
 	reserveVRAM := fs.Float64("reserve-vram", 0, "VRAM held back for the display (default per-workflow; ~2.0 for Hunyuan/Wan)")
+	hero := fs.Bool("hero", false, "native no-LoRA quality pass (wan; slower, better motion for realistic b-roll)")
+	upscale := fs.Bool("upscale", false, "post-decode upscale using this machine's configured upscale model (e.g. 720p->1080p)")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
 
 	// generate-video takes THREE positionals (out path, still image, prompt); the
@@ -885,7 +895,7 @@ func runGenerateVideo(args []string) error {
 	params := buildVideoParams(videoFlags{
 		model: *model, still: still, negative: *negative, out: out,
 		frames: *frames, width: *width, height: *height, steps: *steps,
-		seed: *seed, reserveVRAM: *reserveVRAM,
+		seed: *seed, reserveVRAM: *reserveVRAM, hero: *hero, upscale: *upscale,
 	})
 	res := p.Run(context.Background(), core.Request{
 		Task:   core.TaskGenerateVideo,
@@ -1386,7 +1396,7 @@ func runTrainRouter(args []string) error {
 	if dst == "" {
 		dst = cfg.RouterWeightsPath
 	}
-	rep, err := router.Train(cfg.LedgerPath, cfg.RouterLabelsPath, dst)
+	rep, err := router.Train(cfg.LedgerPath, cfg.RouterLabelsPath, dst, cfg.TriageModel)
 	if err != nil {
 		return err
 	}
@@ -1422,7 +1432,7 @@ func runShadowLabel(args []string) error {
 		return nil
 	}
 
-	emb := judge.NewEmbedder(cfg.Endpoint, 30*time.Second)
+	emb := judge.NewEmbedder(cfg.Endpoint, cfg.EmbedModel(), 30*time.Second)
 	deps := shadow.LabelDeps{
 		Escalation:            cfg.EscalationModel,
 		E2B:                   cfg.TriageModel,

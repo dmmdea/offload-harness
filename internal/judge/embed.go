@@ -16,11 +16,15 @@ import (
 
 type Embedder struct {
 	endpoint string
+	model    string
 	hc       *http.Client
 }
 
-func NewEmbedder(endpoint string, timeout time.Duration) *Embedder {
-	return &Embedder{endpoint: endpoint, hc: &http.Client{Timeout: timeout}}
+// NewEmbedder builds an embedder that posts to endpoint/v1/embeddings using the
+// given model. model is the caller's configured embedder (cfg.EmbedModel()) — this
+// package never hardcodes a model name, so the harness stays model-agnostic.
+func NewEmbedder(endpoint, model string, timeout time.Duration) *Embedder {
+	return &Embedder{endpoint: endpoint, model: model, hc: &http.Client{Timeout: timeout}}
 }
 
 // Similar embeds a and b in one call and returns their cosine similarity.
@@ -50,7 +54,7 @@ func (e *Embedder) Embed(text string) ([]float64, error) {
 // embed posts inputs to /v1/embeddings and returns vectors ordered by the API
 // `index` field (never response position). Errors on non-200 or a missing index.
 func (e *Embedder) embed(inputs []string) ([][]float64, error) {
-	body, err := json.Marshal(map[string]any{"model": "embeddinggemma", "input": inputs})
+	body, err := json.Marshal(map[string]any{"model": e.model, "input": inputs})
 	if err != nil {
 		return nil, fmt.Errorf("embed: marshal: %w", err)
 	}

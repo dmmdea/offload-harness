@@ -28,6 +28,21 @@ llama.cpp server.
 - **No cloud calls.** The harness never calls a cloud model and holds no cloud credentials by
   design; please keep it that way.
 
+## Versioning
+
+This project follows [SemVer](https://semver.org/). **Three sources name the version and MUST be
+bumped together, in the same commit:**
+
+1. the `VERSION` file
+2. the `version` const in `main.go` (advertised in the MCP handshake — a stale value misreports the
+   server to clients)
+3. the top `## [x.y.z]` entry in `CHANGELOG.md`
+
+`TestVersionSourcesAgree` (in `main_test.go`) fails the build if any of the three disagree, so
+`go test ./...` catches a partial bump. When you change published behavior, bump the version **and**
+add a CHANGELOG entry in the same PR. Never let the three drift — a mismatch has real cost: it once
+made the version look lower than a downstream publish and triggered a false "we lost work" fire drill.
+
 ## Opening a pull request
 
 1. Fork the repo and create a branch off `main`.

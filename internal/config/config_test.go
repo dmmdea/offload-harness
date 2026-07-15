@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -30,8 +31,8 @@ func TestDefaultSTTFields(t *testing.T) {
 	if c.STTModel != "whisper-stt" {
 		t.Errorf("STTModel = %q, want \"whisper-stt\"", c.STTModel)
 	}
-	if c.STTModelHQ != "whisper-stt-hq" {
-		t.Errorf("STTModelHQ = %q, want \"whisper-stt-hq\"", c.STTModelHQ)
+	if c.STTModelHQ != "" {
+		t.Errorf("STTModelHQ = %q, want \"\" (opt-in; no phantom default)", c.STTModelHQ)
 	}
 	if !c.STTVAD {
 		t.Error("STTVAD should default true")
@@ -117,17 +118,44 @@ func TestKNNDefaults(t *testing.T) {
 	}
 }
 
+// TestEmbedModelResolution guards that the embedder model is unambiguous and
+// reorder-proof: explicit embed_model wins; else MemoryStack[0] (back-compat); else
+// the "embeddinggemma" fallback. A stack that lists the reranker first must NOT make
+// the embedder request the reranker when embed_model is set.
+func TestEmbedModelResolution(t *testing.T) {
+	cases := []struct {
+		name  string
+		cfg   Config
+		want  string
+	}{
+		{"explicit embed_model wins over stack order", Config{EmbedModelName: "my-embedder", MemoryStack: []string{"bge-reranker-v2-m3", "my-embedder"}}, "my-embedder"},
+		{"falls back to MemoryStack[0]", Config{MemoryStack: []string{"embeddinggemma", "bge-reranker-v2-m3"}}, "embeddinggemma"},
+		{"empty everything falls back to the literal", Config{}, "embeddinggemma"},
+		{"empty first stack element falls back to the literal", Config{MemoryStack: []string{""}}, "embeddinggemma"},
+	}
+	for _, tc := range cases {
+		if got := tc.cfg.EmbedModel(); got != tc.want {
+			t.Errorf("%s: EmbedModel() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestExpandTilde pins the home-shorthand expansion rules (LO-4): "~/x" and a
 // bare "~" expand; "~user/x" and plain relative/absolute paths do not.
 func TestExpandTilde(t *testing.T) {
 	home := filepath.Join("C:", "Users", "u")
 	cases := []struct{ in, want string }{
 		{"~/x/y.json", filepath.Join(home, "x", "y.json")},
-		{`~\x\y.json`, filepath.Join(home, "x", "y.json")},
 		{"~", home},
 		{"~user/x", "~user/x"},   // ambiguous on Windows — untouched
 		{"render/tts.mjs", "render/tts.mjs"},
 		{"", ""},
+	}
+	// The `~\` (backslash) form is a Windows path convention. On non-Windows a
+	// backslash is a literal filename character, not a separator, so filepath.Join
+	// does not normalise it to "x/y.json" — only assert this form on Windows.
+	if runtime.GOOS == "windows" {
+		cases = append(cases, struct{ in, want string }{`~\x\y.json`, filepath.Join(home, "x", "y.json")})
 	}
 	for _, tc := range cases {
 		if got := ExpandTilde(tc.in, home); got != tc.want {

@@ -216,6 +216,36 @@ $warnings = @()
 $os = if ($env:OS -eq 'Windows_NT') { 'windows' } else { 'other' }
 if ($os -ne 'windows') { Write-Error 'This detector targets Windows. Use the Linux/WSL skill path instead.'; exit 1 }
 
+# CUDA version discovery (NVIDIA only), so the installer can be FLEXIBLE about the build:
+#  - driver_cuda   = the driver's max CUDA (nvidia-smi header "CUDA Version: X.Y")
+#  - driver_version= the NVIDIA driver build
+#  - toolkit_cuda  = the installed CUDA Toolkit (nvcc), or null if no toolkit is present
+# Why it matters on Blackwell (sm_120): a CUDA-13 build SERVES (falls back from the MMQ
+# kernel to cuBLAS, ~5.6x slower prefill on Q4 — functional, not peak); a CUDA-12.8 build
+# hits MMQ for full speed; the old CUDA-12.4 prebuilt has no sm_120 and won't run. The
+# installer keys the build choice off these, not a fixed assumption. All null when the
+# tools are absent (e.g. no driver yet) — that is a valid, honest state.
+function Get-CudaInfo {
+  $info = [ordered]@{ driver_cuda = $null; driver_version = $null; toolkit_cuda = $null }
+  try {
+    $smi = (& nvidia-smi 2>$null) -join "`n"
+    if ($smi) {
+      $m = [regex]::Match($smi, 'CUDA Version:\s*([0-9]+\.[0-9]+)')
+      if ($m.Success) { $info.driver_cuda = $m.Groups[1].Value }
+      $dv = (& nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>$null | Select-Object -First 1)
+      if ($dv) { $info.driver_version = ([string]$dv).Trim() }
+    }
+  } catch { }
+  try {
+    $nv = (& nvcc --version 2>$null) -join "`n"
+    if ($nv) {
+      $m = [regex]::Match($nv, 'release\s*([0-9]+\.[0-9]+)')
+      if ($m.Success) { $info.toolkit_cuda = $m.Groups[1].Value }
+    }
+  } catch { }
+  return $info
+}
+
 $gpus = Get-CimInstance Win32_VideoController | Where-Object { $_.Name }
 $gpuNames = ($gpus | ForEach-Object Name) -join '; '
 $nvidia = $gpus | Where-Object { $_.Name -match 'NVIDIA' } | Select-Object -First 1
@@ -273,6 +303,23 @@ $sel       = Get-Profile -Vendor $vendor -Arch $gpuArch -VramGb $vramGB -GpuCoun
 $profileId = $sel.profile
 $bigRam    = [bool]$sel.big_ram
 
+# CUDA versions (NVIDIA only) + a Blackwell build hint so the installer/agent picks the
+# right llama.cpp build flexibly rather than assuming one CUDA version.
+$cuda = [ordered]@{ driver_cuda = $null; driver_version = $null; toolkit_cuda = $null }
+if ($vendor -eq 'nvidia') { $cuda = Get-CudaInfo }
+if ($gpuArch -eq 'blackwell') {
+  $eff = if ($cuda.toolkit_cuda) { $cuda.toolkit_cuda } elseif ($cuda.driver_cuda) { $cuda.driver_cuda } else { $null }
+  if ($eff -match '^12\.4') {
+    $warnings += "Blackwell (sm_120) with CUDA ${eff}: the 12.4 prebuilt has NO sm_120 and will not run - install a CUDA-13 (serves) or CUDA-12.8 (peak) build. See SETUP-AGENT.md Blackwell note."
+  } elseif ($eff -match '^13\.') {
+    $warnings += "Blackwell (sm_120) with CUDA ${eff}: SERVES on a CUDA-13 build (cuBLAS fallback, ~5.6x slower prefill on Q4). For peak throughput build/install against CUDA 12.8 (MMQ). Functional now; not peak."
+  } elseif ($eff -match '^12\.(8|9)' -or $eff -match '^12\.1[0-9]') {
+    $warnings += "Blackwell (sm_120) with CUDA ${eff}: peak path - build with -DCMAKE_CUDA_ARCHITECTURES=120 (MMQ)."
+  } else {
+    $warnings += "Blackwell (sm_120): CUDA version undetected ($eff). Detect the installed CUDA before choosing the build (12.8=peak, 13.x=serves-slower, 12.4=won't run)."
+  }
+}
+
 # An NVIDIA card that matched no arch regex (arch=other) fell through to the
 # VRAM-banded ampere default. Make that silence audible (WARNING only — the
 # fallback profile stands and the exit code is unchanged).
@@ -293,4 +340,5 @@ $warnings | ForEach-Object { Write-Host "WARN: $_" }
 
 @{ os=$os; gpu_vendor=$vendor; gpu_name=$gpuName; gpu_arch=$gpuArch; gpu_count=$gpuCount;
    vram_dedicated_gb=$vramGB; ram_gb=$ramGB; ram_tier=$ramTier; profile=$profileId; big_ram=$bigRam;
+   cuda_driver=$cuda.driver_cuda; cuda_driver_version=$cuda.driver_version; cuda_toolkit=$cuda.toolkit_cuda;
    disk_free_gb=$diskGB; backend=$backend; warnings=$warnings } | ConvertTo-Json -Compress

@@ -112,7 +112,9 @@ func TestDoctorEndpointDownFails(t *testing.T) {
 // the escalation default changed.
 func TestModelsReportUsesConfigValues(t *testing.T) {
 	got := modelsReport(config.Default())
-	for _, want := range []string{"offload-e4b", "gemma4-e2b", "gemma4-26b-a4b", "qwen3vl-4b", "whisper-stt", "whisper-stt-hq"} {
+	// VisionModel + STTModelHQ default to "" now (opt-in; no phantom), so they are not
+	// asserted here — the remaining defaults must still render.
+	for _, want := range []string{"offload-e4b", "gemma4-e2b", "gemma4-26b-a4b", "whisper-stt"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("report missing configured value %q:\n%s", want, got)
 		}

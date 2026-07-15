@@ -47,14 +47,25 @@ func makeFeat(lenChars float64) map[string]float64 {
 
 // ---- synthetic data builder ---------------------------------------------
 
-// syntheticEntries creates n entries for the given task.
-// Short inputs (len_chars < splitAt) are accepted at E2B (y=1).
+// testEntryTier is the entry-tier model name these fixtures record in the
+// ledger. It is just this fixture's roster name — Train must take the tier from
+// the caller's config, never assume it (see TestTrainHonorsConfiguredEntryTier).
+const testEntryTier = "gemma4-e2b"
+
+// syntheticEntries creates n entries for the given task, recorded at
+// testEntryTier.
+// Short inputs (len_chars < splitAt) are accepted at the entry tier (y=1).
 // Long inputs (len_chars >= splitAt) escalate (y=0).
 func syntheticEntries(task string, n int, splitAt float64, rng *rand.Rand) []ledger.Entry {
+	return syntheticEntriesAtTier(task, n, splitAt, rng, testEntryTier)
+}
+
+// syntheticEntriesAtTier is syntheticEntries with an explicit entry-tier name,
+// so a test can simulate a differently-named roster (another machine).
+func syntheticEntriesAtTier(task string, n int, splitAt float64, rng *rand.Rand, tier string) []ledger.Entry {
 	entries := make([]ledger.Entry, n)
 	for i := 0; i < n; i++ {
 		lc := rng.Float64() * 2000 // 0..2000
-		tier := "gemma4-e2b"
 		accepted := lc < splitAt
 		esc := 0
 		if !accepted {
@@ -88,7 +99,7 @@ func TestTrainAndLoad(t *testing.T) {
 	ledgerPath := writeLedger(t, entries)
 	outPath := filepath.Join(dir, "router-weights.json")
 
-	report, err := Train(ledgerPath, "", outPath)
+	report, err := Train(ledgerPath, "", outPath, testEntryTier)
 	if err != nil {
 		t.Fatalf("Train failed: %v\nreport:\n%s", err, report)
 	}
@@ -127,7 +138,7 @@ func TestTriageTask(t *testing.T) {
 	lp := writeLedger(t, entries)
 	op := filepath.Join(dir, "w.json")
 
-	report, err := Train(lp, "", op)
+	report, err := Train(lp, "", op, testEntryTier)
 	if err != nil {
 		t.Fatalf("Train: %v\n%s", err, report)
 	}
@@ -153,7 +164,7 @@ func TestInsufficientRows(t *testing.T) {
 	lp := writeLedger(t, entries)
 	op := filepath.Join(dir, "w.json")
 
-	report, err := Train(lp, "", op)
+	report, err := Train(lp, "", op, testEntryTier)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -210,7 +221,7 @@ func TestMalformedLedgerLines(t *testing.T) {
 	f.Close()
 
 	op := filepath.Join(dir, "w.json")
-	_, err := Train(f.Name(), "", op)
+	_, err := Train(f.Name(), "", op, testEntryTier)
 	if err != nil {
 		t.Fatalf("Train with malformed lines: %v", err)
 	}
@@ -223,7 +234,7 @@ func TestEmptyLedger(t *testing.T) {
 	os.WriteFile(lp, []byte{}, 0o600)
 
 	op := filepath.Join(dir, "w.json")
-	report, err := Train(lp, "", op)
+	report, err := Train(lp, "", op, testEntryTier)
 	if err != nil {
 		t.Fatalf("Train on empty ledger: %v\n%s", err, report)
 	}
@@ -237,7 +248,7 @@ func TestPreferLargerEntryUnknownTask(t *testing.T) {
 	dir := t.TempDir()
 	lp := writeLedger(t, entries)
 	op := filepath.Join(dir, "w.json")
-	Train(lp, "", op)
+	Train(lp, "", op, testEntryTier)
 
 	m := Load(op)
 	if m.PreferLargerEntry("extract", makeFeat(2000)) {
@@ -301,7 +312,7 @@ func TestTrain_MergesRouterLabelSidecar(t *testing.T) {
 	}
 	f.Close()
 
-	report, err := Train(led, side, out)
+	report, err := Train(led, side, out, testEntryTier)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,9 +333,60 @@ func TestTrain_MissingSidecarIgnored(t *testing.T) {
 	op := filepath.Join(t.TempDir(), "w.json")
 
 	// nonexistent sidecar path
-	_, err := Train(lp, filepath.Join(t.TempDir(), "does-not-exist.jsonl"), op)
+	_, err := Train(lp, filepath.Join(t.TempDir(), "does-not-exist.jsonl"), op, testEntryTier)
 	if err != nil {
 		t.Fatalf("missing sidecar should be ignored, got error: %v", err)
+	}
+}
+
+// TestTrainHonorsConfiguredEntryTier is the hardware/model-agnostic guard.
+//
+// Every machine serves its own hardware-optimized roster under its own model
+// names (the workstation's triage model is "gemma-4-e2b"; the laptop's is
+// "gemma4-e2b"). The ledger records whatever name that box's config used, so
+// Train must filter on the CALLER's configured entry tier. It used to compare
+// against a hardcoded "gemma4-e2b", which silently matched zero rows on any box
+// with a differently-named roster: Train returned "need 200 rows", exit 0, and
+// the router never learned anything — a silent, permanent failure.
+func TestTrainHonorsConfiguredEntryTier(t *testing.T) {
+	const renamedTier = "gemma-4-e2b" // same role, different roster name
+	rng := rand.New(rand.NewSource(11))
+	entries := syntheticEntriesAtTier("classify", 300, 800, rng, renamedTier)
+
+	dir := t.TempDir()
+	lp := writeLedger(t, entries)
+	op := filepath.Join(dir, "w.json")
+
+	report, err := Train(lp, "", op, renamedTier)
+	if err != nil {
+		t.Fatalf("Train: %v\n%s", err, report)
+	}
+	if !strings.Contains(report, "trained OK") {
+		t.Fatalf("rows recorded at %q must train when it is the configured entry tier; got: %s", renamedTier, report)
+	}
+
+	m := Load(op)
+	if m == nil || !m.HasTask("classify") {
+		t.Fatal("classify must be trained under a renamed entry tier")
+	}
+	if !m.PreferLargerEntry("classify", makeFeat(1900)) {
+		t.Error("long input: expected PreferLargerEntry=true")
+	}
+
+	// A tier the ledger never recorded must yield zero usable rows, not a
+	// false positive.
+	op2 := filepath.Join(dir, "w2.json")
+	report2, err := Train(lp, "", op2, "some-other-model")
+	if err != nil {
+		t.Fatalf("Train (mismatched tier): %v", err)
+	}
+	if strings.Contains(report2, "trained OK") {
+		t.Fatalf("rows from a different entry tier must not train; got: %s", report2)
+	}
+
+	// An empty tier is a caller bug and must fail loudly, not silently no-op.
+	if _, err := Train(lp, "", op2, ""); err == nil {
+		t.Fatal("empty entryTier must return an error, not silently train nothing")
 	}
 }
 

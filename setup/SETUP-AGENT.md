@@ -81,7 +81,7 @@ Expected shapes:
 | Signal | Action |
 |---|---|
 | exit 0, `backend` + `profile` present | Proceed to Step 1. Remember `backend` and `profile`. |
-| `profile` is `blackwell-16` or `blackwell-8` | **Blackwell (sm_120).** The stock Windows CUDA prebuilt does **not** work — see [Blackwell note](#blackwell-sm_120--required-cuda-128-build) below. This is REQUIRED before those cards serve. |
+| `profile` is `blackwell-16` or `blackwell-8` | **Blackwell (sm_120).** Detect the installed CUDA and pick the build accordingly — see the [Blackwell note](#blackwell-sm_120--detect-the-installed-cuda-and-adapt-be-flexible) below. CUDA 13.x serves now (slower prefill); CUDA 12.8 is peak; the old 12.4 prebuilt won't run. Do not hard-require one version. |
 | exit 1 + stderr `Only NGB free ... need >=25GB` | **STOP.** `disk_free_gb < 25` is a hard blocker. Ask the human to free disk on the install-target drive, then re-run. |
 | exit 1 + stderr `targets Windows` | Wrong OS. This runbook is Windows-only. Stop. |
 | `warnings[]` contains a `RAM ...< 32GB` note | Note it. You will set `OFFLOAD_WITH_FAMILY=0` in Step 1 (E4B workhorse only). |
@@ -101,33 +101,48 @@ projected per-profile serving choices — `selftest.ps1` measures and refines th
 
 | Profile | Config(s) | Resident/default tier | Ctx | KV | 26B-A4B |
 |---|---|---|---|---|---|
-| `blackwell-16` | #1 (5060 Ti 16 GB) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU — **needs the Blackwell build** |
+| `blackwell-16` | #1 (5060 Ti 16 GB) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU — CUDA-13 serves (slower); 12.8 for peak |
 | `volta-16` | #2 (V100 16 GB) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU |
 | `ampere-16` | 3090-class ≥12 GB (defensive) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU |
 | `dual-gpu` | #3/#4 (5060 Ti + V100 32 GB) | 26B architect + E4B editor, both resident | 32K | q8_0 | resident, **zero-swap** two-tier |
 | `ampere-8` | #5/#6 (3070 8 GB; +64 GB) | `offload-e4b` | 16K | q8_0 | `--cpu-moe` if RAM ≥ ~56 GB, else dropped |
-| `blackwell-8` | #8/#9 (5060 8 GB; +64 GB) | `offload-e4b` | 16K | q8_0 | `--cpu-moe` if RAM ≥ ~56 GB — **needs the Blackwell build** |
+| `blackwell-8` | #8/#9 (5060 8 GB; +64 GB) | `offload-e4b` | 16K | q8_0 | `--cpu-moe` if RAM ≥ ~56 GB; CUDA-13 serves, 12.8 peak |
 | `amd-rdna3` | #7 (780M + 64 GB, Vulkan) | `offload-e4b` | 16K | f16 (safe) | `--cpu-moe` very slow, else dropped |
 | `ampere-6` | #10/#11 (3050 6 GB) | `gemma4-e2b` | 16K | q8_0 (**mandatory**) | dropped |
 | `amd-gcn` | #12 (Vega 7 + 32 GB, Vulkan) | `gemma4-e2b` | 8K | f16, FA off | dropped |
 | `cpu` | no GPU | `offload-e4b` (CPU) | 8K | f16, FA off | `--cpu-moe` if RAM ≥ ~56 GB, else dropped |
 
-### Blackwell (sm_120) — REQUIRED CUDA-12.8 build
+### Blackwell (sm_120) — detect the installed CUDA and adapt (be flexible)
 
-**If `detect.ps1` reports `gpu_arch:"blackwell"` (RTX 50-series: 5060 / 5060 Ti / 5090 →
-profile `blackwell-16` / `blackwell-8`), the card will NOT serve on either stock Windows CUDA
-prebuilt.** This is a mandatory workstation build step (installer Task H4), not optional:
+**If `detect.ps1` reports `gpu_arch:"blackwell"` (RTX 50-series: 5060 / 5060 Ti / 5090 → profile
+`blackwell-16` / `blackwell-8`), the right llama.cpp build depends on the CUDA version actually
+installed on the box.** Do NOT hard-require one version — detect what's present and pick the best
+build for it. Three cases:
 
-- The **CUDA-12.4** prebuilt has **no sm_120** — Blackwell is unsupported, it won't run.
-- The **CUDA-13.x** prebuilt **segfaults the Blackwell MMQ kernel** and silently falls back to a
-  cuBLAS FP16 path that is roughly **5.6× slower** (measured elsewhere: ~772 vs ~5611 t/s pp512).
+- **CUDA 13.x installed (e.g. 13.3):** the card **DOES serve** on a CUDA-13 build — it just falls
+  back from the Blackwell MMQ kernel to a cuBLAS path that is roughly **5.6× slower on prefill** for
+  Q4 (measured elsewhere: ~772 vs ~5611 t/s pp512; token generation is far less affected). This is a
+  **functional, ship-it-now state** — good enough to run, not peak. Use the CUDA-13 build and record
+  the perf caveat; do not treat 13.x as broken.
+- **CUDA 12.8 installed:** the **peak** path — a build with `-DCMAKE_CUDA_ARCHITECTURES=120` uses the
+  MMQ integer kernels for full Q4 prefill speed. Recommend/install this when you want peak throughput.
+- **CUDA 12.4 (the old stock prebuilt) only:** has **no sm_120** — Blackwell won't run on it at all.
+  This is the one case that requires action (install a CUDA-13 or 12.8 build).
 
-Blackwell needs **CUDA Toolkit 12.8 + driver R570+**, built with
-`-DCMAKE_CUDA_ARCHITECTURES=120` (a heterogeneous `dual-gpu` pair with a V100 needs a multi-arch
-`sm_70 + sm_120` build). Runtime env: `CUDA_VISIBLE_DEVICES=0`, `CUDA_MODULE_LOADING=LAZY`. Note that
-standard Q4_K GGUFs get **no** FP4 tensor-core speedup (NVFP4 MMQ only helps NVFP4-format models) —
-do not expect an FP4 win. **Flag this to the human as a required prerequisite before those cards
-work; do not substitute a stock prebuilt (Hard rule 2).**
+**Flexibility is the requirement.** The workstation is transitional — a 5060 Ti may run alone on
+CUDA 13.3 today and gain a V100 tomorrow — so the installer must key the build off the *detected*
+CUDA version + the *detected* GPU set, not a fixed assumption:
+- **Single 5060 Ti on 13.3:** CUDA-13 build, serves now (cuBLAS-fallback perf note); offer 12.8 for peak.
+- **Dual `5060 Ti + V100`:** a **multi-arch** build covering **both** `sm_120` (Blackwell) and
+  `sm_70` (Volta), compiled against whatever CUDA (≥12.8 or 13.x) is installed. The dual-gpu profile
+  pins 26B→device 0 / E4B→device 1; heterogeneous-arch multi-GPU is supported but confirm per-device
+  placement.
+
+Runtime env for Blackwell: `CUDA_VISIBLE_DEVICES` set explicitly (avoid the hybrid-graphics
+`-1` trap), `CUDA_MODULE_LOADING=LAZY`. Standard Q4_K GGUFs get **no** FP4 tensor-core speedup
+(NVFP4 MMQ only helps NVFP4-format models) — do not expect an FP4 win. **Report the detected CUDA
+version + which build you selected + the expected perf tier to the human; get consent before
+installing a new CUDA toolkit or a driver (Hard rule 3).**
 
 ---
 

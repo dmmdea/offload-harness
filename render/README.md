@@ -45,8 +45,8 @@ zero-always-warm (it shares the 8 GB with llama-swap, so it must coordinate). Ta
 
 | | model | use |
 |---|---|---|
-| **PRIMARY** | HunyuanVideo 1.5 480p I2V (cfg_distilled Q4_K_S) | default b-roll, 8 GB-friendly |
-| SECONDARY | Wan 2.2 14B I2V (two-stage GGUF + DisTorch2 RAM-offload) | photoreal hero shots, slow (12–25 min) |
+| **PRIMARY** | Wan 2.2 14B I2V (two-stage GGUF + DisTorch2 RAM-offload, 4-step lightx2v LoRAs, `wan_2.1_vae`) | default b-roll — best open 16GB photoreal I2V; ~1.5min/480p, ~2.7min/720p at 4 steps |
+| SECONDARY | HunyuanVideo 1.5 480p I2V (cfg_distilled Q4_K_S) | `--model hunyuan`; opt-in, needs its files installed (absent on the 16GB box) |
 
 ## Files
 

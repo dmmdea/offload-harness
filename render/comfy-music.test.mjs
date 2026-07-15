@@ -37,26 +37,27 @@ test("buildGraphFromArgs: prompt is the second positional; seed/seconds threaded
   assert.equal(seed, 42, "explicit --seed is honored (reproducibility)");
   // ACE-Step graph shape (mirrors wf-acestep.test.mjs)
   const types = Object.values(graph).map((n) => n.class_type);
-  for (const need of ["CheckpointLoaderSimple", "ModelSamplingSD3", "TextEncodeAceStepAudio", "EmptyAceStepLatentAudio", "KSampler", "VAEDecodeAudio", "SaveAudio"]) {
+  for (const need of ["UNETLoader", "DualCLIPLoader", "TextEncodeAceStepAudio1.5", "EmptyAceStep1.5LatentAudio", "KSampler", "VAEDecodeAudio", "SaveAudio"]) {
     assert.ok(types.includes(need), `graph must include ${need}`);
   }
   // seconds wired into the empty latent
-  const lat = Object.values(graph).find((n) => n.class_type === "EmptyAceStepLatentAudio");
+  const lat = Object.values(graph).find((n) => n.class_type === "EmptyAceStep1.5LatentAudio");
   assert.equal(lat.inputs.seconds, 8);
   // seed wired into KSampler
   const ks = Object.values(graph).find((n) => n.class_type === "KSampler");
   assert.equal(ks.inputs.seed, 42);
-  // positive encoder carries the style tags
-  const encs = Object.values(graph).filter((n) => n.class_type === "TextEncodeAceStepAudio");
+  // the single v1.5 encoder carries the style tags
+  const encs = Object.values(graph).filter((n) => n.class_type === "TextEncodeAceStepAudio1.5");
   assert.ok(encs.some((e) => e.inputs.tags.includes("corporate")), "positive carries the tags");
 });
 
 test("buildGraphFromArgs: --lyrics flows into the positive encoder (vocals support)", () => {
   const { pos, flags } = parseArgs(["out.flac", "pop ballad", "--lyrics", "hello from the other side"]);
   const { graph } = buildGraphFromArgs(pos, flags);
-  const encs = Object.values(graph).filter((n) => n.class_type === "TextEncodeAceStepAudio");
-  assert.ok(encs.some((e) => e.inputs.lyrics.includes("hello from the other side")), "lyrics carried on the positive encoder");
-  assert.ok(encs.some((e) => e.inputs.lyrics === ""), "negative encoder stays empty");
+  const encs = Object.values(graph).filter((n) => n.class_type === "TextEncodeAceStepAudio1.5");
+  assert.ok(encs.some((e) => e.inputs.lyrics.includes("hello from the other side")), "lyrics carried on the encoder");
+  // v1.5 has ONE encoder + a ConditioningZeroOut negative (no second empty encoder)
+  assert.ok(Object.values(graph).some((n) => n.class_type === "ConditioningZeroOut"), "negative is a zeroed-out conditioning");
 });
 
 test("buildGraphFromArgs: no --seed mints a positive seed (still reproducible/reported)", () => {

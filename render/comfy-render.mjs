@@ -60,16 +60,25 @@ if (flags.graph) {
   const cfg = Number(flags.cfg || 7);
   const sampler = flags.sampler || "dpmpp_2m";
   const scheduler = flags.scheduler || "karras";
+  // The graph shape is the same for SDXL and for a DiT (HiDream); what differs is
+  // WHERE the VAE comes from. `--vae builtin` decodes with the VAE that the CHECKPOINT
+  // LOADER supplies (its 3rd output, ["4",2] — verified against /object_info:
+  // CheckpointLoaderSimple.output = [MODEL, CLIP, VAE]) instead of loading a standalone
+  // one. That is REQUIRED for HiDream: its .safetensors carries NO VAE weights at all
+  // (1474 tensors, all DiT/text/vision — it is pixel-space), so a standalone 4-channel
+  // sdxl_vae cannot decode its output. Any other --vae value keeps the standalone
+  // VAELoader (SDXL's default path), so callers that don't pass --vae are unaffected.
+  const builtinVAE = ["builtin", "none", "checkpoint"].includes(String(vae).toLowerCase());
   graph = {
     "4":  { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: ckpt } },
-    "10": { class_type: "VAELoader", inputs: { vae_name: vae } },
     "5":  { class_type: "EmptyLatentImage", inputs: { width, height, batch_size: 1 } },
     "6":  { class_type: "CLIPTextEncode", inputs: { text: positive, clip: ["4", 1] } },
     "7":  { class_type: "CLIPTextEncode", inputs: { text: negative, clip: ["4", 1] } },
     "3":  { class_type: "KSampler", inputs: { seed, steps, cfg, sampler_name: sampler, scheduler, denoise: 1, model: ["4", 0], positive: ["6", 0], negative: ["7", 0], latent_image: ["5", 0] } },
-    "8":  { class_type: "VAEDecode", inputs: { samples: ["3", 0], vae: ["10", 0] } },
+    "8":  { class_type: "VAEDecode", inputs: { samples: ["3", 0], vae: builtinVAE ? ["4", 2] : ["10", 0] } },
     "9":  { class_type: "SaveImage", inputs: { filename_prefix: "render", images: ["8", 0] } },
   };
+  if (!builtinVAE) graph["10"] = { class_type: "VAELoader", inputs: { vae_name: vae } };
 }
 
 const j = async (url, opts) => { const r = await fetch(url, opts); if (!r.ok) throw new Error(url + " -> " + r.status + " " + (await r.text()).slice(0, 200)); return r.json(); };

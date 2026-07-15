@@ -136,6 +136,49 @@ func TestRunVisionOCRSuccess(t *testing.T) {
 	}
 }
 
+// TestOCRHonorsConfiguredMaxTokens guards the per-machine OCR cap: the OCR request
+// must carry cfg.OCRMaxTokens, so a machine with a strong VLM can transcribe a dense
+// page instead of hitting the 1024 built-in and deferring the whole OCR to cloud.
+// 0 falls back to the in-package default (1024).
+func TestOCRHonorsConfiguredMaxTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cfgMax  int
+		wantMax float64
+	}{
+		{"configured value raises the cap", 4096, 4096},
+		{"zero falls back to the built-in default", 0, 1024},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotMax float64
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				var body struct {
+					MaxTokens float64 `json:"max_tokens"`
+				}
+				_ = json.Unmarshal(raw, &body)
+				gotMax = body.MaxTokens
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"text"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10}}`))
+			}))
+			defer srv.Close()
+
+			cfg := baseVisionCfg(srv, "fake-vlm")
+			cfg.OCRMaxTokens = tc.cfgMax
+			client := llamaclient.New(srv.URL, cfg.CompletionPath, "", 10*time.Second)
+			p := New(cfg, client, nil, nil)
+
+			res := p.Run(context.Background(), core.Request{Task: core.TaskOCR, Image: minimalPNGDataURI()})
+			if !res.OK {
+				t.Fatalf("expected OK ocr result, got defer: %s", res.Reason)
+			}
+			if gotMax != tc.wantMax {
+				t.Errorf("OCR request max_tokens = %v, want %v", gotMax, tc.wantMax)
+			}
+		})
+	}
+}
+
 // TestRunVisionAssessImageUnwrapped: for a grammar vision task (assess_image) the
 // model output is ALREADY a JSON object, so Data must be that raw JSON verbatim —
 // NOT wrapped in {key: content}. vqa/ocr (no grammar) keep wrapping (above).

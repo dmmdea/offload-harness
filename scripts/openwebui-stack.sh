@@ -4,7 +4,7 @@
 #   2) OpenWebUI on :8081, pre-pointed at the agent server (log in with the account you created on first launch)
 # The agent works inside ~/local-agent-workspace. Chat in OpenWebUI -> it builds.
 #
-# Tuning (learned live, 2026-07-08): a small local driver model has a limited context window and the
+# Tuning (learned live, 2026-07-08): qwythos has a 32K context window and the
 # loop resends the FULL growing transcript every step, so a wide/exploratory
 # web_search-heavy prompt can exceed it before finishing. Defaults below are the
 # verified-working configuration: a lean toolset (no shell/delete — they add
@@ -16,8 +16,8 @@
 # broad topics; edit+upload alone completes in ~25s reliably.
 set -u
 WS="${LOCAL_AGENT_WORKSPACE:-$HOME/local-agent-workspace}"
-BIN="${LOCAL_AGENT_BIN:-$HOME/offload-stack/harness/local-agent}"
-MODEL="${LOCAL_AGENT_MODEL:-offload-e4b}"
+BIN="${LOCAL_AGENT_BIN:-/mnt/d/repos/local-offload/bin/local-agent-linux}"
+MODEL="${LOCAL_AGENT_MODEL:-qwythos}"
 CAPS="${LOCAL_AGENT_CAPS:--allow-write -allow-overwrite -allow-search -allow-github}"
 MAX_STEPS="${LOCAL_AGENT_MAX_STEPS:-12}"
 MAX_SAME_TOOL="${LOCAL_AGENT_MAX_SAME_TOOL:-2}"

@@ -109,11 +109,21 @@ type row struct {
 }
 
 // Train reads the JSONL ledger at ledgerPath, optionally merges a sidecar of
-// synthesized E2B-counterfactual rows at labelsPath (empty string = skip),
-// fits one logistic-regression model per eligible task (triage/classify with
-// >=minRows labelled rows), writes the results to outPath
+// synthesized entry-tier-counterfactual rows at labelsPath (empty string =
+// skip), fits one logistic-regression model per eligible task (triage/classify
+// with >=minRows labelled rows), writes the results to outPath
 // (router-weights.json), and returns a human-readable report.
-func Train(ledgerPath, labelsPath, outPath string) (string, error) {
+//
+// entryTier is the caller's configured entry-tier model (cfg.TriageModel); only
+// ledger rows that entered at that tier carry a usable accept/escalate label.
+// It MUST NOT be hardcoded here: each machine serves its own hardware-optimized
+// roster under its own model names, so a literal would silently match nothing on
+// any box whose triage model is named differently (0 rows -> "need 200 rows",
+// exit 0, router never learns).
+func Train(ledgerPath, labelsPath, outPath, entryTier string) (string, error) {
+	if entryTier == "" {
+		return "", fmt.Errorf("router.Train: entryTier is empty (pass cfg.TriageModel)")
+	}
 	entries, err := readLedger(ledgerPath)
 	if err != nil {
 		return "", fmt.Errorf("router.Train: read ledger: %w", err)
@@ -132,8 +142,8 @@ func Train(ledgerPath, labelsPath, outPath string) (string, error) {
 		if task != "triage" && task != "classify" {
 			continue
 		}
-		if e.ModelTier != "gemma4-e2b" {
-			continue // only rows that entered at E2B are labelled
+		if e.ModelTier != entryTier {
+			continue // only rows that entered at the entry tier are labelled
 		}
 		if len(e.Feat) == 0 {
 			continue

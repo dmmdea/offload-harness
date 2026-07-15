@@ -39,6 +39,11 @@ type Config struct {
 	// VisionMaxImageBytes caps a single decoded image before it is rejected
 	// (guards context/VRAM blowups). 0 = use the loader default.
 	VisionMaxImageBytes int `json:"vision_max_image_bytes,omitempty"`
+	// OCRMaxTokens caps the OCR (image transcription) output. A dense document page
+	// exceeds the built-in 1024 default, hits finish_reason=length, and defers the
+	// whole OCR to cloud — so a machine with a strong VLM (e.g. qwen3-vl-8b) can raise
+	// this to transcribe long pages locally. 0 = the in-package default (1024).
+	OCRMaxTokens int `json:"ocr_max_tokens,omitempty"`
 	// VideoFPS is the frame-sampling rate for video_describe (frames/second).
 	VideoFPS float64 `json:"video_fps,omitempty"`
 	// VideoMaxFrames caps how many sampled frames are sent to the VLM (bounds the
@@ -89,6 +94,32 @@ type Config struct {
 	// ImageGenTimeoutSec bounds one render: ComfyUI cold-start (~4min) + first SDXL
 	// render (~6min) + margin. Default 720 (12min).
 	ImageGenTimeoutSec int `json:"imagegen_timeout_sec,omitempty"`
+	// --- image model binding (PER-MACHINE; the harness stays model-agnostic) ---
+	// Each box serves the image model its hardware can actually run — an 8GB laptop
+	// runs SDXL; a 16GB workstation may run a DiT (HiDream) instead. NONE of those
+	// names may be baked into shared code, so the model + its sampler tuning are
+	// config, not constants. Every field below is OPTIONAL: leave it empty/zero and
+	// comfy-render.mjs keeps its own defaults, so a machine that never sets them
+	// (e.g. the laptop's SDXL path) is byte-for-byte unchanged.
+	//
+	// ImageGenCkpt is the ComfyUI checkpoint filename (CheckpointLoaderSimple), e.g.
+	// "RealVisXL_V5.0_fp16.safetensors" (SDXL) or "hidream_o1_image_dev_mxfp8.safetensors"
+	// (HiDream, a DiT). Empty = the script's default.
+	ImageGenCkpt string `json:"imagegen_ckpt,omitempty"`
+	// ImageGenVAE is the standalone VAE filename, or "builtin" to decode with the VAE
+	// the CHECKPOINT LOADER supplies. "builtin" is REQUIRED for HiDream: that
+	// checkpoint carries no VAE weights (it is pixel-space), so a standalone
+	// 4-channel sdxl_vae cannot decode its output. Empty = the script's default
+	// (a standalone SDXL VAE).
+	ImageGenVAE string `json:"imagegen_vae,omitempty"`
+	// ImageGenSteps / ImageGenCFG / ImageGenSampler / ImageGenScheduler are the
+	// sampler defaults for THIS machine's image model (SDXL wants cfg~7 + karras;
+	// HiDream wants cfg~5 + simple). A per-request "steps" param still overrides.
+	// Zero/empty = the script's default.
+	ImageGenSteps     int     `json:"imagegen_steps,omitempty"`
+	ImageGenCFG       float64 `json:"imagegen_cfg,omitempty"`
+	ImageGenSampler   string  `json:"imagegen_sampler,omitempty"`
+	ImageGenScheduler string  `json:"imagegen_scheduler,omitempty"`
 	// --- video / audio generation (generate_video / generate_audio) ---
 	// VideoGenScript is the path to render/comfy-video.mjs (the I2V lifecycle wrapper).
 	// Empty = no video route (the task defers cleanly), like an empty ImageGenScript.
@@ -103,6 +134,21 @@ type Config struct {
 	// VideoGenTimeoutSec bounds one video render: ComfyUI cold-start + a long I2V
 	// render (Wan native two-stage is slow). Default 1500 (25min).
 	VideoGenTimeoutSec int `json:"videogen_timeout_sec,omitempty"`
+	// VideoGenWidth / VideoGenHeight / VideoGenFrames are this machine's DEFAULT I2V
+	// output size — a per-machine knob so a 16GB box renders 720p while an 8GB box
+	// stays at the builder's 480p default. A per-request width/height/frames always
+	// wins; 0 = use the builder default (no flag passed). Keeps the harness
+	// hardware-agnostic (resolution is config, not a constant).
+	VideoGenWidth  int `json:"videogen_width,omitempty"`
+	VideoGenHeight int `json:"videogen_height,omitempty"`
+	VideoGenFrames int `json:"videogen_frames,omitempty"`
+	// VideoGenUpscaleModel is this machine's post-decode upscale model (e.g. an ESRGAN
+	// "4x-UltraSharp.pth"); when a request asks to upscale, the video runner uses it +
+	// the target size below. Empty = the machine has no upscale model, so upscale is a
+	// no-op there. Per-machine + config-driven — never a hardcoded model name.
+	VideoGenUpscaleModel  string `json:"videogen_upscale_model,omitempty"`
+	VideoGenUpscaleWidth  int    `json:"videogen_upscale_width,omitempty"`
+	VideoGenUpscaleHeight int    `json:"videogen_upscale_height,omitempty"`
 	// AudioGenTimeoutSec bounds one audio synthesis (TTS or ACE-Step). Default 720 (12min).
 	AudioGenTimeoutSec int `json:"audiogen_timeout_sec,omitempty"`
 	// VideoGenWaitMs is how long a queued video job waits for the single GPU slot before
@@ -128,8 +174,14 @@ type Config struct {
 	// MemoryStack lists the CPU-only, zero-VRAM llama-swap models the GPU-free helper
 	// must NEVER unload (the load-bearing mem0 stack). Sourced here (not a buried const)
 	// so a renamed/added 3rd CPU member is honored. Threaded to the runner via the
-	// MEMORY_STACK env. Default {embeddinggemma, bge-reranker-v2-m3}.
+	// MEMORY_STACK env. Default {embeddinggemma, bge-reranker-v2-m3}. This is an
+	// UNORDERED keep-alive set — do NOT infer roles from position (use EmbedModel).
 	MemoryStack []string `json:"memory_stack,omitempty"`
+	// EmbedModelName is the embedding model the judge/kNN embedder requests. Kept
+	// separate from MemoryStack (an unordered keep-alive set) so it is unambiguous and
+	// reorder-proof. Empty falls back to MemoryStack[0] then "embeddinggemma".
+	// Read via the EmbedModel() accessor.
+	EmbedModelName string `json:"embed_model,omitempty"`
 	// Temperature for deterministic structured output (default 0).
 	Temperature float64 `json:"temperature"`
 	// MaxRetries is how many correction re-prompts before deferring.
@@ -245,14 +297,15 @@ func Default() Config {
 		TriageModel:               "gemma4-e2b", // fast tier for triage/classify
 		EscalationModel:           "gemma4-26b-a4b", // MoE escalation tier (experts in RAM via --cpu-moe); part of the served offload family.
 		ReasoningModel:            "gemma4-26b-a4b", // terminal local reasoning tier (think-wrapped grammar) before defer-to-cloud. "" disables.
-		VisionModel:               "qwen3vl-4b", // VLM for the vqa task
+		VisionModel:               "", // opt-in: set the machine's VLM alias (empty = vision defers, no phantom)
 		VisionMaxImageBytes:       6000000,      // ~6MB cap per image
+		OCRMaxTokens:              1024,         // default OCR output cap; raise per-machine for dense docs
 		VideoFPS:                  2.0,
 		VideoMaxFrames:            12,
 		VideoFrameWidth:           512,
 		FFmpegPath:                "ffmpeg",
 		STTModel:                  "whisper-stt",
-		STTModelHQ:                "whisper-stt-hq",
+		STTModelHQ:                "", // opt-in: an accuracy STT tier alias (empty = hq falls back to STTModel)
 		STTLanguage:               "", // auto-detect unless overridden per call
 		STTVAD:                    true,
 		STTMaxInlineSegments:      120,
@@ -274,6 +327,7 @@ func Default() Config {
 		GPULockPath:               "",      // runners' default (GPU_LOCK env, else <tmpdir>/local-offload-gpu.lock)
 		VisionGPUWaitSec:          90,      // LO-1: bounded wait for the gen lock before a vision call defers
 		MemoryStack:               []string{"embeddinggemma", "bge-reranker-v2-m3"},
+		EmbedModelName:            "embeddinggemma", // explicit; reorder-proof (not MemoryStack position)
 		Temperature:               0,
 		MaxRetries:                1,
 		ClassifyMinConfidence:     0.45,
@@ -403,6 +457,23 @@ func warnUnknownKeys(b []byte) {
 			fmt.Fprintf(os.Stderr, "warning: unknown config key %q (ignored — typo?)\n", k)
 		}
 	}
+}
+
+// EmbedModel is the embedding model shared code (the judge/kNN embedder) requests —
+// a config accessor, never a hardcode, so the harness stays model-agnostic. Resolution
+// order: the explicit EmbedModelName; else MemoryStack[0] (back-compat for configs that
+// only set the stack); else the "embeddinggemma" fallback (lives ONLY here, mirroring
+// the router pattern) so an empty config never sends a blank model name to the server.
+// It does NOT infer a role from MemoryStack position beyond that back-compat step —
+// set embed_model explicitly if the stack is not embedder-first.
+func (c Config) EmbedModel() string {
+	if c.EmbedModelName != "" {
+		return c.EmbedModelName
+	}
+	if len(c.MemoryStack) > 0 && c.MemoryStack[0] != "" {
+		return c.MemoryStack[0]
+	}
+	return "embeddinggemma"
 }
 
 // EnsureDirs creates the parent dirs for the store files.

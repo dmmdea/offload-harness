@@ -4,6 +4,106 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.12.0] - 2026-07-15
+
+### Added
+- **Video quality options (universal, param-driven — never hardware-baked):**
+  - **`hero` mode** — a native no-LoRA quality pass for the Wan builder (skips the distill LoRAs, native
+    steps/cfg). Slower, but restores the camera/subject motion the 4-step LoRA trades for speed — the
+    per-research win for realistic b-roll. `--hero` (CLI) / `hero:true` (tool). Fast 4-step stays default.
+  - **`upscale`** — an optional post-decode ESRGAN upscale (`UpscaleModelLoader` → `ImageUpscaleWithModel`
+    → optional resize), e.g. 720p→1080p. The upscale model + target are **per-machine config**
+    (`videogen_upscale_model` / `videogen_upscale_width` / `videogen_upscale_height`) so no model name is
+    baked into shared code; a machine with no upscale model just skips it. `--upscale` (CLI) / `upscale:true`.
+  - (Frame count remains the per-machine `videogen_frames` knob — 81 ≈ a real 5s clip.)
+
+## [0.11.0] - 2026-07-15
+
+### Fixed
+- **Video (`render/comfy-video.mjs` + `render/wf-wan22-i2v.mjs`): the default I2V path now works and is fast.**
+  Default model flipped Hunyuan→**Wan 2.2** (Hunyuan needs 3 files absent on this box), with the JS-scoping
+  bug fixed. Wired the on-disk **4-step lightx2v LoRAs** (HIGH on the high-noise expert, LOW on the low-noise
+  expert) — ~91s for a 25-frame 480p clip vs ~12-25min native. Fixed a pre-existing wrong VAE default
+  (`wan2.2_vae` is the 48-ch 5B VAE; the 14B A14B I2V needs the 16-ch `wan_2.1_vae` → the `patch_embed`
+  36-vs-64-channel error). Live-verified end-to-end at 480p AND 720p.
+- **Music (`render/wf-acestep.mjs`): rewritten from the retired v1 all-in-one to the ACE-Step v1.5 split
+  stack** (UNETLoader + DualCLIPLoader type `ace` + VAELoader + the 1.5 encoder/latent/AuraFlow nodes), all
+  on disk; every input verified against the live `/object_info`. Live-verified (10s FLAC).
+
+### Added
+- **Per-machine video resolution** (`videogen_width` / `videogen_height` / `videogen_frames` config): a 16GB
+  box defaults to 720p while an 8GB box stays at the builder's 480p default (a per-request value still wins).
+  Keeps the harness hardware-agnostic — resolution is config, not a constant. e.g. a 16GB box may set 1280×720.
+
+## [0.10.2] - 2026-07-15
+
+### Changed
+- **`Default()` no longer ships phantom model names** (opt-in defaults): `vision_model` and
+  `stt_model_hq` default to `""` instead of `qwen3vl-4b` / `whisper-stt-hq` (aliases served on no
+  current machine). A machine that omits them now cleanly disables that route instead of inheriting a
+  model that errors → cloud-defers. Configured machines are unaffected (they set both). Template +
+  `config.example.json` updated.
+
+## [0.10.1] - 2026-07-15
+
+### Fixed
+- **whisper-stt crash resilience** (`internal/sttclient`): the "whisper-server 502" was a whisper-server
+  SIGSEGV, not a request bug (real speech transcribes fine). Two harness-side mitigations:
+  - A real process-global serialization mutex around the inference request — whisper-server is
+    single-slot and crashes on overlapping requests (the `Client` doc-comment claimed serialization but
+    no mutex existed).
+  - An empty-body 5xx (the crash signature) now yields a descriptive, diagnostic error (crash /
+    near-silent audio / cold-restart) instead of a bare status code, so the defer reason is accurate.
+  - (Machine-local `config.json`: `stt_unload_after:false` keeps whisper warm between back-to-back calls
+    so no-speech input returns 200-empty instead of cold-crashing — not part of this repo diff.)
+  - The full fix (whisper `ttl:-1` in the live llama-swap so it never cold-loads) needs operator
+    approval and is not included. See docs/superpowers/evidence/2026-07-15-whisper-crash-resilience.md.
+
+## [0.10.0] - 2026-07-15
+
+### Fixed
+- **Model-roster hardcodes removed from shared code** (keeps the harness hardware/model-agnostic — the
+  roster is per-machine config, never baked in):
+  - `internal/judge/embed.go` no longer hardcodes `"embeddinggemma"` — `NewEmbedder` takes the model,
+    threaded from a new `Config.EmbedModel()` accessor (`MemoryStack[0]`, with the fallback living only
+    in config). The genuine model-agnosticism violation.
+  - `internal/mcpserver` `agent_run` planner default and `cmd/local-agent` `--model` / `--architect-model`
+    / `--editor-model` now fall back to the configured model (`cfg.Model` / `cfg.EscalationModel`) instead
+    of the literals `offload-e4b` / `gemma4-26b-a4b`.
+
+### Added
+- **`ocr_max_tokens` config** (default 1024): a machine with a strong VLM can raise the OCR output cap so
+  a dense document page transcribes locally instead of hitting the 1024 ceiling (`finish_reason=length`)
+  and deferring the whole OCR to cloud. Threaded into the vision dispatch; covers `extract_image` too.
+- Guard tests: `TestEmbedUsesConfiguredModel`, `TestOCRHonorsConfiguredMaxTokens`, `TestModelFlagFallsBackToConfig`.
+
+## [0.9.0] - 2026-07-14
+
+### Fixed
+- **Router entry tier is no longer hardcoded** (`internal/router`): `Train` takes the entry-tier
+  model from config (`cfg.TriageModel`) instead of the literal `"gemma4-e2b"`. On any machine whose
+  hardware-optimized roster names its triage model differently (e.g. `gemma-4-e2b`), the ledger rows
+  never matched, so the self-optimization router silently collected 0 rows and never trained. The
+  harness stays hardware/model-agnostic: the roster is per-machine config, never baked into shared code.
+
+### Added
+- **Per-machine image-model binding** (`internal/config`, `internal/imagegen`, `render/comfy-render.mjs`):
+  `imagegen_ckpt` / `imagegen_vae` / `imagegen_steps` / `imagegen_cfg` / `imagegen_sampler` /
+  `imagegen_scheduler`. A machine renders with the checkpoint its hardware can run — SDXL on an 8 GB
+  box, an all-in-one DiT such as HiDream on a 16 GB box via `--vae builtin` (decodes with the VAE the
+  checkpoint loader supplies; HiDream ships no VAE weights). Every field is optional and a zero binding
+  emits no flags, so an unbound machine renders exactly as before.
+- **Version-consistency guard** (`main_test.go` `TestVersionSourcesAgree`): the `VERSION` file, the
+  compiled-in `version` const (advertised in the MCP handshake), and the top `CHANGELOG.md` entry must
+  all name the same version — a build failure now catches drift. They had drifted to
+  `VERSION` 0.7.0 / const 0.6.2 / CHANGELOG 0.7.0.
+
+### Changed
+- Version reconciled to **0.9.0** so this canonical private repo sits ahead of the public mirror
+  (`offload-harness`, published at 0.8.0), per the versioning invariant. Folds in the 0.8.0 line already
+  present in this tree — local coding-agent capabilities + the per-hardware optimization matrix — plus
+  the CUDA-toolkit / Blackwell `detect` work the 0.8.0 publish did not carry.
+
 ## [0.8.0] - 2026-07-12
 
 ### Added — local coding agent capabilities (survive & drive complex multi-step tasks)

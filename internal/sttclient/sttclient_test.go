@@ -8,9 +8,70 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// TestTranscribeSerializesConcurrentCalls guards the single-slot invariant: overlapping
+// inference requests crash whisper-server, so the client must serialize them. The fake
+// server records the peak number of in-flight requests; with the mutex it must be 1.
+func TestTranscribeSerializesConcurrentCalls(t *testing.T) {
+	var inflight, maxSeen int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&inflight, 1)
+		for {
+			m := atomic.LoadInt32(&maxSeen)
+			if n <= m || atomic.CompareAndSwapInt32(&maxSeen, m, n) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond) // hold the slot so a concurrent call would overlap
+		atomic.AddInt32(&inflight, -1)
+		_, _ = w.Write([]byte(`{"text":"ok","segments":[{"id":0,"start":0,"end":1,"text":"ok"}]}`))
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	wav := filepath.Join(tmp, "a.wav")
+	_ = os.WriteFile(wav, []byte("RIFF"), 0o644)
+	c := New(srv.URL, 10*time.Second)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = c.Transcribe(context.Background(), "whisper-stt", wav, DefaultParams())
+		}()
+	}
+	wg.Wait()
+	if m := atomic.LoadInt32(&maxSeen); m != 1 {
+		t.Fatalf("peak concurrent inference requests = %d, want 1 — the single-slot server must be serialized", m)
+	}
+}
+
+// TestTranscribeEmptyBody502IsDescriptive guards that a crash-signature 5xx (empty
+// body) surfaces an accurate, diagnostic error rather than a bare status code.
+func TestTranscribeEmptyBody502IsDescriptive(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway) // 502, empty body — the whisper crash signature
+	}))
+	defer srv.Close()
+	tmp := t.TempDir()
+	wav := filepath.Join(tmp, "a.wav")
+	_ = os.WriteFile(wav, []byte("RIFF"), 0o644)
+	c := New(srv.URL, 10*time.Second)
+
+	_, err := c.Transcribe(context.Background(), "whisper-stt", wav, DefaultParams())
+	if err == nil {
+		t.Fatal("expected an error on empty-body 502")
+	}
+	if !strings.Contains(err.Error(), "crashed") || !strings.Contains(err.Error(), "empty body") {
+		t.Errorf("empty-body 502 error should be descriptive (crash / no-speech hint); got: %v", err)
+	}
+}
 
 func TestSRT(t *testing.T) {
 	got := SRT([]Segment{

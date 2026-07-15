@@ -4,11 +4,11 @@
 set -euo pipefail
 GOAL="${1:?usage: local-build \"<goal>\" [dir]}"
 DIR="${2:-$PWD}"
-BIN="${LOCAL_AGENT_BIN:-$HOME/offload-stack/harness/local-agent}"
+BIN="${LOCAL_AGENT_BIN:-/mnt/d/repos/local-offload/bin/local-agent-linux}"
 exec "$BIN" \
   -allow-write -allow-overwrite -allow-delete -allow-shell \
   -base "${LOCAL_BUILD_BASE:-http://127.0.0.1:11436}" \
-  -model "${LOCAL_BUILD_MODEL:-offload-e4b}" \
+  -model "${LOCAL_BUILD_MODEL:-qwythos}" \
   -root "$DIR" -worktree "$DIR" \
   -max-steps "${LOCAL_BUILD_STEPS:-20}" \
   -goal-timeout "${LOCAL_BUILD_TIMEOUT:-600}" \

@@ -19,8 +19,16 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+// inferMu serializes every inference POST to the whisper upstream. whisper-server is
+// SINGLE-SLOT: two overlapping /inference requests crash it (SIGSEGV → the harness
+// sees an empty-body 502 and llama-swap cold-restarts it, ~60s of refusals). This
+// mutex is process-global (the single server is a single shared resource, regardless
+// of how many Client values exist), so it holds even across concurrent callers.
+var inferMu sync.Mutex
 
 // Word is one timestamped word with whisper's per-word confidence. whisper-server
 // emits words[] in verbose_json BY DEFAULT (no extra request field needed — adding
@@ -93,8 +101,8 @@ func DefaultParams() Params {
 func (Params) ResponseFormat() string { return "verbose_json" }
 
 // Client posts audio to whisper-server through llama-swap on base (e.g.
-// http://127.0.0.1:11436). One transcription is mutex-serialized server-side;
-// the harness calls one at a time.
+// http://127.0.0.1:11436). Every inference is serialized by the process-global
+// inferMu (whisper-server is single-slot and crashes on overlapping requests).
 type Client struct {
 	base string
 	http *http.Client
@@ -127,6 +135,11 @@ func (c *Client) Transcribe(ctx context.Context, model, wavPath string, p Params
 		return Result{}, err
 	}
 	req.Header.Set("Content-Type", contentType)
+	// Serialize against the single-slot server (see inferMu): overlapping requests
+	// crash whisper-server. Held across the whole request/response so a second caller
+	// waits for the connection to fully drain, not just for Do() to return.
+	inferMu.Lock()
+	defer inferMu.Unlock()
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return Result{}, err
@@ -134,6 +147,13 @@ func (c *Client) Transcribe(ctx context.Context, model, wavPath string, p Params
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 400))
+		// An empty-body 5xx is the crash signature: whisper-server SIGSEGV'd (a
+		// cold-load on near-silent/no-speech audio is the known trigger) and
+		// llama-swap is cold-restarting it. Surface a distinct, descriptive error so
+		// the caller defers with an accurate reason instead of a bare status code.
+		if resp.StatusCode >= 500 && len(bytes.TrimSpace(b)) == 0 {
+			return Result{}, fmt.Errorf("whisper-server %d (empty body): upstream crashed — likely near-silent/no-speech audio on a cold load; cold-restart in progress", resp.StatusCode)
+		}
 		return Result{}, fmt.Errorf("whisper-server %d: %s", resp.StatusCode, string(b))
 	}
 	var out Result

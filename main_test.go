@@ -1,12 +1,40 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/eval"
 )
+
+// TestVersionSourcesAgree enforces the versioning invariant: the VERSION file, the
+// compiled-in `version` const (advertised in the MCP handshake), and the top
+// CHANGELOG entry must all name the same version. They silently drifted once —
+// VERSION 0.7.0 / const 0.6.2 / CHANGELOG 0.7.0 while the public mirror published
+// 0.8.0 — which made this canonical repo look *behind* its own mirror and cost real
+// debugging time. A bump that misses any of the three now fails `go test ./...`.
+func TestVersionSourcesAgree(t *testing.T) {
+	raw, err := os.ReadFile("VERSION")
+	if err != nil {
+		t.Fatalf("read VERSION: %v", err)
+	}
+	fileVer := strings.TrimSpace(string(raw))
+
+	if version != fileVer {
+		t.Errorf("version drift: main.go const version = %q but VERSION file = %q — bump both together", version, fileVer)
+	}
+
+	cl, err := os.ReadFile("CHANGELOG.md")
+	if err != nil {
+		t.Fatalf("read CHANGELOG.md: %v", err)
+	}
+	if want := "## [" + fileVer + "]"; !strings.Contains(string(cl), want) {
+		t.Errorf("CHANGELOG.md has no %q entry for the current VERSION — add a changelog entry when you bump", want)
+	}
+}
 
 func TestHoistGlobalConfig(t *testing.T) {
 	cases := []struct {
@@ -146,7 +174,7 @@ func TestBuildAudioParams(t *testing.T) {
 }
 
 // TestBuildVideoParams pins the generate-video CLI param-building: model defaults
-// to hunyuan, the still path is carried as "still", and optional flags
+// to wan, the still path is carried as "still", and optional flags
 // (negative/frames/width/height/steps/seed/reserve_vram) are only set when
 // non-zero. reserve_vram is stringified to match the MCP tool's wire shape.
 // Mirrors buildAudioParams so the arg handling is unit-testable without a render.
@@ -162,9 +190,9 @@ func TestBuildVideoParams(t *testing.T) {
 			map[string]any{"model": "hunyuan", "still": "still.png"},
 		},
 		{
-			"empty model still emits hunyuan (CLI default)",
+			"empty model emits wan (CLI default)",
 			videoFlags{model: "", still: "s.png"},
-			map[string]any{"model": "hunyuan", "still": "s.png"},
+			map[string]any{"model": "wan", "still": "s.png"},
 		},
 		{
 			"frames + seed + reserve_vram + out + negative",
@@ -180,6 +208,11 @@ func TestBuildVideoParams(t *testing.T) {
 			"wan model with width/height/steps",
 			videoFlags{model: "wan", still: "s.png", width: 832, height: 480, steps: 30},
 			map[string]any{"model": "wan", "still": "s.png", "width": 832, "height": 480, "steps": 30},
+		},
+		{
+			"hero + upscale emit their bool params (only when set)",
+			videoFlags{model: "wan", still: "s.png", hero: true, upscale: true},
+			map[string]any{"model": "wan", "still": "s.png", "hero": true, "upscale": true},
 		},
 	}
 	for _, tc := range cases {
