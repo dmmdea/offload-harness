@@ -215,6 +215,15 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 		return p.runGenerateAudio(ctx, req, meta, start)
 	}
 
+	// edit_image / media are deterministic CPU ops (PIL/GIMP/ffmpeg via
+	// internal/mediaops) — own branches, NO GPU lock, run in parallel with renders.
+	if req.Task == core.TaskEditImage {
+		return p.runEditImage(ctx, req, meta, start)
+	}
+	if req.Task == core.TaskMedia {
+		return p.runMedia(ctx, req, meta, start)
+	}
+
 	// Vision tasks (vqa) take a SEPARATE branch: the input is an image, not text,
 	// so they skip the trivial-input gate, the context-budget trim, and the whole
 	// text model cascade. The text path below stays byte-identical for non-vision
@@ -751,6 +760,7 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 		CFG:       p.cfg.ImageGenCFG,
 		Sampler:   p.cfg.ImageGenSampler,
 		Scheduler: p.cfg.ImageGenScheduler,
+		Family:    p.cfg.ImageGenFamily,
 	}
 	outPath, gerr := imagegen.Generate(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, prompt, req.Params, model, timeout, p.lockEnv()...)
 	if gerr != nil {
@@ -845,11 +855,26 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	if rv := paramStr(req.Params, "reserve_vram"); rv != "" {
 		args = append(args, "--reserve-vram", rv)
 	}
+	// Per-machine Wan weight binding (quality-first): this box's configured expert weights
+	// + text encoder, by filename. Unset = the render script's defaults (unchanged).
+	if p.cfg.VideoGenUnetHigh != "" {
+		args = append(args, "--high-unet", p.cfg.VideoGenUnetHigh)
+	}
+	if p.cfg.VideoGenUnetLow != "" {
+		args = append(args, "--low-unet", p.cfg.VideoGenUnetLow)
+	}
+	if p.cfg.VideoGenTextEncoder != "" {
+		args = append(args, "--text-encoder", p.cfg.VideoGenTextEncoder)
+	}
 	// hero: native no-LoRA quality pass (per-request). upscale: use THIS machine's configured
 	// upscale model + target size (per-machine config; a machine with none just skips it).
 	// Both universal -- no model name baked into shared code.
 	if paramBool(req.Params, "hero") {
-		args = append(args, "--hero")
+		args = append(args, "--hero") // backward compat: native IS the default now
+	}
+	// Quality-first: the distilled lightx2v speed path is an explicit OPT-IN.
+	if paramBool(req.Params, "fast") {
+		args = append(args, "--fast")
 	}
 	if paramBool(req.Params, "upscale") && p.cfg.VideoGenUpscaleModel != "" {
 		args = append(args, "--upscale-model", p.cfg.VideoGenUpscaleModel)
@@ -859,11 +884,18 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.VideoGenTimeoutSec) * time.Second
+	// COMFY_WAIT_SEC aligns the render script's poll budget with the harness timeout
+	// (quality-first: the native recipe at 720p legitimately exceeds the script's old
+	// hardcoded ceiling; the Go timeout stays the hard stop).
+	env := p.genEnv(p.cfg.VideoGenWaitMs)
+	if timeout > 0 {
+		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
+	}
 	outPath, gerr := gpugen.Generate(ctx, gpugen.Spec{
 		Exe:     p.cfg.NodePath,
 		Script:  script,
 		Args:    args,
-		Env:     p.genEnv(p.cfg.VideoGenWaitMs),
+		Env:     env,
 		Out:     out,
 		Timeout: timeout,
 	})
@@ -939,13 +971,46 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	//      music worker <out> "<style>" --seed N [--seconds N] [--lyrics ..] [--reserve-vram ..]
 	args := []string{out, text}
 	if kind == "voice" {
-		if ref := paramStr(req.Params, "clone"); ref != "" {
-			args = append(args, "--clone", ref)
+		switch voice := paramStr(req.Params, "voice"); voice {
+		case "", "generalist":
+			// stock multilingual path: a request clone wins; else the machine's default es-MX ref.
+			ref := paramStr(req.Params, "clone")
+			if ref == "" {
+				ref = p.cfg.VoiceGenRef
+			}
+			if ref != "" {
+				args = append(args, "--clone", ref)
+			}
+			if lang := paramStr(req.Params, "lang"); lang != "" {
+				args = append(args, "--lang", lang)
+			}
+		case "finetuned":
+			// per-machine fine-tuned voice; requires a model + base dir, else defer (never cloud).
+			if p.cfg.VoiceGenFTModel == "" || p.cfg.VoiceGenFTBaseDir == "" {
+				return p.deferGen(req, meta, start, len(req.Input), "no fine-tuned voice configured")
+			}
+			meta.Model = "chatterbox-tts-ft"
+			args = append(args, "--engine", "finetuned",
+				"--model", p.cfg.VoiceGenFTModel, "--base-dir", p.cfg.VoiceGenFTBaseDir)
+			ref := paramStr(req.Params, "clone")
+			if ref == "" {
+				ref = p.cfg.VoiceGenFTRef
+			}
+			if ref != "" {
+				args = append(args, "--clone", ref)
+			}
+			lang := p.cfg.VoiceGenFTLang
+			if l := paramStr(req.Params, "lang"); l != "" {
+				lang = l
+			}
+			if lang != "" {
+				args = append(args, "--lang", lang)
+			}
+			args = appendVoiceRecipe(args, p.cfg)
+		default:
+			return p.deferGen(req, meta, start, len(req.Input), "unknown voice "+voice)
 		}
-		if lang := paramStr(req.Params, "lang"); lang != "" {
-			args = append(args, "--lang", lang)
-		}
-		// voice path is unchanged: Chatterbox takes no seed, so no --seed flag.
+		// voice path is unchanged re: seed — Chatterbox takes no seed, so no --seed flag.
 	} else { // music
 		// ACE-Step IS seed-reproducible, so pass the minted/echoed seed (fixes the B1
 		// gap: the audio path minted a seed but never threaded it to the music worker).
@@ -982,6 +1047,23 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	data, _ := json.Marshal(map[string]any{"audio_path": outPath, "kind": kind, "seed": seed})
 	p.record(req.Task, meta, len(text))
 	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// appendVoiceRecipe appends the per-machine fine-tuned generate() recipe knobs as CLI
+// flags, omitting any that are zero (the worker then uses its own default). The worker
+// binds them as kwargs — never positionally — because the English and multilingual
+// Chatterbox generate() signatures order their params differently.
+func appendVoiceRecipe(args []string, cfg config.Config) []string {
+	add := func(flag string, v float64) {
+		if v > 0 {
+			args = append(args, flag, strconv.FormatFloat(v, 'g', -1, 64))
+		}
+	}
+	add("--temperature", cfg.VoiceGenFTTemperature)
+	add("--cfg-weight", cfg.VoiceGenFTCFGWeight)
+	add("--exaggeration", cfg.VoiceGenFTExaggeration)
+	add("--repetition-penalty", cfg.VoiceGenFTRepetitionPenalty)
+	return args
 }
 
 // genEnv builds the extra env for a GPU-gen child: COMFY_DIR + the per-task GPU-lock

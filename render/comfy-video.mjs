@@ -1,6 +1,6 @@
 // comfy-video.mjs — local image-to-video runner. Animates a still into a short b-roll
 // clip via ComfyUI. PRIMARY model Wan 2.2 14B I2V (default; 4-step lightx2v LoRAs = fast);
-// SECONDARY HunyuanVideo 1.5 480p I2V (--model hunyuan; needs 3 files not always installed).
+// SECONDARY HunyuanVideo 1.5 480p I2V (--model hunyuan; needs 3 files absent on the 16GB box).
 // Single-slot GPU-locked + zero-always-warm (frees llama-swap before, frees ComfyUI after).
 // Dependency-free (Node 18+). Mirrors render/comfy-render.mjs.
 //
@@ -69,7 +69,13 @@ async function generate() {
     };
     if (flags.steps) common.steps = Number(flags.steps);
     if (flags.cfg) common.cfg = Number(flags.cfg);
-    if (flags.hero) common.hero = true; // native no-LoRA quality pass (wan)
+    if (flags.hero) common.hero = true; // backward compat: native IS the default now
+    if (flags.fast) common.fast = true; // OPT-IN distilled speed path (wan)
+    // Per-machine weight binding (quality-first): the machine's config names its Wan
+    // expert weights + text encoder; unset = the builder's defaults (unchanged).
+    if (flags["high-unet"]) common.highUnet = flags["high-unet"];
+    if (flags["low-unet"]) common.lowUnet = flags["low-unet"];
+    if (flags["text-encoder"]) common.textEncoder = flags["text-encoder"];
     if (flags["upscale-model"]) {       // optional post-decode upscale (wan)
       common.upscaleModel = flags["upscale-model"];
       if (flags["upscale-width"]) common.upscaleWidth = Number(flags["upscale-width"]);
@@ -80,7 +86,11 @@ async function generate() {
   const { prompt_id } = await j(API + "/prompt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: graph, client_id: "video-" + seed }) });
   console.log("queued", prompt_id, flags.graph ? `(graph ${flags.graph})` : `${model} seed ${seed}`);
   let file = null;
-  for (let i = 0; i < 600; i++) { // up to ~20 min (Wan native two-stage is slow)
+  // Poll budget: the native quality recipe at 720p legitimately exceeds the old ~20-min
+  // ceiling. Default 90 min; the Go harness passes COMFY_WAIT_SEC aligned to its own
+  // videogen timeout and its process-tree kill remains the hard stop.
+  const waitSec = Number(flags["wait-sec"] || process.env.COMFY_WAIT_SEC || 5400);
+  for (let i = 0; i < Math.max(1, Math.ceil(waitSec / 2)); i++) {
     await new Promise((r) => setTimeout(r, 2000));
     let hist; try { hist = await j(`${API}/history/${prompt_id}`); } catch { continue; }
     const h = hist[prompt_id]; if (!h) continue;

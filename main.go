@@ -41,7 +41,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.12.0"
+const version = "0.17.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -70,6 +70,10 @@ func main() {
 		err = runGenerateAudio(args)
 	case "generate-video":
 		err = runGenerateVideo(args)
+	case "edit-image":
+		err = runEditImage(args)
+	case "media":
+		err = runMedia(args)
 	case "nim":
 		err = runNim(args)
 	case "ocr":
@@ -180,7 +184,7 @@ Usage:
   local-offload ocr       <image-path> [--json]
   local-offload extract-image <image-path> --schema schema.json [--json]
   local-offload assess-image <image-path> [--brief "..."] [--json]
-  local-offload generate-audio <out> "<text>" [--kind voice|music] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
+  local-offload generate-audio <out> "<text>" [--kind voice|music] [--voice generalist|finetuned] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
   local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F]
   local-offload nim <file|-|"text"> [--model id] [--base url] [--system "..."] [--max-tokens N] [--temp F] [--json]
   local-offload nim --list-models        list a NIM endpoint's model ids (free hosted catalog or self-hosted)
@@ -645,6 +649,116 @@ func runGenerateImage(args []string) error {
 
 // runGenerateSVG handles `local-offload generate-svg <kind> --spec '<json>' [--spec-file path] [--out file.svg] [--json]`.
 // kind is the positional (gauge|comparison-bar|chromatogram|icon). It renders locally for free (no model/GPU).
+// runEditImage handles `local-offload edit-image <image> --ops '<json array>'
+// [--out path] [--json]`. Deterministic CPU pipeline (PIL + GIMP flatten_design)
+// via internal/mediaops — no GPU lock.
+func runEditImage(args []string) error {
+	fs := flag.NewFlagSet("edit-image", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	opsStr := fs.String("ops", "", `edit ops as a JSON array, e.g. '[{"op":"crop","x":0,"y":0,"width":100,"height":100},{"op":"resize","width":512}]'`)
+	opsFile := fs.String("ops-file", "", "path to a JSON file with the ops array")
+	out := fs.String("out", "", "output image path (default under the media dir)")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "ops": true, "ops-file": true, "out": true,
+	})
+	_ = fs.Parse(flagArgs)
+	if positional == "" || positional == "-" {
+		return fmt.Errorf("edit-image requires an input image: local-offload edit-image <image> --ops '<json array>'")
+	}
+	raw := *opsStr
+	if raw == "" && *opsFile != "" {
+		b, rerr := os.ReadFile(*opsFile)
+		if rerr != nil {
+			return rerr
+		}
+		raw = string(b)
+	}
+	if raw == "" {
+		return fmt.Errorf("edit-image: --ops (or --ops-file) is required")
+	}
+	var ops []map[string]any
+	if jerr := json.Unmarshal([]byte(raw), &ops); jerr != nil {
+		return fmt.Errorf("edit-image: invalid --ops JSON: %w", jerr)
+	}
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	params := map[string]any{"ops": ops}
+	if *out != "" {
+		params["out"] = *out
+	}
+	res := p.Run(context.Background(), core.Request{Task: core.TaskEditImage, Image: positional, Params: params})
+	emitResult(res, *asJSON, "", *compactFlag)
+	return nil
+}
+
+// runMedia handles `local-offload media <op> [--in x] [--inputs a,b] [--out y]
+// [op flags] [--json]`. One ffmpeg operation via internal/mediaops — no GPU lock.
+func runMedia(args []string) error {
+	fs := flag.NewFlagSet("media", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	in := fs.String("in", "", "input media path")
+	inputs := fs.String("inputs", "", "concat: comma-separated input paths (>=2)")
+	out := fs.String("out", "", "output path (extract_frames: a directory; default under the media dir)")
+	start := fs.String("start", "", "trim: start (seconds or hh:mm:ss)")
+	end := fs.String("end", "", "trim: absolute end time")
+	duration := fs.String("duration", "", "trim: duration seconds (alternative to --end)")
+	reencode := fs.Bool("reencode", false, "trim: re-encode for exact cuts (default: keyframe-snapped stream copy)")
+	fps := fs.Float64("fps", 0, "extract_frames: sampling rate")
+	count := fs.Int("count", 0, "extract_frames: total frames (resolved via probe)")
+	audio := fs.String("audio", "", "mux_audio: audio input path")
+	audioOnly := fs.Bool("audio-only", false, "convert: drop video")
+	videoOnly := fs.Bool("video-only", false, "convert: drop audio")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "in": true, "inputs": true, "out": true, "start": true,
+		"end": true, "duration": true, "fps": true, "count": true, "audio": true,
+	})
+	_ = fs.Parse(flagArgs)
+	if positional == "" || positional == "-" {
+		return fmt.Errorf("media requires an op: local-offload media <trim|concat|extract_frames|convert|mux_audio|probe> --in <path>")
+	}
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	params := map[string]any{"op": positional}
+	for k, v := range map[string]string{"in": *in, "out": *out, "start": *start, "end": *end, "duration": *duration, "audio": *audio} {
+		if v != "" {
+			params[k] = v
+		}
+	}
+	if *inputs != "" {
+		params["inputs"] = strings.Split(*inputs, ",")
+	}
+	if *reencode {
+		params["reencode"] = true
+	}
+	if *audioOnly {
+		params["audio_only"] = true
+	}
+	if *videoOnly {
+		params["video_only"] = true
+	}
+	if *fps > 0 {
+		params["fps"] = *fps
+	}
+	if *count > 0 {
+		params["count"] = *count
+	}
+	res := p.Run(context.Background(), core.Request{Task: core.TaskMedia, Params: params})
+	emitResult(res, *asJSON, "", *compactFlag)
+	return nil
+}
+
 func runGenerateSVG(args []string) error {
 	fs := flag.NewFlagSet("generate-svg", flag.ExitOnError)
 	fs.String("config", "", "config file path")
@@ -694,6 +808,7 @@ func runGenerateSVG(args []string) error {
 // param-building (buildAudioParams) is unit-testable without a live render.
 type audioFlags struct {
 	kind        string
+	voice       string
 	clone       string
 	lang        string
 	out         string
@@ -712,6 +827,9 @@ func buildAudioParams(f audioFlags) map[string]any {
 		kind = "voice"
 	}
 	params := map[string]any{"kind": kind}
+	if f.voice != "" {
+		params["voice"] = f.voice
+	}
 	if f.clone != "" {
 		params["clone"] = f.clone
 	}
@@ -744,6 +862,7 @@ func runGenerateAudio(args []string) error {
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "print full result JSON")
 	kind := fs.String("kind", "voice", "voice (Chatterbox TTS) | music (ACE-Step)")
+	voice := fs.String("voice", "", "voice: generalist | finetuned (finetuned needs this machine's voicegen_ft_* config)")
 	clone := fs.String("clone", "", "voice: local path to a reference .wav for zero-shot voice cloning")
 	lang := fs.String("lang", "", "voice: language code (default es)")
 	seconds := fs.Int("seconds", 0, "music: clip length in seconds")
@@ -753,7 +872,7 @@ func runGenerateAudio(args []string) error {
 
 	// generate-audio takes TWO positionals (out path, text); the rest are flags.
 	out, text, flagArgs := splitTwoArgs(args, map[string]bool{
-		"config": true, "kind": true, "clone": true, "lang": true,
+		"config": true, "kind": true, "voice": true, "clone": true, "lang": true,
 		"seconds": true, "seed": true, "reserve-vram": true,
 	})
 	_ = fs.Parse(flagArgs)
@@ -770,7 +889,7 @@ func runGenerateAudio(args []string) error {
 	defer cleanup()
 
 	params := buildAudioParams(audioFlags{
-		kind: *kind, clone: *clone, lang: *lang, out: out,
+		kind: *kind, voice: *voice, clone: *clone, lang: *lang, out: out,
 		seconds: *seconds, seed: *seed, reserveVRAM: *reserveVRAM,
 	})
 	res := p.Run(context.Background(), core.Request{

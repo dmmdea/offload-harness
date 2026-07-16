@@ -34,6 +34,17 @@ func hasNot(t *testing.T, args []string, flag string) {
 	}
 }
 
+// TestBuildArgs_FamilyBinding: the family selects the model-correct graph in
+// comfy-render.mjs (e.g. hidream-o1 = pixel-space DiT graph with ModelNoiseScale +
+// patch-seam smoothing at native 2048). Set -> --family passed; unset -> absent
+// (SDXL machines unchanged).
+func TestBuildArgs_FamilyBinding(t *testing.T) {
+	m := Model{Ckpt: "hidream_o1_image_bf16.safetensors", VAE: "builtin", Family: "hidream-o1"}
+	args := buildArgs("out.png", "p", map[string]any{}, m)
+	has(t, args, "--family", "hidream-o1")
+	hasNot(t, buildArgs("out.png", "p", map[string]any{}, Model{Ckpt: "RealVisXL_V5.0_fp16.safetensors"}), "--family")
+}
+
 // TestBuildArgs_ZeroModelIsUnchanged is the compatibility guard for every machine
 // that has NOT set an image-model binding (e.g. the 8GB laptop on SDXL). A zero
 // Model must add no flags at all, so comfy-render.mjs keeps its own defaults and the

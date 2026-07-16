@@ -30,6 +30,13 @@ type Model struct {
 	CFG       float64 // 0 = script default
 	Sampler   string  // "" = script default
 	Scheduler string  // "" = script default
+	// Family selects the MODEL-CORRECT graph in comfy-render.mjs ("" = the generic
+	// SDXL-shaped graph). "hidream-o1" / "hidream-o1-dev" render the official
+	// pixel-space DiT graph (ModelNoiseScale, patch-seam smoothing, SamplerCustom,
+	// native 2048) — driving a DiT through the generic graph produces measurable
+	// 32px patch blocking. Which family a checkpoint belongs to is per-machine
+	// config, never shared code.
+	Family string
 }
 
 // Generate runs `node <script> <out> <prompt> [--negative ..] [--width ..] ...` and
@@ -43,11 +50,18 @@ type Model struct {
 // error (the caller defers).
 func Generate(ctx context.Context, node, script, comfyDir, out, prompt string, params map[string]any, m Model, timeout time.Duration, extraEnv ...string) (string, error) {
 	args := buildArgs(out, prompt, params, m)
+	// COMFY_WAIT_SEC aligns the render script's poll budget with the harness timeout
+	// (quality-first: a 2048 bf16 O1 render legitimately runs tens of minutes; the
+	// script must not give up before the Go timeout — which stays the hard stop).
+	env := []string{"COMFY_DIR=" + comfyDir}
+	if timeout > 0 {
+		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
+	}
 	return gpugen.Generate(ctx, gpugen.Spec{
 		Exe:     node,
 		Script:  script,
 		Args:    args,
-		Env:     append([]string{"COMFY_DIR=" + comfyDir}, extraEnv...),
+		Env:     append(env, extraEnv...),
 		Out:     out,
 		Timeout: timeout,
 	})
@@ -84,6 +98,9 @@ func buildArgs(out, prompt string, params map[string]any, m Model) []string {
 	}
 	if m.Scheduler != "" {
 		args = append(args, "--scheduler", m.Scheduler)
+	}
+	if m.Family != "" {
+		args = append(args, "--family", m.Family)
 	}
 	return args
 }

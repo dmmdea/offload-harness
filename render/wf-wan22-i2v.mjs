@@ -1,44 +1,62 @@
 // wf-wan22-i2v.mjs — build the Wan 2.2 14B I2V two-stage API-format graph.
-// Two quality modes, both universal (any machine, param-driven — never hardware-baked):
-//   • FAST (default): the 4-step lightx2v LoRAs — HIGH on the high-noise expert, LOW on
-//     the low-noise expert (LoraLoaderModelOnly) + ModelSamplingSD3 shift 5; two
-//     KSamplerAdvanced (2/2 split of 4 steps, leftover-noise handoff, SAME seed, cfg
-//     1.0 = the distilled recipe). ~2-4 min/clip.
-//   • HERO (hero:true): the native two-stage path — NO distill LoRA, more steps (20) at
-//     cfg 3.5. Slower but restores camera/subject motion the 4-step LoRA trades away
-//     (matters for realistic b-roll). The caller can still override steps/cfg.
+// Two modes, both universal (any machine, param-driven — never hardware-baked).
+// QUALITY-FIRST (operator directive, 2026-07-16): the NATIVE path is the DEFAULT; the distilled
+// speed path is an explicit opt-in — never the default.
+//   • NATIVE (default; was "hero"): the official two-stage recipe — NO distill LoRA,
+//     20 steps at cfg 3.5, euler/simple, shift 5.0, 50/50 expert split (ComfyUI
+//     official template; Wan-AI reference = 40 steps unipc, cfg 3.5, boundary 0.9 —
+//     pass steps:40 to match it). The model's official training-time Chinese
+//     negative is applied when the caller provides none.
+//   • FAST (fast:true): the lightx2v distill LoRAs at the research-validated 8-step
+//     asymmetric recipe — 4+4 split, HIGH expert LoRA 0.7 + cfg 3.0 (keeps real
+//     guidance where motion is decided), LOW expert LoRA 1.0 + cfg 1.0 (distilled).
+//     Recovers most of the motion the plain 4-step cfg-1 recipe trades away.
+//   (hero:true is accepted for backward compatibility and equals the default.)
 // Optional post-decode UPSCALE (upscaleModel set): UpscaleModelLoader → ImageUpscaleWithModel
 //   → optional ImageScale to a target size (e.g. 720p→1080p). The upscale model is a
 //   caller/config input, never hardcoded — a machine that has no upscale model leaves it "".
 // umt5 text encoder (type "wan"); the 16-ch Wan 2.1 VAE (the 14B A14B I2V wants 36-ch
 // patch_embed input; the 48-ch wan2.2_vae is for the 5B TI2V and mismatches). Run only
 // with the GPU freed of llama-swap.
+
+// Official Wan training-time negative (Wan-Video/Wan2.2 wan/configs/shared_config.py,
+// sample_neg_prompt — the model is tuned against it; works with English positives).
+export const WAN_OFFICIAL_NEGATIVE = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走";
+
 export function buildWan22I2V({
   imagePath, prompt, negative = "",
-  width = 832, height = 480, length = 81, steps = 4, cfg = 1.0, seed = Math.floor(Math.random() * 1e15),
+  width = 832, height = 480, length = 81, steps = 0, cfg = 0, seed = Math.floor(Math.random() * 1e15),
   shift = 5.0, virtualVramGb = 7.0, boundaryStep,
   highUnet = "wan2.2_i2v_high_noise_14B_Q4_K_S.gguf",
   lowUnet = "wan2.2_i2v_low_noise_14B_Q4_K_M.gguf",
   highLora = "Wan_2_2_I2V_A14B_HIGH_lightx2v_4step_lora_260412_rank_64_fp16.safetensors",
   lowLora = "Wan_2_2_I2V_A14B_LOW_lightx2v_4step_lora_260412_rank_64_fp16.safetensors",
-  loraStrength = 1.0,
-  hero = false,
+  fast = false,
+  hero = false, // backward compat; native IS the default now
   upscaleModel = "", upscaleWidth = 0, upscaleHeight = 0, upscaleMethod = "lanczos",
   textEncoder = "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
   vae = "wan_2.1_vae.safetensors", frameRate = 16,
 } = {}) {
   if (!imagePath) throw new Error("buildWan22I2V: imagePath is required");
   if (!prompt) throw new Error("buildWan22I2V: prompt is required");
-  if (steps === undefined) steps = 4;
-  // Hero = native two-stage: bump the fast defaults to native values unless the caller
-  // set them explicitly (steps 4 / cfg 1.0 ARE the fast defaults, so treat them as unset).
-  if (hero) {
-    if (steps === 4) steps = 20;
-    if (cfg === 1.0) cfg = 3.5;
-  }
+  void hero; // accepted, ignored: the native path is the default
+  const useLora = !!fast;
+  if (!negative) negative = WAN_OFFICIAL_NEGATIVE;
+  // Mode defaults (0 = unset; explicit caller values always win):
+  //   native: 20 steps, cfg 3.5 both experts.
+  //   fast:   8 steps (4+4), cfg 3.0 high / 1.0 low, LoRA 0.7 high / 1.0 low.
+  if (!steps) steps = useLora ? 8 : 20;
+  const highCfg = cfg || (useLora ? 3.0 : 3.5);
+  const lowCfg = cfg || (useLora ? 1.0 : 3.5);
+  const highLoraStrength = 0.7, lowLoraStrength = 1.0;
   if (boundaryStep === undefined) boundaryStep = Math.floor(steps / 2);
-  const useLora = !hero;
-  const distorch = (unet) => ({ class_type: "UnetLoaderGGUFDisTorch2MultiGPU", inputs: { unet_name: unet, compute_device: "cuda:0", virtual_vram_gb: virtualVramGb, donor_device: "cpu", eject_models: true } });
+  // Loader keyed off the weight file extension (quality-first weight binding): GGUF quants
+  // load through the GGUF DisTorch2 node; full/fp8 .safetensors weights through the native
+  // UNETLoader DisTorch2 variant — SAME RAM-offload params, weight_dtype "default" (never
+  // down-cast: the file's own precision is the point of binding it).
+  const distorch = (unet) => /\.gguf$/i.test(unet)
+    ? { class_type: "UnetLoaderGGUFDisTorch2MultiGPU", inputs: { unet_name: unet, compute_device: "cuda:0", virtual_vram_gb: virtualVramGb, donor_device: "cpu", eject_models: true } }
+    : { class_type: "UNETLoaderDisTorch2MultiGPU", inputs: { unet_name: unet, weight_dtype: "default", compute_device: "cuda:0", virtual_vram_gb: virtualVramGb, donor_device: "cpu", eject_models: true } };
 
   const g = {
     "1": { class_type: "LoadImage", inputs: { image: imagePath } },
@@ -52,13 +70,13 @@ export function buildWan22I2V({
     // model-sampling reads the LoRA output (fast) or the raw UNET (hero)
     "8": { class_type: "ModelSamplingSD3", inputs: { model: useLora ? ["15", 0] : ["7", 0], shift } },
     "10": { class_type: "ModelSamplingSD3", inputs: { model: useLora ? ["16", 0] : ["9", 0], shift } },
-    "11": { class_type: "KSamplerAdvanced", inputs: { model: ["8", 0], add_noise: "enable", noise_seed: seed, steps, cfg, sampler_name: "euler", scheduler: "simple", positive: ["6", 0], negative: ["6", 1], latent_image: ["6", 2], start_at_step: 0, end_at_step: boundaryStep, return_with_leftover_noise: "enable" } },
-    "12": { class_type: "KSamplerAdvanced", inputs: { model: ["10", 0], add_noise: "disable", noise_seed: seed, steps, cfg, sampler_name: "euler", scheduler: "simple", positive: ["6", 0], negative: ["6", 1], latent_image: ["11", 0], start_at_step: boundaryStep, end_at_step: 10000, return_with_leftover_noise: "disable" } },
+    "11": { class_type: "KSamplerAdvanced", inputs: { model: ["8", 0], add_noise: "enable", noise_seed: seed, steps, cfg: highCfg, sampler_name: "euler", scheduler: "simple", positive: ["6", 0], negative: ["6", 1], latent_image: ["6", 2], start_at_step: 0, end_at_step: boundaryStep, return_with_leftover_noise: "enable" } },
+    "12": { class_type: "KSamplerAdvanced", inputs: { model: ["10", 0], add_noise: "disable", noise_seed: seed, steps, cfg: lowCfg, sampler_name: "euler", scheduler: "simple", positive: ["6", 0], negative: ["6", 1], latent_image: ["11", 0], start_at_step: boundaryStep, end_at_step: 10000, return_with_leftover_noise: "disable" } },
     "13": { class_type: "VAEDecodeTiled", inputs: { samples: ["12", 0], vae: ["2", 0], tile_size: 256, overlap: 64, temporal_size: 32, temporal_overlap: 8 } },
   };
   if (useLora) {
-    g["15"] = { class_type: "LoraLoaderModelOnly", inputs: { model: ["7", 0], lora_name: highLora, strength_model: loraStrength } };
-    g["16"] = { class_type: "LoraLoaderModelOnly", inputs: { model: ["9", 0], lora_name: lowLora, strength_model: loraStrength } };
+    g["15"] = { class_type: "LoraLoaderModelOnly", inputs: { model: ["7", 0], lora_name: highLora, strength_model: highLoraStrength } };
+    g["16"] = { class_type: "LoraLoaderModelOnly", inputs: { model: ["9", 0], lora_name: lowLora, strength_model: lowLoraStrength } };
   }
   // Optional upscale chain after the decoded frames. Model-based upscale (e.g. an ESRGAN
   // 4x) then an optional exact resize to the target size (720p -> 1080p).

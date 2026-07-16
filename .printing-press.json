@@ -1,0 +1,13 @@
+{
+  "api_name": "local-offload",
+  "cli_name": "local-offload",
+  "version": "0.1.0",
+  "printing_press_version": "hand-built-2026-06-12",
+  "generated_at": "2026-06-12",
+  "description": "Local offload harness — delegate summarize/classify/extract/triage to a free local Gemma-4-E4B model via llama.cpp; MCP + CLI; never calls cloud (defers to Claude).",
+  "module": "github.com/dmmdea/offload-harness",
+  "mcp": {
+    "transport": "stdio",
+    "tools": ["offload_summarize", "offload_classify", "offload_extract", "offload_triage"]
+  }
+}

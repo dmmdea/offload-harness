@@ -101,6 +101,9 @@ projected per-profile serving choices — `selftest.ps1` measures and refines th
 
 | Profile | Config(s) | Resident/default tier | Ctx | KV | 26B-A4B |
 |---|---|---|---|---|---|
+| `blackwell-72` | #15 (RTX PRO 5000 72 GB; PRO 6000 96 GB) | **ALL-RESIDENT** (whole roster hot, no swap group, no ttl) | 128K | **f16** | full-GPU, resident |
+| `blackwell-48` | #14 (RTX PRO 5000 48 GB) | **ALL-RESIDENT** | 128K | **f16** | full-GPU, resident |
+| `blackwell-32` | #13 (RTX 5090 / RTX PRO 4500, 32 GB) | **ALL-RESIDENT** | 64K | q8_0 | full-GPU, resident |
 | `blackwell-16` | #1 (5060 Ti 16 GB) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU — CUDA-13 serves (slower); 12.8 for peak |
 | `volta-16` | #2 (V100 16 GB) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU |
 | `ampere-16` | 3090-class ≥12 GB (defensive) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU |
@@ -111,6 +114,38 @@ projected per-profile serving choices — `selftest.ps1` measures and refines th
 | `ampere-6` | #10/#11 (3050 6 GB) | `gemma4-e2b` | 16K | q8_0 (**mandatory**) | dropped |
 | `amd-gcn` | #12 (Vega 7 + 32 GB, Vulkan) | `gemma4-e2b` | 8K | f16, FA off | dropped |
 | `cpu` | no GPU | `offload-e4b` (CPU) | 8K | f16, FA off | `--cpu-moe` if RAM ≥ ~56 GB, else dropped |
+
+**Big-VRAM Blackwell tiers (#13–15, added 2026-07-16):** cards ≥24 GB render the
+`cuda-resident` template — every model is a standalone entry (no swap group, no ttl), so the
+whole roster runs CONCURRENTLY with zero swap latency. RTX PRO Blackwell workstation cards
+("NVIDIA RTX PRO 5000 Blackwell" etc.) are classified by their own arch rules — the plain
+`RTX 50xx` regex does not match them. The 48/72 tiers serve full-precision **f16 KV** at 128K
+ctx (quality lever; model window is 256K design / 128K common serving cap). These profiles also
+carry a `config_seed` (720p-class video defaults) applied ONLY to a fresh
+`~/.local-offload/config.json` — an existing per-machine config is never touched. llama-swap
+does NO VRAM accounting: all values are PROJECTED until `selftest.ps1` measures the real box.
+Spec: `docs/superpowers/specs/2026-07-16-blackwell-profile-tiers-design.md`.
+
+### Quality-first generation policy (operator directive, 2026-07-16 — applies to EVERY tier)
+
+**Bind the highest-quality model/precision the box can RUN AT ALL. RAM offload and long
+renders are acceptable; visible artifacts are defects. Speed variants exist only as explicit
+opt-ins (`fast:true`), never defaults.** Spec + measured evidence:
+`docs/superpowers/specs/2026-07-16-quality-first-generation-design.md` (the quantized-distilled
+image default produced 3x on-grid patch blocking; the bf16 Base + official family graph at
+native 2048 removed it at 3.9 min/render on a 16GB card).
+
+Every ≥16GB CUDA tier's `config_seed` binds: HiDream-O1 **bf16 Base** via `imagegen_family`
+(the official graph — never the generic SDXL graph for a DiT), Wan 2.2 **Q8_0** experts +
+**umt5_xxl_fp16**, 720p × 81 frames. The seed only writes a FRESH config; for an existing
+box, set the same keys in its config.json. Model download set (SHA256 from the HF API):
+`hidream_o1_image_bf16.safetensors` (16.4GB, Comfy-Org/HiDream-O1-Image),
+`Wan2.2-I2V-A14B-{High,Low}Noise-Q8_0.gguf` (15.4GB ×2, QuantStack/Wan2.2-I2V-A14B-GGUF),
+`umt5_xxl_fp16.safetensors` (10.6GB, Comfy-Org/Wan_2.2_ComfyUI_Repackaged). Requires
+ComfyUI ≥ v0.21.1 (the HiDream-O1 nodes) and ≥~48GB system RAM for the offload path.
+8GB tiers: **VERIFIED** — O1 bf16 @2048 runs on an 8GB 3070 with 64GB RAM (5.9 min/render,
+an 8GB 3070 + 64GB RAM box, 2026-07-16). The seed stays off for 8GB tiers only because low-RAM boxes can't offload
+it — bind manually on any 8GB box with ≥~48GB RAM; video Q8_0 via DisTorch2 likewise.
 
 ### Blackwell (sm_120) — detect the installed CUDA and adapt (be flexible)
 
@@ -134,12 +169,26 @@ CUDA 13.3 today and gain a V100 tomorrow — so the installer must key the build
 CUDA version + the *detected* GPU set, not a fixed assumption:
 - **Single 5060 Ti on 13.3:** CUDA-13 build, serves now (cuBLAS-fallback perf note); offer 12.8 for peak.
 - **Dual `5060 Ti + V100`:** a **multi-arch** build covering **both** `sm_120` (Blackwell) and
-  `sm_70` (Volta), compiled against whatever CUDA (≥12.8 or 13.x) is installed. The dual-gpu profile
-  pins 26B→device 0 / E4B→device 1; heterogeneous-arch multi-GPU is supported but confirm per-device
+  `sm_70` (Volta). It must be compiled against a **CUDA 12.8/12.9 toolkit** — CUDA 13.0 removed
+  offline compilation for Volta (`sm_70`), so a 13.x toolkit cannot produce this build (an R580+
+  *driver* still drives the V100; only the toolkit dropped it). The dual-gpu profile pins
+  26B→device 0 / E4B→device 1; heterogeneous-arch multi-GPU is supported but confirm per-device
   placement.
 
+**H4 (shipped): `install.ps1` automates this selection.** Step 3 reads detect's
+`cuda_driver`/`cuda_toolkit` (`Select-CudaBuild`): Blackwell profile + CUDA-13 driver → the pinned
+`llama-cuda13` (13.3) prebuilt, SHA-verified (tier `serves`); Blackwell on a 12.x driver / undetected
+CUDA → **refuses loudly** with the exact driver-upgrade-or-source-build guidance; `dual-gpu` →
+refuses with the multi-arch source-build recipe (`-DCMAKE_CUDA_ARCHITECTURES="70;120"`, 12.8/12.9
+toolkit); every other CUDA profile keeps the verified 12.4 prebuilt. The selection is reported as
+`NOTE`/`OK` lines and recorded in `installed.json` (`cuda_build`); re-running install after a driver
+upgrade or the V100 arriving adapts automatically (the manifest key change forces the re-install).
+Overrides for synthetic boxes: `OFFLOAD_CUDA_DRIVER` / `OFFLOAD_CUDA_TOOLKIT`.
+
 Runtime env for Blackwell: `CUDA_VISIBLE_DEVICES` set explicitly (avoid the hybrid-graphics
-`-1` trap), `CUDA_MODULE_LOADING=LAZY`. Standard Q4_K GGUFs get **no** FP4 tensor-core speedup
+`-1` trap), `CUDA_MODULE_LOADING=LAZY` — **install.ps1 injects both automatically** into every model
+block of the rendered `llama-swap.yaml` on `blackwell-*` profiles (the dual-cuda template already
+pins devices per group). Standard Q4_K GGUFs get **no** FP4 tensor-core speedup
 (NVFP4 MMQ only helps NVFP4-format models) — do not expect an FP4 win. **Report the detected CUDA
 version + which build you selected + the expected perf tier to the human; get consent before
 installing a new CUDA toolkit or a driver (Hard rule 3).**

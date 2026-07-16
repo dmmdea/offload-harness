@@ -35,3 +35,6 @@ _tmp-*.svg
 .superpowers/
 local-agent.exe
 bin/local-agent-linux
+
+# built binaries under bin/ — never track (0.16.0 release briefly swept them in via add -A)
+/bin/

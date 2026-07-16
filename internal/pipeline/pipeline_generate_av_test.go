@@ -391,3 +391,117 @@ func TestRunGenerateAudio_MissingVoiceScriptDefersDistinctly(t *testing.T) {
 		t.Fatalf("reason = %q, want prefix 'script not found at '", res.Reason)
 	}
 }
+
+// TestRunGenerateAudio_FinetunedRoutesWithArgs: voice=finetuned, fully configured →
+// argv carries --engine finetuned + model/base-dir/clone(ft ref)/recipe. Model-agnostic:
+// the paths come from config, never hardcoded.
+func TestRunGenerateAudio_FinetunedRoutesWithArgs(t *testing.T) {
+	requireNodePipeline(t)
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.VoiceGenScript = writeArgStub(t, dir)
+	cfg.MediaDir = dir
+	cfg.VoiceGenFTModel = "/m/merged.safetensors"
+	cfg.VoiceGenFTBaseDir = "/m/base"
+	cfg.VoiceGenFTRef = "/r/dan.wav"
+	cfg.VoiceGenFTTemperature = 0.6
+	p := &Pipeline{cfg: cfg}
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskGenerateAudio,
+		Input:  "hola mundo",
+		Params: map[string]any{"kind": "voice", "voice": "finetuned"},
+	})
+	if !res.OK {
+		t.Fatalf("expected ok via ft stub, got defer: %s", res.Reason)
+	}
+	var out struct {
+		AudioPath string `json:"audio_path"`
+	}
+	if err := json.Unmarshal(res.Data, &out); err != nil {
+		t.Fatal(err)
+	}
+	args := readArgs(t, out.AudioPath)
+	if !hasFlagVal(args, "engine", "finetuned") {
+		t.Fatalf("ft path must pass --engine finetuned; args=%v", args)
+	}
+	if !hasFlagVal(args, "model", "/m/merged.safetensors") {
+		t.Fatalf("ft path must pass --model from config; args=%v", args)
+	}
+	if !hasFlagVal(args, "base-dir", "/m/base") {
+		t.Fatalf("ft path must pass --base-dir from config; args=%v", args)
+	}
+	if !hasFlagVal(args, "clone", "/r/dan.wav") {
+		t.Fatalf("ft path must pass the ft ref via --clone; args=%v", args)
+	}
+	if !hasFlagVal(args, "temperature", "0.6") {
+		t.Fatalf("ft path must pass configured recipe knobs; args=%v", args)
+	}
+}
+
+// TestRunGenerateAudio_FinetunedUnconfiguredDefers: voice=finetuned with no FT model
+// configured defers cleanly (never cloud), even though the (generalist) script exists.
+func TestRunGenerateAudio_FinetunedUnconfiguredDefers(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.VoiceGenScript = writeStub(t, dir) // present, but FT model/base unset
+	cfg.MediaDir = dir
+	p := &Pipeline{cfg: cfg}
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskGenerateAudio,
+		Input:  "hola",
+		Params: map[string]any{"kind": "voice", "voice": "finetuned"},
+	})
+	if res.OK || !res.Deferred {
+		t.Fatalf("finetuned with no config must defer, got ok=%v", res.OK)
+	}
+	if !strings.Contains(res.Reason, "no fine-tuned voice configured") {
+		t.Fatalf("reason = %q, want 'no fine-tuned voice configured'", res.Reason)
+	}
+}
+
+// TestRunGenerateAudio_GeneralistInjectsConfigRef: generalist (default) with no request
+// clone injects the machine's VoiceGenRef as --clone.
+func TestRunGenerateAudio_GeneralistInjectsConfigRef(t *testing.T) {
+	requireNodePipeline(t)
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.VoiceGenScript = writeArgStub(t, dir)
+	cfg.MediaDir = dir
+	cfg.VoiceGenRef = "/r/gen.wav"
+	p := &Pipeline{cfg: cfg}
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskGenerateAudio,
+		Input:  "hola",
+		Params: map[string]any{"kind": "voice"}, // no voice, no clone
+	})
+	if !res.OK {
+		t.Fatalf("expected ok, got defer: %s", res.Reason)
+	}
+	var out struct {
+		AudioPath string `json:"audio_path"`
+	}
+	if err := json.Unmarshal(res.Data, &out); err != nil {
+		t.Fatal(err)
+	}
+	args := readArgs(t, out.AudioPath)
+	if !hasFlagVal(args, "clone", "/r/gen.wav") {
+		t.Fatalf("generalist must inject VoiceGenRef as --clone; args=%v", args)
+	}
+}
+
+// TestRunGenerateAudio_UnknownVoiceDefers: an unrecognized voice value defers.
+func TestRunGenerateAudio_UnknownVoiceDefers(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.VoiceGenScript = writeStub(t, dir)
+	cfg.MediaDir = dir
+	p := &Pipeline{cfg: cfg}
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskGenerateAudio,
+		Input:  "hola",
+		Params: map[string]any{"kind": "voice", "voice": "podcast"},
+	})
+	if res.OK || !res.Deferred {
+		t.Fatalf("unknown voice must defer, got ok=%v", res.OK)
+	}
+}

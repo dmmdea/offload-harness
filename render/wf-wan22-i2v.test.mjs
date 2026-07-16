@@ -24,36 +24,85 @@ test("two-stage high->low with leftover-noise handoff + DisTorch2 loaders", () =
   assert.ok(vhs.inputs.pingpong !== undefined, "VHS_VideoCombine requires pingpong");
 });
 
-test("4-step lightx2v defaults: LoRA per expert (HIGH on high-noise, LOW on low-noise)", () => {
+test("DEFAULT is the NATIVE quality path: no distill LoRA, 20 steps, cfg 3.5, official negative", () => {
+  // Quality-first (operator directive, 2026-07-16): speed variants are opt-in, never the default.
   const g = buildWan22I2V({ imagePath: "s.png", prompt: "a red bike rolling", seed: 7 });
-  // two LoRA loaders, one per noise expert, at strength 1.0
-  const loras = Object.values(g).filter((n) => n.class_type === "LoraLoaderModelOnly");
-  assert.equal(loras.length, 2, "one LoRA per expert");
-  assert.ok(loras.every((l) => l.inputs.strength_model === 1.0));
-  assert.ok(loras.some((l) => /HIGH_lightx2v_4step/.test(l.inputs.lora_name)), "HIGH lightx2v LoRA present");
-  assert.ok(loras.some((l) => /LOW_lightx2v_4step/.test(l.inputs.lora_name)), "LOW lightx2v LoRA present");
-  // topology: the HIGH LoRA takes the high-noise UNET (node 7) and feeds the high-stage
-  // ModelSamplingSD3 (node 8); LOW takes the low-noise UNET (node 9) → node 10.
-  assert.deepEqual(g["15"].inputs.model, ["7", 0], "HIGH LoRA reads the high-noise UNET");
-  assert.deepEqual(g["8"].inputs.model, ["15", 0], "high-stage sampling reads the HIGH LoRA");
-  assert.deepEqual(g["16"].inputs.model, ["9", 0], "LOW LoRA reads the low-noise UNET");
-  assert.deepEqual(g["10"].inputs.model, ["16", 0], "low-stage sampling reads the LOW LoRA");
-  // distilled recipe defaults: 4 steps, cfg 1.0, 2/2 split
-  const samplers = Object.values(g).filter((n) => n.class_type === "KSamplerAdvanced");
-  assert.ok(samplers.every((s) => s.inputs.steps === 4 && s.inputs.cfg === 1.0), "4 steps, cfg 1.0");
-  assert.equal(samplers.find((s) => s.inputs.add_noise === "enable").inputs.end_at_step, 2, "2/2 split of 4");
-});
-
-test("hero mode: no distill LoRA, native step/cfg, samplers read the raw UNET", () => {
-  const g = buildWan22I2V({ imagePath: "s.png", prompt: "a car on a coastal road", hero: true });
-  assert.equal(Object.values(g).filter((n) => n.class_type === "LoraLoaderModelOnly").length, 0, "hero drops the LoRAs");
+  assert.equal(Object.values(g).filter((n) => n.class_type === "LoraLoaderModelOnly").length, 0, "default has NO distill LoRAs");
   assert.equal(g["8"].inputs.model[0], "7", "high-stage sampling reads the raw high-noise UNET");
   assert.equal(g["10"].inputs.model[0], "9", "low-stage sampling reads the raw low-noise UNET");
   const samplers = Object.values(g).filter((n) => n.class_type === "KSamplerAdvanced");
-  assert.ok(samplers.every((s) => s.inputs.steps === 20 && s.inputs.cfg === 3.5), "hero bumps to native 20 steps / cfg 3.5");
-  // an explicit steps override still wins in hero mode
-  const g2 = buildWan22I2V({ imagePath: "s.png", prompt: "p", hero: true, steps: 12 });
-  assert.ok(Object.values(g2).filter((n) => n.class_type === "KSamplerAdvanced").every((s) => s.inputs.steps === 12), "explicit steps wins over the hero bump");
+  assert.ok(samplers.every((s) => s.inputs.steps === 20 && s.inputs.cfg === 3.5), "native 20 steps / cfg 3.5 (ComfyUI official; Wan-AI ref cfg 3.5)");
+  assert.equal(samplers.find((s) => s.inputs.add_noise === "enable").inputs.end_at_step, 10, "50/50 expert split");
+  // the model's official (training-time) Chinese negative is the default when none given
+  const negNode = Object.values(g).filter((n) => n.class_type === "CLIPTextEncode")[1];
+  assert.ok(/色调艳丽/.test(negNode.inputs.text), "official Wan negative applied by default");
+  // an explicit negative wins
+  const g2 = buildWan22I2V({ imagePath: "s.png", prompt: "p", negative: "blurry" });
+  assert.equal(Object.values(g2).filter((n) => n.class_type === "CLIPTextEncode")[1].inputs.text, "blurry");
+  // hero flag is accepted for backward compat and equals the default
+  const g3 = buildWan22I2V({ imagePath: "s.png", prompt: "p", hero: true });
+  assert.equal(Object.values(g3).filter((n) => n.class_type === "LoraLoaderModelOnly").length, 0);
+});
+
+test("fast: OPT-IN 8-step lightx2v path — asymmetric per-expert recipe (research-validated)", () => {
+  const g = buildWan22I2V({ imagePath: "s.png", prompt: "a red bike rolling", seed: 7, fast: true });
+  // two LoRA loaders, one per expert: HIGH at 0.7 (restores motion), LOW at 1.0
+  const loras = Object.values(g).filter((n) => n.class_type === "LoraLoaderModelOnly");
+  assert.equal(loras.length, 2, "one LoRA per expert");
+  const high = Object.values(g).find((n) => n.class_type === "LoraLoaderModelOnly" && /HIGH_lightx2v_4step/.test(n.inputs.lora_name));
+  const low = Object.values(g).find((n) => n.class_type === "LoraLoaderModelOnly" && /LOW_lightx2v_4step/.test(n.inputs.lora_name));
+  assert.equal(high.inputs.strength_model, 0.7, "HIGH LoRA weakened to 0.7");
+  assert.equal(low.inputs.strength_model, 1.0, "LOW LoRA full strength");
+  // topology: HIGH LoRA reads high-noise UNET -> high-stage sampling; LOW likewise
+  assert.deepEqual(g["15"].inputs.model, ["7", 0]);
+  assert.deepEqual(g["8"].inputs.model, ["15", 0]);
+  assert.deepEqual(g["16"].inputs.model, ["9", 0]);
+  assert.deepEqual(g["10"].inputs.model, ["16", 0]);
+  // 8 steps (4+4), asymmetric cfg: high 3.0 (real guidance for motion), low 1.0 (distilled)
+  const samplers = Object.values(g).filter((n) => n.class_type === "KSamplerAdvanced");
+  assert.ok(samplers.every((s) => s.inputs.steps === 8), "8 steps total");
+  const highS = samplers.find((s) => s.inputs.add_noise === "enable");
+  const lowS = samplers.find((s) => s.inputs.add_noise === "disable");
+  assert.equal(highS.inputs.end_at_step, 4, "4+4 split");
+  assert.equal(highS.inputs.cfg, 3.0, "high-noise expert keeps real guidance");
+  assert.equal(lowS.inputs.cfg, 1.0, "low-noise expert runs distilled cfg 1");
+  // explicit steps/cfg overrides still win in fast mode
+  const g2 = buildWan22I2V({ imagePath: "s.png", prompt: "p", fast: true, steps: 12, cfg: 2.0 });
+  assert.ok(Object.values(g2).filter((n) => n.class_type === "KSamplerAdvanced").every((s) => s.inputs.steps === 12));
+  assert.ok(Object.values(g2).filter((n) => n.class_type === "KSamplerAdvanced").every((s) => s.inputs.cfg === 2.0));
+});
+
+test("weight binding: custom unet/text-encoder names plumb through (quality-first per-machine weights)", () => {
+  const g = buildWan22I2V({
+    imagePath: "s.png", prompt: "p",
+    highUnet: "wan2.2_i2v_high_noise_14B_Q8_0.gguf",
+    lowUnet: "wan2.2_i2v_low_noise_14B_Q8_0.gguf",
+    textEncoder: "umt5_xxl_fp16.safetensors",
+  });
+  const loaders = Object.values(g).filter((n) => n.class_type === "UnetLoaderGGUFDisTorch2MultiGPU");
+  assert.equal(loaders.length, 2);
+  assert.ok(loaders.some((l) => l.inputs.unet_name === "wan2.2_i2v_high_noise_14B_Q8_0.gguf"));
+  assert.ok(loaders.some((l) => l.inputs.unet_name === "wan2.2_i2v_low_noise_14B_Q8_0.gguf"));
+  const clip = Object.values(g).find((n) => n.class_type === "CLIPLoader");
+  assert.equal(clip.inputs.clip_name, "umt5_xxl_fp16.safetensors");
+});
+
+test("weight binding: .safetensors unets use the safetensors DisTorch2 loader (same offload)", () => {
+  const g = buildWan22I2V({
+    imagePath: "s.png", prompt: "p",
+    highUnet: "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+    lowUnet: "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+    virtualVramGb: 9.5,
+  });
+  assert.equal(Object.values(g).filter((n) => n.class_type === "UnetLoaderGGUFDisTorch2MultiGPU").length, 0, "no GGUF loader for safetensors weights");
+  const loaders = Object.values(g).filter((n) => n.class_type === "UNETLoaderDisTorch2MultiGPU");
+  assert.equal(loaders.length, 2, "safetensors DisTorch2 loader per expert");
+  assert.ok(loaders.every((l) => l.inputs.virtual_vram_gb === 9.5 && l.inputs.donor_device === "cpu"), "offload params preserved");
+  assert.ok(loaders.every((l) => l.inputs.weight_dtype === "default"), "no dtype down-cast — quality-first");
+  // mixed case still splits correctly per expert
+  const mixed = buildWan22I2V({ imagePath: "s.png", prompt: "p", highUnet: "high.safetensors", lowUnet: "low.gguf" });
+  assert.equal(Object.values(mixed).filter((n) => n.class_type === "UNETLoaderDisTorch2MultiGPU").length, 1);
+  assert.equal(Object.values(mixed).filter((n) => n.class_type === "UnetLoaderGGUFDisTorch2MultiGPU").length, 1);
 });
 
 test("upscale: model-based upscale + resize chained after decode; combine reads the last stage", () => {

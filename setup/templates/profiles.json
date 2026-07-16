@@ -22,7 +22,44 @@
       "moe_26b": "gpu",
       "flash_attn": "on",
       "backend": "cuda",
-      "notes": "Config #1 (5060 Ti 16GB, Blackwell sm_120). 26B resident full-GPU (-ngl 99). REQUIRES the Blackwell CUDA-12.8 sm_120 build (Task H4) - the pinned 12.4 asset lacks sm_120 and the 13.x asset segfaults the MMQ kernel into a ~5.6x-slower cuBLAS fallback. H3 may push ctx to 64K with q8. PROJECTED."
+      "config_seed": { "imagegen_family": "hidream-o1", "imagegen_ckpt": "hidream_o1_image_bf16.safetensors", "imagegen_vae": "builtin", "imagegen_timeout_sec": 3600, "videogen_unet_high": "Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf", "videogen_unet_low": "Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf", "videogen_text_encoder": "umt5_xxl_fp16.safetensors", "videogen_width": 1280, "videogen_height": 720, "videogen_frames": 81, "videogen_timeout_sec": 5400 },
+      "notes": "Config #1 (5060 Ti 16GB, Blackwell sm_120). 26B resident full-GPU (-ngl 99). REQUIRES the Blackwell CUDA-12.8 sm_120 build (Task H4) - the pinned 12.4 asset lacks sm_120 and the 13.x asset segfaults the MMQ kernel into a ~5.6x-slower cuBLAS fallback. H3 may push ctx to 64K with q8. config_seed: quality-first media bindings PROVEN on this exact tier (bf16 O1 = 3.9min/2048 render via RAM offload; needs the model downloads + >=~48GB system RAM — see SETUP-AGENT). PROJECTED."
+    },
+    "blackwell-32": {
+      "ctx_size": 65536,
+      "kv_type": "q8_0",
+      "agent_ctx_tokens": 65536,
+      "resident_tier": "gemma4-26b-a4b",
+      "include_26b": true,
+      "moe_26b": "gpu",
+      "flash_attn": "on",
+      "backend": "cuda-resident",
+      "config_seed": { "imagegen_family": "hidream-o1", "imagegen_ckpt": "hidream_o1_image_bf16.safetensors", "imagegen_vae": "builtin", "imagegen_timeout_sec": 3600, "videogen_unet_high": "Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf", "videogen_unet_low": "Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf", "videogen_text_encoder": "umt5_xxl_fp16.safetensors", "videogen_width": 1280, "videogen_height": 720, "videogen_frames": 81, "videogen_timeout_sec": 5400 },
+      "notes": "Config #13 (RTX 5090 32GB / RTX PRO 4500 32GB, Blackwell sm_120). ALL-RESIDENT: the whole roster (~21GB weights) stays hot with no swap group; 64K ctx q8_0 KV inside 32GB. config_seed applies only to a FRESH ~/.local-offload/config.json (install Step 8). Spec: docs/superpowers/specs/2026-07-16-blackwell-profile-tiers-design.md. PROJECTED - H3 measures the real ceiling."
+    },
+    "blackwell-48": {
+      "ctx_size": 131072,
+      "kv_type": "f16",
+      "agent_ctx_tokens": 131072,
+      "resident_tier": "gemma4-26b-a4b",
+      "include_26b": true,
+      "moe_26b": "gpu",
+      "flash_attn": "on",
+      "backend": "cuda-resident",
+      "config_seed": { "imagegen_family": "hidream-o1", "imagegen_ckpt": "hidream_o1_image_bf16.safetensors", "imagegen_vae": "builtin", "imagegen_timeout_sec": 3600, "videogen_unet_high": "Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf", "videogen_unet_low": "Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf", "videogen_text_encoder": "umt5_xxl_fp16.safetensors", "videogen_width": 1280, "videogen_height": 720, "videogen_frames": 81, "videogen_timeout_sec": 5400 },
+      "notes": "Config #14 (RTX PRO 5000 48GB, Blackwell sm_120). ALL-RESIDENT + 128K ctx + FULL-PRECISION f16 KV (VRAM is abundant; quality lever per the 2026-07-16 spec). 26B model window: 256K design / 128K common serving cap; SWA-1024 keeps large-ctx KV modest. config_seed: fresh-install 720p video defaults. PROJECTED - H3 measures."
+    },
+    "blackwell-72": {
+      "ctx_size": 131072,
+      "kv_type": "f16",
+      "agent_ctx_tokens": 131072,
+      "resident_tier": "gemma4-26b-a4b",
+      "include_26b": true,
+      "moe_26b": "gpu",
+      "flash_attn": "on",
+      "backend": "cuda-resident",
+      "config_seed": { "imagegen_family": "hidream-o1", "imagegen_ckpt": "hidream_o1_image_bf16.safetensors", "imagegen_vae": "builtin", "imagegen_timeout_sec": 3600, "videogen_unet_high": "Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf", "videogen_unet_low": "Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf", "videogen_text_encoder": "umt5_xxl_fp16.safetensors", "videogen_width": 1280, "videogen_height": 720, "videogen_frames": 81, "videogen_timeout_sec": 5400 },
+      "notes": "Config #15 (RTX PRO 5000 72GB; RTX PRO 6000 96GB shares this until measured — the flagship workstation tier). Serving matches #14 today (all-resident, 128K, f16 KV); the extra headroom is documented for the Q8_0-26B follow-up (out of scope 2026-07-16 spec) and bigger media renders via config_seed (720p + 49 frames on a fresh install). PROJECTED - H3 measures."
     },
     "ampere-16": {
       "ctx_size": 32768,
@@ -33,7 +70,8 @@
       "moe_26b": "gpu",
       "flash_attn": "on",
       "backend": "cuda",
-      "notes": "Ampere >=12GB band (3090-class defensive). 26B resident full-GPU. PROJECTED - H3 confirms OOM ceiling."
+      "config_seed": { "imagegen_family": "hidream-o1", "imagegen_ckpt": "hidream_o1_image_bf16.safetensors", "imagegen_vae": "builtin", "imagegen_timeout_sec": 3600, "videogen_unet_high": "Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf", "videogen_unet_low": "Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf", "videogen_text_encoder": "umt5_xxl_fp16.safetensors", "videogen_width": 1280, "videogen_height": 720, "videogen_frames": 81, "videogen_timeout_sec": 5400 },
+      "notes": "Ampere >=12GB band (3090-class defensive). 26B resident full-GPU. config_seed: quality-first media bindings (bf16 needs no fp8 hardware; verified on the 16GB Blackwell tier — needs the model downloads + >=~48GB system RAM). PROJECTED - H3 confirms OOM ceiling."
     },
     "volta-16": {
       "ctx_size": 32768,
@@ -44,7 +82,8 @@
       "moe_26b": "gpu",
       "flash_attn": "on",
       "backend": "cuda",
-      "notes": "Config #2 (V100 16GB, Volta sm_70). 26B resident full-GPU. RISK: confirm flash-attn on sm_70 is not a slow fallback (H3 measures). PROJECTED."
+      "config_seed": { "imagegen_family": "hidream-o1", "imagegen_ckpt": "hidream_o1_image_bf16.safetensors", "imagegen_vae": "builtin", "imagegen_timeout_sec": 3600, "videogen_unet_high": "Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf", "videogen_unet_low": "Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf", "videogen_text_encoder": "umt5_xxl_fp16.safetensors", "videogen_width": 1280, "videogen_height": 720, "videogen_frames": 81, "videogen_timeout_sec": 5400 },
+      "notes": "Config #2 (V100 16GB, Volta sm_70). 26B resident full-GPU. RISK: confirm flash-attn on sm_70 is not a slow fallback (H3 measures). config_seed: quality-first media bindings (bf16, no fp8 hw needed; sm_70 ComfyUI support to confirm at install). PROJECTED."
     },
     "ampere-8": {
       "ctx_size": 16384,

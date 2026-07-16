@@ -32,7 +32,7 @@ type Recalled struct {
 // MemoryClient talks to the mem0 REST server (the agentic-memory system). It is
 // WRITE-ISOLATED by construction: it recalls across readUsers (e.g. the agent's
 // own namespace for run-to-run continuity + the canonical "dmmdea" namespace for
-// Daniel's knowledge) but only ever WRITES under writeUser, and only at the
+// the operator's knowledge) but only ever WRITES under writeUser, and only at the
 // "evidence" tier — the mem0 server independently rejects any attempt to write
 // the canonical tier (403), so the agent cannot pollute the canonical anchor.
 type MemoryClient struct {

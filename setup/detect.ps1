@@ -37,6 +37,14 @@ function Get-GpuArch {
   if ([string]::IsNullOrWhiteSpace($Name)) { return 'none' }
   # NVIDIA RTX generations — match the 4-digit model so "RTX 3070" -> ampere.
   if ($Name -imatch 'RTX\s*50\d{2}' -or $Name -imatch 'RTX\s*50\b') { return 'blackwell' }
+  # RTX PRO Blackwell workstation cards ("NVIDIA RTX PRO 5000 Blackwell"): "RTX PRO"
+  # breaks the RTX\s*50xx match above, so match the explicit Blackwell suffix, plus
+  # the "RTX PRO NNNN" branding defensively (that branding IS the Blackwell pro
+  # generation — pre-Blackwell pro cards were "RTX A6000" / "RTX 6000 Ada Generation",
+  # which do not match). CAVEAT: a future non-Blackwell "RTX PRO" generation needs a
+  # new rule ABOVE this one.
+  if ($Name -imatch '\bBlackwell\b') { return 'blackwell' }
+  if ($Name -imatch 'RTX\s+PRO\s+\d{4}') { return 'blackwell' }
   if ($Name -imatch 'RTX\s*40\d{2}' -or $Name -imatch 'RTX\s*40\b') { return 'ada' }
   if ($Name -imatch 'RTX\s*30\d{2}' -or $Name -imatch 'RTX\s*30\b') { return 'ampere' }
   # Tesla / data-center Volta.
@@ -65,6 +73,19 @@ function Get-UnrecognizedNvidiaWarning {
   if ($Vendor -eq 'nvidia' -and $GpuArch -eq 'other') {
     return "unrecognized NVIDIA GPU '$GpuName' (arch=other) - using profile '$ProfileId' by VRAM band; verify the serving template fits before relying on it."
   }
+  return $null
+}
+
+# Parse the driver's max CUDA out of the nvidia-smi banner. Two header formats
+# exist in the wild: classic drivers print "CUDA Version: 13.3"; newer drivers
+# (e.g. 610.62) print "KMD Version: 610.62   CUDA UMD Version: 13.3" — the old
+# regex missed the UMD form and silently reported null on real Blackwell boxes
+# (found live on the workstation, 2026-07-15). Pure function — self-tested.
+function Get-CudaFromSmiHeader {
+  param([string]$SmiText)
+  if ([string]::IsNullOrWhiteSpace($SmiText)) { return $null }
+  $m = [regex]::Match($SmiText, 'CUDA(?:\s+UMD)?\s+Version:\s*([0-9]+\.[0-9]+)')
+  if ($m.Success) { return $m.Groups[1].Value }
   return $null
 }
 
@@ -103,6 +124,11 @@ function Get-Profile {
   if ($Vendor -eq 'nvidia') {
     switch ($Arch) {
       'blackwell' {
+        # Bands above 16GB (configs 13-15, spec 2026-07-16-blackwell-profile-tiers-design.md):
+        # 72 covers the RTX PRO 5000 72GB AND the PRO 6000 96GB until H3 measures more.
+        if ($VramGb -ge 64) { return @{ profile = 'blackwell-72'; big_ram = $false } }
+        if ($VramGb -ge 40) { return @{ profile = 'blackwell-48'; big_ram = $false } }
+        if ($VramGb -ge 24) { return @{ profile = 'blackwell-32'; big_ram = $false } }
         if ($VramGb -ge 12) { return @{ profile = 'blackwell-16'; big_ram = $false } }
         return @{ profile = 'blackwell-8'; big_ram = $false }
       }
@@ -158,6 +184,19 @@ if ($SelfTest) {
     else { Write-Host "FAIL warn  $Label -> warn=$got (expected warn=$ExpectWarn)"; $script:fail++ }
   }
 
+  function Assert-CudaHeader {
+    param([string]$Label, [string]$SmiText, [string]$Expected)
+    $got = Get-CudaFromSmiHeader -SmiText $SmiText
+    if ("$got" -eq "$Expected") { Write-Host "PASS cuda  $Label -> $(if ($got) { $got } else { '(null)' })" }
+    else { Write-Host "FAIL cuda  $Label -> $got (expected $Expected)"; $script:fail++ }
+  }
+
+  Write-Host '== nvidia-smi CUDA header parsing (both driver formats) =='
+  Assert-CudaHeader 'classic header'      '| NVIDIA-SMI 570.86.10    Driver Version: 570.86.10    CUDA Version: 12.8     |' '12.8'
+  Assert-CudaHeader 'UMD header (610.62)' '| NVIDIA-SMI 610.62                 KMD Version: 610.62        CUDA UMD Version: 13.3     |' '13.3'
+  Assert-CudaHeader 'no CUDA in text'     'NVIDIA-SMI has failed' ''
+  Assert-CudaHeader 'empty text'          '' ''
+
   Write-Host '== arch name matching =='
   Assert-Arch 'NVIDIA GeForce RTX 5060 Ti'        'blackwell'
   Assert-Arch 'NVIDIA GeForce RTX 5090'           'blackwell'
@@ -166,6 +205,13 @@ if ($SelfTest) {
   Assert-Arch 'NVIDIA GeForce RTX 3070 Laptop GPU' 'ampere'
   Assert-Arch 'NVIDIA GeForce RTX 3050'           'ampere'
   Assert-Arch 'Tesla V100-PCIE-16GB'              'volta'
+  # RTX PRO Blackwell workstation cards: "RTX PRO" breaks the RTX\s*50xx match,
+  # so these need their own rules (72-96GB workstation cards classify here).
+  Assert-Arch 'NVIDIA RTX PRO 4500 Blackwell'     'blackwell'
+  Assert-Arch 'NVIDIA RTX PRO 5000 Blackwell'     'blackwell'
+  Assert-Arch 'NVIDIA RTX PRO 6000 Blackwell Workstation Edition' 'blackwell'
+  # Pre-Blackwell pro cards must NOT trip the defensive RTX-PRO rule.
+  Assert-Arch 'NVIDIA RTX 6000 Ada Generation'    'other'
   Assert-Arch 'AMD Radeon 780M Graphics'          'rdna3'
   Assert-Arch 'AMD Radeon RX 7900 XTX'            'rdna3'
   Assert-Arch 'AMD Radeon Vega 7 Graphics'        'gcn'
@@ -183,6 +229,12 @@ if ($SelfTest) {
   Assert-Profile '5060 8GB (cfg8)'      'nvidia' 'blackwell' 8  1 32  'blackwell-8'
   Assert-Profile '3050 6GB (cfg10)'     'nvidia' 'ampere'    6  1 16  'ampere-6'
   Assert-Profile '3090 24GB (defensive)' 'nvidia' 'ampere'   24 1 64  'ampere-16'
+  # Blackwell bands above 16GB (configs 13-15; spec 2026-07-16-blackwell-profile-tiers-design.md)
+  Assert-Profile '5090 32GB (cfg13)'    'nvidia' 'blackwell' 32 1 64  'blackwell-32'
+  Assert-Profile 'PRO 4500 32GB (cfg13)' 'nvidia' 'blackwell' 32 1 128 'blackwell-32'
+  Assert-Profile 'PRO 5000 48GB (cfg14)' 'nvidia' 'blackwell' 48 1 64  'blackwell-48'
+  Assert-Profile 'PRO 5000 72GB (cfg15)' 'nvidia' 'blackwell' 72 1 128 'blackwell-72'
+  Assert-Profile 'PRO 6000 96GB (cfg15)' 'nvidia' 'blackwell' 96 1 128 'blackwell-72'
   Assert-Profile 'Vega7+32GB (cfg12)'   'amd'    'gcn'       0.5 1 32 'amd-gcn'
   Assert-Profile 'no GPU (cpu)'         'none'   'none'      0  0 16  'cpu'
 
@@ -230,8 +282,7 @@ function Get-CudaInfo {
   try {
     $smi = (& nvidia-smi 2>$null) -join "`n"
     if ($smi) {
-      $m = [regex]::Match($smi, 'CUDA Version:\s*([0-9]+\.[0-9]+)')
-      if ($m.Success) { $info.driver_cuda = $m.Groups[1].Value }
+      $info.driver_cuda = Get-CudaFromSmiHeader -SmiText $smi
       $dv = (& nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>$null | Select-Object -First 1)
       if ($dv) { $info.driver_version = ([string]$dv).Trim() }
     }

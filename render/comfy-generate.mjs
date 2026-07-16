@@ -36,7 +36,7 @@ if (!out || !prompt) {
 // comfy-render reads seed/width/height as flags OR positionals, so flags alone suffice.
 function runRender() {
   const args = [join(__dirname, "comfy-render.mjs"), out, prompt, "--api", API];
-  for (const k of ["negative", "width", "height", "steps", "seed", "ckpt", "vae", "cfg", "sampler", "scheduler"]) {
+  for (const k of ["negative", "width", "height", "steps", "seed", "ckpt", "vae", "cfg", "sampler", "scheduler", "family"]) {
     if (flags[k] != null) args.push("--" + k, String(flags[k]));
   }
   return new Promise((resolve, reject) => {

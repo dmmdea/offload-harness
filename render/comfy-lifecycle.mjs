@@ -38,7 +38,10 @@ export async function ensureComfy(opts = {}) {
     comfyUp: up = comfyUp,
     spawn = nodeSpawn,
     pollMs = 2000,
-    maxPolls = 120,
+    // Startup budget: a laptop cold start (custom nodes + models on a slow disk)
+    // legitimately exceeds the old hardcoded ~4 min. Default 10 min, env-tunable
+    // (COMFY_START_WAIT_SEC) — same pattern as the render polls' COMFY_WAIT_SEC.
+    maxPolls = Math.max(1, Math.ceil(Number(process.env.COMFY_START_WAIT_SEC || 600) * 1000 / 2000)),
   } = opts;
   if (await up(api)) return null; // already running — don't manage it
   const reserve = String(reserveVram || "1.0");
@@ -48,5 +51,5 @@ export async function ensureComfy(opts = {}) {
     if (await up(api)) return child;
   }
   try { child.kill(); } catch {}
-  throw new Error("ComfyUI did not become ready on " + api + " after ~4min");
+  throw new Error("ComfyUI did not become ready on " + api + " after ~" + Math.round(maxPolls * pollMs / 60000) + "min (COMFY_START_WAIT_SEC to extend)");
 }

@@ -200,6 +200,7 @@ Transport is **stdio**. Every tool returns the full result JSON — and a `{"def
 
 | Tool | Arguments | What it does |
 |---|---|---|
+| `offload_status` | — | **Capability discovery — call first when inspecting.** The LOCAL model roster (workhorse/triage/escalation/reasoning/vision/stt/embed) + live served models from the local endpoint + this machine's media engines + the (only) remote surface. Everything except `offload_nim` runs on these local models. |
 | `offload_summarize` | `text`, `max_points?` | Summarize text → `{summary, bullets}`, or defer. |
 | `offload_classify` | `text`, `labels[]` | Classify into one of the labels → `{label, confidence}`, or defer. |
 | `offload_extract` | `text`, `schema` | Extract schema-constrained fields → object, or defer. Values grounded in the input. |
@@ -210,10 +211,12 @@ Transport is **stdio**. Every tool returns the full result JSON — and a `{"def
 | `offload_assess_image` | `image`, `brief?` | QA a render against exclusions → `{has_people, has_text, matches_brief, notes}`. |
 | `offload_video_describe` | `video`, `question` | Sample frames from a local video and answer → `{answer}`, or defer. |
 | `offload_transcribe` | `audio`, `language?`, `hq?`, `select?` | Transcribe local audio/video → `{gist, segments[], srt_path, ...}`, or defer. |
-| `offload_generate_image` | `prompt`, `negative?`, `width?`, `height?`, `steps?`, `seed?`, `out?` | Generate an image on the local GPU (SDXL/ComfyUI) → `{image_path, ...}`, or defer. |
+| `offload_generate_image` | `prompt`, `negative?`, `width?`, `height?`, `steps?`, `seed?`, `out?` | Generate an image on the local GPU (ComfyUI; this machine's configured model at its highest-quality settings — e.g. HiDream-O1 bf16 via its official family graph at native 2048, or SDXL on smaller boxes) → `{image_path, ...}`, or defer. Quality-first: renders may take minutes by design. |
 | `offload_generate_svg` | `kind`, `spec`, `out?` | Render a crisp data-viz SVG (`gauge` · `comparison-bar` · `chromatogram` · `icon`) — no model, no GPU. |
 | `offload_generate_audio` | `text`, `kind?`, `clone?`, `lang?`, `seconds?`, `seed?`, `out?` | Synthesize voice (Chatterbox TTS) or music (ACE-Step) on the local GPU → `{audio_path, ...}`, or defer. |
-| `offload_generate_video` | `prompt`, `still?`, `model?`, `frames?`, `seed?`, `out?` | Animate a still into a short clip (Hunyuan I2V) on the local GPU → `{video_path, seed}`, or defer. |
+| `offload_generate_video` | `prompt`, `still?`, `model?`, `frames?`, `seed?`, `fast?`, `upscale?`, `out?` | Animate a still into a short clip (Wan 2.2 I2V two-stage; Hunyuan opt-in) on the local GPU → `{video_path, seed}`, or defer. Quality-first: the NATIVE recipe is the default (tens of minutes); `fast:true` opts into the 8-step distill draft. |
+| `offload_edit_image` | `image`, `ops[]`, `out?` | **Deterministic edit pipeline** (crop/resize/convert/composite/text via PIL; `flatten_design` opens `.xcf`/`.psd` via GIMP and returns the layer list) → `{image_path, width, height, ops_applied, layers?}`, or defer. CPU-only — never takes the GPU lock. |
+| `offload_media` | `op`, `in`/`inputs[]`, `out?`, op args | **One ffmpeg av op** — `trim` (stream-copy default), `concat`, `extract_frames`, `convert`, `mux_audio`, `probe` → op-specific JSON, or defer. CPU-only — never takes the GPU lock. |
 | `offload_nim` | `prompt`, `model?`, `system?`, `base?`, `max_tokens?`, `temperature?`, `list_models?` | **Opt-in remote.** Call an NVIDIA NIM endpoint (hosted free catalog or self-hosted) → `{model, content, ...}`, or defer. Key from `$NVIDIA_API_KEY` (sent only to NVIDIA hosts); never ledgered. |
 | `agent_run` | `goal`, `read_root?`, `max_steps?`, `model?`, `timeout_sec?` | **Local read-only agent.** A local model plans and iterates over read-only tools (`list_dir`, `read_file`) + the `offload_*` cascade to do a bounded multi-step read-and-reason job → `{output, steps, stop_reason, tools}`, or defer. No writes, no shell, no network; ledger untouched. |
 

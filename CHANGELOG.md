@@ -4,6 +4,122 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.17.0] - 2026-07-16
+
+### Added
+- **`offload_edit_image`** — deterministic image-edit PIPELINE in one call (ops applied
+  in order: crop / resize / convert / composite / text via a PIL worker on the ComfyUI
+  venv python, auto-derived; `flatten_design` as the first op opens `.xcf`/`.psd` via
+  GIMP, flattens, and returns the layer list — script-fu template live-verified on
+  gimp-console 3.2, no raw script pass-through ever). New config: `edit_python`,
+  `gimp_console_path`, `edit_timeout_sec`.
+- **`offload_media`** — one ffmpeg av operation per call: `trim` (keyframe-snapped
+  stream-copy default, `reencode` for exact cuts), `concat`, `extract_frames` (fps or
+  count-via-probe), `convert`, `mux_audio`, `probe` (parses `ffmpeg -i` stderr —
+  imageio_ffmpeg ships no ffprobe; fixture-tested against the real 7.1 banner).
+- Both tools are **CPU-only and never take the GPU lock** — they run in parallel with
+  renders and never evict llama-swap. Engines surface in `offload_status.media`
+  (`edit_pil` / `edit_gimp` / `media_ffmpeg`); every failure class defers cleanly.
+  MCP + CLI (`edit-image`, `media`); NOT registered in the read-only agent loop.
+  Spec: `docs/superpowers/specs/2026-07-16-edit-media-tools-design.md`.
+
+## [0.16.0] - 2026-07-16
+
+### Added — quality-first generation (root-cause fix, all hardware tiers)
+_Directive (operator, 2026-07-16): highest-quality deliverables always, on all hardware; speed variants
+opt-in only. Spec + measured evidence:
+`docs/superpowers/specs/2026-07-16-quality-first-generation-design.md`._
+- **HiDream-O1 official graph** (`render/wf-hidream-o1.mjs`, selected via new
+  `imagegen_family` config): ModelNoiseScale, patch-seam smoothing (kills the measured
+  3× 32px patch blocking of the generic-graph path), the SamplerCustom stack, native
+  2048 resolution, base (40/5/SDE) + dev (28/1/LCM) variants. Generic-graph machines
+  byte-for-byte unchanged when unset.
+- **Per-machine Wan weight binding** (`videogen_unet_high/low`, `videogen_text_encoder`):
+  extension-keyed GGUF/safetensors DisTorch2 loaders, never down-cast — unblocks Q8_0/
+  fp16 weights over the Q4 defaults.
+- **Video native recipe is now the DEFAULT** (no distill LoRA, 20 steps, cfg 3.5, the
+  official Wan training negative); `fast:true` opts into the improved 8-step asymmetric
+  lightx2v distill (HIGH LoRA 0.7 + cfg 3, LOW 1.0 + cfg 1). `hero` = deprecated no-op.
+- **Quality-first `config_seed` on every ≥16GB CUDA tier**: bf16 O1 Base + family graph +
+  Q8_0 Wan experts + umt5 fp16 + 720p×81 (proven on the 16GB tier: 3.9 min/2048 render).
+- `comfy-render.mjs` poll ceiling now `COMFY_WAIT_SEC`-driven (the hardcoded ~6-min
+  ceiling would kill legitimate quality renders); Go aligns it to `imagegen_timeout_sec`.
+
+### Fixed
+- **LO-19: `offload_generate_video` advertised `hero`/`upscale` but never mapped them** —
+  MCP callers requesting the quality pass silently got the 4-step draft. `fast`/`hero`/
+  `upscale` now flow through.
+
+## [0.15.0] - 2026-07-16
+
+### Added
+- **Blackwell profile tiers above 16GB (configs #13–15).**
+  `detect.ps1` now classifies RTX PRO Blackwell workstation cards (their names — e.g.
+  "NVIDIA RTX PRO 5000 Blackwell" — matched NO arch rule and fell into the ampere bands)
+  and bands Blackwell VRAM above 16GB: `blackwell-32` (≥24GB), `blackwell-48` (≥40GB),
+  `blackwell-72` (≥64GB; 96GB cards share it until measured). The new tiers render a new
+  `cuda-resident` template: every model standalone, **no swap group, no ttl** — the whole
+  roster stays hot concurrently (zero swap latency). 48/72 serve 128K ctx with
+  **full-precision f16 KV**; 32 serves 64K q8_0. All values PROJECTED until an H3-style
+  selftest runs on real ≥24GB hardware. Spec:
+  `docs/superpowers/specs/2026-07-16-blackwell-profile-tiers-design.md`.
+- **Profile `config_seed` (seed-on-create media defaults).** A profile may carry
+  `config_seed` in profiles.json; install Step 8 overlays it onto the template config
+  ONLY when creating `~/.local-offload/config.json` fresh (an existing per-machine
+  config is never touched). The big tiers seed 720p-class video defaults.
+- **`offload_status` MCP capability-discovery tool (LO-18).** Fixes the NIM-vs-local
+  asymmetry: `offload_nim` was the only tool that named or listed models, so agents
+  inspecting the harness concluded the text/LLM capability was the cloud NIM catalog and
+  never discovered the LOCAL cascade. `offload_status` (registered first) reports the
+  configured local roster, live-probes the endpoint's `/v1/models`, lists the machine's
+  media engines, and names NIM as the only remote surface; local tool descriptions
+  de-anonymized ("the LOCAL model cascade" instead of "a free local model").
+
+## [0.14.0] - 2026-07-15
+
+### Added
+- **H4: flexible CUDA-keyed llama.cpp build selection (workstation/Blackwell).**
+  `setup/install.ps1` now picks the CUDA build from the *detected* CUDA (never a fixed
+  assumption): Blackwell (sm_120) profiles on a CUDA-13 driver install a new pinned,
+  SHA-verified **cuda-13.3** prebuilt (`llama-cuda13`/`llama-cudart13`) — the SERVE tier
+  (MMQ→cuBLAS fallback, ~5.6× slower prefill; peak = documented source-build vs a
+  12.8/12.9 toolkit, noted when one is detected). Blackwell on a 12.x/undetected driver
+  refuses loudly with driver-upgrade-or-source-build guidance; `dual-gpu` refuses with the
+  multi-arch recipe (`-DCMAKE_CUDA_ARCHITECTURES="70;120"`, 12.8/12.9 toolkit — CUDA 13
+  cannot compile sm_70); all other CUDA profiles keep the verified 12.4 prebuilt.
+  `installed.json` records `cuda_build` under the selected component key so a driver
+  upgrade or the V100 arriving forces the correct re-install on re-run. New synthetic-box
+  overrides: `OFFLOAD_CUDA_DRIVER` / `OFFLOAD_CUDA_TOOLKIT`.
+- **Blackwell runtime env auto-injection.** `blackwell-*` renders now carry
+  `CUDA_VISIBLE_DEVICES=0` + `CUDA_MODULE_LOADING=LAZY` on every model block of the
+  rendered `llama-swap.yaml` (idempotent injection; the 26B's `GGML_CUDA_DISABLE_GRAPHS`
+  list is extended in place).
+- **Tests:** `setup/tests/install-cuda-build.test.ps1` (dot-source seam
+  `OFFLOAD_INSTALL_DOT_SOURCE=1`; pwsh 7 + PS 5.1) + Blackwell env assertions in
+  `setup/render.tests.ps1`.
+
+### Fixed
+- **detect.ps1 missed the driver CUDA on newer drivers.** Drivers like 610.62 print
+  `CUDA UMD Version: 13.3` instead of the classic `CUDA Version:` banner; the parse is now
+  a self-tested pure function covering both formats. (Found live on the workstation —
+  `cuda_driver` reported null on the exact box H4 keys its selection off.)
+
+## [0.13.0] - 2026-07-15
+
+### Added
+- **Config-selectable voice paths (wiring).** `generate_audio kind=voice` now takes a
+  `voice` selector (`generalist` | `finetuned`). The generalist path is the stock
+  Chatterbox multilingual worker (a new `voicegen_ref` supplies a default es-MX reference
+  clip). The `finetuned` path is a per-machine voice located entirely by config
+  (`voicegen_ft_model` / `voicegen_ft_base_dir` / `voicegen_ft_ref` / `voicegen_ft_lang` +
+  the `voicegen_ft_{temperature,cfg_weight,exaggeration,repetition_penalty}` recipe knobs);
+  empty config → clean defer, so shared code carries no model name or personal path.
+  `render/tts.mjs` branches on `--engine` to dispatch to the stock `tts_chatterbox.py` or the
+  new fine-tuned worker `tts_chatterbox_ft.py`, exposed on the MCP tool + CLI as `voice`.
+- **Fine-tuned worker skeleton** `render/tts_chatterbox_ft.py` — arg contract + path
+  validation; defers (exit 3) until its vendored-engine load path is built + tuned in a
+  later session. See `docs/superpowers/specs/2026-07-15-config-selectable-voice-wiring-design.md`.
+
 ## [0.12.0] - 2026-07-15
 
 ### Added
@@ -33,7 +149,7 @@ Versioning: [SemVer](https://semver.org/).
 ### Added
 - **Per-machine video resolution** (`videogen_width` / `videogen_height` / `videogen_frames` config): a 16GB
   box defaults to 720p while an 8GB box stays at the builder's 480p default (a per-request value still wins).
-  Keeps the harness hardware-agnostic — resolution is config, not a constant. e.g. a 16GB box may set 1280×720.
+  Keeps the harness hardware-agnostic — resolution is config, not a constant. The 16GB box is set to 1280×720.
 
 ## [0.10.2] - 2026-07-15
 
@@ -103,24 +219,6 @@ Versioning: [SemVer](https://semver.org/).
   (`offload-harness`, published at 0.8.0), per the versioning invariant. Folds in the 0.8.0 line already
   present in this tree — local coding-agent capabilities + the per-hardware optimization matrix — plus
   the CUDA-toolkit / Blackwell `detect` work the 0.8.0 publish did not carry.
-
-## [0.8.0] - 2026-07-12
-
-### Added — local coding agent capabilities (survive & drive complex multi-step tasks)
-- **Transcript compaction + tool-result cap**: the agent loop stays within the served window (keep system + objective + recent turns full, elide older tool outputs, cap any single result), with a one-shot harder-compact retry on overflow instead of aborting — long tasks complete instead of crashing.
-- **New tools**: `search_files` (worktree-confined regex grep, per-file grouped, 100-match cap), ranged `read_file` (offset/limit lines + continuation hints), `summarize_file` (digests a big file via the local offload cascade so its bytes never enter the transcript).
-- **Working memory**: a per-workspace `AGENT.md` (loaded fenced-as-untrusted) and an `update_plan` scratchpad the loop re-injects on a cadence.
-- **Per-task tool profiles** (`--profile edit|build|research|github`): a curated tool subset + tuned prompt + worked few-shot exemplars (small models select tools more reliably with fewer advertised); a profile can only narrow, never grant.
-- **Restricted runner** (`--allow-run`, OFF by default): runs an allowlisted program directly (no shell) inside the OS sandbox — Linux (Landlock/seccomp) and **Windows (Job Object + low-integrity token, worktree-write-confined + transient relabel)**. `run_shell` (arbitrary shell) is **Linux-only**. Honest residual risk: on native Windows, writes/resources/allowlist are confined but **reads and network are not** — documented in the security section.
-- **Architect/editor two-tier mode** (`--two-tier`): a planning model drafts a complete plan, a separate edit model executes it (aider-style one-shot handoff) — one cold swap, or zero-swap on a dual-GPU host.
-- **Larger context**: `--ctx-tokens` + a 16K CUDA agent tier with q8_0 KV (measured throughput-neutral).
-
-### Added — per-hardware optimization matrix
-- `detect.ps1` classifies the host into one of 10 arch-profiles (Blackwell/Ampere/Volta/RDNA3/GCN × VRAM band + RAM tier + GPU count); `install.ps1` renders profile-driven serving (context, KV type, 26B-A4B placement, and a dual-GPU two-model-resident config); `selftest.ps1` **measures** the projections on the real box and records measured-vs-projected honestly.
-- Documents the **Blackwell (sm_120) CUDA-12.8 build requirement** — neither stock Windows CUDA prebuilt works (12.4 lacks sm_120; 13.x segfaults the MMQ kernel ~5.6× slower).
-
-### Changed
-- README security section + OPERATOR-GUIDE + SETUP-AGENT + CLAUDE.md updated to document every tool, flag, the runner's honest posture, and the profile matrix.
 
 ## [0.7.0] - 2026-07-09
 

@@ -7,7 +7,9 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/mediaops"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
@@ -47,27 +50,39 @@ func parseArgs(raw json.RawMessage, in any) *mcp.CallToolResult {
 func (s *Server) Run(ctx context.Context, version string) error {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "local-offload", Version: version}, nil)
 
+	// Discovery FIRST (LO-18): before this tool existed, offload_nim was the only
+	// tool that named or listed any model, so an agent inspecting the harness
+	// concluded the text/LLM capability was NIM's cloud catalog and never
+	// discovered the LOCAL model cascade every other tool runs on. offload_status
+	// makes the local surface enumerable: configured roster + live served models
+	// + which media engines this machine has + the (only) remote surface.
+	srv.AddTool(&mcp.Tool{
+		Name:        "offload_status",
+		Description: "Discover this harness's capability — call this FIRST when inspecting what the harness can do. Returns {local:{endpoint, roster{workhorse,triage,escalation,reasoning,vision,stt,stt_hq,embed}, served_now[...] (live model ids from the LOCAL llama-swap endpoint)}, media:{...this machine's configured generation engines}, remote:{nim_endpoint, nim_default_model, nim_key_present}}. Every offload_* tool except offload_nim runs on the LOCAL models in the roster (free, on-box, no cloud); offload_nim is the ONLY remote/cloud surface. An empty roster entry means that capability defers on this machine.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+	}, s.handleStatus)
+
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_summarize",
-		Description: "Summarize text on a free local model. Use for bulk/low-judgment summaries to keep tokens out of your context. Returns {summary, bullets}; if it can't do it confidently it returns deferred:true and you should summarize it yourself. Triggers: summarize / tl;dr / gist / digest / recap / condense a doc, log, transcript, article, or thread.",
+		Description: "Summarize text on the LOCAL model cascade (free, on-box, no cloud — see offload_status for the live roster). Use for bulk/low-judgment summaries to keep tokens out of your context. Returns {summary, bullets}; if it can't do it confidently it returns deferred:true and you should summarize it yourself. Triggers: summarize / tl;dr / gist / digest / recap / condense a doc, log, transcript, article, or thread.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to summarize"},"max_points":{"type":"integer","description":"max bullet points (default 5)"}},"required":["text"]}`),
 	}, s.handleSummarize)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_classify",
-		Description: "Classify text into one of the given labels on a free local model. Returns {label, confidence}; low-confidence results are deferred back to you. Triggers: classify / categorize / label / tag / bucket / route text into one of a known set.",
+		Description: "Classify text into one of the given labels on the LOCAL model cascade (free, on-box, no cloud). Returns {label, confidence}; low-confidence results are deferred back to you. Triggers: classify / categorize / label / tag / bucket / route text into one of a known set.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to classify"},"labels":{"type":"array","items":{"type":"string"},"description":"allowed labels (>=2)"}},"required":["text","labels"]}`),
 	}, s.handleClassify)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_extract",
-		Description: "Extract structured fields from text on a free local model, constrained to the provided JSON schema. Returns the extracted object or defers. Triggers: extract / parse / pull out structured fields from text into a schema (names, dates, amounts, entities).",
+		Description: "Extract structured fields from text on the LOCAL model cascade (free, on-box, no cloud), constrained to the provided JSON schema. Returns the extracted object or defers. Triggers: extract / parse / pull out structured fields from text into a schema (names, dates, amounts, entities).",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to extract fields from"},"schema":{"type":"object","description":"JSON schema with a properties object describing the fields to extract"}},"required":["text","schema"]}`),
 	}, s.handleExtract)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_triage",
-		Description: "Answer a yes/no/unsure question about text on a free local model. Returns {decision, reason} or defers. Triggers: a yes/no/unsure check on text — 'does this contain X?', 'is this relevant/spam/safe?', 'should this be flagged?'.",
+		Description: "Answer a yes/no/unsure question about text on the LOCAL model cascade (free, on-box, no cloud). Returns {decision, reason} or defers. Triggers: a yes/no/unsure check on text — 'does this contain X?', 'is this relevant/spam/safe?', 'should this be flagged?'.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to evaluate"},"question":{"type":"string","description":"a yes/no question about the text"}},"required":["text","question"]}`),
 	}, s.handleTriage)
 
@@ -109,7 +124,7 @@ func (s *Server) Run(ctx context.Context, version string) error {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_generate_image",
-		Description: "Generate an IMAGE from a text prompt on the LOCAL ComfyUI (SDXL/RealVisXL) for FREE — no cloud, runs on the local GPU. prompt is required; optional: negative (hard exclusions like 'people, text, watermark' — SDXL enforces these at CFG 7), width/height (default 1024), steps (default 30), seed (for reproducibility), out (output PNG path; default under the media dir). It auto-starts ComfyUI and takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait. First call cold-starts ComfyUI (~4min) + renders (~6min); warm calls are faster. Returns {image_path, width, height, seed}. On any failure (GPU busy, ComfyUI down, render error, timeout) it returns deferred:true — then generate the image another way.",
+		Description: "Generate an IMAGE from a text prompt on the LOCAL ComfyUI for FREE — no cloud, runs on the local GPU, using THIS machine's configured model at its highest-quality settings (see offload_status media; e.g. HiDream-O1 bf16 at native 2048 via its official graph, or SDXL on smaller boxes). QUALITY-FIRST: renders can take many minutes — that is intended; do not lower steps/resolution to speed things up unless the caller explicitly asks for a draft. prompt is required (prose sentences beat tag lists on DiT models; quoted text renders as literal text); optional: negative (active on models served with real CFG), width/height (default = the model's native resolution), steps, seed, out. It auto-starts ComfyUI and takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait. Returns {image_path, width, height, seed}. On any failure it returns deferred:true — then generate the image another way.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"positive text prompt describing the image"},"negative":{"type":"string","description":"hard exclusions, e.g. people, text, watermark"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"},"width":{"type":"integer","description":"width px (default 1024)"},"height":{"type":"integer","description":"height px (default 1024)"},"steps":{"type":"integer","description":"sampler steps (default 30)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"}},"required":["prompt"]}`),
 	}, s.handleGenerateImage)
 
@@ -121,19 +136,31 @@ func (s *Server) Run(ctx context.Context, version string) error {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_generate_video",
-		Description: "Animate a still image into a short b-roll VIDEO clip on the LOCAL ComfyUI (Wan 2.2 14B I2V by default — 4-step lightx2v LoRAs, 720p on a 16GB box; HunyuanVideo 1.5 via model:hunyuan where its files are installed) for FREE — no cloud, runs on the local GPU. still (a local image path) + prompt describe the motion; optional: model (hunyuan|wan), frames (default ~33; realistic ceiling ~49), width/height, steps, seed, negative, reserve_vram (per-workflow VRAM hold-back override), out (output .mp4 path; default under the media dir). It auto-starts ComfyUI and takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait up to ~20min for the slot before deferring. A render itself takes minutes. Returns {video_path, seed}. On any failure (GPU busy, ComfyUI down, render error, timeout) it returns deferred:true — then make the clip another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"text prompt describing the motion/scene"},"still":{"type":"string","description":"local path to the input still image (I2V)"},"model":{"type":"string","description":"wan (default; Wan 2.2 14B, 4-step LoRA — best 16GB photoreal I2V) | hunyuan (opt-in; needs Hunyuan 1.5 files installed)"},"negative":{"type":"string","description":"hard exclusions"},"out":{"type":"string","description":"output .mp4 path (optional; default under the media dir)"},"frames":{"type":"integer","description":"frame count (Wan default 49 ~3s; 81 ~5s; slower at higher counts)"},"width":{"type":"integer","description":"width px"},"height":{"type":"integer","description":"height px"},"steps":{"type":"integer","description":"sampler steps"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"VRAM held back for the display (per-workflow override; default ~1.0, raise for Wan)"},"hero":{"type":"boolean","description":"native no-LoRA quality pass (wan; slower, better motion for realistic b-roll)"},"upscale":{"type":"boolean","description":"post-decode upscale using this machine's configured upscale model (e.g. 720p->1080p; no-op if the machine has none)"}},"required":["prompt"]}`),
+		Description: "Animate a still image into a short b-roll VIDEO clip on the LOCAL ComfyUI (Wan 2.2 14B I2V by default; HunyuanVideo 1.5 via model:hunyuan where its files are installed) for FREE — no cloud, runs on the local GPU. QUALITY-FIRST DEFAULT: the native two-stage recipe (no distill LoRA, 20 steps, cfg 3.5, the model's official negative) — a render takes tens of minutes and that is intended; set fast=true ONLY when the caller explicitly wants a draft (8-step lightx2v distill — visibly weaker motion). still (a local image path) + prompt describe the motion (prose, one camera move, ~80-120 words works best); optional: model (hunyuan|wan), frames (16fps; 81 ≈ 5s is the native ceiling), width/height (per-machine config may default 720p), steps, seed, negative (defaults to the model's official training negative), reserve_vram, out. It auto-starts ComfyUI and takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait for the slot before deferring. Returns {video_path, seed}. On any failure it returns deferred:true — then make the clip another way.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"prose motion prompt (one camera move, ~80-120 words works best)"},"still":{"type":"string","description":"local path to the input still image (I2V)"},"model":{"type":"string","description":"wan (default; Wan 2.2 14B two-stage, native quality recipe) | hunyuan (opt-in; needs Hunyuan 1.5 files installed)"},"negative":{"type":"string","description":"hard exclusions (default: the model's official training-time negative)"},"out":{"type":"string","description":"output .mp4 path (optional; default under the media dir)"},"frames":{"type":"integer","description":"frame count at 16fps (81 ~5s is the native ceiling)"},"width":{"type":"integer","description":"width px"},"height":{"type":"integer","description":"height px"},"steps":{"type":"integer","description":"sampler steps"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"VRAM held back for the display (per-workflow override; default ~1.0, raise for Wan)"},"fast":{"type":"boolean","description":"OPT-IN draft mode: 8-step lightx2v distill (visibly weaker motion). The default is the native quality recipe — only set when the caller explicitly accepts draft quality"},"hero":{"type":"boolean","description":"deprecated: the native quality pass IS the default now; no-op kept for compatibility"},"upscale":{"type":"boolean","description":"post-decode upscale using this machine's configured upscale model (e.g. 720p->1080p; no-op if the machine has none)"}},"required":["prompt"]}`),
 	}, s.handleGenerateVideo)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_generate_audio",
 		Description: "Synthesize AUDIO on the LOCAL GPU for FREE — no cloud. kind=voice (default) is text-to-speech narration via Chatterbox Multilingual (commercial-safe, default Spanish; pass clone=<ref.wav> for zero-shot voice cloning, lang for the language). kind=music is a text-to-music bed via ACE-Step (style-tag prompt; seconds for length; optional lyrics). text is the narration text or the music style prompt. Optional: out (output path; default under the media dir), seed, reserve_vram (music only). It takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait before deferring. Returns {audio_path, kind, seed}. On any failure (GPU busy, no route, worker error, timeout) it returns deferred:true — then synthesize it another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"narration text (voice) or music style prompt (music)"},"kind":{"type":"string","description":"voice (default, Chatterbox TTS) | music (ACE-Step)"},"clone":{"type":"string","description":"voice: local path to a reference .wav for zero-shot voice cloning"},"lang":{"type":"string","description":"voice: language code (default es)"},"seconds":{"type":"integer","description":"music: clip length in seconds"},"out":{"type":"string","description":"output audio path (optional; default under the media dir)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"music: VRAM held back for the display (per-workflow override)"}},"required":["text"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"narration text (voice) or music style prompt (music)"},"kind":{"type":"string","description":"voice (default, Chatterbox TTS) | music (ACE-Step)"},"voice":{"type":"string","description":"generalist | finetuned (default generalist; finetuned requires this machine's voicegen_ft_* config)"},"clone":{"type":"string","description":"voice: local path to a reference .wav for zero-shot voice cloning"},"lang":{"type":"string","description":"voice: language code (default es)"},"seconds":{"type":"integer","description":"music: clip length in seconds"},"out":{"type":"string","description":"output audio path (optional; default under the media dir)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"music: VRAM held back for the display (per-workflow override)"}},"required":["text"]}`),
 	}, s.handleGenerateAudio)
 
 	srv.AddTool(&mcp.Tool{
+		Name:        "offload_edit_image",
+		Description: "Apply a DETERMINISTIC edit pipeline to a local image — free, CPU-only (no GPU lock: runs in parallel with renders, never evicts models). ops is an ARRAY applied in order in one call: crop{x,y,width,height}, resize{width and/or height, keep_aspect}, convert{format png|jpg|webp}, composite{overlay,x,y,opacity}, text{text,x,y,size,color,font,anchor}, and flatten_design{} (FIRST op only: opens a .xcf/.psd design file via GIMP, flattens it, and returns its layer list — then the remaining ops run on the flat raster). Engines are per-machine (see offload_status media): PIL for the pipeline, GIMP only for flatten_design. Returns {image_path,width,height,ops_applied,layers?}. On any failure (engine absent, bad op, tool error) it returns deferred:true — then edit the image another way.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local input image path (.png/.jpg/... ; .xcf/.psd when ops starts with flatten_design)"},"ops":{"type":"array","items":{"type":"object"},"description":"edit operations applied in order; each is {op:..., ...args} (see tool description)"},"out":{"type":"string","description":"output path (optional; default under the media dir)"}},"required":["image","ops"]}`),
+	}, s.handleEditImage)
+
+	srv.AddTool(&mcp.Tool{
+		Name:        "offload_media",
+		Description: "Run ONE ffmpeg av operation on local media — free, CPU-only (no GPU lock). op: trim{in,start,end|duration, reencode? (default false = fast keyframe-snapped stream copy)}, concat{inputs[] (same codec)}, extract_frames{in, fps OR count, out = directory}, convert{in (target by out extension; audio_only/video_only)}, mux_audio{in (video), audio, shortest}, probe{in} -> {duration_sec, streams[], format}. Inputs are LOCAL paths. Returns op-specific JSON. On any failure (ffmpeg absent, bad args) it returns deferred:true — then do it another way.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"op":{"type":"string","description":"trim | concat | extract_frames | convert | mux_audio | probe"},"in":{"type":"string","description":"input media path (all ops except concat)"},"inputs":{"type":"array","items":{"type":"string"},"description":"concat: >=2 input paths, same codec"},"out":{"type":"string","description":"output path (optional; extract_frames: a directory). probe has no output"},"start":{"type":"string","description":"trim: start (seconds or hh:mm:ss)"},"end":{"type":"string","description":"trim: absolute end time"},"duration":{"type":"string","description":"trim: duration in seconds (alternative to end)"},"reencode":{"type":"boolean","description":"trim: re-encode for exact cuts (default false = keyframe-snapped -c copy, fast)"},"fps":{"type":"number","description":"extract_frames: sampling rate"},"count":{"type":"integer","description":"extract_frames: total frames (resolved to fps via probe)"},"audio":{"type":"string","description":"mux_audio: audio input path"},"shortest":{"type":"boolean","description":"mux_audio: stop at the shorter input (default true)"},"audio_only":{"type":"boolean","description":"convert: drop video (-vn)"},"video_only":{"type":"boolean","description":"convert: drop audio (-an)"}},"required":["op"]}`),
+	}, s.handleMedia)
+
+	srv.AddTool(&mcp.Tool{
 		Name:        "offload_nim",
-		Description: "Send a prompt to a remote OpenAI-compatible NVIDIA NIM endpoint — NVIDIA's hosted build.nvidia.com catalog (dozens of FREE models: nemotron, llama, gpt-oss, qwen, deepseek, glm, kimi…) by default, or a self-hosted NIM via base. This is the EXPLICIT remote escalation/test tool: it is OPT-IN (the hosted endpoint needs NVIDIA_API_KEY in the server env; a self-hosted NIM via base is keyless), and unlike the local offload tools it calls a cloud model — so use it deliberately for a stronger model than the local cascade, NOT for routine grunt work. The local GBNF grammar path and the savings ledger are untouched (NIM calls are never ledgered). Set list_models=true to browse available model ids. Returns {model, content, reasoning_content, tokens_in, tokens_out, truncated}; on any failure (no key, endpoint down, bad model) it returns deferred:true with a reason and you handle the prompt yourself.",
+		Description: "Send a prompt to a remote OpenAI-compatible NVIDIA NIM endpoint — NVIDIA's hosted build.nvidia.com catalog (dozens of FREE models: nemotron, llama, gpt-oss, qwen, deepseek, glm, kimi…) by default, or a self-hosted NIM via base. This is the ONLY cloud/remote tool on this server — every other offload_* tool runs on the LOCAL models (see offload_status for that roster). It is OPT-IN (the hosted endpoint needs NVIDIA_API_KEY in the server env; a self-hosted NIM via base is keyless): use it deliberately for a stronger model than the local cascade, NOT for routine grunt work. The local GBNF grammar path and the savings ledger are untouched (NIM calls are never ledgered). Set list_models=true to browse available model ids. Returns {model, content, reasoning_content, tokens_in, tokens_out, truncated}; on any failure (no key, endpoint down, bad model) it returns deferred:true with a reason and you handle the prompt yourself.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"the user prompt"},"model":{"type":"string","description":"model id (default from config; set list_models=true to browse)"},"system":{"type":"string","description":"optional system prompt"},"base":{"type":"string","description":"override the OpenAI-compatible base URL incl. /v1 (e.g. a self-hosted NIM http://host:8000/v1)"},"max_tokens":{"type":"integer","description":"max completion tokens (default from config; reasoning models need headroom)"},"temperature":{"type":"number","description":"sampling temperature (default 0)"},"list_models":{"type":"boolean","description":"list available model ids instead of generating"}},"required":["prompt"]}`),
 	}, s.handleNIM)
 
@@ -154,6 +181,109 @@ func (s *Server) Run(ctx context.Context, version string) error {
 }
 
 // --- tool handlers (named methods so they are directly unit-testable) ---
+
+// handleStatus (LO-18): the capability-discovery tool. Reports the configured
+// LOCAL model roster, live-probes the local endpoint's /v1/models, lists this
+// machine's media engines, and names the single remote surface (NIM). A failed
+// live probe is reported alongside the roster — never a defer: the configured
+// roster is the answer even when the stack is cold.
+func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var in struct{}
+	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+		return bad, nil
+	}
+	cfg := s.p.Cfg()
+
+	roster := map[string]any{
+		"workhorse":  cfg.Model,
+		"triage":     cfg.TriageModel,
+		"escalation": cfg.EscalationModel,
+		"reasoning":  cfg.ReasoningModel,
+		"vision":     cfg.VisionModel,
+		"stt":        cfg.STTModel,
+		"stt_hq":     cfg.STTModelHQ,
+		"embed":      cfg.EmbedModel(),
+	}
+	local := map[string]any{
+		"endpoint": cfg.Endpoint,
+		"roster":   roster,
+		"note":     "every offload_* tool except offload_nim runs on these LOCAL models — free, on-box, no cloud; an empty entry means that capability defers on this machine",
+	}
+	if ids, err := probeServedModels(ctx, cfg.Endpoint); err != nil {
+		local["served_probe_error"] = err.Error()
+	} else {
+		local["served_now"] = ids
+	}
+
+	// edit/media engine presence (existence-checked, per this machine's config).
+	editPy := mediaops.ResolveEditPython(cfg.EditPython, cfg.ComfyDir)
+	gimpPresent := false
+	if cfg.GimpConsolePath != "" {
+		if _, err := os.Stat(cfg.GimpConsolePath); err == nil {
+			gimpPresent = true
+		}
+	}
+	ffmpegPresent := false
+	if cfg.FFmpegPath != "" {
+		if _, err := os.Stat(cfg.FFmpegPath); err == nil {
+			ffmpegPresent = true
+		} else if _, err := exec.LookPath(cfg.FFmpegPath); err == nil {
+			ffmpegPresent = true // bare "ffmpeg" resolved via PATH
+		}
+	}
+	media := map[string]any{
+		"image_engine":        "ComfyUI (local)",
+		"image_ckpt":          cfg.ImageGenCkpt, // "" = the render script's default checkpoint
+		"video_engine":        "ComfyUI Wan 2.2 I2V (local; model:hunyuan opt-in)",
+		"video_upscale_model": cfg.VideoGenUpscaleModel,
+		"audio_voice_engine":  "Chatterbox TTS (local)",
+		"audio_music_engine":  "ACE-Step (local)",
+		"svg_engine":          "deterministic component kit (local, no model)",
+		"edit_pil":            editPy != "", // offload_edit_image pipeline engine
+		"edit_gimp":           gimpPresent,  // flatten_design (.xcf/.psd) engine
+		"media_ffmpeg":        ffmpegPresent, // offload_media engine
+		"note":                "media tools defer cleanly when this machine lacks the engine/files",
+	}
+
+	remote := map[string]any{
+		"nim_endpoint":      cfg.NIMEndpoint,
+		"nim_default_model": cfg.NIMModel,
+		"nim_key_present":   nimclient.KeyForBase(cfg.NIMEndpoint) != "",
+		"note":              "offload_nim is the ONLY remote/cloud tool on this server (opt-in escalation)",
+	}
+
+	return jsonResult(map[string]any{"local": local, "media": media, "remote": remote})
+}
+
+// probeServedModels GETs <endpoint>/v1/models (OpenAI list shape — llama-swap
+// serves it) and returns the live model ids. Short timeout: status must stay
+// snappy even when the endpoint is a black hole.
+func probeServedModels(ctx context.Context, endpoint string) ([]string, error) {
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, strings.TrimRight(endpoint, "/")+"/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(body.Data))
+	for _, d := range body.Data {
+		ids = append(ids, d.ID)
+	}
+	return ids, nil
+}
 
 func (s *Server) handleSummarize(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
@@ -349,11 +479,25 @@ func (s *Server) handleGenerateVideo(ctx context.Context, req *mcp.CallToolReque
 		Steps       int     `json:"steps"`
 		Seed        int     `json:"seed"`
 		ReserveVRAM float64 `json:"reserve_vram"`
+		Fast        bool    `json:"fast"`
+		Hero        bool    `json:"hero"`
+		Upscale     bool    `json:"upscale"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
 	params := map[string]any{}
+	// LO-19: hero/upscale were ADVERTISED in the schema but never mapped — MCP callers
+	// asking for the quality pass silently got the draft path. fast/hero/upscale now flow.
+	if in.Fast {
+		params["fast"] = true
+	}
+	if in.Hero {
+		params["hero"] = true
+	}
+	if in.Upscale {
+		params["upscale"] = true
+	}
 	if in.Still != "" {
 		params["still"] = in.Still
 	}
@@ -391,6 +535,7 @@ func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolReque
 	var in struct {
 		Text        string  `json:"text"`
 		Kind        string  `json:"kind"`
+		Voice       string  `json:"voice"`
 		Clone       string  `json:"clone"`
 		Lang        string  `json:"lang"`
 		Seconds     int     `json:"seconds"`
@@ -404,6 +549,9 @@ func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolReque
 	params := map[string]any{}
 	if in.Kind != "" {
 		params["kind"] = in.Kind
+	}
+	if in.Voice != "" {
+		params["voice"] = in.Voice
 	}
 	if in.Clone != "" {
 		params["clone"] = in.Clone
@@ -424,6 +572,72 @@ func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolReque
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
 	}
 	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateAudio, Input: in.Text, Params: params}))
+}
+
+func (s *Server) handleEditImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var in struct {
+		Image string           `json:"image"`
+		Ops   []map[string]any `json:"ops"`
+		Out   string           `json:"out"`
+	}
+	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+		return bad, nil
+	}
+	params := map[string]any{"ops": in.Ops}
+	if in.Out != "" {
+		params["out"] = in.Out
+	}
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskEditImage, Image: in.Image, Params: params}))
+}
+
+func (s *Server) handleMedia(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var in struct {
+		Op        string   `json:"op"`
+		In        string   `json:"in"`
+		Inputs    []string `json:"inputs"`
+		Out       string   `json:"out"`
+		Start     string   `json:"start"`
+		End       string   `json:"end"`
+		Duration  string   `json:"duration"`
+		Reencode  bool     `json:"reencode"`
+		FPS       float64  `json:"fps"`
+		Count     int      `json:"count"`
+		Audio     string   `json:"audio"`
+		Shortest  *bool    `json:"shortest"`
+		AudioOnly bool     `json:"audio_only"`
+		VideoOnly bool     `json:"video_only"`
+	}
+	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+		return bad, nil
+	}
+	params := map[string]any{"op": in.Op}
+	for k, v := range map[string]string{"in": in.In, "out": in.Out, "start": in.Start, "end": in.End, "duration": in.Duration, "audio": in.Audio} {
+		if v != "" {
+			params[k] = v
+		}
+	}
+	if len(in.Inputs) > 0 {
+		params["inputs"] = in.Inputs
+	}
+	if in.Reencode {
+		params["reencode"] = true
+	}
+	if in.AudioOnly {
+		params["audio_only"] = true
+	}
+	if in.VideoOnly {
+		params["video_only"] = true
+	}
+	if in.FPS > 0 {
+		params["fps"] = in.FPS
+	}
+	if in.Count > 0 {
+		params["count"] = in.Count
+	}
+	if in.Shortest != nil {
+		params["shortest"] = *in.Shortest
+	}
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskMedia, Params: params}))
 }
 
 func (s *Server) handleNIM(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

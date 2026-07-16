@@ -90,6 +90,7 @@ if ($b26 -match '--cpu-moe')                                   { Ok 'ampere-8/mi
 if ($r.yaml -match 'members:\s*\[[^\]]*gemma4-26b-a4b[^\]]*\]') { Ok 'ampere-8/mid 26B in swap-group members' } else { Bad 'ampere-8/mid 26B group member' }
 if ($r.yaml -notmatch '__[A-Z0-9_]+__')                        { Ok 'ampere-8/mid no unsubstituted tokens' } else { Bad 'ampere-8/mid leftover tokens' }
 if ($r.verdict -and [int]$r.verdict.agent_ctx_tokens -eq 16384) { Ok 'ampere-8/mid agent_ctx_tokens=16384' } else { Bad 'ampere-8/mid agent_ctx_tokens' }
+if ($r.yaml -notmatch 'CUDA_MODULE_LOADING')                   { Ok 'ampere-8/mid NO Blackwell runtime env (H4 is blackwell-only)' } else { Bad 'ampere-8/mid unexpected Blackwell env' }
 
 Write-Host "== ampere-8, ram_tier=low - 26B must DROP (no RAM path) =="
 $r = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-8' -RamTier 'low' -BigRam $false
@@ -104,6 +105,39 @@ if ($macro -match '--ctx-size 32768')                          { Ok 'blackwell-1
 $b26 = Get-ModelCmd -Yaml $r.yaml -ModelKey 'gemma4-26b-a4b'
 if ($b26 -match '-ngl 99' -and $b26 -notmatch '--cpu-moe')     { Ok 'blackwell-16 26B on GPU (-ngl 99, no cpu-moe)' } else { Bad "blackwell-16 26B gpu (got: $b26)" }
 if ($r.verdict -and $r.verdict.moe_mode -eq 'gpu')             { Ok 'blackwell-16 verdict moe_mode=gpu' } else { Bad 'blackwell-16 moe_mode' }
+# H4 Blackwell runtime env: every model block carries CUDA_VISIBLE_DEVICES=0 +
+# CUDA_MODULE_LOADING=LAZY; the 26B keeps GGML_CUDA_DISABLE_GRAPHS in the same list.
+$envLines = @($r.yaml -split "`r?`n" | Where-Object { $_ -match '^\s{4}env: \[' })
+if ($envLines.Count -ge 4 -and -not ($envLines | Where-Object { $_ -notmatch 'CUDA_VISIBLE_DEVICES=0' -or $_ -notmatch 'CUDA_MODULE_LOADING=LAZY' })) {
+  Ok "blackwell-16 H4 runtime env on every model block ($($envLines.Count) blocks)" } else { Bad "blackwell-16 H4 runtime env (env lines: $($envLines.Count))" }
+if ($r.yaml -match '(?m)^\s{4}env: \[GGML_CUDA_DISABLE_GRAPHS=1, CUDA_VISIBLE_DEVICES=0, CUDA_MODULE_LOADING=LAZY\]$') {
+  Ok 'blackwell-16 26B env keeps GGML_CUDA_DISABLE_GRAPHS + gains H4 vars' } else { Bad 'blackwell-16 26B merged env list' }
+
+Write-Host "== blackwell-72 - ALL-RESIDENT big-VRAM tier (cuda-resident template, cfg15) =="
+$r = Invoke-Render -Backend 'cuda' -ProfileId 'blackwell-72' -RamTier 'high' -BigRam $false
+if ($r.verdict -and $r.verdict.render_backend -eq 'cuda-resident') { Ok 'blackwell-72 renders the cuda-resident template' } else { Bad "blackwell-72 render_backend (got: $($r.verdict.render_backend))" }
+$models = @('offload-e4b','gemma4-e2b','gemma4-26b-a4b','embeddinggemma')
+$missing = @($models | Where-Object { $r.yaml -notmatch "(?m)^\s{2}$([regex]::Escape($_)):" })
+if ($missing.Count -eq 0)                                       { Ok 'blackwell-72 all four models present' } else { Bad "blackwell-72 missing models: $($missing -join ', ')" }
+if ($r.yaml -notmatch 'exclusive:' -and $r.yaml -notmatch '(?m)^\s*swap:' -and $r.yaml -notmatch '(?m)^groups:') { Ok 'blackwell-72 NO swap group (all resident)' } else { Bad 'blackwell-72 swap group present' }
+if ($r.yaml -notmatch '(?m)^\s{4}ttl:')                         { Ok 'blackwell-72 NO ttl (models stay hot)' } else { Bad 'blackwell-72 ttl present' }
+$macro = Get-CommonMacro $r.yaml
+if ($macro -match '--ctx-size 131072')                          { Ok 'blackwell-72 ctx=131072' } else { Bad "blackwell-72 ctx (got: $macro)" }
+if ($macro -match '--cache-type-k f16' -and $macro -match '--cache-type-v f16') { Ok 'blackwell-72 KV=f16 (full precision)' } else { Bad 'blackwell-72 KV f16' }
+$b26 = Get-ModelCmd -Yaml $r.yaml -ModelKey 'gemma4-26b-a4b'
+if ($b26 -match '-ngl 99' -and $b26 -notmatch '--cpu-moe')     { Ok 'blackwell-72 26B on GPU' } else { Bad "blackwell-72 26B gpu (got: $b26)" }
+$envLines = @($r.yaml -split "`r?`n" | Where-Object { $_ -match '^\s{4}env: \[' })
+if ($envLines.Count -ge 4 -and -not ($envLines | Where-Object { $_ -notmatch 'CUDA_VISIBLE_DEVICES=0' -or $_ -notmatch 'CUDA_MODULE_LOADING=LAZY' })) {
+  Ok 'blackwell-72 H4 runtime env on every model block' } else { Bad "blackwell-72 H4 env (env lines: $($envLines.Count))" }
+if ($r.yaml -notmatch '__[A-Z0-9_]+__')                        { Ok 'blackwell-72 no unsubstituted tokens' } else { Bad 'blackwell-72 leftover tokens' }
+if ($r.verdict -and [int]$r.verdict.agent_ctx_tokens -eq 131072) { Ok 'blackwell-72 agent_ctx_tokens=131072' } else { Bad 'blackwell-72 agent_ctx_tokens' }
+
+Write-Host "== blackwell-32 - 5090-class: resident, 65536 ctx, q8_0 KV (cfg13) =="
+$r = Invoke-Render -Backend 'cuda' -ProfileId 'blackwell-32' -RamTier 'mid' -BigRam $false
+if ($r.verdict -and $r.verdict.render_backend -eq 'cuda-resident') { Ok 'blackwell-32 renders the cuda-resident template' } else { Bad 'blackwell-32 render_backend' }
+$macro = Get-CommonMacro $r.yaml
+if ($macro -match '--ctx-size 65536')                           { Ok 'blackwell-32 ctx=65536' } else { Bad "blackwell-32 ctx (got: $macro)" }
+if ($macro -match '--cache-type-k q8_0')                        { Ok 'blackwell-32 KV=q8_0' } else { Bad 'blackwell-32 KV q8_0' }
 
 Write-Host "== ampere-6 - E2B, ctx 16384, NO 26B =="
 $r = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-6' -RamTier 'min' -BigRam $false

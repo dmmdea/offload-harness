@@ -8,6 +8,8 @@
 #                 OFFLOAD_BACKEND (override detect.ps1: cuda|vulkan|cpu)
 #                 OFFLOAD_PROFILE / OFFLOAD_RAM_TIER / OFFLOAD_BIG_RAM (override the
 #                 detected serving profile — used by -RenderOnly and by testing a synthetic box)
+#                 OFFLOAD_CUDA_DRIVER / OFFLOAD_CUDA_TOOLKIT (H4: override detect's
+#                 cuda_driver/cuda_toolkit for the CUDA build selection — synthetic-box testing)
 #
 # -RenderOnly (H2): resolve the profile + render llama-swap.yaml ONLY (Step 1 + Step 6),
 #   then exit. No winget, no downloads, no Go build, no manifest. Requires OFFLOAD_BACKEND
@@ -51,6 +53,21 @@ $PINNED = @{
     url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/cudart-llama-bin-win-cuda-12.4-x64.zip"
     sha  = '8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6'
     size = 391443627
+    version = $LLAMA_TAG
+  }
+  # H4: CUDA-13.3 build family — the Blackwell (sm_120) SERVE path. SHA256 = the GitHub
+  # release API asset digest for tag b9934 (verified 2026-07-15); Get-Verified re-checks
+  # size + SHA on every download.
+  'llama-cuda13' = @{
+    url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/llama-$LLAMA_TAG-bin-win-cuda-13.3-x64.zip"
+    sha  = '20e49d5c640037db1e6a1d3ad111030ed9e15c6df4d4438fc9dad622de035793'
+    size = 162132387
+    version = $LLAMA_TAG
+  }
+  'llama-cudart13' = @{
+    url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/cudart-llama-bin-win-cuda-13.3-x64.zip"
+    sha  = '1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e'
+    size = 390970417
     version = $LLAMA_TAG
   }
   'llama-cpu' = @{
@@ -396,6 +413,157 @@ function Remove-26bFromYaml {
 }
 
 # ---------------------------------------------------------------------------
+# H4: choose the llama.cpp CUDA build from (profile, detected CUDA) — FLEXIBLE,
+# never a fixed assumption. Pure function of its args — unit-testable via the
+# OFFLOAD_INSTALL_DOT_SOURCE seam (setup/tests/install-cuda-build.test.ps1).
+#
+# The binding constraint for a PREBUILT is the DRIVER's max CUDA (the zips ship
+# their own cudart, but a CUDA-13 runtime still needs a CUDA-13 / R580+ driver);
+# the TOOLKIT (nvcc) only matters for the source-build path, so it is reported
+# as an opportunity, never required.
+#
+# Matrix (upstream reality, release b9934 — verified 2026-07-15):
+#   * win-cuda-12.4 prebuilt: NO sm_120 -> will not run Blackwell at all.
+#   * win-cuda-13.3 prebuilt: SERVES Blackwell (MMQ falls back to cuBLAS,
+#     ~5.6x slower prefill on Q4 — functional, not peak). Needs a CUDA-13 driver.
+#   * NO win-cuda-12.8 prebuilt exists -> the PEAK path (sm_120 MMQ,
+#     -DCMAKE_CUDA_ARCHITECTURES=120) is a documented source-build vs a
+#     12.8/12.9 toolkit. See setup/SETUP-AGENT.md, Blackwell note.
+#   * dual sm_70+sm_120: no single prebuilt covers both, and the CUDA-13 toolkit
+#     cannot compile sm_70 (Volta offline compilation removed in CUDA 13.0) ->
+#     source-build vs a 12.8/12.9 toolkit with -DCMAKE_CUDA_ARCHITECTURES="70;120"
+#     (driver branch R580+ still DRIVES the V100 — only the toolkit dropped it).
+#
+# Returns @{ component; keys; tier; refuse; report } where component is the
+# manifest/PINNED key of the llama zip ('' when refuse), keys = zips to install,
+# tier = standard|serves|refuse, report = operator-facing lines (always >=1).
+# ---------------------------------------------------------------------------
+function Select-CudaBuild {
+  param(
+    [string]$ProfileId,     # blackwell-16|blackwell-8|dual-gpu|ampere-*|volta-16|... or $null
+    [string]$CudaDriver,    # driver's max CUDA "X.Y" (detect: cuda_driver), or $null
+    [string]$CudaToolkit    # installed toolkit "X.Y" (detect: cuda_toolkit), or $null
+  )
+  $driverVer = $null
+  if ($CudaDriver -match '^\d+\.\d+$') { $driverVer = [version]$CudaDriver }
+  $toolkitVer = $null
+  if ($CudaToolkit -match '^\d+\.\d+$') { $toolkitVer = [version]$CudaToolkit }
+  $cudaDesc = "driver CUDA=$(if ($CudaDriver) { $CudaDriver } else { 'undetected' }) toolkit=$(if ($CudaToolkit) { $CudaToolkit } else { 'none' })"
+
+  if ($ProfileId -eq 'dual-gpu') {
+    return @{ component = ''; keys = @(); tier = 'refuse'; refuse = $true; report = @(
+      "dual-gpu (sm_70 Volta + sm_120 Blackwell): no pinned prebuilt covers BOTH arches ($cudaDesc).",
+      "The 12.4 prebuilt has no sm_120; the CUDA-13 toolkit cannot compile sm_70 (Volta offline compilation removed in CUDA 13.0).",
+      "Source-build llama.cpp with a CUDA 12.8/12.9 toolkit: -DCMAKE_CUDA_ARCHITECTURES=`"70;120`" (an R580+ driver still drives the V100).",
+      "See setup/SETUP-AGENT.md - Blackwell note (multi-arch build)." ) }
+  }
+
+  if ($ProfileId -match '^blackwell-') {
+    if ($driverVer -and $driverVer -ge [version]'13.0') {
+      $report = @(
+        "Blackwell (sm_120), $cudaDesc -> CUDA-13.3 prebuilt: SERVES now (MMQ falls back to cuBLAS, ~5.6x slower prefill on Q4). Functional, not peak.",
+        "Peak path: source-build vs a CUDA 12.8/12.9 toolkit with -DCMAKE_CUDA_ARCHITECTURES=120 (MMQ). See setup/SETUP-AGENT.md - Blackwell note." )
+      if ($toolkitVer -and $toolkitVer -ge [version]'12.8' -and $toolkitVer -lt [version]'13.0') {
+        $report += "Toolkit $CudaToolkit is already installed - the peak source-build is available on this box now."
+      }
+      return @{ component = 'llama-cuda13'; keys = @('llama-cuda13','llama-cudart13'); tier = 'serves'; refuse = $false; report = $report }
+    }
+    if ($driverVer -and $driverVer -ge [version]'12.8') {
+      return @{ component = ''; keys = @(); tier = 'refuse'; refuse = $true; report = @(
+        "Blackwell (sm_120), ${cudaDesc}: NO pinned prebuilt runs here - the 12.4 build has no sm_120 and the CUDA-13.3 build needs a CUDA-13 (R580+) driver.",
+        "Either upgrade the NVIDIA driver to R580+ and re-run install (the 13.3 prebuilt then serves), or source-build vs a 12.8/12.9 toolkit for peak (-DCMAKE_CUDA_ARCHITECTURES=120).",
+        "See setup/SETUP-AGENT.md - Blackwell note." ) }
+    }
+    return @{ component = ''; keys = @(); tier = 'refuse'; refuse = $true; report = @(
+      "Blackwell (sm_120), ${cudaDesc}: the old 12.4 prebuilt has NO sm_120 and will not run this card.",
+      "Upgrade the NVIDIA driver to R580+ (CUDA 13.x) and re-run install - detect.ps1 + this selection adapt automatically.",
+      "See setup/SETUP-AGENT.md - Blackwell note." ) }
+  }
+
+  # Every other CUDA profile (ampere-*/volta-16/other/none): the pinned 12.4 build
+  # is the verified status-quo path (sm_70..sm_89 covered; any 12.4+ driver runs it).
+  return @{ component = 'llama-cuda'; keys = @('llama-cuda','llama-cudart'); tier = 'standard'; refuse = $false;
+    report = @("CUDA build: pinned 12.4 prebuilt (profile=$(if ($ProfileId) { $ProfileId } else { '(none)' }), $cudaDesc).") }
+}
+
+# ---------------------------------------------------------------------------
+# H4: inject the Blackwell runtime env into a rendered llama-swap yaml. Adds the
+# given VAR=VAL entries to every model block under models: — appended into an
+# existing "env: [ ... ]" inline list (e.g. the 26B's GGML_CUDA_DISABLE_GRAPHS),
+# or inserted as a new "    env: [...]" line right after the model key. Entries
+# already present are not duplicated (idempotent). Pure string transform.
+# Why: CUDA_VISIBLE_DEVICES must be EXPLICIT (hybrid-graphics boxes can hand the
+# runtime -1), and CUDA_MODULE_LOADING=LAZY avoids the eager-load cost on
+# Blackwell (llama.cpp #22696).
+# ---------------------------------------------------------------------------
+function Add-GpuEnvToYaml {
+  param([string]$Text, [string[]]$EnvVars)
+  $lines = $Text -split "`r?`n"
+  $out = New-Object System.Collections.Generic.List[string]
+  $inModels = $false
+  $i = 0
+  while ($i -lt $lines.Count) {
+    $line = $lines[$i]
+    if ($line -match '^models:\s*$') { $inModels = $true; $out.Add($line); $i++; continue }
+    elseif ($line -match '^\S') { $inModels = $false }   # any other 0-indent key ends models:
+    if ($inModels -and $line -match '^\s{2}(\S+):\s*$') {
+      # Model block: scan it for an existing inline env list.
+      $blockEnd = $i + 1
+      $envIdx = -1
+      while ($blockEnd -lt $lines.Count -and $lines[$blockEnd] -notmatch '^\s{0,2}\S') {
+        if ($lines[$blockEnd] -match '^\s{4}env:\s*\[(.*)\]\s*$') { $envIdx = $blockEnd }
+        $blockEnd++
+      }
+      $out.Add($line)   # the model key line
+      for ($j = $i + 1; $j -lt $blockEnd; $j++) {
+        if ($j -eq $envIdx) {
+          $existing = $Matches = $null
+          if ($lines[$j] -match '^(\s{4}env:\s*\[)(.*)(\]\s*)$') {
+            $existing = $Matches[2].Trim()
+            $entries = @()
+            if ($existing) { $entries = @($existing -split '\s*,\s*') }
+            foreach ($v in $EnvVars) { if ($entries -notcontains $v) { $entries += $v } }
+            $out.Add("    env: [" + ($entries -join ', ') + "]")
+          } else { $out.Add($lines[$j]) }
+        } else { $out.Add($lines[$j]) }
+      }
+      if ($envIdx -lt 0) { $out.Insert($out.Count - ($blockEnd - $i - 1), "    env: [" + ($EnvVars -join ', ') + "]") }
+      $i = $blockEnd
+      continue
+    }
+    $out.Add($line); $i++
+  }
+  return ($out -join "`n")
+}
+
+# ---------------------------------------------------------------------------
+# Task 3 (2026-07-16 Blackwell-tier plan): overlay a profile's config_seed onto
+# the template config.json text. Pure string->string: only the seed's keys are
+# set (existing keys updated, absent keys added); a null/empty seed returns the
+# input UNCHANGED (byte-identical - no gratuitous reformat on the common path).
+# Step 8 applies this ONLY when creating ~/.local-offload/config.json fresh; an
+# existing per-machine config is never touched (it stays the sole authority).
+# ---------------------------------------------------------------------------
+function Merge-ConfigSeed {
+  param([string]$ConfigText, $Seed)
+  if ($null -eq $Seed) { return $ConfigText }
+  $props = @($Seed.PSObject.Properties)
+  if ($props.Count -eq 0) { return $ConfigText }
+  $cfg = $ConfigText | ConvertFrom-Json
+  foreach ($p in $props) {
+    if ($cfg.PSObject.Properties[$p.Name]) { $cfg.($p.Name) = $p.Value }
+    else { $cfg | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value }
+  }
+  return ($cfg | ConvertTo-Json -Depth 8)
+}
+
+# Test seam: OFFLOAD_INSTALL_DOT_SOURCE=1 -> define the pure helpers above and
+# return before ANY main-flow work (no dirs, no transcript, no detection). Used
+# by setup/tests/install-cuda-build.test.ps1 + install-config-seed.test.ps1.
+# Same pattern as selftest.ps1's OFFLOAD_SELFTEST_DOT_SOURCE.
+if ($env:OFFLOAD_INSTALL_DOT_SOURCE -eq '1') { return }
+
+# ---------------------------------------------------------------------------
 # Resolve config
 # ---------------------------------------------------------------------------
 if ($env:OFFLOAD_HOME) { $HOME_DIR = $env:OFFLOAD_HOME } else { $HOME_DIR = Join-Path $HOME 'offload-stack' }
@@ -448,6 +616,7 @@ else {
 # synthetic box / a render-only dry run without the real hardware).
 # ---------------------------------------------------------------------------
 $profileId = $null; $ramTier = $null; $bigRam = $false
+$cudaDriver = $null; $cudaToolkit = $null   # H4: detect's cuda_driver / cuda_toolkit
 if ($RenderOnly -and -not $env:OFFLOAD_BACKEND) {
   throw "-RenderOnly requires OFFLOAD_BACKEND (and OFFLOAD_PROFILE) set so no hardware detection runs"
 }
@@ -469,12 +638,16 @@ if ($env:OFFLOAD_BACKEND) {
   $profileId = $verdictObj.profile
   $ramTier   = $verdictObj.ram_tier
   if ($null -ne $verdictObj.big_ram) { $bigRam = [bool]$verdictObj.big_ram }
+  $cudaDriver  = $verdictObj.cuda_driver
+  $cudaToolkit = $verdictObj.cuda_toolkit
 }
 # Overrides win over detect (and cover the OFFLOAD_BACKEND-override path, where
 # detect never ran and $profileId/$ramTier are still null).
 if ($env:OFFLOAD_PROFILE)  { $profileId = $env:OFFLOAD_PROFILE.Trim() }
 if ($env:OFFLOAD_RAM_TIER) { $ramTier   = $env:OFFLOAD_RAM_TIER.Trim().ToLower() }
 if ($null -ne $env:OFFLOAD_BIG_RAM) { $bigRam = ($env:OFFLOAD_BIG_RAM -ne '0') }
+if ($env:OFFLOAD_CUDA_DRIVER)  { $cudaDriver  = $env:OFFLOAD_CUDA_DRIVER.Trim() }   # H4: synthetic-box testing
+if ($env:OFFLOAD_CUDA_TOOLKIT) { $cudaToolkit = $env:OFFLOAD_CUDA_TOOLKIT.Trim() }
 if ($backend -notin @('cuda','vulkan','cpu')) { throw "unsupported backend '$backend' (expected cuda|vulkan|cpu)" }
 if (-not $ramTier) { $ramTier = 'min' }   # conservative default when unknown (drops the RAM-gated 26B path)
 Write-Host "OK    backend = $backend | profile = $(if ($profileId) { $profileId } else { '(none - backend defaults)' }) | ram_tier = $ramTier$(if ($bigRam) { ' | big_ram' } else { '' })" -ForegroundColor Green
@@ -513,16 +686,29 @@ Step 'prereq: Go >=1.26' `
 
 # ---------------------------------------------------------------------------
 # Step 3: llama.cpp binaries for the backend (+ cudart for CUDA)
-# SKIP requires: artifact present AND manifest records the currently-pinned tag.
+# SKIP requires: artifact present AND manifest records the currently-pinned tag
+# under the SELECTED component key — so a CUDA-build switch (e.g. 12.4 -> 13.3
+# after a driver upgrade, or the V100 arriving flipping the profile) forces a
+# real re-install on the next run even though old bytes are still on disk.
+# H4: for CUDA the build is CHOSEN from (profile, detected CUDA) — flexible,
+# never a fixed assumption. A refuse verdict fails LOUD with the guidance.
 # ---------------------------------------------------------------------------
 $llamaExe = Join-Path $llamaDir 'llama-server.exe'
-$llamaComponentKey = "llama-$backend"
-Step "llama.cpp ($backend) -> $llamaDir" `
+$cudaBuild = $null
+if ($backend -eq 'cuda') {
+  $cudaBuild = Select-CudaBuild -ProfileId $profileId -CudaDriver $cudaDriver -CudaToolkit $cudaToolkit
+  $cudaBuild.report | ForEach-Object { Write-Host "NOTE  $_" -ForegroundColor Yellow }
+  if ($cudaBuild.refuse) { throw "no viable pinned llama.cpp CUDA build for profile '$profileId' - see the NOTE lines above" }
+  Write-Host "OK    CUDA build selected: $($cudaBuild.component) (tier=$($cudaBuild.tier))" -ForegroundColor Green
+  $llamaComponentKey = $cudaBuild.component
+} else {
+  $llamaComponentKey = "llama-$backend"
+}
+Step "llama.cpp ($backend -> $llamaComponentKey) -> $llamaDir" `
   { (Test-Path $llamaExe) -and ((Get-OldVersion $llamaComponentKey) -eq $LLAMA_TAG) } `
   {
     if ($backend -eq 'cuda') {
-      Install-Zip -Key 'llama-cuda'   -Stage $stageDir -Dest $llamaDir
-      Install-Zip -Key 'llama-cudart' -Stage $stageDir -Dest $llamaDir   # CUDA runtime DLLs alongside
+      foreach ($k in $cudaBuild.keys) { Install-Zip -Key $k -Stage $stageDir -Dest $llamaDir }
     } elseif ($backend -eq 'vulkan') {
       Install-Zip -Key 'llama-vulkan' -Stage $stageDir -Dest $llamaDir
     } else {
@@ -580,11 +766,12 @@ foreach ($key in $modelKeys) {
 # ---------------------------------------------------------------------------
 $profilesJson = Join-Path (Join-Path $scriptDir 'templates') 'profiles.json'
 $pp = Resolve-ProfileParams -ProfileId $profileId -RamTier $ramTier -BigRam $bigRam -ProfilesJsonPath $profilesJson -Backend $backend
-# The template to render: the profile's backend (dual-gpu -> dual-cuda), else the
-# fallback's backend (= the detected backend). dual-cuda is CUDA-only; guard a stray override.
+# The template to render: the profile's backend (dual-gpu -> dual-cuda; the
+# blackwell-32/48/72 all-resident tiers -> cuda-resident), else the fallback's
+# backend (= the detected backend). Both are CUDA-only; guard a stray override.
 $tplBackend = $pp.backend
-if ($tplBackend -eq 'dual-cuda' -and $backend -ne 'cuda') {
-  throw "profile '$profileId' wants the dual-cuda template but the resolved backend is '$backend' (need CUDA binaries)"
+if ($tplBackend -in @('dual-cuda', 'cuda-resident') -and $backend -ne 'cuda') {
+  throw "profile '$profileId' wants the $tplBackend template but the resolved backend is '$backend' (need CUDA binaries)"
 }
 $agentCtxTokens = $pp.agent_ctx   # Deliverable 4 (summary)
 
@@ -610,6 +797,12 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     $text = $text.Replace('__FLASH_ATTN__', $pp.flash_attn)
     $text = $text.Replace('__MOE_26B__', $pp.moe_26b)
     if (-not $pp.include_26b) { $text = Remove-26bFromYaml -Text $text }
+    # H4 Blackwell runtime env: CUDA_VISIBLE_DEVICES explicit (hybrid-graphics -1
+    # trap) + CUDA_MODULE_LOADING=LAZY (llama.cpp #22696). Single-GPU Blackwell
+    # profiles only — the dual-cuda template already pins devices per group.
+    if ($profileId -match '^blackwell-') {
+      $text = Add-GpuEnvToYaml -Text $text -EnvVars @('CUDA_VISIBLE_DEVICES=0','CUDA_MODULE_LOADING=LAZY')
+    }
 
     $llamaDirFwd = $llamaDir.Replace('\', '/')
     $modelDirFwd = $modelDir.Replace('\', '/')
@@ -677,7 +870,21 @@ Step 'harness config -> ~/.local-offload/config.json' `
   { Test-Path $cfgDest } `
   {
     New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
-    Copy-Item (Join-Path (Join-Path $scriptDir 'templates') 'config.json') $cfgDest
+    # Task 3: seed the FRESH config from the profile's config_seed (profile-keyed
+    # media defaults, e.g. 720p video on the big-VRAM tiers). Only this create
+    # path seeds - an existing config.json is never touched (the Step SKIPs).
+    $cfgText = Get-Content -Raw (Join-Path (Join-Path $scriptDir 'templates') 'config.json')
+    $seed = $null
+    if ($profileId -and (Test-Path $profilesJson)) {
+      $pdoc = Get-Content -Raw $profilesJson | ConvertFrom-Json
+      if ($pdoc.profiles.PSObject.Properties[$profileId]) { $seed = $pdoc.profiles.$profileId.config_seed }
+    }
+    if ($seed) {
+      $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $seed
+      Write-Host "      config_seed ($profileId): $(@($seed.PSObject.Properties.Name) -join ', ')" -ForegroundColor DarkGray
+    }
+    $noBomCfg = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($cfgDest, $cfgText, $noBomCfg)
   }
 
 # ---------------------------------------------------------------------------
@@ -687,6 +894,9 @@ $manifest = [ordered]@{
   llama_cpp_tag  = $LLAMA_TAG
   llama_swap_tag = $SWAP_TAG
   backend        = $backend
+  cuda_build     = $(if ($cudaBuild) { $cudaBuild.component } else { $null })   # H4: which CUDA family was installed
+  cuda_driver    = $cudaDriver
+  cuda_toolkit   = $cudaToolkit
   profile        = $profileId
   ram_tier       = $ramTier
   big_ram        = $bigRam

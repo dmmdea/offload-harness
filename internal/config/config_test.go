@@ -213,6 +213,8 @@ func pathFieldJSONNames(t *testing.T) []string {
 		"ffmpeg_path", "media_dir", "svg_dir",
 		"imagegen_script", "node_path", "comfy_dir",
 		"videogen_script", "voicegen_script", "musicgen_script", "gpu_lock_path",
+		"voicegen_ref", "voicegen_ft_model", "voicegen_ft_base_dir", "voicegen_ft_ref",
+		"edit_python", "gimp_console_path",
 		"cache_path", "ledger_path",
 		"thresholds_path", "tier_overrides_path", "router_weights_path",
 		"confhead_path", "router_labels_path", "confhead_labels_path",
@@ -252,5 +254,40 @@ func TestPathFieldsCoverEveryPathTypedStructField(t *testing.T) {
 		if !enumerated[ptr] {
 			t.Errorf("path-typed field %s (json %q) missing from pathFields — tilde expansion would skip it", f.Name, tag)
 		}
+	}
+}
+
+func TestVoiceConfigDefaultsInert(t *testing.T) {
+	c := Default()
+	if c.VoiceGenRef != "" || c.VoiceGenFTModel != "" || c.VoiceGenFTBaseDir != "" || c.VoiceGenFTRef != "" {
+		t.Errorf("FT/ref path defaults must be empty (model-agnostic; empty=defer); got ref=%q model=%q base=%q ftref=%q",
+			c.VoiceGenRef, c.VoiceGenFTModel, c.VoiceGenFTBaseDir, c.VoiceGenFTRef)
+	}
+	if c.VoiceGenFTTemperature != 0 || c.VoiceGenFTCFGWeight != 0 || c.VoiceGenFTExaggeration != 0 || c.VoiceGenFTRepetitionPenalty != 0 {
+		t.Error("FT recipe knobs must default 0 (worker default; tuned values live in per-machine config)")
+	}
+}
+
+func TestVoiceConfigRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cfg.json")
+	js := `{"voicegen_ref":"/r/gen.wav","voicegen_ft_model":"/m/merged.safetensors",` +
+		`"voicegen_ft_base_dir":"/m/base","voicegen_ft_ref":"/r/dan.wav","voicegen_ft_lang":"es",` +
+		`"voicegen_ft_temperature":0.6,"voicegen_ft_cfg_weight":0.5,"voicegen_ft_exaggeration":0.6,` +
+		`"voicegen_ft_repetition_penalty":1.2}`
+	if err := os.WriteFile(p, []byte(js), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.VoiceGenRef != "/r/gen.wav" || c.VoiceGenFTModel != "/m/merged.safetensors" ||
+		c.VoiceGenFTBaseDir != "/m/base" || c.VoiceGenFTRef != "/r/dan.wav" || c.VoiceGenFTLang != "es" {
+		t.Errorf("string keys did not round-trip: %+v", c)
+	}
+	if c.VoiceGenFTTemperature != 0.6 || c.VoiceGenFTCFGWeight != 0.5 ||
+		c.VoiceGenFTExaggeration != 0.6 || c.VoiceGenFTRepetitionPenalty != 1.2 {
+		t.Errorf("recipe knobs did not round-trip: %+v", c)
 	}
 }

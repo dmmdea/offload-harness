@@ -106,6 +106,12 @@ type Config struct {
 	// "RealVisXL_V5.0_fp16.safetensors" (SDXL) or "hidream_o1_image_dev_mxfp8.safetensors"
 	// (HiDream, a DiT). Empty = the script's default.
 	ImageGenCkpt string `json:"imagegen_ckpt,omitempty"`
+	// ImageGenFamily selects the model-correct render graph for this machine's
+	// checkpoint: "" = generic SDXL-shaped graph; "hidream-o1" / "hidream-o1-dev" =
+	// the official HiDream-O1 pixel-space graph (ModelNoiseScale, patch-seam
+	// smoothing, SamplerCustom stack, native 2048). Quality-first: a DiT on the
+	// generic graph produces measurable 32px patch blocking.
+	ImageGenFamily string `json:"imagegen_family,omitempty"`
 	// ImageGenVAE is the standalone VAE filename, or "builtin" to decode with the VAE
 	// the CHECKPOINT LOADER supplies. "builtin" is REQUIRED for HiDream: that
 	// checkpoint carries no VAE weights (it is pixel-space), so a standalone
@@ -127,6 +133,27 @@ type Config struct {
 	// VoiceGenScript is the path to render/tts.mjs (Chatterbox TTS; comfyManaged:false).
 	// It serves generate_audio kind=voice. Empty = voice defers.
 	VoiceGenScript string `json:"voicegen_script,omitempty"`
+	// VoiceGenRef is the default reference clip for the GENERALIST voice path (es-MX
+	// zero-shot clone). Empty = Chatterbox's built-in voice. Used only when the request
+	// has no "clone" param. Per-machine path — never a hardcoded voice.
+	VoiceGenRef string `json:"voicegen_ref,omitempty"`
+	// VoiceGenFTModel / VoiceGenFTBaseDir / VoiceGenFTRef locate a per-machine FINE-TUNED
+	// voice: the merged Chatterbox T3 safetensors, the base engine dir it loads from
+	// (ve/s3gen/t3_cfg + grapheme tokenizer.json), and a reference clip. All empty = this
+	// box has no fine-tuned voice, so voice=finetuned defers. Shared code ships NO path.
+	VoiceGenFTModel   string `json:"voicegen_ft_model,omitempty"`
+	VoiceGenFTBaseDir string `json:"voicegen_ft_base_dir,omitempty"`
+	VoiceGenFTRef     string `json:"voicegen_ft_ref,omitempty"`
+	// VoiceGenFTLang is metadata/record for the fine-tuned voice (e.g. "es"). The FT
+	// English-engine path does NOT thread language_id; kept for record + future use.
+	VoiceGenFTLang string `json:"voicegen_ft_lang,omitempty"`
+	// VoiceGenFT{Temperature,CFGWeight,Exaggeration,RepetitionPenalty} are the per-machine
+	// generate() recipe for the fine-tuned voice. 0 = no flag passed (the worker's own
+	// default). The tuned values live only in this machine's config, never in shared code.
+	VoiceGenFTTemperature       float64 `json:"voicegen_ft_temperature,omitempty"`
+	VoiceGenFTCFGWeight         float64 `json:"voicegen_ft_cfg_weight,omitempty"`
+	VoiceGenFTExaggeration      float64 `json:"voicegen_ft_exaggeration,omitempty"`
+	VoiceGenFTRepetitionPenalty float64 `json:"voicegen_ft_repetition_penalty,omitempty"`
 	// MusicGenScript is the path to the ACE-Step music worker (render/comfy-music.mjs,
 	// ComfyUI). It serves generate_audio kind=music. Default render/comfy-music.mjs (the
 	// B3 worker); set "" to disable (music defers) if the ACE-Step checkpoint isn't present.
@@ -149,6 +176,23 @@ type Config struct {
 	VideoGenUpscaleModel  string `json:"videogen_upscale_model,omitempty"`
 	VideoGenUpscaleWidth  int    `json:"videogen_upscale_width,omitempty"`
 	VideoGenUpscaleHeight int    `json:"videogen_upscale_height,omitempty"`
+	// EditPython is the PIL engine for edit_image (a python with Pillow). Empty =
+	// derive <comfy_dir>/.venv python (mediaops.ResolveEditPython); unresolvable =
+	// edit ops defer. GimpConsolePath is the gimp-console binary for flatten_design
+	// (.xcf/.psd -> flat raster + layer list); empty = that op defers. Both are pure
+	// CPU (no GPU lock). EditTimeoutSec bounds one edit/media op (default 300).
+	EditPython      string `json:"edit_python,omitempty"`
+	GimpConsolePath string `json:"gimp_console_path,omitempty"`
+	EditTimeoutSec  int    `json:"edit_timeout_sec,omitempty"`
+	// VideoGenUnetHigh / VideoGenUnetLow / VideoGenTextEncoder bind THIS machine's Wan 2.2
+	// expert weights + text encoder by filename (quality-first weight binding — e.g. a box
+	// with the VRAM/RAM headroom names fp8_scaled/fp16 files instead of the render script's
+	// Q4 GGUF defaults). Empty = the render script's defaults, exactly as before. The loader
+	// is chosen by extension in the script (.gguf vs .safetensors); no model name is baked
+	// into shared code.
+	VideoGenUnetHigh    string `json:"videogen_unet_high,omitempty"`
+	VideoGenUnetLow     string `json:"videogen_unet_low,omitempty"`
+	VideoGenTextEncoder string `json:"videogen_text_encoder,omitempty"`
 	// AudioGenTimeoutSec bounds one audio synthesis (TTS or ACE-Step). Default 720 (12min).
 	AudioGenTimeoutSec int `json:"audiogen_timeout_sec,omitempty"`
 	// VideoGenWaitMs is how long a queued video job waits for the single GPU slot before
@@ -291,66 +335,76 @@ func Default() Config {
 	home, _ := os.UserHomeDir()
 	base := filepath.Join(home, ".local-offload")
 	return Config{
-		Endpoint:                  "http://127.0.0.1:11436",
-		CompletionPath:            "/v1/chat/completions", // chat route: server applies the Gemma template; we pass a raw "grammar" field
-		Model:                     "offload-e4b",
-		TriageModel:               "gemma4-e2b", // fast tier for triage/classify
-		EscalationModel:           "gemma4-26b-a4b", // MoE escalation tier (experts in RAM via --cpu-moe); part of the served offload family.
-		ReasoningModel:            "gemma4-26b-a4b", // terminal local reasoning tier (think-wrapped grammar) before defer-to-cloud. "" disables.
-		VisionModel:               "", // opt-in: set the machine's VLM alias (empty = vision defers, no phantom)
-		VisionMaxImageBytes:       6000000,      // ~6MB cap per image
-		OCRMaxTokens:              1024,         // default OCR output cap; raise per-machine for dense docs
-		VideoFPS:                  2.0,
-		VideoMaxFrames:            12,
-		VideoFrameWidth:           512,
-		FFmpegPath:                "ffmpeg",
-		STTModel:                  "whisper-stt",
-		STTModelHQ:                "", // opt-in: an accuracy STT tier alias (empty = hq falls back to STTModel)
-		STTLanguage:               "", // auto-detect unless overridden per call
-		STTVAD:                    true,
-		STTMaxInlineSegments:      120,
-		STTUnloadAfter:            true,
-		STTRequestTimeoutSec:      1800,
-		MediaDir:                  filepath.Join(base, "media"),
-		SVGDir:                    filepath.Join(base, "svg"),
-		ImageGenScript:            "",
-		NodePath:                  "node",
-		ComfyDir:                  "C:/ComfyUI",
-		ImageGenTimeoutSec:        720,
-		VideoGenScript:            "render/comfy-video.mjs",
-		VoiceGenScript:            "render/tts.mjs",
-		MusicGenScript:            "render/comfy-music.mjs", // B3 ACE-Step music worker; "" => music defers
-		VideoGenTimeoutSec:        1500,
-		AudioGenTimeoutSec:        720,
-		VideoGenWaitMs:            1200000, // 20min — video is the hero job
-		AudioGenWaitMs:            120000,  // 2min — a queued TTS defers fast, never starved by a long video
-		GPULockPath:               "",      // runners' default (GPU_LOCK env, else <tmpdir>/local-offload-gpu.lock)
-		VisionGPUWaitSec:          90,      // LO-1: bounded wait for the gen lock before a vision call defers
-		MemoryStack:               []string{"embeddinggemma", "bge-reranker-v2-m3"},
-		EmbedModelName:            "embeddinggemma", // explicit; reorder-proof (not MemoryStack position)
-		Temperature:               0,
-		MaxRetries:                1,
-		ClassifyMinConfidence:     0.45,
-		ConfidenceMarginThreshold: 0.35,
-		MaxInputChars:             24000, // ~6k tokens, well under ctx 8192
-		CachePath:                 filepath.Join(base, "cache.db"),
-		LedgerPath:                filepath.Join(base, "ledger.jsonl"), // append-only JSONL (concurrent read/append)
-		ThresholdsPath:            filepath.Join(base, "thresholds.json"),
-		TierOverridesPath:         filepath.Join(base, "tier_overrides.json"),
-		RouterWeightsPath:         filepath.Join(base, "router-weights.json"),
-		RouterLabelsPath:          filepath.Join(base, "router-labels.jsonl"),
-		ConfHeadPath:              filepath.Join(base, "confhead-weights.json"),
-		ConfHeadLabelsPath:        filepath.Join(base, "confhead-labels.jsonl"),
-		ConfHeadThresholdsPath:    filepath.Join(base, "confhead-thresholds.json"),
-		ExemplarsDir:              filepath.Join(base, "exemplars"),
-		ExemplarShots:             0, // off until the pool is built + measured
-		AutoHeal:                  false,
-		OpusInputPricePerMTok:     15.0,
-		RequestTimeoutSec:         120,
-		ShadowEnabled:             false,
-		ShadowRate:                0.10,
-		ShadowQueuePath:           filepath.Join(base, "shadow-queue.jsonl"),
-		SummarizeSimThreshold:     0.80,
+		Endpoint:                    "http://127.0.0.1:11436",
+		CompletionPath:              "/v1/chat/completions", // chat route: server applies the Gemma template; we pass a raw "grammar" field
+		Model:                       "offload-e4b",
+		TriageModel:                 "gemma4-e2b",     // fast tier for triage/classify
+		EscalationModel:             "gemma4-26b-a4b", // MoE escalation tier (experts in RAM via --cpu-moe); part of the served offload family.
+		ReasoningModel:              "gemma4-26b-a4b", // terminal local reasoning tier (think-wrapped grammar) before defer-to-cloud. "" disables.
+		VisionModel:                 "",               // opt-in: set the machine's VLM alias (empty = vision defers, no phantom)
+		VisionMaxImageBytes:         6000000,          // ~6MB cap per image
+		OCRMaxTokens:                1024,             // default OCR output cap; raise per-machine for dense docs
+		VideoFPS:                    2.0,
+		VideoMaxFrames:              12,
+		VideoFrameWidth:             512,
+		FFmpegPath:                  "ffmpeg",
+		STTModel:                    "whisper-stt",
+		STTModelHQ:                  "", // opt-in: an accuracy STT tier alias (empty = hq falls back to STTModel)
+		STTLanguage:                 "", // auto-detect unless overridden per call
+		STTVAD:                      true,
+		STTMaxInlineSegments:        120,
+		STTUnloadAfter:              true,
+		STTRequestTimeoutSec:        1800,
+		MediaDir:                    filepath.Join(base, "media"),
+		SVGDir:                      filepath.Join(base, "svg"),
+		ImageGenScript:              "",
+		NodePath:                    "node",
+		ComfyDir:                    "C:/ComfyUI",
+		ImageGenTimeoutSec:          720,
+		VideoGenScript:              "render/comfy-video.mjs",
+		VoiceGenScript:              "render/tts.mjs",
+		VoiceGenRef:                 "", // generalist default ref clip: per-machine, never shipped
+		VoiceGenFTModel:             "", // fine-tuned voice: all empty => voice=finetuned defers
+		VoiceGenFTBaseDir:           "",
+		VoiceGenFTRef:               "",
+		VoiceGenFTLang:              "",
+		VoiceGenFTTemperature:       0, // 0 = worker default; tuned recipe lives per-machine
+		VoiceGenFTCFGWeight:         0,
+		VoiceGenFTExaggeration:      0,
+		VoiceGenFTRepetitionPenalty: 0,
+		MusicGenScript:              "render/comfy-music.mjs", // B3 ACE-Step music worker; "" => music defers
+		VideoGenTimeoutSec:          1500,
+		AudioGenTimeoutSec:          720,
+		EditTimeoutSec:              300, // edit_image / media ops (CPU; no GPU lock)
+		VideoGenWaitMs:              1200000, // 20min — video is the hero job
+		AudioGenWaitMs:              120000,  // 2min — a queued TTS defers fast, never starved by a long video
+		GPULockPath:                 "",      // runners' default (GPU_LOCK env, else <tmpdir>/local-offload-gpu.lock)
+		VisionGPUWaitSec:            90,      // LO-1: bounded wait for the gen lock before a vision call defers
+		MemoryStack:                 []string{"embeddinggemma", "bge-reranker-v2-m3"},
+		EmbedModelName:              "embeddinggemma", // explicit; reorder-proof (not MemoryStack position)
+		Temperature:                 0,
+		MaxRetries:                  1,
+		ClassifyMinConfidence:       0.45,
+		ConfidenceMarginThreshold:   0.35,
+		MaxInputChars:               24000, // ~6k tokens, well under ctx 8192
+		CachePath:                   filepath.Join(base, "cache.db"),
+		LedgerPath:                  filepath.Join(base, "ledger.jsonl"), // append-only JSONL (concurrent read/append)
+		ThresholdsPath:              filepath.Join(base, "thresholds.json"),
+		TierOverridesPath:           filepath.Join(base, "tier_overrides.json"),
+		RouterWeightsPath:           filepath.Join(base, "router-weights.json"),
+		RouterLabelsPath:            filepath.Join(base, "router-labels.jsonl"),
+		ConfHeadPath:                filepath.Join(base, "confhead-weights.json"),
+		ConfHeadLabelsPath:          filepath.Join(base, "confhead-labels.jsonl"),
+		ConfHeadThresholdsPath:      filepath.Join(base, "confhead-thresholds.json"),
+		ExemplarsDir:                filepath.Join(base, "exemplars"),
+		ExemplarShots:               0, // off until the pool is built + measured
+		AutoHeal:                    false,
+		OpusInputPricePerMTok:       15.0,
+		RequestTimeoutSec:           120,
+		ShadowEnabled:               false,
+		ShadowRate:                  0.10,
+		ShadowQueuePath:             filepath.Join(base, "shadow-queue.jsonl"),
+		SummarizeSimThreshold:       0.80,
 
 		AgentTrajectoryCaptureEnabled: false,
 		AgentTrajectoryRate:           0.10,
@@ -403,6 +457,8 @@ func pathFields(c *Config) []*string {
 		&c.FFmpegPath, &c.MediaDir, &c.SVGDir,
 		&c.ImageGenScript, &c.NodePath, &c.ComfyDir,
 		&c.VideoGenScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath,
+		&c.VoiceGenRef, &c.VoiceGenFTModel, &c.VoiceGenFTBaseDir, &c.VoiceGenFTRef,
+		&c.EditPython, &c.GimpConsolePath,
 		&c.CachePath, &c.LedgerPath,
 		&c.ThresholdsPath, &c.TierOverridesPath, &c.RouterWeightsPath,
 		&c.ConfHeadPath, &c.RouterLabelsPath, &c.ConfHeadLabelsPath,

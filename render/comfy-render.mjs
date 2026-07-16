@@ -29,6 +29,7 @@
 //   node comfy-render.mjs <out.png> --graph my-workflow.json [--api ...]
 
 import { readFileSync, writeFileSync } from "node:fs";
+import { buildHiDreamO1 } from "./wf-hidream-o1.mjs";
 
 const argv = process.argv.slice(2);
 const pos = [];
@@ -50,6 +51,27 @@ let height = Number(pos[4] || flags.height || 1024);
 
 if (flags.graph) {
   graph = JSON.parse(readFileSync(flags.graph, "utf8"));
+} else if (flags.family === "hidream-o1" || flags.family === "hidream-o1-dev") {
+  // Model-family-correct graph (quality-first): the generic SDXL-shaped KSampler graph
+  // is WRONG for HiDream-O1 (pixel-space DiT — wrong latent node, missing ModelNoiseScale
+  // + patch-seam smoothing, off-distribution below ~4MP). --family selects the graph the
+  // model was actually shipped with; which family a checkpoint is belongs to per-machine
+  // config (imagegen_family), never shared code.
+  const positive = pos[1] || flags.prompt || "";
+  if (!positive) { console.error("error: a prompt is required (positional or --prompt), unless you pass --graph"); process.exit(2); }
+  if (!flags.ckpt && !process.env.COMFY_CKPT) { console.error("error: --family hidream-o1 requires --ckpt (the o1 checkpoint filename)"); process.exit(2); }
+  // O1 native resolution is 2048x2048 (trained ~4MP): positional/flag dims override,
+  // otherwise the builder's native default applies — NOT the SDXL 1024 default.
+  width = Number(pos[3] || flags.width || 2048);
+  height = Number(pos[4] || flags.height || 2048);
+  graph = buildHiDreamO1({
+    prompt: positive, negative: flags.negative || "",
+    ckpt: flags.ckpt || process.env.COMFY_CKPT,
+    variant: flags.family === "hidream-o1-dev" ? "dev" : "base",
+    width, height, seed,
+    steps: Number(flags.steps || 0), cfg: Number(flags.cfg || 0),
+    sampler: flags.sampler || "",
+  });
 } else {
   const positive = pos[1] || flags.prompt || "";
   if (!positive) { console.error("error: a prompt is required (positional or --prompt), unless you pass --graph"); process.exit(2); }
@@ -99,7 +121,12 @@ async function main() {
   });
   console.log("queued", prompt_id, flags.graph ? `(graph: ${flags.graph})` : `seed ${seed} ${width}x${height}`);
   let img = null;
-  for (let i = 0; i < 180; i++) { // up to ~6 min (low-VRAM first run is slow)
+  // Poll budget: quality-first renders (e.g. HiDream-O1 bf16 at native 2048, 40-step
+  // SDE, RAM-offloaded) legitimately run far beyond the old ~6-min ceiling. Default
+  // 30 min; the Go harness passes COMFY_WAIT_SEC aligned to its own timeout and its
+  // process-tree kill remains the hard stop.
+  const waitSec = Number(flags["wait-sec"] || process.env.COMFY_WAIT_SEC || 1800);
+  for (let i = 0; i < Math.max(1, Math.ceil(waitSec / 2)); i++) {
     await new Promise(r => setTimeout(r, 2000));
     let hist; try { hist = await j(`${API}/history/${prompt_id}`); } catch { continue; }
     const h = hist[prompt_id];

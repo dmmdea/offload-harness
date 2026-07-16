@@ -55,12 +55,21 @@ const (
 	// through internal/gpugen (shared GPU lock + process-tree-kill). Returns
 	// {audio_path, kind, seed}.
 	TaskGenerateAudio TaskType = "generate_audio"
+	// TaskEditImage applies a deterministic edit pipeline (crop/resize/convert/
+	// composite/text, plus GIMP flatten_design for .xcf/.psd) via internal/mediaops.
+	// Pure CPU — NO GPU lock, runs in parallel with renders. Own branch in
+	// pipeline.Run. Returns {image_path, width, height, ops_applied, layers?}.
+	TaskEditImage TaskType = "edit_image"
+	// TaskMedia runs one ffmpeg av operation (trim/concat/extract_frames/convert/
+	// mux_audio/probe) via internal/mediaops. Pure CPU — NO GPU lock. Own branch
+	// in pipeline.Run. Returns op-specific JSON.
+	TaskMedia TaskType = "media"
 )
 
 // Valid reports whether t is a known task type.
 func (t TaskType) Valid() bool {
 	switch t {
-	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage, TaskGenerateSVG, TaskGenerateVideo, TaskGenerateAudio:
+	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage, TaskGenerateSVG, TaskGenerateVideo, TaskGenerateAudio, TaskEditImage, TaskMedia:
 		return true
 	}
 	return false

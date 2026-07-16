@@ -37,7 +37,7 @@ func TestRecallMergesUsersSortsAndDedupes(t *testing.T) {
 		case "local-agent":
 			_, _ = io.WriteString(w, `{"results":[{"id":"a","memory":"agent past run","score":"0.9"},{"id":"dup","memory":"shared","score":"0.5"}]}`)
 		case "dmmdea":
-			_, _ = io.WriteString(w, `{"results":[{"id":"b","memory":"daniel fact","score":"0.7"},{"id":"dup","memory":"shared","score":"0.5"}]}`)
+			_, _ = io.WriteString(w, `{"results":[{"id":"b","memory":"user fact","score":"0.7"},{"id":"dup","memory":"shared","score":"0.5"}]}`)
 		default:
 			_, _ = io.WriteString(w, `{"results":[]}`)
 		}
