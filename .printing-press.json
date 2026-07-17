@@ -1,13 +1,33 @@
 {
   "api_name": "local-offload",
   "cli_name": "local-offload",
-  "version": "0.1.0",
+  "version": "0.17.0",
   "printing_press_version": "hand-built-2026-06-12",
   "generated_at": "2026-06-12",
-  "description": "Local offload harness — delegate summarize/classify/extract/triage to a free local Gemma-4-E4B model via llama.cpp; MCP + CLI; never calls cloud (defers to Claude).",
+  "description": "Local offload harness — delegate grunt work (summarize/classify/extract/triage, plus vision, OCR, transcription and media generation) to a free local Gemma-family cascade via llama.cpp; MCP + CLI; the cascade never calls cloud and defers to the caller instead. The opt-in offload_nim tool is the only remote surface.",
   "module": "github.com/dmmdea/offload-harness",
   "mcp": {
     "transport": "stdio",
-    "tools": ["offload_summarize", "offload_classify", "offload_extract", "offload_triage"]
+    "tools": [
+      "offload_status",
+      "offload_summarize",
+      "offload_classify",
+      "offload_extract",
+      "offload_triage",
+      "offload_vqa",
+      "offload_ocr",
+      "offload_extract_image",
+      "offload_assess_image",
+      "offload_video_describe",
+      "offload_transcribe",
+      "offload_generate_image",
+      "offload_generate_svg",
+      "offload_generate_audio",
+      "offload_generate_video",
+      "offload_edit_image",
+      "offload_media",
+      "offload_nim",
+      "agent_run"
+    ]
   }
 }
