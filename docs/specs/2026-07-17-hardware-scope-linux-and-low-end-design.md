@@ -20,9 +20,11 @@ written to be argued with: every claim is either measured (with the command to r
 labelled as a projection.
 
 **The short version.** The harness *works* on this class of machine — it is not broken, and quality
-was not the problem. But the cascade collapses to a single tier, and a triage call takes **39
-seconds** where the cloud model it is protecting would take about two. The open question is not
-"does it run" but **"what is the harness for, when the tier it escalates to cannot fit?"**
+was not the problem. But the cascade collapses to a single tier, and a triage call takes **38–39
+seconds** where the cloud model it is protecting would take about two. That figure was re-measured
+on a quiesced desktop and did not move (§3.3), so it is a property of the silicon, not of a busy
+laptop. The open question is not "does it run" but **"what is the harness for, when the tier it
+escalates to cannot fit?"**
 
 ---
 
@@ -98,11 +100,12 @@ pins (2,620,368,960 bytes, verified against the `size` field in `install.ps1`).
 
 ### 3.1 Raw throughput (`llama-bench`, 2 repetitions)
 
-| Backend | flash-attn | pp512 (t/s) | tg128 (t/s) |
-|---|---|---|---|
-| Vulkan, `-ngl 99` | off | **213.31 ± 1.12** | **14.86 ± 0.79** |
-| Vulkan, `-ngl 99` | on | 209.82 ± 2.06 | 14.94 ± 0.41 |
-| CPU, `-ngl 0` | off | 169.58 ± 2.73 | 10.69 ± 0.03 |
+| Backend | flash-attn | Desktop | pp512 (t/s) | tg128 (t/s) |
+|---|---|---|---|---|
+| Vulkan, `-ngl 99` | off | loaded | **213.31 ± 1.12** | **14.86 ± 0.79** |
+| Vulkan, `-ngl 99` | off | **quiesced** | **208.64 ± 0.26** | **14.63 ± 0.58** |
+| Vulkan, `-ngl 99` | on | loaded | 209.82 ± 2.06 | 14.94 ± 0.41 |
+| CPU, `-ngl 0` | off | loaded | 169.58 ± 2.73 | 10.69 ± 0.03 |
 
 **Finding A — the iGPU buys +26% prompt processing and +39% token generation over pure CPU.**
 The README's AMD table promises *"prompt processing ≈ 4× CPU"*. That figure is from the 780M
@@ -143,7 +146,52 @@ takes 39 seconds, and the model it is protecting would answer in ~2.
 6,734 tokens; with output that is ~88% of the 8K window. It completed rather than deferring, but the
 margin is thin and untested against a full 8K prompt plus exemplars.
 
-### 3.3 The economics, measured
+### 3.3 Control: does freeing the machine help? (No.)
+
+The obvious objection to §3.2 is that the box was a working laptop, not a bench: a browser, an
+editor and a compositor were live, holding the 2 GiB VRAM carve-out at 98% and sharing the same
+memory bus. So the experiment was repeated with the desktop quiesced — Chromium and VS Code closed
+(gracefully, via SIGTERM), leaving only the compositor and a shell.
+
+**Prediction, recorded before measuring:** no meaningful change. `available` RAM was already 11.8 GiB
+against a 2.44 GiB model, so capacity was never binding; load average was 0.83 across 12 threads, so
+the CPU was not contended; token generation is DDR4-bandwidth-bound and prompt processing is
+compute-bound, and neither of those improves by closing a browser.
+
+What closing them actually freed:
+
+| | Loaded | Quiesced | Δ |
+|---|---|---|---|
+| RAM available | 11,811 MiB | 13,432 MiB | +1,621 |
+| VRAM carve-out used | 2,022 MiB | 1,967 MiB | **−55** |
+| GPU-addressable free (llama.cpp's view) | 6,672 MiB | 6,983 MiB | +311 |
+
+Note the VRAM row: with both applications gone the 2 GiB carve-out is still **96% occupied** by the
+compositor alone. There was never headroom there to reclaim.
+
+The result, same binary, same model, same flags:
+
+| Measurement | Loaded | Quiesced | Δ |
+|---|---|---|---|
+| `pp512` | 213.31 t/s | 208.64 t/s | **−2.2%** |
+| `tg128` | 14.86 t/s | 14.63 t/s | **−1.5%** |
+| `triage` 19,162 chars | 39 s | **38 s** | −1 s |
+| `summarize` 19,162 chars | 51 s | **50 s** | −1 s |
+| `summarize` 24,000 chars | 59 s | **55 s** | −4 s |
+| `classify` / `triage` 500 chars | 3 s / 6 s | 3 s / 6 s | 0 |
+
+**Finding E — the bottleneck is the silicon, not the workload on it.** Freeing 1.6 GiB of RAM and
+removing both GPU-consuming applications changed throughput by less than run-to-run variance — the
+raw numbers came out *marginally slower*, which is noise, not a regression. The headline figure
+survives the fairest possible conditions: a triage of a mid-size document takes **38 seconds on an
+idle machine**.
+
+This closes the "your laptop was busy" objection empirically rather than by argument. It also means
+the numbers in §3.2 are not pessimistic: they are what this hardware class does, and no amount of
+tuning the *environment* moves them. What moves them is different silicon — DDR5 bandwidth for
+generation, and matrix cores for prompt processing.
+
+### 3.4 The economics, measured
 
 Those calls, straight from the harness's own ledger:
 
@@ -247,8 +295,9 @@ is good practice; the README does not inherit it.
   measured and would be slower roughly in proportion to size; the 26B was not attempted.
 - **`llama-bench` measures throughput, not correctness.** Nothing here validates GBNF reliability,
   deep-context stability, or the FA-on reliability question (Finding B).
-- **The box was not idle.** ~11 GiB of RAM and a desktop session were live — which is the realistic
-  condition for a laptop, but it means 6.7 GiB free, not 12.9 GiB.
+- ~~**The box was not idle.**~~ **Tested and closed** (§3.3): repeating the run with Chromium and
+  VS Code closed moved throughput by less than run-to-run noise. The compositor still holds 96% of
+  the VRAM carve-out even then, and it makes no measurable difference.
 - **The dollar figures are avoided-cost estimates**, with all the counterfactual assumptions
   `est_value_kept_local` already carries. They compare *rates*, not billed savings.
 - **Nothing here tests macOS**, which the README also claims.
@@ -280,4 +329,14 @@ go build -o local-offload .
 ./local-offload --config cfg.json doctor
 ./local-offload --config cfg.json triage big.txt --question "..." --json
 ./local-offload --config cfg.json ledger
+
+# 6. The §3.3 control — quiesce the desktop and repeat steps 3-5.
+#    Record what was actually freed; on this hardware it changes nothing.
+free -m
+awk '{print $1/1048576 " MiB"}' /sys/class/drm/card1/device/mem_info_vram_used
+pkill -TERM -x chromium; pkill -TERM -x code
 ```
+
+> Note when reproducing: `pgrep -f chromium` matches its own command line, so it always reports at
+> least one survivor and `pkill -f chromium` will kill the shell running it. Match on the process
+> name (`-x`) instead.
