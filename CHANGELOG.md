@@ -4,6 +4,11 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+> **A note on `docs/superpowers/…` paths.** Some entries cite a design spec or an
+> evidence file under `docs/superpowers/`. Those are authored in the private
+> development repo and are **not published here**, so the paths are provenance
+> pointers rather than links you can follow from this repository.
+
 ## [0.17.0] - 2026-07-16
 
 ### Added
