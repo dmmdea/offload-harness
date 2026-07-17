@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -33,6 +36,62 @@ func TestVersionSourcesAgree(t *testing.T) {
 	}
 	if want := "## [" + fileVer + "]"; !strings.Contains(string(cl), want) {
 		t.Errorf("CHANGELOG.md has no %q entry for the current VERSION — add a changelog entry when you bump", want)
+	}
+
+	// .printing-press.json is the fourth version source and the only one the
+	// checks above never covered: it sat at 0.1.0 while VERSION reached 0.17.0.
+	var manifest struct {
+		Version string `json:"version"`
+	}
+	readManifest(t, &manifest)
+	if manifest.Version != fileVer {
+		t.Errorf("version drift: .printing-press.json version = %q but VERSION file = %q — bump it too", manifest.Version, fileVer)
+	}
+}
+
+// TestPrintingPressManifestListsEveryTool keeps the manifest's advertised MCP
+// surface honest. It listed the original four text tools long after the server
+// grew to nineteen, so anything reading the manifest instead of the running
+// server (a catalog, an installer, a doc generator) saw a harness with no
+// vision, media, or agent capability at all.
+func TestPrintingPressManifestListsEveryTool(t *testing.T) {
+	var manifest struct {
+		MCP struct {
+			Tools []string `json:"tools"`
+		} `json:"mcp"`
+	}
+	readManifest(t, &manifest)
+
+	src, err := os.ReadFile(filepath.Join("internal", "mcpserver", "mcpserver.go"))
+	if err != nil {
+		t.Fatalf("read mcpserver.go: %v", err)
+	}
+	registered := regexp.MustCompile(`(?m)^\s+Name:\s+"([a-z_]+)",`).FindAllStringSubmatch(string(src), -1)
+	if len(registered) == 0 {
+		t.Fatal("found no registered tool names in mcpserver.go — the scrape pattern needs updating")
+	}
+
+	var want []string
+	for _, m := range registered {
+		want = append(want, m[1])
+	}
+	got := manifest.MCP.Tools
+	sort.Strings(want)
+	sort.Strings(got)
+
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("manifest MCP tools drifted from the server's registrations:\n manifest: %v\n   server: %v", got, want)
+	}
+}
+
+func readManifest(t *testing.T, into any) {
+	t.Helper()
+	raw, err := os.ReadFile(".printing-press.json")
+	if err != nil {
+		t.Fatalf("read .printing-press.json: %v", err)
+	}
+	if err := json.Unmarshal(raw, into); err != nil {
+		t.Fatalf("parse .printing-press.json: %v", err)
 	}
 }
 
