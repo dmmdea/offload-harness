@@ -557,9 +557,70 @@ function Merge-ConfigSeed {
   return ($cfg | ConvertTo-Json -Depth 8)
 }
 
+# ---------------------------------------------------------------------------
+# run-graph (Task 12): ensure the manifest-satisfier tooling in the ComfyUI venv.
+# offload_run_graph provisions an arbitrary workflow's node manifest by shelling to
+# ComfyUI-Manager's cm-cli.py; that Manager clone is the REQUIRED tool and a clone
+# failure IS surfaced (throws). comfy-cli is an OPTIONAL convenience — on some boxes
+# its wheel deps (pydantic-core) have no prebuilt wheel and no Rust toolchain to build
+# from, so its install is BEST-EFFORT: a failure logs WARN and continues, never fails
+# the setup step. run-graph does not depend on comfy-cli; a missing satisfier makes
+# run-graph DEFER SATISFIER_UNAVAILABLE at call time (a clean defer, never a crash).
+# All side effects are injected scriptblocks so the whole step is unit-testable with
+# zero network/venv (setup/tests/install-rungraph-deps.test.ps1). Returns a "; "-joined
+# log of what it did/skipped.
+# ---------------------------------------------------------------------------
+function Ensure-RunGraphDeps {
+  param(
+    [string]$ComfyPy, [string]$ComfyDir,
+    [scriptblock]$HasComfyCli = { param($py) & $py -m pip show comfy-cli 2>$null; return ($LASTEXITCODE -eq 0) },
+    [scriptblock]$HasManager  = { param($d)  Test-Path (Join-Path $d 'custom_nodes/ComfyUI-Manager') },
+    [scriptblock]$Pip         = { param($py) & $py -m pip install comfy-cli 2>&1 | Out-Null; if ($LASTEXITCODE -ne 0) { throw "pip install comfy-cli exit $LASTEXITCODE" } },
+    [scriptblock]$Clone       = { param($d)  git clone https://github.com/Comfy-Org/ComfyUI-Manager (Join-Path $d 'custom_nodes/ComfyUI-Manager') 2>&1 | Out-Null; if ($LASTEXITCODE -ne 0) { throw "git clone ComfyUI-Manager exit $LASTEXITCODE" } },
+    [scriptblock]$HasGitPython = { param($py) & $py -c 'import git' 2>$null; return ($LASTEXITCODE -eq 0) },
+    [scriptblock]$PipGitPython = { param($py) & $py -m pip install GitPython 2>&1 | Out-Null; if ($LASTEXITCODE -ne 0) { throw "pip install GitPython exit $LASTEXITCODE" } },
+    [scriptblock]$HasUv = { param($py) Test-Path (Join-Path (Split-Path $py) 'uv.exe') },
+    [scriptblock]$PipUv = { param($py) & $py -m pip install uv 2>&1 | Out-Null; if ($LASTEXITCODE -ne 0) { throw "pip install uv exit $LASTEXITCODE" } }
+  )
+  $log = @()
+  # comfy-cli: OPTIONAL. Best-effort install; a failure is a WARN, not a hard error.
+  if (& $HasComfyCli $ComfyPy) {
+    $log += 'SKIP comfy-cli (present)'
+  } else {
+    try { & $Pip $ComfyPy; $log += 'DO comfy-cli install' }
+    catch { $log += "WARN comfy-cli install failed (optional convenience; run-graph does not need it): $($_.Exception.Message)" }
+  }
+  # ComfyUI-Manager (cm-cli): REQUIRED for manifest satisfaction. A clone failure throws.
+  if (& $HasManager $ComfyDir) {
+    $log += 'SKIP ComfyUI-Manager (present)'
+  } else {
+    & $Clone $ComfyDir
+    $log += 'DO clone ComfyUI-Manager'
+  }
+  # GitPython: REQUIRED by cm-cli.py itself (`import git` — live finding 2026-07-17: a fresh
+  # Manager clone fails ModuleNotFoundError without it). Same required class as the clone.
+  if (& $HasGitPython $ComfyPy) {
+    $log += 'SKIP GitPython (present)'
+  } else {
+    & $PipGitPython $ComfyPy
+    $log += 'DO pip install GitPython'
+  }
+  # uv: REQUIRED by the run-graph pack satisfier (unified `uv pip compile` across all
+  # packs' requirements — the installed cm-cli has no --uv flag, so uv is driven
+  # directly; live finding 2026-07-17). Missing uv => run-graph defers SATISFIER_UNAVAILABLE.
+  if (& $HasUv $ComfyPy) {
+    $log += 'SKIP uv (present)'
+  } else {
+    & $PipUv $ComfyPy
+    $log += 'DO pip install uv'
+  }
+  return ($log -join '; ')
+}
+
 # Test seam: OFFLOAD_INSTALL_DOT_SOURCE=1 -> define the pure helpers above and
 # return before ANY main-flow work (no dirs, no transcript, no detection). Used
-# by setup/tests/install-cuda-build.test.ps1 + install-config-seed.test.ps1.
+# by setup/tests/install-cuda-build.test.ps1 + install-config-seed.test.ps1 +
+# install-rungraph-deps.test.ps1.
 # Same pattern as selftest.ps1's OFFLOAD_SELFTEST_DOT_SOURCE.
 if ($env:OFFLOAD_INSTALL_DOT_SOURCE -eq '1') { return }
 
@@ -886,6 +947,25 @@ Step 'harness config -> ~/.local-offload/config.json' `
     $noBomCfg = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($cfgDest, $cfgText, $noBomCfg)
   }
+
+# ---------------------------------------------------------------------------
+# Step 8b: run-graph satisfier tooling (best-effort). offload_run_graph provisions a
+# workflow's node manifest via ComfyUI-Manager's cm-cli; ensure it (REQUIRED) and
+# comfy-cli (OPTIONAL convenience) are present in the ComfyUI venv. Only runs when a
+# ComfyUI install is discoverable (COMFY_DIR override, else config default C:/ComfyUI)
+# — a box without ComfyUI is unaffected (run-graph then simply DEFERs
+# SATISFIER_UNAVAILABLE at call time, never crashes). A comfy-cli wheel-build failure
+# is a WARN and continues; a ComfyUI-Manager clone failure fails LOUD.
+# ---------------------------------------------------------------------------
+if ($env:COMFY_DIR) { $comfyDir = $env:COMFY_DIR } else { $comfyDir = 'C:/ComfyUI' }
+if ($env:COMFY_PY)  { $comfyPy  = $env:COMFY_PY }  else { $comfyPy  = Join-Path $comfyDir '.venv/Scripts/python.exe' }
+if (Test-Path $comfyDir) {
+  Write-Host "DO    run-graph deps (ComfyUI at $comfyDir)" -ForegroundColor Cyan
+  $rgLog = Ensure-RunGraphDeps -ComfyPy $comfyPy -ComfyDir $comfyDir
+  Write-Host "OK    run-graph deps: $rgLog" -ForegroundColor Green
+} else {
+  Write-Host "SKIP  run-graph deps (no ComfyUI at $comfyDir; offload_run_graph will DEFER SATISFIER_UNAVAILABLE, not crash)" -ForegroundColor DarkGray
+}
 
 # ---------------------------------------------------------------------------
 # R3.5: write the version manifest now that every component version is known.

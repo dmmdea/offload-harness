@@ -56,6 +56,7 @@ func TestAllHandlersSurfaceBadArguments(t *testing.T) {
 		{"assess_image", s.handleAssessImage, `{"image":9}`},
 		{"ocr", s.handleOCR, `{"image":{}}`},
 		{"generate_image", s.handleGenerateImage, `{"prompt":"p","width":"wide"}`},
+		{"inpaint_image", s.handleInpaintImage, `{"image":"a.png","mask":"m.png","prompt":"p","denoise":"deep"}`},
 		{"generate_svg", s.handleGenerateSVG, `{"kind":"gauge","spec":"not-an-object"}`},
 		{"generate_video", s.handleGenerateVideo, `{"prompt":"p","frames":"many"}`},
 		{"generate_audio", s.handleGenerateAudio, `{"text":"t","seconds":"ten"}`},
@@ -64,6 +65,7 @@ func TestAllHandlersSurfaceBadArguments(t *testing.T) {
 		{"status", s.handleStatus, `[1,2,3]`},
 		{"edit_image", s.handleEditImage, `{"image":1,"ops":[]}`},
 		{"media", s.handleMedia, `{"op":["not","a","string"]}`},
+		{"run_graph", s.handleRunGraph, `{"graph_path":123}`}, // wrong type → clean error, no panic
 		{"truncated json", s.handleSummarize, `{"text":"unterminated`},
 	}
 	for _, tc := range cases {

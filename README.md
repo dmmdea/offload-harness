@@ -120,6 +120,12 @@ offload-harness video-describe clip.mp4 --question "What happens here?" --json
 
 # Generate (free, local GPU)
 offload-harness generate-image "a product photo of a coffee mug on white" --negative "people, text, watermark"
+offload-harness generate-image --batch jobs.jsonl   # N prompts through ONE warm ComfyUI session (checkpoint loads once)
+offload-harness run-graph --graph wf.json --manifest m.json --out-dir out/   # arbitrary ComfyUI graph + self-provisioned node manifest
+offload-harness edit-image render.png --ops '[{"op":"mask_boxes","boxes":[{"x":620,"y":540,"width":820,"height":820}],"feather":6}]' --out mask.png   # build a white-on-black inpaint mask
+offload-harness edit-image render.png --ops '[{"op":"grade","levels":{"black":8,"white":248,"gamma":1.05},"wb":{"mode":"gray_world"}},{"op":"resize","width":1920},{"op":"finish"}]' --renditions '[{"width":1080,"format":"webp","suffix":"-ig"}]'   # grade -> resize -> delivery sharpen (+ export matrix)
+offload-harness edit-image template.xcf --ops '[{"op":"instantiate_design","set_text":{"Headline":"Hola Bogotá"},"replace_image":{"ProductShot":"D:/renders/watch.png"}},{"op":"resize","width":1080}]'   # GIMP template factory: new copy + swapped product, then PIL ops
+offload-harness inpaint-image render.png --mask mask.png --prompt "clean glossy dial, no writing"   # re-render ONLY the masked region (white = repaint)
 offload-harness generate-svg gauge '{"value":72,"max":100,"label":"Score","unit":"%"}'
 
 # Remote escalation (explicit, opt-in — NVIDIA NIM; needs NVIDIA_API_KEY for the free hosted catalog)
@@ -137,6 +143,21 @@ offload-harness stats                    # per-task ledger telemetry
 ```
 
 Input is a **file path** or `-` for stdin. Add `--json` for the full result object, `--select a,b,c` to keep only certain top-level fields, and `--compact` to minify. Configuration is read from `--config <path>` or `$LOCAL_OFFLOAD_CONFIG`.
+
+<details>
+<summary><b>Example: warm-batch image generation</b></summary>
+
+`generate-image --batch jobs.jsonl` renders every job through **one warm ComfyUI session** — the checkpoint loads once instead of once per image, and the zero-always-warm teardown (free VRAM, kill the spawned ComfyUI, release the GPU lock) runs at the **batch boundary**. One JSON object per line; `prompt` is required, everything else optional (`out`, `negative`, `width`, `height`, `steps`, `seed` — a missing seed is minted, a missing out defaults under the media dir):
+
+```jsonl
+{"prompt":"a red vintage bicycle against a white brick wall","seed":4242,"out":"C:/renders/bike.png"}
+{"prompt":"a green apple on a slate table, studio light","seed":99}
+{"prompt":"a paper sailboat on a calm pond at golden hour"}
+```
+
+The result is a summary: `{"count":3,"succeeded":3,"failed":0,"items":[{"out":...,"seed":...,"ok":true,"ms":...},...]}`. A single failed render is recorded in its item and does not abort the batch.
+
+</details>
 
 <details>
 <summary><b>Example: extract structured fields</b></summary>
@@ -212,10 +233,12 @@ Transport is **stdio**. Every tool returns the full result JSON — and a `{"def
 | `offload_video_describe` | `video`, `question` | Sample frames from a local video and answer → `{answer}`, or defer. |
 | `offload_transcribe` | `audio`, `language?`, `hq?`, `select?` | Transcribe local audio/video → `{gist, segments[], srt_path, ...}`, or defer. |
 | `offload_generate_image` | `prompt`, `negative?`, `width?`, `height?`, `steps?`, `seed?`, `out?` | Generate an image on the local GPU (ComfyUI; this machine's configured model at its highest-quality settings — e.g. HiDream-O1 bf16 via its official family graph at native 2048, or SDXL on smaller boxes) → `{image_path, ...}`, or defer. Quality-first: renders may take minutes by design. |
+| `offload_run_graph` | `graph_path`\|`graph_json`, `manifest_path?`\|`manifest_json?`, `out_dir?`, `reserve_vram?` | **Generic ComfyUI graph execution.** Run an arbitrary API-format graph in the same GPU-lock/zero-warm lifecycle, satisfying a per-workflow **node manifest** first (custom node packs @ pinned commits via cm-cli with a unified uv resolve under host-torch constraints; models downloaded + sha-verified when a hash is given) → `{outputs:{node_id:[{path,type,kind,width,height}]}, image_path, unverified_models}`, or a **typed defer** `{code, ref, detail}`. The harness never interprets graph semantics — conditioning/prompt/model choices belong to the calling repo. |
 | `offload_generate_svg` | `kind`, `spec`, `out?` | Render a crisp data-viz SVG (`gauge` · `comparison-bar` · `chromatogram` · `icon`) — no model, no GPU. |
 | `offload_generate_audio` | `text`, `kind?`, `clone?`, `lang?`, `seconds?`, `seed?`, `out?` | Synthesize voice (Chatterbox TTS) or music (ACE-Step) on the local GPU → `{audio_path, ...}`, or defer. |
 | `offload_generate_video` | `prompt`, `still?`, `model?`, `frames?`, `seed?`, `fast?`, `upscale?`, `out?` | Animate a still into a short clip (Wan 2.2 I2V two-stage; Hunyuan opt-in) on the local GPU → `{video_path, seed}`, or defer. Quality-first: the NATIVE recipe is the default (tens of minutes); `fast:true` opts into the 8-step distill draft. |
-| `offload_edit_image` | `image`, `ops[]`, `out?` | **Deterministic edit pipeline** (crop/resize/convert/composite/text via PIL; `flatten_design` opens `.xcf`/`.psd` via GIMP and returns the layer list) → `{image_path, width, height, ops_applied, layers?}`, or defer. CPU-only — never takes the GPU lock. |
+| `offload_inpaint_image` | `image`, `mask`, `prompt`, `negative?`, `denoise?`, `grow_mask?`, `steps?`, `seed?`, `out?` | **Generative inpainting** — re-render ONLY the masked region of a local image from a prompt on the local ComfyUI (SDXL-family `inpaint_*` binding; mask is white-on-black, same size as the image, **white = repaint**) → `{image_path, seed}`, or defer. Removes gibberish text/objects/blemishes or replaces a region; diffusion cannot WRITE legible text — inpaint-to-clean, then add real type with `offload_edit_image`'s `text` op. |
+| `offload_edit_image` | `image`, `ops[]`, `out?`, `renditions?` | **Deterministic edit pipeline** (crop/resize/convert/composite/text via PIL; `mask_boxes{boxes,pad?,feather?,invert?}` replaces the working image with a white-on-black inpaint mask at its size — ready for `offload_inpaint_image`; `grade{levels?,curve?,wb?}` tone/color grade composed into ONE LUT per channel (single quantize, no banding); `lut_cube{path,strength?}` applies a `.cube` 3D LUT look; `perspective_composite{overlay,quad}` warps an overlay into a destination quad (UL,UR,LR,LL) for mockup placement; `finish{sharpen?,median?}` delivery sharpening — **always the LAST op, after any resize**; `flatten_design` opens `.xcf`/`.psd` via GIMP and returns the layer list; `instantiate_design{set_text,replace_image}` is the GIMP layered-template factory — new copy into named text layers, new images into named pixel layers, then flatten; `renditions[]` exports a platform matrix `{width/height,format,suffix}` from the master out) → `{image_path, width, height, ops_applied, layers?, renditions?}`, or defer. CPU-only — never takes the GPU lock. |
 | `offload_media` | `op`, `in`/`inputs[]`, `out?`, op args | **One ffmpeg av op** — `trim` (stream-copy default), `concat`, `extract_frames`, `convert`, `mux_audio`, `probe` → op-specific JSON, or defer. CPU-only — never takes the GPU lock. |
 | `offload_nim` | `prompt`, `model?`, `system?`, `base?`, `max_tokens?`, `temperature?`, `list_models?` | **Opt-in remote.** Call an NVIDIA NIM endpoint (hosted free catalog or self-hosted) → `{model, content, ...}`, or defer. Key from `$NVIDIA_API_KEY` (sent only to NVIDIA hosts); never ledgered. |
 | `agent_run` | `goal`, `read_root?`, `max_steps?`, `model?`, `timeout_sec?` | **Local read-only agent.** A local model plans and iterates over read-only tools (`list_dir`, `read_file`) + the `offload_*` cascade to do a bounded multi-step read-and-reason job → `{output, steps, stop_reason, tools}`, or defer. No writes, no shell, no network; ledger untouched. |

@@ -81,13 +81,33 @@ func buildArgs(out, prompt string, params map[string]any, m Model) []string {
 	}
 	// This machine's model binding. Steps is applied only when the request did not
 	// set it (the request wins), so a caller can still tune a single render.
+	b := bindingArgs(m)
+	if m.Steps > 0 && gpugen.AsInt(params["steps"]) > 0 {
+		// request set steps: strip the binding's "--steps N" pair from the shared args
+		for i := 0; i < len(b)-1; i++ {
+			if b[i] == "--steps" {
+				b = append(b[:i], b[i+2:]...)
+				break
+			}
+		}
+	}
+	args = append(args, b...)
+	return args
+}
+
+// bindingArgs emits this machine's model-binding flags (shared by single and batch
+// argv builders). NOTE the difference from buildArgs: batch has no per-request steps
+// param at this layer (per-job steps live in the jobs JSONL and win inside
+// batch-jobs.mjs), so the binding's Steps is always emitted when set.
+func bindingArgs(m Model) []string {
+	var args []string
 	if m.Ckpt != "" {
 		args = append(args, "--ckpt", m.Ckpt)
 	}
 	if m.VAE != "" {
 		args = append(args, "--vae", m.VAE)
 	}
-	if m.Steps > 0 && gpugen.AsInt(params["steps"]) <= 0 {
+	if m.Steps > 0 {
 		args = append(args, "--steps", strconv.Itoa(m.Steps))
 	}
 	if m.CFG > 0 {
@@ -103,4 +123,102 @@ func buildArgs(out, prompt string, params map[string]any, m Model) []string {
 		args = append(args, "--family", m.Family)
 	}
 	return args
+}
+
+// InpaintModel is the machine's inpaint binding (SDXL-class; see config). Inpainting
+// is masked latent re-denoise (VAEEncodeForInpaint) — a pixel-space DiT (HiDream)
+// cannot drive it, so this binding is separate from Model even on a HiDream box.
+type InpaintModel struct {
+	Ckpt, VAE, Sampler, Scheduler string
+	Steps                         int
+	CFG                           float64
+}
+
+// inpaintArgs assembles the comfy-inpaint.mjs argv. Pure; unit-tested. Request
+// steps wins over m.Steps (same rule as buildArgs).
+func inpaintArgs(out, image, mask, prompt string, params map[string]any, m InpaintModel) []string {
+	args := []string{out, image, mask, prompt}
+	if n, ok := params["negative"].(string); ok && n != "" {
+		args = append(args, "--negative", n)
+	}
+	if v := gpugen.AsInt(params["seed"]); v > 0 {
+		args = append(args, "--seed", strconv.Itoa(v))
+	}
+	// Presence-gated, not >0: an explicit grow_mask of 0 (tight mask, no latent
+	// dilation) is a valid request and must reach the runner as --grow-mask 0
+	// rather than silently falling back to the node default of 16.
+	if _, present := params["grow_mask"]; present {
+		if v := gpugen.AsInt(params["grow_mask"]); v >= 0 {
+			args = append(args, "--grow-mask", strconv.Itoa(v))
+		}
+	}
+	if f, ok := params["denoise"].(float64); ok && f > 0 && f <= 1 {
+		args = append(args, "--denoise", strconv.FormatFloat(f, 'g', -1, 64))
+	}
+	if m.Ckpt != "" {
+		args = append(args, "--ckpt", m.Ckpt)
+	}
+	if m.VAE != "" {
+		args = append(args, "--vae", m.VAE)
+	}
+	reqSteps := gpugen.AsInt(params["steps"])
+	if reqSteps > 0 {
+		args = append(args, "--steps", strconv.Itoa(reqSteps))
+	} else if m.Steps > 0 {
+		args = append(args, "--steps", strconv.Itoa(m.Steps))
+	}
+	if m.CFG > 0 {
+		args = append(args, "--cfg", strconv.FormatFloat(m.CFG, 'g', -1, 64))
+	}
+	if m.Sampler != "" {
+		args = append(args, "--sampler", m.Sampler)
+	}
+	if m.Scheduler != "" {
+		args = append(args, "--scheduler", m.Scheduler)
+	}
+	return args
+}
+
+// Inpaint re-renders ONLY the masked region of image on the LOCAL ComfyUI (free).
+// Same lifecycle guards as Generate: gpugen tree-kill on timeout + deferred /free.
+func Inpaint(ctx context.Context, node, script, comfyDir, out, image, mask, prompt string, params map[string]any, m InpaintModel, timeout time.Duration, extraEnv ...string) (string, error) {
+	env := []string{"COMFY_DIR=" + comfyDir}
+	if timeout > 0 {
+		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
+	}
+	return gpugen.Generate(ctx, gpugen.Spec{
+		Exe:     node,
+		Script:  script,
+		Args:    inpaintArgs(out, image, mask, prompt, params, m),
+		Env:     append(env, extraEnv...),
+		Out:     out,
+		Timeout: timeout,
+	})
+}
+
+// batchArgs assembles the comfy-generate.mjs --batch argv. Pure; unit-tested.
+func batchArgs(jobsPath, resultsPath string, m Model) []string {
+	return append([]string{"--batch", jobsPath, "--results", resultsPath}, bindingArgs(m)...)
+}
+
+// GenerateBatch renders every job in jobsPath (JSONL: {"prompt","out",...} per line)
+// through ONE warm ComfyUI session and writes one result line per job to resultsPath.
+// The results file is the gpugen success gate: the script exits 0 with a complete
+// results file even when individual renders failed (the caller reads per-job status),
+// while a crash/timeout/GPU-busy exits non-zero and errors here. timeout bounds the
+// WHOLE batch.
+func GenerateBatch(ctx context.Context, node, script, comfyDir, jobsPath, resultsPath string, m Model, timeout time.Duration, extraEnv ...string) error {
+	env := []string{"COMFY_DIR=" + comfyDir}
+	if timeout > 0 {
+		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
+	}
+	_, err := gpugen.Generate(ctx, gpugen.Spec{
+		Exe:     node,
+		Script:  script,
+		Args:    batchArgs(jobsPath, resultsPath, m),
+		Env:     append(env, extraEnv...),
+		Out:     resultsPath,
+		Timeout: timeout,
+	})
+	return err
 }

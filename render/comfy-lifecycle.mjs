@@ -1,7 +1,9 @@
 // comfy-lifecycle.mjs — the shared, on-demand ComfyUI cold-start lifecycle. This was
 // byte-identical across comfy-generate.mjs and comfy-video.mjs; centralized here so the
 // cold-start + ~4-min ready-poll + zero-always-warm launch flags
-// (--disable-smart-memory --cache-none --reserve-vram) live in ONE place. tts.mjs does
+// (--disable-smart-memory --cache-none --reserve-vram) live in ONE place. A `warm`
+// batch session omits --cache-none so a checkpoint loads once for N renders (the
+// caller still tears the session down at the batch boundary). tts.mjs does
 // NOT use this (its Chatterbox worker is not ComfyUI; it passes comfyManaged:false to
 // withGpuSlot). Dependency-free; deps are injectable purely for tests.
 import { existsSync } from "node:fs";
@@ -35,6 +37,7 @@ export async function ensureComfy(opts = {}) {
     comfyDir = COMFY_DIR,
     py = COMFY_PY,
     reserveVram = "1.0",
+    warm = false,
     comfyUp: up = comfyUp,
     spawn = nodeSpawn,
     pollMs = 2000,
@@ -45,7 +48,13 @@ export async function ensureComfy(opts = {}) {
   } = opts;
   if (await up(api)) return null; // already running — don't manage it
   const reserve = String(reserveVram || "1.0");
-  const child = spawn(py, ["main.py", "--disable-smart-memory", "--cache-none", "--reserve-vram", reserve], { cwd: comfyDir, stdio: "ignore", detached: false });
+  // warm: a BATCH session keeps ComfyUI's model cache ON so the checkpoint loads once
+  // for N renders; the caller still tears the whole session down at the batch boundary
+  // (zero-always-warm moves from per-render to per-batch). Default stays cache-none.
+  const flags = ["--disable-smart-memory"];
+  if (!warm) flags.push("--cache-none");
+  flags.push("--reserve-vram", reserve);
+  const child = spawn(py, ["main.py", ...flags], { cwd: comfyDir, stdio: "ignore", detached: false });
   for (let i = 0; i < maxPolls; i++) {
     await new Promise((r) => setTimeout(r, pollMs));
     if (await up(api)) return child;

@@ -41,7 +41,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.17.0"
+const version = "0.21.1"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -64,12 +64,16 @@ func main() {
 		err = runTranscribe(args)
 	case "generate-image":
 		err = runGenerateImage(args)
+	case "inpaint-image":
+		err = runInpaintImage(args)
 	case "generate-svg":
 		err = runGenerateSVG(args)
 	case "generate-audio":
 		err = runGenerateAudio(args)
 	case "generate-video":
 		err = runGenerateVideo(args)
+	case "run-graph":
+		err = runRunGraph(args)
 	case "edit-image":
 		err = runEditImage(args)
 	case "media":
@@ -185,7 +189,11 @@ Usage:
   local-offload extract-image <image-path> --schema schema.json [--json]
   local-offload assess-image <image-path> [--brief "..."] [--json]
   local-offload generate-audio <out> "<text>" [--kind voice|music] [--voice generalist|finetuned] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
+  local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path]
+  local-offload generate-image --batch jobs.jsonl    N prompts through ONE warm ComfyUI session (checkpoint loads once)
+  local-offload inpaint-image <image> --mask m.png --prompt "..."   re-render ONLY the masked region (white=repaint)
   local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F]
+  local-offload run-graph --graph <g.json> [--manifest <m.json>] [--out-dir <d>] [--reserve-vram F] [--json]
   local-offload nim <file|-|"text"> [--model id] [--base url] [--system "..."] [--max-tokens N] [--temp F] [--json]
   local-offload nim --list-models        list a NIM endpoint's model ids (free hosted catalog or self-hosted)
   local-offload mcp                      run as an MCP server (stdio)
@@ -602,11 +610,53 @@ func runGenerateImage(args []string) error {
 	steps := fs.Int("steps", 0, "sampler steps (default 30)")
 	seed := fs.Int("seed", 0, "RNG seed (default random)")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	batchFile := fs.String("batch", "", "render a JSONL batch of jobs through ONE warm ComfyUI session (one line per job: {\"prompt\":...,\"out\"?,\"negative\"?,\"width\"?,\"height\"?,\"steps\"?,\"seed\"?})")
 	positional, flagArgs := splitArgs(args, map[string]bool{
 		"config": true, "negative": true, "out": true,
 		"width": true, "height": true, "steps": true, "seed": true,
+		"batch": true,
 	})
 	_ = fs.Parse(flagArgs)
+
+	if *batchFile != "" {
+		raw, rerr := os.ReadFile(*batchFile)
+		if rerr != nil {
+			return rerr
+		}
+		var jobs []pipeline.ImageBatchJob
+		for n, line := range strings.Split(string(raw), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var j pipeline.ImageBatchJob
+			if jerr := json.Unmarshal([]byte(line), &j); jerr != nil {
+				return fmt.Errorf("batch line %d: %w", n+1, jerr)
+			}
+			jobs = append(jobs, j)
+		}
+		cfg := loadCfg(fs)
+		p, cleanup, err := openPipeline(cfg)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		items, berr := p.RunImageBatch(context.Background(), jobs)
+		ok := 0
+		for _, it := range items {
+			if it.OK {
+				ok++
+			}
+		}
+		payload := map[string]any{"count": len(items), "succeeded": ok, "failed": len(items) - ok, "items": items}
+		data, _ := json.Marshal(payload)
+		res := core.Result{OK: berr == nil && ok == len(items), Data: data}
+		if berr != nil {
+			res.Reason = berr.Error()
+		}
+		emitResult(res, *asJSON, "", *compactFlag)
+		return berr
+	}
 
 	if positional == "" || positional == "-" {
 		return fmt.Errorf("generate-image requires a prompt (not stdin): local-offload generate-image \"<prompt>\" [--width 1024]")
@@ -647,6 +697,176 @@ func runGenerateImage(args []string) error {
 	return nil
 }
 
+// runInpaintImage handles `local-offload inpaint-image <image> --mask <mask.png>
+// --prompt "<text>" [--negative ...] [--denoise F] [--grow-mask N] [--steps N]
+// [--seed N] [--out path] [--json] [--compact]`. The positional argument is the
+// IMAGE PATH; the mask is a white-on-black image the same size (white = repaint).
+// It re-renders ONLY the masked region on the LOCAL ComfyUI for free (SDXL-class
+// inpaint_* binding required).
+func runInpaintImage(args []string) error {
+	fs := flag.NewFlagSet("inpaint-image", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	mask := fs.String("mask", "", "white-on-black mask image path (white = repaint); required unless --auto-text")
+	autoText := fs.Bool("auto-text", false, "EXPERIMENTAL: replace --mask with a vision-detected mask of rendered-text regions (defers when detection is unreliable)")
+	prompt := fs.String("prompt", "", "what the masked region should become; required")
+	negative := fs.String("negative", "", "hard exclusions for the repainted region")
+	denoise := fs.Float64("denoise", 0, "0-1; default 1.0 (full re-imagination inside the mask)")
+	growMask := fs.Int("grow-mask", -1, "expand+feather the mask by N px in latent space (default 16; 0 = no dilation)")
+	steps := fs.Int("steps", 0, "sampler steps (default: machine binding)")
+	seed := fs.Int("seed", 0, "RNG seed (default random)")
+	out := fs.String("out", "", "output PNG path (default under the media dir)")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "mask": true, "prompt": true, "negative": true,
+		"denoise": true, "grow-mask": true, "steps": true, "seed": true, "out": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	if positional == "" || positional == "-" {
+		return fmt.Errorf("inpaint-image requires an image path (not stdin): local-offload inpaint-image <image> --mask m.png --prompt \"...\"")
+	}
+	if (*mask == "" && !*autoText) || *prompt == "" {
+		return fmt.Errorf("inpaint-image requires --mask (or --auto-text) and --prompt: local-offload inpaint-image <image> --mask m.png --prompt \"...\"")
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	params := map[string]any{"image": positional}
+	if *mask != "" {
+		params["mask"] = *mask
+	}
+	if *autoText {
+		params["auto_text"] = true
+	}
+	if *negative != "" {
+		params["negative"] = *negative
+	}
+	if *denoise > 0 {
+		params["denoise"] = *denoise
+	}
+	if *growMask >= 0 {
+		params["grow_mask"] = *growMask
+	}
+	if *steps > 0 {
+		params["steps"] = *steps
+	}
+	if *seed > 0 {
+		params["seed"] = *seed
+	}
+	if *out != "" {
+		params["out"] = *out
+	}
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskInpaintImage,
+		Input:  *prompt,
+		Params: params,
+	})
+	emitResult(res, *asJSON, "", *compactFlag)
+	return nil
+}
+
+// runRunGraph handles `local-offload run-graph --graph <g.json> [--graph-json '<json>']
+// [--manifest <m.json>] [--manifest-json '<json>'] [--out-dir <d>] [--reserve-vram F]
+// [--json] [--compact]`. It executes an arbitrary ComfyUI API-format graph on the LOCAL
+// ComfyUI, satisfying its per-workflow node manifest first — generic, the caller owns all
+// graph semantics. Any failure defers (never cloud).
+func runRunGraph(args []string) error {
+	fs := flag.NewFlagSet("run-graph", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	// graph/manifest/out-dir/reserve-vram are owned by runGraphParams (the testable arg
+	// seam); register them here too so this parser accepts them without erroring.
+	fs.String("graph", "", "path to a ComfyUI API-format graph JSON (required unless --graph-json)")
+	fs.String("graph-json", "", "inline ComfyUI API-format graph JSON (alternative to --graph)")
+	fs.String("manifest", "", "path to a node manifest JSON")
+	fs.String("manifest-json", "", "inline node manifest JSON (alternative to --manifest)")
+	fs.String("out-dir", "", "directory for output files (default under the media dir)")
+	fs.String("reserve-vram", "", "ComfyUI --reserve-vram override")
+	_ = fs.Parse(args)
+
+	params, err := runGraphParams(args)
+	if err != nil {
+		return err
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	res := p.Run(context.Background(), core.Request{Task: core.TaskRunGraph, Params: params})
+	emitResult(res, *asJSON, "", *compactFlag)
+	return nil
+}
+
+// runGraphParams parses the run-graph flags into the pipeline request params map. It is
+// the testable validation seam: --graph OR --graph-json is required (else an error), and
+// inline JSON is materialized to a temp file whose path is threaded on (the runner reads
+// files). Kept independent of runRunGraph's pipeline wiring so the arg contract is unit-
+// testable without a ComfyUI/pipeline.
+func runGraphParams(args []string) (map[string]any, error) {
+	fs := flag.NewFlagSet("run-graph-params", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.String("config", "", "config file path")
+	fs.Bool("json", false, "")
+	fs.Bool("compact", false, "")
+	graph := fs.String("graph", "", "")
+	graphJSON := fs.String("graph-json", "", "")
+	manifest := fs.String("manifest", "", "")
+	manifestJSON := fs.String("manifest-json", "", "")
+	outDir := fs.String("out-dir", "", "")
+	reserve := fs.String("reserve-vram", "", "")
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+	if *graph == "" && *graphJSON == "" {
+		return nil, fmt.Errorf("run-graph: --graph or --graph-json required")
+	}
+	graphPath, err := materializeArg(*graph, *graphJSON, "run-graph-*.json")
+	if err != nil {
+		return nil, fmt.Errorf("graph: %w", err)
+	}
+	manifestPath, err := materializeArg(*manifest, *manifestJSON, "run-graph-manifest-*.json")
+	if err != nil {
+		return nil, fmt.Errorf("manifest: %w", err)
+	}
+	return map[string]any{
+		"graph_path":    graphPath,
+		"manifest_path": manifestPath,
+		"out_dir":       *outDir,
+		"reserve_vram":  *reserve,
+	}, nil
+}
+
+// materializeArg returns path if set, else writes inline json to a temp file and returns
+// that path (the runner reads files, not inline). Empty+empty → ("", nil).
+func materializeArg(path, inline, pattern string) (string, error) {
+	if path != "" {
+		return path, nil
+	}
+	if inline == "" {
+		return "", nil
+	}
+	f, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(inline); err != nil {
+		return "", err
+	}
+	return f.Name(), nil
+}
+
 // runGenerateSVG handles `local-offload generate-svg <kind> --spec '<json>' [--spec-file path] [--out file.svg] [--json]`.
 // kind is the positional (gauge|comparison-bar|chromatogram|icon). It renders locally for free (no model/GPU).
 // runEditImage handles `local-offload edit-image <image> --ops '<json array>'
@@ -659,9 +879,10 @@ func runEditImage(args []string) error {
 	opsStr := fs.String("ops", "", `edit ops as a JSON array, e.g. '[{"op":"crop","x":0,"y":0,"width":100,"height":100},{"op":"resize","width":512}]'`)
 	opsFile := fs.String("ops-file", "", "path to a JSON file with the ops array")
 	out := fs.String("out", "", "output image path (default under the media dir)")
+	renditions := fs.String("renditions", "", `export matrix from the master out, e.g. '[{"width":1080,"format":"webp","suffix":"-ig"},{"width":1920,"format":"jpg","suffix":"-web"}]'`)
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
 	positional, flagArgs := splitArgs(args, map[string]bool{
-		"config": true, "ops": true, "ops-file": true, "out": true,
+		"config": true, "ops": true, "ops-file": true, "out": true, "renditions": true,
 	})
 	_ = fs.Parse(flagArgs)
 	if positional == "" || positional == "-" {
@@ -691,6 +912,13 @@ func runEditImage(args []string) error {
 	params := map[string]any{"ops": ops}
 	if *out != "" {
 		params["out"] = *out
+	}
+	if *renditions != "" {
+		var rends []map[string]any
+		if jerr := json.Unmarshal([]byte(*renditions), &rends); jerr != nil {
+			return fmt.Errorf("edit-image: invalid --renditions JSON: %w", jerr)
+		}
+		params["renditions"] = rends
 	}
 	res := p.Run(context.Background(), core.Request{Task: core.TaskEditImage, Image: positional, Params: params})
 	emitResult(res, *asJSON, "", *compactFlag)

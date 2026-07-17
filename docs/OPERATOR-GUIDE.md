@@ -128,6 +128,117 @@ tokens kept local (est.): 2920 (~$0.04 Opus-input value — an estimate, not bil
 
 ---
 
+### Warm-batch image generation ✅
+
+```powershell
+local-offload generate-image --batch jobs.jsonl --json
+```
+
+One JSON object per line (`prompt` required; `negative`/`width`/`height`/`steps`/`seed`/`out`
+optional — a missing seed is minted, a missing out defaults under the media dir). All jobs
+render through **one warm ComfyUI session** — the checkpoint loads once instead of once per
+image; the zero-always-warm teardown (free VRAM, kill the spawned ComfyUI, release the GPU
+lock) runs at the **batch boundary**, however the batch ends. Measured on the 16GB box:
+first job ~32s (absorbs the checkpoint load), warm jobs ~22s. A failed job is recorded in
+its result item and does not abort the rest. Single (unbatched) renders keep the zero-warm
+default — nothing changes unless you pass `--batch`.
+
+### Run an arbitrary ComfyUI graph (run-graph) ✅
+
+```powershell
+local-offload run-graph --graph wf.json --manifest manifest.json --out-dir out/
+```
+
+Executes any API-format ComfyUI graph under the same GPU-lock/zero-warm lifecycle. The
+**node manifest** (`node_packs[{name,repo,commit}]` + `models[{path,source_url,sha256}]`)
+is satisfied BEFORE ComfyUI starts: packs cloned at their pinned commits with all deps
+resolved **together** (uv) under **host-torch constraints** (provisioning never replaces the
+installed CUDA torch — an unsatisfiable pack set defers instead), models downloaded and
+sha-verified when a hash is given (`sha256: null` downloads are reported in
+`unverified_models[]`). Results are node-addressed (`outputs.<node_id>[]` with
+`path/type/kind/width/height`); every failure is a **typed defer**
+(`SATISFIER_UNAVAILABLE`, `VENV_INCOHERENT`, `NODE_CLASS_MISSING`,
+`EXTERNAL_COMFY_NEEDS_PACKS`, …) so callers branch on `code`, never parse prose.
+Prerequisites (provisioned by `install.ps1`): **uv** (the pack satisfier's unified-resolve
+tool — the hard requirement) + ComfyUI-Manager + GitPython in the
+ComfyUI venv; set Manager `network_mode = offline` in `<comfy>/user/__manager/config.ini`
+(its first-start registry fetch otherwise slows every cold start).
+
+### Generative inpainting (inpaint-image) ✅
+
+```powershell
+# 1. build a white-on-black mask (white = repaint) with the deterministic mask_boxes edit op
+local-offload edit-image render.png --ops '[{"op":"mask_boxes","boxes":[{"x":620,"y":540,"width":820,"height":820}],"feather":6}]' --out mask.png
+# 2. re-render ONLY the masked region from a prompt
+local-offload inpaint-image render.png --mask mask.png --prompt "clean glossy dark watch dial, no writing" --negative "text, letters" --seed 4242 --json
+```
+
+Masked re-denoise on the local ComfyUI (core nodes only, same GPU-lock/zero-warm
+lifecycle): white mask pixels are re-imagined from the prompt, black pixels stay
+untouched. The route needs a per-machine **SDXL-class** binding in `config.json` —
+`inpaint_script` (path to `render/comfy-inpaint.mjs`), `inpaint_ckpt` (e.g.
+`RealVisXL_V5.0_fp16.safetensors`), optional `inpaint_vae` (`builtin` = the
+checkpoint's own VAE) — because `VAEEncodeForInpaint` is a latent-space technique: a
+pixel-space DiT (HiDream) canNOT drive it even when it is the machine's
+`imagegen_ckpt`. Unbound = the task defers cleanly. Knobs: `--denoise` (default 1.0 —
+full re-imagination inside the mask), `--grow-mask` (default 16 px seam feathering in
+latent space), `--steps/--seed/--out`. Diffusion cannot WRITE legible text: inpaint the
+region clean, then add real type with the `edit-image` `text` op.
+`--auto-text` (EXPERIMENTAL) replaces `--mask` with vision-detected text boxes; it
+defers whenever detection is unparseable, empty, or absurd (>60% coverage) — build the
+mask with `mask_boxes` yourself when it does.
+
+### Deterministic post-production (edit-image op pack) ✅
+
+```powershell
+# grade -> resize -> finish (delivery sharpen LAST), plus a platform export matrix
+local-offload edit-image render.png --ops '[{"op":"grade","levels":{"black":8,"white":248,"gamma":1.05},"wb":{"mode":"gray_world"}},{"op":"resize","width":1920},{"op":"finish"}]' --renditions '[{"width":1920,"format":"jpg","suffix":"-web"},{"width":1080,"format":"webp","suffix":"-ig"}]' --json
+# apply a .cube LUT look at 60% strength
+local-offload edit-image render.png --ops '[{"op":"lut_cube","path":"D:/luts/teal-orange.cube","strength":0.6}]'
+# place a render onto a laptop-screen mockup (quad = UL,UR,LR,LL screen corners)
+local-offload edit-image mockup.png --ops '[{"op":"perspective_composite","overlay":"render.png","quad":[[412,180],[1508,236],[1490,940],[398,905]]}]'
+# GIMP layered-template factory: new copy + swapped product image, then PIL ops
+local-offload edit-image template.xcf --ops '[{"op":"instantiate_design","set_text":{"Headline":"Hola Bogotá"},"replace_image":{"ProductShot":"D:/renders/watch.png"}},{"op":"resize","width":1080}]'
+```
+
+All raster ops are deterministic, CPU-only PIL (no GPU lock, run in parallel with
+renders); GIMP is needed only for `flatten_design`/`instantiate_design` (headless
+`gimp-console`, invocations serialized process-wide). The op pack:
+
+- **`grade`** `{levels{black,white,gamma}?, curve{points[[in,out],…]}?, wb{mode:gray_world|scale,r,g,b}?, luminance_only?}` —
+  tone/color grading. Every transform composes mathematically into ONE 256-entry LUT
+  per channel and quantizes ONCE (chained 8-bit `.point()` passes band visibly); the
+  alpha channel is never remapped.
+- **`lut_cube`** `{path, strength?}` — a `.cube` 3D LUT "look" via Pillow's built-in
+  `Color3DLUT`; `strength` 0–1 blends the graded result over the original. 1D cubes
+  and non-standard domains are rejected.
+- **`perspective_composite`** `{overlay, quad:[[x,y]×4]}` — warps the overlay into the
+  destination quad (**UL,UR,LR,LL winding** — a mismatched winding silently mirrors)
+  with a pure-Python homography solve + BICUBIC resample, then alpha-composites:
+  screen/frame mockup placement. Quads live with the mockup asset; there is no
+  auto-detection.
+- **`finish`** `{sharpen{radius,percent,threshold}?, median 3|5?}` — delivery
+  sharpening; defaults (radius 1.2 / percent 80 / threshold 3) are tuned for
+  post-AI-upscale web output (Pillow's 150% default over-crisps upscaler output).
+  Explicit zeros are honored (`"sharpen":{"percent":0}` = no visible sharpening —
+  the way to get a median-only finish through the harness; direct worker callers
+  may also pass `"sharpen":null`).
+  **Ordering rule: `finish` must be the LAST op, after any `resize`** — sharpening
+  before a resize is undone by resampling. `median` is only for salt-and-pepper
+  speckle; real sensor/upscaler noise reduction (NLM/BM3D-class) is out of PIL's
+  reach and deliberately not faked.
+- **`--renditions`** `[{width/height, format png|jpg|webp, suffix}]` — after the ops
+  pipeline produces the master `out`, each rendition re-runs the worker
+  (resize+convert) writing `<out-stem><suffix>.<format>`; results land in
+  `renditions[]`. One master, full platform matrix in one call.
+- **`instantiate_design`** `{set_text{LayerName: copy}, replace_image{LayerName: path}}`
+  (FIRST op only, `image` = a `.xcf`/`.psd` template) — the GIMP template factory:
+  sets named **text layers'** copy, swaps named **pixel layers** for replacement
+  images at the old layer's offsets, flattens, and hands the raster to the rest of
+  the pipeline (e.g. `grade` → `renditions` = a one-call brand-variant factory).
+  A layer-name mismatch is THE common failure — the error surfaces GIMP's stderr
+  naming the failing lookup; check names with `flatten_design`'s `layers` output.
+
 ## 4. Drive the coding agent
 
 The agent plans with a local model and acts through tools confined to a workspace. Build it once:

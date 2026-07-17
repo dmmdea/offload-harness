@@ -1,6 +1,7 @@
 package imagegen
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -124,5 +125,66 @@ func TestBuildArgs_RequestStepsOverrideMachineDefault(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("--steps emitted %d times, want 1: %s", n, argv(args))
+	}
+}
+
+func TestBatchArgs_BindingAndPaths(t *testing.T) {
+	m := Model{Ckpt: "hidream.safetensors", VAE: "builtin", Steps: 20, CFG: 5, Sampler: "euler", Scheduler: "simple", Family: "hidream-o1"}
+	got := batchArgs(`D:\jobs.jsonl`, `D:\jobs.results.jsonl`, m)
+	want := []string{"--batch", `D:\jobs.jsonl`, "--results", `D:\jobs.results.jsonl`,
+		"--ckpt", "hidream.safetensors", "--vae", "builtin", "--steps", "20",
+		"--cfg", "5", "--sampler", "euler", "--scheduler", "simple", "--family", "hidream-o1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("batchArgs mismatch:\n got %v\nwant %v", got, want)
+	}
+}
+
+func TestBatchArgs_ZeroModelEmitsNoBindingFlags(t *testing.T) {
+	got := batchArgs("j.jsonl", "r.jsonl", Model{})
+	want := []string{"--batch", "j.jsonl", "--results", "r.jsonl"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("zero model must add no flags: got %v", got)
+	}
+}
+
+func TestInpaintArgs_FullBinding(t *testing.T) {
+	m := InpaintModel{Ckpt: "sdxl.safetensors", VAE: "builtin", Steps: 34, CFG: 6.5, Sampler: "dpmpp_2m", Scheduler: "karras"}
+	got := inpaintArgs("o.png", "in.png", "m.png", "clean it", map[string]any{"seed": 9, "denoise": 0.85, "grow_mask": 24, "negative": "text"}, m)
+	want := []string{"o.png", "in.png", "m.png", "clean it",
+		"--negative", "text", "--seed", "9", "--grow-mask", "24", "--denoise", "0.85",
+		"--ckpt", "sdxl.safetensors", "--vae", "builtin", "--steps", "34",
+		"--cfg", "6.5", "--sampler", "dpmpp_2m", "--scheduler", "karras"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("inpaintArgs:\n got %v\nwant %v", got, want)
+	}
+}
+
+func TestInpaintArgs_RequestStepsWin(t *testing.T) {
+	m := InpaintModel{Ckpt: "sdxl.safetensors", Steps: 34}
+	got := inpaintArgs("o.png", "in.png", "m.png", "p", map[string]any{"steps": 12}, m)
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "--steps 12") || strings.Contains(joined, "--steps 34") {
+		t.Fatalf("request steps must win: %v", got)
+	}
+}
+
+// Review fix: an explicit grow_mask of 0 must reach the runner (--grow-mask 0), not
+// silently fall back to the node default of 16; an ABSENT grow_mask emits nothing.
+func TestInpaintArgsGrowMaskZeroVsAbsent(t *testing.T) {
+	withZero := inpaintArgs("o.png", "i.png", "m.png", "p", map[string]any{"grow_mask": 0}, InpaintModel{})
+	found := false
+	for i, a := range withZero {
+		if a == "--grow-mask" && i+1 < len(withZero) && withZero[i+1] == "0" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("explicit grow_mask 0 must emit --grow-mask 0, got %v", withZero)
+	}
+	absent := inpaintArgs("o.png", "i.png", "m.png", "p", map[string]any{}, InpaintModel{})
+	for _, a := range absent {
+		if a == "--grow-mask" {
+			t.Fatalf("absent grow_mask must emit nothing, got %v", absent)
+		}
 	}
 }

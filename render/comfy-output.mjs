@@ -11,3 +11,22 @@ export function firstOutputFile(outputs) {
   }
   return null;
 }
+
+const KINDS = [["images", "image"], ["gifs", "gif"], ["videos", "video"], ["audio", "audio"]];
+
+// allOutputsByNode: every output file ComfyUI recorded, keyed by the node id that
+// produced it, so a generic caller can address each SaveImage/SaveMask/etc. by the
+// node id it put in its own graph — without the harness interpreting graph semantics.
+export function allOutputsByNode(outputs) {
+  const out = {};
+  for (const [nodeId, node] of Object.entries(outputs || {})) {
+    const files = [];
+    for (const [key, kind] of KINDS) {
+      for (const f of node?.[key] || []) {
+        files.push({ filename: f.filename, subfolder: f.subfolder || "", type: f.type || "output", kind });
+      }
+    }
+    if (files.length) out[nodeId] = files;
+  }
+  return out;
+}

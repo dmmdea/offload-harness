@@ -126,10 +126,29 @@ type Config struct {
 	ImageGenCFG       float64 `json:"imagegen_cfg,omitempty"`
 	ImageGenSampler   string  `json:"imagegen_sampler,omitempty"`
 	ImageGenScheduler string  `json:"imagegen_scheduler,omitempty"`
+	// --- generative inpainting (inpaint_image) ---
+	// InpaintScript is the absolute path to render/comfy-inpaint.mjs. Empty = no
+	// inpaint route (the task defers cleanly), like an empty ImageGenScript.
+	InpaintScript string `json:"inpaint_script,omitempty"`
+	// InpaintCkpt is the SDXL-class checkpoint this machine inpaints with. Inpainting
+	// is a latent-space technique (VAEEncodeForInpaint); a pixel-space DiT binding
+	// (HiDream) is NOT valid here even when it is the machine's imagegen_ckpt.
+	InpaintCkpt      string  `json:"inpaint_ckpt,omitempty"`
+	InpaintVAE       string  `json:"inpaint_vae,omitempty"`
+	InpaintSteps     int     `json:"inpaint_steps,omitempty"`
+	InpaintCFG       float64 `json:"inpaint_cfg,omitempty"`
+	InpaintSampler   string  `json:"inpaint_sampler,omitempty"`
+	InpaintScheduler string  `json:"inpaint_scheduler,omitempty"`
+	// InpaintTimeoutSec bounds one inpaint render (default 900).
+	InpaintTimeoutSec int `json:"inpaint_timeout_sec,omitempty"`
 	// --- video / audio generation (generate_video / generate_audio) ---
 	// VideoGenScript is the path to render/comfy-video.mjs (the I2V lifecycle wrapper).
 	// Empty = no video route (the task defers cleanly), like an empty ImageGenScript.
 	VideoGenScript string `json:"videogen_script,omitempty"`
+	// RunGraphScript is the generic run-graph runner (offload_run_graph / run-graph):
+	// render/comfy-run-graph.mjs. It executes an arbitrary ComfyUI API-format graph and
+	// satisfies its per-workflow node manifest. Empty = no run-graph route (defers).
+	RunGraphScript string `json:"run_graph_script,omitempty"`
 	// VoiceGenScript is the path to render/tts.mjs (Chatterbox TTS; comfyManaged:false).
 	// It serves generate_audio kind=voice. Empty = voice defers.
 	VoiceGenScript string `json:"voicegen_script,omitempty"`
@@ -361,7 +380,11 @@ func Default() Config {
 		NodePath:                    "node",
 		ComfyDir:                    "C:/ComfyUI",
 		ImageGenTimeoutSec:          720,
+		InpaintScript:               "", // inpaint route: per-machine SDXL-class binding; empty = defer
+		InpaintCkpt:                 "",
+		InpaintTimeoutSec:           900,
 		VideoGenScript:              "render/comfy-video.mjs",
+		RunGraphScript:              "render/comfy-run-graph.mjs",
 		VoiceGenScript:              "render/tts.mjs",
 		VoiceGenRef:                 "", // generalist default ref clip: per-machine, never shipped
 		VoiceGenFTModel:             "", // fine-tuned voice: all empty => voice=finetuned defers
@@ -456,7 +479,8 @@ func pathFields(c *Config) []*string {
 	return []*string{
 		&c.FFmpegPath, &c.MediaDir, &c.SVGDir,
 		&c.ImageGenScript, &c.NodePath, &c.ComfyDir,
-		&c.VideoGenScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath,
+		&c.InpaintScript,
+		&c.VideoGenScript, &c.RunGraphScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath,
 		&c.VoiceGenRef, &c.VoiceGenFTModel, &c.VoiceGenFTBaseDir, &c.VoiceGenFTRef,
 		&c.EditPython, &c.GimpConsolePath,
 		&c.CachePath, &c.LedgerPath,

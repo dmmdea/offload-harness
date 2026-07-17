@@ -42,6 +42,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/parser"
 	"github.com/dmmdea/offload-harness/internal/router"
+	"github.com/dmmdea/offload-harness/internal/rungraph"
 	"github.com/dmmdea/offload-harness/internal/shadow"
 	"github.com/dmmdea/offload-harness/internal/sttclient"
 	"github.com/dmmdea/offload-harness/internal/svgkit"
@@ -192,6 +193,20 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	// Its own branch — no text cascade, no grammar, no vision call.
 	if req.Task == core.TaskGenerateImage {
 		return p.runGenerateImage(ctx, req, meta, start)
+	}
+
+	// inpaint_image re-renders ONLY the masked region of params.image on the local
+	// ComfyUI by shelling out to comfy-inpaint.mjs (shared GPU lock + ComfyUI
+	// lifecycle). Its own branch — no text cascade, no grammar, no vision call.
+	if req.Task == core.TaskInpaintImage {
+		return p.runInpaintImage(ctx, req, meta, start)
+	}
+
+	// run_graph executes an arbitrary ComfyUI API-format graph + satisfies its node
+	// manifest on the local ComfyUI by shelling out to comfy-run-graph.mjs (shared GPU
+	// lock + ComfyUI lifecycle). Its own branch — no text cascade, no grammar, generic.
+	if req.Task == core.TaskRunGraph {
+		return p.runRunGraph(ctx, req, meta, start)
 	}
 
 	// generate_svg renders a brand-agnostic parametric SVG component (kind + spec in
@@ -777,6 +792,312 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 		"seed":       seed,
 	})
 	p.record(req.Task, meta, len(prompt))
+	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// runInpaintImage re-renders ONLY the masked region of params.image on the LOCAL
+// ComfyUI (generative inpainting). SDXL-family binding required (inpaint_*): a
+// pixel-space DiT (HiDream) cannot drive VAEEncodeForInpaint. Any failure defers.
+func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+	defer1 := func(reason string) core.Result {
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		p.recordDefer(req.Task, meta, len(req.Input), reason)
+		return core.Deferf(reason, "", meta)
+	}
+	if p.cfg.InpaintScript == "" || p.cfg.InpaintCkpt == "" {
+		return defer1("no inpaint route configured")
+	}
+	prompt := strings.TrimSpace(req.Input)
+	if prompt == "" {
+		return defer1("empty inpaint prompt")
+	}
+	image := paramStr(req.Params, "image")
+	mask := paramStr(req.Params, "mask")
+	if image == "" {
+		return defer1("inpaint requires params.image")
+	}
+	// EXPERIMENTAL auto_text (CLI --auto-text): no mask given — chain the vision
+	// text-box detector into a mask_boxes mask (inpaint_autotext.go). Any doubt in
+	// that chain errors here and defers, naming the manual mask_boxes workflow.
+	//
+	// Grounding eval PASSED 2026-07-17 (plan Task 9 gate, previously an always-defer):
+	// 3/3 text-stamped renders grounded correctly (qwen3vl on this stack) — text
+	// found, boxed, erased; zero wrong-region repaints. An oversized image defers
+	// cleanly on the vqa load limit. Evidence:
+	// docs/superpowers/evidence/2026-07-17-nightshift-run-graph.md.
+	if mask == "" && paramBool(req.Params, "auto_text") {
+		am, aerr := p.autoTextMask(ctx, image)
+		if aerr != nil {
+			return defer1("auto text localization failed: " + aerr.Error() + " — build a mask with edit-image mask_boxes instead")
+		}
+		mask = am
+	}
+	if mask == "" {
+		return defer1("inpaint requires params.mask")
+	}
+	script, serr := gpugen.ResolveScript(p.cfg.InpaintScript)
+	if serr != nil {
+		return defer1(serr.Error())
+	}
+	meta.Model = "comfyui-inpaint:" + p.cfg.InpaintCkpt
+	// Pin a concrete seed BEFORE the render (same reproducibility rule as
+	// runGenerateImage: the runner would otherwise pick a random seed and the
+	// result would report a wrong one).
+	seed := paramIntOr(req.Params, "seed", 0)
+	if seed <= 0 {
+		seed = mintSeed()
+		if req.Params == nil {
+			req.Params = map[string]any{}
+		}
+		req.Params["seed"] = seed
+	}
+	out := paramStr(req.Params, "out")
+	if out == "" {
+		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
+		out = filepath.Join(p.cfg.MediaDir, "inpaint-"+sha256hex(image+prompt+tasks.StableParamsKey(req.Params))[:8]+".png")
+	}
+	m := imagegen.InpaintModel{
+		Ckpt: p.cfg.InpaintCkpt, VAE: p.cfg.InpaintVAE, Steps: p.cfg.InpaintSteps,
+		CFG: p.cfg.InpaintCFG, Sampler: p.cfg.InpaintSampler, Scheduler: p.cfg.InpaintScheduler,
+	}
+	timeout := time.Duration(p.cfg.InpaintTimeoutSec) * time.Second
+	outPath, gerr := imagegen.Inpaint(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, image, mask, prompt, req.Params, m, timeout, p.lockEnv()...)
+	if gerr != nil {
+		meta.ErrClass = classifyErr(gerr)
+		return defer1("inpaint failed: " + gerr.Error())
+	}
+	meta.LatencyMs = time.Since(start).Milliseconds()
+	data, _ := json.Marshal(map[string]any{"image_path": outPath, "seed": seed})
+	p.record(req.Task, meta, len(prompt))
+	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// ImageBatchJob is one line of a generate-image --batch JSONL: a prompt plus the
+// per-job overridable request params. Out/Seed are filled by normalizeImageBatch
+// when absent (same invariants as the single-render path).
+type ImageBatchJob struct {
+	Prompt   string `json:"prompt"`
+	Negative string `json:"negative,omitempty"`
+	Width    int    `json:"width,omitempty"`
+	Height   int    `json:"height,omitempty"`
+	Steps    int    `json:"steps,omitempty"`
+	Seed     int    `json:"seed,omitempty"`
+	Out      string `json:"out,omitempty"`
+}
+
+// ImageBatchItem is the per-job outcome of a batch, in job order.
+type ImageBatchItem struct {
+	Out   string `json:"out"`
+	Seed  int    `json:"seed"`
+	OK    bool   `json:"ok"`
+	Ms    int64  `json:"ms"`
+	Error string `json:"error,omitempty"`
+}
+
+// normalizeImageBatch fills the per-job invariants the single-render path enforces
+// (a concrete seed BEFORE the render so the report is reproducible; a stable output
+// path under mediaDir) and renders the jobs file the render script consumes. Pure.
+func normalizeImageBatch(jobs []ImageBatchJob, mediaDir string) ([]ImageBatchJob, string) {
+	norm := make([]ImageBatchJob, len(jobs))
+	var b strings.Builder
+	for i, j := range jobs {
+		if j.Seed <= 0 {
+			j.Seed = mintSeed()
+		}
+		if j.Out == "" {
+			// Same dedup key as the single path (which hashes req.Params INCLUDING
+			// negative): two jobs differing only in negative must not share an output
+			// path, or the second silently overwrites the first.
+			params := map[string]any{"seed": j.Seed, "width": j.Width, "height": j.Height, "steps": j.Steps, "negative": j.Negative}
+			j.Out = filepath.Join(mediaDir, "render-"+sha256hex(j.Prompt+tasks.StableParamsKey(params))[:8]+".png")
+		}
+		norm[i] = j
+		line, _ := json.Marshal(j)
+		b.Write(line)
+		b.WriteByte('\n')
+	}
+	return norm, b.String()
+}
+
+// parseBatchResults maps the script's results JSONL back onto the job list by index.
+// A job with no recorded line (script died mid-batch) gets an explicit failed item so
+// callers never silently lose a job. Pure.
+func parseBatchResults(raw []byte, norm []ImageBatchJob) []ImageBatchItem {
+	byIdx := map[int]ImageBatchItem{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var r struct {
+			I     int    `json:"i"`
+			Out   string `json:"out"`
+			Seed  int    `json:"seed"`
+			OK    bool   `json:"ok"`
+			Ms    int64  `json:"ms"`
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			continue
+		}
+		byIdx[r.I] = ImageBatchItem{Out: r.Out, Seed: r.Seed, OK: r.OK, Ms: r.Ms, Error: r.Error}
+	}
+	items := make([]ImageBatchItem, len(norm))
+	for i, j := range norm {
+		if it, ok := byIdx[i]; ok {
+			if it.Out == "" {
+				it.Out = j.Out
+			}
+			if it.Seed == 0 {
+				it.Seed = j.Seed
+			}
+			items[i] = it
+		} else {
+			items[i] = ImageBatchItem{Out: j.Out, Seed: j.Seed, OK: false, Error: "no result recorded (batch aborted?)"}
+		}
+	}
+	return items
+}
+
+// batchErrClass classifies a failed batch item for the ledger's ErrClass, mirroring
+// the single path's classifyErr. A job with no recorded result line died with the
+// batch itself, so the batch-level error (gerr) is its true cause; a job with its own
+// error line is classified from that. Pure.
+func batchErrClass(itemErr string, gerr error) string {
+	if gerr != nil && strings.Contains(itemErr, "no result recorded") {
+		return classifyErr(gerr)
+	}
+	return classifyErr(fmt.Errorf("%s", itemErr))
+}
+
+// RunImageBatch renders N prompts through ONE warm ComfyUI session (the checkpoint
+// loads once) while preserving zero-always-warm AT THE BATCH BOUNDARY: the render
+// script's single teardown + gpugen's deferred /free restore a clean GPU when the
+// batch ends, however it ends. Ledger: one entry per job, same model label as the
+// single-render path (health tiers must not fragment).
+func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]ImageBatchItem, error) {
+	if p.cfg.ImageGenScript == "" {
+		return nil, fmt.Errorf("no image-gen route configured")
+	}
+	if len(jobs) == 0 {
+		return nil, fmt.Errorf("empty batch")
+	}
+	for i, j := range jobs {
+		if strings.TrimSpace(j.Prompt) == "" {
+			return nil, fmt.Errorf("job %d: empty prompt", i)
+		}
+	}
+	script, serr := gpugen.ResolveScript(p.cfg.ImageGenScript)
+	if serr != nil {
+		return nil, serr
+	}
+	_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
+	norm, jsonl := normalizeImageBatch(jobs, p.cfg.MediaDir)
+	stamp := sha256hex(jsonl)[:8]
+	jobsPath := filepath.Join(p.cfg.MediaDir, "batch-"+stamp+".jobs.jsonl")
+	resultsPath := filepath.Join(p.cfg.MediaDir, "batch-"+stamp+".results.jsonl")
+	if err := os.WriteFile(jobsPath, []byte(jsonl), 0o644); err != nil {
+		return nil, err
+	}
+
+	// Same labeling rule as runGenerateImage: report the checkpoint this machine
+	// actually renders with; UNBOUND keeps the historical "comfyui-sdxl" label so
+	// health tiers don't fragment.
+	modelLabel := "comfyui-sdxl"
+	if p.cfg.ImageGenCkpt != "" {
+		modelLabel = "comfyui:" + p.cfg.ImageGenCkpt
+	}
+	model := imagegen.Model{
+		Ckpt: p.cfg.ImageGenCkpt, VAE: p.cfg.ImageGenVAE, Steps: p.cfg.ImageGenSteps,
+		CFG: p.cfg.ImageGenCFG, Sampler: p.cfg.ImageGenSampler,
+		Scheduler: p.cfg.ImageGenScheduler, Family: p.cfg.ImageGenFamily,
+	}
+	// The whole batch shares one timeout: per-image budget × N (the first job also
+	// absorbs the ComfyUI cold start, which the per-image budget already covers today).
+	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second * time.Duration(len(norm))
+	gerr := imagegen.GenerateBatch(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, jobsPath, resultsPath, model, timeout, p.lockEnv()...)
+
+	raw, _ := os.ReadFile(resultsPath) // best-effort even on gerr: partial results are real work
+	items := parseBatchResults(raw, norm)
+	for i, it := range items {
+		meta := core.Meta{Model: modelLabel, LatencyMs: it.Ms}
+		if it.OK {
+			p.record(core.TaskGenerateImage, meta, len(norm[i].Prompt))
+		} else {
+			// Ledger parity with the single path (which sets ErrClass=classifyErr):
+			// health analytics must distinguish oom/timeout/busy for batch jobs too.
+			meta.ErrClass = batchErrClass(it.Error, gerr)
+			p.recordDefer(core.TaskGenerateImage, meta, len(norm[i].Prompt), "batch job failed: "+it.Error)
+		}
+	}
+	if gerr != nil {
+		return items, fmt.Errorf("image batch failed: %w", gerr)
+	}
+	return items, nil
+}
+
+// buildRunGraphParams maps request params → rungraph.Params. A missing graph path is a
+// hard error (mapped to a clean defer upstream), never a silent empty run.
+func buildRunGraphParams(req core.Request) (rungraph.Params, error) {
+	gp := paramStr(req.Params, "graph_path")
+	if gp == "" {
+		return rungraph.Params{}, fmt.Errorf("run_graph: graph_path required")
+	}
+	return rungraph.Params{
+		GraphPath:    gp,
+		ManifestPath: paramStr(req.Params, "manifest_path"),
+		OutDir:       paramStr(req.Params, "out_dir"),
+		ResultPath:   paramStr(req.Params, "result_path"),
+		ReserveVram:  paramStr(req.Params, "reserve_vram"),
+	}, nil
+}
+
+// runRunGraph executes an arbitrary ComfyUI API-format graph + satisfies its node manifest
+// on the LOCAL ComfyUI by shelling out to comfy-run-graph.mjs (shared GPU lock + ComfyUI
+// lifecycle via internal/rungraph → gpugen). Its own branch — no text models, no grammar,
+// generic. Any failure (no route, missing graph, satisfier/preflight DEFER, render error,
+// timeout) defers to Claude. params: graph_path (required), manifest_path, out_dir,
+// result_path, reserve_vram. Returns the node-addressed envelope JSON.
+func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+	if p.cfg.RunGraphScript == "" {
+		return p.deferGen(req, meta, start, len(req.Input), "no run-graph route configured")
+	}
+	params, err := buildRunGraphParams(req)
+	if err != nil {
+		return p.deferGen(req, meta, start, len(req.Input), err.Error())
+	}
+	// Default the result envelope + output dir under the media dir so an inline caller need
+	// not pick paths; a stable name lets a re-run reuse one file.
+	if params.ResultPath == "" {
+		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
+		params.ResultPath = filepath.Join(p.cfg.MediaDir, "run-graph-"+sha256hex(params.GraphPath+params.ManifestPath)[:8]+".json")
+	}
+	if params.OutDir == "" {
+		params.OutDir = p.cfg.MediaDir
+		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
+	}
+	// LO-2: resolve a relative script path against the exe dir (an MCP host spawns us with
+	// no meaningful cwd) and defer with a distinct reason when missing.
+	script, serr := gpugen.ResolveScript(p.cfg.RunGraphScript)
+	if serr != nil {
+		return p.deferGen(req, meta, start, len(req.Input), serr.Error())
+	}
+	meta.Model = "comfyui-run-graph"
+
+	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second
+	env, gerr := rungraph.Run(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, params, timeout, p.lockEnv()...)
+	if gerr != nil {
+		meta.ErrClass = gpugen.ClassifyErr(gerr)
+		return p.deferGen(req, meta, start, len(req.Input), "run-graph failed: "+gerr.Error())
+	}
+	// fix #4: a handled failure inside the mjs now arrives as a typed DEFER in the envelope
+	// (the mjs exits 0 so gpugen succeeds). Surface the typed code to the caller.
+	if env.Deferred {
+		return p.deferGen(req, meta, start, len(req.Input), env.Code+": "+env.Detail)
+	}
+	meta.LatencyMs = time.Since(start).Milliseconds()
+	data, _ := json.Marshal(env)
+	p.record(req.Task, meta, len(req.Input))
 	return core.Result{OK: true, Data: data, Meta: meta}
 }
 

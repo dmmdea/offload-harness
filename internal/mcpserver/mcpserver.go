@@ -129,6 +129,12 @@ func (s *Server) Run(ctx context.Context, version string) error {
 	}, s.handleGenerateImage)
 
 	srv.AddTool(&mcp.Tool{
+		Name:        "offload_run_graph",
+		Description: "Execute an arbitrary ComfyUI API-format graph on the LOCAL ComfyUI, satisfying a per-workflow node manifest (custom node packs @ pinned commits + model files) first. Generic: the caller owns ALL graph semantics — the harness passes the graph opaquely, provisions its environment, runs it under the shared single-slot GPU lock, and returns node-addressed outputs. Provide the graph as graph_path (a file) OR graph_json (inline API-format JSON); optionally manifest_path/manifest_json (the node manifest), out_dir (where output files land), reserve_vram (ComfyUI VRAM held back for the display). Returns {outputs:{node_id:[{path,type,kind}]}, image_path (first image, convenience alias), unverified_models[]}. On ANY failure it returns deferred:true with a typed reason (SATISFIER_UNAVAILABLE, NODE_CLASS_MISSING, PREFLIGHT_MISSING_INPUTS, MODEL_SHA_MISMATCH, GPU_BUSY, TIMEOUT, ...) — it NEVER falls back to cloud; then run the graph another way.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"graph_path":{"type":"string","description":"path to a ComfyUI API-format graph JSON file (provide this or graph_json)"},"graph_json":{"type":"string","description":"inline ComfyUI API-format graph JSON (alternative to graph_path)"},"manifest_path":{"type":"string","description":"path to a node manifest JSON (custom node packs @ pinned commits + model files to provision)"},"manifest_json":{"type":"string","description":"inline node manifest JSON (alternative to manifest_path)"},"out_dir":{"type":"string","description":"directory for the graph's output files (optional; default under the media dir)"},"reserve_vram":{"type":"string","description":"ComfyUI --reserve-vram override (VRAM held back for the display; per-workflow)"}}}`),
+	}, s.handleRunGraph)
+
+	srv.AddTool(&mcp.Tool{
 		Name:        "offload_generate_svg",
 		Description: "Render a crisp, brand-agnostic data-viz SVG locally for FREE (no model, no GPU) — the right tool for precise diagrams/icons SDXL fakes badly. kind is one of: gauge, comparison-bar, chromatogram, icon. spec is the component's JSON (colors/data are inputs; defaults are neutral — pass a theme {fg,bg,accent,muted,font} to brand it). Optional out = .svg path (default under the svg dir). Examples — gauge: {\"value\":72,\"max\":100,\"label\":\"Purity\",\"unit\":\"%\"}; comparison-bar: {\"items\":[{\"label\":\"A\",\"value\":10},{\"label\":\"B\",\"value\":20}],\"highlight\":1}; chromatogram: {\"peaks\":[{\"rt\":2.5,\"height\":80,\"label\":\"API\"}]}; icon: {\"name\":\"check\",\"color\":\"#22c55e\"}. Returns {svg_path, width, height}. Defers only on a bad kind/spec.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"kind":{"type":"string","description":"gauge | comparison-bar | chromatogram | icon"},"spec":{"type":"object","description":"the component spec (see description for fields; include an optional theme object to set colors)"},"out":{"type":"string","description":"output .svg path (optional; default under the svg dir)"}},"required":["kind","spec"]}`),
@@ -148,9 +154,15 @@ func (s *Server) Run(ctx context.Context, version string) error {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_edit_image",
-		Description: "Apply a DETERMINISTIC edit pipeline to a local image — free, CPU-only (no GPU lock: runs in parallel with renders, never evicts models). ops is an ARRAY applied in order in one call: crop{x,y,width,height}, resize{width and/or height, keep_aspect}, convert{format png|jpg|webp}, composite{overlay,x,y,opacity}, text{text,x,y,size,color,font,anchor}, and flatten_design{} (FIRST op only: opens a .xcf/.psd design file via GIMP, flattens it, and returns its layer list — then the remaining ops run on the flat raster). Engines are per-machine (see offload_status media): PIL for the pipeline, GIMP only for flatten_design. Returns {image_path,width,height,ops_applied,layers?}. On any failure (engine absent, bad op, tool error) it returns deferred:true — then edit the image another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local input image path (.png/.jpg/... ; .xcf/.psd when ops starts with flatten_design)"},"ops":{"type":"array","items":{"type":"object"},"description":"edit operations applied in order; each is {op:..., ...args} (see tool description)"},"out":{"type":"string","description":"output path (optional; default under the media dir)"}},"required":["image","ops"]}`),
+		Description: "Apply a DETERMINISTIC edit pipeline to a local image — free, CPU-only (no GPU lock: runs in parallel with renders, never evicts models). ops is an ARRAY applied in order in one call: crop{x,y,width,height}, resize{width and/or height, keep_aspect}, convert{format png|jpg|webp}, composite{overlay,x,y,opacity}, text{text,x,y,size,color,font,anchor}, mask_boxes{boxes,pad?,feather?,invert?} (REPLACES the working image with a white-on-black inpaint mask at its size — ready for offload_inpaint_image), grade{levels{black,white,gamma}?,curve{points[[in,out],...]}?,wb{mode:gray_world|scale,r,g,b}?,luminance_only?} (tone/color grade — everything composes into ONE LUT per channel, single quantize, no banding; alpha untouched), lut_cube{path,strength?} (.cube 3D LUT look at strength 0-1), perspective_composite{overlay,quad:[[x,y]x4]} (warp the overlay into the destination quad — UL,UR,LR,LL winding — and alpha-composite: mockup placement), finish{sharpen{radius,percent,threshold}?,median 3|5?} (delivery sharpening, defaults tuned for post-AI-upscale web output — MUST be the LAST op, after any resize: sharpening before a resize is undone by resampling), flatten_design{} (FIRST op only: opens a .xcf/.psd via GIMP, flattens it, returns its layer list), and instantiate_design{set_text{LayerName:new copy},replace_image{LayerName:image path}} (FIRST op only: GIMP layered-template factory — sets named text layers' copy, swaps named pixel layers for new images at the same offsets, flattens; the remaining ops then run on the result — a one-call brand-variant factory). Optional renditions[] exports a platform matrix from the master out ({width/height,format,suffix} each → <out-stem><suffix>.<format>). Engines are per-machine (see offload_status media): PIL for the pipeline, GIMP only for flatten_design/instantiate_design. Returns {image_path,width,height,ops_applied,layers?,renditions?}. On any failure (engine absent, bad op, tool error) it returns deferred:true — then edit the image another way.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local input image path (.png/.jpg/... ; .xcf/.psd when ops starts with flatten_design or instantiate_design)"},"ops":{"type":"array","items":{"type":"object"},"description":"edit operations applied in order; each is {op:..., ...args} (see tool description)"},"out":{"type":"string","description":"output path (optional; default under the media dir)"},"renditions":{"type":"array","items":{"type":"object"},"description":"optional export matrix from the master out: [{width and/or height, format png|jpg|webp, suffix}] — each writes <out-stem><suffix>.<format> and is listed in the result's renditions[]"}},"required":["image","ops"]}`),
 	}, s.handleEditImage)
+
+	srv.AddTool(&mcp.Tool{
+		Name:        "offload_inpaint_image",
+		Description: "Generatively INPAINT a local image on the LOCAL ComfyUI for FREE — re-renders ONLY the masked region from a prompt, leaving the rest untouched. Use to REMOVE unwanted content (gibberish text, objects, blemishes) or replace a region with new content. mask is a white-on-black image the same size as image (white = repaint). NOTE: diffusion cannot write specific legible text — inpaint-to-clean, then add real type with offload_edit_image's text op. Takes the shared single-slot GPU lock (serializes with other local gen). Returns {image_path, seed}. On any failure (no SDXL-class inpaint binding on this machine, missing files, render error) it returns deferred:true.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local path of the image to retouch"},"mask":{"type":"string","description":"local path of the white-on-black mask (white = repaint)"},"prompt":{"type":"string","description":"what the masked region should become"},"negative":{"type":"string","description":"hard exclusions for the repainted region"},"denoise":{"type":"number","description":"0-1; default 1.0 (full re-imagination inside the mask). Values well below 1.0 can produce muted/gray fill on the stock VAEEncodeForInpaint path — prefer 1.0 unless you know the tradeoff"},"grow_mask":{"type":"integer","description":"expand+feather the mask by N px in latent space (default 16; 0 = tight mask, no dilation — seam blending comes from this, not mask feathering)"},"steps":{"type":"integer","description":"sampler steps (default: machine binding)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"}},"required":["image","mask","prompt"]}`),
+	}, s.handleInpaintImage)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_media",
@@ -450,6 +462,107 @@ func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolReque
 	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateImage, Input: in.Prompt, Params: params}))
 }
 
+func (s *Server) handleInpaintImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var in struct {
+		Image    string  `json:"image"`
+		Mask     string  `json:"mask"`
+		Prompt   string  `json:"prompt"`
+		Negative string  `json:"negative"`
+		Denoise  float64 `json:"denoise"`
+		GrowMask *int    `json:"grow_mask"` // pointer: an explicit 0 (no dilation) is distinct from absent
+		Steps    int     `json:"steps"`
+		Seed     int     `json:"seed"`
+		Out      string  `json:"out"`
+	}
+	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+		return bad, nil
+	}
+	params := map[string]any{}
+	if in.Image != "" {
+		params["image"] = in.Image
+	}
+	if in.Mask != "" {
+		params["mask"] = in.Mask
+	}
+	if in.Negative != "" {
+		params["negative"] = in.Negative
+	}
+	if in.Denoise > 0 {
+		params["denoise"] = in.Denoise
+	}
+	if in.GrowMask != nil && *in.GrowMask >= 0 {
+		params["grow_mask"] = *in.GrowMask
+	}
+	if in.Steps > 0 {
+		params["steps"] = in.Steps
+	}
+	if in.Seed > 0 {
+		params["seed"] = in.Seed
+	}
+	if in.Out != "" {
+		params["out"] = in.Out
+	}
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskInpaintImage, Input: in.Prompt, Params: params}))
+}
+
+func (s *Server) handleRunGraph(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var in struct {
+		GraphPath    string `json:"graph_path"`
+		GraphJSON    string `json:"graph_json"`
+		ManifestPath string `json:"manifest_path"`
+		ManifestJSON string `json:"manifest_json"`
+		OutDir       string `json:"out_dir"`
+		ReserveVram  string `json:"reserve_vram"`
+	}
+	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+		return bad, nil
+	}
+	// Inline graph_json/manifest_json are written to a temp file whose path is threaded
+	// on (the mjs reads files, not inline). Empty+empty manifest → "" (manifest optional).
+	graphPath, err := materialize(in.GraphPath, in.GraphJSON, "run-graph-*.json")
+	if err != nil {
+		res, _ := jsonResult(map[string]any{"deferred": true, "reason": "bad arguments: graph: " + err.Error()})
+		return res, nil
+	}
+	if graphPath == "" {
+		res, _ := jsonResult(map[string]any{"deferred": true, "reason": "bad arguments: graph_path or graph_json required"})
+		return res, nil
+	}
+	manifestPath, err := materialize(in.ManifestPath, in.ManifestJSON, "run-graph-manifest-*.json")
+	if err != nil {
+		res, _ := jsonResult(map[string]any{"deferred": true, "reason": "bad arguments: manifest: " + err.Error()})
+		return res, nil
+	}
+	params := map[string]any{
+		"graph_path":    graphPath,
+		"manifest_path": manifestPath,
+		"out_dir":       in.OutDir,
+		"reserve_vram":  in.ReserveVram,
+	}
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskRunGraph, Params: params}))
+}
+
+// materialize returns path if set, else writes inline json to a temp file and returns
+// that path (the mjs reads files, not inline). Empty+empty → ("", nil) for the optional
+// manifest; a required graph is validated by the caller when this returns "".
+func materialize(path, inline, pattern string) (string, error) {
+	if path != "" {
+		return path, nil
+	}
+	if inline == "" {
+		return "", nil
+	}
+	f, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(inline); err != nil {
+		return "", err
+	}
+	return f.Name(), nil
+}
+
 func (s *Server) handleGenerateSVG(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
 		Kind string         `json:"kind"`
@@ -576,9 +689,10 @@ func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolReque
 
 func (s *Server) handleEditImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		Image string           `json:"image"`
-		Ops   []map[string]any `json:"ops"`
-		Out   string           `json:"out"`
+		Image      string           `json:"image"`
+		Ops        []map[string]any `json:"ops"`
+		Out        string           `json:"out"`
+		Renditions []map[string]any `json:"renditions"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -586,6 +700,9 @@ func (s *Server) handleEditImage(ctx context.Context, req *mcp.CallToolRequest) 
 	params := map[string]any{"ops": in.Ops}
 	if in.Out != "" {
 		params["out"] = in.Out
+	}
+	if len(in.Renditions) > 0 {
+		params["renditions"] = in.Renditions
 	}
 	return result(s.p.Run(ctx, core.Request{Task: core.TaskEditImage, Image: in.Image, Params: params}))
 }

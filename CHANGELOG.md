@@ -4,10 +4,123 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
-> **A note on `docs/superpowers/…` paths.** Some entries cite a design spec or an
-> evidence file under `docs/superpowers/`. Those are authored in the private
-> development repo and are **not published here**, so the paths are provenance
-> pointers rather than links you can follow from this repository.
+## [0.21.1] - 2026-07-17
+
+### Added — auto-text inpaint chain enabled (grounding eval passed)
+- `inpaint-image --auto-text` now runs by default: the Task-9 grounding eval passed 3/3
+  (text-stamped renders; qwen3vl found, boxed, and erased the text with zero wrong-region
+  repaints; oversized images defer cleanly on the vqa load limit). The always-defer gate
+  was removed per its recorded unlock condition.
+
+### Fixed — run-graph pack satisfier drives uv directly
+- The installed ComfyUI-Manager cm-cli has no `--uv` flag (live scene-swap satisfy run
+  deferred VENV_INCOHERENT, typed defer + host torch untouched — exactly as designed).
+  The satisfier now checks out packs first (git), then runs ONE `uv pip compile` across
+  all packs on-disk requirements under the host-torch constraints and installs the lock.
+  `uv` in the ComfyUI venv is the required satisfier tool (install.ps1 provisions it);
+  cm-cli is no longer load-bearing for run-graph.
+
+## [0.21.0] - 2026-07-17
+
+### Added — edit-image op pack (deterministic post-production suite)
+- **`grade`** `{levels{black,white,gamma}?, curve{points}?, wb{gray_world|scale}?, luminance_only?}`:
+  tone/color grading with compose-once LUT discipline — every transform composes into ONE
+  256-entry float LUT per channel and quantizes in a SINGLE `Image.point()` call (chained
+  8-bit passes band visibly); the alpha band is never remapped.
+- **`lut_cube`** `{path, strength?}`: `.cube` 3D LUT looks via Pillow's built-in `Color3DLUT`
+  (vendored pure-python parser; 1D cubes and non-standard domains rejected); `strength` 0–1
+  blends graded over original.
+- **`perspective_composite`** `{overlay, quad:[[x,y]×4]}`: mockup placement — pure-python
+  homography (partial-pivot Gauss, no numpy) warps the overlay into the destination quad
+  (UL,UR,LR,LL winding), BICUBIC, alpha-composited.
+- **`finish`** `{sharpen{radius,percent,threshold}?, median 3|5?}`: delivery sharpening with
+  post-AI-upscale web defaults (1.2/80/3 — Pillow's 150% default over-crisps upscaler
+  output). MUST run as the LAST op, after any resize (resampling undoes earlier
+  sharpening). Real NLM/BM3D-class denoise is documented as out of PIL's scope, not faked.
+- **`renditions`** (Go-side export matrix): optional `renditions[]`/`--renditions`
+  `[{width/height, format png|jpg|webp, suffix}]` — after the master `out`, each entry
+  re-runs the worker (resize+convert) writing `<out-stem><suffix>.<format>`; result gains
+  `renditions[]`.
+- **`instantiate_design`** `{set_text{Layer: copy}, replace_image{Layer: path}}` (FIRST op
+  only, like `flatten_design`): GIMP layered-template factory — generated Script-Fu sets
+  named text layers' copy, swaps named pixel layers at the old offsets, flattens, and feeds
+  the raster to the PIL pipeline (one-call brand-variant factory). PDB calls verified
+  against the installed gimp-console-3.2 (`gimp-drawable-get-offsets` 3.x naming); headless
+  GIMP invocations are now serialized process-wide (profile-lock contention), and a
+  no-raster script failure surfaces GIMP's stderr (layer-name mismatch is THE common case).
+- Docs: README op table/CLI examples, OPERATOR-GUIDE "Deterministic post-production"
+  section, `render/gimp-instantiate.scm.tmpl` (reviewable batch contract), MCP
+  `offload_edit_image` description enumerates the pack + both ordering rules
+  (instantiate_design first; finish last).
+- Existing five ops, mask_boxes, flatten_design, and all generate/batch/run-graph/inpaint
+  paths are unchanged (locked by the full suites).
+
+## [0.20.0] - 2026-07-17
+
+### Added — generative inpainting route (`offload_inpaint_image` / `inpaint-image`)
+- SDXL-family **masked re-denoise** on the local ComfyUI (core nodes only:
+  `LoadImage → ImageToMask(red) → VAEEncodeForInpaint → KSampler → VAEDecode`): re-renders
+  ONLY the white region of a same-size white-on-black mask from a prompt, leaving every
+  other pixel untouched. New `render/wf-sdxl-inpaint.mjs` graph builder +
+  `render/comfy-inpaint.mjs` runner (staged inputs, single-slot GPU lock, zero-always-warm
+  teardown), `imagegen.Inpaint` exec wrapper, `inpaint_image` pipeline task, MCP tool
+  `offload_inpaint_image` `{image,mask,prompt,negative?,denoise?,grow_mask?,steps?,seed?,out?}`
+  → `{image_path, seed}`, and the `inpaint-image` CLI.
+- Per-machine binding via new config `inpaint_script` / `inpaint_ckpt` / `inpaint_vae` /
+  `inpaint_steps` / `inpaint_cfg` / `inpaint_sampler` / `inpaint_scheduler` /
+  `inpaint_timeout_sec` (default 900). The binding must be **SDXL-class** (e.g. RealVisXL):
+  `VAEEncodeForInpaint` is latent-space — a pixel-space DiT (HiDream) cannot drive it, so a
+  HiDream box keeps HiDream for generation and binds inpaint separately. Unbound = clean defer.
+- New deterministic `mask_boxes` edit op (`edit_image` pipeline):
+  `{op:"mask_boxes",boxes:[{x,y,width,height}],pad?,feather?,invert?}` replaces the working
+  image with a white-on-black inpaint mask at its size — the manual mask workflow.
+- EXPERIMENTAL `inpaint-image --auto-text`: vision-detected text boxes chained through
+  `mask_boxes` into the inpaint; hard validation (unparseable/empty/absurd >60%-coverage
+  boxes) defers with the manual `mask_boxes` workflow named. Grounding acceptance on real
+  gibberish renders is still pending live eval — treat as opt-in sugar.
+- Note: diffusion cannot WRITE specific legible text — inpaint-to-clean, then add real
+  type with the `edit_image` `text` op.
+
+## [0.19.0] - 2026-07-17
+
+### Added — warm batch mode (`generate-image --batch`)
+- N prompts through ONE warm ComfyUI session (checkpoint loads once): `generate-image
+  --batch <jobs.jsonl>` with per-job `{prompt, negative?, width?, height?, steps?, seed?,
+  out?}` overrides and a per-job result report `{count,succeeded,failed,items[]}`.
+  Measured on the 16GB box: 32.6s first job (absorbs the checkpoint load) → **22.4s warm
+  floor**; the old zero-warm cadence re-paid the load on every render. **Zero-warm stays
+  the single-render default** — warmth exists only inside an explicit batch, and the full
+  teardown (freeComfy + kill + lock release) is restored at the batch boundary, verified
+  live (ComfyUI down, VRAM idle, memory stack intact, lock released). GPU lock held across
+  the whole batch; per-job ledger records with ErrClass parity.
+- Operational: ComfyUI-Manager on a satisfier box should run `network_mode = offline`
+  (its first-start registry fetch regressed cold-start ~40s→>150s; offline verified 19s).
+
+## [0.18.0] - 2026-07-17
+
+### Added — run-graph primitive (`offload_run_graph` / `run-graph`)
+- Generic execution of an **arbitrary ComfyUI API-format graph** in the proven GPU-lock /
+  zero-always-warm lifecycle, with a per-workflow **node manifest** (custom node packs @
+  pinned commits + model files with optional sha256) satisfied as part of the contract:
+  unified `uv` dependency resolve via cm-cli (never sequential per-pack pip), `pip check`
+  coherence gate, models downloaded + sha-verified (null-sha → reported in
+  `unverified_models[]`), packs **provisioned to disk BEFORE ComfyUI starts** so they load
+  on first start. Node-addressed outputs `{node_id:[{path,type,kind,width,height}]}` +
+  `image_path` alias; every failure a **typed DEFER** `{deferred,code,ref,detail}` — never
+  cloud. New config: `run_graph_script`. Spec:
+  `docs/superpowers/specs/2026-07-17-run-graph-primitive-design.md`.
+- Setup: `Ensure-RunGraphDeps` provisions ComfyUI-Manager (cm-cli, required) + GitPython
+  (required by cm-cli itself) + comfy-cli (optional, best-effort).
+
+### Fixed / hardened
+- **Host-constraints (v1 protection):** every pip/uv the satisfier spawns runs under a
+  constraints file pinning the host's `torch/torchvision/torchaudio/numpy`
+  (`PIP_CONSTRAINT`/`UV_CONSTRAINT`), plus a post-install drift tripwire → a pack set that
+  cannot install additively around the CUDA stack defers `VENV_INCOHERENT` instead of
+  silently replacing ComfyUI's torch (live finding: the scene-swap lock resolved
+  torch 2.11.0+cu128 → 2.13.0, which would have broken the Wan video path).
+- Empty/models-only manifests skip the pack satisfier entirely (no cm-cli invocation).
+- git arg-injection hardening in pack provisioning (`--` clone guard + commit-ref charset).
 
 ## [0.17.0] - 2026-07-16
 

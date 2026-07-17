@@ -124,6 +124,10 @@ ctx (quality lever; model window is 256K design / 128K common serving cap). Thes
 carry a `config_seed` (720p-class video defaults) applied ONLY to a fresh
 `~/.local-offload/config.json` — an existing per-machine config is never touched. llama-swap
 does NO VRAM accounting: all values are PROJECTED until `selftest.ps1` measures the real box.
+On a real `blackwell-72` box the 26B stays Q4_K today; a **Q8_0 26B pin (~28 GB)** is an
+available quality upgrade held as a follow-up — activate it only after a ≥64 GB card verifies
+the download fits all-resident and measures the quality/throughput gain (spec decision 3 +
+"Out of scope").
 Spec: `docs/superpowers/specs/2026-07-16-blackwell-profile-tiers-design.md`.
 
 ### Quality-first generation policy (operator directive, 2026-07-16 — applies to EVERY tier)
@@ -134,6 +138,13 @@ opt-ins (`fast:true`), never defaults.** Spec + measured evidence:
 `docs/superpowers/specs/2026-07-16-quality-first-generation-design.md` (the quantized-distilled
 image default produced 3x on-grid patch blocking; the bf16 Base + official family graph at
 native 2048 removed it at 3.9 min/render on a 16GB card).
+
+**run-graph host pinning (v1 protection, 2026-07-17):** when `offload_run_graph` satisfies a
+node manifest, every pip/uv it spawns is constrained to the host's installed
+`torch/torchvision/torchaudio/numpy` (`PIP_CONSTRAINT`/`UV_CONSTRAINT` + a post-install drift
+tripwire). A pack set that cannot install additively around the box's CUDA stack DEFERs
+`VENV_INCOHERENT` — it never replaces ComfyUI's torch (which would break the video path).
+Do not remove these pins to "make a pack install work"; that trade is never authorized.
 
 Every ≥16GB CUDA tier's `config_seed` binds: HiDream-O1 **bf16 Base** via `imagegen_family`
 (the official graph — never the generic SDXL graph for a DiT), Wan 2.2 **Q8_0** experts +
@@ -146,6 +157,26 @@ ComfyUI ≥ v0.21.1 (the HiDream-O1 nodes) and ≥~48GB system RAM for the offlo
 8GB tiers: **VERIFIED** — O1 bf16 @2048 runs on an 8GB 3070 with 64GB RAM (5.9 min/render,
 an 8GB 3070 + 64GB RAM box, 2026-07-16). The seed stays off for 8GB tiers only because low-RAM boxes can't offload
 it — bind manually on any 8GB box with ≥~48GB RAM; video Q8_0 via DisTorch2 likewise.
+
+### run-graph satisfier prerequisite (`offload_run_graph`)
+
+`offload_run_graph` self-provisions a workflow's node manifest against the ComfyUI install.
+Packs are cloned/checked out at their pinned commits via **git**, then ALL packs' deps are
+resolved in **one `uv pip compile`** (under the host-torch constraints) and installed as one
+lock — so **`uv` in the ComfyUI venv is the REQUIRED satisfier tool** (live finding
+2026-07-17: the installed cm-cli has no `--uv` flag, so uv is driven directly).
+`install.ps1` provisions the full set — ComfyUI-Manager clone + GitPython (cm-cli's own
+import) + **`pip install uv`** — as part of the run-graph deps step, guarded to skip when
+present. It runs only when a ComfyUI install is discoverable — override with
+`$env:COMFY_DIR` (default `C:/ComfyUI`) / `$env:COMFY_PY`.
+
+`comfy-cli` is an **optional convenience only** — run-graph does **not** depend on it.
+`install.ps1` installs it best-effort: on boxes where its wheel deps (`pydantic-core`) have
+no prebuilt wheel and no Rust toolchain, the install logs a **WARN and continues**.
+
+If `uv` is missing at call time, run-graph returns a clean **DEFER `SATISFIER_UNAVAILABLE`**
+— never a crash, never a cloud fallback. A box without ComfyUI at all is unaffected by install
+(the deps step SKIPs); run-graph simply DEFERs the same way when invoked.
 
 ### Blackwell (sm_120) — detect the installed CUDA and adapt (be flexible)
 
