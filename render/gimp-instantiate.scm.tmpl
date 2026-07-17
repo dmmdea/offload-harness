@@ -1,0 +1,45 @@
+;; gimp-instantiate.scm.tmpl — DOCUMENTATION of the Script-Fu that
+;; internal/mediaops.BuildInstantiateScript generates for the
+;; instantiate_design edit op. Generation happens in Go (this file is never
+;; executed); kept beside the render scripts so the batch contract is
+;; reviewable without reading Go.
+;;
+;; Batch contract (same as flatten_design, LIVE-VERIFIED on gimp-console-3.2):
+;;   gimp-console-3.2.exe -i --batch-interpreter=plug-in-script-fu-eval \
+;;     -b "<the generated script>" -b "(gimp-quit 0)"
+;;   * paths are forward-slash; quotes in paths are rejected outright
+;;   * text values are scheme-escaped (\\ then \") — copy may contain quotes
+;;   * invocations are serialized process-wide (gimpMu): concurrent headless
+;;     consoles contend on the profile-directory lock
+;;   * PDB names verified against GIMP 3.2's shipped scripts + libgimp DLL:
+;;     gimp-drawable-get-offsets is the 3.x rename of 2.x gimp-drawable-offsets
+;;
+;; {{XCF}}  = the .xcf/.psd template ("image" argument of the edit call)
+;; {{OUT}}  = temp flat.png handed to the PIL pipeline for the remaining ops
+;; one set_text block per entry (sorted by layer name):
+;;   {{NAME}} = text layer name, {{TEXT}} = new copy
+;; one replace_image block per entry (sorted by layer name):
+;;   {{NAME}} = pixel layer name, {{PNG}} = replacement image path
+
+(let* ((image (car (gimp-file-load RUN-NONINTERACTIVE "{{XCF}}"))))
+  ;; -- set_text block, repeated --
+  (gimp-text-layer-set-text
+    (car (gimp-image-get-layer-by-name image "{{NAME}}")) "{{TEXT}}")
+  ;; -- replace_image block, repeated: load replacement as a layer, place it at
+  ;;    the old layer's offsets, drop the old layer --
+  (let* ((old (car (gimp-image-get-layer-by-name image "{{NAME}}")))
+         (new (car (gimp-file-load-layer RUN-NONINTERACTIVE image "{{PNG}}")))
+         (off (gimp-drawable-get-offsets old))
+         (pos (car (gimp-image-get-item-position image old))))
+    ;; Insert at the OLD layer's stack position (NOT -1/top — that covered every
+    ;; layer above it, e.g. the headline text; live E2E finding 2026-07-17) and
+    ;; scale to the old layer's bounds so an oversized replacement can't swallow
+    ;; the canvas.
+    (gimp-image-insert-layer image new 0 pos)
+    (gimp-layer-scale new (car (gimp-drawable-get-width old)) (car (gimp-drawable-get-height old)) FALSE)
+    (gimp-layer-set-offsets new (car off) (cadr off))
+    (gimp-image-remove-layer image old))
+  ;; -- tail --
+  (gimp-image-flatten image)
+  (gimp-file-save RUN-NONINTERACTIVE image "{{OUT}}"))
+(gimp-quit 0)

@@ -10,10 +10,19 @@
 //   node render/comfy-generate.mjs <out.png> "<prompt>" \
 //        [--negative "..."] [--width 1024] [--height 1024] [--steps 30] [--seed N] \
 //        [--ckpt name.safetensors] [--api http://127.0.0.1:8188] [--no-lock] [--keep-comfy]
+//   node render/comfy-generate.mjs --batch jobs.jsonl [--results r.jsonl] \
+//        [--negative ...] [--ckpt ...] [--vae ...] [--cfg ...] [--sampler ...] \
+//        [--scheduler ...] [--family ...] [--api ...] [--no-lock] [--reserve-vram F]
+//   Batch: one job per JSONL line ({"prompt","out",...}); N renders through ONE warm
+//   ComfyUI session (checkpoint loads once), one result line per job appended to
+//   --results (default <jobs>.results.jsonl). Zero-always-warm holds at the batch
+//   boundary: withGpuSlot's single teardown frees VRAM + kills the spawned ComfyUI.
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { readFileSync, writeFileSync, appendFileSync } from "node:fs";
 import { withGpuSlot } from "./gpu-lock.mjs";
+import { parseJobs, jobArgs, resultLine } from "./batch-jobs.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -27,18 +36,12 @@ for (let i = 0; i < argv.length; i++) {
 }
 const out = pos[0], prompt = pos[1];
 const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
-if (!out || !prompt) {
-  console.error('usage: node comfy-generate.mjs <out.png> "<prompt>" [--negative ...] [--width N] [--height N] [--steps N] [--seed N] [--ckpt name]');
-  process.exit(2);
-}
 
 // Delegate the actual render to the proven, unmodified comfy-render.mjs (ComfyUI is up now).
 // comfy-render reads seed/width/height as flags OR positionals, so flags alone suffice.
-function runRender() {
-  const args = [join(__dirname, "comfy-render.mjs"), out, prompt, "--api", API];
-  for (const k of ["negative", "width", "height", "steps", "seed", "ckpt", "vae", "cfg", "sampler", "scheduler", "family"]) {
-    if (flags[k] != null) args.push("--" + k, String(flags[k]));
-  }
+// runRenderArgs: spawn comfy-render.mjs with a prebuilt argv tail (out, prompt, flags).
+function runRenderArgs(tail) {
+  const args = [join(__dirname, "comfy-render.mjs"), ...tail];
   return new Promise((resolve, reject) => {
     const c = spawn("node", args, { stdio: "inherit" });
     c.on("exit", (code) => (code === 0 ? resolve() : reject(new Error("comfy-render exited " + code))));
@@ -46,7 +49,43 @@ function runRender() {
   });
 }
 
-withGpuSlot(
-  { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, reserveVram: flags["reserve-vram"] },
-  runRender,
-).catch((e) => { console.error("IMAGE GEN FAILED:", e.message); process.exit(1); });
+const sharedFlags = {};
+for (const k of ["api", "negative", "width", "height", "steps", "seed", "ckpt", "vae", "cfg", "sampler", "scheduler", "family"]) {
+  if (flags[k] != null) sharedFlags[k] = flags[k];
+}
+sharedFlags.api = API;
+
+if (flags.batch) {
+  // BATCH: N jobs through ONE warm ComfyUI session. The checkpoint loads once;
+  // withGpuSlot's teardown (freeComfy + kill + release) runs ONCE, at the batch
+  // boundary — zero-always-warm is preserved per-batch instead of per-render.
+  const jobs = parseJobs(readFileSync(flags.batch, "utf8"));
+  if (jobs.length === 0) { console.error("batch: no jobs in " + flags.batch); process.exit(2); }
+  const resultsPath = flags.results || flags.batch + ".results.jsonl";
+  writeFileSync(resultsPath, "");
+  withGpuSlot(
+    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, reserveVram: flags["reserve-vram"], warm: true },
+    async () => {
+      for (let i = 0; i < jobs.length; i++) {
+        const t0 = Date.now();
+        try {
+          await runRenderArgs(jobArgs(jobs[i], sharedFlags));
+          appendFileSync(resultsPath, resultLine(i, jobs[i], true, Date.now() - t0) + "\n");
+        } catch (e) {
+          // A single failed render must not sink the batch: record and continue.
+          appendFileSync(resultsPath, resultLine(i, jobs[i], false, Date.now() - t0, e.message) + "\n");
+        }
+        console.error(`batch ${i + 1}/${jobs.length} done (${Math.round((Date.now() - t0) / 1000)}s)`);
+      }
+    },
+  ).catch((e) => { console.error("IMAGE BATCH FAILED:", e.message); process.exit(1); });
+} else {
+  if (!out || !prompt) {
+    console.error('usage: node comfy-generate.mjs <out.png> "<prompt>" [--negative ...] [--width N] [--height N] [--steps N] [--seed N] [--ckpt name] | --batch jobs.jsonl [--results r.jsonl]');
+    process.exit(2);
+  }
+  withGpuSlot(
+    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, reserveVram: flags["reserve-vram"] },
+    () => runRenderArgs(jobArgs({ out, prompt }, sharedFlags)),
+  ).catch((e) => { console.error("IMAGE GEN FAILED:", e.message); process.exit(1); });
+}

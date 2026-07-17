@@ -46,6 +46,33 @@ test("--reserve-vram is per-workflow-overridable (invariant 5)", async () => {
   assert.equal(spawnedArgs[ri + 1], "2.0", "override threaded through");
 });
 
+test("warm:true omits --cache-none but keeps the other flags (batch session)", async () => {
+  let spawnedArgs = null;
+  let ups = 0;
+  const child = await ensureComfy({
+    comfyUp: async () => (ups++ > 0),
+    spawn: (py, args) => { spawnedArgs = args; return { kill() {} }; },
+    warm: true,
+    pollMs: 1,
+  });
+  assert.ok(child);
+  assert.ok(!spawnedArgs.includes("--cache-none"), "warm session must not disable the model cache");
+  assert.ok(spawnedArgs.includes("--disable-smart-memory"), "smart-memory stays off");
+  const ri = spawnedArgs.indexOf("--reserve-vram");
+  assert.ok(ri >= 0, "still reserves VRAM for the display");
+});
+
+test("warm defaults to false (zero-always-warm unchanged)", async () => {
+  let spawnedArgs = null;
+  let ups = 0;
+  await ensureComfy({
+    comfyUp: async () => (ups++ > 0),
+    spawn: (py, args) => { spawnedArgs = args; return { kill() {} }; },
+    pollMs: 1,
+  });
+  assert.ok(spawnedArgs.includes("--cache-none"), "default launch still passes --cache-none");
+});
+
 test("never ready => kills the child and throws", async () => {
   let killed = 0;
   await assert.rejects(

@@ -78,6 +78,21 @@ test("freeLlamaSwap runs BEFORE fn (the render gets the whole GPU)", async () =>
   assert.ok(h.calls.indexOf("freeLlamaSwap") < h.calls.indexOf("fn"), "freeLlamaSwap precedes fn");
 });
 
+test("warm is threaded to ensureComfy and teardown still frees at the end", async () => {
+  const calls = [];
+  let ensureOpts = null;
+  await withGpuSlot({
+    warm: true,
+    acquire: async () => ({ release() { calls.push("release"); } }),
+    freeLlamaSwap: async () => { calls.push("freeLS"); },
+    ensureComfy: async (o) => { ensureOpts = o; calls.push("ensure"); return { kill() { calls.push("kill"); } }; },
+    freeComfy: async () => { calls.push("freeComfy"); },
+  }, async () => { calls.push("fn"); });
+  assert.equal(ensureOpts.warm, true, "warm reaches ensureComfy");
+  assert.deepEqual(calls, ["freeLS", "ensure", "fn", "freeComfy", "kill", "release"],
+    "guarded teardown unchanged: free + kill + release AFTER fn (the whole batch)");
+});
+
 test("no-lock mode: acquire skipped, fn runs, no release error", async () => {
   const h = harness();
   await withGpuSlot({ ...h.opts, ...h.deps, noLock: true }, async () => { h.calls.push("fn"); });

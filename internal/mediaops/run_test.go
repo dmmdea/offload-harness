@@ -3,6 +3,9 @@ package mediaops
 import (
 	"context"
 	"errors"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -110,6 +113,66 @@ func TestWorkerSelftest(t *testing.T) {
 	}
 	if want := "SELFTEST PASS"; !containsStr(string(out), want) {
 		t.Fatalf("selftest output missing %q: %s", want, out)
+	}
+}
+
+// TestRunEditImage_Renditions runs the REAL worker (skips without a PIL python):
+// one master + two renditions from a Go-generated PNG, checking the export loop
+// writes every <stem><suffix>.<ext> and reports them in the result.
+func TestRunEditImage_Renditions(t *testing.T) {
+	py := ResolveEditPython("", defaultComfyDirForTest())
+	if py == "" {
+		t.Skip("no PIL python resolvable on this box")
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "in.png")
+	writeTestPNG(t, src, 64, 48)
+	out := filepath.Join(dir, "master.png")
+	worker, _ := filepath.Abs(filepath.Join("..", "..", "render", "edit_image.py"))
+	res, err := RunEditImage(context.Background(),
+		EditConfig{Python: py, Worker: worker, Timeout: 60 * time.Second},
+		EditRequest{Image: src, Out: out, Ops: []EditOp{{Op: "resize", Width: 32}},
+			Renditions: []Rendition{
+				{Width: 16, Format: "jpg", Suffix: "-web"},
+				{Width: 8, Format: "png", Suffix: "-ig"},
+			}})
+	if err != nil {
+		t.Fatalf("RunEditImage with renditions failed: %v", err)
+	}
+	want := []string{filepath.Join(dir, "master-web.jpg"), filepath.Join(dir, "master-ig.png")}
+	if len(res.Renditions) != 2 || res.Renditions[0] != want[0] || res.Renditions[1] != want[1] {
+		t.Fatalf("renditions = %v, want %v", res.Renditions, want)
+	}
+	for _, p := range append(want, out) {
+		if fi, err := os.Stat(p); err != nil || fi.Size() == 0 {
+			t.Fatalf("missing/empty output %s: %v", p, err)
+		}
+	}
+	// a bad rendition set fails fast, before any work
+	_, err = RunEditImage(context.Background(),
+		EditConfig{Python: py, Worker: worker, Timeout: 60 * time.Second},
+		EditRequest{Image: src, Out: out, Ops: []EditOp{{Op: "resize", Width: 32}},
+			Renditions: []Rendition{{Format: "png", Suffix: "-a"}}})
+	if err == nil {
+		t.Fatal("dimensionless rendition must fail validation")
+	}
+}
+
+func writeTestPNG(t *testing.T, path string, w, h int) {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for x := 0; x < w; x++ {
+		for y := 0; y < h; y++ {
+			img.Set(x, y, color.RGBA{uint8(x * 4), uint8(y * 5), 96, 255})
+		}
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		t.Fatal(err)
 	}
 }
 

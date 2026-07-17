@@ -27,19 +27,21 @@ type EditConfig struct {
 
 // EditRequest is one offload_edit_image call (ops already shaped; validated here).
 type EditRequest struct {
-	Image string
-	Ops   []EditOp
-	Out   string
+	Image      string
+	Ops        []EditOp
+	Out        string
+	Renditions []Rendition // optional export matrix derived from the master Out
 }
 
 // EditResult mirrors the tool's return payload (spec §1).
 type EditResult struct {
-	Out        string  `json:"image_path"`
-	Width      int     `json:"width"`
-	Height     int     `json:"height"`
-	OpsApplied int     `json:"ops_applied"`
-	Layers     []Layer `json:"layers,omitempty"`
-	Engine     string  `json:"engine"`
+	Out        string   `json:"image_path"`
+	Width      int      `json:"width"`
+	Height     int      `json:"height"`
+	OpsApplied int      `json:"ops_applied"`
+	Layers     []Layer  `json:"layers,omitempty"`
+	Renditions []string `json:"renditions,omitempty"`
+	Engine     string   `json:"engine"`
 }
 
 // RunEditImage validates and executes a whole edit pipeline: optional GIMP
@@ -52,6 +54,9 @@ func RunEditImage(ctx context.Context, cfg EditConfig, req EditRequest) (EditRes
 	if err := ValidateOps(req.Ops); err != nil {
 		return res, err
 	}
+	if err := ValidateRenditions(req.Renditions); err != nil {
+		return res, err
+	}
 	if _, err := os.Stat(req.Image); err != nil {
 		return res, fmt.Errorf("input image not found: %s", req.Image)
 	}
@@ -59,8 +64,9 @@ func RunEditImage(ctx context.Context, cfg EditConfig, req EditRequest) (EditRes
 	pilInput, ops := req.Image, req.Ops
 	res.Engine = "pil"
 	if UsesGimp(req.Ops) {
+		gimpOp := req.Ops[0]
 		if cfg.GimpConsole == "" {
-			return res, fmt.Errorf("flatten_design needs GIMP (gimp_console_path unset): %w", ErrEngineAbsent)
+			return res, fmt.Errorf("%s needs GIMP (gimp_console_path unset): %w", gimpOp.Op, ErrEngineAbsent)
 		}
 		if _, err := os.Stat(cfg.GimpConsole); err != nil {
 			return res, fmt.Errorf("gimp_console_path %q not found: %w", cfg.GimpConsole, ErrEngineAbsent)
@@ -72,15 +78,31 @@ func RunEditImage(ctx context.Context, cfg EditConfig, req EditRequest) (EditRes
 		defer os.RemoveAll(tmpDir)
 		flatPng := filepath.Join(tmpDir, "flat.png")
 		layersTxt := filepath.Join(tmpDir, "layers.txt")
-		script, err := BuildGimpScript(req.Image, flatPng, layersTxt)
+		var script string
+		if gimpOp.Op == "instantiate_design" {
+			for name, p := range gimpOp.ReplaceImage {
+				if _, err := os.Stat(p); err != nil {
+					return res, fmt.Errorf("instantiate_design replace_image[%q]: file not found: %s", name, p)
+				}
+			}
+			script, err = BuildInstantiateScript(req.Image, flatPng, gimpOp.SetText, gimpOp.ReplaceImage)
+		} else {
+			script, err = BuildGimpScript(req.Image, flatPng, layersTxt)
+		}
 		if err != nil {
 			return res, err
 		}
-		if _, stderr, err := runCapture(ctx, cfg.Timeout, nil, nil, cfg.GimpConsole, GimpArgs(script)...); err != nil {
-			return res, fmt.Errorf("gimp flatten failed: %s", tail(stderr, 300))
+		// serialize headless GIMPs: concurrent consoles contend on the profile lock
+		gimpMu.Lock()
+		_, stderr, err := runCapture(ctx, cfg.Timeout, nil, nil, cfg.GimpConsole, GimpArgs(script)...)
+		gimpMu.Unlock()
+		if err != nil {
+			return res, fmt.Errorf("gimp %s failed: %s", gimpOp.Op, tail(stderr, 300))
 		}
 		if fi, err := os.Stat(flatPng); err != nil || fi.Size() == 0 {
-			return res, fmt.Errorf("gimp produced no flattened raster for %s", req.Image)
+			// a script-fu error (e.g. layer name mismatch) can exit 0 but produce no
+			// raster — surface GIMP's stderr, it names the failing call
+			return res, fmt.Errorf("gimp produced no raster for %s (%s)", req.Image, tail(stderr, 300))
 		}
 		if b, err := os.ReadFile(layersTxt); err == nil {
 			res.Layers = ParseLayerList(string(b))
@@ -92,14 +114,40 @@ func RunEditImage(ctx context.Context, cfg EditConfig, req EditRequest) (EditRes
 	if cfg.Python == "" {
 		return res, fmt.Errorf("image editing needs the PIL engine (edit_python unresolvable): %w", ErrEngineAbsent)
 	}
-	payload, _ := json.Marshal(map[string]any{"image": pilInput, "ops": ops, "out": req.Out})
+	w, h, err := runEditWorker(ctx, cfg, pilInput, ops, req.Out)
+	if err != nil {
+		return res, err
+	}
+	res.Out, res.Width, res.Height = req.Out, w, h
+	res.OpsApplied = len(req.Ops)
+
+	// export matrix: each rendition is a fresh worker pass over the master out
+	// (resize + convert), writing <out-stem><suffix>.<format> beside it.
+	for _, r := range req.Renditions {
+		rOut := renditionOut(req.Out, r)
+		rOps := []EditOp{
+			{Op: "resize", Width: r.Width, Height: r.Height},
+			{Op: "convert", Format: r.Format},
+		}
+		if _, _, err := runEditWorker(ctx, cfg, req.Out, rOps, rOut); err != nil {
+			return res, fmt.Errorf("rendition %q: %w", r.Suffix, err)
+		}
+		res.Renditions = append(res.Renditions, rOut)
+	}
+	return res, nil
+}
+
+// runEditWorker runs one render/edit_image.py invocation (image -> ops -> out)
+// and returns the produced width/height.
+func runEditWorker(ctx context.Context, cfg EditConfig, image string, ops []EditOp, outPath string) (int, int, error) {
+	payload, _ := json.Marshal(map[string]any{"image": image, "ops": ops, "out": outPath})
 	stdout, _, err := runCapture(ctx, cfg.Timeout, payload, nil, cfg.Python, cfg.Worker)
 	if err != nil {
 		// the worker prints {"error": ...} on stdout for arg/pipeline failures
 		if msg := workerError(stdout); msg != "" {
-			return res, fmt.Errorf("edit pipeline: %s", msg)
+			return 0, 0, fmt.Errorf("edit pipeline: %s", msg)
 		}
-		return res, err
+		return 0, 0, err
 	}
 	var out struct {
 		Out    string `json:"out"`
@@ -108,11 +156,9 @@ func RunEditImage(ctx context.Context, cfg EditConfig, req EditRequest) (EditRes
 		N      int    `json:"ops_applied"`
 	}
 	if jerr := json.Unmarshal([]byte(lastJSONLine(stdout)), &out); jerr != nil {
-		return res, fmt.Errorf("edit worker returned no result JSON (%s)", tail(stdout, 200))
+		return 0, 0, fmt.Errorf("edit worker returned no result JSON (%s)", tail(stdout, 200))
 	}
-	res.Out, res.Width, res.Height = out.Out, out.Width, out.Height
-	res.OpsApplied = len(req.Ops)
-	return res, nil
+	return out.Width, out.Height, nil
 }
 
 // MediaConfig carries the ffmpeg binding.

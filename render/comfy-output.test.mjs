@@ -18,3 +18,22 @@ test("reads VHS_VideoCombine gifs, native videos, and images", () => {
   assert.equal(firstOutputFile({ "9": {} }), null);
   assert.equal(firstOutputFile({}), null);
 });
+
+import { allOutputsByNode } from "./comfy-output.mjs";
+
+test("allOutputsByNode maps every save node to its files with kind", () => {
+  const outputs = {
+    "9":  { images: [{ filename: "a.png", subfolder: "", type: "output" }] },
+    "12": { images: [{ filename: "mask.png", subfolder: "sub", type: "output" }] },
+    "20": { gifs:   [{ filename: "v.mp4", subfolder: "", type: "output" }] },
+  };
+  const got = allOutputsByNode(outputs);
+  assert.deepEqual(got["9"],  [{ filename: "a.png", subfolder: "", type: "output", kind: "image" }]);
+  assert.deepEqual(got["12"], [{ filename: "mask.png", subfolder: "sub", type: "output", kind: "image" }]);
+  assert.deepEqual(got["20"], [{ filename: "v.mp4", subfolder: "", type: "output", kind: "gif" }]);
+});
+
+test("allOutputsByNode returns {} for empty/nullish", () => {
+  assert.deepEqual(allOutputsByNode(null), {});
+  assert.deepEqual(allOutputsByNode({ "1": {} }), {});
+});

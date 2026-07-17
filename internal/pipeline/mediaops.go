@@ -52,6 +52,16 @@ func (p *Pipeline) runEditImage(ctx context.Context, req core.Request, meta core
 			return deferWith("edit_image: bad ops: " + err.Error())
 		}
 	}
+	var rends []mediaops.Rendition
+	if raw, ok := req.Params["renditions"]; ok {
+		b, err := json.Marshal(raw)
+		if err != nil {
+			return deferWith("edit_image: bad renditions: " + err.Error())
+		}
+		if err := json.Unmarshal(b, &rends); err != nil {
+			return deferWith("edit_image: bad renditions: " + err.Error())
+		}
+	}
 	cfg := p.editConfig()
 	if cfg.Worker == "" {
 		return deferWith("edit_image: imagegen_script unset so render/edit_image.py is unlocatable — set imagegen_script (or install the render scripts)")
@@ -64,7 +74,7 @@ func (p *Pipeline) runEditImage(ctx context.Context, req core.Request, meta core
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
 		out = filepath.Join(p.cfg.MediaDir, "edit-"+sha256hex(req.Image+fmt.Sprint(req.Params["ops"]))[:8]+".png")
 	}
-	res, err := mediaops.RunEditImage(ctx, cfg, mediaops.EditRequest{Image: req.Image, Ops: ops, Out: out})
+	res, err := mediaops.RunEditImage(ctx, cfg, mediaops.EditRequest{Image: req.Image, Ops: ops, Out: out, Renditions: rends})
 	if err != nil {
 		return deferWith("edit_image: " + err.Error())
 	}

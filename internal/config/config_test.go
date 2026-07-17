@@ -80,6 +80,36 @@ func TestDefaultGenerationFields(t *testing.T) {
 	}
 }
 
+func TestInpaintFieldsRoundTrip(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "cfg.json")
+	js := `{"inpaint_script":"render/comfy-inpaint.mjs","inpaint_ckpt":"some-sdxl.safetensors",` +
+		`"inpaint_vae":"builtin","inpaint_steps":34,"inpaint_cfg":6.5,"inpaint_sampler":"dpmpp_2m",` +
+		`"inpaint_scheduler":"karras","inpaint_timeout_sec":1200}`
+	if err := os.WriteFile(p, []byte(js), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.InpaintScript != "render/comfy-inpaint.mjs" || got.InpaintCkpt != "some-sdxl.safetensors" ||
+		got.InpaintVAE != "builtin" || got.InpaintSteps != 34 || got.InpaintCFG != 6.5 ||
+		got.InpaintSampler != "dpmpp_2m" || got.InpaintScheduler != "karras" || got.InpaintTimeoutSec != 1200 {
+		t.Fatalf("inpaint fields did not round-trip: %+v", got)
+	}
+}
+
+func TestInpaintDefaults(t *testing.T) {
+	c := Default()
+	if c.InpaintScript != "" || c.InpaintCkpt != "" {
+		t.Errorf("inpaint route must default UNCONFIGURED (empty = defer); got script=%q ckpt=%q",
+			c.InpaintScript, c.InpaintCkpt)
+	}
+	if c.InpaintTimeoutSec != 900 {
+		t.Errorf("InpaintTimeoutSec = %d, want 900", c.InpaintTimeoutSec)
+	}
+}
+
 // TestDefaultMemoryStack: the CPU memory stack the GPU-free helper must never unload
 // is sourced from config (not a buried const) so a renamed/added member is honored.
 // Default carries the two canonical CPU-only members.
@@ -212,7 +242,8 @@ func pathFieldJSONNames(t *testing.T) []string {
 	return []string{
 		"ffmpeg_path", "media_dir", "svg_dir",
 		"imagegen_script", "node_path", "comfy_dir",
-		"videogen_script", "voicegen_script", "musicgen_script", "gpu_lock_path",
+		"inpaint_script",
+		"videogen_script", "run_graph_script", "voicegen_script", "musicgen_script", "gpu_lock_path",
 		"voicegen_ref", "voicegen_ft_model", "voicegen_ft_base_dir", "voicegen_ft_ref",
 		"edit_python", "gimp_console_path",
 		"cache_path", "ledger_path",

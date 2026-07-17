@@ -122,7 +122,10 @@ export function defaultLockPath() {
 //   1. acquires the cross-process GPU lock (honoring noLock); a busy slot THROWS GPU-busy
 //      (the runner exits non-zero → the Go wrapper maps it to a clean defer — invariant 4),
 //   2. freeLlamaSwap() so the render gets the whole 8GB (CPU mem-stack stays warm — inv. 1),
-//   3. optionally ensureComfy() (skipped when comfyManaged:false — the TTS path),
+//   3. optionally ensureComfy() (skipped when comfyManaged:false — the TTS path);
+//      warm:true is the BATCH-SESSION mode: ComfyUI keeps its model cache during fn
+//      (the checkpoint loads once for N renders) and step 5's teardown restores
+//      zero-warm at the batch boundary,
 //   4. awaits fn(),
 //   5. runs ONE guarded teardown (zero-always-warm — invariant 3): freeComfy() + kill a
 //      ComfyUI we spawned (unless keepComfy) + lock.release(). The teardown is guarded so
@@ -137,6 +140,7 @@ export async function withGpuSlot(opts, fn) {
     noLock = false,
     keepComfy = false,
     comfyManaged = true,
+    warm = false,
     reserveVram,
     lockPath = defaultLockPath(),
     acquire = acquireGpuLock,
@@ -162,7 +166,12 @@ export async function withGpuSlot(opts, fn) {
   for (const sig of ["SIGINT", "SIGTERM", "SIGBREAK"]) process.on(sig, onSig);
   try {
     await freeLS();                       // give the render the whole 8GB (CPU mem-stack stays warm)
-    if (comfyManaged) comfyChild = await ensureComfy(reserveVram != null ? { reserveVram } : {});
+    if (comfyManaged) {
+      comfyChild = await ensureComfy({
+        ...(reserveVram != null ? { reserveVram } : {}),
+        ...(warm ? { warm: true } : {}),
+      });
+    }
     return await fn({ comfyChild });
   } finally {
     await cleanup();

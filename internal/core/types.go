@@ -38,6 +38,12 @@ const (
 	// grammar) — it shells out to render/comfy-generate.mjs, which takes the shared
 	// GPU lock and starts/stops ComfyUI. Returns {image_path,width,height,seed}.
 	TaskGenerateImage TaskType = "generate_image"
+	// TaskInpaintImage generatively re-renders ONLY the masked region of an existing
+	// image on the LOCAL ComfyUI (masked re-denoise via VAEEncodeForInpaint; SDXL-class
+	// binding required — see config inpaint_*). Its own branch in pipeline.Run — it
+	// shells out to render/comfy-inpaint.mjs via internal/gpugen (shared GPU lock +
+	// ComfyUI lifecycle). Returns {image_path, seed}.
+	TaskInpaintImage TaskType = "inpaint_image"
 	// TaskGenerateSVG renders a brand-agnostic parametric SVG component (gauge,
 	// comparison-bar, chromatogram, icon) from a JSON spec via internal/svgkit —
 	// pure Go, no model/GPU. Its own branch in pipeline.Run. params: kind (string),
@@ -64,12 +70,18 @@ const (
 	// mux_audio/probe) via internal/mediaops. Pure CPU — NO GPU lock. Own branch
 	// in pipeline.Run. Returns op-specific JSON.
 	TaskMedia TaskType = "media"
+	// TaskRunGraph executes an arbitrary ComfyUI API-format graph + satisfies its node
+	// manifest on the LOCAL ComfyUI. 100% generic — the caller owns graph semantics.
+	// Its own branch in pipeline.Run — it shells out to render/comfy-run-graph.mjs via
+	// internal/rungraph (shared GPU lock + ComfyUI lifecycle + manifest satisfaction).
+	// Returns a node-addressed output envelope {outputs, image_path, unverified_models}.
+	TaskRunGraph TaskType = "run_graph"
 )
 
 // Valid reports whether t is a known task type.
 func (t TaskType) Valid() bool {
 	switch t {
-	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage, TaskGenerateSVG, TaskGenerateVideo, TaskGenerateAudio, TaskEditImage, TaskMedia:
+	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskGenerateSVG, TaskGenerateVideo, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskRunGraph:
 		return true
 	}
 	return false
