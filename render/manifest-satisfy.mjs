@@ -19,9 +19,17 @@ export async function satisfyModels(models, deps) {
     try { await download(m.source_url, abs); }
     catch (e) { return defer("MODEL_DOWNLOAD_FAILED", m.path, String(e.message || e)); }
     if (m.sha256) {
-      const got = await sha256(abs);
-      if (got !== m.sha256) return defer("MODEL_SHA_MISMATCH", m.path, `want ${m.sha256} got ${got}`);
-      writeSentinel(abs, got);
+      // Guard the post-download hash read AND the sentinel write: an FS failure here
+      // must defer typed, not escape as an untyped process crash (the sentinel write
+      // was previously outside any try — a fresh download that failed to write its
+      // .sha-ok sidecar took the whole run down).
+      try {
+        const got = await sha256(abs);
+        if (got !== m.sha256) return defer("MODEL_SHA_MISMATCH", m.path, `want ${m.sha256} got ${got}`);
+        writeSentinel(abs, got);
+      } catch (e) {
+        return defer("MODEL_DOWNLOAD_FAILED", m.path, "post-download verify/sentinel failed: " + String(e.message || e));
+      }
     } else {
       unverified.push(m.path);           // downloaded, UNVERIFIED — reported as data
     }
@@ -93,7 +101,7 @@ export async function satisfyManifest(manifest, deps) {
 }
 
 import { spawn as nodeSpawn } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { tmpdir } from "node:os";
@@ -234,12 +242,12 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
     },
     exists: (p) => existsSync(p),
     sentinelOk: (p) => existsSync(p + ".sha-ok"),
-    writeSentinel: (p, h) => require("node:fs").writeFileSync(p + ".sha-ok", h),
+    writeSentinel: (p, h) => writeFileSync(p + ".sha-ok", h),
     download: async (url, dest) => {
       const r = await fetch(url); if (!r.ok) throw new Error(`${r.status}`);
-      require("node:fs").mkdirSync(require("node:path").dirname(dest), { recursive: true });
+      mkdirSync(dirname(dest), { recursive: true });
       const buf = Buffer.from(await r.arrayBuffer());
-      require("node:fs").writeFileSync(dest, buf);
+      writeFileSync(dest, buf);
     },
     sha256: (p) => new Promise((res, rej) => {
       const h = createHash("sha256"); const s = createReadStream(p);
