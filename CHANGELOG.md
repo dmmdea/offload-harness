@@ -4,6 +4,23 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.3] - 2026-07-18
+
+### Fixed — run-graph model satisfier crashed with "require is not defined"
+- `render/manifest-satisfy.mjs`'s `defaultSatisfyDeps` called `require("node:fs")` /
+  `require("node:path")` inside this ESM module, which throws `ReferenceError: require is not
+  defined`. Two real failures resulted: a model **present on disk with a manifest `sha256` but no
+  `.sha-ok` sentinel** fell through to the download branch and deferred `MODEL_DOWNLOAD_FAILED`
+  ("require is not defined") even though nothing was wrong with the file, and a **fresh download**
+  threw from `writeSentinel` (which sat outside any try/catch) and crashed the whole run with an
+  untyped exit. Replaced the four `require()` calls (one in `writeSentinel`, three in `download`) with
+  the existing ESM imports (adding `mkdirSync`).
+- Hardened the post-download path in `satisfyModels`: the hash read and sentinel write are now
+  guarded, so a genuine filesystem failure defers typed (`MODEL_DOWNLOAD_FAILED`) instead of escaping
+  as a process crash.
+- Added regression tests exercising the real `defaultSatisfyDeps.writeSentinel` / `.download`
+  closures (the production glue was previously untested — the gap that hid this).
+
 ## [0.22.2] - 2026-07-18
 
 ### Changed — operator-neutral memory namespace (multitenancy)

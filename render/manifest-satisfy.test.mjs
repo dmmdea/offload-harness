@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { satisfyModels } from "./manifest-satisfy.mjs";
+import { satisfyModels, defaultSatisfyDeps } from "./manifest-satisfy.mjs";
+import { mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { satisfyManifest, buildHostConstraints, publicPin } from "./manifest-satisfy.mjs";
 import { parseManifest } from "./manifest.mjs";
 import { buildCompileCmd, buildInstallCmd, buildEnsurePackCmd, buildClonePackCmd, makeEnsurePack } from "./manifest-satisfy.mjs";
@@ -209,4 +212,43 @@ test("publicPin strips a PEP 440 local-version suffix, leaves public pins alone"
   assert.equal(publicPin("torch==2.11.0+cu128"), "torch==2.11.0");
   assert.equal(publicPin("numpy==2.1.2"), "numpy==2.1.2");
   assert.equal(publicPin("torchvision==0.26.0+rocm6.2"), "torchvision==0.26.0");
+});
+
+// Regression: defaultSatisfyDeps is the production glue, previously untested. Its
+// writeSentinel/download closures called require("node:fs") inside this ESM module,
+// which throws "require is not defined" — a present-but-unsentineled model deferred
+// MODEL_DOWNLOAD_FAILED, and a fresh download crashed the process. These exercise the
+// real closures.
+function realDeps() {
+  const dir = mkdtempSync(join(tmpdir(), "satisfy-real-"));
+  const deps = defaultSatisfyDeps({ comfyDir: dir, comfyPy: join(dir, "python"), api: "http://127.0.0.1:0", cmCli: "" });
+  return { dir, deps };
+}
+
+test("defaultSatisfyDeps.writeSentinel writes the sidecar (no require in ESM)", () => {
+  const { dir, deps } = realDeps();
+  try {
+    const model = join(dir, "model.safetensors");
+    deps.writeSentinel(model, "deadbeef");
+    assert.ok(existsSync(model + ".sha-ok"), "sentinel sidecar written");
+    assert.equal(readFileSync(model + ".sha-ok", "utf8"), "deadbeef");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("defaultSatisfyDeps.download creates dirs and writes bytes (no require in ESM)", async () => {
+  const { dir, deps } = realDeps();
+  const bytes = new TextEncoder().encode("model-bytes");
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, arrayBuffer: async () => bytes.buffer });
+  try {
+    const dest = join(dir, "nested", "sub", "model.bin"); // dirname must be mkdir'd
+    await deps.download("http://example/model.bin", dest);
+    assert.ok(existsSync(dest), "downloaded file written into created dirs");
+    assert.equal(readFileSync(dest, "utf8"), "model-bytes");
+  } finally {
+    globalThis.fetch = origFetch;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
