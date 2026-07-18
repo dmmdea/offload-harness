@@ -347,6 +347,20 @@ type Config struct {
 	// NOTE: the NIM API key is deliberately NOT a config field — it is read from the
 	// NVIDIA_API_KEY (or NGC_API_KEY) env var so a secret never lands in a tracked
 	// config file or the public repo. A self-hosted NIM needs no key.
+	// --- fleet-node server (`fleet-serve` / `fleet-measure`; docs/FLEET-NODE.md) ---
+	// FleetListen is the fleet-serve bind address. Loopback by default; the
+	// production binding is the machine's TAILSCALE address behind
+	// --listen-trusted-network (never 0.0.0.0). Port 18811 — the dispatcher
+	// owns 18810.
+	FleetListen string `json:"fleet_listen,omitempty"`
+	// FleetNodeID names this node in /fleet/health. Empty = the OS hostname,
+	// resolved at serve time (so a shared config never bakes one box's name).
+	FleetNodeID string `json:"fleet_node_id,omitempty"`
+	// FleetSampler selects the per-render VRAM footprint source: "auto" (PDH
+	// per-process tree on Windows, nvidia-smi global-delta elsewhere), "pdh"
+	// (force the tree sampler), "global" (force global-delta — set this when
+	// the FLEET-NODE.md Afterburner validation shows PDH disagreeing >15%).
+	FleetSampler string `json:"fleet_sampler,omitempty"`
 }
 
 // Default returns a config suitable for the verified E4B-QAT+MTP setup.
@@ -443,6 +457,9 @@ func Default() Config {
 		NIMModel:                      "nvidia/nemotron-3-ultra-550b-a55b",
 		NIMMaxTokens:                  1024,
 		NIMTimeoutSec:                 120,
+		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
+		FleetNodeID:                   "",                // "" = hostname at serve time
+		FleetSampler:                  "auto",            // auto|pdh|global (FLEET-NODE.md)
 	}
 }
 

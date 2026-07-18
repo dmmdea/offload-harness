@@ -53,19 +53,23 @@ func buildArgs(p Params) []string {
 	return args
 }
 
-// Run executes the graph and returns the parsed output envelope. A non-zero exit /
-// timeout / missing result file surfaces as an error the caller maps to a DEFER.
-func Run(ctx context.Context, node, script, comfyDir string, p Params, timeout time.Duration, extraEnv ...string) (Envelope, error) {
+// Run executes the graph and returns the parsed output envelope. samp, when
+// non-nil, turns on gpugen's passive per-render VRAM peak sampling (fleet
+// footprints; nil = legacy path). A non-zero exit / timeout / missing result
+// file surfaces as an error the caller maps to a DEFER.
+func Run(ctx context.Context, node, script, comfyDir string, p Params, timeout time.Duration, samp *gpugen.Sampling, extraEnv ...string) (Envelope, error) {
 	env := []string{"COMFY_DIR=" + comfyDir}
 	if timeout > 0 {
 		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
 	}
 	// Out = the result envelope JSON: the mjs always writes it, so gpugen's size>0 stat
 	// gate is meaningful for image AND non-image graphs.
-	if _, err := gpugen.Generate(ctx, gpugen.Spec{
+	spec := gpugen.Spec{
 		Exe: node, Script: script, Args: buildArgs(p),
 		Env: append(env, extraEnv...), Out: p.ResultPath, Timeout: timeout,
-	}); err != nil {
+	}
+	samp.ApplyTo(&spec)
+	if _, err := gpugen.Generate(ctx, spec); err != nil {
 		return Envelope{}, err
 	}
 	raw, err := os.ReadFile(p.ResultPath)

@@ -66,6 +66,40 @@ Logs: `/tmp/agent-server.log`, `/tmp/openwebui.log`.
 | `stack did not confirm ready` | Read the two `/tmp/*.log` files; usually OpenWebUI still installing or the agent port busy. |
 | alias `FAIL — not in the live roster` | The yaml doesn't serve that alias, or a model file is missing. Check `llama-swap.yaml`. Vision/STT aliases are legitimately absent on a grunt-work-only install. |
 
+### Fleet node (`fleet-serve`) — accept dispatched renders from other boxes
+
+Full guide: `docs/FLEET-NODE.md`. The short operating loop:
+
+**Start** (loopback for a local check; the **Tailscale address** for production — the
+endpoints are unauthenticated, so the tailnet is the trust boundary; port **18811**,
+**never `0.0.0.0`**):
+
+```powershell
+local-offload fleet-serve                                                    # loopback smoke
+local-offload fleet-serve --listen 100.64.0.10:18811 --listen-trusted-network   # production (Tailscale addr)
+```
+
+**Verify:**
+
+```powershell
+curl http://127.0.0.1:18811/fleet/health
+# {"node_id":"node-a","schema_version":1,...,"vram_total_gb":15.9,"supported_task_types":["image-gen",...],"model_footprints":[...],"queue_depth":0}
+```
+
+An empty `model_footprints` on a fresh box is expected — prime it once with
+`local-offload fleet-measure` (one minimal render per configured task; prints the recorded
+entries).
+
+**Stop:** Ctrl-C. The server drains: new dispatches 503, in-flight renders get up to 30s,
+survivors are marked terminal `error:"interrupted"` so the dispatcher's pollers always
+resolve.
+
+| Failure | Fix |
+|---|---|
+| `refusing to bind --listen` | Non-loopback address without `--listen-trusted-network`. Use loopback, or add the flag for the Tailscale bind only. |
+| `GPU probe failed` at startup | `nvidia-smi` missing/broken. By design — a node that can't report VRAM would be treated as broken by the dispatcher. Fix the driver first. |
+| footprints look wrong vs Afterburner | Run the PDH-vs-Afterburner validation in `docs/FLEET-NODE.md`; >15% off → set `"fleet_sampler":"global"`. |
+
 ---
 
 ## 2. Chat with a model directly

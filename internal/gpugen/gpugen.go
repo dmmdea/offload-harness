@@ -19,6 +19,7 @@
 package gpugen
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -83,7 +85,54 @@ type Spec struct {
 	// path never starts ComfyUI, so there is nothing to free). The killTree + output
 	// stat still apply — the python worker still gets process-tree-killed on timeout.
 	SkipFreeComfy bool
+	// Footprint, when non-nil, turns on passive per-render VRAM peak sampling for
+	// the fleet-node footprint store (added 2026-07-17): while the child runs,
+	// SampleFunc is polled and the max observation is reported via OnFootprint —
+	// on SUCCESS only (a crashed/phantom run's peak may be partial). nil keeps the
+	// legacy CombinedOutput path byte-identical.
+	Footprint *FootprintKey
+	// SampleFunc returns the current VRAM usage in GiB attributable to the render
+	// rooted at childPid. The CALLER composes what a sample means (PDH process-tree
+	// sum, or a global-delta closure) — gpugen stays dependency-free and only tracks
+	// the peak. nil = no sampling (OnFootprint never fires).
+	SampleFunc func(childPid int) (float64, error)
+	// OnFootprint receives the observed peak (GiB) after a SUCCESSFUL render whose
+	// sampled peak was > 0. nil = observations are discarded.
+	OnFootprint func(peakGiB float64)
 }
+
+// FootprintKey identifies which footprint-store entry a sampled render belongs to
+// (mirrors the fleet contract's model_footprints identity: family + quant + task).
+type FootprintKey struct {
+	Family string // e.g. "sdxl", "wan2.2", "whisper", "acestep"
+	Quant  string // e.g. "bf16", "q8_0"; "" = node default
+	Task   string // fleet task_type, e.g. "image-gen"
+}
+
+// Sampling bundles Spec's passive footprint-sampling hook fields so the thin
+// wrappers (imagegen, rungraph) can thread them opaquely without growing three
+// parameters each. nil = no sampling (the legacy Spec path, byte-identical).
+type Sampling struct {
+	Footprint   *FootprintKey
+	SampleFunc  func(childPid int) (float64, error)
+	OnFootprint func(peakGiB float64)
+}
+
+// ApplyTo copies s onto spec. nil-safe: a nil receiver is a no-op, so callers
+// thread whatever the pipeline composed without a guard.
+func (s *Sampling) ApplyTo(spec *Spec) {
+	if s == nil {
+		return
+	}
+	spec.Footprint = s.Footprint
+	spec.SampleFunc = s.SampleFunc
+	spec.OnFootprint = s.OnFootprint
+}
+
+// footprintSampleInterval is how often SampleFunc is polled during a sampled
+// render. A var (not const) so tests can shorten it; 500ms is cheap for the PDH
+// path (no process spawn) and plenty for multi-second GPU renders.
+var footprintSampleInterval = 500 * time.Millisecond
 
 // Generate runs the spec's command, returning Out on success. A non-zero exit, a
 // timeout (child + tree killed), or a missing/empty Out returns an error so the
@@ -115,14 +164,70 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 		defer freeComfyVRAM(comfyAPI(spec.ComfyAPI))
 	}
 
-	o, err := cmd.CombinedOutput()
+	var (
+		o    []byte
+		err  error
+		peak float64
+	)
+	if spec.Footprint == nil {
+		// Legacy path — byte-identical to the pre-footprint behavior.
+		o, err = cmd.CombinedOutput()
+	} else {
+		o, peak, err = runSampled(cmd, spec.SampleFunc)
+	}
 	if err != nil {
 		return "", fmt.Errorf("gpugen: %s failed: %w (%s)", baseName(spec.Script), err, tail(o, 400))
 	}
 	if fi, statErr := os.Stat(spec.Out); statErr != nil || fi.Size() == 0 {
 		return "", fmt.Errorf("gpugen: no output at %q (%s)", spec.Out, tail(o, 400))
 	}
+	// SUCCESS only: a failed/phantom run's peak may be partial, so it never records.
+	if spec.Footprint != nil && spec.OnFootprint != nil && peak > 0 {
+		spec.OnFootprint(peak)
+	}
 	return spec.Out, nil
+}
+
+// runSampled runs cmd like CombinedOutput (one merged stdout+stderr buffer) but via
+// Start/Wait so a sampler can poll sample(childPid) while the child is alive: one
+// immediate sample (a fast child still gets observed), then every
+// footprintSampleInterval. Returns the merged output, the peak observation, and the
+// child's error. sample==nil degrades to a plain Start/Wait (peak 0).
+func runSampled(cmd *exec.Cmd, sample func(childPid int) (float64, error)) ([]byte, float64, error) {
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Start(); err != nil {
+		return buf.Bytes(), 0, err
+	}
+	var (
+		peak float64
+		done = make(chan struct{})
+		wg   sync.WaitGroup
+	)
+	if sample != nil {
+		pid := cmd.Process.Pid
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			t := time.NewTicker(footprintSampleInterval)
+			defer t.Stop()
+			for {
+				if g, serr := sample(pid); serr == nil && g > peak {
+					peak = g
+				}
+				select {
+				case <-done:
+					return
+				case <-t.C:
+				}
+			}
+		}()
+	}
+	err := cmd.Wait()
+	close(done)
+	wg.Wait() // happens-before: peak is safely visible after the sampler exits
+	return buf.Bytes(), peak, err
 }
 
 // killTree force-terminates p and ALL descendants. On Windows, killing the bare node

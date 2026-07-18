@@ -135,6 +135,8 @@ offload-harness nim "Summarize this" --model meta/llama-3.3-70b-instruct --base 
 
 # Operate & inspect
 offload-harness mcp                      # run as an MCP server (stdio)
+offload-harness fleet-serve              # join the fleet-dispatcher fleet (health/dispatch/jobs on :18811)
+offload-harness fleet-measure            # prime the fleet footprint store (one minimal render per configured task)
 offload-harness ledger [--since DAYS]    # token-savings report
 offload-harness doctor                   # endpoint health + config check
 offload-harness models                   # show configured models + serving flags
@@ -305,6 +307,17 @@ local-agent --serve --listen 127.0.0.1:18800 --base http://127.0.0.1:11436
 The endpoint is **unauthenticated** and drives write/GitHub tools, so it is **loopback-only**: a
 non-loopback `--listen` is refused unless you pass `--listen-trusted-network` (which prints a loud
 warning). See `docs/OPERATOR-GUIDE.md` for the full flag reference and context-budget guidance.
+
+## Fleet node (multi-machine rendering)
+
+`fleet-serve` turns the box into a **fleet node** for the Fleet Dispatcher: three
+contract-fixed HTTP endpoints (`/fleet/health`, `/fleet/dispatch`, `/fleet/jobs/{id}`) that
+accept GPU render jobs and run them through the exact same pipeline, GPU lock, and
+zero-warm lifecycle as local calls. Health advertises **measured** per-model-family VRAM
+footprints, recorded passively during normal use and primed on a fresh box with
+`fleet-measure`. Loopback by default; production binding is the Tailscale address behind
+`--listen-trusted-network`. See **[`docs/FLEET-NODE.md`](docs/FLEET-NODE.md)** for config
+keys, binding guidance, sampler modes, and the recommended MSI Afterburner companion setup.
 
 ## Chat GUI (OpenWebUI)
 

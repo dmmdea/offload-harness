@@ -13,8 +13,10 @@ import (
 	"math/big"
 	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +32,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/contextbudget"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/exemplars"
+	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/gbnf"
 	"github.com/dmmdea/offload-harness/internal/gpugen"
 	"github.com/dmmdea/offload-harness/internal/gpulock"
@@ -104,6 +107,15 @@ type Pipeline struct {
 	visionGPUWait   time.Duration
 	visionGPUPoll   time.Duration
 	visionRetryWait time.Duration
+	// Passive fleet footprint recording (docs/FLEET-NODE.md): every GPU render
+	// carries a gpugen sampling hook keyed by this machine's bindings, so
+	// measured VRAM peaks accumulate during NORMAL harness use, not just fleet
+	// jobs. footOnce lazily opens the shared store (a footprints.json sibling
+	// of the ledger/cache files); fleetSample overrides the composed sampler in
+	// tests (nil = select per cfg.FleetSampler).
+	footOnce    sync.Once
+	foot        *fleetnode.Footprints
+	fleetSample func(childPid int) (float64, error)
 }
 
 // Cfg exposes the loaded config so callers like the MCP server can build
@@ -777,7 +789,11 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 		Scheduler: p.cfg.ImageGenScheduler,
 		Family:    p.cfg.ImageGenFamily,
 	}
-	outPath, gerr := imagegen.Generate(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, prompt, req.Params, model, timeout, p.lockEnv()...)
+	// Passive fleet footprint: key this render by the machine's image binding
+	// (family + the O1 bf16 quant) so measured peaks accumulate during normal use.
+	imgFamily, imgQuant := imageFootprintKey(p.cfg)
+	outPath, gerr := imagegen.Generate(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, prompt, req.Params, model, timeout,
+		p.footprintSampling(imgFamily, imgQuant, "image-gen"), p.lockEnv()...)
 	if gerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		meta.ErrClass = classifyErr(gerr)
@@ -1085,7 +1101,10 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 	meta.Model = "comfyui-run-graph"
 
 	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second
-	env, gerr := rungraph.Run(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, params, timeout, p.lockEnv()...)
+	// Passive fleet footprint: family from a payload-declared model_family (the
+	// fleet dispatch path threads it) else the generic comfy-graph bucket.
+	env, gerr := rungraph.Run(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, params, timeout,
+		p.footprintSampling(runGraphFootprintFamily(req.Params), "", "run-graph"), p.lockEnv()...)
 	if gerr != nil {
 		meta.ErrClass = gpugen.ClassifyErr(gerr)
 		return p.deferGen(req, meta, start, len(req.Input), "run-graph failed: "+gerr.Error())
@@ -1212,14 +1231,18 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	if timeout > 0 {
 		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
 	}
-	outPath, gerr := gpugen.Generate(ctx, gpugen.Spec{
+	spec := gpugen.Spec{
 		Exe:     p.cfg.NodePath,
 		Script:  script,
 		Args:    args,
 		Env:     env,
 		Out:     out,
 		Timeout: timeout,
-	})
+	}
+	// Passive fleet footprint: the bound recipe family is Wan 2.2; quant q8_0
+	// only when this box binds the Q8_0 GGUF experts.
+	p.footprintSampling("wan2.2", videoFootprintQuant(p.cfg), "video-gen").ApplyTo(&spec)
+	outPath, gerr := gpugen.Generate(ctx, spec)
 	if gerr != nil {
 		meta.ErrClass = gpugen.ClassifyErr(gerr)
 		return p.deferGen(req, meta, start, len(req.Input), "video generation failed: "+gerr.Error())
@@ -1359,6 +1382,13 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 		Timeout:       timeout,
 		SkipFreeComfy: kind == "voice",
 	}
+	// Passive fleet footprint: acestep for the ComfyUI music worker, chatterbox
+	// for the TTS voice paths (incl. finetuned — same engine family).
+	audioFamily := "chatterbox"
+	if kind == "music" {
+		audioFamily = "acestep"
+	}
+	p.footprintSampling(audioFamily, "", "audio-gen").ApplyTo(&spec)
 	outPath, gerr := gpugen.Generate(ctx, spec)
 	if gerr != nil {
 		meta.ErrClass = gpugen.ClassifyErr(gerr)
@@ -1412,6 +1442,135 @@ func (p *Pipeline) lockEnv() []string {
 		return []string{"GPU_LOCK=" + p.cfg.GPULockPath}
 	}
 	return nil
+}
+
+// footprintsPath resolves the shared fleet footprint store path: a
+// "footprints.json" sibling of the ledger (else cache) file — the same
+// ~/.local-offload base the default config resolves those to, and
+// automatically isolated in tests that point them at temp dirs. Falls back to
+// ~/.local-offload/footprints.json when both are opted out; "" = no store
+// (sampling stays off).
+func (p *Pipeline) footprintsPath() string {
+	for _, anchor := range []string{p.cfg.LedgerPath, p.cfg.CachePath} {
+		if anchor != "" {
+			return filepath.Join(filepath.Dir(anchor), "footprints.json")
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".local-offload", "footprints.json")
+	}
+	return ""
+}
+
+// FootprintStore returns the lazily-opened shared footprint store (nil when no
+// path resolves). Exported for the fleet-serve/fleet-measure verbs: health
+// advertises its Entries(), fleet-measure prints its on-disk records.
+func (p *Pipeline) FootprintStore() *fleetnode.Footprints {
+	p.footOnce.Do(func() {
+		if path := p.footprintsPath(); path != "" {
+			p.foot = fleetnode.OpenFootprints(path)
+		}
+	})
+	return p.foot
+}
+
+// footprintSampling composes the passive per-render VRAM sampling hook for one
+// GPU render: the footprint key from THIS machine's bindings, the sampler
+// cfg.FleetSampler selects, and a record-into-the-shared-store callback
+// (gpugen fires it on SUCCESS only, peak > 0 only). nil when no store
+// resolves — gpugen then keeps its legacy exec path byte-identical.
+func (p *Pipeline) footprintSampling(family, quant, task string) *gpugen.Sampling {
+	store := p.FootprintStore()
+	if store == nil {
+		return nil
+	}
+	return &gpugen.Sampling{
+		Footprint:   &gpugen.FootprintKey{Family: family, Quant: quant, Task: task},
+		SampleFunc:  p.footprintSampleFunc(),
+		OnFootprint: func(peakGiB float64) { store.Record(family, quant, task, peakGiB) },
+	}
+}
+
+// footprintSampleFunc selects the per-render VRAM source per cfg.FleetSampler:
+// Windows + not-"global" → the PDH per-process tree (measures OUR job's cost,
+// uncontaminated by the desktop/other apps); otherwise an nvidia-smi
+// global-delta closure. p.fleetSample overrides in tests.
+func (p *Pipeline) footprintSampleFunc() func(childPid int) (float64, error) {
+	if p.fleetSample != nil {
+		return p.fleetSample
+	}
+	if runtime.GOOS == "windows" && p.cfg.FleetSampler != "global" {
+		return fleetnode.TreeDedicatedGiB
+	}
+	return globalDeltaSampleFunc(runNvidiaSmiMemory)
+}
+
+// globalDeltaSampleFunc builds the fallback sampler: global VRAM used minus a
+// baseline captured by the closure on its first call — which gpugen makes
+// immediately at child start, before the render loads anything. Called only
+// from gpugen's single sampler goroutine, so the baseline needs no lock.
+func globalDeltaSampleFunc(run func() (string, error)) func(childPid int) (float64, error) {
+	baseline := -1.0
+	return func(int) (float64, error) {
+		out, err := run()
+		if err != nil {
+			return 0, err
+		}
+		_, used, err := fleetnode.ParseSmiMemory(out)
+		if err != nil {
+			return 0, err
+		}
+		if baseline < 0 {
+			baseline = used
+		}
+		d := used - baseline
+		if d < 0 {
+			d = 0
+		}
+		return d, nil
+	}
+}
+
+// runNvidiaSmiMemory shells the global VRAM query the global-delta sampler
+// parses (the same query fleet-serve's 2s health sampler runs).
+func runNvidiaSmiMemory() (string, error) {
+	out, err := exec.Command("nvidia-smi", "--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits").Output()
+	return string(out), err
+}
+
+// imageFootprintKey is this box's image-render footprint identity: the
+// configured imagegen_family (else the script's SDXL default), with quant
+// "bf16" only for the HiDream-O1 checkpoint binding (the bf16 recipe) — every
+// other binding is "node default" per the contract.
+func imageFootprintKey(cfg config.Config) (family, quant string) {
+	family = cfg.ImageGenFamily
+	if family == "" {
+		family = "sdxl"
+	}
+	if strings.HasPrefix(family, "hidream-o1") {
+		quant = "bf16"
+	}
+	return family, quant
+}
+
+// videoFootprintQuant reports "q8_0" when this box's bound Wan expert weights
+// are the Q8_0 GGUFs, else "" (node default — fp8_scaled/fp16 bindings and the
+// script's own defaults).
+func videoFootprintQuant(cfg config.Config) string {
+	if strings.Contains(strings.ToUpper(cfg.VideoGenUnetHigh+cfg.VideoGenUnetLow), "Q8_0") {
+		return "q8_0"
+	}
+	return ""
+}
+
+// runGraphFootprintFamily is the run-graph footprint family: payload-declared
+// model_family when the caller supplied one (the fleet dispatch path), else
+// the generic "comfy-graph".
+func runGraphFootprintFamily(params map[string]any) string {
+	if fam := paramStr(params, "model_family"); fam != "" {
+		return fam
+	}
+	return "comfy-graph"
 }
 
 // deferGen records a deferred gen result with latency stamped, keeping the four gen

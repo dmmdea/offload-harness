@@ -113,6 +113,41 @@ func TestInpaintDefaults(t *testing.T) {
 // TestDefaultMemoryStack: the CPU memory stack the GPU-free helper must never unload
 // is sourced from config (not a buried const) so a renamed/added member is honored.
 // Default carries the two canonical CPU-only members.
+// TestFleetDefaults: fleet-serve binds loopback:18811 by default (the
+// dispatcher owns 18810), the node id resolves to the hostname at serve time
+// (never baked into a shareable config), and the footprint sampler is "auto"
+// (PDH tree on Windows, global-delta elsewhere).
+func TestFleetDefaults(t *testing.T) {
+	c := Default()
+	if c.FleetListen != "127.0.0.1:18811" {
+		t.Errorf("FleetListen = %q, want \"127.0.0.1:18811\"", c.FleetListen)
+	}
+	if c.FleetNodeID != "" {
+		t.Errorf("FleetNodeID = %q, want \"\" (hostname at serve time)", c.FleetNodeID)
+	}
+	if c.FleetSampler != "auto" {
+		t.Errorf("FleetSampler = %q, want \"auto\"", c.FleetSampler)
+	}
+}
+
+// TestFleetFieldsRoundTrip: the fleet keys load from JSON (a Tailscale binding
+// + explicit node id + forced global sampler — the FLEET-NODE.md fallback).
+func TestFleetFieldsRoundTrip(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "cfg.json")
+	js := `{"fleet_listen":"100.64.0.10:18811","fleet_node_id":"node-a","fleet_sampler":"global"}`
+	if err := os.WriteFile(p, []byte(js), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.FleetListen != "100.64.0.10:18811" || got.FleetNodeID != "node-a" || got.FleetSampler != "global" {
+		t.Fatalf("fleet fields did not round-trip: listen=%q node=%q sampler=%q",
+			got.FleetListen, got.FleetNodeID, got.FleetSampler)
+	}
+}
+
 func TestDefaultMemoryStack(t *testing.T) {
 	c := Default()
 	want := map[string]bool{"embeddinggemma": true, "bge-reranker-v2-m3": true}
