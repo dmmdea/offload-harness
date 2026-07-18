@@ -30,11 +30,11 @@ type Recalled struct {
 }
 
 // MemoryClient talks to the mem0 REST server (the agentic-memory system). It is
-// WRITE-ISOLATED by construction: it recalls across readUsers (e.g. the agent's
-// own namespace for run-to-run continuity + the canonical "dmmdea" namespace for
-// the operator's knowledge) but only ever WRITES under writeUser, and only at the
-// "evidence" tier — the mem0 server independently rejects any attempt to write
-// the canonical tier (403), so the agent cannot pollute the canonical anchor.
+// WRITE-ISOLATED by construction: it recalls across readUsers (the agent's own
+// namespace for run-to-run continuity, plus an optional operator/shared namespace
+// for the operator's own knowledge) but only ever WRITES under writeUser, and only
+// at the "evidence" tier — the mem0 server independently rejects any attempt to
+// write the canonical tier (403), so the agent cannot pollute the canonical anchor.
 type MemoryClient struct {
 	base      string
 	apiKey    string
@@ -42,6 +42,21 @@ type MemoryClient struct {
 	writeUser string
 	agentID   string
 	http      *http.Client
+}
+
+// ReadUsers builds the recall-namespace list for the agent: always the agent's
+// own namespace, plus an optional operator/shared namespace when one is
+// configured. The public build defaults the shared namespace to empty, so an
+// unconfigured agent recalls only its own namespace and carries no operator's
+// personal namespace baked in — an operator opts in by setting it (see the
+// --mem-shared-namespace flag / MEM0_SHARED_NAMESPACE). A whitespace-only value
+// is treated as unset.
+func ReadUsers(agentNamespace, sharedNamespace string) []string {
+	users := []string{agentNamespace}
+	if s := strings.TrimSpace(sharedNamespace); s != "" {
+		users = append(users, s)
+	}
+	return users
 }
 
 // NewMemoryClient builds a client. readUsers are the namespaces to recall from;

@@ -99,9 +99,10 @@ func main() {
 	maxSameTool := fs.Int("max-same-tool", 3, "cap on calls to any one tool name per run — the circuit breaker for a model that loops instead of progressing (e.g. repeated/reworded web_search calls). Negative disables the cap; 0 falls back to the built-in default (3).")
 	timeoutSec := fs.Int("timeout", 180, "per model call timeout (seconds)")
 	asJSON := fs.Bool("json", false, "print the full result JSON (transcript + telemetry)")
-	useMem := fs.Bool("memory", false, "enable mem0: recall (dmmdea + agent namespace) before planning, persist the run outcome after (evidence-tier, agent namespace only)")
+	useMem := fs.Bool("memory", false, "enable mem0: recall (agent namespace + optional shared namespace) before planning, persist the run outcome after (evidence-tier, agent namespace only)")
 	memBase := fs.String("mem-base", "http://127.0.0.1:18791", "mem0 server base URL")
 	memUser := fs.String("mem-user", "local-agent", "the agent's mem0 WRITE namespace (isolated; the server blocks canonical regardless)")
+	memShared := fs.String("mem-shared-namespace", os.Getenv("MEM0_SHARED_NAMESPACE"), "optional operator/shared mem0 namespace to ALSO recall from (in addition to --mem-user). Empty = agent namespace only (operator-neutral default). Set this, or MEM0_SHARED_NAMESPACE, to recall your own knowledge namespace.")
 	allowWrite := fs.Bool("allow-write", false, "P2: enable write_file/delete_file (worktree-scoped + policy-gated). Default off (read-only).")
 	allowOverwrite := fs.Bool("allow-overwrite", false, "open-write: allow overwriting existing files + edit_file in the worktree (requires --allow-write). Default off.")
 	allowDelete := fs.Bool("allow-delete", false, "open-write: allow deleting files in the worktree (requires --allow-write). Default off.")
@@ -196,12 +197,13 @@ func main() {
 
 	// Optional mem0 memory (opt-in via --memory). Keep it a nil INTERFACE when off
 	// (a typed-nil *MemoryClient would make the loop call persist() on nil). Reads
-	// the agent's own namespace + canonical "dmmdea"; writes only evidence-tier
-	// records under the agent namespace (the server blocks canonical regardless).
+	// the agent's own namespace plus an optional operator/shared namespace (empty by
+	// default — operator-neutral); writes only evidence-tier records under the agent
+	// namespace (the server blocks canonical regardless).
 	var mem agent.Memory
 	if *useMem {
 		if key := agent.Mem0KeyFromEnvOrFile(); key != "" {
-			mem = agent.NewMemoryClient(*memBase, key, []string{*memUser, "dmmdea"}, *memUser, "local-agent", timeout)
+			mem = agent.NewMemoryClient(*memBase, key, agent.ReadUsers(*memUser, *memShared), *memUser, "local-agent", timeout)
 		} else {
 			// The on-disk key fallback (~/.mem0/api-key) only resolves inside WSL/Linux
 			// (the agent's target home); on Windows export MEM0_API_KEY instead.

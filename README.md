@@ -8,7 +8,6 @@ A local-first harness that offloads short-context, low-judgment work — **summa
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Go Reference](https://pkg.go.dev/badge/github.com/dmmdea/offload-harness.svg)](https://pkg.go.dev/github.com/dmmdea/offload-harness)
-[![CI](https://img.shields.io/github/actions/workflow/status/dmmdea/offload-harness/ci.yml?branch=main)](../../actions)
 [![MCP](https://img.shields.io/badge/MCP-stdio-purple.svg)](https://modelcontextprotocol.io)
 
 </div>
@@ -510,9 +509,16 @@ Expected. The bbolt cache is single-writer; when the long-running MCP server hol
 
 </details>
 
+## Documentation
+
+In-depth documentation lives in **[`docs/`](docs/README.md)** — how each system works
+(`docs/systems/`), behavior that crosses systems (`docs/flows/`), the decision record
+(`docs/architecture/decisions/`), and a [glossary](docs/glossary.md) of terms with a specific meaning
+here. Start at [`docs/README.md`](docs/README.md).
+
 ## Contributing
 
-Contributions welcome. Run `go test ./...` and `go vet ./...` before opening a PR, and keep changes scoped. See `CONTRIBUTING.md` for build/test details.
+Contributions welcome. Run `go test ./...` and `go vet ./...` before opening a PR, and keep changes scoped. See `CONTRIBUTING.md` for build/test details — including the rule that documentation is updated in the same PR as the change it describes.
 
 ## Security
 
