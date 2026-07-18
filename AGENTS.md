@@ -11,6 +11,32 @@ free **Gemma-4 cascade** served by llama.cpp. It ships as a CLI, an **MCP server
 and an optional local **coding agent** (`local-agent`). It never calls a cloud model; on low
 confidence it returns a structured **defer** so the calling agent does that task itself.
 
+## Documentation map
+
+Detailed documentation lives in `docs/`. This file only routes you there.
+
+- [`docs/README.md`](docs/README.md) — the index. Start here.
+- `docs/systems/` — how each part of the harness works (offload pipeline, coding agent, MCP server,
+  media generation, fleet node, installer).
+- `docs/flows/` — behavior that crosses systems (cascade escalation and defer, run-graph manifest
+  satisfaction, fleet job lifecycle, zero-warm generation).
+- [`docs/architecture/decisions/`](docs/architecture/decisions/README.md) — Architecture Decision
+  Records. **Only `Accepted` status is current guidance.**
+- [`docs/glossary.md`](docs/glossary.md) — terms with a specific meaning here (Defer, Tier,
+  Zero-Warm, Node Manifest, …).
+
+**Workflow:**
+
+1. Read the system and flow docs for the area you are about to change.
+2. Inspect the source for implementation detail.
+3. Make the change.
+4. Update the affected docs **in the same pull request** when behavior, responsibilities, flows,
+   invariants, interfaces, or glossary concepts change.
+5. Make sure docs and code agree before you finish. `go test -run TestDocsLint .` checks structure;
+   you check meaning. If they disagree and you cannot resolve it, say so explicitly in the PR.
+
+Do not put detailed system behavior in this file — it belongs in `docs/`.
+
 ## Installing the stack
 
 Point yourself at **`setup/SETUP-AGENT.md`** and follow it exactly. It is an agent-executable

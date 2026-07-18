@@ -25,18 +25,46 @@ llama.cpp server.
 - **Add or update tests** for any behavior you change.
 - **Conventional-ish commit messages.** Prefix with the kind of change — `feat:`, `fix:`,
   `docs:`, `test:`, `refactor:`, `chore:` — followed by a short imperative summary.
-- **No cloud calls.** The harness never calls a cloud model and holds no cloud credentials by
-  design; please keep it that way.
+- **No cloud calls in the cascade.** The cascade never calls a cloud model and holds no cloud
+  credentials by design — on low confidence it returns a structured defer and the caller does the
+  task. Please keep it that way. (`offload_nim` is the single, explicit, caller-invoked remote tool;
+  nothing escalates or falls back into it. See
+  [ADR 0001](docs/architecture/decisions/0001-defer-never-cloud-fallback.md).)
+
+## Documentation
+
+Documentation lives in [`docs/`](docs/README.md) and is part of the change, not a follow-up.
+
+- **Read before you change.** Start at [`docs/README.md`](docs/README.md): `systems/` explains how
+  each part works, `flows/` covers behavior crossing systems, `architecture/decisions/` records why
+  things are the way they are (only `Accepted` ADRs are current guidance), and
+  [`glossary.md`](docs/glossary.md) defines terms that mean something specific here.
+- **Update in the same PR.** A change affecting responsibilities, observable behavior, interfaces,
+  data, configuration, error handling, security, invariants, testing expectations, or a glossary
+  concept must update the affected docs in that same pull request.
+- **Docs and code must agree.** When they disagree, do one of three things — never nothing: update
+  the docs to match the code, update the code to match the documented intent, or call out the
+  mismatch explicitly in the PR. Reviewers compare the two; that is what makes the docs useful during
+  review.
+- **Verify what you write.** Check each factual claim against the source at the time of writing. Mark
+  genuine uncertainty with `> **Unverified:**` rather than guessing.
+- **Structural gate:** `go test -run TestDocsLint .` checks that scaffold files exist, relative links
+  resolve, ADR frontmatter is schema-valid, and system/flow docs keep their required sections. It
+  checks structure only — meaning is a review duty.
+- Conventions, the ADR schema, and the privacy rules for published files are in
+  [`docs/STYLE.md`](docs/STYLE.md).
 
 ## Versioning
 
-This project follows [SemVer](https://semver.org/). **Three sources name the version and MUST be
+This project follows [SemVer](https://semver.org/). **Four sources name the version and MUST be
 bumped together, in the same commit:**
 
 1. the `VERSION` file
 2. the `version` const in `main.go` (advertised in the MCP handshake — a stale value misreports the
    server to clients)
 3. the top `## [x.y.z]` entry in `CHANGELOG.md`
+4. the `version` field in `.printing-press.json` (the MCP manifest — it also declares the tool list,
+   which a drift test checks against what the code actually registers)
 
 `TestVersionSourcesAgree` (in `main_test.go`) fails the build if any of the three disagree, so
 `go test ./...` catches a partial bump. When you change published behavior, bump the version **and**
