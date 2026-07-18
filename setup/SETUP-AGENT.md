@@ -22,6 +22,15 @@ The install is **three scripts, in order**: `detect.ps1` → `install.ps1` → `
 prints human-readable progress and then **one machine-readable JSON line as its last stdout line** —
 that line is your input signal.
 
+**Fleet node (optional, post-install):** `local-offload fleet-serve` joins this box to the
+fleet-dispatcher fleet — an unauthenticated HTTP server (default `127.0.0.1:18811`; production
+binds the **Tailscale** address behind `--listen-trusted-network`, never `0.0.0.0`) that accepts
+dispatched GPU renders through the same pipeline. Measured per-model VRAM footprints live at
+`~/.local-offload/footprints.json` (prime a fresh box with `local-offload fleet-measure`). **MSI
+Afterburner is the recommended companion** on a fleet box — its per-process VRAM display (which
+nvidia-smi cannot provide under WDDM) validates our recorded footprints and doubles as a live
+monitor; recommended, never required. Full guide: `docs/FLEET-NODE.md`.
+
 ## Hard rules (read before running anything)
 
 1. **Verify, do not infer.** Parse the actual JSON each script prints. Never assume a step

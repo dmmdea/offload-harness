@@ -111,5 +111,8 @@
   "nim_endpoint": "https://integrate.api.nvidia.com/v1",
   "nim_model": "nvidia/nemotron-3-ultra-550b-a55b",
   "nim_max_tokens": 1024,
-  "nim_timeout_sec": 120
+  "nim_timeout_sec": 120,
+  "fleet_listen": "127.0.0.1:18811",
+  "fleet_node_id": "",
+  "fleet_sampler": "auto"
 }

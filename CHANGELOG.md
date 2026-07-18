@@ -4,6 +4,35 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.0] - 2026-07-17
+
+### Added — fleet-node server (`fleet-serve` / `fleet-measure`)
+- **`fleet-serve`**: this box can now join the Fleet Dispatcher fleet (CONTRACT.md v2) —
+  `GET /fleet/health` (live GiB VRAM, derived task/family lists, measured footprints, queue
+  depth), `POST /fleet/dispatch` (immediate 202 ack with exact `job_id` echo; idempotent on
+  duplicates; async execution through the existing pipeline + single-slot GPU lock), and
+  `GET /fleet/jobs/{id}` (accepted→running→done|error; terminal results retained ~1h).
+  New `internal/fleetnode` package: contract-exact HTTP server, drain-safe ack-then-poll
+  job store, task-type mapping with strict raw-JSON run-graph payload validation at ack
+  time, and a two-source VRAM sampler (nvidia-smi global snapshot every 2s; Windows PDH
+  `\GPU Process Memory` per-process-tree source for footprints). Startup GPU probe refuses
+  to stand up a zero-VRAM node; SIGINT drains for 30s and marks survivors
+  `error:"interrupted"`. Loopback by default via the shared `internal/netguard` guard
+  (extracted from local-agent, behavior identical); production binds the Tailscale address
+  behind `--listen-trusted-network` on port 18811.
+- **Passive measured footprints**: every image/video/audio/run-graph render through the
+  pipeline now records its observed VRAM peak into `~/.local-offload/footprints.json`
+  (max-keep; advertised `vram_peak_gb` = observed × 1.2), keyed by this machine's actual
+  bindings — so footprints accumulate during normal harness use and stay current when
+  bindings change. Implemented as a nil-gated `gpugen.Spec` sampling hook: the non-fleet
+  render path is byte-identical when unset. **`fleet-measure`** primes an empty store (one
+  minimal render per configured task) and prints the recorded entries.
+- Config: `fleet_listen` (default `127.0.0.1:18811`), `fleet_node_id` (default hostname at
+  serve time), `fleet_sampler` (`auto|pdh|global`).
+- Docs: new `docs/FLEET-NODE.md` (config, Tailscale binding guidance, sampler modes, the
+  PDH-vs-Afterburner validation procedure, and the recommended — never required — MSI
+  Afterburner companion setup) + README/OPERATOR-GUIDE/SETUP-AGENT fleet sections.
+
 ## [0.21.1] - 2026-07-17
 
 ### Added — auto-text inpaint chain enabled (grounding eval passed)

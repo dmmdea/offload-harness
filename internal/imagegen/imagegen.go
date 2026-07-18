@@ -46,9 +46,10 @@ type Model struct {
 // the machine's image-model binding. A per-request steps param overrides m.Steps.
 // extraEnv appends additional "K=V" entries (LO-1: the pipeline threads a configured
 // GPU_LOCK override so the runner contends on the same lock the Go vision gate
-// watches). A non-zero exit, a timeout, or a missing/empty output file returns an
-// error (the caller defers).
-func Generate(ctx context.Context, node, script, comfyDir, out, prompt string, params map[string]any, m Model, timeout time.Duration, extraEnv ...string) (string, error) {
+// watches). samp, when non-nil, turns on gpugen's passive per-render VRAM peak
+// sampling (fleet footprints; nil = legacy path). A non-zero exit, a timeout, or a
+// missing/empty output file returns an error (the caller defers).
+func Generate(ctx context.Context, node, script, comfyDir, out, prompt string, params map[string]any, m Model, timeout time.Duration, samp *gpugen.Sampling, extraEnv ...string) (string, error) {
 	args := buildArgs(out, prompt, params, m)
 	// COMFY_WAIT_SEC aligns the render script's poll budget with the harness timeout
 	// (quality-first: a 2048 bf16 O1 render legitimately runs tens of minutes; the
@@ -57,14 +58,16 @@ func Generate(ctx context.Context, node, script, comfyDir, out, prompt string, p
 	if timeout > 0 {
 		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
 	}
-	return gpugen.Generate(ctx, gpugen.Spec{
+	spec := gpugen.Spec{
 		Exe:     node,
 		Script:  script,
 		Args:    args,
 		Env:     append(env, extraEnv...),
 		Out:     out,
 		Timeout: timeout,
-	})
+	}
+	samp.ApplyTo(&spec)
+	return gpugen.Generate(ctx, spec)
 }
 
 // buildArgs assembles the comfy-generate.mjs argv. Split out from Generate so the

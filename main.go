@@ -10,8 +10,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -26,6 +29,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/eval"
 	"github.com/dmmdea/offload-harness/internal/exemplars"
+	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/grounding"
 	"github.com/dmmdea/offload-harness/internal/health"
 	"github.com/dmmdea/offload-harness/internal/judge"
@@ -33,6 +37,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/mcpserver"
+	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/report"
@@ -41,7 +46,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.21.1"
+const version = "0.22.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -88,6 +93,10 @@ func main() {
 		err = runAssessImage(args)
 	case "mcp":
 		err = runMCP(args)
+	case "fleet-serve":
+		err = runFleetServe(args)
+	case "fleet-measure":
+		err = runFleetMeasure(args)
 	case "ledger":
 		err = runLedger(args)
 	case "doctor":
@@ -197,6 +206,8 @@ Usage:
   local-offload nim <file|-|"text"> [--model id] [--base url] [--system "..."] [--max-tokens N] [--temp F] [--json]
   local-offload nim --list-models        list a NIM endpoint's model ids (free hosted catalog or self-hosted)
   local-offload mcp                      run as an MCP server (stdio)
+  local-offload fleet-serve [--listen ADDR] [--listen-trusted-network] [--node-id NAME]   join the fleet-dispatcher fleet (health/dispatch/jobs on :18811; docs/FLEET-NODE.md)
+  local-offload fleet-measure            prime the fleet footprint store: one minimal render per configured task, then print the recorded entries
   local-offload ledger [--since DAYS]    token-savings report
   local-offload doctor                   check endpoint health + config
   local-offload models                   show configured offload model
@@ -1517,6 +1528,270 @@ func runMCP(args []string) error {
 	stopReloader := p.StartReloader(0) // 0 => default interval
 	defer stopReloader()
 	return mcpserver.New(p).Run(context.Background(), version)
+}
+
+// nvidiaSmiMemory shells the global VRAM query (MiB CSV) that feeds both the
+// fleet-serve startup probe and the 2s health sampler; fleetnode.ParseSmiMemory
+// parses it.
+func nvidiaSmiMemory() (string, error) {
+	out, err := exec.Command("nvidia-smi", "--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits").Output()
+	return string(out), err
+}
+
+// gpuArchFromName maps an nvidia-smi product name to the architecture CLASS
+// the health payload advertises as gpu_arch — the dispatcher routes on arch
+// classes, not product names ("NVIDIA GeForce RTX 3070 Laptop GPU" is not a
+// schedulable fact; "ampere" is). Mirrors setup/detect.ps1's Get-GpuArch:
+// note "RTX PRO" must match in its own right BEFORE any 50xx logic — the PRO
+// branding ("RTX PRO 5000") breaks the "RTX 50" substring, and that branding
+// IS the Blackwell pro generation (pre-Blackwell pro cards were "RTX A6000" /
+// "RTX 6000 Ada Generation", which match neither rule). Unrecognized products
+// (and an empty name from a failed query) fall back to the lowercase vendor
+// "nvidia" — an honest "NVIDIA, generation unknown", never "".
+func gpuArchFromName(name string) string {
+	n := strings.ToUpper(name)
+	switch {
+	case strings.Contains(n, "RTX PRO"), strings.Contains(n, "BLACKWELL"), strings.Contains(n, "RTX 50"):
+		return "blackwell"
+	case strings.Contains(n, "RTX 40"):
+		return "ada"
+	case strings.Contains(n, "RTX 30"):
+		return "ampere"
+	case strings.Contains(n, "RTX 20"), strings.Contains(n, "GTX 16"):
+		return "turing"
+	case strings.Contains(n, "V100"):
+		return "volta"
+	default:
+		return "nvidia"
+	}
+}
+
+// nvidiaSmiGPUName returns the GPU product name feeding gpuArchFromName
+// (best-effort: "" when the query fails — the probe already proved the GPU
+// works, and the arch mapper turns "" into the vendor fallback).
+func nvidiaSmiGPUName() string {
+	out, err := exec.Command("nvidia-smi", "--query-gpu=name", "--format=csv,noheader").Output()
+	if err != nil {
+		return ""
+	}
+	name := strings.TrimSpace(string(out))
+	if i := strings.IndexByte(name, '\n'); i >= 0 {
+		name = strings.TrimSpace(name[:i])
+	}
+	return name
+}
+
+// fleetServeParams resolves + validates fleet-serve's identity/binding args —
+// the testable seam (mirrors runGraphParams): flag > config for the listen
+// address and node id, hostname fallback for an empty id, and the shared
+// netguard loopback refusal unless --listen-trusted-network.
+func fleetServeParams(listenFlag, nodeIDFlag string, trusted bool, cfg config.Config, hostname func() (string, error)) (listen, nodeID string, err error) {
+	listen = listenFlag
+	if listen == "" {
+		listen = cfg.FleetListen
+	}
+	if listen == "" {
+		listen = "127.0.0.1:18811" // config.Default's value; belt-and-suspenders for a zeroed config
+	}
+	if err := netguard.Validate(listen, trusted); err != nil {
+		return "", "", err
+	}
+	nodeID = nodeIDFlag
+	if nodeID == "" {
+		nodeID = cfg.FleetNodeID
+	}
+	if nodeID == "" {
+		if h, herr := hostname(); herr == nil && h != "" {
+			nodeID = h
+		} else {
+			nodeID = "fleet-node"
+		}
+	}
+	return listen, nodeID, nil
+}
+
+// runFleetServe joins this box to the fleet-dispatcher fleet (CONTRACT.md v2:
+// /fleet/health, /fleet/dispatch, /fleet/jobs/{id}) on the same pipeline the
+// MCP server drives. Refuses to start without a working NVIDIA GPU (a
+// zero-VRAM node is a contract violation the dispatcher treats as broken);
+// SIGINT drains in-flight jobs for up to 30s before exiting.
+func runFleetServe(args []string) error {
+	fs := flag.NewFlagSet("fleet-serve", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	listenFlag := fs.String("listen", "", "listen address (default: config fleet_listen, 127.0.0.1:18811)")
+	trusted := fs.Bool("listen-trusted-network", false, "allow --listen to bind beyond loopback (the Tailscale address). The fleet endpoints are UNAUTHENTICATED; set this ONLY on a network you fully trust — and NEVER bind 0.0.0.0.")
+	nodeIDFlag := fs.String("node-id", "", "node id advertised in /fleet/health (default: config fleet_node_id, else the hostname)")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+
+	listen, nodeID, err := fleetServeParams(*listenFlag, *nodeIDFlag, *trusted, cfg, os.Hostname)
+	if err != nil {
+		return err
+	}
+	if *trusted {
+		fmt.Fprintf(os.Stderr, "[fleet-serve] WARNING: --listen-trusted-network set — the UNAUTHENTICATED fleet "+
+			"endpoints are exposed beyond loopback on %q. Anyone who can reach them can run renders on this GPU.\n", listen)
+	}
+
+	// Startup GPU probe: one nvidia-smi exec. Error or total <= 0 → refuse
+	// loudly (ParseSmiMemory already rejects a non-positive total).
+	probeOut, perr := nvidiaSmiMemory()
+	if perr != nil {
+		return fmt.Errorf("fleet-serve: GPU probe failed (nvidia-smi: %v) — refusing to start: a node without a working NVIDIA GPU cannot honor the fleet contract (vram_total_gb must be > 0)", perr)
+	}
+	total, _, perr := fleetnode.ParseSmiMemory(probeOut)
+	if perr != nil {
+		return fmt.Errorf("fleet-serve: GPU probe returned no usable VRAM (%v) — refusing to start: advertising a zero-VRAM node would make the dispatcher treat this box as broken", perr)
+	}
+
+	// Same pipeline construction as the mcp verb, incl. the hot-reloader (this
+	// is a long-running server; nightly retrains must go live without a restart).
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	stopReloader := p.StartReloader(0)
+	defer stopReloader()
+
+	ctx, stopSig := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stopSig()
+
+	sampler := fleetnode.StartGlobalSampler(ctx, 2*time.Second, nvidiaSmiMemory)
+	jobs := fleetnode.NewJobs(time.Hour)
+	srv := fleetnode.New(p, jobs, fleetnode.Options{
+		NodeID:   nodeID,
+		Snapshot: sampler.Load,
+		Footprints: func() []fleetnode.FootprintEntry {
+			if st := p.FootprintStore(); st != nil {
+				// Pick up records written by OTHER processes (fleet-measure while
+				// serving was the live-found case) — mtime-gated, max-merged.
+				st.ReloadIfChanged()
+				return st.Entries()
+			}
+			return nil
+		},
+		GpuVendor: "nvidia",
+		GpuArch:   gpuArchFromName(nvidiaSmiGPUName()),
+		Cfg:       cfg,
+	})
+
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		return fmt.Errorf("fleet-serve: listen %s: %w", listen, err)
+	}
+	fmt.Fprintf(os.Stderr, "[fleet-serve] node %q serving /fleet on %s (%.1f GiB VRAM; tasks: %s)\n",
+		nodeID, listen, total, strings.Join(fleetnode.SupportedTasks(cfg), ", "))
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ln) }()
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		// Drain BEFORE closing the listener: new dispatches already 503, but
+		// pollers can still read states while in-flight renders finish.
+		fmt.Fprintln(os.Stderr, "[fleet-serve] interrupt — draining jobs (up to 30s); survivors are marked error:\"interrupted\"")
+		jobs.DrainAndStop(30 * time.Second)
+		ln.Close()
+		<-errCh
+		return nil
+	}
+}
+
+// runFleetMeasure primes an empty footprint store: one minimal render per
+// configured task through the NORMAL pipeline (so the passive gpugen hook
+// records exactly what fleet jobs will), then prints the store's on-disk
+// records as JSON. Tasks without a cheap universal probe (voice, run-graph)
+// are skipped — their footprints accumulate passively during normal use.
+func runFleetMeasure(args []string) error {
+	fs := flag.NewFlagSet("fleet-measure", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	_ = fs.Parse(args)
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	ctx := context.Background()
+	note := func(format string, a ...any) { fmt.Fprintf(os.Stderr, "[fleet-measure] "+format+"\n", a...) }
+
+	// image-gen: a small fast render (512² at 8 steps).
+	var stillPath string
+	if cfg.ImageGenScript != "" {
+		note("image-gen: rendering 512x512 at 8 steps...")
+		res := p.Run(ctx, core.Request{
+			Task:   core.TaskGenerateImage,
+			Input:  "fleet-measure probe: a plain gray sphere on a white background",
+			Params: map[string]any{"width": 512, "height": 512, "steps": 8},
+		})
+		if res.OK {
+			var out struct {
+				ImagePath string `json:"image_path"`
+			}
+			_ = json.Unmarshal(res.Data, &out)
+			stillPath = out.ImagePath
+			note("image-gen: done (%s)", out.ImagePath)
+		} else {
+			note("image-gen: deferred: %s", res.Reason)
+		}
+	} else {
+		note("image-gen: skipped (no imagegen_script configured)")
+	}
+
+	// video-gen: the FAST (distilled) recipe at the smallest frame count — the
+	// slow native recipe is not a measurement tool. Reuses the probe image as
+	// the I2V still when the image step produced one.
+	if cfg.VideoGenScript != "" {
+		note("video-gen: rendering the fast recipe at 9 frames...")
+		params := map[string]any{"fast": true, "frames": 9}
+		req := core.Request{Task: core.TaskGenerateVideo, Input: "fleet-measure probe: slow gentle camera pan", Params: params}
+		if stillPath != "" {
+			req.Image = stillPath
+		}
+		if res := p.Run(ctx, req); res.OK {
+			note("video-gen: done")
+		} else {
+			note("video-gen: deferred: %s", res.Reason)
+		}
+	} else {
+		note("video-gen: skipped (no videogen_script configured)")
+	}
+
+	// audio-gen: 5s of music (the ComfyUI ACE-Step path — the GPU-heavy one).
+	if cfg.MusicGenScript != "" {
+		note("audio-gen: rendering 5s of music...")
+		res := p.Run(ctx, core.Request{
+			Task:   core.TaskGenerateAudio,
+			Input:  "fleet-measure probe: soft ambient pad, slow tempo",
+			Params: map[string]any{"kind": "music", "seconds": 5},
+		})
+		if res.OK {
+			note("audio-gen: done")
+		} else {
+			note("audio-gen: deferred: %s", res.Reason)
+		}
+	} else {
+		note("audio-gen: skipped (no musicgen_script configured)")
+	}
+	note("audio-gen (voice): skipped — voice footprints accumulate passively during normal TTS use")
+	note("run-graph: skipped — no universal probe graph; footprints accumulate passively per model_family")
+
+	// Print the on-disk records (vram_peak_gb + observed_peak_gb/samples — the
+	// observed value is what the Afterburner validation procedure compares).
+	st := p.FootprintStore()
+	if st == nil {
+		fmt.Println("[]")
+		return nil
+	}
+	raw, rerr := os.ReadFile(st.Path())
+	if rerr != nil {
+		fmt.Println("[]")
+		return nil
+	}
+	fmt.Println(strings.TrimSpace(string(raw)))
+	return nil
 }
 
 func runLedger(args []string) error {

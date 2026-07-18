@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -125,6 +126,164 @@ func TestClassifyErr(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// --- footprint sampling hook (fleet-node, additive + nil-gated) ---
+
+// TestGenerateFootprintReportsPeakOnSuccess: with Footprint set and a fake
+// SampleFunc, a successful render reports the MAX observed sample via OnFootprint.
+func TestGenerateFootprintReportsPeakOnSuccess(t *testing.T) {
+	requireNode(t)
+	old := footprintSampleInterval
+	footprintSampleInterval = 50 * time.Millisecond
+	defer func() { footprintSampleInterval = old }()
+
+	out := filepath.Join(t.TempDir(), "made.txt")
+	exe, script, args := sleepThenWriteCmd(out, "hello", 400)
+
+	var mu sync.Mutex
+	samples := []float64{1.5, 3.25, 2.0} // peak = 3.25, not the last value
+	i := 0
+	var reported []float64
+	var sampledPid int
+	_, err := Generate(context.Background(), Spec{
+		Exe: exe, Script: script, Args: args,
+		Out:     out,
+		Timeout: 20 * time.Second,
+		Footprint: &FootprintKey{Family: "sdxl", Quant: "bf16", Task: "image-gen"},
+		SampleFunc: func(pid int) (float64, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			sampledPid = pid
+			v := samples[i%len(samples)]
+			i++
+			return v, nil
+		},
+		OnFootprint: func(peak float64) {
+			mu.Lock()
+			defer mu.Unlock()
+			reported = append(reported, peak)
+		},
+	})
+	if err != nil {
+		t.Fatalf("Generate: unexpected error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if sampledPid <= 0 {
+		t.Fatalf("SampleFunc never received the child pid (got %d)", sampledPid)
+	}
+	if len(reported) != 1 {
+		t.Fatalf("OnFootprint called %d times, want exactly 1", len(reported))
+	}
+	if reported[0] != 3.25 {
+		t.Fatalf("OnFootprint reported %v, want the peak 3.25", reported[0])
+	}
+}
+
+// TestGenerateFootprintNotReportedOnFailure: a run whose output-stat gate fails
+// (child exits 0 but writes nothing) must NOT report a footprint — a crashed or
+// phantom run's peak may be partial, so only SUCCESS records.
+func TestGenerateFootprintNotReportedOnFailure(t *testing.T) {
+	requireNode(t)
+	old := footprintSampleInterval
+	footprintSampleInterval = 50 * time.Millisecond
+	defer func() { footprintSampleInterval = old }()
+
+	exe, script, args := trueCmd()
+	called := false
+	_, err := Generate(context.Background(), Spec{
+		Exe: exe, Script: script, Args: args,
+		Out:       filepath.Join(t.TempDir(), "never.txt"),
+		Timeout:   10 * time.Second,
+		Footprint: &FootprintKey{Family: "sdxl", Task: "image-gen"},
+		SampleFunc: func(pid int) (float64, error) { return 5.0, nil },
+		OnFootprint: func(peak float64) { called = true },
+	})
+	if err == nil {
+		t.Fatal("Generate must error when the output file is absent")
+	}
+	if called {
+		t.Fatal("OnFootprint must NOT fire on a failed run")
+	}
+}
+
+// TestGenerateFootprintChildErrorNotReported: a non-zero child exit is a failure —
+// no footprint even though samples were taken.
+func TestGenerateFootprintChildErrorNotReported(t *testing.T) {
+	requireNode(t)
+	old := footprintSampleInterval
+	footprintSampleInterval = 50 * time.Millisecond
+	defer func() { footprintSampleInterval = old }()
+
+	called := false
+	_, err := Generate(context.Background(), Spec{
+		Exe: "node", Script: "-e", Args: []string{"process.exit(3)"},
+		Out:       filepath.Join(t.TempDir(), "never.txt"),
+		Timeout:   10 * time.Second,
+		Footprint: &FootprintKey{Family: "whisper", Task: "stt"},
+		SampleFunc: func(pid int) (float64, error) { return 5.0, nil },
+		OnFootprint: func(peak float64) { called = true },
+	})
+	if err == nil {
+		t.Fatal("Generate must surface the child's non-zero exit")
+	}
+	if called {
+		t.Fatal("OnFootprint must NOT fire when the child failed")
+	}
+}
+
+// TestGenerateFootprintNilHookUnchanged: with Footprint nil the legacy path runs —
+// SampleFunc/OnFootprint are never touched even when (mistakenly) set.
+func TestGenerateFootprintNilHookUnchanged(t *testing.T) {
+	requireNode(t)
+	out := filepath.Join(t.TempDir(), "made.txt")
+	exe, script, args := writeFileCmd(out, "hello")
+	sampled, reported := false, false
+	got, err := Generate(context.Background(), Spec{
+		Exe: exe, Script: script, Args: args,
+		Out:     out,
+		Timeout: 10 * time.Second,
+		// Footprint nil ⇒ byte-identical CombinedOutput path; the callbacks are inert.
+		SampleFunc:  func(pid int) (float64, error) { sampled = true; return 1, nil },
+		OnFootprint: func(peak float64) { reported = true },
+	})
+	if err != nil {
+		t.Fatalf("Generate: unexpected error: %v", err)
+	}
+	if got != out {
+		t.Fatalf("Generate returned %q, want %q", got, out)
+	}
+	if sampled || reported {
+		t.Fatalf("nil Footprint must not sample or report (sampled=%v reported=%v)", sampled, reported)
+	}
+}
+
+// TestGenerateFootprintNilCallbacksSafe: Footprint set but OnFootprint/SampleFunc
+// nil — success path must not panic (nil-safe wiring).
+func TestGenerateFootprintNilCallbacksSafe(t *testing.T) {
+	requireNode(t)
+	out := filepath.Join(t.TempDir(), "made.txt")
+	exe, script, args := writeFileCmd(out, "hello")
+	got, err := Generate(context.Background(), Spec{
+		Exe: exe, Script: script, Args: args,
+		Out:       out,
+		Timeout:   10 * time.Second,
+		Footprint: &FootprintKey{Family: "sdxl", Task: "image-gen"},
+	})
+	if err != nil {
+		t.Fatalf("Generate: unexpected error: %v", err)
+	}
+	if got != out {
+		t.Fatalf("Generate returned %q, want %q", got, out)
+	}
+}
+
+// sleepThenWriteCmd: node sleeps ms milliseconds, then writes content to path and
+// exits 0 — long enough for the footprint sampler to take several ticks.
+func sleepThenWriteCmd(out, content string, ms int) (exe, script string, args []string) {
+	js := `setTimeout(()=>{require('fs').writeFileSync(process.argv[1], process.argv[2])}, ` + itoa(ms) + `)`
+	return "node", "-e", []string{js, out, content}
+}
 
 // --- command builders: drive `node -e <script>`, exactly the runner gpugen wraps in
 // production (a render/*.mjs). No GPU, no ComfyUI — pure process lifecycle exercise.
