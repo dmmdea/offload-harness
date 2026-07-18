@@ -51,8 +51,10 @@ measured. It does not get to be the first answer.
 - Defer rate stays meaningful as a quality signal, because it is not inflated by a latency policy.
 - Genuinely slow hardware stays slow, and is described honestly rather than papered over. Latency
   measurements from low-end machines are treated as data about the profile, not as a case for a gate.
-- The contributed proposal is deprioritized rather than rejected outright; the conditions under which
-  it could be revisited are the ones above.
+- The contributed proposal is **deprioritized, not rejected** — its pull request stays **open** by
+  design, and the conditions under which it could be revisited are the ones above. The "Rejected"
+  entries in *Alternatives considered* below concern the timing and framing of the option (adopting
+  it now, banning it forever, defaulting it on), not the contribution itself.
 
 ## Alternatives considered
 
