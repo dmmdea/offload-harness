@@ -4,6 +4,61 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.2] - 2026-07-18
+
+### Changed — operator-neutral memory namespace (multitenancy)
+- **The optional `--memory` recall namespace is no longer hardcoded.** The agent previously always
+  recalled from a compiled-in `"dmmdea"` namespace alongside its own; it now recalls only its own
+  namespace by default and appends an operator/shared namespace only when one is configured via the
+  new `--mem-shared-namespace` flag or the `MEM0_SHARED_NAMESPACE` environment variable. This makes
+  the public build operator-neutral (multitenant) — no personal namespace is baked into tracked code.
+  New helper `agent.ReadUsers` builds the list; behavior is unchanged for an operator who sets the
+  namespace. First step of the repo-model inversion (public becomes the canonical, multitenant source).
+
+### Fixed
+- **`TestDocsLint` is now line-ending agnostic.** The ADR frontmatter check anchored on `\n`, so a
+  Windows checkout with `autocrlf` (CRLF working tree) failed every ADR. The regex now accepts
+  `\r?\n`, so the gate passes for any contributor regardless of line-ending configuration.
+
+## [0.22.1] - 2026-07-18
+
+### Added — repo-local documentation system
+- **`docs/` is now a navigable knowledge base** for humans and coding agents, with `AGENTS.md`
+  as the routing layer: `systems/` (offload pipeline, coding agent, MCP server, media generation,
+  fleet node, setup/installer), `flows/` (cascade escalation and defer, run-graph manifest
+  satisfaction, fleet job lifecycle, zero-warm generation), `architecture/decisions/` (ADRs
+  0001–0011, backfilled from decisions that previously lived only in `CLAUDE.md` invariants and
+  session records), `glossary.md`, `templates/`, and `STYLE.md`.
+- **`TestDocsLint`** — a structural gate run by `go test ./...`: scaffold files exist, relative
+  links resolve, ADR frontmatter is schema-valid, and system/flow docs keep their navigational
+  sections. Scoped to the durable documentation surface; `docs/templates/` and the dated
+  `docs/superpowers/` archive are exempt from link resolution by design.
+- **`CONTRIBUTING.md` documentation section** — read before changing, update in the same PR, and
+  the three legal ways to resolve a docs/code disagreement.
+
+### Fixed — documentation accuracy
+- Corrected four `CLAUDE.md` claims that disagreed with the code, each re-verified against source:
+  KV cache type is profile-driven (`q8_0` on 9 of 13 profiles) rather than `f16` everywhere, with
+  an `amd-gcn` flash-attn exception, a cpu template that omits the flag, an `embeddinggemma` entry
+  that bypasses the shared macro, and no STT carve-out (no whisper entry is templated); the policy
+  broker gates effectful actions while the **loop** owns step and tool budgets (two mechanisms,
+  previously described as one); `--profile` and `--two-tier` conflict only for a non-default
+  profile; and the **cascade** never calls cloud while `offload_nim` is an explicit opt-in side
+  channel.
+
+### Known issues documented (not yet fixed)
+- **run-graph model leg** — `render/manifest-satisfy.mjs` calls `require()` in an ESM module.
+  A model present on disk with a declared `sha256` but no `.sha-ok` sentinel re-enters the download
+  branch and defers as `MODEL_DOWNLOAD_FAILED: "require is not defined"`; a *successful* fresh
+  download throws out of `writeSentinel` outside the try/catch and exits untyped. `sha256: null`
+  works around both by skipping the branch entirely. `defaultSatisfyDeps` has no test coverage,
+  which is why the suite stayed green. See `docs/flows/run-graph-manifest-satisfaction.md`.
+- **`VENV_INCOHERENT` diagnosability** — host-pin drift and an ordinary dependency conflict share
+  one defer detail; the drift diagnostic reaches stderr only.
+- **`.git` mask asymmetry** — the read-only `.git` protection for the shell path is Linux-only; the
+  native-Windows `run` path has no equivalent. The broker's `.git` denial still covers file tools on
+  every platform. See ADR 0004.
+
 ## [0.22.0] - 2026-07-17
 
 ### Added — fleet-node server (`fleet-serve` / `fleet-measure`)

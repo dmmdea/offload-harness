@@ -2,9 +2,10 @@
 
 Local-first Go harness that offloads grunt work (summarize/classify/extract/triage + vision/OCR/STT/
 media-gen) to a free **Gemma-4 cascade** on llama.cpp. Ships as a CLI, an **MCP server**
-(`local-offload`), and an optional local **coding agent** (`local-agent`). Never calls cloud; on low
-confidence it returns a structured **defer** and the caller does the task. Every command below was
-executed successfully while writing this file.
+(`local-offload`), and an optional local **coding agent** (`local-agent`). The **cascade** never
+calls cloud; on low confidence it returns a structured **defer** and the caller does the task.
+(`offload_nim` is the one remote surface — an explicit, caller-invoked side channel that nothing
+escalates or falls back into.) Every command below was executed successfully while writing this file.
 
 ## Components & ports
 
@@ -81,19 +82,28 @@ Key flags (all `--allow-*` OFF by default): `-ctx-tokens` (default 16384; compac
 the served `--ctx-size`), `-profile general|edit|build|research|github` (narrows tools + adds a tuned
 prompt/exemplars; can only narrow), `-allow-run` (the allowlisted direct-exec `run` tool),
 `-allow-shell` (Linux-only `run_shell`), `-two-tier` + `-architect-model` (default `gemma4-26b-a4b`)
-/ `-editor-model` (default `offload-e4b`). `--profile` and `--two-tier` are mutually exclusive.
+/ `-editor-model` (default `offload-e4b`). `--profile` and `--two-tier` conflict only for a
+**non-default** profile — `general` or empty coexists with two-tier, which sets its own toolsets.
 
 ## Invariants — DO NOT BREAK
 
-1. **Grammar-reliable serving flags** (model-family, every backend): `--jinja --reasoning off`,
-   f16 KV cache (`--cache-type-k/v f16`), `--flash-attn on` (except CPU + STT), **no MTP/draft**.
-   Never `--json-schema` / `response_format` — they crash the model; the harness passes a raw GBNF
-   `grammar` field. `--reasoning off` is mandatory or output comes back empty.
+1. **Grammar-reliable serving flags.** Universal on every task-serving entry, every backend:
+   `--jinja --reasoning off`, **no MTP/draft**. Never `--json-schema` / `response_format` — they
+   crash the model; the harness passes a raw GBNF `grammar` field. `--reasoning off` is mandatory or
+   output comes back empty. **Profile-driven, NOT universal:** `--cache-type-k/v` is `q8_0` on 9 of
+   13 profiles (`f16` only on blackwell-48/72, both AMD, and cpu; K and V always symmetric, and
+   `q8_0` V requires flash-attn on), and `--flash-attn` is on for 11 profiles, off for `amd-gcn`,
+   and omitted entirely by the cpu template. The `embeddinggemma` entry bypasses the shared flag
+   macro altogether. (There is no STT carve-out — no whisper entry is templated; `whisper-stt` is a
+   config alias to a separately provisioned upstream.) Detail: `docs/systems/setup-installer.md`.
 2. **Defer, never crash.** A `{"deferred":true,...}` result is a *valid* success signal (low
    confidence / over-long / all tiers failed), not an error. Do not "fix" defers by adding a cloud
    fallback — the harness holds no cloud credentials by design.
-3. **Policy-broker order:** the agent's single broker enforces the step/tool caps (esp.
-   `--max-same-tool`, the exact-repeat circuit breaker) *before* executing a tool. Capability flags
+3. **Two chokepoints, not one** (frequently misdescribed): the **policy broker** (`policy.go`) gates
+   *effectful actions* — write/overwrite/delete/fetch/shell — and downgrades an Allow to Deny if the
+   audit write fails; the **loop** (`loop.go`) owns the *budgets* — the step limit and the tool caps
+   (`--max-same-tool`, the exact-repeat breaker), enforced in `dispatchOrThrottle`, which is the only
+   path to `dispatch` and therefore runs before any `Exec`. Capability flags
    (`--allow-write/-overwrite/-delete/-fetch/-search/-run/-shell/-github`) are all **OFF by default**.
    The `run` tool (`--allow-run`) execs an **allowlisted program directly, no shell** (`go`, `gofmt`,
    `python`, `python3`, `pytest`, `npm`, `node`, `cargo`, `git`; bare name only, resolved on the
@@ -124,6 +134,8 @@ prompt/exemplars; can only narrow), `-allow-run` (the allowlisted direct-exec `r
 
 ## When lost
 
+- **Understanding a system before changing it?** → `docs/README.md` — the repo-local documentation
+  system (systems / flows / ADRs / glossary). Read the relevant doc first; update it in the same PR.
 - **Installing?** → `setup/SETUP-AGENT.md` (agent runbook, decision tables keyed to script JSON).
 - **Operating / diagnosing?** → `docs/OPERATOR-GUIDE.md` (task walkthroughs).
 - **What a subcommand does?** → `local-offload` with no args prints usage; `README.md` has the full

@@ -36,7 +36,7 @@ func TestRecallMergesUsersSortsAndDedupes(t *testing.T) {
 		switch u {
 		case "local-agent":
 			_, _ = io.WriteString(w, `{"results":[{"id":"a","memory":"agent past run","score":"0.9"},{"id":"dup","memory":"shared","score":"0.5"}]}`)
-		case "dmmdea":
+		case "operator":
 			_, _ = io.WriteString(w, `{"results":[{"id":"b","memory":"user fact","score":"0.7"},{"id":"dup","memory":"shared","score":"0.5"}]}`)
 		default:
 			_, _ = io.WriteString(w, `{"results":[]}`)
@@ -44,7 +44,7 @@ func TestRecallMergesUsersSortsAndDedupes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewMemoryClient(srv.URL, "sek", []string{"local-agent", "dmmdea"}, "local-agent", "agent-1", 5*time.Second)
+	c := NewMemoryClient(srv.URL, "sek", []string{"local-agent", "operator"}, "local-agent", "agent-1", 5*time.Second)
 	got, err := c.Recall(context.Background(), "q", 8)
 	if err != nil {
 		t.Fatalf("Recall: %v", err)
@@ -75,7 +75,7 @@ func TestPersistIsEvidenceTierUnderAgentNamespace(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewMemoryClient(srv.URL, "sek", []string{"dmmdea"}, "local-agent", "agent-1", 5*time.Second)
+	c := NewMemoryClient(srv.URL, "sek", []string{"operator"}, "local-agent", "agent-1", 5*time.Second)
 	// caller maliciously/accidentally tries every escape: lowercase tier, CAPITALIZED
 	// Tier (case-fold bypass), and a server retrieval-gating key — all must be STRIPPED.
 	id, err := c.Persist(context.Background(), "ran objective X, outcome Y", map[string]string{
@@ -117,13 +117,34 @@ func TestRecallDefersNotCrashesOnServerError(t *testing.T) {
 		_, _ = io.WriteString(w, "boom")
 	}))
 	defer srv.Close()
-	c := NewMemoryClient(srv.URL, "k", []string{"dmmdea"}, "local-agent", "a", 5*time.Second)
+	c := NewMemoryClient(srv.URL, "k", []string{"operator"}, "local-agent", "a", 5*time.Second)
 	got, err := c.Recall(context.Background(), "q", 5)
 	if err == nil {
 		t.Fatal("expected error surfaced on total failure")
 	}
 	if len(got) != 0 {
 		t.Errorf("expected empty recall on failure, got %d", len(got))
+	}
+}
+
+func TestReadUsersDefaultsToAgentNamespaceOnly(t *testing.T) {
+	// Operator-neutral default: with no shared namespace configured, the agent
+	// recalls only its own namespace — the public build carries no operator's
+	// personal namespace baked in.
+	if got := ReadUsers("local-agent", ""); len(got) != 1 || got[0] != "local-agent" {
+		t.Errorf("ReadUsers(agent, \"\") = %v, want [local-agent]", got)
+	}
+	if got := ReadUsers("local-agent", "   "); len(got) != 1 {
+		t.Errorf("a whitespace-only shared namespace must be ignored, got %v", got)
+	}
+}
+
+func TestReadUsersAppendsConfiguredSharedNamespace(t *testing.T) {
+	// An operator who sets a shared namespace also recalls from it, in addition
+	// to the agent's own — the agent namespace stays first.
+	got := ReadUsers("local-agent", "operator")
+	if len(got) != 2 || got[0] != "local-agent" || got[1] != "operator" {
+		t.Errorf("ReadUsers(agent, operator) = %v, want [local-agent operator]", got)
 	}
 }
 
