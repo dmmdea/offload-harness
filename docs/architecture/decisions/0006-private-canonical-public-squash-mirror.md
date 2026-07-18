@@ -1,9 +1,14 @@
 ---
-status: Accepted
+status: Superseded
 date: "2026-07-18"
+superseded_by: 0012-public-canonical-repository.md
 ---
 
 # Private canonical repository with a public squash-published mirror
+
+> **Superseded 2026-07-18 by [ADR 0012](0012-public-canonical-repository.md).** The roles were
+> inverted: the public repository is now canonical and the private one became the development/moat
+> repository. This ADR is kept for the record; it is no longer current guidance.
 
 ## Context
 

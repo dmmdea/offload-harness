@@ -66,10 +66,11 @@ bumped together, in the same commit:**
 4. the `version` field in `.printing-press.json` (the MCP manifest — it also declares the tool list,
    which a drift test checks against what the code actually registers)
 
-`TestVersionSourcesAgree` (in `main_test.go`) fails the build if any of the three disagree, so
+`TestVersionSourcesAgree` (in `main_test.go`) fails the build if any of these disagree, so
 `go test ./...` catches a partial bump. When you change published behavior, bump the version **and**
-add a CHANGELOG entry in the same PR. Never let the three drift — a mismatch has real cost: it once
-made the version look lower than a downstream publish and triggered a false "we lost work" fire drill.
+add a CHANGELOG entry in the same PR. This repository is the canonical source of version authority.
+Never let the sources drift — a mismatch once made the version look lower than a separately-published
+copy and triggered a false "we lost work" fire drill.
 
 ## Opening a pull request
 

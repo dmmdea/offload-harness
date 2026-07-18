@@ -73,9 +73,12 @@ explains each outcome. The recordless path writes nothing to it.
 
 ## Mirror
 
-The public repository (`dmmdea/offload-harness`), updated by squash-publishing from the private
-canonical repository. Its history is release snapshots, not a replay of development. See
-[architecture/decisions/0006-private-canonical-public-squash-mirror.md](architecture/decisions/0006-private-canonical-public-squash-mirror.md).
+Historical term. Under the earlier repository model the public repository was a squash-published
+mirror of a private canonical one. That was **inverted** on 2026-07-18 — the public repository
+(`dmmdea/offload-harness`) is now canonical, and the private repository is the development and moat
+repository. See
+[architecture/decisions/0012-public-canonical-repository.md](architecture/decisions/0012-public-canonical-repository.md)
+(which supersedes 0006).
 
 ## Node Manifest
 
@@ -123,8 +126,10 @@ authoring while the harness owns execution.
 
 ## Squash-publish
 
-Publishing to the Mirror as a single squashed snapshot rather than replaying private commits. Keeps
-the publishable surface small enough to review for the privacy rules in [STYLE.md](STYLE.md).
+Historical term, retired with the Mirror model on 2026-07-18. It named the act of publishing to the
+old public mirror as a single squashed snapshot. With the public repository now canonical
+(ADR 0012), development happens there directly and there is nothing to publish. Retained here only so
+older references resolve.
 
 ## Tier
 

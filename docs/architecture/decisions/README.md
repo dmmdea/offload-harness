@@ -15,12 +15,13 @@ code, treat everything else as background.
 | [0003](0003-policy-broker-and-capability-flags-off-by-default.md) | Accepted | Single policy broker; capability flags off by default |
 | [0004](0004-worktree-confinement-audit-outside.md) | Accepted | Worktree confinement with the audit trail stored outside it |
 | [0005](0005-loopback-only-serve.md) | Accepted | Loopback-only serving unless explicitly opted out |
-| [0006](0006-private-canonical-public-squash-mirror.md) | Accepted | Private canonical repository with a public squash-published mirror |
+| [0006](0006-private-canonical-public-squash-mirror.md) | Superseded | Private canonical repository with a public squash-published mirror → [0012](0012-public-canonical-repository.md) |
 | [0007](0007-host-torch-pinned-additive-provisioning.md) | Accepted | Pinned-additive provisioning that never moves host torch |
 | [0008](0008-pdh-primary-vram-sampling.md) | Accepted | Per-process PDH counters as the primary footprint source |
 | [0009](0009-zero-warm-gpu-lifecycle.md) | Accepted | Zero-warm GPU lifecycle for media generation |
 | [0010](0010-tier-optimization-before-latency-defer.md) | Accepted | Fix the tier binding before adding latency-based defers |
 | [0011](0011-flux-family-license-prohibition.md) | Accepted | FLUX-family models are prohibited |
+| [0012](0012-public-canonical-repository.md) | Accepted | Public repository is canonical; private is the development and moat repository |
 
 
 ## Lifecycle

@@ -112,7 +112,8 @@ long architectural explanations that belong in an ADR, or leave stale historical
 
 ## Privacy
 
-Anything in this repository may be published to the public mirror. Documentation must never contain:
+This is the public canonical repository — everything tracked here is already public. Documentation
+(and code) must never contain:
 
 - Real machine hostnames.
 - Tailnet IP addresses or the tailnet domain name.
