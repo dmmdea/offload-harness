@@ -89,8 +89,9 @@ instances, and sums only the render's own process tree. This is the only per-pro
 consumer cards with a display attached run under WDDM, where NVML per-process accounting returns N/A
 and `nvidia-smi` can therefore only see global memory.
 
-Advertised footprints are **padded and max-kept**: a new observed peak sets
-`vram_peak_gb = round(observed × 1.2, 0.1)`. Only successful renders with a positive peak are
+Advertised footprints are the **raw max-observed peak**: a new observed peak sets
+`vram_peak_gb = round(observed, 0.1)` — the node adds **no** margin; the dispatcher owns all routing
+margin ([ADR 0013](../architecture/decisions/0013-nodes-advertise-raw-footprint.md)). Only successful renders with a positive peak are
 recorded. Footprints merge across processes by file mtime, so `fleet-measure` run while a node is
 serving becomes visible to the running node.
 

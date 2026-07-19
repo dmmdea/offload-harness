@@ -34,11 +34,15 @@ sums only those belonging to the render's own process tree. This is the only per
 works under WDDM. Elsewhere — and when explicitly configured — a global-delta sampler subtracts a
 baseline captured before the render loaded anything.
 
-**Advertised footprints are padded and max-kept.** A new observed peak sets
-`vram_peak_gb = round(observed × 1.2, 0.1)`. The multiplier is headroom against the variance a
-sampler at 500 ms cadence will miss; the max-keep means a footprint ratchets up to the worst
+**Advertised footprints are max-kept.** A new observed peak ratchets the footprint up to the worst
 observation rather than averaging toward optimism. Only successful renders with a positive peak are
 recorded, because a failed run's peak may be partial.
+
+> **Revised 2026-07-18 by [ADR 0013](0013-nodes-advertise-raw-footprint.md).** This ADR originally
+> had the node pad the advertised value by ×1.2 (`round(observed × 1.2, 0.1)`). That was reversed:
+> the node now advertises the **raw** observed peak and the dispatcher owns all routing margin —
+> node ×1.2 on top of the dispatcher's margin double-inflated footprints. The PDH/sampling core of
+> this ADR is unchanged; only the padding is superseded.
 
 **Footprints merge across processes by file mtime.** `fleet-measure` run while `fleet-serve` is
 already serving would otherwise be invisible to the running node; a stat-and-reload before each read
@@ -54,8 +58,8 @@ trustworthy on that machine, and worse than that is the documented signal to set
 
 - Footprints reflect our job's real cost on the machine that will run it, not a number copied from a
   spec sheet.
-- The padding makes advertised footprints deliberately pessimistic. A dispatcher packing nodes to the
-  last gigabyte will under-pack slightly. That is the intended direction of error.
+- Footprints are the raw observed peak (see the ADR 0013 revision note above); the dispatcher applies
+  the routing margin, so a node never double-inflates its own footprint.
 - **The sampler config value is not validated.** The selection predicate is `!= "global"`, so `"pdh"`
   and `"auto"` behave identically, and `"pdh"` on a non-Windows host silently yields the global-delta
   sampler. A typo in this field selects PDH rather than erroring.

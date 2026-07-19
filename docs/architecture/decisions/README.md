@@ -22,6 +22,7 @@ code, treat everything else as background.
 | [0010](0010-tier-optimization-before-latency-defer.md) | Accepted | Fix the tier binding before adding latency-based defers |
 | [0011](0011-flux-family-license-prohibition.md) | Accepted | FLUX-family models are prohibited |
 | [0012](0012-public-canonical-repository.md) | Accepted | Public repository is canonical; private is the development and moat repository |
+| [0013](0013-nodes-advertise-raw-footprint.md) | Accepted | Nodes advertise the raw observed footprint; the dispatcher owns all margin |
 
 
 ## Lifecycle
