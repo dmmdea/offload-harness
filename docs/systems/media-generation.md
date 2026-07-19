@@ -121,6 +121,13 @@ Hardware profiles seed these. Tiers at 16 GB and above bind **HiDream-O1 bf16** 
 Q8_0** experts with an fp16 text encoder. **RealVisXL** is the SDXL-class inpainting default. The 8 GB
 tiers stay SDXL-class for image generation until O1 on 8 GB is verified on real hardware.
 
+The recommended **≥16 GB image-*edit* primitive is Qwen-Image-Edit-2511** (Apache-2.0). It is a
+model-matrix *designation*, not a config binding — image editing at that tier runs through
+[run-graph](../flows/run-graph-manifest-satisfaction.md) with the model set declared in the caller's
+node manifest (e.g. the creative-marketing-pipelines scene-swap), so no edit checkpoint is seeded into
+`config.json`. FLUX-family models remain prohibited
+([ADR 0011](../architecture/decisions/0011-flux-family-license-prohibition.md)).
+
 ## Error handling
 
 Failures return typed Defers rather than crashing: a busy GPU lock defers with a distinct reason, a
