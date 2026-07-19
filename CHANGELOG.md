@@ -4,6 +4,16 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.7] - 2026-07-18
+
+### Added — Qwen-Image-Edit-2511 designated the ≥16GB image-edit primitive (model matrix)
+- Documented Qwen-Image-Edit-2511 (Apache-2.0, commercial-safe) as the recommended ≥16GB image-*edit*
+  primitive in `setup/SETUP-AGENT.md` and `docs/systems/media-generation.md`. It is a matrix
+  *designation*, not a `config_seed` binding — edit workflows run through `run-graph` with the model
+  set in the caller's node manifest, so no edit checkpoint is seeded into `config.json`. HiDream-O1
+  (t2i) and Wan (video) stay the config_seed bindings; FLUX-family remains prohibited (ADR 0011).
+  Aligns the harness model matrix with the creative-marketing-pipelines 16GB tier pick.
+
 ## [0.22.6] - 2026-07-18
 
 ### Changed — fleet nodes advertise the RAW footprint; the dispatcher owns all margin (CONTRACT v2.1)
