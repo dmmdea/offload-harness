@@ -97,12 +97,25 @@ func (f *Footprints) Path() string {
 // changed; safe to call from the health accessor (no locks beyond the store's
 // own, no spawns).
 func (f *Footprints) ReloadIfChanged() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reloadMergeLocked()
+}
+
+// reloadMergeLocked is the mtime-gated max-merge of the on-disk store into memory
+// (higher observed peak wins per key). The caller holds f.mu. It runs on BOTH the
+// read path (ReloadIfChanged, so health surfaces another process's records) AND
+// the write path (Record, BEFORE persisting) — the latter is what stops a write
+// from CLOBBERING a record another process just wrote: fleet-measure and the MCP
+// share ~/.local-offload/footprints.json, and without this a Record would
+// overwrite the file with only this process's in-memory entries (the live-found
+// "only comfy-graph advertised"). A partially-written file mid-rename skips
+// cleanly; the next call retries.
+func (f *Footprints) reloadMergeLocked() {
 	fi, err := os.Stat(f.path)
 	if err != nil {
 		return // missing/unreadable: nothing newer to merge
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	if !fi.ModTime().After(f.loadedMod) {
 		return
 	}
@@ -152,6 +165,11 @@ func (f *Footprints) Record(family, quant, task string, observedGiB float64) {
 	}
 	rec.Samples++
 	rec.Updated = time.Now().UTC()
+	// Merge any record another process wrote since we loaded, BEFORE we persist —
+	// otherwise this write overwrites the file with only our in-memory entries and
+	// clobbers e.g. fleet-measure's records while the MCP is running (max-keep means
+	// our just-folded observation still wins its own key unless disk saw higher).
+	f.reloadMergeLocked()
 	if err := f.persistLocked(); err != nil {
 		log.Printf("footprints: persist %s failed (entry kept in memory): %v", f.path, err)
 	}
