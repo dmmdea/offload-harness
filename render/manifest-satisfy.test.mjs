@@ -246,11 +246,18 @@ test("defaultSatisfyDeps.writeSentinel writes the sidecar (no require in ESM)", 
   }
 });
 
-test("defaultSatisfyDeps.download creates dirs and writes bytes (no require in ESM)", async () => {
+test("defaultSatisfyDeps.download streams the body to disk (no >2GB Buffer cap)", async () => {
+  // The response body is consumed as a STREAM (Readable.fromWeb), not buffered whole via
+  // arrayBuffer() — that buffering threw ">2GB length" on Node's Buffer cap, so a >~2GB model
+  // (Qwen-Image-Edit GGUF, RealVisXL) could never download. A mock that only exposes `body`
+  // (and no arrayBuffer) proves the code takes the streaming path.
   const { dir, deps } = realDeps();
   const bytes = new TextEncoder().encode("model-bytes");
   const origFetch = globalThis.fetch;
-  globalThis.fetch = async () => ({ ok: true, arrayBuffer: async () => bytes.buffer });
+  globalThis.fetch = async () => ({
+    ok: true,
+    body: new ReadableStream({ start(c) { c.enqueue(bytes); c.close(); } }),
+  });
   try {
     const dest = join(dir, "nested", "sub", "model.bin"); // dirname must be mkdir'd
     await deps.download("http://example/model.bin", dest);
