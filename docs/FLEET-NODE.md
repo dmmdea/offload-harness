@@ -63,10 +63,12 @@ entry with `vram_peak_gb <= 0` (we never write those).
 
 Recording is **passive**: every GPU render through the pipeline — normal harness use, not
 just fleet jobs — samples VRAM while the child process runs and folds the observed peak
-into the store (max-keep; `vram_peak_gb = observed_max × 1.2`, rounded to 0.1). Footprints
-therefore stay current when bindings change: a new model family simply starts a new entry.
-The recorded ×1.2 is the only margin we add — the dispatcher applies its own on top, so
-don't pad the store by hand.
+into the store (max-keep; `vram_peak_gb = observed_max`, rounded to 0.1 — the **raw** peak,
+no padding). Footprints therefore stay current when bindings change: a new model family
+simply starts a new entry. The node adds **no** margin: the dispatcher owns all routing
+margin (CONTRACT v2.1 / ADR 0013). A node that padded its own ×1.2 on top of the
+dispatcher's margin double-inflated footprints and made wan2.2/hidream unroutable on a 16 GB
+node — so don't pad the store by hand.
 
 ### Priming an empty store: `fleet-measure`
 

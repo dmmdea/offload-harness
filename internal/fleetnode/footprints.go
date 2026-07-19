@@ -3,9 +3,11 @@ package fleetnode
 // footprints.go is the measured-footprint store behind /fleet/health's
 // model_footprints[] (~/.local-offload/footprints.json). Entries are MEASURED
 // per-render peaks including our offload strategy: Record keeps the max
-// observed GiB per (family, quant, task) key and stores vram_peak_gb =
-// max x 1.2 rounded to 0.1. The dispatcher adds its own margin on top — we
-// never double-pad beyond the recorded x1.2, and we never write a
+// observed GiB per (family, quant, task) key and stores vram_peak_gb = that
+// RAW max observed peak, rounded to 0.1 — no node-side padding. The DISPATCHER
+// owns all routing margin (CONTRACT v2.1 / ADR 0013): a node advertising its
+// own ×1.2 on top of the dispatcher's margin double-inflated footprints and
+// made wan2.2/hidream unroutable on a 16GB node. We never write a
 // vram_peak_gb <= 0 entry (the contract has dispatchers ignore those).
 
 import (
@@ -128,8 +130,8 @@ func roundToTenth(v float64) float64 {
 }
 
 // Record folds one observed per-render peak (GiB) into the (family, quant,
-// task) entry: max-keep on the observation, vram_peak_gb = max x 1.2 rounded
-// 0.1, samples++, then persist. Non-positive observations are dropped — a
+// task) entry: max-keep on the observation, vram_peak_gb = raw max observed
+// rounded 0.1 (no padding), samples++, then persist. Non-positive observations are dropped — a
 // zero/negative "peak" is a sampling failure, and the contract forbids
 // advertising vram_peak_gb <= 0.
 func (f *Footprints) Record(family, quant, task string, observedGiB float64) {
@@ -146,7 +148,7 @@ func (f *Footprints) Record(family, quant, task string, observedGiB float64) {
 	}
 	if observedGiB > rec.ObservedPeakGiB {
 		rec.ObservedPeakGiB = observedGiB
-		rec.VramPeakGiB = roundToTenth(observedGiB * 1.2)
+		rec.VramPeakGiB = roundToTenth(observedGiB) // RAW peak — the dispatcher owns all margin (ADR 0013)
 	}
 	rec.Samples++
 	rec.Updated = time.Now().UTC()

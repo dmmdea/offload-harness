@@ -4,6 +4,18 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.6] - 2026-07-18
+
+### Changed — fleet nodes advertise the RAW footprint; the dispatcher owns all margin (CONTRACT v2.1)
+- A fleet node used to pad its advertised footprint by ×1.2 (`vram_peak_gb = round(observed × 1.2)`).
+  The dispatcher independently applies its own margin, so the two compounded (`observed × 1.2 × 1.2 +
+  offset`) and pushed wan2.2/hidream past a 16 GB node's capacity — **unroutable** even though they
+  run there. `Record` now stores the **raw** observed peak (`round(observed, 0.1)`); the dispatcher
+  owns all routing margin. The `vram_peak_gb` contract field's meaning changes from padded footprint
+  to raw measured peak (CONTRACT v2.1). New **ADR 0013** records the decision and supersedes the
+  padding part of ADR 0008 (the PDH sampling core of 0008 is unchanged). Footprint tests updated to
+  the raw values.
+
 ## [0.22.5] - 2026-07-18
 
 ### Changed — VENV_INCOHERENT defers say WHY (host-pin drift vs dependency conflict)
