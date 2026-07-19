@@ -4,6 +4,18 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.9] - 2026-07-18
+
+### Fixed — run-graph model download streams to disk (models >2GB now work)
+- The manifest satisfier's `download` buffered the entire model file in memory via
+  `Buffer.from(await r.arrayBuffer())`, which throws a ">2GB length" RangeError on Node's
+  Buffer/ArrayBuffer cap — so any model over ~2GB (Qwen-Image-Edit GGUF ~14GB, RealVisXL 6.94GB)
+  could never be satisfied and the run-graph manifest deferred. It now streams the response body
+  straight to disk (`pipeline(Readable.fromWeb(r.body), createWriteStream(dest))`), which has no size
+  limit. The sha256-verify path already streamed, so only the download was affected. Reported by the
+  creative-marketing-pipelines session hitting it live on RealVisXL. Regression test asserts the
+  streaming path (a mock exposing only `body`, no `arrayBuffer`).
+
 ## [0.22.8] - 2026-07-18
 
 ### Fixed — footprint store merges on write (no cross-process clobber)
