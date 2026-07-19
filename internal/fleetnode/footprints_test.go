@@ -228,6 +228,23 @@ func TestFootprintsConcurrentRecord(t *testing.T) {
 	}
 }
 
+// TestConcurrentProcessWritesMerge reproduces the live Aorus symptom: fleet-measure
+// and the MCP server share ~/.local-offload/footprints.json as separate processes.
+// A write must MERGE the on-disk state, not overwrite it with only this process's
+// in-memory entries — the reported "only comfy-graph advertised" was the MCP's
+// Record clobbering fleet-measure's freshly-measured hidream record.
+func TestConcurrentProcessWritesMerge(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "footprints.json")
+	measure := OpenFootprints(path) // "fleet-measure" process
+	server := OpenFootprints(path)  // "MCP" process — both opened while the file was absent
+	measure.Record("hidream-o1", "bf16", "image-gen", 12.5)
+	server.Record("comfy-graph", "", "run-graph", 0.5) // must NOT clobber the hidream record on disk
+	final := OpenFootprints(path).Entries()
+	if len(final) != 2 {
+		t.Fatalf("a concurrent process's write clobbered a record: disk has %d entries, want 2 (hidream-o1 + comfy-graph): %+v", len(final), final)
+	}
+}
+
 // Live-found bug: fleet-serve held its startup (empty) store while fleet-measure
 // (another process) wrote records — health served 0 footprints. ReloadIfChanged
 // must surface the other process's records (mtime-gated) and never regress a
