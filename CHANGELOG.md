@@ -4,6 +4,20 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.8] - 2026-07-18
+
+### Fixed — footprint store merges on write (no cross-process clobber)
+- A fleet node's footprint store `Record` overwrote `~/.local-offload/footprints.json` with only the
+  writing process's in-memory entries. When `fleet-measure` and the MCP server ran as separate
+  processes sharing that file, whichever wrote last **clobbered** the other's records — the live Aorus
+  symptom "only comfy-graph advertised" was the MCP's write wiping fleet-measure's freshly-measured
+  entries. (The earlier "cache lock" diagnosis was a misread; footprints.json is not the cache.) The
+  merge (`ReloadIfChanged`) previously ran only on the read path; `Record` now reload-merges the
+  on-disk state **before** persisting, so a write folds in another process's records instead of
+  overwriting them. Reproduction test added (two stores on one path → both records survive). Residual:
+  two writes in the same mtime tick can still race — negligible in practice since renders are
+  GPU-lock-serialized; a cross-process file lock would fully serialize if ever needed.
+
 ## [0.22.7] - 2026-07-18
 
 ### Added — Qwen-Image-Edit-2511 designated the ≥16GB image-edit primitive (model matrix)
