@@ -106,6 +106,8 @@ import { existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { tmpdir } from "node:os";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 // Command builders are pure (unit-tested); execution is in defaultSatisfyDeps.
 // Unified resolve: ONE `uv pip compile` across ALL packs' requirements files at once
@@ -247,8 +249,11 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
     download: async (url, dest) => {
       const r = await fetch(url); if (!r.ok) throw new Error(`${r.status}`);
       mkdirSync(dirname(dest), { recursive: true });
-      const buf = Buffer.from(await r.arrayBuffer());
-      writeFileSync(dest, buf);
+      // Stream the body straight to disk. Buffer.from(await r.arrayBuffer()) buffered the WHOLE
+      // file in memory and threw a ">2GB length" RangeError on Node's Buffer/ArrayBuffer cap, so
+      // any model over ~2GB (Qwen-Image-Edit GGUF ~14GB, RealVisXL 6.94GB) could never download.
+      // Streaming has no size limit; pipeline closes both streams and rejects on any error.
+      await pipeline(Readable.fromWeb(r.body), createWriteStream(dest));
     },
     sha256: (p) => new Promise((res, rej) => {
       const h = createHash("sha256"); const s = createReadStream(p);
