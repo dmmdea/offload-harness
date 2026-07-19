@@ -52,7 +52,7 @@ const okDeps = {
   download: async () => {}, sha256: async () => "HASH",
   satisfierAvailable: () => true, comfyVersion: async () => "0.23.5",
   resolveDeps: async () => {}, ensurePack: async () => ({ changed: false }),
-  pipCheck: async () => true,
+  pipCheck: async () => ({ ok: true }),
 };
 const M = parseManifest({
   comfyui_min_version: "0.23.0",
@@ -76,8 +76,17 @@ test("DEFER COMFY_VERSION_BELOW_MIN", async () => {
 });
 
 test("DEFER VENV_INCOHERENT when pip check fails", async () => {
-  const r = await satisfyManifest(M, { ...okDeps, pipCheck: async () => false });
+  const r = await satisfyManifest(M, { ...okDeps, pipCheck: async () => ({ ok: false, reason: "conflicting installed dependencies" }) });
   assert.equal(r.defer.code, "VENV_INCOHERENT");
+});
+
+test("VENV_INCOHERENT surfaces the pipCheck reason (host-pin drift is actionable, not opaque)", async () => {
+  // A pack that moved a host-pinned package (e.g. torch) must report WHICH package drifted in
+  // the defer detail — a consuming workflow can't act on a generic "conflicting dependencies".
+  const drift = "host-pin drift — a pinned package moved during provisioning: expected [torch==2.11.0] got [torch==2.13.0]";
+  const r = await satisfyManifest(M, { ...okDeps, pipCheck: async () => ({ ok: false, reason: drift }) });
+  assert.equal(r.defer.code, "VENV_INCOHERENT");
+  assert.equal(r.defer.detail, drift);
 });
 
 // Regression (live acceptance 2026-07-17): an empty/models-only manifest must NOT invoke the
@@ -89,7 +98,7 @@ test("empty manifest (no packs) skips the satisfier entirely — no cm-cli", asy
     ...okDeps,
     satisfierAvailable: () => { touched = true; return false; },
     resolveDeps: async () => { touched = true; },
-    pipCheck: async () => { touched = true; return false; },
+    pipCheck: async () => { touched = true; return { ok: false, reason: "x" }; },
   };
   const r = await satisfyManifest(empty, spy);
   assert.equal(r.ok, true); assert.equal(r.changed, false);

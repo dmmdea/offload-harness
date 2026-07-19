@@ -4,6 +4,17 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.5] - 2026-07-18
+
+### Changed — VENV_INCOHERENT defers say WHY (host-pin drift vs dependency conflict)
+- The run-graph pack satisfier's `pipCheck` tripwire returned a bare boolean for both a genuine
+  dependency conflict and host-pin drift (a pack moving `torch`/`torchvision`/`torchaudio`/`numpy`),
+  so every `VENV_INCOHERENT` defer read `"conflicting installed dependencies"` and the actionable
+  drift diagnostic — which pinned package moved, expected vs observed — was written only to stderr.
+  `pipCheck` now returns `{ok, reason}` and the defer surfaces that reason, so a consuming workflow
+  can tell drift from a conflict and see the exact pins. Makes a Qwen-image-edit (or any node-pack)
+  manifest-satisfaction defer actionable instead of opaque.
+
 ## [0.22.4] - 2026-07-18
 
 ### Fixed — run-graph creates a caller-supplied out_dir instead of ENOENT-ing
