@@ -4,6 +4,16 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.4] - 2026-07-18
+
+### Fixed — run-graph creates a caller-supplied out_dir instead of ENOENT-ing
+- A caller-supplied `out_dir` that did not yet exist failed at first output write with an opaque
+  `RUN_ERROR` — only the *defaulted* media dir was created, never a caller's directory. The Go side
+  now resolves and `MkdirAll`s the output directory in either case (new `resolveOutDir` helper, unit
+  tested); a directory that genuinely cannot be created defers typed ("cannot create out_dir") rather
+  than failing later. The standalone `render/comfy-run-graph.mjs` write path `mkdirSync`s the target
+  as well, so a fresh out-dir works there too.
+
 ## [0.22.3] - 2026-07-18
 
 ### Fixed — run-graph model satisfier crashed with "require is not defined"
