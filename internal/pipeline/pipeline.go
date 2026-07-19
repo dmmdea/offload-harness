@@ -1068,6 +1068,21 @@ func buildRunGraphParams(req core.Request) (rungraph.Params, error) {
 	}, nil
 }
 
+// resolveOutDir picks the run-graph output directory — the caller's out_dir if given,
+// else the media dir — and ensures it exists. Creating a caller-supplied directory here
+// (not only the defaulted media dir) is what stops a not-yet-existing out_dir from
+// ENOENT-ing at first output write and surfacing as an opaque RUN_ERROR.
+func resolveOutDir(mediaDir, callerOutDir string) (string, error) {
+	dir := callerOutDir
+	if dir == "" {
+		dir = mediaDir
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 // runRunGraph executes an arbitrary ComfyUI API-format graph + satisfies its node manifest
 // on the LOCAL ComfyUI by shelling out to comfy-run-graph.mjs (shared GPU lock + ComfyUI
 // lifecycle via internal/rungraph → gpugen). Its own branch — no text models, no grammar,
@@ -1088,10 +1103,11 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
 		params.ResultPath = filepath.Join(p.cfg.MediaDir, "run-graph-"+sha256hex(params.GraphPath+params.ManifestPath)[:8]+".json")
 	}
-	if params.OutDir == "" {
-		params.OutDir = p.cfg.MediaDir
-		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
+	outDir, oerr := resolveOutDir(p.cfg.MediaDir, params.OutDir)
+	if oerr != nil {
+		return p.deferGen(req, meta, start, len(req.Input), "cannot create out_dir: "+oerr.Error())
 	}
+	params.OutDir = outDir
 	// LO-2: resolve a relative script path against the exe dir (an MCP host spawns us with
 	// no meaningful cwd) and defer with a distinct reason when missing.
 	script, serr := gpugen.ResolveScript(p.cfg.RunGraphScript)

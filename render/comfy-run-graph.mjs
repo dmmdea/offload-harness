@@ -6,7 +6,7 @@
 // teardown; run-graph owns the ComfyUI lifecycle itself. Ownership is keyed on the
 // manifest hash (NOT an ephemeral node pid). DEFER-never-cloud: every failure writes
 // {deferred:true, code, ref, detail} to the result and exits 0 (a defer is data, not a crash).
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withGpuSlot, freeComfy as _freeComfy } from "./gpu-lock.mjs";
@@ -163,6 +163,7 @@ async function main() {
       fetchToDir: async (f, dir) => {
         const q = new URLSearchParams({ filename: f.filename, subfolder: f.subfolder, type: f.type });
         const r = await fetch(`${api}/view?` + q); const buf = Buffer.from(await r.arrayBuffer());
+        mkdirSync(dir, { recursive: true }); // standalone-mjs path: don't ENOENT on a fresh out-dir
         const p = join(dir, f.filename); writeFileSync(p, buf);
         const { width, height } = pngSize(buf);
         return { path: p, type: f.type, kind: f.kind, width, height };
