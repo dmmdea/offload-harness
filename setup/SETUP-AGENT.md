@@ -163,6 +163,13 @@ box, set the same keys in its config.json. Model download set (SHA256 from the H
 `Wan2.2-I2V-A14B-{High,Low}Noise-Q8_0.gguf` (15.4GB ×2, QuantStack/Wan2.2-I2V-A14B-GGUF),
 `umt5_xxl_fp16.safetensors` (10.6GB, Comfy-Org/Wan_2.2_ComfyUI_Repackaged). Requires
 ComfyUI ≥ v0.21.1 (the HiDream-O1 nodes) and ≥~48GB system RAM for the offload path.
+
+The **≥16GB image-EDIT primitive is Qwen-Image-Edit-2511** (Apache-2.0, commercial-safe — the
+8GB→16GB compositing/edit unlock). This is a *recommended-model designation*, **not** a `config_seed`
+binding: edit workflows (e.g. the creative-marketing-pipelines scene-swap) run through `run-graph`
+with the model set declared in their own node manifest, so the harness never binds an edit checkpoint
+in `config.json`. HiDream-O1 (t2i) and Wan (video) stay the config_seed bindings; RealVisXL is the
+SDXL-class inpaint binding. **FLUX-family stays prohibited** (BFL non-commercial — ADR 0011).
 8GB tiers: **VERIFIED** — O1 bf16 @2048 runs on an 8GB 3070 with 64GB RAM (5.9 min/render,
 an 8GB 3070 + 64GB RAM box, 2026-07-16). The seed stays off for 8GB tiers only because low-RAM boxes can't offload
 it — bind manually on any 8GB box with ≥~48GB RAM; video Q8_0 via DisTorch2 likewise.
