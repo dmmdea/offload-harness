@@ -94,7 +94,8 @@ export async function satisfyManifest(manifest, deps) {
     //    (under the host-torch constraints env), never per-pack pip.
     try { await resolveDeps(manifest.node_packs); }
     catch (e) { return defer("VENV_INCOHERENT", "uv-resolve", String(e.message || e)); }
-    if (!(await pipCheck())) return defer("VENV_INCOHERENT", "pip-check", "conflicting installed dependencies");
+    const pc = await pipCheck();
+    if (!pc.ok) return defer("VENV_INCOHERENT", "pip-check", pc.reason);
   }
 
   return { ok: true, changed, unverified: models.unverified };
@@ -274,9 +275,17 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
       gitHead: (dir) => runOut(["git", "-C", dir, "rev-parse", "HEAD"]),
       gitRun: (cmd) => run(cmd),
     }),
+    // Returns { ok: true } or { ok: false, reason } — the reason is surfaced in the
+    // VENV_INCOHERENT defer detail so a consuming workflow can tell host-pin DRIFT
+    // (which pinned package moved) from an ordinary dependency CONFLICT, instead of an
+    // opaque "conflicting installed dependencies".
     pipCheck: async () => {
       try {
-        await run([comfyPy, "-m", "pip", "check"]);
+        try {
+          await run([comfyPy, "-m", "pip", "check"]);
+        } catch (e) {
+          return { ok: false, reason: "pip check reported conflicting installed dependencies: " + String(e.message || e) };
+        }
         // Tripwire (belt + suspenders under the constraints env): if provisioning moved a
         // HOST_PINNED package anyway, that venv would break the existing render path —
         // report incoherent (→ typed VENV_INCOHERENT defer), never a silent torch swap.
@@ -284,12 +293,13 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
         if (pins.length) {
           const now = buildHostConstraints(await runOut([comfyPy, "-m", "pip", "freeze"]));
           if ([...pins].sort().join("|") !== [...now].sort().join("|")) {
-            console.error("host-pin drift: expected [" + pins.join(", ") + "] got [" + now.join(", ") + "]");
-            return false;
+            const detail = "host-pin drift — a pinned package moved during provisioning: expected [" + pins.join(", ") + "] got [" + now.join(", ") + "]";
+            console.error(detail);
+            return { ok: false, reason: detail };
           }
         }
-        return true;
-      } catch { return false; }
+        return { ok: true };
+      } catch (e) { return { ok: false, reason: "venv coherence check failed: " + String(e.message || e) }; }
     },
   };
 }
