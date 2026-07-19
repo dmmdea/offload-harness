@@ -98,8 +98,8 @@ func TestRunGraphFootprintFamily(t *testing.T) {
 }
 
 // TestFootprintSampling_Composition: the composed hook carries the exact key,
-// a sampler, and a callback that records into the shared store with the x1.2
-// margin.
+// a sampler, and a callback that records into the shared store (raw peak — the
+// node adds no margin; the dispatcher owns it, ADR 0013).
 func TestFootprintSampling_Composition(t *testing.T) {
 	p := footprintTestPipeline(t, config.Default(), 0)
 	s := p.footprintSampling("sdxl", "", "image-gen")
@@ -111,8 +111,8 @@ func TestFootprintSampling_Composition(t *testing.T) {
 	}
 	s.OnFootprint(3.0)
 	e := findEntry(t, p.FootprintStore().Entries(), "sdxl", "image-gen")
-	if e.VramPeakGiB != 3.6 { // 3.0 x 1.2
-		t.Errorf("vram_peak_gb = %v, want 3.6", e.VramPeakGiB)
+	if e.VramPeakGiB != 3.0 { // 3.0 observed, raw (no node padding)
+		t.Errorf("vram_peak_gb = %v, want 3.0", e.VramPeakGiB)
 	}
 }
 
@@ -136,8 +136,8 @@ func TestRunGenerateImage_RecordsFootprint(t *testing.T) {
 	if e.Quant != "" {
 		t.Errorf("quant = %q, want \"\" (no HiDream binding)", e.Quant)
 	}
-	if e.VramPeakGiB != 2.4 { // 2.0 observed x 1.2
-		t.Errorf("vram_peak_gb = %v, want 2.4", e.VramPeakGiB)
+	if e.VramPeakGiB != 2.0 { // 2.0 observed, raw (no node padding)
+		t.Errorf("vram_peak_gb = %v, want 2.0", e.VramPeakGiB)
 	}
 }
 
@@ -160,8 +160,8 @@ func TestRunGenerateVideo_RecordsFootprint(t *testing.T) {
 	if e.Quant != "q8_0" {
 		t.Errorf("quant = %q, want \"q8_0\"", e.Quant)
 	}
-	if e.VramPeakGiB != 6.6 { // 5.5 x 1.2
-		t.Errorf("vram_peak_gb = %v, want 6.6", e.VramPeakGiB)
+	if e.VramPeakGiB != 5.5 { // 5.5 observed, raw (no node padding)
+		t.Errorf("vram_peak_gb = %v, want 5.5", e.VramPeakGiB)
 	}
 }
 
