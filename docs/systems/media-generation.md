@@ -125,7 +125,10 @@ The recommended **≥16 GB image-*edit* primitive is Qwen-Image-Edit-2511** (Apa
 model-matrix *designation*, not a config binding — image editing at that tier runs through
 [run-graph](../flows/run-graph-manifest-satisfaction.md) with the model set declared in the caller's
 node manifest (e.g. the creative-marketing-pipelines scene-swap), so no edit checkpoint is seeded into
-`config.json`. FLUX-family models remain prohibited
+`config.json`. **Pin a `_1` GGUF quant (`Q4_1`/`Q5_1`), never a `_K_` one:** 2511 K-quants fail
+`UnetLoaderGGUF` with `cannot reshape array` even on byte-perfect files (city96/ComfyUI-GGUF #247).
+Measured on `ampere-16` 2026-07-19: Q5_1 (15.4 GB) + fp8 encoder fits 16 GB with block-swap, composite
+peak 15,757 MiB. FLUX-family models remain prohibited
 ([ADR 0011](../architecture/decisions/0011-flux-family-license-prohibition.md)).
 
 ## Error handling

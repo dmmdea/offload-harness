@@ -170,6 +170,15 @@ binding: edit workflows (e.g. the creative-marketing-pipelines scene-swap) run t
 with the model set declared in their own node manifest, so the harness never binds an edit checkpoint
 in `config.json`. HiDream-O1 (t2i) and Wan (video) stay the config_seed bindings; RealVisXL is the
 SDXL-class inpaint binding. **FLUX-family stays prohibited** (BFL non-commercial — ADR 0011).
+
+> **GGUF quant caveat — pin a `_1` quant, never a `_K_` one.** Qwen-Image-Edit-2511 K-quants
+> (`Q5_K_S` and friends, including the common unsloth default) **fail to load** in ComfyUI-GGUF's
+> `UnetLoaderGGUF` with `cannot reshape array`, even on a byte-perfect file (verified: disk sha ==
+> upstream LFS oid, gguf 0.19.0, pack at HEAD). Only **`Q4_1` / `Q5_1`** load for 2511 — see
+> city96/ComfyUI-GGUF issue #247. Measured live on `ampere-16` (Qube) 2026-07-19 by the
+> creative-marketing-pipelines session: **Q5_1 (15.4GB) + fp8 Qwen2.5-VL encoder fits 16GB with
+> block-swap** — composite peak **15,757 MiB** (HiDream for comparison: 15,688 MiB). A manifest that
+> pins a K-quant will download 15GB and then fail at load time, so pin the `_1` quant explicitly.
 8GB tiers: **VERIFIED** — O1 bf16 @2048 runs on an 8GB 3070 with 64GB RAM (5.9 min/render,
 an 8GB 3070 + 64GB RAM box, 2026-07-16). The seed stays off for 8GB tiers only because low-RAM boxes can't offload
 it — bind manually on any 8GB box with ≥~48GB RAM; video Q8_0 via DisTorch2 likewise.
