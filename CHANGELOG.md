@@ -4,6 +4,31 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.11] - 2026-07-20
+
+### Fixed — model presence spans ComfyUI's full search path (`extra_model_paths.yaml`)
+- The satisfier resolved every model as `join(comfyDir, model.path)` and knew nothing about
+  `extra_model_paths.yaml`, so on any machine that keeps its model tree off the OS drive — e.g. a
+  `V:` Optane tree, the documented Qube layout — a model that ComfyUI loads fine read as **MISSING**
+  and was re-downloaded to `C:` on every run (tens of GB for a big GGUF). Presence now checks the
+  canonical location first and then every directory registered for that model class. The YAML is
+  read by a minimal, dependency-free parser (this repo ships no npm deps) handling `base_path`,
+  `category: dir`, and block scalars (`unet: |` listing several dirs); it is **fail-safe** —
+  anything unparseable yields no extra roots, i.e. exactly the previous behavior. Verified against
+  the live Qube file: 17 categories parsed, `unet` correctly expanded to both `diffusion_models` and
+  `unet`, and the real Qwen-Image-Edit GGUF resolved on `V:`.
+
+### Fixed — a pre-provisioned model is adopted instead of re-downloaded
+- The skip gate trusted the `.sha-ok` sidecar alone, so a model placed by hand or by `curl` — with a
+  byte-correct hash but no sidecar — failed the gate and fell into the **download** branch, re-fetching
+  a file that was already correct. A present file with a pinned sha is now hashed **once** and, on a
+  match, adopted by writing the sentinel beside the file that was actually found (which may be on the
+  secondary tree, not `comfyDir`). On a mismatch it is replaced when a `source_url` exists; with no
+  `source_url` it defers `MODEL_SHA_MISMATCH` — naming the real problem instead of the misleading
+  "missing on disk and no source_url".
+- Both defects were reported by the creative-marketing-pipelines session from its live 16 GB
+  scene-swap run on Qube, and both are covered by new tests (43 in the file, up from 31).
+
 ## [0.22.10] - 2026-07-20
 
 ### Fixed — model matrix: Qwen-Image-Edit-2511 must pin a `_1` GGUF quant, not a `_K_` one
