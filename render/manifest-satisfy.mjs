@@ -6,14 +6,81 @@ import { join, dirname } from "node:path";
 
 const defer = (code, ref, detail) => ({ ok: false, defer: { code, ref, detail } });
 
+const isAbsPath = (p) => /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("/") || p.startsWith("\\");
+const joinBase = (base, dir) =>
+  base ? base.replace(/[\\/]+$/, "") + "/" + dir.replace(/^[\\/]+/, "") : dir;
+
+// parseExtraModelPaths: read ComfyUI's extra_model_paths.yaml well enough to know WHERE a
+// model class may physically live. This repo ships zero npm dependencies, so rather than
+// pull in a YAML parser we handle exactly the shape ComfyUI documents — a provider block
+// with `base_path` plus `category: dir` entries, where a category may also be a block
+// scalar (`unet: |`) listing several dirs. It is deliberately FAIL-SAFE: anything it cannot
+// parse yields no roots, which degrades to the historical comfyDir-only behavior.
+export function parseExtraModelPaths(text) {
+  const roots = {};
+  if (!text || typeof text !== "string") return roots;
+  const add = (category, basePath, dir) => {
+    if (!dir) return;
+    (roots[category] ||= []).push(isAbsPath(dir) ? dir : joinBase(basePath, dir));
+  };
+  try {
+    let basePath = "", pendingKey = null, pendingIndent = 0;
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.replace(/\s+$/, "");
+      const t = line.trim();
+      if (!t || t.startsWith("#")) continue;
+      const indent = line.length - line.trimStart().length;
+      // Deeper-indented lines after `key: |` are that category's extra dirs.
+      if (pendingKey && indent > pendingIndent) { add(pendingKey, basePath, t); continue; }
+      pendingKey = null;
+      const m = /^([A-Za-z0-9_.-]+)\s*:\s*(.*)$/.exec(t);
+      if (!m) continue;
+      const key = m[1], val = m[2].replace(/\s+#.*$/, "").trim();
+      if (indent === 0) { basePath = ""; continue; }   // provider block header
+      if (key === "base_path") { basePath = val; continue; }
+      if (val === "|" || val === ">" || val === "") { pendingKey = key; pendingIndent = indent; continue; }
+      add(key, basePath, val);
+    }
+  } catch { return {}; }
+  return roots;
+}
+
+// modelCandidates: every absolute path a manifest model MIGHT occupy — the canonical
+// comfyDir location first, then each dir registered for that model class in
+// extra_model_paths.yaml. Manifest paths look like `models/<category>/<rest>`.
+export function modelCandidates(relPath, comfyDir, extraRoots) {
+  const out = [join(comfyDir, relPath)];
+  const m = /^models\/([^/]+)\/(.+)$/.exec(String(relPath || "").replace(/\\/g, "/"));
+  if (!m) return out;
+  for (const dir of (extraRoots && extraRoots[m[1]]) || []) out.push(join(dir, m[2]));
+  return out;
+}
+
 export async function satisfyModels(models, deps) {
-  const { comfyDir, exists, download, sha256, sentinelOk, writeSentinel } = deps;
+  const { comfyDir, exists, download, sha256, sentinelOk, writeSentinel, extraRoots = {} } = deps;
   const unverified = [];
   for (const m of models || []) {
     const abs = join(comfyDir, m.path);
-    if (exists(abs) && (m.sha256 ? sentinelOk(abs) : exists(abs))) {
-      if (!m.sha256) { /* present but unverifiable — trust on-disk, no re-flag */ }
-      continue;
+    // Presence resolves across ComfyUI's FULL search path, not just comfyDir. A model that
+    // lives only on a secondary tree (e.g. the V: Optane drive registered via
+    // extra_model_paths.yaml) otherwise reads as MISSING and is re-downloaded to C: — 15GB
+    // per run for a big GGUF, which is exactly what the scene-swap consumer hit live.
+    const found = modelCandidates(m.path, comfyDir, extraRoots).find((p) => exists(p)) || null;
+    if (found) {
+      if (!m.sha256) continue;            // present but unverifiable — trust on-disk
+      if (sentinelOk(found)) continue;    // already verified once
+      // Present, sha pinned, but no .sha-ok sidecar: the hand/curl-provisioned case. Hash it
+      // ONCE and adopt it by writing the sentinel. Previously this failed the skip gate and
+      // fell into the download branch, re-fetching a file that was already byte-correct.
+      try {
+        const got = await sha256(found);
+        if (got === m.sha256) { writeSentinel(found, got); continue; }
+        // Wrong bytes: replaceable only if we have a source. Otherwise name the REAL problem
+        // (a mismatching file) instead of the misleading "missing on disk".
+        if (!m.source_url) return defer("MODEL_SHA_MISMATCH", m.path, `want ${m.sha256} got ${got}`);
+      } catch (e) {
+        return defer("MODEL_DOWNLOAD_FAILED", m.path, "present-file verify failed: " + String(e.message || e));
+      }
     }
     if (!m.source_url) return defer("MODEL_DOWNLOAD_FAILED", m.path, "missing on disk and no source_url");
     try { await download(m.source_url, abs); }
@@ -102,7 +169,7 @@ export async function satisfyManifest(manifest, deps) {
 }
 
 import { spawn as nodeSpawn } from "node:child_process";
-import { existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { tmpdir } from "node:os";
@@ -243,6 +310,15 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
       try { const r = await fetch(`${api}/system_stats`); const j = await r.json(); return j?.system?.comfyui_version || j?.comfyui_version || null; }
       catch { return null; }
     },
+    // ComfyUI resolves models across extra_model_paths.yaml; so must presence-checking, or
+    // a model held on a secondary tree looks missing and gets re-downloaded. Read once,
+    // fail-safe: an unreadable/absent file leaves the roots empty (comfyDir-only behavior).
+    extraRoots: (() => {
+      try {
+        const p = join(comfyDir, "extra_model_paths.yaml");
+        return existsSync(p) ? parseExtraModelPaths(readFileSync(p, "utf8")) : {};
+      } catch { return {}; }
+    })(),
     exists: (p) => existsSync(p),
     sentinelOk: (p) => existsSync(p + ".sha-ok"),
     writeSentinel: (p, h) => writeFileSync(p + ".sha-ok", h),

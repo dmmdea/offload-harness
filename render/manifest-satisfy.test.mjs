@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { satisfyModels, defaultSatisfyDeps } from "./manifest-satisfy.mjs";
+import { satisfyModels, defaultSatisfyDeps, parseExtraModelPaths, modelCandidates } from "./manifest-satisfy.mjs";
 import { mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -44,6 +44,129 @@ test("null-sha model downloads and is reported unverified", async () => {
 test("no source_url for a missing model DEFERs MODEL_DOWNLOAD_FAILED", async () => {
   const r = await satisfyModels([{ path: "m/x", source_url: "", sha256: null }], base);
   assert.equal(r.defer.code, "MODEL_DOWNLOAD_FAILED");
+});
+
+// --- extra_model_paths.yaml awareness (models living outside comfyDir/models) ---
+// Live defect (CMP session, 2026-07-19): presence resolved ONLY under comfyDir, so a
+// model on the V: Optane tree (registered via ComfyUI's extra_model_paths.yaml) read as
+// MISSING and was re-downloaded to C: — 15GB per run.
+
+test("parseExtraModelPaths maps a simple category onto base_path", () => {
+  const roots = parseExtraModelPaths(`qube_optane:\n    base_path: V:/models/\n    checkpoints: checkpoints\n`);
+  assert.deepEqual(roots.checkpoints, ["V:/models/checkpoints"]);
+});
+
+test("parseExtraModelPaths expands a block scalar into MULTIPLE dirs", () => {
+  // ComfyUI's real shape: `unet: |` with two physical dirs beneath it.
+  const roots = parseExtraModelPaths(`qube_optane:\n    base_path: V:/models/\n    unet: |\n        diffusion_models\n        unet\n`);
+  assert.deepEqual(roots.unet, ["V:/models/diffusion_models", "V:/models/unet"]);
+});
+
+test("parseExtraModelPaths ignores comments/blanks and keeps an absolute category path", () => {
+  const roots = parseExtraModelPaths(`# a comment\n\nprov:\n    base_path: V:/models/\n    # another\n    vae: D:/elsewhere/vae\n`);
+  assert.deepEqual(roots.vae, ["D:/elsewhere/vae"]);
+});
+
+test("parseExtraModelPaths fails SAFE on garbage (never throws)", () => {
+  assert.deepEqual(parseExtraModelPaths("%%% not yaml ::: ["), {});
+  assert.deepEqual(parseExtraModelPaths(""), {});
+  assert.deepEqual(parseExtraModelPaths(null), {});
+});
+
+test("modelCandidates falls back to comfyDir alone when no extra roots", () => {
+  assert.deepEqual(modelCandidates("models/unet/x.gguf", "C:/ComfyUI", {}),
+    [join("C:/ComfyUI", "models/unet/x.gguf")]);
+});
+
+test("modelCandidates adds every registered dir for the path's category", () => {
+  const got = modelCandidates("models/unet/x.gguf", "C:/ComfyUI",
+    { unet: ["V:/m/diffusion_models", "V:/m/unet"] });
+  assert.deepEqual(got, [
+    join("C:/ComfyUI", "models/unet/x.gguf"),
+    join("V:/m/diffusion_models", "x.gguf"),
+    join("V:/m/unet", "x.gguf"),
+  ]);
+});
+
+test("modelCandidates preserves nested subpaths under the category", () => {
+  const got = modelCandidates("models/loras/sub/y.safetensors", "C:/ComfyUI", { loras: ["V:/m/loras"] });
+  assert.equal(got[1], join("V:/m/loras", "sub/y.safetensors"));
+});
+
+test("modelCandidates ignores unknown categories and non-models paths", () => {
+  assert.equal(modelCandidates("models/nope/x", "C:/ComfyUI", { unet: ["V:/m/unet"] }).length, 1);
+  assert.equal(modelCandidates("custom/x", "C:/ComfyUI", { unet: ["V:/m/unet"] }).length, 1);
+});
+
+test("model present ONLY under an extra root is NOT re-downloaded", async () => {
+  // The exact CMP defect: file lives on V:, absent from C: — must be seen as present.
+  const onV = join("V:/m/unet", "x.gguf");
+  let dl = 0;
+  const r = await satisfyModels([{ path: "models/unet/x.gguf", source_url: "u", sha256: "HASH" }], {
+    ...base,
+    extraRoots: { unet: ["V:/m/unet"] },
+    exists: (p) => p === onV,
+    sentinelOk: (p) => p === onV,
+    download: async () => { dl++; },
+  });
+  assert.equal(dl, 0, "must not download a model already present on the extra root");
+  assert.deepEqual(r, { ok: true, unverified: [] });
+});
+
+// --- pre-provisioned file adoption (sentinel written after a one-time hash) ---
+// Live defect (CMP session): a hand/curl-provisioned file with a byte-correct sha but no
+// .sha-ok sidecar FAILED the skip gate and fell into the DOWNLOAD branch — re-downloading
+// instead of adopting it.
+
+test("present pinned-sha file WITHOUT a sentinel is adopted, not re-downloaded", async () => {
+  let dl = 0, wrote = null;
+  const r = await satisfyModels([{ path: "m/x", source_url: "u", sha256: "HASH" }], {
+    ...base,
+    exists: () => true,
+    sentinelOk: () => false,          // pre-provisioned: no sidecar
+    sha256: async () => "HASH",       // but the bytes are correct
+    download: async () => { dl++; },
+    writeSentinel: (p, h) => { wrote = [p, h]; },
+  });
+  assert.equal(dl, 0, "a byte-correct present file must be adopted, never re-downloaded");
+  assert.deepEqual(wrote, [join("C:/ComfyUI", "m/x"), "HASH"], "adoption writes the sentinel");
+  assert.equal(r.ok, true);
+});
+
+test("adoption writes the sentinel BESIDE the file it actually found (extra root)", async () => {
+  const onV = join("V:/m/vae", "v.safetensors");
+  let wrote = null;
+  await satisfyModels([{ path: "models/vae/v.safetensors", source_url: "u", sha256: "HASH" }], {
+    ...base,
+    extraRoots: { vae: ["V:/m/vae"] },
+    exists: (p) => p === onV,
+    sentinelOk: () => false,
+    sha256: async () => "HASH",
+    writeSentinel: (p, h) => { wrote = [p, h]; },
+  });
+  assert.deepEqual(wrote, [onV, "HASH"], "sentinel must land next to the V: file, not the C: path");
+});
+
+test("present file whose hash MISMATCHES the pin is re-downloaded", async () => {
+  let dl = 0, calls = 0;
+  const r = await satisfyModels([{ path: "m/x", source_url: "u", sha256: "WANT" }], {
+    ...base,
+    exists: () => true,
+    sentinelOk: () => false,
+    // 1st call = the present file (wrong bytes); 2nd = the post-download verify (correct).
+    sha256: async () => (++calls === 1 ? "GOT" : "WANT"),
+    download: async () => { dl++; },
+  });
+  assert.equal(dl, 1, "a corrupt/wrong present file must be replaced");
+  assert.equal(r.ok, true);
+});
+
+test("present mismatching file with NO source_url DEFERs MODEL_SHA_MISMATCH", async () => {
+  const r = await satisfyModels([{ path: "m/x", source_url: "", sha256: "WANT" }], {
+    ...base, exists: () => true, sentinelOk: () => false, sha256: async () => "GOT",
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.defer.code, "MODEL_SHA_MISMATCH", "must name the real problem, not 'missing on disk'");
 });
 
 const okDeps = {
