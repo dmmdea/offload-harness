@@ -34,10 +34,22 @@ environment.
 
 3. **Check the ComfyUI version** against `comfyui_min_version` → `COMFY_VERSION_BELOW_MIN`.
 
-4. **Satisfy models.** For each model, if the file exists *and* (has no declared sha256, or has a
-   `.sha-ok` sentinel sidecar), skip it. Otherwise download from `source_url`, verify the hash, and
-   write the sentinel. No `source_url` → `MODEL_DOWNLOAD_FAILED`. Hash mismatch →
-   `MODEL_SHA_MISMATCH`. Models downloaded without a declared hash are reported as
+4. **Satisfy models.** Presence is resolved across ComfyUI's **full model search path** — the
+   canonical `<comfy_dir>/<model.path>` first, then every directory registered for that model class
+   in `<comfy_dir>/extra_model_paths.yaml`. This matters on machines that keep the model tree off the
+   OS drive (e.g. a `V:` Optane tree): checking `comfy_dir` alone made such a model read as *missing*
+   and re-download tens of GB per run. The YAML is parsed by a minimal, dependency-free reader that
+   understands `base_path` plus `category: dir` entries and block scalars (`unet: |` listing several
+   dirs); it is fail-safe — anything unparseable yields no extra roots, i.e. the old comfyDir-only
+   behavior.
+
+   Given the file is found: no declared sha256 → trust it. A `.sha-ok` sentinel → already verified,
+   skip. **Present with a declared sha but no sentinel** (the hand- or `curl`-provisioned case) → hash
+   it **once** and, if it matches, *adopt* it by writing the sentinel beside the file that was
+   actually found. If it mismatches and a `source_url` exists the file is replaced; with no
+   `source_url` it defers `MODEL_SHA_MISMATCH` — naming the real problem rather than the misleading
+   "missing on disk". Otherwise download from `source_url`, verify, and write the sentinel. No
+   `source_url` → `MODEL_DOWNLOAD_FAILED`. Models downloaded without a declared hash are reported as
    `unverified_models` in the success envelope rather than silently trusted.
 
 5. **Clone or check out each node pack** at its pinned commit. A pack is considered changed by
@@ -89,31 +101,31 @@ runner) defers with a free-form `run-graph failed: …` reason and a lowercase `
 code — the `GPU_BUSY` and `TIMEOUT` tokens in the MCP tool description are advisory text, not codes
 this path emits.
 
-### Known defects
+### Resolved defects
 
-> **`require is not defined` in the model leg — open, verified 2026-07-18.**
->
-> `render/manifest-satisfy.mjs` calls `require()` in three places inside an ESM module (in
-> `writeSentinel` and `download`), where `require` does not exist. Two distinct failures result:
->
-> 1. **A model present on disk with a declared `sha256` but no `.sha-ok` sentinel** — for example
->    placed by hand, or left by an interrupted earlier run — does not match the skip condition, so it
->    falls through to the download branch. The fetch succeeds, then `require` throws, and it is caught
->    and reported as `MODEL_DOWNLOAD_FAILED` with detail `require is not defined`.
-> 2. **A fully successful fresh download** then calls `writeSentinel`, which is *outside* the
->    try/catch. That throw escapes the satisfier entirely and exits the process, producing an untyped
->    failure rather than a typed Defer.
->
-> Setting `sha256: null` avoids both, because the skip condition then tests only file existence —
-> which is why manifests with nulled hashes pass end to end. That is a workaround, not a fix, and it
-> gives up hash verification.
->
-> Note this is **not** a verification bug: there is no code path that hashes an already-present file.
-> The gate is sentinel-based. Adding present-file verification would be a feature, not a repair.
->
-> The three `require()` calls are the defect. Related gap: `defaultSatisfyDeps` — the entire
-> production glue block — is not imported by any test, which is why the suite is green while this
-> path is broken.
+All four defects previously recorded here are fixed; they are kept as a short history because each
+one shaped the current design.
+
+1. **`require is not defined` in the model leg** — fixed in v0.22.3. Three `require()` calls sat
+   inside an ESM module, so a present-but-unsentinelled model reported `MODEL_DOWNLOAD_FAILED` with
+   detail `require is not defined`, and a successful fresh download threw *outside* the try/catch,
+   escaping as an untyped process exit. Replaced with ESM imports and the sentinel write brought
+   inside the guard. The `sha256: null` workaround this forced on callers is no longer needed.
+2. **Caller-supplied `out_dir` not created** — fixed in v0.22.4 (`resolveOutDir` now creates it).
+3. **Models over ~2GB could never be satisfied** — fixed in v0.22.9. The download buffered whole
+   files via `Buffer.from(await r.arrayBuffer())` and hit Node's ArrayBuffer cap; it now streams the
+   body to disk, which has no size limit.
+4. **Models outside `comfy_dir` re-downloaded, and pre-provisioned files re-fetched** — fixed in
+   v0.22.11. Presence checked only `comfy_dir`, so a model held on a secondary tree registered in
+   `extra_model_paths.yaml` read as missing and re-downloaded tens of GB per run; and the skip gate
+   trusted the `.sha-ok` sidecar alone, so a byte-correct hand-provisioned file fell into the
+   download branch. Presence now spans the full search path, and a present file with a pinned sha is
+   hashed once and adopted. This closes the old note that "there is no code path that hashes an
+   already-present file" — there is one now, and it is the adoption path.
+
+The historical root cause behind several of these was that `defaultSatisfyDeps` — the entire
+production glue block — was imported by no test, so the suite stayed green while the path was broken.
+It is covered now.
 
 ## External dependencies
 
@@ -125,7 +137,9 @@ access for pack clones and model downloads.
 1. Provisioning is additive and never moves the protected host packages.
 2. Packs are placed before dependency resolution.
 3. The node-class gate runs after ComfyUI is up, not before.
-4. Failures are typed Defers, not crashes — with the escaping-throw case above as a known violation.
+4. Failures are typed Defers, not crashes.
+   Model presence is resolved across ComfyUI's full search path, so the harness and ComfyUI agree on
+   whether a model exists; a file the graph can load is never re-downloaded.
 5. The harness never adds models of its own; manifests are the caller's responsibility — which is
    also the boundary for
    [ADR 0011](../architecture/decisions/0011-flux-family-license-prohibition.md).
