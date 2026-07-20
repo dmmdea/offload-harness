@@ -4,6 +4,19 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.10] - 2026-07-20
+
+### Fixed — model matrix: Qwen-Image-Edit-2511 must pin a `_1` GGUF quant, not a `_K_` one
+- The v0.22.7 designation of Qwen-Image-Edit-2511 as the ≥16 GB image-edit primitive named no quant,
+  which is actively misleading: 2511 **K-quants** (`Q5_K_S` and friends, including the common unsloth
+  default) fail ComfyUI-GGUF's `UnetLoaderGGUF` with `cannot reshape array` even on a byte-perfect
+  file (disk sha == upstream LFS oid, gguf 0.19.0, pack at HEAD) — see city96/ComfyUI-GGUF issue #247.
+  Only `Q4_1`/`Q5_1` load. Following the old wording cost a 15 GB download that then fails at load.
+  Both the setup guide and the media-generation system doc now pin the `_1` quants explicitly and
+  record the live `ampere-16` measurement from the creative-marketing-pipelines session (2026-07-19):
+  Q5_1 (15.4 GB) + fp8 Qwen2.5-VL encoder fits 16 GB with block-swap, composite peak **15,757 MiB**
+  (HiDream for comparison: 15,688 MiB) — the first real footprint datum for the Qwen edit family.
+
 ## [0.22.9] - 2026-07-18
 
 ### Fixed — run-graph model download streams to disk (models >2GB now work)

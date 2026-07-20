@@ -1,7 +1,7 @@
 {
   "api_name": "local-offload",
   "cli_name": "local-offload",
-  "version": "0.22.9",
+  "version": "0.22.10",
   "printing_press_version": "hand-built-2026-06-12",
   "generated_at": "2026-06-12",
   "description": "Local offload harness — delegate grunt work (summarize/classify/extract/triage, plus vision, OCR, transcription and media generation) to a free local Gemma-family cascade via llama.cpp; MCP + CLI; the cascade never calls cloud and defers to the caller instead. The opt-in offload_nim tool is the only remote surface.",
