@@ -138,15 +138,26 @@ contradictory CC-BY-NC/CC0, unsafe for a monetized channel. Same call as music: 
 node render/tts.mjs out.wav "Hola, bienvenidos a mi canal." --clone ref.wav --lang es
 ```
 
-**Setup** (one-time): the `.tts-venv` is built on ComfyUI's 3.12 python (system 3.14 is too new
-for torch); `pip install chatterbox-tts` then force CUDA torch (`torch==2.6.0 --index-url
-.../cu124` — the package pulls CPU torch). The worker sets `HF_HUB_DISABLE_SYMLINKS=1` (Windows
-blocks symlinks without Developer Mode).
+**Setup** (one-time): build `.tts-venv` at the repo root on a python torch supports (3.11–3.12;
+system 3.14 is too new — `uv venv .tts-venv --python 3.11` works; note a uv venv ships no pip,
+so install with `uv pip install --python .tts-venv/Scripts/python.exe …` throughout).
+`chatterbox-tts` pulls CPU torch, so force the CUDA build matched to the GPU: pre-Blackwell
+cards take `torch==2.6.0 torchaudio==2.6.0 --index-url .../cu124`; Blackwell (RTX 50xx, sm_120)
+needs `torch==2.7.0 torchaudio==2.7.0 --index-url .../cu128` — cu124 ships no sm_120 kernels.
+One trap: setuptools must be present AND <81 (`setuptools==80.9.0`) — perth, the watermarker
+dep, imports `pkg_resources` (removed in setuptools 81+, absent from uv venvs), and without it
+`perth.PerthImplicitWatermarker` silently resolves to `None` → `TypeError: 'NoneType' object
+is not callable` at model init. The worker sets `HF_HUB_DISABLE_SYMLINKS=1` (Windows blocks
+symlinks without Developer Mode).
 
 **VERIFIED 2026-06-16:** a Spanish line cloned from a reference voice clip → a 6.4 s
 24 kHz WAV; **whisper round-trip transcribes it back word-for-word** (intelligible Spanish),
 GPU freed after. Clone *timbre* quality is best judged by ear — a clean ~10 s solo voice
 reference (vs. a noisy stereo mix) will improve it.
+
+**VERIFIED 2026-07-22 (Qube, RTX 5060 Ti / Blackwell):** the setup above (uv 3.11 venv,
+torch 2.7.0+cu128, setuptools 80.9.0) → `local-offload generate-audio` end-to-end: a Spanish
+line → a real 4.0 s 24 kHz mono WAV, GPU lock acquired and released.
 
 ---
 

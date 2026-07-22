@@ -72,7 +72,7 @@ async function main() {
     console.error('usage: node tts.mjs <out.wav> "<text>" [--engine generalist|finetuned] [--clone <ref.wav>] [--lang es] [--model <f>] [--base-dir <d>] [recipe flags] [--no-lock]');
     process.exit(2);
   }
-  // python auto-detect, mirroring comfy-video.mjs's COMFY_PY (the .tts-venv built on ComfyUI's 3.12)
+  // python auto-detect, mirroring comfy-video.mjs's COMFY_PY (the repo-root .tts-venv; see render/README.md Setup)
   const TTS_PY = process.env.TTS_PY
     || [join(__dir, "../.tts-venv/Scripts/python.exe"), join(__dir, "../.tts-venv/bin/python")].find((p) => existsSync(p))
     || "python";
