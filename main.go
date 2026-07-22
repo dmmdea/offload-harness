@@ -46,7 +46,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.22.13"
+const version = "0.22.14"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -226,18 +226,22 @@ A bare {"field":"string"} map has no usable properties and is deferred.
 }
 
 func loadCfg(fs *flag.FlagSet) config.Config {
-	home, _ := os.UserHomeDir()
-	path := resolveCfgPath(
-		fs.Lookup("config").Value.String(),
-		os.Getenv("LOCAL_OFFLOAD_CONFIG"),
-		home,
-		func(p string) bool { info, statErr := os.Stat(p); return statErr == nil && !info.IsDir() },
-	)
-	cfg, err := config.Load(path)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "warning: config load failed, using defaults:", err)
-	}
+	cfg, _ := loadCfgWithSource(fs)
 	return cfg
+}
+
+// loadCfgWithSource loads the config and DISCLOSES its true source, warning on stderr
+// whenever the effective config is built-in defaults — including the two silent-trap
+// shapes a review surfaced: an explicit --config/$LOCAL_OFFLOAD_CONFIG path that does not
+// exist (Load maps IsNotExist to defaults with a NIL error by design), and a file that
+// exists but fails to parse. Silent degradation is the trap (live incident 2026-07-20):
+// a box whose real config lived at a non-conventional path served every bare CLI call
+// from built-in defaults — empty VisionModel and all — and the only symptom was a
+// misleading "no vision model configured" defer in a consumer's pipeline hours later.
+func loadCfgWithSource(fs *flag.FlagSet) (config.Config, config.Source) {
+	cfg, src := config.LoadWithSource(fs.Lookup("config").Value.String())
+	config.WarnOnDefaults(src, os.Stderr)
+	return cfg, src
 }
 
 // resolveCfgPath picks the config file by precedence: explicit --config flag >
@@ -250,22 +254,7 @@ func loadCfg(fs *flag.FlagSet) config.Config {
 // with ShadowEnabled=false, so capture never fired and the flywheel starved.
 // exists is injected so the precedence is unit-testable without touching disk.
 func resolveCfgPath(flagPath, envPath, home string, exists func(string) bool) string {
-	if flagPath != "" {
-		return flagPath
-	}
-	if envPath != "" {
-		return envPath
-	}
-	if exists("config.json") { // cwd-relative, the quickstart convention
-		return "config.json"
-	}
-	if home != "" {
-		def := filepath.Join(home, ".local-offload", "config.json")
-		if exists(def) {
-			return def
-		}
-	}
-	return ""
+	return config.ResolvePath(flagPath, envPath, home, exists)
 }
 
 func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
@@ -1833,7 +1822,11 @@ func runDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	_ = fs.Parse(args)
-	cfg := loadCfg(fs)
+	cfg, src := loadCfgWithSource(fs)
+	// Disclose the config source FIRST — and truthfully: SourceLine never credits a file
+	// that was not actually read (not-found and failed-to-load both disclose defaults).
+	// Every binding verdict below is only as good as the file that produced it.
+	fmt.Fprintln(os.Stdout, config.SourceLine(src))
 	return doctorRun(cfg, os.Stdout)
 }
 
