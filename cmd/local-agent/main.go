@@ -149,10 +149,10 @@ func main() {
 		os.Exit(2)
 	}
 
-	cfg, err := config.Load(*cfgPath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "warning: config load failed, using defaults:", err)
-	}
+	// Same discovery + loud-defaults contract as the main CLI (a review found this
+	// binary silently ran on built-in defaults AND ignored the conventional config).
+	cfg, cfgSrc := config.LoadWithSource(*cfgPath)
+	config.WarnOnDefaults(cfgSrc, os.Stderr)
 	absRoot, err := filepath.Abs(*root)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: bad --root:", err)

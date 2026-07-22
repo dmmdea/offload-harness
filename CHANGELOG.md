@@ -4,6 +4,26 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.14] - 2026-07-22
+
+### Changed — running on built-in defaults is now LOUD (`config:` disclosure in doctor)
+- When the effective config is built-in defaults, every config-loading command prints one stderr
+  warning naming the state and the escape hatches. All THREE defaults shapes warn (the last two
+  were review findings on the first draft of this change): nothing resolves anywhere; an explicit
+  `--config`/`$LOCAL_OFFLOAD_CONFIG` path that does NOT exist (`Load` maps IsNotExist to defaults
+  with a nil error by design — previously totally silent); and a file that exists but fails to
+  parse. Silent fallback was the trap (live incident 2026-07-20): a box whose real config lived at
+  a non-conventional path served every bare CLI call from built-in defaults — empty `vision_model`
+  and all — and the only symptom was a misleading "no vision model configured" defer inside a
+  consumer's pipeline.
+- `doctor` prints a `config:` first line that is TRUTHFUL: it names the file only when that file
+  was actually read; not-found and failed-to-load both disclose `BUILT-IN DEFAULTS` with the
+  reason (crediting an unread file would be worse than no disclosure).
+- Resolution + disclosure moved to `internal/config` (`ResolvePath`/`LoadWithSource`/
+  `WarnOnDefaults`/`SourceLine`) and **`local-agent` now shares it** — review found that binary
+  silently ran on defaults AND never discovered the conventional `~/.local-offload/config.json`
+  at all.
+
 ## [0.22.13] - 2026-07-22
 
 ### Fixed — a spawn failure is not a venv problem (`SATISFIER_SPAWN_FAILED`)

@@ -376,7 +376,7 @@ The harness improves itself **offline and inference-free** — pure Go statistic
 
 ## Configuration
 
-Copy `config.example.json` and edit. Config is resolved in precedence order: `--config <path>` > `$LOCAL_OFFLOAD_CONFIG` > `./config.json` > `~/.local-offload/config.json` > built-in defaults. A leading `~/` in any path-typed value expands to your home directory; an unknown key warns to stderr rather than being silently dropped.
+Copy `config.example.json` and edit. Config is resolved in precedence order: `--config <path>` > `$LOCAL_OFFLOAD_CONFIG` > `./config.json` > `~/.local-offload/config.json` > built-in defaults. Running on built-in defaults is LOUD: every config-loading command prints a stderr warning (machine bindings — vision, media, cascade tiers — are inactive on defaults, and those calls defer) — including when an explicit `--config`/`$LOCAL_OFFLOAD_CONFIG` path does not exist or fails to parse — and `doctor` prints a `config:` line naming the file it ACTUALLY loaded, or `BUILT-IN DEFAULTS` with the reason. `local-agent` shares the same discovery and warning. A leading `~/` in any path-typed value expands to your home directory; an unknown key warns to stderr rather than being silently dropped.
 
 | Key | Default | Purpose |
 |---|---|---|
