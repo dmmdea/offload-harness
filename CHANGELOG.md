@@ -4,6 +4,21 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.16] - 2026-07-22
+
+### Fixed — TTS venv setup docs generalized beyond the original machine
+- `render/README.md`'s `.tts-venv` setup note documented one machine's path (ComfyUI's
+  Python 3.12, `torch==2.6.0` cu124) — a recipe that fails outright on Blackwell GPUs
+  (RTX 50xx, sm_120: cu124 ships no sm_120 kernels; torch ≥2.7.0 cu128 required) and
+  omitted a universal trap: `resemble-perth` (chatterbox's watermarker dep) imports
+  `pkg_resources`, removed in setuptools 81+ and absent from uv venvs, so
+  `perth.PerthImplicitWatermarker` silently resolves to `None` and model init crashes with
+  `TypeError: 'NoneType' object is not callable`. The note now covers both GPU generations,
+  the `uv pip` install path (uv venvs ship no pip), and the setuptools<81 requirement, with a
+  second VERIFIED line from the Blackwell machine (Qube, RTX 5060 Ti: real 4.0 s 24 kHz WAV
+  end-to-end through `generate-audio`). Stale one-machine comment in `render/tts.mjs` retired
+  with it.
+
 ## [0.22.15] - 2026-07-22
 
 ### Added — the HQ STT tier can be an llama-server mtmd model (`stt_hq_api: "openai"`)
