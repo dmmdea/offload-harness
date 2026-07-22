@@ -3,7 +3,7 @@
 Task-oriented walkthroughs for an agent (or human) operating an installed offload-harness stack.
 Each task is **goal → commands → expected output → failure table**. Commands are given for
 **PowerShell** (native Windows install) and **bash** where applicable. `$OFFLOAD_HOME` defaults to
-`$HOME\offload-stack`; the harness config lives at `~/.local-offload/config.json`.
+`$HOME\offload-stack`; the harness config lives at `~/.local-offload/config.json`. If no config file resolves at all, every command warns on stderr that it is running on BUILT-IN DEFAULTS (machine bindings inactive) — `local-offload doctor` shows the resolved source on its `config:` line; never debug a binding problem without checking that line first.
 
 > **Verified on this machine:** the commands marked ✅ below were spot-executed verbatim while
 > writing this guide (NVIDIA/CUDA host, llama-swap live on :11436). Output snippets are real.
@@ -26,6 +26,7 @@ Each task is **goal → commands → expected output → failure table**. Comman
 & "$env:OFFLOAD_HOME\harness\local-offload.exe" --config "$HOME\.local-offload\config.json" doctor
 ```
 ```
+config:     ~/.local-offload/config.json
 endpoint:   http://127.0.0.1:11436/v1/chat/completions
 model:      offload-e4b
 health:     OK
