@@ -46,7 +46,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.22.14"
+const version = "0.22.15"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -435,7 +435,7 @@ func runTranscribe(args []string) error {
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "print full result JSON")
 	language := fs.String("language", "", "force language: en, es, or auto (default auto-detect)")
-	hq := fs.Bool("hq", false, "use the higher-quality large-v3 model (slower)")
+	hq := fs.Bool("hq", false, "use the configured higher-accuracy STT tier (slower; may return one full-span segment instead of timestamps)")
 	selectFlag := fs.String("select", "", "comma-separated top-level result fields to keep (e.g. gist,language,srt_path — drops the verbose segments[])")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
 	positional, flagArgs := splitArgs(args, map[string]bool{

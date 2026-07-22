@@ -293,10 +293,16 @@ Two validated **non-bindings** (as load-bearing as the bindings):
   Outside the cascade it keeps its real role: the free-text/interactive throughput model —
   4-slot admission proven, with aggregate throughput HALVING under 4-way load (the seat's claim
   is "no queueing", not "4× tokens").
-- **`stt_model_hq` cannot bind `qwen3-asr` yet**: the harness's HQ transcribe client speaks the
-  whisper-server HTTP protocol, while Qwen3-ASR is served by llama-server (mtmd) — binding it
-  defers with a whisper-endpoint 404 (verified live 2026-07-21, rolled back). Filling that seat
-  needs a harness feature first: an llama-server audio path for the HQ tier.
+- **`stt_model_hq` CAN bind an llama-server mtmd STT model since v0.22.15 — but only with
+  `stt_hq_api` set.** Historical gap: the HQ transcribe client spoke only the whisper-server HTTP
+  protocol, so binding Qwen3-ASR (served by llama-server, mtmd) deferred with a whisper-endpoint
+  404 (verified live 2026-07-21, rolled back). The HQ path now also speaks the OpenAI
+  `/v1/audio/transcriptions` shape via the same `/upstream/<model>/` passthrough. To bind such a
+  model set BOTH: `"stt_model_hq": "qwen3-asr"` AND `"stt_hq_api": "openai"` (omitting the API
+  field keeps the whisper protocol and reproduces the 404). Caveats: no timestamps on this path —
+  the result carries ONE full-span segment (whisper-turbo keeps the timestamps/SRT/long-form
+  role); language comes from the model's own detection (the `language X<asr_text>` prefix is
+  parsed out); whisper decode knobs (VAD/beam/language forcing) do not apply.
 
 ## Step 1 — install
 

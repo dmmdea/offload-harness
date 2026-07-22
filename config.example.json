@@ -14,6 +14,7 @@
   "ffmpeg_path": "ffmpeg",
   "stt_model": "whisper-stt",
   "stt_model_hq": "",
+  "stt_hq_api": "",
   "stt_language": "",
   "stt_vad": true,
   "stt_max_inline_segments": 120,

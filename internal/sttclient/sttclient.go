@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -249,4 +250,119 @@ func srtTime(sec float64) string {
 	s := ms / 1000
 	ms %= 1000
 	return fmt.Sprintf("%02d:%02d:%02d,%03d", h, m, s, ms)
+}
+
+// --- OpenAI-transcriptions path (llama-server mtmd STT) -------------------------------
+// The HQ accuracy tier may be served by llama-server (mtmd; e.g. Qwen3-ASR) rather than
+// whisper-server. llama-server exposes the OpenAI /v1/audio/transcriptions shape —
+// multipart with a `file` field — reachable through llama-swap's /upstream/<model>/
+// passthrough, exactly like the whisper /inference path. Verified live on Qube
+// 2026-07-22 (HTTP 200; body {"type":"transcript.text.done","text":...}).
+
+// asrLangPrefix matches exactly the Qwen3-ASR language span ("language English") —
+// nothing else may be treated as one: a transcript that legitimately CONTAINS the
+// literal marker must not lose its leading content to an over-eager parse.
+var asrLangPrefix = regexp.MustCompile(`^(?i)language\s+(\S+)$`)
+
+// ParseASRText splits a Qwen3-ASR-style transcript. The model prefixes its output with
+// a detected-language span: "language English<asr_text>the transcript…". The prefix is
+// consumed ONLY when it matches that exact shape; otherwise the whole trimmed input is
+// the transcript and language is unknown ("").
+func ParseASRText(raw string) (lang, text string) {
+	const marker = "<asr_text>"
+	raw = strings.TrimSpace(raw)
+	i := strings.Index(raw, marker)
+	if i < 0 {
+		return "", raw
+	}
+	m := asrLangPrefix.FindStringSubmatch(strings.TrimSpace(raw[:i]))
+	if m == nil {
+		return "", raw // marker present but prefix is not a language span: keep everything
+	}
+	return strings.ToLower(m[1]), strings.TrimSpace(raw[i+len(marker):])
+}
+
+// wavDurationSec computes duration from a 16 kHz mono s16 WAV by locating the RIFF
+// `data` chunk and using ITS size (32000 bytes/second). The naive (size-44)/32000
+// assumed a canonical 44-byte header, but the actual producer (ffmpeg via
+// ConvertToWav16k) writes a LIST/INFO chunk too — 78 header bytes, empirically
+// verified in review — so the constant was wrong by construction. Falls back to the
+// 44-byte estimate only when the chunk walk fails (never worse than before).
+func wavDurationSec(wav []byte) float64 {
+	if len(wav) > 12 && string(wav[0:4]) == "RIFF" && string(wav[8:12]) == "WAVE" {
+		for off := 12; off+8 <= len(wav); {
+			id := string(wav[off : off+4])
+			sz := int(uint32(wav[off+4]) | uint32(wav[off+5])<<8 | uint32(wav[off+6])<<16 | uint32(wav[off+7])<<24)
+			if id == "data" {
+				return float64(sz) / 32000.0
+			}
+			off += 8 + sz + (sz & 1) // chunks are word-aligned
+		}
+	}
+	if len(wav) <= 44 {
+		return 0
+	}
+	return float64(len(wav)-44) / 32000.0
+}
+
+// TranscribeOAI uploads wavPath to the model's OpenAI-compatible transcriptions
+// endpoint and adapts the reply to the whisper-shaped Result: parsed language, the
+// transcript, and ONE synthesized segment spanning the whole clip (SRT and the
+// segments.json consumers rely on segments existing; timestamps are not available on
+// this path). Serialized by the same process-global mutex as Transcribe — the mtmd
+// upstream is served single-slot too.
+func (c *Client) TranscribeOAI(ctx context.Context, model, wavPath string) (Result, error) {
+	wav, err := os.ReadFile(wavPath)
+	if err != nil {
+		return Result{}, fmt.Errorf("read wav: %w", err)
+	}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	fw, err := mw.CreateFormFile("file", filepath.Base(wavPath))
+	if err != nil {
+		return Result{}, err
+	}
+	if _, err := fw.Write(wav); err != nil {
+		return Result{}, err
+	}
+	if err := mw.WriteField("response_format", "json"); err != nil {
+		return Result{}, err
+	}
+	if err := mw.Close(); err != nil {
+		return Result{}, err
+	}
+
+	url := c.base + "/upstream/" + model + "/v1/audio/transcriptions"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &body)
+	if err != nil {
+		return Result{}, err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	inferMu.Lock()
+	defer inferMu.Unlock()
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return Result{}, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return Result{}, fmt.Errorf("transcriptions endpoint %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+
+	var parsed struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return Result{}, fmt.Errorf("transcriptions response parse: %w (body %.200s)", err, raw)
+	}
+	lang, text := ParseASRText(parsed.Text)
+	dur := wavDurationSec(wav)
+	r := Result{Language: lang, Duration: dur, Text: text}
+	if text != "" {
+		r.Segments = []Segment{{ID: 0, Start: 0, End: dur, Text: text}}
+	}
+	return r, nil
 }
