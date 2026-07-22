@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/eval"
 )
 
@@ -331,6 +333,62 @@ func TestSplitThreeArgs(t *testing.T) {
 					tc.in, a, b, c, flags, tc.wantA, tc.wantB, tc.wantC, tc.wantFlags)
 			}
 		})
+	}
+}
+
+// TestWarnOnDefaults pins the loud-fallback contract (live incident 2026-07-20: a box
+// whose config lived at a non-conventional path served every bare CLI call from BUILT-IN
+// DEFAULTS — empty VisionModel and all — and the only symptom was a misleading "no vision
+// model configured" defer hours later). All three defaults shapes must warn: nothing
+// resolved, an explicit path that does not exist, and a file that fails to load. A
+// genuinely loaded file must stay silent.
+func TestWarnOnDefaults(t *testing.T) {
+	var buf bytes.Buffer
+	if !config.WarnOnDefaults(config.Source{}, &buf) {
+		t.Fatal("nothing resolved = built-in defaults; must warn")
+	}
+	for _, want := range []string{"BUILT-IN DEFAULTS", "--config", ".local-offload"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("warning must mention %q; got %q", want, buf.String())
+		}
+	}
+	buf.Reset()
+	if !config.WarnOnDefaults(config.Source{Path: "C:/typo.json", NotFound: true}, &buf) {
+		t.Fatal("an explicit path that does not exist runs on defaults; must warn")
+	}
+	if !strings.Contains(buf.String(), "NOT FOUND") || !strings.Contains(buf.String(), "C:/typo.json") {
+		t.Fatalf("not-found warning must name the path; got %q", buf.String())
+	}
+	buf.Reset()
+	if !config.WarnOnDefaults(config.Source{Path: "C:/bad.json", LoadErr: os.ErrInvalid}, &buf) {
+		t.Fatal("a file that failed to load runs on defaults; must warn")
+	}
+	buf.Reset()
+	if config.WarnOnDefaults(config.Source{Path: "C:/real.json"}, &buf) {
+		t.Fatal("a genuinely loaded file must NOT warn")
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("no output expected for a loaded file; got %q", buf.String())
+	}
+}
+
+// TestConfigSourceLine pins doctor's config-source disclosure: it must name the file ONLY
+// when that file was actually read — a resolved-but-unread path must disclose defaults
+// (crediting an unread file is worse than no disclosure).
+func TestConfigSourceLine(t *testing.T) {
+	if got := config.SourceLine(config.Source{Path: "C:/x/config.json"}); !strings.Contains(got, "C:/x/config.json") {
+		t.Fatalf("loaded file: source line must name it; got %q", got)
+	}
+	if got := config.SourceLine(config.Source{}); !strings.Contains(got, "BUILT-IN DEFAULTS") {
+		t.Fatalf("nothing resolved: must state built-in defaults; got %q", got)
+	}
+	got := config.SourceLine(config.Source{Path: "C:/typo.json", NotFound: true})
+	if !strings.Contains(got, "BUILT-IN DEFAULTS") || !strings.Contains(got, "C:/typo.json") {
+		t.Fatalf("not-found: must state defaults AND name the bad path; got %q", got)
+	}
+	got = config.SourceLine(config.Source{Path: "C:/bad.json", LoadErr: os.ErrInvalid})
+	if !strings.Contains(got, "BUILT-IN DEFAULTS") || !strings.Contains(got, "failed to load") {
+		t.Fatalf("load-failed: must state defaults and why; got %q", got)
 	}
 }
 
