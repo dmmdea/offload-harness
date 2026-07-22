@@ -97,6 +97,22 @@ test("preflight missing required input → DEFER PREFLIGHT_MISSING_INPUTS", asyn
   assert.equal(r.ref, "SaveImage");
 });
 
+test("a satisfy fail-open warning is surfaced on stderr (SATISFY WARN)", async () => {
+  // The warning is the ONLY operator-visible signal that the coherence check was skipped.
+  const seen = [];
+  const orig = console.error;
+  console.error = (...a) => { seen.push(a.join(" ")); };
+  try {
+    const deps = baseDeps({
+      satisfy: async () => ({ ok: true, changed: false, unverified: [], warning: "coherence check skipped (test)" }),
+    });
+    const r = await runGraphFlow(ARGS, deps);
+    assert.equal(r.deferred, undefined, "a warning is not a defer");
+  } finally { console.error = orig; }
+  assert.ok(seen.some((l) => l.includes("SATISFY WARN") && l.includes("coherence check skipped")),
+    "the warning must reach stderr");
+});
+
 test("satisfy DEFER short-circuits BEFORE start + POST", async () => {
   const deps = baseDeps({
     satisfy: async () => ({ ok: false, defer: { code: "VENV_INCOHERENT", ref: "x", detail: "d" } }),

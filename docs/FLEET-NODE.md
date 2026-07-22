@@ -149,7 +149,7 @@ is not advertised, so the dispatcher can't send work the box would defer:
 
 run-graph payloads carry `graph` and `manifest` as **raw nested JSON** (no base64) and are
 strict-validated at ack time — a malformed fleet job dies at the 400 with a clear reason,
-never mid-render. Typed run-graph defers (`VENV_INCOHERENT`, `NODE_CLASS_MISSING`, …)
+never mid-render. Typed run-graph defers (`VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `NODE_CLASS_MISSING`, …)
 surface in the job's `error` field as `code: detail`.
 
 ## Known limits (v1)

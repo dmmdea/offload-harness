@@ -191,7 +191,7 @@ installed CUDA torch — an unsatisfiable pack set defers instead), models downl
 sha-verified when a hash is given (`sha256: null` downloads are reported in
 `unverified_models[]`). Results are node-addressed (`outputs.<node_id>[]` with
 `path/type/kind/width/height`); every failure is a **typed defer**
-(`SATISFIER_UNAVAILABLE`, `VENV_INCOHERENT`, `NODE_CLASS_MISSING`,
+(`SATISFIER_UNAVAILABLE`, `VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `NODE_CLASS_MISSING`,
 `EXTERNAL_COMFY_NEEDS_PACKS`, …) so callers branch on `code`, never parse prose.
 Prerequisites (provisioned by `install.ps1`): **uv** (the pack satisfier's unified-resolve
 tool — the hard requirement) + ComfyUI-Manager + GitPython in the
