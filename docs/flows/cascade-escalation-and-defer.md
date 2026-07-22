@@ -44,7 +44,8 @@ The pipeline, the configured model Tiers served by llama-swap, the grammar compi
 5. **Terminal reasoning attempt.** Once the chain is exhausted, grammar tasks whose output was not
    truncated get one final attempt on the reasoning Tier, with a thinking span supplied by the grammar
    and an extra token budget. It runs once, skips the confidence gate, and is marked
-   `Reasoning: true`. It runs on the same model as the escalation Tier — that flag is what
+   `Reasoning: true`. Under the shipped default it runs on the same model as the escalation Tier
+   (a config may bind them apart — the ≥16GB matrix recommendation does); the flag is what
    distinguishes them in the ledger.
 
 6. **Defer.** If that also fails, build a Defer carrying the last reason, any partial output, and the
