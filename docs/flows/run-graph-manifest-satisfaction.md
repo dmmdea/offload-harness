@@ -57,10 +57,27 @@ environment.
    *before* dependency resolution, because the unified resolve reads their on-disk requirements.
 
 6. **Resolve and install dependencies once**, for all packs together, under host-pin constraints that
-   prevent anything moving `torch`, `torchvision`, `torchaudio`, or `numpy`. `uv` resolves;
-   `python -m pip` installs. A tripwire re-checks the pins afterward with full local versions. Failure
-   → `VENV_INCOHERENT`. See
+   prevent anything moving `torch`, `torchvision`, `torchaudio`, or `numpy`. The resolve runs on
+   every satisfy EXCEPT the proven re-run: it is skipped only when no checkout moved AND a
+   **persisted marker** proves this exact pin-set was already resolved+checked successfully.
+   `uv` resolves; `python -m pip` installs. The marker (`<venv>/.offload-deps-satisfied` — it
+   attests venv state, so it lives inside the venv and dies with it; holding the pin-set
+   key `name@commit|…`), written ONLY after a fully successful resolve+check — "git didn't move this
+   run" alone proves nothing: a prior run that checked packs out and failed before installing must
+   still resolve. A tripwire re-checks the pins afterward with full local versions; the cheap
+   `pip check` coherence gate always runs. Failure → `VENV_INCOHERENT`. See
    [ADR 0007](../architecture/decisions/0007-host-torch-pinned-additive-provisioning.md).
+
+   **Spawn failures are classified apart** (live report 2026-07-20: a transient `spawn UNKNOWN`
+   after a long batch was misreported as venv incoherence): if a satisfier subprocess (git, uv,
+   pip) fails to *start*, it is retried once after 500 ms, then defers **`SATISFIER_SPAWN_FAILED`**
+   — never `VENV_INCOHERENT`, because "the check could not run" says nothing about the venv. One
+   deliberate, narrow fail-open: when the pin-set is unchanged AND the satisfied-marker proves it
+   was previously resolved+checked, a coherence check whose subprocess fails to spawn yields a
+   `warning` (stderr `SATISFY WARN`) instead of a defer. Anything unproven fails closed. The git
+   checkout stage is deliberately NOT retried — a retry would recompute its HEAD-before against its
+   own surviving side effects and misreport `changed=false`; a git spawn failure defers typed and
+   the caller retries the whole satisfy, which is idempotent at that level.
 
 7. **Start ComfyUI** through the zero-warm GPU lifecycle. An externally managed instance that lacks
    the required packs → `EXTERNAL_COMFY_NEEDS_PACKS`. Failure to start → `COMFY_START_FAILED`.
@@ -95,7 +112,7 @@ and are therefore `0` for non-PNG outputs.
 
 A typed Defer: `{ "deferred": true, "code": …, "ref": …, "detail": … }`. Codes emitted by this path:
 `MODEL_DOWNLOAD_FAILED`, `MODEL_SHA_MISMATCH`, `SATISFIER_UNAVAILABLE`, `COMFY_VERSION_BELOW_MIN`,
-`VENV_INCOHERENT`, `EXTERNAL_COMFY_NEEDS_PACKS`, `COMFY_START_FAILED`, `NODE_CLASS_MISSING`,
+`VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `EXTERNAL_COMFY_NEEDS_PACKS`, `COMFY_START_FAILED`, `NODE_CLASS_MISSING`,
 `PREFLIGHT_MISSING_INPUTS`, `RUN_ERROR`. A failure on the Go side of the call (rather than in the
 runner) defers with a free-form `run-graph failed: …` reason and a lowercase `err_class`, not a typed
 code — the `GPU_BUSY` and `TIMEOUT` tokens in the MCP tool description are advisory text, not codes
@@ -154,10 +171,10 @@ commits is what makes it auditable; it is not a sandbox. Do not expose it to an 
 
 The defer `code` identifies the stage; `ref` identifies the offending pack, model, or node class.
 
-> **Diagnosability gap:** host-pin drift and an ordinary dependency conflict both surface as
-> `VENV_INCOHERENT` with detail `conflicting installed dependencies`. The actual drift diagnostic —
-> expected versus observed pins — is written only to stderr. Read stderr before assuming a plain
-> conflict.
+> **Diagnosability (fixed in stages):** since v0.22.5 the defer detail names the actual problem —
+> host-pin drift reports *which* pinned package moved (expected vs observed), a genuine conflict
+> reports pip's own message. Since v0.22.13 a subprocess that failed to *spawn* is a separate code
+> entirely (`SATISFIER_SPAWN_FAILED`) rather than masquerading as incoherence.
 
 A caller-supplied `out_dir` is **not** created for you — a missing directory produces an ENOENT at
 first output write, surfacing as `RUN_ERROR`. Create it first. (The default output directory, used
