@@ -49,7 +49,8 @@ The mechanism has three parts:
 *before* the resolve, because the unified `uv pip compile` reads their on-disk `requirements.txt`.
 
 Failures are typed defers, not crashes — `VENV_INCOHERENT`, `SATISFIER_UNAVAILABLE`,
-`COMFY_VERSION_BELOW_MIN`, and the model-leg codes.
+`SATISFIER_SPAWN_FAILED` (v0.22.13: a subprocess that failed to *start*, retried once, classified
+apart from a venv problem), `COMFY_VERSION_BELOW_MIN`, and the model-leg codes.
 
 ## Consequences
 
@@ -58,10 +59,11 @@ Failures are typed defers, not crashes — `VENV_INCOHERENT`, `SATISFIER_UNAVAIL
 - Provisioning can fail. That is the intended trade: a typed defer beats a silently degraded
   environment, and the calling workflow layer handles the defer.
 - Adding a fifth protected package means editing one list.
-- **Known diagnosability gap:** host-pin drift and an ordinary dependency conflict both surface as
-  `VENV_INCOHERENT` with the detail `conflicting installed dependencies`. The specific drift
-  diagnostic — expected pins versus observed — is written only to stderr. Anyone debugging a
-  `VENV_INCOHERENT` defer should read stderr before assuming it is a normal conflict.
+- **Diagnosability (closed):** the original gap — drift and ordinary conflicts both reading
+  `conflicting installed dependencies`, with the real diagnostic only on stderr — was closed in
+  v0.22.5 (the defer detail names the drifted pin or pip's own message). v0.22.13 closed the
+  remaining mislabel: a subprocess that failed to *spawn* now defers `SATISFIER_SPAWN_FAILED`
+  instead of `VENV_INCOHERENT`.
 
 ## Alternatives considered
 

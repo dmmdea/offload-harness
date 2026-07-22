@@ -69,6 +69,9 @@ export async function runGraphFlow(args, deps) {
   if (!cached) {
     sat = await satisfy(m);
     if (!sat.ok) return await writeDefer(sat.defer);
+    // Fail-open note from the satisfier (e.g. coherence check skipped on an unchanged env
+    // because its subprocess could not spawn) — surfaced on stderr, never fatal.
+    if (sat.warning) console.error("SATISFY WARN", sat.warning);
   }
 
   // Packs changed under an EXTERNAL ComfyUI we don't own → we can't reload it: DEFER.

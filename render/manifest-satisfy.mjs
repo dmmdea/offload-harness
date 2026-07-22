@@ -126,6 +126,31 @@ function versionBelow(have, min) {
 // --uv <refs>`, but the installed cm-cli has no --uv flag; uv is driven directly now,
 // which the resolve-only spike already proved live.) "Unified, never sequential
 // per-pack" is unchanged — one compile over ALL packs' requirements at once.
+// isSpawnFailure: was this error the SUBPROCESS FAILING TO START (vs the subprocess running
+// and reporting a real problem)? Node's child_process surfaces these via the "error" event
+// with a syscall of "spawn ..." and codes like ENOENT/EACCES/UNKNOWN. The distinction is
+// load-bearing: a spawn failure says nothing about the venv, so reporting it as
+// VENV_INCOHERENT (live CMP report 2026-07-20, "spawn UNKNOWN" after a long batch) sends the
+// operator chasing healthy torch pins.
+export function isSpawnFailure(e) {
+  if (!e || typeof e !== "object") return false;
+  if (typeof e.syscall === "string" && e.syscall.startsWith("spawn")) return true;
+  return typeof e.message === "string" && /^spawn\b/.test(e.message) && !/exit \d+/.test(e.message);
+}
+
+// runRetryOnSpawn: run fn; on a SPAWN failure only, wait briefly and retry exactly once.
+// CMP's live spawn failure was transient (appeared after a long render batch, gone later) —
+// one cheap retry absorbs that class. Real failures (non-zero exits) are never retried:
+// pip/uv/git are deterministic enough that a second identical run just doubles the latency.
+export async function runRetryOnSpawn(fn, { delayMs = 500 } = {}) {
+  try { return await fn(); }
+  catch (e) {
+    if (!isSpawnFailure(e)) throw e;
+    await new Promise((r) => setTimeout(r, delayMs));
+    return fn();
+  }
+}
+
 export async function satisfyManifest(manifest, deps) {
   const {
     satisfierAvailable, comfyVersion, resolveDeps, ensurePack, pipCheck,
@@ -148,24 +173,63 @@ export async function satisfyManifest(manifest, deps) {
   const models = await satisfyModels(manifest.models, deps);
   if (!models.ok) return models;
 
+  // Spawn failures get their own typed code everywhere below: "the tool could not RUN" and
+  // "the tool ran and found your venv broken" demand different operator actions.
+  const spawnOrVenv = (e, ref) =>
+    isSpawnFailure(e)
+      ? defer("SATISFIER_SPAWN_FAILED", ref, String(e.message || e))
+      : defer("VENV_INCOHERENT", ref, String(e.message || e));
+
+  const retryOpts = { delayMs: deps.retryDelayMs ?? 500 };
+  // The durable "this exact pin-set was resolved+checked successfully" marker. Injectable;
+  // production reads/writes a sidecar under custom_nodes. Read is fail-safe (null on error).
+  const readDepsMarker = deps.readDepsMarker || (() => null);
+  const writeDepsMarker = deps.writeDepsMarker || (() => {});
+  const packsKey = (manifest.node_packs || [])
+    .map((p) => `${p.name}@${p.commit}`).sort().join("|");
+
   let changed = false;
+  let warning;
   if (hasPacks) {
-    // 1. Checkout every pack at its pin (git-only; no python side effects).
+    // 1. Checkout every pack at its pin (git-only). Deliberately NOT retried as a unit:
+    //    a retry would recompute the HEAD-before against attempt 1's surviving side effects
+    //    (fresh clone / moved checkout) and misreport changed=false for a pack that just
+    //    changed (adversarial-review repro, 2026-07-22). A git spawn failure defers typed —
+    //    the caller can re-run the whole satisfy, which IS idempotent at this level.
     for (const pack of manifest.node_packs) {
       let res;
       try { res = await ensurePack(pack); }
-      catch (e) { return defer("VENV_INCOHERENT", pack.name, String(e.message || e)); }
+      catch (e) { return spawnOrVenv(e, pack.name); }
       if (res.changed) changed = true;
     }
-    // 2. ONE unified resolve+install over all packs' on-disk requirements
-    //    (under the host-torch constraints env), never per-pack pip.
-    try { await resolveDeps(manifest.node_packs); }
-    catch (e) { return defer("VENV_INCOHERENT", "uv-resolve", String(e.message || e)); }
-    const pc = await pipCheck();
+    // 2. ONE unified resolve+install over all packs' on-disk requirements (under the
+    //    host-torch constraints env), never per-pack pip. Skipped ONLY when nothing moved
+    //    AND the persisted marker proves this exact pin-set was already resolved+checked
+    //    successfully — "git didn't move this run" alone is NOT that proof: a prior run
+    //    that checked packs out and then failed before installing leaves changed=false
+    //    forever (adversarial-review finding, 2026-07-22).
+    const alreadySatisfied = !changed && readDepsMarker() === packsKey && packsKey !== "";
+    if (!alreadySatisfied) {
+      try { await runRetryOnSpawn(() => resolveDeps(manifest.node_packs), retryOpts); }
+      catch (e) { return spawnOrVenv(e, "uv-resolve"); }
+    }
+    // 3. The cheap coherence check always runs. If its subprocess cannot even START:
+    //    fail OPEN with a warning ONLY for a proven-satisfied unchanged env (the marker,
+    //    not just an idle git); anything else fails closed.
+    let pc;
+    try { pc = await runRetryOnSpawn(() => pipCheck(), retryOpts); }
+    catch (e) {
+      if (!isSpawnFailure(e)) return defer("VENV_INCOHERENT", "pip-check", String(e.message || e));
+      if (!alreadySatisfied) return defer("SATISFIER_SPAWN_FAILED", "pip-check", String(e.message || e));
+      warning = "coherence check skipped (its subprocess failed to spawn: " + String(e.message || e) + "); pin-set unchanged and previously satisfied, trusting it";
+      pc = { ok: true };
+    }
     if (!pc.ok) return defer("VENV_INCOHERENT", "pip-check", pc.reason);
+    // Record success — the ONLY writer of the marker, after resolve+check both passed.
+    try { writeDepsMarker(packsKey); } catch { /* marker is an optimization; never fail satisfy */ }
   }
 
-  return { ok: true, changed, unverified: models.unverified };
+  return { ok: true, changed, unverified: models.unverified, ...(warning ? { warning } : {}) };
 }
 
 import { spawn as nodeSpawn } from "node:child_process";
@@ -289,7 +353,11 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
   // compares against the pre-install state and the constraints file exists before
   // any pip/uv spawns.
   let hostPinsP = null;
-  const hostPins = () => (hostPinsP ??= (async () => {
+  // A REJECTED promise must not stay memoized: ??= treats it as present, so a transient
+  // spawn failure in `pip freeze` would make every retry re-await the same stale rejection
+  // (adversarial-review finding, 2026-07-22). Clear the memo on rejection so a retry
+  // actually re-spawns.
+  const hostPins = () => (hostPinsP ??= ((async () => {
     const pins = buildHostConstraints(await runOut([comfyPy, "-m", "pip", "freeze"]));
     let env = {};
     if (pins.length) {
@@ -300,7 +368,7 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
       env = { PIP_CONSTRAINT: p, UV_CONSTRAINT: p };
     }
     return { pins, env };
-  })());
+  })()).catch((e) => { hostPinsP = null; throw e; }));
   return {
     comfyDir,
     // The pack satisfier's hard tool is uv (unified resolve); derived from the venv
@@ -320,6 +388,19 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
       } catch { return {}; }
     })(),
     exists: (p) => existsSync(p),
+    // Durable "this exact pin-set was resolved+checked successfully" marker. Written only
+    // after a fully successful resolve+check; read fail-safe. It attests VENV state, so it
+    // lives INSIDE the venv (beside the interpreter's home): a wiped/recreated venv takes
+    // the claim down with it. The other wipe case needs no marker help — deleting pack dirs
+    // forces a fresh clone, which reports changed=true and re-resolves regardless.
+    readDepsMarker: () => {
+      try { return readFileSync(join(dirname(dirname(comfyPy)), ".offload-deps-satisfied"), "utf8").trim(); }
+      catch { return null; }
+    },
+    writeDepsMarker: (key) => {
+      try { writeFileSync(join(dirname(dirname(comfyPy)), ".offload-deps-satisfied"), key); }
+      catch { /* optimization only — never fail satisfy over the marker */ }
+    },
     sentinelOk: (p) => existsSync(p + ".sha-ok"),
     writeSentinel: (p, h) => writeFileSync(p + ".sha-ok", h),
     download: async (url, dest) => {
@@ -365,6 +446,10 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
         try {
           await run([comfyPy, "-m", "pip", "check"]);
         } catch (e) {
+          // A spawn failure means pip never RAN — rethrow so the caller classifies it as
+          // SATISFIER_SPAWN_FAILED instead of blaming the venv. Only a real non-zero exit
+          // is evidence of conflicting dependencies.
+          if (isSpawnFailure(e)) throw e;
           return { ok: false, reason: "pip check reported conflicting installed dependencies: " + String(e.message || e) };
         }
         // Tripwire (belt + suspenders under the constraints env): if provisioning moved a
@@ -380,7 +465,10 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
           }
         }
         return { ok: true };
-      } catch (e) { return { ok: false, reason: "venv coherence check failed: " + String(e.message || e) }; }
+      } catch (e) {
+        if (isSpawnFailure(e)) throw e;   // never report "could not run" as incoherence
+        return { ok: false, reason: "venv coherence check failed: " + String(e.message || e) };
+      }
     },
   };
 }
