@@ -57,9 +57,17 @@ type Config struct {
 	// STTModel is the llama-swap alias for the default whisper-server upstream
 	// (large-v3-turbo). Empty = no STT route (transcribe defers).
 	STTModel string `json:"stt_model,omitempty"`
-	// STTModelHQ is the quality-escalation whisper upstream (large-v3), used when
-	// a transcribe request passes hq=true. Empty = hq falls back to STTModel.
+	// STTModelHQ is the quality-escalation STT upstream, used when a transcribe
+	// request passes hq=true. Empty = hq falls back to STTModel.
 	STTModelHQ string `json:"stt_model_hq,omitempty"`
+	// STTHQAPI names the protocol the HQ upstream speaks. "" or "whisper" = the
+	// whisper-server /inference multipart protocol (large-v3-class upstreams).
+	// "openai" = the OpenAI /v1/audio/transcriptions shape served by llama-server for
+	// mtmd STT models (e.g. Qwen3-ASR) — binding such a model WITHOUT this field made
+	// the HQ path 404 against the whisper endpoint (live finding 2026-07-21, rolled
+	// back; this field is what makes the binding possible). Timestamps are not
+	// available on this path: the result carries one full-span segment.
+	STTHQAPI string `json:"stt_hq_api,omitempty"`
 	// STTLanguage forces the transcription language ("en"/"es"); "" = auto-detect.
 	// Per-call params["language"] overrides this. Forcing is more reliable on
 	// noisy/code-switching field audio than auto-detect.
@@ -483,10 +491,23 @@ func Load(path string) (Config, error) {
 		return c, err
 	}
 	warnUnknownKeys(b)
+	warnBadEnumValues(c)
 	if home, herr := os.UserHomeDir(); herr == nil {
 		expandUserPaths(&c, home)
 	}
 	return c, nil
+}
+
+// warnBadEnumValues makes typo'd enum-like fields LOUD instead of silently falling back
+// to a default behavior. First case: stt_hq_api — anything but ""/"whisper"/"openai"
+// silently meant the whisper protocol, reproducing the exact HQ-binding 404 the field
+// exists to fix (v0.22.14's whole theme was that silent config states are the trap).
+func warnBadEnumValues(c Config) {
+	switch strings.ToLower(c.STTHQAPI) {
+	case "", "whisper", "openai":
+	default:
+		fmt.Fprintf(os.Stderr, "warning: unrecognized stt_hq_api %q (valid: \"\", \"whisper\", \"openai\") — treating as \"whisper\"; an llama-server HQ model will 404\n", c.STTHQAPI)
+	}
 }
 
 // pathFields enumerates every path-typed Config field (file, dir, script, or

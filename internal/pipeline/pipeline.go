@@ -580,10 +580,7 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		p.recordDefer(req.Task, meta, len(req.Audio), "no stt model configured")
 		return core.Deferf("no stt model configured", "", meta)
 	}
-	model := p.cfg.STTModel
-	if paramBool(req.Params, "hq") && p.cfg.STTModelHQ != "" {
-		model = p.cfg.STTModelHQ
-	}
+	model, useOAI := sttRoute(p.cfg, paramBool(req.Params, "hq"))
 	meta.Model = model
 
 	lang := p.cfg.STTLanguage
@@ -607,7 +604,19 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	// cache key AND the on-disk media filename so they agree and never collide
 	// across distinct sources that share a basename (recording.m4a is common in
 	// field audio) or across model/lang variants of the same source.
-	ident := req.Audio + "|" + audioCacheExtra(req.Audio, model, lang)
+	// The protocol is part of the result's identity: the same alias re-bound across
+	// protocols (whisper <-> mtmd) produces differently-shaped results (timestamped
+	// segments vs one full-span segment), so a protocol flip must never serve the other
+	// protocol's cached entry or on-disk media files. On the OAI path the language knob
+	// does not apply, so it is excluded — otherwise each distinct language value would
+	// re-transcribe and re-cache identical output (review findings, 2026-07-22).
+	identLang := lang
+	proto := "whisper"
+	if useOAI {
+		identLang = ""
+		proto = "oai"
+	}
+	ident := req.Audio + "|" + audioCacheExtra(req.Audio, model, identLang) + "|proto=" + proto
 	ck := cache.Key("transcribe", ident, tasks.StableParamsKey(req.Params), model, "")
 	if p.cache != nil {
 		if raw, ok := p.cache.Get(ck); ok {
@@ -621,12 +630,20 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		}
 	}
 
-	prm := sttclient.DefaultParams()
-	prm.Language = lang
-	if !p.cfg.STTVAD {
-		prm.VAD = false
+	var tr sttclient.Result
+	var terr error
+	if useOAI {
+		// The OAI path takes no whisper decode knobs (language is model-detected and
+		// returned in the transcript prefix; no VAD/beam controls exist there).
+		tr, terr = p.stt.TranscribeOAI(ctx, model, wav)
+	} else {
+		prm := sttclient.DefaultParams()
+		prm.Language = lang
+		if !p.cfg.STTVAD {
+			prm.VAD = false
+		}
+		tr, terr = p.stt.Transcribe(ctx, model, wav, prm)
 	}
-	tr, terr := p.stt.Transcribe(ctx, model, wav, prm)
 	// zero-always-warm: free the upstream's VRAM now (best-effort, short timeout).
 	if p.cfg.STTUnloadAfter {
 		uctx, ucancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1677,6 +1694,21 @@ func sanitizeStem(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// sttRoute picks the STT model and protocol for a transcribe request. Pure — the
+// selection logic is the feature's actual switch, so it is unit-tested directly
+// (the pipeline holds a concrete client, so routing is not stubbable above it).
+// The HQ upstream may speak the OpenAI /v1/audio/transcriptions protocol instead of
+// whisper-server's /inference (llama-server mtmd STT, e.g. Qwen3-ASR): binding such a
+// model without stt_hq_api="openai" 404'd the whisper endpoint (live finding 2026-07-21).
+func sttRoute(cfg config.Config, hq bool) (model string, useOAI bool) {
+	model = cfg.STTModel
+	if hq && cfg.STTModelHQ != "" {
+		model = cfg.STTModelHQ
+		useOAI = strings.EqualFold(cfg.STTHQAPI, "openai")
+	}
+	return model, useOAI
 }
 
 // audioCacheExtra folds the source file identity (path+size+modtime) + model +

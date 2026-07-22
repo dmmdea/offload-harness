@@ -386,7 +386,8 @@ Copy `config.example.json` and edit. Config is resolved in precedence order: `--
 | `triage_model` | `gemma4-e2b` | Fast entry tier (triage / classify); empty = use `model`. |
 | `escalation_model` | `gemma4-26b-a4b` | Larger tier tried before deferring; empty = no escalation. |
 | `vision_model` | `qwen3vl-4b` | Local vision tier (VQA / OCR / image extract / assess). |
-| `stt_model` / `stt_model_hq` | `whisper-stt` / `whisper-stt-hq` | Speech-to-text upstreams (turbo / high-quality). |
+| `stt_model` / `stt_model_hq` | `whisper-stt` / `""` | Speech-to-text upstreams (default / opt-in accuracy tier). |
+| `stt_hq_api` | `""` | Protocol of the HQ upstream: `""`/`whisper` = whisper-server `/inference`; `openai` = llama-server's `/v1/audio/transcriptions` (mtmd STT like Qwen3-ASR — no timestamps: one full-span segment; language auto-detected; whisper knobs don't apply). |
 | `classify_min_confidence` | `0.45` | Self-reported confidence floor for classify. |
 | `confidence_margin_threshold` | `0.35` | Logprob decision margin gate (0 disables). |
 | `max_input_chars` | `24000` | Inputs above this are trimmed; over-long inputs defer. |
