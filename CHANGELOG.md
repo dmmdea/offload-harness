@@ -4,6 +4,41 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.13] - 2026-07-22
+
+### Fixed — a spawn failure is not a venv problem (`SATISFIER_SPAWN_FAILED`)
+- A satisfier subprocess (git / uv / pip) that failed to **start** — Node spawn errors like
+  `spawn UNKNOWN` / `ENOENT` — was caught and relabeled `VENV_INCOHERENT`, in the worst case as
+  "pip check reported conflicting installed dependencies: spawn UNKNOWN": a wrong diagnosis
+  pointing the operator at healthy torch pins (live creative-marketing-pipelines report,
+  2026-07-20, transient after a long render batch). Spawn failures are now classified apart
+  (`isSpawnFailure`), **retried once** after 500 ms (the observed failure was transient), and then
+  defer with the new typed code **`SATISFIER_SPAWN_FAILED`** naming the stage (`pack name` /
+  `uv-resolve` / `pip-check`). `VENV_INCOHERENT` now always means the tool RAN and found a real
+  problem.
+
+### Changed — proven-satisfied re-runs skip the resolve; one deliberate fail-open
+- The common re-run stops paying the expensive `uv` resolve no-op — but the skip is authorized by
+  a **persisted marker** (`<venv>/.offload-deps-satisfied` — it attests venv state so it lives
+  inside the venv and a recreated venv takes it down; the sorted `name@commit` pin-set key), written ONLY after a fully successful resolve+check. "Git didn't move this run" alone is
+  NOT proof (adversarial-review finding: a run that checks packs out and fails before installing
+  would otherwise skip the install forever and report ok on an unprovisioned env). A stale or
+  missing marker, or any moved checkout, still runs the full resolve. The cheap `pip check`
+  coherence gate always runs.
+- Fail-open, narrowly: only a marker-proven, unchanged pin-set survives a coherence check whose
+  subprocess fails to spawn (after the retry) — satisfy then succeeds with a `warning` (stderr
+  `SATISFY WARN`). Anything unproven fails closed with `SATISFIER_SPAWN_FAILED`.
+- The git checkout stage is deliberately NOT retried: a whole-step retry recomputes HEAD-before
+  against its own surviving side effects (fresh clone / moved checkout) and misreports
+  `changed=false` (adversarial-review repro). A git spawn failure defers typed; retrying the whole
+  satisfy is the caller's idempotent recovery. The lazily-captured host-pins snapshot also no
+  longer memoizes a REJECTED promise, so the 500 ms retry genuinely re-runs `pip freeze`.
+- Docs de-staled in the same change: the flow doc and ADR 0007 still described the pre-v0.22.5
+  "drift diagnostic only on stderr" gap as open; both now record the staged fixes. The v0.22.12
+  changelog's "old shape / tier-agnostic" phrasing is also clarified below (the shipped default
+  binds `gemma4-26b-a4b` to both escalation and reasoning and is unchanged; the 4-rung ladder is
+  a ≥16GB matrix recommendation on top of it).
+
 ## [0.22.12] - 2026-07-21
 
 ### Changed — model matrix: validated 4-rung cascade ladder for ≥16GB tiers

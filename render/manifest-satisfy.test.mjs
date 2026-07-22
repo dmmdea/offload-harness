@@ -4,7 +4,7 @@ import { satisfyModels, defaultSatisfyDeps, parseExtraModelPaths, modelCandidate
 import { mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { satisfyManifest, buildHostConstraints, publicPin } from "./manifest-satisfy.mjs";
+import { satisfyManifest, buildHostConstraints, publicPin, isSpawnFailure, runRetryOnSpawn } from "./manifest-satisfy.mjs";
 import { parseManifest } from "./manifest.mjs";
 import { buildCompileCmd, buildInstallCmd, buildEnsurePackCmd, buildClonePackCmd, makeEnsurePack } from "./manifest-satisfy.mjs";
 
@@ -171,6 +171,7 @@ test("present mismatching file with NO source_url DEFERs MODEL_SHA_MISMATCH", as
 
 const okDeps = {
   comfyDir: "C:/ComfyUI",
+  retryDelayMs: 1,          // never pay the production 500ms sleep in tests
   exists: () => true, sentinelOk: () => true, writeSentinel: () => {},
   download: async () => {}, sha256: async () => "HASH",
   satisfierAvailable: () => true, comfyVersion: async () => "0.23.5",
@@ -232,6 +233,206 @@ test("models-only manifest satisfies without the pack satisfier present", async 
   const mo = parseManifest({ node_packs: [], models: [{ path: "m/y", source_url: "u", sha256: "HASH" }] });
   const r = await satisfyManifest(mo, { ...okDeps, satisfierAvailable: () => false });
   assert.equal(r.ok, true);
+});
+
+// --- spawn-failure classification (live CMP report 2026-07-20) ---
+// A spawn-level failure ("spawn UNKNOWN"/ENOENT/EACCES - the subprocess never ran) was caught
+// and relabeled VENV_INCOHERENT: "the check could not run" reported as "your venv is broken",
+// pointing the operator at healthy torch pins. Spawn failures must be classified distinctly
+// (SATISFIER_SPAWN_FAILED), retried once for the python-touching steps (CMP's was transient
+// after a long batch), and - for a pin-set the persisted marker proves was already satisfied -
+// must not fail a previously-coherent env at all.
+
+const spawnErr = () => Object.assign(new Error("spawn UNKNOWN"), { code: "UNKNOWN", syscall: "spawn" });
+// M's packs key, for marker-based tests.
+const M_KEY = (M.node_packs || []).map((p) => `${p.name}@${p.commit}`).sort().join("|");
+
+test("isSpawnFailure recognizes Node spawn errors and nothing else", () => {
+  assert.equal(isSpawnFailure(spawnErr()), true);
+  assert.equal(isSpawnFailure(Object.assign(new Error("spawn python ENOENT"), { code: "ENOENT", syscall: "spawn python" })), true);
+  // The message-only fallback (wrapped/re-thrown errors that lost their syscall property):
+  assert.equal(isSpawnFailure(new Error("spawn EPERM")), true, "message-only spawn errors must classify");
+  assert.equal(isSpawnFailure(new Error("python exit 1: pip check found conflicts")), false, "a real non-zero exit is NOT a spawn failure");
+  assert.equal(isSpawnFailure(new Error("random")), false);
+  assert.equal(isSpawnFailure(null), false);
+});
+
+test("spawn failure in the git checkout stage defers SATISFIER_SPAWN_FAILED with the pack as ref", async () => {
+  const r = await satisfyManifest(M, { ...okDeps, ensurePack: async () => { throw spawnErr(); } });
+  assert.equal(r.ok, false);
+  assert.equal(r.defer.code, "SATISFIER_SPAWN_FAILED");
+  assert.equal(r.defer.ref, M.node_packs[0].name, "ref must name the failing stage");
+});
+
+test("ensurePack is NOT retried (a retry recomputes HEAD-before against its own side effects)", async () => {
+  let calls = 0;
+  await satisfyManifest(M, { ...okDeps, ensurePack: async () => { calls++; throw spawnErr(); } });
+  assert.equal(calls, 1, "the checkout stage defers typed on first spawn failure; the CALLER retries the whole satisfy");
+});
+
+test("spawn failure in resolveDeps defers SATISFIER_SPAWN_FAILED/uv-resolve, not VENV_INCOHERENT", async () => {
+  const r = await satisfyManifest(M, {
+    ...okDeps,
+    ensurePack: async () => ({ changed: true }),
+    resolveDeps: async () => { throw spawnErr(); },
+  });
+  assert.equal(r.defer.code, "SATISFIER_SPAWN_FAILED", "spawn failure must not masquerade as venv incoherence");
+  assert.equal(r.defer.ref, "uv-resolve");
+  assert.match(r.defer.detail, /spawn UNKNOWN/);
+});
+
+test("a TRANSIENT resolveDeps spawn failure is retried once and satisfy succeeds", async () => {
+  let calls = 0;
+  const r = await satisfyManifest(M, {
+    ...okDeps,
+    ensurePack: async () => ({ changed: true }),
+    resolveDeps: async () => { if (++calls === 1) throw spawnErr(); },
+  });
+  assert.equal(r.ok, true, "one transient spawn failure must be absorbed");
+  assert.equal(calls, 2);
+});
+
+test("a REAL resolve failure (non-zero exit) still defers VENV_INCOHERENT", async () => {
+  const r = await satisfyManifest(M, {
+    ...okDeps,
+    ensurePack: async () => ({ changed: true }),
+    resolveDeps: async () => { throw new Error("uv exit 1: no solution within host constraints"); },
+  });
+  assert.equal(r.defer.code, "VENV_INCOHERENT");
+});
+
+test("runRetryOnSpawn retries ONCE on a spawn failure and succeeds", async () => {
+  let calls = 0;
+  const out = await runRetryOnSpawn(async () => { if (++calls === 1) throw spawnErr(); return "ok"; }, { delayMs: 1 });
+  assert.equal(out, "ok");
+  assert.equal(calls, 2);
+});
+
+test("runRetryOnSpawn does NOT retry a real failure, and gives up after the one retry", async () => {
+  let calls = 0;
+  await assert.rejects(
+    () => runRetryOnSpawn(async () => { calls++; throw new Error("uv exit 1: conflict"); }, { delayMs: 1 }),
+    /exit 1/);
+  assert.equal(calls, 1, "non-spawn failures are not retried");
+  let calls2 = 0;
+  await assert.rejects(
+    () => runRetryOnSpawn(async () => { calls2++; throw spawnErr(); }, { delayMs: 1 }),
+    /spawn UNKNOWN/);
+  assert.equal(calls2, 2, "exactly one retry for a persistent spawn failure");
+});
+
+// --- the deps-satisfied marker (adversarial-review redesign, 2026-07-22) ---
+// "git didn't move this run" is NOT proof the deps were ever installed: a run that checks
+// packs out and fails before resolveDeps leaves changed=false forever. The skip (and the
+// fail-open) key on a marker written ONLY after a fully successful resolve+check.
+
+test("unchanged packs WITHOUT a satisfied marker still run the full resolve", async () => {
+  let resolved = false;
+  const r = await satisfyManifest(M, {
+    ...okDeps,
+    ensurePack: async () => ({ changed: false }),
+    readDepsMarker: () => null,             // e.g. a prior run died between checkout and install
+    resolveDeps: async () => { resolved = true; },
+  });
+  assert.equal(r.ok, true);
+  assert.equal(resolved, true, "no proof of a prior successful install - must resolve");
+});
+
+test("unchanged packs WITH a matching marker skip the resolve (the common re-run)", async () => {
+  let resolved = false, checked = false;
+  const r = await satisfyManifest(M, {
+    ...okDeps,
+    ensurePack: async () => ({ changed: false }),
+    readDepsMarker: () => M_KEY,
+    resolveDeps: async () => { resolved = true; },
+    pipCheck: async () => { checked = true; return { ok: true }; },
+  });
+  assert.equal(r.ok, true);
+  assert.equal(resolved, false, "pin-set unchanged AND proven satisfied - nothing to resolve");
+  assert.equal(checked, true, "the cheap coherence check still runs");
+});
+
+test("a STALE marker (different pin-set) does not authorize the skip", async () => {
+  let resolved = false;
+  await satisfyManifest(M, {
+    ...okDeps,
+    ensurePack: async () => ({ changed: false }),
+    readDepsMarker: () => "A@OLD-COMMIT",
+    resolveDeps: async () => { resolved = true; },
+  });
+  assert.equal(resolved, true, "marker for a different pin-set proves nothing about this one");
+});
+
+test("the marker is written ONLY after resolve+check both succeed", async () => {
+  let wrote = null;
+  await satisfyManifest(M, {
+    ...okDeps,
+    ensurePack: async () => ({ changed: true }),
+    writeDepsMarker: (k) => { wrote = k; },
+  });
+  assert.equal(wrote, M_KEY, "success writes the pin-set key");
+  wrote = null;
+  await satisfyManifest(M, {
+    ...okDeps,
+    ensurePack: async () => ({ changed: true }),
+    pipCheck: async () => ({ ok: false, reason: "conflict" }),
+    writeDepsMarker: (k) => { wrote = k; },
+  });
+  assert.equal(wrote, null, "a failed check must NOT record the env as satisfied");
+});
+
+test("changed packs still run the full resolve even with a matching marker", async () => {
+  let resolved = false;
+  const r = await satisfyManifest(M, {
+    ...okDeps,
+    ensurePack: async () => ({ changed: true }),
+    readDepsMarker: () => M_KEY,
+    resolveDeps: async () => { resolved = true; },
+  });
+  assert.equal(r.ok, true);
+  assert.equal(resolved, true, "a moved checkout always re-resolves");
+});
+
+test("proven-satisfied env + pipCheck SPAWN failure fails OPEN with a warning", async () => {
+  const r = await satisfyManifest(M, {
+    ...okDeps,
+    ensurePack: async () => ({ changed: false }),
+    readDepsMarker: () => M_KEY,
+    pipCheck: async () => { throw spawnErr(); },
+  });
+  assert.equal(r.ok, true, "marker proves prior coherence - a check that could not RUN is not evidence against it");
+  assert.match(r.warning || "", /coherence check skipped/i);
+});
+
+test("UNPROVEN env + pipCheck spawn failure fails CLOSED (SATISFIER_SPAWN_FAILED)", async () => {
+  const noMarker = await satisfyManifest(M, {
+    ...okDeps,
+    ensurePack: async () => ({ changed: false }),
+    readDepsMarker: () => null,
+    pipCheck: async () => { throw spawnErr(); },
+  });
+  assert.equal(noMarker.ok, false);
+  assert.equal(noMarker.defer.code, "SATISFIER_SPAWN_FAILED");
+  assert.equal(noMarker.defer.ref, "pip-check");
+  const justChanged = await satisfyManifest(M, {
+    ...okDeps,
+    ensurePack: async () => ({ changed: true }),
+    readDepsMarker: () => M_KEY,
+    pipCheck: async () => { throw spawnErr(); },
+  });
+  assert.equal(justChanged.defer.code, "SATISFIER_SPAWN_FAILED", "a just-modified env cannot fail open");
+});
+
+test("PRODUCTION pipCheck rethrows a real child_process spawn failure (not {ok:false})", async () => {
+  // The glue this release exists for: a REAL spawn error from a nonexistent interpreter must
+  // escape pipCheck as a throw (for classification), never be swallowed into a venv verdict.
+  const deps = defaultSatisfyDeps({
+    comfyDir: "C:/ComfyUI",
+    comfyPy: "C:/definitely/not/a/real/python-interpreter.exe",
+    api: "http://127.0.0.1:1", cmCli: "",
+  });
+  await assert.rejects(() => deps.pipCheck(), (e) => isSpawnFailure(e),
+    "a spawn-level failure must propagate as a throw that classifies as a spawn failure");
 });
 
 // NODE_CLASS_MISSING moved OUT of satisfyManifest to the orchestrator's post-start preflight
