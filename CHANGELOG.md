@@ -4,6 +4,26 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.15] - 2026-07-22
+
+### Added — the HQ STT tier can be an llama-server mtmd model (`stt_hq_api: "openai"`)
+- The HQ transcribe path spoke only whisper-server's `/inference` multipart protocol, so binding
+  an llama-server-served STT model (Qwen3-ASR, mtmd) to `stt_model_hq` deferred with a
+  whisper-endpoint 404 (live finding 2026-07-21, binding rolled back). The client now also speaks
+  the OpenAI `/v1/audio/transcriptions` shape through the same `/upstream/<model>/` passthrough —
+  verified live on Qube before building (HTTP 200 on `qwen3-asr` with a correct transcription).
+- New config field `stt_hq_api`: `""`/`"whisper"` = the existing whisper protocol; `"openai"` =
+  the transcriptions endpoint. Selection only affects the `hq=true` path; the default STT tier is
+  untouched.
+- Adapter honesty: mtmd ASR models emit no timestamps, so the result carries ONE synthesized
+  full-span segment (duration derived from the 16 kHz WAV size); Qwen3-ASR's
+  `language X<asr_text>` prefix is parsed into the result's language field (free detection);
+  whisper decode knobs (VAD/beam/language forcing) do not apply on this path. The single-slot
+  serialization mutex covers both protocols.
+- Matrix updated: the v0.22.12 "cannot bind qwen3-asr yet" non-binding is now a HOW-TO (set both
+  `stt_model_hq` and `stt_hq_api`); the MCP transcribe tool's `hq` description no longer
+  hardcodes "large-v3".
+
 ## [0.22.14] - 2026-07-22
 
 ### Changed — running on built-in defaults is now LOUD (`config:` disclosure in doctor)

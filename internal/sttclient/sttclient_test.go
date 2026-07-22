@@ -185,3 +185,121 @@ func TestUnloadURL(t *testing.T) {
 		t.Errorf("Unload hit %s %s, want POST /api/models/unload/whisper-stt", gotMethod, gotPath)
 	}
 }
+
+// --- OpenAI-transcriptions path (llama-server mtmd STT, e.g. Qwen3-ASR) ---
+// The HQ accuracy tier can be served by llama-server (mtmd) instead of whisper-server;
+// llama-server exposes the OpenAI /v1/audio/transcriptions shape (multipart `file`),
+// reachable through llama-swap's /upstream/<model>/ passthrough. Verified live on Qube
+// 2026-07-22: HTTP 200, {"type":"transcript.text.done","text":"language English<asr_text>..."}.
+
+func TestParseASRText(t *testing.T) {
+	lang, text := ParseASRText("language English<asr_text>The quick brown fox.")
+	if lang != "english" || text != "The quick brown fox." {
+		t.Fatalf("marker form: got lang=%q text=%q", lang, text)
+	}
+	lang, text = ParseASRText("  plain transcript with no marker ")
+	if lang != "" || text != "plain transcript with no marker" {
+		t.Fatalf("no-marker form: got lang=%q text=%q", lang, text)
+	}
+	lang, text = ParseASRText("")
+	if lang != "" || text != "" {
+		t.Fatalf("empty: got lang=%q text=%q", lang, text)
+	}
+}
+
+func TestTranscribeOAIPostsMultipartAndParses(t *testing.T) {
+	var gotPath, gotCT string
+	var sawFile bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotCT = r.Header.Get("Content-Type")
+		if err := r.ParseMultipartForm(1 << 20); err == nil {
+			_, _, ferr := r.FormFile("file")
+			sawFile = ferr == nil
+		}
+		_, _ = w.Write([]byte(`{"type":"transcript.text.done","text":"language English<asr_text>Hello world.","usage":{"total_tokens":10}}`))
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	wav := filepath.Join(tmp, "a.wav")
+	// ffmpeg-shaped RIFF: fmt + LIST/INFO (the real producer writes one — review-verified
+	// 78-byte header) + a data chunk of exactly 1.0s of 16kHz mono s16. Duration must come
+	// from the DATA CHUNK size, not a naive size-44.
+	_ = os.WriteFile(wav, buildRIFF(t, 32000), 0o644)
+
+	c := New(srv.URL, 10*time.Second)
+	r, err := c.TranscribeOAI(context.Background(), "qwen3-asr", wav)
+	if err != nil {
+		t.Fatalf("TranscribeOAI: %v", err)
+	}
+	if gotPath != "/upstream/qwen3-asr/v1/audio/transcriptions" {
+		t.Fatalf("posted to %q", gotPath)
+	}
+	if !strings.HasPrefix(gotCT, "multipart/form-data") || !sawFile {
+		t.Fatalf("must upload multipart with a `file` field (ct=%q sawFile=%v)", gotCT, sawFile)
+	}
+	if r.Language != "english" || r.Text != "Hello world." {
+		t.Fatalf("parse: lang=%q text=%q", r.Language, r.Text)
+	}
+	if r.Duration < 0.99 || r.Duration > 1.01 {
+		t.Fatalf("duration from wav size: got %v want ~1.0", r.Duration)
+	}
+	if len(r.Segments) != 1 || r.Segments[0].Text != "Hello world." || r.Segments[0].End != r.Duration {
+		t.Fatalf("must synthesize ONE full-span segment (SRT/consumers rely on segments); got %+v", r.Segments)
+	}
+}
+
+func TestTranscribeOAIErrorsAreErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"message":"File Not Found"}}`, 404)
+	}))
+	defer srv.Close()
+	tmp := t.TempDir()
+	wav := filepath.Join(tmp, "a.wav")
+	_ = os.WriteFile(wav, make([]byte, 100), 0o644)
+	c := New(srv.URL, 10*time.Second)
+	if _, err := c.TranscribeOAI(context.Background(), "m", wav); err == nil {
+		t.Fatal("non-200 must be an error, not an empty result")
+	}
+}
+
+// buildRIFF fabricates a WAV like the real ConvertToWav16k producer: RIFF/WAVE with a
+// fmt chunk, a LIST/INFO chunk (ffmpeg writes one — the naive 44-byte-header assumption
+// broke on it), then a data chunk of dataLen zero bytes.
+func buildRIFF(t *testing.T, dataLen int) []byte {
+	t.Helper()
+	le32 := func(v int) []byte { return []byte{byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24)} }
+	var b []byte
+	fmtChunk := append([]byte("fmt "), le32(16)...)
+	fmtChunk = append(fmtChunk, make([]byte, 16)...)
+	info := []byte("INFOISFT")
+	info = append(info, le32(13)...)
+	info = append(info, []byte("Lavf62.12.102")...) // 13 bytes (ffmpeg pads to even with a NUL; the walk only reads top-level chunks)
+	list := append([]byte("LIST"), le32(len(info))...)
+	list = append(list, info...)
+	data := append([]byte("data"), le32(dataLen)...)
+	data = append(data, make([]byte, dataLen)...)
+	body := append(append(append([]byte("WAVE"), fmtChunk...), list...), data...)
+	b = append([]byte("RIFF"), le32(len(body))...)
+	return append(b, body...)
+}
+
+// Guarded prefix parsing (review finding: an over-eager parse dropped leading content).
+func TestParseASRTextGuards(t *testing.T) {
+	// A transcript that legitimately CONTAINS the marker must not lose its lead.
+	lang, text := ParseASRText("The model emits <asr_text>as a delimiter.")
+	if lang != "" || text != "The model emits <asr_text>as a delimiter." {
+		t.Fatalf("non-language prefix must be kept verbatim: lang=%q text=%q", lang, text)
+	}
+	// Case-insensitive language keyword.
+	lang, text = ParseASRText("Language Spanish<asr_text>Hola mundo.")
+	if lang != "spanish" || text != "Hola mundo." {
+		t.Fatalf("case-insensitive prefix: lang=%q text=%q", lang, text)
+	}
+	// A second marker later in the transcript stays verbatim.
+	lang, text = ParseASRText("language English<asr_text>one <asr_text> two")
+	if lang != "english" || text != "one <asr_text> two" {
+		t.Fatalf("later markers stay: lang=%q text=%q", lang, text)
+	}
+}

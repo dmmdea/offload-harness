@@ -66,3 +66,29 @@ func TestMediaBaseDisambiguates(t *testing.T) {
 		t.Errorf("stem should keep the basename: %q", a)
 	}
 }
+
+// TestSTTRoute pins the feature's actual switch (v0.22.15): the OpenAI-transcriptions
+// protocol is selected ONLY for an hq request with a bound HQ model AND
+// stt_hq_api="openai". Everything else keeps the whisper protocol — including the
+// non-hq default tier even when the config carries the field.
+func TestSTTRoute(t *testing.T) {
+	cfg := config.Config{STTModel: "w", STTModelHQ: "q", STTHQAPI: "openai"}
+	if m, oai := sttRoute(cfg, true); m != "q" || !oai {
+		t.Fatalf("hq + openai: got (%q,%v)", m, oai)
+	}
+	if m, oai := sttRoute(cfg, false); m != "w" || oai {
+		t.Fatalf("non-hq must never take the OAI branch: got (%q,%v)", m, oai)
+	}
+	cfg.STTHQAPI = ""
+	if m, oai := sttRoute(cfg, true); m != "q" || oai {
+		t.Fatalf("hq without the field keeps whisper: got (%q,%v)", m, oai)
+	}
+	cfg.STTHQAPI = "OpenAI" // case-insensitive
+	if _, oai := sttRoute(cfg, true); !oai {
+		t.Fatal("field must be case-insensitive")
+	}
+	cfg.STTModelHQ = ""
+	if m, oai := sttRoute(cfg, true); m != "w" || oai {
+		t.Fatalf("hq with no HQ model falls back to the default tier, whisper protocol: got (%q,%v)", m, oai)
+	}
+}
