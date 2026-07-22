@@ -251,6 +251,53 @@ installing a new CUDA toolkit or a driver (Hard rule 3).**
 
 ---
 
+## Text-cascade matrix — validated ladder for ≥16GB tiers (2026-07-21)
+
+The recommended cascade binding on a **≥16GB** box that serves a 12B-class MTP tier is the
+**4-rung ladder**. Three rows use canonical repo aliases; the 12B rung has **no repo alias yet**
+(no template serves it — see "Installer honesty" below), so its row shows the alias convention
+used where it is live today (Qube: `offload-12b`, also answering to `gemma4-12b-qat`; the
+historical bench script called the same tier `gemma4-12b`). When a template first serves a 12B
+tier, pick ONE repo alias and update this row:
+
+| Slot | Alias | Why (measured on `ampere-16`, 2026-07-20/21) |
+|---|---|---|
+| `triage_model` | `gemma4-e2b` | 154.5 tok/s; grammar-clean |
+| `model` (workhorse) | `offload-e4b` | 95.7 tok/s; grammar-clean |
+| `escalation_model` | `offload-12b` *(Qube-local — see note above)* (gemma-4-12B + MTP drafter) | **82.1 tok/s — 2.5× the 26B it offloads from**; grammar-clean 5/5; task-level A/B vs the both-26B incumbent showed zero regressions (outputs content-identical) |
+| `reasoning_model` | `gemma4-26b-a4b` | terminal local tier, 32.5 tok/s; grammar-clean |
+
+"Rungs" name the roster ladder, not the chain shape: the request chain stays
+`[triage_model?] → model → escalation_model`, and the reasoning slot is the separate
+grammar-task **terminal tier** that runs after the chain is exhausted (see
+`docs/systems/offload-pipeline.md`).
+
+**Know what you are changing from:** the shipped default binds `gemma4-26b-a4b` to BOTH
+`escalation_model` and `reasoning_model` — exactly the both-26B shape this recommendation
+replaces. That default is correct for 8GB tiers (a 12B-class rung does not fit beside the
+residents there — the 8GB ladder stays e2b → e4b → 26b-`--cpu-moe`) and stays the built-in;
+this is a matrix recommendation for ≥16GB operators, not a default change.
+
+**Installer honesty:** the profile templates do NOT yet serve a 12B tier — no template renders an
+`offload-12b` entry. On a box installed purely from this runbook the recommendation is
+inapplicable until the operator adds the 12B entry to llama-swap out-of-band (as Qube did:
+gemma-4-12B QAT + MTP drafter, aliases `offload-12b`/`12b`/`quality`). Full validation record:
+the operator's benchmark archive (`2026-07-20_qube-roster-validation/`, ROSTER.md).
+
+Two validated **non-bindings** (as load-bearing as the bindings):
+
+- **`gpt-oss-20b` must never fill ANY cascade slot.** Every cascade tier generates under a GBNF
+  grammar (all tasks, summarize included), and its harmony channel format is structurally
+  incompatible with GBNF (hard 500: "output does not match the expected peg-native format");
+  separately, its reasoning phase consumes the token budget (empty `content` on small budgets).
+  Outside the cascade it keeps its real role: the free-text/interactive throughput model —
+  4-slot admission proven, with aggregate throughput HALVING under 4-way load (the seat's claim
+  is "no queueing", not "4× tokens").
+- **`stt_model_hq` cannot bind `qwen3-asr` yet**: the harness's HQ transcribe client speaks the
+  whisper-server HTTP protocol, while Qwen3-ASR is served by llama-server (mtmd) — binding it
+  defers with a whisper-endpoint 404 (verified live 2026-07-21, rolled back). Filling that seat
+  needs a harness feature first: an llama-server audio path for the HQ tier.
+
 ## Step 1 — install
 
 ```powershell

@@ -4,6 +4,27 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.12] - 2026-07-21
+
+### Changed — model matrix: validated 4-rung cascade ladder for ≥16GB tiers
+- `setup/SETUP-AGENT.md` gains a **Text-cascade matrix** section recording the roster validation
+  run on `ampere-16` (operator benchmark archive `2026-07-20_qube-roster-validation/`): the
+  recommended ≥16GB binding is the 4-rung ladder — e2b triage (154.5 tok/s) → e4b workhorse
+  (95.7) → **a 12B-MTP escalation rung (`offload-12b`, 82.1 — 2.5× the 26B it offloads from,
+  grammar-clean, task-level A/B showed zero regressions)** → 26b terminal reasoning (32.5). The
+  old shape bound escalation AND reasoning to the 26B, wasting a slot. 8GB tiers keep the 3-rung
+  ladder; code defaults stay tier-agnostic (this is a matrix recommendation, not a default change).
+- Two validated **non-bindings** recorded alongside: `gpt-oss-20b` must never take a
+  grammar-constrained slot (harmony format vs GBNF = hard 500; reasoning phase eats small budgets
+  → empty content; it stays the free-text/throughput model, 4-slot admission proven with aggregate
+  throughput halving under 4-way load), and `stt_model_hq` cannot bind `qwen3-asr` yet (the HQ
+  transcribe client speaks whisper-server HTTP; Qwen3-ASR is served by llama-server mtmd — binding
+  defers with a whisper-endpoint 404, verified live and rolled back; needs an llama-server audio
+  path for the HQ tier first).
+- `docs/systems/offload-pipeline.md` and `docs/flows/cascade-escalation-and-defer.md` are
+  cross-referenced with the matrix and their "reasoning runs on the same model as escalation"
+  statements conditioned on the binding (they were flatly false under the new recommendation).
+
 ## [0.22.11] - 2026-07-20
 
 ### Fixed — model presence spans ComfyUI's full search path (`extra_model_paths.yaml`)

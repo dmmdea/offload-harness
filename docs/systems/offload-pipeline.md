@@ -47,6 +47,14 @@ The triage Tier is only included for `triage` and `classify` tasks, and can be s
 entry-tier router. Duplicate aliases collapse, Tiers whose circuit breaker is open are skipped, and
 if everything is pruned the chain falls back to the workhorse model alone.
 
+What fills those slots — and the separate terminal reasoning tier described below — is a
+per-machine choice; the validated recommendation per hardware tier lives in the model matrix
+(`setup/SETUP-AGENT.md`, "Text-cascade matrix"). As of 2026-07-21 the ≥16GB recommendation binds
+the escalation slot to a 12B-MTP tier and the terminal reasoning tier to the 26B (the chain shape
+above is unchanged — three slots plus the terminal tier); 8GB tiers keep the default shape. The
+matrix also records the models that must NOT fill cascade slots at all (e.g. `gpt-oss-20b`, whose
+harmony output format is incompatible with the GBNF path described below).
+
 For each Tier the pipeline generates under a GBNF grammar, then applies a series of gates. Each gate
 answers "is this good enough, and if not, is it worth trying a bigger model?"
 
@@ -68,7 +76,9 @@ When the whole chain has deferred, one last attempt runs on the **terminal reaso
 grammar tasks whose output was not truncated. It gets a thinking span supplied by the grammar
 (`WrapThinking`) and an extra token budget, runs once, and is not subject to the confidence gate.
 Results from it are marked `Reasoning: true`, which is what distinguishes them from ordinary
-escalation results in the ledger — both run on the same model.
+escalation results in the ledger. With the shipped default binding both run on the same model
+(`gemma4-26b-a4b`); under the ≥16GB matrix recommendation they differ — escalation on the 12B,
+the terminal tier on the 26B.
 
 If that also fails, the pipeline returns a Defer and records it.
 
@@ -152,8 +162,9 @@ their own unit tests.
 - **Treating a defer as a bug.** It is the designed outcome when confidence is low.
 - **Expecting grounding to gate summaries.** It is logged for summaries, actioned only for extract.
 - Assuming escalation happens on any failure — infrastructure failures deliberately do not escalate.
-- Assuming `Reasoning` means a different model. It is the same model as the escalation Tier; the flag
-  is what tells them apart.
+- Assuming `Reasoning` implies a different model. Under the shipped default it is the same model
+  as the escalation Tier (they differ only if the config binds them apart, as the ≥16GB matrix
+  recommendation does); the flag is what tells them apart.
 - Reading logprobs under an active grammar as if they were unconstrained. They are pre-mask.
 
 ## Source map
