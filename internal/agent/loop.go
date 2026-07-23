@@ -90,6 +90,7 @@ type Loop struct {
 	ctxTokens     int // model context window in tokens; input budget derives from it
 	keepRecent    int  // most-recent turns kept full during compaction
 	skeletonPrune bool // enable the skeleton rung of the compaction ladder (default off)
+	gcfCompact    bool // enable the lossless GCF rung of the compaction ladder (default off)
 	toolResultCap int // max chars of ONE tool result kept in the transcript (0 => derive from window)
 	system        string
 	mem           Memory
@@ -235,6 +236,17 @@ func (l *Loop) WithContextTokens(n int) *Loop {
 // it off, compaction behaves exactly as before this rung existed.
 func (l *Loop) WithSkeletonPrune(on bool) *Loop { l.skeletonPrune = on; return l }
 
+// WithGCFCompact enables the LOSSLESS GCF rung of the compaction ladder:
+// over budget, older tool bodies that are eligible JSON arrays are re-encoded
+// columnar (internal/gcf, round-trip proven) before any lossy rung runs. Off
+// by default until measured in live use.
+func (l *Loop) WithGCFCompact(on bool) *Loop { l.gcfCompact = on; return l }
+
+// ladderOpts bundles the loop's rung flags for compact().
+func (l *Loop) ladderOpts() compactOpts {
+	return compactOpts{GCF: l.gcfCompact, Skeleton: l.skeletonPrune}
+}
+
 // WithToolResultCap overrides the per-result character cap applied when a
 // tool's output becomes a transcript Msg (see toolResultCapChars). A
 // non-positive value resets to the window-derived default. Use a large value
@@ -372,7 +384,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// the server's KV cache stays warm on the happy path).
 		budget := l.inputBudget()
 		if estimateTokens(msgs) > budget {
-			msgs = compact(msgs, budget, l.keepRecent, preambleLen, l.skeletonPrune)
+			msgs = compact(msgs, budget, l.keepRecent, preambleLen, l.ladderOpts())
 		}
 		comp, err := l.client.Chat(ctx, msgs, specs, l.maxTokens)
 		if err != nil {
@@ -383,7 +395,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			// non-overflow error, or a still-overflowing retry, is returned as
 			// before.
 			if isContextOverflowErr(err) {
-				msgs = compact(msgs, budget/2, l.keepRecent/2, preambleLen, l.skeletonPrune)
+				msgs = compact(msgs, budget/2, l.keepRecent/2, preambleLen, l.ladderOpts())
 				comp, err = l.client.Chat(ctx, msgs, specs, l.maxTokens)
 			}
 			if err != nil {

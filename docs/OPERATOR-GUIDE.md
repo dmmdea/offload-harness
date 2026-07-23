@@ -375,7 +375,13 @@ to a single-model run of the original objective (logged as `fallback=…`). `--a
   the install prints the profile's value). The derived usable **input budget** is
   `ctx-tokens − max-tokens − 512`. Setting it too high lets the transcript overflow the real window
   (a 400); too low compacts sooner than necessary.
-- `--skeleton-prune` (default off) — adds a gentler first rung to compaction: over budget, older tool
+- `--gcf-compact` (default off) — the compaction ladder's LOSSLESS first rung: over budget, older
+  tool results that are JSON arrays of flat objects are re-encoded columnar (keys stated once,
+  `internal/gcf`, round-trip proven — nothing is lost) before any lossy rung runs. The same
+  transform guards the offload pipeline's context trim via the `gcf_compact` config field: an
+  over-budget input's JSON is compacted losslessly before the head/tail cut, converting would-be
+  truncations into full-fidelity completions.
+- `--skeleton-prune` (default off) — the next, lossy-structural rung: over budget, older tool
   results are reduced to signal-preserving **skeletons** (head/tail lines + error/failure/warning
   lines kept, elided runs replaced by `[... n lines elided ...]` markers) before the existing
   bare-marker and turn-drop rungs run. Deterministic and local — no model call, no added latency.

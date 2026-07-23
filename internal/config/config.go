@@ -266,6 +266,13 @@ type Config struct {
 	ConfidenceMarginThreshold float64 `json:"confidence_margin_threshold"`
 	// MaxInputChars caps input length before context-budget trimming.
 	MaxInputChars int `json:"max_input_chars"`
+
+	// GCFCompact enables LOSSLESS columnar re-encoding (internal/gcf) of
+	// eligible JSON arrays inside over-budget inputs BEFORE the lossy
+	// context-budget head/tail trim — content that would have been cut can
+	// then fit the local window instead (a defer/truncation converted into a
+	// full-fidelity completion). Off by default until measured.
+	GCFCompact bool `json:"gcf_compact,omitempty"`
 	// CachePath / LedgerPath are bbolt files.
 	CachePath  string `json:"cache_path"`
 	LedgerPath string `json:"ledger_path"`
