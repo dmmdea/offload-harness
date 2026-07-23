@@ -79,6 +79,7 @@
   "classify_min_confidence": 0.45,
   "confidence_margin_threshold": 0.35,
   "max_input_chars": 24000,
+  "gcf_compact": false,
   "cache_path": "~/.local-offload/cache.db",
   "ledger_path": "~/.local-offload/ledger.jsonl",
   "thresholds_path": "~/.local-offload/thresholds.json",
