@@ -51,6 +51,11 @@ func estimateTokens(msgs []Msg) int {
 //     profile exemplars + recall + AGENT.md + objective), so the objective is
 //     never guessed at and never dropped even when exemplars precede it — plus
 //     the most recent keepRecent turns.
+//     2b. (skeleton=true only) SKELETONIZE the bodies of OLDER tool-role messages
+//     oldest-first until under budget: head/tail windows + buried signal lines
+//     kept, the rest elided to counted run markers (see skeleton.go). Strictly
+//     less destructive than step 3 — the error a task later needs usually
+//     survives — and a skeleton can still fall through to a bare marker below.
 //  3. Elide the bodies of OLDER tool-role messages to a compact marker
 //     (preserving Role + ToolCallID so pairing is intact), oldest-first, until
 //     under budget. Eliding a body is preferred over dropping a message.
@@ -72,7 +77,7 @@ func estimateTokens(msgs []Msg) int {
 // and exemplars are a small fixed set); if it ALONE exceeds budget, compaction
 // cannot shrink it — the transcript stays over budget and the run errors honestly
 // on the next Chat rather than silently dropping the objective to fit.
-func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int) []Msg {
+func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, skeleton bool) []Msg {
 	if estimateTokens(msgs) <= budget {
 		return msgs // happy path: untouched, KV cache preserved.
 	}
@@ -96,10 +101,33 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int) []Msg 
 		recentStart = protectedEnd
 	}
 
-	// Step 3: elide OLDER tool-result bodies to markers, oldest-first.
+	// Step 2b (flag-gated): skeletonize OLDER tool bodies oldest-first — the
+	// least-destructive body edit. Deterministic, so a transcript compacted
+	// twice lands on identical bytes (isSkeletonized stops re-pruning).
+	if skeleton {
+		for i := protectedEnd; i < recentStart && estimateTokens(out) > budget; i++ {
+			if out[i].Role == "tool" {
+				if sk, ok := skeletonize(out[i].Content); ok {
+					out[i].Content = sk
+				}
+			}
+		}
+		if estimateTokens(out) <= budget {
+			return out
+		}
+	}
+
+	// Step 3: elide OLDER tool-result bodies to markers, oldest-first. A
+	// skeleton falls through to a bare marker here under harder pressure; its
+	// marker reports the ORIGINAL body size (parsed from the skeleton's own
+	// prefix), not the skeleton's — the marker discloses what was lost.
 	for i := protectedEnd; i < recentStart && estimateTokens(out) > budget; i++ {
 		if out[i].Role == "tool" && !isElided(out[i].Content) {
-			out[i].Content = elisionMarker(len(out[i].Content))
+			n := len(out[i].Content)
+			if orig, ok := skeletonOriginalSize(out[i].Content); ok {
+				n = orig
+			}
+			out[i].Content = elisionMarker(n)
 		}
 	}
 	if estimateTokens(out) <= budget {
