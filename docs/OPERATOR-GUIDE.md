@@ -375,6 +375,12 @@ to a single-model run of the original objective (logged as `fallback=…`). `--a
   the install prints the profile's value). The derived usable **input budget** is
   `ctx-tokens − max-tokens − 512`. Setting it too high lets the transcript overflow the real window
   (a 400); too low compacts sooner than necessary.
+- `--skeleton-prune` (default off) — adds a gentler first rung to compaction: over budget, older tool
+  results are reduced to signal-preserving **skeletons** (head/tail lines + error/failure/warning
+  lines kept, elided runs replaced by `[... n lines elided ...]` markers) before the existing
+  bare-marker and turn-drop rungs run. Deterministic and local — no model call, no added latency.
+  Long multi-step runs keep *what went wrong earlier* visible to the model instead of losing whole
+  older results at the first budget crossing.
 
 ### Context-budget guidance (why prompt shape matters)
 
