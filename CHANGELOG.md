@@ -4,6 +4,31 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.17] - 2026-07-23
+
+### Added — skeleton rung in the agent's compaction ladder (`--skeleton-prune`, default off)
+- The transcript compactor jumped straight from "full tool body" to "bare size marker", so the
+  first budget crossing in a long agent task destroyed ALL information in every older tool
+  result at once. A new flag-gated rung sits between the two: older verbose bodies are reduced
+  to deterministic **skeletons** — the head/tail windows plus buried
+  error/failure/warning/test-summary lines, elided runs replaced by counted
+  `[... n lines elided ...]` markers, opened by a disclosure prefix that also makes the pass
+  idempotent. Bare markers and whole-turn drops remain the fall-through when skeletons alone
+  cannot reach the budget (a fallen-through marker reports the ORIGINAL body size, parsed from
+  the skeleton prefix); with the flag off the older rungs run untouched (pinned by test on the
+  off-path's shape). Surface: the `local-agent` CLI (`--skeleton-prune`), all drive modes incl.
+  two-tier. The MCP `agent_run` path has no per-call knob yet — it gains the rung only if the
+  default flips after broader measurement.
+- Deliberately model-free: the local cascade costs ~4 s warm / ~11 s cold per ~2k-token call
+  (measured 2026-07-23 on the 16 GB box), which would serialize every over-budget step; the
+  rules pass costs microseconds, is unit-testable, and produces identical bytes on every
+  re-compaction (KV-prefix friendly). A cascade-refined or lossless-structural skeletonizer can
+  slot into the same seam later if measurement earns it (the queued OmniRoute study).
+- Origin: the swe-pruner-pro *policy* (prune consumed tool outputs into skeletons) adopted
+  WITHOUT its mechanism (SGLang hidden-state serving + per-backbone trained heads — verified
+  against its README 2026-07-23); advisory proposal reconciled against this repo's existing
+  compaction design rather than the proposal's insertion-time sketch.
+
 ## [0.22.16] - 2026-07-22
 
 ### Fixed — TTS venv setup docs generalized beyond the original machine

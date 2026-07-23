@@ -79,7 +79,14 @@ search only; the editor gets whatever capabilities were granted.
 > empty value coexists with two-tier, because two-tier sets its own toolsets.
 
 **Compaction** keeps the transcript within `-ctx-tokens` (default 16384) — set it to match the served
-context size.
+context size. Its ladder is least-destructive-first: under budget nothing is touched (byte-stable, so
+the server's KV prefix cache stays warm); over budget, with `--skeleton-prune` (default off) older
+tool bodies are first reduced to deterministic **skeletons** — head/tail windows plus buried
+error/failure/warning lines, elided runs replaced by counted markers — then, as pressure rises, to
+bare size markers, and finally whole older turns are dropped as assistant+tool units. The skeleton
+rung is model-free on purpose: a cascade call costs seconds on the loop's critical path (measured;
+see `skeleton.go`), a rules pass costs microseconds and produces identical bytes on every
+re-compaction.
 
 ## Data and state
 
@@ -167,7 +174,7 @@ write-tool scoping and TOCTOU behavior, profile narrowing, and two-tier plan han
 - [`internal/agent/runtool.go`](../../internal/agent/runtool.go) — allowlist, direct exec
 - [`internal/agent/writetools.go`](../../internal/agent/writetools.go) — `os.Root` scoping
 - [`internal/agent/builder.go`](../../internal/agent/builder.go) — capability grants, audit-path check
-- [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go)
+- [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go)
 - [`internal/sandbox/`](../../internal/sandbox/) — platform cages
 - [`cmd/local-agent/`](../../cmd/local-agent/) — CLI and server
 

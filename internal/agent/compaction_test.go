@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -68,7 +69,7 @@ func TestCompactUnderBudgetIsNoOp(t *testing.T) {
 	}
 	// Give a budget far above the estimate so nothing is touched. Preamble =
 	// system + objective = 2.
-	out := compact(msgs, 100000, 2, 2)
+	out := compact(msgs, 100000, 2, 2, false)
 	if len(out) != len(msgs) {
 		t.Fatalf("no-op compaction changed message count: %d -> %d", len(msgs), len(out))
 	}
@@ -95,7 +96,7 @@ func TestCompactElidesOldestToolBodyKeepsSystemObjectiveRecent(t *testing.T) {
 	// Budget that the full transcript exceeds but that fits once the oldest
 	// tool body is elided. Keep the most recent 2 turns full.
 	budget := estimateTokens(msgs) - 800
-	out := compact(msgs, budget, 2, 2) // preamble = system + objective = 2
+	out := compact(msgs, budget, 2, 2, false) // preamble = system + objective = 2
 
 	// system + objective preserved verbatim.
 	if out[0].Role != "system" || out[0].Content != "SYSTEM-PROMPT" {
@@ -149,7 +150,7 @@ func TestCompactDropsMatchedOlderTurnsAsUnits(t *testing.T) {
 	// alone brings the estimate to ~85 tokens), the estimate must still exceed
 	// this so the assistant framing of older turns is dropped to fit. keepRecent=1.
 	budget := 40
-	out := compact(msgs, budget, 1, 2) // preamble = system + objective = 2
+	out := compact(msgs, budget, 1, 2, false) // preamble = system + objective = 2
 
 	// system + objective always survive.
 	var sawSys, sawObj bool
@@ -336,4 +337,174 @@ type alwaysErrClient struct {
 func (c *alwaysErrClient) Chat(_ context.Context, _ []Msg, _ []ToolSpec, _ int) (Completion, error) {
 	c.calls++
 	return Completion{}, errors.New(c.errText)
+}
+
+// --- skeleton rung of the compaction ladder ---
+
+// skTranscript builds a transcript whose two older tool results are verbose
+// multi-line bodies with buried signal lines, plus a recent full turn.
+func skTranscript() []Msg {
+	old1 := buildToolOutput(120, "ERROR: connection refused by upstream")
+	old2 := buildToolOutput(120, "--- FAIL: TestPairing (0.01s)")
+	return []Msg{
+		{Role: "system", Content: "SYSTEM-PROMPT"},
+		{Role: "user", Content: "OBJECTIVE-TEXT"},
+		asstCall("c1"),
+		{Role: "tool", ToolCallID: "c1", Content: old1},
+		asstCall("c2"),
+		{Role: "tool", ToolCallID: "c2", Content: old2},
+		asstCall("c3"),
+		toolResult("c3", 800), // recent — must stay full
+		{Role: "assistant", Content: "thinking"},
+	}
+}
+
+// TestCompactSkeletonizesBeforeMarkerElision: with the skeleton rung enabled
+// and a budget that skeletons alone can satisfy, older tool bodies become
+// signal-preserving skeletons — NOT bare size markers — and the recent turn
+// stays full, pairing intact.
+func TestCompactSkeletonizesBeforeMarkerElision(t *testing.T) {
+	msgs := skTranscript()
+	budget := estimateTokens(msgs) - 1200 // fits once the two old bodies shrink to skeletons
+	out := compact(msgs, budget, 2, 2, true)
+
+	var c1, c3 Msg
+	for _, m := range out {
+		if m.Role == "tool" && m.ToolCallID == "c1" {
+			c1 = m
+		}
+		if m.Role == "tool" && m.ToolCallID == "c3" {
+			c3 = m
+		}
+	}
+	if c1.ToolCallID != "c1" {
+		t.Fatal("older tool result dropped; want it skeletonized in place")
+	}
+	if !isSkeletonized(c1.Content) {
+		t.Errorf("older tool body not skeletonized: %q", firstLine(c1.Content))
+	}
+	if isElided(c1.Content) {
+		t.Errorf("older tool body went straight to a bare marker; the skeleton rung was skipped")
+	}
+	if !strings.Contains(c1.Content, "ERROR: connection refused by upstream") {
+		t.Errorf("skeleton lost the buried error signal line")
+	}
+	if len(c3.Content) != 800 {
+		t.Errorf("recent tool result must stay full; got len %d", len(c3.Content))
+	}
+	pairing(t, out)
+	if estimateTokens(out) > budget {
+		t.Errorf("still over budget after skeleton rung: %d > %d", estimateTokens(out), budget)
+	}
+}
+
+// TestCompactSkeletonFallsThroughToMarkers: when skeletons alone cannot reach
+// the budget, the ladder must continue exactly as before — bare markers, then
+// whole-turn drops — and still land under budget with pairing intact.
+func TestCompactSkeletonFallsThroughToMarkers(t *testing.T) {
+	msgs := skTranscript()
+	// A budget far below what skeletons can reach: forces marker elision (and
+	// possibly drops) after the skeleton rung.
+	out := compact(msgs, 400, 1, 2, true)
+	if estimateTokens(out) > 400 {
+		t.Errorf("ladder failed to reach a tight budget: %d > 400", estimateTokens(out))
+	}
+	pairing(t, out)
+	if out[0].Content != "SYSTEM-PROMPT" || out[1].Content != "OBJECTIVE-TEXT" {
+		t.Errorf("protected preamble lost under fall-through pressure")
+	}
+}
+
+// TestCompactSkeletonOffIsByteIdenticalToOldLadder: skeleton=false must
+// reproduce the pre-feature ladder exactly. Pinned message-by-message: every
+// message either survives verbatim or carries the EXACT bare-marker string the
+// old ladder produced — any off-path drift (marker text, order, extra drops)
+// fails here.
+func TestCompactSkeletonOffIsByteIdenticalToOldLadder(t *testing.T) {
+	msgs := skTranscript()
+	budget := estimateTokens(msgs) - 1200
+	out := compact(msgs, budget, 2, 2, false)
+
+	if len(out) != len(msgs) {
+		t.Fatalf("off-path dropped/added messages: %d -> %d (this budget only needs body elision)", len(msgs), len(out))
+	}
+	for i := range out {
+		if out[i].Role != msgs[i].Role || out[i].ToolCallID != msgs[i].ToolCallID {
+			t.Fatalf("off-path reordered msg %d: %s/%s -> %s/%s", i, msgs[i].Role, msgs[i].ToolCallID, out[i].Role, out[i].ToolCallID)
+		}
+		want := msgs[i].Content
+		// The old ladder's ONLY edit at this budget: the OLDEST tool body (c1)
+		// becomes an exact bare marker — its elision alone (~1900 est. tokens
+		// saved) satisfies the 1200-token deficit, so the oldest-first loop
+		// stops there and c2 stays full.
+		if out[i].Role == "tool" && out[i].ToolCallID == "c1" {
+			want = elisionMarker(len(msgs[i].Content))
+		}
+		if out[i].Content != want {
+			t.Errorf("off-path msg %d (%s/%s) drifted:\n got %q\nwant %q", i, out[i].Role, out[i].ToolCallID, firstLine(out[i].Content), firstLine(want))
+		}
+	}
+}
+
+// TestCompactSkeletonFallThroughMarkerReportsOriginalSize: when harder
+// pressure elides a skeleton onward to a bare marker, the marker must disclose
+// the ORIGINAL body size (parsed from the skeleton prefix), not the skeleton's
+// own much smaller length.
+func TestCompactSkeletonFallThroughMarkerReportsOriginalSize(t *testing.T) {
+	msgs := skTranscript()
+	origLen := len(msgs[3].Content) // c1's verbose body
+	out := compact(msgs, 400, 1, 2, true)
+	for _, m := range out {
+		if m.Role == "tool" && m.ToolCallID == "c1" && isElided(m.Content) {
+			if m.Content != elisionMarker(origLen) {
+				t.Errorf("fall-through marker misreports size: got %q, want %q", m.Content, elisionMarker(origLen))
+			}
+			return
+		}
+	}
+	// c1 dropped entirely at this budget is also legal (step 4); nothing to assert then.
+}
+
+// TestLoopSkeletonPruneWiring: a loop built WithSkeletonPrune(true) and a tiny
+// window must produce skeletonized (not bare-marker) older tool results in the
+// transcript it sends — proving the flag actually reaches compact().
+func TestLoopSkeletonPruneWiring(t *testing.T) {
+	verbose := buildToolOutput(150, "ERROR: wired through")
+	script := []Completion{}
+	for i := 0; i < 5; i++ {
+		// Unique args per call — byte-identical repeats are refused by
+		// dispatchOrThrottle and would replace the verbose bodies under test
+		// with small refusal messages.
+		script = append(script, Completion{
+			Msg:          Msg{Role: "assistant", ToolCalls: []ToolCall{tc(fmt.Sprintf("call-%d", i), "bloat", fmt.Sprintf(`{"i":%d}`, i))}},
+			FinishReason: "tool_calls",
+		})
+	}
+	script = append(script, Completion{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"})
+	client := &fakeClient{script: script}
+	tools := []Tool{{
+		ToolSpec: ToolSpec{Name: "bloat", Description: "bloat", Schema: []byte(`{"type":"object"}`)},
+		Exec:     func(_ context.Context, _ string) (string, error) { return verbose, nil },
+	}}
+	// Window sized so the run must compact but skeletons ALONE satisfy the
+	// budget — a tighter window would legitimately elide the skeletons onward
+	// to bare markers (the fall-through rung), hiding the wiring under test.
+	loop := NewLoop(client, tools, 20).
+		WithContextTokens(8192).
+		WithMaxTokens(512).
+		WithMaxSameTool(0).
+		WithSkeletonPrune(true)
+	res, err := loop.Run(context.Background(), "objective")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	found := false
+	for _, m := range res.Transcript {
+		if m.Role == "tool" && isSkeletonized(m.Content) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no skeletonized tool result in the final transcript — WithSkeletonPrune not wired into the loop's compact() calls")
+	}
 }
