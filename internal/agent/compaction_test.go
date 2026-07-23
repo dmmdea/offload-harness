@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/gcf"
 )
 
 // --- helpers for building transcripts the compactor operates on ---
@@ -69,7 +71,7 @@ func TestCompactUnderBudgetIsNoOp(t *testing.T) {
 	}
 	// Give a budget far above the estimate so nothing is touched. Preamble =
 	// system + objective = 2.
-	out := compact(msgs, 100000, 2, 2, false)
+	out := compact(msgs, 100000, 2, 2, compactOpts{})
 	if len(out) != len(msgs) {
 		t.Fatalf("no-op compaction changed message count: %d -> %d", len(msgs), len(out))
 	}
@@ -96,7 +98,7 @@ func TestCompactElidesOldestToolBodyKeepsSystemObjectiveRecent(t *testing.T) {
 	// Budget that the full transcript exceeds but that fits once the oldest
 	// tool body is elided. Keep the most recent 2 turns full.
 	budget := estimateTokens(msgs) - 800
-	out := compact(msgs, budget, 2, 2, false) // preamble = system + objective = 2
+	out := compact(msgs, budget, 2, 2, compactOpts{}) // preamble = system + objective = 2
 
 	// system + objective preserved verbatim.
 	if out[0].Role != "system" || out[0].Content != "SYSTEM-PROMPT" {
@@ -150,7 +152,7 @@ func TestCompactDropsMatchedOlderTurnsAsUnits(t *testing.T) {
 	// alone brings the estimate to ~85 tokens), the estimate must still exceed
 	// this so the assistant framing of older turns is dropped to fit. keepRecent=1.
 	budget := 40
-	out := compact(msgs, budget, 1, 2, false) // preamble = system + objective = 2
+	out := compact(msgs, budget, 1, 2, compactOpts{}) // preamble = system + objective = 2
 
 	// system + objective always survive.
 	var sawSys, sawObj bool
@@ -366,7 +368,7 @@ func skTranscript() []Msg {
 func TestCompactSkeletonizesBeforeMarkerElision(t *testing.T) {
 	msgs := skTranscript()
 	budget := estimateTokens(msgs) - 1200 // fits once the two old bodies shrink to skeletons
-	out := compact(msgs, budget, 2, 2, true)
+	out := compact(msgs, budget, 2, 2, compactOpts{Skeleton: true})
 
 	var c1, c3 Msg
 	for _, m := range out {
@@ -405,7 +407,7 @@ func TestCompactSkeletonFallsThroughToMarkers(t *testing.T) {
 	msgs := skTranscript()
 	// A budget far below what skeletons can reach: forces marker elision (and
 	// possibly drops) after the skeleton rung.
-	out := compact(msgs, 400, 1, 2, true)
+	out := compact(msgs, 400, 1, 2, compactOpts{Skeleton: true})
 	if estimateTokens(out) > 400 {
 		t.Errorf("ladder failed to reach a tight budget: %d > 400", estimateTokens(out))
 	}
@@ -423,7 +425,7 @@ func TestCompactSkeletonFallsThroughToMarkers(t *testing.T) {
 func TestCompactSkeletonOffIsByteIdenticalToOldLadder(t *testing.T) {
 	msgs := skTranscript()
 	budget := estimateTokens(msgs) - 1200
-	out := compact(msgs, budget, 2, 2, false)
+	out := compact(msgs, budget, 2, 2, compactOpts{})
 
 	if len(out) != len(msgs) {
 		t.Fatalf("off-path dropped/added messages: %d -> %d (this budget only needs body elision)", len(msgs), len(out))
@@ -453,7 +455,7 @@ func TestCompactSkeletonOffIsByteIdenticalToOldLadder(t *testing.T) {
 func TestCompactSkeletonFallThroughMarkerReportsOriginalSize(t *testing.T) {
 	msgs := skTranscript()
 	origLen := len(msgs[3].Content) // c1's verbose body
-	out := compact(msgs, 400, 1, 2, true)
+	out := compact(msgs, 400, 1, 2, compactOpts{Skeleton: true})
 	for _, m := range out {
 		if m.Role == "tool" && m.ToolCallID == "c1" && isElided(m.Content) {
 			if m.Content != elisionMarker(origLen) {
@@ -463,6 +465,118 @@ func TestCompactSkeletonFallThroughMarkerReportsOriginalSize(t *testing.T) {
 		}
 	}
 	// c1 dropped entirely at this budget is also legal (step 4); nothing to assert then.
+}
+
+// jsonToolBody builds an eligible GCF payload: a JSON array of n flat objects.
+func jsonToolBody(n int) string {
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = fmt.Sprintf(`{"path":"internal/pkg/file_%d.go","line":%d,"match":"func Fn%d() error","kind":"function"}`, i, i*13, i)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+// TestCompactGCFRungRunsBeforeSkeleton: with both gentler rungs enabled and a
+// budget the lossless rung alone can satisfy, an older JSON-array tool body
+// must become a GCF block — NOT a skeleton, NOT a marker — and the recent
+// window stays full.
+func TestCompactGCFRungRunsBeforeSkeleton(t *testing.T) {
+	msgs := []Msg{
+		{Role: "system", Content: "SYS"},
+		{Role: "user", Content: "OBJ"},
+		asstCall("c1"),
+		{Role: "tool", ToolCallID: "c1", Content: jsonToolBody(30)},
+		asstCall("c2"),
+		toolResult("c2", 800), // recent — full
+		{Role: "assistant", Content: "thinking"},
+	}
+	budget := estimateTokens(msgs) - 200 // GCF's ~30%+ on the JSON body more than covers this
+	out := compact(msgs, budget, 2, 2, compactOpts{GCF: true, Skeleton: true})
+
+	var c1, c2 Msg
+	for _, m := range out {
+		if m.Role == "tool" && m.ToolCallID == "c1" {
+			c1 = m
+		}
+		if m.Role == "tool" && m.ToolCallID == "c2" {
+			c2 = m
+		}
+	}
+	if !gcf.IsCompacted(c1.Content) {
+		t.Fatalf("older JSON tool body not GCF-compacted: %q", firstLine(c1.Content))
+	}
+	if isSkeletonized(c1.Content) || isElided(c1.Content) {
+		t.Errorf("lossless rung skipped: body went to a lossy rung")
+	}
+	if len(c2.Content) != 800 {
+		t.Errorf("recent tool result must stay full; got len %d", len(c2.Content))
+	}
+	pairing(t, out)
+	if estimateTokens(out) > budget {
+		t.Errorf("still over budget after GCF rung: %d > %d", estimateTokens(out), budget)
+	}
+}
+
+// TestCompactGCFIneligibleFallsToSkeleton: a verbose NON-JSON body cannot use
+// the lossless rung; with both rungs on it must fall through to a skeleton.
+func TestCompactGCFIneligibleFallsToSkeleton(t *testing.T) {
+	msgs := skTranscript()
+	budget := estimateTokens(msgs) - 1200
+	out := compact(msgs, budget, 2, 2, compactOpts{GCF: true, Skeleton: true})
+	for _, m := range out {
+		if m.Role == "tool" && m.ToolCallID == "c1" {
+			if !isSkeletonized(m.Content) {
+				t.Errorf("prose body should have fallen through to the skeleton rung: %q", firstLine(m.Content))
+			}
+			if gcf.IsCompacted(m.Content) {
+				t.Errorf("prose body wrongly GCF-marked")
+			}
+		}
+	}
+	pairing(t, out)
+}
+
+// TestLoopGCFCompactWiring: a loop built WithGCFCompact(true) and a window
+// that forces compaction must produce GCF-compacted older tool results in the
+// final transcript — proving the flag reaches compact() through ladderOpts.
+func TestLoopGCFCompactWiring(t *testing.T) {
+	// Sized so the transcript EXCEEDS the input budget (compaction must fire)
+	// while GCF'd older bodies (~45% smaller on this shape) bring it back
+	// under — a tighter window would fall through to bare markers and hide
+	// the GCF block; a looser one never compacts at all (first version of
+	// this test failed exactly that way).
+	body := jsonToolBody(80)
+	script := []Completion{}
+	for i := 0; i < 5; i++ {
+		script = append(script, Completion{
+			Msg:          Msg{Role: "assistant", ToolCalls: []ToolCall{tc(fmt.Sprintf("g%d", i), "bloat", fmt.Sprintf(`{"i":%d}`, i))}},
+			FinishReason: "tool_calls",
+		})
+	}
+	script = append(script, Completion{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"})
+	client := &fakeClient{script: script}
+	tools := []Tool{{
+		ToolSpec: ToolSpec{Name: "bloat", Description: "bloat", Schema: []byte(`{"type":"object"}`)},
+		Exec:     func(_ context.Context, _ string) (string, error) { return body, nil },
+	}}
+	loop := NewLoop(client, tools, 20).
+		WithContextTokens(8192).
+		WithMaxTokens(256).
+		WithMaxSameTool(0).
+		WithGCFCompact(true)
+	res, err := loop.Run(context.Background(), "objective")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	found := false
+	for _, m := range res.Transcript {
+		if m.Role == "tool" && gcf.IsCompacted(m.Content) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no GCF-compacted tool result in the final transcript — WithGCFCompact not wired into the loop's compact() calls")
+	}
 }
 
 // TestLoopSkeletonPruneWiring: a loop built WithSkeletonPrune(true) and a tiny

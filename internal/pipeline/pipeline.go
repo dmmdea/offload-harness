@@ -272,6 +272,7 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	if contextbudget.IsTrivial(req.Input) {
 		return core.Deferf("input too small to offload", "", meta)
 	}
+	req.Input = compactForBudget(req.Input, p.cfg.MaxInputChars, p.cfg.GCFCompact)
 	req.Input, _ = contextbudget.Trim(req.Input, p.cfg.MaxInputChars)
 	meta.Feat = featurize(req.Task, req.Input) // cheap input features for the router
 

@@ -36,8 +36,12 @@ recoverable failure. **Grounding** — checking that output values actually appe
 
 ## How the system works
 
-A request names a task and carries input. The pipeline builds a Tier chain for that task, then walks
-it:
+A request names a task and carries input. Before the chain runs, oversized input meets the context
+budget: with `gcf_compact` on (default off), JSON arrays of flat objects inside an over-budget input
+are first re-encoded columnar by `internal/gcf` — LOSSLESS, round-trip proven — so content that the
+head/tail trim would have cut can instead fit the local window at full fidelity; whatever still
+overflows is trimmed as before. An in-budget input is never touched. The pipeline then builds a
+Tier chain for that task and walks it:
 
 ```
 chain = [triage_model?] → model → escalation_model
