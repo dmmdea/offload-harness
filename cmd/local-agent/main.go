@@ -97,6 +97,7 @@ func main() {
 	maxTokens := fs.Int("max-tokens", 4096, "planner max tokens per completion — must be large enough for the biggest tool-call argument (e.g. a full file's content) or the model's JSON gets cut off mid-string and the call fails")
 	ctxTokens := fs.Int("ctx-tokens", 16384, "served model context window (tokens) that transcript compaction budgets against — set it to match the tier's --ctx-size (the CUDA tier serves 16384). Default 16384; the derived INPUT budget is ctx-tokens - max-tokens - 512.")
 	skeletonPrune := fs.Bool("skeleton-prune", false, "compaction: before eliding older tool results to bare size markers, first reduce them to signal-preserving skeletons (head/tail + error/failure lines kept, the rest elided with counted markers). Deterministic and local — no model call. Default off until measured.")
+	gcfCompact := fs.Bool("gcf-compact", false, "compaction: LOSSLESS first rung — older tool results that are JSON arrays of flat objects are re-encoded columnar (keys stated once), round-trip proven, before any lossy rung runs. Deterministic and local. Default off until measured.")
 	maxSameTool := fs.Int("max-same-tool", 3, "cap on calls to any one tool name per run — the circuit breaker for a model that loops instead of progressing (e.g. repeated/reworded web_search calls). Negative disables the cap; 0 falls back to the built-in default (3).")
 	timeoutSec := fs.Int("timeout", 180, "per model call timeout (seconds)")
 	asJSON := fs.Bool("json", false, "print the full result JSON (transcript + telemetry)")
@@ -262,6 +263,7 @@ func main() {
 	// effect identically across the one-shot, --serve, and --queue drive modes.
 	loop.WithContextTokens(*ctxTokens)
 	loop.WithSkeletonPrune(*skeletonPrune)
+	loop.WithGCFCompact(*gcfCompact)
 
 	// Per-task tool profile (Task C6): applied AFTER WithWorktree so a
 	// worktree-registered tool (update_plan) is present for the edit/build/github
@@ -415,8 +417,8 @@ func main() {
 		for _, n := range editBuilt.Notes {
 			fmt.Fprintln(os.Stderr, "[local-agent] "+n)
 		}
-		architect := archBuilt.Loop.WithWorktree(archBuilt.Worktree).WithContextTokens(*ctxTokens).WithSkeletonPrune(*skeletonPrune)
-		editor := editBuilt.Loop.WithWorktree(editBuilt.Worktree).WithContextTokens(*ctxTokens).WithSkeletonPrune(*skeletonPrune)
+		architect := archBuilt.Loop.WithWorktree(archBuilt.Worktree).WithContextTokens(*ctxTokens).WithSkeletonPrune(*skeletonPrune).WithGCFCompact(*gcfCompact)
+		editor := editBuilt.Loop.WithWorktree(editBuilt.Worktree).WithContextTokens(*ctxTokens).WithSkeletonPrune(*skeletonPrune).WithGCFCompact(*gcfCompact)
 		fmt.Fprintf(os.Stderr, "[local-agent] two-tier: architect=%s editor=%s (one swap)\n", archModel, edModel)
 
 		res, err := agent.RunTwoTier(ctx, objective, architect, editor)

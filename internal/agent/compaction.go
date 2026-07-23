@@ -1,6 +1,10 @@
 package agent
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/dmmdea/offload-harness/internal/gcf"
+)
 
 // Transcript compaction. The agent loop resends the FULL running transcript on
 // every step, but the local models are served with a small window (the shipped
@@ -51,7 +55,10 @@ func estimateTokens(msgs []Msg) int {
 //     profile exemplars + recall + AGENT.md + objective), so the objective is
 //     never guessed at and never dropped even when exemplars precede it — plus
 //     the most recent keepRecent turns.
-//     2b. (skeleton=true only) SKELETONIZE the bodies of OLDER tool-role messages
+//     2a. (opts.GCF only, LOSSLESS) re-encode OLDER tool bodies that are
+//     eligible JSON arrays into GCF columnar form (internal/gcf) — states the
+//     repeated keys once, loses nothing; always tried before any lossy rung.
+//     2b. (opts.Skeleton only) SKELETONIZE the bodies of OLDER tool-role messages
 //     oldest-first until under budget: head/tail windows + buried signal lines
 //     kept, the rest elided to counted run markers (see skeleton.go). Strictly
 //     less destructive than step 3 — the error a task later needs usually
@@ -77,7 +84,14 @@ func estimateTokens(msgs []Msg) int {
 // and exemplars are a small fixed set); if it ALONE exceeds budget, compaction
 // cannot shrink it — the transcript stays over budget and the run errors honestly
 // on the next Chat rather than silently dropping the objective to fit.
-func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, skeleton bool) []Msg {
+// compactOpts selects the optional gentler rungs of the ladder. Zero value =
+// the original two-rung ladder (markers, drops) — the pinned default path.
+type compactOpts struct {
+	GCF      bool // lossless: re-encode eligible JSON-array tool bodies (internal/gcf)
+	Skeleton bool // lossy-structural: reduce older tool bodies to signal skeletons
+}
+
+func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts compactOpts) []Msg {
 	if estimateTokens(msgs) <= budget {
 		return msgs // happy path: untouched, KV cache preserved.
 	}
@@ -101,10 +115,27 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, skelet
 		recentStart = protectedEnd
 	}
 
+	// Step 2a (flag-gated, LOSSLESS): re-encode older tool bodies that are
+	// eligible JSON arrays into GCF columnar form — zero information loss, so
+	// it always runs before any lossy rung. Deterministic and idempotent
+	// (gcf.IsCompacted stops re-encoding).
+	if opts.GCF {
+		for i := protectedEnd; i < recentStart && estimateTokens(out) > budget; i++ {
+			if out[i].Role == "tool" && !isElided(out[i].Content) && !isSkeletonized(out[i].Content) && !gcf.IsCompacted(out[i].Content) {
+				if c, ok := gcf.Compact(out[i].Content); ok {
+					out[i].Content = c
+				}
+			}
+		}
+		if estimateTokens(out) <= budget {
+			return out
+		}
+	}
+
 	// Step 2b (flag-gated): skeletonize OLDER tool bodies oldest-first — the
 	// least-destructive body edit. Deterministic, so a transcript compacted
 	// twice lands on identical bytes (isSkeletonized stops re-pruning).
-	if skeleton {
+	if opts.Skeleton {
 		for i := protectedEnd; i < recentStart && estimateTokens(out) > budget; i++ {
 			if out[i].Role == "tool" {
 				if sk, ok := skeletonize(out[i].Content); ok {

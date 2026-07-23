@@ -4,6 +4,29 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.18] - 2026-07-23
+
+### Added — GCF lossless columnar compaction (`internal/gcf`) — OmniRoute harvest Phase A
+- New codec: eligible JSON arrays (≥8 flat objects, scalar values only) re-encode columnar —
+  keys stated once in a `[N]{fields}` header, pipe-joined rows, `~`=missing/`-`=null sentinels,
+  ambiguous strings JSON-quoted. **Losslessness is the contract**: the decoder ships as the
+  round-trip ORACLE (production never decodes; the model reads the compact form) and every
+  encoder path must deep-equal back through it in tests and fuzz — three defects were found and
+  fixed BEFORE first ship (fuzz: Sscanf header fragility on field names with spaces; review,
+  reproduced: all-empty-objects arrays decoding a phantom field; by test: trailing-content
+  acceptance that would have eaten text after the array), crashers kept in the fuzz corpus.
+  Anything outside the contract fails closed to the original text: under min rows, non-object
+  elements, nested values, duplicate keys, unsafe field names, or no strict size win.
+  ≥30% savings test-asserted on typical tool-output arrays. Format attribution (gcf-typescript
+  via OmniRoute, both MIT) added to NOTICE; independent reimplementation, no code copied.
+- **Agent ladder**: new LOSSLESS rung 2a via `--gcf-compact` (default off) — over budget, older
+  JSON-array tool bodies re-encode before the skeleton/marker/drop rungs run. `compact()` now
+  takes a `compactOpts` struct; zero value = the original pinned ladder.
+- **Pipeline context assembly**: new `gcf_compact` config field (default off) — an over-budget
+  input's eligible JSON is compacted losslessly BEFORE the head/tail context trim, converting
+  would-be truncations into full-fidelity completions. In-budget inputs are never touched
+  (happy-path bytes stable, pinned by test).
+
 ## [0.22.17] - 2026-07-23
 
 ### Added — skeleton rung in the agent's compaction ladder (`--skeleton-prune`, default off)
