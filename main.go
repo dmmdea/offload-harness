@@ -214,7 +214,7 @@ Usage:
   local-offload doctor                   check endpoint health + config
   local-offload models                   show configured offload model
   local-offload eval [--dir DIR]         code-based quality eval (AURC, deferral-curve AUDC/QNC)
-  local-offload compaction-eval <run|freeze|check|ab> --corpus C   compaction ladder eval: ratio/retention report, tokens ratchet, gated A/B
+  local-offload compaction-eval <harvest|run|freeze|check|ab> --corpus C   compaction ladder eval: trace→corpus harvest (redacting), ratio/retention report, tokens ratchet, gated A/B
   local-offload confhead-eval            out-of-fold adoption gate (AURC/AUGRC + paired-bootstrap CI)
   local-offload confhead-calibrate       per-task conformal p(correct) escalation thresholds (ADOPT tasks)
   local-offload stats                    observational per-task ledger telemetry
