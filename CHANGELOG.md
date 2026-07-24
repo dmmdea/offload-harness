@@ -17,7 +17,8 @@ Versioning: [SemVer](https://semver.org/).
   env overrides the Wan graph's DisTorch2 `compute_device` (kills the hardcoded `cuda:0`);
   `COMFY_EXTRA_ARGS` appends verbatim flags to the managed ComfyUI launch; `TTS_DEVICE` overrides
   the Chatterbox worker's torch device auto-pick (the ft skeleton gains it when its engine lands).
-  Node tests pin all three (env set → applied; unset → byte-identical).
+  Node tests pin the two COMFY seams (env set → applied; unset → byte-identical); TTS_DEVICE
+  rides the worker's plain env read (no torch in the test environment to pin it against).
 
 ## [0.22.21] - 2026-07-24
 
