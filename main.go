@@ -2161,7 +2161,10 @@ func runAgentTrajectoryLabel(args []string) error {
 // bootstrap delta (candidate − incumbent) + verdict (ADOPT-eligible iff ci_lo>0,
 // BLOCK iff ci_hi<0). It ADOPTS NOTHING and is ledger-pristine (recordless
 // pipelines throughout). Effectful trajectories (write/shell/fetch) are excluded —
-// a side-effect-free replay cannot fairly re-run them.
+// a side-effect-free replay cannot fairly re-run them. NOTE: the replay loop
+// deliberately keeps the ladder rungs OFF and a fixed 8192 window (a frozen
+// compaction regime) so candidate-vs-incumbent deltas are never confounded by
+// compaction-default changes like ADR 0015's flip.
 func runAgentTrajectoryGate(args []string) error {
 	fs := flag.NewFlagSet("agent-trajectory-gate", flag.ExitOnError)
 	fs.String("config", "", "config file path")

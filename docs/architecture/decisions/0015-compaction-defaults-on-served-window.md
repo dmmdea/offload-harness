@@ -45,6 +45,9 @@ reactive harder-compaction retry re-sent the same overflow byte-for-byte and the
 - A serving-config change (larger or smaller `-c`) is picked up automatically at run start; the
   16384-assumption class of failure cannot recur where the probe answers.
 - The probe may cold-start the planner model on llama-swap — acceptable, the run is about to use
-  exactly that model.
+  exactly that model. Two-tier mode probes ONCE (the planner/editor-class model) and applies the
+  resolved window to both tiers — a deliberate approximation to preserve its one-swap design; on
+  this fleet the tiers share one serving config, and a differently-served architect is backstopped
+  by the reactive retry.
 - `emergencyShrink` can destroy recent-tool-body detail on the overflow path; the alternative it
   replaces is the run aborting with the same information lost and nothing produced.

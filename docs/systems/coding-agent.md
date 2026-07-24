@@ -95,8 +95,12 @@ rung is model-free on purpose: a cascade call costs seconds on the loop's critic
 see `skeleton.go`), a rules pass costs microseconds and produces identical bytes on every
 re-compaction. When a server overflow rejection survives the harder-compaction retry (the
 oversized body sits inside keep-recent, where the ladder is forbidden), `emergencyShrink` is the
-last resort before the run dies: tool BODIES are skeletonized, then elided, oldest-first — the
-preamble is never touched and no turn is dropped.
+last resort before the run dies: OLDER tool bodies are skeletonized then elided, oldest-first,
+while the NEWEST body — the result the model is about to work on — is spared until last and then
+trimmed head/tail to the remaining room (a bare marker only if even the trim cannot fit). The
+preamble is never touched and no turn is dropped. The retry's shrink target is relative to the
+just-rejected transcript's own estimate, not only the budget, so a dense-content estimate error
+can never make the retry re-send the bytes the server just refused.
 
 **Compaction eval harness (`compaction-eval`, `internal/compeval`).** Default flips for the ladder
 rungs are gated by MEASUREMENT, never estimates: the verb replays a pinned corpus (JSONL of
