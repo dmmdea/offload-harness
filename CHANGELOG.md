@@ -4,6 +4,31 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.23] - 2026-07-24
+
+### Added — OmniRoute harvest Phase B: the compaction eval harness + ratchet (`internal/compeval`)
+- **`compaction-eval` verb** (run | freeze | check | ab) over a pinned transcript corpus: JSONL of
+  transcript slices, sha256 corpus hash stamped into every artifact, deterministic PII vetting
+  that REFUSES a corpus (never scrubs in place — scrubbing would change the pinned bytes).
+- **Replays the PRODUCTION ladder** — a new exported seam (`agent.CompactReplay` /
+  `agent.EstimateTokens`) means measured numbers are the shipping behavior, never a
+  reimplementation. Per content kind (tool-json/tool-text/logs/code/prose/mixed): compression
+  ratio, budget-fit share, and **entity retention with explicit lost-entity lists** (numbers,
+  paths, URLs, key=value, UPPER_SNAKE, hex — the FORCE_PRESERVE classes). Test-pinned property:
+  on a logs corpus the skeleton rung retains the buried error entities the marker-only ladder
+  destroys.
+- **Tokens ratchet**: `freeze` pins per-entry compacted tokens; `check` fails loudly beyond ±2%
+  and REFUSES cross-corpus/cross-ladder/missing-entry comparisons (a ratchet against a different
+  artifact is not a ratchet). Verified live: freeze → hold → ladder-mismatch refusal (exit 1).
+- **Gated task-outcome A/B**: full-vs-compacted scored through the live pipeline
+  (accept/ground outcome signal), behind the **control-pair self-test gate** — the scorer must
+  rank a known-good/known-degraded pair first or the A/B ABORTS (no confident numbers from a
+  blind judge); paired bootstrap delta via the existing eval machinery; partial runs abort.
+- Committed deterministic mini-corpus at `testdata/compeval/` (6 kinds); real replay corpora are
+  machine-local. Trajectory-trace harvesting into corpus entries is a recorded follow-up.
+  This harness is what decides the pending default flips (`--skeleton-prune`, `gcf_compact`) —
+  savings claims exist only as measured mean ratios stamped with the corpus hash.
+
 ## [0.22.22] - 2026-07-24
 
 ### Added — J4: 8GB-tier first-class sub-item + per-box device seams (Juan-tier Q0, phase 4 of 5)
