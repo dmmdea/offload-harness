@@ -32,7 +32,7 @@ import (
 
 func runCompactionEval(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: local-offload compaction-eval <run|freeze|check|ab> --corpus <corpus.jsonl> [flags]")
+		return fmt.Errorf("usage: local-offload compaction-eval <harvest|run|freeze|check|ab> [--corpus <corpus.jsonl>] [flags] (harvest takes --traces/--out instead of --corpus)")
 	}
 	mode := args[0]
 	fs := flag.NewFlagSet("compaction-eval "+mode, flag.ExitOnError)
@@ -44,7 +44,7 @@ func runCompactionEval(args []string) error {
 	outPath := fs.String("out", "", "freeze/harvest: where to write the output file")
 	tolerance := fs.Float64("tolerance", compeval.DefaultTolerance, "check: allowed per-entry token drift (fraction)")
 	tracesDir := fs.String("traces", "", "harvest: directory of standalone agent trace files (*.json)")
-	minTurns := fs.Int("min-turns", 3, "harvest: skip traces with fewer transcript turns")
+	minTurns := fs.Int("min-turns", 3, "harvest: skip traces with fewer transcript turns (<=0 also means the default, 3)")
 	maxEntries := fs.Int("max-entries", 0, "harvest: cap harvested entries (0 = all)")
 	_ = fs.Parse(args[1:])
 	if mode == "harvest" {
@@ -158,7 +158,7 @@ func runCompactionEval(args []string) error {
 		}
 		return emitJSON(rep)
 	default:
-		return fmt.Errorf("compaction-eval: unknown mode %q (run|freeze|check|ab)", mode)
+		return fmt.Errorf("compaction-eval: unknown mode %q (harvest|run|freeze|check|ab)", mode)
 	}
 }
 
