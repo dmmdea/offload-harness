@@ -89,6 +89,30 @@ function Get-CudaFromSmiHeader {
   return $null
 }
 
+# J1: classify an AMD Adrenalin (Radeon Software) version string against the known
+# deep-context Vulkan crash class (llama.cpp #17432 - present in 25.11.1 and older).
+# Returns a warning string for affected/unreadable versions, $null when the driver is
+# newer than the known-bad class. Pure function - self-tested. The caller reads the
+# actual version from the registry (Get-AdrenalinVersion below).
+function Get-AdrenalinWarning {
+  param([string]$Version)
+  $knownBad = [version]'25.11.1'
+  if ([string]::IsNullOrWhiteSpace($Version)) {
+    return "Adrenalin version UNREADABLE - keep the AMD driver CURRENT: 25.11.1 and older have a known deep-context Vulkan crash (llama.cpp #17432); selftest.ps1 includes a canary for it."
+  }
+  $v = $null
+  # Adrenalin versions are 'YY.M.P' (e.g. 25.11.1, 26.3.2). Take the leading dotted-number run.
+  $m = [regex]::Match($Version.Trim(), '^(\d+(?:\.\d+){1,3})')
+  if ($m.Success) { try { $v = [version]$m.Groups[1].Value } catch { $v = $null } }
+  if ($null -eq $v) {
+    return "Adrenalin version '$Version' did not parse - keep the AMD driver CURRENT: 25.11.1 and older have a known deep-context Vulkan crash (llama.cpp #17432)."
+  }
+  if ($v -le $knownBad) {
+    return "Adrenalin $Version has the KNOWN deep-context Vulkan crash class (llama.cpp #17432, affects <= 25.11.1) - STOP and ask the human to update the driver before relying on this box. Never update a GPU driver yourself."
+  }
+  return $null
+}
+
 # Map RAM size to a tier. >=120 high (128GB config), >=56 mid (64GB configs
 # unlock 26B via --cpu-moe), >=28 low (32GB), else min (<32GB warns already).
 function Get-RamTier {
@@ -145,7 +169,14 @@ function Get-Profile {
   }
 
   if ($Vendor -eq 'amd') {
-    if ($Arch -eq 'rdna3') { return @{ profile = 'amd-rdna3'; big_ram = $false } }
+    if ($Arch -eq 'rdna3') {
+      # J1 AMD VRAM banding: an iGPU (780M-class) reports a SMALL dedicated carve-out
+      # (typically 0.5-4GB - real capacity is UMA/GTT shared memory), while a discrete
+      # RDNA3 card (RX 7900-class) reports its real >=12GB dedicated VRAM. Before this
+      # band a 24GB RX 7900 XTX silently got the iGPU floor profile (audit finding).
+      if ($VramGb -ge 12) { return @{ profile = 'amd-rdna3-dgpu'; big_ram = $false } }
+      return @{ profile = 'amd-rdna3'; big_ram = $false }
+    }
     return @{ profile = 'amd-gcn'; big_ram = $false }   # gcn / vega / other AMD -> weakest Vulkan path
   }
 
@@ -226,6 +257,11 @@ if ($SelfTest) {
   Assert-Profile '3070 8GB (cfg5)'      'nvidia' 'ampere'    8  1 16  'ampere-8'
   Assert-Profile '3070+64GB (cfg6)'     'nvidia' 'ampere'    8  1 64  'ampere-8'
   Assert-Profile '780M+64GB (cfg7)'     'amd'    'rdna3'     0.5 1 64 'amd-rdna3'
+  # J1 AMD VRAM banding: iGPU carve-out (small dedicated) stays on the UMA floor;
+  # a discrete RDNA3 card (>=12GB dedicated) gets the dgpu band, not the iGPU floor.
+  Assert-Profile '780M 4GB carve-out'   'amd'    'rdna3'     4   1 64 'amd-rdna3'
+  Assert-Profile 'RX 7900 XTX 24GB'     'amd'    'rdna3'     24  1 64 'amd-rdna3-dgpu'
+  Assert-Profile 'RX 7700 XT 12GB'      'amd'    'rdna3'     12  1 32 'amd-rdna3-dgpu'
   Assert-Profile '5060 8GB (cfg8)'      'nvidia' 'blackwell' 8  1 32  'blackwell-8'
   Assert-Profile '3050 6GB (cfg10)'     'nvidia' 'ampere'    6  1 16  'ampere-6'
   Assert-Profile '3090 24GB (defensive)' 'nvidia' 'ampere'   24 1 64  'ampere-16'
@@ -244,6 +280,21 @@ if ($SelfTest) {
   Assert-RamTier 56  'mid'
   Assert-RamTier 32  'low'
   Assert-RamTier 16  'min'
+
+  Write-Host '== Adrenalin version classification (J1) =='
+  function Assert-Adrenalin {
+    param([string]$Label, [string]$Version, [bool]$ExpectWarn)
+    $w = Get-AdrenalinWarning -Version $Version
+    $got = [bool]$w
+    if ($got -eq $ExpectWarn) { Write-Host "PASS adren $Label -> warn=$got" }
+    else { Write-Host "FAIL adren $Label -> warn=$got (expected warn=$ExpectWarn)"; $script:fail++ }
+  }
+  Assert-Adrenalin 'known-bad 25.11.1 warns'   '25.11.1' $true
+  Assert-Adrenalin 'older 25.5.1 warns'        '25.5.1'  $true
+  Assert-Adrenalin 'newer 26.3.2 clean'        '26.3.2'  $false
+  Assert-Adrenalin 'newer 25.12.1 clean'       '25.12.1' $false
+  Assert-Adrenalin 'unreadable (empty) warns'  ''        $true
+  Assert-Adrenalin 'garbage string warns'      'WHQL'    $true
 
   Write-Host '== unrecognized-NVIDIA fallback warning =='
   # A GPU that CIM reports as NVIDIA but whose name matches no arch regex ->
@@ -295,6 +346,23 @@ function Get-CudaInfo {
     }
   } catch { }
   return $info
+}
+
+# J1: read the AMD Adrenalin (Radeon Software) marketing version from the display-class
+# registry key matching the GPU (the same key family the VRAM read below uses). WMI's
+# DriverVersion is the internal build (e.g. 32.0.13031.x), NOT the Adrenalin version the
+# crash-class advisories are keyed on - AMD writes that as RadeonSoftwareVersion. Returns
+# the version string or $null (unreadable is a valid, honest state the classifier handles).
+function Get-AdrenalinVersion {
+  param([string]$GpuName)
+  try {
+    $keys = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0*' -ErrorAction SilentlyContinue |
+      Where-Object { $_.PSObject.Properties['RadeonSoftwareVersion'] -and $_.RadeonSoftwareVersion }
+    if (-not $keys) { return $null }
+    $match = $keys | Where-Object { $GpuName -and $_.DriverDesc -eq $GpuName } | Select-Object -First 1
+    if (-not $match) { $match = $keys | Select-Object -First 1 }
+    return [string]$match.RadeonSoftwareVersion
+  } catch { return $null }
 }
 
 $gpus = Get-CimInstance Win32_VideoController | Where-Object { $_.Name }
@@ -379,9 +447,15 @@ if ($unrecognizedNvidiaWarning) { $warnings += $unrecognizedNvidiaWarning }
 
 if ($ramGB -lt 32) { $warnings += "RAM ${ramGB}GB < 32GB: install only the E4B workhorse tier (set OFFLOAD_WITH_FAMILY=0)" }
 if ($diskGB -lt 25) { Write-Error "Only ${diskGB}GB free on ${targetDrive}: (install target drive); need >=25GB for models + binaries."; exit 1 }
+$amdAdrenalin = $null
 if ($vendor -eq 'amd') {
   $warnings += 'AMD path uses the llama.cpp VULKAN backend (native Windows). ROCm/HIP is NOT supported on RDNA3 iGPUs (gfx1103) and WSL2 cannot accelerate AMD iGPUs - do not attempt either.'
-  $warnings += 'Keep the AMD Adrenalin driver CURRENT: an older driver (25.11.1) has a known deep-context Vulkan crash (llama.cpp #17432). selftest.ps1 includes a canary for it.'
+  # J1: the driver-age warning is now CHECKED, not generic - read the Adrenalin version
+  # and classify it against the known deep-context Vulkan crash class (<= 25.11.1).
+  $amdAdrenalin = Get-AdrenalinVersion -GpuName $gpuName
+  $adrenWarn = Get-AdrenalinWarning -Version $amdAdrenalin
+  if ($adrenWarn) { $warnings += $adrenWarn }
+  else { Write-Host "Adrenalin: $amdAdrenalin (newer than the known crash class <= 25.11.1 - OK; selftest's deep-context canary still runs)" }
 }
 
 Write-Host "OS: windows | GPUs: $gpuNames"
@@ -392,4 +466,5 @@ $warnings | ForEach-Object { Write-Host "WARN: $_" }
 @{ os=$os; gpu_vendor=$vendor; gpu_name=$gpuName; gpu_arch=$gpuArch; gpu_count=$gpuCount;
    vram_dedicated_gb=$vramGB; ram_gb=$ramGB; ram_tier=$ramTier; profile=$profileId; big_ram=$bigRam;
    cuda_driver=$cuda.driver_cuda; cuda_driver_version=$cuda.driver_version; cuda_toolkit=$cuda.toolkit_cuda;
+   amd_adrenalin=$amdAdrenalin;
    disk_free_gb=$diskGB; backend=$backend; warnings=$warnings } | ConvertTo-Json -Compress
