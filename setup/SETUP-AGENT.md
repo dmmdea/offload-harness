@@ -64,7 +64,8 @@ pwsh -NoProfile -File setup\detect.ps1     # or: powershell.exe -NoProfile -File
 The last stdout line is JSON. Fields: `os`, `gpu_vendor` (`amd|nvidia|none`), `gpu_name`,
 `gpu_arch` (`blackwell|ampere|ada|volta|rdna3|gcn|other|none`), `gpu_count`, `vram_dedicated_gb`,
 `ram_gb`, `ram_tier` (`high|mid|low|min`), `disk_free_gb`, `backend` (`vulkan|cuda|cpu`),
-**`profile`** (one of the arch-class ids in the matrix below), `big_ram`, `warnings[]`.
+**`profile`** (one of the arch-class ids in the matrix below), `big_ram`, `amd_adrenalin` (the
+Radeon Software version read from the registry; `null` off-AMD or unreadable), `warnings[]`.
 
 The **`profile`** is the load-bearing new field: `install.ps1` keys the serving template + params
 (context, KV type, 26B placement) off it, and `selftest.ps1` measures against it. It is chosen from
@@ -79,8 +80,10 @@ Expected shapes:
 {"os":"windows","gpu_vendor":"nvidia","gpu_name":"NVIDIA GeForce RTX 3070 ...","gpu_arch":"ampere","backend":"cuda","profile":"ampere-8","ram_tier":"low", ...}
 // Blackwell box (5060 Ti → profile blackwell-16 — see the Blackwell note below)
 {"os":"windows","gpu_vendor":"nvidia","gpu_name":"NVIDIA GeForce RTX 5060 Ti","gpu_arch":"blackwell","backend":"cuda","profile":"blackwell-16", ...}
-// AMD box (RDNA3 iGPU — this is the intended AMD path)
-{"os":"windows","gpu_vendor":"amd","gpu_name":"AMD Radeon(TM) 780M Graphics","gpu_arch":"rdna3","backend":"vulkan","profile":"amd-rdna3","warnings":["AMD path uses the llama.cpp VULKAN backend ...","Keep the AMD Adrenalin driver CURRENT ..."]}
+// AMD box (RDNA3 iGPU — this is the intended AMD path; amd_adrenalin is READ and classified:
+// a warning appears only for the known crash class <= 25.11.1 or an unreadable version.
+// A discrete RDNA3 card with >=12GB dedicated VRAM bands to profile amd-rdna3-dgpu instead.)
+{"os":"windows","gpu_vendor":"amd","gpu_name":"AMD Radeon(TM) 780M Graphics","gpu_arch":"rdna3","backend":"vulkan","profile":"amd-rdna3","amd_adrenalin":"26.3.2","warnings":["AMD path uses the llama.cpp VULKAN backend ..."]}
 // No GPU
 {"os":"windows","gpu_vendor":"none","backend":"cpu","profile":"cpu", ...}
 ```
@@ -119,7 +122,8 @@ projected per-profile serving choices — `selftest.ps1` measures and refines th
 | `dual-gpu` | #3/#4 (5060 Ti + V100 32 GB) | 26B architect + E4B editor, both resident | 32K | q8_0 | resident, **zero-swap** two-tier |
 | `ampere-8` | #5/#6 (3070 8 GB; +64 GB) | `offload-e4b` | 16K | q8_0 | `--cpu-moe` if RAM ≥ ~56 GB, else dropped |
 | `blackwell-8` | #8/#9 (5060 8 GB; +64 GB) | `offload-e4b` | 16K | q8_0 | `--cpu-moe` if RAM ≥ ~56 GB; CUDA-13 serves, 12.8 peak |
-| `amd-rdna3` | #7 (780M + 64 GB, Vulkan) | `offload-e4b` | 16K | f16 (safe) | `--cpu-moe` very slow, else dropped |
+| `amd-rdna3` | #7 (780M + 64 GB, Vulkan) | `offload-e4b` | 16K (floor; canary → 32K) | f16 (floor; canary → q8_0) | `--cpu-moe` floor; canary → full-offload `-ngl 99` (~20–25 t/s measured elsewhere) — see the [AMD RDNA3 chapter](#amd-rdna3--the-780m-class-runbook-for-the-installing-agent) |
+| `amd-rdna3-dgpu` | discrete RDNA3 ≥12 GB (RX 7900-class, Vulkan) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU `-ngl 99` (on 12 GB the OOM remediation flips it to `--cpu-moe`) |
 | `ampere-6` | #10/#11 (3050 6 GB) | `gemma4-e2b` | 16K | q8_0 (**mandatory**) | dropped |
 | `amd-gcn` | #12 (Vega 7 + 32 GB, Vulkan) | `gemma4-e2b` | 8K | f16, FA off | dropped |
 | `cpu` | no GPU | `offload-e4b` (CPU) | 8K | f16, FA off | `--cpu-moe` if RAM ≥ ~56 GB, else dropped |
@@ -248,6 +252,126 @@ pins devices per group). Standard Q4_K GGUFs get **no** FP4 tensor-core speedup
 (NVFP4 MMQ only helps NVFP4-format models) — do not expect an FP4 win. **Report the detected CUDA
 version + which build you selected + the expected perf tier to the human; get consent before
 installing a new CUDA toolkit or a driver (Hard rule 3).**
+
+---
+
+## AMD RDNA3 — the 780M-class runbook (for the installing agent)
+
+**You are probably Claude running on the owner's machine.** This chapter is the complete
+install → test → validate → report sequence for the `amd-rdna3` profile (Radeon 780M-class iGPU +
+big dual-channel DDR5; `amd-rdna3-dgpu` for discrete cards differs only where noted). This tier is
+**PROJECTED, not yet validated on real hardware** — your job is to run the sequence, apply ONLY the
+canary-gated promotions below, and send back the receipt that turns every PROJECTED number into
+MEASURED. The profile's serving floor is deliberately conservative; the canaries are how it earns
+its real performance.
+
+**Why this tier is frontier-pinned:** the AMD Vulkan flash-attention tuning that makes a 780M
+competitive landed **Feb–Mar 2026** (scalar-FA Wave32 + AMD graphics-queue work ≈ +56% on AMD
+iGPUs), and FA + q8_0-KV on Vulkan dates from the same window. The pinned llama.cpp build satisfies
+this **≥ Mar-2026 floor**; `install.ps1` prints a NOTE when upstream is ahead of the pin
+(`Show-FrontierNote`). **Never install a build older than the floor, and never substitute a newer
+one mid-install** (Hard rule 2 — pins change by a human bumping them, then re-running this
+chapter's canaries).
+
+### What to expect (so you don't misread normal as broken)
+
+- **Token generation is memory-bandwidth-bound.** DDR5-5600 dual-channel envelope: E2B/3–4B-class
+  ≈ 30–45 t/s · E4B/7–9B-class Q4 ≈ 15–20 t/s · 26B-A4B full-offload ≈ 20–25 t/s (yes, the MoE is
+  FASTER than dense 7B — active params are what count). ~20 t/s is **normal and correct**, not a
+  defect, and ROCm would not improve it (Forbidden detours, Hard rules).
+- **Prompt processing is the UX pain:** pp ≈ 150–260 t/s, so a 4K prompt costs 20–30 s. llama-swap
+  KV reuse and the harness's compaction rungs are the mitigations — do not chase pp with driver
+  or backend experiments.
+- **A small `vram_dedicated_gb` is expected** (BIOS carve-out). Real capacity is UMA/GTT shared
+  memory — the iGPU can address ~half of system RAM. Capacity is a non-issue on a 64 GB box;
+  `-ngl 99` full offload of the 14.2 GB 26B through GTT is the design, not an accident.
+- **Single-channel RAM is a clean ~2× loss** on every tg number above. Confirm dual-channel
+  (hardware question 1) before judging any measurement.
+
+### Sequence
+
+1. `detect.ps1` — expect `profile:"amd-rdna3"`, `backend:"vulkan"`, and the new `amd_adrenalin`
+   field. If the Adrenalin warning fires (driver ≤ 25.11.1 = the deep-context Vulkan crash class,
+   llama.cpp #17432): **STOP and ask the human to update the driver. Never update it yourself.**
+2. `install.ps1` — renders the Vulkan template: 16K ctx / f16 KV / FA explicitly `on` / 26B
+   `--cpu-moe` / `GGML_VK_VISIBLE_DEVICES=0` on every model. If `llama-server --list-devices`
+   shows the wrong adapter as device 0 (multi-ICD boxes can enumerate a second GPU or a software
+   rasterizer first), fix the index in the rendered `llama-swap.yaml` — that edit is yours to make.
+3. `selftest.ps1` — on a Vulkan backend the **H3 canary suite runs by default** (budget 15–30 min;
+   the 26B GTT load alone can take minutes — that is a load, not a hang). Read
+   `receipt.canaries.*` against the table below.
+4. Apply the **authorized promotions** (next section) to the rendered `llama-swap.yaml` +
+   `installed.json`'s `agent_ctx_tokens`, restart llama-swap, re-run `selftest.ps1` once to
+   confirm the promoted config still passes.
+5. **Send the receipt back** (last section). Until the receipts land upstream, every number in
+   this tier stays PROJECTED.
+
+### The canaries — what each PASS proves, and does not prove
+
+| Canary | Proves | Does NOT prove | On fail |
+|---|---|---|---|
+| `fa_q8kv` | FA is genuinely ON (server log at `-lv 10`) and q8_0-KV text matches f16 at temp 0 (word overlap ≥ 0.80) on THIS gpu+driver | long-session stability at depth; other models | Stay on f16. `fa_confirmed:"off"` despite `-fa on` = the silent-disable mode — report it, do not force q8. |
+| `moe_full_offload` | the 26B loads at `-ngl 99` through GTT and its decode t/s beats the measured `--cpu-moe` number | that 32K ctx also fits alongside; thermals under sustained load | Keep the `--cpu-moe` floor. The manual middle path is `--n-cpu-moe N` (a few expert layers in RAM — preferred over `-ot` regex; try N≈4–8). |
+| `ctx_sweep` | the resident tier loads AND generates at 8/16/32K with the canary-chosen KV | quality at depth (SWA-1024 keeps KV modest; depth-quality is the model's own behavior) | The standing ctx probe/downshift result governs; serve the largest PASSING size. |
+| `bench` | pp512/tg128 on this exact build+driver (your regression baseline) | anything cross-machine | `tg < 8` = CPU-class → offload is broken; check FA state, device pin, and the Adrenalin warning before anything else. |
+| `swap_leak` | llama-swap evicts cleanly across a tier cycle (≤1 llama-server process after) | multi-hour TTL behavior on :11436 | Report; do not ship a leaking stack. |
+| `embedder` | embeddinggemma orders related > unrelated by cosine through the real endpoint | retrieval quality | Report; the memory-stack seat depends on it. |
+| `whisper` | (always skipped — no seat installed) | — | When the human later wants STT here: **whisper.cpp ≥ 1.8.3 is the floor** on AMD iGPUs (~3–4× realtime); earlier builds are not viable. |
+
+**Vision seat warning:** Gemma-Vulkan's open bugs cluster on the VISION path (garbled/frozen image
+processing on APUs). The text tier is unaffected. **Do not bind a vision model on this box** until
+a dedicated vision canary exists and passes — this is a named non-binding, like `gpt-oss-20b`.
+
+### Decisions you MAY take autonomously (each gated on its canary, nothing else)
+
+| Decision | Gate | Action |
+|---|---|---|
+| KV `f16 → q8_0` | `fa_q8kv.status:"pass"` (which requires `fa_confirmed:"on"`) | Set `--cache-type-k/v q8_0` in the rendered yaml (K and V stay symmetric). |
+| ctx `16384 → 32768` | `ctx_sweep.max_ok_ctx ≥ 32768` | Raise `--ctx-size` and `installed.json`→`agent_ctx_tokens` to 32768 together. |
+| 26B `--cpu-moe → -ngl 99` | `moe_full_offload.promote:true` | Replace `--cpu-moe -ngl 999` with `-ngl 99` on the 26B cmd. If a later request OOMs, the standing remediation returns it to `--cpu-moe` — that rollback is also yours to keep. |
+| Vulkan device index | `--list-devices` shows the wrong device 0 | Edit `GGML_VK_VISIBLE_DEVICES` to the correct index. |
+
+Apply promotions ONE at a time, re-running selftest after the set — a combined failure you cannot
+attribute is worse than a slower verified config.
+
+**HARD FORBIDDEN (no canary overrides these):** updating/downgrading the GPU driver or Adrenalin
+(**always** STOP-and-ask); ROCm/HIP or WSL2 for inference (dead ends — Hard rules); substituting
+any pinned asset; binding a vision model (above); exposing any server beyond loopback.
+
+### The 5 hardware questions (ask the human once; answers pin the perf envelope)
+
+1. Exact DDR5 speed (MT/s) and **stick count/channel config** — dual-channel confirm; single is a ~2× tg loss.
+2. BIOS UMA/carve-out setting (Auto / 4 GB / 16 GB …).
+3. Chassis/SKU (mini-PC vs laptop — TDP; an 8700G clocks ~15% higher than a 780M laptop).
+4. Task Manager → GPU: the **dedicated vs shared** memory totals it shows.
+5. Installed AMD Adrenalin version (cross-check against detect's `amd_adrenalin`).
+
+Put the answers in the receipt notes.
+
+### The receipt to send back (PROJECTED → MEASURED promotion)
+
+Send BOTH files, plus the answers above, back to the harness maintainer (agent-talk if wired,
+else any file drop the human prefers):
+
+```json
+// 1. $OFFLOAD_HOME\installed.json  (versions actually installed)
+// 2. selftest receipt — the LAST stdout line of the FINAL selftest run (post-promotions),
+//    which carries: tiers[] (per-tier cold_load_s/tok_s), canaries.fa_q8kv{overlap,fa_confirmed},
+//    canaries.moe_full_offload{full_tps,cpu_moe_tps,promote}, canaries.ctx_sweep{results,max_ok_ctx},
+//    canaries.bench{pp512_tps,tg128_tps}, canaries.swap_leak, canaries.embedder,
+//    profile_measure.tuned{...}, verdict, and the honest does_not_prove[] list.
+```
+
+Maintainer side: those numbers replace this chapter's "expect" ranges and `profiles.json`'s
+PROJECTED notes with MEASURED values (same-PR docs), and this box becomes the harness's third
+real-hardware validation profile after `ampere-8` and `blackwell-16`.
+
+### `amd-rdna3-dgpu` deltas (discrete RX 7900-class)
+
+Renders 32K / q8_0 / 26B `-ngl 99` resident directly (dedicated VRAM, no GTT dependency). The same
+canaries run; `moe_full_offload` self-skips (`profile already projects full-offload`). On a 12 GB
+card the 26B OOMs and the standing remediation flips it to `--cpu-moe` — expected, keep it. All
+other rules of this chapter apply unchanged.
 
 ---
 
@@ -394,6 +518,12 @@ cold-swap latency (`cold_swap[]`); and whether q8_0 KV held. The **`tuned`** blo
 projected profile; `source:"projected"` means nothing on this host could measure it (recorded
 honestly, never faked). Dual-GPU / Optane checks are marked `not-applicable-on-this-host` /
 `measure-on-target` on a single-GPU box.
+
+**`canaries` (J1 — promotion gates).** On a **Vulkan** backend the receipt also carries a
+`canaries` block (`fa_q8kv` / `moe_full_offload` / `ctx_sweep` / `bench` / `swap_leak` /
+`embedder` / `whisper`), run by default (force on any box with `OFFLOAD_SELFTEST_CANARIES=1`,
+off with `=0`). These never change the verdict — they authorize specific config promotions.
+Read them against the tables in the [AMD RDNA3 chapter](#amd-rdna3--the-780m-class-runbook-for-the-installing-agent).
 
 **Verdict decision table:**
 
