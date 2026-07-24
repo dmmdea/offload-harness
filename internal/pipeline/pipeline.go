@@ -876,6 +876,14 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 		}
 		req.Params["seed"] = seed
 	}
+	// Default the size EXPLICITLY (review finding): sd.cpp's own default is 512x512,
+	// so without this the result metadata would claim 1024 while the file was 512 -
+	// and 1024 is Z-Image's native resolution (quality-first default).
+	for _, k := range []string{"width", "height"} {
+		if paramIntOr(req.Params, k, 0) <= 0 {
+			req.Params[k] = 1024
+		}
+	}
 	out := paramStr(req.Params, "out")
 	if out == "" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
@@ -1671,8 +1679,10 @@ func imageFootprintKey(cfg config.Config) (family, quant string) {
 		if family == "" {
 			family = "sdcpp"
 		}
-		up := strings.ToUpper(cfg.SdcppModel)
-		for _, q := range []string{"Q8_0", "Q6_K", "Q5_K", "Q5_1", "Q4_K", "Q4_1", "Q4_0", "Q3_K", "Q2_K", "F16", "BF16"} {
+		// Basename only (a "models-bf16" DIR must not hit) and longest-token-first
+		// (BF16 before F16, Q4_K_M before Q4_K) so subsets never shadow supersets.
+		up := strings.ToUpper(filepath.Base(cfg.SdcppModel))
+		for _, q := range []string{"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_K", "Q5_1", "Q4_K_M", "Q4_K_S", "Q4_K", "Q4_1", "Q4_0", "Q3_K", "Q2_K", "BF16", "F16"} {
 			if strings.Contains(up, q) {
 				quant = strings.ToLower(q)
 				break

@@ -141,7 +141,7 @@ type Config struct {
 	// path the runner env carries NO COMFY_DIR and gpugen skips the post-run ComfyUI
 	// /free (there is nothing to free) — same shape the TTS path proved.
 	ImageGenEngine string `json:"imagegen_engine,omitempty"`
-	// SdcppBin is the absolute path to the sd.cpp CLI (sd.exe from the pinned
+	// SdcppBin is the absolute path to the sd.cpp CLI (sd-cli.exe from the pinned
 	// win-vulkan release). Required when ImageGenEngine is "sdcpp"; empty = defer.
 	SdcppBin string `json:"sdcpp_bin,omitempty"`
 	// SdcppScript is the Node runner (default "render/sdcpp-generate.mjs", resolved
@@ -597,6 +597,17 @@ func ExpandTilde(p, home string) string {
 		return filepath.Join(home, p[2:])
 	}
 	return p
+}
+
+// ImageRouteConfigured reports whether THIS box serves generate_image at all —
+// the ComfyUI path (imagegen_script) OR the sdcpp engine (J2: sdcpp_bin + model;
+// imagegen_script stays empty there). The fleet capability gate and fleet-measure
+// key on this, matching the pipeline's engine-first routing.
+func (c Config) ImageRouteConfigured() bool {
+	if c.ImageGenEngine == "sdcpp" {
+		return c.SdcppBin != "" && c.SdcppModel != ""
+	}
+	return c.ImageGenScript != ""
 }
 
 // warnUnknownKeys prints a stderr warning for any JSON key that doesn't map to a
