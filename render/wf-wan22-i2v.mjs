@@ -54,9 +54,13 @@ export function buildWan22I2V({
   // load through the GGUF DisTorch2 node; full/fp8 .safetensors weights through the native
   // UNETLoader DisTorch2 variant — SAME RAM-offload params, weight_dtype "default" (never
   // down-cast: the file's own precision is the point of binding it).
+  // J4 seam: the compute device is env-overridable (COMFY_COMPUTE_DEVICE) — the
+  // hardcoded cuda:0 assumed an NVIDIA box; non-CUDA ComfyUI backends name their
+  // devices differently. Default unchanged.
+  const computeDevice = process.env.COMFY_COMPUTE_DEVICE || "cuda:0";
   const distorch = (unet) => /\.gguf$/i.test(unet)
-    ? { class_type: "UnetLoaderGGUFDisTorch2MultiGPU", inputs: { unet_name: unet, compute_device: "cuda:0", virtual_vram_gb: virtualVramGb, donor_device: "cpu", eject_models: true } }
-    : { class_type: "UNETLoaderDisTorch2MultiGPU", inputs: { unet_name: unet, weight_dtype: "default", compute_device: "cuda:0", virtual_vram_gb: virtualVramGb, donor_device: "cpu", eject_models: true } };
+    ? { class_type: "UnetLoaderGGUFDisTorch2MultiGPU", inputs: { unet_name: unet, compute_device: computeDevice, virtual_vram_gb: virtualVramGb, donor_device: "cpu", eject_models: true } }
+    : { class_type: "UNETLoaderDisTorch2MultiGPU", inputs: { unet_name: unet, weight_dtype: "default", compute_device: computeDevice, virtual_vram_gb: virtualVramGb, donor_device: "cpu", eject_models: true } };
 
   const g = {
     "1": { class_type: "LoadImage", inputs: { image: imagePath } },
