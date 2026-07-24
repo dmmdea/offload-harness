@@ -79,13 +79,18 @@ listener, so pollers can still read final state.
 This is the single most misread part of the system. There are two different questions, with two
 different answers:
 
-**Live node capacity** (`vram_total_gb`, `vram_free_gb` in health) comes from **`nvidia-smi` only** —
-a global sampler polling every two seconds. There is no per-process path here. A sampling failure
-keeps the last good snapshot rather than publishing zeros, bounded by the 30-second staleness gate.
+**Live node capacity** (`vram_total_gb`, `vram_free_gb` in health) comes from a **resolved memory
+provider** ([ADR 0014](../architecture/decisions/0014-gpu-memory-provider-and-uma-sampling.md)):
+`nvidia-smi` where it works, else the windows-generic WDDM source (registry `qwMemorySize` capacity
++ `\GPU Adapter Memory` PDH usage; UMA iGPUs advertise carve-out + the ~RAM/2 shared budget and
+Dedicated+Shared usage) — a global sampler polling every two seconds either way. There is no
+per-process path here. A sampling failure keeps the last good snapshot rather than publishing
+zeros, bounded by the 30-second staleness gate.
 
 **Per-render footprints** use **per-process PDH counters as primary**, with a global-delta sampler as
 fallback. On Windows the sampler reads `\GPU Process Memory(*)\Dedicated Usage`, enumerates
-instances, and sums only the render's own process tree. This is the only per-process option available:
+instances, and sums only the render's own process tree — or Dedicated **plus Shared** in the
+`pdh-shared` mode the UMA tier seeds (on an iGPU allocations land in Shared and Dedicated reads ~0). This is the only per-process option available:
 consumer cards with a display attached run under WDDM, where NVML per-process accounting returns N/A
 and `nvidia-smi` can therefore only see global memory.
 
@@ -114,7 +119,7 @@ treated as non-loopback and refused — see
 
 ## Dependencies
 
-`nvidia-smi` for capacity, Windows PDH for per-process footprints, the media generation stack for
+A resolved GPU memory provider for capacity (`nvidia-smi`, else WDDM registry+PDH), Windows PDH for per-process footprints, the media generation stack for
 actually running jobs, `internal/netguard` for the bind guard.
 
 ## Downstream effects
@@ -129,7 +134,7 @@ implications.
 2. `done` re-acks `202`; only `error` returns `409`.
 3. Advertised `vram_peak_gb` is never zero or negative.
 4. Health answers 503 rather than serving a stale snapshot.
-5. The node refuses to start without a GPU.
+5. The node refuses to start without a working GPU memory source.
 
 ## Security and privacy notes
 
@@ -156,7 +161,7 @@ PDH instance parser. `fleet_verbs_test.go` covers parameter resolution and the b
 
 ## Common pitfalls
 
-- Believing PDH supplies health's VRAM numbers. It does not — that is `nvidia-smi`.
+- Believing the per-process PDH tree supplies health's VRAM numbers. It does not — that is the resolved provider (`nvidia-smi`, or the ADAPTER-level WDDM counters on the generic path).
 - Expecting `queued` as a state. The first state is `accepted`.
 - Expecting a duplicate dispatch to return an error. Only `error` jobs do.
 - Binding with `:18811` and expecting it to work as loopback.

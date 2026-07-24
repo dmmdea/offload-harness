@@ -85,6 +85,10 @@ Assert ($amdSeed.sdcpp_model_kind -eq 'diffusion')                          'amd
 Assert ($amdSeed.sdcpp_extra_args -contains '--vae-on-cpu')                 'amd-rdna3 seeds --vae-on-cpu (iGPU VAE stability, sd.cpp #563/#1621)'
 Assert ($amdSeed.imagegen_cfg -eq 1 -and $amdSeed.imagegen_steps -eq 8)     'amd-rdna3 seeds turbo sampling (cfg 1, 8 steps)'
 Assert ($profiles.'amd-rdna3-dgpu'.config_seed.imagegen_engine -eq 'sdcpp') 'amd-rdna3-dgpu seeds the sdcpp engine too'
+# J3: the UMA tier MUST sample Dedicated+Shared (Dedicated reads ~0 on an iGPU);
+# the discrete tier keeps the plain Dedicated tree.
+Assert ($amdSeed.fleet_sampler -eq 'pdh-shared')                            'amd-rdna3 seeds fleet_sampler pdh-shared (UMA footprints)'
+Assert ($profiles.'amd-rdna3-dgpu'.config_seed.fleet_sampler -eq 'pdh')     'amd-rdna3-dgpu seeds fleet_sampler pdh (discrete)'
 # Token substitution: string values AND strings inside array values expand; the
 # default (no -OffloadHome) leaves the template text byte-identical (pre-J2 callers).
 $tpl = '{"model":"offload-e4b"}'

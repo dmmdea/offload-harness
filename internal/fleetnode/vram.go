@@ -77,28 +77,39 @@ func (s *Sampler) Load() (Snapshot, bool) {
 	return v.(Snapshot), true
 }
 
-func (s *Sampler) sample(run func() (string, error)) {
-	out, err := run()
+func (s *Sampler) sample(probe MemProbe) {
+	total, used, err := probe()
 	if err != nil {
-		return // keep the last good snapshot
+		return // keep the last good snapshot — never publish a bad probe
 	}
-	total, used, err := ParseSmiMemory(out)
-	if err != nil {
-		return // ditto — never publish a bad parse
+	free := total - used
+	if free < 0 {
+		// The windows-generic source sums usage over ALL adapters while total is
+		// the largest adapter (single-GPU is the target shape; ADR 0014) — on a
+		// hybrid box the difference can dip negative. Publish an honest floor.
+		free = 0
 	}
-	s.snap.Store(Snapshot{TotalGiB: total, FreeGiB: total - used, At: time.Now()})
+	s.snap.Store(Snapshot{TotalGiB: total, FreeGiB: free, At: time.Now()})
 }
 
 // StartGlobalSampler samples run() (an injected nvidia-smi invocation) once
-// synchronously — so a successful probe is Load-able the moment this returns —
-// then keeps refreshing every interval until ctx is done. Runner or parse
-// failures leave the previous snapshot in place: the sampler degrades to stale
-// data, never to zeros. Staleness is bounded downstream — the health handler
-// refuses (503) any snapshot older than maxSnapshotAge, so a persistently
-// failing nvidia-smi (driver reset) cannot serve hours-stale 200s.
+// synchronously, then keeps refreshing — kept as the nvidia-smi convenience
+// wrapper over StartProbeSampler (J3 made the memory SOURCE a provider; this
+// signature predates that and existing callers/tests keep working).
 func StartGlobalSampler(ctx context.Context, interval time.Duration, run func() (string, error)) *Sampler {
+	return StartProbeSampler(ctx, interval, SmiProbe(run))
+}
+
+// StartProbeSampler samples probe once synchronously — so a successful probe
+// is Load-able the moment this returns — then keeps refreshing every interval
+// until ctx is done. Probe failures leave the previous snapshot in place: the
+// sampler degrades to stale data, never to zeros. Staleness is bounded
+// downstream — the health handler refuses (503) any snapshot older than
+// maxSnapshotAge, so a persistently failing source (driver reset) cannot
+// serve hours-stale 200s.
+func StartProbeSampler(ctx context.Context, interval time.Duration, probe MemProbe) *Sampler {
 	s := &Sampler{}
-	s.sample(run)
+	s.sample(probe)
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
@@ -107,7 +118,7 @@ func StartGlobalSampler(ctx context.Context, interval time.Duration, run func() 
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				s.sample(run)
+				s.sample(probe)
 			}
 		}
 	}()
