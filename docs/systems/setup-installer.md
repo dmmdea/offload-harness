@@ -35,7 +35,10 @@ Three scripts run in order, each ending with a machine-readable JSON line:
 1. **`detect.ps1`** classifies the machine and emits a backend verdict.
 2. **`install.ps1`** installs pinned binaries and models, substitutes the template placeholders, and
    builds the Go binaries.
-3. **`selftest.ps1`** emits a receipt with verdict `pass | warn | fail`.
+3. **`selftest.ps1`** emits a receipt with verdict `pass | warn | fail`. On a Vulkan backend it
+   also runs the **H3 canary suite** (`fa_q8kv`, `moe_full_offload`, `ctx_sweep`, `bench`,
+   `swap_leak`, `embedder`, `whisper`) — promotion gates recorded in `receipt.canaries`, never
+   verdict-changing; `OFFLOAD_SELFTEST_CANARIES=1|0` forces them on/off anywhere.
 
 `setup/SETUP-AGENT.md` is written for an agent to execute directly, with decision tables keyed to
 those receipts.
@@ -55,16 +58,23 @@ first, because a heterogeneous pair outranks any single-card band:
 | NVIDIA Ampere/Ada ≥12 GB | `ampere-16` |
 | NVIDIA Ampere/Ada ≥7 GB | `ampere-8` |
 | NVIDIA Ampere/Ada, below | `ampere-6` |
-| AMD RDNA3 | `amd-rdna3` |
+| AMD RDNA3 ≥12 GB dedicated | `amd-rdna3-dgpu` (discrete RX 7900-class; 26B resident) |
+| AMD RDNA3, below | `amd-rdna3` (iGPU/UMA floor — an iGPU's dedicated number is just the BIOS carve-out) |
 | AMD, anything else | `amd-gcn` |
 | No usable GPU | `cpu` |
 
-Thirteen profiles. Two boundaries are deliberately below their nominal card size: the `ampere-8` band
+Fourteen profiles. Two boundaries are deliberately below their nominal card size: the `ampere-8` band
 starts at **7 GB**, and `blackwell-72` starts at **64 GB** so it covers both 72 GB and 96 GB
 workstation cards until larger hardware is actually measured.
 
-`detect.ps1 -SelfTest` asserts this table against **17 synthetic configurations**, plus separate
-assertion families for architecture detection, RAM tiering, and unrecognized-hardware warnings.
+For AMD, `detect.ps1` also reads the **Adrenalin (Radeon Software) version** from the registry and
+classifies it against the known deep-context Vulkan crash class (≤ 25.11.1, llama.cpp #17432) —
+the old generic "keep your driver current" warning is now a checked verdict, emitted as
+`amd_adrenalin` in the JSON.
+
+`detect.ps1 -SelfTest` asserts this table against **20 synthetic configurations**, plus separate
+assertion families for architecture detection, RAM tiering, Adrenalin classification, and
+unrecognized-hardware warnings.
 
 > **Known coverage gap:** two configurations in the numbered matrix have no profile assertion, and
 > `blackwell-8` is only asserted at exactly 8 GB rather than via a low-VRAM fallthrough.
@@ -74,11 +84,16 @@ confusion:
 
 - **Universal on every task-serving entry:** `--jinja` and `--reasoning off`. Omitting
   `--reasoning off` produces empty output. No MTP or draft/speculative flags appear anywhere.
-- **Profile-driven:** `--cache-type-k` / `--cache-type-v` (`q8_0` on eight profiles; `f16` on the
-  remaining five — the two large-VRAM Blackwell tiers, both AMD profiles, and CPU — K and V always
-  symmetric, and `q8_0` for V requires flash-attention on) and `--flash-attn` (on for eleven
-  profiles, off for `amd-gcn`, and omitted entirely by the CPU template because that backend has
-  neither `-ngl` nor `--flash-attn`).
+- **Profile-driven:** `--cache-type-k` / `--cache-type-v` (`q8_0` on nine profiles; `f16` on the
+  remaining five — the two large-VRAM Blackwell tiers, the two AMD floor profiles (`amd-rdna3`,
+  `amd-gcn`), and CPU — K and V always symmetric, and `q8_0` for V requires flash-attention on)
+  and `--flash-attn` (on for twelve profiles, off for `amd-gcn`, and omitted entirely by the CPU
+  template because that backend has neither `-ngl` nor `--flash-attn`). On `amd-rdna3` the f16/16K
+  values are an explicit SAFE FLOOR: the selftest's H3 canary suite (`fa_q8kv`, `ctx_sweep`,
+  `moe_full_offload`) measures the q8_0/32K/26B-full-offload promotions on the real box, and the
+  installing agent applies them canary-gated per the runbook's AMD RDNA3 chapter.
+- **Vulkan device pinning:** every model entry in the Vulkan template carries
+  `GGML_VK_VISIBLE_DEVICES=0` so multi-ICD boxes serve from a deterministic adapter.
 - **One exemption:** the `embeddinggemma` entry bypasses the shared flag macro entirely, taking
   `--embedding --pooling mean` instead. "All served models get these flags" is therefore false.
 
@@ -136,9 +151,12 @@ serving problem from a harness problem.
 
 ## Testing notes
 
-`detect.ps1 -SelfTest` covers classification. `setup/tests/` carries PowerShell tests for config-seed
-behavior. Go-side config round-tripping is covered by `example_config_test.go` and `doctor_test.go`,
-which also guard against tier-key drift between `config.example.json` and the code.
+`detect.ps1 -SelfTest` covers classification (including the AMD VRAM banding and Adrenalin
+version classifier). `setup/tests/` carries PowerShell tests for config-seed behavior and for the
+canary pure helpers (`selftest-canaries.test.ps1` — word-overlap, flash-attn log-state scan with
+live-captured log lines, cosine). Go-side config round-tripping is covered by
+`example_config_test.go` and `doctor_test.go`, which also guard against tier-key drift between
+`config.example.json` and the code.
 
 ## Common pitfalls
 
