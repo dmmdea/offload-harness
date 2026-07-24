@@ -875,7 +875,8 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
   {
     (Test-Path $yamlDest) -and
     -not (Select-String -Path $yamlDest -Pattern '__(LLAMA_BIN|MODELS|NTHREADS|CTX|KV_K|KV_V|FLASH_ATTN|MOE_26B)__' -Quiet) -and
-    -not (Select-String -Path $yamlDest -SimpleMatch -Pattern $llamaDir -Quiet)   # backslash path = stale pre-R3.6 render
+    -not (Select-String -Path $yamlDest -SimpleMatch -Pattern $llamaDir -Quiet) -and   # backslash path = stale pre-R3.6 render
+    (($tplBackend -ne 'vulkan') -or (Select-String -Path $yamlDest -SimpleMatch -Pattern 'GGML_VK_VISIBLE_DEVICES' -Quiet))   # J1: vulkan render without the device pin = stale pre-0.22.19 render
   } `
   {
     $tpl = Join-Path (Join-Path $scriptDir 'templates') "llama-swap.win-$tplBackend.yaml"

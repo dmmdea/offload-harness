@@ -34,6 +34,11 @@ Assert-Eq 'empty both'            (Get-WordOverlap -A '' -B '') 0
 Assert-Range 'half overlap'       (Get-WordOverlap -A 'one two three four' -B 'three four five six') 0.30 0.40   # 2/6
 Assert-Range 'case+punct folded'  (Get-WordOverlap -A 'Two, Three; FIVE!' -B 'two three five') 1 1
 Assert-Range 'near-identical gen' (Get-WordOverlap -A '2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37' -B '2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 41') 0.80 0.95
+# Review finding (PS 5.1 single-element unwrap made 'string + string' CONCATENATE -> union=1
+# -> overlap falsely 1.0 on degenerate single-word generations). These pin the fix:
+Assert-Range 'single word vs pair'   (Get-WordOverlap -A 'ok' -B 'ok yes') 0.49 0.51           # 1/2
+Assert-Range 'repeated single word'  (Get-WordOverlap -A 'ok ok ok' -B 'ok yes no') 0.32 0.34  # 1/3
+Assert-Eq   'single word identical'  (Get-WordOverlap -A 'ok' -B 'ok') 1
 
 Write-Host '== Get-FaStateFromLog (flash-attn state scan) =='
 Assert-Eq 'classic = 1'          (Get-FaStateFromLog -LogText 'llama_context: flash_attn = 1') 'on'

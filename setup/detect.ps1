@@ -89,6 +89,17 @@ function Get-CudaFromSmiHeader {
   return $null
 }
 
+# J1: is this AMD adapter name an iGPU (APU graphics)? The Radeon iGPUs are the 'NNNM'
+# series (780M/760M/680M...) plus the named-graphics APUs. Used to (a) prefer a discrete
+# adapter when a hybrid box exposes both, and (b) refuse to band an iGPU into the
+# amd-rdna3-dgpu profile just because its BIOS carve-out is large (a 16GB UMA carve-out
+# reads as >=12GB 'dedicated' but is NOT discrete VRAM). Pure fn - self-tested.
+function Test-AmdIgpuName {
+  param([string]$Name)
+  if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+  return [bool]($Name -imatch '\b\d{3}M\b' -or $Name -imatch '\bVega\s*\d+\b' -or $Name -imatch 'Graphics\s*$')
+}
+
 # J1: classify an AMD Adrenalin (Radeon Software) version string against the known
 # deep-context Vulkan crash class (llama.cpp #17432 - present in 25.11.1 and older).
 # Returns a warning string for affected/unreadable versions, $null when the driver is
@@ -101,8 +112,10 @@ function Get-AdrenalinWarning {
     return "Adrenalin version UNREADABLE - keep the AMD driver CURRENT: 25.11.1 and older have a known deep-context Vulkan crash (llama.cpp #17432); selftest.ps1 includes a canary for it."
   }
   $v = $null
-  # Adrenalin versions are 'YY.M.P' (e.g. 25.11.1, 26.3.2). Take the leading dotted-number run.
-  $m = [regex]::Match($Version.Trim(), '^(\d+(?:\.\d+){1,3})')
+  # Adrenalin versions are 'YY.M.P' (e.g. 25.11.1, 26.3.2). Take at most THREE components:
+  # a 4-part registry value like '25.11.1.0' must still compare equal-class to 25.11.1
+  # ([version]'25.11.1.0' would sort GREATER and dodge the known-bad match).
+  $m = [regex]::Match($Version.Trim(), '^(\d+(?:\.\d+){1,2})')
   if ($m.Success) { try { $v = [version]$m.Groups[1].Value } catch { $v = $null } }
   if ($null -eq $v) {
     return "Adrenalin version '$Version' did not parse - keep the AMD driver CURRENT: 25.11.1 and older have a known deep-context Vulkan crash (llama.cpp #17432)."
@@ -293,8 +306,23 @@ if ($SelfTest) {
   Assert-Adrenalin 'older 25.5.1 warns'        '25.5.1'  $true
   Assert-Adrenalin 'newer 26.3.2 clean'        '26.3.2'  $false
   Assert-Adrenalin 'newer 25.12.1 clean'       '25.12.1' $false
+  Assert-Adrenalin '4-part 25.11.1.0 warns'    '25.11.1.0' $true
   Assert-Adrenalin 'unreadable (empty) warns'  ''        $true
   Assert-Adrenalin 'garbage string warns'      'WHQL'    $true
+
+  Write-Host '== AMD iGPU name classification (J1) =='
+  function Assert-Igpu {
+    param([string]$Name, [bool]$Expected)
+    $got = Test-AmdIgpuName -Name $Name
+    if ($got -eq $Expected) { Write-Host "PASS igpu  '$Name' -> $got" }
+    else { Write-Host "FAIL igpu  '$Name' -> $got (expected $Expected)"; $script:fail++ }
+  }
+  Assert-Igpu 'AMD Radeon(TM) 780M Graphics'  $true
+  Assert-Igpu 'AMD Radeon 760M'               $true
+  Assert-Igpu 'AMD Radeon(TM) Graphics'       $true
+  Assert-Igpu 'AMD Radeon Vega 7 Graphics'    $true
+  Assert-Igpu 'AMD Radeon RX 7900 XTX'        $false
+  Assert-Igpu 'AMD Radeon RX 7700 XT'         $false
 
   Write-Host '== unrecognized-NVIDIA fallback warning =='
   # A GPU that CIM reports as NVIDIA but whose name matches no arch regex ->
@@ -368,7 +396,11 @@ function Get-AdrenalinVersion {
 $gpus = Get-CimInstance Win32_VideoController | Where-Object { $_.Name }
 $gpuNames = ($gpus | ForEach-Object Name) -join '; '
 $nvidia = $gpus | Where-Object { $_.Name -match 'NVIDIA' } | Select-Object -First 1
-$amd    = $gpus | Where-Object { $_.Name -match 'AMD|Radeon' } | Select-Object -First 1
+# J1: on a hybrid AMD box (iGPU + discrete) prefer the DISCRETE adapter - WMI enumeration
+# order is arbitrary, and picking the iGPU here would under-serve the real card.
+$amdAll = @($gpus | Where-Object { $_.Name -match 'AMD|Radeon' })
+$amd    = $amdAll | Where-Object { -not (Test-AmdIgpuName -Name $_.Name) } | Select-Object -First 1
+if (-not $amd) { $amd = $amdAll | Select-Object -First 1 }
 # Detection contract: NVIDIA present = CIM name match OR nvidia-smi resolves.
 $nvidiaSmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
 
@@ -421,6 +453,12 @@ $ramTier = Get-RamTier -RamGb $ramGB
 $sel       = Get-Profile -Vendor $vendor -Arch $gpuArch -VramGb $vramGB -GpuCount $gpuCount -RamGb $ramGB
 $profileId = $sel.profile
 $bigRam    = [bool]$sel.big_ram
+# J1 guard: a large BIOS UMA carve-out can make an iGPU report >=12GB 'dedicated', which
+# would band it into the DISCRETE profile. The name says iGPU -> the UMA floor profile wins.
+if ($profileId -eq 'amd-rdna3-dgpu' -and (Test-AmdIgpuName -Name $gpuName)) {
+  $warnings += "iGPU '$gpuName' reports ${vramGB}GB dedicated (a BIOS UMA carve-out, not discrete VRAM) - keeping the amd-rdna3 UMA profile, not amd-rdna3-dgpu."
+  $profileId = 'amd-rdna3'
+}
 
 # CUDA versions (NVIDIA only) + a Blackwell build hint so the installer/agent picks the
 # right llama.cpp build flexibly rather than assuming one CUDA version.

@@ -13,8 +13,9 @@ Versioning: [SemVer](https://semver.org/).
   `fa_q8kv` (fixed-prompt temp-0 f16-vs-q8_0 word overlap ≥0.80 **plus** server-log proof FA is
   actually ON — probe servers now launch `-lv 10` because default verbosity omits the
   `flash_attn` state line, verified live on a Jul-2026 build), `moe_full_offload` (the 26B
-  `-ngl 99` trial — the upward mirror of the standing `--cpu-moe` downshift; promote only on a
-  measured decode-t/s win), `ctx_sweep` (8/16/32K load+gen; 32K pass authorizes the ctx
+  `-ngl 99` trial — the upward mirror of the standing `--cpu-moe` downshift; promotes on a
+  measured full-offload decode number that beats the cpu-moe baseline where one was measured,
+  and on the measured number alone where the baseline probe was skipped), `ctx_sweep` (8/16/32K load+gen; 32K pass authorizes the ctx
   promotion), `bench` (llama-bench pp512/tg128 regression-gate numbers), `swap_leak` (eviction
   cycle leaves ≤1 llama-server), `embedder` (cosine ordering through the real endpoint),
   `whisper` (honest skip carrying the whisper.cpp ≥1.8.3 AMD-iGPU floor). Skipped canaries land
