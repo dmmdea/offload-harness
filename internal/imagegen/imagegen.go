@@ -128,6 +128,97 @@ func bindingArgs(m Model) []string {
 	return args
 }
 
+// SdcppModel is this machine's stable-diffusion.cpp binding (J2: the AMD/Vulkan
+// tier's engine). All paths are FULL paths — sd.cpp has no ComfyUI-style model-dir
+// convention. Steps/CFG/Sampler reuse the machine's imagegen_* sampler defaults.
+type SdcppModel struct {
+	Bin       string   // sd.exe path (exported to the runner as SDCPP_BIN). Required.
+	Model     string   // main model file (GGUF or safetensors). Required.
+	ModelKind string   // ""/"checkpoint" => -m; "diffusion" => --diffusion-model
+	VAE       string   // companion weights ("" = not passed)
+	ClipL     string
+	ClipG     string
+	T5        string
+	LLM       string // LLM-class text encoder (Z-Image: Qwen3 GGUF; sd.cpp --llm)
+	Steps     int
+	CFG       float64
+	Sampler   string
+	ExtraArgs []string // verbatim sd.cpp args (--vae-on-cpu etc.; canary-decided)
+}
+
+// sdcppArgs assembles the render/sdcpp-generate.mjs argv. Pure; unit-tested. The
+// runner owns the mapping from these flags to sd.cpp's own CLI surface, so the Go
+// side never hardcodes sd.cpp flag names. Request steps wins over m.Steps (same
+// rule as buildArgs).
+func sdcppArgs(out, prompt string, params map[string]any, m SdcppModel) []string {
+	args := []string{out, prompt}
+	if n, ok := params["negative"].(string); ok && n != "" {
+		args = append(args, "--negative", n)
+	}
+	for _, k := range []string{"width", "height", "seed"} {
+		if v := gpugen.AsInt(params[k]); v > 0 {
+			args = append(args, "--"+k, strconv.Itoa(v))
+		}
+	}
+	if v := gpugen.AsInt(params["steps"]); v > 0 {
+		args = append(args, "--steps", strconv.Itoa(v))
+	} else if m.Steps > 0 {
+		args = append(args, "--steps", strconv.Itoa(m.Steps))
+	}
+	if m.Model != "" {
+		args = append(args, "--model", m.Model)
+	}
+	if m.ModelKind != "" {
+		args = append(args, "--model-kind", m.ModelKind)
+	}
+	if m.VAE != "" {
+		args = append(args, "--vae", m.VAE)
+	}
+	if m.ClipL != "" {
+		args = append(args, "--clip-l", m.ClipL)
+	}
+	if m.ClipG != "" {
+		args = append(args, "--clip-g", m.ClipG)
+	}
+	if m.T5 != "" {
+		args = append(args, "--t5xxl", m.T5)
+	}
+	if m.LLM != "" {
+		args = append(args, "--llm", m.LLM)
+	}
+	if m.CFG > 0 {
+		args = append(args, "--cfg", strconv.FormatFloat(m.CFG, 'g', -1, 64))
+	}
+	if m.Sampler != "" {
+		args = append(args, "--sampler", m.Sampler)
+	}
+	for _, e := range m.ExtraArgs {
+		if e != "" {
+			args = append(args, "--extra", e)
+		}
+	}
+	return args
+}
+
+// GenerateSdcpp renders via stable-diffusion.cpp (render/sdcpp-generate.mjs): a
+// spawn-per-job single binary under the same GPU lock — zero-warm by construction.
+// Same gpugen lifecycle guards as Generate (tree-kill on timeout, output-stat gate),
+// but NO ComfyUI coupling: the env carries no COMFY_DIR and SkipFreeComfy suppresses
+// the post-run /free (the seam the TTS path proved; audit seam 3).
+func GenerateSdcpp(ctx context.Context, node, script, out, prompt string, params map[string]any, m SdcppModel, timeout time.Duration, samp *gpugen.Sampling, extraEnv ...string) (string, error) {
+	spec := gpugen.Spec{
+		Exe:           node,
+		Script:        script,
+		Args:          sdcppArgs(out, prompt, params, m),
+		Env:           append([]string{"SDCPP_BIN=" + m.Bin}, extraEnv...),
+		Out:           out,
+		Timeout:       timeout,
+		SkipFreeComfy: true,
+	}
+	samp.ApplyTo(&spec)
+	return gpugen.Generate(ctx, spec)
+}
+
 // InpaintModel is the machine's inpaint binding (SDXL-class; see config). Inpainting
 // is masked latent re-denoise (VAEEncodeForInpaint) — a pixel-space DiT (HiDream)
 // cannot drive it, so this binding is separate from Model even on a HiDream box.

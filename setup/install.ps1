@@ -121,6 +121,72 @@ $PINNED = @{
     sha  = 'a0f7b4e13c397a6e1b32c2de75b1f65a14c92ec524d5f674d94a4290a1c4969b'
     version = 'a0f7b4e1'
   }
+  # --- J2 media tier: stable-diffusion.cpp (Vulkan) + the Apache-2.0 image roster ---
+  # sd.cpp uses rolling per-master releases (no semver): the pin is tag+commit, a
+  # SNAPSHOT OF FRONTIER (same rule as the llama.cpp pin — refresh via the media
+  # canaries, never let it rot). SHA256 = the GitHub release asset digest; binary
+  # inside is sd-cli.exe (+ sd-server.exe, the recorded warm-swap upgrade path).
+  'sdcpp-vulkan' = @{
+    url  = 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-789-5114672/sd-master-5114672-bin-win-vulkan-x64.zip'
+    sha  = 'cb5fb173430147d83fa3439040be1e1d97906c2e8fb3a06cc8afb761ea98ba17'
+    size = 37813364
+    version = 'master-789-5114672'
+  }
+  # Lead image model: Z-Image-Turbo (Apache-2.0 end-to-end; 8-step few-step DiT).
+  # jayn7's GGUF build, NOT leejet's: leejet's mixed-rule low-bit quants produce
+  # blank/solid images on Vulkan+AMD (sd.cpp issue #1031); jayn7's K-quants are the
+  # community-confirmed-working set. Q8_0 = quality-first within UMA reality.
+  'model-zimage' = @{
+    url  = 'https://huggingface.co/jayn7/Z-Image-Turbo-GGUF/resolve/main/z_image_turbo-Q8_0.gguf'
+    name = 'z_image_turbo-Q8_0.gguf'
+    size = 7224707136
+    sha  = 'f163d60b0eb427469510b8226243d196574a18139a2e40c017409cfbda95ecfe'
+    version = 'f163d60b'
+  }
+  # Z-Image companions: the Qwen3-4B LLM text encoder (sd.cpp --llm; the exact repo
+  # named in the pinned release's docs/z_image.md) + the Flux AE VAE from the UNGATED
+  # Comfy-Org mirror (the BFL original is gated and its LFS sha is API-masked).
+  'model-zimage-llm' = @{
+    url  = 'https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf'
+    name = 'Qwen3-4B-Instruct-2507-Q4_K_M.gguf'
+    size = 2497281120
+    sha  = '3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597'
+    version = '3605803b'
+  }
+  'model-zimage-vae' = @{
+    url  = 'https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors'
+    name = 'zimage_ae.safetensors'
+    size = 335304388
+    sha  = 'afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38'
+    version = 'afc8e282'
+  }
+  # Optional roster extras (OFFLOAD_MEDIA_EXTRAS=1): SD 1.5 speed floor (single-file,
+  # creativeml-openrail-m; the repo carries fp32 only, 4.27GB) + SDXL base slow path
+  # (openrail++) with the fp16-fix VAE (MIT; REQUIRED on AMD iGPUs - the stock fp16
+  # VAE renders all-black there, sd.cpp issue #563). NOT installed by default.
+  # Excluded on license/ADR grounds: SDXL-Turbo (sai-nc-community, non-commercial)
+  # and the entire FLUX family (ADR 0011 - even Apache schnell; reopening = new ADR).
+  'model-sd15' = @{
+    url  = 'https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors'
+    name = 'v1-5-pruned-emaonly.safetensors'
+    size = 4265146304
+    sha  = '6ce0161689b3853acaa03779ec93eafe75a02f4ced659bee03f50797806fa2fa'
+    version = '6ce01616'
+  }
+  'model-sdxl' = @{
+    url  = 'https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors'
+    name = 'sd_xl_base_1.0.safetensors'
+    size = 6938078334
+    sha  = '31e35c80fc4829d14f90153f4c74cd59c90b779f6afe05a74cd6120b893f7e5b'
+    version = '31e35c80'
+  }
+  'model-sdxl-vae' = @{
+    url  = 'https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors'
+    name = 'sdxl_vae_fp16_fix.safetensors'
+    size = 334641162
+    sha  = '235745af8d86bf4a4c1b5b4f529868b37019a10f7c0b2e79ad0abca3a22bc6e1'
+    version = '235745af'
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -574,16 +640,42 @@ function Add-GpuEnvToYaml {
 # input UNCHANGED (byte-identical - no gratuitous reformat on the common path).
 # Step 8 applies this ONLY when creating ~/.local-offload/config.json fresh; an
 # existing per-machine config is never touched (it stays the sole authority).
+# J2: seed values may carry the __OFFLOAD_HOME__ token - sdcpp bindings are FULL
+# paths under the install root, which profiles.json cannot know statically. When
+# -OffloadHome is given, the token is substituted (forward slashes) in every
+# string value, including strings inside array values. "" = no substitution
+# (keeps every pre-J2 caller/test byte-identical).
 # ---------------------------------------------------------------------------
 function Merge-ConfigSeed {
-  param([string]$ConfigText, $Seed)
+  param([string]$ConfigText, $Seed, [string]$OffloadHome = '')
   if ($null -eq $Seed) { return $ConfigText }
   $props = @($Seed.PSObject.Properties)
   if ($props.Count -eq 0) { return $ConfigText }
+  $homeFwd = ''
+  if ($OffloadHome) { $homeFwd = $OffloadHome.Replace('\', '/') }
+  # NB: every array return is prefixed with the comma operator - PowerShell's return
+  # pipeline UNROLLS a 1-element array to its bare element, which would serialize a
+  # 1-flag sdcpp_extra_args as a JSON *string* and make Go's json.Unmarshal reject
+  # the whole config (found in adversarial review; both AMD seeds ship exactly one
+  # extra arg, so every fresh AMD install would have produced a corrupt config).
+  function Expand-SeedValue {
+    param($Value, [string]$HomeFwd)
+    if ($Value -is [string]) {
+      if ($HomeFwd) { return $Value.Replace('__OFFLOAD_HOME__', $HomeFwd) }
+      return $Value
+    }
+    if ($Value -is [System.Array]) {
+      $out = @($Value | ForEach-Object { if ($_ -is [string] -and $HomeFwd) { $_.Replace('__OFFLOAD_HOME__', $HomeFwd) } else { $_ } })
+      return ,([object[]]$out)
+    }
+    return $Value
+  }
   $cfg = $ConfigText | ConvertFrom-Json
   foreach ($p in $props) {
-    if ($cfg.PSObject.Properties[$p.Name]) { $cfg.($p.Name) = $p.Value }
-    else { $cfg | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value }
+    $v = Expand-SeedValue -Value $p.Value -HomeFwd $homeFwd
+    if ($p.Value -is [System.Array]) { $v = [object[]]@($v) }   # belt: never let an array degrade
+    if ($cfg.PSObject.Properties[$p.Name]) { $cfg.($p.Name) = $v }
+    else { $cfg | Add-Member -NotePropertyName $p.Name -NotePropertyValue $v }
   }
   return ($cfg | ConvertTo-Json -Depth 8)
 }
@@ -844,6 +936,45 @@ foreach ($key in $modelKeys) {
     }
   $manifestComponents[$key] = $m.version
 }
+# ---------------------------------------------------------------------------
+# Step 5b (J2): media tier - stable-diffusion.cpp (Vulkan) + the image roster.
+# Default gate: ON for the AMD/Vulkan profiles (amd-*: the tier this leg was built
+# for), OFF elsewhere. OFFLOAD_WITH_MEDIA=1 forces on any box (sd.cpp runs on any
+# Vulkan GPU incl. NVIDIA); =0 forces off (metered links - the lead set is ~10GB).
+# OFFLOAD_MEDIA_EXTRAS=1 additionally pulls SD1.5 + SDXL base + fp16-fix VAE.
+# ---------------------------------------------------------------------------
+$withMedia = ($profileId -match '^amd-rdna3')
+if ($env:OFFLOAD_WITH_MEDIA -eq '1') { $withMedia = $true }
+if ($env:OFFLOAD_WITH_MEDIA -eq '0') { $withMedia = $false }
+$sdcppDir = Join-Path $HOME_DIR 'sdcpp'
+$sdcppExe = Join-Path $sdcppDir 'sd-cli.exe'
+if ($withMedia) {
+  Step "sd.cpp (vulkan) -> $sdcppDir" `
+    { (Test-Path $sdcppExe) -and ((Get-OldVersion 'sdcpp-vulkan') -eq $PINNED['sdcpp-vulkan'].version) } `
+    {
+      Install-Zip -Key 'sdcpp-vulkan' -Stage $stageDir -Dest $sdcppDir
+      if (-not (Test-Path $sdcppExe)) { throw "sd-cli.exe not found in $sdcppDir after unzip" }
+    }
+  $manifestComponents['sdcpp-vulkan'] = $PINNED['sdcpp-vulkan'].version
+  $mediaKeys = @('model-zimage', 'model-zimage-llm', 'model-zimage-vae')
+  if ($env:OFFLOAD_MEDIA_EXTRAS -eq '1') { $mediaKeys += @('model-sd15', 'model-sdxl', 'model-sdxl-vae') }
+  foreach ($key in $mediaKeys) {
+    $m = $PINNED[$key]
+    $dest = Join-Path $modelDir $m.name
+    Step "media model: $($m.name)" `
+      {
+        (Test-Path $dest) -and ((Get-Item $dest).Length -eq $m.size) -and
+        ((Get-OldVersion $key) -eq $m.version) -and (Test-CachedSha -Path $dest -ExpectedSha $m.sha)
+      } `
+      {
+        Get-Verified -Url $m.url -Dest $dest -ExpectedSize $m.size -Sha $m.sha
+        Test-CachedSha -Path $dest -ExpectedSha $m.sha | Out-Null
+      }
+    $manifestComponents[$key] = $m.version
+  }
+} else {
+  Write-Host "SKIP  media tier (profile=$(if ($profileId) { $profileId } else { '(none)' }) is not amd-*; set OFFLOAD_WITH_MEDIA=1 to install sd.cpp + the image roster on any Vulkan-capable box)" -ForegroundColor DarkGray
+}
 }  # end if (-not $RenderOnly) — Steps 2-5 (artifact acquisition)
 
 # ---------------------------------------------------------------------------
@@ -974,7 +1105,7 @@ Step 'harness config -> ~/.local-offload/config.json' `
       if ($pdoc.profiles.PSObject.Properties[$profileId]) { $seed = $pdoc.profiles.$profileId.config_seed }
     }
     if ($seed) {
-      $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $seed
+      $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $seed -OffloadHome $HOME_DIR
       Write-Host "      config_seed ($profileId): $(@($seed.PSObject.Properties.Name) -join ', ')" -ForegroundColor DarkGray
     }
     $noBomCfg = New-Object System.Text.UTF8Encoding($false)
