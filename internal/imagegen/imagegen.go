@@ -139,6 +139,7 @@ type SdcppModel struct {
 	ClipL     string
 	ClipG     string
 	T5        string
+	LLM       string // LLM-class text encoder (Z-Image: Qwen3 GGUF; sd.cpp --llm)
 	Steps     int
 	CFG       float64
 	Sampler   string
@@ -181,6 +182,9 @@ func sdcppArgs(out, prompt string, params map[string]any, m SdcppModel) []string
 	}
 	if m.T5 != "" {
 		args = append(args, "--t5xxl", m.T5)
+	}
+	if m.LLM != "" {
+		args = append(args, "--llm", m.LLM)
 	}
 	if m.CFG > 0 {
 		args = append(args, "--cfg", strconv.FormatFloat(m.CFG, 'g', -1, 64))
