@@ -253,6 +253,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "[local-agent] audit="+auditP)
 	}
 	loop := built.Loop
+	// Resolve the profile BEFORE any network work: a typo'd --profile must be
+	// a fast usage error, not one paid for after a possible cold model start.
+	prof, err := agent.LookupProfile(*profile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(2)
+	}
 	// Ctrl-C cancels cleanly — created HERE (before the served-window probe,
 	// which may cold-start a model) so every network step below is cancellable.
 	// The loop checks ctx.Err() each iteration.
@@ -281,11 +288,6 @@ func main() {
 	// worktree-registered tool (update_plan) is present for the edit/build/github
 	// subsets to keep. A profile can only NARROW the enabled tool set (safety
 	// invariant in WithProfile) + add a tuned prompt and few-shot exemplars.
-	prof, err := agent.LookupProfile(*profile)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(2)
-	}
 	loop.WithProfile(prof)
 	if prof.Name != "general" {
 		fmt.Fprintf(os.Stderr, "[local-agent] profile=%s (tools narrowed to %d; %d exemplars)\n", prof.Name, len(prof.Tools), len(prof.Exemplars))

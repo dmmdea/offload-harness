@@ -236,11 +236,13 @@ func isElided(content string) bool {
 // makes the harder-compaction retry a byte-for-byte no-op, so the retry
 // re-sends the same overflow and the run dies. At that point recency
 // protection has nothing left to protect — the alternative is an abort — so
-// tool BODIES (never the preamble, never whole turns) are shrunk oldest-first:
-// skeleton first (signal-preserving), then the elision marker, and finally a
-// head/tail trim of whatever single body still keeps the estimate over budget.
-// Deterministic; returns msgs unchanged when already within budget.
-func emergencyShrink(msgs []Msg, budget, protectedPrefix int, opts compactOpts) []Msg {
+// tool BODIES (never the preamble, never whole turns) are shrunk: OLDER bodies
+// skeleton-first then elision markers, oldest-first; the NEWEST body is spared
+// until last and then trimmed head/tail to the remaining room (a bare marker
+// only if even the trim cannot fit — a degraded result beats a request the
+// server will reject again). Deterministic; returns msgs unchanged when
+// already within budget.
+func emergencyShrink(msgs []Msg, budget, protectedPrefix int) []Msg {
 	if estimateTokens(msgs) <= budget {
 		return msgs
 	}
@@ -249,21 +251,32 @@ func emergencyShrink(msgs []Msg, budget, protectedPrefix int, opts compactOpts) 
 	if protectedPrefix < 0 {
 		protectedPrefix = 0
 	}
-	// Pass 1: skeletonize every eligible tool body, oldest-first (only useful
-	// when the skeleton rung wasn't already applied to that body).
+	// The NEWEST tool body — the model's just-fetched result, the content the
+	// next completion most needs — is spared by passes 1-2 and degraded
+	// GRACEFULLY (head/tail trim) in pass 3, never jumped straight to a marker.
+	lastTool := -1
+	for i := len(out) - 1; i >= protectedPrefix; i-- {
+		if out[i].Role == "tool" {
+			lastTool = i
+			break
+		}
+	}
+	// Pass 1: skeletonize every eligible OLDER tool body, oldest-first (only
+	// useful when the skeleton rung wasn't already applied to that body).
 	for i := protectedPrefix; i < len(out) && estimateTokens(out) > budget; i++ {
-		if out[i].Role != "tool" || isElided(out[i].Content) {
+		if out[i].Role != "tool" || i == lastTool || isElided(out[i].Content) {
 			continue
 		}
 		if sk, ok := skeletonize(out[i].Content); ok && len(sk) < len(out[i].Content) {
 			out[i].Content = sk
 		}
 	}
-	// Pass 2: elide tool bodies to bare markers, oldest-first — including the
-	// keepRecent tail compact() must never touch; sparing the newest turns as
-	// long as the estimate allows is exactly why this walks oldest-first.
+	// Pass 2: elide OLDER tool bodies to bare markers, oldest-first — including
+	// the keepRecent tail compact() must never touch, but NOT the newest body
+	// (eliding it here would make pass 3 unreachable and destroy the one result
+	// the model is about to work on).
 	for i := protectedPrefix; i < len(out) && estimateTokens(out) > budget; i++ {
-		if out[i].Role != "tool" || isElided(out[i].Content) {
+		if out[i].Role != "tool" || i == lastTool || isElided(out[i].Content) {
 			continue
 		}
 		if orig, ok := skeletonOriginalSize(out[i].Content); ok {
@@ -272,25 +285,24 @@ func emergencyShrink(msgs []Msg, budget, protectedPrefix int, opts compactOpts) 
 			out[i].Content = elisionMarker(len(out[i].Content))
 		}
 	}
-	// Pass 3: if ONE body still keeps the estimate over budget (a huge newest
-	// tool result larger than the whole window), trim that body itself to the
-	// room the rest of the transcript leaves. Non-tool content (system,
-	// objective, assistant text) is never touched — if THAT alone exceeds the
-	// budget the run errors honestly, same as the preamble contract.
-	if estimateTokens(out) > budget {
-		largest, size := -1, 0
-		for i := protectedPrefix; i < len(out); i++ {
-			if out[i].Role == "tool" && len(out[i].Content) > size {
-				largest, size = i, len(out[i].Content)
-			}
+	// Pass 3: the newest tool body is what still keeps the estimate over
+	// budget — trim IT to the room the rest of the transcript leaves
+	// (head/tail, disclosure marker inside). If even the floored trim cannot
+	// fit, fall through to a bare marker: a destroyed result beats a request
+	// the server will reject again. Non-tool content (system, objective,
+	// assistant text) is never touched — if THAT alone exceeds the budget the
+	// transcript is returned honestly over budget, same as the preamble
+	// contract.
+	if lastTool >= 0 && estimateTokens(out) > budget {
+		size := len(out[lastTool].Content)
+		rest := estimateTokens(out) - size/bytesPerToken
+		roomChars := (budget - rest) * bytesPerToken
+		if roomChars < 256 {
+			roomChars = 256
 		}
-		if largest >= 0 {
-			rest := estimateTokens(out) - size/bytesPerToken
-			roomChars := (budget - rest) * bytesPerToken
-			if roomChars < 256 {
-				roomChars = 256
-			}
-			out[largest].Content, _ = contextbudget.Trim(out[largest].Content, roomChars)
+		out[lastTool].Content, _ = contextbudget.Trim(out[lastTool].Content, roomChars)
+		if estimateTokens(out) > budget {
+			out[lastTool].Content = elisionMarker(size)
 		}
 	}
 	return out

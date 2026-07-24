@@ -270,10 +270,12 @@ type errThenScriptClient struct {
 	errText   string // the error surfaced on that call
 	errored   bool
 	msgCounts []int
+	msgEst    []int // estimateTokens of EVERY call incl. the errored one (fakeClient.seen skips it)
 }
 
 func (c *errThenScriptClient) Chat(ctx context.Context, msgs []Msg, specs []ToolSpec, mt int) (Completion, error) {
 	c.msgCounts = append(c.msgCounts, len(msgs))
+	c.msgEst = append(c.msgEst, estimateTokens(msgs))
 	if !c.errored && len(c.msgCounts)-1 == c.errOnCall {
 		c.errored = true
 		return Completion{}, errors.New(c.errText)
@@ -351,7 +353,7 @@ func TestEmergencyShrinkNewestHugeTurn(t *testing.T) {
 	if compacted := compact(msgs, budget, 2, 2, compactOpts{}); estimateTokens(compacted) <= budget {
 		t.Fatal("fixture invalid: compact() alone fit the budget, the emergency case never arises")
 	}
-	out := emergencyShrink(msgs, budget, 2, compactOpts{})
+	out := emergencyShrink(msgs, budget, 2)
 	if got := estimateTokens(out); got > budget {
 		t.Fatalf("emergencyShrink left estimate %d > budget %d", got, budget)
 	}
@@ -364,8 +366,17 @@ func TestEmergencyShrinkNewestHugeTurn(t *testing.T) {
 	if out[3].Content == huge {
 		t.Fatal("the huge newest body was not shrunk")
 	}
+	// The newest body must be TRIMMED (disclosure marker inside real content),
+	// not jumped straight to a bare elision marker — graceful degradation is
+	// the whole point of sparing it until pass 3.
+	if isElided(out[3].Content) {
+		t.Fatalf("newest body was elided to a bare marker instead of trimmed: %q", out[3].Content)
+	}
+	if !strings.Contains(out[3].Content, "all work and no play") {
+		t.Fatalf("trimmed newest body kept none of its real content: %q", out[3].Content)
+	}
 	// Determinism: same input, same bytes.
-	out2 := emergencyShrink(msgs, budget, 2, compactOpts{})
+	out2 := emergencyShrink(msgs, budget, 2)
 	for i := range out {
 		if out[i].Content != out2[i].Content {
 			t.Fatalf("nondeterministic shrink at turn %d", i)
@@ -391,7 +402,7 @@ func TestEmergencyShrinkPrefersOldest(t *testing.T) {
 	// Budget that fits once the OLDER body is reduced but does not require
 	// touching the newest one beyond pass 1.
 	budget := estimateTokens(msgs) - len(body)/bytesPerToken/2
-	out := emergencyShrink(msgs, budget, 1, compactOpts{})
+	out := emergencyShrink(msgs, budget, 1)
 	if estimateTokens(out) > budget {
 		t.Fatalf("did not fit budget")
 	}
@@ -426,6 +437,49 @@ func TestLoopReactiveRetryHugeNewestBody(t *testing.T) {
 	}
 	if res.Output != "summarized after recovery" {
 		t.Errorf("output = %q", res.Output)
+	}
+	// The pin that makes this test non-vacuous (a review proved err==nil holds
+	// even without the fix): the RETRY must send strictly fewer estimated
+	// tokens than the rejected request — the retry never re-sends the same
+	// bytes the server just refused.
+	if len(client.msgEst) < 3 {
+		t.Fatalf("expected 3 Chat calls (step 1, rejected, retry), got %d", len(client.msgEst))
+	}
+	if client.msgEst[2] >= client.msgEst[1] {
+		t.Fatalf("retry estimate %d not smaller than the rejected request's %d — identical bytes were re-sent", client.msgEst[2], client.msgEst[1])
+	}
+}
+
+// TestLoopReactiveRetryDenseContent pins the estimate-error hole a review
+// found: on dense content (CJK/base64 ≈ 1 token/byte vs the chars/4 heuristic)
+// the transcript's ESTIMATE sits under the budget while the server counts real
+// tokens and rejects. A budget-relative retry target would no-op both the
+// harder compact and the emergency shrink and re-send the identical bytes;
+// the estimate-relative target must shrink the retry regardless.
+func TestLoopReactiveRetryDenseContent(t *testing.T) {
+	dense := strings.Repeat("好的内容非常密集", 300) // ~7KB UTF-8 → est ~1.8K "tokens", real ~4-7K
+	client := &errThenScriptClient{
+		errOnCall: 1,
+		errText:   "chat 400: request (9187 tokens) exceeds the available context size (8192 tokens), try increasing it",
+	}
+	client.script = []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Name: "read_file", Args: `{"path":"dense.txt"}`}}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "recovered"}, FinishReason: "stop"},
+	}
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) {
+		return dense, nil
+	}}}
+	// A window whose derived budget the ESTIMATE comfortably fits — the
+	// pre-fix retry had nothing to do here and re-sent the rejected bytes.
+	loop := NewLoop(client, tools, 5).WithSystem("sys").WithContextTokens(16384).WithMaxTokens(1024).WithToolResultCap(len(dense) + 1)
+	if _, err := loop.Run(context.Background(), "objective: read the dense file"); err != nil {
+		t.Fatalf("run died: %v", err)
+	}
+	if len(client.msgEst) < 3 {
+		t.Fatalf("expected 3 Chat calls, got %d", len(client.msgEst))
+	}
+	if client.msgEst[2] >= client.msgEst[1] {
+		t.Fatalf("dense-content retry estimate %d not smaller than the rejected %d — the estimate-relative target is not working", client.msgEst[2], client.msgEst[1])
 	}
 }
 

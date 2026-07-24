@@ -309,8 +309,10 @@ type Config struct {
 	// then fit the local window instead (a defer/truncation converted into a
 	// full-fidelity completion). Default ON (flip decision 2026-07-24:
 	// lossless + fail-closed by construction, measured live defer→completion
-	// win); an explicit false in the config file still disables it.
-	GCFCompact bool `json:"gcf_compact,omitempty"`
+	// win); an explicit false in the config file still disables it. No
+	// omitempty: with a TRUE default, omitting a false value on any future
+	// re-marshal would silently flip an operator's explicit choice.
+	GCFCompact bool `json:"gcf_compact"`
 	// CachePath / LedgerPath are bbolt files.
 	CachePath  string `json:"cache_path"`
 	LedgerPath string `json:"ledger_path"`
