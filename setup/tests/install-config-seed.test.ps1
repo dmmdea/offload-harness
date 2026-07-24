@@ -72,9 +72,10 @@ foreach ($tier in @('blackwell-72','blackwell-48','blackwell-32','blackwell-16',
   Assert ($s.videogen_width -eq 1280 -and $s.videogen_height -eq 720)       "$tier seeds 720p video"
   Assert ($s.videogen_frames -eq 81)                                        "$tier seeds the 81-frame native ceiling"
 }
-# 8GB tiers: SDXL-class image stays until O1-on-8GB is verified on a real box (policy table).
-Assert ($null -eq $profiles.'ampere-8'.config_seed.imagegen_family)         'ampere-8 does NOT seed the o1 family (unverified on 8GB)'
-Assert ($null -eq $profiles.'blackwell-8'.config_seed.imagegen_family)      'blackwell-8 does NOT seed the o1 family (unverified on 8GB)'
+# 8GB tiers: the BASE seed stays media-free (low-RAM boxes have no offload path);
+# the O1 image seat now lives in the RAM-CONDITIONAL layer asserted in the J4 block below.
+Assert ($null -eq $profiles.'ampere-8'.config_seed.imagegen_family)         'ampere-8 BASE seed does NOT bind the o1 family (media is RAM-conditional)'
+Assert ($null -eq $profiles.'blackwell-8'.config_seed.imagegen_family)      'blackwell-8 BASE seed does NOT bind the o1 family (media is RAM-conditional)'
 
 # --- J2: the amd-rdna3 sdcpp seed + __OFFLOAD_HOME__ token substitution ---------------
 Write-Host ""
@@ -108,6 +109,22 @@ Assert ($mergedNoHome -match '__OFFLOAD_HOME__')                            'wit
 $arrTok = [pscustomobject]@{ sdcpp_extra_args = @('__OFFLOAD_HOME__/x', '--flag') }
 $arrOut = (Merge-ConfigSeed -ConfigText $tpl -Seed $arrTok -OffloadHome 'D:\oh') | ConvertFrom-Json
 Assert (@($arrOut.sdcpp_extra_args)[0] -eq 'D:/oh/x')                       'token expands inside array elements'
+
+# --- J4: the RAM-conditional 8GB media seed layer -------------------------------------
+Write-Host ""
+Write-Host "== J4: config_seed_ram_mid_high (8GB tiers) =="
+foreach ($tier8 in @('ampere-8', 'blackwell-8')) {
+  $cond = $profiles.$tier8.config_seed_ram_mid_high
+  Assert ($null -ne $cond)                                                  "$tier8 carries the RAM-conditional seed"
+  Assert ($cond.imagegen_family -eq 'hidream-o1')                           "$tier8 conditional seed binds the O1 family (quality-first image seat)"
+  Assert ($cond.imagegen_vae -eq 'builtin')                                 "$tier8 conditional seed uses the builtin VAE (O1 is pixel-space)"
+  $mediaKeys = @($cond.PSObject.Properties.Name | Where-Object { $_ -like 'videogen_*' -or $_ -like 'musicgen_*' })
+  Assert ($mediaKeys.Count -eq 0)                                           "$tier8 conditional seed has NO video/music keys AT ALL (8GB decision 2026-07-23)"
+  Assert ($null -eq $profiles.$tier8.config_seed)                           "$tier8 BASE seed stays absent (low-RAM boxes get no media binding)"
+}
+# The conditional layer merges ON TOP of the template like any seed.
+$condMerged = (Merge-ConfigSeed -ConfigText $tpl -Seed $profiles.'ampere-8'.config_seed_ram_mid_high -OffloadHome 'D:\oh') | ConvertFrom-Json
+Assert ($condMerged.imagegen_family -eq 'hidream-o1')                       'conditional seed merges cleanly'
 
 Write-Host ""
 if ($failures -eq 0) { Write-Host 'ALL PASS' -ForegroundColor Green; exit 0 }

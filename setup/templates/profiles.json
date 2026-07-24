@@ -94,7 +94,8 @@
       "moe_26b": "cpu_moe",
       "flash_attn": "on",
       "backend": "cuda",
-      "notes": "Configs #5/#6 (3070 8GB laptop; +64GB adds the 26B cpu-moe path). E4B resident full-GPU. 26B via --cpu-moe ONLY when ram_tier is mid/high; dropped on low/min (no RAM path). PROJECTED."
+      "config_seed_ram_mid_high": { "imagegen_family": "hidream-o1", "imagegen_ckpt": "hidream_o1_image_bf16.safetensors", "imagegen_vae": "builtin", "imagegen_timeout_sec": 3600 },
+      "notes": "Configs #5/#6 (3070 8GB laptop; +64GB adds the 26B cpu-moe path). E4B resident full-GPU. 26B via --cpu-moe ONLY when ram_tier is mid/high; dropped on low/min (no RAM path). J4: config_seed_ram_mid_high auto-binds the quality-first O1 bf16 IMAGE seat on mid/high-RAM boxes (VERIFIED on the 8GB 3070 + 64GB reference box, 5.9 min/render via RAM offload; the seat the Aorus previously bound manually). IMAGE ONLY by decision 2026-07-23: no video/music seat on the 8GB node. Model downloads stay out-of-band like the >=16GB seeds. PROJECTED."
     },
     "blackwell-8": {
       "ctx_size": 16384,
@@ -105,7 +106,8 @@
       "moe_26b": "cpu_moe",
       "flash_attn": "on",
       "backend": "cuda",
-      "notes": "Configs #8/#9 (5060 8GB Blackwell; +64GB adds 26B cpu-moe). E4B resident full-GPU. REQUIRES the Blackwell CUDA-12.8 sm_120 build (Task H4). 26B cpu-moe only when ram_tier mid/high; else dropped. PROJECTED."
+      "config_seed_ram_mid_high": { "imagegen_family": "hidream-o1", "imagegen_ckpt": "hidream_o1_image_bf16.safetensors", "imagegen_vae": "builtin", "imagegen_timeout_sec": 3600 },
+      "notes": "Configs #8/#9 (5060 8GB Blackwell; +64GB adds 26B cpu-moe). E4B resident full-GPU. REQUIRES the Blackwell CUDA-12.8 sm_120 build (Task H4). 26B cpu-moe only when ram_tier mid/high; else dropped. J4: config_seed_ram_mid_high auto-binds the O1 bf16 IMAGE seat on mid/high-RAM boxes (verified on the ampere-8 reference box; image only — no video/music on 8GB by decision 2026-07-23). PROJECTED."
     },
     "ampere-6": {
       "ctx_size": 16384,

@@ -86,6 +86,13 @@ evaluation passed 3/3. Its safety envelope is validation rather than a gate — 
 no boxes, or absurd boxes covering more than 60% of the image all error out so the caller defers,
 with the manual `mask_boxes` workflow named. It never silently repaints unverified regions.
 
+**Per-box device/launch seams (J4).** Three env knobs decouple shared code from CUDA-box
+assumptions, all default-preserving: `COMFY_COMPUTE_DEVICE` overrides the DisTorch2 loaders'
+`compute_device` in the Wan graph (was hardcoded `cuda:0`); `COMFY_EXTRA_ARGS` appends verbatim
+flags to the managed ComfyUI launch (whitespace-split — a flag VALUE containing spaces is
+inexpressible, fine for ComfyUI-style flags); `TTS_DEVICE` overrides the
+Chatterbox worker's torch device auto-pick.
+
 ## Data and state
 
 Rendered outputs land in the configured media directory or a caller-supplied `out_dir`. Footprint
