@@ -188,3 +188,70 @@ func TestInpaintArgsGrowMaskZeroVsAbsent(t *testing.T) {
 		}
 	}
 }
+
+// TestSdcppArgs_FullBinding: the sdcpp argv carries every configured binding flag,
+// positionals first, extra args as repeated --extra tokens (the runner owns the
+// mapping to sd.cpp's real CLI — no sd.cpp flag names appear at this layer).
+func TestSdcppArgs_FullBinding(t *testing.T) {
+	m := SdcppModel{
+		Bin:       `C:\sd\sd.exe`,
+		Model:     `D:\models\z-image-turbo-Q8_0.gguf`,
+		ModelKind: "diffusion",
+		VAE:       `D:\models\zimage_vae.safetensors`,
+		ClipL:     `D:\models\clip_l.safetensors`,
+		ClipG:     `D:\models\clip_g.safetensors`,
+		T5:        `D:\models\t5xxl_fp16.safetensors`,
+		Steps:     8,
+		CFG:       1,
+		Sampler:   "euler",
+		ExtraArgs: []string{"--vae-on-cpu", "--clip-on-cpu"},
+	}
+	args := sdcppArgs("out.png", "a red fox", map[string]any{"negative": "blurry", "width": 1024, "height": 768, "seed": 42}, m)
+	if args[0] != "out.png" || args[1] != "a red fox" {
+		t.Fatalf("positionals wrong: %s", argv(args))
+	}
+	has(t, args, "--negative", "blurry")
+	has(t, args, "--width", "1024")
+	has(t, args, "--height", "768")
+	has(t, args, "--seed", "42")
+	has(t, args, "--steps", "8")
+	has(t, args, "--model", `D:\models\z-image-turbo-Q8_0.gguf`)
+	has(t, args, "--model-kind", "diffusion")
+	has(t, args, "--vae", `D:\models\zimage_vae.safetensors`)
+	has(t, args, "--clip-l", `D:\models\clip_l.safetensors`)
+	has(t, args, "--clip-g", `D:\models\clip_g.safetensors`)
+	has(t, args, "--t5xxl", `D:\models\t5xxl_fp16.safetensors`)
+	has(t, args, "--cfg", "1")
+	has(t, args, "--sampler", "euler")
+	// both extra args present as --extra pairs, in order
+	n := 0
+	for i, a := range args {
+		if a == "--extra" {
+			want := m.ExtraArgs[n]
+			if args[i+1] != want {
+				t.Fatalf("--extra[%d] = %q, want %q in: %s", n, args[i+1], want, argv(args))
+			}
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("want 2 --extra pairs, got %d in: %s", n, argv(args))
+	}
+}
+
+// TestSdcppArgs_RequestStepsWinAndZeroBinding: a per-request steps overrides the
+// binding's steps (same contract as the ComfyUI path), and a zero binding passes
+// no binding flags at all.
+func TestSdcppArgs_RequestStepsWinAndZeroBinding(t *testing.T) {
+	m := SdcppModel{Model: "m.gguf", Steps: 20}
+	args := sdcppArgs("o.png", "p", map[string]any{"steps": 4}, m)
+	has(t, args, "--steps", "4")
+	zero := SdcppModel{Model: "m.gguf"}
+	zargs := sdcppArgs("o.png", "p", nil, zero)
+	if want := "o.png p --model m.gguf"; argv(zargs) != want {
+		t.Fatalf("zero binding argv = %q, want %q", argv(zargs), want)
+	}
+	hasNot(t, zargs, "--model-kind")
+	hasNot(t, zargs, "--vae")
+	hasNot(t, zargs, "--extra")
+}

@@ -743,6 +743,12 @@ func mediaBase(mediaDir, audioPath, ident string) string {
 // prompt, ComfyUI down, render error, timeout) defers to Claude. params: negative (string),
 // width/height/steps/seed (int).
 func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+	// J2: per-machine media-engine seam. "sdcpp" routes to the stable-diffusion.cpp
+	// runner (single Vulkan binary, no ComfyUI) — its own function so the ComfyUI
+	// path below stays byte-for-byte unchanged. ""/"comfy" = the standing default.
+	if p.cfg.ImageGenEngine == "sdcpp" {
+		return p.runGenerateImageSdcpp(ctx, req, meta, start)
+	}
 	if p.cfg.ImageGenScript == "" {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		p.recordDefer(req.Task, meta, len(req.Input), "no image-gen route configured")
@@ -817,6 +823,84 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 		meta.ErrClass = classifyErr(gerr)
 		p.recordDefer(req.Task, meta, len(req.Input), "image generation failed: "+gerr.Error())
 		return core.Deferf("image generation failed: "+gerr.Error(), "", meta)
+	}
+	meta.LatencyMs = time.Since(start).Milliseconds()
+	data, _ := json.Marshal(map[string]any{
+		"image_path": outPath,
+		"width":      paramIntOr(req.Params, "width", 1024),
+		"height":     paramIntOr(req.Params, "height", 1024),
+		"seed":       seed,
+	})
+	p.record(req.Task, meta, len(prompt))
+	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// runGenerateImageSdcpp renders req.Input via stable-diffusion.cpp (J2): a single
+// native binary spawned per job under the same GPU lock — zero-warm by construction,
+// no ComfyUI anywhere on the path (no COMFY_DIR in the env, no post-run /free). The
+// AMD/Vulkan tier's engine; any failure defers exactly like the ComfyUI path.
+func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+	deferf := func(reason string) core.Result {
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		p.recordDefer(req.Task, meta, len(req.Input), reason)
+		return core.Deferf(reason, "", meta)
+	}
+	if p.cfg.SdcppBin == "" {
+		return deferf("imagegen_engine is sdcpp but sdcpp_bin is not configured")
+	}
+	if p.cfg.SdcppModel == "" {
+		return deferf("imagegen_engine is sdcpp but sdcpp_model is not configured")
+	}
+	prompt := strings.TrimSpace(req.Input)
+	if prompt == "" {
+		return deferf("empty image prompt")
+	}
+	scriptCfg := p.cfg.SdcppScript
+	if scriptCfg == "" {
+		scriptCfg = "render/sdcpp-generate.mjs"
+	}
+	script, serr := gpugen.ResolveScript(scriptCfg)
+	if serr != nil {
+		return deferf(serr.Error())
+	}
+	// Ledger/health tier: the sdcpp engine is its own tier keyed by the bound model
+	// file — never the ComfyUI labels (health.groupByTier must not merge engines).
+	meta.Model = "sdcpp:" + filepath.Base(p.cfg.SdcppModel)
+	// Same seed-pinning contract as the ComfyUI path: the reported seed must be the
+	// seed actually rendered, so mint one before the run when the caller sent none.
+	seed := paramIntOr(req.Params, "seed", 0)
+	if seed <= 0 {
+		seed = mintSeed()
+		if req.Params == nil {
+			req.Params = map[string]any{}
+		}
+		req.Params["seed"] = seed
+	}
+	out := paramStr(req.Params, "out")
+	if out == "" {
+		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
+		out = filepath.Join(p.cfg.MediaDir, "render-"+sha256hex(prompt+tasks.StableParamsKey(req.Params))[:8]+".png")
+	}
+	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second
+	m := imagegen.SdcppModel{
+		Bin:       p.cfg.SdcppBin,
+		Model:     p.cfg.SdcppModel,
+		ModelKind: p.cfg.SdcppModelKind,
+		VAE:       p.cfg.SdcppVAE,
+		ClipL:     p.cfg.SdcppClipL,
+		ClipG:     p.cfg.SdcppClipG,
+		T5:        p.cfg.SdcppT5,
+		Steps:     p.cfg.ImageGenSteps,
+		CFG:       p.cfg.ImageGenCFG,
+		Sampler:   p.cfg.ImageGenSampler,
+		ExtraArgs: p.cfg.SdcppExtraArgs,
+	}
+	imgFamily, imgQuant := imageFootprintKey(p.cfg)
+	outPath, gerr := imagegen.GenerateSdcpp(ctx, p.cfg.NodePath, script, out, prompt, req.Params, m, timeout,
+		p.footprintSampling(imgFamily, imgQuant, "image-gen"), p.lockEnv()...)
+	if gerr != nil {
+		meta.ErrClass = classifyErr(gerr)
+		return deferf("image generation failed: " + gerr.Error())
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	data, _ := json.Marshal(map[string]any{
@@ -1578,6 +1662,23 @@ func runNvidiaSmiMemory() (string, error) {
 // other binding is "node default" per the contract.
 func imageFootprintKey(cfg config.Config) (family, quant string) {
 	family = cfg.ImageGenFamily
+	// J2 sdcpp engine: family still comes from imagegen_family (per-machine truth);
+	// with no family set, "sdcpp" keeps its ledger tier distinct from the ComfyUI
+	// SDXL default. Quant is read from the bound model's filename (GGUF quants
+	// encode it: ...-Q8_0.gguf / Q4_K...), else node default.
+	if cfg.ImageGenEngine == "sdcpp" {
+		if family == "" {
+			family = "sdcpp"
+		}
+		up := strings.ToUpper(cfg.SdcppModel)
+		for _, q := range []string{"Q8_0", "Q6_K", "Q5_K", "Q5_1", "Q4_K", "Q4_1", "Q4_0", "Q3_K", "Q2_K", "F16", "BF16"} {
+			if strings.Contains(up, q) {
+				quant = strings.ToLower(q)
+				break
+			}
+		}
+		return family, quant
+	}
 	if family == "" {
 		family = "sdxl"
 	}
