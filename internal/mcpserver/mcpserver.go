@@ -893,13 +893,17 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	if rerr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error(), "steps": res.Steps})
 	}
-	return jsonResult(map[string]any{
+	out := map[string]any{
 		"output":      res.Output,
 		"steps":       res.Steps,
 		"stop_reason": res.StopReason,
 		"tools":       len(built.Tools),
 		"ctx_window":  effCtx, // the window compaction budgeted against (probed, or the conservative fallback)
-	})
+	}
+	if res.CompactionsExhausted > 0 {
+		out["compactions_exhausted"] = res.CompactionsExhausted // fit=false telemetry: best-effort over-budget requests were sent
+	}
+	return jsonResult(out)
 }
 
 // jsonResult marshals an arbitrary payload (NIM is not a core.Result) into a

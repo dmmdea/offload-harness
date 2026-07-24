@@ -4,6 +4,32 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.26] - 2026-07-24
+
+### Added — OmniRoute harvest Phase C: dedupe rung, re-request pinning, FORCE_PRESERVE, fit telemetry (ADR 0016)
+- **Content-addressed dedupe rung** (always on, the ladder's cheapest, before GCF): an OLDER tool
+  body byte-identical to a LATER result collapses to a reference marker naming the later call id —
+  the newest copy stays authoritative, pairing intact, information reachable by reference. Bodies
+  under 64 chars are skipped.
+- **H8 re-request pinning**: when the circuit breaker refuses an exact-repeat call, the ORIGINAL
+  result's call id is pinned for the rest of the run — exempt from dedupe/skeleton/elide, its unit
+  from drop (lossless GCF still applies; `emergencyShrink` stays pin-blind). Content the model
+  re-reads stops being lossily compacted.
+- **FORCE_PRESERVE guards**: the elision rung keeps a bounded residue (≤5 lines/≤400 chars) of a
+  body's signal lines (errors/failures/warnings/test summaries) under the marker; the drop rung
+  refuses to drop units still carrying signal residue or pinned results. The mini-corpus eval pin
+  evolved accordingly: the buried error entity now survives BOTH ladders (pinned both directions).
+- **fit=false telemetry**: `Result.CompactionsExhausted` counts steps whose ladder could not fit
+  the budget; surfaced by the standalone runner (stderr) and `agent_run` (result JSON) — a
+  best-effort over-budget request is never silent.
+- **Monotonicity invariant, test-pinned**: compaction is idempotent at a fixed budget and never
+  regresses a compacted turn at a gentler one (KV-prefix stability doctrine made explicit).
+- Deliberate deviation, documented in ADR 0016: the harvested projected-fit driver is NOT ported —
+  rungs here are microsecond-cheap and applied-and-measured, strictly more accurate than static
+  projection factors; the exhaustion telemetry delivers the factors' remaining value.
+- **Baseline note**: the base ladder's bytes change for signal-bearing bodies, so pre-Phase-C
+  compaction-eval ratchet baselines correctly BREACH — re-freeze after adopting.
+
 ## [0.22.25] - 2026-07-24
 
 ### Changed — compaction defaults ON + the budget targets the SERVED window (ADR 0015)

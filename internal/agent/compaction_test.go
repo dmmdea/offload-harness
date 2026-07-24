@@ -17,9 +17,13 @@ func asstCall(id string) Msg {
 	return Msg{Role: "assistant", ToolCalls: []ToolCall{tc(id, "search", `{"q":"x"}`)}}
 }
 
-// toolResult is the matching tool result for a call id, with a body of n bytes.
+// toolResult is the matching tool result for a call id, with a body of exactly
+// n bytes. The id prefixes the body so two same-size results are never
+// byte-identical — the dedupe rung (Phase C) would otherwise collapse the
+// older one and change what these fixtures exercise.
 func toolResult(id string, n int) Msg {
-	return Msg{Role: "tool", ToolCallID: id, Content: strings.Repeat("R", n)}
+	body := id + strings.Repeat("R", n-len(id))
+	return Msg{Role: "tool", ToolCallID: id, Content: body}
 }
 
 // pairing verifies every tool-role message has a matching earlier assistant
@@ -570,12 +574,13 @@ func TestCompactSkeletonFallsThroughToMarkers(t *testing.T) {
 	}
 }
 
-// TestCompactSkeletonOffIsByteIdenticalToOldLadder: skeleton=false must
-// reproduce the pre-feature ladder exactly. Pinned message-by-message: every
-// message either survives verbatim or carries the EXACT bare-marker string the
-// old ladder produced — any off-path drift (marker text, order, extra drops)
-// fails here.
-func TestCompactSkeletonOffIsByteIdenticalToOldLadder(t *testing.T) {
+// TestCompactSkeletonOffPinnedLadderBytes: skeleton=false must reproduce the
+// base ladder exactly, pinned message-by-message. Since Phase C (ADR 0016) the
+// base elision carries the FORCE_PRESERVE amendment: a signal-bearing body's
+// marker keeps a bounded residue of its signal lines — pinned here as the
+// EXACT expected bytes (marker line + the known ERROR line). Any other drift
+// (marker text, order, extra drops, residue beyond the signal) fails.
+func TestCompactSkeletonOffPinnedLadderBytes(t *testing.T) {
 	msgs := skTranscript()
 	budget := estimateTokens(msgs) - 1200
 	out := compact(msgs, budget, 2, 2, compactOpts{})
@@ -588,12 +593,10 @@ func TestCompactSkeletonOffIsByteIdenticalToOldLadder(t *testing.T) {
 			t.Fatalf("off-path reordered msg %d: %s/%s -> %s/%s", i, msgs[i].Role, msgs[i].ToolCallID, out[i].Role, out[i].ToolCallID)
 		}
 		want := msgs[i].Content
-		// The old ladder's ONLY edit at this budget: the OLDEST tool body (c1)
-		// becomes an exact bare marker — its elision alone (~1900 est. tokens
-		// saved) satisfies the 1200-token deficit, so the oldest-first loop
-		// stops there and c2 stays full.
+		// The base ladder's ONLY edit at this budget: the OLDEST tool body (c1)
+		// is elided — marker first line + its one buried ERROR line preserved.
 		if out[i].Role == "tool" && out[i].ToolCallID == "c1" {
-			want = elisionMarker(len(msgs[i].Content))
+			want = elisionMarker(len(msgs[i].Content)) + "\nERROR: connection refused by upstream"
 		}
 		if out[i].Content != want {
 			t.Errorf("off-path msg %d (%s/%s) drifted:\n got %q\nwant %q", i, out[i].Role, out[i].ToolCallID, firstLine(out[i].Content), firstLine(want))
@@ -611,8 +614,15 @@ func TestCompactSkeletonFallThroughMarkerReportsOriginalSize(t *testing.T) {
 	out := compact(msgs, 400, 1, 2, compactOpts{Skeleton: true})
 	for _, m := range out {
 		if m.Role == "tool" && m.ToolCallID == "c1" && isElided(m.Content) {
-			if m.Content != elisionMarker(origLen) {
-				t.Errorf("fall-through marker misreports size: got %q, want %q", m.Content, elisionMarker(origLen))
+			// The marker's FIRST line must disclose the ORIGINAL size; the
+			// FORCE_PRESERVE residue (signal lines) may follow it.
+			if !strings.HasPrefix(m.Content, elisionMarker(origLen)) {
+				t.Errorf("fall-through marker misreports size: got %q, want prefix %q", firstLine(m.Content), elisionMarker(origLen))
+			}
+			for _, ln := range strings.Split(m.Content, "\n")[1:] {
+				if !signalLine.MatchString(ln) {
+					t.Errorf("non-signal residue under the marker: %q", ln)
+				}
 			}
 			return
 		}
@@ -698,7 +708,6 @@ func TestLoopGCFCompactWiring(t *testing.T) {
 	// under — a tighter window would fall through to bare markers and hide
 	// the GCF block; a looser one never compacts at all (first version of
 	// this test failed exactly that way).
-	body := jsonToolBody(80)
 	script := []Completion{}
 	for i := 0; i < 5; i++ {
 		script = append(script, Completion{
@@ -708,9 +717,16 @@ func TestLoopGCFCompactWiring(t *testing.T) {
 	}
 	script = append(script, Completion{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"})
 	client := &fakeClient{script: script}
+	// Each call returns a DISTINCT (still GCF-eligible) array — identical
+	// bodies would be collapsed by the cheaper dedupe rung (Phase C) before
+	// GCF ever ran, hiding the wiring under test.
+	n := 0
 	tools := []Tool{{
 		ToolSpec: ToolSpec{Name: "bloat", Description: "bloat", Schema: []byte(`{"type":"object"}`)},
-		Exec:     func(_ context.Context, _ string) (string, error) { return body, nil },
+		Exec: func(_ context.Context, _ string) (string, error) {
+			n++
+			return jsonToolBody(80 + n), nil
+		},
 	}}
 	loop := NewLoop(client, tools, 20).
 		WithContextTokens(8192).
@@ -736,7 +752,6 @@ func TestLoopGCFCompactWiring(t *testing.T) {
 // window must produce skeletonized (not bare-marker) older tool results in the
 // transcript it sends — proving the flag actually reaches compact().
 func TestLoopSkeletonPruneWiring(t *testing.T) {
-	verbose := buildToolOutput(150, "ERROR: wired through")
 	script := []Completion{}
 	for i := 0; i < 5; i++ {
 		// Unique args per call — byte-identical repeats are refused by
@@ -749,9 +764,15 @@ func TestLoopSkeletonPruneWiring(t *testing.T) {
 	}
 	script = append(script, Completion{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"})
 	client := &fakeClient{script: script}
+	// DISTINCT verbose bodies per call — identical bodies would be collapsed
+	// by the cheaper dedupe rung (Phase C) before the skeleton rung ran.
+	n := 0
 	tools := []Tool{{
 		ToolSpec: ToolSpec{Name: "bloat", Description: "bloat", Schema: []byte(`{"type":"object"}`)},
-		Exec:     func(_ context.Context, _ string) (string, error) { return verbose, nil },
+		Exec: func(_ context.Context, _ string) (string, error) {
+			n++
+			return buildToolOutput(150+n, "ERROR: wired through"), nil
+		},
 	}}
 	// Window sized so the run must compact but skeletons ALONE satisfy the
 	// budget — a tighter window would legitimately elide the skeletons onward
