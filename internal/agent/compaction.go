@@ -124,15 +124,42 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts c
 		recentStart = protectedEnd
 	}
 
+	// Resolve pins TRANSITIVELY through dedupe references first: a pinned body
+	// that is already a dedupe marker protects only the reference — the bytes
+	// the model actually wanted live at the referenced (possibly chained) call,
+	// which must be pinned too or later pressure destroys exactly the content
+	// H8 exists to keep.
+	pinned := opts.Pinned
+	if len(pinned) > 0 {
+		pinned = make(map[string]bool, len(opts.Pinned))
+		for id := range opts.Pinned {
+			pinned[id] = true
+		}
+		for changed := true; changed; {
+			changed = false
+			for _, m := range out {
+				if m.Role == "tool" && pinned[m.ToolCallID] && isDeduped(m.Content) {
+					if ref, ok := dedupeRef(m.Content); ok && !pinned[ref] {
+						pinned[ref] = true
+						changed = true
+					}
+				}
+			}
+		}
+	}
+
 	// Step 2-pre (always on — the cheapest rung, reference-preserving): collapse
 	// OLDER tool bodies byte-identical to a LATER tool result. A model that
 	// fetched the same content twice keeps its NEWEST copy authoritative; the
 	// older copy becomes a reference marker naming the later call id (pairing
 	// intact, information reachable via the reference). Runs before GCF so
-	// per-copy re-encodings can never make duplicates unequal first. If the
-	// later copy is itself compacted by a later rung the reference degrades to
-	// pointing at a marker — disclosed, and still no worse than the marker the
-	// older copy would have become anyway.
+	// per-copy re-encodings can never make duplicates unequal first. Honest
+	// limits, disclosed here rather than papered over: if the later copy is
+	// itself compacted afterwards the reference degrades to pointing at a
+	// marker; the drop rung can remove the referenced unit entirely; and
+	// repeated passes over fresh duplicates can produce short reference
+	// chains. All are still no worse than the bare marker the older copy
+	// would otherwise have become, and pin resolution above follows chains.
 	latest := map[string]int{} // body → index of its LAST occurrence
 	for i := len(out) - 1; i >= protectedEnd; i-- {
 		if out[i].Role != "tool" || len(out[i].Content) < dedupeMinChars || IsCompactionArtifact(out[i].Content) {
@@ -143,11 +170,15 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts c
 		}
 	}
 	for i := protectedEnd; i < recentStart && estimateTokens(out) > budget; i++ {
-		if out[i].Role != "tool" || opts.Pinned[out[i].ToolCallID] || len(out[i].Content) < dedupeMinChars || IsCompactionArtifact(out[i].Content) {
+		if out[i].Role != "tool" || pinned[out[i].ToolCallID] || len(out[i].Content) < dedupeMinChars || IsCompactionArtifact(out[i].Content) {
 			continue
 		}
 		if j, ok := latest[out[i].Content]; ok && j > i {
-			out[i].Content = dedupeMarker(out[j].ToolCallID, len(out[i].Content))
+			// Guard against GROWTH: a long call id can make the marker larger
+			// than a smallish body — collapsing must always shrink.
+			if m := dedupeMarker(out[j].ToolCallID, len(out[i].Content)); len(m) < len(out[i].Content) {
+				out[i].Content = m
+			}
 		}
 	}
 	if estimateTokens(out) <= budget {
@@ -176,7 +207,7 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts c
 	// twice lands on identical bytes (isSkeletonized stops re-pruning).
 	if opts.Skeleton {
 		for i := protectedEnd; i < recentStart && estimateTokens(out) > budget; i++ {
-			if out[i].Role == "tool" && !opts.Pinned[out[i].ToolCallID] {
+			if out[i].Role == "tool" && !pinned[out[i].ToolCallID] {
 				if sk, ok := skeletonize(out[i].Content); ok {
 					out[i].Content = sk
 				}
@@ -197,7 +228,7 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts c
 	// instead of losing them to a bare marker. Deduped references are skipped —
 	// already tiny, and eliding one would sever the reference for no gain.
 	for i := protectedEnd; i < recentStart && estimateTokens(out) > budget; i++ {
-		if out[i].Role == "tool" && !isElided(out[i].Content) && !isDeduped(out[i].Content) && !opts.Pinned[out[i].ToolCallID] {
+		if out[i].Role == "tool" && !isElided(out[i].Content) && !isDeduped(out[i].Content) && !pinned[out[i].ToolCallID] {
 			n := len(out[i].Content)
 			if orig, ok := skeletonOriginalSize(out[i].Content); ok {
 				n = orig
@@ -236,7 +267,7 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts c
 			droppable := true
 			for j := i + 1; j < recentStart; j++ {
 				if out[j].Role == "tool" && ids[out[j].ToolCallID] {
-					if opts.Pinned[out[j].ToolCallID] || signalLine.MatchString(out[j].Content) {
+					if pinned[out[j].ToolCallID] || signalLine.MatchString(out[j].Content) {
 						droppable = false
 						break
 					}
@@ -298,6 +329,20 @@ func isDeduped(content string) bool {
 	return len(content) >= len(dedupePrefix) && content[:len(dedupePrefix)] == dedupePrefix
 }
 
+// dedupeRef parses the referenced call id back out of a dedupe marker, so pin
+// resolution can follow the reference to the bytes it stands for.
+func dedupeRef(content string) (string, bool) {
+	if !isDeduped(content) {
+		return "", false
+	}
+	rest := content[len(dedupePrefix):]
+	end := strings.Index(rest, " — ")
+	if end <= 0 {
+		return "", false
+	}
+	return rest[:end], true
+}
+
 // elideSignalMaxLines / elideSignalMaxChars bound the FORCE_PRESERVE residue an
 // elision may keep — enough for the error that a later step needs, never a
 // skeleton-sized survivor.
@@ -312,18 +357,30 @@ const elideSignalMaxChars = 400
 func elideWithSignal(content string, origLen int) string {
 	marker := elisionMarker(origLen)
 	var kept []string
-	total := 0
+	total := 0 // total JOINED length of the residue, newline separators included
 	for _, ln := range strings.Split(content, "\n") {
-		if len(kept) >= elideSignalMaxLines || total >= elideSignalMaxChars {
+		if len(kept) >= elideSignalMaxLines {
 			break
 		}
-		if signalLine.MatchString(ln) {
-			if len(ln) > elideSignalMaxChars {
-				ln = ln[:elideSignalMaxChars]
-			}
-			kept = append(kept, ln)
-			total += len(ln)
+		if !signalLine.MatchString(ln) {
+			continue
 		}
+		sep := 0
+		if len(kept) > 0 {
+			sep = 1 // the joining newline counts against the bound too
+		}
+		room := elideSignalMaxChars - total - sep
+		if room <= 0 {
+			break
+		}
+		if len(ln) > room {
+			ln = clip(ln, room) // rune-safe: never split a multibyte char
+		}
+		if ln == "" {
+			break
+		}
+		kept = append(kept, ln)
+		total += len(ln) + sep
 	}
 	if len(kept) == 0 {
 		return marker
@@ -333,9 +390,10 @@ func elideWithSignal(content string, origLen int) string {
 
 // isElided reports whether a tool body has already been replaced by a marker,
 // so a re-compaction does not double-elide (which would misreport the size).
-// Compaction only ever replaces a body with this fixed ASCII marker — it never
-// partially truncates a body — so no multibyte rune can be split (the marker
-// itself is pure ASCII). Rune-safe by construction; no headCut/tailCut needed.
+// The marker line itself is pure ASCII; the two places compaction DOES
+// truncate content — the FORCE_PRESERVE signal residue (elideWithSignal) and
+// emergencyShrink's final trim — both go through rune-safe helpers (clip /
+// contextbudget.Trim), so no multibyte rune is ever split.
 func isElided(content string) bool {
 	const prefix = "[earlier result elided to fit context —"
 	return len(content) >= len(prefix) && content[:len(prefix)] == prefix
@@ -387,9 +445,19 @@ func emergencyShrink(msgs []Msg, budget, protectedPrefix int) []Msg {
 	// Pass 2: elide OLDER tool bodies to bare markers, oldest-first — including
 	// the keepRecent tail compact() must never touch, but NOT the newest body
 	// (eliding it here would make pass 3 unreachable and destroy the one result
-	// the model is about to work on).
+	// the model is about to work on). A body that is ALREADY an elision marker
+	// carrying FORCE_PRESERVE signal residue is stripped to its bare first
+	// line: the ladder proper never reclaims residue, so this last resort must
+	// (the pin-blind rationale applies identically — the alternative is a dead
+	// run), or a residue-heavy transcript could never be made to fit at all.
 	for i := protectedPrefix; i < len(out) && estimateTokens(out) > budget; i++ {
-		if out[i].Role != "tool" || i == lastTool || isElided(out[i].Content) {
+		if out[i].Role != "tool" || i == lastTool {
+			continue
+		}
+		if isElided(out[i].Content) {
+			if nl := strings.IndexByte(out[i].Content, '\n'); nl >= 0 {
+				out[i].Content = out[i].Content[:nl] // strip signal residue
+			}
 			continue
 		}
 		if orig, ok := skeletonOriginalSize(out[i].Content); ok {

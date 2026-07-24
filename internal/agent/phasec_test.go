@@ -107,9 +107,12 @@ func TestLoopExactRepeatPinsOriginalResult(t *testing.T) {
 		{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) { return body, nil }},
 		{ToolSpec: ToolSpec{Name: "other_tool"}, Exec: func(_ context.Context, _ string) (string, error) { return filler, nil }},
 	}
-	// A window tight enough that compaction MUST elide something on the last
-	// step, but generous enough to hold the pinned body + markers.
-	loop := NewLoop(client, tools, 10).WithContextTokens(4096).WithMaxTokens(1024).WithSkeletonPrune(true)
+	// A window tight enough that compaction MUST run on the final steps and
+	// c1 is the ONLY body outside keep-recent — without the pin it gets
+	// elided (a review mutation-proved the previous looser window let this
+	// test pass with pinning deleted entirely).
+	loop := NewLoop(client, tools, 10).WithContextTokens(2048).WithMaxTokens(512).WithSkeletonPrune(true).
+		WithToolResultCap(len(body) + 1) // the boundary cap must not pre-trim the body this test pins
 	res, err := loop.Run(context.Background(), "objective: keep reading the same file")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -123,6 +126,156 @@ func TestLoopExactRepeatPinsOriginalResult(t *testing.T) {
 	if pinnedBody != body {
 		t.Fatalf("the re-requested result was compacted (len %d vs %d) — H8 pin not applied", len(pinnedBody), len(body))
 	}
+	// Prove the pressure was real: with c1 pinned and everything else inside
+	// the protected regions, the ladder had nothing left and must have
+	// exhausted at least once. (Without the pin, c1 is elided instead and
+	// this transcript can fit — either assertion kills the no-pin mutation.)
+	if res.CompactionsExhausted == 0 {
+		t.Fatal("expected the ladder to exhaust under this window — the fixture exerts no real pressure (vacuous test)")
+	}
+}
+
+// TestPinFollowsDedupeReference: pinning a result whose body is ALREADY a
+// dedupe reference must protect the REFERENCED call's bytes too — otherwise
+// H8 protects a 50-char marker while the content the model wanted is
+// destroyed.
+func TestPinFollowsDedupeReference(t *testing.T) {
+	body := strings.Repeat("shared bytes the model actually wants\n", 50)
+	msgs := []Msg{
+		{Role: "user", Content: "objective"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1"}}},
+		{Role: "tool", ToolCallID: "c1", Content: dedupeMarker("c2", len(body))}, // pre-deduped
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "c2"}}},
+		{Role: "tool", ToolCallID: "c2", Content: body},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "c3"}}},
+		{Role: "tool", ToolCallID: "c3", Content: strings.Repeat("droppable filler\n", 50)},
+		{Role: "assistant", Content: "final"},
+	}
+	out := compact(msgs, 60, 1, 1, compactOpts{Skeleton: true, Pinned: map[string]bool{"c1": true}})
+	var c2 string
+	for _, m := range out {
+		if m.Role == "tool" && m.ToolCallID == "c2" {
+			c2 = m.Content
+		}
+	}
+	if c2 != body {
+		t.Fatalf("the referenced body was not transitively pinned: %q", firstLine(c2))
+	}
+}
+
+// TestEmergencyShrinkStripsResidue: FORCE_PRESERVE residue is untouchable by
+// the ladder proper — the LAST RESORT must be able to reclaim it (strip to the
+// bare marker first line), or residue-heavy transcripts can never fit.
+func TestEmergencyShrinkStripsResidue(t *testing.T) {
+	residueBody := elisionMarker(5000) + "\nERROR: kept line one\nWARNING: kept line two"
+	var msgs []Msg
+	msgs = append(msgs, Msg{Role: "user", Content: "objective"})
+	for i := 0; i < 6; i++ {
+		id := "c" + string(rune('1'+i))
+		msgs = append(msgs,
+			Msg{Role: "assistant", ToolCalls: []ToolCall{{ID: id}}},
+			Msg{Role: "tool", ToolCallID: id, Content: residueBody},
+		)
+	}
+	msgs = append(msgs, Msg{Role: "assistant", Content: "final"})
+	budget := estimateTokens(msgs) - 20 // needs SOME reclaim; only residue is left to give
+	out := emergencyShrink(msgs, budget, 1)
+	if got := estimateTokens(out); got > budget {
+		t.Fatalf("emergencyShrink could not reclaim residue: %d > %d", got, budget)
+	}
+	stripped := 0
+	for _, m := range out {
+		if m.Role == "tool" && isElided(m.Content) && !strings.Contains(m.Content, "\n") {
+			stripped++
+		}
+	}
+	if stripped == 0 {
+		t.Fatal("no residue was stripped to a bare marker")
+	}
+}
+
+// TestLoopReExecutesDestroyedResult: when the breaker sees an exact repeat and
+// the ORIGINAL result no longer exists as raw content (compacted away), the
+// call is re-executed ONCE and the fresh result pinned — refusing would point
+// the model at destroyed bytes with no recovery.
+func TestLoopReExecutesDestroyedResult(t *testing.T) {
+	body := strings.Repeat("the readme content the model needs again\n", 60)
+	mk := func(id, name, args string) Completion {
+		return Completion{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc(id, name, args)}}, FinishReason: "tool_calls"}
+	}
+	client := &fakeClient{script: []Completion{
+		mk("c1", "read_file", `{"p":"a"}`),
+		mk("c2", "filler", `{"i":2}`),
+		mk("c3", "filler", `{"i":3}`),
+		mk("c4", "read_file", `{"p":"a"}`), // exact repeat — original destroyed by then
+		{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+	}}
+	n := 0
+	tools := []Tool{
+		{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) { return body, nil }},
+		{ToolSpec: ToolSpec{Name: "filler"}, Exec: func(_ context.Context, _ string) (string, error) {
+			n++
+			return strings.Repeat("filler output line\n", 60+n), nil
+		}},
+	}
+	loop := NewLoop(client, tools, 10).WithContextTokens(2048).WithMaxTokens(512).
+		WithToolResultCap(len(body) * 2) // no boundary pre-trim — the compaction rungs must be the destroyers
+	res, err := loop.Run(context.Background(), "objective: read and re-read")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var c1, c4 string
+	for _, m := range res.Transcript {
+		if m.Role == "tool" && m.ToolCallID == "c1" {
+			c1 = m.Content
+		}
+		if m.Role == "tool" && m.ToolCallID == "c4" {
+			c4 = m.Content
+		}
+	}
+	if !IsCompactionArtifact(c1) {
+		t.Fatalf("fixture invalid: the original result was never destroyed (%q) — the recovery path is not exercised", firstLine(c1))
+	}
+	if c4 != body {
+		t.Fatalf("destroyed-result repeat was refused instead of re-executed: %q", firstLine(c4))
+	}
+}
+
+// TestElideSignalResidueBoundIsTight: the documented ≤400-char bound holds
+// even when many just-under-limit signal lines qualify (a review found the
+// old check allowed ~2× the bound).
+func TestElideSignalResidueBoundIsTight(t *testing.T) {
+	line := "ERROR: " + strings.Repeat("x", 92) // 99 chars, matches signalLine
+	content := strings.Repeat(line+"\n", 40)
+	out := elideWithSignal(content, len(content))
+	residue := out[strings.IndexByte(out, '\n')+1:]
+	if len(residue) > elideSignalMaxChars {
+		t.Fatalf("residue %d chars exceeds the documented bound %d", len(residue), elideSignalMaxChars)
+	}
+}
+
+// TestDedupeNeverGrows: a long real-world call id can make the reference
+// marker bigger than a smallish duplicate body — collapsing must be skipped
+// then, never applied.
+func TestDedupeNeverGrows(t *testing.T) {
+	body := strings.Repeat("z", 70) // over dedupeMinChars, under marker size for a long id
+	longID := "call_0123456789abcdef0123456789abcdef"
+	msgs := []Msg{
+		{Role: "user", Content: "objective"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "a1"}}},
+		{Role: "tool", ToolCallID: "a1", Content: body},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: longID}}},
+		{Role: "tool", ToolCallID: longID, Content: body},
+		{Role: "assistant", Content: "final"},
+	}
+	before := estimateTokens(msgs)
+	out := compact(msgs, 1, 1, 1, compactOpts{})
+	for _, m := range out {
+		if isDeduped(m.Content) && len(m.Content) >= len(body) {
+			t.Fatalf("dedupe grew a body: %d -> %d chars", len(body), len(m.Content))
+		}
+	}
+	_ = before
 }
 
 // --- FORCE_PRESERVE ----------------------------------------------------------

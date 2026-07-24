@@ -369,6 +369,9 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 	// rungs stop touching it (see compactOpts.Pinned).
 	firstCallID := map[string]string{}
 	pinned := map[string]bool{}
+	// reExecuted bounds the destroyed-result recovery to ONE re-execution per
+	// exact (name,args) pair — see dispatchOrThrottle.
+	reExecuted := map[string]bool{}
 	// exhausted counts steps whose ladder could not fit the budget (fit=false
 	// telemetry on the Result — never a silent over-budget request).
 	exhausted := 0
@@ -444,6 +447,9 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				if estimateTokens(msgs) > target {
 					msgs = emergencyShrink(msgs, target, preambleLen)
 				}
+				if estimateTokens(msgs) > target {
+					exhausted++ // even the last resort could not fit — counted, never silent
+				}
 				comp, err = l.client.Chat(ctx, msgs, specs, l.maxTokens)
 			}
 			if err != nil {
@@ -465,7 +471,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 
 		// Execute every requested tool; defer-not-crash on error/unknown.
 		for _, call := range comp.Msg.ToolCalls {
-			content, isErr := l.dispatchOrThrottle(ctx, call, exactCalls, sameNameCalls, disabledTools, firstCallID, pinned)
+			content, isErr := l.dispatchOrThrottle(ctx, call, msgs, exactCalls, sameNameCalls, disabledTools, firstCallID, pinned, reExecuted)
 			// Cap ONE result at the loop boundary so no single tool output can blow
 			// the small window — the per-tool caps don't protect us here (read_file's
 			// 256 KB is ~16× the whole input budget). Trim no-ops under the cap, so
@@ -492,8 +498,12 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 // (name,args) pair records its call id; a later exact-repeat refusal proves
 // the model WANTED that result back, so the original id is pinned and the
 // lossy compaction rungs stop touching it — content the model re-reads stops
-// being compacted.
-func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, exactCalls, sameNameCalls map[string]int, disabledTools map[string]bool, firstCallID map[string]string, pinned map[string]bool) (string, bool) {
+// being compacted. When the original result NO LONGER EXISTS as raw content
+// (already compacted to a marker, or its unit dropped), a refusal would point
+// the model at destroyed bytes with no recovery path — so the call is
+// re-executed ONCE per pair (reExecuted bounds it) and the FRESH result is
+// pinned instead; msgs is the live transcript that check reads.
+func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg, exactCalls, sameNameCalls map[string]int, disabledTools map[string]bool, firstCallID map[string]string, pinned map[string]bool, reExecuted map[string]bool) (string, bool) {
 	if disabledTools[call.Name] {
 		return fmt.Sprintf("NOT executed: %s has been disabled for the rest of this task (too many repeated calls). It is no longer offered — use a different tool or your existing results to continue.", call.Name), true
 	}
@@ -511,8 +521,18 @@ func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, exactCalls
 		return fmt.Sprintf("NOT executed: %s has now been called %d times in this task — that is enough, and it is now DISABLED for the rest of this task. Proceed with the remaining steps using what you already have; %s is no longer available.", call.Name, sameNameCalls[call.Name], call.Name), true
 	}
 	if exactCalls[key] > 1 {
-		if id := firstCallID[key]; id != "" {
+		id := firstCallID[key]
+		if id != "" {
 			pinned[id] = true // the model asked for this result again — stop compacting it
+		}
+		// Recovery path: if the original result is gone (compacted to a marker
+		// or its unit dropped), "use the result you already have" would be a
+		// lie with no way out. Re-execute ONCE per pair and pin the fresh
+		// result; every later repeat is refused as usual.
+		if id != "" && !reExecuted[key] && resultDestroyed(msgs, id) {
+			reExecuted[key] = true
+			pinned[call.ID] = true
+			return l.dispatch(ctx, call)
 		}
 		return fmt.Sprintf("NOT executed: you already called %s with these exact same arguments earlier in this task and you already have that result. Do NOT repeat this call — use the result you already have and move on to the NEXT step of the task.", call.Name), true
 	}
@@ -520,6 +540,18 @@ func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, exactCalls
 		firstCallID[key] = call.ID
 	}
 	return l.dispatch(ctx, call)
+}
+
+// resultDestroyed reports whether the tool result for callID no longer exists
+// as raw content in the transcript: its message was dropped by the drop rung,
+// or its body is now a compaction artifact (marker/skeleton/dedupe reference).
+func resultDestroyed(msgs []Msg, callID string) bool {
+	for _, m := range msgs {
+		if m.Role == "tool" && m.ToolCallID == callID {
+			return IsCompactionArtifact(m.Content)
+		}
+	}
+	return true // no trace of it left at all
 }
 
 // dispatch runs one tool call, returning (resultText, isError). An unknown tool
