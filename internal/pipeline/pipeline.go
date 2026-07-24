@@ -1619,12 +1619,18 @@ func (p *Pipeline) footprintSampling(family, quant, task string) *gpugen.Samplin
 }
 
 // footprintSampleFunc selects the per-render VRAM source per cfg.FleetSampler:
-// Windows + not-"global" → the PDH per-process tree (measures OUR job's cost,
+// "pdh-shared" (J3, UMA iGPUs — the amd-rdna3 seed sets it) → the PDH tree
+// summing Dedicated+Shared, because on unified memory allocations land in
+// SHARED and Dedicated reads ~0 (footprints would silently never record);
+// Windows + not-"global" → the PDH Dedicated tree (measures OUR job's cost,
 // uncontaminated by the desktop/other apps); otherwise an nvidia-smi
 // global-delta closure. p.fleetSample overrides in tests.
 func (p *Pipeline) footprintSampleFunc() func(childPid int) (float64, error) {
 	if p.fleetSample != nil {
 		return p.fleetSample
+	}
+	if runtime.GOOS == "windows" && p.cfg.FleetSampler == "pdh-shared" {
+		return fleetnode.TreeDedicatedPlusSharedGiB
 	}
 	if runtime.GOOS == "windows" && p.cfg.FleetSampler != "global" {
 		return fleetnode.TreeDedicatedGiB

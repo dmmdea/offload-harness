@@ -13,3 +13,25 @@ import "fmt"
 func TreeDedicatedGiB(rootPid int) (float64, error) {
 	return 0, fmt.Errorf("per-process GPU memory sampling requires Windows PDH counters (pid %d)", rootPid)
 }
+
+// TreeDedicatedPlusSharedGiB (fleet_sampler "pdh-shared", J3) is likewise a
+// WDDM/PDH facility — off-Windows it always errors.
+func TreeDedicatedPlusSharedGiB(rootPid int) (float64, error) {
+	return 0, fmt.Errorf("per-process GPU memory sampling requires Windows PDH counters (pid %d)", rootPid)
+}
+
+// GenericWindowsProbe (the windows-generic health source, J3) has no
+// off-Windows implementation: the stub returns a probe that always errors, so
+// ResolveProvider's fallback fails honestly and the gate reports "no working
+// GPU memory source" instead of pretending.
+func GenericWindowsProbe(uma bool) MemProbe {
+	return func() (float64, float64, error) {
+		return 0, 0, fmt.Errorf("windows-generic GPU memory source requires WDDM (uma=%v)", uma)
+	}
+}
+
+// DedicatedVramTotalGiB is a WDDM registry read — off-Windows it always
+// errors (the UMA heuristic in fleet-serve then simply doesn't fire).
+func DedicatedVramTotalGiB() (float64, error) {
+	return 0, fmt.Errorf("dedicated VRAM capacity read requires the Windows display-class registry")
+}

@@ -4,6 +4,30 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.21] - 2026-07-24
+
+### Added — J3: fleet-node citizenship for non-NVIDIA GPUs (Juan-tier Q0, phase 3 of 5)
+- **GPU memory provider seam** (ADR 0014): `fleet-serve` resolves its memory source instead of
+  assuming `nvidia-smi` — nvidia-smi first (existing NVIDIA nodes byte-identical), else the
+  **windows-generic WDDM provider**: capacity from the display-class registry
+  (`HardwareInformation.qwMemorySize`, the same source detect.ps1 uses), usage from the
+  vendor-agnostic `\GPU Adapter Memory(*)` PDH counters. The startup gate refuses only on
+  "no working GPU memory source" — never on GPU brand — and the serve log names the resolved
+  source. `gpu_vendor`/`gpu_arch` now come from `installed.json`'s profile (VendorArchFromProfile)
+  instead of NVIDIA product-name regexes; unknown stays "unknown", never guessed.
+- **UMA memory model**: an iGPU's carve-out is not its capacity — the generic provider advertises
+  carve-out + the WDDM shared budget (~RAM/2) as `vram_total_gb` and Dedicated+Shared as usage
+  (profile-keyed via UMAFromProfile; small-carve-out heuristic only when no manifest exists).
+- **`fleet_sampler: "pdh-shared"`** — the per-process PDH tree summing Dedicated **+ Shared**
+  Usage: on unified memory allocations land in Shared and the Dedicated counter reads ~0, so
+  footprints on the amd-rdna3 tier would silently never record (the audit's "invisible" break).
+  The `amd-rdna3` config_seed sets it (dgpu seeds plain `pdh`); `auto` is unchanged.
+- Sampler generalized to `StartProbeSampler(MemProbe)` (`StartGlobalSampler` kept as the
+  nvidia-smi wrapper); new env-gated live receipt probe `TestLiveWindowsProbes`
+  (FLEET_LIVE_SMOKE=1) — verified on real hardware this session (registry 15.93 GiB on a 5060 Ti,
+  adapter counters live, UMA composition 79.77 GiB on 128 GB RAM). Docs: FLEET-NODE.md +
+  systems/fleet-node.md updated; ADR 0008 cross-referenced.
+
 ## [0.22.20] - 2026-07-24
 
 ### Added — J2: the sd.cpp media tier (Juan-tier Q0, phase 2 of 5)
