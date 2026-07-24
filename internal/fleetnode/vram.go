@@ -82,7 +82,14 @@ func (s *Sampler) sample(probe MemProbe) {
 	if err != nil {
 		return // keep the last good snapshot — never publish a bad probe
 	}
-	s.snap.Store(Snapshot{TotalGiB: total, FreeGiB: total - used, At: time.Now()})
+	free := total - used
+	if free < 0 {
+		// The windows-generic source sums usage over ALL adapters while total is
+		// the largest adapter (single-GPU is the target shape; ADR 0014) — on a
+		// hybrid box the difference can dip negative. Publish an honest floor.
+		free = 0
+	}
+	s.snap.Store(Snapshot{TotalGiB: total, FreeGiB: free, At: time.Now()})
 }
 
 // StartGlobalSampler samples run() (an injected nvidia-smi invocation) once

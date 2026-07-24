@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -68,9 +69,9 @@ func InstalledJSONPath() string {
 		if err != nil {
 			return ""
 		}
-		home = userHome + string(os.PathSeparator) + "offload-stack"
+		home = filepath.Join(userHome, "offload-stack")
 	}
-	return home + string(os.PathSeparator) + "installed.json"
+	return filepath.Join(home, "installed.json")
 }
 
 // VendorArchFromProfile maps an installer profile id to the (vendor, arch)
@@ -118,34 +119,46 @@ func UMAFromProfile(profile string) (uma, ok bool) {
 }
 
 // ResolvedProvider is what fleet-serve runs on after resolution: the probe
-// that feeds the gate + sampler, the advertisement identity, and the source
-// name for the operator log line.
+// that feeds the gate + sampler, the advertisement identity, the source name
+// for the operator log line, and the selection probe's own reading (TotalGiB/
+// UsedGiB — so the startup banner never re-executes or discards a probe).
 type ResolvedProvider struct {
-	Probe  MemProbe
-	Vendor string
-	Arch   string
-	Source string // "nvidia-smi" | "windows-generic"
+	Probe    MemProbe
+	Vendor   string
+	Arch     string
+	Source   string // "nvidia-smi" | "windows-generic"
+	TotalGiB float64
+	UsedGiB  float64
 }
 
 // ResolveProvider picks the working GPU memory source. Order: nvidia-smi (the
 // proven path — keeps every existing NVIDIA node byte-identical in behavior),
-// else the injected generic provider (Windows WDDM; nil off-Windows or in
-// tests that exclude it). Both failing is the new gate error: "no working GPU
-// memory source". Pure of I/O — both probes and the manifest info are
-// injected, so selection is unit-testable.
-func ResolveProvider(smi MemProbe, generic MemProbe, smiVendor, smiArch string, info InstalledInfo) (ResolvedProvider, error) {
+// else the injected generic provider (Windows WDDM; nil off-Windows, on a
+// cpu-profile box, or in tests that exclude it). smiIdentity is called ONLY
+// when nvidia-smi wins (it typically shells nvidia-smi for the product name —
+// pointless on a box where smi just failed). Both probes failing is the new
+// gate error: "no working GPU memory source". A note on transience: selection
+// happens once at startup — a transiently failing nvidia-smi binds the generic
+// provider for the process lifetime (restart re-resolves; documented in ADR
+// 0014). Pure of I/O — probes, identity, and manifest info are injected, so
+// selection is unit-testable.
+func ResolveProvider(smi MemProbe, generic MemProbe, smiIdentity func() (vendor, arch string), info InstalledInfo) (ResolvedProvider, error) {
 	var smiErr, genErr error
 	if smi != nil {
-		if _, _, err := smi(); err == nil {
-			return ResolvedProvider{Probe: smi, Vendor: smiVendor, Arch: smiArch, Source: "nvidia-smi"}, nil
+		if total, used, err := smi(); err == nil {
+			vendor, arch := "nvidia", "nvidia"
+			if smiIdentity != nil {
+				vendor, arch = smiIdentity()
+			}
+			return ResolvedProvider{Probe: smi, Vendor: vendor, Arch: arch, Source: "nvidia-smi", TotalGiB: total, UsedGiB: used}, nil
 		} else {
 			smiErr = err
 		}
 	}
 	if generic != nil {
-		if _, _, err := generic(); err == nil {
+		if total, used, err := generic(); err == nil {
 			vendor, arch := VendorArchFromProfile(info.Profile)
-			return ResolvedProvider{Probe: generic, Vendor: vendor, Arch: arch, Source: "windows-generic"}, nil
+			return ResolvedProvider{Probe: generic, Vendor: vendor, Arch: arch, Source: "windows-generic", TotalGiB: total, UsedGiB: used}, nil
 		} else {
 			genErr = err
 		}

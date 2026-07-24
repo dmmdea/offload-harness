@@ -50,6 +50,16 @@ break).
   behavior and numbers are unchanged.
 - Off-Windows non-NVIDIA boxes still cannot fleet-serve (no generic provider there) — the gate
   message says which sources were tried; a Linux provider is a future seam, not this decision.
+- **Known edges, accepted and visible rather than papered over:** (a) provider selection happens
+  once at startup — a *transiently* failing nvidia-smi binds the generic provider for the process
+  lifetime (restart re-resolves; the serve banner names the source, so it is never silent);
+  (b) the no-manifest UMA heuristic (dedicated < 6 GiB) misfires on a manifest-less small
+  *discrete* card, over-advertising capacity — the banner marks `uma=true(heuristic)` and the
+  real fix is running the installer (a manifest ends the guessing); (c) the generic provider's
+  usage sums ALL adapters while capacity is the largest one — single-GPU boxes are the target
+  shape, the sampler clamps free at 0, and a hybrid iGPU+dGPU box under-advertises free rather
+  than lying upward; (d) a `cpu`-profile box gets no generic provider at all — a box the
+  installer classified as GPU-less must not qualify itself off residual WDDM counters.
 
 ## Alternatives considered
 

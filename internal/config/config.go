@@ -514,7 +514,7 @@ func Default() Config {
 		NIMTimeoutSec:                 120,
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
-		FleetSampler:                  "auto",            // auto|pdh|global (FLEET-NODE.md)
+		FleetSampler:                  "auto",            // auto|pdh|pdh-shared|global (FLEET-NODE.md)
 	}
 }
 
