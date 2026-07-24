@@ -95,9 +95,9 @@ func main() {
 	base := fs.String("base", "", "OpenAI-compatible planner endpoint (default: harness endpoint)")
 	maxSteps := fs.Int("max-steps", 12, "hard step budget (owned in code, not the prompt)")
 	maxTokens := fs.Int("max-tokens", 4096, "planner max tokens per completion — must be large enough for the biggest tool-call argument (e.g. a full file's content) or the model's JSON gets cut off mid-string and the call fails")
-	ctxTokens := fs.Int("ctx-tokens", 16384, "served model context window (tokens) that transcript compaction budgets against — set it to match the tier's --ctx-size (the CUDA tier serves 16384). Default 16384; the derived INPUT budget is ctx-tokens - max-tokens - 512.")
-	skeletonPrune := fs.Bool("skeleton-prune", false, "compaction: before eliding older tool results to bare size markers, first reduce them to signal-preserving skeletons (head/tail + error/failure lines kept, the rest elided with counted markers). Deterministic and local — no model call. Default off until measured.")
-	gcfCompact := fs.Bool("gcf-compact", false, "compaction: LOSSLESS first rung — older tool results that are JSON arrays of flat objects are re-encoded columnar (keys stated once), round-trip proven, before any lossy rung runs. Deterministic and local. Default off until measured.")
+	ctxTokens := fs.Int("ctx-tokens", 0, "served model context window (tokens) that transcript compaction budgets against. Default 0 = AUTO: probe the serving endpoint's live n_ctx (/props, llama-swap per-model passthrough) and fall back to 8192 when unanswerable — an assumed window killed real runs with exceed_context_size 400s (measured 2026-07-24). An explicit value overrides the probe (warned when it exceeds the served window). The derived INPUT budget is ctx-tokens - max-tokens - 512.")
+	skeletonPrune := fs.Bool("skeleton-prune", true, "compaction: before eliding older tool results to bare size markers, first reduce them to signal-preserving skeletons (head/tail + error/failure lines kept, the rest elided with counted markers). Deterministic and local — no model call. Default ON (measured: flip decision 2026-07-24 — retention never worse, no outcome cost).")
+	gcfCompact := fs.Bool("gcf-compact", true, "compaction: LOSSLESS first rung — older tool results that are JSON arrays of flat objects are re-encoded columnar (keys stated once), round-trip proven, before any lossy rung runs. Deterministic and local. Default ON (measured: flip decision 2026-07-24 — lossless, fail-closed, no-op where ineligible).")
 	maxSameTool := fs.Int("max-same-tool", 3, "cap on calls to any one tool name per run — the circuit breaker for a model that loops instead of progressing (e.g. repeated/reworded web_search calls). Negative disables the cap; 0 falls back to the built-in default (3).")
 	timeoutSec := fs.Int("timeout", 180, "per model call timeout (seconds)")
 	asJSON := fs.Bool("json", false, "print the full result JSON (transcript + telemetry)")
@@ -253,15 +253,34 @@ func main() {
 		fmt.Fprintln(os.Stderr, "[local-agent] audit="+auditP)
 	}
 	loop := built.Loop
+	// Resolve the profile BEFORE any network work: a typo'd --profile must be
+	// a fast usage error, not one paid for after a possible cold model start.
+	prof, err := agent.LookupProfile(*profile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(2)
+	}
+	// Ctrl-C cancels cleanly — created HERE (before the served-window probe,
+	// which may cold-start a model) so every network step below is cancellable.
+	// The loop checks ctx.Err() each iteration.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 	// Durable working memory (Task C5): AGENT.md workspace facts + .agent/plan.md
 	// scratchpad, rooted at the resolved worktree. built.Worktree is "" when no
 	// write/shell/github capability is enabled, in which case WithWorktree is a
 	// no-op (nothing loaded, update_plan not registered).
 	loop.WithWorktree(built.Worktree)
-	// Budget transcript compaction against the ACTUAL served window (default 16384,
-	// matching the CUDA tier's --ctx-size). Applied to the shared loop, so it takes
-	// effect identically across the one-shot, --serve, and --queue drive modes.
-	loop.WithContextTokens(*ctxTokens)
+	// Budget transcript compaction against the ACTUAL served window: probe the
+	// endpoint for the planner model's live n_ctx (--ctx-tokens 0 = auto; an
+	// explicit flag overrides, warned when it exceeds the probe). Applied to the
+	// shared loop, so it takes effect identically across the one-shot, --serve,
+	// and --queue drive modes.
+	probed, probeOK := agent.ProbeServedWindow(ctx, plannerBase, plannerModel)
+	effCtx, ctxNote := agent.ResolveContextTokens(*ctxTokens, probed, probeOK)
+	if ctxNote != "" {
+		fmt.Fprintln(os.Stderr, "[local-agent] "+ctxNote)
+	}
+	loop.WithContextTokens(effCtx)
 	loop.WithSkeletonPrune(*skeletonPrune)
 	loop.WithGCFCompact(*gcfCompact)
 
@@ -269,19 +288,10 @@ func main() {
 	// worktree-registered tool (update_plan) is present for the edit/build/github
 	// subsets to keep. A profile can only NARROW the enabled tool set (safety
 	// invariant in WithProfile) + add a tuned prompt and few-shot exemplars.
-	prof, err := agent.LookupProfile(*profile)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(2)
-	}
 	loop.WithProfile(prof)
 	if prof.Name != "general" {
 		fmt.Fprintf(os.Stderr, "[local-agent] profile=%s (tools narrowed to %d; %d exemplars)\n", prof.Name, len(prof.Tools), len(prof.Exemplars))
 	}
-
-	// Ctrl-C cancels cleanly — the loop checks ctx.Err() each iteration.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
 
 	// Server drive mode: expose the loop as an OpenAI-compatible HTTP endpoint so a
 	// chat GUI (OpenWebUI, etc.) can drive it. Blocks until killed.
@@ -417,8 +427,11 @@ func main() {
 		for _, n := range editBuilt.Notes {
 			fmt.Fprintln(os.Stderr, "[local-agent] "+n)
 		}
-		architect := archBuilt.Loop.WithWorktree(archBuilt.Worktree).WithContextTokens(*ctxTokens).WithSkeletonPrune(*skeletonPrune).WithGCFCompact(*gcfCompact)
-		editor := editBuilt.Loop.WithWorktree(editBuilt.Worktree).WithContextTokens(*ctxTokens).WithSkeletonPrune(*skeletonPrune).WithGCFCompact(*gcfCompact)
+		// Both tiers budget against the SAME resolved window (probed for the
+		// default/editor-class model above — on this fleet the tiers share one
+		// serving config; an explicit --ctx-tokens still overrides for both).
+		architect := archBuilt.Loop.WithWorktree(archBuilt.Worktree).WithContextTokens(effCtx).WithSkeletonPrune(*skeletonPrune).WithGCFCompact(*gcfCompact)
+		editor := editBuilt.Loop.WithWorktree(editBuilt.Worktree).WithContextTokens(effCtx).WithSkeletonPrune(*skeletonPrune).WithGCFCompact(*gcfCompact)
 		fmt.Fprintf(os.Stderr, "[local-agent] two-tier: architect=%s editor=%s (one swap)\n", archModel, edModel)
 
 		res, err := agent.RunTwoTier(ctx, objective, architect, editor)
