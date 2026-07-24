@@ -90,6 +90,21 @@ rung is model-free on purpose: a cascade call costs seconds on the loop's critic
 see `skeleton.go`), a rules pass costs microseconds and produces identical bytes on every
 re-compaction.
 
+**Compaction eval harness (`compaction-eval`, `internal/compeval`).** Default flips for the ladder
+rungs are gated by MEASUREMENT, never estimates: the verb replays a pinned corpus (JSONL of
+transcript slices, sha256-hashed; a PII finding refuses the whole corpus) through the PRODUCTION
+ladder via `agent.CompactReplay`, reporting per content kind the compression ratio, entity
+retention with explicit lost-entity lists (the FORCE_PRESERVE classes: numbers, paths, URLs,
+key=value, UPPER_SNAKE, hex ids), and a per-entry tokens ratchet against a frozen baseline (±2%,
+cross-corpus and cross-ladder comparisons refused). `compaction-eval ab` scores full-vs-compacted
+through the live pipeline (summarize + entity-recall outcome scorer — grounding is deliberately
+not a term: measured live, it both passes entity-free garbage and inverts on benign numeric
+paraphrase) behind a **control-pair self-test gate**: a scorer that cannot rank a
+known-good/known-degraded pair aborts the A/B instead of producing a confident number from a blind
+judge. A committed mini-corpus lives at `testdata/compeval/`; real replay corpora are
+machine-local and never committed. Methodology harvested from the OmniRoute compression service's
+eval approach (MIT); metrics and signals are this harness's own.
+
 ## Data and state
 
 - **Audit trail** — append-only JSONL, mode `0600`, at `~/.local-offload/agent-audit.jsonl` by
@@ -176,7 +191,7 @@ write-tool scoping and TOCTOU behavior, profile narrowing, and two-tier plan han
 - [`internal/agent/runtool.go`](../../internal/agent/runtool.go) — allowlist, direct exec
 - [`internal/agent/writetools.go`](../../internal/agent/writetools.go) — `os.Root` scoping
 - [`internal/agent/builder.go`](../../internal/agent/builder.go) — capability grants, audit-path check
-- [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go)
+- [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go), [`internal/compeval/`](../../internal/compeval/)
 - [`internal/sandbox/`](../../internal/sandbox/) — platform cages
 - [`cmd/local-agent/`](../../cmd/local-agent/) — CLI and server
 
