@@ -3,7 +3,20 @@
 ## Purpose
 
 Image, video, audio, and SVG generation plus image editing — everything that drives a local ComfyUI
-instance or a generation script, under a GPU lifecycle that leaves the machine usable afterwards.
+instance, a stable-diffusion.cpp binary, or a generation script, under a GPU lifecycle that leaves
+the machine usable afterwards.
+
+**Two image engines (J2, 2026-07-24).** `imagegen_engine` selects the `generate_image` backend
+per machine: `""`/`"comfy"` = the ComfyUI path this doc mostly describes (unchanged default);
+`"sdcpp"` = **stable-diffusion.cpp** via `render/sdcpp-generate.mjs` — a single native Vulkan
+binary, spawn-per-job under the same GPU lock, zero-warm by construction (the process exits and
+the memory is gone; no `/free`, no Python). The sdcpp path exists for the AMD/Vulkan tier
+(`amd-rdna3*` profiles seed it with the Apache-2.0 Z-Image-Turbo GGUF set — see
+`setup/SETUP-AGENT.md`, Media tier) but runs on any Vulkan GPU. Go-side, the runner is a thin
+`gpugen.Spec` with `SkipFreeComfy:true` — the shape the TTS path proved; the runner owns the
+mapping from the harness's generic flags to sd.cpp's CLI, so a pin bump fixes flag drift in one
+`.mjs` file, never in Go. `sd-server` (OpenAI/A1111-compatible, ships in the same pinned zip) is
+the recorded warm-swap upgrade path — deliberately not wired yet.
 
 ## Questions this doc answers
 
@@ -170,6 +183,8 @@ and defer paths.
 - [`render/gpu-lock.mjs`](../../render/gpu-lock.mjs) — slot, free step, teardown
 - [`render/comfy-lifecycle.mjs`](../../render/comfy-lifecycle.mjs) — cold start, warm flag
 - [`render/comfy-generate.mjs`](../../render/comfy-generate.mjs) — single and batch render
+- [`render/sdcpp-generate.mjs`](../../render/sdcpp-generate.mjs) — the sdcpp engine (flag mapping
+  to the pinned sd.cpp CLI lives here)
 - [`render/edit_image.py`](../../render/edit_image.py) — the edit ops
 - [`internal/pipeline/inpaint_autotext.go`](../../internal/pipeline/inpaint_autotext.go) — auto-text
   localization and its validation envelope

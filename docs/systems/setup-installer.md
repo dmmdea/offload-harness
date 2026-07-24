@@ -100,7 +100,14 @@ confusion:
 See [ADR 0002](../architecture/decisions/0002-grammar-reliable-serving-flags.md).
 
 **Config seeds** bind media models per profile. Tiers at 16 GB and above seed HiDream-O1 bf16 and Wan
-2.2 Q8_0; 8 GB tiers stay SDXL-class until O1 on 8 GB is verified on real hardware.
+2.2 Q8_0; 8 GB tiers stay SDXL-class until O1 on 8 GB is verified on real hardware. The AMD profiles
+seed the **sdcpp engine** (J2): `imagegen_engine:"sdcpp"` with the Apache-2.0 Z-Image-Turbo GGUF
+set, full paths carried via the `__OFFLOAD_HOME__` token that `Merge-ConfigSeed` expands at install
+time. The media leg itself (Step 5b: the pinned sd.cpp win-vulkan zip + roster downloads) defaults
+on for `amd-*` profiles only; `OFFLOAD_WITH_MEDIA=1|0` forces it on/off anywhere and
+`OFFLOAD_MEDIA_EXTRAS=1` adds the SD1.5/SDXL extras. `selftest.ps1` gains the first **media leg**
+(`receipt.media`): a fixed-prompt reference render (non-blank gate: sampled distinct-colors) plus a
+gpu-vae promotion trial mirroring the H3 canary pattern.
 
 ## Data and state
 

@@ -4,6 +4,39 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.20] - 2026-07-24
+
+### Added — J2: the sd.cpp media tier (Juan-tier Q0, phase 2 of 5)
+- **Second image engine.** `imagegen_engine:"sdcpp"` routes `generate_image` to
+  **stable-diffusion.cpp** via the new `render/sdcpp-generate.mjs` — a single native Vulkan
+  binary, spawn-per-job under the shared GPU lock, zero-warm by construction, no ComfyUI/Python
+  anywhere on the path (`gpugen.Spec` with `SkipFreeComfy:true`, the shape the TTS path proved).
+  The ComfyUI default path stays byte-for-byte unchanged. New config surface: `sdcpp_bin`,
+  `sdcpp_script`, `sdcpp_model` (+`_kind`), companions `sdcpp_vae`/`sdcpp_clip_l`/`sdcpp_clip_g`/
+  `sdcpp_t5xxl`/`sdcpp_llm` (Z-Image's Qwen3 encoder), and `sdcpp_extra_args` (canary-decided
+  stability toggles). The runner owns the mapping to sd.cpp's real CLI (verified against the
+  pinned release: `--diffusion-model` vs `-m`, `--clip_l`/`--clip_g` underscores, `-p/-n/-W/-H`,
+  `-s`, `--cfg-scale`, `--sampling-method`) — flag drift on a pin bump is fixed in one .mjs.
+- **Installer media leg (Step 5b)** — pins **sd.cpp `master-789-5114672` win-vulkan**
+  (GitHub-digest SHA; ships `sd-cli.exe` + `sd-server.exe`, the recorded warm-swap upgrade path)
+  and the **Apache-2.0 lead roster (~10.1 GB)**: Z-Image-Turbo Q8_0 (**jayn7 build** — leejet's
+  own low-bit quants render blank on Vulkan+AMD, sd.cpp #1031), Qwen3-4B-Instruct Q4_K_M
+  (`--llm`), and the ungated Comfy-Org Flux AE. Default-on for `amd-*` profiles;
+  `OFFLOAD_WITH_MEDIA=1|0` forces anywhere; `OFFLOAD_MEDIA_EXTRAS=1` adds SD1.5 + SDXL base +
+  the fp16-fix VAE (all-black-on-AMD-iGPU guard, sd.cpp #563). Excluded on license grounds:
+  SDXL-Turbo (non-commercial) and the whole FLUX family (ADR 0011 — Apache schnell included).
+- **`config_seed` for `amd-rdna3`/`amd-rdna3-dgpu`** — engine, model paths (via the new
+  `__OFFLOAD_HOME__` token `Merge-ConfigSeed` now expands, arrays included), turbo sampling
+  (steps 8, cfg 1), and the VAE stability workaround (`--vae-on-cpu` iGPU / `--vae-tiling` dgpu).
+- **First media selftest leg** (`receipt.media`): a fixed-prompt/seed **reference render**
+  gated on a non-blank check (sampled distinct-colors ≥ 8, >20 KB, timed against the ZLUDA
+  anchors) plus the **gpu_vae promotion trial** (drop the CPU-VAE workaround only on a measured
+  clean-and-faster run) — the media mirror of the H3 canary pattern, with the same
+  `does_not_prove` honesty when skipped.
+- **Runbook**: SETUP-AGENT.md AMD chapter gains the Media tier section (roster + licenses,
+  receipt gates, timing calibration, allowed autonomous decisions, media forbidden list:
+  `--vae-conv-direct`, SD2-class, fp8, quant substitution).
+
 ## [0.22.19] - 2026-07-24
 
 ### Added — J1: the AMD RDNA3 text tier goes first-class (Juan-tier Q0, phase 1 of 5)

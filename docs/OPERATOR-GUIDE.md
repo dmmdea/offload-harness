@@ -163,6 +163,14 @@ tokens kept local (est.): 2920 (~$0.04 Opus-input value — an estimate, not bil
 
 ---
 
+### Image engines (J2)
+
+`generate_image` has two per-machine backends via `imagegen_engine`: `""`/`"comfy"` (the ComfyUI
+path, unchanged default) and `"sdcpp"` — stable-diffusion.cpp as a single native Vulkan binary
+(`sdcpp_bin` + `sdcpp_model` + companions in config; spawn-per-job, zero-warm, no Python). The
+AMD profiles seed sdcpp with the Apache-2.0 Z-Image-Turbo set at install; any Vulkan-capable box
+can opt in (`OFFLOAD_WITH_MEDIA=1` at install). Warm-batch below is ComfyUI-engine only.
+
 ### Warm-batch image generation ✅
 
 ```powershell
