@@ -54,6 +54,12 @@ export async function ensureComfy(opts = {}) {
   const flags = ["--disable-smart-memory"];
   if (!warm) flags.push("--cache-none");
   flags.push("--reserve-vram", reserve);
+  // J4 seam: COMFY_EXTRA_ARGS appends verbatim (whitespace-split) launch flags —
+  // the per-box escape hatch for non-CUDA backends (--directml, device pinning)
+  // without touching shared code. Empty/unset = byte-identical launch.
+  if (process.env.COMFY_EXTRA_ARGS) {
+    flags.push(...process.env.COMFY_EXTRA_ARGS.split(/\s+/).filter(Boolean));
+  }
   const child = spawn(py, ["main.py", ...flags], { cwd: comfyDir, stdio: "ignore", detached: false });
   for (let i = 0; i < maxPolls; i++) {
     await new Promise((r) => setTimeout(r, pollMs));
