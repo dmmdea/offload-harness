@@ -37,6 +37,12 @@ $LLAMA_TAG = 'b9934'
 $SWAP_TAG  = 'v236'
 $PINNED = @{
   # llama.cpp backend binaries (SHA256 from the GitHub release API; verified by download).
+  # FRONTIER FLOOR (J1, 2026-07-24): the vulkan build must be >= Mar-2026 — the AMD
+  # scalar-FA Wave32 + graphics-queue tuning (Feb–Mar 2026) is what makes the RDNA3
+  # tiers competitive, and FA+q8_0-KV support on Vulkan dates from the same window.
+  # The pin below is a SNAPSHOT OF FRONTIER, refreshed on a cadence (bump, re-run the
+  # H3 canary suite, promote) — never let it age below the floor. Show-FrontierNote
+  # surfaces newer upstream releases at install time so the pin never silently rots.
   'llama-vulkan' = @{
     url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/llama-$LLAMA_TAG-bin-win-vulkan-x64.zip"
     sha  = '20ea5f484c0ae373affd5c5032b718bf3b9e15a31db5c93bfbbb6d9323824a23'
@@ -139,6 +145,31 @@ function Update-SessionPath {
   $user    = [System.Environment]::GetEnvironmentVariable('Path', 'User')
   $combined = (@($machine, $user) | Where-Object { $_ }) -join ';'
   if ($combined) { $env:Path = $combined }
+}
+
+# ---------------------------------------------------------------------------
+# J1 frontier surfacing: the pins are SNAPSHOTS OF FRONTIER (house rule: recency
+# floors, never staleness pins). This best-effort check asks GitHub for the latest
+# llama.cpp / llama-swap release tags and prints a NOTE when the pin is behind —
+# it NEVER blocks or fails the install (offline boxes just skip it silently), and
+# it never substitutes an asset (Hard rule 2: pins only change by a human bumping
+# them and re-running the canary suite). OFFLOAD_SKIP_UPDATE_CHECK=1 disables.
+# ---------------------------------------------------------------------------
+function Show-FrontierNote {
+  if ($env:OFFLOAD_SKIP_UPDATE_CHECK -eq '1') { return }
+  $checks = @(
+    @{ repo = 'ggml-org/llama.cpp';     pinned = $LLAMA_TAG; name = 'llama.cpp' }
+    @{ repo = 'mostlygeek/llama-swap';  pinned = $SWAP_TAG;  name = 'llama-swap' }
+  )
+  foreach ($c in $checks) {
+    try {
+      $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$($c.repo)/releases/latest" -TimeoutSec 5 `
+             -Headers @{ 'User-Agent' = 'offload-harness-installer' }
+      if ($r.tag_name -and ($r.tag_name -ne $c.pinned)) {
+        Write-Host "NOTE  $($c.name): newer release $($r.tag_name) available (pinned $($c.pinned) = the verified frontier snapshot). Do NOT substitute mid-install; refresh the pin via the canary suite (bump + re-run selftest + promote)." -ForegroundColor Yellow
+      }
+    } catch { }   # offline / rate-limited / API change: silently skip — never install-fatal
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -725,6 +756,7 @@ function Test-Go126 {
   return ([int]$parts[0] -gt 1) -or ([int]$parts[0] -eq 1 -and [int]$parts[1] -ge 26)
 }
 if (-not $RenderOnly) {
+Show-FrontierNote   # J1: surface newer upstream releases (best-effort, never fatal)
 $wingetFlags = @('--accept-package-agreements', '--accept-source-agreements', '--silent')
 Step 'prereq: Git' `
   { [bool](Get-Command git -ErrorAction SilentlyContinue) } `
@@ -843,7 +875,8 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
   {
     (Test-Path $yamlDest) -and
     -not (Select-String -Path $yamlDest -Pattern '__(LLAMA_BIN|MODELS|NTHREADS|CTX|KV_K|KV_V|FLASH_ATTN|MOE_26B)__' -Quiet) -and
-    -not (Select-String -Path $yamlDest -SimpleMatch -Pattern $llamaDir -Quiet)   # backslash path = stale pre-R3.6 render
+    -not (Select-String -Path $yamlDest -SimpleMatch -Pattern $llamaDir -Quiet) -and   # backslash path = stale pre-R3.6 render
+    (($tplBackend -ne 'vulkan') -or (Select-String -Path $yamlDest -SimpleMatch -Pattern 'GGML_VK_VISIBLE_DEVICES' -Quiet))   # J1: vulkan render without the device pin = stale pre-0.22.19 render
   } `
   {
     $tpl = Join-Path (Join-Path $scriptDir 'templates') "llama-swap.win-$tplBackend.yaml"

@@ -127,7 +127,18 @@
       "moe_26b": "cpu_moe",
       "flash_attn": "on",
       "backend": "vulkan",
-      "notes": "Config #7 (780M/gfx1103 + 64GB, Vulkan UMA). CONSERVATIVE: f16 KV + 16K ctx as the safe floor. MEASURE-AT-INSTALL (H3) may raise ctx to 32K and/or switch KV to q8_0 if the Vulkan FA + q8-KV canary is stable. Two-tier DROPPED (one iGPU). 26B cpu-moe (very slow) only when ram_tier mid/high; else dropped. PROJECTED."
+      "notes": "Config #7 (780M/gfx1103 iGPU + 64GB dual-channel DDR5, Vulkan UMA). SAFE FLOOR: f16 KV + 16K ctx + 26B cpu-moe (ram_tier mid/high; else dropped). Research 2026-07-23 (J1): the floor is deliberately BELOW what this hardware measures elsewhere - 26B-A4B Q4_K_M runs FULLY OFFLOADED (-ngl 99, weights in GTT/shared memory) at ~20-25 tok/s tg on a 780M with dual-channel DDR5 (two independent community measurements; the earlier 'cpu-moe = very slow' note was wrong for dual-channel boxes), and Vulkan FA + q8_0 KV is production-supported since the Feb-Mar 2026 AMD tuning PRs. selftest.ps1's H3 canaries (fa_q8kv / moe_full_offload / ctx_sweep) MEASURE all three promotions on the real box; the agent applies them canary-gated per SETUP-AGENT.md (amd-rdna3 chapter). REQUIRES a llama.cpp win-vulkan build >= Mar-2026 (the pinned tag satisfies this - it is the frontier snapshot, never downgrade below the floor) and flash-attn EXPLICITLY 'on' (never auto: a silent FA-off then fails quantized-V loads on Gemma). Single-channel RAM is a clean ~2x tg loss - confirm dual-channel at install. PROJECTED until receipts return."
+    },
+    "amd-rdna3-dgpu": {
+      "ctx_size": 32768,
+      "kv_type": "q8_0",
+      "agent_ctx_tokens": 32768,
+      "resident_tier": "gemma4-26b-a4b",
+      "include_26b": true,
+      "moe_26b": "gpu",
+      "flash_attn": "on",
+      "backend": "vulkan",
+      "notes": "Discrete RDNA3 (RX 7900-class, >=12GB dedicated VRAM, Vulkan). Previously this card fell through to the amd-rdna3 iGPU floor - a severe under-serve (J1 audit finding). 26B resident full-GPU (-ngl 99, 14.2GB Q4 fits >=16GB VRAM; on a 12GB card the load OOMs and selftest's standing remediation switches the 26B to --cpu-moe), 32K ctx, q8_0 KV with FA on (Vulkan FA+q8 supported since Feb-Mar 2026; same >=Mar-2026 build floor as amd-rdna3). No real box measured yet - the H3 canaries gate everything. PROJECTED."
     },
     "amd-gcn": {
       "ctx_size": 8192,
