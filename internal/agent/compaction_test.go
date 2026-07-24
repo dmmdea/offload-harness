@@ -330,6 +330,105 @@ func TestLoopReactiveRetryGivesUpAfterOne(t *testing.T) {
 	}
 }
 
+// --- emergency shrink (reactive-overflow last resort) ---
+
+// TestEmergencyShrinkNewestHugeTurn pins the exact live failure (flip-decision
+// report 2026-07-24, F3): [system, objective, assistant, tool(HUGE)] — the
+// harder-compaction retry no-ops because keepRecent protects the huge newest
+// body, and the run dies. emergencyShrink must fit the budget WITHOUT touching
+// the preamble and without dropping any turn.
+func TestEmergencyShrinkNewestHugeTurn(t *testing.T) {
+	huge := strings.Repeat("all work and no play makes a very long tool result line\n", 800)
+	msgs := []Msg{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "objective: read the readme"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Name: "read_file"}}},
+		{Role: "tool", ToolCallID: "c1", Content: huge},
+	}
+	budget := 1000
+	// Precondition: this is the case compact() cannot help (everything is
+	// protected by preamble + keepRecent) — pin it so the test keeps meaning.
+	if compacted := compact(msgs, budget, 2, 2, compactOpts{}); estimateTokens(compacted) <= budget {
+		t.Fatal("fixture invalid: compact() alone fit the budget, the emergency case never arises")
+	}
+	out := emergencyShrink(msgs, budget, 2, compactOpts{})
+	if got := estimateTokens(out); got > budget {
+		t.Fatalf("emergencyShrink left estimate %d > budget %d", got, budget)
+	}
+	if len(out) != len(msgs) {
+		t.Fatalf("turn count changed: %d -> %d (must shrink bodies, never drop turns)", len(msgs), len(out))
+	}
+	if out[0].Content != "sys" || out[1].Content != "objective: read the readme" {
+		t.Fatal("preamble was modified")
+	}
+	if out[3].Content == huge {
+		t.Fatal("the huge newest body was not shrunk")
+	}
+	// Determinism: same input, same bytes.
+	out2 := emergencyShrink(msgs, budget, 2, compactOpts{})
+	for i := range out {
+		if out[i].Content != out2[i].Content {
+			t.Fatalf("nondeterministic shrink at turn %d", i)
+		}
+	}
+	// The input slice itself must be untouched (shrink works on a copy).
+	if msgs[3].Content != huge {
+		t.Fatal("emergencyShrink mutated its input")
+	}
+}
+
+// Oldest-first: with several oversized tool bodies, the OLDER ones are
+// destroyed before the newest is touched.
+func TestEmergencyShrinkPrefersOldest(t *testing.T) {
+	body := strings.Repeat("filler line with some text in it\n", 120)
+	msgs := []Msg{
+		{Role: "user", Content: "objective"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1"}}},
+		{Role: "tool", ToolCallID: "c1", Content: body},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "c2"}}},
+		{Role: "tool", ToolCallID: "c2", Content: body},
+	}
+	// Budget that fits once the OLDER body is reduced but does not require
+	// touching the newest one beyond pass 1.
+	budget := estimateTokens(msgs) - len(body)/bytesPerToken/2
+	out := emergencyShrink(msgs, budget, 1, compactOpts{})
+	if estimateTokens(out) > budget {
+		t.Fatalf("did not fit budget")
+	}
+	if out[2].Content == body && out[4].Content != body {
+		t.Fatal("shrink touched the newest body while the older one survived intact")
+	}
+}
+
+// TestLoopReactiveRetryHugeNewestBody: the loop-level version of the live
+// failure — the first Chat overflows while the transcript's newest tool body
+// is inside keepRecent. Without emergencyShrink the retry re-sends the same
+// bytes and the run dies; with it, the retry fits and the run completes.
+func TestLoopReactiveRetryHugeNewestBody(t *testing.T) {
+	huge := strings.Repeat("readme content line that goes on and on\n", 700)
+	client := &errThenScriptClient{
+		errOnCall: 1, // the Chat AFTER the huge tool result lands
+		errText:   "chat 400: request (9187 tokens) exceeds the available context size (8192 tokens), try increasing it",
+	}
+	client.script = []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Name: "read_file", Args: `{"path":"README.md"}`}}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "summarized after recovery"}, FinishReason: "stop"},
+	}
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) {
+		return huge, nil
+	}}}
+	// The explicit over-large cap reproduces the pre-fix reality: the boundary
+	// cap does not save us (live it was mis-derived from an assumed window).
+	loop := NewLoop(client, tools, 5).WithSystem("sys").WithContextTokens(2048).WithMaxTokens(512).WithToolResultCap(len(huge) + 1)
+	res, err := loop.Run(context.Background(), "objective: read the readme")
+	if err != nil {
+		t.Fatalf("run died on the huge-newest-body overflow (the pre-fix behavior): %v", err)
+	}
+	if res.Output != "summarized after recovery" {
+		t.Errorf("output = %q", res.Output)
+	}
+}
+
 // alwaysErrClient always returns the same context-overflow error.
 type alwaysErrClient struct {
 	errText string

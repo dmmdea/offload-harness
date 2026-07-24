@@ -307,7 +307,9 @@ type Config struct {
 	// eligible JSON arrays inside over-budget inputs BEFORE the lossy
 	// context-budget head/tail trim — content that would have been cut can
 	// then fit the local window instead (a defer/truncation converted into a
-	// full-fidelity completion). Off by default until measured.
+	// full-fidelity completion). Default ON (flip decision 2026-07-24:
+	// lossless + fail-closed by construction, measured live defer→completion
+	// win); an explicit false in the config file still disables it.
 	GCFCompact bool `json:"gcf_compact,omitempty"`
 	// CachePath / LedgerPath are bbolt files.
 	CachePath  string `json:"cache_path"`
@@ -479,6 +481,7 @@ func Default() Config {
 		ClassifyMinConfidence:       0.45,
 		ConfidenceMarginThreshold:   0.35,
 		MaxInputChars:               24000, // ~6k tokens, well under ctx 8192
+		GCFCompact:                  true,  // flip decision 2026-07-24 (lossless, fail-closed; explicit false in a config file still wins)
 		CachePath:                   filepath.Join(base, "cache.db"),
 		LedgerPath:                  filepath.Join(base, "ledger.jsonl"), // append-only JSONL (concurrent read/append)
 		ThresholdsPath:              filepath.Join(base, "thresholds.json"),
