@@ -244,11 +244,15 @@ function Get-ServedCtx {
 function Get-WordOverlap {
   param([string]$A, [string]$B)
   if ([string]::IsNullOrWhiteSpace($A) -or [string]::IsNullOrWhiteSpace($B)) { return 0.0 }
-  $wa = @(($A.ToLowerInvariant() -split '[^\w]+') | Where-Object { $_ }) | Select-Object -Unique
-  $wb = @(($B.ToLowerInvariant() -split '[^\w]+') | Where-Object { $_ }) | Select-Object -Unique
+  # @(...) around EVERY use: PS 5.1 unwraps a single-element pipeline result to a bare
+  # string, and 'string + string' is CONCATENATION - without the array forcing, a
+  # degenerate single-unique-word generation made union=1 and overlap read 1.0
+  # (found in adversarial review; exactly the failure mode this canary guards).
+  $wa = @(@(($A.ToLowerInvariant() -split '[^\w]+') | Where-Object { $_ }) | Select-Object -Unique)
+  $wb = @(@(($B.ToLowerInvariant() -split '[^\w]+') | Where-Object { $_ }) | Select-Object -Unique)
   if ($wa.Count -eq 0 -or $wb.Count -eq 0) { return 0.0 }
   $inter = @($wa | Where-Object { $wb -contains $_ }).Count
-  $union = @($wa + $wb | Select-Object -Unique).Count
+  $union = @(@($wa) + @($wb) | Select-Object -Unique).Count
   if ($union -eq 0) { return 0.0 }
   return [math]::Round($inter / $union, 2)
 }
@@ -486,7 +490,18 @@ function Invoke-ProbeLoad {
         $sw.Stop()
         $tail = ''
         try { $tail = (Get-Content -Path $logFile -Tail 4 -ErrorAction SilentlyContinue) -join ' | ' } catch { }
-        return @{ ok = $false; detail = ("server exited early (code {0}) {1}" -f $proc.ExitCode, $tail); cold_load_s = $null; tps = $null }
+        # J1: at -lv 10 the alloc/OOM line can scroll out of the 4-line tail behind debug
+        # chatter, which would make Test-AllocFailure misclassify a real OOM as non-alloc
+        # (silently skipping the ctx-downshift remediation). Scan the WHOLE log for the
+        # alloc-class marker and surface that line in the detail.
+        try {
+          $whole = Get-Content -Raw -Path $logFile -ErrorAction SilentlyContinue
+          if ($whole) {
+            $am = [regex]::Match($whole, '(?im)^.*(VK_ERROR_OUT_OF_DEVICE_MEMORY|out of device memory|CUDA (error )?out of memory|cudaErrorMemoryAllocation|device[- ]lost|VK_ERROR_DEVICE_LOST|failed to allocate|unable to allocate).*$')
+            if ($am.Success) { $tail = ($am.Value.Trim() + ' | ' + $tail) }
+          }
+        } catch { }
+        return @{ ok = $false; detail = ("server exited early (code {0}) {1}" -f $proc.ExitCode, $tail); cold_load_s = $null; tps = $null; text = ''; fa_state = $null }
       }
       $h = Invoke-JsonGet "http://127.0.0.1:$probePort/health" 4
       if ($h) { $healthy = $true; break }
@@ -692,6 +707,11 @@ try {
   }
   $receipt.backend = $backend
   LogOk "backend = $backend"
+  # J1: on Vulkan, pin the SAME device the rendered template pins (GGML_VK_VISIBLE_DEVICES=0)
+  # for every child this script spawns (probe servers, llama-bench) - otherwise on a
+  # multi-ICD box the canaries could measure a different adapter than production serving.
+  # Process-scoped env; dies with this script. An operator override already set wins.
+  if ($backend -eq 'vulkan' -and -not $env:GGML_VK_VISIBLE_DEVICES) { $env:GGML_VK_VISIBLE_DEVICES = '0' }
 
   # --- GPU + driver capture (R4.3) ----------------------------------------------------------
   # Source of truth for WHICH gpu = llama.cpp itself. `llama-server --list-devices` prints the
@@ -1279,6 +1299,22 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       $cnResidentOk = Test-Path (Join-Path $modelDir $cnResidentSpec.file)
       $cnCtx = 16384; $cnKv = 'f16'; $cnFa = 'on'
       if ($proj) { $cnCtx = [int]$proj.ctx_size; $cnKv = [string]$proj.kv_type; $cnFa = [string]$proj.flash_attn }
+      # VRAM-contention mitigation (review finding): the transient swap still holds the
+      # LAST-SERVED model resident (ttl 300) while canary probes load standalone on :18804.
+      # Harmless on a UMA iGPU (shared memory), but on a discrete card (amd-rdna3-dgpu:
+      # 26B ~14.2GB resident of 16GB) the probes would OOM against the resident. Park the
+      # swap on the SMALLEST installed tier before probing.
+      try {
+        $parkTier = $installedTiers | Sort-Object { (Get-Item (Join-Path $modelDir $_.file)).Length } | Select-Object -First 1
+        if ($parkTier -and $installedTiers.Count -ge 2) {
+          Log "  parking the swap on the smallest tier ($($parkTier.id)) to free memory for the probe servers"
+          [void](Invoke-Chat -Model $parkTier.id -UserContent 'Reply with exactly the single word: ok' -MaxTokens 8 -TimeoutSec 300)
+        }
+      } catch { }
+      # fa_q8kv correctness needs a KV-type comparison, not a ctx stress test - and the f16
+      # baseline at a 32K profile ctx needs ~2x the KV of the q8_0 target and can OOM where
+      # the real config fits. Cap the comparison ctx at 16K (ctx_sweep owns the ctx question).
+      $faCtx = [math]::Min($cnCtx, 16384)
 
       # (1) fa_q8kv - FA + q8_0-KV correctness: FIXED prompt at temp 0, f16-KV baseline vs
       # q8_0-KV run, word-set overlap >= 0.80, AND server-log proof FA is actually ON
@@ -1289,10 +1325,10 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         $cn.fa_q8kv.detail = 'cpu backend (no FA / no GPU KV)'; LogWarn "fa_q8kv SKIPPED: $($cn.fa_q8kv.detail)"
       } else {
         $faPrompt = 'List the first twelve prime numbers in ascending order, comma-separated, then stop.'
-        LogStep "  fa_q8kv: f16-KV baseline (fixed prompt, temp 0)"
-        $rf = Invoke-ProbeLoad -ModelFile $cnResidentSpec.file -Ctx $cnCtx -KvType 'f16' -FlashAttn 'on' -WarmDecode -GenPrompt $faPrompt -TimeoutSec 240
+        LogStep "  fa_q8kv: f16-KV baseline (fixed prompt, temp 0, ctx=$faCtx)"
+        $rf = Invoke-ProbeLoad -ModelFile $cnResidentSpec.file -Ctx $faCtx -KvType 'f16' -FlashAttn 'on' -WarmDecode -GenPrompt $faPrompt -TimeoutSec 240
         LogStep "  fa_q8kv: q8_0-KV run (same prompt)"
-        $rq = Invoke-ProbeLoad -ModelFile $cnResidentSpec.file -Ctx $cnCtx -KvType 'q8_0' -FlashAttn 'on' -WarmDecode -GenPrompt $faPrompt -TimeoutSec 240
+        $rq = Invoke-ProbeLoad -ModelFile $cnResidentSpec.file -Ctx $faCtx -KvType 'q8_0' -FlashAttn 'on' -WarmDecode -GenPrompt $faPrompt -TimeoutSec 240
         $cn.fa_q8kv.fa_confirmed = $rq.fa_state
         if (-not $rq.ok) {
           $cn.fa_q8kv.status = 'fail'
@@ -1449,13 +1485,14 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         } catch { $mineProcs = @() }
         $cn.swap_leak.servers_after = $mineProcs.Count
         $stillUp = [bool](Invoke-JsonGet "$swapBase/v1/models" 5)
+        $cycleLabel = if ($installedTiers.Count -ge 2) { 'after the eviction cycle' } else { '(single tier - process-count check only, no eviction cycle ran)' }
         if ($mineProcs.Count -le 1 -and $stillUp) {
           $cn.swap_leak.status = 'pass'
-          $cn.swap_leak.detail = "$($mineProcs.Count) llama-server process(es) after cycling; swap proxy still healthy"
+          $cn.swap_leak.detail = "$($mineProcs.Count) llama-server process(es) $cycleLabel; swap proxy still healthy"
           LogOk "swap_leak: $($cn.swap_leak.detail)"
         } else {
           $cn.swap_leak.status = 'fail'
-          $cn.swap_leak.detail = "$($mineProcs.Count) llama-server processes after cycling (expected <=1); swap healthy=$stillUp"
+          $cn.swap_leak.detail = "$($mineProcs.Count) llama-server processes $cycleLabel (expected <=1); swap healthy=$stillUp"
           LogWarn "swap_leak: $($cn.swap_leak.detail)"
         }
       } catch {
@@ -1608,6 +1645,15 @@ if ($pmf.optane.status -ne 'measured') {
 if (-not $receipt.canaries.ran) {
   $d = "the H3 promotion canaries (fa_q8kv / moe_full_offload / ctx_sweep / bench / swap_leak / embedder): not run this pass ($($receipt.canaries.gate)) - no config promotion is authorized"
   if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
+} else {
+  # Individually skipped canaries prove nothing either - each lands its own line.
+  foreach ($cnName in @('fa_q8kv','moe_full_offload','ctx_sweep','bench','swap_leak','embedder')) {
+    $cnEntry = $receipt.canaries[$cnName]
+    if ($cnEntry -and $cnEntry.status -eq 'skipped') {
+      $d = "canary ${cnName}: skipped ($($cnEntry.detail)) - its promotion/verification is not authorized this pass"
+      if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
+    }
+  }
 }
 
 Log ""
