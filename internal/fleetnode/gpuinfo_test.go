@@ -82,16 +82,16 @@ func failProbe(msg string) MemProbe {
 // TestResolveProvider_SmiWins: a working nvidia-smi keeps every existing NVIDIA
 // node byte-identical — smi source, smi-derived vendor/arch, generic never consulted.
 func TestResolveProvider_SmiWins(t *testing.T) {
-	prov, err := ResolveProvider(okProbe(16, 2), failProbe("must not be consulted"), "nvidia", "blackwell", InstalledInfo{Profile: "amd-rdna3"})
+	prov, err := ResolveProvider(okProbe(16, 2), failProbe("must not be consulted"),
+		func() (string, string) { return "nvidia", "blackwell" }, InstalledInfo{Profile: "amd-rdna3"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if prov.Source != "nvidia-smi" || prov.Vendor != "nvidia" || prov.Arch != "blackwell" {
 		t.Fatalf("got %+v", prov)
 	}
-	total, used, perr := prov.Probe()
-	if perr != nil || total != 16 || used != 2 {
-		t.Fatalf("probe = (%v, %v, %v)", total, used, perr)
+	if prov.TotalGiB != 16 || prov.UsedGiB != 2 {
+		t.Fatalf("selection reading not carried: %+v", prov)
 	}
 }
 
@@ -99,19 +99,27 @@ func TestResolveProvider_SmiWins(t *testing.T) {
 // source serves, with vendor/arch from the installer manifest (never re-derived
 // from NVIDIA product names).
 func TestResolveProvider_GenericFallback(t *testing.T) {
-	prov, err := ResolveProvider(failProbe("exec: nvidia-smi not found"), okProbe(35.7, 3.2), "nvidia", "nvidia", InstalledInfo{Profile: "amd-rdna3"})
+	smiIdentityCalls := 0
+	prov, err := ResolveProvider(failProbe("exec: nvidia-smi not found"), okProbe(35.7, 3.2),
+		func() (string, string) { smiIdentityCalls++; return "nvidia", "nvidia" }, InstalledInfo{Profile: "amd-rdna3"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if prov.Source != "windows-generic" || prov.Vendor != "amd" || prov.Arch != "rdna3" {
 		t.Fatalf("got %+v", prov)
 	}
+	if prov.TotalGiB != 35.7 {
+		t.Fatalf("selection reading not carried: %+v", prov)
+	}
+	if smiIdentityCalls != 0 {
+		t.Fatalf("smi identity must be LAZY — called %d times on a non-smi box (it shells nvidia-smi)", smiIdentityCalls)
+	}
 }
 
 // TestResolveProvider_BothFail: the new gate error names BOTH sources and their
 // failures — "no working GPU memory source", not a brand requirement.
 func TestResolveProvider_BothFail(t *testing.T) {
-	_, err := ResolveProvider(failProbe("smi dead"), failProbe("wddm dead"), "nvidia", "nvidia", InstalledInfo{})
+	_, err := ResolveProvider(failProbe("smi dead"), failProbe("wddm dead"), nil, InstalledInfo{})
 	if err == nil {
 		t.Fatal("want error")
 	}
@@ -125,7 +133,7 @@ func TestResolveProvider_BothFail(t *testing.T) {
 // TestResolveProvider_NilGeneric: off-Windows composition (nil generic) reports
 // the absence honestly instead of a nil-call panic.
 func TestResolveProvider_NilGeneric(t *testing.T) {
-	_, err := ResolveProvider(failProbe("smi dead"), nil, "nvidia", "nvidia", InstalledInfo{})
+	_, err := ResolveProvider(failProbe("smi dead"), nil, nil, InstalledInfo{})
 	if err == nil || !strings.Contains(err.Error(), "not available on this platform") {
 		t.Fatalf("got %v", err)
 	}

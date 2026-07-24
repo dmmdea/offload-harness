@@ -29,3 +29,9 @@ func GenericWindowsProbe(uma bool) MemProbe {
 		return 0, 0, fmt.Errorf("windows-generic GPU memory source requires WDDM (uma=%v)", uma)
 	}
 }
+
+// DedicatedVramTotalGiB is a WDDM registry read — off-Windows it always
+// errors (the UMA heuristic in fleet-serve then simply doesn't fire).
+func DedicatedVramTotalGiB() (float64, error) {
+	return 0, fmt.Errorf("dedicated VRAM capacity read requires the Windows display-class registry")
+}
