@@ -102,7 +102,19 @@ not a term: measured live, it both passes entity-free garbage and inverts on ben
 paraphrase) behind a **control-pair self-test gate**: a scorer that cannot rank a
 known-good/known-degraded pair aborts the A/B instead of producing a confident number from a blind
 judge. A committed mini-corpus lives at `testdata/compeval/`; real replay corpora are
-machine-local and never committed. Methodology harvested from the OmniRoute compression service's
+machine-local and never committed. `compaction-eval harvest --traces DIR --out corpus.jsonl`
+builds a real corpus from the standalone agent's trace files with REDACTION-AT-HARVEST:
+deterministic placeholder substitution over the exact vet refusal classes (git output alone
+carries author emails; the private-key class redacts the whole block, not just the header),
+kind classification by byte-weighted majority of the TOOL payloads, and production replay
+pressure mirrored exactly — `protected_prefix` = the real preamble (turns before the first
+assistant turn), `keep_recent` = the live loop's `agent.DefaultKeepRecent`. Transcripts the
+ladder already compacted mid-run are refused (`agent.IsCompactionArtifact`): their raw content
+is unrecoverable and replaying them would measure the ladder against its own output. The
+redaction table derives from the vet's class table (parity by construction), the VetPII gate
+re-runs on the result — residual PII refuses the harvest — and the corpus is written atomically
+(temp + rename), round-trip-proven through the strict loader before it exists at its
+destination. Methodology harvested from the OmniRoute compression service's
 eval approach (MIT); metrics and signals are this harness's own.
 
 ## Data and state

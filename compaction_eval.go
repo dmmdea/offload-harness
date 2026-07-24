@@ -1,12 +1,16 @@
 // compaction_eval.go — the `compaction-eval` verb: the OmniRoute-harvest
 // Phase-B harness over a pinned transcript corpus (internal/compeval).
 //
+//	compaction-eval harvest --traces DIR --out corpus.jsonl [--min-turns N] [--max-entries N]
 //	compaction-eval run    --corpus C [--gcf] [--skeleton] [--json]
 //	compaction-eval freeze --corpus C [--gcf] [--skeleton] --out baseline.json
 //	compaction-eval check  --corpus C --baseline B [--tolerance 0.02]
 //	compaction-eval ab     --corpus C [--gcf] [--skeleton]   (needs the live endpoint)
 //
-// run/freeze/check are DETERMINISTIC and model-free (the replay measures with
+// harvest builds a REAL replay corpus from standalone agent trace files with
+// redaction-at-harvest (see internal/compeval/harvest.go) — the produced file
+// is machine-local eval data, never committed. run/freeze/check are
+// DETERMINISTIC and model-free (the replay measures with
 // the production ladder + its own token estimator). ab scores full-vs-compacted
 // through the live pipeline behind the control-pair self-test gate — a scorer
 // that cannot rank a known-good/known-degraded pair aborts the A/B rather than
@@ -20,6 +24,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 
 	"github.com/dmmdea/offload-harness/internal/compeval"
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -27,7 +32,7 @@ import (
 
 func runCompactionEval(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: local-offload compaction-eval <run|freeze|check|ab> --corpus <corpus.jsonl> [flags]")
+		return fmt.Errorf("usage: local-offload compaction-eval <harvest|run|freeze|check|ab> [--corpus <corpus.jsonl>] [flags] (harvest takes --traces/--out instead of --corpus)")
 	}
 	mode := args[0]
 	fs := flag.NewFlagSet("compaction-eval "+mode, flag.ExitOnError)
@@ -36,9 +41,15 @@ func runCompactionEval(args []string) error {
 	gcf := fs.Bool("gcf", false, "enable the lossless GCF rung in the replayed ladder")
 	skeleton := fs.Bool("skeleton", false, "enable the skeleton rung in the replayed ladder")
 	baselinePath := fs.String("baseline", "", "check: frozen baseline JSON")
-	outPath := fs.String("out", "", "freeze: where to write the baseline JSON")
+	outPath := fs.String("out", "", "freeze/harvest: where to write the output file")
 	tolerance := fs.Float64("tolerance", compeval.DefaultTolerance, "check: allowed per-entry token drift (fraction)")
+	tracesDir := fs.String("traces", "", "harvest: directory of standalone agent trace files (*.json)")
+	minTurns := fs.Int("min-turns", 3, "harvest: skip traces with fewer transcript turns (<=0 also means the default, 3)")
+	maxEntries := fs.Int("max-entries", 0, "harvest: cap harvested entries (0 = all)")
 	_ = fs.Parse(args[1:])
+	if mode == "harvest" {
+		return runCompactionHarvest(*tracesDir, *outPath, *minTurns, *maxEntries)
+	}
 	if *corpusPath == "" {
 		return fmt.Errorf("compaction-eval %s: --corpus is required", mode)
 	}
@@ -147,8 +158,46 @@ func runCompactionEval(args []string) error {
 		}
 		return emitJSON(rep)
 	default:
-		return fmt.Errorf("compaction-eval: unknown mode %q (run|freeze|check|ab)", mode)
+		return fmt.Errorf("compaction-eval: unknown mode %q (harvest|run|freeze|check|ab)", mode)
 	}
+}
+
+// runCompactionHarvest builds a real replay corpus from standalone agent
+// traces: convert → redact-at-harvest → classify → residual-PII gate → write
+// (round-trip-proven through the strict loader). Stats go to stderr; the
+// corpus hash is the artifact every downstream report is stamped with.
+func runCompactionHarvest(tracesDir, outPath string, minTurns, maxEntries int) error {
+	if tracesDir == "" || outPath == "" {
+		return fmt.Errorf("compaction-eval harvest: --traces and --out are required")
+	}
+	entries, stats, err := compeval.HarvestTraces(tracesDir, compeval.HarvestOpts{MinTurns: minTurns, MaxEntries: maxEntries})
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("compaction-eval harvest: no usable traces in %s (%d file(s), all skipped)", tracesDir, stats.Files)
+	}
+	hash, err := compeval.WriteCorpus(outPath, entries)
+	if err != nil {
+		return err
+	}
+	for _, n := range stats.Skipped {
+		fmt.Fprintf(os.Stderr, "[compaction-eval] harvest skipped %s: %s\n", n.File, n.Reason)
+	}
+	classes := make([]string, 0, len(stats.Redactions))
+	for class := range stats.Redactions {
+		classes = append(classes, class)
+	}
+	sort.Strings(classes)
+	for _, class := range classes {
+		fmt.Fprintf(os.Stderr, "[compaction-eval] harvest redacted %d × %s\n", stats.Redactions[class], class)
+	}
+	fmt.Fprintf(os.Stderr, "[compaction-eval] harvested %d/%d trace(s) → %s (corpus %.12s)\n", stats.Harvested, stats.Files, outPath, hash)
+	return emitJSON(struct {
+		CorpusHash string               `json:"corpus_hash"`
+		Out        string               `json:"out"`
+		Stats      compeval.HarvestStats `json:"stats"`
+	}{hash, outPath, stats})
 }
 
 // builtinControlPairs are the standing known-ordering probes: the same factual
