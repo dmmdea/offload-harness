@@ -122,3 +122,17 @@ test("upscale: model-based upscale + resize chained after decode; combine reads 
   assert.deepEqual(Object.values(plain).find((n) => n.class_type === "VHS_VideoCombine").inputs.images, ["13", 0]);
   assert.equal(Object.values(plain).filter((n) => n.class_type === "ImageUpscaleWithModel").length, 0);
 });
+
+test("COMFY_COMPUTE_DEVICE overrides the DisTorch2 compute device (J4 seam); unset = cuda:0", () => {
+  process.env.COMFY_COMPUTE_DEVICE = "xpu:0";
+  let g;
+  try {
+    g = buildWan22I2V({ imagePath: "in.png", prompt: "p" });
+  } finally {
+    delete process.env.COMFY_COMPUTE_DEVICE;
+  }
+  assert.equal(g["7"].inputs.compute_device, "xpu:0");
+  assert.equal(g["9"].inputs.compute_device, "xpu:0");
+  const g2 = buildWan22I2V({ imagePath: "in.png", prompt: "p" });
+  assert.equal(g2["7"].inputs.compute_device, "cuda:0");
+});

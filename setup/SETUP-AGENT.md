@@ -184,8 +184,12 @@ SDXL-class inpaint binding. **FLUX-family stays prohibited** (BFL non-commercial
 > block-swap** — composite peak **15,757 MiB** (HiDream for comparison: 15,688 MiB). A manifest that
 > pins a K-quant will download 15GB and then fail at load time, so pin the `_1` quant explicitly.
 8GB tiers: **VERIFIED** — O1 bf16 @2048 runs on an 8GB 3070 with 64GB RAM (5.9 min/render,
-an 8GB 3070 + 64GB RAM box, 2026-07-16). The seed stays off for 8GB tiers only because low-RAM boxes can't offload
-it — bind manually on any 8GB box with ≥~48GB RAM; video Q8_0 via DisTorch2 likewise.
+an 8GB 3070 + 64GB RAM box, 2026-07-16). **J4: this binding is now AUTOMATIC on fresh installs** —
+`ampere-8`/`blackwell-8` carry a `config_seed_ram_mid_high` layer that install.ps1 merges only when
+`ram_tier` is mid/high (same RAM gate as the 26B cpu-moe path): the O1 bf16 IMAGE seat, image only
+(no video/music on the 8GB node — decision 2026-07-23). Low-RAM 8GB boxes still get no media
+binding; existing configs are never touched (bind manually there); model downloads stay
+out-of-band like the ≥16GB seeds.
 
 ### run-graph satisfier prerequisite (`offload_run_graph`)
 

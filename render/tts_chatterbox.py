@@ -26,7 +26,9 @@ def main():
     ap.add_argument("--ref", default=None, help="reference wav to clone the voice from")
     args = ap.parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # J4 seam: TTS_DEVICE overrides torch device selection ("cpu", "cuda", "cuda:1",
+    # "xpu", ...) — the AMD/CPU boxes' escape hatch. Unset = the old auto-pick.
+    device = os.environ.get("TTS_DEVICE") or ("cuda" if torch.cuda.is_available() else "cpu")
     log(f"[chatterbox] loading model on {device} (first run downloads weights ~1GB)…")
     model = ChatterboxMultilingualTTS.from_pretrained(device=device)
 

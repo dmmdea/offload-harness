@@ -4,6 +4,21 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.22] - 2026-07-24
+
+### Added — J4: 8GB-tier first-class sub-item + per-box device seams (Juan-tier Q0, phase 4 of 5)
+- **RAM-conditional 8GB media seed**: `ampere-8`/`blackwell-8` carry `config_seed_ram_mid_high` —
+  install.ps1 merges it on top of the base seed ONLY when `ram_tier` is mid/high (the same RAM
+  gate as the 26B cpu-moe path): the VERIFIED quality-first HiDream-O1 bf16 IMAGE seat (5.9
+  min/render on the 8GB 3070 + 64GB reference box) that previously needed manual binding.
+  Image only — no video/music seat on 8GB by the 2026-07-23 decision. Low-RAM boxes unchanged;
+  existing configs never touched.
+- **Per-box device/launch seams** (all default-preserving, audit seams 4): `COMFY_COMPUTE_DEVICE`
+  env overrides the Wan graph's DisTorch2 `compute_device` (kills the hardcoded `cuda:0`);
+  `COMFY_EXTRA_ARGS` appends verbatim flags to the managed ComfyUI launch; `TTS_DEVICE` overrides
+  the Chatterbox worker's torch device auto-pick (the ft skeleton gains it when its engine lands).
+  Node tests pin all three (env set → applied; unset → byte-identical).
+
 ## [0.22.21] - 2026-07-24
 
 ### Added — J3: fleet-node citizenship for non-NVIDIA GPUs (Juan-tier Q0, phase 3 of 5)

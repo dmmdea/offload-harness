@@ -86,3 +86,26 @@ test("never ready => kills the child and throws", async () => {
   );
   assert.equal(killed, 1, "spawned child killed when it never came up");
 });
+
+test("COMFY_EXTRA_ARGS appends verbatim launch flags (J4 seam); unset = byte-identical", async () => {
+  let spawnedArgs = null;
+  process.env.COMFY_EXTRA_ARGS = "--directml --some-flag 1";
+  try {
+    await ensureComfy({
+      comfyUp: async () => spawnedArgs !== null, // down first, up after spawn
+      spawn: (_py, args) => { spawnedArgs = args; return { kill() {} }; },
+      pollMs: 1,
+    });
+  } finally {
+    delete process.env.COMFY_EXTRA_ARGS;
+  }
+  assert.deepEqual(spawnedArgs.slice(-3), ["--directml", "--some-flag", "1"]);
+  // and without the env, the tail stays the standard flag set
+  let plainArgs = null;
+  await ensureComfy({
+    comfyUp: async () => plainArgs !== null,
+    spawn: (_py, args) => { plainArgs = args; return { kill() {} }; },
+    pollMs: 1,
+  });
+  assert.equal(plainArgs.includes("--directml"), false);
+});

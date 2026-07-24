@@ -1100,13 +1100,26 @@ Step 'harness config -> ~/.local-offload/config.json' `
     # path seeds - an existing config.json is never touched (the Step SKIPs).
     $cfgText = Get-Content -Raw (Join-Path (Join-Path $scriptDir 'templates') 'config.json')
     $seed = $null
+    $seedCond = $null
     if ($profileId -and (Test-Path $profilesJson)) {
       $pdoc = Get-Content -Raw $profilesJson | ConvertFrom-Json
-      if ($pdoc.profiles.PSObject.Properties[$profileId]) { $seed = $pdoc.profiles.$profileId.config_seed }
+      if ($pdoc.profiles.PSObject.Properties[$profileId]) {
+        $seed = $pdoc.profiles.$profileId.config_seed
+        # J4: RAM-conditional seed layer — 8GB tiers auto-bind the quality-first O1
+        # image seat ONLY when the box has the RAM path for the offload (mid|high,
+        # same gate as the 26B cpu-moe path). Applied ON TOP of the base seed.
+        if ($ramTier -in @('mid','high') -and $pdoc.profiles.$profileId.PSObject.Properties['config_seed_ram_mid_high']) {
+          $seedCond = $pdoc.profiles.$profileId.config_seed_ram_mid_high
+        }
+      }
     }
     if ($seed) {
       $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $seed -OffloadHome $HOME_DIR
       Write-Host "      config_seed ($profileId): $(@($seed.PSObject.Properties.Name) -join ', ')" -ForegroundColor DarkGray
+    }
+    if ($seedCond) {
+      $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $seedCond -OffloadHome $HOME_DIR
+      Write-Host "      config_seed_ram_mid_high ($profileId, ram_tier=$ramTier): $(@($seedCond.PSObject.Properties.Name) -join ', ')" -ForegroundColor DarkGray
     }
     $noBomCfg = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($cfgDest, $cfgText, $noBomCfg)
