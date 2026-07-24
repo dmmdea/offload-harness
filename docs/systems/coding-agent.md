@@ -85,12 +85,21 @@ killed real runs with `exceed_context_size` 400s before the budget engaged ([ADR
 0015](../architecture/decisions/0015-compaction-defaults-on-served-window.md)). An explicit value
 overrides the probe (warned when it exceeds the served window). The ladder is
 least-destructive-first: under budget nothing is touched (byte-stable, so the server's KV prefix
-cache stays warm); over budget, with `--gcf-compact` (default ON — flip decision 2026-07-24) older
-tool bodies that are JSON arrays of flat objects are first re-encoded columnar (`internal/gcf` —
+cache stays warm); over budget, the CHEAPEST rung runs first: **dedupe** (always on, ADR 0016) —
+an older tool body byte-identical to a later result collapses to a reference naming the later
+call; then with `--gcf-compact` (default ON — flip decision 2026-07-24) older
+tool bodies that are JSON arrays of flat objects are re-encoded columnar (`internal/gcf` —
 LOSSLESS, round-trip proven); with `--skeleton-prune` (default ON, same decision) remaining older
 bodies are reduced to deterministic **skeletons** — head/tail windows plus buried
 error/failure/warning lines, elided runs replaced by counted markers — then, as pressure rises, to
-bare size markers, and finally whole older turns are dropped as assistant+tool units. The skeleton
+size markers that keep a bounded residue of the body's signal lines (the FORCE_PRESERVE guard),
+and finally whole older turns are dropped as assistant+tool units — except units still carrying
+signal residue or a **pinned** result (a result the model re-requested and the circuit breaker
+refused again — the H8 ramp: content the model re-reads stops being lossily compacted). A ladder
+that consequently cannot fit exhausts honestly: `Result.CompactionsExhausted` counts it, and the
+standalone runner + `agent_run` surface it (fit=false telemetry, never a silent over-budget
+request). Compaction is idempotent and monotonic (test-pinned): a turn only moves down the ladder,
+never back up — the KV-prefix stability invariant. The skeleton
 rung is model-free on purpose: a cascade call costs seconds on the loop's critical path (measured;
 see `skeleton.go`), a rules pass costs microseconds and produces identical bytes on every
 re-compaction. When a server overflow rejection survives the harder-compaction retry (the

@@ -104,5 +104,8 @@ func RunTwoTier(ctx context.Context, objective string, architect, editor *Loop) 
 
 	// One-shot handoff: the architect's full plan is the editor's sole user message.
 	res, eerr := editor.Run(ctx, plan)
+	// fit=false telemetry aggregates across BOTH tiers — an exhausted architect
+	// ladder must not vanish just because the editor's Result is the one returned.
+	res.CompactionsExhausted += archRes.CompactionsExhausted
 	return res.withFallback(FallbackNone), eerr
 }
