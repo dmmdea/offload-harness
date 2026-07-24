@@ -4,6 +4,29 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.25] - 2026-07-24
+
+### Changed — compaction defaults ON + the budget targets the SERVED window (ADR 0015)
+- **`--skeleton-prune` and `--gcf-compact` default ON** (CLI, and now wired on the MCP `agent_run`
+  path, which previously enabled neither); pipeline `gcf_compact` defaults ON (explicit `false`
+  still wins). Flipped on MEASUREMENT per the Phase-B gate: real-corpus replay (retention never
+  worse, better where the ladders differ) + control-pair-gated live A/Bs (base +0.119
+  CI[+0.047,+0.194], skeleton +0.090 CI[+0.029,+0.165] — no outcome cost at production pressure).
+  Flip decision approved 2026-07-24 from `COMPACTION-FLIP-DECISION-2026-07-24`.
+- **`--ctx-tokens` defaults to 0 = AUTO**: probe the serving endpoint's live `n_ctx`
+  (`/upstream/{model}/props` for llama-swap, `/props` for bare llama-server; conservative 8192
+  fallback), replacing the stale 16384 assumption that killed two real runs with
+  `exceed_context_size` 400s before the budget engaged. An explicit flag overrides the probe and
+  warns when it exceeds the served window.
+
+### Fixed
+- **Huge-newest-tool-body overflow no longer kills the run**: when the server rejects for
+  overflow and the harder-compaction retry cannot help (the oversized body sits inside
+  keep-recent, where every ladder rung is forbidden — the retry used to re-send the same bytes),
+  `emergencyShrink` reduces tool bodies as a last resort: skeleton first, then elision markers,
+  oldest-first, finally trimming the one body that still overflows. The preamble is never touched
+  and no turn is dropped; pinned by a loop-level test reproducing the live failure shape.
+
 ## [0.22.24] - 2026-07-24
 
 ### Added — `compaction-eval harvest`: real replay corpora from agent traces, redaction-at-harvest

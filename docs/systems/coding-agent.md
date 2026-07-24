@@ -78,17 +78,25 @@ search only; the editor gets whatever capabilities were granted.
 > `--profile` and `--two-tier` conflict only for a *non-default* profile. `--profile general` or an
 > empty value coexists with two-tier, because two-tier sets its own toolsets.
 
-**Compaction** keeps the transcript within `-ctx-tokens` (default 16384) — set it to match the served
-context size. Its ladder is least-destructive-first: under budget nothing is touched (byte-stable, so
-the server's KV prefix cache stays warm); over budget, with `--gcf-compact` (default off) older tool
-bodies that are JSON arrays of flat objects are first re-encoded columnar (`internal/gcf` —
-LOSSLESS, round-trip proven); with `--skeleton-prune` (default off) remaining older bodies are
-reduced to deterministic **skeletons** — head/tail windows plus buried error/failure/warning lines,
-elided runs replaced by counted markers — then, as pressure rises, to bare size markers, and finally
-whole older turns are dropped as assistant+tool units. The skeleton
+**Compaction** keeps the transcript within the SERVED context window: `--ctx-tokens` defaults to
+0 = auto — probe the endpoint's live `n_ctx` (`/upstream/{model}/props` on llama-swap, `/props` on
+a bare llama-server; conservative 8192 fallback when unanswerable), because an assumed window
+killed real runs with `exceed_context_size` 400s before the budget engaged ([ADR
+0015](../architecture/decisions/0015-compaction-defaults-on-served-window.md)). An explicit value
+overrides the probe (warned when it exceeds the served window). The ladder is
+least-destructive-first: under budget nothing is touched (byte-stable, so the server's KV prefix
+cache stays warm); over budget, with `--gcf-compact` (default ON — flip decision 2026-07-24) older
+tool bodies that are JSON arrays of flat objects are first re-encoded columnar (`internal/gcf` —
+LOSSLESS, round-trip proven); with `--skeleton-prune` (default ON, same decision) remaining older
+bodies are reduced to deterministic **skeletons** — head/tail windows plus buried
+error/failure/warning lines, elided runs replaced by counted markers — then, as pressure rises, to
+bare size markers, and finally whole older turns are dropped as assistant+tool units. The skeleton
 rung is model-free on purpose: a cascade call costs seconds on the loop's critical path (measured;
 see `skeleton.go`), a rules pass costs microseconds and produces identical bytes on every
-re-compaction.
+re-compaction. When a server overflow rejection survives the harder-compaction retry (the
+oversized body sits inside keep-recent, where the ladder is forbidden), `emergencyShrink` is the
+last resort before the run dies: tool BODIES are skeletonized, then elided, oldest-first — the
+preamble is never touched and no turn is dropped.
 
 **Compaction eval harness (`compaction-eval`, `internal/compeval`).** Default flips for the ladder
 rungs are gated by MEASUREMENT, never estimates: the verb replays a pinned corpus (JSONL of

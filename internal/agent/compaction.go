@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dmmdea/offload-harness/internal/contextbudget"
 	"github.com/dmmdea/offload-harness/internal/gcf"
 )
 
@@ -225,6 +226,74 @@ func elisionMarker(origLen int) string {
 func isElided(content string) bool {
 	const prefix = "[earlier result elided to fit context —"
 	return len(content) >= len(prefix) && content[:len(prefix)] == prefix
+}
+
+// emergencyShrink is the reactive-overflow LAST RESORT, used only after a
+// server overflow rejection when compact() could not get under budget —
+// typically because the oversized tool body sits inside keepRecent, where every
+// ladder rung is forbidden. Observed live (flip-decision report 2026-07-24,
+// finding F3): a transcript of [system, objective, assistant, tool(HUGE)]
+// makes the harder-compaction retry a byte-for-byte no-op, so the retry
+// re-sends the same overflow and the run dies. At that point recency
+// protection has nothing left to protect — the alternative is an abort — so
+// tool BODIES (never the preamble, never whole turns) are shrunk oldest-first:
+// skeleton first (signal-preserving), then the elision marker, and finally a
+// head/tail trim of whatever single body still keeps the estimate over budget.
+// Deterministic; returns msgs unchanged when already within budget.
+func emergencyShrink(msgs []Msg, budget, protectedPrefix int, opts compactOpts) []Msg {
+	if estimateTokens(msgs) <= budget {
+		return msgs
+	}
+	out := make([]Msg, len(msgs))
+	copy(out, msgs)
+	if protectedPrefix < 0 {
+		protectedPrefix = 0
+	}
+	// Pass 1: skeletonize every eligible tool body, oldest-first (only useful
+	// when the skeleton rung wasn't already applied to that body).
+	for i := protectedPrefix; i < len(out) && estimateTokens(out) > budget; i++ {
+		if out[i].Role != "tool" || isElided(out[i].Content) {
+			continue
+		}
+		if sk, ok := skeletonize(out[i].Content); ok && len(sk) < len(out[i].Content) {
+			out[i].Content = sk
+		}
+	}
+	// Pass 2: elide tool bodies to bare markers, oldest-first — including the
+	// keepRecent tail compact() must never touch; sparing the newest turns as
+	// long as the estimate allows is exactly why this walks oldest-first.
+	for i := protectedPrefix; i < len(out) && estimateTokens(out) > budget; i++ {
+		if out[i].Role != "tool" || isElided(out[i].Content) {
+			continue
+		}
+		if orig, ok := skeletonOriginalSize(out[i].Content); ok {
+			out[i].Content = elisionMarker(orig)
+		} else {
+			out[i].Content = elisionMarker(len(out[i].Content))
+		}
+	}
+	// Pass 3: if ONE body still keeps the estimate over budget (a huge newest
+	// tool result larger than the whole window), trim that body itself to the
+	// room the rest of the transcript leaves. Non-tool content (system,
+	// objective, assistant text) is never touched — if THAT alone exceeds the
+	// budget the run errors honestly, same as the preamble contract.
+	if estimateTokens(out) > budget {
+		largest, size := -1, 0
+		for i := protectedPrefix; i < len(out); i++ {
+			if out[i].Role == "tool" && len(out[i].Content) > size {
+				largest, size = i, len(out[i].Content)
+			}
+		}
+		if largest >= 0 {
+			rest := estimateTokens(out) - size/bytesPerToken
+			roomChars := (budget - rest) * bytesPerToken
+			if roomChars < 256 {
+				roomChars = 256
+			}
+			out[largest].Content, _ = contextbudget.Trim(out[largest].Content, roomChars)
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

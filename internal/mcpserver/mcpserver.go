@@ -879,6 +879,12 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	// Budget compaction against the SERVED window (probe; conservative fallback
+	// inside ResolveContextTokens when unanswerable) and run the measured-ON
+	// ladder rungs — the same defaults as the CLI (flip decision 2026-07-24).
+	probed, probeOK := agent.ProbeServedWindow(cctx, cfg.Endpoint, model)
+	effCtx, _ := agent.ResolveContextTokens(0, probed, probeOK)
+	built.Loop.WithContextTokens(effCtx).WithSkeletonPrune(true).WithGCFCompact(true)
 	res, rerr := built.Loop.Run(cctx, in.Goal)
 	if rerr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error(), "steps": res.Steps})

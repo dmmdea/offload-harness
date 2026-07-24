@@ -396,6 +396,14 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			// before.
 			if isContextOverflowErr(err) {
 				msgs = compact(msgs, budget/2, l.keepRecent/2, preambleLen, l.ladderOpts())
+				// The harder compact can be a NO-OP when the oversized body sits
+				// inside keepRecent (observed live: a huge newest tool result made
+				// the retry re-send the same overflow). Emergency shrink is the
+				// last resort before the run dies: it may touch tool bodies the
+				// keep-recent contract normally protects.
+				if estimateTokens(msgs) > budget/2 {
+					msgs = emergencyShrink(msgs, budget/2, preambleLen, l.ladderOpts())
+				}
 				comp, err = l.client.Chat(ctx, msgs, specs, l.maxTokens)
 			}
 			if err != nil {

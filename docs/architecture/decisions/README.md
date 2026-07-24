@@ -24,6 +24,7 @@ code, treat everything else as background.
 | [0012](0012-public-canonical-repository.md) | Accepted | Public repository is canonical; private is the development and moat repository |
 | [0013](0013-nodes-advertise-raw-footprint.md) | Accepted | Nodes advertise the raw observed footprint; the dispatcher owns all margin |
 | [0014](0014-gpu-memory-provider-and-uma-sampling.md) | Accepted | GPU memory is a resolved provider (nvidia-smi else windows-generic WDDM); UMA samples Dedicated+Shared |
+| [0015](0015-compaction-defaults-on-served-window.md) | Accepted | Compaction rungs default ON (measured flip decision); the budget probes the SERVED window; emergency shrink on the overflow retry |
 
 
 ## Lifecycle
