@@ -233,6 +233,58 @@ function Get-ServedCtx {
   return $null
 }
 
+# ---------------------------------------------------------------------------
+# J1 canary pure helpers (dot-source testable via OFFLOAD_SELFTEST_DOT_SOURCE).
+# ---------------------------------------------------------------------------
+
+# Jaccard word-set overlap of two generations, 0.0-1.0 rounded to 2 decimals.
+# Used by the FA+q8_0-KV correctness canary: at temp 0 an f16-KV and a q8_0-KV run
+# of the same prompt should produce near-identical text; a positional diff would
+# over-penalize a benign mid-sequence divergence, so we compare word SETS. Pure fn.
+function Get-WordOverlap {
+  param([string]$A, [string]$B)
+  if ([string]::IsNullOrWhiteSpace($A) -or [string]::IsNullOrWhiteSpace($B)) { return 0.0 }
+  # @(...) around EVERY use: PS 5.1 unwraps a single-element pipeline result to a bare
+  # string, and 'string + string' is CONCATENATION - without the array forcing, a
+  # degenerate single-unique-word generation made union=1 and overlap read 1.0
+  # (found in adversarial review; exactly the failure mode this canary guards).
+  $wa = @(@(($A.ToLowerInvariant() -split '[^\w]+') | Where-Object { $_ }) | Select-Object -Unique)
+  $wb = @(@(($B.ToLowerInvariant() -split '[^\w]+') | Where-Object { $_ }) | Select-Object -Unique)
+  if ($wa.Count -eq 0 -or $wb.Count -eq 0) { return 0.0 }
+  $inter = @($wa | Where-Object { $wb -contains $_ }).Count
+  $union = @(@($wa) + @($wb) | Select-Object -Unique).Count
+  if ($union -eq 0) { return 0.0 }
+  return [math]::Round($inter / $union, 2)
+}
+
+# Scan a llama-server log for the flash-attention state. Returns 'on'|'off'|$null
+# (unknown). Tolerant of the several formats llama.cpp has used ("flash_attn = 1",
+# "flash_attn : enabled", auto-disable notices). The FA canary treats 'off' as a
+# HARD fail (the silent-FA-disable mode then breaks quantized-V loads on Gemma) and
+# $null as a soft unknown (recorded honestly, never claimed confirmed). Pure fn.
+function Get-FaStateFromLog {
+  param([string]$LogText)
+  if ([string]::IsNullOrWhiteSpace($LogText)) { return $null }
+  if ($LogText -match '(?im)(disabling flash attention|flash attention.*not supported|flash_attn[^\r\n]*(=|:)\s*(0|off|disabled|false)\b)') { return 'off' }
+  if ($LogText -match '(?im)flash_attn[^\r\n]*(=|:)\s*(1|on|enabled|true|auto)\b') {
+    # 'auto' alone does not prove ON — but the negative patterns above did not match,
+    # so an explicit '-fa on' launch that reached here is serving with FA. Distinguish:
+    if ($LogText -match '(?im)flash_attn[^\r\n]*(=|:)\s*auto\b' -and $LogText -notmatch '(?im)flash_attn[^\r\n]*(=|:)\s*(1|on|enabled|true)\b') { return $null }
+    return 'on'
+  }
+  return $null
+}
+
+# Cosine similarity of two equal-length vectors, rounded to 4 decimals. Pure fn.
+function Get-CosineSim {
+  param([double[]]$A, [double[]]$B)
+  if (-not $A -or -not $B -or $A.Count -eq 0 -or $A.Count -ne $B.Count) { return $null }
+  $dot = 0.0; $na = 0.0; $nb = 0.0
+  for ($i = 0; $i -lt $A.Count; $i++) { $dot += $A[$i] * $B[$i]; $na += $A[$i] * $A[$i]; $nb += $B[$i] * $B[$i] }
+  if ($na -eq 0 -or $nb -eq 0) { return $null }
+  return [math]::Round($dot / ([math]::Sqrt($na) * [math]::Sqrt($nb)), 4)
+}
+
 # Approx KV-cache size in MB for gemma-4 E4B at a given ctx. f16 KV (2 bytes/elem), K+V (x2).
 # gemma-4 E4B geometry: ~34 layers, GQA num_kv_heads ~4, head_dim 256 -> kv_dim = 4*256 = 1024.
 # bytes = ctx * layers * kv_dim * 2(K+V) * 2(f16). This is a documented ESTIMATE, not a measurement.
@@ -390,6 +442,10 @@ function Get-ProjectedProfile {
 #   -CpuMoe      add --cpu-moe (experts in RAM) - the 26B reduce path
 #   -FlashAttn   on|off (default on; the cpu backend template omits it, handled by caller)
 #   -WarmDecode  after /health, issue one chat and time the generation for tok/s
+#   -GenPrompt   the warm-decode prompt (J1: the FA+q8-KV canary needs a FIXED prompt
+#                whose temp-0 text it compares across KV types)
+# J1: the result also carries text (the warm generation, '' unless -WarmDecode) and
+# fa_state ('on'|'off'|$null) scanned from the server log — see Get-FaStateFromLog.
 function Invoke-ProbeLoad {
   param(
     [string]$ModelFile,
@@ -398,6 +454,7 @@ function Invoke-ProbeLoad {
     [switch]$CpuMoe,
     [string]$FlashAttn = 'on',
     [switch]$WarmDecode,
+    [string]$GenPrompt = 'Count from one to forty in words, comma-separated, then stop.',
     [int]$TimeoutSec = 180
   )
   $llamaServer = Join-Path $llamaDir 'llama-server.exe'
@@ -417,7 +474,10 @@ function Invoke-ProbeLoad {
   if ($FlashAttn -eq 'on' -and $backend -ne 'cpu') { $svArgs.AddRange([string[]]@('--flash-attn', 'on')) }
   $svArgs.AddRange([string[]]@('--cache-type-k', $KvType, '--cache-type-v', $KvType,
                              '--jinja', '--no-webui', '--parallel', '1',
-                             '--port', "$probePort", '--host', '127.0.0.1'))
+                             '--port', "$probePort", '--host', '127.0.0.1',
+                             '-lv', '10'))   # J1: default verbosity omits the flash_attn state line;
+                                             # -lv 10 prints "llama_context: flash_attn = enabled|disabled"
+                                             # (verified live on a Jul-2026 build) for Get-FaStateFromLog
   $proc = $null
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
   try {
@@ -430,20 +490,42 @@ function Invoke-ProbeLoad {
         $sw.Stop()
         $tail = ''
         try { $tail = (Get-Content -Path $logFile -Tail 4 -ErrorAction SilentlyContinue) -join ' | ' } catch { }
-        return @{ ok = $false; detail = ("server exited early (code {0}) {1}" -f $proc.ExitCode, $tail); cold_load_s = $null; tps = $null }
+        # J1: at -lv 10 the alloc/OOM line can scroll out of the 4-line tail behind debug
+        # chatter, which would make Test-AllocFailure misclassify a real OOM as non-alloc
+        # (silently skipping the ctx-downshift remediation). Scan the WHOLE log for the
+        # alloc-class marker and surface that line in the detail.
+        try {
+          $whole = Get-Content -Raw -Path $logFile -ErrorAction SilentlyContinue
+          if ($whole) {
+            $am = [regex]::Match($whole, '(?im)^.*(VK_ERROR_OUT_OF_DEVICE_MEMORY|out of device memory|CUDA (error )?out of memory|cudaErrorMemoryAllocation|device[- ]lost|VK_ERROR_DEVICE_LOST|failed to allocate|unable to allocate).*$')
+            if ($am.Success) { $tail = ($am.Value.Trim() + ' | ' + $tail) }
+          }
+        } catch { }
+        return @{ ok = $false; detail = ("server exited early (code {0}) {1}" -f $proc.ExitCode, $tail); cold_load_s = $null; tps = $null; text = ''; fa_state = $null }
       }
       $h = Invoke-JsonGet "http://127.0.0.1:$probePort/health" 4
       if ($h) { $healthy = $true; break }
       Start-Sleep -Milliseconds 500
     }
     $sw.Stop()
-    if (-not $healthy) { return @{ ok = $false; detail = "no /health within ${TimeoutSec}s at ctx=$Ctx kv=$KvType"; cold_load_s = [math]::Round($sw.Elapsed.TotalSeconds, 2); tps = $null } }
+    if (-not $healthy) { return @{ ok = $false; detail = "no /health within ${TimeoutSec}s at ctx=$Ctx kv=$KvType"; cold_load_s = [math]::Round($sw.Elapsed.TotalSeconds, 2); tps = $null; text = ''; fa_state = $null } }
     $coldS = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+    # J1: scan the server log for the flash-attention state (see Get-FaStateFromLog).
+    # llama-server logs to stderr ($logFile); scan stdout too, defensively.
+    $faState = $null
+    try {
+      $logTxt = ''
+      foreach ($lf in @($logFile, "$logFile.out")) {
+        if (Test-Path $lf) { $logTxt += (Get-Content -Raw -Path $lf -ErrorAction SilentlyContinue) + "`n" }
+      }
+      $faState = Get-FaStateFromLog -LogText $logTxt
+    } catch { $faState = $null }
     $tps = $null
+    $genText = ''
     $detail = "loaded+healthy at ctx=$Ctx kv=$KvType$(if ($CpuMoe){' --cpu-moe'}) on a standalone probe server"
     if ($WarmDecode) {
       # One warm generation directly against the probe server's OpenAI endpoint; time the decode.
-      $body = @{ model = 'probe'; messages = @(@{ role = 'user'; content = 'Count from one to forty in words, comma-separated, then stop.' });
+      $body = @{ model = 'probe'; messages = @(@{ role = 'user'; content = $GenPrompt });
                  max_tokens = 160; temperature = 0; stream = $false } | ConvertTo-Json -Depth 6 -Compress
       $dsw = [System.Diagnostics.Stopwatch]::StartNew()
       try {
@@ -453,15 +535,16 @@ function Invoke-ProbeLoad {
         $ct = 0
         if ($rr.usage -and $rr.usage.completion_tokens) { $ct = [int]$rr.usage.completion_tokens }
         if ($ct -gt 0 -and $dsw.Elapsed.TotalSeconds -gt 0) { $tps = [math]::Round($ct / $dsw.Elapsed.TotalSeconds, 1) }
+        if ($rr.choices -and $rr.choices[0].message) { $genText = [string]$rr.choices[0].message.content }
         $detail = "$detail; warm decode $ct tok in $([math]::Round($dsw.Elapsed.TotalSeconds,2))s"
       } catch {
         $dsw.Stop()
         $detail = "$detail; warm decode FAILED: $($_.Exception.Message)"
       }
     }
-    return @{ ok = $true; detail = $detail; cold_load_s = $coldS; tps = $tps }
+    return @{ ok = $true; detail = $detail; cold_load_s = $coldS; tps = $tps; text = $genText; fa_state = $faState }
   } catch {
-    return @{ ok = $false; detail = "probe threw: $($_.Exception.Message)"; cold_load_s = $null; tps = $null }
+    return @{ ok = $false; detail = "probe threw: $($_.Exception.Message)"; cold_load_s = $null; tps = $null; text = ''; fa_state = $null }
   } finally {
     if ($proc -and -not $proc.HasExited) { try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { } }
     try {
@@ -559,6 +642,22 @@ $receipt = [ordered]@{
       notes         = $null
     }
   }
+  # J1: the H3 canary ledger — the promotion gates for the AMD/Vulkan tiers (and any
+  # box forcing OFFLOAD_SELFTEST_CANARIES=1). Every entry starts 'skipped' and is only
+  # upgraded by an actual measurement; the SETUP-AGENT.md amd-rdna3 chapter tells the
+  # installing agent which config promotions each PASS authorizes (ctx 16K->32K,
+  # f16->q8_0 KV, 26B cpu-moe->full-offload). Nothing here is auto-applied.
+  canaries        = [ordered]@{
+    ran              = $false
+    gate             = $null      # why the suite ran / was skipped
+    fa_q8kv          = [ordered]@{ status = 'skipped'; fa_confirmed = $null; overlap = $null; detail = $null }
+    moe_full_offload = [ordered]@{ status = 'skipped'; full_tps = $null; cpu_moe_tps = $null; promote = $null; detail = $null }
+    ctx_sweep        = [ordered]@{ status = 'skipped'; results = @(); max_ok_ctx = $null; detail = $null }
+    bench            = [ordered]@{ status = 'skipped'; pp512_tps = $null; tg128_tps = $null; detail = $null }
+    swap_leak        = [ordered]@{ status = 'skipped'; servers_after = $null; detail = $null }
+    embedder         = [ordered]@{ status = 'skipped'; cos_related = $null; cos_unrelated = $null; reranker = 'skipped: no reranker model is installed by this stack (memory_stack rerank seat is operator-provisioned)'; detail = $null }
+    whisper          = [ordered]@{ status = 'skipped'; detail = 'no whisper seat is installed by this stack; when binding one on an AMD iGPU, whisper.cpp >= 1.8.3 is the FLOOR (earlier builds are not viable on AMD iGPUs; ~3-4x realtime expected)' }
+  }
   verdict         = 'fail'
   proves          = @(
     'installation integrity',
@@ -608,6 +707,11 @@ try {
   }
   $receipt.backend = $backend
   LogOk "backend = $backend"
+  # J1: on Vulkan, pin the SAME device the rendered template pins (GGML_VK_VISIBLE_DEVICES=0)
+  # for every child this script spawns (probe servers, llama-bench) - otherwise on a
+  # multi-ICD box the canaries could measure a different adapter than production serving.
+  # Process-scoped env; dies with this script. An operator override already set wins.
+  if ($backend -eq 'vulkan' -and -not $env:GGML_VK_VISIBLE_DEVICES) { $env:GGML_VK_VISIBLE_DEVICES = '0' }
 
   # --- GPU + driver capture (R4.3) ----------------------------------------------------------
   # Source of truth for WHICH gpu = llama.cpp itself. `llama-server --list-devices` prints the
@@ -1167,6 +1271,285 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
     LogFail "profile_measure section threw: $($_.Exception.Message) - continuing to verdict"
   }
 
+  # --- J1: H3 canary suite - the AMD/Vulkan promotion gates ----------------------------------
+  # Independent section (own try/catch; never changes the verdict rule). These canaries turn
+  # the amd-rdna3 profile's SAFE FLOOR into evidence-backed promotions: each PASS authorizes
+  # the installing agent to apply ONE config change per SETUP-AGENT.md (amd-rdna3 chapter) -
+  # ctx 16K->32K (ctx_sweep), f16->q8_0 KV (fa_q8kv), 26B cpu-moe->full-offload
+  # (moe_full_offload). Nothing is auto-applied here. Default gate: vulkan backend;
+  # OFFLOAD_SELFTEST_CANARIES=1 forces on any box, =0 forces off.
+  LogStep "H3 canaries: promotion gates (fa_q8kv / moe_full_offload / ctx_sweep / bench / swap_leak / embedder / whisper)"
+  $cn = $receipt.canaries
+  try {
+    $canaryOn = $false
+    if ($env:OFFLOAD_SELFTEST_CANARIES -eq '1') { $canaryOn = $true; $cn.gate = 'forced: OFFLOAD_SELFTEST_CANARIES=1' }
+    elseif ($env:OFFLOAD_SELFTEST_CANARIES -eq '0') { $cn.gate = 'skipped: OFFLOAD_SELFTEST_CANARIES=0' }
+    elseif ($backend -eq 'vulkan') { $canaryOn = $true; $cn.gate = 'vulkan backend (AMD-tier promotion gates run by default)' }
+    else { $cn.gate = "skipped: backend=$backend (set OFFLOAD_SELFTEST_CANARIES=1 to force)" }
+
+    if (-not $canaryOn) {
+      LogWarn "canary suite $($cn.gate)"
+    } else {
+      $cn.ran = $true
+      Log "  gate: $($cn.gate)"
+      # Shared inputs. $proj/$residentSpec come from the profile_measure section; guard
+      # partial state (that section has its own try/catch and may have thrown early).
+      $cnResidentSpec = $residentSpec
+      if (-not $cnResidentSpec) { $cnResidentSpec = $TIER_SPEC | Where-Object { $_.id -eq 'offload-e4b' } | Select-Object -First 1 }
+      $cnResidentOk = Test-Path (Join-Path $modelDir $cnResidentSpec.file)
+      $cnCtx = 16384; $cnKv = 'f16'; $cnFa = 'on'
+      if ($proj) { $cnCtx = [int]$proj.ctx_size; $cnKv = [string]$proj.kv_type; $cnFa = [string]$proj.flash_attn }
+      # VRAM-contention mitigation (review finding): the transient swap still holds the
+      # LAST-SERVED model resident (ttl 300) while canary probes load standalone on :18804.
+      # Harmless on a UMA iGPU (shared memory), but on a discrete card (amd-rdna3-dgpu:
+      # 26B ~14.2GB resident of 16GB) the probes would OOM against the resident. Park the
+      # swap on the SMALLEST installed tier before probing.
+      try {
+        $parkTier = $installedTiers | Sort-Object { (Get-Item (Join-Path $modelDir $_.file)).Length } | Select-Object -First 1
+        if ($parkTier -and $installedTiers.Count -ge 2) {
+          Log "  parking the swap on the smallest tier ($($parkTier.id)) to free memory for the probe servers"
+          [void](Invoke-Chat -Model $parkTier.id -UserContent 'Reply with exactly the single word: ok' -MaxTokens 8 -TimeoutSec 300)
+        }
+      } catch { }
+      # fa_q8kv correctness needs a KV-type comparison, not a ctx stress test - and the f16
+      # baseline at a 32K profile ctx needs ~2x the KV of the q8_0 target and can OOM where
+      # the real config fits. Cap the comparison ctx at 16K (ctx_sweep owns the ctx question).
+      $faCtx = [math]::Min($cnCtx, 16384)
+
+      # (1) fa_q8kv - FA + q8_0-KV correctness: FIXED prompt at temp 0, f16-KV baseline vs
+      # q8_0-KV run, word-set overlap >= 0.80, AND server-log proof FA is actually ON
+      # (the silent-FA-disable mode then fails quantized-V loads on Gemma - hard fail).
+      if (-not $cnResidentOk) {
+        $cn.fa_q8kv.detail = "resident-tier gguf absent"; LogWarn "fa_q8kv SKIPPED: $($cn.fa_q8kv.detail)"
+      } elseif ($backend -eq 'cpu') {
+        $cn.fa_q8kv.detail = 'cpu backend (no FA / no GPU KV)'; LogWarn "fa_q8kv SKIPPED: $($cn.fa_q8kv.detail)"
+      } else {
+        $faPrompt = 'List the first twelve prime numbers in ascending order, comma-separated, then stop.'
+        LogStep "  fa_q8kv: f16-KV baseline (fixed prompt, temp 0, ctx=$faCtx)"
+        $rf = Invoke-ProbeLoad -ModelFile $cnResidentSpec.file -Ctx $faCtx -KvType 'f16' -FlashAttn 'on' -WarmDecode -GenPrompt $faPrompt -TimeoutSec 240
+        LogStep "  fa_q8kv: q8_0-KV run (same prompt)"
+        $rq = Invoke-ProbeLoad -ModelFile $cnResidentSpec.file -Ctx $faCtx -KvType 'q8_0' -FlashAttn 'on' -WarmDecode -GenPrompt $faPrompt -TimeoutSec 240
+        $cn.fa_q8kv.fa_confirmed = $rq.fa_state
+        if (-not $rq.ok) {
+          $cn.fa_q8kv.status = 'fail'
+          $cn.fa_q8kv.detail = "q8_0-KV load FAILED: $($rq.detail) - stay on the f16 floor"
+          LogFail "fa_q8kv: $($cn.fa_q8kv.detail)"
+        } elseif ($rq.fa_state -eq 'off') {
+          $cn.fa_q8kv.status = 'fail'
+          $cn.fa_q8kv.detail = 'server log shows flash-attn OFF despite -fa on (the silent-disable mode) - q8_0 KV is NOT safe; stay on f16 and investigate the driver/build'
+          LogFail "fa_q8kv: $($cn.fa_q8kv.detail)"
+        } elseif (-not $rf.ok) {
+          $cn.fa_q8kv.status = 'warn'
+          $cn.fa_q8kv.detail = "q8_0-KV loaded+generated but the f16 baseline failed ($($rf.detail)) - overlap not comparable this run"
+          LogWarn "fa_q8kv: $($cn.fa_q8kv.detail)"
+        } else {
+          $ov = Get-WordOverlap -A $rf.text -B $rq.text
+          $cn.fa_q8kv.overlap = $ov
+          if ($ov -ge 0.8 -and $rq.text -and $rq.text.Trim().Length -gt 0) {
+            if ($rq.fa_state -eq 'on') {
+              $cn.fa_q8kv.status = 'pass'
+              $cn.fa_q8kv.detail = "q8_0-KV matches f16 at temp 0 (word overlap $ov) with FA confirmed ON in the server log - q8_0 KV promotion authorized"
+              LogOk "fa_q8kv PASS: overlap=$ov, FA=on"
+            } else {
+              $cn.fa_q8kv.status = 'warn'
+              $cn.fa_q8kv.detail = "overlap $ov passes but the FA state was NOT found in the server log (unknown, not confirmed) - treat as unconfirmed"
+              LogWarn "fa_q8kv: $($cn.fa_q8kv.detail)"
+            }
+          } else {
+            $cn.fa_q8kv.status = 'fail'
+            $cn.fa_q8kv.detail = "q8_0-KV text diverged from f16 (word overlap $ov < 0.80) - stay on the f16 floor"
+            LogFail "fa_q8kv: $($cn.fa_q8kv.detail)"
+          }
+        }
+      }
+
+      # (2) moe_full_offload - the 26B -ngl 99 FULL-OFFLOAD trial: the upward mirror of the
+      # standing Invoke-Remediate26B downshift. On UMA boxes the weights live in GTT/shared
+      # memory; research (2026-07-23) measured ~20-25 tok/s tg on a 780M + dual-channel DDR5 -
+      # FASTER than cpu-moe. pass+promote -> the agent may flip the 26B to -ngl 99;
+      # fail -> the cpu-moe floor stands.
+      $moeSpec26 = $TIER_SPEC | Where-Object { $_.id -eq 'gemma4-26b-a4b' } | Select-Object -First 1
+      $moeInstalled26 = Test-Path (Join-Path $modelDir $moeSpec26.file)
+      if ($proj -and $proj.moe_26b -eq 'gpu') {
+        $cn.moe_full_offload.detail = 'profile already projects full-offload (moe_26b=gpu) - nothing to trial'; LogWarn "moe_full_offload SKIPPED: $($cn.moe_full_offload.detail)"
+      } elseif ($proj -and -not $proj.include_26b) {
+        $cn.moe_full_offload.detail = 'profile excludes the 26B'; LogWarn "moe_full_offload SKIPPED: $($cn.moe_full_offload.detail)"
+      } elseif (-not $moeInstalled26) {
+        $cn.moe_full_offload.detail = '26B gguf not installed in this stack'; LogWarn "moe_full_offload SKIPPED: $($cn.moe_full_offload.detail)"
+      } elseif ($backend -eq 'cpu') {
+        $cn.moe_full_offload.detail = 'cpu backend'; LogWarn "moe_full_offload SKIPPED: $($cn.moe_full_offload.detail)"
+      } else {
+        LogStep "  moe_full_offload: 26B -ngl 99 trial (weights via GTT on UMA; may take minutes)"
+        $rmf = Invoke-ProbeLoad -ModelFile $moeSpec26.file -Ctx $cnCtx -KvType $cnKv -FlashAttn $cnFa -WarmDecode -TimeoutSec 600
+        $cn.moe_full_offload.cpu_moe_tps = $pm.moe26b.moe26b_tps
+        if ($rmf.ok -and $null -ne $rmf.tps) {
+          $cn.moe_full_offload.full_tps = $rmf.tps
+          $promote = ($null -eq $pm.moe26b.moe26b_tps) -or ($rmf.tps -gt $pm.moe26b.moe26b_tps)
+          $cn.moe_full_offload.promote = [bool]$promote
+          $cn.moe_full_offload.status = 'pass'
+          $cmLabel = if ($null -ne $pm.moe26b.moe26b_tps) { "$($pm.moe26b.moe26b_tps)" } else { 'unmeasured' }
+          $cn.moe_full_offload.detail = "26B full-offload measured $($rmf.tps) tok/s decode vs cpu-moe $cmLabel - $(if ($promote) { 'PROMOTE to -ngl 99' } else { 'keep cpu-moe (full-offload is not faster here)' })"
+          LogOk "moe_full_offload: $($cn.moe_full_offload.detail)"
+        } elseif ($rmf.ok) {
+          $cn.moe_full_offload.status = 'warn'
+          $cn.moe_full_offload.promote = $false
+          $cn.moe_full_offload.detail = "26B full-offload LOADED but decode tok/s was unmeasured ($($rmf.detail)) - no promotion without a number"
+          LogWarn "moe_full_offload: $($cn.moe_full_offload.detail)"
+        } else {
+          $cn.moe_full_offload.status = 'fail'
+          $cn.moe_full_offload.promote = $false
+          $cn.moe_full_offload.detail = "26B full-offload did not load ($($rmf.detail)) - the cpu-moe floor stands (a partial --n-cpu-moe N split is the manual middle path)"
+          LogWarn "moe_full_offload: $($cn.moe_full_offload.detail)"
+        }
+      }
+
+      # (3) ctx_sweep - long-context SWA sweep 8K/16K/32K on the resident tier. KV type:
+      # q8_0 if fa_q8kv PASSED this run, else the profile's projected KV. Stops at the
+      # first failing size (larger would fail too). max_ok_ctx >= 32768 authorizes the
+      # ctx 16K->32K promotion.
+      if (-not $cnResidentOk) {
+        $cn.ctx_sweep.detail = 'resident-tier gguf absent'; LogWarn "ctx_sweep SKIPPED: $($cn.ctx_sweep.detail)"
+      } elseif ($backend -eq 'cpu') {
+        $cn.ctx_sweep.detail = 'cpu backend'; LogWarn "ctx_sweep SKIPPED: $($cn.ctx_sweep.detail)"
+      } else {
+        $sweepKv = if ($cn.fa_q8kv.status -eq 'pass') { 'q8_0' } else { $cnKv }
+        LogStep "  ctx_sweep: 8K/16K/32K loads+gen on $($cnResidentSpec.id) (kv=$sweepKv)"
+        $sweepRes = @()
+        $maxOk = $null
+        foreach ($sc in @(8192, 16384, 32768)) {
+          $rs = Invoke-ProbeLoad -ModelFile $cnResidentSpec.file -Ctx $sc -KvType $sweepKv -FlashAttn $cnFa -WarmDecode -TimeoutSec 240
+          $sweepRes += ,([ordered]@{ ctx = $sc; ok = [bool]$rs.ok; tps = $rs.tps })
+          if ($rs.ok) { $maxOk = $sc; LogOk "ctx_sweep: ctx=$sc ok ($(if ($null -ne $rs.tps) { "$($rs.tps) tok/s" } else { 'tps n/a' }))" }
+          else { LogWarn "ctx_sweep: ctx=$sc FAILED ($($rs.detail)) - stopping the sweep"; break }
+        }
+        $cn.ctx_sweep.results = [object[]]@($sweepRes)
+        $cn.ctx_sweep.max_ok_ctx = $maxOk
+        if ($null -ne $maxOk -and $maxOk -ge $cnCtx) {
+          $cn.ctx_sweep.status = 'pass'
+          $cn.ctx_sweep.detail = "max loading+generating ctx=$maxOk (kv=$sweepKv)$(if ($maxOk -ge 32768) { ' - 32K promotion authorized' })"
+        } elseif ($null -ne $maxOk) {
+          $cn.ctx_sweep.status = 'warn'
+          $cn.ctx_sweep.detail = "max ok ctx=$maxOk is BELOW the profile's projected $cnCtx - the ctx probe/downshift result governs"
+        } else {
+          $cn.ctx_sweep.status = 'fail'
+          $cn.ctx_sweep.detail = "no sweep size loaded (kv=$sweepKv)"
+        }
+        Log "  ctx_sweep: $($cn.ctx_sweep.detail)"
+      }
+
+      # (4) bench - llama-bench pp512/tg128 on the resident tier: the regression-gate
+      # numbers (recorded in the receipt so a driver/build change has a before/after).
+      $benchExe = Join-Path $llamaDir 'llama-bench.exe'
+      if (-not (Test-Path $benchExe)) {
+        $cn.bench.detail = 'llama-bench.exe absent from the llama.cpp install'; LogWarn "bench SKIPPED: $($cn.bench.detail)"
+      } elseif (-not $cnResidentOk) {
+        $cn.bench.detail = 'resident-tier gguf absent'; LogWarn "bench SKIPPED: $($cn.bench.detail)"
+      } else {
+        LogStep "  bench: llama-bench -p 512 -n 128 on $($cnResidentSpec.id)"
+        $benchRaw = Invoke-WithEapContinue { & $benchExe -m (Join-Path $modelDir $cnResidentSpec.file) -p 512 -n 128 -o json 2>$null | Out-String }
+        $benchDoc = $null
+        try { $benchDoc = $benchRaw | ConvertFrom-Json } catch { $benchDoc = $null }
+        if ($benchDoc) {
+          foreach ($row in @($benchDoc)) {
+            if ($row.n_prompt -gt 0 -and $row.n_gen -eq 0 -and $row.avg_ts) { $cn.bench.pp512_tps = [math]::Round([double]$row.avg_ts, 1) }
+            if ($row.n_gen -gt 0 -and $row.avg_ts) { $cn.bench.tg128_tps = [math]::Round([double]$row.avg_ts, 1) }
+          }
+        }
+        if ($null -ne $cn.bench.tg128_tps -or $null -ne $cn.bench.pp512_tps) {
+          $cn.bench.status = if ($null -ne $cn.bench.tg128_tps -and $cn.bench.tg128_tps -lt 8) { 'warn' } else { 'pass' }
+          $cn.bench.detail = "pp512=$($cn.bench.pp512_tps) tok/s, tg128=$($cn.bench.tg128_tps) tok/s$(if ($cn.bench.status -eq 'warn') { ' (tg is CPU-class - check offload)' })"
+          if ($cn.bench.status -eq 'pass') { LogOk "bench: $($cn.bench.detail)" } else { LogWarn "bench: $($cn.bench.detail)" }
+        } else {
+          $cn.bench.status = 'fail'
+          $cn.bench.detail = 'llama-bench produced no parseable pp/tg numbers'
+          LogWarn "bench: $($cn.bench.detail)"
+        }
+      }
+
+      # (5) swap_leak - cycle tiers through the transient swap, then verify llama-swap did
+      # not leak llama-server processes (>=2 tiers exercises a real eviction cycle).
+      try {
+        if ($installedTiers.Count -ge 2) {
+          LogStep "  swap_leak: eviction cycle $($installedTiers[0].id) -> $($installedTiers[1].id) -> $($installedTiers[0].id)"
+          foreach ($t in @($installedTiers[0], $installedTiers[1], $installedTiers[0])) {
+            [void](Invoke-Chat -Model $t.id -UserContent 'Reply with exactly the single word: ok' -MaxTokens 8 -TimeoutSec 300)
+          }
+        } else {
+          LogStep "  swap_leak: single tier installed - process-count check only (no eviction cycle)"
+        }
+        Start-Sleep -Seconds 5
+        $mineProcs = @()
+        try {
+          $mineProcs = @(Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and ($_.CommandLine -match [regex]::Escape($HOME_DIR.Replace('\','/')) -or $_.CommandLine -match [regex]::Escape($HOME_DIR)) })
+        } catch { $mineProcs = @() }
+        $cn.swap_leak.servers_after = $mineProcs.Count
+        $stillUp = [bool](Invoke-JsonGet "$swapBase/v1/models" 5)
+        $cycleLabel = if ($installedTiers.Count -ge 2) { 'after the eviction cycle' } else { '(single tier - process-count check only, no eviction cycle ran)' }
+        if ($mineProcs.Count -le 1 -and $stillUp) {
+          $cn.swap_leak.status = 'pass'
+          $cn.swap_leak.detail = "$($mineProcs.Count) llama-server process(es) $cycleLabel; swap proxy still healthy"
+          LogOk "swap_leak: $($cn.swap_leak.detail)"
+        } else {
+          $cn.swap_leak.status = 'fail'
+          $cn.swap_leak.detail = "$($mineProcs.Count) llama-server processes $cycleLabel (expected <=1); swap healthy=$stillUp"
+          LogWarn "swap_leak: $($cn.swap_leak.detail)"
+        }
+      } catch {
+        $cn.swap_leak.status = 'warn'
+        $cn.swap_leak.detail = "swap_leak check threw: $($_.Exception.Message)"
+        LogWarn $cn.swap_leak.detail
+      }
+
+      # (6) embedder - cosine sanity through the transient swap: two related texts must
+      # score closer than an unrelated pair. (Reranker: not installed by this stack -
+      # the receipt's preset note stands.)
+      $embedFile = 'embeddinggemma-300m-Q8_0.gguf'
+      if (-not (Test-Path (Join-Path $modelDir $embedFile))) {
+        $cn.embedder.detail = 'embeddinggemma gguf absent'; LogWarn "embedder SKIPPED: $($cn.embedder.detail)"
+      } else {
+        LogStep "  embedder: cosine sanity (related pair vs unrelated pair)"
+        try {
+          $eBody = @{ model = 'embeddinggemma'; input = @(
+            'The cat sat quietly on the warm mat.',
+            'A kitten rested calmly on the soft rug.',
+            'Quarterly GPU shipment revenue grew nine percent year over year.') } | ConvertTo-Json -Depth 4 -Compress
+          $er = Invoke-RestMethod -Uri "$swapBase/v1/embeddings" -Method Post -ContentType 'application/json' -Body $eBody -TimeoutSec 120
+          $vecs = @($er.data | Sort-Object index | ForEach-Object { ,([double[]]$_.embedding) })
+          if ($vecs.Count -eq 3) {
+            $cn.embedder.cos_related   = Get-CosineSim -A $vecs[0] -B $vecs[1]
+            $cn.embedder.cos_unrelated = Get-CosineSim -A $vecs[0] -B $vecs[2]
+            if ($null -ne $cn.embedder.cos_related -and $null -ne $cn.embedder.cos_unrelated -and
+                ($cn.embedder.cos_related -gt ($cn.embedder.cos_unrelated + 0.05))) {
+              $cn.embedder.status = 'pass'
+              $cn.embedder.detail = "related=$($cn.embedder.cos_related) > unrelated=$($cn.embedder.cos_unrelated) (+0.05 margin)"
+              LogOk "embedder: $($cn.embedder.detail)"
+            } else {
+              $cn.embedder.status = 'fail'
+              $cn.embedder.detail = "cosine ordering wrong or unmeasurable: related=$($cn.embedder.cos_related) unrelated=$($cn.embedder.cos_unrelated)"
+              LogWarn "embedder: $($cn.embedder.detail)"
+            }
+          } else {
+            $cn.embedder.status = 'fail'
+            $cn.embedder.detail = "embeddings endpoint returned $($vecs.Count) vectors (expected 3)"
+            LogWarn "embedder: $($cn.embedder.detail)"
+          }
+        } catch {
+          $cn.embedder.status = 'fail'
+          $cn.embedder.detail = "embeddings call failed: $($_.Exception.Message)"
+          LogWarn "embedder: $($cn.embedder.detail)"
+        }
+      }
+
+      # (7) whisper - no seat installed by this stack; the receipt's preset detail carries
+      # the version FLOOR (whisper.cpp >= 1.8.3 on AMD iGPUs) for when one is bound.
+      LogWarn "whisper: $($cn.whisper.detail)"
+    }
+  } catch {
+    $cn.gate = "canary section threw: $($_.Exception.Message)"
+    LogFail "canary section threw: $($_.Exception.Message) - continuing to verdict"
+  }
+
   # --- Verdict (R4.4 rule) ------------------------------------------------------------------
   # fail iff harness_smoke=fail OR agent_smoke=fail OR ALL tiers failed. A single non-26b tier
   # failing, or 26b failing even after remediation, is WARN (partial capability). The canary
@@ -1257,6 +1640,21 @@ if ($pmf.optane.status -ne 'measured') {
   $d = "Optane cold-load/mmap latency (config #4): $($pmf.optane.status) - $($pmf.optane.detail)"
   if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
 }
+# J1 honesty: when the H3 promotion canaries did not run, no promotion (ctx/KV/26B
+# placement) is authorized - the floor stands and the receipt must say why.
+if (-not $receipt.canaries.ran) {
+  $d = "the H3 promotion canaries (fa_q8kv / moe_full_offload / ctx_sweep / bench / swap_leak / embedder): not run this pass ($($receipt.canaries.gate)) - no config promotion is authorized"
+  if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
+} else {
+  # Individually skipped canaries prove nothing either - each lands its own line.
+  foreach ($cnName in @('fa_q8kv','moe_full_offload','ctx_sweep','bench','swap_leak','embedder')) {
+    $cnEntry = $receipt.canaries[$cnName]
+    if ($cnEntry -and $cnEntry.status -eq 'skipped') {
+      $d = "canary ${cnName}: skipped ($($cnEntry.detail)) - its promotion/verification is not authorized this pass"
+      if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
+    }
+  }
+}
 
 Log ""
 LogStep "verdict: $($receipt.verdict)"
@@ -1271,6 +1669,8 @@ $receipt.does_not_prove = [object[]]@($receipt.does_not_prove)
 # H3: profile_measure.cold_swap is an array of per-tier records - same [object[]] force so a
 # one-tier install serializes "cold_swap":[{...}] (never a bare object) and an empty run "[]".
 $receipt.profile_measure.cold_swap = [object[]]@($receipt.profile_measure.cold_swap)
+# J1: same force for the ctx_sweep results array.
+$receipt.canaries.ctx_sweep.results = [object[]]@($receipt.canaries.ctx_sweep.results)
 $json = ([pscustomobject]$receipt) | ConvertTo-Json -Depth 8 -Compress
 Write-Output $json
 if ($receipt.verdict -eq 'fail') { exit 1 } else { exit 0 }

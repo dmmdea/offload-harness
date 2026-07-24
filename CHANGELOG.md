@@ -4,6 +4,56 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.19] - 2026-07-24
+
+### Added — J1: the AMD RDNA3 text tier goes first-class (Juan-tier Q0, phase 1 of 5)
+- **H3 canary suite in `selftest.ps1`** (new `receipt.canaries` block; runs by default on a
+  Vulkan backend, `OFFLOAD_SELFTEST_CANARIES=1|0` forces on/off; never verdict-changing —
+  each PASS *authorizes* one config promotion the installing agent applies per the runbook):
+  `fa_q8kv` (fixed-prompt temp-0 f16-vs-q8_0 word overlap ≥0.80 **plus** server-log proof FA is
+  actually ON — probe servers now launch `-lv 10` because default verbosity omits the
+  `flash_attn` state line, verified live on a Jul-2026 build), `moe_full_offload` (the 26B
+  `-ngl 99` trial — the upward mirror of the standing `--cpu-moe` downshift; promotes on a
+  measured full-offload decode number that beats the cpu-moe baseline where one was measured,
+  and on the measured number alone where the baseline probe was skipped), `ctx_sweep` (8/16/32K load+gen; 32K pass authorizes the ctx
+  promotion), `bench` (llama-bench pp512/tg128 regression-gate numbers), `swap_leak` (eviction
+  cycle leaves ≤1 llama-server), `embedder` (cosine ordering through the real endpoint),
+  `whisper` (honest skip carrying the whisper.cpp ≥1.8.3 AMD-iGPU floor). Skipped canaries land
+  in `does_not_prove` — no promotion without a measurement.
+- **`SETUP-AGENT.md` AMD RDNA3 chapter** — a complete install→test→validate→report runbook
+  written for the agent driving the box: expected perf envelope (bandwidth-bound tg, pp as the
+  UX pain, small dedicated-VRAM is normal UMA), per-canary proves/does-not-prove tables, the
+  exact autonomous decisions allowed (f16→q8_0 KV, ctx 16K→32K, 26B cpu-moe→full-offload,
+  Vulkan device index — each gated on its named canary), the hard forbidden list (driver
+  updates, ROCm/HIP/WSL2, pin substitution, vision-seat binding), the 5 hardware questions, and
+  the receipt (installed.json + final selftest JSON) that promotes every PROJECTED number to
+  MEASURED upstream.
+- **`amd-rdna3-dgpu` profile + AMD VRAM banding in `detect.ps1`** — a discrete RDNA3 card
+  (≥12 GB dedicated) no longer falls to the iGPU floor: it renders 32K/q8_0/26B `-ngl 99`
+  resident (PROJECTED; 12 GB cards fall back via the standing OOM→cpu-moe remediation).
+- **Adrenalin version is now READ, not guessed** — `detect.ps1` reads `RadeonSoftwareVersion`
+  from the registry, classifies it against the deep-context Vulkan crash class (≤ 25.11.1,
+  llama.cpp #17432), emits `amd_adrenalin` in the JSON, and only warns when it actually matches
+  (or is unreadable). Pure classifier + 6 new self-test assertions.
+- **Vulkan serving hardening** — `GGML_VK_VISIBLE_DEVICES=0` on every model entry of the Vulkan
+  template (deterministic adapter on multi-ICD boxes) and frontier-floor comments (llama.cpp
+  win-vulkan ≥ Mar-2026: the AMD scalar-FA Wave32 + graphics-queue tuning window; FA explicitly
+  on/off, never auto).
+- **Frontier surfacing in `install.ps1`** (`Show-FrontierNote`, standing principle 2026-07-24):
+  best-effort GitHub check that prints a NOTE when the llama.cpp/llama-swap pin is behind the
+  latest release — pins are snapshots of frontier refreshed via the canary suite, never silently
+  stale, never substituted mid-install. `OFFLOAD_SKIP_UPDATE_CHECK=1` disables; offline is a
+  silent skip, never fatal.
+- **`amd-rdna3` profile notes rewritten from the 2026-07-23 research** — the "cpu-moe = very
+  slow" claim was wrong for dual-channel DDR5 boxes (26B-A4B full-offload measures ~20–25 t/s tg
+  on a 780M, faster than dense 7B); the floor stays conservative and the canaries earn the
+  promotions. New PS test suite `setup/tests/selftest-canaries.test.ps1` (23 assertions incl.
+  live-captured llama-server FA log lines).
+
+### Changed
+- `docs/systems/setup-installer.md` + `docs/OPERATOR-GUIDE.md` profile tables: fourteen
+  profiles, AMD banding, canary-floor annotations.
+
 ## [0.22.18] - 2026-07-23
 
 ### Added — GCF lossless columnar compaction (`internal/gcf`) — OmniRoute harvest Phase A
