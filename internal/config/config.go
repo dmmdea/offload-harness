@@ -134,6 +134,42 @@ type Config struct {
 	ImageGenCFG       float64 `json:"imagegen_cfg,omitempty"`
 	ImageGenSampler   string  `json:"imagegen_sampler,omitempty"`
 	ImageGenScheduler string  `json:"imagegen_scheduler,omitempty"`
+	// --- sd.cpp image engine (J2: the AMD/Vulkan tier's backend; per-task media_engine seam) ---
+	// ImageGenEngine selects the generate_image backend: ""/"comfy" = the ComfyUI path
+	// above (unchanged default); "sdcpp" = stable-diffusion.cpp via SdcppScript — a
+	// single native binary (Vulkan-first, GGUF models, no Python/ComfyUI). On the sdcpp
+	// path the runner env carries NO COMFY_DIR and gpugen skips the post-run ComfyUI
+	// /free (there is nothing to free) — same shape the TTS path proved.
+	ImageGenEngine string `json:"imagegen_engine,omitempty"`
+	// SdcppBin is the absolute path to the sd.cpp CLI (sd-cli.exe from the pinned
+	// win-vulkan release). Required when ImageGenEngine is "sdcpp"; empty = defer.
+	SdcppBin string `json:"sdcpp_bin,omitempty"`
+	// SdcppScript is the Node runner (default "render/sdcpp-generate.mjs", resolved
+	// against the executable dir like every render script).
+	SdcppScript string `json:"sdcpp_script,omitempty"`
+	// SdcppModel is the FULL path to the main model file (GGUF or safetensors).
+	// sd.cpp has no ComfyUI-style model dir convention, so sdcpp bindings are full
+	// paths, not filenames.
+	SdcppModel string `json:"sdcpp_model,omitempty"`
+	// SdcppModelKind tells the runner which sd.cpp flag loads SdcppModel:
+	// ""/"checkpoint" = an all-in-one checkpoint (-m); "diffusion" = a bare
+	// diffusion/DiT model (--diffusion-model) that needs the companion files below.
+	SdcppModelKind string `json:"sdcpp_model_kind,omitempty"`
+	// Companion weights (FULL paths; empty = not passed). A DiT-class model
+	// (model_kind "diffusion") typically needs its VAE + text encoder(s); an
+	// all-in-one checkpoint needs none of them.
+	SdcppVAE   string `json:"sdcpp_vae,omitempty"`
+	SdcppClipL string `json:"sdcpp_clip_l,omitempty"`
+	SdcppClipG string `json:"sdcpp_clip_g,omitempty"`
+	SdcppT5    string `json:"sdcpp_t5xxl,omitempty"`
+	// SdcppLLM is the LLM-class text encoder some DiT families use instead of
+	// CLIP/T5 (Z-Image: a Qwen3 GGUF, sd.cpp's --llm). Full path; "" = not passed.
+	SdcppLLM string `json:"sdcpp_llm,omitempty"`
+	// SdcppExtraArgs are appended verbatim to the sd.cpp invocation — the stability
+	// toggles the AMD/Phoenix canaries decide (e.g. "--vae-on-cpu", "--clip-on-cpu",
+	// a flash-attention toggle). Config-driven so a canary-gated promotion is a
+	// config edit, never a code change.
+	SdcppExtraArgs []string `json:"sdcpp_extra_args,omitempty"`
 	// --- generative inpainting (inpaint_image) ---
 	// InpaintScript is the absolute path to render/comfy-inpaint.mjs. Empty = no
 	// inpaint route (the task defers cleanly), like an empty ImageGenScript.
@@ -415,6 +451,7 @@ func Default() Config {
 		VideoGenScript:              "render/comfy-video.mjs",
 		RunGraphScript:              "render/comfy-run-graph.mjs",
 		VoiceGenScript:              "render/tts.mjs",
+		SdcppScript:                 "render/sdcpp-generate.mjs",
 		VoiceGenRef:                 "", // generalist default ref clip: per-machine, never shipped
 		VoiceGenFTModel:             "", // fine-tuned voice: all empty => voice=finetuned defers
 		VoiceGenFTBaseDir:           "",
@@ -524,6 +561,7 @@ func pathFields(c *Config) []*string {
 	return []*string{
 		&c.FFmpegPath, &c.MediaDir, &c.SVGDir,
 		&c.ImageGenScript, &c.NodePath, &c.ComfyDir,
+		&c.SdcppScript, &c.SdcppBin, &c.SdcppModel, &c.SdcppVAE, &c.SdcppClipL, &c.SdcppClipG, &c.SdcppT5, &c.SdcppLLM,
 		&c.InpaintScript,
 		&c.VideoGenScript, &c.RunGraphScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath,
 		&c.VoiceGenRef, &c.VoiceGenFTModel, &c.VoiceGenFTBaseDir, &c.VoiceGenFTRef,
@@ -559,6 +597,17 @@ func ExpandTilde(p, home string) string {
 		return filepath.Join(home, p[2:])
 	}
 	return p
+}
+
+// ImageRouteConfigured reports whether THIS box serves generate_image at all —
+// the ComfyUI path (imagegen_script) OR the sdcpp engine (J2: sdcpp_bin + model;
+// imagegen_script stays empty there). The fleet capability gate and fleet-measure
+// key on this, matching the pipeline's engine-first routing.
+func (c Config) ImageRouteConfigured() bool {
+	if c.ImageGenEngine == "sdcpp" {
+		return c.SdcppBin != "" && c.SdcppModel != ""
+	}
+	return c.ImageGenScript != ""
 }
 
 // warnUnknownKeys prints a stderr warning for any JSON key that doesn't map to a

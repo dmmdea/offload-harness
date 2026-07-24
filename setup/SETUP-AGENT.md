@@ -299,7 +299,9 @@ chapter's canaries).
    rasterizer first), fix the index in the rendered `llama-swap.yaml` — that edit is yours to make.
 3. `selftest.ps1` — on a Vulkan backend the **H3 canary suite runs by default** (budget 15–30 min;
    the 26B GTT load alone can take minutes — that is a load, not a hang). Read
-   `receipt.canaries.*` against the table below.
+   `receipt.canaries.*` against the table below. When the media tier is installed, the **media
+   leg** (`receipt.media`: reference render + gpu-vae trial) also runs — see the Media tier
+   section.
 4. Apply the **authorized promotions** (next section) to the rendered `llama-swap.yaml` +
    `installed.json`'s `agent_ctx_tokens`, restart llama-swap, re-run `selftest.ps1` once to
    confirm the promoted config still passes.
@@ -359,12 +361,56 @@ else any file drop the human prefers):
 //    which carries: tiers[] (per-tier cold_load_s/tok_s), canaries.fa_q8kv{overlap,fa_confirmed},
 //    canaries.moe_full_offload{full_tps,cpu_moe_tps,promote}, canaries.ctx_sweep{results,max_ok_ctx},
 //    canaries.bench{pp512_tps,tg128_tps}, canaries.swap_leak, canaries.embedder,
+//    media.render{seconds,bytes,distinct_colors}, media.gpu_vae{seconds,promote},
 //    profile_measure.tuned{...}, verdict, and the honest does_not_prove[] list.
 ```
 
 Maintainer side: those numbers replace this chapter's "expect" ranges and `profiles.json`'s
 PROJECTED notes with MEASURED values (same-PR docs), and this box becomes the harness's third
 real-hardware validation profile after `ampere-8` and `blackwell-16`.
+
+### Media tier (J2) — image generation via stable-diffusion.cpp
+
+On the `amd-*` profiles, `install.ps1` also lays down the **media tier** (skip with
+`OFFLOAD_WITH_MEDIA=0`; force onto any Vulkan-capable box with `=1`): the pinned
+**stable-diffusion.cpp win-vulkan build** (`sdcpp/sd-cli.exe`; `sd-server.exe` ships in the same
+zip and is the recorded warm-swap upgrade path — not wired yet) plus the **Apache-2.0 lead
+roster** (~10.1 GB — Hard rule 3: get download consent on a metered link):
+
+| File | Role | License |
+|---|---|---|
+| `z_image_turbo-Q8_0.gguf` (7.2 GB, jayn7 build) | lead image model — 8-step few-step DiT, quality-first for ~90 GB/s UMA | Apache-2.0 |
+| `Qwen3-4B-Instruct-2507-Q4_K_M.gguf` (2.5 GB) | Z-Image's LLM text encoder (`--llm`) | Apache-2.0 |
+| `zimage_ae.safetensors` (0.34 GB) | Flux AE VAE (ungated Comfy-Org copy) | Apache-2.0 |
+
+`OFFLOAD_MEDIA_EXTRAS=1` adds SD 1.5 (speed floor, openrail-m, 4.3 GB) and SDXL base + the
+fp16-fix VAE (slow path, openrail++/MIT, 7.3 GB). **Excluded on license grounds:** SDXL-Turbo
+(non-commercial) and the whole FLUX family (ADR 0011 — includes Apache schnell; a new ADR is the
+only reopening path). **The jayn7 GGUF build is load-bearing:** leejet's own low-bit Z-Image
+quants render blank/solid images on Vulkan+AMD (sd.cpp issue #1031) — never substitute them.
+
+The `config_seed` binds `imagegen_engine:"sdcpp"` with turbo sampling (steps 8, cfg 1) and
+`--vae-on-cpu` (iGPU VAE stability class, sd.cpp #563/#1621; the dgpu profile seeds
+`--vae-tiling` instead). `generate_image` then renders through `render/sdcpp-generate.mjs` —
+spawn-per-job under the same GPU lock, zero-warm, no ComfyUI/Python anywhere.
+
+**Media receipt (`receipt.media`), the two gates:**
+
+| Check | Proves | Does NOT prove | On fail |
+|---|---|---|---|
+| `render` | the seeded config produces a real image (non-blank: sampled `distinct_colors ≥ 8`, >20 KB) in `seconds` on THIS gpu+driver | prompt-following quality (eyeball the PNG; a VLM verdict is a later luxury) | Blank/solid = the #1031 quant class or a VAE fault — verify the model SHA matches the pin, then report. Do not swap quants on your own. |
+| `gpu_vae` | dropping the CPU-VAE workaround decodes clean AND faster | stability at larger sizes (1024²+ may still need `--vae-tiling`, sd.cpp #1621) | Keep the seeded workaround. |
+
+**Timing calibration** (ZLUDA-Comfy anchors measured on a real 780M — sd.cpp receipts replace
+them): SD1.5-class 512² ≈ 12.7 s · SDXL-class ≈ 117 s. Honest expectations: Turbo-class ≤1024² is
+the sweet spot (tens of seconds); SDXL full ≈ 2–4 min. Minutes-long first renders include model
+load from disk — not a hang.
+
+**Media decisions you MAY take autonomously:** drop `--vae-on-cpu`/`--vae-tiling` only on
+`gpu_vae.promote:true`; add `--vae-tiling` (via `sdcpp_extra_args`) if large renders fail after a
+clean 512² reference. **Media FORBIDDEN:** `--vae-conv-direct` on Vulkan (distorted output,
+sd.cpp #1673); SD2-class models (RDNA3-adjacent crash, #1340); fp8 anything (Q8_0/Q4_K GGUF
+only); substituting quant builds or unpinned models (Hard rule 2).
 
 ### `amd-rdna3-dgpu` deltas (discrete RX 7900-class)
 

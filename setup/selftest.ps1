@@ -275,6 +275,64 @@ function Get-FaStateFromLog {
   return $null
 }
 
+# J2: resolve the media bindings the way PRODUCTION resolves them — the INSTALLED
+# ~/.local-offload/config.json wins when it binds the sdcpp engine (test what is
+# deployed, review finding); else fall back to the active profile's config_seed in
+# profiles.json with the __OFFLOAD_HOME__ token expanded (fresh-install mirror).
+# Returns a hashtable of binding keys or $null. Pure of hardware.
+function Get-MediaSeed {
+  param([string]$ProfileId, [string]$ProfilesJsonPath, [string]$OffloadHome, [string]$InstalledConfigPath = $null)
+  if ($InstalledConfigPath -and (Test-Path $InstalledConfigPath)) {
+    try {
+      $live = Get-Content -Raw -Path $InstalledConfigPath -Encoding UTF8 | ConvertFrom-Json
+      if ($live.PSObject.Properties['imagegen_engine'] -and $live.imagegen_engine -eq 'sdcpp') {
+        $r = @{}
+        foreach ($k in @('imagegen_engine','sdcpp_bin','sdcpp_model','sdcpp_model_kind','sdcpp_vae','sdcpp_llm','sdcpp_extra_args','imagegen_steps','imagegen_cfg','imagegen_timeout_sec')) {
+          if ($live.PSObject.Properties[$k]) { $r[$k] = $live.$k }
+        }
+        return $r
+      }
+    } catch { }
+  }
+  if (-not $ProfileId -or -not (Test-Path $ProfilesJsonPath)) { return $null }
+  try { $doc = Get-Content -Raw -Path $ProfilesJsonPath -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
+  if (-not $doc.profiles.PSObject.Properties[$ProfileId]) { return $null }
+  $seed = $doc.profiles.$ProfileId.config_seed
+  if (-not $seed) { return $null }
+  $homeFwd = $OffloadHome.Replace('\', '/')
+  $r = @{}
+  foreach ($p in $seed.PSObject.Properties) {
+    $v = $p.Value
+    if ($v -is [string]) { $v = $v.Replace('__OFFLOAD_HOME__', $homeFwd) }
+    elseif ($v -is [System.Array]) { $v = @($v | ForEach-Object { if ($_ -is [string]) { $_.Replace('__OFFLOAD_HOME__', $homeFwd) } else { $_ } }) }
+    $r[$p.Name] = $v
+  }
+  return $r
+}
+
+# J2: count distinct colors on a sparse sample grid of a PNG (System.Drawing).
+# The non-blank gate for a rendered image: a blank/solid/failed decode samples
+# 1-2 distinct colors; any real render samples dozens. Returns [int] or $null
+# (unreadable file — caller records the failure, never fakes a count).
+function Get-PngDistinctColors {
+  param([string]$Path, [int]$Grid = 16)
+  try {
+    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+    $bmp = [System.Drawing.Bitmap]::FromFile($Path)
+    try {
+      $colors = New-Object System.Collections.Generic.HashSet[int]
+      for ($gy = 0; $gy -lt $Grid; $gy++) {
+        for ($gx = 0; $gx -lt $Grid; $gx++) {
+          $x = [int]([math]::Floor(($gx + 0.5) * $bmp.Width / $Grid))
+          $y = [int]([math]::Floor(($gy + 0.5) * $bmp.Height / $Grid))
+          [void]$colors.Add($bmp.GetPixel($x, $y).ToArgb())
+        }
+      }
+      return $colors.Count
+    } finally { $bmp.Dispose() }
+  } catch { return $null }
+}
+
 # Cosine similarity of two equal-length vectors, rounded to 4 decimals. Pure fn.
 function Get-CosineSim {
   param([double[]]$A, [double[]]$B)
@@ -657,6 +715,16 @@ $receipt = [ordered]@{
     swap_leak        = [ordered]@{ status = 'skipped'; servers_after = $null; detail = $null }
     embedder         = [ordered]@{ status = 'skipped'; cos_related = $null; cos_unrelated = $null; reranker = 'skipped: no reranker model is installed by this stack (memory_stack rerank seat is operator-provisioned)'; detail = $null }
     whisper          = [ordered]@{ status = 'skipped'; detail = 'no whisper seat is installed by this stack; when binding one on an AMD iGPU, whisper.cpp >= 1.8.3 is the FLOOR (earlier builds are not viable on AMD iGPUs; ~3-4x realtime expected)' }
+  }
+  # J2: the first media selftest leg. Runs when the sd.cpp media tier is installed
+  # (install.ps1 Step 5b); reference render = the install-integrity gate, gpu_vae =
+  # the promotion trial (drop the CPU-VAE workaround only on a measured clean+faster
+  # run). OFFLOAD_SELFTEST_MEDIA=0 skips the leg; it runs whenever the artifacts exist.
+  media           = [ordered]@{
+    ran     = $false
+    gate    = $null
+    render  = [ordered]@{ status = 'skipped'; seconds = $null; bytes = $null; distinct_colors = $null; detail = $null }
+    gpu_vae = [ordered]@{ status = 'skipped'; seconds = $null; promote = $null; detail = $null }
   }
   verdict         = 'fail'
   proves          = @(
@@ -1550,6 +1618,173 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
     LogFail "canary section threw: $($_.Exception.Message) - continuing to verdict"
   }
 
+  # --- J2: media selftest leg - sd.cpp reference render + gpu-vae promotion trial ------------
+  # Independent section (own try/catch; never changes the verdict rule). Gate: the sd.cpp
+  # media tier is installed (install.ps1 Step 5b lays down sdcpp/sd-cli.exe + the roster).
+  # The bindings come from the active profile's config_seed (token-expanded) so model
+  # names live in ONE place; a non-seeded box (e.g. forced OFFLOAD_WITH_MEDIA=1 on
+  # NVIDIA) falls back to the installer's fixed artifact names.
+  LogStep "J2 media: sd.cpp reference render + gpu-vae trial"
+  $md = $receipt.media
+  try {
+    $mseed = $null
+    if ($env:OFFLOAD_SELFTEST_MEDIA -ne '0') {
+      $activeProfileId = $null
+      if ($active -and $active.profile) { $activeProfileId = $active.profile }
+      $mseed = Get-MediaSeed -ProfileId $activeProfileId -ProfilesJsonPath $profilesJsonPath -OffloadHome $HOME_DIR `
+                 -InstalledConfigPath (Join-Path $HOME '.local-offload\config.json')
+      if ($mseed -and $mseed['imagegen_engine'] -ne 'sdcpp') { $mseed = $null }
+    }
+    $homeFwd  = $HOME_DIR.Replace('\', '/')
+    $sdBin    = if ($mseed -and $mseed['sdcpp_bin'])   { $mseed['sdcpp_bin'] }   else { "$homeFwd/sdcpp/sd-cli.exe" }
+    $sdModel  = if ($mseed -and $mseed['sdcpp_model']) { $mseed['sdcpp_model'] } else { "$homeFwd/models/z_image_turbo-Q8_0.gguf" }
+    $sdVae    = if ($mseed) { $mseed['sdcpp_vae'] }  else { "$homeFwd/models/zimage_ae.safetensors" }
+    $sdLlm    = if ($mseed) { $mseed['sdcpp_llm'] }  else { "$homeFwd/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf" }
+    $sdKind   = if ($mseed -and $mseed['sdcpp_model_kind']) { $mseed['sdcpp_model_kind'] } else { 'diffusion' }
+    $sdSteps  = if ($mseed -and $mseed['imagegen_steps']) { [int]$mseed['imagegen_steps'] } else { 8 }
+    $sdCfg    = if ($mseed -and $mseed['imagegen_cfg'])   { $mseed['imagegen_cfg'] } else { 1 }
+    $sdExtra  = @()
+    if ($mseed -and $mseed['sdcpp_extra_args']) { $sdExtra = @($mseed['sdcpp_extra_args']) }
+    $sdTimeout = if ($mseed -and $mseed['imagegen_timeout_sec']) { [int]$mseed['imagegen_timeout_sec'] } else { 900 }
+
+    if ($env:OFFLOAD_SELFTEST_MEDIA -eq '0') {
+      $md.gate = 'skipped: OFFLOAD_SELFTEST_MEDIA=0'
+      LogWarn "media leg $($md.gate)"
+    } elseif (-not (Test-Path $sdBin)) {
+      $md.gate = "skipped: sd-cli.exe not installed ($sdBin) - the media tier is not on this box (install with OFFLOAD_WITH_MEDIA=1)"
+      LogWarn "media leg $($md.gate)"
+    } elseif (-not (Test-Path $sdModel)) {
+      $md.gate = "skipped: image model not installed ($sdModel)"
+      LogWarn "media leg $($md.gate)"
+    } else {
+      $md.ran = $true
+      $md.gate = "sd.cpp tier present (bin=$sdBin, model=$([System.IO.Path]::GetFileName($sdModel)))"
+      Log "  gate: $($md.gate)"
+      # Contention guard (review finding, mirrors the J1 canary parking): the transient
+      # swap may still hold a chat tier resident from the canaries. The media leg is the
+      # LAST measuring section, so STOP the transient swap outright - the render timings
+      # and the gpu_vae promote decision must reflect an uncontended GPU, which is what
+      # production renders get (the runner frees llama-swap inside withGpuSlot).
+      # Teardown in finally stays idempotent.
+      try {
+        if ($script:swapProc -and -not $script:swapProc.HasExited) {
+          Log "  stopping the transient swap before media renders (uncontended-GPU timings)"
+          try { Stop-Process -Id $script:swapProc.Id -Force -ErrorAction SilentlyContinue } catch { }
+        }
+        $kids = Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" -ErrorAction SilentlyContinue |
+                  Where-Object { $_.CommandLine -and ($_.CommandLine -match [regex]::Escape($HOME_DIR.Replace('\','/')) -or $_.CommandLine -match [regex]::Escape($HOME_DIR)) }
+        foreach ($k in $kids) { try { Stop-Process -Id $k.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
+        Start-Sleep -Seconds 2
+      } catch { }
+      $modelFlag = if ($sdKind -eq 'diffusion') { '--diffusion-model' } else { '-m' }
+      # One sd-cli render on a spare output; fixed prompt/seed so receipts compare
+      # across boxes and driver updates. 512x512 keeps the reference fast (the ZLUDA
+      # anchors for scale: SD1.5 512^2 ~12.7s, SDXL-class ~117s on a 780M).
+      function Invoke-SdcppRender {
+        param([string]$OutPng, [string[]]$Extras, [int]$TimeoutSec)
+        $rArgs = New-Object System.Collections.Generic.List[string]
+        $rArgs.AddRange([string[]]@($modelFlag, $sdModel))
+        if ($sdVae -and (Test-Path $sdVae)) { $rArgs.AddRange([string[]]@('--vae', $sdVae)) }
+        if ($sdLlm -and (Test-Path $sdLlm)) { $rArgs.AddRange([string[]]@('--llm', $sdLlm)) }
+        $rArgs.AddRange([string[]]@('-p', 'a lighthouse on a rocky coast at golden hour, photorealistic',
+                                    '--cfg-scale', "$sdCfg", '--steps', "$sdSteps",
+                                    '-W', '512', '-H', '512', '-s', '42', '-o', $OutPng))
+        foreach ($e in $Extras) { if ($e) { $rArgs.Add($e) } }
+        $logF = Join-Path $env:TEMP ("offload-selftest-sdcpp-{0}.log" -f $PID)
+        # Start-Process does NOT quote space-containing ArgumentList elements (review
+        # CRITICAL: the prompt arrived as 11 argv tokens on both engines) - build one
+        # explicitly-quoted argument string instead.
+        $argStr = ($rArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $proc = $null
+        try {
+          $proc = Start-Process -FilePath $sdBin -ArgumentList $argStr -PassThru -NoNewWindow `
+                    -RedirectStandardError $logF -RedirectStandardOutput "$logF.out"
+          $deadline = (Get-Date).AddSeconds($TimeoutSec)
+          while ((Get-Date) -lt $deadline -and -not $proc.HasExited) { Start-Sleep -Milliseconds 500 }
+          $sw.Stop()
+          if (-not $proc.HasExited) {
+            try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { }
+            return @{ ok = $false; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); detail = "render exceeded ${TimeoutSec}s - killed" }
+          }
+          $tail = ''
+          try { $tail = (Get-Content -Path $logF -Tail 3 -ErrorAction SilentlyContinue) -join ' | ' } catch { }
+          if ($proc.ExitCode -ne 0) { return @{ ok = $false; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); detail = "sd-cli exited $($proc.ExitCode): $tail" } }
+          return @{ ok = $true; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); detail = 'ok' }
+        } catch {
+          $sw.Stop()
+          return @{ ok = $false; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); detail = "render threw: $($_.Exception.Message)" }
+        } finally {
+          Get-ChildItem $env:TEMP -Filter ("offload-selftest-sdcpp-{0}*" -f $PID) -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+      }
+
+      # (1) Reference render with the SEEDED (safe) config - the install-integrity gate.
+      $refPng = Join-Path $env:TEMP ("offload-selftest-media-ref-{0}.png" -f $PID)
+      Remove-Item $refPng -Force -ErrorAction SilentlyContinue
+      LogStep "  media render: reference prompt, seeded config (steps=$sdSteps cfg=$sdCfg extras: $($sdExtra -join ' '))"
+      $r1 = Invoke-SdcppRender -OutPng $refPng -Extras $sdExtra -TimeoutSec $sdTimeout
+      $md.render.seconds = $r1.seconds
+      if ($r1.ok -and (Test-Path $refPng)) {
+        $md.render.bytes = (Get-Item $refPng).Length
+        $md.render.distinct_colors = Get-PngDistinctColors -Path $refPng
+        if ($md.render.bytes -gt 20000 -and $null -ne $md.render.distinct_colors -and $md.render.distinct_colors -ge 8) {
+          $md.render.status = 'pass'
+          $md.render.detail = "reference render OK in $($r1.seconds)s ($($md.render.bytes) bytes, $($md.render.distinct_colors) sampled colors) - non-blank"
+          LogOk "media render: $($md.render.detail)"
+        } else {
+          $md.render.status = 'fail'
+          $md.render.detail = "render produced a suspect image ($($md.render.bytes) bytes, distinct_colors=$($md.render.distinct_colors)) - the blank/solid-output class (wrong quant build or VAE fault); see the runbook's media canary table"
+          LogFail "media render: $($md.render.detail)"
+        }
+      } else {
+        $md.render.status = 'fail'
+        $md.render.detail = "reference render FAILED: $($r1.detail)"
+        LogFail "media render: $($md.render.detail)"
+      }
+
+      # (2) gpu_vae trial - the promotion mirror: re-render WITHOUT the CPU-VAE
+      # workaround; promote only on a clean, non-blank, faster run.
+      $vaeWorkarounds = @($sdExtra | Where-Object { $_ -in @('--vae-on-cpu', '--vae-tiling') })
+      if ($md.render.status -ne 'pass') {
+        $md.gpu_vae.detail = 'skipped: reference render did not pass'
+        LogWarn "gpu_vae trial $($md.gpu_vae.detail)"
+      } elseif ($vaeWorkarounds.Count -eq 0) {
+        $md.gpu_vae.detail = 'skipped: no CPU-VAE workaround in the seeded extras - nothing to trial'
+        LogWarn "gpu_vae trial $($md.gpu_vae.detail)"
+      } else {
+        $trialExtras = @($sdExtra | Where-Object { $_ -notin @('--vae-on-cpu', '--vae-tiling') })
+        $trialPng = Join-Path $env:TEMP ("offload-selftest-media-trial-{0}.png" -f $PID)
+        Remove-Item $trialPng -Force -ErrorAction SilentlyContinue
+        LogStep "  gpu_vae trial: same render without $($vaeWorkarounds -join '/')"
+        $r2 = Invoke-SdcppRender -OutPng $trialPng -Extras $trialExtras -TimeoutSec $sdTimeout
+        $md.gpu_vae.seconds = $r2.seconds
+        $trialColors = if ($r2.ok -and (Test-Path $trialPng)) { Get-PngDistinctColors -Path $trialPng } else { $null }
+        if ($r2.ok -and $null -ne $trialColors -and $trialColors -ge 8 -and $r2.seconds -lt $r1.seconds) {
+          $md.gpu_vae.status = 'pass'
+          $md.gpu_vae.promote = $true
+          $md.gpu_vae.detail = "GPU VAE decode clean + faster ($($r2.seconds)s vs $($r1.seconds)s) - dropping the CPU-VAE workaround is authorized"
+          LogOk "gpu_vae: $($md.gpu_vae.detail)"
+        } elseif ($r2.ok -and $null -ne $trialColors -and $trialColors -ge 8) {
+          $md.gpu_vae.status = 'pass'
+          $md.gpu_vae.promote = $false
+          $md.gpu_vae.detail = "GPU VAE decode clean but not faster ($($r2.seconds)s vs $($r1.seconds)s) - keep the seeded workaround"
+          LogOk "gpu_vae: $($md.gpu_vae.detail)"
+        } else {
+          $md.gpu_vae.status = 'fail'
+          $md.gpu_vae.promote = $false
+          $md.gpu_vae.detail = "GPU VAE decode failed or blank ($($r2.detail); distinct_colors=$trialColors) - the CPU-VAE workaround STAYS (sd.cpp #563/#1621 class)"
+          LogWarn "gpu_vae: $($md.gpu_vae.detail)"
+        }
+        Remove-Item $trialPng -Force -ErrorAction SilentlyContinue
+      }
+      Remove-Item $refPng -Force -ErrorAction SilentlyContinue
+    }
+  } catch {
+    $md.gate = "media section threw: $($_.Exception.Message)"
+    LogFail "media section threw: $($_.Exception.Message) - continuing to verdict"
+  }
+
   # --- Verdict (R4.4 rule) ------------------------------------------------------------------
   # fail iff harness_smoke=fail OR agent_smoke=fail OR ALL tiers failed. A single non-26b tier
   # failing, or 26b failing even after remediation, is WARN (partial capability). The canary
@@ -1654,6 +1889,12 @@ if (-not $receipt.canaries.ran) {
       if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
     }
   }
+}
+# J2 honesty: a media tier that was not rendered this pass is unproven.
+if (-not $receipt.media.ran) {
+  $mg = if ($receipt.media.gate) { $receipt.media.gate } else { 'media section ended before gating' }
+  $d = "the sd.cpp media tier (reference render + gpu-vae trial): not exercised this pass ($mg) - image generation on this box is unproven"
+  if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
 }
 
 Log ""
