@@ -13,8 +13,11 @@ Versioning: [SemVer](https://semver.org/).
   under 64 chars are skipped.
 - **H8 re-request pinning**: when the circuit breaker refuses an exact-repeat call, the ORIGINAL
   result's call id is pinned for the rest of the run — exempt from dedupe/skeleton/elide, its unit
-  from drop (lossless GCF still applies; `emergencyShrink` stays pin-blind). Content the model
-  re-reads stops being lossily compacted.
+  from drop (lossless GCF still applies; `emergencyShrink` stays pin-blind). Pins resolve
+  transitively through dedupe references. If the original result was ALREADY destroyed by
+  compaction, the call is re-executed once per pair and the fresh result pinned — a refusal
+  pointing at destroyed bytes had no recovery path. Content the model re-reads stops being
+  lossily compacted.
 - **FORCE_PRESERVE guards**: the elision rung keeps a bounded residue (≤5 lines/≤400 chars) of a
   body's signal lines (errors/failures/warnings/test summaries) under the marker; the drop rung
   refuses to drop units still carrying signal residue or pinned results. The mini-corpus eval pin

@@ -24,13 +24,22 @@ the buried-error-survival property the bare marker lacked.
    the marker the older copy would have become.
 2. **Re-requested results are pinned (the H8 ramp).** The circuit breaker's exact-repeat refusal
    is proof the model WANTED a result back; that result's call id becomes Pinned for the rest of
-   the run: exempt from dedupe/skeleton/elide, its unit from drop. The LOSSLESS GCF rung still
-   applies; `emergencyShrink` stays pin-blind (at that point the alternative is a dead run).
+   the run: exempt from dedupe/skeleton/elide, its unit from drop. Pins resolve TRANSITIVELY
+   through dedupe references (pinning a reference alone would protect a 50-char marker while the
+   referenced bytes are destroyed). When the original result NO LONGER EXISTS as raw content
+   (already a compaction artifact, or its unit dropped), the refusal would point the model at
+   destroyed bytes with no recovery — so the call is re-executed ONCE per exact (name,args) pair
+   and the FRESH result pinned; later repeats are refused as usual. The LOSSLESS GCF rung still
+   applies to pinned bodies; `emergencyShrink` stays pin-blind (at that point the alternative is
+   a dead run).
 3. **FORCE_PRESERVE lines survive every rung short of the run's own death.** The elision rung
-   keeps a bounded residue (≤5 lines / ≤400 chars) of a body's signal lines (the skeleton rung's
-   own `signalLine` class: errors, failures, warnings, test summaries) UNDER the bare marker; the
-   drop rung refuses to drop a unit whose bodies still carry signal (or are pinned). A ladder that
-   consequently cannot fit the budget exhausts HONESTLY:
+   keeps a bounded residue (≤5 lines / ≤400 chars including separators, rune-safe truncation) of
+   a body's signal lines (the skeleton rung's own `signalLine` class: errors, failures, warnings,
+   test summaries) UNDER the bare marker; the drop rung refuses to drop a unit whose bodies still
+   carry signal (or are pinned). "Short of the run's own death" is literal: `emergencyShrink` —
+   the reactive-overflow last resort — CAN strip residue back to the bare marker line, exactly as
+   it is pin-blind, so a residue-heavy transcript can always be made to fit before the run dies.
+   A ladder that (short of that last resort) cannot fit the budget exhausts HONESTLY:
 4. **fit=false telemetry.** `Result.CompactionsExhausted` counts steps whose ladder ran and still
    could not fit the input budget; the standalone runner and `agent_run` surface it. A best-effort
    over-budget request is never silent.
@@ -55,4 +64,7 @@ cannot fit before sending — is delivered by the fit telemetry instead.
 - Duplicate-heavy transcripts (a model re-reading files) compact losslessly-by-reference before
   anything destructive runs.
 - A pathological transcript that is all signal can exhaust the ladder over budget; the reactive
-  retry and `emergencyShrink` (ADR 0015) remain the backstop, and the exhaustion is now counted.
+  retry and `emergencyShrink` (ADR 0015, extended here to reclaim residue) remain a REAL backstop,
+  and the exhaustion is now counted on both the proactive and reactive paths.
+- Dedupe never grows a body (a reference larger than the duplicate is skipped), and a dedupe
+  reference can dangle if the referenced unit is later dropped — disclosed in the rung's comment.
