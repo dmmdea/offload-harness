@@ -162,6 +162,9 @@ type Config struct {
 	SdcppClipL string `json:"sdcpp_clip_l,omitempty"`
 	SdcppClipG string `json:"sdcpp_clip_g,omitempty"`
 	SdcppT5    string `json:"sdcpp_t5xxl,omitempty"`
+	// SdcppLLM is the LLM-class text encoder some DiT families use instead of
+	// CLIP/T5 (Z-Image: a Qwen3 GGUF, sd.cpp's --llm). Full path; "" = not passed.
+	SdcppLLM string `json:"sdcpp_llm,omitempty"`
 	// SdcppExtraArgs are appended verbatim to the sd.cpp invocation — the stability
 	// toggles the AMD/Phoenix canaries decide (e.g. "--vae-on-cpu", "--clip-on-cpu",
 	// a flash-attention toggle). Config-driven so a canary-gated promotion is a
@@ -558,7 +561,7 @@ func pathFields(c *Config) []*string {
 	return []*string{
 		&c.FFmpegPath, &c.MediaDir, &c.SVGDir,
 		&c.ImageGenScript, &c.NodePath, &c.ComfyDir,
-		&c.SdcppScript, &c.SdcppBin, &c.SdcppModel, &c.SdcppVAE, &c.SdcppClipL, &c.SdcppClipG, &c.SdcppT5,
+		&c.SdcppScript, &c.SdcppBin, &c.SdcppModel, &c.SdcppVAE, &c.SdcppClipL, &c.SdcppClipG, &c.SdcppT5, &c.SdcppLLM,
 		&c.InpaintScript,
 		&c.VideoGenScript, &c.RunGraphScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath,
 		&c.VoiceGenRef, &c.VoiceGenFTModel, &c.VoiceGenFTBaseDir, &c.VoiceGenFTRef,

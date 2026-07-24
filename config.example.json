@@ -42,6 +42,7 @@
   "sdcpp_clip_l": "",
   "sdcpp_clip_g": "",
   "sdcpp_t5xxl": "",
+  "sdcpp_llm": "",
   "sdcpp_extra_args": null,
   "inpaint_script": "",
   "inpaint_ckpt": "",

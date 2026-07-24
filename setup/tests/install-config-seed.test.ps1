@@ -76,6 +76,30 @@ foreach ($tier in @('blackwell-72','blackwell-48','blackwell-32','blackwell-16',
 Assert ($null -eq $profiles.'ampere-8'.config_seed.imagegen_family)         'ampere-8 does NOT seed the o1 family (unverified on 8GB)'
 Assert ($null -eq $profiles.'blackwell-8'.config_seed.imagegen_family)      'blackwell-8 does NOT seed the o1 family (unverified on 8GB)'
 
+# --- J2: the amd-rdna3 sdcpp seed + __OFFLOAD_HOME__ token substitution ---------------
+Write-Host ""
+Write-Host "== J2: sdcpp seed + __OFFLOAD_HOME__ token =="
+$amdSeed = $profiles.'amd-rdna3'.config_seed
+Assert ($amdSeed.imagegen_engine -eq 'sdcpp')                               'amd-rdna3 seeds the sdcpp engine'
+Assert ($amdSeed.sdcpp_model_kind -eq 'diffusion')                          'amd-rdna3 seeds model_kind diffusion (Z-Image DiT)'
+Assert ($amdSeed.sdcpp_extra_args -contains '--vae-on-cpu')                 'amd-rdna3 seeds --vae-on-cpu (iGPU VAE stability, sd.cpp #563/#1621)'
+Assert ($amdSeed.imagegen_cfg -eq 1 -and $amdSeed.imagegen_steps -eq 8)     'amd-rdna3 seeds turbo sampling (cfg 1, 8 steps)'
+Assert ($profiles.'amd-rdna3-dgpu'.config_seed.imagegen_engine -eq 'sdcpp') 'amd-rdna3-dgpu seeds the sdcpp engine too'
+# Token substitution: string values AND strings inside array values expand; the
+# default (no -OffloadHome) leaves the template text byte-identical (pre-J2 callers).
+$tpl = '{"model":"offload-e4b"}'
+$merged = Merge-ConfigSeed -ConfigText $tpl -Seed $amdSeed -OffloadHome 'C:\Users\ju\offload-stack'
+$mo = $merged | ConvertFrom-Json
+Assert ($mo.sdcpp_bin -eq 'C:/Users/ju/offload-stack/sdcpp/sd-cli.exe')     'token expands in string values (forward slashes)'
+Assert ($mo.sdcpp_model -eq 'C:/Users/ju/offload-stack/models/z_image_turbo-Q8_0.gguf') 'token expands in the model path'
+Assert (-not ($merged -match '__OFFLOAD_HOME__'))                           'no unexpanded token remains when -OffloadHome given'
+Assert (@($mo.sdcpp_extra_args) -contains '--vae-on-cpu')                   'array seed values survive the merge'
+$mergedNoHome = Merge-ConfigSeed -ConfigText $tpl -Seed $amdSeed
+Assert ($mergedNoHome -match '__OFFLOAD_HOME__')                            'without -OffloadHome the token is left as-is (pre-J2 behavior preserved)'
+$arrTok = [pscustomobject]@{ sdcpp_extra_args = @('__OFFLOAD_HOME__/x', '--flag') }
+$arrOut = (Merge-ConfigSeed -ConfigText $tpl -Seed $arrTok -OffloadHome 'D:\oh') | ConvertFrom-Json
+Assert (@($arrOut.sdcpp_extra_args)[0] -eq 'D:/oh/x')                       'token expands inside array elements'
+
 Write-Host ""
 if ($failures -eq 0) { Write-Host 'ALL PASS' -ForegroundColor Green; exit 0 }
 Write-Host "FAILURES: $failures" -ForegroundColor Red; exit 1
