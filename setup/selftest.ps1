@@ -275,12 +275,25 @@ function Get-FaStateFromLog {
   return $null
 }
 
-# J2: read the active profile's config_seed from profiles.json and expand the
-# __OFFLOAD_HOME__ token — the selftest's view of the media bindings mirrors what
-# install.ps1 Step 8 seeded, keeping model names in ONE place (profiles.json).
-# Returns a hashtable of the seed's keys (token-expanded) or $null. Pure of hardware.
+# J2: resolve the media bindings the way PRODUCTION resolves them — the INSTALLED
+# ~/.local-offload/config.json wins when it binds the sdcpp engine (test what is
+# deployed, review finding); else fall back to the active profile's config_seed in
+# profiles.json with the __OFFLOAD_HOME__ token expanded (fresh-install mirror).
+# Returns a hashtable of binding keys or $null. Pure of hardware.
 function Get-MediaSeed {
-  param([string]$ProfileId, [string]$ProfilesJsonPath, [string]$OffloadHome)
+  param([string]$ProfileId, [string]$ProfilesJsonPath, [string]$OffloadHome, [string]$InstalledConfigPath = $null)
+  if ($InstalledConfigPath -and (Test-Path $InstalledConfigPath)) {
+    try {
+      $live = Get-Content -Raw -Path $InstalledConfigPath -Encoding UTF8 | ConvertFrom-Json
+      if ($live.PSObject.Properties['imagegen_engine'] -and $live.imagegen_engine -eq 'sdcpp') {
+        $r = @{}
+        foreach ($k in @('imagegen_engine','sdcpp_bin','sdcpp_model','sdcpp_model_kind','sdcpp_vae','sdcpp_llm','sdcpp_extra_args','imagegen_steps','imagegen_cfg','imagegen_timeout_sec')) {
+          if ($live.PSObject.Properties[$k]) { $r[$k] = $live.$k }
+        }
+        return $r
+      }
+    } catch { }
+  }
   if (-not $ProfileId -or -not (Test-Path $ProfilesJsonPath)) { return $null }
   try { $doc = Get-Content -Raw -Path $ProfilesJsonPath -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
   if (-not $doc.profiles.PSObject.Properties[$ProfileId]) { return $null }
@@ -706,7 +719,7 @@ $receipt = [ordered]@{
   # J2: the first media selftest leg. Runs when the sd.cpp media tier is installed
   # (install.ps1 Step 5b); reference render = the install-integrity gate, gpu_vae =
   # the promotion trial (drop the CPU-VAE workaround only on a measured clean+faster
-  # run). OFFLOAD_SELFTEST_MEDIA=0 skips, =1 forces the attempt.
+  # run). OFFLOAD_SELFTEST_MEDIA=0 skips the leg; it runs whenever the artifacts exist.
   media           = [ordered]@{
     ran     = $false
     gate    = $null
@@ -1616,7 +1629,10 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
   try {
     $mseed = $null
     if ($env:OFFLOAD_SELFTEST_MEDIA -ne '0') {
-      $mseed = Get-MediaSeed -ProfileId $active.profile -ProfilesJsonPath $profilesJsonPath -OffloadHome $HOME_DIR
+      $activeProfileId = $null
+      if ($active -and $active.profile) { $activeProfileId = $active.profile }
+      $mseed = Get-MediaSeed -ProfileId $activeProfileId -ProfilesJsonPath $profilesJsonPath -OffloadHome $HOME_DIR `
+                 -InstalledConfigPath (Join-Path $HOME '.local-offload\config.json')
       if ($mseed -and $mseed['imagegen_engine'] -ne 'sdcpp') { $mseed = $null }
     }
     $homeFwd  = $HOME_DIR.Replace('\', '/')
@@ -1644,6 +1660,22 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       $md.ran = $true
       $md.gate = "sd.cpp tier present (bin=$sdBin, model=$([System.IO.Path]::GetFileName($sdModel)))"
       Log "  gate: $($md.gate)"
+      # Contention guard (review finding, mirrors the J1 canary parking): the transient
+      # swap may still hold a chat tier resident from the canaries. The media leg is the
+      # LAST measuring section, so STOP the transient swap outright - the render timings
+      # and the gpu_vae promote decision must reflect an uncontended GPU, which is what
+      # production renders get (the runner frees llama-swap inside withGpuSlot).
+      # Teardown in finally stays idempotent.
+      try {
+        if ($script:swapProc -and -not $script:swapProc.HasExited) {
+          Log "  stopping the transient swap before media renders (uncontended-GPU timings)"
+          try { Stop-Process -Id $script:swapProc.Id -Force -ErrorAction SilentlyContinue } catch { }
+        }
+        $kids = Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" -ErrorAction SilentlyContinue |
+                  Where-Object { $_.CommandLine -and ($_.CommandLine -match [regex]::Escape($HOME_DIR.Replace('\','/')) -or $_.CommandLine -match [regex]::Escape($HOME_DIR)) }
+        foreach ($k in $kids) { try { Stop-Process -Id $k.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
+        Start-Sleep -Seconds 2
+      } catch { }
       $modelFlag = if ($sdKind -eq 'diffusion') { '--diffusion-model' } else { '-m' }
       # One sd-cli render on a spare output; fixed prompt/seed so receipts compare
       # across boxes and driver updates. 512x512 keeps the reference fast (the ZLUDA
@@ -1659,10 +1691,14 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
                                     '-W', '512', '-H', '512', '-s', '42', '-o', $OutPng))
         foreach ($e in $Extras) { if ($e) { $rArgs.Add($e) } }
         $logF = Join-Path $env:TEMP ("offload-selftest-sdcpp-{0}.log" -f $PID)
+        # Start-Process does NOT quote space-containing ArgumentList elements (review
+        # CRITICAL: the prompt arrived as 11 argv tokens on both engines) - build one
+        # explicitly-quoted argument string instead.
+        $argStr = ($rArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $proc = $null
         try {
-          $proc = Start-Process -FilePath $sdBin -ArgumentList ([string[]]$rArgs) -PassThru -NoNewWindow `
+          $proc = Start-Process -FilePath $sdBin -ArgumentList $argStr -PassThru -NoNewWindow `
                     -RedirectStandardError $logF -RedirectStandardOutput "$logF.out"
           $deadline = (Get-Date).AddSeconds($TimeoutSec)
           while ((Get-Date) -lt $deadline -and -not $proc.HasExited) { Start-Sleep -Milliseconds 500 }
@@ -1856,7 +1892,8 @@ if (-not $receipt.canaries.ran) {
 }
 # J2 honesty: a media tier that was not rendered this pass is unproven.
 if (-not $receipt.media.ran) {
-  $d = "the sd.cpp media tier (reference render + gpu-vae trial): not exercised this pass ($($receipt.media.gate)) - image generation on this box is unproven"
+  $mg = if ($receipt.media.gate) { $receipt.media.gate } else { 'media section ended before gating' }
+  $d = "the sd.cpp media tier (reference render + gpu-vae trial): not exercised this pass ($mg) - image generation on this box is unproven"
   if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
 }
 

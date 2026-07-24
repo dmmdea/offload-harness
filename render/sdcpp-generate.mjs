@@ -90,6 +90,10 @@ async function main() {
     console.error("SDCPP FAILED: SDCPP_BIN not set or missing: " + (bin || "(unset)"));
     process.exit(1);
   }
+  // Pin ONE Vulkan device deterministically, matching the J1 text-tier pin (the
+  // llama-swap template and the selftest both pin device 0). An operator override
+  // already in the environment wins. Multi-ICD boxes otherwise enumerate unstably.
+  if (!process.env.GGML_VK_VISIBLE_DEVICES) process.env.GGML_VK_VISIBLE_DEVICES = "0";
   const args = buildSdArgs(out, prompt, flags, extra);
   await withGpuSlot({ noLock: flags["no-lock"], comfyManaged: false }, async () => {
     const code = await new Promise((res) => spawn(bin, args, { stdio: "inherit" }).on("close", res));

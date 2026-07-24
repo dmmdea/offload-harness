@@ -653,18 +653,27 @@ function Merge-ConfigSeed {
   if ($props.Count -eq 0) { return $ConfigText }
   $homeFwd = ''
   if ($OffloadHome) { $homeFwd = $OffloadHome.Replace('\', '/') }
+  # NB: every array return is prefixed with the comma operator - PowerShell's return
+  # pipeline UNROLLS a 1-element array to its bare element, which would serialize a
+  # 1-flag sdcpp_extra_args as a JSON *string* and make Go's json.Unmarshal reject
+  # the whole config (found in adversarial review; both AMD seeds ship exactly one
+  # extra arg, so every fresh AMD install would have produced a corrupt config).
   function Expand-SeedValue {
     param($Value, [string]$HomeFwd)
-    if (-not $HomeFwd) { return $Value }
-    if ($Value -is [string]) { return $Value.Replace('__OFFLOAD_HOME__', $HomeFwd) }
+    if ($Value -is [string]) {
+      if ($HomeFwd) { return $Value.Replace('__OFFLOAD_HOME__', $HomeFwd) }
+      return $Value
+    }
     if ($Value -is [System.Array]) {
-      return @($Value | ForEach-Object { if ($_ -is [string]) { $_.Replace('__OFFLOAD_HOME__', $HomeFwd) } else { $_ } })
+      $out = @($Value | ForEach-Object { if ($_ -is [string] -and $HomeFwd) { $_.Replace('__OFFLOAD_HOME__', $HomeFwd) } else { $_ } })
+      return ,([object[]]$out)
     }
     return $Value
   }
   $cfg = $ConfigText | ConvertFrom-Json
   foreach ($p in $props) {
     $v = Expand-SeedValue -Value $p.Value -HomeFwd $homeFwd
+    if ($p.Value -is [System.Array]) { $v = [object[]]@($v) }   # belt: never let an array degrade
     if ($cfg.PSObject.Properties[$p.Name]) { $cfg.($p.Name) = $v }
     else { $cfg | Add-Member -NotePropertyName $p.Name -NotePropertyValue $v }
   }

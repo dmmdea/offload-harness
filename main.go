@@ -1706,9 +1706,10 @@ func runFleetMeasure(args []string) error {
 	ctx := context.Background()
 	note := func(format string, a ...any) { fmt.Fprintf(os.Stderr, "[fleet-measure] "+format+"\n", a...) }
 
-	// image-gen: a small fast render (512² at 8 steps).
+	// image-gen: a small fast render (512² at 8 steps). Engine-aware gate (J2):
+	// an sdcpp box has no imagegen_script but absolutely serves image-gen.
 	var stillPath string
-	if cfg.ImageGenScript != "" {
+	if cfg.ImageRouteConfigured() {
 		note("image-gen: rendering 512x512 at 8 steps...")
 		res := p.Run(ctx, core.Request{
 			Task:   core.TaskGenerateImage,
@@ -1726,7 +1727,7 @@ func runFleetMeasure(args []string) error {
 			note("image-gen: deferred: %s", res.Reason)
 		}
 	} else {
-		note("image-gen: skipped (no imagegen_script configured)")
+		note("image-gen: skipped (no image route configured - neither imagegen_script nor the sdcpp engine)")
 	}
 
 	// video-gen: the FAST (distilled) recipe at the smallest frame count — the

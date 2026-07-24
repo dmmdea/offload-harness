@@ -93,7 +93,12 @@ $mo = $merged | ConvertFrom-Json
 Assert ($mo.sdcpp_bin -eq 'C:/Users/ju/offload-stack/sdcpp/sd-cli.exe')     'token expands in string values (forward slashes)'
 Assert ($mo.sdcpp_model -eq 'C:/Users/ju/offload-stack/models/z_image_turbo-Q8_0.gguf') 'token expands in the model path'
 Assert (-not ($merged -match '__OFFLOAD_HOME__'))                           'no unexpanded token remains when -OffloadHome given'
+# Regression pin (review CRITICAL): a 1-element array seed must serialize as a JSON
+# ARRAY, never unroll to a bare string (which makes Go reject the whole config).
+Assert ($merged -match '"sdcpp_extra_args":\s*\[')                          '1-element array seed serializes as a JSON array (no PS unroll)'
 Assert (@($mo.sdcpp_extra_args) -contains '--vae-on-cpu')                   'array seed values survive the merge'
+$mergedNoHomeArr = Merge-ConfigSeed -ConfigText $tpl -Seed $amdSeed
+Assert ($mergedNoHomeArr -match '"sdcpp_extra_args":\s*\[')                 'array stays an array with no -OffloadHome too'
 $mergedNoHome = Merge-ConfigSeed -ConfigText $tpl -Seed $amdSeed
 Assert ($mergedNoHome -match '__OFFLOAD_HOME__')                            'without -OffloadHome the token is left as-is (pre-J2 behavior preserved)'
 $arrTok = [pscustomobject]@{ sdcpp_extra_args = @('__OFFLOAD_HOME__/x', '--flag') }

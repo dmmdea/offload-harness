@@ -31,7 +31,7 @@ var fleetTaskOrder = []string{"image-gen", "video-gen", "stt", "audio-gen", "run
 func taskConfigured(cfg config.Config, taskType string) bool {
 	switch taskType {
 	case "image-gen":
-		return cfg.ImageGenScript != ""
+		return cfg.ImageRouteConfigured()   // ComfyUI script OR the sdcpp engine (J2)
 	case "video-gen":
 		return cfg.VideoGenScript != ""
 	case "stt":
