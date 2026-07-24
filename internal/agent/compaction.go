@@ -225,3 +225,27 @@ func isElided(content string) bool {
 	const prefix = "[earlier result elided to fit context —"
 	return len(content) >= len(prefix) && content[:len(prefix)] == prefix
 }
+
+// ---------------------------------------------------------------------------
+// Replay seam (compaction eval harness). The eval harness (internal/compeval)
+// replays REAL transcript slices through the EXACT production ladder — never a
+// reimplementation — so measured ratios/retention are the shipping behavior.
+// Exported wrappers only; the ladder itself stays package-private.
+// ---------------------------------------------------------------------------
+
+// ReplayOpts mirrors compactOpts for external replay callers.
+type ReplayOpts struct {
+	GCF      bool
+	Skeleton bool
+}
+
+// CompactReplay runs the production compaction ladder over msgs at budget with
+// the given optional rungs. keepRecent/protectedPrefix follow compact()'s
+// semantics (see above).
+func CompactReplay(msgs []Msg, budget, keepRecent, protectedPrefix int, opts ReplayOpts) []Msg {
+	return compact(msgs, budget, keepRecent, protectedPrefix, compactOpts{GCF: opts.GCF, Skeleton: opts.Skeleton})
+}
+
+// EstimateTokens exposes the ladder's own token estimator so replay callers
+// measure with the same yardstick the ladder budgets by.
+func EstimateTokens(msgs []Msg) int { return estimateTokens(msgs) }

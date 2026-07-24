@@ -46,7 +46,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.22.22"
+const version = "0.22.23"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -127,6 +127,8 @@ func main() {
 		err = runAuditSample(args)
 	case "eval":
 		err = runEval(args)
+	case "compaction-eval":
+		err = runCompactionEval(args)
 	case "stats":
 		err = runStats(args)
 	case "version", "--version", "-v":
@@ -212,6 +214,7 @@ Usage:
   local-offload doctor                   check endpoint health + config
   local-offload models                   show configured offload model
   local-offload eval [--dir DIR]         code-based quality eval (AURC, deferral-curve AUDC/QNC)
+  local-offload compaction-eval <run|freeze|check|ab> --corpus C   compaction ladder eval: ratio/retention report, tokens ratchet, gated A/B
   local-offload confhead-eval            out-of-fold adoption gate (AURC/AUGRC + paired-bootstrap CI)
   local-offload confhead-calibrate       per-task conformal p(correct) escalation thresholds (ADOPT tasks)
   local-offload stats                    observational per-task ledger telemetry
