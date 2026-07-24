@@ -250,6 +250,11 @@ func runStandalone(ctx context.Context, loop *agent.Loop, o standaloneOpts) erro
 		res, rerr := loop.Run(gctx, g.Goal)
 		cancel()
 
+		// fit=false telemetry (ADR 0015 / Phase C): a run whose ladder exhausted
+		// sent best-effort over-budget requests — name it, never hide it.
+		if res.CompactionsExhausted > 0 {
+			fmt.Fprintf(os.Stderr, "[standalone] %s: compaction ladder exhausted on %d step(s) — best-effort over-budget requests were sent\n", gid, res.CompactionsExhausted)
+		}
 		tr := traceRecord{ID: gid, Goal: g.Goal, StopReason: res.StopReason, Steps: res.Steps, Output: res.Output, Transcript: res.Transcript}
 		if rerr != nil {
 			tr.Error = rerr.Error()

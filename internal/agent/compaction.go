@@ -91,6 +91,13 @@ func estimateTokens(msgs []Msg) int {
 type compactOpts struct {
 	GCF      bool // lossless: re-encode eligible JSON-array tool bodies (internal/gcf)
 	Skeleton bool // lossy-structural: reduce older tool bodies to signal skeletons
+	// Pinned marks tool_call_ids whose results the model DEMONSTRABLY re-requested
+	// (the circuit breaker refused an exact-repeat call for them) — the H8 ramp:
+	// content the model re-reads stops being lossily compacted. A pinned body is
+	// exempt from dedupe/skeleton/elide, and its unit from drop; the LOSSLESS GCF
+	// rung still applies (nothing is lost). emergencyShrink stays pin-blind — at
+	// that point the alternative is a dead run.
+	Pinned map[string]bool
 }
 
 func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts compactOpts) []Msg {
@@ -117,6 +124,36 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts c
 		recentStart = protectedEnd
 	}
 
+	// Step 2-pre (always on — the cheapest rung, reference-preserving): collapse
+	// OLDER tool bodies byte-identical to a LATER tool result. A model that
+	// fetched the same content twice keeps its NEWEST copy authoritative; the
+	// older copy becomes a reference marker naming the later call id (pairing
+	// intact, information reachable via the reference). Runs before GCF so
+	// per-copy re-encodings can never make duplicates unequal first. If the
+	// later copy is itself compacted by a later rung the reference degrades to
+	// pointing at a marker — disclosed, and still no worse than the marker the
+	// older copy would have become anyway.
+	latest := map[string]int{} // body → index of its LAST occurrence
+	for i := len(out) - 1; i >= protectedEnd; i-- {
+		if out[i].Role != "tool" || len(out[i].Content) < dedupeMinChars || IsCompactionArtifact(out[i].Content) {
+			continue
+		}
+		if _, seen := latest[out[i].Content]; !seen {
+			latest[out[i].Content] = i
+		}
+	}
+	for i := protectedEnd; i < recentStart && estimateTokens(out) > budget; i++ {
+		if out[i].Role != "tool" || opts.Pinned[out[i].ToolCallID] || len(out[i].Content) < dedupeMinChars || IsCompactionArtifact(out[i].Content) {
+			continue
+		}
+		if j, ok := latest[out[i].Content]; ok && j > i {
+			out[i].Content = dedupeMarker(out[j].ToolCallID, len(out[i].Content))
+		}
+	}
+	if estimateTokens(out) <= budget {
+		return out
+	}
+
 	// Step 2a (flag-gated, LOSSLESS): re-encode older tool bodies that are
 	// eligible JSON arrays into GCF columnar form — zero information loss, so
 	// it always runs before any lossy rung. Deterministic and idempotent
@@ -139,7 +176,7 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts c
 	// twice lands on identical bytes (isSkeletonized stops re-pruning).
 	if opts.Skeleton {
 		for i := protectedEnd; i < recentStart && estimateTokens(out) > budget; i++ {
-			if out[i].Role == "tool" {
+			if out[i].Role == "tool" && !opts.Pinned[out[i].ToolCallID] {
 				if sk, ok := skeletonize(out[i].Content); ok {
 					out[i].Content = sk
 				}
@@ -154,13 +191,18 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts c
 	// skeleton falls through to a bare marker here under harder pressure; its
 	// marker reports the ORIGINAL body size (parsed from the skeleton's own
 	// prefix), not the skeleton's — the marker discloses what was lost.
+	// FORCE_PRESERVE guard: a body whose remaining content still carries signal
+	// lines (errors/failures/warnings — the class every OmniRoute intensity
+	// preserves) keeps up to a bounded residue of those lines under the marker
+	// instead of losing them to a bare marker. Deduped references are skipped —
+	// already tiny, and eliding one would sever the reference for no gain.
 	for i := protectedEnd; i < recentStart && estimateTokens(out) > budget; i++ {
-		if out[i].Role == "tool" && !isElided(out[i].Content) {
+		if out[i].Role == "tool" && !isElided(out[i].Content) && !isDeduped(out[i].Content) && !opts.Pinned[out[i].ToolCallID] {
 			n := len(out[i].Content)
 			if orig, ok := skeletonOriginalSize(out[i].Content); ok {
 				n = orig
 			}
-			out[i].Content = elisionMarker(n)
+			out[i].Content = elideWithSignal(out[i].Content, n)
 		}
 	}
 	if estimateTokens(out) <= budget {
@@ -179,10 +221,29 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts c
 			continue
 		}
 		if out[i].Role == "assistant" && len(out[i].ToolCalls) > 0 {
-			// Drop this assistant turn AND its matching tool results as a unit.
+			// Drop this assistant turn AND its matching tool results as a unit —
+			// UNLESS a result is pinned (the model re-requested it) or its
+			// remaining content still carries signal lines (the elide rung's
+			// FORCE_PRESERVE residue; bare markers/skeleton prefixes contain no
+			// signal vocabulary, so this test is exactly "residue present").
+			// Skipping a unit can leave the ladder exhausted over budget — the
+			// caller surfaces that honestly (fit telemetry) rather than this
+			// rung force-dropping preserved signal.
 			ids := map[string]bool{}
 			for _, c := range out[i].ToolCalls {
 				ids[c.ID] = true
+			}
+			droppable := true
+			for j := i + 1; j < recentStart; j++ {
+				if out[j].Role == "tool" && ids[out[j].ToolCallID] {
+					if opts.Pinned[out[j].ToolCallID] || signalLine.MatchString(out[j].Content) {
+						droppable = false
+						break
+					}
+				}
+			}
+			if !droppable {
+				continue
 			}
 			keep[i] = false
 			for j := i + 1; j < recentStart; j++ {
@@ -216,6 +277,58 @@ func masked(msgs []Msg, keep []bool) []Msg {
 // dropped and how much.
 func elisionMarker(origLen int) string {
 	return fmt.Sprintf("[earlier result elided to fit context — %d chars]", origLen)
+}
+
+// dedupeMinChars: below this a duplicate body is not worth collapsing — the
+// reference marker would be a meaningful fraction of the "savings".
+const dedupeMinChars = 64
+
+// dedupePrefix opens every dedupe reference (idempotence marker for isDeduped).
+const dedupePrefix = "[identical to the later result for call "
+
+// dedupeMarker replaces an older duplicate tool body with a reference to the
+// call whose (newer) result carries the same bytes.
+func dedupeMarker(callID string, origLen int) string {
+	return fmt.Sprintf("%s%s — %d chars]", dedupePrefix, callID, origLen)
+}
+
+// isDeduped reports whether a body is already a dedupe reference. Pure-ASCII
+// prefix — rune-safe by construction, like isElided.
+func isDeduped(content string) bool {
+	return len(content) >= len(dedupePrefix) && content[:len(dedupePrefix)] == dedupePrefix
+}
+
+// elideSignalMaxLines / elideSignalMaxChars bound the FORCE_PRESERVE residue an
+// elision may keep — enough for the error that a later step needs, never a
+// skeleton-sized survivor.
+const elideSignalMaxLines = 5
+const elideSignalMaxChars = 400
+
+// elideWithSignal elides a body to the standard marker, keeping a bounded
+// residue of its signal lines (errors/failures/warnings) UNDER the marker when
+// any exist — the FORCE_PRESERVE guard: an error line survives every rung
+// short of the run's own death. The marker line comes first, so isElided still
+// recognizes the result and no rung reprocesses it.
+func elideWithSignal(content string, origLen int) string {
+	marker := elisionMarker(origLen)
+	var kept []string
+	total := 0
+	for _, ln := range strings.Split(content, "\n") {
+		if len(kept) >= elideSignalMaxLines || total >= elideSignalMaxChars {
+			break
+		}
+		if signalLine.MatchString(ln) {
+			if len(ln) > elideSignalMaxChars {
+				ln = ln[:elideSignalMaxChars]
+			}
+			kept = append(kept, ln)
+			total += len(ln)
+		}
+	}
+	if len(kept) == 0 {
+		return marker
+	}
+	return marker + "\n" + strings.Join(kept, "\n")
 }
 
 // isElided reports whether a tool body has already been replaced by a marker,
@@ -338,10 +451,10 @@ func EstimateTokens(msgs []Msg) int { return estimateTokens(msgs) }
 const DefaultKeepRecent = defaultKeepRecent
 
 // IsCompactionArtifact reports whether a tool body is a PRODUCT of this
-// ladder — an elision marker or a skeleton — rather than raw content. The
-// trace harvest uses it to refuse already-compacted transcripts: replaying
-// compaction-of-compacted text would measure the ladder against its own
-// output and bias every ratio toward 1.
+// ladder — an elision marker (with or without signal residue), a skeleton, or
+// a dedupe reference — rather than raw content. The trace harvest uses it to
+// refuse already-compacted transcripts: replaying compaction-of-compacted text
+// would measure the ladder against its own output and bias every ratio toward 1.
 func IsCompactionArtifact(content string) bool {
-	return isElided(content) || strings.HasPrefix(content, skeletonPrefix)
+	return isElided(content) || strings.HasPrefix(content, skeletonPrefix) || isDeduped(content)
 }
