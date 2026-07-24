@@ -107,6 +107,31 @@ func TestRedactorPrivateKeyBlockWholeBlock(t *testing.T) {
 	}
 }
 
+// Parity by construction: every vet class must have a same-named redactor (a
+// vet class without one turns the residual gate into a hard failure on real
+// data), and the redactor's regex must match everything the vet regex matches.
+func TestRedactorCoversAllVetClasses(t *testing.T) {
+	if len(redactPatterns) != len(piiPatterns) {
+		t.Fatalf("redactPatterns has %d classes, piiPatterns has %d", len(redactPatterns), len(piiPatterns))
+	}
+	for i, p := range piiPatterns {
+		if redactPatterns[i].name != p.name {
+			t.Fatalf("class order/name drift at %d: redact=%q vet=%q", i, redactPatterns[i].name, p.name)
+		}
+	}
+	for name := range redactOverrides {
+		found := false
+		for _, p := range piiPatterns {
+			if p.name == name {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("redact override %q names a class the vet does not have", name)
+		}
+	}
+}
+
 // The placeholders themselves must never re-trip the vet (a placeholder that
 // matched a pattern would make every harvest refuse itself).
 func TestPlaceholdersAreVetClean(t *testing.T) {
@@ -277,6 +302,101 @@ func TestHarvestTracesEndToEnd(t *testing.T) {
 	}
 }
 
+// Fidelity: harvested entries must replay at PRODUCTION keep-recent, and a
+// transcript the ladder already compacted mid-run must be refused with a note.
+func TestHarvestMirrorsProductionKeepRecent(t *testing.T) {
+	dir := t.TempDir()
+	writeTraceFile(t, dir, "a.json", sampleTrace("a", "plain payload"))
+	entries, _, err := HarvestTraces(dir, HarvestOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entries[0].KeepRecent != agent.DefaultKeepRecent {
+		t.Fatalf("keep_recent %d, want production default %d", entries[0].KeepRecent, agent.DefaultKeepRecent)
+	}
+}
+
+func TestHarvestRefusesPreCompactedTranscripts(t *testing.T) {
+	dir := t.TempDir()
+	elided := sampleTrace("e", "[earlier result elided to fit context — 4321 chars]")
+	writeTraceFile(t, dir, "elided.json", elided)
+	skel := sampleTrace("s", "[skeleton — pruned from 9876 chars]\nkept line\nERROR kept")
+	writeTraceFile(t, dir, "skel.json", skel)
+	writeTraceFile(t, dir, "clean.json", sampleTrace("c", "raw payload"))
+	entries, stats, err := HarvestTraces(dir, HarvestOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].ID != "hv-clean" {
+		t.Fatalf("expected only the clean trace, got %+v", entries)
+	}
+	if stats.PreCompacted != 2 {
+		t.Fatalf("pre_compacted count %d, want 2", stats.PreCompacted)
+	}
+	for _, n := range stats.Skipped {
+		if !strings.Contains(n.Reason, "pre-compacted") {
+			t.Fatalf("skip note must name the refusal: %+v", n)
+		}
+	}
+}
+
+// A malformed trace (tool turn without a tool_call_id) becomes a per-file skip
+// note — never a whole-harvest abort at write time.
+func TestHarvestSkipsStructurallyInvalidTraces(t *testing.T) {
+	dir := t.TempDir()
+	bad := sampleTrace("b", "payload")
+	bad.Transcript[3].ToolCallID = ""
+	writeTraceFile(t, dir, "bad.json", bad)
+	writeTraceFile(t, dir, "good.json", sampleTrace("g", "payload"))
+	entries, stats, err := HarvestTraces(dir, HarvestOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].ID != "hv-good" {
+		t.Fatalf("expected only the good trace, got %+v", entries)
+	}
+	if len(stats.Skipped) != 1 || !strings.Contains(stats.Skipped[0].Reason, "tool_call_id") {
+		t.Fatalf("expected a tool_call_id skip note, got %+v", stats.Skipped)
+	}
+}
+
+// PII inside tool-call ARGS must be redacted through the harvest path (not
+// merely refused by the residual gate).
+func TestHarvestRedactsToolCallArgs(t *testing.T) {
+	dir := t.TempDir()
+	tr := sampleTrace("a", "clean payload")
+	tr.Transcript[2].ToolCalls[0].Args = `{"path":"inbox","query":"from:dan@example.com"}`
+	writeTraceFile(t, dir, "a.json", tr)
+	entries, stats, err := HarvestTraces(dir, HarvestOpts{})
+	if err != nil {
+		t.Fatalf("harvest refused instead of redacting Args: %v", err)
+	}
+	args := entries[0].Turns[2].ToolCalls[0].Args
+	if strings.Contains(args, "@") || !strings.Contains(args, "[redacted-email-1]") {
+		t.Fatalf("Args not redacted: %q", args)
+	}
+	if stats.Redactions["email"] != 1 {
+		t.Fatalf("redaction stats missed Args: %+v", stats.Redactions)
+	}
+}
+
+// A refused corpus must never exist at the destination (atomic write): entries
+// that fail the strict re-load leave no file and no temp behind.
+func TestWriteCorpusRefusalLeavesNoFile(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "corpus.jsonl")
+	bad := []Entry{{ID: "x", Kind: "prose", Turns: []Turn{{Role: "tool", ToolCallID: "", Content: "orphan"}}}}
+	if _, err := WriteCorpus(out, bad); err == nil {
+		t.Fatal("expected the strict re-load to refuse")
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatalf("refused corpus exists at destination: %v", err)
+	}
+	if _, err := os.Stat(out + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("temp file left behind: %v", err)
+	}
+}
+
 func TestHarvestMaxEntriesCap(t *testing.T) {
 	dir := t.TempDir()
 	writeTraceFile(t, dir, "a.json", sampleTrace("a", "payload one"))
@@ -313,7 +433,24 @@ func TestRefuseResidualPII(t *testing.T) {
 func TestHarvestedCorpusReplays(t *testing.T) {
 	dir := t.TempDir()
 	long := strings.Repeat("2026-07-24T10:00:01 INFO step ok\nERROR: retrying id=42\n", 40)
-	writeTraceFile(t, dir, "g1.json", sampleTrace("g1", long))
+	// Enough exchanges that OLDER tool turns fall outside the production
+	// keep-recent window (4) the harvest now mirrors — the long payloads sit
+	// early so the ladder has something it is allowed to compact.
+	rec := TraceRecord{
+		ID: "g1", Goal: "analyze logs", StopReason: "done", Steps: 5, Output: "done",
+		Transcript: []agent.Msg{
+			{Role: "system", Content: "you are the local agent"},
+			{Role: "user", Content: "objective: analyze the logs"},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "c1", Name: "read_file", Args: `{"path":"a.log"}`}}},
+			{Role: "tool", ToolCallID: "c1", Content: long},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "c2", Name: "read_file", Args: `{"path":"b.log"}`}}},
+			{Role: "tool", ToolCallID: "c2", Content: long},
+			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "c3", Name: "read_file", Args: `{"path":"c.log"}`}}},
+			{Role: "tool", ToolCallID: "c3", Content: "short tail"},
+			{Role: "assistant", Content: "summary of findings"},
+		},
+	}
+	writeTraceFile(t, dir, "g1.json", rec)
 	entries, _, err := HarvestTraces(dir, HarvestOpts{})
 	if err != nil {
 		t.Fatal(err)

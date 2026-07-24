@@ -11,8 +11,13 @@ Versioning: [SemVer](https://semver.org/).
   standalone agent's trace files (`cmd/local-agent` per-goal JSON, full transcript): converts the
   `[]agent.Msg` transcript to the strict corpus wire format, classifies each entry's kind by
   byte-weighted majority (≥60%) of its TOOL payloads (no majority → `mixed`; no tool payloads →
-  `prose`), and sets `protected_prefix` to the production preamble (turns before the first
-  assistant turn) so the replay exerts the same pressure the live loop does.
+  `prose`), and mirrors PRODUCTION replay pressure: `protected_prefix` = the real preamble (turns
+  before the first assistant turn) and `keep_recent` = the live loop's exported
+  `agent.DefaultKeepRecent` (review finding: leaving it at the harness default of 1 replayed every
+  entry under systematically harsher pressure than production). Transcripts the ladder already
+  compacted mid-run (elision markers / skeletons in tool bodies, detected via the new
+  `agent.IsCompactionArtifact`) are REFUSED with a note and counted (`pre_compacted`) — replaying
+  compaction-of-compacted text would measure the ladder against its own output.
 - **Redaction-at-harvest**: deterministic placeholder substitution over the exact VetPII refusal
   classes BEFORE the corpus file exists (git output alone carries author emails, which the vet
   refuses). Same matched text → same numbered placeholder, so distinctness survives for entity
@@ -21,9 +26,14 @@ Versioning: [SemVer](https://semver.org/).
   recognizes the header and a header-only redaction would leave key material behind.
 - **Defense-in-depth gate**: after redaction the VetPII gate re-runs on the built entries; any
   residual finding refuses the whole harvest (redactor/vet drift must fail loudly, never write a
-  file the loader would refuse). The written corpus is round-trip-proven through the strict
-  loader (`Load`) before its sha256 hash is reported; skipped trace files (corrupt, too short,
-  capped) are each named with a reason — silent drops would read as coverage.
+  file the loader would refuse). The redaction table is DERIVED from the vet's own class table
+  (parity by construction — a future vet class is automatically redacted with its own regex
+  unless an override widens it, as private-key-block does). The written corpus is written
+  atomically (temp + rename) and round-trip-proven through the strict loader (`Load`) BEFORE it
+  exists at the destination; malformed traces (e.g. a tool turn without `tool_call_id`) degrade
+  to per-file skip notes at harvest time instead of aborting the run at write time; skipped trace
+  files (corrupt, too short, pre-compacted, capped) are each named with a reason — silent drops
+  would read as coverage.
 
 ## [0.22.23] - 2026-07-24
 

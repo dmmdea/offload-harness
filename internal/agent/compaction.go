@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/gcf"
 )
@@ -249,3 +250,17 @@ func CompactReplay(msgs []Msg, budget, keepRecent, protectedPrefix int, opts Rep
 // EstimateTokens exposes the ladder's own token estimator so replay callers
 // measure with the same yardstick the ladder budgets by.
 func EstimateTokens(msgs []Msg) int { return estimateTokens(msgs) }
+
+// DefaultKeepRecent exposes the production keep-recent default so replay
+// callers (the compaction eval's trace harvest) mirror the live loop's
+// pressure instead of silently replaying under a harsher setting.
+const DefaultKeepRecent = defaultKeepRecent
+
+// IsCompactionArtifact reports whether a tool body is a PRODUCT of this
+// ladder — an elision marker or a skeleton — rather than raw content. The
+// trace harvest uses it to refuse already-compacted transcripts: replaying
+// compaction-of-compacted text would measure the ladder against its own
+// output and bias every ratio toward 1.
+func IsCompactionArtifact(content string) bool {
+	return isElided(content) || strings.HasPrefix(content, skeletonPrefix)
+}

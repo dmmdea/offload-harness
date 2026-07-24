@@ -8,10 +8,14 @@
 // classes, then the VetPII gate re-runs on the result as defense-in-depth — a
 // harvest whose output would still refuse is an error, never a written file.
 //
-// Fidelity contract: the whole transcript is kept (including the system turn)
-// and ProtectedPrefix is set to the preamble length (turns before the first
-// assistant turn), mirroring how the live loop calls compact() — the replay
-// exerts the same pressure production does.
+// Fidelity contract: the whole transcript is kept (including the system turn),
+// ProtectedPrefix is set to the preamble length (turns before the first
+// assistant turn), and KeepRecent to the live loop's DefaultKeepRecent —
+// mirroring how production calls compact(), so the replay exerts the same
+// pressure production does. Transcripts the ladder already compacted mid-run
+// (elision markers / skeletons in tool bodies) are REFUSED with a note: their
+// raw content is unrecoverable, and replaying compaction-of-compacted text
+// would measure the ladder against its own output.
 package compeval
 
 import (
@@ -55,22 +59,39 @@ func MsgsToTurns(msgs []agent.Msg) []Turn {
 	return out
 }
 
-// redactPatterns are the harvest-side substitution classes — the same classes
-// VetPII refuses, with one deliberate upgrade: private-key-block redacts the
-// WHOLE block (through the END marker, or to end-of-string when the block is
-// truncated), because the vet pattern only recognizes the BEGIN header and a
-// redactor that removed only the header would leave the key material behind.
-var redactPatterns = []struct {
+// redactOverrides widens a vet class's substitution regex where redacting only
+// the vet match would leave sensitive residue behind. private-key-block: the
+// vet pattern recognizes just the BEGIN header, so the redactor takes the
+// WHOLE block — through the END marker, or to end-of-string when the block is
+// truncated (over-redaction is the safe direction).
+var redactOverrides = map[string]*regexp.Regexp{
+	"private-key-block": regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(-----END [A-Z ]*PRIVATE KEY-----|\z)`),
+}
+
+// redactPatterns are DERIVED from piiPatterns (the vet's own table) so parity
+// holds by construction: a vet class added tomorrow is automatically redacted
+// with its own regex unless an override widens it — the residual-PII gate can
+// only trip on a genuine widening bug, never on a forgotten mirror entry.
+var redactPatterns = func() []struct {
 	name string
 	re   *regexp.Regexp
-}{
-	{"email", regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)},
-	{"private-key-block", regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(-----END [A-Z ]*PRIVATE KEY-----|\z)`)},
-	{"bearer-token", regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9_\-\.=]{16,}`)},
-	{"api-key-assignment", regexp.MustCompile(`(?i)\b(api[_-]?key|secret|token|passwd|password)\s*[=:]\s*['"]?[A-Za-z0-9_\-]{12,}`)},
-	{"aws-access-key", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
-	{"github-token", regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{20,}\b`)},
-}
+} {
+	out := make([]struct {
+		name string
+		re   *regexp.Regexp
+	}, 0, len(piiPatterns))
+	for _, p := range piiPatterns {
+		re := p.re
+		if o, ok := redactOverrides[p.name]; ok {
+			re = o
+		}
+		out = append(out, struct {
+			name string
+			re   *regexp.Regexp
+		}{p.name, re})
+	}
+	return out
+}()
 
 // redactor substitutes stable placeholders per entry: the same matched text
 // always yields the same placeholder (numbered by first appearance, per class),
@@ -230,8 +251,11 @@ type HarvestStats struct {
 	Files      int            `json:"files"`
 	Harvested  int            `json:"harvested"`
 	Skipped    []HarvestNote  `json:"skipped,omitempty"`
-	Redactions map[string]int `json:"redactions,omitempty"` // class → substitutions
-	Kinds      map[string]int `json:"kinds"`                // kind → entries
+	// PreCompacted counts traces refused because their transcript already
+	// carried ladder artifacts (see the fidelity gate in HarvestTraces).
+	PreCompacted int            `json:"pre_compacted,omitempty"`
+	Redactions   map[string]int `json:"redactions,omitempty"` // class → substitutions
+	Kinds        map[string]int `json:"kinds"`                // kind → entries
 }
 
 // HarvestTraces reads every *.json trace under dir (sorted by name — the
@@ -267,6 +291,23 @@ func HarvestTraces(dir string, opts HarvestOpts) ([]Entry, HarvestStats, error) 
 			stats.Skipped = append(stats.Skipped, HarvestNote{File: filepath.Base(p), Reason: fmt.Sprintf("transcript has %d turn(s) < min %d", len(rec.Transcript), opts.MinTurns)})
 			continue
 		}
+		// Fidelity gate 1: refuse transcripts the ladder ALREADY compacted
+		// mid-run (elision markers / skeletons in tool bodies). The raw content
+		// is unrecoverable, and replaying compaction-of-compacted text would
+		// measure the ladder against its own output — ratios near 1 on exactly
+		// the high-pressure traces a flip decision cares most about.
+		if n := countCompactionArtifacts(rec.Transcript); n > 0 {
+			stats.PreCompacted++
+			stats.Skipped = append(stats.Skipped, HarvestNote{File: filepath.Base(p), Reason: fmt.Sprintf("pre-compacted transcript (%d ladder-artifact tool turn(s)) — raw content unrecoverable", n)})
+			continue
+		}
+		// Fidelity gate 2: structural validation the strict loader will apply,
+		// run HERE so one malformed trace becomes a skip note instead of
+		// aborting the whole harvest at write time.
+		if reason := structuralProblem(rec.Transcript); reason != "" {
+			stats.Skipped = append(stats.Skipped, HarvestNote{File: filepath.Base(p), Reason: reason})
+			continue
+		}
 		turns := MsgsToTurns(rec.Transcript)
 		red := newRedactor()
 		for i := range turns {
@@ -287,6 +328,11 @@ func HarvestTraces(dir string, opts HarvestOpts) ([]Entry, HarvestStats, error) 
 			ID:              opts.IDPrefix + base,
 			Kind:            kind,
 			Turns:           turns,
+			// Mirror PRODUCTION replay pressure: the live loop compacts with
+			// keepRecent=agent.DefaultKeepRecent; leaving this 0 would replay
+			// at the harness default (1) — systematically harsher than
+			// production on every entry.
+			KeepRecent:      agent.DefaultKeepRecent,
 			ProtectedPrefix: preambleLen(turns),
 		})
 		stats.Kinds[kind]++
@@ -296,6 +342,34 @@ func HarvestTraces(dir string, opts HarvestOpts) ([]Entry, HarvestStats, error) 
 		return nil, stats, err
 	}
 	return entries, stats, nil
+}
+
+// countCompactionArtifacts counts tool turns whose body is a PRODUCT of the
+// production ladder (elision marker or skeleton) rather than raw content.
+func countCompactionArtifacts(msgs []agent.Msg) int {
+	n := 0
+	for _, m := range msgs {
+		if m.Role == "tool" && agent.IsCompactionArtifact(m.Content) {
+			n++
+		}
+	}
+	return n
+}
+
+// structuralProblem pre-applies the strict loader's per-turn checks to a
+// transcript and returns a skip reason, or "" when clean — so a malformed
+// trace (e.g. a backend that returned empty tool-call ids) degrades to a
+// per-file note instead of failing the whole harvest at write time.
+func structuralProblem(msgs []agent.Msg) string {
+	for i, m := range msgs {
+		if m.Role == "" {
+			return fmt.Sprintf("turn %d missing role", i)
+		}
+		if m.Role == "tool" && m.ToolCallID == "" {
+			return fmt.Sprintf("tool turn %d missing tool_call_id (the strict loader would refuse it)", i)
+		}
+	}
+	return ""
 }
 
 // refuseResidualPII is the harvest's exit gate: redaction targets exactly the
@@ -315,9 +389,11 @@ func refuseResidualPII(entries []Entry) error {
 }
 
 // WriteCorpus writes entries as corpus JSONL and returns the corpus hash —
-// obtained by RE-LOADING the written file through Load, the strict production
-// reader, so a written corpus is round-trip-proven loadable and the returned
-// hash is exactly the one every eval artifact will be stamped with.
+// obtained by RE-LOADING the bytes through Load, the strict production reader,
+// so a written corpus is round-trip-proven loadable and the returned hash is
+// exactly the one every eval artifact will be stamped with. The write is
+// atomic-by-rename: the re-load runs against a temp file, so a refused corpus
+// never exists at the destination path.
 func WriteCorpus(path string, entries []Entry) (string, error) {
 	if len(entries) == 0 {
 		return "", fmt.Errorf("write corpus: no entries")
@@ -331,15 +407,22 @@ func WriteCorpus(path string, entries []Entry) (string, error) {
 		buf.Write(line)
 		buf.WriteByte('\n')
 	}
-	if err := os.WriteFile(path, []byte(buf.String()), 0o644); err != nil {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(buf.String()), 0o644); err != nil {
 		return "", err
 	}
-	loaded, hash, err := Load(path)
+	loaded, hash, err := Load(tmp)
 	if err != nil {
-		return "", fmt.Errorf("written corpus failed the strict re-load (corpus NOT usable): %w", err)
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("corpus failed the strict re-load (nothing written to %s): %w", path, err)
 	}
 	if len(loaded) != len(entries) {
-		return "", fmt.Errorf("written corpus re-loaded %d entries, expected %d", len(loaded), len(entries))
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("corpus re-loaded %d entries, expected %d (nothing written to %s)", len(loaded), len(entries), path)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
 	}
 	return hash, nil
 }
