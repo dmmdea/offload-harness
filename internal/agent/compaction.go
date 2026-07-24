@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dmmdea/offload-harness/internal/contextbudget"
 	"github.com/dmmdea/offload-harness/internal/gcf"
 )
 
@@ -225,6 +226,86 @@ func elisionMarker(origLen int) string {
 func isElided(content string) bool {
 	const prefix = "[earlier result elided to fit context —"
 	return len(content) >= len(prefix) && content[:len(prefix)] == prefix
+}
+
+// emergencyShrink is the reactive-overflow LAST RESORT, used only after a
+// server overflow rejection when compact() could not get under budget —
+// typically because the oversized tool body sits inside keepRecent, where every
+// ladder rung is forbidden. Observed live (flip-decision report 2026-07-24,
+// finding F3): a transcript of [system, objective, assistant, tool(HUGE)]
+// makes the harder-compaction retry a byte-for-byte no-op, so the retry
+// re-sends the same overflow and the run dies. At that point recency
+// protection has nothing left to protect — the alternative is an abort — so
+// tool BODIES (never the preamble, never whole turns) are shrunk: OLDER bodies
+// skeleton-first then elision markers, oldest-first; the NEWEST body is spared
+// until last and then trimmed head/tail to the remaining room (a bare marker
+// only if even the trim cannot fit — a degraded result beats a request the
+// server will reject again). Deterministic; returns msgs unchanged when
+// already within budget.
+func emergencyShrink(msgs []Msg, budget, protectedPrefix int) []Msg {
+	if estimateTokens(msgs) <= budget {
+		return msgs
+	}
+	out := make([]Msg, len(msgs))
+	copy(out, msgs)
+	if protectedPrefix < 0 {
+		protectedPrefix = 0
+	}
+	// The NEWEST tool body — the model's just-fetched result, the content the
+	// next completion most needs — is spared by passes 1-2 and degraded
+	// GRACEFULLY (head/tail trim) in pass 3, never jumped straight to a marker.
+	lastTool := -1
+	for i := len(out) - 1; i >= protectedPrefix; i-- {
+		if out[i].Role == "tool" {
+			lastTool = i
+			break
+		}
+	}
+	// Pass 1: skeletonize every eligible OLDER tool body, oldest-first (only
+	// useful when the skeleton rung wasn't already applied to that body).
+	for i := protectedPrefix; i < len(out) && estimateTokens(out) > budget; i++ {
+		if out[i].Role != "tool" || i == lastTool || isElided(out[i].Content) {
+			continue
+		}
+		if sk, ok := skeletonize(out[i].Content); ok && len(sk) < len(out[i].Content) {
+			out[i].Content = sk
+		}
+	}
+	// Pass 2: elide OLDER tool bodies to bare markers, oldest-first — including
+	// the keepRecent tail compact() must never touch, but NOT the newest body
+	// (eliding it here would make pass 3 unreachable and destroy the one result
+	// the model is about to work on).
+	for i := protectedPrefix; i < len(out) && estimateTokens(out) > budget; i++ {
+		if out[i].Role != "tool" || i == lastTool || isElided(out[i].Content) {
+			continue
+		}
+		if orig, ok := skeletonOriginalSize(out[i].Content); ok {
+			out[i].Content = elisionMarker(orig)
+		} else {
+			out[i].Content = elisionMarker(len(out[i].Content))
+		}
+	}
+	// Pass 3: the newest tool body is what still keeps the estimate over
+	// budget — trim IT to the room the rest of the transcript leaves
+	// (head/tail, disclosure marker inside). If even the floored trim cannot
+	// fit, fall through to a bare marker: a destroyed result beats a request
+	// the server will reject again. Non-tool content (system, objective,
+	// assistant text) is never touched — if THAT alone exceeds the budget the
+	// transcript is returned honestly over budget, same as the preamble
+	// contract.
+	if lastTool >= 0 && estimateTokens(out) > budget {
+		size := len(out[lastTool].Content)
+		rest := estimateTokens(out) - size/bytesPerToken
+		roomChars := (budget - rest) * bytesPerToken
+		if roomChars < 256 {
+			roomChars = 256
+		}
+		out[lastTool].Content, _ = contextbudget.Trim(out[lastTool].Content, roomChars)
+		if estimateTokens(out) > budget {
+			out[lastTool].Content = elisionMarker(size)
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

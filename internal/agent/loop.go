@@ -89,8 +89,8 @@ type Loop struct {
 	maxSameTool   int
 	ctxTokens     int // model context window in tokens; input budget derives from it
 	keepRecent    int  // most-recent turns kept full during compaction
-	skeletonPrune bool // enable the skeleton rung of the compaction ladder (default off)
-	gcfCompact    bool // enable the lossless GCF rung of the compaction ladder (default off)
+	skeletonPrune bool // enable the skeleton rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
+	gcfCompact    bool // enable the lossless GCF rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
 	toolResultCap int // max chars of ONE tool result kept in the transcript (0 => derive from window)
 	system        string
 	mem           Memory
@@ -232,14 +232,16 @@ func (l *Loop) WithContextTokens(n int) *Loop {
 // WithSkeletonPrune enables the skeleton rung of the compaction ladder: when
 // the transcript is over budget, older tool bodies are first reduced to
 // signal-preserving skeletons (see skeleton.go) before the bare-marker and
-// whole-turn-drop rungs run. Off by default until measured in live use — with
-// it off, compaction behaves exactly as before this rung existed.
+// whole-turn-drop rungs run. The Loop's zero value leaves it off; every
+// production caller defaults it ON since the measured flip decision
+// (ADR 0015) — with it off, compaction behaves as before this rung existed.
 func (l *Loop) WithSkeletonPrune(on bool) *Loop { l.skeletonPrune = on; return l }
 
 // WithGCFCompact enables the LOSSLESS GCF rung of the compaction ladder:
 // over budget, older tool bodies that are eligible JSON arrays are re-encoded
-// columnar (internal/gcf, round-trip proven) before any lossy rung runs. Off
-// by default until measured in live use.
+// columnar (internal/gcf, round-trip proven) before any lossy rung runs. The
+// Loop's zero value leaves it off; every production caller defaults it ON
+// since the measured flip decision (ADR 0015).
 func (l *Loop) WithGCFCompact(on bool) *Loop { l.gcfCompact = on; return l }
 
 // ladderOpts bundles the loop's rung flags for compact().
@@ -395,7 +397,30 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			// non-overflow error, or a still-overflowing retry, is returned as
 			// before.
 			if isContextOverflowErr(err) {
-				msgs = compact(msgs, budget/2, l.keepRecent/2, preambleLen, l.ladderOpts())
+				// The server rejected on REAL tokens; our chars/4 estimate can sit
+				// far UNDER it on dense content (CJK/base64/byte-fallback tokenizes
+				// up to ~1 token/byte). So the retry target is relative to BOTH the
+				// budget and the just-rejected transcript's own estimate — a
+				// budget-only target lets a low estimate no-op the whole retry and
+				// re-send the identical rejected bytes. The 256 floor keeps a
+				// degenerate target from destroying a tiny transcript that was
+				// rejected for reasons no shrink can fix.
+				target := budget / 2
+				if half := estimateTokens(msgs) / 2; half < target {
+					target = half
+				}
+				if target < 256 {
+					target = 256
+				}
+				msgs = compact(msgs, target, l.keepRecent/2, preambleLen, l.ladderOpts())
+				// The harder compact can still be a NO-OP when the oversized body
+				// sits inside keepRecent (observed live: a huge newest tool result
+				// made the retry re-send the same overflow). Emergency shrink is
+				// the last resort before the run dies: it may touch tool bodies
+				// the keep-recent contract normally protects.
+				if estimateTokens(msgs) > target {
+					msgs = emergencyShrink(msgs, target, preambleLen)
+				}
 				comp, err = l.client.Chat(ctx, msgs, specs, l.maxTokens)
 			}
 			if err != nil {

@@ -358,3 +358,24 @@ func TestVoiceConfigRoundTrip(t *testing.T) {
 		t.Errorf("recipe knobs did not round-trip: %+v", c)
 	}
 }
+
+// TestCompactionFlipDefaults pins the 2026-07-24 flip decision: pipeline GCF
+// compaction defaults ON (lossless + fail-closed; measured), while an explicit
+// false in a config file still wins (Load unmarshals over Default()).
+func TestCompactionFlipDefaults(t *testing.T) {
+	if !Default().GCFCompact {
+		t.Fatal("Default().GCFCompact must be true (flip decision 2026-07-24)")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(p, []byte(`{"gcf_compact": false}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.GCFCompact {
+		t.Fatal("an explicit gcf_compact:false in the config file must still disable it")
+	}
+}
