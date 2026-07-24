@@ -92,5 +92,7 @@ trustworthy on that machine, and worse than that is the documented signal to set
 
 ## Related docs
 
+- [0014](0014-gpu-memory-provider-and-uma-sampling.md) extends this decision for unified-memory iGPUs (`pdh-shared`: Dedicated+Shared) and makes the global memory source a resolved provider.
+
 - [../../FLEET-NODE.md](../../FLEET-NODE.md) — the operator-facing validation procedure
 - [../../systems/fleet-node.md](../../systems/fleet-node.md)

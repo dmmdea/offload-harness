@@ -412,6 +412,22 @@ clean 512² reference. **Media FORBIDDEN:** `--vae-conv-direct` on Vulkan (disto
 sd.cpp #1673); SD2-class models (RDNA3-adjacent crash, #1340); fp8 anything (Q8_0/Q4_K GGUF
 only); substituting quant builds or unpinned models (Hard rule 2).
 
+### Fleet membership (J3) — this box can join the fleet
+
+`local-offload fleet-serve` now works on AMD: the GPU memory source is a **resolved provider**
+(`nvidia-smi` where present, else the windows-generic WDDM source — registry capacity + adapter
+PDH counters), vendor/arch come from `installed.json`'s profile, and a UMA box honestly
+advertises carve-out + the ~RAM/2 shared budget as its total. The `amd-rdna3` config_seed also
+sets **`fleet_sampler:"pdh-shared"`** — on unified memory, per-render footprints must sum
+Dedicated+Shared (Dedicated alone reads ~0 and footprints would silently never record). One
+receipt probe to run once and send back with the others:
+
+```powershell
+$env:FLEET_LIVE_SMOKE='1'; go test -run TestLiveWindowsProbes -v ./internal/fleetnode/
+```
+
+(from the repo checkout; it logs the box's capacity/usage numbers and sanity-checks them).
+
 ### `amd-rdna3-dgpu` deltas (discrete RX 7900-class)
 
 Renders 32K / q8_0 / 26B `-ngl 99` resident directly (dedicated VRAM, no GTT dependency). The same

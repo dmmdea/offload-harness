@@ -46,7 +46,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.22.20"
+const version = "0.22.21"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -1622,16 +1622,32 @@ func runFleetServe(args []string) error {
 			"endpoints are exposed beyond loopback on %q. Anyone who can reach them can run renders on this GPU.\n", listen)
 	}
 
-	// Startup GPU probe: one nvidia-smi exec. Error or total <= 0 → refuse
-	// loudly (ParseSmiMemory already rejects a non-positive total).
-	probeOut, perr := nvidiaSmiMemory()
-	if perr != nil {
-		return fmt.Errorf("fleet-serve: GPU probe failed (nvidia-smi: %v) — refusing to start: a node without a working NVIDIA GPU cannot honor the fleet contract (vram_total_gb must be > 0)", perr)
+	// Startup GPU probe (J3: provider resolution, not an nvidia-smi assumption).
+	// nvidia-smi is tried first — a working NVIDIA node behaves exactly as
+	// before; else the windows-generic WDDM source (registry capacity + PDH
+	// adapter usage) serves AMD/Intel boxes, with vendor/arch read from the
+	// installer's manifest and the UMA memory model taken from the profile.
+	// Only when NO memory source works does the node refuse — that is the fact
+	// the contract cares about (vram_total_gb must be > 0), not the GPU brand.
+	info, _ := fleetnode.ReadInstalledInfo(fleetnode.InstalledJSONPath()) // absent manifest = zero info, handled below
+	uma, umaKnown := fleetnode.UMAFromProfile(info.Profile)
+	if !umaKnown {
+		// No profile signal (pre-installer box): a small dedicated pool reads as a
+		// UMA carve-out. Heuristic, stated in the serve log via the source name.
+		if ded, derr := fleetnode.DedicatedVramTotalGiB(); derr == nil && ded < 6 {
+			uma = true
+		}
 	}
-	total, _, perr := fleetnode.ParseSmiMemory(probeOut)
+	prov, perr := fleetnode.ResolveProvider(
+		fleetnode.SmiProbe(nvidiaSmiMemory),
+		fleetnode.GenericWindowsProbe(uma),
+		"nvidia", gpuArchFromName(nvidiaSmiGPUName()),
+		info,
+	)
 	if perr != nil {
-		return fmt.Errorf("fleet-serve: GPU probe returned no usable VRAM (%v) — refusing to start: advertising a zero-VRAM node would make the dispatcher treat this box as broken", perr)
+		return fmt.Errorf("fleet-serve: %v — refusing to start: a node without a working GPU memory source cannot honor the fleet contract (vram_total_gb must be > 0)", perr)
 	}
+	total, _, _ := prov.Probe()
 
 	// Same pipeline construction as the mcp verb, incl. the hot-reloader (this
 	// is a long-running server; nightly retrains must go live without a restart).
@@ -1646,7 +1662,7 @@ func runFleetServe(args []string) error {
 	ctx, stopSig := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stopSig()
 
-	sampler := fleetnode.StartGlobalSampler(ctx, 2*time.Second, nvidiaSmiMemory)
+	sampler := fleetnode.StartProbeSampler(ctx, 2*time.Second, prov.Probe)
 	jobs := fleetnode.NewJobs(time.Hour)
 	srv := fleetnode.New(p, jobs, fleetnode.Options{
 		NodeID:   nodeID,
@@ -1660,8 +1676,8 @@ func runFleetServe(args []string) error {
 			}
 			return nil
 		},
-		GpuVendor: "nvidia",
-		GpuArch:   gpuArchFromName(nvidiaSmiGPUName()),
+		GpuVendor: prov.Vendor,
+		GpuArch:   prov.Arch,
 		Cfg:       cfg,
 	})
 
@@ -1669,8 +1685,8 @@ func runFleetServe(args []string) error {
 	if err != nil {
 		return fmt.Errorf("fleet-serve: listen %s: %w", listen, err)
 	}
-	fmt.Fprintf(os.Stderr, "[fleet-serve] node %q serving /fleet on %s (%.1f GiB VRAM; tasks: %s)\n",
-		nodeID, listen, total, strings.Join(fleetnode.SupportedTasks(cfg), ", "))
+	fmt.Fprintf(os.Stderr, "[fleet-serve] node %q serving /fleet on %s (%.1f GiB VRAM via %s, vendor=%s arch=%s; tasks: %s)\n",
+		nodeID, listen, total, prov.Source, prov.Vendor, prov.Arch, strings.Join(fleetnode.SupportedTasks(cfg), ", "))
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ln) }()

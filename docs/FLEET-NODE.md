@@ -25,9 +25,15 @@ curl http://127.0.0.1:18811/fleet/health
 local-offload fleet-serve --listen 100.64.0.10:18811 --listen-trusted-network
 ```
 
-Startup runs a **GPU probe** (one `nvidia-smi` memory query). No working NVIDIA GPU →
-`fleet-serve` refuses to start: the contract treats `vram_total_gb <= 0` as a broken node,
-and refusing loudly beats advertising an empty GPU. Ctrl-C drains: new dispatches get 503,
+Startup resolves a **GPU memory provider** (J3): `nvidia-smi` first (a working NVIDIA node
+behaves exactly as before), else the **windows-generic WDDM source** — capacity from the
+display-class registry (`qwMemorySize`), usage from the `\GPU Adapter Memory` PDH counters,
+vendor/arch from the installer's `installed.json` profile, and the UMA memory model from the
+profile (an iGPU advertises carve-out + the ~RAM/2 WDDM shared budget as its total, and
+Dedicated+Shared as usage). Only when **no memory source works** does `fleet-serve` refuse to
+start: the contract treats `vram_total_gb <= 0` as a broken node, and refusing loudly beats
+advertising an empty GPU. The serve log names the resolved source
+(`... via nvidia-smi|windows-generic, vendor=... arch=...`). Ctrl-C drains: new dispatches get 503,
 in-flight renders get up to 30s to finish, survivors are marked terminal
 `error:"interrupted"` so pollers always reach a terminal state.
 
@@ -37,7 +43,7 @@ in-flight renders get up to 30s to finish, survivors are marked terminal
 |---|---|---|
 | `fleet_listen` | `127.0.0.1:18811` | Bind address (`--listen` overrides). Port **18811** — the dispatcher owns 18810. |
 | `fleet_node_id` | `""` | Node id in `/fleet/health`. Empty = the OS hostname at serve time (`--node-id` overrides). |
-| `fleet_sampler` | `auto` | Per-render VRAM footprint source: `auto` \| `pdh` \| `global` (see [Sampler modes](#sampler-modes)). |
+| `fleet_sampler` | `auto` | Per-render VRAM footprint source: `auto` \| `pdh` \| `pdh-shared` \| `global` (see [Sampler modes](#sampler-modes)). |
 
 ## Binding guidance (read before exposing anything)
 
@@ -94,8 +100,9 @@ sources:
 | Mode | Source | What it measures |
 |---|---|---|
 | `pdh` | Windows PDH counter `\GPU Process Memory(pid_*)\Dedicated Usage`, summed over the render's **process tree**, sampled every 500ms during renders only | What OUR job costs — uncontaminated by the desktop, browsers, or other apps. The same counter Task Manager and Afterburner surface. |
+| `pdh-shared` | The same PDH process tree, summing **Dedicated + Shared** Usage | The UMA/iGPU mode (J3): on unified memory (amd-rdna3 tier) allocations land in SHARED and the Dedicated counter reads ~0 — footprints would silently never record. The `amd-rdna3` config_seed sets this; discrete boxes should not (Shared is noise there). |
 | `global` | `nvidia-smi` global `memory.used` delta from a baseline captured at render start | The whole GPU's swing during the render — includes anything else that allocated meanwhile. |
-| `auto` (default) | PDH on Windows, global-delta elsewhere | The right default once PDH is validated (below). |
+| `auto` (default) | PDH (Dedicated) on Windows, global-delta elsewhere | The right default once PDH is validated (below). |
 
 The PDH counter set has a documented accuracy caveat on some driver/Windows combinations —
 hence a one-time validation at bring-up. One honest quirk to expect: the counter set often

@@ -408,8 +408,11 @@ type Config struct {
 	// resolved at serve time (so a shared config never bakes one box's name).
 	FleetNodeID string `json:"fleet_node_id,omitempty"`
 	// FleetSampler selects the per-render VRAM footprint source: "auto" (PDH
-	// per-process tree on Windows, nvidia-smi global-delta elsewhere), "pdh"
-	// (force the tree sampler), "global" (force global-delta — set this when
+	// per-process tree on Windows, nvidia-smi global-delta elsewhere),
+	// "pdh-shared" (J3: the tree summing Dedicated+Shared — REQUIRED on UMA
+	// iGPUs like the amd-rdna3 tier, where allocations land in Shared and the
+	// Dedicated counter reads ~0; the amd-rdna3 config_seed sets it), "pdh"
+	// (force the Dedicated tree sampler), "global" (force global-delta — set this when
 	// the FLEET-NODE.md Afterburner validation shows PDH disagreeing >15%).
 	FleetSampler string `json:"fleet_sampler,omitempty"`
 }
