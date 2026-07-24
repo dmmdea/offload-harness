@@ -1,9 +1,10 @@
 // entities.go — the deterministic FORCE_PRESERVE-class entity extractor.
 // "Entity" here means the token classes a compaction step must never silently
 // destroy: numbers, file paths, URLs, key=value keys, error-line signal,
-// UPPER_SNAKE identifiers, and long hex ids. Retention is measured over the
-// TOOL bodies (the only content the ladder edits) and every lost entity is
-// listed by value — a retention percentage without the lost list is not
+// UPPER_SNAKE identifiers, and long hex ids. Retention is measured over ALL
+// turn bodies — the ladder edits tool bodies, but its final rung drops whole
+// older turns, and entities lost that way must count too. Every lost entity
+// is listed by value — a retention percentage without the lost list is not
 // reviewable, so the list is the primary artifact and the ratio is derived.
 package compeval
 
@@ -39,24 +40,28 @@ func Entities(s string) map[string]struct{} {
 			// and "path/file.go." must normalize to the bare value or retention
 			// would depend on the sentence the entity sat in.
 			m = strings.TrimRight(m, ".,;:)]}\"'")
-			if m != "" {
-				out[m] = struct{}{}
+			// The POSIX-path pattern necessarily matches a leading delimiter
+			// (its guard class); strip it so the same path in different
+			// surrounding contexts is ONE entity, not several.
+			m = strings.TrimLeft(m, "=\"'(")
+			if m == "" || isAllAlphaHex(m) {
+				continue // digitless hex-alphabet words ("defaced") are prose, not ids
 			}
+			out[m] = struct{}{}
 		}
 	}
 	return out
 }
 
-// Retention compares entity sets over the TOOL bodies of a transcript before
-// and after compaction. Returns the retention ratio in [0,1] (1 when the
-// original had no entities) and the sorted lost-entity list.
+// Retention compares entity sets over ALL turn bodies before and after
+// compaction (the drop rung destroys non-tool turns too). Returns the
+// retention ratio in [0,1] (1 when the original had no entities) and the
+// sorted lost-entity list.
 func Retention(before, after []agent.Msg) (ratio float64, lost []string) {
 	orig := map[string]struct{}{}
 	for _, m := range before {
-		if m.Role == "tool" {
-			for e := range Entities(m.Content) {
-				orig[e] = struct{}{}
-			}
+		for e := range Entities(m.Content) {
+			orig[e] = struct{}{}
 		}
 	}
 	if len(orig) == 0 {
@@ -64,10 +69,8 @@ func Retention(before, after []agent.Msg) (ratio float64, lost []string) {
 	}
 	kept := map[string]struct{}{}
 	for _, m := range after {
-		if m.Role == "tool" {
-			for e := range Entities(m.Content) {
-				kept[e] = struct{}{}
-			}
+		for e := range Entities(m.Content) {
+			kept[e] = struct{}{}
 		}
 	}
 	for e := range orig {
@@ -77,4 +80,23 @@ func Retention(before, after []agent.Msg) (ratio float64, lost []string) {
 	}
 	sort.Strings(lost)
 	return float64(len(orig)-len(lost)) / float64(len(orig)), lost
+}
+
+// isAllAlphaHex reports a hex-class match containing no digit — an English
+// word that happens to sit in the hex alphabet ("defaced"), never an id.
+func isAllAlphaHex(s string) bool {
+	if len(s) < 7 {
+		return false
+	}
+	digit := false
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			digit = true
+		case (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F'):
+		default:
+			return false // mixed-class token: some other pattern owns it
+		}
+	}
+	return !digit
 }

@@ -17,8 +17,8 @@ import (
 )
 
 // Scorer scores one rendered transcript (higher = better task signal). The
-// concrete signal is injected — the CLI wires the harness's verify/logprob-
-// margin scorer; tests inject deterministic fakes.
+// concrete signal is injected — the CLI wires the pipeline's accept+grounded
+// OUTCOME scorer (see compaction_eval.go); tests inject deterministic fakes.
 type Scorer func(ctx context.Context, rendered string) (float64, error)
 
 // ControlPair is a known-ordering probe: Good must outscore Degraded.
@@ -97,20 +97,10 @@ func RunAB(ctx context.Context, score Scorer, entries []Entry, corpusHash string
 	rep.GatePassed = true
 	var full, comp []float64
 	for _, e := range entries {
-		budget := e.BudgetTokens
-		if budget <= 0 {
-			budget = deriveBudget(agent.EstimateTokens(e.Turns))
-		}
-		keep := e.KeepRecent
-		if keep <= 0 {
-			keep = 1
-		}
-		prot := e.ProtectedPrefix
-		if prot <= 0 {
-			prot = 1
-		}
-		compacted := agent.CompactReplay(e.Turns, budget, keep, prot, agent.ReplayOpts{GCF: opts.GCF, Skeleton: opts.Skeleton})
-		sf, err := score(ctx, Render(e.Turns))
+		msgs := e.Msgs()
+		budget, keep, prot := entryParams(e, msgs)
+		compacted := agent.CompactReplay(msgs, budget, keep, prot, agent.ReplayOpts{GCF: opts.GCF, Skeleton: opts.Skeleton})
+		sf, err := score(ctx, Render(msgs))
 		if err != nil {
 			return rep, fmt.Errorf("entry %q: scoring full: %w", e.ID, err)
 		}

@@ -32,10 +32,10 @@ import (
 type Entry struct {
 	ID   string `json:"id"`
 	Kind string `json:"kind"` // tool-json | tool-text | logs | code | prose | mixed
-	// Turns is the transcript slice. Compaction targets tool-role bodies; the
-	// harness replays the WHOLE slice so protected-prefix/keep-recent semantics
-	// match production.
-	Turns []agent.Msg `json:"turns"`
+	// Turns is the transcript slice in the EXPLICIT wire casing below (lowercase
+	// snake_case, matching the OpenAI transcript shape). The harness replays the
+	// WHOLE slice so protected-prefix/keep-recent semantics match production.
+	Turns []Turn `json:"turns"`
 	// BudgetTokens is the compaction budget to replay at. 0 = derived as 60% of
 	// the entry's own estimated tokens (forces the ladder to actually work).
 	BudgetTokens int `json:"budget_tokens,omitempty"`
@@ -44,6 +44,42 @@ type Entry struct {
 	KeepRecent      int `json:"keep_recent,omitempty"`
 	ProtectedPrefix int `json:"protected_prefix,omitempty"`
 }
+
+// Turn is the corpus wire format for one message — EXPLICIT lowercase tags so
+// a corpus can never half-parse: agent.Msg's fields are untagged, and Go's
+// case-insensitive fallback would accept "Role" but silently MISS snake_case
+// keys like "tool_call_id", producing empty pairing fields and replay behavior
+// that differs from production without any error. This struct + strict
+// decoding is the contract; ToMsg converts to the ladder's type.
+type Turn struct {
+	Role       string         `json:"role"`
+	Content    string         `json:"content"`
+	ToolCalls  []TurnToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+// TurnToolCall mirrors agent.ToolCall in wire casing.
+type TurnToolCall struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+	Args string `json:"args,omitempty"`
+}
+
+// ToMsgs converts a wire transcript to the ladder's message type.
+func ToMsgs(turns []Turn) []agent.Msg {
+	out := make([]agent.Msg, len(turns))
+	for i, t := range turns {
+		m := agent.Msg{Role: t.Role, Content: t.Content, ToolCallID: t.ToolCallID}
+		for _, c := range t.ToolCalls {
+			m.ToolCalls = append(m.ToolCalls, agent.ToolCall{ID: c.ID, Name: c.Name, Args: c.Args})
+		}
+		out[i] = m
+	}
+	return out
+}
+
+// Msgs is the Entry's transcript as ladder messages.
+func (e Entry) Msgs() []agent.Msg { return ToMsgs(e.Turns) }
 
 // KnownKinds is the closed bucket set; Load rejects entries outside it so a
 // typo'd kind can never silently fragment the per-kind aggregation.
@@ -65,6 +101,7 @@ func Load(path string) ([]Entry, string, error) {
 	sum := sha256.Sum256(raw)
 	hash := hex.EncodeToString(sum[:])
 	var out []Entry
+	seenIDs := map[string]bool{}
 	sc := bufio.NewScanner(bytes.NewReader(raw))
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<24)
 	line := 0
@@ -74,18 +111,35 @@ func Load(path string) ([]Entry, string, error) {
 		if len(b) == 0 {
 			continue
 		}
+		// Strict decode: an unknown key (wrong casing, typo) is a corpus ERROR,
+		// never a silent miss — half-parsed pairing fields would replay a
+		// different ladder than production.
+		dec := json.NewDecoder(bytes.NewReader(b))
+		dec.DisallowUnknownFields()
 		var e Entry
-		if err := json.Unmarshal(b, &e); err != nil {
+		if err := dec.Decode(&e); err != nil {
 			return nil, "", fmt.Errorf("corpus %s line %d: %w", path, line, err)
 		}
 		if e.ID == "" {
 			return nil, "", fmt.Errorf("corpus %s line %d: missing id", path, line)
 		}
+		if seenIDs[e.ID] {
+			return nil, "", fmt.Errorf("corpus %s line %d: duplicate id %q (a frozen baseline keys per-entry — duplicates would silently collapse)", path, line, e.ID)
+		}
+		seenIDs[e.ID] = true
 		if !KnownKinds[e.Kind] {
 			return nil, "", fmt.Errorf("corpus %s line %d (%s): unknown kind %q", path, line, e.ID, e.Kind)
 		}
 		if len(e.Turns) == 0 {
 			return nil, "", fmt.Errorf("corpus %s line %d (%s): no turns", path, line, e.ID)
+		}
+		for ti, t := range e.Turns {
+			if t.Role == "" {
+				return nil, "", fmt.Errorf("corpus %s line %d (%s): turn %d missing role", path, line, e.ID, ti)
+			}
+			if t.Role == "tool" && t.ToolCallID == "" {
+				return nil, "", fmt.Errorf("corpus %s line %d (%s): tool turn %d missing tool_call_id (pairing would differ from production)", path, line, e.ID, ti)
+			}
 		}
 		out = append(out, e)
 	}
@@ -118,18 +172,27 @@ type PIIFinding struct {
 	Class   string
 }
 
-// VetPII scans every turn body and returns the findings. A non-empty result
-// means the corpus is NOT usable — callers refuse to evaluate it.
+// VetPII scans every turn body AND every tool-call name/args (raw tool
+// arguments are exactly where harvested transcripts carry credentials) and
+// returns the findings. A non-empty result means the corpus is NOT usable —
+// callers refuse to evaluate it.
 func VetPII(entries []Entry) []PIIFinding {
 	var out []PIIFinding
 	for _, e := range entries {
 		seen := map[string]bool{}
-		for _, t := range e.Turns {
+		scan := func(s string) {
 			for _, p := range piiPatterns {
-				if !seen[p.name] && p.re.MatchString(t.Content) {
+				if !seen[p.name] && p.re.MatchString(s) {
 					seen[p.name] = true
 					out = append(out, PIIFinding{EntryID: e.ID, Class: p.name})
 				}
+			}
+		}
+		for _, t := range e.Turns {
+			scan(t.Content)
+			for _, c := range t.ToolCalls {
+				scan(c.Name)
+				scan(c.Args)
 			}
 		}
 	}
