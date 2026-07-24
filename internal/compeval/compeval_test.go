@@ -145,10 +145,14 @@ func TestEntities_ClassesAndRetention(t *testing.T) {
 	}
 }
 
-// TestEvaluate_SkeletonBeatsMarkersOnRetention: the whole point of the gentler
-// rung — on a logs entry with buried error signal, the skeleton ladder must
-// retain MORE entities than the marker-only base ladder, at a fitting budget.
-func TestEvaluate_SkeletonBeatsMarkersOnRetention(t *testing.T) {
+// TestEvaluate_SignalSurvivesEveryLadder: the buried-error property, measured
+// through the PRODUCTION replay seam. Originally this pinned "skeleton beats
+// markers" — the bare-marker rung destroyed the buried exit_code entity and
+// only the skeleton kept it. Since Phase C's FORCE_PRESERVE guard (ADR 0016)
+// the elision marker itself retains a bounded residue of signal lines, so the
+// error entity now survives BOTH ladders — pinned here in both directions:
+// nobody loses the error, and skeleton retention never falls below base.
+func TestEvaluate_SignalSurvivesEveryLadder(t *testing.T) {
 	entries := []Entry{mkEntry("logs-1", "logs", logsBody())}
 	base := Evaluate(entries, "h", LadderOpts{})
 	skel := Evaluate(entries, "h", LadderOpts{Skeleton: true})
@@ -159,18 +163,14 @@ func TestEvaluate_SkeletonBeatsMarkersOnRetention(t *testing.T) {
 	if !b.FitBudget || !s.FitBudget {
 		t.Fatalf("both ladders must fit the derived budget: base=%v skel=%v", b.FitBudget, s.FitBudget)
 	}
-	if s.EntityRetention <= b.EntityRetention {
-		t.Fatalf("skeleton retention %v must beat base %v (the error line must survive skeletonization)", s.EntityRetention, b.EntityRetention)
+	if s.EntityRetention < b.EntityRetention {
+		t.Fatalf("skeleton retention %v fell below base %v", s.EntityRetention, b.EntityRetention)
 	}
-	// The buried ERROR line's signal survives the skeleton ladder.
-	found := false
+	// The buried ERROR line's exit_code entity survives BOTH ladders now.
 	for _, l := range b.LostEntities {
 		if strings.Contains(l, "exit_code=2") {
-			found = true
+			t.Fatalf("base ladder lost the exit_code entity — the FORCE_PRESERVE elision residue is not reaching the replay; lost=%v", b.LostEntities)
 		}
-	}
-	if !found {
-		t.Fatalf("base ladder should have LOST the exit_code entity; lost=%v", b.LostEntities)
 	}
 	for _, l := range s.LostEntities {
 		if strings.Contains(l, "exit_code=2") {

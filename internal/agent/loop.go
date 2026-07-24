@@ -77,6 +77,12 @@ type Result struct {
 	// architect/editor plan-then-execute path ran (FallbackNone) or a fallback to a
 	// single-model editor run occurred, and why. Empty on ordinary single-loop runs.
 	Fallback FallbackReason
+
+	// CompactionsExhausted counts steps where the ladder ran and still could
+	// not fit the input budget (best-effort transcript sent anyway) — the
+	// honest fit=false telemetry the OmniRoute-harvest design requires instead
+	// of silent over-budget requests. 0 on every run that stayed within budget.
+	CompactionsExhausted int
 }
 
 // Loop runs the canonical agent loop over a fixed tool set.
@@ -356,10 +362,23 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 	exactCalls := map[string]int{}
 	sameNameCalls := map[string]int{}
 	disabledTools := map[string]bool{}
+	// H8 ramp state (per-Run): firstCallID maps an exact (name,args) pair to
+	// the call id of its FIRST execution; when the circuit breaker later
+	// refuses an exact repeat of that pair, the ORIGINAL result is what the
+	// model wanted back — its id lands in pinned and the lossy compaction
+	// rungs stop touching it (see compactOpts.Pinned).
+	firstCallID := map[string]string{}
+	pinned := map[string]bool{}
+	// reExecuted bounds the destroyed-result recovery to ONE re-execution per
+	// exact (name,args) pair — see dispatchOrThrottle.
+	reExecuted := map[string]bool{}
+	// exhausted counts steps whose ladder could not fit the budget (fit=false
+	// telemetry on the Result — never a silent over-budget request).
+	exhausted := 0
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
-			return Result{Steps: step, StopReason: "error", Transcript: msgs}, err
+			return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted}, err
 		}
 		specs := l.specs
 		if len(disabledTools) > 0 {
@@ -386,7 +405,12 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// the server's KV cache stays warm on the happy path).
 		budget := l.inputBudget()
 		if estimateTokens(msgs) > budget {
-			msgs = compact(msgs, budget, l.keepRecent, preambleLen, l.ladderOpts())
+			opts := l.ladderOpts()
+			opts.Pinned = pinned
+			msgs = compact(msgs, budget, l.keepRecent, preambleLen, opts)
+			if estimateTokens(msgs) > budget {
+				exhausted++ // ladder exhausted — best-effort request, honestly counted
+			}
 		}
 		comp, err := l.client.Chat(ctx, msgs, specs, l.maxTokens)
 		if err != nil {
@@ -412,7 +436,9 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				if target < 256 {
 					target = 256
 				}
-				msgs = compact(msgs, target, l.keepRecent/2, preambleLen, l.ladderOpts())
+				ropts := l.ladderOpts()
+				ropts.Pinned = pinned
+				msgs = compact(msgs, target, l.keepRecent/2, preambleLen, ropts)
 				// The harder compact can still be a NO-OP when the oversized body
 				// sits inside keepRecent (observed live: a huge newest tool result
 				// made the retry re-send the same overflow). Emergency shrink is
@@ -421,10 +447,13 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				if estimateTokens(msgs) > target {
 					msgs = emergencyShrink(msgs, target, preambleLen)
 				}
+				if estimateTokens(msgs) > target {
+					exhausted++ // even the last resort could not fit — counted, never silent
+				}
 				comp, err = l.client.Chat(ctx, msgs, specs, l.maxTokens)
 			}
 			if err != nil {
-				return Result{Steps: step, StopReason: "error", Transcript: msgs}, err
+				return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted}, err
 			}
 		}
 		msgs = append(msgs, comp.Msg)
@@ -435,14 +464,14 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// finish_reason "stop", so trusting finish_reason drops the tool call
 		// and returns an empty answer.
 		if len(comp.Msg.ToolCalls) == 0 {
-			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs}
+			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, CompactionsExhausted: exhausted}
 			l.persist(ctx, objective, res.Output)
 			return res, nil
 		}
 
 		// Execute every requested tool; defer-not-crash on error/unknown.
 		for _, call := range comp.Msg.ToolCalls {
-			content, isErr := l.dispatchOrThrottle(ctx, call, exactCalls, sameNameCalls, disabledTools)
+			content, isErr := l.dispatchOrThrottle(ctx, call, msgs, exactCalls, sameNameCalls, disabledTools, firstCallID, pinned, reExecuted)
 			// Cap ONE result at the loop boundary so no single tool output can blow
 			// the small window — the per-tool caps don't protect us here (read_file's
 			// 256 KB is ~16× the whole input budget). Trim no-ops under the cap, so
@@ -451,7 +480,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			msgs = append(msgs, Msg{Role: "tool", ToolCallID: call.ID, Content: content, IsError: isErr})
 		}
 	}
-	return Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs}, nil
+	return Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, CompactionsExhausted: exhausted}, nil
 }
 
 // dispatchOrThrottle is the circuit breaker: it refuses to EXECUTE a tool call
@@ -464,7 +493,17 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 // enforcement a weak model cannot talk its way around by ignoring the
 // message. maxSameTool<=0 disables the name-cap (exact-repeat refusal still
 // applies, but never disables the tool outright).
-func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, exactCalls, sameNameCalls map[string]int, disabledTools map[string]bool) (string, bool) {
+//
+// firstCallID/pinned are the H8-ramp state: the first execution of each exact
+// (name,args) pair records its call id; a later exact-repeat refusal proves
+// the model WANTED that result back, so the original id is pinned and the
+// lossy compaction rungs stop touching it — content the model re-reads stops
+// being compacted. When the original result NO LONGER EXISTS as raw content
+// (already compacted to a marker, or its unit dropped), a refusal would point
+// the model at destroyed bytes with no recovery path — so the call is
+// re-executed ONCE per pair (reExecuted bounds it) and the FRESH result is
+// pinned instead; msgs is the live transcript that check reads.
+func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg, exactCalls, sameNameCalls map[string]int, disabledTools map[string]bool, firstCallID map[string]string, pinned map[string]bool, reExecuted map[string]bool) (string, bool) {
 	if disabledTools[call.Name] {
 		return fmt.Sprintf("NOT executed: %s has been disabled for the rest of this task (too many repeated calls). It is no longer offered — use a different tool or your existing results to continue.", call.Name), true
 	}
@@ -482,9 +521,37 @@ func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, exactCalls
 		return fmt.Sprintf("NOT executed: %s has now been called %d times in this task — that is enough, and it is now DISABLED for the rest of this task. Proceed with the remaining steps using what you already have; %s is no longer available.", call.Name, sameNameCalls[call.Name], call.Name), true
 	}
 	if exactCalls[key] > 1 {
+		id := firstCallID[key]
+		if id != "" {
+			pinned[id] = true // the model asked for this result again — stop compacting it
+		}
+		// Recovery path: if the original result is gone (compacted to a marker
+		// or its unit dropped), "use the result you already have" would be a
+		// lie with no way out. Re-execute ONCE per pair and pin the fresh
+		// result; every later repeat is refused as usual.
+		if id != "" && !reExecuted[key] && resultDestroyed(msgs, id) {
+			reExecuted[key] = true
+			pinned[call.ID] = true
+			return l.dispatch(ctx, call)
+		}
 		return fmt.Sprintf("NOT executed: you already called %s with these exact same arguments earlier in this task and you already have that result. Do NOT repeat this call — use the result you already have and move on to the NEXT step of the task.", call.Name), true
 	}
+	if _, seen := firstCallID[key]; !seen {
+		firstCallID[key] = call.ID
+	}
 	return l.dispatch(ctx, call)
+}
+
+// resultDestroyed reports whether the tool result for callID no longer exists
+// as raw content in the transcript: its message was dropped by the drop rung,
+// or its body is now a compaction artifact (marker/skeleton/dedupe reference).
+func resultDestroyed(msgs []Msg, callID string) bool {
+	for _, m := range msgs {
+		if m.Role == "tool" && m.ToolCallID == callID {
+			return IsCompactionArtifact(m.Content)
+		}
+	}
+	return true // no trace of it left at all
 }
 
 // dispatch runs one tool call, returning (resultText, isError). An unknown tool
