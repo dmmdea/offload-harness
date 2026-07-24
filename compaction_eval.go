@@ -23,7 +23,6 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/compeval"
 	"github.com/dmmdea/offload-harness/internal/core"
-	"github.com/dmmdea/offload-harness/internal/grounding"
 )
 
 func runCompactionEval(args []string) error {
@@ -32,7 +31,7 @@ func runCompactionEval(args []string) error {
 	}
 	mode := args[0]
 	fs := flag.NewFlagSet("compaction-eval "+mode, flag.ExitOnError)
-	fs.String("config", "", "config file path")
+	fs.String("config", "", "config file path (consumed by ab; run/freeze/check are model-free and ignore it)")
 	corpusPath := fs.String("corpus", "", "pinned corpus JSONL (compeval.Entry per line)")
 	gcf := fs.Bool("gcf", false, "enable the lossless GCF rung in the replayed ladder")
 	skeleton := fs.Bool("skeleton", false, "enable the skeleton rung in the replayed ladder")
@@ -97,19 +96,50 @@ func runCompactionEval(args []string) error {
 			return err
 		}
 		defer cleanup()
-		// Outcome scorer — the harness's own accept/ground signal over a
-		// summarize of the rendered transcript: 1.0 accepted+grounded,
-		// 0.5 accepted but ungroundable, 0.0 deferred. Coarse by design; the
-		// control-pair gate decides whether it discriminates on THIS box.
+		// Outcome scorer — accept + ENTITY RECALL over a summarize of the
+		// rendered transcript: 0.0 deferred; else 0.2 plus up to 0.8 for how
+		// many of the source's FORCE_PRESERVE entities the summary actually
+		// carries (capped at 8). Two dead ends were measured live before this
+		// shape and are why grounding is deliberately NOT a term: (a) pure
+		// self-grounding scores a degraded, entity-free source 1.0 (nothing
+		// falsifiable), and (b) as a gate it INVERTS the ranking — the
+		// entity-dense good side fails strict number-grounding on benign
+		// paraphrase while the empty side passes trivially. Recall pays only
+		// for preserved signal, which is the thing compaction can destroy.
+		// The control-pair gate still decides admissibility on THIS box.
 		scorer := func(ctx context.Context, rendered string) (float64, error) {
 			res := p.Run(ctx, core.Request{Task: core.TaskSummarize, Input: rendered})
 			if !res.OK {
 				return 0, nil
 			}
-			if g, ok := grounding.Check(core.TaskSummarize, rendered, res.Data); ok && g {
-				return 1, nil
+			var payload struct {
+				Summary string `json:"summary"`
 			}
-			return 0.5, nil
+			_ = json.Unmarshal(res.Data, &payload)
+			summary := payload.Summary
+			if summary == "" {
+				summary = string(res.Data)
+			}
+			src := compeval.Entities(rendered)
+			if len(src) == 0 {
+				return 0.2, nil // accepted, but an entity-free source proves nothing more
+			}
+			sum := compeval.Entities(summary)
+			hits := 0
+			for e := range sum {
+				if _, ok := src[e]; ok {
+					hits++
+				}
+			}
+			denom := len(src)
+			if denom > 8 {
+				denom = 8
+			}
+			recall := float64(hits) / float64(denom)
+			if recall > 1 {
+				recall = 1
+			}
+			return 0.2 + 0.8*recall, nil
 		}
 		rep, err := compeval.RunAB(context.Background(), scorer, entries, hash, opts, builtinControlPairs(), []string{cfg.Model, cfg.EscalationModel})
 		if err != nil {

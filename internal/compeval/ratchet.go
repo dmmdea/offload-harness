@@ -63,9 +63,12 @@ type Breach struct {
 // Check compares a report against a frozen baseline. Refuses (error) on a
 // corpus-hash or ladder mismatch, or on entries missing from either side —
 // silence there would let the ratchet rot. Returns the breaches beyond
-// ±tolerance (empty = ratchet holds).
+// ±tolerance (empty = ratchet holds). The band is TWO-SIDED on purpose: an
+// IMPROVEMENT breaches too — any ladder-behavior change is an explicit
+// operator act (re-freeze), never silent drift. tolerance 0 = strict
+// equality; negative = DefaultTolerance.
 func Check(b Baseline, rep Report, tolerance float64) ([]Breach, error) {
-	if tolerance <= 0 {
+	if tolerance < 0 {
 		tolerance = DefaultTolerance
 	}
 	if b.CorpusHash != rep.CorpusHash {

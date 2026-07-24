@@ -20,10 +20,15 @@ Versioning: [SemVer](https://semver.org/).
 - **Tokens ratchet**: `freeze` pins per-entry compacted tokens; `check` fails loudly beyond ±2%
   and REFUSES cross-corpus/cross-ladder/missing-entry comparisons (a ratchet against a different
   artifact is not a ratchet). Verified live: freeze → hold → ladder-mismatch refusal (exit 1).
-- **Gated task-outcome A/B**: full-vs-compacted scored through the live pipeline
-  (accept/ground outcome signal), behind the **control-pair self-test gate** — the scorer must
-  rank a known-good/known-degraded pair first or the A/B ABORTS (no confident numbers from a
-  blind judge); paired bootstrap delta via the existing eval machinery; partial runs abort.
+- **Gated task-outcome A/B**: full-vs-compacted scored through the live pipeline (summarize +
+  entity-recall outcome scorer — two dead ends measured live and documented in-code: pure
+  self-grounding passes entity-free garbage, and grounding-as-gate inverts on benign numeric
+  paraphrase), behind the **control-pair self-test gate** — the scorer must rank a
+  known-good/known-degraded pair first or the A/B ABORTS (no confident numbers from a blind
+  judge; the gate fired twice for real during bring-up). Paired bootstrap delta via the existing
+  eval machinery; partial runs abort. First live run on the mini corpus: delta −0.251
+  (CI −0.473..−0.033) at the aggressive 60% replay budget — the harness's own first verdict is
+  that default flips need the real-corpus run, not optimism.
 - Committed deterministic mini-corpus at `testdata/compeval/` (6 kinds); real replay corpora are
   machine-local. Trajectory-trace harvesting into corpus entries is a recorded follow-up.
   This harness is what decides the pending default flips (`--skeleton-prune`, `gcf_compact`) —

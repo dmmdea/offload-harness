@@ -17,9 +17,9 @@ import (
 func mkEntry(id, kind, toolBody string) Entry {
 	return Entry{
 		ID: id, Kind: kind,
-		Turns: []agent.Msg{
+		Turns: []Turn{
 			{Role: "user", Content: "objective: verify the build and report"},
-			{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "c1"}}},
+			{Role: "assistant", ToolCalls: []TurnToolCall{{ID: "c1"}}},
 			{Role: "tool", ToolCallID: "c1", Content: toolBody},
 			{Role: "user", Content: "and then?"},
 		},
@@ -50,7 +50,7 @@ func writeCorpus(t *testing.T, entries []string) string {
 
 func TestLoad_HashAndRefusals(t *testing.T) {
 	p := writeCorpus(t, []string{
-		`{"id":"a","kind":"logs","turns":[{"Role":"user","Content":"x"}]}`,
+		`{"id":"a","kind":"logs","turns":[{"role":"user","content":"x"}]}`,
 	})
 	entries, hash, err := Load(p)
 	if err != nil || len(entries) != 1 || len(hash) != 64 {
@@ -61,16 +61,31 @@ func TestLoad_HashAndRefusals(t *testing.T) {
 	if hash != hash2 {
 		t.Fatal("hash must be deterministic over identical bytes")
 	}
-	// Refusals: unknown kind, missing id, malformed line, empty turns.
+	// Case-INSENSITIVE key matching is Go's decoder behavior, so "Role"/"Content"
+	// parse CORRECTLY into the tagged fields — that shape is safe, not a refusal.
+	if _, _, err := Load(writeCorpus(t, []string{`{"id":"ok","kind":"logs","turns":[{"Role":"user","Content":"x"}]}`})); err != nil {
+		t.Fatalf("case-folded keys of the SAME names must parse: %v", err)
+	}
+	// Refusals: the real half-parse trap (Go-struct casing "ToolCalls" vs the
+	// wire tag tool_calls — no case fold makes those equal), unknown kind,
+	// missing id, malformed line, empty turns, missing role, tool turn without
+	// tool_call_id, duplicate id.
 	for _, bad := range []string{
-		`{"id":"b","kind":"martian","turns":[{"Role":"user","Content":"x"}]}`,
-		`{"kind":"logs","turns":[{"Role":"user","Content":"x"}]}`,
+		`{"id":"b","kind":"logs","turns":[{"role":"assistant","ToolCalls":[{"id":"c1"}]}]}`,
+		`{"id":"b","kind":"martian","turns":[{"role":"user","content":"x"}]}`,
+		`{"kind":"logs","turns":[{"role":"user","content":"x"}]}`,
 		`{not json`,
 		`{"id":"c","kind":"logs","turns":[]}`,
+		`{"id":"d","kind":"logs","turns":[{"content":"no role"}]}`,
+		`{"id":"e","kind":"logs","turns":[{"role":"tool","content":"orphan body"}]}`,
 	} {
 		if _, _, err := Load(writeCorpus(t, []string{bad})); err == nil {
 			t.Fatalf("corpus line %q must refuse", bad)
 		}
+	}
+	dup := `{"id":"same","kind":"logs","turns":[{"role":"user","content":"x"}]}`
+	if _, _, err := Load(writeCorpus(t, []string{dup, dup})); err == nil {
+		t.Fatal("duplicate ids must refuse (baseline maps key per-entry)")
 	}
 }
 
@@ -86,13 +101,21 @@ func TestVetPII_RefusalClasses(t *testing.T) {
 		"github-token":       "ghp_abcdefghijklmnopqrstuv0123456789", // secret-ok (placeholder)
 	}
 	for class, content := range cases {
-		e := []Entry{{ID: "x", Kind: "logs", Turns: []agent.Msg{{Role: "tool", Content: content}}}}
+		e := []Entry{{ID: "x", Kind: "logs", Turns: []Turn{{Role: "tool", ToolCallID: "c", Content: content}}}}
 		f := VetPII(e)
 		if len(f) == 0 || f[0].Class != class {
 			t.Errorf("class %s: findings %v", class, f)
 		}
 	}
-	clean := []Entry{{ID: "x", Kind: "logs", Turns: []agent.Msg{{Role: "tool", Content: "plain build output exit 0"}}}}
+	// Tool-call ARGS are scanned too — raw arguments are where harvested
+	// transcripts actually carry credentials.
+	inArgs := []Entry{{ID: "x", Kind: "logs", Turns: []Turn{{
+		Role: "assistant", ToolCalls: []TurnToolCall{{ID: "c1", Name: "fetch", Args: `{"token":"Bearer abcdefghijklmnop1234"}`}},
+	}}}}
+	if f := VetPII(inArgs); len(f) == 0 || f[0].Class != "bearer-token" {
+		t.Errorf("tool-call args must be vetted: %v", f)
+	}
+	clean := []Entry{{ID: "x", Kind: "logs", Turns: []Turn{{Role: "tool", ToolCallID: "c", Content: "plain build output exit 0"}}}}
 	if f := VetPII(clean); len(f) != 0 {
 		t.Errorf("clean corpus flagged: %v", f)
 	}

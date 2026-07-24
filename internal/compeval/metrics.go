@@ -6,6 +6,7 @@
 package compeval
 
 import (
+	"math"
 	"sort"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
@@ -78,26 +79,35 @@ func deriveBudget(tokens int) int {
 	return b
 }
 
+// entryParams resolves one entry's replay knobs — the SINGLE source both the
+// deterministic Evaluate and the model-backed RunAB use, so the A/B can never
+// silently replay a different compaction than the ratchet measures.
+func entryParams(e Entry, msgs []agent.Msg) (budget, keep, prot int) {
+	budget = e.BudgetTokens
+	if budget <= 0 {
+		budget = deriveBudget(agent.EstimateTokens(msgs))
+	}
+	keep = e.KeepRecent
+	if keep <= 0 {
+		keep = 1
+	}
+	prot = e.ProtectedPrefix
+	if prot <= 0 {
+		prot = 1
+	}
+	return budget, keep, prot
+}
+
 // Evaluate replays every entry and aggregates per kind. Pure of I/O.
 func Evaluate(entries []Entry, corpusHash string, opts LadderOpts) Report {
 	rep := Report{CorpusHash: corpusHash, Ladder: opts.Label()}
 	for _, e := range entries {
-		before := agent.EstimateTokens(e.Turns)
-		budget := e.BudgetTokens
-		if budget <= 0 {
-			budget = deriveBudget(before)
-		}
-		keep := e.KeepRecent
-		if keep <= 0 {
-			keep = 1
-		}
-		prot := e.ProtectedPrefix
-		if prot <= 0 {
-			prot = 1
-		}
-		after := agent.CompactReplay(e.Turns, budget, keep, prot, agent.ReplayOpts{GCF: opts.GCF, Skeleton: opts.Skeleton})
+		msgs := e.Msgs()
+		before := agent.EstimateTokens(msgs)
+		budget, keep, prot := entryParams(e, msgs)
+		after := agent.CompactReplay(msgs, budget, keep, prot, agent.ReplayOpts{GCF: opts.GCF, Skeleton: opts.Skeleton})
 		afterTokens := agent.EstimateTokens(after)
-		ret, lost := Retention(e.Turns, after)
+		ret, lost := Retention(msgs, after)
 		ratio := 1.0
 		if before > 0 {
 			ratio = float64(afterTokens) / float64(before)
@@ -147,5 +157,5 @@ func aggregate(entries []EntryResult) []KindStats {
 }
 
 func round4(f float64) float64 {
-	return float64(int(f*10000+0.5)) / 10000
+	return math.Round(f*10000) / 10000
 }
