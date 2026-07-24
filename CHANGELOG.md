@@ -4,6 +4,27 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.24] - 2026-07-24
+
+### Added — `compaction-eval harvest`: real replay corpora from agent traces, redaction-at-harvest
+- **`compaction-eval harvest --traces DIR --out corpus.jsonl`** builds a REAL replay corpus from the
+  standalone agent's trace files (`cmd/local-agent` per-goal JSON, full transcript): converts the
+  `[]agent.Msg` transcript to the strict corpus wire format, classifies each entry's kind by
+  byte-weighted majority (≥60%) of its TOOL payloads (no majority → `mixed`; no tool payloads →
+  `prose`), and sets `protected_prefix` to the production preamble (turns before the first
+  assistant turn) so the replay exerts the same pressure the live loop does.
+- **Redaction-at-harvest**: deterministic placeholder substitution over the exact VetPII refusal
+  classes BEFORE the corpus file exists (git output alone carries author emails, which the vet
+  refuses). Same matched text → same numbered placeholder, so distinctness survives for entity
+  retention and re-harvesting is byte-identical. The private-key class redacts the WHOLE block —
+  including truncated blocks (BEGIN without END) through end-of-string — because the vet only
+  recognizes the header and a header-only redaction would leave key material behind.
+- **Defense-in-depth gate**: after redaction the VetPII gate re-runs on the built entries; any
+  residual finding refuses the whole harvest (redactor/vet drift must fail loudly, never write a
+  file the loader would refuse). The written corpus is round-trip-proven through the strict
+  loader (`Load`) before its sha256 hash is reported; skipped trace files (corrupt, too short,
+  capped) are each named with a reason — silent drops would read as coverage.
+
 ## [0.22.23] - 2026-07-24
 
 ### Added — OmniRoute harvest Phase B: the compaction eval harness + ratchet (`internal/compeval`)
