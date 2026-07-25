@@ -78,15 +78,17 @@ search only; the editor gets whatever capabilities were granted.
 > `--profile` and `--two-tier` conflict only for a *non-default* profile. `--profile general` or an
 > empty value coexists with two-tier, because two-tier sets its own toolsets.
 
-**The compaction budget is calibrated, not assumed.** The ladder's `chars/4` estimator undercounts
-real tokens by a measured p95 of 2.81 (1.3-1.8 net of the fixed tool-spec payload), while the shipped safety margin covers only 1.077× — measured live,
-that let three real transcripts be rejected with `exceed_context_size` while the ladder declined to
-compact, because by its own estimate they fit. `internal/agent/tokencal.go` therefore fits
-`real ≈ intercept + slope·estimate` online from each response's `usage.prompt_tokens` and corrects
-the BUDGET (never `estimateTokens` itself, so every rung compares in one space). The intercept
-absorbs the fixed tool-spec payload the estimator cannot see; the slope absorbs content density.
-Under two distinct observations the budget is returned unchanged, so an uncalibrated run is
-byte-identical to the pre-calibration behaviour; `DisableTokenCalibration()` is the escape hatch. See
+**Budget calibration is available and OFF by default.** The ladder's `chars/4` estimator undercounts
+real tokens (measured density 1.3-1.4 plus a fixed ~900-token payload the estimate cannot see), and
+with a SMALL output reservation that lets requests through which the server then rejects.
+`internal/agent/tokencal.go` fits `real ≈ intercept + slope·estimate` online from each response's
+`usage.prompt_tokens` and corrects the BUDGET (never `estimateTokens`, so every rung compares in one
+space), using a median fit over a sliding window so one bad reading cannot define or persist in the
+line, bounded so it can never cut context by more than half. It ships **off**: at the shipped
+`--max-tokens 4096` the output reservation already absorbs the error, and a live A/B showed enabling
+it cut retained tool content by 52% and produced a wrong answer while neither arm hit a rejection.
+Enable with `WithTokenCalibration(true)` where the output reservation is small or rejections are
+actually observed; `Result.TokenCal` reports what it learned. See
 [ADR 0017](../architecture/decisions/0017-kv-reuse-is-binary-and-how-we-measure-it.md).
 
 **Compaction** keeps the transcript within the SERVED context window: `--ctx-tokens` defaults to

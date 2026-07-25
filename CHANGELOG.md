@@ -46,7 +46,7 @@ Versioning: [SemVer](https://semver.org/).
   block): a backend that reports only `usage` has no reuse to report, and its structural zero is
   excluded from every rate rather than averaged in as "no reuse".
 
-### Fixed — the compaction budget now calibrates against the server's REAL token counts
+### Added (OPT-IN, default OFF) — budget calibration against the server's REAL token counts
 - **The estimator defect Phase D found, fixed.** The ladder decided whether to compact by comparing
   a flat `chars/4` estimate against `inputBudget()`. Measured real/estimated on the shipped bench
   (tool specs included, as production sends them) was p50 **2.15** / p95 **2.81**; net of the fixed
@@ -62,18 +62,31 @@ Versioning: [SemVer](https://semver.org/).
   fixed per-request tool-spec payload (~528 tokens here, invisible to `estimateTokens`, which is why
   small requests show ratios up to 2.81), the slope absorbs content density. A single multiplicative
   factor fitted across sizes mis-corrects at both ends.
+- **DEFAULT OFF (`WithTokenCalibration(true)` to enable), and that default is measured.** A live
+  A/B over dense multi-file goals at shipped defaults: the fit was sound (`real ≈ 963 + 1.31·est`)
+  but it cut the budget to 56%, retained **52% less tool content** (10,060 → 4,857 chars) and turned
+  a correct answer ("275 lines") into a wrong one ("1 line") — while NEITHER arm hit a server
+  rejection. At `--max-tokens 4096` the output reservation already absorbs the estimator error, so
+  enabling it by default would spend real quality on a risk that does not materialise at those
+  settings. Enable it where the output reservation is small relative to the window (the regime the
+  defect was found in) or where overflow rejections are actually observed.
 - **Uncalibrated behaviour is byte-identical to before**: fewer than two *distinct* observations ⇒
-  the budget is returned unchanged. Slope/intercept are clamped to a credible range, the budget has
-  the same floor `inputBudget()` uses, and a fit implying MORE headroom never raises the allowance.
-  `Loop.DisableTokenCalibration()` is the escape hatch.
+  the budget is returned unchanged. Slope/intercept are clamped to a credible range, the fit is a
+  median over a sliding window (outlier-resistant, and mistakes age out), and the total correction
+  is bounded at half the allowance.
+- **`Result.TokenCal`** reports what the calibration learned (observations, slope, intercept, raw vs
+  final budget), surfaced per goal by the standalone runner — a self-tuning mechanism that cannot be
+  inspected is one nobody can debug.
 - Chosen over the alternatives deliberately: a per-kind chars/token table is a guess (and a guess is
   what produced this defect), while a `/tokenize` round-trip would add a network dependency and a new
   failure mode to every step of the loop's critical path.
-- **Scope of the evidence, stated plainly**: the defect and the fix are demonstrated on real harvested
-  transcripts via replay plus a loop-level differential test (uncalibrated peak 11,540 real tokens —
-  rejected live — vs 7,728 calibrated). A live agent A/B did **not** reproduce the overflow, because
-  the loop's tool-result cap incidentally bounds single-request size; calibration closes the gap by
-  measurement instead of relying on that incidental protection.
+- **Scope of the evidence, stated plainly**: the defect is demonstrated on real harvested transcripts
+  via replay plus a loop-level differential test (uncalibrated peak 11,540 real tokens — over the
+  allowance — vs 7,728 calibrated), in the SMALL-output-reservation regime (`--max-out 1024`,
+  budget 6,656). Re-measured at the shipped `--max-tokens 4096` (budget 3,584) the ladder fires on
+  its own and compaction prevents one of the three overflows without calibration; the remaining two
+  are ladder exhaustion (oversized newest turn), which no estimator fix addresses. That is why this
+  ships opt-in rather than on.
 
 ### Changed — the harvest's KV rationale for compaction is corrected in the record
 - Measured (ADR 0017): KV reuse on gemma-4-e4b is **binary** — appending a TURN reuses everything

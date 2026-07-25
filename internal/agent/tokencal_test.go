@@ -280,11 +280,14 @@ func TestLoopCalibratesAndCompactsSooner(t *testing.T) {
 
 	run := func(withCal bool) (fires, maxEst, exhausted int) {
 		c := &usageClient{fixed: 528, density: 1.8}
+		// max-tokens 1024 on purpose: this is the SMALL-output-reservation
+		// regime where the estimator error is not absorbed by slack, and the
+		// only regime where enabling calibration is indicated. At the shipped
+		// default (4096) the reservation covers the error on its own — measured,
+		// which is why calibration ships OFF.
 		loop := NewLoop(c, tools, 8).WithSystem("sys").WithContextTokens(8192).WithMaxTokens(1024).
-			WithToolResultCap(len(body) + 1).WithSkeletonPrune(true)
-		if !withCal {
-			loop.DisableTokenCalibration()
-		}
+			WithToolResultCap(len(body) + 1).WithSkeletonPrune(true).
+			WithTokenCalibration(withCal)
 		res, err := loop.Run(context.Background(), "objective: read several dense files")
 		if err != nil {
 			t.Fatalf("Run: %v", err)

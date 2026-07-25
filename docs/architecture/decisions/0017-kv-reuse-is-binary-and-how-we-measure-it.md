@@ -94,9 +94,22 @@ Three facts follow, and they reshape the phase:
    COUNT is a property of the fixture, not of production. The mode is stamped in every report, and
    no fire-frequency claim may be made without it.
 
-10. **The compaction budget calibrates against real token counts.** The measurement's own headline
-   finding is that the ladder never fired on real transcripts at the production budget, yet three of
-   them were still rejected — because the gate is a `chars/4` estimate that undercounts real tokens by p95 2.81 as measured (1.3-1.8 net of the fixed tool-spec payload). `internal/agent/tokencal.go` fits `real ≈ intercept + slope·estimate` online from
+10. **Budget calibration against real token counts — implemented, and shipped OFF by default.**
+   The gate for compaction is a `chars/4` estimate that undercounts real tokens (p95 2.81 as
+   measured; 1.3–1.8 net of the fixed tool-spec payload). With a SMALL output reservation
+   (`--max-out 1024`, budget 6,656) that lets three real transcripts through which the server then
+   rejected, while the ladder declined to compact.
+   **But the default is not that regime, and the first version of this ADR got the conclusion
+   wrong by measuring at 1024 when the shipped `local-agent` reserves `--max-tokens 4096`
+   (budget 3,584).** Re-measured there: the ladder fires on its own (7 times) and compaction
+   prevents one of the three overflows WITHOUT calibration; the remaining two are ladder
+   exhaustion (oversized newest turn), which no estimator fix addresses.
+   A live A/B then showed enabling calibration is not free: the fit was sound
+   (`real ≈ 963 + 1.31·est`) but it cut the budget to 56%, retained 52% less tool content, and
+   turned a correct answer into a wrong one — while neither arm hit a rejection.
+   So it ships opt-in (`WithTokenCalibration(true)`), indicated where the output reservation is
+   small relative to the window or where rejections are actually observed, with `Result.TokenCal`
+   exposing what it learned. `internal/agent/tokencal.go` fits `real ≈ intercept + slope·estimate` online from
    `usage.prompt_tokens` and corrects the BUDGET (not the estimator, so each rung's internal
    comparisons stay in one space). Two terms, not one: the intercept absorbs the fixed tool-spec
    payload `estimateTokens` cannot see, the slope absorbs content density. With fewer than two
