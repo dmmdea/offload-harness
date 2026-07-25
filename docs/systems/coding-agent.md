@@ -141,7 +141,8 @@ on `Completion.Serve`, nil when a backend reports nothing) to measure KV-prefix 
 token counts. It brackets every run with a positive control (byte-identical resend, ≥90% reuse) and
 a negative control (unrelated prompt) with a SEPARATION gate (pos−neg ≥ 0.40; the real tool specs create a legitimate ~17% framing floor, recorded as framing_floor_reuse), runs its arms in BLOCKS because the tier serves one KV
 slot, and **fails closed to `INCONCLUSIVE`** rather than publishing a table of zeros when the tier
-was evicted mid-run — one `/v1/embeddings` request is enough to do that. Arms are compared only
+was evicted mid-run — one media-generation job on the same GPU is enough to do that, since
+`render/gpu-lock.mjs::freeLlamaSwap` unloads every GPU-resident model before a render. Arms are compared only
 over steps that succeeded in BOTH (`paired_totals`; per-arm totals are diagnostic-only), every
 failure is classified `overflow`/`timeout`/`other` with timeouts checked first, and mid-run
 evictions are detected from the data itself — on a prefix extension the server must still hold
