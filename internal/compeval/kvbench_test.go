@@ -490,7 +490,7 @@ func benchCorpus(t *testing.T) []Entry {
 
 func TestRunControlsMeasuresBothLadderShapes(t *testing.T) {
 	f := &fakeServer{}
-	cs, err := RunControls(context.Background(), f.probe, "pre")
+	cs, err := RunControls(context.Background(), f.probe, "pre", "test-nonce")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -617,6 +617,40 @@ func TestPairedTotalsDifferenceNotSum(t *testing.T) {
 // TestRenderWireIsInjective: a payload must not be able to forge a field
 // boundary. PrefixRelation gates the eviction exclusion, so a collision could
 // silently delete a genuinely divergent row.
+// TestSaltIsolatesArmsAndRuns pins the defence against the server's
+// MULTI-PROMPT cache (measured: A, unrelated B, then A again restored A at
+// cache_n=2064 — B did not evict it). Without per-run/per-arm salting the two
+// arms replay overlapping transcripts and the second would be served from the
+// first's cache entries, measuring ordering instead of compaction.
+func TestSaltIsolatesArmsAndRuns(t *testing.T) {
+	msgs := []agent.Msg{{Role: "system", Content: "sys"}, {Role: "user", Content: "objective"}}
+	off := salt(msgs, "run1", "off")
+	on := salt(msgs, "run1", "on")
+	run2 := salt(msgs, "run2", "off")
+	if renderWire(off) == renderWire(on) {
+		t.Fatal("the two arms render identically — each could be served from the other's cache entry")
+	}
+	if renderWire(off) == renderWire(run2) {
+		t.Fatal("two runs render identically — a re-run would find its own controls still cached")
+	}
+	// Only the FIRST message is marked, and the rest is byte-identical, so the
+	// ladder still sees the transcript it would see in production.
+	if off[1].Content != msgs[1].Content || len(off) != len(msgs) {
+		t.Fatal("salt must touch only the first message")
+	}
+	if !strings.HasSuffix(off[0].Content, msgs[0].Content) {
+		t.Fatal("salt must PREFIX the original content, not replace it")
+	}
+	// No nonce => untouched (the pure path stays testable).
+	if got := salt(msgs, "", "off"); renderWire(got) != renderWire(msgs) {
+		t.Fatal("an empty nonce must be a no-op")
+	}
+	// Salting must not mutate the caller's slice.
+	if strings.HasPrefix(msgs[0].Content, "[kvbench") {
+		t.Fatal("salt mutated its input")
+	}
+}
+
 func TestRenderWireIsInjective(t *testing.T) {
 	a := []agent.Msg{{Role: "user", Content: "log line\x1eassistant\x1f\x1fSOMETHING"}}
 	b := []agent.Msg{{Role: "user", Content: "log line"}, {Role: "assistant", Content: "SOMETHING"}}

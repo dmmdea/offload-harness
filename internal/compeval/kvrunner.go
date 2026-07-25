@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
 )
@@ -62,6 +63,11 @@ type BenchOpts struct {
 	// Margin is the production safety margin (agent's compactionMargin) used
 	// by production budget mode.
 	Margin int
+	// RunNonce makes every request unique to this run+arm so the server's
+	// MULTI-PROMPT cache cannot serve one arm from another arm's entries, or
+	// this run from a previous run's. Auto-generated when empty; recorded in
+	// the report. See salt().
+	RunNonce string
 }
 
 func (o BenchOpts) withDefaults() BenchOpts {
@@ -82,6 +88,9 @@ func (o BenchOpts) withDefaults() BenchOpts {
 	}
 	if o.Margin <= 0 {
 		o.Margin = agent.CompactionMargin
+	}
+	if o.RunNonce == "" {
+		o.RunNonce = strconv.FormatInt(time.Now().UnixNano(), 36)
 	}
 	return o
 }
@@ -105,6 +114,10 @@ type KVReport struct {
 	// BudgetMode records how the on-arm ladder budget was derived — the fire
 	// COUNT is a direct consequence of it and means nothing without it.
 	BudgetMode string `json:"budget_mode"`
+	// RunNonce is the per-run marker that isolates this run (and each arm
+	// within it) from the server's multi-prompt cache. Two reports with the
+	// same nonce came from the same run.
+	RunNonce string `json:"run_nonce"`
 
 	// Verdict is ADMISSIBLE or INCONCLUSIVE. On INCONCLUSIVE the samples are
 	// still emitted (they are evidence about the environment) but no headline
@@ -229,6 +242,37 @@ func msgsOf(text string) []agent.Msg {
 	return []agent.Msg{{Role: "user", Content: text}}
 }
 
+// salt prefixes the FIRST message with a per-run, per-arm marker so no request
+// can be served from a cache entry created by a different arm or a different
+// run.
+//
+// WHY THIS IS REQUIRED (measured 2026-07-24): llama.cpp keeps a MULTI-PROMPT
+// cache, not merely the last prefix. Sending prompt A, then an unrelated B,
+// then A again returned cache_n=2064 for A — B did not evict it, and both were
+// restorable. Two consequences the bench must defend against:
+//
+//  1. The negative control is only "unrelated" if that exact prompt has never
+//     been sent. Without a per-run salt, a second run finds its own negative
+//     control still cached from the first and reports ~100% reuse (observed).
+//  2. The arms replay OVERLAPPING transcripts — on a no-fire step the
+//     compacted transcript is byte-identical to the raw one — so the arm that
+//     runs second could be served from the first arm's cache entries, making
+//     the comparison measure ordering rather than compaction.
+//
+// The cost is a ~10-token marker on the first message, disclosed in the
+// report's limits. The alternative — disabling the server's prompt cache —
+// means editing the operator's live llama-swap config, which is out of scope
+// for a measurement.
+func salt(msgs []agent.Msg, nonce, arm string) []agent.Msg {
+	if nonce == "" || len(msgs) == 0 {
+		return msgs
+	}
+	out := make([]agent.Msg, len(msgs))
+	copy(out, msgs)
+	out[0].Content = "[kvbench " + nonce + "/" + arm + "]\n" + out[0].Content
+	return out
+}
+
 // RunControls issues the calibration shots. phase is "pre" or "post": the pre
 // phase measures all four properties, the post phase re-checks residency only.
 //
@@ -236,8 +280,10 @@ func msgsOf(text string) []agent.Msg {
 // MEASURED PROPERTIES of the serving stack that decide how the body samples
 // must be read (append-only reuse working while mid-prompt divergence collapses
 // the cache is exactly what makes the ladder's fires expensive).
-func RunControls(ctx context.Context, probe ProbeFunc, phase string) ([]Control, error) {
-	base := controlBase(phase)
+func RunControls(ctx context.Context, probe ProbeFunc, phase, nonce string) ([]Control, error) {
+	// Salted so the negative control is genuinely unseen: the server's
+	// multi-prompt cache would otherwise hand back a previous run's copy.
+	base := salt(msgsOf(controlBase(phase)), nonce, "ctl")[0].Content
 	var out []Control
 
 	measureMsgs := func(name string, prime, then []agent.Msg) error {
@@ -347,6 +393,10 @@ func runArm(ctx context.Context, probe ProbeFunc, entries []Entry, arm string, r
 				s.DropFired = len(sent) < len(msgs)
 				s.Exhausted = agent.EstimateTokens(sent) > budget
 			}
+			// Salt AFTER the ladder ran (so compaction sees the real
+			// transcript) and BEFORE anything is measured or compared, so the
+			// relation annotations describe the bytes actually sent.
+			sent = salt(sent, opts.RunNonce, arm)
 			s.EstTokens = agent.EstimateTokens(sent)
 			s.SentMsgs = len(sent)
 			s.SentChars = charsOf(sent)
@@ -402,13 +452,14 @@ func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash 
 		// every early-return path below writes a report to disk, and an
 		// aborted run stamped ADMISSIBLE would be a lie that outlives the
 		// non-zero exit code.
-		Verdict:        "INCONCLUSIVE",
+		Verdict:         "INCONCLUSIVE",
 		EntriesReplayed: len(entries),
-		BudgetMode:     opts.BudgetMode,
+		BudgetMode:      opts.BudgetMode,
+		RunNonce:        opts.RunNonce,
 	}
 
 	for round := 1; round <= opts.Rounds; round++ {
-		pre, err := RunControls(ctx, probe, "pre")
+		pre, err := RunControls(ctx, probe, "pre", opts.RunNonce)
 		rep.Controls = append(rep.Controls, pre...)
 		if err != nil {
 			return rep, err
@@ -420,7 +471,7 @@ func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash 
 				return rep, err
 			}
 		}
-		post, err := RunControls(ctx, probe, "post")
+		post, err := RunControls(ctx, probe, "post", opts.RunNonce)
 		rep.Controls = append(rep.Controls, post...)
 		if err != nil {
 			return rep, err
@@ -529,5 +580,7 @@ func benchLimits() []string {
 		"Transcripts are harvested replays, not live agent runs: real tool latency and the H8 pin state (compactOpts.Pinned) are absent, so the replayed ladder is slightly gentler than production.",
 		"The size effect and the cache effect are reported separately and must never be summed into one 'compaction speedup' — a shorter transcript prefills faster at zero cache reuse.",
 		"A concurrent embedding/other-model request can evict the tier mid-run; the bracketing positive controls are what make a run admissible, and a failed control means INCONCLUSIVE, not zero reuse.",
+		"The server keeps a MULTI-PROMPT cache (measured: A, then unrelated B, then A again restored A at cache_n=2064), so every request here carries a per-run/per-arm salt on its first message. Without it the arms would read each other's cache entries and a re-run would find its own negative control still cached. Cost: a ~10-token marker the production transcript does not have.",
+		"Because the salt makes each arm's prompts unique, the reuse a REAL agent gets may be HIGHER than measured here: production reruns over similar transcripts can hit that same multi-prompt cache across runs.",
 	}
 }
