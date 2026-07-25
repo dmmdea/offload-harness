@@ -90,8 +90,19 @@ func TestAdmissible(t *testing.T) {
 	if ok, why := Admissible(ctrls(0.99, 0.001, 0.10)); ok || !strings.Contains(why, "DURING") {
 		t.Fatalf("residency lost mid-run must be inadmissible and say so: ok=%v %q", ok, why)
 	}
-	if ok, _ := Admissible(ctrls(0.99, 0.50, 0.98)); ok {
-		t.Fatal("a leaking negative control must be inadmissible")
+	if ok, _ := Admissible(ctrls(0.99, 0.80, 0.98)); ok {
+		t.Fatal("a negative control reusing the majority of its prompt must be inadmissible")
+	}
+	// A non-zero framing floor is LEGITIMATE: production sends tool specs, and
+	// the chat template renders them into a shared prefix (measured ~16.8%).
+	// The instrument must still be admissible in that condition.
+	if ok, why := Admissible(ctrls(0.99, 0.168, 0.99)); !ok {
+		t.Fatalf("a real tool-spec framing floor must not fail the gate: %s", why)
+	}
+	// SEPARATION is the load-bearing criterion: if pos and neg converge, the
+	// metric cannot tell a hit from a miss whatever the absolute values are.
+	if ok, why := Admissible(ctrls(0.92, 0.60, 0.95)); ok || !strings.Contains(why, "apart") {
+		t.Fatalf("converging controls must be inadmissible on separation: ok=%v %q", ok, why)
 	}
 	// Fail CLOSED on missing / unmeasured controls.
 	if ok, why := Admissible(nil); ok || !strings.Contains(why, "missing") {

@@ -112,6 +112,11 @@ type KVReport struct {
 	Verdict            string    `json:"verdict"`
 	InadmissibleReason string    `json:"inadmissible_reason,omitempty"`
 	Controls           []Control `json:"controls"`
+	// FramingFloorReuse is what an UNRELATED prompt still reuses: the shared
+	// template + tool-spec prefix every production request carries. It is the
+	// zero point every other reuse number should be read against, not an
+	// anomaly — measured ~0.17 once the real tool specs are sent.
+	FramingFloorReuse float64 `json:"framing_floor_reuse"`
 
 	Arms        []ArmStats    `json:"arms"`
 	Overflow    OverflowStats `json:"overflow"`
@@ -424,6 +429,11 @@ func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash 
 
 	// Promotion, never assumption: the report only claims ADMISSIBLE here,
 	// after a complete run whose controls all passed.
+	for _, c := range rep.Controls {
+		if c.Name == CtrlNegPre && c.ReuseFrac > rep.FramingFloorReuse {
+			rep.FramingFloorReuse = c.ReuseFrac
+		}
+	}
 	if ok, reason := Admissible(rep.Controls); ok {
 		rep.Verdict = "ADMISSIBLE"
 	} else {

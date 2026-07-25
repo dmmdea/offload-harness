@@ -24,7 +24,27 @@ Versioning: [SemVer](https://semver.org/).
   reported separately and never summed**.
 - **Safety-margin decision table** (`S ≥ (C − M)(1 − 1/r)`) computed from measured real/estimated
   token ratios per content kind — a table, not a recommendation, since raising the margin
-  unconditionally shrinks usable context on every request.
+  unconditionally shrinks usable context on every request. The probe sends the REAL read-only tool
+  specs production sends, because `estimateTokens` counts tool specs as zero and omitting them
+  would understate every implied margin by that constant.
+- **Comparisons are PAIRED**: arms are compared only over steps that succeeded in BOTH (the
+  no-compaction arm loses steps to overflow rejections). Per-arm totals remain as
+  `*_unpaired_diagnostic` fields with a note; only `paired_totals` carries a delta.
+- **Every failure is classified and counted**: `overflow` / `timeout` / `other`, with timeouts
+  checked FIRST — a client timeout reads "context deadline exceeded" and must never be filed as
+  the phase's own headline finding.
+- **Eviction is detected from the data, no extra requests**: on a prefix EXTENSION the server must
+  still hold what it held before, so a sample whose `cache_n` collapsed relative to the PREVIOUS
+  prompt's real length is a scheduler artifact — flagged per row, excluded from rates, kept in
+  token totals. (Comparing against the *new* prompt's reuse fraction instead would discard
+  legitimate large appends; that error was caught in review and is regression-tested.)
+- **`--budget-mode`**: `production` budgets the ladder exactly as `Loop.inputBudget()` does, so
+  fire counts describe the corpus at that window; `pressure` (60% of each entry's estimate)
+  guarantees the ramp is observable but makes the fire COUNT a property of the fixture. The mode
+  is stamped in every report.
+- `Completion.Serve` distinguishes `Measured` (any accounting) from `KVMeasured` (a `timings`
+  block): a backend that reports only `usage` has no reuse to report, and its structural zero is
+  excluded from every rate rather than averaged in as "no reuse".
 
 ### Changed — the harvest's KV rationale for compaction is corrected in the record
 - Measured (ADR 0017): KV reuse on gemma-4-e4b is **binary** — a pure append reuses everything
