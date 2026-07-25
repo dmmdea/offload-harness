@@ -41,6 +41,11 @@ type Msg struct {
 // ("tool_calls" => the loop must execute tools and continue; anything else =>
 // the loop stops).
 type Completion struct {
+	// Serve is the SERVER's accounting for this completion (KV reuse, real
+	// token counts, prefill/decode ms) when the backend reports it — nil when
+	// it does not. Purely observational: the loop never reads it; the Phase D
+	// measurement leg does (ADR 0017).
+	Serve        *ServeStats
 	Msg          Msg
 	FinishReason string
 }
