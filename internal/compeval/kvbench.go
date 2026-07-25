@@ -5,9 +5,10 @@
 // design asked us to "verify the monotonic ladder preserves llama.cpp's KV
 // prefix cache". Measured on this stack (2026-07-24), that statement is not
 // true as written, for a reason stronger than expected: reuse here is BINARY.
-// A pure append reuses everything (2316 of 2321 tokens), but ANY edit to the
-// prompt discards the ENTIRE cache — a position sweep showed a one-line edit
-// at 98% of the prompt costing all 2662 tokens, identically to an edit at 4%.
+// Appending a turn reuses everything the server held (2429 kept, 19 prefilled),
+// but ANY edit to the prompt discards the ENTIRE cache — a position sweep
+// showed a one-line edit at 98% of the prompt costing all 2662 tokens,
+// identically to an edit at 4%.
 // Since every lossy rung edits from protectedEnd FORWARD (compaction.go —
 // dedupe/GCF/skeleton/elide/drop all iterate `for i := protectedEnd; i <
 // recentStart`), the step on which the ladder fires always pays a full
@@ -54,7 +55,13 @@ type ProbeResult struct {
 	UsagePromptTokens int     `json:"usage_prompt_tokens"`
 	UsageCachedTokens int     `json:"usage_cached_tokens"`
 	WallMS            float64 `json:"wall_ms"`
-	Measured          bool    `json:"measured"`
+	// Measured: the backend reported SOME accounting (usage and/or timings).
+	// KVMeasured: it reported the TIMINGS block, the only source of KV reuse.
+	// A backend that emits usage but no timings (vLLM, OpenAI, most proxies)
+	// is Measured && !KVMeasured — reporting reuse=0 for it would be exactly
+	// the "unmeasured read as measured zero" the design forbids.
+	Measured   bool `json:"measured"`
+	KVMeasured bool `json:"kv_measured"`
 }
 
 // RealPromptTokens is the server's true prompt length: reused + prefilled.
@@ -102,7 +109,11 @@ type Sample struct {
 	// the previous request — the actual predictor of KV survival.
 	PrefixRelation    string  `json:"prefix_relation"`
 	PrefixSharedChars int     `json:"prefix_shared_chars"`
-	PrefixSharedFrac  float64 `json:"prefix_shared_frac"` // how much of the PREVIOUS stream survived — the SWA-relevant quantity
+	PrefixSharedFrac  float64 `json:"prefix_shared_frac"` // how much of the PREVIOUS stream survived
+	// PrevRealTokens is the server-reported length of the PREVIOUS successful
+	// request — the yardstick the eviction invariant needs (see
+	// SuspectedEviction); 0 when there was no previous request.
+	PrevRealTokens int `json:"prev_real_tokens"`
 	EstTokens       int  `json:"est_tokens"`       // the ladder's own chars/4 estimate of what was sent
 	SentMsgs        int  `json:"sent_msgs"`
 	SentChars       int  `json:"sent_chars"`
@@ -114,6 +125,9 @@ type Sample struct {
 	// failure: the compaction-off arm is expected to overflow the window on
 	// long transcripts, which is exactly the failure the ladder prevents.
 	Error string `json:"error,omitempty"`
+	// ErrorClass is "overflow" | "timeout" | "other" — a timeout carries the
+	// text "context deadline exceeded" and must never be filed as an overflow.
+	ErrorClass string `json:"error_class,omitempty"`
 	// EvictionSuspected marks a sample the SCHEDULER ruined rather than the
 	// ladder — see SuspectedEviction. Recorded per row so the exclusion is
 	// auditable rather than silent.
@@ -123,26 +137,34 @@ type Sample struct {
 	EstRatio float64 `json:"est_ratio"`
 }
 
-// evictionReuseFloor: an EXTENSION that reuses less than this was almost
-// certainly evicted. Deliberately generous — the measured extension reuse is
-// ~0.84-1.0 and an evicted request reads ~0.000, so anything in between is
-// already anomalous.
-const evictionReuseFloor = 0.5
+// evictionKeptFloor: on an EXTENSION the server should still hold (nearly) all
+// of what it held before. Below this fraction of the PREVIOUS prompt, the
+// cache was dropped between requests.
+const evictionKeptFloor = 0.5
 
 // SuspectedEviction reports whether this sample measured the SCHEDULER instead
 // of the ladder.
 //
 // The test needs no extra requests, which is the point: injecting inline
 // control shots between body requests would itself destroy the cache
-// continuity being measured. Instead it uses a measured INVARIANT — a pure
-// prefix EXTENSION must reuse (that is what extensions do on this stack) — so
-// an extension that did not reuse is evidence the tier was torn down between
-// the two requests. This was not theoretical: mid-run evictions were observed
-// repeatedly on this box, and a single /v1/embeddings call is enough to cause
-// one.
+// continuity being measured. It uses a measured INVARIANT — on a pure prefix
+// EXTENSION the server keeps everything it already held — so an extension that
+// LOST that content was torn down between the two requests. Mid-run evictions
+// are not theoretical here: a single /v1/embeddings call causes one.
+//
+// The comparison is cache_n vs the PREVIOUS prompt's real length, NOT the
+// reuse fraction. Reuse is a fraction of the NEW prompt, so appending a
+// 750-token tool result onto a 17-token prefix legitimately scores 0.02 while
+// the cache did its job perfectly — an earlier version of this check used that
+// fraction and silently deleted ~20% of the body, biasing every median upward.
 func (s Sample) SuspectedEviction() bool {
-	return s.Error == "" && s.Probe.Measured && !s.FirstStep &&
-		s.PrefixRelation == string(RelExtension) && s.ReuseFrac < evictionReuseFloor
+	if s.Error != "" || !s.Probe.KVMeasured || s.FirstStep || s.PrevRealTokens <= 0 {
+		return false
+	}
+	if s.PrefixRelation != string(RelExtension) {
+		return false // a divergence legitimately reuses nothing — that is the ladder's cost
+	}
+	return float64(s.Probe.CacheN) < evictionKeptFloor*float64(s.PrevRealTokens)
 }
 
 // --- controls ---------------------------------------------------------------
@@ -235,6 +257,14 @@ type ArmStats struct {
 	// requests (an extension that did not reuse). Reported, never hidden: a
 	// high count means the box was busy and the medians rest on less data.
 	Evictions int `json:"evictions_excluded"`
+	// Unmeasured counts samples whose backend reported no timings block — kept
+	// out of every rate, counted so the exclusion is visible.
+	Unmeasured int `json:"unmeasured_excluded"`
+	// NoFireSamples / OnFireSamples are the class counts behind the medians:
+	// a class with zero samples reports a 0.0 median, and only these counts
+	// distinguish that from a measured zero.
+	NoFireSamples int `json:"no_fire_samples"`
+	OnFireSamples int `json:"on_fire_samples"`
 	// ExtensionReuse is the median reuse over CLEAN extension steps — the
 	// direct, high-n answer to "do appends reuse?", far more robust than the
 	// single append control shot.
@@ -268,8 +298,16 @@ func Summarize(arm string, samples []Sample) ArmStats {
 		st.TotalPrefilled += s.Probe.PromptN
 		st.TotalReused += s.Probe.CacheN
 		st.TotalRealTokens += s.Probe.RealPromptTokens()
-		// RATE statistics exclude scheduler artifacts — an evicted step
-		// measures llama-swap, not the compaction ladder.
+		// RATE statistics require a KV-MEASURED sample: a backend that reports
+		// usage but no timings has no reuse to report, and folding its
+		// structural zero into a median is the "unmeasured as measured zero"
+		// error this design forbids.
+		if !s.Probe.KVMeasured {
+			st.Unmeasured++
+			continue
+		}
+		// ...and exclude scheduler artifacts — an evicted step measures
+		// llama-swap, not the compaction ladder.
 		if s.SuspectedEviction() {
 			st.Evictions++
 			continue
@@ -297,6 +335,7 @@ func Summarize(arm string, samples []Sample) ArmStats {
 	st.MedianReuseFrac = Median(reuse)
 	st.MedianPromptMS = Median(promptMS)
 	st.MedianWallMS = Median(wallMS)
+	st.NoFireSamples, st.OnFireSamples = len(reuseNo), len(reuseOn)
 	st.MedianReuseNoFire = Median(reuseNo)
 	st.MedianReuseOnFire = Median(reuseOn)
 	st.MedianPromptMSNoFire = Median(msNo)
@@ -469,27 +508,34 @@ func DivergenceIndex(prev, cur []agent.Msg) int {
 // not of message identity: appending to one message's content extends the
 // prefix even though the message object changed. Approximate on purpose (the
 // real chat template is the server's), and used only for prefix ANNOTATION.
-// The separator goes BETWEEN messages, never after the last one: appending to
-// the final message's content must read as a prefix EXTENSION (measured: it
-// reuses), which a trailing separator would hide.
+// Fields are LENGTH-PREFIXED, which makes the encoding injective: no payload
+// can forge a field boundary. That matters because PrefixRelation now gates
+// the eviction exclusion — with plain separators, a tool result containing the
+// separator byte could render identically to a genuinely different transcript
+// and silently delete a divergent row.
+//
+// Appending whole MESSAGES still preserves the byte prefix (earlier messages'
+// encodings are untouched), which is the only shape the agent loop produces.
+// Growing an existing message's CONTENT reads as divergent — correct, because
+// the chat template writes an end-of-turn marker straight after the content,
+// so extending it diverges on the wire too.
 func renderWire(msgs []agent.Msg) string {
 	var b strings.Builder
-	for i, m := range msgs {
-		if i > 0 {
-			b.WriteString("\x1e")
-		}
-		b.WriteString(m.Role)
-		b.WriteString("\x1f")
-		b.WriteString(m.ToolCallID)
-		b.WriteString("\x1f")
-		b.WriteString(m.Content)
+	field := func(s string) {
+		b.WriteString(strconv.Itoa(len(s)))
+		b.WriteByte(':')
+		b.WriteString(s)
+	}
+	for _, m := range msgs {
+		field(m.Role)
+		field(m.ToolCallID)
+		field(m.Content)
+		b.WriteString(strconv.Itoa(len(m.ToolCalls)))
+		b.WriteByte('|')
 		for _, c := range m.ToolCalls {
-			b.WriteString("\x1f")
-			b.WriteString(c.ID)
-			b.WriteString("\x1f")
-			b.WriteString(c.Name)
-			b.WriteString("\x1f")
-			b.WriteString(c.Args)
+			field(c.ID)
+			field(c.Name)
+			field(c.Args)
 		}
 	}
 	return b.String()
@@ -512,9 +558,10 @@ const (
 // fraction of the previous stream survived.
 //
 // MEASURED RULE (gemma-4-e4b, llama.cpp b50, --cache-reuse unset, 2026-07-24):
-// reuse is BINARY, not proportional. An EXTENSION (previous stream is a prefix
-// of this one) reuses everything — appending 119 tokens to a 2321-token prompt
-// reused 2316. A TRUNCATION reuses everything too. ANY divergence discards the
+// reuse is BINARY, not proportional. An EXTENSION reuses everything the server
+// already held — appending a turn to a 2429-token prompt reused 2429 and
+// prefilled only the 19 new tokens, corroborated by ~80 append steps per arm
+// reusing a median 0.88 of their (larger) prompts. ANY divergence discards the
 // WHOLE cache regardless of how much was shared: a position sweep editing one
 // line at 4%, 17%, 33%, 50%, 62%, 75%, 83%, 92% and 98% of a 120-line prompt
 // returned cache_n of 1,1,1,1,1,0,0,0,0 — even a divergence two lines from the

@@ -119,6 +119,10 @@ const defaultCtxTokens = 8192
 // token-estimate's error and per-request framing the estimate doesn't model.
 const compactionMargin = 512
 
+// CompactionMargin exposes the production safety margin so a measurement can
+// budget exactly as the loop does instead of guessing (Phase D, ADR 0017).
+const CompactionMargin = compactionMargin
+
 // defaultKeepRecent is how many of the most recent turns compaction keeps full
 // by default — enough for the model to see its latest tool result(s) and reason
 // about the next step, while older bodies get elided.
