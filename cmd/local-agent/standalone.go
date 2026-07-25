@@ -255,6 +255,16 @@ func runStandalone(ctx context.Context, loop *agent.Loop, o standaloneOpts) erro
 		if res.CompactionsExhausted > 0 {
 			fmt.Fprintf(os.Stderr, "[standalone] %s: compaction ladder exhausted on %d step(s) — best-effort over-budget requests were sent\n", gid, res.CompactionsExhausted)
 		}
+		// What the budget calibration learned (ADR 0017) — printed so a
+		// self-tuning mechanism is auditable per run rather than inferred.
+		if tc := res.TokenCal; tc.Fitted {
+			fmt.Fprintf(os.Stderr, "[standalone] %s: token-cal fitted from %d obs — real≈%.0f+%.2f×est, budget %d→%d (%.0f%%)\n",
+				gid, tc.Observations, tc.Intercept, tc.Slope, tc.RawBudget, tc.FinalBudget,
+				100*float64(tc.FinalBudget)/float64(tc.RawBudget))
+		} else {
+			fmt.Fprintf(os.Stderr, "[standalone] %s: token-cal NOT fitted (%d obs) — budget unchanged at %d\n",
+				gid, tc.Observations, tc.RawBudget)
+		}
 		tr := traceRecord{ID: gid, Goal: g.Goal, StopReason: res.StopReason, Steps: res.Steps, Output: res.Output, Transcript: res.Transcript}
 		if rerr != nil {
 			tr.Error = rerr.Error()
