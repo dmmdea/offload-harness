@@ -43,9 +43,25 @@ type BenchOpts struct {
 	// MaxEntries caps how many corpus entries are replayed (0 = all).
 	MaxEntries int
 	// CtxTokens / MaxOut describe the SERVED window and the reserved output
-	// budget; they parameterize the safety-margin decision table only.
+	// budget; they parameterize the safety-margin decision table and, in
+	// production budget mode, the ladder budget itself.
 	CtxTokens int
 	MaxOut    int
+	// BudgetMode selects how the on-arm ladder budget is derived:
+	//
+	//   "production" — ctxTokens - maxOut - margin, i.e. exactly what
+	//     Loop.inputBudget() uses. Fire counts are then meaningful as a
+	//     statement about this corpus at this window.
+	//   "pressure"   — 60% of each entry's own estimate (what Evaluate uses).
+	//     Guarantees the ladder engages so the RAMP is observable, but the
+	//     fire COUNT is then a property of the fixture, not of production.
+	//
+	// Whichever is used is stamped in the report; the distinction is the
+	// difference between a measurement and an artifact.
+	BudgetMode string
+	// Margin is the production safety margin (agent's compactionMargin) used
+	// by production budget mode.
+	Margin int
 }
 
 func (o BenchOpts) withDefaults() BenchOpts {
@@ -61,15 +77,34 @@ func (o BenchOpts) withDefaults() BenchOpts {
 	if o.MaxOut <= 0 {
 		o.MaxOut = 1024
 	}
+	if o.BudgetMode != BudgetProduction && o.BudgetMode != BudgetPressure {
+		o.BudgetMode = BudgetPressure
+	}
+	if o.Margin <= 0 {
+		o.Margin = agent.CompactionMargin
+	}
 	return o
 }
+
+// Budget modes — see BenchOpts.BudgetMode.
+const (
+	BudgetProduction = "production"
+	BudgetPressure   = "pressure"
+)
 
 // KVReport is the bench artifact. Samples are RAW — every headline number
 // below can be re-derived from them.
 type KVReport struct {
 	CorpusHash string `json:"corpus_hash"`
-	Ladder     string `json:"ladder"`
-	Rounds     int    `json:"rounds"`
+	// EntriesReplayed disambiguates the hash: --max-entries truncates the
+	// corpus, so two runs over the same file can legitimately differ. The hash
+	// alone would claim they are the same artifact.
+	EntriesReplayed int    `json:"entries_replayed"`
+	Ladder          string `json:"ladder"`
+	Rounds          int    `json:"rounds"`
+	// BudgetMode records how the on-arm ladder budget was derived — the fire
+	// COUNT is a direct consequence of it and means nothing without it.
+	BudgetMode string `json:"budget_mode"`
 
 	// Verdict is ADMISSIBLE or INCONCLUSIVE. On INCONCLUSIVE the samples are
 	// still emitted (they are evidence about the environment) but no headline
@@ -95,6 +130,34 @@ type KVReport struct {
 type OverflowStats struct {
 	OffErrors int `json:"off_errors"`
 	OnErrors  int `json:"on_errors"`
+	// Timeouts and OtherErrors keep every failure visible. A client timeout
+	// carries the text "context deadline exceeded", which a naive substring
+	// match on "context"/"exceed" would file as an overflow — i.e. as evidence
+	// FOR the phase's own headline. Timeouts are therefore classified first
+	// and counted separately, and anything unrecognised lands in OtherErrors
+	// rather than nowhere.
+	Timeouts    int `json:"timeouts"`
+	OtherErrors int `json:"other_errors"`
+}
+
+// ErrorClass buckets a probe failure. Order matters: timeout BEFORE overflow.
+func ErrorClass(errText string) string {
+	l := strings.ToLower(errText)
+	switch {
+	case l == "":
+		return ""
+	case strings.Contains(l, "deadline exceeded"), strings.Contains(l, "timeout"),
+		strings.Contains(l, "client.timeout"):
+		return "timeout"
+	case strings.Contains(l, "exceed_context_size"),
+		strings.Contains(l, "exceeds the available context"),
+		strings.Contains(l, "context length"), strings.Contains(l, "too many tokens"):
+		return "overflow"
+	case strings.HasPrefix(l, "chat 413"):
+		return "overflow"
+	default:
+		return "other"
+	}
 }
 
 // PairedTotals compares the arms over the INTERSECTION of steps that succeeded
@@ -118,21 +181,20 @@ type PairedTotals struct {
 	PrefillDeltaTokens int `json:"prefill_delta_tokens"`
 }
 
-// SizeVsCache keeps the two effects strictly separate. Compacted transcripts
-// are SHORTER, so they prefill faster even at zero cache reuse; folding that
-// into a "compaction speedup" would confirm the KV hypothesis with evidence
-// entirely explained by size. These fields are never summed.
+// SizeVsCache is a PER-ARM diagnostic only: raw totals over each arm's own
+// successful samples, which are NOT the same step set (the off arm loses steps
+// to overflow rejections). Differences between these columns are not a valid
+// comparison — PairedTotals is. Field names carry the warning so a reader
+// grepping the JSON cannot mistake one for the other.
 type SizeVsCache struct {
-	OffRealPromptTokens int `json:"off_real_prompt_tokens"`
-	OnRealPromptTokens  int `json:"on_real_prompt_tokens"`
-	// SizeEffectTokens: fewer REAL prompt tokens because the ladder made the
-	// transcript smaller (off - on).
-	SizeEffectTokens int `json:"size_effect_tokens"`
-	OffPrefilled     int `json:"off_prefilled_tokens"`
-	OnPrefilled      int `json:"on_prefilled_tokens"`
-	// CacheEffectTokens: tokens the SERVER skipped via KV reuse, per arm.
+	OffRealPromptTokensUnpaired int `json:"off_real_prompt_tokens_unpaired_diagnostic"`
+	OnRealPromptTokensUnpaired  int `json:"on_real_prompt_tokens_unpaired_diagnostic"`
+	OffPrefilledUnpaired        int `json:"off_prefilled_tokens_unpaired_diagnostic"`
+	OnPrefilledUnpaired         int `json:"on_prefilled_tokens_unpaired_diagnostic"`
+	// Cache effect per arm: tokens the SERVER skipped via KV reuse.
 	OffCacheEffectTokens int `json:"off_cache_effect_tokens"`
 	OnCacheEffectTokens  int `json:"on_cache_effect_tokens"`
+	Note                 string `json:"note"`
 }
 
 // --- controls ---------------------------------------------------------------
@@ -242,10 +304,22 @@ func RunControls(ctx context.Context, probe ProbeFunc, phase string) ([]Control,
 func runArm(ctx context.Context, probe ProbeFunc, entries []Entry, arm string, round int, opts BenchOpts) ([]Sample, error) {
 	var out []Sample
 	var prevSent []agent.Msg
+	prevReal := 0 // server-reported length of the previous successful request
 
 	for _, e := range entries {
 		full := e.Msgs()
 		budget, keep, prot := entryParams(e, full)
+		if opts.BudgetMode == BudgetProduction {
+			// Exactly Loop.inputBudget(): the budget production actually
+			// compacts against. Fire counts under this mode describe the
+			// corpus at this window; under "pressure" they describe the
+			// fixture.
+			budget = opts.CtxTokens - opts.MaxOut - opts.Margin
+			if budget < 256 {
+				budget = 256
+			}
+			keep = agent.DefaultKeepRecent
+		}
 		first := true
 		for k := 1; k <= len(full); k++ {
 			// Stride sampling, but never skip the final (largest) step.
@@ -283,18 +357,21 @@ func runArm(ctx context.Context, probe ProbeFunc, entries []Entry, arm string, r
 				// prevent. Record it and keep going; the cache is untouched,
 				// so prevSent deliberately does NOT advance.
 				s.Error = err.Error()
+				s.ErrorClass = ErrorClass(s.Error)
 				out = append(out, s)
 				first = false
 				continue
 			}
 			s.Probe = r
 			s.ReuseFrac = ReuseFrac(r)
+			s.PrevRealTokens = prevReal
 			s.EvictionSuspected = s.SuspectedEviction()
 			if real := r.RealPromptTokens(); real > 0 && s.EstTokens > 0 {
 				s.EstRatio = float64(real) / float64(s.EstTokens)
 			}
 			out = append(out, s)
 			prevSent = sent
+			prevReal = r.RealPromptTokens()
 			first = false
 		}
 	}
@@ -316,7 +393,13 @@ func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash 
 		CorpusHash: corpusHash,
 		Ladder:     opts.Ladder.Label(),
 		Rounds:     opts.Rounds,
-		Verdict:    "ADMISSIBLE",
+		// Starts INCONCLUSIVE and is promoted only after the controls pass:
+		// every early-return path below writes a report to disk, and an
+		// aborted run stamped ADMISSIBLE would be a lie that outlives the
+		// non-zero exit code.
+		Verdict:        "INCONCLUSIVE",
+		EntriesReplayed: len(entries),
+		BudgetMode:     opts.BudgetMode,
 	}
 
 	for round := 1; round <= opts.Rounds; round++ {
@@ -339,8 +422,11 @@ func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash 
 		}
 	}
 
-	if ok, reason := Admissible(rep.Controls); !ok {
-		rep.Verdict = "INCONCLUSIVE"
+	// Promotion, never assumption: the report only claims ADMISSIBLE here,
+	// after a complete run whose controls all passed.
+	if ok, reason := Admissible(rep.Controls); ok {
+		rep.Verdict = "ADMISSIBLE"
+	} else {
 		rep.InadmissibleReason = reason
 	}
 
@@ -350,14 +436,19 @@ func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash 
 		if s.Error != "" {
 			// Errored requests carry no timings to aggregate, but the failure
 			// itself is a headline: an overflow means that request would not
-			// have completed at all.
-			if strings.Contains(s.Error, "exceed") || strings.Contains(s.Error, "context") ||
-				strings.Contains(s.Error, "chat 400") || strings.Contains(s.Error, "chat 413") {
+			// have completed at all. Every other failure is counted too — a
+			// failure nobody counts is a failure nobody sees.
+			switch ErrorClass(s.Error) {
+			case "overflow":
 				if s.Arm == "off" {
 					rep.Overflow.OffErrors++
 				} else {
 					rep.Overflow.OnErrors++
 				}
+			case "timeout":
+				rep.Overflow.Timeouts++
+			default:
+				rep.Overflow.OtherErrors++
 			}
 			continue
 		}
@@ -393,13 +484,13 @@ func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash 
 	offStats, onStats := Summarize("off", off), Summarize("on", on)
 	rep.Arms = []ArmStats{offStats, onStats}
 	rep.SizeVsCache = SizeVsCache{
-		OffRealPromptTokens:  offStats.TotalRealTokens,
-		OnRealPromptTokens:   onStats.TotalRealTokens,
-		SizeEffectTokens:     offStats.TotalRealTokens - onStats.TotalRealTokens,
-		OffPrefilled:         offStats.TotalPrefilled,
-		OnPrefilled:          onStats.TotalPrefilled,
-		OffCacheEffectTokens: offStats.TotalReused,
-		OnCacheEffectTokens:  onStats.TotalReused,
+		OffRealPromptTokensUnpaired: offStats.TotalRealTokens,
+		OnRealPromptTokensUnpaired:  onStats.TotalRealTokens,
+		OffPrefilledUnpaired:        offStats.TotalPrefilled,
+		OnPrefilledUnpaired:         onStats.TotalPrefilled,
+		OffCacheEffectTokens:        offStats.TotalReused,
+		OnCacheEffectTokens:         onStats.TotalReused,
+		Note:                        "per-arm totals over DIFFERENT step sets; do not subtract these columns — use paired_totals",
 	}
 	rep.Estimator = FitEstimator(rep.Samples)
 	// The margin table spans a standard ladder PLUS the ratios actually

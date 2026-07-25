@@ -2,6 +2,7 @@ package compeval
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -14,15 +15,17 @@ func TestReuseFracAndRealTokens(t *testing.T) {
 	// A full cache hit reports prompt_n=1 (the tail always re-evaluates), so
 	// the denominator MUST be cache_n+prompt_n — cache_n/prompt_n would say
 	// "1768x reuse".
-	hit := ProbeResult{CacheN: 1768, PromptN: 1, Measured: true}
-	if f := ReuseFrac(hit); f < 0.999 {
-		t.Fatalf("full hit reuse = %v, want ~1", f)
+	hit := ProbeResult{CacheN: 1768, PromptN: 1, Measured: true, KVMeasured: true}
+	// BOTH bounds: the lower one alone is passed by the very bug the comment
+	// warns about — cache_n/prompt_n would be 1768, and 1768 < 0.999 is false.
+	if f := ReuseFrac(hit); f < 0.999 || f > 1.0 {
+		t.Fatalf("full hit reuse = %v, want in [0.999,1.0] — a value >1 means the denominator is prompt_n instead of the real prompt length", f)
 	}
 	if got := hit.RealPromptTokens(); got != 1769 {
 		t.Fatalf("real tokens = %d, want 1769", got)
 	}
 	// usage.prompt_tokens wins when present (same number by another route).
-	withUsage := ProbeResult{CacheN: 100, PromptN: 20, UsagePromptTokens: 121, Measured: true}
+	withUsage := ProbeResult{CacheN: 100, PromptN: 20, UsagePromptTokens: 121, Measured: true, KVMeasured: true}
 	if got := withUsage.RealPromptTokens(); got != 121 {
 		t.Fatalf("usage should win: %d", got)
 	}
@@ -176,11 +179,14 @@ func TestDivergenceIndex(t *testing.T) {
 		t.Fatal("SameTranscript wrong")
 	}
 	// Relation is the BYTE-stream view — the one that predicts KV survival.
-	// Appending to the LAST message's content must read as an extension (it
-	// reuses live); a trailing separator would wrongly call it divergent.
+	// Growing an existing message's CONTENT is DIVERGENT, not an extension:
+	// the chat template writes an end-of-turn marker straight after the
+	// content, so the cached stream is no longer a prefix. (The loop only ever
+	// appends whole turns; this shape measured inconsistently live and is not
+	// relied upon.)
 	grown := []agent.Msg{{Role: "user", Content: "one"}, {Role: "assistant", Content: "two and more"}}
-	if rel, _, _ := Relation(a, grown); rel != RelExtension {
-		t.Fatalf("appending to the last message must be an extension, got %s", rel)
+	if rel, _, _ := Relation(a, grown); rel != RelDivergent {
+		t.Fatalf("growing a message's content must be divergent, got %s", rel)
 	}
 	if rel, _, _ := Relation(a, appended); rel != RelExtension {
 		t.Fatalf("appending a new message must be an extension, got %s", rel)
@@ -232,7 +238,8 @@ func TestSummarizeSeparatesRampClasses(t *testing.T) {
 		c := int(reuse * float64(total))
 		return Sample{
 			Arm: "on", FirstStep: first, Fired: fired, ReuseFrac: reuse,
-			Probe: ProbeResult{CacheN: c, PromptN: promptN, PromptMS: float64(promptN), UsagePromptTokens: c + promptN, Measured: true},
+			PrevRealTokens: c + promptN,
+			Probe:          ProbeResult{CacheN: c, PromptN: promptN, PromptMS: float64(promptN), UsagePromptTokens: c + promptN, Measured: true, KVMeasured: true},
 		}
 	}
 	st := Summarize("on", []Sample{
@@ -260,8 +267,47 @@ func TestSummarizeSeparatesRampClasses(t *testing.T) {
 	}
 }
 
-// TestSuspectedEvictionSeparatesSchedulerFromLadder: an EXTENSION that did not
-// reuse is the scheduler tearing the tier down, not a ladder property. Those
+// TestEvictionInvariantIsAboutThePreviousPrompt pins the CRITICAL fix: the
+// eviction test compares cache_n against the PREVIOUS prompt's real length,
+// never against the reuse fraction of the NEW one. An earlier version used the
+// fraction and deleted ~20% of a clean run's rows — systematically the early
+// steps of every entry, biasing every median upward.
+func TestEvictionInvariantIsAboutThePreviousPrompt(t *testing.T) {
+	// The exact false positive: a 17-token prefix, then a 747-token tool
+	// result appended. Reuse is 0.022 — and the cache did its job perfectly.
+	bigAppend := Sample{
+		Arm: "on", PrefixRelation: string(RelExtension), PrevRealTokens: 17,
+		ReuseFrac: 17.0 / 764.0,
+		Probe:     ProbeResult{CacheN: 17, PromptN: 747, Measured: true, KVMeasured: true},
+	}
+	if bigAppend.SuspectedEviction() {
+		t.Fatal("a legitimate large append was flagged as eviction — this deleted ~20% of a clean run")
+	}
+	// A real eviction: the server kept nothing of what it held.
+	realEvict := Sample{
+		Arm: "on", PrefixRelation: string(RelExtension), PrevRealTokens: 2400,
+		ReuseFrac: 0,
+		Probe:     ProbeResult{CacheN: 0, PromptN: 2420, Measured: true, KVMeasured: true},
+	}
+	if !realEvict.SuspectedEviction() {
+		t.Fatal("a genuine eviction was not detected")
+	}
+	// No previous request => no invariant to test.
+	noPrev := realEvict
+	noPrev.PrevRealTokens = 0
+	if noPrev.SuspectedEviction() {
+		t.Fatal("cannot claim eviction without a previous request to compare against")
+	}
+	// Not KV-measured => nothing to conclude.
+	noKV := realEvict
+	noKV.Probe.KVMeasured = false
+	if noKV.SuspectedEviction() {
+		t.Fatal("an unmeasured sample cannot be an eviction")
+	}
+}
+
+// TestSuspectedEvictionSeparatesSchedulerFromLadder: an EXTENSION that lost the
+// cache is the scheduler tearing the tier down, not a ladder property. Those
 // rows must be flagged, excluded from RATE statistics, and still counted in
 // token TOTALS (the server really did prefill everything).
 func TestSuspectedEvictionSeparatesSchedulerFromLadder(t *testing.T) {
@@ -270,7 +316,8 @@ func TestSuspectedEvictionSeparatesSchedulerFromLadder(t *testing.T) {
 		c := int(reuse * float64(total))
 		return Sample{
 			Arm: "on", PrefixRelation: string(RelExtension), ReuseFrac: reuse,
-			Probe: ProbeResult{CacheN: c, PromptN: total - c, PromptMS: 100, UsagePromptTokens: total, Measured: true},
+			PrevRealTokens: 1000,
+			Probe:          ProbeResult{CacheN: c, PromptN: total - c, PromptMS: 100, UsagePromptTokens: total, Measured: true, KVMeasured: true},
 		}
 	}
 	good1, good2, evicted := ext(0.95), ext(0.93), ext(0.0)
@@ -307,6 +354,30 @@ func TestSuspectedEvictionSeparatesSchedulerFromLadder(t *testing.T) {
 	// Totals keep it: the prefill work really happened.
 	if st.TotalRealTokens != 3000 {
 		t.Fatalf("totals must include the evicted row: %d", st.TotalRealTokens)
+	}
+}
+
+// TestEstRatioDirection pins which way the ratio points. Inverting it
+// (est/real) leaves every other test green while turning the entire safety
+// margin table upside down — the margin would then be sized for the case that
+// needs none.
+func TestEstRatioDirection(t *testing.T) {
+	// A dense-code payload: the estimator says 100, the server counts 190.
+	// The ratio must be >1 (real exceeds estimate) — that is the UNSAFE
+	// direction the margin exists to cover.
+	est, real := 100, 190
+	ratio := float64(real) / float64(est)
+	if ratio <= 1 {
+		t.Fatal("fixture wrong")
+	}
+	fit := FitEstimator([]Sample{{EntryKind: "code", EstTokens: est, EstRatio: ratio,
+		Probe: ProbeResult{UsagePromptTokens: real, Measured: true, KVMeasured: true}}})
+	if fit.P50 < 1.5 {
+		t.Fatalf("ratio p50 = %v — an under-1 value means real/estimated was inverted, which inverts the whole margin table", fit.P50)
+	}
+	// And the margin implied by it must be LARGER than for a perfect estimator.
+	if ImpliedMargin(fit.P50, 8192, 1024) <= ImpliedMargin(1.0, 8192, 1024) {
+		t.Fatal("a worse estimator must imply a BIGGER safety margin")
 	}
 }
 
@@ -383,7 +454,8 @@ func (f *fakeServer) probe(_ context.Context, msgs []agent.Msg) (ProbeResult, er
 	return ProbeResult{
 		CacheN: cacheN, PromptN: promptN,
 		PromptMS: float64(promptN) * 0.3, WallMS: float64(promptN)*0.3 + 5,
-		UsagePromptTokens: total, UsageCachedTokens: cacheN, Measured: true,
+		UsagePromptTokens: total, UsageCachedTokens: cacheN,
+		Measured: true, KVMeasured: true,
 	}, nil
 }
 
@@ -458,12 +530,13 @@ func TestRunBenchAdmissibleAndSeparatesEffects(t *testing.T) {
 	if on.Fires == 0 {
 		t.Fatal("fixture exerts no compaction pressure — the on arm never fired, so the ramp is untested")
 	}
-	// The two effects must both be present AND separate.
-	if rep.SizeVsCache.OnRealPromptTokens >= rep.SizeVsCache.OffRealPromptTokens {
+	// The two effects must both be present AND separate — measured over the
+	// PAIRED step set, never the per-arm diagnostic totals.
+	if rep.Paired.OnRealPromptTokens >= rep.Paired.OffRealPromptTokens {
 		t.Fatal("compaction should reduce REAL prompt tokens (the size effect)")
 	}
-	if rep.SizeVsCache.SizeEffectTokens <= 0 {
-		t.Fatalf("size effect = %d", rep.SizeVsCache.SizeEffectTokens)
+	if rep.Paired.SizeEffectTokens <= 0 {
+		t.Fatalf("size effect = %d", rep.Paired.SizeEffectTokens)
 	}
 	if rep.Estimator.Samples == 0 {
 		t.Fatal("estimator fit empty — margin tuning has no basis")
@@ -474,6 +547,82 @@ func TestRunBenchAdmissibleAndSeparatesEffects(t *testing.T) {
 	// Raw rows are the evidence: every headline must be re-derivable.
 	if len(rep.Samples) < 10 {
 		t.Fatalf("samples = %d, want the raw per-request rows", len(rep.Samples))
+	}
+}
+
+// TestErrorClassification pins the classifier that decides what a failure
+// MEANS. A client timeout carries "context deadline exceeded" — containing both
+// "context" and "exceed" — and must never be filed as the phase's headline
+// finding (an overflow rejection).
+func TestErrorClassification(t *testing.T) {
+	cases := map[string]string{
+		`chat 400: {"error":{"message":"request (9187 tokens) exceeds the available context size (8192 tokens)","type":"exceed_context_size_error"}}`: "overflow",
+		"chat 413: payload too large":                                    "overflow",
+		`Post "http://x/v1/chat/completions": context deadline exceeded`:  "timeout",
+		"net/http: request canceled (Client.Timeout exceeded while awaiting headers)": "timeout",
+		"chat 500: internal server error":                                "other",
+		`Post "http://x": EOF`:                                           "other",
+		"": "",
+	}
+	for in, want := range cases {
+		if got := ErrorClass(in); got != want {
+			t.Errorf("ErrorClass(%.60q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestPairedTotalsDifferenceNotSum pins the arithmetic of the headline. Summing
+// instead of differencing (or flipping the prefill delta sign) would invert the
+// report's central claim while leaving the numbers plausible.
+func TestPairedTotalsDifferenceNotSum(t *testing.T) {
+	f := &fakeServer{}
+	rep, err := RunBench(context.Background(), f.probe, benchCorpus(t), "hash-x",
+		BenchOpts{Ladder: LadderOpts{Skeleton: true}, Rounds: 1, CtxTokens: 8192, MaxOut: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := rep.Paired
+	if p.PairedSteps == 0 {
+		t.Fatal("no paired steps — the comparison has no basis")
+	}
+	if got, want := p.SizeEffectTokens, p.OffRealPromptTokens-p.OnRealPromptTokens; got != want {
+		t.Fatalf("size effect = %d, want off-on = %d (a SUM would read %d)", got, want, p.OffRealPromptTokens+p.OnRealPromptTokens)
+	}
+	if got, want := p.PrefillDeltaTokens, p.OnPrefilled-p.OffPrefilled; got != want {
+		t.Fatalf("prefill delta = %d, want on-off = %d (the sign carries the finding)", got, want)
+	}
+	// Compaction sends fewer tokens: the size effect must be positive here.
+	if p.SizeEffectTokens <= 0 {
+		t.Fatalf("size effect = %d, want >0 for a corpus the ladder actually compacts", p.SizeEffectTokens)
+	}
+	// The unpaired diagnostic must NOT masquerade as the headline: it carries
+	// no size_effect field at all.
+	b, _ := json.Marshal(rep.SizeVsCache)
+	if strings.Contains(string(b), `"size_effect_tokens"`) {
+		t.Fatalf("the unpaired diagnostic still exposes a size_effect_tokens field: %s", b)
+	}
+}
+
+// TestRenderWireIsInjective: a payload must not be able to forge a field
+// boundary. PrefixRelation gates the eviction exclusion, so a collision could
+// silently delete a genuinely divergent row.
+func TestRenderWireIsInjective(t *testing.T) {
+	a := []agent.Msg{{Role: "user", Content: "log line\x1eassistant\x1f\x1fSOMETHING"}}
+	b := []agent.Msg{{Role: "user", Content: "log line"}, {Role: "assistant", Content: "SOMETHING"}}
+	if renderWire(a) == renderWire(b) {
+		t.Fatal("a crafted payload forged a message boundary — the encoding is not injective")
+	}
+	// Appending a whole message is still an extension (the shape the loop makes).
+	base := []agent.Msg{{Role: "user", Content: "one"}}
+	grown := []agent.Msg{{Role: "user", Content: "one"}, {Role: "assistant", Content: "two"}}
+	if rel, _, _ := Relation(base, grown); rel != RelExtension {
+		t.Fatalf("appending a message must stay an extension, got %s", rel)
+	}
+	// An identical resend — the positive-control shape — must classify as
+	// extension, not truncation (the case order matters and is unasserted
+	// otherwise).
+	if rel, _, _ := Relation(base, base); rel != RelExtension {
+		t.Fatalf("identical resend must be an extension, got %s", rel)
 	}
 }
 

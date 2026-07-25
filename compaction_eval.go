@@ -55,6 +55,7 @@ func runCompactionEval(args []string) error {
 	kvTimeoutSec := fs.Int("timeout", 300, "kvbench: per-request timeout in seconds")
 	kvCtxTokens := fs.Int("ctx-tokens", 0, "kvbench: served window for the safety-margin table (0 = probe the endpoint)")
 	kvMaxOut := fs.Int("max-out", 1024, "kvbench: output reservation for the safety-margin table")
+	kvBudgetMode := fs.String("budget-mode", "pressure", "kvbench: 'production' budgets the ladder exactly as Loop.inputBudget() does (fire counts describe this corpus at this window); 'pressure' uses 60% of each entry's own estimate, guaranteeing the ladder engages so the ramp is observable but making the fire COUNT a property of the fixture")
 	_ = fs.Parse(args[1:])
 	if mode == "harvest" {
 		return runCompactionHarvest(*tracesDir, *outPath, *minTurns, *maxEntries)
@@ -189,11 +190,24 @@ func runCompactionEval(args []string) error {
 			ctxTokens, _ = agent.ResolveContextTokens(0, probed, ok)
 		}
 		client := agent.NewLLMClient(endpoint, model, "", time.Duration(*kvTimeoutSec)*time.Second)
+		// Send the REAL read-only tool specs production sends. They are a
+		// constant several-hundred-token payload on every request that
+		// estimateTokens counts as ZERO, so omitting them here would make the
+		// measured real/estimated ratio — and therefore every implied safety
+		// margin — understate the error by that constant.
+		var specs []agent.ToolSpec
+		if tools, terr := agent.ReadOnlyTools(".", nil); terr == nil {
+			for _, t := range tools {
+				specs = append(specs, t.ToolSpec)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "[compaction-eval] WARNING: tool specs unavailable (%v) — the estimator ratio will UNDERSTATE the error by the tool-spec payload\n", terr)
+		}
 		probe := func(ctx context.Context, msgs []agent.Msg) (compeval.ProbeResult, error) {
 			start := time.Now()
 			// max_tokens 1: we are measuring PREFILL, so decode is kept to the
 			// single token the API requires.
-			comp, err := client.Chat(ctx, msgs, nil, 1)
+			comp, err := client.Chat(ctx, msgs, specs, 1)
 			wall := time.Since(start)
 			if err != nil {
 				return compeval.ProbeResult{}, err
@@ -201,6 +215,10 @@ func runCompactionEval(args []string) error {
 			pr := compeval.ProbeResult{WallMS: float64(wall.Microseconds()) / 1000}
 			if s := comp.Serve; s != nil {
 				pr.Measured = true
+				// KVMeasured requires the TIMINGS block: a backend that emits
+				// only `usage` has no reuse to report, and calling that zero
+				// reuse is the error this whole design refuses to make.
+				pr.KVMeasured = s.PromptN > 0 || s.CacheN > 0
 				pr.CacheN, pr.PromptN = s.CacheN, s.PromptN
 				pr.PromptMS, pr.PredictedMS = s.PromptMS, s.PredictedMS
 				pr.UsagePromptTokens, pr.UsageCachedTokens = s.UsagePromptTokens, s.UsageCachedTokens
@@ -212,6 +230,7 @@ func runCompactionEval(args []string) error {
 		rep, runErr := compeval.RunBench(ctx, probe, entries, hash, compeval.BenchOpts{
 			Ladder: opts, Rounds: *kvRounds, StepStride: *kvStride,
 			MaxEntries: *maxEntries, CtxTokens: ctxTokens, MaxOut: *kvMaxOut,
+			BudgetMode: *kvBudgetMode,
 		})
 		if *outPath != "" {
 			b, err := json.MarshalIndent(rep, "", "  ")
