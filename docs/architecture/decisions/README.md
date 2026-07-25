@@ -26,6 +26,7 @@ code, treat everything else as background.
 | [0014](0014-gpu-memory-provider-and-uma-sampling.md) | Accepted | GPU memory is a resolved provider (nvidia-smi else windows-generic WDDM); UMA samples Dedicated+Shared |
 | [0015](0015-compaction-defaults-on-served-window.md) | Accepted | Compaction rungs default ON (measured flip decision); the budget probes the SERVED window; emergency shrink on the overflow retry |
 | [0016](0016-phase-c-dedupe-pinning-force-preserve.md) | Accepted | Phase C: content-addressed dedupe rung, re-request pinning (H8), FORCE_PRESERVE elide/drop guards, fit=false telemetry, monotonicity invariant |
+| [0017](0017-kv-reuse-is-binary-and-how-we-measure-it.md) | Accepted | KV reuse is append-only (any edit costs the whole cache); the `kvbench` mode measures it, brackets itself with controls, and fails closed |
 
 
 ## Lifecycle

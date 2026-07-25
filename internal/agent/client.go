@@ -72,6 +72,42 @@ type wireResp struct {
 		Message      wireMsg `json:"message"`
 		FinishReason string  `json:"finish_reason"`
 	} `json:"choices"`
+	// Usage / Timings are OPTIONAL server accounting. llama.cpp emits both by
+	// default on /v1/chat/completions; other OpenAI-compatible backends emit
+	// neither. Absent fields decode to zero and Completion.Serve stays nil, so
+	// a caller can always tell "unmeasured" from "measured zero" — never an
+	// error, never a behavior change (Phase D, ADR 0017).
+	Usage struct {
+		PromptTokens        int `json:"prompt_tokens"`
+		CompletionTokens    int `json:"completion_tokens"`
+		PromptTokensDetails struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+	} `json:"usage"`
+	Timings struct {
+		CacheN      int     `json:"cache_n"`
+		PromptN     int     `json:"prompt_n"`
+		PromptMS    float64 `json:"prompt_ms"`
+		PredictedN  int     `json:"predicted_n"`
+		PredictedMS float64 `json:"predicted_ms"`
+	} `json:"timings"`
+}
+
+// ServeStats is the SERVER's own accounting for one completion — the only
+// trustworthy source for KV-prefix reuse and REAL token counts (the ladder's
+// own estimator is chars/4 and drifts by content kind).
+//
+// CacheN is the count of prompt tokens served from the KV cache; PromptN the
+// count actually prefilled. Their sum is the real prompt length, which is why
+// reuse is CacheN/(CacheN+PromptN) and never CacheN/PromptN.
+type ServeStats struct {
+	CacheN            int     `json:"cache_n"`
+	PromptN           int     `json:"prompt_n"`
+	PromptMS          float64 `json:"prompt_ms"`
+	PredictedN        int     `json:"predicted_n"`
+	PredictedMS       float64 `json:"predicted_ms"`
+	UsagePromptTokens int     `json:"usage_prompt_tokens"`
+	UsageCachedTokens int     `json:"usage_cached_tokens"`
 }
 
 // Chat sends the running transcript + tool specs and returns the next completion.
@@ -137,5 +173,18 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 	for _, tc := range ch.Message.ToolCalls {
 		out.ToolCalls = append(out.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Args: tc.Function.Arguments})
 	}
-	return Completion{Msg: out, FinishReason: ch.FinishReason}, nil
+	comp := Completion{Msg: out, FinishReason: ch.FinishReason}
+	// Attach server accounting only when the backend actually reported some —
+	// nil means "this backend does not tell us", which a measurement must
+	// report as unmeasured rather than as zero reuse.
+	if wr.Timings.PromptN > 0 || wr.Timings.CacheN > 0 || wr.Usage.PromptTokens > 0 {
+		comp.Serve = &ServeStats{
+			CacheN: wr.Timings.CacheN, PromptN: wr.Timings.PromptN,
+			PromptMS: wr.Timings.PromptMS,
+			PredictedN: wr.Timings.PredictedN, PredictedMS: wr.Timings.PredictedMS,
+			UsagePromptTokens: wr.Usage.PromptTokens,
+			UsageCachedTokens: wr.Usage.PromptTokensDetails.CachedTokens,
+		}
+	}
+	return comp, nil
 }

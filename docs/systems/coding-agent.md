@@ -122,8 +122,18 @@ through the live pipeline (summarize + entity-recall outcome scorer — groundin
 not a term: measured live, it both passes entity-free garbage and inverts on benign numeric
 paraphrase) behind a **control-pair self-test gate**: a scorer that cannot rank a
 known-good/known-degraded pair aborts the A/B instead of producing a confident number from a blind
-judge. A committed mini-corpus lives at `testdata/compeval/`; real replay corpora are
-machine-local and never committed. `compaction-eval harvest --traces DIR --out corpus.jsonl`
+judge. `compaction-eval kvbench` is the Phase D leg: it replays a corpus step-by-step through the
+production client and records the SERVER's own accounting (`timings.cache_n` / `prompt_n`, exposed
+on `Completion.Serve`, nil when a backend reports nothing) to measure KV-prefix reuse and REAL
+token counts. It brackets every run with a positive control (byte-identical resend, ≥90% reuse) and
+a negative control (unrelated prompt, ≤5%), runs its arms in BLOCKS because the tier serves one KV
+slot, and **fails closed to `INCONCLUSIVE`** rather than publishing a table of zeros when the tier
+was evicted mid-run — one `/v1/embeddings` request is enough to do that. Measured finding
+([ADR 0017](../architecture/decisions/0017-kv-reuse-is-binary-and-how-we-measure-it.md)): reuse is
+BINARY — appends reuse everything, any edit anywhere discards the whole cache — so a compaction
+fire always costs a full re-prefill, and the ladder is justified by the size win and by requests
+completing at all, not by cache friendliness. A committed mini-corpus lives at `testdata/compeval/`;
+real replay corpora are machine-local and never committed. `compaction-eval harvest --traces DIR --out corpus.jsonl`
 builds a real corpus from the standalone agent's trace files with REDACTION-AT-HARVEST:
 deterministic placeholder substitution over the exact vet refusal classes (git output alone
 carries author emails; the private-key class redacts the whole block, not just the header),

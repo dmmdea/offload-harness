@@ -4,6 +4,35 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.22.27] - 2026-07-24
+
+### Added — OmniRoute harvest Phase D: `compaction-eval kvbench` (KV reuse + real-token measurement, ADR 0017)
+- **Server accounting is now visible to the harness**: `Completion.Serve` (`*agent.ServeStats`)
+  carries llama.cpp's `timings.cache_n`/`prompt_n`/`prompt_ms` and `usage.prompt_tokens[_details]`
+  when the backend reports them, and is **nil when it does not** — "unmeasured" is never readable as
+  "measured zero". Additive only: the wire REQUEST is unchanged, pinned by a test.
+- **`compaction-eval kvbench`** replays a corpus step-by-step through the production client and
+  measures, per request: KV reuse fraction, real vs estimated tokens, prefill/wall time, which ladder
+  rungs fired, and the byte-stream relation to the previous request (extension / truncation /
+  divergent). Raw per-request rows are always emitted so every headline is re-derivable.
+- **Fails closed.** Positive controls (byte-identical resend, ≥90% reuse) bracket the run and a
+  negative control (unrelated prompt, ≤5%) calibrates the metric; any failure ⇒ verdict
+  `INCONCLUSIVE` + non-zero exit, because on this box a single `/v1/embeddings` request evicts the
+  tier and would otherwise turn a scheduler artifact into a false "compaction destroys the cache".
+- **Arms run in blocks, never interleaved** (the tier serves `--parallel 1`: one KV slot, so
+  interleaving would make every request a cache miss), and the **size effect and cache effect are
+  reported separately and never summed**.
+- **Safety-margin decision table** (`S ≥ (C − M)(1 − 1/r)`) computed from measured real/estimated
+  token ratios per content kind — a table, not a recommendation, since raising the margin
+  unconditionally shrinks usable context on every request.
+
+### Changed — the harvest's KV rationale for compaction is corrected in the record
+- Measured (ADR 0017): KV reuse on gemma-4-e4b is **binary** — a pure append reuses everything
+  (2316 of 2321 tokens), while ANY edit discards the ENTIRE cache; a position sweep showed a
+  one-line edit at 98% of the prompt costing as much as one at 4%. Since every lossy rung edits from
+  `protectedEnd` forward, a compaction fire always pays a full re-prefill. Compaction is justified by
+  the size win and by requests completing at all — not by cache friendliness.
+
 ## [0.22.26] - 2026-07-24
 
 ### Added — OmniRoute harvest Phase C: dedupe rung, re-request pinning, FORCE_PRESERVE, fit telemetry (ADR 0016)
