@@ -18,19 +18,25 @@ survive contact with it.
 |---|---|---|---|---|
 | cold first request | 0 | 1769 | 465 | 6836 |
 | byte-identical resend | 1768 | 1 | 38 | 53 |
-| append 119 tokens to a 2321-token prompt | 2316 | 119 | 83 | 96 |
-| strict prefix of the cached prompt | 2316 | 5 | 80 | 95 |
+| **append a TURN** (the shape the loop produces) | **2429** | 19 | — | — |
 | **one line edited at 20% of the prompt** | **1** | 2319 | 558 | 609 |
 | **one line edited at 98% of the prompt** | **0** | 2662 | 656 | — |
 | identical resend AFTER one `/v1/embeddings` call | 0 | 2320 | 582 | 6873 |
 
+Corroborated at scale by the bench body: ~80 append steps per arm reused a median of **0.88**,
+against **0.073** on the steps where the ladder fired.
+
 Three facts follow, and they reshape the phase:
 
-1. **Reuse is BINARY, not proportional.** Appends and truncations reuse everything; *any* edit
-   discards the *entire* cache. A position sweep (edit at 4/17/33/50/62/75/83/92/98% of a 120-line
-   prompt) returned `cache_n` = 1,1,1,1,1,0,0,0,0 — an edit two lines from the end costs exactly as
-   much as an edit at the start. Our first hypothesis (a sliding-window horizon, so near-the-end
-   edits would survive) is **falsified** by that sweep and is recorded here so it is not re-derived.
+1. **Reuse is BINARY, not proportional.** Appends reuse everything; *any* edit discards the *entire*
+   cache. A position sweep (edit at 4/17/33/50/62/75/83/92/98% of a 120-line prompt) returned
+   `cache_n` = 1,1,1,1,1,0,0,0,0 — an edit two lines from the end costs exactly as much as an edit
+   at the start. Our first hypothesis (a sliding-window horizon, so near-the-end edits would
+   survive) is **falsified** by that sweep and is recorded here so it is not re-derived.
+   *Unresolved and deliberately not smoothed over*: appending to the LAST MESSAGE'S CONTENT — which
+   the chat template turns into a divergence, since an end-of-turn marker follows the content — was
+   inconsistent across runs (2316/2321 once, ~0 twice). The agent loop only ever appends TURNS, so
+   no conclusion here depends on it, and the bench's append control tests the turn shape.
 2. **Therefore the ladder cannot be KV-friendly by construction.** Every lossy rung edits from
    `protectedEnd` forward (`internal/agent/compaction.go`: dedupe, GCF, skeleton, elide and drop all
    iterate `for i := protectedEnd; i < recentStart`), so a firing step always pays a full re-prefill.
@@ -66,6 +72,16 @@ Three facts follow, and they reshape the phase:
    reports real-vs-estimated token ratios per content kind plus a decision TABLE
    (`S ≥ (C − M)(1 − 1/r)`), and makes no recommendation: raising the margin buys safety by
    unconditionally shrinking usable context on every request, which is the operator's trade.
+
+7. **Arm totals are PAIRED.** The compaction-off arm loses steps to overflow rejections, so totals
+   over unequal sample sets would overstate whichever arm had fewer (larger) requests. The report
+   compares only steps that succeeded in BOTH arms and reports the unpaired counts. Rejected
+   requests are counted separately as `overflow` — they are the failure the ladder prevents, not
+   noise.
+8. **Eviction is detected from the data, not by extra probes.** A pure prefix EXTENSION must reuse;
+   one that did not means the tier was torn down between requests. Those rows are flagged, excluded
+   from rate statistics and kept in token totals. Injecting inline control shots between body
+   requests — the obvious alternative — would itself destroy the cache continuity being measured.
 
 ## Consequences
 
