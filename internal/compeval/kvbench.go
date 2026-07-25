@@ -410,6 +410,13 @@ type EstimatorFit struct {
 	// ByKind isolates content-dependence — the reason a single global margin
 	// is the wrong lever if the error is dense-JSON-specific.
 	ByKind map[string]float64 `json:"ratio_p95_by_kind"`
+	// Note warns that the ratio conflates a FIXED per-request payload (tool
+	// specs, invisible to estimateTokens) with content density. Small prompts
+	// are dominated by the fixed term, so a single multiplicative r read off
+	// this distribution overstates the margin needed by large prompts — the
+	// ones that actually overflow. tokencal.go models both terms; this
+	// distribution does not.
+	Note string `json:"note"`
 }
 
 // FitEstimator computes the real/estimated ratio distribution. Ratios come
@@ -418,6 +425,15 @@ func FitEstimator(samples []Sample) EstimatorFit {
 	fit := EstimatorFit{ByKind: map[string]float64{}}
 	var all []float64
 	byKind := map[string][]float64{}
+	// DEDUPE identical (est, real) payloads. Every corpus entry begins with the
+	// same system+objective preamble, so step 1 contributes a byte-identical
+	// row once per entry — 34 of 192 rows on the real corpus. Those duplicates
+	// carry no extra information, yet being the densest rows (the fixed
+	// tool-spec payload dominates a small prompt) they became the p95 for EVERY
+	// content kind, reporting one identical number for code, logs, tool-json
+	// and tool-text. A metric whose stated purpose is isolating
+	// content-dependence must not be decided by a repeated constant.
+	seen := map[[2]int]bool{}
 	for _, s := range samples {
 		if !s.Probe.Measured || s.EstTokens <= 0 {
 			continue
@@ -425,6 +441,15 @@ func FitEstimator(samples []Sample) EstimatorFit {
 		r := s.EstRatio
 		if r <= 0 {
 			continue
+		}
+		// Identity requires BOTH numbers: with no real count we cannot tell two
+		// payloads apart, so such rows are never deduped away.
+		if real := s.Probe.RealPromptTokens(); real > 0 {
+			key := [2]int{s.EstTokens, real}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
 		}
 		all = append(all, r)
 		byKind[s.EntryKind] = append(byKind[s.EntryKind], r)
@@ -437,6 +462,7 @@ func FitEstimator(samples []Sample) EstimatorFit {
 	for k, v := range byKind {
 		fit.ByKind[k] = Percentile(v, 0.95)
 	}
+	fit.Note = "ratio = real/estimated, conflating a FIXED per-request payload (tool specs) with content density; small prompts are dominated by the fixed term, so a single multiplicative r overstates the margin large prompts need — see tokencal.go for the two-term model"
 	return fit
 }
 

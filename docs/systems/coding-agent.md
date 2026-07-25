@@ -79,7 +79,7 @@ search only; the editor gets whatever capabilities were granted.
 > empty value coexists with two-tier, because two-tier sets its own toolsets.
 
 **The compaction budget is calibrated, not assumed.** The ladder's `chars/4` estimator undercounts
-real tokens by up to 1.9× on code, and the shipped safety margin covers only 1.077× — measured live,
+real tokens by a measured p95 of 2.81 (1.3-1.8 net of the fixed tool-spec payload), while the shipped safety margin covers only 1.077× — measured live,
 that let three real transcripts be rejected with `exceed_context_size` while the ladder declined to
 compact, because by its own estimate they fit. `internal/agent/tokencal.go` therefore fits
 `real ≈ intercept + slope·estimate` online from each response's `usage.prompt_tokens` and corrects
@@ -137,16 +137,17 @@ judge. `compaction-eval kvbench` is the Phase D leg: it replays a corpus step-by
 production client and records the SERVER's own accounting (`timings.cache_n` / `prompt_n`, exposed
 on `Completion.Serve`, nil when a backend reports nothing) to measure KV-prefix reuse and REAL
 token counts. It brackets every run with a positive control (byte-identical resend, ≥90% reuse) and
-a negative control (unrelated prompt, ≤5%), runs its arms in BLOCKS because the tier serves one KV
+a negative control (unrelated prompt) with a SEPARATION gate (pos−neg ≥ 0.40; the real tool specs create a legitimate ~17% framing floor, recorded as framing_floor_reuse), runs its arms in BLOCKS because the tier serves one KV
 slot, and **fails closed to `INCONCLUSIVE`** rather than publishing a table of zeros when the tier
 was evicted mid-run — one `/v1/embeddings` request is enough to do that. Arms are compared only
 over steps that succeeded in BOTH (`paired_totals`; per-arm totals are diagnostic-only), every
 failure is classified `overflow`/`timeout`/`other` with timeouts checked first, and mid-run
 evictions are detected from the data itself — on a prefix extension the server must still hold
 what it held, so a collapsed `cache_n` relative to the PREVIOUS prompt is a scheduler artifact,
-flagged and excluded from rates but kept in totals. `--budget-mode production` budgets the ladder
-exactly as `Loop.inputBudget()` does (fire counts then describe the corpus at that window);
-`pressure` guarantees the ramp is observable but makes the fire count a fixture property — the
+flagged and excluded from rates but kept in totals. `--budget-mode production-uncalibrated` budgets
+the ladder as `Loop.inputBudget()` does WITHOUT the token calibration above, so its fire counts are
+a lower bound on the calibrated agent's (measuring the calibrated budget needs a live run, not a
+replay); `pressure` guarantees the ramp is observable but makes the fire count a fixture property — the
 mode is stamped in the report. Measured finding
 ([ADR 0017](../architecture/decisions/0017-kv-reuse-is-binary-and-how-we-measure-it.md)): reuse is
 BINARY — appends reuse everything, any edit anywhere discards the whole cache — so a compaction

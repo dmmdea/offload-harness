@@ -671,6 +671,111 @@ func TestRenderWireIsInjective(t *testing.T) {
 	}
 }
 
+// TestRunBenchSaltsEveryRequest pins that salting is actually WIRED into the
+// body and the controls — a review found the helper tested but its wiring not,
+// which is exactly how the negative and mid-edit controls stayed unsalted.
+func TestRunBenchSaltsEveryRequest(t *testing.T) {
+	var sent [][]agent.Msg
+	f := &fakeServer{}
+	probe := func(ctx context.Context, msgs []agent.Msg) (ProbeResult, error) {
+		sent = append(sent, append([]agent.Msg(nil), msgs...))
+		return f.probe(ctx, msgs)
+	}
+	if _, err := RunBench(context.Background(), probe, benchCorpus(t), "h",
+		BenchOpts{Rounds: 1, CtxTokens: 8192, MaxOut: 1024, RunNonce: "NONCE7"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) == 0 {
+		t.Fatal("no requests captured")
+	}
+	for i, msgs := range sent {
+		if len(msgs) == 0 || !strings.Contains(msgs[0].Content, "NONCE7") {
+			t.Fatalf("request %d was sent UNSALTED — it can be served from another run's or arm's cache entry: %.60q",
+				i, msgs[0].Content)
+		}
+	}
+	// Arms must be distinguishable, or they can read each other's entries.
+	var sawOff, sawOn bool
+	for _, msgs := range sent {
+		if strings.Contains(msgs[0].Content, "/off]") {
+			sawOff = true
+		}
+		if strings.Contains(msgs[0].Content, "/on]") {
+			sawOn = true
+		}
+	}
+	if !sawOff || !sawOn {
+		t.Fatalf("arm markers missing (off=%v on=%v) — arms are not isolated", sawOff, sawOn)
+	}
+}
+
+// TestMidEditControlDivergesLate: the mid-edit control must differ from its
+// prime at LINE 20, not at byte 0. Rebuilding it from an unsalted tag made it a
+// second unrelated prompt while still being reported as a mid-edit shot.
+func TestMidEditControlDivergesLate(t *testing.T) {
+	base := salt(msgsOf(controlBase("pre")), "NONCE7", "ctl")[0].Content
+	mid := midEditOf(base)
+	if base == mid {
+		t.Fatal("mid-edit produced an identical payload")
+	}
+	// Semantic assertion rather than a magic ratio: everything up to line 19
+	// must survive, and line 21 must not (i.e. the divergence really is at
+	// line 20 of 90, ~22% in).
+	shared := base[:commonPrefixLen(base, mid)]
+	if !strings.Contains(shared, "Line 19 of the ") {
+		t.Fatalf("mid-edit diverged BEFORE line 19 (shared %d of %d bytes) — that is an unrelated prompt, not a mid-edit",
+			len(shared), len(base))
+	}
+	if strings.Contains(shared, "Line 21 of the ") {
+		t.Fatal("mid-edit diverged after line 21 — the edit is not where the control claims")
+	}
+	if !strings.HasPrefix(mid, "[kvbench NONCE7/ctl]") {
+		t.Fatal("mid-edit lost the salt — it could be served from another run's cache")
+	}
+}
+
+// TestFitEstimatorDedupesIdenticalPayloads: every entry starts with the same
+// preamble, so step 1 repeats a byte-identical row per entry. Left in, those
+// duplicates became the p95 for every kind and the metric stopped measuring
+// content-dependence at all.
+func TestFitEstimatorDedupesIdenticalPayloads(t *testing.T) {
+	dup := Sample{EntryKind: "code", EstTokens: 291, EstRatio: 2.81,
+		Probe: ProbeResult{UsagePromptTokens: 818, Measured: true, KVMeasured: true}}
+	samples := []Sample{dup, dup, dup, dup, dup,
+		{EntryKind: "code", EstTokens: 4000, EstRatio: 1.35,
+			Probe: ProbeResult{UsagePromptTokens: 5400, Measured: true, KVMeasured: true}},
+		{EntryKind: "code", EstTokens: 5000, EstRatio: 1.30,
+			Probe: ProbeResult{UsagePromptTokens: 6500, Measured: true, KVMeasured: true}},
+	}
+	fit := FitEstimator(samples)
+	if fit.Samples != 3 {
+		t.Fatalf("samples = %d, want 3 (five identical payloads count once)", fit.Samples)
+	}
+	if fit.Note == "" {
+		t.Fatal("the fixed-vs-multiplicative caveat must ship with the numbers")
+	}
+}
+
+// TestSummarizeExcludesUnmeasuredFromRates: a backend reporting no timings has
+// no reuse to report; folding its structural zero into a median is the
+// "unmeasured as measured zero" error the design forbids.
+func TestSummarizeExcludesUnmeasuredFromRates(t *testing.T) {
+	good := Sample{Arm: "on", PrefixRelation: string(RelExtension), ReuseFrac: 0.95, PrevRealTokens: 1000,
+		Probe: ProbeResult{CacheN: 950, PromptN: 50, UsagePromptTokens: 1000, Measured: true, KVMeasured: true}}
+	silent := Sample{Arm: "on", PrefixRelation: string(RelExtension), ReuseFrac: 0,
+		Probe: ProbeResult{PromptN: 0, UsagePromptTokens: 900, Measured: true, KVMeasured: false}}
+	st := Summarize("on", []Sample{good, good, silent})
+	if st.Unmeasured != 1 {
+		t.Fatalf("unmeasured = %d, want 1", st.Unmeasured)
+	}
+	if st.MedianReuseFrac < 0.9 {
+		t.Fatalf("median reuse = %v — an unmeasured row was folded in as zero", st.MedianReuseFrac)
+	}
+	if st.TotalRealTokens != 2900 {
+		t.Fatalf("totals must still include it: %d", st.TotalRealTokens)
+	}
+}
+
 func TestRunBenchInconclusiveWhenModelEvicted(t *testing.T) {
 	// The exact box condition measured live: something evicts the tier between
 	// requests, so a byte-identical resend reuses nothing. The bench must

@@ -55,7 +55,7 @@ func runCompactionEval(args []string) error {
 	kvTimeoutSec := fs.Int("timeout", 300, "kvbench: per-request timeout in seconds")
 	kvCtxTokens := fs.Int("ctx-tokens", 0, "kvbench: served window for the safety-margin table (0 = probe the endpoint)")
 	kvMaxOut := fs.Int("max-out", 1024, "kvbench: output reservation for the safety-margin table")
-	kvBudgetMode := fs.String("budget-mode", "pressure", "kvbench: 'production' budgets the ladder exactly as Loop.inputBudget() does (fire counts describe this corpus at this window); 'pressure' uses 60% of each entry's own estimate, guaranteeing the ladder engages so the ramp is observable but making the fire COUNT a property of the fixture")
+	kvBudgetMode := fs.String("budget-mode", "pressure", "kvbench: 'production-uncalibrated' budgets the ladder as Loop.inputBudget() does WITHOUT token calibration (a calibrated loop compacts sooner on dense content, so its fire counts are a lower bound); 'pressure' uses 60% of each entry's own estimate, guaranteeing the ladder engages so the ramp is observable but making the fire COUNT a property of the fixture")
 	_ = fs.Parse(args[1:])
 	if mode == "harvest" {
 		return runCompactionHarvest(*tracesDir, *outPath, *minTurns, *maxEntries)

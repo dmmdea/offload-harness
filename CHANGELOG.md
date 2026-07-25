@@ -16,7 +16,7 @@ Versioning: [SemVer](https://semver.org/).
   rungs fired, and the byte-stream relation to the previous request (extension / truncation /
   divergent). Raw per-request rows are always emitted so every headline is re-derivable.
 - **Fails closed.** Positive controls (byte-identical resend, ≥90% reuse) bracket the run and a
-  negative control (unrelated prompt, ≤5%) calibrates the metric; any failure ⇒ verdict
+  negative control (unrelated prompt) plus a SEPARATION gate (pos−neg ≥ 0.40), because the real tool specs create a legitimate ~17% framing floor calibrates the metric; any failure ⇒ verdict
   `INCONCLUSIVE` + non-zero exit, because on this box a single `/v1/embeddings` request evicts the
   tier and would otherwise turn a scheduler artifact into a false "compaction destroys the cache".
 - **Arms run in blocks, never interleaved** (the tier serves `--parallel 1`: one KV slot, so
@@ -48,8 +48,10 @@ Versioning: [SemVer](https://semver.org/).
 
 ### Fixed — the compaction budget now calibrates against the server's REAL token counts
 - **The estimator defect Phase D found, fixed.** The ladder decided whether to compact by comparing
-  a flat `chars/4` estimate against `inputBudget()`. Measured real/estimated was p95 **1.69** overall
-  and **1.90** on code, while the shipped margin covers only 1.077 — and three real transcripts were
+  a flat `chars/4` estimate against `inputBudget()`. Measured real/estimated on the shipped bench
+  (tool specs included, as production sends them) was p50 **2.15** / p95 **2.81**; net of the fixed
+  spec payload the density component alone is **1.3–1.8** on the failing transcripts, against a
+  shipped margin covering only 1.077 — and three real transcripts were
   rejected by the server with `exceed_context_size` while **the ladder declined to compact**, because
   by its own estimate they fit (`hv-json-ledger` estimated 6,224 vs 11,369 real; `hv-docs-readme`
   6,219 vs 8,749; `hv-deep-compeval` 5,693 vs 9,190). Compaction was gated on the wrong number.
@@ -74,8 +76,9 @@ Versioning: [SemVer](https://semver.org/).
   measurement instead of relying on that incidental protection.
 
 ### Changed — the harvest's KV rationale for compaction is corrected in the record
-- Measured (ADR 0017): KV reuse on gemma-4-e4b is **binary** — a pure append reuses everything
-  (2316 of 2321 tokens), while ANY edit discards the ENTIRE cache; a position sweep showed a
+- Measured (ADR 0017): KV reuse on gemma-4-e4b is **binary** — appending a TURN reuses everything
+  the server held (2,971 kept, only the 19 new tokens prefilled; corroborated by ~80 append steps
+  per arm at a median 0.88), while ANY edit discards the ENTIRE cache; a position sweep showed a
   one-line edit at 98% of the prompt costing as much as one at 4%. Since every lossy rung edits from
   `protectedEnd` forward, a compaction fire always pays a full re-prefill. Compaction is justified by
   the size win and by requests completing at all — not by cache friendliness.

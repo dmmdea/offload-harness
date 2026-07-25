@@ -297,6 +297,19 @@ func (l *Loop) inputBudget() int {
 	return b
 }
 
+// budgetForCompaction is inputBudget() corrected by what the server has told us
+// about this run's token density (ADR 0017). Uncalibrated — the first steps, or
+// a backend that reports no usage — it returns inputBudget() unchanged, so
+// behaviour is identical to before calibration existed. Single source of truth
+// for every budget-derived decision in the loop.
+func (l *Loop) budgetForCompaction() int {
+	b := l.inputBudget()
+	if l.tokenCalOff {
+		return b
+	}
+	return l.tokenCal.Budget(b)
+}
+
 // toolResultCapChars is the max CHARACTER length a SINGLE tool result may keep
 // in the transcript. WHY this is needed on top of compaction: compaction elides
 // OLDER tool bodies but keeps the RECENT keepRecent turns full, so one huge
@@ -313,7 +326,12 @@ func (l *Loop) toolResultCapChars() int {
 	if l.toolResultCap > 0 {
 		return l.toolResultCap
 	}
-	cap := l.inputBudget() * bytesPerToken / 2
+	// Derived from the CALIBRATED budget, not the raw one: the cap exists so no
+	// single result can blow the window, and once calibration knows the real
+	// token density the raw budget overstates the room available. Using the
+	// uncorrected budget here would leave the cap proportionally too generous
+	// exactly on the dense content that needs it most.
+	cap := l.budgetForCompaction() * bytesPerToken / 2
 	if cap < 1024 {
 		cap = 1024
 	}
@@ -428,10 +446,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// token density (ADR 0017). Uncalibrated — first steps, or a backend
 		// that reports no usage — this returns inputBudget() unchanged, so the
 		// behaviour is identical to before calibration existed.
-		budget := l.inputBudget()
-		if !l.tokenCalOff {
-			budget = l.tokenCal.Budget(budget)
-		}
+		budget := l.budgetForCompaction()
 		if estimateTokens(msgs) > budget {
 			opts := l.ladderOpts()
 			opts.Pinned = pinned
