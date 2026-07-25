@@ -17,7 +17,7 @@ Versioning: [SemVer](https://semver.org/).
   divergent). Raw per-request rows are always emitted so every headline is re-derivable.
 - **Fails closed.** Positive controls (byte-identical resend, ≥90% reuse) bracket the run and a
   negative control (unrelated prompt) plus a SEPARATION gate (pos−neg ≥ 0.40), because the real tool specs create a legitimate ~17% framing floor calibrates the metric; any failure ⇒ verdict
-  `INCONCLUSIVE` + non-zero exit, because on this box a single `/v1/embeddings` request evicts the
+  `INCONCLUSIVE` + non-zero exit, because on this box an unrelated media-generation job evicts the
   tier and would otherwise turn a scheduler artifact into a false "compaction destroys the cache".
 - **Arms run in blocks, never interleaved** (the tier serves `--parallel 1`: one KV slot, so
   interleaving would make every request a cache miss), and the **size effect and cache effect are

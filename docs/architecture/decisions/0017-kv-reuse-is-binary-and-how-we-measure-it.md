@@ -21,7 +21,7 @@ survive contact with it.
 | **append a TURN** (the shape the loop produces) | **2971** | 19 | — | — |
 | **one line edited at 20% of the prompt** | **1** | 2319 | 558 | 609 |
 | **one line edited at 98% of the prompt** | **0** | 2662 | 656 | — |
-| identical resend AFTER one `/v1/embeddings` call | 0 | 2320 | 582 | 6873 |
+| identical resend after an unrelated tier teardown | 0 | 2320 | 582 | 6873 |
 
 Corroborated at scale by the bench body: ~80 append steps per arm reused a median of **0.88**,
 against **0.307** on the steps where the ladder fired (clean cache-isolated run).
@@ -42,9 +42,19 @@ Three facts follow, and they reshape the phase:
    iterate `for i := protectedEnd; i < recentStart`), so a firing step always pays a full re-prefill.
    What monotonicity + the idempotence guards genuinely buy is that steps BETWEEN fires stay pure
    appends, so the cache returns immediately after a fire.
-3. **Cache lifetime is a property of the SCHEDULER, not of our code.** A single `/v1/embeddings`
-   request evicted the tier and zeroed the cache; a byte-identical resend then cost a 6.9s reload.
-   Any measurement that does not bracket itself with controls will attribute that to compaction.
+3. **Cache lifetime is a property of the ENVIRONMENT, not of our code.** A tier teardown between two
+   byte-identical requests zeroes the cache and makes the resend cost a 6.9s reload. On this box the
+   dominant cause is *this repo's own media path*: `render/gpu-lock.mjs::freeLlamaSwap` POSTs
+   `/api/models/unload/<id>` for every GPU-resident model before a generation job takes the card, so
+   each render tears down the text tier. The server log shows **3,356 such unloads, 330 of them for
+   `gemma-4-e4b`, and 0 for the memory stack** — that exclusion is `freeLlamaSwap`'s own invariant,
+   which identifies the caller unambiguously. A per-model `ttl` (300s for `gemma-4-e4b`) evicts on
+   idle as well. An earlier revision of this ADR attributed the teardown to a coincident
+   `/v1/embeddings` call; that is **withdrawn as unproven** — the memory stack sits in a
+   `persistent: true, swap: false` group and is never a target of the unload route, and a re-test was
+   inconclusive because the box was saturated (99% GPU, 15.0/16.3 GiB) by an unrelated bulk-embedding
+   run. The operational conclusion is unchanged and better evidenced: any measurement that does not
+   bracket itself with controls will attribute an environmental teardown to compaction.
 
 ## Decision
 
