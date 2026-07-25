@@ -99,6 +99,16 @@ func TestAdmissible(t *testing.T) {
 	if ok, why := Admissible(unmeasured); ok || !strings.Contains(why, "unmeasured") {
 		t.Fatalf("an unmeasured control must be inadmissible: ok=%v %q", ok, why)
 	}
+	// MULTI-ROUND: a failure in round 1 must NOT be masked by a pass in round
+	// 2. Keying controls by name would do exactly that.
+	multi := append(ctrls(0.99, 0.001, 0.02), ctrls(0.99, 0.001, 0.99)...)
+	if ok, why := Admissible(multi); ok {
+		t.Fatalf("a round-1 control failure was masked by round 2: ok=%v %q", ok, why)
+	}
+	// ...and a clean multi-round run still passes.
+	if ok, why := Admissible(append(ctrls(0.99, 0.001, 0.98), ctrls(0.97, 0.002, 0.99)...)); !ok {
+		t.Fatalf("clean multi-round run rejected: %s", why)
+	}
 }
 
 // --- safety margin -----------------------------------------------------------
@@ -247,6 +257,56 @@ func TestSummarizeSeparatesRampClasses(t *testing.T) {
 	// The cold conversation-start sample must NOT drag the no-fire median down.
 	if st.MedianReuseNoFire < 0.5 {
 		t.Fatal("first step leaked into the no-fire class")
+	}
+}
+
+// TestSuspectedEvictionSeparatesSchedulerFromLadder: an EXTENSION that did not
+// reuse is the scheduler tearing the tier down, not a ladder property. Those
+// rows must be flagged, excluded from RATE statistics, and still counted in
+// token TOTALS (the server really did prefill everything).
+func TestSuspectedEvictionSeparatesSchedulerFromLadder(t *testing.T) {
+	ext := func(reuse float64) Sample {
+		total := 1000
+		c := int(reuse * float64(total))
+		return Sample{
+			Arm: "on", PrefixRelation: string(RelExtension), ReuseFrac: reuse,
+			Probe: ProbeResult{CacheN: c, PromptN: total - c, PromptMS: 100, UsagePromptTokens: total, Measured: true},
+		}
+	}
+	good1, good2, evicted := ext(0.95), ext(0.93), ext(0.0)
+	if good1.SuspectedEviction() {
+		t.Fatal("a reusing extension must not be flagged")
+	}
+	if !evicted.SuspectedEviction() {
+		t.Fatal("an extension that did not reuse MUST be flagged — that is the eviction signature")
+	}
+	// A first step is cold by construction, never an eviction.
+	first := ext(0.0)
+	first.FirstStep = true
+	if first.SuspectedEviction() {
+		t.Fatal("conversation-start must not be misread as eviction")
+	}
+	// A DIVERGENT step legitimately reuses nothing — never an eviction.
+	div := ext(0.0)
+	div.PrefixRelation = string(RelDivergent)
+	if div.SuspectedEviction() {
+		t.Fatal("a divergent step reusing nothing is the expected ladder cost, not eviction")
+	}
+
+	st := Summarize("on", []Sample{good1, good2, evicted})
+	if st.Evictions != 1 {
+		t.Fatalf("evictions = %d, want 1", st.Evictions)
+	}
+	// Rates exclude it: the median reuse must not be dragged toward zero.
+	if st.MedianReuseFrac < 0.9 {
+		t.Fatalf("evicted sample leaked into the rate statistics: median=%v", st.MedianReuseFrac)
+	}
+	if st.ExtensionReuse < 0.9 {
+		t.Fatalf("extension reuse = %v, want ~0.94 over the clean rows", st.ExtensionReuse)
+	}
+	// Totals keep it: the prefill work really happened.
+	if st.TotalRealTokens != 3000 {
+		t.Fatalf("totals must include the evicted row: %d", st.TotalRealTokens)
 	}
 }
 

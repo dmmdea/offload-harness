@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
@@ -77,12 +78,44 @@ type KVReport struct {
 	InadmissibleReason string    `json:"inadmissible_reason,omitempty"`
 	Controls           []Control `json:"controls"`
 
-	Arms        []ArmStats  `json:"arms"`
-	SizeVsCache SizeVsCache `json:"size_vs_cache"`
+	Arms        []ArmStats    `json:"arms"`
+	Overflow    OverflowStats `json:"overflow"`
+	Paired      PairedTotals  `json:"paired_totals"`
+	SizeVsCache SizeVsCache   `json:"size_vs_cache"`
 	Estimator   EstimatorFit `json:"estimator_fit"`
 	MarginTable []MarginRow `json:"margin_table"`
 	Samples     []Sample    `json:"samples"`
 	Limits      []string    `json:"limits"`
+}
+
+// OverflowStats counts requests the SERVER REJECTED for exceeding the context
+// window, per arm. This is not noise: it is the failure the ladder exists to
+// prevent, and an off-arm overflow means that request would simply not have
+// completed at all.
+type OverflowStats struct {
+	OffErrors int `json:"off_errors"`
+	OnErrors  int `json:"on_errors"`
+}
+
+// PairedTotals compares the arms over the INTERSECTION of steps that succeeded
+// in BOTH — the only apples-to-apples comparison. Totals over unequal sample
+// sets would silently overstate whichever arm had fewer (usually larger)
+// requests. Unpaired steps are reported, never dropped in silence.
+type PairedTotals struct {
+	PairedSteps int `json:"paired_steps"`
+	UnpairedOff int `json:"unpaired_off"`
+	UnpairedOn  int `json:"unpaired_on"`
+
+	OffRealPromptTokens int `json:"off_real_prompt_tokens"`
+	OnRealPromptTokens  int `json:"on_real_prompt_tokens"`
+	// SizeEffectTokens: real prompt tokens saved by a smaller transcript (off-on).
+	SizeEffectTokens int `json:"size_effect_tokens"`
+	OffPrefilled     int `json:"off_prefilled_tokens"`
+	OnPrefilled      int `json:"on_prefilled_tokens"`
+	// PrefillDeltaTokens = on - off. POSITIVE means compaction made the server
+	// do MORE prefill work despite sending fewer tokens, because each fire
+	// discards the KV cache.
+	PrefillDeltaTokens int `json:"prefill_delta_tokens"`
 }
 
 // SizeVsCache keeps the two effects strictly separate. Compacted transcripts
@@ -140,18 +173,25 @@ func RunControls(ctx context.Context, probe ProbeFunc, phase string) ([]Control,
 	base := controlBase(phase)
 	var out []Control
 
-	measure := func(name, prime, then string) error {
-		if prime != "" {
-			if _, err := probe(ctx, msgsOf(prime)); err != nil {
+	measureMsgs := func(name string, prime, then []agent.Msg) error {
+		if len(prime) > 0 {
+			if _, err := probe(ctx, prime); err != nil {
 				return fmt.Errorf("control %s (prime): %w", name, err)
 			}
 		}
-		r, err := probe(ctx, msgsOf(then))
+		r, err := probe(ctx, then)
 		if err != nil {
 			return fmt.Errorf("control %s: %w", name, err)
 		}
 		out = append(out, Control{Name: name, Probe: r, ReuseFrac: ReuseFrac(r)})
 		return nil
+	}
+	measure := func(name, prime, then string) error {
+		var p []agent.Msg
+		if prime != "" {
+			p = msgsOf(prime)
+		}
+		return measureMsgs(name, p, msgsOf(then))
 	}
 
 	posName := CtrlPosPre
@@ -169,8 +209,21 @@ func RunControls(ctx context.Context, probe ProbeFunc, phase string) ([]Control,
 	if err := measure(CtrlNegPre, "", controlBase("unrelated-negative")); err != nil {
 		return out, err
 	}
-	// Append: re-prime X, then send X + new tail (the between-fires shape).
-	if err := measure(CtrlAppend, base, base+"Line 91 of the appended tail: additional content continues past the original ending.\n"); err != nil {
+	// Append: re-prime X, then send X plus a NEW MESSAGE — the shape the agent
+	// loop actually produces between fires (a new turn is appended; earlier
+	// turns keep their bytes AND their template framing, so the cached prompt
+	// is a true prefix of the new one).
+	//
+	// Deliberately NOT an append to the last message's CONTENT: that is a
+	// different shape, because the chat template puts an end-of-turn marker
+	// straight after the content, so extending it DIVERGES rather than
+	// extends. Measured content-append behaviour was inconsistent across runs
+	// (2316/2321 once, 1/2447 twice) and is recorded as unresolved rather than
+	// smoothed over — the loop never produces that shape anyway.
+	if err := measureMsgs(CtrlAppend, msgsOf(base), append(msgsOf(base),
+		agent.Msg{Role: "assistant", Content: "Acknowledged."},
+		agent.Msg{Role: "user", Content: "Continue with the next step."},
+	)); err != nil {
 		return out, err
 	}
 	// Mid-edit: re-prime X, then send X with an early line rewritten (the
@@ -236,6 +289,7 @@ func runArm(ctx context.Context, probe ProbeFunc, entries []Entry, arm string, r
 			}
 			s.Probe = r
 			s.ReuseFrac = ReuseFrac(r)
+			s.EvictionSuspected = s.SuspectedEviction()
 			if real := r.RealPromptTokens(); real > 0 && s.EstTokens > 0 {
 				s.EstRatio = float64(real) / float64(s.EstTokens)
 			}
@@ -291,16 +345,51 @@ func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash 
 	}
 
 	var off, on []Sample
+	okOff, okOn := map[string]Sample{}, map[string]Sample{}
 	for _, s := range rep.Samples {
 		if s.Error != "" {
-			continue // errored requests carry no timings to aggregate
+			// Errored requests carry no timings to aggregate, but the failure
+			// itself is a headline: an overflow means that request would not
+			// have completed at all.
+			if strings.Contains(s.Error, "exceed") || strings.Contains(s.Error, "context") ||
+				strings.Contains(s.Error, "chat 400") || strings.Contains(s.Error, "chat 413") {
+				if s.Arm == "off" {
+					rep.Overflow.OffErrors++
+				} else {
+					rep.Overflow.OnErrors++
+				}
+			}
+			continue
 		}
+		key := s.EntryID + "\x00" + strconv.Itoa(s.Step) + "\x00" + strconv.Itoa(s.Round)
 		if s.Arm == "off" {
 			off = append(off, s)
+			okOff[key] = s
 		} else {
 			on = append(on, s)
+			okOn[key] = s
 		}
 	}
+	// Paired comparison over steps that succeeded in BOTH arms.
+	for key, o := range okOff {
+		n, ok := okOn[key]
+		if !ok {
+			rep.Paired.UnpairedOff++
+			continue
+		}
+		rep.Paired.PairedSteps++
+		rep.Paired.OffRealPromptTokens += o.Probe.RealPromptTokens()
+		rep.Paired.OnRealPromptTokens += n.Probe.RealPromptTokens()
+		rep.Paired.OffPrefilled += o.Probe.PromptN
+		rep.Paired.OnPrefilled += n.Probe.PromptN
+	}
+	for key := range okOn {
+		if _, ok := okOff[key]; !ok {
+			rep.Paired.UnpairedOn++
+		}
+	}
+	rep.Paired.SizeEffectTokens = rep.Paired.OffRealPromptTokens - rep.Paired.OnRealPromptTokens
+	rep.Paired.PrefillDeltaTokens = rep.Paired.OnPrefilled - rep.Paired.OffPrefilled
 	offStats, onStats := Summarize("off", off), Summarize("on", on)
 	rep.Arms = []ArmStats{offStats, onStats}
 	rep.SizeVsCache = SizeVsCache{
