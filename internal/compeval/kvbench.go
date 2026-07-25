@@ -114,9 +114,35 @@ type Sample struct {
 	// failure: the compaction-off arm is expected to overflow the window on
 	// long transcripts, which is exactly the failure the ladder prevents.
 	Error string `json:"error,omitempty"`
+	// EvictionSuspected marks a sample the SCHEDULER ruined rather than the
+	// ladder — see SuspectedEviction. Recorded per row so the exclusion is
+	// auditable rather than silent.
+	EvictionSuspected bool `json:"eviction_suspected,omitempty"`
 	// EstRatio is real/estimated — the estimator's error on this exact
 	// payload, the only sound basis for tuning the compaction safety margin.
 	EstRatio float64 `json:"est_ratio"`
+}
+
+// evictionReuseFloor: an EXTENSION that reuses less than this was almost
+// certainly evicted. Deliberately generous — the measured extension reuse is
+// ~0.84-1.0 and an evicted request reads ~0.000, so anything in between is
+// already anomalous.
+const evictionReuseFloor = 0.5
+
+// SuspectedEviction reports whether this sample measured the SCHEDULER instead
+// of the ladder.
+//
+// The test needs no extra requests, which is the point: injecting inline
+// control shots between body requests would itself destroy the cache
+// continuity being measured. Instead it uses a measured INVARIANT — a pure
+// prefix EXTENSION must reuse (that is what extensions do on this stack) — so
+// an extension that did not reuse is evidence the tier was torn down between
+// the two requests. This was not theoretical: mid-run evictions were observed
+// repeatedly on this box, and a single /v1/embeddings call is enough to cause
+// one.
+func (s Sample) SuspectedEviction() bool {
+	return s.Error == "" && s.Probe.Measured && !s.FirstStep &&
+		s.PrefixRelation == string(RelExtension) && s.ReuseFrac < evictionReuseFloor
 }
 
 // --- controls ---------------------------------------------------------------
@@ -151,29 +177,43 @@ const (
 )
 
 // Admissible reports whether the control shots prove the instrument works.
-// Fails CLOSED: a missing control is a failure, not a pass.
+//
+// Fails CLOSED, and checks EVERY control instance rather than one per name: a
+// multi-round run appends each round's controls, so keying by name would let a
+// later round's pass silently overwrite an earlier round's failure — exactly
+// the contamination the controls exist to catch.
 func Admissible(cs []Control) (bool, string) {
-	byName := map[string]Control{}
-	for _, c := range cs {
-		byName[c.Name] = c
+	present := map[string]int{}
+	for i, c := range cs {
+		switch c.Name {
+		case CtrlPosPre, CtrlPosPost, CtrlNegPre:
+		default:
+			continue // append / mid-edit are measured properties, not gates
+		}
+		present[c.Name]++
+		where := " (control #" + strconv.Itoa(i+1) + ")"
+		if !c.Probe.Measured {
+			return false, "control " + c.Name + " unmeasured" + where + " — the backend reported no timings; KV reuse cannot be observed here"
+		}
+		switch c.Name {
+		case CtrlPosPre:
+			if c.ReuseFrac < PosReuseMin {
+				return false, "positive control pre-run reused only " + pct(c.ReuseFrac) + " (need >=" + pct(PosReuseMin) + ")" + where + " — the model was evicted between identical requests; every arm would read as zero reuse for reasons that have nothing to do with compaction"
+			}
+		case CtrlPosPost:
+			if c.ReuseFrac < PosReuseMin {
+				return false, "positive control post-run reused only " + pct(c.ReuseFrac) + " (need >=" + pct(PosReuseMin) + ")" + where + " — residency was lost DURING the run; the body samples are contaminated"
+			}
+		case CtrlNegPre:
+			if c.ReuseFrac > NegReuseMax {
+				return false, "negative control reused " + pct(c.ReuseFrac) + " (need <=" + pct(NegReuseMax) + ")" + where + " — an unrelated prompt should share nothing; the metric is not measuring what we think"
+			}
+		}
 	}
 	for _, name := range []string{CtrlPosPre, CtrlNegPre, CtrlPosPost} {
-		c, ok := byName[name]
-		if !ok {
+		if present[name] == 0 {
 			return false, "control " + name + " missing — an unproven instrument is not admissible"
 		}
-		if !c.Probe.Measured {
-			return false, "control " + name + " unmeasured — the backend reported no timings; KV reuse cannot be observed here"
-		}
-	}
-	if f := byName[CtrlPosPre].ReuseFrac; f < PosReuseMin {
-		return false, "positive control pre-run reused only " + pct(f) + " (need >=" + pct(PosReuseMin) + ") — the model was evicted between identical requests; every arm would read as zero reuse for reasons that have nothing to do with compaction"
-	}
-	if f := byName[CtrlPosPost].ReuseFrac; f < PosReuseMin {
-		return false, "positive control post-run reused only " + pct(f) + " (need >=" + pct(PosReuseMin) + ") — residency was lost DURING the run; the body samples are contaminated"
-	}
-	if f := byName[CtrlNegPre].ReuseFrac; f > NegReuseMax {
-		return false, "negative control reused " + pct(f) + " (need <=" + pct(NegReuseMax) + ") — an unrelated prompt should share nothing; the metric is not measuring what we think"
 	}
 	return true, ""
 }
@@ -191,6 +231,14 @@ type ArmStats struct {
 	Samples    int    `json:"samples"`
 	Fires      int    `json:"fires"`
 	FirstSteps int    `json:"first_steps"` // conversation-start requests, excluded from the ramp medians
+	// Evictions counts samples excluded because the tier was torn down between
+	// requests (an extension that did not reuse). Reported, never hidden: a
+	// high count means the box was busy and the medians rest on less data.
+	Evictions int `json:"evictions_excluded"`
+	// ExtensionReuse is the median reuse over CLEAN extension steps — the
+	// direct, high-n answer to "do appends reuse?", far more robust than the
+	// single append control shot.
+	ExtensionReuse float64 `json:"median_extension_reuse"`
 
 	MedianReuseFrac float64 `json:"median_reuse_frac"`
 	MedianPromptMS  float64 `json:"median_prompt_ms"`
@@ -213,14 +261,25 @@ type ArmStats struct {
 // Summarize aggregates samples for one arm. Pure.
 func Summarize(arm string, samples []Sample) ArmStats {
 	st := ArmStats{Arm: arm, Samples: len(samples)}
-	var reuse, promptMS, wallMS, reuseNo, reuseOn, msNo, msOn []float64
+	var reuse, promptMS, wallMS, reuseNo, reuseOn, msNo, msOn, ext []float64
 	for _, s := range samples {
-		reuse = append(reuse, s.ReuseFrac)
-		promptMS = append(promptMS, s.Probe.PromptMS)
-		wallMS = append(wallMS, s.Probe.WallMS)
+		// Token TOTALS keep every sample: they describe the work the server
+		// actually did, and an evicted request really did prefill everything.
 		st.TotalPrefilled += s.Probe.PromptN
 		st.TotalReused += s.Probe.CacheN
 		st.TotalRealTokens += s.Probe.RealPromptTokens()
+		// RATE statistics exclude scheduler artifacts — an evicted step
+		// measures llama-swap, not the compaction ladder.
+		if s.SuspectedEviction() {
+			st.Evictions++
+			continue
+		}
+		reuse = append(reuse, s.ReuseFrac)
+		promptMS = append(promptMS, s.Probe.PromptMS)
+		wallMS = append(wallMS, s.Probe.WallMS)
+		if s.PrefixRelation == string(RelExtension) && !s.FirstStep {
+			ext = append(ext, s.ReuseFrac)
+		}
 		switch {
 		case s.FirstStep:
 			// Cold by construction (the cache holds the previous entry) —
@@ -242,6 +301,7 @@ func Summarize(arm string, samples []Sample) ArmStats {
 	st.MedianReuseOnFire = Median(reuseOn)
 	st.MedianPromptMSNoFire = Median(msNo)
 	st.MedianPromptMSOnFire = Median(msOn)
+	st.ExtensionReuse = Median(ext)
 	return st
 }
 
