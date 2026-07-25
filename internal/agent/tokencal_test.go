@@ -95,6 +95,105 @@ func TestCalibratorReproducesTheMeasuredFailure(t *testing.T) {
 	}
 }
 
+// TestCalibratorResistsOutliers pins the failure a review demonstrated: with
+// least squares, ONE anomalous usage.prompt_tokens (a proxy reporting
+// cumulative or prompt+completion tokens) dragged the slope to its clamp and
+// cut the budget to 33% for the rest of the run, with no recovery.
+func TestCalibratorResistsOutliers(t *testing.T) {
+	healthy := func() *TokenCalibrator {
+		c := &TokenCalibrator{}
+		for i := 1; i <= 12; i++ {
+			est := 400 * i
+			c.Observe(est, 528+int(1.03*float64(est))) // prose: density ~1.03 + specs
+		}
+		return c
+	}
+	clean := healthy().Budget(6656)
+	if clean < 5500 {
+		t.Fatalf("healthy prose run budget = %d, expected ~5.9k (only the fixed spec payload removed)", clean)
+	}
+	// Same run, one 10x reading injected.
+	poisoned := healthy()
+	poisoned.Observe(2000, 10*(528+int(1.03*2000)))
+	got := poisoned.Budget(6656)
+	if got < clean-600 {
+		t.Fatalf("one outlier moved the budget %d -> %d; a median fit must absorb a single bad reading", clean, got)
+	}
+	// And it must AGE OUT: further healthy observations restore the budget.
+	for i := 1; i <= calKeep; i++ {
+		est := 400 + 100*i
+		poisoned.Observe(est, 528+int(1.03*float64(est)))
+	}
+	if recovered := poisoned.Budget(6656); recovered < clean-300 {
+		t.Fatalf("budget did not recover after the outlier aged out: %d vs clean %d", recovered, clean)
+	}
+}
+
+// TestCalibratorRejectsDegenerateSpread: two observations whose estimates
+// differ by a token carry no slope information. A one-token spread previously
+// satisfied the guard, so the noise slope pinned to the clamp and cut the
+// budget to a third.
+func TestCalibratorRejectsDegenerateSpread(t *testing.T) {
+	var c TokenCalibrator
+	c.Observe(5000, 6600)
+	c.Observe(5001, 6640) // 1-token spread, 40-token jump => slope 40
+	c.Observe(5002, 6560)
+	if _, _, ok := c.Fit(); ok {
+		t.Fatal("a degenerate spread must not produce a fit")
+	}
+	if got := c.Budget(6656); got != 6656 {
+		t.Fatalf("degenerate spread: budget = %d, want the allowance unchanged", got)
+	}
+	// Once a genuinely wide-spread observation arrives, the fit engages.
+	c.Observe(1000, 528+int(1.5*1000))
+	if _, _, ok := c.Fit(); !ok {
+		t.Fatal("a wide-spread observation should enable the fit")
+	}
+}
+
+// TestCalibratorNeverShrinksBeyondHalf bounds the blast radius of any fit.
+func TestCalibratorNeverShrinksBeyondHalf(t *testing.T) {
+	var c TokenCalibrator
+	// Absurdly dense readings that pin the slope at its clamp.
+	for i := 1; i <= 6; i++ {
+		est := 1000 * i
+		c.Observe(est, 50*est)
+	}
+	const allowance = 6656
+	got := c.Budget(allowance)
+	if got < int(calMaxShrink*allowance) {
+		t.Fatalf("budget %d cut below the %v floor of allowance %d — calibration is a correction, not an authority",
+			got, calMaxShrink, allowance)
+	}
+	if got >= allowance {
+		t.Fatalf("budget %d should still be tightened for genuinely dense content", got)
+	}
+}
+
+// TestCalibratorInterceptFitsTheClampedSlope: deriving the intercept from an
+// UNCLAMPED slope and clamping it afterwards leaves a line through neither the
+// data nor the clamp, and yields the most aggressive budget the bounds allow.
+func TestCalibratorInterceptFitsTheClampedSlope(t *testing.T) {
+	var c TokenCalibrator
+	for i := 1; i <= 6; i++ {
+		est := 1000 * i
+		c.Observe(est, 500+8*est) // true slope 8 -> clamps to calMaxSlope
+	}
+	slope, intercept, ok := c.Fit()
+	if !ok {
+		t.Fatal("expected a fit")
+	}
+	if slope != calMaxSlope {
+		t.Fatalf("slope = %v, want the clamp %v", slope, calMaxSlope)
+	}
+	// With the slope clamped to 3 and the data at 8, residuals are large and
+	// POSITIVE, so the intercept must be positive — not driven negative and
+	// clamped to zero the way the unclamped-slope order produced.
+	if intercept <= 0 {
+		t.Fatalf("intercept = %v; refitting to the clamped slope must yield a positive fixed term", intercept)
+	}
+}
+
 // TestCalibratorClamps: a pathological observation sequence must never drive
 // the budget to a degenerate value.
 func TestCalibratorClamps(t *testing.T) {

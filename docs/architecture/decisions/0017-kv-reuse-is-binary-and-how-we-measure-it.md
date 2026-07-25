@@ -18,13 +18,13 @@ survive contact with it.
 |---|---|---|---|---|
 | cold first request | 0 | 1769 | 465 | 6836 |
 | byte-identical resend | 1768 | 1 | 38 | 53 |
-| **append a TURN** (the shape the loop produces) | **2429** | 19 | — | — |
+| **append a TURN** (the shape the loop produces) | **2971** | 19 | — | — |
 | **one line edited at 20% of the prompt** | **1** | 2319 | 558 | 609 |
 | **one line edited at 98% of the prompt** | **0** | 2662 | 656 | — |
 | identical resend AFTER one `/v1/embeddings` call | 0 | 2320 | 582 | 6873 |
 
 Corroborated at scale by the bench body: ~80 append steps per arm reused a median of **0.88**,
-against **0.073** on the steps where the ladder fired.
+against **0.307** on the steps where the ladder fired (clean cache-isolated run).
 
 Three facts follow, and they reshape the phase:
 
@@ -56,8 +56,7 @@ Three facts follow, and they reshape the phase:
    deterministic, model-free, and ratchet-guarded on integer token counts; wall-clock inputs would
    flap the ±2% band. New mode, new report type, new artifact.
 3. **Controls bracket every run and the bench FAILS CLOSED.** A positive control (byte-identical
-   resend, must reuse ≥90%) before and after, plus a negative control (unrelated prompt, must reuse
-   ≤5%). Any failure ⇒ verdict `INCONCLUSIVE`, non-zero exit, raw samples still emitted as evidence
+   resend, must reuse ≥90%) before and after, plus a negative control (unrelated prompt, must reuse no more than a loose ceiling, with the load-bearing criterion being SEPARATION (positive − negative ≥ 0.40) since the real tool specs create a legitimate ~17% framing floor). Any failure ⇒ verdict `INCONCLUSIVE`, non-zero exit, raw samples still emitted as evidence
    — never a headline number. The append and mid-edit controls do not gate; they are measured
    properties that tell the reader how to interpret the body.
 4. **Arms run in BLOCKS, never interleaved.** The tier serves `--parallel 1` — one KV slot — so
@@ -89,7 +88,7 @@ Three facts follow, and they reshape the phase:
    being measured. The comparison must NOT use the reuse fraction of the new prompt: appending a
    large tool result onto a small prefix legitimately scores near zero, and an earlier version of
    this check did exactly that and silently deleted ~20% of a clean run's rows.
-9. **Fire counts are only meaningful with their budget mode.** `--budget-mode production` budgets
+9. **Fire counts are only meaningful with their budget mode.** `--budget-mode production-uncalibrated` budgets Loop.inputBudget() WITHOUT the token calibration of decision 10, so its fire counts are a lower bound on the calibrated agent's; it budgets
    the ladder exactly as `Loop.inputBudget()` does; `pressure` (60% of each entry's own estimate,
    what `Evaluate` uses) guarantees the ladder engages so the ramp is observable, but then the fire
    COUNT is a property of the fixture, not of production. The mode is stamped in every report, and
@@ -97,12 +96,19 @@ Three facts follow, and they reshape the phase:
 
 10. **The compaction budget calibrates against real token counts.** The measurement's own headline
    finding is that the ladder never fired on real transcripts at the production budget, yet three of
-   them were still rejected — because the gate is a `chars/4` estimate that undercounts by up to
-   1.9×. `internal/agent/tokencal.go` fits `real ≈ intercept + slope·estimate` online from
+   them were still rejected — because the gate is a `chars/4` estimate that undercounts real tokens by p95 2.81 as measured (1.3-1.8 net of the fixed tool-spec payload). `internal/agent/tokencal.go` fits `real ≈ intercept + slope·estimate` online from
    `usage.prompt_tokens` and corrects the BUDGET (not the estimator, so each rung's internal
    comparisons stay in one space). Two terms, not one: the intercept absorbs the fixed tool-spec
    payload `estimateTokens` cannot see, the slope absorbs content density. With fewer than two
    distinct observations the budget is unchanged, so an uncalibrated loop behaves exactly as before.
+   The fit is ROBUST by construction — a median-of-pairwise-slopes (Theil–Sen) over a sliding
+   window of the last 32 observations, with the intercept refitted to the CLAMPED slope, pairs
+   required to span a meaningful estimate range, and the total correction bounded so calibration can
+   never cut usable context by more than half. Least squares was the obvious choice and the wrong
+   one: it has an unbounded influence function, so a single anomalous `usage.prompt_tokens` (a proxy
+   reporting cumulative or prompt+completion tokens) pinned the slope to its clamp and cut the budget
+   to a third for the remainder of the run, with no recovery. Every one of those bounds exists
+   because a review demonstrated the failure it prevents.
    Rejected: a per-kind chars/token table (a guess, and a guess is what caused this) and a
    `/tokenize` round-trip (a network dependency on every step of the critical path).
 

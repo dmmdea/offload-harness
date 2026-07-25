@@ -97,7 +97,15 @@ func (o BenchOpts) withDefaults() BenchOpts {
 
 // Budget modes — see BenchOpts.BudgetMode.
 const (
-	BudgetProduction = "production"
+	// BudgetProduction reproduces Loop.inputBudget() — the budget production
+	// used BEFORE token calibration (ADR 0017 decision 10) shipped in this same
+	// release. It is deliberately NOT renamed away from "production" in the
+	// artifacts, but it is not the current production budget: a calibrated loop
+	// compacts against tokenCal.Budget(inputBudget()), which is tighter on
+	// dense content. Measuring the calibrated budget requires a live agent run,
+	// not a replay, because calibration is a property of the loop's observed
+	// responses rather than of the transcript.
+	BudgetProduction = "production-uncalibrated"
 	BudgetPressure   = "pressure"
 )
 
@@ -227,13 +235,21 @@ func controlBase(tag string) string {
 	return b.String()
 }
 
-// controlMidEdited returns the base with ONE line rewritten ~20% in — the
-// shape the compaction ladder actually produces (it edits from protectedEnd
-// forward, i.e. near the START of the prompt, not the end).
-func controlMidEdited(tag string) string {
-	lines := strings.Split(strings.TrimRight(controlBase(tag), "\n"), "\n")
-	if len(lines) > 20 {
-		lines[19] = "Line 20 of the " + tag + " control block: COMPLETELY DIFFERENT WORDING now occupies this particular position instead."
+// midEditOf rewrites the "Line 20" line of an ALREADY-BUILT control block —
+// the shape the compaction ladder actually produces (it edits from
+// protectedEnd forward, i.e. near the START of the prompt, not the end).
+//
+// It operates on the finished text rather than rebuilding from a tag so that
+// it edits the SALTED base. Rebuilding lost the salt, which made the mid-edit
+// control diverge at byte 0 — turning it into a second unrelated prompt rather
+// than the mid-edit shape it is named for.
+func midEditOf(text string) string {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	for i, ln := range lines {
+		if strings.HasPrefix(ln, "Line 20 of the ") {
+			lines[i] = "Line 20 of the control block: COMPLETELY DIFFERENT WORDING now occupies this particular position instead."
+			break
+		}
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
@@ -318,8 +334,12 @@ func RunControls(ctx context.Context, probe ProbeFunc, phase, nonce string) ([]C
 	if phase == "post" {
 		return out, nil
 	}
-	// Negative: an unrelated payload right after X must share ~nothing.
-	if err := measure(CtrlNegPre, "", controlBase("unrelated-negative")); err != nil {
+	// Negative: an unrelated payload right after X must share ~nothing. SALTED
+	// — this is the control the salt exists for: unsalted, a second run finds
+	// its own negative control still in the server's multi-prompt cache and
+	// reports near-total reuse.
+	neg := salt(msgsOf(controlBase("unrelated-negative")), nonce, "ctl")[0].Content
+	if err := measure(CtrlNegPre, "", neg); err != nil {
 		return out, err
 	}
 	// Append: re-prime X, then send X plus a NEW MESSAGE — the shape the agent
@@ -341,7 +361,8 @@ func RunControls(ctx context.Context, probe ProbeFunc, phase, nonce string) ([]C
 	}
 	// Mid-edit: re-prime X, then send X with an early line rewritten (the
 	// on-fire shape).
-	if err := measure(CtrlMidEdit, base, controlMidEdited(phase)); err != nil {
+	// Derived from the SALTED base so the divergence really is at line 20.
+	if err := measure(CtrlMidEdit, base, midEditOf(base)); err != nil {
 		return out, err
 	}
 	return out, nil
@@ -582,5 +603,6 @@ func benchLimits() []string {
 		"A concurrent embedding/other-model request can evict the tier mid-run; the bracketing positive controls are what make a run admissible, and a failed control means INCONCLUSIVE, not zero reuse.",
 		"The server keeps a MULTI-PROMPT cache (measured: A, then unrelated B, then A again restored A at cache_n=2064), so every request here carries a per-run/per-arm salt on its first message. Without it the arms would read each other's cache entries and a re-run would find its own negative control still cached. Cost: a ~10-token marker the production transcript does not have.",
 		"Because the salt makes each arm's prompts unique, the reuse a REAL agent gets may be HIGHER than measured here: production reruns over similar transcripts can hit that same multi-prompt cache across runs.",
+		"budget_mode 'production-uncalibrated' reproduces Loop.inputBudget() WITHOUT the token calibration that shipped in this same release; a calibrated loop compacts sooner on dense content, so fire counts from this mode are a lower bound on the current agent's.",
 	}
 }
