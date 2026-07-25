@@ -103,6 +103,11 @@ type Loop struct {
 	skeletonPrune bool // enable the skeleton rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
 	gcfCompact    bool // enable the lossless GCF rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
 	toolResultCap int // max chars of ONE tool result kept in the transcript (0 => derive from window)
+	// tokenCal corrects the compaction budget using the server's own token
+	// counts — the fix for the estimator defect that let three real
+	// transcripts be rejected while the ladder declined to compact (ADR 0017).
+	tokenCal    TokenCalibrator
+	tokenCalOff bool
 	system        string
 	mem           Memory
 	worktree      string // RW worktree root for durable working memory (AGENT.md + .agent/plan.md); "" disables it
@@ -243,6 +248,13 @@ func (l *Loop) WithContextTokens(n int) *Loop {
 	}
 	return l
 }
+
+// DisableTokenCalibration turns OFF budget correction from the server's token
+// counts, restoring the pre-ADR-0017 behaviour (compact against the raw chars/4
+// estimate). Provided as an escape hatch and for differential testing — the
+// measured default is ON, because the uncorrected budget let three real
+// transcripts be rejected by the server while the ladder declined to compact.
+func (l *Loop) DisableTokenCalibration() *Loop { l.tokenCalOff = true; return l }
 
 // WithSkeletonPrune enables the skeleton rung of the compaction ladder: when
 // the transcript is over budget, older tool bodies are first reduced to
@@ -412,7 +424,14 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// multi-step task does not overflow the model's small window and abort.
 		// Under budget, compact is a byte-for-byte no-op (prefix stability =>
 		// the server's KV cache stays warm on the happy path).
+		// Correct the budget with what the SERVER has told us about this run's
+		// token density (ADR 0017). Uncalibrated — first steps, or a backend
+		// that reports no usage — this returns inputBudget() unchanged, so the
+		// behaviour is identical to before calibration existed.
 		budget := l.inputBudget()
+		if !l.tokenCalOff {
+			budget = l.tokenCal.Budget(budget)
+		}
 		if estimateTokens(msgs) > budget {
 			opts := l.ladderOpts()
 			opts.Pinned = pinned
@@ -464,6 +483,12 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			if err != nil {
 				return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted}, err
 			}
+		}
+		// Learn from the response: estimateTokens(msgs) is what we thought the
+		// payload cost, comp.Serve.UsagePromptTokens is what it actually cost.
+		// Observed BEFORE appending the reply, so both refer to the same bytes.
+		if comp.Serve != nil {
+			l.tokenCal.Observe(estimateTokens(msgs), comp.Serve.UsagePromptTokens)
 		}
 		msgs = append(msgs, comp.Msg)
 

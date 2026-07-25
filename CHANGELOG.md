@@ -46,6 +46,33 @@ Versioning: [SemVer](https://semver.org/).
   block): a backend that reports only `usage` has no reuse to report, and its structural zero is
   excluded from every rate rather than averaged in as "no reuse".
 
+### Fixed — the compaction budget now calibrates against the server's REAL token counts
+- **The estimator defect Phase D found, fixed.** The ladder decided whether to compact by comparing
+  a flat `chars/4` estimate against `inputBudget()`. Measured real/estimated was p95 **1.69** overall
+  and **1.90** on code, while the shipped margin covers only 1.077 — and three real transcripts were
+  rejected by the server with `exceed_context_size` while **the ladder declined to compact**, because
+  by its own estimate they fit (`hv-json-ledger` estimated 6,224 vs 11,369 real; `hv-docs-readme`
+  6,219 vs 8,749; `hv-deep-compeval` 5,693 vs 9,190). Compaction was gated on the wrong number.
+- **`internal/agent/tokencal.go`**: an online two-term fit, `real ≈ intercept + slope·estimate`,
+  learned from `usage.prompt_tokens` on every response (available since this release's client
+  instrumentation) and applied to the BUDGET — not to `estimateTokens`, so every rung's internal
+  comparisons stay in one space. The two terms are separated on purpose: the intercept absorbs the
+  fixed per-request tool-spec payload (~528 tokens here, invisible to `estimateTokens`, which is why
+  small requests show ratios up to 2.81), the slope absorbs content density. A single multiplicative
+  factor fitted across sizes mis-corrects at both ends.
+- **Uncalibrated behaviour is byte-identical to before**: fewer than two *distinct* observations ⇒
+  the budget is returned unchanged. Slope/intercept are clamped to a credible range, the budget has
+  the same floor `inputBudget()` uses, and a fit implying MORE headroom never raises the allowance.
+  `Loop.DisableTokenCalibration()` is the escape hatch.
+- Chosen over the alternatives deliberately: a per-kind chars/token table is a guess (and a guess is
+  what produced this defect), while a `/tokenize` round-trip would add a network dependency and a new
+  failure mode to every step of the loop's critical path.
+- **Scope of the evidence, stated plainly**: the defect and the fix are demonstrated on real harvested
+  transcripts via replay plus a loop-level differential test (uncalibrated peak 11,540 real tokens —
+  rejected live — vs 7,728 calibrated). A live agent A/B did **not** reproduce the overflow, because
+  the loop's tool-result cap incidentally bounds single-request size; calibration closes the gap by
+  measurement instead of relying on that incidental protection.
+
 ### Changed — the harvest's KV rationale for compaction is corrected in the record
 - Measured (ADR 0017): KV reuse on gemma-4-e4b is **binary** — a pure append reuses everything
   (2316 of 2321 tokens), while ANY edit discards the ENTIRE cache; a position sweep showed a

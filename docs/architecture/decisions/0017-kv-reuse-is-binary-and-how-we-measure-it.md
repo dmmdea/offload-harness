@@ -95,6 +95,17 @@ Three facts follow, and they reshape the phase:
    COUNT is a property of the fixture, not of production. The mode is stamped in every report, and
    no fire-frequency claim may be made without it.
 
+10. **The compaction budget calibrates against real token counts.** The measurement's own headline
+   finding is that the ladder never fired on real transcripts at the production budget, yet three of
+   them were still rejected — because the gate is a `chars/4` estimate that undercounts by up to
+   1.9×. `internal/agent/tokencal.go` fits `real ≈ intercept + slope·estimate` online from
+   `usage.prompt_tokens` and corrects the BUDGET (not the estimator, so each rung's internal
+   comparisons stay in one space). Two terms, not one: the intercept absorbs the fixed tool-spec
+   payload `estimateTokens` cannot see, the slope absorbs content density. With fewer than two
+   distinct observations the budget is unchanged, so an uncalibrated loop behaves exactly as before.
+   Rejected: a per-kind chars/token table (a guess, and a guess is what caused this) and a
+   `/tokenize` round-trip (a network dependency on every step of the critical path).
+
 ## Consequences
 
 - The harvest's KV-prefix rationale for the ladder is **corrected in the record**: compaction is
