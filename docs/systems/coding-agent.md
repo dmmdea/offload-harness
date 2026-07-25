@@ -128,7 +128,15 @@ on `Completion.Serve`, nil when a backend reports nothing) to measure KV-prefix 
 token counts. It brackets every run with a positive control (byte-identical resend, ≥90% reuse) and
 a negative control (unrelated prompt, ≤5%), runs its arms in BLOCKS because the tier serves one KV
 slot, and **fails closed to `INCONCLUSIVE`** rather than publishing a table of zeros when the tier
-was evicted mid-run — one `/v1/embeddings` request is enough to do that. Measured finding
+was evicted mid-run — one `/v1/embeddings` request is enough to do that. Arms are compared only
+over steps that succeeded in BOTH (`paired_totals`; per-arm totals are diagnostic-only), every
+failure is classified `overflow`/`timeout`/`other` with timeouts checked first, and mid-run
+evictions are detected from the data itself — on a prefix extension the server must still hold
+what it held, so a collapsed `cache_n` relative to the PREVIOUS prompt is a scheduler artifact,
+flagged and excluded from rates but kept in totals. `--budget-mode production` budgets the ladder
+exactly as `Loop.inputBudget()` does (fire counts then describe the corpus at that window);
+`pressure` guarantees the ramp is observable but makes the fire count a fixture property — the
+mode is stamped in the report. Measured finding
 ([ADR 0017](../architecture/decisions/0017-kv-reuse-is-binary-and-how-we-measure-it.md)): reuse is
 BINARY — appends reuse everything, any edit anywhere discards the whole cache — so a compaction
 fire always costs a full re-prefill, and the ladder is justified by the size win and by requests

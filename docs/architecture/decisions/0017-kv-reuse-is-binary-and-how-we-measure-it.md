@@ -73,15 +73,27 @@ Three facts follow, and they reshape the phase:
    (`S ≥ (C − M)(1 − 1/r)`), and makes no recommendation: raising the margin buys safety by
    unconditionally shrinking usable context on every request, which is the operator's trade.
 
+6a. **The probe sends the tool specs production sends.** `estimateTokens` counts tool specs as
+   ZERO while every production request carries them, so a probe with `tools=nil` would understate
+   the measured real/estimated ratio — and therefore every implied margin — by that constant.
 7. **Arm totals are PAIRED.** The compaction-off arm loses steps to overflow rejections, so totals
    over unequal sample sets would overstate whichever arm had fewer (larger) requests. The report
    compares only steps that succeeded in BOTH arms and reports the unpaired counts. Rejected
    requests are counted separately as `overflow` — they are the failure the ladder prevents, not
    noise.
-8. **Eviction is detected from the data, not by extra probes.** A pure prefix EXTENSION must reuse;
-   one that did not means the tier was torn down between requests. Those rows are flagged, excluded
-   from rate statistics and kept in token totals. Injecting inline control shots between body
-   requests — the obvious alternative — would itself destroy the cache continuity being measured.
+8. **Eviction is detected from the data, not by extra probes.** On a prefix EXTENSION the server
+   must still hold what it already held; a sample whose `cache_n` collapsed **relative to the
+   PREVIOUS prompt's real length** means the tier was torn down between requests. Those rows are
+   flagged, excluded from rate statistics and kept in token totals. Injecting inline control shots
+   between body requests — the obvious alternative — would itself destroy the cache continuity
+   being measured. The comparison must NOT use the reuse fraction of the new prompt: appending a
+   large tool result onto a small prefix legitimately scores near zero, and an earlier version of
+   this check did exactly that and silently deleted ~20% of a clean run's rows.
+9. **Fire counts are only meaningful with their budget mode.** `--budget-mode production` budgets
+   the ladder exactly as `Loop.inputBudget()` does; `pressure` (60% of each entry's own estimate,
+   what `Evaluate` uses) guarantees the ladder engages so the ramp is observable, but then the fire
+   COUNT is a property of the fixture, not of production. The mode is stamped in every report, and
+   no fire-frequency claim may be made without it.
 
 ## Consequences
 

@@ -190,12 +190,30 @@ const (
 	CtrlPosPost = "pos-post"
 )
 
-// Admissibility thresholds. A byte-identical resend must reuse essentially
-// everything; an unrelated prompt must reuse essentially nothing. Anything in
-// between means the instrument is not trustworthy right now.
+// Admissibility thresholds.
+//
+// A byte-identical resend must reuse essentially everything. An unrelated
+// prompt must reuse only the UNAVOIDABLE COMMON FRAMING — and that floor is not
+// zero: every production request carries the same tool specs, which the chat
+// template renders into a shared prefix. Measured here, that floor is ~16.8%
+// of a ~2600-token prompt (≈440 tokens of specs). An earlier absolute ceiling
+// of 5% encoded the assumption that no common framing exists; sending the real
+// specs (as production does) falsified it, and the gate correctly refused to
+// publish rather than quietly passing.
+//
+// So the ceiling is generous, and the LOAD-BEARING criterion is SEPARATION:
+// the instrument is only trustworthy if it can tell reuse from no-reuse by a
+// wide margin. That is a property of the measurement, not of the framing.
+// NegReuseMax is a loose sanity bound only — the framing floor is legitimate
+// and its size depends on how big the tool specs are relative to the prompt.
+// MinPosNegMargin is the criterion that actually binds: with a large enough
+// floor (small prompts, big spec set) the absolute numbers can both look
+// "fine" while the metric has lost its ability to discriminate, and that is
+// the condition worth refusing.
 const (
-	PosReuseMin = 0.90
-	NegReuseMax = 0.05
+	PosReuseMin     = 0.90
+	NegReuseMax     = 0.75
+	MinPosNegMargin = 0.40
 )
 
 // Admissible reports whether the control shots prove the instrument works.
@@ -228,9 +246,28 @@ func Admissible(cs []Control) (bool, string) {
 			}
 		case CtrlNegPre:
 			if c.ReuseFrac > NegReuseMax {
-				return false, "negative control reused " + pct(c.ReuseFrac) + " (need <=" + pct(NegReuseMax) + ")" + where + " — an unrelated prompt should share nothing; the metric is not measuring what we think"
+				return false, "negative control reused " + pct(c.ReuseFrac) + " (need <=" + pct(NegReuseMax) + ")" + where + " — an unrelated prompt reused the MAJORITY of its prompt; the metric is not measuring what we think"
 			}
 		}
+	}
+	// Separation: the instrument must distinguish reuse from no-reuse by a
+	// wide margin. This is what makes the numbers meaningful once a non-zero
+	// common framing (tool specs) exists.
+	pos, neg, havePos, haveNeg := 1.0, 0.0, false, false
+	for _, c := range cs {
+		switch c.Name {
+		case CtrlPosPre, CtrlPosPost:
+			if !havePos || c.ReuseFrac < pos {
+				pos, havePos = c.ReuseFrac, true // worst positive
+			}
+		case CtrlNegPre:
+			if !haveNeg || c.ReuseFrac > neg {
+				neg, haveNeg = c.ReuseFrac, true // worst negative
+			}
+		}
+	}
+	if havePos && haveNeg && pos-neg < MinPosNegMargin {
+		return false, "positive and negative controls are only " + pct(pos-neg) + " apart (need >=" + pct(MinPosNegMargin) + ") — the metric cannot distinguish a cache hit from a miss on this box right now"
 	}
 	for _, name := range []string{CtrlPosPre, CtrlNegPre, CtrlPosPost} {
 		if present[name] == 0 {
