@@ -363,9 +363,16 @@ var syncRootPrefixes = []string{"onedrive", "dropbox", "icloud"}
 // "/srv/dropbox-exporter" must not be refused. Segment-aware prefixing keeps
 // "Dropbox (Personal)" refused while leaving "dropbox-exporter" alone, because the
 // latter's segment continues with '-' rather than ending or opening a qualifier.
+// SEPARATORS ARE TREATED ALIKE ON EVERY PLATFORM. Splitting with filepath.ToSlash made
+// this guard PLATFORM-DEPENDENT: on Linux ToSlash is a no-op, so
+// `C:\Users\x\OneDrive\state` was one long segment, no marker matched a whole segment,
+// and the refusal silently did nothing. A safety check that only works on the OS it was
+// written on is worse than none, because it is trusted everywhere. The cost is that a
+// POSIX directory whose NAME contains a backslash can now be split — pathological, and
+// the failure mode is a clear refusal rather than silent breakage.
 func syncRootReason(p string) string {
-	norm := strings.ToLower(filepath.ToSlash(p))
-	for _, seg := range strings.Split(norm, "/") {
+	norm := strings.ToLower(p)
+	for _, seg := range strings.FieldsFunc(norm, func(r rune) bool { return r == '/' || r == '\\' }) {
 		seg = strings.TrimSpace(seg)
 		if seg == "" {
 			continue
