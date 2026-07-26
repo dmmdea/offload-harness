@@ -579,9 +579,12 @@ func TestConcurrentAcquireReleaseCyclesNeverReuseAnEpoch(t *testing.T) {
 
 // A busy card must QUEUE the job, not drop it: the lock this package replaced existed to
 // serialize GPU work, and a render arriving mid-render should run afterwards.
+// The holder is `media` on purpose: a media expiry is a timeout ceiling, so the waiter
+// must actually wait it out. A `text` holder declaring a window past ours short-circuits
+// instead — see TestALongTextReservationDefersImmediately.
 func TestAcquireWaitsOutAHolderThenTakesTheCard(t *testing.T) {
 	m, now := newTestManager(t)
-	holder, err := m.TryAcquire(ClassText, Options{Reason: "benchmark", TTL: time.Hour})
+	holder, err := m.TryAcquire(ClassMedia, Options{Reason: "render", TTL: time.Hour})
 	if err != nil {
 		t.Fatalf("setup acquire: %v", err)
 	}
@@ -611,7 +614,7 @@ func TestAcquireWaitsOutAHolderThenTakesTheCard(t *testing.T) {
 // an agent caller can act on "held by text, 45m reservation", not on "error".
 func TestAcquireGivesUpAfterItsWindowAndNamesTheHolder(t *testing.T) {
 	m, now := newTestManager(t)
-	if _, err := m.TryAcquire(ClassText, Options{Reason: "45m reservation", TTL: 45 * time.Minute}); err != nil {
+	if _, err := m.TryAcquire(ClassMedia, Options{Reason: "long video", TTL: 45 * time.Minute}); err != nil {
 		t.Fatalf("setup acquire: %v", err)
 	}
 	probes := 0
@@ -622,7 +625,7 @@ func TestAcquireGivesUpAfterItsWindowAndNamesTheHolder(t *testing.T) {
 	if !errors.As(err, &held) {
 		t.Fatalf("err = %v, want *ErrHeld carrying the holder", err)
 	}
-	if held.Info.Class != ClassText || held.Info.Reason != "45m reservation" {
+	if held.Info.Class != ClassMedia || held.Info.Reason != "long video" {
 		t.Errorf("holder detail lost: %+v", held.Info)
 	}
 	if probes != 5 {
@@ -642,6 +645,96 @@ func TestAcquireDoesNotWaitOutAConfigurationFault(t *testing.T) {
 	}
 	if slept != 0 {
 		t.Errorf("waited %d times on a configuration fault; it can never clear", slept)
+	}
+}
+
+// A waiter must be CHEAP. Issuing a fencing token takes a machine-wide lock and four
+// file operations, and doing that on every probe churned the counter ~90 times per wait
+// for claims that could not possibly succeed.
+func TestAWaitingAcquirerDoesNotChurnTheFencingCounter(t *testing.T) {
+	m, now := newTestManager(t)
+	if _, err := m.TryAcquire(ClassMedia, Options{Reason: "render", TTL: time.Hour}); err != nil {
+		t.Fatalf("setup acquire: %v", err)
+	}
+	before, err := m.readEpoch()
+	if err != nil {
+		t.Fatalf("read epoch: %v", err)
+	}
+	probes := 0
+	m.sleep = func(d time.Duration) { probes++; *now = now.Add(d) }
+
+	if _, err := m.Acquire(ClassMedia, Options{Reason: "second", Wait: 10 * time.Second}); err == nil {
+		t.Fatal("acquired a card that is held")
+	}
+	if probes != 10 {
+		t.Fatalf("probed %d times in a 10s window, want 10", probes)
+	}
+	after, err := m.readEpoch()
+	if err != nil {
+		t.Fatalf("read epoch: %v", err)
+	}
+	if after != before {
+		t.Errorf("the fencing counter advanced %d times while merely WAITING (%d -> %d); "+
+			"a waiter must not issue tokens it cannot use", after-before, before, after)
+	}
+}
+
+// Waiting for something that cannot happen is pure friction. A `text` reservation is an
+// operator's DECLARED duration, so one that outlasts the whole window is answered now.
+func TestALongTextReservationDefersImmediately(t *testing.T) {
+	m, _ := newTestManager(t)
+	if _, err := m.TryAcquire(ClassText, Options{Reason: "45m bench", TTL: 45 * time.Minute}); err != nil {
+		t.Fatalf("setup acquire: %v", err)
+	}
+	slept := 0
+	m.sleep = func(time.Duration) { slept++ }
+
+	_, err := m.Acquire(ClassMedia, Options{Reason: "video", Wait: 90 * time.Second})
+	var held *ErrHeld
+	if !errors.As(err, &held) {
+		t.Fatalf("err = %v, want *ErrHeld", err)
+	}
+	if held.Info.Class != ClassText {
+		t.Errorf("holder detail lost: %+v", held.Info)
+	}
+	if slept != 0 {
+		t.Errorf("waited %d times for a reservation declared to outlast the window", slept)
+	}
+}
+
+// The converse, so the short-circuit cannot quietly grow into "never wait": a media
+// holder's expiry is a TIMEOUT CEILING, not a promise — a 45-minute video budget
+// routinely finishes in three — so it must still be waited out.
+func TestALongMediaHolderIsStillWaitedOut(t *testing.T) {
+	m, now := newTestManager(t)
+	if _, err := m.TryAcquire(ClassMedia, Options{Reason: "long video", TTL: 45 * time.Minute}); err != nil {
+		t.Fatalf("setup acquire: %v", err)
+	}
+	slept := 0
+	m.sleep = func(d time.Duration) { slept++; *now = now.Add(d) }
+
+	if _, err := m.Acquire(ClassMedia, Options{Reason: "second", Wait: 4 * time.Second}); err == nil {
+		t.Fatal("acquired a held card")
+	}
+	if slept == 0 {
+		t.Error("did not wait at all for a media holder; its expiry is a ceiling, not a promise")
+	}
+}
+
+// A short text reservation may genuinely free inside the window, so it is waited out too.
+func TestAShortTextReservationIsStillWaitedOut(t *testing.T) {
+	m, now := newTestManager(t)
+	if _, err := m.TryAcquire(ClassText, Options{Reason: "quick eval", TTL: 5 * time.Second}); err != nil {
+		t.Fatalf("setup acquire: %v", err)
+	}
+	slept := 0
+	m.sleep = func(d time.Duration) { slept++; *now = now.Add(d) }
+
+	if _, err := m.Acquire(ClassMedia, Options{Reason: "video", Wait: 60 * time.Second}); err == nil {
+		t.Fatal("acquired a held card")
+	}
+	if slept == 0 {
+		t.Error("did not wait for a reservation that expires INSIDE the window")
 	}
 }
 

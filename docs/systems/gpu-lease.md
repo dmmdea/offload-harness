@@ -17,7 +17,7 @@ other on a single shared card.
 |---|---|
 | `internal/gpulease/gpulease.go` | **the only implementation**: `LeaseDir` (the one resolver), acquire/release, epoch fencing, the reclaim conjunction, `InspectDir` (the one read path) |
 | `internal/gpulease/proc*.go` | per-platform liveness and process-start identity, exported so no consumer keeps a second copy |
-| `internal/pipeline/pipeline.go` | takes the `media` lease around **every** generation call site (image ComfyUI + sdcpp, inpaint, image batch, run-graph, video, audio) and threads `GPU_LEASE_*` to the runner; inherits an ambient lease instead of re-acquiring |
+| `internal/pipeline/pipeline.go` | takes the `media` lease around **every** generation call site (image ComfyUI + sdcpp, inpaint, image batch, run-graph, video, audio) and threads `GPU_LEASE_*` to the runner; inherits an ambient lease instead of re-acquiring; owns the in-process slot (`mediaSlot`) that arbitrates jobs sharing one inherited lease |
 | `gpu_cmd.go` | the `gpu status\|reserve\|release\|hold` verbs, wrapper and `--detach` forms |
 | `gpu_hide_windows.go`, `gpu_hide_other.go` | hidden spawn for the detached holder (a visible console gets closed, killing the hold) |
 | `render/gpu-lock.mjs` | READ-ONLY participant: honours + fences an inherited lease, elects one unloader, drains, ComfyUI lifecycle. **Does not acquire.** |
@@ -76,6 +76,34 @@ cleanly and prints a note naming the replacement.
 Only **contention** is waited out — an unwritable or cloud-synced lease location comes back
 immediately, because waiting cannot fix a configuration fault. A busy card is a **defer**, not a
 failure: `generate-image --batch` exits 0 with `err_class: gpu_busy` rather than a non-zero error.
+
+Two things keep the wait from becoming friction:
+
+- **A `text` reservation that outlasts your window is answered immediately.**
+  `gpu reserve --class text --for 45m` is an operator's *declared* duration, so there is nothing
+  to wait for — you get the ETA now instead of 90 s later. A `media` holder is deliberately not
+  treated this way: its expiry is a timeout *ceiling*, and a 25-minute video budget routinely
+  finishes in three, so it is waited out.
+- **Two jobs in the SAME process never poll each other.** They queue on an in-process slot and
+  the waiter is handed the card the instant the holder releases — no timer, no file reads.
+
+## What it costs when nothing is contending
+
+**Nothing.** The lease adds no daemon, no scheduled task, no watchdog and no background thread.
+Every timer below exists only while real work is in flight, and stops with it:
+
+| when | what runs | cost |
+|---|---|---|
+| idle | nothing at all | zero |
+| a render is running | one 15 s heartbeat per held lease, at most one per process | one small file write / 15 s |
+| your job is queued behind another process | one probe per second, capped by `gpu_wait_ms` | two small file reads / s, ≤90 s |
+| your job is queued behind one in the same process | blocks on a channel | zero — no polling |
+| `gpu reserve -- <cmd>` | one 15 s heartbeat for the command's lifetime | one small file write / 15 s |
+| `gpu reserve --detach` | a hidden holder polls once a second until released or expired | the only continuous poller; exits on its own |
+
+`--detach` is the sole thing that keeps running after the command that started it, which is why
+the wrapper form is preferred. It is an ordinary process, not a registered service: it exits by
+itself when released, when fenced out, or at its declared deadline, and nothing respawns it.
 
 Running the harness under a reservation **inherits** that lease:
 

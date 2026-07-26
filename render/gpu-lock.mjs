@@ -20,7 +20,7 @@
 //   - the ComfyUI lifecycle and the guarded teardown.
 //
 // No npm dependencies.
-import { writeFileSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { ensureComfy as defaultEnsureComfy } from "./comfy-lifecycle.mjs";
 
@@ -32,9 +32,7 @@ function metaPath(lockPath) {
 // READS it — the schema is owned on the Go side.
 export function readLease(lockPath) {
   try {
-    const m = JSON.parse(readFileSync(metaPath(lockPath), "utf8"));
-    m.mtimeMs = statSync(metaPath(lockPath)).mtimeMs;
-    return m;
+    return JSON.parse(readFileSync(metaPath(lockPath), "utf8"));
   } catch { return null; }
 }
 

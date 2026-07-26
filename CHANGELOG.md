@@ -26,7 +26,20 @@ Versioning: [SemVer](https://semver.org/).
   - Running the harness itself under `gpu reserve --class media -- local-offload …` **inherits**
     the ambient lease instead of acquiring a second one and queueing behind its own parent. An
     inherited lease that is no longer current refuses the job rather than quietly taking a fresh
-    one, so a lost reservation is visible.
+    one, so a lost reservation is visible. Jobs sharing an inherited lease are serialized by an
+    **in-process slot** — they have no file claim to contend on, so without it
+    `gpu reserve --class media -- local-offload fleet-serve` (which runs the pipeline inline in a
+    `net/http` handler goroutine) put two renders on the card at once: measured 256 ms of overlap
+    on 250 ms jobs. A waiter there blocks on a channel rather than polling.
+  - **A `text` reservation that outlasts your wait window is answered immediately** instead of
+    after 90 s of pointless polling — `--for 45m` is a declared duration, so there is nothing to
+    wait for. A `media` holder is not treated this way: its expiry is a timeout ceiling and a
+    25-minute video budget routinely finishes in three.
+  - **Nothing ticks at idle.** No daemon, scheduled task or watchdog is added; every timer is
+    scoped to work in flight (a 15 s heartbeat while a lease is held, a 1 s probe while queued
+    behind another process). A waiter no longer issues a fencing token per probe, which had it
+    taking a machine-wide lock and doing four file operations a second for claims that could not
+    succeed. `gpu reserve --detach` is the only continuous poller and exits on its own.
   - `local-offload gpu status|reserve|release`. The **wrapper** form
     (`gpu reserve ... -- <command>`) is preferred — the lease lives exactly as long as the
     command and cannot be leaked by forgetting to release. `--detach` spawns a hidden holder for
