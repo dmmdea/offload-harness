@@ -2,24 +2,46 @@ package gpulock
 
 import (
 	"context"
-	"fmt"
-	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
-// writeLock creates a lock dir with a meta.json recording pid, exactly like
-// gpu-lock.mjs acquireGpuLock does. Returns the lock path.
-func writeLock(t *testing.T, pid int) string {
+// deadPID is a pid that will not exist. Liveness is no longer stubbable from this
+// package — it delegates to gpulease.PIDAlive precisely so there cannot be a second,
+// weaker definition here — so tests use real pids: our own (alive) and this one (dead).
+const deadPID = 999999999
+
+// writeLease writes the SHARED lease record (gpulease.Meta), which is what every
+// participant now reads. The old helper wrote a legacy {pid,startedAt} shape that only
+// this package's now-deleted local parser understood.
+func writeLease(t *testing.T, pid int, mutate func(*gpulease.Meta)) string {
 	t.Helper()
-	lock := filepath.Join(t.TempDir(), "gpu.lock")
-	if err := os.Mkdir(lock, 0o755); err != nil {
+	lock := filepath.Join(t.TempDir(), "lease")
+	if err := os.MkdirAll(lock, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	meta := fmt.Sprintf(`{"pid":%d,"startedAt":%d}`, pid, time.Now().UnixMilli())
-	if err := os.WriteFile(filepath.Join(lock, "meta.json"), []byte(meta), 0o644); err != nil {
+	now := time.Now()
+	m := gpulease.Meta{
+		Epoch:        1,
+		Class:        gpulease.ClassMedia,
+		Holder:       gpulease.Holder{PID: pid},
+		AcquiredAtMs: now.UnixMilli(),
+		RenewedAtMs:  now.UnixMilli(),
+		ExpiresAtMs:  now.Add(time.Hour).UnixMilli(),
+	}
+	if mutate != nil {
+		mutate(&m)
+	}
+	b, err := json.Marshal(&m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lock, "meta.json"), b, 0o666); err != nil {
 		t.Fatal(err)
 	}
 	return lock
@@ -65,111 +87,119 @@ func TestPathMatchesTheLeaseDirectoryAcquirersUse(t *testing.T) {
 	if got := Path("", stateDir); got != lease.Dir() {
 		t.Fatalf("gpulock watches %q but acquirers write %q — the gate is blind", got, lease.Dir())
 	}
-	if info := Inspect(Path("", stateDir)); !info.Held {
+	info := Inspect(Path("", stateDir))
+	if !info.Held {
 		t.Fatal("gpulock reports a freshly acquired lease as FREE — vision calls would fire into a busy GPU")
 	}
+	if info.Class != string(gpulease.ClassMedia) {
+		t.Errorf("Class = %q, want media; the caller should be able to say WHAT holds the card", info.Class)
+	}
 }
 
-// TestInspectAbsent: no lock dir => free.
 func TestInspectAbsent(t *testing.T) {
 	if info := Inspect(filepath.Join(t.TempDir(), "no-such.lock")); info.Held {
-		t.Fatal("absent lock dir must report not held")
+		t.Fatal("absent lease must report not held")
 	}
 }
 
-// TestInspectHeldByLiveHolder: a fresh lock recording OUR (alive) pid is held,
-// with the holder pid surfaced and a sane age.
 func TestInspectHeldByLiveHolder(t *testing.T) {
-	lock := writeLock(t, os.Getpid())
-	// Backdate meta.json so the age is measurably positive.
-	old := time.Now().Add(-5 * time.Second)
-	if err := os.Chtimes(filepath.Join(lock, "meta.json"), old, old); err != nil {
-		t.Fatal(err)
-	}
+	lock := writeLease(t, os.Getpid(), func(m *gpulease.Meta) {
+		m.AcquiredAtMs = time.Now().Add(-5 * time.Second).UnixMilli()
+	})
 	info := Inspect(lock)
 	if !info.Held {
-		t.Fatal("live-holder lock must report held")
+		t.Fatal("live-holder lease must report held")
 	}
 	if info.PID != os.Getpid() {
 		t.Errorf("PID = %d, want %d", info.PID, os.Getpid())
 	}
+	// Age is time HELD, not time since the last heartbeat.
 	if info.Age < 4*time.Second || info.Age > time.Minute {
-		t.Errorf("Age = %v, want ~5s (from meta.json mtime)", info.Age)
+		t.Errorf("Age = %v, want ~5s (time held, from the acquirer's stamp)", info.Age)
 	}
 }
 
-// TestInspectDeadHolderIsStale: same liveness rule as the .mjs — a lock whose
-// recorded pid is dead is stale and reports NOT held (regardless of age).
 func TestInspectDeadHolderIsStale(t *testing.T) {
-	lock := writeLock(t, os.Getpid())
-	orig := pidAlive
-	pidAlive = func(int) bool { return false } // deterministic dead holder
-	defer func() { pidAlive = orig }()
+	lock := writeLease(t, deadPID, nil)
 	if info := Inspect(lock); info.Held {
-		t.Fatal("dead-holder lock must report not held (stale)")
+		t.Fatal("dead-holder lease must report not held (stale)")
 	}
 }
 
-// TestInspectMissingMetaIsStale: a bare lock dir with no meta.json is stale
-// (mjs: isStale(null) === true).
 func TestInspectMissingMetaIsStale(t *testing.T) {
-	lock := filepath.Join(t.TempDir(), "gpu.lock")
-	if err := os.Mkdir(lock, 0o755); err != nil {
+	lock := filepath.Join(t.TempDir(), "lease")
+	if err := os.MkdirAll(lock, 0o777); err != nil {
 		t.Fatal(err)
 	}
 	if info := Inspect(lock); info.Held {
-		t.Fatal("meta-less lock dir must report not held (stale)")
+		t.Fatal("a lease dir with no claim must report not held")
 	}
 }
 
-// TestInspectTTLCap: even a live-pid lock older than the TTL is stale — the
-// age cap / pid-recycle backstop the .mjs keeps.
-func TestInspectTTLCap(t *testing.T) {
-	lock := writeLock(t, os.Getpid())
-	if info := inspectAt(lock, time.Hour, time.Now().Add(2*time.Hour)); info.Held {
-		t.Fatal("over-TTL lock must report not held (stale)")
+// THE THIRD RULE IS GONE — this pins that this package now applies gpulease's rule and
+// not its own. The old local rule was (pid dead) OR (mtime older than 1h), so a holder
+// that had legitimately held the card for over an hour read as STALE here while gpulease
+// considered it live. Under the shared rule, a live heartbeating holder stays held no
+// matter how long it has run, and reclaim needs BOTH a stale heartbeat and an expired
+// window.
+func TestUsesTheSharedStalenessRuleNotAnMtimeTTL(t *testing.T) {
+	// Held for 3 hours, still heartbeating, window still open: the OLD rule called this
+	// stale at the 1h mark; the shared rule calls it held.
+	longRunning := writeLease(t, os.Getpid(), func(m *gpulease.Meta) {
+		now := time.Now()
+		m.AcquiredAtMs = now.Add(-3 * time.Hour).UnixMilli()
+		m.RenewedAtMs = now.UnixMilli()
+		m.ExpiresAtMs = now.Add(time.Hour).UnixMilli()
+	})
+	if info := Inspect(longRunning); !info.Held {
+		t.Fatal("a live, heartbeating 3-hour holder reported as FREE — the vision gate would " +
+			"fire into a busy GPU (this is the old mtime-TTL rule leaking back in)")
 	}
-	if info := inspectAt(lock, time.Hour, time.Now()); !info.Held {
-		t.Fatal("fresh live-pid lock must report held under the same TTL")
+
+	// Stale heartbeat AND expired window: reclaimable under the shared rule.
+	abandoned := writeLease(t, os.Getpid(), func(m *gpulease.Meta) {
+		now := time.Now()
+		m.AcquiredAtMs = now.Add(-3 * time.Hour).UnixMilli()
+		m.RenewedAtMs = now.Add(-1 * time.Hour).UnixMilli()
+		m.ExpiresAtMs = now.Add(-30 * time.Minute).UnixMilli()
+	})
+	if info := Inspect(abandoned); info.Held {
+		t.Fatal("an abandoned lease (stale heartbeat AND expired window) still reported held")
 	}
 }
 
-// TestPidAliveSelf: the real liveness probe recognizes our own process.
-func TestPidAliveSelf(t *testing.T) {
-	if !pidAlive(os.Getpid()) {
-		t.Fatal("pidAlive(self) must be true")
+// Liveness is shared, not reimplemented here.
+func TestLivenessIsShared(t *testing.T) {
+	if !gpulease.PIDAlive(os.Getpid()) {
+		t.Fatal("our own process read as dead")
 	}
-	if pidAlive(0) || pidAlive(-1) {
-		t.Fatal("pidAlive must reject non-positive pids")
+	if gpulease.PIDAlive(0) || gpulease.PIDAlive(-1) {
+		t.Fatal("non-positive pids must never read as alive")
 	}
 }
 
-// TestWaitFreeBoundedWait: a held lock makes WaitFree poll for the FULL wait
-// window and then report held (the caller defers).
 func TestWaitFreeBoundedWait(t *testing.T) {
-	lock := writeLock(t, os.Getpid())
+	lock := writeLease(t, os.Getpid(), nil)
 	start := time.Now()
 	info := WaitFree(context.Background(), lock, 120*time.Millisecond, 20*time.Millisecond)
 	if !info.Held {
-		t.Fatal("still-held lock must report held after the bounded wait")
+		t.Fatal("still-held lease must report held after the bounded wait")
 	}
 	if el := time.Since(start); el < 120*time.Millisecond {
 		t.Errorf("WaitFree returned after %v, want >= the 120ms wait window", el)
 	}
 }
 
-// TestWaitFreeReleasedMidWait: releasing the lock mid-wait lets WaitFree
-// return free well before the deadline (the caller proceeds).
 func TestWaitFreeReleasedMidWait(t *testing.T) {
-	lock := writeLock(t, os.Getpid())
+	lock := writeLease(t, os.Getpid(), nil)
 	go func() {
 		time.Sleep(60 * time.Millisecond)
-		_ = os.RemoveAll(lock)
+		_ = os.Remove(filepath.Join(lock, "meta.json"))
 	}()
 	start := time.Now()
 	info := WaitFree(context.Background(), lock, 5*time.Second, 10*time.Millisecond)
 	if info.Held {
-		t.Fatal("released lock must report not held")
+		t.Fatal("released lease must report not held")
 	}
 	if el := time.Since(start); el >= 5*time.Second {
 		t.Errorf("WaitFree took the full window (%v) despite the release", el)

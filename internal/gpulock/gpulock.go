@@ -67,51 +67,21 @@ func Path(override, stateDir string) string {
 	return dir
 }
 
-// Info is one point-in-time inspection of the lock.
+// Info is one point-in-time inspection of the lease.
 type Info struct {
-	// Held is true when the lock dir exists AND its meta is not stale.
+	// Held is true when a claim exists AND the shared staleness rule says it is live.
 	Held bool
-	// Age is how long the current holder has held the lock (time since the
-	// meta.json mtime — the same clock gpu-lock.mjs uses). Zero when not held.
+	// Age is how long the current holder has held the card, from the acquirer's own
+	// stamp. NOT time-since-last-heartbeat, which reads as a few seconds for any
+	// long-running holder and made the defer message report "(0s)" for a job that had
+	// owned the card for an hour.
 	Age time.Duration
 	// PID is the recorded holder pid (0 when unknown / not held).
 	PID int
+	// Class is the holder's lease class (media/text), so a caller can say WHICH kind of
+	// work holds the card instead of assuming it is a generation job.
+	Class string
 }
-
-// lockMeta matches the meta.json every lease participant writes.
-//
-// The holder pid moved from a flat "pid" to a nested "holder.pid" when Go and Node
-// adopted one shared record. Reading only the old shape yielded PID == 0, which skips
-// the dead-holder check entirely and decides held/free on mtime alone — a lease held
-// by a live process could then read as free. Both shapes are accepted so a mixed
-// deployment (this fleet is hand-deployed and has drifted before) degrades to the old
-// behaviour rather than to a wrong answer.
-type lockMeta struct {
-	Holder struct {
-		PID int `json:"pid"`
-	} `json:"holder"`
-	LegacyPID   int   `json:"pid"`
-	StartedAt   int64 `json:"startedAt"`
-	ExpiresAtMs int64 `json:"expires_at_ms"`
-}
-
-// pid returns the holder pid from whichever schema the record uses.
-func (m lockMeta) pid() int {
-	if m.Holder.PID > 0 {
-		return m.Holder.PID
-	}
-	return m.LegacyPID
-}
-
-// pidAlive delegates to gpulease so the two views of liveness cannot disagree.
-//
-// The previous local copy assumed every participant runs as the same user and so
-// treated an access-denied OpenProcess as "no such process". That assumption is
-// exactly what the machine-wide lease exists to break: a holder may be an elevated or
-// SYSTEM-registered process, and misreading it as dead makes this package report a
-// live holder's lease as FREE — the vision gate would then fire straight into a busy
-// GPU. A package var so tests can stub a deterministic "dead holder".
-var pidAlive = gpulease.PIDAlive
 
 // Inspect reports whether the lock at lockPath is currently held, using the
 // same staleness rule as gpu-lock.mjs with the default 1h TTL. A stale lock
@@ -119,33 +89,45 @@ var pidAlive = gpulease.PIDAlive
 // runners' job, never ours.
 func Inspect(lockPath string) Info { return inspectAt(lockPath, DefaultTTL, time.Now()) }
 
-// inspectAt is Inspect with an injectable TTL and clock (unit-testable).
-func inspectAt(lockPath string, ttl time.Duration, now time.Time) Info {
-	fi, err := os.Stat(lockPath)
-	if err != nil || !fi.IsDir() {
-		return Info{} // no lock dir => free
-	}
-	mp := filepath.Join(lockPath, "meta.json")
-	mfi, err := os.Stat(mp)
+// inspectAt is Inspect with an injectable TTL and clock, retained for the existing
+// unit tests. The TTL argument is now ADVISORY ONLY: staleness is decided by
+// gpulease.Reclaimable, not here.
+//
+// THE THIRD RULE IS GONE. This package used to carry its own staleness logic —
+// (pid dead) OR (meta.json mtime older than 1h) — which was a THIRD implementation
+// alongside Go's and Node's, and it disagreed with both: gpulease reclaims on
+// (provably gone) OR (recycled pid) OR (heartbeat stale AND declared window expired).
+// A holder that heartbeats for over an hour is live to gpulease and stale here, so this
+// gate would report a busy card as free. That is the same failure mode as the path split
+// (C5) and the schema split, one layer down. Delegating means there is one rule.
+func inspectAt(lockPath string, _ time.Duration, now time.Time) Info {
+	return inspectVia(lockPath, now, gpulease.Reclaimable, gpulease.DefaultHeartbeatTTL)
+}
+
+// inspectVia is the delegation seam, so a test can drive the shared rule directly.
+func inspectVia(lockPath string, now time.Time,
+	reclaimable func(*gpulease.Meta, time.Time, time.Duration, func(int) (int64, bool)) bool,
+	heartbeatTTL time.Duration) Info {
+
+	b, err := os.ReadFile(filepath.Join(lockPath, "meta.json"))
 	if err != nil {
-		return Info{} // no meta => stale (mjs: isStale(null) === true)
+		return Info{} // no claim => free
 	}
-	b, rerr := os.ReadFile(mp)
-	var m lockMeta
-	if rerr != nil || json.Unmarshal(b, &m) != nil {
-		return Info{} // unreadable/corrupt meta => stale, same as the .mjs
+	var m gpulease.Meta
+	if json.Unmarshal(b, &m) != nil {
+		return Info{} // unparseable => not something we can call held
 	}
-	if p := m.pid(); p > 0 && !pidAlive(p) {
-		return Info{} // holder is dead => stale (the .mjs would reclaim it)
+	if reclaimable(&m, now, heartbeatTTL, gpulease.ProcessStart) {
+		return Info{} // stale by the ONE rule => not held
 	}
-	age := now.Sub(mfi.ModTime())
-	if age > ttl {
-		return Info{} // TTL cap: no-pid fallback + pid-recycle backstop
-	}
+	// Age is time HELD, from the acquirer's own stamp — not time since the last
+	// heartbeat, which would read as a few seconds for any long-running holder and made
+	// the defer message report "(0s)" for a job that had owned the card for an hour.
+	age := now.Sub(time.UnixMilli(m.AcquiredAtMs))
 	if age < 0 {
 		age = 0
 	}
-	return Info{Held: true, Age: age, PID: m.pid()}
+	return Info{Held: true, Age: age, PID: m.Holder.PID, Class: string(m.Class)}
 }
 
 // WaitFree polls the lock every poll (min bound 1ms; the pipeline passes 2s)
