@@ -648,19 +648,34 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 			// acquirers each decide the other's half-written claim is garbage.
 			return nil, &ErrHeld{Info: Info{Held: true, Reason: "claim in progress"}}
 		}
-		if m.reclaimable(meta, m.now()) {
-			// Remove only the CLAIM, never the container: another acquirer may be
-			// working inside this directory right now.
-			if err := removeClaim(m.metaPath()); err != nil {
-				// A reclaim we cannot perform is not a free lease. Report it as held
-				// rather than looping — spinning here once pegged a core forever.
-				return nil, fmt.Errorf("gpulease: cannot reclaim the stale lease at %s: %w", m.metaPath(), err)
-			}
-			continue
+		if !m.reclaimable(meta, m.now()) {
+			return nil, &ErrHeld{Info: m.holderInfo(meta)}
 		}
-		return nil, &ErrHeld{Info: m.Inspect()}
+		// Remove only the CLAIM, never the container: another acquirer may be working
+		// inside this directory right now.
+		if err := removeClaim(m.metaPath()); err != nil {
+			// A reclaim we cannot perform is not a free lease. Report it as held rather
+			// than looping — spinning here once pegged a core forever.
+			return nil, fmt.Errorf("gpulease: cannot reclaim the stale lease at %s: %w", m.metaPath(), err)
+		}
 	}
-	return nil, &ErrHeld{Info: m.Inspect()}
+	return nil, &ErrHeld{Info: m.holderInfo(nil)}
+}
+
+// holderInfo describes the current holder for an ErrHeld, falling back to the record we
+// already read.
+//
+// A fresh Inspect() can lose a race with the holder's release and return a ZERO Info,
+// which renders as `gpu busy:  holds the lease (0s, reason "")`. That string is not
+// decoration: it is what an agent reads to decide whether retrying is worth it.
+func (m *Manager) holderInfo(meta *Meta) Info {
+	if info := m.Inspect(); info.Held {
+		return info
+	}
+	if meta != nil {
+		return infoFrom(meta, m.now())
+	}
+	return Info{Held: true, Reason: "released while we were claiming it"}
 }
 
 // Acquire takes the card, retrying for up to opts.Wait while someone else legitimately
