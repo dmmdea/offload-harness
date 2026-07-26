@@ -59,6 +59,14 @@ matches), `summarize_file` (an offload digest), and the in-process `offload_*` c
 the rest sits behind its own flag, all defaulting off: `write_file` / `edit_file` / `delete_file`,
 `web_fetch`, `web_search`, `run`, `run_shell`, and the `github_*` tools.
 
+`search_files` patterns are **case-sensitive** regexes (`(?i)` prefixes one to fold case). That fact
+has to reach the planner at the moment it matters: a bare `no matches` made small planners retry with
+a *longer, more specific* query and then report the text as absent — a docs lookup that failed on
+every model/profile combination on the 6 GB tier. The zero-match result therefore states the
+case-sensitivity and names the concrete `(?i)` retry, and the suggestion is suppressed for patterns
+that already fold case (detected by parsing the pattern, not by substring-matching `"(?i)"`), so it
+can never burn a `MaxSameTool` call on a retry that cannot change the result.
+
 **`run` executes an allowlisted program directly, with no shell** — `go`, `gofmt`, `python`,
 `python3`, `pytest`, `npm`, `node`, `cargo`, `git`. Bare name only, resolved on the trusted PATH, and
 refused if the resolved binary lives inside the worktree (the `build` profile grants both `write_file`
