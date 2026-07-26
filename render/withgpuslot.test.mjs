@@ -108,7 +108,7 @@ test("no-lock mode: acquire skipped, fn runs, no release error", async () => {
 
 test("inherited lease: acquire is SKIPPED (we would contend with our own holder)", async () => {
   const h = harness();
-  await withGpuSlot({ ...h.opts, ...h.deps, lease: { dir: "X", epoch: 7 } },
+  await withGpuSlot({ ...h.opts, ...h.deps, lease: { dir: "X", epoch: 7 }, checkLease: () => true },
     async () => { h.calls.push("fn"); });
   assert.ok(!h.calls.includes("acquire"), "must not re-acquire a lease we already hold");
   assert.ok(h.calls.includes("fn"), "the job still runs");
@@ -121,7 +121,7 @@ test("inherited lease: the FIRST job performs the unload (the hoist actually hap
   const h = harness();
   await withGpuSlot({
     ...h.opts, ...h.deps,
-    lease: { dir: "X", epoch: 7 },
+    lease: { dir: "X", epoch: 7 }, checkLease: () => true,
     claimUnload: () => true, // we are the first job under this lease
   }, async () => { h.calls.push("fn"); });
   assert.ok(h.calls.includes("freeLlamaSwap"),
@@ -129,11 +129,55 @@ test("inherited lease: the FIRST job performs the unload (the hoist actually hap
   assert.ok(h.calls.indexOf("freeLlamaSwap") < h.calls.indexOf("fn"), "unload precedes the job");
 });
 
+// CLASS GATE. A `text` lease is a benchmark's reservation; unloading under it destroys
+// exactly the run the lease exists to protect. This regressed once already: skipping the
+// unload for ANY inherited lease made text safe by accident, and electing an unloader
+// without checking the class then made a text lease tear the text tier down.
+test("inherited TEXT lease NEVER unloads the text tier, even as the first job", async () => {
+  const h = harness();
+  await withGpuSlot({
+    ...h.opts, ...h.deps,
+    lease: { dir: "X", epoch: 7, class: "text" }, checkLease: () => true,
+    claimUnload: () => true, // even if we would win the election
+  }, async () => { h.calls.push("fn"); });
+  assert.ok(!h.calls.includes("freeLlamaSwap"),
+    "a text reservation must never unload the tier it was taken to protect");
+  assert.ok(h.calls.includes("fn"), "the job still runs");
+});
+
+test("inherited MEDIA lease does unload (the class gate is not a blanket skip)", async () => {
+  const h = harness();
+  await withGpuSlot({
+    ...h.opts, ...h.deps,
+    lease: { dir: "X", epoch: 7, class: "media" }, checkLease: () => true,
+    claimUnload: () => true,
+  }, async () => { h.calls.push("fn"); });
+  assert.ok(h.calls.includes("freeLlamaSwap"), "a media lease still frees the card");
+});
+
+// THE FENCE, exercised. A process that slept through a takeover must abort rather than
+// unload on top of whoever holds the card now — the incident replayed by a closing lid.
+test("a FENCED-OUT inherited lease refuses to touch the GPU", async () => {
+  const h = harness();
+  await assert.rejects(
+    withGpuSlot({
+      ...h.opts, ...h.deps,
+      lease: { dir: "X", epoch: 7, class: "media" },
+      checkLease: () => false, // our epoch is no longer current
+      claimUnload: () => true,
+    }, async () => { h.calls.push("fn"); }),
+    /fenced out/i
+  );
+  assert.ok(!h.calls.includes("freeLlamaSwap"),
+    "a fenced-out process must NOT unload — that is the original incident, replayed by a lid");
+  assert.ok(!h.calls.includes("fn"), "and it must not run the job either");
+});
+
 test("inherited lease: a LATER job skips the unload (once per lease, not per job)", async () => {
   const h = harness();
   await withGpuSlot({
     ...h.opts, ...h.deps,
-    lease: { dir: "X", epoch: 7 },
+    lease: { dir: "X", epoch: 7 }, checkLease: () => true,
     claimUnload: () => false, // another job already unloaded for this lease
   }, async () => { h.calls.push("fn"); });
   assert.ok(!h.calls.includes("freeLlamaSwap"),
@@ -142,7 +186,7 @@ test("inherited lease: a LATER job skips the unload (once per lease, not per job
 
 test("inherited lease: teardown still runs (freeComfy + kill), and release is a no-op", async () => {
   const h = harness();
-  await withGpuSlot({ ...h.opts, ...h.deps, lease: { dir: "X", epoch: 7 } },
+  await withGpuSlot({ ...h.opts, ...h.deps, lease: { dir: "X", epoch: 7 }, checkLease: () => true },
     async () => { h.calls.push("fn"); });
   assert.ok(h.calls.includes("freeComfy"), "ComfyUI is still torn down at the batch boundary");
   assert.equal(h.killed.n, 1, "a ComfyUI we spawned is still killed");
@@ -159,7 +203,7 @@ test("WITHOUT an inherited lease the old behaviour is unchanged (acquire + unloa
 test("the job callback receives the lease so it can fence before irreversible work", async () => {
   const h = harness();
   let seen;
-  await withGpuSlot({ ...h.opts, ...h.deps, lease: { dir: "X", epoch: 7 } },
+  await withGpuSlot({ ...h.opts, ...h.deps, lease: { dir: "X", epoch: 7 }, checkLease: () => true },
     async (ctx) => { seen = ctx.lease; });
   assert.deepEqual(seen, { dir: "X", epoch: 7 });
 });

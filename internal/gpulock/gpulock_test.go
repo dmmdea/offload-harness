@@ -29,10 +29,12 @@ func writeLock(t *testing.T, pid int) string {
 // same order every other lease participant resolves.
 func TestPathResolution(t *testing.T) {
 	t.Setenv("GPU_LOCK", filepath.Join("env", "gpu.lock"))
-	if got := Path(filepath.Join("cfg", "gpu.lock"), ""); got != filepath.Join("cfg", "gpu.lock") {
+	wantCfg, _ := filepath.Abs(filepath.Join("cfg", "gpu.lock"))
+	if got := Path(filepath.Join("cfg", "gpu.lock"), ""); got != wantCfg {
 		t.Errorf("override must win over env: got %q", got)
 	}
-	if got := Path("", ""); got != filepath.Join("env", "gpu.lock") {
+	wantEnv, _ := filepath.Abs(filepath.Join("env", "gpu.lock"))
+	if got := Path("", ""); got != wantEnv {
 		t.Errorf("env must win over default: got %q", got)
 	}
 	t.Setenv("GPU_LOCK", "")
