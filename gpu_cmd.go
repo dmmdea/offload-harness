@@ -212,6 +212,19 @@ func detachHolder(fs *flag.FlagSet, class string, dur time.Duration, reason, ori
 		return fmt.Errorf("spawning detached holder: %w", err)
 	}
 	childPID := child.Process.Pid
+	childProc := child.Process
+	// If we do not end up reporting success, the child must not survive. Both failure
+	// paths below used to return while leaving it running: it would then acquire as soon
+	// as the winner released and hold the card for its full --for window, while the
+	// operator had been told the reservation FAILED. This file warns about exactly that
+	// hazard a few lines up ("a leaked text reservation blocks every render until it
+	// expires").
+	reported := false
+	defer func() {
+		if !reported && childProc != nil {
+			_ = childProc.Kill()
+		}
+	}()
 	_ = child.Process.Release()
 
 	// Wait for the child to actually take the lease before reporting success —
@@ -238,6 +251,7 @@ func detachHolder(fs *flag.FlagSet, class string, dur time.Duration, reason, ori
 				fmt.Printf("reserved: %s epoch %d (pid %d) until %s\n  release with: local-offload gpu release --epoch %d\n",
 					info.Class, info.Epoch, info.PID, info.ExpiresAt.Format(time.Kitchen), info.Epoch)
 			}
+			reported = true // the holder is ours and reported; leave it running
 			return nil
 		}
 		time.Sleep(150 * time.Millisecond)

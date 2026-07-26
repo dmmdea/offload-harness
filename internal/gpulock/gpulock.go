@@ -22,7 +22,6 @@ package gpulock
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"time"
@@ -100,34 +99,14 @@ func Inspect(lockPath string) Info { return inspectAt(lockPath, DefaultTTL, time
 // A holder that heartbeats for over an hour is live to gpulease and stale here, so this
 // gate would report a busy card as free. That is the same failure mode as the path split
 // (C5) and the schema split, one layer down. Delegating means there is one rule.
-func inspectAt(lockPath string, _ time.Duration, now time.Time) Info {
-	return inspectVia(lockPath, now, gpulease.Reclaimable, gpulease.DefaultHeartbeatTTL)
-}
-
-// inspectVia is the delegation seam, so a test can drive the shared rule directly.
-func inspectVia(lockPath string, now time.Time,
-	reclaimable func(*gpulease.Meta, time.Time, time.Duration, func(int) (int64, bool)) bool,
-	heartbeatTTL time.Duration) Info {
-
-	b, err := os.ReadFile(filepath.Join(lockPath, "meta.json"))
-	if err != nil {
-		return Info{} // no claim => free
-	}
-	var m gpulease.Meta
-	if json.Unmarshal(b, &m) != nil {
-		return Info{} // unparseable => not something we can call held
-	}
-	if reclaimable(&m, now, heartbeatTTL, gpulease.ProcessStart) {
-		return Info{} // stale by the ONE rule => not held
-	}
-	// Age is time HELD, from the acquirer's own stamp — not time since the last
-	// heartbeat, which would read as a few seconds for any long-running holder and made
-	// the defer message report "(0s)" for a job that had owned the card for an hour.
-	age := now.Sub(time.UnixMilli(m.AcquiredAtMs))
-	if age < 0 {
-		age = 0
-	}
-	return Info{Held: true, Age: age, PID: m.Holder.PID, Class: string(m.Class)}
+func inspectAt(lockPath string, _ time.Duration, _ time.Time) Info {
+	// Delegate WHOLESALE, not just the rule. Reconstructing the judgement here from the
+	// record — even using the shared Reclaimable — was still a second reader, and it
+	// broke the moment the heartbeat moved into a per-epoch file: a record-only view
+	// sees a frozen RenewedAtMs and calls a live, renewing holder stale as soon as its
+	// declared window lapses. One inspection path, one answer.
+	i := gpulease.InspectDir(lockPath)
+	return Info{Held: i.Held, Age: i.Age, PID: i.PID, Class: string(i.Class)}
 }
 
 // WaitFree polls the lock every poll (min bound 1ms; the pipeline passes 2s)
