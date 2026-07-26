@@ -52,20 +52,19 @@ const DefaultLockName = "local-offload-gpu.lock"
 // the moment offloading matters). Resolution is delegated rather than duplicated so
 // the two can never drift apart again.
 func Path(override, stateDir string) string {
-	if override != "" {
-		return override
-	}
-	if v := os.Getenv("GPU_LOCK"); v != "" {
-		return v
-	}
-	root, err := gpulease.ResolveStateRoot(stateDir)
+	// ONE resolver for every consumer. Re-deriving the location here is what split the
+	// lease in two: this package honoured the override while the acquirer ignored it,
+	// so the gate watched a directory nothing wrote.
+	dir, err := gpulease.LeaseDir(override, stateDir)
 	if err != nil {
-		// Read-only inspection must never fail the caller. Fall back to the
-		// package default so a bad state_dir degrades to "cannot see the lease"
-		// rather than breaking the vision path outright.
-		return filepath.Join(os.TempDir(), DefaultLockName)
+		// Read-only inspection must never fail the caller, but it must not silently
+		// pretend either: an unresolvable location degrades to a path that provably
+		// does not exist, so Inspect reports NOT held and the caller proceeds — the
+		// same outcome as today, without inventing a plausible-looking tmpdir path
+		// that could collide with a real lock.
+		return filepath.Join(os.TempDir(), "local-offload-gpu-UNRESOLVED")
 	}
-	return filepath.Join(root, "gpu", "lease")
+	return dir
 }
 
 // Info is one point-in-time inspection of the lock.

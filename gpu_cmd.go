@@ -55,7 +55,11 @@ func runGPU(args []string) error {
 // never end up arbitrating a different lease than the render path.
 func openLease(fs *flag.FlagSet) (*gpulease.Manager, error) {
 	cfg := loadCfg(fs)
-	return gpulease.Open(cfg.StateDir)
+	// gpu_lock_path MUST be honoured here. Ignoring it while the render path and the
+	// vision gate obeyed it put the reservation verb on a different directory from the
+	// renders it is supposed to arbitrate against — they never contended, which is the
+	// original incident with no warning.
+	return gpulease.OpenAt(cfg.GPULockPath, cfg.StateDir)
 }
 
 func runGPUStatus(args []string) error {

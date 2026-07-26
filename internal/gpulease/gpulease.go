@@ -150,17 +150,83 @@ type Options struct {
 // Manager binds a resolved state root. Construct with Open, which performs the
 // refuse-to-start validation exactly once.
 type Manager struct {
-	root         string
-	heartbeatTTL time.Duration
-	now          func() time.Time
-	procStart    func(pid int) (int64, bool)
-	pid          int
+	root string
+	// leaseOverride, when set, is the fully resolved lease directory (see LeaseDir).
+	// It exists so every consumer can be handed the SAME directory rather than each
+	// re-deriving one from a different input.
+	leaseOverride string
+	heartbeatTTL  time.Duration
+	now           func() time.Time
+	procStart     func(pid int) (int64, bool)
+	pid           int
 }
 
-// Open resolves and VALIDATES the state root, then returns a Manager. It returns an
-// error rather than degrading: an unwritable or cloud-synced root is a refuse-to-start
-// condition, never a silent fallback.
-func Open(override string) (*Manager, error) {
+// LeaseDir is THE resolver every consumer must use — the CLI, the pipeline, the
+// read-only vision gate, and the render runners via GPU_LEASE_DIR.
+//
+// It exists because a second resolution order is how the lease silently splits in two.
+// `gpu_lock_path`/GPU_LOCK were honoured by some consumers and ignored by others, so
+// setting that supported field put the reservation verb and the render path on
+// DIFFERENT directories, where they never contend — the original incident, restored
+// with no warning. One function, one answer.
+func LeaseDir(lockOverride, stateDir string) (string, error) {
+	if o := strings.TrimSpace(lockOverride); o != "" {
+		abs, err := filepath.Abs(o)
+		if err != nil {
+			return "", fmt.Errorf("gpulease: gpu_lock_path %q is not a valid path: %w", o, err)
+		}
+		if why := syncRootReason(abs); why != "" {
+			return "", fmt.Errorf("gpulease: refusing gpu_lock_path %q: %s", abs, why)
+		}
+		return abs, nil
+	}
+	if v := strings.TrimSpace(os.Getenv("GPU_LOCK")); v != "" {
+		abs, err := filepath.Abs(v)
+		if err != nil {
+			return "", fmt.Errorf("gpulease: GPU_LOCK %q is not a valid path: %w", v, err)
+		}
+		if why := syncRootReason(abs); why != "" {
+			return "", fmt.Errorf("gpulease: refusing GPU_LOCK %q: %s", abs, why)
+		}
+		return abs, nil
+	}
+	root, err := ResolveStateRoot(stateDir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "gpu", leaseDirName), nil
+}
+
+// Open resolves and VALIDATES the lease location, then returns a Manager. It returns
+// an error rather than degrading: an unwritable or cloud-synced location is a
+// refuse-to-start condition, never a silent fallback.
+func Open(override string) (*Manager, error) { return OpenAt("", override) }
+
+// OpenAt is Open with an explicit gpu_lock_path override, so the CLI and the pipeline
+// resolve exactly the directory the render runners will be told to use.
+func OpenAt(lockOverride, stateDir string) (*Manager, error) {
+	lease, err := LeaseDir(lockOverride, stateDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(lease, 0o777); err != nil {
+		return nil, fmt.Errorf("gpulease: lease dir %q is not usable: %w", lease, err)
+	}
+	if err := probeWritable(lease); err != nil {
+		return nil, err
+	}
+	return &Manager{
+		leaseOverride: lease,
+		root:          filepath.Dir(filepath.Dir(lease)),
+		heartbeatTTL:  DefaultHeartbeatTTL,
+		now:           time.Now,
+		procStart:     processStart,
+		pid:           os.Getpid(),
+	}, nil
+}
+
+// openLegacy is the original state-root-only constructor, retained for tests.
+func openLegacy(override string) (*Manager, error) {
 	root, err := ResolveStateRoot(override)
 	if err != nil {
 		return nil, err
@@ -182,11 +248,37 @@ func Open(override string) (*Manager, error) {
 
 // Root is the resolved state root (for diagnostics and for threading to the Node
 // side as GPU_LEASE_DIR).
-func (m *Manager) Root() string      { return m.root }
-func (m *Manager) gpuDir() string    { return filepath.Join(m.root, "gpu") }
-func (m *Manager) leaseDir() string  { return filepath.Join(m.gpuDir(), leaseDirName) }
+func (m *Manager) Root() string { return m.root }
+func (m *Manager) gpuDir() string {
+	if m.leaseOverride != "" {
+		return filepath.Dir(m.leaseOverride)
+	}
+	return filepath.Join(m.root, "gpu")
+}
+func (m *Manager) leaseDir() string {
+	if m.leaseOverride != "" {
+		return m.leaseOverride
+	}
+	return filepath.Join(m.gpuDir(), leaseDirName)
+}
 func (m *Manager) epochPath() string { return filepath.Join(m.gpuDir(), epochFileName) }
 func (m *Manager) metaPath() string  { return filepath.Join(m.leaseDir(), metaFileName) }
+
+// clearUnloadMarkers removes the per-epoch "somebody already unloaded for this lease"
+// markers the render path elects with. They MUST be cleared when the lease ends: a
+// marker outliving its lease, combined with any epoch reuse, silently suppresses a
+// needed unload and the next render runs against a full card.
+func (m *Manager) clearUnloadMarkers() {
+	entries, err := os.ReadDir(m.leaseDir())
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "unloaded.") {
+			_ = os.Remove(filepath.Join(m.leaseDir(), e.Name()))
+		}
+	}
+}
 
 // ResolveStateRoot picks the machine-wide state root and REFUSES bad ones.
 //
@@ -413,17 +505,33 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 		}
 		hookLeaseDirCreated()
 
-		// THE CLAIM: exclusive creation of meta.json — byte-identical in intent to the
-		// Node side's O_EXCL write. This single token is what makes cross-language
-		// mutual exclusion real rather than merely documented.
+		// The epoch is taken BEFORE the claim so the record can be written in the SAME
+		// call that creates it. Creating the token empty and filling it in afterwards
+		// left a window where the claim was present but unparseable — a reader with no
+		// grace period reads that as debris and deletes a live claim. A failed claim
+		// therefore burns an epoch number, which is harmless: the counter only has to
+		// be monotonic, never gapless.
+		epoch, eerr := m.bumpEpoch()
+		if eerr != nil {
+			return nil, eerr
+		}
+		rec, rerr := m.record(epoch, class, opts)
+		if rerr != nil {
+			return nil, rerr
+		}
+
+		// THE CLAIM: exclusive creation of meta.json, written complete in one call.
+		// This single token is what makes cross-language mutual exclusion real rather
+		// than merely documented.
 		f, err := os.OpenFile(m.metaPath(), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o666)
 		if err == nil {
-			lease, werr := m.stamp(f, class, opts)
-			if werr != nil {
+			_, werr := f.Write(rec)
+			cerr := f.Close()
+			if werr != nil || cerr != nil {
 				_ = os.Remove(m.metaPath()) // drop a claim we could not complete
-				return nil, werr
+				return nil, fmt.Errorf("gpulease: writing lease claim: %w", errors.Join(werr, cerr))
 			}
-			return lease, nil
+			return &Lease{mgr: m, epoch: epoch, class: class}, nil
 		}
 		if !os.IsExist(err) {
 			return nil, fmt.Errorf("gpulease: could not claim the lease: %w", err)
@@ -467,16 +575,9 @@ func (m *Manager) claimIsFresh() bool {
 	return m.now().Sub(fi.ModTime()) < claimGrace
 }
 
-// stamp fills in the claim we already hold exclusively. It writes through the OPEN
-// handle from the O_EXCL create rather than renaming a temp file over it: a rename
-// would overwrite whatever is at that path, which is precisely how a competing claim
-// used to get clobbered.
-func (m *Manager) stamp(f *os.File, class Class, opts Options) (*Lease, error) {
-	defer func() { _ = f.Close() }()
-	epoch, err := m.bumpEpoch()
-	if err != nil {
-		return nil, err
-	}
+// record builds the complete lease record, so the claim can be created and filled in
+// by a single write. Nothing observes a partially written token.
+func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error) {
 	ttl := opts.TTL
 	if ttl <= 0 {
 		ttl = DefaultTTL
@@ -496,12 +597,9 @@ func (m *Manager) stamp(f *os.File, class Class, opts Options) (*Lease, error) {
 	}
 	b, err := json.Marshal(&meta)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("gpulease: encoding lease record: %w", err)
 	}
-	if _, err := f.Write(b); err != nil {
-		return nil, fmt.Errorf("gpulease: writing lease claim: %w", err)
-	}
-	return &Lease{mgr: m, epoch: epoch, class: class}, nil
+	return b, nil
 }
 
 // writeMeta rewrites an EXISTING claim we already own (heartbeat renewal). It is only
@@ -522,10 +620,24 @@ func (m *Manager) writeMeta(meta *Meta) error {
 // lease dir so it survives reclaim and can never go backwards when a lease is removed.
 func (m *Manager) bumpEpoch() (uint64, error) {
 	cur := uint64(0)
-	if b, err := os.ReadFile(m.epochPath()); err == nil {
-		if v, perr := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64); perr == nil {
-			cur = v
+	b, err := os.ReadFile(m.epochPath())
+	switch {
+	case err == nil:
+		v, perr := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+		if perr != nil {
+			// FAIL CLOSED. Silently treating an unreadable counter as 0 restarts the
+			// fence at 1, and a straggler still holding epoch 1 then matches the new
+			// lease, passes Check(), and its release deletes the live holder's claim.
+			// A torn counter is exactly what a non-atomic writer produces, so this is
+			// reachable under ordinary contention rather than only on corruption.
+			return 0, fmt.Errorf("gpulease: fencing counter at %s is unreadable (%q); "+
+				"refusing to restart the fence from zero", m.epochPath(), strings.TrimSpace(string(b)))
 		}
+		cur = v
+	case os.IsNotExist(err):
+		cur = 0 // first ever acquisition on this box
+	default:
+		return 0, fmt.Errorf("gpulease: reading fencing counter: %w", err)
 	}
 	next := cur + 1
 	tmp := m.epochPath() + ".tmp"
@@ -590,6 +702,7 @@ func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
 	}
 	// Drop the CLAIM only. Removing the container would delete a directory another
 	// acquirer may be working inside.
+	m.clearUnloadMarkers()
 	if err := os.Remove(m.metaPath()); err != nil && !os.IsNotExist(err) {
 		return false, fmt.Errorf("gpulease: releasing lease: %w", err)
 	}
@@ -611,6 +724,7 @@ func (l *Lease) Release() error {
 	if meta.Epoch != l.epoch {
 		return nil // fenced out; the lease is someone else's now — leave it alone
 	}
+	l.mgr.clearUnloadMarkers()
 	if err := os.Remove(l.mgr.metaPath()); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("gpulease: releasing lease: %w", err)
 	}

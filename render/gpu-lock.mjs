@@ -425,6 +425,7 @@ export async function withGpuSlot(opts, fn) {
     freeComfy: freeCfy = freeComfy,
     lease = inheritedLease(),
     claimUnload = claimLeaseUnload,
+    checkLease = checkInheritedLease,
   } = opts || {};
 
   const lock = noLock || lease
@@ -452,9 +453,25 @@ export async function withGpuSlot(opts, fn) {
   const onSig = async () => { await cleanup(); process.exit(130); };
   for (const sig of ["SIGINT", "SIGTERM", "SIGBREAK"]) process.on(sig, onSig);
   try {
-    // Once per LEASE, not once per job. Under an inherited lease the first job in
-    // claims the unload; later jobs in the same batch skip it.
-    if (!lease || claimUnload(lease)) {
+    // WHO MAY UNLOAD, and HOW OFTEN.
+    //
+    // Class first: only a `media` holder may tear the text tier down. A `text` lease is
+    // a benchmark's reservation — unloading under it destroys exactly the run the lease
+    // was taken to protect. (An earlier revision skipped the unload for ANY inherited
+    // lease, which happened to make text safe; electing an unloader without checking
+    // the class then made a text lease unload the text tier.)
+    //
+    // Then once per LEASE, not once per job: the first job in claims the marker and
+    // performs the teardown, later jobs in the same batch skip it.
+    const mayUnload = !lease || lease.class !== "text";
+    if (mayUnload && (!lease || claimUnload(lease))) {
+      // FENCE before an irreversible action. A process that slept through a takeover
+      // (a closing lid is not a crash) must not unload on top of the current holder.
+      if (lease && !checkLease(lease)) {
+        throw new Error(
+          `GPU lease epoch ${lease.epoch} is no longer current — this process was fenced out ` +
+          `(the card was handed to another holder while we were suspended). Refusing to touch the GPU.`);
+      }
       await freeLS();
     }
     if (comfyManaged) {
