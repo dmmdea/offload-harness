@@ -258,13 +258,22 @@ type Config struct {
 	VideoGenTextEncoder string `json:"videogen_text_encoder,omitempty"`
 	// AudioGenTimeoutSec bounds one audio synthesis (TTS or ACE-Step). Default 720 (12min).
 	AudioGenTimeoutSec int `json:"audiogen_timeout_sec,omitempty"`
-	// VideoGenWaitMs is how long a queued video job waits for the single GPU slot before
-	// deferring (passed to the runner as GPU_LOCK waitMs). Long because video is the hero
-	// job. Default 1200000 (20min).
+	// GPUWaitMs is how long ANY GPU job queues behind a current lease holder before it
+	// defers with the holder's detail. It is the default ceiling for every GPU task;
+	// VideoGenWaitMs / AudioGenWaitMs override it for their own task.
+	//
+	// A busy card must QUEUE the job rather than drop it — that is what the single GPU
+	// slot has always been for. It is BOUNDED because the caller is usually one tool
+	// call, and a tool call that blocks for tens of minutes is indistinguishable from a
+	// hang; past the window an honest "held by <class>, <n>s in" is more useful to a
+	// caller that can retry. Default 90000 (90s), matching VisionGPUWaitSec so the two
+	// GPU waiters behave alike.
+	GPUWaitMs int `json:"gpu_wait_ms,omitempty"`
+	// VideoGenWaitMs is how long a queued video job waits for the GPU lease before
+	// deferring. Default 90000 (90s); raise it to restore a long serial queue.
 	VideoGenWaitMs int `json:"videogen_wait_ms,omitempty"`
-	// AudioGenWaitMs is how long a queued audio job waits for the GPU slot before deferring.
-	// Kept SHORTER than video so a cheap queued TTS isn't starved by a 20-min video job —
-	// it defers cleanly after this window. Default 120000 (2min).
+	// AudioGenWaitMs is how long a queued audio job waits for the GPU lease before
+	// deferring. Default 90000 (90s).
 	AudioGenWaitMs int `json:"audiogen_wait_ms,omitempty"`
 	// GPULockPath overrides the single-slot GPU lock DIRECTORY shared with the render
 	// runners (render/gpu-lock.mjs). Empty = the runners' own default (the GPU_LOCK env,
@@ -483,8 +492,9 @@ func Default() Config {
 		VideoGenTimeoutSec:          1500,
 		AudioGenTimeoutSec:          720,
 		EditTimeoutSec:              300,     // edit_image / media ops (CPU; no GPU lock)
-		VideoGenWaitMs:              1200000, // 20min — video is the hero job
-		AudioGenWaitMs:              120000,  // 2min — a queued TTS defers fast, never starved by a long video
+		GPUWaitMs:                   90000, // 90s — queue behind a holder, then defer with an ETA
+		VideoGenWaitMs:              90000,
+		AudioGenWaitMs:              90000,
 		GPULockPath:                 "",      // runners' default (GPU_LOCK env, else <state_dir>/gpu/lease)
 		StateDir:                    "",      // platform default: %ProgramData%\local-offload | /var/lib/local-offload
 		VisionGPUWaitSec:            90,      // LO-1: bounded wait for the gen lock before a vision call defers

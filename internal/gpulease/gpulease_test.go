@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -469,5 +470,196 @@ func TestFailedStampLeavesNoOrphanClaim(t *testing.T) {
 	}
 	if info := m.Inspect(); info.Held {
 		t.Fatalf("the lease reads as HELD after a failed stamp: %+v", info)
+	}
+}
+
+// realClockManager is a Manager on a temp root using the REAL clock. Tests that run
+// acquirers concurrently need it: newTestManager's fake clock is a plain variable, and
+// several goroutines reading and advancing it is a data race, not a test.
+func realClockManager(t *testing.T) *Manager {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "gpu"), 0o777); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	return &Manager{
+		root:         root,
+		heartbeatTTL: DefaultHeartbeatTTL,
+		now:          time.Now,
+		sleep:        time.Sleep,
+		pollEvery:    2 * time.Millisecond,
+		procStart:    func(int) (int64, bool) { return 4242, true },
+		pid:          os.Getpid(),
+	}
+}
+
+// A fencing token that two leases share is not a cosmetic defect. The token is threaded
+// to child processes as GPU_LEASE_EPOCH, so a straggling child of the FIRST lease passes
+// Check() against the SECOND, may unload models on top of it, and its release deletes
+// the live holder's claim. Read-modify-write on the counter is what produced duplicates:
+// two acquirers both read n and both wrote n+1, which tmp+rename cannot prevent because
+// it makes each WRITE atomic, not the increment.
+func TestConcurrentAcquirersNeverShareAFencingToken(t *testing.T) {
+	m := realClockManager(t)
+	const workers, each = 8, 15
+	tokens := make(chan uint64, workers*each)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < each; i++ {
+				v, err := m.bumpEpoch()
+				if err != nil {
+					t.Errorf("bumpEpoch: %v", err)
+					return
+				}
+				tokens <- v
+			}
+		}()
+	}
+	wg.Wait()
+	close(tokens)
+
+	seen := map[uint64]bool{}
+	for v := range tokens {
+		if seen[v] {
+			t.Fatalf("token %d was issued twice; a straggler holding it would pass Check() against a later lease", v)
+		}
+		seen[v] = true
+	}
+	if len(seen) != workers*each {
+		t.Fatalf("issued %d distinct tokens, want %d", len(seen), workers*each)
+	}
+	for i := uint64(1); i <= workers*each; i++ {
+		if !seen[i] {
+			t.Errorf("token %d was never issued; the counter did not advance one at a time", i)
+		}
+	}
+}
+
+// The end-to-end version of the same invariant: real acquire/release cycles under
+// contention must never hand one epoch to two different leases.
+func TestConcurrentAcquireReleaseCyclesNeverReuseAnEpoch(t *testing.T) {
+	m := realClockManager(t)
+	const workers, each = 6, 8
+	var mu sync.Mutex
+	seen := map[uint64]int{}
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < each; i++ {
+				l, err := m.Acquire(ClassMedia, Options{Reason: "job", Wait: 30 * time.Second})
+				if err != nil {
+					t.Errorf("Acquire: %v", err)
+					return
+				}
+				mu.Lock()
+				seen[l.Epoch()]++
+				mu.Unlock()
+				if err := l.Release(); err != nil {
+					t.Errorf("Release: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	for epoch, n := range seen {
+		if n > 1 {
+			t.Errorf("epoch %d was handed to %d different leases", epoch, n)
+		}
+	}
+	if len(seen) != workers*each {
+		t.Errorf("completed %d leases, want %d", len(seen), workers*each)
+	}
+}
+
+// A busy card must QUEUE the job, not drop it: the lock this package replaced existed to
+// serialize GPU work, and a render arriving mid-render should run afterwards.
+func TestAcquireWaitsOutAHolderThenTakesTheCard(t *testing.T) {
+	m, now := newTestManager(t)
+	holder, err := m.TryAcquire(ClassText, Options{Reason: "benchmark", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("setup acquire: %v", err)
+	}
+	probes := 0
+	m.sleep = func(d time.Duration) {
+		probes++
+		*now = now.Add(d)
+		if probes == 2 {
+			if rerr := holder.Release(); rerr != nil {
+				t.Errorf("holder release: %v", rerr)
+			}
+		}
+	}
+	lease, err := m.Acquire(ClassMedia, Options{Reason: "video", Wait: 90 * time.Second})
+	if err != nil {
+		t.Fatalf("Acquire dropped a job it should have queued: %v", err)
+	}
+	if probes != 2 {
+		t.Errorf("took the card after %d probes, want 2 (one per second until the holder released)", probes)
+	}
+	if lease.Class() != ClassMedia {
+		t.Errorf("class = %q, want %q", lease.Class(), ClassMedia)
+	}
+}
+
+// The wait is BOUNDED, and what comes back is an honest ETA rather than a bare failure:
+// an agent caller can act on "held by text, 45m reservation", not on "error".
+func TestAcquireGivesUpAfterItsWindowAndNamesTheHolder(t *testing.T) {
+	m, now := newTestManager(t)
+	if _, err := m.TryAcquire(ClassText, Options{Reason: "45m reservation", TTL: 45 * time.Minute}); err != nil {
+		t.Fatalf("setup acquire: %v", err)
+	}
+	probes := 0
+	m.sleep = func(d time.Duration) { probes++; *now = now.Add(d) }
+
+	_, err := m.Acquire(ClassMedia, Options{Reason: "video", Wait: 5 * time.Second})
+	var held *ErrHeld
+	if !errors.As(err, &held) {
+		t.Fatalf("err = %v, want *ErrHeld carrying the holder", err)
+	}
+	if held.Info.Class != ClassText || held.Info.Reason != "45m reservation" {
+		t.Errorf("holder detail lost: %+v", held.Info)
+	}
+	if probes != 5 {
+		t.Errorf("probed %d times in a 5s window at 1s intervals, want 5", probes)
+	}
+}
+
+// Waiting cannot fix an unusable lease location, so a configuration fault must come back
+// immediately instead of burning the caller's whole window first.
+func TestAcquireDoesNotWaitOutAConfigurationFault(t *testing.T) {
+	m, _ := newTestManager(t)
+	slept := 0
+	m.sleep = func(time.Duration) { slept++ }
+
+	if _, err := m.Acquire(Class("gpu"), Options{Wait: time.Hour}); err == nil {
+		t.Fatal("an unknown class was accepted")
+	}
+	if slept != 0 {
+		t.Errorf("waited %d times on a configuration fault; it can never clear", slept)
+	}
+}
+
+// Zero Wait is exactly the old single-try behaviour, so callers that genuinely want to
+// fail fast keep it.
+func TestAcquireWithoutAWaitIsASingleTry(t *testing.T) {
+	m, _ := newTestManager(t)
+	if _, err := m.TryAcquire(ClassMedia, Options{Reason: "holder", TTL: time.Hour}); err != nil {
+		t.Fatalf("setup acquire: %v", err)
+	}
+	slept := 0
+	m.sleep = func(time.Duration) { slept++ }
+
+	var held *ErrHeld
+	if _, err := m.Acquire(ClassMedia, Options{Reason: "second"}); !errors.As(err, &held) {
+		t.Fatalf("err = %v, want *ErrHeld", err)
+	}
+	if slept != 0 {
+		t.Errorf("slept %d times with Wait unset", slept)
 	}
 }
