@@ -86,6 +86,24 @@ const (
 	epochFileName  = "epoch"
 	waitersDirName = "waiters"
 	metaFileName   = "meta.json"
+	// epochLockName serializes the read-modify-write of the fencing counter. See
+	// withEpochLock for why tmp+rename alone is not enough.
+	epochLockName = "epoch.lock"
+)
+
+const (
+	// epochLockStale bounds how long a lock file may sit before it is treated as debris
+	// from a process that died mid-bump rather than as live contention. The window it
+	// guards is two file operations wide, so this is orders of magnitude generous.
+	epochLockStale = 30 * time.Second
+	// epochLockAttempts x epochLockPause bound the spin. A bump is two file operations;
+	// anything that cannot complete inside this is a wedged lock, not a queue.
+	epochLockAttempts = 400
+	epochLockPause    = 5 * time.Millisecond
+
+	// acquirePollInterval is how often Acquire re-probes a held card. Frequent enough
+	// that a waiter starts within a second of a release, cheap enough to be free.
+	acquirePollInterval = time.Second
 )
 
 // ErrHeld is returned by TryAcquire when the card is legitimately held by someone
@@ -145,6 +163,10 @@ type Options struct {
 	// TTL is how long the holder declares it will need the card. Stamped into
 	// ExpiresAtMs. Zero uses DefaultTTL.
 	TTL time.Duration
+	// Wait is how long Acquire keeps retrying while the card is legitimately held by
+	// someone else. Zero means try exactly once. Only contention is waited out; a
+	// configuration fault is returned immediately, because waiting cannot fix it.
+	Wait time.Duration
 }
 
 // Manager binds a resolved state root. Construct with Open, which performs the
@@ -157,8 +179,30 @@ type Manager struct {
 	leaseOverride string
 	heartbeatTTL  time.Duration
 	now           func() time.Time
-	procStart     func(pid int) (int64, bool)
-	pid           int
+	// sleep pauses between Acquire probes, and pollEvery is how long each pause is.
+	// Both are injectable so a waiting test can advance its own clock instead of
+	// spending real seconds.
+	sleep     func(time.Duration)
+	pollEvery time.Duration
+	procStart func(pid int) (int64, bool)
+	pid       int
+}
+
+// pause waits between Acquire probes, tolerating a Manager built without a sleep seam.
+func (m *Manager) pause(d time.Duration) {
+	if m.sleep == nil {
+		time.Sleep(d)
+		return
+	}
+	m.sleep(d)
+}
+
+// pollInterval is how long Acquire waits between probes.
+func (m *Manager) pollInterval() time.Duration {
+	if m.pollEvery > 0 {
+		return m.pollEvery
+	}
+	return acquirePollInterval
 }
 
 // LeaseDir is THE resolver every consumer must use — the CLI, the pipeline, the
@@ -220,29 +264,9 @@ func OpenAt(lockOverride, stateDir string) (*Manager, error) {
 		root:          filepath.Dir(filepath.Dir(lease)),
 		heartbeatTTL:  DefaultHeartbeatTTL,
 		now:           time.Now,
+		sleep:         time.Sleep,
 		procStart:     processStart,
 		pid:           os.Getpid(),
-	}, nil
-}
-
-// openLegacy is the original state-root-only constructor, retained for tests.
-func openLegacy(override string) (*Manager, error) {
-	root, err := ResolveStateRoot(override)
-	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(filepath.Join(root, "gpu"), 0o777); err != nil {
-		return nil, fmt.Errorf("gpulease: state root %q is not usable: %w", root, err)
-	}
-	if err := probeWritable(filepath.Join(root, "gpu")); err != nil {
-		return nil, err
-	}
-	return &Manager{
-		root:         root,
-		heartbeatTTL: DefaultHeartbeatTTL,
-		now:          time.Now,
-		procStart:    processStart,
-		pid:          os.Getpid(),
 	}, nil
 }
 
@@ -261,8 +285,9 @@ func (m *Manager) leaseDir() string {
 	}
 	return filepath.Join(m.gpuDir(), leaseDirName)
 }
-func (m *Manager) epochPath() string { return filepath.Join(m.gpuDir(), epochFileName) }
-func (m *Manager) metaPath() string  { return filepath.Join(m.leaseDir(), metaFileName) }
+func (m *Manager) epochPath() string     { return filepath.Join(m.gpuDir(), epochFileName) }
+func (m *Manager) epochLockPath() string { return filepath.Join(m.gpuDir(), epochLockName) }
+func (m *Manager) metaPath() string      { return filepath.Join(m.leaseDir(), metaFileName) }
 
 // clearUnloadMarkers removes the per-epoch "somebody already unloaded for this lease"
 // markers the render path elects with. They MUST be cleared when the lease ends: a
@@ -542,10 +567,6 @@ func (m *Manager) readMeta() (*Meta, error) {
 // Acquisition
 // ---------------------------------------------------------------------------
 
-// hookLeaseDirCreated is a test-only seam invoked once the lease directory exists but
-// before this acquirer's claim is recorded. Production behaviour is a no-op.
-var hookLeaseDirCreated = func() {}
-
 // Lease is a held lease. Every irreversible action must be preceded by Check().
 type Lease struct {
 	mgr   *Manager
@@ -576,7 +597,6 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 		if err := os.MkdirAll(m.leaseDir(), 0o777); err != nil {
 			return nil, fmt.Errorf("gpulease: could not create lease dir: %w", err)
 		}
-		hookLeaseDirCreated()
 
 		// The epoch is taken BEFORE the claim so the record can be written in the SAME
 		// call that creates it. Creating the token empty and filling it in afterwards
@@ -601,7 +621,7 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 			_, werr := f.Write(rec)
 			cerr := f.Close()
 			if werr != nil || cerr != nil {
-				_ = os.Remove(m.metaPath()) // drop a claim we could not complete
+				_ = removeClaim(m.metaPath()) // drop a claim we could not complete
 				return nil, fmt.Errorf("gpulease: writing lease claim: %w", errors.Join(werr, cerr))
 			}
 			return &Lease{mgr: m, epoch: epoch, class: class}, nil
@@ -621,7 +641,7 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 		if m.reclaimable(meta, m.now()) {
 			// Remove only the CLAIM, never the container: another acquirer may be
 			// working inside this directory right now.
-			if err := os.Remove(m.metaPath()); err != nil && !os.IsNotExist(err) {
+			if err := removeClaim(m.metaPath()); err != nil {
 				// A reclaim we cannot perform is not a free lease. Report it as held
 				// rather than looping — spinning here once pegged a core forever.
 				return nil, fmt.Errorf("gpulease: cannot reclaim the stale lease at %s: %w", m.metaPath(), err)
@@ -631,6 +651,53 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 		return nil, &ErrHeld{Info: m.Inspect()}
 	}
 	return nil, &ErrHeld{Info: m.Inspect()}
+}
+
+// Acquire takes the card, retrying for up to opts.Wait while someone else legitimately
+// holds it. Zero Wait is exactly TryAcquire.
+//
+// WHY A BOUNDED WAIT AND NOT A SINGLE TRY: the lock this package replaced existed to
+// ORGANIZE concurrent GPU jobs into a serial queue, not to cancel them — a render that
+// arrives thirty seconds into someone else's render should run thirty seconds later,
+// not fail. Trying once turns ordinary contention into a dropped job.
+//
+// WHY BOUNDED AND NOT THE OLD 30 MINUTES: the caller is usually a single tool call, and
+// a tool call that blocks for half an hour is indistinguishable from a hang. Past the
+// window the honest answer — "held by <class>, <n>s in" — is more useful to an agent
+// that can retry than another twenty minutes of silence.
+//
+// Only *ErrHeld is retried. An unwritable or cloud-synced lease location is returned
+// immediately: it is a configuration fault, and waiting cannot fix it.
+func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
+	lease, err := m.TryAcquire(class, opts)
+	if err == nil || opts.Wait <= 0 {
+		return lease, err
+	}
+	var held *ErrHeld
+	if !errors.As(err, &held) {
+		return nil, err
+	}
+	deadline := m.now().Add(opts.Wait)
+	for {
+		remaining := deadline.Sub(m.now())
+		if remaining <= 0 {
+			return nil, err // the most recent holder, not the first one we saw
+		}
+		pause := m.pollInterval()
+		if remaining < pause {
+			pause = remaining
+		}
+		m.pause(pause)
+
+		lease, aerr := m.TryAcquire(class, opts)
+		if aerr == nil {
+			return lease, nil
+		}
+		if !errors.As(aerr, &held) {
+			return nil, aerr
+		}
+		err = aerr
+	}
 }
 
 // claimGrace is how long a present-but-unparseable meta.json is treated as a claim in
@@ -675,24 +742,101 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 	return b, nil
 }
 
-// writeMeta rewrites an EXISTING claim we already own (heartbeat renewal). It is only
-// safe because the caller has verified the epoch is still ours — it must never be used
-// to publish a new claim, which is what allowed a competing claim to be overwritten.
-func (m *Manager) writeMeta(meta *Meta) error {
-	b, err := json.Marshal(meta)
+// bumpEpoch issues the next fencing token. The counter lives OUTSIDE the lease dir so
+// it survives reclaim and can never go backwards when a lease is removed.
+//
+// THE INCREMENT IS SERIALIZED, not merely written atomically. tmp+rename makes each
+// WRITE indivisible and does nothing about two acquirers that both READ n and both
+// write n+1 — measured: two concurrent acquirers were issued the SAME token. A
+// duplicate token is not a cosmetic defect, because the token is threaded to child
+// processes as GPU_LEASE_EPOCH: a straggling child of lease A passes Check() against a
+// LATER lease B that reused the number, may unload models on top of B, and its release
+// deletes B's live claim. Issuance must therefore be a critical section.
+func (m *Manager) bumpEpoch() (uint64, error) {
+	var next uint64
+	err := m.withEpochLock(func() error {
+		cur, rerr := m.readEpoch()
+		if rerr != nil {
+			return rerr
+		}
+		next = cur + 1
+		return m.writeEpoch(next)
+	})
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if err := os.WriteFile(m.metaPath(), b, 0o666); err != nil {
-		return fmt.Errorf("gpulease: updating lease meta: %w", err)
-	}
-	return nil
+	return next, nil
 }
 
-// bumpEpoch increments the monotonic fencing counter. The counter lives OUTSIDE the
-// lease dir so it survives reclaim and can never go backwards when a lease is removed.
-func (m *Manager) bumpEpoch() (uint64, error) {
-	cur := uint64(0)
+// withEpochLock runs fn while holding an exclusive-create lock beside the counter.
+// Exclusive creation is the same primitive the claim itself uses, so it works across
+// processes and languages rather than only across goroutines.
+func (m *Manager) withEpochLock(fn func() error) error {
+	lock := m.epochLockPath()
+	for attempt := 0; ; attempt++ {
+		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o666)
+		if err == nil {
+			_ = f.Close()
+			defer os.Remove(lock)
+			return fn()
+		}
+		// CONTENTION ON WINDOWS DOES NOT ALWAYS LOOK LIKE EEXIST. Deleting a file whose
+		// handle is still open marks it delete-PENDING, and a create issued in that
+		// window fails with ACCESS_DENIED rather than "already exists". Treating that as
+		// fatal turned an ordinary release-and-reacquire race into a hard acquisition
+		// failure — measured, with 8 concurrent acquirers. Both spellings mean "someone
+		// else has it", so both retry; a genuinely unwritable root is already refused up
+		// front by probeWritable, and anything still failing here falls out of the spin
+		// below with a message naming both causes.
+		if !os.IsExist(err) && !errors.Is(err, os.ErrPermission) {
+			return fmt.Errorf("gpulease: could not take the epoch lock at %s: %w", lock, err)
+		}
+		// A process that died mid-bump must not wedge every future acquisition on this
+		// machine. The critical section is two file operations wide, so a lock older
+		// than epochLockStale is debris, not contention.
+		if fi, serr := os.Stat(lock); serr == nil && time.Since(fi.ModTime()) > epochLockStale {
+			_ = os.Remove(lock)
+			continue
+		}
+		if attempt >= epochLockAttempts {
+			return fmt.Errorf("gpulease: the epoch lock at %s did not clear in %s; "+
+				"remove it if no acquisition is in flight, and check the directory is writable",
+				lock, epochLockAttempts*epochLockPause)
+		}
+		time.Sleep(epochLockPause)
+	}
+}
+
+const (
+	// removeAttempts x removePause bound the retry on removing the claim. A reader holds
+	// its handle for microseconds, so this is generous by orders of magnitude.
+	removeAttempts = 20
+	removePause    = 5 * time.Millisecond
+)
+
+// removeClaim deletes a file, retrying a sharing violation.
+//
+// WHY THIS IS NOT PARANOIA: on Windows a plain read (os.ReadFile) opens WITHOUT
+// FILE_SHARE_DELETE, so any concurrent reader makes os.Remove fail outright. Every
+// waiter polls the claim while it waits, so a release landing during someone else's
+// poll would fail — and a release that fails LEAKS the lease until both halves of the
+// reclaim rule fire, blocking the card behind nobody. Measured under six concurrent
+// acquire/release cycles. The overlap is microseconds wide, so retrying clears it.
+func removeClaim(path string) error {
+	for attempt := 0; ; attempt++ {
+		err := os.Remove(path)
+		if err == nil || os.IsNotExist(err) {
+			return nil
+		}
+		if attempt >= removeAttempts {
+			return err
+		}
+		time.Sleep(removePause)
+	}
+}
+
+// readEpoch returns the current fencing counter. Callers must hold the epoch lock.
+func (m *Manager) readEpoch() (uint64, error) {
 	b, err := os.ReadFile(m.epochPath())
 	switch {
 	case err == nil:
@@ -701,27 +845,28 @@ func (m *Manager) bumpEpoch() (uint64, error) {
 			// FAIL CLOSED. Silently treating an unreadable counter as 0 restarts the
 			// fence at 1, and a straggler still holding epoch 1 then matches the new
 			// lease, passes Check(), and its release deletes the live holder's claim.
-			// A torn counter is exactly what a non-atomic writer produces, so this is
-			// reachable under ordinary contention rather than only on corruption.
 			return 0, fmt.Errorf("gpulease: fencing counter at %s is unreadable (%q); "+
 				"refusing to restart the fence from zero", m.epochPath(), strings.TrimSpace(string(b)))
 		}
-		cur = v
+		return v, nil
 	case os.IsNotExist(err):
-		cur = 0 // first ever acquisition on this box
+		return 0, nil // first ever acquisition on this box
 	default:
 		return 0, fmt.Errorf("gpulease: reading fencing counter: %w", err)
 	}
-	next := cur + 1
+}
+
+// writeEpoch publishes a counter value atomically. Callers must hold the epoch lock.
+func (m *Manager) writeEpoch(v uint64) error {
 	tmp := m.epochPath() + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strconv.FormatUint(next, 10)), 0o666); err != nil {
-		return 0, fmt.Errorf("gpulease: writing epoch: %w", err)
+	if err := os.WriteFile(tmp, []byte(strconv.FormatUint(v, 10)), 0o666); err != nil {
+		return fmt.Errorf("gpulease: writing epoch: %w", err)
 	}
 	if err := os.Rename(tmp, m.epochPath()); err != nil {
 		_ = os.Remove(tmp)
-		return 0, fmt.Errorf("gpulease: publishing epoch: %w", err)
+		return fmt.Errorf("gpulease: publishing epoch: %w", err)
 	}
-	return next, nil
+	return nil
 }
 
 // Check is the FENCE. Call it immediately before every irreversible action:
@@ -802,7 +947,7 @@ func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
 	// Drop the CLAIM only. Removing the container would delete a directory another
 	// acquirer may be working inside.
 	m.clearUnloadMarkers()
-	if err := os.Remove(m.metaPath()); err != nil && !os.IsNotExist(err) {
+	if err := removeClaim(m.metaPath()); err != nil {
 		return false, fmt.Errorf("gpulease: releasing lease: %w", err)
 	}
 	return true, nil
@@ -824,7 +969,7 @@ func (l *Lease) Release() error {
 		return nil // fenced out; the lease is someone else's now — leave it alone
 	}
 	l.mgr.clearUnloadMarkers()
-	if err := os.Remove(l.mgr.metaPath()); err != nil && !os.IsNotExist(err) {
+	if err := removeClaim(l.mgr.metaPath()); err != nil {
 		return fmt.Errorf("gpulease: releasing lease: %w", err)
 	}
 	return nil
