@@ -13,7 +13,9 @@ func SystemPrompt(allowWrite, allowOverwrite, allowFetch, allowShell, runGranted
 - read_file(path, offset?, limit?): read a file as numbered lines; offset/limit read just a line range (pair with search_files to read only the lines around a match).
 - search_files(pattern, path?, glob?, mode?): find files/lines matching a REGULAR EXPRESSION within the workspace — locate code before reading it. pattern is CASE-SENSITIVE: prefix with "(?i)" to fold case, e.g. "(?i)rate limit". glob narrows by filename (e.g. "*.go"); mode:"files" lists only the paths that match.
 - summarize_file(path, max_points?): digest a big workspace file on a free local model WITHOUT its bytes entering your context.
-- offload_summarize / offload_classify / offload_triage / offload_extract: delegate bulk text work to a free local model`
+- offload_summarize / offload_classify / offload_triage / offload_extract: delegate bulk text work to a free local model
+- offload_vqa(path, question) / offload_ocr(path): look at an IMAGE file — ask about it, or transcribe its text — without the image entering your context.
+- offload_transcribe(path, language?): transcribe an AUDIO file without the audio entering your context.`
 	if allowWrite {
 		if allowOverwrite {
 			s += `
