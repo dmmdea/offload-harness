@@ -272,6 +272,17 @@ type Config struct {
 	// runner as the GPU_LOCK env, so the Go-side vision gate (LO-1) and the Node runners
 	// always contend on the SAME lock.
 	GPULockPath string `json:"gpu_lock_path,omitempty"`
+	// StateDir overrides the MACHINE-WIDE state root that holds the GPU lease
+	// (<state_dir>/gpu/lease) and future durable harness state. Empty = the platform
+	// default: %ProgramData%\local-offload on Windows, /var/lib/local-offload elsewhere.
+	//
+	// It is machine-wide ON PURPOSE. The previous GPU lock defaulted under the OS temp
+	// dir, which is PER-USER on Windows, so a process in another security context took a
+	// DIFFERENT lock and mutual exclusion silently evaporated. An unwritable or
+	// cloud-synced root is REFUSED at startup rather than silently falling back — a
+	// sync client replicating a lock file between machines would hand one GPU to two
+	// hosts. See internal/gpulease.
+	StateDir string `json:"state_dir,omitempty"`
 	// VisionGPUWaitSec is how long a vision call (vqa/ocr/assess_image/video_describe)
 	// waits for the GPU lock held by a generation job before deferring (polled every 2s).
 	// While a gen job owns the GPU, llama-swap cannot (re)load the VLM — calling anyway
@@ -471,10 +482,11 @@ func Default() Config {
 		MusicGenScript:              "render/comfy-music.mjs", // B3 ACE-Step music worker; "" => music defers
 		VideoGenTimeoutSec:          1500,
 		AudioGenTimeoutSec:          720,
-		EditTimeoutSec:              300, // edit_image / media ops (CPU; no GPU lock)
+		EditTimeoutSec:              300,     // edit_image / media ops (CPU; no GPU lock)
 		VideoGenWaitMs:              1200000, // 20min — video is the hero job
 		AudioGenWaitMs:              120000,  // 2min — a queued TTS defers fast, never starved by a long video
-		GPULockPath:                 "",      // runners' default (GPU_LOCK env, else <tmpdir>/local-offload-gpu.lock)
+		GPULockPath:                 "",      // runners' default (GPU_LOCK env, else <state_dir>/gpu/lease)
+		StateDir:                    "",      // platform default: %ProgramData%\local-offload | /var/lib/local-offload
 		VisionGPUWaitSec:            90,      // LO-1: bounded wait for the gen lock before a vision call defers
 		MemoryStack:                 []string{"embeddinggemma", "bge-reranker-v2-m3"},
 		EmbedModelName:              "embeddinggemma", // explicit; reorder-proof (not MemoryStack position)
@@ -571,7 +583,7 @@ func pathFields(c *Config) []*string {
 		&c.ImageGenScript, &c.NodePath, &c.ComfyDir,
 		&c.SdcppScript, &c.SdcppBin, &c.SdcppModel, &c.SdcppVAE, &c.SdcppClipL, &c.SdcppClipG, &c.SdcppT5, &c.SdcppLLM,
 		&c.InpaintScript,
-		&c.VideoGenScript, &c.RunGraphScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath,
+		&c.VideoGenScript, &c.RunGraphScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath, &c.StateDir,
 		&c.VoiceGenRef, &c.VoiceGenFTModel, &c.VoiceGenFTBaseDir, &c.VoiceGenFTRef,
 		&c.EditPython, &c.GimpConsolePath,
 		&c.CachePath, &c.LedgerPath,

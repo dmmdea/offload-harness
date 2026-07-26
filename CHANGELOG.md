@@ -4,6 +4,57 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.23.0] - 2026-07-25
+
+### Added
+- **Machine-wide fenced GPU lease (`internal/gpulease`) + `local-offload gpu` verb.** One
+  exclusive card is shared by llama-swap and ComfyUI, but only the Node render runners ever
+  took a lock — text work took nothing. A media job arriving through another ingress therefore
+  called `freeLlamaSwap()` and unloaded every GPU-resident model out from under an in-flight
+  benchmark; the server log holds **3,356 unloads, 330 of them the text workhorse**. The lease
+  is taken by every consumer regardless of ingress: `gpu reserve --class text` lets a bench hold
+  the card, and a render then WAITS instead of tearing the tier down.
+  - `local-offload gpu status|reserve|release`. The **wrapper** form
+    (`gpu reserve ... -- <command>`) is preferred — the lease lives exactly as long as the
+    command and cannot be leaked by forgetting to release. `--detach` spawns a hidden holder for
+    interactive use and is the weaker form by design.
+  - **Machine-wide**, not per-user: the old default was `join(tmpdir(), ...)`, which on Windows
+    is per-user, so a process in another security context silently took a *different* lock and
+    mutual exclusion evaporated with no error. An unwritable or **cloud-synced** root is now
+    refused at startup instead of silently falling back — a sync client replicating a lock file
+    between machines would hand one GPU to two hosts. The refusal is segment-aware, so
+    `dropbox-exporter` is fine while `.../Dropbox/...` is not.
+  - **Fenced.** A closing laptop lid is not a crash: the process resumes and would act on top of
+    whoever holds the card now. Every acquisition bumps a monotonic epoch (kept outside the lease
+    dir so reclaim cannot reset it) and `Check()` must precede every irreversible action.
+  - **Pid-recycle safe** — the holder's process start time is recorded and compared, because
+    pid-liveness alone reads a recycled pid as a live holder forever.
+  - Reclaim is a deliberate conjunction: *(holder provably gone)* OR *(heartbeat stale AND the
+    declared window expired)*. Each half alone is wrong — a bare heartbeat timeout expires a
+    descheduled benchmark under exactly the load it exists to protect, and pid-liveness cannot
+    see a `--detach` proxy outliving the run behind it.
+  - `Release()` is epoch-guarded: a fenced-out straggler can never delete the *current* holder's
+    lease. Leaking one is recoverable; silently handing the GPU to a third party is not.
+- New `state_dir` config field (machine-wide state root; default `%ProgramData%\local-offload`
+  on Windows, `/var/lib/local-offload` elsewhere).
+
+### Changed
+- **`freeLlamaSwap` is hoisted from per-JOB to per-LEASE.** It ran inside `withGpuSlot`, i.e.
+  once per job — that is the arithmetic behind 3,356 unloads. With an inherited lease
+  (`GPU_LEASE_DIR` + `GPU_LEASE_EPOCH`) `withGpuSlot` skips both the acquire (it would contend
+  with its own holder) and the unload. Without one, behaviour is unchanged.
+- **Unloading now drains first.** Measured on llama-swap v242: an unload issued during a
+  generation returned in **1,265 ms without draining** and the in-flight request died at
+  **4,107 ms with `502 Bad Gateway`**. The unload route does not honour in-flight work, so the
+  caller must. `quiesceLlamaSwap` polls llama-server's `/slots` via `/upstream/<id>/slots`
+  (`is_processing` verified true throughout a 23 s / 1500-token generation). It is fail-safe,
+  not fail-open-silent: an unreadable `/slots` reports `drained:false` and names the tiers it
+  could not observe, so the caller logs that it proceeded without a verified drain rather than
+  pretending. A stuck tier times out instead of deadlocking the render queue.
+- `render/gpu-lock.mjs` now shares the lease **schema** with `internal/gpulease`, not just the
+  path. Had it kept its flat `{pid,startedAt}` shape, the Go reader would find no holder pid,
+  treat the lease as ownerless and reclaim one actively held.
+
 ## [0.22.26] - 2026-07-24
 
 ### Added — OmniRoute harvest Phase C: dedupe rung, re-request pinning, FORCE_PRESERVE, fit telemetry (ADR 0016)

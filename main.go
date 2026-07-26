@@ -46,7 +46,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.22.26"
+const version = "0.23.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -107,6 +107,8 @@ func main() {
 		err = runCalibrate(args)
 	case "health":
 		err = runHealth(args)
+	case "gpu":
+		err = runGPU(args)
 	case "train-router":
 		err = runTrainRouter(args)
 	case "shadow-label":

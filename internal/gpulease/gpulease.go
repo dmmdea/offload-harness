@@ -502,6 +502,28 @@ func (l *Lease) Renew() error {
 	return l.mgr.writeMeta(meta)
 }
 
+// ReleaseByEpoch drops the CURRENT lease from a process that does not hold it (the
+// `gpu release` verb). Passing a non-zero epoch makes it a compare-and-delete: the
+// lease is removed only if it is still the one the caller saw. Zero means "release
+// whatever is there", which is the operator's explicit override.
+//
+// A detached holder notices its lease vanish on its next Check() and exits on its
+// own, so releasing never has to kill a process by pid — which would be unsafe under
+// pid recycling.
+func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
+	meta, err := m.readMeta()
+	if err != nil || meta == nil {
+		return false, nil // nothing held
+	}
+	if epoch != 0 && meta.Epoch != epoch {
+		return false, fmt.Errorf("gpulease: lease has moved on (asked for epoch %d, current is %d)", epoch, meta.Epoch)
+	}
+	if err := os.RemoveAll(m.leaseDir()); err != nil {
+		return false, fmt.Errorf("gpulease: releasing lease: %w", err)
+	}
+	return true, nil
+}
+
 // Release drops the lease — but ONLY if we still hold it. Releasing unconditionally
 // would let a fenced-out straggler delete the CURRENT holder's lease, which is a
 // worse failure than leaking one: it silently hands the card to a third party.
