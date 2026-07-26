@@ -148,6 +148,32 @@ test("a FENCED-OUT inherited lease refuses to touch the GPU", async () => {
   assert.ok(!h.calls.includes("fn"), "and it must not run the job either");
 });
 
+// The fence used to live INSIDE the unload-election branch, so these two paths reached
+// fn() while fenced out and rendered on somebody else's card. Submitting a graph is
+// irreversible GPU work — it needs the guard just as much as the unload does. The test
+// above cannot catch either, because it injects claimUnload:() => true and a media
+// lease, i.e. only ever the winner path.
+test("FENCED OUT + lost the unload election still refuses (batch jobs 2..N)", async () => {
+  const h = harness();
+  await assert.rejects(
+    withGpuSlot({ ...h.opts, ...h.deps, checkLease: () => false, claimUnload: () => false },
+      async () => { h.calls.push("fn"); }),
+    /fenced out/i
+  );
+  assert.ok(!h.calls.includes("fn"),
+    "a later batch job must not submit a graph on a card that was handed to someone else");
+});
+
+test("FENCED OUT under a TEXT lease still refuses", async () => {
+  const h = harness();
+  await assert.rejects(
+    withGpuSlot({ ...h.opts, ...h.deps, lease: { dir: "X", epoch: 7, class: "text" }, checkLease: () => false },
+      async () => { h.calls.push("fn"); }),
+    /fenced out/i
+  );
+  assert.ok(!h.calls.includes("fn"), "a text-lease job must not run once fenced out either");
+});
+
 test("the job callback receives the lease so it can fence before its own irreversible work", async () => {
   const h = harness();
   let seen;

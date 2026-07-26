@@ -99,8 +99,9 @@ type Pipeline struct {
 	nowFn    func() time.Time
 	// LO-1 GPU-lock gate: vision calls check the render runners' single-slot GPU
 	// lock (internal/gpulock) BEFORE hitting llama-swap — while a generation job
-	// owns the GPU the VLM cannot (re)load, so calling anyway just burns an
-	// http_5xx defer to the expensive cloud model. gpuLockPath is resolved once
+	// owns the GPU the VLM cannot (re)load, so calling anyway just burns a doomed
+	// HTTP call and returns an http_5xx defer — which hands the work back to the
+	// calling session rather than calling any cloud model. gpuLockPath is resolved once
 	// in New (config override > GPU_LOCK env > tmpdir default, same as the .mjs
 	// runners); visionGPUWait/visionGPUPoll bound the pre-call wait; and
 	// visionRetryWait is the one-retry backoff on a vision http_5xx. The three
@@ -438,8 +439,9 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 	}
 	// LO-1: the VLM shares the 8GB GPU with the generation runners. If a gen job
 	// holds the single-slot lock, llama-swap CANNOT (re)load the vision model —
-	// during the Jul-1 incident every vision call 5xx'd and deferred to the
-	// expensive cloud model (295 of 337 all-time defers in ONE hour). Wait for
+	// during the Jul-1 incident every vision call 5xx'd and DEFERRED, handing the
+	// work back to the calling session (295 of 337 all-time defers in ONE hour;
+	// the harness itself never calls a cloud model). Wait for
 	// the slot (bounded, cheap dir-stat poll) instead of burning a doomed call;
 	// if it never frees, defer with a distinct, actionable reason.
 	if info := gpulock.WaitFree(ctx, p.gpuLockPath, p.visionGPUWait, p.visionGPUPoll); info.Held {
@@ -1678,6 +1680,17 @@ type errGPUBusy struct{ info gpulease.Info }
 func (e *errGPUBusy) Error() string {
 	return fmt.Sprintf("gpu busy: %s holds the lease (%ds, reason %q)",
 		e.info.Class, int(e.info.Age/time.Second), e.info.Reason)
+}
+
+// IsGPUBusy reports whether err means the card was legitimately held by someone else
+// for the whole wait window — the work is intact and was queued, not broken.
+//
+// It is exported because errGPUBusy is unexported and RunImageBatch returns an error
+// rather than a core.Result: with no predicate the CLI turned a busy card into a hard
+// failure and exited non-zero, which is precisely what a defer exists to avoid.
+func IsGPUBusy(err error) bool {
+	var busy *errGPUBusy
+	return errors.As(err, &busy)
 }
 
 // deferForLease turns a lease-acquisition failure into the same clean defer the render

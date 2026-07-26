@@ -57,6 +57,23 @@ Two further facts shaped the design:
    participants** — thousands per day at ~46 ms, and leasing them is untenable. That asymmetry is
    a known limit, recorded here so it is not mistaken for an oversight.
 
+2a. **A busy card QUEUES the job for a BOUNDED window, then defers with the holder's detail.**
+   The single GPU slot has always existed to organize concurrent jobs into a serial queue, not to
+   cancel them: a render arriving thirty seconds into someone else's render should run thirty
+   seconds later. Trying once and dropping the job turns ordinary contention into lost work —
+   a `gpu reserve --class text --for 45m` would silently drop 45 minutes of media requests.
+
+   The bound is the other half. The old lock waited up to **30 minutes** (`videogen_wait_ms`
+   20 min, `audiogen_wait_ms` 2 min), and the caller is usually a single tool call, where
+   blocking that long is indistinguishable from a hang. Past the window the honest answer —
+   *held by `<class>`, `<n>`s in, reason `<r>`* — is more useful to a caller that can retry.
+   The ceiling is `gpu_wait_ms` (**90 s**, matching `vision_gpu_wait_sec` so the two GPU
+   waiters behave alike), overridable per task by `videogen_wait_ms` / `audiogen_wait_ms`;
+   raise those to restore a long serial queue. Only contention is waited out — an unwritable or
+   cloud-synced lease location returns immediately, because waiting cannot fix a configuration
+   fault. Queueing lives in Go with the acquisition; the runners never read a wait variable
+   (`GPU_LOCK_WAIT_MS` is gone).
+
 3. **The state root is machine-wide and REFUSES rather than degrades.** `%ProgramData%\local-offload`
    on Windows, `/var/lib/local-offload` elsewhere, overridable via `state_dir`. An unwritable root
    refuses to start instead of falling back per-user — the silent fallback *is* the bug. A root
@@ -68,8 +85,18 @@ Two further facts shaped the design:
    and would otherwise call `freeLlamaSwap()` on top of whoever holds the card now, which is the
    original incident replayed by a lid. Every acquisition bumps a monotonic epoch, stored OUTSIDE
    the lease dir so removing a lease cannot reset it, and `Check()` must precede every irreversible
-   action. Holder identity records the process START TIME beside the pid, because pid-liveness
-   alone reads a recycled pid as a live holder forever.
+   action — **unconditionally**, not only on the path that unloads models. Nesting the fence inside
+   the unload election skipped it for jobs 2..N of a batch and for every `text` lease, and those
+   jobs went on to submit a graph while fenced out; submitting a graph is irreversible GPU work.
+   Holder identity records the process START TIME beside the pid, because pid-liveness alone reads
+   a recycled pid as a live holder forever.
+
+   **Issuing the token is a critical section, not just an atomic write.** tmp+rename makes each
+   write indivisible and does nothing about two acquirers that both read *n* and both write *n+1*;
+   measured, two concurrent acquirers were handed the same token. Because the token is threaded to
+   children as `GPU_LEASE_EPOCH`, a duplicate lets a straggler from the first lease pass `Check()`
+   against the second, unload on top of it, and delete its claim on release. The increment is
+   serialized by an exclusive-create lock beside the counter.
 
 5. **Reclaim is a conjunction, and both halves are load-bearing:**
 
@@ -136,8 +163,12 @@ Two further facts shaped the design:
 - **The lease reduces the COUNT of teardowns but does not make any single teardown safe** —
   the drain does. Both are required; neither alone is sufficient.
 - Head-of-line blocking is unchanged and structural: one 45-minute video blocks everything behind
-  it. ComfyUI cannot suspend a diffusion run, so preemption would be cancel-and-requeue.
-- The Go pipeline does not yet take a `media` lease around its own generation calls — the Node
-  runner does, on the same path, so the arbitration holds today. Threading it through
-  `internal/pipeline` is a follow-up, as are the durable queue and supervised `fleet-serve`
-  (which needs its own approval).
+  it. ComfyUI cannot suspend a diffusion run, so preemption would be cancel-and-requeue. The
+  bounded queue does not fix this — it bounds how long a waiter pretends otherwise.
+- Waiting is in-process and unfair: waiters poll, so the job that arrives first is not guaranteed
+  to be the one that takes the card. A durable, ordered queue is the follow-up (as is a supervised
+  `fleet-serve`, which needs its own approval).
+- Running the harness under `gpu reserve --class media -- local-offload …` INHERITS the ambient
+  lease rather than acquiring a second one, which would have queued the child behind its own
+  parent. An ambient lease that is no longer current refuses the job instead of quietly taking a
+  fresh lease, so a lost reservation is visible rather than papered over.

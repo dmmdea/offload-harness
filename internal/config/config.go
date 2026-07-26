@@ -295,8 +295,10 @@ type Config struct {
 	// VisionGPUWaitSec is how long a vision call (vqa/ocr/assess_image/video_describe)
 	// waits for the GPU lock held by a generation job before deferring (polled every 2s).
 	// While a gen job owns the GPU, llama-swap cannot (re)load the VLM — calling anyway
-	// just burns an http_5xx defer to the expensive cloud model (LO-1: 295 of the 337
-	// all-time defers landed in ONE such hour). Default 90.
+	// just burns a doomed HTTP call and returns an http_5xx defer (LO-1: 295 of the 337
+	// all-time defers landed in ONE such hour). A defer is not a cloud API call: the
+	// harness never calls a cloud model, it hands the work back to the calling session,
+	// which is the expensive path this wait exists to avoid. Default 90.
 	VisionGPUWaitSec int `json:"vision_gpu_wait_sec,omitempty"`
 	// MemoryStack lists the CPU-only, zero-VRAM llama-swap models the GPU-free helper
 	// must NEVER unload (the load-bearing mem0 stack). Sourced here (not a buried const)

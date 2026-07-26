@@ -4,7 +4,8 @@ package pipeline
 // accounting. Evidence: 295 of the 337 all-time defers were http_5xx landing
 // in ONE hour while generate_image jobs held the single-slot GPU lock —
 // llama-swap could not (re)load the VLM, so every vision call burned a doomed
-// HTTP call and deferred to the expensive cloud model. Temp lock dirs + fake
+// HTTP call and DEFERRED, handing the work back to the calling session (the
+// harness never calls a cloud model itself). Temp lock dirs + fake
 // servers only; no real GPU work.
 
 import (

@@ -225,7 +225,11 @@ func detachHolder(fs *flag.FlagSet, class string, dur time.Duration, reason, ori
 			_ = childProc.Kill()
 		}
 	}()
-	_ = child.Process.Release()
+	// NO Process.Release() HERE. Releasing invalidates the handle, so the Kill above
+	// returns EINVAL and the orphan survives both failure paths — the guard read as
+	// present while doing nothing. Holding the handle costs nothing: this CLI
+	// invocation returns moments later and exits, at which point the OS drops the
+	// handle and the child carries on as an independent process either way.
 
 	// Wait for the child to actually take the lease before reporting success —
 	// otherwise a failed hold reads as a successful reservation.

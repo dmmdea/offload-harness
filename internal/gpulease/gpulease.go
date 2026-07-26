@@ -81,11 +81,10 @@ const (
 	// A real video generation runs many minutes.
 	DefaultTTL = time.Hour
 
-	// leaseDirName / epochFileName / waitersDirName live under <root>/gpu/.
-	leaseDirName   = "lease"
-	epochFileName  = "epoch"
-	waitersDirName = "waiters"
-	metaFileName   = "meta.json"
+	// leaseDirName / epochFileName live under <root>/gpu/.
+	leaseDirName  = "lease"
+	epochFileName = "epoch"
+	metaFileName  = "meta.json"
 	// epochLockName serializes the read-modify-write of the fencing counter. See
 	// withEpochLock for why tmp+rename alone is not enough.
 	epochLockName = "epoch.lock"
@@ -689,9 +688,9 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 		}
 		m.pause(pause)
 
-		lease, aerr := m.TryAcquire(class, opts)
+		got, aerr := m.TryAcquire(class, opts)
 		if aerr == nil {
-			return lease, nil
+			return got, nil
 		}
 		if !errors.As(aerr, &held) {
 			return nil, aerr

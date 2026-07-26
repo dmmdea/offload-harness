@@ -14,6 +14,20 @@ Versioning: [SemVer](https://semver.org/).
   benchmark; the server log holds **3,356 unloads, 330 of them the text workhorse**. The lease
   is taken by every consumer regardless of ingress: `gpu reserve --class text` lets a bench hold
   the card, and a render then WAITS instead of tearing the tier down.
+  - **A busy card queues the job for a bounded window, then defers with the holder's detail.**
+    The slot exists to serialize GPU work, not to cancel it — a render arriving mid-render should
+    run afterwards, and dropping it would let a `gpu reserve --class text --for 45m` silently
+    discard 45 minutes of media requests. The bound matters too: the caller is usually one tool
+    call, so the old 20-minute video wait was indistinguishable from a hang. New `gpu_wait_ms`
+    (**90 s**, matching `vision_gpu_wait_sec`) is the ceiling for every GPU task, overridable per
+    task by `videogen_wait_ms` / `audiogen_wait_ms` — **both defaults drop from 20 min / 2 min to
+    90 s**; raise them to restore a long serial queue. Only contention is waited out: an
+    unwritable or cloud-synced lease location still returns immediately. A busy card at the
+    `generate-image --batch` CLI is now a clean **defer** (exit 0) rather than a hard failure.
+  - Running the harness itself under `gpu reserve --class media -- local-offload …` **inherits**
+    the ambient lease instead of acquiring a second one and queueing behind its own parent. An
+    inherited lease that is no longer current refuses the job rather than quietly taking a fresh
+    one, so a lost reservation is visible.
   - `local-offload gpu status|reserve|release`. The **wrapper** form
     (`gpu reserve ... -- <command>`) is preferred — the lease lives exactly as long as the
     command and cannot be leaked by forgetting to release. `--detach` spawns a hidden holder for
@@ -26,7 +40,14 @@ Versioning: [SemVer](https://semver.org/).
     `dropbox-exporter` is fine while `.../Dropbox/...` is not.
   - **Fenced.** A closing laptop lid is not a crash: the process resumes and would act on top of
     whoever holds the card now. Every acquisition bumps a monotonic epoch (kept outside the lease
-    dir so reclaim cannot reset it) and `Check()` must precede every irreversible action.
+    dir so reclaim cannot reset it) and `Check()` must precede every irreversible action —
+    **unconditionally**, including for jobs that do not unload (batch jobs 2..N and `text`
+    leases), because submitting a graph is irreversible GPU work too.
+  - **Epoch issuance is serialized, not merely written atomically.** tmp+rename makes each write
+    indivisible and does nothing about two acquirers that both read *n* and both write *n+1* —
+    measured, two concurrent acquirers were handed the same token. Since the token is threaded to
+    children as `GPU_LEASE_EPOCH`, a duplicate lets a straggler pass `Check()` against a later
+    lease and delete its claim on release.
   - **Pid-recycle safe** — the holder's process start time is recorded and compared, because
     pid-liveness alone reads a recycled pid as a live holder forever.
   - Reclaim is a deliberate conjunction: *(holder provably gone)* OR *(heartbeat stale AND the
@@ -70,6 +91,13 @@ Versioning: [SemVer](https://semver.org/).
 - `render/gpu-lock.mjs` now shares the lease **schema** with `internal/gpulease`, not just the
   path. Had it kept its flat `{pid,startedAt}` shape, the Go reader would find no holder pid,
   treat the lease as ownerless and reclaim one actively held.
+- **`GPU_LOCK_WAIT_MS` is gone.** Queueing moved to Go alongside the acquisition, so the harness
+  can refuse a job before spawning a process that could only have waited and timed out. No render
+  runner ever read the variable.
+- **Every GPU task takes the lease at its Go call site** — image (ComfyUI and sdcpp), inpaint,
+  image batch, run-graph, video and audio (voice and music). Coverage is asserted by a table over
+  the GPU tasks plus a guard that fails when a new `withGpuSlot` runner appears with no case,
+  because wiring call sites by hand is how two of them were missed.
 
 ## [0.22.26] - 2026-07-24
 
