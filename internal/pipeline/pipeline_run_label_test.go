@@ -126,10 +126,10 @@ func TestRunLabelsAgreementWithEntryMargin(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Endpoint = srv.URL
-	cfg.Model = escModel            // escalation/workhorse tier
-	cfg.TriageModel = entryModel    // fast entry tier
-	cfg.EscalationModel = ""        // chain = [entry, model]
-	cfg.MaxRetries = 0              // single attempt per tier
+	cfg.Model = escModel         // escalation/workhorse tier
+	cfg.TriageModel = entryModel // fast entry tier
+	cfg.EscalationModel = ""     // chain = [entry, model]
+	cfg.MaxRetries = 0           // single attempt per tier
 	cfg.ConfHeadLabelsPath = labelsPath
 	// keep the logprob gate on its default 0.35 so margin 0.2 escalates
 	cfg.ThresholdsPath = ""

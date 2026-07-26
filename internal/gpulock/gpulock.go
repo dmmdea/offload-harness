@@ -1,33 +1,32 @@
-// Package gpulock is the READ-ONLY Go view of the single-slot GPU lock owned by
-// the Node render runners (render/gpu-lock.mjs). The 8GB GPU is shared between
-// llama-swap (the VLM/text tiers) and ComfyUI/Chatterbox (the generation jobs);
-// the runners serialize GPU-heavy work through one lock DIRECTORY (mkdir is
-// atomic) holding a meta.json {pid, startedAt}.
+// Package gpulock is the READ-ONLY Go view of the GPU lease that internal/gpulease
+// owns and that every GPU consumer takes. The GPU is shared between llama-swap (the
+// VLM/text tiers) and ComfyUI/Chatterbox (the generation jobs).
 //
-// LO-1 evidence: while a generation job held that lock, llama-swap could not
-// (re)load the vision model, so EVERY vision call 5xx'd and deferred to the
-// expensive cloud model (295 of the 337 all-time defers landed inside one such
-// hour). This package lets the pipeline SEE the lock before burning a doomed
-// HTTP call: resolve the same path the runners use, report held/not-held plus
-// holder age, and wait (bounded) for the slot to free.
+// LO-1 evidence: while a generation job held the lease, llama-swap could not (re)load
+// the vision model, so EVERY vision call 5xx'd and DEFERRED — 295 of the 337 all-time
+// defers landed inside one such hour. A defer is not a cloud API call: the harness
+// never calls a cloud model (see main.go), it returns a structured defer and the work
+// falls back to Opus, the calling session. The cost is that the harness stops doing
+// the one thing it exists for, silently. This package lets the pipeline SEE the lease
+// before burning a doomed HTTP call: resolve the same path every other consumer uses,
+// report held/not-held plus holder age, and wait (bounded) for the slot to free.
 //
 // Invariants:
-//   - Read-only: this package NEVER creates, reclaims, or removes the lock —
-//     acquisition/stale-reclaim stay with the runners (gpu-lock.mjs owns them).
-//   - Same staleness rule as gpu-lock.mjs isStale(): missing/unreadable meta =>
-//     stale; a recorded holder pid that is dead => stale; older than the 1h TTL
-//     (the no-pid fallback + pid-recycle backstop) => stale. Stale == not held.
+//   - Read-only: this package NEVER creates, reclaims, or removes the lease —
+//     acquisition and stale-reclaim belong to internal/gpulease.
+//   - It resolves the SAME path and parses the SAME record as every other
+//     participant, and shares one definition of process liveness with them. Each of
+//     those was independently wrong once, and each time the symptom was identical:
+//     this package reported a live holder's lease as FREE.
 package gpulock
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
-	"syscall"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
 // DefaultTTL mirrors DEFAULT_TTL_MS in render/gpu-lock.mjs (1h — a real video
@@ -35,63 +34,48 @@ import (
 // holder pid is unknown, and the backstop against pid recycling).
 const DefaultTTL = time.Hour
 
-// DefaultLockName is the basename of the shared lock dir under the OS temp dir,
-// matching defaultLockPath() in render/gpu-lock.mjs.
-const DefaultLockName = "local-offload-gpu.lock"
-
-// Path resolves the shared GPU lock directory exactly the way the Node render
-// runners do (gpu-lock.mjs defaultLockPath): explicit override first (the
-// gpu_lock_path config field — the pipeline also threads it to the runners as
-// the GPU_LOCK env so both sides always contend on ONE path), then the GPU_LOCK
-// env, then <os-tmpdir>/local-offload-gpu.lock. Note the default is TMPDIR-
-// relative (per the .mjs), NOT exe-dir-relative like the render script paths.
-func Path(override string) string {
-	if override != "" {
-		return override
+// Path resolves the shared GPU lease directory exactly the way every other consumer
+// does: explicit override first (the gpu_lock_path config field — the pipeline also
+// threads it to the runners as the GPU_LOCK env so both sides always contend on ONE
+// path), then the GPU_LOCK env, then <state-root>/gpu/lease.
+//
+// THE DEFAULT MOVED, AND THIS MUST MOVE WITH IT. The lease used to live under the OS
+// temp dir. When it became machine-wide (%ProgramData%) this function was left behind,
+// so the vision gate watched a path nothing writes and WaitFree answered "free" every
+// time — silently reinstating the LO-1 regression it exists to prevent (a vision call
+// fired into a busy GPU 5xx's and defers, so the harness stops offloading at exactly
+// the moment offloading matters). Resolution is delegated rather than duplicated so
+// the two can never drift apart again.
+func Path(override, stateDir string) string {
+	// ONE resolver for every consumer. Re-deriving the location here is what split the
+	// lease in two: this package honoured the override while the acquirer ignored it,
+	// so the gate watched a directory nothing wrote.
+	dir, err := gpulease.LeaseDir(override, stateDir)
+	if err != nil {
+		// Read-only inspection must never fail the caller, but it must not silently
+		// pretend either: an unresolvable location degrades to a path that provably
+		// does not exist, so Inspect reports NOT held and the caller proceeds — the
+		// same outcome as today, without inventing a plausible-looking tmpdir path
+		// that could collide with a real lock.
+		return filepath.Join(os.TempDir(), "local-offload-gpu-UNRESOLVED")
 	}
-	if v := os.Getenv("GPU_LOCK"); v != "" {
-		return v
-	}
-	return filepath.Join(os.TempDir(), DefaultLockName)
+	return dir
 }
 
-// Info is one point-in-time inspection of the lock.
+// Info is one point-in-time inspection of the lease.
 type Info struct {
-	// Held is true when the lock dir exists AND its meta is not stale.
+	// Held is true when a claim exists AND the shared staleness rule says it is live.
 	Held bool
-	// Age is how long the current holder has held the lock (time since the
-	// meta.json mtime — the same clock gpu-lock.mjs uses). Zero when not held.
+	// Age is how long the current holder has held the card, from the acquirer's own
+	// stamp. NOT time-since-last-heartbeat, which reads as a few seconds for any
+	// long-running holder and made the defer message report "(0s)" for a job that had
+	// owned the card for an hour.
 	Age time.Duration
 	// PID is the recorded holder pid (0 when unknown / not held).
 	PID int
-}
-
-// lockMeta matches the meta.json the runners write on acquisition.
-type lockMeta struct {
-	PID       int   `json:"pid"`
-	StartedAt int64 `json:"startedAt"`
-}
-
-// pidAlive reports whether pid is a live process, mirroring the .mjs rule
-// (process.kill(pid, 0); EPERM still means alive). On Windows a successful
-// OpenProcess (os.FindProcess) means alive; a failure means no such process.
-// All gen runners run as the same user, so an access-denied misread (foreign
-// elevated pid => reported dead) is not a case the lock can reach in practice.
-// A package var so tests can stub a deterministic "dead holder".
-var pidAlive = func(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false // Windows: OpenProcess failed => no such process
-	}
-	defer p.Release()
-	if runtime.GOOS == "windows" {
-		return true // FindProcess only opens live processes on Windows
-	}
-	err = p.Signal(syscall.Signal(0))
-	return err == nil || errors.Is(err, syscall.EPERM)
+	// Class is the holder's lease class (media/text), so a caller can say WHICH kind of
+	// work holds the card instead of assuming it is a generation job.
+	Class string
 }
 
 // Inspect reports whether the lock at lockPath is currently held, using the
@@ -100,33 +84,25 @@ var pidAlive = func(pid int) bool {
 // runners' job, never ours.
 func Inspect(lockPath string) Info { return inspectAt(lockPath, DefaultTTL, time.Now()) }
 
-// inspectAt is Inspect with an injectable TTL and clock (unit-testable).
-func inspectAt(lockPath string, ttl time.Duration, now time.Time) Info {
-	fi, err := os.Stat(lockPath)
-	if err != nil || !fi.IsDir() {
-		return Info{} // no lock dir => free
-	}
-	mp := filepath.Join(lockPath, "meta.json")
-	mfi, err := os.Stat(mp)
-	if err != nil {
-		return Info{} // no meta => stale (mjs: isStale(null) === true)
-	}
-	b, rerr := os.ReadFile(mp)
-	var m lockMeta
-	if rerr != nil || json.Unmarshal(b, &m) != nil {
-		return Info{} // unreadable/corrupt meta => stale, same as the .mjs
-	}
-	if m.PID > 0 && !pidAlive(m.PID) {
-		return Info{} // holder is dead => stale (the .mjs would reclaim it)
-	}
-	age := now.Sub(mfi.ModTime())
-	if age > ttl {
-		return Info{} // TTL cap: no-pid fallback + pid-recycle backstop
-	}
-	if age < 0 {
-		age = 0
-	}
-	return Info{Held: true, Age: age, PID: m.PID}
+// inspectAt is Inspect with an injectable TTL and clock, retained for the existing
+// unit tests. The TTL argument is now ADVISORY ONLY: staleness is decided by
+// gpulease.Reclaimable, not here.
+//
+// THE THIRD RULE IS GONE. This package used to carry its own staleness logic —
+// (pid dead) OR (meta.json mtime older than 1h) — which was a THIRD implementation
+// alongside Go's and Node's, and it disagreed with both: gpulease reclaims on
+// (provably gone) OR (recycled pid) OR (heartbeat stale AND declared window expired).
+// A holder that heartbeats for over an hour is live to gpulease and stale here, so this
+// gate would report a busy card as free. That is the same failure mode as the path split
+// (C5) and the schema split, one layer down. Delegating means there is one rule.
+func inspectAt(lockPath string, _ time.Duration, _ time.Time) Info {
+	// Delegate WHOLESALE, not just the rule. Reconstructing the judgement here from the
+	// record — even using the shared Reclaimable — was still a second reader, and it
+	// broke the moment the heartbeat moved into a per-epoch file: a record-only view
+	// sees a frozen RenewedAtMs and calls a live, renewing holder stale as soon as its
+	// declared window lapses. One inspection path, one answer.
+	i := gpulease.InspectDir(lockPath)
+	return Info{Held: i.Held, Age: i.Age, PID: i.PID, Class: string(i.Class)}
 }
 
 // WaitFree polls the lock every poll (min bound 1ms; the pipeline passes 2s)
