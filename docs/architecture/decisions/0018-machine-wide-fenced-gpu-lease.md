@@ -85,11 +85,31 @@ Two further facts shaped the design:
    lease. Leaking a lease is recoverable — it expires; silently handing the GPU to a third party
    is not.
 
-7. **Node shares the SCHEMA, not merely the path.** Both sides resolve `<state-root>/gpu/lease`.
-   Had `gpu-lock.mjs` kept its flat `{pid,startedAt}` record, the Go reader would find
-   `holder.pid` missing, treat the lease as ownerless and reclaim one actively held. `isStale`
-   mirrors `Reclaimable` including the conjunction; if the two implementations drift, Go and Node
-   will disagree about who owns the GPU.
+7. **There is exactly ONE implementation, and Node is not it.** `internal/gpulease` owns
+   acquisition, staleness, fencing, the epoch counter, path resolution (`LeaseDir`) and
+   inspection (`InspectDir`). `internal/pipeline` takes the `media` lease around every
+   generation call site and threads `GPU_LEASE_DIR/EPOCH/CLASS` down; the render runner
+   inherits, fences, elects one unloader, and drains. A GPU job with no lease refuses.
+
+   **This replaces the original decision, which was "share the schema".** Sharing the schema
+   was not enough, and the record of why is the useful part: with two implementations, every
+   review round found a NEW divergence, each fixed before the next surfaced — different atomic
+   tokens (both sides holding the lease); `os.FindProcess` vs `process.kill(pid,0)` disagreeing
+   on ACCESS_DENIED; a non-atomic epoch write measured restarting the fence at 1 in **24.5%** of
+   concurrent reads; one side deleting the other's in-progress claim; and a *third* staleness
+   rule in `gpulock` that called a live three-hour holder stale. Every fix was correct and the
+   class survived, because the defect was the duplication, not any instance of it.
+
+   The corollary is a rule, not a preference: a second reader that re-derives the judgement is
+   the same bug wearing a different hat. When the heartbeat moved into a per-epoch file,
+   `gpulock` — which by then shared the path, the record AND the rule — still diverged, because
+   it reconstructed the answer from the record. It now calls `InspectDir`.
+
+7a. **The heartbeat is a per-epoch file, not a field in the claim.** Renewing by
+   read-modify-writing the record is a read-then-write race: a reclaim plus a fresh acquisition
+   between the read and the write lets a stale holder stamp over the live record. `hb.<epoch>`
+   makes a stale writer harmless. This is only affordable because the heartbeat is Go-only —
+   an example of the collapse paying for itself.
 
 8. **`freeLlamaSwap` is hoisted to once per LEASE, and it DRAINS FIRST.** Under an inherited
    lease `withGpuSlot` skips the acquire and **elects exactly one job to unload** through an

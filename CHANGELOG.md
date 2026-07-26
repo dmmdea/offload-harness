@@ -47,11 +47,18 @@ Versioning: [SemVer](https://semver.org/).
   cost ONE teardown. Note the difference from merely skipping: an earlier revision skipped the
   unload under an inherited lease while nothing performed it, so a leased render ran with every
   model still resident.
+- **BREAKING for direct runner invocation: `render/*.mjs` no longer acquires the GPU.**
+  `internal/gpulease` is the single implementation; the harness takes the lease and the runner
+  inherits it. A GPU job started with no lease now refuses and names the fix:
+  `local-offload gpu reserve --class media -- node render/comfy-generate.mjs ...`
+  (`--no-lock` remains the escape hatch). This deleted `acquireGpuLock`, `isStale`, `bumpEpoch`,
+  `machineStateRoot`, `ensureStateRoot` and `defaultLockPath` — roughly a third of that file.
+  Two implementations of one concurrency rule produced a new divergence in every review round;
+  the class is gone by construction rather than by patch. See ADR 0018 §7.
 - **The default lock path moved** from `<os-tmpdir>/local-offload-gpu.lock` to
-  `<state_dir>/gpu/lease`. A bare `node render/*.mjs` run still acquires for itself as before,
-  but it now does so at the machine-wide path — set `state_dir`/`GPU_LOCK` if that root is not
-  writable, since the runner refuses rather than falling back per-user. `internal/gpulock` (the
-  read-only vision gate) moved with it; leaving it behind made `WaitFree` answer "free" forever.
+  `<state_dir>/gpu/lease`, and `gpu_lock_path`/`GPU_LOCK` are now honoured by every consumer
+  through one resolver. Previously some honoured them and some did not, so setting that field put
+  the reservation verb and the render path on different directories where they never contended.
 - **Unloading now drains first.** Measured on llama-swap v242: an unload issued during a
   generation returned in **1,265 ms without draining** and the in-flight request died at
   **4,107 ms with `502 Bad Gateway`**. The unload route does not honour in-flight work, so the
