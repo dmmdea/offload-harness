@@ -19,11 +19,10 @@ Versioning: [SemVer](https://semver.org/).
     run afterwards, and dropping it would let a `gpu reserve --class text --for 45m` silently
     discard 45 minutes of media requests. The bound matters too: the caller is usually one tool
     call, so the old 20-minute video wait was indistinguishable from a hang. New `gpu_wait_ms`
-    (**90 s**, matching `vision_gpu_wait_sec`) is the ceiling for every GPU task, overridable per
-    task by `videogen_wait_ms` / `audiogen_wait_ms` — **both defaults drop from 20 min / 2 min to
-    90 s**; raise them to restore a long serial queue. Only contention is waited out: an
-    unwritable or cloud-synced lease location still returns immediately. A busy card at the
-    `generate-image --batch` CLI is now a clean **defer** (exit 0) rather than a hard failure.
+    (**90 s**, matching `vision_gpu_wait_sec`) is the single ceiling for every GPU task. Only
+    contention is waited out: an unwritable or cloud-synced lease location still returns
+    immediately. A busy card at the `generate-image --batch` CLI is now a clean **defer**
+    (exit 0, `err_class: gpu_busy`) rather than a hard failure.
   - Running the harness itself under `gpu reserve --class media -- local-offload …` **inherits**
     the ambient lease instead of acquiring a second one and queueing behind its own parent. An
     inherited lease that is no longer current refuses the job rather than quietly taking a fresh
@@ -43,6 +42,14 @@ Versioning: [SemVer](https://semver.org/).
     dir so reclaim cannot reset it) and `Check()` must precede every irreversible action —
     **unconditionally**, including for jobs that do not unload (batch jobs 2..N and `text`
     leases), because submitting a graph is irreversible GPU work too.
+  - **Windows delete-pending semantics are handled on both sides of the claim.** Removing a file
+    whose handle is still open marks it delete-PENDING, and an `O_EXCL` create in that window
+    fails with `ACCESS_DENIED` rather than "already exists" — which read as a hard fault. The
+    window is exactly the moment a holder releases, i.e. exactly when every waiter is polling,
+    so the acquirer most likely to hit it was the one that should have won: measured, 1 in 48
+    acquire/release cycles under six workers failed with *"could not claim the lease: Access is
+    denied"*. Symmetrically, `os.Remove` on the claim fails while any reader has it open, and a
+    failed release LEAKS the lease until both halves of the reclaim rule fire. Both retry.
   - **Epoch issuance is serialized, not merely written atomically.** tmp+rename makes each write
     indivisible and does nothing about two acquirers that both read *n* and both write *n+1* —
     measured, two concurrent acquirers were handed the same token. Since the token is threaded to
@@ -58,6 +65,15 @@ Versioning: [SemVer](https://semver.org/).
     lease. Leaking one is recoverable; silently handing the GPU to a third party is not.
 - New `state_dir` config field (machine-wide state root; default `%ProgramData%\local-offload`
   on Windows, `/var/lib/local-offload` elsewhere).
+
+### Removed
+- **`videogen_wait_ms` and `audiogen_wait_ms` are retired**, replaced by the single
+  `gpu_wait_ms`. They existed so a cheap queued TTS was not starved behind a 20-minute video;
+  at a 90 s ceiling that distinction buys nothing. **This matters on upgrade:** the installer
+  template shipped `videogen_wait_ms: 1200000` to every machine, so keeping them as per-task
+  overrides would have silently restored the exact 20-minute wait the bounded queue replaces.
+  A config still carrying them loads cleanly and prints a note naming the replacement — no
+  action needed, and no "unknown key — typo?" warning for a key your own installer wrote.
 
 ### Changed
 - **`freeLlamaSwap` is hoisted from per-JOB to per-LEASE.** It ran inside `withGpuSlot`, i.e.

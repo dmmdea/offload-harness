@@ -299,7 +299,7 @@ func (m *Manager) clearUnloadMarkers() {
 	}
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), "unloaded.") || strings.HasPrefix(e.Name(), "hb.") {
-			_ = os.Remove(filepath.Join(m.leaseDir(), e.Name()))
+			_ = removeClaim(filepath.Join(m.leaseDir(), e.Name()))
 		}
 	}
 }
@@ -615,7 +615,7 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 		// THE CLAIM: exclusive creation of meta.json, written complete in one call.
 		// This single token is what makes cross-language mutual exclusion real rather
 		// than merely documented.
-		f, err := os.OpenFile(m.metaPath(), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o666)
+		f, err := createClaim(m.metaPath())
 		if err == nil {
 			_, werr := f.Write(rec)
 			cerr := f.Close()
@@ -812,6 +812,33 @@ const (
 	removeAttempts = 20
 	removePause    = 5 * time.Millisecond
 )
+
+// createClaim exclusively creates the claim file, retrying while a delete of the SAME
+// file is still pending.
+//
+// This is the acquire-side twin of removeClaim, and it is on the hottest path there is.
+// On Windows, removing a file whose handle is still open marks it delete-PENDING, and a
+// create issued in that window fails with ACCESS_DENIED rather than "already exists" —
+// which the caller reasonably read as a hard fault. The window is precisely the moment a
+// holder releases, i.e. exactly when every waiter is polling to take the card, so the
+// acquirer most likely to hit it is the one that should have won. Measured: 1 of every
+// 48 acquire/release cycles under six concurrent workers failed with
+// "could not claim the lease: Access is denied".
+//
+// Returns the open file on success; os.ErrExist (via the raw syscall error) when someone
+// else holds the claim; any other error is genuine.
+func createClaim(path string) (*os.File, error) {
+	for attempt := 0; ; attempt++ {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o666)
+		if err == nil || os.IsExist(err) {
+			return f, err
+		}
+		if !errors.Is(err, os.ErrPermission) || attempt >= removeAttempts {
+			return nil, err
+		}
+		time.Sleep(removePause)
+	}
+}
 
 // removeClaim deletes a file, retrying a sharing violation.
 //
