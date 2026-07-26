@@ -63,6 +63,10 @@ type ToolSpec struct {
 type Tool struct {
 	ToolSpec
 	Exec func(ctx context.Context, args string) (string, error)
+	// Timeout bounds ONE call of this tool. Zero uses the loop default
+	// (defaultToolTimeout). It lives on Tool, not ToolSpec, because ToolSpec is
+	// the wire format handed to the model — the model has no business seeing it.
+	Timeout time.Duration
 }
 
 // Client is the minimal OpenAI-compatible tool-calling chat interface the loop
@@ -124,26 +128,27 @@ func (l *Loop) calReport() TokenCalReport {
 
 // Loop runs the canonical agent loop over a fixed tool set.
 type Loop struct {
-	client      Client
-	tools       map[string]Tool
-	specs       []ToolSpec
-	maxSteps    int
-	maxTokens   int
+	client        Client
+	tools         map[string]Tool
+	specs         []ToolSpec
+	maxSteps      int
+	maxTokens     int
 	maxSameTool   int
-	ctxTokens     int // model context window in tokens; input budget derives from it
-	keepRecent    int  // most-recent turns kept full during compaction
-	skeletonPrune bool // enable the skeleton rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
-	gcfCompact    bool // enable the lossless GCF rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
-	toolResultCap int // max chars of ONE tool result kept in the transcript (0 => derive from window)
+	ctxTokens     int           // model context window in tokens; input budget derives from it
+	keepRecent    int           // most-recent turns kept full during compaction
+	toolTimeout   time.Duration // per-tool-call cap; see defaultToolTimeout
+	skeletonPrune bool          // enable the skeleton rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
+	gcfCompact    bool          // enable the lossless GCF rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
+	toolResultCap int           // max chars of ONE tool result kept in the transcript (0 => derive from window)
 	// tokenCal corrects the compaction budget using the server's own token
 	// counts — the fix for the estimator defect that let three real
 	// transcripts be rejected while the ladder declined to compact (ADR 0017).
-	tokenCal    TokenCalibrator
-	tokenCalOn  bool // OFF by default — see WithTokenCalibration
-	system        string
-	mem           Memory
-	worktree      string // RW worktree root for durable working memory (AGENT.md + .agent/plan.md); "" disables it
-	exemplars     []Msg  // trusted few-shot messages injected after system, before recall/objective (Task C6)
+	tokenCal   TokenCalibrator
+	tokenCalOn bool // OFF by default — see WithTokenCalibration
+	system     string
+	mem        Memory
+	worktree   string // RW worktree root for durable working memory (AGENT.md + .agent/plan.md); "" disables it
+	exemplars  []Msg  // trusted few-shot messages injected after system, before recall/objective (Task C6)
 }
 
 // defaultCtxTokens is the model context window the loop budgets against. It
@@ -174,6 +179,19 @@ const defaultKeepRecent = 4
 // slightly reworded search queries) that the exact-match check would miss.
 const defaultMaxSameTool = 3
 
+// defaultToolTimeout bounds ONE tool call. Until this existed, Loop.dispatch
+// handed t.Exec the whole run context with no deadline, so a single tool could
+// consume the entire run budget and the loop had no way to continue past it.
+// Only run_shell self-capped (at this same 120s, which is why the default
+// matches it): the harness's own media routes default to 720s image / 1500s
+// video / 1800s STT against a 180s agent_run budget, so wiring any of them in
+// without a per-tool cap would have made one call swallow the run whole.
+//
+// It is a REACTABLE failure, not a fatal one: an expired tool returns an
+// is_error result the planner can read and route around, exactly like any other
+// tool error.
+const defaultToolTimeout = 120 * time.Second
+
 // NewLoop builds a loop. maxSteps is the hard budget guard (owned in code, not
 // the prompt). A non-positive maxSteps defaults to 1.
 func NewLoop(c Client, tools []Tool, maxSteps int) *Loop {
@@ -189,6 +207,7 @@ func NewLoop(c Client, tools []Tool, maxSteps int) *Loop {
 		maxSameTool: defaultMaxSameTool,
 		ctxTokens:   defaultCtxTokens,
 		keepRecent:  defaultKeepRecent,
+		toolTimeout: defaultToolTimeout,
 	}
 	for _, t := range tools {
 		l.tools[t.Name] = t
@@ -706,12 +725,62 @@ func (l *Loop) dispatch(ctx context.Context, call ToolCall) (string, bool) {
 	if !ok {
 		return fmt.Sprintf("error: unknown tool %q", call.Name), true
 	}
-	out, err := t.Exec(ctx, call.Args)
-	if err != nil {
-		return fmt.Sprintf("error: %v", err), true
+	budget := t.Timeout
+	if budget <= 0 {
+		budget = l.toolTimeout
 	}
-	return out, false
+	if budget <= 0 {
+		out, err := t.Exec(ctx, call.Args) // capping explicitly disabled
+		if err != nil {
+			return fmt.Sprintf("error: %v", err), true
+		}
+		return out, false
+	}
+
+	tctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
+	// THE CAP IS HARD, not merely cooperative. Cancelling a context does not
+	// preempt anything: a tool that ignores ctx would block dispatch forever and
+	// the deadline would be decoration. Selecting on the result lets the LOOP
+	// proceed regardless of whether the tool honours cancellation.
+	//
+	// The trade-off is explicit: an uncooperative tool's goroutine outlives the
+	// call and its result is discarded. Every tool in-tree threads ctx properly
+	// (exec.CommandContext, http requests), so today that is theoretical — but
+	// the media routes this unblocks are minutes-long subprocesses, and "the
+	// agent hung" is a far worse failure than one leaked goroutine.
+	type toolResult struct {
+		out string
+		err error
+	}
+	done := make(chan toolResult, 1) // buffered: a late finisher must never block
+	go func() {
+		out, err := t.Exec(tctx, call.Args)
+		done <- toolResult{out, err}
+	}()
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			return fmt.Sprintf("error: %v", r.err), true
+		}
+		return r.out, false
+	case <-tctx.Done():
+		// Distinguish OUR cap from the run's own deadline. If the parent is also
+		// done the whole run ended, and blaming the tool would be a lie.
+		if ctx.Err() != nil {
+			return fmt.Sprintf("error: run cancelled during %s: %v", call.Name, ctx.Err()), true
+		}
+		return fmt.Sprintf("error: tool %s exceeded its %s budget and was cancelled; "+
+			"try a narrower request, or a different tool", call.Name, budget), true
+	}
 }
+
+// WithToolTimeout overrides the per-tool-call cap (see defaultToolTimeout).
+// A non-positive value DISABLES capping — only for tests that need to observe an
+// unbounded tool.
+func (l *Loop) WithToolTimeout(d time.Duration) *Loop { l.toolTimeout = d; return l }
 
 // persist best-effort records the run outcome to memory. Defer-not-crash: any
 // error is swallowed — memory persistence must never fail an otherwise-complete
