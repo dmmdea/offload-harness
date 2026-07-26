@@ -1670,12 +1670,65 @@ func ambientLeaseEnv() ([]string, error) {
 	}, nil
 }
 
+// mediaSlot is the IN-PROCESS half of GPU mutual exclusion: one media job at a time
+// inside this process, whatever else is true.
+//
+// The file claim serializes across processes. An INHERITED lease has no claim to
+// contend on — every job under `gpu reserve -- <cmd>` already holds the same one — so
+// without this, concurrency inside one process is unarbitrated. That is fine for the
+// one-shot command the wrapper was written for and wrong for a long-running server:
+// fleet-serve runs Pipeline.Run inline in a net/http handler goroutine, so two
+// dispatches under one reservation would both proceed, spawn two ComfyUI instances on
+// one card, and race the unload election so one render runs with models still resident
+// — precisely the condition the lease exists to prevent. The docs also recommend the
+// wrapper form, which steers straight into it.
+//
+// It is a buffered channel rather than a Mutex for two reasons: a waiter BLOCKS instead
+// of polling (no timers, no wakeups, no file reads — it is handed the slot the moment
+// the holder releases), and the wait can be bounded, which a Mutex cannot.
+//
+// LOCK ORDER IS ALWAYS slot -> file lease, never the reverse, so the two cannot deadlock.
+var mediaSlot = make(chan struct{}, 1)
+
+// takeMediaSlot claims the in-process slot, waiting at most wait. Reports false on
+// timeout, which the caller turns into the same clean defer a busy card produces.
+func takeMediaSlot(wait time.Duration) bool {
+	select {
+	case mediaSlot <- struct{}{}:
+		return true // free: no timer allocated at all in the common case
+	default:
+	}
+	if wait <= 0 {
+		return false
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case mediaSlot <- struct{}{}:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func releaseMediaSlot() { <-mediaSlot }
+
 // errGPUBusy reports that the card is legitimately held by someone else. Callers turn
 // it into a clean defer rather than a failure — the work is not broken, it waited its
 // window behind a holder.
-type errGPUBusy struct{ info gpulease.Info }
+//
+// detail is set when the holder is another job in THIS process, where there is no lease
+// record to describe — the machine-wide Info would name our own lease and read as
+// nonsense.
+type errGPUBusy struct {
+	info   gpulease.Info
+	detail string
+}
 
 func (e *errGPUBusy) Error() string {
+	if e.detail != "" {
+		return "gpu busy: " + e.detail
+	}
 	return fmt.Sprintf("gpu busy: %s holds the lease (%ds, reason %q)",
 		e.info.Class, int(e.info.Age/time.Second), e.info.Reason)
 }
@@ -1724,6 +1777,24 @@ func (p *Pipeline) deferForLease(err error, task core.TaskType, meta core.Meta, 
 // inside the declared window is harmless.
 func (p *Pipeline) acquireMediaLease(reason string, ttl, wait time.Duration) ([]string, func(), error) {
 	noop := func() {}
+	start := time.Now()
+
+	// THE IN-PROCESS SLOT COMES FIRST, on both paths. Blocking here is free — no timer
+	// in the uncontended case, no polling in the contended one — and it is the only
+	// thing arbitrating two jobs that INHERIT the same lease. See mediaSlot.
+	if !takeMediaSlot(wait) {
+		return nil, noop, &errGPUBusy{detail: fmt.Sprintf(
+			"another generation job in this process still holds the card after %s", wait)}
+	}
+	slotHeld := true
+	defer func() {
+		// Every failure path below must give the slot back, or the first bad lease
+		// wedges every later job in this process.
+		if slotHeld {
+			releaseMediaSlot()
+		}
+	}()
+
 	// Already inside someone's lease? Inherit it. Acquiring again would queue behind
 	// ourselves until the window lapsed.
 	inherited, ierr := ambientLeaseEnv()
@@ -1732,8 +1803,10 @@ func (p *Pipeline) acquireMediaLease(reason string, ttl, wait time.Duration) ([]
 	}
 	if inherited != nil {
 		// The holder above us owns renewal and release; doing either here would drop a
-		// lease that is not ours.
-		return append(inherited, p.lockEnv()...), noop, nil
+		// lease that is not ours. The slot is still ours to give back.
+		slotHeld = false
+		var once sync.Once
+		return append(inherited, p.lockEnv()...), func() { once.Do(releaseMediaSlot) }, nil
 	}
 	m, err := gpulease.OpenAt(p.cfg.GPULockPath, p.cfg.StateDir)
 	if err != nil {
@@ -1743,8 +1816,14 @@ func (p *Pipeline) acquireMediaLease(reason string, ttl, wait time.Duration) ([]
 		// text tier down. The message names the fix (state_dir).
 		return nil, noop, err
 	}
+	// Spend only what is LEFT of the window on the machine-wide lease, so the two waits
+	// compose into the one budget the caller asked for rather than doubling it.
+	remaining := wait - time.Since(start)
+	if remaining < 0 {
+		remaining = 0
+	}
 	lease, err := m.Acquire(gpulease.ClassMedia, gpulease.Options{
-		Reason: reason, Origin: "pipeline", TTL: ttl, Wait: wait,
+		Reason: reason, Origin: "pipeline", TTL: ttl, Wait: remaining,
 	})
 	if err != nil {
 		var held *gpulease.ErrHeld
@@ -1754,8 +1833,13 @@ func (p *Pipeline) acquireMediaLease(reason string, ttl, wait time.Duration) ([]
 		return nil, noop, err
 	}
 
+	// The heartbeat exists only while a render is actually running, and one media job
+	// runs at a time per process, so this is at most ONE 15s timer for the duration of
+	// GPU work that lasts minutes. Nothing ticks while the harness is idle.
 	stop := make(chan struct{})
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		t := time.NewTicker(15 * time.Second)
 		defer t.Stop()
 		for {
@@ -1767,10 +1851,19 @@ func (p *Pipeline) acquireMediaLease(reason string, ttl, wait time.Duration) ([]
 			}
 		}
 	}()
+	var once sync.Once
 	release := func() {
-		close(stop)
-		_ = lease.Release()
+		once.Do(func() {
+			close(stop)
+			// JOIN, do not just signal. Release mutates the Lease that a Renew() already
+			// in flight is reading, and it would also let that Renew re-create the
+			// heartbeat file after the release swept it. Waiting costs microseconds.
+			<-stopped
+			_ = lease.Release()
+			releaseMediaSlot()
+		})
 	}
+	slotHeld = false
 	env := []string{
 		"GPU_LEASE_DIR=" + lease.Dir(),
 		"GPU_LEASE_EPOCH=" + strconv.FormatUint(lease.Epoch(), 10),

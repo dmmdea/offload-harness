@@ -3,10 +3,12 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -299,6 +301,108 @@ func TestAmbientLeaseIsInheritedNotReacquired(t *testing.T) {
 	}
 	if wait := p.gpuWait(); elapsed >= wait {
 		t.Errorf("took %s, i.e. the whole %s wait window: it queued instead of inheriting", elapsed, wait)
+	}
+}
+
+// writeSpanStub writes a node stub that records the wall-clock interval it occupied the
+// GPU for, to "$LEASE_PROBE.<pid>.json". Two overlapping intervals mean two jobs ran on
+// the card at once.
+func writeSpanStub(t *testing.T, dir string) string {
+	t.Helper()
+	stub := filepath.Join(dir, "spanstub.mjs")
+	if err := os.WriteFile(stub, []byte(`import {writeFileSync} from "node:fs";
+const probe = process.env.LEASE_PROBE;
+const start = Date.now();
+// Synchronous sleep: hold the "GPU" long enough that an overlap is unmistakable.
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+writeFileSync(probe + "." + process.pid + ".json", JSON.stringify({start, end: Date.now()}));
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return stub
+}
+
+type runSpan struct {
+	Start int64 `json:"start"`
+	End   int64 `json:"end"`
+}
+
+func readSpans(t *testing.T, dir string) []runSpan {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spans []runSpan
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "span.") || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		b, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		var s runSpan
+		if err := json.Unmarshal(b, &s); err != nil {
+			t.Fatalf("span %s unreadable: %v", e.Name(), err)
+		}
+		spans = append(spans, s)
+	}
+	return spans
+}
+
+// TestConcurrentJobsUnderOneInheritedLeaseStillSerialize covers the hole the ambient-lease
+// inheritance opened: the file claim serializes ACROSS processes, but jobs that inherit
+// one lease have no claim to contend on, so nothing arbitrated them WITHIN a process.
+//
+// That is not hypothetical. fleet-serve runs Pipeline.Run inline in a net/http handler
+// goroutine, so under `gpu reserve --class media -- local-offload fleet-serve` — the
+// wrapper form the docs recommend — two dispatches would both proceed, spawn two ComfyUI
+// instances on one card, and race the unload election so one render runs with every model
+// still resident. That is the condition the lease exists to prevent.
+func TestConcurrentJobsUnderOneInheritedLeaseStillSerialize(t *testing.T) {
+	requireNodePipeline(t)
+	m, err := gpulease.OpenAt("", "")
+	if err != nil {
+		t.Fatalf("open lease manager: %v", err)
+	}
+	held, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "reserve --class media", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("setup acquire: %v", err)
+	}
+	defer func() { _ = held.Release() }()
+
+	dir := t.TempDir()
+	t.Setenv("LEASE_PROBE", filepath.Join(dir, "span"))
+	t.Setenv("GPU_LEASE_DIR", held.Dir())
+	t.Setenv("GPU_LEASE_EPOCH", strconv.FormatUint(held.Epoch(), 10))
+	t.Setenv("GPU_LEASE_CLASS", string(held.Class()))
+
+	cfg := config.Default()
+	cfg.MediaDir = dir
+	cfg.VideoGenScript = writeSpanStub(t, dir)
+	p := &Pipeline{cfg: cfg}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			p.Run(context.Background(), core.Request{
+				Task: core.TaskGenerateVideo, Input: fmt.Sprintf("clip %d", i)})
+		}(i)
+	}
+	wg.Wait()
+
+	spans := readSpans(t, dir)
+	if len(spans) != 2 {
+		t.Fatalf("got %d runner spans, want 2 — both jobs must still RUN, just not at the same time", len(spans))
+	}
+	// Positive overlap = the two renders were on the card together.
+	overlapMs := min(spans[0].End, spans[1].End) - max(spans[0].Start, spans[1].Start)
+	if overlapMs > 50 {
+		t.Fatalf("two GPU jobs overlapped by %dms under one inherited lease; "+
+			"in-process arbitration is gone and two renders shared the card", overlapMs)
 	}
 }
 

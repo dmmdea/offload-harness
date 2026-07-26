@@ -587,6 +587,17 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 		return nil, fmt.Errorf("gpulease: unknown class %q (want %q or %q)", class, ClassMedia, ClassText)
 	}
 	for attempt := 0; attempt < 3; attempt++ {
+		// CHEAP PROBE FIRST. A waiter re-tries once a second, and issuing a fencing
+		// token is the most expensive step here — it takes a machine-wide lock and does
+		// four file operations. Bumping before we know the card is even free made a
+		// polling waiter burn all of that every second and churn the counter ~90 times
+		// per wait, for a claim that could not possibly succeed. This is ONLY an
+		// optimisation: the O_EXCL claim below is still the sole arbiter, so a card that
+		// frees between this read and that create just costs one wasted iteration.
+		if info := m.Inspect(); info.Held {
+			return nil, &ErrHeld{Info: info}
+		}
+
 		// THE DIRECTORY IS A CONTAINER, NEVER A CLAIM. Creating it must be
 		// non-exclusive: when Go claimed by creating the directory while Node claimed
 		// by exclusively creating meta.json, the two sides held DIFFERENT atomic
@@ -674,6 +685,19 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 	}
 	var held *ErrHeld
 	if !errors.As(err, &held) {
+		return nil, err
+	}
+	// NEVER WAIT FOR SOMETHING THAT CANNOT HAPPEN. A `text` reservation carries an
+	// operator's DECLARED duration (`gpu reserve --for 45m`), so if it outlasts our
+	// whole window there is nothing to wait for: polling for 90 s first only delays the
+	// identical answer and keeps a waiter doing file reads for no reason.
+	//
+	// A `media` lease is deliberately NOT treated this way. Its expiry is a timeout
+	// CEILING, not a promise — a video job declares a 25-minute budget and routinely
+	// finishes in three — so short-circuiting on it would drop jobs that were about to
+	// be served.
+	if held.Info.Class == ClassText && !held.Info.ExpiresAt.IsZero() &&
+		held.Info.ExpiresAt.After(m.now().Add(opts.Wait)) {
 		return nil, err
 	}
 	deadline := m.now().Add(opts.Wait)

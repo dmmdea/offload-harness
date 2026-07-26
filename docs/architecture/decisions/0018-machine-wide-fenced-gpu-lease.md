@@ -178,3 +178,16 @@ Two further facts shaped the design:
   lease rather than acquiring a second one, which would have queued the child behind its own
   parent. An ambient lease that is no longer current refuses the job instead of quietly taking a
   fresh lease, so a lost reservation is visible rather than papered over.
+- **Mutual exclusion is therefore two-layered.** The file claim serializes across PROCESSES;
+  an in-process slot serializes within one. The second layer is not redundant: jobs that inherit
+  one lease have no claim to contend on, so `gpu reserve --class media -- local-offload
+  fleet-serve` — which runs `Pipeline.Run` inline in a `net/http` handler goroutine — would
+  otherwise put two renders on the card at once. Measured at 256 ms of overlap on 250 ms jobs,
+  i.e. fully concurrent. Lock order is always slot → file lease.
+- **The design adds no daemon, scheduled task or watchdog, and nothing ticks at idle.** Every
+  timer is scoped to work in flight: a 15 s heartbeat while a lease is held, a 1 s probe while a
+  job is queued behind another process (capped by `gpu_wait_ms`), and nothing at all when a job
+  is queued behind one in the same process — that waiter blocks on a channel. A waiter also no
+  longer issues a fencing token per probe, which had it taking a machine-wide lock and doing
+  four file operations a second for claims that could not succeed. `gpu reserve --detach` is the
+  one continuous poller, exists only on explicit operator command, and exits by itself.
