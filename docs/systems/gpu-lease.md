@@ -15,13 +15,14 @@ other on a single shared card.
 
 | path | role |
 |---|---|
-| `internal/gpulease/gpulease.go` | the lease itself: state-root resolution and refusal, acquire/release, epoch fencing, the reclaim conjunction |
-| `internal/gpulease/procstart_*.go` | per-platform process-start identity (the pid-recycle guard); degrades to "unknown" off Windows/Linux |
+| `internal/gpulease/gpulease.go` | **the only implementation**: `LeaseDir` (the one resolver), acquire/release, epoch fencing, the reclaim conjunction, `InspectDir` (the one read path) |
+| `internal/gpulease/proc*.go` | per-platform liveness and process-start identity, exported so no consumer keeps a second copy |
+| `internal/pipeline/pipeline.go` | takes the `media` lease around all five generation call sites and threads `GPU_LEASE_*` to the runner |
 | `gpu_cmd.go` | the `gpu status\|reserve\|release\|hold` verbs, wrapper and `--detach` forms |
 | `gpu_hide_windows.go`, `gpu_hide_other.go` | hidden spawn for the detached holder (a visible console gets closed, killing the hold) |
-| `render/gpu-lock.mjs` | the Node participant: same path, same schema, plus `quiesceLlamaSwap` and the hoisted `freeLlamaSwap` |
-| `internal/gpulock` | the older READ-ONLY view, still used by the vision gate to defer rather than acquire |
-| `internal/config` | `state_dir` |
+| `render/gpu-lock.mjs` | READ-ONLY participant: honours + fences an inherited lease, elects one unloader, drains, ComfyUI lifecycle. **Does not acquire.** |
+| `internal/gpulock` | the read-only vision gate; delegates wholesale to `gpulease.InspectDir` |
+| `internal/config` | `state_dir`, `gpu_lock_path` |
 
 ## Why it exists
 
@@ -97,29 +98,41 @@ pretending. A stuck tier times out rather than deadlocking the render queue.
 
 ## Node interop
 
-Both sides resolve the **same directory and the same record schema**. That is load-bearing: if
-the Node side wrote its old flat `{pid,startedAt}` shape, the Go reader would find no holder pid,
-treat the lease as ownerless, and reclaim one actively held. `isStale` in `gpu-lock.mjs` mirrors
-`gpulease.Reclaimable` including the conjunction — **if these drift, Go and Node will disagree
-about who owns the GPU.**
+**Node does not acquire.** `internal/gpulease` is the only implementation of acquisition,
+staleness, fencing and the epoch counter. The Go caller takes the lease and threads
+`GPU_LEASE_DIR`, `GPU_LEASE_EPOCH` and `GPU_LEASE_CLASS` down; `withGpuSlot` honours what it is
+given.
 
-When the Go side already holds the lease it threads `GPU_LEASE_DIR`, `GPU_LEASE_EPOCH` and
-`GPU_LEASE_CLASS` down. `withGpuSlot` then skips its own acquire (it would contend with its own
-holder) and **elects exactly one job per lease to unload**, via an `O_EXCL` per-epoch marker
-inside the lease directory. First job in tears the tier down once; the rest skip. That election
-is what makes the hoist real — merely *skipping* the unload under an inherited lease, with
-nothing performing it, left a leased render running against a full card.
+A GPU job with **no** lease REFUSES, naming the fix, rather than grabbing the card:
 
-With no lease variables set, a bare `node render/*.mjs` still acquires for itself and unloads for
-itself, so standalone debugging works. It is **not** byte-for-byte unchanged, though: the default
-path moved from `%TEMP%` to the machine-wide state root, so a runner that cannot write there now
-refuses with an actionable message instead of falling back to a per-user path.
+```
+local-offload gpu reserve --class media -- node render/comfy-generate.mjs ...
+```
 
-There is deliberately **no legacy `%TEMP%` dual-write**. An earlier revision created the old
-directory as "mixed-version insurance", but it wrote an *empty* directory — which an
-older binary treats as stale and reclaims on its first iteration, letting it start a second GPU
-job — and its release unconditionally removed that directory even when an old-version process
-legitimately held it. It provided no insurance and actively stole locks, so it was removed.
+`--no-lock` remains the deliberate escape hatch for "nothing else can touch this GPU".
+
+### Why the Node implementation was deleted rather than repaired
+
+Two languages independently implementing one concurrency rule produced a **new** divergence in
+every review round, and each was individually fixed before the next was found:
+
+| round | divergence | symptom |
+|---|---|---|
+| 1 | different atomic tokens (dir vs `meta.json`) | both sides held the lease |
+| 1 | `os.FindProcess` vs `process.kill(pid,0)` | ACCESS_DENIED read as dead here, alive there |
+| 2 | non-atomic epoch write | **24.5%** of concurrent reads saw a torn counter and restarted the fence at 1 |
+| 2 | no claim-freshness grace on one side | Node deleted Go's in-progress claim |
+| 3 | a third staleness rule in `gpulock` | a live 3-hour holder read as free |
+
+The defect was never any single bug — it was the duplication. What Node keeps is what is
+genuinely its job: honour and **fence** against an inherited lease, elect **one** unloader per
+lease, **drain** before unloading, and run the ComfyUI lifecycle.
+
+The heartbeat lives in a per-epoch `hb.<epoch>` file rather than in the record, so a stale holder
+renewing after a takeover updates something nothing reads. Read-only consumers call
+`gpulease.InspectDir` rather than re-deriving the judgement — a second reader is how this
+diverges, and it did: when the heartbeat moved, a record-only view briefly called a live,
+renewing holder stale the moment its declared window lapsed.
 
 ## Known gaps
 
