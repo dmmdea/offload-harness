@@ -279,6 +279,11 @@ func TestResolveStateRootRefusesCloudSyncedPaths(t *testing.T) {
 		`C:\Users\x\OneDrive\state`,
 		`/home/x/Dropbox/state`,
 		`D:\My Drive\state`,
+		// The real-world spellings that exact-segment matching alone accepted.
+		`C:\Users\x\OneDrive - Contoso\state`,
+		`C:\Users\x\Dropbox (Personal)\state`,
+		`C:\Users\x\iCloudDrive\state`,
+		`G:\Shared drives\team\state`,
 	} {
 		if _, err := ResolveStateRoot(p); err == nil {
 			t.Errorf("ResolveStateRoot(%q) accepted a cloud-synced root; a replicated LOCK FILE "+

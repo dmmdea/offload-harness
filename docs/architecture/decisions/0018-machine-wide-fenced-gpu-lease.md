@@ -91,8 +91,11 @@ Two further facts shaped the design:
    mirrors `Reclaimable` including the conjunction; if the two implementations drift, Go and Node
    will disagree about who owns the GPU.
 
-8. **`freeLlamaSwap` is hoisted to once per LEASE, and it DRAINS FIRST.** With an inherited lease
-   (`GPU_LEASE_DIR` + `GPU_LEASE_EPOCH`) `withGpuSlot` skips both the acquire and the unload.
+8. **`freeLlamaSwap` is hoisted to once per LEASE, and it DRAINS FIRST.** Under an inherited
+   lease `withGpuSlot` skips the acquire and **elects exactly one job to unload** through an
+   `O_EXCL` per-epoch marker in the lease directory. The election is the load-bearing half:
+   skipping the unload without anyone performing it is not a hoist, it is an omission, and it
+   left a leased render running with every model resident.
    `quiesceLlamaSwap` polls `/upstream/<id>/slots`, where `is_processing` was verified true
    throughout a 23 s / 1500-token generation and false on completion. It is fail-SAFE, not
    fail-open-silent: an unreadable `/slots` yields `drained:false` plus the tiers it could not

@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
@@ -137,6 +138,10 @@ func runGPUReserve(args []string) error {
 	cmd.Env = append(os.Environ(),
 		"GPU_LEASE_DIR="+lease.Dir(),
 		fmt.Sprintf("GPU_LEASE_EPOCH=%d", lease.Epoch()),
+		// The class travels with the lease so an inheriting render knows what kind of
+		// hold it is running under; the unload is elected per lease inside the render
+		// path (claimLeaseUnload), so exactly one job per lease tears the tier down.
+		"GPU_LEASE_CLASS="+string(lease.Class()),
 	)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting wrapped command: %w", err)
@@ -160,7 +165,16 @@ func runGPUReserve(args []string) error {
 		case <-sigc:
 			_ = cmd.Process.Kill()
 		case <-tick.C:
-			_ = lease.Renew()
+			// LOSING THE LEASE MUST BE LOUD. Discarding this error left the wrapped
+			// benchmark running with no reservation while a render tore its tier down
+			// — the failure the wrapper exists to prevent, now invisible. Renew()
+			// checks the epoch first, so this fires on an operator `gpu release` or on
+			// being fenced out.
+			if err := lease.Renew(); err != nil {
+				fmt.Fprintf(os.Stderr,
+					"gpu reserve: LEASE LOST (%v) — the GPU is no longer reserved for this command; killing it\n", err)
+				_ = cmd.Process.Kill()
+			}
 		}
 	}
 }
@@ -181,16 +195,35 @@ func detachHolder(fs *flag.FlagSet, class string, dur time.Duration, reason, ori
 		child.Args = append(child.Args, "--config", cfgPath)
 	}
 	hideWindow(child) // no console window may ever appear; one gets closed and the hold dies
+
+	// A hidden child with nil Stderr writes to NUL, so a holder that fails to start
+	// produced ZERO diagnostics and the parent could only report "did not take the
+	// lease". Capture it.
+	errLog := filepath.Join(os.TempDir(), fmt.Sprintf("local-offload-gpu-hold-%d.log", os.Getpid()))
+	if f, ferr := os.Create(errLog); ferr == nil {
+		child.Stderr = f
+		defer func() { _ = f.Close() }()
+	}
 	if err := child.Start(); err != nil {
 		return fmt.Errorf("spawning detached holder: %w", err)
 	}
+	childPID := child.Process.Pid
 	_ = child.Process.Release()
 
 	// Wait for the child to actually take the lease before reporting success —
 	// otherwise a failed hold reads as a successful reservation.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if info := m.Inspect(); info.Held {
+		info := m.Inspect()
+		// THE HOLDER MUST BE OURS. The pre-flight Inspect is a TOCTOU: a racer can take
+		// the card between the check and the spawn. Without comparing pids, the losing
+		// parent reported someone else's reservation as its own and printed a release
+		// command that would kill the winner's hold.
+		if info.Held && info.PID != childPID {
+			return fmt.Errorf("another holder took the GPU first: %s (pid %d, reason %q)",
+				info.Class, info.PID, info.Reason)
+		}
+		if info.Held {
 			if asJSON {
 				b, _ := json.Marshal(map[string]any{
 					"held": true, "class": info.Class, "epoch": info.Epoch,
@@ -205,7 +238,7 @@ func detachHolder(fs *flag.FlagSet, class string, dur time.Duration, reason, ori
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	return errors.New("detached holder did not take the lease within 10s")
+	return fmt.Errorf("detached holder (pid %d) did not take the lease within 10s; its output is at %s", childPID, errLog)
 }
 
 // runGPUHold is the detached holder itself (internal; spawned by --detach). It holds

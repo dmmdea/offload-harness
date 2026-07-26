@@ -227,17 +227,26 @@ func defaultStateRoot() string {
 	return "/var/lib/local-offload"
 }
 
-// syncRootMarkers are path segments that indicate a cloud-sync-managed directory.
-// Matching is case-insensitive and segment-aware so a legitimate path such as
-// "/srv/dropbox-exporter" is not refused for containing the substring.
-var syncRootMarkers = []string{
-	"my drive", "google drive", "googledrive",
-	"onedrive", "dropbox", "icloumdrive", "icloud drive", "icloud",
+// syncRootExact are path segments that are cloud-sync roots only when they match a
+// whole segment. Kept separate from the prefix set so short, ambiguous words cannot
+// swallow legitimate directory names.
+var syncRootExact = []string{
+	"my drive", "google drive", "googledrive", "shared drives",
 	"box sync", "nextcloud", "owncloud", "syncthing", "pcloud", "mega",
 }
 
-// syncRootReason returns a non-empty explanation when p sits under a known
-// cloud-sync root. Empty means the path is acceptable.
+// syncRootPrefixes are the vendors whose real-world directory names carry suffixes:
+// "OneDrive - Contoso", "Dropbox (Personal)", "iCloudDrive". Exact matching alone
+// accepted every one of those.
+var syncRootPrefixes = []string{"onedrive", "dropbox", "icloud"}
+
+// syncRootReason returns a non-empty explanation when p sits under a known cloud-sync
+// root. Empty means the path is acceptable.
+//
+// Matching is case-insensitive and SEGMENT-AWARE, never a bare substring: a legitimate
+// "/srv/dropbox-exporter" must not be refused. Segment-aware prefixing keeps
+// "Dropbox (Personal)" refused while leaving "dropbox-exporter" alone, because the
+// latter's segment continues with '-' rather than ending or opening a qualifier.
 func syncRootReason(p string) string {
 	norm := strings.ToLower(filepath.ToSlash(p))
 	for _, seg := range strings.Split(norm, "/") {
@@ -245,9 +254,21 @@ func syncRootReason(p string) string {
 		if seg == "" {
 			continue
 		}
-		for _, marker := range syncRootMarkers {
+		for _, marker := range syncRootExact {
 			if seg == marker {
 				return "path segment " + strconv.Quote(seg) + " is a cloud-sync root"
+			}
+		}
+		for _, marker := range syncRootPrefixes {
+			if seg == marker {
+				return "path segment " + strconv.Quote(seg) + " is a cloud-sync root"
+			}
+			// "onedrive - contoso", "dropbox (personal)", "iclouddrive"
+			if strings.HasPrefix(seg, marker) {
+				rest := seg[len(marker):]
+				if rest == "" || rest[0] == ' ' || rest[0] == '(' || rest == "drive" {
+					return "path segment " + strconv.Quote(seg) + " is a cloud-sync root"
+				}
 			}
 		}
 	}

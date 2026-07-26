@@ -103,14 +103,23 @@ treat the lease as ownerless, and reclaim one actively held. `isStale` in `gpu-l
 `gpulease.Reclaimable` including the conjunction — **if these drift, Go and Node will disagree
 about who owns the GPU.**
 
-When the Go side already holds the lease it threads `GPU_LEASE_DIR` and `GPU_LEASE_EPOCH` down.
-`withGpuSlot` then skips both its own acquire (it would contend with its own holder) and its own
-`freeLlamaSwap` (the holder already unloaded once for the whole batch). With neither variable set,
-a bare `node render/*.mjs` behaves exactly as before, which keeps standalone debugging working.
+When the Go side already holds the lease it threads `GPU_LEASE_DIR`, `GPU_LEASE_EPOCH` and
+`GPU_LEASE_CLASS` down. `withGpuSlot` then skips its own acquire (it would contend with its own
+holder) and **elects exactly one job per lease to unload**, via an `O_EXCL` per-epoch marker
+inside the lease directory. First job in tears the tier down once; the rest skip. That election
+is what makes the hoist real — merely *skipping* the unload under an inherited lease, with
+nothing performing it, left a leased render running against a full card.
 
-The legacy `%TEMP%` lock directory is still created for one release as mixed-version insurance:
-this fleet is hand-deployed and has drifted between versions before, and a not-yet-upgraded binary
-still checks the old path.
+With no lease variables set, a bare `node render/*.mjs` still acquires for itself and unloads for
+itself, so standalone debugging works. It is **not** byte-for-byte unchanged, though: the default
+path moved from `%TEMP%` to the machine-wide state root, so a runner that cannot write there now
+refuses with an actionable message instead of falling back to a per-user path.
+
+There is deliberately **no legacy `%TEMP%` dual-write**. An earlier revision created the old
+directory as "mixed-version insurance", but it wrote an *empty* directory — which an
+older binary treats as stale and reclaims on its first iteration, letting it start a second GPU
+job — and its release unconditionally removed that directory even when an old-version process
+legitimately held it. It provided no insurance and actively stole locks, so it was removed.
 
 ## Known gaps
 

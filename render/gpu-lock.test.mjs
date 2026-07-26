@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { rmSync, mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import {
   acquireGpuLock, isStale, memoryStack,
-  quiesceLlamaSwap, freeLlamaSwap, checkInheritedLease,
+  quiesceLlamaSwap, freeLlamaSwap, checkInheritedLease, claimLeaseUnload,
 } from "./gpu-lock.mjs";
 
 test("acquire is exclusive; second acquire fails fast", async () => {
@@ -106,12 +106,56 @@ test("quiesce waits while a slot is processing, then reports a verified drain", 
   assert.ok(polls >= 3, `expected to keep polling while busy, polled ${polls}`);
 });
 
-test("quiesce treats a 404 (model not loaded) as nothing to drain", async () => {
+// A 404 from /slots is only "idle" when the model is genuinely NOT LOADED, which is
+// what /running is consulted for.
+test("quiesce treats a 404 for an UNLOADED model as nothing to drain", async () => {
   const r = await quiesceLlamaSwap(["m"], {
-    fetchImpl: async () => ({ ok: false, status: 404, json: async () => ({}) }),
-    pollMs: 1, timeoutMs: 1_000,
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/running")) {
+        return { ok: true, status: 200, json: async () => ({ running: [] }) }; // m is not loaded
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    },
+    pollMs: 1, timeoutMs: 1_000, graceMs: 1,
   });
-  assert.equal(r.drained, true);
+  assert.equal(r.drained, true, "an unloaded model has nothing in flight");
+  assert.deepEqual(r.unknown, []);
+});
+
+// THE FAIL-OPEN THIS CLOSES: a LOADED upstream with no /slots route also 404s — any
+// non-llama.cpp backend on :11436, and whisper is one. Reporting that as a verified
+// drain let the unload fire into in-flight work, which is the measured 502.
+test("quiesce does NOT call a 404 idle when /running says the model IS loaded", async () => {
+  const r = await quiesceLlamaSwap(["whisper-stt"], {
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/running")) {
+        return { ok: true, status: 200, json: async () => ({ running: [{ model: "whisper-stt" }] }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) }; // loaded, but no /slots route
+    },
+    pollMs: 1, timeoutMs: 1_000, graceMs: 1,
+  });
+  assert.equal(r.drained, false, "a loaded-but-unobservable tier must not report as drained");
+  assert.deepEqual(r.unknown, ["whisper-stt"], "the unobservable tier is named for the caller's log");
+});
+
+// A transient blip must not poison the verdict for the whole call: the drain is judged
+// on the evidence of the round that concluded it.
+test("quiesce clears a transient unknown once the tier becomes observable", async () => {
+  let n = 0;
+  const r = await quiesceLlamaSwap(["m"], {
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/running")) {
+        return { ok: true, status: 200, json: async () => ({ running: [{ model: "m" }] }) };
+      }
+      n++;
+      if (n === 1) return { ok: false, status: 502, json: async () => ({}) }; // one blip
+      return { ok: true, status: 200, json: async () => [{ id: 0, is_processing: n < 3 }] };
+    },
+    pollMs: 1, timeoutMs: 5_000, graceMs: 1,
+  });
+  assert.equal(r.drained, true, "a resolved transient must not leave the drain marked unverified");
+  assert.deepEqual(r.unknown, []);
 });
 
 test("quiesce does NOT claim a drain it could not verify", async () => {
@@ -180,6 +224,47 @@ test("release is epoch-guarded: a fenced-out holder must not delete the current 
   const after = JSON.parse(readFileSync(join(lock, "meta.json"), "utf8"));
   assert.equal(after.epoch, a.epoch + 1,
     "the CURRENT holder's lease survived a stale holder's release");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// The once-per-lease claim must be exclusive: several jobs starting under one lease
+// at the same moment must yield exactly ONE unloader.
+test("claimLeaseUnload elects exactly one unloader per lease epoch", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "gpulease-unload-"));
+  const lease = { dir, epoch: 11 };
+  const winners = [claimLeaseUnload(lease), claimLeaseUnload(lease), claimLeaseUnload(lease)]
+    .filter(Boolean).length;
+  assert.equal(winners, 1, "exactly one job per lease may unload");
+  // A NEW lease (higher epoch) gets its own unload — the card was handed over.
+  assert.equal(claimLeaseUnload({ dir, epoch: 12 }), true, "a new lease unloads again");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("claimLeaseUnload unloads when it cannot tell (correctness over saving a teardown)", () => {
+  assert.equal(claimLeaseUnload(null), true);
+  assert.equal(claimLeaseUnload({ dir: join(tmpdir(), "definitely-not-here-xyz"), epoch: 1 }), true);
+});
+
+// A long render must keep its lease alive; without renewal a job outliving its declared
+// window was reclaimable mid-run (a video job's wait window alone is 20 minutes).
+test("renew refreshes the heartbeat and reports being fenced out", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "gpulease-renew-"));
+  const lock = join(dir, "gpu", "lease");
+  const a = await acquireGpuLock({ lockPath: lock, waitMs: 0 });
+  assert.ok(a, "acquire");
+  const before = JSON.parse(readFileSync(join(lock, "meta.json"), "utf8")).renewed_at_ms;
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(a.renew(), true, "renew succeeds while we hold the lease");
+  const after = JSON.parse(readFileSync(join(lock, "meta.json"), "utf8")).renewed_at_ms;
+  assert.ok(after >= before, "heartbeat advanced");
+
+  // Someone else takes over: renew must report the loss rather than stamping a lease
+  // that is no longer ours.
+  writeFileSync(join(lock, "meta.json"), JSON.stringify({
+    epoch: a.epoch + 1, class: "text", holder: { pid: process.pid, start_time_ms: 0 },
+    acquired_at_ms: Date.now(), renewed_at_ms: Date.now(), expires_at_ms: Date.now() + 60_000,
+  }));
+  assert.equal(a.renew(), false, "a fenced-out holder must not keep renewing");
   rmSync(dir, { recursive: true, force: true });
 });
 
