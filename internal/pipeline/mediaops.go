@@ -72,7 +72,7 @@ func (p *Pipeline) runEditImage(ctx context.Context, req core.Request, meta core
 	out := paramStr(req.Params, "out")
 	if out == "" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
-		out = filepath.Join(p.cfg.MediaDir, "edit-"+sha256hex(req.Image+fmt.Sprint(req.Params["ops"]))[:8]+".png")
+		out = filepath.Join(p.cfg.MediaDir, "edit-"+sha256hex(req.Image + fmt.Sprint(req.Params["ops"]))[:8]+".png")
 	}
 	res, err := mediaops.RunEditImage(ctx, cfg, mediaops.EditRequest{Image: req.Image, Ops: ops, Out: out, Renditions: rends})
 	if err != nil {
@@ -117,7 +117,7 @@ func (p *Pipeline) runMedia(ctx context.Context, req core.Request, meta core.Met
 	if mreq.Out == "" && mreq.Op != "probe" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
 		ext := defaultMediaExt(mreq)
-		mreq.Out = filepath.Join(p.cfg.MediaDir, "media-"+sha256hex(mreq.Op+mreq.In+fmt.Sprint(mreq.Inputs))[:8]+ext)
+		mreq.Out = filepath.Join(p.cfg.MediaDir, "media-"+sha256hex(mreq.Op + mreq.In + fmt.Sprint(mreq.Inputs))[:8]+ext)
 	}
 	cfg := mediaops.MediaConfig{FFmpeg: p.cfg.FFmpegPath, Timeout: time.Duration(p.cfg.EditTimeoutSec) * time.Second}
 	res, err := mediaops.RunMedia(ctx, cfg, mreq)

@@ -1,31 +1,21 @@
 // node --test render/gpu-lock.test.mjs
+//
+// This file no longer tests acquisition, staleness or the epoch counter: Node does not
+// implement them any more. internal/gpulease (Go) is the single implementation, and the
+// duplicate was deleted because two languages independently implementing one concurrency
+// rule produced a fresh divergence in every review round.
+//
+// What is tested here is what Node still owns: reading the shared record, the fence, the
+// once-per-lease unload election, and the drain.
 import { test } from "node:test";
 import assert from "node:assert";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rmSync, mkdtempSync } from "node:fs";
-import { acquireGpuLock, isStale, memoryStack } from "./gpu-lock.mjs";
-
-test("acquire is exclusive; second acquire fails fast", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "gpulock-"));
-  const lock = join(dir, "gpu.lock");
-  const a = await acquireGpuLock({ lockPath: lock, waitMs: 0 });
-  assert.ok(a, "first acquire should succeed");
-  const b = await acquireGpuLock({ lockPath: lock, waitMs: 0 });
-  assert.equal(b, null, "second acquire should fail while held");
-  a.release();
-  const c = await acquireGpuLock({ lockPath: lock, waitMs: 0 });
-  assert.ok(c, "acquire should succeed after release");
-  c.release();
-  rmSync(dir, { recursive: true, force: true });
-});
-
-test("a stale lock (old mtime, dead pid) is reclaimable", async () => {
-  // A lock whose recorded pid is not alive AND is older than ttl is stale.
-  assert.equal(isStale({ pid: 999999999, mtimeMs: 0 }, { ttlMs: 1000, nowMs: 1_000_000 }), true);
-  // A fresh lock by a live pid is NOT stale.
-  assert.equal(isStale({ pid: process.pid, mtimeMs: 1_000_000 }, { ttlMs: 1000, nowMs: 1_000_500 }), false);
-});
+import { rmSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+  memoryStack, quiesceLlamaSwap, freeLlamaSwap,
+  checkInheritedLease, claimLeaseUnload, readLease, inheritedLease,
+} from "./gpu-lock.mjs";
 
 test("MEMORY_STACK is sourced from env, not a buried const (invariant 1)", () => {
   // Default (env unset) carries the two canonical CPU-only mem0 models — never unloaded.
@@ -40,11 +30,190 @@ test("MEMORY_STACK is sourced from env, not a buried const (invariant 1)", () =>
   assert.ok(!env.has(""), "empty entries dropped");
 });
 
-test("a dead-pid lock is reclaimable IMMEDIATELY, even when young (no 1h deadlock)", async () => {
-  // Regression: a holder killed without releasing (crash / Go timeout-kill) leaves a fresh
-  // mtime but a dead pid. It must be reclaimable at once — the old `aged && !alive` AND-gate
-  // left the GPU deadlocked for up to the full 1h TTL.
-  assert.equal(isStale({ pid: 999999999, mtimeMs: 1_000_000 }, { ttlMs: 3_600_000, nowMs: 1_000_500 }), true);
-  // A live holder with a young lock is still NOT stale (don't steal a working job's lock).
-  assert.equal(isStale({ pid: process.pid, mtimeMs: 1_000_000 }, { ttlMs: 3_600_000, nowMs: 1_000_500 }), false);
+// --- reading the shared record ---------------------------------------------
+// The schema is owned by Go. Node only reads it, but it must read it CORRECTLY: the
+// fence compares epochs, and a record Node cannot parse reads as "fenced out", which
+// would block every render.
+
+test("readLease parses a Go-shaped record, and returns null for a missing one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gpulease-read-"));
+  assert.equal(readLease(dir), null, "absent record => null");
+  writeFileSync(join(dir, "meta.json"), JSON.stringify({
+    epoch: 12, class: "media", holder: { pid: 4242, start_time_ms: 99 },
+    acquired_at_ms: 1, renewed_at_ms: 2, expires_at_ms: 3,
+  }));
+  const m = readLease(dir);
+  assert.equal(m.epoch, 12);
+  assert.equal(m.class, "media");
+  assert.equal(m.holder.pid, 4242, "the nested holder.pid must survive the round trip");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("inheritedLease requires BOTH dir and epoch, and carries the class", () => {
+  assert.equal(inheritedLease({}), null);
+  assert.equal(inheritedLease({ GPU_LEASE_DIR: "X" }), null, "a dir with no epoch is not a lease");
+  assert.equal(inheritedLease({ GPU_LEASE_EPOCH: "3" }), null, "an epoch with no dir is not a lease");
+  assert.deepEqual(inheritedLease({ GPU_LEASE_DIR: "X", GPU_LEASE_EPOCH: "3", GPU_LEASE_CLASS: "text" }),
+    { dir: "X", epoch: 3, class: "text" });
+});
+
+// --- the fence -------------------------------------------------------------
+
+test("checkInheritedLease fences a resumed process out (the closing-lid case)", () => {
+  assert.equal(checkInheritedLease({ dir: "X", epoch: 5 }, () => ({ epoch: 5 })), true);
+  assert.equal(checkInheritedLease({ dir: "X", epoch: 5 }, () => ({ epoch: 6 })), false,
+    "a process that slept through a takeover must NOT act on the GPU");
+  assert.equal(checkInheritedLease({ dir: "X", epoch: 5 }, () => null), false,
+    "a vanished lease is not ours either");
+});
+
+// --- once-per-lease unload election ----------------------------------------
+
+test("claimLeaseUnload elects exactly one unloader per lease epoch", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gpulease-unload-"));
+  const lease = { dir, epoch: 11 };
+  const winners = [claimLeaseUnload(lease), claimLeaseUnload(lease), claimLeaseUnload(lease)]
+    .filter(Boolean).length;
+  assert.equal(winners, 1, "exactly one job per lease may unload");
+  // A NEW lease (higher epoch) gets its own unload — the card was handed over.
+  assert.equal(claimLeaseUnload({ dir, epoch: 12 }), true, "a new lease unloads again");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("claimLeaseUnload unloads when it cannot tell (correctness over saving a teardown)", () => {
+  assert.equal(claimLeaseUnload(null), true);
+  assert.equal(claimLeaseUnload({ dir: join(tmpdir(), "definitely-not-here-xyz"), epoch: 1 }), true);
+});
+
+// --- the drain -------------------------------------------------------------
+// MEASURED on llama-swap v242: an unload issued mid-generation returned in 1,265ms
+// without draining and the in-flight request died at 4,107ms with 502 Bad Gateway.
+// The unload route does not honour in-flight work, so the caller must drain first.
+// The signal is llama-server's /slots (is_processing), verified true throughout a
+// 23s/1500-token generation and false on completion.
+
+const slotsResponse = (processing) => ({
+  ok: true, status: 200, json: async () => [{ id: 0, is_processing: processing }],
+});
+
+test("quiesce waits while a slot is processing, then reports a verified drain", async () => {
+  let polls = 0;
+  const fetchImpl = async (url) => {
+    if (String(url).endsWith("/running")) {
+      return { ok: true, status: 200, json: async () => ({ running: [{ model: "m" }] }) };
+    }
+    polls++;
+    return slotsResponse(polls < 3);
+  };
+  const r = await quiesceLlamaSwap(["m"], { fetchImpl, pollMs: 1, timeoutMs: 5_000 });
+  assert.equal(r.drained, true, "drain verified once no slot reports is_processing");
+  assert.ok(polls >= 3, `expected to keep polling while busy, polled ${polls}`);
+});
+
+test("quiesce treats a 404 for an UNLOADED model as nothing to drain", async () => {
+  const r = await quiesceLlamaSwap(["m"], {
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/running")) {
+        return { ok: true, status: 200, json: async () => ({ running: [] }) }; // m is not loaded
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    },
+    pollMs: 1, timeoutMs: 1_000, graceMs: 1,
+  });
+  assert.equal(r.drained, true, "an unloaded model has nothing in flight");
+  assert.deepEqual(r.unknown, []);
+});
+
+// THE FAIL-OPEN THIS CLOSES: a LOADED upstream with no /slots route also 404s — any
+// non-llama.cpp backend on :11436, and whisper is one. Reporting that as a verified
+// drain let the unload fire into in-flight work, which is the measured 502.
+test("quiesce does NOT call a 404 idle when /running says the model IS loaded", async () => {
+  const r = await quiesceLlamaSwap(["whisper-stt"], {
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/running")) {
+        return { ok: true, status: 200, json: async () => ({ running: [{ model: "whisper-stt" }] }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) }; // loaded, but no /slots route
+    },
+    pollMs: 1, timeoutMs: 1_000, graceMs: 1,
+  });
+  assert.equal(r.drained, false, "a loaded-but-unobservable tier must not report as drained");
+  assert.deepEqual(r.unknown, ["whisper-stt"], "the unobservable tier is named for the caller's log");
+});
+
+test("quiesce clears a transient unknown once the tier becomes observable", async () => {
+  let n = 0;
+  const r = await quiesceLlamaSwap(["m"], {
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/running")) {
+        return { ok: true, status: 200, json: async () => ({ running: [{ model: "m" }] }) };
+      }
+      n++;
+      if (n === 1) return { ok: false, status: 502, json: async () => ({}) }; // one blip
+      return { ok: true, status: 200, json: async () => [{ id: 0, is_processing: n < 3 }] };
+    },
+    pollMs: 1, timeoutMs: 5_000, graceMs: 1,
+  });
+  assert.equal(r.drained, true, "a resolved transient must not leave the drain marked unverified");
+  assert.deepEqual(r.unknown, []);
+});
+
+test("quiesce gives up after timeoutMs rather than blocking a render forever", async () => {
+  const r = await quiesceLlamaSwap(["m"], {
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/running")) {
+        return { ok: true, status: 200, json: async () => ({ running: [{ model: "m" }] }) };
+      }
+      return slotsResponse(true); // never idle
+    },
+    pollMs: 1, timeoutMs: 30,
+  });
+  assert.equal(r.drained, false, "a stuck tier must not deadlock the queue");
+});
+
+test("freeLlamaSwap DRAINS BEFORE it unloads, and never unloads the memory stack", async () => {
+  const order = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v1/models")) {
+      return { ok: true, status: 200, json: async () => ({ data: [
+        { id: "gemma-4-e4b" }, { id: "embeddinggemma" }, { id: "bge-reranker-v2-m3" },
+      ] }) };
+    }
+    if (u.includes("/api/models/unload/")) {
+      order.push("unload:" + u.split("/api/models/unload/")[1]);
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  try {
+    await freeLlamaSwap("http://x", {
+      quiesce: async (ids) => { order.push("drain:" + ids.join("+")); return { drained: true, waitedMs: 0, unknown: [] }; },
+    });
+  } finally { globalThis.fetch = realFetch; }
+
+  assert.equal(order[0], "drain:gemma-4-e4b", "the drain must precede every unload");
+  assert.ok(order.includes("unload:gemma-4-e4b"), "the GPU tier is unloaded");
+  assert.ok(!order.some((o) => o.includes("embeddinggemma")),
+    "invariant 1: the CPU memory stack is never drained or unloaded");
+  assert.ok(!order.some((o) => o.includes("bge-reranker")),
+    "invariant 1: the reranker is never drained or unloaded");
+});
+
+test("freeLlamaSwap does NOT unload when it cannot list models (better a slow render than a dead tier)", async () => {
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v1/models")) return { ok: false, status: 500, json: async () => ({}) };
+    calls.push(u);
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const logged = [];
+  try {
+    await freeLlamaSwap("http://x", { log: (m) => logged.push(m) });
+  } finally { globalThis.fetch = realFetch; }
+  assert.equal(calls.length, 0, "nothing was unloaded");
+  assert.ok(logged.some((m) => /NOT unloading/.test(m)), "and it said so, loudly");
 });
