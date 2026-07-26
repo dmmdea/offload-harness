@@ -4,6 +4,27 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.23.4] - 2026-07-26
+
+### Added
+- **Per-tool timeouts in the agent loop.** `Loop.dispatch` handed `t.Exec` the whole run context
+  with **no deadline**, so a single tool could consume the entire run budget and the loop had no way
+  to continue past it. Only `run_shell` self-capped. That is a hard prerequisite for wiring the
+  harness's media routes into the agent: they default to **720 s image / 1500 s video / 1800 s STT
+  against a 180 s `agent_run` budget**, so one call would have swallowed the run whole.
+  - Default `120 s` (matching the existing `run_shell` cap), overridable per tool via `Tool.Timeout`
+    so a genuinely long media route can be granted more without loosening the cap for everything,
+    and per loop via `WithToolTimeout`.
+  - An expired tool is a **reactable `is_error` result** the planner can route around, not a fatal
+    run — the same contract as any other tool error.
+  - **The cap is hard, not merely cooperative.** Cancelling a context preempts nothing, so a tool
+    that ignores `ctx` would block `dispatch` forever and the deadline would be decoration. Proven:
+    with a cooperative-only implementation the regression test does not fail, it *hangs*
+    (`panic: test timed out after 20s`). The trade-off is stated in the code — an uncooperative
+    tool's goroutine outlives the call and its result is discarded.
+  - The run's own deadline is reported distinctly from a tool overrun, so a cancelled run never
+    sends the planner chasing an innocent tool.
+
 ## [0.23.3] - 2026-07-26
 
 ### Fixed
