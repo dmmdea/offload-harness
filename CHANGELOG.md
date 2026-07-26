@@ -4,6 +4,19 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.23.5] - 2026-07-26
+
+### Fixed
+- **The GPU lease's refusal on Linux now names the remedy.** Found in the field: a Linux services
+  box upgraded past 0.23.0 and **every media job began deferring**. `/var/lib/local-offload` does not
+  exist on Linux and an unprivileged service user cannot create it, and `setup/install.ps1` is
+  Windows-only so nothing creates it. The refusal itself is correct — the lease is machine-wide on
+  purpose and must not fall back to a per-user path — but `permission denied` alone left the
+  operator unable to tell which of two very different fixes applied. The error now spells out both
+  (`sudo mkdir -p … && sudo chmod 0777 …`, or set `state_dir`), including why the directory must
+  **not** be sticky: reclaiming a dead holder's lease means removing another user's file.
+  `docs/systems/gpu-lease.md` gains the one-time Linux setup step.
+
 ## [0.23.4] - 2026-07-26
 
 ### Added
