@@ -99,3 +99,49 @@ test("no-lock mode: acquire skipped, fn runs, no release error", async () => {
   assert.ok(!h.calls.includes("acquire"), "acquire skipped in no-lock mode");
   assert.ok(h.calls.includes("fn"));
 });
+
+// --- inherited lease -------------------------------------------------------
+// When the Go holder already owns the lease it threads GPU_LEASE_DIR/GPU_LEASE_EPOCH
+// down. Acquiring again would contend with our own holder, and unloading again would
+// repeat the per-job teardown this change exists to remove: freeLlamaSwap ran INSIDE
+// withGpuSlot, i.e. once per job, which is the arithmetic behind 3,356 unloads.
+
+test("inherited lease: acquire is SKIPPED (we would contend with our own holder)", async () => {
+  const h = harness();
+  await withGpuSlot({ ...h.opts, ...h.deps, lease: { dir: "X", epoch: 7 } },
+    async () => { h.calls.push("fn"); });
+  assert.ok(!h.calls.includes("acquire"), "must not re-acquire a lease we already hold");
+  assert.ok(h.calls.includes("fn"), "the job still runs");
+});
+
+test("inherited lease: freeLlamaSwap is SKIPPED (hoisted to once per lease)", async () => {
+  const h = harness();
+  await withGpuSlot({ ...h.opts, ...h.deps, lease: { dir: "X", epoch: 7 } },
+    async () => { h.calls.push("fn"); });
+  assert.ok(!h.calls.includes("freeLlamaSwap"),
+    "an inherited lease already unloaded once for the whole batch; unloading per job is the defect");
+});
+
+test("inherited lease: teardown still runs (freeComfy + kill), and release is a no-op", async () => {
+  const h = harness();
+  await withGpuSlot({ ...h.opts, ...h.deps, lease: { dir: "X", epoch: 7 } },
+    async () => { h.calls.push("fn"); });
+  assert.ok(h.calls.includes("freeComfy"), "ComfyUI is still torn down at the batch boundary");
+  assert.equal(h.killed.n, 1, "a ComfyUI we spawned is still killed");
+  assert.equal(h.released, 0, "we never took the lease, so we must never release it");
+});
+
+test("WITHOUT an inherited lease the old behaviour is unchanged (acquire + unload)", async () => {
+  const h = harness();
+  // lease:null is explicit so the ambient GPU_LEASE_DIR of a real run cannot leak in.
+  await withGpuSlot({ ...h.opts, ...h.deps, lease: null }, async () => { h.calls.push("fn"); });
+  assert.deepEqual(h.calls, ["acquire", "freeLlamaSwap", "ensureComfy", "fn", "freeComfy", "release"]);
+});
+
+test("the job callback receives the lease so it can fence before irreversible work", async () => {
+  const h = harness();
+  let seen;
+  await withGpuSlot({ ...h.opts, ...h.deps, lease: { dir: "X", epoch: 7 } },
+    async (ctx) => { seen = ctx.lease; });
+  assert.deepEqual(seen, { dir: "X", epoch: 7 });
+});
