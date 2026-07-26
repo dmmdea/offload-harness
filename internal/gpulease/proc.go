@@ -24,4 +24,9 @@ func pidAlive(pid int) bool { return pidAliveFn(pid) }
 // held in another.
 func PIDAlive(pid int) bool { return pidAliveFn(pid) }
 
+// ProcessStart is the exported process-start identity, exported for the same reason as
+// PIDAlive: a second consumer of the lease must apply the SAME reclaim rule, and
+// Reclaimable needs this to detect a recycled pid.
+func ProcessStart(pid int) (int64, bool) { return processStart(pid) }
+
 var pidAliveFn = func(pid int) bool { return pidAliveImpl(pid) }
