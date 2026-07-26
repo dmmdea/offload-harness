@@ -820,7 +820,7 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	// Passive fleet footprint: key this render by the machine's image binding
 	// (family + the O1 bf16 quant) so measured peaks accumulate during normal use.
 	imgFamily, imgQuant := imageFootprintKey(p.cfg)
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen", timeout, p.gpuWait(0))
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -914,7 +914,7 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 		ExtraArgs: p.cfg.SdcppExtraArgs,
 	}
 	imgFamily, imgQuant := imageFootprintKey(p.cfg)
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen (sdcpp)", timeout, p.gpuWait(0))
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen (sdcpp)", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1002,7 +1002,7 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 		CFG: p.cfg.InpaintCFG, Sampler: p.cfg.InpaintSampler, Scheduler: p.cfg.InpaintScheduler,
 	}
 	timeout := time.Duration(p.cfg.InpaintTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("inpaint", timeout, p.gpuWait(0))
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("inpaint", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1166,7 +1166,7 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 	// 3,356 unloads in the server log.
 	// This helper returns items+error rather than a core.Result, so a busy card surfaces
 	// as an error for the caller to classify — no items were produced.
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen batch", timeout, p.gpuWait(0))
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen batch", timeout, p.gpuWait())
 	if lerr != nil {
 		return nil, lerr
 	}
@@ -1259,7 +1259,7 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second
 	// Passive fleet footprint: family from a payload-declared model_family (the
 	// fleet dispatch path threads it) else the generic comfy-graph bucket.
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("run-graph", timeout, p.gpuWait(0))
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("run-graph", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1385,7 +1385,7 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.VideoGenTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("video-gen", timeout, p.gpuWait(p.cfg.VideoGenWaitMs))
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("video-gen", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1537,7 +1537,7 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.AudioGenTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("audio-gen ("+kind+")", timeout, p.gpuWait(p.cfg.AudioGenWaitMs))
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("audio-gen ("+kind+")", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1605,17 +1605,15 @@ func (p *Pipeline) genEnv() []string {
 	return env
 }
 
-// gpuWait resolves how long ONE GPU task may queue behind a current holder: the
-// per-task override when set, else the machine-wide ceiling. Zero means a single try.
-func (p *Pipeline) gpuWait(override int) time.Duration {
-	ms := override
-	if ms <= 0 {
-		ms = p.cfg.GPUWaitMs
-	}
-	if ms <= 0 {
+// gpuWait is how long a GPU task may queue behind the current holder before deferring.
+// One ceiling for every task: per-task overrides bought nothing at 90s and would have
+// silently restored the old 20-minute video wait from every existing config file.
+// Zero means a single try.
+func (p *Pipeline) gpuWait() time.Duration {
+	if p.cfg.GPUWaitMs <= 0 {
 		return 0
 	}
-	return time.Duration(ms) * time.Millisecond
+	return time.Duration(p.cfg.GPUWaitMs) * time.Millisecond
 }
 
 // lockEnv threads a configured GPU-lock override to a render runner as the

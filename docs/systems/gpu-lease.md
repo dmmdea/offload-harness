@@ -66,16 +66,16 @@ holder's class, age and reason. Both halves are deliberate:
   of minutes is indistinguishable from a hang. Past the window an honest ETA is more useful to a
   caller that can retry.
 
-| knob | default | scope |
-|---|---|---|
-| `gpu_wait_ms` | 90 s | every GPU task (matches `vision_gpu_wait_sec`) |
-| `videogen_wait_ms` | 90 s | overrides `gpu_wait_ms` for video |
-| `audiogen_wait_ms` | 90 s | overrides `gpu_wait_ms` for audio |
+`gpu_wait_ms` (default **90 s**, matching `vision_gpu_wait_sec`) is the single ceiling for every
+GPU task. `videogen_wait_ms` and `audiogen_wait_ms` are **retired and ignored** — they existed so
+a cheap TTS was not starved behind a 20-minute video, which buys nothing at 90 s, and every
+installed `config.json` still carries `videogen_wait_ms: 1200000`, so honouring them as overrides
+would have quietly restored the old 20-minute wait on upgrade. A config carrying them loads
+cleanly and prints a note naming the replacement.
 
-Raise the per-task values to restore a long serial queue. Only **contention** is waited out — an
-unwritable or cloud-synced lease location comes back immediately, because waiting cannot fix a
-configuration fault. A busy card is a **defer**, not a failure: `generate-image --batch` exits 0
-with `err_class: gpu_busy` rather than a non-zero error.
+Only **contention** is waited out — an unwritable or cloud-synced lease location comes back
+immediately, because waiting cannot fix a configuration fault. A busy card is a **defer**, not a
+failure: `generate-image --batch` exits 0 with `err_class: gpu_busy` rather than a non-zero error.
 
 Running the harness under a reservation **inherits** that lease:
 
@@ -128,6 +128,24 @@ So `freeLlamaSwap` drains before it unloads. `quiesceLlamaSwap` polls each tier'
 cannot be read (older llama-server, `--no-slots`), it reports `drained:false` and names the
 unobservable tiers, and the caller logs that it proceeded without a verified drain instead of
 pretending. A stuck tier times out rather than deadlocking the render queue.
+
+## Windows file semantics the lease depends on
+
+Two behaviours that do not exist on POSIX shape the implementation, and both were found by a
+concurrency test rather than by reading:
+
+- **Delete is pending, not instant.** Removing a file whose handle is still open marks it
+  delete-pending; an `O_EXCL` create in that window fails with `ACCESS_DENIED`, not
+  `EEXIST`. That window is precisely the moment a holder releases — exactly when every waiter is
+  polling — so the acquirer most likely to hit it is the one that should have won. Both the claim
+  and the epoch lock retry it instead of treating it as a fault.
+- **A reader blocks a delete.** `os.ReadFile` opens without `FILE_SHARE_DELETE`, so `os.Remove`
+  on the claim fails while anyone is inspecting it. A failed release *leaks* the lease until both
+  halves of the reclaim rule fire, so removal retries.
+
+Neither is defensive padding: with waiters polling once a second, both races are ordinary
+traffic. Measured under six concurrent acquire/release workers, 1 in 48 cycles failed before the
+retries were added.
 
 ## Node interop
 

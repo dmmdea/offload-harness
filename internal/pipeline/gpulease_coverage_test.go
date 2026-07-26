@@ -297,7 +297,7 @@ func TestAmbientLeaseIsInheritedNotReacquired(t *testing.T) {
 	if got.Epoch != strconv.FormatUint(held.Epoch(), 10) {
 		t.Errorf("child ran under epoch %s, want the inherited %d — it took a SECOND lease", got.Epoch, held.Epoch())
 	}
-	if wait := p.gpuWait(p.cfg.VideoGenWaitMs); elapsed >= wait {
+	if wait := p.gpuWait(); elapsed >= wait {
 		t.Errorf("took %s, i.e. the whole %s wait window: it queued instead of inheriting", elapsed, wait)
 	}
 }

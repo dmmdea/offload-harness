@@ -258,9 +258,8 @@ type Config struct {
 	VideoGenTextEncoder string `json:"videogen_text_encoder,omitempty"`
 	// AudioGenTimeoutSec bounds one audio synthesis (TTS or ACE-Step). Default 720 (12min).
 	AudioGenTimeoutSec int `json:"audiogen_timeout_sec,omitempty"`
-	// GPUWaitMs is how long ANY GPU job queues behind a current lease holder before it
-	// defers with the holder's detail. It is the default ceiling for every GPU task;
-	// VideoGenWaitMs / AudioGenWaitMs override it for their own task.
+	// GPUWaitMs is how long ANY GPU job queues behind the current lease holder before it
+	// defers with the holder's detail. One knob for every GPU task.
 	//
 	// A busy card must QUEUE the job rather than drop it — that is what the single GPU
 	// slot has always been for. It is BOUNDED because the caller is usually one tool
@@ -268,13 +267,13 @@ type Config struct {
 	// hang; past the window an honest "held by <class>, <n>s in" is more useful to a
 	// caller that can retry. Default 90000 (90s), matching VisionGPUWaitSec so the two
 	// GPU waiters behave alike.
+	//
+	// It REPLACES videogen_wait_ms (20min) and audiogen_wait_ms (2min), which are now
+	// ignored. Those existed only so a cheap TTS was not starved behind a long video;
+	// at a 90s ceiling that distinction buys nothing, and keeping them would have been
+	// a trap — every install shipped with videogen_wait_ms=1200000 in its config, so
+	// per-task overrides would have silently restored the 20-minute wait on upgrade.
 	GPUWaitMs int `json:"gpu_wait_ms,omitempty"`
-	// VideoGenWaitMs is how long a queued video job waits for the GPU lease before
-	// deferring. Default 90000 (90s); raise it to restore a long serial queue.
-	VideoGenWaitMs int `json:"videogen_wait_ms,omitempty"`
-	// AudioGenWaitMs is how long a queued audio job waits for the GPU lease before
-	// deferring. Default 90000 (90s).
-	AudioGenWaitMs int `json:"audiogen_wait_ms,omitempty"`
 	// GPULockPath overrides the single-slot GPU lock DIRECTORY shared with the render
 	// runners (render/gpu-lock.mjs). Empty = the runners' own default (the GPU_LOCK env,
 	// else <os-tmpdir>/local-offload-gpu.lock). When set it is also threaded to every gen
@@ -495,8 +494,6 @@ func Default() Config {
 		AudioGenTimeoutSec:          720,
 		EditTimeoutSec:              300,     // edit_image / media ops (CPU; no GPU lock)
 		GPUWaitMs:                   90000, // 90s — queue behind a holder, then defer with an ETA
-		VideoGenWaitMs:              90000,
-		AudioGenWaitMs:              90000,
 		GPULockPath:                 "",      // runners' default (GPU_LOCK env, else <state_dir>/gpu/lease)
 		StateDir:                    "",      // platform default: %ProgramData%\local-offload | /var/lib/local-offload
 		VisionGPUWaitSec:            90,      // LO-1: bounded wait for the gen lock before a vision call defers
@@ -642,6 +639,16 @@ func (c Config) ImageRouteConfigured() bool {
 	return c.ImageGenScript != ""
 }
 
+// retiredKeys are config keys the harness once honoured and has deliberately dropped.
+// They get their own message: every shipped config.json still carries
+// videogen_wait_ms/audiogen_wait_ms, and telling a whole fleet of installs that their
+// own installer made a "typo?" is both wrong and noise that trains operators to ignore
+// the warning that matters.
+var retiredKeys = map[string]string{
+	"videogen_wait_ms": "replaced by gpu_wait_ms (one 90s queue ceiling for every GPU task)",
+	"audiogen_wait_ms": "replaced by gpu_wait_ms (one 90s queue ceiling for every GPU task)",
+}
+
 // warnUnknownKeys prints a stderr warning for any JSON key that doesn't map to a
 // Config field — so a typo like "escalaton_model" surfaces instead of being
 // silently ignored. It never fails: the valid fields still load.
@@ -659,9 +666,14 @@ func warnUnknownKeys(b []byte) {
 		}
 	}
 	for k := range raw {
-		if !known[k] {
-			fmt.Fprintf(os.Stderr, "warning: unknown config key %q (ignored — typo?)\n", k)
+		if known[k] {
+			continue
 		}
+		if why, retired := retiredKeys[k]; retired {
+			fmt.Fprintf(os.Stderr, "note: config key %q is retired and ignored — %s\n", k, why)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "warning: unknown config key %q (ignored — typo?)\n", k)
 	}
 }
 

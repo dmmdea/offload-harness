@@ -68,11 +68,17 @@ Two further facts shaped the design:
    blocking that long is indistinguishable from a hang. Past the window the honest answer —
    *held by `<class>`, `<n>`s in, reason `<r>`* — is more useful to a caller that can retry.
    The ceiling is `gpu_wait_ms` (**90 s**, matching `vision_gpu_wait_sec` so the two GPU
-   waiters behave alike), overridable per task by `videogen_wait_ms` / `audiogen_wait_ms`;
-   raise those to restore a long serial queue. Only contention is waited out — an unwritable or
-   cloud-synced lease location returns immediately, because waiting cannot fix a configuration
-   fault. Queueing lives in Go with the acquisition; the runners never read a wait variable
+   waiters behave alike). Only contention is waited out — an unwritable or cloud-synced lease
+   location returns immediately, because waiting cannot fix a configuration fault. Queueing
+   lives in Go with the acquisition; the runners never read a wait variable
    (`GPU_LOCK_WAIT_MS` is gone).
+
+   **One knob, not three.** `videogen_wait_ms` / `audiogen_wait_ms` are retired and ignored.
+   They existed so a cheap queued TTS was not starved behind a 20-minute video; at a 90 s
+   ceiling that distinction buys nothing. Keeping them as overrides would have been worse than
+   useless: the installer template shipped `videogen_wait_ms: 1200000` to every machine, so an
+   upgrade would have silently restored the exact 20-minute wait this decision replaced —
+   correct-looking config doing the rejected thing. Retired keys load cleanly and say so.
 
 3. **The state root is machine-wide and REFUSES rather than degrades.** `%ProgramData%\local-offload`
    on Windows, `/var/lib/local-offload` elsewhere, overridable via `state_dir`. An unwritable root
