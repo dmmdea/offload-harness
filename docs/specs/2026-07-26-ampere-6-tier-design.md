@@ -219,9 +219,21 @@ Serving check (the one that decides the profile value):
 | **24** | **16384** | serves, 5134 MiB VRAM, ~21 GB RAM free |
 | **24** | **32768** | serves, 5320 MiB VRAM |
 
-**H3 — CONFIRMED.** The 26B runs as a real escalation tier on a 32 GB box at **13.5 tok/s**, inside
-the predicted 8–14 band. The sweep matters: N=24 is 18% faster at generation than all-experts-on-CPU
-(13.47 vs 11.44) and 11% faster at prompt processing.
+**H3 — the measurement CONFIRMED, the hypothesis REJECTED on architectural grounds.** The 26B does
+run on a 32 GB box at **13.5 tok/s**, inside the predicted 8–14 band, and the sweep matters (N=24 is
+18% faster at generation than all-experts-on-CPU). **But it is not adopted, and must not be.**
+
+H3 asked the wrong question. It treated `include_26b: false` as a capacity guess to be falsified by
+measurement. It was not — it encodes a **role boundary**: machines in this class are *servers*, and
+their CPU and RAM are committed to the services they run. Inference here is confined to the GPU. A
+`--cpu-moe`/`--n-cpu-moe` tier is by construction a claim on CPU and RAM, so it is out of scope for
+this profile no matter how well it benchmarks. The second cost is concrete: at N=24 the 26B holds
+5.1–5.3 GB of 6144, which starves a desktop session sharing the card — and boxes in this class are
+not necessarily headless.
+
+The measurement is kept because it is true and useful (it tells a *dedicated* inference box of this
+shape what it would get), but the profile keeps `include_26b: false`. **A benchmark result is not a
+mandate.** Confirming that something fits says nothing about whether it belongs.
 
 **N=22 is a trap.** It benches fastest but cannot allocate at a serving context — `llama-bench`
 uses a small window, so bench-optimal ≠ serve-safe. **24 is the value; do not raise it.**
@@ -249,16 +261,23 @@ unreachable while `free` appears to explain nothing.
 
 | Field | Was (PROJECTED) | Now (MEASURED) |
 |---|---|---|
-| `resident_tier` | `gemma4-e2b` | **`offload-e4b`** |
-| `ctx_size` | 16384 | **32768** |
-| `include_26b` | `false` | **`true`** |
-| `moe_26b` | `drop` | **`n_cpu_moe`** |
-| `n_cpu_moe` | — | **24** |
+| `resident_tier` | `gemma4-e2b` | **`offload-e4b`** — GPU-side win, no CPU/RAM cost |
+| `ctx_size` | 16384 | **32768** — GPU-side win |
+| `kv_type` | q8_0 ("MANDATORY") | q8_0 (kept), but the *mandatory* claim is disproven |
+| `include_26b` | `false` | **`false` — unchanged, and now with its reason recorded** |
+| `moe_26b` | `drop` | **`drop` — unchanged** |
 
-`n_cpu_moe` is a new mode added to `install.ps1`: `--cpu-moe` puts *every* expert in RAM and is
-correctly gated to ≥56 GB boxes, which is why the 26B was dropped here. Partial offload has a
-fraction of that appetite, so it is gated only against `min` (<28 GB). Covered by new render tests
-for both the `min` and `low` bands.
+Only the GPU-side values move. The two changes that would have consumed CPU and RAM are
+deliberately not made.
+
+`install.ps1` does carry a new `n_cpu_moe` mode (partial expert offload, `--n-cpu-moe N`), added
+while investigating H3. **No profile selects it** — it exists for a hypothetical *dedicated*
+inference box with low VRAM and free RAM, and is gated against `min`. It is additive, tested, and
+cannot alter any existing profile. If it is judged to be a temptation not worth keeping, deleting
+it costs nothing.
+
+Render tests assert the 26B is dropped on **all four RAM bands** (`min`/`low`/`mid`/`high`), so a
+future RAM upgrade cannot silently re-introduce a CPU-offload tier on this profile.
 
 ## 5. Threats to validity
 
