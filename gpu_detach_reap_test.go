@@ -51,17 +51,44 @@ func exited(cmd *exec.Cmd, within time.Duration) bool {
 // present and dead for exactly that reason.
 func TestReleasedHandleCannotReapTheChild(t *testing.T) {
 	cmd := spawnHelper(t)
+
+	// CAPTURE THE PID BEFORE Release(). Release sets Process.Pid to -1, and on Unix
+	// os.FindProcess(-1) succeeds, so killing through it issues kill(-1, SIGKILL) —
+	// "signal every process this user may signal", i.e. the test runner and everything
+	// else on the machine. Windows hides that: OpenProcess(-1) fails, so FindProcess
+	// returns an error and the kill is skipped.
+	pid := cmd.Process.Pid
+	if pid <= 0 {
+		t.Fatalf("helper has no usable pid: %d", pid)
+	}
+
 	proc := cmd.Process
 	if err := proc.Release(); err != nil {
 		t.Fatalf("release: %v", err)
 	}
 	if err := proc.Kill(); err == nil {
+		reapByPID(t, pid)
 		t.Skip("this platform still kills through a released handle; the ordering fix is a no-op here")
 	}
-	// The child outlived a Kill that reported failure. Clean it up out of band.
-	if p, err := os.FindProcess(cmd.Process.Pid); err == nil {
-		_ = p.Kill()
+	// The child outlived a Kill that reported failure — which is the whole point.
+	// Clean it up out of band, by the pid we saved rather than the invalidated handle.
+	reapByPID(t, pid)
+}
+
+// reapByPID kills a process by pid, refusing any non-positive value: on Unix those are
+// process-GROUP and broadcast selectors, never a single child.
+func reapByPID(t *testing.T, pid int) {
+	t.Helper()
+	if pid <= 0 {
+		t.Fatalf("refusing to signal pid %d — that is a broadcast, not a process", pid)
 	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return
+	}
+	_ = p.Kill()
+	// The parent never Wait()s a released process, so on Unix the corpse lingers as a
+	// zombie until this test binary exits and init reaps it. Harmless and short-lived.
 }
 
 // And the fix: with the handle retained, Kill actually reaps the child.
