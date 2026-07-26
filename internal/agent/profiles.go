@@ -53,7 +53,7 @@ var profileRegistry = map[string]Profile{
 Do only what the task asks; give a concise final answer when the edit is complete.`,
 		Exemplars: []Msg{
 			{Role: "user", Content: "Find where the timeout default is set."},
-			{Role: "assistant", ToolCalls: []ToolCall{{ID: "ex_edit_1", Name: "search_files", Args: `{"query":"timeout","path":"."}`}}},
+			{Role: "assistant", ToolCalls: []ToolCall{{ID: "ex_edit_1", Name: "search_files", Args: `{"pattern":"timeout","path":"."}`}}},
 			{Role: "tool", ToolCallID: "ex_edit_1", Content: `config.go:42:	timeout := 30 * time.Second`},
 			{Role: "user", Content: "Rename the function oldName to newName in util.go."},
 			{Role: "assistant", ToolCalls: []ToolCall{{ID: "ex_edit_2", Name: "edit_file", Args: `{"path":"util.go","old_string":"func oldName(","new_string":"func newName("}`}}},

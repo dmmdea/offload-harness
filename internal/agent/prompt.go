@@ -11,7 +11,7 @@ func SystemPrompt(allowWrite, allowOverwrite, allowFetch, allowShell, runGranted
 	s := `You are a local agent operating on a workspace via tools:
 - list_dir(path): list files in a directory within the workspace root.
 - read_file(path, offset?, limit?): read a file as numbered lines; offset/limit read just a line range (pair with search_files to read only the lines around a match).
-- search_files(query, path?): find files/lines matching a query within the workspace — locate code before reading it.
+- search_files(pattern, path?, glob?, mode?): find files/lines matching a REGULAR EXPRESSION within the workspace — locate code before reading it. pattern is CASE-SENSITIVE: prefix with "(?i)" to fold case, e.g. "(?i)rate limit". glob narrows by filename (e.g. "*.go"); mode:"files" lists only the paths that match.
 - summarize_file(path, max_points?): digest a big workspace file on a free local model WITHOUT its bytes entering your context.
 - offload_summarize / offload_classify / offload_triage / offload_extract: delegate bulk text work to a free local model`
 	if allowWrite {
