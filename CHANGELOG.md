@@ -4,6 +4,98 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.23.1] - 2026-07-26
+
+### Added — OmniRoute harvest Phase D: `compaction-eval kvbench` (KV reuse + real-token measurement, ADR 0017)
+- **Server accounting is now visible to the harness**: `Completion.Serve` (`*agent.ServeStats`)
+  carries llama.cpp's `timings.cache_n`/`prompt_n`/`prompt_ms` and `usage.prompt_tokens[_details]`
+  when the backend reports them, and is **nil when it does not** — "unmeasured" is never readable as
+  "measured zero". Additive only: the wire REQUEST is unchanged, pinned by a test.
+- **`compaction-eval kvbench`** replays a corpus step-by-step through the production client and
+  measures, per request: KV reuse fraction, real vs estimated tokens, prefill/wall time, which ladder
+  rungs fired, and the byte-stream relation to the previous request (extension / truncation /
+  divergent). Raw per-request rows are always emitted so every headline is re-derivable.
+- **Fails closed.** Positive controls (byte-identical resend, ≥90% reuse) bracket the run and a
+  negative control (unrelated prompt) plus a SEPARATION gate (pos−neg ≥ 0.40), because the real tool specs create a legitimate ~17% framing floor calibrates the metric; any failure ⇒ verdict
+  `INCONCLUSIVE` + non-zero exit, because on this box an unrelated media-generation job evicts the
+  tier and would otherwise turn a scheduler artifact into a false "compaction destroys the cache".
+- **Arms run in blocks, never interleaved** (the tier serves `--parallel 1`: one KV slot, so
+  interleaving would make every request a cache miss), and the **size effect and cache effect are
+  reported separately and never summed**.
+- **Safety-margin decision table** (`S ≥ (C − M)(1 − 1/r)`) computed from measured real/estimated
+  token ratios per content kind — a table, not a recommendation, since raising the margin
+  unconditionally shrinks usable context on every request. The probe sends the REAL read-only tool
+  specs production sends, because `estimateTokens` counts tool specs as zero and omitting them
+  would understate every implied margin by that constant.
+- **Comparisons are PAIRED**: arms are compared only over steps that succeeded in BOTH (the
+  no-compaction arm loses steps to overflow rejections). Per-arm totals remain as
+  `*_unpaired_diagnostic` fields with a note; only `paired_totals` carries a delta.
+- **Every failure is classified and counted**: `overflow` / `timeout` / `other`, with timeouts
+  checked FIRST — a client timeout reads "context deadline exceeded" and must never be filed as
+  the phase's own headline finding.
+- **Eviction is detected from the data, no extra requests**: on a prefix EXTENSION the server must
+  still hold what it held before, so a sample whose `cache_n` collapsed relative to the PREVIOUS
+  prompt's real length is a scheduler artifact — flagged per row, excluded from rates, kept in
+  token totals. (Comparing against the *new* prompt's reuse fraction instead would discard
+  legitimate large appends; that error was caught in review and is regression-tested.)
+- **`--budget-mode`**: `production` budgets the ladder exactly as `Loop.inputBudget()` does, so
+  fire counts describe the corpus at that window; `pressure` (60% of each entry's estimate)
+  guarantees the ramp is observable but makes the fire COUNT a property of the fixture. The mode
+  is stamped in every report.
+- `Completion.Serve` distinguishes `Measured` (any accounting) from `KVMeasured` (a `timings`
+  block): a backend that reports only `usage` has no reuse to report, and its structural zero is
+  excluded from every rate rather than averaged in as "no reuse".
+
+### Added (OPT-IN, default OFF) — budget calibration against the server's REAL token counts
+- **The estimator defect Phase D found, fixed.** The ladder decided whether to compact by comparing
+  a flat `chars/4` estimate against `inputBudget()`. Measured real/estimated on the shipped bench
+  (tool specs included, as production sends them) was p50 **2.15** / p95 **2.81**; net of the fixed
+  spec payload the density component alone is **1.3–1.8** on the failing transcripts, against a
+  shipped margin covering only 1.077 — and three real transcripts were
+  rejected by the server with `exceed_context_size` while **the ladder declined to compact**, because
+  by its own estimate they fit (`hv-json-ledger` estimated 6,224 vs 11,369 real; `hv-docs-readme`
+  6,219 vs 8,749; `hv-deep-compeval` 5,693 vs 9,190). Compaction was gated on the wrong number.
+- **`internal/agent/tokencal.go`**: an online two-term fit, `real ≈ intercept + slope·estimate`,
+  learned from `usage.prompt_tokens` on every response (available since this release's client
+  instrumentation) and applied to the BUDGET — not to `estimateTokens`, so every rung's internal
+  comparisons stay in one space. The two terms are separated on purpose: the intercept absorbs the
+  fixed per-request tool-spec payload (~528 tokens here, invisible to `estimateTokens`, which is why
+  small requests show ratios up to 2.81), the slope absorbs content density. A single multiplicative
+  factor fitted across sizes mis-corrects at both ends.
+- **DEFAULT OFF (`WithTokenCalibration(true)` to enable), and that default is measured.** A live
+  A/B over dense multi-file goals at shipped defaults: the fit was sound (`real ≈ 963 + 1.31·est`)
+  but it cut the budget to 56%, retained **52% less tool content** (10,060 → 4,857 chars) and turned
+  a correct answer ("275 lines") into a wrong one ("1 line") — while NEITHER arm hit a server
+  rejection. At `--max-tokens 4096` the output reservation already absorbs the estimator error, so
+  enabling it by default would spend real quality on a risk that does not materialise at those
+  settings. Enable it where the output reservation is small relative to the window (the regime the
+  defect was found in) or where overflow rejections are actually observed.
+- **Uncalibrated behaviour is byte-identical to before**: fewer than two *distinct* observations ⇒
+  the budget is returned unchanged. Slope/intercept are clamped to a credible range, the fit is a
+  median over a sliding window (outlier-resistant, and mistakes age out), and the total correction
+  is bounded at half the allowance.
+- **`Result.TokenCal`** reports what the calibration learned (observations, slope, intercept, raw vs
+  final budget), surfaced per goal by the standalone runner — a self-tuning mechanism that cannot be
+  inspected is one nobody can debug.
+- Chosen over the alternatives deliberately: a per-kind chars/token table is a guess (and a guess is
+  what produced this defect), while a `/tokenize` round-trip would add a network dependency and a new
+  failure mode to every step of the loop's critical path.
+- **Scope of the evidence, stated plainly**: the defect is demonstrated on real harvested transcripts
+  via replay plus a loop-level differential test (uncalibrated peak 11,540 real tokens — over the
+  allowance — vs 7,728 calibrated), in the SMALL-output-reservation regime (`--max-out 1024`,
+  budget 6,656). Re-measured at the shipped `--max-tokens 4096` (budget 3,584) the ladder fires on
+  its own and compaction prevents one of the three overflows without calibration; the remaining two
+  are ladder exhaustion (oversized newest turn), which no estimator fix addresses. That is why this
+  ships opt-in rather than on.
+
+### Changed — the harvest's KV rationale for compaction is corrected in the record
+- Measured (ADR 0017): KV reuse on gemma-4-e4b is **binary** — appending a TURN reuses everything
+  the server held (2,971 kept, only the 19 new tokens prefilled; corroborated by ~80 append steps
+  per arm at a median 0.88), while ANY edit discards the ENTIRE cache; a position sweep showed a
+  one-line edit at 98% of the prompt costing as much as one at 4%. Since every lossy rung edits from
+  `protectedEnd` forward, a compaction fire always pays a full re-prefill. Compaction is justified by
+  the size win and by requests completing at all — not by cache friendliness.
+
 ## [0.23.0] - 2026-07-26
 
 ### Added

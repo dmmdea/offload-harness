@@ -25,14 +25,16 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"time"
 
+	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/compeval"
 	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 func runCompactionEval(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: local-offload compaction-eval <harvest|run|freeze|check|ab> [--corpus <corpus.jsonl>] [flags] (harvest takes --traces/--out instead of --corpus)")
+		return fmt.Errorf("usage: local-offload compaction-eval <harvest|run|freeze|check|ab|kvbench> [--corpus <corpus.jsonl>] [flags] (harvest takes --traces/--out instead of --corpus)")
 	}
 	mode := args[0]
 	fs := flag.NewFlagSet("compaction-eval "+mode, flag.ExitOnError)
@@ -46,6 +48,14 @@ func runCompactionEval(args []string) error {
 	tracesDir := fs.String("traces", "", "harvest: directory of standalone agent trace files (*.json)")
 	minTurns := fs.Int("min-turns", 3, "harvest: skip traces with fewer transcript turns (<=0 also means the default, 3)")
 	maxEntries := fs.Int("max-entries", 0, "harvest: cap harvested entries (0 = all)")
+	kvEndpoint := fs.String("endpoint", "", "kvbench: serving endpoint (default: the configured endpoint)")
+	kvModel := fs.String("model", "", "kvbench: model id to measure (default: the configured workhorse)")
+	kvRounds := fs.Int("rounds", 1, "kvbench: repeat the whole controls+arms block N times")
+	kvStride := fs.Int("step-stride", 1, "kvbench: measure every Nth transcript step (the final step is always measured)")
+	kvTimeoutSec := fs.Int("timeout", 300, "kvbench: per-request timeout in seconds")
+	kvCtxTokens := fs.Int("ctx-tokens", 0, "kvbench: served window for the safety-margin table (0 = probe the endpoint)")
+	kvMaxOut := fs.Int("max-out", 1024, "kvbench: output reservation for the safety-margin table")
+	kvBudgetMode := fs.String("budget-mode", "pressure", "kvbench: 'production-uncalibrated' budgets the ladder as Loop.inputBudget() does WITHOUT token calibration (a calibrated loop compacts sooner on dense content, so its fire counts are a lower bound); 'pressure' uses 60% of each entry's own estimate, guaranteeing the ladder engages so the ramp is observable but making the fire COUNT a property of the fixture")
 	_ = fs.Parse(args[1:])
 	if mode == "harvest" {
 		return runCompactionHarvest(*tracesDir, *outPath, *minTurns, *maxEntries)
@@ -157,8 +167,95 @@ func runCompactionEval(args []string) error {
 			return err
 		}
 		return emitJSON(rep)
+	case "kvbench":
+		// Phase D (ADR 0017): measure KV-prefix reuse + REAL token accounting
+		// through the PRODUCTION client, so the numbers describe the request
+		// the agent actually sends. Deliberately NOT routed through
+		// openPipeline: that path is task-shaped and layers a bbolt cache over
+		// the call — a cache hit returns in ~0ms and silently destroys the
+		// measurement.
+		cfg := loadCfg(fs)
+		endpoint := *kvEndpoint
+		if endpoint == "" {
+			endpoint = cfg.Endpoint
+		}
+		model := *kvModel
+		if model == "" {
+			model = cfg.Model
+		}
+		ctx := context.Background()
+		ctxTokens := *kvCtxTokens
+		if ctxTokens <= 0 {
+			probed, ok := agent.ProbeServedWindow(ctx, endpoint, model)
+			ctxTokens, _ = agent.ResolveContextTokens(0, probed, ok)
+		}
+		client := agent.NewLLMClient(endpoint, model, "", time.Duration(*kvTimeoutSec)*time.Second)
+		// Send the REAL read-only tool specs production sends. They are a
+		// constant several-hundred-token payload on every request that
+		// estimateTokens counts as ZERO, so omitting them here would make the
+		// measured real/estimated ratio — and therefore every implied safety
+		// margin — understate the error by that constant.
+		var specs []agent.ToolSpec
+		if tools, terr := agent.ReadOnlyTools(".", nil); terr == nil {
+			for _, t := range tools {
+				specs = append(specs, t.ToolSpec)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "[compaction-eval] WARNING: tool specs unavailable (%v) — the estimator ratio will UNDERSTATE the error by the tool-spec payload\n", terr)
+		}
+		probe := func(ctx context.Context, msgs []agent.Msg) (compeval.ProbeResult, error) {
+			start := time.Now()
+			// max_tokens 1: we are measuring PREFILL, so decode is kept to the
+			// single token the API requires.
+			comp, err := client.Chat(ctx, msgs, specs, 1)
+			wall := time.Since(start)
+			if err != nil {
+				return compeval.ProbeResult{}, err
+			}
+			pr := compeval.ProbeResult{WallMS: float64(wall.Microseconds()) / 1000}
+			if s := comp.Serve; s != nil {
+				pr.Measured = true
+				// KVMeasured requires the TIMINGS block: a backend that emits
+				// only `usage` has no reuse to report, and calling that zero
+				// reuse is the error this whole design refuses to make.
+				pr.KVMeasured = s.PromptN > 0 || s.CacheN > 0
+				pr.CacheN, pr.PromptN = s.CacheN, s.PromptN
+				pr.PromptMS, pr.PredictedMS = s.PromptMS, s.PredictedMS
+				pr.UsagePromptTokens, pr.UsageCachedTokens = s.UsagePromptTokens, s.UsageCachedTokens
+			}
+			return pr, nil
+		}
+		fmt.Fprintf(os.Stderr, "[compaction-eval] kvbench: endpoint=%s model=%s ctx=%d entries=%d rounds=%d ladder=%s\n",
+			endpoint, model, ctxTokens, len(entries), *kvRounds, opts.Label())
+		rep, runErr := compeval.RunBench(ctx, probe, entries, hash, compeval.BenchOpts{
+			Ladder: opts, Rounds: *kvRounds, StepStride: *kvStride,
+			MaxEntries: *maxEntries, CtxTokens: ctxTokens, MaxOut: *kvMaxOut,
+			BudgetMode: *kvBudgetMode,
+		})
+		if *outPath != "" {
+			b, err := json.MarshalIndent(rep, "", "  ")
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(*outPath, b, 0o644); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "[compaction-eval] kvbench report → %s\n", *outPath)
+		} else if err := emitJSON(rep); err != nil {
+			return err
+		}
+		if runErr != nil {
+			return runErr
+		}
+		if rep.Verdict != "ADMISSIBLE" {
+			// Fail closed, exactly like a ratchet breach: the samples are kept
+			// as evidence, but no headline number may be quoted from them.
+			return fmt.Errorf("kvbench INCONCLUSIVE: %s", rep.InadmissibleReason)
+		}
+		fmt.Fprintf(os.Stderr, "[compaction-eval] kvbench ADMISSIBLE (corpus %.12s, %d samples)\n", hash, len(rep.Samples))
+		return nil
 	default:
-		return fmt.Errorf("compaction-eval: unknown mode %q (harvest|run|freeze|check|ab)", mode)
+		return fmt.Errorf("compaction-eval: unknown mode %q (harvest|run|freeze|check|ab|kvbench)", mode)
 	}
 }
 
