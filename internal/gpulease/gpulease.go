@@ -253,7 +253,22 @@ func OpenAt(lockOverride, stateDir string) (*Manager, error) {
 		return nil, err
 	}
 	if err := os.MkdirAll(lease, 0o777); err != nil {
-		return nil, fmt.Errorf("gpulease: lease dir %q is not usable: %w", lease, err)
+		// NAME THE REMEDY, not just the failure. Measured in the field: a Linux
+		// services box upgraded past 0.23.0 and EVERY media job began deferring,
+		// because the machine-wide default (/var/lib/local-offload) does not exist
+		// and an unprivileged service user cannot create it. The installer is
+		// Windows-only, so nothing creates that root on Linux — the refusal is
+		// correct, but an operator reading "permission denied" has no way to know
+		// which of two very different fixes applies.
+		return nil, fmt.Errorf("gpulease: lease dir %q is not usable: %w.\n"+
+			"  The GPU lease is machine-wide ON PURPOSE (a per-user path silently breaks mutual\n"+
+			"  exclusion across security contexts), so it will not fall back. Either:\n"+
+			"    1. create it once, world-writable, so every security context can contend:\n"+
+			"         sudo mkdir -p %q && sudo chmod 0777 %q\n"+
+			"       (deliberately NOT sticky: reclaiming a dead holder's lease means removing\n"+
+			"        another user's file)\n"+
+			"    2. or point state_dir at a local, unsynced path this user already owns.",
+			lease, err, filepath.Dir(filepath.Dir(lease)), filepath.Dir(filepath.Dir(lease)))
 	}
 	if err := probeWritable(lease); err != nil {
 		return nil, err
