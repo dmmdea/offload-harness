@@ -129,7 +129,7 @@ func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Le
 	p.stt = sttclient.New(cfg.Endpoint, time.Duration(cfg.STTRequestTimeoutSec)*time.Second)
 	// LO-1: resolve the shared GPU lock path ONCE, the same way the Node render
 	// runners do, so the vision gate watches the exact lock the gen jobs hold.
-	p.gpuLockPath = gpulock.Path(cfg.GPULockPath)
+	p.gpuLockPath = gpulock.Path(cfg.GPULockPath, cfg.StateDir)
 	p.visionGPUWait = time.Duration(cfg.VisionGPUWaitSec) * time.Second
 	p.visionGPUPoll = 2 * time.Second
 	p.visionRetryWait = 3 * time.Second
@@ -887,7 +887,7 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 	out := paramStr(req.Params, "out")
 	if out == "" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
-		out = filepath.Join(p.cfg.MediaDir, "render-"+sha256hex(prompt+tasks.StableParamsKey(req.Params))[:8]+".png")
+		out = filepath.Join(p.cfg.MediaDir, "render-"+sha256hex(prompt + tasks.StableParamsKey(req.Params))[:8]+".png")
 	}
 	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second
 	m := imagegen.SdcppModel{
@@ -981,7 +981,7 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 	out := paramStr(req.Params, "out")
 	if out == "" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
-		out = filepath.Join(p.cfg.MediaDir, "inpaint-"+sha256hex(image+prompt+tasks.StableParamsKey(req.Params))[:8]+".png")
+		out = filepath.Join(p.cfg.MediaDir, "inpaint-"+sha256hex(image + prompt + tasks.StableParamsKey(req.Params))[:8]+".png")
 	}
 	m := imagegen.InpaintModel{
 		Ckpt: p.cfg.InpaintCkpt, VAE: p.cfg.InpaintVAE, Steps: p.cfg.InpaintSteps,
@@ -1036,7 +1036,7 @@ func normalizeImageBatch(jobs []ImageBatchJob, mediaDir string) ([]ImageBatchJob
 			// negative): two jobs differing only in negative must not share an output
 			// path, or the second silently overwrites the first.
 			params := map[string]any{"seed": j.Seed, "width": j.Width, "height": j.Height, "steps": j.Steps, "negative": j.Negative}
-			j.Out = filepath.Join(mediaDir, "render-"+sha256hex(j.Prompt+tasks.StableParamsKey(params))[:8]+".png")
+			j.Out = filepath.Join(mediaDir, "render-"+sha256hex(j.Prompt + tasks.StableParamsKey(params))[:8]+".png")
 		}
 		norm[i] = j
 		line, _ := json.Marshal(j)
@@ -1212,7 +1212,7 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 	// not pick paths; a stable name lets a re-run reuse one file.
 	if params.ResultPath == "" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
-		params.ResultPath = filepath.Join(p.cfg.MediaDir, "run-graph-"+sha256hex(params.GraphPath+params.ManifestPath)[:8]+".json")
+		params.ResultPath = filepath.Join(p.cfg.MediaDir, "run-graph-"+sha256hex(params.GraphPath + params.ManifestPath)[:8]+".json")
 	}
 	outDir, oerr := resolveOutDir(p.cfg.MediaDir, params.OutDir)
 	if oerr != nil {
@@ -1288,7 +1288,7 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	out := paramStr(req.Params, "out")
 	if out == "" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
-		out = filepath.Join(p.cfg.MediaDir, "video-"+sha256hex(prompt+tasks.StableParamsKey(req.Params))[:8]+".mp4")
+		out = filepath.Join(p.cfg.MediaDir, "video-"+sha256hex(prompt + tasks.StableParamsKey(req.Params))[:8]+".mp4")
 	}
 
 	// comfy-video.mjs CLI: <out> <still> "<prompt>" [--model ..] [--frames N] ...
@@ -1435,7 +1435,7 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	out := paramStr(req.Params, "out")
 	if out == "" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
-		out = filepath.Join(p.cfg.MediaDir, kind+"-"+sha256hex(text+tasks.StableParamsKey(req.Params))[:8]+ext)
+		out = filepath.Join(p.cfg.MediaDir, kind+"-"+sha256hex(text + tasks.StableParamsKey(req.Params))[:8]+ext)
 	}
 
 	// CLI: tts.mjs <out> "<text>" [--clone ref] [--lang es]

@@ -356,6 +356,10 @@ func (m *Manager) readMeta() (*Meta, error) {
 // Acquisition
 // ---------------------------------------------------------------------------
 
+// hookLeaseDirCreated is a test-only seam invoked once the lease directory exists but
+// before this acquirer's claim is recorded. Production behaviour is a no-op.
+var hookLeaseDirCreated = func() {}
+
 // Lease is a held lease. Every irreversible action must be preceded by Check().
 type Lease struct {
 	mgr   *Manager
@@ -377,23 +381,49 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 		return nil, fmt.Errorf("gpulease: unknown class %q (want %q or %q)", class, ClassMedia, ClassText)
 	}
 	for attempt := 0; attempt < 3; attempt++ {
-		err := os.Mkdir(m.leaseDir(), 0o777) // atomic on every OS
+		// THE DIRECTORY IS A CONTAINER, NEVER A CLAIM. Creating it must be
+		// non-exclusive: when Go claimed by creating the directory while Node claimed
+		// by exclusively creating meta.json, the two sides held DIFFERENT atomic
+		// tokens, and a Node claim landing between Go's mkdir and Go's record was
+		// silently overwritten — one GPU, two holders. Regression test:
+		// TestGoDoesNotClobberANodeClaimMadeInsideItsAcquireWindow.
+		if err := os.MkdirAll(m.leaseDir(), 0o777); err != nil {
+			return nil, fmt.Errorf("gpulease: could not create lease dir: %w", err)
+		}
+		hookLeaseDirCreated()
+
+		// THE CLAIM: exclusive creation of meta.json — byte-identical in intent to the
+		// Node side's O_EXCL write. This single token is what makes cross-language
+		// mutual exclusion real rather than merely documented.
+		f, err := os.OpenFile(m.metaPath(), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o666)
 		if err == nil {
-			lease, werr := m.stamp(class, opts)
+			lease, werr := m.stamp(f, class, opts)
 			if werr != nil {
-				_ = os.RemoveAll(m.leaseDir()) // never leave a lease we failed to stamp
+				_ = os.Remove(m.metaPath()) // drop a claim we could not complete
 				return nil, werr
 			}
 			return lease, nil
 		}
 		if !os.IsExist(err) {
-			return nil, fmt.Errorf("gpulease: could not create lease dir: %w", err)
+			return nil, fmt.Errorf("gpulease: could not claim the lease: %w", err)
 		}
-		meta, _ := m.readMeta()
+
+		// Someone else holds the claim.
+		meta, rerr := m.readMeta()
+		if rerr != nil && m.claimIsFresh() {
+			// Present but not yet parseable: a claim caught mid-write. Treat it as
+			// held rather than stealing it — the alternative is a race where two
+			// acquirers each decide the other's half-written claim is garbage.
+			return nil, &ErrHeld{Info: Info{Held: true, Reason: "claim in progress"}}
+		}
 		if Reclaimable(meta, m.now(), m.heartbeatTTL, m.procStart) {
-			// Reclaim and retry. Bounded retries stop two racing reclaimers from
-			// spinning against each other forever.
-			_ = os.RemoveAll(m.leaseDir())
+			// Remove only the CLAIM, never the container: another acquirer may be
+			// working inside this directory right now.
+			if err := os.Remove(m.metaPath()); err != nil && !os.IsNotExist(err) {
+				// A reclaim we cannot perform is not a free lease. Report it as held
+				// rather than looping — spinning here once pegged a core forever.
+				return nil, fmt.Errorf("gpulease: cannot reclaim the stale lease at %s: %w", m.metaPath(), err)
+			}
 			continue
 		}
 		return nil, &ErrHeld{Info: m.Inspect()}
@@ -401,8 +431,27 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 	return nil, &ErrHeld{Info: m.Inspect()}
 }
 
-// stamp bumps the epoch and writes meta.json for a freshly created lease dir.
-func (m *Manager) stamp(class Class, opts Options) (*Lease, error) {
+// claimGrace is how long a present-but-unparseable meta.json is treated as a claim in
+// progress rather than debris. The write follows its exclusive create immediately, so
+// this only has to cover a scheduling hiccup.
+const claimGrace = 10 * time.Second
+
+// claimIsFresh reports whether the claim file was created recently enough to be a
+// write in progress.
+func (m *Manager) claimIsFresh() bool {
+	fi, err := os.Stat(m.metaPath())
+	if err != nil {
+		return false
+	}
+	return m.now().Sub(fi.ModTime()) < claimGrace
+}
+
+// stamp fills in the claim we already hold exclusively. It writes through the OPEN
+// handle from the O_EXCL create rather than renaming a temp file over it: a rename
+// would overwrite whatever is at that path, which is precisely how a competing claim
+// used to get clobbered.
+func (m *Manager) stamp(f *os.File, class Class, opts Options) (*Lease, error) {
+	defer func() { _ = f.Close() }()
 	epoch, err := m.bumpEpoch()
 	if err != nil {
 		return nil, err
@@ -424,26 +473,26 @@ func (m *Manager) stamp(class Class, opts Options) (*Lease, error) {
 		ExpiresAtMs:  now.Add(ttl).UnixMilli(),
 		RenewedAtMs:  now.UnixMilli(),
 	}
-	if err := m.writeMeta(&meta); err != nil {
+	b, err := json.Marshal(&meta)
+	if err != nil {
 		return nil, err
+	}
+	if _, err := f.Write(b); err != nil {
+		return nil, fmt.Errorf("gpulease: writing lease claim: %w", err)
 	}
 	return &Lease{mgr: m, epoch: epoch, class: class}, nil
 }
 
-// writeMeta writes meta.json atomically (temp + rename) so a reader never observes
-// a half-written record.
+// writeMeta rewrites an EXISTING claim we already own (heartbeat renewal). It is only
+// safe because the caller has verified the epoch is still ours — it must never be used
+// to publish a new claim, which is what allowed a competing claim to be overwritten.
 func (m *Manager) writeMeta(meta *Meta) error {
 	b, err := json.Marshal(meta)
 	if err != nil {
 		return err
 	}
-	tmp := m.metaPath() + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o666); err != nil {
-		return fmt.Errorf("gpulease: writing lease meta: %w", err)
-	}
-	if err := os.Rename(tmp, m.metaPath()); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("gpulease: publishing lease meta: %w", err)
+	if err := os.WriteFile(m.metaPath(), b, 0o666); err != nil {
+		return fmt.Errorf("gpulease: updating lease meta: %w", err)
 	}
 	return nil
 }
@@ -518,7 +567,9 @@ func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
 	if epoch != 0 && meta.Epoch != epoch {
 		return false, fmt.Errorf("gpulease: lease has moved on (asked for epoch %d, current is %d)", epoch, meta.Epoch)
 	}
-	if err := os.RemoveAll(m.leaseDir()); err != nil {
+	// Drop the CLAIM only. Removing the container would delete a directory another
+	// acquirer may be working inside.
+	if err := os.Remove(m.metaPath()); err != nil && !os.IsNotExist(err) {
 		return false, fmt.Errorf("gpulease: releasing lease: %w", err)
 	}
 	return true, nil
@@ -539,7 +590,7 @@ func (l *Lease) Release() error {
 	if meta.Epoch != l.epoch {
 		return nil // fenced out; the lease is someone else's now — leave it alone
 	}
-	if err := os.RemoveAll(l.mgr.leaseDir()); err != nil {
+	if err := os.Remove(l.mgr.metaPath()); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("gpulease: releasing lease: %w", err)
 	}
 	return nil

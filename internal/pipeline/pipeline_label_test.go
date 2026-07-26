@@ -8,12 +8,12 @@ import (
 
 func TestAnswersAgree(t *testing.T) {
 	cases := []struct {
-		name        string
-		task        core.TaskType
-		candidate   string
-		final       string
-		wantAgreed  bool
-		wantOK      bool
+		name       string
+		task       core.TaskType
+		candidate  string
+		final      string
+		wantAgreed bool
+		wantOK     bool
 	}{
 		{"classify same label", core.TaskClassify, `{"label":"spam","confidence":0.6}`, `{"label":"spam","confidence":0.9}`, true, true},
 		// FIX 2: the raw entry candidate may be fenced/prose-wrapped; parser.Extract
