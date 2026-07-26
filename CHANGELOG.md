@@ -4,6 +4,37 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.23.3] - 2026-07-26
+
+### Fixed
+- **The `edit` profile taught the planner a call that always hard-errors.** Its only search
+  exemplar passed `{"query":...}` while `search_files` requires `{"pattern":...}`, so the decoder
+  rejected it with *"search_files requires a pattern"*. Profile exemplars live in the
+  **never-compacted** protected preamble, so the wrong call shape was taught for the entire run and
+  could not age out. `prompt.go`'s tool line had the same wrong argument name, and also omitted
+  `glob` and `mode` — the two cheapest narrowing levers, invisible to the model until now.
+- **Profile exemplars are now narrowed with the tools, not copied wholesale.** `WithProfile`
+  correctly restricted the tool set but assigned every exemplar regardless, so applying `build` to a
+  loop without `run_shell` (the read-only MCP front door) demonstrated a tool the planner could not
+  call — the same defect class as a wrong argument name. Exemplar cycles are dropped whole
+  (assistant turn *and* its tool results), because a dangling `tool_calls` is rejected outright by
+  strict `--jinja` templates.
+- **A live data race under `--serve`.** `tokenCal.Observe` was called unconditionally and appends to
+  a shared slice, while `--serve` shares one `*Loop` across concurrent HTTP handlers. It is now
+  gated on `tokenCalOn` like the package's two other call sites — so an off-by-default feature has
+  stopped mutating shared state from several goroutines at once.
+
+### Added
+- **`profile` on the MCP `agent_run` tool.** The front door could previously only produce bare
+  `general` — the one configuration MEASURED to fail, because a 4B planner handed every tool calls
+  none of them. Unknown names return a clean defer listing the valid ones rather than silently
+  falling back to the configuration known not to work.
+- **Two contract tests that turn this defect class into a build failure.** Every profile exemplar's
+  arguments are validated against the named tool's real JSON Schema, every exemplar tool name must
+  be registered *and* granted by its own profile, and applying a profile to a loop missing one of
+  its tools must leave no impossible example and no orphan tool result. The suite previously checked
+  exemplar *structure* and no *argument* anywhere.
+
 ## [0.23.2] - 2026-07-26
 
 ### Fixed — `search_files` never told the planner its pattern was case-sensitive
