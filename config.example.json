@@ -82,6 +82,7 @@
   "videogen_wait_ms": 1200000,
   "audiogen_wait_ms": 120000,
   "gpu_lock_path": "",
+  "state_dir": "",
   "vision_gpu_wait_sec": 90,
   "memory_stack": ["embeddinggemma","bge-reranker-v2-m3"],
   "embed_model": "embeddinggemma",
