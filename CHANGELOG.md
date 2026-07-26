@@ -4,6 +4,37 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.24.0] - 2026-07-26
+
+### Added — the agent loop can finally see and listen (Stage B)
+- **`offload_vqa`, `offload_ocr`, `offload_transcribe`.** The loop could reach **4 of the harness's
+  18 task types**: it could not see, listen or read a page even though the same binary does all
+  three. These are the READ-ONLY senses — they consume a file the workspace already has and cost at
+  most one model swap. The image/audio never enters the agent's context.
+- **Media requests now route through `Pipeline.Run` instead of `RunTier`.** `RunTier` does
+  `tasks.Build` + a **text** generate and never enters the 12-branch media dispatch — and
+  `tasks.Build` SUCCEEDS for `vqa`/`ocr`/`assess_image`/`video_describe`. So a visual task sent that
+  way did not error: it returned a confident answer about an image the model never saw. Handing a
+  hallucination to an autonomous planner is worse than any error. `Run` fails closed at two gates
+  (no vision model configured; image/audio load failed), both now covered by tests.
+  - The routing default is **fail-safe**: only the four text tasks may take the single-tier path,
+    so any task added later goes through the full dispatch rather than the text-hallucination path.
+  - Text tasks deliberately stay on `RunTier` — it runs ONE named tier, so an agent offload call
+    cannot trigger a cascade that swaps the planner's own model off a shared GPU mid-run.
+  - `image`/`video`/`audio` params are lifted onto `core.Request`'s fields, which were never
+    assigned. They ride `params` rather than a wider closure signature so `internal/agent` keeps its
+    zero-import-of-pipeline invariant, and each key is declared in the tool's JSON Schema — a
+    published contract, not a convention.
+  - The recordless guarantee is unchanged: `Run` on a nil-cache/nil-ledger pipeline still writes no
+    ledger, cache, shadow store or exemplars.
+
+### Not included, deliberately
+- **Generation tools** (`generate_image`/`video`/`audio`). On a single-GPU box a generation job
+  holds a machine-wide lease entitled to unload llama-swap models — **including the planner running
+  the loop**. An agent tool that can evict its own planner is a design error no timeout fixes; that
+  needs an HTTP/OpenAI image seat (a third `imagegen_engine` value) rather than the spawn-per-job
+  CLI path.
+
 ## [0.23.5] - 2026-07-26
 
 ### Fixed
