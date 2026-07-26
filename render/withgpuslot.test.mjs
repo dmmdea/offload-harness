@@ -1,59 +1,69 @@
 // node --test render/withgpuslot.test.mjs
+//
 // Tests the centralized withGpuSlot lifecycle via injected deps (no real GPU/ComfyUI/
-// llama-swap, no network). Verifies the guarded cleanup + lock.release run on BOTH the
-// success and the throw paths, the order (freeLlamaSwap before fn), the comfyManaged
-// flag, and the keepComfy guard.
+// llama-swap, no network).
+//
+// withGpuSlot no longer acquires anything: internal/gpulease (Go) owns acquisition and
+// the runner INHERITS a lease. So the old "acquire -> ... -> release" ordering tests are
+// gone; what is verified now is that the runner REFUSES to run without a lease, honours
+// the class gate and the fence, elects one unloader per lease, and still runs its guarded
+// ComfyUI teardown.
 import { test } from "node:test";
 import assert from "node:assert";
 import { withGpuSlot } from "./gpu-lock.mjs";
 
-function harness({ lockNull = false, comfyChild = {}, keepComfy = false, comfyManaged = true } = {}) {
+const MEDIA = { dir: "X", epoch: 7, class: "media" };
+
+function harness({ comfyChild = {}, keepComfy = false, comfyManaged = true } = {}) {
   const calls = [];
-  let released = 0;
   const killed = { n: 0 };
   const child = comfyChild ? { kill() { killed.n++; } } : null;
   const deps = {
-    acquire: async () => {
-      calls.push("acquire");
-      return lockNull ? null : { release() { released++; calls.push("release"); } };
-    },
     freeLlamaSwap: async () => { calls.push("freeLlamaSwap"); },
     ensureComfy: async () => { calls.push("ensureComfy"); return child; },
     freeComfy: async () => { calls.push("freeComfy"); },
+    checkLease: () => true,
+    claimUnload: () => true,
   };
-  return { calls, deps, get released() { return released; }, killed, opts: { keepComfy, comfyManaged } };
+  return { calls, deps, killed, opts: { keepComfy, comfyManaged, lease: MEDIA } };
 }
 
-test("success path: freeLlamaSwap -> ensureComfy -> fn -> freeComfy -> kill -> release", async () => {
+test("success path: freeLlamaSwap -> ensureComfy -> fn -> freeComfy -> kill", async () => {
   const h = harness();
   const r = await withGpuSlot({ ...h.opts, ...h.deps }, async () => { h.calls.push("fn"); return "ok"; });
   assert.equal(r, "ok");
-  assert.deepEqual(h.calls, ["acquire", "freeLlamaSwap", "ensureComfy", "fn", "freeComfy", "release"]);
-  assert.equal(h.released, 1, "lock released exactly once");
+  assert.deepEqual(h.calls, ["freeLlamaSwap", "ensureComfy", "fn", "freeComfy"]);
   assert.equal(h.killed.n, 1, "spawned ComfyUI killed");
 });
 
-test("throw path: cleanup + release STILL run, error propagates", async () => {
+test("throw path: cleanup STILL runs, error propagates", async () => {
   const h = harness();
   await assert.rejects(
     withGpuSlot({ ...h.opts, ...h.deps }, async () => { h.calls.push("fn"); throw new Error("boom"); }),
     /boom/
   );
   assert.ok(h.calls.includes("freeComfy"), "freeComfy ran on throw");
-  assert.ok(h.calls.includes("release"), "lock released on throw");
-  assert.equal(h.released, 1, "released exactly once even on throw");
   assert.equal(h.killed.n, 1, "spawned ComfyUI killed on throw");
 });
 
-test("busy lock (acquire -> null) throws GPU-busy, never runs fn", async () => {
-  const h = harness({ lockNull: true });
+// THE COLLAPSE, asserted. A runner with no lease must refuse rather than grab the card:
+// re-adding acquisition here is exactly the duplicate implementation that was deleted,
+// and rendering unarbitrated is what tore the text tier down in the first place.
+test("NO LEASE => refuse, with a message that says how to get one", async () => {
   let ran = false;
   await assert.rejects(
-    withGpuSlot({ ...h.opts, ...h.deps }, async () => { ran = true; }),
-    /busy/i
+    withGpuSlot({ lease: null, freeLlamaSwap: async () => { ran = true; } },
+      async () => { ran = true; }),
+    /GPU lease missing[\s\S]*gpu reserve/
   );
-  assert.equal(ran, false, "fn must not run when the slot is busy");
-  assert.ok(!h.calls.includes("freeLlamaSwap"), "no teardown of llama-swap when we never got the slot");
+  assert.equal(ran, false, "nothing touched the GPU without a lease");
+});
+
+test("--no-lock still works as the deliberate escape hatch", async () => {
+  const h = harness();
+  await withGpuSlot({ ...h.opts, ...h.deps, lease: null, noLock: true },
+    async () => { h.calls.push("fn"); });
+  assert.ok(h.calls.includes("fn"), "the job runs");
 });
 
 test("comfyManaged:false skips ensureComfy AND freeComfy (TTS path)", async () => {
@@ -61,7 +71,6 @@ test("comfyManaged:false skips ensureComfy AND freeComfy (TTS path)", async () =
   await withGpuSlot({ ...h.opts, ...h.deps }, async () => { h.calls.push("fn"); });
   assert.ok(!h.calls.includes("ensureComfy"), "ensureComfy skipped when comfyManaged:false");
   assert.ok(!h.calls.includes("freeComfy"), "freeComfy skipped when comfyManaged:false");
-  assert.equal(h.released, 1, "lock still released");
 });
 
 test("keepComfy:true does NOT kill the spawned ComfyUI", async () => {
@@ -69,7 +78,6 @@ test("keepComfy:true does NOT kill the spawned ComfyUI", async () => {
   await withGpuSlot({ ...h.opts, ...h.deps }, async () => {});
   assert.equal(h.killed.n, 0, "ComfyUI left running with keepComfy");
   assert.ok(h.calls.includes("freeComfy"), "VRAM still freed");
-  assert.equal(h.released, 1);
 });
 
 test("freeLlamaSwap runs BEFORE fn (the render gets the whole GPU)", async () => {
@@ -82,62 +90,43 @@ test("warm is threaded to ensureComfy and teardown still frees at the end", asyn
   const calls = [];
   let ensureOpts = null;
   await withGpuSlot({
-    warm: true,
-    acquire: async () => ({ release() { calls.push("release"); } }),
+    warm: true, lease: MEDIA, checkLease: () => true, claimUnload: () => true,
     freeLlamaSwap: async () => { calls.push("freeLS"); },
     ensureComfy: async (o) => { ensureOpts = o; calls.push("ensure"); return { kill() { calls.push("kill"); } }; },
     freeComfy: async () => { calls.push("freeComfy"); },
   }, async () => { calls.push("fn"); });
   assert.equal(ensureOpts.warm, true, "warm reaches ensureComfy");
-  assert.deepEqual(calls, ["freeLS", "ensure", "fn", "freeComfy", "kill", "release"],
-    "guarded teardown unchanged: free + kill + release AFTER fn (the whole batch)");
+  assert.deepEqual(calls, ["freeLS", "ensure", "fn", "freeComfy", "kill"],
+    "guarded teardown unchanged: free + kill AFTER fn (the whole batch)");
 });
 
-test("no-lock mode: acquire skipped, fn runs, no release error", async () => {
-  const h = harness();
-  await withGpuSlot({ ...h.opts, ...h.deps, noLock: true }, async () => { h.calls.push("fn"); });
-  assert.ok(!h.calls.includes("acquire"), "acquire skipped in no-lock mode");
-  assert.ok(h.calls.includes("fn"));
-});
+// --- once per lease, and only for media ------------------------------------
 
-// --- inherited lease -------------------------------------------------------
-// When the Go holder already owns the lease it threads GPU_LEASE_DIR/GPU_LEASE_EPOCH
-// down. Acquiring again would contend with our own holder, and unloading again would
-// repeat the per-job teardown this change exists to remove: freeLlamaSwap ran INSIDE
-// withGpuSlot, i.e. once per job, which is the arithmetic behind 3,356 unloads.
-
-test("inherited lease: acquire is SKIPPED (we would contend with our own holder)", async () => {
+test("the FIRST job under a lease performs the unload (the hoist actually happens)", async () => {
   const h = harness();
-  await withGpuSlot({ ...h.opts, ...h.deps, lease: { dir: "X", epoch: 7 }, checkLease: () => true },
+  await withGpuSlot({ ...h.opts, ...h.deps, claimUnload: () => true },
     async () => { h.calls.push("fn"); });
-  assert.ok(!h.calls.includes("acquire"), "must not re-acquire a lease we already hold");
-  assert.ok(h.calls.includes("fn"), "the job still runs");
-});
-
-// THE HOIST, both halves. Skipping the unload under an inherited lease WITHOUT anyone
-// performing it was the defect: a leased render then ran with every model still
-// resident. Exactly one job per lease unloads.
-test("inherited lease: the FIRST job performs the unload (the hoist actually happens)", async () => {
-  const h = harness();
-  await withGpuSlot({
-    ...h.opts, ...h.deps,
-    lease: { dir: "X", epoch: 7 }, checkLease: () => true,
-    claimUnload: () => true, // we are the first job under this lease
-  }, async () => { h.calls.push("fn"); });
   assert.ok(h.calls.includes("freeLlamaSwap"),
     "somebody must unload for the lease, or the render runs against a full card");
-  assert.ok(h.calls.indexOf("freeLlamaSwap") < h.calls.indexOf("fn"), "unload precedes the job");
+});
+
+test("a LATER job under the same lease skips the unload (once per lease, not per job)", async () => {
+  const h = harness();
+  await withGpuSlot({ ...h.opts, ...h.deps, claimUnload: () => false },
+    async () => { h.calls.push("fn"); });
+  assert.ok(!h.calls.includes("freeLlamaSwap"),
+    "unloading per job is the arithmetic behind 3,356 teardowns");
 });
 
 // CLASS GATE. A `text` lease is a benchmark's reservation; unloading under it destroys
-// exactly the run the lease exists to protect. This regressed once already: skipping the
-// unload for ANY inherited lease made text safe by accident, and electing an unloader
-// without checking the class then made a text lease tear the text tier down.
-test("inherited TEXT lease NEVER unloads the text tier, even as the first job", async () => {
+// exactly the run the lease exists to protect. This regressed once: skipping the unload
+// for ANY inherited lease made text safe by accident, and electing an unloader without
+// checking the class then made a text lease tear the text tier down.
+test("an inherited TEXT lease NEVER unloads the text tier, even as the first job", async () => {
   const h = harness();
   await withGpuSlot({
     ...h.opts, ...h.deps,
-    lease: { dir: "X", epoch: 7, class: "text" }, checkLease: () => true,
+    lease: { dir: "X", epoch: 7, class: "text" },
     claimUnload: () => true, // even if we would win the election
   }, async () => { h.calls.push("fn"); });
   assert.ok(!h.calls.includes("freeLlamaSwap"),
@@ -145,27 +134,13 @@ test("inherited TEXT lease NEVER unloads the text tier, even as the first job", 
   assert.ok(h.calls.includes("fn"), "the job still runs");
 });
 
-test("inherited MEDIA lease does unload (the class gate is not a blanket skip)", async () => {
-  const h = harness();
-  await withGpuSlot({
-    ...h.opts, ...h.deps,
-    lease: { dir: "X", epoch: 7, class: "media" }, checkLease: () => true,
-    claimUnload: () => true,
-  }, async () => { h.calls.push("fn"); });
-  assert.ok(h.calls.includes("freeLlamaSwap"), "a media lease still frees the card");
-});
-
-// THE FENCE, exercised. A process that slept through a takeover must abort rather than
-// unload on top of whoever holds the card now — the incident replayed by a closing lid.
+// THE FENCE. A process that slept through a takeover must abort rather than unload on
+// top of whoever holds the card now — the incident replayed by a closing lid.
 test("a FENCED-OUT inherited lease refuses to touch the GPU", async () => {
   const h = harness();
   await assert.rejects(
-    withGpuSlot({
-      ...h.opts, ...h.deps,
-      lease: { dir: "X", epoch: 7, class: "media" },
-      checkLease: () => false, // our epoch is no longer current
-      claimUnload: () => true,
-    }, async () => { h.calls.push("fn"); }),
+    withGpuSlot({ ...h.opts, ...h.deps, checkLease: () => false },
+      async () => { h.calls.push("fn"); }),
     /fenced out/i
   );
   assert.ok(!h.calls.includes("freeLlamaSwap"),
@@ -173,37 +148,9 @@ test("a FENCED-OUT inherited lease refuses to touch the GPU", async () => {
   assert.ok(!h.calls.includes("fn"), "and it must not run the job either");
 });
 
-test("inherited lease: a LATER job skips the unload (once per lease, not per job)", async () => {
-  const h = harness();
-  await withGpuSlot({
-    ...h.opts, ...h.deps,
-    lease: { dir: "X", epoch: 7 }, checkLease: () => true,
-    claimUnload: () => false, // another job already unloaded for this lease
-  }, async () => { h.calls.push("fn"); });
-  assert.ok(!h.calls.includes("freeLlamaSwap"),
-    "unloading per job is the arithmetic behind 3,356 teardowns");
-});
-
-test("inherited lease: teardown still runs (freeComfy + kill), and release is a no-op", async () => {
-  const h = harness();
-  await withGpuSlot({ ...h.opts, ...h.deps, lease: { dir: "X", epoch: 7 }, checkLease: () => true },
-    async () => { h.calls.push("fn"); });
-  assert.ok(h.calls.includes("freeComfy"), "ComfyUI is still torn down at the batch boundary");
-  assert.equal(h.killed.n, 1, "a ComfyUI we spawned is still killed");
-  assert.equal(h.released, 0, "we never took the lease, so we must never release it");
-});
-
-test("WITHOUT an inherited lease the old behaviour is unchanged (acquire + unload)", async () => {
-  const h = harness();
-  // lease:null is explicit so the ambient GPU_LEASE_DIR of a real run cannot leak in.
-  await withGpuSlot({ ...h.opts, ...h.deps, lease: null }, async () => { h.calls.push("fn"); });
-  assert.deepEqual(h.calls, ["acquire", "freeLlamaSwap", "ensureComfy", "fn", "freeComfy", "release"]);
-});
-
-test("the job callback receives the lease so it can fence before irreversible work", async () => {
+test("the job callback receives the lease so it can fence before its own irreversible work", async () => {
   const h = harness();
   let seen;
-  await withGpuSlot({ ...h.opts, ...h.deps, lease: { dir: "X", epoch: 7 }, checkLease: () => true },
-    async (ctx) => { seen = ctx.lease; });
-  assert.deepEqual(seen, { dir: "X", epoch: 7 });
+  await withGpuSlot({ ...h.opts, ...h.deps }, async (ctx) => { seen = ctx.lease; });
+  assert.deepEqual(seen, MEDIA);
 });
