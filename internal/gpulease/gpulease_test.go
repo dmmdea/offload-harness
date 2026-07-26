@@ -365,6 +365,14 @@ func TestEpochIsMonotonicAcrossReclaims(t *testing.T) {
 // State-root validation — refuse, never degrade
 // ---------------------------------------------------------------------------
 
+// Both separator styles are asserted ON EVERY PLATFORM, deliberately.
+//
+// This suite used to list only backslash paths, and the matcher split segments with
+// filepath.ToSlash — a no-op on Linux. So on Linux every one of these was a single
+// segment, nothing matched, the refusal did nothing, and the test failed there while
+// passing on Windows. It stayed red in CI for a day because all local verification is
+// Windows. A guard that only works on the OS it was written on is worse than no guard,
+// since it is trusted everywhere.
 func TestResolveStateRootRefusesCloudSyncedPaths(t *testing.T) {
 	for _, p := range []string{
 		`G:\My Drive\AI Ecosystem\state`,
@@ -376,6 +384,13 @@ func TestResolveStateRootRefusesCloudSyncedPaths(t *testing.T) {
 		`C:\Users\x\Dropbox (Personal)\state`,
 		`C:\Users\x\iCloudDrive\state`,
 		`G:\Shared drives\team\state`,
+		// The same roots spelled POSIX-style, so neither separator can regress unseen.
+		`/mnt/g/My Drive/AI Ecosystem/state`,
+		`/home/x/OneDrive/state`,
+		`/home/x/OneDrive - Contoso/state`,
+		`/home/x/Dropbox (Personal)/state`,
+		`/home/x/iCloudDrive/state`,
+		`/mnt/g/Shared drives/team/state`,
 	} {
 		if _, err := ResolveStateRoot(p); err == nil {
 			t.Errorf("ResolveStateRoot(%q) accepted a cloud-synced root; a replicated LOCK FILE "+
