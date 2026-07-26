@@ -5,9 +5,11 @@
 # PROFILE-DRIVEN: install.ps1 (H2) substitutes the CTX / KV-K / KV-V / FLASH-ATTN
 # / MOE-26B tokens in the common macro + 26B cmd from setup/templates/profiles.json,
 # keyed on the detected profile id. q8_0 V requires flash-attn on (satisfied
-# whenever a profile picks q8_0). Do NOT add --swa-full. MoE tier: the verified
-# NVIDIA 8GB config keeps experts in RAM (cpu-moe) with the non-expert layers on
-# the GPU; a 16GB+ profile places experts on the GPU (full offload) instead.
+# whenever a profile picks q8_0). Do NOT add --swa-full. MoE tier placement is
+# profile-driven: an 8GB profile keeps ALL experts in RAM (--cpu-moe); a 6GB
+# profile keeps only the top N expert layers in RAM (--n-cpu-moe N, the rest on
+# GPU); a 16GB+ profile places experts on the GPU (full offload). The __MOE_26B__
+# token carries whichever form the profile selected.
 # GGML_CUDA_DISABLE_GRAPHS=1 stays set for the 26B tier.
 healthCheckTimeout: 300
 logLevel: info
