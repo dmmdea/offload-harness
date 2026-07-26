@@ -1,72 +1,81 @@
 package gpulease
 
-// Cross-language contention tests: a Go acquirer and the Node acquirer
-// (render/gpu-lock.mjs) against ONE lease directory.
+// Cross-language tests: what still spans the Go/Node boundary now that acquisition has
+// COLLAPSED into this package.
 //
-// This file exists because its absence hid several defects. Both sides were tested in
-// isolation and both suites were green while, between them, TWO PARTIES COULD HOLD
-// THE LEASE AT ONCE: Go's atomic token was `os.Mkdir(leaseDir)` with the meta written
-// several operations later, while Node's token was an O_EXCL write of meta.json over
-// a non-exclusive mkdir. Each was internally consistent; together they were not.
+// The original version of this file tested mutual exclusion between a Go acquirer and a
+// Node acquirer, because both implemented acquisition and they disagreed — different
+// atomic tokens, different liveness rules, a non-atomic epoch counter. Node no longer
+// acquires, so that entire class of test is moot by construction, which was the point of
+// the collapse.
 //
-// THE HOLDER MUST STAY ALIVE. A helper that acquires and exits leaves a lease whose
-// holder pid is dead, which is *correctly* reclaimable — asserting mutual exclusion
-// against it tests nothing and fails for the wrong reason. Every test below keeps the
-// contending process running for the duration of the assertion.
+// What remains genuinely cross-language, and is tested here:
+//   - Node must READ a Go-written lease record correctly (the fence compares epochs, and
+//     a record Node cannot parse reads as "fenced out", which would block every render).
+//   - Node's fence must agree with Go about which epoch is current.
+//   - A render must REFUSE to run without an inherited lease, rather than reintroducing
+//     acquisition.
+//
+// These do NOT skip when node is missing. A suite whose whole purpose is catching what
+// the single-language suites cannot see must not silently evaporate; set
+// GPULEASE_ALLOW_NO_NODE=1 to downgrade that to a skip on a machine without node.
 
 import (
-	"bufio"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-// nodeHelper drives render/gpu-lock.mjs from a child node process. It prints ONE JSON
-// line describing the outcome, then — in hold mode — stays alive so its pid remains a
-// live holder while the Go side makes its assertions.
+// nodeHelper reads the shared record through render/gpu-lock.mjs and reports what Node
+// makes of it. Read-only: Node has no acquisition API left to call.
 const nodeHelper = `
-import { acquireGpuLock, isStale } from %MJS%;
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-const lockPath = process.argv[2];
-const mode = process.argv[3];
+import { readLease, checkInheritedLease, inheritedLease } from %MJS%;
+const dir = process.argv[2];
+const epoch = Number(process.argv[3]);
 const out = (o) => { process.stdout.write(JSON.stringify(o) + "\n"); };
 try {
-  if (mode === "inspect") {
-    let meta = null;
-    try { meta = JSON.parse(readFileSync(join(lockPath, "meta.json"), "utf8")); } catch {}
-    out({ ok: true, meta, stale: isStale(meta) });
-  } else {
-    const lock = await acquireGpuLock({ lockPath, waitMs: 0, reason: "node-contender", ttlMs: 600000 });
-    out({ ok: true, acquired: lock !== null, epoch: lock ? lock.epoch : null });
-    if (mode === "hold" && lock) {
-      // Stay alive holding the lease. The parent kills us when it is done.
-      await new Promise((r) => setTimeout(r, 120000));
-    }
-  }
+  const meta = readLease(dir);
+  out({
+    ok: true,
+    parsed: meta !== null,
+    epoch: meta ? meta.epoch : null,
+    holderPid: meta && meta.holder ? meta.holder.pid : null,
+    klass: meta ? meta.class : null,
+    fencePasses: checkInheritedLease({ dir, epoch }),
+    inherits: inheritedLease({ GPU_LEASE_DIR: dir, GPU_LEASE_EPOCH: String(epoch), GPU_LEASE_CLASS: "media" }) !== null,
+  });
 } catch (e) {
   out({ ok: false, error: String((e && e.code) || e) });
 }
 `
 
 type nodeResult struct {
-	OK       bool            `json:"ok"`
-	Acquired bool            `json:"acquired"`
-	Epoch    *int64          `json:"epoch"`
-	Meta     json.RawMessage `json:"meta"`
-	Stale    bool            `json:"stale"`
-	Error    string          `json:"error"`
+	OK          bool   `json:"ok"`
+	Parsed      bool   `json:"parsed"`
+	Epoch       *int64 `json:"epoch"`
+	HolderPID   *int   `json:"holderPid"`
+	Class       string `json:"klass"`
+	FencePasses bool   `json:"fencePasses"`
+	Inherits    bool   `json:"inherits"`
+	Error       string `json:"error"`
 }
 
-func nodeScript(t *testing.T) (exe string, script string) {
+// runNode executes the read-only helper against a lease directory.
+func runNode(t *testing.T, leaseDir string, epoch uint64) nodeResult {
 	t.Helper()
 	nodeExe, err := exec.LookPath("node")
 	if err != nil {
-		t.Skip("node not on PATH; cross-language contention cannot be verified here")
+		if os.Getenv("GPULEASE_ALLOW_NO_NODE") != "" {
+			t.Skip("node not on PATH and GPULEASE_ALLOW_NO_NODE is set")
+		}
+		t.Fatal("node is not on PATH. These are the only tests that check Go and Node agree " +
+			"about the lease record; silently skipping them is how the two drifted before. " +
+			"Install node, or set GPULEASE_ALLOW_NO_NODE=1 to accept the gap.")
 	}
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -79,75 +88,11 @@ func nodeScript(t *testing.T) (exe string, script string) {
 	mjsURL := `"file:///` + strings.ReplaceAll(filepath.ToSlash(mjs), " ", "%20") + `"`
 
 	dir := t.TempDir()
-	path := filepath.Join(dir, "helper.mjs")
-	if err := os.WriteFile(path, []byte(strings.Replace(nodeHelper, "%MJS%", mjsURL, 1)), 0o666); err != nil {
+	script := filepath.Join(dir, "helper.mjs")
+	if err := os.WriteFile(script, []byte(strings.Replace(nodeHelper, "%MJS%", mjsURL, 1)), 0o666); err != nil {
 		t.Fatalf("write helper: %v", err)
 	}
-	return nodeExe, path
-}
-
-// startNodeHolder spawns the helper in hold mode, waits for its result line, and
-// returns it along with a cleanup that terminates the still-running holder.
-func startNodeHolder(t *testing.T, lockPath string) (nodeResult, func()) {
-	t.Helper()
-	exe, script := nodeScript(t)
-	cmd := exec.Command(exe, script, lockPath, "hold")
-	cmd.Env = append(os.Environ(), "GPU_LOCK="+lockPath)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("stdout pipe: %v", err)
-	}
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start node holder: %v", err)
-	}
-	stop := func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	}
-
-	type lineOrErr struct {
-		res nodeResult
-		err error
-	}
-	ch := make(chan lineOrErr, 1)
-	go func() {
-		sc := bufio.NewScanner(stdout)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if !strings.HasPrefix(line, "{") {
-				continue
-			}
-			var r nodeResult
-			if json.Unmarshal([]byte(line), &r) == nil {
-				ch <- lineOrErr{res: r}
-				return
-			}
-		}
-		ch <- lineOrErr{err: sc.Err()}
-	}()
-
-	select {
-	case v := <-ch:
-		if v.err != nil {
-			stop()
-			t.Fatalf("reading node holder output: %v", v.err)
-		}
-		return v.res, stop
-	case <-time.After(30 * time.Second):
-		stop()
-		t.Fatal("node holder produced no result within 30s")
-	}
-	return nodeResult{}, stop
-}
-
-// runNodeOnce runs the helper to completion (inspect mode).
-func runNodeOnce(t *testing.T, lockPath, mode string) nodeResult {
-	t.Helper()
-	exe, script := nodeScript(t)
-	cmd := exec.Command(exe, script, lockPath, mode)
-	cmd.Env = append(os.Environ(), "GPU_LOCK="+lockPath)
-	out, err := cmd.CombinedOutput()
+	out, err := exec.Command(nodeExe, script, leaseDir, itoa(epoch)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("node helper failed: %v\n%s", err, out)
 	}
@@ -165,6 +110,8 @@ func runNodeOnce(t *testing.T, lockPath, mode string) nodeResult {
 	return nodeResult{}
 }
 
+func itoa(v uint64) string { return strconv.FormatUint(v, 10) }
+
 func testManagerAt(t *testing.T, root string) *Manager {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(root, "gpu"), 0o777); err != nil {
@@ -179,192 +126,86 @@ func testManagerAt(t *testing.T, root string) *Manager {
 	}
 }
 
-// While GO holds the lease, a LIVE Node acquirer must be refused.
-func TestNodeCannotAcquireWhileGoHolds(t *testing.T) {
-	root := t.TempDir()
-	m := testManagerAt(t, root)
-	lease, err := m.TryAcquire(ClassText, Options{Reason: "go bench", TTL: 10 * time.Minute})
-	if err != nil {
-		t.Fatalf("go acquire: %v", err)
-	}
-	defer func() { _ = lease.Release() }()
-
-	res := runNodeOnce(t, m.leaseDir(), "acquire")
-	if !res.OK {
-		t.Fatalf("node helper errored: %s", res.Error)
-	}
-	if res.Acquired {
-		t.Fatal("NODE ACQUIRED THE LEASE WHILE GO HELD IT — two holders on one GPU")
-	}
-}
-
-// And the reverse: while a LIVE Node process holds it, Go must be refused.
-func TestGoCannotAcquireWhileNodeHolds(t *testing.T) {
-	root := t.TempDir()
-	m := testManagerAt(t, root)
-
-	res, stop := startNodeHolder(t, m.leaseDir())
-	defer stop()
-	if !res.OK || !res.Acquired {
-		t.Fatalf("node could not acquire a free lease: %+v", res)
-	}
-	if _, err := m.TryAcquire(ClassMedia, Options{Reason: "go render"}); err == nil {
-		t.Fatal("GO ACQUIRED THE LEASE WHILE NODE HELD IT — two holders on one GPU")
-	}
-}
-
-// THE C1 RACE, made deterministic: an EMPTY lease directory is the transient state of
-// an in-progress acquisition. It must not be a claim by itself — meta.json is the only
-// token — and a live Node claim inside that directory must still block Go.
-func TestEmptyLeaseDirIsNotAClaimAndNodeStillBlocksGo(t *testing.T) {
-	root := t.TempDir()
-	m := testManagerAt(t, root)
-	// Simulate the window: the directory exists, nobody has claimed it.
-	if err := os.MkdirAll(m.leaseDir(), 0o777); err != nil {
-		t.Fatalf("pre-create lease dir: %v", err)
-	}
-	if info := m.Inspect(); info.Held {
-		t.Fatal("an empty lease directory reported as HELD")
-	}
-	res, stop := startNodeHolder(t, m.leaseDir())
-	defer stop()
-	if !res.OK || !res.Acquired {
-		t.Fatalf("node could not claim inside an existing empty lease dir: %+v", res)
-	}
-	if _, err := m.TryAcquire(ClassMedia, Options{Reason: "go render"}); err == nil {
-		t.Fatal("Go claimed over a live Node claim in a pre-existing lease dir — the C1 race")
-	}
-}
-
-// THE C1 RACE ITSELF, made deterministic.
-//
-// A sequential test cannot reach this: Go's acquire fails fast on an existing lease
-// directory, so it never sits inside its own Mkdir→record window. The seam puts a live
-// Node acquirer INSIDE that window. The invariant is simple and absolute — after
-// TryAcquire returns, at most one party may believe it holds the lease.
-//
-// This FAILS when the two sides use different atomic tokens (Go claiming by creating
-// the directory, Node claiming by exclusively creating meta.json): Node's claim lands
-// in the window and Go's record then overwrites it, leaving two holders.
-func TestGoDoesNotClobberANodeClaimMadeInsideItsAcquireWindow(t *testing.T) {
-	root := t.TempDir()
-	m := testManagerAt(t, root)
-
-	var stop func()
-	var nodeRes nodeResult
-	var fired bool
-	orig := hookLeaseDirCreated
-	hookLeaseDirCreated = func() {
-		if fired {
-			return // only race the first attempt
-		}
-		fired = true
-		nodeRes, stop = startNodeHolder(t, m.leaseDir())
-	}
-	t.Cleanup(func() {
-		hookLeaseDirCreated = orig
-		if stop != nil {
-			stop()
-		}
-	})
-
+// Node must parse a Go-written record, including the NESTED holder.pid. When the two
+// schemas diverged, the reader found no holder and treated a live lease as ownerless.
+func TestNodeReadsGoWrittenLease(t *testing.T) {
+	m := testManagerAt(t, t.TempDir())
 	lease, err := m.TryAcquire(ClassMedia, Options{Reason: "go render", TTL: 10 * time.Minute})
-
-	if !fired {
-		t.Fatal("seam never fired; the race was not exercised")
-	}
-	if !nodeRes.OK {
-		t.Fatalf("node helper errored inside the window: %s", nodeRes.Error)
-	}
-
-	// Node claimed inside the window. Go must therefore NOT come away holding it.
-	if nodeRes.Acquired && err == nil {
-		_ = lease.Release()
-		t.Fatal("BOTH Go and Node hold the lease: Node claimed inside Go's acquire window " +
-			"and Go's record overwrote it. One GPU, two holders.")
-	}
-	// The complementary direction is also acceptable and safe: Node was refused
-	// because Go had already claimed. Exactly one of them must hold it.
-	if !nodeRes.Acquired && err != nil {
-		t.Fatalf("NEITHER side holds the lease (node refused, go errored: %v) — the card is stranded", err)
-	}
-	if err == nil {
-		_ = lease.Release()
-	}
-}
-
-// Go must be able to READ a Node-written lease: same path is not enough, the record
-// SCHEMA must match. If Go cannot see holder.pid it treats the lease as ownerless.
-func TestGoReadsLiveNodeWrittenLease(t *testing.T) {
-	root := t.TempDir()
-	m := testManagerAt(t, root)
-
-	res, stop := startNodeHolder(t, m.leaseDir())
-	defer stop()
-	if !res.OK || !res.Acquired {
-		t.Fatalf("node acquire failed: %+v", res)
-	}
-	info := m.Inspect()
-	if !info.Held {
-		t.Fatal("Go reports a LIVE Node-held lease as FREE — schema mismatch; Go would reclaim it")
-	}
-	if info.PID <= 0 {
-		t.Fatalf("Go could not read the holder pid from a Node-written lease: %+v", info)
-	}
-}
-
-// Node must be able to READ a Go-written lease and agree it is NOT stale. A
-// disagreement means one side waits while the other reclaims.
-func TestNodeReadsGoWrittenLeaseAndAgreesItIsHeld(t *testing.T) {
-	root := t.TempDir()
-	m := testManagerAt(t, root)
-	lease, err := m.TryAcquire(ClassText, Options{Reason: "go bench", TTL: 10 * time.Minute})
 	if err != nil {
 		t.Fatalf("go acquire: %v", err)
 	}
 	defer func() { _ = lease.Release() }()
 
-	res := runNodeOnce(t, m.leaseDir(), "inspect")
+	res := runNode(t, m.leaseDir(), lease.Epoch())
 	if !res.OK {
 		t.Fatalf("node helper errored: %s", res.Error)
 	}
-	if len(res.Meta) == 0 || string(res.Meta) == "null" {
-		t.Fatal("Node could not parse a Go-written lease record")
+	if !res.Parsed {
+		t.Fatal("Node could not parse a Go-written lease record — the fence would read this as 'fenced out' and block every render")
 	}
-	if res.Stale {
-		t.Fatal("Node considers a live Go-held lease STALE — it would reclaim the GPU from under it")
+	if res.HolderPID == nil || *res.HolderPID != os.Getpid() {
+		t.Fatalf("Node read holder.pid = %v, want %d — schema drift", res.HolderPID, os.Getpid())
 	}
-}
-
-// A lease whose holder has EXITED is legitimately reclaimable across the boundary —
-// this is the counterpart to the tests above and pins that we did not "fix" mutual
-// exclusion by making dead holders un-reclaimable.
-func TestGoReclaimsLeaseFromExitedNodeHolder(t *testing.T) {
-	root := t.TempDir()
-	m := testManagerAt(t, root)
-
-	res := runNodeOnce(t, m.leaseDir(), "acquire") // acquires, then EXITS
-	if !res.OK || !res.Acquired {
-		t.Fatalf("node acquire failed: %+v", res)
-	}
-	if _, err := m.TryAcquire(ClassMedia, Options{Reason: "go render"}); err != nil {
-		t.Fatalf("Go could not reclaim a lease whose Node holder exited: %v", err)
+	if res.Class != string(ClassMedia) {
+		t.Fatalf("Node read class = %q, want %q; the class gate depends on this", res.Class, ClassMedia)
 	}
 }
 
-// After Go releases, Node must be able to take the lease.
-func TestNodeAcquiresAfterGoReleases(t *testing.T) {
-	root := t.TempDir()
-	m := testManagerAt(t, root)
-	lease, err := m.TryAcquire(ClassText, Options{Reason: "go bench"})
+// The fence must agree across the boundary: the epoch Go issued is the epoch Node sees.
+func TestNodeFenceAgreesWithGoEpoch(t *testing.T) {
+	m := testManagerAt(t, t.TempDir())
+	lease, err := m.TryAcquire(ClassMedia, Options{Reason: "go render", TTL: 10 * time.Minute})
 	if err != nil {
 		t.Fatalf("go acquire: %v", err)
+	}
+	defer func() { _ = lease.Release() }()
+
+	if res := runNode(t, m.leaseDir(), lease.Epoch()); !res.FencePasses {
+		t.Fatal("Node's fence rejected the CURRENT epoch — every inherited render would refuse to run")
+	}
+	// And a stale epoch must be rejected: this is the closing-lid case.
+	if res := runNode(t, m.leaseDir(), lease.Epoch()-1); res.FencePasses {
+		t.Fatal("Node's fence accepted a STALE epoch — a suspended process would act on top of the current holder")
+	}
+}
+
+// After Go releases, Node must see no lease at all — a released lease that still reads as
+// present would fence out the next legitimate holder.
+func TestNodeSeesNothingAfterGoReleases(t *testing.T) {
+	m := testManagerAt(t, t.TempDir())
+	lease, err := m.TryAcquire(ClassMedia, Options{Reason: "go render"})
+	if err != nil {
+		t.Fatalf("go acquire: %v", err)
+	}
+	epoch := lease.Epoch()
+	if err := lease.Release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	res := runNode(t, m.leaseDir(), epoch)
+	if res.Parsed {
+		t.Fatal("Node still sees a lease record after Go released it")
+	}
+	if res.FencePasses {
+		t.Fatal("Node's fence passed against a released lease")
+	}
+}
+
+// The unload markers the render path elects with must not survive the lease: a marker
+// outliving its lease suppresses a needed unload for the next one.
+func TestReleaseClearsUnloadMarkers(t *testing.T) {
+	m := testManagerAt(t, t.TempDir())
+	lease, err := m.TryAcquire(ClassMedia, Options{Reason: "go render"})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	marker := filepath.Join(m.leaseDir(), "unloaded."+itoa(lease.Epoch()))
+	if err := os.WriteFile(marker, []byte("1"), 0o666); err != nil {
+		t.Fatalf("seed marker: %v", err)
 	}
 	if err := lease.Release(); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	res := runNodeOnce(t, m.leaseDir(), "acquire")
-	if !res.OK || !res.Acquired {
-		t.Fatalf("node could not acquire after Go released: %+v", res)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("an unload marker survived its lease; the next lease would skip a needed unload")
 	}
 }
