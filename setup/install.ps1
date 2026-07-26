@@ -394,7 +394,7 @@ function Get-OldVersion {
 #   dual        [bool]    dual-gpu two-resident render
 #   include_26b [bool]    keep the 26B model+group-member AFTER the ram gate
 #   moe_26b     [string]  the __MOE_26B__ substitution string ('' when dropped)
-#   moe_mode    [string]  gpu|cpu_moe|drop (post-gate, for logging)
+#   moe_mode    [string]  gpu|cpu_moe|n_cpu_moe|drop (post-gate, for logging)
 #   notes       [string]  operator-facing note
 # ---------------------------------------------------------------------------
 function Resolve-ProfileParams {
@@ -423,23 +423,43 @@ function Resolve-ProfileParams {
   }
   $p = $doc.profiles.$ProfileId
 
-  # --cpu-moe needs a RAM path (>=~48GB). We keep the 26B on cpu_moe ONLY when
-  # ram_tier is mid|high; on low|min there is no RAM path so the 26B is dropped.
-  # 'gpu' placement never depends on RAM; 'drop' is always dropped.
+  # --cpu-moe needs a RAM path (>=~48GB) because EVERY expert lands in RAM. We keep
+  # the 26B on cpu_moe ONLY when ram_tier is mid|high; on low|min there is no RAM
+  # path so the 26B is dropped. 'gpu' placement never depends on RAM; 'drop' is
+  # always dropped.
+  #
+  # n_cpu_moe is the PARTIAL form: --n-cpu-moe <N> pushes only the top N expert
+  # layers to RAM and keeps the rest on the GPU, so its RAM appetite is a fraction
+  # of full cpu_moe. That makes the 26B reachable on a `low` box, which the
+  # all-or-nothing gate above would wrongly drop. Measured on ampere-6 (6GB VRAM +
+  # 32GB RAM): N=24 serves at 32K ctx using 5.3GB VRAM with ~21GB RAM still free.
+  # `min` (<28GB) is still refused - there is genuinely no room there.
   $moeMode = $p.moe_26b
   $include = [bool]$p.include_26b
   if ($moeMode -eq 'drop') { $include = $false }
   elseif ($moeMode -eq 'cpu_moe' -and $RamTier -notin @('mid','high')) {
     $include = $false; $moeMode = 'drop'   # cpu_moe requested but no RAM path -> drop
   }
+  elseif ($moeMode -eq 'n_cpu_moe' -and $RamTier -eq 'min') {
+    $include = $false; $moeMode = 'drop'   # partial offload still needs >= ~28GB
+  }
 
   # __MOE_26B__ substitution string for the 26B llama-server cmd.
-  #   gpu     -> experts on GPU, full offload
-  #   cpu_moe -> experts in RAM, non-expert layers on GPU
+  #   gpu       -> experts on GPU, full offload
+  #   cpu_moe   -> ALL experts in RAM, non-expert layers on GPU
+  #   n_cpu_moe -> top N expert layers in RAM, the rest on GPU (partial)
   $moeStr = ''
   if ($include) {
     if ($moeMode -eq 'gpu') { $moeStr = '-ngl 99' }
     elseif ($moeMode -eq 'cpu_moe') { $moeStr = '--cpu-moe -ngl 999' }
+    elseif ($moeMode -eq 'n_cpu_moe') {
+      # n_cpu_moe MUST carry an N. A profile that names the mode without one is a
+      # defect, not something to paper over with a guess - fall back to the safe
+      # all-experts-in-RAM form rather than emitting a broken flag.
+      $n = [int]$p.n_cpu_moe
+      if ($n -gt 0) { $moeStr = "--n-cpu-moe $n -ngl 999" }
+      else { $moeStr = '--cpu-moe -ngl 999'; $moeMode = 'cpu_moe' }
+    }
   }
 
   return @{

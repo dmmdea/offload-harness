@@ -110,15 +110,16 @@
       "notes": "Configs #8/#9 (5060 8GB Blackwell; +64GB adds 26B cpu-moe). E4B resident full-GPU. REQUIRES the Blackwell CUDA-12.8 sm_120 build (Task H4). 26B cpu-moe only when ram_tier mid/high; else dropped. J4: config_seed_ram_mid_high auto-binds the O1 bf16 IMAGE seat on mid/high-RAM boxes (verified on the ampere-8 reference box; image only — no video/music on 8GB by decision 2026-07-23). PROJECTED."
     },
     "ampere-6": {
-      "ctx_size": 16384,
+      "ctx_size": 32768,
       "kv_type": "q8_0",
-      "agent_ctx_tokens": 16384,
-      "resident_tier": "gemma4-e2b",
-      "include_26b": false,
-      "moe_26b": "drop",
+      "agent_ctx_tokens": 32768,
+      "resident_tier": "offload-e4b",
+      "include_26b": true,
+      "moe_26b": "n_cpu_moe",
+      "n_cpu_moe": 24,
       "flash_attn": "on",
       "backend": "cuda",
-      "notes": "Configs #10/#11 (3050 6GB). E2B resident. q8_0 KV is MANDATORY to reach 16K on 6GB. 26B dropped. PROJECTED - H3 confirms the 16K ceiling; may downshift to 8K."
+      "notes": "Configs #10/#11 (3050 6GB). **MEASURED 2026-07-26** on an RTX 3050 6GB + i9-9900 + 32GB DDR4-2667 dual-channel (spec: docs/specs/2026-07-26-ampere-6-tier-design.md). The previous PROJECTED entry was wrong on all three of its main calls and is corrected here. (1) RESIDENT TIER E2B -> E4B: E4B at 16K/q8_0 occupies only 3100 MiB of 6144, so the stronger workhorse fits with room to spare. (2) CTX 16K -> 32K: the projected worry about downshifting to 8K was unfounded - E4B reaches 64K/f16 in 4046 MiB and E2B 64K/f16 in 2078 MiB; 32K is the cap only because the 26B needs the rest. (3) 'q8_0 KV is MANDATORY' was FALSE: Gemma-4 E-series uses a 512-token sliding window with only periodic global layers, so KV barely grows - f16 at 16K costs just 130 MiB more than q8_0. q8_0 is retained here purely because the 26B tier wants the headroom; drop the 26B and f16/64K is available. (4) 26B RESTORED via PARTIAL offload: --n-cpu-moe 24 serves at 32K in 5.3GB VRAM leaving ~21GB RAM free, at 210 t/s pp / 13.5 t/s tg - so this tier gets a REAL escalation model instead of the collapsed single-tier cascade that include_26b:false produces. N=22 benches faster (243 pp / 14.3 tg) but FAILS to serve at 16K (CUDA alloc), and N=20/18 fail outright - 24 is the serve-safe optimum, do not raise it. Throughput: E2B 2631 pp / 90.9 tg; E4B 1529 pp / 48.1 tg. The 70W power cap (not raisable) is the real limiter - the card sustains ~1639 MHz of a 2100 MHz max at 58W mean. NOTE for ZFS hosts: cap zfs_arc_max (ARC grew to 19.9GB of 31GB here and is NOT counted in MemAvailable, which starves the 26B)."
     },
     "amd-rdna3": {
       "ctx_size": 16384,

@@ -139,13 +139,34 @@ $macro = Get-CommonMacro $r.yaml
 if ($macro -match '--ctx-size 65536')                           { Ok 'blackwell-32 ctx=65536' } else { Bad "blackwell-32 ctx (got: $macro)" }
 if ($macro -match '--cache-type-k q8_0')                        { Ok 'blackwell-32 KV=q8_0' } else { Bad 'blackwell-32 KV q8_0' }
 
-Write-Host "== ampere-6 - E2B, ctx 16384, NO 26B =="
+# ampere-6 was re-measured 2026-07-26 on real 3050 6GB hardware (see
+# docs/specs/2026-07-26-ampere-6-tier-design.md): ctx 16384->32768, resident E2B->E4B,
+# and the 26B restored via PARTIAL expert offload. The two RAM bands differ, so both
+# are asserted: `min` still has no RAM path for the 26B, `low` now does.
+Write-Host "== ampere-6 / ram=min - ctx 32768, still NO 26B (no RAM path) =="
 $r = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-6' -RamTier 'min' -BigRam $false
 $macro = Get-CommonMacro $r.yaml
-if ($macro -match '--ctx-size 16384')                          { Ok 'ampere-6 ctx=16384' } else { Bad "ampere-6 ctx (got: $macro)" }
+if ($macro -match '--ctx-size 32768')                          { Ok 'ampere-6 ctx=32768' } else { Bad "ampere-6 ctx (got: $macro)" }
 if ($r.yaml -match '(?m)^\s{2}gemma4-e2b:')                    { Ok 'ampere-6 has E2B tier' } else { Bad 'ampere-6 E2B present' }
-if ($r.yaml -notmatch 'gemma4-26b-a4b')                        { Ok 'ampere-6 has NO 26B tier' } else { Bad 'ampere-6 26B absent' }
-if ($r.verdict -and $r.verdict.resident_tier -ne 'gemma4-26b-a4b') { Ok 'ampere-6 resident is not 26B' } else { }  # informational
+if ($r.yaml -notmatch 'gemma4-26b-a4b')                        { Ok 'ampere-6/min has NO 26B tier' } else { Bad 'ampere-6/min 26B absent' }
+if ($r.verdict -and $r.verdict.moe_mode -eq 'drop')             { Ok 'ampere-6/min moe_mode=drop' } else { Bad "ampere-6/min moe_mode (got: $($r.verdict.moe_mode))" }
+
+Write-Host "== ampere-6 / ram=low - 26B KEPT via partial offload (--n-cpu-moe 24) =="
+$r = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-6' -RamTier 'low' -BigRam $false
+# Scope the flag assertions to the 26B model BLOCK, not the whole yaml — the
+# template header comment legitimately names both --cpu-moe and --n-cpu-moe when
+# explaining the modes, and the 26B command spans multiple lines (model path on
+# one, flags on the next), so a single-line grab would miss the flags.
+$a6lines = $r.yaml -split "`r?`n"
+$a6start = 0; for ($i=0; $i -lt $a6lines.Count; $i++) { if ($a6lines[$i] -match '^\s{2}gemma4-26b-a4b:') { $a6start = $i; break } }
+$a6buf = @(); for ($j=$a6start+1; $j -lt $a6lines.Count -and $a6lines[$j] -notmatch '^(\s{0,2}\S|groups:)'; $j++) { $a6buf += $a6lines[$j] }
+$moe26bCmd = ($a6buf -join ' ')
+if ($r.yaml -match 'gemma4-26b-a4b')                           { Ok 'ampere-6/low KEEPS the 26B' } else { Bad 'ampere-6/low 26B was dropped' }
+if ($moe26bCmd -match '--n-cpu-moe 24')                        { Ok 'ampere-6/low renders --n-cpu-moe 24' } else { Bad "ampere-6/low missing --n-cpu-moe 24 (cmd: $moe26bCmd)" }
+if ($moe26bCmd -notmatch '(?<!-n)--cpu-moe\b')                 { Ok 'ampere-6/low uses partial, not all-expert offload' } else { Bad 'ampere-6/low 26B cmd emitted --cpu-moe' }
+if ($r.yaml -notmatch '__MOE_26B__')                           { Ok 'ampere-6/low: no unsubstituted MoE token' } else { Bad 'ampere-6/low left __MOE_26B__' }
+if ($r.verdict -and $r.verdict.moe_mode -eq 'n_cpu_moe')       { Ok 'ampere-6/low moe_mode=n_cpu_moe' } else { Bad "ampere-6/low moe_mode (got: $($r.verdict.moe_mode))" }
+if ($r.verdict -and [bool]$r.verdict.include_26b)              { Ok 'ampere-6/low verdict include_26b=true' } else { Bad 'ampere-6/low verdict include_26b' }
 
 Write-Host "== amd-gcn - 8192 / f16 / flash-attn off (vulkan) =="
 $r = Invoke-Render -Backend 'vulkan' -ProfileId 'amd-gcn' -RamTier 'low' -BigRam $false
