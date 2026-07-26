@@ -34,10 +34,6 @@ import (
 // holder pid is unknown, and the backstop against pid recycling).
 const DefaultTTL = time.Hour
 
-// DefaultLockName is the basename of the shared lock dir under the OS temp dir,
-// matching defaultLockPath() in render/gpu-lock.mjs.
-const DefaultLockName = "local-offload-gpu.lock"
-
 // Path resolves the shared GPU lease directory exactly the way every other consumer
 // does: explicit override first (the gpu_lock_path config field — the pipeline also
 // threads it to the runners as the GPU_LOCK env so both sides always contend on ONE

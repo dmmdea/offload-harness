@@ -17,7 +17,7 @@ other on a single shared card.
 |---|---|
 | `internal/gpulease/gpulease.go` | **the only implementation**: `LeaseDir` (the one resolver), acquire/release, epoch fencing, the reclaim conjunction, `InspectDir` (the one read path) |
 | `internal/gpulease/proc*.go` | per-platform liveness and process-start identity, exported so no consumer keeps a second copy |
-| `internal/pipeline/pipeline.go` | takes the `media` lease around all five generation call sites and threads `GPU_LEASE_*` to the runner |
+| `internal/pipeline/pipeline.go` | takes the `media` lease around **every** generation call site (image ComfyUI + sdcpp, inpaint, image batch, run-graph, video, audio) and threads `GPU_LEASE_*` to the runner; inherits an ambient lease instead of re-acquiring |
 | `gpu_cmd.go` | the `gpu status\|reserve\|release\|hold` verbs, wrapper and `--detach` forms |
 | `gpu_hide_windows.go`, `gpu_hide_other.go` | hidden spawn for the detached holder (a visible console gets closed, killing the hold) |
 | `render/gpu-lock.mjs` | READ-ONLY participant: honours + fences an inherited lease, elects one unloader, drains, ComfyUI lifecycle. **Does not acquire.** |
@@ -53,6 +53,39 @@ local-offload gpu release --epoch <N>
 `gpu status [--json]` reports the holder, its class, age, reason and declared expiry — and says
 **"free (unreserved)"** explicitly, because an unreserved card is exactly when work is exposed;
 that should be visible, not inferred from silence.
+
+## What happens when the card is busy
+
+A GPU job **queues behind the current holder for a bounded window, then defers** with the
+holder's class, age and reason. Both halves are deliberate:
+
+- **It queues** because the single slot exists to serialize GPU work, not to cancel it. A render
+  arriving thirty seconds into someone else's render should run thirty seconds later. Dropping it
+  would let a `gpu reserve --class text --for 45m` silently discard 45 minutes of media requests.
+- **The queue is bounded** because the caller is usually one tool call, and blocking it for tens
+  of minutes is indistinguishable from a hang. Past the window an honest ETA is more useful to a
+  caller that can retry.
+
+| knob | default | scope |
+|---|---|---|
+| `gpu_wait_ms` | 90 s | every GPU task (matches `vision_gpu_wait_sec`) |
+| `videogen_wait_ms` | 90 s | overrides `gpu_wait_ms` for video |
+| `audiogen_wait_ms` | 90 s | overrides `gpu_wait_ms` for audio |
+
+Raise the per-task values to restore a long serial queue. Only **contention** is waited out — an
+unwritable or cloud-synced lease location comes back immediately, because waiting cannot fix a
+configuration fault. A busy card is a **defer**, not a failure: `generate-image --batch` exits 0
+with `err_class: gpu_busy` rather than a non-zero error.
+
+Running the harness under a reservation **inherits** that lease:
+
+```
+local-offload gpu reserve --class media -- local-offload generate-video "…"
+```
+
+The child does not acquire a second lease — it would queue behind its own parent for the whole
+window and then defer. If the inherited lease is no longer current (the parent was fenced out),
+the job refuses instead of quietly taking a fresh one, so a lost reservation is visible.
 
 ## Classes
 

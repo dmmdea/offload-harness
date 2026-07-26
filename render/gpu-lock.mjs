@@ -287,14 +287,20 @@ export async function withGpuSlot(opts, fn) {
   const onSig = async () => { await cleanup(); process.exit(130); };
   for (const sig of ["SIGINT", "SIGTERM", "SIGBREAK"]) process.on(sig, onSig);
   try {
-    // Class gate first, then once-per-lease election, then the fence.
+    // THE FENCE COMES FIRST, AND IT IS UNCONDITIONAL. It used to sit inside the
+    // unload-election branch, so it was skipped for every job that lost the election
+    // (jobs 2..N of a batch) and for every `text` lease — those jobs went straight to
+    // submitting a graph while fenced out, i.e. rendering on somebody else's card.
+    // Submitting a graph is irreversible GPU work, so it needs the same guard the
+    // unload does.
+    if (lease && !checkLease(lease)) {
+      throw new Error(
+        `GPU lease epoch ${lease.epoch} is no longer current — this process was fenced out ` +
+        `(the card was handed to another holder while we were suspended). Refusing to touch the GPU.`);
+    }
+    // Then the class gate, then the once-per-lease election.
     const mayUnload = !lease || lease.class !== "text";
     if (mayUnload && (!lease || claimUnload(lease))) {
-      if (lease && !checkLease(lease)) {
-        throw new Error(
-          `GPU lease epoch ${lease.epoch} is no longer current — this process was fenced out ` +
-          `(the card was handed to another holder while we were suspended). Refusing to touch the GPU.`);
-      }
       await freeLS();
     }
     if (comfyManaged) {

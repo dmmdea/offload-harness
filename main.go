@@ -658,6 +658,15 @@ func runGenerateImage(args []string) error {
 		res := core.Result{OK: berr == nil && ok == len(items), Data: data}
 		if berr != nil {
 			res.Reason = berr.Error()
+			// A busy card is a DEFER, not a failure: the batch waited its window behind
+			// another holder and produced nothing, which is recoverable by retrying.
+			// Returning it as an error made the CLI exit non-zero, so any wrapper read a
+			// queued render as a broken one.
+			if pipeline.IsGPUBusy(berr) {
+				res.Deferred = true
+				res.Meta.ErrClass = "gpu_busy"
+				berr = nil
+			}
 		}
 		emitResult(res, *asJSON, "", *compactFlag)
 		return berr
