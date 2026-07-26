@@ -114,12 +114,30 @@ test("inherited lease: acquire is SKIPPED (we would contend with our own holder)
   assert.ok(h.calls.includes("fn"), "the job still runs");
 });
 
-test("inherited lease: freeLlamaSwap is SKIPPED (hoisted to once per lease)", async () => {
+// THE HOIST, both halves. Skipping the unload under an inherited lease WITHOUT anyone
+// performing it was the defect: a leased render then ran with every model still
+// resident. Exactly one job per lease unloads.
+test("inherited lease: the FIRST job performs the unload (the hoist actually happens)", async () => {
   const h = harness();
-  await withGpuSlot({ ...h.opts, ...h.deps, lease: { dir: "X", epoch: 7 } },
-    async () => { h.calls.push("fn"); });
+  await withGpuSlot({
+    ...h.opts, ...h.deps,
+    lease: { dir: "X", epoch: 7 },
+    claimUnload: () => true, // we are the first job under this lease
+  }, async () => { h.calls.push("fn"); });
+  assert.ok(h.calls.includes("freeLlamaSwap"),
+    "somebody must unload for the lease, or the render runs against a full card");
+  assert.ok(h.calls.indexOf("freeLlamaSwap") < h.calls.indexOf("fn"), "unload precedes the job");
+});
+
+test("inherited lease: a LATER job skips the unload (once per lease, not per job)", async () => {
+  const h = harness();
+  await withGpuSlot({
+    ...h.opts, ...h.deps,
+    lease: { dir: "X", epoch: 7 },
+    claimUnload: () => false, // another job already unloaded for this lease
+  }, async () => { h.calls.push("fn"); });
   assert.ok(!h.calls.includes("freeLlamaSwap"),
-    "an inherited lease already unloaded once for the whole batch; unloading per job is the defect");
+    "unloading per job is the arithmetic behind 3,356 teardowns");
 });
 
 test("inherited lease: teardown still runs (freeComfy + kill), and release is a no-op", async () => {

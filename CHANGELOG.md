@@ -40,9 +40,18 @@ Versioning: [SemVer](https://semver.org/).
 
 ### Changed
 - **`freeLlamaSwap` is hoisted from per-JOB to per-LEASE.** It ran inside `withGpuSlot`, i.e.
-  once per job — that is the arithmetic behind 3,356 unloads. With an inherited lease
-  (`GPU_LEASE_DIR` + `GPU_LEASE_EPOCH`) `withGpuSlot` skips both the acquire (it would contend
-  with its own holder) and the unload. Without one, behaviour is unchanged.
+  once per job — that is the arithmetic behind 3,356 unloads. Under an inherited lease
+  (`GPU_LEASE_DIR` / `GPU_LEASE_EPOCH` / `GPU_LEASE_CLASS`) `withGpuSlot` skips the acquire (it
+  would contend with its own holder) and elects **exactly one** job per lease to perform the
+  unload, via an O_EXCL per-epoch marker inside the lease. N renders under one lease therefore
+  cost ONE teardown. Note the difference from merely skipping: an earlier revision skipped the
+  unload under an inherited lease while nothing performed it, so a leased render ran with every
+  model still resident.
+- **The default lock path moved** from `<os-tmpdir>/local-offload-gpu.lock` to
+  `<state_dir>/gpu/lease`. A bare `node render/*.mjs` run still acquires for itself as before,
+  but it now does so at the machine-wide path — set `state_dir`/`GPU_LOCK` if that root is not
+  writable, since the runner refuses rather than falling back per-user. `internal/gpulock` (the
+  read-only vision gate) moved with it; leaving it behind made `WaitFree` answer "free" forever.
 - **Unloading now drains first.** Measured on llama-swap v242: an unload issued during a
   generation returned in **1,265 ms without draining** and the in-flight request died at
   **4,107 ms with `502 Bad Gateway`**. The unload route does not honour in-flight work, so the
