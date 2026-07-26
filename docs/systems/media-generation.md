@@ -46,15 +46,17 @@ checkpoint loads once for N renders. **Op** — one image-editing operation insi
 
 ## How the system works
 
-Every GPU-heavy job runs inside `withGpuSlot`, which owns the whole lifecycle: acquire the lock, free
-the llama-swap tiers, cold-start ComfyUI, run the job, then tear down — `/free`, kill the ComfyUI
-process, release the lock. Teardown is idempotent and also runs on SIGINT/SIGTERM, so an interrupt
-does not leak the slot.
+Every GPU-heavy job runs inside `withGpuSlot`, which owns the render-side lifecycle: **fence**
+against the lease it was handed, free the llama-swap tiers (once per lease, after draining),
+cold-start ComfyUI, run the job, then tear down — `/free` and kill the ComfyUI process. Teardown is
+idempotent and also runs on SIGINT/SIGTERM, so an interrupt does not leak ComfyUI.
 
-The lock is a **directory**, because `mkdir` is atomic everywhere with no dependencies. A lock whose
-owning process is dead is reclaimed **immediately**; the one-hour TTL is only a fallback. An earlier
-version gated reclaim behind the TTL alone and left the single GPU slot deadlocked for up to an hour
-after a crash.
+`withGpuSlot` does **not** acquire or release. The harness takes the machine-wide lease in Go and
+threads `GPU_LEASE_DIR` / `GPU_LEASE_EPOCH` / `GPU_LEASE_CLASS` down; a GPU job started with no
+lease refuses rather than grabbing the card. Arbitration, staleness, fencing and reclaim all live
+in one place — see [GPU lease](gpu-lease.md) and
+[ADR 0018](../architecture/decisions/0018-machine-wide-fenced-gpu-lease.md). A busy card queues the
+job for a bounded window (`gpu_wait_ms`, 90 s) and then defers with the holder's detail.
 
 Two details of the free step are easy to get wrong:
 

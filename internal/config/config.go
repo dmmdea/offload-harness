@@ -258,25 +258,46 @@ type Config struct {
 	VideoGenTextEncoder string `json:"videogen_text_encoder,omitempty"`
 	// AudioGenTimeoutSec bounds one audio synthesis (TTS or ACE-Step). Default 720 (12min).
 	AudioGenTimeoutSec int `json:"audiogen_timeout_sec,omitempty"`
-	// VideoGenWaitMs is how long a queued video job waits for the single GPU slot before
-	// deferring (passed to the runner as GPU_LOCK waitMs). Long because video is the hero
-	// job. Default 1200000 (20min).
-	VideoGenWaitMs int `json:"videogen_wait_ms,omitempty"`
-	// AudioGenWaitMs is how long a queued audio job waits for the GPU slot before deferring.
-	// Kept SHORTER than video so a cheap queued TTS isn't starved by a 20-min video job —
-	// it defers cleanly after this window. Default 120000 (2min).
-	AudioGenWaitMs int `json:"audiogen_wait_ms,omitempty"`
+	// GPUWaitMs is how long ANY GPU job queues behind the current lease holder before it
+	// defers with the holder's detail. One knob for every GPU task.
+	//
+	// A busy card must QUEUE the job rather than drop it — that is what the single GPU
+	// slot has always been for. It is BOUNDED because the caller is usually one tool
+	// call, and a tool call that blocks for tens of minutes is indistinguishable from a
+	// hang; past the window an honest "held by <class>, <n>s in" is more useful to a
+	// caller that can retry. Default 90000 (90s), matching VisionGPUWaitSec so the two
+	// GPU waiters behave alike.
+	//
+	// It REPLACES videogen_wait_ms (20min) and audiogen_wait_ms (2min), which are now
+	// ignored. Those existed only so a cheap TTS was not starved behind a long video;
+	// at a 90s ceiling that distinction buys nothing, and keeping them would have been
+	// a trap — every install shipped with videogen_wait_ms=1200000 in its config, so
+	// per-task overrides would have silently restored the 20-minute wait on upgrade.
+	GPUWaitMs int `json:"gpu_wait_ms,omitempty"`
 	// GPULockPath overrides the single-slot GPU lock DIRECTORY shared with the render
 	// runners (render/gpu-lock.mjs). Empty = the runners' own default (the GPU_LOCK env,
 	// else <os-tmpdir>/local-offload-gpu.lock). When set it is also threaded to every gen
 	// runner as the GPU_LOCK env, so the Go-side vision gate (LO-1) and the Node runners
 	// always contend on the SAME lock.
 	GPULockPath string `json:"gpu_lock_path,omitempty"`
+	// StateDir overrides the MACHINE-WIDE state root that holds the GPU lease
+	// (<state_dir>/gpu/lease) and future durable harness state. Empty = the platform
+	// default: %ProgramData%\local-offload on Windows, /var/lib/local-offload elsewhere.
+	//
+	// It is machine-wide ON PURPOSE. The previous GPU lock defaulted under the OS temp
+	// dir, which is PER-USER on Windows, so a process in another security context took a
+	// DIFFERENT lock and mutual exclusion silently evaporated. An unwritable or
+	// cloud-synced root is REFUSED at startup rather than silently falling back — a
+	// sync client replicating a lock file between machines would hand one GPU to two
+	// hosts. See internal/gpulease.
+	StateDir string `json:"state_dir,omitempty"`
 	// VisionGPUWaitSec is how long a vision call (vqa/ocr/assess_image/video_describe)
 	// waits for the GPU lock held by a generation job before deferring (polled every 2s).
 	// While a gen job owns the GPU, llama-swap cannot (re)load the VLM — calling anyway
-	// just burns an http_5xx defer to the expensive cloud model (LO-1: 295 of the 337
-	// all-time defers landed in ONE such hour). Default 90.
+	// just burns a doomed HTTP call and returns an http_5xx defer (LO-1: 295 of the 337
+	// all-time defers landed in ONE such hour). A defer is not a cloud API call: the
+	// harness never calls a cloud model, it hands the work back to the calling session,
+	// which is the expensive path this wait exists to avoid. Default 90.
 	VisionGPUWaitSec int `json:"vision_gpu_wait_sec,omitempty"`
 	// MemoryStack lists the CPU-only, zero-VRAM llama-swap models the GPU-free helper
 	// must NEVER unload (the load-bearing mem0 stack). Sourced here (not a buried const)
@@ -471,10 +492,10 @@ func Default() Config {
 		MusicGenScript:              "render/comfy-music.mjs", // B3 ACE-Step music worker; "" => music defers
 		VideoGenTimeoutSec:          1500,
 		AudioGenTimeoutSec:          720,
-		EditTimeoutSec:              300, // edit_image / media ops (CPU; no GPU lock)
-		VideoGenWaitMs:              1200000, // 20min — video is the hero job
-		AudioGenWaitMs:              120000,  // 2min — a queued TTS defers fast, never starved by a long video
-		GPULockPath:                 "",      // runners' default (GPU_LOCK env, else <tmpdir>/local-offload-gpu.lock)
+		EditTimeoutSec:              300,     // edit_image / media ops (CPU; no GPU lock)
+		GPUWaitMs:                   90000, // 90s — queue behind a holder, then defer with an ETA
+		GPULockPath:                 "",      // runners' default (GPU_LOCK env, else <state_dir>/gpu/lease)
+		StateDir:                    "",      // platform default: %ProgramData%\local-offload | /var/lib/local-offload
 		VisionGPUWaitSec:            90,      // LO-1: bounded wait for the gen lock before a vision call defers
 		MemoryStack:                 []string{"embeddinggemma", "bge-reranker-v2-m3"},
 		EmbedModelName:              "embeddinggemma", // explicit; reorder-proof (not MemoryStack position)
@@ -571,7 +592,7 @@ func pathFields(c *Config) []*string {
 		&c.ImageGenScript, &c.NodePath, &c.ComfyDir,
 		&c.SdcppScript, &c.SdcppBin, &c.SdcppModel, &c.SdcppVAE, &c.SdcppClipL, &c.SdcppClipG, &c.SdcppT5, &c.SdcppLLM,
 		&c.InpaintScript,
-		&c.VideoGenScript, &c.RunGraphScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath,
+		&c.VideoGenScript, &c.RunGraphScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath, &c.StateDir,
 		&c.VoiceGenRef, &c.VoiceGenFTModel, &c.VoiceGenFTBaseDir, &c.VoiceGenFTRef,
 		&c.EditPython, &c.GimpConsolePath,
 		&c.CachePath, &c.LedgerPath,
@@ -618,6 +639,16 @@ func (c Config) ImageRouteConfigured() bool {
 	return c.ImageGenScript != ""
 }
 
+// retiredKeys are config keys the harness once honoured and has deliberately dropped.
+// They get their own message: every shipped config.json still carries
+// videogen_wait_ms/audiogen_wait_ms, and telling a whole fleet of installs that their
+// own installer made a "typo?" is both wrong and noise that trains operators to ignore
+// the warning that matters.
+var retiredKeys = map[string]string{
+	"videogen_wait_ms": "replaced by gpu_wait_ms (one 90s queue ceiling for every GPU task)",
+	"audiogen_wait_ms": "replaced by gpu_wait_ms (one 90s queue ceiling for every GPU task)",
+}
+
 // warnUnknownKeys prints a stderr warning for any JSON key that doesn't map to a
 // Config field — so a typo like "escalaton_model" surfaces instead of being
 // silently ignored. It never fails: the valid fields still load.
@@ -635,9 +666,14 @@ func warnUnknownKeys(b []byte) {
 		}
 	}
 	for k := range raw {
-		if !known[k] {
-			fmt.Fprintf(os.Stderr, "warning: unknown config key %q (ignored — typo?)\n", k)
+		if known[k] {
+			continue
 		}
+		if why, retired := retiredKeys[k]; retired {
+			fmt.Fprintf(os.Stderr, "note: config key %q is retired and ignored — %s\n", k, why)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "warning: unknown config key %q (ignored — typo?)\n", k)
 	}
 }
 

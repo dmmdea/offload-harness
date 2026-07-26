@@ -1,83 +1,92 @@
-// gpu-lock.mjs — a single-slot, cross-process GPU lock + GPU-free helpers for the
-// local-offload generation runners. The 8GB GPU is shared with llama-swap (:11436)
-// and ComfyUI (:8188); only ONE GPU-heavy job may run at a time. The lock is a
-// directory (mkdir is atomic on every OS, no deps) holding a meta.json {pid,startedAt}.
-// A crashed holder leaves a stale lock; we reclaim it when its pid is dead AND it is
-// older than ttl. No npm dependencies.
-import { mkdirSync, writeFileSync, readFileSync, rmSync, statSync } from "node:fs";
+// gpu-lock.mjs — the Node side of the machine-wide, FENCED GPU lease.
+//
+// THIS FILE NO LONGER ACQUIRES. internal/gpulease (Go) is the ONE implementation of
+// acquisition, staleness, fencing and the epoch counter; a render INHERITS a lease that
+// the Go caller already holds (GPU_LEASE_DIR / GPU_LEASE_EPOCH / GPU_LEASE_CLASS).
+//
+// WHY THE DUPLICATE WAS DELETED RATHER THAN FIXED. Two languages independently
+// implementing one concurrency rule produced a new divergence in every review round:
+// different atomic tokens (both sides ended up holding the lease), different liveness
+// rules (EPERM meant "alive" here and "dead" there), a non-atomic epoch write that a
+// measurement showed restarting the fence at 1 in 24.5% of concurrent reads, and one
+// side deleting the other's in-progress claim. Each was fixed individually and the next
+// round found the next one, because the defect was never a bug — it was the duplication.
+// There is now exactly one rule, in one language, and this file is a consumer of it.
+//
+// What remains here is everything that is genuinely Node's job:
+//   - honour an inherited lease and FENCE against it before anything irreversible,
+//   - elect ONE unloader per lease so a batch costs one teardown, not N,
+//   - DRAIN llama-swap before unloading, because the unload route does not,
+//   - the ComfyUI lifecycle and the guarded teardown.
+//
+// No npm dependencies.
+import { writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { ensureComfy as defaultEnsureComfy } from "./comfy-lifecycle.mjs";
 
-const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1h — a real video gen can take many minutes
-
-function pidAlive(pid) {
-  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
+function metaPath(lockPath) {
+  return join(lockPath, "meta.json");
 }
 
-// isStale: reclaim a lock as soon as its recorded holder pid is confirmed DEAD — the
-// pid-liveness check is the whole point, so don't AND it behind the long TTL (that left the
-// single-slot GPU deadlocked for up to a full hour after a crash / timeout-kill). The TTL
-// stays as the fallback when the holder can't be identified (no pid) and as a pid-recycle
-// backstop for a still-"alive" but ancient lock.
-export function isStale(meta, { ttlMs = DEFAULT_TTL_MS, nowMs = Date.now() } = {}) {
-  if (!meta) return true;
-  if (typeof meta.pid === "number" && !pidAlive(meta.pid)) return true;
-  return nowMs - (meta.mtimeMs ?? 0) > ttlMs;
-}
-
-function readMeta(lockPath) {
+// readLease parses the shared lease record written by internal/gpulease. Node only ever
+// READS it — the schema is owned on the Go side.
+export function readLease(lockPath) {
   try {
-    const m = JSON.parse(readFileSync(join(lockPath, "meta.json"), "utf8"));
-    m.mtimeMs = statSync(join(lockPath, "meta.json")).mtimeMs;
-    return m;
+    return JSON.parse(readFileSync(metaPath(lockPath), "utf8"));
   } catch { return null; }
 }
 
-// acquireGpuLock: returns {release()} on success, or null if held (after waiting waitMs).
-// DEFAULT waitMs is a GENEROUS QUEUE WAIT (30min), set 2026-06-30 for the "serialize GPU workloads" goal.
-// The aim is to ORGANIZE concurrent GPU jobs into a serial queue, NOT to cancel them: a job whose slot is
-// busy WAITS its turn and then runs — it never drops its work. 30min covers queuing behind even the longest
-// job (video ~20min) with margin. A CRASHED holder never deadlocks the queue: isStale reclaims a dead-pid
-// lock immediately (and any lock past the 1h TTL). Callers with a different window (video 20min, audio 2min)
-// set GPU_LOCK_WAIT_MS, which withGpuSlot passes through and overrides this default. Sequential gen (the
-// serial hero stage runs one image at a time) never contends, so it acquires instantly.
-export async function acquireGpuLock({ lockPath, waitMs = 30 * 60 * 1000, ttlMs = DEFAULT_TTL_MS } = {}) {
-  const deadline = Date.now() + waitMs;
-  for (;;) {
-    try {
-      mkdirSync(lockPath); // atomic: throws EEXIST if held
-      writeFileSync(join(lockPath, "meta.json"), JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
-      let released = false;
-      return {
-        release() {
-          if (released) return;
-          released = true;
-          try { rmSync(lockPath, { recursive: true, force: true }); } catch {}
-        },
-      };
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
-      // Held — reclaim if stale, else wait.
-      if (isStale(readMeta(lockPath), { ttlMs })) {
-        try { rmSync(lockPath, { recursive: true, force: true }); } catch {}
-        continue; // retry the mkdir immediately
-      }
-      if (Date.now() >= deadline) return null;
-      await new Promise((r) => setTimeout(r, 1000));
-    }
+// inheritedLease: the Go holder threads its lease down. Absent env means no lease, which
+// is now an ERROR for a GPU job rather than a cue to acquire one (see withGpuSlot).
+export function inheritedLease(env = process.env) {
+  const dir = (env.GPU_LEASE_DIR || "").trim();
+  const epoch = (env.GPU_LEASE_EPOCH || "").trim();
+  if (!dir || !epoch) return null;
+  return { dir, epoch: Number(epoch), class: (env.GPU_LEASE_CLASS || "").trim() || undefined };
+}
+
+// checkInheritedLease is the FENCE. Before an irreversible action, confirm the epoch we
+// were handed is still current. A closing laptop lid is not a crash — the process
+// survives and resumes, and without this it would resume and unload models on top of
+// whoever holds the card now, which is the original incident replayed by a lid.
+export function checkInheritedLease(lease, read = readLease) {
+  if (!lease) return true;
+  const meta = read(lease.dir);
+  if (!meta) return false;
+  return Number(meta.epoch) === Number(lease.epoch);
+}
+
+// claimLeaseUnload: elect the ONE job that unloads for this lease. Exclusive creation of
+// a per-epoch marker makes the winner unambiguous even when several jobs start under one
+// lease at once. Markers are cleaned up by the Go release path.
+//
+// This is what makes the hoist real. Skipping the unload under an inherited lease while
+// nothing performed it left a leased render running with every model resident.
+export function claimLeaseUnload(lease) {
+  if (!lease || !lease.dir || !Number.isFinite(lease.epoch)) return true;
+  try {
+    writeFileSync(join(lease.dir, `unloaded.${lease.epoch}`), String(process.pid), { flag: "wx" });
+    return true;
+  } catch (e) {
+    if (e.code === "EEXIST") return false; // someone already unloaded for this lease
+    return true; // cannot tell => unload. Correctness over saving one teardown.
   }
 }
 
+// releaseLeaseUnloadMarker lets a standalone run clean up after itself. The Go release
+// path sweeps these too; this is belt and braces for a job that owns its own marker.
+export function releaseLeaseUnloadMarker(lease) {
+  if (!lease) return;
+  try { unlinkSync(join(lease.dir, `unloaded.${lease.epoch}`)); } catch {}
+}
+
 // MEMORY_STACK: the always-loaded, CPU-only mem0 models (they hold ZERO GPU VRAM).
-// freeLlamaSwap must NEVER unload these — the unload-ALL route did, needlessly tearing down
-// the load-bearing memory stack on every gen job for no VRAM benefit. Everything else on
-// llama-swap is GPU-resident + swappable, so freeing it per-model gives the render the GPU.
+// freeLlamaSwap must NEVER unload these — the unload-ALL route did, needlessly tearing
+// down the load-bearing memory stack on every gen job for no VRAM benefit.
 //
-// SOURCED FROM CONFIG/ENV, not a buried const (invariant 1): the Go harness threads the
-// config's MemoryStack as the MEMORY_STACK env (comma-separated), so a renamed/added 3rd
-// CPU member is honored instead of silently unloaded. The literal default below is the
-// fallback when the env is unset (e.g. a direct CLI run).
+// SOURCED FROM CONFIG/ENV, not a buried const: the Go harness threads the config's
+// MemoryStack as MEMORY_STACK, so a renamed/added 3rd CPU member is honored instead
+// of silently unloaded. The literal below is the fallback for a direct CLI run.
 const DEFAULT_MEMORY_STACK = ["embeddinggemma", "bge-reranker-v2-m3"];
 export function memoryStack(env = process.env.MEMORY_STACK) {
   if (env && env.trim()) {
@@ -86,19 +95,135 @@ export function memoryStack(env = process.env.MEMORY_STACK) {
   return new Set(DEFAULT_MEMORY_STACK);
 }
 
-// freeLlamaSwap: free the GPU-resident llama-swap models so their VRAM goes to a gen job,
-// while leaving the CPU memory stack warm. Per-model unload via the proven
-// `/api/models/unload/<model>` route (mirrors sttclient.Unload), NOT the unload-ALL route.
-// Best-effort — never throws (llama-swap may be down; unloading a not-loaded model is a no-op).
-export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://localhost:11436") {
+// withTimeout: every network call here needs its own deadline. Node's fetch has NO
+// default request timeout, so a socket that accepts and then stalls would hang the
+// drain — and with it the render — indefinitely, regardless of any timeoutMs we track.
+function withTimeout(ms) {
+  return AbortSignal.timeout(ms);
+}
+
+// quiesceLlamaSwap: wait for in-flight work on `ids` to finish before unloading them.
+//
+// MEASURED, not defensive: on llama-swap v242 an unload issued during a generation
+// returned in 1,265ms without draining and the in-flight request died at 4,107ms with
+// 502 Bad Gateway. The unload route does not honour in-flight work, so a caller that
+// wants to avoid killing someone's request must drain first.
+//
+// Signal: llama-server's own /slots via llama-swap's /upstream/<id>/slots, where
+// is_processing is true exactly while a slot is generating (verified against a
+// 23s/1500-token generation).
+//
+// FAIL-SAFE, NOT FAIL-OPEN-SILENT. A 404 is only "idle" when the model is genuinely
+// NOT LOADED — it is also what a loaded upstream without a /slots route returns (any
+// non-llama.cpp backend on :11436; whisper is one). Accepting that as idle reported a
+// verified drain while in-flight work was killed, which is the exact 502 this exists to
+// prevent. So a 404 is cross-checked against /running, and anything we cannot observe
+// is named in `unknown` rather than assumed quiet.
+export async function quiesceLlamaSwap(ids, {
+  api = process.env.LLAMA_SWAP_API || "http://localhost:11436",
+  timeoutMs = 60_000, pollMs = 500, graceMs = 1_500,
+  fetchImpl = fetch, nowFn = Date.now, requestTimeoutMs = 5_000,
+} = {}) {
+  const deadline = nowFn() + timeoutMs;
+  const unknown = new Set();
+  const started = nowFn();
+
+  // Which models does the server consider loaded? Used to disambiguate a 404.
+  const loaded = async () => {
+    try {
+      const r = await fetchImpl(`${api}/running`, { signal: withTimeout(requestTimeoutMs) });
+      if (!r.ok) return null;
+      const j = await r.json();
+      return new Set((j.running || []).map((m) => m.model).filter(Boolean));
+    } catch { return null; }
+  };
+
+  const busy = async (id, loadedSet) => {
+    try {
+      const r = await fetchImpl(`${api}/upstream/${id}/slots`, { signal: withTimeout(requestTimeoutMs) });
+      if (r.status === 404) {
+        // Not loaded => truly nothing to drain. Loaded but no /slots route => we are
+        // blind to it, and must say so instead of claiming a drain.
+        if (loadedSet && loadedSet.has(id)) { unknown.add(id); }
+        else if (!loadedSet) { unknown.add(id); } // could not check either
+        return false;
+      }
+      if (!r.ok) { unknown.add(id); return false; }
+      const j = await r.json();
+      const slots = Array.isArray(j) ? j : [j];
+      return slots.some((s) => s && s.is_processing === true);
+    } catch { unknown.add(id); return false; }
+  };
+
+  // An unobservable tier reads as "not busy", which would otherwise end the drain on
+  // the first transient blip. Retry a BOUNDED number of extra rounds so a momentary
+  // 502 (a model swapping, say) resolves, while a permanently unobservable tier — one
+  // with no /slots route at all — still costs only a few polls instead of the whole
+  // timeout before every render.
+  const unknownRetries = 2;
+  let unknownRounds = 0;
+  for (;;) {
+    unknown.clear(); // judge each round on its own evidence, not a stale transient
+    const loadedSet = await loaded();
+    const flags = await Promise.all(ids.map((id) => busy(id, loadedSet)));
+    if (!flags.some(Boolean)) {
+      if (unknown.size === 0) break;               // verified idle
+      if (++unknownRounds > unknownRetries) break; // accept: genuinely unobservable
+    } else {
+      unknownRounds = 0;
+    }
+    if (nowFn() >= deadline) {
+      return { drained: false, waitedMs: nowFn() - started, unknown: [...unknown] };
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  if (unknown.size > 0) {
+    // We could not observe some tiers. Give in-flight work a brief grace rather than
+    // claiming a drain we did not verify.
+    await new Promise((r) => setTimeout(r, graceMs));
+  }
+  return { drained: unknown.size === 0, waitedMs: nowFn() - started, unknown: [...unknown] };
+}
+
+// freeLlamaSwap: free the GPU-resident llama-swap models so their VRAM goes to a gen
+// job, while leaving the CPU memory stack warm. DRAINS FIRST (see quiesceLlamaSwap).
+//
+// Called ONCE PER LEASE, not per job — withGpuSlot enforces that via claimLeaseUnload.
+// Errors are reported through `log` rather than swallowed: silently unloading nothing
+// leaves the render to OOM against a full card.
+export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://localhost:11436", opts = {}) {
+  const {
+    quiesce = quiesceLlamaSwap, drainTimeoutMs = 60_000, requestTimeoutMs = 10_000,
+    log = (m) => console.error(m),
+  } = opts;
   const keep = memoryStack();
+  let ids = [];
   try {
-    const r = await fetch(api + "/v1/models");
+    const r = await fetch(api + "/v1/models", { signal: withTimeout(requestTimeoutMs) });
+    if (!r.ok) { log(`freeLlamaSwap: /v1/models returned ${r.status}; NOT unloading (the render keeps a shared card)`); return; }
     const j = await r.json();
-    const ids = (j.data || []).map((m) => m.id).filter((id) => id && !keep.has(id));
-    await Promise.all(ids.map((id) =>
-      fetch(api + "/api/models/unload/" + id, { method: "POST" }).catch(() => {})));
-  } catch {}
+    ids = (j.data || []).map((m) => m.id).filter((id) => id && !keep.has(id));
+  } catch (e) {
+    log(`freeLlamaSwap: could not list models (${e && e.message}); NOT unloading (the render keeps a shared card)`);
+    return;
+  }
+  if (ids.length === 0) return;
+
+  try {
+    const res = await quiesce(ids, { api, timeoutMs: drainTimeoutMs });
+    if (!res.drained) {
+      // Loud, not silent: proceeding here may kill someone's in-flight request. The
+      // alternative — blocking the render forever behind a stuck tier — is worse, so
+      // we proceed and say so.
+      log(`freeLlamaSwap: proceeding without a verified drain after ${res.waitedMs}ms` +
+          (res.unknown.length ? ` (could not read /slots for: ${res.unknown.join(",")})` : ""));
+    }
+  } catch (e) {
+    log(`freeLlamaSwap: drain failed (${e && e.message}); proceeding to unload`);
+  }
+  await Promise.all(ids.map((id) =>
+    fetch(api + "/api/models/unload/" + id, { method: "POST", signal: withTimeout(requestTimeoutMs) })
+      .catch((e) => log(`freeLlamaSwap: unload ${id} failed: ${e && e.message}`))));
 }
 
 // freeComfy: tell ComfyUI to drop loaded models + free VRAM after a job (zero-warm).
@@ -107,34 +232,23 @@ export async function freeComfy(api = process.env.COMFY_API || "http://127.0.0.1
     await fetch(api + "/free", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ unload_models: true, free_memory: true }),
+      signal: withTimeout(10_000),
     });
   } catch {}
 }
 
-// defaultLockPath: the single shared GPU lock all gen runners contend on.
-export function defaultLockPath() {
-  return process.env.GPU_LOCK || join(tmpdir(), "local-offload-gpu.lock");
-}
-
-// withGpuSlot centralizes the single-slot GPU lifecycle every gen runner shared (lifted
-// verbatim from comfy-generate.mjs, the only one with the full guarded teardown + signal
-// handlers + double-run guard). It:
-//   1. acquires the cross-process GPU lock (honoring noLock); a busy slot THROWS GPU-busy
-//      (the runner exits non-zero → the Go wrapper maps it to a clean defer — invariant 4),
-//   2. freeLlamaSwap() so the render gets the whole 8GB (CPU mem-stack stays warm — inv. 1),
-//   3. optionally ensureComfy() (skipped when comfyManaged:false — the TTS path);
-//      warm:true is the BATCH-SESSION mode: ComfyUI keeps its model cache during fn
-//      (the checkpoint loads once for N renders) and step 5's teardown restores
-//      zero-warm at the batch boundary,
-//   4. awaits fn(),
-//   5. runs ONE guarded teardown (zero-always-warm — invariant 3): freeComfy() + kill a
-//      ComfyUI we spawned (unless keepComfy) + lock.release(). The teardown is guarded so
-//      neither the finally nor a SIGINT/SIGTERM/SIGBREAK can double-run it; a graceful
-//      signal releases the lock+VRAM instead of leaking them (a forced SIGKILL is still
-//      backstopped by the Go wrapper's process-tree kill + defer /free).
-// waitMs comes from GPU_LOCK_WAIT_MS (the Go harness threads the per-task value so a queued
-// TTS isn't starved by a long video job); unset → acquireGpuLock's default. Deps
-// (acquire/freeLlamaSwap/ensureComfy/freeComfy) are injectable for tests only.
+// withGpuSlot centralizes the single-slot GPU lifecycle every gen runner shares:
+//   1. REQUIRE a lease (inherited from the Go caller) unless noLock — this file no
+//      longer acquires, so a GPU job without one is a wiring error, not a cue to grab
+//      the card,
+//   2. FENCE against it, then unload llama-swap ONCE PER LEASE and only for a `media`
+//      lease — a `text` lease is a benchmark's reservation and unloading under it
+//      destroys exactly the run it was taken to protect,
+//   3. optionally ensureComfy(); warm:true is the BATCH-SESSION mode,
+//   4. await fn(),
+//   5. run ONE guarded teardown: freeComfy() + kill a ComfyUI we spawned.
+// Deps (freeLlamaSwap/ensureComfy/freeComfy/checkLease/claimUnload) are injectable for
+// tests only.
 export async function withGpuSlot(opts, fn) {
   const {
     noLock = false,
@@ -142,17 +256,24 @@ export async function withGpuSlot(opts, fn) {
     comfyManaged = true,
     warm = false,
     reserveVram,
-    lockPath = defaultLockPath(),
-    acquire = acquireGpuLock,
     freeLlamaSwap: freeLS = freeLlamaSwap,
     ensureComfy = defaultEnsureComfy,
     freeComfy: freeCfy = freeComfy,
+    lease = inheritedLease(),
+    claimUnload = claimLeaseUnload,
+    checkLease = checkInheritedLease,
   } = opts || {};
 
-  const lock = noLock
-    ? { release() {} }
-    : await acquire({ lockPath, ...(waitMsFromEnv() != null ? { waitMs: waitMsFromEnv() } : {}) });
-  if (!lock) throw new Error("GPU is busy (another gen job holds the lock); try again later or --no-lock");
+  // No lease, and not explicitly opted out => refuse. Acquiring here is exactly the
+  // duplicate implementation that was deleted; silently rendering unarbitrated is the
+  // behaviour that tore the text tier down in the first place.
+  if (!noLock && !lease) {
+    throw new Error(
+      "GPU lease missing: this runner no longer acquires the GPU itself. " +
+      "Run it under the harness (which takes the lease and threads GPU_LEASE_DIR/EPOCH/CLASS), " +
+      "or for a standalone run wrap it: `local-offload gpu reserve --class media -- node <script> ...`. " +
+      "Use --no-lock only when you know nothing else can touch the GPU.");
+  }
 
   let comfyChild = null;
   let cleaning = false;
@@ -160,30 +281,35 @@ export async function withGpuSlot(opts, fn) {
     if (cleaning) return; cleaning = true;
     if (comfyManaged) { try { await freeCfy(); } catch {} }
     if (comfyChild && !keepComfy) { try { comfyChild.kill(); } catch {} }
-    try { lock.release(); } catch {}
   };
   const onSig = async () => { await cleanup(); process.exit(130); };
   for (const sig of ["SIGINT", "SIGTERM", "SIGBREAK"]) process.on(sig, onSig);
   try {
-    await freeLS();                       // give the render the whole 8GB (CPU mem-stack stays warm)
+    // THE FENCE COMES FIRST, AND IT IS UNCONDITIONAL. It used to sit inside the
+    // unload-election branch, so it was skipped for every job that lost the election
+    // (jobs 2..N of a batch) and for every `text` lease — those jobs went straight to
+    // submitting a graph while fenced out, i.e. rendering on somebody else's card.
+    // Submitting a graph is irreversible GPU work, so it needs the same guard the
+    // unload does.
+    if (lease && !checkLease(lease)) {
+      throw new Error(
+        `GPU lease epoch ${lease.epoch} is no longer current — this process was fenced out ` +
+        `(the card was handed to another holder while we were suspended). Refusing to touch the GPU.`);
+    }
+    // Then the class gate, then the once-per-lease election.
+    const mayUnload = !lease || lease.class !== "text";
+    if (mayUnload && (!lease || claimUnload(lease))) {
+      await freeLS();
+    }
     if (comfyManaged) {
       comfyChild = await ensureComfy({
         ...(reserveVram != null ? { reserveVram } : {}),
         ...(warm ? { warm: true } : {}),
       });
     }
-    return await fn({ comfyChild });
+    return await fn({ comfyChild, lease });
   } finally {
     await cleanup();
     for (const sig of ["SIGINT", "SIGTERM", "SIGBREAK"]) process.removeListener(sig, onSig);
   }
-}
-
-// waitMsFromEnv: per-task GPU-lock wait window threaded by the Go harness
-// (GPU_LOCK_WAIT_MS). null when unset (acquireGpuLock's own default applies).
-function waitMsFromEnv() {
-  const v = process.env.GPU_LOCK_WAIT_MS;
-  if (v == null || v === "") return null;
-  const n = Number(v);
-  return Number.isFinite(n) && n >= 0 ? n : null;
 }

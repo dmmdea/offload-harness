@@ -72,11 +72,33 @@ func TestDefaultGenerationFields(t *testing.T) {
 	if c.AudioGenTimeoutSec <= 0 {
 		t.Errorf("AudioGenTimeoutSec = %d, want > 0", c.AudioGenTimeoutSec)
 	}
-	if c.VideoGenWaitMs <= 0 {
-		t.Errorf("VideoGenWaitMs = %d, want > 0", c.VideoGenWaitMs)
+
+	// One wait ceiling for every GPU task. The per-task videogen_wait_ms /
+	// audiogen_wait_ms are gone: at 90s the distinction bought nothing, and every
+	// shipped config carries videogen_wait_ms=1200000, so honouring it as an override
+	// would have restored the 20-minute wait on upgrade.
+	if c.GPUWaitMs <= 0 {
+		t.Errorf("GPUWaitMs = %d, want > 0", c.GPUWaitMs)
 	}
-	if c.AudioGenWaitMs <= 0 {
-		t.Errorf("AudioGenWaitMs = %d, want > 0", c.AudioGenWaitMs)
+}
+
+// Every install shipped with videogen_wait_ms=1200000 / audiogen_wait_ms=120000 in its
+// config.json, so those keys are still sitting on disk everywhere. They must LOAD
+// CLEANLY and change nothing — honouring them would silently restore the 20-minute
+// video wait on upgrade, which is the behaviour the bounded queue replaced.
+func TestRetiredPerTaskWaitKeysAreIgnored(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "cfg.json")
+	js := `{"videogen_wait_ms":1200000,"audiogen_wait_ms":120000}`
+	if err := os.WriteFile(p, []byte(js), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("a config carrying the retired keys must still load: %v", err)
+	}
+	if c.GPUWaitMs != Default().GPUWaitMs {
+		t.Errorf("GPUWaitMs = %d, want the default %d — a stale per-task key changed the ceiling",
+			c.GPUWaitMs, Default().GPUWaitMs)
 	}
 }
 
@@ -279,7 +301,7 @@ func pathFieldJSONNames(t *testing.T) []string {
 		"imagegen_script", "node_path", "comfy_dir",
 		"sdcpp_script", "sdcpp_bin", "sdcpp_model", "sdcpp_vae", "sdcpp_clip_l", "sdcpp_clip_g", "sdcpp_t5xxl", "sdcpp_llm",
 		"inpaint_script",
-		"videogen_script", "run_graph_script", "voicegen_script", "musicgen_script", "gpu_lock_path",
+		"videogen_script", "run_graph_script", "voicegen_script", "musicgen_script", "gpu_lock_path", "state_dir",
 		"voicegen_ref", "voicegen_ft_model", "voicegen_ft_base_dir", "voicegen_ft_ref",
 		"edit_python", "gimp_console_path",
 		"cache_path", "ledger_path",

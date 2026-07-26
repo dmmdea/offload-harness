@@ -4,7 +4,7 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
-## [0.22.27] - 2026-07-24
+## [0.23.1] - 2026-07-26
 
 ### Added — OmniRoute harvest Phase D: `compaction-eval kvbench` (KV reuse + real-token measurement, ADR 0017)
 - **Server accounting is now visible to the harness**: `Completion.Serve` (`*agent.ServeStats`)
@@ -95,6 +95,130 @@ Versioning: [SemVer](https://semver.org/).
   one-line edit at 98% of the prompt costing as much as one at 4%. Since every lossy rung edits from
   `protectedEnd` forward, a compaction fire always pays a full re-prefill. Compaction is justified by
   the size win and by requests completing at all — not by cache friendliness.
+
+## [0.23.0] - 2026-07-26
+
+### Added
+- **Machine-wide fenced GPU lease (`internal/gpulease`) + `local-offload gpu` verb.** One
+  exclusive card is shared by llama-swap and ComfyUI, but only the Node render runners ever
+  took a lock — text work took nothing. A media job arriving through another ingress therefore
+  called `freeLlamaSwap()` and unloaded every GPU-resident model out from under an in-flight
+  benchmark; the server log holds **3,356 unloads, 330 of them the text workhorse**. The lease
+  is taken by every consumer regardless of ingress: `gpu reserve --class text` lets a bench hold
+  the card, and a render then WAITS instead of tearing the tier down.
+  - **A busy card queues the job for a bounded window, then defers with the holder's detail.**
+    The slot exists to serialize GPU work, not to cancel it — a render arriving mid-render should
+    run afterwards, and dropping it would let a `gpu reserve --class text --for 45m` silently
+    discard 45 minutes of media requests. The bound matters too: the caller is usually one tool
+    call, so the old 20-minute video wait was indistinguishable from a hang. New `gpu_wait_ms`
+    (**90 s**, matching `vision_gpu_wait_sec`) is the single ceiling for every GPU task. Only
+    contention is waited out: an unwritable or cloud-synced lease location still returns
+    immediately. A busy card at the `generate-image --batch` CLI is now a clean **defer**
+    (exit 0, `err_class: gpu_busy`) rather than a hard failure.
+  - Running the harness itself under `gpu reserve --class media -- local-offload …` **inherits**
+    the ambient lease instead of acquiring a second one and queueing behind its own parent. An
+    inherited lease that is no longer current refuses the job rather than quietly taking a fresh
+    one, so a lost reservation is visible. Jobs sharing an inherited lease are serialized by an
+    **in-process slot** — they have no file claim to contend on, so without it
+    `gpu reserve --class media -- local-offload fleet-serve` (which runs the pipeline inline in a
+    `net/http` handler goroutine) put two renders on the card at once: measured 256 ms of overlap
+    on 250 ms jobs. A waiter there blocks on a channel rather than polling.
+  - **A `text` reservation that outlasts your wait window is answered immediately** instead of
+    after 90 s of pointless polling — `--for 45m` is a declared duration, so there is nothing to
+    wait for. A `media` holder is not treated this way: its expiry is a timeout ceiling and a
+    25-minute video budget routinely finishes in three.
+  - **Nothing ticks at idle.** No daemon, scheduled task or watchdog is added; every timer is
+    scoped to work in flight (a 15 s heartbeat while a lease is held, a 1 s probe while queued
+    behind another process). A waiter no longer issues a fencing token per probe, which had it
+    taking a machine-wide lock and doing four file operations a second for claims that could not
+    succeed. `gpu reserve --detach` is the only continuous poller and exits on its own.
+  - `local-offload gpu status|reserve|release`. The **wrapper** form
+    (`gpu reserve ... -- <command>`) is preferred — the lease lives exactly as long as the
+    command and cannot be leaked by forgetting to release. `--detach` spawns a hidden holder for
+    interactive use and is the weaker form by design.
+  - **Machine-wide**, not per-user: the old default was `join(tmpdir(), ...)`, which on Windows
+    is per-user, so a process in another security context silently took a *different* lock and
+    mutual exclusion evaporated with no error. An unwritable or **cloud-synced** root is now
+    refused at startup instead of silently falling back — a sync client replicating a lock file
+    between machines would hand one GPU to two hosts. The refusal is segment-aware, so
+    `dropbox-exporter` is fine while `.../Dropbox/...` is not.
+  - **Fenced.** A closing laptop lid is not a crash: the process resumes and would act on top of
+    whoever holds the card now. Every acquisition bumps a monotonic epoch (kept outside the lease
+    dir so reclaim cannot reset it) and `Check()` must precede every irreversible action —
+    **unconditionally**, including for jobs that do not unload (batch jobs 2..N and `text`
+    leases), because submitting a graph is irreversible GPU work too.
+  - **Windows delete-pending semantics are handled on both sides of the claim.** Removing a file
+    whose handle is still open marks it delete-PENDING, and an `O_EXCL` create in that window
+    fails with `ACCESS_DENIED` rather than "already exists" — which read as a hard fault. The
+    window is exactly the moment a holder releases, i.e. exactly when every waiter is polling,
+    so the acquirer most likely to hit it was the one that should have won: measured, 1 in 48
+    acquire/release cycles under six workers failed with *"could not claim the lease: Access is
+    denied"*. Symmetrically, `os.Remove` on the claim fails while any reader has it open, and a
+    failed release LEAKS the lease until both halves of the reclaim rule fire. Both retry.
+  - **Epoch issuance is serialized, not merely written atomically.** tmp+rename makes each write
+    indivisible and does nothing about two acquirers that both read *n* and both write *n+1* —
+    measured, two concurrent acquirers were handed the same token. Since the token is threaded to
+    children as `GPU_LEASE_EPOCH`, a duplicate lets a straggler pass `Check()` against a later
+    lease and delete its claim on release.
+  - **Pid-recycle safe** — the holder's process start time is recorded and compared, because
+    pid-liveness alone reads a recycled pid as a live holder forever.
+  - Reclaim is a deliberate conjunction: *(holder provably gone)* OR *(heartbeat stale AND the
+    declared window expired)*. Each half alone is wrong — a bare heartbeat timeout expires a
+    descheduled benchmark under exactly the load it exists to protect, and pid-liveness cannot
+    see a `--detach` proxy outliving the run behind it.
+  - `Release()` is epoch-guarded: a fenced-out straggler can never delete the *current* holder's
+    lease. Leaking one is recoverable; silently handing the GPU to a third party is not.
+- New `state_dir` config field (machine-wide state root; default `%ProgramData%\local-offload`
+  on Windows, `/var/lib/local-offload` elsewhere).
+
+### Removed
+- **`videogen_wait_ms` and `audiogen_wait_ms` are retired**, replaced by the single
+  `gpu_wait_ms`. They existed so a cheap queued TTS was not starved behind a 20-minute video;
+  at a 90 s ceiling that distinction buys nothing. **This matters on upgrade:** the installer
+  template shipped `videogen_wait_ms: 1200000` to every machine, so keeping them as per-task
+  overrides would have silently restored the exact 20-minute wait the bounded queue replaces.
+  A config still carrying them loads cleanly and prints a note naming the replacement — no
+  action needed, and no "unknown key — typo?" warning for a key your own installer wrote.
+
+### Changed
+- **`freeLlamaSwap` is hoisted from per-JOB to per-LEASE.** It ran inside `withGpuSlot`, i.e.
+  once per job — that is the arithmetic behind 3,356 unloads. Under an inherited lease
+  (`GPU_LEASE_DIR` / `GPU_LEASE_EPOCH` / `GPU_LEASE_CLASS`) `withGpuSlot` skips the acquire (it
+  would contend with its own holder) and elects **exactly one** job per lease to perform the
+  unload, via an O_EXCL per-epoch marker inside the lease. N renders under one lease therefore
+  cost ONE teardown. Note the difference from merely skipping: an earlier revision skipped the
+  unload under an inherited lease while nothing performed it, so a leased render ran with every
+  model still resident.
+- **BREAKING for direct runner invocation: `render/*.mjs` no longer acquires the GPU.**
+  `internal/gpulease` is the single implementation; the harness takes the lease and the runner
+  inherits it. A GPU job started with no lease now refuses and names the fix:
+  `local-offload gpu reserve --class media -- node render/comfy-generate.mjs ...`
+  (`--no-lock` remains the escape hatch). This deleted `acquireGpuLock`, `isStale`, `bumpEpoch`,
+  `machineStateRoot`, `ensureStateRoot` and `defaultLockPath` — roughly a third of that file.
+  Two implementations of one concurrency rule produced a new divergence in every review round;
+  the class is gone by construction rather than by patch. See ADR 0018 §7.
+- **The default lock path moved** from `<os-tmpdir>/local-offload-gpu.lock` to
+  `<state_dir>/gpu/lease`, and `gpu_lock_path`/`GPU_LOCK` are now honoured by every consumer
+  through one resolver. Previously some honoured them and some did not, so setting that field put
+  the reservation verb and the render path on different directories where they never contended.
+- **Unloading now drains first.** Measured on llama-swap v242: an unload issued during a
+  generation returned in **1,265 ms without draining** and the in-flight request died at
+  **4,107 ms with `502 Bad Gateway`**. The unload route does not honour in-flight work, so the
+  caller must. `quiesceLlamaSwap` polls llama-server's `/slots` via `/upstream/<id>/slots`
+  (`is_processing` verified true throughout a 23 s / 1500-token generation). It is fail-safe,
+  not fail-open-silent: an unreadable `/slots` reports `drained:false` and names the tiers it
+  could not observe, so the caller logs that it proceeded without a verified drain rather than
+  pretending. A stuck tier times out instead of deadlocking the render queue.
+- `render/gpu-lock.mjs` now shares the lease **schema** with `internal/gpulease`, not just the
+  path. Had it kept its flat `{pid,startedAt}` shape, the Go reader would find no holder pid,
+  treat the lease as ownerless and reclaim one actively held.
+- **`GPU_LOCK_WAIT_MS` is gone.** Queueing moved to Go alongside the acquisition, so the harness
+  can refuse a job before spawning a process that could only have waited and timed out. No render
+  runner ever read the variable.
+- **Every GPU task takes the lease at its Go call site** — image (ComfyUI and sdcpp), inpaint,
+  image batch, run-graph, video and audio (voice and music). Coverage is asserted by a table over
+  the GPU tasks plus a guard that fails when a new `withGpuSlot` runner appears with no case,
+  because wiring call sites by hand is how two of them were missed.
 
 ## [0.22.26] - 2026-07-24
 

@@ -139,14 +139,27 @@ $macro = Get-CommonMacro $r.yaml
 if ($macro -match '--ctx-size 65536')                           { Ok 'blackwell-32 ctx=65536' } else { Bad "blackwell-32 ctx (got: $macro)" }
 if ($macro -match '--cache-type-k q8_0')                        { Ok 'blackwell-32 KV=q8_0' } else { Bad 'blackwell-32 KV q8_0' }
 
-Write-Host "== ampere-6 - E2B, ctx 16384, NO 26B =="
-$r = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-6' -RamTier 'min' -BigRam $false
-$macro = Get-CommonMacro $r.yaml
-if ($macro -match '--ctx-size 16384')                          { Ok 'ampere-6 ctx=16384' } else { Bad "ampere-6 ctx (got: $macro)" }
-if ($r.yaml -match '(?m)^\s{2}gemma4-e2b:')                    { Ok 'ampere-6 has E2B tier' } else { Bad 'ampere-6 E2B present' }
-if ($r.yaml -notmatch 'gemma4-26b-a4b')                        { Ok 'ampere-6 has NO 26B tier' } else { Bad 'ampere-6 26B absent' }
-if ($r.verdict -and $r.verdict.resident_tier -ne 'gemma4-26b-a4b') { Ok 'ampere-6 resident is not 26B' } else { }  # informational
-
+# ampere-6 was measured 2026-07-26 on real 3050 6GB hardware (see
+# docs/specs/2026-07-26-ampere-6-tier-design.md): ctx 16384->32768 and resident
+# E2B->E4B, both pure GPU-side wins.
+#
+# The 26B stays DROPPED on EVERY ram tier, and that is deliberate: boxes in this
+# class are servers whose CPU and RAM belong to their services, so inference is
+# confined to the GPU and no MoE/CPU-offload tier is allowed. It was measured to
+# RUN here, so the temptation to enable it is real — these assertions exist
+# precisely to fail if someone does. Both bands are asserted so a future RAM
+# upgrade (low -> mid) cannot silently re-introduce it.
+foreach ($band in @('min','low','mid','high')) {
+  Write-Host "== ampere-6 / ram=$band - ctx 32768, NO 26B (GPU-only by design) =="
+  $r = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-6' -RamTier $band -BigRam $false
+  $macro = Get-CommonMacro $r.yaml
+  if ($macro -match '--ctx-size 32768')                        { Ok "ampere-6/$band ctx=32768" } else { Bad "ampere-6/$band ctx (got: $macro)" }
+  if ($r.yaml -match '(?m)^\s{2}gemma4-e2b:')                  { Ok "ampere-6/$band has E2B tier" } else { Bad "ampere-6/$band E2B present" }
+  if ($r.yaml -notmatch 'gemma4-26b-a4b')                      { Ok "ampere-6/$band has NO 26B tier" } else { Bad "ampere-6/$band 26B LEAKED IN (CPU/RAM is reserved for services)" }
+  if ($r.yaml -notmatch '(?m)^\s+cmd:.*--n?-?cpu-moe')         { Ok "ampere-6/$band renders no CPU-offload flag" } else { Bad "ampere-6/$band emitted a cpu-moe flag" }
+  if ($r.verdict -and $r.verdict.moe_mode -eq 'drop')          { Ok "ampere-6/$band moe_mode=drop" } else { Bad "ampere-6/$band moe_mode (got: $($r.verdict.moe_mode))" }
+  if ($r.yaml -notmatch '__MOE_26B__')                         { Ok "ampere-6/${band}: no unsubstituted MoE token" } else { Bad "ampere-6/$band left __MOE_26B__" }
+}
 Write-Host "== amd-gcn - 8192 / f16 / flash-attn off (vulkan) =="
 $r = Invoke-Render -Backend 'vulkan' -ProfileId 'amd-gcn' -RamTier 'low' -BigRam $false
 $macro = Get-CommonMacro $r.yaml
