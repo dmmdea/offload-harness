@@ -360,5 +360,61 @@ func offloadTools(offload OffloadFunc) []Tool {
 				}
 				return in.Text, map[string]any{"schema": in.Schema}, nil
 			}),
+
+		// --- READ-ONLY SENSES (Stage B) -------------------------------------
+		// The loop could reach 4 of the harness's 18 task types: it could not see,
+		// listen or read a page, even though the same binary does all three. These
+		// three are the read-only half — they consume a file the workspace already
+		// has and cost one model swap at most. GENERATION tools (image/video/audio)
+		// are deliberately NOT here: on a single-GPU box a generation job holds a
+		// machine-wide lease entitled to unload llama-swap models, INCLUDING the
+		// planner running this very loop, and no timeout fixes a tool that evicts
+		// its own planner.
+		//
+		// `image`/`video`/`audio` are lifted onto core.Request by the offload
+		// closure, and a missing or unreadable file DEFERS there rather than
+		// returning a text answer about a file nobody opened.
+		mk("offload_vqa", "vqa",
+			"Ask a question about an IMAGE on a free local vision model, without the image entering the agent's context. path must be a real image file. Returns {answer} or a defer (e.g. no vision model configured, unreadable file).",
+			`{"type":"object","properties":{"path":{"type":"string","description":"path to the image file to look at"},"question":{"type":"string","description":"what to ask about the image"}},"required":["path","question"]}`,
+			func(a json.RawMessage) (string, map[string]any, error) {
+				var in struct {
+					Path     string `json:"path"`
+					Question string `json:"question"`
+				}
+				if err := json.Unmarshal(a, &in); err != nil {
+					return "", nil, err
+				}
+				return in.Question, map[string]any{"image": in.Path, "question": in.Question}, nil
+			}),
+		mk("offload_ocr", "ocr",
+			"Transcribe the text in an IMAGE on a free local vision model, without the image entering the agent's context. path must be a real image file. Returns {text} or a defer.",
+			`{"type":"object","properties":{"path":{"type":"string","description":"path to the image file to transcribe"}},"required":["path"]}`,
+			func(a json.RawMessage) (string, map[string]any, error) {
+				var in struct {
+					Path string `json:"path"`
+				}
+				if err := json.Unmarshal(a, &in); err != nil {
+					return "", nil, err
+				}
+				return "", map[string]any{"image": in.Path}, nil
+			}),
+		mk("offload_transcribe", "transcribe",
+			"Transcribe an AUDIO file on a free local speech model, without the audio entering the agent's context. path must be a real audio file. Returns the transcript or a defer.",
+			`{"type":"object","properties":{"path":{"type":"string","description":"path to the audio file to transcribe"},"language":{"type":"string","description":"optional ISO language hint, e.g. \"en\""}},"required":["path"]}`,
+			func(a json.RawMessage) (string, map[string]any, error) {
+				var in struct {
+					Path     string `json:"path"`
+					Language string `json:"language"`
+				}
+				if err := json.Unmarshal(a, &in); err != nil {
+					return "", nil, err
+				}
+				p := map[string]any{"audio": in.Path}
+				if in.Language != "" {
+					p["language"] = in.Language
+				}
+				return "", p, nil
+			}),
 	}
 }
