@@ -8,7 +8,8 @@ takes it. It exists so a text measurement and a media generation can no longer d
 other on a single shared card.
 
 - **CLI:** `local-offload gpu status|reserve|release`
-- **State:** `<state_dir>/gpu/{lease/meta.json, epoch}` — default `%ProgramData%\local-offload`
+- **State:** `<state_dir>/gpu/{lease/meta.json, epoch}` — default `%ProgramData%\local-offload` on
+  Windows, `/var/lib/local-offload` on Linux (**see the one-time Linux setup below**)
 - **Decision record:** [ADR 0018](../architecture/decisions/0018-machine-wide-fenced-gpu-lease.md)
 
 ## Source map
@@ -53,6 +54,26 @@ local-offload gpu release --epoch <N>
 `gpu status [--json]` reports the holder, its class, age, reason and declared expiry — and says
 **"free (unreserved)"** explicitly, because an unreserved card is exactly when work is exposed;
 that should be visible, not inferred from silence.
+
+## One-time Linux setup (required)
+
+`%ProgramData%` already exists and is writable on Windows. **`/var/lib/local-offload` does not exist
+on Linux and an unprivileged service user cannot create it** — and `setup/install.ps1` is
+Windows-only, so nothing creates it for you. Until it exists the lease refuses to start and **every
+media job defers**, which is the refusal working correctly and is easy to misread as a broken route.
+Measured on a Linux services box the first time it was upgraded past 0.23.0.
+
+```
+sudo mkdir -p /var/lib/local-offload && sudo chmod 0777 /var/lib/local-offload
+```
+
+World-writable is deliberate: the lease is machine-wide so that a service running as one user and a
+render running as another contend on the SAME lease. It is deliberately **not** sticky — reclaiming
+a dead holder's lease means removing another user's file, which the sticky bit would forbid.
+
+Alternatively set `state_dir` to a local, unsynced path the user already owns. That works, but it
+scopes the lease to whatever can reach that path — if two security contexts do not share it, they do
+not contend, which is the failure the machine-wide default exists to prevent.
 
 ## What happens when the card is busy
 

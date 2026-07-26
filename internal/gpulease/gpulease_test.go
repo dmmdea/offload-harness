@@ -454,6 +454,37 @@ func TestOpenRefusesUnwritableRootInsteadOfFallingBack(t *testing.T) {
 	}
 }
 
+// A refusal must NAME THE REMEDY. Measured in the field: a Linux services box
+// upgraded past 0.23.0 and every media job began deferring, because the
+// machine-wide default (/var/lib/local-offload) does not exist and an
+// unprivileged service user cannot create it. The installer is Windows-only, so
+// nothing creates that root on Linux. Refusing is correct; refusing with only
+// "permission denied" leaves the operator unable to tell which of two very
+// different fixes applies.
+func TestUnusableLeaseDirErrorNamesBothRemedies(t *testing.T) {
+	if os.Getenv("CI_SKIP_PERM") != "" {
+		t.Skip("permission semantics not exercised here")
+	}
+	root := t.TempDir()
+	// Make <root>/gpu a FILE so creating <root>/gpu/lease beneath it must fail.
+	if err := os.WriteFile(filepath.Join(root, "gpu"), []byte("not a dir"), 0o666); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	_, err := Open(root)
+	if err == nil {
+		t.Fatal("Open succeeded on an unusable lease dir")
+	}
+	msg := err.Error()
+	for _, want := range []string{"machine-wide", "chmod 0777", "state_dir"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal does not mention %q — an operator cannot act on it:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "sticky") != true {
+		t.Errorf("refusal should warn that the dir must NOT be sticky (reclaim removes another user's file):\n%s", msg)
+	}
+}
+
 func TestUnknownClassRefused(t *testing.T) {
 	m, _ := newTestManager(t)
 	if _, err := m.TryAcquire(Class("gpu-ish"), Options{}); err == nil {
