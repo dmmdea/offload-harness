@@ -261,8 +261,52 @@ func (l *Loop) WithProfile(p Profile) *Loop {
 	if p.System != "" {
 		l.system = p.System
 	}
-	l.exemplars = p.Exemplars
+	// EXEMPLARS ARE NARROWED TOO, not just tools. A profile's Tools list is a
+	// WISH; the loop may not have registered all of them (the MCP front door is
+	// read-only, so `build` keeps its reading tools and loses run_shell). Copying
+	// the exemplars wholesale would then teach the planner a worked example of a
+	// call it cannot make — the same defect as an exemplar whose ARGS are wrong,
+	// and exemplars sit in the never-compacted preamble, so it is taught for the
+	// whole run.
+	l.exemplars = exemplarsFor(p.Exemplars, l.tools)
 	return l
+}
+
+// exemplarsFor drops any exemplar tool-call cycle that references a tool the
+// loop did not register, keeping the surrounding conversation intact.
+//
+// It drops the assistant message AND its following tool-role results together:
+// removing only one half would leave a dangling tool_calls or an orphan result,
+// which strict --jinja templates reject outright (the invariant
+// TestProfileExemplarsAreCompleteToolCycles exists for exactly that reason).
+func exemplarsFor(ex []Msg, have map[string]Tool) []Msg {
+	if len(ex) == 0 {
+		return ex
+	}
+	out := make([]Msg, 0, len(ex))
+	for i := 0; i < len(ex); i++ {
+		m := ex[i]
+		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
+			out = append(out, m)
+			continue
+		}
+		ok := true
+		for _, c := range m.ToolCalls {
+			if _, present := have[c.Name]; !present {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			out = append(out, m)
+			continue
+		}
+		// Skip this assistant turn and every tool result that answers it.
+		for i+1 < len(ex) && ex[i+1].Role == "tool" {
+			i++
+		}
+	}
+	return out
 }
 
 // WithMaxSameTool overrides the per-run same-tool call cap (see
@@ -549,7 +593,11 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// Learn from the response: estimateTokens(msgs) is what we thought the
 		// payload cost, comp.Serve.UsagePromptTokens is what it actually cost.
 		// Observed BEFORE appending the reply, so both refer to the same bytes.
-		if comp.Serve != nil {
+		// GATED, like every other tokenCal site (see :115 and :354). Observing
+		// unconditionally appends to a shared slice on every turn, and --serve
+		// shares ONE *Loop across concurrent HTTP handlers — so an off-by-default
+		// feature was still mutating shared state from several goroutines at once.
+		if l.tokenCalOn && comp.Serve != nil {
 			l.tokenCal.Observe(estimateTokens(msgs), comp.Serve.UsagePromptTokens)
 		}
 		msgs = append(msgs, comp.Msg)
