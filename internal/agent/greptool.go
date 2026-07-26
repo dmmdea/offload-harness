@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"regexp/syntax"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,9 +61,11 @@ func SearchTool(root string) (Tool, error) {
 			Description: "Search the workspace for lines matching a regular expression (like ripgrep/grep). " +
 				"Use this to FIND code by matching lines instead of reading whole files. " +
 				"Output is grouped per file with line numbers and is hard-capped at 100 matches. " +
-				"pattern is a regular expression (required). path optionally restricts to a subdirectory (relative to the root). " +
+				"pattern is a regular expression (required) and is CASE-SENSITIVE: prefix it with \"(?i)\" " +
+				"to match case-insensitively, e.g. \"(?i)rate limit\". " +
+				"path optionally restricts to a subdirectory (relative to the root). " +
 				"glob optionally restricts by filename (e.g. \"*.go\"). mode is \"content\" (default, show matching lines) or \"files\" (show only file paths that contain a match).",
-			Schema: json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string","description":"regular expression to search for"},"path":{"type":"string","description":"optional subdirectory (relative to the workspace root) to search within"},"glob":{"type":"string","description":"optional filename glob filter, e.g. \"*.go\""},"mode":{"type":"string","enum":["content","files"],"description":"\"content\" (default) shows matching lines; \"files\" shows only file paths with a match"}},"required":["pattern"]}`),
+			Schema: json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string","description":"regular expression to search for; CASE-SENSITIVE: prefix with \"(?i)\" for a case-insensitive match, e.g. \"(?i)rate limit\""},"path":{"type":"string","description":"optional subdirectory (relative to the workspace root) to search within"},"glob":{"type":"string","description":"optional filename glob filter, e.g. \"*.go\""},"mode":{"type":"string","enum":["content","files"],"description":"\"content\" (default) shows matching lines; \"files\" shows only file paths with a match"}},"required":["pattern"]}`),
 		},
 		Exec: s.searchFiles,
 	}, nil
@@ -305,11 +308,61 @@ func relPath(baseAbs, p string) string {
 	return filepath.ToSlash(rel)
 }
 
+// patternFoldsCase reports whether the pattern ALREADY asks for case-insensitive
+// matching anywhere in it — "(?i)foo", "(?i:foo)", "(?is)foo" and "foo|(?i)bar"
+// all count. A substring test for "(?i)" gets this wrong in both directions: it
+// misses the scoped and combined forms (so we would suggest a retry that cannot
+// change the result, burning one of the planner's MaxSameTool calls), and it
+// fires on a literal character class like "[(?i)]abc" that is genuinely
+// case-sensitive. Parsing the flags is the only test that answers the question
+// actually being asked.
+//
+// An unparseable pattern never reaches here (searchFiles compiles first and
+// returns the compile error), so the error branch is defensive only.
+func patternFoldsCase(pattern string) bool {
+	re, err := syntax.Parse(pattern, syntax.Perl)
+	if err != nil {
+		return false
+	}
+	return foldsCase(re)
+}
+
+func foldsCase(re *syntax.Regexp) bool {
+	if re.Flags&syntax.FoldCase != 0 {
+		return true
+	}
+	for _, sub := range re.Sub {
+		if sub != nil && foldsCase(sub) {
+			return true
+		}
+	}
+	return false
+}
+
 // renderGrep groups matches per file and formats them. No-match returns a clean
 // string (never an error). When capped, the more-matches marker is appended.
 func renderGrep(matches []grepMatch, capped bool, pattern, mode string) string {
 	if len(matches) == 0 {
-		return fmt.Sprintf("no matches for %q", pattern)
+		// Zero matches is the moment a small planner is most likely to give up — or,
+		// worse, retry with a LONGER, more specific query. The pattern is a
+		// case-SENSITIVE regex, so a miss is very often just letter case or word form
+		// ("rate limit" vs "Rate limiting"). The spec carries the same fact, but it
+		// competes with every other tool's spec; naming the concrete retry HERE puts
+		// it in the model's immediate working set at the moment it decides whether to
+		// give up. Measured 2026-07-26 (ampere-6): a docs lookup failed on every
+		// model/profile combination because the planner lengthened its query instead
+		// of loosening it, then concluded the text was absent.
+		if !patternFoldsCase(pattern) {
+			return fmt.Sprintf(
+				"no matches for %q (the pattern is a CASE-SENSITIVE regex). "+
+					"Before concluding it is absent, retry with %q for a case-insensitive match, "+
+					"or search one short distinctive word instead of a phrase.",
+				pattern, "(?i)"+pattern)
+		}
+		// Already case-insensitive: never re-suggest the same retry. A suggestion that
+		// cannot change the result would burn one of the planner's MaxSameTool calls.
+		return fmt.Sprintf(
+			"no matches for %q. Try one short distinctive word instead of a phrase.", pattern)
 	}
 
 	// Stable ordering: by path, then line — independent of backend/walk order.

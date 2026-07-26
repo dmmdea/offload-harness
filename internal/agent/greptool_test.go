@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -132,5 +133,98 @@ func TestSearchFilesNoMatchIsCleanString(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(out), "no matches") {
 		t.Errorf("expected a clean 'no matches' string, got %q", out)
+	}
+}
+
+// A case-only miss must tell the planner HOW to retry, and that retry must actually
+// work. A live ampere-6 run failed a docs lookup on every model/profile combination
+// because the planner searched "rate limit" against "Rate limiting", then lengthened
+// its query instead of loosening it. The hint has to land at the point of failure.
+func TestSearchFilesNoMatchSuggestsCaseInsensitiveRetry(t *testing.T) {
+	root := t.TempDir()
+	body := "Rate limiting: the gateway allows 250 requests per minute per client.\n"
+	if err := os.WriteFile(filepath.Join(root, "limits.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tools, _ := ReadOnlyTools(root, nil)
+	sf := findTool(tools, "search_files")
+
+	// The exact query a planner produced live — wrong case AND wrong word form.
+	out, err := sf.Exec(context.Background(), `{"pattern":"rate limit"}`)
+	if err != nil {
+		t.Fatalf("no-match must not be an error, got %v", err)
+	}
+	if !strings.Contains(out, "(?i)rate limit") {
+		t.Errorf("no-match output must name the case-insensitive retry, got %q", out)
+	}
+
+	// The suggested retry must genuinely find it — on whichever backend runs
+	// (ripgrep when on PATH, else the Go walk). Both honor the (?i) inline flag.
+	out, err = sf.Exec(context.Background(), `{"pattern":"(?i)rate limit"}`)
+	if err != nil {
+		t.Fatalf("case-insensitive retry: %v", err)
+	}
+	if !strings.Contains(out, "limits.md") || !strings.Contains(out, "250") {
+		t.Errorf("suggested retry must find the line it was suggested for, got %q", out)
+	}
+
+	// Do not re-suggest (?i) to a pattern that ALREADY folds case — a suggestion
+	// that cannot change the result burns one of the planner's MaxSameTool calls.
+	// A substring test for "(?i)" gets the scoped/combined forms wrong, so each
+	// spelling is pinned here.
+	for _, alreadyFolding := range []string{
+		`(?i)willNotBeFound12345`,
+		`(?i:willNotBeFound12345)`,
+		`(?is)willNotBeFound12345`,
+		`nope|(?i)willNotBeFound12345`,
+	} {
+		args, _ := json.Marshal(map[string]string{"pattern": alreadyFolding})
+		out, err := sf.Exec(context.Background(), string(args))
+		if err != nil {
+			t.Fatalf("no-match must not be an error for %q, got %v", alreadyFolding, err)
+		}
+		if strings.Contains(out, "retry with") || strings.Contains(out, "(?i)(?i") {
+			t.Errorf("must not suggest a case-insensitive retry for already-folding %q, got %q",
+				alreadyFolding, out)
+		}
+	}
+
+	// Inverse: a literal "(?i)" inside a character class is genuinely
+	// case-sensitive and MUST still get the hint.
+	args, _ := json.Marshal(map[string]string{"pattern": `[(?i)]willNotBeFound12345`})
+	out, err = sf.Exec(context.Background(), string(args))
+	if err != nil {
+		t.Fatalf("no-match must not be an error, got %v", err)
+	}
+	if !strings.Contains(out, "retry with") {
+		t.Errorf("a case-sensitive pattern containing a literal (?i) class must still get the hint, got %q", out)
+	}
+}
+
+// The schema is a hand-escaped JSON literal inside a Go raw string: one stray
+// quote ships a malformed tool spec to the model while every other test stays
+// green. Pin that it parses and that it still states the case-sensitivity
+// contract the no-match hint depends on.
+func TestSearchFilesSchemaIsValidJSONAndStatesCaseSensitivity(t *testing.T) {
+	tools, err := ReadOnlyTools(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sf := findTool(tools, "search_files")
+	if sf == nil {
+		t.Fatal("search_files tool missing")
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(sf.Schema, &schema); err != nil {
+		t.Fatalf("search_files schema is not valid JSON: %v", err)
+	}
+	props, _ := schema["properties"].(map[string]any)
+	pat, _ := props["pattern"].(map[string]any)
+	desc, _ := pat["description"].(string)
+	if !strings.Contains(desc, "(?i)") {
+		t.Errorf("pattern schema must document the (?i) case-insensitive prefix, got %q", desc)
+	}
+	if !strings.Contains(sf.Description, "(?i)") {
+		t.Errorf("tool description must document the (?i) case-insensitive prefix, got %q", sf.Description)
 	}
 }

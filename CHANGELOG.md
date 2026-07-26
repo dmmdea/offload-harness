@@ -4,6 +4,32 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.23.2] - 2026-07-26
+
+### Fixed — `search_files` never told the planner its pattern was case-sensitive
+- **Measured failure (ampere-6, RTX 3050 6 GB, gemma-4-E4B and granite-4.0-h-tiny planners):** a
+  documentation lookup failed on **every model/profile combination**. The planner searched
+  `"rate limit"` against a file reading `"Rate limiting: …"`, got a bare `no matches for "rate limit"`,
+  then retried with a **longer, more specific** query (`"gateway rate limit"`) and concluded the text
+  was absent. `search_files` compiles with `regexp.Compile` (case-sensitive) and neither its
+  description nor its schema ever mentioned the `(?i)` inline flag.
+- **The tool spec now states the contract**: `pattern` is a CASE-SENSITIVE regex and `(?i)` makes it
+  case-insensitive — in both the description and the `pattern` schema field.
+- **The zero-match result now names the concrete retry at the point of failure**, which is where a
+  small planner actually decides whether to give up: `no matches for "rate limit" (the pattern is a
+  CASE-SENSITIVE regex). Before concluding it is absent, retry with "(?i)rate limit" …`. The spec
+  competes with every other tool's spec; the failure message does not.
+- **Already-case-insensitive patterns never get the suggestion re-offered.** Detection parses the
+  pattern via `regexp/syntax` rather than substring-testing for `"(?i)"`, because a substring test is
+  wrong in both directions: it misses `(?i:…)`, `(?is)…` and `a|(?i)b` (so it would suggest a retry
+  that cannot change the result, burning one of the planner's `MaxSameTool` calls), and it fires on a
+  literal `[(?i)]` character class that is genuinely case-sensitive.
+- **Verified on the failing case, not just in unit tests:** the originally failing goal now passes on
+  `offload-e4b/general`, `offload-e4b/build` and `granite-4-h-tiny/general` — 3 steps each, correct
+  answer, source file cited. Previously 0/4 combinations succeeded.
+- `(?i)` is honored identically by both grep backends (Go `regexp` walk and ripgrep, which receives
+  `re.String()` verbatim); confirmed with `rg` present and absent from `PATH`.
+
 ## [0.23.1] - 2026-07-26
 
 ### Added — OmniRoute harvest Phase D: `compaction-eval kvbench` (KV reuse + real-token measurement, ADR 0017)
