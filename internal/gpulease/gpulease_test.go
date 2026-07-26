@@ -95,9 +95,9 @@ func TestReclaimsDeadHolder(t *testing.T) {
 	if _, err := m.TryAcquire(ClassMedia, Options{Reason: "crashed"}); err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
-	orig := pidAlive
-	pidAlive = func(int) bool { return false } // holder is provably gone
-	t.Cleanup(func() { pidAlive = orig })
+	orig := pidAliveFn
+	pidAliveFn = func(int) bool { return false } // holder is provably gone
+	t.Cleanup(func() { pidAliveFn = orig })
 
 	if info := m.Inspect(); info.Held {
 		t.Fatalf("dead holder still reported held: %+v", info)
@@ -137,9 +137,9 @@ func TestStaleHeartbeatAloneDoesNotReclaim(t *testing.T) {
 		ExpiresAtMs:  now.Add(15 * time.Minute).UnixMilli(),  // but window NOT expired
 	}
 	alive := func(int) bool { return true }
-	orig := pidAlive
-	pidAlive = alive
-	t.Cleanup(func() { pidAlive = orig })
+	orig := pidAliveFn
+	pidAliveFn = alive
+	t.Cleanup(func() { pidAliveFn = orig })
 
 	if Reclaimable(meta, now, DefaultHeartbeatTTL, func(int) (int64, bool) { return 4242, true }) {
 		t.Fatal("reclaimed on a stale heartbeat alone; a descheduled bench would lose the GPU mid-run")
@@ -156,9 +156,9 @@ func TestExpiredWindowAloneDoesNotReclaim(t *testing.T) {
 		RenewedAtMs:  now.Add(-5 * time.Second).UnixMilli(),  // fresh heartbeat
 		ExpiresAtMs:  now.Add(-10 * time.Minute).UnixMilli(), // window expired
 	}
-	orig := pidAlive
-	pidAlive = func(int) bool { return true }
-	t.Cleanup(func() { pidAlive = orig })
+	orig := pidAliveFn
+	pidAliveFn = func(int) bool { return true }
+	t.Cleanup(func() { pidAliveFn = orig })
 
 	if Reclaimable(meta, now, DefaultHeartbeatTTL, func(int) (int64, bool) { return 4242, true }) {
 		t.Fatal("reclaimed a still-heartbeating holder just because its declared window lapsed")
@@ -176,9 +176,9 @@ func TestStaleAndExpiredReclaims(t *testing.T) {
 		RenewedAtMs:  now.Add(-30 * time.Minute).UnixMilli(),
 		ExpiresAtMs:  now.Add(-10 * time.Minute).UnixMilli(),
 	}
-	orig := pidAlive
-	pidAlive = func(int) bool { return true }
-	t.Cleanup(func() { pidAlive = orig })
+	orig := pidAliveFn
+	pidAliveFn = func(int) bool { return true }
+	t.Cleanup(func() { pidAliveFn = orig })
 
 	if !Reclaimable(meta, now, DefaultHeartbeatTTL, func(int) (int64, bool) { return 4242, true }) {
 		t.Fatal("a dead detached holder held the card past both its heartbeat and its window")
@@ -199,10 +199,10 @@ func TestFencedOutHolderFailsCheck(t *testing.T) {
 		t.Fatalf("acquire: %v", err)
 	}
 	// Holder disappears; a second party reclaims and acquires.
-	orig := pidAlive
-	pidAlive = func(int) bool { return false }
+	orig := pidAliveFn
+	pidAliveFn = func(int) bool { return false }
 	fresh, err := m.TryAcquire(ClassText, Options{Reason: "new owner"})
-	pidAlive = orig
+	pidAliveFn = orig
 	if err != nil {
 		t.Fatalf("reclaim acquire: %v", err)
 	}
@@ -223,12 +223,12 @@ func TestFencedOutReleaseDoesNotStealCurrentLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
-	orig := pidAlive
-	pidAlive = func(int) bool { return false }
+	orig := pidAliveFn
+	pidAliveFn = func(int) bool { return false }
 	if _, err := m.TryAcquire(ClassText, Options{Reason: "new owner"}); err != nil {
 		t.Fatalf("reclaim acquire: %v", err)
 	}
-	pidAlive = orig
+	pidAliveFn = orig
 
 	if err := stale.Release(); err != nil {
 		t.Fatalf("stale release returned error: %v", err)
@@ -243,15 +243,15 @@ func TestFencedOutReleaseDoesNotStealCurrentLease(t *testing.T) {
 // that is what makes it usable as a fencing token. It lives OUTSIDE the lease dir
 // precisely so removing a lease cannot reset it.
 //
-// Every round's predecessor is dead, so each acquisition is a reclaim. pidAlive is
+// Every round's predecessor is dead, so each acquisition is a reclaim. pidAliveFn is
 // stubbed dead for the WHOLE loop rather than toggled per round: toggling it back to
 // alive before the next TryAcquire makes the previous lease legitimately held, and
 // the acquisition is then correctly refused instead of reclaiming.
 func TestEpochIsMonotonicAcrossReclaims(t *testing.T) {
 	m, _ := newTestManager(t)
-	orig := pidAlive
-	pidAlive = func(int) bool { return false }
-	t.Cleanup(func() { pidAlive = orig })
+	orig := pidAliveFn
+	pidAliveFn = func(int) bool { return false }
+	t.Cleanup(func() { pidAliveFn = orig })
 
 	var last uint64
 	for i := 0; i < 4; i++ {
@@ -352,8 +352,14 @@ func TestUnknownClassRefused(t *testing.T) {
 	}
 }
 
-// A failed stamp must not leave an unowned lease dir behind that blocks everyone.
-func TestFailedStampLeavesNoOrphanLease(t *testing.T) {
+// A failed stamp must not leave an unowned CLAIM behind that blocks everyone.
+//
+// The lease DIRECTORY legitimately survives — it is a container, not a claim, and
+// another acquirer may be working inside it. The invariant is about meta.json, the
+// single token both languages contend on. (An earlier version of this test asserted
+// the directory was gone, which only held while Go used the directory itself as its
+// atomic token — the very asymmetry that let Go and Node both hold the lease.)
+func TestFailedStampLeavesNoOrphanClaim(t *testing.T) {
 	m, _ := newTestManager(t)
 	// Make the epoch path a DIRECTORY so bumpEpoch's write fails.
 	if err := os.MkdirAll(m.epochPath(), 0o777); err != nil {
@@ -362,7 +368,10 @@ func TestFailedStampLeavesNoOrphanLease(t *testing.T) {
 	if _, err := m.TryAcquire(ClassMedia, Options{}); err == nil {
 		t.Fatal("acquire succeeded despite an unwritable epoch counter")
 	}
-	if _, err := os.Stat(m.leaseDir()); !os.IsNotExist(err) {
-		t.Fatal("a lease dir survived a failed stamp; the GPU would be blocked by nobody")
+	if _, err := os.Stat(m.metaPath()); !os.IsNotExist(err) {
+		t.Fatal("a claim survived a failed stamp; the GPU would be blocked by nobody")
+	}
+	if info := m.Inspect(); info.Held {
+		t.Fatalf("the lease reads as HELD after a failed stamp: %+v", info)
 	}
 }

@@ -3,6 +3,7 @@ package gpulock
 import (
 	"context"
 	"fmt"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,20 +25,46 @@ func writeLock(t *testing.T, pid int) string {
 	return lock
 }
 
-// TestPathResolution: config override > GPU_LOCK env > tmpdir default — the
-// same order the Node runners resolve (gpu-lock.mjs defaultLockPath).
+// TestPathResolution: config override > GPU_LOCK env > <state-root>/gpu/lease — the
+// same order every other lease participant resolves.
 func TestPathResolution(t *testing.T) {
 	t.Setenv("GPU_LOCK", filepath.Join("env", "gpu.lock"))
-	if got := Path(filepath.Join("cfg", "gpu.lock")); got != filepath.Join("cfg", "gpu.lock") {
+	if got := Path(filepath.Join("cfg", "gpu.lock"), ""); got != filepath.Join("cfg", "gpu.lock") {
 		t.Errorf("override must win over env: got %q", got)
 	}
-	if got := Path(""); got != filepath.Join("env", "gpu.lock") {
+	if got := Path("", ""); got != filepath.Join("env", "gpu.lock") {
 		t.Errorf("env must win over default: got %q", got)
 	}
 	t.Setenv("GPU_LOCK", "")
-	want := filepath.Join(os.TempDir(), DefaultLockName)
-	if got := Path(""); got != want {
-		t.Errorf("default = %q, want the .mjs tmpdir default %q", got, want)
+	stateDir := t.TempDir()
+	want := filepath.Join(stateDir, "gpu", "lease")
+	if got := Path("", stateDir); got != want {
+		t.Errorf("default = %q, want the shared lease dir %q", got, want)
+	}
+}
+
+// THE REGRESSION THIS PACKAGE SUFFERED, pinned: the read-only view must resolve to the
+// exact directory the acquirers write. When the lease moved to a machine-wide root and
+// this function was left pointing at the OS temp dir, WaitFree answered "free" forever
+// and the vision gate stopped gating — the harness silently quit offloading.
+func TestPathMatchesTheLeaseDirectoryAcquirersUse(t *testing.T) {
+	t.Setenv("GPU_LOCK", "")
+	stateDir := t.TempDir()
+	m, err := gpulease.Open(stateDir)
+	if err != nil {
+		t.Fatalf("open lease manager: %v", err)
+	}
+	lease, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "render"})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer func() { _ = lease.Release() }()
+
+	if got := Path("", stateDir); got != lease.Dir() {
+		t.Fatalf("gpulock watches %q but acquirers write %q — the gate is blind", got, lease.Dir())
+	}
+	if info := Inspect(Path("", stateDir)); !info.Held {
+		t.Fatal("gpulock reports a freshly acquired lease as FREE — vision calls would fire into a busy GPU")
 	}
 }
 
