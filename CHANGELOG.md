@@ -4,7 +4,7 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
-## [0.23.0] - 2026-07-25
+## [0.23.0] - 2026-07-26
 
 ### Added
 - **Machine-wide fenced GPU lease (`internal/gpulease`) + `local-offload gpu` verb.** One
