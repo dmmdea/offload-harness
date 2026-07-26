@@ -78,6 +78,19 @@ search only; the editor gets whatever capabilities were granted.
 > `--profile` and `--two-tier` conflict only for a *non-default* profile. `--profile general` or an
 > empty value coexists with two-tier, because two-tier sets its own toolsets.
 
+**Budget calibration is available and OFF by default.** The ladder's `chars/4` estimator undercounts
+real tokens (measured density 1.3-1.4 plus a fixed ~900-token payload the estimate cannot see), and
+with a SMALL output reservation that lets requests through which the server then rejects.
+`internal/agent/tokencal.go` fits `real ≈ intercept + slope·estimate` online from each response's
+`usage.prompt_tokens` and corrects the BUDGET (never `estimateTokens`, so every rung compares in one
+space), using a median fit over a sliding window so one bad reading cannot define or persist in the
+line, bounded so it can never cut context by more than half. It ships **off**: at the shipped
+`--max-tokens 4096` the output reservation already absorbs the error, and a live A/B showed enabling
+it cut retained tool content by 52% and produced a wrong answer while neither arm hit a rejection.
+Enable with `WithTokenCalibration(true)` where the output reservation is small or rejections are
+actually observed; `Result.TokenCal` reports what it learned. See
+[ADR 0017](../architecture/decisions/0017-kv-reuse-is-binary-and-how-we-measure-it.md).
+
 **Compaction** keeps the transcript within the SERVED context window: `--ctx-tokens` defaults to
 0 = auto — probe the endpoint's live `n_ctx` (`/upstream/{model}/props` on llama-swap, `/props` on
 a bare llama-server; conservative 8192 fallback when unanswerable), because an assumed window
@@ -122,8 +135,28 @@ through the live pipeline (summarize + entity-recall outcome scorer — groundin
 not a term: measured live, it both passes entity-free garbage and inverts on benign numeric
 paraphrase) behind a **control-pair self-test gate**: a scorer that cannot rank a
 known-good/known-degraded pair aborts the A/B instead of producing a confident number from a blind
-judge. A committed mini-corpus lives at `testdata/compeval/`; real replay corpora are
-machine-local and never committed. `compaction-eval harvest --traces DIR --out corpus.jsonl`
+judge. `compaction-eval kvbench` is the Phase D leg: it replays a corpus step-by-step through the
+production client and records the SERVER's own accounting (`timings.cache_n` / `prompt_n`, exposed
+on `Completion.Serve`, nil when a backend reports nothing) to measure KV-prefix reuse and REAL
+token counts. It brackets every run with a positive control (byte-identical resend, ≥90% reuse) and
+a negative control (unrelated prompt) with a SEPARATION gate (pos−neg ≥ 0.40; the real tool specs create a legitimate ~17% framing floor, recorded as framing_floor_reuse), runs its arms in BLOCKS because the tier serves one KV
+slot, and **fails closed to `INCONCLUSIVE`** rather than publishing a table of zeros when the tier
+was evicted mid-run — one media-generation job on the same GPU is enough to do that, since
+`render/gpu-lock.mjs::freeLlamaSwap` unloads every GPU-resident model before a render. Arms are compared only
+over steps that succeeded in BOTH (`paired_totals`; per-arm totals are diagnostic-only), every
+failure is classified `overflow`/`timeout`/`other` with timeouts checked first, and mid-run
+evictions are detected from the data itself — on a prefix extension the server must still hold
+what it held, so a collapsed `cache_n` relative to the PREVIOUS prompt is a scheduler artifact,
+flagged and excluded from rates but kept in totals. `--budget-mode production-uncalibrated` budgets
+the ladder as `Loop.inputBudget()` does WITHOUT the token calibration above, so its fire counts are
+a lower bound on the calibrated agent's (measuring the calibrated budget needs a live run, not a
+replay); `pressure` guarantees the ramp is observable but makes the fire count a fixture property — the
+mode is stamped in the report. Measured finding
+([ADR 0017](../architecture/decisions/0017-kv-reuse-is-binary-and-how-we-measure-it.md)): reuse is
+BINARY — appends reuse everything, any edit anywhere discards the whole cache — so a compaction
+fire always costs a full re-prefill, and the ladder is justified by the size win and by requests
+completing at all, not by cache friendliness. A committed mini-corpus lives at `testdata/compeval/`;
+real replay corpora are machine-local and never committed. `compaction-eval harvest --traces DIR --out corpus.jsonl`
 builds a real corpus from the standalone agent's trace files with REDACTION-AT-HARVEST:
 deterministic placeholder substitution over the exact vet refusal classes (git output alone
 carries author emails; the private-key class redacts the whole block, not just the header),

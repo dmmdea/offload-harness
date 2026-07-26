@@ -1,0 +1,152 @@
+---
+status: Accepted
+date: "2026-07-24"
+---
+
+# KV reuse is append-only; the bench measures it and fails closed
+
+## Context
+
+OmniRoute-harvest Phase D asked us to "verify the monotonic compaction ladder preserves llama.cpp's
+KV prefix cache". Before building anything we probed the live stack, and the premise did not
+survive contact with it.
+
+**Measured on gemma-4-e4b (llama.cpp b50, `-c 8192`, flash-attn on, `--cache-reuse` unset,
+2026-07-24):**
+
+| probe | cache_n | prompt_n | prompt_ms | wall_ms |
+|---|---|---|---|---|
+| cold first request | 0 | 1769 | 465 | 6836 |
+| byte-identical resend | 1768 | 1 | 38 | 53 |
+| **append a TURN** (the shape the loop produces) | **2971** | 19 | — | — |
+| **one line edited at 20% of the prompt** | **1** | 2319 | 558 | 609 |
+| **one line edited at 98% of the prompt** | **0** | 2662 | 656 | — |
+| identical resend after an unrelated tier teardown | 0 | 2320 | 582 | 6873 |
+
+Corroborated at scale by the bench body: ~80 append steps per arm reused a median of **0.88**,
+against **0.307** on the steps where the ladder fired (clean cache-isolated run).
+
+Three facts follow, and they reshape the phase:
+
+1. **Reuse is BINARY, not proportional.** Appends reuse everything; *any* edit discards the *entire*
+   cache. A position sweep (edit at 4/17/33/50/62/75/83/92/98% of a 120-line prompt) returned
+   `cache_n` = 1,1,1,1,1,0,0,0,0 — an edit two lines from the end costs exactly as much as an edit
+   at the start. Our first hypothesis (a sliding-window horizon, so near-the-end edits would
+   survive) is **falsified** by that sweep and is recorded here so it is not re-derived.
+   *Unresolved and deliberately not smoothed over*: appending to the LAST MESSAGE'S CONTENT — which
+   the chat template turns into a divergence, since an end-of-turn marker follows the content — was
+   inconsistent across runs (2316/2321 once, ~0 twice). The agent loop only ever appends TURNS, so
+   no conclusion here depends on it, and the bench's append control tests the turn shape.
+2. **Therefore the ladder cannot be KV-friendly by construction.** Every lossy rung edits from
+   `protectedEnd` forward (`internal/agent/compaction.go`: dedupe, GCF, skeleton, elide and drop all
+   iterate `for i := protectedEnd; i < recentStart`), so a firing step always pays a full re-prefill.
+   What monotonicity + the idempotence guards genuinely buy is that steps BETWEEN fires stay pure
+   appends, so the cache returns immediately after a fire.
+3. **Cache lifetime is a property of the ENVIRONMENT, not of our code.** A tier teardown between two
+   byte-identical requests zeroes the cache and makes the resend cost a 6.9s reload. On this box the
+   dominant cause is *this repo's own media path*: `render/gpu-lock.mjs::freeLlamaSwap` POSTs
+   `/api/models/unload/<id>` for every GPU-resident model before a generation job takes the card, so
+   each render tears down the text tier. The server log shows **3,356 such unloads, 330 of them for
+   `gemma-4-e4b`, and 0 for the memory stack** — that exclusion is `freeLlamaSwap`'s own invariant,
+   which identifies the caller unambiguously. A per-model `ttl` (300s for `gemma-4-e4b`) evicts on
+   idle as well. An earlier revision of this ADR attributed the teardown to a coincident
+   `/v1/embeddings` call; that is **withdrawn as unproven** — the memory stack sits in a
+   `persistent: true, swap: false` group and is never a target of the unload route, and a re-test was
+   inconclusive because the box was saturated (99% GPU, 15.0/16.3 GiB) by an unrelated bulk-embedding
+   run. The operational conclusion is unchanged and better evidenced: any measurement that does not
+   bracket itself with controls will attribute an environmental teardown to compaction.
+
+## Decision
+
+1. **The client captures the server's own accounting, additively.** `wireResp` gains optional
+   `usage`/`timings`; `Completion.Serve` is a `*ServeStats` that is **nil when the backend reports
+   nothing**, so "unmeasured" can never be read as "measured zero". The request body is unchanged
+   and pinned by a test — instrumentation must not perturb the thing it measures.
+2. **A new `compaction-eval kvbench` mode**, never inside `run`/`freeze`/`check`. Those are
+   deterministic, model-free, and ratchet-guarded on integer token counts; wall-clock inputs would
+   flap the ±2% band. New mode, new report type, new artifact.
+3. **Controls bracket every run and the bench FAILS CLOSED.** A positive control (byte-identical
+   resend, must reuse ≥90%) before and after, plus a negative control (unrelated prompt, must reuse no more than a loose ceiling, with the load-bearing criterion being SEPARATION (positive − negative ≥ 0.40) since the real tool specs create a legitimate ~17% framing floor). Any failure ⇒ verdict `INCONCLUSIVE`, non-zero exit, raw samples still emitted as evidence
+   — never a headline number. The append and mid-edit controls do not gate; they are measured
+   properties that tell the reader how to interpret the body.
+4. **Arms run in BLOCKS, never interleaved.** The tier serves `--parallel 1` — one KV slot — so
+   round-robin interleaving (the textbook drift control) would make *every* request a cache miss.
+   Blocks confound drift with arm; rounds are repeated and per-round values reported instead.
+5. **The size effect and the cache effect are reported separately and never summed.** A compacted
+   transcript is shorter, so it prefills faster at zero reuse; folding that into one "compaction
+   speedup" would confirm the KV hypothesis with evidence entirely explained by size.
+6. **The safety margin is tuned from estimator calibration, not from the replay.** `compactionMargin`
+   lives in `Loop.inputBudget()`, while corpus replay derives its budget from `entryParams` (60% of
+   the entry's own estimate) — the replay never exercises `inputBudget()` at all. The bench therefore
+   reports real-vs-estimated token ratios per content kind plus a decision TABLE
+   (`S ≥ (C − M)(1 − 1/r)`), and makes no recommendation: raising the margin buys safety by
+   unconditionally shrinking usable context on every request, which is the operator's trade.
+
+6a. **The probe sends the tool specs production sends.** `estimateTokens` counts tool specs as
+   ZERO while every production request carries them, so a probe with `tools=nil` would understate
+   the measured real/estimated ratio — and therefore every implied margin — by that constant.
+7. **Arm totals are PAIRED.** The compaction-off arm loses steps to overflow rejections, so totals
+   over unequal sample sets would overstate whichever arm had fewer (larger) requests. The report
+   compares only steps that succeeded in BOTH arms and reports the unpaired counts. Rejected
+   requests are counted separately as `overflow` — they are the failure the ladder prevents, not
+   noise.
+8. **Eviction is detected from the data, not by extra probes.** On a prefix EXTENSION the server
+   must still hold what it already held; a sample whose `cache_n` collapsed **relative to the
+   PREVIOUS prompt's real length** means the tier was torn down between requests. Those rows are
+   flagged, excluded from rate statistics and kept in token totals. Injecting inline control shots
+   between body requests — the obvious alternative — would itself destroy the cache continuity
+   being measured. The comparison must NOT use the reuse fraction of the new prompt: appending a
+   large tool result onto a small prefix legitimately scores near zero, and an earlier version of
+   this check did exactly that and silently deleted ~20% of a clean run's rows.
+9. **Fire counts are only meaningful with their budget mode.** `--budget-mode production-uncalibrated` budgets Loop.inputBudget() WITHOUT the token calibration of decision 10, so its fire counts are a lower bound on the calibrated agent's; it budgets
+   the ladder exactly as `Loop.inputBudget()` does; `pressure` (60% of each entry's own estimate,
+   what `Evaluate` uses) guarantees the ladder engages so the ramp is observable, but then the fire
+   COUNT is a property of the fixture, not of production. The mode is stamped in every report, and
+   no fire-frequency claim may be made without it.
+
+10. **Budget calibration against real token counts — implemented, and shipped OFF by default.**
+   The gate for compaction is a `chars/4` estimate that undercounts real tokens (p95 2.81 as
+   measured; 1.3–1.8 net of the fixed tool-spec payload). With a SMALL output reservation
+   (`--max-out 1024`, budget 6,656) that lets three real transcripts through which the server then
+   rejected, while the ladder declined to compact.
+   **But the default is not that regime, and the first version of this ADR got the conclusion
+   wrong by measuring at 1024 when the shipped `local-agent` reserves `--max-tokens 4096`
+   (budget 3,584).** Re-measured there: the ladder fires on its own (7 times) and compaction
+   prevents one of the three overflows WITHOUT calibration; the remaining two are ladder
+   exhaustion (oversized newest turn), which no estimator fix addresses.
+   A live A/B then showed enabling calibration is not free: the fit was sound
+   (`real ≈ 963 + 1.31·est`) but it cut the budget to 56%, retained 52% less tool content, and
+   turned a correct answer into a wrong one — while neither arm hit a rejection.
+   So it ships opt-in (`WithTokenCalibration(true)`), indicated where the output reservation is
+   small relative to the window or where rejections are actually observed, with `Result.TokenCal`
+   exposing what it learned. `internal/agent/tokencal.go` fits `real ≈ intercept + slope·estimate` online from
+   `usage.prompt_tokens` and corrects the BUDGET (not the estimator, so each rung's internal
+   comparisons stay in one space). Two terms, not one: the intercept absorbs the fixed tool-spec
+   payload `estimateTokens` cannot see, the slope absorbs content density. With fewer than two
+   distinct observations the budget is unchanged, so an uncalibrated loop behaves exactly as before.
+   The fit is ROBUST by construction — a median-of-pairwise-slopes (Theil–Sen) over a sliding
+   window of the last 32 observations, with the intercept refitted to the CLAMPED slope, pairs
+   required to span a meaningful estimate range, and the total correction bounded so calibration can
+   never cut usable context by more than half. Least squares was the obvious choice and the wrong
+   one: it has an unbounded influence function, so a single anomalous `usage.prompt_tokens` (a proxy
+   reporting cumulative or prompt+completion tokens) pinned the slope to its clamp and cut the budget
+   to a third for the remainder of the run, with no recovery. Every one of those bounds exists
+   because a review demonstrated the failure it prevents.
+   Rejected: a per-kind chars/token table (a guess, and a guess is what caused this) and a
+   `/tokenize` round-trip (a network dependency on every step of the critical path).
+
+## Consequences
+
+- The harvest's KV-prefix rationale for the ladder is **corrected in the record**: compaction is
+  justified by the size win and by requests completing at all, not by cache friendliness. The
+  alternative to a fire is not a warm cache — it is the transcript growing until the server rejects
+  it (measured live as `exceed_context_size` 400s).
+- A cheap, real optimisation is now visible and is NOT taken here (out of scope, needs its own
+  change): fires are full re-prefills, so anything that reduces fire COUNT — a larger effective
+  window, or compacting in bigger, rarer steps — buys more than making each fire gentler.
+- The bench is live-only by nature; its CI-safe half (metric math, admissibility, relation
+  classification, sequencing against a serving simulator that encodes the measured binary rule) runs
+  with no GPU and no network.
+- The Aorus laptop is **UNMEASURED**, not projected: it runs 0.22.22, which predates the
+  `compaction-eval` verb entirely, and updating an operator's working laptop across the 0.22.25
+  default flip is its own decision, never a silent prerequisite of a measurement.

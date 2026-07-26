@@ -46,7 +46,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.23.0"
+const version = "0.23.1"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -216,7 +216,7 @@ Usage:
   local-offload doctor                   check endpoint health + config
   local-offload models                   show configured offload model
   local-offload eval [--dir DIR]         code-based quality eval (AURC, deferral-curve AUDC/QNC)
-  local-offload compaction-eval <harvest|run|freeze|check|ab> --corpus C   compaction ladder eval: trace→corpus harvest (redacting), ratio/retention report, tokens ratchet, gated A/B
+  local-offload compaction-eval <harvest|run|freeze|check|ab|kvbench> --corpus C   compaction ladder eval: trace→corpus harvest (redacting), ratio/retention report, tokens ratchet, gated A/B, KV-reuse bench
   local-offload confhead-eval            out-of-fold adoption gate (AURC/AUGRC + paired-bootstrap CI)
   local-offload confhead-calibrate       per-task conformal p(correct) escalation thresholds (ADOPT tasks)
   local-offload stats                    observational per-task ledger telemetry

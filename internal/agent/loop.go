@@ -41,6 +41,11 @@ type Msg struct {
 // ("tool_calls" => the loop must execute tools and continue; anything else =>
 // the loop stops).
 type Completion struct {
+	// Serve is the SERVER's accounting for this completion (KV reuse, real
+	// token counts, prefill/decode ms) when the backend reports it — nil when
+	// it does not. Purely observational: the loop never reads it; the Phase D
+	// measurement leg does (ADR 0017).
+	Serve        *ServeStats
 	Msg          Msg
 	FinishReason string
 }
@@ -83,6 +88,38 @@ type Result struct {
 	// honest fit=false telemetry the OmniRoute-harvest design requires instead
 	// of silent over-budget requests. 0 on every run that stayed within budget.
 	CompactionsExhausted int
+
+	// TokenCal reports what the budget calibration actually learned this run
+	// (ADR 0017). A self-tuning mechanism that cannot be inspected is a
+	// mechanism nobody can debug: these fields make its behaviour auditable
+	// per run instead of inferred from outcomes.
+	TokenCal TokenCalReport
+}
+
+// TokenCalReport is the observable state of the budget calibration at the end
+// of a run. Fitted=false means it never had enough well-spread observations
+// and the budget was left exactly as inputBudget() computed it.
+type TokenCalReport struct {
+	Observations int     `json:"observations"`
+	Fitted       bool    `json:"fitted"`
+	Slope        float64 `json:"slope,omitempty"`
+	Intercept    float64 `json:"intercept,omitempty"`
+	RawBudget    int     `json:"raw_budget"`
+	FinalBudget  int     `json:"final_budget"`
+}
+
+// calReport snapshots the calibration for the Result.
+func (l *Loop) calReport() TokenCalReport {
+	raw := l.inputBudget()
+	rep := TokenCalReport{Observations: l.tokenCal.Observations(), RawBudget: raw, FinalBudget: raw}
+	if !l.tokenCalOn {
+		return rep
+	}
+	if slope, intercept, ok := l.tokenCal.Fit(); ok {
+		rep.Fitted, rep.Slope, rep.Intercept = true, slope, intercept
+	}
+	rep.FinalBudget = l.budgetForCompaction()
+	return rep
 }
 
 // Loop runs the canonical agent loop over a fixed tool set.
@@ -98,6 +135,11 @@ type Loop struct {
 	skeletonPrune bool // enable the skeleton rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
 	gcfCompact    bool // enable the lossless GCF rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
 	toolResultCap int // max chars of ONE tool result kept in the transcript (0 => derive from window)
+	// tokenCal corrects the compaction budget using the server's own token
+	// counts — the fix for the estimator defect that let three real
+	// transcripts be rejected while the ladder declined to compact (ADR 0017).
+	tokenCal    TokenCalibrator
+	tokenCalOn  bool // OFF by default — see WithTokenCalibration
 	system        string
 	mem           Memory
 	worktree      string // RW worktree root for durable working memory (AGENT.md + .agent/plan.md); "" disables it
@@ -113,6 +155,10 @@ const defaultCtxTokens = 8192
 // budget on top of the reserved completion tokens, to absorb the crude
 // token-estimate's error and per-request framing the estimate doesn't model.
 const compactionMargin = 512
+
+// CompactionMargin exposes the production safety margin so a measurement can
+// budget exactly as the loop does instead of guessing (Phase D, ADR 0017).
+const CompactionMargin = compactionMargin
 
 // defaultKeepRecent is how many of the most recent turns compaction keeps full
 // by default — enough for the model to see its latest tool result(s) and reason
@@ -235,6 +281,28 @@ func (l *Loop) WithContextTokens(n int) *Loop {
 	return l
 }
 
+// WithTokenCalibration enables budget correction from the server's own token
+// counts (ADR 0017). It is **OFF by default**, and that default is measured,
+// not cautious:
+//
+//   - The estimator really does undercount (density ~1.3-1.4 plus a fixed
+//     ~900-token payload, fitted live on real goals), so with a SMALL output
+//     reservation the raw budget lets requests through that the server rejects.
+//     That is the regime the defect was found in (--max-out 1024 ⇒ budget 6656).
+//   - But the shipped agent reserves --max-tokens 4096 of the 8192 window, so
+//     the input budget is 3584 and roughly 3,700 tokens of slack already absorb
+//     the estimator's error. Re-measured at that real default, the ladder fires
+//     on its own and compaction prevents an overflow WITHOUT calibration.
+//   - And calibration is not free: on a live A/B over dense multi-file goals it
+//     cut retained tool content by 52% (10,060 → 4,857 chars) and turned a
+//     correct answer ("275 lines") into a wrong one ("1 line"). Neither arm hit
+//     a server rejection, so that quality was spent defending against a risk
+//     that did not materialise at shipped defaults.
+//
+// Enable it where the output reservation is small relative to the window, or
+// where overflow rejections are actually observed. Leave it off otherwise.
+func (l *Loop) WithTokenCalibration(on bool) *Loop { l.tokenCalOn = on; return l }
+
 // WithSkeletonPrune enables the skeleton rung of the compaction ladder: when
 // the transcript is over budget, older tool bodies are first reduced to
 // signal-preserving skeletons (see skeleton.go) before the bare-marker and
@@ -276,6 +344,19 @@ func (l *Loop) inputBudget() int {
 	return b
 }
 
+// budgetForCompaction is inputBudget() corrected by what the server has told us
+// about this run's token density (ADR 0017). Uncalibrated — the first steps, or
+// a backend that reports no usage — it returns inputBudget() unchanged, so
+// behaviour is identical to before calibration existed. Single source of truth
+// for every budget-derived decision in the loop.
+func (l *Loop) budgetForCompaction() int {
+	b := l.inputBudget()
+	if !l.tokenCalOn {
+		return b
+	}
+	return l.tokenCal.Budget(b)
+}
+
 // toolResultCapChars is the max CHARACTER length a SINGLE tool result may keep
 // in the transcript. WHY this is needed on top of compaction: compaction elides
 // OLDER tool bodies but keeps the RECENT keepRecent turns full, so one huge
@@ -292,7 +373,12 @@ func (l *Loop) toolResultCapChars() int {
 	if l.toolResultCap > 0 {
 		return l.toolResultCap
 	}
-	cap := l.inputBudget() * bytesPerToken / 2
+	// Derived from the CALIBRATED budget, not the raw one: the cap exists so no
+	// single result can blow the window, and once calibration knows the real
+	// token density the raw budget overstates the room available. Using the
+	// uncorrected budget here would leave the cap proportionally too generous
+	// exactly on the dense content that needs it most.
+	cap := l.budgetForCompaction() * bytesPerToken / 2
 	if cap < 1024 {
 		cap = 1024
 	}
@@ -378,7 +464,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
-			return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted}, err
+			return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport()}, err
 		}
 		specs := l.specs
 		if len(disabledTools) > 0 {
@@ -403,7 +489,11 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// multi-step task does not overflow the model's small window and abort.
 		// Under budget, compact is a byte-for-byte no-op (prefix stability =>
 		// the server's KV cache stays warm on the happy path).
-		budget := l.inputBudget()
+		// Correct the budget with what the SERVER has told us about this run's
+		// token density (ADR 0017). Uncalibrated — first steps, or a backend
+		// that reports no usage — this returns inputBudget() unchanged, so the
+		// behaviour is identical to before calibration existed.
+		budget := l.budgetForCompaction()
 		if estimateTokens(msgs) > budget {
 			opts := l.ladderOpts()
 			opts.Pinned = pinned
@@ -453,8 +543,14 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				comp, err = l.client.Chat(ctx, msgs, specs, l.maxTokens)
 			}
 			if err != nil {
-				return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted}, err
+				return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport()}, err
 			}
+		}
+		// Learn from the response: estimateTokens(msgs) is what we thought the
+		// payload cost, comp.Serve.UsagePromptTokens is what it actually cost.
+		// Observed BEFORE appending the reply, so both refer to the same bytes.
+		if comp.Serve != nil {
+			l.tokenCal.Observe(estimateTokens(msgs), comp.Serve.UsagePromptTokens)
 		}
 		msgs = append(msgs, comp.Msg)
 
@@ -464,7 +560,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// finish_reason "stop", so trusting finish_reason drops the tool call
 		// and returns an empty answer.
 		if len(comp.Msg.ToolCalls) == 0 {
-			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, CompactionsExhausted: exhausted}
+			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport()}
 			l.persist(ctx, objective, res.Output)
 			return res, nil
 		}
@@ -480,7 +576,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			msgs = append(msgs, Msg{Role: "tool", ToolCallID: call.ID, Content: content, IsError: isErr})
 		}
 	}
-	return Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, CompactionsExhausted: exhausted}, nil
+	return Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport()}, nil
 }
 
 // dispatchOrThrottle is the circuit breaker: it refuses to EXECUTE a tool call
