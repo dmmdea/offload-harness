@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -183,6 +184,96 @@ func TestStaleAndExpiredReclaims(t *testing.T) {
 	if !Reclaimable(meta, now, DefaultHeartbeatTTL, func(int) (int64, bool) { return 4242, true }) {
 		t.Fatal("a dead detached holder held the card past both its heartbeat and its window")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Heartbeat — kept in a PER-EPOCH file, not in the claim record
+// ---------------------------------------------------------------------------
+
+// Renewing by read-modify-writing meta.json is a read-then-write race: a reclaim plus a
+// fresh acquisition landing between the read and the write lets the OLD holder stamp its
+// stale record over the LIVE one. Keying the heartbeat by epoch makes a stale writer
+// harmless — it updates a file nothing reads any more.
+func TestRenewDoesNotRewriteTheClaimRecord(t *testing.T) {
+	m, _ := newTestManager(t)
+	lease, err := m.TryAcquire(ClassMedia, Options{Reason: "render"})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	before, err := os.ReadFile(m.metaPath())
+	if err != nil {
+		t.Fatalf("read record: %v", err)
+	}
+	if err := lease.Renew(); err != nil {
+		t.Fatalf("renew: %v", err)
+	}
+	after, err := os.ReadFile(m.metaPath())
+	if err != nil {
+		t.Fatalf("re-read record: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("Renew rewrote the claim record; a stale holder could then stamp over a live one")
+	}
+}
+
+// A holder that keeps renewing must stay held even PAST its declared window — the
+// conjunction requires a stale heartbeat too. If the heartbeat were still read from the
+// frozen record field, this holder would look abandoned the moment its window lapsed.
+func TestRenewingHolderSurvivesItsDeclaredWindow(t *testing.T) {
+	m, now := newTestManager(t)
+	// Use REAL process identity here: this test compares the Manager's view against
+	// InspectDir, and InspectDir necessarily uses the real processStart. With the
+	// harness's stub the record would carry a fake start time, InspectDir would read a
+	// mismatch, and the "disagreement" would be an artifact of the test rather than of
+	// the code.
+	m.procStart = ProcessStart
+	lease, err := m.TryAcquire(ClassMedia, Options{Reason: "long render", TTL: time.Minute})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	// Jump past the declared window, renewing as a live holder would.
+	*now = now.Add(30 * time.Minute)
+	if err := lease.Renew(); err != nil {
+		t.Fatalf("renew: %v", err)
+	}
+	if info := m.Inspect(); !info.Held {
+		t.Fatal("a live, renewing holder past its declared window reported as FREE")
+	}
+	// And the read-only view must agree — a second reader that reconstructs the
+	// judgement from the record alone is how this diverges.
+	if info := inspectDirAt(m.leaseDir(), *now, DefaultHeartbeatTTL); !info.Held {
+		t.Fatal("InspectDir disagrees with the Manager about a renewing holder")
+	}
+}
+
+// A heartbeat for a SUPERSEDED epoch must not keep the current lease alive, and must not
+// be mistaken for the current holder's.
+func TestStaleEpochHeartbeatIsIgnored(t *testing.T) {
+	m, now := newTestManager(t)
+	lease, err := m.TryAcquire(ClassMedia, Options{Reason: "first", TTL: time.Minute})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	staleEpoch := lease.Epoch()
+	orig := pidAliveFn
+	pidAliveFn = func(int) bool { return false }
+	fresh, err := m.TryAcquire(ClassText, Options{Reason: "second", TTL: time.Minute})
+	pidAliveFn = orig
+	if err != nil {
+		t.Fatalf("reclaim acquire: %v", err)
+	}
+
+	// The old holder keeps heartbeating its own (now superseded) epoch.
+	*now = now.Add(30 * time.Minute)
+	_ = os.WriteFile(m.heartbeatPath(staleEpoch),
+		[]byte(strconv.FormatInt(now.UnixMilli(), 10)), 0o666)
+
+	// The CURRENT lease has not renewed and its window has lapsed, so it is reclaimable
+	// regardless of the stale writer's heartbeat.
+	if info := m.Inspect(); info.Held {
+		t.Fatalf("a superseded epoch's heartbeat kept the current lease alive: %+v", info)
+	}
+	_ = fresh
 }
 
 // ---------------------------------------------------------------------------

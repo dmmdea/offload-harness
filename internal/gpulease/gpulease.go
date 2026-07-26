@@ -274,7 +274,7 @@ func (m *Manager) clearUnloadMarkers() {
 		return
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "unloaded.") {
+		if strings.HasPrefix(e.Name(), "unloaded.") || strings.HasPrefix(e.Name(), "hb.") {
 			_ = os.Remove(filepath.Join(m.leaseDir(), e.Name()))
 		}
 	}
@@ -426,6 +426,79 @@ func Reclaimable(m *Meta, now time.Time, heartbeatTTL time.Duration, procStart f
 // Inspection
 // ---------------------------------------------------------------------------
 
+// reclaimable applies the shared rule using the PER-EPOCH heartbeat file rather than
+// the value frozen into the record at acquisition. Without this, a holder that renews
+// correctly still looks stale to every reader, because the record's RenewedAtMs is
+// never updated any more.
+func (m *Manager) reclaimable(meta *Meta, now time.Time) bool {
+	if meta == nil {
+		return true
+	}
+	effective := *meta
+	effective.RenewedAtMs = m.lastHeartbeat(meta)
+	return Reclaimable(&effective, now, m.heartbeatTTL, m.procStart)
+}
+
+// InspectDir reports the lease state at an explicit lease directory, for READ-ONLY
+// consumers that do not own a Manager (the vision gate in internal/gpulock).
+//
+// It exists so there is ONE inspection path. A second reader that reconstructs the
+// judgement from the record alone gets it wrong the moment any detail moves — when the
+// heartbeat became a per-epoch file, a record-only reader saw a frozen RenewedAtMs and
+// would call a live, renewing holder stale as soon as its declared window lapsed. Same
+// divergence as the path split and the schema split, one more layer down.
+func InspectDir(leaseDir string) Info { return inspectDirAt(leaseDir, time.Now(), DefaultHeartbeatTTL) }
+
+func inspectDirAt(leaseDir string, now time.Time, hbTTL time.Duration) Info {
+	b, err := os.ReadFile(filepath.Join(leaseDir, metaFileName))
+	if err != nil {
+		return Info{}
+	}
+	var meta Meta
+	if json.Unmarshal(b, &meta) != nil {
+		return Info{}
+	}
+	effective := meta
+	effective.RenewedAtMs = heartbeatAt(leaseDir, &meta)
+	if Reclaimable(&effective, now, hbTTL, processStart) {
+		return Info{}
+	}
+	return infoFrom(&meta, now)
+}
+
+// heartbeatAt reads the per-epoch heartbeat beside a lease record, falling back to the
+// value stamped at acquisition when nothing has renewed yet.
+func heartbeatAt(leaseDir string, meta *Meta) int64 {
+	b, err := os.ReadFile(filepath.Join(leaseDir, "hb."+strconv.FormatUint(meta.Epoch, 10)))
+	if err != nil {
+		return meta.RenewedAtMs
+	}
+	v, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if perr != nil || v < meta.RenewedAtMs {
+		return meta.RenewedAtMs
+	}
+	return v
+}
+
+// infoFrom builds the public view. Age is time HELD, from the acquirer's own stamp.
+func infoFrom(meta *Meta, now time.Time) Info {
+	age := now.Sub(time.UnixMilli(meta.AcquiredAtMs))
+	if age < 0 {
+		age = 0
+	}
+	return Info{
+		Held:      true,
+		Class:     meta.Class,
+		Epoch:     meta.Epoch,
+		PID:       meta.Holder.PID,
+		Age:       age,
+		Reason:    meta.Reason,
+		Origin:    meta.Origin,
+		JobID:     meta.JobID,
+		ExpiresAt: time.UnixMilli(meta.ExpiresAtMs),
+	}
+}
+
 // Inspect reports the current lease state. A reclaimable lease reports NOT held.
 func (m *Manager) Inspect() Info {
 	meta, err := m.readMeta()
@@ -433,7 +506,7 @@ func (m *Manager) Inspect() Info {
 		return Info{}
 	}
 	now := m.now()
-	if Reclaimable(meta, now, m.heartbeatTTL, m.procStart) {
+	if m.reclaimable(meta, now) {
 		return Info{}
 	}
 	age := now.Sub(time.UnixMilli(meta.AcquiredAtMs))
@@ -545,7 +618,7 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 			// acquirers each decide the other's half-written claim is garbage.
 			return nil, &ErrHeld{Info: Info{Held: true, Reason: "claim in progress"}}
 		}
-		if Reclaimable(meta, m.now(), m.heartbeatTTL, m.procStart) {
+		if m.reclaimable(meta, m.now()) {
 			// Remove only the CLAIM, never the container: another acquirer may be
 			// working inside this directory right now.
 			if err := os.Remove(m.metaPath()); err != nil && !os.IsNotExist(err) {
@@ -670,18 +743,44 @@ func (l *Lease) Check() error {
 }
 
 // Renew refreshes the heartbeat. A long holder should call this periodically; the
-// reclaim rule requires BOTH a stale heartbeat and an expired window, so missing a
-// few renewals inside the declared window is harmless by design.
+// reclaim rule requires BOTH a stale heartbeat and an expired window, so missing a few
+// renewals inside the declared window is harmless by design.
+//
+// THE HEARTBEAT LIVES IN ITS OWN PER-EPOCH FILE, not in the claim record. Renewing by
+// read-modify-writing meta.json is a read-then-write race: if a reclaim and a fresh
+// acquisition land between the read and the write, the OLD holder stamps its stale
+// record over the LIVE one, and the new holder's next Check() then fails while the
+// stale holder carries on — the same shape as the token race that let two parties hold
+// the card. Keying the heartbeat by epoch makes a stale writer harmless: it updates
+// hb.<its own epoch>, which nothing reads any more.
+//
+// This is only affordable because the heartbeat is now Go-only. Node no longer
+// implements staleness, so the mechanism can change without a cross-language contract.
 func (l *Lease) Renew() error {
 	if err := l.Check(); err != nil {
 		return err
 	}
-	meta, err := l.mgr.readMeta()
-	if err != nil || meta == nil {
-		return errors.New("gpulease: lease vanished during renew")
+	return os.WriteFile(l.mgr.heartbeatPath(l.epoch),
+		[]byte(strconv.FormatInt(l.mgr.now().UnixMilli(), 10)), 0o666)
+}
+
+// heartbeatPath is the per-epoch heartbeat file inside the lease directory.
+func (m *Manager) heartbeatPath(epoch uint64) string {
+	return filepath.Join(m.leaseDir(), "hb."+strconv.FormatUint(epoch, 10))
+}
+
+// lastHeartbeat returns the most recent heartbeat for this epoch, falling back to the
+// value stamped into the record at acquisition when nothing has renewed yet.
+func (m *Manager) lastHeartbeat(meta *Meta) int64 {
+	b, err := os.ReadFile(m.heartbeatPath(meta.Epoch))
+	if err != nil {
+		return meta.RenewedAtMs
 	}
-	meta.RenewedAtMs = l.mgr.now().UnixMilli()
-	return l.mgr.writeMeta(meta)
+	v, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if perr != nil || v < meta.RenewedAtMs {
+		return meta.RenewedAtMs
+	}
+	return v
 }
 
 // ReleaseByEpoch drops the CURRENT lease from a process that does not hold it (the
