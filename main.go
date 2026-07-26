@@ -46,7 +46,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.22.26"
+const version = "0.23.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -107,6 +107,8 @@ func main() {
 		err = runCalibrate(args)
 	case "health":
 		err = runHealth(args)
+	case "gpu":
+		err = runGPU(args)
 	case "train-router":
 		err = runTrainRouter(args)
 	case "shadow-label":
@@ -656,6 +658,15 @@ func runGenerateImage(args []string) error {
 		res := core.Result{OK: berr == nil && ok == len(items), Data: data}
 		if berr != nil {
 			res.Reason = berr.Error()
+			// A busy card is a DEFER, not a failure: the batch waited its window behind
+			// another holder and produced nothing, which is recoverable by retrying.
+			// Returning it as an error made the CLI exit non-zero, so any wrapper read a
+			// queued render as a broken one.
+			if pipeline.IsGPUBusy(berr) {
+				res.Deferred = true
+				res.Meta.ErrClass = "gpu_busy"
+				berr = nil
+			}
 		}
 		emitResult(res, *asJSON, "", *compactFlag)
 		return berr

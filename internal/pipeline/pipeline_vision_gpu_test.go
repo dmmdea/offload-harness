@@ -4,12 +4,13 @@ package pipeline
 // accounting. Evidence: 295 of the 337 all-time defers were http_5xx landing
 // in ONE hour while generate_image jobs held the single-slot GPU lock —
 // llama-swap could not (re)load the VLM, so every vision call burned a doomed
-// HTTP call and deferred to the expensive cloud model. Temp lock dirs + fake
+// HTTP call and DEFERRED, handing the work back to the calling session (the
+// harness never calls a cloud model itself). Temp lock dirs + fake
 // servers only; no real GPU work.
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,20 +22,40 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/breaker"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 )
 
-// holdGPULock creates a held lock exactly the way render/gpu-lock.mjs
-// acquireGpuLock does: mkdir + meta.json{pid,startedAt}, with OUR (live) pid so
-// the lock is genuinely held, not stale.
+// holdGPULock creates a held lease exactly the way internal/gpulease does: the lease
+// directory plus a meta.json in the SHARED record shape, with OUR (live) pid and a
+// fresh heartbeat so it is genuinely held, not stale.
+//
+// This used to write the legacy flat {pid,startedAt} shape that gpulock's own,
+// now-deleted parser understood. gpulock reads the shared record and applies the shared
+// staleness rule, so a fixture in the old shape parses to no holder and the gate reports
+// the card FREE — which is precisely the class of bug (a second definition of the
+// record) that the collapse removed.
 func holdGPULock(t *testing.T) string {
 	t.Helper()
-	lock := filepath.Join(t.TempDir(), "gpu.lock")
-	if err := os.Mkdir(lock, 0o755); err != nil {
+	lock := filepath.Join(t.TempDir(), "lease")
+	if err := os.MkdirAll(lock, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	meta := fmt.Sprintf(`{"pid":%d,"startedAt":%d}`, os.Getpid(), time.Now().UnixMilli())
-	if err := os.WriteFile(filepath.Join(lock, "meta.json"), []byte(meta), 0o644); err != nil {
+	now := time.Now()
+	meta := gpulease.Meta{
+		Epoch:        1,
+		Class:        gpulease.ClassMedia,
+		Holder:       gpulease.Holder{PID: os.Getpid()},
+		Reason:       "test generation job",
+		AcquiredAtMs: now.UnixMilli(),
+		RenewedAtMs:  now.UnixMilli(),
+		ExpiresAtMs:  now.Add(time.Hour).UnixMilli(),
+	}
+	b, err := json.Marshal(&meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lock, "meta.json"), b, 0o666); err != nil {
 		t.Fatal(err)
 	}
 	return lock

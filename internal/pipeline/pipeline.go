@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"math/rand"
@@ -35,6 +36,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/gbnf"
 	"github.com/dmmdea/offload-harness/internal/gpugen"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpulock"
 	"github.com/dmmdea/offload-harness/internal/grounding"
 	"github.com/dmmdea/offload-harness/internal/imagegen"
@@ -97,8 +99,9 @@ type Pipeline struct {
 	nowFn    func() time.Time
 	// LO-1 GPU-lock gate: vision calls check the render runners' single-slot GPU
 	// lock (internal/gpulock) BEFORE hitting llama-swap — while a generation job
-	// owns the GPU the VLM cannot (re)load, so calling anyway just burns an
-	// http_5xx defer to the expensive cloud model. gpuLockPath is resolved once
+	// owns the GPU the VLM cannot (re)load, so calling anyway just burns a doomed
+	// HTTP call and returns an http_5xx defer — which hands the work back to the
+	// calling session rather than calling any cloud model. gpuLockPath is resolved once
 	// in New (config override > GPU_LOCK env > tmpdir default, same as the .mjs
 	// runners); visionGPUWait/visionGPUPoll bound the pre-call wait; and
 	// visionRetryWait is the one-retry backoff on a vision http_5xx. The three
@@ -129,7 +132,7 @@ func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Le
 	p.stt = sttclient.New(cfg.Endpoint, time.Duration(cfg.STTRequestTimeoutSec)*time.Second)
 	// LO-1: resolve the shared GPU lock path ONCE, the same way the Node render
 	// runners do, so the vision gate watches the exact lock the gen jobs hold.
-	p.gpuLockPath = gpulock.Path(cfg.GPULockPath)
+	p.gpuLockPath = gpulock.Path(cfg.GPULockPath, cfg.StateDir)
 	p.visionGPUWait = time.Duration(cfg.VisionGPUWaitSec) * time.Second
 	p.visionGPUPoll = 2 * time.Second
 	p.visionRetryWait = 3 * time.Second
@@ -436,8 +439,9 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 	}
 	// LO-1: the VLM shares the 8GB GPU with the generation runners. If a gen job
 	// holds the single-slot lock, llama-swap CANNOT (re)load the vision model —
-	// during the Jul-1 incident every vision call 5xx'd and deferred to the
-	// expensive cloud model (295 of 337 all-time defers in ONE hour). Wait for
+	// during the Jul-1 incident every vision call 5xx'd and DEFERRED, handing the
+	// work back to the calling session (295 of 337 all-time defers in ONE hour;
+	// the harness itself never calls a cloud model). Wait for
 	// the slot (bounded, cheap dir-stat poll) instead of burning a doomed call;
 	// if it never frees, defer with a distinct, actionable reason.
 	if info := gpulock.WaitFree(ctx, p.gpuLockPath, p.visionGPUWait, p.visionGPUPoll); info.Held {
@@ -816,8 +820,13 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	// Passive fleet footprint: key this render by the machine's image binding
 	// (family + the O1 bf16 quant) so measured peaks accumulate during normal use.
 	imgFamily, imgQuant := imageFootprintKey(p.cfg)
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen", timeout, p.gpuWait())
+	if lerr != nil {
+		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
+	}
+	defer releaseLease()
 	outPath, gerr := imagegen.Generate(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, prompt, req.Params, model, timeout,
-		p.footprintSampling(imgFamily, imgQuant, "image-gen"), p.lockEnv()...)
+		p.footprintSampling(imgFamily, imgQuant, "image-gen"), leaseEnv...)
 	if gerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		meta.ErrClass = classifyErr(gerr)
@@ -887,7 +896,7 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 	out := paramStr(req.Params, "out")
 	if out == "" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
-		out = filepath.Join(p.cfg.MediaDir, "render-"+sha256hex(prompt+tasks.StableParamsKey(req.Params))[:8]+".png")
+		out = filepath.Join(p.cfg.MediaDir, "render-"+sha256hex(prompt + tasks.StableParamsKey(req.Params))[:8]+".png")
 	}
 	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second
 	m := imagegen.SdcppModel{
@@ -905,8 +914,13 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 		ExtraArgs: p.cfg.SdcppExtraArgs,
 	}
 	imgFamily, imgQuant := imageFootprintKey(p.cfg)
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen (sdcpp)", timeout, p.gpuWait())
+	if lerr != nil {
+		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
+	}
+	defer releaseLease()
 	outPath, gerr := imagegen.GenerateSdcpp(ctx, p.cfg.NodePath, script, out, prompt, req.Params, m, timeout,
-		p.footprintSampling(imgFamily, imgQuant, "image-gen"), p.lockEnv()...)
+		p.footprintSampling(imgFamily, imgQuant, "image-gen"), leaseEnv...)
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return deferf("image generation failed: " + gerr.Error())
@@ -981,14 +995,19 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 	out := paramStr(req.Params, "out")
 	if out == "" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
-		out = filepath.Join(p.cfg.MediaDir, "inpaint-"+sha256hex(image+prompt+tasks.StableParamsKey(req.Params))[:8]+".png")
+		out = filepath.Join(p.cfg.MediaDir, "inpaint-"+sha256hex(image + prompt + tasks.StableParamsKey(req.Params))[:8]+".png")
 	}
 	m := imagegen.InpaintModel{
 		Ckpt: p.cfg.InpaintCkpt, VAE: p.cfg.InpaintVAE, Steps: p.cfg.InpaintSteps,
 		CFG: p.cfg.InpaintCFG, Sampler: p.cfg.InpaintSampler, Scheduler: p.cfg.InpaintScheduler,
 	}
 	timeout := time.Duration(p.cfg.InpaintTimeoutSec) * time.Second
-	outPath, gerr := imagegen.Inpaint(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, image, mask, prompt, req.Params, m, timeout, p.lockEnv()...)
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("inpaint", timeout, p.gpuWait())
+	if lerr != nil {
+		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
+	}
+	defer releaseLease()
+	outPath, gerr := imagegen.Inpaint(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, image, mask, prompt, req.Params, m, timeout, leaseEnv...)
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return defer1("inpaint failed: " + gerr.Error())
@@ -1036,7 +1055,7 @@ func normalizeImageBatch(jobs []ImageBatchJob, mediaDir string) ([]ImageBatchJob
 			// negative): two jobs differing only in negative must not share an output
 			// path, or the second silently overwrites the first.
 			params := map[string]any{"seed": j.Seed, "width": j.Width, "height": j.Height, "steps": j.Steps, "negative": j.Negative}
-			j.Out = filepath.Join(mediaDir, "render-"+sha256hex(j.Prompt+tasks.StableParamsKey(params))[:8]+".png")
+			j.Out = filepath.Join(mediaDir, "render-"+sha256hex(j.Prompt + tasks.StableParamsKey(params))[:8]+".png")
 		}
 		norm[i] = j
 		line, _ := json.Marshal(j)
@@ -1142,7 +1161,17 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 	// The whole batch shares one timeout: per-image budget × N (the first job also
 	// absorbs the ComfyUI cold start, which the per-image budget already covers today).
 	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second * time.Duration(len(norm))
-	gerr := imagegen.GenerateBatch(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, jobsPath, resultsPath, model, timeout, p.lockEnv()...)
+	// ONE lease for the WHOLE batch. That is the point of batching: the tier is torn
+	// down once for N renders instead of once each, which is the arithmetic behind the
+	// 3,356 unloads in the server log.
+	// This helper returns items+error rather than a core.Result, so a busy card surfaces
+	// as an error for the caller to classify — no items were produced.
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen batch", timeout, p.gpuWait())
+	if lerr != nil {
+		return nil, lerr
+	}
+	defer releaseLease()
+	gerr := imagegen.GenerateBatch(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, jobsPath, resultsPath, model, timeout, leaseEnv...)
 
 	raw, _ := os.ReadFile(resultsPath) // best-effort even on gerr: partial results are real work
 	items := parseBatchResults(raw, norm)
@@ -1212,7 +1241,7 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 	// not pick paths; a stable name lets a re-run reuse one file.
 	if params.ResultPath == "" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
-		params.ResultPath = filepath.Join(p.cfg.MediaDir, "run-graph-"+sha256hex(params.GraphPath+params.ManifestPath)[:8]+".json")
+		params.ResultPath = filepath.Join(p.cfg.MediaDir, "run-graph-"+sha256hex(params.GraphPath + params.ManifestPath)[:8]+".json")
 	}
 	outDir, oerr := resolveOutDir(p.cfg.MediaDir, params.OutDir)
 	if oerr != nil {
@@ -1230,8 +1259,13 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second
 	// Passive fleet footprint: family from a payload-declared model_family (the
 	// fleet dispatch path threads it) else the generic comfy-graph bucket.
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("run-graph", timeout, p.gpuWait())
+	if lerr != nil {
+		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
+	}
+	defer releaseLease()
 	env, gerr := rungraph.Run(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, params, timeout,
-		p.footprintSampling(runGraphFootprintFamily(req.Params), "", "run-graph"), p.lockEnv()...)
+		p.footprintSampling(runGraphFootprintFamily(req.Params), "", "run-graph"), leaseEnv...)
 	if gerr != nil {
 		meta.ErrClass = gpugen.ClassifyErr(gerr)
 		return p.deferGen(req, meta, start, len(req.Input), "run-graph failed: "+gerr.Error())
@@ -1288,7 +1322,7 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	out := paramStr(req.Params, "out")
 	if out == "" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
-		out = filepath.Join(p.cfg.MediaDir, "video-"+sha256hex(prompt+tasks.StableParamsKey(req.Params))[:8]+".mp4")
+		out = filepath.Join(p.cfg.MediaDir, "video-"+sha256hex(prompt + tasks.StableParamsKey(req.Params))[:8]+".mp4")
 	}
 
 	// comfy-video.mjs CLI: <out> <still> "<prompt>" [--model ..] [--frames N] ...
@@ -1351,10 +1385,15 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.VideoGenTimeoutSec) * time.Second
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("video-gen", timeout, p.gpuWait())
+	if lerr != nil {
+		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
+	}
+	defer releaseLease()
 	// COMFY_WAIT_SEC aligns the render script's poll budget with the harness timeout
 	// (quality-first: the native recipe at 720p legitimately exceeds the script's old
 	// hardcoded ceiling; the Go timeout stays the hard stop).
-	env := p.genEnv(p.cfg.VideoGenWaitMs)
+	env := append(p.genEnv(), leaseEnv...)
 	if timeout > 0 {
 		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
 	}
@@ -1435,7 +1474,7 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	out := paramStr(req.Params, "out")
 	if out == "" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
-		out = filepath.Join(p.cfg.MediaDir, kind+"-"+sha256hex(text+tasks.StableParamsKey(req.Params))[:8]+ext)
+		out = filepath.Join(p.cfg.MediaDir, kind+"-"+sha256hex(text + tasks.StableParamsKey(req.Params))[:8]+ext)
 	}
 
 	// CLI: tts.mjs <out> "<text>" [--clone ref] [--lang es]
@@ -1498,13 +1537,18 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.AudioGenTimeoutSec) * time.Second
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("audio-gen ("+kind+")", timeout, p.gpuWait())
+	if lerr != nil {
+		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
+	}
+	defer releaseLease()
 	// voice never starts ComfyUI → skip the post-run ComfyUI /free (still tree-kills
 	// the python worker on timeout). music drives ComfyUI → keep the /free.
 	spec := gpugen.Spec{
 		Exe:           p.cfg.NodePath,
 		Script:        script,
 		Args:          args,
-		Env:           p.genEnv(p.cfg.AudioGenWaitMs),
+		Env:           append(p.genEnv(), leaseEnv...),
 		Out:           out,
 		Timeout:       timeout,
 		SkipFreeComfy: kind == "voice",
@@ -1544,31 +1588,288 @@ func appendVoiceRecipe(args []string, cfg config.Config) []string {
 	return args
 }
 
-// genEnv builds the extra env for a GPU-gen child: COMFY_DIR + the per-task GPU-lock
-// wait window (GPU_LOCK_WAIT_MS, so a queued TTS isn't starved by a long video job)
-// + MEMORY_STACK (invariant 1: the CPU-only models freeLlamaSwap must never unload,
-// sourced from config not a buried const). waitMs<=0 omits the wait override (runner
-// default applies).
-func (p *Pipeline) genEnv(waitMs int) []string {
+// genEnv builds the extra env for a GPU-gen child: COMFY_DIR + MEMORY_STACK
+// (invariant 1: the CPU-only models freeLlamaSwap must never unload, sourced from
+// config rather than a buried const).
+//
+// It does NOT carry the lease. Callers append the env returned by acquireMediaLease,
+// which is the only thing that makes a runner willing to touch the GPU — keeping the
+// two separate is what makes "did this call site take a lease?" answerable by reading
+// the call site. There is no longer a GPU_LOCK_WAIT_MS: queueing moved to the Go side
+// with the acquisition, and the runners never read that variable.
+func (p *Pipeline) genEnv() []string {
 	env := []string{"COMFY_DIR=" + p.cfg.ComfyDir}
-	if waitMs > 0 {
-		env = append(env, "GPU_LOCK_WAIT_MS="+strconv.Itoa(waitMs))
-	}
 	if len(p.cfg.MemoryStack) > 0 {
 		env = append(env, "MEMORY_STACK="+strings.Join(p.cfg.MemoryStack, ","))
 	}
-	return append(env, p.lockEnv()...)
+	return env
+}
+
+// gpuWait is how long a GPU task may queue behind the current holder before deferring.
+// One ceiling for every task: per-task overrides bought nothing at 90s and would have
+// silently restored the old 20-minute video wait from every existing config file.
+// Zero means a single try.
+func (p *Pipeline) gpuWait() time.Duration {
+	if p.cfg.GPUWaitMs <= 0 {
+		return 0
+	}
+	return time.Duration(p.cfg.GPUWaitMs) * time.Millisecond
 }
 
 // lockEnv threads a configured GPU-lock override to a render runner as the
 // GPU_LOCK env, so the Go-side vision gate (LO-1) and the Node runners always
 // contend on the SAME lock path. Empty when gpu_lock_path is unset — both
-// sides then resolve the identical GPU_LOCK-env/tmpdir default on their own.
+// sides then resolve the identical default on their own via gpulease.LeaseDir.
 func (p *Pipeline) lockEnv() []string {
 	if p.cfg.GPULockPath != "" {
 		return []string{"GPU_LOCK=" + p.cfg.GPULockPath}
 	}
 	return nil
+}
+
+// ambientLeaseEnv reports the lease this process is ALREADY running under, if any.
+//
+// `local-offload gpu reserve --class media -- local-offload …` is a documented
+// standalone flow: the reserve verb takes the lease and runs the harness as its CHILD,
+// threading GPU_LEASE_DIR/EPOCH/CLASS down. Acquiring again inside that child is a
+// self-deadlock — the parent holds the only slot, so the child queues behind itself
+// until its window lapses and then defers. Inheriting is also the right semantic: the
+// operator asked for ONE reservation to cover the whole command.
+//
+// (nil, nil) means no ambient lease — acquire normally. A lease that is PRESENT but no
+// longer current is an error, not an inheritance: the parent was fenced out, so nothing
+// is protecting the card and a silent fresh acquisition would hide that.
+func ambientLeaseEnv() ([]string, error) {
+	dir := strings.TrimSpace(os.Getenv("GPU_LEASE_DIR"))
+	rawEpoch := strings.TrimSpace(os.Getenv("GPU_LEASE_EPOCH"))
+	class := strings.TrimSpace(os.Getenv("GPU_LEASE_CLASS"))
+	if dir == "" && rawEpoch == "" && class == "" {
+		return nil, nil
+	}
+	if dir == "" || rawEpoch == "" || class == "" {
+		return nil, fmt.Errorf("inherited gpu lease is incomplete (GPU_LEASE_DIR=%q EPOCH=%q CLASS=%q); "+
+			"refusing to render unarbitrated", dir, rawEpoch, class)
+	}
+	epoch, perr := strconv.ParseUint(rawEpoch, 10, 64)
+	if perr != nil || epoch == 0 {
+		return nil, fmt.Errorf("inherited gpu lease epoch %q is not a fencing token; refusing to render unarbitrated", rawEpoch)
+	}
+	if !gpulease.Class(class).Valid() {
+		return nil, fmt.Errorf("inherited gpu lease class %q is unknown; refusing to render unarbitrated", class)
+	}
+	// The fence, applied at the boundary: an epoch that is no longer current means the
+	// card was handed to somebody else while our parent was suspended.
+	if info := gpulease.InspectDir(dir); !info.Held || info.Epoch != epoch {
+		return nil, fmt.Errorf("inherited gpu lease (epoch %d) is no longer current at %s; "+
+			"the card was handed to another holder", epoch, dir)
+	}
+	return []string{
+		"GPU_LEASE_DIR=" + dir,
+		"GPU_LEASE_EPOCH=" + rawEpoch,
+		"GPU_LEASE_CLASS=" + class,
+	}, nil
+}
+
+// mediaSlot is the IN-PROCESS half of GPU mutual exclusion: one media job at a time
+// inside this process, whatever else is true.
+//
+// The file claim serializes across processes. An INHERITED lease has no claim to
+// contend on — every job under `gpu reserve -- <cmd>` already holds the same one — so
+// without this, concurrency inside one process is unarbitrated. That is fine for the
+// one-shot command the wrapper was written for and wrong for a long-running server:
+// fleet-serve runs Pipeline.Run inline in a net/http handler goroutine, so two
+// dispatches under one reservation would both proceed, spawn two ComfyUI instances on
+// one card, and race the unload election so one render runs with models still resident
+// — precisely the condition the lease exists to prevent. The docs also recommend the
+// wrapper form, which steers straight into it.
+//
+// It is a buffered channel rather than a Mutex for two reasons: a waiter BLOCKS instead
+// of polling (no timers, no wakeups, no file reads — it is handed the slot the moment
+// the holder releases), and the wait can be bounded, which a Mutex cannot.
+//
+// LOCK ORDER IS ALWAYS slot -> file lease, never the reverse, so the two cannot deadlock.
+var mediaSlot = make(chan struct{}, 1)
+
+// takeMediaSlot claims the in-process slot, waiting at most wait. Reports false on
+// timeout, which the caller turns into the same clean defer a busy card produces.
+func takeMediaSlot(wait time.Duration) bool {
+	select {
+	case mediaSlot <- struct{}{}:
+		return true // free: no timer allocated at all in the common case
+	default:
+	}
+	if wait <= 0 {
+		return false
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case mediaSlot <- struct{}{}:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func releaseMediaSlot() { <-mediaSlot }
+
+// errGPUBusy reports that the card is legitimately held by someone else. Callers turn
+// it into a clean defer rather than a failure — the work is not broken, it waited its
+// window behind a holder.
+//
+// detail is set when the holder is another job in THIS process, where there is no lease
+// record to describe — the machine-wide Info would name our own lease and read as
+// nonsense.
+type errGPUBusy struct {
+	info   gpulease.Info
+	detail string
+}
+
+func (e *errGPUBusy) Error() string {
+	if e.detail != "" {
+		return "gpu busy: " + e.detail
+	}
+	return fmt.Sprintf("gpu busy: %s holds the lease (%ds, reason %q)",
+		e.info.Class, int(e.info.Age/time.Second), e.info.Reason)
+}
+
+// IsGPUBusy reports whether err means the card was legitimately held by someone else
+// for the whole wait window — the work is intact and was queued, not broken.
+//
+// It is exported because errGPUBusy is unexported and RunImageBatch returns an error
+// rather than a core.Result: with no predicate the CLI turned a busy card into a hard
+// failure and exited non-zero, which is precisely what a defer exists to avoid.
+func IsGPUBusy(err error) bool {
+	var busy *errGPUBusy
+	return errors.As(err, &busy)
+}
+
+// deferForLease turns a lease-acquisition failure into the same clean defer the render
+// runner used to produce on a busy card — but WITHOUT spawning a process that could
+// only have queued and timed out. A busy card is not a failure, it is work behind a
+// holder; an unusable lease location is a configuration fault and is classed apart so
+// the two are distinguishable in the ledger.
+func (p *Pipeline) deferForLease(err error, task core.TaskType, meta core.Meta, inputChars int, start time.Time) core.Result {
+	meta.LatencyMs = time.Since(start).Milliseconds()
+	var busy *errGPUBusy
+	if errors.As(err, &busy) {
+		meta.ErrClass = "gpu_busy"
+	} else {
+		meta.ErrClass = "gpu_lease_unavailable"
+	}
+	p.recordDefer(task, meta, inputChars, err.Error())
+	return core.Deferf(err.Error(), "", meta)
+}
+
+// acquireMediaLease takes the machine-wide MEDIA lease for one generation job and
+// returns the env that hands it down to the render runner, plus a release func.
+//
+// THIS IS WHERE ARBITRATION MOVED TO. Acquisition used to live only in
+// render/gpu-lock.mjs, which meant the Go side could not refuse a job before spawning
+// it, and — because two languages each implemented the rules — the two disagreed about
+// who owned the card. The Go side now acquires and the runner INHERITS
+// (GPU_LEASE_DIR/EPOCH/CLASS), so there is exactly one implementation.
+//
+// A busy card is QUEUED for up to `wait` and only then returns *errGPUBusy, so the
+// caller defers with the holder's detail instead of spawning a process that could only
+// have waited and timed out. The heartbeat keeps a long render's lease alive; the
+// reclaim rule needs both a stale heartbeat and an expired window, so a missed tick
+// inside the declared window is harmless.
+func (p *Pipeline) acquireMediaLease(reason string, ttl, wait time.Duration) ([]string, func(), error) {
+	noop := func() {}
+	start := time.Now()
+
+	// THE IN-PROCESS SLOT COMES FIRST, on both paths. Blocking here is free — no timer
+	// in the uncontended case, no polling in the contended one — and it is the only
+	// thing arbitrating two jobs that INHERIT the same lease. See mediaSlot.
+	if !takeMediaSlot(wait) {
+		return nil, noop, &errGPUBusy{detail: fmt.Sprintf(
+			"another generation job in this process still holds the card after %s", wait)}
+	}
+	slotHeld := true
+	defer func() {
+		// Every failure path below must give the slot back, or the first bad lease
+		// wedges every later job in this process.
+		if slotHeld {
+			releaseMediaSlot()
+		}
+	}()
+
+	// Already inside someone's lease? Inherit it. Acquiring again would queue behind
+	// ourselves until the window lapsed.
+	inherited, ierr := ambientLeaseEnv()
+	if ierr != nil {
+		return nil, noop, ierr
+	}
+	if inherited != nil {
+		// The holder above us owns renewal and release; doing either here would drop a
+		// lease that is not ours. The slot is still ours to give back.
+		slotHeld = false
+		var once sync.Once
+		return append(inherited, p.lockEnv()...), func() { once.Do(releaseMediaSlot) }, nil
+	}
+	m, err := gpulease.OpenAt(p.cfg.GPULockPath, p.cfg.StateDir)
+	if err != nil {
+		// Refuse rather than run unarbitrated. This is the fail-closed half of the
+		// design: an unusable lease location means we cannot promise mutual exclusion,
+		// and quietly rendering anyway is exactly the behaviour that let a job tear the
+		// text tier down. The message names the fix (state_dir).
+		return nil, noop, err
+	}
+	// Spend only what is LEFT of the window on the machine-wide lease, so the two waits
+	// compose into the one budget the caller asked for rather than doubling it.
+	remaining := wait - time.Since(start)
+	if remaining < 0 {
+		remaining = 0
+	}
+	lease, err := m.Acquire(gpulease.ClassMedia, gpulease.Options{
+		Reason: reason, Origin: "pipeline", TTL: ttl, Wait: remaining,
+	})
+	if err != nil {
+		var held *gpulease.ErrHeld
+		if errors.As(err, &held) {
+			return nil, noop, &errGPUBusy{info: held.Info}
+		}
+		return nil, noop, err
+	}
+
+	// The heartbeat exists only while a render is actually running, and one media job
+	// runs at a time per process, so this is at most ONE 15s timer for the duration of
+	// GPU work that lasts minutes. Nothing ticks while the harness is idle.
+	stop := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		t := time.NewTicker(15 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				_ = lease.Renew()
+			}
+		}
+	}()
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			close(stop)
+			// JOIN, do not just signal. Release mutates the Lease that a Renew() already
+			// in flight is reading, and it would also let that Renew re-create the
+			// heartbeat file after the release swept it. Waiting costs microseconds.
+			<-stopped
+			_ = lease.Release()
+			releaseMediaSlot()
+		})
+	}
+	slotHeld = false
+	env := []string{
+		"GPU_LEASE_DIR=" + lease.Dir(),
+		"GPU_LEASE_EPOCH=" + strconv.FormatUint(lease.Epoch(), 10),
+		"GPU_LEASE_CLASS=" + string(lease.Class()),
+	}
+	return append(env, p.lockEnv()...), release, nil
 }
 
 // footprintsPath resolves the shared fleet footprint store path: a

@@ -22,13 +22,13 @@ func TestBreakerFailureGlue(t *testing.T) {
 		coldSwap bool
 		want     bool
 	}{
-		{"timeout", true, false},      // cold-swap timeout: exempt
-		{"timeout", false, true},      // warm timeout: counts
-		{"conn_refused", true, true},  // server down is never a swap
-		{"http_5xx", true, true},      // load failure 5xx counts
-		{"oom", true, true},           // OOM counts
-		{"", true, false},             // quality defer never counts
-		{"", false, false},            // success never counts
+		{"timeout", true, false},     // cold-swap timeout: exempt
+		{"timeout", false, true},     // warm timeout: counts
+		{"conn_refused", true, true}, // server down is never a swap
+		{"http_5xx", true, true},     // load failure 5xx counts
+		{"oom", true, true},          // OOM counts
+		{"", true, false},            // quality defer never counts
+		{"", false, false},           // success never counts
 	}
 	for _, tc := range cases {
 		if got := breakerFailure(tc.errClass, tc.coldSwap); got != tc.want {
