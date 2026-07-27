@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -83,9 +85,14 @@ func TestStatusDiscoversLocalCapability(t *testing.T) {
 	if media == nil {
 		t.Fatalf("missing media section: %v", m)
 	}
-	for _, k := range []string{"edit_pil", "edit_gimp", "media_ffmpeg"} {
-		if _, ok := media[k].(bool); !ok {
-			t.Errorf("media.%s must be a present/absent bool, got %v", k, media[k])
+	routes, _ := media["routes"].(map[string]any)
+	if routes == nil {
+		t.Fatalf("missing media.routes: %v", media)
+	}
+	for _, k := range []string{"generate_image", "generate_video", "edit_image", "media"} {
+		e, _ := routes[k].(map[string]any)
+		if e == nil || e["state"] == "" || e["engine"] == "" {
+			t.Errorf("media.routes.%s must carry a derived state + engine, got %v", k, routes[k])
 		}
 	}
 
@@ -98,6 +105,41 @@ func TestStatusDiscoversLocalCapability(t *testing.T) {
 	}
 	if remote["nim_endpoint"] != cfg.NIMEndpoint {
 		t.Errorf("nim_endpoint = %v, want %v", remote["nim_endpoint"], cfg.NIMEndpoint)
+	}
+}
+
+// TestStatusMediaIsDerivedNotDeclared: this block used to state
+// "image_engine": "ComfyUI (local)" as a constant and hand it to an autonomous
+// planner on a node running stable-diffusion.cpp with no ComfyUI installed. The
+// engine must follow the machine's binding, and the declared strings must be
+// gone — a capability map the planner acts on is worse wrong than absent.
+func TestStatusMediaIsDerivedNotDeclared(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "sd-cli")
+	if err := os.WriteFile(bin, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Endpoint = "http://127.0.0.1:1"
+	cfg.ImageGenEngine = "sdcpp"
+	cfg.SdcppBin = bin
+	cfg.SdcppModel = bin // any existing file: this asserts the ENGINE, not the model
+
+	s := New(pipeline.New(cfg, nil, nil, nil))
+	res, err := s.handleStatus(context.Background(), callReq(`{}`))
+	if err != nil {
+		t.Fatalf("handleStatus error: %v", err)
+	}
+	m := decodeResult(t, res)
+	media, _ := m["media"].(map[string]any)
+	routes, _ := media["routes"].(map[string]any)
+	img, _ := routes["generate_image"].(map[string]any)
+	if img == nil || img["engine"] != "sdcpp" {
+		t.Fatalf("generate_image engine must come from imagegen_engine, got %v", routes["generate_image"])
+	}
+	for _, declared := range []string{"image_engine", "video_engine", "audio_voice_engine", "audio_music_engine", "edit_pil", "edit_gimp", "media_ffmpeg"} {
+		if _, ok := media[declared]; ok {
+			t.Errorf("media.%s is a DECLARED capability and must not be reported", declared)
+		}
 	}
 }
 

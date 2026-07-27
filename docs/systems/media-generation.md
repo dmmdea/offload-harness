@@ -165,11 +165,38 @@ node packs, which is a trusted-caller interface by design — see
 [ADR 0007](../architecture/decisions/0007-host-torch-pinned-additive-provisioning.md) for what
 protects the environment from it.
 
+## Capability is derived, never declared
+
+`internal/mediacap` answers "what can this box actually render?" from the bindings themselves and
+the files they name — the same gates the pipeline routes on. Three verdicts per route:
+
+| Verdict | Meaning | Is it a fault? |
+|---|---|---|
+| `CONFIGURED` | bound, and every file it names exists | no |
+| `NOT CONFIGURED` | no binding on this box; the task defers by design | no |
+| `BOUND-BUT-MISSING` | the config names a file that is not there | **yes** — the task defers at call time |
+
+Both reporting surfaces read from it: `local-offload doctor`'s media section (a
+`BOUND-BUT-MISSING` route exits non-zero) and the MCP `offload_status` tool's `media.routes`.
+Neither states an engine as a constant any more. That mattered on a real node: `offload_status`
+hardcoded `"image_engine": "ComfyUI (local)"` and shipped it to an autonomous planner on a box whose
+`imagegen_engine` is `sdcpp` and which has no ComfyUI at all, while `doctor` — checking model
+aliases only — stayed green as `generate_image` deferred on a render script that was not on disk.
+A capability map a planner acts on is worse wrong than absent.
+
+Relative script bindings are resolved against the **executable's** directory (`gpugen.ResolveScript`'s
+rule, shared via `ResolveScriptIn`), so the verdict answers the same question the runner will ask.
+`node` and `comfy_dir` are reported as prereq rows, and only when a bound route actually needs them —
+an sdcpp-only box is never told it is missing ComfyUI. Model-alias routes (vision/STT) are
+deliberately absent: their reachability is a live `/v1/models` question that doctor's alias diff
+already answers.
+
 ## Observability and debugging
 
 Look at the lock directory first when jobs will not start — a leaked lock blocks everything on the
 machine. ComfyUI's own logs cover render failures. `fleet-measure` prints observed VRAM peaks per
-task.
+task. `local-offload doctor` prints the derived media routes above before it probes the endpoint,
+so a broken binding surfaces even when llama-swap is down.
 
 ## Testing notes
 
@@ -198,6 +225,8 @@ and defer paths.
 - [`internal/pipeline/inpaint_autotext.go`](../../internal/pipeline/inpaint_autotext.go) — auto-text
   localization and its validation envelope
 - [`internal/imagegen/`](../../internal/imagegen/), [`internal/gpugen/`](../../internal/gpugen/)
+- [`internal/mediacap/mediacap.go`](../../internal/mediacap/mediacap.go) — derived capability, one
+  source for both `doctor` and `offload_status`
 
 ## Related docs
 

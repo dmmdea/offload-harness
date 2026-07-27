@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,7 +18,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/core"
-	"github.com/dmmdea/offload-harness/internal/mediaops"
+	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
@@ -124,7 +123,7 @@ func (s *Server) Run(ctx context.Context, version string) error {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_generate_image",
-		Description: "Generate an IMAGE from a text prompt on the LOCAL ComfyUI for FREE — no cloud, runs on the local GPU, using THIS machine's configured model at its highest-quality settings (see offload_status media; e.g. HiDream-O1 bf16 at native 2048 via its official graph, or SDXL on smaller boxes). QUALITY-FIRST: renders can take many minutes — that is intended; do not lower steps/resolution to speed things up unless the caller explicitly asks for a draft. prompt is required (prose sentences beat tag lists on DiT models; quoted text renders as literal text); optional: negative (active on models served with real CFG), width/height (default = the model's native resolution), steps, seed, out. It auto-starts ComfyUI and takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait. Returns {image_path, width, height, seed}. On any failure it returns deferred:true — then generate the image another way.",
+		Description: "Generate an IMAGE from a text prompt on THIS machine's LOCAL image engine for FREE — no cloud, runs on the local GPU, using its configured model at its highest-quality settings (the engine is ComfyUI or stable-diffusion.cpp per machine; offload_status media.routes reports which one is bound here — e.g. HiDream-O1 bf16 at native 2048 via its official graph, SDXL on smaller boxes). QUALITY-FIRST: renders can take many minutes — that is intended; do not lower steps/resolution to speed things up unless the caller explicitly asks for a draft. prompt is required (prose sentences beat tag lists on DiT models; quoted text renders as literal text); optional: negative (active on models served with real CFG), width/height (default = the model's native resolution), steps, seed, out. It takes the shared single-slot GPU lock (and, on the ComfyUI engine, auto-starts ComfyUI), so it serializes with other local gen/inference and may wait. Returns {image_path, width, height, seed}. On any failure it returns deferred:true — then generate the image another way.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"positive text prompt describing the image"},"negative":{"type":"string","description":"hard exclusions, e.g. people, text, watermark"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"},"width":{"type":"integer","description":"width px (default 1024)"},"height":{"type":"integer","description":"height px (default 1024)"},"steps":{"type":"integer","description":"sampler steps (default 30)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"}},"required":["prompt"]}`),
 	}, s.handleGenerateImage)
 
@@ -227,34 +226,20 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 		local["served_now"] = ids
 	}
 
-	// edit/media engine presence (existence-checked, per this machine's config).
-	editPy := mediaops.ResolveEditPython(cfg.EditPython, cfg.ComfyDir)
-	gimpPresent := false
-	if cfg.GimpConsolePath != "" {
-		if _, err := os.Stat(cfg.GimpConsolePath); err == nil {
-			gimpPresent = true
-		}
-	}
-	ffmpegPresent := false
-	if cfg.FFmpegPath != "" {
-		if _, err := os.Stat(cfg.FFmpegPath); err == nil {
-			ffmpegPresent = true
-		} else if _, err := exec.LookPath(cfg.FFmpegPath); err == nil {
-			ffmpegPresent = true // bare "ffmpeg" resolved via PATH
-		}
-	}
+	// Media capability is DERIVED from this machine's bindings and the files they
+	// name (internal/mediacap) — never declared. This block used to state
+	// "image_engine": "ComfyUI (local)" as a constant, and shipped that to an
+	// autonomous planner on a node whose imagegen_engine is stable-diffusion.cpp
+	// and which has no ComfyUI installed at all. A capability map the planner acts
+	// on is worse wrong than absent.
 	media := map[string]any{
-		"image_engine":        "ComfyUI (local)",
+		"routes":              mediacap.Map(mediacap.Routes(cfg)),
 		"image_ckpt":          cfg.ImageGenCkpt, // "" = the render script's default checkpoint
-		"video_engine":        "ComfyUI Wan 2.2 I2V (local; model:hunyuan opt-in)",
 		"video_upscale_model": cfg.VideoGenUpscaleModel,
-		"audio_voice_engine":  "Chatterbox TTS (local)",
-		"audio_music_engine":  "ACE-Step (local)",
-		"svg_engine":          "deterministic component kit (local, no model)",
-		"edit_pil":            editPy != "", // offload_edit_image pipeline engine
-		"edit_gimp":           gimpPresent,  // flatten_design (.xcf/.psd) engine
-		"media_ffmpeg":        ffmpegPresent, // offload_media engine
-		"note":                "media tools defer cleanly when this machine lacks the engine/files",
+		"svg_engine":          "deterministic component kit (in-process Go, no model, no engine)",
+		"note": "routes are derived from THIS machine's config: CONFIGURED = bound and the file exists; " +
+			"BOUND-BUT-MISSING = the configured path is absent, so that task defers when called; " +
+			"NOT CONFIGURED = no route on this box. vqa/ocr/transcribe ride the vision/stt models in local.roster.",
 	}
 
 	remote := map[string]any{
