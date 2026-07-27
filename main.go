@@ -47,10 +47,16 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.27.0"
+const version = "0.27.1"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
+
+// docs/tiers/ is rendered from setup/templates/profiles.json so the per-tier pages
+// can never drift from the table that drives the installer (LO-17's lesson, applied
+// to documentation): regenerate with `go generate ./...`; TestTierDocsAreCurrent
+// fails the build if the checked-in tree is stale.
+//go:generate go run ./cmd/gentiers .
 
 func main() {
 	sub, args, ok := hoistGlobalConfig(os.Args[1:])
