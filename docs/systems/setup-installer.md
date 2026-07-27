@@ -180,6 +180,36 @@ it is rather than re-deriving it. Wiring the choice into `install.ps1` (and reco
 `installed.json`) needs the bootstrap to fetch the binary before it picks a target, and belongs with
 the detection move — this verb is the decision engine those wrappers will call.
 
+### Classification without PowerShell (`install detect` / `install plan`)
+
+`setup/detect.ps1`'s second statement refuses to run anywhere but Windows, so a Linux
+box could never be told what it IS — and its serving topology, resident tier and media
+bindings had to be hand-derived. On the measured Linux node the first two hand-derived
+topologies were both wrong in ways that broke chat.
+
+```
+local-offload install detect            # what is this machine, and which tier?
+local-offload install plan              # ...and what would an install bind here?
+```
+
+Both are read-only: probe, classify, print. `--json` feeds a wrapper.
+
+`internal/hwdetect.Classify` is a **straight port of `Get-Profile`** — same order, same
+bands — and `ArchFromName` ports `Get-Arch` rule for rule, because the rule ORDER is the
+logic (an "RTX PRO 5000 Blackwell" must not fall through to the RTX-50xx rule it does not
+match). Both are verified against the same table `detect.tests.ps1` asserts, so a
+machine's tier cannot depend on which implementation asked. `detect.ps1` remains the
+Windows install path until the wrapper work lands; this is what makes a non-Windows
+install possible at all.
+
+Detection prefers `nvidia-smi` and falls back per OS (CIM on Windows, DRM sysfs + lspci on
+Linux) — an AMD box that cannot be identified must never be silently called `cpu`, which
+would strip it of the entire Vulkan serving path.
+
+Verified on the fleet: Qube → `blackwell-16` (RTX 5060 Ti, 15.9 GB), the Aorus →
+`ampere-8` (RTX 3070 Laptop, 8 GB), and the Linux node → `ampere-6` (RTX 3050, 6 GB),
+each matching the tier it actually runs.
+
 ### Tier media seeds (`local-offload install seed`)
 
 A tier's `config_seed` is the media/config fragment a fresh install of that hardware class

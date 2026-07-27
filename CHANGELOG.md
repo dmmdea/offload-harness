@@ -4,6 +4,27 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.30.0] - 2026-07-27
+
+### Added — a machine can be classified without PowerShell (W3, first slice)
+- **`internal/hwdetect` + `local-offload install detect` / `install plan`.** `setup/detect.ps1`
+  refuses to run off Windows (`if ($os -ne 'windows') { Write-Error ...; exit 1 }`), so a Linux box
+  could never be told what it IS — and its serving topology, resident tier and media bindings had to
+  be hand-derived. On the measured Linux node the first two hand-derived topologies were both wrong
+  in ways that broke chat.
+  - `Classify` is a **straight port of `Get-Profile`** and `ArchFromName` of `Get-Arch`, rule order
+    included (the order IS the logic: "RTX PRO 5000 Blackwell" must not fall through to the RTX-50xx
+    rule it does not match). Both are asserted against the SAME table `detect.tests.ps1` uses — 14
+    arch cases and 20 profile cases — so a machine's tier cannot depend on which implementation asked.
+  - Detection prefers `nvidia-smi`, then falls back per OS (CIM on Windows, DRM sysfs + `lspci` on
+    Linux). An AMD box that cannot be identified must never be silently called `cpu`: that would
+    strip it of the entire Vulkan serving path. Covered by a test.
+  - `install plan` composes the two halves that already existed — the classified tier and the media
+    seed that tier renders for this OS — into "what would an install do here", read-only.
+  - **Verified on the whole fleet:** Qube → `blackwell-16` (RTX 5060 Ti, 15.9 GB), Aorus →
+    `ampere-8` (RTX 3070 Laptop, 8 GB), Linux node → `ampere-6` (RTX 3050, 6 GB). Each matches the
+    tier that box actually runs, and the Linux one had no way to answer at all before.
+
 ## [0.29.0] - 2026-07-27
 
 ### Added — a tier is a hardware class, not a Windows class (W4, first slice)

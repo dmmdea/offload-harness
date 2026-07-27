@@ -20,15 +20,19 @@ import (
 // live? The answer was previously "$HOME", i.e. the OS drive, on every machine.
 func runInstall(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("install needs a subcommand: volumes")
+		return fmt.Errorf("install needs a subcommand: detect, plan, volumes, seed")
 	}
 	switch args[0] {
+	case "detect":
+		return runInstallDetect(args[1:])
+	case "plan":
+		return runInstallPlan(args[1:])
 	case "volumes":
 		return runInstallVolumes(args[1:])
 	case "seed":
 		return runInstallSeed(args[1:])
 	default:
-		return fmt.Errorf("unknown install subcommand %q (have: volumes, seed)", args[0])
+		return fmt.Errorf("unknown install subcommand %q (have: detect, plan, volumes, seed)", args[0])
 	}
 }
 
