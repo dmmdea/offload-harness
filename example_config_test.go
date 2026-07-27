@@ -20,6 +20,15 @@ func TestConfigExampleRoundTrips(t *testing.T) {
 		t.Fatal(err)
 	}
 	def := config.Default()
+	// comfy_dir is the ONE platform-dependent default (config.DefaultComfyDir): the
+	// committed example is the Windows reference, while Default() is unbound off Windows
+	// so a non-Windows box reports NOT CONFIGURED instead of a path that cannot exist.
+	// Pin the example's value explicitly, then normalize so the whole-struct drift guard
+	// still covers every other field on every OS.
+	if cfg.ComfyDir != "C:/ComfyUI" {
+		t.Fatalf("config.example.json comfy_dir = %q, want the Windows reference \"C:/ComfyUI\" — regenerate with `go generate .` on Windows", cfg.ComfyDir)
+	}
+	def.ComfyDir = cfg.ComfyDir
 	if !reflect.DeepEqual(cfg, def) {
 		t.Fatalf("config.example.json does not round-trip to config.Default() — regenerate with `go generate .`\n got: %+v\nwant: %+v", cfg, def)
 	}

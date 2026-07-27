@@ -10,7 +10,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withGpuSlot, freeComfy as _freeComfy } from "./gpu-lock.mjs";
-import { comfyUp as _comfyUp, ensureComfy as _ensureComfy } from "./comfy-lifecycle.mjs";
+import { comfyUp as _comfyUp, ensureComfy as _ensureComfy, resolveComfyDir, resolveComfyPy } from "./comfy-lifecycle.mjs";
 import { parseManifest as _parse, manifestHash as _hash } from "./manifest.mjs";
 import { satisfyManifest, defaultSatisfyDeps } from "./manifest-satisfy.mjs";
 import { preflightGraph } from "./preflight-graph-file.mjs";
@@ -142,13 +142,16 @@ async function main() {
   const argv = process.argv.slice(2); const flags = {};
   for (let i = 0; i < argv.length; i++) if (argv[i].startsWith("--")) { flags[argv[i].slice(2)] = argv[i + 1]; i++; }
   const api = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
-  const comfyDir = process.env.COMFY_DIR || "C:/ComfyUI";
+  const comfyDir = resolveComfyDir();
   const graph = JSON.parse(readFileSync(flags.graph, "utf8"));
   const manifest = flags.manifest ? JSON.parse(readFileSync(flags.manifest, "utf8")) : { node_packs: [], models: [] };
   const reserveVram = flags["reserve-vram"];
 
   const j = async (url, opts) => { const r = await fetch(url, opts); if (!r.ok) throw new Error(url + " " + r.status); return r.json(); };
-  const comfyPy = process.env.COMFY_PY || join(comfyDir, ".venv/Scripts/python.exe");
+  // Shared with the lifecycle module: this line used to hardcode the Windows venv path
+  // with no candidate list and no existence check, so run_graph spawned a binary that
+  // cannot exist on Linux — advertised to the fleet, broken on arrival.
+  const comfyPy = resolveComfyPy(comfyDir);
   const cmCli = process.env.COMFY_CM_CLI || join(comfyDir, "custom_nodes/ComfyUI-Manager/cm-cli.py");
   const satDeps = defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli });
 
