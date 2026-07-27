@@ -180,6 +180,28 @@ it is rather than re-deriving it. Wiring the choice into `install.ps1` (and reco
 `installed.json`) needs the bootstrap to fetch the binary before it picks a target, and belongs with
 the detection move — this verb is the decision engine those wrappers will call.
 
+### Relocating an install: one knob, not a dozen paths
+
+Choosing a volume is only half the job — the harness has to actually live there. Every
+derived path (cache, ledger, media/svg output, exemplars, thresholds, router and confhead
+stores) hangs off an install root:
+
+| source | precedence |
+|---|---|
+| an explicit value for that key in `config.json` | always wins |
+| `"home": "D:/offload-stack"` in `config.json` | rebases everything still at its default |
+| `$LOCAL_OFFLOAD_HOME` | same, before any config file exists (the bootstrap case) |
+| `~/.local-offload` | the fallback |
+
+So moving an install is: copy the tree, set `home`, done. Before this, relocating meant
+hand-writing about a dozen absolute paths into the config — which is how a machine ends up
+with a model tree on its OS drive and bindings that drift from the binary.
+
+**The machine-wide state root is deliberately excluded.** `state_dir` / `gpu_lock_path`
+stay unset so `internal/gpulease` resolves them machine-wide (`%ProgramData%` /
+`/var/lib`). Rebasing the GPU lease under a home directory is the per-user trap that
+silently un-serializes the GPU — 0.24.1 added a warning for exactly that.
+
 ## Observability and debugging
 
 `local-offload doctor` verifies the serving layer end to end and reports per-alias reachability.

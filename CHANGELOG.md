@@ -4,6 +4,24 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.28.0] - 2026-07-27
+
+### Added — an install can move to the volume that has room
+- **`home` (config) / `$LOCAL_OFFLOAD_HOME` (env)** is the install root every DERIVED path hangs
+  off: cache, ledger, media and svg output, exemplars, thresholds, the router and confhead stores.
+  Precedence: an explicit value for a key always wins, then `home`, then the env var, then
+  `~/.local-offload`.
+  - This is the missing half of `install volumes`. Choosing a volume is pointless if living there
+    means hand-writing a dozen absolute paths into the config — the hand-patching that put a model
+    tree on an OS drive and let bindings drift from the binary. Moving an install is now: copy the
+    tree, set `home`.
+  - **The machine-wide state root is deliberately NOT rebased.** `state_dir` / `gpu_lock_path` stay
+    unset so `internal/gpulease` resolves them machine-wide; putting the GPU lease under a home
+    directory is the per-user trap that silently un-serializes the GPU (0.24.1 added a warning for
+    it). Covered by a test, not just a comment.
+  - Paths whose defaults do not hang off the install root — `node`, `ffmpeg`, `comfy_dir` — are
+    untouched by construction.
+
 ## [0.27.2] - 2026-07-27
 
 ### Added — the prompt shape that makes prefix reuse work is now enforced
