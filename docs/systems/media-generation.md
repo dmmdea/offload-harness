@@ -191,6 +191,25 @@ an sdcpp-only box is never told it is missing ComfyUI. Model-alias routes (visio
 deliberately absent: their reachability is a live `/v1/models` question that doctor's alias diff
 already answers.
 
+## Cross-platform engine resolution
+
+The engines are resolved the same way on every OS, because a tier is a hardware class and not an
+operating system:
+
+| What | Rule | Where |
+|---|---|---|
+| Render script (`render/*.mjs`) | relative → against the **executable's** dir | `gpugen.ResolveScript` / `ResolveScriptIn` |
+| ComfyUI venv python | `COMFY_PY`, else `.venv/Scripts/python.exe`, `venv/Scripts/python.exe`, `python_embeded/python.exe`, `.venv/bin/python`, `venv/bin/python`, else `python` (Windows) / `python3` | `render/comfy-lifecycle.mjs` `resolveComfyPy`, shared with `comfy-run-graph.mjs` |
+| ComfyUI install dir | `COMFY_DIR` / `comfy_dir`, else `C:/ComfyUI` on Windows and **unbound** elsewhere | `config.DefaultComfyDir` + `resolveComfyDir` |
+| Executable binding (`node_path`, `ffmpeg_path`, `sdcpp_bin`) | stat when it is a path, PATH lookup when it is a bare name | `mediacap.binaryPresent` |
+
+Windows candidates are probed **first**, so Windows resolution is byte-identical to what it always
+was. This exists because it was not always so: the venv probe was Windows-only and `comfy_dir`
+defaulted to `C:/ComfyUI` everywhere, which made ComfyUI unlaunchable on Linux nodes while their
+`/fleet/health` still advertised every ComfyUI-backed task. An unbound `comfy_dir` is now
+NOT CONFIGURED (a legitimate machine) rather than a path that cannot exist, and `ensureComfy`
+refuses with that reason instead of spawning into a bad cwd.
+
 ## Observability and debugging
 
 Look at the lock directory first when jobs will not start — a leaked lock blocks everything on the
@@ -202,7 +221,12 @@ so a broken binding surfaces even when llama-swap is down.
 
 `render/*.test.mjs` (run with `node --test` from the repo root) covers the lock, lifecycle, batch
 semantics, and output parsing. Go-side coverage sits in `internal/pipeline/` for the media dispatch
-and defer paths.
+and defer paths, and `internal/mediacap/` for the derived verdicts.
+
+`crossplatform_lint_test.go` (repo root) is the gate on the resolution rules above: a runner that
+probes a Windows venv interpreter without a POSIX one, a drive-letter literal in shared Go with no
+`runtime.GOOS` branch, or a `.exe` in a tier `config_seed` fails CI. The two `amd-rdna3*` seeds are
+recorded as known offenders with their reason rather than silently skipped — a NEW one fails.
 
 ## Common pitfalls
 
