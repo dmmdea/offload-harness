@@ -47,6 +47,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -221,6 +222,7 @@ func LeaseDir(lockOverride, stateDir string) (string, error) {
 		if why := syncRootReason(abs); why != "" {
 			return "", fmt.Errorf("gpulease: refusing gpu_lock_path %q: %s", abs, why)
 		}
+		warnPerUserOverride("gpu_lock_path", abs)
 		return abs, nil
 	}
 	if v := strings.TrimSpace(os.Getenv("GPU_LOCK")); v != "" {
@@ -231,6 +233,7 @@ func LeaseDir(lockOverride, stateDir string) (string, error) {
 		if why := syncRootReason(abs); why != "" {
 			return "", fmt.Errorf("gpulease: refusing GPU_LOCK %q: %s", abs, why)
 		}
+		warnPerUserOverride("GPU_LOCK", abs)
 		return abs, nil
 	}
 	root, err := ResolveStateRoot(stateDir)
@@ -238,6 +241,52 @@ func LeaseDir(lockOverride, stateDir string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(root, "gpu", leaseDirName), nil
+}
+
+// perUserOverrideWarned makes the warning fire once per process, not once per
+// acquisition — a waiter probing every second must not spam the log.
+var perUserOverrideWarned sync.Once
+
+// warnPerUserOverride says so, loudly, when an explicit override puts the
+// machine-wide lease inside somebody's home directory.
+//
+// FOUND IN THE FIELD: a node carried a legacy `GPU_LOCK` from before this package
+// existed, pointing at ~/.local-offload/gpu.lock. It was honoured silently, so the
+// "machine-wide" lease was per-USER — the exact split this package was written to
+// end, on a box that also runs a scheduled task. Nothing reported it; `gpu status`
+// simply printed a state root under C:\Users and looked plausible.
+//
+// It WARNS rather than refuses, deliberately. An unwritable root and a cloud-synced
+// root are always wrong, so those still refuse. A per-user path is merely RISKY and
+// can be a deliberate choice on a single-user box — so the operator keeps the
+// override and gains the one thing they were missing: knowing what it costs.
+func warnPerUserOverride(source, abs string) {
+	if !pathInsideHome(abs) {
+		return
+	}
+	perUserOverrideWarned.Do(func() {
+		fmt.Fprintf(os.Stderr,
+			"warning: %s puts the GPU lease at %q, inside this user's home directory.\n"+
+				"  The lease is meant to be MACHINE-WIDE: a process in another security context\n"+
+				"  (a service, a scheduled task, a second user) resolves a DIFFERENT path, takes a\n"+
+				"  DIFFERENT lease, and mutual exclusion silently evaporates — the failure this\n"+
+				"  lease exists to prevent. Unset %s to use the machine-wide default.\n",
+			source, abs, source)
+	})
+}
+
+// pathInsideHome reports whether abs sits within the current user's home directory —
+// i.e. whether a "machine-wide" lease placed there is actually per-user.
+func pathInsideHome(abs string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return false
+	}
+	rel, rerr := filepath.Rel(home, abs)
+	if rerr != nil {
+		return false // different volume: definitively outside
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // Open resolves and VALIDATES the lease location, then returns a Manager. It returns
