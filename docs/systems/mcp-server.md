@@ -105,8 +105,12 @@ read-only unless deliberately widened. See
 
 ## Observability and debugging
 
-- `offload_status` reports harness state to the calling agent.
-- `local-offload doctor` checks the serving layer the tools depend on.
+- `offload_status` reports harness state to the calling agent: the configured model roster, a live
+  `/v1/models` probe, and `media.routes` — this machine's media capability **derived** from its
+  bindings (`internal/mediacap`), never declared. See
+  [media-generation.md](media-generation.md#capability-is-derived-never-declared) for the verdicts.
+- `local-offload doctor` checks the serving layer the tools depend on, and prints the same derived
+  media routes — a route bound to a file that is absent exits non-zero.
 - **The most common operational surprise:** an MCP client holds its server process for the session,
   so a rebuilt binary is not picked up until the client restarts. Newly added tools appearing absent
   almost always means a stale server process, not a registration bug.

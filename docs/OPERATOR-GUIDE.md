@@ -159,6 +159,7 @@ tokens kept local (est.): 2920 (~$0.04 Opus-input value — an estimate, not bil
 | Failure | Fix |
 |---|---|
 | every call `deferred:true` | Run `doctor`. Usually the endpoint is down or unreachable. A defer on genuinely hard/over-long input is by design. |
+| one media task always defers (`generate_image`, `generate_video`, `generate_audio`, `run_graph`, `edit_image`…) | Run `doctor` and read its **media routes** section. `BOUND-BUT-MISSING` names the exact configured path that is not on disk (relative script bindings resolve against the binary's directory, not your cwd) and exits non-zero; `NOT CONFIGURED` means this box has no such binding and the defer is by design. |
 | `cache unavailable (held by the MCP server?)` | Expected — the bbolt cache is single-writer. The CLI continues cache-less; the ledger still appends. |
 
 ---
@@ -378,9 +379,13 @@ to a single-model run of the original objective (logged as `fallback=…`). `--a
 - `--max-tokens` (default 4096) — planner tokens per completion. Must be large enough for the biggest
   tool-call argument (e.g. a whole file's content) or the model's JSON gets cut off mid-string and
   the call fails. 4096 is the tested value; do not lower it for write-heavy runs.
-- `--ctx-tokens` (default 16384) — the served model context window the loop's transcript compaction
-  budgets against. **Set it to match the tier's served `--ctx-size`** (the CUDA tier serves 16384;
-  the install prints the profile's value). The derived usable **input budget** is
+- `--ctx-tokens` (**default 0 = AUTO**) — the served model context window the loop's transcript
+  compaction budgets against. At 0 the loop **probes the serving endpoint** for the planner model's
+  live `n_ctx` (`/upstream/{model}/props` on llama-swap, `/props` on a bare llama-server) and falls
+  back to 8192 only when the endpoint will not answer — an *assumed* window killed real runs with
+  `exceed_context_size` 400s (ADR 0015). An explicit value **overrides the probe** and is warned
+  about when it exceeds the served window; set one only to match a tier's `--ctx-size` deliberately
+  (the install prints the profile's value). The derived usable **input budget** is
   `ctx-tokens − max-tokens − 512`. Setting it too high lets the transcript overflow the real window
   (a 400); too low compacts sooner than necessary.
 - `--gcf-compact` (default off) — the compaction ladder's LOSSLESS first rung: over budget, older
