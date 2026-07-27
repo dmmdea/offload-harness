@@ -4,6 +4,27 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.27.2] - 2026-07-27
+
+### Added — the prompt shape that makes prefix reuse work is now enforced
+- **`internal/tasks/prefixorder_test.go`** locks the property every text task depends on: the
+  variable input must be the SUFFIX of the user message (exactly once), and the system prompt must
+  be byte-identical across two different inputs. Measured on <node-b> against `gemma-4-e4b`: a
+  2037-token prompt re-sent with the same leading instructions and a different payload re-prefilled
+  only **41** tokens (`cache_n` 1996), turning a 7.1 s call into **0.30 s**. That saving is one
+  `fmt.Sprintf` argument order away from being lost SILENTLY — nothing would fail, every call would
+  just quietly pay full prefill again.
+
+### Documentation
+- `docs/systems/offload-pipeline.md` gains the measurement, the invariant, and two explicit
+  non-conclusions: it is **not** a reason to add `--swa-full` to the small tiers (that flag is
+  load-bearing for the large iSWA models and is set for them; the table above was measured against
+  a `gemma-4-e4b` entry WITHOUT it, and forcing a full window costs KV memory on the tiers with
+  least to spare), and it re-tunes **no** defer or escalation gate, since those are
+  confidence-driven rather than latency-driven. Also records the benchmarking rule: use the
+  server's `timings.prompt_n`, never process RSS — an mmap'd model's weights live in the page
+  cache, so an RSS-based "did it restart?" check reports phantom restarts.
+
 ## [0.27.1] - 2026-07-27
 
 ### Added — every hardware tier is documented IN THE REPO
