@@ -49,6 +49,13 @@ func ResolveScript(script string) (string, error) {
 	return resolveScriptIn(script, filepath.Dir(exe))
 }
 
+// ResolveScriptIn is ResolveScript against a caller-supplied executable dir. It
+// exists so capability reporting (internal/mediacap) answers "will this script
+// resolve?" with THIS rule rather than a second copy of it that can drift.
+func ResolveScriptIn(script, exeDir string) (string, error) {
+	return resolveScriptIn(script, exeDir)
+}
+
 // resolveScriptIn is ResolveScript with an injectable exe dir (unit-testable).
 func resolveScriptIn(script, exeDir string) (string, error) {
 	p := script

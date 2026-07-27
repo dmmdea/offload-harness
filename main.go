@@ -37,6 +37,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/mcpserver"
+	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
@@ -46,7 +47,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.24.1"
+const version = "0.25.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -1874,7 +1875,7 @@ func runDoctor(args []string) error {
 	// that was not actually read (not-found and failed-to-load both disclose defaults).
 	// Every binding verdict below is only as good as the file that produced it.
 	fmt.Fprintln(os.Stdout, config.SourceLine(src))
-	return doctorRun(cfg, os.Stdout)
+	return doctorRun(cfg, mediacap.Routes(cfg), os.Stdout)
 }
 
 // aliasCheck pairs a config key with its configured llama-swap model alias.
@@ -1899,9 +1900,19 @@ func modelAliases(cfg config.Config) []aliasCheck {
 // against every configured model alias (LO-11: doctor used to GET only
 // /health, so a renamed/removed llama-swap alias passed doctor yet every call
 // deferred). Any missing alias prints FAIL and the command exits non-zero.
-func doctorRun(cfg config.Config, w io.Writer) error {
+//
+// It also reports the DERIVED media routes (internal/mediacap): doctor checked
+// model aliases only, so on a node whose generate_image deferred on a render
+// script that was not on disk it still printed green. Passing them in keeps the
+// filesystem probe at the caller's edge, so the check itself stays testable.
+func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 	fmt.Fprintf(w, "endpoint:   %s%s\nmodel:      %s\ncache:      %s\nledger:     %s\n",
 		cfg.Endpoint, cfg.CompletionPath, cfg.Model, cfg.CachePath, cfg.LedgerPath)
+	// Media first, and independent of everything below: these verdicts are pure
+	// config + filesystem, so an endpoint that happens to be down must never hide
+	// them — a doctor that is red for llama-swap and silent about a broken media
+	// binding is the same blind spot in a different disguise.
+	mediaMissing := writeMediaSection(w, routes)
 	client := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, 5*time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1930,7 +1941,35 @@ func doctorRun(cfg config.Config, w io.Writer) error {
 	if missing > 0 {
 		return fmt.Errorf("%d configured model alias(es) missing from %s/v1/models", missing, cfg.Endpoint)
 	}
+	if mediaMissing > 0 {
+		return fmt.Errorf("%d media route(s) bound to a file that does not exist on this machine", mediaMissing)
+	}
 	return nil
+}
+
+// writeMediaSection prints this machine's DERIVED media capability and returns
+// the number of routes bound to a file that is absent. Only that class is a
+// failure: NOT CONFIGURED is a legitimate machine (the task defers by design),
+// while BOUND-BUT-MISSING is a config that promises a capability the box cannot
+// deliver — which until now surfaced only as a defer at call time.
+func writeMediaSection(w io.Writer, routes []mediacap.Route) int {
+	if len(routes) == 0 {
+		return 0
+	}
+	fmt.Fprintln(w, "media routes (derived from this config; a bound file that is absent means the task DEFERS when called):")
+	missing := 0
+	for _, r := range routes {
+		mark := "OK  "
+		switch r.State {
+		case mediacap.BoundButMissing:
+			mark = "FAIL"
+			missing++
+		case mediacap.NotConfigured:
+			mark = "-   "
+		}
+		fmt.Fprintf(w, "  %-22s %s  %-18s %-15s %s\n", r.Name+":", mark, string(r.State), r.Engine, r.Detail)
+	}
+	return missing
 }
 
 // fetchModelRoster GETs <endpoint>/v1/models and returns the served model ids.

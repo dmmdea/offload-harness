@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/mediacap"
 )
 
 // fakeSwap serves /health and a /v1/models roster like llama-swap does.
@@ -47,7 +48,7 @@ func TestDoctorRosterAllPresent(t *testing.T) {
 	cfg := config.Default()
 	cfg.Endpoint = srv.URL
 	var out strings.Builder
-	if err := doctorRun(cfg, &out); err != nil {
+	if err := doctorRun(cfg, nil, &out); err != nil {
 		t.Fatalf("doctor must pass with a full roster: %v\n%s", err, out.String())
 	}
 	got := out.String()
@@ -76,7 +77,7 @@ func TestDoctorRosterMissingAliasFails(t *testing.T) {
 	srv := fakeSwap(t, served)
 	cfg.Endpoint = srv.URL
 	var out strings.Builder
-	err := doctorRun(cfg, &out)
+	err := doctorRun(cfg, nil, &out)
 	if err == nil {
 		t.Fatalf("doctor must fail when an alias is missing\n%s", out.String())
 	}
@@ -99,11 +100,68 @@ func TestDoctorEndpointDownFails(t *testing.T) {
 	cfg := config.Default()
 	cfg.Endpoint = url
 	var out strings.Builder
-	if err := doctorRun(cfg, &out); err == nil {
+	if err := doctorRun(cfg, nil, &out); err == nil {
 		t.Fatal("doctor must fail when the endpoint is down")
 	}
 	if !strings.Contains(out.String(), "DOWN") {
 		t.Fatalf("expected DOWN in output:\n%s", out.String())
+	}
+}
+
+// TestDoctorReportsMediaRoutesAndFailsOnAbsentBinding: doctor used to check
+// model aliases only, so a node whose generate_image deferred on a render script
+// that was not on disk still printed green. A route the config BOUND must fail
+// when its file is absent; a route the box never bound is reported and forgiven.
+func TestDoctorReportsMediaRoutesAndFailsOnAbsentBinding(t *testing.T) {
+	srv := fakeSwap(t, defaultAliasIDs())
+	cfg := config.Default()
+	cfg.Endpoint = srv.URL
+	routes := []mediacap.Route{
+		{Name: "generate_image", Engine: "sdcpp", State: mediacap.Configured, Detail: "sdcpp_bin=/opt/sd-cli"},
+		{Name: "generate_video", Engine: "comfyui", State: mediacap.BoundButMissing, Detail: "videogen_script=/opt/render/comfy-video.mjs: script not found"},
+		{Name: "run_graph", Engine: "comfyui", State: mediacap.NotConfigured, Detail: "run_graph_script is unset"},
+	}
+	var out strings.Builder
+	err := doctorRun(cfg, routes, &out)
+	if err == nil {
+		t.Fatalf("a bound-but-absent media file must fail doctor\n%s", out.String())
+	}
+	got := out.String()
+	for _, want := range []string{"media routes", "generate_image", "CONFIGURED", "BOUND-BUT-MISSING", "NOT CONFIGURED", "sdcpp"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("media section missing %q:\n%s", want, got)
+		}
+	}
+	// The unbound route must not be dressed up as a failure.
+	if !strings.Contains(err.Error(), "1 media route") {
+		t.Errorf("only the bound-but-absent route counts: %v", err)
+	}
+
+	// Same roster, nothing missing on disk -> doctor passes.
+	var ok strings.Builder
+	if err := doctorRun(cfg, routes[:1], &ok); err != nil {
+		t.Fatalf("configured media must not fail doctor: %v\n%s", err, ok.String())
+	}
+}
+
+// TestDoctorMediaSectionSurvivesADeadEndpoint: the media verdicts are pure
+// config + filesystem, so the section must print even when the serving layer is
+// down — the failure they exist to end is a doctor that is loud about llama-swap
+// and silent about a media binding that cannot work.
+func TestDoctorMediaSectionSurvivesADeadEndpoint(t *testing.T) {
+	srv := fakeSwap(t, nil)
+	url := srv.URL
+	srv.Close()
+	cfg := config.Default()
+	cfg.Endpoint = url
+	var out strings.Builder
+	if err := doctorRun(cfg, []mediacap.Route{
+		{Name: "generate_image", Engine: "comfyui", State: mediacap.NotConfigured, Detail: "imagegen_script is unset"},
+	}, &out); err == nil {
+		t.Fatal("a dead endpoint is still a failure")
+	}
+	if !strings.Contains(out.String(), "generate_image") {
+		t.Errorf("media section must print before the health probe:\n%s", out.String())
 	}
 }
 
