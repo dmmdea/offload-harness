@@ -47,7 +47,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.25.1"
+const version = "0.26.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -102,6 +102,8 @@ func main() {
 		err = runLedger(args)
 	case "doctor":
 		err = runDoctor(args)
+	case "report":
+		err = runReport(args)
 	case "models":
 		err = runModels(args)
 	case "calibrate":
@@ -215,6 +217,7 @@ Usage:
   local-offload fleet-measure            prime the fleet footprint store: one minimal render per configured task, then print the recorded entries
   local-offload ledger [--since DAYS]    token-savings report
   local-offload doctor                   check endpoint health + config
+  local-offload report [--out FILE]      READ-ONLY capability report for this machine (tier, serving, media routes) — Markdown, safe to send
   local-offload models                   show configured offload model
   local-offload eval [--dir DIR]         code-based quality eval (AURC, deferral-curve AUDC/QNC)
   local-offload compaction-eval <harvest|run|freeze|check|ab|kvbench> --corpus C   compaction ladder eval: trace→corpus harvest (redacting), ratio/retention report, tokens ratchet, gated A/B, KV-reuse bench
