@@ -141,6 +141,7 @@ offload-harness doctor                   # endpoint health, model aliases, deriv
 offload-harness report [--out FILE]      # read-only capability report (tier, serving, media routes) — Markdown, safe to send
                                          #   your tier is documented in docs/tiers/ — see docs/tiers/README.md
 offload-harness install detect           # what is this machine, and which hardware tier?
+offload-harness install render           # render this tier's llama-swap serving config (Linux included)
 offload-harness install volumes          # where should this machine install? (most free space, never the OS drive by default)
 offload-harness models                   # show configured models + serving flags
 offload-harness eval [--dir DIR]         # code-based quality eval (AURC, deferral-curve AUDC/QNC)
