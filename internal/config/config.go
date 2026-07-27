@@ -281,6 +281,17 @@ type Config struct {
 	// runner as the GPU_LOCK env, so the Go-side vision gate (LO-1) and the Node runners
 	// always contend on the SAME lock.
 	GPULockPath string `json:"gpu_lock_path,omitempty"`
+	// Home is the install root every DERIVED path hangs off: the cache, ledger,
+	// media/svg output, exemplars, thresholds and the router/confhead stores. Empty =
+	// $LOCAL_OFFLOAD_HOME, else ~/.local-offload.
+	//
+	// It exists so an install can live on the volume that has room WITHOUT hand-writing
+	// a dozen absolute paths into this file — the hand-patching that put a model tree on
+	// an OS drive and then drifted. Precedence per path: an explicit value in this file
+	// always wins; anything still at its built-in default follows Home. The MACHINE-WIDE
+	// state root (state_dir / gpu_lock_path) is deliberately NOT rebased: it must stay
+	// machine-wide or the GPU lease silently becomes per-user again.
+	Home string `json:"home,omitempty"`
 	// StateDir overrides the MACHINE-WIDE state root that holds the GPU lease
 	// (<state_dir>/gpu/lease) and future durable harness state. Empty = the platform
 	// default: %ProgramData%\local-offload on Windows, /var/lib/local-offload elsewhere.
@@ -444,9 +455,20 @@ type Config struct {
 }
 
 // Default returns a config suitable for the verified E4B-QAT+MTP setup.
-func Default() Config {
+// DefaultBase is the install root used when nothing overrides it:
+// $LOCAL_OFFLOAD_HOME when set, else ~/.local-offload. A relative or "~/"-prefixed
+// env value is resolved against the user's home so the variable is usable from a
+// shell profile without absolute-path ceremony.
+func DefaultBase() string {
 	home, _ := os.UserHomeDir()
-	base := filepath.Join(home, ".local-offload")
+	if v := strings.TrimSpace(os.Getenv("LOCAL_OFFLOAD_HOME")); v != "" {
+		return ExpandTilde(v, home)
+	}
+	return filepath.Join(home, ".local-offload")
+}
+
+func Default() Config {
+	base := DefaultBase()
 	return Config{
 		Endpoint:                    "http://127.0.0.1:11436",
 		CompletionPath:              "/v1/chat/completions", // chat route: server applies the Gemma template; we pass a raw "grammar" field
@@ -493,11 +515,11 @@ func Default() Config {
 		MusicGenScript:              "render/comfy-music.mjs", // B3 ACE-Step music worker; "" => music defers
 		VideoGenTimeoutSec:          1500,
 		AudioGenTimeoutSec:          720,
-		EditTimeoutSec:              300,     // edit_image / media ops (CPU; no GPU lock)
+		EditTimeoutSec:              300,   // edit_image / media ops (CPU; no GPU lock)
 		GPUWaitMs:                   90000, // 90s — queue behind a holder, then defer with an ETA
-		GPULockPath:                 "",      // runners' default (GPU_LOCK env, else <state_dir>/gpu/lease)
-		StateDir:                    "",      // platform default: %ProgramData%\local-offload | /var/lib/local-offload
-		VisionGPUWaitSec:            90,      // LO-1: bounded wait for the gen lock before a vision call defers
+		GPULockPath:                 "",    // runners' default (GPU_LOCK env, else <state_dir>/gpu/lease)
+		StateDir:                    "",    // platform default: %ProgramData%\local-offload | /var/lib/local-offload
+		VisionGPUWaitSec:            90,    // LO-1: bounded wait for the gen lock before a vision call defers
 		MemoryStack:                 []string{"embeddinggemma", "bge-reranker-v2-m3"},
 		EmbedModelName:              "embeddinggemma", // explicit; reorder-proof (not MemoryStack position)
 		Temperature:                 0,
@@ -567,9 +589,42 @@ func Load(path string) (Config, error) {
 	warnUnknownKeys(b)
 	warnBadEnumValues(c)
 	if home, herr := os.UserHomeDir(); herr == nil {
+		c.Home = ExpandTilde(c.Home, home)
 		expandUserPaths(&c, home)
 	}
+	rebaseHome(&c)
 	return c, nil
+}
+
+// rebaseHome moves every DERIVED path onto c.Home. A field the operator wrote in the
+// file is left exactly as typed — only values still identical to the built-in default
+// follow, which is what makes "home" a single knob instead of a dozen edits.
+//
+// Paths whose default does not live under the base (node, ffmpeg, comfy_dir) and the
+// machine-wide state root (empty by default, resolved in internal/gpulease) are skipped
+// by construction: rebasing the lease under a home directory is the per-user trap that
+// silently un-serializes the GPU.
+func rebaseHome(c *Config) {
+	if c.Home == "" {
+		return
+	}
+	def := Default()
+	base := DefaultBase()
+	cur, dfl := pathFields(c), pathFields(&def)
+	for i := range cur {
+		if i >= len(dfl) {
+			break
+		}
+		v, d := *cur[i], *dfl[i]
+		if v == "" || v != d {
+			continue // unset, or explicitly set by the operator
+		}
+		rel, err := filepath.Rel(base, d)
+		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+			continue // not a path that hangs off the install root
+		}
+		*cur[i] = filepath.Join(c.Home, rel)
+	}
 }
 
 // warnBadEnumValues makes typo'd enum-like fields LOUD instead of silently falling back

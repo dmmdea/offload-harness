@@ -125,6 +125,18 @@ server, so each message runs a full agent loop (see §4), not a bare completion.
 
 ---
 
+### Moving the harness to another drive ✅
+
+```powershell
+local-offload install volumes            # which volume should hold it?
+# copy the tree, then in config.json:  "home": "D:/offload-stack"
+local-offload doctor                     # every derived path now under the new root
+```
+
+`home` (or `$LOCAL_OFFLOAD_HOME`) rebases every path still at its default; anything you set
+explicitly is left exactly as you typed it. The machine-wide GPU lease root is never
+rebased — it must stay machine-wide.
+
 ### Capability report — send this instead of describing your box ✅
 
 ```powershell
