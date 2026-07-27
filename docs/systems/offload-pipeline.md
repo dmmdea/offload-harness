@@ -148,7 +148,9 @@ input passes through the ledger only as metadata and token counts, not as conten
 
 ## Observability and debugging
 
-- `local-offload doctor` — endpoint health and per-alias reachability.
+- `local-offload doctor` — endpoint health, per-alias reachability, and the derived media routes
+  (a media binding whose file is absent exits non-zero — see
+  [media-generation.md](media-generation.md#capability-is-derived-never-declared)).
 - `local-offload models` — the resolved Tier routing table.
 - `local-offload ledger --since N` — savings accounting.
 - The ledger's per-entry metadata (`escalations`, `margin`, `grounded`, `err_class`, `reasoning`) is

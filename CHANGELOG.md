@@ -4,6 +4,46 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.25.0] - 2026-07-27
+
+### Changed — two contracts moved, which is why this is a minor bump
+- `offload_status`'s media block **no longer carries** `image_engine`, `video_engine`,
+  `audio_voice_engine`, `audio_music_engine`, `edit_pil`, `edit_gimp` or `media_ffmpeg`. Everything
+  they claimed now lives in `media.routes`, derived per machine. `image_ckpt`,
+  `video_upscale_model` and `svg_engine` stay.
+- `doctor` **exits non-zero on a media route bound to a file that does not exist**, where it
+  previously ignored media entirely. `setup/selftest.ps1` already treats a non-zero doctor with a
+  healthy `health:` line as a warning rather than a gate, so an install does not fail on it.
+
+### Fixed — capability is DERIVED now, on both surfaces that report it
+- **`offload_status` no longer declares an engine it may not have.** Its media block hardcoded
+  `"image_engine": "ComfyUI (local)"`, `"video_engine": "ComfyUI Wan 2.2 I2V …"` and the rest as
+  constants, and handed them to an **autonomous planner** on a node whose `imagegen_engine` is
+  `sdcpp` and which has no ComfyUI installed at all. It now reports `media.routes`, derived from
+  this machine's bindings by the new `internal/mediacap` — the right pattern already existed 30
+  lines away in `fleetnode.taskConfigured` and `config.ImageRouteConfigured`. Exposing a *declared*
+  capability map to something that acts on it is strictly worse than exposing none.
+- **`doctor` gained a media section — the change that ends "doctor is green but `generate_image`
+  defers".** It checked model aliases only, so a box whose render script was not on disk passed.
+  Each route is now `CONFIGURED` / `NOT CONFIGURED` / `BOUND-BUT-MISSING`, and only the last is a
+  failure (non-zero exit): a box that never bound a route is a legitimate machine, a box that bound
+  one to a file that does not exist is a promise it cannot keep.
+  - Verdicts are computed with the runners' own rule — a relative script binding resolves against
+    the **executable's** directory (`gpugen.ResolveScriptIn`, exported so the check cannot drift
+    from `ResolveScript`), an executable binding by stat when it is a path and by PATH lookup when
+    it is a bare name (`node`, `ffmpeg`) — so a verdict answers the same question the runner asks.
+  - `node` and `comfy_dir` are reported as prereq rows only when a bound route needs them: an
+    sdcpp-only node is never told it is missing ComfyUI.
+  - The section prints **before** the health probe and independent of it. A doctor that is loud
+    about llama-swap and silent about a broken media binding is the same blind spot in a new
+    disguise.
+
+### Fixed — docs
+- **`--ctx-tokens` is documented as `0 = AUTO` again** (README, `docs/OPERATOR-GUIDE.md`,
+  `CLAUDE.md`). They still claimed a default of 16384 — the stale assumption ADR 0015 removed in
+  0.22.x. The code was right; three docs told the operator to reason from a number the flag has not
+  used in months.
+
 ## [0.24.1] - 2026-07-26
 
 ### Fixed

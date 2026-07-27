@@ -137,7 +137,7 @@ offload-harness mcp                      # run as an MCP server (stdio)
 offload-harness fleet-serve              # join the fleet-dispatcher fleet (health/dispatch/jobs on :18811)
 offload-harness fleet-measure            # prime the fleet footprint store (one minimal render per configured task)
 offload-harness ledger [--since DAYS]    # token-savings report
-offload-harness doctor                   # endpoint health + config check
+offload-harness doctor                   # endpoint health, model aliases, derived media routes
 offload-harness models                   # show configured models + serving flags
 offload-harness eval [--dir DIR]         # code-based quality eval (AURC, deferral-curve AUDC/QNC)
 offload-harness stats                    # per-task ledger telemetry
@@ -281,7 +281,7 @@ local-agent --root . --base http://127.0.0.1:11436 --max-steps 4 "list the files
 
 **Two-tier mode** (`--two-tier`, Task C8): an architect/editor split following aider's one-shot handoff. The planning model (`--architect-model`, default `gemma4-26b-a4b`) drafts one complete, standalone plan using read/search tools only; a separate edit model (`--editor-model`, default `offload-e4b`) then executes that plan as its **sole** instruction — it never sees the original request or any history. On a single GPU this is exactly one cold model swap (plan-once, not per-step alternation). A degenerate/empty plan falls back to a single-model run of the original objective. `--two-tier` and `--profile` are **mutually exclusive** (two-tier sets the architect/editor toolsets itself).
 
-**Context & compaction.** `--ctx-tokens` (default **16384**) tells the loop the served window so transcript compaction budgets against it (derived input budget = `ctx-tokens − max-tokens − 512`); set it to match the tier's served `--ctx-size`. The loop resends the full transcript each step, so when it would overflow, compaction keeps the protected preamble (system + exemplars + AGENT.md + objective) and recent turns, elides older tool-result bodies to markers, then drops whole older turns as intact assistant↔tool pairs. Every tool result is also centrally capped.
+**Context & compaction.** `--ctx-tokens` (default **0 = AUTO**) tells the loop the served window so transcript compaction budgets against it (derived input budget = `ctx-tokens − max-tokens − 512`). At the default it probes the endpoint for the model's live `n_ctx` and falls back to 8192 only when that is unanswerable; pass an explicit value to override the probe with the tier's served `--ctx-size`. The loop resends the full transcript each step, so when it would overflow, compaction keeps the protected preamble (system + exemplars + AGENT.md + objective) and recent turns, elides older tool-result bodies to markers, then drops whole older turns as intact assistant↔tool pairs. Every tool result is also centrally capped.
 
 **Policy broker & confinement.** A single deny→ask→allow broker is the only chokepoint to any tool,
 with an audit trail written **outside** the worktree (`~/.local-offload/agent-audit.jsonl`) so a run
