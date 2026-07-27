@@ -4,6 +4,23 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.24.1] - 2026-07-26
+
+### Fixed
+- **A `GPU_LOCK` / `gpu_lock_path` pointing inside a home directory is now reported.** Found while
+  bringing a fleet node current: it carried a **legacy `GPU_LOCK`** from before this package
+  existed, aimed at `~/.local-offload/gpu.lock`. It was honoured silently, so the "machine-wide"
+  lease was per-**USER** on a box that also runs a scheduled task — the exact split this package was
+  written to end. Nothing reported it; `gpu status` printed a state root under the user profile and
+  looked entirely plausible.
+  - It **warns rather than refuses**, deliberately. An unwritable root and a cloud-synced root are
+    always wrong and still refuse. A per-user path is merely *risky* and can be a deliberate choice
+    on a single-user box — so the operator keeps the override and gains the one thing they lacked:
+    knowing what it costs. Fires once per process, so a polling waiter cannot spam the log.
+  - The detector is tested against a genuinely machine-wide path rather than `t.TempDir()` — on
+    Windows that is `C:\Users\<u>\AppData\Local\Temp`, i.e. *inside* the home directory, which is
+    the very per-user trap `gpu-lock.mjs`'s original `join(tmpdir(), ...)` default fell into.
+
 ## [0.24.0] - 2026-07-26
 
 ### Added — the agent loop can finally see and listen (Stage B)

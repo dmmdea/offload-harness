@@ -454,6 +454,43 @@ func TestOpenRefusesUnwritableRootInsteadOfFallingBack(t *testing.T) {
 	}
 }
 
+// An override that puts the "machine-wide" lease inside a home directory must SAY SO.
+//
+// Found in the field: a node carried a legacy GPU_LOCK from before this package
+// existed, pointing at ~/.local-offload/gpu.lock. It was honoured silently, so the
+// lease was per-USER on a box that also runs a scheduled task — the exact split this
+// package was written to end. `gpu status` printed a state root under the user profile
+// and looked entirely plausible.
+func TestPerUserOverrideIsReportedNotSilentlyAccepted(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("no home directory resolvable here")
+	}
+	inHome := filepath.Join(home, ".local-offload", "gpu.lock")
+	// NOT t.TempDir(): on Windows that is C:\Users\<u>\AppData\Local\Temp, i.e. INSIDE
+	// the home directory — which is the very per-user trap this detector exists to
+	// catch (gpu-lock.mjs's original join(tmpdir(),...) default had exactly this bug).
+	outside := filepath.Join(defaultStateRoot(), "gpu", "lease")
+
+	// Both must still RESOLVE — this warns, it does not refuse. An unwritable or
+	// cloud-synced root is always wrong and still refuses; a per-user path is merely
+	// risky and can be a deliberate choice on a single-user box.
+	if got, err := LeaseDir(inHome, ""); err != nil || got == "" {
+		t.Fatalf("a per-user override must still resolve (warn, not refuse): %q %v", got, err)
+	}
+	if got, err := LeaseDir(outside, ""); err != nil || got == "" {
+		t.Fatalf("an out-of-home override must resolve cleanly: %q %v", got, err)
+	}
+
+	// The detector itself is the load-bearing part: in-home => true, elsewhere => false.
+	if !pathInsideHome(inHome) {
+		t.Errorf("%q is inside the home directory but was not detected", inHome)
+	}
+	if pathInsideHome(outside) {
+		t.Errorf("%q is outside the home directory but was flagged", outside)
+	}
+}
+
 // A refusal must NAME THE REMEDY. Measured in the field: a Linux services box
 // upgraded past 0.23.0 and every media job began deferring, because the
 // machine-wide default (/var/lib/local-offload) does not exist and an
