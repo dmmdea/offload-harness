@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 )
 
@@ -97,7 +98,7 @@ type Config struct {
 	// NodePath is the node executable used to run the image script. Default "node".
 	NodePath string `json:"node_path,omitempty"`
 	// ComfyDir is the local ComfyUI install dir (passed to the script as COMFY_DIR).
-	// Default "C:/ComfyUI".
+	// Default: "C:/ComfyUI" on Windows, "" (unbound) elsewhere — see DefaultComfyDir.
 	ComfyDir string `json:"comfy_dir,omitempty"`
 	// ImageGenTimeoutSec bounds one render: ComfyUI cold-start (~4min) + first SDXL
 	// render (~6min) + margin. Default 720 (12min).
@@ -471,7 +472,7 @@ func Default() Config {
 		SVGDir:                      filepath.Join(base, "svg"),
 		ImageGenScript:              "",
 		NodePath:                    "node",
-		ComfyDir:                    "C:/ComfyUI",
+		ComfyDir:                    DefaultComfyDir(),
 		ImageGenTimeoutSec:          720,
 		InpaintScript:               "", // inpaint route: per-machine SDXL-class binding; empty = defer
 		InpaintCkpt:                 "",
@@ -626,6 +627,22 @@ func ExpandTilde(p, home string) string {
 		return filepath.Join(home, p[2:])
 	}
 	return p
+}
+
+// DefaultComfyDir is the ComfyUI install a machine drives when nothing is bound.
+// It is the ONE platform-dependent default in this file, deliberately: the old
+// "C:/ComfyUI" applied on every OS, so a Linux node reported a ComfyUI install it
+// cannot have — and, because the ComfyUI-backed scripts were bound, its fleet health
+// advertised video-gen / audio-gen / run-graph that fail on arrival. Off Windows an
+// unset comfy_dir is UNBOUND: mediacap then reports NOT CONFIGURED (a legitimate
+// machine) instead of BOUND-BUT-MISSING (a promise it cannot keep), and the installer
+// writes the real path per machine. render/comfy-lifecycle.mjs resolveComfyDir mirrors
+// this rule on the runner side.
+func DefaultComfyDir() string {
+	if runtime.GOOS == "windows" {
+		return "C:/ComfyUI"
+	}
+	return ""
 }
 
 // ImageRouteConfigured reports whether THIS box serves generate_image at all —
