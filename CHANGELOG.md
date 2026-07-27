@@ -4,6 +4,33 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.25.1] - 2026-07-27
+
+### Fixed — the harness can drive its engines on Linux, not just Windows
+- **ComfyUI was unlaunchable on any Linux node.** `render/comfy-lifecycle.mjs` probed the venv
+  interpreter at Windows paths ONLY (`.venv/Scripts/python.exe`, `venv/Scripts/python.exe`,
+  `python_embeded/python.exe`) and otherwise fell back to a bare `python` — absent on Ubuntu, or the
+  system interpreter without torch. `resolveComfyPy` now probes both families, **Windows candidates
+  first** so Windows resolution is byte-identical, and falls back to `python3` off Windows.
+- **`run_graph` spawned a path that cannot exist there.** `comfy-run-graph.mjs` hardcoded
+  `.venv/Scripts/python.exe` with no candidate list and no existence check; it now shares
+  `resolveComfyPy`/`resolveComfyDir` with the lifecycle module.
+- **`comfy_dir` defaulted to `C:/ComfyUI` on every OS** (both the Go config and the runner). A Linux
+  node therefore reported a ComfyUI install it cannot have — and, because the ComfyUI-backed scripts
+  are bound by default, its `/fleet/health` advertised `video-gen`, `audio-gen` and `run-graph`, all
+  of which fail on arrival. The default is now `C:/ComfyUI` on Windows and **unbound** elsewhere, so
+  `doctor`/`offload_status` report NOT CONFIGURED (a legitimate machine) instead of a promise the box
+  cannot keep. `ensureComfy` refuses an unbound `comfy_dir` with that reason rather than spawning
+  into a nonexistent cwd.
+
+### Added
+- **`crossplatform_lint_test.go` — the class fails in CI now, not on a node six weeks later.** Three
+  rules: a runner probing a Windows venv interpreter must probe the POSIX one too; a drive-letter
+  literal in shared Go needs a `runtime.GOOS` branch; a tier `config_seed` may not name a `.exe`.
+  Verified against the pre-fix blobs — rules 1 and 2 fire on exactly the code this release fixes.
+  The two `amd-rdna3*` seeds that still carry `sd-cli.exe` are recorded with their reason (per-OS
+  binary rendering is the tier-schema workstream), so a NEW offender fails immediately.
+
 ## [0.25.0] - 2026-07-27
 
 ### Changed — two contracts moved, which is why this is a minor bump
