@@ -401,3 +401,22 @@ func TestCompactionFlipDefaults(t *testing.T) {
 		t.Fatal("an explicit gcf_compact:false in the config file must still disable it")
 	}
 }
+
+// TestComfyDirDefaultIsOSAware: comfy_dir defaulted to "C:/ComfyUI" on EVERY platform,
+// so a Linux node claimed a ComfyUI install it cannot have and — because the
+// ComfyUI-backed scripts ARE bound by default — advertised video-gen / audio-gen /
+// run-graph to the fleet, which fail on arrival. Off Windows the honest default is
+// unbound; the installer writes the real path per machine.
+func TestComfyDirDefaultIsOSAware(t *testing.T) {
+	got := Default().ComfyDir
+	if runtime.GOOS == "windows" {
+		if got != "C:/ComfyUI" {
+			t.Fatalf("the Windows default must not change: got %q", got)
+		}
+		return
+	}
+	if got != "" {
+		t.Fatalf("comfy_dir default on %s = %q; a non-Windows box must be UNBOUND rather than "+
+			"pointed at a path that cannot exist", runtime.GOOS, got)
+	}
+}

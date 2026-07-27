@@ -10,14 +10,33 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawn as nodeSpawn } from "node:child_process";
 
-export const COMFY_DIR = process.env.COMFY_DIR || "C:/ComfyUI";
+// resolveComfyDir: the ComfyUI install this machine drives. The old default was
+// "C:/ComfyUI" on EVERY platform, so a Linux node reported an install it cannot have and
+// the fleet advertised the routes that drive it. Off Windows an unset COMFY_DIR is
+// UNBOUND ("") — the honest answer, which the harness reports as NOT CONFIGURED instead
+// of a path that will never exist.
+export function resolveComfyDir(env = process.env) {
+  return env.COMFY_DIR || (process.platform === "win32" ? "C:/ComfyUI" : "");
+}
 
-// COMFY_PY: ComfyUI deps live in its venv, not the system python. Auto-detect; override
-// via COMFY_PY. (Identical resolution to the runners' prior inline logic.)
-export const COMFY_PY = process.env.COMFY_PY
-  || [".venv/Scripts/python.exe", "venv/Scripts/python.exe", "python_embeded/python.exe"]
-       .map((p) => join(COMFY_DIR, p)).find((p) => existsSync(p))
-  || "python";
+// resolveComfyPy: ComfyUI's deps live in its venv, not the system python. Probes BOTH
+// platform families — the Windows candidates first, so Windows resolution is unchanged.
+// Only Windows paths were probed before, so a Linux node fell through to a bare "python"
+// that is either absent on Ubuntu or the system interpreter without torch: ComfyUI could
+// not be launched by the harness at all. tts.mjs already probed both families; this is
+// that pattern applied where it was missed.
+export function resolveComfyPy(comfyDir = COMFY_DIR, env = process.env) {
+  if (env.COMFY_PY) return env.COMFY_PY;
+  const bare = process.platform === "win32" ? "python" : "python3";
+  if (!comfyDir) return bare;
+  return [".venv/Scripts/python.exe", "venv/Scripts/python.exe", "python_embeded/python.exe",
+          ".venv/bin/python", "venv/bin/python"]
+           .map((p) => join(comfyDir, p)).find((p) => existsSync(p))
+    || bare;
+}
+
+export const COMFY_DIR = resolveComfyDir();
+export const COMFY_PY = resolveComfyPy(COMFY_DIR);
 
 // comfyUp: is a ComfyUI HTTP server already answering on api?
 export async function comfyUp(api = process.env.COMFY_API || "http://127.0.0.1:8188") {
@@ -47,6 +66,11 @@ export async function ensureComfy(opts = {}) {
     maxPolls = Math.max(1, Math.ceil(Number(process.env.COMFY_START_WAIT_SEC || 600) * 1000 / 2000)),
   } = opts;
   if (await up(api)) return null; // already running — don't manage it
+  // An unbound COMFY_DIR must fail with its reason, not with a bad cwd from spawn(): on a
+  // machine with no ComfyUI binding the caller's defer should say WHY.
+  if (!comfyDir) {
+    throw new Error("COMFY_DIR is not set — this machine has no ComfyUI install bound (set comfy_dir in the harness config)");
+  }
   const reserve = String(reserveVram || "1.0");
   // warm: a BATCH session keeps ComfyUI's model cache ON so the checkpoint loads once
   // for N renders; the caller still tears the whole session down at the batch boundary

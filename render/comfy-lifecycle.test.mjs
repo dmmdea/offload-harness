@@ -5,7 +5,10 @@
 // 5); and a never-ready spawn is killed + throws.
 import { test } from "node:test";
 import assert from "node:assert";
-import { ensureComfy } from "./comfy-lifecycle.mjs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ensureComfy, resolveComfyPy, resolveComfyDir } from "./comfy-lifecycle.mjs";
 
 test("already running => returns null (don't manage someone else's ComfyUI)", async () => {
   const child = await ensureComfy({
@@ -108,4 +111,61 @@ test("COMFY_EXTRA_ARGS appends verbatim launch flags (J4 seam); unset = byte-ide
     pollMs: 1,
   });
   assert.equal(plainArgs.includes("--directml"), false);
+});
+
+// --- cross-platform engine resolution -------------------------------------------------
+// A Linux node could not launch ComfyUI at all: the venv auto-detect probed ONLY Windows
+// paths (.venv/Scripts/python.exe, venv/Scripts/python.exe, python_embeded/python.exe)
+// and otherwise fell back to a bare "python", which on Ubuntu is either absent or the
+// system interpreter without torch. render/tts.mjs already probed both families — this
+// is that pattern, applied where it was missed.
+test("resolveComfyPy: finds a POSIX venv python", () => {
+  const dir = mkdtempSync(join(tmpdir(), "comfy-py-"));
+  mkdirSync(join(dir, ".venv/bin"), { recursive: true });
+  writeFileSync(join(dir, ".venv/bin/python"), "");
+  assert.equal(resolveComfyPy(dir, {}), join(dir, ".venv/bin/python"));
+});
+
+test("resolveComfyPy: an explicit COMFY_PY always wins", () => {
+  assert.equal(resolveComfyPy("/anything", { COMFY_PY: "/opt/py" }), "/opt/py");
+});
+
+test("resolveComfyPy: Windows candidates keep priority (Windows resolution unchanged)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "comfy-py-"));
+  mkdirSync(join(dir, ".venv/Scripts"), { recursive: true });
+  mkdirSync(join(dir, ".venv/bin"), { recursive: true });
+  writeFileSync(join(dir, ".venv/Scripts/python.exe"), "");
+  writeFileSync(join(dir, ".venv/bin/python"), "");
+  assert.equal(resolveComfyPy(dir, {}), join(dir, ".venv/Scripts/python.exe"));
+});
+
+test("resolveComfyPy: no venv falls back to the platform's interpreter name", () => {
+  const dir = mkdtempSync(join(tmpdir(), "comfy-py-"));
+  assert.equal(resolveComfyPy(dir, {}), process.platform === "win32" ? "python" : "python3");
+});
+
+test("resolveComfyPy: an empty comfyDir never fabricates a relative candidate", () => {
+  assert.equal(resolveComfyPy("", {}), process.platform === "win32" ? "python" : "python3");
+});
+
+// COMFY_DIR defaulted to "C:/ComfyUI" on EVERY platform, so a Linux node reported a
+// ComfyUI install it cannot have — and the fleet advertised the routes that drive it.
+test("resolveComfyDir: the env value always wins", () => {
+  assert.equal(resolveComfyDir({ COMFY_DIR: "/srv/comfyui" }), "/srv/comfyui");
+});
+
+test("resolveComfyDir: the Windows default is Windows-only", () => {
+  const got = resolveComfyDir({});
+  if (process.platform === "win32") {
+    assert.equal(got, "C:/ComfyUI");
+  } else {
+    assert.equal(got, "", "an unset COMFY_DIR off Windows must be UNBOUND, not a C:/ path");
+  }
+});
+
+test("ensureComfy: an unbound COMFY_DIR fails with a reason, not a bad cwd", async () => {
+  await assert.rejects(
+    () => ensureComfy({ comfyUp: async () => false, comfyDir: "", spawn: () => { throw new Error("must not spawn"); }, pollMs: 1 }),
+    /COMFY_DIR/,
+  );
 });
