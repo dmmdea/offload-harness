@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -211,9 +212,9 @@ func TestKNNDefaults(t *testing.T) {
 // the embedder request the reranker when embed_model is set.
 func TestEmbedModelResolution(t *testing.T) {
 	cases := []struct {
-		name  string
-		cfg   Config
-		want  string
+		name string
+		cfg  Config
+		want string
 	}{
 		{"explicit embed_model wins over stack order", Config{EmbedModelName: "my-embedder", MemoryStack: []string{"bge-reranker-v2-m3", "my-embedder"}}, "my-embedder"},
 		{"falls back to MemoryStack[0]", Config{MemoryStack: []string{"embeddinggemma", "bge-reranker-v2-m3"}}, "embeddinggemma"},
@@ -234,7 +235,7 @@ func TestExpandTilde(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"~/x/y.json", filepath.Join(home, "x", "y.json")},
 		{"~", home},
-		{"~user/x", "~user/x"},   // ambiguous on Windows — untouched
+		{"~user/x", "~user/x"}, // ambiguous on Windows — untouched
 		{"render/tts.mjs", "render/tts.mjs"},
 		{"", ""},
 	}
@@ -418,5 +419,77 @@ func TestComfyDirDefaultIsOSAware(t *testing.T) {
 	if got != "" {
 		t.Fatalf("comfy_dir default on %s = %q; a non-Windows box must be UNBOUND rather than "+
 			"pointed at a path that cannot exist", runtime.GOOS, got)
+	}
+}
+
+// TestHomeRebasesDerivedPathsOnly: "home" exists so an install can live on the volume
+// that has room WITHOUT hand-writing a dozen absolute paths — the hand-patching that
+// put a model tree on an OS drive and then drifted. A path the operator typed must
+// survive untouched; only defaults follow.
+func TestHomeRebasesDerivedPathsOnly(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	explicit := filepath.Join(dir, "somewhere-else", "ledger.jsonl")
+	body := `{"home":"D:/offload-stack","ledger_path":` + strconv.Quote(explicit) + `}`
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantCache := filepath.Join("D:/offload-stack", "cache.db")
+	if got.CachePath != wantCache {
+		t.Errorf("cache_path = %q, want %q (a default must follow home)", got.CachePath, wantCache)
+	}
+	if got.MediaDir != filepath.Join("D:/offload-stack", "media") {
+		t.Errorf("media_dir = %q, want it rebased onto home", got.MediaDir)
+	}
+	if got.LedgerPath != explicit {
+		t.Errorf("ledger_path = %q, want the operator's value %q untouched", got.LedgerPath, explicit)
+	}
+}
+
+// TestHomeNeverRebasesTheMachineWideState: the GPU lease root is machine-wide ON
+// PURPOSE. Moving it under a home directory is exactly the per-user trap that made
+// mutual exclusion evaporate once already (0.24.1 added a warning for it).
+func TestHomeNeverRebasesTheMachineWideState(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"home":"D:/offload-stack"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.StateDir != "" || got.GPULockPath != "" {
+		t.Errorf("state_dir=%q gpu_lock_path=%q — the machine-wide lease root must stay unset so "+
+			"internal/gpulease resolves it machine-wide", got.StateDir, got.GPULockPath)
+	}
+	// Binaries resolved by name or by an absolute platform path are not ours to move.
+	if got.NodePath != "node" {
+		t.Errorf("node_path = %q, want the bare name untouched", got.NodePath)
+	}
+	if runtime.GOOS == "windows" && got.ComfyDir != "C:/ComfyUI" {
+		t.Errorf("comfy_dir = %q, want the platform default untouched", got.ComfyDir)
+	}
+}
+
+// TestDefaultBaseHonorsTheEnvVar: the same knob has to work before any config file
+// exists — that is the bootstrap case an installer runs in.
+func TestDefaultBaseHonorsTheEnvVar(t *testing.T) {
+	t.Setenv("LOCAL_OFFLOAD_HOME", filepath.Join("V:", "offload-stack"))
+	if got := DefaultBase(); got != filepath.Join("V:", "offload-stack") {
+		t.Errorf("DefaultBase() = %q, want the env value", got)
+	}
+	if got := Default().CachePath; got != filepath.Join("V:", "offload-stack", "cache.db") {
+		t.Errorf("Default().CachePath = %q, want it under the env home", got)
+	}
+	t.Setenv("LOCAL_OFFLOAD_HOME", "")
+	home, _ := os.UserHomeDir()
+	if got := DefaultBase(); got != filepath.Join(home, ".local-offload") {
+		t.Errorf("with the env cleared DefaultBase() = %q, want ~/.local-offload", got)
 	}
 }
