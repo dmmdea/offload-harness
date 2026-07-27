@@ -152,6 +152,34 @@ The runbook explicitly bounds unsupervised agent behavior: **do not** substitute
 install ROCm/CUDA, or start the agent server beyond loopback without asking the human. Installers run
 with real privileges and fetch remote assets, which is why the boundary is stated rather than assumed.
 
+## Where an install goes (`local-offload install volumes`)
+
+The installer has always used `$OFFLOAD_HOME`, defaulting to `$HOME\offload-stack` — the **OS
+drive** on every machine. That is how a laptop ends up with a multi-GB model tree beside Windows and
+a services box fills its root while a 250 GB pool sits idle next to it.
+
+`local-offload install volumes` decides instead, from one policy:
+
+1. Never a **removable** or **network** volume — an install that vanishes with a USB stick or a
+   dropped share is worse than no install.
+2. Never a volume below the floor (**20 GiB** free by default; a tier's media set alone exceeds 12 GiB).
+3. Prefer any qualifying volume over the **OS volume**. Filling the OS volume takes the machine
+   down, not just the harness, so it is selected only with `--allow-os-volume` — an explicit
+   decision that gets recorded, never a silent fallback.
+4. Among the rest, **most free space wins**; ties break on path depth, then name. Depth matters on
+   ZFS, where every dataset of a pool reports the same free space: without it the harness lands
+   under whatever sorts first (`apps/adventurelog` on the measured box) instead of the pool root.
+
+Selection is pure and unit-tested (`internal/volumes`); only enumeration is platform-specific
+(kernel32 on Windows, `/proc/mounts` + `statfs` on Unix), so the policy cannot drift between
+operating systems. `--json` emits the full enumeration plus `{volume, because}` for a wrapper to
+consume; the console view shows the roomiest few and says how many it withheld.
+
+`because` is meant to be stored with the install, so a later operator can see why the tree is where
+it is rather than re-deriving it. Wiring the choice into `install.ps1` (and recording it in
+`installed.json`) needs the bootstrap to fetch the binary before it picks a target, and belongs with
+the detection move — this verb is the decision engine those wrappers will call.
+
 ## Observability and debugging
 
 `local-offload doctor` verifies the serving layer end to end and reports per-alias reachability.
