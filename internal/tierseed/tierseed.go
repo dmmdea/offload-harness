@@ -1,0 +1,219 @@
+// Package tierseed resolves a hardware tier's config_seed into the harness config
+// fragment an install should start from.
+//
+// The seeds existed only inside install.ps1, which meant a tier's media binding was
+// both Windows-shaped (`sd-cli.exe` baked into the table) and PowerShell-only. A tier
+// is a HARDWARE class: the same tier on Linux must produce the same capabilities, so
+// the resolution lives here — one implementation, cross-compiled, testable — and the
+// wrappers become consumers.
+//
+// It also VALIDATES, because a seed is config that ships to every machine of that
+// class and a typo in it is a capability that silently never works:
+//   - every key must be a real Config field (a misspelled seed key would be dropped
+//     by the loader with only a warning, on every install of that tier);
+//   - no literal ".exe" — binaries carry the __EXE__ token so one seed renders on
+//     both platforms;
+//   - vae_mode is rejected as "cpu" on a CUDA backend, where it was MEASURED at 7.8x
+//     slower (58.2s vs 7.5s) — correct on an AMD/UMA part, a trap everywhere else.
+package tierseed
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"sort"
+	"strings"
+
+	"github.com/dmmdea/offload-harness/internal/config"
+)
+
+// Tokens a seed value may carry. They exist so ONE table row renders correctly on
+// every machine and OS: the install root differs per machine (see the `home` key),
+// and the executable suffix differs per platform.
+const (
+	TokenHome = "__OFFLOAD_HOME__"
+	TokenExe  = "__EXE__"
+)
+
+// Options describe the machine the seed is being resolved FOR — never the machine
+// doing the resolving, so a Windows box can render a Linux node's config.
+type Options struct {
+	// Home is the install root substituted for __OFFLOAD_HOME__. Forward slashes are
+	// used verbatim: the harness accepts them on Windows and they survive JSON.
+	Home string
+	// GOOS selects the executable suffix. "" = the running platform.
+	GOOS string
+	// RAMTier selects the optional config_seed_ram_mid_high overlay ("mid"/"high").
+	RAMTier string
+}
+
+// vaeArgs maps the declared vae_mode to the sd.cpp flag it stands for. Free-text
+// extra args were how "--vae-on-cpu" spread to a tier it was wrong for.
+var vaeArgs = map[string]string{
+	"tiling": "--vae-tiling",
+	"cpu":    "--vae-on-cpu",
+	"none":   "",
+}
+
+// Profile is the part of a profiles.json entry this package reads.
+type Profile struct {
+	Backend           string         `json:"backend"`
+	ConfigSeed        map[string]any `json:"config_seed"`
+	ConfigSeedMidHigh map[string]any `json:"config_seed_ram_mid_high"`
+}
+
+type profilesDoc struct {
+	Profiles map[string]Profile `json:"profiles"`
+}
+
+// Load reads the profile table from a repo root.
+func Load(root string) (map[string]Profile, error) {
+	raw, err := os.ReadFile(filepath.Join(root, "setup", "templates", "profiles.json"))
+	if err != nil {
+		return nil, err
+	}
+	var d profilesDoc
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return nil, fmt.Errorf("profiles.json: %w", err)
+	}
+	if len(d.Profiles) == 0 {
+		return nil, fmt.Errorf("profiles.json has no profiles — the schema moved")
+	}
+	return d.Profiles, nil
+}
+
+// Resolve renders one tier's seed for a target machine: overlay applied, tokens
+// expanded, vae_mode translated, and the whole thing validated. The result is ready
+// to merge into a config.json.
+func Resolve(p Profile, id string, opt Options) (map[string]any, error) {
+	if len(p.ConfigSeed) == 0 && len(p.ConfigSeedMidHigh) == 0 {
+		return nil, nil // a text-only tier is a legitimate answer, not an error
+	}
+	merged := map[string]any{}
+	for k, v := range p.ConfigSeed {
+		merged[k] = v
+	}
+	if opt.RAMTier == "mid" || opt.RAMTier == "high" {
+		for k, v := range p.ConfigSeedMidHigh {
+			merged[k] = v
+		}
+	}
+	if err := validate(merged, p.Backend, id); err != nil {
+		return nil, err
+	}
+
+	goos := opt.GOOS
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	exe := ""
+	if goos == "windows" {
+		exe = ".exe"
+	}
+	home := strings.TrimRight(strings.ReplaceAll(opt.Home, `\`, "/"), "/")
+
+	out := map[string]any{}
+	for k, v := range merged {
+		if k == "vae_mode" {
+			continue // translated below, never emitted as a config key
+		}
+		out[k] = expand(v, home, exe)
+	}
+	if mode, ok := merged["vae_mode"].(string); ok {
+		if flag := vaeArgs[mode]; flag != "" {
+			out["sdcpp_extra_args"] = appendArg(out["sdcpp_extra_args"], flag)
+		}
+	}
+	return out, nil
+}
+
+// validate is where a bad seed dies — at authoring time, not on someone's machine.
+func validate(seed map[string]any, backend, id string) error {
+	known := configKeys()
+	var problems []string
+	for _, k := range sortedKeys(seed) {
+		if k == "vae_mode" {
+			continue // a seed-only directive, translated to sdcpp_extra_args
+		}
+		if !known[k] {
+			problems = append(problems, fmt.Sprintf("unknown key %q (not a harness config field — it would be dropped on every install of this tier)", k))
+		}
+		if s, ok := seed[k].(string); ok && strings.Contains(strings.ToLower(s), ".exe") {
+			problems = append(problems, fmt.Sprintf("%s carries a literal \".exe\" — use the %s token so the tier renders on every OS", k, TokenExe))
+		}
+	}
+	if mode, ok := seed["vae_mode"]; ok {
+		s, isStr := mode.(string)
+		if !isStr {
+			problems = append(problems, "vae_mode must be a string (tiling|cpu|none)")
+		} else if _, valid := vaeArgs[s]; !valid {
+			problems = append(problems, fmt.Sprintf("vae_mode %q is not one of tiling|cpu|none", s))
+		} else if s == "cpu" && strings.Contains(backend, "cuda") {
+			problems = append(problems, "vae_mode \"cpu\" on a CUDA backend: measured 7.8x slower (58.2s vs 7.5s with tiling). "+
+				"It is correct on an AMD/UMA part and a trap everywhere else — use \"tiling\"")
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("tier %q config_seed:\n  - %s", id, strings.Join(problems, "\n  - "))
+	}
+	return nil
+}
+
+// configKeys is every json tag on config.Config — the set a seed may write.
+func configKeys() map[string]bool {
+	out := map[string]bool{}
+	t := reflect.TypeOf(config.Config{})
+	for i := 0; i < t.NumField(); i++ {
+		name := strings.SplitN(t.Field(i).Tag.Get("json"), ",", 2)[0]
+		if name != "" && name != "-" {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+func expand(v any, home, exe string) any {
+	switch t := v.(type) {
+	case string:
+		s := strings.ReplaceAll(t, TokenExe, exe)
+		if home != "" {
+			s = strings.ReplaceAll(s, TokenHome, home)
+		}
+		return s
+	case []any:
+		out := make([]any, 0, len(t))
+		for _, e := range t {
+			out = append(out, expand(e, home, exe))
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// appendArg adds a flag to sdcpp_extra_args without duplicating it, so a seed that
+// still lists the flag explicitly does not get it twice.
+func appendArg(existing any, flag string) []any {
+	var out []any
+	if cur, ok := existing.([]any); ok {
+		for _, e := range cur {
+			if s, ok := e.(string); ok && s == flag {
+				return cur
+			}
+		}
+		out = append(out, cur...)
+	}
+	return append(out, flag)
+}
+
+func sortedKeys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}

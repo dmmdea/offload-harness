@@ -26,12 +26,12 @@ The installer seeds this tier's media bindings (`config_seed`):
 | `imagegen_family` | `z-image-turbo` |
 | `imagegen_steps` | `8` |
 | `imagegen_timeout_sec` | `900` |
-| `sdcpp_bin` | `__OFFLOAD_HOME__/sdcpp/sd-cli.exe` |
-| `sdcpp_extra_args` | `--vae-on-cpu` |
+| `sdcpp_bin` | `__OFFLOAD_HOME__/sdcpp/sd-cli__EXE__` |
 | `sdcpp_llm` | `__OFFLOAD_HOME__/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf` |
 | `sdcpp_model` | `__OFFLOAD_HOME__/models/z_image_turbo-Q8_0.gguf` |
 | `sdcpp_model_kind` | `diffusion` |
 | `sdcpp_vae` | `__OFFLOAD_HOME__/models/zimage_ae.safetensors` |
+| `vae_mode` | `cpu` |
 
 `__OFFLOAD_HOME__` is replaced with the install root at render time.
 
