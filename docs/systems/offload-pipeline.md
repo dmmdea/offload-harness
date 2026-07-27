@@ -146,6 +146,44 @@ reason and any partial output preserved in `Partial`.
 The cascade holds no credentials and reaches no network beyond the configured local endpoint. Task
 input passes through the ledger only as metadata and token counts, not as content.
 
+## Prefix reuse — why the prompt shape is load-bearing
+
+The serving stack reuses a KV prefix, so the cost of a call is dominated by how much of
+its prompt the server has already seen. **Measured on Qube, 2026-07-27, `gemma-4-e4b`:**
+
+| call | `prompt_n` | `cache_n` | prefill | wall |
+|---|---:|---:|---:|---:|
+| cold — instructions + payload A | 2037 | 0 | 514.7 ms | 7.1 s |
+| identical repeat | 1 | 2036 | 30.5 ms | 0.22 s |
+| **same instructions, NEW payload** | **41** | 1996 | 85.8 ms | **0.30 s** |
+
+The third row is the one that matters: a harness payload always differs, and only the 41
+changed tokens were re-prefilled. That saving exists **only while the stable text comes
+first and the variable document last**, which is how every builder in `internal/tasks`
+is written — a constant `System` per task, then instructions/labels/schema/question,
+then `TEXT:\n<input>` at the end.
+
+It is one `fmt.Sprintf` argument order away from being lost **silently**: nothing would
+fail, every call would just quietly pay full prefill again. `internal/tasks/prefixorder_test.go`
+is the guard — the input must be the suffix of the user message, appear exactly once, and
+the system prompt must be byte-identical across two different inputs.
+
+Two things this does NOT mean:
+
+- **It is not a reason to add `--swa-full` to the small tiers.** That flag was measured as
+  load-bearing for the large iSWA models (Laguna, V4-Flash) and is set for them. The
+  harness's own tiers reuse prefixes on this box *without* it — the table above was
+  measured against a `gemma-4-e4b` entry that does not carry the flag — and forcing a full
+  window would cost KV memory on exactly the tiers that have least to spare. Verify per
+  model before copying serving flags between them.
+- **It changes no defer or escalation decision.** Those gates are confidence- and
+  validation-driven, never latency-driven, so cheaper repeat calls do not re-tune anything.
+
+If you benchmark this yourself, use the server's own `timings.prompt_n` as ground truth —
+did it re-prefill? — never process memory. An mmap'd model's weights live in the page
+cache, not the process working set, so a "did it restart?" check based on RSS reports
+phantom restarts and has already produced one retracted root cause.
+
 ## Observability and debugging
 
 - `local-offload doctor` — endpoint health, per-alias reachability, and the derived media routes
