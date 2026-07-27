@@ -4,6 +4,32 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.31.0] - 2026-07-27
+
+### Added — a Linux node can render its own serving config (W3, second slice)
+- **`setup/templates/llama-swap.linux-cuda.yaml` + `internal/servingtmpl` + `install render`.**
+  Rendering lived in `install.ps1`, so a Linux node could not produce a serving config at all and
+  every Linux deployment hand-wrote one. The templates are **embedded in the binary**, so a fetched
+  binary renders a config on a machine with no checkout.
+- **The template is not a translation of the Windows one.** Two Linux-specific things are
+  load-bearing: `LD_LIBRARY_PATH` on every seat (a self-built `llama-server` links its own shared
+  objects; without it the process dies at exec with a loader error that reads nothing like a config
+  problem), and the group topology.
+- **The topology is MEASURED, and now enforced by a test.** `heavy` is `swap:true,
+  exclusive:false`; `support` is `swap:false`. On the 6 GB node `exclusive:true` on a swapping tier
+  meant the loaded seat evicted everything and nothing evicted it — every chat request returned 502
+  for the full 5-minute TTL after any render; and with the embedder inside the swapping tier a
+  single RAG query paid three full model loads (free VRAM 3655 → 1005 MiB, because loading the
+  embedder had evicted the chat model). `TestHeavyGroupIsNeverExclusive` keeps both.
+- **Rendering refuses to emit a config that still contains a token.** `install.ps1` has a comment
+  about that exact failure; a llama-swap started with a literal `--ctx-size __CTX__` fails looking
+  like a model problem. A tier that drops the 26B loses its model block AND its group membership
+  together — llama-swap rejects a config whose group names a model that does not exist.
+- **Verified end to end on the Linux node:** the rendered `ampere-6` config was handed to that
+  node's own `llama-swap` on a throwaway port, which accepted it and listed exactly `offload-e4b`,
+  `gemma4-e2b`, `embeddinggemma`, `bge-reranker-v2-m3` — the 26B correctly absent. The live service
+  on `:11436` was untouched.
+
 ## [0.30.0] - 2026-07-27
 
 ### Added — a machine can be classified without PowerShell (W3, first slice)
