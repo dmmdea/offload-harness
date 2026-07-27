@@ -47,7 +47,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.29.0"
+const version = "0.30.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -226,6 +226,8 @@ Usage:
   local-offload ledger [--since DAYS]    token-savings report
   local-offload doctor                   check endpoint health + config
   local-offload report [--out FILE]      READ-ONLY capability report for this machine (tier, serving, media routes) — Markdown, safe to send
+  local-offload install detect [--json]  classify this machine into a hardware tier (works on every OS)
+  local-offload install plan [--json]    the tier + the media bindings an install would seed here
   local-offload install volumes [--json] [--min-free-gb N] [--allow-os-volume]   where should this machine install? (most free space, never the OS drive by default)
   local-offload models                   show configured offload model
   local-offload eval [--dir DIR]         code-based quality eval (AURC, deferral-curve AUDC/QNC)
