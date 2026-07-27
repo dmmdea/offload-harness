@@ -4,6 +4,32 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.27.0] - 2026-07-27
+
+### Added — the installer can stop defaulting onto the OS drive
+- **`local-offload install volumes`** decides where a machine's harness, models and media should
+  live, from one policy: never removable or network media; never below a floor (20 GiB free by
+  default — a tier's media set alone exceeds 12 GiB); prefer ANY qualifying volume over the OS
+  volume, which is selectable only with `--allow-os-volume` and is then recorded as a deliberate
+  choice; among the rest most free space wins.
+  - **Ties break on path depth, then name.** On ZFS every dataset of a pool reports the same free
+    space, so a name-only tie-break puts the harness under whatever sorts first — measured on the
+    Lenovo, that is `/srv/ecosystem_backup/apps/adventurelog` rather than the pool root.
+  - Selection (`internal/volumes.Pick`) is **pure and unit-tested**; only enumeration is
+    platform-specific (kernel32 on Windows, `/proc/mounts` + `statfs` on Unix), so the policy cannot
+    drift between operating systems. Free space uses the UNPRIVILEGED figure on Unix (`Bavail`, not
+    `Bfree`) — reserved blocks are not space an install can use.
+  - Verified on both: <node-b> picks `V:` (its weights volume, 308 GiB free) over `C:` with 640 GiB free
+    because `C:` is the OS volume; the <node-c> node picks `/srv/ecosystem_backup` out of **39** enumerated
+    filesystems.
+  - `--json` carries the full enumeration plus `{volume, because}` for wrapper consumption; the
+    console view shows the roomiest few and says how many it withheld.
+- `install` is a verb GROUP: the installer's decisions move into the binary so PowerShell and shell
+  wrappers only fetch and place files. Wiring the choice into `install.ps1` and `installed.json`
+  needs the bootstrap to fetch the binary before it picks a target and lands with the detection
+  move — this release is the decision engine those wrappers will call, and the answer an operator
+  can already act on.
+
 ## [0.26.0] - 2026-07-27
 
 ### Added
