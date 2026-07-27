@@ -138,6 +138,7 @@ offload-harness fleet-serve              # join the fleet-dispatcher fleet (heal
 offload-harness fleet-measure            # prime the fleet footprint store (one minimal render per configured task)
 offload-harness ledger [--since DAYS]    # token-savings report
 offload-harness doctor                   # endpoint health, model aliases, derived media routes
+offload-harness report [--out FILE]      # read-only capability report (tier, serving, media routes) — Markdown, safe to send
 offload-harness models                   # show configured models + serving flags
 offload-harness eval [--dir DIR]         # code-based quality eval (AURC, deferral-curve AUDC/QNC)
 offload-harness stats                    # per-task ledger telemetry
