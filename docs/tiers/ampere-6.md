@@ -16,10 +16,21 @@
 
 ## Media
 
-**This tier ships no media configuration.** It serves text only until an operator binds
-the media routes by hand, so `generate_image`, `generate_video`, `generate_audio` and
-`run_graph` will report `NOT CONFIGURED` — or `BOUND-BUT-MISSING` where a shipped default
-script path does not exist on the machine. Run `local-offload doctor` to see which.
+The installer seeds this tier's media bindings (`config_seed`):
+
+| key | value |
+|---|---|
+| `imagegen_cfg` | `1` |
+| `imagegen_engine` | `sdcpp` |
+| `imagegen_family` | `sdxl-turbo` |
+| `imagegen_steps` | `4` |
+| `imagegen_timeout_sec` | `900` |
+| `sdcpp_bin` | `__OFFLOAD_HOME__/sdcpp/sd-cli__EXE__` |
+| `sdcpp_model` | `__OFFLOAD_HOME__/models/sdxl-turbo/stable-diffusion-xl-1.0-turbo-Q4_0.gguf` |
+| `sdcpp_model_kind` | `checkpoint` |
+| `vae_mode` | `tiling` |
+
+`__OFFLOAD_HOME__` is replaced with the install root at render time.
 
 ## Operator notes
 
