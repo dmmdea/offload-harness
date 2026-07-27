@@ -125,6 +125,25 @@ server, so each message runs a full agent loop (see §4), not a bare completion.
 
 ---
 
+### Capability report — send this instead of describing your box ✅
+
+```powershell
+local-offload report --out capability-report.md      # Windows
+./local-offload report --out capability-report.md    # Linux
+```
+
+One read-only Markdown document: harness version and platform, which config file is actually
+loaded, the hardware tier from the installer manifest, every configured model alias measured
+against the live `/v1/models`, and every media route with its derived verdict — plus a
+**Needs attention** section that lists only the genuinely broken ones (a route this box never
+bound is a legitimate machine, not a fault).
+
+It loads no model, queues no GPU work, and changes nothing. Attach it when asking for help, or
+when a collaborator asks "what can that machine do?" — it answers from the same code paths the
+harness routes on, so it cannot claim a capability the box would defer. A report generated on
+BUILT-IN DEFAULTS says so on its config line: that machine's real bindings are inactive and every
+verdict below it describes defaults, not the install.
+
 ## 3. Run an offload task + read the ledger
 
 An offload task returns a verified JSON result or a structured defer. ✅
