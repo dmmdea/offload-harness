@@ -139,6 +139,7 @@ offload-harness fleet-measure            # prime the fleet footprint store (one 
 offload-harness ledger [--since DAYS]    # token-savings report
 offload-harness doctor                   # endpoint health, model aliases, derived media routes
 offload-harness report [--out FILE]      # read-only capability report (tier, serving, media routes) — Markdown, safe to send
+                                         #   your tier is documented in docs/tiers/ — see docs/tiers/README.md
 offload-harness install volumes          # where should this machine install? (most free space, never the OS drive by default)
 offload-harness models                   # show configured models + serving flags
 offload-harness eval [--dir DIR]         # code-based quality eval (AURC, deferral-curve AUDC/QNC)

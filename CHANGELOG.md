@@ -4,6 +4,30 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.27.1] - 2026-07-27
+
+### Added — every hardware tier is documented IN THE REPO
+- **`docs/tiers/`**: an index plus one page per tier (14 today), so anyone who downloads the repo can
+  read what their own machine's class gets — served window, KV type, backend template, resident
+  model, 26B placement, whether the tier ships a media `config_seed`, and the operator notes recorded
+  against it (many of which are measurements from real hardware, including the reasons a tempting
+  change was deliberately NOT made). Until now that lived only as a JSON blob inside the installer,
+  which is a large part of why collaborators' installs drifted.
+- **The capability report is part of that documentation.** Every tier page ends with how to produce
+  one for a specific machine (`local-offload report`), what its three verdicts mean, and links to any
+  checked-in example for that tier. `docs/tiers/reports/` carries three real ones — <node-b>
+  (`blackwell-16`), the <node-a> laptop (`ampere-8`) and the <node-c> node (`ampere-6`) — committed verbatim, and says
+  plainly that all three report `hardware tier: UNKNOWN` because none was installed by `install.ps1`
+  into the default `$OFFLOAD_HOME`.
+- **The pages are GENERATED and gated.** `cmd/gentiers` renders them from
+  `setup/templates/profiles.json` (`go generate ./...`), and `TestTierDocsAreCurrent` fails the build
+  when the checked-in tree is stale — including an orphan page for a tier that no longer exists. This
+  is LO-17's `config.example.json` lesson applied to documentation; the gate was verified by injecting
+  drift into a page and watching it fail, then pass after regeneration.
+- The index makes one gap visible at a glance that was previously buried: **6 of 14 tiers ship no
+  media seat at all** (`amd-gcn`, `ampere-6`, `ampere-8`, `blackwell-8`, `cpu`, `dual-gpu`), so those
+  machines serve text only until an operator binds media by hand.
+
 ## [0.27.0] - 2026-07-27
 
 ### Added — the installer can stop defaulting onto the OS drive

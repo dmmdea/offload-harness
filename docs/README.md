@@ -26,6 +26,14 @@ where the code lives.
 - [systems/setup-installer.md](systems/setup-installer.md) — hardware detection, profiles, serving
   templates, the install runbook
 
+## Hardware tiers — what YOUR machine gets
+
+- [tiers/README.md](tiers/README.md) — the tier index: served window, KV type, backend template,
+  resident model, 26B placement and media seat for each of the supported hardware classes, plus how
+  to produce a **capability report** for a specific machine (`local-offload report`).
+- [tiers/reports/](tiers/reports/) — real capability reports from real machines, checked in as
+  reference. Generated pages: edit `setup/templates/profiles.json`, then `go generate ./...`.
+
 ## Flows — behavior that crosses systems
 
 - [flows/cascade-escalation-and-defer.md](flows/cascade-escalation-and-defer.md) — how a task walks
