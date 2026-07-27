@@ -101,19 +101,11 @@ func TestNoUnguardedDriveLetterDefaults(t *testing.T) {
 	}
 }
 
-// windowsOnlySeedGrandfathered are the tier seeds that still carry a Windows-only
-// binary name. They are NOT accepted — they are recorded, with the reason, so a NEW
-// one fails immediately while these two are fixed by the tier-schema work (W4 of the
-// install-architecture plan: per-OS binary names rendered by the installer). Removing
-// an entry here is part of that change; adding one requires the same justification.
-var windowsOnlySeedGrandfathered = map[string]string{
-	"amd-rdna3":      "sdcpp_bin sd-cli.exe — Juan's tier; needs per-OS binary rendering (W4)",
-	"amd-rdna3-dgpu": "sdcpp_bin sd-cli.exe — same seed shape as amd-rdna3 (W4)",
-}
-
 // TestTierSeedsCarryNoWindowsOnlyBinary: a tier is a HARDWARE class, not an operating
 // system. A seed that names sd-cli.exe cannot be rendered on a Linux box of the same
 // tier, which is how "first-class on every node" quietly becomes "first-class on mine".
+// The two amd-rdna3* seeds that once carried it now use the __EXE__ token, so this rule
+// has no exceptions left — internal/tierseed resolves the suffix per target OS.
 func TestTierSeedsCarryNoWindowsOnlyBinary(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("setup", "templates", "profiles.json"))
 	if err != nil {
@@ -133,10 +125,6 @@ func TestTierSeedsCarryNoWindowsOnlyBinary(t *testing.T) {
 	for name, p := range doc.Profiles {
 		for key, val := range p.ConfigSeed {
 			if !strings.Contains(strings.ToLower(string(val)), ".exe") {
-				continue
-			}
-			if why, known := windowsOnlySeedGrandfathered[name]; known {
-				t.Logf("known Windows-only seed %s.%s (%s)", name, key, why)
 				continue
 			}
 			t.Errorf("tier %q seeds %s = %s — a .exe in a tier seed cannot render on a "+

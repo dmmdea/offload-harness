@@ -180,6 +180,32 @@ it is rather than re-deriving it. Wiring the choice into `install.ps1` (and reco
 `installed.json`) needs the bootstrap to fetch the binary before it picks a target, and belongs with
 the detection move — this verb is the decision engine those wrappers will call.
 
+### Tier media seeds (`local-offload install seed`)
+
+A tier's `config_seed` is the media/config fragment a fresh install of that hardware class
+starts from. It lived only inside `install.ps1`, which made it Windows-shaped (`sd-cli.exe`
+baked into the table) and unreachable from a non-Windows install. Resolution now lives in
+`internal/tierseed`:
+
+```
+local-offload install seed --profile ampere-6 --home /srv/offload-stack --os linux
+```
+
+- `__OFFLOAD_HOME__` expands to the install root, `__EXE__` to `.exe` on Windows and nothing
+  elsewhere — **one row renders on every OS**, which is what makes a tier a hardware class
+  rather than a Windows class.
+- `--os` targets a machine other than the one resolving, so a Windows box can render a Linux
+  node's fragment.
+- `vae_mode: tiling|cpu|none` replaces free-text `sdcpp_extra_args` for the VAE lever and is
+  **refused as `cpu` on a CUDA backend**, where it measured 7.8× slower (58.2 s vs 7.5 s with
+  tiling). It is correct on an AMD/UMA part; free text is how it would spread to a tier it is
+  wrong for.
+- Every seed key is checked against the real `config.Config` fields. A typo'd key is silently
+  dropped by the loader on *every* install of that tier, so it is refused at authoring time.
+
+`TestEveryShippedSeedIsValid` resolves every tier in the table for **both** platforms, which
+is the gate that would have caught `sd-cli.exe`.
+
 ### Relocating an install: one knob, not a dozen paths
 
 Choosing a volume is only half the job — the harness has to actually live there. Every

@@ -4,6 +4,31 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.29.0] - 2026-07-27
+
+### Added — a tier is a hardware class, not a Windows class (W4, first slice)
+- **`internal/tierseed` + `local-offload install seed`** resolve a tier's `config_seed` for a
+  TARGET machine: `__OFFLOAD_HOME__` expands to the install root and the new `__EXE__` token to
+  `.exe` on Windows and nothing elsewhere, so one table row renders on every OS. `--os` lets a
+  Windows box render a Linux node's fragment. The seeds previously lived only inside
+  `install.ps1` — Windows-shaped and unreachable from any non-Windows install.
+- **`vae_mode: tiling|cpu|none`** replaces free-text `sdcpp_extra_args` for the VAE lever, and is
+  **refused as `cpu` on a CUDA backend** with the measurement in the error (7.8× slower: 58.2 s vs
+  7.5 s). It is correct on an AMD/UMA part — free text is exactly how it would have spread to a
+  tier it is wrong for.
+- **Seed keys are validated against the real `config.Config` fields.** A typo'd key is dropped by
+  the loader with only a warning, on every install of that tier; it is now refused at authoring.
+- **`ampere-6` finally has a media seat** — modelled on the configuration proven on the measured
+  6 GB node (sdcpp + SDXL-Turbo Q4_0, 4 steps, cfg 1.0, VAE tiling, since the VAE and not the UNet
+  is the 6 GB wall). 9 of 14 tiers now ship media configuration, up from 8.
+
+### Changed
+- The two `amd-rdna3*` seeds carry `sd-cli__EXE__` instead of `sd-cli.exe`, so
+  **`crossplatform_lint_test.go` has no grandfathered exceptions left** — the "no `.exe` in a tier
+  seed" rule is now absolute.
+- `TestEveryShippedSeedIsValid` resolves every tier for both platforms: the gate that would have
+  caught `sd-cli.exe` in the first place.
+
 ## [0.28.0] - 2026-07-27
 
 ### Added — an install can move to the volume that has room
