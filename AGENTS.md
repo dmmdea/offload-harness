@@ -18,6 +18,9 @@ Detailed documentation lives in `docs/`. This file only routes you there.
 - [`docs/README.md`](docs/README.md) — the index. Start here.
 - `docs/systems/` — how each part of the harness works (offload pipeline, coding agent, MCP server,
   media generation, fleet node, installer).
+- `docs/tiers/` — one page per hardware tier (GENERATED from `setup/templates/profiles.json` by
+  `cmd/gentiers`; run `go generate ./...` after changing the profile table) plus checked-in
+  capability reports from real machines.
 - `docs/flows/` — behavior that crosses systems (cascade escalation and defer, run-graph manifest
   satisfaction, fleet job lifecycle, zero-warm generation).
 - [`docs/architecture/decisions/`](docs/architecture/decisions/README.md) — Architecture Decision
