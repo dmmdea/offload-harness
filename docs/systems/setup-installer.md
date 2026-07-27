@@ -180,6 +180,45 @@ it is rather than re-deriving it. Wiring the choice into `install.ps1` (and reco
 `installed.json`) needs the bootstrap to fetch the binary before it picks a target, and belongs with
 the detection move — this verb is the decision engine those wrappers will call.
 
+### Serving config on Linux (`install render`)
+
+Template rendering lived in `install.ps1`, so a Linux node could not produce a serving
+config at all — every Linux deployment hand-wrote one, and on the measured 6 GB node the
+first two hand-written topologies each broke the box.
+
+```
+local-offload install render --profile ampere-6   --llama-bin /srv/offload/build/llamacpp/build/bin   --models /srv/offload/models --listen 127.0.0.1:11436 --out llama-swap.yaml
+```
+
+The templates are **embedded in the binary**, so a fetched binary can render a config on a
+machine with no checkout — which is the shape a real install needs. Omit `--profile` and it
+classifies the machine first.
+
+`setup/templates/llama-swap.linux-cuda.yaml` is not a translation of the Windows template.
+Two things in it are Linux-specific and load-bearing:
+
+- **`LD_LIBRARY_PATH` on every seat.** A self-built `llama-server` links its own shared
+  objects; without it the process dies at exec with a loader error that reads nothing like
+  a config problem.
+- **The group topology is MEASURED.** `heavy` is `swap:true, exclusive:false` and `support`
+  is `swap:false`. Both were learned the hard way on the 6 GB node: `exclusive:true` on a
+  swapping tier meant the loaded seat evicted everything and nothing evicted it, so every
+  chat request returned 502 for the full 5-minute TTL after any render; and with the
+  embedder inside the swapping tier, one RAG query paid three full model loads (free VRAM
+  dropped 3655 → 1005 MiB because loading the embedder had evicted the chat model).
+  `TestHeavyGroupIsNeverExclusive` encodes that as a test rather than a comment.
+
+Rendering **refuses to emit a config that still contains a token**. `install.ps1` carries a
+comment about that exact failure; a llama-swap started with a literal `--ctx-size __CTX__`
+fails in a way that looks like a model problem. A tier that drops the 26B has its model
+block **and** its group membership removed together — llama-swap rejects a config whose
+group names a model that does not exist.
+
+**Verified end to end on the Linux node:** the rendered `ampere-6` config was handed to the
+node's own `llama-swap` on a throwaway port, which accepted it and listed exactly
+`offload-e4b`, `gemma4-e2b`, `embeddinggemma`, `bge-reranker-v2-m3` — the 26B correctly
+absent. The live service on `:11436` was untouched throughout.
+
 ### Classification without PowerShell (`install detect` / `install plan`)
 
 `setup/detect.ps1`'s second statement refuses to run anywhere but Windows, so a Linux

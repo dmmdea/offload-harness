@@ -1,0 +1,93 @@
+# llama-swap.linux-cuda.yaml — offload-harness family on the llama.cpp CUDA backend
+# (Linux; NVIDIA GPU). Rendered by `local-offload install render`, which substitutes
+# the __CTX__ / __KV_K__ / __KV_V__ / __FLASH_ATTN__ / __MOE_26B__ / __LLAMA_BIN__ /
+# __MODELS__ / __NTHREADS__ / __LISTEN__ tokens from the detected tier and drops the
+# 26B block entirely on a tier whose include_26b is false.
+#
+# Serving invariants (grammar reliability — do NOT change): --jinja, --flash-attn on,
+# no MTP, reasoning off. Do NOT add --swa-full here: it was measured as load-bearing
+# for the LARGE iSWA models only, and forcing a full attention window costs KV memory
+# on exactly the tiers with the least VRAM headroom.
+#
+# LINUX-SPECIFIC AND LOAD-BEARING: every seat carries LD_LIBRARY_PATH pointing at the
+# llama.cpp build dir. A self-built llama-server links its own shared objects; without
+# it the process dies at exec with a loader error that looks nothing like a config
+# problem. The Windows templates have no equivalent, which is one reason this file
+# could not be a translation of them.
+healthCheckTimeout: 300
+logLevel: info
+listen: __LISTEN__
+
+macros:
+  common: >-
+    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
+    --threads __NTHREADS__ --jinja --reasoning off --port ${PORT} --host 127.0.0.1
+  ld: "LD_LIBRARY_PATH=__LLAMA_BIN__:${LD_LIBRARY_PATH:-}"
+
+models:
+  offload-e4b:
+    aliases: [gemma4-e4b, offload]
+    env: ["${ld}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf
+      --n-gpu-layers 99 --parallel 1 ${common}
+    checkEndpoint: /health
+    ttl: 300
+  gemma4-e2b:
+    aliases: [e2b]
+    env: ["${ld}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
+      --n-gpu-layers 99 ${common}
+    checkEndpoint: /health
+    ttl: 300
+  gemma4-26b-a4b:
+    env: ["GGML_CUDA_DISABLE_GRAPHS=1", "${ld}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
+      __MOE_26B__ --parallel 1 ${common}
+    checkEndpoint: /health
+    ttl: 300
+  embeddinggemma:
+    aliases: [text-embedding, local-embed]
+    env: ["${ld}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/embeddinggemma-300M-Q8_0.gguf
+      --embeddings --pooling mean --ctx-size 2048 --batch-size 2048 --ubatch-size 2048
+      --n-gpu-layers 99 --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 600
+  bge-reranker-v2-m3:
+    aliases: [reranker-v2-m3]
+    env: ["${ld}"]
+    # --n-gpu-layers 0 ON PURPOSE: the reranker on CPU buys back ~245 MiB of VRAM
+    # (measured) and it is never on a latency-critical path.
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/bge-reranker-v2-m3-Q4_K_M.gguf
+      --reranking --pooling rank --ctx-size 8192 --batch-size 4096 --ubatch-size 4096
+      --n-gpu-layers 0 --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 600
+
+groups:
+  # The topology below is MEASURED, not assumed. Two earlier shapes were tried on a
+  # 6 GB card sharing a live desktop and both broke the box:
+  #
+  #   1. exclusive:true on a media group — the image seat evicted everything and
+  #      NOTHING evicted it, so every chat request returned 502 for the full 5-minute
+  #      TTL after any render.
+  #   2. the embedder/reranker inside the swapping tier — loading the embedder DROPPED
+  #      free VRAM 3655 -> 1005 MiB because it had evicted the chat model, so a single
+  #      RAG query paid three full model loads.
+  #
+  # heavy: one big seat at a time (every member is >3 GB), but exclusive:false so it
+  # never evicts the support tier. support: swap:false, so the two small always-on
+  # models stay co-resident with whatever heavy seat is loaded.
+  heavy:
+    swap: true
+    exclusive: false
+    members: [offload-e4b, gemma4-e2b, gemma4-26b-a4b]
+  support:
+    swap: false
+    exclusive: false
+    members: [embeddinggemma, bge-reranker-v2-m3]
