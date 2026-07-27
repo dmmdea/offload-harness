@@ -9,6 +9,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/dmmdea/offload-harness/internal/tierseed"
 	"github.com/dmmdea/offload-harness/internal/volumes"
 )
 
@@ -24,8 +25,10 @@ func runInstall(args []string) error {
 	switch args[0] {
 	case "volumes":
 		return runInstallVolumes(args[1:])
+	case "seed":
+		return runInstallSeed(args[1:])
 	default:
-		return fmt.Errorf("unknown install subcommand %q (have: volumes)", args[0])
+		return fmt.Errorf("unknown install subcommand %q (have: volumes, seed)", args[0])
 	}
 }
 
@@ -123,4 +126,50 @@ func dash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// runInstallSeed resolves ONE hardware tier's media/config seed for a target machine.
+// The seeds lived only inside install.ps1, so a tier's bindings were Windows-shaped
+// (`sd-cli.exe` in the table) and unreachable from a Linux install. A tier is a
+// HARDWARE class: --os lets a Windows box render a Linux node's fragment, and the
+// resolver validates the seed rather than shipping a typo to every machine of that
+// class.
+func runInstallSeed(args []string) error {
+	fs := flag.NewFlagSet("install seed", flag.ExitOnError)
+	profile := fs.String("profile", "", "tier id (see docs/tiers/README.md)")
+	home := fs.String("home", "", "install root substituted for __OFFLOAD_HOME__")
+	goos := fs.String("os", "", "target OS for binary names: windows|linux (default: this machine)")
+	ramTier := fs.String("ram-tier", "", "apply the config_seed_ram_mid_high overlay: mid|high")
+	root := fs.String("root", ".", "repo root holding setup/templates/profiles.json")
+	_ = fs.Parse(args)
+	if *profile == "" {
+		return fmt.Errorf("install seed needs --profile <tier id>")
+	}
+	profiles, err := tierseed.Load(*root)
+	if err != nil {
+		return err
+	}
+	p, ok := profiles[*profile]
+	if !ok {
+		names := make([]string, 0, len(profiles))
+		for n := range profiles {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		return fmt.Errorf("unknown tier %q (have: %s)", *profile, strings.Join(names, ", "))
+	}
+	seed, err := tierseed.Resolve(p, *profile, tierseed.Options{Home: *home, GOOS: *goos, RAMTier: *ramTier})
+	if err != nil {
+		return err
+	}
+	if seed == nil {
+		fmt.Println("tier", *profile, "ships no media configuration — it serves text only until an operator binds media by hand")
+		return nil
+	}
+	b, err := json.MarshalIndent(seed, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(b))
+	return nil
 }
