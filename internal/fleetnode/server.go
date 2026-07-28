@@ -47,6 +47,11 @@ type Options struct {
 	NodeID     string
 	Snapshot   func() (Snapshot, bool)
 	Footprints func() []FootprintEntry
+	// Version is advertised as harness_version. Empty = omitted.
+	Version string
+	// Reclaim reports how much VRAM this node could free right now. nil (or an
+	// unknown verdict) omits the reclaim fields entirely rather than guessing.
+	Reclaim func(freeGiB, totalGiB float64) ReclaimVerdict
 	GpuVendor  string
 	GpuArch    string
 	Cfg        config.Config
@@ -116,6 +121,22 @@ type healthPayload struct {
 	LoadableModelFamilies []string         `json:"loadable_model_families"`
 	ModelFootprints       []FootprintEntry `json:"model_footprints"`
 	QueueDepth            int              `json:"queue_depth"`
+	// HarnessVersion closes the node/repo drift gap: fleet drift used to be found
+	// by hand, and a node several releases behind is debugged against known-fixed
+	// bugs.
+	HarnessVersion string `json:"harness_version,omitempty"`
+	// VramReclaimableGb is how much VRAM this node can FREE by unloading its own
+	// models — the number a scheduler actually needs. vram_free_gb under-counts a
+	// warm node; vram_total_gb over-counts every node whose card is shared (the
+	// measured workstation's desktop holds ~6.5 GiB that cannot be reclaimed at any
+	// price). Both fields are OMITTED when unmeasured, so a consumer can tell
+	// "nothing to reclaim" from "not known yet" and fall back to free VRAM.
+	VramReclaimableGb *float64 `json:"vram_reclaimable_gb,omitempty"`
+	// VramSchedulableGb is free + reclaimable: the headroom a job can actually get.
+	VramSchedulableGb *float64 `json:"vram_schedulable_gb,omitempty"`
+	// VramReclaimSource states HOW the number was reached, so a measured zero is
+	// never mistaken for an unknown.
+	VramReclaimSource string `json:"vram_reclaim_source,omitempty"`
 }
 
 // handleHealth assembles the contract health JSON from cached/cheap reads
@@ -149,7 +170,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if families == nil {
 		families = []string{}
 	}
-	writeJSON(w, http.StatusOK, healthPayload{
+	payload := healthPayload{
 		NodeID:                s.opts.NodeID,
 		SchemaVersion:         1,
 		GpuVendor:             s.opts.GpuVendor,
@@ -160,7 +181,23 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		LoadableModelFamilies: families,
 		ModelFootprints:       fps,
 		QueueDepth:            s.jobs.QueueDepth(),
-	})
+		HarnessVersion:        s.opts.Version,
+	}
+	// Reclaim is advertised ONLY when measured. An unknown verdict omits both
+	// numbers so a consumer falls back to free VRAM instead of acting on a guess;
+	// the source string is published either way, since "why is it absent?" is the
+	// first question anyone reading this payload will have.
+	if s.opts.Reclaim != nil {
+		v := s.opts.Reclaim(snap.FreeGiB, snap.TotalGiB)
+		payload.VramReclaimSource = v.Source
+		if v.Known {
+			reclaimable := v.ReclaimableGiB
+			schedulable := snap.FreeGiB + reclaimable
+			payload.VramReclaimableGb = &reclaimable
+			payload.VramSchedulableGb = &schedulable
+		}
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // dispatchEnvelope is the strict dispatch wire shape. DisallowUnknownFields

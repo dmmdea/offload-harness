@@ -167,6 +167,52 @@ PDH instance parser. `fleet_verbs_test.go` covers parameter resolution and the b
 - Binding with `:18811` and expecting it to work as loopback.
 - Treating Afterburner as required.
 
+## What a node advertises about its VRAM
+
+`/fleet/health` publishes four VRAM numbers, and only one of them is a safe divisor
+for scheduling:
+
+| field | meaning | why it is not enough alone |
+|---|---|---|
+| `vram_total_gb` | the card's capacity | over-counts every shared card — the measured workstation's desktop plus its always-resident support tier hold ~3 GiB that cannot be reclaimed at any price |
+| `vram_free_gb` | free right now | under-counts a WARM node: a loaded, swappable model looks like lost capacity |
+| `vram_reclaimable_gb` | what this node can free by unloading its own **swappable** seats | — |
+| `vram_schedulable_gb` | `free + reclaimable` — **the number to divide by** | — |
+
+Measured on a 16 GiB workstation, before and after loading one 4 GiB seat:
+
+| | free | reclaimable | schedulable |
+|---|---:|---:|---:|
+| idle | 12.77 | 0 | **12.77** |
+| warm | 8.74 | 4.04 | **12.78** |
+
+Free drops by 4 GiB; schedulable stays flat. That is the property a dispatcher needs —
+a warm node must not look full.
+
+**How reclaimable is derived.** Two obvious mechanisms do not work: per-process GPU
+memory (`nvidia-smi --query-compute-apps=...,used_memory`) returns `[N/A]` on Windows,
+which is exactly the node with the shared desktop; and the footprint store records what a
+RENDER task peaks at, not what the text tiers currently hold. So the node measures an
+**idle baseline** — used VRAM observed while no swappable seat of ours is loaded and the
+GPU lease is free — and reports everything above it as reclaimable. The baseline IS the
+unreclaimable share, measured rather than assumed, and it re-measures as the machine
+changes.
+
+**Always-resident seats count as baseline, not capacity.** The support tier (embedder +
+reranker) is co-resident on purpose; unloading it is what made a single RAG query pay
+three model loads. Seats llama-swap reports with `ttl 0` (no auto-unload) are therefore
+treated as part of the baseline. Without that rule a correctly configured node — which
+never reaches "nothing loaded" — would report `unknown` forever.
+
+**Unknown is published as absence.** Before any idle baseline has been observed, both
+numbers are OMITTED and only `vram_reclaim_source` is sent, explaining why. A consumer
+falls back to `vram_free_gb`. Over-promising costs a failed job; under-promising costs a
+scheduling opportunity, so the rule is deliberately asymmetric: the node never claims
+reclaim capacity while holding nothing.
+
+`harness_version` ships in the same payload — node/repo drift used to be found by hand,
+and a node several releases behind gets debugged against known-fixed bugs.
+
 ## Source map
 
 - [`internal/fleetnode/server.go`](../../internal/fleetnode/server.go) — routes, payloads, duplicate
