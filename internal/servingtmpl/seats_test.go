@@ -35,11 +35,11 @@ func seatParams(seats ...mediaseat.Seat) Params {
 	return p
 }
 
-// TestSeatsLandInBothTheModelsMapAndTheGroup is the whole contract. llama-swap
-// REJECTS a config whose group names a model it cannot find, and a model in no
-// group silently joins the implicit default group — which swaps and evicts. So
-// a seat that reaches only one of the two places is a broken node either way.
-func TestSeatsLandInBothTheModelsMapAndTheGroup(t *testing.T) {
+// TestSeatsLandInBothTheModelsMapAndTheMatrix is the whole contract. llama-swap
+// REJECTS a set naming an unknown var, and a model that reaches the models map but
+// no set is one the solver has no valid combination for. A seat that arrives in only
+// one of the two places is a broken node either way.
+func TestSeatsLandInBothTheModelsMapAndTheMatrix(t *testing.T) {
 	got, err := Render(linuxCUDA(t), seatParams(visionSeat(), sttSeat()))
 	if err != nil {
 		t.Fatal(err)
@@ -51,16 +51,34 @@ func TestSeatsLandInBothTheModelsMapAndTheGroup(t *testing.T) {
 		"--ctx-size 8192", // the vision seat's OWN window, not the chat tier's 32768
 		"/srv/offload/build/whisper.cpp/build/bin/whisper-server",
 		"--vad --vad-model /srv/offload/models/ggml-silero-v5.1.2.bin",
-		"members: [offload-e4b, gemma4-e2b, gemma4-26b-a4b, gemma4-e4b-vision, whisper-stt]",
+		"    vis: gemma4-e4b-vision", // a matrix var, because a set may name only vars
+		"    stt: whisper-stt",
+		// Swappable seats are ALTERNATIVES: one big seat on the card at a time.
+		`interactive: "+residents & (e4b | e2b | m26 | vis | stt)"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("rendered config missing %q:\n%s", want, got)
 		}
 	}
-	// The support tier must be untouched: it is swap:false precisely so the small
-	// always-on models survive whatever heavy seat is loaded.
-	if !strings.Contains(got, "members: [embeddinggemma, bge-reranker-v2-m3]") {
-		t.Error("a swappable seat must not be added to the resident group")
+	// The resident set must be untouched: it is the memory stack, and a swappable seat
+	// joining it would make the stack part of a mutually-exclusive choice.
+	if !strings.Contains(got, `residents: "emb & rer"`) {
+		t.Errorf("a swappable seat must not join the resident set:\n%s", got)
+	}
+}
+
+// TestAResidentSeatIsConjoinedNotAlternated: the operator is the whole difference
+// between "may be co-resident" and "instead of". A resident seat ANDed into the
+// resident set stays loaded; alternated, it would displace the memory stack.
+func TestAResidentSeatIsConjoinedNotAlternated(t *testing.T) {
+	s := visionSeat()
+	s.Residency = mediaseat.Resident
+	got, err := Render(linuxCUDA(t), seatParams(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `residents: "emb & rer & vis"`) {
+		t.Errorf("a resident seat must be conjoined into the resident set:\n%s", got)
 	}
 }
 
@@ -178,27 +196,33 @@ func TestNoSeatsChangesNothing(t *testing.T) {
 	}
 }
 
-// TestACommentInsideAGroupDoesNotHideItsMembers. The shipped templates comment in
-// prose that contains colons ("# heavy: one big seat at a time"). Treating such a
-// line as the next group key made addMember abandon the search and report that the
-// group had no members list — turning a house-style comment into a broken install.
-func TestACommentInsideAGroupDoesNotHideItsMembers(t *testing.T) {
-	tmpl := "# offload-seats: swappable=heavy\nmodels:\n  offload-e4b:\n    cmd: x\n" +
-		"groups:\n  heavy:\n    # note: one big seat at a time\n    swap: true\n    members: [offload-e4b]\n"
+// TestACommentAfterTheVarsBlockDoesNotDisplaceTheInsert. The shipped templates carry
+// prose comments between the vars and the next key, and one contains a colon
+// ("# keep: make it maximally expensive to stop"). Anchoring the insert on "where the
+// block ends" put the new var in the MIDDLE of that sentence — observed, not imagined.
+// The insert anchors on the last var line instead.
+func TestACommentAfterTheVarsBlockDoesNotDisplaceTheInsert(t *testing.T) {
+	tmpl := "# offload-seats: swappable\nmodels:\n  offload-e4b:\n    cmd: x\n" +
+		"matrix:\n  vars:\n    e4b: offload-e4b\n" +
+		"  # note: this comment has a colon\n  # and spans two lines\n" +
+		"  sets:\n    interactive: \"(e4b__SEATS_SWAPPABLE__)\"\n"
 	got, err := Render(tmpl, seatParams(visionSeat()))
 	if err != nil {
-		t.Fatalf("a comment between the group key and its members must not break placement: %v", err)
+		t.Fatalf("a commented vars block must not break placement: %v", err)
 	}
-	if !strings.Contains(got, "members: [offload-e4b, gemma4-e4b-vision]") {
-		t.Errorf("seat not placed:\n%s", got)
+	if !strings.Contains(got, "    e4b: offload-e4b\n    vis: gemma4-e4b-vision\n  # note:") {
+		t.Errorf("the new var did not land directly after the last existing one:\n%s", got)
+	}
+	if !strings.Contains(got, `interactive: "(e4b | vis)"`) {
+		t.Errorf("seat not joined into the set:\n%s", got)
 	}
 }
 
 // TestTwoDirectivesAreRefused: first-match-wins would silently pick one answer to
 // "where do seats go" while the author believed the other.
 func TestTwoDirectivesAreRefused(t *testing.T) {
-	tmpl := "# offload-seats: swappable=support\n# offload-seats: swappable=heavy\nmodels:\n  a:\n    cmd: x\n" +
-		"groups:\n  heavy:\n    members: [a]\n  support:\n    members: [a]\n"
+	tmpl := "# offload-seats: swappable\n# offload-seats: resident\nmodels:\n  a:\n    cmd: x\n" +
+		"matrix:\n  vars:\n    a: a\n  sets:\n    s: \"a__SEATS_SWAPPABLE__\"\n"
 	if _, err := Render(tmpl, seatParams(visionSeat())); err == nil ||
 		!strings.Contains(err.Error(), "directives") {
 		t.Fatalf("two directives must be refused, got %v", err)
@@ -206,11 +230,12 @@ func TestTwoDirectivesAreRefused(t *testing.T) {
 }
 
 // TestDroppingATrailing26BKeepsTheSectionsBelowIt. The block-extent heuristic ended
-// only at a two-space key, so a 26B declared LAST swallowed `groups:` and the
-// `# offload-seats:` directive — promoting the first group to a model.
+// only at a two-space key, so a 26B declared LAST swallowed `matrix:` and the
+// `# offload-seats:` directive — promoting a matrix key into the models map.
 func TestDroppingATrailing26BKeepsTheSectionsBelowIt(t *testing.T) {
 	tmpl := "models:\n  offload-e4b:\n    cmd: x\n  gemma4-26b-a4b:\n    cmd: y\n" +
-		"# offload-seats: swappable=heavy\ngroups:\n  heavy:\n    members: [offload-e4b, gemma4-26b-a4b]\n"
+		"# offload-seats: swappable\nmatrix:\n  vars:\n    e4b: offload-e4b\n    m26: gemma4-26b-a4b\n" +
+		"  sets:\n    s: \"e4b__M26_ALT____SEATS_SWAPPABLE__\"\n"
 	p := params()
 	p.Include26B = false
 	p.MoE26B = ""
@@ -218,11 +243,14 @@ func TestDroppingATrailing26BKeepsTheSectionsBelowIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "groups:") {
-		t.Errorf("dropping a trailing 26B deleted the groups section:\n%s", got)
+	if !strings.Contains(got, "matrix:") {
+		t.Errorf("dropping a trailing 26B deleted the matrix section:\n%s", got)
 	}
 	if !strings.Contains(got, "# offload-seats:") {
 		t.Errorf("dropping a trailing 26B deleted the seat directive:\n%s", got)
+	}
+	if strings.Contains(got, "m26") {
+		t.Errorf("the 26B's var survived:\n%s", got)
 	}
 }
 
@@ -240,7 +268,7 @@ func TestSeatRenderingSurvivesTheDropped26B(t *testing.T) {
 	if strings.Contains(got, "gemma4-26b-a4b") {
 		t.Error("the 26B survived alongside the seats")
 	}
-	if !strings.Contains(got, "members: [offload-e4b, gemma4-e2b, gemma4-e4b-vision, whisper-stt]") {
-		t.Errorf("members list wrong after dropping the 26B and adding seats:\n%s", got)
+	if !strings.Contains(got, `interactive: "+residents & (e4b | e2b | vis | stt)"`) {
+		t.Errorf("set expression wrong after dropping the 26B and adding seats:\n%s", got)
 	}
 }

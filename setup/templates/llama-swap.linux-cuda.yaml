@@ -69,34 +69,52 @@ models:
     checkEndpoint: /health
     ttl: 600
 
-# This template accepts tier-declared media seats, and maps the two residency
-# ROLES onto its own groups. Roles, not group names, are what a tier may declare:
-# group names are per-template (this file has heavy/support; the win-* templates
-# have offload-family or architect/editor, and win-cuda-resident has none), while
-# a tier is a hardware class that renders into several of them. `env` is the macro
-# a llama-backed seat carries — the loader path, which only this file needs.
-# A template WITHOUT this directive renders no seats and refuses by name rather
-# than dropping them silently.
-# offload-seats: swappable=heavy resident=support env=${ld}
-groups:
-  # The topology below is MEASURED, not assumed. Two earlier shapes were tried on a
-  # 6 GB card sharing a live desktop and both broke the box:
-  #
-  #   1. exclusive:true on a media group — the image seat evicted everything and
-  #      NOTHING evicted it, so every chat request returned 502 for the full 5-minute
-  #      TTL after any render.
-  #   2. the embedder/reranker inside the swapping tier — loading the embedder DROPPED
-  #      free VRAM 3655 -> 1005 MiB because it had evicted the chat model, so a single
-  #      RAG query paid three full model loads.
-  #
-  # heavy: one big seat at a time (every member is >3 GB), but exclusive:false so it
-  # never evicts the support tier. support: swap:false, so the two small always-on
-  # models stay co-resident with whatever heavy seat is loaded.
-  heavy:
-    swap: true
-    exclusive: false
-    members: [offload-e4b, gemma4-e2b, gemma4-26b-a4b]
-  support:
-    swap: false
-    exclusive: false
-    members: [embeddinggemma, bge-reranker-v2-m3]
+# This template accepts tier-declared media seats. A tier declares a residency ROLE,
+# never a set or group name: those are per-template, while a tier is a hardware class
+# that renders into several templates. The SEATS_SWAPPABLE / SEATS_RESIDENT markers in
+# the set expressions below (each wrapped in double underscores) say WHERE a seat of
+# that role joins the matrix; this directive says WHICH roles are accepted at all.
+# `env` is the macro a llama-backed seat carries —
+# the loader path, which only this file needs. A template WITHOUT this directive
+# renders no seats and refuses by name rather than dropping them silently.
+# offload-seats: swappable resident env=${ld}
+# RESIDENCY IS DECLARED WITH `matrix:`, NOT `groups:`. llama-swap replaced groups with
+# matrix in v202; a config must use one or the other, never both. This is not a style
+# preference — it is a MEASURED failure. On the workstation node, under `groups:`, an
+# `exclusive: true` group evicted a `persistent: true` group anyway (verified live
+# 2026-07-26): the reranker could not start, a rerank returned HTTP 000 after 90 s, and
+# the memory stack silently degraded to dense-only ordering with no error anywhere.
+# `persistent` did not do what its name promises. Matrix states the valid CONCURRENT
+# COMBINATIONS instead of a priority the solver may reinterpret.
+#
+# Sets ARE those combinations. Residents appear in EVERY set, so the solver may never
+# evict them to satisfy anything else — the property the old topology only approximated
+# with swap:false, and the one the Windows templates got outright wrong.
+#
+# The rest is still MEASURED, not assumed. Two earlier shapes were tried on a 6 GB card
+# sharing a live desktop and both broke the box:
+#   1. an exclusive media group — the image seat evicted everything and NOTHING evicted
+#      it, so every chat request returned 502 for the full 5-minute TTL after a render.
+#   2. the embedder/reranker inside the swapping tier — loading the embedder DROPPED
+#      free VRAM 3655 -> 1005 MiB because it had evicted the chat model, so one RAG
+#      query paid three full model loads.
+#
+# REQUIRES llama-swap >= v202. Verified against the real binary: `vars` is mandatory,
+# a var key must be alphanumeric and 1-8 characters, and a set expression may reference
+# ONLY var ids — never a model id.
+matrix:
+  vars:
+    emb: embeddinggemma
+    rer: bge-reranker-v2-m3
+    e4b: offload-e4b
+    e2b: gemma4-e2b
+    m26: gemma4-26b-a4b
+  # The memory stack is the most expensive thing on this box to lose and the cheapest to
+  # keep: make it maximally expensive to stop, so if the solver ever does have a choice
+  # it stops something else first.
+  evict_costs:
+    emb: 1000
+    rer: 1000
+  sets:
+    residents: "emb & rer__SEATS_RESIDENT__"
+    interactive: "+residents & (e4b | e2b__M26_ALT____SEATS_SWAPPABLE__)"

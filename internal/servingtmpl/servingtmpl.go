@@ -35,9 +35,10 @@ type Params struct {
 	FlashAttn string // "on"/"off"
 	MoE26B    string // the flag form the tier chose: -ngl 99 | --cpu-moe | --n-cpu-moe N
 	Threads   int
-	// Include26B false removes the 26B seat entirely — model block AND group
-	// membership. A member naming a model that does not exist is a config llama-swap
-	// rejects at startup, so dropping one without the other bricks the service.
+	// Include26B false removes the 26B seat entirely — model block, matrix var, and
+	// set membership. A set naming a var that does not exist, or a var naming a model
+	// that does not exist, is a config llama-swap rejects at startup, so dropping one
+	// without the others bricks the service.
 	Include26B bool
 
 	// Seats are the tier's alias-backed media seats (vision / STT). Empty is the
@@ -51,19 +52,20 @@ type Params struct {
 	GOOS string
 }
 
-// seatAnchors is the TEMPLATE's own declaration of where seats may go: which of
-// its groups satisfies each residency role, and the env macro its llama-backed
-// seats carry. It lives in the template because group names and the loader-path
-// macro are per-template facts — the Linux template's `ld` macro has no Windows
-// equivalent, which is why that file could not be a translation of the others.
+// seatAnchors is the TEMPLATE's own declaration of which residency roles it can
+// place, plus the env macro its llama-backed seats carry. It lives in the template
+// because the matrix set layout and the loader-path macro are per-template facts —
+// the Linux template's `ld` macro has no Windows equivalent, which is why that file
+// could not be a translation of the others. The __SEATS_<ROLE>__ markers in the set
+// expressions say WHERE; this directive says WHICH roles are accepted at all.
 //
 // A template with no directive renders no seats and says so by name. That is the
 // point: a tier declaring seats against a template that cannot place them is the
 // silent-capability-loss failure this whole workstream exists to end, so it is a
 // refusal, never a quiet omission.
 type seatAnchors struct {
-	groups map[string]string // residency role -> this template's group name
-	env    string            // env macro for llama-backed seats, e.g. "${ld}"
+	roles map[string]bool // residency roles this template can place
+	env   string          // env macro for llama-backed seats, e.g. "${ld}"
 }
 
 var anchorRe = regexp.MustCompile(`(?m)^#\s*offload-seats:\s*(.+)$`)
@@ -79,18 +81,15 @@ func parseAnchors(tmpl string) (seatAnchors, error) {
 		return seatAnchors{}, fmt.Errorf("this template carries %d `# offload-seats:` directives; "+
 			"exactly one may declare where seats go", len(all))
 	}
-	m := all[0]
-	a := seatAnchors{groups: map[string]string{}}
-	for _, f := range strings.Fields(m[1]) {
-		k, v, ok := strings.Cut(f, "=")
-		if !ok {
+	a := seatAnchors{roles: map[string]bool{}}
+	for _, f := range strings.Fields(all[0][1]) {
+		if k, v, ok := strings.Cut(f, "="); ok {
+			if k == "env" {
+				a.env = v
+			}
 			continue
 		}
-		if k == "env" {
-			a.env = v
-			continue
-		}
-		a.groups[k] = v
+		a.roles[f] = true // a bare word is a residency role this template can place
 	}
 	return a, nil
 }
@@ -126,22 +125,31 @@ func Render(tmpl string, p Params) (string, error) {
 	// whose text happens to mention the 26B can never trip drop26B's post-check;
 	// before, so seat blocks are written in the same token vocabulary as the rest
 	// of the template and are resolved by the one substitution pass below.
-	if len(p.Seats) > 0 {
-		var err error
-		if out, err = insertSeats(out, p); err != nil {
-			return "", err
-		}
+	out, seatFrag, err := insertSeats(out, p)
+	if err != nil {
+		return "", err
+	}
+	// The 26B's set membership is a token rather than surgery on an expression: the
+	// operator differs per template (an alternative in a swapping set, a conjunction
+	// in an all-resident one) and only the template knows which it means.
+	m26alt, m26and := "", ""
+	if p.Include26B {
+		m26alt, m26and = " | m26", " & m26"
 	}
 	for from, to := range map[string]string{
-		"__LLAMA_BIN__":  strings.TrimRight(p.LlamaBin, "/"),
-		"__MODELS__":     strings.TrimRight(p.ModelsDir, "/"),
-		"__LISTEN__":     p.Listen,
-		"__CTX__":        fmt.Sprint(p.Ctx),
-		"__KV_K__":       p.KVType,
-		"__KV_V__":       p.KVType,
-		"__FLASH_ATTN__": p.FlashAttn,
-		"__MOE_26B__":    p.MoE26B,
-		"__NTHREADS__":   fmt.Sprint(p.Threads),
+		"__M26_ALT__":         m26alt,
+		"__M26_AND__":         m26and,
+		"__SEATS_SWAPPABLE__": seatFrag[roleSwappable],
+		"__SEATS_RESIDENT__":  seatFrag[roleResident],
+		"__LLAMA_BIN__":       strings.TrimRight(p.LlamaBin, "/"),
+		"__MODELS__":          strings.TrimRight(p.ModelsDir, "/"),
+		"__LISTEN__":          p.Listen,
+		"__CTX__":             fmt.Sprint(p.Ctx),
+		"__KV_K__":            p.KVType,
+		"__KV_V__":            p.KVType,
+		"__FLASH_ATTN__":      p.FlashAttn,
+		"__MOE_26B__":         p.MoE26B,
+		"__NTHREADS__":        fmt.Sprint(p.Threads),
 	} {
 		out = strings.ReplaceAll(out, from, to)
 	}
@@ -219,54 +227,172 @@ func (p Params) seatExpand(s string) string {
 	return s
 }
 
-// insertSeats places every declared seat into the models map and into the group
-// its residency role maps to. Both, always — llama-swap rejects a config whose
-// group names a model it cannot find, and a model in no group silently joins the
-// implicit default group, which swaps and evicts. Neither half is optional.
-func insertSeats(tmpl string, p Params) (string, error) {
+// insertSeats places every declared seat into the models map AND into the matrix —
+// a `vars` entry plus the var id joined into the set its residency role marks. All
+// of it, always: llama-swap refuses a set naming an unknown var, and a model that
+// reaches the models map but no set is one the solver has no combination for.
+//
+// It returns the per-role var-id fragments the caller substitutes into the set
+// expressions, because the operator differs by role: a swappable seat is one more
+// ALTERNATIVE in a mutually-exclusive set (`| vis`), while a resident seat is one
+// more CO-RESIDENT member (`& vis`). Getting that backwards would either pin a big
+// seat in memory forever or make the memory stack evictable.
+func insertSeats(tmpl string, p Params) (string, map[string]string, error) {
+	frag := map[string]string{roleSwappable: "", roleResident: ""}
+	if len(p.Seats) == 0 {
+		return tmpl, frag, nil
+	}
 	anchors, err := parseAnchors(tmpl)
 	if err != nil && err != errNoAnchors {
-		return "", err
+		return "", nil, err
 	}
 	if err == errNoAnchors {
 		var names []string
 		for _, s := range p.Seats {
 			names = append(names, s.Kind+":"+s.Name)
 		}
-		return "", fmt.Errorf("this tier declares media seats (%s) but the target serving template carries no "+
-			"`# offload-seats:` directive, so there is nowhere to place them. Rendering them into an unmapped "+
-			"group topology is how a node loses a capability by accident of OS — add the directive to the "+
-			"template (declaring which of its groups satisfies the swappable/resident roles) or render this "+
-			"tier for a target whose template has one", strings.Join(names, ", "))
+		return "", nil, fmt.Errorf("this tier declares media seats (%s) but the target serving template carries no "+
+			"`# offload-seats:` directive, so there is nowhere to place them. Rendering them into a residency "+
+			"topology the template never declared is how a node loses a capability by accident of OS — add the "+
+			"directive and the __SEATS_<ROLE>__ markers to the template, or render this tier for a target whose "+
+			"template has them", strings.Join(names, ", "))
 	}
 	out := tmpl
+	taken := existingVars(out)
 	for _, s := range p.Seats {
-		group, ok := anchors.groups[s.Residency]
-		if !ok {
+		if !anchors.roles[s.Residency] {
 			var roles []string
-			for r := range anchors.groups {
+			for r := range anchors.roles {
 				roles = append(roles, r)
 			}
 			sort.Strings(roles)
-			return "", fmt.Errorf("seat %q wants residency %q, which this template does not map (it maps: %s)",
+			return "", nil, fmt.Errorf("seat %q wants residency %q, which this template does not place (it places: %s)",
 				s.Name, s.Residency, strings.Join(roles, ", "))
 		}
 		if definesModel(out, s.Name) {
-			return "", fmt.Errorf("seat %q is already defined by the template — a tier may not redeclare a seat "+
+			return "", nil, fmt.Errorf("seat %q is already defined by the template — a tier may not redeclare a seat "+
 				"the template owns", s.Name)
 		}
+		id, err := seatVarID(s, taken)
+		if err != nil {
+			return "", nil, err
+		}
+		taken[id] = true
 		block, err := seatBlock(s, p, anchors.env)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		if out, err = appendModel(out, block); err != nil {
-			return "", err
+			return "", nil, err
 		}
-		if out, err = addMember(out, group, s.Name); err != nil {
-			return "", err
+		if out, err = addMatrixVar(out, id, s.Name); err != nil {
+			return "", nil, err
+		}
+		frag[s.Residency] += matrixJoin(s.Residency) + id
+	}
+	return out, frag, nil
+}
+
+// Residency roles, mirrored from internal/mediaseat so the template vocabulary and
+// the schema vocabulary cannot drift apart silently.
+const (
+	roleSwappable = mediaseat.Swappable
+	roleResident  = mediaseat.Resident
+)
+
+// matrixJoin is the set operator a role's members are combined with. Swappable
+// members are alternatives (one at a time); residents are conjunctions (all at once).
+func matrixJoin(role string) string {
+	if role == roleResident {
+		return " & "
+	}
+	return " | "
+}
+
+// seatVarID derives the matrix var key for a seat. llama-swap REQUIRES a var key to
+// be alphanumeric and 1-8 characters (verified against the binary: a key of
+// "embeddinggemma" is rejected outright), so the seat's own name — which carries
+// hyphens and is usually longer — can never be the key. The kind is used because a
+// tier may declare at most one seat per kind, which makes the id both stable and
+// unique by construction.
+func seatVarID(s mediaseat.Seat, taken map[string]bool) (string, error) {
+	base := map[string]string{mediaseat.KindVision: "vis", mediaseat.KindSTT: "stt"}[s.Kind]
+	if base == "" {
+		return "", fmt.Errorf("seat %q: no matrix var id for kind %q", s.Name, s.Kind)
+	}
+	if !taken[base] {
+		return base, nil
+	}
+	for i := 2; i < 10; i++ {
+		if id := fmt.Sprintf("%s%d", base, i); !taken[id] {
+			return id, nil
 		}
 	}
-	return out, nil
+	return "", fmt.Errorf("seat %q: cannot derive a free matrix var id from %q", s.Name, base)
+}
+
+var varLineRe = regexp.MustCompile(`(?m)^ {4}([A-Za-z0-9]{1,8}):\s*(\S+)\s*$`)
+
+// varsBounds locates the matrix vars block: the index of the `  vars:` line, and the
+// index of the LAST var line under it. Anchoring on the last var line rather than on
+// "where the block ends" is deliberate — the templates carry prose comments between
+// the vars and the next key, and a comment that happens to contain a colon once made
+// the insertion land in the middle of a sentence.
+func varsBounds(lines []string) (start, lastVar int) {
+	start, lastVar = -1, -1
+	for i, l := range lines {
+		if start < 0 {
+			if strings.TrimRight(l, " ") == "  vars:" {
+				start = i
+			}
+			continue
+		}
+		if varLineRe.MatchString(l) {
+			lastVar = i
+			continue
+		}
+		// Anything at 2-space indent or shallower (and not blank) ends the block.
+		if strings.TrimSpace(l) != "" && !strings.HasPrefix(l, "    ") {
+			break
+		}
+	}
+	return start, lastVar
+}
+
+// existingVars reads the template's matrix var keys so a generated id cannot collide
+// with one the template already owns.
+func existingVars(tmpl string) map[string]bool {
+	lines := strings.Split(tmpl, "\n")
+	start, last := varsBounds(lines)
+	out := map[string]bool{}
+	if start < 0 || last < 0 {
+		return out
+	}
+	for _, l := range lines[start : last+1] {
+		if m := varLineRe.FindStringSubmatch(l); m != nil {
+			out[m[1]] = true
+		}
+	}
+	return out
+}
+
+// addMatrixVar appends one `    <id>: <model>` line after the last existing var.
+func addMatrixVar(tmpl, id, model string) (string, error) {
+	lines := strings.Split(tmpl, "\n")
+	start, last := varsBounds(lines)
+	if start < 0 {
+		return "", fmt.Errorf("this template declares no `matrix.vars:` block, so seat %q has no var to be named by "+
+			"(llama-swap requires every set member to be a declared var)", model)
+	}
+	at := last
+	if at < 0 {
+		at = start // an empty vars block: the new var becomes its first entry
+	}
+	out := make([]string, 0, len(lines)+1)
+	out = append(out, lines[:at+1]...)
+	out = append(out, "    "+id+": "+model)
+	out = append(out, lines[at+1:]...)
+	return strings.Join(out, "\n"), nil
 }
 
 // seatBlock writes one seat. The command SHAPES here are the measured, running
@@ -399,8 +525,11 @@ func addMember(tmpl, group, member string) (string, error) {
 		"(a model in no group joins llama-swap's implicit default group, which swaps and evicts)", group, member)
 }
 
-// drop26B removes the 26B model block and every group membership naming it. Both,
-// or llama-swap refuses the config at startup for referencing an unknown member.
+// drop26B removes the 26B model block AND its matrix var. Both, or llama-swap refuses
+// the config at startup: a var pointing at a model that does not exist is exactly the
+// dangling reference the old group-members removal existed to prevent. Its SET
+// membership is handled by the __M26_*__ tokens, not here — an expression edit would
+// have to know whether the operator was `|` or `&`, which only the template knows.
 func drop26B(tmpl string) (string, error) {
 	const model = "gemma4-26b-a4b"
 	lines := strings.Split(tmpl, "\n")
@@ -409,6 +538,10 @@ func drop26B(tmpl string) (string, error) {
 	for _, l := range lines {
 		if strings.HasPrefix(l, "  "+model+":") {
 			skipping = true
+			continue
+		}
+		// The matrix var naming it goes too: `    m26: gemma4-26b-a4b`.
+		if m := varLineRe.FindStringSubmatch(l); m != nil && m[2] == model {
 			continue
 		}
 		if skipping {

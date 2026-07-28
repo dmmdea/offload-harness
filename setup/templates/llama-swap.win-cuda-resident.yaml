@@ -38,3 +38,26 @@ models:
     cmd: >-
       __LLAMA_BIN__\llama-server.exe -m __MODELS__\embeddinggemma-300m-Q8_0.gguf
       --embedding --pooling mean --ctx-size 2048 --parallel 4 --port ${PORT} --host 127.0.0.1
+
+# RESIDENCY IS NOW DECLARED. This template previously carried NO `groups:` block at
+# all, which meant the ALL-RESIDENT tiers (blackwell-32/48/72) never actually stated
+# that they are all-resident — residency was left to llama-swap's own default for
+# ungrouped models rather than to this file. On a tier whose entire premise is "the
+# whole roster stays hot with no swap group", leaving that to a default is the one
+# thing the file must not do.
+#
+# One set = one valid concurrent combination, and this tier's combination is
+# everything at once. There is VRAM for it: that is what the tier IS.
+#
+# Verified against the real binary: `vars` is mandatory, a var key must be alphanumeric
+# and 1-8 characters, and a set expression may reference ONLY var ids.
+matrix:
+  vars:
+    emb: embeddinggemma
+    e4b: offload-e4b
+    e2b: gemma4-e2b
+    m26: gemma4-26b-a4b
+  evict_costs:
+    emb: 1000
+  sets:
+    resident: "emb & e4b & e2b__M26_AND__"
