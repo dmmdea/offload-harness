@@ -16,7 +16,7 @@ a Windows class.
 | [amd-rdna3](amd-rdna3.md) | vulkan | 16384 | f16 | offload-e4b | `cpu_moe` | `sdcpp` (z-image-turbo) | — |
 | [amd-rdna3-dgpu](amd-rdna3-dgpu.md) | vulkan | 32768 | q8_0 | gemma4-26b-a4b | `gpu` | `sdcpp` (z-image-turbo) | — |
 | [ampere-16](ampere-16.md) | cuda | 32768 | q8_0 | gemma4-26b-a4b | `gpu` | comfyui (hidream-o1) | — |
-| [ampere-6](ampere-6.md) | cuda | 32768 | q8_0 | offload-e4b | dropped | `sdcpp` (sdxl-turbo) | [1](reports/ampere-6-lenovo-m720q.md) |
+| [ampere-6](ampere-6.md) | cuda | 32768 | q8_0 | offload-e4b | dropped | `sdcpp` (sdxl-turbo) + stt/vision seat | [1](reports/ampere-6-lenovo-m720q.md) |
 | [ampere-8](ampere-8.md) | cuda | 16384 | q8_0 | offload-e4b | `cpu_moe` | — | [1](reports/ampere-8-aorus15p-xd.md) |
 | [blackwell-16](blackwell-16.md) | cuda | 32768 | q8_0 | gemma4-26b-a4b | `gpu` | comfyui (hidream-o1) | [1](reports/blackwell-16-qube.md) |
 | [blackwell-32](blackwell-32.md) | cuda-resident | 65536 | q8_0 | gemma4-26b-a4b | `gpu` | comfyui (hidream-o1) | — |

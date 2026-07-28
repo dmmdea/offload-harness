@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/dmmdea/offload-harness/internal/mediaseat"
 )
 
 // Profile mirrors the fields setup/templates/profiles.json defines. Unknown keys
@@ -35,7 +37,12 @@ type Profile struct {
 	DualResident   bool            `json:"dual_resident"`
 	Notes          string          `json:"notes"`
 	ConfigSeed     map[string]any  `json:"config_seed"`
-	Extra          json.RawMessage `json:"-"`
+	// MediaSeats are the ALIAS-backed media capabilities (vision / STT) the tier
+	// serves. They are a separate axis from ConfigSeed — seats become llama-swap
+	// models, seed keys become spawn-per-job bindings — and a page that showed only
+	// the seed would understate what the tier delivers.
+	MediaSeats []mediaseat.Seat `json:"media_seats"`
+	Extra      json.RawMessage  `json:"-"`
 }
 
 type doc struct {
@@ -127,6 +134,19 @@ a Windows class.
 		if len(p.ConfigSeed) > 0 {
 			media = mediaSummary(p.ConfigSeed)
 		}
+		if n := len(p.MediaSeats); n > 0 {
+			kinds := make([]string, 0, n)
+			for _, s := range p.MediaSeats {
+				kinds = append(kinds, s.Kind)
+			}
+			sort.Strings(kinds)
+			seats := "+ " + strings.Join(kinds, "/") + " seat"
+			if media == "—" {
+				media = seats[2:]
+			} else {
+				media += " " + seats
+			}
+		}
 		rep := "—"
 		if len(reports[n]) > 0 {
 			rep = fmt.Sprintf("[%d](%s)", len(reports[n]), "reports/"+reports[n][0])
@@ -202,7 +222,21 @@ func renderTier(name string, p Profile, reports []string) string {
 	}
 
 	b.WriteString("\n## Media\n\n")
-	if len(p.ConfigSeed) == 0 {
+	if len(p.MediaSeats) > 0 {
+		b.WriteString("This tier serves these media **seats** — models in its own llama-swap config, rendered\n" +
+			"at install time. Each seat also produces the harness config binding that routes to it, so a\n" +
+			"binding can never name a seat that was not rendered:\n\n" +
+			"| seat | kind | binds | model | residency |\n|---|---|---|---|---|\n")
+		for _, s := range p.MediaSeats {
+			bind := "`vision_model`"
+			if s.Kind == mediaseat.KindSTT {
+				bind = "`stt_model`"
+			}
+			fmt.Fprintf(&b, "| `%s` | %s | %s | `%s` | %s |\n", s.Name, s.Kind, bind, s.Model, s.Residency)
+		}
+		b.WriteString("\nA seat still needs its weights on the box — model downloads stay out-of-band, as with\nevery seed.\n\n")
+	}
+	if len(p.ConfigSeed) == 0 && len(p.MediaSeats) == 0 {
 		b.WriteString("**This tier ships no media configuration.** It serves text only until an operator binds\n" +
 			"the media routes by hand, so `generate_image`, `generate_video`, `generate_audio` and\n" +
 			"`run_graph` will report `NOT CONFIGURED` — or `BOUND-BUT-MISSING` where a shipped default\n" +

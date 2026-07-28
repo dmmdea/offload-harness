@@ -16,6 +16,18 @@
 
 ## Media
 
+This tier serves these media **seats** — models in its own llama-swap config, rendered
+at install time. Each seat also produces the harness config binding that routes to it, so a
+binding can never name a seat that was not rendered:
+
+| seat | kind | binds | model | residency |
+|---|---|---|---|---|
+| `gemma4-e4b-vision` | vision | `vision_model` | `gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf` | swappable |
+| `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo-q5_0.bin` | swappable |
+
+A seat still needs its weights on the box — model downloads stay out-of-band, as with
+every seed.
+
 The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
