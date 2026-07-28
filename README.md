@@ -141,6 +141,7 @@ offload-harness doctor                   # endpoint health, model aliases, deriv
 offload-harness report [--out FILE]      # read-only capability report (tier, serving, media routes) — Markdown, safe to send
 offload-harness acceptance               # the gate: exercise every bound capability AS THIS IDENTITY (non-zero = do not hand it work)
                                          #   your tier is documented in docs/tiers/ — see docs/tiers/README.md
+setup/install.sh --dry-run               # Linux install: every decision printed, nothing changed
 offload-harness install detect           # what is this machine, and which hardware tier?
 offload-harness install render           # render this tier's llama-swap serving config (Linux included)
 offload-harness install volumes          # where should this machine install? (most free space, never the OS drive by default)
