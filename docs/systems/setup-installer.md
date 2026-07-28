@@ -219,6 +219,45 @@ node's own `llama-swap` on a throwaway port, which accepted it and listed exactl
 `offload-e4b`, `gemma4-e2b`, `embeddinggemma`, `bge-reranker-v2-m3` — the 26B correctly
 absent. The live service on `:11436` was untouched throughout.
 
+### The Linux install path (`setup/install.sh`)
+
+```
+setup/install.sh --bin ./local-offload --llama-bin /path/to/llamacpp/build/bin [--prefix DIR] [--user NAME]
+```
+
+It is **deliberately thin**. Every decision that can be wrong lives in the binary, which
+is cross-compiled and unit-tested; the script only fetches, places and registers:
+
+| step | who decides |
+|---|---|
+| which tier is this machine? | `install detect` |
+| which disk should hold it? | `install volumes` (never the OS volume) |
+| what media does the tier bind? | `install seed` (rendered for this OS) |
+| what serving config? | `install render` |
+| may this node be handed work? | `acceptance`, run **as the service identity** |
+
+If you find yourself adding a decision to the script, it belongs in the binary — that is
+the whole reason this path and `install.ps1` cannot drift.
+
+**`--dry-run` prints every decision and command and changes nothing.** Use it first; it is
+how the two real defects below were found before any node was touched.
+
+**The tier table and serving templates are EMBEDDED in the binary.** An install begins by
+fetching one binary onto a machine with no checkout, so reading `profiles.json` from a repo
+path is the development case, not the install case. When that lookup silently failed, the
+script produced a config with **no media bindings at all and said nothing** — the exact
+class of drift this workstream exists to end. A seed failure is now fatal.
+
+**Prerequisites the script does not install** (and says so up front): a built llama.cpp,
+the tier's GGUF models, node, and — for the sdcpp tiers — the sd.cpp binary. The acceptance
+gate refuses the node until they are present, which is the intended outcome: a node that
+cannot render must not be advertised as one that can.
+
+**Line endings are load-bearing here.** A `.sh` checked out with CRLF fails at exec with
+`env: 'bash': No such file or directory` — a message naming neither the script nor the
+cause. This repo is developed on Windows and deployed to Linux, so `.gitattributes` pins
+`*.sh`, the serving templates and the generated docs to LF.
+
 ### Classification without PowerShell (`install detect` / `install plan`)
 
 `setup/detect.ps1`'s second statement refuses to run anywhere but Windows, so a Linux

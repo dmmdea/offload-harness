@@ -151,7 +151,11 @@ func runInstallSeed(args []string) error {
 	if *profile == "" {
 		return fmt.Errorf("install seed needs --profile <tier id>")
 	}
-	profiles, err := tierseed.Load(*root)
+	raw, err := profilesJSON(*root)
+	if err != nil {
+		return err
+	}
+	profiles, err := tierseed.Parse(raw)
 	if err != nil {
 		return err
 	}

@@ -75,6 +75,12 @@ func Load(root string) (map[string]Profile, error) {
 	if err != nil {
 		return nil, err
 	}
+	return Parse(raw)
+}
+
+// Parse reads the profile table from bytes — the install case, where the table is
+// embedded in the binary because the machine has no checkout.
+func Parse(raw []byte) (map[string]Profile, error) {
 	var d profilesDoc
 	if err := json.Unmarshal(raw, &d); err != nil {
 		return nil, fmt.Errorf("profiles.json: %w", err)
