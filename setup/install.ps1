@@ -1009,6 +1009,26 @@ if ($withMedia) {
 # escapes inside its YAML string scalars; Windows APIs accept forward slashes natively.
 # ---------------------------------------------------------------------------
 $profilesJson = Join-Path (Join-Path $scriptDir 'templates') 'profiles.json'
+
+# Media seats (ADR 0019) are rendered by the GO renderer (`local-offload install
+# render`), which reads the tier's `media_seats` and places each into the models
+# map and a group. THIS script is a second, older renderer that does not know the
+# key exists. Rendering here would silently produce a config with no vision/STT
+# seat while the tier table says the box serves them - silent capability loss
+# across an OS boundary, which is precisely what this tier schema forbids. So it
+# refuses by name rather than installing a quietly degraded node.
+$seatDoc = Get-Content -Raw -LiteralPath $profilesJson | ConvertFrom-Json
+$declaredSeats = if ($profileId -and $seatDoc.profiles.PSObject.Properties.Name -contains $profileId) {
+  $seatDoc.profiles.$profileId.media_seats
+} else { $null }
+if ($declaredSeats -and @($declaredSeats).Count -gt 0) {
+  $names = (@($declaredSeats) | ForEach-Object { "$($_.kind):$($_.name)" }) -join ', '
+  throw ("profile '$profileId' declares media seats ($names) but install.ps1 renders llama-swap itself and " +
+         "cannot place them. Installing anyway would leave this box advertising vision/STT it cannot serve. " +
+         "Render the serving config with 'local-offload install render --profile $profileId --os windows --home <root>' " +
+         "once a win-* template carries an '# offload-seats:' directive - tracked as the Windows slice of W4.")
+}
+
 $pp = Resolve-ProfileParams -ProfileId $profileId -RamTier $ramTier -BigRam $bigRam -ProfilesJsonPath $profilesJson -Backend $backend
 # The template to render: the profile's backend (dual-gpu -> dual-cuda; the
 # blackwell-32/48/72 all-resident tiers -> cuda-resident), else the fallback's

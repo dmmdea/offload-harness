@@ -4,6 +4,68 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.35.0] - 2026-07-28
+
+### Fixed — a phantom binding on every node in the fleet (the defect W4 slice 2 uncovered)
+- **`stt_model` no longer defaults to `"whisper-stt"`.** Not one of the six serving templates
+  defines a whisper seat, so the default bound EVERY rendered node to an alias its own config could
+  not serve: the node advertised `stt` to the fleet dispatcher (`internal/fleetnode` gates that task
+  on `STTModel != ""`) while `local-offload acceptance` failed it on the same alias. Measured with
+  the new closure gate: **20 of 20 (tier, OS) pairs red; `stt_model` was the only binding that
+  failed.** `vision_model` was fixed this way already ("opt-in … no phantom"); this finishes that
+  pass. **Migration:** a node whose llama-swap genuinely serves a hand-provisioned `whisper-stt`
+  must now say so in its own config — the binding is explicit or it is absent.
+- **`TestEveryBoundAliasIsServed`** — the cross-artifact gate that was missing. For every tier and
+  every OS it renders for, every non-empty alias the harness config binds must be a seat the
+  rendered serving config defines. The two artifacts are written by two commands from one table;
+  nothing had ever checked them against each other.
+
+### Added — tier-declared media seats (W4 slice 2)
+- **`internal/mediaseat`** — typed, validated declarations of the ALIAS-backed media capabilities a
+  hardware tier serves (`kind: vision|stt`), and the single source of the config binding that routes
+  to each. One declaration produces the llama-swap seat AND `vision_model`/`stt_model`, so the state
+  "bound to a seat that does not exist" is no longer representable from the tier table. `config_seed`
+  is now refused if it writes either key — two writers is how they drifted apart.
+- **`internal/servingtmpl` renders seats** into the models map *and* the group its residency role
+  maps to. Both, always: llama-swap rejects a config whose group names an undefined model, and a
+  model in no group joins the implicit default group, which swaps and evicts.
+- **Residency is a ROLE (`swappable`/`resident`), never a group name.** Group names are per-template
+  (`heavy`/`support` here, `offload-family` in three win-* templates, `architect`/`editor` in
+  win-dual-cuda, none in win-cuda-resident) while a tier is a hardware class that renders into
+  several of them. Templates map roles to their own groups with `# offload-seats:`.
+- **A tier declaring seats against a template that maps no roles is REFUSED BY NAME**, never
+  silently dropped — silent capability loss across an OS boundary is the failure this workstream
+  exists to end. Windows tiers therefore refuse loudly until a win-* template maps roles.
+- **`ampere-6` declares its vision + STT seats**, reproducing the 6 GB reference node's proven live
+  seats: the vision seat carries its own 8K window (not the chat tier's 32K) and whisper-server
+  carries its own `LD_LIBRARY_PATH`, because it is a separate self-built binary.
+- **`install render --home`** supplies the install root for seat paths (`__OFFLOAD_HOME__`), and
+  refuses rather than rendering an empty root into an absolute path that fails at exec.
+- **`docs/tiers/` surfaces seats** — the per-tier page and the summary table were computed from
+  `config_seed` alone, so a tier's alias-backed capability was invisible where collaborators read it.
+- **Both halves of an install refuse together.** `install seed` now asks whether the target's
+  template can place the tier's seats BEFORE writing their bindings. Without this, `install seed
+  --os windows` happily wrote `stt_model`/`vision_model` for a target whose `install render`
+  refuses — reproducing the phantom binding from the same table by a different route.
+- **`setup/install.sh` passes `--home`**, without which the Linux install of a seat-declaring tier
+  aborted at the render step *after* having already written a config bound to those seats' aliases.
+- **`setup/install.ps1` refuses a seat-declaring tier by name.** It is a second, older renderer that
+  does not read `media_seats`, so it would have installed a Windows node silently missing the vision
+  and STT seats its own tier row promises — silent capability loss across an OS boundary.
+- **Seat names and aliases are charset-validated.** A name becomes a YAML key *and* an inline
+  flow-sequence member: `a,b` split into a member naming no model (a config llama-swap rejects at
+  startup) and `a:b` produced a malformed document. Kind-irrelevant fields (`bin` on a vision seat,
+  `mmproj` on an stt seat) and `__OFFLOAD_HOME__` in a models-dir-relative field are refused rather
+  than silently ignored.
+- **Two string-surgery fragilities fixed in `internal/servingtmpl`:** an indented comment containing
+  a colon between a group key and its `members:` line made seat placement report the group had no
+  members list (and the shipped template's own house style is full of such comments); and dropping a
+  26B declared LAST swallowed `groups:` and the seat directive with it.
+- **ADR 0019** records the decision, the measurement, and the four rejected alternatives —
+  including why image/video/music stay out of this schema (there is no `sd-server` client in the
+  repo, and hosting one in llama-swap would put its group machinery and the ADR 0018 lease in charge
+  of the same card at once).
+
 ## [0.34.0] - 2026-07-28
 
 ### Added — a supported Linux install path (W3, final slice)

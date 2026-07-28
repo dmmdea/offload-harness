@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/mediaseat"
 )
 
 // Tokens a seed value may carry. They exist so ONE table row renders correctly on
@@ -63,6 +64,9 @@ type Profile struct {
 	Backend           string         `json:"backend"`
 	ConfigSeed        map[string]any `json:"config_seed"`
 	ConfigSeedMidHigh map[string]any `json:"config_seed_ram_mid_high"`
+	// MediaSeats are the tier's alias-backed media capabilities. They are the SOLE
+	// writer of the config keys they bind — see mediaseat.Bindings.
+	MediaSeats []mediaseat.Seat `json:"media_seats"`
 }
 
 type profilesDoc struct {
@@ -95,8 +99,11 @@ func Parse(raw []byte) (map[string]Profile, error) {
 // expanded, vae_mode translated, and the whole thing validated. The result is ready
 // to merge into a config.json.
 func Resolve(p Profile, id string, opt Options) (map[string]any, error) {
-	if len(p.ConfigSeed) == 0 && len(p.ConfigSeedMidHigh) == 0 {
+	if len(p.ConfigSeed) == 0 && len(p.ConfigSeedMidHigh) == 0 && len(p.MediaSeats) == 0 {
 		return nil, nil // a text-only tier is a legitimate answer, not an error
+	}
+	if err := mediaseat.Validate(p.MediaSeats, id); err != nil {
+		return nil, err
 	}
 	merged := map[string]any{}
 	for k, v := range p.ConfigSeed {
@@ -133,16 +140,31 @@ func Resolve(p Profile, id string, opt Options) (map[string]any, error) {
 			out["sdcpp_extra_args"] = appendArg(out["sdcpp_extra_args"], flag)
 		}
 	}
+	// The seat is the sole writer of its binding, so this lands LAST and
+	// unconditionally: one declaration produces both the llama-swap seat and the
+	// config key that routes to it, and the two cannot disagree.
+	for k, v := range mediaseat.Bindings(p.MediaSeats) {
+		out[k] = v
+	}
 	return out, nil
 }
 
 // validate is where a bad seed dies — at authoring time, not on someone's machine.
 func validate(seed map[string]any, backend, id string) error {
 	known := configKeys()
+	bound := map[string]bool{}
+	for _, k := range mediaseat.BoundKeys() {
+		bound[k] = true
+	}
 	var problems []string
 	for _, k := range sortedKeys(seed) {
 		if k == "vae_mode" {
 			continue // a seed-only directive, translated to sdcpp_extra_args
+		}
+		if bound[k] {
+			problems = append(problems, fmt.Sprintf("%q is written by a media_seat, not by config_seed — "+
+				"declare the seat instead. Two writers is how the binding and the seat it names drifted apart", k))
+			continue
 		}
 		if !known[k] {
 			problems = append(problems, fmt.Sprintf("unknown key %q (not a harness config field — it would be dropped on every install of this tier)", k))

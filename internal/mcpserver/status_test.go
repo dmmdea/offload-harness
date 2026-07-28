@@ -38,7 +38,10 @@ func TestStatusDiscoversLocalCapability(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Endpoint = upstream.URL
+	// Both are opt-in bindings (a tier earns them by declaring a media seat), so a
+	// node that serves them says so — exactly as a real config does.
 	cfg.VisionModel = "qwen3vl"
+	cfg.STTModel = "whisper-stt"
 	t.Setenv("NVIDIA_API_KEY", "")
 	t.Setenv("NGC_API_KEY", "")
 

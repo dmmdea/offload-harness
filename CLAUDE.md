@@ -27,7 +27,7 @@ The `--serve` endpoint is **unauthenticated** and drives write/GitHub tools → 
 | `offload-e4b` (alias `gemma4-e4b`) | `model` | Workhorse — summarize / extract; default agent planner. |
 | `gemma4-26b-a4b` | `escalation_model` / `reasoning_model` | MoE tier tried before deferring. |
 | `embeddinggemma` | (memory stack) | Embeddings. |
-| `qwen3vl-4b`, `whisper-stt`, `whisper-stt-hq` | `vision_model` / `stt_model[_hq]` | Vision + speech (optional; absent on a grunt-work-only install). |
+| `qwen3vl-4b`, `whisper-stt`, `whisper-stt-hq` | `vision_model` / `stt_model[_hq]` | Vision + speech. All opt-in and DERIVED: a tier declares a `media_seats` entry, which renders the llama-swap seat and writes the binding together. No seat, no binding, route defers. |
 
 The cascade enters small and escalates only on validation failure or low decision-confidence; all
 tiers exhausted → **defer**. It is model-family, not vendor, specific — CUDA/Vulkan/CPU all serve the
@@ -95,8 +95,11 @@ prompt/exemplars; can only narrow), `-allow-run` (the allowlisted direct-exec `r
    13 profiles (`f16` only on blackwell-48/72, both AMD, and cpu; K and V always symmetric, and
    `q8_0` V requires flash-attn on), and `--flash-attn` is on for 11 profiles, off for `amd-gcn`,
    and omitted entirely by the cpu template. The `embeddinggemma` entry bypasses the shared flag
-   macro altogether. (There is no STT carve-out — no whisper entry is templated; `whisper-stt` is a
-   config alias to a separately provisioned upstream.) Detail: `docs/systems/setup-installer.md`.
+   macro altogether. **Media seats** (vision / STT) are NOT baked into the templates: a tier
+   declares them in `media_seats` and `internal/servingtmpl` renders each into the models map and
+   into the group its residency ROLE maps to (`# offload-seats:` in the template maps role→group,
+   because group names are per-template). The same declaration writes `vision_model`/`stt_model`,
+   so a binding can never name a seat that was not rendered. Detail: `docs/systems/setup-installer.md`.
 2. **Defer, never crash.** A `{"deferred":true,...}` result is a *valid* success signal (low
    confidence / over-long / all tiers failed), not an error. Do not "fix" defers by adding a cloud
    fallback — the harness holds no cloud credentials by design.
