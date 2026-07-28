@@ -4,6 +4,34 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.32.0] - 2026-07-28
+
+### Added — a node advertises what it can actually deliver (`vram_reclaimable_gb`)
+- **`/fleet/health` gains `vram_reclaimable_gb`, `vram_schedulable_gb`, `vram_reclaim_source` and
+  `harness_version`.** Requested by the fleet-dispatcher side, which was otherwise going to
+  approximate it: neither published number is a safe divisor. `vram_total_gb` over-counts every
+  shared card (the measured workstation's desktop plus its always-resident support tier hold ~3 GiB
+  that cannot be reclaimed at any price) and `vram_free_gb` under-counts a WARM node, whose loaded
+  swappable model looks like lost capacity. `vram_schedulable_gb` (free + reclaimable) is the
+  number to divide by.
+- **Measured on a 16 GiB workstation, before/after loading one 4 GiB seat:** free 12.77 → 8.74,
+  reclaimable 0 → 4.04, **schedulable 12.77 → 12.78**. Free collapses; schedulable stays flat.
+- **How it is derived, since two obvious mechanisms fail.** Per-process GPU memory
+  (`nvidia-smi --query-compute-apps`) returns `[N/A]` on Windows — exactly the node with the shared
+  desktop — and the footprint store records what a RENDER task peaks at, not what the text tiers
+  hold. So the node measures an **idle baseline** (used VRAM while no swappable seat is loaded and
+  the GPU lease is free) and reports what sits above it. The baseline IS the unreclaimable share,
+  measured rather than assumed.
+- **Always-resident seats are baseline, not capacity.** The support tier is co-resident on purpose —
+  unloading it is what made one RAG query pay three model loads — so seats llama-swap reports with
+  `ttl 0` are counted into the baseline. Found before shipping: without this rule a *correctly*
+  configured node never reaches "nothing loaded" and would advertise `unknown` forever.
+- **Unknown is published as absence.** Before any baseline is observed both numbers are omitted and
+  only the source string is sent, so a consumer falls back to free VRAM instead of acting on a
+  guess. The node never claims reclaim capacity while holding nothing, so a third party's
+  allocation cannot be mistaken for our own model.
+- Sampling runs in the background (5 s); the health handler never blocks on llama-swap.
+
 ## [0.31.0] - 2026-07-27
 
 ### Added — a Linux node can render its own serving config (W3, second slice)
