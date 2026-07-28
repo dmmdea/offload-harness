@@ -69,6 +69,15 @@ models:
     checkEndpoint: /health
     ttl: 600
 
+# This template accepts tier-declared media seats, and maps the two residency
+# ROLES onto its own groups. Roles, not group names, are what a tier may declare:
+# group names are per-template (this file has heavy/support; the win-* templates
+# have offload-family or architect/editor, and win-cuda-resident has none), while
+# a tier is a hardware class that renders into several of them. `env` is the macro
+# a llama-backed seat carries — the loader path, which only this file needs.
+# A template WITHOUT this directive renders no seats and refuses by name rather
+# than dropping them silently.
+# offload-seats: swappable=heavy resident=support env=${ld}
 groups:
   # The topology below is MEASURED, not assumed. Two earlier shapes were tried on a
   # 6 GB card sharing a live desktop and both broke the box:

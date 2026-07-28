@@ -12,7 +12,7 @@
   "video_max_frames": 12,
   "video_frame_width": 512,
   "ffmpeg_path": "ffmpeg",
-  "stt_model": "whisper-stt",
+  "stt_model": "",
   "stt_model_hq": "",
   "stt_language": "",
   "stt_vad": true,

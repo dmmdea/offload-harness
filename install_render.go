@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/hwdetect"
+	"github.com/dmmdea/offload-harness/internal/mediaseat"
 	"github.com/dmmdea/offload-harness/internal/servingtmpl"
 )
 
@@ -57,6 +58,10 @@ type servingProfile struct {
 	Backend    string `json:"backend"`
 	Include26B bool   `json:"include_26b"`
 	MoE26B     string `json:"moe_26b"`
+	// MediaSeats are rendered into the models map and the group their residency
+	// role maps to. The same declaration produces the harness config binding via
+	// internal/tierseed, so the seat and the alias routing to it cannot disagree.
+	MediaSeats []mediaseat.Seat `json:"media_seats"`
 }
 
 // moeFlag turns the tier's declared 26B PLACEMENT into the llama.cpp flag form the
@@ -108,6 +113,7 @@ func runInstallRender(args []string) error {
 	goos := fs.String("os", "", "target OS: windows|linux (default: this machine)")
 	out := fs.String("out", "", "write the rendered config here instead of stdout")
 	root := fs.String("root", ".", "repo root holding setup/templates/profiles.json")
+	home := fs.String("home", "", "install root, for media seat paths (__OFFLOAD_HOME__)")
 	_ = fs.Parse(args)
 
 	target := *goos
@@ -150,6 +156,7 @@ func runInstallRender(args []string) error {
 		LlamaBin: *llamaBin, ModelsDir: *modelsDir, Listen: *listen,
 		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
 		MoE26B: moeFlag(p.MoE26B), Threads: n, Include26B: p.Include26B && p.MoE26B != "drop",
+		Seats: p.MediaSeats, Home: *home, GOOS: target,
 	})
 	if err != nil {
 		return fmt.Errorf("tier %s: %w", id, err)

@@ -1,0 +1,179 @@
+// Package mediaseat is the tier schema's declaration of the ALIAS-backed media
+// capabilities a hardware tier serves: a vision (VLM) seat and a speech-to-text
+// seat, each rendered into the node's llama-swap config AND into the harness
+// config binding that routes to it.
+//
+// One declaration, two artifacts, on purpose. Before this existed the two were
+// authored separately and drifted immediately: config.Default() bound
+// stt_model="whisper-stt" while not one of the six serving templates defined a
+// whisper seat, so every freshly installed node advertised `stt` to the fleet
+// dispatcher and failed its own acceptance gate at the same time. A binding is
+// now DERIVED from a seat — a tier that serves STT declares the seat and gets the
+// binding; a tier that does not declares neither and the route honestly defers.
+// The state "bound to a seat that does not exist" is no longer representable
+// from the tier table.
+//
+// FILE-backed media (image/video/music generation) is deliberately NOT here.
+// Those routes are spawn-per-job subprocesses arbitrated by internal/gpulease,
+// not llama-swap seats — there is no sd-server client anywhere in this repo, and
+// hosting one inside llama-swap would put two residency authorities over one
+// card. internal/mediacap derives those; this package derives their counterpart.
+package mediaseat
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+)
+
+// The kinds a seat may declare. A closed set: each one has a distinct binary,
+// a distinct flag grammar and a distinct config binding, so an unrecognized kind
+// is refused rather than rendered into something that looks plausible.
+const (
+	KindVision = "vision"
+	KindSTT    = "stt"
+)
+
+// Residency is a ROLE, not a group name. Group names are a per-TEMPLATE
+// namespace — heavy/support in linux-cuda, offload-family in the win-cuda,
+// win-vulkan and win-cpu templates, architect/editor in win-dual-cuda, and none
+// at all in win-cuda-resident — while a tier is a HARDWARE class that renders
+// into several of them. A tier naming "heavy" would therefore be simultaneously
+// valid and invalid for itself. The tier declares what a seat NEEDS; each
+// template maps that need onto one of its own groups.
+const (
+	// Swappable: a seat big enough that only one of its residency class should be
+	// on the card at a time.
+	Swappable = "swappable"
+	// Resident: a small seat that stays co-loaded alongside whatever else is up.
+	Resident = "resident"
+)
+
+// Seat is one alias-backed media capability a tier serves.
+type Seat struct {
+	Kind    string   `json:"kind"`
+	Name    string   `json:"name"` // the llama-swap model id AND the config binding value
+	Aliases []string `json:"aliases,omitempty"`
+	// Model is relative to the node's models dir, matching how every existing
+	// seat in the serving templates names its weights.
+	Model string `json:"model"`
+	// MMProj is the multimodal projector (vision only). A "vision" seat without
+	// one is just a chat model that silently answers image questions blind.
+	MMProj string `json:"mmproj,omitempty"`
+	// VADModel enables voice-activity detection (stt only); empty = no VAD flags.
+	VADModel string `json:"vad_model,omitempty"`
+	// Bin is the seat's executable when it is NOT llama-server (stt only —
+	// whisper.cpp ships its own server). May carry the __OFFLOAD_HOME__ and
+	// __EXE__ tokens so one row renders on every OS.
+	Bin string `json:"bin,omitempty"`
+	// LibDir is the directory holding the seat binary's shared objects. A
+	// self-built whisper-server links its own, and without it the process dies at
+	// exec with a loader error that reads nothing like a config problem. POSIX
+	// only; ignored on Windows.
+	LibDir string `json:"lib_dir,omitempty"`
+	// CtxSize is the seat's own served window. Vision runs a much smaller window
+	// than the chat tier on the same card, so it is per-seat, not inherited.
+	CtxSize   int    `json:"ctx_size,omitempty"`
+	Residency string `json:"residency"`
+	TTL       int    `json:"ttl,omitempty"`
+}
+
+// configKey is the harness config field a seat of this kind binds.
+func configKey(kind string) string {
+	switch kind {
+	case KindVision:
+		return "vision_model"
+	case KindSTT:
+		return "stt_model"
+	}
+	return ""
+}
+
+// Bindings is the config fragment a tier's seats produce. This is the ONLY
+// writer of these keys — a seed that also sets them by hand is refused, because
+// two writers is exactly how the seat and its binding drifted apart before.
+func Bindings(seats []Seat) map[string]any {
+	out := map[string]any{}
+	for _, s := range seats {
+		if k := configKey(s.Kind); k != "" {
+			out[k] = s.Name
+		}
+	}
+	return out
+}
+
+// BoundKeys is every config key seats may write, for the seed validator.
+func BoundKeys() []string { return []string{"stt_model", "vision_model"} }
+
+// Validate rejects a seat set at AUTHORING time — in a test over the committed
+// tier table — rather than on someone's machine, where the symptom is a service
+// that will not start or a route that quietly defers.
+func Validate(seats []Seat, tier string) error {
+	var problems []string
+	seen := map[string]bool{}
+	perKind := map[string]int{}
+
+	for i, s := range seats {
+		where := fmt.Sprintf("seat %d", i)
+		if s.Name != "" {
+			where = fmt.Sprintf("seat %q", s.Name)
+		}
+		switch s.Kind {
+		case KindVision, KindSTT:
+			perKind[s.Kind]++
+		case "":
+			problems = append(problems, where+": no kind (want "+KindVision+" or "+KindSTT+")")
+		default:
+			problems = append(problems, fmt.Sprintf("%s: unknown kind %q (want %s or %s)", where, s.Kind, KindVision, KindSTT))
+		}
+		switch {
+		case s.Name == "":
+			problems = append(problems, where+": no name — the name IS the llama-swap model id and the config binding")
+		case strings.ContainsAny(s.Name, " \t"):
+			problems = append(problems, fmt.Sprintf("%s: a seat name may not contain whitespace", where))
+		case seen[s.Name]:
+			problems = append(problems, fmt.Sprintf("%s: declared twice", where))
+		}
+		seen[s.Name] = true
+		for _, a := range s.Aliases {
+			if seen[a] {
+				problems = append(problems, fmt.Sprintf("%s: alias %q collides with another seat name or alias", where, a))
+			}
+			seen[a] = true
+		}
+		if s.Model == "" {
+			problems = append(problems, where+": no model file")
+		}
+		if s.Residency != Swappable && s.Residency != Resident {
+			problems = append(problems, fmt.Sprintf("%s: residency %q is not %s or %s", where, s.Residency, Swappable, Resident))
+		}
+		if s.Kind == KindVision {
+			if s.MMProj == "" {
+				problems = append(problems, where+": a vision seat needs an mmproj — without one it loads as a text model "+
+					"and answers image questions blind instead of failing")
+			}
+			if s.CtxSize <= 0 {
+				problems = append(problems, where+": a vision seat needs its own ctx_size (it is not the chat tier's)")
+			}
+		}
+		if s.Kind == KindSTT && s.Bin == "" {
+			problems = append(problems, where+": an stt seat needs a bin — whisper-server is a separate binary, not llama-server")
+		}
+		for field, v := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel, "bin": s.Bin, "lib_dir": s.LibDir} {
+			if strings.Contains(strings.ToLower(v), ".exe") {
+				problems = append(problems, fmt.Sprintf("%s: %s carries a literal \".exe\" — use the __EXE__ token so the tier renders on every OS", where, field))
+			}
+		}
+	}
+	for _, k := range []string{KindVision, KindSTT} {
+		if perKind[k] > 1 {
+			problems = append(problems, fmt.Sprintf("%d %s seats: %q is a single config field, so a tier may declare at most one",
+				perKind[k], k, configKey(k)))
+		}
+	}
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		return fmt.Errorf("tier %q media_seats:\n  - %s", tier, strings.Join(problems, "\n  - "))
+	}
+	return nil
+}
