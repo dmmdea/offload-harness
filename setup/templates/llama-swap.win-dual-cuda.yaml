@@ -59,12 +59,25 @@ models:
 
 # Two NON-exclusive groups: neither unloads the other, so the architect (device 0)
 # and editor (device 1) stay resident together for zero-swap two-tier runs.
-groups:
-  architect:
-    swap: false
-    exclusive: false
-    members: [gemma4-26b-a4b]
-  editor:
-    swap: false
-    exclusive: false
-    members: [offload-e4b, gemma4-e2b, embeddinggemma]
+# RESIDENCY IS DECLARED WITH `matrix:`, NOT `groups:` (llama-swap >= v202; a config
+# uses one or the other, never both). The intent of this tier is unchanged and is the
+# whole point of it: the 26B architect is pinned to one card and the E4B editor to the
+# other, so NOTHING swaps — two models stay resident simultaneously.
+#
+# `groups:` could only approximate that with two swap:false groups and relied on the
+# solver leaving them alone. A set states it directly: this single set IS the valid
+# concurrent combination, so every member may be co-resident and none may evict
+# another. Per-GPU pinning stays in each model's own cmd (CUDA_VISIBLE_DEVICES).
+#
+# Verified against the real binary: `vars` is mandatory, a var key must be alphanumeric
+# and 1-8 characters, and a set expression may reference ONLY var ids.
+matrix:
+  vars:
+    emb: embeddinggemma
+    e4b: offload-e4b
+    e2b: gemma4-e2b
+    m26: gemma4-26b-a4b
+  evict_costs:
+    emb: 1000
+  sets:
+    resident: "emb & e4b & e2b__M26_AND__"
