@@ -47,7 +47,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.31.0"
+const version = "0.32.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -1706,8 +1706,14 @@ func runFleetServe(args []string) error {
 
 	sampler := fleetnode.StartProbeSampler(ctx, 2*time.Second, prov.Probe)
 	jobs := fleetnode.NewJobs(time.Hour)
+	// Reclaimable VRAM is sampled in the background (never from the health handler,
+	// which must not block on llama-swap) — see fleet_reclaim.go for why the idle
+	// baseline, not free or total, is the right denominator for a shared card.
+	reclaim := startReclaimTracking(ctx, cfg, sampler.Load, 5*time.Second)
 	srv := fleetnode.New(p, jobs, fleetnode.Options{
 		NodeID:   nodeID,
+		Version:  version,
+		Reclaim:  reclaim,
 		Snapshot: sampler.Load,
 		Footprints: func() []fleetnode.FootprintEntry {
 			if st := p.FootprintStore(); st != nil {
