@@ -187,7 +187,7 @@ config at all — every Linux deployment hand-wrote one, and on the measured 6 G
 first two hand-written topologies each broke the box.
 
 ```
-local-offload install render --profile ampere-6   --llama-bin /srv/offload/build/llamacpp/build/bin   --models /srv/offload/models --listen 127.0.0.1:11436 --out llama-swap.yaml
+local-offload install render --profile ampere-6 --home /srv/offload   --llama-bin /srv/offload/build/llamacpp/build/bin   --models /srv/offload/models --listen 127.0.0.1:11436 --out llama-swap.yaml
 ```
 
 The templates are **embedded in the binary**, so a fetched binary can render a config on a
@@ -354,8 +354,11 @@ live-captured log lines, cosine). Go-side config round-tripping is covered by
 ## Common pitfalls
 
 - Assuming `f16` KV cache everywhere. It is the minority.
-- Assuming a flash-attention exception for speech. There is none in these templates — no whisper
-  entry is templated at all; `whisper-stt` is a config alias to a separately provisioned upstream.
+- Assuming a flash-attention exception for speech. There is none in these templates — a whisper
+  entry is never baked in. It arrives from the TIER: a `media_seats` entry of kind `stt` renders a
+  whisper-server seat (with its own loader path, since it is a separate binary) into the models map,
+  and writes `stt_model` at the same time. A tier that declares no seat leaves `stt_model` empty and
+  the route defers — it does not name an upstream nothing serves.
 - Adding a profile without its self-test assertion.
 - Expecting the `ampere-8` band to start at 8 GB. It starts at 7.
 - Treating the profile string as fleet routing input. It is not.

@@ -152,7 +152,10 @@ SWAP_YAML="$PREFIX/etc/llama-swap.yaml"
 if [ "$DRY_RUN" -eq 1 ]; then
   say "  would render $SWAP_YAML for tier $TIER"
 else
-  "$BIN" install render --profile "$TIER" --os linux \
+  # --home is load-bearing: a tier's media seats name their binaries under the
+  # install root, and without it the render REFUSES — after step 4 has already
+  # written a config.json binding those seats' aliases.
+  "$BIN" install render --profile "$TIER" --os linux --home "$PREFIX" \
     --llama-bin "$LLAMA_BIN" --models "$MODELS" --listen "$LISTEN" --out "$SWAP_YAML"
 fi
 

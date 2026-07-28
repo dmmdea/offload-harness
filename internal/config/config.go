@@ -483,7 +483,14 @@ func Default() Config {
 		VideoMaxFrames:              12,
 		VideoFrameWidth:             512,
 		FFmpegPath:                  "ffmpeg",
-		STTModel:                    "whisper-stt",
+		// opt-in, for the same reason VisionModel is: no serving template defines a
+		// whisper seat, so a default of "whisper-stt" bound EVERY node to an alias its
+		// own rendered config could not serve — the node advertised `stt` to the fleet
+		// (internal/fleetnode/tasks.go gates on STTModel != "") while failing its own
+		// acceptance gate. A tier that serves STT now EARNS this binding by declaring
+		// an stt media seat (internal/mediaseat); a node with a hand-provisioned
+		// upstream sets it explicitly.
+		STTModel:                    "",
 		STTModelHQ:                  "", // opt-in: an accuracy STT tier alias (empty = hq falls back to STTModel)
 		STTLanguage:                 "", // auto-detect unless overridden per call
 		STTVAD:                      true,

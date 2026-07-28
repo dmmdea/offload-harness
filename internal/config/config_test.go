@@ -29,8 +29,10 @@ func TestDefaultVideoFields(t *testing.T) {
 
 func TestDefaultSTTFields(t *testing.T) {
 	c := Default()
-	if c.STTModel != "whisper-stt" {
-		t.Errorf("STTModel = %q, want \"whisper-stt\"", c.STTModel)
+	// Opt-in, like VisionModel: no serving template defines a whisper seat, so a
+	// non-empty default bound every node to an alias it could not serve.
+	if c.STTModel != "" {
+		t.Errorf("STTModel = %q, want \"\" (a tier earns this binding via an stt media seat)", c.STTModel)
 	}
 	if c.STTModelHQ != "" {
 		t.Errorf("STTModelHQ = %q, want \"\" (opt-in; no phantom default)", c.STTModelHQ)
