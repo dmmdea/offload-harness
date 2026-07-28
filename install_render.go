@@ -96,6 +96,26 @@ func templateFor(goos, backend string) (string, error) {
 	return "", fmt.Errorf("no serving template for %s/%s (have: %s)", osTag(goos), backend, strings.Join(have, ", "))
 }
 
+// seatsPlaceable reports whether the serving template for this target can host
+// tier-declared media seats, so `install seed` can refuse exactly the pairs
+// `install render` refuses instead of writing a binding the node cannot honour.
+func seatsPlaceable(goos, backend string) error {
+	target := goos
+	if target == "" {
+		target = runtime.GOOS
+	}
+	tmpl, err := templateFor(target, backend)
+	if err != nil {
+		return err
+	}
+	if !servingtmpl.SupportsSeats(tmpl) {
+		return fmt.Errorf("this tier declares media seats, but the %s/%s serving template carries no "+
+			"`# offload-seats:` directive, so they cannot be placed. Seeding their bindings here would write a "+
+			"config naming aliases this node will never serve — refusing both halves instead", osTag(target), backend)
+	}
+	return nil
+}
+
 func osTag(goos string) string {
 	if goos == "windows" {
 		return "win"

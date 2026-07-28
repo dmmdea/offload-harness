@@ -42,7 +42,7 @@ type Params struct {
 
 	// Seats are the tier's alias-backed media seats (vision / STT). Empty is the
 	// common case and MUST render byte-identically to a build that had no seat
-	// support at all — TestTiersWithoutSeatsRenderUnchanged holds that line.
+	// support at all — TestNoSeatsChangesNothing holds that line.
 	Seats []mediaseat.Seat
 	// Home is the install root substituted for __OFFLOAD_HOME__ in seat paths, and
 	// GOOS is the TARGET platform (never the rendering one) selecting the executable
@@ -68,11 +68,18 @@ type seatAnchors struct {
 
 var anchorRe = regexp.MustCompile(`(?m)^#\s*offload-seats:\s*(.+)$`)
 
-func parseAnchors(tmpl string) (seatAnchors, bool) {
-	m := anchorRe.FindStringSubmatch(tmpl)
-	if m == nil {
-		return seatAnchors{}, false
+func parseAnchors(tmpl string) (seatAnchors, error) {
+	all := anchorRe.FindAllStringSubmatch(tmpl, -1)
+	if len(all) == 0 {
+		return seatAnchors{}, errNoAnchors
 	}
+	// Two directives means two answers to "where does a seat go", and first-match
+	// would silently pick one. A template author editing this must see the conflict.
+	if len(all) > 1 {
+		return seatAnchors{}, fmt.Errorf("this template carries %d `# offload-seats:` directives; "+
+			"exactly one may declare where seats go", len(all))
+	}
+	m := all[0]
 	a := seatAnchors{groups: map[string]string{}}
 	for _, f := range strings.Fields(m[1]) {
 		k, v, ok := strings.Cut(f, "=")
@@ -85,7 +92,20 @@ func parseAnchors(tmpl string) (seatAnchors, bool) {
 		}
 		a.groups[k] = v
 	}
-	return a, true
+	return a, nil
+}
+
+// errNoAnchors means the template declares no seat placement at all — a distinct
+// case from a malformed directive, and the one that gets the actionable message.
+var errNoAnchors = fmt.Errorf("no `# offload-seats:` directive")
+
+// SupportsSeats reports whether a serving template can place tier-declared media
+// seats. `install seed` asks BEFORE writing a config, so a target that cannot
+// serve a seat never gets the binding for it written either — the two halves of
+// an install refuse together or not at all.
+func SupportsSeats(tmpl string) bool {
+	_, err := parseAnchors(tmpl)
+	return err == nil
 }
 
 var tokenRe = regexp.MustCompile(`__[A-Z0-9_]+__`)
@@ -175,9 +195,11 @@ const (
 	tokenExe  = "__EXE__"
 )
 
+// seatsNeedHome scans exactly the fields seatExpand resolves. Scanning more would
+// promise a substitution that never happens.
 func seatsNeedHome(seats []mediaseat.Seat) bool {
 	for _, s := range seats {
-		if strings.Contains(s.Bin+s.LibDir+s.Model+s.MMProj+s.VADModel, tokenHome) {
+		if strings.Contains(s.Bin+s.LibDir, tokenHome) {
 			return true
 		}
 	}
@@ -202,8 +224,11 @@ func (p Params) seatExpand(s string) string {
 // group names a model it cannot find, and a model in no group silently joins the
 // implicit default group, which swaps and evicts. Neither half is optional.
 func insertSeats(tmpl string, p Params) (string, error) {
-	anchors, ok := parseAnchors(tmpl)
-	if !ok {
+	anchors, err := parseAnchors(tmpl)
+	if err != nil && err != errNoAnchors {
+		return "", err
+	}
+	if err == errNoAnchors {
 		var names []string
 		for _, s := range p.Seats {
 			names = append(names, s.Kind+":"+s.Name)
@@ -345,6 +370,13 @@ func addMember(tmpl, group, member string) (string, error) {
 		if !in {
 			continue
 		}
+		// A comment is not a key. The shipped templates carry indented comments that
+		// contain colons ("# heavy: one big seat at a time", "# 1. exclusive:true"),
+		// so treating them as the next group would abandon the search and report that
+		// the group has no members list at all.
+		if trimmed := strings.TrimSpace(l); strings.HasPrefix(trimmed, "#") {
+			continue
+		}
 		if strings.HasPrefix(l, "  ") && !strings.HasPrefix(l, "   ") && strings.Contains(l, ":") {
 			break // reached the next group without finding a members list
 		}
@@ -380,10 +412,16 @@ func drop26B(tmpl string) (string, error) {
 			continue
 		}
 		if skipping {
-			// The block ends at the next key at the same indent (two spaces, no more).
-			if strings.HasPrefix(l, "  ") && !strings.HasPrefix(l, "   ") && strings.Contains(l, ":") {
+			// The block ends at the next key at the same indent (two spaces, no more)
+			// OR at any column-0 line, which starts a new top-level section. Without
+			// the second case, a 26B declared LAST would swallow `groups:` and the
+			// `# offload-seats:` directive, turning the first group into a model.
+			switch {
+			case l != "" && !strings.HasPrefix(l, " "):
 				skipping = false
-			} else {
+			case strings.HasPrefix(l, "  ") && !strings.HasPrefix(l, "   ") && strings.Contains(l, ":"):
+				skipping = false
+			default:
 				continue
 			}
 		}

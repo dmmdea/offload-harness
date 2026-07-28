@@ -187,7 +187,7 @@ config at all — every Linux deployment hand-wrote one, and on the measured 6 G
 first two hand-written topologies each broke the box.
 
 ```
-local-offload install render --profile ampere-6   --llama-bin /srv/offload/build/llamacpp/build/bin   --models /srv/offload/models --listen 127.0.0.1:11436 --out llama-swap.yaml
+local-offload install render --profile ampere-6 --home /srv/offload   --llama-bin /srv/offload/build/llamacpp/build/bin   --models /srv/offload/models --listen 127.0.0.1:11436 --out llama-swap.yaml
 ```
 
 The templates are **embedded in the binary**, so a fetched binary can render a config on a

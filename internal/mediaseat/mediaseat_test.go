@@ -47,6 +47,17 @@ func TestValidateRejects(t *testing.T) {
 		{"literal .exe", func(s []Seat) []Seat { s[1].Bin = "/bin/whisper-server.exe"; return s }, "__EXE__"},
 		{"duplicate name", func(s []Seat) []Seat { s[1].Name = s[0].Name; return s }, "declared twice"},
 		{"alias collides", func(s []Seat) []Seat { s[1].Aliases = []string{"vlm-seat"}; return s }, "collides"},
+		// A name becomes a YAML key AND an inline flow-sequence member, so these are
+		// not cosmetic: "a,b" splits into a member naming no model (llama-swap refuses
+		// the config at startup) and "a:b" makes the document malformed.
+		{"comma in name", func(s []Seat) []Seat { s[0].Name = "a,b"; return s }, "must match"},
+		{"colon in name", func(s []Seat) []Seat { s[0].Name = "a:b"; return s }, "must match"},
+		{"bracket in name", func(s []Seat) []Seat { s[0].Name = "a]b"; return s }, "must match"},
+		{"bad alias", func(s []Seat) []Seat { s[0].Aliases = []string{"a,b"}; return s }, "must match"},
+		{"home token in model", func(s []Seat) []Seat { s[0].Model = "__OFFLOAD_HOME__/m.gguf"; return s },
+			"may not carry __OFFLOAD_HOME__"},
+		{"vision with bin", func(s []Seat) []Seat { s[0].Bin = "/x/llama-server"; return s }, "always"},
+		{"stt with mmproj", func(s []Seat) []Seat { s[1].MMProj = "p.gguf"; return s }, "vision-only"},
 		{"two vision seats", func(s []Seat) []Seat {
 			s[1] = Seat{Kind: KindVision, Name: "other", Model: "m", MMProj: "p", CtxSize: 1, Residency: Resident}
 			return s

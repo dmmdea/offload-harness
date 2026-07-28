@@ -236,7 +236,12 @@ func renderTier(name string, p Profile, reports []string) string {
 		}
 		b.WriteString("\nA seat still needs its weights on the box — model downloads stay out-of-band, as with\nevery seed.\n\n")
 	}
-	if len(p.ConfigSeed) == 0 && len(p.MediaSeats) == 0 {
+	if len(p.ConfigSeed) == 0 && len(p.MediaSeats) > 0 {
+		// Seats but no seed: a real combination, and the seed branch below would
+		// print an empty table under a heading claiming bindings exist.
+		b.WriteString("It ships no file-backed media seed, so `generate_image` / `generate_video` /\n" +
+			"`generate_audio` / `run_graph` report `NOT CONFIGURED` until an operator binds them.\n")
+	} else if len(p.ConfigSeed) == 0 {
 		b.WriteString("**This tier ships no media configuration.** It serves text only until an operator binds\n" +
 			"the media routes by hand, so `generate_image`, `generate_video`, `generate_audio` and\n" +
 			"`run_graph` will report `NOT CONFIGURED` — or `BOUND-BUT-MISSING` where a shipped default\n" +

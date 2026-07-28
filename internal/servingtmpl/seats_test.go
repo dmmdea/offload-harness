@@ -178,6 +178,54 @@ func TestNoSeatsChangesNothing(t *testing.T) {
 	}
 }
 
+// TestACommentInsideAGroupDoesNotHideItsMembers. The shipped templates comment in
+// prose that contains colons ("# heavy: one big seat at a time"). Treating such a
+// line as the next group key made addMember abandon the search and report that the
+// group had no members list — turning a house-style comment into a broken install.
+func TestACommentInsideAGroupDoesNotHideItsMembers(t *testing.T) {
+	tmpl := "# offload-seats: swappable=heavy\nmodels:\n  offload-e4b:\n    cmd: x\n" +
+		"groups:\n  heavy:\n    # note: one big seat at a time\n    swap: true\n    members: [offload-e4b]\n"
+	got, err := Render(tmpl, seatParams(visionSeat()))
+	if err != nil {
+		t.Fatalf("a comment between the group key and its members must not break placement: %v", err)
+	}
+	if !strings.Contains(got, "members: [offload-e4b, gemma4-e4b-vision]") {
+		t.Errorf("seat not placed:\n%s", got)
+	}
+}
+
+// TestTwoDirectivesAreRefused: first-match-wins would silently pick one answer to
+// "where do seats go" while the author believed the other.
+func TestTwoDirectivesAreRefused(t *testing.T) {
+	tmpl := "# offload-seats: swappable=support\n# offload-seats: swappable=heavy\nmodels:\n  a:\n    cmd: x\n" +
+		"groups:\n  heavy:\n    members: [a]\n  support:\n    members: [a]\n"
+	if _, err := Render(tmpl, seatParams(visionSeat())); err == nil ||
+		!strings.Contains(err.Error(), "directives") {
+		t.Fatalf("two directives must be refused, got %v", err)
+	}
+}
+
+// TestDroppingATrailing26BKeepsTheSectionsBelowIt. The block-extent heuristic ended
+// only at a two-space key, so a 26B declared LAST swallowed `groups:` and the
+// `# offload-seats:` directive — promoting the first group to a model.
+func TestDroppingATrailing26BKeepsTheSectionsBelowIt(t *testing.T) {
+	tmpl := "models:\n  offload-e4b:\n    cmd: x\n  gemma4-26b-a4b:\n    cmd: y\n" +
+		"# offload-seats: swappable=heavy\ngroups:\n  heavy:\n    members: [offload-e4b, gemma4-26b-a4b]\n"
+	p := params()
+	p.Include26B = false
+	p.MoE26B = ""
+	got, err := Render(tmpl, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "groups:") {
+		t.Errorf("dropping a trailing 26B deleted the groups section:\n%s", got)
+	}
+	if !strings.Contains(got, "# offload-seats:") {
+		t.Errorf("dropping a trailing 26B deleted the seat directive:\n%s", got)
+	}
+}
+
 // TestSeatRenderingSurvivesTheDropped26B: a tier that drops the 26B AND declares
 // seats exercises both structural edits in one pass — and ampere-6, the first
 // tier to declare seats, is exactly that tier.
