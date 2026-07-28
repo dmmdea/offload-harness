@@ -168,6 +168,16 @@ func runInstallSeed(args []string) error {
 		sort.Strings(names)
 		return fmt.Errorf("unknown tier %q (have: %s)", *profile, strings.Join(names, ", "))
 	}
+	// A seat's binding and the seat itself must be written by the same decision. If
+	// the target's serving template cannot place the seats, `install render` refuses
+	// — so seeding a binding for that target would leave a config naming an alias
+	// nothing will ever serve, which is the state this whole schema exists to make
+	// unrepresentable. Both halves refuse together.
+	if len(p.MediaSeats) > 0 {
+		if err := seatsPlaceable(*goos, p.Backend); err != nil {
+			return fmt.Errorf("tier %s: %w", *profile, err)
+		}
+	}
 	seed, err := tierseed.Resolve(p, *profile, tierseed.Options{Home: *home, GOOS: *goos, RAMTier: *ramTier})
 	if err != nil {
 		return err

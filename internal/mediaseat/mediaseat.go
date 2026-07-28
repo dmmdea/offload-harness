@@ -22,9 +22,14 @@ package mediaseat
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
+
+// safeID is what may become a YAML key and an inline flow-sequence member. It is
+// deliberately the same charset the closure gate's roster parser assumes.
+var safeID = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // The kinds a seat may declare. A closed set: each one has a distinct binary,
 // a distinct flag grammar and a distinct config binding, so an unrecognized kind
@@ -129,13 +134,20 @@ func Validate(seats []Seat, tier string) error {
 		switch {
 		case s.Name == "":
 			problems = append(problems, where+": no name — the name IS the llama-swap model id and the config binding")
-		case strings.ContainsAny(s.Name, " \t"):
-			problems = append(problems, fmt.Sprintf("%s: a seat name may not contain whitespace", where))
+		case !safeID.MatchString(s.Name):
+			// A name is written into a YAML key AND into an inline flow sequence, so a
+			// comma splits it into a member naming no model (a config llama-swap rejects
+			// at startup) and a colon or bracket makes the document malformed outright.
+			problems = append(problems, fmt.Sprintf("%s: a seat name must match %s — it becomes a YAML key and "+
+				"a group member, where a comma silently splits it and a colon breaks the document", where, safeID))
 		case seen[s.Name]:
 			problems = append(problems, fmt.Sprintf("%s: declared twice", where))
 		}
 		seen[s.Name] = true
 		for _, a := range s.Aliases {
+			if !safeID.MatchString(a) {
+				problems = append(problems, fmt.Sprintf("%s: alias %q must match %s", where, a, safeID))
+			}
 			if seen[a] {
 				problems = append(problems, fmt.Sprintf("%s: alias %q collides with another seat name or alias", where, a))
 			}
@@ -156,12 +168,31 @@ func Validate(seats []Seat, tier string) error {
 				problems = append(problems, where+": a vision seat needs its own ctx_size (it is not the chat tier's)")
 			}
 		}
-		if s.Kind == KindSTT && s.Bin == "" {
-			problems = append(problems, where+": an stt seat needs a bin — whisper-server is a separate binary, not llama-server")
+		if s.Kind == KindSTT {
+			if s.Bin == "" {
+				problems = append(problems, where+": an stt seat needs a bin — whisper-server is a separate binary, not llama-server")
+			}
+			// Fields the renderer would silently ignore. Accepting them would let a
+			// tier author believe a knob applies when it does nothing.
+			if s.MMProj != "" || s.CtxSize > 0 {
+				problems = append(problems, where+": mmproj/ctx_size are vision-only and are ignored on an stt seat")
+			}
+		}
+		if s.Kind == KindVision && (s.Bin != "" || s.LibDir != "") {
+			problems = append(problems, where+": bin/lib_dir are for a seat that is NOT llama-server; a vision seat always "+
+				"runs the template's llama-server and would silently ignore them")
 		}
 		for field, v := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel, "bin": s.Bin, "lib_dir": s.LibDir} {
 			if strings.Contains(strings.ToLower(v), ".exe") {
 				problems = append(problems, fmt.Sprintf("%s: %s carries a literal \".exe\" — use the __EXE__ token so the tier renders on every OS", where, field))
+			}
+		}
+		// Only bin/lib_dir are resolved against the install root. The model fields are
+		// relative to the models dir, so a home token there renders nowhere and would
+		// die at the token guard with no hint as to which field caused it.
+		for field, v := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel} {
+			if strings.Contains(v, "__OFFLOAD_HOME__") {
+				problems = append(problems, fmt.Sprintf("%s: %s is relative to the models dir and may not carry __OFFLOAD_HOME__", where, field))
 			}
 		}
 	}

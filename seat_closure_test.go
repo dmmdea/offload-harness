@@ -142,7 +142,16 @@ func TestEveryBoundAliasIsServed(t *testing.T) {
 				// real first-class gap, and the refusal is what keeps it from becoming a
 				// node that quietly lost a capability.
 				if len(sp.MediaSeats) > 0 && strings.Contains(err.Error(), "offload-seats") {
-					t.Logf("gap: tier %s has no seat-capable template for %s/%s — %v", id, goos, sp.Backend, err)
+					// The refusal only protects the node if the OTHER half refuses too.
+					// If `install seed` still wrote the bindings for this pair, the node
+					// would end up with a config naming aliases nothing serves — the very
+					// state this gate exists to prevent, arrived at by a different route.
+					if placeErr := seatsPlaceable(goos, sp.Backend); placeErr == nil {
+						t.Errorf("tier %s (%s/%s): render refuses the seats but install seed would still write "+
+							"their bindings — the two halves must refuse together", id, goos, sp.Backend)
+					}
+					t.Logf("gap (both halves refuse, as they must): tier %s has no seat-capable template for %s/%s",
+						id, goos, sp.Backend)
 					continue
 				}
 				t.Errorf("tier %s (%s/%s): rendering: %v", id, goos, sp.Backend, err)
