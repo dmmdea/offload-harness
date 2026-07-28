@@ -47,7 +47,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.32.0"
+const version = "0.33.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -110,6 +110,8 @@ func main() {
 		err = runDoctor(args)
 	case "report":
 		err = runReport(args)
+	case "acceptance":
+		err = runAcceptance(args)
 	case "install":
 		err = runInstall(args)
 	case "models":
@@ -226,6 +228,7 @@ Usage:
   local-offload ledger [--since DAYS]    token-savings report
   local-offload doctor                   check endpoint health + config
   local-offload report [--out FILE]      READ-ONLY capability report for this machine (tier, serving, media routes) — Markdown, safe to send
+  local-offload acceptance [--json]      the gate: EXERCISE every bound capability as this identity (lease writable, interpreters runnable, aliases live). Non-zero when a node must not be handed work.
   local-offload install detect [--json]  classify this machine into a hardware tier (works on every OS)
   local-offload install plan [--json]    the tier + the media bindings an install would seed here
   local-offload install render [--profile ID] [--llama-bin DIR] [--models DIR] [--out FILE]   render this tier's llama-swap serving config (templates embedded)

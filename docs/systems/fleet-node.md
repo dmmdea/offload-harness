@@ -167,6 +167,35 @@ PDH instance parser. `fleet_verbs_test.go` covers parameter resolution and the b
 - Binding with `:18811` and expecting it to work as loopback.
 - Treating Afterburner as required.
 
+## The acceptance gate (`local-offload acceptance`)
+
+A node must pass this before it is handed work. It is deliberately NOT `doctor`: doctor
+STATS the configured files, and both 2026-07-27 fleet failures passed doctor cleanly while
+every dispatched job died.
+
+| node | what doctor saw | what actually happened |
+|---|---|---|
+| Windows | the venv `python.exe` exists and is readable | it is a **uv trampoline** re-execing a base interpreter in ANOTHER account's roaming profile — it stats for everyone, runs only for its owner |
+| Linux | the lease directory exists and is readable | it was owned by a different user, so the running identity could not create a lease file |
+
+So every check here **exercises** the capability as the running identity — it runs the
+interpreter, it writes to the lease directory — and the report leads with which identity
+that was, because in both failures the binary, the config and the files were all correct
+and only the account was wrong.
+
+Checks: GPU lease writable (by writing a probe file and removing it) · every bound
+interpreter runnable (`node`, `ffmpeg`, the PIL python, `sd-cli`) · derived media routes
+carry no `BOUND-BUT-MISSING` · every configured model alias is in the live roster.
+Unbound capabilities `SKIP` and never make a node look unready. Exit is non-zero when the
+node must not be handed work.
+
+**Capability is identity-dependent, and that is the point.** On the measured Linux node the
+same binary and config report the PIL engine as `PASS` for the install owner and `SKIP` for
+the service account, because the ComfyUI venv is not visible to the latter. Run the gate as
+the identity the service runs as — `sudo -u <svc>` / the scheduled task's principal — or it
+answers a question nobody asked. Relative script bindings resolve against the EXECUTABLE's
+directory, so run the INSTALLED binary, not a copy in /tmp.
+
 ## What a node advertises about its VRAM
 
 `/fleet/health` publishes four VRAM numbers, and only one of them is a safe divisor
