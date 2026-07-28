@@ -1,0 +1,16 @@
+# Line endings are not cosmetic for everything in this repo.
+#
+# A shell script checked out with CRLF fails at exec with "env: 'bash\r': No such
+# file or directory" — a message that names neither the script nor the real cause.
+# This repo is developed on Windows and deployed to Linux nodes, so that path is
+# the normal one, not an edge case.
+*.sh            text eol=lf
+*.bash          text eol=lf
+
+# Rendered onto Linux nodes and read by services there.
+setup/templates/*.yaml  text eol=lf
+
+# Generated files: keeping them LF means `go generate` produces no diff on a
+# Windows checkout, so a no-op regeneration cannot look like a change.
+docs/tiers/**   text eol=lf
+config.example.json text eol=lf

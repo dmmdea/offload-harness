@@ -22,6 +22,32 @@ import (
 //go:embed setup/templates/llama-swap.*.yaml
 var servingTemplates embed.FS
 
+// The tier table is embedded for the same reason as the templates: an install
+// begins by fetching ONE binary onto a machine with no checkout. Reading it from
+// a --root path is the development case, not the install case — and when the
+// lookup silently failed, install.sh produced a config with no media bindings at
+// all and said nothing, which is the failure this whole workstream exists to end.
+//
+//go:embed setup/templates/profiles.json
+var embeddedProfiles []byte
+
+// profilesJSON returns the tier table: the checkout's copy when --root names one
+// that has it, else the embedded copy. A --root that was given explicitly and does
+// NOT have it is an error, never a silent fallback.
+func profilesJSON(root string) ([]byte, error) {
+	if root == "" {
+		return embeddedProfiles, nil
+	}
+	b, err := os.ReadFile(filepath.Join(root, "setup", "templates", "profiles.json"))
+	if err != nil {
+		if os.IsNotExist(err) && root == "." {
+			return embeddedProfiles, nil // default root, no checkout: use the built-in table
+		}
+		return nil, fmt.Errorf("reading the tier table from --root %q: %w", root, err)
+	}
+	return b, nil
+}
+
 // servingProfile is the slice of a profiles.json entry that decides how a tier
 // SERVES. (The media half lives in internal/tierseed.)
 type servingProfile struct {
@@ -93,7 +119,7 @@ func runInstallRender(args []string) error {
 		id = hwdetect.Classify(hwdetect.Detect()).Profile
 	}
 
-	raw, err := os.ReadFile(filepath.Join(*root, "setup", "templates", "profiles.json"))
+	raw, err := profilesJSON(*root)
 	if err != nil {
 		return err
 	}

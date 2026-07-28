@@ -71,7 +71,11 @@ func runInstallPlan(args []string) error {
 	}
 
 	var seed map[string]any
-	profiles, err := tierseed.Load(*root)
+	rawProfiles, err := profilesJSON(*root)
+	if err != nil {
+		return err
+	}
+	profiles, err := tierseed.Parse(rawProfiles)
 	if err != nil {
 		return err
 	}

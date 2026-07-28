@@ -4,6 +4,32 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.34.0] - 2026-07-28
+
+### Added — a supported Linux install path (W3, final slice)
+- **`setup/install.sh`** — thin by design: `install detect` picks the tier, `install volumes` the
+  disk, `install seed` the media bindings, `install render` the serving config, and `acceptance`
+  gates the result **as the service identity**. Every decision lives in the binary; the script only
+  fetches, places and registers. `--dry-run` prints all of it and changes nothing.
+- **The tier table is now EMBEDDED** alongside the serving templates. An install starts by fetching
+  one binary onto a machine with no checkout, so a repo-relative `profiles.json` is the development
+  case. This was found by dry-running: the lookup failed silently and the script wrote a config with
+  **no media bindings at all**, saying nothing. A seed failure is now fatal.
+
+### Fixed
+- **Tiers that DROP the 26B no longer route escalation at it.** `ampere-6` and `amd-gcn` set
+  `include_26b: false`, but their seeds left `escalation_model`/`reasoning_model` at the built-in
+  `gemma4-26b-a4b` default — so a fresh install escalated to a model the node does not serve, and
+  every escalation failed. The measured Linux node only avoided this because a human noticed once and
+  cleared it by hand; that knowledge now lives in the tier. Caught by running the installer end to
+  end: the acceptance gate reported `2 alias(es) not served`, and reports them live after the fix.
+- **`.gitattributes` pins `*.sh`, the serving templates and generated docs to LF.** A shell script
+  checked out with CRLF fails at exec with `env: 'bash': No such file or directory`, naming
+  neither the script nor the cause. This repo is developed on Windows and deployed to Linux, so that
+  is the normal path, not an edge case — hit twice while testing this slice.
+- `install.sh` warns loudly when no `render/` tree sits beside the binary, instead of leaving the
+  acceptance gate to explain why every media route is BOUND-BUT-MISSING.
+
 ## [0.33.0] - 2026-07-28
 
 ### Added — `local-offload acceptance`, the gate a node passes before it is handed work (W5)
