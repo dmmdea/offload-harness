@@ -139,6 +139,7 @@ offload-harness fleet-measure            # prime the fleet footprint store (one 
 offload-harness ledger [--since DAYS]    # token-savings report
 offload-harness doctor                   # endpoint health, model aliases, derived media routes
 offload-harness report [--out FILE]      # read-only capability report (tier, serving, media routes) — Markdown, safe to send
+offload-harness acceptance               # the gate: exercise every bound capability AS THIS IDENTITY (non-zero = do not hand it work)
                                          #   your tier is documented in docs/tiers/ — see docs/tiers/README.md
 offload-harness install detect           # what is this machine, and which hardware tier?
 offload-harness install render           # render this tier's llama-swap serving config (Linux included)
