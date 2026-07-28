@@ -12,7 +12,7 @@ a Windows class.
 
 | tier | backend | ctx | KV | resident tier | 26B | media seat | report |
 |---|---|---|---|---|---|---|---|
-| [amd-gcn](amd-gcn.md) | vulkan | 8192 | f16 | gemma4-e2b | dropped | — | — |
+| [amd-gcn](amd-gcn.md) | vulkan | 8192 | f16 | gemma4-e2b | dropped | yes | — |
 | [amd-rdna3](amd-rdna3.md) | vulkan | 16384 | f16 | offload-e4b | `cpu_moe` | `sdcpp` (z-image-turbo) | — |
 | [amd-rdna3-dgpu](amd-rdna3-dgpu.md) | vulkan | 32768 | q8_0 | gemma4-26b-a4b | `gpu` | `sdcpp` (z-image-turbo) | — |
 | [ampere-16](ampere-16.md) | cuda | 32768 | q8_0 | gemma4-26b-a4b | `gpu` | comfyui (hidream-o1) | — |

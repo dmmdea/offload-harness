@@ -16,10 +16,14 @@
 
 ## Media
 
-**This tier ships no media configuration.** It serves text only until an operator binds
-the media routes by hand, so `generate_image`, `generate_video`, `generate_audio` and
-`run_graph` will report `NOT CONFIGURED` — or `BOUND-BUT-MISSING` where a shipped default
-script path does not exist on the machine. Run `local-offload doctor` to see which.
+The installer seeds this tier's media bindings (`config_seed`):
+
+| key | value |
+|---|---|
+| `escalation_model` | `` |
+| `reasoning_model` | `` |
+
+`__OFFLOAD_HOME__` is replaced with the install root at render time.
 
 ## Operator notes
 

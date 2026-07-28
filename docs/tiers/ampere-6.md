@@ -20,11 +20,13 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
 |---|---|
+| `escalation_model` | `` |
 | `imagegen_cfg` | `1` |
 | `imagegen_engine` | `sdcpp` |
 | `imagegen_family` | `sdxl-turbo` |
 | `imagegen_steps` | `4` |
 | `imagegen_timeout_sec` | `900` |
+| `reasoning_model` | `` |
 | `sdcpp_bin` | `__OFFLOAD_HOME__/sdcpp/sd-cli__EXE__` |
 | `sdcpp_model` | `__OFFLOAD_HOME__/models/sdxl-turbo/stable-diffusion-xl-1.0-turbo-Q4_0.gguf` |
 | `sdcpp_model_kind` | `checkpoint` |
