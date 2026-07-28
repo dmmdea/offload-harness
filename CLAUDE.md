@@ -95,11 +95,15 @@ prompt/exemplars; can only narrow), `-allow-run` (the allowlisted direct-exec `r
    13 profiles (`f16` only on blackwell-48/72, both AMD, and cpu; K and V always symmetric, and
    `q8_0` V requires flash-attn on), and `--flash-attn` is on for 11 profiles, off for `amd-gcn`,
    and omitted entirely by the cpu template. The `embeddinggemma` entry bypasses the shared flag
-   macro altogether. **Media seats** (vision / STT) are NOT baked into the templates: a tier
-   declares them in `media_seats` and `internal/servingtmpl` renders each into the models map and
-   into the group its residency ROLE maps to (`# offload-seats:` in the template maps role→group,
-   because group names are per-template). The same declaration writes `vision_model`/`stt_model`,
-   so a binding can never name a seat that was not rendered. Detail: `docs/systems/setup-installer.md`.
+   macro altogether. **Residency is declared with `matrix:`, never legacy `groups:`** (ADR 0020):
+   sets are the valid CONCURRENT COMBINATIONS and the memory stack appears in every set, so no
+   request can be satisfied by evicting it — `groups:`+`persistent:true` was measured failing to
+   guarantee that. A var key must be alphanumeric and 1-8 chars, and a set may name only var ids.
+   **Media seats** (vision / STT) are NOT baked into the templates: a tier declares them in
+   `media_seats` and `internal/servingtmpl` renders each into the models map, a matrix var, and
+   the set its residency ROLE marks (`__SEATS_SWAPPABLE__` joins with `|`, `__SEATS_RESIDENT__`
+   with `&`). The same declaration writes `vision_model`/`stt_model`, so a binding can never name
+   a seat that was not rendered. Detail: `docs/systems/setup-installer.md`.
 2. **Defer, never crash.** A `{"deferred":true,...}` result is a *valid* success signal (low
    confidence / over-long / all tiers failed), not an error. Do not "fix" defers by adding a cloud
    fallback — the harness holds no cloud credentials by design.
