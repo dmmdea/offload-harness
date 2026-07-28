@@ -4,6 +4,27 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.33.0] - 2026-07-28
+
+### Added — `local-offload acceptance`, the gate a node passes before it is handed work (W5)
+- Both 2026-07-27 fleet failures **passed `doctor` cleanly** while every dispatched job died, because
+  doctor stats configured files. A Windows node's venv `python.exe` existed and was readable but is a
+  **uv trampoline** re-execing a base interpreter in another account's roaming profile; a Linux
+  node's GPU lease directory existed and was readable but was owned by a different user. Neither is
+  detectable by stat — only by ATTEMPTING the thing as the running identity.
+- So every check **exercises** the capability: it writes a probe file into the lease directory and
+  removes it, and it EXECUTES each bound interpreter (`node`, `ffmpeg`, the PIL python, `sd-cli`).
+  It also requires that no derived media route is `BOUND-BUT-MISSING` and that every configured
+  model alias is in the live roster. Unbound capabilities `SKIP` and never make a node look unready.
+  Non-zero exit means the node must not be handed work.
+- **The report leads with the identity**, because in both failures the binary, config and files were
+  all correct and only the account was wrong.
+- **Capability is identity-dependent, and the gate makes that visible.** Verified on the measured
+  Linux node: run as the install owner it reports the PIL engine `PASS`; run as the service account
+  (`sudo -u fleet`) the same binary and config report `SKIP`, because that user cannot see the
+  ComfyUI venv. Both identities are otherwise READY — which also independently confirms the lease
+  ownership fix applied on that node.
+
 ## [0.32.0] - 2026-07-28
 
 ### Added — a node advertises what it can actually deliver (`vram_reclaimable_gb`)
