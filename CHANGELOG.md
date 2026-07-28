@@ -4,6 +4,43 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.36.0] - 2026-07-28
+
+### Changed — residency is declared with `matrix:`, not legacy `groups:` (all six templates)
+- **The semantics did not hold.** On the workstation node, under `groups:`, an
+  `exclusive: true` group evicted a `persistent: true` group anyway — verified live on
+  2026-07-26. `bge-reranker-v2-m3` could not start, a rerank returned HTTP 000 after 90 s, and
+  the memory stack **silently fell back to dense-only ordering** while its admission thresholds
+  stayed calibrated to the reranker's logits. That node was hand-migrated the same day; the repo
+  templates were not, so every tier still rendered the topology that had just been disproven.
+  llama-swap also replaced groups with matrix upstream in v202.
+- **Sets are the valid CONCURRENT COMBINATIONS, and residents appear in every set** — so there
+  is no combination in which the memory stack is absent, and no request can be satisfied by
+  evicting it. `evict_costs` is now a second line of defence rather than the first.
+- **Three templates were strictly worse than the node that broke.** `win-cuda`, `win-vulkan` and
+  `win-cpu` declared `offload-family` as `swap: true` + **`exclusive: true`** with
+  `embeddinggemma` in **no group at all** — an exclusive group unloads everything outside
+  itself, so loading any chat model evicted the embedder. Fixed.
+- **`win-cuda-resident` declared no residency whatsoever.** The ALL-RESIDENT tiers
+  (`blackwell-32/48/72`) never stated that they are all-resident; it was left to llama-swap's
+  default for ungrouped models. Now declared explicitly.
+- **Constraints verified against the real binary, none of them in the upstream README:** a
+  matrix must define at least one var; a var key must be **alphanumeric and 1-8 characters**
+  (`embeddinggemma` is rejected outright); and a set expression may reference **only var ids**,
+  never a model id. A seat's var key is therefore derived from its KIND (`vis`, `stt`) — stable
+  and unique because a tier may declare at most one seat per kind.
+- **26B and seat membership are tokens, not expression edits** (`__M26_ALT__` / `__M26_AND__`,
+  `__SEATS_SWAPPABLE__` / `__SEATS_RESIDENT__`): a swappable member joins as an ALTERNATIVE
+  (`|`), a resident one as a CO-RESIDENT (`&`), and only the template knows which it means.
+- **`TestNoTemplateStillDeclaresLegacyGroups`** fails CI if a template regresses to `groups:`
+  or ships no `matrix:`.
+- **Nothing changes on a running node.** These render at INSTALL time; the live configs on both
+  active nodes are hand-maintained and the repo never writes their paths. ADR 0020 records this,
+  including the one way it could bite (rendering a template over a hand-tuned live config).
+- Validated before merge on real binaries: all five Windows templates on **v242**, and the Linux
+  template on **v208** — the oldest in the fleet, chosen as the floor test — which served the
+  full roster including both media seats.
+
 ## [0.35.0] - 2026-07-28
 
 ### Fixed — a phantom binding on every node in the fleet (the defect W4 slice 2 uncovered)

@@ -55,8 +55,27 @@ models:
       --embedding --pooling mean --ctx-size 2048 --parallel 4 --port ${PORT} --host 127.0.0.1
     ttl: 600
 
-groups:
-  offload-family:
-    swap: true
-    exclusive: true
-    members: [offload-e4b, gemma4-e2b, gemma4-26b-a4b]
+# RESIDENCY IS DECLARED WITH `matrix:`, NOT `groups:` (llama-swap >= v202; a config
+# uses one or the other, never both). This replaces a topology that was measurably
+# wrong: `offload-family` was `swap: true` + **`exclusive: true`** while
+# `embeddinggemma` belonged to NO group, and an exclusive group unloads everything
+# outside itself — so loading any chat model evicted the embedder, and the next
+# embedding call paid a full reload.
+#
+# Matrix states the valid CONCURRENT COMBINATIONS instead. `emb` is in every set, so
+# the solver may never evict it to satisfy anything else; the chat tiers stay mutually
+# exclusive, which is all `offload-family` was actually trying to say.
+#
+# Verified against the real binary: `vars` is mandatory, a var key must be alphanumeric
+# and 1-8 characters, and a set expression may reference ONLY var ids.
+matrix:
+  vars:
+    emb: embeddinggemma
+    e4b: offload-e4b
+    e2b: gemma4-e2b
+    m26: gemma4-26b-a4b
+  evict_costs:
+    emb: 1000
+  sets:
+    residents: "emb"
+    interactive: "+residents & (e4b | e2b__M26_ALT__)"

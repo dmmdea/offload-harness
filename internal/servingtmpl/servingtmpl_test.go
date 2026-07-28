@@ -55,10 +55,11 @@ func TestUnresolvedTokenIsRefused(t *testing.T) {
 	}
 }
 
-// TestDroppingThe26BRemovesItsGroupMembershipToo: llama-swap REJECTS a config whose
-// group names a model that does not exist, so removing the block without the member
-// bricks the service on a tier that simply does not serve the 26B.
-func TestDroppingThe26BRemovesItsGroupMembershipToo(t *testing.T) {
+// TestDroppingThe26BRemovesItsVarAndSetMembershipToo: llama-swap REJECTS a config
+// whose set names an unknown var, and a var naming a model that does not exist is the
+// same dangling reference one level down. Removing the block without both bricks the
+// service on a tier that simply does not serve the 26B.
+func TestDroppingThe26BRemovesItsVarAndSetMembershipToo(t *testing.T) {
 	p := params()
 	p.Include26B = false
 	p.MoE26B = "" // a dropped tier names no placement
@@ -75,28 +76,66 @@ func TestDroppingThe26BRemovesItsGroupMembershipToo(t *testing.T) {
 			t.Errorf("dropping the 26B removed %q as well", want)
 		}
 	}
-	if !strings.Contains(got, "members: [offload-e4b, gemma4-e2b]") {
-		t.Errorf("heavy group members not rewritten cleanly:\n%s", got)
+	if !strings.Contains(got, `interactive: "+residents & (e4b | e2b)"`) {
+		t.Errorf("set expression not rewritten cleanly after dropping the 26B:\n%s", got)
+	}
+	if strings.Contains(got, "m26") {
+		t.Errorf("the 26B's matrix var survived its removal:\n%s", got)
 	}
 }
 
-// TestHeavyGroupIsNeverExclusive encodes a MEASURED lesson as a test. On the 6 GB
-// node, exclusive:true on a swapping tier meant the loaded seat evicted everything
-// and nothing evicted it — every chat request returned 502 for the full 5-minute TTL
-// after any render. The support tier must also stay swap:false so the embedder and
-// reranker remain co-resident; when they swapped, one RAG query paid three model loads.
-func TestHeavyGroupIsNeverExclusive(t *testing.T) {
+// TestTheMemoryStackIsInEverySet encodes a MEASURED lesson as a test, now in matrix
+// terms. Under `groups:` this was "support must stay swap:false" — and that guarantee
+// turned out to be worth less than it read: on the workstation node an exclusive group
+// evicted a persistent:true group anyway, the reranker could not start, and the memory
+// stack silently degraded to dense-only ordering. A matrix set IS a valid concurrent
+// combination, so a resident that appears in EVERY set can never be evicted to satisfy
+// one — the guarantee is structural rather than advisory.
+func TestTheMemoryStackIsInEverySet(t *testing.T) {
 	got, err := Render(linuxCUDA(t), params())
 	if err != nil {
 		t.Fatal(err)
 	}
-	heavy := section(got, "  heavy:")
-	if !strings.Contains(heavy, "swap: true") || !strings.Contains(heavy, "exclusive: false") {
-		t.Errorf("heavy group must be swap:true + exclusive:false, got:\n%s", heavy)
+	if strings.Contains(got, "\ngroups:") {
+		t.Error("legacy groups: block resurfaced — a config may use matrix OR groups, never both")
 	}
-	support := section(got, "  support:")
-	if !strings.Contains(support, "swap: false") {
-		t.Errorf("support group must be swap:false so the small models stay resident, got:\n%s", support)
+	for _, want := range []string{
+		`residents: "emb & rer"`,       // the memory stack IS the resident set
+		`interactive: "+residents & (`, // and every other set includes it
+		"emb: 1000",                    // maximally expensive to stop
+		"rer: 1000",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rendered matrix missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestNoTemplateStillDeclaresLegacyGroups: the migration is only real if every
+// template moved. One left behind would keep the measured eviction bug alive on
+// whichever tier renders it.
+func TestNoTemplateStillDeclaresLegacyGroups(t *testing.T) {
+	dir := filepath.Join("..", "..", "setup", "templates")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "llama-swap.") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(b)
+		if strings.Contains(s, "\ngroups:") {
+			t.Errorf("%s still declares legacy `groups:`", e.Name())
+		}
+		if !strings.Contains(s, "\nmatrix:") {
+			t.Errorf("%s declares no `matrix:` — its residency is left to llama-swap's default "+
+				"rather than stated, which is exactly what the all-resident tiers got wrong", e.Name())
+		}
 	}
 }
 
