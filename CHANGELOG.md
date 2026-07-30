@@ -4,6 +4,39 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.39.0] - 2026-07-28
+
+### Fixed — both RAM gates were inert on Linux, and one had never worked there at all
+`ram_tier` gates two things: the 26B placement (`--cpu-moe` puts EVERY expert in RAM, so
+it is dropped without a real RAM path) and the RAM-gated media seed
+(`config_seed_ram_mid_high`). detect.ps1 has always emitted a ram tier; the Go side
+reported raw `ram_gb` only, so `install.sh` had nothing to pass and **neither gate ran**:
+- a Linux install of `ampere-8` / `blackwell-8` / `amd-rdna3` / `cpu` served the 26B on a
+  box with no RAM path for it;
+- and `install seed` never received a ram tier either, so the mid/high-only image seed had
+  **never applied on Linux** — a capability the tier promises and the OS silently withheld.
+
+- **`hwdetect.RAMTier`** ports detect.ps1's `Get-RamTier` thresholds (>=120 high, >=56 mid,
+  >=28 low, else min). `TestRAMTierMatchesTheInstallerTable` asserts the SAME values
+  detect.ps1's own self-test does, including the boundaries — 56 GB is what unlocks the
+  26B and 55 must not.
+- **`Classify` stamps `ram_tier` in one place**, not per return path: an empty value means
+  "do not gate", so a verdict that forgot it would disable both gates without failing.
+  `TestClassifyAlwaysStampsARAMTier` covers every profile branch including zero facts.
+- **`install detect --json` carries `ram_tier`** on the verdict, and **`install.sh` passes
+  it to both `install seed` and `install render`** — and **dies** if detect returns none
+  rather than installing with the gates off.
+- Verified on the real 6 GB Linux node: `ampere-6, ram_tier=low, 31 GB`, installer dry-run
+  clean. Verified on the Linux path for a gated tier: `ampere-8 --ram-tier low` drops the
+  26B and withholds the image seed; `mid` applies both.
+
+### Added — the installer's own test suites are in CI
+`render.tests.ps1` and `detect.tests.ps1` drifted silently for two releases (0.36.0 moved
+the templates to `matrix:`; three assertions kept asserting `groups:`) because nothing ran
+them. A `windows-latest` job now runs both, and the ubuntu job gained the ~170 `node --test`
+render-runner assertions that were never in CI either. Both suites are synthetic — no
+hardware detection, no downloads — so a runner is a valid host.
+
 ## [0.38.0] - 2026-07-28
 
 ### Fixed — a fresh Windows install rendered a config llama-swap REFUSES to load
