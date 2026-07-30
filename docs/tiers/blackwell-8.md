@@ -16,6 +16,18 @@
 
 ## Media
 
+This tier serves these media **seats** — models in its own llama-swap config, rendered
+at install time. Each seat also produces the harness config binding that routes to it, so a
+binding can never name a seat that was not rendered:
+
+| seat | kind | binds | model | residency |
+|---|---|---|---|---|
+| `qwen3vl-4b` | vision | `vision_model` | `Qwen3VL-4B-Instruct-Q4_K_M.gguf` | swappable |
+| `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | swappable |
+
+A seat still needs its weights on the box — model downloads stay out-of-band, as with
+every seed.
+
 This tier's media bindings are **RAM-gated** (`config_seed_ram_mid_high`): the installer applies
 them only when the detected `ram_tier` is `mid` or `high`, so the same tier on a low-RAM box
 honestly serves text only.
@@ -35,7 +47,7 @@ media binding for this tier.
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Configs #8/#9 (5060 8GB Blackwell; +64GB adds 26B cpu-moe). E4B resident full-GPU. REQUIRES the Blackwell CUDA-12.8 sm_120 build (Task H4). 26B cpu-moe only when ram_tier mid/high; else dropped. J4: config_seed_ram_mid_high auto-binds the O1 bf16 IMAGE seat on mid/high-RAM boxes (verified on the ampere-8 reference box; image only — no video/music on 8GB by decision 2026-07-23). PROJECTED.
+> Configs #8/#9 (5060 8GB Blackwell; +64GB adds 26B cpu-moe). E4B resident full-GPU. REQUIRES the Blackwell CUDA-12.8 sm_120 build (Task H4). 26B cpu-moe only when ram_tier mid/high; else dropped. J4: config_seed_ram_mid_high auto-binds the O1 bf16 IMAGE seat on mid/high-RAM boxes (verified on the ampere-8 reference box; image only — no video/music on 8GB by decision 2026-07-23). PROJECTED. J-media 2026-07-28: media_seats = ampere-8's PROVEN CUDA seats verbatim (same 8 GB/E4B/cpu-moe class); tier gpu_env pins the device on both. PROJECTED here (the reference is ampere-8 on the Aorus, not this exact card).
 
 ## Capability report
 

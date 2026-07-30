@@ -16,6 +16,18 @@
 
 ## Media
 
+This tier serves these media **seats** — models in its own llama-swap config, rendered
+at install time. Each seat also produces the harness config binding that routes to it, so a
+binding can never name a seat that was not rendered:
+
+| seat | kind | binds | model | residency |
+|---|---|---|---|---|
+| `gemma4-e4b-vision` | vision | `vision_model` | `gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf` | swappable |
+| `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | swappable |
+
+A seat still needs its weights on the box — model downloads stay out-of-band, as with
+every seed.
+
 The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
@@ -30,7 +42,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Config #12 (Vega 7/GCN + 32GB, Vulkan). Weakest path: E2B, 8K f16, flash-attn OFF (older Vulkan FA unreliable), 26B dropped. PROJECTED.
+> Config #12 (Vega 7/GCN + 32GB, Vulkan). Weakest path: E2B, 8K f16, flash-attn OFF (older Vulkan FA unreliable), 26B dropped. PROJECTED. J-media 2026-07-28: STT via the whisper.cpp Vulkan build (solid). Vision reuses E4B + mmproj but keeps the CLIP encoder on CPU (--no-mmproj-offload) because mmproj on the Vulkan backend is degraded (llama.cpp #20081); the LLM still decodes on the iGPU. flash-attn off (tier). Both pin GGML_VK_VISIBLE_DEVICES=0. PROJECTED — no GCN box measured; needs a whisper.cpp Vulkan build.
 
 ## Capability report
 
