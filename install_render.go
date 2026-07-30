@@ -291,7 +291,7 @@ func runInstallRender(args []string) error {
 		LlamaBin: *llamaBin, ModelsDir: *modelsDir, Listen: *listen,
 		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
 		MoE26B: moe, Threads: n, Include26B: include26B,
-		Seats: p.MediaSeats, Home: *home, GOOS: target, GPUEnv: p.GPUEnv,
+		Seats: p.MediaSeats, Home: *home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
 	})
 	if err != nil {
 		return fmt.Errorf("tier %s: %w", id, err)
