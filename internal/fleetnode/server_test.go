@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -497,6 +498,92 @@ func TestRunGraphCleanupRunsAfterJobFinishes(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// TestMediaServesExistingFile confirms the happy path: a file seeded directly
+// in the config's MediaDir (the same dir GenerateSdcpp's `out` argument
+// targets — see pipeline.go's runImageGen) comes back 200 with its bytes and
+// an image/png Content-Type derived from the extension.
+func TestMediaServesExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	want := []byte("\x89PNG\r\n\x1a\nfake-png-bytes")
+	if err := os.WriteFile(filepath.Join(dir, "render-abc123.png"), want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := newTestServer(t, config.Config{MediaDir: dir}, &fakeRunner{}, nil)
+	rec := do(t, s, http.MethodGet, "/fleet/media/render-abc123.png", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
+		t.Fatalf("Content-Type = %q, want image/png", ct)
+	}
+	if rec.Body.String() != string(want) {
+		t.Fatalf("body = %q, want %q", rec.Body.String(), want)
+	}
+}
+
+// TestMediaMissingFile404 confirms a name that never existed answers the
+// file's JSON error shape, not a bare filesystem error.
+func TestMediaMissingFile404(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := newTestServer(t, config.Config{MediaDir: dir}, &fakeRunner{}, nil)
+	rec := do(t, s, http.MethodGet, "/fleet/media/never-rendered.png", "", nil)
+	wantErrorShape(t, rec, http.StatusNotFound, "not found")
+}
+
+// TestMediaRejectsBadFilenames is table-driven over every way a filename can
+// stop being a bare name: traversal via a %2F-hidden slash, a literal
+// forward slash, a literal backslash (the Windows separator — must be
+// rejected even though this route also serves a Linux fleet node), and an
+// empty segment. All four must die at validation with the SAME 400 JSON
+// shape as every other handler in this file, never reaching the filesystem.
+func TestMediaRejectsBadFilenames(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := newTestServer(t, config.Config{MediaDir: dir}, &fakeRunner{}, nil)
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"percent-encoded traversal", "/fleet/media/..%2Fescape"},
+		{"forward slash", "/fleet/media/a/b"},
+		{"backslash", "/fleet/media/a\\b"},
+		{"empty", "/fleet/media/"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := do(t, s, http.MethodGet, tc.path, "", nil)
+			wantErrorShape(t, rec, http.StatusBadRequest, "bare name")
+		})
+	}
+}
+
+// TestMediaRejectsSymlinkEscape mirrors internal/agent's established
+// symlink-escape regression (TestReadFileRejectsSymlinkEscape): a file inside
+// MediaDir that is actually a symlink resolving OUTSIDE MediaDir must not be
+// served, even though its bare name passes the traversal-string checks.
+// Portable: skips where the OS/user can't create symlinks (matches the
+// codebase's existing convention rather than requiring elevation).
+func TestMediaRejectsSymlinkEscape(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "media")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(parent, "secret.png")
+	if err := os.WriteFile(secret, []byte("TOPSECRET"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "escape.png")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skipf("symlink creation unsupported here: %v", err)
+	}
+	s, _ := newTestServer(t, config.Config{MediaDir: dir}, &fakeRunner{}, nil)
+	rec := do(t, s, http.MethodGet, "/fleet/media/escape.png", "", nil)
+	if rec.Code == http.StatusOK && strings.Contains(rec.Body.String(), "TOPSECRET") {
+		t.Fatalf("SECURITY: symlink escape not rejected, served %q", rec.Body.String())
+	}
+	wantErrorShape(t, rec, http.StatusNotFound, "not found")
 }
 
 func TestServeTimeoutTable(t *testing.T) {
