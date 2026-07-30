@@ -78,9 +78,20 @@ type Seat struct {
 	LibDir string `json:"lib_dir,omitempty"`
 	// CtxSize is the seat's own served window. Vision runs a much smaller window
 	// than the chat tier on the same card, so it is per-seat, not inherited.
-	CtxSize   int    `json:"ctx_size,omitempty"`
-	Residency string `json:"residency"`
-	TTL       int    `json:"ttl,omitempty"`
+	CtxSize int `json:"ctx_size,omitempty"`
+	// ImageMaxTokens caps the tokens one image may expand into (vision only). This is
+	// a VRAM bound, not a quality knob: on the measured 8 GB tier it is what keeps a
+	// large screenshot from pushing the seat past the card. 0 = leave it to the server.
+	ImageMaxTokens int `json:"image_max_tokens,omitempty"`
+	// NoContextShift disables llama-server's context shifting for this seat (vision
+	// only). Shifting a window that holds image embeddings is not meaningful.
+	NoContextShift bool `json:"no_context_shift,omitempty"`
+	// NoFlashAttn passes whisper.cpp's -nfa (stt only). Flash attention is default-ON
+	// in whisper.cpp since v1.8.0 and DEGRADES non-English and noisy audio
+	// (whisper.cpp #3020), so a tier serving Spanish or field recordings wants it off.
+	NoFlashAttn bool   `json:"no_flash_attn,omitempty"`
+	Residency   string `json:"residency"`
+	TTL         int    `json:"ttl,omitempty"`
 }
 
 // configKey is the harness config field a seat of this kind binds.
@@ -174,13 +185,20 @@ func Validate(seats []Seat, tier string) error {
 			}
 			// Fields the renderer would silently ignore. Accepting them would let a
 			// tier author believe a knob applies when it does nothing.
-			if s.MMProj != "" || s.CtxSize > 0 {
-				problems = append(problems, where+": mmproj/ctx_size are vision-only and are ignored on an stt seat")
+			if s.MMProj != "" || s.CtxSize > 0 || s.ImageMaxTokens > 0 || s.NoContextShift {
+				problems = append(problems, where+": mmproj/ctx_size/image_max_tokens/no_context_shift are "+
+					"vision-only and are ignored on an stt seat")
 			}
 		}
-		if s.Kind == KindVision && (s.Bin != "" || s.LibDir != "") {
-			problems = append(problems, where+": bin/lib_dir are for a seat that is NOT llama-server; a vision seat always "+
-				"runs the template's llama-server and would silently ignore them")
+		if s.Kind == KindVision {
+			if s.Bin != "" || s.LibDir != "" {
+				problems = append(problems, where+": bin/lib_dir are for a seat that is NOT llama-server; a vision seat "+
+					"always runs the template's llama-server and would silently ignore them")
+			}
+			if s.NoFlashAttn {
+				problems = append(problems, where+": no_flash_attn is a whisper.cpp flag (stt only); a vision seat's "+
+					"flash-attn comes from the tier's flash_attn")
+			}
 		}
 		for field, v := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel, "bin": s.Bin, "lib_dir": s.LibDir} {
 			if strings.Contains(strings.ToLower(v), ".exe") {
