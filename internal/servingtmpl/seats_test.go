@@ -1,6 +1,8 @@
 package servingtmpl
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -113,6 +115,102 @@ func TestWindowsSeatGetsNoLoaderPathAndAnExeSuffix(t *testing.T) {
 	}
 	if !strings.Contains(got, "whisper-server.exe") {
 		t.Errorf("__EXE__ did not resolve for the target platform:\n%s", got)
+	}
+}
+
+// TestVisionSeatCarriesItsVramBound: --image-max-tokens is not a quality knob, it is
+// what keeps one large screenshot from pushing the seat past an 8 GB card. If it
+// silently did not render, the tier would look configured and OOM in use.
+func TestVisionSeatCarriesItsVramBound(t *testing.T) {
+	s := visionSeat()
+	s.ImageMaxTokens = 1024
+	s.NoContextShift = true
+	got, err := Render(linuxCUDA(t), seatParams(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "--image-max-tokens 1024 --no-context-shift") {
+		t.Errorf("vision seat lost its VRAM bound:\n%s", got)
+	}
+	// And a tier that does not ask for one must not get the flag at all.
+	plain, err := Render(linuxCUDA(t), seatParams(visionSeat()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain, "--image-max-tokens") {
+		t.Error("an unset image_max_tokens must not render a flag")
+	}
+}
+
+// TestSttSeatCanTurnFlashAttentionOff: whisper.cpp has flash attention default-ON
+// since v1.8.0 and it DEGRADES non-English and noisy audio, so a tier serving Spanish
+// asks for -nfa. Rendering it as a no-op would quietly cost accuracy.
+func TestSttSeatCanTurnFlashAttentionOff(t *testing.T) {
+	s := sttSeat()
+	s.NoFlashAttn = true
+	got, err := Render(linuxCUDA(t), seatParams(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "-nfa") {
+		t.Errorf("stt seat did not render -nfa:\n%s", got)
+	}
+	if strings.Contains(mustRender(t, linuxCUDA(t), seatParams(sttSeat())), "-nfa") {
+		t.Error("an stt seat that did not ask for -nfa must not get it")
+	}
+}
+
+func mustRender(t *testing.T, tmpl string, p Params) string {
+	t.Helper()
+	got, err := Render(tmpl, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// TestAnAllResidentTemplateRefusesASwappableSeat: those templates exist because the
+// tier's premise is that nothing swaps. Quietly reshaping a swappable seat into a
+// resident one would give the operator a topology they never asked for on the tier
+// where residency is the whole point.
+func TestAnAllResidentTemplateRefusesASwappableSeat(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "setup", "templates", "llama-swap.win-cuda-resident.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := seatParams(visionSeat()) // swappable by default
+	p.GOOS = "windows"
+	_, err = Render(string(b), p)
+	if err == nil || !strings.Contains(err.Error(), "does not place") {
+		t.Fatalf("an all-resident template must refuse a swappable seat by name, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "resident") {
+		t.Errorf("the refusal must name the role it DOES place, got: %v", err)
+	}
+}
+
+// TestEveryTemplateCanPlaceSeats is the first-class invariant made checkable: a tier
+// is a HARDWARE class, so a seat it declares must render on every OS that tier can be
+// installed on. Until this held, `install.ps1` refused every seat-declaring tier and
+// no further tier could declare one.
+func TestEveryTemplateCanPlaceSeats(t *testing.T) {
+	dir := filepath.Join("..", "..", "setup", "templates")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "llama-swap.") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !SupportsSeats(string(b)) {
+			t.Errorf("%s declares no `# offload-seats:` directive, so any tier rendering into it "+
+				"loses its media seats by accident of OS", e.Name())
+		}
 	}
 }
 

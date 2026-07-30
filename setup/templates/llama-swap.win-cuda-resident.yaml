@@ -51,6 +51,12 @@ models:
 #
 # Verified against the real binary: `vars` is mandatory, a var key must be alphanumeric
 # and 1-8 characters, and a set expression may reference ONLY var ids.
+# This template accepts tier-declared media seats, but ONLY the `resident` role. Its whole
+# premise is that nothing swaps, so a `swappable` seat would contradict the tier it is
+# rendering for — a tier declaring one is refused BY NAME rather than quietly reshaped.
+# The SEATS_RESIDENT marker below (wrapped in double underscores) says where a resident
+# seat joins. No `env=`: a Windows llama-server build is self-contained.
+# offload-seats: resident
 matrix:
   vars:
     emb: embeddinggemma
@@ -60,4 +66,4 @@ matrix:
   evict_costs:
     emb: 1000
   sets:
-    resident: "emb & e4b & e2b__M26_AND__"
+    resident: "emb & e4b & e2b__M26_AND____SEATS_RESIDENT__"

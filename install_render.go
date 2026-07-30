@@ -96,6 +96,42 @@ func templateFor(goos, backend string) (string, error) {
 	return "", fmt.Errorf("no serving template for %s/%s (have: %s)", osTag(goos), backend, strings.Join(have, ", "))
 }
 
+// warnMissingSeatModels names every declared seat weight that is not on disk.
+//
+// This exists because llama-swap's /v1/models roster is built from the CONFIG, not
+// from the filesystem: a seat whose .gguf was never downloaded still appears in the
+// roster, so `doctor`'s alias diff and `acceptance`'s alias check both pass and the
+// route fails only when someone actually calls it. Install time is the one moment
+// where the fix — download the file — is still cheap, so that is where it is said.
+//
+// A warning rather than an error: rendering the serving config before fetching
+// weights is a legitimate order of operations, and refusing would break it. It is
+// skipped when rendering for another machine, where a local miss means nothing.
+func warnMissingSeatModels(seats []mediaseat.Seat, modelsDir, target string) {
+	if len(seats) == 0 || modelsDir == "" || target != runtime.GOOS {
+		return
+	}
+	var missing []string
+	for _, s := range seats {
+		for label, rel := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel} {
+			if rel == "" {
+				continue
+			}
+			full := filepath.Join(modelsDir, rel)
+			if _, err := os.Stat(full); err != nil {
+				missing = append(missing, fmt.Sprintf("  %s (%s %s): %s", s.Name, s.Kind, label, full))
+			}
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+	sort.Strings(missing)
+	fmt.Fprintf(os.Stderr, "WARNING: %d declared seat weight(s) are not on this machine. llama-swap lists a seat "+
+		"from the CONFIG, so the alias checks in `doctor` and `acceptance` will PASS and the route will fail only "+
+		"when called. Fetch these before relying on them:\n%s\n", len(missing), strings.Join(missing, "\n"))
+}
+
 // seatsPlaceable reports whether the serving template for this target can host
 // tier-declared media seats, so `install seed` can refuse exactly the pairs
 // `install render` refuses instead of writing a binding the node cannot honour.
@@ -181,6 +217,8 @@ func runInstallRender(args []string) error {
 	if err != nil {
 		return fmt.Errorf("tier %s: %w", id, err)
 	}
+
+	warnMissingSeatModels(p.MediaSeats, *modelsDir, target)
 
 	if *out == "" {
 		fmt.Print(rendered)
