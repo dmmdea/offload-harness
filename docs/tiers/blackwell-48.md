@@ -16,6 +16,18 @@
 
 ## Media
 
+This tier serves these media **seats** — models in its own llama-swap config, rendered
+at install time. Each seat also produces the harness config binding that routes to it, so a
+binding can never name a seat that was not rendered:
+
+| seat | kind | binds | model | residency |
+|---|---|---|---|---|
+| `qwen3-vl-8b` | vision | `vision_model` | `Qwen3VL-8B-Instruct-Q8_0.gguf` | resident |
+| `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | resident |
+
+A seat still needs its weights on the box — model downloads stay out-of-band, as with
+every seed.
+
 The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
@@ -39,7 +51,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Config #14 (RTX PRO 5000 48GB, Blackwell sm_120). ALL-RESIDENT + 128K ctx + FULL-PRECISION f16 KV (VRAM is abundant; quality lever per the 2026-07-16 spec). 26B model window: 256K design / 128K common serving cap; SWA-1024 keeps large-ctx KV modest. config_seed: fresh-install 720p video defaults. PROJECTED - H3 measures.
+> Config #14 (RTX PRO 5000 48GB, Blackwell sm_120). ALL-RESIDENT + 128K ctx + FULL-PRECISION f16 KV (VRAM is abundant; quality lever per the 2026-07-16 spec). 26B model window: 256K design / 128K common serving cap; SWA-1024 keeps large-ctx KV modest. config_seed: fresh-install 720p video defaults. PROJECTED - H3 measures. J-media 2026-07-28: RESIDENT seats (nothing swaps on this tier), and there is room for the full qwen3-vl-8b: 21 (roster) + 10 (Q8 + F16 mmproj) + 1.6 (whisper) = ~33GB of 48GB. PROJECTED. The 'ocr' alias rides on this shared VLM (one seat owns screenshots/GUI/document OCR); the harness routes via vision_model, not the alias, so it is a label rather than a separate model.
 
 ## Capability report
 
