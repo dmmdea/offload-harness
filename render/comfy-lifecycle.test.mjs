@@ -10,6 +10,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensureComfy, resolveComfyPy, resolveComfyDir } from "./comfy-lifecycle.mjs";
 
+// A bound ComfyUI dir, injected so the lifecycle tests exercise the SPAWN path on
+// every OS. Without it they inherited the platform default — "C:/ComfyUI" on Windows,
+// "" on Linux — so on Linux every one tripped the unbound-dir guard before reaching
+// the behaviour under test, and the whole file was silently Windows-only (caught when
+// the node suite entered CI). spawn is faked, so the dir is never used beyond the guard.
+const BOUND_DIR = "/fake/comfyui";
+
 test("already running => returns null (don't manage someone else's ComfyUI)", async () => {
   const child = await ensureComfy({
     comfyUp: async () => true,
@@ -25,6 +32,7 @@ test("down => spawns with zero-always-warm flags + default --reserve-vram 1.0", 
   const child = await ensureComfy({
     comfyUp: async () => (ups++ > 0), // first poll: down; then up
     spawn: (py, args) => { spawnedArgs = args; return fake; },
+    comfyDir: BOUND_DIR,
     pollMs: 1,
   });
   assert.equal(child, fake, "returns the spawned child so the caller can kill it");
@@ -42,6 +50,7 @@ test("--reserve-vram is per-workflow-overridable (invariant 5)", async () => {
     comfyUp: async () => (ups++ > 0),
     spawn: (py, args) => { spawnedArgs = args; return { kill() {} }; },
     reserveVram: "2.0",
+    comfyDir: BOUND_DIR,
     pollMs: 1,
   });
   assert.ok(child);
@@ -56,6 +65,7 @@ test("warm:true omits --cache-none but keeps the other flags (batch session)", a
     comfyUp: async () => (ups++ > 0),
     spawn: (py, args) => { spawnedArgs = args; return { kill() {} }; },
     warm: true,
+    comfyDir: BOUND_DIR,
     pollMs: 1,
   });
   assert.ok(child);
@@ -71,6 +81,7 @@ test("warm defaults to false (zero-always-warm unchanged)", async () => {
   await ensureComfy({
     comfyUp: async () => (ups++ > 0),
     spawn: (py, args) => { spawnedArgs = args; return { kill() {} }; },
+    comfyDir: BOUND_DIR,
     pollMs: 1,
   });
   assert.ok(spawnedArgs.includes("--cache-none"), "default launch still passes --cache-none");
@@ -82,6 +93,7 @@ test("never ready => kills the child and throws", async () => {
     ensureComfy({
       comfyUp: async () => false, // always down
       spawn: () => ({ kill() { killed++; } }),
+      comfyDir: BOUND_DIR,
       pollMs: 1,
       maxPolls: 3,
     }),
@@ -97,6 +109,7 @@ test("COMFY_EXTRA_ARGS appends verbatim launch flags (J4 seam); unset = byte-ide
     await ensureComfy({
       comfyUp: async () => spawnedArgs !== null, // down first, up after spawn
       spawn: (_py, args) => { spawnedArgs = args; return { kill() {} }; },
+      comfyDir: BOUND_DIR,
       pollMs: 1,
     });
   } finally {
@@ -108,6 +121,7 @@ test("COMFY_EXTRA_ARGS appends verbatim launch flags (J4 seam); unset = byte-ide
   await ensureComfy({
     comfyUp: async () => plainArgs !== null,
     spawn: (_py, args) => { plainArgs = args; return { kill() {} }; },
+    comfyDir: BOUND_DIR,
     pollMs: 1,
   });
   assert.equal(plainArgs.includes("--directml"), false);
