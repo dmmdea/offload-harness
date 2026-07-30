@@ -138,14 +138,22 @@ export async function quiesceLlamaSwap(ids, {
     } catch { return null; }
   };
 
+  // /running GATES every probe. On llama-swap v208 (live-found on <node-c>),
+  // `/upstream/<id>/slots` is `Any /upstream/*` -> proxyToUpstream: requesting it
+  // for a model that is NOT loaded swaps the model IN — the drain was loading ~3GB
+  // into VRAM immediately before the render it existed to protect. So:
+  //   - id not in /running  => nothing to drain, and NO probe is ever sent;
+  //   - /running unreadable => we are blind, and hands-off beats a probe that may
+  //     LOAD a model: every id is named unknown, no /upstream request fires.
   const busy = async (id, loadedSet) => {
+    if (!loadedSet) { unknown.add(id); return false; } // blind: never probe
+    if (!loadedSet.has(id)) return false;              // not loaded: nothing in flight
     try {
       const r = await fetchImpl(`${api}/upstream/${id}/slots`, { signal: withTimeout(requestTimeoutMs) });
       if (r.status === 404) {
-        // Not loaded => truly nothing to drain. Loaded but no /slots route => we are
+        // Loaded but no /slots route (whisper, any non-llama.cpp backend): we are
         // blind to it, and must say so instead of claiming a drain.
-        if (loadedSet && loadedSet.has(id)) { unknown.add(id); }
-        else if (!loadedSet) { unknown.add(id); } // could not check either
+        unknown.add(id);
         return false;
       }
       if (!r.ok) { unknown.add(id); return false; }
@@ -209,8 +217,27 @@ export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://
   }
   if (ids.length === 0) return;
 
+  // /running decides what actually holds VRAM. Unloading a model that is not
+  // loaded is not merely pointless: on llama-swap v208 the per-model unload
+  // route does not even exist, so each such request was a full requestTimeoutMs
+  // of dead wait per configured model, on every render. And if /running cannot
+  // be read, unloading blind is how a shared card gets a load-bearing tier torn
+  // down — hands off, loudly, like the /v1/models failure above.
+  let running;
   try {
-    const res = await quiesce(ids, { api, timeoutMs: drainTimeoutMs });
+    const r = await fetch(api + "/running", { signal: withTimeout(requestTimeoutMs) });
+    if (!r.ok) { log(`freeLlamaSwap: /running returned ${r.status}; NOT unloading (cannot see what is loaded)`); return; }
+    const j = await r.json();
+    running = new Set((j.running || []).map((m) => m.model).filter(Boolean));
+  } catch (e) {
+    log(`freeLlamaSwap: could not read /running (${e && e.message}); NOT unloading (cannot see what is loaded)`);
+    return;
+  }
+  const loaded = ids.filter((id) => running.has(id));
+  if (loaded.length === 0) return; // nothing of ours is holding VRAM
+
+  try {
+    const res = await quiesce(loaded, { api, timeoutMs: drainTimeoutMs });
     if (!res.drained) {
       // Loud, not silent: proceeding here may kill someone's in-flight request. The
       // alternative — blocking the render forever behind a stuck tier — is worse, so
@@ -221,9 +248,36 @@ export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://
   } catch (e) {
     log(`freeLlamaSwap: drain failed (${e && e.message}); proceeding to unload`);
   }
-  await Promise.all(ids.map((id) =>
-    fetch(api + "/api/models/unload/" + id, { method: "POST", signal: withTimeout(requestTimeoutMs) })
-      .catch((e) => log(`freeLlamaSwap: unload ${id} failed: ${e && e.message}`))));
+
+  // Per-model unload first (llama-swap >= v24x). Any failure falls back ONCE to
+  // v208's only unload route — GET /unload, which unloads EVERYTHING — and that
+  // fallback is gated on the memory stack not being resident: tearing down the
+  // always-on CPU tier to free VRAM it does not hold would trade a render for
+  // the memory stack (invariant 1).
+  const failures = [];
+  await Promise.all(loaded.map(async (id) => {
+    try {
+      const r = await fetch(api + "/api/models/unload/" + id, { method: "POST", signal: withTimeout(requestTimeoutMs) });
+      if (!r.ok) failures.push(id);
+    } catch (e) {
+      log(`freeLlamaSwap: unload ${id} failed: ${e && e.message}`);
+      failures.push(id);
+    }
+  }));
+  if (failures.length === 0) return;
+
+  const keepResident = [...running].filter((id) => keep.has(id));
+  if (keepResident.length > 0) {
+    log(`freeLlamaSwap: per-model unload unavailable for ${failures.join(",")} and the memory stack (${keepResident.join(",")}) is resident — cannot unload-all; the render runs against whatever VRAM remains`);
+    return;
+  }
+  try {
+    const r = await fetch(api + "/unload", { signal: withTimeout(requestTimeoutMs) });
+    if (r.ok) log(`freeLlamaSwap: per-model unload unavailable (${failures.join(",")}); GET /unload (unload-all, llama-swap v208 route) succeeded`);
+    else log(`freeLlamaSwap: unload-all fallback returned ${r.status}; the render runs against whatever VRAM remains`);
+  } catch (e) {
+    log(`freeLlamaSwap: unload-all fallback failed: ${e && e.message}`);
+  }
 }
 
 // freeComfy: tell ComfyUI to drop loaded models + free VRAM after a job (zero-warm).
