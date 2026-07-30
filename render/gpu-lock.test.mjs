@@ -181,6 +181,13 @@ test("freeLlamaSwap DRAINS BEFORE it unloads, and never unloads the memory stack
         { id: "gemma-4-e4b" }, { id: "embeddinggemma" }, { id: "bge-reranker-v2-m3" },
       ] }) };
     }
+    if (u.endsWith("/running")) {
+      // The GPU tier is loaded; the CPU memory stack is loaded too (it always is).
+      // Neither fact may leak an unload of the latter.
+      return { ok: true, status: 200, json: async () => ({ running: [
+        { model: "gemma-4-e4b" }, { model: "embeddinggemma" }, { model: "bge-reranker-v2-m3" },
+      ] }) };
+    }
     if (u.includes("/api/models/unload/")) {
       order.push("unload:" + u.split("/api/models/unload/")[1]);
       return { ok: true, status: 200, json: async () => ({}) };
@@ -216,4 +223,170 @@ test("freeLlamaSwap does NOT unload when it cannot list models (better a slow re
   } finally { globalThis.fetch = realFetch; }
   assert.equal(calls.length, 0, "nothing was unloaded");
   assert.ok(logged.some((m) => /NOT unloading/.test(m)), "and it said so, loudly");
+});
+
+// --- llama-swap v208 compatibility (live-found on <node-c>) ---------------
+// MEASURED on llama-swap v208 (commit e8d4384): /upstream/<id>/slots is a PROXY
+// route (`Any /upstream/*` -> proxyToUpstream) — requesting it for a model that
+// is not loaded SWAPS THE MODEL IN. The drain protocol therefore loaded ~3GB of
+// model into VRAM immediately before each render, and per-model
+// POST /api/models/unload/<id> does not exist there (v208's only unload is
+// GET /unload, all models), so nothing could ever be unloaded again. Renders
+// then failed allocation (unet 1882MB / clip 1285MB) whenever the stolen VRAM
+// had not idle-expired: fleet job success was TTL roulette.
+
+test("quiesce NEVER probes /upstream for a model /running does not list (v208: that probe swap-loads it)", async () => {
+  const urls = [];
+  const r = await quiesceLlamaSwap(["gemma4-e2b", "whisper-stt"], {
+    fetchImpl: async (url) => {
+      urls.push(String(url));
+      if (String(url).endsWith("/running")) {
+        return { ok: true, status: 200, json: async () => ({ running: [] }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    },
+    pollMs: 1, timeoutMs: 1_000, graceMs: 1,
+  });
+  assert.equal(r.drained, true, "nothing loaded => nothing to drain");
+  assert.ok(!urls.some((u) => u.includes("/upstream/")),
+    `an unloaded model must never be probed via /upstream (got: ${urls.join(", ")})`);
+});
+
+test("quiesce does not touch /upstream at all when /running is unreadable", async () => {
+  const urls = [];
+  const r = await quiesceLlamaSwap(["m"], {
+    fetchImpl: async (url) => {
+      urls.push(String(url));
+      if (String(url).endsWith("/running")) {
+        return { ok: false, status: 500, json: async () => ({}) };
+      }
+      return { ok: true, status: 200, json: async () => [{ id: 0, is_processing: false }] };
+    },
+    pollMs: 1, timeoutMs: 200, graceMs: 1,
+  });
+  assert.ok(!urls.some((u) => u.includes("/upstream/")),
+    "blind => hands off: probing /upstream may LOAD the model on v208");
+  assert.equal(r.drained, false, "an unobservable server is not a verified drain");
+  assert.deepEqual(r.unknown, ["m"], "the unobservable id is named");
+});
+
+test("freeLlamaSwap unloads ONLY models /running lists as loaded", async () => {
+  const unloads = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v1/models")) {
+      return { ok: true, status: 200, json: async () => ({ data: [
+        { id: "gemma4-e2b" }, { id: "whisper-stt" }, { id: "sdxl-turbo" },
+      ] }) };
+    }
+    if (u.endsWith("/running")) {
+      return { ok: true, status: 200, json: async () => ({ running: [{ model: "whisper-stt" }] }) };
+    }
+    if (u.includes("/api/models/unload/")) {
+      unloads.push(u.split("/api/models/unload/")[1]);
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  try {
+    await freeLlamaSwap("http://x", {
+      quiesce: async () => ({ drained: true, waitedMs: 0, unknown: [] }),
+    });
+  } finally { globalThis.fetch = realFetch; }
+  assert.deepEqual(unloads, ["whisper-stt"],
+    "unloading a model that is not loaded is 10s of timeout per id on v208, for nothing");
+});
+
+test("freeLlamaSwap falls back to GET /unload (v208 unload-all) when per-model unload is unavailable", async () => {
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u.endsWith("/v1/models")) {
+      return { ok: true, status: 200, json: async () => ({ data: [{ id: "whisper-stt" }] }) };
+    }
+    if (u.endsWith("/running")) {
+      return { ok: true, status: 200, json: async () => ({ running: [{ model: "whisper-stt" }] }) };
+    }
+    if (u.includes("/api/models/unload/")) {
+      calls.push("per-model");
+      return { ok: false, status: 404, json: async () => ({}) };
+    }
+    if (u.endsWith("/unload") && (!init || !init.method || init.method === "GET")) {
+      calls.push("unload-all");
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  try {
+    await freeLlamaSwap("http://x", {
+      quiesce: async () => ({ drained: true, waitedMs: 0, unknown: [] }),
+    });
+  } finally { globalThis.fetch = realFetch; }
+  assert.ok(calls.includes("per-model"), "the modern route is tried first");
+  assert.ok(calls.includes("unload-all"), "v208's GET /unload is the fallback");
+});
+
+test("freeLlamaSwap refuses the unload-all fallback while a memory-stack model is resident", async () => {
+  const calls = [];
+  const logged = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u.endsWith("/v1/models")) {
+      return { ok: true, status: 200, json: async () => ({ data: [
+        { id: "gemma4-e2b" }, { id: "embeddinggemma" },
+      ] }) };
+    }
+    if (u.endsWith("/running")) {
+      return { ok: true, status: 200, json: async () => ({ running: [
+        { model: "gemma4-e2b" }, { model: "embeddinggemma" },
+      ] }) };
+    }
+    if (u.includes("/api/models/unload/")) {
+      calls.push("per-model:" + u.split("/api/models/unload/")[1]);
+      return { ok: false, status: 404, json: async () => ({}) };
+    }
+    if (u.endsWith("/unload")) {
+      calls.push("unload-all");
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  try {
+    await freeLlamaSwap("http://x", {
+      quiesce: async () => ({ drained: true, waitedMs: 0, unknown: [] }),
+      log: (m) => logged.push(m),
+    });
+  } finally { globalThis.fetch = realFetch; }
+  assert.ok(!calls.includes("unload-all"),
+    "unload-all would tear down the memory stack (invariant 1) — must refuse");
+  assert.ok(logged.some((m) => /memory stack|cannot unload-all|per-model unload unavailable/i.test(m)),
+    "and the refusal is loud, naming why");
+});
+
+test("freeLlamaSwap refuses to unload anything when /running is unreadable", async () => {
+  const calls = [];
+  const logged = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v1/models")) {
+      return { ok: true, status: 200, json: async () => ({ data: [{ id: "gemma4-e2b" }] }) };
+    }
+    if (u.endsWith("/running")) {
+      return { ok: false, status: 500, json: async () => ({}) };
+    }
+    calls.push(u);
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  try {
+    await freeLlamaSwap("http://x", {
+      quiesce: async () => ({ drained: true, waitedMs: 0, unknown: [] }),
+      log: (m) => logged.push(m),
+    });
+  } finally { globalThis.fetch = realFetch; }
+  assert.equal(calls.length, 0, "blind => no unload, no drain, no fallback");
+  assert.ok(logged.some((m) => /NOT unloading/.test(m)), "and the refusal is loud");
 });
