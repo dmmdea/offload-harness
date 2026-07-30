@@ -18,6 +18,19 @@ func TestAValidSeatSetPasses(t *testing.T) {
 	}
 }
 
+// TestPerSeatKnobsAreAccepted: the device pin and the Vulkan mmproj mitigation are
+// valid on the kinds they apply to. gpu_env is any kind (a device pin); no_mmproj_offload
+// is vision-only (already refused on stt in TestValidateRejects).
+func TestPerSeatKnobsAreAccepted(t *testing.T) {
+	s := good()
+	s[0].NoMmprojOffload = true // vision: keep CLIP on CPU
+	s[0].GPUEnv = []string{"GGML_VK_VISIBLE_DEVICES=0"}
+	s[1].GPUEnv = []string{"CUDA_VISIBLE_DEVICES=1"} // stt: pin a card
+	if err := Validate(s, "tier"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestBindingsAreDerivedFromSeats: the point of the package. A tier that serves a
 // capability gets the binding; a tier that does not gets nothing, and the route
 // honestly defers instead of naming a seat that was never rendered.
@@ -62,6 +75,7 @@ func TestValidateRejects(t *testing.T) {
 		// who sets one believes it applies.
 		{"stt with image_max_tokens", func(s []Seat) []Seat { s[1].ImageMaxTokens = 512; return s }, "vision-only"},
 		{"stt with no_context_shift", func(s []Seat) []Seat { s[1].NoContextShift = true; return s }, "vision-only"},
+		{"stt with no_mmproj_offload", func(s []Seat) []Seat { s[1].NoMmprojOffload = true; return s }, "vision-only"},
 		{"vision with no_flash_attn", func(s []Seat) []Seat { s[0].NoFlashAttn = true; return s }, "whisper.cpp flag"},
 		{"two vision seats", func(s []Seat) []Seat {
 			s[1] = Seat{Kind: KindVision, Name: "other", Model: "m", MMProj: "p", CtxSize: 1, Residency: Resident}

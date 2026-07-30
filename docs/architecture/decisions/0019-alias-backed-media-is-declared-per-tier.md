@@ -84,3 +84,27 @@ that routes to it.**
   FLAGS are measured invariants and stay in the reviewed template; the tier declares membership.
 - **Leave `stt_model` and rely on doctor's alias diff.** The diff already reports it. The problem
   is that it reports it on every node, so the signal had been trained into noise.
+
+## Addendum (0.40.0) — per-seat device pinning, the Vulkan mmproj mitigation, CPU vision
+
+Seeding the last four tiers surfaced hardware that the original seat shape could not serve
+correctly, so the schema gained two per-seat fields and one backend rule — all still
+"measured invariants in code, per-tier values in the schema":
+
+- **`gpu_env` (per-seat)** — a device pin for a seat that must sit somewhere the tier's
+  other models do not. The `dual-gpu` template is resident-only with the 26B architect on
+  device 0 and the editor tier on device 1; its media seats pin `CUDA_VISIBLE_DEVICES=1`
+  so they share the editor card, never the architect's. Distinct from the tier-level
+  `gpu_env` (every model, uniform) added in 0.38.0.
+- **`no_mmproj_offload` (vision)** — mmproj on the Vulkan backend is degraded (llama.cpp
+  #20081), so `amd-gcn`'s vision seat keeps the CLIP encoder on CPU while the LLM decodes
+  on the iGPU. A no-op on CUDA; refused on an stt seat.
+- **Backend-aware vision** — on the `cpu` backend the vision seat omits `-ngl` and
+  `--flash-attn`, matching the cpu template's own chat models rather than emitting flags a
+  GPU-less build would only ignore.
+
+These four tiers are **PROJECTED** — no matching card is in the fleet. The guarantee is the
+same as every other projected tier param: the rendered config was verified to LOAD in real
+llama-swap (v242), and the seats reproduce a proven reference where one exists (blackwell-8
+is ampere-8's twin; cpu/amd-gcn reuse ampere-6's E4B+mmproj vision). Runtime quality on the
+actual hardware is the operator's / H3's to measure, recorded in each tier's notes.

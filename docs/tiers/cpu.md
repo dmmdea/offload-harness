@@ -16,17 +16,27 @@
 
 ## Media
 
-**This tier ships no media configuration.** It serves text only until an operator binds
-the media routes by hand, so `generate_image`, `generate_video`, `generate_audio` and
-`run_graph` will report `NOT CONFIGURED` — or `BOUND-BUT-MISSING` where a shipped default
-script path does not exist on the machine. Run `local-offload doctor` to see which.
+This tier serves these media **seats** — models in its own llama-swap config, rendered
+at install time. Each seat also produces the harness config binding that routes to it, so a
+binding can never name a seat that was not rendered:
+
+| seat | kind | binds | model | residency |
+|---|---|---|---|---|
+| `gemma4-e4b-vision` | vision | `vision_model` | `gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf` | swappable |
+| `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | swappable |
+
+A seat still needs its weights on the box — model downloads stay out-of-band, as with
+every seed.
+
+It ships no file-backed media seed, so `generate_image` / `generate_video` /
+`generate_audio` / `run_graph` report `NOT CONFIGURED` until an operator binds them.
 
 ## Operator notes
 
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> No usable GPU. E4B on CPU, 8K f16, flash-attn off (CPU backend has no -ngl/--flash-attn; the cpu template omits both). 26B kept when ram_tier is mid OR high (>= ~56GB); dropped on low/min (no RAM path). On CPU 'cpu_moe' is nominal - all layers already run on CPU. PROJECTED.
+> No usable GPU. E4B on CPU, 8K f16, flash-attn off (CPU backend has no -ngl/--flash-attn; the cpu template omits both). 26B kept when ram_tier is mid OR high (>= ~56GB); dropped on low/min (no RAM path). On CPU 'cpu_moe' is nominal - all layers already run on CPU. PROJECTED. J-media 2026-07-28: media_seats reuse the resident E4B + mmproj (no separate VLM download, ampere-6's approach) and CPU whisper (whisper.cpp is CPU-native). Vision has NO -ngl/--flash-attn (CPU build) and a hard 512 image cap — CPU VLM is correct but SLOW; STT is genuinely usable. Both swappable (RAM is the constraint). PROJECTED — no CPU box measured.
 
 ## Capability report
 
