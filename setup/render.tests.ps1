@@ -14,16 +14,22 @@ $work    = Join-Path ([System.IO.Path]::GetTempPath()) ("offload-render-test-" +
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
 # Rendering is DELEGATED to `local-offload install render` (ADR 0021). install.ps1 will
-# build a renderer itself if it cannot find one, but that would be a build PER CASE;
-# build it ONCE here and point every case at it via the override this test exists to use.
-$renderExe = Join-Path $work 'local-offload-render.exe'
-Push-Location (Split-Path -Parent $here)
-try {
-  $bo = & go build -o $renderExe . 2>&1
-  if ($LASTEXITCODE -ne 0) { throw "cannot build the renderer under test: $($bo -join ' ')" }
-} finally { Pop-Location }
-$env:OFFLOAD_HARNESS_EXE = $renderExe
-Write-Host "renderer under test: $renderExe"
+# build a renderer itself if it cannot find one, but that would be a build PER CASE, so
+# provide one ONCE. If the caller already set OFFLOAD_HARNESS_EXE (CI builds it as its
+# own step, so a build failure fails on the BUILD with go's error rather than inside a
+# PowerShell throw), use that; otherwise build here for local convenience.
+if ($env:OFFLOAD_HARNESS_EXE -and (Test-Path $env:OFFLOAD_HARNESS_EXE)) {
+  Write-Host "renderer under test: $($env:OFFLOAD_HARNESS_EXE) (provided)"
+} else {
+  $renderExe = Join-Path $work 'local-offload-render.exe'
+  Push-Location (Split-Path -Parent $here)
+  try {
+    $bo = & go build -o $renderExe . 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "cannot build the renderer under test: $($bo -join ' ')" }
+  } finally { Pop-Location }
+  $env:OFFLOAD_HARNESS_EXE = $renderExe
+  Write-Host "renderer under test: $renderExe (built)"
+}
 
 $fail = 0
 function Ok  { param([string]$m) Write-Host "PASS $m" }
