@@ -17,6 +17,8 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -86,6 +88,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /fleet/health", s.handleHealth)
 	mux.HandleFunc("POST /fleet/dispatch", s.handleDispatch)
 	mux.HandleFunc("GET /fleet/jobs/{id}", s.handleJob)
+	// {filename...} (not {filename}) is deliberate: it's a multi-segment
+	// wildcard, so a caller-supplied "/" or a %2F-hidden one still reaches the
+	// handler as PART OF filename instead of 404ing at the mux before our
+	// validation ever runs — every malformed name gets this file's one 400
+	// JSON shape, not the mux's bare-text 404.
+	mux.HandleFunc("GET /fleet/media/{filename...}", s.handleMedia)
 	return mux
 }
 
@@ -317,6 +325,33 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJobView(w, http.StatusOK, view)
+}
+
+// handleMedia serves ONE rendered artifact by bare filename out of the same
+// dir render jobs write into — config.Config.MediaDir, exactly the source
+// pipeline.go's runImageGen joins onto for GenerateSdcpp's `out` argument
+// (see `filepath.Join(p.cfg.MediaDir, "render-"+hash+".png")`). Read-only and
+// deliberately narrow: a single path segment inside the configured media
+// dir, so the fleet's unauthenticated surface gains a file reader, never a
+// browser. A name containing a separator or ".." dies at validation before
+// any filesystem call; what's left is resolved through symlinks and its
+// resolved path is checked for containment under the resolved media dir, so
+// a symlink planted inside MediaDir cannot serve a file from outside it.
+func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("filename")
+	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
+		writeError(w, http.StatusBadRequest, "filename must be a bare name")
+		return
+	}
+	mediaDir := s.opts.Cfg.MediaDir
+	path := filepath.Join(mediaDir, name)
+	resolved, err := filepath.EvalSymlinks(path)
+	dirResolved, dirErr := filepath.EvalSymlinks(mediaDir)
+	if err != nil || dirErr != nil || !strings.HasPrefix(resolved, dirResolved+string(filepath.Separator)) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	http.ServeFile(w, r, resolved) // sets Content-Type from extension, handles range/HEAD
 }
 
 // jobWire is the jobs-endpoint shape: `state` (not `status`), `data` only on
