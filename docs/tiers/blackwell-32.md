@@ -16,6 +16,18 @@
 
 ## Media
 
+This tier serves these media **seats** — models in its own llama-swap config, rendered
+at install time. Each seat also produces the harness config binding that routes to it, so a
+binding can never name a seat that was not rendered:
+
+| seat | kind | binds | model | residency |
+|---|---|---|---|---|
+| `gemma4-e4b-vision` | vision | `vision_model` | `gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf` | resident |
+| `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | resident |
+
+A seat still needs its weights on the box — model downloads stay out-of-band, as with
+every seed.
+
 The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
@@ -39,7 +51,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Config #13 (RTX 5090 32GB / RTX PRO 4500 32GB, Blackwell sm_120). ALL-RESIDENT: the whole roster (~21GB weights) stays hot with no swap group; 64K ctx q8_0 KV inside 32GB. config_seed applies only to a FRESH ~/.local-offload/config.json (install Step 8). Spec: docs/superpowers/specs/2026-07-16-blackwell-profile-tiers-design.md. PROJECTED - H3 measures the real ceiling.
+> Config #13 (RTX 5090 32GB / RTX PRO 4500 32GB, Blackwell sm_120). ALL-RESIDENT: the whole roster (~21GB weights) stays hot with no swap group; 64K ctx q8_0 KV inside 32GB. config_seed applies only to a FRESH ~/.local-offload/config.json (install Step 8). Spec: docs/superpowers/specs/2026-07-16-blackwell-profile-tiers-design.md. PROJECTED - H3 measures the real ceiling. J-media 2026-07-28: seats are RESIDENT here (win-cuda-resident places only that role - nothing on this tier swaps), so VRAM is ADDITIVE with the roster. Arithmetic, stated so it can be checked: the ~21GB roster figure is THIS TIER'S OWN pre-existing note, not a new measurement; E4B+mmproj at ctx 4096 (~4.5GB) plus whisper (~1.6GB) is about +6GB, which spends roughly HALF of the ~11GB the original 32GB design left implicit for 64K q8_0 KV, leaving ~5GB for four co-resident models. The 8B (~10GB) does not fit at all, which is why 48/72 get it and this tier does not. Because nothing swaps on this template, an operator who finds KV tight must DROP a seat rather than expect the solver to recover. Also note this backend has no Linux template (cuda-resident is Windows-only). PROJECTED - verify the budget on real silicon before relying on it.
 
 ## Capability report
 

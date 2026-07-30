@@ -41,7 +41,43 @@
         "videogen_frames": 81,
         "videogen_timeout_sec": 5400
       },
-      "notes": "Config #1 (5060 Ti 16GB, Blackwell sm_120). 26B resident full-GPU (-ngl 99). REQUIRES the Blackwell CUDA-12.8 sm_120 build (Task H4) - the pinned 12.4 asset lacks sm_120 and the 13.x asset segfaults the MMQ kernel into a ~5.6x-slower cuBLAS fallback. H3 may push ctx to 64K with q8. config_seed: quality-first media bindings PROVEN on this exact tier (bf16 O1 = 3.9min/2048 render via RAM offload; needs the model downloads + >=~48GB system RAM — see SETUP-AGENT). PROJECTED."
+      "notes": "Config #1 (5060 Ti 16GB, Blackwell sm_120). 26B resident full-GPU (-ngl 99). REQUIRES the Blackwell CUDA-12.8 sm_120 build (Task H4) - the pinned 12.4 asset lacks sm_120 and the 13.x asset segfaults the MMQ kernel into a ~5.6x-slower cuBLAS fallback. H3 may push ctx to 64K with q8. config_seed: quality-first media bindings PROVEN on this exact tier (bf16 O1 = 3.9min/2048 render via RAM offload; needs the model downloads + >=~48GB system RAM — see SETUP-AGENT). PROJECTED. J-media 2026-07-28: media_seats are informed by a LIVE REFERENCE, not a runtime measurement. This tier IS the workstation, and its hand-built llama-swap serves the same qwen3-vl-8b (Q8_0 weights + FULL-PRECISION F16 mmproj, ctx 16384) plus whisper large-v3-turbo. The Q8 + F16-tower pairing is the 8->16GB unlock: Q4 is where small-screenshot-text fidelity died, and this one seat owns screenshots/GUI/document OCR, which is why no separate OCR model exists (hence the 'ocr' alias here and on the other tiers that inherit this seat). DELTAS FROM LIVE, deliberate and NOT measured: the seat inherits this tier's q8_0 KV while the live entry sets no cache-type at all and therefore runs F16; and it adds --image-max-tokens 2048 + --no-context-shift, neither of which live carries. Same weights and window, tighter KV, an explicit image bound. Swappable, so the ~10GB seat is the only heavy seat loaded. NOT expressible here: the live box also serves qwen3-asr as an HQ STT tier, but that runs on llama-server (mtmd), not whisper-server, and binds stt_model_hq, which media_seats does not write - bind it by hand where it exists.",
+      "media_seats": [
+        {
+          "kind": "vision",
+          "name": "qwen3-vl-8b",
+          "aliases": [
+            "vision",
+            "vlm",
+            "qwen3-vl",
+            "ocr"
+          ],
+          "model": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+          "mmproj": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+          "ctx_size": 16384,
+          "image_max_tokens": 2048,
+          "no_context_shift": true,
+          "residency": "swappable",
+          "ttl": 300
+        },
+        {
+          "kind": "stt",
+          "name": "whisper-stt",
+          "aliases": [
+            "stt",
+            "whisper",
+            "transcribe",
+            "whisper-turbo"
+          ],
+          "bin": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin/whisper-server__EXE__",
+          "lib_dir": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin",
+          "model": "ggml-large-v3-turbo.bin",
+          "vad_model": "ggml-silero-v6.2.0.bin",
+          "no_flash_attn": true,
+          "residency": "swappable",
+          "ttl": 300
+        }
+      ]
     },
     "blackwell-32": {
       "ctx_size": 65536,
@@ -69,7 +105,42 @@
         "videogen_frames": 81,
         "videogen_timeout_sec": 5400
       },
-      "notes": "Config #13 (RTX 5090 32GB / RTX PRO 4500 32GB, Blackwell sm_120). ALL-RESIDENT: the whole roster (~21GB weights) stays hot with no swap group; 64K ctx q8_0 KV inside 32GB. config_seed applies only to a FRESH ~/.local-offload/config.json (install Step 8). Spec: docs/superpowers/specs/2026-07-16-blackwell-profile-tiers-design.md. PROJECTED - H3 measures the real ceiling."
+      "notes": "Config #13 (RTX 5090 32GB / RTX PRO 4500 32GB, Blackwell sm_120). ALL-RESIDENT: the whole roster (~21GB weights) stays hot with no swap group; 64K ctx q8_0 KV inside 32GB. config_seed applies only to a FRESH ~/.local-offload/config.json (install Step 8). Spec: docs/superpowers/specs/2026-07-16-blackwell-profile-tiers-design.md. PROJECTED - H3 measures the real ceiling. J-media 2026-07-28: seats are RESIDENT here (win-cuda-resident places only that role - nothing on this tier swaps), so VRAM is ADDITIVE with the roster. Arithmetic, stated so it can be checked: the ~21GB roster figure is THIS TIER'S OWN pre-existing note, not a new measurement; E4B+mmproj at ctx 4096 (~4.5GB) plus whisper (~1.6GB) is about +6GB, which spends roughly HALF of the ~11GB the original 32GB design left implicit for 64K q8_0 KV, leaving ~5GB for four co-resident models. The 8B (~10GB) does not fit at all, which is why 48/72 get it and this tier does not. Because nothing swaps on this template, an operator who finds KV tight must DROP a seat rather than expect the solver to recover. Also note this backend has no Linux template (cuda-resident is Windows-only). PROJECTED - verify the budget on real silicon before relying on it.",
+      "media_seats": [
+        {
+          "kind": "vision",
+          "name": "gemma4-e4b-vision",
+          "aliases": [
+            "vision",
+            "vlm",
+            "gemma4-vision"
+          ],
+          "model": "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf",
+          "mmproj": "mmproj-F16.gguf",
+          "ctx_size": 4096,
+          "image_max_tokens": 768,
+          "no_context_shift": true,
+          "residency": "resident",
+          "ttl": 300
+        },
+        {
+          "kind": "stt",
+          "name": "whisper-stt",
+          "aliases": [
+            "stt",
+            "whisper",
+            "transcribe",
+            "whisper-turbo"
+          ],
+          "bin": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin/whisper-server__EXE__",
+          "lib_dir": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin",
+          "model": "ggml-large-v3-turbo.bin",
+          "vad_model": "ggml-silero-v6.2.0.bin",
+          "no_flash_attn": true,
+          "residency": "resident",
+          "ttl": 300
+        }
+      ]
     },
     "blackwell-48": {
       "ctx_size": 131072,
@@ -97,7 +168,43 @@
         "videogen_frames": 81,
         "videogen_timeout_sec": 5400
       },
-      "notes": "Config #14 (RTX PRO 5000 48GB, Blackwell sm_120). ALL-RESIDENT + 128K ctx + FULL-PRECISION f16 KV (VRAM is abundant; quality lever per the 2026-07-16 spec). 26B model window: 256K design / 128K common serving cap; SWA-1024 keeps large-ctx KV modest. config_seed: fresh-install 720p video defaults. PROJECTED - H3 measures."
+      "notes": "Config #14 (RTX PRO 5000 48GB, Blackwell sm_120). ALL-RESIDENT + 128K ctx + FULL-PRECISION f16 KV (VRAM is abundant; quality lever per the 2026-07-16 spec). 26B model window: 256K design / 128K common serving cap; SWA-1024 keeps large-ctx KV modest. config_seed: fresh-install 720p video defaults. PROJECTED - H3 measures. J-media 2026-07-28: RESIDENT seats (nothing swaps on this tier), and there is room for the full qwen3-vl-8b: 21 (roster) + 10 (Q8 + F16 mmproj) + 1.6 (whisper) = ~33GB of 48GB. PROJECTED. The 'ocr' alias rides on this shared VLM (one seat owns screenshots/GUI/document OCR); the harness routes via vision_model, not the alias, so it is a label rather than a separate model.",
+      "media_seats": [
+        {
+          "kind": "vision",
+          "name": "qwen3-vl-8b",
+          "aliases": [
+            "vision",
+            "vlm",
+            "qwen3-vl",
+            "ocr"
+          ],
+          "model": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+          "mmproj": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+          "ctx_size": 16384,
+          "image_max_tokens": 2048,
+          "no_context_shift": true,
+          "residency": "resident",
+          "ttl": 300
+        },
+        {
+          "kind": "stt",
+          "name": "whisper-stt",
+          "aliases": [
+            "stt",
+            "whisper",
+            "transcribe",
+            "whisper-turbo"
+          ],
+          "bin": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin/whisper-server__EXE__",
+          "lib_dir": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin",
+          "model": "ggml-large-v3-turbo.bin",
+          "vad_model": "ggml-silero-v6.2.0.bin",
+          "no_flash_attn": true,
+          "residency": "resident",
+          "ttl": 300
+        }
+      ]
     },
     "blackwell-72": {
       "ctx_size": 131072,
@@ -125,7 +232,43 @@
         "videogen_frames": 81,
         "videogen_timeout_sec": 5400
       },
-      "notes": "Config #15 (RTX PRO 5000 72GB; RTX PRO 6000 96GB shares this until measured — the flagship workstation tier). Serving matches #14 today (all-resident, 128K, f16 KV); the extra headroom is documented for the Q8_0-26B follow-up (out of scope 2026-07-16 spec) and bigger media renders via config_seed (720p + 49 frames on a fresh install). PROJECTED - H3 measures."
+      "notes": "Config #15 (RTX PRO 5000 72GB; RTX PRO 6000 96GB shares this until measured — the flagship workstation tier). Serving matches #14 today (all-resident, 128K, f16 KV); the extra headroom is documented for the Q8_0-26B follow-up (out of scope 2026-07-16 spec) and bigger media renders via config_seed (720p + 49 frames on a fresh install). PROJECTED - H3 measures. J-media 2026-07-28: RESIDENT seats, qwen3-vl-8b at full quality — ~33GB of 72GB leaves the most headroom of any tier. PROJECTED. The 'ocr' alias rides on this shared VLM (one seat owns screenshots/GUI/document OCR); the harness routes via vision_model, not the alias, so it is a label rather than a separate model.",
+      "media_seats": [
+        {
+          "kind": "vision",
+          "name": "qwen3-vl-8b",
+          "aliases": [
+            "vision",
+            "vlm",
+            "qwen3-vl",
+            "ocr"
+          ],
+          "model": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+          "mmproj": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+          "ctx_size": 16384,
+          "image_max_tokens": 2048,
+          "no_context_shift": true,
+          "residency": "resident",
+          "ttl": 300
+        },
+        {
+          "kind": "stt",
+          "name": "whisper-stt",
+          "aliases": [
+            "stt",
+            "whisper",
+            "transcribe",
+            "whisper-turbo"
+          ],
+          "bin": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin/whisper-server__EXE__",
+          "lib_dir": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin",
+          "model": "ggml-large-v3-turbo.bin",
+          "vad_model": "ggml-silero-v6.2.0.bin",
+          "no_flash_attn": true,
+          "residency": "resident",
+          "ttl": 300
+        }
+      ]
     },
     "ampere-16": {
       "ctx_size": 32768,
@@ -149,7 +292,43 @@
         "videogen_frames": 81,
         "videogen_timeout_sec": 5400
       },
-      "notes": "Ampere >=12GB band (3090-class defensive). 26B resident full-GPU. config_seed: quality-first media bindings (bf16 needs no fp8 hardware; verified on the 16GB Blackwell tier — needs the model downloads + >=~48GB system RAM). PROJECTED - H3 confirms OOM ceiling."
+      "notes": "Ampere >=12GB band (3090-class defensive). 26B resident full-GPU. config_seed: quality-first media bindings (bf16 needs no fp8 hardware; verified on the 16GB Blackwell tier — needs the model downloads + >=~48GB system RAM). PROJECTED - H3 confirms OOM ceiling. J-media 2026-07-28: same qwen3-vl-8b seat as the MEASURED blackwell-16, but ctx trimmed 16384->8192 because this band's FLOOR is 12GB ('3090-class defensive') and KV has to fit there too; a 24GB 3090 can raise it. ~10GB seat, swappable so it never shares with another heavy seat. PROJECTED on this exact silicon. The 'ocr' alias rides on this shared VLM (one seat owns screenshots/GUI/document OCR); the harness routes via vision_model, not the alias, so it is a label rather than a separate model.",
+      "media_seats": [
+        {
+          "kind": "vision",
+          "name": "qwen3-vl-8b",
+          "aliases": [
+            "vision",
+            "vlm",
+            "qwen3-vl",
+            "ocr"
+          ],
+          "model": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+          "mmproj": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+          "ctx_size": 8192,
+          "image_max_tokens": 1536,
+          "no_context_shift": true,
+          "residency": "swappable",
+          "ttl": 300
+        },
+        {
+          "kind": "stt",
+          "name": "whisper-stt",
+          "aliases": [
+            "stt",
+            "whisper",
+            "transcribe",
+            "whisper-turbo"
+          ],
+          "bin": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin/whisper-server__EXE__",
+          "lib_dir": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin",
+          "model": "ggml-large-v3-turbo.bin",
+          "vad_model": "ggml-silero-v6.2.0.bin",
+          "no_flash_attn": true,
+          "residency": "swappable",
+          "ttl": 300
+        }
+      ]
     },
     "volta-16": {
       "ctx_size": 32768,
@@ -173,7 +352,43 @@
         "videogen_frames": 81,
         "videogen_timeout_sec": 5400
       },
-      "notes": "Config #2 (V100 16GB, Volta sm_70). 26B resident full-GPU. RISK: confirm flash-attn on sm_70 is not a slow fallback (H3 measures). config_seed: quality-first media bindings (bf16, no fp8 hw needed; sm_70 ComfyUI support to confirm at install). PROJECTED."
+      "notes": "Config #2 (V100 16GB, Volta sm_70). 26B resident full-GPU. RISK: confirm flash-attn on sm_70 is not a slow fallback (H3 measures). config_seed: quality-first media bindings (bf16, no fp8 hw needed; sm_70 ComfyUI support to confirm at install). PROJECTED. J-media 2026-07-28: qwen3-vl-8b seat, ctx 8192. INHERITS this tier's open sm_70 flash-attn risk — the vision seat takes the tier's flash_attn (on), so if H3 finds FA is a slow fallback on Volta it is wrong for the vision seat too, not just chat. PROJECTED. The 'ocr' alias rides on this shared VLM (one seat owns screenshots/GUI/document OCR); the harness routes via vision_model, not the alias, so it is a label rather than a separate model.",
+      "media_seats": [
+        {
+          "kind": "vision",
+          "name": "qwen3-vl-8b",
+          "aliases": [
+            "vision",
+            "vlm",
+            "qwen3-vl",
+            "ocr"
+          ],
+          "model": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+          "mmproj": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+          "ctx_size": 8192,
+          "image_max_tokens": 1536,
+          "no_context_shift": true,
+          "residency": "swappable",
+          "ttl": 300
+        },
+        {
+          "kind": "stt",
+          "name": "whisper-stt",
+          "aliases": [
+            "stt",
+            "whisper",
+            "transcribe",
+            "whisper-turbo"
+          ],
+          "bin": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin/whisper-server__EXE__",
+          "lib_dir": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin",
+          "model": "ggml-large-v3-turbo.bin",
+          "vad_model": "ggml-silero-v6.2.0.bin",
+          "no_flash_attn": true,
+          "residency": "swappable",
+          "ttl": 300
+        }
+      ]
     },
     "ampere-8": {
       "ctx_size": 16384,
@@ -363,7 +578,49 @@
         "imagegen_cfg": 1,
         "imagegen_timeout_sec": 900
       },
-      "notes": "Config #7 (780M/gfx1103 iGPU + 64GB dual-channel DDR5, Vulkan UMA). SAFE FLOOR: f16 KV + 16K ctx + 26B cpu-moe (ram_tier mid/high; else dropped). Research 2026-07-23 (J1): the floor is deliberately BELOW what this hardware measures elsewhere - 26B-A4B Q4_K_M runs FULLY OFFLOADED (-ngl 99, weights in GTT/shared memory) at ~20-25 tok/s tg on a 780M with dual-channel DDR5 (two independent community measurements; the earlier 'cpu-moe = very slow' note was wrong for dual-channel boxes), and Vulkan FA + q8_0 KV is production-supported since the Feb-Mar 2026 AMD tuning PRs. selftest.ps1's H3 canaries (fa_q8kv / moe_full_offload / ctx_sweep) MEASURE all three promotions on the real box; the agent applies them canary-gated per SETUP-AGENT.md (amd-rdna3 chapter). REQUIRES a llama.cpp win-vulkan build >= Mar-2026 (the pinned tag satisfies this - it is the frontier snapshot, never downgrade below the floor) and flash-attn EXPLICITLY 'on' (never auto: a silent FA-off then fails quantized-V loads on Gemma). Single-channel RAM is a clean ~2x tg loss - confirm dual-channel at install. PROJECTED until receipts return."
+      "notes": "Config #7 (780M/gfx1103 iGPU + 64GB dual-channel DDR5, Vulkan UMA). SAFE FLOOR: f16 KV + 16K ctx + 26B cpu-moe (ram_tier mid/high; else dropped). Research 2026-07-23 (J1): the floor is deliberately BELOW what this hardware measures elsewhere - 26B-A4B Q4_K_M runs FULLY OFFLOADED (-ngl 99, weights in GTT/shared memory) at ~20-25 tok/s tg on a 780M with dual-channel DDR5 (two independent community measurements; the earlier 'cpu-moe = very slow' note was wrong for dual-channel boxes), and Vulkan FA + q8_0 KV is production-supported since the Feb-Mar 2026 AMD tuning PRs. selftest.ps1's H3 canaries (fa_q8kv / moe_full_offload / ctx_sweep) MEASURE all three promotions on the real box; the agent applies them canary-gated per SETUP-AGENT.md (amd-rdna3 chapter). REQUIRES a llama.cpp win-vulkan build >= Mar-2026 (the pinned tag satisfies this - it is the frontier snapshot, never downgrade below the floor) and flash-attn EXPLICITLY 'on' (never auto: a silent FA-off then fails quantized-V loads on Gemma). Single-channel RAM is a clean ~2x tg loss - confirm dual-channel at install. PROJECTED until receipts return. J-media 2026-07-28 (Juan's tier - the D9 audit gap): STT via the whisper.cpp Vulkan build. Vision reuses this tier's resident E4B + mmproj, so no extra multi-GB download on a UMA box. Vision keeps the CLIP encoder on CPU (--no-mmproj-offload). The REASON, stated accurately: llama.cpp #20081 reports mmproj quality degradation on Vulkan, but the maintainer could not reproduce it across several devices and the reporter closed it inconclusively - so quality alone is weak evidence. The load-bearing fact is in the same thread: running model + mmproj both on the Vulkan backend of a Radeon 780M iGPU gives a hard vk::DeviceLostError immediately after 'decoding image batch 1/8', reproducibly, on the exact silicon this tier targets. Keeping the encoder on CPU avoids that crash path and costs only encoder throughput; the LLM still decodes on the GPU. Both seats pin GGML_VK_VISIBLE_DEVICES=0 (multi-ICD boxes). REQUIRES a whisper.cpp Vulkan build + the whisper weights, which install.ps1's amd-* asset table does NOT fetch - `install render` warns by exact path. PROJECTED.",
+      "media_seats": [
+        {
+          "kind": "vision",
+          "name": "gemma4-e4b-vision",
+          "aliases": [
+            "vision",
+            "vlm",
+            "gemma4-vision"
+          ],
+          "model": "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf",
+          "mmproj": "mmproj-F16.gguf",
+          "ctx_size": 4096,
+          "image_max_tokens": 768,
+          "no_context_shift": true,
+          "no_mmproj_offload": true,
+          "gpu_env": [
+            "GGML_VK_VISIBLE_DEVICES=0"
+          ],
+          "residency": "swappable",
+          "ttl": 300
+        },
+        {
+          "kind": "stt",
+          "name": "whisper-stt",
+          "aliases": [
+            "stt",
+            "whisper",
+            "transcribe",
+            "whisper-turbo"
+          ],
+          "bin": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin/whisper-server__EXE__",
+          "lib_dir": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin",
+          "model": "ggml-large-v3-turbo.bin",
+          "vad_model": "ggml-silero-v6.2.0.bin",
+          "no_flash_attn": true,
+          "gpu_env": [
+            "GGML_VK_VISIBLE_DEVICES=0"
+          ],
+          "residency": "swappable",
+          "ttl": 300
+        }
+      ]
     },
     "amd-rdna3-dgpu": {
       "ctx_size": 32768,
@@ -388,7 +645,49 @@
         "imagegen_cfg": 1,
         "imagegen_timeout_sec": 900
       },
-      "notes": "Discrete RDNA3 (RX 7900-class, >=12GB dedicated VRAM, Vulkan). Previously this card fell through to the amd-rdna3 iGPU floor - a severe under-serve (J1 audit finding). 26B resident full-GPU (-ngl 99, 14.2GB Q4 fits >=16GB VRAM; on a 12GB card the load OOMs and selftest's standing remediation switches the 26B to --cpu-moe), 32K ctx, q8_0 KV with FA on (Vulkan FA+q8 supported since Feb-Mar 2026; same >=Mar-2026 build floor as amd-rdna3). No real box measured yet - the H3 canaries gate everything. PROJECTED."
+      "notes": "Discrete RDNA3 (RX 7900-class, >=12GB dedicated VRAM, Vulkan). Previously this card fell through to the amd-rdna3 iGPU floor - a severe under-serve (J1 audit finding). 26B resident full-GPU (-ngl 99, 14.2GB Q4 fits >=16GB VRAM; on a 12GB card the load OOMs and selftest's standing remediation switches the 26B to --cpu-moe), 32K ctx, q8_0 KV with FA on (Vulkan FA+q8 supported since Feb-Mar 2026; same >=Mar-2026 build floor as amd-rdna3). No real box measured yet - the H3 canaries gate everything. PROJECTED. J-media 2026-07-28: same Vulkan shape as amd-rdna3 (E4B + mmproj, ICD pinned), image budget raised to 1024 for the dedicated card. Vision keeps the CLIP encoder on CPU (--no-mmproj-offload). The REASON, stated accurately: llama.cpp #20081 reports mmproj quality degradation on Vulkan, but the maintainer could not reproduce it across several devices and the reporter closed it inconclusively - so quality alone is weak evidence. The load-bearing fact is in the same thread: running model + mmproj both on the Vulkan backend of a Radeon 780M iGPU gives a hard vk::DeviceLostError immediately after 'decoding image batch 1/8', reproducibly, on the exact silicon this tier targets. Keeping the encoder on CPU avoids that crash path and costs only encoder throughput; the LLM still decodes on the GPU. WHY NOT THE 8B here, stated correctly: NOT because it could not coexist - the seat is swappable, so llama-swap evicts before starting and it would load alone, exactly as ampere-16's 8B does on the same 12GB floor. It is a CONSERVATIVE choice for an UNMEASURED Vulkan part: CUDA vision on this repo is measured-adjacent (the workstation runs it), Vulkan vision is not, and this tier's own params are PROJECTED with every promotion gated behind H3 canaries. That asymmetry with ampere-16 is deliberate; promote to the 8B when a real RDNA3 dGPU measures it. PROJECTED.",
+      "media_seats": [
+        {
+          "kind": "vision",
+          "name": "gemma4-e4b-vision",
+          "aliases": [
+            "vision",
+            "vlm",
+            "gemma4-vision"
+          ],
+          "model": "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf",
+          "mmproj": "mmproj-F16.gguf",
+          "ctx_size": 4096,
+          "image_max_tokens": 1024,
+          "no_context_shift": true,
+          "no_mmproj_offload": true,
+          "gpu_env": [
+            "GGML_VK_VISIBLE_DEVICES=0"
+          ],
+          "residency": "swappable",
+          "ttl": 300
+        },
+        {
+          "kind": "stt",
+          "name": "whisper-stt",
+          "aliases": [
+            "stt",
+            "whisper",
+            "transcribe",
+            "whisper-turbo"
+          ],
+          "bin": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin/whisper-server__EXE__",
+          "lib_dir": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin",
+          "model": "ggml-large-v3-turbo.bin",
+          "vad_model": "ggml-silero-v6.2.0.bin",
+          "no_flash_attn": true,
+          "gpu_env": [
+            "GGML_VK_VISIBLE_DEVICES=0"
+          ],
+          "residency": "swappable",
+          "ttl": 300
+        }
+      ]
     },
     "amd-gcn": {
       "ctx_size": 8192,

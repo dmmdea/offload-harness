@@ -16,6 +16,18 @@
 
 ## Media
 
+This tier serves these media **seats** — models in its own llama-swap config, rendered
+at install time. Each seat also produces the harness config binding that routes to it, so a
+binding can never name a seat that was not rendered:
+
+| seat | kind | binds | model | residency |
+|---|---|---|---|---|
+| `qwen3-vl-8b` | vision | `vision_model` | `Qwen3VL-8B-Instruct-Q8_0.gguf` | resident |
+| `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | resident |
+
+A seat still needs its weights on the box — model downloads stay out-of-band, as with
+every seed.
+
 The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
@@ -39,7 +51,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Config #15 (RTX PRO 5000 72GB; RTX PRO 6000 96GB shares this until measured — the flagship workstation tier). Serving matches #14 today (all-resident, 128K, f16 KV); the extra headroom is documented for the Q8_0-26B follow-up (out of scope 2026-07-16 spec) and bigger media renders via config_seed (720p + 49 frames on a fresh install). PROJECTED - H3 measures.
+> Config #15 (RTX PRO 5000 72GB; RTX PRO 6000 96GB shares this until measured — the flagship workstation tier). Serving matches #14 today (all-resident, 128K, f16 KV); the extra headroom is documented for the Q8_0-26B follow-up (out of scope 2026-07-16 spec) and bigger media renders via config_seed (720p + 49 frames on a fresh install). PROJECTED - H3 measures. J-media 2026-07-28: RESIDENT seats, qwen3-vl-8b at full quality — ~33GB of 72GB leaves the most headroom of any tier. PROJECTED. The 'ocr' alias rides on this shared VLM (one seat owns screenshots/GUI/document OCR); the harness routes via vision_model, not the alias, so it is a label rather than a separate model.
 
 ## Capability report
 

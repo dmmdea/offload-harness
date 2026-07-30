@@ -16,6 +16,18 @@
 
 ## Media
 
+This tier serves these media **seats** — models in its own llama-swap config, rendered
+at install time. Each seat also produces the harness config binding that routes to it, so a
+binding can never name a seat that was not rendered:
+
+| seat | kind | binds | model | residency |
+|---|---|---|---|---|
+| `qwen3-vl-8b` | vision | `vision_model` | `Qwen3VL-8B-Instruct-Q8_0.gguf` | swappable |
+| `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | swappable |
+
+A seat still needs its weights on the box — model downloads stay out-of-band, as with
+every seed.
+
 The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
@@ -39,7 +51,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Ampere >=12GB band (3090-class defensive). 26B resident full-GPU. config_seed: quality-first media bindings (bf16 needs no fp8 hardware; verified on the 16GB Blackwell tier — needs the model downloads + >=~48GB system RAM). PROJECTED - H3 confirms OOM ceiling.
+> Ampere >=12GB band (3090-class defensive). 26B resident full-GPU. config_seed: quality-first media bindings (bf16 needs no fp8 hardware; verified on the 16GB Blackwell tier — needs the model downloads + >=~48GB system RAM). PROJECTED - H3 confirms OOM ceiling. J-media 2026-07-28: same qwen3-vl-8b seat as the MEASURED blackwell-16, but ctx trimmed 16384->8192 because this band's FLOOR is 12GB ('3090-class defensive') and KV has to fit there too; a 24GB 3090 can raise it. ~10GB seat, swappable so it never shares with another heavy seat. PROJECTED on this exact silicon. The 'ocr' alias rides on this shared VLM (one seat owns screenshots/GUI/document OCR); the harness routes via vision_model, not the alias, so it is a label rather than a separate model.
 
 ## Capability report
 
