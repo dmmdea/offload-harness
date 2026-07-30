@@ -58,6 +58,10 @@ type Params struct {
 	// This lived in install.ps1 as an `if ($profileId -match '^blackwell-')` branch,
 	// so a Linux install of the same tier silently did not get it.
 	GPUEnv []string
+	// Backend is the tier's serving backend (cuda|vulkan|cpu|…). A vision seat renders
+	// GPU flags (-ngl, --flash-attn) UNLESS this is "cpu", where the template's own
+	// chat models carry neither and a GPU-less build would only ignore them.
+	Backend string
 }
 
 // seatAnchors is the TEMPLATE's own declaration of which residency roles it can
@@ -425,8 +429,13 @@ func seatBlock(s mediaseat.Seat, p Params, env string) (string, error) {
 	}
 	switch s.Kind {
 	case mediaseat.KindVision:
+		var envEntries []string
 		if env != "" {
-			fmt.Fprintf(&b, "    env: [%q]\n", env)
+			envEntries = append(envEntries, fmt.Sprintf("%q", env))
+		}
+		envEntries = append(envEntries, s.GPUEnv...) // per-seat device pin, barewords
+		if len(envEntries) > 0 {
+			fmt.Fprintf(&b, "    env: [%s]\n", strings.Join(envEntries, ", "))
 		}
 		exe := ""
 		if p.GOOS == "windows" {
@@ -441,16 +450,34 @@ func seatBlock(s mediaseat.Seat, p Params, env string) (string, error) {
 		if s.NoContextShift {
 			bound += " --no-context-shift"
 		}
+		// Keep the CLIP encoder on CPU where the LLM backend degrades it (Vulkan,
+		// llama.cpp #20081). The LLM still decodes on the GPU (-ngl 99).
+		if s.NoMmprojOffload {
+			bound += " --no-mmproj-offload"
+		}
+		// On the cpu backend the template's own chat models carry neither -ngl nor
+		// --flash-attn; a GPU-less build would only ignore them, so the vision seat
+		// omits them too and renders the same shape.
+		gpuFlags := " --n-gpu-layers 99"
+		fa := " --flash-attn __FLASH_ATTN__"
+		if p.Backend == "cpu" {
+			gpuFlags, fa = "", ""
+		}
 		fmt.Fprintf(&b, "    cmd: >-\n"+
 			"      __LLAMA_BIN__/llama-server%s --model __MODELS__/%s --mmproj __MODELS__/%s\n"+
-			"      --n-gpu-layers 99 --parallel 1 --ctx-size %d%s --flash-attn __FLASH_ATTN__\n"+
+			"     %s --parallel 1 --ctx-size %d%s%s\n"+
 			"      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --threads __NTHREADS__ --jinja\n"+
-			"      --reasoning off --port ${PORT} --host 127.0.0.1\n", exe, s.Model, s.MMProj, s.CtxSize, bound)
+			"      --reasoning off --port ${PORT} --host 127.0.0.1\n", exe, s.Model, s.MMProj, gpuFlags, s.CtxSize, bound, fa)
 	case mediaseat.KindSTT:
+		var envEntries []string
 		// POSIX only: a self-built whisper-server links its own shared objects and
 		// dies at exec without them. The Windows builds are self-contained.
 		if lib := p.seatExpand(s.LibDir); lib != "" && p.GOOS != "windows" {
-			fmt.Fprintf(&b, "    env: [\"LD_LIBRARY_PATH=%s:${LD_LIBRARY_PATH:-}\"]\n", lib)
+			envEntries = append(envEntries, fmt.Sprintf("%q", "LD_LIBRARY_PATH="+lib+":${LD_LIBRARY_PATH:-}"))
+		}
+		envEntries = append(envEntries, s.GPUEnv...) // per-seat device pin
+		if len(envEntries) > 0 {
+			fmt.Fprintf(&b, "    env: [%s]\n", strings.Join(envEntries, ", "))
 		}
 		vad := ""
 		if s.VADModel != "" {

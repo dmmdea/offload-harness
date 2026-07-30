@@ -142,6 +142,70 @@ func TestVisionSeatCarriesItsVramBound(t *testing.T) {
 	}
 }
 
+// TestVisionSeatKeepsMmprojOnCPUWhenAsked: on a Vulkan backend the mmproj is degraded
+// (llama.cpp #20081), so a Vulkan vision tier decodes the LLM on the GPU but keeps the
+// CLIP encoder on CPU. The flag must render, and only when asked.
+func TestVisionSeatKeepsMmprojOnCPUWhenAsked(t *testing.T) {
+	s := visionSeat()
+	s.NoMmprojOffload = true
+	got, err := Render(linuxCUDA(t), seatParams(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "--no-mmproj-offload") {
+		t.Errorf("vision seat did not keep the mmproj on CPU:\n%s", got)
+	}
+	if strings.Contains(mustRender(t, linuxCUDA(t), seatParams(visionSeat())), "--no-mmproj-offload") {
+		t.Error("a seat that did not ask must not get --no-mmproj-offload")
+	}
+}
+
+// TestPerSeatGPUEnvPinsTheDevice: a media seat that must sit on a SPECIFIC card (the
+// dual-gpu editor, a Vulkan ICD) carries its own env entry. It must land in the seat's
+// env list, on both kinds.
+func TestPerSeatGPUEnvPinsTheDevice(t *testing.T) {
+	v := visionSeat()
+	v.GPUEnv = []string{"CUDA_VISIBLE_DEVICES=1"}
+	s := sttSeat()
+	s.GPUEnv = []string{"CUDA_VISIBLE_DEVICES=1"}
+	got, err := Render(linuxCUDA(t), seatParams(v, s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The vision seat's env carries the device pin (alongside the ${ld} macro on Linux).
+	if !strings.Contains(got, `env: ["${ld}", CUDA_VISIBLE_DEVICES=1]`) {
+		t.Errorf("vision seat missing its per-seat device pin:\n%s", got)
+	}
+	// The stt seat's env carries the loader path AND the device pin.
+	if !strings.Contains(got, "CUDA_VISIBLE_DEVICES=1]") || !strings.Contains(got, "LD_LIBRARY_PATH=") {
+		t.Errorf("stt seat missing loader path + device pin:\n%s", got)
+	}
+}
+
+// TestCPUBackendVisionOmitsGPUFlags: the cpu template's chat models carry neither -ngl
+// nor --flash-attn; a GPU-less build would only ignore them, so the vision seat renders
+// the same shape rather than a cosmetically-wrong one.
+func TestCPUBackendVisionOmitsGPUFlags(t *testing.T) {
+	p := seatParams(visionSeat())
+	p.Backend = "cpu"
+	got, err := Render(linuxCUDA(t), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seat := section(got, "  gemma4-e4b-vision:")
+	if strings.Contains(seat, "--n-gpu-layers") {
+		t.Errorf("cpu vision seat must not render -ngl:\n%s", seat)
+	}
+	if strings.Contains(seat, "--flash-attn") {
+		t.Errorf("cpu vision seat must not render --flash-attn:\n%s", seat)
+	}
+	// A non-cpu backend still renders both.
+	gpu := section(mustRender(t, linuxCUDA(t), seatParams(visionSeat())), "  gemma4-e4b-vision:")
+	if !strings.Contains(gpu, "--n-gpu-layers 99") || !strings.Contains(gpu, "--flash-attn") {
+		t.Errorf("a GPU backend must still render -ngl and --flash-attn:\n%s", gpu)
+	}
+}
+
 // TestSttSeatCanTurnFlashAttentionOff: whisper.cpp has flash attention default-ON
 // since v1.8.0 and it DEGRADES non-English and noisy audio, so a tier serving Spanish
 // asks for -nfa. Rendering it as a no-op would quietly cost accuracy.

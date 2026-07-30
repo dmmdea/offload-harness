@@ -89,9 +89,19 @@ type Seat struct {
 	// NoFlashAttn passes whisper.cpp's -nfa (stt only). Flash attention is default-ON
 	// in whisper.cpp since v1.8.0 and DEGRADES non-English and noisy audio
 	// (whisper.cpp #3020), so a tier serving Spanish or field recordings wants it off.
-	NoFlashAttn bool   `json:"no_flash_attn,omitempty"`
-	Residency   string `json:"residency"`
-	TTL         int    `json:"ttl,omitempty"`
+	NoFlashAttn bool `json:"no_flash_attn,omitempty"`
+	// NoMmprojOffload keeps the multimodal projector (CLIP) on CPU while the LLM runs
+	// on the GPU (vision only). llama.cpp #20081: mmproj on the Vulkan backend is
+	// "extremely degraded" for some images, so a Vulkan vision tier decodes the LLM on
+	// the GPU but keeps the vision encoder on CPU where it is correct. A no-op on CUDA.
+	NoMmprojOffload bool `json:"no_mmproj_offload,omitempty"`
+	// GPUEnv is env vars added to THIS seat's env list — a per-seat device pin. The
+	// tier-level gpu_env applies to EVERY model uniformly; this is for a seat that must
+	// sit on a SPECIFIC device the tier's other models do not (the dual-gpu media seats
+	// pin to the editor card; a Vulkan seat pins its ICD).
+	GPUEnv    []string `json:"gpu_env,omitempty"`
+	Residency string   `json:"residency"`
+	TTL       int      `json:"ttl,omitempty"`
 }
 
 // configKey is the harness config field a seat of this kind binds.
@@ -185,9 +195,9 @@ func Validate(seats []Seat, tier string) error {
 			}
 			// Fields the renderer would silently ignore. Accepting them would let a
 			// tier author believe a knob applies when it does nothing.
-			if s.MMProj != "" || s.CtxSize > 0 || s.ImageMaxTokens > 0 || s.NoContextShift {
-				problems = append(problems, where+": mmproj/ctx_size/image_max_tokens/no_context_shift are "+
-					"vision-only and are ignored on an stt seat")
+			if s.MMProj != "" || s.CtxSize > 0 || s.ImageMaxTokens > 0 || s.NoContextShift || s.NoMmprojOffload {
+				problems = append(problems, where+": mmproj/ctx_size/image_max_tokens/no_context_shift/no_mmproj_offload "+
+					"are vision-only and are ignored on an stt seat")
 			}
 		}
 		if s.Kind == KindVision {

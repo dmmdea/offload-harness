@@ -4,6 +4,35 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.40.0] - 2026-07-28
+
+### Added — media seats for the last four unseeded tiers, each chosen for its hardware
+`blackwell-8`, `cpu`, `amd-gcn`, `dual-gpu` now declare vision + STT seats. These are
+**PROJECTED, not measured** — none of these exact cards is in the fleet — but every
+rendered config was verified to LOAD in real llama-swap v242, and each tier's seats were
+chosen for what its hardware can actually serve rather than copied blindly:
+- **`blackwell-8`** — CUDA twin of the proven `ampere-8`; its seats verbatim (the tier's
+  `gpu_env` pins the device on both).
+- **`cpu`** — reuses the resident E4B + mmproj (no separate VLM download, `ampere-6`'s
+  approach) and CPU whisper (whisper.cpp is CPU-native). The vision seat renders with
+  neither `-ngl` nor `--flash-attn`, matching the cpu template's own chat models.
+- **`amd-gcn`** — STT via the whisper.cpp Vulkan build (solid). Vision keeps the CLIP
+  encoder on CPU (`--no-mmproj-offload`) because mmproj on the Vulkan backend is degraded
+  ([llama.cpp #20081](https://github.com/ggml-org/llama.cpp/issues/20081)); the LLM still
+  decodes on the iGPU. Both pin the Vulkan ICD.
+- **`dual-gpu`** — resident seats (the template has no swap group) pinned to the **editor
+  card** (`CUDA_VISIBLE_DEVICES=1`) so they never contend with the 26B architect on device 0.
+
+### Added — two per-seat schema fields the above needed (ADR 0019 extended)
+- **`gpu_env`** (per-seat) — env vars for a seat that must sit on a SPECIFIC device the
+  tier's other models do not (the dual-gpu editor card; a Vulkan ICD). Distinct from the
+  tier-level `gpu_env`, which applies to every model uniformly.
+- **`no_mmproj_offload`** (vision only) — keeps the CLIP encoder on CPU where the LLM
+  backend degrades it. Refused on an stt seat.
+- The vision seat is now **backend-aware**: on the `cpu` backend it omits `-ngl` and
+  `--flash-attn`, so it renders the same shape as the cpu template's chat models instead
+  of a cosmetically-wrong one a GPU-less build would merely ignore.
+
 ## [0.39.0] - 2026-07-28
 
 ### Fixed — both RAM gates were inert on Linux, and one had never worked there at all

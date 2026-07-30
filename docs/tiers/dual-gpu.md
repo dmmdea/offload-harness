@@ -17,17 +17,27 @@
 
 ## Media
 
-**This tier ships no media configuration.** It serves text only until an operator binds
-the media routes by hand, so `generate_image`, `generate_video`, `generate_audio` and
-`run_graph` will report `NOT CONFIGURED` — or `BOUND-BUT-MISSING` where a shipped default
-script path does not exist on the machine. Run `local-offload doctor` to see which.
+This tier serves these media **seats** — models in its own llama-swap config, rendered
+at install time. Each seat also produces the harness config binding that routes to it, so a
+binding can never name a seat that was not rendered:
+
+| seat | kind | binds | model | residency |
+|---|---|---|---|---|
+| `qwen3vl-4b` | vision | `vision_model` | `Qwen3VL-4B-Instruct-Q4_K_M.gguf` | resident |
+| `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | resident |
+
+A seat still needs its weights on the box — model downloads stay out-of-band, as with
+every seed.
+
+It ships no file-backed media seed, so `generate_image` / `generate_video` /
+`generate_audio` / `run_graph` report `NOT CONFIGURED` until an operator binds them.
 
 ## Operator notes
 
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Configs #3/#4 (5060 Ti + V100 32GB; #4 adds 128GB+Optane). TWO models resident, NO shared exclusive swap group: 26B architect pinned to CUDA_VISIBLE_DEVICES=0, E4B editor pinned to CUDA_VISIBLE_DEVICES=1 - both -ngl 99 -> two-tier with ZERO swap. big_ram (128GB, config #4) adds a 26B --cpu-moe fallback note. Per-GPU device assignment (which physical card is device 0 vs 1) and heterogeneous-arch driver scope (a multi-arch sm_70+sm_120 build - Task H4) are the OPERATOR's to confirm; this profile only places the models. Needs a multi-arch build for heterogeneous pairs. PROJECTED.
+> Configs #3/#4 (5060 Ti + V100 32GB; #4 adds 128GB+Optane). TWO models resident, NO shared exclusive swap group: 26B architect pinned to CUDA_VISIBLE_DEVICES=0, E4B editor pinned to CUDA_VISIBLE_DEVICES=1 - both -ngl 99 -> two-tier with ZERO swap. big_ram (128GB, config #4) adds a 26B --cpu-moe fallback note. Per-GPU device assignment (which physical card is device 0 vs 1) and heterogeneous-arch driver scope (a multi-arch sm_70+sm_120 build - Task H4) are the OPERATOR's to confirm; this profile only places the models. Needs a multi-arch build for heterogeneous pairs. PROJECTED. J-media 2026-07-28: media_seats are RESIDENT (this template has no swap group) and pinned to the EDITOR card (CUDA_VISIBLE_DEVICES=1) so they never contend with the 26B architect on device 0. qwen3vl-4b at full quality (room on a 16 GB editor card). PROJECTED — which physical card is device 1 is the operator's to confirm, same as the base editor tier.
 
 ## Capability report
 
