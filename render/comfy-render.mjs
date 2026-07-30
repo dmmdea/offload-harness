@@ -103,11 +103,13 @@ if (flags.graph) {
   if (!builtinVAE) graph["10"] = { class_type: "VAELoader", inputs: { vae_name: vae } };
 }
 
-const j = async (url, opts) => { const r = await fetch(url, opts); if (!r.ok) throw new Error(url + " -> " + r.status + " " + (await r.text()).slice(0, 200)); return r.json(); };
+const j = async (url, opts) => { const r = await fetch(url, opts); if (!r.ok) { const e = new Error(url + " -> " + r.status + " " + (await r.text()).slice(0, 200)); e.httpStatus = r.status; throw e; } return r.json(); };
 
 async function waitServer() {
   for (let i = 0; i < 90; i++) {
-    try { const r = await fetch(API + "/system_stats"); if (r.ok) return true; } catch {}
+    // Per-probe abort: a wedged-but-listening server hangs sockets; without a signal the
+    // fetch would stall this loop far past its intended ~3min cap.
+    try { const r = await fetch(API + "/system_stats", { signal: AbortSignal.timeout(8000) }); if (r.ok) return true; } catch {}
     await new Promise(r => setTimeout(r, 2000));
   }
   throw new Error("ComfyUI not reachable on " + API + " after ~3min");
@@ -126,9 +128,39 @@ async function main() {
   // 30 min; the Go harness passes COMFY_WAIT_SEC aligned to its own timeout and its
   // process-tree kill remains the hard stop.
   const waitSec = Number(flags["wait-sec"] || process.env.COMFY_WAIT_SEC || 1800);
+  // Dead-server watchdog (2026-07-30): a ComfyUI that wedges MID-render (queue accepted,
+  // then the server stops answering — model loaded, 0% util, HTTP dead) used to burn the
+  // ENTIRE quality-first budget above while the Go side held the exclusive GPU slot, so
+  // every later job on the node bounced with "gpu busy" until a manual process restart.
+  // "Not reachable" is not "not finished": consecutive FAILED polls (fetch threw) abort
+  // early and release the slot in seconds. A slow render on a HEALTHY server still
+  // answers /history (with no output yet), which resets the counter — the long budget
+  // continues to govern that case, and the Go process-tree kill remains the hard stop.
+  const deadRaw = Number(process.env.COMFY_DEAD_SEC);
+  const deadSec = Number.isFinite(deadRaw) ? Math.max(10, deadRaw) : 240;
+  let lastAnswerAt = Date.now();
+  let prevTickAt = Date.now();
   for (let i = 0; i < Math.max(1, Math.ceil(waitSec / 2)); i++) {
     await new Promise(r => setTimeout(r, 2000));
-    let hist; try { hist = await j(`${API}/history/${prompt_id}`); } catch { continue; }
+    // Suspend/resume fence (this fleet closes lids mid-render by design): a timer jump
+    // means the MACHINE slept, not the server — do not count that time as dead.
+    if (Date.now() - prevTickAt > 120_000) lastAnswerAt = Date.now();
+    prevTickAt = Date.now();
+    let hist;
+    // Per-poll abort (30s): sockets that HANG (wedged-but-listening server) must count
+    // as unreachable time too, or the watchdog goes blind exactly when it is needed —
+    // generous because a swap-thrashed quality render answers slowly but honestly. The
+    // counter is WALL time since the last ANSWER of any kind: an HTTP error status IS
+    // an answer (server alive), only network/abort failures accrue dead time.
+    try { hist = await j(`${API}/history/${prompt_id}`, { signal: AbortSignal.timeout(30_000) }); } catch (e) {
+      if (e && e.httpStatus) { lastAnswerAt = Date.now(); continue; }
+      const deadFor = Math.floor((Date.now() - lastAnswerAt) / 1000);
+      if (deadFor >= deadSec) {
+        throw new Error(`ComfyUI stopped answering mid-render (unreachable ${deadFor}s, COMFY_DEAD_SEC=${deadSec}); aborting early to release the GPU slot`);
+      }
+      continue;
+    }
+    lastAnswerAt = Date.now();
     const h = hist[prompt_id];
     if (!h) continue;
     if (h.status && h.status.status_str === "error") throw new Error("ComfyUI exec error: " + JSON.stringify(h.status).slice(0, 400));

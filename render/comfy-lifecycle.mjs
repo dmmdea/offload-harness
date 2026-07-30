@@ -40,7 +40,7 @@ export const COMFY_PY = resolveComfyPy(COMFY_DIR);
 
 // comfyUp: is a ComfyUI HTTP server already answering on api?
 export async function comfyUp(api = process.env.COMFY_API || "http://127.0.0.1:8188") {
-  try { const r = await fetch(api + "/system_stats"); return r.ok; } catch { return false; }
+  try { const r = await fetch(api + "/system_stats", { signal: AbortSignal.timeout(8000) }); return r.ok; } catch { return false; }
 }
 
 // ensureComfy: if ComfyUI is already up, return null (don't manage someone else's).
