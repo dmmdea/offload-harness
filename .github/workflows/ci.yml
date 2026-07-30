@@ -58,6 +58,16 @@ jobs:
         shell: powershell
         run: .\setup\detect.tests.ps1
 
+      # Build the renderer explicitly so the render self-test does not do it itself
+      # inside PowerShell on a cold runner. render.tests.ps1 self-builds for local dev
+      # convenience, but CI should build once, deterministically, and fail on the BUILD
+      # step (with go's own error) rather than inside a PowerShell throw.
+      - name: Build the renderer
+        shell: powershell
+        run: go build -o ${{ runner.temp }}\local-offload-render.exe .
+
       - name: install.ps1 render self-test
         shell: powershell
+        env:
+          OFFLOAD_HARNESS_EXE: ${{ runner.temp }}\local-offload-render.exe
         run: .\setup\render.tests.ps1
