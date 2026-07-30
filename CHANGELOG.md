@@ -4,6 +4,45 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.37.0] - 2026-07-28
+
+### Added — every serving template can place media seats (the Windows half of W4)
+- **All five `win-*` templates carry an `# offload-seats:` directive and `__SEATS_*__` markers.**
+  Until now only `llama-swap.linux-cuda.yaml` could place a seat, so a tier declaring one was
+  refused on Windows — which meant no further tier could declare seats at all. A tier is a
+  HARDWARE class, so this is the invariant that makes that true in practice, and
+  `TestEveryTemplateCanPlaceSeats` now fails CI if a template loses the ability.
+- **The two all-resident templates accept only the `resident` role.** `win-cuda-resident` and
+  `win-dual-cuda` exist because nothing swaps on those tiers; a `swappable` seat contradicts that,
+  so it is refused BY NAME rather than quietly reshaped into something the operator did not ask for.
+- **Three measured seat knobs the schema could not express:** `image_max_tokens` (a VRAM bound, not
+  a quality knob — it is what keeps one large screenshot from pushing the seat past an 8 GB card),
+  `no_context_shift`, and `no_flash_attn` (whisper.cpp has flash attention default-ON since v1.8.0
+  and it DEGRADES non-English and noisy audio, so a tier serving Spanish asks for `-nfa`). Each is
+  refused on the kind it does not apply to, rather than silently ignored.
+- **`install render` now warns, by exact path, when a declared seat's weights are not on the box.**
+  llama-swap builds `/v1/models` from the CONFIG, not the filesystem — so a seat whose `.gguf` was
+  never downloaded still appears in the roster, `doctor` and `acceptance` both PASS on the alias,
+  and the route fails only when called. Install time is when that is still cheap to fix.
+
+### Fixed — the tier pages understated two tiers' media
+- **`ampere-8` and `blackwell-8` claimed "This tier ships no media configuration"** while the
+  installer bound an image seat on any mid/high-RAM box: `tierdocs` read `config_seed` but not
+  `config_seed_ram_mid_high`. One of those two is the 8 GB reference laptop, and the pages are the
+  collaborator-facing artifact. Both now state the RAM gate explicitly.
+
+### Deliberately NOT shipped
+- **`ampere-8`'s seat declaration is parked, not live** (`_media_seats_pending_installer_delegation`
+  in the tier table). The seats are measured and reproduce the reference laptop's live config
+  exactly, and `local-offload install render --profile ampere-8 --os windows` renders them correctly
+  today — verified accepted by real llama-swap v242, serving `qwen3vl-4b` + `whisper-stt`. But
+  `setup/install.ps1` renders llama-swap with its own PowerShell substitution and never reads
+  `media_seats`, so declaring them makes it refuse: confirmed with `install.ps1 -RenderOnly` on this
+  exact tier, which throws. Shipping the declaration would have made the 8 GB tier uninstallable on
+  Windows. **Next task: make install.ps1 delegate the render to the Go verb** — which requires
+  Step 7 (build) to precede Step 6 (render) and changes `-RenderOnly`'s documented no-build
+  contract, so it is its own reviewed slice rather than a tail-end edit.
+
 ## [0.36.0] - 2026-07-28
 
 ### Changed — residency is declared with `matrix:`, not legacy `groups:` (all six templates)

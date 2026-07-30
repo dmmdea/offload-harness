@@ -418,11 +418,20 @@ func seatBlock(s mediaseat.Seat, p Params, env string) (string, error) {
 		if p.GOOS == "windows" {
 			exe = ".exe"
 		}
+		// A VRAM bound, and the reason it is per-seat: the same VLM on a 6 GB and an
+		// 8 GB card wants different image budgets.
+		bound := ""
+		if s.ImageMaxTokens > 0 {
+			bound += fmt.Sprintf(" --image-max-tokens %d", s.ImageMaxTokens)
+		}
+		if s.NoContextShift {
+			bound += " --no-context-shift"
+		}
 		fmt.Fprintf(&b, "    cmd: >-\n"+
 			"      __LLAMA_BIN__/llama-server%s --model __MODELS__/%s --mmproj __MODELS__/%s\n"+
-			"      --n-gpu-layers 99 --parallel 1 --ctx-size %d --flash-attn __FLASH_ATTN__\n"+
+			"      --n-gpu-layers 99 --parallel 1 --ctx-size %d%s --flash-attn __FLASH_ATTN__\n"+
 			"      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --threads __NTHREADS__ --jinja\n"+
-			"      --reasoning off --port ${PORT} --host 127.0.0.1\n", exe, s.Model, s.MMProj, s.CtxSize)
+			"      --reasoning off --port ${PORT} --host 127.0.0.1\n", exe, s.Model, s.MMProj, s.CtxSize, bound)
 	case mediaseat.KindSTT:
 		// POSIX only: a self-built whisper-server links its own shared objects and
 		// dies at exec without them. The Windows builds are self-contained.
@@ -432,6 +441,12 @@ func seatBlock(s mediaseat.Seat, p Params, env string) (string, error) {
 		vad := ""
 		if s.VADModel != "" {
 			vad = fmt.Sprintf(" --vad --vad-model __MODELS__/%s", s.VADModel)
+		}
+		// -nfa turns flash attention OFF. It is default-ON in whisper.cpp since v1.8.0
+		// and measurably degrades non-English and noisy audio, so a tier serving Spanish
+		// or field recordings asks for it.
+		if s.NoFlashAttn {
+			vad += " -nfa"
 		}
 		fmt.Fprintf(&b, "    cmd: >-\n"+
 			"      %s --model __MODELS__/%s%s\n"+
