@@ -250,7 +250,8 @@ export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://
   }
 
   // Per-model unload first (llama-swap >= v24x). Any failure falls back ONCE to
-  // v208's only unload route — GET /unload, which unloads EVERYTHING — and that
+  // GET /unload — v208's ONLY unload route, and still present-and-total on v242,
+  // which is why the gate below applies on every version — and that
   // fallback is gated on the memory stack not being resident: tearing down the
   // always-on CPU tier to free VRAM it does not hold would trade a render for
   // the memory stack (invariant 1).
