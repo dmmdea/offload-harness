@@ -13,6 +13,18 @@ $psExe   = (Get-Process -Id $PID).Path         # render with the SAME host runni
 $work    = Join-Path ([System.IO.Path]::GetTempPath()) ("offload-render-test-" + [guid]::NewGuid().ToString('N').Substring(0,8))
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
+# Rendering is DELEGATED to `local-offload install render` (ADR 0021). install.ps1 will
+# build a renderer itself if it cannot find one, but that would be a build PER CASE;
+# build it ONCE here and point every case at it via the override this test exists to use.
+$renderExe = Join-Path $work 'local-offload-render.exe'
+Push-Location (Split-Path -Parent $here)
+try {
+  $bo = & go build -o $renderExe . 2>&1
+  if ($LASTEXITCODE -ne 0) { throw "cannot build the renderer under test: $($bo -join ' ')" }
+} finally { Pop-Location }
+$env:OFFLOAD_HARNESS_EXE = $renderExe
+Write-Host "renderer under test: $renderExe"
+
 $fail = 0
 function Ok  { param([string]$m) Write-Host "PASS $m" }
 function Bad { param([string]$m) Write-Host "FAIL $m" -ForegroundColor Red; $script:fail++ }
@@ -87,7 +99,10 @@ if ($macro -match '--flash-attn on')                           { Ok 'ampere-8/mi
 if ($r.yaml -match '(?m)^\s{2}gemma4-26b-a4b:')                 { Ok 'ampere-8/mid includes 26B tier' } else { Bad 'ampere-8/mid 26B present' }
 $b26 = Get-ModelCmd -Yaml $r.yaml -ModelKey 'gemma4-26b-a4b'
 if ($b26 -match '--cpu-moe')                                   { Ok 'ampere-8/mid 26B uses --cpu-moe (ram=mid)' } else { Bad "ampere-8/mid 26B --cpu-moe (got: $b26)" }
-if ($r.yaml -match 'members:\s*\[[^\]]*gemma4-26b-a4b[^\]]*\]') { Ok 'ampere-8/mid 26B in swap-group members' } else { Bad 'ampere-8/mid 26B group member' }
+# Residency is `matrix:` now (ADR 0020), so the 26B is a VAR referenced by a SET
+# rather than an entry in a `members:` list. Both halves must be there: llama-swap
+# rejects a set naming an unknown var, and a var naming an undefined model.
+if ($r.yaml -match '(?m)^\s{4}m26:\s*gemma4-26b-a4b\s*$' -and $r.yaml -match '(?m)^\s{4}interactive:.*\bm26\b') { Ok 'ampere-8/mid 26B is a matrix var referenced by the interactive set' } else { Bad 'ampere-8/mid 26B matrix membership' }
 if ($r.yaml -notmatch '__[A-Z0-9_]+__')                        { Ok 'ampere-8/mid no unsubstituted tokens' } else { Bad 'ampere-8/mid leftover tokens' }
 if ($r.verdict -and [int]$r.verdict.agent_ctx_tokens -eq 16384) { Ok 'ampere-8/mid agent_ctx_tokens=16384' } else { Bad 'ampere-8/mid agent_ctx_tokens' }
 if ($r.yaml -notmatch 'CUDA_MODULE_LOADING')                   { Ok 'ampere-8/mid NO Blackwell runtime env (H4 is blackwell-only)' } else { Bad 'ampere-8/mid unexpected Blackwell env' }
@@ -170,7 +185,15 @@ if ($r.yaml -notmatch 'gemma4-26b-a4b')                        { Ok 'amd-gcn NO 
 
 Write-Host "== dual-gpu - two groups + per-GPU CUDA_VISIBLE_DEVICES, no exclusive swap =="
 $r = Invoke-Render -Backend 'cuda' -ProfileId 'dual-gpu' -RamTier 'mid' -BigRam $false
-if (($r.yaml -split "`r?`n" | Where-Object { $_ -match 'members:\s*\[' }).Count -ge 2) { Ok 'dual-gpu renders TWO groups' } else { Bad 'dual-gpu two groups' }
+# Under `matrix:` the point of this tier is expressed DIRECTLY: one set listing every
+# model conjoined (&) means they may all be co-resident, so nothing swaps. That is
+# stronger than the two swap:false groups it replaced, which only asked the solver
+# nicely. Assert the co-residency AND that no legacy swap topology came back.
+# @() is load-bearing: a single match unwraps to a STRING, and then $dualSet[0] indexes
+# the first CHARACTER instead of the line.
+$dualSet = @($r.yaml -split "`r?`n" | Where-Object { $_ -match '(?m)^\s{4}\w+:\s*"[^"]*&[^"]*"' })
+if ($dualSet.Count -eq 1 -and $dualSet[0] -match 'e4b' -and $dualSet[0] -match 'm26' -and $dualSet[0] -notmatch '\|') { Ok 'dual-gpu renders ONE all-co-resident matrix set (nothing swaps)' } else { Bad "dual-gpu co-resident set (got: $($dualSet -join ' / '))" }
+if ($r.yaml -notmatch '(?m)^groups:' -and $r.yaml -notmatch 'swap:\s*true') { Ok 'dual-gpu has no legacy swap group' } else { Bad 'dual-gpu legacy swap topology returned' }
 if ($r.yaml -match 'CUDA_VISIBLE_DEVICES=0' -and $r.yaml -match 'CUDA_VISIBLE_DEVICES=1') { Ok 'dual-gpu pins device 0 AND device 1' } else { Bad 'dual-gpu CUDA_VISIBLE_DEVICES' }
 if ($r.yaml -notmatch 'exclusive:\s*true')                     { Ok 'dual-gpu has NO exclusive swap group' } else { Bad 'dual-gpu exclusive:true present' }
 # 26B (architect) block must carry the device-0 pin in its env list.
@@ -185,7 +208,10 @@ Write-Host "== cpu - 26B kept on ram=mid OR high (>= ~56GB); dropped on low/min 
 $rHigh = Invoke-Render -Backend 'cpu' -ProfileId 'cpu' -RamTier 'high' -BigRam $false
 $rLow  = Invoke-Render -Backend 'cpu' -ProfileId 'cpu' -RamTier 'low'  -BigRam $false
 if ($rHigh.yaml -match 'gemma4-26b-a4b')                       { Ok 'cpu/high keeps 26B' } else { Bad 'cpu/high 26B present' }
-if ($rLow.yaml -notmatch 'gemma4-26b-a4b')                     { Ok 'cpu/low drops 26B' } else { Bad 'cpu/low 26B dropped' }
+# Comment-insensitive on purpose: the cpu template DOCUMENTS the 26B in prose ("OPTIONAL
+# on CPU - needs >=48GB RAM"), so matching the raw text would fail on a sentence.
+$lowFunctional = (($rLow.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' }) -join "`n"
+if ($lowFunctional -notmatch 'gemma4-26b-a4b')                 { Ok 'cpu/low drops 26B (model block AND matrix var)' } else { Bad 'cpu/low 26B dropped' }
 $macro = Get-CommonMacro $rHigh.yaml
 if ($macro -match '--ctx-size 8192' -and $macro -match '--threads') { Ok 'cpu ctx=8192 + threads substituted' } else { Bad "cpu ctx/threads (got: $macro)" }
 
