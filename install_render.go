@@ -58,25 +58,84 @@ type servingProfile struct {
 	Backend    string `json:"backend"`
 	Include26B bool   `json:"include_26b"`
 	MoE26B     string `json:"moe_26b"`
+	// NCPUMoE is the N for the partial `n_cpu_moe` placement (top N expert layers in
+	// RAM, the rest on the GPU).
+	NCPUMoE int `json:"n_cpu_moe"`
 	// MediaSeats are rendered into the models map and the group their residency
 	// role maps to. The same declaration produces the harness config binding via
 	// internal/tierseed, so the seat and the alias routing to it cannot disagree.
 	MediaSeats []mediaseat.Seat `json:"media_seats"`
+	// GPUEnv is added to every model in the rendered config.
+	GPUEnv []string `json:"gpu_env"`
+	// moeLiteral is set ONLY by fallbackProfile and bypasses moeFlag: the off-matrix
+	// defaults are literal flag strings (`--cpu-moe -ngl 999`, with 999 — not the 99
+	// a declared "gpu" placement renders), and they must stay byte-identical to what
+	// install.ps1 emitted or the delegation silently changes an off-matrix install.
+	moeLiteral string
 }
 
-// moeFlag turns the tier's declared 26B PLACEMENT into the llama.cpp flag form the
-// template carries. The distinction is load-bearing on small cards: "cpu_moe" keeps
-// every expert in RAM, "gpu" offloads them, and getting it backwards either OOMs the
-// card or wastes it.
-func moeFlag(placement string) string {
-	switch placement {
-	case "gpu":
-		return "-ngl 99"
-	case "cpu_moe":
-		return "--cpu-moe"
-	default:
-		return ""
+// fallbackProfile is what an UNKNOWN or absent tier renders. install.ps1 carried this
+// table ("an unknown/absent profile renders the backend's ORIGINAL baked defaults, so
+// the config is always valid even off-matrix") and it has to live here now that the
+// installer delegates — otherwise delegating would turn a working off-matrix install
+// into a hard failure.
+func fallbackProfile(backend string) (servingProfile, error) {
+	switch backend {
+	case "cuda", "cuda-resident", "dual-cuda":
+		return servingProfile{CtxSize: 16384, KVType: "q8_0", FlashAttn: "on", Backend: backend,
+			Include26B: true, moeLiteral: "--cpu-moe -ngl 999"}, nil
+	case "vulkan":
+		return servingProfile{CtxSize: 8192, KVType: "f16", FlashAttn: "on", Backend: backend,
+			Include26B: true, moeLiteral: "-ngl 999"}, nil
+	case "cpu":
+		// The cpu template carries no MoE token, so this is inert in the output; it is
+		// non-empty only because a tier that serves the 26B must name a placement.
+		return servingProfile{CtxSize: 8192, KVType: "f16", FlashAttn: "off", Backend: backend,
+			Include26B: true, moeLiteral: "--cpu-moe"}, nil
 	}
+	return servingProfile{}, fmt.Errorf("no fallback defaults for backend %q (have: cuda, cuda-resident, dual-cuda, vulkan, cpu)", backend)
+}
+
+// moePlacement resolves BOTH the 26B flag form and whether the tier serves it at all.
+// Ported rule-for-rule from install.ps1's Resolve-ProfileParams, and asserted against
+// it: rendering the two side by side is what caught this function returning a bare
+// "--cpu-moe" where the installer emits "--cpu-moe -ngl 999" (the -ngl is what keeps
+// the NON-expert layers on the GPU while every expert sits in RAM).
+//
+// ramTier gates the RAM-hungry placements. "cpu_moe" puts EVERY expert in RAM, so it
+// needs a real RAM path and is dropped on low/min; "n_cpu_moe" pushes only the top N
+// expert layers out and survives `low`, but not `min`. An EMPTY ramTier means the
+// caller does not know, and the gate is skipped — which is what the Linux installer
+// does today, and is recorded as a gap rather than silently changed here.
+func moePlacement(p servingProfile, ramTier string) (flag string, include bool) {
+	include = p.Include26B
+	mode := p.MoE26B
+	gated := ramTier != ""
+	switch {
+	case mode == "drop":
+		include = false
+	case gated && mode == "cpu_moe" && ramTier != "mid" && ramTier != "high":
+		include = false
+	case gated && mode == "n_cpu_moe" && ramTier == "min":
+		include = false
+	}
+	if !include {
+		return "", false
+	}
+	switch mode {
+	case "gpu":
+		return "-ngl 99", true
+	case "cpu_moe":
+		return "--cpu-moe -ngl 999", true
+	case "n_cpu_moe":
+		// A tier naming the partial form without an N is a defect; fall back to the
+		// safe all-experts-in-RAM form rather than emitting a broken flag.
+		if p.NCPUMoE > 0 {
+			return fmt.Sprintf("--n-cpu-moe %d -ngl 999", p.NCPUMoE), true
+		}
+		return "--cpu-moe -ngl 999", true
+	}
+	return "", false
 }
 
 // templateFor picks the serving template for an OS + backend pair, and says exactly
@@ -170,6 +229,8 @@ func runInstallRender(args []string) error {
 	out := fs.String("out", "", "write the rendered config here instead of stdout")
 	root := fs.String("root", ".", "repo root holding setup/templates/profiles.json")
 	home := fs.String("home", "", "install root, for media seat paths (__OFFLOAD_HOME__)")
+	fallback := fs.String("fallback-backend", "", "render off-matrix defaults for this backend when --profile is unknown or empty (cuda|cuda-resident|dual-cuda|vulkan|cpu)")
+	ramTier := fs.String("ram-tier", "", "min|low|mid|high — gates the RAM-hungry 26B placements. Empty = do not gate (the caller does not know)")
 	_ = fs.Parse(args)
 
 	target := *goos
@@ -177,7 +238,12 @@ func runInstallRender(args []string) error {
 		target = runtime.GOOS
 	}
 	id := *profileID
-	if id == "" {
+	// Classifying THIS machine is the convenience default, but it must not happen when
+	// the caller asked for off-matrix defaults: an empty --profile with
+	// --fallback-backend means "this box is not on the matrix", and classifying anyway
+	// silently rendered the RENDERING machine's tier instead (caught by comparing the
+	// delegated output against the PowerShell renderer's).
+	if id == "" && *fallback == "" {
 		id = hwdetect.Classify(hwdetect.Detect()).Profile
 	}
 
@@ -193,7 +259,16 @@ func runInstallRender(args []string) error {
 	}
 	p, ok := doc.Profiles[id]
 	if !ok {
-		return fmt.Errorf("unknown tier %q", id)
+		// Off-matrix is a supported outcome, not an error, WHEN the caller says which
+		// backend to fall back to. install.ps1 has always rendered a valid config for
+		// an unrecognized box; delegating must not take that away.
+		if *fallback == "" {
+			return fmt.Errorf("unknown tier %q (pass --fallback-backend to render off-matrix defaults instead)", id)
+		}
+		if p, err = fallbackProfile(*fallback); err != nil {
+			return err
+		}
+		id = "(off-matrix: " + *fallback + " defaults)"
 	}
 
 	tmpl, err := templateFor(target, p.Backend)
@@ -208,11 +283,15 @@ func runInstallRender(args []string) error {
 			n = 1
 		}
 	}
+	moe, include26B := moePlacement(p, strings.ToLower(strings.TrimSpace(*ramTier)))
+	if p.moeLiteral != "" {
+		moe, include26B = p.moeLiteral, true // off-matrix defaults are literal flags
+	}
 	rendered, err := servingtmpl.Render(tmpl, servingtmpl.Params{
 		LlamaBin: *llamaBin, ModelsDir: *modelsDir, Listen: *listen,
 		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
-		MoE26B: moeFlag(p.MoE26B), Threads: n, Include26B: p.Include26B && p.MoE26B != "drop",
-		Seats: p.MediaSeats, Home: *home, GOOS: target,
+		MoE26B: moe, Threads: n, Include26B: include26B,
+		Seats: p.MediaSeats, Home: *home, GOOS: target, GPUEnv: p.GPUEnv,
 	})
 	if err != nil {
 		return fmt.Errorf("tier %s: %w", id, err)
@@ -227,6 +306,10 @@ func runInstallRender(args []string) error {
 	if err := os.WriteFile(*out, []byte(rendered), 0o644); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s (tier %s, %s/%s)\n", *out, id, osTag(target), p.Backend)
+	// stdout, not stderr: this is a SUCCESS line, and a PowerShell caller with
+	// $ErrorActionPreference='Stop' turns any stderr output from a native command into
+	// a terminating error — which is exactly how the delegated installer first broke.
+	// stdout is free here because the config only goes there when --out is empty.
+	fmt.Printf("wrote %s (tier %s, %s/%s)\n", *out, id, osTag(target), p.Backend)
 	return nil
 }

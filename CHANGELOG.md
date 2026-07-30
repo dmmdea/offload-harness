@@ -4,6 +4,53 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.38.0] - 2026-07-28
+
+### Fixed — a fresh Windows install rendered a config llama-swap REFUSES to load
+Both verified against real llama-swap v242, not inferred. Live nodes were spared only
+because Step 6 skips when a config already exists; a **fresh** install would not have started.
+- **0.36.0 onward:** the PowerShell renderer removed the 26B model block but left its matrix
+  `m26` var behind on any tier that drops the 26B → `matrix: var key "m26" references unknown
+  model "gemma4-26b-a4b"`.
+- **0.37.0 onward:** additionally left literal `__SEATS_RESIDENT__` / `__SEATS_SWAPPABLE__` /
+  `__M26_ALT__` inside matrix set expressions, on **every** tier.
+Root cause of both: `setup/install.ps1` had its own renderer, which never learned what the
+templates had become.
+
+### Changed — `install.ps1` delegates the render; there is now ONE renderer (ADR 0021)
+- Step 6 calls `local-offload install render`. The wrapper keeps only what it alone knows —
+  resolved `ram_tier`, physical-core count, install paths — and passes them as flags. Its
+  renderer internals are gone: `Remove-26bFromYaml` and `Add-GpuEnvToYaml` deleted.
+- **`gpu_env` is now a TIER FIELD.** The Blackwell CUDA env (`CUDA_VISIBLE_DEVICES=0`,
+  `CUDA_MODULE_LOADING=LAZY`) was an `if ($profileId -match '^blackwell-')` branch inside
+  install.ps1, so a **Linux** install of the same tier silently went without it. Same tier,
+  same treatment, on any OS — which is what a tier is for.
+- **`--ram-tier` implements the 26B RAM gate once.** `cpu_moe` puts EVERY expert in RAM, so
+  it is dropped on low/min. The Go renderer had no ram-tier input at all, so Linux served the
+  26B on boxes with no RAM path for it. An empty value means "do not gate", so nothing changes
+  until a caller passes one — `install.sh` still does not, and that is the next gap.
+- **`--fallback-backend`** carries the off-matrix defaults install.ps1 used to hold, so an
+  unrecognized box still renders a valid config instead of failing.
+- `-RenderOnly` is no longer build-free (it resolves a renderer: `$env:OFFLOAD_HARNESS_EXE`,
+  else the installed exe, else a `go build` into a temp dir). Still touches no install
+  artifact. `render.tests.ps1` builds once and points every case at it.
+
+### Added — `ampere-8` declares its measured vision + STT seats
+Parked in 0.37.0 because install.ps1 refused them; the delegation unblocks it. Reproduces the
+8 GB reference laptop's proven live config, including `--image-max-tokens 1024` (the VRAM
+bound) and whisper's `-nfa`. Verified: `install.ps1 -RenderOnly` on `ampere-8` now succeeds and
+the config it writes is **accepted** by llama-swap v242, serving `qwen3vl-4b` + `whisper-stt`.
+`ampere-6` is likewise installable on Windows again.
+
+### How the delegation was proven safe
+Every profile × backend × ram-tier rendered by BOTH renderers — 34 configs — and compared
+line by line ignoring comments: **zero unexplained differences across all 32 comparable
+pairs**. That gate caught three regressions before merge: the renderer classifying the LOCAL
+machine when asked for off-matrix defaults, `--cpu-moe` emitted without its `-ngl 999`, and
+`blackwell-8` missing the CUDA env. Also fixed along the way: `drop26B`'s post-check refused a
+valid config because a template COMMENT names the 26B, and three `render.tests.ps1` assertions
+had gone stale against `groups:` in 0.36.0 (that suite is not in CI, so it drifted silently).
+
 ## [0.37.0] - 2026-07-28
 
 ### Added — every serving template can place media seats (the Windows half of W4)
