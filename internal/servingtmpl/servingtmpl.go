@@ -78,6 +78,12 @@ type Params struct {
 type seatAnchors struct {
 	roles map[string]bool // residency roles this template can place
 	env   string          // env macro for llama-backed seats, e.g. "${ld}"
+	// noTTL: this template gives its models NO ttl, so a seat must not get one either.
+	// A ttl on an all-resident tier means llama-swap unloads the seat after an idle
+	// window — the exact opposite of what "resident" promises. It is per-TEMPLATE and
+	// not per-role: win-cuda-resident carries no ttl anywhere, while win-dual-cuda is
+	// also resident-only and DOES use ttl on every model.
+	noTTL bool
 }
 
 var anchorRe = regexp.MustCompile(`(?m)^#\s*offload-seats:\s*(.+)$`)
@@ -96,8 +102,11 @@ func parseAnchors(tmpl string) (seatAnchors, error) {
 	a := seatAnchors{roles: map[string]bool{}}
 	for _, f := range strings.Fields(all[0][1]) {
 		if k, v, ok := strings.Cut(f, "="); ok {
-			if k == "env" {
+			switch k {
+			case "env":
 				a.env = v
+			case "ttl":
+				a.noTTL = v == "none"
 			}
 			continue
 		}
@@ -296,7 +305,7 @@ func insertSeats(tmpl string, p Params) (string, map[string]string, error) {
 			return "", nil, err
 		}
 		taken[id] = true
-		block, err := seatBlock(s, p, anchors.env)
+		block, err := seatBlock(s, p, anchors)
 		if err != nil {
 			return "", nil, err
 		}
@@ -417,7 +426,8 @@ func addMatrixVar(tmpl, id, model string) (string, error) {
 // ones from the 6 GB reference node — a vision seat carries its own smaller
 // window rather than inheriting the chat tier's, and whisper-server takes its own
 // loader path because it is a separate self-built binary.
-func seatBlock(s mediaseat.Seat, p Params, env string) (string, error) {
+func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
+	env := a.env
 	ttl := s.TTL
 	if ttl <= 0 {
 		ttl = 300
@@ -499,8 +509,15 @@ func seatBlock(s mediaseat.Seat, p Params, env string) (string, error) {
 	// whisper-server's /health is 200 when ready and 503 while loading, and
 	// llama-server's is the same shape — correct for both, and correct ONLY
 	// because neither seat repoints its request path.
-	b.WriteString("    checkEndpoint: /health\n")
-	fmt.Fprintf(&b, "    ttl: %d", ttl)
+	b.WriteString("    checkEndpoint: /health")
+	// A template that gives its own models no ttl gets seats with no ttl either: on an
+	// all-resident tier a ttl means llama-swap unloads the seat after an idle window,
+	// which is exactly what "resident" is supposed to prevent. Per-TEMPLATE, not
+	// per-role — win-dual-cuda is also resident-only and DOES use ttl on every model.
+	if a.noTTL {
+		return b.String(), nil
+	}
+	fmt.Fprintf(&b, "\n    ttl: %d", ttl)
 	return b.String(), nil
 }
 
