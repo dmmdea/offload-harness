@@ -12,6 +12,9 @@
 #                 cuda_driver/cuda_toolkit for the CUDA build selection — synthetic-box testing)
 #
 # -RenderOnly (H2): resolve the profile + render llama-swap.yaml ONLY (Step 1 + Step 6),
+#                 Rendering is DELEGATED to `local-offload install render` (ADR 0021), so
+#                 this needs a renderer binary: $env:OFFLOAD_HARNESS_EXE, else an installed
+#                 one, else a `go build` into a TEMP dir. Still touches no install artifact.
 #   then exit. No winget, no downloads, no Go build, no manifest. Requires OFFLOAD_BACKEND
 #   + OFFLOAD_PROFILE (and OFFLOAD_RAM_TIER) set so no hardware detection runs. -RenderOut
 #   overrides the output path (default $OFFLOAD_HOME\llama-swap.yaml). This is the render
@@ -479,55 +482,6 @@ function Resolve-ProfileParams {
   }
 }
 
-# ---------------------------------------------------------------------------
-# H2: drop the gemma4-26b-a4b model block from a rendered llama-swap yaml AND
-# remove it from every group's members list. Operates on the rendered text so it
-# works for all four templates (cuda/vulkan/cpu/dual-cuda). Returns the edited
-# text. Pure string transform — unit-testable.
-#   * Model block: the top-level "  gemma4-26b-a4b:" key through the next
-#     top-level 2-space model key or a 0-indent line (groups:). A leading
-#     comment block immediately above it (the CPU template's OPTIONAL note) is
-#     also removed so no dangling comment is left behind.
-#   * Group members: strip ", gemma4-26b-a4b" / "gemma4-26b-a4b, " / a lone entry
-#     from any "members: [ ... ]" inline list.
-# ---------------------------------------------------------------------------
-function Remove-26bFromYaml {
-  param([string]$Text)
-  $lines = $Text -split "`r?`n"
-  $out = New-Object System.Collections.Generic.List[string]
-  $i = 0
-  while ($i -lt $lines.Count) {
-    $line = $lines[$i]
-    if ($line -match '^\s{2}gemma4-26b-a4b:\s*$') {
-      # Drop any immediately-preceding comment lines we already emitted (the
-      # 2-space "# ..." note that introduces this model).
-      while ($out.Count -gt 0 -and $out[$out.Count - 1] -match '^\s{2}#') {
-        $out.RemoveAt($out.Count - 1)
-      }
-      # Skip this model block: consume lines until the next 2-space top-level key
-      # (another model) or a 0-indent line (e.g. "groups:") or EOF.
-      $i++
-      while ($i -lt $lines.Count) {
-        $l = $lines[$i]
-        if ($l -match '^\s{2}\S' -or $l -match '^\S' ) { break }   # next key / dedent
-        $i++
-      }
-      continue
-    }
-    if ($line -match 'members:\s*\[') {
-      # Remove the 26B entry from the inline members list, tidy separators.
-      $new = $line
-      $new = $new -replace ',\s*gemma4-26b-a4b', ''
-      $new = $new -replace 'gemma4-26b-a4b\s*,\s*', ''
-      $new = $new -replace 'gemma4-26b-a4b', ''
-      $new = $new -replace '\[\s*,', '['
-      $new = $new -replace ',\s*\]', ']'
-      $out.Add($new); $i++; continue
-    }
-    $out.Add($line); $i++
-  }
-  return ($out -join "`n")
-}
 
 # ---------------------------------------------------------------------------
 # H4: choose the llama.cpp CUDA build from (profile, detected CUDA) — FLEXIBLE,
@@ -603,55 +557,6 @@ function Select-CudaBuild {
     report = @("CUDA build: pinned 12.4 prebuilt (profile=$(if ($ProfileId) { $ProfileId } else { '(none)' }), $cudaDesc).") }
 }
 
-# ---------------------------------------------------------------------------
-# H4: inject the Blackwell runtime env into a rendered llama-swap yaml. Adds the
-# given VAR=VAL entries to every model block under models: — appended into an
-# existing "env: [ ... ]" inline list (e.g. the 26B's GGML_CUDA_DISABLE_GRAPHS),
-# or inserted as a new "    env: [...]" line right after the model key. Entries
-# already present are not duplicated (idempotent). Pure string transform.
-# Why: CUDA_VISIBLE_DEVICES must be EXPLICIT (hybrid-graphics boxes can hand the
-# runtime -1), and CUDA_MODULE_LOADING=LAZY avoids the eager-load cost on
-# Blackwell (llama.cpp #22696).
-# ---------------------------------------------------------------------------
-function Add-GpuEnvToYaml {
-  param([string]$Text, [string[]]$EnvVars)
-  $lines = $Text -split "`r?`n"
-  $out = New-Object System.Collections.Generic.List[string]
-  $inModels = $false
-  $i = 0
-  while ($i -lt $lines.Count) {
-    $line = $lines[$i]
-    if ($line -match '^models:\s*$') { $inModels = $true; $out.Add($line); $i++; continue }
-    elseif ($line -match '^\S') { $inModels = $false }   # any other 0-indent key ends models:
-    if ($inModels -and $line -match '^\s{2}(\S+):\s*$') {
-      # Model block: scan it for an existing inline env list.
-      $blockEnd = $i + 1
-      $envIdx = -1
-      while ($blockEnd -lt $lines.Count -and $lines[$blockEnd] -notmatch '^\s{0,2}\S') {
-        if ($lines[$blockEnd] -match '^\s{4}env:\s*\[(.*)\]\s*$') { $envIdx = $blockEnd }
-        $blockEnd++
-      }
-      $out.Add($line)   # the model key line
-      for ($j = $i + 1; $j -lt $blockEnd; $j++) {
-        if ($j -eq $envIdx) {
-          $existing = $Matches = $null
-          if ($lines[$j] -match '^(\s{4}env:\s*\[)(.*)(\]\s*)$') {
-            $existing = $Matches[2].Trim()
-            $entries = @()
-            if ($existing) { $entries = @($existing -split '\s*,\s*') }
-            foreach ($v in $EnvVars) { if ($entries -notcontains $v) { $entries += $v } }
-            $out.Add("    env: [" + ($entries -join ', ') + "]")
-          } else { $out.Add($lines[$j]) }
-        } else { $out.Add($lines[$j]) }
-      }
-      if ($envIdx -lt 0) { $out.Insert($out.Count - ($blockEnd - $i - 1), "    env: [" + ($EnvVars -join ', ') + "]") }
-      $i = $blockEnd
-      continue
-    }
-    $out.Add($line); $i++
-  }
-  return ($out -join "`n")
-}
 
 # ---------------------------------------------------------------------------
 # Task 3 (2026-07-16 Blackwell-tier plan): overlay a profile's config_seed onto
@@ -997,6 +902,33 @@ if ($withMedia) {
 }
 }  # end if (-not $RenderOnly) — Steps 2-5 (artifact acquisition)
 
+# Resolve-HarnessExe returns a local-offload.exe able to render a serving config.
+# Step 6 delegates rendering to it, but Step 7 is what BUILDS the installed copy, so
+# at Step 6 time there may not be one yet. Resolution order, cheapest first:
+#   1. $env:OFFLOAD_HARNESS_EXE  - an explicit override; render.tests.ps1 builds once
+#                                  and points every case at it instead of paying a
+#                                  build per render.
+#   2. the already-installed exe - true on every re-install.
+#   3. `go build` into a temp dir - Go is a verified prereq well before Step 6, and
+#                                  this touches NO install artifact, which keeps
+#                                  -RenderOnly side-effect-free with respect to the
+#                                  install tree (it is no longer build-free, and the
+#                                  header says so).
+function Resolve-HarnessExe {
+  if ($env:OFFLOAD_HARNESS_EXE -and (Test-Path $env:OFFLOAD_HARNESS_EXE)) { return $env:OFFLOAD_HARNESS_EXE }
+  $installed = Join-Path (Join-Path $HOME_DIR 'harness') 'local-offload.exe'
+  if (Test-Path $installed) { return $installed }
+  $repoRoot = Split-Path -Parent $scriptDir
+  $tmpExe = Join-Path ([System.IO.Path]::GetTempPath()) ("offload-render-" + [guid]::NewGuid().ToString('N').Substring(0,8) + ".exe")
+  Push-Location $repoRoot
+  try {
+    $buildOut = & go build -o $tmpExe . 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "cannot build the renderer from $repoRoot ($LASTEXITCODE): $($buildOut -join ' ')" }
+  } finally { Pop-Location }
+  if (-not (Test-Path $tmpExe)) { throw "go build reported success but produced no $tmpExe" }
+  return $tmpExe
+}
+
 # ---------------------------------------------------------------------------
 # Step 6: render llama-swap.yaml PROFILE-DRIVEN (H2). The template is chosen by
 # the profile's backend (cuda|vulkan|cpu|dual-cuda), and the profile's serving
@@ -1010,27 +942,6 @@ if ($withMedia) {
 # ---------------------------------------------------------------------------
 $profilesJson = Join-Path (Join-Path $scriptDir 'templates') 'profiles.json'
 
-# Media seats (ADR 0019) are rendered by the GO renderer (`local-offload install
-# render`), which reads the tier's `media_seats` and places each into the models
-# map and a group. THIS script is a second, older renderer that does not know the
-# key exists. Rendering here would silently produce a config with no vision/STT
-# seat while the tier table says the box serves them - silent capability loss
-# across an OS boundary, which is precisely what this tier schema forbids. So it
-# refuses by name rather than installing a quietly degraded node.
-$seatDoc = Get-Content -Raw -LiteralPath $profilesJson | ConvertFrom-Json
-$declaredSeats = if ($profileId -and $seatDoc.profiles.PSObject.Properties.Name -contains $profileId) {
-  $seatDoc.profiles.$profileId.media_seats
-} else { $null }
-if ($declaredSeats -and @($declaredSeats).Count -gt 0) {
-  $names = (@($declaredSeats) | ForEach-Object { "$($_.kind):$($_.name)" }) -join ', '
-  throw ("profile '$profileId' declares media seats ($names) but THIS SCRIPT renders llama-swap with its own " +
-         "PowerShell substitution and never reads 'media_seats'. Installing anyway would leave the box advertising " +
-         "vision/STT it cannot serve. The win-* templates DO carry an '# offload-seats:' directive now, and " +
-         "'local-offload install render --profile $profileId --os windows --home <root>' renders these seats " +
-         "correctly today - the gap is only this wrapper. Fix: make Step 6 delegate to that verb, which requires " +
-         "Step 7 (build the harness) to run first and changes the -RenderOnly no-build contract. Until then, render " +
-         "the serving config with the Go verb and re-run this script with the yaml already in place.")
-}
 
 $pp = Resolve-ProfileParams -ProfileId $profileId -RamTier $ramTier -BigRam $bigRam -ProfilesJsonPath $profilesJson -Backend $backend
 # The template to render: the profile's backend (dual-gpu -> dual-cuda; the
@@ -1053,41 +964,49 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     (($tplBackend -ne 'vulkan') -or (Select-String -Path $yamlDest -SimpleMatch -Pattern 'GGML_VK_VISIBLE_DEVICES' -Quiet))   # J1: vulkan render without the device pin = stale pre-0.22.19 render
   } `
   {
-    $tpl = Join-Path (Join-Path $scriptDir 'templates') "llama-swap.win-$tplBackend.yaml"
-    if (-not (Test-Path $tpl)) { throw "template not found: $tpl" }
-    $text = Get-Content -Raw $tpl
+    # DELEGATED to `local-offload install render` (ADR 0021). This script used to
+    # substitute the template's tokens itself, which made it a SECOND renderer: it
+    # never learned about `media_seats`, so a seat-declaring tier could not be
+    # installed on Windows at all, and the Blackwell CUDA env was applied by a
+    # `-match '^blackwell-'` branch that a Linux install of the same tier never got.
+    # ONE renderer, in the binary, consumed by both wrappers - which is what section 3
+    # of the first-class-install plan always described.
+    $offloadRender = Resolve-HarnessExe
+    $renderArgs = @(
+      'install', 'render',
+      '--os', 'windows',
+      '--llama-bin', $llamaDir.Replace('\', '/'),
+      '--models', $modelDir.Replace('\', '/'),
+      '--home', $HOME_DIR.Replace('\', '/'),
+      '--listen', '127.0.0.1:11436',
+      '--out', $yamlDest,
+      '--root', (Split-Path -Parent $scriptDir)
+    )
+    # An unknown/absent profile still renders: the binary carries the same off-matrix
+    # backend defaults this script used to hold, keyed by the TEMPLATE's backend.
+    if ($pp.known -and $profileId) { $renderArgs += @('--profile', $profileId) }
+    else { $renderArgs += @('--fallback-backend', $tplBackend) }
+    # --threads matters only where the template carries the token (the cpu backend),
+    # and there it is PHYSICAL cores - the value this script has always used.
+    $cores = (Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum
+    if (-not $cores -or $cores -lt 1) { $cores = [Environment]::ProcessorCount }
+    $renderArgs += @('--threads', "$cores")
+    # The RAM gate on the 26B lives in the binary now, but the VALUE is this script's:
+    # it resolves ram_tier from the detect verdict (or OFFLOAD_RAM_TIER), defaulting to
+    # 'min'. Passing it keeps the gate byte-identical to what this script used to do
+    # itself - cpu_moe needs a real RAM path and is dropped on low/min.
+    if ($ramTier) { $renderArgs += @('--ram-tier', $ramTier) }
 
-    # Profile-driven serving params. $pp always carries concrete values (a known
-    # profile's, or the backend fallback's), so substitution is unconditional -
-    # the fully-tokenized templates would otherwise leave __CTX__ etc. in a config.
-    $text = $text.Replace('__CTX__', $pp.ctx)
-    $text = $text.Replace('__KV_K__', $pp.kv_k).Replace('__KV_V__', $pp.kv_v)
-    $text = $text.Replace('__FLASH_ATTN__', $pp.flash_attn)
-    $text = $text.Replace('__MOE_26B__', $pp.moe_26b)
-    if (-not $pp.include_26b) { $text = Remove-26bFromYaml -Text $text }
-    # H4 Blackwell runtime env: CUDA_VISIBLE_DEVICES explicit (hybrid-graphics -1
-    # trap) + CUDA_MODULE_LOADING=LAZY (llama.cpp #22696). Single-GPU Blackwell
-    # profiles only — the dual-cuda template already pins devices per group.
-    if ($profileId -match '^blackwell-') {
-      $text = Add-GpuEnvToYaml -Text $text -EnvVars @('CUDA_VISIBLE_DEVICES=0','CUDA_MODULE_LOADING=LAZY')
-    }
-
-    $llamaDirFwd = $llamaDir.Replace('\', '/')
-    $modelDirFwd = $modelDir.Replace('\', '/')
-    # Replace token+backslash together so the template's own literal '\' path separator
-    # (baked in right after each token, e.g. "__LLAMA_BIN__\llama-server.exe") also becomes
-    # forward-slash - a plain token substitution would leave that literal backslash behind.
-    $text = $text.Replace('__LLAMA_BIN__\', "$llamaDirFwd/").Replace('__MODELS__\', "$modelDirFwd/")
-    $text = $text.Replace('__LLAMA_BIN__', $llamaDirFwd).Replace('__MODELS__', $modelDirFwd)
-    if ($tplBackend -eq 'cpu') {
-      $cores = (Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum
-      if (-not $cores -or $cores -lt 1) { $cores = [Environment]::ProcessorCount }
-      $text = $text.Replace('__NTHREADS__', "$cores")
-    }
-    # UTF8 without BOM (llama-swap's YAML parser rejects a BOM). PS 5.1's -Encoding
-    # UTF8 writes a BOM, so use an explicit no-BOM encoder for both hosts.
-    $noBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($yamlDest, $text, $noBom)
+    # A native command writing to stderr becomes a TERMINATING error under
+    # $ErrorActionPreference='Stop', so warnings from the renderer would abort the
+    # install. Capture on Continue, then decide from the exit code.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $renderOut = & $offloadRender @renderArgs 2>&1 } finally { $ErrorActionPreference = $prevEap }
+    if ($LASTEXITCODE -ne 0) { throw "install render failed ($LASTEXITCODE): $($renderOut -join ' ')" }
+    # Surface the binary's own warnings (e.g. a declared seat whose weights are absent).
+    $renderOut | Where-Object { $_ -match 'WARNING' } | ForEach-Object { Write-Host "      $_" -ForegroundColor Yellow }
+    if (-not (Test-Path $yamlDest)) { throw "install render reported success but wrote no $yamlDest" }
   }
 
 # -RenderOnly stops here: config rendered, no artifacts/build/manifest. Emit a

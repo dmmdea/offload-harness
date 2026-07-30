@@ -19,24 +19,26 @@ models:
   offload-e4b:
     aliases: [gemma4-e4b]
     cmd: >-
-      __LLAMA_BIN__\llama-server.exe -m __MODELS__\gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf
       --parallel 1 ${common}
     ttl: 300
   gemma4-e2b:
     cmd: >-
-      __LLAMA_BIN__\llama-server.exe -m __MODELS__\gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
       ${common}
     ttl: 300
   # gemma4-26b-a4b: OPTIONAL on CPU — needs >=48GB RAM. Also remove from the
-  # offload-family members list below if you do not install this model.
+  # matrix var + set expression below if you do not install this model. The renderer
+  # does exactly that when the tier drops the 26B (include_26b false, or a cpu_moe
+  # placement on a low/min RAM tier), so this is only a hand-edit note.
   gemma4-26b-a4b:
     cmd: >-
-      __LLAMA_BIN__\llama-server.exe -m __MODELS__\gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
       --parallel 1 ${common}
     ttl: 300
   embeddinggemma:
     cmd: >-
-      __LLAMA_BIN__\llama-server.exe -m __MODELS__\embeddinggemma-300m-Q8_0.gguf
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/embeddinggemma-300m-Q8_0.gguf
       --embedding --pooling mean --ctx-size 2048 --parallel 4 --threads __NTHREADS__ --port ${PORT} --host 127.0.0.1
     ttl: 600
 

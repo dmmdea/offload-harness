@@ -91,12 +91,16 @@ func effectiveConfig(t *testing.T, prof tierseed.Profile, id, goos string) confi
 }
 
 func renderParams(prof servingProfile, goos string) servingtmpl.Params {
+	// No ram tier: the closure gate asks whether a BOUND alias is served, and the RAM
+	// gate only ever removes the 26B — which no media binding routes to. Passing "" is
+	// the ungated case, i.e. the widest roster a tier can render.
+	moe, include26B := moePlacement(prof, "")
 	return servingtmpl.Params{
 		LlamaBin: "/opt/offload/bin", ModelsDir: "/opt/offload/models",
 		Listen: "127.0.0.1:11436", Ctx: prof.CtxSize, KVType: prof.KVType,
-		FlashAttn: prof.FlashAttn, MoE26B: moeFlag(prof.MoE26B), Threads: 8,
-		Include26B: prof.Include26B && prof.MoE26B != "drop",
-		Seats:      prof.MediaSeats, Home: "/opt/offload", GOOS: goos,
+		FlashAttn: prof.FlashAttn, MoE26B: moe, Threads: 8,
+		Include26B: include26B,
+		Seats:      prof.MediaSeats, Home: "/opt/offload", GOOS: goos, GPUEnv: prof.GPUEnv,
 	}
 }
 
