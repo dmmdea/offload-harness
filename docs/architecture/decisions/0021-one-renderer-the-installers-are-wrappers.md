@@ -76,10 +76,13 @@ field had been added to the other four Blackwell tiers only.
   the same treatment, which is the whole point of a tier.
 - `install.ps1`'s renderer internals are dead and were removed. `Remove-26bFromYaml` and
   `Add-GpuEnvToYaml` no longer have a caller in the render path.
-- **`install.sh` still passes no `--ram-tier`**, so the Linux gate is inert until it does.
-  An empty ram tier deliberately means "do not gate" rather than "drop", so this changes
-  nothing today — but the Go side has no ram-tier derivation (`install detect` reports
-  `ram_gb`, not a tier), and that is the next gap.
+- ~~**`install.sh` still passes no `--ram-tier`**, so the Linux gate is inert until it
+  does.~~ **CLOSED in 0.39.0:** `hwdetect.RAMTier` ports detect.ps1's thresholds, `install
+  detect` emits `ram_tier` on the verdict, and `install.sh` passes it to BOTH `install
+  seed` and `install render` — refusing to install if detect returns none, rather than
+  silently running with both gates off. That also closed a second, quieter half of the
+  same gap: `install seed` never received a ram tier either, so the RAM-gated media seed
+  (`config_seed_ram_mid_high`) had never applied on Linux at all.
 - `render.tests.ps1` needs Go on PATH. It always ran from a checkout, so this is not new
   in practice, and it is stated in the header.
 

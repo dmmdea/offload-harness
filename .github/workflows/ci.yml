@@ -26,3 +26,38 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+      # The render runners are ~170 node:test assertions that were never in CI.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+
+      - name: Test render runners
+        run: node --test render/*.test.mjs
+
+  # The installer's own suites drifted silently for two releases (0.36.0 moved the
+  # templates to `matrix:` and three render.tests.ps1 assertions kept asserting
+  # `groups:`) because nothing ran them. They are pure/synthetic — detect.tests.ps1
+  # drives detect.ps1 -SelfTest over synthetic tuples, and render.tests.ps1 renders
+  # with OFFLOAD_BACKEND/OFFLOAD_PROFILE set so no hardware detection happens — so a
+  # runner is a valid host for both. render.tests.ps1 needs Go: rendering is delegated
+  # to `local-offload install render` (ADR 0021) and it builds the renderer once.
+  installer-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: detect.ps1 classifier self-test
+        shell: powershell
+        run: .\setup\detect.tests.ps1
+
+      - name: install.ps1 render self-test
+        shell: powershell
+        run: .\setup\render.tests.ps1
