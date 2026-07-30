@@ -96,6 +96,15 @@ TIER="$(printf '%s' "$DETECT_JSON" | jq -r .verdict.profile)"
 [ -n "$TIER" ] && [ "$TIER" != "null" ] || die "could not classify this machine"
 say "tier:      $TIER  ($(printf '%s' "$DETECT_JSON" | jq -r .verdict.reason))"
 
+# ram_tier gates BOTH the 26B placement (--cpu-moe puts every expert in RAM, so it is
+# dropped without a real RAM path) and the RAM-gated media seed. This script passed
+# neither, so both gates were inert on Linux: a tier served the 26B on a box that
+# cannot host it, and the mid/high-only image seed never applied. An EMPTY value means
+# "do not gate", so it is a hard failure here rather than a silent downgrade.
+RAM_TIER="$(printf '%s' "$DETECT_JSON" | jq -r '.verdict.ram_tier // empty')"
+[ -n "$RAM_TIER" ] || die "detect returned no ram_tier — refusing to install with both RAM gates inert"
+say "ram_tier:  $RAM_TIER  ($(printf '%s' "$DETECT_JSON" | jq -r .facts.ram_gb) GB)"
+
 # ---- 2. where should it live? -----------------------------------------------
 if [ -z "$PREFIX" ]; then
   VOL_JSON="$("$BIN" install volumes --json 2>/dev/null || true)"
@@ -130,7 +139,7 @@ fi
 # A seed failure is FATAL, never a silent '{}': an install that quietly ships no
 # media bindings is exactly the drift this path exists to end. A tier that
 # genuinely has none says so on stdout and is not an error.
-if ! SEED="$("$BIN" install seed --profile "$TIER" --home "$PREFIX" --os linux)"; then
+if ! SEED="$("$BIN" install seed --profile "$TIER" --home "$PREFIX" --os linux --ram-tier "$RAM_TIER")"; then
   die "could not resolve the media seed for tier $TIER"
 fi
 case "$SEED" in *"ships no media"*) SEED='{}'; say "media:     tier $TIER ships none — text only until bound by hand" ;; esac
@@ -156,6 +165,7 @@ else
   # install root, and without it the render REFUSES — after step 4 has already
   # written a config.json binding those seats' aliases.
   "$BIN" install render --profile "$TIER" --os linux --home "$PREFIX" \
+    --ram-tier "$RAM_TIER" \
     --llama-bin "$LLAMA_BIN" --models "$MODELS" --listen "$LISTEN" --out "$SWAP_YAML"
 fi
 
