@@ -365,3 +365,28 @@ test("freeLlamaSwap refuses the unload-all fallback while a memory-stack model i
   assert.ok(logged.some((m) => /memory stack|cannot unload-all|per-model unload unavailable/i.test(m)),
     "and the refusal is loud, naming why");
 });
+
+test("freeLlamaSwap refuses to unload anything when /running is unreadable", async () => {
+  const calls = [];
+  const logged = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v1/models")) {
+      return { ok: true, status: 200, json: async () => ({ data: [{ id: "gemma4-e2b" }] }) };
+    }
+    if (u.endsWith("/running")) {
+      return { ok: false, status: 500, json: async () => ({}) };
+    }
+    calls.push(u);
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  try {
+    await freeLlamaSwap("http://x", {
+      quiesce: async () => ({ drained: true, waitedMs: 0, unknown: [] }),
+      log: (m) => logged.push(m),
+    });
+  } finally { globalThis.fetch = realFetch; }
+  assert.equal(calls.length, 0, "blind => no unload, no drain, no fallback");
+  assert.ok(logged.some((m) => /NOT unloading/.test(m)), "and the refusal is loud");
+});
