@@ -44,11 +44,50 @@ type Verdict struct {
 	// see the Optane drive that really distinguishes it, so RAM approximates it.
 	BigRAM bool   `json:"big_ram"`
 	Reason string `json:"reason"`
+	// RAMTier gates the RAM-hungry 26B placements and the RAM-gated config_seed
+	// overlay. detect.ps1 has always emitted it; this side reported raw ram_gb only,
+	// so the Linux installer had nothing to pass and BOTH gates were inert there —
+	// a tier served the 26B on a box with no RAM path for it, and the mid/high-only
+	// image seed never applied.
+	RAMTier string `json:"ram_tier"`
 }
 
-// Classify maps facts to a tier. A straight port of detect.ps1's Get-Profile —
-// same order, same boundaries.
+// RAM tier boundaries, in GB. A straight port of detect.ps1's Get-RamTier, asserted
+// against the same table its own self-test uses (128 high, 64 mid, 56 mid, 32 low,
+// 16 min) so the two cannot drift.
+const (
+	ramHighGb = 120 // the 128 GB config
+	ramMidGb  = 56  // 64 GB configs — this is what unlocks the 26B via --cpu-moe
+	ramLowGb  = 28  // 32 GB
+)
+
+// RAMTier maps RAM size to the tier name the installers gate on.
+func RAMTier(ramGb int) string {
+	switch {
+	case ramGb >= ramHighGb:
+		return "high"
+	case ramGb >= ramMidGb:
+		return "mid"
+	case ramGb >= ramLowGb:
+		return "low"
+	default:
+		return "min"
+	}
+}
+
+// Classify maps facts to a tier and its RAM tier. The RAM tier is stamped HERE, in
+// one place, rather than at each return: the profile logic has early returns and a
+// verdict that silently carried an empty ram_tier would leave both RAM gates inert
+// without anything failing.
 func Classify(f Facts) Verdict {
+	v := classifyProfile(f)
+	v.RAMTier = RAMTier(f.RAMGb)
+	return v
+}
+
+// classifyProfile is the profile decision only — a straight port of detect.ps1's
+// Get-Profile, same order, same boundaries.
+func classifyProfile(f Facts) Verdict {
 	vendor := strings.ToLower(f.Vendor)
 	arch := strings.ToLower(f.Arch)
 
