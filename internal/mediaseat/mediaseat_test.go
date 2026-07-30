@@ -58,6 +58,11 @@ func TestValidateRejects(t *testing.T) {
 			"may not carry __OFFLOAD_HOME__"},
 		{"vision with bin", func(s []Seat) []Seat { s[0].Bin = "/x/llama-server"; return s }, "always"},
 		{"stt with mmproj", func(s []Seat) []Seat { s[1].MMProj = "p.gguf"; return s }, "vision-only"},
+		// Kind-mismatched knobs are refused rather than silently ignored: a tier author
+		// who sets one believes it applies.
+		{"stt with image_max_tokens", func(s []Seat) []Seat { s[1].ImageMaxTokens = 512; return s }, "vision-only"},
+		{"stt with no_context_shift", func(s []Seat) []Seat { s[1].NoContextShift = true; return s }, "vision-only"},
+		{"vision with no_flash_attn", func(s []Seat) []Seat { s[0].NoFlashAttn = true; return s }, "whisper.cpp flag"},
 		{"two vision seats", func(s []Seat) []Seat {
 			s[1] = Seat{Kind: KindVision, Name: "other", Model: "m", MMProj: "p", CtxSize: 1, Residency: Resident}
 			return s

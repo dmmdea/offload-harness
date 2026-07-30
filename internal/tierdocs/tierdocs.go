@@ -26,17 +26,22 @@ import (
 // are preserved in Extra so a new field surfaces in the docs as soon as it is
 // added, instead of silently going undocumented.
 type Profile struct {
-	CtxSize        int             `json:"ctx_size"`
-	KVType         string          `json:"kv_type"`
-	AgentCtxTokens int             `json:"agent_ctx_tokens"`
-	ResidentTier   string          `json:"resident_tier"`
-	Include26B     bool            `json:"include_26b"`
-	MoE26B         string          `json:"moe_26b"`
-	FlashAttn      string          `json:"flash_attn"`
-	Backend        string          `json:"backend"`
-	DualResident   bool            `json:"dual_resident"`
-	Notes          string          `json:"notes"`
-	ConfigSeed     map[string]any  `json:"config_seed"`
+	CtxSize        int            `json:"ctx_size"`
+	KVType         string         `json:"kv_type"`
+	AgentCtxTokens int            `json:"agent_ctx_tokens"`
+	ResidentTier   string         `json:"resident_tier"`
+	Include26B     bool           `json:"include_26b"`
+	MoE26B         string         `json:"moe_26b"`
+	FlashAttn      string         `json:"flash_attn"`
+	Backend        string         `json:"backend"`
+	DualResident   bool           `json:"dual_resident"`
+	Notes          string         `json:"notes"`
+	ConfigSeed     map[string]any `json:"config_seed"`
+	// ConfigSeedMidHigh is the RAM-gated overlay. It was absent here, so a tier whose
+	// ONLY media binding is RAM-gated (ampere-8, blackwell-8 — one of them the 8 GB
+	// reference laptop) had its page claim it "ships no media configuration" while the
+	// installer bound an image seat on any mid/high-RAM box.
+	ConfigSeedMidHigh map[string]any `json:"config_seed_ram_mid_high"`
 	// MediaSeats are the ALIAS-backed media capabilities (vision / STT) the tier
 	// serves. They are a separate axis from ConfigSeed — seats become llama-swap
 	// models, seed keys become spawn-per-job bindings — and a page that showed only
@@ -133,6 +138,8 @@ a Windows class.
 		media := "—"
 		if len(p.ConfigSeed) > 0 {
 			media = mediaSummary(p.ConfigSeed)
+		} else if len(p.ConfigSeedMidHigh) > 0 {
+			media = mediaSummary(p.ConfigSeedMidHigh) + " (RAM-gated)"
 		}
 		if n := len(p.MediaSeats); n > 0 {
 			kinds := make([]string, 0, n)
@@ -236,17 +243,37 @@ func renderTier(name string, p Profile, reports []string) string {
 		}
 		b.WriteString("\nA seat still needs its weights on the box — model downloads stay out-of-band, as with\nevery seed.\n\n")
 	}
-	if len(p.ConfigSeed) == 0 && len(p.MediaSeats) > 0 {
+	if len(p.ConfigSeedMidHigh) > 0 {
+		b.WriteString("This tier's media bindings are **RAM-gated** (`config_seed_ram_mid_high`): the installer applies\n" +
+			"them only when the detected `ram_tier` is `mid` or `high`, so the same tier on a low-RAM box\n" +
+			"honestly serves text only.\n\n| key | value |\n|---|---|\n")
+		keys := make([]string, 0, len(p.ConfigSeedMidHigh))
+		for k := range p.ConfigSeedMidHigh {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(&b, "| `%s` | `%s` |\n", k, valueString(p.ConfigSeedMidHigh[k]))
+		}
+		b.WriteString("\n")
+	}
+	switch {
+	case len(p.ConfigSeed) == 0 && len(p.ConfigSeedMidHigh) == 0 && len(p.MediaSeats) > 0:
 		// Seats but no seed: a real combination, and the seed branch below would
 		// print an empty table under a heading claiming bindings exist.
 		b.WriteString("It ships no file-backed media seed, so `generate_image` / `generate_video` /\n" +
 			"`generate_audio` / `run_graph` report `NOT CONFIGURED` until an operator binds them.\n")
-	} else if len(p.ConfigSeed) == 0 {
+	case len(p.ConfigSeed) == 0 && len(p.ConfigSeedMidHigh) == 0:
 		b.WriteString("**This tier ships no media configuration.** It serves text only until an operator binds\n" +
 			"the media routes by hand, so `generate_image`, `generate_video`, `generate_audio` and\n" +
 			"`run_graph` will report `NOT CONFIGURED` — or `BOUND-BUT-MISSING` where a shipped default\n" +
 			"script path does not exist on the machine. Run `local-offload doctor` to see which.\n")
-	} else {
+	case len(p.ConfigSeed) == 0:
+		// RAM-gated only: the overlay table above IS the whole media story. Falling
+		// through would print an empty `config_seed` table under a heading saying it
+		// has bindings.
+		b.WriteString("It ships no unconditional `config_seed` — the RAM-gated overlay above is the whole\nmedia binding for this tier.\n")
+	default:
 		b.WriteString("The installer seeds this tier's media bindings (`config_seed`):\n\n| key | value |\n|---|---|\n")
 		keys := make([]string, 0, len(p.ConfigSeed))
 		for k := range p.ConfigSeed {

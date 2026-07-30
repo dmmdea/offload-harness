@@ -1023,10 +1023,13 @@ $declaredSeats = if ($profileId -and $seatDoc.profiles.PSObject.Properties.Name 
 } else { $null }
 if ($declaredSeats -and @($declaredSeats).Count -gt 0) {
   $names = (@($declaredSeats) | ForEach-Object { "$($_.kind):$($_.name)" }) -join ', '
-  throw ("profile '$profileId' declares media seats ($names) but install.ps1 renders llama-swap itself and " +
-         "cannot place them. Installing anyway would leave this box advertising vision/STT it cannot serve. " +
-         "Render the serving config with 'local-offload install render --profile $profileId --os windows --home <root>' " +
-         "once a win-* template carries an '# offload-seats:' directive - tracked as the Windows slice of W4.")
+  throw ("profile '$profileId' declares media seats ($names) but THIS SCRIPT renders llama-swap with its own " +
+         "PowerShell substitution and never reads 'media_seats'. Installing anyway would leave the box advertising " +
+         "vision/STT it cannot serve. The win-* templates DO carry an '# offload-seats:' directive now, and " +
+         "'local-offload install render --profile $profileId --os windows --home <root>' renders these seats " +
+         "correctly today - the gap is only this wrapper. Fix: make Step 6 delegate to that verb, which requires " +
+         "Step 7 (build the harness) to run first and changes the -RenderOnly no-build contract. Until then, render " +
+         "the serving config with the Go verb and re-run this script with the yaml already in place.")
 }
 
 $pp = Resolve-ProfileParams -ProfileId $profileId -RamTier $ramTier -BigRam $bigRam -ProfilesJsonPath $profilesJson -Backend $backend

@@ -16,10 +16,19 @@
 
 ## Media
 
-**This tier ships no media configuration.** It serves text only until an operator binds
-the media routes by hand, so `generate_image`, `generate_video`, `generate_audio` and
-`run_graph` will report `NOT CONFIGURED` — or `BOUND-BUT-MISSING` where a shipped default
-script path does not exist on the machine. Run `local-offload doctor` to see which.
+This tier's media bindings are **RAM-gated** (`config_seed_ram_mid_high`): the installer applies
+them only when the detected `ram_tier` is `mid` or `high`, so the same tier on a low-RAM box
+honestly serves text only.
+
+| key | value |
+|---|---|
+| `imagegen_ckpt` | `hidream_o1_image_bf16.safetensors` |
+| `imagegen_family` | `hidream-o1` |
+| `imagegen_timeout_sec` | `3600` |
+| `imagegen_vae` | `builtin` |
+
+It ships no unconditional `config_seed` — the RAM-gated overlay above is the whole
+media binding for this tier.
 
 ## Operator notes
 
