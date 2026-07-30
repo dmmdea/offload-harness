@@ -278,6 +278,45 @@ func TestEveryTemplateCanPlaceSeats(t *testing.T) {
 	}
 }
 
+// TestATemplateWithNoTTLGivesItsSeatsNoTTL: win-cuda-resident carries no `ttl` on any
+// model because its whole premise is that everything stays hot. A ttl on a seat there
+// would have llama-swap unload it after an idle window — the opposite of "resident".
+// It is per-TEMPLATE, not per-role: win-dual-cuda is also resident-only and DOES use
+// ttl, so a role-based rule would have been wrong.
+func TestATemplateWithNoTTLGivesItsSeatsNoTTL(t *testing.T) {
+	read := func(name string) string {
+		b, err := os.ReadFile(filepath.Join("..", "..", "setup", "templates", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	p := seatParams(visionSeat())
+	p.Seats[0].Residency = mediaseat.Resident
+	p.GOOS = "windows"
+
+	noTTL, err := Render(read("llama-swap.win-cuda-resident.yaml"), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(section(noTTL, "  gemma4-e4b-vision:"), "ttl:") {
+		t.Errorf("a ttl=none template must not give its seat a ttl:\n%s", section(noTTL, "  gemma4-e4b-vision:"))
+	}
+	if !strings.Contains(noTTL, "checkEndpoint: /health") {
+		t.Error("dropping the ttl must not drop the health check with it")
+	}
+
+	// The sibling resident-only template DOES use ttl — the seat must follow it.
+	withTTL, err := Render(read("llama-swap.win-dual-cuda.yaml"), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(section(withTTL, "  gemma4-e4b-vision:"), "ttl: 300") {
+		t.Errorf("a template that uses ttl must still give its seat one:\n%s",
+			section(withTTL, "  gemma4-e4b-vision:"))
+	}
+}
+
 // TestSeatsAreRefusedByNameWhenTheTemplateCannotPlaceThem. Silently dropping them
 // is the exact failure this workstream exists to end: a node that renders clean,
 // reports success, and has quietly lost a capability because of its OS.

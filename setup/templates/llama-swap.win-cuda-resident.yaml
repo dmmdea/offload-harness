@@ -56,7 +56,7 @@ models:
 # rendering for — a tier declaring one is refused BY NAME rather than quietly reshaped.
 # The SEATS_RESIDENT marker below (wrapped in double underscores) says where a resident
 # seat joins. No `env=`: a Windows llama-server build is self-contained.
-# offload-seats: resident
+# offload-seats: resident ttl=none
 matrix:
   vars:
     emb: embeddinggemma
