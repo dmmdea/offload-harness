@@ -16,6 +16,18 @@
 
 ## Media
 
+This tier serves these media **seats** — models in its own llama-swap config, rendered
+at install time. Each seat also produces the harness config binding that routes to it, so a
+binding can never name a seat that was not rendered:
+
+| seat | kind | binds | model | residency |
+|---|---|---|---|---|
+| `gemma4-e4b-vision` | vision | `vision_model` | `gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf` | swappable |
+| `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | swappable |
+
+A seat still needs its weights on the box — model downloads stay out-of-band, as with
+every seed.
+
 The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
@@ -40,7 +52,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Config #7 (780M/gfx1103 iGPU + 64GB dual-channel DDR5, Vulkan UMA). SAFE FLOOR: f16 KV + 16K ctx + 26B cpu-moe (ram_tier mid/high; else dropped). Research 2026-07-23 (J1): the floor is deliberately BELOW what this hardware measures elsewhere - 26B-A4B Q4_K_M runs FULLY OFFLOADED (-ngl 99, weights in GTT/shared memory) at ~20-25 tok/s tg on a 780M with dual-channel DDR5 (two independent community measurements; the earlier 'cpu-moe = very slow' note was wrong for dual-channel boxes), and Vulkan FA + q8_0 KV is production-supported since the Feb-Mar 2026 AMD tuning PRs. selftest.ps1's H3 canaries (fa_q8kv / moe_full_offload / ctx_sweep) MEASURE all three promotions on the real box; the agent applies them canary-gated per SETUP-AGENT.md (amd-rdna3 chapter). REQUIRES a llama.cpp win-vulkan build >= Mar-2026 (the pinned tag satisfies this - it is the frontier snapshot, never downgrade below the floor) and flash-attn EXPLICITLY 'on' (never auto: a silent FA-off then fails quantized-V loads on Gemma). Single-channel RAM is a clean ~2x tg loss - confirm dual-channel at install. PROJECTED until receipts return.
+> Config #7 (780M/gfx1103 iGPU + 64GB dual-channel DDR5, Vulkan UMA). SAFE FLOOR: f16 KV + 16K ctx + 26B cpu-moe (ram_tier mid/high; else dropped). Research 2026-07-23 (J1): the floor is deliberately BELOW what this hardware measures elsewhere - 26B-A4B Q4_K_M runs FULLY OFFLOADED (-ngl 99, weights in GTT/shared memory) at ~20-25 tok/s tg on a 780M with dual-channel DDR5 (two independent community measurements; the earlier 'cpu-moe = very slow' note was wrong for dual-channel boxes), and Vulkan FA + q8_0 KV is production-supported since the Feb-Mar 2026 AMD tuning PRs. selftest.ps1's H3 canaries (fa_q8kv / moe_full_offload / ctx_sweep) MEASURE all three promotions on the real box; the agent applies them canary-gated per SETUP-AGENT.md (amd-rdna3 chapter). REQUIRES a llama.cpp win-vulkan build >= Mar-2026 (the pinned tag satisfies this - it is the frontier snapshot, never downgrade below the floor) and flash-attn EXPLICITLY 'on' (never auto: a silent FA-off then fails quantized-V loads on Gemma). Single-channel RAM is a clean ~2x tg loss - confirm dual-channel at install. PROJECTED until receipts return. J-media 2026-07-28 (Juan's tier - the D9 audit gap): STT via the whisper.cpp Vulkan build. Vision reuses this tier's resident E4B + mmproj, so no extra multi-GB download on a UMA box. Vision keeps the CLIP encoder on CPU (--no-mmproj-offload). The REASON, stated accurately: llama.cpp #20081 reports mmproj quality degradation on Vulkan, but the maintainer could not reproduce it across several devices and the reporter closed it inconclusively - so quality alone is weak evidence. The load-bearing fact is in the same thread: running model + mmproj both on the Vulkan backend of a Radeon 780M iGPU gives a hard vk::DeviceLostError immediately after 'decoding image batch 1/8', reproducibly, on the exact silicon this tier targets. Keeping the encoder on CPU avoids that crash path and costs only encoder throughput; the LLM still decodes on the GPU. Both seats pin GGML_VK_VISIBLE_DEVICES=0 (multi-ICD boxes). REQUIRES a whisper.cpp Vulkan build + the whisper weights, which install.ps1's amd-* asset table does NOT fetch - `install render` warns by exact path. PROJECTED.
 
 ## Capability report
 

@@ -4,6 +4,52 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.41.0] - 2026-07-28
+
+### Added — media seats for the remaining 8 tiers: all 14 now declare vision + STT
+`blackwell-16/32/48/72`, `ampere-16`, `volta-16`, `amd-rdna3`, `amd-rdna3-dgpu`. Sizing follows the
+TEMPLATE, not just the card, because that is what decides whether VRAM is additive.
+- **`blackwell-16` is informed by a LIVE REFERENCE, not a runtime measurement.** This tier is the
+  workstation, whose hand-built llama-swap serves the same `qwen3-vl-8b` (Q8_0 weights + FULL-PRECISION
+  F16 mmproj, ctx 16384) plus whisper large-v3-turbo. The Q8+F16-tower pairing is the 8→16 GB unlock;
+  Q4 is where small-screenshot-text fidelity died, and this one seat owns screenshots/GUI/document OCR.
+  **Deltas from live, deliberate:** the seat inherits the tier's `q8_0` KV (live sets no cache-type and
+  so runs F16) and adds `--image-max-tokens 2048` + `--no-context-shift`. So: same weights, same window,
+  a tighter KV and an image bound — not a byte-for-byte replica of a measured run.
+- **`ampere-16` / `volta-16`** — same 8B seat, ctx trimmed to 8192 because the ampere-16 band FLOOR is
+  12 GB ("3090-class defensive") and KV has to fit there too. The seat is swappable, so it is the only
+  heavy seat loaded and ~10 GB fits a 12 GB card. volta-16 inherits that tier's open sm_70 flash-attn
+  risk for the vision seat as well as chat.
+- **`blackwell-32` takes the SMALL vision seat on purpose.** The `cuda-resident` template places only
+  `resident` seats, so VRAM is ADDITIVE with the ~21 GB roster (that figure is the tier's own
+  pre-existing note, not a new measurement). E4B+mmproj at ctx 4096 plus whisper is ~+6 GB, which spends
+  roughly half of the ~11 GB the original design left for 64K q8_0 KV, leaving ~5 GB. The 8B (~10 GB)
+  would not fit at all. Nothing swaps on this template, so an operator who finds KV tight should drop a
+  seat rather than expect recovery. **`blackwell-48`/`72`** have real room for the 8B (~33 of 48/72 GB).
+- **`amd-rdna3` (Juan's tier, the D9 audit gap) and `amd-rdna3-dgpu`** — STT via the whisper.cpp Vulkan
+  build; vision reuses the tier's resident E4B+mmproj and keeps the CLIP encoder on CPU
+  (`--no-mmproj-offload`). Both pin the Vulkan ICD. The dgpu variant keeps the smaller seat as a
+  CONSERVATIVE choice for an unmeasured Vulkan part — not because a 10 GB seat could not fit: it is
+  swappable, so it would load alone. That asymmetry with ampere-16 (same 12 GB floor, CUDA, gets the 8B)
+  is deliberate: CUDA vision is measured-adjacent here, Vulkan vision is not.
+
+**Why the CLIP encoder stays on CPU on Vulkan:** llama.cpp
+[#20081](https://github.com/ggml-org/llama.cpp/issues/20081) reports mmproj quality degradation on the
+Vulkan backend; the maintainer could not reproduce it and the reporter closed it inconclusively, so that
+alone is weak. The load-bearing reason is in the same thread: a hard `vk::DeviceLostError` crash with
+mmproj on the Vulkan backend of the **780M iGPU this tier targets**. Keeping the encoder on CPU avoids
+the crash path and costs only encoder throughput; the LLM still decodes on the GPU.
+
+**Verified:** all 8 rendered configs ACCEPTED by real llama-swap v242; resident tiers place seats in the
+co-resident set (`&`), swappable tiers as alternatives (`|`). PROJECTED — structural validity plus a
+live reference, not a runtime measurement; each tier's notes carry its VRAM arithmetic so an operator can
+check it. Seat weights stay out-of-band as with every seed; `install render` warns by path.
+`blackwell-32/48/72` have no Linux template (`cuda-resident` is Windows-only) — pre-existing, now noted.
+
+**Not expressible here:** the workstation also serves `qwen3-asr` as an HQ STT tier, but that runs on
+llama-server (mtmd) rather than whisper-server and binds `stt_model_hq`, which `media_seats` does not
+write. Bind it by hand where it exists.
+
 ## [0.40.0] - 2026-07-28
 
 ### Added — media seats for the last four unseeded tiers, each chosen for its hardware

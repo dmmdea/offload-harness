@@ -16,6 +16,18 @@
 
 ## Media
 
+This tier serves these media **seats** — models in its own llama-swap config, rendered
+at install time. Each seat also produces the harness config binding that routes to it, so a
+binding can never name a seat that was not rendered:
+
+| seat | kind | binds | model | residency |
+|---|---|---|---|---|
+| `qwen3-vl-8b` | vision | `vision_model` | `Qwen3VL-8B-Instruct-Q8_0.gguf` | swappable |
+| `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | swappable |
+
+A seat still needs its weights on the box — model downloads stay out-of-band, as with
+every seed.
+
 The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
@@ -39,7 +51,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Config #2 (V100 16GB, Volta sm_70). 26B resident full-GPU. RISK: confirm flash-attn on sm_70 is not a slow fallback (H3 measures). config_seed: quality-first media bindings (bf16, no fp8 hw needed; sm_70 ComfyUI support to confirm at install). PROJECTED.
+> Config #2 (V100 16GB, Volta sm_70). 26B resident full-GPU. RISK: confirm flash-attn on sm_70 is not a slow fallback (H3 measures). config_seed: quality-first media bindings (bf16, no fp8 hw needed; sm_70 ComfyUI support to confirm at install). PROJECTED. J-media 2026-07-28: qwen3-vl-8b seat, ctx 8192. INHERITS this tier's open sm_70 flash-attn risk — the vision seat takes the tier's flash_attn (on), so if H3 finds FA is a slow fallback on Volta it is wrong for the vision seat too, not just chat. PROJECTED. The 'ocr' alias rides on this shared VLM (one seat owns screenshots/GUI/document OCR); the harness routes via vision_model, not the alias, so it is a label rather than a separate model.
 
 ## Capability report
 
