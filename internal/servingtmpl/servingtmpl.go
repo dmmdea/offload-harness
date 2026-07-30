@@ -50,6 +50,14 @@ type Params struct {
 	// suffix. Both matter only when Seats is non-empty.
 	Home string
 	GOOS string
+
+	// GPUEnv is added to EVERY model's env list, appended after whatever the template
+	// already declares. It comes from the tier's `gpu_env`, not from a name match: the
+	// Blackwell tiers need CUDA_VISIBLE_DEVICES pinned (a hybrid-graphics trap where
+	// the default can resolve to -1) and CUDA_MODULE_LOADING=LAZY (llama.cpp #22696).
+	// This lived in install.ps1 as an `if ($profileId -match '^blackwell-')` branch,
+	// so a Linux install of the same tier silently did not get it.
+	GPUEnv []string
 }
 
 // seatAnchors is the TEMPLATE's own declaration of which residency roles it can
@@ -128,6 +136,12 @@ func Render(tmpl string, p Params) (string, error) {
 	out, seatFrag, err := insertSeats(out, p)
 	if err != nil {
 		return "", err
+	}
+	// GPU env lands AFTER seats so a tier's own media seats are pinned to the same
+	// device as everything else — the PowerShell version applied it to every model
+	// block in the map, and a seat is a model block.
+	if len(p.GPUEnv) > 0 {
+		out = injectGPUEnv(out, p.GPUEnv)
 	}
 	// The 26B's set membership is a token rather than surgery on an expression: the
 	// operator differs per template (an alternative in a swapping set, a conjunction
@@ -463,6 +477,71 @@ func seatBlock(s mediaseat.Seat, p Params, env string) (string, error) {
 	return b.String(), nil
 }
 
+var modelKeyRe = regexp.MustCompile(`^ {2}"?([A-Za-z0-9._-]+)"?:\s*$`)
+var envLineRe = regexp.MustCompile(`^ {4}env:\s*\[(.*)\]\s*$`)
+
+// injectGPUEnv appends vars to every model's env list, creating the line when a model
+// has none. Ported from install.ps1's Add-GpuEnvToYaml and kept byte-identical to it
+// on purpose: the delegation is only safe if the output does not move, and a golden
+// comparison against the PowerShell renderer is what proved that.
+//
+// Order matters — existing entries stay FIRST. The 26B declares
+// GGML_CUDA_DISABLE_GRAPHS=1 and must keep it in front, both because that is what
+// shipped and because appending is the only edit that cannot reorder a template's
+// own intent.
+func injectGPUEnv(tmpl string, vars []string) string {
+	add := strings.Join(vars, ", ")
+	lines := strings.Split(tmpl, "\n")
+	out := make([]string, 0, len(lines)+8)
+	inModels := false
+	for i := 0; i < len(lines); i++ {
+		l := lines[i]
+		switch {
+		case strings.HasPrefix(l, "models:"):
+			inModels = true
+			out = append(out, l)
+			continue
+		case l != "" && !strings.HasPrefix(l, " ") && !strings.HasPrefix(l, "#"):
+			inModels = false
+		}
+		out = append(out, l)
+		if !inModels || !modelKeyRe.MatchString(l) {
+			continue
+		}
+		// Find this block's extent and any env line already in it.
+		envAt := -1
+		end := i + 1
+		for ; end < len(lines); end++ {
+			if t := lines[end]; t != "" && !strings.HasPrefix(t, "   ") {
+				break // next key at 2-space indent or shallower ends the block
+			}
+			if envLineRe.MatchString(lines[end]) {
+				envAt = end
+			}
+		}
+		if envAt < 0 {
+			out = append(out, "    env: ["+add+"]")
+			continue
+		}
+		// Copy the block, rewriting its env line in place.
+		for j := i + 1; j < end; j++ {
+			if j == envAt {
+				m := envLineRe.FindStringSubmatch(lines[j])
+				existing := strings.TrimSpace(m[1])
+				if existing == "" {
+					out = append(out, "    env: ["+add+"]")
+				} else {
+					out = append(out, "    env: ["+existing+", "+add+"]")
+				}
+				continue
+			}
+			out = append(out, lines[j])
+		}
+		i = end - 1
+	}
+	return strings.Join(out, "\n")
+}
+
 func definesModel(tmpl, name string) bool {
 	return regexp.MustCompile(`(?m)^ {2}"?` + regexp.QuoteMeta(name) + `"?:\s*$`).MatchString(tmpl)
 }
@@ -582,8 +661,15 @@ func drop26B(tmpl string) (string, error) {
 		return "", fmt.Errorf("template ended inside the %s block — its shape changed", model)
 	}
 	res := strings.Join(out, "\n")
-	if strings.Contains(res, model) {
-		return "", fmt.Errorf("%s still referenced after removal — a config llama-swap would reject", model)
+	// Check FUNCTIONAL lines only. A comment may legitimately name the model — the cpu
+	// template documents it as "OPTIONAL on CPU, needs >=48GB RAM" — and treating that
+	// prose as a dangling reference refused a perfectly good config. This only surfaced
+	// once the RAM gate started dropping the 26B on that template.
+	for _, l := range strings.Split(res, "\n") {
+		if t := strings.TrimSpace(l); t != "" && !strings.HasPrefix(t, "#") && strings.Contains(l, model) {
+			return "", fmt.Errorf("%s still referenced after removal (%q) — a config llama-swap would reject",
+				model, strings.TrimSpace(l))
+		}
 	}
 	return res, nil
 }

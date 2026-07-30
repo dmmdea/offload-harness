@@ -16,6 +16,18 @@
 
 ## Media
 
+This tier serves these media **seats** — models in its own llama-swap config, rendered
+at install time. Each seat also produces the harness config binding that routes to it, so a
+binding can never name a seat that was not rendered:
+
+| seat | kind | binds | model | residency |
+|---|---|---|---|---|
+| `qwen3vl-4b` | vision | `vision_model` | `Qwen3VL-4B-Instruct-Q4_K_M.gguf` | swappable |
+| `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | swappable |
+
+A seat still needs its weights on the box — model downloads stay out-of-band, as with
+every seed.
+
 This tier's media bindings are **RAM-gated** (`config_seed_ram_mid_high`): the installer applies
 them only when the detected `ram_tier` is `mid` or `high`, so the same tier on a low-RAM box
 honestly serves text only.
