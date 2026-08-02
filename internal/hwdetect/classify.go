@@ -34,14 +34,34 @@ type Facts struct {
 	GPUName       string `json:"gpu_name,omitempty"`
 	DriverVersion string `json:"driver_version,omitempty"`
 	OS            string `json:"os,omitempty"`
+	// Archs lists EVERY detected GPU's architecture, in nvidia-smi row order. Arch
+	// above is the primary (largest) card's; a homogeneity decision — "one sm_120
+	// build serves both cards" — needs all of them, not the biggest.
+	Archs []string `json:"archs,omitempty"`
+}
+
+// allArchs reports whether every detected GPU's architecture is exactly want.
+// It is deliberately strict: it demands one entry PER counted GPU, so a probe
+// that captured the count but not every card's identity cannot satisfy it.
+func allArchs(f Facts, want string) bool {
+	if len(f.Archs) != f.GPUCount || f.GPUCount == 0 {
+		return false
+	}
+	for _, a := range f.Archs {
+		if strings.ToLower(a) != want {
+			return false
+		}
+	}
+	return true
 }
 
 // Verdict is the classification plus why, so an operator can see the band that
 // caught their machine instead of taking the answer on faith.
 type Verdict struct {
 	Profile string `json:"profile"`
-	// BigRAM is meaningful only for dual-gpu (the 128 GB variant): detection cannot
-	// see the Optane drive that really distinguishes it, so RAM approximates it.
+	// BigRAM marks the >=120 GB RAM variant of the multi-GPU tiers (dual-gpu's
+	// config #4 and blackwell-2x16): detection cannot see the Optane drive that
+	// really distinguishes config #4, so RAM approximates it.
 	BigRAM bool   `json:"big_ram"`
 	Reason string `json:"reason"`
 	// RAMTier gates the RAM-hungry 26B placements and the RAM-gated config_seed
@@ -90,6 +110,23 @@ func Classify(f Facts) Verdict {
 func classifyProfile(f Facts) Verdict {
 	vendor := strings.ToLower(f.Vendor)
 	arch := strings.ToLower(f.Arch)
+
+	// A homogeneous PAIR of 16GB-class Blackwell cards is its own hardware class,
+	// decided BEFORE the generic multi-GPU rule: one sm_120 CUDA build serves both
+	// cards (no multi-arch build), and the serving topology is per-card pinning on
+	// an asymmetric-bandwidth pair — neither of which the heterogeneous dual-gpu
+	// row (5060 Ti + V100, architect/editor) describes. STRICT on all three axes:
+	// ALL archs captured and blackwell (a pair whose second card is unknown falls
+	// through to dual-gpu), AND the primary card in the 16GB band — the "16" in the
+	// tier name is the template's load-bearing assumption (it pins the 26B and a
+	// ~10GB vision seat per card), so a 2x 8GB or 2x 32GB pair must not claim it.
+	// VRAMGb is the LARGEST card's, so a mixed 16+8 pair passes this band check;
+	// catching that fully needs per-GPU VRAM capture — recorded as a known limit.
+	if f.GPUCount == 2 && vendor == "nvidia" && allArchs(f, "blackwell") &&
+		f.VRAMGb >= 12 && f.VRAMGb < 24 {
+		return Verdict{Profile: "blackwell-2x16", BigRAM: f.RAMGb >= 120,
+			Reason: "2 GPUs, both Blackwell, 16GB band -> the homogeneous dual-sm_120 tier"}
+	}
 
 	// Multi-GPU with at least one NVIDIA outranks any single-card band: the
 	// dual-resident rig serves two models at once rather than swapping.

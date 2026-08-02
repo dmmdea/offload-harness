@@ -73,6 +73,59 @@ func TestClassifyMatchesTheShippedTable(t *testing.T) {
 	}
 }
 
+// TestHomogeneousBlackwellPairGetsItsOwnTier: two same-arch sm_120 cards are a
+// different hardware class from the heterogeneous dual-gpu rig — one CUDA build,
+// per-card pinning topology — and the rule must be STRICT: it fires only when
+// every card's architecture was actually captured and is Blackwell. A pair whose
+// second card is unknown must fall through to dual-gpu rather than claim a
+// same-build tier the box may not be able to serve.
+func TestHomogeneousBlackwellPairGetsItsOwnTier(t *testing.T) {
+	for _, tc := range []struct {
+		label   string
+		archs   []string
+		gpus    int
+		ram     int
+		want    string
+		wantBig bool
+	}{
+		{"5060Ti+5070Ti 128GB (the reference box)", []string{"blackwell", "blackwell"}, 2, 127, "blackwell-2x16", true},
+		{"2x blackwell, 64GB", []string{"blackwell", "blackwell"}, 2, 64, "blackwell-2x16", false},
+		{"blackwell+volta (cfg3's real shape)", []string{"blackwell", "volta"}, 2, 64, "dual-gpu", false},
+		{"pair counted but archs not captured", nil, 2, 128, "dual-gpu", true},
+		{"pair with only ONE arch captured", []string{"blackwell"}, 2, 128, "dual-gpu", true},
+		{"three blackwell cards", []string{"blackwell", "blackwell", "blackwell"}, 3, 128, "dual-gpu", true},
+		{"single blackwell stays in its band", []string{"blackwell"}, 1, 128, "blackwell-16", false},
+	} {
+		got := Classify(Facts{Vendor: "nvidia", Arch: "blackwell", VRAMGb: 16,
+			GPUCount: tc.gpus, RAMGb: tc.ram, Archs: tc.archs})
+		if got.Profile != tc.want {
+			t.Errorf("%s: profile = %q, want %q", tc.label, got.Profile, tc.want)
+		}
+		if got.Profile == "blackwell-2x16" && got.BigRAM != tc.wantBig {
+			t.Errorf("%s: big_ram = %v, want %v", tc.label, got.BigRAM, tc.wantBig)
+		}
+	}
+	// The "16" in the tier name is ENFORCED, not decorative: the template pins the
+	// 26B and a ~10GB vision seat per card, so a pair outside the 16GB band must
+	// fall through to dual-gpu rather than inherit a topology that OOMs it.
+	for _, tc := range []struct {
+		label string
+		vram  float64
+		want  string
+	}{
+		{"2x blackwell 8GB (5060 pair) is NOT the 16GB tier", 8, "dual-gpu"},
+		{"2x blackwell 32GB (5090 pair) is NOT the 16GB tier", 32, "dual-gpu"},
+		{"band floor: 12GB counts as 16-class", 12, "blackwell-2x16"},
+		{"band ceiling: 24GB does not", 24, "dual-gpu"},
+	} {
+		got := Classify(Facts{Vendor: "nvidia", Arch: "blackwell", VRAMGb: tc.vram,
+			GPUCount: 2, RAMGb: 128, Archs: []string{"blackwell", "blackwell"}})
+		if got.Profile != tc.want {
+			t.Errorf("%s: profile = %q, want %q", tc.label, got.Profile, tc.want)
+		}
+	}
+}
+
 // TestClassifyNeverGuessesCPUForAKnownVendor: calling an unclassifiable AMD box "cpu"
 // would strip it of the entire Vulkan serving path, which is the failure mode a
 // Windows-only detector could never surface.
