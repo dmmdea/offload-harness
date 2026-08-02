@@ -146,9 +146,27 @@ function Get-Profile {
     [string]$Arch,     # blackwell|ampere|ada|volta|rdna3|gcn|other|none
     [double]$VramGb,
     [int]$GpuCount,
-    [int]$RamGb
+    [int]$RamGb,
+    [string[]]$ArchsAll = @()   # EVERY adapter's arch; a homogeneity decision needs all, not the biggest
   )
   $bigRam = $false
+
+  # A homogeneous PAIR of 16GB-class Blackwell cards is its own hardware class,
+  # decided BEFORE the generic multi-GPU rule: one sm_120 CUDA build serves both
+  # cards, and the topology is per-card pinning on an asymmetric-bandwidth pair —
+  # neither of which the heterogeneous dual-gpu row describes. STRICT on all three
+  # axes: one arch captured PER counted GPU and every one blackwell (an unknown
+  # second card falls through to dual-gpu), AND the primary card in the 16GB band —
+  # the "16" is the template's load-bearing assumption (it pins the 26B and a ~10GB
+  # vision seat per card), so a 2x 8GB or 2x 32GB pair must not claim it. VramGb is
+  # the LARGEST card's; a mixed 16+8 pair passes the band check — known limit until
+  # per-GPU VRAM capture lands. (@() everywhere — the 1-element-unwrap trap.)
+  if ($GpuCount -eq 2 -and $Vendor -eq 'nvidia' -and @($ArchsAll).Count -eq 2 -and
+      -not (@($ArchsAll) | Where-Object { $_ -ne 'blackwell' }) -and
+      $VramGb -ge 12 -and $VramGb -lt 24) {
+    if ($RamGb -ge 120) { $bigRam = $true }
+    return @{ profile = 'blackwell-2x16'; big_ram = $bigRam }
+  }
 
   # Multi-GPU with at least one NVIDIA -> the 5060 Ti + V100 dual-resident rig
   # (configs 3-4). Two models resident, no swap. Checked first: a heterogeneous
@@ -208,8 +226,8 @@ if ($SelfTest) {
     else { Write-Host "FAIL arch  '$Name' -> $got (expected $Expected)"; $script:fail++ }
   }
   function Assert-Profile {
-    param([string]$Label, [string]$Vendor, [string]$Arch, [double]$Vram, [int]$Count, [int]$Ram, [string]$Expected, [bool]$ExpectBigRam = $false)
-    $r = Get-Profile -Vendor $Vendor -Arch $Arch -VramGb $Vram -GpuCount $Count -RamGb $Ram
+    param([string]$Label, [string]$Vendor, [string]$Arch, [double]$Vram, [int]$Count, [int]$Ram, [string]$Expected, [bool]$ExpectBigRam = $false, [string[]]$ArchsAll = @())
+    $r = Get-Profile -Vendor $Vendor -Arch $Arch -VramGb $Vram -GpuCount $Count -RamGb $Ram -ArchsAll $ArchsAll
     $ok = ($r.profile -eq $Expected) -and ($r.big_ram -eq $ExpectBigRam)
     if ($ok) { Write-Host "PASS prof  $Label -> $($r.profile) (big_ram=$($r.big_ram))" }
     else { Write-Host "FAIL prof  $Label -> $($r.profile) big_ram=$($r.big_ram) (expected $Expected big_ram=$ExpectBigRam)"; $script:fail++ }
@@ -265,8 +283,19 @@ if ($SelfTest) {
   Write-Host '== profile selection (matrix configs) =='
   Assert-Profile '5060 Ti 16GB (cfg1)'  'nvidia' 'blackwell' 16 1 64  'blackwell-16'
   Assert-Profile 'V100 16GB (cfg2)'     'nvidia' 'volta'     16 1 64  'volta-16'
-  Assert-Profile 'dual 5060Ti+V100 (cfg3)' 'nvidia' 'blackwell' 16 2 64  'dual-gpu'
-  Assert-Profile 'dual +128GB (cfg4)'   'nvidia' 'blackwell' 16 2 128 'dual-gpu' $true
+  Assert-Profile 'dual 5060Ti+V100 (cfg3)' 'nvidia' 'blackwell' 16 2 64  'dual-gpu' $false @('blackwell','volta')
+  Assert-Profile 'dual +128GB (cfg4)'   'nvidia' 'blackwell' 16 2 128 'dual-gpu' $true @('blackwell','volta')
+  # Homogeneous dual-sm_120 pair = its OWN tier; strict rules mirrored from Go
+  # (hwdetect.TestHomogeneousBlackwellPairGetsItsOwnTier — keep the two tables in sync).
+  Assert-Profile '5060Ti+5070Ti 128GB (blackwell-2x16 ref)' 'nvidia' 'blackwell' 16 2 127 'blackwell-2x16' $true @('blackwell','blackwell')
+  Assert-Profile '2x blackwell, 64GB'   'nvidia' 'blackwell' 16 2 64  'blackwell-2x16' $false @('blackwell','blackwell')
+  Assert-Profile 'pair, archs not captured -> dual-gpu' 'nvidia' 'blackwell' 16 2 128 'dual-gpu' $true
+  Assert-Profile 'pair, ONE arch captured -> dual-gpu'  'nvidia' 'blackwell' 16 2 128 'dual-gpu' $true @('blackwell')
+  Assert-Profile '3x blackwell -> dual-gpu'             'nvidia' 'blackwell' 16 3 128 'dual-gpu' $true @('blackwell','blackwell','blackwell')
+  # The 16GB band is ENFORCED (the template pins the 26B + a ~10GB vision seat per card):
+  Assert-Profile '2x blackwell 8GB -> dual-gpu (not the 16GB tier)'  'nvidia' 'blackwell' 8  2 128 'dual-gpu' $true @('blackwell','blackwell')
+  Assert-Profile '2x blackwell 32GB -> dual-gpu (not the 16GB tier)' 'nvidia' 'blackwell' 32 2 128 'dual-gpu' $true @('blackwell','blackwell')
+  Assert-Profile 'band floor 12GB -> blackwell-2x16'                 'nvidia' 'blackwell' 12 2 128 'blackwell-2x16' $true @('blackwell','blackwell')
   Assert-Profile '3070 8GB (cfg5)'      'nvidia' 'ampere'    8  1 16  'ampere-8'
   Assert-Profile '3070+64GB (cfg6)'     'nvidia' 'ampere'    8  1 64  'ampere-8'
   Assert-Profile '780M+64GB (cfg7)'     'amd'    'rdna3'     0.5 1 64 'amd-rdna3'
@@ -449,8 +478,22 @@ $diskGB = [math]::Round((Get-PSDrive -Name $targetDrive).Free / 1GB)
 # Arch class + profile (pure functions above).
 $gpuArch = Get-GpuArch -Name $gpuName
 $ramTier = Get-RamTier -RamGb $ramGB
+# Every adapter's arch, for the homogeneous-pair rule. nvidia-smi is authoritative
+# when present (one row per card, marketing names the arch table matches); the CIM
+# fallback names whatever it saw. @() everywhere — the 1-element-unwrap trap.
+$gpuArchsAll = @()
+if ($nvidiaSmi) {
+  try {
+    $gpuArchsAll = @((& nvidia-smi --query-gpu=name --format=csv,noheader 2>$null) |
+      ForEach-Object { $n = "$_".Trim(); if ($n) { Get-GpuArch -Name $n } } | Where-Object { $_ })
+  } catch { $gpuArchsAll = @() }
+}
+if (@($gpuArchsAll).Count -eq 0) {
+  $gpuArchsAll = @($gpus | Where-Object { $_.Name -match 'NVIDIA|AMD|Radeon' } |
+    ForEach-Object { Get-GpuArch -Name $_.Name })
+}
 # NB: use $profileId, not $profile — $profile is a PowerShell automatic variable.
-$sel       = Get-Profile -Vendor $vendor -Arch $gpuArch -VramGb $vramGB -GpuCount $gpuCount -RamGb $ramGB
+$sel       = Get-Profile -Vendor $vendor -Arch $gpuArch -VramGb $vramGB -GpuCount $gpuCount -RamGb $ramGB -ArchsAll $gpuArchsAll
 $profileId = $sel.profile
 $bigRam    = [bool]$sel.big_ram
 # J1 guard: a large BIOS UMA carve-out can make an iGPU report >=12GB 'dedicated', which
@@ -502,6 +545,7 @@ Write-Host "Profile: $profileId$(if ($bigRam) { ' (big_ram)' } else { '' })"
 $warnings | ForEach-Object { Write-Host "WARN: $_" }
 
 @{ os=$os; gpu_vendor=$vendor; gpu_name=$gpuName; gpu_arch=$gpuArch; gpu_count=$gpuCount;
+   gpu_archs=@($gpuArchsAll);
    vram_dedicated_gb=$vramGB; ram_gb=$ramGB; ram_tier=$ramTier; profile=$profileId; big_ram=$bigRam;
    cuda_driver=$cuda.driver_cuda; cuda_driver_version=$cuda.driver_version; cuda_toolkit=$cuda.toolkit_cuda;
    amd_adrenalin=$amdAdrenalin;

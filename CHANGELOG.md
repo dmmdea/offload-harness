@@ -4,6 +4,53 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.42.0] - 2026-08-02
+
+### Added — the `blackwell-2x16` tier: a homogeneous pair of 16GB Blackwell cards (config #16)
+The workstation's second GPU (RTX 5070 Ti 16GB, ~896 GB/s) joined its 5060 Ti (~448 GB/s, x8),
+and neither existing multi-GPU row describes that shape: `dual-gpu` is the heterogeneous
+5060 Ti + V100 plan (multi-arch build), `blackwell-32` assumes ONE 32GB card. Per the ampere-6
+precedent, a new hardware class gets its own id. Full design: the 2026-08-02 dual-Blackwell tier
+research (Drive, Local-Offload-Harness).
+
+- **Classifier (Go + PS, parity-tested):** `Facts.Archs` now lists EVERY GPU's architecture
+  (nvidia-smi row order; the fallback probe keeps the one-entry-per-GPU invariant), and a STRICT
+  rule above the generic dual-gpu rule claims the tier only when all three axes hold: exactly 2
+  GPUs, every captured arch Blackwell, and the primary card in the 16GB band (>=12, <24 GB) — the
+  "16" is the template's load-bearing assumption (it pins the 26B and a ~10GB vision seat per
+  card), so a 2x 8GB or 2x 32GB pair falls through to dual-gpu. A pair whose second card was not
+  captured also falls through — never claim a same-build tier on partial evidence. Known limit:
+  VRAM is the largest card's, so a mixed 16+8 pair passes the band; catching it needs per-GPU
+  VRAM capture. detect.ps1 emits `gpu_archs` in its JSON; both live probes on the reference box
+  agree: `blackwell-2x16 (big_ram, ram_tier=high)`.
+- **Template `llama-swap.win-dual-blackwell.yaml` — PIN, DON'T SPLIT.** Every model fits one card
+  and is pinned whole: splitting a fits-on-one-card model costs 20-33% tg (sequential per-token
+  pipeline; harmonic-mean arithmetic, verified). Fast card (device 1): latency primaries + the
+  vision seat, kept clean. Utility card (device 0): the memory-stack residents — including
+  `bge-reranker-v2-m3`, in a win template for the FIRST time (memory-stack parity with the live
+  box) — plus the STT seat and the desktop/DWM tax (no iGPU on this platform). Matrix set
+  `"+residents & (e4b | e2b | m26 | vis) & stt"`: one fast-card model at a time, STT CONCURRENT
+  from the other card — the second card's payoff for this route. Device indices follow
+  PCI_BUS_ID and the reference box; the header instructs nvidia-smi verification + GPU-UUID
+  substitution after any slot change or BIOS reset (this board wipes settings on AC loss).
+- **Profile row:** ctx 32768, q8_0 KV, 26B full-GPU (`moe_26b: gpu`), uniform
+  `CUDA_DEVICE_ORDER=PCI_BUS_ID` + `CUDA_MODULE_LOADING=LAZY` (deliberately NO uniform device
+  pin — that would hide a card), the PROVEN blackwell-16 media seed (hidream-o1 bf16 + Wan2.2 Q8
+  at 81 frames), and incumbent-only seats per the 2026-08-02 seat-lifecycle house rule: vision
+  `qwen3-vl-8b` Q8+F16 pinned fast, STT `whisper large-v3-turbo` pinned utility,
+  residency=resident so it runs concurrently. Every challenger from the research (Gemma-4-31B
+  QAT, Qwen3.6-27B, V4-Flash IQ3 RAM-GATED, Qwen3.5-122B-MTP, gpt-oss-120b, VL-32B, whisper
+  large-v3 full, Qwen3-TTS/Higgs v3, Wan fp16 + HiDream-O1-resident via DisTorch2) is NAMED in
+  the notes and enters only via documented bake-off.
+- **Adversarial review corrected three MAJORs before merge:** the 16GB band was enforced nowhere
+  (added to both classifiers + 7 table rows, mutation-tested red); `videogen_frames: 121` had
+  smuggled an unmeasured escalation into the seed (81, like every proven sibling); and
+  `resident_tier` had a copy-slip downgrade to e4b (now the 26B, like every 16GB-class sibling).
+- The live <node-b> serving config remains hand-maintained and untouched; switching it to the
+  rendered tier plus the model downloads stay gated on the research report's §7 hard gates
+  (RAM-concurrency arithmetic, V: capacity plan with Exos archiving, PSU/thermal burn-in, UUID
+  pins, RTC battery, wired Ethernet).
+
 ## [0.41.0] - 2026-07-28
 
 ### Added — media seats for the remaining 8 tiers: all 14 now declare vision + STT

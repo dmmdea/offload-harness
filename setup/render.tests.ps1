@@ -150,8 +150,25 @@ if ($b26 -match '-ngl 99' -and $b26 -notmatch '--cpu-moe')     { Ok 'blackwell-7
 $envLines = @($r.yaml -split "`r?`n" | Where-Object { $_ -match '^\s{4}env: \[' })
 if ($envLines.Count -ge 4 -and -not ($envLines | Where-Object { $_ -notmatch 'CUDA_VISIBLE_DEVICES=0' -or $_ -notmatch 'CUDA_MODULE_LOADING=LAZY' })) {
   Ok 'blackwell-72 H4 runtime env on every model block' } else { Bad "blackwell-72 H4 env (env lines: $($envLines.Count))" }
+
 if ($r.yaml -notmatch '__[A-Z0-9_]+__')                        { Ok 'blackwell-72 no unsubstituted tokens' } else { Bad 'blackwell-72 leftover tokens' }
 if ($r.verdict -and [int]$r.verdict.agent_ctx_tokens -eq 131072) { Ok 'blackwell-72 agent_ctx_tokens=131072' } else { Bad 'blackwell-72 agent_ctx_tokens' }
+
+Write-Host "== blackwell-2x16 - homogeneous dual-sm_120 pair (dual-blackwell template, cfg16) =="
+$r = Invoke-Render -Backend 'cuda' -ProfileId 'blackwell-2x16' -RamTier 'high' -BigRam $true
+if ($r.verdict -and $r.verdict.render_backend -eq 'dual-blackwell') { Ok 'b2x16 renders the dual-blackwell template' } else { Bad "b2x16 render_backend (got: $($r.verdict.render_backend))" }
+# The whole point of the template: per-CARD pins. Primaries + vision on device 1
+# (the fast card), memory-stack residents + STT on device 0 (the utility card).
+$e4bEnv = @($r.yaml -split "`r?`n" | Select-String -Pattern '^\s{2}offload-e4b:' -Context 0,3 | ForEach-Object { $_.Context.PostContext } | Where-Object { $_ -match 'env:' })
+if ("$e4bEnv" -match 'CUDA_VISIBLE_DEVICES=1')                  { Ok 'b2x16 workhorse pinned to the FAST card (device 1)' } else { Bad "b2x16 e4b pin (got: $e4bEnv)" }
+$embEnv = @($r.yaml -split "`r?`n" | Select-String -Pattern '^\s{2}embeddinggemma:' -Context 0,3 | ForEach-Object { $_.Context.PostContext } | Where-Object { $_ -match 'env:' })
+if ("$embEnv" -match 'CUDA_VISIBLE_DEVICES=0')                  { Ok 'b2x16 embedder pinned to the UTILITY card (device 0)' } else { Bad "b2x16 emb pin (got: $embEnv)" }
+if ($r.yaml -match '(?m)^\s{2}bge-reranker-v2-m3:')             { Ok 'b2x16 reranker present (memory-stack parity with the live box)' } else { Bad 'b2x16 reranker missing' }
+# The two-card concurrency contract: fast-card seats are alternatives, the STT seat
+# joins as a CONJUNCTION so it may run concurrently from the other card.
+$setLines = @($r.yaml -split "`r?`n" | Where-Object { $_ -match '^\s{4}(text|residents):' }) -join ' / '
+if ($r.yaml -match '(?m)^\s{4}text:\s*"\+residents & \(e4b \| e2b \| m26 \| vis\) & stt"') { Ok 'b2x16 matrix: one fast-card model + concurrent STT + residents' } else { Bad "b2x16 matrix set (got: $setLines)" }
+if ($r.yaml -notmatch '__[A-Z0-9_]+__')                         { Ok 'b2x16 no unsubstituted tokens' } else { Bad 'b2x16 leftover tokens' }
 
 Write-Host "== blackwell-32 - 5090-class: resident, 65536 ctx, q8_0 KV (cfg13) =="
 $r = Invoke-Render -Backend 'cuda' -ProfileId 'blackwell-32' -RamTier 'mid' -BigRam $false
