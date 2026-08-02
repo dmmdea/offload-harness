@@ -948,7 +948,7 @@ $pp = Resolve-ProfileParams -ProfileId $profileId -RamTier $ramTier -BigRam $big
 # blackwell-32/48/72 all-resident tiers -> cuda-resident), else the fallback's
 # backend (= the detected backend). Both are CUDA-only; guard a stray override.
 $tplBackend = $pp.backend
-if ($tplBackend -in @('dual-cuda', 'cuda-resident') -and $backend -ne 'cuda') {
+if ($tplBackend -in @('dual-cuda', 'cuda-resident', 'dual-blackwell') -and $backend -ne 'cuda') {
   throw "profile '$profileId' wants the $tplBackend template but the resolved backend is '$backend' (need CUDA binaries)"
 }
 $agentCtxTokens = $pp.agent_ctx   # Deliverable 4 (summary)

@@ -31,6 +31,9 @@ func Detect() Facts {
 		f.VRAMGb = vram
 		if f.Vendor != "none" {
 			f.GPUCount = 1
+			// One entry per counted GPU — allArchs demands the invariant hold on
+			// every probe path, not just nvidia-smi's.
+			f.Archs = []string{f.Arch}
 		}
 	}
 	return f
@@ -54,6 +57,7 @@ func probeNvidiaSMI() Facts {
 		mib, _ := strconv.ParseFloat(strings.TrimSpace(cols[1]), 64)
 		gb := mib / 1024
 		f.GPUCount++
+		f.Archs = append(f.Archs, ArchFromName(name))
 		if gb > f.VRAMGb {
 			f.VRAMGb, f.GPUName, f.Arch = gb, name, ArchFromName(name)
 			if len(cols) >= 3 {
