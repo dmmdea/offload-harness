@@ -42,6 +42,9 @@ func TestStatusDiscoversLocalCapability(t *testing.T) {
 	// node that serves them says so — exactly as a real config does.
 	cfg.VisionModel = "qwen3vl"
 	cfg.STTModel = "whisper-stt"
+	// The agent seat is opt-in the same way (tier-seeded from resident_tier);
+	// the roster must report the RESOLVED planner, i.e. cfg.AgentPlannerModel("").
+	cfg.AgentModel = "gemma4-26b-a4b"
 	t.Setenv("NVIDIA_API_KEY", "")
 	t.Setenv("NGC_API_KEY", "")
 
@@ -68,6 +71,7 @@ func TestStatusDiscoversLocalCapability(t *testing.T) {
 	}
 	for key, want := range map[string]string{
 		"workhorse":  "offload-e4b",
+		"agent":      cfg.AgentPlannerModel(""), // the resolved planner seat, not the raw field
 		"triage":     "gemma4-e2b",
 		"escalation": "gemma4-26b-a4b",
 		"reasoning":  "gemma4-26b-a4b",

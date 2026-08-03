@@ -10,7 +10,7 @@
 | ctx_size | 32768 | the served window (`--ctx-size`) |
 | kv_type | `q8_0` | `--cache-type-k/v`, kept symmetric |
 | flash_attn | `on` | `--flash-attn` (required for a q8_0 V cache) |
-| resident_tier | `offload-e4b` | the model that stays hot and is the agent's default |
+| resident_tier | `offload-e4b` | the model that stays hot; seeds the agent planner seat (agent_model) when it differs from the workhorse |
 | agent_ctx_tokens | 32768 | the agent's `-ctx-tokens` compaction budget |
 | 26B-A4B | dropped | whether the 26B MoE is served, and where its experts live |
 

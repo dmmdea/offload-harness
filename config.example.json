@@ -5,6 +5,8 @@
   "triage_model": "gemma4-e2b",
   "escalation_model": "gemma4-26b-a4b",
   "reasoning_model": "gemma4-26b-a4b",
+  "agent_model": "",
+  "agent_timeout_sec": 0,
   "vision_model": "",
   "vision_max_image_bytes": 6000000,
   "ocr_max_tokens": 1024,
