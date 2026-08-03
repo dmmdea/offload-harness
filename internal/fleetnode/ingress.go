@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -34,6 +35,34 @@ var tailnetCGNAT = netip.MustParsePrefix("100.64.0.0/10")
 // ingressTimeout bounds one ref's whole fetch (dial + headers + body).
 const ingressTimeout = 60 * time.Second
 
+// refKeyPattern is the allowlist for ref map keys. fetchOne writes to
+// destDir/<key><ext>, so an unvalidated key is a path-traversal primitive —
+// a key of "../../evil" would write outside destDir entirely. Real ref keys
+// are the fixed short names the dispatch payload actually uses
+// (product/logo/background); this pattern matches how they're used, nothing
+// more permissive.
+var refKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// newIngressClient builds the HTTP client shared by every ref fetch in one
+// FetchRefs call: a fixed timeout, every redirect refused, and — critically —
+// no environment proxy. Left to its zero value, http.Client falls back to
+// http.DefaultTransport, whose Proxy field is http.ProxyFromEnvironment: with
+// HTTP_PROXY/HTTPS_PROXY/ALL_PROXY set, a request whose host just passed the
+// allowlist check would be handed to a completely unchecked proxy, which
+// could then dial anywhere on our behalf — defeating the "checked BEFORE any
+// network dial" invariant this whole file exists to enforce. Cloning
+// DefaultTransport keeps its other sane defaults (connection pooling, HTTP/2,
+// dial/TLS timeouts) and nils only the one field that matters here.
+func newIngressClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return &http.Client{
+		Timeout:       ingressTimeout,
+		CheckRedirect: refuseRedirect,
+		Transport:     transport,
+	}
+}
+
 // FetchRefs downloads each ref into destDir (created if needed) and returns
 // ref key -> absolute local path. Any failure aborts the whole set (the
 // returned cleanup removes destDir). Fetches are refused unless the URL host
@@ -43,6 +72,14 @@ const ingressTimeout = 60 * time.Second
 func FetchRefs(ctx context.Context, refs map[string]string, destDir string,
 	extraAllow []string, capMB int) (paths map[string]string, cleanup func(), err error) {
 	noop := func() {}
+
+	// Validate every ref key BEFORE touching the filesystem or the network:
+	// a bad key must never create destDir, let alone contact any server.
+	for key := range refs {
+		if !refKeyPattern.MatchString(key) {
+			return nil, noop, fmt.Errorf("ingress: ref key %q is invalid (must match %s)", key, refKeyPattern.String())
+		}
+	}
 
 	absDestDir, absErr := filepath.Abs(destDir)
 	if absErr != nil {
@@ -55,11 +92,9 @@ func FetchRefs(ctx context.Context, refs map[string]string, destDir string,
 
 	// One client for the whole set: CheckRedirect refuses every redirect (a
 	// redirect target has not itself passed the allowlist check, so
-	// following it would reopen the hole this file exists to close).
-	client := &http.Client{
-		Timeout:       ingressTimeout,
-		CheckRedirect: refuseRedirect,
-	}
+	// following it would reopen the hole this file exists to close), and its
+	// Transport ignores env proxies (see newIngressClient).
+	client := newIngressClient()
 
 	out := make(map[string]string, len(refs))
 	for key, rawURL := range refs {
