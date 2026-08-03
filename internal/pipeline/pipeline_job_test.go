@@ -329,6 +329,31 @@ func TestRunPipelineJob_RecordsFootprint(t *testing.T) {
 	}
 }
 
+// TestSceneSwapFailReason_UsesLastOccurrence: the doc comment promises "the
+// LAST SCENE-SWAP-FAIL line"; with two occurrences in the combined output
+// (e.g. an earlier stage's log line happens to echo the marker text), the
+// function must return the LAST one — the CLI's own actual terminal failure,
+// not an earlier line that merely contains the same substring.
+func TestSceneSwapFailReason_UsesLastOccurrence(t *testing.T) {
+	msg := `gpugen: fake-scene-swap.mjs failed: exit status 1 (SCENE-SWAP-FAIL stage=product: retrying after transient error
+SCENE-SWAP-FAIL stage=background: boom
+)`
+	got := sceneSwapFailReason(msg)
+	want := "SCENE-SWAP-FAIL stage=background: boom"
+	if got != want {
+		t.Errorf("sceneSwapFailReason = %q, want %q (must pick the LAST occurrence)", got, want)
+	}
+}
+
+// TestSceneSwapFailReason_AbsentReturnsEmpty: no marker present (e.g. a
+// timeout-kill, which prints no such line) returns "" so the caller falls
+// back to the generic exec error.
+func TestSceneSwapFailReason_AbsentReturnsEmpty(t *testing.T) {
+	if got := sceneSwapFailReason("gpugen: x failed: exit status 1 (killed)"); got != "" {
+		t.Errorf("sceneSwapFailReason = %q, want \"\" (no SCENE-SWAP-FAIL marker present)", got)
+	}
+}
+
 // --- Review fix #1: published[] must be index-aligned with spec.Artifacts,
 // not compacted — a compacted slice skews FinalPath/QaReportPath onto the
 // wrong artifact whenever a MIDDLE artifact is missing. ---

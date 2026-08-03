@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -513,6 +514,15 @@ func TestPipelinesDefaultEmpty(t *testing.T) {
 // fails Load with an error naming BOTH the field and the pipeline key — a bad
 // entry must fail at config-load time, never silently at dispatch time.
 func TestPipelinesLoadValidation(t *testing.T) {
+	// Real, genuinely-absolute (per THIS OS) paths — a hand-typed "/abs/..."
+	// literal is absolute on POSIX but NOT on Windows (filepath.IsAbs requires
+	// a drive letter or UNC prefix there), so validatePipelines' new
+	// filepath.IsAbs(script) check needs an actually-absolute fixture.
+	// filepath.ToSlash keeps the JSON literal escape-free; Go's filepath.IsAbs
+	// accepts forward slashes after a Windows drive letter too.
+	absScript := filepath.ToSlash(filepath.Join(t.TempDir(), "run-scene-swap.mjs"))
+	absWorkdir := filepath.ToSlash(t.TempDir())
+
 	cases := []struct {
 		name    string
 		json    string
@@ -520,38 +530,56 @@ func TestPipelinesLoadValidation(t *testing.T) {
 	}{
 		{
 			name: "valid scene-swap entry loads",
-			json: `{"pipelines":{"scene-swap":{"script":"/abs/run-scene-swap.mjs","workdir":"/abs/repo",` +
-				`"timeout_sec":2400,"artifacts":["final.png","qa-report.json"]}}}`,
+			json: fmt.Sprintf(`{"pipelines":{"scene-swap":{"script":%q,"workdir":%q,`+
+				`"timeout_sec":2400,"artifacts":["final.png","qa-report.json"]}}}`, absScript, absWorkdir),
 		},
 		{
 			name: "missing timeout_sec fails naming field and key",
-			json: `{"pipelines":{"scene-swap":{"script":"/abs/run-scene-swap.mjs","workdir":"/abs/repo",` +
-				`"artifacts":["final.png"]}}}`,
+			json: fmt.Sprintf(`{"pipelines":{"scene-swap":{"script":%q,"workdir":%q,`+
+				`"artifacts":["final.png"]}}}`, absScript, absWorkdir),
 			wantErr: `pipelines["scene-swap"]: timeout_sec`,
 		},
 		{
 			name: "zero timeout_sec fails naming field and key",
-			json: `{"pipelines":{"scene-swap":{"script":"/abs/run-scene-swap.mjs","workdir":"/abs/repo",` +
-				`"timeout_sec":0,"artifacts":["final.png"]}}}`,
+			json: fmt.Sprintf(`{"pipelines":{"scene-swap":{"script":%q,"workdir":%q,`+
+				`"timeout_sec":0,"artifacts":["final.png"]}}}`, absScript, absWorkdir),
 			wantErr: `pipelines["scene-swap"]: timeout_sec`,
 		},
 		{
 			name: "empty script fails naming field and key",
-			json: `{"pipelines":{"scene-swap":{"script":"","workdir":"/abs/repo",` +
-				`"timeout_sec":60,"artifacts":["final.png"]}}}`,
+			json: fmt.Sprintf(`{"pipelines":{"scene-swap":{"script":"","workdir":%q,`+
+				`"timeout_sec":60,"artifacts":["final.png"]}}}`, absWorkdir),
 			wantErr: `pipelines["scene-swap"]: script`,
 		},
 		{
+			name: "relative script fails naming field and key",
+			json: fmt.Sprintf(`{"pipelines":{"scene-swap":{"script":"relative/run.mjs","workdir":%q,`+
+				`"timeout_sec":60,"artifacts":["final.png"]}}}`, absWorkdir),
+			wantErr: `pipelines["scene-swap"]: script must be an absolute path`,
+		},
+		{
 			name: "empty workdir fails naming field and key",
-			json: `{"pipelines":{"scene-swap":{"script":"/abs/run.mjs","workdir":"",` +
-				`"timeout_sec":60,"artifacts":["final.png"]}}}`,
+			json: fmt.Sprintf(`{"pipelines":{"scene-swap":{"script":%q,"workdir":"",`+
+				`"timeout_sec":60,"artifacts":["final.png"]}}}`, absScript),
 			wantErr: `pipelines["scene-swap"]: workdir`,
 		},
 		{
 			name: "empty artifacts fails naming field and key",
-			json: `{"pipelines":{"scene-swap":{"script":"/abs/run.mjs","workdir":"/abs/repo",` +
-				`"timeout_sec":60,"artifacts":[]}}}`,
+			json: fmt.Sprintf(`{"pipelines":{"scene-swap":{"script":%q,"workdir":%q,`+
+				`"timeout_sec":60,"artifacts":[]}}}`, absScript, absWorkdir),
 			wantErr: `pipelines["scene-swap"]: artifacts`,
+		},
+		{
+			name: "artifact with forward slash fails naming field and key",
+			json: fmt.Sprintf(`{"pipelines":{"scene-swap":{"script":%q,"workdir":%q,`+
+				`"timeout_sec":60,"artifacts":["sub/final.png"]}}}`, absScript, absWorkdir),
+			wantErr: `pipelines["scene-swap"]: artifact "sub/final.png" must be a bare filename`,
+		},
+		{
+			name: "artifact with backslash fails naming field and key",
+			json: fmt.Sprintf(`{"pipelines":{"scene-swap":{"script":%q,"workdir":%q,`+
+				`"timeout_sec":60,"artifacts":["sub\\final.png"]}}}`, absScript, absWorkdir),
+			wantErr: `must be a bare filename`,
 		},
 	}
 	for _, tc := range cases {

@@ -280,7 +280,15 @@ verbatim; otherwise the generic exec error (including a timeout-kill) is used.
   (see Known limits below): survivors are marked terminal `error:"interrupted"` on drain: an
   in-flight run may leave partial output under its `pipeline-jobs/<job_id>/out/` — the
   dispatcher's failure handling (re-dispatch elsewhere) is the recovery path, not a node-side
-  resume.
+  resume. A **graceful** stop (SIGINT, drained) removes nothing extra — the job's own
+  directory is cleaned up by its normal cleanup path once the drain marks it terminal. An
+  **ungraceful** stop (crash, `kill -9`, power loss) leaves the directory behind with no
+  in-memory record of it at all; since `job_spec.id` collisions are guarded by an exclusive
+  directory create (see above), that orphaned directory would otherwise refuse EVERY future
+  dispatch reusing the same `job_spec.id`, forever. `fleet-serve` sweeps
+  `<base_dir>/pipeline-jobs/`'s contents once at startup, **before** it starts listening —
+  every directory present at that instant is orphaned by definition (this process has not
+  accepted a single dispatch yet) — and logs how many it removed.
 
 ## Known limits (v1)
 
