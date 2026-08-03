@@ -1418,7 +1418,7 @@ func (p *Pipeline) runPipelineJob(ctx context.Context, req core.Request, meta co
 // (a timeout-kill, or any failure before the CLI could print one), so the
 // caller falls back to the generic exec error.
 func sceneSwapFailReason(errMsg string) string {
-	idx := strings.Index(errMsg, sceneSwapFailPrefix)
+	idx := strings.LastIndex(errMsg, sceneSwapFailPrefix)
 	if idx < 0 {
 		return ""
 	}

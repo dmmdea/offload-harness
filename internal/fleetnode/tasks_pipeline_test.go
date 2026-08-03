@@ -370,6 +370,95 @@ func TestBuildPipelineJob_UnconfiguredPipeline(t *testing.T) {
 	}
 }
 
+// TestSweepOrphanedPipelineJobs_RemovesEntries: a fake orphan dir (as a crash
+// would leave behind — jobs are in-memory, so nothing tracks it after an
+// ungraceful stop) is removed by the sweep, and the count reflects it.
+func TestSweepOrphanedPipelineJobs_RemovesEntries(t *testing.T) {
+	cfg := config.Default()
+	cfg.Home = t.TempDir()
+	jobsDir := filepath.Join(cfg.BaseDir(), "pipeline-jobs")
+	for _, id := range []string{"orphan-1", "orphan-2"} {
+		d := filepath.Join(jobsDir, id, "assets")
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(jobsDir, id, "job.json"), []byte(`{"id":"`+id+`"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	swept, err := SweepOrphanedPipelineJobs(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if swept != 2 {
+		t.Fatalf("swept = %d, want 2", swept)
+	}
+	entries, rerr := os.ReadDir(jobsDir)
+	if rerr != nil {
+		t.Fatalf("pipeline-jobs dir itself should survive (only its CONTENTS are swept): %v", rerr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("pipeline-jobs dir not empty after sweep: %v", entries)
+	}
+}
+
+// TestSweepOrphanedPipelineJobs_MissingDirIsNotAnError: a fresh install (or a
+// node that has never served a pipeline job) has no pipeline-jobs/ dir at
+// all — that is normal, not a sweep failure.
+func TestSweepOrphanedPipelineJobs_MissingDirIsNotAnError(t *testing.T) {
+	cfg := config.Default()
+	cfg.Home = t.TempDir() // pipeline-jobs/ never created under this fresh Home
+	swept, err := SweepOrphanedPipelineJobs(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if swept != 0 {
+		t.Fatalf("swept = %d, want 0", swept)
+	}
+}
+
+// TestSweepOrphanedPipelineJobs_UnblocksReusedID: the actual bug scenario —
+// after a crash, a fresh dispatch reusing the same job_spec.id must succeed
+// (not be falsely refused as "already in flight") once the sweep has run.
+func TestSweepOrphanedPipelineJobs_UnblocksReusedID(t *testing.T) {
+	srv := pngServer(t)
+	cfg := testPipelineConfig(t)
+
+	// Simulate a crash: a job dir left on disk with NO corresponding in-memory
+	// Jobs-store entry (there is none in this test — buildPipelineJob is
+	// called directly, never through a Jobs store).
+	orphanID := "crash-orphan"
+	if _, cleanup, err := buildPipelineJob(cfg, "scene-swap", validPipelinePayload(srv, orphanID)); err != nil {
+		t.Fatalf("setup: unexpected error: %v", err)
+	} else {
+		_ = cleanup // deliberately NOT called — this is the orphan
+	}
+
+	// Without a sweep, re-dispatching the same job_spec.id is falsely refused.
+	if _, cleanup, err := buildPipelineJob(cfg, "scene-swap", validPipelinePayload(srv, orphanID)); err == nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		t.Fatal("expected the pre-sweep re-dispatch to be refused (the orphan is still on disk)")
+	}
+
+	if _, err := SweepOrphanedPipelineJobs(cfg); err != nil {
+		t.Fatalf("sweep: unexpected error: %v", err)
+	}
+
+	// After the sweep (as fleet-serve runs at startup), the SAME job_spec.id
+	// must be dispatchable again.
+	req, cleanup, err := buildPipelineJob(cfg, "scene-swap", validPipelinePayload(srv, orphanID))
+	if err != nil {
+		t.Fatalf("post-sweep re-dispatch still refused: %v", err)
+	}
+	defer cleanup()
+	if req.Params["job_id"].(string) != orphanID {
+		t.Errorf("job_id = %v, want %q", req.Params["job_id"], orphanID)
+	}
+}
+
 // TestSupportedTasks_IncludesPipelineIffConfigured: SupportedTasks advertises
 // a pipeline's task_type key exactly when cfg.Pipelines has a valid entry for
 // it — mirroring every hardcoded route's taskConfigured gate.

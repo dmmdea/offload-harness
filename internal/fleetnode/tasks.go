@@ -674,3 +674,45 @@ func pipelineInjectRefs(jobSpec map[string]json.RawMessage, fetched map[string]s
 	}
 	return json.Marshal(out)
 }
+
+// SweepOrphanedPipelineJobs removes every entry directly under
+// cfg.BaseDir()/pipeline-jobs/ (each one a materialized job dir from
+// buildPipelineJob) and reports how many were removed. Missing pipeline-jobs/
+// (nothing configured yet, or a fresh install) is not an error — (0, nil).
+//
+// Called ONCE at fleet-serve startup, BEFORE listening (main.go's
+// runFleetServe). Jobs are in-memory (internal/fleetnode/jobs.go's Jobs
+// store) — an ungraceful stop (crash, kill -9, power loss) loses every
+// in-flight job's state, but its materialized directory on disk survives.
+// Left in place, that orphaned directory would permanently refuse every
+// FUTURE dispatch that reuses its job_spec.id: buildPipelineJob's exclusive
+// os.Mkdir collision guard has no way to distinguish "a real still-running
+// job" from "a directory nobody is ever going to finish or clean up" — so at
+// process start, before any job has been accepted, EVERY directory present is
+// orphaned by definition and safe to remove.
+//
+// A per-entry removal failure (e.g. a locked file) is collected but does not
+// abort the sweep of the REST of the entries — one bad directory blocking one
+// job_spec.id forever is a much smaller failure than a startup crash over it.
+func SweepOrphanedPipelineJobs(cfg config.Config) (swept int, err error) {
+	dir := filepath.Join(cfg.BaseDir(), "pipeline-jobs")
+	entries, rerr := os.ReadDir(dir)
+	if rerr != nil {
+		if os.IsNotExist(rerr) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("sweep pipeline-jobs: reading %s: %w", dir, rerr)
+	}
+	var firstErr error
+	for _, e := range entries {
+		p := filepath.Join(dir, e.Name())
+		if rmErr := os.RemoveAll(p); rmErr != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("sweep pipeline-jobs: removing %s: %w", p, rmErr)
+			}
+			continue
+		}
+		swept++
+	}
+	return swept, firstErr
+}

@@ -674,9 +674,6 @@ func Load(path string) (Config, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return c, err
 	}
-	if err := validatePipelines(c.Pipelines); err != nil {
-		return c, err
-	}
 	warnUnknownKeys(b)
 	warnBadEnumValues(c)
 	if home, herr := os.UserHomeDir(); herr == nil {
@@ -684,6 +681,13 @@ func Load(path string) (Config, error) {
 		expandUserPaths(&c, home)
 	}
 	rebaseHome(&c)
+	// validatePipelines runs LAST, after tilde-expansion/rebase — it checks
+	// filepath.IsAbs(script), and a legitimate "~/..."-prefixed script (which
+	// expandPipelinePaths above resolves to absolute) must not be rejected as
+	// relative just because validation ran before expansion did.
+	if err := validatePipelines(c.Pipelines); err != nil {
+		return c, err
+	}
 	return c, nil
 }
 
@@ -734,18 +738,32 @@ func warnBadEnumValues(c Config) {
 // to run it as a fleet task, so a bad entry fails LOUDLY at config load time —
 // never silently at dispatch time (Task 4). Each error names BOTH the field and
 // the pipeline key so an operator with a dozen pipelines can tell which one is
-// broken.
+// broken. Called (from Load) AFTER tilde-expansion/rebase, so script is
+// already resolved to its final form when the absolute-path check runs.
 func validatePipelines(pipelines map[string]PipelineSpec) error {
 	for key, spec := range pipelines {
 		switch {
 		case strings.TrimSpace(spec.Script) == "":
 			return fmt.Errorf("pipelines[%q]: script is required", key)
+		case !filepath.IsAbs(spec.Script):
+			// A relative script is resolved against whatever the CHILD PROCESS's
+			// cwd happens to be (gpugen.Generate sets cmd.Dir = spec.Workdir, but
+			// Script itself is passed as-is to exec) — silently wrong the moment
+			// fleet-serve's own cwd differs from the pipeline's Workdir. Fail
+			// loudly at load instead of a confusing ENOENT at first dispatch.
+			return fmt.Errorf("pipelines[%q]: script must be an absolute path (got %q)", key, spec.Script)
 		case strings.TrimSpace(spec.Workdir) == "":
 			return fmt.Errorf("pipelines[%q]: workdir is required", key)
 		case spec.TimeoutSec <= 0:
 			return fmt.Errorf("pipelines[%q]: timeout_sec must be > 0", key)
 		case len(spec.Artifacts) == 0:
 			return fmt.Errorf("pipelines[%q]: artifacts must be non-empty", key)
+		}
+		for _, a := range spec.Artifacts {
+			if strings.ContainsAny(a, `/\`) {
+				return fmt.Errorf("pipelines[%q]: artifact %q must be a bare filename (no / or \\) — "+
+					"it becomes an out/<id>/ entry and a MediaDir publish name, both of which reject separators", key, a)
+			}
 		}
 	}
 	return nil
