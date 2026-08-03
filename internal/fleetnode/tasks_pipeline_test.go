@@ -312,6 +312,50 @@ func TestBuildPipelineJob_CleanupRemovesWholeJobDir(t *testing.T) {
 	}
 }
 
+// TestBuildPipelineJob_DuplicateJobSpecIDRefusedAtAck: a second dispatch
+// carrying the SAME job_spec.id as a still-in-flight (not yet cleaned up)
+// first job must be refused at ack — not silently share the job dir, which
+// would let the first job's eventual cleanup() rip the second job's live
+// assets/job.json out from under it while it's still running.
+func TestBuildPipelineJob_DuplicateJobSpecIDRefusedAtAck(t *testing.T) {
+	srv := pngServer(t)
+	cfg := testPipelineConfig(t)
+
+	req1, cleanup1, err1 := buildPipelineJob(cfg, "scene-swap", validPipelinePayload(srv, "dup-case"))
+	if err1 != nil {
+		t.Fatalf("first buildPipelineJob: unexpected error: %v", err1)
+	}
+	defer cleanup1()
+	firstJobPath := req1.Params["job_path"].(string)
+	firstJobBytes, err := os.ReadFile(firstJobPath)
+	if err != nil {
+		t.Fatalf("first job's job.json missing: %v", err)
+	}
+
+	// Second dispatch, same job_spec.id, while the first is still "in flight"
+	// (its cleanup has not run yet).
+	_, cleanup2, err2 := buildPipelineJob(cfg, "scene-swap", validPipelinePayload(srv, "dup-case"))
+	if cleanup2 != nil {
+		cleanup2()
+	}
+	if err2 == nil {
+		t.Fatal("expected the second dispatch with a duplicate job_spec.id to be refused at ack")
+	}
+	if !strings.Contains(err2.Error(), "dup-case") || !strings.Contains(err2.Error(), "already in flight") {
+		t.Errorf("error = %q, want it to name the id and say it is already in flight", err2.Error())
+	}
+
+	// The first job's directory/job.json must be completely UNTOUCHED by the
+	// refused second attempt.
+	gotBytes, err := os.ReadFile(firstJobPath)
+	if err != nil {
+		t.Fatalf("first job's job.json was disturbed by the refused duplicate: %v", err)
+	}
+	if string(gotBytes) != string(firstJobBytes) {
+		t.Error("first job's job.json content changed after the refused duplicate dispatch")
+	}
+}
+
 // TestBuildPipelineJob_UnconfiguredPipeline: a task_type with no cfg.Pipelines
 // entry is a clean ack-time error (BuildRequest's taskConfigured gate normally
 // catches this first; buildPipelineJob defends the same rule directly).

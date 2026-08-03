@@ -1397,12 +1397,14 @@ func (p *Pipeline) runPipelineJob(ctx context.Context, req core.Request, meta co
 
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	result := pipelineJobResult{
-		FinalPath:   published[0],
+		FinalPath:   published[0], // published is index-aligned with spec.Artifacts; [0] is required, never "".
 		JobID:       jobID,
 		Tier:        tier,
 		DurationSec: time.Since(start).Seconds(),
 	}
-	if len(published) > 1 {
+	// QaReportPath binds to Artifacts[1] SPECIFICALLY (never a later index that
+	// happened to publish) — present iff Artifacts[1] was actually published.
+	if len(published) > 1 && published[1] != "" {
 		result.QaReportPath = published[1]
 	}
 	data, _ := json.Marshal(result)
@@ -1433,17 +1435,28 @@ func sceneSwapFailReason(errMsg string) string {
 
 // publishPipelineArtifacts copies each configured artifact from the CLI's
 // out/<id>/ dir to cfg.MediaDir as "<id>-<artifact>" (flat, bare names — the
-// fleet media route rejects any separator). The PRIMARY artifact (index 0)
-// is required — gpugen's Out-stat gate already proved it exists, but a
-// missing/unreadable file here is still surfaced as an error defensively;
-// any other (optional) artifact that is missing is silently omitted, never
-// an error.
+// fleet media route rejects any separator).
+//
+// The returned slice is INDEX-ALIGNED with artifacts (same length): published[i]
+// is the destination path for artifacts[i], or "" when that artifact was
+// missing. This matters because the caller binds specific RESULT fields to
+// specific indices (FinalPath <- [0], QaReportPath <- [1]) — a compacted
+// slice would skew those bindings whenever a middle artifact is missing (a
+// later, present artifact would silently slide into an earlier field's
+// slot). The PRIMARY artifact (index 0) is required — gpugen's Out-stat gate
+// already proved it exists, but a missing/unreadable file here is still
+// surfaced as an error defensively; any OTHER (optional) artifact that is
+// missing leaves its slot "" — never an error. Every configured artifact,
+// including ones beyond index 1, is still published to MediaDir when
+// present; only index 0 and 1 are ever NAMED in the JSON result (see
+// docs/FLEET-NODE.md's "Pipeline-job task families" section) — a 3rd+
+// artifact's caller must know its published name out of band.
 func publishPipelineArtifacts(outRoot, jobID string, artifacts []string, mediaDir string) ([]string, error) {
 	if err := os.MkdirAll(mediaDir, 0o755); err != nil {
 		return nil, fmt.Errorf("pipeline publish: creating media dir: %w", err)
 	}
 	srcDir := filepath.Join(outRoot, jobID)
-	published := make([]string, 0, len(artifacts))
+	published := make([]string, len(artifacts))
 	for i, name := range artifacts {
 		src := filepath.Join(srcDir, name)
 		data, rerr := os.ReadFile(src)
@@ -1451,7 +1464,7 @@ func publishPipelineArtifacts(outRoot, jobID string, artifacts []string, mediaDi
 			if i == 0 {
 				return nil, fmt.Errorf("pipeline publish: primary artifact %q missing: %w", name, rerr)
 			}
-			continue // optional artifact missing: omit, not an error
+			continue // optional artifact missing: leave published[i] == "", never an error
 		}
 		dest := filepath.Join(mediaDir, jobID+"-"+name)
 		if werr := os.WriteFile(dest, data, 0o644); werr != nil {
@@ -1460,9 +1473,9 @@ func publishPipelineArtifacts(outRoot, jobID string, artifacts []string, mediaDi
 			}
 			continue
 		}
-		published = append(published, dest)
+		published[i] = dest
 	}
-	if len(published) == 0 {
+	if published[0] == "" {
 		return nil, fmt.Errorf("pipeline publish: primary artifact %q missing", artifacts[0])
 	}
 	return published, nil
