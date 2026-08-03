@@ -495,3 +495,168 @@ func TestDefaultBaseHonorsTheEnvVar(t *testing.T) {
 		t.Errorf("with the env cleared DefaultBase() = %q, want ~/.local-offload", got)
 	}
 }
+
+// --- Task 4: pipelines config surface (config-driven fleet "pipeline job" family) ---
+
+// TestPipelinesDefaultEmpty: pipelines are opt-in per box, exactly like
+// ImageGenScript/InpaintScript — a shared config must never bind a box to a
+// pipeline CLI that only exists on one machine.
+func TestPipelinesDefaultEmpty(t *testing.T) {
+	c := Default()
+	if len(c.Pipelines) != 0 {
+		t.Errorf("Pipelines default must be empty (opt-in per box); got %v", c.Pipelines)
+	}
+}
+
+// TestPipelinesLoadValidation: a config JSON with a valid pipelines entry loads
+// cleanly and PipelineNames() reports it; an entry missing a required field
+// fails Load with an error naming BOTH the field and the pipeline key — a bad
+// entry must fail at config-load time, never silently at dispatch time.
+func TestPipelinesLoadValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		json    string
+		wantErr string // substring the Load error must contain; "" = must load cleanly
+	}{
+		{
+			name: "valid scene-swap entry loads",
+			json: `{"pipelines":{"scene-swap":{"script":"/abs/run-scene-swap.mjs","workdir":"/abs/repo",` +
+				`"timeout_sec":2400,"artifacts":["final.png","qa-report.json"]}}}`,
+		},
+		{
+			name: "missing timeout_sec fails naming field and key",
+			json: `{"pipelines":{"scene-swap":{"script":"/abs/run-scene-swap.mjs","workdir":"/abs/repo",` +
+				`"artifacts":["final.png"]}}}`,
+			wantErr: `pipelines["scene-swap"]: timeout_sec`,
+		},
+		{
+			name: "zero timeout_sec fails naming field and key",
+			json: `{"pipelines":{"scene-swap":{"script":"/abs/run-scene-swap.mjs","workdir":"/abs/repo",` +
+				`"timeout_sec":0,"artifacts":["final.png"]}}}`,
+			wantErr: `pipelines["scene-swap"]: timeout_sec`,
+		},
+		{
+			name: "empty script fails naming field and key",
+			json: `{"pipelines":{"scene-swap":{"script":"","workdir":"/abs/repo",` +
+				`"timeout_sec":60,"artifacts":["final.png"]}}}`,
+			wantErr: `pipelines["scene-swap"]: script`,
+		},
+		{
+			name: "empty workdir fails naming field and key",
+			json: `{"pipelines":{"scene-swap":{"script":"/abs/run.mjs","workdir":"",` +
+				`"timeout_sec":60,"artifacts":["final.png"]}}}`,
+			wantErr: `pipelines["scene-swap"]: workdir`,
+		},
+		{
+			name: "empty artifacts fails naming field and key",
+			json: `{"pipelines":{"scene-swap":{"script":"/abs/run.mjs","workdir":"/abs/repo",` +
+				`"timeout_sec":60,"artifacts":[]}}}`,
+			wantErr: `pipelines["scene-swap"]: artifacts`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "cfg.json")
+			if err := os.WriteFile(p, []byte(tc.json), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			c, err := Load(p)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected a clean load, got error: %v", err)
+				}
+				if names := c.PipelineNames(); len(names) != 1 || names[0] != "scene-swap" {
+					t.Fatalf(`PipelineNames() = %v, want ["scene-swap"]`, names)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected a load error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %q, want it to contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestPipelineNamesSortedAndSkipsInvalid: PipelineNames() returns sorted keys
+// and — for a Config assembled directly rather than through Load() (tests,
+// future callers) — silently skips any entry that fails the same validation
+// rules Load() enforces, so a caller never advertises a route it cannot run.
+func TestPipelineNamesSortedAndSkipsInvalid(t *testing.T) {
+	c := Config{Pipelines: map[string]PipelineSpec{
+		"zzz-last":  {Script: "/a", Workdir: "/b", TimeoutSec: 10, Artifacts: []string{"out.png"}},
+		"aaa-first": {Script: "/a", Workdir: "/b", TimeoutSec: 10, Artifacts: []string{"out.png"}},
+		"bad-entry": {Script: "", Workdir: "/b", TimeoutSec: 10, Artifacts: []string{"out.png"}},
+	}}
+	got := c.PipelineNames()
+	want := []string{"aaa-first", "zzz-last"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("PipelineNames() = %v, want %v", got, want)
+	}
+}
+
+// TestPipelinesConfigured mirrors ImageRouteConfigured's simple gate, scaled to
+// a variable-size set of pipeline routes.
+func TestPipelinesConfigured(t *testing.T) {
+	var c Config
+	if c.PipelinesConfigured() {
+		t.Fatal("no pipelines configured by default")
+	}
+	c.Pipelines = map[string]PipelineSpec{
+		"scene-swap": {Script: "/a", Workdir: "/b", TimeoutSec: 10, Artifacts: []string{"out.png"}},
+	}
+	if !c.PipelinesConfigured() {
+		t.Fatal("a valid pipeline entry should report configured")
+	}
+}
+
+// TestPipelineSpecRefCapMB: max_ref_mb <= 0 reads as 24 (a scene-swap job pulls
+// a handful of PNGs, not a video); a positive value passes through unchanged.
+func TestPipelineSpecRefCapMB(t *testing.T) {
+	cases := []struct {
+		name string
+		spec PipelineSpec
+		want int
+	}{
+		{"zero defaults to 24", PipelineSpec{}, 24},
+		{"negative defaults to 24", PipelineSpec{MaxRefMB: -5}, 24},
+		{"positive passes through", PipelineSpec{MaxRefMB: 48}, 48},
+	}
+	for _, tc := range cases {
+		if got := tc.spec.RefCapMB(); got != tc.want {
+			t.Errorf("%s: RefCapMB() = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestPipelinePathsTildeExpand: script/workdir live inside a variable-size map
+// (Config.Pipelines), so they cannot join the flat pathFields list — they get
+// their own tilde-expansion pass, exercised here the same way
+// TestLoadExpandsTildeInEveryPathField exercises the fixed fields.
+func TestPipelinePathsTildeExpand(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir on this runner")
+	}
+	js := `{"pipelines":{"scene-swap":{"script":"~/pipelines/run.mjs","workdir":"~/pipelines",` +
+		`"timeout_sec":60,"artifacts":["final.png"]}}}`
+	p := filepath.Join(t.TempDir(), "cfg.json")
+	if err := os.WriteFile(p, []byte(js), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := c.Pipelines["scene-swap"]
+	wantScript := filepath.Join(home, "pipelines", "run.mjs")
+	wantWorkdir := filepath.Join(home, "pipelines")
+	if spec.Script != wantScript {
+		t.Errorf("pipeline script = %q, want %q", spec.Script, wantScript)
+	}
+	if spec.Workdir != wantWorkdir {
+		t.Errorf("pipeline workdir = %q, want %q", spec.Workdir, wantWorkdir)
+	}
+}
