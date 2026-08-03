@@ -328,3 +328,117 @@ func TestRunPipelineJob_RecordsFootprint(t *testing.T) {
 		t.Errorf("quant = %q, want \"\" (no family/quant claim)", e.Quant)
 	}
 }
+
+// --- Review fix #1: published[] must be index-aligned with spec.Artifacts,
+// not compacted — a compacted slice skews FinalPath/QaReportPath onto the
+// wrong artifact whenever a MIDDLE artifact is missing. ---
+
+// writeSelectiveArtifactStub writes a node stub that creates ONLY the named
+// bare filenames under <out>/<job.id>/ and exits 0, ignoring --tier/--backend
+// entirely. Used to test publishPipelineArtifacts'/runPipelineJob's index
+// binding independent of the real CLI's final.png+qa-report.json contract
+// (fake-scene-swap.mjs always writes both, so it can't produce a
+// "middle artifact missing, later one present" shape).
+func writeSelectiveArtifactStub(t *testing.T, dir string, files ...string) string {
+	t.Helper()
+	stub := filepath.Join(dir, "selective-stub.mjs")
+	filesJSON, err := json.Marshal(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := `import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import path from "node:path";
+function argVal(flag) {
+  const i = process.argv.indexOf(flag);
+  return i >= 0 ? process.argv[i + 1] : undefined;
+}
+const job = JSON.parse(readFileSync(argVal("--job"), "utf8"));
+const outDir = path.join(argVal("--out"), job.id);
+mkdirSync(outDir, { recursive: true });
+for (const name of ` + string(filesJSON) + `) {
+  writeFileSync(path.join(outDir, name), "stub-" + name);
+}
+process.exit(0);
+`
+	if err := os.WriteFile(stub, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return stub
+}
+
+// TestPublishPipelineArtifacts_IndexBinding: a whitebox proof that a missing
+// MIDDLE artifact leaves published[1]=="" rather than sliding artifacts[2]'s
+// path into slot 1 — the direct fix for the reviewed positional-skew bug.
+func TestPublishPipelineArtifacts_IndexBinding(t *testing.T) {
+	dir := t.TempDir()
+	outRoot := filepath.Join(dir, "out")
+	srcDir := filepath.Join(outRoot, "job1")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "final.png"), []byte("f"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// qa-report.json (artifacts[1]) intentionally NOT written — the missing middle artifact.
+	if err := os.WriteFile(filepath.Join(srcDir, "extra.json"), []byte("e"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mediaDir := filepath.Join(dir, "media")
+	published, err := publishPipelineArtifacts(outRoot, "job1", []string{"final.png", "qa-report.json", "extra.json"}, mediaDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(published) != 3 {
+		t.Fatalf("published = %#v, want 3 index-aligned entries (matching len(artifacts))", published)
+	}
+	if published[0] == "" {
+		t.Error("published[0] (final.png, present) must be set")
+	}
+	if published[1] != "" {
+		t.Errorf("published[1] (qa-report.json, MISSING) must be \"\", got %q — this is the positional-skew bug", published[1])
+	}
+	if published[2] == "" {
+		t.Error("published[2] (extra.json, present) must still be published even though [1] is missing")
+	}
+	if _, statErr := os.Stat(filepath.Join(mediaDir, "job1-extra.json")); statErr != nil {
+		t.Errorf("extra.json not actually copied to the media dir: %v", statErr)
+	}
+}
+
+// TestRunPipelineJob_MiddleArtifactMissingDoesNotSkewQAPath: the E2E proof
+// through p.Run — with artifacts ["final.png","qa-report.json","extra.json"]
+// and a CLI that produces only final.png + extra.json (skipping the middle
+// one), the result must OMIT qa_report_path entirely (never misreport
+// extra.json's path as the QA report), while extra.json still lands in
+// MediaDir under its own name.
+func TestRunPipelineJob_MiddleArtifactMissingDoesNotSkewQAPath(t *testing.T) {
+	requireNodePipeline(t)
+	jobDir := t.TempDir()
+	script := writeSelectiveArtifactStub(t, jobDir, "final.png", "extra.json")
+	cfg := pipelineTestConfig(t, script, jobDir, 30, []string{"final.png", "qa-report.json", "extra.json"})
+
+	jobID := "middle-missing-case"
+	jobPath := writeTestJobJSON(t, jobDir, jobID)
+	outRoot := filepath.Join(jobDir, "out")
+
+	p := &Pipeline{cfg: cfg}
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskPipelineJob,
+		Params: pipelineJobParams("scene-swap", jobID, jobPath, outRoot, "16gb"),
+	})
+	if !res.OK {
+		t.Fatalf("expected OK, got defer/failure: %s", res.Reason)
+	}
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(res.Data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := out["qa_report_path"]; has {
+		t.Errorf("qa_report_path must be ABSENT when artifacts[1] (qa-report.json) is missing, got %s", out["qa_report_path"])
+	}
+	wantExtra := filepath.Join(cfg.MediaDir, jobID+"-extra.json")
+	if _, statErr := os.Stat(wantExtra); statErr != nil {
+		t.Errorf("extra.json (artifacts[2]) should still be published to MediaDir despite artifacts[1] missing: %v", statErr)
+	}
+}

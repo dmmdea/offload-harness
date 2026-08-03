@@ -216,6 +216,11 @@ accepted — a bad payload or an unreachable ref is a 400, never a mid-render su
 - `job_spec` must **not** already contain `product`, `logo`, or `background.path` — the node,
   never the dispatch payload, injects those from the fetched `image_refs` (a payload trying to
   set them itself is rejected outright).
+- `job_spec.id` must **not** already have an in-flight job on this node: the materialization
+  dir is created with an exclusive `os.Mkdir` (not `MkdirAll`), so a second dispatch sharing an
+  id with a still-running job is refused at ack (`"job_spec.id ... already in flight on this
+  node"`) rather than sharing the directory — which would otherwise let the first job's
+  eventual cleanup delete the second job's still-live assets/`job.json` out from under it.
 - Every `image_refs` URL goes through the same allowlisted/capped/magic-sniffed ingress every
   other fetched ref uses (tailnet CGNAT + loopback + this pipeline's `ingress_allow`; PNG/JPEG/
   WebP only; capped at `max_ref_mb`).
@@ -246,6 +251,15 @@ filenames — `GET /fleet/media/{name}` rejects any separator, same as every oth
 render). The **primary** artifact (`artifacts[0]`) missing is an error; any other
 (**optional**, e.g. `qa-report.json`) artifact missing is silently omitted from the result,
 never an error.
+
+The JSON result only ever **names** `artifacts[0]` (`final_path`) and `artifacts[1]`
+(`qa_report_path`) — the binding is by **index**, not by "whichever artifacts happened to be
+present": if `artifacts[1]` is missing but a `artifacts[2]` exists, `qa_report_path` stays
+absent (never silently reports `artifacts[2]`'s path instead). A 3rd-or-later configured
+artifact is still copied to `MediaDir` under its own `<job_id>-<name>` name when present, it is
+simply never referenced in the result JSON — a consumer that configures more than two
+artifacts must know the extra names out of band (e.g. a fixed convention agreed with the
+pipeline's own docs).
 
 A child CLI failure (non-zero exit) is surfaced as a **plain failure**, not a defer — a fleet
 job has no interactive caller to hand work back to. When the CLI's stderr carries the CMP CLI

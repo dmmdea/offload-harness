@@ -447,11 +447,18 @@ var pipelineJobIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 // tier is a non-empty string; image_refs.product and .logo are required;
 // image_refs.background is required IFF job_spec.background.mode=="stock";
 // job_spec must not already contain product/logo/background.path — the node,
-// never the payload, is authoritative there.
+// never the payload, is authoritative there; job_spec.id must not already
+// have an in-flight job on this node (a duplicate dispatch sharing an id with
+// a still-running job is refused at ack, never silently reused — see the
+// exclusive os.Mkdir below).
 //
 // Materialization dir: filepath.Join(cfg.BaseDir(), "pipeline-jobs", jobID) —
 // assets/ (fetched refs), job.json, out/ (the CLI's --out root; the CLI
-// itself creates out/<id>/ and writes artifacts there).
+// itself creates out/<id>/ and writes artifacts there). jobDir itself is
+// created with os.Mkdir (exclusive, NOT MkdirAll): two dispatches racing on
+// the same job_spec.id must not both proceed into the same directory, or the
+// first job to finish would os.RemoveAll it out from under the second,
+// still-running one.
 //
 // Cleanup-scope decision (brief left this to the implementer): the returned
 // cleanup ALWAYS removes the WHOLE job dir, never just assets/. FetchRefs'
@@ -525,7 +532,23 @@ func buildPipelineJob(cfg config.Config, taskType string, payload json.RawMessag
 
 	// --- Every validation rule passed. From here on we touch the filesystem
 	// and the network, so any failure must clean up whatever it created. ---
-	jobDir := filepath.Join(cfg.BaseDir(), "pipeline-jobs", jobID)
+	pipelineJobsDir := filepath.Join(cfg.BaseDir(), "pipeline-jobs")
+	if mkErr := os.MkdirAll(pipelineJobsDir, 0o755); mkErr != nil {
+		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: creating pipeline-jobs dir: %w", mkErr)
+	}
+	jobDir := filepath.Join(pipelineJobsDir, jobID)
+	// Exclusive create (os.Mkdir, NOT MkdirAll): two dispatches sharing the same
+	// job_spec.id would otherwise both proceed into the SAME jobDir, and the
+	// first one to finish would os.RemoveAll it out from under the second,
+	// still-running job (the cleanup closure below). A collision is therefore
+	// an ack-time validation error, not a race resolved later.
+	if mkErr := os.Mkdir(jobDir, 0o755); mkErr != nil {
+		if os.IsExist(mkErr) {
+			return core.Request{}, noop, fmt.Errorf(
+				"pipeline-job payload: job_spec.id %q already in flight on this node", jobID)
+		}
+		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: creating job dir: %w", mkErr)
+	}
 	assetsDir := filepath.Join(jobDir, "assets")
 	outRoot := filepath.Join(jobDir, "out")
 
