@@ -515,9 +515,11 @@ type, flash-attn, and 26B MoE placement (`gpu` / `--cpu-moe` / dropped) into the
 (`dual-gpu` renders the `win-dual-cuda` two-model-resident template). It drops the 26B entirely when
 `ram_tier` is `low`/`min` (no RAM path for `--cpu-moe`). The install step prints the resolved
 `profile | ram_tier | ctx | kv | 26b` and writes `profile`, `ram_tier`, `big_ram`, and
-`agent_ctx_tokens` into `installed.json`. Run the agent with `-model <resident tier>` and
-`-ctx-tokens <agent_ctx_tokens>` — install prints the exact command. An unknown/absent profile falls
-back to the backend template's baked-in defaults.
+`agent_ctx_tokens` into `installed.json`. The install seed binds the agent's planner seat
+automatically: config `agent_model` derives from the profile's `resident_tier` when it differs from
+the workhorse, so `-model <resident tier>` is no longer required — the `-model` flag remains an
+override. Run the agent with `-ctx-tokens <agent_ctx_tokens>` — install prints the exact command. An
+unknown/absent profile falls back to the backend template's baked-in defaults.
 
 Last stdout line: `{"installed":true,"backend":"...","home":"...","next":"run selftest.ps1"}`.
 

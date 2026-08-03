@@ -4,6 +4,30 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.43.0] - 2026-08-02
+
+### Added — `agent_model`: a dedicated planner seat for the single-loop coding agent
+The agent's judgment wants the strongest model the tier serves; the cascade's economics want the
+small fast workhorse. One `model` key could not serve both, so the planner seat is now its own
+config key with a live fallback chain.
+
+- **Resolution (`config.AgentPlannerModel`): per-call/flag override > config `agent_model` > config
+  `model`.** An empty `agent_model` is the pre-seat behavior, and nothing materializes the fallback
+  at rest, so the chain stays live.
+- **Derived at install-seed time (`internal/tierseed`):** `agent_model` seeds from the tier row's
+  `resident_tier` when it differs from the effective workhorse; an explicit
+  `config_seed.agent_model` (including a blank) always wins; matching tiers materialize nothing.
+- **`agent_timeout_sec`** — tier-seedable default wall-clock for `agent_run` when the call passes no
+  timeout (0 = the built-in 180s). `blackwell-2x16` seeds `agent_timeout_sec=600`: a cold
+  big-planner load plus low tok/s inside 180s is a timeout machine, not an agent.
+- **`agent_run`** now defaults its planner to the agent seat, reports the resolved planner `model`
+  in its result (visibility is the cure for a silent seat), and fails loud (`deferred: true`) when
+  the resolved planner is not in the endpoint's served roster — never a silent fall back to the
+  workhorse.
+- **The in-loop offload cascade stays on the workhorse (`model`)**, preserving cascade economics; an
+  explicit per-call model still drives both. Two-tier seats are unchanged
+  (architect=`escalation_model`, editor=`model`).
+
 ## [0.42.0] - 2026-08-02
 
 ### Added — the `blackwell-2x16` tier: a homogeneous pair of 16GB Blackwell cards (config #16)

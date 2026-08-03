@@ -86,6 +86,15 @@ search only; the editor gets whatever capabilities were granted.
 > `--profile` and `--two-tier` conflict only for a *non-default* profile. `--profile general` or an
 > empty value coexists with two-tier, because two-tier sets its own toolsets.
 
+**Model seats.** The single-loop planner resolves per-call/flag override > config `agent_model` >
+config `model` (`config.AgentPlannerModel`). `agent_model` is the tier-seeded planner seat: the
+install seed (`internal/tierseed`) derives it from the tier row's `resident_tier` when that differs
+from the workhorse — when they match, nothing materializes, so the fallback chain stays live. The
+in-loop offload cascade stays on `model` (workhorse economics; an explicit per-call model still
+drives both), and the two-tier seats are unchanged (architect=`escalation_model`, editor=`model`).
+`agent_timeout_sec` is the tier-seedable default wall-clock for `agent_run` when the call passes no
+timeout (0 = the built-in 180s).
+
 **Budget calibration is available and OFF by default.** The ladder's `chars/4` estimator undercounts
 real tokens (measured density 1.3-1.4 plus a fixed ~900-token payload the estimate cannot see), and
 with a SMALL output reservation that lets requests through which the server then rejects.

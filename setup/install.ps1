@@ -606,6 +606,33 @@ function Merge-ConfigSeed {
 }
 
 # ---------------------------------------------------------------------------
+# Agent planner seat derivation for the FRESH-config path - a deliberate PARITY
+# COPY of internal/tierseed.Resolve (Go), which is the AUTHORITATIVE rule.
+# Step 8 merges the RAW config_seed via Merge-ConfigSeed and bypasses tierseed,
+# so without this copy a fresh Windows install never binds the seat the tier
+# table promises. The rule, kept tiny and identical (change tierseed.Resolve
+# FIRST, then mirror here): derive agent_model = resident_tier ONLY when the
+# profile row names a resident_tier, no seed layer sets agent_model itself (an
+# explicit value - including a "" blank-out - always wins), and resident_tier
+# differs from the effective workhorse (the last seed layer's `model`, else the
+# 'offload-e4b' default). $Seeds = the seed layers in apply order (base, then
+# the RAM overlay). Returns the seat to bind, or $null for "bind nothing"
+# (materializing agent_model=workhorse would fork the live fallback chain).
+# ---------------------------------------------------------------------------
+function Get-DerivedAgentModel {
+  param($ProfileRow, $Seeds)
+  if ($null -eq $ProfileRow -or -not $ProfileRow.resident_tier) { return $null }
+  $workhorse = 'offload-e4b'
+  foreach ($s in @($Seeds)) {
+    if ($null -eq $s) { continue }
+    if ($s.PSObject.Properties['agent_model']) { return $null }
+    if ($s.PSObject.Properties['model'] -and $s.model) { $workhorse = $s.model }
+  }
+  if ($ProfileRow.resident_tier -ne $workhorse) { return $ProfileRow.resident_tier }
+  return $null
+}
+
+# ---------------------------------------------------------------------------
 # run-graph (Task 12): ensure the manifest-satisfier tooling in the ComfyUI venv.
 # offload_run_graph provisions an arbitrary workflow's node manifest by shelling to
 # ComfyUI-Manager's cm-cli.py; that Manager clone is the REQUIRED tool and a clone
@@ -1063,15 +1090,17 @@ Step 'harness config -> ~/.local-offload/config.json' `
     $cfgText = Get-Content -Raw (Join-Path (Join-Path $scriptDir 'templates') 'config.json')
     $seed = $null
     $seedCond = $null
+    $profRow = $null
     if ($profileId -and (Test-Path $profilesJson)) {
       $pdoc = Get-Content -Raw $profilesJson | ConvertFrom-Json
       if ($pdoc.profiles.PSObject.Properties[$profileId]) {
-        $seed = $pdoc.profiles.$profileId.config_seed
+        $profRow = $pdoc.profiles.$profileId
+        $seed = $profRow.config_seed
         # J4: RAM-conditional seed layer — 8GB tiers auto-bind the quality-first O1
         # image seat ONLY when the box has the RAM path for the offload (mid|high,
         # same gate as the 26B cpu-moe path). Applied ON TOP of the base seed.
-        if ($ramTier -in @('mid','high') -and $pdoc.profiles.$profileId.PSObject.Properties['config_seed_ram_mid_high']) {
-          $seedCond = $pdoc.profiles.$profileId.config_seed_ram_mid_high
+        if ($ramTier -in @('mid','high') -and $profRow.PSObject.Properties['config_seed_ram_mid_high']) {
+          $seedCond = $profRow.config_seed_ram_mid_high
         }
       }
     }
@@ -1082,6 +1111,15 @@ Step 'harness config -> ~/.local-offload/config.json' `
     if ($seedCond) {
       $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $seedCond -OffloadHome $HOME_DIR
       Write-Host "      config_seed_ram_mid_high ($profileId, ram_tier=$ramTier): $(@($seedCond.PSObject.Properties.Name) -join ', ')" -ForegroundColor DarkGray
+    }
+    # Agent planner seat: deliberate parity copy of internal/tierseed.Resolve
+    # (authoritative) — this raw-merge path bypasses tierseed, so the derivation
+    # is replicated via Get-DerivedAgentModel (see its comment). Runs even with
+    # no seed at all: a seed-less tier (e.g. dual-gpu) still names a resident_tier.
+    $agentSeat = Get-DerivedAgentModel -ProfileRow $profRow -Seeds @($seed, $seedCond)
+    if ($agentSeat) {
+      $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed ([pscustomobject]@{ agent_model = $agentSeat })
+      Write-Host "      agent seat ($profileId): agent_model=$agentSeat (derived from resident_tier)" -ForegroundColor DarkGray
     }
     $noBomCfg = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($cfgDest, $cfgText, $noBomCfg)
@@ -1140,7 +1178,27 @@ Write-Host ""
 # the rendered yaml matches it. openwebui-stack.sh reads LOCAL_AGENT_* env, so no
 # launcher signature changes here — document the value for the operator instead.
 Write-Host "Run the agent against this profile's served window ($agentCtxTokens tokens):" -ForegroundColor White
-Write-Host "  & '$agentExe' `"<objective>`" -base http://127.0.0.1:11436 -model $($pp.resident_tier) -ctx-tokens $agentCtxTokens" -ForegroundColor White
+# The derived-seat sentence may only be printed when the derivation actually
+# APPLIES (resident_tier present and != the effective workhorse) — recomputed
+# here with the same parity rule, because Step 8's scriptblock scope is gone.
+# Otherwise no seat was bound and the claim would be false; keep the old-style
+# -model hint instead.
+$derivedSeat = $null
+if ($profileId -and (Test-Path $profilesJson)) {
+  $hintDoc = Get-Content -Raw $profilesJson | ConvertFrom-Json
+  if ($hintDoc.profiles.PSObject.Properties[$profileId]) {
+    $hintRow = $hintDoc.profiles.$profileId
+    $hintSeeds = @($hintRow.config_seed)
+    if ($ramTier -in @('mid','high') -and $hintRow.PSObject.Properties['config_seed_ram_mid_high']) { $hintSeeds += $hintRow.config_seed_ram_mid_high }
+    $derivedSeat = Get-DerivedAgentModel -ProfileRow $hintRow -Seeds $hintSeeds
+  }
+}
+if ($derivedSeat) {
+  Write-Host "  & '$agentExe' `"<objective>`" -base http://127.0.0.1:11436 -ctx-tokens $agentCtxTokens" -ForegroundColor White
+  Write-Host "  (the config already binds the agent seat: agent_model='$derivedSeat' derived from resident_tier; -model is an override, not required)" -ForegroundColor White
+} else {
+  Write-Host "  & '$agentExe' `"<objective>`" -base http://127.0.0.1:11436 -model $($pp.resident_tier) -ctx-tokens $agentCtxTokens" -ForegroundColor White
+}
 Write-Host ""
 $verdict = @{ installed = $true; backend = $backend; render_backend = $tplBackend; profile = $profileId;
   ram_tier = $ramTier; big_ram = $bigRam; agent_ctx_tokens = $agentCtxTokens; home = $HOME_DIR;

@@ -4,7 +4,7 @@
     "ctx_size": "--ctx-size served window (tokens).",
     "kv_type": "q8_0|f16 -> --cache-type-k/--cache-type-v (kept symmetric; q8_0 V requires flash-attn on).",
     "agent_ctx_tokens": "value for the agent's -ctx-tokens (compaction budget); matches ctx_size.",
-    "resident_tier": "the model that stays hot / is the agent's default (gemma4-26b-a4b|offload-e4b|gemma4-e2b).",
+    "resident_tier": "the model that stays hot (gemma4-26b-a4b|offload-e4b|gemma4-e2b). SEEDS the agent planner seat: install seed derives config agent_model from it when it differs from the workhorse (internal/tierseed); override or blank via config_seed.agent_model.",
     "include_26b": "whether the 26B-A4B model appears in the rendered yaml + swap group at all.",
     "moe_26b": "gpu (-ngl 99, experts on GPU) | cpu_moe (--cpu-moe, experts in RAM) | drop (omit 26B). When cpu_moe, install.ps1 drops the 26B if ram_tier is low/min (no RAM path).",
     "flash_attn": "on|off -> --flash-attn.",
@@ -166,7 +166,8 @@
         "videogen_width": 1280,
         "videogen_height": 720,
         "videogen_frames": 81,
-        "videogen_timeout_sec": 5400
+        "videogen_timeout_sec": 5400,
+        "agent_timeout_sec": 600
       },
       "media_seats": [
         {
