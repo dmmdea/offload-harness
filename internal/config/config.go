@@ -919,6 +919,19 @@ func (c Config) EmbedModel() string {
 	return "embeddinggemma"
 }
 
+// BaseDir returns this node's resolved install root: c.Home when set, else
+// DefaultBase() ($LOCAL_OFFLOAD_HOME, else ~/.local-offload) — the same root
+// Default()'s derived paths (media, cache, ledger, ...) hang off. Added for
+// Task 6 (pipeline-job materialization, internal/fleetnode buildPipelineJob):
+// a job's working tree lives at BaseDir()/pipeline-jobs/<job-id>, beside every
+// other harness-owned state rather than inventing a second root.
+func (c Config) BaseDir() string {
+	if c.Home != "" {
+		return c.Home
+	}
+	return DefaultBase()
+}
+
 // EnsureDirs creates the parent dirs for the store files.
 func (c Config) EnsureDirs() error {
 	for _, p := range []string{c.CachePath, c.LedgerPath, c.ThresholdsPath, c.RouterWeightsPath, c.TierOverridesPath, c.ConfHeadPath, c.ConfHeadLabelsPath, c.ConfHeadThresholdsPath, c.KNNIndexPath} {

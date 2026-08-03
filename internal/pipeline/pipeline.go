@@ -224,6 +224,15 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 		return p.runRunGraph(ctx, req, meta, start)
 	}
 
+	// pipeline-job runs an externally-provided pipeline CLI this node is configured
+	// for (internal/config Config.Pipelines, Task 4) as a fleet task — 100%
+	// config-driven, unlike every hardcoded route above. Its own branch — no text
+	// cascade, no grammar, no machine-wide GPU lease (only the in-process
+	// mediaSlot; see runPipelineJob's doc comment).
+	if req.Task == core.TaskPipelineJob {
+		return p.runPipelineJob(ctx, req, meta, start)
+	}
+
 	// generate_svg renders a brand-agnostic parametric SVG component (kind + spec in
 	// params) via internal/svgkit. Its own branch — pure Go, no text cascade, no
 	// grammar, no GPU lock.
@@ -1279,6 +1288,184 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 	data, _ := json.Marshal(env)
 	p.record(req.Task, meta, len(req.Input))
 	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// pipelineJobResult is the pipeline-job task family's wire result
+// (shared-contracts.md, verbatim). FinalPath MUST stay the FIRST field: Go
+// struct fields marshal in declaration order, and the web viewmodel harvests
+// artifacts in insertion order (artifacts[0] == final_path).
+type pipelineJobResult struct {
+	FinalPath    string  `json:"final_path"`
+	QaReportPath string  `json:"qa_report_path,omitempty"`
+	JobID        string  `json:"job_id"`
+	Tier         string  `json:"tier"`
+	DurationSec  float64 `json:"duration_sec"`
+}
+
+// sceneSwapFailPrefix is the CMP CLI contract's stderr marker on a handled
+// failure: "SCENE-SWAP-FAIL stage=<last completed stage or none>: <message>".
+const sceneSwapFailPrefix = "SCENE-SWAP-FAIL"
+
+// runPipelineJob runs an externally-provided pipeline CLI this node is
+// configured for (cfg.Pipelines[taskType], Task 4's PipelineSpec — e.g.
+// "scene-swap") by shelling out to spec.Script via gpugen, mirroring
+// runRunGraph's shape but config-driven end to end: taskType (which
+// cfg.Pipelines entry to use), job_id/job_path/out_root/tier all arrive
+// through req.Params, exactly as internal/fleetnode's buildPipelineJob (ack
+// time) materialized them — every payload validation error already happened
+// there; this function never re-validates the payload.
+//
+// GPU arbitration is DELIBERATELY narrower than every other GPU-gen route:
+// only the in-process mediaSlot is acquired (takeMediaSlot/releaseMediaSlot),
+// NEVER the machine-wide media lease (acquireMediaLease is not called). The
+// CMP CLI's own nested per-stage calls take the machine-wide lease themselves
+// for each stage (mirroring how a manual scene-swap run already works today —
+// see the brief); acquiring it AGAIN here would self-deadlock the same
+// process waiting on its own nested acquisition. A second concurrent
+// pipeline-job in this process still can't race the first: it queues on
+// mediaSlot for up to gpuWait() and then defers as gpu_busy, exactly like
+// every other route's busy-card behavior.
+//
+// On a CHILD RENDER failure (non-zero exit) this returns a PLAIN failure —
+// core.Result{OK:false, Reason: ...} — NOT a Deferred result: unlike the
+// Claude-facing routes, a fleet job has no interactive caller to hand work
+// back to, so a real render failure is a real failure. The last stderr line
+// starting with SCENE-SWAP-FAIL is surfaced as Reason when present (gpugen's
+// error already embeds up to the last 400 bytes of combined output); anything
+// else (including a timeout-kill, which prints no such line) falls back to
+// the generic exec error. Every OTHER defer path here (no route configured,
+// missing script, gpu_busy) stays a normal Deferf — those are dispatch/
+// contention conditions, not a broken render.
+func (p *Pipeline) runPipelineJob(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+	taskType := paramStr(req.Params, "pipeline_task")
+	spec, ok := p.cfg.Pipelines[taskType]
+	if !ok {
+		return p.deferGen(req, meta, start, len(req.Input), "no pipeline route configured for "+taskType)
+	}
+	jobID := paramStr(req.Params, "job_id")
+	jobPath := paramStr(req.Params, "job_path")
+	outRoot := paramStr(req.Params, "out_root")
+	tier := paramStr(req.Params, "tier")
+
+	meta.Model = "pipeline:" + taskType
+
+	script, serr := gpugen.ResolveScript(spec.Script)
+	if serr != nil {
+		return p.deferGen(req, meta, start, len(req.Input), serr.Error())
+	}
+
+	wait := p.gpuWait()
+	if !takeMediaSlot(wait) {
+		err := &errGPUBusy{detail: fmt.Sprintf("another generation job in this process still holds the card after %s", wait)}
+		return p.deferForLease(err, req.Task, meta, len(req.Input), start)
+	}
+	defer releaseMediaSlot()
+
+	if len(spec.Artifacts) == 0 {
+		return p.deferGen(req, meta, start, len(req.Input), "pipeline "+taskType+": no artifacts configured")
+	}
+	timeout := time.Duration(spec.TimeoutSec) * time.Second
+	gspec := gpugen.Spec{
+		Exe:     p.cfg.NodePath,
+		Script:  script,
+		Args:    []string{"--job", jobPath, "--tier", tier, "--out", outRoot},
+		Dir:     spec.Workdir,
+		Out:     filepath.Join(outRoot, jobID, spec.Artifacts[0]),
+		Timeout: timeout,
+	}
+	// Passive fleet footprint (mirrors image-gen's plumbing): no family/quant
+	// claim — a pipeline job's sizing rides on its own task-scoped footprint
+	// entry, Record("", "", taskType, peak), not an advertised model family.
+	p.footprintSampling("", "", taskType).ApplyTo(&gspec)
+
+	_, gerr := gpugen.Generate(ctx, gspec)
+	if gerr != nil {
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		meta.ErrClass = gpugen.ClassifyErr(gerr)
+		reason := sceneSwapFailReason(gerr.Error())
+		if reason == "" {
+			reason = "pipeline " + taskType + " failed: " + gerr.Error()
+		}
+		return core.Result{OK: false, Reason: reason, Meta: meta}
+	}
+
+	published, perr := publishPipelineArtifacts(outRoot, jobID, spec.Artifacts, p.cfg.MediaDir)
+	if perr != nil {
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		return core.Result{OK: false, Reason: perr.Error(), Meta: meta}
+	}
+
+	meta.LatencyMs = time.Since(start).Milliseconds()
+	result := pipelineJobResult{
+		FinalPath:   published[0],
+		JobID:       jobID,
+		Tier:        tier,
+		DurationSec: time.Since(start).Seconds(),
+	}
+	if len(published) > 1 {
+		result.QaReportPath = published[1]
+	}
+	data, _ := json.Marshal(result)
+	p.record(req.Task, meta, len(req.Input))
+	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// sceneSwapFailReason extracts the last SCENE-SWAP-FAIL line out of a gpugen
+// error message (which embeds up to the last 400 bytes of the child's
+// combined stdout+stderr, wrapped as "... (<tail>)"). Returns "" when absent
+// (a timeout-kill, or any failure before the CLI could print one), so the
+// caller falls back to the generic exec error.
+func sceneSwapFailReason(errMsg string) string {
+	idx := strings.Index(errMsg, sceneSwapFailPrefix)
+	if idx < 0 {
+		return ""
+	}
+	rest := errMsg[idx:]
+	if nl := strings.IndexAny(rest, "\r\n"); nl >= 0 {
+		rest = rest[:nl]
+	} else {
+		// No trailing newline in the child's output: gpugen's own format
+		// string wraps the tail in one closing paren right after it.
+		rest = strings.TrimSuffix(rest, ")")
+	}
+	return strings.TrimSpace(rest)
+}
+
+// publishPipelineArtifacts copies each configured artifact from the CLI's
+// out/<id>/ dir to cfg.MediaDir as "<id>-<artifact>" (flat, bare names — the
+// fleet media route rejects any separator). The PRIMARY artifact (index 0)
+// is required — gpugen's Out-stat gate already proved it exists, but a
+// missing/unreadable file here is still surfaced as an error defensively;
+// any other (optional) artifact that is missing is silently omitted, never
+// an error.
+func publishPipelineArtifacts(outRoot, jobID string, artifacts []string, mediaDir string) ([]string, error) {
+	if err := os.MkdirAll(mediaDir, 0o755); err != nil {
+		return nil, fmt.Errorf("pipeline publish: creating media dir: %w", err)
+	}
+	srcDir := filepath.Join(outRoot, jobID)
+	published := make([]string, 0, len(artifacts))
+	for i, name := range artifacts {
+		src := filepath.Join(srcDir, name)
+		data, rerr := os.ReadFile(src)
+		if rerr != nil {
+			if i == 0 {
+				return nil, fmt.Errorf("pipeline publish: primary artifact %q missing: %w", name, rerr)
+			}
+			continue // optional artifact missing: omit, not an error
+		}
+		dest := filepath.Join(mediaDir, jobID+"-"+name)
+		if werr := os.WriteFile(dest, data, 0o644); werr != nil {
+			if i == 0 {
+				return nil, fmt.Errorf("pipeline publish: writing primary artifact %q: %w", name, werr)
+			}
+			continue
+		}
+		published = append(published, dest)
+	}
+	if len(published) == 0 {
+		return nil, fmt.Errorf("pipeline publish: primary artifact %q missing", artifacts[0])
+	}
+	return published, nil
 }
 
 // runGenerateVideo animates req.Image (a still) into a short clip on the LOCAL ComfyUI by
