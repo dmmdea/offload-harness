@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -209,6 +210,92 @@ func TestFetchRefs(t *testing.T) {
 		explicitURL, _ := url.Parse("http://100.64.1.2:9999/x")
 		if h, p := hostPort(explicitURL); h != "100.64.1.2" || p != "9999" {
 			t.Fatalf("explicit port must win over the default: got host=%s port=%s", h, p)
+		}
+	})
+
+	// (h) fix for the env-proxy finding: HTTP_PROXY/HTTPS_PROXY/ALL_PROXY
+	// must never receive a request — a validated destination handed to an
+	// unchecked proxy is the same SSRF hole the allowlist exists to close.
+	// The loopback target still must succeed, and the proxy (a t.Error-on-
+	// contact server, same pattern as the redirect-target test) must see
+	// zero traffic. t.Setenv keeps env mutation scoped to this subtest.
+	t.Run("h_env_proxy_never_contacted", func(t *testing.T) {
+		var proxyContacted int32
+		proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&proxyContacted, 1)
+			t.Error("HTTP_PROXY must never be contacted — the ingress client must ignore env proxies entirely")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer proxy.Close()
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write(pngBytes)
+		}))
+		defer srv.Close()
+
+		t.Setenv("HTTP_PROXY", proxy.URL)
+		t.Setenv("HTTPS_PROXY", proxy.URL)
+		t.Setenv("ALL_PROXY", proxy.URL)
+
+		destDir := filepath.Join(t.TempDir(), "job-h")
+		paths, cleanup, err := FetchRefs(context.Background(), map[string]string{"product": srv.URL + "/p.png"}, destDir, nil, 24)
+		if err != nil {
+			t.Fatalf("FetchRefs against the loopback target must still succeed with env proxies set: %v", err)
+		}
+		defer cleanup()
+		if _, ok := paths["product"]; !ok {
+			t.Fatalf("missing product path: %+v", paths)
+		}
+		if atomic.LoadInt32(&proxyContacted) != 0 {
+			t.Fatal("the env proxy was contacted")
+		}
+	})
+
+	// (h2) whitebox regression guard for the same finding. The black-box
+	// subtest above cannot actually discriminate vulnerable vs fixed code:
+	// verified against golang.org/x/net/http/httpproxy (vendored under
+	// GOROOT/src/vendor), Go's OWN default proxy func unconditionally
+	// exempts loopback/"localhost" destinations from every proxy
+	// (useProxy returns false whenever the parsed IP IsLoopback()) —
+	// httptest servers bind to 127.0.0.1, so a loopback-target test passes
+	// identically whether or not the ingress client sets Proxy: nil. The
+	// real exposure is non-loopback allowlisted hosts (the tailnet CGNAT
+	// range, 100.64.0.0/10) that Go's stdlib does NOT exempt — not
+	// practical to stand up a real listener on in a unit test. This
+	// subtest asserts the actual property that matters regardless of
+	// destination: the client's Transport never consults env proxies.
+	t.Run("h2_ingress_client_transport_ignores_env_proxy", func(t *testing.T) {
+		client := newIngressClient()
+		tr, ok := client.Transport.(*http.Transport)
+		if !ok {
+			t.Fatalf("want *http.Transport, got %T", client.Transport)
+		}
+		if tr.Proxy != nil {
+			t.Fatal("ingress client's Transport.Proxy must be nil — see the comment above for why the black-box loopback test alone can't catch this")
+		}
+	})
+
+	// (i) fix for the path-traversal finding: a ref key that isn't a bare
+	// allowlisted name (here "../../evil") must be rejected before any
+	// fetch — no server contact, no destDir created.
+	t.Run("i_ref_key_path_traversal_rejected", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("server must never be contacted when a ref key fails validation")
+			w.Write(pngBytes)
+		}))
+		defer srv.Close()
+
+		destDir := filepath.Join(t.TempDir(), "job-i")
+		badKey := "../../evil"
+		_, _, err := FetchRefs(context.Background(), map[string]string{badKey: srv.URL + "/x.png"}, destDir, nil, 24)
+		if err == nil {
+			t.Fatal("want error for a path-traversal ref key")
+		}
+		if !strings.Contains(err.Error(), badKey) {
+			t.Fatalf("error must name the bad key, got: %v", err)
+		}
+		if _, statErr := os.Stat(destDir); !os.IsNotExist(statErr) {
+			t.Fatalf("destDir must never be created when key validation fails, stat err = %v", statErr)
 		}
 	})
 }
