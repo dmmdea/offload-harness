@@ -245,6 +245,41 @@ $macro = Get-CommonMacro $r.yaml
 if ($macro -match '--ctx-size 16384' -and $macro -match '--cache-type-k q8_0') { Ok 'unknown profile: CUDA fallback = 16384/q8_0' } else { Bad "unknown profile CUDA defaults (got: $macro)" }
 if ($r.verdict -and $r.verdict.profile -eq 'does-not-exist')   { Ok 'unknown profile: verdict echoes the unknown id' } else { Bad 'unknown profile verdict' }
 
+Write-Host "== agent seat (B2): fresh seed-merge derives agent_model in PARITY with internal/tierseed =="
+# Dot-source install.ps1's pure helpers (OFFLOAD_INSTALL_DOT_SOURCE seam - no
+# main-flow work) and drive the exact Step 8 fresh-config sequence: template ->
+# config_seed merge -> RAM overlay -> Get-DerivedAgentModel -> seat merge.
+$prevSeam = $env:OFFLOAD_INSTALL_DOT_SOURCE
+try {
+  $env:OFFLOAD_INSTALL_DOT_SOURCE = '1'
+  . $install
+} finally {
+  if ($null -ne $prevSeam) { $env:OFFLOAD_INSTALL_DOT_SOURCE = $prevSeam }
+  else { Remove-Item Env:OFFLOAD_INSTALL_DOT_SOURCE -ErrorAction SilentlyContinue }
+}
+$seedProfiles = (Get-Content -Raw (Join-Path (Join-Path $here 'templates') 'profiles.json') | ConvertFrom-Json).profiles
+$seedTpl      = Get-Content -Raw (Join-Path (Join-Path $here 'templates') 'config.json')
+
+# blackwell-2x16: resident_tier gemma4-26b-a4b != the workhorse -> the fresh
+# merge must BIND the seat (this is what the Go tierseed path derives too).
+$row = $seedProfiles.'blackwell-2x16'
+$mergedSeed = Merge-ConfigSeed -ConfigText $seedTpl -Seed $row.config_seed
+$seat = Get-DerivedAgentModel -ProfileRow $row -Seeds @($row.config_seed)
+if ($seat) { $mergedSeed = Merge-ConfigSeed -ConfigText $mergedSeed -Seed ([pscustomobject]@{ agent_model = $seat }) }
+$mergedObj = $mergedSeed | ConvertFrom-Json
+if ($mergedObj.agent_model -eq 'gemma4-26b-a4b') { Ok 'b2x16 fresh seed-merge binds agent_model=gemma4-26b-a4b' } else { Bad "b2x16 agent_model (got: '$($mergedObj.agent_model)')" }
+
+# ampere-8 (resident_tier=offload-e4b == workhorse): NO agent_model key may
+# appear - materializing the fallback would fork the live chain. Mid-RAM flow
+# (base seed + overlay), the widest seed path an 8GB box gets.
+$row8 = $seedProfiles.'ampere-8'
+$merged8 = Merge-ConfigSeed -ConfigText $seedTpl -Seed $row8.config_seed
+if ($row8.PSObject.Properties['config_seed_ram_mid_high']) { $merged8 = Merge-ConfigSeed -ConfigText $merged8 -Seed $row8.config_seed_ram_mid_high }
+$seat8 = Get-DerivedAgentModel -ProfileRow $row8 -Seeds @($row8.config_seed, $row8.config_seed_ram_mid_high)
+if ($seat8) { $merged8 = Merge-ConfigSeed -ConfigText $merged8 -Seed ([pscustomobject]@{ agent_model = $seat8 }) }
+$merged8Obj = $merged8 | ConvertFrom-Json
+if (-not $merged8Obj.PSObject.Properties['agent_model']) { Ok 'ampere-8 fresh seed-merge yields NO agent_model key (resident==workhorse)' } else { Bad "ampere-8 unexpected agent_model (got: '$($merged8Obj.agent_model)')" }
+
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 
 Write-Host ""

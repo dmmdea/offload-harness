@@ -7,6 +7,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
@@ -184,8 +186,8 @@ func (s *Server) Run(ctx context.Context, version string) error {
 	// net); a failure is a clean defer, not a server error.
 	srv.AddTool(&mcp.Tool{
 		Name:        "agent_run",
-		Description: "Run the LOCAL autonomous agent loop on a goal: a free local model plans and iterates over read-only tools (list_dir, read_file) plus the offload_* cascade, multi-step, and returns a final answer. DELEGATE a bounded multi-step read-and-reason job — map how X flows through a repo, summarize a doc set, extract facts across many files — to the local stack to keep that work out of your own context. It is READ-ONLY: it cannot write files, run commands, or touch the network. The savings ledger is untouched (the agent's offload calls run record=false). Returns {output, steps, stop_reason, tools}; on any failure it returns deferred:true with a reason and you do the task yourself.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"goal":{"type":"string","description":"the task for the local agent to accomplish"},"read_root":{"type":"string","description":"absolute directory the agent may read; it cannot read outside it (default: the server working dir)"},"max_steps":{"type":"integer","description":"hard step budget (default 12)"},"model":{"type":"string","description":"planner model id; must support tool-calling (default: the configured workhorse model)"},"timeout_sec":{"type":"integer","description":"wall-clock budget in seconds (default 180)"},"profile":{"type":"string","enum":["general","edit","build","research","github"],"description":"task profile: narrows the tool list and injects worked examples. MEASURED: a small planner given the full tool set often calls NO tool at all, so a narrowed profile is the single most effective lever. Prefer \"build\" for reading and reasoning over a codebase; \"general\" (the default) advertises everything. Tools this read-only front door does not grant are dropped, along with their examples."}},"required":["goal"]}`),
+		Description: "Run the LOCAL autonomous agent loop on a goal: a free local model plans and iterates over read-only tools (list_dir, read_file) plus the offload_* cascade, multi-step, and returns a final answer. DELEGATE a bounded multi-step read-and-reason job — map how X flows through a repo, summarize a doc set, extract facts across many files — to the local stack to keep that work out of your own context. It is READ-ONLY: it cannot write files, run commands, or touch the network. The savings ledger is untouched (the agent's offload calls run record=false). Returns {output, steps, stop_reason, tools, model}; on any failure it returns deferred:true with a reason and you do the task yourself.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"goal":{"type":"string","description":"the task for the local agent to accomplish"},"read_root":{"type":"string","description":"absolute directory the agent may read; it cannot read outside it (default: the server working dir)"},"max_steps":{"type":"integer","description":"hard step budget (default 12)"},"model":{"type":"string","description":"planner model id; must support tool-calling (default: the tier's agent seat (agent_model), falling back to the configured workhorse)"},"timeout_sec":{"type":"integer","description":"wall-clock budget in seconds (default: the tier's agent_timeout_sec, else 180)"},"profile":{"type":"string","enum":["general","edit","build","research","github"],"description":"task profile: narrows the tool list and injects worked examples. MEASURED: a small planner given the full tool set often calls NO tool at all, so a narrowed profile is the single most effective lever. Prefer \"build\" for reading and reasoning over a codebase; \"general\" (the default) advertises everything. Tools this read-only front door does not grant are dropped, along with their examples."}},"required":["goal"]}`),
 	}, s.handleAgentRun)
 
 	return srv.Run(ctx, &mcp.StdioTransport{})
@@ -207,6 +209,7 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 
 	roster := map[string]any{
 		"workhorse":  cfg.Model,
+		"agent":      cfg.AgentPlannerModel(""), // the resolved planner seat (agent_model, else workhorse)
 		"triage":     cfg.TriageModel,
 		"escalation": cfg.EscalationModel,
 		"reasoning":  cfg.ReasoningModel,
@@ -832,9 +835,15 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	if err != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": "bad read_root: " + err.Error()})
 	}
-	model := in.Model
-	if model == "" {
-		model = cfg.Model // this machine's configured workhorse; never a hardcoded alias
+	// Planner seat vs cascade seat, resolved separately on purpose: the planner
+	// follows agent_model (per-call > seat > workhorse; config.AgentPlannerModel),
+	// while the IN-LOOP offload cascade stays on the workhorse economics exactly
+	// as before this seat existed. An explicit per-call model still drives both,
+	// preserving the old override semantics.
+	model := cfg.AgentPlannerModel(in.Model)
+	offloadModel := in.Model
+	if offloadModel == "" {
+		offloadModel = cfg.Model
 	}
 	maxSteps := in.MaxSteps
 	if maxSteps <= 0 {
@@ -843,15 +852,25 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	if maxSteps > 64 {
 		maxSteps = 64 // a self-standing ceiling so the step budget doesn't rely solely on the timeout
 	}
-	timeout := time.Duration(in.TimeoutSec) * time.Second
-	if timeout <= 0 {
-		timeout = 180 * time.Second
+	timeout := agentTimeout(in.TimeoutSec, cfg)
+	// Fail LOUD when the resolved planner is not in the served roster — a seat
+	// that silently fell back to the workhorse would ship the exact silent
+	// downgrade this seat exists to cure. Roster unreachable = proceed (the
+	// loop's first chat call surfaces the real transport error).
+	if missing, checked := plannerUnserved(ctx, cfg.Endpoint, model); checked && missing {
+		// The advice must match where the model CAME from: telling a caller whose
+		// explicit model is unserved to "pass model explicitly" is circular.
+		reason := fmt.Sprintf("agent planner model %q is not in the endpoint's served roster — fix agent_model/config or pass model explicitly", model)
+		if in.Model != "" {
+			reason = fmt.Sprintf("explicitly requested model %q is not in the endpoint's served roster — pick a served model (offload_status lists them)", model)
+		}
+		return jsonResult(map[string]any{"deferred": true, "reason": reason})
 	}
 	// In-process offload (record=false, nil cache+ledger) + the SHARED loop
 	// builder — identical construction to the CLI and the standalone runner, so
 	// the three drive modes stay at parity. Read-only front door: no
 	// write/fetch/shell, no audit (the offload cannot write the ledger anyway).
-	offload := pipeline.NewRecordlessOffload(cfg, model, timeout)
+	offload := pipeline.NewRecordlessOffload(cfg, offloadModel, timeout)
 	built, err := agent.Build(agent.BuildConfig{
 		PlannerBase: cfg.Endpoint,
 		Model:       model,
@@ -895,12 +914,83 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		"steps":       res.Steps,
 		"stop_reason": res.StopReason,
 		"tools":       len(built.Tools),
+		"model":       model, // the resolved PLANNER seat — visibility is the cure for a silent seat (roast finding)
 		"ctx_window":  effCtx, // the window compaction budgeted against (probed, or the conservative fallback)
 	}
 	if res.CompactionsExhausted > 0 {
 		out["compactions_exhausted"] = res.CompactionsExhausted // fit=false telemetry: best-effort over-budget requests were sent
 	}
 	return jsonResult(out)
+}
+
+// agentTimeout resolves an agent run's wall-clock budget: an explicit per-call
+// timeout wins; else the tier-seeded config default. A tier that binds a big
+// planner seat seeds agent_timeout_sec with it: a cold big-model load + low
+// tok/s inside the old 180s default is a timeout machine (roast finding,
+// 2026-08-02). 180s stays the floor for configs that seed nothing.
+func agentTimeout(reqSec int, cfg config.Config) time.Duration {
+	if reqSec > 0 {
+		return time.Duration(reqSec) * time.Second
+	}
+	if cfg.AgentTimeoutSec > 0 {
+		return time.Duration(cfg.AgentTimeoutSec) * time.Second
+	}
+	return 180 * time.Second
+}
+
+// plannerUnserved checks the endpoint's /v1/models roster for the resolved
+// planner seat. checked=false means the roster was unreachable/unparseable —
+// callers proceed and let the loop's first chat call surface the transport
+// error; only a POSITIVE "roster answered and the model is absent" fails loud.
+func plannerUnserved(ctx context.Context, base, model string) (missing, checked bool) {
+	b := strings.TrimRight(base, "/")
+	if b == "" || model == "" {
+		return false, false
+	}
+	if !strings.HasSuffix(b, "/v1") {
+		b += "/v1"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b+"/models", nil)
+	if err != nil {
+		return false, false
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return false, false
+	}
+	defer resp.Body.Close()
+	// llama-swap's /v1/models lists CANONICAL ids in data[].id; a harness-bound
+	// ALIAS (the very names tier seeds put in agent_model) appears only in each
+	// entry's meta.llamaswap.aliases — matching id alone would fail-loud on a
+	// correctly served seat.
+	var doc struct {
+		Data []struct {
+			ID   string `json:"id"`
+			Meta struct {
+				Llamaswap struct {
+					Aliases []string `json:"aliases"`
+				} `json:"llamaswap"`
+			} `json:"meta"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil || len(doc.Data) == 0 {
+		return false, false
+	}
+	for _, m := range doc.Data {
+		if m.ID == model {
+			return false, true
+		}
+		for _, a := range m.Meta.Llamaswap.Aliases {
+			if a == model {
+				return false, true
+			}
+		}
+	}
+	return true, true
 }
 
 // jsonResult marshals an arbitrary payload (NIM is not a core.Result) into a

@@ -53,6 +53,13 @@ results, not errors.
 side channel and is not part of the Cascade — nothing escalates or falls back into it. See
 [ADR 0001](../architecture/decisions/0001-defer-never-cloud-fallback.md).
 
+`agent_run` drives the coding agent loop. Its default planner is the **agent seat** (config
+`agent_model`, else the workhorse `model`; a per-call `model` argument overrides both), its default
+timeout honors config `agent_timeout_sec` (else the built-in 180s), and its result reports the
+resolved planner `model` alongside `output`/`steps`/`stop_reason` — visibility is the cure for a
+silent seat. A resolved planner absent from the endpoint's served roster fails loud with
+`deferred: true` naming the model, never a silent fall back to the workhorse.
+
 ## Important flows
 
 Every tool ultimately enters the Cascade or a media backend — see

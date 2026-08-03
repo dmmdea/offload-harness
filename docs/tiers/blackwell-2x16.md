@@ -10,7 +10,7 @@
 | ctx_size | 32768 | the served window (`--ctx-size`) |
 | kv_type | `q8_0` | `--cache-type-k/v`, kept symmetric |
 | flash_attn | `on` | `--flash-attn` (required for a q8_0 V cache) |
-| resident_tier | `gemma4-26b-a4b` | the model that stays hot and is the agent's default |
+| resident_tier | `gemma4-26b-a4b` | the model that stays hot; seeds the agent planner seat (agent_model) when it differs from the workhorse |
 | agent_ctx_tokens | 32768 | the agent's `-ctx-tokens` compaction budget |
 | 26B-A4B | `gpu` | whether the 26B MoE is served, and where its experts live |
 
@@ -32,6 +32,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
 |---|---|
+| `agent_timeout_sec` | `600` |
 | `imagegen_ckpt` | `hidream_o1_image_bf16.safetensors` |
 | `imagegen_family` | `hidream-o1` |
 | `imagegen_timeout_sec` | `3600` |
