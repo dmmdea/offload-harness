@@ -76,6 +76,13 @@ type Spec struct {
 	Exe    string
 	Script string
 	Args   []string
+	// Dir is the child's working directory ("" = inherit the current process's
+	// cwd, the pre-existing behavior for every caller that leaves it unset).
+	// Added for Task 6 (pipeline-job): an externally-provided pipeline CLI is
+	// invoked with its OWN repo root as cwd (PipelineSpec.Workdir), unlike the
+	// bundled render/*.mjs scripts, which run from wherever the harness resolves
+	// them and never need a cwd override.
+	Dir string
 	// Env are extra "K=V" entries appended to the current environment (e.g.
 	// COMFY_DIR, MEMORY_STACK, GPU_LOCK_WAIT_MS). nil = inherit only.
 	Env []string
@@ -160,6 +167,7 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 
 	args := append([]string{spec.Script}, spec.Args...)
 	cmd := exec.CommandContext(cctx, exe, args...)
+	cmd.Dir = spec.Dir
 	cmd.Env = append(os.Environ(), spec.Env...)
 	// On timeout/cancel kill the WHOLE process tree (invariant 3): a bare kill on
 	// Windows orphans the ComfyUI python grandchild and bypasses node's finally.

@@ -11,9 +11,12 @@
 package fleetnode
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -41,6 +44,19 @@ func taskConfigured(cfg config.Config, taskType string) bool {
 	case "run-graph":
 		return cfg.RunGraphScript != ""
 	}
+	// Anything else is only "configured" when it is a VALID cfg.Pipelines key
+	// (Task 6): 100% config-driven, so a new pipeline needs no new case here.
+	return pipelineNameConfigured(cfg, taskType)
+}
+
+// pipelineNameConfigured reports whether taskType is one of cfg.Pipelines'
+// VALID entries (config.PipelineNames() already excludes invalid ones).
+func pipelineNameConfigured(cfg config.Config, taskType string) bool {
+	for _, n := range cfg.PipelineNames() {
+		if n == taskType {
+			return true
+		}
+	}
 	return false
 }
 
@@ -53,6 +69,9 @@ func SupportedTasks(cfg config.Config) []string {
 			out = append(out, t)
 		}
 	}
+	// Config-driven pipeline routes (Task 6) advertise alongside the hardcoded
+	// families — already sorted by PipelineNames().
+	out = append(out, cfg.PipelineNames()...)
 	return out
 }
 
@@ -121,6 +140,12 @@ func BuildRequest(cfg config.Config, taskType string, payload json.RawMessage) (
 		return buildAudioGen(payload)
 	case "run-graph":
 		return buildRunGraph(payload)
+	}
+	// Any other taskType that reaches here (taskConfigured already gated
+	// membership) must be a configured cfg.Pipelines key (Task 6) — 100%
+	// config-driven, so a new pipeline needs no new case above.
+	if pipelineNameConfigured(cfg, taskType) {
+		return buildPipelineJob(cfg, taskType, payload)
 	}
 	// Unreachable: taskConfigured gates membership. Kept for defense.
 	return core.Request{}, noop, fmt.Errorf("unsupported task_type %q (supported: %s)",
@@ -398,4 +423,231 @@ func materializeRaw(raw json.RawMessage, pattern string) (string, error) {
 		return "", err
 	}
 	return f.Name(), nil
+}
+
+// pipelineJobIDPattern validates job_spec.id: it becomes the materialization
+// directory name, a filename prefix on every published artifact, and (per the
+// CMP CLI contract) a render seed — the same slug-safety rule ingress.go's ref
+// keys use (refKeyPattern), kept as its own var since the two validate
+// different payload fields for different reasons.
+var pipelineJobIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// buildPipelineJob translates a fleet dispatch for a config-driven pipeline
+// route (cfg.Pipelines[taskType], e.g. "scene-swap" — Task 4's PipelineSpec)
+// into a core.Request. EVERY validation error surfaces here at ack time (the
+// server maps them to 400s); runPipelineJob (internal/pipeline) never
+// re-validates the payload.
+//
+// On a valid payload this ALSO does the network-bound work: it fetches
+// image_refs via Task 5's FetchRefs (allowlisted, capped, magic-sniffed) and
+// writes the job.json a CLI process will read, with product/logo (and
+// background.path, when fetched) injected as absolute local paths — so a bad
+// ref URL is ALSO an ack-time 400, never a mid-run surprise. Rules (shared-
+// contracts.md, verbatim): job_spec is a JSON object with a slug-valid id;
+// tier is a non-empty string; image_refs.product and .logo are required;
+// image_refs.background is required IFF job_spec.background.mode=="stock";
+// job_spec must not already contain product/logo/background.path — the node,
+// never the payload, is authoritative there.
+//
+// Materialization dir: filepath.Join(cfg.BaseDir(), "pipeline-jobs", jobID) —
+// assets/ (fetched refs), job.json, out/ (the CLI's --out root; the CLI
+// itself creates out/<id>/ and writes artifacts there).
+//
+// Cleanup-scope decision (brief left this to the implementer): the returned
+// cleanup ALWAYS removes the WHOLE job dir, never just assets/. FetchRefs'
+// own cleanup only reaches its destDir (assets/), which is not enough — the
+// job also has job.json and (later) out/ under the same jobDir, and those
+// must vanish together too. So: on any failure AFTER something was written to
+// disk, this function calls os.RemoveAll(jobDir) itself before returning (the
+// server's error path still calls the returned noop cleanup defensively — see
+// server.go's `if err != nil { cleanup(); ... }` — so that stays a safe no-op
+// covering an already-clean state). On SUCCESS the returned cleanup closure
+// removes the whole jobDir, but is not invoked here — the caller (server.go's
+// dispatch handler) defers it until AFTER the run finishes, so assets/job.json
+// survive for the whole render, exactly as long as the job needs them, not
+// just the ack.
+func buildPipelineJob(cfg config.Config, taskType string, payload json.RawMessage) (core.Request, func(), error) {
+	noop := func() {}
+	if !pipelineNameConfigured(cfg, taskType) {
+		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: unconfigured pipeline %q", taskType)
+	}
+	spec := cfg.Pipelines[taskType]
+
+	if len(payload) == 0 {
+		payload = json.RawMessage(`{}`)
+	}
+	var in struct {
+		JobSpec   json.RawMessage   `json:"job_spec"`
+		ImageRefs map[string]string `json:"image_refs"`
+		Tier      string            `json:"tier"`
+	}
+	if err := json.Unmarshal(payload, &in); err != nil {
+		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: %w", err)
+	}
+	if isAbsentJSON(in.JobSpec) {
+		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: job_spec required (a JSON object)")
+	}
+	var jobSpec map[string]json.RawMessage
+	if err := json.Unmarshal(in.JobSpec, &jobSpec); err != nil {
+		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: job_spec must be a JSON object: %v", err)
+	}
+	jobID, err := pipelineJobSpecID(jobSpec)
+	if err != nil {
+		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: %w", err)
+	}
+	if strings.TrimSpace(in.Tier) == "" {
+		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: tier required (a non-empty string)")
+	}
+	for _, forbidden := range [2]string{"product", "logo"} {
+		if _, has := jobSpec[forbidden]; has {
+			return core.Request{}, noop, fmt.Errorf(
+				"pipeline-job payload: job_spec must not contain %q (the node injects it from image_refs)", forbidden)
+		}
+	}
+	bgMode, bgHasPath, berr := pipelineBackgroundMode(jobSpec)
+	if berr != nil {
+		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: %w", berr)
+	}
+	if bgHasPath {
+		return core.Request{}, noop, fmt.Errorf(
+			"pipeline-job payload: job_spec.background must not contain \"path\" (the node injects it from image_refs)")
+	}
+	if strings.TrimSpace(in.ImageRefs["product"]) == "" {
+		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: image_refs.product required")
+	}
+	if strings.TrimSpace(in.ImageRefs["logo"]) == "" {
+		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: image_refs.logo required")
+	}
+	if bgMode == "stock" && strings.TrimSpace(in.ImageRefs["background"]) == "" {
+		return core.Request{}, noop, fmt.Errorf(
+			"pipeline-job payload: image_refs.background required when job_spec.background.mode is \"stock\"")
+	}
+
+	// --- Every validation rule passed. From here on we touch the filesystem
+	// and the network, so any failure must clean up whatever it created. ---
+	jobDir := filepath.Join(cfg.BaseDir(), "pipeline-jobs", jobID)
+	assetsDir := filepath.Join(jobDir, "assets")
+	outRoot := filepath.Join(jobDir, "out")
+
+	refs := map[string]string{
+		"product": in.ImageRefs["product"],
+		"logo":    in.ImageRefs["logo"],
+	}
+	if bgMode == "stock" {
+		refs["background"] = in.ImageRefs["background"]
+	}
+	fetched, _, ferr := FetchRefs(context.Background(), refs, assetsDir, spec.IngressAllow, spec.RefCapMB())
+	if ferr != nil {
+		os.RemoveAll(jobDir) // FetchRefs' own cleanup only reaches assetsDir; jobDir may still exist (mkdir'd, empty).
+		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: %w", ferr)
+	}
+
+	if mkErr := os.MkdirAll(outRoot, 0o755); mkErr != nil {
+		os.RemoveAll(jobDir)
+		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: creating out root: %w", mkErr)
+	}
+
+	jobJSON, jerr := pipelineInjectRefs(jobSpec, fetched, bgMode)
+	if jerr != nil {
+		os.RemoveAll(jobDir)
+		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: %w", jerr)
+	}
+	jobPath := filepath.Join(jobDir, "job.json")
+	if werr := os.WriteFile(jobPath, jobJSON, 0o644); werr != nil {
+		os.RemoveAll(jobDir)
+		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: writing job.json: %w", werr)
+	}
+
+	cleanup := func() { os.RemoveAll(jobDir) }
+	req := core.Request{
+		Task: core.TaskPipelineJob,
+		Params: map[string]any{
+			"pipeline_task": taskType, // which cfg.Pipelines entry runPipelineJob uses
+			"job_id":        jobID,
+			"job_path":      jobPath,
+			"out_root":      outRoot,
+			"tier":          in.Tier,
+		},
+	}
+	return req, cleanup, nil
+}
+
+// pipelineJobSpecID extracts and validates job_spec.id.
+func pipelineJobSpecID(jobSpec map[string]json.RawMessage) (string, error) {
+	raw, ok := jobSpec["id"]
+	if !ok || isAbsentJSON(raw) {
+		return "", fmt.Errorf("job_spec.id required")
+	}
+	var id string
+	if err := json.Unmarshal(raw, &id); err != nil {
+		return "", fmt.Errorf("job_spec.id must be a string: %v", err)
+	}
+	if !pipelineJobIDPattern.MatchString(id) {
+		return "", fmt.Errorf("job_spec.id %q must match %s", id, pipelineJobIDPattern.String())
+	}
+	return id, nil
+}
+
+// pipelineBackgroundMode reads job_spec.background (absent = ("", false,
+// nil)) and reports its declared mode plus whether it ALREADY carries a
+// "path" key (which must be rejected — the node, not the payload, injects it).
+func pipelineBackgroundMode(jobSpec map[string]json.RawMessage) (mode string, hasPath bool, err error) {
+	raw, ok := jobSpec["background"]
+	if !ok || isAbsentJSON(raw) {
+		return "", false, nil
+	}
+	var bg map[string]json.RawMessage
+	if uerr := json.Unmarshal(raw, &bg); uerr != nil {
+		return "", false, fmt.Errorf("job_spec.background must be a JSON object: %v", uerr)
+	}
+	if _, has := bg["path"]; has {
+		return "", true, nil
+	}
+	if modeRaw, has := bg["mode"]; has {
+		if merr := json.Unmarshal(modeRaw, &mode); merr != nil {
+			return "", false, fmt.Errorf("job_spec.background.mode must be a string: %v", merr)
+		}
+	}
+	return mode, false, nil
+}
+
+// pipelineInjectRefs returns job.json's bytes: jobSpec with product/logo (and
+// background.path, when bgMode=="stock") set to the FETCHED absolute local
+// paths. buildPipelineJob has already rejected a payload that tried to set
+// these itself, so this never overwrites an operator-supplied value.
+func pipelineInjectRefs(jobSpec map[string]json.RawMessage, fetched map[string]string, bgMode string) ([]byte, error) {
+	out := make(map[string]json.RawMessage, len(jobSpec)+2)
+	for k, v := range jobSpec {
+		out[k] = v
+	}
+	productRaw, err := json.Marshal(fetched["product"])
+	if err != nil {
+		return nil, err
+	}
+	out["product"] = productRaw
+	logoRaw, err := json.Marshal(fetched["logo"])
+	if err != nil {
+		return nil, err
+	}
+	out["logo"] = logoRaw
+	if bgMode == "stock" {
+		var bg map[string]json.RawMessage
+		if raw, has := jobSpec["background"]; has {
+			_ = json.Unmarshal(raw, &bg) // already validated as an object by pipelineBackgroundMode
+		}
+		if bg == nil {
+			bg = map[string]json.RawMessage{}
+		}
+		pathRaw, perr := json.Marshal(fetched["background"])
+		if perr != nil {
+			return nil, perr
+		}
+		bg["path"] = pathRaw
+		bgBytes, berr := json.Marshal(bg)
+		if berr != nil {
+			return nil, berr
+		}
+		out["background"] = bgBytes
+	}
+	return json.Marshal(out)
 }
