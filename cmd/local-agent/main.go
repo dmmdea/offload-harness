@@ -165,15 +165,36 @@ func main() {
 		plannerBase = cfg.Endpoint
 	}
 	// Resolve model flags against this machine's config (never a hardcoded alias) —
-	// an empty flag falls back to the configured model, so the CLI is model-agnostic.
-	plannerModel := orCfg(*model, cfg.Model)
+	// an empty flag falls back to the configured seat, so the CLI is model-agnostic.
+	// The single-loop PLANNER follows the agent seat (flag > agent_model > model);
+	// two-tier keeps its own seats (architect=escalation_model, editor=model) and is
+	// deliberately NOT rerouted — dual-resident tiers document architect+editor as a
+	// zero-swap pair.
+	plannerModel := cfg.AgentPlannerModel(*model)
 	archModel := orCfg(*architectModel, cfg.EscalationModel)
 	edModel := orCfg(*editorModel, cfg.Model)
-	timeout := time.Duration(*timeoutSec) * time.Second
+	// -timeout left at its default follows the tier-seeded agent_timeout_sec —
+	// same roast rationale as handleAgentRun (2026-08-02): a tier binding a big
+	// planner seat seeds this higher because a cold big-model load + low tok/s
+	// inside the 180s default is a timeout machine. flag.Visit is the only way
+	// to tell "explicitly set to 180" (which must win) from "left at default".
+	timeoutSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "timeout" {
+			timeoutSet = true
+		}
+	})
+	effTimeoutSec := *timeoutSec
+	if !timeoutSet && cfg.AgentTimeoutSec > 0 {
+		effTimeoutSec = cfg.AgentTimeoutSec
+	}
+	timeout := time.Duration(effTimeoutSec) * time.Second
 
 	// In-process offload (record=false, nil cache+ledger) — the SINGLE shared
 	// constructor, so every drive mode's ledger-pristine guarantee is identical.
-	offload := pipeline.NewRecordlessOffload(cfg, plannerModel, timeout)
+	// The in-loop cascade stays on the WORKHORSE (an explicit -model still drives
+	// both, preserving the old override semantics; the agent seat does not).
+	offload := pipeline.NewRecordlessOffload(cfg, orCfg(*model, cfg.Model), timeout)
 
 	// The broker audit trail must live OUTSIDE any worktree; resolve a default
 	// only when a mutating capability is enabled.
@@ -271,11 +292,19 @@ func main() {
 	// no-op (nothing loaded, update_plan not registered).
 	loop.WithWorktree(built.Worktree)
 	// Budget transcript compaction against the ACTUAL served window: probe the
-	// endpoint for the planner model's live n_ctx (--ctx-tokens 0 = auto; an
-	// explicit flag overrides, warned when it exceeds the probe). Applied to the
-	// shared loop, so it takes effect identically across the one-shot, --serve,
-	// and --queue drive modes.
-	probed, probeOK := agent.ProbeServedWindow(ctx, plannerBase, plannerModel)
+	// endpoint for the live n_ctx (--ctx-tokens 0 = auto; an explicit flag
+	// overrides, warned when it exceeds the probe). Applied to the shared loop,
+	// so it takes effect identically across the one-shot, --serve, and --queue
+	// drive modes. The probed model is MODE-AWARE: the single loop budgets
+	// against the planner seat it runs on; --two-tier budgets against edModel —
+	// the editor/workhorse-class window (the pre-seat semantics: the editor is
+	// the loop that carries the long transcript, and rerouting this probe to the
+	// agent seat would budget both tiers against a window neither runs on).
+	probeModel := plannerModel
+	if *twoTier {
+		probeModel = edModel
+	}
+	probed, probeOK := agent.ProbeServedWindow(ctx, plannerBase, probeModel)
 	effCtx, ctxNote := agent.ResolveContextTokens(*ctxTokens, probed, probeOK)
 	if ctxNote != "" {
 		fmt.Fprintln(os.Stderr, "[local-agent] "+ctxNote)
@@ -427,9 +456,10 @@ func main() {
 		for _, n := range editBuilt.Notes {
 			fmt.Fprintln(os.Stderr, "[local-agent] "+n)
 		}
-		// Both tiers budget against the SAME resolved window (probed for the
-		// default/editor-class model above — on this fleet the tiers share one
-		// serving config; an explicit --ctx-tokens still overrides for both).
+		// Both tiers budget against the SAME resolved window — under --two-tier
+		// the shared preamble probed edModel (the editor, the loop that carries
+		// the long transcript); on this fleet the tiers share one serving config,
+		// and an explicit --ctx-tokens still overrides for both.
 		architect := archBuilt.Loop.WithWorktree(archBuilt.Worktree).WithContextTokens(effCtx).WithSkeletonPrune(*skeletonPrune).WithGCFCompact(*gcfCompact)
 		editor := editBuilt.Loop.WithWorktree(editBuilt.Worktree).WithContextTokens(effCtx).WithSkeletonPrune(*skeletonPrune).WithGCFCompact(*gcfCompact)
 		fmt.Fprintf(os.Stderr, "[local-agent] two-tier: architect=%s editor=%s (one swap)\n", archModel, edModel)

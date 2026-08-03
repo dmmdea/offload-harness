@@ -461,9 +461,12 @@ low so a stuck model gets its tool disabled quickly.
 
 The installer resolves a hardware **profile** (`detect.ps1` → `install.ps1`, see
 `setup/SETUP-AGENT.md`) and renders the serving template + writes the profile's `agent_ctx_tokens`
-to `installed.json`. Run the agent with `-model <resident_tier>` and `-ctx-tokens <agent_ctx_tokens>`
-matching the profile. These are **projected defaults**; `selftest.ps1` measures on the real box and
-its `receipt.profile_measure.tuned` block carries any measured override to apply.
+to `installed.json`. The install seed also binds the agent's planner seat automatically: config
+`agent_model` is derived from the profile's `resident_tier` when it differs from the workhorse, so
+running the agent no longer requires `-model <resident_tier>` — the `-model` flag remains an
+override. Run with `-ctx-tokens <agent_ctx_tokens>` matching the profile. These are **projected
+defaults**; `selftest.ps1` measures on the real box and its `receipt.profile_measure.tuned` block
+carries any measured override to apply.
 
 | Profile | Resident/default tier | Served ctx (`-ctx-tokens`) | KV | 26B-A4B |
 |---|---|---|---|---|

@@ -10,7 +10,7 @@
 | ctx_size | 8192 | the served window (`--ctx-size`) |
 | kv_type | `f16` | `--cache-type-k/v`, kept symmetric |
 | flash_attn | `off` | `--flash-attn` (required for a q8_0 V cache) |
-| resident_tier | `gemma4-e2b` | the model that stays hot and is the agent's default |
+| resident_tier | `gemma4-e2b` | the model that stays hot; seeds the agent planner seat (agent_model) when it differs from the workhorse |
 | agent_ctx_tokens | 8192 | the agent's `-ctx-tokens` compaction budget |
 | 26B-A4B | dropped | whether the 26B MoE is served, and where its experts live |
 

@@ -47,7 +47,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.42.0"
+const version = "0.43.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -1911,6 +1911,7 @@ type aliasCheck struct{ Key, Alias string }
 func modelAliases(cfg config.Config) []aliasCheck {
 	return []aliasCheck{
 		{"model", cfg.Model},
+		{"agent_model", cfg.AgentModel},
 		{"triage_model", cfg.TriageModel},
 		{"escalation_model", cfg.EscalationModel},
 		{"reasoning_model", cfg.ReasoningModel},
@@ -2275,7 +2276,10 @@ func runAgentTrajectoryGate(args []string) error {
 	}
 
 	timeout := time.Duration(cfg.RequestTimeoutSec) * time.Second
-	plannerModel := cfg.Model
+	// The replay agent must score prompts on the model PRODUCTION agents plan
+	// with — the agent seat, not the bare workhorse (else prompt A/B verdicts
+	// grade the wrong planner).
+	plannerModel := cfg.AgentPlannerModel("")
 	judgeModel := cfg.EscalationModel
 	if judgeModel == "" {
 		judgeModel = cfg.Model

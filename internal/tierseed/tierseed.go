@@ -64,6 +64,9 @@ type Profile struct {
 	Backend           string         `json:"backend"`
 	ConfigSeed        map[string]any `json:"config_seed"`
 	ConfigSeedMidHigh map[string]any `json:"config_seed_ram_mid_high"`
+	// ResidentTier is the tier's preferred hot model. It SEEDS the agent planner
+	// seat (agent_model) when it differs from the workhorse — see Resolve.
+	ResidentTier string `json:"resident_tier"`
 	// MediaSeats are the tier's alias-backed media capabilities. They are the SOLE
 	// writer of the config keys they bind — see mediaseat.Bindings.
 	MediaSeats []mediaseat.Seat `json:"media_seats"`
@@ -99,9 +102,6 @@ func Parse(raw []byte) (map[string]Profile, error) {
 // expanded, vae_mode translated, and the whole thing validated. The result is ready
 // to merge into a config.json.
 func Resolve(p Profile, id string, opt Options) (map[string]any, error) {
-	if len(p.ConfigSeed) == 0 && len(p.ConfigSeedMidHigh) == 0 && len(p.MediaSeats) == 0 {
-		return nil, nil // a text-only tier is a legitimate answer, not an error
-	}
 	if err := mediaseat.Validate(p.MediaSeats, id); err != nil {
 		return nil, err
 	}
@@ -113,6 +113,31 @@ func Resolve(p Profile, id string, opt Options) (map[string]any, error) {
 		for k, v := range p.ConfigSeedMidHigh {
 			merged[k] = v
 		}
+	}
+	// The agent planner seat DERIVES from resident_tier: the table has claimed
+	// "resident_tier ... is the agent's default" since the field existed, and the
+	// installers print it as a manual -model hint — this makes the claim true in
+	// config. Rules keep the fallback chain LIVE where it already worked:
+	//   - an explicit config_seed.agent_model (or config_seed_ram_mid_high value,
+	//     including an explicit "" blank-out) always wins. The overlay exists ONLY
+	//     for mid/high RAM — low/min RAM has no overlay at all, so nothing here can
+	//     blank a seat on the boxes that drop the big model; the low-RAM guard is
+	//     the table lint (TestNo26BAgentSeatOnRAMDroppable26B), which forbids a 26B
+	//     seat on any row whose 26B placement is RAM-droppable;
+	//   - derive only when resident_tier DIFFERS from the row's effective
+	//     workhorse — materializing agent_model=workhorse would silently fork the
+	//     live fallback (an operator changing `model` expects the planner to follow).
+	if _, explicit := merged["agent_model"]; !explicit && p.ResidentTier != "" {
+		workhorse := config.Default().Model
+		if m, ok := merged["model"].(string); ok && m != "" {
+			workhorse = m
+		}
+		if p.ResidentTier != workhorse {
+			merged["agent_model"] = p.ResidentTier
+		}
+	}
+	if len(merged) == 0 && len(p.MediaSeats) == 0 {
+		return nil, nil // a text-only tier is a legitimate answer, not an error
 	}
 	if err := validate(merged, p.Backend, id); err != nil {
 		return nil, err

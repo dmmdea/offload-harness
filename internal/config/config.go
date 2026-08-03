@@ -34,6 +34,20 @@ type Config struct {
 	// it thinking-OFF — the grammar, not the chat template, supplies the <think> span.
 	// Empty = no reasoning tier (defer straight to Opus, the prior behavior).
 	ReasoningModel string `json:"reasoning_model,omitempty"`
+	// AgentModel is the coding agent's PLANNER seat (single-loop agent_run / local-agent).
+	// Empty = the planner falls back to Model, the pre-seat behavior — and the chain
+	// stays LIVE: nothing may materialize the fallback into this field at rest.
+	// Distinct from Model on purpose: the cascade's economics want the small fast
+	// workhorse; the agent's judgment wants the strongest model the tier serves. Seeded
+	// per tier (derived from the tier row's resident_tier when the two differ). The
+	// two-tier seats are NOT this key (architect=EscalationModel, editor=Model), and
+	// the agent's in-loop offload cascade stays on Model.
+	AgentModel string `json:"agent_model,omitempty"`
+	// AgentTimeoutSec is the default wall-clock budget for an agent run when the call
+	// passes no timeout. 0 = the built-in default (180s). Tiers binding a big planner
+	// seat seed this higher: a cold big-model load plus low tok/s inside 180s is a
+	// timeout machine, not an agent.
+	AgentTimeoutSec int `json:"agent_timeout_sec,omitempty"`
 	// VisionModel is the VLM alias used for the vqa task (multimodal). Empty = no
 	// vision route (vqa defers).
 	VisionModel string `json:"vision_model,omitempty"`
@@ -465,6 +479,20 @@ func DefaultBase() string {
 		return ExpandTilde(v, home)
 	}
 	return filepath.Join(home, ".local-offload")
+}
+
+// AgentPlannerModel resolves the coding agent's planner seat. Precedence:
+// an explicit per-call/per-flag override > the configured AgentModel seat >
+// the workhorse Model. The chain is resolved at call time, never persisted —
+// an unset seat keeps following Model wherever Model goes.
+func (c Config) AgentPlannerModel(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if c.AgentModel != "" {
+		return c.AgentModel
+	}
+	return c.Model
 }
 
 func Default() Config {

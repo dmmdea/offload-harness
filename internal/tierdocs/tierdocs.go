@@ -221,7 +221,7 @@ func renderTier(name string, p Profile, reports []string) string {
 	fmt.Fprintf(&b, "| ctx_size | %d | the served window (`--ctx-size`) |\n", p.CtxSize)
 	fmt.Fprintf(&b, "| kv_type | `%s` | `--cache-type-k/v`, kept symmetric |\n", dash(p.KVType))
 	fmt.Fprintf(&b, "| flash_attn | `%s` | `--flash-attn` (required for a q8_0 V cache) |\n", dash(p.FlashAttn))
-	fmt.Fprintf(&b, "| resident_tier | `%s` | the model that stays hot and is the agent's default |\n", dash(p.ResidentTier))
+	fmt.Fprintf(&b, "| resident_tier | `%s` | the model that stays hot; seeds the agent planner seat (agent_model) when it differs from the workhorse |\n", dash(p.ResidentTier))
 	fmt.Fprintf(&b, "| agent_ctx_tokens | %d | the agent's `-ctx-tokens` compaction budget |\n", p.AgentCtxTokens)
 	fmt.Fprintf(&b, "| 26B-A4B | %s | whether the 26B MoE is served, and where its experts live |\n", moe(p))
 	if p.DualResident {

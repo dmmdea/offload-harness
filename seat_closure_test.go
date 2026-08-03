@@ -92,8 +92,11 @@ func effectiveConfig(t *testing.T, prof tierseed.Profile, id, goos string) confi
 
 func renderParams(prof servingProfile, goos string) servingtmpl.Params {
 	// No ram tier: the closure gate asks whether a BOUND alias is served, and the RAM
-	// gate only ever removes the 26B — which no media binding routes to. Passing "" is
-	// the ungated case, i.e. the widest roster a tier can render.
+	// gate only ever removes the 26B — which no MEDIA binding routes to. The AGENT
+	// seat (agent_model) CAN route to the 26B, and that is exactly what this ungated
+	// widest-roster render cannot see; the low-RAM guard for it is the dedicated
+	// table lint below (TestNo26BAgentSeatOnRAMDroppable26B). Passing "" is the
+	// ungated case, i.e. the widest roster a tier can render.
 	moe, include26B := moePlacement(prof, "")
 	return servingtmpl.Params{
 		LlamaBin: "/opt/offload/bin", ModelsDir: "/opt/offload/models",
@@ -116,6 +119,39 @@ func TestCommittedTierTableSeatsAreValid(t *testing.T) {
 	for id, p := range profiles {
 		if err := mediaseat.Validate(p.MediaSeats, id); err != nil {
 			t.Error(err)
+		}
+	}
+}
+
+// TestNo26BAgentSeatOnRAMDroppable26B is the low-RAM guard the ungated-roster
+// gate below cannot provide: renderParams passes ramTier "" (the widest roster),
+// so a 26B whose placement the RAM gate drops on a low/min box (moe_26b cpu_moe
+// or n_cpu_moe) still renders as served there. The agent seat is the one config
+// binding that routes to the 26B, and low/min RAM has no seed overlay to blank
+// it (config_seed_ram_mid_high applies only to mid/high) — so the TABLE itself
+// must never pair a derived-or-seeded 26B agent seat with a RAM-droppable 26B.
+// Only moe_26b "gpu" survives every ram tier; anything else can vanish from the
+// roster while agent_model keeps naming it, and every run then fails loud.
+func TestNo26BAgentSeatOnRAMDroppable26B(t *testing.T) {
+	seedProfiles, err := tierseed.Parse(embeddedProfiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Profiles map[string]servingProfile `json:"profiles"`
+	}
+	if err := json.Unmarshal(embeddedProfiles, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for id, sp := range doc.Profiles {
+		for _, goos := range []string{"linux", "windows"} {
+			cfg := effectiveConfig(t, seedProfiles[id], id, goos)
+			if agent := cfg.AgentPlannerModel(""); agent == "gemma4-26b-a4b" && sp.MoE26B != "gpu" {
+				t.Errorf("tier %s (%s): the resolved agent seat is %q but moe_26b is %q — on a low/min-RAM "+
+					"box the RAM gate drops the 26B from the served roster while agent_model still names it, "+
+					"and low/min RAM has no overlay to blank the seat. Pin the 26B (moe_26b \"gpu\") or seat a "+
+					"RAM-independent model.", id, goos, agent, sp.MoE26B)
+			}
 		}
 	}
 }
