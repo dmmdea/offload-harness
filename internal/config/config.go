@@ -8,8 +8,69 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 )
+
+// PipelineSpec describes one externally-provided pipeline CLI this node can run
+// as a fleet task (Task 4: config surface for pipeline jobs — the CMP scene-swap
+// pipeline is the first consumer, but this type is deliberately generic). The
+// map key under Config.Pipelines is the task_type dispatched to reach it (e.g.
+// "scene-swap"); nothing about this struct is CMP-specific. A well-formed entry
+// example (see the pipelines doc comment on Config for the full JSON):
+//
+//	"scene-swap": {
+//	  "script": "D:/Dev/dmmdea/creative-marketing-pipelines/scripts/run-scene-swap.mjs",
+//	  "workdir": "D:/Dev/dmmdea/creative-marketing-pipelines",
+//	  "timeout_sec": 2400,
+//	  "artifacts": ["final.png", "qa-report.json"],
+//	  "max_ref_mb": 24
+//	}
+type PipelineSpec struct {
+	// Script is the absolute path to the CLI entry (a node script). Required —
+	// Load() rejects an entry whose script is empty.
+	Script string `json:"script"`
+	// Workdir is the cwd for the child process (the pipeline repo root).
+	// Required — Load() rejects an entry whose workdir is empty.
+	Workdir string `json:"workdir"`
+	// TimeoutSec bounds one run of this pipeline. Required, > 0 — this is a
+	// PER-PIPELINE timeout (NOT imagegen's shared 720s default): a scene-swap
+	// job needs its own ceiling (ComfyUI cold-start + a full generative
+	// composite can run long).
+	TimeoutSec int `json:"timeout_sec"`
+	// Artifacts lists the bare filenames this pipeline writes inside the job's
+	// out dir; the first entry is the primary result (becomes final_path /
+	// artifacts[0] downstream). Required, non-empty.
+	Artifacts []string `json:"artifacts"`
+	// IngressAllow lists extra "host:port" pairs allowed for this pipeline's
+	// image-ref downloads, beyond the tailnet CGNAT default (100.64.0.0/10).
+	// Empty = the default allowlist only.
+	IngressAllow []string `json:"ingress_allow,omitempty"`
+	// MaxRefMB caps a single downloaded image ref in MB. 0/negative = 24 (read
+	// via RefCapMB(), never this field directly).
+	MaxRefMB int `json:"max_ref_mb,omitempty"`
+}
+
+// valid reports whether p has every field required to run as a fleet task —
+// the same rules validatePipelines enforces at Load() time. Exported methods
+// (PipelineNames, PipelinesConfigured) re-check this so a Config assembled
+// directly (tests, future callers) never advertises a route it cannot run.
+func (p PipelineSpec) valid() bool {
+	return strings.TrimSpace(p.Script) != "" &&
+		strings.TrimSpace(p.Workdir) != "" &&
+		p.TimeoutSec > 0 &&
+		len(p.Artifacts) > 0
+}
+
+// RefCapMB returns the effective per-ref download cap for this pipeline, in MB:
+// MaxRefMB when positive, else 24 (a scene-swap job pulls a handful of PNGs,
+// not a video — 24MB comfortably covers that with margin).
+func (p PipelineSpec) RefCapMB() int {
+	if p.MaxRefMB <= 0 {
+		return 24
+	}
+	return p.MaxRefMB
+}
 
 // Config controls endpoint, model, thresholds, and storage paths.
 type Config struct {
@@ -452,6 +513,25 @@ type Config struct {
 	// (force the Dedicated tree sampler), "global" (force global-delta — set this when
 	// the FLEET-NODE.md Afterburner validation shows PDH disagreeing >15%).
 	FleetSampler string `json:"fleet_sampler,omitempty"`
+	// --- config-driven pipeline jobs (Task 4: fleet-node "pipeline job" task family) ---
+	// Pipelines maps a task_type name (e.g. "scene-swap") to the externally-
+	// provided CLI that serves it — see PipelineSpec. Empty/nil = this box
+	// serves NO pipeline routes (opt-in per box, exactly like ImageGenScript):
+	// a shared config file must never bind every node to a pipeline CLI that
+	// only exists on one machine. Every entry is validated at Load() time (a
+	// bad entry fails at startup, never silently at dispatch) — see
+	// validatePipelines. Example entry:
+	//
+	//	"pipelines": {
+	//	  "scene-swap": {
+	//	    "script": "D:/Dev/dmmdea/creative-marketing-pipelines/scripts/run-scene-swap.mjs",
+	//	    "workdir": "D:/Dev/dmmdea/creative-marketing-pipelines",
+	//	    "timeout_sec": 2400,
+	//	    "artifacts": ["final.png", "qa-report.json"],
+	//	    "max_ref_mb": 24
+	//	  }
+	//	}
+	Pipelines map[string]PipelineSpec `json:"pipelines,omitempty"`
 }
 
 // Default returns a config suitable for the verified E4B-QAT+MTP setup.
@@ -571,6 +651,7 @@ func Default() Config {
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
 		FleetSampler:                  "auto",            // auto|pdh|pdh-shared|global (FLEET-NODE.md)
+		Pipelines:                     nil,               // empty = no pipeline-job routes on this box (opt-in per pipeline)
 	}
 }
 
@@ -591,6 +672,9 @@ func Load(path string) (Config, error) {
 		return c, err
 	}
 	if err := json.Unmarshal(b, &c); err != nil {
+		return c, err
+	}
+	if err := validatePipelines(c.Pipelines); err != nil {
 		return c, err
 	}
 	warnUnknownKeys(b)
@@ -646,6 +730,27 @@ func warnBadEnumValues(c Config) {
 	}
 }
 
+// validatePipelines checks every Config.Pipelines entry has the fields required
+// to run it as a fleet task, so a bad entry fails LOUDLY at config load time —
+// never silently at dispatch time (Task 4). Each error names BOTH the field and
+// the pipeline key so an operator with a dozen pipelines can tell which one is
+// broken.
+func validatePipelines(pipelines map[string]PipelineSpec) error {
+	for key, spec := range pipelines {
+		switch {
+		case strings.TrimSpace(spec.Script) == "":
+			return fmt.Errorf("pipelines[%q]: script is required", key)
+		case strings.TrimSpace(spec.Workdir) == "":
+			return fmt.Errorf("pipelines[%q]: workdir is required", key)
+		case spec.TimeoutSec <= 0:
+			return fmt.Errorf("pipelines[%q]: timeout_sec must be > 0", key)
+		case len(spec.Artifacts) == 0:
+			return fmt.Errorf("pipelines[%q]: artifacts must be non-empty", key)
+		}
+	}
+	return nil
+}
+
 // pathFields enumerates every path-typed Config field (file, dir, script, or
 // executable path) for tilde expansion. Keep in sync with the struct — a new
 // *Path/*Dir/*Script field belongs here.
@@ -673,6 +778,23 @@ func pathFields(c *Config) []*string {
 func expandUserPaths(c *Config, home string) {
 	for _, p := range pathFields(c) {
 		*p = ExpandTilde(*p, home)
+	}
+	expandPipelinePaths(c, home)
+}
+
+// expandPipelinePaths tilde-expands each pipelines entry's script/workdir.
+// These live inside a variable-size map (Config.Pipelines), so — unlike every
+// other path-typed field — they cannot join the flat pathFields list a plain
+// []*string walks; they get their own pass here. Only "~/" expansion applies:
+// rebaseHome's "still equal to the built-in default" rule can never fire for a
+// pipeline entry, because validatePipelines requires script/workdir non-empty
+// and there is no default (non-empty) pipeline entry to have drifted from —
+// every entry here is always explicitly operator-set.
+func expandPipelinePaths(c *Config, home string) {
+	for k, spec := range c.Pipelines {
+		spec.Script = ExpandTilde(spec.Script, home)
+		spec.Workdir = ExpandTilde(spec.Workdir, home)
+		c.Pipelines[k] = spec
 	}
 }
 
@@ -716,6 +838,30 @@ func (c Config) ImageRouteConfigured() bool {
 		return c.SdcppBin != "" && c.SdcppModel != ""
 	}
 	return c.ImageGenScript != ""
+}
+
+// PipelineNames returns the sorted task_type keys of every VALID pipelines
+// entry (an entry that fails PipelineSpec.valid() is silently excluded, so a
+// Config assembled directly rather than through Load() never advertises a
+// route it cannot run — Load() itself already rejects a bad entry outright via
+// validatePipelines).
+func (c Config) PipelineNames() []string {
+	names := make([]string, 0, len(c.Pipelines))
+	for k, spec := range c.Pipelines {
+		if !spec.valid() {
+			continue
+		}
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// PipelinesConfigured reports whether this node serves ANY pipeline-job
+// routes — mirrors ImageRouteConfigured's single-route gate, scaled to a
+// variable-size set (internal/fleetnode's capability gate keys on this).
+func (c Config) PipelinesConfigured() bool {
+	return len(c.PipelineNames()) > 0
 }
 
 // retiredKeys are config keys the harness once honoured and has deliberately dropped.
