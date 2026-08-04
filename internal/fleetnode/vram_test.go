@@ -54,6 +54,203 @@ func TestParseSmiMemory(t *testing.T) {
 	}
 }
 
+// TestParseSmiMemoryDevices_MultiDevice locks the multi-device parse this bug
+// fix adds: EVERY line becomes a device, in nvidia-smi's own enumeration
+// order, and the case that actually shipped the bug — the largest card is
+// NOT first — must not silently collapse back to "first line wins".
+func TestParseSmiMemoryDevices_MultiDevice(t *testing.T) {
+	// index 0 is the SMALLER card; index 1 is the LARGER card. The old
+	// first-line-wins code would headline index 0 — this fix must not.
+	in := "0, NVIDIA GeForce RTX 3070, 8192, 1024\n1, NVIDIA GeForce RTX 4090, 24576, 2048\n"
+	devices, err := ParseSmiMemoryDevices(in)
+	if err != nil {
+		t.Fatalf("ParseSmiMemoryDevices: %v", err)
+	}
+	if len(devices) != 2 {
+		t.Fatalf("got %d devices, want 2: %+v", len(devices), devices)
+	}
+	want := []GPUDevice{
+		{Index: 0, Name: "NVIDIA GeForce RTX 3070", TotalGiB: 8192.0 / 1024, FreeGiB: (8192.0 - 1024) / 1024},
+		{Index: 1, Name: "NVIDIA GeForce RTX 4090", TotalGiB: 24576.0 / 1024, FreeGiB: (24576.0 - 2048) / 1024},
+	}
+	for i, d := range devices {
+		if d != want[i] {
+			t.Errorf("devices[%d] = %+v, want %+v", i, d, want[i])
+		}
+	}
+	head := HeadlineDevice(devices)
+	if head.Index != 1 || head.Name != "NVIDIA GeForce RTX 4090" {
+		t.Fatalf("HeadlineDevice = %+v, want index 1 (the LARGER card, not the first line)", head)
+	}
+}
+
+// TestParseSmiMemoryDevices_QubeShape locks the exact live-verified qube
+// numbers: two near-twin 16 GiB Blackwell cards where nvidia-smi index 0 (the
+// RTX 5060 Ti, the auxiliary/donor card) is NOT the compute card — the RTX
+// 5070 Ti at index 1 is, per ComfyUI's /system_stats (CUDA FASTEST_FIRST
+// ordering binds cuda:0 to the 5070 Ti). nvidia-smi carries no signal that
+// exposes CUDA device order, so HeadlineDevice cannot "know" which card
+// ComfyUI will actually use — it applies the documented, deterministic
+// largest-total rule instead. For THESE exact numbers, index 0 has marginally
+// more total memory (16311 > 16303 MiB — an 8 MiB gap from per-SKU
+// driver/firmware reserve, not a real capacity difference), so it wins on the
+// "largest total" branch, not the tie-break branch. This test exists to make
+// that outcome explicit and intentional, not accidental: the fix's honesty is
+// in gpu_devices carrying BOTH cards' real numbers, not in the headline pick
+// being "correct" for near-twin hardware — see HeadlineDevice's doc comment.
+func TestParseSmiMemoryDevices_QubeShape(t *testing.T) {
+	in := "0, NVIDIA GeForce RTX 5060 Ti, 16311, 867\n1, NVIDIA GeForce RTX 5070 Ti, 16303, 2187\n"
+	devices, err := ParseSmiMemoryDevices(in)
+	if err != nil {
+		t.Fatalf("ParseSmiMemoryDevices: %v", err)
+	}
+	if len(devices) != 2 {
+		t.Fatalf("got %d devices, want 2: %+v", len(devices), devices)
+	}
+	if devices[0].Index != 0 || devices[0].Name != "NVIDIA GeForce RTX 5060 Ti" {
+		t.Errorf("devices[0] = %+v", devices[0])
+	}
+	if devices[1].Index != 1 || devices[1].Name != "NVIDIA GeForce RTX 5070 Ti" {
+		t.Errorf("devices[1] = %+v", devices[1])
+	}
+	head := HeadlineDevice(devices)
+	// Deliberate, documented tie-break outcome: index 0 wins by 8 MiB of raw
+	// total — NOT because it is (or is believed to be) the compute card.
+	if head.Index != 0 {
+		t.Fatalf("HeadlineDevice = %+v, want index 0 (16311 MiB > 16303 MiB total — the documented largest-total rule)", head)
+	}
+}
+
+// TestParseSmiMemoryDevicesSingleLine is the regression guard: a single
+// device line behaves exactly like today's single-GPU box — one device,
+// headline == that device.
+func TestParseSmiMemoryDevicesSingleLine(t *testing.T) {
+	devices, err := ParseSmiMemoryDevices("0, NVIDIA GeForce RTX 3070, 8192, 1024\n")
+	if err != nil {
+		t.Fatalf("ParseSmiMemoryDevices: %v", err)
+	}
+	if len(devices) != 1 {
+		t.Fatalf("got %d devices, want 1: %+v", len(devices), devices)
+	}
+	head := HeadlineDevice(devices)
+	if head.TotalGiB != 8.0 || head.FreeGiB != 7.0 {
+		t.Fatalf("HeadlineDevice = %+v, want Total 8 Free 7", head)
+	}
+}
+
+// TestParseSmiMemoryDevicesMalformedLinesSkipped locks the no-panic contract:
+// malformed/blank lines interleaved with valid ones are skipped, not fatal —
+// a single garbled row (a transient nvidia-smi hiccup) must not take down
+// every other card's reading.
+func TestParseSmiMemoryDevicesMalformedLinesSkipped(t *testing.T) {
+	in := "\n0, NVIDIA GeForce RTX 3070, 8192, 1024\nnot,a,valid,line,at,all\n\n1, NVIDIA GeForce RTX 4090, 24576, 2048\ngarbage\n"
+	devices, err := ParseSmiMemoryDevices(in)
+	if err != nil {
+		t.Fatalf("ParseSmiMemoryDevices: %v", err)
+	}
+	if len(devices) != 2 {
+		t.Fatalf("got %d devices, want 2 (malformed/blank lines skipped): %+v", len(devices), devices)
+	}
+	if devices[0].Index != 0 || devices[1].Index != 1 {
+		t.Fatalf("devices out of order or wrong: %+v", devices)
+	}
+}
+
+// TestParseSmiMemoryDevicesAllInvalidIsError locks the contract: if every
+// line is malformed/blank/zero-total (nothing valid parses), that is the same
+// class of failure as an empty probe — vram_total_gb <= 0 must never leak
+// through as a publishable snapshot.
+func TestParseSmiMemoryDevicesAllInvalidIsError(t *testing.T) {
+	cases := []string{
+		"",
+		"\n\n\n",
+		"garbage\nnot,valid\n",
+		"0, GPU, 0, 0\n", // total <= 0 is a failed probe, per device too
+	}
+	for _, in := range cases {
+		if _, err := ParseSmiMemoryDevices(in); err == nil {
+			t.Errorf("ParseSmiMemoryDevices(%q) = nil error, want error (no valid device lines)", in)
+		}
+	}
+}
+
+// TestParseSmiMemoryDevicesCRLF locks Windows CRLF tolerance across multiple
+// device lines (nvidia-smi emits \r\n on Windows).
+func TestParseSmiMemoryDevicesCRLF(t *testing.T) {
+	in := "0, NVIDIA GeForce RTX 3070, 8192, 1024\r\n1, NVIDIA GeForce RTX 4090, 24576, 2048\r\n"
+	devices, err := ParseSmiMemoryDevices(in)
+	if err != nil {
+		t.Fatalf("ParseSmiMemoryDevices: %v", err)
+	}
+	if len(devices) != 2 {
+		t.Fatalf("got %d devices, want 2: %+v", len(devices), devices)
+	}
+	if devices[0].Name != "NVIDIA GeForce RTX 3070" || devices[1].Name != "NVIDIA GeForce RTX 4090" {
+		t.Fatalf("CRLF not stripped from name field: %+v", devices)
+	}
+}
+
+// TestStartDeviceProbeSampler locks the sampler wiring: an injected
+// DeviceProbe publishes a Snapshot whose TotalGiB/FreeGiB come from
+// HeadlineDevice (not enumeration order) and whose Devices carries every
+// parsed card.
+func TestStartDeviceProbeSampler(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	probe := func() ([]GPUDevice, error) {
+		return []GPUDevice{
+			{Index: 0, Name: "small", TotalGiB: 8, FreeGiB: 7},
+			{Index: 1, Name: "big", TotalGiB: 16, FreeGiB: 2},
+		}, nil
+	}
+	s := StartDeviceProbeSampler(ctx, 10*time.Millisecond, probe)
+	snap, ok := s.Load()
+	if !ok {
+		t.Fatal("Load() not ok after start")
+	}
+	if snap.TotalGiB != 16 || snap.FreeGiB != 2 {
+		t.Errorf("headline = (%v, %v), want (16, 2) — the LARGER device, not index 0", snap.TotalGiB, snap.FreeGiB)
+	}
+	if len(snap.Devices) != 2 {
+		t.Fatalf("Devices = %+v, want 2 entries", snap.Devices)
+	}
+}
+
+// TestStartDeviceProbeSamplerErrorKeepsLast mirrors
+// TestStartGlobalSamplerErrorKeepsLast for the device-aware sampler: a
+// failing probe must never publish zeros or an empty snapshot.
+func TestStartDeviceProbeSamplerErrorKeepsLast(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	fail := false
+	calls := 0
+	probe := func() ([]GPUDevice, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if fail {
+			return nil, errors.New("nvidia-smi exploded")
+		}
+		return []GPUDevice{{Index: 0, Name: "only", TotalGiB: 16, FreeGiB: 15}}, nil
+	}
+	s := StartDeviceProbeSampler(ctx, 10*time.Millisecond, probe)
+	if _, ok := s.Load(); !ok {
+		t.Fatal("initial sample should have published")
+	}
+	mu.Lock()
+	fail = true
+	base := calls
+	mu.Unlock()
+	if !waitFor(t, 2*time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return calls >= base+2 }) {
+		t.Fatal("sampler stopped sampling after errors")
+	}
+	snap, ok := s.Load()
+	if !ok || snap.TotalGiB != 16 || snap.FreeGiB != 15 {
+		t.Errorf("after probe failures snapshot = %+v ok=%v, want last good (16, 15) true", snap, ok)
+	}
+}
+
 // waitFor polls until cond() or the deadline. Sampler tests are timing-based by
 // nature (goroutine + ticker); the injected runner keeps them GPU-free.
 func waitFor(t *testing.T, d time.Duration, cond func() bool) bool {

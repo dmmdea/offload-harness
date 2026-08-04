@@ -294,6 +294,26 @@ func SystemRAMGiB() (float64, error) {
 //
 // Every value is a live read; any failing source fails the probe (the sampler
 // keeps its last good snapshot, same contract as the nvidia-smi source).
+//
+// Per-device breakdown: NOT available from this source, unlike the
+// nvidia-smi path's ParseSmiMemoryDevices/HeadlineDevice (vram.go). Both PDH
+// helpers this probe composes — sumAdapterCounterGiB (used, above) and
+// DedicatedVramTotalGiB (capacity) — deliberately discard the per-instance
+// identity PDH exposes: adapter counter instances are named
+// "luid_0x..._phys_N" and the registry enumeration walks display-class
+// subkeys, but neither keeps that identity attached to its number; they only
+// ever reduce to one scalar (a sum across sumAdapterCounterGiB's instances, a
+// max across the registry's subkeys). Building a true per-adapter GPUDevice
+// list here would mean threading the "luid"/subkey identity through both
+// helpers instead of folding it away — a real change, not a doc-only one, so
+// it is left for a future pass; a windows-generic node's Snapshot.Devices
+// simply stays nil (Sampler.sample / StartProbeSampler, not the
+// devices-aware StartDeviceProbeSampler, is what serves this probe), which is
+// exactly today's single-number behavior — no regression, honestly labeled
+// as "no breakdown available" rather than a guessed one. Note capacity
+// already follows a largest-device-shaped rule independent of this gap:
+// DedicatedVramTotalGiB takes the LARGEST single adapter's qwMemorySize, not
+// an enumeration-order pick.
 func GenericWindowsProbe(uma bool) MemProbe {
 	return func() (float64, float64, error) {
 		dedTotal, err := DedicatedVramTotalGiB()

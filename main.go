@@ -1552,11 +1552,29 @@ func runMCP(args []string) error {
 	return mcpserver.New(p).Run(context.Background(), version)
 }
 
-// nvidiaSmiMemory shells the global VRAM query (MiB CSV) that feeds both the
-// fleet-serve startup probe and the 2s health sampler; fleetnode.ParseSmiMemory
-// parses it.
+// nvidiaSmiMemory shells the global VRAM query (MiB CSV) that feeds the
+// fleet-serve startup GATE probe (ResolveProvider's "does nvidia-smi work at
+// all" check); fleetnode.ParseSmiMemory parses it. The ONGOING 2s health
+// sampler uses nvidiaSmiMemoryDevices instead (below) — a multi-GPU box needs
+// the per-device breakdown that query can't provide (2 fields, no index/name;
+// see ParseSmiMemory's doc comment for why this query/parser pair is frozen
+// rather than extended: the pipeline's per-process footprint delta sampler
+// also depends on this exact 2-field shape).
 func nvidiaSmiMemory() (string, error) {
 	out, err := exec.Command("nvidia-smi", "--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits").Output()
+	return string(out), err
+}
+
+// nvidiaSmiMemoryDevices shells the PER-DEVICE VRAM query (index, name,
+// memory.total, memory.used — MiB CSV, one line per GPU) that feeds the
+// fleet-serve 2s health sampler on a working nvidia-smi node;
+// fleetnode.ParseSmiMemoryDevices parses it. This is what actually fixes the
+// multi-GPU mis-report: nvidia-smi's own line order is PCI bus order, not
+// CUDA device order, so which line is "first" says nothing about which
+// device a render will actually use (fleetnode.HeadlineDevice picks the
+// headline device from the parsed set instead of trusting enumeration order).
+func nvidiaSmiMemoryDevices() (string, error) {
+	out, err := exec.Command("nvidia-smi", "--query-gpu=index,name,memory.total,memory.used", "--format=csv,noheader,nounits").Output()
 	return string(out), err
 }
 
@@ -1706,7 +1724,6 @@ func runFleetServe(args []string) error {
 	if perr != nil {
 		return fmt.Errorf("fleet-serve: %v — refusing to start: a node without a working GPU memory source cannot honor the fleet contract (vram_total_gb must be > 0)", perr)
 	}
-	total := prov.TotalGiB
 
 	// Same pipeline construction as the mcp verb, incl. the hot-reloader (this
 	// is a long-running server; nightly retrains must go live without a restart).
@@ -1721,7 +1738,29 @@ func runFleetServe(args []string) error {
 	ctx, stopSig := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stopSig()
 
-	sampler := fleetnode.StartProbeSampler(ctx, 2*time.Second, prov.Probe)
+	// Multi-GPU fix: on a working nvidia-smi node, the ONGOING health sampler
+	// runs the per-device query (nvidiaSmiMemoryDevices) so /fleet/health can
+	// report every card (gpu_devices[]) and headline the LARGEST one
+	// (fleetnode.HeadlineDevice) instead of trusting nvidia-smi's PCI-bus-order
+	// "index 0" — see vram.go's HeadlineDevice doc for why that distinction
+	// matters. windows-generic has no per-device signal (vram_windows.go), so
+	// it stays on the single-value sampler exactly as before this fix.
+	var sampler *fleetnode.Sampler
+	if prov.Source == "nvidia-smi" {
+		sampler = fleetnode.StartDeviceProbeSampler(ctx, 2*time.Second, fleetnode.SmiDeviceProbe(nvidiaSmiMemoryDevices))
+	} else {
+		sampler = fleetnode.StartProbeSampler(ctx, 2*time.Second, prov.Probe)
+	}
+	// total for the startup banner below: prefer the live sampler's headline
+	// reading (multi-device-aware) over prov.TotalGiB (the gate probe's
+	// single-value, first-line reading) so the banner never disagrees with
+	// what /fleet/health is about to advertise. Falls back to the gate
+	// reading only in the implausible case the sampler's own first sample
+	// (taken synchronously above) somehow isn't loadable yet.
+	total := prov.TotalGiB
+	if snap, ok := sampler.Load(); ok {
+		total = snap.TotalGiB
+	}
 	jobs := fleetnode.NewJobs(time.Hour)
 	// Reclaimable VRAM is sampled in the background (never from the health handler,
 	// which must not block on llama-swap) — see fleet_reclaim.go for why the idle
@@ -1754,8 +1793,12 @@ func runFleetServe(args []string) error {
 	if prov.Source == "windows-generic" {
 		umaLabel = fmt.Sprintf(", uma=%v(%s)", uma, umaSrc)
 	}
-	fmt.Fprintf(os.Stderr, "[fleet-serve] node %q serving /fleet on %s (%.1f GiB VRAM via %s, vendor=%s arch=%s%s; tasks: %s)\n",
-		nodeID, listen, total, prov.Source, prov.Vendor, prov.Arch, umaLabel, strings.Join(fleetnode.SupportedTasks(cfg), ", "))
+	devicesLabel := ""
+	if snap, ok := sampler.Load(); ok && len(snap.Devices) > 1 {
+		devicesLabel = fmt.Sprintf(", %d GPUs (headlining the largest)", len(snap.Devices))
+	}
+	fmt.Fprintf(os.Stderr, "[fleet-serve] node %q serving /fleet on %s (%.1f GiB VRAM via %s, vendor=%s arch=%s%s%s; tasks: %s)\n",
+		nodeID, listen, total, prov.Source, prov.Vendor, prov.Arch, umaLabel, devicesLabel, strings.Join(fleetnode.SupportedTasks(cfg), ", "))
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ln) }()

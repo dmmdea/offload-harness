@@ -39,6 +39,41 @@ about (running, done, or previously failed) still re-acks 202 — or 409 if it p
 failed — even mid-drain, since that's not new work. In-flight renders get up to 30s to finish, survivors are marked terminal
 `error:"interrupted"` so pollers always reach a terminal state.
 
+## Multi-GPU: `gpu_devices[]` and the headline VRAM numbers
+
+On a box with more than one NVIDIA GPU, `/fleet/health` adds a per-device breakdown:
+
+```json
+"vram_total_gb": 15.93, "vram_free_gb": 15.08,
+"gpu_devices": [
+  {"index": 0, "name": "NVIDIA GeForce RTX 5060 Ti", "vram_total_gb": 15.93, "vram_free_gb": 15.08},
+  {"index": 1, "name": "NVIDIA GeForce RTX 5070 Ti", "vram_total_gb": 15.92, "vram_free_gb": 13.46}
+]
+```
+
+`gpu_devices` is **additive** — `vram_total_gb`/`vram_free_gb` keep exactly the meaning they
+always had, and `gpu_devices` is omitted entirely (not an empty array) on a single-GPU node or
+the windows-generic source, which has no per-adapter signal to report.
+
+**Why this exists:** `nvidia-smi` enumerates devices in PCI bus order — that order has no
+relationship to which device a render actually runs on. A CUDA app (ComfyUI included) can bind
+its `cuda:0` to a different physical card via `CUDA_DEVICE_ORDER=FASTEST_FIRST`, so trusting
+"index 0" for the headline VRAM numbers can silently advertise the WRONG card's free memory —
+an idle donor card looking free while the real compute card is mid-render, which lets the
+dispatcher over-admit a second job that then contends or OOMs.
+
+**The headline rule:** `vram_total_gb`/`vram_free_gb` describe the device with the **largest
+total VRAM**; an exact tie in total is broken by whichever card has more free VRAM right now.
+A single render binds to one device, so the admission-relevant number is the biggest device a
+job could actually land on — never an arbitrary enumeration index, and deliberately **not a
+sum** across cards (summing would let the dispatcher admit a job no single card can hold). This
+rule is a defensible, deterministic heuristic, not a way to detect which card CUDA will
+actually pick — nvidia-smi carries no such signal. On a box with two near-identical-capacity
+cards it can pick either one; the full `gpu_devices[]` breakdown exists precisely so a consumer
+that needs the real per-card numbers (or a smarter dispatcher) isn't limited to the headline
+guess. Implementation: `fleetnode.ParseSmiMemoryDevices` / `fleetnode.HeadlineDevice` in
+`internal/fleetnode/vram.go`.
+
 ## Config keys
 
 | Key | Default | Purpose |

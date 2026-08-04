@@ -35,6 +35,34 @@ func SmiProbe(run func() (string, error)) MemProbe {
 	}
 }
 
+// DeviceProbe returns the full per-device VRAM breakdown (nvidia-smi only
+// today — vram_windows.go's GenericWindowsProbe documents why the
+// windows-generic WDDM source cannot produce one: its PDH reads sum blindly
+// across adapter instances with no per-adapter identity preserved). Unlike
+// MemProbe, a DeviceProbe never collapses to a single number itself —
+// HeadlineDevice does that deliberately, once, in the sampler, so there is
+// exactly one place in the codebase that decides which device is "the"
+// device for the health payload's headline pair.
+type DeviceProbe func() ([]GPUDevice, error)
+
+// SmiDeviceProbe adapts the nvidia-smi multi-device CSV runner (index, name,
+// memory.total, memory.used) to a DeviceProbe via ParseSmiMemoryDevices — the
+// devices-aware sibling of SmiProbe/ParseSmiMemory. run must invoke the
+// index+name query (a different nvidia-smi invocation than the plain
+// memory.total,memory.used one SmiProbe/ParseSmiMemory expect); the two are
+// kept separate rather than reusing one query so ParseSmiMemory's existing
+// 2-field CSV contract (and its other caller, the pipeline's per-process
+// footprint delta sampler) never breaks.
+func SmiDeviceProbe(run func() (string, error)) DeviceProbe {
+	return func() ([]GPUDevice, error) {
+		out, err := run()
+		if err != nil {
+			return nil, fmt.Errorf("nvidia-smi: %w", err)
+		}
+		return ParseSmiMemoryDevices(out)
+	}
+}
+
 // InstalledInfo is the slice of the installer's manifest ($OFFLOAD_HOME/
 // installed.json) the fleet node needs: the hardware profile detect.ps1
 // classified (the vendor/arch/UMA truth — no re-derivation from product-name
