@@ -90,8 +90,14 @@ zeros, bounded by the 30-second staleness gate.
 **Multi-GPU:** a working `nvidia-smi` node runs a per-device query (`index,uuid,name,memory.total,
 memory.used`, one line per GPU — `nvidiaSmiMemoryDevices`/`fleetnode.ParseSmiMemoryDevices`) on
 that same 2-second sampler instead of the single-value query, and publishes the full breakdown as
-`gpu_devices[]` in health (additive; omitted on single-GPU/windows-generic nodes, which have no
-per-adapter signal). The headline `vram_total_gb`/`vram_free_gb` pair is picked by
+`gpu_devices[]` in health — additive, and **always present when nvidia-smi is the resolved
+source, including a single-GPU box** (a one-element array; there is no single-GPU special case —
+`chooseSamplerKind` in `main.go` is the exact routing decision, unit-tested in
+`fleet_verbs_test.go`). It is omitted only on windows-generic, which has no per-adapter signal to
+enumerate. A new field is additive in practice too: the fleet-dispatcher decodes health with a
+plain `json.Decoder` and sets `DisallowUnknownFields` nowhere in its `internal/`, so an extra
+field on any node — single-GPU included — is silently ignored, not a wire break. The headline
+`vram_total_gb`/`vram_free_gb` pair is picked by
 `fleetnode.SelectHeadlineDevice`: the config-pinned `primary_gpu_uuid` card when set and present,
 else `fleetnode.HeadlineDevice`'s fallback — the device with the **largest total VRAM** (ties
 broken by more free VRAM) — never nvidia-smi's own line order, which is PCI bus order and has no

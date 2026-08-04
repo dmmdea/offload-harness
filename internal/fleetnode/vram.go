@@ -86,11 +86,12 @@ type GPUDevice struct {
 // Windows). Blank lines and lines that don't parse as "index, uuid, name,
 // total, used" are SKIPPED rather than failing the whole probe — a single
 // garbled/partial row (a transient nvidia-smi hiccup) must not take down
-// every other card's reading. A line whose total is <= 0 or whose used is
-// negative is likewise skipped (not a working GPU line). If NO line parses
-// into a valid device, that IS an error: the contract treats vram_total_gb
-// <= 0 as a failed probe, so a would-be zero-device snapshot must never reach
-// the caller as success.
+// every other card's reading. A line whose total is <= 0, whose used is
+// negative, or whose used EXCEEDS its total is likewise skipped (not a
+// working GPU line — see the used>total check below for why this is a skip,
+// not a clamp). If NO line parses into a valid device, that IS an error: the
+// contract treats vram_total_gb <= 0 as a failed probe, so a would-be
+// zero-device snapshot must never reach the caller as success.
 func ParseSmiMemoryDevices(out string) ([]GPUDevice, error) {
 	var devices []GPUDevice
 	for _, rawLine := range strings.Split(out, "\n") {
@@ -119,16 +120,25 @@ func ParseSmiMemoryDevices(out string) ([]GPUDevice, error) {
 		if totalMiB <= 0 || usedMiB < 0 {
 			continue
 		}
-		freeMiB := totalMiB - usedMiB
-		if freeMiB < 0 {
-			freeMiB = 0
+		// used > total is a corrupt reading (a broken driver, a query that raced
+		// a hot-unplug, garbled counter values), not a legitimate "over budget"
+		// state nvidia-smi can actually report. The OLD behavior clamped this to
+		// 0 free and published the device anyway — that hides a broken
+		// driver/query behind a plausible-looking number (0 free reads as "this
+		// card is full", not "this reading is garbage"), which is worse than
+		// skipping it: skipping is honest about "this device's line was bad this
+		// tick," and (per the file-level contract) the OTHER devices on the same
+		// box still publish normally, while a fully bad probe still fails via the
+		// "zero valid devices" check below.
+		if usedMiB > totalMiB {
+			continue
 		}
 		devices = append(devices, GPUDevice{
 			Index:    idx,
 			UUID:     uuid,
 			Name:     name,
 			TotalGiB: totalMiB / 1024,
-			FreeGiB:  freeMiB / 1024,
+			FreeGiB:  (totalMiB - usedMiB) / 1024,
 		})
 	}
 	if len(devices) == 0 {
@@ -215,10 +225,19 @@ func HeadlineDevice(devices []GPUDevice) GPUDevice {
 //     and side-effect-free so it's trivially unit-testable.
 //
 // devices must be non-empty, same precondition as HeadlineDevice.
+//
+// The match is case-INsensitive (strings.EqualFold) and primaryUUID itself is
+// trimmed by config.Load before it ever reaches here — an operator is
+// expected to copy the UUID straight out of /fleet/health's gpu_devices[],
+// and a copy/paste can pick up a trailing newline/space or a
+// different-cased-but-identical UUID (nvidia-smi lowercases; some tools that
+// display UUIDs don't) without the operator noticing either difference.
+// Neither should be enough to silently drop a correct pin to the fallback
+// rule and its warning.
 func SelectHeadlineDevice(devices []GPUDevice, primaryUUID string) (head GPUDevice, warning string) {
 	if primaryUUID != "" {
 		for _, d := range devices {
-			if d.UUID == primaryUUID {
+			if strings.EqualFold(d.UUID, primaryUUID) {
 				return d, ""
 			}
 		}
@@ -232,14 +251,18 @@ func SelectHeadlineDevice(devices []GPUDevice, primaryUUID string) (head GPUDevi
 type Snapshot struct {
 	TotalGiB float64
 	FreeGiB  float64
-	// Devices is the full per-device breakdown (nvidia-smi multi-device
-	// source only, in nvidia-smi's own enumeration order — see
-	// ParseSmiMemoryDevices/HeadlineDevice). Nil when the source cannot
-	// enumerate devices (windows-generic, or any plain single-value MemProbe
-	// source): TotalGiB/FreeGiB alone describe that box exactly as they did
-	// before this field existed, and a nil/empty Devices is never itself an
-	// error condition — additive only, per ADR-style compatibility with every
-	// existing single-GPU node.
+	// Devices is the full per-device breakdown (nvidia-smi source only, in
+	// nvidia-smi's own enumeration order — see ParseSmiMemoryDevices/
+	// HeadlineDevice). ALWAYS populated when the source is nvidia-smi,
+	// including a single-GPU box (one entry — no single-GPU special case).
+	// Nil only when the source cannot enumerate devices at all — today, the
+	// windows-generic MemProbe path (StartProbeSampler, not
+	// StartDeviceProbeSampler): TotalGiB/FreeGiB alone describe that box
+	// exactly as they did before this field existed, and a nil Devices is
+	// never itself an error condition. Additive only — no pre-fix consumer
+	// (the fleet-dispatcher decodes health with a plain json.Decoder, no
+	// DisallowUnknownFields anywhere in its internal/) breaks on the new
+	// field appearing.
 	Devices []GPUDevice
 	At      time.Time
 }

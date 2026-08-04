@@ -546,12 +546,19 @@ type Config struct {
 	// can't be told apart by total VRAM — 16311 vs 16303 MiB, a same-SKU-size
 	// near-tie). The UUID is the only identifier stable across all of that.
 	// Read the UUIDs straight off a running node's /fleet/health gpu_devices[]
-	// to fill this in. "" (default) = the largest-total rule, unchanged. Set
-	// but not found among the parsed devices = the same fallback PLUS one
-	// stderr warning (never a silent revert to guessing — that would hide a
-	// typo'd UUID or an actually-removed card forever). No effect on a
-	// single-GPU or windows-generic node (nothing to pin against / no
-	// per-device signal to match on).
+	// to fill this in — gpu_devices[] is ALWAYS present for a nvidia-smi node
+	// (single-GPU boxes included; there is no single-GPU special case, see
+	// main.go's chooseSamplerKind). "" (default) = the largest-total rule,
+	// unchanged. Set but not found among the parsed devices = the same
+	// fallback PLUS one stderr warning (never a silent revert to guessing —
+	// that would hide a typo'd UUID or an actually-removed card forever).
+	// Trimmed of surrounding whitespace at Load (a copy-paste from a terminal
+	// can carry a trailing newline) and matched case-insensitively
+	// (fleetnode.SelectHeadlineDevice) — an operator's copy of the UUID should
+	// never fail to match over incidental formatting. No FUNCTIONAL effect on
+	// a single-GPU nvidia-smi node beyond confirming what's already true (its
+	// one device is already the headline); no effect at all on a
+	// windows-generic node, which has no gpu_devices[] to match against.
 	PrimaryGPUUUID string `json:"primary_gpu_uuid,omitempty"`
 	// --- config-driven pipeline jobs (Task 4: fleet-node "pipeline job" task family) ---
 	// Pipelines maps a task_type name (e.g. "scene-swap") to the externally-
@@ -729,6 +736,14 @@ func Load(path string) (Config, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return c, err
 	}
+	// primary_gpu_uuid is meant to be copy-pasted straight out of a running
+	// node's /fleet/health gpu_devices[] — trim whitespace an editor/terminal
+	// can introduce (a trailing newline from a copy, stray leading space) so a
+	// pin that LOOKS correct doesn't silently drop to the fallback rule and
+	// its warning. The match itself is also case-insensitive (vram.go's
+	// SelectHeadlineDevice) — together these cover the two ways a manually
+	// copied UUID commonly fails to compare equal to the source.
+	c.PrimaryGPUUUID = strings.TrimSpace(c.PrimaryGPUUUID)
 	warnUnknownKeys(b)
 	warnBadEnumValues(c)
 	if home, herr := os.UserHomeDir(); herr == nil {
