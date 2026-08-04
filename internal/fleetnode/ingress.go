@@ -74,10 +74,12 @@ func FetchRefs(ctx context.Context, refs map[string]string, destDir string,
 	noop := func() {}
 
 	// Validate every ref key BEFORE touching the filesystem or the network:
-	// a bad key must never create destDir, let alone contact any server.
-	for key := range refs {
+	// a bad key must never create destDir, let alone contact any server. Uses
+	// refErr (not a bespoke format) so this failure reads exactly like every
+	// other per-ref error below — "ingress: ref %q (%s): ...".
+	for key, rawURL := range refs {
 		if !refKeyPattern.MatchString(key) {
-			return nil, noop, fmt.Errorf("ingress: ref key %q is invalid (must match %s)", key, refKeyPattern.String())
+			return nil, noop, refErr(key, rawURL, fmt.Errorf("invalid ref key (must match %s)", refKeyPattern.String()))
 		}
 	}
 
@@ -122,6 +124,14 @@ func fetchOne(ctx context.Context, client *http.Client, absDestDir, key, rawURL 
 	if err != nil {
 		return "", refErr(key, rawURL, fmt.Errorf("invalid URL: %w", err))
 	}
+	// Explicit scheme check BEFORE the allowlist: without it, a URL like
+	// "gopher://100.64.1.2/x" sails through checkAllowed (the host IS a valid
+	// tailnet address) and only fails deep inside the HTTP transport with a
+	// confusing "unsupported protocol scheme" error — a slow, indirect way to
+	// reject something we can name outright, fast, with zero dial attempted.
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", refErr(key, rawURL, fmt.Errorf("scheme %q not allowed (want http or https)", u.Scheme))
+	}
 	host, port := hostPort(u)
 	if err := checkAllowed(host, port, extraAllow); err != nil {
 		return "", refErr(key, rawURL, err)
@@ -137,6 +147,7 @@ func fetchOne(ctx context.Context, client *http.Client, absDestDir, key, rawURL 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		drainBody(resp) // let the transport reuse this connection instead of tearing it down
 		return "", refErr(key, rawURL, fmt.Errorf("unexpected status %s", resp.Status))
 	}
 
@@ -146,11 +157,13 @@ func fetchOne(ctx context.Context, client *http.Client, absDestDir, key, rawURL 
 		return "", refErr(key, rawURL, fmt.Errorf("reading body: %w", err))
 	}
 	if int64(len(body)) > capLimit {
+		drainBody(resp) // the LimitReader above only consumed capLimit+1 bytes; the rest is still on the wire
 		return "", refErr(key, rawURL, fmt.Errorf("body exceeds the %d MiB cap", capMB))
 	}
 
 	ext, err := sniffImageExt(body)
 	if err != nil {
+		drainBody(resp) // body is already fully read here (ReadAll succeeded under the cap); a no-op, kept for consistency
 		return "", refErr(key, rawURL, err)
 	}
 
@@ -164,6 +177,16 @@ func fetchOne(ctx context.Context, client *http.Client, absDestDir, key, rawURL 
 // refErr names the ref key and URL on every failure.
 func refErr(key, rawURL string, err error) error {
 	return fmt.Errorf("ingress: ref %q (%s): %w", key, rawURL, err)
+}
+
+// drainBody discards whatever is left of resp.Body, bounded, so the
+// underlying connection can be returned to the client's pool instead of
+// being torn down on Close (an unread/partially-read body forces Go's
+// transport to close the connection rather than reuse it). The drain itself
+// is capped — not unbounded — so an oversized or malicious body can't turn an
+// error path into unbounded work.
+func drainBody(resp *http.Response) {
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 }
 
 // hostPort splits a URL's authority into host and port, defaulting the port
@@ -196,8 +219,15 @@ func checkAllowed(host, port string, extraAllow []string) error {
 			return nil
 		}
 	}
+	// extraAllow entries are DNS names (the CIDR/IP-literal path above is
+	// already handled structurally and untouched here): DNS names are
+	// case-insensitive (RFC 4343), so an operator-authored entry like
+	// "MyHost:8080" must match a URL host that arrives as "myhost:8080" (or
+	// vice versa). Lowercase both sides of the comparison; the port digits
+	// are unaffected by case, so this keeps port matching exact.
+	normalizedHostport := strings.ToLower(hostport)
 	for _, a := range extraAllow {
-		if a == hostport {
+		if strings.ToLower(a) == normalizedHostport {
 			return nil
 		}
 	}

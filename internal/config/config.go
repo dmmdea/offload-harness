@@ -51,10 +51,17 @@ type PipelineSpec struct {
 	MaxRefMB int `json:"max_ref_mb,omitempty"`
 }
 
-// valid reports whether p has every field required to run as a fleet task —
-// the same rules validatePipelines enforces at Load() time. Exported methods
-// (PipelineNames, PipelinesConfigured) re-check this so a Config assembled
-// directly (tests, future callers) never advertises a route it cannot run.
+// valid reports whether p has the fields required to run as a fleet task
+// PRESENT — script, workdir, a positive timeout_sec, and at least one
+// artifact. It is a NECESSARY SUBSET of what validatePipelines enforces at
+// Load() time, not the same rule set: validatePipelines additionally
+// requires script to be an absolute path, every artifact to be a bare
+// filename (no "/" or "\"), and max_ref_mb to be >= 0 — checks this method
+// deliberately omits, since those exist to fail a hand-authored config file
+// loudly at load time, not to gate a Config a caller assembled directly in
+// memory. Exported methods (PipelineNames, PipelinesConfigured) re-check this
+// so such a Config never advertises a route missing a required field — it is
+// NOT a guarantee the route would also pass validatePipelines.
 func (p PipelineSpec) valid() bool {
 	return strings.TrimSpace(p.Script) != "" &&
 		strings.TrimSpace(p.Workdir) != "" &&
@@ -768,8 +775,20 @@ func warnBadEnumValues(c Config) {
 // the pipeline key so an operator with a dozen pipelines can tell which one is
 // broken. Called (from Load) AFTER tilde-expansion/rebase, so script is
 // already resolved to its final form when the absolute-path check runs.
+//
+// Keys are visited in SORTED order (not map iteration order, which Go
+// deliberately randomizes) so that when more than one entry is invalid, the
+// FIRST error returned is deterministic — reproducible across runs instead of
+// depending on map hash seeding, which matters for anyone diffing a failing
+// config load or writing a test against the error text.
 func validatePipelines(pipelines map[string]PipelineSpec) error {
-	for key, spec := range pipelines {
+	keys := make([]string, 0, len(pipelines))
+	for key := range pipelines {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		spec := pipelines[key]
 		switch {
 		case strings.TrimSpace(spec.Script) == "":
 			return fmt.Errorf("pipelines[%q]: script is required", key)
@@ -786,6 +805,12 @@ func validatePipelines(pipelines map[string]PipelineSpec) error {
 			return fmt.Errorf("pipelines[%q]: timeout_sec must be > 0", key)
 		case len(spec.Artifacts) == 0:
 			return fmt.Errorf("pipelines[%q]: artifacts must be non-empty", key)
+		case spec.MaxRefMB < 0:
+			// 0 is legitimate (RefCapMB() reads it as "use the 24 MB default");
+			// only a NEGATIVE value is a caller mistake — silently treating it
+			// the same as 0 would hide a typo'd config value instead of failing
+			// loudly at load time, same reasoning as every other field here.
+			return fmt.Errorf("pipelines[%q]: max_ref_mb must be >= 0 (got %d)", key, spec.MaxRefMB)
 		}
 		for _, a := range spec.Artifacts {
 			if strings.ContainsAny(a, `/\`) {
