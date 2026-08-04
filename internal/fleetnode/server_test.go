@@ -3,6 +3,7 @@ package fleetnode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -403,6 +404,127 @@ func TestDuplicateDispatchAfterError409(t *testing.T) {
 	if len(fr.requests()) != 1 {
 		t.Fatalf("runner ran %d times, want exactly 1 (a 409 must never re-run)", len(fr.requests()))
 	}
+}
+
+// pipelineDispatchCfg returns a Config with one valid "scene-swap" pipeline
+// route, Home pinned to an isolated temp dir (BaseDir()/pipeline-jobs never
+// touches the real ~/.local-offload).
+func pipelineDispatchCfg(t *testing.T) config.Config {
+	t.Helper()
+	cfg := config.Default()
+	cfg.Home = t.TempDir()
+	cfg.Pipelines = map[string]config.PipelineSpec{
+		"scene-swap": {
+			Script:     "does-not-run.mjs",
+			Workdir:    "wd",
+			TimeoutSec: 30,
+			Artifacts:  []string{"final.png"},
+		},
+	}
+	return cfg
+}
+
+func pipelineDispatchBody(jobID, jobSpecID, productURL, logoURL string) string {
+	return fmt.Sprintf(
+		`{"job_id":%q,"task_type":"scene-swap","payload":{"job_spec":{"id":%q},"image_refs":{"product":%q,"logo":%q},"tier":"16gb"}}`,
+		jobID, jobSpecID, productURL, logoURL)
+}
+
+// TestDispatchPipelineJobDuplicateReAcksWithoutRebuild is the regression test
+// for the review finding: BuildRequest used to run BEFORE the Accept dedupe,
+// so a lost-ack re-dispatch of the SAME job_id (still running) reached
+// buildPipelineJob a second time and hit its exclusive job-dir Mkdir guard —
+// a false "already in flight" 400, which the dispatcher treats as an outright
+// REFUSAL (inviting a duplicate render elsewhere). The fix looks up a known
+// job_id BEFORE calling BuildRequest at all. Proven here by counting hits on
+// a seen-array ref server: a duplicate dispatch must NOT re-fetch either ref
+// (the direct proof BuildRequest/buildPipelineJob never ran a second time,
+// not just that the runner didn't re-render).
+func TestDispatchPipelineJobDuplicateReAcksWithoutRebuild(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	refSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.URL.Path)
+		mu.Unlock()
+		w.Write([]byte("\x89PNG\r\n\x1a\nfake-image-bytes"))
+	}))
+	defer refSrv.Close()
+
+	release := make(chan struct{})
+	fr := &fakeRunner{fn: func(ctx context.Context, req core.Request) core.Result {
+		<-release
+		return core.Result{OK: true, Data: json.RawMessage(`{"final_path":"x.png"}`)}
+	}}
+	s, _ := newTestServer(t, pipelineDispatchCfg(t), fr, nil)
+
+	body := pipelineDispatchBody("pipe-dup", "pipe-dup-case", refSrv.URL+"/product.png", refSrv.URL+"/logo.png")
+
+	rec := do(t, s, http.MethodPost, "/fleet/dispatch", body, nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first POST status = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	pollJob(t, s, "pipe-dup", JobRunning)
+
+	mu.Lock()
+	firstCount := len(seen)
+	mu.Unlock()
+	if firstCount != 2 { // product + logo, fetched exactly once
+		t.Fatalf("expected 2 ref fetches on the first dispatch, got %d: %v", firstCount, seen)
+	}
+
+	// Re-dispatch the SAME envelope job_id while the first job is still running.
+	rec = do(t, s, http.MethodPost, "/fleet/dispatch", body, nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("duplicate-while-running status = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	mu.Lock()
+	secondCount := len(seen)
+	mu.Unlock()
+	if secondCount != firstCount {
+		t.Errorf("refs were RE-FETCHED on the duplicate dispatch (BuildRequest ran again): %d -> %d hits: %v",
+			firstCount, secondCount, seen)
+	}
+
+	close(release)
+	pollJob(t, s, "pipe-dup", JobDone)
+	if len(fr.requests()) != 1 {
+		t.Fatalf("runner ran %d times, want exactly 1", len(fr.requests()))
+	}
+}
+
+// TestDispatchPipelineJobDifferentJobIDSameSpecIDStill400s proves the Mkdir
+// collision guard still catches the REAL collision: two DIFFERENT envelope
+// job_ids that happen to carry the same job_spec.id (e.g. two independent web
+// submissions racing on a duplicate id) must still 400 the second one — only
+// a re-dispatch of the identical job_id is fast-pathed to a re-ack.
+func TestDispatchPipelineJobDifferentJobIDSameSpecIDStill400s(t *testing.T) {
+	refSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("\x89PNG\r\n\x1a\nfake-image-bytes"))
+	}))
+	defer refSrv.Close()
+
+	release := make(chan struct{})
+	fr := &fakeRunner{fn: func(ctx context.Context, req core.Request) core.Result {
+		<-release
+		return core.Result{OK: true, Data: json.RawMessage(`{"final_path":"x.png"}`)}
+	}}
+	s, _ := newTestServer(t, pipelineDispatchCfg(t), fr, nil)
+
+	bodyA := pipelineDispatchBody("job-A", "shared-spec-id", refSrv.URL+"/product.png", refSrv.URL+"/logo.png")
+	rec := do(t, s, http.MethodPost, "/fleet/dispatch", bodyA, nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first POST status = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	pollJob(t, s, "job-A", JobRunning)
+
+	bodyB := pipelineDispatchBody("job-B", "shared-spec-id", refSrv.URL+"/product.png", refSrv.URL+"/logo.png")
+	rec = do(t, s, http.MethodPost, "/fleet/dispatch", bodyB, nil)
+	wantErrorShape(t, rec, http.StatusBadRequest, "already in flight")
+
+	close(release)
+	pollJob(t, s, "job-A", JobDone)
 }
 
 func TestJobsUnknown404(t *testing.T) {

@@ -268,6 +268,30 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Idempotent re-ack BEFORE BuildRequest: a lost-ack re-dispatch of a job_id
+	// this node already knows about must re-ack without redoing ANY build work
+	// (ref fetches, materialized temp files) — for every family that's pure
+	// waste, and for a pipeline-job it is actively WRONG: BuildRequest's
+	// exclusive job-dir create (buildPipelineJob, the job_spec.id collision
+	// guard) cannot tell "the same job_id re-dispatched while still running"
+	// from "a genuinely different job_id whose job_spec.id collides", and
+	// would 400 the former — which the dispatcher treats as an outright
+	// REFUSAL (see the comment below), buying a duplicate render on another
+	// node. Checking the SAME job_id here, before BuildRequest ever runs,
+	// makes that distinction correctly: a known job_id short-circuits straight
+	// to the same re-ack/409 logic Accept's own duplicate path already uses;
+	// only a job_id this node has never seen reaches BuildRequest, so a real
+	// job_spec.id collision (a DIFFERENT job_id) still hits the Mkdir guard
+	// and 400s as intended.
+	if view, ok := s.jobs.Get(env.JobID); ok {
+		if view.State == JobError {
+			writeError(w, http.StatusConflict, "job previously failed on this node: "+view.Error)
+			return
+		}
+		writeAck(w, env.JobID) // accepted/running/done: idempotent re-ack, no rebuild, no render
+		return
+	}
+
 	req, cleanup, err := BuildRequest(s.opts.Cfg, env.TaskType, env.Payload)
 	if err != nil {
 		cleanup()

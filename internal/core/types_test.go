@@ -46,3 +46,15 @@ func TestTaskGenerateVideoAudioValid(t *testing.T) {
 		t.Fatal("unknown task must be invalid")
 	}
 }
+
+// TestTaskPipelineJobValid (Task 4): the config-driven pipeline-job task type
+// (internal/config Config.Pipelines, run generically via the task's configured
+// script) is recognized by Valid() alongside the existing tasks.
+func TestTaskPipelineJobValid(t *testing.T) {
+	if !TaskPipelineJob.Valid() {
+		t.Fatal("TaskPipelineJob should be Valid()")
+	}
+	if TaskType("nope-pipeline").Valid() {
+		t.Fatal("unknown task must be invalid")
+	}
+}
