@@ -129,8 +129,21 @@ func buildSummarize(req core.Request) (Built, error) {
 		System:    "You are a precise summarizer. Output ONLY a JSON object. Be faithful to the source; do not invent facts.",
 		User:      fmt.Sprintf("Summarize the text below. Provide a 1-2 sentence \"summary\" and up to %d key points in \"bullets\".\n\nTEXT:\n%s", n, req.Input),
 		Grammar:   grammar,
-		MaxTokens: 512,
+		// Budget SCALES with the number of bullets requested. A flat 512 was the
+		// single largest source of truncation defers in the 2026-08-03 ledger audit
+		// (8 of 34): the caller asks for N points, the model writes them, the budget
+		// does not move, the JSON is cut mid-structure and the whole call defers to
+		// cloud. 384 covers the summary + JSON scaffolding, 160/bullet is measured
+		// headroom for a full sentence each.
+		MaxTokens: summarizeBudget(n),
 	}, nil
+}
+
+// summarizeBudget sizes the output budget to what was actually requested.
+// Deliberately generous: an over-large budget costs nothing when the model stops
+// early (llama.cpp streams until EOS), while an under-sized one defers the call.
+func summarizeBudget(points int) int {
+	return 384 + 160*points
 }
 
 func buildClassify(req core.Request) (Built, error) {
@@ -163,7 +176,11 @@ func buildTriage(req core.Request) (Built, error) {
 		System:    "You triage yes/no/unsure questions about a piece of text. Output ONLY a JSON object.",
 		User:      fmt.Sprintf("Question: %s\nAnswer with \"decision\" (yes, no, or unsure) and a short \"reason\".\n\nTEXT:\n%s", q, req.Input),
 		Grammar:   grammar,
-		MaxTokens: 256,
+		// 256 -> 768: the "reason" field is free text and the 2026-08-03 ledger audit
+		// caught 3 triage calls truncating at exactly 256, which discards a decision
+		// the model had ALREADY made (the enum comes first in the grammar) and defers
+		// the whole call. The decision is the product; do not lose it to the rationale.
+		MaxTokens: 768,
 	}, nil
 }
 

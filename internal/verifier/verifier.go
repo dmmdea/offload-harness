@@ -12,8 +12,13 @@ type Verdict struct {
 	Reason string // populated when !OK
 	// Terminal marks a failure that a LARGER tier cannot fix either, so the
 	// pipeline should defer to Opus immediately instead of escalating. Truncation
-	// is the case: every local tier shares the same context window, so climbing
-	// to the slow 26B-A4B just burns compute before deferring anyway.
+	// is the case: the binding constraint is the OUTPUT BUDGET, which every tier
+	// shares for a given task, so climbing to the slow 26B-A4B just burns compute
+	// before deferring anyway. (Updated 2026-08-03: the old wording said every tier
+	// shares one context window. That is no longer true — the seats are served at
+	// different -c values, and the workhorse now has the LARGEST. Escalating on
+	// truncation would move to a SMALLER window, so Terminal is more right than
+	// before, for a different reason.)
 	Terminal bool
 }
 

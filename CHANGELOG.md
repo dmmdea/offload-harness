@@ -4,6 +4,31 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.43.1] - 2026-08-03
+
+### Fixed — output budgets sized from ledger evidence, not from a guess
+A 984-call ledger audit on the reference box found that **every** local-cascade deferral was a
+budget failure, not a model-quality failure: 16 of 34 were context overflow and 11 were output
+truncation. Zero were "the model was not capable enough". Two truncation sources are fixed here:
+
+- **`summarize` now scales its budget with `max_points`** (`384 + 160*n`, so the default 5-point
+  request budgets 1184 instead of a flat 512). The old flat budget could not fit the number of
+  bullets the caller explicitly asked for: the model wrote them, the budget ran out, the JSON was
+  cut mid-structure, and the whole call deferred to cloud. 8 of the 34 deferrals were this.
+- **`triage` raised 256 → 768.** Its `reason` field is free text and was measured truncating at
+  exactly 256, which throws away a `decision` the model had already emitted (the enum comes first
+  in the grammar) and defers the call. The decision is the product; it must not be lost to the
+  rationale.
+
+`ocr` truncation is already addressable per-machine via the existing `ocr_max_tokens` config key
+(a strong VLM transcribing a dense page exceeds the built-in 1024) — no code change needed.
+
+### Changed — corrected a stale premise in the verifier
+Truncation is still `Terminal` (defer, never escalate), but the comment explaining *why* said
+"every local tier shares the same context window". That is no longer true — seats are now served
+at different `-c` values and the workhorse holds the largest, so escalating on truncation would
+move to a **smaller** window. The behavior was right; the reasoning is now right too.
+
 ## [0.43.0] - 2026-08-02
 
 ### Added — `agent_model`: a dedicated planner seat for the single-loop coding agent
