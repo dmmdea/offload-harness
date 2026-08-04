@@ -311,7 +311,7 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req, cleanup, err := BuildRequest(s.opts.Cfg, env.TaskType, env.Payload)
+	req, cleanup, err := BuildRequest(r.Context(), s.opts.Cfg, env.TaskType, env.Payload)
 	if err != nil {
 		cleanup()
 		writeError(w, http.StatusBadRequest, err.Error())
