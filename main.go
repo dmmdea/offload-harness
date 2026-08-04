@@ -1565,16 +1565,20 @@ func nvidiaSmiMemory() (string, error) {
 	return string(out), err
 }
 
-// nvidiaSmiMemoryDevices shells the PER-DEVICE VRAM query (index, name,
+// nvidiaSmiMemoryDevices shells the PER-DEVICE VRAM query (index, uuid, name,
 // memory.total, memory.used — MiB CSV, one line per GPU) that feeds the
 // fleet-serve 2s health sampler on a working nvidia-smi node;
 // fleetnode.ParseSmiMemoryDevices parses it. This is what actually fixes the
 // multi-GPU mis-report: nvidia-smi's own line order is PCI bus order, not
 // CUDA device order, so which line is "first" says nothing about which
 // device a render will actually use (fleetnode.HeadlineDevice picks the
-// headline device from the parsed set instead of trusting enumeration order).
+// headline device from the parsed set instead of trusting enumeration order,
+// and fleetnode.SelectHeadlineDevice lets an operator override that pick by
+// UUID via the primary_gpu_uuid config key — the uuid field is why it's in
+// this query at all: index/total-VRAM alone can't reliably identify a card
+// across a reboot or reseat, but the UUID is burned into it).
 func nvidiaSmiMemoryDevices() (string, error) {
-	out, err := exec.Command("nvidia-smi", "--query-gpu=index,name,memory.total,memory.used", "--format=csv,noheader,nounits").Output()
+	out, err := exec.Command("nvidia-smi", "--query-gpu=index,uuid,name,memory.total,memory.used", "--format=csv,noheader,nounits").Output()
 	return string(out), err
 }
 
@@ -1740,14 +1744,17 @@ func runFleetServe(args []string) error {
 
 	// Multi-GPU fix: on a working nvidia-smi node, the ONGOING health sampler
 	// runs the per-device query (nvidiaSmiMemoryDevices) so /fleet/health can
-	// report every card (gpu_devices[]) and headline the LARGEST one
-	// (fleetnode.HeadlineDevice) instead of trusting nvidia-smi's PCI-bus-order
-	// "index 0" — see vram.go's HeadlineDevice doc for why that distinction
-	// matters. windows-generic has no per-device signal (vram_windows.go), so
-	// it stays on the single-value sampler exactly as before this fix.
+	// report every card (gpu_devices[]) and headline either the operator-pinned
+	// primary_gpu_uuid card (cfg.PrimaryGPUUUID — the CMP tier notes' canonical
+	// "pin by UUID, never index" guidance) or, when unset/unmatched, the
+	// LARGEST one (fleetnode.HeadlineDevice) — never trusting nvidia-smi's
+	// PCI-bus-order "index 0". See vram.go's SelectHeadlineDevice/HeadlineDevice
+	// doc comments for why that distinction matters. windows-generic has no
+	// per-device signal (vram_windows.go), so it stays on the single-value
+	// sampler exactly as before this fix, and PrimaryGPUUUID has no effect there.
 	var sampler *fleetnode.Sampler
 	if prov.Source == "nvidia-smi" {
-		sampler = fleetnode.StartDeviceProbeSampler(ctx, 2*time.Second, fleetnode.SmiDeviceProbe(nvidiaSmiMemoryDevices))
+		sampler = fleetnode.StartDeviceProbeSampler(ctx, 2*time.Second, fleetnode.SmiDeviceProbe(nvidiaSmiMemoryDevices), cfg.PrimaryGPUUUID)
 	} else {
 		sampler = fleetnode.StartProbeSampler(ctx, 2*time.Second, prov.Probe)
 	}

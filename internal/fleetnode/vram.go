@@ -11,6 +11,7 @@ package fleetnode
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -53,31 +54,37 @@ func ParseSmiMemory(out string) (totalGiB, usedGiB float64, err error) {
 	return totalMiB / 1024, usedMiB / 1024, nil
 }
 
-// GPUDevice is one parsed nvidia-smi device line: the index/name nvidia-smi
-// itself reports plus its GiB memory figures. JSON tags match the
-// gpu_devices[] shape documented in docs/FLEET-NODE.md.
+// GPUDevice is one parsed nvidia-smi device line: the index/uuid/name
+// nvidia-smi itself reports plus its GiB memory figures. JSON tags match the
+// gpu_devices[] shape documented in docs/FLEET-NODE.md. UUID is what
+// primary_gpu_uuid pins against (config.Config.PrimaryGPUUUID /
+// SelectHeadlineDevice) — an operator reads it straight off a running node's
+// /fleet/health gpu_devices[] to fill that config key in.
 type GPUDevice struct {
 	Index    int     `json:"index"`
+	UUID     string  `json:"uuid"`
 	Name     string  `json:"name"`
 	TotalGiB float64 `json:"vram_total_gb"`
 	FreeGiB  float64 `json:"vram_free_gb"`
 }
 
-// ParseSmiMemoryDevices parses `nvidia-smi --query-gpu=index,name,memory.total,
-// memory.used --format=csv,noheader,nounits` output — one line per GPU, e.g.
-// "0, NVIDIA GeForce RTX 5060 Ti, 16311, 867" — into an ordered []GPUDevice
-// (nvidia-smi's own enumeration order, i.e. PCI bus order; NOT necessarily
-// CUDA device order — see HeadlineDevice's doc comment for why that
-// distinction is the whole bug this parser exists to fix). This is the
-// devices-aware sibling of ParseSmiMemory: that function is kept unchanged
-// (first-line-wins, 2-field CSV) because it has a caller outside the
-// snapshot/health path (the pipeline's per-process footprint delta sampler),
-// so its behavior cannot change out from under that caller. This is a
-// separate function over a separate (4-field) query instead.
+// ParseSmiMemoryDevices parses `nvidia-smi --query-gpu=index,uuid,name,
+// memory.total,memory.used --format=csv,noheader,nounits` output — one line
+// per GPU, e.g. "0, GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97, NVIDIA GeForce
+// RTX 5060 Ti, 16311, 867" — into an ordered []GPUDevice (nvidia-smi's own
+// enumeration order, i.e. PCI bus order; NOT necessarily CUDA device order —
+// see HeadlineDevice's doc comment for why that distinction is the whole bug
+// this parser exists to fix, and SelectHeadlineDevice/primary_gpu_uuid for
+// the deterministic override). This is the devices-aware sibling of
+// ParseSmiMemory: that function is kept unchanged (first-line-wins, 2-field
+// CSV) because it has a caller outside the snapshot/health path (the
+// pipeline's per-process footprint delta sampler), so its behavior cannot
+// change out from under that caller. This is a separate function over a
+// separate (5-field) query instead.
 //
 // CRLF and surrounding whitespace are tolerated (nvidia-smi emits \r\n on
-// Windows). Blank lines and lines that don't parse as "index, name, total,
-// used" are SKIPPED rather than failing the whole probe — a single
+// Windows). Blank lines and lines that don't parse as "index, uuid, name,
+// total, used" are SKIPPED rather than failing the whole probe — a single
 // garbled/partial row (a transient nvidia-smi hiccup) must not take down
 // every other card's reading. A line whose total is <= 0 or whose used is
 // negative is likewise skipped (not a working GPU line). If NO line parses
@@ -92,19 +99,20 @@ func ParseSmiMemoryDevices(out string) ([]GPUDevice, error) {
 			continue
 		}
 		fields := strings.Split(line, ",")
-		if len(fields) != 4 {
+		if len(fields) != 5 {
 			continue
 		}
 		idx, err := strconv.Atoi(strings.TrimSpace(fields[0]))
 		if err != nil {
 			continue
 		}
-		name := strings.TrimSpace(fields[1])
-		totalMiB, err := strconv.ParseFloat(strings.TrimSpace(fields[2]), 64)
+		uuid := strings.TrimSpace(fields[1])
+		name := strings.TrimSpace(fields[2])
+		totalMiB, err := strconv.ParseFloat(strings.TrimSpace(fields[3]), 64)
 		if err != nil {
 			continue
 		}
-		usedMiB, err := strconv.ParseFloat(strings.TrimSpace(fields[3]), 64)
+		usedMiB, err := strconv.ParseFloat(strings.TrimSpace(fields[4]), 64)
 		if err != nil {
 			continue
 		}
@@ -117,6 +125,7 @@ func ParseSmiMemoryDevices(out string) ([]GPUDevice, error) {
 		}
 		devices = append(devices, GPUDevice{
 			Index:    idx,
+			UUID:     uuid,
 			Name:     name,
 			TotalGiB: totalMiB / 1024,
 			FreeGiB:  freeMiB / 1024,
@@ -160,6 +169,13 @@ func ParseSmiMemoryDevices(out string) ([]GPUDevice, error) {
 //
 // devices must be non-empty — callers only reach this after a successful
 // parse, which never returns an empty slice.
+//
+// This is the FALLBACK rule — SelectHeadlineDevice applies it only when no
+// primary_gpu_uuid is pinned (or the pinned UUID isn't present), because
+// total VRAM alone cannot reliably identify "the" card either: two
+// same-SKU-size cards can be a near-tie (16311 vs 16303 MiB on qube) that this
+// rule breaks by raw capacity, not by which one is actually doing the compute
+// work.
 func HeadlineDevice(devices []GPUDevice) GPUDevice {
 	head := devices[0]
 	for _, d := range devices[1:] {
@@ -168,6 +184,47 @@ func HeadlineDevice(devices []GPUDevice) GPUDevice {
 		}
 	}
 	return head
+}
+
+// SelectHeadlineDevice is the full headline-selection rule the health sampler
+// uses: an operator-pinned primary_gpu_uuid (config.Config.PrimaryGPUUUID)
+// takes priority over HeadlineDevice's largest-total heuristic, because UUID
+// is the ONLY identifier this codebase can rely on across a reboot/reseat.
+// Canonical guidance (CMP tier notes): pin by GPU UUID, NEVER index —
+// verified live on qube 2026-08-04: nvidia-smi's own index 0 is the RTX 5060
+// Ti, but ComfyUI's CUDA ordering (CUDA_DEVICE_ORDER=FASTEST_FIRST) binds
+// cuda:0 to the RTX 5070 Ti at index 1, and the two cards can't be told apart
+// by total VRAM either (16311 vs 16303 MiB — HeadlineDevice's rule picks
+// whichever has 8 MiB more, not whichever is faster). A UUID survives all of
+// that: it is burned into the card, unaffected by enumeration order, CUDA
+// ordering, or which PCI slot it's currently seated in.
+//
+// Behavior:
+//   - primaryUUID == "": HeadlineDevice(devices), no warning — today's
+//     behavior, byte-identical.
+//   - primaryUUID set and found among devices: that device wins outright,
+//     regardless of its total/free VRAM — no warning.
+//   - primaryUUID set but NOT found (typo, or the pinned card is actually
+//     gone): falls back to HeadlineDevice(devices), AND returns a non-empty
+//     warning naming the missing UUID. A silent fallback here would hide a
+//     typo'd config (or a genuinely missing card) forever, which is worse
+//     than the original enumeration-order bug this whole file fixes — at
+//     least that one was consistently wrong in a discoverable way. The
+//     caller (Sampler.sampleDevices) is responsible for actually emitting
+//     the warning (once, not once per 2s tick) — this function stays pure
+//     and side-effect-free so it's trivially unit-testable.
+//
+// devices must be non-empty, same precondition as HeadlineDevice.
+func SelectHeadlineDevice(devices []GPUDevice, primaryUUID string) (head GPUDevice, warning string) {
+	if primaryUUID != "" {
+		for _, d := range devices {
+			if d.UUID == primaryUUID {
+				return d, ""
+			}
+		}
+		warning = fmt.Sprintf("primary_gpu_uuid %q not found among %d parsed GPU device(s) — falling back to the largest-total-VRAM rule; check for a typo, or a card that was removed/replaced", primaryUUID, len(devices))
+	}
+	return HeadlineDevice(devices), warning
 }
 
 // Snapshot is the cached global VRAM state /fleet/health reads. GiB = 2^30,
@@ -191,6 +248,15 @@ type Snapshot struct {
 // handler never blocks on (or spawns) nvidia-smi.
 type Sampler struct {
 	snap atomic.Value // Snapshot
+	// primaryGPUUUID and warnedMissingUUID back SelectHeadlineDevice's UUID
+	// pin for the devices-aware path (sampleDevices/StartDeviceProbeSampler)
+	// only; the plain MemProbe path (sample/StartProbeSampler) never touches
+	// them. Both fields are read/written ONLY from sampleDevices, which runs
+	// on a single-goroutine timeline (one synchronous call, then serialized
+	// ticks — see runSamplerLoop), so no lock/atomic is needed here even
+	// though snap itself is atomic.
+	primaryGPUUUID    string
+	warnedMissingUUID bool
 }
 
 // Load returns the latest snapshot. ok is false until a sample has succeeded —
@@ -220,13 +286,21 @@ func (s *Sampler) sample(probe MemProbe) {
 
 // sampleDevices is sample's devices-aware sibling: it publishes the FULL
 // per-device breakdown alongside a headline TotalGiB/FreeGiB derived by
-// HeadlineDevice (the largest-total device), never by enumeration order.
+// SelectHeadlineDevice — s.primaryGPUUUID when pinned and present, else
+// HeadlineDevice's largest-total rule, never raw enumeration order. A missing
+// pinned UUID logs ONE stderr warning for the process lifetime (not one per
+// 2s tick — warnedMissingUUID latches after the first) naming the UUID, so a
+// typo'd config is loud once rather than either silent or a spam flood.
 func (s *Sampler) sampleDevices(probe DeviceProbe) {
 	devices, err := probe()
 	if err != nil {
 		return // keep the last good snapshot — never publish a bad probe
 	}
-	head := HeadlineDevice(devices)
+	head, warning := SelectHeadlineDevice(devices, s.primaryGPUUUID)
+	if warning != "" && !s.warnedMissingUUID {
+		fmt.Fprintf(os.Stderr, "[fleet-serve] warning: %s\n", warning)
+		s.warnedMissingUUID = true
+	}
 	s.snap.Store(Snapshot{TotalGiB: head.TotalGiB, FreeGiB: head.FreeGiB, Devices: devices, At: time.Now()})
 }
 
@@ -273,13 +347,18 @@ func StartProbeSampler(ctx context.Context, interval time.Duration, probe MemPro
 
 // StartDeviceProbeSampler is StartProbeSampler's devices-aware sibling: same
 // sync-then-tick contract, but over a DeviceProbe, publishing the full
-// per-device breakdown (Snapshot.Devices) alongside a HeadlineDevice-derived
-// TotalGiB/FreeGiB. Used for the nvidia-smi multi-device source; the
-// windows-generic source has no per-device signal (vram_windows.go) and stays
-// on StartProbeSampler, so its Snapshot.Devices is always nil — exactly
-// today's single-number behavior.
-func StartDeviceProbeSampler(ctx context.Context, interval time.Duration, probe DeviceProbe) *Sampler {
-	s := &Sampler{}
+// per-device breakdown (Snapshot.Devices) alongside a SelectHeadlineDevice-
+// derived TotalGiB/FreeGiB — primaryGPUUUID (config.Config.PrimaryGPUUUID,
+// "" = disabled) pins the headline to one card by UUID, overriding the
+// largest-total fallback; see SelectHeadlineDevice's doc comment for the full
+// rule and why UUID (not index, not total VRAM) is the only stable pin. Used
+// for the nvidia-smi multi-device source; the windows-generic source has no
+// per-device signal (vram_windows.go) and stays on StartProbeSampler, so its
+// Snapshot.Devices is always nil — exactly today's single-number behavior,
+// and a primaryGPUUUID has no effect there (there is nothing to match it
+// against).
+func StartDeviceProbeSampler(ctx context.Context, interval time.Duration, probe DeviceProbe, primaryGPUUUID string) *Sampler {
+	s := &Sampler{primaryGPUUUID: primaryGPUUUID}
 	runSamplerLoop(ctx, interval, func() { s.sampleDevices(probe) })
 	return s
 }

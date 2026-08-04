@@ -534,6 +534,25 @@ type Config struct {
 	// (force the Dedicated tree sampler), "global" (force global-delta — set this when
 	// the FLEET-NODE.md Afterburner validation shows PDH disagreeing >15%).
 	FleetSampler string `json:"fleet_sampler,omitempty"`
+	// PrimaryGPUUUID pins /fleet/health's headline vram_total_gb/vram_free_gb to
+	// ONE specific card by its stable nvidia-smi UUID, overriding the default
+	// largest-total-VRAM rule (fleetnode.HeadlineDevice). Canonical guidance
+	// (CMP tier notes): pin by GPU UUID, NEVER index — nvidia-smi's own
+	// enumeration index, CUDA's device order (CUDA_DEVICE_ORDER=FASTEST_FIRST),
+	// and raw total VRAM can all disagree about which card is "the" compute
+	// card, and cards can change PCI slots across a reboot/reseat (verified
+	// live on qube: nvidia-smi index 0 is the RTX 5060 Ti while ComfyUI's CUDA
+	// ordering binds cuda:0 to the RTX 5070 Ti at index 1; the two cards also
+	// can't be told apart by total VRAM — 16311 vs 16303 MiB, a same-SKU-size
+	// near-tie). The UUID is the only identifier stable across all of that.
+	// Read the UUIDs straight off a running node's /fleet/health gpu_devices[]
+	// to fill this in. "" (default) = the largest-total rule, unchanged. Set
+	// but not found among the parsed devices = the same fallback PLUS one
+	// stderr warning (never a silent revert to guessing — that would hide a
+	// typo'd UUID or an actually-removed card forever). No effect on a
+	// single-GPU or windows-generic node (nothing to pin against / no
+	// per-device signal to match on).
+	PrimaryGPUUUID string `json:"primary_gpu_uuid,omitempty"`
 	// --- config-driven pipeline jobs (Task 4: fleet-node "pipeline job" task family) ---
 	// Pipelines maps a task_type name (e.g. "scene-swap") to the externally-
 	// provided CLI that serves it — see PipelineSpec. Empty/nil = this box
@@ -686,6 +705,7 @@ func Default() Config {
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
 		FleetSampler:                  "auto",            // auto|pdh|pdh-shared|global (FLEET-NODE.md)
+		PrimaryGPUUUID:                "",                // "" = largest-total headline rule; set to pin by UUID (FLEET-NODE.md)
 		Pipelines:                     nil,               // empty = no pipeline-job routes on this box (opt-in per pipeline)
 	}
 }

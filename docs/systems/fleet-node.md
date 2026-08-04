@@ -87,19 +87,27 @@ Dedicated+Shared usage) — a global sampler polling every two seconds either wa
 per-process path here. A sampling failure keeps the last good snapshot rather than publishing
 zeros, bounded by the 30-second staleness gate.
 
-**Multi-GPU:** a working `nvidia-smi` node runs a per-device query (`index,name,memory.total,
+**Multi-GPU:** a working `nvidia-smi` node runs a per-device query (`index,uuid,name,memory.total,
 memory.used`, one line per GPU — `nvidiaSmiMemoryDevices`/`fleetnode.ParseSmiMemoryDevices`) on
 that same 2-second sampler instead of the single-value query, and publishes the full breakdown as
 `gpu_devices[]` in health (additive; omitted on single-GPU/windows-generic nodes, which have no
 per-adapter signal). The headline `vram_total_gb`/`vram_free_gb` pair is picked by
-`fleetnode.HeadlineDevice`: the device with the **largest total VRAM** (ties broken by more free
-VRAM) — never nvidia-smi's own line order, which is PCI bus order and has no relationship to which
-device a CUDA app actually computes on (`CUDA_DEVICE_ORDER=FASTEST_FIRST` can bind `cuda:0` to a
-different index). This is the fix for a real mis-report found live on a 2×16 GiB Blackwell box: the
-donor card (nvidia-smi index 0) was being advertised as the fleet's free VRAM while renders ran on
-the compute card at index 1, which could over-admit a second job that then contends or OOMs.
-`ParseSmiMemory` (2-field, first-line) itself is left unchanged — it has a caller outside this path
-(the per-process footprint delta sampler below) that must not silently change behavior.
+`fleetnode.SelectHeadlineDevice`: the config-pinned `primary_gpu_uuid` card when set and present,
+else `fleetnode.HeadlineDevice`'s fallback — the device with the **largest total VRAM** (ties
+broken by more free VRAM) — never nvidia-smi's own line order, which is PCI bus order and has no
+relationship to which device a CUDA app actually computes on (`CUDA_DEVICE_ORDER=FASTEST_FIRST` can
+bind `cuda:0` to a different index). This is the fix for a real mis-report found live on a 2×16 GiB
+Blackwell box (qube): the donor card (nvidia-smi index 0, the RTX 5060 Ti) was being advertised as
+the fleet's free VRAM while renders ran on the compute card at index 1 (the RTX 5070 Ti), which
+could over-admit a second job that then contends or OOMs — and because the two cards are a
+near-tie in total VRAM (16311 vs 16303 MiB), even the largest-total fallback still headlines the
+wrong one there. **Canonical guidance (CMP tier notes): pin by GPU UUID, never index** —
+`primary_gpu_uuid` is the deterministic fix for exactly this case; a UUID is stable across reboots,
+reseats, and whatever order nvidia-smi or CUDA choose to enumerate in. A pinned-but-not-found UUID
+falls back to the largest-total rule and logs one stderr warning (never silent — a typo'd UUID
+must not quietly revert to guessing forever). `ParseSmiMemory` (2-field, first-line) itself is left
+unchanged — it has a caller outside this path (the per-process footprint delta sampler below) that
+must not silently change behavior.
 
 **Per-render footprints** use **per-process PDH counters as primary**, with a global-delta sampler as
 fallback. On Windows the sampler reads `\GPU Process Memory(*)\Dedicated Usage`, enumerates
