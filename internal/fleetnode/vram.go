@@ -53,12 +53,138 @@ func ParseSmiMemory(out string) (totalGiB, usedGiB float64, err error) {
 	return totalMiB / 1024, usedMiB / 1024, nil
 }
 
+// GPUDevice is one parsed nvidia-smi device line: the index/name nvidia-smi
+// itself reports plus its GiB memory figures. JSON tags match the
+// gpu_devices[] shape documented in docs/FLEET-NODE.md.
+type GPUDevice struct {
+	Index    int     `json:"index"`
+	Name     string  `json:"name"`
+	TotalGiB float64 `json:"vram_total_gb"`
+	FreeGiB  float64 `json:"vram_free_gb"`
+}
+
+// ParseSmiMemoryDevices parses `nvidia-smi --query-gpu=index,name,memory.total,
+// memory.used --format=csv,noheader,nounits` output — one line per GPU, e.g.
+// "0, NVIDIA GeForce RTX 5060 Ti, 16311, 867" — into an ordered []GPUDevice
+// (nvidia-smi's own enumeration order, i.e. PCI bus order; NOT necessarily
+// CUDA device order — see HeadlineDevice's doc comment for why that
+// distinction is the whole bug this parser exists to fix). This is the
+// devices-aware sibling of ParseSmiMemory: that function is kept unchanged
+// (first-line-wins, 2-field CSV) because it has a caller outside the
+// snapshot/health path (the pipeline's per-process footprint delta sampler),
+// so its behavior cannot change out from under that caller. This is a
+// separate function over a separate (4-field) query instead.
+//
+// CRLF and surrounding whitespace are tolerated (nvidia-smi emits \r\n on
+// Windows). Blank lines and lines that don't parse as "index, name, total,
+// used" are SKIPPED rather than failing the whole probe — a single
+// garbled/partial row (a transient nvidia-smi hiccup) must not take down
+// every other card's reading. A line whose total is <= 0 or whose used is
+// negative is likewise skipped (not a working GPU line). If NO line parses
+// into a valid device, that IS an error: the contract treats vram_total_gb
+// <= 0 as a failed probe, so a would-be zero-device snapshot must never reach
+// the caller as success.
+func ParseSmiMemoryDevices(out string) ([]GPUDevice, error) {
+	var devices []GPUDevice
+	for _, rawLine := range strings.Split(out, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, ",")
+		if len(fields) != 4 {
+			continue
+		}
+		idx, err := strconv.Atoi(strings.TrimSpace(fields[0]))
+		if err != nil {
+			continue
+		}
+		name := strings.TrimSpace(fields[1])
+		totalMiB, err := strconv.ParseFloat(strings.TrimSpace(fields[2]), 64)
+		if err != nil {
+			continue
+		}
+		usedMiB, err := strconv.ParseFloat(strings.TrimSpace(fields[3]), 64)
+		if err != nil {
+			continue
+		}
+		if totalMiB <= 0 || usedMiB < 0 {
+			continue
+		}
+		freeMiB := totalMiB - usedMiB
+		if freeMiB < 0 {
+			freeMiB = 0
+		}
+		devices = append(devices, GPUDevice{
+			Index:    idx,
+			Name:     name,
+			TotalGiB: totalMiB / 1024,
+			FreeGiB:  freeMiB / 1024,
+		})
+	}
+	if len(devices) == 0 {
+		return nil, fmt.Errorf("nvidia-smi multi-device memory query: no valid GPU lines parsed (contract: vram_total_gb <= 0 = failed probe)")
+	}
+	return devices, nil
+}
+
+// HeadlineDevice picks which parsed device the health payload's single
+// vram_total_gb/vram_free_gb pair describes. A single render job binds to
+// exactly ONE CUDA device — so the admission-relevant number is the biggest
+// device a job could actually land on, never an arbitrary enumeration index.
+// That distinction is the whole bug this fixes: nvidia-smi enumerates in PCI
+// bus order, which has no relationship to which device a CUDA app actually
+// computes on (CUDA_DEVICE_ORDER=FASTEST_FIRST can bind cuda:0 to nvidia-smi
+// index 1) — "index 0 wins" was an artifact of enumeration order dressed up
+// as a measurement, and it silently mis-sizes admission whenever the compute
+// card isn't index 0.
+//
+// Rule: the device with the LARGEST TotalGiB wins. An exact tie in total is
+// broken by whichever has more FreeGiB right now (more headroom to admit a
+// job against). This is deliberately NOT a sum across devices — summing free
+// VRAM would let the dispatcher admit a job that no single card can actually
+// hold, since a render binds to one device, not the fleet of them combined.
+//
+// Documented limitation: on a box with two near-identical-capacity cards
+// (see TestParseSmiMemoryDevices_NodeBShape: 16311 MiB vs 16303 MiB total, an
+// 8 MiB gap from per-SKU driver/firmware reserve, not a real capacity
+// difference), this rule has no way to know which index a CUDA app's device
+// -order policy will actually pick — nvidia-smi carries no such signal. It
+// picks the device with more raw capacity, which is a defensible,
+// deterministic, non-arbitrary choice, but is NOT guaranteed to be "the
+// compute card" on near-twin hardware. The full per-device breakdown in
+// Snapshot.Devices / the health payload's gpu_devices[] exists precisely so
+// a caller that needs to reason about this edge case (or a smarter
+// dispatcher) has the real numbers for every card, not just the headline
+// guess.
+//
+// devices must be non-empty — callers only reach this after a successful
+// parse, which never returns an empty slice.
+func HeadlineDevice(devices []GPUDevice) GPUDevice {
+	head := devices[0]
+	for _, d := range devices[1:] {
+		if d.TotalGiB > head.TotalGiB || (d.TotalGiB == head.TotalGiB && d.FreeGiB > head.FreeGiB) {
+			head = d
+		}
+	}
+	return head
+}
+
 // Snapshot is the cached global VRAM state /fleet/health reads. GiB = 2^30,
 // per the contract.
 type Snapshot struct {
 	TotalGiB float64
 	FreeGiB  float64
-	At       time.Time
+	// Devices is the full per-device breakdown (nvidia-smi multi-device
+	// source only, in nvidia-smi's own enumeration order — see
+	// ParseSmiMemoryDevices/HeadlineDevice). Nil when the source cannot
+	// enumerate devices (windows-generic, or any plain single-value MemProbe
+	// source): TotalGiB/FreeGiB alone describe that box exactly as they did
+	// before this field existed, and a nil/empty Devices is never itself an
+	// error condition — additive only, per ADR-style compatibility with every
+	// existing single-GPU node.
+	Devices []GPUDevice
+	At      time.Time
 }
 
 // Sampler publishes the latest good Snapshot via an atomic.Value so the health
@@ -92,6 +218,38 @@ func (s *Sampler) sample(probe MemProbe) {
 	s.snap.Store(Snapshot{TotalGiB: total, FreeGiB: free, At: time.Now()})
 }
 
+// sampleDevices is sample's devices-aware sibling: it publishes the FULL
+// per-device breakdown alongside a headline TotalGiB/FreeGiB derived by
+// HeadlineDevice (the largest-total device), never by enumeration order.
+func (s *Sampler) sampleDevices(probe DeviceProbe) {
+	devices, err := probe()
+	if err != nil {
+		return // keep the last good snapshot — never publish a bad probe
+	}
+	head := HeadlineDevice(devices)
+	s.snap.Store(Snapshot{TotalGiB: head.TotalGiB, FreeGiB: head.FreeGiB, Devices: devices, At: time.Now()})
+}
+
+// runSamplerLoop is the shared scaffolding both StartProbeSampler and
+// StartDeviceProbeSampler ride: sample once synchronously (so a successful
+// probe is Load-able the moment the caller returns), then keep resampling on
+// interval until ctx is done.
+func runSamplerLoop(ctx context.Context, interval time.Duration, sampleOnce func()) {
+	sampleOnce()
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				sampleOnce()
+			}
+		}
+	}()
+}
+
 // StartGlobalSampler samples run() (an injected nvidia-smi invocation) once
 // synchronously, then keeps refreshing — kept as the nvidia-smi convenience
 // wrapper over StartProbeSampler (J3 made the memory SOURCE a provider; this
@@ -109,18 +267,19 @@ func StartGlobalSampler(ctx context.Context, interval time.Duration, run func() 
 // serve hours-stale 200s.
 func StartProbeSampler(ctx context.Context, interval time.Duration, probe MemProbe) *Sampler {
 	s := &Sampler{}
-	s.sample(probe)
-	go func() {
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				s.sample(probe)
-			}
-		}
-	}()
+	runSamplerLoop(ctx, interval, func() { s.sample(probe) })
+	return s
+}
+
+// StartDeviceProbeSampler is StartProbeSampler's devices-aware sibling: same
+// sync-then-tick contract, but over a DeviceProbe, publishing the full
+// per-device breakdown (Snapshot.Devices) alongside a HeadlineDevice-derived
+// TotalGiB/FreeGiB. Used for the nvidia-smi multi-device source; the
+// windows-generic source has no per-device signal (vram_windows.go) and stays
+// on StartProbeSampler, so its Snapshot.Devices is always nil — exactly
+// today's single-number behavior.
+func StartDeviceProbeSampler(ctx context.Context, interval time.Duration, probe DeviceProbe) *Sampler {
+	s := &Sampler{}
+	runSamplerLoop(ctx, interval, func() { s.sampleDevices(probe) })
 	return s
 }
