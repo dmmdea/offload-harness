@@ -19,9 +19,9 @@
 package gpugen
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -179,22 +179,29 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 		defer freeComfyVRAM(comfyAPI(spec.ComfyAPI))
 	}
 
+	// tw bounds BOTH capture sites below to tailWriterCap (Fix: SP3 follow-up
+	// review) — previously cmd.CombinedOutput() (legacy path) and runSampled's
+	// bytes.Buffer each accumulated the child's ENTIRE stdout+stderr in RAM;
+	// tail(o, 400) truncated only at error-FORMAT time, never at capture time,
+	// so a runaway child could balloon memory over the whole timeout_sec
+	// window before that truncation ever ran.
+	tw := newTailWriter(tailWriterCap)
 	var (
-		o    []byte
 		err  error
 		peak float64
 	)
 	if spec.Footprint == nil {
-		// Legacy path — byte-identical to the pre-footprint behavior.
-		o, err = cmd.CombinedOutput()
+		// Legacy path — byte-identical to the pre-tailWriter behavior for any
+		// output under the cap (which is every real case tail(o,400) cares about).
+		err = runCombined(cmd, tw)
 	} else {
-		o, peak, err = runSampled(cmd, spec.SampleFunc)
+		peak, err = runSampled(cmd, tw, spec.SampleFunc)
 	}
 	if err != nil {
-		return "", fmt.Errorf("gpugen: %s failed: %w (%s)", baseName(spec.Script), err, tail(o, 400))
+		return "", fmt.Errorf("gpugen: %s failed: %w (%s)", baseName(spec.Script), err, tailDetail(tw))
 	}
 	if fi, statErr := os.Stat(spec.Out); statErr != nil || fi.Size() == 0 {
-		return "", fmt.Errorf("gpugen: no output at %q (%s)", spec.Out, tail(o, 400))
+		return "", fmt.Errorf("gpugen: no output at %q (%s)", spec.Out, tailDetail(tw))
 	}
 	// SUCCESS only: a failed/phantom run's peak may be partial, so it never records.
 	if spec.Footprint != nil && spec.OnFootprint != nil && peak > 0 {
@@ -203,17 +210,42 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 	return spec.Out, nil
 }
 
-// runSampled runs cmd like CombinedOutput (one merged stdout+stderr buffer) but via
+// tailDetail formats a tailWriter's captured output for embedding in a gpugen
+// error message: the last 400 bytes of whatever it retained (matching the
+// pre-existing tail() truncation every error message already used — under
+// the cap this is BYTE-IDENTICAL to the old cmd.CombinedOutput()/bytes.Buffer
+// behavior), prefixed with a total-bytes marker on the rare path where the
+// writer itself had to drop earlier data (total written > its capacity).
+func tailDetail(tw *tailWriter) string {
+	d := tail(tw.Contents(), 400)
+	if tw.Truncated() {
+		return fmt.Sprintf("truncated: total %d bytes; tail: %s", tw.Total(), d)
+	}
+	return d
+}
+
+// runCombined runs cmd with both stdout and stderr merged into w — the
+// bounded-capture replacement for cmd.CombinedOutput() (which used its own
+// unbounded internal buffer). This is the "legacy/CombinedOutput-style" call
+// site the SP3 follow-up review named explicitly.
+func runCombined(cmd *exec.Cmd, w io.Writer) error {
+	cmd.Stdout = w
+	cmd.Stderr = w
+	return cmd.Run()
+}
+
+// runSampled runs cmd like runCombined (one merged stdout+stderr writer) but via
 // Start/Wait so a sampler can poll sample(childPid) while the child is alive: one
 // immediate sample (a fast child still gets observed), then every
-// footprintSampleInterval. Returns the merged output, the peak observation, and the
-// child's error. sample==nil degrades to a plain Start/Wait (peak 0).
-func runSampled(cmd *exec.Cmd, sample func(childPid int) (float64, error)) ([]byte, float64, error) {
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
+// footprintSampleInterval. w receives the child's merged output (the bounded-
+// capture replacement for this function's own former bytes.Buffer — the SP3
+// follow-up review's second named call site). Returns the peak observation and
+// the child's error. sample==nil degrades to a plain Start/Wait (peak 0).
+func runSampled(cmd *exec.Cmd, w io.Writer, sample func(childPid int) (float64, error)) (float64, error) {
+	cmd.Stdout = w
+	cmd.Stderr = w
 	if err := cmd.Start(); err != nil {
-		return buf.Bytes(), 0, err
+		return 0, err
 	}
 	var (
 		peak float64
@@ -242,7 +274,7 @@ func runSampled(cmd *exec.Cmd, sample func(childPid int) (float64, error)) ([]by
 	err := cmd.Wait()
 	close(done)
 	wg.Wait() // happens-before: peak is safely visible after the sampler exits
-	return buf.Bytes(), peak, err
+	return peak, err
 }
 
 // killTree force-terminates p and ALL descendants. On Windows, killing the bare node
