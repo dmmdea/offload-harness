@@ -203,6 +203,28 @@ func TestSelectHeadlineDevice_PinnedUUIDOnSingleGPUBox(t *testing.T) {
 	}
 }
 
+// TestSelectHeadlineDevice_CaseInsensitiveUUIDMatch locks the second half of
+// the copy-paste safety net (the first half, whitespace trimming, is
+// config.Load's job — internal/config/config_test.go
+// TestLoadTrimsPrimaryGPUUUID). nvidia-smi emits UUIDs lowercase, but not
+// every tool an operator might copy one from does — a differently-cased but
+// otherwise identical UUID must still match, not silently fall back with a
+// warning.
+func TestSelectHeadlineDevice_CaseInsensitiveUUIDMatch(t *testing.T) {
+	devices := []GPUDevice{
+		{Index: 0, UUID: qube5060TiUUID, Name: "RTX 5060 Ti", TotalGiB: 16311.0 / 1024, FreeGiB: 15},
+		{Index: 1, UUID: qube5070TiUUID, Name: "RTX 5070 Ti", TotalGiB: 16303.0 / 1024, FreeGiB: 13},
+	}
+	uppered := strings.ToUpper(qube5070TiUUID)
+	head, warning := SelectHeadlineDevice(devices, uppered)
+	if warning != "" {
+		t.Fatalf("warning = %q, want none — %q should case-insensitively match %q", warning, uppered, qube5070TiUUID)
+	}
+	if head.Index != 1 || head.UUID != qube5070TiUUID {
+		t.Fatalf("SelectHeadlineDevice = %+v, want the pinned 5070 Ti (case-insensitive match)", head)
+	}
+}
+
 // TestParseSmiMemoryDevicesSingleLine is the regression guard: a single
 // device line behaves exactly like today's single-GPU box — one device,
 // headline == that device.
@@ -255,6 +277,33 @@ func TestParseSmiMemoryDevicesAllInvalidIsError(t *testing.T) {
 		if _, err := ParseSmiMemoryDevices(in); err == nil {
 			t.Errorf("ParseSmiMemoryDevices(%q) = nil error, want error (no valid device lines)", in)
 		}
+	}
+}
+
+// TestParseSmiMemoryDevicesUsedExceedsTotalSkipped locks the corruption guard:
+// a device line reporting more used than total memory is impossible for a
+// real card and must be SKIPPED — not clamped to 0 free and published as if
+// it were a legitimate "card is full" reading. A skipped device must not take
+// down its neighbors on the same box (mirrors the malformed-line contract).
+func TestParseSmiMemoryDevicesUsedExceedsTotalSkipped(t *testing.T) {
+	in := "0, " + qube5060TiUUID + ", NVIDIA GeForce RTX 5060 Ti, 16311, 867\n" + // valid
+		"1, " + qube5070TiUUID + ", NVIDIA GeForce RTX 5070 Ti, 16303, 99999\n" // used > total: corrupt
+	devices, err := ParseSmiMemoryDevices(in)
+	if err != nil {
+		t.Fatalf("ParseSmiMemoryDevices: %v", err)
+	}
+	if len(devices) != 1 {
+		t.Fatalf("got %d devices, want 1 (the used>total line must be skipped, not clamped): %+v", len(devices), devices)
+	}
+	if devices[0].Index != 0 {
+		t.Fatalf("surviving device = %+v, want the valid index-0 line", devices[0])
+	}
+
+	// If EVERY line is used>total, that is zero valid devices — same failed-
+	// probe contract as any other all-invalid input.
+	allBad := "0, " + qube5060TiUUID + ", GPU, 100, 200\n1, " + qube5070TiUUID + ", GPU, 50, 999\n"
+	if _, err := ParseSmiMemoryDevices(allBad); err == nil {
+		t.Errorf("ParseSmiMemoryDevices(all used>total) = nil error, want error (no valid device lines)")
 	}
 }
 

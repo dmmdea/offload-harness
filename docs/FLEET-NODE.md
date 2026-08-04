@@ -41,7 +41,13 @@ failed — even mid-drain, since that's not new work. In-flight renders get up t
 
 ## Multi-GPU: `gpu_devices[]` and the headline VRAM numbers
 
-On a box with more than one NVIDIA GPU, `/fleet/health` adds a per-device breakdown:
+On any node whose VRAM source is `nvidia-smi`, `/fleet/health` always adds a per-device
+breakdown — **including a single-GPU box**, which reports a one-element array. There is no
+single-vs-multi-GPU special case: `gpu_devices[]` is present whenever nvidia-smi is the resolved
+source, full stop (`chooseSamplerKind` in `main.go`, unit-tested at that exact seam in
+`fleet_verbs_test.go`). It is **absent** only on a source that cannot enumerate devices at all —
+today, only the Windows PDH/windows-generic path (`vram_windows.go`), which has no per-adapter
+identity to report.
 
 ```json
 "vram_total_gb": 15.93, "vram_free_gb": 15.08,
@@ -52,8 +58,10 @@ On a box with more than one NVIDIA GPU, `/fleet/health` adds a per-device breakd
 ```
 
 `gpu_devices` is **additive** — `vram_total_gb`/`vram_free_gb` keep exactly the meaning they
-always had, and `gpu_devices` is omitted entirely (not an empty array) on a single-GPU node or
-the windows-generic source, which has no per-adapter signal to report.
+always had, and adding a new field breaks nothing on the consumer side in practice: the
+fleet-dispatcher decodes health with a plain `json.Decoder` (no `DisallowUnknownFields`
+anywhere in its `internal/`), so an extra field it doesn't know about is silently ignored, not a
+wire error, on any node — single-GPU included.
 
 **Why this exists:** `nvidia-smi` enumerates devices in PCI bus order — that order has no
 relationship to which device a render actually runs on. A CUDA app (ComfyUI included) can bind
@@ -94,12 +102,17 @@ ordering actually computes on the RTX 5070 Ti (index 1, verified via ComfyUI's o
 that is actually doing the work.
 
 Behavior: unset (`""`, the default) = the largest-total rule, unchanged. Set and found among the
-parsed devices = that device wins outright. **Set but not found** (typo, or the card was
+parsed devices = that device wins outright. The match is case-insensitive, and the config value
+is whitespace-trimmed at load — both matter because the UUID is meant to be copy-pasted straight
+out of `gpu_devices[]` above, and a copy can pick up a trailing newline or land in a different
+case than nvidia-smi's own lowercase output. **Set but not found** (typo, or the card was
 removed/reseated) = falls back to the largest-total rule **and** logs one
 `[fleet-serve] warning: primary_gpu_uuid "..." not found among N parsed GPU device(s)...` line to
 stderr (once per process lifetime, not once per 2s sampler tick) — a silent fallback would hide
-a typo'd UUID forever. No effect on a single-GPU node or the windows-generic source (nothing to
-disambiguate). Implementation: `fleetnode.SelectHeadlineDevice` in `internal/fleetnode/vram.go`.
+a typo'd UUID forever. No effect on a single-GPU node beyond confirming what's already true (its
+one `gpu_devices[]` entry is already the headline); no effect at all on the windows-generic
+source, which has no `gpu_devices[]` to match against. Implementation:
+`fleetnode.SelectHeadlineDevice` in `internal/fleetnode/vram.go`.
 
 ## Config keys
 
