@@ -295,6 +295,26 @@ func TestLoadExpandsTildeInEveryPathField(t *testing.T) {
 	}
 }
 
+// TestLoadTrimsPrimaryGPUUUID locks the copy-paste safety net for
+// primary_gpu_uuid (docs/FLEET-NODE.md tells an operator to copy this
+// straight out of a running node's /fleet/health gpu_devices[]): a value
+// picked up with surrounding whitespace (a trailing newline from a terminal
+// copy, a stray leading space) must be trimmed at Load — not left to silently
+// fail SelectHeadlineDevice's match and drop to the fallback rule + warning.
+func TestLoadTrimsPrimaryGPUUUID(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte(`{"primary_gpu_uuid": "  GPU-2a44210f-6739-2d89-0e21-44cd5143faf7\n"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PrimaryGPUUUID != "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7" {
+		t.Errorf("PrimaryGPUUUID = %q, want the whitespace trimmed off", got.PrimaryGPUUUID)
+	}
+}
+
 // pathFieldJSONNames returns the json key for each pathFields entry, in the
 // same order. Kept as an explicit list so a drift between the two enumerations
 // fails the length check above.

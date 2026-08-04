@@ -1552,12 +1552,70 @@ func runMCP(args []string) error {
 	return mcpserver.New(p).Run(context.Background(), version)
 }
 
-// nvidiaSmiMemory shells the global VRAM query (MiB CSV) that feeds both the
-// fleet-serve startup probe and the 2s health sampler; fleetnode.ParseSmiMemory
-// parses it.
+// nvidiaSmiMemory shells the global VRAM query (MiB CSV) that feeds the
+// fleet-serve startup GATE probe (ResolveProvider's "does nvidia-smi work at
+// all" check); fleetnode.ParseSmiMemory parses it. The ONGOING 2s health
+// sampler uses nvidiaSmiMemoryDevices instead (below) — a multi-GPU box needs
+// the per-device breakdown that query can't provide (2 fields, no index/name;
+// see ParseSmiMemory's doc comment for why this query/parser pair is frozen
+// rather than extended: the pipeline's per-process footprint delta sampler
+// also depends on this exact 2-field shape).
 func nvidiaSmiMemory() (string, error) {
 	out, err := exec.Command("nvidia-smi", "--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits").Output()
 	return string(out), err
+}
+
+// nvidiaSmiMemoryDevices shells the PER-DEVICE VRAM query (index, uuid, name,
+// memory.total, memory.used — MiB CSV, one line per GPU) that feeds the
+// fleet-serve 2s health sampler on a working nvidia-smi node;
+// fleetnode.ParseSmiMemoryDevices parses it. This is what actually fixes the
+// multi-GPU mis-report: nvidia-smi's own line order is PCI bus order, not
+// CUDA device order, so which line is "first" says nothing about which
+// device a render will actually use (fleetnode.HeadlineDevice picks the
+// headline device from the parsed set instead of trusting enumeration order,
+// and fleetnode.SelectHeadlineDevice lets an operator override that pick by
+// UUID via the primary_gpu_uuid config key — the uuid field is why it's in
+// this query at all: index/total-VRAM alone can't reliably identify a card
+// across a reboot or reseat, but the UUID is burned into it).
+func nvidiaSmiMemoryDevices() (string, error) {
+	out, err := exec.Command("nvidia-smi", "--query-gpu=index,uuid,name,memory.total,memory.used", "--format=csv,noheader,nounits").Output()
+	return string(out), err
+}
+
+// samplerKind is which VRAM sampler runFleetServe starts for a resolved
+// provider Source — the exact seam that decides whether /fleet/health's
+// gpu_devices[] is populated or omitted. Pulled out as its own type + pure
+// selection function (chooseSamplerKind, below) specifically so that claim is
+// unit-tested against the SAME decision runFleetServe ships (main_test.go),
+// not a hand-copied approximation of it — runFleetServe calls
+// chooseSamplerKind rather than re-implementing the branch inline.
+type samplerKind int
+
+const (
+	// samplerKindDevice runs the per-device nvidia-smi query
+	// (nvidiaSmiMemoryDevices/fleetnode.StartDeviceProbeSampler). gpu_devices[]
+	// is ALWAYS present on this path — including a single-GPU nvidia-smi box,
+	// which reports it with exactly one entry. There is no single-vs-multi-GPU
+	// special case anywhere in this file: nvidia-smi always gets this sampler.
+	samplerKindDevice samplerKind = iota
+	// samplerKindSingle runs the plain single-value MemProbe
+	// (fleetnode.StartProbeSampler) — today only the windows-generic source,
+	// which has no per-adapter identity to enumerate (vram_windows.go).
+	// gpu_devices[] is omitted (Snapshot.Devices stays nil) on this path.
+	samplerKindSingle
+)
+
+// chooseSamplerKind picks which sampler runFleetServe starts, given the
+// resolved GPU memory provider's Source ("nvidia-smi" | "windows-generic").
+// nvidia-smi always gets samplerKindDevice — a single-GPU nvidia-smi box is
+// NOT special-cased to the single-value sampler; it runs the per-device query
+// and /fleet/health reports gpu_devices[] with one entry, same as any other
+// nvidia-smi node. Every other source falls through to samplerKindSingle.
+func chooseSamplerKind(source string) samplerKind {
+	if source == "nvidia-smi" {
+		return samplerKindDevice
+	}
+	return samplerKindSingle
 }
 
 // gpuArchFromName maps an nvidia-smi product name to the architecture CLASS
@@ -1706,7 +1764,6 @@ func runFleetServe(args []string) error {
 	if perr != nil {
 		return fmt.Errorf("fleet-serve: %v — refusing to start: a node without a working GPU memory source cannot honor the fleet contract (vram_total_gb must be > 0)", perr)
 	}
-	total := prov.TotalGiB
 
 	// Same pipeline construction as the mcp verb, incl. the hot-reloader (this
 	// is a long-running server; nightly retrains must go live without a restart).
@@ -1721,7 +1778,37 @@ func runFleetServe(args []string) error {
 	ctx, stopSig := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stopSig()
 
-	sampler := fleetnode.StartProbeSampler(ctx, 2*time.Second, prov.Probe)
+	// Multi-GPU fix: on a working nvidia-smi node, the ONGOING health sampler
+	// runs the per-device query (nvidiaSmiMemoryDevices) so /fleet/health can
+	// report every card (gpu_devices[], ALWAYS present for nvidia-smi — including
+	// a single-GPU box, with one entry; no single-GPU special case) and headline
+	// either the operator-pinned primary_gpu_uuid card (cfg.PrimaryGPUUUID — the
+	// CMP tier notes' canonical "pin by UUID, never index" guidance) or, when
+	// unset/unmatched, the LARGEST one (fleetnode.HeadlineDevice) — never
+	// trusting nvidia-smi's PCI-bus-order "index 0". See vram.go's
+	// SelectHeadlineDevice/HeadlineDevice doc comments for why that distinction
+	// matters. windows-generic has no per-device signal (vram_windows.go), so it
+	// stays on the single-value sampler (gpu_devices[] omitted), and
+	// PrimaryGPUUUID has no effect there. chooseSamplerKind is the tested seam
+	// for this routing decision (fleet_verbs_test.go) — this switch is its only
+	// caller, so the tested logic is the shipped logic.
+	var sampler *fleetnode.Sampler
+	switch chooseSamplerKind(prov.Source) {
+	case samplerKindDevice:
+		sampler = fleetnode.StartDeviceProbeSampler(ctx, 2*time.Second, fleetnode.SmiDeviceProbe(nvidiaSmiMemoryDevices), cfg.PrimaryGPUUUID)
+	default:
+		sampler = fleetnode.StartProbeSampler(ctx, 2*time.Second, prov.Probe)
+	}
+	// total for the startup banner below: prefer the live sampler's headline
+	// reading (multi-device-aware) over prov.TotalGiB (the gate probe's
+	// single-value, first-line reading) so the banner never disagrees with
+	// what /fleet/health is about to advertise. Falls back to the gate
+	// reading only in the implausible case the sampler's own first sample
+	// (taken synchronously above) somehow isn't loadable yet.
+	total := prov.TotalGiB
+	if snap, ok := sampler.Load(); ok {
+		total = snap.TotalGiB
+	}
 	jobs := fleetnode.NewJobs(time.Hour)
 	// Reclaimable VRAM is sampled in the background (never from the health handler,
 	// which must not block on llama-swap) — see fleet_reclaim.go for why the idle
@@ -1754,8 +1841,12 @@ func runFleetServe(args []string) error {
 	if prov.Source == "windows-generic" {
 		umaLabel = fmt.Sprintf(", uma=%v(%s)", uma, umaSrc)
 	}
-	fmt.Fprintf(os.Stderr, "[fleet-serve] node %q serving /fleet on %s (%.1f GiB VRAM via %s, vendor=%s arch=%s%s; tasks: %s)\n",
-		nodeID, listen, total, prov.Source, prov.Vendor, prov.Arch, umaLabel, strings.Join(fleetnode.SupportedTasks(cfg), ", "))
+	devicesLabel := ""
+	if snap, ok := sampler.Load(); ok && len(snap.Devices) > 1 {
+		devicesLabel = fmt.Sprintf(", %d GPUs (headlining the largest)", len(snap.Devices))
+	}
+	fmt.Fprintf(os.Stderr, "[fleet-serve] node %q serving /fleet on %s (%.1f GiB VRAM via %s, vendor=%s arch=%s%s%s; tasks: %s)\n",
+		nodeID, listen, total, prov.Source, prov.Vendor, prov.Arch, umaLabel, devicesLabel, strings.Join(fleetnode.SupportedTasks(cfg), ", "))
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ln) }()

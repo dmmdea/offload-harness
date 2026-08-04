@@ -225,6 +225,65 @@ func TestHealthFreshSnapshotWithinBoundServes200(t *testing.T) {
 	}
 }
 
+// TestHealthIncludesGpuDevicesWhenPresent locks the wiring from
+// Snapshot.Devices to the health JSON's gpu_devices[] — the additive field
+// the multi-GPU fix adds. The headline vram_total_gb/vram_free_gb pair (16.3
+// / 13.8, matching the LARGER device) must NOT match the smaller card: it
+// proves handleHealth passes the snapshot through rather than re-deriving it.
+func TestHealthIncludesGpuDevicesWhenPresent(t *testing.T) {
+	opts := &Options{
+		NodeID: "n",
+		Snapshot: func() (Snapshot, bool) {
+			return Snapshot{
+				TotalGiB: 24.0,
+				FreeGiB:  22.0,
+				Devices: []GPUDevice{
+					{Index: 0, Name: "NVIDIA GeForce RTX 5060 Ti", TotalGiB: 16.0, FreeGiB: 15.0},
+					{Index: 1, Name: "NVIDIA GeForce RTX 3090", TotalGiB: 24.0, FreeGiB: 22.0},
+				},
+				At: time.Now(),
+			}, true
+		},
+	}
+	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, opts)
+	rec := do(t, s, http.MethodGet, "/fleet/health", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	m := decodeMap(t, rec)
+	devices, ok := m["gpu_devices"].([]any)
+	if !ok || len(devices) != 2 {
+		t.Fatalf("gpu_devices = %v, want a 2-entry array", m["gpu_devices"])
+	}
+	first, _ := devices[0].(map[string]any)
+	if first["index"] != float64(0) || first["name"] != "NVIDIA GeForce RTX 5060 Ti" || first["vram_total_gb"] != float64(16) {
+		t.Errorf("gpu_devices[0] = %+v", first)
+	}
+	second, _ := devices[1].(map[string]any)
+	if second["index"] != float64(1) || second["name"] != "NVIDIA GeForce RTX 3090" {
+		t.Errorf("gpu_devices[1] = %+v", second)
+	}
+	if m["vram_total_gb"] != float64(24) || m["vram_free_gb"] != float64(22) {
+		t.Fatalf("headline vram_total_gb/vram_free_gb = %v/%v, want the LARGER device's numbers (24/22), not the smaller card's", m["vram_total_gb"], m["vram_free_gb"])
+	}
+}
+
+// TestHealthOmitsGpuDevicesWhenAbsent locks the no-regression contract: a
+// single-source snapshot (windows-generic, or any node whose Devices is nil)
+// must OMIT the gpu_devices key entirely — not publish an empty array — so a
+// consumer can tell "no breakdown available" from "breakdown is empty".
+func TestHealthOmitsGpuDevicesWhenAbsent(t *testing.T) {
+	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, nil) // newTestServer's default Options uses goodSnapshot, whose Devices is nil
+	rec := do(t, s, http.MethodGet, "/fleet/health", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	m := decodeMap(t, rec)
+	if _, present := m["gpu_devices"]; present {
+		t.Fatalf("gpu_devices present when Snapshot.Devices is nil: %v", m["gpu_devices"])
+	}
+}
+
 func TestDispatchEchoExactness(t *testing.T) {
 	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, nil)
 	const id = "a3f9-XYZ_0123456789abcdef.fleet~job"
