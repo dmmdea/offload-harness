@@ -581,6 +581,17 @@ func TestPipelinesLoadValidation(t *testing.T) {
 				`"timeout_sec":60,"artifacts":["sub\\final.png"]}}}`, absScript, absWorkdir),
 			wantErr: `must be a bare filename`,
 		},
+		{
+			name: "negative max_ref_mb fails naming field and key",
+			json: fmt.Sprintf(`{"pipelines":{"scene-swap":{"script":%q,"workdir":%q,`+
+				`"timeout_sec":60,"artifacts":["final.png"],"max_ref_mb":-5}}}`, absScript, absWorkdir),
+			wantErr: `pipelines["scene-swap"]: max_ref_mb must be >= 0 (got -5)`,
+		},
+		{
+			name: "zero max_ref_mb loads cleanly (means default-24 via RefCapMB)",
+			json: fmt.Sprintf(`{"pipelines":{"scene-swap":{"script":%q,"workdir":%q,`+
+				`"timeout_sec":60,"artifacts":["final.png"],"max_ref_mb":0}}}`, absScript, absWorkdir),
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -605,6 +616,35 @@ func TestPipelinesLoadValidation(t *testing.T) {
 				t.Fatalf("error = %q, want it to contain %q", err.Error(), tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestValidatePipelinesMultiErrorDeterministic: when MORE THAN ONE pipelines
+// entry is invalid, the error returned must be deterministic — the entry
+// visited FIRST in SORTED key order — never dependent on Go's randomized map
+// iteration. Both entries here are invalid (empty script) for the identical
+// reason, so the only thing distinguishing which error surfaces is key sort
+// order: "aaa-first" sorts before "zzz-second" and must be the one named,
+// every time, across repeated loads (map iteration order is re-randomized
+// per run, so a single pass proves little).
+func TestValidatePipelinesMultiErrorDeterministic(t *testing.T) {
+	absWorkdir := filepath.ToSlash(t.TempDir())
+	body := fmt.Sprintf(`{"pipelines":{`+
+		`"zzz-second":{"script":"","workdir":%q,"timeout_sec":60,"artifacts":["final.png"]},`+
+		`"aaa-first":{"script":"","workdir":%q,"timeout_sec":60,"artifacts":["final.png"]}`+
+		`}}`, absWorkdir, absWorkdir)
+	for i := 0; i < 5; i++ {
+		p := filepath.Join(t.TempDir(), "cfg.json")
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(p)
+		if err == nil {
+			t.Fatal("expected a load error")
+		}
+		if !strings.Contains(err.Error(), `pipelines["aaa-first"]`) {
+			t.Fatalf("run %d: error = %q, want it to name the sorted-first key aaa-first (not zzz-second)", i, err.Error())
+		}
 	}
 }
 

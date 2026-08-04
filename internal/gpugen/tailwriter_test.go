@@ -157,6 +157,33 @@ func TestTailWriterWriteLargerThanCapInOneShot(t *testing.T) {
 	}
 }
 
+// TestTailWriterWriteExactlyAtCapBoundary: a SINGLE write whose length is
+// EXACTLY the cap (neither over nor under) must hit the `n >= w.cap` branch
+// in Write (the same branch TestTailWriterWriteLargerThanCapInOneShot
+// exercises for n > cap) and retain the WHOLE write byte-for-byte — the
+// boundary case that branch's `>=` (not `>`) is written to cover.
+func TestTailWriterWriteExactlyAtCapBoundary(t *testing.T) {
+	const capacity = 16
+	w := newTailWriter(capacity)
+	input := []byte("exactly-16-bytes") // len == 16 == capacity, not one more or less
+	if len(input) != capacity {
+		t.Fatalf("test fixture must be exactly %d bytes, got %d", capacity, len(input))
+	}
+	n, err := w.Write(input)
+	if err != nil || n != len(input) {
+		t.Fatalf("Write = (%d, %v), want (%d, nil)", n, err, len(input))
+	}
+	if !bytes.Equal(w.Contents(), input) {
+		t.Fatalf("Contents() = %q, want %q (the whole exactly-at-cap write retained)", w.Contents(), input)
+	}
+	if w.Truncated() {
+		t.Fatal("Truncated() must be false — total written equals the cap, not more than it")
+	}
+	if cap(w.buf) > capacity {
+		t.Fatalf("cap(buf) = %d, want <= %d", cap(w.buf), capacity)
+	}
+}
+
 // --- call-site integration test: exercises the ACTUAL production wiring
 // (runCombined for the legacy/no-footprint path, runSampled for the
 // footprint/sampled path) against a REAL child process that writes more than
