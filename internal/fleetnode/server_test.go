@@ -406,6 +406,113 @@ func TestDuplicateDispatchAfterError409(t *testing.T) {
 	}
 }
 
+// --- Fix 2 (SP3 follow-up review): during drain, a re-dispatch of an
+// already-known job_id got a flat 503 rather than a re-ack, because the
+// Draining() check ran BEFORE the known-job lookup — so ANY dispatch while
+// draining 503'd, even for a job_id this node already owns (running, done,
+// or even a job it had already finished). The dispatcher's documented
+// contract treats any non-202 as an outright refusal, so that flat 503
+// could invite a duplicate render on another node for work already done
+// here. The fix moves the known-job lookup BEFORE the Draining() check:
+// known+JobError stays 409 (unchanged); known+anything else re-acks 202
+// even mid-drain; only a genuinely UNKNOWN job_id is subject to the drain
+// refusal (503, unchanged).
+
+// TestDispatchDrainKnownRunningJobReAcks202 is case (a): a re-dispatch of a
+// job_id that is RUNNING on this node, issued WHILE a drain is in progress,
+// must re-ack 202 — it is not new work, so it must never be refused just
+// because the node happens to be draining.
+//
+// Verified RED against the pre-fix ordering (Draining() checked before the
+// known-job lookup): run this test against server.go as it stood before this
+// commit and it fails with "status = 503, want 202" — the drain check short-
+// circuits before ever reaching the s.jobs.Get(env.JobID) branch. See the
+// report for the captured red output.
+func TestDispatchDrainKnownRunningJobReAcks202(t *testing.T) {
+	release := make(chan struct{})
+	fr := &fakeRunner{fn: func(ctx context.Context, req core.Request) core.Result {
+		<-release
+		return core.Result{OK: true, Data: json.RawMessage(`{"image_path":"out.png"}`)}
+	}}
+	s, jobs := newTestServer(t, imageCfg(), fr, nil)
+	body := `{"job_id":"drain-known","task_type":"image-gen","payload":{"prompt":"hi"}}`
+	rec := do(t, s, http.MethodPost, "/fleet/dispatch", body, nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first POST status = %d, want 202", rec.Code)
+	}
+	pollJob(t, s, "drain-known", JobRunning)
+
+	// Begin a drain with a timeout long enough that the still-blocked job
+	// survives as JobRunning for the rest of this test (we release it
+	// ourselves once the re-dispatch assertion is done).
+	drainDone := make(chan struct{})
+	go func() {
+		jobs.DrainAndStop(5 * time.Second)
+		close(drainDone)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for !jobs.Draining() {
+		if time.Now().After(deadline) {
+			t.Fatal("Draining() never turned true")
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+	// The job must still be running (not yet force-marked interrupted) —
+	// confirms we're inside the genuine "draining + known + not-yet-terminal"
+	// window the finding describes, not a race that already resolved it.
+	if v, ok := jobs.Get("drain-known"); !ok || v.State != JobRunning {
+		t.Fatalf("test setup: job state = %+v (ok=%v), want still JobRunning while draining", v, ok)
+	}
+
+	rec = do(t, s, http.MethodPost, "/fleet/dispatch", body, nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("re-dispatch of a known RUNNING job during drain: status = %d, want 202 re-ack (body %s)", rec.Code, rec.Body.String())
+	}
+	m := decodeMap(t, rec)
+	if m["job_id"] != "drain-known" || m["status"] != "accepted" {
+		t.Fatalf("re-ack shape wrong: %s", rec.Body.String())
+	}
+
+	close(release)
+	<-drainDone
+}
+
+// TestDispatchDrainUnknownJobStill503 is case (b): a job_id this node has
+// NEVER SEEN, dispatched while draining, still gets the flat 503 refusal —
+// the fix only changes the outcome for a job_id the node already knows, so
+// genuinely new work during a drain must still be refused (unchanged
+// behavior, guarding against the fix accidentally widening the re-ack path).
+func TestDispatchDrainUnknownJobStill503(t *testing.T) {
+	s, jobs := newTestServer(t, imageCfg(), &fakeRunner{}, nil)
+	jobs.DrainAndStop(10 * time.Millisecond)
+	rec := do(t, s, http.MethodPost, "/fleet/dispatch",
+		`{"job_id":"drain-unknown","task_type":"image-gen","payload":{"prompt":"hi"}}`, nil)
+	wantErrorShape(t, rec, http.StatusServiceUnavailable, "node draining")
+}
+
+// TestDispatchDrainKnownErroredJobStill409 is case (c): a job_id that
+// already FAILED on this node, re-dispatched while draining, still answers
+// 409 (unchanged) — a previously-failed job is a legitimate case for the
+// dispatcher to retry elsewhere, drain or no drain, so this must NOT become
+// a 202 re-ack just because the lookup now runs earlier.
+func TestDispatchDrainKnownErroredJobStill409(t *testing.T) {
+	fr := &fakeRunner{fn: func(ctx context.Context, req core.Request) core.Result {
+		return core.Result{OK: false, Reason: "oom: cudaMalloc failed"}
+	}}
+	s, jobs := newTestServer(t, imageCfg(), fr, nil)
+	body := `{"job_id":"drain-err","task_type":"image-gen","payload":{"prompt":"hi"}}`
+	rec := do(t, s, http.MethodPost, "/fleet/dispatch", body, nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first POST status = %d, want 202", rec.Code)
+	}
+	pollJob(t, s, "drain-err", JobError)
+
+	jobs.DrainAndStop(10 * time.Millisecond) // job is already terminal; nothing left to force-mark
+
+	rec = do(t, s, http.MethodPost, "/fleet/dispatch", body, nil)
+	wantErrorShape(t, rec, http.StatusConflict, "job previously failed on this node: oom: cudaMalloc failed")
+}
+
 // pipelineDispatchCfg returns a Config with one valid "scene-swap" pipeline
 // route, Home pinned to an isolated temp dir (BaseDir()/pipeline-jobs never
 // touches the real ~/.local-offload).
