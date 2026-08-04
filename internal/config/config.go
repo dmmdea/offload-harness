@@ -534,6 +534,32 @@ type Config struct {
 	// (force the Dedicated tree sampler), "global" (force global-delta — set this when
 	// the FLEET-NODE.md Afterburner validation shows PDH disagreeing >15%).
 	FleetSampler string `json:"fleet_sampler,omitempty"`
+	// PrimaryGPUUUID pins /fleet/health's headline vram_total_gb/vram_free_gb to
+	// ONE specific card by its stable nvidia-smi UUID, overriding the default
+	// largest-total-VRAM rule (fleetnode.HeadlineDevice). Canonical guidance
+	// (CMP tier notes): pin by GPU UUID, NEVER index — nvidia-smi's own
+	// enumeration index, CUDA's device order (CUDA_DEVICE_ORDER=FASTEST_FIRST),
+	// and raw total VRAM can all disagree about which card is "the" compute
+	// card, and cards can change PCI slots across a reboot/reseat (verified
+	// live on <node-b>: nvidia-smi index 0 is the RTX 5060 Ti while ComfyUI's CUDA
+	// ordering binds cuda:0 to the RTX 5070 Ti at index 1; the two cards also
+	// can't be told apart by total VRAM — 16311 vs 16303 MiB, a same-SKU-size
+	// near-tie). The UUID is the only identifier stable across all of that.
+	// Read the UUIDs straight off a running node's /fleet/health gpu_devices[]
+	// to fill this in — gpu_devices[] is ALWAYS present for a nvidia-smi node
+	// (single-GPU boxes included; there is no single-GPU special case, see
+	// main.go's chooseSamplerKind). "" (default) = the largest-total rule,
+	// unchanged. Set but not found among the parsed devices = the same
+	// fallback PLUS one stderr warning (never a silent revert to guessing —
+	// that would hide a typo'd UUID or an actually-removed card forever).
+	// Trimmed of surrounding whitespace at Load (a copy-paste from a terminal
+	// can carry a trailing newline) and matched case-insensitively
+	// (fleetnode.SelectHeadlineDevice) — an operator's copy of the UUID should
+	// never fail to match over incidental formatting. No FUNCTIONAL effect on
+	// a single-GPU nvidia-smi node beyond confirming what's already true (its
+	// one device is already the headline); no effect at all on a
+	// windows-generic node, which has no gpu_devices[] to match against.
+	PrimaryGPUUUID string `json:"primary_gpu_uuid,omitempty"`
 	// --- config-driven pipeline jobs (Task 4: fleet-node "pipeline job" task family) ---
 	// Pipelines maps a task_type name (e.g. "scene-swap") to the externally-
 	// provided CLI that serves it — see PipelineSpec. Empty/nil = this box
@@ -686,6 +712,7 @@ func Default() Config {
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
 		FleetSampler:                  "auto",            // auto|pdh|pdh-shared|global (FLEET-NODE.md)
+		PrimaryGPUUUID:                "",                // "" = largest-total headline rule; set to pin by UUID (FLEET-NODE.md)
 		Pipelines:                     nil,               // empty = no pipeline-job routes on this box (opt-in per pipeline)
 	}
 }
@@ -709,6 +736,14 @@ func Load(path string) (Config, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return c, err
 	}
+	// primary_gpu_uuid is meant to be copy-pasted straight out of a running
+	// node's /fleet/health gpu_devices[] — trim whitespace an editor/terminal
+	// can introduce (a trailing newline from a copy, stray leading space) so a
+	// pin that LOOKS correct doesn't silently drop to the fallback rule and
+	// its warning. The match itself is also case-insensitive (vram.go's
+	// SelectHeadlineDevice) — together these cover the two ways a manually
+	// copied UUID commonly fails to compare equal to the source.
+	c.PrimaryGPUUUID = strings.TrimSpace(c.PrimaryGPUUUID)
 	warnUnknownKeys(b)
 	warnBadEnumValues(c)
 	if home, herr := os.UserHomeDir(); herr == nil {

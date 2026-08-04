@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/fleetnode"
 )
 
 // TestGpuArchFromName locks the product-name → architecture-class mapping the
@@ -113,6 +116,75 @@ func TestFleetServeParams(t *testing.T) {
 		}
 		if listen != "127.0.0.1:18899" {
 			t.Errorf("listen = %q, want the config value", listen)
+		}
+	})
+}
+
+// TestChooseSamplerKind locks the routing decision runFleetServe's sampler
+// switch is built on: it is the ONLY thing that decides whether
+// /fleet/health's gpu_devices[] is present or omitted, so the docs' claim
+// ("always present for nvidia-smi, including single-GPU; omitted only for
+// windows-generic") is a fact about THIS function, not a hand-checked
+// assertion about main.go's control flow.
+func TestChooseSamplerKind(t *testing.T) {
+	cases := []struct {
+		source string
+		want   samplerKind
+	}{
+		{"nvidia-smi", samplerKindDevice},
+		{"windows-generic", samplerKindSingle},
+		// Defensive: an unrecognized/empty source (should never happen —
+		// ResolveProvider only ever sets these two strings) still degrades to
+		// the single-value sampler rather than risking a nil device probe.
+		{"", samplerKindSingle},
+		{"something-new-later", samplerKindSingle},
+	}
+	for _, tc := range cases {
+		if got := chooseSamplerKind(tc.source); got != tc.want {
+			t.Errorf("chooseSamplerKind(%q) = %v, want %v", tc.source, got, tc.want)
+		}
+	}
+}
+
+// TestChooseSamplerKindDrivesGpuDevicesShape proves the actual claim the docs
+// make, end to end, through the SAME two fleetnode constructors runFleetServe
+// calls (StartDeviceProbeSampler / StartProbeSampler) — not just the kind
+// enum in isolation. This is what makes the doc claim testable at the real
+// seam: nvidia-smi (even a single-device probe) always yields a populated,
+// one-entry gpu_devices[]; windows-generic always yields Devices == nil.
+func TestChooseSamplerKindDrivesGpuDevicesShape(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	t.Run("nvidia-smi, single device: gpu_devices present with exactly one entry", func(t *testing.T) {
+		if chooseSamplerKind("nvidia-smi") != samplerKindDevice {
+			t.Fatal("precondition: nvidia-smi must route to samplerKindDevice")
+		}
+		probe := func() ([]fleetnode.GPUDevice, error) {
+			return []fleetnode.GPUDevice{{Index: 0, UUID: "GPU-solo", Name: "solo card", TotalGiB: 16, FreeGiB: 15}}, nil
+		}
+		s := fleetnode.StartDeviceProbeSampler(ctx, time.Hour, probe, "")
+		snap, ok := s.Load()
+		if !ok {
+			t.Fatal("Load() not ok")
+		}
+		if len(snap.Devices) != 1 {
+			t.Fatalf("Devices = %+v, want exactly 1 entry — a single-GPU nvidia-smi node is NOT special-cased to omit gpu_devices", snap.Devices)
+		}
+	})
+
+	t.Run("windows-generic: gpu_devices omitted (Devices nil)", func(t *testing.T) {
+		if chooseSamplerKind("windows-generic") != samplerKindSingle {
+			t.Fatal("precondition: windows-generic must route to samplerKindSingle")
+		}
+		probe := func() (float64, float64, error) { return 16, 1, nil }
+		s := fleetnode.StartProbeSampler(ctx, time.Hour, probe)
+		snap, ok := s.Load()
+		if !ok {
+			t.Fatal("Load() not ok")
+		}
+		if snap.Devices != nil {
+			t.Fatalf("Devices = %+v, want nil (windows-generic has no per-device signal)", snap.Devices)
 		}
 	})
 }

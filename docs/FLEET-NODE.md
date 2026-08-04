@@ -39,6 +39,81 @@ about (running, done, or previously failed) still re-acks 202 — or 409 if it p
 failed — even mid-drain, since that's not new work. In-flight renders get up to 30s to finish, survivors are marked terminal
 `error:"interrupted"` so pollers always reach a terminal state.
 
+## Multi-GPU: `gpu_devices[]` and the headline VRAM numbers
+
+On any node whose VRAM source is `nvidia-smi`, `/fleet/health` always adds a per-device
+breakdown — **including a single-GPU box**, which reports a one-element array. There is no
+single-vs-multi-GPU special case: `gpu_devices[]` is present whenever nvidia-smi is the resolved
+source, full stop (`chooseSamplerKind` in `main.go`, unit-tested at that exact seam in
+`fleet_verbs_test.go`). It is **absent** only on a source that cannot enumerate devices at all —
+today, only the Windows PDH/windows-generic path (`vram_windows.go`), which has no per-adapter
+identity to report.
+
+```json
+"vram_total_gb": 15.93, "vram_free_gb": 15.08,
+"gpu_devices": [
+  {"index": 0, "uuid": "GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97", "name": "NVIDIA GeForce RTX 5060 Ti", "vram_total_gb": 15.93, "vram_free_gb": 15.08},
+  {"index": 1, "uuid": "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7", "name": "NVIDIA GeForce RTX 5070 Ti", "vram_total_gb": 15.92, "vram_free_gb": 13.46}
+]
+```
+
+`gpu_devices` is **additive** — `vram_total_gb`/`vram_free_gb` keep exactly the meaning they
+always had, and adding a new field breaks nothing on the consumer side in practice: the
+fleet-dispatcher decodes health with a plain `json.Decoder` (no `DisallowUnknownFields`
+anywhere in its `internal/`), so an extra field it doesn't know about is silently ignored, not a
+wire error, on any node — single-GPU included.
+
+**Why this exists:** `nvidia-smi` enumerates devices in PCI bus order — that order has no
+relationship to which device a render actually runs on. A CUDA app (ComfyUI included) can bind
+its `cuda:0` to a different physical card via `CUDA_DEVICE_ORDER=FASTEST_FIRST`, so trusting
+"index 0" for the headline VRAM numbers can silently advertise the WRONG card's free memory —
+an idle donor card looking free while the real compute card is mid-render, which lets the
+dispatcher over-admit a second job that then contends or OOMs.
+
+**The default headline rule** (no `primary_gpu_uuid` set): `vram_total_gb`/`vram_free_gb`
+describe the device with the **largest total VRAM**; an exact tie in total is broken by
+whichever card has more free VRAM right now. A single render binds to one device, so the
+admission-relevant number is the biggest device a job could actually land on — never an
+arbitrary enumeration index, and deliberately **not a sum** across cards (summing would let the
+dispatcher admit a job no single card can hold). This rule is a defensible, deterministic
+heuristic, not a way to detect which card CUDA will actually pick — nvidia-smi carries no such
+signal. On a box with two near-identical-capacity cards it can pick either one; the full
+`gpu_devices[]` breakdown exists precisely so a consumer that needs the real per-card numbers
+(or a smarter dispatcher) isn't limited to the headline guess. Implementation:
+`fleetnode.ParseSmiMemoryDevices` / `fleetnode.HeadlineDevice` in `internal/fleetnode/vram.go`.
+
+### `primary_gpu_uuid` — pin the headline device deterministically
+
+The largest-total rule cannot tell two near-identical-capacity cards apart, and total VRAM says
+nothing about which card CUDA will actually compute on. **Canonical guidance (CMP tier notes):
+pin by GPU UUID, NEVER index.** Set `primary_gpu_uuid` to one of the UUIDs read off this node's
+own `gpu_devices[]` (see the JSON example above) and that device — regardless of its total or
+free VRAM — becomes the headline `vram_total_gb`/`vram_free_gb`:
+
+```json
+{ "primary_gpu_uuid": "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7" }
+```
+
+On <node-b>, `gpu_devices[]` shows the RTX 5060 Ti at index 0 with the marginally larger total
+(16311 vs 16303 MiB), so the default largest-total rule headlines it — but ComfyUI's CUDA
+ordering actually computes on the RTX 5070 Ti (index 1, verified via ComfyUI's own
+`/system_stats`). Pinning `primary_gpu_uuid` to the 5070 Ti's UUID
+(`GPU-2a44210f-6739-2d89-0e21-44cd5143faf7`) makes the health payload finally describe the card
+that is actually doing the work.
+
+Behavior: unset (`""`, the default) = the largest-total rule, unchanged. Set and found among the
+parsed devices = that device wins outright. The match is case-insensitive, and the config value
+is whitespace-trimmed at load — both matter because the UUID is meant to be copy-pasted straight
+out of `gpu_devices[]` above, and a copy can pick up a trailing newline or land in a different
+case than nvidia-smi's own lowercase output. **Set but not found** (typo, or the card was
+removed/reseated) = falls back to the largest-total rule **and** logs one
+`[fleet-serve] warning: primary_gpu_uuid "..." not found among N parsed GPU device(s)...` line to
+stderr (once per process lifetime, not once per 2s sampler tick) — a silent fallback would hide
+a typo'd UUID forever. No effect on a single-GPU node beyond confirming what's already true (its
+one `gpu_devices[]` entry is already the headline); no effect at all on the windows-generic
+source, which has no `gpu_devices[]` to match against. Implementation:
+`fleetnode.SelectHeadlineDevice` in `internal/fleetnode/vram.go`.
+
 ## Config keys
 
 | Key | Default | Purpose |
@@ -46,6 +121,7 @@ failed — even mid-drain, since that's not new work. In-flight renders get up t
 | `fleet_listen` | `127.0.0.1:18811` | Bind address (`--listen` overrides). Port **18811** — the dispatcher owns 18810. |
 | `fleet_node_id` | `""` | Node id in `/fleet/health`. Empty = the OS hostname at serve time (`--node-id` overrides). |
 | `fleet_sampler` | `auto` | Per-render VRAM footprint source: `auto` \| `pdh` \| `pdh-shared` \| `global` (see [Sampler modes](#sampler-modes)). |
+| `primary_gpu_uuid` | `""` | Pins the headline `vram_total_gb`/`vram_free_gb` to one card by nvidia-smi UUID, overriding the largest-total rule (see [`primary_gpu_uuid`](#primary_gpu_uuid--pin-the-headline-device-deterministically) above). Empty = unchanged largest-total behavior. |
 
 ## Binding guidance (read before exposing anything)
 

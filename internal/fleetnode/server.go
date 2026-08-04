@@ -125,6 +125,15 @@ type healthPayload struct {
 	GpuArch               string           `json:"gpu_arch"`
 	VramTotalGb           float64          `json:"vram_total_gb"`
 	VramFreeGb            float64          `json:"vram_free_gb"`
+	// GpuDevices is the full per-device breakdown behind VramTotalGb/
+	// VramFreeGb's headline pick (nvidia-smi multi-device source only — see
+	// HeadlineDevice for the largest-total-wins rule those two fields apply).
+	// Additive: VramTotalGb/VramFreeGb keep their existing meaning for every
+	// node unchanged. Omitted entirely (not an empty array) when the snapshot
+	// source can't enumerate devices, so "no gpu_devices key" unambiguously
+	// means "single-device source" — the exact shape every pre-fix node and
+	// consumer already expects.
+	GpuDevices []GPUDevice `json:"gpu_devices,omitempty"`
 	SupportedTaskTypes    []string         `json:"supported_task_types"`
 	LoadableModelFamilies []string         `json:"loadable_model_families"`
 	ModelFootprints       []FootprintEntry `json:"model_footprints"`
@@ -185,6 +194,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		GpuArch:               s.opts.GpuArch,
 		VramTotalGb:           snap.TotalGiB,
 		VramFreeGb:            snap.FreeGiB,
+		GpuDevices:            snap.Devices,
 		SupportedTaskTypes:    tasks,
 		LoadableModelFamilies: families,
 		ModelFootprints:       fps,
