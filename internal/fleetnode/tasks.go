@@ -120,7 +120,12 @@ func Families(cfg config.Config) []string {
 // removes the materialized temp files. Errors are caller mistakes (the server's
 // 400s): unknown/unconfigured task_type (listing this box's supported set),
 // malformed payload JSON, or a missing/invalid required field.
-func BuildRequest(cfg config.Config, taskType string, payload json.RawMessage) (core.Request, func(), error) {
+//
+// ctx is threaded through to the pipeline-job family's ack-time ref fetch
+// (buildPipelineJob -> FetchRefs): the caller is server.go's handleDispatch,
+// which passes r.Context(), so a dispatch whose client vanishes mid-ack stops
+// fetching refs instead of racing to completion against context.Background().
+func BuildRequest(ctx context.Context, cfg config.Config, taskType string, payload json.RawMessage) (core.Request, func(), error) {
 	noop := func() {}
 	if !taskConfigured(cfg, taskType) {
 		return core.Request{}, noop, fmt.Errorf("unsupported task_type %q (supported: %s)",
@@ -145,7 +150,7 @@ func BuildRequest(cfg config.Config, taskType string, payload json.RawMessage) (
 	// membership) must be a configured cfg.Pipelines key (Task 6) — 100%
 	// config-driven, so a new pipeline needs no new case above.
 	if pipelineNameConfigured(cfg, taskType) {
-		return buildPipelineJob(cfg, taskType, payload)
+		return buildPipelineJob(ctx, cfg, taskType, payload)
 	}
 	// Unreachable: taskConfigured gates membership. Kept for defense.
 	return core.Request{}, noop, fmt.Errorf("unsupported task_type %q (supported: %s)",
@@ -473,7 +478,7 @@ var pipelineJobIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 // dispatch handler) defers it until AFTER the run finishes, so assets/job.json
 // survive for the whole render, exactly as long as the job needs them, not
 // just the ack.
-func buildPipelineJob(cfg config.Config, taskType string, payload json.RawMessage) (core.Request, func(), error) {
+func buildPipelineJob(ctx context.Context, cfg config.Config, taskType string, payload json.RawMessage) (core.Request, func(), error) {
 	noop := func() {}
 	if !pipelineNameConfigured(cfg, taskType) {
 		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: unconfigured pipeline %q", taskType)
@@ -559,7 +564,7 @@ func buildPipelineJob(cfg config.Config, taskType string, payload json.RawMessag
 	if bgMode == "stock" {
 		refs["background"] = in.ImageRefs["background"]
 	}
-	fetched, _, ferr := FetchRefs(context.Background(), refs, assetsDir, spec.IngressAllow, spec.RefCapMB())
+	fetched, _, ferr := FetchRefs(ctx, refs, assetsDir, spec.IngressAllow, spec.RefCapMB())
 	if ferr != nil {
 		os.RemoveAll(jobDir) // FetchRefs' own cleanup only reaches assetsDir; jobDir may still exist (mkdir'd, empty).
 		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: %w", ferr)

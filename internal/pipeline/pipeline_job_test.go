@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -465,5 +466,145 @@ func TestRunPipelineJob_MiddleArtifactMissingDoesNotSkewQAPath(t *testing.T) {
 	wantExtra := filepath.Join(cfg.MediaDir, jobID+"-extra.json")
 	if _, statErr := os.Stat(wantExtra); statErr != nil {
 		t.Errorf("extra.json (artifacts[2]) should still be published to MediaDir despite artifacts[1] missing: %v", statErr)
+	}
+}
+
+// --- SP3 polish: empty-artifacts guard hoisted above takeMediaSlot ---
+
+// TestRunPipelineJob_EmptyArtifactsGuardHoistedAboveMediaSlot: a pipeline
+// entry with no artifacts configured (only reachable via a Config assembled
+// directly, bypassing Load/validatePipelines — see PipelineSpec.valid()'s
+// doc comment) can never publish a result, so it must be refused BEFORE
+// contending for the mediaSlot — never after burning part of the GPU-wait
+// window on a config that could not have run regardless. Proven here by
+// holding mediaSlot for the whole test and asserting the defer still returns
+// near-instantly instead of waiting out cfg.GPUWaitMs.
+func TestRunPipelineJob_EmptyArtifactsGuardHoistedAboveMediaSlot(t *testing.T) {
+	// A REAL, resolvable script (not a dummy path) is deliberate: it isolates
+	// this test to the artifacts-guard-vs-takeMediaSlot ordering specifically.
+	// A dummy/unresolvable script would fail at gpugen.ResolveScript BEFORE
+	// takeMediaSlot regardless of where the artifacts guard sits, which would
+	// make this test pass for the wrong reason even without the fix.
+	script := fakeSceneSwapScript(t)
+	cfg := config.Default()
+	cfg.GPUWaitMs = 5000 // large enough that "returned fast" is a meaningful signal
+	cfg.Pipelines = map[string]config.PipelineSpec{
+		"scene-swap": {Script: script, Workdir: filepath.Dir(script), TimeoutSec: 30, Artifacts: nil},
+	}
+	if !takeMediaSlot(0) {
+		t.Fatal("test setup: failed to take the media slot")
+	}
+	defer releaseMediaSlot()
+
+	p := &Pipeline{cfg: cfg}
+	start := time.Now()
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskPipelineJob,
+		Params: pipelineJobParams("scene-swap", "x", "x", "x", "8gb"),
+	})
+	elapsed := time.Since(start)
+	if res.OK || !res.Deferred {
+		t.Fatalf("expected a clean defer for a no-artifacts pipeline, got OK=%v", res.OK)
+	}
+	if !strings.Contains(res.Reason, "no artifacts configured") {
+		t.Errorf("Reason = %q, want it to name the no-artifacts guard", res.Reason)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("took %v — the empty-artifacts guard must fire BEFORE contending on the (already held) media slot, "+
+			"not burn part of the %dms GPU-wait window first", elapsed, cfg.GPUWaitMs)
+	}
+}
+
+// --- SP3 polish: publishPipelineArtifacts logs WHICH optional-artifact
+// outcome happened, instead of silently treating "never produced" and
+// "produced but the copy failed" the same way ---
+
+// captureLog redirects the standard logger's output for the duration of the
+// test and restores it afterward (log.SetOutput is process-global state).
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+	return &buf
+}
+
+// TestPublishPipelineArtifacts_LogsOptionalArtifactNotProduced: an optional
+// artifact the CLI simply never wrote (a legitimate, expected shape — e.g.
+// no QA report for this tier) logs a "not produced" line, not a "copy
+// failed" one, and still returns success (the existing, unchanged result
+// semantics — this only adds a log line).
+func TestPublishPipelineArtifacts_LogsOptionalArtifactNotProduced(t *testing.T) {
+	dir := t.TempDir()
+	outRoot := filepath.Join(dir, "out")
+	srcDir := filepath.Join(outRoot, "job1")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "final.png"), []byte("f"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// qa-report.json (the optional artifact) intentionally never written.
+
+	buf := captureLog(t)
+	mediaDir := filepath.Join(dir, "media")
+	published, err := publishPipelineArtifacts(outRoot, "job1", []string{"final.png", "qa-report.json"}, mediaDir)
+	if err != nil {
+		t.Fatalf("a missing OPTIONAL artifact must not fail publish: %v", err)
+	}
+	if published[1] != "" {
+		t.Errorf("published[1] must be \"\" for a never-produced optional artifact, got %q", published[1])
+	}
+	got := buf.String()
+	if !strings.Contains(got, `optional artifact "qa-report.json" not produced`) {
+		t.Fatalf("log output = %q, want it to say the artifact was not produced", got)
+	}
+	if strings.Contains(got, "copy") {
+		t.Fatalf("log output = %q, must not claim a copy failure for a simply-missing artifact", got)
+	}
+}
+
+// TestPublishPipelineArtifacts_LogsOptionalArtifactCopyFailed: an optional
+// artifact the CLI DID produce, but whose copy into mediaDir fails, must log
+// a DIFFERENT line naming the copy failure — today (pre-fix) this silently
+// looked identical to "never produced". The copy failure is forced
+// portably (no platform-fiddly read-only-dir/ACL trick) by pre-creating a
+// DIRECTORY at the exact destination path: os.WriteFile then fails because
+// the target is a directory, on both POSIX and Windows.
+func TestPublishPipelineArtifacts_LogsOptionalArtifactCopyFailed(t *testing.T) {
+	dir := t.TempDir()
+	outRoot := filepath.Join(dir, "out")
+	srcDir := filepath.Join(outRoot, "job1")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "final.png"), []byte("f"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "qa-report.json"), []byte("q"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mediaDir := filepath.Join(dir, "media")
+	if err := os.MkdirAll(mediaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	destPath := filepath.Join(mediaDir, "job1-qa-report.json")
+	if err := os.MkdirAll(destPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := captureLog(t)
+	published, err := publishPipelineArtifacts(outRoot, "job1", []string{"final.png", "qa-report.json"}, mediaDir)
+	if err != nil {
+		t.Fatalf("a failed OPTIONAL artifact copy must not fail the whole publish: %v", err)
+	}
+	if published[1] != "" {
+		t.Errorf("published[1] must be \"\" when the copy failed, got %q", published[1])
+	}
+	got := buf.String()
+	if !strings.Contains(got, `optional artifact "qa-report.json" was produced but copy to media dir failed`) {
+		t.Fatalf("log output = %q, want it to distinguish a produced-but-copy-failed optional artifact", got)
 	}
 }

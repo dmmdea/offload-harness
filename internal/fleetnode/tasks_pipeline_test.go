@@ -6,6 +6,7 @@ package fleetnode
 // the fetched assets — see buildPipelineJob's doc comment for why).
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -72,7 +73,7 @@ func TestBuildPipelineJob_ValidPayload_MaterializesJobJSON(t *testing.T) {
 	srv := pngServer(t)
 	cfg := testPipelineConfig(t)
 
-	req, cleanup, err := buildPipelineJob(cfg, "scene-swap", validPipelinePayload(srv, "web-1a2b3c4d"))
+	req, cleanup, err := buildPipelineJob(context.Background(), cfg, "scene-swap", validPipelinePayload(srv, "web-1a2b3c4d"))
 	if err != nil {
 		t.Fatalf("buildPipelineJob: unexpected error: %v", err)
 	}
@@ -141,7 +142,7 @@ func TestBuildPipelineJob_StockBackgroundInjectsPath(t *testing.T) {
 		"tier": "8gb",
 	}
 	b, _ := json.Marshal(payload)
-	req, cleanup, err := buildPipelineJob(cfg, "scene-swap", b)
+	req, cleanup, err := buildPipelineJob(context.Background(), cfg, "scene-swap", b)
 	if err != nil {
 		t.Fatalf("buildPipelineJob: unexpected error: %v", err)
 	}
@@ -275,7 +276,7 @@ func TestBuildPipelineJob_ValidationMatrix(t *testing.T) {
 			p := base()
 			c.mutate(p)
 			b, _ := json.Marshal(p)
-			_, cleanup, err := buildPipelineJob(cfg, "scene-swap", b)
+			_, cleanup, err := buildPipelineJob(context.Background(), cfg, "scene-swap", b)
 			if cleanup != nil {
 				defer cleanup()
 			}
@@ -295,7 +296,7 @@ func TestBuildPipelineJob_ValidationMatrix(t *testing.T) {
 func TestBuildPipelineJob_CleanupRemovesWholeJobDir(t *testing.T) {
 	srv := pngServer(t)
 	cfg := testPipelineConfig(t)
-	req, cleanup, err := buildPipelineJob(cfg, "scene-swap", validPipelinePayload(srv, "cleanup-case"))
+	req, cleanup, err := buildPipelineJob(context.Background(), cfg, "scene-swap", validPipelinePayload(srv, "cleanup-case"))
 	if err != nil {
 		t.Fatalf("buildPipelineJob: unexpected error: %v", err)
 	}
@@ -321,7 +322,7 @@ func TestBuildPipelineJob_DuplicateJobSpecIDRefusedAtAck(t *testing.T) {
 	srv := pngServer(t)
 	cfg := testPipelineConfig(t)
 
-	req1, cleanup1, err1 := buildPipelineJob(cfg, "scene-swap", validPipelinePayload(srv, "dup-case"))
+	req1, cleanup1, err1 := buildPipelineJob(context.Background(), cfg, "scene-swap", validPipelinePayload(srv, "dup-case"))
 	if err1 != nil {
 		t.Fatalf("first buildPipelineJob: unexpected error: %v", err1)
 	}
@@ -334,7 +335,7 @@ func TestBuildPipelineJob_DuplicateJobSpecIDRefusedAtAck(t *testing.T) {
 
 	// Second dispatch, same job_spec.id, while the first is still "in flight"
 	// (its cleanup has not run yet).
-	_, cleanup2, err2 := buildPipelineJob(cfg, "scene-swap", validPipelinePayload(srv, "dup-case"))
+	_, cleanup2, err2 := buildPipelineJob(context.Background(), cfg, "scene-swap", validPipelinePayload(srv, "dup-case"))
 	if cleanup2 != nil {
 		cleanup2()
 	}
@@ -361,7 +362,7 @@ func TestBuildPipelineJob_DuplicateJobSpecIDRefusedAtAck(t *testing.T) {
 // catches this first; buildPipelineJob defends the same rule directly).
 func TestBuildPipelineJob_UnconfiguredPipeline(t *testing.T) {
 	cfg := config.Default() // no Pipelines configured
-	_, cleanup, err := buildPipelineJob(cfg, "scene-swap", []byte(`{}`))
+	_, cleanup, err := buildPipelineJob(context.Background(), cfg, "scene-swap", []byte(`{}`))
 	if cleanup != nil {
 		cleanup()
 	}
@@ -429,14 +430,14 @@ func TestSweepOrphanedPipelineJobs_UnblocksReusedID(t *testing.T) {
 	// Jobs-store entry (there is none in this test — buildPipelineJob is
 	// called directly, never through a Jobs store).
 	orphanID := "crash-orphan"
-	if _, cleanup, err := buildPipelineJob(cfg, "scene-swap", validPipelinePayload(srv, orphanID)); err != nil {
+	if _, cleanup, err := buildPipelineJob(context.Background(), cfg, "scene-swap", validPipelinePayload(srv, orphanID)); err != nil {
 		t.Fatalf("setup: unexpected error: %v", err)
 	} else {
 		_ = cleanup // deliberately NOT called — this is the orphan
 	}
 
 	// Without a sweep, re-dispatching the same job_spec.id is falsely refused.
-	if _, cleanup, err := buildPipelineJob(cfg, "scene-swap", validPipelinePayload(srv, orphanID)); err == nil {
+	if _, cleanup, err := buildPipelineJob(context.Background(), cfg, "scene-swap", validPipelinePayload(srv, orphanID)); err == nil {
 		if cleanup != nil {
 			cleanup()
 		}
@@ -449,7 +450,7 @@ func TestSweepOrphanedPipelineJobs_UnblocksReusedID(t *testing.T) {
 
 	// After the sweep (as fleet-serve runs at startup), the SAME job_spec.id
 	// must be dispatchable again.
-	req, cleanup, err := buildPipelineJob(cfg, "scene-swap", validPipelinePayload(srv, orphanID))
+	req, cleanup, err := buildPipelineJob(context.Background(), cfg, "scene-swap", validPipelinePayload(srv, orphanID))
 	if err != nil {
 		t.Fatalf("post-sweep re-dispatch still refused: %v", err)
 	}
@@ -498,7 +499,7 @@ func TestFamilyFor_PipelineTaskClaimsNoFamily(t *testing.T) {
 func TestBuildRequest_RoutesConfiguredPipeline(t *testing.T) {
 	srv := pngServer(t)
 	cfg := testPipelineConfig(t)
-	req, cleanup, err := BuildRequest(cfg, "scene-swap", validPipelinePayload(srv, "routed-case"))
+	req, cleanup, err := BuildRequest(context.Background(), cfg, "scene-swap", validPipelinePayload(srv, "routed-case"))
 	if err != nil {
 		t.Fatalf("BuildRequest: unexpected error: %v", err)
 	}
@@ -513,7 +514,7 @@ func TestBuildRequest_RoutesConfiguredPipeline(t *testing.T) {
 // exactly like today, naming the supported set.
 func TestBuildRequest_UnconfiguredPipelineRejected(t *testing.T) {
 	cfg := config.Default()
-	_, cleanup, err := BuildRequest(cfg, "scene-swap", []byte(`{}`))
+	_, cleanup, err := BuildRequest(context.Background(), cfg, "scene-swap", []byte(`{}`))
 	cleanup()
 	if err == nil {
 		t.Fatal("expected an unsupported task_type error")

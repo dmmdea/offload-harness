@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"math/rand"
 	"os"
@@ -1342,6 +1343,15 @@ func (p *Pipeline) runPipelineJob(ctx context.Context, req core.Request, meta co
 	if !ok {
 		return p.deferGen(req, meta, start, len(req.Input), "no pipeline route configured for "+taskType)
 	}
+	// Hoisted ABOVE takeMediaSlot (SP3 polish): validatePipelines already
+	// rejects an empty artifacts list at config Load() time, so this only
+	// fires for a Config assembled directly in-process (bypassing Load — see
+	// PipelineSpec.valid()'s doc comment). Such a job can never publish a
+	// result no matter how long it waits for the GPU slot, so refuse it
+	// before burning any queue wait on a config that can never run.
+	if len(spec.Artifacts) == 0 {
+		return p.deferGen(req, meta, start, len(req.Input), "pipeline "+taskType+": no artifacts configured")
+	}
 	jobID := paramStr(req.Params, "job_id")
 	jobPath := paramStr(req.Params, "job_path")
 	outRoot := paramStr(req.Params, "out_root")
@@ -1361,9 +1371,6 @@ func (p *Pipeline) runPipelineJob(ctx context.Context, req core.Request, meta co
 	}
 	defer releaseMediaSlot()
 
-	if len(spec.Artifacts) == 0 {
-		return p.deferGen(req, meta, start, len(req.Input), "pipeline "+taskType+": no artifacts configured")
-	}
 	timeout := time.Duration(spec.TimeoutSec) * time.Second
 	gspec := gpugen.Spec{
 		Exe:     p.cfg.NodePath,
@@ -1464,13 +1471,28 @@ func publishPipelineArtifacts(outRoot, jobID string, artifacts []string, mediaDi
 			if i == 0 {
 				return nil, fmt.Errorf("pipeline publish: primary artifact %q missing: %w", name, rerr)
 			}
-			continue // optional artifact missing: leave published[i] == "", never an error
+			// Two distinct optional-artifact outcomes used to look identical
+			// (both a silent "continue"): the CLI simply never wrote this
+			// artifact (a legitimate, expected shape — e.g. no QA report
+			// configured for this tier) versus the CLI DID write it but this
+			// node failed to read it back (permissions, a half-flushed file,
+			// disk pressure) — the latter is an operational problem worth a
+			// log line, the former is not.
+			if os.IsNotExist(rerr) {
+				log.Printf("pipeline publish: optional artifact %q not produced for job %s (skipping)", name, jobID)
+			} else {
+				log.Printf("pipeline publish: optional artifact %q was produced but could not be read for job %s: %v", name, jobID, rerr)
+			}
+			continue // optional artifact missing/unreadable: leave published[i] == "", never an error
 		}
 		dest := filepath.Join(mediaDir, jobID+"-"+name)
 		if werr := os.WriteFile(dest, data, 0o644); werr != nil {
 			if i == 0 {
 				return nil, fmt.Errorf("pipeline publish: writing primary artifact %q: %w", name, werr)
 			}
+			// Read succeeded, so the artifact WAS produced — the failure is
+			// purely in the copy-to-mediaDir step.
+			log.Printf("pipeline publish: optional artifact %q was produced but copy to media dir failed for job %s: %v", name, jobID, werr)
 			continue
 		}
 		published[i] = dest

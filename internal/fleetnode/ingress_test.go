@@ -298,4 +298,84 @@ func TestFetchRefs(t *testing.T) {
 			t.Fatalf("destDir must never be created when key validation fails, stat err = %v", statErr)
 		}
 	})
+
+	// (j) scheme allowlist: a non-http(s) scheme must be refused BEFORE any
+	// dial — a gopher URL pointed at an otherwise-allowlisted tailnet address
+	// used to sail through checkAllowed and only fail deep inside the HTTP
+	// transport with a confusing "unsupported protocol scheme" error.
+	t.Run("j_disallowed_scheme_refused_before_dial", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		destDir := filepath.Join(t.TempDir(), "job-j")
+		start := time.Now()
+		_, _, err := FetchRefs(ctx, map[string]string{"product": "gopher://100.64.0.1/x"}, destDir, nil, 24)
+		elapsed := time.Since(start)
+
+		if err == nil {
+			t.Fatal("want error for a gopher-scheme URL")
+		}
+		if !strings.Contains(err.Error(), "gopher") {
+			t.Fatalf("error must name the offending scheme, got: %v", err)
+		}
+		if elapsed > time.Second {
+			t.Fatalf("scheme refusal took %v — looks like a dial was attempted", elapsed)
+		}
+	})
+
+	// (k) extraAllow matching is case-insensitive for DNS names: an entry
+	// "LOCALHOST:<port>" must match a ref URL whose host is the literal name
+	// "localhost" (lowercase) — the CIDR/IP-literal allow path is untouched;
+	// the URL host must be the NAME, not an IP literal, or the check never
+	// reaches the extraAllow string-match path at all.
+	t.Run("k_extraAllow_matches_case_insensitively", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write(pngBytes)
+		}))
+		defer srv.Close()
+
+		srvURL, err := url.Parse(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := srvURL.Port()
+		localhostURL := "http://localhost:" + port + "/p.png"
+		extraAllow := []string{"LOCALHOST:" + port} // deliberately uppercase
+
+		destDir := filepath.Join(t.TempDir(), "job-k")
+		paths, cleanup, err := FetchRefs(context.Background(), map[string]string{"product": localhostURL}, destDir, extraAllow, 24)
+		if err != nil {
+			t.Fatalf("FetchRefs with a case-mismatched extraAllow entry should still succeed: %v", err)
+		}
+		defer cleanup()
+		if _, ok := paths["product"]; !ok {
+			t.Fatalf("missing product path: %+v", paths)
+		}
+	})
+
+	// (l) boundary: a body of EXACTLY capMB MiB (not one byte over) must pass
+	// the cap check — the off-by-one edge of "body exceeds the N MiB cap".
+	t.Run("l_body_exactly_at_cap_passes", func(t *testing.T) {
+		const capMB = 1
+		exact := make([]byte, capMB<<20) // exactly 1 MiB, not 1 byte more
+		copy(exact, "\x89PNG\r\n\x1a\n")
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write(exact)
+		}))
+		defer srv.Close()
+
+		destDir := filepath.Join(t.TempDir(), "job-l")
+		paths, cleanup, err := FetchRefs(context.Background(), map[string]string{"product": srv.URL + "/exact.png"}, destDir, nil, capMB)
+		if err != nil {
+			t.Fatalf("a body of exactly the %d MiB cap must pass, got: %v", capMB, err)
+		}
+		defer cleanup()
+		b, readErr := os.ReadFile(paths["product"])
+		if readErr != nil {
+			t.Fatalf("reading %s: %v", paths["product"], readErr)
+		}
+		if len(b) != len(exact) {
+			t.Fatalf("written file len = %d, want %d (exact cap)", len(b), len(exact))
+		}
+	})
 }
