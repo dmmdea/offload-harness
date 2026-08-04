@@ -33,8 +33,10 @@ profile (an iGPU advertises carve-out + the ~RAM/2 WDDM shared budget as its tot
 Dedicated+Shared as usage). Only when **no memory source works** does `fleet-serve` refuse to
 start: the contract treats `vram_total_gb <= 0` as a broken node, and refusing loudly beats
 advertising an empty GPU. The serve log names the resolved source
-(`... via nvidia-smi|windows-generic, vendor=... arch=...`). Ctrl-C drains: new dispatches get 503,
-in-flight renders get up to 30s to finish, survivors are marked terminal
+(`... via nvidia-smi|windows-generic, vendor=... arch=...`). Ctrl-C drains: dispatches for a
+job_id this node has never seen get 503; a re-dispatch of a job_id this node already knows
+about (running, done, or previously failed) still re-acks 202 — or 409 if it previously
+failed — even mid-drain, since that's not new work. In-flight renders get up to 30s to finish, survivors are marked terminal
 `error:"interrupted"` so pollers always reach a terminal state.
 
 ## Config keys

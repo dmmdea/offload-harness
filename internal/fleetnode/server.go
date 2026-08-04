@@ -231,9 +231,12 @@ type dispatchEnvelope struct {
 }
 
 // handleDispatch is the ack path: validate everything a caller can get wrong
-// (the 400s), refuse during drain (503), then Accept — which either starts the
-// run (202 exact echo) or reveals a duplicate (202 re-ack for anything not
-// failed, 409 for a previously failed job; never a second render).
+// (the 400s), resolve a KNOWN job_id first (re-ack/409 — see below; this
+// runs regardless of drain state, since a job this node already owns is
+// never new work), refuse UNKNOWN work during drain (503), then Accept —
+// which either starts the run (202 exact echo) or reveals a duplicate (202
+// re-ack for anything not failed, 409 for a previously failed job; never a
+// second render).
 func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxDispatchBody)
 
@@ -263,24 +266,35 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "job_id required")
 		return
 	}
-	if s.jobs.Draining() {
-		writeError(w, http.StatusServiceUnavailable, "node draining")
-		return
-	}
 
-	// Idempotent re-ack BEFORE BuildRequest: a lost-ack re-dispatch of a job_id
-	// this node already knows about must re-ack without redoing ANY build work
-	// (ref fetches, materialized temp files) — for every family that's pure
+	// Idempotent re-ack BEFORE BuildRequest AND before the Draining() check
+	// (Fix: SP3 follow-up review — this ordering predates the pipeline-job
+	// work, which added this lookup but left it AFTER Draining(), so a
+	// drain-in-progress flat-503'd a re-dispatch of a job_id this node
+	// ALREADY OWNED, even one it had already finished. The dispatcher's
+	// documented contract treats ANY non-202 dispatch response as an outright
+	// REFUSAL and may re-dispatch the same job_id to another node — so that
+	// flat 503 could buy a duplicate render fleet-wide for work this node had
+	// already done. A known job_id is NOT new work, so it is never subject to
+	// the drain refusal below, whatever state it's in:
+	//   - JobError (previously failed here)            → 409, drain or not.
+	//   - accepted/running/done (this node owns it)     → 202 re-ack, drain or not.
+	// Only a job_id this node has NEVER SEEN reaches the Draining() gate.
+	//
+	// This lookup ALSO must run before BuildRequest for the pipeline-job
+	// family specifically: a lost-ack re-dispatch of a job_id this node
+	// already knows about must re-ack without redoing ANY build work (ref
+	// fetches, materialized temp files) — for every family that's pure
 	// waste, and for a pipeline-job it is actively WRONG: BuildRequest's
 	// exclusive job-dir create (buildPipelineJob, the job_spec.id collision
 	// guard) cannot tell "the same job_id re-dispatched while still running"
 	// from "a genuinely different job_id whose job_spec.id collides", and
-	// would 400 the former — which the dispatcher treats as an outright
-	// REFUSAL (see the comment below), buying a duplicate render on another
-	// node. Checking the SAME job_id here, before BuildRequest ever runs,
-	// makes that distinction correctly: a known job_id short-circuits straight
-	// to the same re-ack/409 logic Accept's own duplicate path already uses;
-	// only a job_id this node has never seen reaches BuildRequest, so a real
+	// would 400 the former — again an outright REFUSAL per the dispatcher's
+	// contract, again inviting a duplicate render elsewhere. Checking the
+	// SAME job_id here, before BuildRequest ever runs, makes that distinction
+	// correctly: a known job_id short-circuits straight to the same
+	// re-ack/409 logic Accept's own duplicate path already uses; only a
+	// job_id this node has never seen reaches BuildRequest, so a real
 	// job_spec.id collision (a DIFFERENT job_id) still hits the Mkdir guard
 	// and 400s as intended.
 	if view, ok := s.jobs.Get(env.JobID); ok {
@@ -288,7 +302,12 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "job previously failed on this node: "+view.Error)
 			return
 		}
-		writeAck(w, env.JobID) // accepted/running/done: idempotent re-ack, no rebuild, no render
+		writeAck(w, env.JobID) // accepted/running/done: idempotent re-ack, even mid-drain — no rebuild, no render
+		return
+	}
+
+	if s.jobs.Draining() {
+		writeError(w, http.StatusServiceUnavailable, "node draining")
 		return
 	}
 
