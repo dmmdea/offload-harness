@@ -243,7 +243,8 @@ func TestGenerateFootprintNilHookUnchanged(t *testing.T) {
 		Exe: exe, Script: script, Args: args,
 		Out:     out,
 		Timeout: 10 * time.Second,
-		// Footprint nil ⇒ byte-identical CombinedOutput path; the callbacks are inert.
+		// Footprint nil ⇒ the legacy runCombined path (byte-identical output under the
+		// tailWriter cap); the callbacks are inert.
 		SampleFunc:  func(pid int) (float64, error) { sampled = true; return 1, nil },
 		OnFootprint: func(peak float64) { reported = true },
 	})
