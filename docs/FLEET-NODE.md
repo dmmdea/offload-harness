@@ -153,11 +153,142 @@ is not advertised, so the dispatcher can't send work the box would defer:
 | `stt` | `transcribe` | `stt_model` set | `whisper` (llama-swap-resident — no footprint sampling) |
 | `audio-gen` | `generate_audio` | voice or music script set | `acestep` (music) / `chatterbox` (voice) |
 | `run-graph` | `run_graph` | `run_graph_script` set | payload-declared `model_family`, else `comfy-graph` |
+| *(config-driven)* | `pipeline-job` | a valid `pipelines.<task_type>` entry (see below) | none — sizing rides on the task-scoped `Record("", "", task_type, peak)` entry |
 
 run-graph payloads carry `graph` and `manifest` as **raw nested JSON** (no base64) and are
 strict-validated at ack time — a malformed fleet job dies at the 400 with a clear reason,
 never mid-render. Typed run-graph defers (`VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `NODE_CLASS_MISSING`, …)
 surface in the job's `error` field as `code: detail`.
+
+## Pipeline-job task families
+
+`pipelines` (`internal/config` `Config.Pipelines map[string]PipelineSpec`) lets this node
+serve an **externally-provided pipeline CLI** as its own fleet `task_type` — 100%
+config-driven, unlike every hardcoded row in the table above: adding a new pipeline needs no
+code change, only a new `pipelines.<task_type>` entry:
+
+```json
+{
+  "pipelines": {
+    "scene-swap": {
+      "script": "D:/Dev/dmmdea/creative-marketing-pipelines/scripts/run-scene-swap.mjs",
+      "workdir": "D:/Dev/dmmdea/creative-marketing-pipelines",
+      "timeout_sec": 2400,
+      "artifacts": ["final.png", "qa-report.json"],
+      "max_ref_mb": 24
+    }
+  }
+}
+```
+
+`script`/`workdir`/`timeout_sec`/`artifacts` are required (an invalid entry is rejected LOUDLY
+at config load, never silently at dispatch); `ingress_allow`/`max_ref_mb` are optional (default
+allowlist / 24 MiB per ref). The task_type key (`"scene-swap"` above) is dispatched exactly
+like any other fleet task — it is advertised in `/fleet/health`'s task list once the entry is
+valid, and refused with the usual `unsupported task_type` 400 otherwise.
+
+### Payload
+
+```json
+{
+  "task_type": "scene-swap",
+  "payload": {
+    "job_spec": { "id": "web-1a2b3c4d", "background": { "mode": "generate", "...": "..." }, "...": "..." },
+    "image_refs": {
+      "product": "http://<node>:<port>/api/uploads/<name>.png",
+      "logo": "http://<node>:<port>/api/uploads/<name>.png",
+      "background": "http://<node>:<port>/api/uploads/<name>.png"
+    },
+    "tier": "16gb"
+  }
+}
+```
+
+**Ack-time validation** (every rule below is checked, and every ref fetched, BEFORE the job is
+accepted — a bad payload or an unreachable ref is a 400, never a mid-render surprise):
+
+- `job_spec` is required and must be a JSON object with a slug-valid `id`
+  (`^[A-Za-z0-9_-]{1,64}$` — it becomes the materialization dir name and a filename prefix on
+  every published artifact).
+- `tier` is a required non-empty string (the CLI's own tier resolution is authoritative).
+- `image_refs.product` and `image_refs.logo` are required; `image_refs.background` is
+  required **iff** `job_spec.background.mode == "stock"`.
+- `job_spec` must **not** already contain `product`, `logo`, or `background.path` — the node,
+  never the dispatch payload, injects those from the fetched `image_refs` (a payload trying to
+  set them itself is rejected outright).
+- `job_spec.id` must **not** already have an in-flight job on this node: the materialization
+  dir is created with an exclusive `os.Mkdir` (not `MkdirAll`), so a second dispatch sharing an
+  id with a still-running job is refused at ack (`"job_spec.id ... already in flight on this
+  node"`) rather than sharing the directory — which would otherwise let the first job's
+  eventual cleanup delete the second job's still-live assets/`job.json` out from under it.
+- Every `image_refs` URL goes through the same allowlisted/capped/magic-sniffed ingress every
+  other fetched ref uses (tailnet CGNAT + loopback + this pipeline's `ingress_allow`; PNG/JPEG/
+  WebP only; capped at `max_ref_mb`).
+
+On success the node materializes `<base_dir>/pipeline-jobs/<job_id>/`: `assets/` (the fetched
+refs), `job.json` (`job_spec` with `product`/`logo`/`background.path` injected as absolute
+local paths), and `out/` (the CLI's `--out` root — the CLI itself creates `out/<job_id>/` and
+writes its artifacts there). This whole directory is removed once the job reaches a terminal
+state (success or failure) — never before, since the CLI reads `job.json` and the fetched
+assets for the entire run.
+
+### Result + publishing
+
+```go
+type pipelineJobResult struct {
+    FinalPath    string  `json:"final_path"`               // FIRST key — becomes artifacts[0]
+    QaReportPath string  `json:"qa_report_path,omitempty"` // artifacts[1], when produced
+    JobID        string  `json:"job_id"`
+    Tier         string  `json:"tier"`
+    DurationSec  float64 `json:"duration_sec"`
+}
+```
+
+`final_path` is marshaled **first on purpose** — the web viewmodel harvests artifacts in
+insertion order, so `artifacts[0]` must be the primary render. Every configured `artifacts[i]`
+is copied from `out/<job_id>/<name>` to `MediaDir` as **`<job_id>-<name>`** (flat, bare
+filenames — `GET /fleet/media/{name}` rejects any separator, same as every other published
+render). The **primary** artifact (`artifacts[0]`) missing is an error; any other
+(**optional**, e.g. `qa-report.json`) artifact missing is silently omitted from the result,
+never an error.
+
+The JSON result only ever **names** `artifacts[0]` (`final_path`) and `artifacts[1]`
+(`qa_report_path`) — the binding is by **index**, not by "whichever artifacts happened to be
+present": if `artifacts[1]` is missing but a `artifacts[2]` exists, `qa_report_path` stays
+absent (never silently reports `artifacts[2]`'s path instead). A 3rd-or-later configured
+artifact is still copied to `MediaDir` under its own `<job_id>-<name>` name when present, it is
+simply never referenced in the result JSON — a consumer that configures more than two
+artifacts must know the extra names out of band (e.g. a fixed convention agreed with the
+pipeline's own docs).
+
+A child CLI failure (non-zero exit) is surfaced as a **plain failure**, not a defer — a fleet
+job has no interactive caller to hand work back to. When the CLI's stderr carries the CMP CLI
+contract's `SCENE-SWAP-FAIL stage=<...>: <message>` line, that line becomes the job's `error`
+verbatim; otherwise the generic exec error (including a timeout-kill) is used.
+
+### GPU concurrency caveats (read before dispatching two pipeline jobs at once)
+
+- **No machine-wide GPU lease is taken in Go for a pipeline job** — only this process's
+  single in-process media slot. The externally-provided CLI's own nested per-stage calls
+  acquire the machine-wide lease themselves, exactly like a manual run of the same pipeline
+  today; taking the machine lease again here would self-deadlock against that nested
+  acquisition. Practical effect: **a second concurrent pipeline-job dispatch to this node
+  waits behind the first for up to `gpu_wait_ms`, then fails as `gpu_busy`** — same shape as
+  every other GPU route's busy-card behavior, just arbitrated one level higher (in-process
+  only, not across processes).
+- **A node restart loses an in-flight pipeline job** exactly like every other fleet task
+  (see Known limits below): survivors are marked terminal `error:"interrupted"` on drain: an
+  in-flight run may leave partial output under its `pipeline-jobs/<job_id>/out/` — the
+  dispatcher's failure handling (re-dispatch elsewhere) is the recovery path, not a node-side
+  resume. A **graceful** stop (SIGINT, drained) removes nothing extra — the job's own
+  directory is cleaned up by its normal cleanup path once the drain marks it terminal. An
+  **ungraceful** stop (crash, `kill -9`, power loss) leaves the directory behind with no
+  in-memory record of it at all; since `job_spec.id` collisions are guarded by an exclusive
+  directory create (see above), that orphaned directory would otherwise refuse EVERY future
+  dispatch reusing the same `job_spec.id`, forever. `fleet-serve` sweeps
+  `<base_dir>/pipeline-jobs/`'s contents once at startup, **before** it starts listening —
+  every directory present at that instant is orphaned by definition (this process has not
+  accepted a single dispatch yet) — and logs how many it removed.
 
 ## Known limits (v1)
 

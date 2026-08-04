@@ -76,12 +76,21 @@ const (
 	// internal/rungraph (shared GPU lock + ComfyUI lifecycle + manifest satisfaction).
 	// Returns a node-addressed output envelope {outputs, image_path, unverified_models}.
 	TaskRunGraph TaskType = "run_graph"
+	// TaskPipelineJob runs an externally-provided pipeline CLI this node is
+	// configured for (internal/config Config.Pipelines, keyed by the pipeline's
+	// task_type name, e.g. "scene-swap") as a fleet task. Unlike every hardcoded
+	// route above, this one is 100% config-driven: adding a new pipeline needs
+	// no code change, only a new internal/config Config.Pipelines entry (script,
+	// workdir, timeout_sec, artifacts). Its own branch in pipeline.Run — it
+	// shells out to the configured script, like TaskRunGraph shells out to
+	// comfy-run-graph.mjs. Returns pipeline-defined result fields.
+	TaskPipelineJob TaskType = "pipeline-job"
 )
 
 // Valid reports whether t is a known task type.
 func (t TaskType) Valid() bool {
 	switch t {
-	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskGenerateSVG, TaskGenerateVideo, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskRunGraph:
+	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskGenerateSVG, TaskGenerateVideo, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskRunGraph, TaskPipelineJob:
 		return true
 	}
 	return false
