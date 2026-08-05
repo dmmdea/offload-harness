@@ -1,5 +1,11 @@
 # local-offload capability report
 
+> ⚠️ **HISTORICAL — this is NOT Qube's current hardware.** Generated 2026-07-27, when Qube ran a
+> single RTX 5060 Ti (16 GB). On **2026-08-02** a second card (RTX 5070 Ti 16 GB) was installed, so
+> Qube now runs the **`blackwell-2x16`** tier with **~32 GB total VRAM across two cards**
+> (32614 MiB measured, `nvidia-smi` 2026-08-05). Kept verbatim as a point-in-time record.
+> Do not size anything off the numbers below.
+
 | | |
 |---|---|
 | host | Qube |
