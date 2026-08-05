@@ -284,9 +284,16 @@ Detection prefers `nvidia-smi` and falls back per OS (CIM on Windows, DRM sysfs 
 Linux) — an AMD box that cannot be identified must never be silently called `cpu`, which
 would strip it of the entire Vulkan serving path.
 
-Verified on the fleet: <node-b> → `blackwell-16` (RTX 5060 Ti, 15.9 GB), the <node-a> laptop →
-`ampere-8` (RTX 3070 Laptop, 8 GB), and the Linux node → `ampere-6` (RTX 3050, 6 GB),
-each matching the tier it actually runs.
+Verified on the fleet: <node-b> → `blackwell-2x16` (RTX 5060 Ti 16 GB **+** RTX 5070 Ti 16 GB,
+~32 GB total), the <node-a> laptop → `ampere-8` (RTX 3070 Laptop, 8 GB), and the Linux node →
+`ampere-6` (RTX 3050, 6 GB), each matching the tier it actually runs.
+
+> <node-b> read `blackwell-16` (single RTX 5060 Ti, 15.9 GB) until **2026-08-02**, when the
+> 5070 Ti was installed. Detection already handles this — `hwdetect.Classify` returns
+> `blackwell-2x16` for two Blackwell cards, and its test names this exact pair as the
+> reference box — but this sentence lagged, and stale "5060 Ti solo" wording in several
+> places led to the box repeatedly being budgeted as a single 16 GB card. It is 32 GB
+> across two cards. Corrected 2026-08-05.
 
 ### Tier media seeds (`local-offload install seed`)
 
