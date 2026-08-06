@@ -49,6 +49,11 @@ type wireMsg struct {
 	Content    string         `json:"content"`
 	ToolCalls  []wireToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
+	// ReasoningContent is decode-only: reasoning/harmony models (DeepSeek V4 thinking,
+	// gpt-oss) can return message.content EMPTY with the entire answer in
+	// reasoning_content. Outgoing messages never set it, so omitempty keeps it off
+	// the request wire.
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 type wireToolDef struct {
 	Type     string `json:"type"`
@@ -170,6 +175,16 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 	}
 	ch := wr.Choices[0]
 	out := Msg{Role: "assistant", Content: ch.Message.Content}
+	// Reasoning-model fallback (ports nimclient's proven behavior): when content is
+	// empty, no tool call was made, and reasoning_content is populated, the answer is
+	// in the reasoning channel — without this the loop sees an empty turn and a
+	// perfectly good completion is scored as silence. This exact blind spot is what
+	// disqualified gpt-oss-20b's free-text role (2026-08-03 round-2 record) and hid
+	// one eval answer on 2026-08-05. Tool-call turns keep empty content: that is the
+	// normal shape, not a failure.
+	if out.Content == "" && len(ch.Message.ToolCalls) == 0 && ch.Message.ReasoningContent != "" {
+		out.Content = ch.Message.ReasoningContent
+	}
 	for _, tc := range ch.Message.ToolCalls {
 		out.ToolCalls = append(out.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Args: tc.Function.Arguments})
 	}
