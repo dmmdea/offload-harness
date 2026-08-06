@@ -4,6 +4,19 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.43.2] - 2026-08-05
+
+### Fixed — agent client no longer drops answers that arrive in `reasoning_content`
+Reasoning/harmony models (DeepSeek V4 thinking, gpt-oss) can return `message.content` EMPTY with
+the entire completion in `message.reasoning_content`. The NIM client has decoded that field since
+its introduction; the local agent client never did, so the agent loop read such turns as silence.
+This exact blind spot produced the "content comes back empty" evidence that disqualified
+gpt-oss-20b's free-text role (2026-08-03 round-2 record) and hid one correct eval answer on
+2026-08-05. The client now falls back to `reasoning_content` when content is empty AND the turn
+made no tool calls — tool-call turns keep their (normal) empty content, and populated content
+always wins. Decode-only: outgoing requests are unchanged (`omitempty`). Three tests, each
+mutation-verified red against the pre-fix client at the real call site.
+
 ## [0.43.1] - 2026-08-03
 
 ### Fixed — output budgets sized from ledger evidence, not from a guess
