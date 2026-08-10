@@ -4,6 +4,40 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.44.0] - 2026-08-10
+
+### Added — `offload_edit_image_generative`: instruction edits with no mask
+The fleet had three edit-shaped things and none of them was a generative,
+instruction-following edit. `edit_image` is deterministic PIL ops; `inpaint_image`
+re-denoises inside a mask you supply. Neither can do "make it snowing heavily" or
+"turn the leather into fur", where the change is global or diffuse and there is no
+region to draw. A Qwen-Image-Edit 2511 GGUF had been sitting on disk bound to
+nothing because no workflow builder existed for it.
+
+New route (`gen_edit_*` config — named `gen_edit`, not `edit`, because `edit_*` is
+already the PIL route and a shared prefix would collide in the JSON config):
+
+- `render/wf-qwen-image-edit.mjs` — graph follows ComfyUI's shipped
+  `image_qwen_image_edit_2511` template, with a switchable loader (UnetLoaderGGUF
+  for `.gguf`, UNETLoader for `.safetensors`) so a GGUF binding works, and Lightning
+  applied as a **LoRA** rather than requiring a pre-merged few-step checkpoint —
+  same result, composes with any quantisation, and saves a 20 GB download.
+- `render/comfy-edit.mjs` — standard lifecycle (single-slot GPU lock, on-demand
+  ComfyUI, zero-always-warm teardown).
+- `QWEN_EDIT_PRESETS` pairs steps+cfg+LoRA as a matched triple (`full` |
+  `lightning8` | `lightning4`). The builder throws rather than default them: a
+  Lightning LoRA at 40 steps/cfg 3 produces mush and the base at 4 steps/cfg 1
+  produces noise, and either renders "successfully".
+
+Verified end to end, same source/prompt/seed on a 2-card 16 GB box:
+`lightning8` 8 steps 5m26s, `full` 40 steps 9m15s. Both preserve composition and
+add convincing snow. Marginal cost ~7.2 s/step, so **~4.5 min of both runs is fixed
+overhead** (ComfyUI cold start + a 15.4 GB GGUF load) — the LoRA saves ~4 min of a
+9 min job, but the overhead is the bigger target.
+
+Known limitation: `FluxKontextImageScale` snaps to ~1 MP, so a 2048x2048 source
+returns ~1024x1024.
+
 ## [0.43.2] - 2026-08-05
 
 ### Fixed — agent client no longer drops answers that arrive in `reasoning_content`

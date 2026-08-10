@@ -126,6 +126,22 @@ func routesIn(cfg config.Config, exeDir string) []Route {
 		out = append(out, r)
 	}
 
+	// --- edit_image_generative: script AND unet, matching the pipeline's gate.
+	// edit_unet is a ComfyUI model FILENAME, not a path, so it is reported but never
+	// stat'd — same rule as inpaint_ckpt.
+	if cfg.GenEditScript == "" || cfg.GenEditUnet == "" {
+		out = append(out, Route{Name: "edit_image_generative", Engine: "comfyui", State: NotConfigured,
+			Detail: "gen_edit_script/gen_edit_unet is unset"})
+	} else {
+		comfyUsed, nodeUsed = true, true
+		r := fileRoute("edit_image_generative", "comfyui", exeDir,
+			binding{key: "gen_edit_script", value: cfg.GenEditScript, kind: scriptBinding},
+		)
+		r.Detail += fmt.Sprintf("; gen_edit_unet=%s preset=%s (ComfyUI model name, not checked here)",
+			cfg.GenEditUnet, cfg.GenEditPreset)
+		out = append(out, r)
+	}
+
 	// --- the plain script routes ---
 	for _, s := range []struct {
 		name, engine, key, value string

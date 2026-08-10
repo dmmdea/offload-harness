@@ -147,6 +147,64 @@ func TestBatchArgs_ZeroModelEmitsNoBindingFlags(t *testing.T) {
 	}
 }
 
+func TestEditArgs_FullBinding(t *testing.T) {
+	m := EditModel{Unet: "qwen-edit.gguf", Preset: "lightning8", LoRA: "light8.safetensors",
+		LoRAStrength: 0.8, CLIP: "qwen_vl.safetensors", VAE: "qwen_vae.safetensors",
+		Steps: 8, CFG: 1, Sampler: "euler", Scheduler: "simple"}
+	got := editArgs("o.png", "in.png", "make it snow", map[string]any{"seed": 9, "negative": "blurry"}, m)
+	want := []string{"o.png", "in.png", "make it snow",
+		"--negative", "blurry", "--seed", "9", "--unet", "qwen-edit.gguf",
+		"--preset", "lightning8", "--clip", "qwen_vl.safetensors", "--vae", "qwen_vae.safetensors",
+		"--lora", "light8.safetensors", "--lora-strength", "0.8",
+		"--steps", "8", "--cfg", "1", "--sampler", "euler", "--scheduler", "simple"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("editArgs:\n got %v\nwant %v", got, want)
+	}
+}
+
+func TestEditArgs_ZeroModelAddsNoFlags(t *testing.T) {
+	got := editArgs("o.png", "in.png", "p", nil, EditModel{})
+	want := []string{"o.png", "in.png", "p"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("zero model must add no flags: got %v", got)
+	}
+}
+
+// A per-request preset is the supported speed/fidelity dial and must beat the
+// machine binding — otherwise a caller asking for `full` silently gets Lightning.
+func TestEditArgs_RequestPresetAndStepsWin(t *testing.T) {
+	m := EditModel{Unet: "u.gguf", Preset: "lightning8", Steps: 8}
+	joined := strings.Join(editArgs("o.png", "in.png", "p",
+		map[string]any{"preset": "full", "steps": 40, "cfg": 3.0}, m), " ")
+	if !strings.Contains(joined, "--preset full") || strings.Contains(joined, "--preset lightning8") {
+		t.Fatalf("request preset must win: %s", joined)
+	}
+	if !strings.Contains(joined, "--steps 40") || strings.Contains(joined, "--steps 8") {
+		t.Fatalf("request steps must win: %s", joined)
+	}
+	if !strings.Contains(joined, "--cfg 3") {
+		t.Fatalf("request cfg must reach the runner: %s", joined)
+	}
+}
+
+// An explicit empty lora means "base model, no distillation" and has to override a
+// configured LoRA. Falling through to the binding would silently keep distilling.
+func TestEditArgs_ExplicitEmptyLoRAOverridesBinding(t *testing.T) {
+	m := EditModel{Unet: "u.gguf", LoRA: "light8.safetensors"}
+	joined := strings.Join(editArgs("o.png", "in.png", "p", map[string]any{"lora": ""}, m), " ")
+	if strings.Contains(joined, "light8.safetensors") {
+		t.Fatalf("explicit empty lora must override the binding: %s", joined)
+	}
+	if !strings.Contains(joined, "--lora ") {
+		t.Fatalf("explicit empty lora must still reach the runner: %s", joined)
+	}
+	// absent (not explicit) falls through to the binding
+	fallthroughJoined := strings.Join(editArgs("o.png", "in.png", "p", nil, m), " ")
+	if !strings.Contains(fallthroughJoined, "--lora light8.safetensors") {
+		t.Fatalf("absent lora must fall through to the binding: %s", fallthroughJoined)
+	}
+}
+
 func TestInpaintArgs_FullBinding(t *testing.T) {
 	m := InpaintModel{Ckpt: "sdxl.safetensors", VAE: "builtin", Steps: 34, CFG: 6.5, Sampler: "dpmpp_2m", Scheduler: "karras"}
 	got := inpaintArgs("o.png", "in.png", "m.png", "clean it", map[string]any{"seed": 9, "denoise": 0.85, "grow_mask": 24, "negative": "text"}, m)
