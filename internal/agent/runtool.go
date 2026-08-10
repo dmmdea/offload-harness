@@ -65,7 +65,7 @@ func runTool(pol *Policy, worktree, scratch string, run shellRunner) Tool {
 			// model must give a BARE executable name, which we then resolve ourselves
 			// against the trusted PATH.
 			if strings.ContainsAny(cmd, `/\`) || filepath.IsAbs(cmd) {
-				return `NOT run: command must be a bare executable name (e.g. "go"), not a path`, nil
+				return "", NotPerformed(`NOT run: command must be a bare executable name (e.g. "go"), not a path`)
 			}
 
 			// TOOL-LAYER ALLOWLIST — the PRIMARY gate, cross-platform, BEFORE any
@@ -74,7 +74,7 @@ func runTool(pol *Policy, worktree, scratch string, run shellRunner) Tool {
 			// command is a normal refusal tool result, not an error. Checked on the
 			// BARE name (path forms already refused above).
 			if !runAllowlisted(cmd, runAllowedExecutables) {
-				return fmt.Sprintf("NOT run: %s is not on the runner allowlist (allowed: %s)", cmd, allowed), nil
+				return "", NotPerformed(fmt.Sprintf("NOT run: %s is not on the runner allowlist (allowed: %s)", cmd, allowed))
 			}
 
 			// (b) Resolve the bare name against the TRUSTED system PATH. exec.LookPath
@@ -82,20 +82,20 @@ func runTool(pol *Policy, worktree, scratch string, run shellRunner) Tool {
 			// binary is not resolvable via a bare name. On error → refuse.
 			resolved, lookErr := exec.LookPath(cmd)
 			if lookErr != nil {
-				return fmt.Sprintf("NOT run: %s not found on PATH", cmd), nil
+				return "", NotPerformed(fmt.Sprintf("NOT run: %s not found on PATH", cmd))
 			}
 
 			// (c) Defense in depth — refuse if the resolved executable lives INSIDE the
 			// worktree (guards the edge case where the worktree is somehow on PATH).
 			if inside, _ := pathInside(worktree, resolved); inside {
-				return fmt.Sprintf("NOT run: resolved executable %s is inside the worktree", resolved), nil
+				return "", NotPerformed(fmt.Sprintf("NOT run: resolved executable %s is inside the worktree", resolved))
 			}
 
 			// Broker gate — opt-in capability + an audit record of every command
 			// (records the direct-exec command line). defer-not-crash on non-Allow.
 			auditLine := strings.TrimSpace(cmd + " " + strings.Join(in.Args, " "))
 			if d, reason := pol.Decide(Action{Kind: ActShell, Path: auditLine}); d != Allow {
-				return fmt.Sprintf("NOT performed (%s): %s", d, reason), nil
+				return "", NotPerformed(fmt.Sprintf("NOT performed (%s): %s", d, reason))
 			}
 
 			ctx, cancel := context.WithTimeout(ctx, shellTimeout)
@@ -118,7 +118,7 @@ func runTool(pol *Policy, worktree, scratch string, run shellRunner) Tool {
 			if res.Refused {
 				// the CAGE refused to start (setup failure / defense-in-depth allowlist)
 				// — not a command exit.
-				return fmt.Sprintf("NOT performed (cage refused): %s", strings.TrimSpace(res.Stderr)), nil
+				return "", NotPerformed(fmt.Sprintf("NOT performed (cage refused): %s", strings.TrimSpace(res.Stderr)))
 			}
 			if err != nil && res.ExitCode == 0 && res.Signal == 0 {
 				// the cage failed to launch the command at all (exec error, or the OS

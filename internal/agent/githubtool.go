@@ -86,12 +86,12 @@ func GitHubTools(pol *Policy, token, defaultRepo, worktreeRoot string) []Tool {
 		},
 		Exec: func(ctx context.Context, args string) (string, error) {
 			if msg, ok := need(); !ok {
-				return msg, nil
+				return "", NotPerformed(msg)
 			}
 			var in struct{ Method, Path, Body string }
 			_ = json.Unmarshal([]byte(args), &in)
 			if strings.TrimSpace(in.Method) == "" || strings.TrimSpace(in.Path) == "" {
-				return "NOT performed: github_api requires method and path", nil
+				return "", NotPerformed("NOT performed: github_api requires method and path")
 			}
 			var body []byte
 			if strings.TrimSpace(in.Body) != "" {
@@ -113,7 +113,7 @@ func GitHubTools(pol *Policy, token, defaultRepo, worktreeRoot string) []Tool {
 		},
 		Exec: func(ctx context.Context, args string) (string, error) {
 			if msg, ok := need(); !ok {
-				return msg, nil
+				return "", NotPerformed(msg)
 			}
 			var in struct {
 				Name        string `json:"name"`
@@ -122,7 +122,7 @@ func GitHubTools(pol *Policy, token, defaultRepo, worktreeRoot string) []Tool {
 			}
 			_ = json.Unmarshal([]byte(args), &in)
 			if strings.TrimSpace(in.Name) == "" {
-				return "NOT performed: github_create_repo requires name", nil
+				return "", NotPerformed("NOT performed: github_create_repo requires name")
 			}
 			body, _ := json.Marshal(map[string]any{"name": in.Name, "private": in.Private, "description": in.Description, "auto_init": true})
 			status, data, err := githubDo(ctx, client, pol, token, http.MethodPost, "/user/repos", body)
@@ -149,19 +149,19 @@ func GitHubTools(pol *Policy, token, defaultRepo, worktreeRoot string) []Tool {
 		},
 		Exec: func(ctx context.Context, args string) (string, error) {
 			if msg, ok := need(); !ok {
-				return msg, nil
+				return "", NotPerformed(msg)
 			}
 			var in struct{ Path, Repo, Dest, Message string }
 			_ = json.Unmarshal([]byte(args), &in)
 			if strings.TrimSpace(in.Path) == "" {
-				return "NOT performed: github_upload_file requires path", nil
+				return "", NotPerformed("NOT performed: github_upload_file requires path")
 			}
 			repo := strings.TrimSpace(in.Repo)
 			if repo == "" {
 				repo = defaultRepo
 			}
 			if repo == "" {
-				return "NOT performed: no repo given and no default repo configured (set GITHUB_REPO)", nil
+				return "", NotPerformed("NOT performed: no repo given and no default repo configured (set GITHUB_REPO)")
 			}
 			dest := strings.TrimSpace(in.Dest)
 			if dest == "" {
@@ -175,7 +175,7 @@ func GitHubTools(pol *Policy, token, defaultRepo, worktreeRoot string) []Tool {
 			defer r.Close()
 			f, err := r.OpenFile(rel, os.O_RDONLY, 0)
 			if err != nil {
-				return fmt.Sprintf("NOT performed: cannot open %s (%v)", in.Path, err), nil
+				return "", NotPerformed(fmt.Sprintf("NOT performed: cannot open %s (%v)", in.Path, err))
 			}
 			content, rerr := io.ReadAll(f)
 			f.Close()
