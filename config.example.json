@@ -41,6 +41,8 @@
   "imagegen_lora": "",
   "imagegen_lora_strength": 0,
   "imagegen_shift": 0,
+  "imagegen_refiner_model": "",
+  "imagegen_refiner_timeout_sec": 30,
   "imagegen_engine": "",
   "sdcpp_bin": "",
   "sdcpp_script": "render/sdcpp-generate.mjs",

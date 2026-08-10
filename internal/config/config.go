@@ -241,6 +241,18 @@ type Config struct {
 	ImageGenLoRA         string  `json:"imagegen_lora,omitempty"`
 	ImageGenLoRAStrength float64 `json:"imagegen_lora_strength,omitempty"`
 	ImageGenShift        float64 `json:"imagegen_shift,omitempty"`
+	// --- opt-in prompt refiner (generate_image; all engines + batch) ---
+	// ImageGenRefinerModel is the llama-swap model id (e.g. "gemma-4-12b") that
+	// expands an image prompt with concrete photographic detail before the render.
+	// Empty = the feature is OFF and the render path is byte-identical to a
+	// harness without it (compatibility pinned by test). The refiner is fail-safe:
+	// any refiner problem (transport error, timeout, empty/short output, a dropped
+	// "double-quoted" text span) falls back to the raw prompt and the render
+	// proceeds — refinement never makes a render fail.
+	ImageGenRefinerModel string `json:"imagegen_refiner_model,omitempty"`
+	// ImageGenRefinerTimeoutSec bounds one refiner call (the text tier may need a
+	// llama-swap cold swap first). Default 30; <=0 = the default.
+	ImageGenRefinerTimeoutSec int `json:"imagegen_refiner_timeout_sec,omitempty"`
 	// --- sd.cpp image engine (J2: the AMD/Vulkan tier's backend; per-task media_engine seam) ---
 	// ImageGenEngine selects the generate_image backend: ""/"comfy" = the ComfyUI path
 	// above (unchanged default); "sdcpp" = stable-diffusion.cpp via SdcppScript — a
@@ -702,6 +714,8 @@ func Default() Config {
 		NodePath:                    "node",
 		ComfyDir:                    DefaultComfyDir(),
 		ImageGenTimeoutSec:          720,
+		ImageGenRefinerModel:        "", // opt-in prompt refiner: empty = OFF (render path byte-identical)
+		ImageGenRefinerTimeoutSec:   30,
 		InpaintScript:               "", // inpaint route: per-machine SDXL-class binding; empty = defer
 		InpaintCkpt:                 "",
 		InpaintTimeoutSec:           900,
