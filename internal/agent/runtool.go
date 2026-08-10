@@ -37,10 +37,11 @@ func runTool(pol *Policy, worktree, scratch string, run shellRunner) Tool {
 	allowed := strings.Join(runAllowedExecutables, ", ")
 	return Tool{
 		ToolSpec: ToolSpec{
-			Name: "run",
+			Name:        "run",
 			Description: "Run an ALLOWLISTED program directly (no shell) inside an OS sandbox. Provide the program in `command` (one of: " + allowed + ") and its arguments as a `args` array — arguments are passed literally, with NO shell interpretation (no pipes, globs, redirection, or &&). Use it for builds and tests, e.g. command=\"go\" args=[\"test\",\"./...\"]. Returns the exit code, stdout, and stderr. On native Windows the command is confined by a Job Object (kill/memory/time limits) and a low-integrity token: DURING the run the worktree is temporarily set to low integrity (so a low-integrity process could write into it for that window) and reverted afterward; writes OUTSIDE the worktree are blocked, but reads and network are NOT confined on native Windows (unlike the Linux cage). A command not on the allowlist is refused without running. Off by default.",
-			Schema:      json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"the program to run (must be on the runner allowlist)"},"args":{"type":"array","items":{"type":"string"},"description":"arguments passed literally to the program (no shell interpretation)"}},"required":["command"]}`),
+			Schema:      json.RawMessage(`{"type":"object","properties":{"security_risk":{"type":"string","enum":["low","medium","high"],"description":"your own risk assessment of THIS call. Be honest: on an unattended run, high parks the call for operator review instead of executing it"},"command":{"type":"string","description":"the program to run (must be on the runner allowlist)"},"args":{"type":"array","items":{"type":"string"},"description":"arguments passed literally to the program (no shell interpretation)"}},"required":["command"]}`),
 		},
+		ParkOnHighRisk: true,
 		Exec: func(ctx context.Context, args string) (string, error) {
 			var in struct {
 				Command string   `json:"command"`

@@ -41,8 +41,9 @@ func shellTool(pol *Policy, worktree, scratch string, run shellRunner) Tool {
 		ToolSpec: ToolSpec{
 			Name:        "run_shell",
 			Description: "Run a shell command (/bin/sh -c) inside the Linux OS cage: NO network egress, filesystem confined to the worktree (writable) plus a scratch dir, dangerous syscalls blocked, the i386 ABI closed. Use it for builds, tests, and file manipulation. Returns the exit code, stdout, and stderr. Off by default; Linux-only.",
-			Schema:      json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"the shell command line to run"}},"required":["command"]}`),
+			Schema:      json.RawMessage(`{"type":"object","properties":{"security_risk":{"type":"string","enum":["low","medium","high"],"description":"your own risk assessment of THIS call. Be honest: on an unattended run, high parks the call for operator review instead of executing it"},"command":{"type":"string","description":"the shell command line to run"}},"required":["command"]}`),
 		},
+		ParkOnHighRisk: true,
 		Exec: func(ctx context.Context, args string) (string, error) {
 			var in struct {
 				Command string `json:"command"`

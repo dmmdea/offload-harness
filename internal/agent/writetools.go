@@ -30,8 +30,9 @@ func WriteTools(worktreeRoot string, pol *Policy) ([]Tool, error) {
 		ToolSpec: ToolSpec{
 			Name:        "write_file",
 			Description: "CREATE a NEW file within the worktree with the given contents. Use this ONLY to create a new file; to change an EXISTING file use edit_file instead. Creating a new file is allowed; OVERWRITING an existing file requires approval (denied on unattended runs). path is relative to the worktree root.",
-			Schema:      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"file path relative to the worktree root"},"content":{"type":"string","description":"file contents"}},"required":["path","content"]}`),
+			Schema:      json.RawMessage(`{"type":"object","properties":{"security_risk":{"type":"string","enum":["low","medium","high"],"description":"your own risk assessment of THIS call. Be honest: on an unattended run, high parks the call for operator review instead of executing it"},"path":{"type":"string","description":"file path relative to the worktree root"},"content":{"type":"string","description":"file contents"}},"required":["path","content"]}`),
 		},
+		ParkOnHighRisk: true,
 		Exec: func(_ context.Context, args string) (string, error) {
 			var in struct {
 				Path    string `json:"path"`
@@ -89,8 +90,9 @@ func WriteTools(worktreeRoot string, pol *Policy) ([]Tool, error) {
 		ToolSpec: ToolSpec{
 			Name:        "delete_file",
 			Description: "Delete a file within the worktree. Always requires approval (denied on unattended runs). path is relative to the worktree root.",
-			Schema:      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"file path relative to the worktree root"}},"required":["path"]}`),
+			Schema:      json.RawMessage(`{"type":"object","properties":{"security_risk":{"type":"string","enum":["low","medium","high"],"description":"your own risk assessment of THIS call. Be honest: on an unattended run, high parks the call for operator review instead of executing it"},"path":{"type":"string","description":"file path relative to the worktree root"}},"required":["path"]}`),
 		},
+		ParkOnHighRisk: true,
 		Exec: func(_ context.Context, args string) (string, error) {
 			var in struct {
 				Path string `json:"path"`
@@ -122,8 +124,9 @@ func WriteTools(worktreeRoot string, pol *Policy) ([]Tool, error) {
 		ToolSpec: ToolSpec{
 			Name:        "edit_file",
 			Description: "CHANGE an EXISTING file by replacing ONE unique snippet. old_string must match a snippet that appears EXACTLY once in the file — include enough surrounding context (whole lines around the change) to make it unique; it is replaced by new_string. Use this to modify a file that already exists; to CREATE a new file use write_file instead. PREFER this over rewriting a whole file. path is relative to the worktree root.",
-			Schema:      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"file path relative to the worktree root"},"old_string":{"type":"string","description":"exact snippet to find; must be unique in the file"},"new_string":{"type":"string","description":"replacement text"}},"required":["path","old_string","new_string"]}`),
+			Schema:      json.RawMessage(`{"type":"object","properties":{"security_risk":{"type":"string","enum":["low","medium","high"],"description":"your own risk assessment of THIS call. Be honest: on an unattended run, high parks the call for operator review instead of executing it"},"path":{"type":"string","description":"file path relative to the worktree root"},"old_string":{"type":"string","description":"exact snippet to find; must be unique in the file"},"new_string":{"type":"string","description":"replacement text"}},"required":["path","old_string","new_string"]}`),
 		},
+		ParkOnHighRisk: true,
 		Exec: func(_ context.Context, args string) (string, error) {
 			var in struct {
 				Path      string `json:"path"`

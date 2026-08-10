@@ -451,7 +451,7 @@ func TestLoopDoesNotCapSmallToolResult(t *testing.T) {
 	tools := []Tool{{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) {
 		return "small exact content", nil
 	}}}
-	res, err := NewLoop(client, tools, 10).WithToolResultCap(8 * 1024).Run(context.Background(), "read small")
+	res, err := NewLoop(client, tools, 10).WithToolResultCap(8*1024).Run(context.Background(), "read small")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

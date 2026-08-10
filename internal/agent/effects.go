@@ -1,6 +1,11 @@
 package agent
 
-import "errors"
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+)
 
 // Effect accounting for tool execution (ADR-pending; pattern adopted 2026-08-10
 // from turnstone's effect-record design, trimmed to what this loop can honestly
@@ -78,6 +83,10 @@ type EffectRecord struct {
 	// refusal class, unknown tool) so the record is auditable without the
 	// transcript. Empty for committed.
 	Note string `json:"note,omitempty"`
+	// Risk is the model's own security_risk annotation on the call ("" when
+	// not provided) — recorded for every fate so the flywheel can correlate
+	// self-assessed risk with actual outcomes.
+	Risk string `json:"risk,omitempty"`
 }
 
 // EffectCounts aggregates a run's records per status — the summary an MCP
@@ -91,4 +100,42 @@ func EffectCounts(recs []EffectRecord) map[EffectStatus]int {
 		c[r.Status]++
 	}
 	return c
+}
+
+// securityRisk extracts the model's own security_risk annotation from a tool
+// call's raw JSON args. Absent (or wholly unparsable JSON) yields "" — no
+// signal; a wholly-malformed call fails loudly in the tool's own required-field
+// checks. A PRESENT value normalizes case+whitespace, and a present-but-
+// unrecognized value ("critical", "severe", a number) returns
+// "unrecognized(<raw>)" rather than "": the target population is weak local
+// models, which emit case variants and synonyms routinely, and a tighten-only
+// mechanism must fail CLOSED — the model tried to flag the call, so the park
+// logic treats anything unrecognized like high, and the ledger records the raw
+// attempt instead of silently discarding it (review finding #1, 2026-08-10).
+func securityRisk(args string) string {
+	var probe struct {
+		SecurityRisk any `json:"security_risk"`
+	}
+	if err := json.Unmarshal([]byte(args), &probe); err != nil || probe.SecurityRisk == nil {
+		return ""
+	}
+	raw, ok := probe.SecurityRisk.(string)
+	if !ok {
+		return fmt.Sprintf("unrecognized(%v)", probe.SecurityRisk)
+	}
+	switch norm := strings.ToLower(strings.TrimSpace(raw)); norm {
+	case "":
+		return ""
+	case "low", "medium", "high":
+		return norm
+	default:
+		return "unrecognized(" + raw + ")"
+	}
+}
+
+// riskParks reports whether a security_risk annotation parks an effectful call
+// on an unattended run: an explicit high, or any present-but-unrecognized
+// value (fail closed — see securityRisk).
+func riskParks(risk string) bool {
+	return risk == "high" || strings.HasPrefix(risk, "unrecognized(")
 }
