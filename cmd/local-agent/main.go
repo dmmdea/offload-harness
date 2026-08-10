@@ -238,17 +238,17 @@ func main() {
 	// Build the loop + tools + broker via the SHARED builder — identical across the
 	// CLI, the MCP front door, and standalone (parity by construction).
 	built, err := agent.Build(agent.BuildConfig{
-		PlannerBase:  plannerBase,
-		Model:        plannerModel,
-		Timeout:      timeout,
-		MaxSteps:     *maxSteps,
-		MaxTokens:    *maxTokens,
-		MaxSameTool:  *maxSameTool,
-		ReadRoot:     absRoot,
-		Offload:      offload,
-		Unattended:   true, // non-interactive CLI: ask → deny-and-queue
-		AuditPath:    auditP,
-		AskQueuePath: askQ,
+		PlannerBase:    plannerBase,
+		Model:          plannerModel,
+		Timeout:        timeout,
+		MaxSteps:       *maxSteps,
+		MaxTokens:      *maxTokens,
+		MaxSameTool:    *maxSameTool,
+		ReadRoot:       absRoot,
+		Offload:        offload,
+		Unattended:     true, // non-interactive CLI: ask → deny-and-queue
+		AuditPath:      auditP,
+		AskQueuePath:   askQ,
 		AllowWrite:     *allowWrite,
 		AllowOverwrite: *allowOverwrite,
 		AllowDelete:    *allowDelete,
@@ -259,9 +259,9 @@ func main() {
 		AllowGitHub:    *allowGitHub,
 		GitHubToken:    os.Getenv("GITHUB_TOKEN"),
 		GitHubRepo:     os.Getenv("GITHUB_REPO"),
-		Worktree:     *worktree,
-		EgressHosts:  egressHosts,
-		Memory:       mem,
+		Worktree:       *worktree,
+		EgressHosts:    egressHosts,
+		Memory:         mem,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -467,6 +467,7 @@ func main() {
 		res, err := agent.RunTwoTier(ctx, objective, architect, editor)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
+			printFlaggedEffects(res.Effects) // what already touched the world before the death
 			os.Exit(1)
 		}
 		if res.Fallback != agent.FallbackNone {
@@ -485,6 +486,7 @@ func main() {
 	res, err := loop.Run(ctx, objective)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
+		printFlaggedEffects(res.Effects) // what already touched the world before the death
 		os.Exit(1)
 	}
 	if *asJSON {
@@ -493,5 +495,17 @@ func main() {
 	} else {
 		fmt.Println(res.Output)
 		fmt.Fprintf(os.Stderr, "[local-agent] steps=%d stop=%s tools=%d\n", res.Steps, res.StopReason, len(built.Tools))
+	}
+}
+
+// printFlaggedEffects reports non-committed tool effects on the CLI's error
+// paths — the Result's ledger is guaranteed populated even on errors, and a
+// run that died with a tool abandoned mid-flight (unknown) must say so before
+// the process exits, or the operator retries blind.
+func printFlaggedEffects(effects []agent.EffectRecord) {
+	for _, r := range effects {
+		if r.Status != agent.EffectCommitted {
+			fmt.Fprintf(os.Stderr, "[local-agent] effect %s: %s (%s) %s\n", r.Status, r.Tool, r.CallID, r.Note)
+		}
 	}
 }

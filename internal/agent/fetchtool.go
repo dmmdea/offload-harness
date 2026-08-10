@@ -198,15 +198,15 @@ func fetchTool(pol *Policy, client *http.Client) Tool {
 				return "", fmt.Errorf("web_fetch requires a url")
 			}
 			if len(in.URL) > maxURLLen {
-				return "NOT performed (deny): url exceeds 2048 chars", nil
+				return "", NotPerformed("NOT performed (deny): url exceeds 2048 chars")
 			}
 			u, err := url.Parse(in.URL)
 			if err != nil {
-				return fmt.Sprintf("NOT performed (deny): could not parse url: %v", err), nil
+				return "", NotPerformed(fmt.Sprintf("NOT performed (deny): could not parse url: %v", err))
 			}
 			// The broker (scheme/userinfo/port/allowlist) gate — defer-not-crash on deny.
 			if err := pol.validateURL(u); err != nil {
-				return fmt.Sprintf("NOT performed (deny): %s", err), nil
+				return "", NotPerformed(fmt.Sprintf("NOT performed (deny): %s", err))
 			}
 			ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 			defer cancel()

@@ -960,7 +960,13 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	}
 	res, rerr := built.Loop.Run(cctx, in.Goal)
 	if rerr != nil {
-		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error(), "steps": res.Steps})
+		// The DEFERRED path carries the effect ledger too — a run that died on
+		// timeout with a tool abandoned mid-flight (EffectUnknown) is precisely
+		// the run whose caller must not blindly retry. Dropping the ledger here
+		// would hide the one record that matters most.
+		dout := map[string]any{"deferred": true, "reason": rerr.Error(), "steps": res.Steps}
+		addEffects(dout, res.Effects)
+		return jsonResult(dout)
 	}
 	out := map[string]any{
 		"output":      res.Output,
@@ -973,7 +979,30 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	if res.CompactionsExhausted > 0 {
 		out["compactions_exhausted"] = res.CompactionsExhausted // fit=false telemetry: best-effort over-budget requests were sent
 	}
+	addEffects(out, res.Effects)
 	return jsonResult(out)
+}
+
+// addEffects folds a run's effect ledger into an agent_run response — counts
+// when any tools ran, plus the full records for every NON-committed call. Used
+// by BOTH the success and deferred paths so they cannot drift: the one record a
+// caller must never miss is "unknown" — a tool abandoned mid-flight whose
+// effects may exist, which changes whether the run is safe to blindly retry.
+func addEffects(out map[string]any, effects []agent.EffectRecord) {
+	counts := agent.EffectCounts(effects)
+	if counts == nil {
+		return
+	}
+	out["effects"] = counts
+	var flagged []agent.EffectRecord
+	for _, r := range effects {
+		if r.Status != agent.EffectCommitted {
+			flagged = append(flagged, r)
+		}
+	}
+	if len(flagged) > 0 {
+		out["effects_flagged"] = flagged
+	}
 }
 
 // agentTimeout resolves an agent run's wall-clock budget: an explicit per-call

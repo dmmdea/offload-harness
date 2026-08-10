@@ -46,7 +46,7 @@ func TestEditFileRefusesNonUnique(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x\nx\n"), 0o644)
 	edit := editTool(t, dir, NewPolicy(true, nil).WithWritePosture(true, false))
-	out, _ := edit.Exec(context.Background(), `{"path":"a.txt","old_string":"x","new_string":"y"}`)
+	out := refusalText(edit.Exec(context.Background(), `{"path":"a.txt","old_string":"x","new_string":"y"}`))
 	if !strings.Contains(out, "NOT performed") {
 		t.Fatalf("want refusal for non-unique match, got %q", out)
 	}
@@ -56,7 +56,7 @@ func TestEditFileRefusedWithoutOverwritePosture(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("foo\n"), 0o644)
 	edit := editTool(t, dir, NewPolicy(true, nil)) // no posture → overwrite denied
-	out, _ := edit.Exec(context.Background(), `{"path":"a.txt","old_string":"foo","new_string":"bar"}`)
+	out := refusalText(edit.Exec(context.Background(), `{"path":"a.txt","old_string":"foo","new_string":"bar"}`))
 	if !strings.Contains(out, "NOT performed") {
 		t.Fatalf("want broker refusal, got %q", out)
 	}
@@ -109,7 +109,7 @@ func TestEditFileWhitespaceFallbackRefusesAmbiguous(t *testing.T) {
 		t.Fatal(err)
 	}
 	edit := editTool(t, dir, NewPolicy(true, nil).WithWritePosture(true, false))
-	out, _ := edit.Exec(context.Background(), `{"path":"a.txt","old_string":"foo bar","new_string":"baz"}`)
+	out := refusalText(edit.Exec(context.Background(), `{"path":"a.txt","old_string":"foo bar","new_string":"baz"}`))
 	if !strings.Contains(out, "NOT performed") {
 		t.Fatalf("ambiguous normalized match must be refused, got %q", out)
 	}
@@ -147,7 +147,7 @@ func TestEditFileWhitespaceFallbackHonorsBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	edit := editTool(t, dir, NewPolicy(true, nil)) // no posture → overwrite denied
-	out, _ := edit.Exec(context.Background(), `{"path":"a.txt","old_string":"foo bar","new_string":"baz"}`)
+	out := refusalText(edit.Exec(context.Background(), `{"path":"a.txt","old_string":"foo bar","new_string":"baz"}`))
 	if !strings.Contains(out, "NOT performed") {
 		t.Fatalf("broker must still deny even on the whitespace path, got %q", out)
 	}
@@ -212,10 +212,11 @@ func TestWriteFileOverwriteDeniedUnattended(t *testing.T) {
 	}
 	tools, _ := WriteTools(wt, NewPolicy(true, nil))
 	wf := findTool(tools, "write_file")
-	out, err := wf.Exec(context.Background(), `{"path":"a.txt","content":"HACKED"}`)
-	if err != nil {
-		t.Fatalf("should not error (defer-not-crash): %v", err)
+	o, err := wf.Exec(context.Background(), `{"path":"a.txt","content":"HACKED"}`)
+	if !IsNotPerformed(err) {
+		t.Fatalf("a broker denial must be the NotPerformed sentinel: %v", err)
 	}
+	out := refusalText(o, err)
 	if !strings.Contains(out, "NOT performed") {
 		t.Errorf("overwrite must be denied unattended, got %q", out)
 	}
@@ -250,7 +251,7 @@ func TestWriteFileGitDenied(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(wt, ".git"), 0o755)
 	tools, _ := WriteTools(wt, NewPolicy(false, nil)) // even ATTENDED: .git is unconditional deny
 	wf := findTool(tools, "write_file")
-	out, _ := wf.Exec(context.Background(), `{"path":".git/config","content":"x"}`)
+	out := refusalText(wf.Exec(context.Background(), `{"path":".git/config","content":"x"}`))
 	if !strings.Contains(out, "NOT performed") {
 		t.Errorf("write under .git must be denied, got %q", out)
 	}
@@ -292,10 +293,11 @@ func TestDeleteFileDeniedUnattended(t *testing.T) {
 	if df == nil {
 		t.Fatal("delete_file missing")
 	}
-	out, err := df.Exec(context.Background(), `{"path":"a.txt"}`)
-	if err != nil {
-		t.Fatalf("defer-not-crash: %v", err)
+	o, err := df.Exec(context.Background(), `{"path":"a.txt"}`)
+	if !IsNotPerformed(err) {
+		t.Fatalf("a broker denial must be the NotPerformed sentinel: %v", err)
 	}
+	out := refusalText(o, err)
 	if !strings.Contains(out, "NOT performed") {
 		t.Errorf("delete must be denied unattended, got %q", out)
 	}

@@ -32,11 +32,14 @@ func TestDispatchCapsAToolThatOverrunsItsBudget(t *testing.T) {
 	l.WithToolTimeout(50 * time.Millisecond)
 
 	start := time.Now()
-	out, isErr := l.dispatch(context.Background(), ToolCall{ID: "1", Name: "slow_tool"})
+	out, isErr, eff := l.dispatch(context.Background(), ToolCall{ID: "1", Name: "slow_tool"})
 	elapsed := time.Since(start)
 
 	if !isErr {
 		t.Fatalf("an overrunning tool must be an is_error result, got ok: %q", out)
+	}
+	if eff != EffectUnknown {
+		t.Errorf("an abandoned-mid-flight tool must ledger as unknown (effects may exist), got %q", eff)
 	}
 	if !strings.Contains(out, "exceeded its") {
 		t.Errorf("result should name the budget so the planner can react, got %q", out)
@@ -59,9 +62,12 @@ func TestDispatchDistinguishesRunCancellationFromToolOverrun(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	out, isErr := l.dispatch(ctx, ToolCall{ID: "1", Name: "slow_tool"})
+	out, isErr, eff := l.dispatch(ctx, ToolCall{ID: "1", Name: "slow_tool"})
 	if !isErr {
 		t.Fatalf("expected an error result, got ok: %q", out)
+	}
+	if eff != EffectUnknown {
+		t.Errorf("a call started before the run died must ledger as unknown, got %q", eff)
 	}
 	if strings.Contains(out, "exceeded its") {
 		t.Errorf("the RUN expired, not the tool's budget — message blames the tool: %q", out)
@@ -83,9 +89,12 @@ func TestPerToolTimeoutOverridesTheLoopDefault(t *testing.T) {
 	l := NewLoop(&fakeClient{}, []Tool{slow}, 5)
 	l.WithToolTimeout(1 * time.Millisecond) // a default this tool must NOT inherit
 
-	out, isErr := l.dispatch(context.Background(), ToolCall{ID: "1", Name: "quick_tool"})
+	out, isErr, eff := l.dispatch(context.Background(), ToolCall{ID: "1", Name: "quick_tool"})
 	if isErr {
 		t.Fatalf("per-tool Timeout should have overridden the tiny default, got error: %q", out)
+	}
+	if eff != EffectCommitted {
+		t.Errorf("a completed tool must ledger as committed, got %q", eff)
 	}
 	if out != "finally" {
 		t.Errorf("out = %q, want the tool's real result", out)
@@ -95,8 +104,11 @@ func TestPerToolTimeoutOverridesTheLoopDefault(t *testing.T) {
 // Fast tools are unaffected — the cap must not add latency or change results.
 func TestDispatchLeavesAFastToolAlone(t *testing.T) {
 	l := NewLoop(&fakeClient{}, mkTools("list_dir"), 5)
-	out, isErr := l.dispatch(context.Background(), ToolCall{ID: "1", Name: "list_dir"})
+	out, isErr, eff := l.dispatch(context.Background(), ToolCall{ID: "1", Name: "list_dir"})
 	if isErr || out != "ok" {
 		t.Fatalf("fast tool result changed: out=%q isErr=%v", out, isErr)
+	}
+	if eff != EffectCommitted {
+		t.Errorf("fast tool must ledger as committed, got %q", eff)
 	}
 }

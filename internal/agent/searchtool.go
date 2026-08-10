@@ -112,7 +112,7 @@ func searchTool(pol *Policy, client *http.Client) Tool {
 				return "", err
 			}
 			if err := pol.validateURL(u); err != nil {
-				return fmt.Sprintf("NOT performed (deny): %s", err), nil
+				return "", NotPerformed(fmt.Sprintf("NOT performed (deny): %s", err))
 			}
 			ctx, cancel := context.WithTimeout(ctx, searchTimeout)
 			defer cancel()

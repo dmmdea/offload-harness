@@ -171,7 +171,7 @@ func TestWebFetchDeniedHostNotPerformed(t *testing.T) {
 		called = true
 		return mkResp(200, "x"), nil
 	}}}
-	out, _ := fetchTool(NewPolicyWithEgress(true, nil, allow), client).Exec(context.Background(), `{"url":"http://evil.com/"}`)
+	out := refusalText(fetchTool(NewPolicyWithEgress(true, nil, allow), client).Exec(context.Background(), `{"url":"http://evil.com/"}`))
 	if !strings.Contains(out, "NOT performed") {
 		t.Errorf("denied host = %q, want NOT performed", out)
 	}
@@ -186,7 +186,7 @@ func TestWebFetchSchemeRejected(t *testing.T) {
 		t.Fatal("must not dial for a file:// URL")
 		return nil, nil
 	}}}
-	out, _ := fetchTool(NewPolicyWithEgress(true, nil, allow), client).Exec(context.Background(), `{"url":"file:///C:/secret"}`)
+	out := refusalText(fetchTool(NewPolicyWithEgress(true, nil, allow), client).Exec(context.Background(), `{"url":"file:///C:/secret"}`))
 	if !strings.Contains(out, "NOT performed") {
 		t.Errorf("file scheme = %q, want NOT performed", out)
 	}
