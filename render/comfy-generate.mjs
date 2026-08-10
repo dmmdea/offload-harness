@@ -20,7 +20,7 @@
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { parseJobs, jobArgs, resultLine } from "./batch-jobs.mjs";
 
@@ -50,7 +50,7 @@ function runRenderArgs(tail) {
 }
 
 const sharedFlags = {};
-for (const k of ["api", "negative", "width", "height", "steps", "seed", "ckpt", "vae", "cfg", "sampler", "scheduler", "family"]) {
+for (const k of ["api", "negative", "width", "height", "steps", "seed", "ckpt", "vae", "cfg", "sampler", "scheduler", "family", "preset", "clip", "lora", "lora-strength", "shift"]) {
   if (flags[k] != null) sharedFlags[k] = flags[k];
 }
 sharedFlags.api = API;
@@ -62,6 +62,8 @@ if (flags.batch) {
   const jobs = parseJobs(readFileSync(flags.batch, "utf8"));
   if (jobs.length === 0) { console.error("batch: no jobs in " + flags.batch); process.exit(2); }
   const resultsPath = flags.results || flags.batch + ".results.jsonl";
+  // Same ENOENT class as the render output: a missing parent must not sink the batch.
+  mkdirSync(dirname(resultsPath) || ".", { recursive: true });
   writeFileSync(resultsPath, "");
   withGpuSlot(
     { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, reserveVram: flags["reserve-vram"], warm: true },

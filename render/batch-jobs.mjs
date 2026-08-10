@@ -7,7 +7,7 @@
 // NOT override the binding (ckpt/vae/...): which checkpoint a machine renders with is
 // per-machine config threaded by the Go harness, never per-prompt data.
 const JOB_PARAMS = ["negative", "width", "height", "steps", "seed"];
-const SHARED_ONLY = ["ckpt", "vae", "cfg", "sampler", "scheduler", "family"];
+const SHARED_ONLY = ["ckpt", "vae", "cfg", "sampler", "scheduler", "family", "preset", "clip", "lora", "lora-strength", "shift"];
 
 export function parseJobs(text) {
   const jobs = [];

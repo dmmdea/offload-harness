@@ -143,6 +143,15 @@ Hardware profiles seed these. Tiers at 16 GB and above bind **HiDream-O1 bf16** 
 Q8_0** experts with an fp16 text encoder. **RealVisXL** is the SDXL-class inpainting default. The 8 GB
 tiers stay SDXL-class for image generation until O1 on 8 GB is verified on real hardware.
 
+**Qwen-Image 2512** (Apache-2.0) is the prompt-adherence *generation* alternative at ≥16 GB:
+`imagegen_family: "qwen-image"` selects its model-correct graph — SD3-class 16-channel latent
+(`EmptySD3LatentImage`, never the SDXL latent), `ModelSamplingAuraFlow` shift, split
+text-encoder/VAE files, and `ConditioningZeroOut` for an empty negative — with `imagegen_ckpt`
+carrying the UNET filename (`.gguf` or `.safetensors`; the `_1`-quant rule below applies to 2512
+GGUFs the same as 2511). It is not the seeded default seat; it exists so renders that need strong
+instruction/text adherence can route to it per call (`--family qwen-image`, presets `full` =
+50 steps/cfg 4 and `lightning4` = 4 steps/cfg 1 + Lightning LoRA, both template-verified).
+
 The recommended **≥16 GB image-*edit* primitive is Qwen-Image-Edit-2511** (Apache-2.0). It is a
 model-matrix *designation*, not a config binding — image editing at that tier runs through
 [run-graph](../flows/run-graph-manifest-satisfaction.md) with the model set declared in the caller's
