@@ -39,6 +39,15 @@ type Model struct {
 	// the UNET filename). Which family a checkpoint belongs to is per-machine
 	// config, never shared code.
 	Family string
+	// Preset / CLIP / LoRA / LoRAStrength / Shift are the qwen-image family's
+	// remaining knobs (--preset picks a steps+cfg+LoRA pairing; the rest
+	// override its fields). Zero values emit no flag; other families ignore
+	// the flags if a config binds them anyway.
+	Preset       string
+	CLIP         string
+	LoRA         string
+	LoRAStrength float64
+	Shift        float64
 }
 
 // Generate runs `node <script> <out> <prompt> [--negative ..] [--width ..] ...` and
@@ -126,6 +135,24 @@ func bindingArgs(m Model) []string {
 	}
 	if m.Family != "" {
 		args = append(args, "--family", m.Family)
+	}
+	if m.Preset != "" {
+		args = append(args, "--preset", m.Preset)
+	}
+	if m.CLIP != "" {
+		args = append(args, "--clip", m.CLIP)
+	}
+	if m.LoRA != "" {
+		args = append(args, "--lora", m.LoRA)
+	}
+	// != 0, not > 0: a NEGATIVE strength is a legitimate inverse-LoRA weight in
+	// ComfyUI and the script layer honors it — silently dropping it would apply
+	// the builder's default 1.0, the OPPOSITE of what the operator bound.
+	if m.LoRAStrength != 0 {
+		args = append(args, "--lora-strength", strconv.FormatFloat(m.LoRAStrength, 'g', -1, 64))
+	}
+	if m.Shift > 0 {
+		args = append(args, "--shift", strconv.FormatFloat(m.Shift, 'g', -1, 64))
 	}
 	return args
 }
@@ -328,7 +355,8 @@ func editArgs(out, image, prompt string, params map[string]any, m EditModel) []s
 	} else if m.LoRA != "" {
 		args = append(args, "--lora", m.LoRA)
 	}
-	if m.LoRAStrength > 0 {
+	// != 0 for the same inverse-LoRA reason as bindingArgs above.
+	if m.LoRAStrength != 0 {
 		args = append(args, "--lora-strength", strconv.FormatFloat(m.LoRAStrength, 'g', -1, 64))
 	}
 	if reqSteps := gpugen.AsInt(params["steps"]); reqSteps > 0 {

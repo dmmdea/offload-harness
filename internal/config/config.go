@@ -226,6 +226,21 @@ type Config struct {
 	ImageGenCFG       float64 `json:"imagegen_cfg,omitempty"`
 	ImageGenSampler   string  `json:"imagegen_sampler,omitempty"`
 	ImageGenScheduler string  `json:"imagegen_scheduler,omitempty"`
+	// ImageGenPreset / ImageGenCLIP / ImageGenLoRA / ImageGenLoRAStrength /
+	// ImageGenShift thread the qwen-image family's remaining knobs
+	// (comfy-render --preset/--clip/--lora/--lora-strength/--shift) so a
+	// harness-driven qwen-image seat can bind e.g. the lightning4 recipe.
+	// Preset selects a steps+cfg+LoRA PAIRING ("full" | "lightning4"); the
+	// others override its fields one by one. Families that don't read a flag
+	// ignore it. NOTE: an empty ImageGenLoRA means UNSET (omitempty), not
+	// "strip the preset's LoRA" — bind preset "full" for a LoRA-free run.
+	// Like ImageGenCkpt these are ComfyUI FILENAMES, not paths. Zero/empty =
+	// the script's default.
+	ImageGenPreset       string  `json:"imagegen_preset,omitempty"`
+	ImageGenCLIP         string  `json:"imagegen_clip,omitempty"`
+	ImageGenLoRA         string  `json:"imagegen_lora,omitempty"`
+	ImageGenLoRAStrength float64 `json:"imagegen_lora_strength,omitempty"`
+	ImageGenShift        float64 `json:"imagegen_shift,omitempty"`
 	// --- sd.cpp image engine (J2: the AMD/Vulkan tier's backend; per-task media_engine seam) ---
 	// ImageGenEngine selects the generate_image backend: ""/"comfy" = the ComfyUI path
 	// above (unchanged default); "sdcpp" = stable-diffusion.cpp via SdcppScript — a
