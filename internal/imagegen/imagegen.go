@@ -34,7 +34,9 @@ type Model struct {
 	// SDXL-shaped graph). "hidream-o1" / "hidream-o1-dev" render the official
 	// pixel-space DiT graph (ModelNoiseScale, patch-seam smoothing, SamplerCustom,
 	// native 2048) — driving a DiT through the generic graph produces measurable
-	// 32px patch blocking. Which family a checkpoint belongs to is per-machine
+	// 32px patch blocking. "qwen-image" renders the official Qwen-Image 2512 graph
+	// (SD3-class latent, AuraFlow shift, split text-encoder/VAE files; Ckpt carries
+	// the UNET filename). Which family a checkpoint belongs to is per-machine
 	// config, never shared code.
 	Family string
 }

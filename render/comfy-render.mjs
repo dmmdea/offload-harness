@@ -46,6 +46,10 @@ for (let i = 0; i < argv.length; i++) {
 const out = pos[0];
 const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
 if (!out) { console.error('usage: node comfy-render.mjs <out.png> "<prompt>" [seed] [w] [h] [flags]   |   <out.png> --graph wf.json'); process.exit(2); }
+// Create the output parent UP-FRONT: a bad path must fail in 0s, not after the
+// render — an ENOENT at the write site used to discard a finished image after
+// every second of GPU work had succeeded (it cost a full A/B arm, 2026-08-10).
+mkdirSync(dirname(out) || ".", { recursive: true });
 
 // Build the graph: either the caller's full workflow, or a parameterized SDXL text2img.
 let graph;
@@ -87,10 +91,19 @@ if (flags.graph) {
   if (!positive) { console.error("error: a prompt is required (positional or --prompt), unless you pass --graph"); process.exit(2); }
   if (!flags.ckpt && !process.env.COMFY_CKPT) { console.error("error: --family qwen-image requires --ckpt (the qwen-image UNET filename, .gguf or .safetensors)"); process.exit(2); }
   // The preset resolves the steps/cfg/LoRA pairing (wrong pairings render noise or
-  // mush); explicit --steps/--cfg/--lora override the preset field-by-field.
+  // mush); --steps/--cfg override it only TOGETHER. A half-override is the classic
+  // silent ruin: the harness forwards a caller's per-request steps but cfg only
+  // ever comes from binding config, so "steps 8" alone would render the base model
+  // at few steps / cfg 4 — technically successful, actually noise. Pair or preset.
+  if ((flags.steps != null) !== (flags.cfg != null)) {
+    console.error("error: --family qwen-image takes --steps and --cfg together or not at all — a half-override of the preset pairing renders noise or mush; pick a --preset (" + Object.keys(QWEN_IMAGE_PRESETS).join("|") + ") for a sanctioned pairing instead");
+    process.exit(2);
+  }
   const presetName = flags.preset || "full";
+  // hasOwn, not truthy-lookup: '--preset __proto__' must hit the helpful error,
+  // not resolve up the prototype chain into a confusing builder throw.
+  if (!Object.hasOwn(QWEN_IMAGE_PRESETS, presetName)) { console.error(`error: unknown --preset '${presetName}' (known: ${Object.keys(QWEN_IMAGE_PRESETS).join(", ")})`); process.exit(2); }
   const preset = QWEN_IMAGE_PRESETS[presetName];
-  if (!preset) { console.error(`error: unknown --preset '${presetName}' (known: ${Object.keys(QWEN_IMAGE_PRESETS).join(", ")})`); process.exit(2); }
   // The UNET file carries no VAE weights — a "builtin" VAE binding is a config
   // error for this family (it means the machine's imagegen_vae still points at an
   // all-in-one checkpoint family like HiDream). Fail loud with the fix.
@@ -101,17 +114,21 @@ if (flags.graph) {
   }
   width = Number(pos[3] || flags.width || 1328);
   height = Number(pos[4] || flags.height || 1328);
+  // Everything optional passes undefined so the BUILDER stays the single source
+  // of truth for defaults (sampler/scheduler/shift/strength) — restating them
+  // here is how a future builder-default change silently misses this entrypoint.
   graph = buildQwenImage({
     prompt: positive, negative: flags.negative || "",
     unet: flags.ckpt || process.env.COMFY_CKPT,
+    loader: flags.loader || undefined,
     clip: flags.clip || undefined,
     vae: vaeFlag || undefined,
     lora: flags.lora != null ? flags.lora : preset.lora,
-    loraStrength: Number(flags["lora-strength"] || 1.0),
-    steps: Number(flags.steps || preset.steps),
-    cfg: Number(flags.cfg || preset.cfg),
-    sampler: flags.sampler || "euler", scheduler: flags.scheduler || "simple",
-    shift: Number(flags.shift || 3.1),
+    loraStrength: flags["lora-strength"] != null ? Number(flags["lora-strength"]) : undefined,
+    steps: flags.steps != null ? Number(flags.steps) : preset.steps,
+    cfg: flags.cfg != null ? Number(flags.cfg) : preset.cfg,
+    sampler: flags.sampler || undefined, scheduler: flags.scheduler || undefined,
+    shift: flags.shift != null ? Number(flags.shift) : undefined,
     width, height, seed,
   });
 } else {
@@ -214,10 +231,6 @@ async function main() {
   const r = await fetch(`${API}/view?` + q.toString());
   if (!r.ok) throw new Error("view fetch " + r.status);
   const buf = Buffer.from(await r.arrayBuffer());
-  // A missing output parent must not discard a finished render: the GPU work is
-  // already done by this point, and an ENOENT here wasted a full A/B render arm
-  // (2026-08-10) after every server-side render had succeeded.
-  mkdirSync(dirname(out) || ".", { recursive: true });
   writeFileSync(out, buf);
   console.log("WROTE", out, buf.length, "bytes");
 }

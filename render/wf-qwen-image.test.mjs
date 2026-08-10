@@ -113,3 +113,16 @@ test("required inputs are enforced", () => {
   assert.throws(() => buildQwenImage({ ...base, prompt: undefined }), /prompt/);
   assert.throws(() => buildQwenImage({ ...base, unet: undefined }), /unet/);
 });
+
+test("non-finite or non-positive dims throw instead of riding into the graph as NaN", () => {
+  assert.throws(() => buildQwenImage({ ...base, width: NaN }), /width\/height/);
+  assert.throws(() => buildQwenImage({ ...base, width: Number("abc") }), /width\/height/);
+  assert.throws(() => buildQwenImage({ ...base, height: 0 }), /width\/height/);
+  assert.throws(() => buildQwenImage({ ...base, height: -512 }), /width\/height/);
+});
+
+test("whitespace-only negative is treated as empty — zero-out, not an encoded blank", () => {
+  const g = buildQwenImage({ ...base, negative: "  \n " });
+  assert.ok(Object.values(g).some((n) => n.class_type === "ConditioningZeroOut"));
+  assert.equal(Object.values(g).filter((n) => n.class_type === "CLIPTextEncode").length, 1);
+});
