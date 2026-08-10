@@ -356,3 +356,70 @@ func TestParkRecorderReceivesParkedCalls(t *testing.T) {
 		t.Fatalf("park recorder must fire once with tool+risk, got %v", got)
 	}
 }
+
+// Batch judge (part 3): opt-in, one extra completion at end of run ONLY when
+// something was flagged; the report is advisory text on the Result; a judge
+// failure is a labeled string, never a run error.
+func TestBatchJudgeRunsOnceOnFlaggedRuns(t *testing.T) {
+	client := &fakeClient{script: []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "ghost", `{}`)}}, FinishReason: "tool_calls"}, // -> none (flagged)
+		{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+		{Msg: Msg{Role: "assistant", Content: "1. ghost call: flag warranted; worst case none; add-a-rule."}, FinishReason: "stop"}, // judge turn
+	}}
+	res, err := NewLoop(client, nil, 6).WithBatchJudge(true).Run(context.Background(), "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.JudgeReport, "add-a-rule") {
+		t.Fatalf("judge report missing, got %q", res.JudgeReport)
+	}
+	if client.calls != 3 {
+		t.Fatalf("want exactly one extra judge call (3 total), got %d", client.calls)
+	}
+	// The judge turn must be FRESH CONTEXT: system prompt + records only.
+	judgeMsgs := client.seen[2]
+	if len(judgeMsgs) != 2 || judgeMsgs[0].Role != "system" {
+		t.Fatalf("judge must run on a fresh 2-message context, got %d messages", len(judgeMsgs))
+	}
+	if strings.Contains(judgeMsgs[1].Content, "done") {
+		t.Error("judge context must not include the run transcript")
+	}
+}
+
+func TestBatchJudgeSkipsCleanRunsAndIsOffByDefault(t *testing.T) {
+	mk := func() *fakeClient {
+		return &fakeClient{script: []Completion{
+			{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+		}}
+	}
+	// clean run, judge on: no extra call
+	c1 := mk()
+	res, err := NewLoop(c1, nil, 4).WithBatchJudge(true).Run(context.Background(), "goal")
+	if err != nil || res.JudgeReport != "" || c1.calls != 1 {
+		t.Fatalf("clean run must not judge: report=%q calls=%d err=%v", res.JudgeReport, c1.calls, err)
+	}
+	// default off: flagged effects, still no extra call
+	c2 := &fakeClient{script: []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "ghost", `{}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+	}}
+	res2, err := NewLoop(c2, nil, 4).Run(context.Background(), "goal")
+	if err != nil || res2.JudgeReport != "" || c2.calls != 2 {
+		t.Fatalf("judge must be off by default: report=%q calls=%d err=%v", res2.JudgeReport, c2.calls, err)
+	}
+}
+
+func TestBatchJudgeFailureIsLabeledNotFatal(t *testing.T) {
+	client := &fakeClient{script: []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "ghost", `{}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+		// script exhausted -> the judge Chat errors
+	}}
+	res, err := NewLoop(client, nil, 6).WithBatchJudge(true).Run(context.Background(), "goal")
+	if err != nil {
+		t.Fatalf("a judge failure must never fail the run: %v", err)
+	}
+	if !strings.Contains(res.JudgeReport, "batch judge failed") {
+		t.Fatalf("judge failure must be LABELED, not silent: %q", res.JudgeReport)
+	}
+}
