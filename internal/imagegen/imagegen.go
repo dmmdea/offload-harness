@@ -145,7 +145,10 @@ func bindingArgs(m Model) []string {
 	if m.LoRA != "" {
 		args = append(args, "--lora", m.LoRA)
 	}
-	if m.LoRAStrength > 0 {
+	// != 0, not > 0: a NEGATIVE strength is a legitimate inverse-LoRA weight in
+	// ComfyUI and the script layer honors it — silently dropping it would apply
+	// the builder's default 1.0, the OPPOSITE of what the operator bound.
+	if m.LoRAStrength != 0 {
 		args = append(args, "--lora-strength", strconv.FormatFloat(m.LoRAStrength, 'g', -1, 64))
 	}
 	if m.Shift > 0 {
@@ -352,7 +355,8 @@ func editArgs(out, image, prompt string, params map[string]any, m EditModel) []s
 	} else if m.LoRA != "" {
 		args = append(args, "--lora", m.LoRA)
 	}
-	if m.LoRAStrength > 0 {
+	// != 0 for the same inverse-LoRA reason as bindingArgs above.
+	if m.LoRAStrength != 0 {
 		args = append(args, "--lora-strength", strconv.FormatFloat(m.LoRAStrength, 'g', -1, 64))
 	}
 	if reqSteps := gpugen.AsInt(params["steps"]); reqSteps > 0 {
