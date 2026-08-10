@@ -193,7 +193,7 @@ func (s *Server) Run(ctx context.Context, version string) error {
 	srv.AddTool(&mcp.Tool{
 		Name:        "agent_run",
 		Description: "Run the LOCAL autonomous agent loop on a goal: a free local model plans and iterates over read-only tools (list_dir, read_file) plus the offload_* cascade, multi-step, and returns a final answer. DELEGATE a bounded multi-step read-and-reason job — map how X flows through a repo, summarize a doc set, extract facts across many files — to the local stack to keep that work out of your own context. It is READ-ONLY: it cannot write files, run commands, or touch the network. The savings ledger is untouched (the agent's offload calls run record=false). Returns {output, steps, stop_reason, tools, model}; on any failure it returns deferred:true with a reason and you do the task yourself.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"goal":{"type":"string","description":"the task for the local agent to accomplish"},"read_root":{"type":"string","description":"absolute directory the agent may read; it cannot read outside it (default: the server working dir)"},"max_steps":{"type":"integer","description":"hard step budget (default 12)"},"model":{"type":"string","description":"planner model id; must support tool-calling (default: the tier's agent seat (agent_model), falling back to the configured workhorse)"},"timeout_sec":{"type":"integer","description":"wall-clock budget in seconds (default: the tier's agent_timeout_sec, else 180)"},"profile":{"type":"string","enum":["general","edit","build","research","github"],"description":"task profile: narrows the tool list and injects worked examples. MEASURED: a small planner given the full tool set often calls NO tool at all, so a narrowed profile is the single most effective lever. Prefer \"build\" for reading and reasoning over a codebase; \"general\" (the default) advertises everything. Tools this read-only front door does not grant are dropped, along with their examples."}},"required":["goal"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"goal":{"type":"string","description":"the task for the local agent to accomplish"},"read_root":{"type":"string","description":"absolute directory the agent may read; it cannot read outside it (default: the server working dir)"},"max_steps":{"type":"integer","description":"hard step budget (default 12)"},"model":{"type":"string","description":"planner model id; must support tool-calling (default: the tier's agent seat (agent_model), falling back to the configured workhorse)"},"timeout_sec":{"type":"integer","description":"wall-clock budget in seconds (default: the tier's agent_timeout_sec, else 180)"},"profile":{"type":"string","enum":["general","edit","build","research","github"],"description":"task profile: narrows the tool list and injects worked examples. MEASURED: a small planner given the full tool set often calls NO tool at all, so a narrowed profile is the single most effective lever. Prefer \"build\" for reading and reasoning over a codebase; \"general\" (the default) advertises everything. Tools this read-only front door does not grant are dropped, along with their examples."},"judge":{"type":"boolean","description":"end-of-run ADVISORY audit: one extra same-seat completion grading the run's flagged effects (parked/failed/unknown/self-flagged) for the operator review. Never gates anything. Default false"}},"required":["goal"]}`),
 	}, s.handleAgentRun)
 
 	return srv.Run(ctx, &mcp.StdioTransport{})
@@ -867,6 +867,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		Model      string `json:"model"`
 		TimeoutSec int    `json:"timeout_sec"`
 		Profile    string `json:"profile"`
+		Judge      bool   `json:"judge"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -958,6 +959,9 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		}
 		built.Loop.WithProfile(prof)
 	}
+	if in.Judge {
+		built.Loop.WithBatchJudge(true)
+	}
 	res, rerr := built.Loop.Run(cctx, in.Goal)
 	if rerr != nil {
 		// The DEFERRED path carries the effect ledger too — a run that died on
@@ -980,6 +984,9 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		out["compactions_exhausted"] = res.CompactionsExhausted // fit=false telemetry: best-effort over-budget requests were sent
 	}
 	addEffects(out, res.Effects)
+	if res.JudgeReport != "" {
+		out["judge_report"] = res.JudgeReport // ADVISORY end-of-run audit of flagged effects
+	}
 	return jsonResult(out)
 }
 
