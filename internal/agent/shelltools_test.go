@@ -32,7 +32,7 @@ func TestShellToolDeniedWhenNotEnabled(t *testing.T) {
 		return sandbox.Result{}, nil
 	}
 	wf := shellTool(NewPolicy(true, nil) /* shell NOT enabled */, "/wt", "/wt/.scratch", run)
-	out, _ := wf.Exec(context.Background(), `{"command":"rm -rf /"}`)
+	out := refusalText(wf.Exec(context.Background(), `{"command":"rm -rf /"}`))
 	if !strings.Contains(out, "NOT performed") {
 		t.Errorf("shell must be denied when the capability is off; got %q", out)
 	}
@@ -68,7 +68,7 @@ func TestShellToolCageRefused(t *testing.T) {
 		return sandbox.Result{Refused: true, Stderr: "[[SANDBOX-REFUSED]] sandbox worker: landlock floor not met"}, context.DeadlineExceeded
 	}
 	wf := shellTool(NewPolicy(true, nil).WithShell(true), "/wt", "/wt/.scratch", run)
-	out, _ := wf.Exec(context.Background(), `{"command":"echo hi"}`)
+	out := refusalText(wf.Exec(context.Background(), `{"command":"echo hi"}`))
 	if !strings.Contains(out, "cage refused") {
 		t.Errorf("a cage refusal should surface as 'cage refused'; got %q", out)
 	}

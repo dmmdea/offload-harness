@@ -41,7 +41,7 @@ func TestRunToolDeniedWhenNotEnabled(t *testing.T) {
 		return sandbox.Result{}, nil
 	}
 	rt := runTool(NewPolicy(true, nil) /* shell/run NOT enabled */, "/wt", "/wt/.scratch", run)
-	out, _ := rt.Exec(context.Background(), `{"command":"go","args":["version"]}`)
+	out := refusalText(rt.Exec(context.Background(), `{"command":"go","args":["version"]}`))
 	if !strings.Contains(out, "NOT performed") {
 		t.Errorf("run must be denied when the capability is off; got %q", out)
 	}
@@ -102,7 +102,7 @@ func TestRunToolNonAllowlistedRefusedAtToolLayer(t *testing.T) {
 			return sandbox.Result{}, nil
 		}
 		rt := runTool(NewPolicy(true, nil).WithShell(true), "/wt", "/wt/.scratch", run)
-		out, _ := rt.Exec(context.Background(), `{"command":"`+cmd+`","args":["x"]}`)
+		out := refusalText(rt.Exec(context.Background(), `{"command":"`+cmd+`","args":["x"]}`))
 		if !strings.Contains(out, "not on the runner allowlist") {
 			t.Errorf("%q must be refused at the tool layer; got %q", cmd, out)
 		}
@@ -174,10 +174,11 @@ func TestRunToolPathBearingCommandRefused(t *testing.T) {
 		}
 		rt := runTool(NewPolicy(true, nil).WithShell(true), "/wt", "/wt/.scratch", run)
 		esc := strings.ReplaceAll(cmd, `\`, `\\`)
-		out, err := rt.Exec(context.Background(), `{"command":"`+esc+`","args":["version"]}`)
-		if err != nil {
-			t.Errorf("%q: refusal must be a normal tool result, not a Go error; got err=%v", cmd, err)
+		o, err := rt.Exec(context.Background(), `{"command":"`+esc+`","args":["version"]}`)
+		if !IsNotPerformed(err) {
+			t.Errorf("%q: refusal must be the NotPerformed sentinel; got err=%v", cmd, err)
 		}
+		out := refusalText(o, err)
 		if !strings.Contains(out, "must be a bare executable name") {
 			t.Errorf("%q: path-bearing command must be refused as a path; got %q", cmd, out)
 		}
@@ -204,10 +205,11 @@ func TestRunToolBareNameNotOnPATHRefused(t *testing.T) {
 		return sandbox.Result{ExitCode: 0}, nil
 	}
 	rt := runTool(NewPolicy(true, nil).WithShell(true), "/wt", "/wt/.scratch", run)
-	out, err := rt.Exec(context.Background(), `{"command":"go","args":["version"]}`)
-	if err != nil {
-		t.Errorf("refusal must be a normal tool result, not a Go error; got err=%v", err)
+	o, err := rt.Exec(context.Background(), `{"command":"go","args":["version"]}`)
+	if !IsNotPerformed(err) {
+		t.Errorf("refusal must be the NotPerformed sentinel; got err=%v", err)
 	}
+	out := refusalText(o, err)
 	if !strings.Contains(out, "not found on PATH") {
 		t.Errorf("bare allowlisted name absent from PATH must be refused with not-found; got %q", out)
 	}
@@ -266,10 +268,11 @@ func TestRunToolResolvedInsideWorktreeRefused(t *testing.T) {
 		return sandbox.Result{ExitCode: 0}, nil
 	}
 	rt := runTool(NewPolicy(true, nil).WithShell(true), wt, wt+"/.scratch", run)
-	out, err := rt.Exec(context.Background(), `{"command":"go","args":["version"]}`)
-	if err != nil {
-		t.Errorf("refusal must be a normal tool result, not a Go error; got err=%v", err)
+	o, err := rt.Exec(context.Background(), `{"command":"go","args":["version"]}`)
+	if !IsNotPerformed(err) {
+		t.Errorf("refusal must be the NotPerformed sentinel; got err=%v", err)
 	}
+	out := refusalText(o, err)
 	if !strings.Contains(out, "inside the worktree") {
 		t.Errorf("a bare name resolving INTO the worktree must be refused (defense in depth); got %q", out)
 	}
