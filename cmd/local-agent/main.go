@@ -119,6 +119,7 @@ func main() {
 	allowGitHub := fs.Bool("allow-github", false, "enable GitHub tools (github_api/create_repo/upload_file). Token from $GITHUB_TOKEN, default repo from $GITHUB_REPO. Default off.")
 	queuePath := fs.String("queue", "", "P5b standalone: drain a JSONL goal queue UNATTENDED (the capability flags become the pre-authorization envelope) instead of a single objective. No resume — a re-run reprocesses the whole queue.")
 	askQueuePath := fs.String("ask-queue", "", "standalone: file where asks deferred on the unattended run are parked for review (default: ~/.local-offload/agent-asks.jsonl)")
+	rulesPath := fs.String("rules", "", "structural risk rule table (JSON array of {kind,glob,decision,severity,reason}; tighten-only — rules may deny or ask, never allow). Fails closed on a bad or missing file.")
 	tracesDir := fs.String("traces", "", "standalone: directory for per-goal trace JSON (default: ~/.local-offload/agent-traces)")
 	goalTimeoutSec := fs.Int("goal-timeout", 300, "standalone: per-goal wall-clock budget in seconds")
 	totalTimeoutSec := fs.Int("total-timeout", 0, "standalone: optional cumulative wall-clock budget for the WHOLE drain in seconds (0 = unbounded; --goal-timeout still bounds each goal)")
@@ -134,7 +135,7 @@ func main() {
 	objective, flags := splitObjective(os.Args[1:], map[string]bool{
 		"config": true, "root": true, "model": true, "base": true, "max-steps": true, "max-tokens": true, "ctx-tokens": true, "max-same-tool": true, "timeout": true,
 		"mem-base": true, "mem-user": true, "worktree": true, "audit": true, "egress-host": true,
-		"queue": true, "ask-queue": true, "traces": true, "goal-timeout": true, "total-timeout": true, "checkpoint": true,
+		"queue": true, "ask-queue": true, "rules": true, "traces": true, "goal-timeout": true, "total-timeout": true, "checkpoint": true,
 		"listen": true, "profile": true,
 		"architect-model": true, "editor-model": true,
 	})
@@ -249,6 +250,7 @@ func main() {
 		Unattended:     true, // non-interactive CLI: ask → deny-and-queue
 		AuditPath:      auditP,
 		AskQueuePath:   askQ,
+		RulesPath:      *rulesPath,
 		AllowWrite:     *allowWrite,
 		AllowOverwrite: *allowOverwrite,
 		AllowDelete:    *allowDelete,
@@ -409,6 +411,7 @@ func main() {
 			Unattended:           true,
 			AuditPath:            auditP,
 			AskQueuePath:         askQ,
+			RulesPath:            *rulesPath,
 			AllowSearch:          *allowSearch, // read/search only; NO write for the architect
 			GitHubToken:          os.Getenv("GITHUB_TOKEN"),
 			GitHubRepo:           os.Getenv("GITHUB_REPO"),
@@ -434,6 +437,7 @@ func main() {
 			Unattended:           true,
 			AuditPath:            auditP,
 			AskQueuePath:         askQ,
+			RulesPath:            *rulesPath,
 			AllowWrite:           *allowWrite,
 			AllowOverwrite:       *allowOverwrite,
 			AllowDelete:          *allowDelete,
