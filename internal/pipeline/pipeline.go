@@ -836,20 +836,7 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	// This machine's image-model binding (per-machine config; never hardcoded here —
 	// an 8GB box runs SDXL, a 16GB box may run an all-in-one DiT). All fields are
 	// optional: a zero Model passes no flags and the renderer keeps its own defaults.
-	model := imagegen.Model{
-		Ckpt:         p.cfg.ImageGenCkpt,
-		VAE:          p.cfg.ImageGenVAE,
-		Steps:        p.cfg.ImageGenSteps,
-		CFG:          p.cfg.ImageGenCFG,
-		Sampler:      p.cfg.ImageGenSampler,
-		Scheduler:    p.cfg.ImageGenScheduler,
-		Family:       p.cfg.ImageGenFamily,
-		Preset:       p.cfg.ImageGenPreset,
-		CLIP:         p.cfg.ImageGenCLIP,
-		LoRA:         p.cfg.ImageGenLoRA,
-		LoRAStrength: p.cfg.ImageGenLoRAStrength,
-		Shift:        p.cfg.ImageGenShift,
-	}
+	model := imageModelFromConfig(p.cfg)
 	// Passive fleet footprint: key this render by the machine's image binding
 	// (family + the O1 bf16 quant) so measured peaks accumulate during normal use.
 	imgFamily, imgQuant := imageFootprintKey(p.cfg)
@@ -1251,11 +1238,7 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 	if p.cfg.ImageGenCkpt != "" {
 		modelLabel = "comfyui:" + p.cfg.ImageGenCkpt
 	}
-	model := imagegen.Model{
-		Ckpt: p.cfg.ImageGenCkpt, VAE: p.cfg.ImageGenVAE, Steps: p.cfg.ImageGenSteps,
-		CFG: p.cfg.ImageGenCFG, Sampler: p.cfg.ImageGenSampler,
-		Scheduler: p.cfg.ImageGenScheduler, Family: p.cfg.ImageGenFamily,
-	}
+	model := imageModelFromConfig(p.cfg)
 	// The whole batch shares one timeout: per-image budget × N (the first job also
 	// absorbs the ComfyUI cold start, which the per-image budget already covers today).
 	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second * time.Duration(len(norm))
@@ -2280,6 +2263,30 @@ func globalDeltaSampleFunc(run func() (string, error)) func(childPid int) (float
 func runNvidiaSmiMemory() (string, error) {
 	out, err := exec.Command("nvidia-smi", "--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits").Output()
 	return string(out), err
+}
+
+// imageModelFromConfig is the ONE mapping from config to the render-model
+// binding, shared by the single and batch paths. It exists because the two
+// paths each carried their own Model literal and the second silently dropped
+// five newly added fields (a lightning4-bound seat rendered the 50-step full
+// recipe in batch, review-caught pre-merge 2026-08-10) — a drift class this
+// helper deletes. TestImageModelFromConfig reflect-checks that every field
+// added to imagegen.Model gets mapped here.
+func imageModelFromConfig(cfg config.Config) imagegen.Model {
+	return imagegen.Model{
+		Ckpt:         cfg.ImageGenCkpt,
+		VAE:          cfg.ImageGenVAE,
+		Steps:        cfg.ImageGenSteps,
+		CFG:          cfg.ImageGenCFG,
+		Sampler:      cfg.ImageGenSampler,
+		Scheduler:    cfg.ImageGenScheduler,
+		Family:       cfg.ImageGenFamily,
+		Preset:       cfg.ImageGenPreset,
+		CLIP:         cfg.ImageGenCLIP,
+		LoRA:         cfg.ImageGenLoRA,
+		LoRAStrength: cfg.ImageGenLoRAStrength,
+		Shift:        cfg.ImageGenShift,
+	}
 }
 
 // imageFootprintKey is this box's image-render footprint identity: the

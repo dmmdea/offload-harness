@@ -160,7 +160,9 @@ template-verified). The `--preset/--clip/--lora/--lora-strength/--shift` flags a
 `imagegen_preset` / `imagegen_clip` / `imagegen_lora` / `imagegen_lora_strength` /
 `imagegen_shift`, so a harness-driven `qwen-image` seat can run the `lightning4` recipe
 directly (an empty `imagegen_lora` means unset, not LoRA-stripping — bind preset `full` for a
-LoRA-free run).
+LoRA-free run). On a qwen-image seat with no `imagegen_cfg` bound, a per-request `steps`
+override alone trips the route's steps/cfg pair guard by design (exit 2, loud) — callers on
+that seat pick a preset instead of overriding steps.
 
 The recommended **≥16 GB image-*edit* primitive is Qwen-Image-Edit-2511** (Apache-2.0). It is a
 model-matrix *designation*, not a config binding — image editing at that tier runs through
