@@ -214,6 +214,9 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	// inpaint_image re-renders ONLY the masked region of params.image on the local
 	// ComfyUI by shelling out to comfy-inpaint.mjs (shared GPU lock + ComfyUI
 	// lifecycle). Its own branch — no text cascade, no grammar, no vision call.
+	if req.Task == core.TaskEditImageGenerative {
+		return p.runEditImageGenerative(ctx, req, meta, start)
+	}
 	if req.Task == core.TaskInpaintImage {
 		return p.runInpaintImage(ctx, req, meta, start)
 	}
@@ -1021,6 +1024,71 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return defer1("inpaint failed: " + gerr.Error())
+	}
+	meta.LatencyMs = time.Since(start).Milliseconds()
+	data, _ := json.Marshal(map[string]any{"image_path": outPath, "seed": seed})
+	p.record(req.Task, meta, len(prompt))
+	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// runEditImageGenerative rewrites the WHOLE of params.image from a text instruction
+// on the LOCAL ComfyUI — no mask (Qwen-Image-Edit class). Distinct from
+// runInpaintImage, which needs a mask and an SDXL-class latent binding. Any failure
+// defers.
+func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+	defer1 := func(reason string) core.Result {
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		p.recordDefer(req.Task, meta, len(req.Input), reason)
+		return core.Deferf(reason, "", meta)
+	}
+	if p.cfg.GenEditScript == "" || p.cfg.GenEditUnet == "" {
+		return defer1("no generative edit route configured")
+	}
+	prompt := strings.TrimSpace(req.Input)
+	if prompt == "" {
+		return defer1("empty edit instruction")
+	}
+	image := paramStr(req.Params, "image")
+	if image == "" {
+		return defer1("generative edit requires params.image")
+	}
+	script, serr := gpugen.ResolveScript(p.cfg.GenEditScript)
+	if serr != nil {
+		return defer1(serr.Error())
+	}
+	meta.Model = "comfyui-edit:" + p.cfg.GenEditUnet
+	// Pin a concrete seed BEFORE the render, same reproducibility rule as
+	// runGenerateImage/runInpaintImage: otherwise the runner mints its own and the
+	// reported seed would not reproduce the image.
+	seed := paramIntOr(req.Params, "seed", 0)
+	if seed <= 0 {
+		seed = mintSeed()
+		if req.Params == nil {
+			req.Params = map[string]any{}
+		}
+		req.Params["seed"] = seed
+	}
+	out := paramStr(req.Params, "out")
+	if out == "" {
+		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
+		out = filepath.Join(p.cfg.MediaDir, "edit-"+sha256hex(image+prompt+tasks.StableParamsKey(req.Params))[:8]+".png")
+	}
+	m := imagegen.EditModel{
+		Unet: p.cfg.GenEditUnet, Preset: p.cfg.GenEditPreset, LoRA: p.cfg.GenEditLoRA,
+		LoRAStrength: p.cfg.GenEditLoRAStrength, CLIP: p.cfg.GenEditCLIP, VAE: p.cfg.GenEditVAE,
+		Steps: p.cfg.GenEditSteps, CFG: p.cfg.GenEditCFG,
+		Sampler: p.cfg.GenEditSampler, Scheduler: p.cfg.GenEditScheduler,
+	}
+	timeout := time.Duration(p.cfg.GenEditTimeoutSec) * time.Second
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("edit", timeout, p.gpuWait())
+	if lerr != nil {
+		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
+	}
+	defer releaseLease()
+	outPath, gerr := imagegen.Edit(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, image, prompt, req.Params, m, timeout, leaseEnv...)
+	if gerr != nil {
+		meta.ErrClass = classifyErr(gerr)
+		return defer1("generative edit failed: " + gerr.Error())
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	data, _ := json.Marshal(map[string]any{"image_path": outPath, "seed": seed})

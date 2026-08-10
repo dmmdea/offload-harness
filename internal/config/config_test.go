@@ -324,7 +324,7 @@ func pathFieldJSONNames(t *testing.T) []string {
 		"ffmpeg_path", "media_dir", "svg_dir",
 		"imagegen_script", "node_path", "comfy_dir",
 		"sdcpp_script", "sdcpp_bin", "sdcpp_model", "sdcpp_vae", "sdcpp_clip_l", "sdcpp_clip_g", "sdcpp_t5xxl", "sdcpp_llm",
-		"inpaint_script",
+		"inpaint_script", "gen_edit_script",
 		"videogen_script", "run_graph_script", "voicegen_script", "musicgen_script", "gpu_lock_path", "state_dir",
 		"voicegen_ref", "voicegen_ft_model", "voicegen_ft_base_dir", "voicegen_ft_ref",
 		"edit_python", "gimp_console_path",

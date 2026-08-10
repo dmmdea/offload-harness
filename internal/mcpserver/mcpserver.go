@@ -166,6 +166,12 @@ func (s *Server) Run(ctx context.Context, version string) error {
 	}, s.handleInpaintImage)
 
 	srv.AddTool(&mcp.Tool{
+		Name:        "offload_edit_image_generative",
+		Description: "Rewrite a local image from a TEXT INSTRUCTION on the LOCAL ComfyUI for FREE — no mask (Qwen-Image-Edit class: the model reads the source through its own vision encoder and re-renders the whole frame). This is the route for instruction edits that have no drawable region: \"make it snowing heavily\", \"turn the leather into fur\", \"make it night\", \"change the sofa to green\". Pick between the three edit routes by what you have: offload_edit_image for DETERMINISTIC ops (crop/resize/text/composite — free, CPU, exact); offload_inpaint_image when you can supply a MASK and want the rest untouched pixel-for-pixel; THIS when the change is global or diffuse and you cannot draw a mask. Note it re-renders everything, so fine detail outside the intended change will shift — prefer inpaint when a mask is possible. Output is snapped to ~1MP (a 2048x2048 source returns ~1024x1024). preset trades speed for fidelity: lightning8 (default, ~4x faster) or full. Takes the shared single-slot GPU lock (serializes with other local gen); expect several minutes, most of it fixed model-load overhead. Returns {image_path, seed}. On any failure (no edit binding on this machine, missing file, render error) it returns deferred:true.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local path of the source image"},"prompt":{"type":"string","description":"the edit INSTRUCTION, e.g. 'make it snowing heavily, winter atmosphere' — describe the change, not the whole scene"},"negative":{"type":"string","description":"hard exclusions"},"preset":{"type":"string","description":"full | lightning8 | lightning4 — a MATCHED steps+cfg+LoRA triple. Prefer switching preset over setting steps/cfg by hand: half-overriding the pairing renders successfully and looks wrong"},"steps":{"type":"integer","description":"sampler steps (advanced; overrides the preset — see preset)"},"cfg":{"type":"number","description":"guidance (advanced; a Lightning preset needs 1.0 — see preset)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"}},"required":["image","prompt"]}`),
+	}, s.handleEditImageGenerative)
+
+	srv.AddTool(&mcp.Tool{
 		Name:        "offload_media",
 		Description: "Run ONE ffmpeg av operation on local media — free, CPU-only (no GPU lock). op: trim{in,start,end|duration, reencode? (default false = fast keyframe-snapped stream copy)}, concat{inputs[] (same codec)}, extract_frames{in, fps OR count, out = directory}, convert{in (target by out extension; audio_only/video_only)}, mux_audio{in (video), audio, shortest}, probe{in} -> {duration_sec, streams[], format}. Inputs are LOCAL paths. Returns op-specific JSON. On any failure (ffmpeg absent, bad args) it returns deferred:true — then do it another way.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"op":{"type":"string","description":"trim | concat | extract_frames | convert | mux_audio | probe"},"in":{"type":"string","description":"input media path (all ops except concat)"},"inputs":{"type":"array","items":{"type":"string"},"description":"concat: >=2 input paths, same codec"},"out":{"type":"string","description":"output path (optional; extract_frames: a directory). probe has no output"},"start":{"type":"string","description":"trim: start (seconds or hh:mm:ss)"},"end":{"type":"string","description":"trim: absolute end time"},"duration":{"type":"string","description":"trim: duration in seconds (alternative to end)"},"reencode":{"type":"boolean","description":"trim: re-encode for exact cuts (default false = keyframe-snapped -c copy, fast)"},"fps":{"type":"number","description":"extract_frames: sampling rate"},"count":{"type":"integer","description":"extract_frames: total frames (resolved to fps via probe)"},"audio":{"type":"string","description":"mux_audio: audio input path"},"shortest":{"type":"boolean","description":"mux_audio: stop at the shorter input (default true)"},"audio_only":{"type":"boolean","description":"convert: drop video (-vn)"},"video_only":{"type":"boolean","description":"convert: drop audio (-an)"}},"required":["op"]}`),
@@ -448,6 +454,45 @@ func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolReque
 		params["seed"] = in.Seed
 	}
 	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateImage, Input: in.Prompt, Params: params}))
+}
+
+func (s *Server) handleEditImageGenerative(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var in struct {
+		Image    string  `json:"image"`
+		Prompt   string  `json:"prompt"`
+		Negative string  `json:"negative"`
+		Preset   string  `json:"preset"`
+		Steps    int     `json:"steps"`
+		CFG      float64 `json:"cfg"`
+		Seed     int     `json:"seed"`
+		Out      string  `json:"out"`
+	}
+	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+		return bad, nil
+	}
+	params := map[string]any{}
+	if in.Image != "" {
+		params["image"] = in.Image
+	}
+	if in.Negative != "" {
+		params["negative"] = in.Negative
+	}
+	if in.Preset != "" {
+		params["preset"] = in.Preset
+	}
+	if in.Steps > 0 {
+		params["steps"] = in.Steps
+	}
+	if in.CFG > 0 {
+		params["cfg"] = in.CFG
+	}
+	if in.Seed > 0 {
+		params["seed"] = in.Seed
+	}
+	if in.Out != "" {
+		params["out"] = in.Out
+	}
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskEditImageGenerative, Input: in.Prompt, Params: params}))
 }
 
 func (s *Server) handleInpaintImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
