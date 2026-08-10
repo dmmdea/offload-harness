@@ -89,6 +89,23 @@ func gpuLeaseCases() []gpuLeaseCase {
 			invoke: genReq(core.TaskGenerateImage, nil),
 		},
 		{
+			name:   "edit_image_generative",
+			runner: "comfy-edit.mjs",
+			setup: func(t *testing.T, cfg *config.Config, stub, dir string) {
+				t.Helper()
+				cfg.GenEditScript = stub
+				cfg.GenEditUnet = "qwen-image-edit-2511-Q5_1.gguf"
+				if err := os.WriteFile(filepath.Join(dir, "a.png"), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			invoke: func(t *testing.T, p *Pipeline, dir string) {
+				t.Helper()
+				p.Run(context.Background(), core.Request{Task: core.TaskEditImageGenerative,
+					Input: "make it snowing", Params: map[string]any{"image": filepath.Join(dir, "a.png")}})
+			},
+		},
+		{
 			name:   "inpaint_image",
 			runner: "comfy-inpaint.mjs",
 			setup: func(t *testing.T, cfg *config.Config, stub, dir string) {

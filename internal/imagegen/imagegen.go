@@ -273,6 +273,98 @@ func inpaintArgs(out, image, mask, prompt string, params map[string]any, m Inpai
 	return args
 }
 
+// EditModel binds the GENERATIVE, mask-free edit route (Qwen-Image-Edit class).
+// Distinct from InpaintModel: no mask, no SDXL checkpoint — a diffusion-transformer
+// unet plus its own text encoder and VAE, driven by a text instruction.
+type EditModel struct {
+	Unet, Preset, LoRA, CLIP, VAE, Sampler, Scheduler string
+	LoRAStrength                                      float64
+	Steps                                             int
+	CFG                                               float64
+}
+
+// editArgs assembles the comfy-edit.mjs argv. Pure; unit-tested. Request steps
+// wins over m.Steps (same rule as buildArgs/inpaintArgs).
+//
+// Steps and CFG are emitted ONLY when explicitly set. The runner resolves a
+// preset (full | lightning8 | lightning4) into a MATCHED steps+cfg+lora triple,
+// and half-overriding that pairing is the classic way to get a technically
+// successful render that looks wrong: a Lightning LoRA at 40 steps/cfg 3 produces
+// mush, the base model at 4 steps/cfg 1 produces noise. Sending nothing lets the
+// preset stay internally consistent.
+func editArgs(out, image, prompt string, params map[string]any, m EditModel) []string {
+	args := []string{out, image, prompt}
+	if n, ok := params["negative"].(string); ok && n != "" {
+		args = append(args, "--negative", n)
+	}
+	if v := gpugen.AsInt(params["seed"]); v > 0 {
+		args = append(args, "--seed", strconv.Itoa(v))
+	}
+	if m.Unet != "" {
+		args = append(args, "--unet", m.Unet)
+	}
+	// A per-request preset is the supported way to trade speed for fidelity.
+	preset := m.Preset
+	if s, ok := params["preset"].(string); ok && s != "" {
+		preset = s
+	}
+	if preset != "" {
+		args = append(args, "--preset", preset)
+	}
+	if m.CLIP != "" {
+		args = append(args, "--clip", m.CLIP)
+	}
+	if m.VAE != "" {
+		args = append(args, "--vae", m.VAE)
+	}
+	// Presence-gated: an explicit empty lora means "base model, no distillation"
+	// and must override a configured LoRA rather than fall through to it.
+	if lora, present := params["lora"]; present {
+		if s, ok := lora.(string); ok {
+			args = append(args, "--lora", s)
+		}
+	} else if m.LoRA != "" {
+		args = append(args, "--lora", m.LoRA)
+	}
+	if m.LoRAStrength > 0 {
+		args = append(args, "--lora-strength", strconv.FormatFloat(m.LoRAStrength, 'g', -1, 64))
+	}
+	if reqSteps := gpugen.AsInt(params["steps"]); reqSteps > 0 {
+		args = append(args, "--steps", strconv.Itoa(reqSteps))
+	} else if m.Steps > 0 {
+		args = append(args, "--steps", strconv.Itoa(m.Steps))
+	}
+	if f, ok := params["cfg"].(float64); ok && f > 0 {
+		args = append(args, "--cfg", strconv.FormatFloat(f, 'g', -1, 64))
+	} else if m.CFG > 0 {
+		args = append(args, "--cfg", strconv.FormatFloat(m.CFG, 'g', -1, 64))
+	}
+	if m.Sampler != "" {
+		args = append(args, "--sampler", m.Sampler)
+	}
+	if m.Scheduler != "" {
+		args = append(args, "--scheduler", m.Scheduler)
+	}
+	return args
+}
+
+// Edit rewrites a whole image from a text instruction on the LOCAL ComfyUI (free),
+// with no mask. Same lifecycle guards as Generate.
+func Edit(ctx context.Context, node, script, comfyDir, out, image, prompt string, params map[string]any, m EditModel, timeout time.Duration, extraEnv ...string) (string, error) {
+	env := []string{"COMFY_DIR=" + comfyDir}
+	if timeout > 0 {
+		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
+	}
+	return gpugen.Generate(ctx, gpugen.Spec{
+		Exe:     node,
+		Script:  script,
+		Args:    editArgs(out, image, prompt, params, m),
+		Env:     append(env, extraEnv...),
+		Out:     out,
+		Timeout: timeout,
+	})
+}
+
 // Inpaint re-renders ONLY the masked region of image on the LOCAL ComfyUI (free).
 // Same lifecycle guards as Generate: gpugen tree-kill on timeout + deferred /free.
 func Inpaint(ctx context.Context, node, script, comfyDir, out, image, mask, prompt string, params map[string]any, m InpaintModel, timeout time.Duration, extraEnv ...string) (string, error) {
