@@ -47,7 +47,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.46.0"
+const version = "0.47.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -215,7 +215,7 @@ Usage:
   local-offload extract-image <image-path> --schema schema.json [--json]
   local-offload assess-image <image-path> [--brief "..."] [--json]
   local-offload generate-audio <out> "<text>" [--kind voice|music] [--voice generalist|finetuned] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
-  local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path]
+  local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false]
   local-offload generate-image --batch jobs.jsonl    N prompts through ONE warm ComfyUI session (checkpoint loads once)
   local-offload inpaint-image <image> --mask m.png --prompt "..."   re-render ONLY the masked region (white=repaint)
   local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F]
@@ -633,14 +633,21 @@ func runGenerateImage(args []string) error {
 	height := fs.Int("height", 0, "image height px (default 1024)")
 	steps := fs.Int("steps", 0, "sampler steps (default 30)")
 	seed := fs.Int("seed", 0, "RNG seed (default random)")
+	refine := fs.Bool("refine", true, "set --refine=false (the =form is required) to render the prompt verbatim, skipping this machine's opt-in prompt refiner; on --batch it applies to every job without its own \"refine\" value (no-op unless imagegen_refiner_model is configured)")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
-	batchFile := fs.String("batch", "", "render a JSONL batch of jobs through ONE warm ComfyUI session (one line per job: {\"prompt\":...,\"out\"?,\"negative\"?,\"width\"?,\"height\"?,\"steps\"?,\"seed\"?})")
+	batchFile := fs.String("batch", "", "render a JSONL batch of jobs through ONE warm ComfyUI session (one line per job: {\"prompt\":...,\"out\"?,\"negative\"?,\"width\"?,\"height\"?,\"steps\"?,\"seed\"?,\"refine\"?})")
 	positional, flagArgs := splitArgs(args, map[string]bool{
 		"config": true, "negative": true, "out": true,
 		"width": true, "height": true, "steps": true, "seed": true,
 		"batch": true,
 	})
 	_ = fs.Parse(flagArgs)
+	// Boolean flags in space form ("--refine false") make the value a stray
+	// argument: flag.Parse stops there, so later flags are SILENTLY dropped and
+	// the stray can even become the prompt. Refuse loudly instead.
+	if err := leftoverArgErr(fs, "generate-image"); err != nil {
+		return err
+	}
 
 	if *batchFile != "" {
 		raw, rerr := os.ReadFile(*batchFile)
@@ -659,6 +666,10 @@ func runGenerateImage(args []string) error {
 			}
 			jobs = append(jobs, j)
 		}
+		// --refine=false applies to every job that does not set its own
+		// "refine" (job-level wins) — before this, the flag was silently
+		// ignored on the batch path.
+		applyBatchRefineDefault(jobs, *refine)
 		cfg := loadCfg(fs)
 		p, cleanup, err := openPipeline(cfg)
 		if err != nil {
@@ -667,12 +678,22 @@ func runGenerateImage(args []string) error {
 		defer cleanup()
 		items, berr := p.RunImageBatch(context.Background(), jobs)
 		ok := 0
+		refineFallbacks := 0
 		for _, it := range items {
 			if it.OK {
 				ok++
 			}
+			if it.RefineFallback != "" {
+				refineFallbacks++
+			}
 		}
 		payload := map[string]any{"count": len(items), "succeeded": ok, "failed": len(items) - ok, "items": items}
+		// Surface the refiner fallback count in the batch summary whenever a
+		// refiner is configured (0 = all jobs refined or opted out) — absent
+		// otherwise, keeping the refiner-less payload byte-identical.
+		if p.Cfg().ImageGenRefinerModel != "" {
+			payload["refine_fallbacks"] = refineFallbacks
+		}
 		data, _ := json.Marshal(payload)
 		res := core.Result{OK: berr == nil && ok == len(items), Data: data}
 		if berr != nil {
@@ -720,6 +741,11 @@ func runGenerateImage(args []string) error {
 	}
 	if *seed > 0 {
 		params["seed"] = *seed
+	}
+	// Only an EXPLICIT --refine=false reaches the pipeline (the opt-in
+	// refiner's only request-level knob turns it off; the default is inert).
+	if !*refine {
+		params["refine"] = false
 	}
 	res := p.Run(context.Background(), core.Request{
 		Task:   core.TaskGenerateImage,
@@ -2875,6 +2901,32 @@ func readInput(arg string) (string, error) {
 // splitArgs separates the first positional (input path) from flags, treating
 // the named value-flags as consuming the following token. This lets the input
 // path appear before flags on the command line.
+// leftoverArgErr rejects arguments left over after flag parsing. The flag
+// package stops at the first non-flag token, so a boolean flag given in space
+// form ("--refine false") silently drops every later flag and can promote its
+// value into a positional. cmd names the command for the error text.
+func leftoverArgErr(fs *flag.FlagSet, cmd string) error {
+	if fs.NArg() == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s: unexpected argument %q — boolean flags need the =form (e.g. --refine=false), and the prompt must be one quoted argument", cmd, fs.Arg(0))
+}
+
+// applyBatchRefineDefault propagates the CLI-level --refine=false onto batch
+// jobs that carry no per-job "refine" value (job-level wins). --refine=true is
+// the inert default, so only an explicit false writes anything.
+func applyBatchRefineDefault(jobs []pipeline.ImageBatchJob, refine bool) {
+	if refine {
+		return
+	}
+	off := false
+	for i := range jobs {
+		if jobs[i].Refine == nil {
+			jobs[i].Refine = &off
+		}
+	}
+}
+
 func splitArgs(args []string, valueFlags map[string]bool) (positional string, flags []string) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
