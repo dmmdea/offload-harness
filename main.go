@@ -215,7 +215,7 @@ Usage:
   local-offload extract-image <image-path> --schema schema.json [--json]
   local-offload assess-image <image-path> [--brief "..."] [--json]
   local-offload generate-audio <out> "<text>" [--kind voice|music] [--voice generalist|finetuned] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
-  local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path]
+  local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false]
   local-offload generate-image --batch jobs.jsonl    N prompts through ONE warm ComfyUI session (checkpoint loads once)
   local-offload inpaint-image <image> --mask m.png --prompt "..."   re-render ONLY the masked region (white=repaint)
   local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F]
@@ -633,8 +633,9 @@ func runGenerateImage(args []string) error {
 	height := fs.Int("height", 0, "image height px (default 1024)")
 	steps := fs.Int("steps", 0, "sampler steps (default 30)")
 	seed := fs.Int("seed", 0, "RNG seed (default random)")
+	refine := fs.Bool("refine", true, "set --refine=false to render the prompt verbatim, skipping this machine's opt-in prompt refiner (no-op unless imagegen_refiner_model is configured)")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
-	batchFile := fs.String("batch", "", "render a JSONL batch of jobs through ONE warm ComfyUI session (one line per job: {\"prompt\":...,\"out\"?,\"negative\"?,\"width\"?,\"height\"?,\"steps\"?,\"seed\"?})")
+	batchFile := fs.String("batch", "", "render a JSONL batch of jobs through ONE warm ComfyUI session (one line per job: {\"prompt\":...,\"out\"?,\"negative\"?,\"width\"?,\"height\"?,\"steps\"?,\"seed\"?,\"refine\"?})")
 	positional, flagArgs := splitArgs(args, map[string]bool{
 		"config": true, "negative": true, "out": true,
 		"width": true, "height": true, "steps": true, "seed": true,
@@ -720,6 +721,11 @@ func runGenerateImage(args []string) error {
 	}
 	if *seed > 0 {
 		params["seed"] = *seed
+	}
+	// Only an EXPLICIT --refine=false reaches the pipeline (the opt-in
+	// refiner's only request-level knob turns it off; the default is inert).
+	if !*refine {
+		params["refine"] = false
 	}
 	res := p.Run(context.Background(), core.Request{
 		Task:   core.TaskGenerateImage,
