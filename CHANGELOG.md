@@ -4,6 +4,50 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.45.0] - 2026-08-10
+
+### Added — `--family qwen-image`: the 2512 prompt-adherence preset
+Qwen-Image 2512 (the DiT with the strongest instruction/text rendering on disk)
+was reachable only through `run_graph` with a hand-built workflow — no named
+preset, so nothing could route to it. Now `comfy-render.mjs --family qwen-image`
+selects the model-correct graph, exactly like `--family hidream-o1` does for the
+default seat. No Go changes: the harness already threads `imagegen_family` and
+`imagegen_ckpt` through as `--family`/`--ckpt`.
+
+- `render/wf-qwen-image.mjs` — graph follows ComfyUI's shipped
+  `image_qwen_Image_2512` template (and its Lightning sibling), with the same two
+  fleet departures as the edit builder: switchable UnetLoaderGGUF/UNETLoader, and
+  Lightning applied as a **LoRA** so it composes with any quantisation.
+  Family-correct details the generic graph gets wrong: `EmptySD3LatentImage`
+  (16-channel; the SDXL latent is the wrong format), `ModelSamplingAuraFlow`
+  shift 3.1, native 1328x1328 with /16 dim snapping, and an EMPTY negative
+  becomes `ConditioningZeroOut` of the positive (the template's own "no
+  negative"), never an encoded empty string.
+- `QWEN_IMAGE_PRESETS` pairs steps+cfg+LoRA as a matched pair of recipes
+  (`full` = 50 steps/cfg 4, `lightning4` = 4 steps/cfg 1 + LoRA), template-widget
+  verified; the builder throws on unpaired steps/cfg, same rationale as the edit
+  presets.
+- `comfy-generate.mjs`/`batch-jobs.mjs` forward the new flags (`--preset`,
+  `--clip`, `--lora`, `--lora-strength`, `--shift`; shared-only, a batch job
+  cannot override them). These are **CLI-layer only for now**: no harness config
+  key binds them, so a harness-driven `qwen-image` seat renders the `full`
+  recipe until that wiring lands (recorded follow-up). `--lora ""` forwards
+  through the wrapper deliberately — it is the escape hatch that strips a
+  preset's LoRA.
+- Guard rails, all fail-loud: `--steps`/`--cfg` are accepted only together
+  (the harness forwards per-request steps but never per-request cfg, so a lone
+  steps override would render the base model at draft steps — technically
+  successful, actually noise); unknown/prototype `--preset` names, a missing
+  `--ckpt`, and a `builtin` VAE binding (the UNET carries no VAE weights) all
+  exit 2 with the fix in the message; the builder rejects non-finite dims and
+  unpaired steps/cfg.
+
+### Fixed — finished renders can no longer die on a missing output directory
+`comfy-render.mjs` now creates the output file's parent directory before
+writing, and `comfy-generate.mjs --batch` does the same for its results file. An
+ENOENT at the write site used to discard a fully rendered image after all the
+GPU work had succeeded — this wasted a complete A/B render arm on 2026-08-10.
+
 ## [0.44.0] - 2026-08-10
 
 ### Added — `offload_edit_image_generative`: instruction edits with no mask

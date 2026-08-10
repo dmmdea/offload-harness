@@ -143,6 +143,23 @@ Hardware profiles seed these. Tiers at 16 GB and above bind **HiDream-O1 bf16** 
 Q8_0** experts with an fp16 text encoder. **RealVisXL** is the SDXL-class inpainting default. The 8 GB
 tiers stay SDXL-class for image generation until O1 on 8 GB is verified on real hardware.
 
+**Qwen-Image 2512** (Apache-2.0) is the prompt-adherence *generation* alternative at ≥16 GB:
+`imagegen_family: "qwen-image"` selects its model-correct graph — SD3-class 16-channel latent
+(`EmptySD3LatentImage`, never the SDXL latent), `ModelSamplingAuraFlow` shift, split
+text-encoder/VAE files, and `ConditioningZeroOut` for an empty negative — with `imagegen_ckpt`
+carrying the UNET filename (`.gguf` or `.safetensors`; the `_1`-quant rule below applies to 2512
+GGUFs the same as 2511). **Binding it on a seeded box takes TWO key changes, not one:** every
+≥16 GB profile seeds `imagegen_vae: "builtin"` for HiDream, and the qwen-image route fails loud
+on that value (the UNET file carries no VAE weights) — set `imagegen_vae` to
+`qwen_image_vae.safetensors` or clear it. If binding `imagegen_steps`/`imagegen_cfg`, set both
+or neither: the route rejects a half-override of the preset pairing. It is not the seeded
+default seat: `imagegen_family` is a per-machine binding, and ad-hoc renders reach the family
+through the render CLIs (`comfy-render.mjs`/`comfy-generate.mjs --family qwen-image`; presets
+`full` = 50 steps/cfg 4 and `lightning4` = 4 steps/cfg 1 + Lightning LoRA, both
+template-verified). The `--preset/--clip/--lora/--lora-strength/--shift` flags are CLI-layer
+only for now — no harness config key binds them, so a harness-driven `qwen-image` seat always
+renders the `full` recipe until that wiring lands.
+
 The recommended **≥16 GB image-*edit* primitive is Qwen-Image-Edit-2511** (Apache-2.0). It is a
 model-matrix *designation*, not a config binding — image editing at that tier runs through
 [run-graph](../flows/run-graph-manifest-satisfaction.md) with the model set declared in the caller's

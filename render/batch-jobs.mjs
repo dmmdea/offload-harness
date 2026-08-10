@@ -7,7 +7,7 @@
 // NOT override the binding (ckpt/vae/...): which checkpoint a machine renders with is
 // per-machine config threaded by the Go harness, never per-prompt data.
 const JOB_PARAMS = ["negative", "width", "height", "steps", "seed"];
-const SHARED_ONLY = ["ckpt", "vae", "cfg", "sampler", "scheduler", "family"];
+const SHARED_ONLY = ["ckpt", "vae", "cfg", "sampler", "scheduler", "family", "preset", "clip", "lora", "lora-strength", "shift"];
 
 export function parseJobs(text) {
   const jobs = [];
@@ -32,7 +32,11 @@ export function jobArgs(job, shared = {}) {
     if (v != null && v !== "") args.push("--" + k, String(v));
   }
   for (const k of SHARED_ONLY) {
-    if (shared[k] != null && shared[k] !== "") args.push("--" + k, String(shared[k]));
+    // "lora" forwards even as an EMPTY string: --lora "" is the documented way to
+    // strip a preset's LoRA at the comfy-render layer, and dropping it here made
+    // the two entry points silently diverge on identical argv (the wrapper would
+    // re-apply the very LoRA the caller disabled).
+    if (shared[k] != null && (shared[k] !== "" || k === "lora")) args.push("--" + k, String(shared[k]));
   }
   return args;
 }
