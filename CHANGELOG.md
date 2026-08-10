@@ -19,16 +19,31 @@ before the render — temperature 0.4, ~256 tokens, bounded by
 engine, and warm batch — the same drift class `imageModelFromConfig` deletes
 for the model binding.
 
-**Fail-safe by construction:** any refiner problem — transport error, timeout,
-empty output, output shorter than the input, or a computed quoted-span guard
-violation (every `"double-quoted"` span of the raw prompt must appear verbatim
-in the refined one; this protects text-render prompts) — falls back to the RAW
-prompt, records the reason, and renders anyway. Refinement never makes a
-render fail. Output paths still derive from the raw prompt, so identical
-requests keep reusing one file. Results gain `refined` (+ `refined_prompt` /
-`refine_fallback`) only when a refiner is configured; batch items mirror the
-same keys. Request-level opt-out: `refine=false` on the MCP tool / CLI
-(`--refine=false`) / a batch job's `"refine": false`.
+**Fail-safe by construction:** any refiner problem — transport error, timeout
+(annotated "cold model swap?" on a deadline hit), truncated or empty output,
+output shorter than the input, a prompt already over the ~200-token refiner
+budget (skipped up front), or a computed quoted-span guard violation — falls
+back to the RAW prompt, records the reason, and renders anyway. Refinement
+never makes a render fail. The span guard runs in BOTH directions and in
+normalized-quote space (curly `“”` count as straight): every `"double-quoted"`
+span of the raw prompt must survive verbatim (with distinct
+`altered (glyphs/whitespace)` vs `dropped` reasons), and the refiner may not
+ADD quoted text — a whole-output quote wrap is stripped, anything beyond that
+is rejected (net-new quotes are a draw-this-text instruction on this model
+family). An odd raw quote count drops the trailing quote before span pairing
+(inch-mark tolerance). Batches get a refiner circuit breaker: 3 consecutive
+transport/timeout-class failures disable refinement for the remaining jobs
+(marked `refiner disabled after N consecutive failures`) instead of stalling
+timeout-by-timeout before the first render; the batch summary reports
+`refine_fallbacks`. Output paths still derive from the raw prompt with the
+`refine` knob stripped from the hash, so identical requests keep reusing one
+file, and batch jobs/results stamps hash the RAW jobs. Results gain `refined`
+(+ `refined_prompt` / `refine_fallback`) only when a refiner is configured;
+batch items then always carry `refined` true/false. Request-level opt-out:
+`refine=false` on the MCP tool / CLI (`--refine=false`; the `=form` is
+enforced — a space-form boolean now errors loudly instead of silently
+dropping flags) / a batch job's `"refine": false`, with the CLI flag
+propagating onto batch jobs that set no per-job value.
 
 ## [0.46.0] - 2026-08-10
 

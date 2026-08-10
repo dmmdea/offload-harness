@@ -78,12 +78,22 @@ composition, materials, mood, lens vocabulary) on the free local text tier — b
 before the media lease, so the text call never contends with the render. One decision point
 (`internal/pipeline/refiner.go`) serves the single ComfyUI path, the sdcpp engine, and warm batch.
 It is fail-safe by construction: any refiner problem — transport error, timeout
-(`imagegen_refiner_timeout_sec`, default 30), empty output, output shorter than the input, or a
-dropped/altered `"double-quoted"` span (a computed guard protecting text-render prompts) — falls
-back to the raw prompt, records the reason, and renders anyway. Empty model = OFF and the path is
-byte-identical (pinned by test). Results carry `refined`/`refined_prompt` only when configured;
-`refine=false` (MCP/CLI/per-batch-job) renders the prompt verbatim. Output paths derive from the
-raw prompt, so re-runs keep reusing one file.
+(`imagegen_refiner_timeout_sec`, default 30; a deadline hit is annotated "cold model swap?"),
+truncated or empty output, output shorter than the input, a prompt already over the ~200-token
+refiner budget (skipped up front), a dropped/altered `"double-quoted"` span, or **added** quoted
+text (a whole-output quote wrap is stripped first; net-new quotes beyond that are rejected) —
+falls back to the raw prompt, records the reason, and renders anyway. Span guarding is computed in
+normalized-quote space (curly `“”` count as `"`); an odd quote count drops the trailing quote
+before pairing, so a trailing inch mark never pairs into a bogus span (a LEADING stray still can —
+that mis-pair falls back safely, and the distinct `altered (glyphs/whitespace)` vs `dropped`
+reasons make it diagnosable). Batches carry a refiner circuit breaker: after 3 consecutive
+transport/timeout-class failures the remaining jobs skip the refiner (marked
+`refiner disabled after N consecutive failures`) instead of stalling timeout-by-timeout before the
+first render. Empty model = OFF and the path is byte-identical (pinned by test). Results carry
+`refined`/`refined_prompt`/`refine_fallback` only when configured (batch items always say
+`refined` true/false then, and the batch summary counts `refine_fallbacks`); `refine=false`
+(MCP/CLI `--refine=false`/per-batch-job) renders the prompt verbatim. Output paths derive from the
+raw prompt with the `refine` knob stripped from the hash, so re-runs keep reusing one file.
 
 **Image editing** is one verb (`edit-image` / `offload_edit_image`) carrying an `ops` list, not a
 family of verbs. The full op set (validated in `mediaops.ValidateOps`) is `crop`, `resize`,
