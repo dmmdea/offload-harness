@@ -4,6 +4,20 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.46.0] - 2026-08-10
+
+### Added — harness binding for the qwen-image preset knobs
+0.45.0 shipped `--preset/--clip/--lora/--lora-strength/--shift` as CLI-layer
+flags with no config path, so a harness-driven `qwen-image` seat could only
+render the `full` recipe. New config keys `imagegen_preset` / `imagegen_clip` /
+`imagegen_lora` / `imagegen_lora_strength` / `imagegen_shift` now thread
+through `imagegen.Model` → `bindingArgs` to the render scripts — a bound seat
+can run `lightning4` (4-step LoRA) directly. Zero-value fields emit no flag,
+so every existing binding renders a byte-for-byte identical command
+(compatibility pinned by test). An empty `imagegen_lora` means UNSET, not
+"strip the preset's LoRA" — bind preset `full` for a LoRA-free run. No script
+changes: comfy-render/comfy-generate/batch-jobs already read these flags.
+
 ## [0.45.0] - 2026-08-10
 
 ### Added — `--family qwen-image`: the 2512 prompt-adherence preset
