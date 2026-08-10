@@ -125,8 +125,8 @@ func (s *Server) Run(ctx context.Context, version string) error {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_generate_image",
-		Description: "Generate an IMAGE from a text prompt on THIS machine's LOCAL image engine for FREE — no cloud, runs on the local GPU, using its configured model at its highest-quality settings (the engine is ComfyUI or stable-diffusion.cpp per machine; offload_status media.routes reports which one is bound here — e.g. HiDream-O1 bf16 at native 2048 via its official graph, SDXL on smaller boxes). QUALITY-FIRST: renders can take many minutes — that is intended; do not lower steps/resolution to speed things up unless the caller explicitly asks for a draft. prompt is required (prose sentences beat tag lists on DiT models; quoted text renders as literal text); optional: negative (active on models served with real CFG), width/height (default = the model's native resolution), steps, seed, out. It takes the shared single-slot GPU lock (and, on the ComfyUI engine, auto-starts ComfyUI), so it serializes with other local gen/inference and may wait. Returns {image_path, width, height, seed}. On any failure it returns deferred:true — then generate the image another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"positive text prompt describing the image"},"negative":{"type":"string","description":"hard exclusions, e.g. people, text, watermark"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"},"width":{"type":"integer","description":"width px (default 1024)"},"height":{"type":"integer","description":"height px (default 1024)"},"steps":{"type":"integer","description":"sampler steps (default 30)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"}},"required":["prompt"]}`),
+		Description: "Generate an IMAGE from a text prompt on THIS machine's LOCAL image engine for FREE — no cloud, runs on the local GPU, using its configured model at its highest-quality settings (the engine is ComfyUI or stable-diffusion.cpp per machine; offload_status media.routes reports which one is bound here — e.g. HiDream-O1 bf16 at native 2048 via its official graph, SDXL on smaller boxes). QUALITY-FIRST: renders can take many minutes — that is intended; do not lower steps/resolution to speed things up unless the caller explicitly asks for a draft. prompt is required (prose sentences beat tag lists on DiT models; quoted text renders as literal text); optional: negative (active on models served with real CFG), width/height (default = the model's native resolution), steps, seed, out. It takes the shared single-slot GPU lock (and, on the ComfyUI engine, auto-starts ComfyUI), so it serializes with other local gen/inference and may wait. Where this machine configures a prompt-refiner model (imagegen_refiner_model), the prompt is first expanded with photographic detail on the free local text tier — quoted text spans are always preserved verbatim, any refiner problem silently falls back to your raw prompt, and the result then carries refined plus refined_prompt; set refine=false to render your prompt verbatim. Returns {image_path, width, height, seed}. On any failure it returns deferred:true — then generate the image another way.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"positive text prompt describing the image"},"negative":{"type":"string","description":"hard exclusions, e.g. people, text, watermark"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"},"width":{"type":"integer","description":"width px (default 1024)"},"height":{"type":"integer","description":"height px (default 1024)"},"steps":{"type":"integer","description":"sampler steps (default 30)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"refine":{"type":"boolean","description":"set false to skip this machine's opt-in prompt refiner and render the prompt verbatim (default: refine when a refiner model is configured; no-op otherwise)"}},"required":["prompt"]}`),
 	}, s.handleGenerateImage)
 
 	srv.AddTool(&mcp.Tool{
@@ -438,6 +438,7 @@ func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolReque
 		Height   int    `json:"height"`
 		Steps    int    `json:"steps"`
 		Seed     int    `json:"seed"`
+		Refine   *bool  `json:"refine"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -460,6 +461,11 @@ func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolReque
 	}
 	if in.Seed > 0 {
 		params["seed"] = in.Seed
+	}
+	// Pointer so absent != false: only an EXPLICIT refine:false reaches the
+	// pipeline (the opt-in refiner's only request-level knob turns it off).
+	if in.Refine != nil && !*in.Refine {
+		params["refine"] = false
 	}
 	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateImage, Input: in.Prompt, Params: params}))
 }
