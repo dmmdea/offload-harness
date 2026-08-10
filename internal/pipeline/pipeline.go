@@ -400,22 +400,37 @@ func visionResultKey(t core.TaskType) string {
 	return "answer"
 }
 
+// visionModelFor picks the alias a vision task runs on. OCR gets its own binding
+// when the machine has one: a purpose-built OCR model (GLM-OCR and friends) beats
+// a general VLM on dense text, but is text-recognition ONLY — it cannot answer a
+// vqa question or judge an image, so it must never become the vision tier itself.
+// Empty ocr_model = the general vision model, exactly as before.
+func (p *Pipeline) visionModelFor(t core.TaskType) string {
+	if t == core.TaskOCR && p.cfg.OCRModel != "" {
+		return p.cfg.OCRModel
+	}
+	return p.cfg.VisionModel
+}
+
 // runVision handles a single multimodal call on the VLM tier. It mirrors the
 // text path's cache + ledger + defer machinery but uses GenerateVision and has
 // NO grammar/grounding/confidence-margin gate — vqa is free-text, so it rides
 // only empty-output, truncation, and infra defers. A bigger local tier is not
 // available, so any defer goes straight to Opus (itself a strong VLM).
 func (p *Pipeline) runVision(ctx context.Context, req core.Request, built tasks.Built, meta core.Meta, start time.Time) core.Result {
-	// An empty VisionModel means "no vision route configured" (documented in
+	// Resolve the alias ONCE: OCR may ride a dedicated ocr_model, and the call, the
+	// cache key, the breaker and the ledger all have to agree on which model ran.
+	model := p.visionModelFor(req.Task)
+	// An empty model means "no vision route configured" (documented in
 	// config.VisionModel). Guard FIRST: GenerateVision(ctx, "", ...) would fall back
 	// to the TEXT model alias, misrouting an image request onto a text tier. Defer
 	// to Opus (itself a strong VLM) instead — never call the model.
-	if p.cfg.VisionModel == "" {
+	if model == "" {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		p.recordDefer(req.Task, meta, len(req.Input), "no vision model configured")
 		return core.Deferf("no vision model configured", "", meta)
 	}
-	meta.Model = p.cfg.VisionModel
+	meta.Model = model
 	dataURI, err := imageio.LoadImageB64(req.Image, p.cfg.VisionMaxImageBytes)
 	if err != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
@@ -423,7 +438,7 @@ func (p *Pipeline) runVision(ctx context.Context, req core.Request, built tasks.
 		return core.Deferf("image load: "+err.Error(), "", meta)
 	}
 	return p.runVisionGen(ctx, req, built, meta, start, "img:"+sha256hex(dataURI), func(gctx context.Context) (llamaclient.GenResult, error) {
-		return p.client.GenerateVision(gctx, p.cfg.VisionModel, built.System, built.User, []string{dataURI}, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0)
+		return p.client.GenerateVision(gctx, model, built.System, built.User, []string{dataURI}, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0)
 	})
 }
 
@@ -437,7 +452,7 @@ func (p *Pipeline) runVision(ctx context.Context, req core.Request, built tasks.
 // wait, distinct "gpu busy" defer), retries once on http_5xx, and records the
 // final infra outcome into the vision tier's circuit breaker.
 func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tasks.Built, meta core.Meta, start time.Time, cacheKeyExtra string, gen func(context.Context) (llamaclient.GenResult, error)) core.Result {
-	ck := cache.Key(string(req.Task), req.Input+"|"+cacheKeyExtra, tasks.StableParamsKey(req.Params), p.cfg.VisionModel, built.Grammar)
+	ck := cache.Key(string(req.Task), req.Input+"|"+cacheKeyExtra, tasks.StableParamsKey(req.Params), meta.Model, built.Grammar)
 	if p.cache != nil {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
@@ -467,7 +482,7 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 
 	// LO-9 parity for the vision tier: stamp the call so a cold-swap timeout is
 	// exempt from breaker accounting (http_5xx / warm timeouts still count).
-	likelyColdSwap := p.noteTierCall(p.cfg.VisionModel)
+	likelyColdSwap := p.noteTierCall(meta.Model)
 	gres, gerr := gen(ctx)
 	if gerr != nil && classifyErr(gerr) == "http_5xx" {
 		// LO-1: retry ONCE after a short backoff — a vision 5xx is usually
@@ -488,7 +503,7 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 		if gerr != nil {
 			ec = classifyErr(gerr)
 		}
-		p.breakers.Record(p.cfg.VisionModel, !breakerFailure(ec, likelyColdSwap))
+		p.breakers.Record(meta.Model, !breakerFailure(ec, likelyColdSwap))
 	}
 	if gerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
@@ -1071,7 +1086,7 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 	out := paramStr(req.Params, "out")
 	if out == "" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
-		out = filepath.Join(p.cfg.MediaDir, "edit-"+sha256hex(image+prompt+tasks.StableParamsKey(req.Params))[:8]+".png")
+		out = filepath.Join(p.cfg.MediaDir, "edit-"+sha256hex(image + prompt + tasks.StableParamsKey(req.Params))[:8]+".png")
 	}
 	m := imagegen.EditModel{
 		Unet: p.cfg.GenEditUnet, Preset: p.cfg.GenEditPreset, LoRA: p.cfg.GenEditLoRA,

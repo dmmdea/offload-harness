@@ -220,9 +220,17 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 		"escalation": cfg.EscalationModel,
 		"reasoning":  cfg.ReasoningModel,
 		"vision":     cfg.VisionModel,
-		"stt":        cfg.STTModel,
-		"stt_hq":     cfg.STTModelHQ,
-		"embed":      cfg.EmbedModel(),
+		// ocr falls back to vision when unbound, so the roster reports what will
+		// ACTUALLY run rather than an empty slot that reads as "no OCR here".
+		"ocr": func() string {
+			if cfg.OCRModel != "" {
+				return cfg.OCRModel
+			}
+			return cfg.VisionModel
+		}(),
+		"stt":    cfg.STTModel,
+		"stt_hq": cfg.STTModelHQ,
+		"embed":  cfg.EmbedModel(),
 	}
 	local := map[string]any{
 		"endpoint": cfg.Endpoint,
@@ -959,7 +967,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		"steps":       res.Steps,
 		"stop_reason": res.StopReason,
 		"tools":       len(built.Tools),
-		"model":       model, // the resolved PLANNER seat — visibility is the cure for a silent seat (roast finding)
+		"model":       model,  // the resolved PLANNER seat — visibility is the cure for a silent seat (roast finding)
 		"ctx_window":  effCtx, // the window compaction budgeted against (probed, or the conservative fallback)
 	}
 	if res.CompactionsExhausted > 0 {
