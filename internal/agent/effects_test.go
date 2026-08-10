@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -203,4 +204,155 @@ func refusalText(out string, err error) string {
 		return err.Error()
 	}
 	return out
+}
+
+// Reshaped judge part 2 (OpenHands pattern): a self-flagged high-risk call to
+// an effectful tool is PARKED on unattended runs — ledgered none with an
+// honest note — while low/omitted annotations proceed under the broker as
+// before. Annotation only tightens.
+func TestHighRiskSelfFlagParksOnUnattended(t *testing.T) {
+	execs := 0
+	mk := func() []Tool {
+		return []Tool{{ToolSpec: ToolSpec{Name: "write_file", Description: "w", Schema: json.RawMessage(`{"type":"object"}`)},
+			ParkOnHighRisk: true,
+			Exec:           func(_ context.Context, _ string) (string, error) { execs++; return "wrote", nil }}}
+	}
+	script := func() []Completion {
+		return []Completion{
+			{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "write_file", `{"path":"a","security_risk":"high"}`)}}, FinishReason: "tool_calls"},
+			{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c2", "write_file", `{"path":"b","security_risk":"low"}`)}}, FinishReason: "tool_calls"},
+			{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c3", "write_file", `{"path":"c"}`)}}, FinishReason: "tool_calls"},
+			{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+		}
+	}
+
+	// Unattended: high parks, low and omitted execute.
+	execs = 0
+	l := NewLoop(&fakeClient{script: script()}, mk(), 8).WithParkHighRisk(true)
+	res, err := l.Run(context.Background(), "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execs != 2 {
+		t.Fatalf("unattended: want 2 executions (low+omitted), got %d", execs)
+	}
+	if res.Effects[0].Status != EffectNone || !strings.Contains(res.Effects[0].Note, "PARKED") {
+		t.Fatalf("high-risk call must park as none, got %+v", res.Effects[0])
+	}
+	if res.Effects[0].Risk != "high" || res.Effects[1].Risk != "low" || res.Effects[2].Risk != "" {
+		t.Fatalf("risk annotations must be recorded per call: %+v", res.Effects)
+	}
+
+	// Attended (park off): all three execute — annotation is telemetry only.
+	execs = 0
+	l2 := NewLoop(&fakeClient{script: script()}, mk(), 8)
+	if _, err := l2.Run(context.Background(), "goal"); err != nil {
+		t.Fatal(err)
+	}
+	if execs != 3 {
+		t.Fatalf("attended: want 3 executions, got %d", execs)
+	}
+}
+
+// A read-only tool (ParkOnHighRisk=false) is never parked, whatever the model
+// claims — parking is scoped to effectful tools.
+func TestReadOnlyToolNeverParked(t *testing.T) {
+	execs := 0
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "read_file", Description: "r", Schema: json.RawMessage(`{"type":"object"}`)},
+		Exec: func(_ context.Context, _ string) (string, error) { execs++; return "data", nil }}}
+	client := &fakeClient{script: []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "read_file", `{"p":"a","security_risk":"high"}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+	}}
+	if _, err := NewLoop(client, tools, 4).WithParkHighRisk(true).Run(context.Background(), "goal"); err != nil {
+		t.Fatal(err)
+	}
+	if execs != 1 {
+		t.Fatalf("read tool must execute despite the flag, got %d executions", execs)
+	}
+}
+
+// Review finding #1: a present-but-unrecognized risk value fails CLOSED — the
+// model tried to flag the call, so it parks, and the ledger records the raw
+// attempt instead of silently discarding it.
+func TestUnrecognizedRiskValueParks(t *testing.T) {
+	execs := 0
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "write_file", Description: "w", Schema: json.RawMessage(`{"type":"object"}`)},
+		ParkOnHighRisk: true,
+		Exec:           func(_ context.Context, _ string) (string, error) { execs++; return "wrote", nil }}}
+	client := &fakeClient{script: []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{
+			tc("c1", "write_file", `{"path":"a","security_risk":"HIGH"}`),     // case variant
+			tc("c2", "write_file", `{"path":"b","security_risk":"critical"}`), // synonym
+			tc("c3", "write_file", `{"path":"c","security_risk":3}`),          // wrong type
+		}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+	}}
+	res, err := NewLoop(client, tools, 6).WithParkHighRisk(true).Run(context.Background(), "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execs != 0 {
+		t.Fatalf("all three variants must park (fail closed), got %d executions", execs)
+	}
+	if res.Effects[0].Risk != "high" { // "HIGH" normalizes
+		t.Errorf("case variant must normalize to high, got %q", res.Effects[0].Risk)
+	}
+	for _, i := range []int{1, 2} {
+		if !strings.HasPrefix(res.Effects[i].Risk, "unrecognized(") {
+			t.Errorf("effects[%d].Risk = %q, want the raw attempt preserved", i, res.Effects[i].Risk)
+		}
+		if res.Effects[i].Status != EffectNone {
+			t.Errorf("effects[%d] must park, got %s", i, res.Effects[i].Status)
+		}
+	}
+}
+
+// Review finding #4: parked calls must NOT consume the same-name budget — the
+// tool stays available for a subsequent low-risk call.
+func TestParkedCallsDoNotDisableTheTool(t *testing.T) {
+	execs := 0
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "write_file", Description: "w", Schema: json.RawMessage(`{"type":"object"}`)},
+		ParkOnHighRisk: true,
+		Exec:           func(_ context.Context, _ string) (string, error) { execs++; return "wrote", nil }}}
+	client := &fakeClient{script: []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "write_file", `{"path":"a","security_risk":"high"}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c2", "write_file", `{"path":"b","security_risk":"high"}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c3", "write_file", `{"path":"c","security_risk":"high"}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c4", "write_file", `{"path":"d","security_risk":"high"}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c5", "write_file", `{"path":"e","security_risk":"low"}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+	}}
+	res, err := NewLoop(client, tools, 10).WithParkHighRisk(true).Run(context.Background(), "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execs != 1 {
+		t.Fatalf("the low-risk call after 4 parks must still execute, got %d executions", execs)
+	}
+	last := res.Effects[len(res.Effects)-1]
+	if last.Status != EffectCommitted || last.Risk != "low" {
+		t.Fatalf("final low-risk call must commit: %+v", last)
+	}
+}
+
+// Review finding #3: parks reach the durable recorder (the builder wires it to
+// the ask queue) with tool, args and normalized risk.
+func TestParkRecorderReceivesParkedCalls(t *testing.T) {
+	var got []string
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "run_shell", Description: "s", Schema: json.RawMessage(`{"type":"object"}`)},
+		ParkOnHighRisk: true,
+		Exec:           func(_ context.Context, _ string) (string, error) { return "ran", nil }}}
+	client := &fakeClient{script: []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "run_shell", `{"command":"rm -rf build","security_risk":"high"}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+	}}
+	l := NewLoop(client, tools, 4).WithParkHighRisk(true).
+		WithParkRecorder(func(tool, args, risk string) { got = append(got, tool+"|"+risk) })
+	if _, err := l.Run(context.Background(), "goal"); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "run_shell|high" {
+		t.Fatalf("park recorder must fire once with tool+risk, got %v", got)
+	}
 }

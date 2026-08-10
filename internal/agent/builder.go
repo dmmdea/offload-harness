@@ -142,8 +142,10 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 			return nil, fmt.Errorf("risk rule table: %w", rerr)
 		}
 	}
+	var askQueue *AuditLog
 	if cfg.AskQueuePath != "" {
-		pol.WithAskQueue(NewAuditLog(cfg.AskQueuePath))
+		askQueue = NewAuditLog(cfg.AskQueuePath)
+		pol.WithAskQueue(askQueue)
 	}
 	pol.WithWritePosture(cfg.AllowOverwrite, cfg.AllowDelete)
 	res.Policy = pol
@@ -256,7 +258,15 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 	if cfg.SystemPromptOverride != "" {
 		sys = cfg.SystemPromptOverride
 	}
-	loop := NewLoop(client, tools, maxSteps).WithSystem(sys).WithMaxTokens(maxTokens)
+	loop := NewLoop(client, tools, maxSteps).WithSystem(sys).WithMaxTokens(maxTokens).WithParkHighRisk(cfg.Unattended)
+	if askQueue != nil {
+		// Parked high-risk calls land in the SAME reviewable queue as deferred
+		// asks — they are the highest-signal deferred asks the system produces.
+		loop.WithParkRecorder(func(tool, args, risk string) {
+			_ = askQueue.Record(Action{Kind: ActPark, Path: tool + " " + args}, Ask,
+				"self-flagged security_risk="+risk+"; parked on unattended run")
+		})
+	}
 	if cfg.MaxSameTool != 0 {
 		loop = loop.WithMaxSameTool(cfg.MaxSameTool) // 0 (unset) leaves NewLoop's built-in default (3); negative disables
 	}

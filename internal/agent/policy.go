@@ -28,6 +28,11 @@ const (
 	ActDelete ActionKind = "delete"
 	ActFetch  ActionKind = "fetch" // P3: outbound HTTP(S) GET to a host (egress-allowlist gated)
 	ActShell  ActionKind = "shell" // P4.6: run a command inside the OS sandbox (opt-in, audited)
+	// ActPark records a self-flagged high-risk call parked on an unattended run
+	// (Loop.WithParkRecorder → ask queue). Queue/audit vocabulary only — the
+	// broker never classifies it and the rule table rejects it implicitly
+	// (validate allows write/delete/fetch only).
+	ActPark ActionKind = "park"
 )
 
 // Action is a proposed mutating operation. Path is worktree-relative (the

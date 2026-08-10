@@ -118,8 +118,8 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts c
 	out := make([]Msg, len(msgs))
 	copy(out, msgs)
 
-	protectedEnd := protectedPrefix // [0,protectedEnd) is always kept.
-	recentStart := len(out) - keepRecent    // [recentStart,len) is always kept.
+	protectedEnd := protectedPrefix      // [0,protectedEnd) is always kept.
+	recentStart := len(out) - keepRecent // [recentStart,len) is always kept.
 	if recentStart < protectedEnd {
 		recentStart = protectedEnd
 	}

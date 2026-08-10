@@ -67,6 +67,11 @@ type Tool struct {
 	// (defaultToolTimeout). It lives on Tool, not ToolSpec, because ToolSpec is
 	// the wire format handed to the model — the model has no business seeing it.
 	Timeout time.Duration
+	// ParkOnHighRisk marks an EFFECTFUL tool whose calls are parked (refused
+	// with EffectNone) when the model self-flags security_risk=high and the
+	// loop runs unattended (WithParkHighRisk). Self-annotation can only
+	// TIGHTEN: there is no risk value that loosens the broker or auto-allows.
+	ParkOnHighRisk bool
 }
 
 // Client is the minimal OpenAI-compatible tool-calling chat interface the loop
@@ -141,12 +146,14 @@ type Loop struct {
 	maxSteps      int
 	maxTokens     int
 	maxSameTool   int
-	ctxTokens     int           // model context window in tokens; input budget derives from it
-	keepRecent    int           // most-recent turns kept full during compaction
-	toolTimeout   time.Duration // per-tool-call cap; see defaultToolTimeout
-	skeletonPrune bool          // enable the skeleton rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
-	gcfCompact    bool          // enable the lossless GCF rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
-	toolResultCap int           // max chars of ONE tool result kept in the transcript (0 => derive from window)
+	parkHighRisk  bool                          // unattended: park self-flagged high-risk effectful calls (WithParkHighRisk)
+	parkRecord    func(tool, args, risk string) // durable park record (ask queue); nil = ledger only
+	ctxTokens     int                           // model context window in tokens; input budget derives from it
+	keepRecent    int                           // most-recent turns kept full during compaction
+	toolTimeout   time.Duration                 // per-tool-call cap; see defaultToolTimeout
+	skeletonPrune bool                          // enable the skeleton rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
+	gcfCompact    bool                          // enable the lossless GCF rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
+	toolResultCap int                           // max chars of ONE tool result kept in the transcript (0 => derive from window)
 	// tokenCal corrects the compaction budget using the server's own token
 	// counts — the fix for the estimator defect that let three real
 	// transcripts be rejected while the ladder declined to compact (ADR 0017).
@@ -339,6 +346,23 @@ func exemplarsFor(ex []Msg, have map[string]Tool) []Msg {
 // defaultMaxSameTool). n<=0 disables the cap (unlimited) — use only for tests
 // that specifically need to observe unthrottled repeats.
 func (l *Loop) WithMaxSameTool(n int) *Loop { l.maxSameTool = n; return l }
+
+// WithParkHighRisk enables unattended parking: a call to a ParkOnHighRisk tool
+// that self-flags security_risk=high is refused (ledgered none, note "parked")
+// instead of executed — there is no human to ask, so high-risk defers to the
+// morning review. OFF by default; the builder enables it for unattended runs.
+// The OpenHands-pattern half of the reshaped judge: the annotation is free
+// (rides the tool call itself, no extra model call, no seat swap) and it can
+// only tighten. An OMITTED annotation is no signal — weak models omit the
+// field routinely, and parking everything unannotated would kill open-write
+// runs — so omission proceeds under the broker exactly as before.
+func (l *Loop) WithParkHighRisk(on bool) *Loop { l.parkHighRisk = on; return l }
+
+// WithParkRecorder attaches a durable record hook for parked calls — the
+// builder wires it to the ask queue, so "PARKED for operator review" is a
+// promise the plumbing keeps (review finding #3: without it, a parked call's
+// only trace was the ephemeral response JSON). nil = ledger only.
+func (l *Loop) WithParkRecorder(f func(tool, args, risk string)) *Loop { l.parkRecord = f; return l }
 
 // WithContextTokens sets the model context window (in tokens) that transcript
 // compaction budgets against. Default is defaultCtxTokens (8192, matching the
@@ -658,7 +682,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			// order, whatever became of it. Note carries the why only for
 			// non-committed statuses — for those, the (bounded) result text IS
 			// the explanation and it is small (refusals/errors are short strings).
-			rec := EffectRecord{Step: step + 1, CallID: call.ID, Tool: call.Name, Status: eff}
+			rec := EffectRecord{Step: step + 1, CallID: call.ID, Tool: call.Name, Status: eff, Risk: securityRisk(call.Args)}
 			if eff != EffectCommitted {
 				rec.Note = content
 			}
@@ -692,6 +716,26 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg, exactCalls, sameNameCalls map[string]int, disabledTools map[string]bool, firstCallID map[string]string, pinned map[string]bool, reExecuted map[string]bool) (string, bool, EffectStatus) {
 	if disabledTools[call.Name] {
 		return fmt.Sprintf("NOT executed: %s has been disabled for the rest of this task (too many repeated calls). It is no longer offered — use a different tool or your existing results to continue.", call.Name), true, EffectNone
+	}
+	// Unattended park (WithParkHighRisk): the model's own security_risk on an
+	// effectful tool defers the call to review — an explicit high, or a
+	// present-but-unrecognized value (fail closed; see riskParks). Checked
+	// BEFORE the counters on purpose (review findings #4/#5, 2026-08-10):
+	// parked calls must not consume the same-name budget — three parked
+	// high-risk attempts would otherwise DISABLE the tool for legitimate
+	// low-risk use, and the disable message ("use what you already have")
+	// would lie, since nothing executed. Repeats simply re-park with the same
+	// honest message; maxSteps bounds a fixated model. isErr=false per the
+	// refusal convention: the park is policy, not a tool failure.
+	if l.parkHighRisk {
+		if risk := securityRisk(call.Args); riskParks(risk) {
+			if t, ok := l.tools[call.Name]; ok && t.ParkOnHighRisk {
+				if l.parkRecord != nil {
+					l.parkRecord(call.Name, call.Args, risk)
+				}
+				return fmt.Sprintf("PARKED for operator review: you flagged this %s call security_risk=%s, and this is an unattended run. It was NOT executed. If the task can proceed without it, continue; otherwise finish and report what remains.", call.Name, risk), false, EffectNone
+			}
+		}
 	}
 	key := call.Name + "\x00" + call.Args
 	exactCalls[key]++
