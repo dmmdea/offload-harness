@@ -837,13 +837,18 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	// an 8GB box runs SDXL, a 16GB box may run an all-in-one DiT). All fields are
 	// optional: a zero Model passes no flags and the renderer keeps its own defaults.
 	model := imagegen.Model{
-		Ckpt:      p.cfg.ImageGenCkpt,
-		VAE:       p.cfg.ImageGenVAE,
-		Steps:     p.cfg.ImageGenSteps,
-		CFG:       p.cfg.ImageGenCFG,
-		Sampler:   p.cfg.ImageGenSampler,
-		Scheduler: p.cfg.ImageGenScheduler,
-		Family:    p.cfg.ImageGenFamily,
+		Ckpt:         p.cfg.ImageGenCkpt,
+		VAE:          p.cfg.ImageGenVAE,
+		Steps:        p.cfg.ImageGenSteps,
+		CFG:          p.cfg.ImageGenCFG,
+		Sampler:      p.cfg.ImageGenSampler,
+		Scheduler:    p.cfg.ImageGenScheduler,
+		Family:       p.cfg.ImageGenFamily,
+		Preset:       p.cfg.ImageGenPreset,
+		CLIP:         p.cfg.ImageGenCLIP,
+		LoRA:         p.cfg.ImageGenLoRA,
+		LoRAStrength: p.cfg.ImageGenLoRAStrength,
+		Shift:        p.cfg.ImageGenShift,
 	}
 	// Passive fleet footprint: key this render by the machine's image binding
 	// (family + the O1 bf16 quant) so measured peaks accumulate during normal use.

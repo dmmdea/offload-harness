@@ -132,7 +132,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 
 | Concern | Keys |
 |---|---|
-| Image | `imagegen_family`, `imagegen_ckpt`, `imagegen_vae`, `imagegen_steps/cfg/sampler/scheduler` |
+| Image | `imagegen_family`, `imagegen_ckpt`, `imagegen_vae`, `imagegen_steps/cfg/sampler/scheduler`, `imagegen_preset/clip/lora/lora_strength/shift` (qwen-image knobs) |
 | Inpaint | `inpaint_ckpt`, `inpaint_vae`, `inpaint_steps/cfg/sampler/scheduler` |
 | Video | `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model` |
 | Audio | `voicegen_*`, `musicgen_script` |
@@ -156,9 +156,11 @@ or neither: the route rejects a half-override of the preset pairing. It is not t
 default seat: `imagegen_family` is a per-machine binding, and ad-hoc renders reach the family
 through the render CLIs (`comfy-render.mjs`/`comfy-generate.mjs --family qwen-image`; presets
 `full` = 50 steps/cfg 4 and `lightning4` = 4 steps/cfg 1 + Lightning LoRA, both
-template-verified). The `--preset/--clip/--lora/--lora-strength/--shift` flags are CLI-layer
-only for now — no harness config key binds them, so a harness-driven `qwen-image` seat always
-renders the `full` recipe until that wiring lands.
+template-verified). The `--preset/--clip/--lora/--lora-strength/--shift` flags are bound by
+`imagegen_preset` / `imagegen_clip` / `imagegen_lora` / `imagegen_lora_strength` /
+`imagegen_shift`, so a harness-driven `qwen-image` seat can run the `lightning4` recipe
+directly (an empty `imagegen_lora` means unset, not LoRA-stripping — bind preset `full` for a
+LoRA-free run).
 
 The recommended **≥16 GB image-*edit* primitive is Qwen-Image-Edit-2511** (Apache-2.0). It is a
 model-matrix *designation*, not a config binding — image editing at that tier runs through

@@ -46,6 +46,26 @@ func TestBuildArgs_FamilyBinding(t *testing.T) {
 	hasNot(t, buildArgs("out.png", "p", map[string]any{}, Model{Ckpt: "RealVisXL_V5.0_fp16.safetensors"}), "--family")
 }
 
+// TestBuildArgs_QwenPresetBinding: the qwen-image family's remaining knobs thread
+// through as flags (preset picks the steps+cfg+LoRA pairing; clip/lora/strength/
+// shift override its fields). Unset -> absent, so every existing binding renders
+// byte-for-byte the same command.
+func TestBuildArgs_QwenPresetBinding(t *testing.T) {
+	m := Model{Ckpt: "qwen-image-2512-Q5_1.gguf", Family: "qwen-image",
+		Preset: "lightning4", CLIP: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+		LoRA: "Qwen-Image-2512-Lightning-4steps-V1.0-fp32.safetensors",
+		LoRAStrength: 0.9, Shift: 3.1}
+	args := buildArgs("out.png", "p", map[string]any{}, m)
+	has(t, args, "--preset", "lightning4")
+	has(t, args, "--clip", "qwen_2.5_vl_7b_fp8_scaled.safetensors")
+	has(t, args, "--lora", "Qwen-Image-2512-Lightning-4steps-V1.0-fp32.safetensors")
+	has(t, args, "--lora-strength", "0.9")
+	has(t, args, "--shift", "3.1")
+	for _, f := range []string{"--preset", "--clip", "--lora", "--lora-strength", "--shift"} {
+		hasNot(t, buildArgs("out.png", "p", map[string]any{}, Model{Ckpt: "x.gguf", Family: "qwen-image"}), f)
+	}
+}
+
 // TestBuildArgs_ZeroModelIsUnchanged is the compatibility guard for every machine
 // that has NOT set an image-model binding (e.g. the 8GB laptop on SDXL). A zero
 // Model must add no flags at all, so comfy-render.mjs keeps its own defaults and the
