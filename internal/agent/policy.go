@@ -53,20 +53,26 @@ type Policy struct {
 
 	allowOverwrite bool // open-write: Allow overwrite of an existing file within the worktree
 	allowDelete    bool // open-write: Allow delete of a file within the worktree
+
+	// rules is the structural risk table (rules.go): tighten-only, evaluated
+	// after the unconditional built-ins and before capability/posture defaults.
+	// Seeded with the secret-material floor; extended via WithRules/LoadRules.
+	rules []Rule
 }
 
 // NewPolicy builds a broker. unattended=true makes every "ask" deny-and-queue.
 // audit may be nil (decisions then aren't logged). Egress is deny-all (no
-// allowlist) — use NewPolicyWithEgress to grant outbound hosts.
+// allowlist) — use NewPolicyWithEgress to grant outbound hosts. Every broker
+// carries the built-in secret-material rule floor (rules.go defaultRules).
 func NewPolicy(unattended bool, audit *AuditLog) *Policy {
-	return &Policy{unattended: unattended, audit: audit}
+	return &Policy{unattended: unattended, audit: audit, rules: defaultRules()}
 }
 
 // NewPolicyWithEgress is NewPolicy plus a P3 egress allowlist (the set of hosts
 // web_fetch may reach). An empty allowlist is default-deny. The allowlist is set
 // once and never mutated afterward, so classify stays pure and deterministic.
 func NewPolicyWithEgress(unattended bool, audit *AuditLog, allow Allowlist) *Policy {
-	return &Policy{unattended: unattended, audit: audit, allow: allow}
+	return &Policy{unattended: unattended, audit: audit, allow: allow, rules: defaultRules()}
 }
 
 // WithShell enables (or disables) the ActShell capability. Off by default; the
@@ -160,26 +166,59 @@ func (p *Policy) classify(a Action) (Decision, string) {
 // ALLOW cannot be audited, it is downgraded to DENY — an unauditable mutation is
 // not performed (a mutating agent must leave a trail).
 func (p *Policy) Decide(a Action) (Decision, string) {
+	// Structural risk table (rules.go): tighten-only, first match wins. Sits
+	// between classify's unconditional built-ins (a rule cannot resurrect what
+	// .git-deny killed — classify runs first and its Deny wins below) and the
+	// capability/posture defaults (a rule CAN veto what posture would allow).
+	// Evaluated here rather than inside classify so the fired rule's severity
+	// and glob reach the audit trail as STRUCTURED fields — a morning review
+	// sorts a night's queue by severity, which must never mean parsing prose.
 	d, reason := p.classify(a)
+	var fired Rule
+	if r, ok := p.ruleFor(a); ok && stricter(r.Decision, d) {
+		// Tighten-only in BOTH directions of composition: a rule upgrades
+		// classify's Allow to Ask/Deny and its Ask to Deny (the secret floor
+		// must hard-deny even where posture-less classify would merely ask),
+		// but can never soften a classify Deny.
+		d = r.Decision
+		fired = r
+		reason = "[" + string(r.Severity) + "] " + r.Reason
+	}
 	eff := d
 	if d == Ask && p.unattended {
 		// Park the pending ask for later human review BEFORE rewriting the reason, so
 		// the queue carries the original "why it needs approval". Best-effort: a queue
 		// write failure must not change the (already safe) deny outcome.
 		if p.askQueue != nil {
-			_ = p.askQueue.Record(a, Ask, reason)
+			_ = p.askQueue.record(a, Ask, reason, fired)
 		}
 		eff = Deny
 		reason = "requires approval; unattended run → denied & queued (" + reason + ")"
 	}
 	if p.audit != nil {
-		if err := p.audit.Record(a, eff, reason); err != nil && eff == Allow {
+		if err := p.audit.record(a, eff, reason, fired); err != nil && eff == Allow {
 			eff = Deny
 			reason = "refusing to proceed: audit write failed (" + err.Error() + ")"
-			_ = p.audit.Record(a, eff, reason) // best-effort: try to log the downgrade itself
+			_ = p.audit.record(a, eff, reason, fired) // best-effort: try to log the downgrade itself
 		}
 	}
 	return eff, reason
+}
+
+// stricter reports whether decision x is strictly more restrictive than y
+// (Deny > Ask > Allow). Used to compose the rule table with classify: rules
+// tighten, never loosen.
+func stricter(x, y Decision) bool {
+	rank := func(d Decision) int {
+		switch d {
+		case Deny:
+			return 2
+		case Ask:
+			return 1
+		}
+		return 0
+	}
+	return rank(x) > rank(y)
 }
 
 // AuditLog is an append-only JSONL record of every brokered decision — kept
@@ -215,15 +254,26 @@ type auditEntry struct {
 	Exists   bool   `json:"exists"`
 	Decision string `json:"decision"`
 	Reason   string `json:"reason"`
+	// Severity + Rule identify a risk-table hit as STRUCTURED fields (which
+	// rule fired, at what grade) so a review can sort/filter a night's queue
+	// without parsing prose. Empty when no rule fired.
+	Severity string `json:"severity,omitempty"`
+	Rule     string `json:"rule,omitempty"`
 }
 
 // Record appends one decision as a JSON line and RETURNS any error so the broker
 // can refuse to perform an unauditable allow. A nil receiver is a no-op (nil err).
 func (l *AuditLog) Record(a Action, d Decision, reason string) error {
+	return l.record(a, d, reason, Rule{})
+}
+
+// record is Record plus the fired risk rule (zero value = none).
+func (l *AuditLog) record(a Action, d Decision, reason string, fired Rule) error {
 	if l == nil {
 		return nil
 	}
-	e := auditEntry{TS: time.Now().Unix(), Kind: string(a.Kind), Path: clampAudit(a.Path), Exists: a.Exists, Decision: string(d), Reason: reason}
+	e := auditEntry{TS: time.Now().Unix(), Kind: string(a.Kind), Path: clampAudit(a.Path), Exists: a.Exists, Decision: string(d), Reason: reason,
+		Severity: string(fired.Severity), Rule: fired.Glob}
 	b, err := json.Marshal(e)
 	if err != nil {
 		return err

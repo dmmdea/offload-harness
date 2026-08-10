@@ -37,20 +37,21 @@ type BuildConfig struct {
 	Unattended   bool   // true => every broker "ask" deny-and-queues (no human in the loop)
 	AuditPath    string // append-only broker audit JSONL; must live OUTSIDE the worktree
 	AskQueuePath string // P5b: reviewable queue of asks deferred on an unattended run (optional)
+	RulesPath    string // structural risk table (rules.go LoadRules); optional, tighten-only
 
-	AllowWrite  bool     // P2: write_file/delete_file in the worktree
-	AllowFetch  bool     // P3: web_fetch behind the egress allowlist
-	AllowShell  bool     // P4.6: run_shell in the LINUX OS cage (granted only on Linux + sandbox.Available)
-	AllowRun    bool     // C7b: `run` — allowlisted direct-exec runner in the OS sandbox (Linux AND Windows)
+	AllowWrite bool // P2: write_file/delete_file in the worktree
+	AllowFetch bool // P3: web_fetch behind the egress allowlist
+	AllowShell bool // P4.6: run_shell in the LINUX OS cage (granted only on Linux + sandbox.Available)
+	AllowRun   bool // C7b: `run` — allowlisted direct-exec runner in the OS sandbox (Linux AND Windows)
 
-	AllowOverwrite bool // open-write: allow overwrite of existing files in the worktree
-	AllowDelete    bool // open-write: allow delete of files in the worktree
-	AllowSearch    bool   // web_search (DuckDuckGo); auto-allowlists the search host
-	AllowGitHub    bool   // github_api/create_repo/upload_file; auto-allowlists api.github.com
-	GitHubToken    string // token for the GitHub tools (secret; Authorization header only)
-	GitHubRepo     string // default OWNER/NAME for github_upload_file
-	Worktree    string   // RW worktree for write/shell; default = ReadRoot
-	EgressHosts []string // web_fetch allowlist (AllowFetch)
+	AllowOverwrite bool     // open-write: allow overwrite of existing files in the worktree
+	AllowDelete    bool     // open-write: allow delete of files in the worktree
+	AllowSearch    bool     // web_search (DuckDuckGo); auto-allowlists the search host
+	AllowGitHub    bool     // github_api/create_repo/upload_file; auto-allowlists api.github.com
+	GitHubToken    string   // token for the GitHub tools (secret; Authorization header only)
+	GitHubRepo     string   // default OWNER/NAME for github_upload_file
+	Worktree       string   // RW worktree for write/shell; default = ReadRoot
+	EgressHosts    []string // web_fetch allowlist (AllowFetch)
 
 	Memory Memory // optional mem0 layer; nil => no memory
 }
@@ -130,6 +131,17 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 		audit = NewAuditLog(cfg.AuditPath)
 	}
 	pol := NewPolicyWithEgress(cfg.Unattended, audit, allow)
+	if cfg.RulesPath != "" {
+		rs, rerr := LoadRules(cfg.RulesPath)
+		if rerr != nil {
+			// Fail closed: an operator who pointed at a rule table believes it is
+			// active. Running without it would be a silent policy downgrade.
+			return nil, fmt.Errorf("risk rule table: %w", rerr)
+		}
+		if _, rerr = pol.WithRules(rs); rerr != nil {
+			return nil, fmt.Errorf("risk rule table: %w", rerr)
+		}
+	}
 	if cfg.AskQueuePath != "" {
 		pol.WithAskQueue(NewAuditLog(cfg.AskQueuePath))
 	}
