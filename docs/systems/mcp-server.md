@@ -58,7 +58,10 @@ side channel and is not part of the Cascade — nothing escalates or falls back 
 timeout honors config `agent_timeout_sec` (else the built-in 180s), and its result reports the
 resolved planner `model` alongside `output`/`steps`/`stop_reason` — visibility is the cure for a
 silent seat. A resolved planner absent from the endpoint's served roster fails loud with
-`deferred: true` naming the model, never a silent fall back to the workhorse.
+`deferred: true` naming the model, never a silent fall back to the workhorse. Every response
+carries the effect ledger (`effects` counts + `effects_flagged` records) on success AND deferred
+paths, and `judge: true` adds one end-of-run **advisory** same-seat completion (`judge_report`)
+grading the flagged effects for operator review — annotation only, it never gates anything.
 
 ## Important flows
 

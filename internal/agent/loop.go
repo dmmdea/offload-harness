@@ -110,6 +110,12 @@ type Result struct {
 	// EffectUnknown (started, then abandoned — effects may exist) vs
 	// EffectNone (never executed — the world is untouched).
 	Effects []EffectRecord
+
+	// JudgeReport is the end-of-run ADVISORY audit of flagged effects
+	// (batchjudge.go): one same-seat completion, only when something was
+	// flagged and WithBatchJudge is on. Annotation for the operator — nothing
+	// in the codebase makes decisions from it. Empty when off or clean.
+	JudgeReport string
 }
 
 // TokenCalReport is the observable state of the budget calibration at the end
@@ -148,6 +154,7 @@ type Loop struct {
 	maxSameTool   int
 	parkHighRisk  bool                          // unattended: park self-flagged high-risk effectful calls (WithParkHighRisk)
 	parkRecord    func(tool, args, risk string) // durable park record (ask queue); nil = ledger only
+	batchJudge    bool                          // end-of-run advisory judge pass (WithBatchJudge; batchjudge.go)
 	ctxTokens     int                           // model context window in tokens; input budget derives from it
 	keepRecent    int                           // most-recent turns kept full during compaction
 	toolTimeout   time.Duration                 // per-tool-call cap; see defaultToolTimeout
@@ -663,6 +670,9 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// and returns an empty answer.
 		if len(comp.Msg.ToolCalls) == 0 {
 			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Effects: effects}
+			if l.batchJudge {
+				res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
+			}
 			l.persist(ctx, objective, res.Output)
 			return res, nil
 		}
@@ -690,7 +700,11 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			msgs = append(msgs, Msg{Role: "tool", ToolCallID: call.ID, Content: content, IsError: isErr})
 		}
 	}
-	return Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Effects: effects}, nil
+	res := Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Effects: effects}
+	if l.batchJudge {
+		res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
+	}
+	return res, nil
 }
 
 // dispatchOrThrottle is the circuit breaker: it refuses to EXECUTE a tool call
