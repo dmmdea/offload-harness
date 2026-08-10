@@ -6,10 +6,14 @@
 // workflow. `--family qwen-image` in comfy-render.mjs selects this graph.
 //
 // Graph follows ComfyUI's shipped `image_qwen_Image_2512` template (subgraph
-// "Text to Image (Qwen-Image 2512)") and its `image_qwen_image_2512_with_2steps_lora`
-// sibling, verified from the installed comfyui_workflow_templates_json package.
-// Two deliberate departures, the same two as wf-qwen-image-edit.mjs and for the
-// same reason — our fleet binding differs from the template's:
+// "Text to Image (Qwen-Image 2512)"), verified from the installed
+// comfyui_workflow_templates_json package. BOTH presets come from that one
+// template: `full` is its un-distilled path and `lightning4` is its own
+// enable-4-steps-LoRA switch branch (primitives 4 / cfg 1 / the lightx2v LoRA)
+// — NOT the separate `..._with_2steps_lora` template, which uses a different
+// vendor's 2-step LoRA. Two deliberate departures, the same two as
+// wf-qwen-image-edit.mjs and for the same reason — our fleet binding differs
+// from the template's:
 //   · loader is switchable — UnetLoaderGGUF for a .gguf unet, UNETLoader for a
 //     .safetensors one. The template assumes fp8 safetensors; our verified copy
 //     on this fleet is Q5_1 GGUF (and 2511/2512 K-quants are prohibited — see
@@ -22,11 +26,13 @@
 // CheckpointLoaderSimple graph cannot even load it. EmptySD3LatentImage is the
 // correct latent source (16-channel); the SD1/SDXL EmptyLatentImage is wrong.
 //
-// Negative-prompt semantics (template-verified): the full recipe runs cfg 4 with
-// a REAL, active negative; the Lightning recipes run cfg 1 where the negative is
-// inert and the official templates wire ConditioningZeroOut instead of encoding
-// an empty string. This builder mirrors that: an empty `negative` becomes a
-// zeroed-out conditioning, a non-empty one is encoded normally.
+// Negative-prompt semantics — a deliberate house choice, stated honestly: the
+// shipped 2512 template bakes a default Chinese quality-negative into BOTH its
+// branches, and this harness bakes in NO prompt content by policy. With no
+// negative of our own, an empty `negative` becomes ConditioningZeroOut of the
+// positive — the family's no-negative idiom (it is how the official
+// `..._2512_with_2steps_lora` template runs) — never an encoded empty string.
+// A non-empty (post-trim) negative is encoded normally and is active at cfg > 1.
 //
 // Step/cfg are NOT defaulted here on purpose — the base model at 4 steps/cfg 1
 // produces noise and a Lightning LoRA at 50 steps/cfg 4 produces mush. The
@@ -71,6 +77,11 @@ export function buildQwenImage({
     throw new Error(`buildQwenImage: loader must be auto|gguf|unet, got ${loader}`);
   }
 
+  // Fail loud on nonsense dims: NaN would otherwise ride silently into the graph
+  // and surface only as a remote ComfyUI validation error after the round-trip.
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+    throw new Error(`buildQwenImage: width/height must be positive numbers, got ${width}x${height}`);
+  }
   // VAE 8x downsample + DiT patch size 2 → pixel dims must be /16 (every entry
   // in the template's aspect table is: 1328x1328, 1664x928, 1472x1104, ...).
   width = Math.max(64, Math.floor(width / 16) * 16);
@@ -92,9 +103,10 @@ export function buildQwenImage({
   g["5"] = { class_type: "ModelSamplingAuraFlow", inputs: { model: [modelSrc, 0], shift } };
 
   g["6"] = { class_type: "CLIPTextEncode", inputs: { text: prompt, clip: ["2", 0] } };
-  // Empty negative = zeroed conditioning (the official qwen-image "no negative"),
-  // never an encoded empty string; a real negative is encoded and active at cfg > 1.
-  g["7"] = negative
+  // Empty OR whitespace-only negative = zeroed conditioning (the family's
+  // no-negative idiom), never an encoded blank string; a real negative is
+  // encoded and active at cfg > 1.
+  g["7"] = String(negative).trim()
     ? { class_type: "CLIPTextEncode", inputs: { text: negative, clip: ["2", 0] } }
     : { class_type: "ConditioningZeroOut", inputs: { conditioning: ["6", 0] } };
   g["8"] = { class_type: "EmptySD3LatentImage", inputs: { width, height, batch_size: 1 } };

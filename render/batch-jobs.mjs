@@ -32,7 +32,11 @@ export function jobArgs(job, shared = {}) {
     if (v != null && v !== "") args.push("--" + k, String(v));
   }
   for (const k of SHARED_ONLY) {
-    if (shared[k] != null && shared[k] !== "") args.push("--" + k, String(shared[k]));
+    // "lora" forwards even as an EMPTY string: --lora "" is the documented way to
+    // strip a preset's LoRA at the comfy-render layer, and dropping it here made
+    // the two entry points silently diverge on identical argv (the wrapper would
+    // re-apply the very LoRA the caller disabled).
+    if (shared[k] != null && (shared[k] !== "" || k === "lora")) args.push("--" + k, String(shared[k]));
   }
   return args;
 }

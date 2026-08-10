@@ -206,8 +206,11 @@ type Config struct {
 	// ImageGenFamily selects the model-correct render graph for this machine's
 	// checkpoint: "" = generic SDXL-shaped graph; "hidream-o1" / "hidream-o1-dev" =
 	// the official HiDream-O1 pixel-space graph (ModelNoiseScale, patch-seam
-	// smoothing, SamplerCustom stack, native 2048). Quality-first: a DiT on the
-	// generic graph produces measurable 32px patch blocking.
+	// smoothing, SamplerCustom stack, native 2048); "qwen-image" = the official
+	// Qwen-Image 2512 graph (SD3-class latent, AuraFlow shift; ImageGenCkpt carries
+	// the UNET filename and ImageGenVAE must NOT be "builtin" — the UNET file has
+	// no VAE weights). Quality-first: a DiT on the generic graph produces
+	// measurable 32px patch blocking.
 	ImageGenFamily string `json:"imagegen_family,omitempty"`
 	// ImageGenVAE is the standalone VAE filename, or "builtin" to decode with the VAE
 	// the CHECKPOINT LOADER supplies. "builtin" is REQUIRED for HiDream: that
