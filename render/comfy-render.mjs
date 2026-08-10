@@ -27,9 +27,13 @@
 //        [--steps 30] [--cfg 7] [--sampler dpmpp_2m] [--scheduler karras] \
 //        [--api http://127.0.0.1:8188]
 //   node comfy-render.mjs <out.png> --graph my-workflow.json [--api ...]
+//   node comfy-render.mjs <out.png> "<prompt>" --family qwen-image --ckpt qwen-image-2512-Q5_1.gguf \
+//        [--preset full|lightning4] [--clip te.safetensors] [--lora l.safetensors] [--shift 3.1]
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { buildHiDreamO1 } from "./wf-hidream-o1.mjs";
+import { buildQwenImage, QWEN_IMAGE_PRESETS } from "./wf-qwen-image.mjs";
 
 const argv = process.argv.slice(2);
 const pos = [];
@@ -42,6 +46,10 @@ for (let i = 0; i < argv.length; i++) {
 const out = pos[0];
 const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
 if (!out) { console.error('usage: node comfy-render.mjs <out.png> "<prompt>" [seed] [w] [h] [flags]   |   <out.png> --graph wf.json'); process.exit(2); }
+// Create the output parent UP-FRONT: a bad path must fail in 0s, not after the
+// render — an ENOENT at the write site used to discard a finished image after
+// every second of GPU work had succeeded (it cost a full A/B arm, 2026-08-10).
+mkdirSync(dirname(out) || ".", { recursive: true });
 
 // Build the graph: either the caller's full workflow, or a parameterized SDXL text2img.
 let graph;
@@ -71,6 +79,57 @@ if (flags.graph) {
     width, height, seed,
     steps: Number(flags.steps || 0), cfg: Number(flags.cfg || 0),
     sampler: flags.sampler || "",
+  });
+} else if (flags.family === "qwen-image") {
+  // Model-family-correct graph: Qwen-Image 2512 is an SD3-latent DiT whose text
+  // encoder and VAE ship as separate files — there is no all-in-one checkpoint, so
+  // the generic CheckpointLoaderSimple graph cannot even load it. --ckpt carries
+  // the UNET filename (the per-machine imagegen_ckpt binding, e.g.
+  // qwen-image-2512-Q5_1.gguf); text encoder + VAE default to the family's
+  // standard split files, overridable via --clip / --vae.
+  const positive = pos[1] || flags.prompt || "";
+  if (!positive) { console.error("error: a prompt is required (positional or --prompt), unless you pass --graph"); process.exit(2); }
+  if (!flags.ckpt && !process.env.COMFY_CKPT) { console.error("error: --family qwen-image requires --ckpt (the qwen-image UNET filename, .gguf or .safetensors)"); process.exit(2); }
+  // The preset resolves the steps/cfg/LoRA pairing (wrong pairings render noise or
+  // mush); --steps/--cfg override it only TOGETHER. A half-override is the classic
+  // silent ruin: the harness forwards a caller's per-request steps but cfg only
+  // ever comes from binding config, so "steps 8" alone would render the base model
+  // at few steps / cfg 4 — technically successful, actually noise. Pair or preset.
+  if ((flags.steps != null) !== (flags.cfg != null)) {
+    console.error("error: --family qwen-image takes --steps and --cfg together or not at all — a half-override of the preset pairing renders noise or mush; pick a --preset (" + Object.keys(QWEN_IMAGE_PRESETS).join("|") + ") for a sanctioned pairing instead");
+    process.exit(2);
+  }
+  const presetName = flags.preset || "full";
+  // hasOwn, not truthy-lookup: '--preset __proto__' must hit the helpful error,
+  // not resolve up the prototype chain into a confusing builder throw.
+  if (!Object.hasOwn(QWEN_IMAGE_PRESETS, presetName)) { console.error(`error: unknown --preset '${presetName}' (known: ${Object.keys(QWEN_IMAGE_PRESETS).join(", ")})`); process.exit(2); }
+  const preset = QWEN_IMAGE_PRESETS[presetName];
+  // The UNET file carries no VAE weights — a "builtin" VAE binding is a config
+  // error for this family (it means the machine's imagegen_vae still points at an
+  // all-in-one checkpoint family like HiDream). Fail loud with the fix.
+  const vaeFlag = flags.vae || process.env.COMFY_VAE || "";
+  if (["builtin", "none", "checkpoint"].includes(String(vaeFlag).toLowerCase())) {
+    console.error("error: --family qwen-image has no built-in VAE (the UNET file carries no VAE weights); unset imagegen_vae/--vae or name one (default qwen_image_vae.safetensors)");
+    process.exit(2);
+  }
+  width = Number(pos[3] || flags.width || 1328);
+  height = Number(pos[4] || flags.height || 1328);
+  // Everything optional passes undefined so the BUILDER stays the single source
+  // of truth for defaults (sampler/scheduler/shift/strength) — restating them
+  // here is how a future builder-default change silently misses this entrypoint.
+  graph = buildQwenImage({
+    prompt: positive, negative: flags.negative || "",
+    unet: flags.ckpt || process.env.COMFY_CKPT,
+    loader: flags.loader || undefined,
+    clip: flags.clip || undefined,
+    vae: vaeFlag || undefined,
+    lora: flags.lora != null ? flags.lora : preset.lora,
+    loraStrength: flags["lora-strength"] != null ? Number(flags["lora-strength"]) : undefined,
+    steps: flags.steps != null ? Number(flags.steps) : preset.steps,
+    cfg: flags.cfg != null ? Number(flags.cfg) : preset.cfg,
+    sampler: flags.sampler || undefined, scheduler: flags.scheduler || undefined,
+    shift: flags.shift != null ? Number(flags.shift) : undefined,
+    width, height, seed,
   });
 } else {
   const positive = pos[1] || flags.prompt || "";

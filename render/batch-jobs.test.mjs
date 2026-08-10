@@ -35,6 +35,16 @@ test("jobArgs: job fields override shared, binding flags come from shared only",
   assert.ok(!args.includes("--width"), "unset numerics emit no flag");
 });
 
+test("jobArgs: an EMPTY shared lora still forwards — it strips a preset's LoRA downstream", () => {
+  const args = jobArgs({ prompt: "p", out: "o.png" }, { family: "qwen-image", preset: "lightning4", lora: "" });
+  const i = args.indexOf("--lora");
+  assert.ok(i >= 0, "--lora present despite empty value");
+  assert.equal(args[i + 1], "", "empty string survives to comfy-render");
+  // ...while other empty shared values still emit no flag at all.
+  const none = jobArgs({ prompt: "p", out: "o.png" }, { family: "qwen-image", clip: "", shift: "" });
+  assert.ok(!none.includes("--clip") && !none.includes("--shift"));
+});
+
 test("resultLine: ok and error shapes", () => {
   const ok = JSON.parse(resultLine(0, { out: "a.png", seed: 7 }, true, 1234));
   assert.deepEqual(ok, { i: 0, out: "a.png", seed: 7, ok: true, ms: 1234 });
