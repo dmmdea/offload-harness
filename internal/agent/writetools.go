@@ -56,7 +56,7 @@ func WriteTools(worktreeRoot string, pol *Policy) ([]Tool, error) {
 			// create fails and we re-broker / return the error. O_EXCL, not Stat, is
 			// the authoritative existence + containment guard.
 			if d, reason := pol.Decide(Action{Kind: ActWrite, Path: rel, Exists: exists}); d != Allow {
-				return fmt.Sprintf("NOT performed (%s): %s", d, reason), nil
+				return "", NotPerformed(fmt.Sprintf("NOT performed (%s): %s", d, reason))
 			}
 			if dir := filepath.Dir(rel); dir != "." && dir != "" {
 				if err := r.MkdirAll(dir, 0o755); err != nil {
@@ -69,7 +69,7 @@ func WriteTools(worktreeRoot string, pol *Policy) ([]Tool, error) {
 			f, err := r.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 			if errors.Is(err, fs.ErrExist) {
 				if d, reason := pol.Decide(Action{Kind: ActWrite, Path: rel, Exists: true}); d != Allow {
-					return fmt.Sprintf("NOT performed (%s): %s", d, reason), nil
+					return "", NotPerformed(fmt.Sprintf("NOT performed (%s): %s", d, reason))
 				}
 				f, err = r.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644) // approved overwrite (attended only)
 			}
@@ -109,7 +109,7 @@ func WriteTools(worktreeRoot string, pol *Policy) ([]Tool, error) {
 				exists = true
 			}
 			if d, reason := pol.Decide(Action{Kind: ActDelete, Path: rel, Exists: exists}); d != Allow {
-				return fmt.Sprintf("NOT performed (%s): %s", d, reason), nil
+				return "", NotPerformed(fmt.Sprintf("NOT performed (%s): %s", d, reason))
 			}
 			if err := r.Remove(rel); err != nil {
 				return "", err
@@ -174,10 +174,10 @@ func WriteTools(worktreeRoot string, pol *Policy) ([]Tool, error) {
 					matchStart, matchLen, wsTolerant = start, length, true
 					break
 				}
-				return fmt.Sprintf("NOT performed: old_string is not unique in %s — include more surrounding context", filepath.ToSlash(rel)), nil
+				return "", NotPerformed(fmt.Sprintf("NOT performed: old_string is not unique in %s — include more surrounding context", filepath.ToSlash(rel)))
 			}
 			if d, reason := pol.Decide(Action{Kind: ActWrite, Path: rel, Exists: true}); d != Allow {
-				return fmt.Sprintf("NOT performed (%s): %s", d, reason), nil
+				return "", NotPerformed(fmt.Sprintf("NOT performed (%s): %s", d, reason))
 			}
 			// Splice at the matched byte span (works for both the exact and the
 			// whitespace-tolerant path — the latter matched against the file's ACTUAL

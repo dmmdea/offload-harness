@@ -98,6 +98,13 @@ type Result struct {
 	// mechanism nobody can debug: these fields make its behaviour auditable
 	// per run instead of inferred from outcomes.
 	TokenCal TokenCalReport
+
+	// Effects is the per-call execution ledger (effects.go): one record per
+	// tool call the model REQUESTED, in call order, present on every return
+	// path including errors. The one consequential distinction it preserves:
+	// EffectUnknown (started, then abandoned — effects may exist) vs
+	// EffectNone (never executed — the world is untouched).
+	Effects []EffectRecord
 }
 
 // TokenCalReport is the observable state of the budget calibration at the end
@@ -524,10 +531,14 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 	// exhausted counts steps whose ladder could not fit the budget (fit=false
 	// telemetry on the Result — never a silent over-budget request).
 	exhausted := 0
+	// effects is the per-call execution ledger (effects.go) — one record per
+	// requested tool call, on EVERY Result return path including errors, so a
+	// caller inspecting a failed run still sees what ran before it died.
+	var effects []EffectRecord
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
-			return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport()}, err
+			return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Effects: effects}, err
 		}
 		specs := l.specs
 		if len(disabledTools) > 0 {
@@ -606,7 +617,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				comp, err = l.client.Chat(ctx, msgs, specs, l.maxTokens)
 			}
 			if err != nil {
-				return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport()}, err
+				return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Effects: effects}, err
 			}
 		}
 		// Learn from the response: estimateTokens(msgs) is what we thought the
@@ -627,23 +638,35 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// finish_reason "stop", so trusting finish_reason drops the tool call
 		// and returns an empty answer.
 		if len(comp.Msg.ToolCalls) == 0 {
-			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport()}
+			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Effects: effects}
 			l.persist(ctx, objective, res.Output)
 			return res, nil
 		}
 
 		// Execute every requested tool; defer-not-crash on error/unknown.
 		for _, call := range comp.Msg.ToolCalls {
-			content, isErr := l.dispatchOrThrottle(ctx, call, msgs, exactCalls, sameNameCalls, disabledTools, firstCallID, pinned, reExecuted)
+			content, isErr, eff := l.dispatchOrThrottle(ctx, call, msgs, exactCalls, sameNameCalls, disabledTools, firstCallID, pinned, reExecuted)
 			// Cap ONE result at the loop boundary so no single tool output can blow
 			// the small window — the per-tool caps don't protect us here (read_file's
 			// 256 KB is ~16× the whole input budget). Trim no-ops under the cap, so
 			// small results (and tiny refusal strings) pass through byte-for-byte.
+			// The trim runs BEFORE the ledger record is built: the record's Note is
+			// serialized into the MCP response, so an untrimmed note would smuggle
+			// the very bytes this cap exists to bound past the loop boundary.
 			content, _ = contextbudget.Trim(content, l.toolResultCapChars())
+			// Effect ledger (effects.go): one record per REQUESTED call, in call
+			// order, whatever became of it. Note carries the why only for
+			// non-committed statuses — for those, the (bounded) result text IS
+			// the explanation and it is small (refusals/errors are short strings).
+			rec := EffectRecord{Step: step + 1, CallID: call.ID, Tool: call.Name, Status: eff}
+			if eff != EffectCommitted {
+				rec.Note = content
+			}
+			effects = append(effects, rec)
 			msgs = append(msgs, Msg{Role: "tool", ToolCallID: call.ID, Content: content, IsError: isErr})
 		}
 	}
-	return Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport()}, nil
+	return Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Effects: effects}, nil
 }
 
 // dispatchOrThrottle is the circuit breaker: it refuses to EXECUTE a tool call
@@ -666,9 +689,9 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 // the model at destroyed bytes with no recovery path — so the call is
 // re-executed ONCE per pair (reExecuted bounds it) and the FRESH result is
 // pinned instead; msgs is the live transcript that check reads.
-func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg, exactCalls, sameNameCalls map[string]int, disabledTools map[string]bool, firstCallID map[string]string, pinned map[string]bool, reExecuted map[string]bool) (string, bool) {
+func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg, exactCalls, sameNameCalls map[string]int, disabledTools map[string]bool, firstCallID map[string]string, pinned map[string]bool, reExecuted map[string]bool) (string, bool, EffectStatus) {
 	if disabledTools[call.Name] {
-		return fmt.Sprintf("NOT executed: %s has been disabled for the rest of this task (too many repeated calls). It is no longer offered — use a different tool or your existing results to continue.", call.Name), true
+		return fmt.Sprintf("NOT executed: %s has been disabled for the rest of this task (too many repeated calls). It is no longer offered — use a different tool or your existing results to continue.", call.Name), true, EffectNone
 	}
 	key := call.Name + "\x00" + call.Args
 	exactCalls[key]++
@@ -681,7 +704,7 @@ func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg
 	// tool — would never be reached.
 	if l.maxSameTool > 0 && sameNameCalls[call.Name] > l.maxSameTool {
 		disabledTools[call.Name] = true
-		return fmt.Sprintf("NOT executed: %s has now been called %d times in this task — that is enough, and it is now DISABLED for the rest of this task. Proceed with the remaining steps using what you already have; %s is no longer available.", call.Name, sameNameCalls[call.Name], call.Name), true
+		return fmt.Sprintf("NOT executed: %s has now been called %d times in this task — that is enough, and it is now DISABLED for the rest of this task. Proceed with the remaining steps using what you already have; %s is no longer available.", call.Name, sameNameCalls[call.Name], call.Name), true, EffectNone
 	}
 	if exactCalls[key] > 1 {
 		id := firstCallID[key]
@@ -697,7 +720,7 @@ func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg
 			pinned[call.ID] = true
 			return l.dispatch(ctx, call)
 		}
-		return fmt.Sprintf("NOT executed: you already called %s with these exact same arguments earlier in this task and you already have that result. Do NOT repeat this call — use the result you already have and move on to the NEXT step of the task.", call.Name), true
+		return fmt.Sprintf("NOT executed: you already called %s with these exact same arguments earlier in this task and you already have that result. Do NOT repeat this call — use the result you already have and move on to the NEXT step of the task.", call.Name), true, EffectNone
 	}
 	if _, seen := firstCallID[key]; !seen {
 		firstCallID[key] = call.ID
@@ -717,13 +740,15 @@ func resultDestroyed(msgs []Msg, callID string) bool {
 	return true // no trace of it left at all
 }
 
-// dispatch runs one tool call, returning (resultText, isError). An unknown tool
-// or an Exec error becomes an is_error result the model can react to — the loop
-// never panics or aborts on tool failure.
-func (l *Loop) dispatch(ctx context.Context, call ToolCall) (string, bool) {
+// dispatch runs one tool call, returning (resultText, isError, effect). An
+// unknown tool or an Exec error becomes an is_error result the model can react
+// to — the loop never panics or aborts on tool failure. The EffectStatus is the
+// honest execution accounting (effects.go): committed/failed ran to completion,
+// unknown was started-then-abandoned, none never executed.
+func (l *Loop) dispatch(ctx context.Context, call ToolCall) (string, bool, EffectStatus) {
 	t, ok := l.tools[call.Name]
 	if !ok {
-		return fmt.Sprintf("error: unknown tool %q", call.Name), true
+		return fmt.Sprintf("error: unknown tool %q", call.Name), true, EffectNone
 	}
 	budget := t.Timeout
 	if budget <= 0 {
@@ -732,9 +757,12 @@ func (l *Loop) dispatch(ctx context.Context, call ToolCall) (string, bool) {
 	if budget <= 0 {
 		out, err := t.Exec(ctx, call.Args) // capping explicitly disabled
 		if err != nil {
-			return fmt.Sprintf("error: %v", err), true
+			if IsNotPerformed(err) { // refusal: model sees plain content, ledger sees none
+				return err.Error(), false, EffectNone
+			}
+			return fmt.Sprintf("error: %v", err), true, EffectFailed
 		}
-		return out, false
+		return out, false, EffectCommitted
 	}
 
 	tctx, cancel := context.WithTimeout(ctx, budget)
@@ -763,17 +791,25 @@ func (l *Loop) dispatch(ctx context.Context, call ToolCall) (string, bool) {
 	select {
 	case r := <-done:
 		if r.err != nil {
-			return fmt.Sprintf("error: %v", r.err), true
+			if IsNotPerformed(r.err) { // refusal: model sees plain content, ledger sees none
+				return r.err.Error(), false, EffectNone
+			}
+			return fmt.Sprintf("error: %v", r.err), true, EffectFailed
 		}
-		return r.out, false
+		return r.out, false, EffectCommitted
 	case <-tctx.Done():
+		// Both abandonment paths are EffectUnknown: the goroutine was started
+		// and may still be mutating the world when we stop waiting — the exact
+		// case the effect ledger exists to keep distinguishable from "nothing
+		// happened".
+		//
 		// Distinguish OUR cap from the run's own deadline. If the parent is also
 		// done the whole run ended, and blaming the tool would be a lie.
 		if ctx.Err() != nil {
-			return fmt.Sprintf("error: run cancelled during %s: %v", call.Name, ctx.Err()), true
+			return fmt.Sprintf("error: run cancelled during %s: %v", call.Name, ctx.Err()), true, EffectUnknown
 		}
 		return fmt.Sprintf("error: tool %s exceeded its %s budget and was cancelled; "+
-			"try a narrower request, or a different tool", call.Name, budget), true
+			"try a narrower request, or a different tool", call.Name, budget), true, EffectUnknown
 	}
 }
 

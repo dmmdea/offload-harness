@@ -90,6 +90,7 @@ func RunTwoTier(ctx context.Context, objective string, architect, editor *Loop) 
 		// Architect unreachable/failed — fall back to a single-model editor run of
 		// the ORIGINAL objective so the user still gets an attempt.
 		res, eerr := editor.Run(ctx, objective)
+		res.Effects = append(archRes.Effects, res.Effects...) // architect's ledger survives the fallback
 		return res.withFallback(FallbackArchitectError), eerr
 	}
 
@@ -99,13 +100,17 @@ func RunTwoTier(ctx context.Context, objective string, architect, editor *Loop) 
 		// is unrecoverable (it never sees the original request), so fall back to a
 		// single-model editor run of the ORIGINAL objective.
 		res, eerr := editor.Run(ctx, objective)
+		res.Effects = append(archRes.Effects, res.Effects...)
 		return res.withFallback(FallbackDegeneratePlan), eerr
 	}
 
 	// One-shot handoff: the architect's full plan is the editor's sole user message.
 	res, eerr := editor.Run(ctx, plan)
-	// fit=false telemetry aggregates across BOTH tiers — an exhausted architect
-	// ladder must not vanish just because the editor's Result is the one returned.
+	// Cross-tier telemetry aggregates on the returned Result — an exhausted
+	// architect ladder, or an architect tool abandoned mid-flight (EffectUnknown),
+	// must not vanish just because the editor's Result is the one returned. The
+	// architect's records come FIRST: the ledger is in execution order.
 	res.CompactionsExhausted += archRes.CompactionsExhausted
+	res.Effects = append(archRes.Effects, res.Effects...)
 	return res.withFallback(FallbackNone), eerr
 }

@@ -9,6 +9,8 @@ local-offload.exe~
 # machine-specific working configs — use config.example.json as the template
 config.json
 config-*.json
+config.json.bak*
+config.json.*.bak
 test-config.json
 # ...but the installer's shipped config template IS tracked
 !setup/templates/config.json

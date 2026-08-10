@@ -54,7 +54,7 @@ func shellTool(pol *Policy, worktree, scratch string, run shellRunner) Tool {
 			// Broker gate — opt-in capability + an audit record of every command
 			// (a.Path is the command line). defer-not-crash on a non-Allow decision.
 			if d, reason := pol.Decide(Action{Kind: ActShell, Path: in.Command}); d != Allow {
-				return fmt.Sprintf("NOT performed (%s): %s", d, reason), nil
+				return "", NotPerformed(fmt.Sprintf("NOT performed (%s): %s", d, reason))
 			}
 			ctx, cancel := context.WithTimeout(ctx, shellTimeout)
 			defer cancel()
@@ -67,7 +67,7 @@ func shellTool(pol *Policy, worktree, scratch string, run shellRunner) Tool {
 			})
 			if res.Refused {
 				// the CAGE refused to start (setup failure) — not a command exit.
-				return fmt.Sprintf("NOT performed (cage refused): %s", strings.TrimSpace(res.Stderr)), nil
+				return "", NotPerformed(fmt.Sprintf("NOT performed (cage refused): %s", strings.TrimSpace(res.Stderr)))
 			}
 			if err != nil && res.ExitCode == 0 && res.Signal == 0 {
 				// the cage failed to launch the command at all (e.g. clone/exec error,
