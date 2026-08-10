@@ -4,6 +4,32 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.47.0] - 2026-08-10
+
+### Added — opt-in prompt refiner on the image-generation path
+Arena scoring showed a prompt-refiner agent is worth a free quality bump, so
+the harness prompt path now replicates it. New config key
+`imagegen_refiner_model` (a llama-swap model id, e.g. `"gemma-4-12b"`; empty =
+OFF, path byte-identical to today — pinned by test) has `generate_image`
+expand the raw prompt with concrete photographic detail (lighting,
+composition, materials, mood, lens vocabulary) on the free local text tier
+before the render — temperature 0.4, ~256 tokens, bounded by
+`imagegen_refiner_timeout_sec` (default 30). One shared decision point
+(`internal/pipeline/refiner.go`) serves the single ComfyUI path, the sdcpp
+engine, and warm batch — the same drift class `imageModelFromConfig` deletes
+for the model binding.
+
+**Fail-safe by construction:** any refiner problem — transport error, timeout,
+empty output, output shorter than the input, or a computed quoted-span guard
+violation (every `"double-quoted"` span of the raw prompt must appear verbatim
+in the refined one; this protects text-render prompts) — falls back to the RAW
+prompt, records the reason, and renders anyway. Refinement never makes a
+render fail. Output paths still derive from the raw prompt, so identical
+requests keep reusing one file. Results gain `refined` (+ `refined_prompt` /
+`refine_fallback`) only when a refiner is configured; batch items mirror the
+same keys. Request-level opt-out: `refine=false` on the MCP tool / CLI
+(`--refine=false`) / a batch job's `"refine": false`.
+
 ## [0.46.0] - 2026-08-10
 
 ### Added — harness binding for the qwen-image preset knobs
