@@ -120,6 +120,10 @@ type Pipeline struct {
 	footOnce    sync.Once
 	foot        *fleetnode.Footprints
 	fleetSample func(childPid int) (float64, error)
+	// Opt-in image-prompt refiner seam (refiner.go): overrides the refiner's
+	// chat call in tests (nil = p.client.Generate). Only reached when
+	// cfg.ImageGenRefinerModel is set, so a client-less test Pipeline stays safe.
+	refineGen func(ctx context.Context, model, system, user string, maxTokens int, temperature float64) (llamaclient.GenResult, error)
 }
 
 // Cfg exposes the loaded config so callers like the MCP server can build
@@ -832,6 +836,14 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 		out = filepath.Join(p.cfg.MediaDir, "render-"+sha256hex(prompt + tasks.StableParamsKey(req.Params))[:8]+".png")
 	}
 
+	// Opt-in prompt refiner (refiner.go): expand the raw prompt on the local text
+	// tier BEFORE the render — and before the media lease, so the text call never
+	// contends with our own render. Fail-safe: any refiner problem falls back to
+	// the raw prompt. `out` above deliberately derives from the RAW prompt, so an
+	// identical request keeps reusing one file across runs (the refined text is
+	// sampled at temperature and would fragment the output path).
+	renderPrompt, refined, refineNote := p.maybeRefinePrompt(ctx, prompt, refineExplicitlyOff(req.Params))
+
 	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second
 	// This machine's image-model binding (per-machine config; never hardcoded here —
 	// an 8GB box runs SDXL, a 16GB box may run an all-in-one DiT). All fields are
@@ -845,7 +857,7 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
 	defer releaseLease()
-	outPath, gerr := imagegen.Generate(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, prompt, req.Params, model, timeout,
+	outPath, gerr := imagegen.Generate(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, renderPrompt, req.Params, model, timeout,
 		p.footprintSampling(imgFamily, imgQuant, "image-gen"), leaseEnv...)
 	if gerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
@@ -854,12 +866,14 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 		return core.Deferf("image generation failed: "+gerr.Error(), "", meta)
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
-	data, _ := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"image_path": outPath,
 		"width":      paramIntOr(req.Params, "width", 1024),
 		"height":     paramIntOr(req.Params, "height", 1024),
 		"seed":       seed,
-	})
+	}
+	addRefineData(payload, p.cfg.ImageGenRefinerModel, refined, renderPrompt, refineNote)
+	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
 }
@@ -918,6 +932,9 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
 		out = filepath.Join(p.cfg.MediaDir, "render-"+sha256hex(prompt + tasks.StableParamsKey(req.Params))[:8]+".png")
 	}
+	// Opt-in prompt refiner — same shared decision point as the ComfyUI path
+	// (refiner.go), same raw-prompt-derived `out` rationale.
+	renderPrompt, refined, refineNote := p.maybeRefinePrompt(ctx, prompt, refineExplicitlyOff(req.Params))
 	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second
 	m := imagegen.SdcppModel{
 		Bin:       p.cfg.SdcppBin,
@@ -939,19 +956,21 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
 	defer releaseLease()
-	outPath, gerr := imagegen.GenerateSdcpp(ctx, p.cfg.NodePath, script, out, prompt, req.Params, m, timeout,
+	outPath, gerr := imagegen.GenerateSdcpp(ctx, p.cfg.NodePath, script, out, renderPrompt, req.Params, m, timeout,
 		p.footprintSampling(imgFamily, imgQuant, "image-gen"), leaseEnv...)
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return deferf("image generation failed: " + gerr.Error())
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
-	data, _ := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"image_path": outPath,
 		"width":      paramIntOr(req.Params, "width", 1024),
 		"height":     paramIntOr(req.Params, "height", 1024),
 		"seed":       seed,
-	})
+	}
+	addRefineData(payload, p.cfg.ImageGenRefinerModel, refined, renderPrompt, refineNote)
+	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
 }
@@ -1114,6 +1133,10 @@ type ImageBatchJob struct {
 	Steps    int    `json:"steps,omitempty"`
 	Seed     int    `json:"seed,omitempty"`
 	Out      string `json:"out,omitempty"`
+	// Refine is the per-job opt-out mirroring the single path's "refine" param:
+	// an EXPLICIT false skips the configured prompt refiner for this job; nil or
+	// true means the configured default applies. Pointer so absent != false.
+	Refine *bool `json:"refine,omitempty"`
 }
 
 // ImageBatchItem is the per-job outcome of a batch, in job order.
@@ -1123,6 +1146,11 @@ type ImageBatchItem struct {
 	OK    bool   `json:"ok"`
 	Ms    int64  `json:"ms"`
 	Error string `json:"error,omitempty"`
+	// Refiner outcome (refiner.go), mirroring the single path's result keys.
+	// All omitempty: with no refiner configured the item is byte-identical.
+	Refined        bool   `json:"refined,omitempty"`
+	RefinedPrompt  string `json:"refined_prompt,omitempty"`
+	RefineFallback string `json:"refine_fallback,omitempty"`
 }
 
 // normalizeImageBatch fills the per-job invariants the single-render path enforces
@@ -1130,7 +1158,6 @@ type ImageBatchItem struct {
 // path under mediaDir) and renders the jobs file the render script consumes. Pure.
 func normalizeImageBatch(jobs []ImageBatchJob, mediaDir string) ([]ImageBatchJob, string) {
 	norm := make([]ImageBatchJob, len(jobs))
-	var b strings.Builder
 	for i, j := range jobs {
 		if j.Seed <= 0 {
 			j.Seed = mintSeed()
@@ -1143,11 +1170,21 @@ func normalizeImageBatch(jobs []ImageBatchJob, mediaDir string) ([]ImageBatchJob
 			j.Out = filepath.Join(mediaDir, "render-"+sha256hex(j.Prompt + tasks.StableParamsKey(params))[:8]+".png")
 		}
 		norm[i] = j
+	}
+	return norm, jobsJSONL(norm)
+}
+
+// jobsJSONL renders the jobs file the batch render script consumes — one JSON
+// line per job. Shared by normalizeImageBatch and the refiner pass (which
+// rewrites prompts after normalization and must re-render the same shape).
+func jobsJSONL(jobs []ImageBatchJob) string {
+	var b strings.Builder
+	for _, j := range jobs {
 		line, _ := json.Marshal(j)
 		b.Write(line)
 		b.WriteByte('\n')
 	}
-	return norm, b.String()
+	return b.String()
 }
 
 // parseBatchResults maps the script's results JSONL back onto the job list by index.
@@ -1224,6 +1261,31 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 	}
 	_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
 	norm, jsonl := normalizeImageBatch(jobs, p.cfg.MediaDir)
+	// Opt-in prompt refiner (refiner.go) — the batch parity of the single path's
+	// pre-render refinement, via the SAME decision point. It runs AFTER
+	// normalization, so each job's Out still derives from its RAW prompt (stable
+	// across re-runs), and BEFORE the media lease, so the text-tier calls never
+	// contend with our own renders. Per-job "refine": false opts a job out;
+	// every fallback leaves that job's raw prompt in place.
+	var refinedFlags []bool
+	var refineNotes []string
+	if p.cfg.ImageGenRefinerModel != "" {
+		refinedFlags = make([]bool, len(norm))
+		refineNotes = make([]string, len(norm))
+		changed := false
+		for i := range norm {
+			explicitOff := norm[i].Refine != nil && !*norm[i].Refine
+			rp, ok, note := p.maybeRefinePrompt(ctx, norm[i].Prompt, explicitOff)
+			refinedFlags[i], refineNotes[i] = ok, note
+			if ok {
+				norm[i].Prompt = rp
+				changed = true
+			}
+		}
+		if changed {
+			jsonl = jobsJSONL(norm)
+		}
+	}
 	stamp := sha256hex(jsonl)[:8]
 	jobsPath := filepath.Join(p.cfg.MediaDir, "batch-"+stamp+".jobs.jsonl")
 	resultsPath := filepath.Join(p.cfg.MediaDir, "batch-"+stamp+".results.jsonl")
@@ -1257,14 +1319,26 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 	raw, _ := os.ReadFile(resultsPath) // best-effort even on gerr: partial results are real work
 	items := parseBatchResults(raw, norm)
 	for i, it := range items {
+		// Refiner outcome onto the item (single-path result-key parity). Set
+		// BEFORE the ledger loop reads `items` so callers and records agree.
+		if refinedFlags != nil {
+			items[i].Refined = refinedFlags[i]
+			if refinedFlags[i] {
+				items[i].RefinedPrompt = norm[i].Prompt
+			} else {
+				items[i].RefineFallback = refineNotes[i]
+			}
+		}
+		// Ledger input-chars parity with the single path: the RAW prompt is the
+		// caller's input (jobs[i]; norm[i].Prompt may hold the refined text).
 		meta := core.Meta{Model: modelLabel, LatencyMs: it.Ms}
 		if it.OK {
-			p.record(core.TaskGenerateImage, meta, len(norm[i].Prompt))
+			p.record(core.TaskGenerateImage, meta, len(jobs[i].Prompt))
 		} else {
 			// Ledger parity with the single path (which sets ErrClass=classifyErr):
 			// health analytics must distinguish oom/timeout/busy for batch jobs too.
 			meta.ErrClass = batchErrClass(it.Error, gerr)
-			p.recordDefer(core.TaskGenerateImage, meta, len(norm[i].Prompt), "batch job failed: "+it.Error)
+			p.recordDefer(core.TaskGenerateImage, meta, len(jobs[i].Prompt), "batch job failed: "+it.Error)
 		}
 	}
 	if gerr != nil {
