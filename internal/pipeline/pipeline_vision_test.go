@@ -335,3 +335,71 @@ func TestRunVisionBadImageDefers(t *testing.T) {
 		t.Fatalf("expected defer on image load failure, got OK=%v", res.OK)
 	}
 }
+
+// TestOCRModelRoutesOnlyOCR: a dedicated ocr_model must take the OCR task and
+// NOTHING else. Purpose-built OCR models are text-recognition only — routing vqa
+// or assess_image onto one would silently degrade both, since neither can answer
+// a question about an image.
+func TestOCRModelRoutesOnlyOCR(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		task  core.TaskType
+		want  string
+		extra map[string]any
+	}{
+		{"ocr uses the dedicated model", core.TaskOCR, "glm-ocr", nil},
+		{"vqa stays on the vision model", core.TaskVQA, "fake-vlm", map[string]any{"question": "what?"}},
+		{"assess stays on the vision model", core.TaskAssessImage, "fake-vlm", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotModel string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				var req struct {
+					Model string `json:"model"`
+				}
+				_ = json.Unmarshal(body, &req)
+				gotModel = req.Model
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(fakeChat{content: "ok", finishReason: "stop", promptTokens: 10}.marshal())
+			}))
+			defer srv.Close()
+
+			cfg := baseVisionCfg(srv, "fake-vlm")
+			cfg.OCRModel = "glm-ocr"
+			client := llamaclient.New(srv.URL, cfg.CompletionPath, "", 10*time.Second)
+			p := New(cfg, client, nil, nil)
+
+			p.Run(context.Background(), core.Request{Task: tc.task, Image: minimalPNGDataURI(), Params: tc.extra})
+			if gotModel != tc.want {
+				t.Fatalf("%s: called model %q, want %q", tc.task, gotModel, tc.want)
+			}
+		})
+	}
+}
+
+// TestOCRFallsBackToVisionModel: an unset ocr_model must leave OCR exactly where
+// it was — on the general vision tier.
+func TestOCRFallsBackToVisionModel(t *testing.T) {
+	var gotModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(body, &req)
+		gotModel = req.Model
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(fakeChat{content: "ok", finishReason: "stop", promptTokens: 10}.marshal())
+	}))
+	defer srv.Close()
+
+	cfg := baseVisionCfg(srv, "fake-vlm") // OCRModel deliberately unset
+	client := llamaclient.New(srv.URL, cfg.CompletionPath, "", 10*time.Second)
+	p := New(cfg, client, nil, nil)
+
+	p.Run(context.Background(), core.Request{Task: core.TaskOCR, Image: minimalPNGDataURI()})
+	if gotModel != "fake-vlm" {
+		t.Fatalf("unset ocr_model must fall back to vision_model, called %q", gotModel)
+	}
+}

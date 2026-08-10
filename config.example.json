@@ -8,6 +8,7 @@
   "agent_model": "",
   "agent_timeout_sec": 0,
   "vision_model": "",
+  "ocr_model": "",
   "vision_max_image_bytes": 6000000,
   "ocr_max_tokens": 1024,
   "video_fps": 2,

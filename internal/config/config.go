@@ -119,6 +119,12 @@ type Config struct {
 	// VisionModel is the VLM alias used for the vqa task (multimodal). Empty = no
 	// vision route (vqa defers).
 	VisionModel string `json:"vision_model,omitempty"`
+	// OCRModel is an OPTIONAL dedicated alias for the ocr task. Purpose-built OCR
+	// models (GLM-OCR and friends) beat a general VLM on dense text, but they are
+	// text-recognition ONLY — they cannot answer a vqa question or judge an image,
+	// which is exactly why this is a separate binding and not a replacement for
+	// VisionModel. Empty = ocr rides VisionModel, as it always did.
+	OCRModel string `json:"ocr_model,omitempty"`
 	// VisionMaxImageBytes caps a single decoded image before it is rejected
 	// (guards context/VRAM blowups). 0 = use the loader default.
 	VisionMaxImageBytes int `json:"vision_max_image_bytes,omitempty"`
@@ -645,19 +651,19 @@ func (c Config) AgentPlannerModel(explicit string) string {
 func Default() Config {
 	base := DefaultBase()
 	return Config{
-		Endpoint:                    "http://127.0.0.1:11436",
-		CompletionPath:              "/v1/chat/completions", // chat route: server applies the Gemma template; we pass a raw "grammar" field
-		Model:                       "offload-e4b",
-		TriageModel:                 "gemma4-e2b",     // fast tier for triage/classify
-		EscalationModel:             "gemma4-26b-a4b", // MoE escalation tier (experts in RAM via --cpu-moe); part of the served offload family.
-		ReasoningModel:              "gemma4-26b-a4b", // terminal local reasoning tier (think-wrapped grammar) before defer-to-cloud. "" disables.
-		VisionModel:                 "",               // opt-in: set the machine's VLM alias (empty = vision defers, no phantom)
-		VisionMaxImageBytes:         6000000,          // ~6MB cap per image
-		OCRMaxTokens:                1024,             // default OCR output cap; raise per-machine for dense docs
-		VideoFPS:                    2.0,
-		VideoMaxFrames:              12,
-		VideoFrameWidth:             512,
-		FFmpegPath:                  "ffmpeg",
+		Endpoint:            "http://127.0.0.1:11436",
+		CompletionPath:      "/v1/chat/completions", // chat route: server applies the Gemma template; we pass a raw "grammar" field
+		Model:               "offload-e4b",
+		TriageModel:         "gemma4-e2b",     // fast tier for triage/classify
+		EscalationModel:     "gemma4-26b-a4b", // MoE escalation tier (experts in RAM via --cpu-moe); part of the served offload family.
+		ReasoningModel:      "gemma4-26b-a4b", // terminal local reasoning tier (think-wrapped grammar) before defer-to-cloud. "" disables.
+		VisionModel:         "",               // opt-in: set the machine's VLM alias (empty = vision defers, no phantom)
+		VisionMaxImageBytes: 6000000,          // ~6MB cap per image
+		OCRMaxTokens:        1024,             // default OCR output cap; raise per-machine for dense docs
+		VideoFPS:            2.0,
+		VideoMaxFrames:      12,
+		VideoFrameWidth:     512,
+		FFmpegPath:          "ffmpeg",
 		// opt-in, for the same reason VisionModel is: no serving template defines a
 		// whisper seat, so a default of "whisper-stt" bound EVERY node to an alias its
 		// own rendered config could not serve — the node advertised `stt` to the fleet
