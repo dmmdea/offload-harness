@@ -205,13 +205,20 @@ const (
 // chunkedTotalChunks chunks of chunkedChunkSize bytes to stdout, chunk i
 // filled with the byte 'A'+(i%26) — fully deterministic so the Go side can
 // replicate the exact expected byte sequence (expectedChunkedOutput).
+//
+// It must NOT call process.exit(). When stdout is a PIPE (which it always is
+// here — the parent captures it), Node writes asynchronously on POSIX, and
+// process.exit() discards whatever is still buffered. The child then delivers a
+// whole number of chunks and stops: this test failed on Linux CI for a week with
+// 62160 and 81585 bytes — exactly 80 and 105 of the 777-byte chunks — while
+// passing on Windows, where pipe writes are synchronous and everything got out.
+// Letting the event loop drain naturally exits 0 with the full stream flushed.
 func chunkedStdoutScript() (exe, script string, args []string) {
 	js := fmt.Sprintf(`
 for (let i = 0; i < %d; i++) {
   const b = 65 + (i %% 26);
   process.stdout.write(Buffer.alloc(%d, b));
 }
-process.exit(0);
 `, chunkedTotalChunks, chunkedChunkSize)
 	return "node", "-e", []string{js}
 }
