@@ -27,9 +27,13 @@
 //        [--steps 30] [--cfg 7] [--sampler dpmpp_2m] [--scheduler karras] \
 //        [--api http://127.0.0.1:8188]
 //   node comfy-render.mjs <out.png> --graph my-workflow.json [--api ...]
+//   node comfy-render.mjs <out.png> "<prompt>" --family qwen-image --ckpt qwen-image-2512-Q5_1.gguf \
+//        [--preset full|lightning4] [--clip te.safetensors] [--lora l.safetensors] [--shift 3.1]
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { buildHiDreamO1 } from "./wf-hidream-o1.mjs";
+import { buildQwenImage, QWEN_IMAGE_PRESETS } from "./wf-qwen-image.mjs";
 
 const argv = process.argv.slice(2);
 const pos = [];
@@ -71,6 +75,44 @@ if (flags.graph) {
     width, height, seed,
     steps: Number(flags.steps || 0), cfg: Number(flags.cfg || 0),
     sampler: flags.sampler || "",
+  });
+} else if (flags.family === "qwen-image") {
+  // Model-family-correct graph: Qwen-Image 2512 is an SD3-latent DiT whose text
+  // encoder and VAE ship as separate files — there is no all-in-one checkpoint, so
+  // the generic CheckpointLoaderSimple graph cannot even load it. --ckpt carries
+  // the UNET filename (the per-machine imagegen_ckpt binding, e.g.
+  // qwen-image-2512-Q5_1.gguf); text encoder + VAE default to the family's
+  // standard split files, overridable via --clip / --vae.
+  const positive = pos[1] || flags.prompt || "";
+  if (!positive) { console.error("error: a prompt is required (positional or --prompt), unless you pass --graph"); process.exit(2); }
+  if (!flags.ckpt && !process.env.COMFY_CKPT) { console.error("error: --family qwen-image requires --ckpt (the qwen-image UNET filename, .gguf or .safetensors)"); process.exit(2); }
+  // The preset resolves the steps/cfg/LoRA pairing (wrong pairings render noise or
+  // mush); explicit --steps/--cfg/--lora override the preset field-by-field.
+  const presetName = flags.preset || "full";
+  const preset = QWEN_IMAGE_PRESETS[presetName];
+  if (!preset) { console.error(`error: unknown --preset '${presetName}' (known: ${Object.keys(QWEN_IMAGE_PRESETS).join(", ")})`); process.exit(2); }
+  // The UNET file carries no VAE weights — a "builtin" VAE binding is a config
+  // error for this family (it means the machine's imagegen_vae still points at an
+  // all-in-one checkpoint family like HiDream). Fail loud with the fix.
+  const vaeFlag = flags.vae || process.env.COMFY_VAE || "";
+  if (["builtin", "none", "checkpoint"].includes(String(vaeFlag).toLowerCase())) {
+    console.error("error: --family qwen-image has no built-in VAE (the UNET file carries no VAE weights); unset imagegen_vae/--vae or name one (default qwen_image_vae.safetensors)");
+    process.exit(2);
+  }
+  width = Number(pos[3] || flags.width || 1328);
+  height = Number(pos[4] || flags.height || 1328);
+  graph = buildQwenImage({
+    prompt: positive, negative: flags.negative || "",
+    unet: flags.ckpt || process.env.COMFY_CKPT,
+    clip: flags.clip || undefined,
+    vae: vaeFlag || undefined,
+    lora: flags.lora != null ? flags.lora : preset.lora,
+    loraStrength: Number(flags["lora-strength"] || 1.0),
+    steps: Number(flags.steps || preset.steps),
+    cfg: Number(flags.cfg || preset.cfg),
+    sampler: flags.sampler || "euler", scheduler: flags.scheduler || "simple",
+    shift: Number(flags.shift || 3.1),
+    width, height, seed,
   });
 } else {
   const positive = pos[1] || flags.prompt || "";
@@ -172,6 +214,10 @@ async function main() {
   const r = await fetch(`${API}/view?` + q.toString());
   if (!r.ok) throw new Error("view fetch " + r.status);
   const buf = Buffer.from(await r.arrayBuffer());
+  // A missing output parent must not discard a finished render: the GPU work is
+  // already done by this point, and an ENOENT here wasted a full A/B render arm
+  // (2026-08-10) after every server-side render had succeeded.
+  mkdirSync(dirname(out) || ".", { recursive: true });
   writeFileSync(out, buf);
   console.log("WROTE", out, buf.length, "bytes");
 }
