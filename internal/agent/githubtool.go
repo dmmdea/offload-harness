@@ -82,8 +82,9 @@ func GitHubTools(pol *Policy, token, defaultRepo, worktreeRoot string) []Tool {
 		ToolSpec: ToolSpec{
 			Name:        "github_api",
 			Description: "Make an authenticated GitHub REST API call. method: GET/POST/PUT/PATCH/DELETE. path: e.g. /user/repos or /repos/OWNER/REPO/contents/FILE. body: optional JSON string. Returns the HTTP status and response body. Full GitHub access.",
-			Schema:      json.RawMessage(`{"type":"object","properties":{"method":{"type":"string"},"path":{"type":"string","description":"API path beginning with / (host api.github.com is implied)"},"body":{"type":"string","description":"optional JSON request body"}},"required":["method","path"]}`),
+			Schema:      json.RawMessage(`{"type":"object","properties":{"security_risk":{"type":"string","enum":["low","medium","high"],"description":"your own risk assessment of THIS call. Be honest: on an unattended run, high parks the call for operator review instead of executing it"},"method":{"type":"string"},"path":{"type":"string","description":"API path beginning with / (host api.github.com is implied)"},"body":{"type":"string","description":"optional JSON request body"}},"required":["method","path"]}`),
 		},
+		ParkOnHighRisk: true,
 		Exec: func(ctx context.Context, args string) (string, error) {
 			if msg, ok := need(); !ok {
 				return "", NotPerformed(msg)
@@ -109,8 +110,9 @@ func GitHubTools(pol *Policy, token, defaultRepo, worktreeRoot string) []Tool {
 		ToolSpec: ToolSpec{
 			Name:        "github_create_repo",
 			Description: "Create a new GitHub repository under the authenticated account (auto-initialised with a README so it has a default branch). Returns the repo full_name and URL.",
-			Schema:      json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"},"private":{"type":"boolean","description":"default false"},"description":{"type":"string"}},"required":["name"]}`),
+			Schema:      json.RawMessage(`{"type":"object","properties":{"security_risk":{"type":"string","enum":["low","medium","high"],"description":"your own risk assessment of THIS call. Be honest: on an unattended run, high parks the call for operator review instead of executing it"},"name":{"type":"string"},"private":{"type":"boolean","description":"default false"},"description":{"type":"string"}},"required":["name"]}`),
 		},
+		ParkOnHighRisk: true,
 		Exec: func(ctx context.Context, args string) (string, error) {
 			if msg, ok := need(); !ok {
 				return "", NotPerformed(msg)
@@ -145,8 +147,9 @@ func GitHubTools(pol *Policy, token, defaultRepo, worktreeRoot string) []Tool {
 		ToolSpec: ToolSpec{
 			Name:        "github_upload_file",
 			Description: "Upload (create or update) a file from the worktree to a GitHub repo via the Contents API. path = worktree file to upload. repo = OWNER/NAME (omit to use the configured default). dest = path in the repo (omit to reuse the file's path). Returns the file URL.",
-			Schema:      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"worktree file to upload"},"repo":{"type":"string","description":"OWNER/NAME; optional if a default repo is configured"},"dest":{"type":"string","description":"destination path in the repo; defaults to path"},"message":{"type":"string","description":"commit message"}},"required":["path"]}`),
+			Schema:      json.RawMessage(`{"type":"object","properties":{"security_risk":{"type":"string","enum":["low","medium","high"],"description":"your own risk assessment of THIS call. Be honest: on an unattended run, high parks the call for operator review instead of executing it"},"path":{"type":"string","description":"worktree file to upload"},"repo":{"type":"string","description":"OWNER/NAME; optional if a default repo is configured"},"dest":{"type":"string","description":"destination path in the repo; defaults to path"},"message":{"type":"string","description":"commit message"}},"required":["path"]}`),
 		},
+		ParkOnHighRisk: true,
 		Exec: func(ctx context.Context, args string) (string, error) {
 			if msg, ok := need(); !ok {
 				return "", NotPerformed(msg)
