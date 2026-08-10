@@ -44,6 +44,13 @@ const (
 	// shells out to render/comfy-inpaint.mjs via internal/gpugen (shared GPU lock +
 	// ComfyUI lifecycle). Returns {image_path, seed}.
 	TaskInpaintImage TaskType = "inpaint_image"
+	// TaskEditImageGenerative rewrites a WHOLE image from a text instruction on the
+	// LOCAL ComfyUI, with NO mask (Qwen-Image-Edit class: the model reads the source
+	// through its own vision encoder). The third and last edit-shaped route —
+	// TaskEditImage is deterministic PIL ops and TaskInpaintImage needs a mask.
+	// Its own branch in pipeline.Run — shells out to render/comfy-edit.mjs via
+	// internal/gpugen (shared GPU lock + ComfyUI lifecycle). Returns {image_path, seed}.
+	TaskEditImageGenerative TaskType = "edit_image_generative"
 	// TaskGenerateSVG renders a brand-agnostic parametric SVG component (gauge,
 	// comparison-bar, chromatogram, icon) from a JSON spec via internal/svgkit —
 	// pure Go, no model/GPU. Its own branch in pipeline.Run. params: kind (string),
@@ -90,7 +97,7 @@ const (
 // Valid reports whether t is a known task type.
 func (t TaskType) Valid() bool {
 	switch t {
-	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskGenerateSVG, TaskGenerateVideo, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskRunGraph, TaskPipelineJob:
+	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskGenerateSVG, TaskGenerateVideo, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskRunGraph, TaskPipelineJob:
 		return true
 	}
 	return false

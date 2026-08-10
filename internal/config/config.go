@@ -268,6 +268,40 @@ type Config struct {
 	InpaintScheduler string  `json:"inpaint_scheduler,omitempty"`
 	// InpaintTimeoutSec bounds one inpaint render (default 900).
 	InpaintTimeoutSec int `json:"inpaint_timeout_sec,omitempty"`
+	// --- generative, mask-free image edit (edit_image_generative) ---
+	// A THIRD edit-shaped route, deliberately distinct from its two siblings:
+	// edit_image is deterministic PIL ops, inpaint_image re-denoises inside a
+	// user-supplied mask, and this rewrites the whole frame from a text
+	// instruction with no mask (Qwen-Image-Edit class).
+	// NAMED GenEdit*, not Edit*: Edit* is already taken by the DETERMINISTIC PIL
+	// route (EditPython, EditTimeoutSec). Two different routes sharing an `edit_`
+	// prefix would collide in Go and, worse, in the JSON config.
+	// GenEditScript is the absolute path to render/comfy-edit.mjs. Empty = no
+	// generative-edit route (the task defers cleanly), like an empty ImageGenScript.
+	GenEditScript string `json:"gen_edit_script,omitempty"`
+	// GenEditUnet is the diffusion-transformer unet this machine edits with — a .gguf
+	// (loaded via UnetLoaderGGUF) or a .safetensors (UNETLoader). NOT a checkpoint:
+	// the text encoder and VAE are bound separately below.
+	GenEditUnet string `json:"gen_edit_unet,omitempty"`
+	// GenEditPreset pairs steps+cfg+LoRA as a matched triple: full | lightning8 |
+	// lightning4. Overriding half the pairing renders successfully and looks wrong,
+	// so prefer switching preset over hand-setting GenEditSteps/GenEditCFG.
+	GenEditPreset string `json:"gen_edit_preset,omitempty"`
+	// GenEditLoRA overrides the preset's distillation LoRA. Normally leave empty.
+	GenEditLoRA         string  `json:"gen_edit_lora,omitempty"`
+	GenEditLoRAStrength float64 `json:"gen_edit_lora_strength,omitempty"`
+	// GenEditCLIP / GenEditVAE are the companion text encoder and VAE. Empty = the
+	// runner's own defaults (qwen_2.5_vl_7b_fp8_scaled / qwen_image_vae).
+	GenEditCLIP      string  `json:"gen_edit_clip,omitempty"`
+	GenEditVAE       string  `json:"gen_edit_vae,omitempty"`
+	GenEditSteps     int     `json:"gen_edit_steps,omitempty"`
+	GenEditCFG       float64 `json:"gen_edit_cfg,omitempty"`
+	GenEditSampler   string  `json:"gen_edit_sampler,omitempty"`
+	GenEditScheduler string  `json:"gen_edit_scheduler,omitempty"`
+	// GenEditTimeoutSec bounds one generative edit (default 1800). Measured on a
+	// 2-card 16 GB box: ~4.5 min of fixed overhead (ComfyUI cold start + a 15.4 GB
+	// GGUF load) before sampling starts, then ~7 s/step.
+	GenEditTimeoutSec int `json:"gen_edit_timeout_sec,omitempty"`
 	// --- video / audio generation (generate_video / generate_audio) ---
 	// VideoGenScript is the path to render/comfy-video.mjs (the I2V lifecycle wrapper).
 	// Empty = no video route (the task defers cleanly), like an empty ImageGenScript.
@@ -647,6 +681,10 @@ func Default() Config {
 		InpaintScript:               "", // inpaint route: per-machine SDXL-class binding; empty = defer
 		InpaintCkpt:                 "",
 		InpaintTimeoutSec:           900,
+		GenEditScript:               "", // generative-edit route: per-machine unet binding; empty = defer
+		GenEditUnet:                 "",
+		GenEditPreset:               "lightning8", // matched steps+cfg+LoRA; ~4x faster than full at close quality
+		GenEditTimeoutSec:           1800,
 		VideoGenScript:              "render/comfy-video.mjs",
 		RunGraphScript:              "render/comfy-run-graph.mjs",
 		VoiceGenScript:              "render/tts.mjs",
@@ -865,7 +903,7 @@ func pathFields(c *Config) []*string {
 		&c.FFmpegPath, &c.MediaDir, &c.SVGDir,
 		&c.ImageGenScript, &c.NodePath, &c.ComfyDir,
 		&c.SdcppScript, &c.SdcppBin, &c.SdcppModel, &c.SdcppVAE, &c.SdcppClipL, &c.SdcppClipG, &c.SdcppT5, &c.SdcppLLM,
-		&c.InpaintScript,
+		&c.InpaintScript, &c.GenEditScript,
 		&c.VideoGenScript, &c.RunGraphScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath, &c.StateDir,
 		&c.VoiceGenRef, &c.VoiceGenFTModel, &c.VoiceGenFTBaseDir, &c.VoiceGenFTRef,
 		&c.EditPython, &c.GimpConsolePath,
