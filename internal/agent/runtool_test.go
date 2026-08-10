@@ -157,14 +157,14 @@ func TestRunToolPathBearingCommandRefused(t *testing.T) {
 	// These carry a path separator OR are absolute — all must be refused as paths,
 	// regardless of whether the base name is on the allowlist.
 	pathCmds := []string{
-		`./go`,             // relative, leading ./
-		`sub\go.exe`,       // relative with a Windows separator
-		`sub/go`,           // relative with a POSIX separator
-		`.\go.exe`,         // relative with .\
-		`worktree\go.exe`,  // the exact attack from the finding
-		`/usr/bin/go`,      // POSIX absolute
-		`C:\tools\go.exe`,  // Windows absolute (IsAbs on Windows)
-		`\\server\go.exe`,  // UNC / rooted
+		`./go`,            // relative, leading ./
+		`sub\go.exe`,      // relative with a Windows separator
+		`sub/go`,          // relative with a POSIX separator
+		`.\go.exe`,        // relative with .\
+		`worktree\go.exe`, // the exact attack from the finding
+		`/usr/bin/go`,     // POSIX absolute
+		`C:\tools\go.exe`, // Windows absolute (IsAbs on Windows)
+		`\\server\go.exe`, // UNC / rooted
 	}
 	for _, cmd := range pathCmds {
 		called := false

@@ -195,7 +195,7 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 	if wr.Timings.PromptN > 0 || wr.Timings.CacheN > 0 || wr.Usage.PromptTokens > 0 {
 		comp.Serve = &ServeStats{
 			CacheN: wr.Timings.CacheN, PromptN: wr.Timings.PromptN,
-			PromptMS: wr.Timings.PromptMS,
+			PromptMS:   wr.Timings.PromptMS,
 			PredictedN: wr.Timings.PredictedN, PredictedMS: wr.Timings.PredictedMS,
 			UsagePromptTokens: wr.Usage.PromptTokens,
 			UsageCachedTokens: wr.Usage.PromptTokensDetails.CachedTokens,
