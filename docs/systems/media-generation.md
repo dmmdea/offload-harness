@@ -23,13 +23,15 @@ the recorded warm-swap upgrade path — deliberately not wired yet.
 - What happens to the GPU during a render, and what state is the machine left in?
 - Which models are bound, and where is that configured?
 - What are the image-editing operations, and how are they invoked?
+- Which of the three edit-shaped routes fits a given change?
 - When is batching worth it?
 - Why is FLUX not an option?
 
 ## Scope
 
 The generation verbs and MCP tools, the GPU lock and zero-warm lifecycle, warm batch mode, the
-inpainting route, the edit-operation pack, and per-machine model bindings.
+inpainting route, the generative instruction-edit route, the edit-operation pack, and per-machine
+model bindings.
 
 ## Non-scope
 
@@ -111,6 +113,24 @@ evaluation passed 3/3. Its safety envelope is validation rather than a gate — 
 no boxes, or absurd boxes covering more than 60% of the image all error out so the caller defers,
 with the manual `mask_boxes` workflow named. It never silently repaints unverified regions.
 
+**Generative instruction edit** (`offload_edit_image_generative`, MCP-only — no CLI verb) is the
+third edit-shaped route, for changes that are global or diffuse and have no drawable region: "make
+it snowing heavily", "turn the leather into fur". A Qwen-Image-Edit-class model reads the source
+through its own vision encoder and re-renders the whole frame, so fine detail outside the intended
+change will shift — prefer inpainting whenever a mask is possible. The route is bound per machine by
+the `gen_edit_*` keys (named `gen_edit`, not `edit`, because `edit_*` is the deterministic PIL
+route); no tier seeds them, so it defers until a machine binds `gen_edit_script`
+(`render/comfy-edit.mjs`) and `gen_edit_unet`. `gen_edit_preset` pairs steps+cfg+LoRA as a matched
+triple (`full` | `lightning8`, the default | `lightning4`) — the builder throws rather than default
+a half-override, because a Lightning LoRA at full steps/cfg produces mush and the base at 4 steps
+produces noise, and either renders "successfully". Lightning is applied as a **LoRA**, never a
+pre-merged checkpoint, so it composes with any quantisation (GGUF bindings load via
+`UnetLoaderGGUF`). Known limitation: output snaps to ~1 MP (a 2048x2048 source returns ~1024x1024).
+
+The three edit-shaped routes in one line each: `edit_image` = deterministic PIL ops (exact, CPU, no
+GPU lock); `inpaint_image` = re-denoise inside a mask you supply (the rest stays pixel-identical);
+`edit_image_generative` = maskless instruction edit (the whole frame re-renders).
+
 **Per-box device/launch seams (J4).** Three env knobs decouple shared code from CUDA-box
 assumptions, all default-preserving: `COMFY_COMPUTE_DEVICE` overrides the DisTorch2 loaders'
 `compute_device` in the Wan graph (was hardcoded `cuda:0`); `COMFY_EXTRA_ARGS` appends verbatim
@@ -127,7 +147,9 @@ observations are recorded as a side effect of successful renders — see
 ## Interfaces and entry points
 
 CLI verbs `generate-image`, `inpaint-image`, `generate-video`, `generate-audio`, `generate-svg`,
-`edit-image`, `media`, `run-graph`; the matching `offload_*` MCP tools.
+`edit-image`, `media`, `run-graph`; the matching `offload_*` MCP tools. The generative instruction
+edit is MCP-only (`offload_edit_image_generative`); ad-hoc runs use `render/comfy-edit.mjs`
+directly.
 
 ## Dependencies
 
@@ -157,6 +179,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 |---|---|
 | Image | `imagegen_family`, `imagegen_ckpt`, `imagegen_vae`, `imagegen_steps/cfg/sampler/scheduler`, `imagegen_preset/clip/lora/lora_strength/shift` (qwen-image knobs), `imagegen_refiner_model/refiner_timeout_sec` (opt-in prompt refiner) |
 | Inpaint | `inpaint_ckpt`, `inpaint_vae`, `inpaint_steps/cfg/sampler/scheduler` |
+| Generative edit | `gen_edit_script`, `gen_edit_unet`, `gen_edit_preset` (`full`/`lightning8`/`lightning4`), `gen_edit_clip/vae/lora/lora_strength`, `gen_edit_steps/cfg/sampler/scheduler`, `gen_edit_timeout_sec` |
 | Video | `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model` |
 | Audio | `voicegen_*`, `musicgen_script` |
 | ComfyUI | `comfy_dir`, per-task `*_script` and `*_timeout_sec` |
@@ -187,14 +210,17 @@ LoRA-free run). On a qwen-image seat with no `imagegen_cfg` bound, a per-request
 override alone trips the route's steps/cfg pair guard by design (exit 2, loud) — callers on
 that seat pick a preset instead of overriding steps.
 
-The recommended **≥16 GB image-*edit* primitive is Qwen-Image-Edit-2511** (Apache-2.0). It is a
-model-matrix *designation*, not a config binding — image editing at that tier runs through
-[run-graph](../flows/run-graph-manifest-satisfaction.md) with the model set declared in the caller's
-node manifest (e.g. the creative-marketing-pipelines scene-swap), so no edit checkpoint is seeded into
-`config.json`. **Pin a `_1` GGUF quant (`Q4_1`/`Q5_1`), never a `_K_` one:** 2511 K-quants fail
-`UnetLoaderGGUF` with `cannot reshape array` even on byte-perfect files (city96/ComfyUI-GGUF #247).
-Measured on `ampere-16` 2026-07-19: Q5_1 (15.4 GB) + fp8 encoder fits 16 GB with block-swap, composite
-peak 15,757 MiB. FLUX-family models remain prohibited
+The recommended **≥16 GB image-*edit* primitive is Qwen-Image-Edit-2511** (Apache-2.0). Since the
+generative-edit route landed (0.44.0) it is a first-class `gen_edit_*` config binding — set
+`gen_edit_unet` to the 2511 file and the harness drives it through `render/comfy-edit.mjs` /
+`render/wf-qwen-image-edit.mjs`; no tier seeds it, so binding remains a per-machine decision.
+Callers with their own graphs can still reach the model through
+[run-graph](../flows/run-graph-manifest-satisfaction.md) with the model set declared in the node
+manifest (e.g. the creative-marketing-pipelines scene-swap). **Pin a `_1` GGUF quant
+(`Q4_1`/`Q5_1`), never a `_K_` one:** 2511 K-quants fail `UnetLoaderGGUF` with
+`cannot reshape array` even on byte-perfect files (city96/ComfyUI-GGUF #247). Measured on
+`ampere-16` 2026-07-19: Q5_1 (15.4 GB) + fp8 encoder fits 16 GB with block-swap, composite peak
+15,757 MiB. FLUX-family models remain prohibited
 ([ADR 0011](../architecture/decisions/0011-flux-family-license-prohibition.md)).
 
 ## Error handling
@@ -287,6 +313,9 @@ recorded as known offenders with their reason rather than silently skipped — a
 - [`render/gpu-lock.mjs`](../../render/gpu-lock.mjs) — slot, free step, teardown
 - [`render/comfy-lifecycle.mjs`](../../render/comfy-lifecycle.mjs) — cold start, warm flag
 - [`render/comfy-generate.mjs`](../../render/comfy-generate.mjs) — single and batch render
+- [`render/comfy-edit.mjs`](../../render/comfy-edit.mjs) /
+  [`render/wf-qwen-image-edit.mjs`](../../render/wf-qwen-image-edit.mjs) — the generative edit
+  lifecycle and its graph builder
 - [`render/sdcpp-generate.mjs`](../../render/sdcpp-generate.mjs) — the sdcpp engine (flag mapping
   to the pinned sd.cpp CLI lives here)
 - [`render/edit_image.py`](../../render/edit_image.py) — the edit ops
