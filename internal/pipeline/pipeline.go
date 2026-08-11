@@ -377,6 +377,15 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 			entrySnapshot = &snap
 			entryCandidate = res.Partial // candidate JSON string (gen.Content carried into Deferf)
 		}
+		// Carry WHY this call is climbing into the next tier's meta, so the
+		// entry that finally SUCCEEDS attributes the climb. Without this the
+		// source dies with the deferred attempt and the ledger stays silent on
+		// exactly the rows that matter — a successful escalation.
+		// Only-if-unset, so the value means "the gate that first sent this call
+		// up", not "the last gate it happened to trip".
+		if meta.EscSource == core.EscNone {
+			meta.EscSource = res.Meta.EscSource
+		}
 		if !escalatable || ci == len(chain)-1 {
 			break
 		}
@@ -2707,6 +2716,7 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 		if v.OK {
 			if verr := validator.Validate(data, built.Schema); verr != nil {
 				v = verifier.Verdict{Retry: true, Reason: "schema: " + verr.Error()}
+				meta.EscSource = core.EscSchema
 			} else if g, ok := grounding.Check(req.Task, req.Input, data); ok {
 				// Phase 1 quality eval. Log grounded for the calibration label; act
 				// (retry/escalate) ONLY on extract — extraction is verbatim, so a
@@ -2719,10 +2729,11 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 						reason = "ungrounded extract fields: " + strings.Join(bad, ", ")
 					}
 					v = verifier.Verdict{Retry: true, Reason: reason}
+					meta.EscSource = core.EscGrounding
 				}
 			}
 			if v.OK {
-				reason, margin, low := p.confidenceGate(req, data, gen.Logprobs)
+				reason, margin, src, low := p.confidenceGate(req, data, gen.Logprobs)
 				meta.Margin = margin
 				// Confhead correctness gate (opt-in, ADOPT tasks only): if the head
 				// predicts a low p(correct) for this call, treat it as low-confidence
@@ -2742,11 +2753,13 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 						if pc >= 0 && pc < tau {
 							low = true
 							reason = fmt.Sprintf("low confhead p(correct)=%.3f < threshold %.3f", pc, tau)
+							src = core.EscConfhead
 						}
 					}
 				}
 				if low {
 					meta.LatencyMs = time.Since(start).Milliseconds()
+					meta.EscSource = src
 					// a larger, more decisive tier may clear the threshold
 					return core.Deferf(reason, gen.Content, meta), true
 				}
@@ -2780,11 +2793,17 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 			continue
 		}
 		meta.LatencyMs = time.Since(start).Milliseconds()
+		// Schema/grounding already stamped their own source above; anything
+		// still unattributed here failed parse/verify.
+		if meta.EscSource == core.EscNone {
+			meta.EscSource = core.EscVerifier
+		}
 		// A terminal failure (e.g. truncation — input too large for ANY local
 		// tier) defers straight to Opus; escalating would just burn the slow 26B.
 		return core.Deferf(v.Reason, gen.Content, meta), !v.Terminal
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
+	meta.EscSource = core.EscRetries
 	return core.Deferf("exhausted retries", lastContent, meta), true
 }
 
@@ -2941,6 +2960,7 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		Retries:   meta.Retries, Truncated: meta.Truncated, Grounded: meta.Grounded,
 		EscalatedAgreed: meta.EscalatedAgreed, ErrClass: meta.ErrClass,
 		InputChars: inputChars, Feat: meta.Feat,
+		EscSource: string(meta.EscSource),
 	}
 }
 
@@ -2970,8 +2990,14 @@ func (p *Pipeline) recordDefer(task core.TaskType, meta core.Meta, inputChars in
 // (both tasks). It ALWAYS returns the computed margin (0 if N/A) so the ledger
 // can record it on success — that margin stream is what Phase 2 calibrates on.
 // The threshold is per-task (data-derived via `calibrate`) with the config
-// constant as fallback. Returns (reason, margin, escalate?).
-func (p *Pipeline) confidenceGate(req core.Request, data []byte, lps []llamaclient.TokenLogprob) (string, float64, bool) {
+// constant as fallback. Returns (reason, margin, source, escalate?).
+//
+// The SOURCE is returned beside the human-readable reason because the two serve
+// different readers: the reason is for a person reading one deferred row, the
+// source is a closed enum the ledger can group by. Without it, "was this the
+// model's self-report or a structural signal?" is unanswerable in aggregate —
+// which is exactly the gap measured on 2026-08-11.
+func (p *Pipeline) confidenceGate(req core.Request, data []byte, lps []llamaclient.TokenLogprob) (string, float64, core.EscalationSource, bool) {
 	var margin float64
 	switch req.Task {
 	case core.TaskClassify:
@@ -2981,20 +3007,20 @@ func (p *Pipeline) confidenceGate(req core.Request, data []byte, lps []llamaclie
 			}
 		}
 		if conf, low := lowConfidence(data, p.cfg.ClassifyMinConfidence); low {
-			return fmt.Sprintf("low confidence %.2f", conf), margin, true
+			return fmt.Sprintf("low confidence %.2f", conf), margin, core.EscSelfConfidence, true
 		}
 		if t := p.marginThreshold(req.Task); t > 0 && margin > 0 && margin < t {
-			return fmt.Sprintf("low decision margin %.2f<%.2f", margin, t), margin, true
+			return fmt.Sprintf("low decision margin %.2f<%.2f", margin, t), margin, core.EscMargin, true
 		}
 	case core.TaskTriage:
 		if m, ok := confidence.Margin(lps, "decision", []string{"yes", "no", "unsure"}); ok {
 			margin = m
 		}
 		if t := p.marginThreshold(req.Task); t > 0 && margin > 0 && margin < t {
-			return fmt.Sprintf("low decision margin %.2f<%.2f", margin, t), margin, true
+			return fmt.Sprintf("low decision margin %.2f<%.2f", margin, t), margin, core.EscMargin, true
 		}
 	}
-	return "", margin, false
+	return "", margin, core.EscNone, false
 }
 
 // marginThreshold returns the per-task escalation threshold: a data-derived
