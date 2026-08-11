@@ -35,7 +35,7 @@ The server runs over **stdio** and registers its tools at startup. A calling age
 calls them with JSON arguments, and receives JSON results — including Defers, which are successful
 results, not errors.
 
-**Twenty-one tools** are registered, in families:
+**Twenty-two tools** are registered, in families:
 
 | Family | Tools |
 |---|---|
@@ -43,7 +43,7 @@ results, not errors.
 | Vision | `offload_vqa`, `offload_assess_image`, `offload_extract_image`, `offload_video_describe` |
 | Speech / OCR | `offload_transcribe`, `offload_ocr` |
 | Media generation | `offload_generate_image`, `offload_generate_video`, `offload_generate_audio`, `offload_generate_svg` |
-| Media editing | `offload_edit_image`, `offload_inpaint_image`, `offload_media` |
+| Media editing | `offload_edit_image`, `offload_inpaint_image`, `offload_edit_image_generative`, `offload_media` |
 | Graph execution | `offload_run_graph` |
 | Agent | `agent_run` |
 | Remote (opt-in) | `offload_nim` |
@@ -94,9 +94,9 @@ errors it will try to work around.
 ## Invariants and assumptions
 
 1. **The manifest and the registered tools must agree.** A drift test enforces it, so adding a tool
-   without updating `.printing-press.json` fails the build. Currently 21 registered, 21 declared, both
-   at version 0.22.1. This test arrived via an outside contribution after the manifest had silently
-   drifted to claiming four tools.
+   without updating `.printing-press.json` fails the build. Currently 22 registered, 22 declared;
+   the manifest's `version` tracks `VERSION` release by release. This test arrived via an outside
+   contribution after the manifest had silently drifted to claiming four tools.
 2. A Defer is a successful result. Do not map it to an MCP error.
 3. `offload_nim` is the only remote surface, and it is opt-in.
 
