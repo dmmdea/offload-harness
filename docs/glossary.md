@@ -36,6 +36,13 @@ Run-graph defers are **typed**, carrying a machine-readable `code`, a `ref` iden
 item, and a `detail`. See
 [architecture/decisions/0001-defer-never-cloud-fallback.md](architecture/decisions/0001-defer-never-cloud-fallback.md).
 
+## Effect record
+
+The coding agent's per-tool-call execution accounting: `committed`, `failed`, `unknown` (the loop
+stopped waiting — effects genuinely unknown), or `none` (never executed: refusal, denial, Park).
+Distinct from the Ledger, which counts token savings — the effect record answers "what did this
+call do to the world?". See [systems/coding-agent.md](systems/coding-agent.md).
+
 ## Escalation
 
 Moving a task to the next, larger Tier after a recoverable failure — a schema violation, ungrounded
@@ -69,7 +76,9 @@ grounding would be noise.
 
 The append-only JSONL record of offload calls and their savings, `fsync`ed per entry. Carries
 `tokens_saved` — input tokens kept out of the calling model's context — plus the metadata that
-explains each outcome. The recordless path writes nothing to it.
+explains each outcome. The recordless path writes nothing to it. Not to be confused with the coding
+agent's per-call Effect record ("the effect ledger"), which accounts for what tool calls did, not
+what tokens they saved.
 
 ## Mirror
 
@@ -98,10 +107,20 @@ One image-editing operation inside the `edit-image` verb — the set is `crop`, 
 `flatten_design`, `instantiate_design`. Ops are list items, not separate commands. `finish` should
 come last by convention, but the validator does not enforce ordering.
 
+## Park
+
+The unattended-run refusal of an effectful agent tool call that the model itself flagged
+`security_risk: high` (or with an unrecognized value — fail closed). A parked call is never
+executed: it records `none` on the Effect record, lands durably in the ask queue for operator
+review, and does not consume the loop's same-name tool budget. See
+[systems/coding-agent.md](systems/coding-agent.md).
+
 ## Policy broker
 
-The single gate for effectful agent actions — write, overwrite, delete, fetch, shell. Distinct from
-the loop's step and tool-call budgets, which are a separate mechanism. See
+The single gate for effectful agent actions — write, overwrite, delete, fetch, shell. Its classify
+step includes a structural, tighten-only risk-rule table (rules may deny or ask, never allow, with
+a built-in secret-material floor). Distinct from the loop's step and tool-call budgets, which are a
+separate mechanism. See
 [architecture/decisions/0003-policy-broker-and-capability-flags-off-by-default.md](architecture/decisions/0003-policy-broker-and-capability-flags-off-by-default.md).
 
 ## Profile
