@@ -114,6 +114,44 @@ type Request struct {
 }
 
 // Meta is per-call telemetry returned to the caller and recorded in the ledger.
+// EscalationSource is the CLOSED set of reasons a call climbed a tier.
+//
+// Closed on purpose. The ledger already carried a free-text `reason`, but only
+// on DEFERRED entries — a successful escalation recorded nothing, so the one
+// question the telemetry needed to answer ("did the model's self-report send
+// this up, or did a structural signal?") could not be answered from the data.
+// Bounded cardinality is what makes it groupable; a sentence is not.
+//
+// Ordering note for readers: the pipeline evaluates the quality gates in the
+// order verifier -> schema -> grounding -> self-confidence -> margin ->
+// confhead, and records the FIRST that fired, so these values are mutually
+// exclusive per call.
+type EscalationSource string
+
+const (
+	EscNone EscalationSource = "" // did not escalate
+
+	// EscSelfConfidence: the model's own `confidence` field fell below
+	// classify_min_confidence. This is the only SELF-DECLARED gate in the
+	// cascade; every other value below is structural.
+	EscSelfConfidence EscalationSource = "self_confidence"
+	// EscMargin: the logprob decision margin over the label/decision tokens
+	// fell below the per-task threshold. Structural — derived from the
+	// distribution, not from anything the model said about itself.
+	EscMargin EscalationSource = "margin"
+	// EscConfhead: the learned p(correct) head predicted below its conformal
+	// threshold. Structural.
+	EscConfhead EscalationSource = "confhead"
+	// EscSchema: output parsed but failed schema validation.
+	EscSchema EscalationSource = "schema"
+	// EscGrounding: extract produced values absent from the source text.
+	EscGrounding EscalationSource = "grounding"
+	// EscVerifier: parse/verify failure (malformed or truncated output).
+	EscVerifier EscalationSource = "verifier"
+	// EscRetries: retries exhausted without a valid answer.
+	EscRetries EscalationSource = "retries"
+)
+
 type Meta struct {
 	TokensIn  int     `json:"tokens_in"`
 	TokensOut int     `json:"tokens_out"`
@@ -137,6 +175,13 @@ type Meta struct {
 	EscalatedAgreed *bool              `json:"escalated_agreed,omitempty"` // higher tier agreed with the smaller (nil = no escalation)
 	ErrClass        string             `json:"err_class,omitempty"`        // oom|timeout|http_5xx|conn_refused on infra failure; gpu_busy = vision call skipped, a gen job held the GPU lock (LO-1)
 	Feat            map[string]float64 `json:"feat,omitempty"`             // cheap input features for the entry-tier router
+	// EscSource names WHICH gate sent this call up a tier. Closed set (see
+	// EscalationSource) so it aggregates; a free-text reason does not.
+	// Measured gap 2026-08-11: a SUCCESSFUL escalation recorded no reason at
+	// all, so "which gate fired" was unreadable from telemetry and no change
+	// to the gating could be evaluated after the fact. Empty on calls that
+	// never escalated.
+	EscSource EscalationSource `json:"esc_source,omitempty"`
 }
 
 // Result is the harness outcome. On success Data holds the validated task output.
