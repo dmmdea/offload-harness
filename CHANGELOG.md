@@ -4,6 +4,66 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.48.0] - 2026-08-11
+
+### Added — the ledger can finally say WHY a call escalated (#94)
+The ledger carried a free-text `reason` on DEFERRED rows only, so a call that
+escalated and then SUCCEEDED recorded nothing — and those are exactly the rows
+that matter. The one question the telemetry needed to answer, "did the model's
+self-report send this up, or did a structural signal?", was unanswerable in
+aggregate, which meant no change to the gating could be evaluated after the fact.
+
+New `core.EscalationSource`: a CLOSED set of seven — `self_confidence` (the only
+self-declared gate) plus `margin`, `confhead`, `schema`, `grounding`, `verifier`,
+`retries` (all structural). Closed because bounded cardinality is what makes it
+groupable; a sentence is not. Stamped where each gate fires and carried across
+tiers only-if-unset, so the value means "the gate that first sent this call up"
+rather than "the last one it tripped". Persisted as `esc_source`, omitted
+entirely on non-escalating rows (the append-only JSONL's small-line atomicity is
+load-bearing), and rows written before the field still parse.
+
+Verified on production traffic, not only in tests: a real classify climbing
+e2b → e4b now writes `{"escalations":1,"margin":0.925,"esc_source":"margin"}`.
+
+### Added — `examples/agent-rules.json`, and an UNGATED warning (#94)
+MEASURED on the production agent seat over 48 runs and 66 effectful calls: the
+model's own `security_risk` annotation is a literal constant — **54 of 54**
+emitted declarations are `low`, including **all 36** structurally destructive
+calls. Park-gate recall: **0%**. It holds under an escalated-severity arm, where
+deleting every source file in a tree is also declared `low`. The built-in
+`defaultRules()` floor covers secret-material globs only and would not have
+stopped one of them.
+
+`Build` now appends an `UNGATED` note when an unattended run is granted
+destructive capability with no `--rules` table, and the shipped example table
+turns the probe's own call (`delete src/notify.py`, self-declared `low`) into a
+non-Allow. A note rather than an error, because refusing to run would break
+existing callers — but silence is what let a 0%-recall mechanism sit where a
+safety control appears to be.
+
+Scope: this is the CLI/queue path, which grants `--allow-*` and sets
+`Unattended`. The MCP `agent_run` front door passes no write/delete/shell/fetch
+capability at all and is unaffected.
+
+### Changed — the advisory judge got somewhere to put ordinary work (#95)
+Same failure shape as the annotation above: a grader asked only about trouble
+saturates toward trouble. Every record the judge sees is ALREADY flagged, and the
+framing question was "was the flag warranted" — uninformative, and biased toward
+yes. The prompt now partitions WARRANTED / EXPECTED FRICTION / BLOCKER, with the
+friction cases enumerated concretely (a call corrected on a later turn, a test
+written to expose a defect, an exploration dead-end, a fallback after a refusal,
+a command that failed before a service existed, a policy refusal the run worked
+around, and zero-count results — which are CLEAN outcomes, not failures), plus an
+explicitly sanctioned all-clear.
+
+`flaggedForJudge`'s comment claimed the model's self-assessment "is signal". It
+is not, per the measurement above, so that clause selects zero records in
+practice. It stays because it fails SAFE, but no longer advertises coverage it
+does not provide.
+
+Pattern credit: NVIDIA-NeMo/Switchyard (Apache-2.0), whose escalation judge prompt
+spends more words on what must NOT escalate than on what must. No code vendored.
+
 ## [0.47.0] - 2026-08-10
 
 ### Added — opt-in prompt refiner on the image-generation path
