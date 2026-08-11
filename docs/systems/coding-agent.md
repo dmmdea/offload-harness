@@ -12,7 +12,8 @@ weak enough to get stuck.
 - What stops a stuck model from looping forever?
 - How confined is an executed command, and does that differ by platform?
 - What is the difference between a profile and two-tier mode?
-- Where is the record of what the agent did?
+- Where is the record of what the agent did, and how honest is it about what each call did?
+- Which layer may block a risky action, and which only annotates it?
 
 ## Scope
 
@@ -53,6 +54,56 @@ It resolves deny → ask → allow with deny unconditional, converts an `Ask` to
 
 > These are two distinct chokepoints. The broker decides *may this happen at all*; the loop decides
 > *has this happened too often*. They are frequently described as one thing, and they are not.
+
+**Risk rules.** Inside the broker's classify chokepoint sits a **structural, tighten-only rule
+table** (`rules.go`): each rule is an action kind plus a glob over the worktree-relative path
+(write/delete) or the host (fetch), and its decision must be Deny or Ask — a rule can veto what
+posture would have allowed, never resurrect what the built-ins deny, and never grant. There are
+deliberately **no rules over shell command lines** (string-matching a command line is a WAF —
+bypassable by quoting tricks while false-positiving on legitimate work; the OS cage owns shell
+containment). A built-in floor denies secret-material paths (`.env*`, `*.pem`, `*.key`, `id_rsa*`,
+`id_ed25519*`) at any posture. Operators load a versioned, diffable JSON table with `--rules` — a
+missing or invalid file is an error, never a silently inactive table. Subjects are normalized the
+way the filesystem (or DNS) resolves them — case-folded, trailing dots/spaces stripped, on every
+OS — so folding errs toward denial. Each hit is recorded in the audit trail with the rule and its
+severity; severity sorts the morning review, it never changes the decision.
+
+**Effect ledger.** Every tool call is recorded as an `EffectRecord` (`effects.go`) — step, tool,
+status, and the why for non-committed statuses. Four statuses, deliberately only four:
+`committed` (ran to completion, success), `failed` (ran, returned an error — the tool got its
+chance to clean up), `unknown` (the loop stopped waiting: per-tool budget exceeded or mid-call
+cancellation; the goroutine may still be mutating the world — the one status it is dangerous to
+soften), and `none` (never executed: unknown tool, circuit-breaker refusal, broker denial, park).
+Tools that *declined* to act return the `NotPerformed` sentinel so the refusal ledgers as `none`,
+not `committed` — without it, a run whose writes were ALL denied was byte-identical on the ledger
+to one whose writes all landed. The model-visible bytes are unchanged (the sentinel converts back
+to ordinary tool-result content). `agent_run` surfaces the counts plus every non-committed record
+(`effects`, `effects_flagged`) on success AND deferred paths, and the standalone CLI prints the
+flagged records. PARTIAL and ROLLED_BACK are deliberately absent: the loop has no rollback
+machinery, so claiming them would be decoration.
+
+**Unattended risk parking.** Each effectful tool (the write/edit/delete trio, `web_fetch`, `run`,
+`run_shell`, the `github_*` trio) advertises a `security_risk` self-annotation (low/medium/high) in
+its schema, recorded on the call's `EffectRecord` whatever its fate. On an unattended run, an
+effectful call flagged `high` — or carrying any present-but-unrecognized value, which **fails
+closed** (the model tried to flag it) — is **parked**: refused with `EffectNone`, recorded durably
+in the ask queue, and answered with an explicit "NOT executed, continue if you can" result.
+Self-annotation can only tighten — an unannotated call proceeds under normal policy, because weak
+local models skip optional fields routinely and parking everything unannotated would kill
+open-write runs. Parked calls do not consume the same-name tool budget: three parked writes must
+not disable `write_file` for a later low-risk one.
+
+**End-of-run advisory judge** (`agent_run judge=true` / `WithBatchJudge`). After the loop
+finishes, one bounded same-seat completion grades the run's flagged effect records for the
+operator's review (`judge_report`). It runs with **fresh context** — only the objective and the
+flagged records, never the transcript, because a judge that shares the planner's context is
+steered by whatever steered the planner — and its inputs are bounded (first 24 flagged records,
+clipped notes and objective, omissions stated in the prompt) so the chaotic run that most needs a
+summary is not the one whose judge dies on a context overflow. It is **advisory only and never
+fatal**: it gates nothing, blocks nothing, and runs only on runs that actually flagged something.
+The evidence base for annotation-not-enforcement: prompted general models are near-random at
+trajectory risk grading (R-Judge) and favor their own generations, so the report is consumed by
+humans, never by control flow.
 
 **Tools.** Read-only by default: `list_dir`, ranged `read_file`, `search_files` (regex/glob, capped
 matches), `summarize_file` (an offload digest), and the in-process `offload_*` cascade tools. Each of
@@ -192,7 +243,7 @@ eval approach (MIT); metrics and signals are this harness's own.
 
 - **Audit trail** — append-only JSONL, mode `0600`, at `~/.local-offload/agent-audit.jsonl` by
   default. Resolved only when a mutating capability is enabled.
-- **Ask queue** — sibling file for deferred approvals.
+- **Ask queue** — sibling file for deferred approvals and parked high-risk calls.
 - **Worktree memory** — an `AGENT.md` loaded into context on a re-injection cadence.
 - **Traces** — optional per-run transcripts.
 
@@ -249,14 +300,17 @@ and the tool description the model sees says the same.
 
 ## Observability and debugging
 
-Read the audit trail first — it records what was allowed, denied, and why. `StopReason` distinguishes
-budget exhaustion from completion. Throttle refusals appear in the transcript as "NOT executed"
-messages.
+Read the audit trail first — it records what was allowed, denied, and why, including which risk
+rule fired at what severity. The effect ledger (`effects` / `effects_flagged` on `agent_run`, the
+flagged-effects print on the CLI) answers "did anything end in `unknown` or get parked?".
+`StopReason` distinguishes budget exhaustion from completion. Throttle refusals appear in the
+transcript as "NOT executed" messages.
 
 ## Testing notes
 
-`internal/agent/` covers the broker (including `.git` normalization cases), the throttle ordering,
-write-tool scoping and TOCTOU behavior, profile narrowing, and two-tier plan handling.
+`internal/agent/` covers the broker (including `.git` normalization cases), the risk-rule table
+(`rules_test.go`), effect accounting and parking (`effects_test.go`), the batch judge, the throttle
+ordering, write-tool scoping and TOCTOU behavior, profile narrowing, and two-tier plan handling.
 `cmd/local-agent/serve_test.go` covers the loopback guard.
 
 ## Common pitfalls
@@ -271,6 +325,11 @@ write-tool scoping and TOCTOU behavior, profile narrowing, and two-tier plan han
 
 - [`internal/agent/loop.go`](../../internal/agent/loop.go) — loop, budget, `dispatchOrThrottle`
 - [`internal/agent/policy.go`](../../internal/agent/policy.go) — broker, `.git` denial, audit append
+- [`internal/agent/rules.go`](../../internal/agent/rules.go) — the tighten-only risk-rule table
+- [`internal/agent/effects.go`](../../internal/agent/effects.go) — effect statuses, `NotPerformed`,
+  the `security_risk` park logic
+- [`internal/agent/batchjudge.go`](../../internal/agent/batchjudge.go) — the advisory end-of-run
+  judge
 - [`internal/agent/runtool.go`](../../internal/agent/runtool.go) — allowlist, direct exec
 - [`internal/agent/writetools.go`](../../internal/agent/writetools.go) — `os.Root` scoping
 - [`internal/agent/builder.go`](../../internal/agent/builder.go) — capability grants, audit-path check

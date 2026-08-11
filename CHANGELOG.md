@@ -59,6 +59,26 @@ so every existing binding renders a byte-for-byte identical command
 "strip the preset's LoRA" — bind preset `full` for a LoRA-free run. No script
 changes: comfy-render/comfy-generate/batch-jobs already read these flags.
 
+## [0.44.x interim] - 2026-08-10
+
+Merged inside the 0.44.x line with no separate version bump (recorded here
+retroactively so the changelog carries the whole arc; details live in each
+PR and the system docs):
+
+- **#84** `ocr_model` capability — dedicated OCR seat binding routing ONLY the
+  ocr task, falls back to `vision_model`; deliberately unbound.
+- **#85** CI un-broken — POSIX-only test-fixture pipe-flush bug; `main` had
+  been red since 08-04.
+- **#86** Effect ledger — per-call EffectRecord (committed|failed|unknown|none)
+  on every Result path + the `NotPerformed` sentinel across ~25 refusal sites
+  (denied writes no longer ledger-identical to landed ones).
+- **#87** Broker risk-rule table — structural, tighten-only, secret-material
+  floor, versioned JSON via `--rules`, severity+rule audit fields.
+- **#88** `security_risk` self-annotation — unattended high/unrecognized PARKS
+  the call (fail closed, ask-queue record).
+- **#89** Advisory end-of-run batch judge — opt-in, fresh context, bounded
+  inputs, never fatal.
+
 ## [0.45.0] - 2026-08-10
 
 ### Added — `--family qwen-image`: the 2512 prompt-adherence preset
