@@ -263,6 +263,12 @@ region clean, then add real type with the `edit-image` `text` op.
 defers whenever detection is unparseable, empty, or absurd (>60% coverage) — build the
 mask with `mask_boxes` yourself when it does.
 
+For edits that have **no drawable region** ("make it snowing heavily", "turn the leather
+into fur") the third edit route is the maskless **generative instruction edit** — MCP-only
+(`offload_edit_image_generative`, no CLI verb), bound per machine by the `gen_edit_*`
+config keys and unbound by default. See
+[systems/media-generation.md](systems/media-generation.md).
+
 ### Deterministic post-production (edit-image op pack) ✅
 
 ```powershell
@@ -369,8 +375,9 @@ turn on.
 | `research` | find + read sources (needs `--allow-search`/`--allow-fetch`) | `web_search`, `web_fetch`, `summarize_file`, `read_file`, `list_dir` |
 | `github` | prepare files then publish (needs `--allow-github`) | edit set **+ `github_api` / `github_create_repo` / `github_upload_file`** |
 
-`--profile` and `--two-tier` are **mutually exclusive** (two-tier picks the architect/editor toolsets
-itself); the CLI rejects the combination.
+`--two-tier` conflicts with any **non-default** `--profile` (two-tier picks the architect/editor
+toolsets itself); the CLI rejects that combination, while `--profile general` or an empty value
+coexists.
 
 ### The runner (`--allow-run`) + how to extend the allowlist
 
@@ -419,18 +426,42 @@ to a single-model run of the original objective (logged as `fallback=…`). `--a
   (the install prints the profile's value). The derived usable **input budget** is
   `ctx-tokens − max-tokens − 512`. Setting it too high lets the transcript overflow the real window
   (a 400); too low compacts sooner than necessary.
-- `--gcf-compact` (default off) — the compaction ladder's LOSSLESS first rung: over budget, older
+- `--gcf-compact` (default **ON** — measured flip decision 2026-07-24) — the compaction ladder's LOSSLESS first rung: over budget, older
   tool results that are JSON arrays of flat objects are re-encoded columnar (keys stated once,
   `internal/gcf`, round-trip proven — nothing is lost) before any lossy rung runs. The same
   transform guards the offload pipeline's context trim via the `gcf_compact` config field: an
   over-budget input's JSON is compacted losslessly before the head/tail cut, converting would-be
   truncations into full-fidelity completions.
-- `--skeleton-prune` (default off) — the next, lossy-structural rung: over budget, older tool
+- `--skeleton-prune` (default **ON** — same 2026-07-24 flip decision) — the next, lossy-structural rung: over budget, older tool
   results are reduced to signal-preserving **skeletons** (head/tail lines + error/failure/warning
   lines kept, elided runs replaced by `[... n lines elided ...]` markers) before the existing
   bare-marker and turn-drop rungs run. Deterministic and local — no model call, no added latency.
   Long multi-step runs keep *what went wrong earlier* visible to the model instead of losing whole
   older results at the first budget crossing.
+
+### Unattended runs: risk rules, parking, and the advisory judge
+
+The CLI is non-interactive, so every broker "ask" is **deny-and-queue** — deferred approvals and
+parked calls land in the ask queue (`--ask-queue`, default `~/.local-offload/agent-asks.jsonl`) for
+your morning review. Three mechanisms shape what an unattended run may do and how honestly it
+reports it:
+
+- `--rules <file>` — a versioned JSON array of **structural, tighten-only** policy rules
+  (`{kind, glob, decision, severity, reason}`): action kind + a glob over the worktree-relative
+  path (write/delete) or host (fetch); `decision` must be `deny` or `ask`, never allow. A built-in
+  floor already denies secret-material paths (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`).
+  A bad or missing file fails the run rather than silently deactivating the table; the audit trail
+  records which rule fired at what severity.
+- **Risk parking** — every effectful tool asks the model to self-annotate `security_risk`
+  (low/medium/high). A call flagged `high` (or with an unrecognized value — fail closed) is
+  **parked**: never executed, recorded in the ask queue, the run continues without it.
+- **Effect accounting + the judge** — every tool call gets an honest effect status
+  (`committed`/`failed`/`unknown`/`none`); the CLI prints the non-committed records at the end of a
+  run, and `agent_run` returns them (`effects`, `effects_flagged`). `agent_run judge=true` adds one
+  end-of-run **advisory** completion grading the flagged records for your review — it never gates
+  anything.
+
+Details and rationale: [systems/coding-agent.md](systems/coding-agent.md).
 
 ### Context-budget guidance (why prompt shape matters)
 
