@@ -86,6 +86,14 @@ the terminal tier on the 26B.
 
 If that also fails, the pipeline returns a Defer and records it.
 
+**Vision-task dispatch.** `vqa` / `assess_image` / `extract_image` ride `vision_model`. The `ocr`
+task alone may ride a dedicated `ocr_model` seat when one is bound — purpose-built OCR models beat
+a general VLM on dense text but are text-recognition only, which is why it is a separate binding
+and never a `vision_model` replacement. It is deliberately unbound by default (no tier seeds it):
+empty = OCR rides `vision_model`, byte-identical to before. The alias is resolved once and threaded
+through, so the call, the cache key, the circuit breaker, and the ledger all name the model that
+actually ran; `offload_status`'s roster reports the effective `ocr` model, falling back to vision.
+
 ## Important flows
 
 - [../flows/cascade-escalation-and-defer.md](../flows/cascade-escalation-and-defer.md) — the walk in
