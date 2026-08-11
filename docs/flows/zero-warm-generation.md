@@ -8,8 +8,9 @@ harness does, so the sequence is fixed and shared by every generation path.
 
 ## Trigger
 
-Any GPU-heavy job — `generate-image` (single or `--batch`), `inpaint-image`, `generate-video`,
-`generate-audio`, `run-graph` — via CLI or MCP.
+Any GPU-heavy job — `generate-image` (single or `--batch`), `inpaint-image`, the generative
+instruction edit (`offload_edit_image_generative`), `generate-video`, `generate-audio`,
+`run-graph` — via CLI or MCP.
 
 ## Participants
 
