@@ -108,7 +108,9 @@ prompt/exemplars; can only narrow), `-allow-run` (the allowlisted direct-exec `r
    confidence / over-long / all tiers failed), not an error. Do not "fix" defers by adding a cloud
    fallback — the harness holds no cloud credentials by design.
 3. **Two chokepoints, not one** (frequently misdescribed): the **policy broker** (`policy.go`) gates
-   *effectful actions* — write/overwrite/delete/fetch/shell — and downgrades an Allow to Deny if the
+   *effectful actions* — write/overwrite/delete/fetch/shell — carries a tighten-only structural
+   risk-rule table (`rules.go`, loaded via `--rules`; rules deny or ask, never allow, with a
+   built-in secret-material floor), and downgrades an Allow to Deny if the
    audit write fails; the **loop** (`loop.go`) owns the *budgets* — the step limit and the tool caps
    (`--max-same-tool`, the exact-repeat breaker), enforced in `dispatchOrThrottle`, which is the only
    path to `dispatch` and therefore runs before any `Exec`. Capability flags
