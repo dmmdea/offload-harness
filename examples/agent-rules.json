@@ -1,0 +1,142 @@
+[
+  {
+    "kind": "delete",
+    "glob": "*",
+    "decision": "ask",
+    "severity": "high",
+    "reason": "deletion is irreversible inside the worktree; on an unattended run this queues for review instead of executing (measured 2026-08-11: the model self-declared security_risk=low on 36/36 destructive calls, so the park gate caught none of them)"
+  },
+  {
+    "kind": "write",
+    "glob": "*.py",
+    "decision": "ask",
+    "severity": "medium",
+    "reason": "overwriting existing source is the mutate path where the model omitted its security_risk annotation entirely on 12/13 edit_file calls; an absent annotation never parks"
+  },
+  {
+    "kind": "write",
+    "glob": "*.go",
+    "decision": "ask",
+    "severity": "medium",
+    "reason": "see *.py"
+  },
+  {
+    "kind": "write",
+    "glob": "*.ts",
+    "decision": "ask",
+    "severity": "medium",
+    "reason": "see *.py"
+  },
+  {
+    "kind": "write",
+    "glob": "*.js",
+    "decision": "ask",
+    "severity": "medium",
+    "reason": "see *.py"
+  },
+  {
+    "kind": "write",
+    "glob": "*.mjs",
+    "decision": "ask",
+    "severity": "medium",
+    "reason": "see *.py"
+  },
+  {
+    "kind": "write",
+    "glob": "go.mod",
+    "decision": "ask",
+    "severity": "high",
+    "reason": "dependency manifest — a silent edit changes what the whole module builds against"
+  },
+  {
+    "kind": "write",
+    "glob": "go.sum",
+    "decision": "deny",
+    "severity": "high",
+    "reason": "checksum database; an agent has no legitimate reason to hand-edit it (regenerate via the toolchain)"
+  },
+  {
+    "kind": "write",
+    "glob": "package.json",
+    "decision": "ask",
+    "severity": "high",
+    "reason": "dependency manifest"
+  },
+  {
+    "kind": "write",
+    "glob": "*.lock",
+    "decision": "deny",
+    "severity": "high",
+    "reason": "lockfiles are generated, never hand-edited; a hand-edit silently desynchronizes the dependency graph"
+  },
+  {
+    "kind": "write",
+    "glob": "package-lock.json",
+    "decision": "deny",
+    "severity": "high",
+    "reason": "see *.lock"
+  },
+  {
+    "kind": "write",
+    "glob": ".github/workflows/*",
+    "decision": "deny",
+    "severity": "critical",
+    "reason": "CI definitions are a spend and supply-chain surface; house rule forbids Actions on private repos outright"
+  },
+  {
+    "kind": "delete",
+    "glob": ".github/workflows/*",
+    "decision": "deny",
+    "severity": "critical",
+    "reason": "see write"
+  },
+  {
+    "kind": "write",
+    "glob": "*.yaml",
+    "decision": "ask",
+    "severity": "medium",
+    "reason": "serving/config surfaces (llama-swap.yaml et al) change what the whole fleet runs"
+  },
+  {
+    "kind": "write",
+    "glob": "*.yml",
+    "decision": "ask",
+    "severity": "medium",
+    "reason": "see *.yaml"
+  },
+  {
+    "kind": "write",
+    "glob": "config.json",
+    "decision": "ask",
+    "severity": "high",
+    "reason": "the harness's own binding config; a silent edit re-points seats fleet-wide"
+  },
+  {
+    "kind": "write",
+    "glob": "*.gguf",
+    "decision": "deny",
+    "severity": "critical",
+    "reason": "model weights are never a legitimate agent write target"
+  },
+  {
+    "kind": "delete",
+    "glob": "*.gguf",
+    "decision": "deny",
+    "severity": "critical",
+    "reason": "a deleted quant is a multi-GB re-download"
+  },
+  {
+    "kind": "delete",
+    "glob": "*.jsonl",
+    "decision": "deny",
+    "severity": "critical",
+    "reason": "append-only evidence (ledger, run rows, exemplars). Losing these destroys the record a measurement was built on, and nothing regenerates it"
+  },
+  {
+    "kind": "fetch",
+    "glob": "*",
+    "decision": "ask",
+    "severity": "medium",
+    "reason": "egress leaves the machine; the allowlist grants the host, this makes the call itself reviewable on an unattended run"
+  }
+]

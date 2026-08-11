@@ -48,6 +48,14 @@ type Entry struct {
 	// entries and truncated to maxReasonLen on write. Old ledger lines without
 	// the field parse fine (empty string).
 	Reason string `json:"reason,omitempty"`
+	// EscSource names WHICH gate sent the call up a tier, from core's closed
+	// EscalationSource set. Unlike Reason it is written on SUCCESSFUL
+	// escalations too — that was the gap: a call that escalated and then
+	// succeeded recorded nothing, so the split between the one self-declared
+	// gate (self_confidence) and the structural ones (margin/confhead/schema/
+	// grounding/verifier/retries) could not be recovered from telemetry.
+	// Closed set = groupable; the free-text Reason is not.
+	EscSource string `json:"esc_source,omitempty"`
 }
 
 // maxReasonLen bounds a recorded defer reason so a long upstream error can't

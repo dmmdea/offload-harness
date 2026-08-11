@@ -141,6 +141,24 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 		if _, rerr = pol.WithRules(rs); rerr != nil {
 			return nil, fmt.Errorf("risk rule table: %w", rerr)
 		}
+	} else if cfg.Unattended && (cfg.AllowDelete || cfg.AllowOverwrite || cfg.AllowShell || cfg.AllowGitHub) {
+		// MEASURED 2026-08-11: with no table loaded, the only per-call gate above
+		// the capability flags on an unattended run is the model's own
+		// `security_risk` annotation — and that annotation was a literal constant
+		// "low" across 54/54 emitted declarations, including all 36 structurally
+		// destructive calls in the probe. Park-gate recall: 0%. The built-in
+		// defaultRules() floor covers secret-material globs only, so it would not
+		// have stopped any of them.
+		//
+		// A NOTE, not an error: refusing to run would break every existing
+		// unattended caller. But an operator granting destructive capability to an
+		// unattended run deserves to be told, once, that the mechanism they
+		// probably believe is guarding it does not.
+		res.Notes = append(res.Notes,
+			"UNGATED: unattended run with destructive capability and no --rules table. "+
+				"The model's own security_risk annotation is then the only per-call gate, "+
+				"and it measured as a constant 'low' (0% recall on destructive calls). "+
+				"Pass --rules (see examples/agent-rules.json) for a structural gate.")
 	}
 	var askQueue *AuditLog
 	if cfg.AskQueuePath != "" {
