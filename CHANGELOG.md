@@ -4,6 +4,30 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.48.1] - 2026-08-12
+
+### Fixed — graph preflight rejected graphs ComfyUI itself accepts (#97)
+The generic API-graph preflight matched required inputs by **exact key**. ComfyUI
+serialises a dynamic autogrow group (`COMFY_AUTOGROW_V3`) only as dotted **child**
+keys — `ComfyMathExpression`'s `values` arrives as `values.a`, `values.b` and never
+as `values` — so every node using one was reported as missing a required input and
+the run deferred with `PREFLIGHT_MISSING_INPUTS`.
+
+Found running the **official ComfyUI LTX-2.5 image-to-video template**: preflight
+rejected four `ComfyMathExpression` nodes while ComfyUI's own `/prompt` validation
+accepted the identical graph. These nodes appear throughout the shipped workflow
+templates, so this blocked that entire class of graph — which is the class most
+worth running, since they are the reference implementations.
+
+A required input is now satisfied by its own key **or** by at least `min` dotted
+children (autogrow declares its own minimum; default 1). Counting children rather
+than merely detecting one keeps groups that need more than one wire honest.
+
+Verified against the real 45-node LTX-2.5 graph — preflight now returns `ok`,
+agreeing with the server. Tests pin the real `/object_info` schema shape
+(`COMFY_AUTOGROW_V3` + `template.min`) and cover the zero-child case, `min:2`
+enforcement, and that a dotted key cannot satisfy a *different* required input.
+
 ## [0.48.0] - 2026-08-11
 
 ### Added — the ledger can finally say WHY a call escalated (#94)
