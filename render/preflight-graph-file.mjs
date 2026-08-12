@@ -13,15 +13,32 @@ async function defaultFetchInfo(cls) {
   } catch { return null; }
 }
 
+// A dynamic input GROUP is not wired under its own name. ComfyUI's autogrow inputs
+// (COMFY_AUTOGROW_V3 — e.g. ComfyMathExpression's `values`, which grows a, b, c…) are
+// serialised by the frontend as DOTTED CHILD KEYS: `values.a`, `values.b`. The group
+// name itself never appears in the graph, so an exact-key check reports every such node
+// as missing a required input and defers a graph ComfyUI would happily accept.
+//
+// Satisfaction rule: the exact key, or at least `min` dotted children (autogrow declares
+// its own minimum; default 1). Counting children rather than just detecting one keeps the
+// check honest for groups that require more than one wire.
+function satisfies(spec, key, def) {
+  const have = Object.keys(spec.inputs || {});
+  if (have.includes(key)) return true;
+  const children = have.filter((h) => h.startsWith(`${key}.`)).length;
+  if (children === 0) return false;
+  const min = Number(def?.[1]?.template?.min ?? 1);
+  return children >= (Number.isFinite(min) ? min : 1);
+}
+
 export async function preflightGraph(graph, fetchInfo = defaultFetchInfo) {
   const missing = [], unknownClasses = [];
   for (const [node, spec] of Object.entries(graph || {})) {
     const cls = spec?.class_type;
     const info = await fetchInfo(cls);
     if (!info) { unknownClasses.push({ node, class_type: cls }); continue; }
-    const required = Object.keys(info?.input?.required || {});
-    const have = new Set(Object.keys(spec.inputs || {}));
-    const miss = required.filter((k) => !have.has(k));
+    const required = info?.input?.required || {};
+    const miss = Object.keys(required).filter((k) => !satisfies(spec, k, required[k]));
     if (miss.length) missing.push({ node, class_type: cls, inputs: miss });
   }
   return { ok: missing.length === 0 && unknownClasses.length === 0, missing, unknownClasses };

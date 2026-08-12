@@ -87,6 +87,13 @@ environment.
    deliberately lives *here*, after ComfyUI is up with the packs installed — not in the satisfier,
    where the classes would not yet be loadable.
 
+   A required input is satisfied by its own key **or**, for a dynamic autogrow group
+   (`COMFY_AUTOGROW_V3`), by at least `min` dotted child keys. The frontend serialises such
+   groups only as children — `ComfyMathExpression`'s `values` arrives as `values.a`, `values.b`
+   and never as `values` — so an exact-key check would defer graphs ComfyUI accepts. This
+   matters for graphs exported from official ComfyUI workflow templates, which use these
+   nodes freely.
+
 9. **Execute, poll, and fetch outputs**, then tear down through the same GPU lifecycle.
 
 ## Data and state changes
