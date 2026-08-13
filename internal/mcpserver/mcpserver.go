@@ -59,7 +59,7 @@ func (s *Server) Run(ctx context.Context, version string) error {
 	// + which media engines this machine has + the (only) remote surface.
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_status",
-		Description: "Discover this harness's capability — call this FIRST when inspecting what the harness can do. Returns {local:{endpoint, roster{workhorse,triage,escalation,reasoning,vision,stt,stt_hq,embed}, served_now[...] (live model ids from the LOCAL llama-swap endpoint)}, media:{...this machine's configured generation engines}, remote:{nim_endpoint, nim_default_model, nim_key_present}}. Every offload_* tool except offload_nim runs on the LOCAL models in the roster (free, on-box, no cloud); offload_nim is the ONLY remote/cloud surface. An empty roster entry means that capability defers on this machine.",
+		Description: "Discover this harness's capability — call this FIRST when inspecting what the harness can do. Returns {local:{endpoint, roster{workhorse,agent,triage,escalation,reasoning,vision,ocr,stt,stt_hq,embed}, served_now[...] (live model ids from the LOCAL llama-swap endpoint)}, media:{...this machine's configured generation engines}, remote:{nim_endpoint, nim_default_model, nim_key_present}}. Every offload_* tool except offload_nim runs on the LOCAL models in the roster (free, on-box, no cloud); offload_nim is the ONLY remote/cloud surface. An empty roster entry means that capability defers on this machine.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
 	}, s.handleStatus)
 
