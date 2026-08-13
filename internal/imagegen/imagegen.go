@@ -310,6 +310,9 @@ type EditModel struct {
 	LoRAStrength                                      float64
 	Steps                                             int
 	CFG                                               float64
+	// Megapixels pins the working canvas (= the output resolution). 0 means "let the
+	// runner keep the source's own resolution, capped" — see config.GenEditMegapixels.
+	Megapixels float64
 }
 
 // editArgs assembles the comfy-edit.mjs argv. Pure; unit-tested. Request steps
@@ -374,6 +377,12 @@ func editArgs(out, image, prompt string, params map[string]any, m EditModel) []s
 	}
 	if m.Scheduler != "" {
 		args = append(args, "--scheduler", m.Scheduler)
+	}
+	// Omitted when unset so the runner keeps its source-measuring default. Sending a
+	// zero would be a schema violation downstream (the node's floor is 0.01), and
+	// sending the cap instead would upscale every small source.
+	if m.Megapixels > 0 {
+		args = append(args, "--megapixels", strconv.FormatFloat(m.Megapixels, 'g', -1, 64))
 	}
 	return args
 }

@@ -170,15 +170,31 @@ func TestBatchArgs_ZeroModelEmitsNoBindingFlags(t *testing.T) {
 func TestEditArgs_FullBinding(t *testing.T) {
 	m := EditModel{Unet: "qwen-edit.gguf", Preset: "lightning8", LoRA: "light8.safetensors",
 		LoRAStrength: 0.8, CLIP: "qwen_vl.safetensors", VAE: "qwen_vae.safetensors",
-		Steps: 8, CFG: 1, Sampler: "euler", Scheduler: "simple"}
+		Steps: 8, CFG: 1, Sampler: "euler", Scheduler: "simple", Megapixels: 2}
 	got := editArgs("o.png", "in.png", "make it snow", map[string]any{"seed": 9, "negative": "blurry"}, m)
 	want := []string{"o.png", "in.png", "make it snow",
 		"--negative", "blurry", "--seed", "9", "--unet", "qwen-edit.gguf",
 		"--preset", "lightning8", "--clip", "qwen_vl.safetensors", "--vae", "qwen_vae.safetensors",
 		"--lora", "light8.safetensors", "--lora-strength", "0.8",
-		"--steps", "8", "--cfg", "1", "--sampler", "euler", "--scheduler", "simple"}
+		"--steps", "8", "--cfg", "1", "--sampler", "euler", "--scheduler", "simple",
+		"--megapixels", "2"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("editArgs:\n got %v\nwant %v", got, want)
+	}
+}
+
+// An UNSET canvas must stay unset on the command line. The runner's default is
+// "measure the source and keep its resolution, capped"; passing a number here — any
+// number — would overwrite that with a fixed size for every edit on the machine.
+func TestEditArgs_UnsetMegapixelsStaysOffTheCommandLine(t *testing.T) {
+	joined := strings.Join(editArgs("o.png", "in.png", "p", nil, EditModel{Unet: "u.gguf"}), " ")
+	if strings.Contains(joined, "--megapixels") {
+		t.Fatalf("an unset canvas must not reach the runner: %s", joined)
+	}
+	joined = strings.Join(editArgs("o.png", "in.png", "p", nil,
+		EditModel{Unet: "u.gguf", Megapixels: 1.5}), " ")
+	if !strings.Contains(joined, "--megapixels 1.5") {
+		t.Fatalf("a configured canvas must reach the runner: %s", joined)
 	}
 }
 
