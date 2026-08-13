@@ -1,0 +1,51 @@
+version: 2
+project_name: comfyui-pp-cli
+changelog:
+  disable: true
+builds:
+  - id: comfyui-pp-cli
+    main: ./cmd/comfyui-pp-cli
+    binary: comfyui-pp-cli
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X comfyui-pp-cli/internal/cli.version={{ .Version }}
+    targets:
+      - darwin_amd64
+      - darwin_arm64
+      - linux_amd64
+      - linux_arm64
+      - windows_amd64
+      - windows_arm64
+  - id: comfyui-pp-mcp
+    main: ./cmd/comfyui-pp-mcp
+    binary: comfyui-pp-mcp
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    targets:
+      - darwin_amd64
+      - darwin_arm64
+      - linux_amd64
+      - linux_arm64
+      - windows_amd64
+      - windows_arm64
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+checksum:
+  name_template: checksums.txt
+brews:
+  - name: comfyui-pp-cli
+    repository:
+      owner: dmmdea
+      name: homebrew-tap
+    homepage: "https://github.com/dmmdea/comfyui-pp-cli"
+    description: "Drive a local ComfyUI render server from the shell, with a durable record of every run the server itself forgets."
+    install: |
+      bin.install "comfyui-pp-cli"
+      bin.install "comfyui-pp-mcp"

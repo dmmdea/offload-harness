@@ -14,3 +14,10 @@ setup/templates/*.yaml  text eol=lf
 # Windows checkout, so a no-op regeneration cannot look like a change.
 docs/tiers/**   text eol=lf
 config.example.json text eol=lf
+
+# Printed CLIs (docs/systems/printed-clis.md) are generated trees vendored from the
+# Printing Press, which emits LF. Same rationale as above, one step larger: a Windows
+# checkout with autocrlf would rewrite all ~200 files to CRLF, and the next re-vendor
+# would then diff the ENTIRE tree against an LF source — burying the real change. It
+# also keeps spec.yaml byte-identical to the `spec_checksum` in .printing-press.json.
+tools/**        text eol=lf
