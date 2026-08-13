@@ -8,10 +8,15 @@ repository as repo tooling.
 
 They live here for one reason: the harness drives external services that have their own operational
 surface, and an agent working in this repo should be able to reach for a real, tested tool for that
-service instead of hand-rolling HTTP calls. ComfyUI is the first — the harness's media generation
-(`offload_generate_image`, `offload_run_graph`) submits graphs to a local ComfyUI server, and
-`comfyui-pp-cli` is the purpose-built way to inspect, submit, time, and attribute those renders from
-the shell.
+service instead of hand-rolling HTTP calls. There are two, and between them they cover both halves of
+what the harness actually talks to:
+
+- **`tools/comfyui/`** — the harness's media generation (`offload_generate_image`,
+  `offload_run_graph`) submits graphs to a local ComfyUI server; `comfyui-pp-cli` is the purpose-built
+  way to inspect, submit, time, and attribute those renders from the shell.
+- **`tools/llamaswap/`** — every offload task the cascade runs is served by llama-swap;
+  `llamaswap-pp-cli` is the way to see what is loaded, what a swap cost, which model a seat is
+  bound to, and what the config's backup history actually says.
 
 A printed CLI is **generated code that we adopt, not code we author here.** That distinction drives
 every rule below.
@@ -31,10 +36,11 @@ them in step with the upstream Printing Press.
 
 ## Non-scope
 
-- **The harness's own media pipeline.** How the harness decides what to render and on which GPU is
-  [systems/media-generation.md](media-generation.md). A printed CLI is an operator/agent tool beside
-  that pipeline, not a component of it — the harness does not shell out to `comfyui-pp-cli` at
-  runtime.
+- **The harness's own pipelines.** How the harness decides what to render and on which GPU is
+  [systems/media-generation.md](media-generation.md); how it picks and escalates tiers is
+  [systems/offload-pipeline.md](offload-pipeline.md). A printed CLI is an operator/agent tool beside
+  those pipelines, not a component of them — the harness does not shell out to `comfyui-pp-cli` or
+  `llamaswap-pp-cli` at runtime, and neither tool is in the serving path.
 - **Generation itself.** Research, codegen, verification, and scoring happen in the Printing Press
   runstate on the machine that prints, not in this repo.
 
@@ -46,7 +52,8 @@ them in step with the upstream Printing Press.
   Press. A reprint replaces the generated tree wholesale; it is not a patch.
 - **Vendoring** — copying a promoted printed CLI out of the Printing Press library into
   `tools/<api>/` here. This repo is the tool's *distribution* home, not its *source of truth*.
-- **Provenance record** — [`tools/comfyui/.printing-press.json`](../../tools/comfyui/.printing-press.json),
+- **Provenance record** — each tool's `.printing-press.json` (e.g.
+  [`tools/comfyui/.printing-press.json`](../../tools/comfyui/.printing-press.json)),
   which records the Printing Press version, run id, spec checksum, verify result, and scorecard for
   the exact tree that was vendored. Read it before assuming anything about how current a tool is.
 
@@ -122,9 +129,24 @@ Not vendored, and ignored in `.gitignore`:
 - Run reports (`dogfood-results.json`, `workflow-verify-report.json`,
   `apify-actor-audit-report.json`, `.printing-press-*-polish.json`) — evidence from one machine's
   run, superseded by the next one. The durable summary already lives in `.printing-press.json`.
+- **Live captures.** `llamaswap-pp-cli captures export` writes `captures.jsonl` into the module dir:
+  real request and response bodies from whatever server was running. It is runtime output, it was
+  3.5 MB on the printing machine, and in a public repo it is a data-leak hazard. Never vendored.
 
 Note that the root `.gitignore`'s `/bin/` rule is anchored to the repo root and does **not** cover
 `tools/*/bin/`; the `tools/*/` rules exist precisely because of that.
+
+### Privacy is part of the vendoring step
+
+This repository is public, and [STYLE.md](../STYLE.md) forbids real machine hostnames, the tailnet
+domain, and identity-leaking filesystem paths — **in code as well as prose**. A printed CLI is
+generated on a real machine against a real deployment, so its fixtures can legitimately pick those up:
+`llamaswap-pp-cli` arrived with real node hostnames and a real tailnet domain in three test files, and
+`comfyui-pp-cli` arrived with a local username in a path. Neither carried any test meaning — the names
+were arbitrary — so both were replaced with neutral placeholders during vendoring.
+
+Sweep every tree before committing it, not after. Deployment paths that are genuinely part of the
+tool's documented interface (`C:\llama-swap`, `V:/models`) are fine; identities are not.
 
 ## Layout contract
 
@@ -144,25 +166,34 @@ tools/<api>/                 # <api> is the API name, matching .printing-press.j
   .printing-press-patches/   # local deviations from the generated tree; normally empty
 ```
 
-Adopting a new one means: vendor the tree, add a CI job mirroring the existing one, add a routing
-line to the root [`AGENTS.md`](../../AGENTS.md), and list it in this doc and the root `README.md`.
-`llamaswap-pp-cli` is the next expected arrival and lands at `tools/llamaswap/`.
+Adopting a new one means, in one PR: vendor the tree, sweep it for privacy, add a CI job mirroring
+the existing ones, add a routing line to the root [`AGENTS.md`](../../AGENTS.md), and list it in this
+doc and the root `README.md`. Both current tools follow this shape exactly; `llamaswap` additionally
+carries a `pkg/llamaswap/` importable client and three `REGISTRATIONS-*.md` wiring notes that its own
+source comments reference.
 
 ## Interfaces and entry points
 
+Per tool, `<api>` being `comfyui` or `llamaswap`:
+
 | Entry point | What it is |
 |---|---|
-| [`tools/comfyui/SKILL.md`](../../tools/comfyui/SKILL.md) | The agent skill (`pp-comfyui`). **Read this first** for any ComfyUI work — it carries the command surface, the discovery protocol, and the teach/recall loop. |
-| [`tools/comfyui/README.md`](../../tools/comfyui/README.md) | Human-facing install and usage. |
-| [`tools/comfyui/AGENTS.md`](../../tools/comfyui/AGENTS.md) | The tool's own operating contract for agents (runtime discovery over memorized command lists, `--agent` output mode, dry-run before mutation). |
-| `cmd/comfyui-pp-cli` | The CLI binary. `make build` writes `bin/comfyui-pp-cli`. |
-| `cmd/comfyui-pp-mcp` | The MCP stdio server. `make build-mcp`. Independent of the harness's own `local-offload` MCP server ([systems/mcp-server.md](mcp-server.md)) — registering it is an operator choice, not something this repo does. |
+| `tools/<api>/SKILL.md` | The agent skill (`pp-comfyui` / `pp-llamaswap`). **Read this first** for work against that service — it carries the command surface, the discovery protocol, and the teach/recall loop. |
+| `tools/<api>/README.md` | Human-facing install and usage. |
+| `tools/<api>/AGENTS.md` | The tool's own operating contract for agents (runtime discovery over memorized command lists, `--agent` output mode, dry-run before mutation). |
+| `cmd/<api>-pp-cli` | The CLI binary. `make build` writes `bin/<api>-pp-cli`. |
+| `cmd/<api>-pp-mcp` | The MCP stdio server. `make build-mcp`. Independent of the harness's own `local-offload` MCP server ([systems/mcp-server.md](mcp-server.md)) — registering it is an operator choice, not something this repo does. |
+
+Direct links: [comfyui SKILL](../../tools/comfyui/SKILL.md) ·
+[comfyui AGENTS](../../tools/comfyui/AGENTS.md) ·
+[llamaswap SKILL](../../tools/llamaswap/SKILL.md) ·
+[llamaswap AGENTS](../../tools/llamaswap/AGENTS.md)
 
 ## Dependencies
 
 Each printed CLI depends only on its own `go.mod` graph and Go 1.26+. It does not import the harness,
-and the harness does not import it. `comfyui-pp-cli` additionally expects a reachable ComfyUI server
-at runtime — but not at build or test time.
+and the harness does not import it. Each expects its own service reachable at *runtime* — ComfyUI and
+llama-swap respectively — but neither needs one at build or test time.
 
 ## Downstream effects
 
@@ -179,28 +210,64 @@ change here is the tool itself, its CI job, and this doc.
 3. **No binaries, no run reports.** Enforced by `.gitignore`.
 4. **Every printed CLI has a CI job.** A module invisible to the root `./...` and absent from CI is a
    module that is not actually tested.
-5. **Tests stay offline.** A printed CLI's `go test ./...` must pass with no live server.
+5. **Tests pass on a bare runner.** A printed CLI's `go test ./...` must be green with no live
+   server, no model volume, and no reference deployment. Tests that genuinely need one of those
+   `t.Skip` with the reason; they never fail for absence.
+6. **No tool is vendored carrying an identity.** Hostnames, tailnet domain, usernames — swept out at
+   vendoring time.
 
 ## Testing notes
 
 From the module directory:
 
 ```bash
-cd tools/comfyui
+cd tools/comfyui      # or tools/llamaswap
 go build ./...
 go vet ./...
 go test ./... -count=1
 ```
 
-`comfyui-pp-cli` has 17 packages with tests, all passing offline. The suite reaches the network only
-to assert a *failure* path (`ProbeReachable` against a closed port), so an ubuntu CI runner with no
-ComfyUI installed is a valid host for the full suite — no packages are excluded and no mock-mode env
-var is needed. The Printing Press verify-mode variables (`PRINTING_PRESS_VERIFY`,
-`PRINTING_PRESS_VERIFY_LIVE_HTTP`, `PRINTING_PRESS_DOGFOOD`) govern the Printing Press's own verify
-and dogfood runners, not `go test`, and CI leaves them unset.
+CI runs each as a dedicated job in `.github/workflows/ci.yml` — `tools-comfyui` and
+`tools-llamaswap` — parallel to the harness `build` job. Neither excludes any package.
 
-CI runs this as a dedicated `tools-comfyui` job in `.github/workflows/ci.yml`, parallel to the
-harness `build` job.
+The Printing Press verify-mode variables (`PRINTING_PRESS_VERIFY`, `PRINTING_PRESS_VERIFY_LIVE_HTTP`,
+`PRINTING_PRESS_DOGFOOD`) govern the Printing Press's own verify and dogfood runners, not `go test`,
+and CI leaves them unset. `LLAMASWAP_BASE_URL` is likewise left unset: the default points at a
+loopback port that is closed on a runner, which is what the offline paths expect.
+
+**`comfyui-pp-cli`** — 17 test packages, all offline. The suite reaches the network only to assert a
+*failure* path (`ProbeReachable` against a closed port).
+
+**`llamaswap-pp-cli`** — 18 test packages. Most are `fakeswap`/`httptest`-backed and fully portable,
+but some are deliberately coupled to a **real deployment** and skip when it is absent:
+
+| Suite | Needs | Behavior when absent |
+|---|---|---|
+| `internal/gguf` | real GGUF files on the model volume | 4 tests `t.Skip`, 3 portable ones still run |
+| `internal/cli` seat-log corpus | a real llama-swap backup corpus | 2 tests `t.Skip`, 237 still run |
+| `internal/cliutil` | one host-specific path probe | 1 test `t.Skip` |
+
+That is by design: these are machine-specific *acceptance gates* asserting independently verified
+facts about a reference deployment, not portable unit tests. Verified on Linux with the model volume,
+the corpus, and the server all missing — **750 pass, 7 skip, 0 fail**. So a failure in these suites on
+CI means a skip guard regressed, not that the runner lacks hardware.
+
+### Verify a vendored tree on Linux before pushing
+
+Both tools are printed on Windows, so the first CI run is a genuine portability test (see below). Do
+not use CI as the debug loop — cross-compile and run the real test binaries instead:
+
+```bash
+cd tools/<api>
+GOOS=linux go vet ./...              # compiles TEST files too; `go build` does not
+for p in $(go list ./...); do GOOS=linux CGO_ENABLED=0 go test -c "$p" -o /tmp/t/$(echo $p | tr / _).test; done
+# then run each binary from its own package dir on a Linux box
+```
+
+One caveat when using WSL2 for that: its networking is *mirrored*, so a loopback port that is closed
+on a CI runner is **open** in WSL. Point `LLAMASWAP_BASE_URL` at a closed port to simulate CI
+faithfully. A package whose tests shell out to `go build` (`internal/mcp/cobratree`) will fail on a
+Linux box with no Go toolchain — that is the harness of the check, not a defect.
 
 ## Common pitfalls
 
@@ -210,18 +277,28 @@ harness `build` job.
   cycle above.
 - **Assuming the vendored tree is current.** Check `.printing-press.json` — its `run_id` and
   `printing_press_version` describe the run that produced *this* tree, not the latest Printing Press.
-- **Confusing `comfyui-pp-mcp` with the harness MCP server.** Two different servers with different
-  tool surfaces. The harness's is `local-offload`.
+- **Confusing `comfyui-pp-mcp` / `llamaswap-pp-mcp` with the harness MCP server.** Three different
+  servers with different tool surfaces. The harness's is `local-offload`.
+- **"Fixing" a skipped llama-swap test so it stops skipping.** The skip is the contract on a machine
+  without the reference deployment. Making it run there means inventing a corpus, and the assertions
+  are ground truth about a real one.
 - **Adding the tool's dependencies to the harness `go.mod` to "share" them.** That reintroduces
   exactly the coupling the module split prevents.
 
 ## Source map
 
 - [`tools/comfyui/`](../../tools/comfyui/) — the vendored ComfyUI printed CLI.
-- [`tools/comfyui/go.mod`](../../tools/comfyui/go.mod) — the module boundary (`comfyui-pp-cli`).
-- [`tools/comfyui/SKILL.md`](../../tools/comfyui/SKILL.md) — the agent entry point.
-- [`tools/comfyui/.printing-press.json`](../../tools/comfyui/.printing-press.json) — provenance for
-  the vendored tree.
+- [`tools/llamaswap/`](../../tools/llamaswap/) — the vendored llama-swap printed CLI.
+- [`tools/comfyui/go.mod`](../../tools/comfyui/go.mod) ·
+  [`tools/llamaswap/go.mod`](../../tools/llamaswap/go.mod) — the module boundaries
+  (`comfyui-pp-cli`, `llamaswap-pp-cli`).
+- [`tools/comfyui/SKILL.md`](../../tools/comfyui/SKILL.md) ·
+  [`tools/llamaswap/SKILL.md`](../../tools/llamaswap/SKILL.md) — the agent entry points.
+- [`tools/llamaswap/pkg/llamaswap/`](../../tools/llamaswap/pkg/llamaswap/) — llama-swap's importable
+  Go client, the one printed-CLI surface meant to be consumed as a library.
+- [`tools/comfyui/.printing-press.json`](../../tools/comfyui/.printing-press.json) ·
+  [`tools/llamaswap/.printing-press.json`](../../tools/llamaswap/.printing-press.json) — provenance
+  for the vendored trees.
 - [`tools/comfyui/Makefile`](../../tools/comfyui/Makefile) — `build`, `build-mcp`, `test`, `lint`.
 - [`.gitignore`](../../.gitignore) — the `tools/*/` exclusion rules.
 - `.github/workflows/ci.yml` — the `tools-comfyui` job.

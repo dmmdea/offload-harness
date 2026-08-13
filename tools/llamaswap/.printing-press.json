@@ -1,0 +1,82 @@
+{
+  "schema_version": 2,
+  "generated_at": "2026-08-13T09:51:08.3816273Z",
+  "printing_press_version": "4.30.2",
+  "api_name": "llamaswap",
+  "display_name": "llama-swap",
+  "cli_name": "llamaswap-pp-cli",
+  "creator": {
+    "handle": "pepsdubai",
+    "name": "Daniel Martinez"
+  },
+  "owner": "pepsdubai",
+  "printer": "pepsdubai",
+  "printer_name": "Daniel Martinez",
+  "spec_path": "spec.yaml",
+  "spec_format": "internal",
+  "spec_checksum": "sha256:22adcd85eb84d84b53c73cbbaaa136185c7e5ca35668a154f58a246362cd74b5",
+  "run_id": "20260813-003851",
+  "description": "The llama-swap operations console — durable history, drain-aware control, and measurement commands that structurally cannot produce the errors operators actually make.",
+  "mcp_binary": "llamaswap-pp-mcp",
+  "mcp_tool_count": 27,
+  "mcp_public_tool_count": 27,
+  "mcp_ready": "full",
+  "api_version": "v249",
+  "auth_type": "none",
+  "auth_env_vars": [
+    "PRINTING_PRESS_CLIENT_PROFILE"
+  ],
+  "auth_env_var_specs": [
+    {
+      "name": "PRINTING_PRESS_CLIENT_PROFILE",
+      "kind": "per_call",
+      "required": true,
+      "sensitive": false
+    }
+  ],
+  "novel_features": [
+    {
+      "name": "Keep-set audit",
+      "command": "keepset audit",
+      "description": "See when the memory-stack models were actually resident, every eviction attributed to its cause, and how much embed/rerank traffic landed inside a degraded window."
+    },
+    {
+      "name": "Seat change timeline",
+      "command": "seat log",
+      "description": "A per-model chronology of every flag change mined from the dated config-backup series, with the YAML comments as the reasoning and the live cmd as the current truth."
+    },
+    {
+      "name": "Mirror sync with loss accounting",
+      "command": "sync",
+      "description": "Pull the server's in-memory request activity and event stream into local SQLite before a restart destroys them, sealing each server epoch and quantifying what the ring buffer already dropped."
+    },
+    {
+      "name": "Swap economics",
+      "command": "swaps",
+      "description": "Cold-load percentiles per model, time lost to swapping, and which model pairs repeatedly evict each other."
+    },
+    {
+      "name": "Memory-stack probe verify",
+      "command": "verify",
+      "description": "Embeds a fixed probe on the embedder and reranks a fixed pair on the reranker, asserting both against stored calibrated baselines — catching dropped flags that roster counting cannot."
+    }
+  ],
+  "verify": {
+    "mode": "mock",
+    "pass_rate": 100,
+    "passed": 69,
+    "total": 69,
+    "data_pipeline": true,
+    "verdict": "PASS"
+  },
+  "scorecard": {
+    "steinberger": {
+      "percentage": 89,
+      "grade": "A (1 of 24 dimensions unverified: live_api_verification)",
+      "total": 89
+    },
+    "unverified_dimensions": [
+      "live_api_verification"
+    ]
+  }
+}

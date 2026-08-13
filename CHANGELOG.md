@@ -4,6 +4,60 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.51.0] - 2026-08-13
+
+### Added — `tools/llamaswap`: the second printed CLI
+`llamaswap-pp-cli` lands at `tools/llamaswap/`, completing the pair `tools/` was set up
+for in 0.50.0. Where `comfyui-pp-cli` covers the media half of what the harness talks to,
+this covers the other half: the llama-swap server that actually serves the cascade. It
+reports what is loaded and what a swap cost, resolves seat and model bindings, reads GGUF
+header facts straight off the model files rather than trusting a config, and reads the
+llama-swap config's own backup history. It ships an MCP server (`llamaswap-pp-mcp`), the
+`pp-llamaswap` agent skill, and — unique among the printed CLIs so far — an importable Go
+client at `pkg/llamaswap`.
+
+Same contract as the first: separate Go module (`llamaswap-pp-cli`), invisible to the
+harness's `./...`, no harness package imports it, no behavior change to the harness. It
+follows the layout contract in `docs/systems/printed-clis.md` exactly, which is what the
+contract was written for.
+
+**It needed no portability patch.** `GOOS=linux go vet ./...` — which compiles test files,
+unlike `go build` — passed as vendored, and the platform-split files (`*_windows.go` /
+`*_other.go`) were already correct. That is the opposite of 0.50.0's experience with
+`comfyui-pp-cli`, and the reason to keep running the check rather than assume either result.
+
+### Added — `tools-llamaswap` CI job
+Mirrors `tools-comfyui`: `go build`, `go vet`, `go test ./... -count=1`, nothing excluded.
+
+Some of this suite is deliberately coupled to a **real deployment** — `internal/gguf` reads
+real GGUF files off the model volume, and the seat-log tests assert independently verified
+facts about a reference llama-swap backup corpus. Those are machine-specific acceptance
+gates, not portable unit tests, and they already `t.Skip` when the resource is absent.
+Verified rather than assumed: with the model volume, the corpus, and the server all missing,
+the module runs **750 pass, 7 skip, 0 fail** on Linux. So CI excludes nothing, and a failure
+in those suites means a skip guard regressed rather than that the runner lacks hardware.
+
+`LLAMASWAP_BASE_URL` is left unset in CI: the default points at a loopback port that is
+closed on a runner, which is what the offline paths expect.
+
+### Fixed — real hostnames and the tailnet domain in vendored fixtures
+The vendored tree arrived with real node hostnames and the real tailnet domain in three
+`internal/cli` test files, used as sample "named remote" values. `docs/STYLE.md` forbids
+both in this public repository, in code as well as prose. Replaced with neutral placeholders
+(`node-a`, `node-b`, `node-b-host`, `tailnet-example`); the names carried no test meaning, so
+behavior is identical.
+
+This is now a documented step of the adoption cycle rather than a one-off: a printed CLI is
+generated on a real machine against a real deployment, so **sweep every tree for identities
+before committing it**. Deployment paths that are part of the tool's documented interface
+(`C:\llama-swap`, `V:/models`) are fine; hostnames, tailnet domains, and usernames are not.
+
+### Changed — `.gitignore` excludes live captures
+`llamaswap-pp-cli captures export` writes `captures.jsonl` into the module directory: real
+request and response bodies from whatever server was running. It was 3.5 MB on the printing
+machine. Runtime output and a data-leak hazard in a public repo — never vendored, now
+ignored via `tools/*/captures.jsonl`.
+
 ## [0.50.0] - 2026-08-13
 
 ### Added — `tools/`: printed CLIs are vendored here as repo tooling
