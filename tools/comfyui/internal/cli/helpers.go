@@ -507,14 +507,22 @@ func writeNoop(flags *rootFlags, reason, prose string) error {
 	return nil
 }
 
+// writeAPIErrorEnvelope is retained as the in-RunE emitter for the HTTP-409
+// branch of classifyAPIError. It now emits the SAME document as
+// finalizeErrorOutput (errenvelope.go) rather than the old {error, code} pair,
+// so a caller never has to parse two different failure shapes depending on
+// which branch produced the error.
+//
+// It also marks structuredWritten, so the end-of-run envelope goes to stderr
+// instead of appending a second JSON document to stdout after this one.
 func writeAPIErrorEnvelope(flags *rootFlags, err error, code int) {
 	if flags == nil || !flags.asJSON {
 		return
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
-		"error": err.Error(),
-		"code":  code,
-	})
+	env := errorEnvelope{OK: false, Error: classifyErrorEnvelope(err, code)}
+	if encErr := json.NewEncoder(os.Stdout).Encode(env); encErr == nil {
+		flags.structuredWritten = true
+	}
 }
 
 // classifyAPIError maps API errors to structured exit codes with actionable hints.
@@ -544,6 +552,21 @@ func classifyAPIError(err error, flags *rootFlags) error {
 	case strings.Contains(msg, "HTTP 429"):
 		return rateLimitErr(err)
 	default:
+		// A failure with no HTTP status that names a dead socket is not an
+		// API error — the API never answered. Give it ExitServerUnreachable
+		// so the process exit code agrees with the error envelope's
+		// server_unreachable classification, and so an unattended caller can
+		// tell "ComfyUI is down" (wait and retry, or start it) from "ComfyUI
+		// rejected this" (fix the request) without parsing prose.
+		//
+		// DELIBERATE MIGRATION: these previously exited 5. Documented in the
+		// README/SKILL exit tables and in exitcodes.go.
+		if httpStatusFromError(err) == 0 && isNetworkFailure(err) {
+			return unreachableErr(err)
+		}
+		if status := httpStatusFromError(err); status >= 500 {
+			return upstream5xxErr(err)
+		}
 		return apiErr(err)
 	}
 }
@@ -1317,6 +1340,16 @@ func resolvePlatformWindow(ctx context.Context, request platform.WindowRequest, 
 }
 
 func wrapPlatformStructuredOutput(data json.RawMessage, flags *rootFlags, resultKey string, mergeOwnedEnvelope bool) (json.RawMessage, error) {
+	// Every generated command calls this from its structured-output branch,
+	// immediately before printOutput, which takes no flags and so cannot mark
+	// this itself. Marking BEFORE the nil-session early return is deliberate:
+	// the mark tracks "a structured document is going to stdout", which is
+	// true whether or not a platform session exists. Over-marking is the safe
+	// direction — it moves the error envelope to stderr, whereas
+	// under-marking would put two JSON documents on stdout.
+	if flags != nil {
+		flags.structuredWritten = true
+	}
 	if flags == nil || flags.platformSession == nil {
 		return data, nil
 	}
@@ -1713,6 +1746,13 @@ func isDryRunResponseForClient(c any, data json.RawMessage) bool {
 func printOutputWithFlagsMeta(w io.Writer, data json.RawMessage, flags *rootFlags, agentMeta map[string]any) error {
 	if err := validatePlatformAnalytics(flags); err != nil {
 		return err
+	}
+	// The funnel for hand-authored commands (printJSONFiltered lands here).
+	// See the note on rootFlags.structuredWritten: this is what keeps a
+	// command that prints a result envelope and then returns a typed error —
+	// wait, submit — from emitting two JSON documents on stdout.
+	if flags != nil && platformStructuredOutputSelected(w, flags) {
+		flags.structuredWritten = true
 	}
 	// --select wins over --compact when both are set: an explicit field list
 	// is the user's authoritative request, so the high-gravity allow-list

@@ -6,6 +6,88 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.53.0] - 2026-08-13
+
+### Added — comfyui-pp-cli perfection wave 1
+
+Seven scored backlog rows against the vendored `tools/comfyui` CLI. Sibling parity with
+`llamaswap-pp-cli` was the organising principle: where that CLI already solved a problem, this
+wave ports the solution rather than inventing a second one.
+
+**Typed domain exit codes (row 1).** `internal/cli/exitcodes.go` is now the single registry of
+every non-zero code, mirroring the sibling's contract. The domain codes were previously scattered
+across four files with no shared view, which is how 12/13 and 21/22 each came to carry two
+meanings unnoticed; nothing is renumbered, but every value is named and every reuse documented and
+command-scoped via `pp:typed-exit-codes`. A compile-time guard fails the build if
+`internal/comfy/submit`'s own constants ever drift from the registry. `set` and `validate` gained
+the annotations they were raising codes without.
+
+Three new codes, and two deliberate migrations that a caller branching on the old values will see:
+`24` execution-interrupted and `25` upstream-OOM split out of the generic `21` (classification
+reuses `exp.ClassifyFailure`, so the sweep runner and the wait path agree on what an OOM is), and
+a dial failure now exits `4` rather than `5` — "the server is down" and "the server refused this
+request" had been sharing a code. `26` upstream-5xx separates a broken server from a refused
+request.
+
+**Structured error envelope (row 3).** Under `--json`/`--agent`, every failing exit now emits
+`{ok:false, error:{code, category, retryable, http_status, message, remediation, exit_code}}`.
+Previously only the HTTP-409 branch emitted anything structured — and it emitted a different,
+poorer shape — so every typed exit, dial failure and usage error reached a machine caller as bare
+prose. The worst case was a malformed invocation under `--agent`, where flag parsing fails before
+`--agent` can imply `--json`; that path is covered by scanning argv. **Field names are identical
+to `llamaswap-pp-cli`'s**, so one parser reads both twins. The envelope goes to stdout, or to
+stderr when the command already wrote a result document there, so stdout stays exactly one JSON
+document.
+
+**Code-orchestration MCP surface (row 2).** The 13 endpoint-mirror tools are replaced by
+`comfyui_search` / `comfyui_get` / `comfyui_execute` over an in-binary registry — the sibling's
+shape, and the pattern Anthropic documented for large MCP surfaces. Endpoint summaries are carried
+over verbatim because they encode findings that cost real render time to learn. One deliberate
+divergence from the sibling: `Positional` is populated for real, so `{prompt_id}`, `{class_type}`
+and `{file}` actually substitute — the sibling ships empty slices and sends literal templates for
+its `{model}` endpoints, a bug owed a separate fix there.
+
+**MCP output schemas (row 4).** The three code-orchestration tools declare `outputSchema` and
+return real `structuredContent`. Schemas are committed under `internal/mcp/testdata/schema/` and
+the goldens are checked against what the server actually advertises AND against live handler
+output validated through a schema-validating server — proven non-vacuous by injecting drift in
+both directions.
+
+**API surface completeness (rows 8/18/23/29).** `free` (POST /free) is the cross-tool VRAM handoff
+primitive for a box where ComfyUI and llama-swap share cards. `features` (GET /features) turns the
+0.32.0 pin from an invisible assumption into a reported fact, comparing key SHAPE only because the
+values follow the server's own CLI args. `history clear`/`delete` close the one queue-family verb
+the history group was missing. `upload mask` adds the multipart endpoint, sharing one multipart
+implementation with `stage` rather than a second copy.
+
+All four contracts were read from the ComfyUI server source rather than inferred, which is how
+they document behaviour the route list does not: `/free` and `/history` answer with EMPTY 200
+bodies, `/free` acts asynchronously via a queue flag, and `/upload/mask` composites the posted
+file's ALPHA CHANNEL onto an existing image — so an opaque PNG silently writes an opaque mask, and
+a missing original writes nothing while still returning 200. Every side-effecting command prints
+by default and requires `--execute`, with an `IsVerifyEnv` short-circuit and no `mcp:read-only`.
+
+**Reproducibility intelligence (rows 12/13).** `deps <graph.json>` reports which pack provides each
+class and which classes nothing installed provides, resolving provenance through `/object_info`'s
+`python_module` and recovering pack names for missing classes from the ComfyUI Manager hints a
+UI-format workflow carries. It complements `validate` rather than overlapping it: validate asks
+"is this graph well-formed here", deps asks "what would this box need installed at all".
+`provenance` now reports the node set a run was submitted against — server identity alone cannot
+answer "was this the same environment", because a custom pack installed between two runs changes
+what a `class_type` means while every server field stays identical. Capture and report only; no
+restore. Storage uses new tables rather than new columns, because the idempotent migration replays
+`CREATE TABLE IF NOT EXISTS` and would never add a column to an existing database.
+
+**Test target (row 15).** `make test` is now `-count=1 -race -shuffle=on`. No races were exposed.
+
+### Verification
+`gofmt` clean, `go build ./...` and `go vet ./...` clean, and `go test ./... -count=1 -race
+-shuffle=on` green across all 17 packages, in both the canonical library tree and this vendored
+copy. The error envelope was additionally live-checked against the real binary with the server
+down. **No live-server verification was possible** — the box's ComfyUI was down and another
+session owned both GPUs — so every check needing a real server is written up as a runnable
+procedure in the library tree's `LIVE-SMOKES-DEFERRED.md`, ordered by risk.
+
 ### Fixed — documentation drift: the whole verified backlog (#99 + the remaining 13)
 A four-track audit of the 0.44.0–0.48.1 arc confirmed 17 drifts against **both** the doc line and
 the code line (3 further claims were checked and rejected as not-real). Four were fixed in #99,

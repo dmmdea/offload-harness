@@ -42,13 +42,16 @@ import (
 // outcome without string-matching a message. 12 is unused by the generated
 // framework (2 usage, 3 not-found, 4 auth, 5 api, 6 partial, 7 rate-limit,
 // 10 config).
-const comfyExitClassUnregistered = 12
+// The value lives in exitcodes.go as ExitNodeClassDrift; this alias keeps the
+// nodes-family call sites reading in their own vocabulary.
+const comfyExitClassUnregistered = ExitNodeClassDrift
 
 // comfyExitModelNotVisible is the exit code for `models why` when the file is
 // simply not offered by any loader and no COMBO is empty (not-listed /
 // no-such-input). Separate from 12 so "unregistered class" and "file not in a
 // registered folder" never collapse into one branch.
-const comfyExitModelNotVisible = 13
+// The value lives in exitcodes.go as ExitModelNotVisible.
+const comfyExitModelNotVisible = ExitModelNotVisible
 
 func comfyClassUnregisteredErr(err error) error {
 	return &cliError{code: comfyExitClassUnregistered, err: err}

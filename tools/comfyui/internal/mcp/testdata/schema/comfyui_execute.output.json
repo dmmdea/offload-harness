@@ -1,0 +1,39 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "endpoint_id",
+    "method",
+    "path",
+    "body_bytes"
+  ],
+  "properties": {
+    "endpoint_id": {
+      "type": "string",
+      "description": "Dotted identifier of the endpoint that was executed."
+    },
+    "method": {
+      "type": "string",
+      "description": "HTTP method used for the call."
+    },
+    "path": {
+      "type": "string",
+      "description": "Path actually requested, after path-placeholder substitution and query-string assembly."
+    },
+    "body_bytes": {
+      "type": "integer",
+      "description": "Size in bytes of the bounded response body carried by the text content."
+    },
+    "body": {
+      "description": "Response body parsed as JSON. Unconstrained: the shape is whatever the ComfyUI endpoint returned. Absent when the body was not JSON or was omitted."
+    },
+    "body_text": {
+      "type": "string",
+      "description": "Response body verbatim when it did not parse as JSON — ComfyUI's /view returns raw file bytes. Absent when body or body_omitted is present."
+    },
+    "body_omitted": {
+      "type": "boolean",
+      "description": "True when the body was left out of structuredContent because it exceeds the inline mirror budget; read it from the text content instead."
+    }
+  }
+}

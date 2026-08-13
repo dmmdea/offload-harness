@@ -1,0 +1,148 @@
+--- a/tools/comfyui/internal/cli/root.go
++++ b/tools/comfyui/internal/cli/root.go
+@@ -66,6 +66,15 @@
+ 	dataSource              string
+ 	freshnessMeta           any
+ 
++	// structuredWritten records that a structured document has already been
++	// written to stdout during this invocation. The error envelope
++	// (errenvelope.go) reads it to decide its stream: without the flag, a
++	// command that prints a result envelope and THEN returns a typed error
++	// would put two JSON documents on stdout and break a naive reader. Set by
++	// the two output funnels, printOutputWithFlags and
++	// wrapPlatformStructuredOutput.
++	structuredWritten bool
++
+ 	// deliverBuf captures command output when --deliver is set to a
+ 	// non-stdout sink. Flushed to the sink after Execute returns.
+ 	deliverBuf  *bytes.Buffer
+@@ -115,6 +124,11 @@
+ func Execute() (retErr error) {
+ 	var flags rootFlags
+ 	rootCmd := newRootCmd(&flags)
++	// Registered FIRST so it runs LAST (defers are LIFO): the envelope must
++	// describe the error the caller actually receives, after every other
++	// deferred hook — finalizePlatformInvocation among them — has had its
++	// chance to replace retErr.
++	defer func() { finalizeErrorOutput(&flags, retErr) }()
+ 	defer finalizePlatformInvocation(&flags, &retErr)
+ 
+ 	executedCmd, err := rootCmd.ExecuteC()
+@@ -140,13 +154,12 @@
+ 			// these up.
+ 			journalFailedFlag = flagStr
+ 			if suggestion := suggestFlag(flagStr, rootCmd); suggestion != "" {
+-				// Cobra already printed `Error: unknown flag: --foob` before
+-				// returning; the wrap below attaches the hint to err.Error()
+-				// for downstream consumers and exit-code classification, but
+-				// would never reach stderr now that main.go no longer prints
+-				// err. Emit the hint explicitly so the suggestion still
+-				// shows up under Cobra's error line.
+-				fmt.Fprintf(os.Stderr, "hint: did you mean --%s?\n", suggestion)
++				// The wrap attaches the hint to err.Error() for downstream
++				// consumers and exit-code classification. It is not ALSO
++				// printed here: finalizeErrorOutput is now the single error
++				// reporting site and renders this same err — for a human as
++				// one prose line, for a machine inside the envelope's
++				// message field. Printing it here too duplicated the hint.
+ 				err = fmt.Errorf("%w\nhint: did you mean --%s?", err, suggestion)
+ 				journalSuggestedFlag = "--" + suggestion
+ 			}
+@@ -234,7 +247,14 @@
+ Add --agent to any command for JSON output + non-interactive mode.
+ Run 'comfyui-pp-cli doctor' to verify auth and connectivity.`,
+ 		SilenceUsage: true,
+-		Version:      version,
++		// Cobra's own error printing is suppressed so that finalizeErrorOutput
++		// (errenvelope.go) is the SINGLE error-reporting site. Without this,
++		// a machine caller under --json/--agent received Cobra's bare
++		// `Error: ...` line in addition to the structured envelope, and on
++		// the flag-parse path received ONLY that line. Humans still get one
++		// prose line — finalizeErrorOutput prints it.
++		SilenceErrors: true,
++		Version:       version,
+ 	}
+ 	rootCmd.SetVersionTemplate("comfyui-pp-cli {{ .Version }}\n")
+ 
+--- a/tools/comfyui/internal/cli/helpers.go
++++ b/tools/comfyui/internal/cli/helpers.go
+@@ -507,14 +507,22 @@
+ 	return nil
+ }
+ 
++// writeAPIErrorEnvelope is retained as the in-RunE emitter for the HTTP-409
++// branch of classifyAPIError. It now emits the SAME document as
++// finalizeErrorOutput (errenvelope.go) rather than the old {error, code} pair,
++// so a caller never has to parse two different failure shapes depending on
++// which branch produced the error.
++//
++// It also marks structuredWritten, so the end-of-run envelope goes to stderr
++// instead of appending a second JSON document to stdout after this one.
+ func writeAPIErrorEnvelope(flags *rootFlags, err error, code int) {
+ 	if flags == nil || !flags.asJSON {
+ 		return
+ 	}
+-	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
+-		"error": err.Error(),
+-		"code":  code,
+-	})
++	env := errorEnvelope{OK: false, Error: classifyErrorEnvelope(err, code)}
++	if encErr := json.NewEncoder(os.Stdout).Encode(env); encErr == nil {
++		flags.structuredWritten = true
++	}
+ }
+ 
+ // classifyAPIError maps API errors to structured exit codes with actionable hints.
+@@ -544,6 +552,21 @@
+ 	case strings.Contains(msg, "HTTP 429"):
+ 		return rateLimitErr(err)
+ 	default:
++		// A failure with no HTTP status that names a dead socket is not an
++		// API error — the API never answered. Give it ExitServerUnreachable
++		// so the process exit code agrees with the error envelope's
++		// server_unreachable classification, and so an unattended caller can
++		// tell "ComfyUI is down" (wait and retry, or start it) from "ComfyUI
++		// rejected this" (fix the request) without parsing prose.
++		//
++		// DELIBERATE MIGRATION: these previously exited 5. Documented in the
++		// README/SKILL exit tables and in exitcodes.go.
++		if httpStatusFromError(err) == 0 && isNetworkFailure(err) {
++			return unreachableErr(err)
++		}
++		if status := httpStatusFromError(err); status >= 500 {
++			return upstream5xxErr(err)
++		}
+ 		return apiErr(err)
+ 	}
+ }
+@@ -1317,6 +1340,16 @@
+ }
+ 
+ func wrapPlatformStructuredOutput(data json.RawMessage, flags *rootFlags, resultKey string, mergeOwnedEnvelope bool) (json.RawMessage, error) {
++	// Every generated command calls this from its structured-output branch,
++	// immediately before printOutput, which takes no flags and so cannot mark
++	// this itself. Marking BEFORE the nil-session early return is deliberate:
++	// the mark tracks "a structured document is going to stdout", which is
++	// true whether or not a platform session exists. Over-marking is the safe
++	// direction — it moves the error envelope to stderr, whereas
++	// under-marking would put two JSON documents on stdout.
++	if flags != nil {
++		flags.structuredWritten = true
++	}
+ 	if flags == nil || flags.platformSession == nil {
+ 		return data, nil
+ 	}
+@@ -1714,6 +1747,13 @@
+ 	if err := validatePlatformAnalytics(flags); err != nil {
+ 		return err
+ 	}
++	// The funnel for hand-authored commands (printJSONFiltered lands here).
++	// See the note on rootFlags.structuredWritten: this is what keeps a
++	// command that prints a result envelope and then returns a typed error —
++	// wait, submit — from emitting two JSON documents on stdout.
++	if flags != nil && platformStructuredOutputSelected(w, flags) {
++		flags.structuredWritten = true
++	}
+ 	// --select wins over --compact when both are set: an explicit field list
+ 	// is the user's authoritative request, so the high-gravity allow-list
+ 	// must not strip those fields out before --select can pick them. When

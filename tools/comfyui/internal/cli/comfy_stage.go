@@ -22,11 +22,9 @@ package cli
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -612,82 +610,20 @@ type stageUploadResponse struct {
 
 // stageUploadImage POSTs a multipart/form-data upload to /upload/image.
 //
-// This does not go through internal/client: that client marshals every body as
-// JSON and has no multipart path. The file is streamed through an io.Pipe so a
-// multi-hundred-megabyte input is never buffered in memory.
+// The multipart mechanics moved to comfyMultipartUpload (comfy_upload_mask.go)
+// when `upload mask` arrived and needed the identical pipe/teardown/status
+// handling against a different endpoint. This function keeps stage's own
+// vocabulary — subfolder, assetType, overwrite — and translates it into the
+// form fields /upload/image expects.
 func stageUploadImage(ctx context.Context, flags *rootFlags, baseURL, hostPath, filename, subfolder, assetType string, overwrite bool) (stageUploadResponse, error) {
-	f, err := os.Open(hostPath)
-	if err != nil {
-		return stageUploadResponse{}, fmt.Errorf("opening %s: %w", hostPath, err)
+	fields := map[string]string{"type": assetType}
+	if subfolder != "" {
+		fields["subfolder"] = subfolder
 	}
-	defer f.Close()
-
-	pr, pw := io.Pipe()
-	mw := multipart.NewWriter(pw)
-	go func() {
-		var writeErr error
-		defer func() { _ = pw.CloseWithError(writeErr) }()
-		part, err := mw.CreateFormFile("image", filename)
-		if err != nil {
-			writeErr = err
-			return
-		}
-		if _, err := io.Copy(part, f); err != nil {
-			writeErr = err
-			return
-		}
-		fields := map[string]string{"type": assetType}
-		if subfolder != "" {
-			fields["subfolder"] = subfolder
-		}
-		if overwrite {
-			fields["overwrite"] = "true"
-		}
-		for k, v := range fields {
-			if err := mw.WriteField(k, v); err != nil {
-				writeErr = err
-				return
-			}
-		}
-		writeErr = mw.Close()
-	}()
-
-	target := strings.TrimRight(baseURL, "/") + "/upload/image"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, pr)
-	if err != nil {
-		return stageUploadResponse{}, err
+	if overwrite {
+		fields["overwrite"] = "true"
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "comfyui-pp-cli/"+version)
-
-	timeout := time.Duration(0)
-	if flags != nil && flags.timeout > 0 {
-		timeout = flags.timeout
-	}
-	httpClient := &http.Client{Timeout: timeout}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return stageUploadResponse{}, apiErr(fmt.Errorf("uploading %s to %s: %w", filepath.Base(hostPath), target, err))
-	}
-	defer resp.Body.Close()
-
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return stageUploadResponse{}, apiErr(fmt.Errorf("upload rejected: HTTP %d from %s: %s",
-			resp.StatusCode, target, strings.TrimSpace(string(body))))
-	}
-	if readErr != nil {
-		return stageUploadResponse{}, apiErr(fmt.Errorf("reading upload response: %w", readErr))
-	}
-	var parsed stageUploadResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return stageUploadResponse{}, apiErr(fmt.Errorf("upload response was not JSON: %s", strings.TrimSpace(string(body))))
-	}
-	if strings.TrimSpace(parsed.Name) == "" {
-		return stageUploadResponse{}, apiErr(fmt.Errorf("upload response carried no filename: %s", strings.TrimSpace(string(body))))
-	}
-	return parsed, nil
+	return comfyMultipartUpload(ctx, flags, baseURL, "/upload/image", hostPath, filename, fields)
 }
 
 func stageEmit(cmd *cobra.Command, flags *rootFlags, result stageResult) error {

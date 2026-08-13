@@ -52,8 +52,47 @@ func init() {
 			// Experiments
 			newComfyExpCmd(flags),    // multi-arm sweeps that survive a restart
 			newComfyReplayCmd(flags), // replay with an attributed delta
+
+			// Reproducibility and server state
+			newComfyDepsCmd(flags),     // which packs a graph needs; what nothing provides
+			newComfyFreeCmd(flags),     // cross-tool VRAM handoff (POST /free)
+			newComfyFeaturesCmd(flags), // capability negotiation + drift vs the pinned version
 		} {
 			addNovelCommandIfAbsent(root, cmd)
 		}
+
+		// Leaves that belong under a GENERATED parent. These cannot go in the
+		// slice above — they are not top-level commands, and the generated
+		// parent's own constructor is rewritten on every regeneration, so
+		// attaching from there would not survive. Resolving the parent by name
+		// at registration time does survive, and yields silently when the
+		// parent is absent rather than panicking.
+		attachLeavesToParent(root, "history",
+			newComfyHistoryClearCmd(flags),  // POST /history {"clear": true}
+			newComfyHistoryDeleteCmd(flags), // POST /history {"delete": [...]}
+		)
+		attachLeavesToParent(root, "upload",
+			newComfyUploadMaskCmd(flags), // POST /upload/mask (multipart)
+		)
 	})
+}
+
+// attachLeavesToParent adds hand-authored subcommands to a command the
+// generator owns, matched by name.
+//
+// Yields silently when the parent does not exist: a future spec revision could
+// rename or drop it, and a missing parent must degrade to "this leaf is not
+// registered" rather than panicking at startup. Uses addNovelCommandIfAbsent
+// so a generated leaf of the same name always wins, exactly as it does for
+// top-level commands.
+func attachLeavesToParent(root *cobra.Command, parentName string, leaves ...*cobra.Command) {
+	for _, candidate := range root.Commands() {
+		if candidate.Name() != parentName {
+			continue
+		}
+		for _, leaf := range leaves {
+			addNovelCommandIfAbsent(candidate, leaf)
+		}
+		return
+	}
 }

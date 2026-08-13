@@ -823,6 +823,18 @@ type ClassSpec struct {
 	DisplayName string               `json:"display_name,omitempty"`
 	Category    string               `json:"category,omitempty"`
 	Inputs      map[string]InputSpec `json:"inputs"`
+
+	// PythonModule is /object_info's python_module: the module that
+	// registered this class. It is the ONLY field in the whole schema that
+	// says WHERE a node came from — "nodes" for core, "comfy_extras.<name>"
+	// for bundled extras, "custom_nodes.<PackName>" for an installed custom
+	// pack. `deps` reads it to answer "what would this box need installed to
+	// run this graph at all", which nothing else in the schema can answer.
+	//
+	// Optional: absent from very old servers and from any hand-written
+	// --object-info dump, in which case provenance is reported as unknown
+	// rather than guessed.
+	PythonModule string `json:"python_module,omitempty"`
 }
 
 // Schema is the cached node schema: class type -> spec.
@@ -877,6 +889,9 @@ func ParseClassEntry(classType string, entry interface{}) (ClassSpec, bool) {
 	}
 	if s, ok := obj["category"].(string); ok {
 		spec.Category = s
+	}
+	if s, ok := obj["python_module"].(string); ok {
+		spec.PythonModule = s
 	}
 	input, _ := obj["input"].(map[string]interface{})
 	for _, group := range []struct {
