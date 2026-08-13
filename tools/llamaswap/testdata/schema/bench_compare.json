@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer"
+    },
+    "a": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "ts": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "kv_depth": {
+          "type": "integer"
+        },
+        "kv_depth_observed": {
+          "type": "integer"
+        },
+        "pp_mean": {
+          "type": "number"
+        },
+        "pp_stddev": {
+          "type": "number"
+        },
+        "tg_mean": {
+          "type": "number"
+        },
+        "tg_stddev": {
+          "type": "number"
+        },
+        "prompt_n": {
+          "type": "integer"
+        },
+        "runs": {
+          "type": "integer"
+        },
+        "build_info": {
+          "type": "string"
+        },
+        "llamaswap_version": {
+          "type": "string"
+        },
+        "comparability_sha": {
+          "type": "string"
+        }
+      },
+      "required": ["build_info","comparability_sha","id","kv_depth","kv_depth_observed","llamaswap_version","model","pp_mean","pp_stddev","prompt_n","runs","tg_mean","tg_stddev","ts"]
+    },
+    "b": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "ts": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "kv_depth": {
+          "type": "integer"
+        },
+        "kv_depth_observed": {
+          "type": "integer"
+        },
+        "pp_mean": {
+          "type": "number"
+        },
+        "pp_stddev": {
+          "type": "number"
+        },
+        "tg_mean": {
+          "type": "number"
+        },
+        "tg_stddev": {
+          "type": "number"
+        },
+        "prompt_n": {
+          "type": "integer"
+        },
+        "runs": {
+          "type": "integer"
+        },
+        "build_info": {
+          "type": "string"
+        },
+        "llamaswap_version": {
+          "type": "string"
+        },
+        "comparability_sha": {
+          "type": "string"
+        }
+      },
+      "required": ["build_info","comparability_sha","id","kv_depth","kv_depth_observed","llamaswap_version","model","pp_mean","pp_stddev","prompt_n","runs","tg_mean","tg_stddev","ts"]
+    },
+    "comparable": {
+      "type": "boolean"
+    },
+    "refusal": {
+      "type": "string"
+    },
+    "comparability_key_diff": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "deltas": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "metric": {
+            "type": "string"
+          },
+          "a": {
+            "type": "number"
+          },
+          "b": {
+            "type": "number"
+          },
+          "delta_pct": {
+            "type": "number"
+          },
+          "significant": {
+            "type": "boolean"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": ["a","b","delta_pct","metric","significant"]
+      }
+    },
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "ts": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "kv_depth": {
+            "type": "integer"
+          },
+          "kv_depth_observed": {
+            "type": "integer"
+          },
+          "pp_mean": {
+            "type": "number"
+          },
+          "pp_stddev": {
+            "type": "number"
+          },
+          "tg_mean": {
+            "type": "number"
+          },
+          "tg_stddev": {
+            "type": "number"
+          },
+          "prompt_n": {
+            "type": "integer"
+          },
+          "runs": {
+            "type": "integer"
+          },
+          "build_info": {
+            "type": "string"
+          },
+          "llamaswap_version": {
+            "type": "string"
+          },
+          "comparability_sha": {
+            "type": "string"
+          }
+        },
+        "required": ["build_info","comparability_sha","id","kv_depth","kv_depth_observed","llamaswap_version","model","pp_mean","pp_stddev","prompt_n","runs","tg_mean","tg_stddev","ts"]
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": ["comparable","schema_version"]
+}

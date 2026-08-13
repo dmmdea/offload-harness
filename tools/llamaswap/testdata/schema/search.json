@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "count": {
+      "type": "integer"
+    },
+    "results": {
+      "type": "array",
+      "items": {
+
+      }
+    },
+    "store_status": {
+      "type": "string"
+    },
+    "resumable": {
+      "type": "boolean"
+    },
+    "next_step": {
+      "type": "string"
+    }
+  },
+  "required": ["count","results","resumable","store_status"]
+}

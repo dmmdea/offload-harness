@@ -115,6 +115,12 @@ func RootCmd() *cobra.Command {
 func Execute() (retErr error) {
 	var flags rootFlags
 	rootCmd := newRootCmd(&flags)
+	// PATCHED (wave LS-1): the machine-readable error contract. Registered
+	// FIRST so it runs LAST (defers are LIFO) and the envelope is the final
+	// stdout document. Human mode is unaffected — it emits nothing unless
+	// --json/--agent was set. See
+	// .printing-press-patches/internal-cli-root.go.md.
+	defer finalizeAgentErrorEnvelope(&flags, &retErr)
 	defer finalizePlatformInvocation(&flags, &retErr)
 
 	executedCmd, err := rootCmd.ExecuteC()

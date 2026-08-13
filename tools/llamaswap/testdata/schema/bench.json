@@ -1,0 +1,430 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer"
+    },
+    "started_at": {
+      "type": "string"
+    },
+    "route": {
+      "type": "string"
+    },
+    "host": {
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "type": "string"
+        },
+        "cpu_physical_cores": {
+          "type": "integer"
+        },
+        "cpu_logical_threads": {
+          "type": "integer"
+        },
+        "os": {
+          "type": "string"
+        },
+        "arch": {
+          "type": "string"
+        },
+        "MemoryGiB": {
+          "type": "number"
+        },
+        "llamaswap_version": {
+          "type": "string"
+        },
+        "llamaswap_commit": {
+          "type": "string"
+        },
+        "gpus": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": ["MemoryGiB"]
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "requested_as": {
+            "type": "string"
+          },
+          "was_loaded_before": {
+            "type": "boolean"
+          },
+          "swapped_in_by_this_bench": {
+            "type": "boolean"
+          },
+          "config_sha256": {
+            "type": "string"
+          },
+          "serving_cmd": {
+            "type": "string"
+          },
+          "llamaswap_version": {
+            "type": "string"
+          },
+          "build_info": {
+            "type": "string"
+          },
+          "clean_state": {
+            "type": "boolean"
+          },
+          "runs": {
+            "type": "integer"
+          },
+          "max_tokens": {
+            "type": "integer"
+          },
+          "concurrency": {
+            "type": "integer"
+          },
+          "cache_prompt": {
+            "type": "boolean"
+          },
+          "prompt_tokens_measured": {
+            "type": "integer"
+          },
+          "standard_preset": {
+            "type": "boolean"
+          },
+          "model_path": {
+            "type": "string"
+          },
+          "model_ftype": {
+            "type": "string"
+          },
+          "model_size_bytes": {
+            "type": "integer"
+          },
+          "model_n_params": {
+            "type": "integer"
+          },
+          "comparability_key": {
+            "type": "object",
+            "properties": {
+              "fields": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "source": {
+                      "type": "string"
+                    },
+                    "observed": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["name","observed","source"]
+                }
+              },
+              "comparability_sha": {
+                "type": "string"
+              },
+              "observed_fields": {
+                "type": "integer"
+              },
+              "total_fields": {
+                "type": "integer"
+              },
+              "unobserved_fields": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "contract": {
+                "type": "string"
+              }
+            },
+            "required": ["comparability_sha","contract","fields","observed_fields","total_fields"]
+          },
+          "depths": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kv_depth_requested": {
+                  "type": "integer"
+                },
+                "kv_depth_filler_tokens": {
+                  "type": "integer"
+                },
+                "kv_depth_observed_cache_n": {
+                  "type": "integer"
+                },
+                "kv_depth_note": {
+                  "type": "string"
+                },
+                "pp_tokens_per_second": {
+                  "type": "object",
+                  "properties": {
+                    "n": {
+                      "type": "integer"
+                    },
+                    "mean": {
+                      "type": "number"
+                    },
+                    "stddev": {
+                      "type": "number"
+                    },
+                    "median": {
+                      "type": "number"
+                    },
+                    "min": {
+                      "type": "number"
+                    },
+                    "max": {
+                      "type": "number"
+                    },
+                    "coefficient_of_variation_pct": {
+                      "type": "number"
+                    },
+                    "unstable": {
+                      "type": "boolean"
+                    },
+                    "note": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["coefficient_of_variation_pct","max","mean","median","min","n","stddev","unstable"]
+                },
+                "tg_tokens_per_second": {
+                  "type": "object",
+                  "properties": {
+                    "n": {
+                      "type": "integer"
+                    },
+                    "mean": {
+                      "type": "number"
+                    },
+                    "stddev": {
+                      "type": "number"
+                    },
+                    "median": {
+                      "type": "number"
+                    },
+                    "min": {
+                      "type": "number"
+                    },
+                    "max": {
+                      "type": "number"
+                    },
+                    "coefficient_of_variation_pct": {
+                      "type": "number"
+                    },
+                    "unstable": {
+                      "type": "boolean"
+                    },
+                    "note": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["coefficient_of_variation_pct","max","mean","median","min","n","stddev","unstable"]
+                },
+                "prompt_tokens_measured": {
+                  "type": "integer"
+                },
+                "prompt_cache_hit_rate": {
+                  "type": "number"
+                },
+                "samples": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "index": {
+                        "type": "integer"
+                      },
+                      "kv_depth_requested": {
+                        "type": "integer"
+                      },
+                      "wall_ms": {
+                        "type": "number"
+                      },
+                      "cache_n": {
+                        "type": "integer"
+                      },
+                      "prompt_n": {
+                        "type": "integer"
+                      },
+                      "prompt_ms": {
+                        "type": "number"
+                      },
+                      "pp_tokens_per_second": {
+                        "type": "number"
+                      },
+                      "predicted_n": {
+                        "type": "integer"
+                      },
+                      "predicted_ms": {
+                        "type": "number"
+                      },
+                      "tg_tokens_per_second": {
+                        "type": "number"
+                      },
+                      "rate_source": {
+                        "type": "string"
+                      },
+                      "error": {
+                        "type": "string"
+                      },
+                      "cold_load_ms": {
+                        "type": "number"
+                      }
+                    },
+                    "required": ["cache_n","index","kv_depth_requested","pp_tokens_per_second","predicted_ms","predicted_n","prompt_ms","prompt_n","rate_source","tg_tokens_per_second","wall_ms"]
+                  }
+                },
+                "warnings": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": ["kv_depth_filler_tokens","kv_depth_observed_cache_n","kv_depth_requested","pp_tokens_per_second","prompt_cache_hit_rate","prompt_tokens_measured","samples","tg_tokens_per_second"]
+            }
+          },
+          "pp_median_tokens_per_second": {
+            "type": "number"
+          },
+          "tg_median_tokens_per_second": {
+            "type": "number"
+          },
+          "tg_max_tokens_per_second": {
+            "type": "number"
+          },
+          "cold_load_ms": {
+            "type": "number"
+          },
+          "vram_delta_per_uuid": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "uuid": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "role": {
+                  "type": "string"
+                },
+                "baseline_mib": {
+                  "type": "integer"
+                },
+                "after_mib": {
+                  "type": "integer"
+                },
+                "delta_mib": {
+                  "type": "integer"
+                },
+                "total_mib": {
+                  "type": "integer"
+                }
+              },
+              "required": ["after_mib","baseline_mib","delta_mib","name","total_mib","uuid"]
+            }
+          },
+          "vram_delta_total_mib": {
+            "type": "integer"
+          },
+          "samples": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer"
+                },
+                "kv_depth_requested": {
+                  "type": "integer"
+                },
+                "wall_ms": {
+                  "type": "number"
+                },
+                "cache_n": {
+                  "type": "integer"
+                },
+                "prompt_n": {
+                  "type": "integer"
+                },
+                "prompt_ms": {
+                  "type": "number"
+                },
+                "pp_tokens_per_second": {
+                  "type": "number"
+                },
+                "predicted_n": {
+                  "type": "integer"
+                },
+                "predicted_ms": {
+                  "type": "number"
+                },
+                "tg_tokens_per_second": {
+                  "type": "number"
+                },
+                "rate_source": {
+                  "type": "string"
+                },
+                "error": {
+                  "type": "string"
+                },
+                "cold_load_ms": {
+                  "type": "number"
+                }
+              },
+              "required": ["cache_n","index","kv_depth_requested","pp_tokens_per_second","predicted_ms","predicted_n","prompt_ms","prompt_n","rate_source","tg_tokens_per_second","wall_ms"]
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "timing_provenance": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string"
+              }
+            },
+            "required": ["note","source"]
+          }
+        },
+        "required": ["build_info","cache_prompt","clean_state","comparability_key","concurrency","config_sha256","depths","llamaswap_version","max_tokens","model","pp_median_tokens_per_second","prompt_tokens_measured","runs","samples","serving_cmd","standard_preset","swapped_in_by_this_bench","tg_max_tokens_per_second","tg_median_tokens_per_second","timing_provenance","vram_delta_total_mib","was_loaded_before"]
+      }
+    },
+    "standard_markdown": {
+      "type": "string"
+    }
+  },
+  "required": ["host","models","route","schema_version","started_at"]
+}

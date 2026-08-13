@@ -40,6 +40,13 @@ const (
 	// ExitUpstream5xx: the upstream model server answered 5xx.
 	ExitUpstream5xx = 27
 	// ExitFitRefusal: fit/ctx verdict lands inside the uncertainty band —
-	// the command refuses to answer rather than guess.
+	// the command refuses to answer rather than guess. Also raised when the
+	// header makes the standard KV formula inapplicable (MLA/SSM), when a
+	// shard set is incomplete, or when the file is not a model at all.
 	ExitFitRefusal = 28
+	// ExitNotComparable: two measurement rows carry different comparability
+	// keys, so their difference measures the configuration change rather than
+	// the thing being compared. A finding, not a failure — the command
+	// printed both rows and named the differing fields before exiting.
+	ExitNotComparable = 29
 )

@@ -1,0 +1,388 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer"
+    },
+    "target": {
+      "type": "string"
+    },
+    "resolved_from": {
+      "type": "string"
+    },
+    "header": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "file_size_bytes": {
+          "type": "integer"
+        },
+        "file_size_mib": {
+          "type": "integer"
+        },
+        "is_gguf": {
+          "type": "boolean"
+        },
+        "not_gguf_reason": {
+          "type": "string"
+        },
+        "magic_seen": {
+          "type": "string"
+        },
+        "version": {
+          "type": "integer"
+        },
+        "tensor_count": {
+          "type": "integer"
+        },
+        "kv_count": {
+          "type": "integer"
+        },
+        "metadata_bytes": {
+          "type": "integer"
+        },
+        "architecture": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "size_label": {
+          "type": "string"
+        },
+        "block_count": {
+          "type": "integer"
+        },
+        "head_count": {
+          "type": "integer"
+        },
+        "head_count_kv": {
+          "type": "integer"
+        },
+        "context_length": {
+          "type": "integer"
+        },
+        "embedding_length": {
+          "type": "integer"
+        },
+        "head_count_kv_source": {
+          "type": "string"
+        },
+        "key_length": {
+          "type": "integer"
+        },
+        "value_length": {
+          "type": "integer"
+        },
+        "key_value_length_source": {
+          "type": "string"
+        },
+        "sliding_window": {
+          "type": "integer"
+        },
+        "sliding_window_pattern": {
+          "type": "array",
+          "items": {
+            "type": "boolean"
+          }
+        },
+        "key_length_swa": {
+          "type": "integer"
+        },
+        "value_length_swa": {
+          "type": "integer"
+        },
+        "shared_kv_layers": {
+          "type": "integer"
+        },
+        "file_type": {
+          "type": "integer"
+        },
+        "file_type_base": {
+          "type": "integer"
+        },
+        "file_type_guessed": {
+          "type": "boolean"
+        },
+        "quantization": {
+          "type": "string"
+        },
+        "general_type": {
+          "type": "string"
+        },
+        "is_model": {
+          "type": "boolean"
+        },
+        "not_a_model_reason": {
+          "type": "string"
+        },
+        "pooling_type": {
+          "type": "integer"
+        },
+        "pooling_type_name": {
+          "type": "string"
+        },
+        "pooling_role": {
+          "type": "string"
+        },
+        "split": {
+          "type": "object",
+          "properties": {
+            "split_no": {
+              "type": "integer"
+            },
+            "split_count": {
+              "type": "integer"
+            },
+            "split_tensors_count": {
+              "type": "integer"
+            },
+            "shard_index_1_based": {
+              "type": "integer"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "filename_index": {
+              "type": "integer"
+            },
+            "filename_count": {
+              "type": "integer"
+            },
+            "disagreement": {
+              "type": "string"
+            }
+          },
+          "required": ["shard_index_1_based","split_count","split_no","summary"]
+        },
+        "rope_scaling": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string"
+            },
+            "factor": {
+              "type": "number"
+            },
+            "original_context_length": {
+              "type": "integer"
+            },
+            "attn_factor": {
+              "type": "number"
+            },
+            "yarn_log_multiplier": {
+              "type": "number"
+            },
+            "yarn_ext_factor": {
+              "type": "number"
+            },
+            "yarn_beta_fast": {
+              "type": "number"
+            },
+            "yarn_beta_slow": {
+              "type": "number"
+            },
+            "finetuned": {
+              "type": "boolean"
+            },
+            "Keys": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": ["Keys"]
+        },
+        "moe": {
+          "type": "object",
+          "properties": {
+            "expert_count": {
+              "type": "integer"
+            },
+            "expert_used_count": {
+              "type": "integer"
+            },
+            "expert_shared_count": {
+              "type": "integer"
+            },
+            "params_total": {
+              "type": "integer"
+            },
+            "params_in_expert_tensors": {
+              "type": "integer"
+            },
+            "params_active_per_token": {
+              "type": "integer"
+            },
+            "expert_tensor_count": {
+              "type": "integer"
+            },
+            "active_params_source": {
+              "type": "string"
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "required": ["active_params_source","expert_count"]
+        },
+        "quantization_profile": {
+          "type": "object",
+          "properties": {
+            "tensors": {
+              "type": "integer"
+            },
+            "elements": {
+              "type": "integer"
+            },
+            "bytes": {
+              "type": "integer"
+            },
+            "bits_per_weight": {
+              "type": "number"
+            },
+            "types": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string"
+                  },
+                  "tensors": {
+                    "type": "integer"
+                  },
+                  "elements": {
+                    "type": "integer"
+                  },
+                  "bytes": {
+                    "type": "integer"
+                  },
+                  "bits_per_element": {
+                    "type": "number"
+                  },
+                  "share_of_bytes": {
+                    "type": "number"
+                  }
+                },
+                "required": ["bits_per_element","bytes","elements","share_of_bytes","tensors","type"]
+              }
+            },
+            "dominant_type": {
+              "type": "string"
+            },
+            "declared_file_type": {
+              "type": "string"
+            },
+            "label_mismatch": {
+              "type": "boolean"
+            },
+            "label_mismatch_note": {
+              "type": "string"
+            },
+            "unknown_types": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "unsized_tensors": {
+              "type": "integer"
+            },
+            "partial_shard": {
+              "type": "boolean"
+            }
+          },
+          "required": ["bits_per_weight","bytes","elements","label_mismatch","tensors","types"]
+        },
+        "unsupported_kv_arch": {
+          "type": "string"
+        },
+        "unsupported_kv_keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tensor_info_bytes": {
+          "type": "integer"
+        },
+        "tensor_info_error": {
+          "type": "string"
+        },
+        "chat_template_chars": {
+          "type": "integer"
+        },
+        "chat_template_sha256": {
+          "type": "string"
+        },
+        "kv": {
+          "type": "object",
+          "additionalProperties": {
+
+          }
+        }
+      },
+      "required": ["file_size_bytes","file_size_mib","file_type","file_type_base","file_type_guessed","is_gguf","is_model","kv_count","metadata_bytes","path","quantization","tensor_count"]
+    },
+    "shards": {
+      "type": "object",
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "shards": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": {
+                "type": "integer"
+              },
+              "path": {
+                "type": "string"
+              },
+              "bytes": {
+                "type": "integer"
+              },
+              "exists": {
+                "type": "boolean"
+              }
+            },
+            "required": ["bytes","exists","index","path"]
+          }
+        },
+        "total_bytes": {
+          "type": "integer"
+        },
+        "missing_shard_indexes": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "convention": {
+          "type": "string"
+        }
+      },
+      "required": ["complete","convention","count","shards","total_bytes"]
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "raw_metadata_included": {
+      "type": "boolean"
+    }
+  },
+  "required": ["raw_metadata_included","resolved_from","schema_version","target"]
+}
