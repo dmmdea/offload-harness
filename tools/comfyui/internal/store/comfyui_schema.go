@@ -321,6 +321,40 @@ var comfyUIMigrations = []string{
 		k TEXT PRIMARY KEY,
 		v TEXT
 	)`,
+
+	// One distinct NODE SET: which node classes and custom-node packs the
+	// server offered. This is the half of reproducibility that `server` does
+	// not cover — server records the binary's identity (version, argv), and
+	// two runs can share all of that while a custom pack was installed,
+	// upgraded, or removed between them, which silently changes what a graph
+	// means. Capture only; nothing here restores anything.
+	//
+	// id is a content hash, so an unchanged node set is recorded once no
+	// matter how many runs reference it.
+	`CREATE TABLE IF NOT EXISTS node_set (
+		id TEXT PRIMARY KEY,
+		comfyui_version TEXT,
+		class_count INTEGER,
+		pack_count INTEGER,
+		packs_json JSON,
+		class_digest TEXT,
+		source TEXT,
+		captured_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`,
+
+	// run -> node_set as a LINK TABLE rather than a column on run.
+	// MigrateComfyUI replays CREATE TABLE IF NOT EXISTS on every open, which
+	// creates new tables on an existing database but does NOT add a column to
+	// an existing one. A new column would therefore exist only in databases
+	// created after this release, and every older store would fail the SELECT.
+	// A separate table is the shape that migrates cleanly with no ALTER and no
+	// schema-version bump.
+	`CREATE TABLE IF NOT EXISTS run_node_set (
+		prompt_id TEXT PRIMARY KEY,
+		node_set_id TEXT NOT NULL,
+		captured_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`,
 }
 
 // comfyUIFTS is created separately: FTS5 virtual tables are not IF-NOT-EXISTS-safe to

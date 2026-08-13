@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "endpoint_id",
+    "method",
+    "path",
+    "summary"
+  ],
+  "properties": {
+    "endpoint_id": {
+      "type": "string",
+      "description": "Dotted identifier of the endpoint that was looked up."
+    },
+    "method": {
+      "type": "string",
+      "description": "HTTP method; comfyui_get only resolves GET endpoints."
+    },
+    "path": {
+      "type": "string",
+      "description": "Request path template; {name} segments are filled from the params object."
+    },
+    "summary": {
+      "type": "string",
+      "description": "What the endpoint returns and the traps it carries."
+    }
+  }
+}

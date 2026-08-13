@@ -36,11 +36,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Exit codes for the patching surface. 2/3/4/5/6/7/10 are already claimed by
-// helpers.go; these two are distinct so a script can tell "you addressed the
-// wrong node" from "the graph itself will not run".
-func slotsClassAssertionErr(err error) error { return &cliError{code: 12, err: err} }
-func slotsGraphInvalidErr(err error) error   { return &cliError{code: 13, err: err} }
+// Exit codes for the patching surface — the values live in exitcodes.go, the
+// single registry. These two are distinct so a script can tell "you addressed
+// the wrong node" from "the graph itself will not run".
+func slotsClassAssertionErr(err error) error { return &cliError{code: ExitNodeClassDrift, err: err} }
+func slotsGraphInvalidErr(err error) error   { return &cliError{code: ExitGraphInvalid, err: err} }
 
 const slotsStdinArg = "-"
 
@@ -273,6 +273,9 @@ summary to stderr; under --json the patched graph is embedded in the report.`,
   comfyui-pp-cli set workflow_api.json '6@CLIPTextEncode.text=a lighthouse at dusk'
   comfyui-pp-cli set workflow_api.json 3@KSampler.seed=1234567890123456 --apply --out patched.json
   comfyui-pp-cli set workflow_api.json 3.steps=30 --apply | comfyui-pp-cli validate -`,
+		Annotations: map[string]string{
+			"pp:typed-exit-codes": "0,2,3,12",
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if dryRunOK(flags) {
 				return writeDryRun(cmd.OutOrStdout(), flags, "resolve overrides against a graph file")
@@ -532,7 +535,10 @@ told apart from a real one.`,
   comfyui-pp-cli validate workflow_api.json --data-source live
   comfyui-pp-cli validate workflow_api.json --object-info object_info.json
   comfyui-pp-cli validate workflow_api.json --strict`,
-		Annotations: map[string]string{"mcp:read-only": "true"},
+		Annotations: map[string]string{
+			"mcp:read-only":       "true",
+			"pp:typed-exit-codes": "0,2,3,13",
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if dryRunOK(flags) {
 				return writeDryRun(cmd.OutOrStdout(), flags, "validate a graph file against the cached node schema")
