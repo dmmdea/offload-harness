@@ -58,12 +58,17 @@ models:
     ttl: 600
   bge-reranker-v2-m3:
     env: [CUDA_VISIBLE_DEVICES=0]
-    # -ngl 0 ON PURPOSE: the reranker on CPU is a measured house decision (buys back
-    # VRAM for ~zero latency cost on its path) — same as the linux template.
+    # -ngl 99 on THIS tier (operator decision 2026-08-13): a 16GB-class utility card
+    # fits the ~360MB Q4 weights trivially, and CPU serving cost 2.4-4.6s per 20-doc
+    # rerank vs ~143ms typical / ~1.2s worst-case on GPU (measured on the reference
+    # dual-Blackwell box). The old "-ngl 0 buys back VRAM for ~zero latency cost" note
+    # was an 8GB-era carryover — it remains CORRECT for small-VRAM tiers: the linux
+    # (Lenovo-class) template keeps -ngl 0 deliberately. Raw-logit scores are
+    # device-independent, so admission-gate threshold calibration is unaffected.
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/bge-reranker-v2-m3-Q4_K_M.gguf
       --reranking --pooling rank --ctx-size 8192 --batch-size 4096 --ubatch-size 4096
-      --parallel 4 --n-gpu-layers 0 --port ${PORT} --host 127.0.0.1
+      --parallel 4 -ngl 99 --port ${PORT} --host 127.0.0.1
     ttl: 600
 
 # RESIDENCY IS DECLARED WITH `matrix:` (llama-swap >= v202; groups' persistent:true was
