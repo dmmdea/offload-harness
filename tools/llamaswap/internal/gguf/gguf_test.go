@@ -213,8 +213,12 @@ func TestReadTruncatedHeader(t *testing.T) {
 }
 
 func TestFileTypeNameUnknownStaysVisible(t *testing.T) {
-	if got := FileTypeName(9999); got != "unknown-ftype-9999" {
-		t.Errorf("FileTypeName(9999) = %q", got)
+	// 999 is chosen deliberately: it is below LLAMA_FTYPE_GUESSED (1024), so
+	// it exercises the plain unknown path. A value like 9999 has the GUESSED
+	// bit set inside it and is handled by
+	// TestFileTypeGuessedBitIsMaskedAndLabeled instead.
+	if got := FileTypeName(999); got != "unknown-ftype-999" {
+		t.Errorf("FileTypeName(999) = %q", got)
 	}
 	if got := FileTypeName(15); got != "Q4_K_M" {
 		t.Errorf("FileTypeName(15) = %q", got)

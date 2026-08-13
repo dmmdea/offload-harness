@@ -46,7 +46,7 @@ func TestBenchRequestSendsCachePromptFalseWithTheFixedPrompt(t *testing.T) {
 	})
 	defer closeFn()
 
-	run := benchRequest(context.Background(), flags, "gemma-4-e2b", 256, 10*time.Second)
+	run := benchRequest(context.Background(), flags, "gemma-4-e2b", benchPrompt, "", 256, false, 10*time.Second)
 	if run.Error != "" {
 		t.Fatalf("bench request failed: %s", run.Error)
 	}
@@ -90,7 +90,7 @@ func TestBenchRequestLabelsTheWallClockFallback(t *testing.T) {
 	})
 	defer closeFn()
 
-	run := benchRequest(context.Background(), flags, "m", 64, 10*time.Second)
+	run := benchRequest(context.Background(), flags, "m", benchPrompt, "", 64, false, 10*time.Second)
 	if run.Error != "" {
 		t.Fatalf("unexpected error: %s", run.Error)
 	}
@@ -120,7 +120,7 @@ func TestBenchRequestDerivesRatesFromServerMilliseconds(t *testing.T) {
 	})
 	defer closeFn()
 
-	run := benchRequest(context.Background(), flags, "m", 50, 10*time.Second)
+	run := benchRequest(context.Background(), flags, "m", benchPrompt, "", 50, false, 10*time.Second)
 	if run.Source != "timings" {
 		t.Fatalf("source = %q", run.Source)
 	}
@@ -140,7 +140,7 @@ func TestBenchRequestReportsHTTPFailures(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("LLAMASWAP_BASE_URL", srv.URL)
 
-	run := benchRequest(context.Background(), &rootFlags{}, "m", 8, 10*time.Second)
+	run := benchRequest(context.Background(), &rootFlags{}, "m", benchPrompt, "", 8, false, 10*time.Second)
 	if run.Error == "" {
 		t.Fatal("a 500 must be recorded as a failed sample, not a zero-rate success")
 	}

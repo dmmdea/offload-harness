@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -29,9 +30,15 @@ type ctxReport struct {
 	Model         string `json:"model"`
 	RequestedAs   string `json:"requested_as,omitempty"`
 
-	Loaded       bool   `json:"loaded"`
-	NCtxLive     int    `json:"n_ctx_live"`
-	NCtxSource   string `json:"n_ctx_source"`
+	Loaded     bool   `json:"loaded"`
+	NCtxLive   int    `json:"n_ctx_live"`
+	NCtxSource string `json:"n_ctx_source"`
+	// NCtxRoster is meta.n_ctx from /v1/models, present on llama-swap builds
+	// newer than v249. It is the CONFIGURED context and is reported alongside
+	// the live value rather than instead of it: llama.cpp divides n_ctx across
+	// the seat's parallel slots, so the two legitimately differ and only the
+	// live one describes what a request actually gets.
+	NCtxRoster   int    `json:"n_ctx_roster,omitempty"`
 	SeatCtxFlag  int    `json:"seat_ctx_flag,omitempty"`
 	PromptLabel  string `json:"prompt_label"`
 	RealTokens   int    `json:"real_tokens"`
@@ -39,6 +46,16 @@ type ctxReport struct {
 	OutputBudget int    `json:"output_budget_tokens"`
 	Room         int    `json:"room_tokens"`
 	Verdict      string `json:"verdict"`
+
+	// NativeCtx / DeclaredCtx come from the GGUF, not from the process:
+	// DeclaredCtx is <arch>.context_length and NativeCtx is
+	// rope.scaling.original_context_length when the model reaches its declared
+	// window only through YaRN/linear extension. Serving above NativeCtx is a
+	// quality decision, and the two numbers are reported separately so it is
+	// visible as one.
+	NativeCtx   int    `json:"native_ctx_tokens,omitempty"`
+	DeclaredCtx int    `json:"declared_ctx_tokens,omitempty"`
+	CtxScaling  string `json:"context_scaling_note,omitempty"`
 
 	TargetCtx  int                 `json:"target_ctx,omitempty"`
 	TargetKV   *measure.KVEstimate `json:"kv_at_target_ctx,omitempty"`
@@ -83,14 +100,8 @@ explicitly.`,
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				if flags.asJSON {
-					if err := printJSONFiltered(cmd.OutOrStdout(), map[string]any{
-						"error": "requires a model name",
-						"usage": cmd.CommandPath() + " --help",
-					}, flags); err != nil {
-						return err
-					}
-					return usageErr(fmt.Errorf("%q requires a model name", cmd.CommandPath()))
+				if wantsAgentErrorEnvelope(flags) {
+					return usageEnvelopeErr(flags, fmt.Errorf("%q requires a model name", cmd.CommandPath()))
 				}
 				return cmd.Help()
 			}
@@ -124,15 +135,31 @@ explicitly.`,
 			if err != nil {
 				return mcClassify(err)
 			}
+			// Fast path (post-v249 llama-swap): meta.n_ctx on the roster answers
+			// "what context is this seat configured for" WITHOUT the
+			// /upstream/{model}/props round trip and, crucially, without the
+			// auto-start that probing an unloaded model triggers. It is
+			// recorded, never substituted for the live value below.
+			if n, ok := rosterNCtx(ctx, flags, model, timeout); ok {
+				report.NCtxRoster = n
+			}
+
 			seat, loaded := mcFindSeat(seats, model)
 			report.Loaded = loaded
 			if !loaded {
 				if !flagAllowLoad {
+					rosterHint := ""
+					if report.NCtxRoster > 0 {
+						rosterHint = fmt.Sprintf(
+							"\nWithout loading it: the roster reports meta.n_ctx = %d for this model, which is the CONFIGURED context "+
+								"(the live per-slot value can be lower). Real-token accounting still needs the model's tokenizer, which needs it loaded.",
+							report.NCtxRoster)
+					}
 					return &cliError{code: ExitModelNotFound, err: fmt.Errorf(
 						"%q is not loaded, and /upstream/{model}/tokenize + /props are AUTO-START endpoints: probing it would make llama-swap load the model "+
 							"(multi-GB, evicting whatever is resident). Loaded right now: %s.\n"+
-							"Either bench/chat it first, or re-run with --allow-load to accept that cost deliberately",
-						model, mcJoinOrNone(mcLoadedNames(seats)))}
+							"Either bench/chat it first, or re-run with --allow-load to accept that cost deliberately%s",
+						model, mcJoinOrNone(mcLoadedNames(seats)), rosterHint)}
 				}
 				report.Warnings = append(report.Warnings,
 					"--allow-load: this probe STARTED the model; VRAM and whatever it evicted changed as a side effect")
@@ -176,6 +203,17 @@ explicitly.`,
 				return mcClassify(err)
 			}
 			report.NCtxLive, report.NCtxSource = props.DefaultGenerationSettings.NCtx, "GET /upstream/"+model+"/props (live process)"
+			switch {
+			case report.NCtxRoster == 0:
+				report.Notes = append(report.Notes,
+					"this llama-swap build does not expose meta.n_ctx on /v1/models (added after v249), so the live context came from the props round trip")
+			case report.NCtxRoster != report.NCtxLive:
+				report.Notes = append(report.Notes, fmt.Sprintf(
+					"roster meta.n_ctx is %d but the live process reports %d: the roster carries the CONFIGURED context and llama.cpp divides it across the seat's parallel slots. The live number is the one a request gets",
+					report.NCtxRoster, report.NCtxLive))
+			default:
+				report.Notes = append(report.Notes, fmt.Sprintf("roster meta.n_ctx (%d) agrees with the live process", report.NCtxRoster))
+			}
 			if loaded {
 				if c, ok := mcSeatCtx(seat.Cmd); ok {
 					report.SeatCtxFlag = c
@@ -201,27 +239,60 @@ explicitly.`,
 				report.Verdict = "fits"
 			}
 
-			// KV at a target context needs the weights file, which only a
-			// loaded seat can point at without parsing the YAML.
+			// The seat's own GGUF answers two questions the process cannot:
+			// what window the model was TRAINED at (vs the extended one it
+			// declares), and what its KV cache costs at a target context.
+			// Both need the header, which only a loaded seat can point at
+			// without parsing the YAML.
+			var header *gguf.Result
+			if loaded {
+				if path, ok := mcSeatModelPath(seat.Cmd); ok {
+					h, err := gguf.Read(path)
+					switch {
+					case err != nil:
+						report.Warnings = append(report.Warnings, "reading the seat's GGUF: "+err.Error())
+					case !h.IsGGUF:
+						report.Notes = append(report.Notes, "the seat's weights are not GGUF ("+h.NotGGUFReason+"); native-context and KV reporting skipped")
+					default:
+						header = h
+					}
+				}
+			}
+			if header != nil {
+				native, declared, note := header.NativeContext()
+				report.NativeCtx, report.DeclaredCtx, report.CtxScaling = native, declared, note
+				report.Notes = append(report.Notes, ggufHeaderNotes(header)...)
+				if native > 0 && report.NCtxLive > native {
+					report.Warnings = append(report.Warnings, fmt.Sprintf(
+						"the seat serves n_ctx %d but the model's native (pre-extension) window is %d tokens; everything past %d relies on RoPE scaling",
+						report.NCtxLive, native, native))
+				}
+			}
+
 			if flagTargetCtx > 0 {
-				if !loaded {
+				switch {
+				case header == nil:
 					report.Warnings = append(report.Warnings, "--target-ctx needs the GGUF header, which is resolved from the loaded seat's -m path; skipped")
-				} else if path, ok := mcSeatModelPath(seat.Cmd); ok {
-					header, err := gguf.Read(path)
-					if err != nil {
-						report.Warnings = append(report.Warnings, "reading GGUF for the KV estimate: "+err.Error())
-					} else if header.IsGGUF {
-						k, v := mcSeatCacheTypes(seat.Cmd)
-						ctK, errK := measure.ParseCacheType(k)
-						ctV, errV := measure.ParseCacheType(v)
-						if errK != nil || errV != nil {
-							report.Warnings = append(report.Warnings, "unrecognized cache type on the seat; KV estimate skipped")
-						} else if est, err := measure.EstimateKV(header, flagTargetCtx, ctK, ctV); err != nil {
-							report.Warnings = append(report.Warnings, "KV estimate: "+err.Error())
-						} else {
-							report.TargetKV = &est
-							report.TargetKVGB = est.TotalBytes / (1024 * 1024 * 1024)
-						}
+				case header.UnsupportedKVArch != "":
+					// A confident wrong KV number is worse than none. Refuse
+					// with the same typed code fit uses.
+					return &cliError{code: ExitFitRefusal, err: fmt.Errorf(
+						"architecture-specific KV/state math not supported - refusing to guess.\n"+
+							"%s declares %s (keys: %s), and this CLI's estimator only models grouped-query attention with "+
+							"sliding-window and shared-KV geometry. The live n_ctx above is measured and stands; the "+
+							"--target-ctx KV figure is the part that would have been invented",
+						model, header.UnsupportedKVArch, strings.Join(header.UnsupportedKVKeys, ", "))}
+				default:
+					k, v := mcSeatCacheTypes(seat.Cmd)
+					ctK, errK := measure.ParseCacheType(k)
+					ctV, errV := measure.ParseCacheType(v)
+					if errK != nil || errV != nil {
+						report.Warnings = append(report.Warnings, "unrecognized cache type on the seat; KV estimate skipped")
+					} else if est, err := measure.EstimateKV(header, flagTargetCtx, ctK, ctV); err != nil {
+						report.Warnings = append(report.Warnings, "KV estimate: "+err.Error())
+					} else {
+						report.TargetKV = &est
+						report.TargetKVGB = est.TotalBytes / (1024 * 1024 * 1024)
 					}
 				}
 			}
@@ -252,6 +323,11 @@ func ctxPrint(w io.Writer, r *ctxReport) {
 	fmt.Fprintf(w, "%s  %s\n", bold("ctx"), r.Model)
 	fmt.Fprintf(w, "  real tokens     %d  [%s, prompt: %s]\n", r.RealTokens, r.TokenSource, r.PromptLabel)
 	fmt.Fprintf(w, "  n_ctx live      %d  [%s]\n", r.NCtxLive, r.NCtxSource)
+	if r.NativeCtx > 0 && r.DeclaredCtx > 0 && r.NativeCtx != r.DeclaredCtx {
+		fmt.Fprintf(w, "  model window    %d native / %d declared  [%s]\n", r.NativeCtx, r.DeclaredCtx, r.CtxScaling)
+	} else if r.DeclaredCtx > 0 {
+		fmt.Fprintf(w, "  model window    %d tokens (GGUF context_length)\n", r.DeclaredCtx)
+	}
 	if r.SeatCtxFlag > 0 {
 		fmt.Fprintf(w, "  seat -c flag    %d\n", r.SeatCtxFlag)
 	}

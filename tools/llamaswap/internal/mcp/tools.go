@@ -76,6 +76,11 @@ func RegisterTools(s *server.MCPServer) {
 	// Runtime Cobra-tree mirror — exposes every user-facing command that is
 	// not already covered by a typed endpoint or framework MCP tool.
 	cobratree.RegisterAll(s, cli.RootCmd(), cobratree.SiblingCLIPath)
+	// PATCHED (wave LS-1): attach outputSchema + structuredContent to the
+	// tools with a stable typed envelope. Runs LAST so it can decorate every
+	// registration above. See
+	// .printing-press-patches/internal-mcp-tools.go.md.
+	registerOutputSchemas(s)
 }
 
 type mcpParamBinding struct {

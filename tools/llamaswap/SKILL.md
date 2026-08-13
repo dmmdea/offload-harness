@@ -136,12 +136,15 @@ Generated from the shipped binary's own command tree. Run `llamaswap-pp-cli <com
 
 ### Measurement — numbers with their traps encoded
 
-- `llamaswap-pp-cli bench` — Benchmark seats through the production route, with the serving config identity attached.
+- `llamaswap-pp-cli bench` — Benchmark seats through the production route, with the serving config identity attached. pp and tg are reported SEPARATELY as `mean ± sample stddev (n-1)`; a spread over 3% of the mean is flagged `UNSTABLE`, which means the row describes two machine states rather than one rate. `--depth N[,N...]` measures at KV depths (llama-bench `-d` semantics: the prefill is excluded from the timed window, and the observed `cache_n` is reported so a prefill that did not stick is called out rather than published). `--standard` emits the canonical pp512/tg128 markdown row. Every row carries a comparability key over the build, host, weights, and seat flags.
+- `llamaswap-pp-cli bench compare` — Diff two recorded rows; REFUSES with exit 29 when their comparability keys differ and names the differing fields. A delta inside the two rows' combined spread is reported as noise, not as a regression. Local store only — loads nothing.
 - `llamaswap-pp-cli bench aux` — Latency and throughput for the resident embedder and reranker.
+- `llamaswap-pp-cli metrics <model>` — Parsed llama-server Prometheus telemetry with windowed counter rates (`--delta 5s`) and capacity findings; `requests_deferred > 0` surfaces as `slots_too_low`. Exits 0 with `metrics_enabled:false` when the seat lacks `--metrics`. Refuses to scrape an unloaded model (that route auto-starts it) unless `--allow-load`.
 - `llamaswap-pp-cli vram` — Per-GPU-UUID VRAM snapshot with explicit baseline/after/delta.
-- `llamaswap-pp-cli fit` — Will this model at this context fit the cards, as an interval with a refuse-to-answer band. Takes a loaded model id or a `.gguf` path; it never starts a model to answer.
-- `llamaswap-pp-cli ctx` — Real tokens vs the seat's live n_ctx: room left, and KV cost at a target context.
-- `llamaswap-pp-cli gguf` — Read a GGUF file's header: architecture, layers, GQA heads, native context, quantization.
+- `llamaswap-pp-cli fit` — Will this model at this context fit the cards, as an interval with a refuse-to-answer band. Takes a loaded model id or a `.gguf` path; it never starts a model to answer. Refuses (28) rather than guessing on a sharded model whose set is incomplete (it sums the whole set when present), on MLA and SSM architectures, and on non-model GGUFs.
+- `llamaswap-pp-cli ctx` — Real tokens vs the seat's live n_ctx: room left, and KV cost at a target context. Reports the model's native (pre-extension) window beside its declared one.
+- `llamaswap-pp-cli gguf` — Read a GGUF file's header: architecture, layers, GQA heads, native context, quantization, plus a MEASURED bits-per-weight histogram from the tensor table, shard membership, MoE total-vs-active parameters, RoPE scaling, pooling type, and `general.type`.
+- `llamaswap-pp-cli version drift` — Is the live server the build this CLI's surface knowledge was verified against, and is it llama-swap at all (vs llama.cpp router mode)? Exit 25 on a server older than the pin.
 - `llamaswap-pp-cli gate grammar` — Does this seat actually enforce a GBNF grammar on the chat route?
 - `llamaswap-pp-cli gate tools` — Does this seat emit a well-formed tool call?
 - `llamaswap-pp-cli scratch` — Run an ephemeral eval seat derived EXACTLY from a production command line.
@@ -288,7 +291,19 @@ Commands that read from the local store or the API wrap output in a provenance e
 }
 ```
 
-Parse `.results` for data and `.meta.source` to know whether it's live or local. A human-readable `N results (live)` summary is printed to stderr only when stdout is a terminal AND no machine-format flag (`--json`, `--csv`, `--compact`, `--quiet`, `--plain`, `--select`) is set — piped/agent consumers and explicit-format runs get pure JSON on stdout.
+Parse `.results` for data and `.meta.source` to know whether it's live or local.
+
+**Error envelope.** Every non-zero exit under `--json`/`--agent` emits one machine-readable document:
+
+```json
+{"ok": false,
+ "error": {"code": "refused_to_guess", "category": "refusal", "retryable": false,
+           "http_status": 0, "message": "...", "remediation": "...", "exit_code": 28}}
+```
+
+Branch on `error.code`, never on `error.message`. `category` is `fix_request` | `retry` | `unavailable` | `refusal` | `internal` — the decision to make. `retryable` answers whether re-running the SAME command unchanged can ever help: it is true for a dial failure and a drain timeout, false for every refusal. The envelope covers cobra's pre-parse flag errors and dial failures too. It lands on **stdout** when stdout is still clean and on **stderr** once the command already wrote a result document there, so stdout is always exactly one JSON document.
+
+**MCP output schemas.** Tools with a stable typed envelope advertise `outputSchema` (JSON Schema 2020-12) and return `structuredContent` beside their text. The schemas are REFLECTED from the Go result structs, so they cannot drift from the JSON, and they are committed under `testdata/schema/` with a golden test that fails on any unreviewed change. A human-readable `N results (live)` summary is printed to stderr only when stdout is a terminal AND no machine-format flag (`--json`, `--csv`, `--compact`, `--quiet`, `--plain`, `--select`) is set — piped/agent consumers and explicit-format runs get pure JSON on stdout.
 
 ## Paths and state
 
@@ -574,7 +589,8 @@ llama-swap-specific codes (from `internal/cli/exitcodes.go`) — these are the o
 | 25 | Drift — live process flags diverge from the file (`config drift`, `seat show --diff-yaml`). Not an error; a finding |
 | 26 | Probe failed — `verify --probe` found the memory stack answering but DEGRADED (cosine/score outside stored tolerance) |
 | 27 | Upstream 5xx — the upstream model server answered 5xx |
-| 28 | Fit refusal — `fit`/`ctx` lands inside the uncertainty band and refuses to answer rather than guess |
+| 28 | Refused to guess — `fit`/`ctx` lands inside the uncertainty band, OR the header makes the standard KV formula inapplicable (incomplete shard set, MLA, SSM, non-model GGUF) |
+| 29 | Not comparable — `bench compare` was given two rows with different comparability keys |
 
 ## Argument Parsing
 

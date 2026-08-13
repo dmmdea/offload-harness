@@ -113,7 +113,7 @@ func TestMcNormalizeHostKillsLocalhost(t *testing.T) {
 		"http://localhost:11436/": "http://127.0.0.1:11436",
 		"http://[::1]:11436":      "http://127.0.0.1:11436",
 		"http://127.0.0.1:11436":  "http://127.0.0.1:11436",
-		"http://node-a:18791":       "http://node-a:18791",
+		"http://node-a:18791":     "http://node-a:18791",
 	}
 	for in, want := range cases {
 		if got := mcNormalizeHost(in); got != want {

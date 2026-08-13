@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer"
+    },
+    "cli_pinned_surface": {
+      "type": "string"
+    },
+    "live_server_version": {
+      "type": "string"
+    },
+    "live_server_commit": {
+      "type": "string"
+    },
+    "relation": {
+      "type": "string"
+    },
+    "backend": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "version": {
+          "type": "string"
+        },
+        "commit": {
+          "type": "string"
+        },
+        "warning": {
+          "type": "string"
+        }
+      },
+      "required": ["confidence","evidence","kind"]
+    },
+    "possibly_affected_commands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "verdict": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": ["backend","cli_pinned_surface","live_server_version","relation","schema_version","verdict"]
+}

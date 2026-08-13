@@ -117,8 +117,56 @@ type Result struct {
 	// allocate none of their own.
 	SharedKVLayers int `json:"shared_kv_layers,omitempty"`
 
-	FileType     int    `json:"file_type"`
-	Quantization string `json:"quantization"`
+	// FileType is the RAW general.file_type value, GUESSED bit included.
+	// FileTypeBase strips it and FileTypeGuessed reports it, so a consumer
+	// never has to know that 1031 means "Q8_0, inferred".
+	FileType        int    `json:"file_type"`
+	FileTypeBase    int    `json:"file_type_base"`
+	FileTypeGuessed bool   `json:"file_type_guessed"`
+	Quantization    string `json:"quantization"`
+
+	// GeneralType is general.type. Absent means "model"; "adapter" (LoRA),
+	// "imatrix" (importance matrix) and "mmproj" (vision projector) files are
+	// GGUF but are NOT models, and KV/fit math does not apply to them.
+	GeneralType     string `json:"general_type,omitempty"`
+	IsModel         bool   `json:"is_model"`
+	NotAModelReason string `json:"not_a_model_reason,omitempty"`
+
+	// PoolingType is <arch>.pooling_type (llama_pooling_type). 4 = RANK,
+	// which is how a reranker is identified from the file alone.
+	PoolingType     *int   `json:"pooling_type,omitempty"`
+	PoolingTypeName string `json:"pooling_type_name,omitempty"`
+	PoolingRole     string `json:"pooling_role,omitempty"`
+
+	// Split describes shard membership (split.no / split.count). A shard's
+	// header describes ONLY that shard: its tensor count, parameter count and
+	// file size are a fraction of the model.
+	Split *SplitInfo `json:"split,omitempty"`
+
+	// RoPE carries the context-extension metadata: a model can declare a
+	// context_length that is only reachable through YaRN/linear scaling.
+	RoPE *RoPEScaling `json:"rope_scaling,omitempty"`
+
+	// MoE reports total vs active parameters for mixture-of-experts models.
+	MoE *MoEInfo `json:"moe,omitempty"`
+
+	// Quant is the tensor-derived bits-per-weight profile. It is measured
+	// from the tensor table, so it catches a file whose general.file_type
+	// label disagrees with what is actually stored.
+	Quant *QuantProfile `json:"quantization_profile,omitempty"`
+
+	// UnsupportedKVArch is set for architectures whose KV/state footprint is
+	// NOT the standard n_kv_heads x head_dim x 2 x n_layers formula: MLA
+	// (compressed latent KV) and SSM/Mamba (fixed-size recurrent state).
+	// Callers that would otherwise print a KV number must refuse instead.
+	UnsupportedKVArch string   `json:"unsupported_kv_arch,omitempty"`
+	UnsupportedKVKeys []string `json:"unsupported_kv_keys,omitempty"`
+
+	// TensorInfoBytes is the tensor-info table's size on top of
+	// MetadataBytes. TensorInfoError records a table that could not be read
+	// without failing the header read that already succeeded.
+	TensorInfoBytes int64  `json:"tensor_info_bytes,omitempty"`
+	TensorInfoError string `json:"tensor_info_error,omitempty"`
 
 	ChatTemplateChars  int    `json:"chat_template_chars,omitempty"`
 	ChatTemplateSHA256 string `json:"chat_template_sha256,omitempty"`
@@ -352,8 +400,74 @@ func Read(path string) (*Result, error) {
 	}
 	res.MetadataBytes = r.n
 
-	res.finish()
+	// The tensor-info table sits between the metadata and the tensor data:
+	// names, dims and type tags only, never a byte of weights. It is the
+	// only place the file says what is ACTUALLY stored, so the BPW histogram
+	// and the MoE expert classification both come from here. A table this
+	// reader cannot walk is recorded and skipped - the header fields above
+	// are already valid and must not be thrown away over it.
+	tensors, terr := readTensorInfos(r, res.TensorCount)
+	res.TensorInfoBytes = r.n - res.MetadataBytes
+	if terr != nil {
+		res.TensorInfoError = terr.Error()
+	}
+
+	res.finish(tensors)
 	return res, nil
+}
+
+// TensorInfo is one row of the tensor-info table. Offset is relative to the
+// start of the tensor-data section, not to the file.
+type TensorInfo struct {
+	Name     string
+	Dims     []uint64
+	Type     uint32
+	Offset   uint64
+	Elements uint64
+}
+
+// maxTensorInfo caps the tensor table walk. Real models top out in the low
+// thousands; a corrupt count must not make the reader allocate unbounded.
+const maxTensorInfo = 1 << 20
+
+func readTensorInfos(r *reader, count uint64) ([]TensorInfo, error) {
+	if count == 0 {
+		return nil, nil
+	}
+	if count > maxTensorInfo {
+		return nil, fmt.Errorf("tensor count %d exceeds cap %d (corrupt header?)", count, maxTensorInfo)
+	}
+	out := make([]TensorInfo, 0, count)
+	for i := uint64(0); i < count; i++ {
+		name, err := r.str(maxKeyLen)
+		if err != nil {
+			return out, fmt.Errorf("tensor %d name: %w", i, err)
+		}
+		nd, err := r.u32()
+		if err != nil {
+			return out, fmt.Errorf("tensor %q n_dims: %w", name, err)
+		}
+		if nd > 8 {
+			return out, fmt.Errorf("tensor %q declares %d dimensions (GGML_MAX_DIMS is 4); refusing to walk further", name, nd)
+		}
+		ti := TensorInfo{Name: name, Elements: 1}
+		for d := uint32(0); d < nd; d++ {
+			v, err := r.u64()
+			if err != nil {
+				return out, fmt.Errorf("tensor %q dim %d: %w", name, d, err)
+			}
+			ti.Dims = append(ti.Dims, v)
+			ti.Elements *= v
+		}
+		if ti.Type, err = r.u32(); err != nil {
+			return out, fmt.Errorf("tensor %q type: %w", name, err)
+		}
+		if ti.Offset, err = r.u64(); err != nil {
+			return out, fmt.Errorf("tensor %q offset: %w", name, err)
+		}
+		out = append(out, ti)
+	}
+	return out, nil
 }
 
 // readValue decodes one metadata value. Tokenizer vocabularies and other
@@ -443,7 +557,7 @@ func readValue(r *reader, t uint32, key string) (any, error) {
 }
 
 // finish projects the raw KV map onto the typed fields.
-func (res *Result) finish() {
+func (res *Result) finish(tensors []TensorInfo) {
 	res.Architecture, _ = res.KV["general.architecture"].(string)
 	res.Name, _ = res.KV["general.name"].(string)
 	res.SizeLabel, _ = res.KV["general.size_label"].(string)
@@ -498,10 +612,19 @@ func (res *Result) finish() {
 
 	if ft, ok := res.Int("general.file_type"); ok {
 		res.FileType = ft
+		res.FileTypeBase, res.FileTypeGuessed = SplitFileType(ft)
 		res.Quantization = FileTypeName(ft)
 	} else {
+		res.FileTypeBase = -1
 		res.Quantization = "unknown (no general.file_type key)"
 	}
+
+	res.finishGeneralType()
+	res.finishPooling(arch)
+	res.finishSplit()
+	res.finishRoPE(arch)
+	res.finishUnsupportedKV(arch)
+	res.finishTensors(tensors)
 
 	switch tpl := res.KV["tokenizer.chat_template"].(type) {
 	case string:

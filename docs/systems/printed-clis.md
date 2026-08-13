@@ -209,6 +209,7 @@ Per tool, `<api>` being `comfyui` or `llamaswap`:
 | `tools/<api>/AGENTS.md` | The tool's own operating contract for agents (runtime discovery over memorized command lists, `--agent` output mode, dry-run before mutation). |
 | `cmd/<api>-pp-cli` | The CLI binary. `make build` writes `bin/<api>-pp-cli`. |
 | `cmd/<api>-pp-mcp` | The MCP stdio server. `make build-mcp`. Independent of the harness's own `local-offload` MCP server ([systems/mcp-server.md](mcp-server.md)) — registering it is an operator choice, not something this repo does. |
+| `tools/<api>/testdata/schema/` | The MCP `outputSchema` documents each tool advertises, one JSON Schema 2020-12 file per tool. They are REFLECTED from the Go result structs at build time and committed, with a golden test that fails when a result envelope changes without the schema being reviewed. Treat a diff here as a public contract change, not as generated noise. (`llamaswap` since 0.54.0.) |
 
 Direct links: [comfyui SKILL](../../tools/comfyui/SKILL.md) ·
 [comfyui AGENTS](../../tools/comfyui/AGENTS.md) ·

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 )
 
 // Domain schema for llama-swap operational history. Additive to the generated
@@ -121,7 +122,14 @@ func EnsureDomainSchema(ctx context.Context, db *sql.DB) error {
 			clean_state INTEGER,
 			runs INTEGER, max_tokens INTEGER,
 			concurrency INTEGER NOT NULL DEFAULT 1,
-			notes TEXT
+			notes TEXT,
+			kv_depth INTEGER NOT NULL DEFAULT 0,
+			kv_depth_observed INTEGER,
+			pp_mean REAL, pp_stddev REAL,
+			tg_mean REAL, tg_stddev REAL,
+			cache_hit_rate REAL,
+			comparability_sha TEXT,
+			comparability_key TEXT
 		)`,
 		`CREATE TABLE IF NOT EXISTS vram_snapshots (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,5 +168,74 @@ func EnsureDomainSchema(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
+	return ensureDomainColumns(ctx, db)
+}
+
+// domainAddedColumns are columns added to a domain table AFTER it shipped.
+// CREATE TABLE IF NOT EXISTS is a no-op on a store that already has the
+// table, so a new column reaches an existing database only through ALTER.
+// Every entry must be nullable or carry a DEFAULT: SQLite cannot add a NOT
+// NULL column without one, and back-filling a measurement column with a
+// fabricated value is worse than leaving it NULL.
+var domainAddedColumns = []struct{ table, column, ddl string }{
+	// wave LS-1: per-depth bench rows with dispersion and a comparability key.
+	{"bench_runs", "kv_depth", "INTEGER NOT NULL DEFAULT 0"},
+	{"bench_runs", "kv_depth_observed", "INTEGER"},
+	{"bench_runs", "pp_mean", "REAL"},
+	{"bench_runs", "pp_stddev", "REAL"},
+	{"bench_runs", "tg_mean", "REAL"},
+	{"bench_runs", "tg_stddev", "REAL"},
+	{"bench_runs", "cache_hit_rate", "REAL"},
+	{"bench_runs", "comparability_sha", "TEXT"},
+	{"bench_runs", "comparability_key", "TEXT"},
+}
+
+// ensureDomainColumns applies the additive column migrations idempotently by
+// reading the live table shape first. Relying on the "duplicate column name"
+// error string would couple the migration to a driver message.
+func ensureDomainColumns(ctx context.Context, db *sql.DB) error {
+	existing := map[string]map[string]bool{}
+	for _, c := range domainAddedColumns {
+		if _, ok := existing[c.table]; ok {
+			continue
+		}
+		cols, err := tableColumns(ctx, db, c.table)
+		if err != nil {
+			return err
+		}
+		existing[c.table] = cols
+	}
+	for _, c := range domainAddedColumns {
+		if existing[c.table][c.column] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.table, c.column, c.ddl)); err != nil {
+			return fmt.Errorf("adding %s.%s: %w", c.table, c.column, err)
+		}
+		existing[c.table][c.column] = true
+	}
 	return nil
+}
+
+func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return nil, fmt.Errorf("reading %s columns: %w", table, err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid        int
+			name, typ  string
+			notNull    int
+			dflt       sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &primaryKey); err != nil {
+			return nil, fmt.Errorf("scanning %s columns: %w", table, err)
+		}
+		out[name] = true
+	}
+	return out, rows.Err()
 }

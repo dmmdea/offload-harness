@@ -316,12 +316,17 @@ Read-only analysis of the llama-swap YAML. None of these ever writes your hand-c
 
 ### Measurement commands
 
-- **`llamaswap-pp-cli bench`** - Benchmark seats through the production route, with the serving config identity attached — so a number is never separated from the flags that produced it.
+- **`llamaswap-pp-cli bench`** - Benchmark seats through the production route, with the serving config identity attached — so a number is never separated from the flags that produced it. Prompt processing and generation are reported **separately**, each as `mean ± sample stddev (n-1)` over `--runs`, and a spread above 3% of the mean is flagged `UNSTABLE` rather than averaged away.
+  - `--depth N[,N...]` measures at one or more **KV depths** (llama-bench's `-d`): N tokens are prefilled before the timed window opens, and the prefill is excluded from the timing. The observed `cache_n` is reported, so a prefill that failed to stick is called out as `PARTIAL depth` instead of being published as a deep-context rate. Benching at depth 0 only **overstates** a seat — both rates decay as the cache fills.
+  - `--standard` emits the community-canonical **pp512 / tg128** markdown row with the build, hardware line, and comparability sha.
+  - Every row records a **comparability key** over the llama.cpp build, the host, the weights file, and every seat flag that moves a number.
+- **`llamaswap-pp-cli bench compare`** - Diff two recorded bench rows, **refusing (exit 29)** when their comparability keys differ, and naming the fields that differ. A delta smaller than the two rows' combined run-to-run spread is reported as noise, not as a regression.
 - **`llamaswap-pp-cli bench aux`** - Latency and throughput for the resident embedder and reranker.
+- **`llamaswap-pp-cli metrics <model>`** - Parse a seat's llama-server Prometheus exposition into typed telemetry. `--delta 5s` scrapes twice and reports counters as a **windowed rate** (a single scrape of a counter is a lifetime total, not a rate). `requests_deferred > 0` is surfaced as a `slots_too_low` finding. Serves `metrics_enabled:false` and **exit 0** when the seat lacks `--metrics`. Note `kv_cache_usage_ratio` no longer exists upstream; its absence is reported as a removal, not a fault.
 - **`llamaswap-pp-cli vram`** - Per-GPU-UUID VRAM snapshot with explicit baseline/after/delta.
-- **`llamaswap-pp-cli fit`** - Will this model at this context fit the cards, as an interval with a refuse-to-answer band (exit 28 inside the band). Takes a loaded model id or a `.gguf` path; it never starts a model to answer, so a bare id that is not loaded exits 3.
-- **`llamaswap-pp-cli ctx`** - Real tokens vs the seat's live n_ctx: room left, and KV cost at a target context.
-- **`llamaswap-pp-cli gguf`** - Read a GGUF file's header: architecture, layers, GQA heads, native context, quantization.
+- **`llamaswap-pp-cli fit`** - Will this model at this context fit the cards, as an interval with a refuse-to-answer band (exit 28 inside the band). Takes a loaded model id or a `.gguf` path; it never starts a model to answer, so a bare id that is not loaded exits 3. Four header facts also make it refuse rather than emit a confident wrong number: a **sharded** model (it sums every sibling shard when the whole set is on disk, and refuses when one is missing), **MLA** (compressed latent KV), **SSM/Mamba** (fixed recurrent state), and a **non-model** GGUF (adapter / imatrix / mmproj).
+- **`llamaswap-pp-cli ctx`** - Real tokens vs the seat's live n_ctx: room left, and KV cost at a target context. Also reports the model's **native (pre-extension) window** beside its declared one, so serving a YaRN-extended model past its training context is visible as the quality decision it is. Uses `meta.n_ctx` from the roster as a fast path on servers newer than v249, falling back to the `/props` round trip with an explicit note.
+- **`llamaswap-pp-cli gguf`** - Read a GGUF file's header: architecture, layers, GQA heads, native context, quantization. Reports a **measured bits-per-weight histogram** derived from the tensor table (which catches a file whose `general.file_type` label disagrees with what is stored), **shard membership** (`split.count` / `split.no`, with the sibling shards resolved and summed), **MoE total-vs-active parameters**, **RoPE scaling**, `pooling_type` (RANK ⇒ reranker), and `general.type` (adapter / imatrix / mmproj are identified, never treated as models). The `LLAMA_FTYPE_GUESSED` bit is masked and labelled `(guessed)`.
 - **`llamaswap-pp-cli gate grammar`** - Does this seat actually enforce a GBNF grammar on the chat route?
 - **`llamaswap-pp-cli gate tools`** - Does this seat emit a well-formed tool call?
 - **`llamaswap-pp-cli scratch`** - Run an ephemeral eval seat derived EXACTLY from a production command line.
@@ -334,6 +339,8 @@ Thin wrappers over the proxy's own routes.
 - **`llamaswap-pp-cli server hardware`** - Hardware detection as llama-swap sees it (GPUs, VRAM). Added in v247 — returns 404 on older servers; treat 404 as "feature absent", not an error.
 
 - **`llamaswap-pp-cli server health`** - Liveness of the llama-swap proxy itself (plain "OK"). This says NOTHING about any model being loaded or ready — a green /health with an empty /running is the normal idle state. For per-model readiness use upstream health.
+
+- **`llamaswap-pp-cli version drift`** - Compares the llama-swap surface this CLI was verified against (`v249`) with the live server, and reports **which backend actually answered**. llama.cpp's own `llama-server` has shipped a native model-swapping router mode since Dec 2025 that serves a similarly shaped `/models`; pointing this CLI's admin commands at one produces 404s that look like faults, and the detector names it instead. Exit 25 when the server is older than the verified surface (a finding, not an error). Read-only.
 
 - **`llamaswap-pp-cli server version`** - Returns {version, commit, build_date}. The capability gate for everything else: per-model unload routes need v24x+, /api/hardware needs v247+, profiles/selectors need v241+. Cache this and gate optional commands on it instead of guessing from 404s.
 
@@ -427,6 +434,15 @@ This CLI is designed for AI agent consumption:
 - **Piped input** - commands accept structured input when their help lists `--stdin`
 - **Offline-friendly** - sync/search commands can use the local SQLite store when available
 - **Agent-safe by default** - no colors or formatting unless `--human-friendly` is set
+- **Structured errors** - every non-zero exit under `--json`/`--agent` emits one machine-readable envelope:
+
+```json
+{"ok": false,
+ "error": {"code": "server_unreachable", "category": "unavailable", "retryable": true,
+           "http_status": 0, "message": "...", "remediation": "...", "exit_code": 4}}
+```
+
+  `category` is one of `fix_request`, `retry`, `unavailable`, `refusal`, `internal` — the four decisions a caller can make. Branch on `code`, never on `message`. The envelope covers **every** exit path, including cobra's pre-parse flag errors (detected by scanning argv, because a parse failure aborts before flags are bound) and dial failures. It goes to **stdout** while stdout is clean, and to **stderr** once a command has already written a result document there — so a refusal that printed its report first (`bench compare`) still leaves exactly one JSON document on stdout. Human mode is unchanged: no envelope, same stderr line, same exit code.
 
 ### Exit codes
 
@@ -444,7 +460,8 @@ llama-swap-specific codes — the ones an unattended run branches on:
 | 25 | Drift — live process flags diverge from the file (`config drift`, `seat show --diff-yaml`). Not an error; a finding |
 | 26 | Probe failed — `verify --probe` found the memory stack answering but DEGRADED (outside stored tolerance) |
 | 27 | Upstream 5xx — the upstream model server answered 5xx |
-| 28 | Fit refusal — `fit`/`ctx` lands inside the uncertainty band and refuses to answer rather than guess |
+| 28 | Refused to guess — `fit`/`ctx` lands inside the uncertainty band, OR the GGUF makes the standard KV formula inapplicable (incomplete shard set, MLA, SSM, or a non-model file). The message names the measurement that would settle it |
+| 29 | Not comparable — `bench compare` was asked to diff two rows with different comparability keys; their difference would measure the configuration change, not the thing being compared |
 
 ## Health Check
 
