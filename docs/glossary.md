@@ -112,7 +112,12 @@ come last by convention, but the validator does not enforce ordering.
 The unattended-run refusal of an effectful agent tool call that the model itself flagged
 `security_risk: high` (or with an unrecognized value — fail closed). A parked call is never
 executed: it records `none` on the Effect record, lands durably in the ask queue for operator
-review, and does not consume the loop's same-name tool budget. See
+review, and does not consume the loop's same-name tool budget.
+
+It is a **model self-report, not a boundary**: measured on the production agent seat, the
+annotation was a constant `low` across 54/54 emitted declarations — including all 36 structurally
+destructive calls — so park-gate recall was 0%. The structural gate is the risk-rule table
+(`--rules`); parking is the fail-safe residue around it. See
 [systems/coding-agent.md](systems/coding-agent.md).
 
 ## Policy broker

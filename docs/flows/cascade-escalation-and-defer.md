@@ -60,8 +60,8 @@ the coding agent — nil cache, nil ledger, no shadow capture.
 ## Success behavior
 
 A validated, schema-conforming result with metadata describing how it was reached: which model,
-how many escalations, the decision margin, whether it was grounded, and whether the reasoning Tier
-produced it.
+how many escalations, **which gate caused the first escalation** (`esc_source`), the decision margin,
+whether it was grounded, and whether the reasoning Tier produced it.
 
 ## Failure behavior
 
@@ -90,9 +90,28 @@ Task content does not enter the ledger; only metadata and token counts do.
 
 ## Observability and debugging
 
-The ledger entry answers "why did this defer?" — read `reason`, `err_class`, `escalations`, `margin`,
-and `grounded` together. A defer with `err_class` set is an infrastructure problem, not a quality
-problem, and the two have completely different remedies.
+The ledger entry answers "why did this defer?" — read `reason`, `err_class`, `escalations`,
+`esc_source`, `margin`, and `grounded` together. A defer with `err_class` set is an infrastructure
+problem, not a quality problem, and the two have completely different remedies.
+
+`esc_source` names WHICH gate sent a call up a tier, and it is the one field written on **successful**
+escalations too — that was the measured gap it closed: a call that escalated and then succeeded
+recorded no reason at all, so "which gate fired" was unreadable from telemetry and no change to the
+gating could be evaluated after the fact. It is a **closed seven-value set**
+(`internal/core/types.go`), which is what makes it groupable where the free-text `reason` is not:
+`self_confidence` (the model's own `confidence` field fell below `classify_min_confidence` — the only
+self-declared gate in the cascade), and the six structural ones — `margin` (logprob decision margin
+below the per-task threshold), `confhead` (the learned p(correct) head below its conformal
+threshold), `schema` (parsed but failed validation), `grounding` (extract produced values absent from
+the source), `verifier` (malformed or truncated output), and `retries` (exhausted without a valid
+answer). The gates are evaluated verifier → schema → grounding → self-confidence → margin →
+confhead, and the FIRST to fire is recorded, so the values are mutually exclusive per call; a call
+that never escalated carries the empty `EscNone`. Across tiers it is carried only-if-unset, so it
+keeps naming the gate that started the climb rather than the last one to agree.
+
+The field is **omitted entirely on non-escalating rows** (`omitempty` — the append-only JSONL's
+small-line atomicity is load-bearing), and rows written before the field was added still parse (an
+absent field decodes to empty). See `internal/ledger/ledger.go`.
 
 When defers rise on a given machine, the first question is whether that machine's Tier binding is
 right — model, quantization, profile, serving flags — not whether the thresholds should move
@@ -102,13 +121,15 @@ right — model, quantization, profile, serving flags — not whether the thresh
 
 `internal/pipeline/pipeline_reasoning_test.go` (including that garbage output still defers),
 `pipeline_confhead_test.go`, `knn_prefilter_test.go`, `runtier_test.go` for the no-side-effect
-invariant, and per-task defer suites.
+invariant, `escsource_test.go` for the `esc_source` stamping and its only-if-unset carry across
+tiers, and per-task defer suites.
 
 ## Source map
 
 - [`internal/pipeline/pipeline.go`](../../internal/pipeline/pipeline.go) — chain, gates, reasoning
   tier, defer sites
-- [`internal/core/types.go`](../../internal/core/types.go) — `Result`, `Meta`, `Deferf`
+- [`internal/core/types.go`](../../internal/core/types.go) — `Result`, `Meta`, `EscalationSource`,
+  `Deferf`
 - [`internal/grounding/grounding.go`](../../internal/grounding/grounding.go)
 - [`internal/confidence/confidence.go`](../../internal/confidence/confidence.go)
 - [`internal/ledger/ledger.go`](../../internal/ledger/ledger.go)
