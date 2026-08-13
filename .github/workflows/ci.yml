@@ -75,7 +75,7 @@ jobs:
   # Printed CLIs under tools/ are SEPARATE Go modules (docs/systems/printed-clis.md),
   # so the `build` job's `./...` does not reach them — Go excludes nested modules from a
   # parent's package pattern. Without a job of their own they would be vendored code that
-  # nothing ever compiles. One job per printed CLI; `tools/llamaswap` gets the next one.
+  # nothing ever compiles. One job per printed CLI.
   #
   # The suite is offline by construction: it touches the network only to assert a FAILURE
   # path (ProbeReachable against a closed port), so a runner with no ComfyUI installed is
@@ -96,6 +96,43 @@ jobs:
         with:
           go-version: '1.26.x'
           cache-dependency-path: tools/comfyui/go.sum
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1
+
+  # Second printed CLI, same contract as tools-comfyui above.
+  #
+  # This one drives llama-swap, and parts of its suite are deliberately coupled to a
+  # REAL deployment: internal/gguf reads model files off the model volume, and the
+  # seat-log corpus tests assert independently-verified facts about a reference
+  # llama-swap backup corpus. Those are machine-specific acceptance gates, and they
+  # t.Skip when the resource is absent — verified on Linux with the model volume, the
+  # corpus, and the server all missing: 750 pass, 7 skip, 0 fail. So CI runs the whole
+  # module and excludes nothing; the skips ARE the intended behavior on a bare runner,
+  # and a failure here means a guard regressed, not that the runner lacks hardware.
+  #
+  # LLAMASWAP_BASE_URL is left unset on purpose: the default points at a loopback port
+  # that is closed on a runner, which is what the offline paths expect.
+  tools-llamaswap:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/llamaswap
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: tools/llamaswap/go.sum
 
       - name: Build
         run: go build ./...

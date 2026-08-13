@@ -1,0 +1,366 @@
+{
+  "api_name": "llamaswap",
+  "base_url": "http://127.0.0.1:11436",
+  "description": "The llama-swap operations console — durable history, drain-aware control, and measurement commands that structurally cannot produce the errors operators actually make.",
+  "mcp_ready": "full",
+  "http_transport": "standard",
+  "mcp": {
+    "endpoint_tools": "hidden",
+    "orchestration": "code"
+  },
+  "auth": {
+    "type": "none"
+  },
+  "required_headers": [],
+  "tools": [
+    {
+      "name": "activity_log",
+      "description": "Per-request activity log: id, timestamp, model, HTTP status, cached/prompt/generated token counts, prompt speed, generation speed, duration. Model-scoped, paginated and sortable via query params (verified live against the v249 UI). This history is IN-MEMORY — a proxy restart zeroes it, which is exactly why the CLI mirrors it into SQLite. Optional: model, page, limit (plus 2 more).",
+      "method": "GET",
+      "path": "/api/metrics/activity",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "model",
+          "type": "string",
+          "location": "query",
+          "description": "Filter to one model id."
+        },
+        {
+          "name": "page",
+          "type": "integer",
+          "location": "query",
+          "description": "Page number (1-based)."
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "location": "query",
+          "description": "Rows per page."
+        },
+        {
+          "name": "sort",
+          "type": "string",
+          "location": "query",
+          "description": "Sort column (e.g. id, time, duration)."
+        },
+        {
+          "name": "order",
+          "type": "string",
+          "location": "query",
+          "description": "asc or desc."
+        }
+      ]
+    },
+    {
+      "name": "activity_performance",
+      "description": "Performance metrics feed backing the UI's Performance page (per-model speed distributions).",
+      "method": "GET",
+      "path": "/api/performance",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "activity_prometheus",
+      "description": "Prometheus exposition of proxy metrics. Returns 503 when monitoring is disabled in config — treat 503 as 'feature off', not proxy-down.",
+      "method": "GET",
+      "path": "/metrics",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "activity_stats",
+      "description": "Aggregated activity stats (request counts, token totals) since proxy start.",
+      "method": "GET",
+      "path": "/api/metrics/stats",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "captures_get",
+      "description": "Full request/response capture for one activity entry — the body-level diagnostic for 'what did the client actually send and what came back'. 404 when capture wasn't enabled or the buffer rotated past this id. Required: id.",
+      "method": "GET",
+      "path": "/api/captures/{id}",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "location": "path",
+          "description": "Activity/capture id.",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "inflight_cancel",
+      "description": "Cancel one in-flight request by its id (ids visible in the activity feed / UI in-flight table). The polite alternative to unloading a model out from under a stuck request. Required: id.",
+      "method": "POST",
+      "path": "/api/inflight/{id}/cancel",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "id",
+          "type": "string",
+          "location": "path",
+          "description": "In-flight request id.",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "logs_get",
+      "description": "Buffered recent logs as plain text (proxy + upstream stdout/stderr interleaved). For live following the server also exposes SSE at /logs/stream and per-source /logs/stream/{proxy|upstream|model_id} — the CLI's follow mode consumes those.",
+      "method": "GET",
+      "path": "/logs",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "models_list",
+      "description": "Every CONFIGURED model (from config YAML), not just loaded ones. Extended fields per entry: name, description, architecture, capabilities, supported_parameters, context_length, status.value, and meta.llamaswap.aliases. CRITICAL: data[].id is the canonical id; harness-bound aliases hide in meta.llamaswap.aliases — matching id alone reports a correctly-served alias as missing (the exact bug in 2 of 3 clients in the offload-harness today). This roster is CONFIG-derived: a model whose GGUF file was never downloaded still appears here and fails only when called.",
+      "method": "GET",
+      "path": "/v1/models",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "models_running",
+      "description": "Only the models currently holding VRAM: {running:[{model, state, cmd, proxy, ttl, name, description}]}. state is 'ready' once health-checked. ttl==0 means deliberately resident (keep-set); any other ttl means the model self-unloads after idle. This is the ground truth for 'what is actually loaded' — /v1/models is config, /running is VRAM.",
+      "method": "GET",
+      "path": "/running",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "models_unload",
+      "description": "Unload ONE model by id. WARNING (measured on this deployment): an unload issued during an in-flight generation returns in ~1.3s WITHOUT draining and the in-flight request dies with 502. Check /upstream/{model}/slots is_processing (or /running + activity) before unloading anything that might be serving. Route exists on v24x+. Required: model.",
+      "method": "POST",
+      "path": "/api/models/unload/{model}",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "model",
+          "type": "string",
+          "location": "path",
+          "description": "Model id (canonical id from /v1/models, not an alias).",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "models_unload_all",
+      "description": "Unload EVERY model, including ttl:0 keep-set residents. On this deployment that kills the mem0 memory stack (embeddinggemma + bge-reranker-v2-m3) until their next request re-warms them. Prefer per-model unload with a keep-set exclusion.",
+      "method": "POST",
+      "path": "/api/models/unload",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "profiles_activate",
+      "description": "Switch the active profile. Body is the profile selection object.",
+      "method": "PUT",
+      "path": "/api/profiles/active",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "profiles_list",
+      "description": "List configured profiles and which one is active. 404 on pre-v241 servers.",
+      "method": "GET",
+      "path": "/api/profiles",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "server_hardware",
+      "description": "Hardware detection as llama-swap sees it (GPUs, VRAM). Added in v247 — returns 404 on older servers; treat 404 as 'feature absent', not an error.",
+      "method": "GET",
+      "path": "/api/hardware",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "server_health",
+      "description": "Liveness of the llama-swap proxy itself (plain 'OK'). This says NOTHING about any model being loaded or ready — a green /health with an empty /running is the normal idle state. For per-model readiness use upstream health.",
+      "method": "GET",
+      "path": "/health",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "server_version",
+      "description": "Returns {version, commit, build_date}. The capability gate for everything else: per-model unload routes need v24x+, /api/hardware needs v247+, profiles/selectors need v241+. Cache this and gate optional commands on it instead of guessing from 404s.",
+      "method": "GET",
+      "path": "/api/version",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "upstream_apply_template",
+      "description": "Render OpenAI-style messages through the model's chat template WITHOUT generating — returns the exact prompt string. Pair with tokenize for precise budget math. Required: model.",
+      "method": "POST",
+      "path": "/upstream/{model}/apply-template",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "model",
+          "type": "string",
+          "location": "path",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "upstream_detokenize",
+      "description": "Convert token ids back to text. Required: model.",
+      "method": "POST",
+      "path": "/upstream/{model}/detokenize",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "model",
+          "type": "string",
+          "location": "path",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "upstream_embeddings",
+      "description": "Embeddings from an embedding-capable model (on this deployment embeddinggemma, 768-dim, resident). Also dispatchable proxy-wide at /v1/embeddings; the upstream form pins the exact model. Required: model.",
+      "method": "POST",
+      "path": "/upstream/{model}/v1/embeddings",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "model",
+          "type": "string",
+          "location": "path",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "upstream_health",
+      "description": "Per-model readiness ({'status':'ok'} once loaded; 503 while loading). Required: model.",
+      "method": "GET",
+      "path": "/upstream/{model}/health",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "model",
+          "type": "string",
+          "location": "path",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "upstream_lora_adapters",
+      "description": "List LoRA adapters loaded on this model and their scales. Required: model.",
+      "method": "GET",
+      "path": "/upstream/{model}/lora-adapters",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "model",
+          "type": "string",
+          "location": "path",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "upstream_lora_set",
+      "description": "Set LoRA adapter scales on this model. Required: model.",
+      "method": "POST",
+      "path": "/upstream/{model}/lora-adapters",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "model",
+          "type": "string",
+          "location": "path",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "upstream_metrics",
+      "description": "Per-model llama-server Prometheus metrics (needs --metrics on the seat; 404 otherwise). Required: model.",
+      "method": "GET",
+      "path": "/upstream/{model}/metrics",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "model",
+          "type": "string",
+          "location": "path",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "upstream_props",
+      "description": "llama-server properties for one model: build_info, model_path, chat_template, modalities, total_slots, default_generation_settings (incl. the REAL loaded n_ctx — the authority for context-window sizing; assuming ctx from config has killed real runs with exceed_context_size 400s). Required: model.",
+      "method": "GET",
+      "path": "/upstream/{model}/props",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "model",
+          "type": "string",
+          "location": "path",
+          "description": "Model id (auto-starts the model if idle).",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "upstream_rerank",
+      "description": "Rerank documents against a query with a reranker model (on this deployment bge-reranker-v2-m3, resident, CPU-bound). Note the harness config declares rerank as a first-class roster member but today only a bench script can reach it — this command closes that gap. Required: model.",
+      "method": "POST",
+      "path": "/upstream/{model}/v1/rerank",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "model",
+          "type": "string",
+          "location": "path",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "upstream_slots",
+      "description": "Per-slot state incl. is_processing — the drain signal before unload. CAVEATS: needs llama-server started with --slots (404/501 otherwise — on this deployment most seats do not pass it); on non-llama.cpp upstreams (whisper-server) 404 is ambiguous with 'not loaded' and must be cross-checked against /running; slot state exposes prompt content, so treat output as sensitive. Required: model.",
+      "method": "GET",
+      "path": "/upstream/{model}/slots",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "model",
+          "type": "string",
+          "location": "path",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "upstream_tokenize",
+      "description": "Tokenize text with the model's own tokenizer. The honest answer to 'does this fit the context window' — chars/4 estimates are ~2x off on Gemma-family tokenizers (measured). Required: model.",
+      "method": "POST",
+      "path": "/upstream/{model}/tokenize",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "model",
+          "type": "string",
+          "location": "path",
+          "required": true
+        }
+      ]
+    }
+  ]
+}

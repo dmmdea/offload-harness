@@ -68,6 +68,11 @@ them; `cd` into the module.
   options, model-visibility triage, honest run timing, output provenance, and replay. Prefer it over
   hand-rolled HTTP against the ComfyUI API. Note this is the *operator/agent* tool for ComfyUI — the
   harness's own render path is `docs/systems/media-generation.md`.
+- **Inspecting or operating llama-swap — read
+  [`tools/llamaswap/SKILL.md`](tools/llamaswap/SKILL.md) first.** It is the agent entry point for
+  `llamaswap-pp-cli`: what is loaded, what a swap cost, seat and model bindings, config and its
+  backup history, and measurement. Prefer it over curling the llama-swap API by hand. This is the
+  *operator/agent* tool — the harness's own serving path is `docs/systems/offload-pipeline.md`.
 - **Never hand-edit a generated file under `tools/`.** Fix it upstream in the Printing Press and
   re-vendor, or the next reprint silently drops your change. Full rules:
   [`docs/systems/printed-clis.md`](docs/systems/printed-clis.md).

@@ -1,0 +1,7 @@
+{
+  "descriptions": {
+    "upstream_detokenize": "Convert token ids back to text using the model's own tokenizer. Required: model (path param), tokens (body, array of token ids). Returns the decoded text string. Inverse of upstream_tokenize — use it to inspect what a logged or cached token sequence actually says.",
+    "upstream_lora_set": "Set LoRA adapter scales on one running model. Required: model (path param), adapters (body, array of {id, scale}). Returns the applied adapter set. Scales change on the live model without a reload; call upstream_lora_adapters first to see what is loaded and at what scale.",
+    "profiles_activate": "Switch llama-swap's active profile (a named model group from the config). Required: profile (body, the profile name to activate). Activating a profile changes which models are eligible to swap in. Requires server v241+ (404 on older). Use profiles_list first to see configured profiles and which one is active."
+  }
+}

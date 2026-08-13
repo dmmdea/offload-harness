@@ -58,3 +58,17 @@ tools/*/dogfood-results.json
 tools/*/workflow-verify-report.json
 tools/*/apify-actor-audit-report.json
 tools/*/.printing-press-*-polish.json
+# `llamaswap-pp-cli captures export` writes this into the module dir by default. It is
+# a live capture of real request/response bodies from whatever server was running —
+# runtime output and a data-leak hazard in a public repo, never source.
+tools/*/captures.jsonl
+
+# ...but re-include a printed CLI's OWN config files. The `config.json` / `config-*.json`
+# patterns near the top of this file are unanchored — they target the harness's
+# machine-specific working configs, and they also match at any depth, including inside a
+# vendored module where such a file is SOURCE. That silently dropped
+# tools/llamaswap/internal/lsconfig/schema/config-schema.json, which validate.go pulls in
+# with //go:embed: the module then does not compile at all, and the omission is invisible
+# in a diff. Negations must come after the pattern they undo.
+!tools/**/config.json
+!tools/**/config-*.json
