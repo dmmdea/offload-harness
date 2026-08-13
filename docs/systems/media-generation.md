@@ -121,9 +121,16 @@ change will shift — prefer inpainting whenever a mask is possible. The route i
 the `gen_edit_*` keys (named `gen_edit`, not `edit`, because `edit_*` is the deterministic PIL
 route); no tier seeds them, so it defers until a machine binds `gen_edit_script`
 (`render/comfy-edit.mjs`) and `gen_edit_unet`. `gen_edit_preset` pairs steps+cfg+LoRA as a matched
-triple (`full` | `lightning8`, the default | `lightning4`) — the builder throws rather than default
-a half-override, because a Lightning LoRA at full steps/cfg produces mush and the base at 4 steps
-produces noise, and either renders "successfully". Lightning is applied as a **LoRA**, never a
+triple (`full` | `lightning8`, the default | `lightning4`), because a Lightning LoRA at full
+steps/cfg produces mush and the base at 4 steps produces noise, and either renders "successfully".
+The builder itself defaults neither steps nor cfg — it throws if either is missing
+(`render/wf-qwen-image-edit.mjs`) — but the runner fills a missing half straight from the preset
+(`render/comfy-edit.mjs`), so that throw is unreachable here and **a half-override is silently
+completed rather than rejected**. This route therefore has NO pair guard, unlike the qwen-image
+GENERATION route, which exits 2 on a half-override. The same applies at the binding layer:
+`gen_edit_steps` and `gen_edit_cfg` are independent keys emitted independently by the harness, so
+binding one alone silently runs at the preset's other half. Set both or neither, and prefer
+switching preset over hand-setting either. Lightning is applied as a **LoRA**, never a
 pre-merged checkpoint, so it composes with any quantisation (GGUF bindings load via
 `UnetLoaderGGUF`).
 
@@ -155,7 +162,10 @@ returned 1456x720) with no configuration that could raise it. It bought the grap
 ~1 MP snapped to 8 for the reference latents), so the pre-scaler only ever fed the canvas.
 
 The three edit-shaped routes in one line each: `edit_image` = deterministic PIL ops (exact, CPU, no
-GPU lock); `inpaint_image` = re-denoise inside a mask you supply (the rest stays pixel-identical);
+GPU lock); `inpaint_image` = re-denoise inside a mask you supply (everything outside the mask is
+preserved in INTENT, but is NOT pixel-identical: `grow_mask` dilates + feathers the mask by 16 px in
+latent space by default, and the whole frame is VAE round-tripped on decode — there is no
+composite-back node in the graph; pass `grow_mask: 0` for the tightest mask);
 `edit_image_generative` = maskless instruction edit (the whole frame re-renders).
 
 **Per-box device/launch seams (J4).** Three env knobs decouple shared code from CUDA-box

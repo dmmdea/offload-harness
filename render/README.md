@@ -6,19 +6,25 @@ A small, dependency-free Node tool that drives a local **ComfyUI** server to gen
 - **Node 18+** (built-in `fetch`)
 - A running **ComfyUI** (default `http://127.0.0.1:8188`) with the checkpoint/VAE you reference installed.
 
-## Two modes
+## Three modes
 
 **1. Parameterized SDXL text2img (convenience)**
 ```bash
 node render/comfy-render.mjs out.png "a misty pine forest at dawn" --steps 30 --cfg 7
 ```
-Flags (all optional, neutral defaults): `--negative` (default *empty*), `--ckpt`, `--vae`, `--steps`, `--cfg`, `--sampler`, `--scheduler`, `--width`, `--height`, `--seed`, `--api`. Env: `COMFY_API`, `COMFY_CKPT`, `COMFY_VAE`.
+Flags (all optional, neutral defaults): `--negative` (default *empty*), `--ckpt`, `--vae`, `--steps`, `--cfg`, `--sampler`, `--scheduler`, `--width`, `--height`, `--seed`, `--prompt` (the non-positional way to pass the prompt), `--wait-sec`, `--api`. Env: `COMFY_API`, `COMFY_CKPT`, `COMFY_VAE`, `COMFY_WAIT_SEC`, `COMFY_DEAD_SEC`. `--prompt`, `--wait-sec`, `--api` and the two poller env vars apply to **every** mode, not just this one.
 
 **2. Any ComfyUI workflow (full control)**
 ```bash
 node render/comfy-render.mjs out.png --graph my-workflow.json
 ```
 `--graph` POSTs an arbitrary ComfyUI **API-format** workflow as-is — any nodes, any model, any pipeline (img2img, ControlNet, LoRA, a different base model, …). Export it from ComfyUI via **Save (API Format)**. Use this for narrow/specific pipelines; use mode 1 for quick general text2img.
+
+**3. Model-family graphs (`--family`)**
+```bash
+node render/comfy-render.mjs out.png "<prompt>" --family qwen-image --ckpt qwen-image-2512-Q5_1.gguf
+```
+`--family hidream-o1|hidream-o1-dev|qwen-image` builds the graph the model actually shipped with instead of the generic SDXL one (the SDXL-shaped `CheckpointLoaderSimple` + `KSampler` graph is wrong for a pixel-space DiT and cannot load a split-file UNET at all). Both families require `--ckpt` (or `COMFY_CKPT`); `hidream-o1` renders at its native 2048x2048 unless you override `--width`/`--height`. `qwen-image` additionally takes `--preset full|lightning4` (default `full`; the preset fixes the steps/cfg/LoRA pairing, so `--steps` and `--cfg` are accepted only **together** — a half-override exits 2), `--clip`, `--vae` (default `qwen_image_vae.safetensors`; `--vae builtin|none|checkpoint` is rejected because the UNET file carries no VAE weights), `--lora`, `--lora-strength`, `--shift`, and `--loader auto|gguf|unet`. Which family a given machine's checkpoint belongs to is per-machine binding config, not shared code — see [`docs/systems/media-generation.md`](../docs/systems/media-generation.md).
 
 ## Hard exclusions (no people / no text)
 SDXL honors real **negative** prompts at normal CFG, so exclusions are enforceable *when you want them* — just pass them (nothing is assumed by default):
@@ -29,7 +35,7 @@ node render/comfy-render.mjs out.png "an abstract product hero" \
 (The fast distilled 2026 models run at CFG≈1 and ignore negatives — that's why the convenience graph is SDXL.) Then QA the result: `local-offload assess-image out.png --json` → `{has_people, has_text, matches_brief, notes}`.
 
 ## Notes
-- Writes a single PNG to the output path you give; first run after a model swap is slow on a low‑VRAM card (the poller waits up to ~6 min).
+- Writes a single PNG to the output path you give; first run after a model swap is slow on a low‑VRAM card. The poller waits **30 min by default**, tunable with `--wait-sec` or `COMFY_WAIT_SEC` (the Go harness sets `COMFY_WAIT_SEC` to match its own timeout, and its process-tree kill stays the hard stop). A ComfyUI that stops answering *mid-render* aborts early after `COMFY_DEAD_SEC` (default 240 s) to release the GPU slot — consecutive failed polls, not a slow one: a healthy server still answers `/history` with no output yet and resets the counter.
 - Standalone tool (not part of the Go binary) — generation is a different stack (PyTorch/diffusion) from the GGUF text/vision tiers, and is intentionally kept separate.
 
 ---
