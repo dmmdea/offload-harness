@@ -2,6 +2,7 @@ package sttclient
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"llamaswap-pp-cli/pkg/llamaswap"
 )
 
 // TestTranscribeSerializesConcurrentCalls guards the single-slot invariant: overlapping
@@ -172,17 +175,70 @@ func TestTranscribeHTTPErrorIsError(t *testing.T) {
 	}
 }
 
-func TestUnloadURL(t *testing.T) {
-	var gotPath, gotMethod string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		gotMethod = r.Method
-	}))
-	defer srv.Close()
+// unloadSwap fakes the llama-swap surface Unload now goes through: the roster
+// (canonical id `whisper-stt`, reachable as the aliases the harness actually
+// binds), /running, and the per-model unload route. It records the unload it was
+// asked for.
+func unloadSwap(t *testing.T, unloaded *string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"object":"list","data":[
+			{"id":"whisper-stt","meta":{"llamaswap":{"aliases":["whisper","stt","transcribe"]}}}]}`))
+	})
+	mux.HandleFunc("/running", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"running":[{"model":"whisper-stt","state":"ready","ttl":300}]}`))
+	})
+	mux.HandleFunc("/api/models/unload/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			*unloaded = strings.TrimPrefix(r.URL.Path, "/api/models/unload/")
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// isolateKeepSet points the keep-set loader at a path that does not exist, so a
+// test never picks up the llama-swap config of the machine it happens to run on.
+func isolateKeepSet(t *testing.T) {
+	t.Helper()
+	t.Setenv("LLAMASWAP_YAML", filepath.Join(t.TempDir(), "absent.yaml"))
+	t.Setenv("LLAMASWAP_KEEP_SET", "")
+	t.Setenv("LLAMASWAP_CONFIG", "")
+}
+
+// TestUnloadResolvesAliasToCanonicalID: the harness binds stt_model to an ALIAS
+// (`whisper`, `stt`), and only the canonical id is guaranteed to key the unload
+// route. The old raw POST put whatever it was handed straight into the URL.
+func TestUnloadResolvesAliasToCanonicalID(t *testing.T) {
+	isolateKeepSet(t)
+	var unloaded string
+	srv := unloadSwap(t, &unloaded)
 	c := New(srv.URL, 5*time.Second)
-	_ = c.Unload(context.Background(), "whisper-stt")
-	if gotMethod != http.MethodPost || gotPath != "/api/models/unload/whisper-stt" {
-		t.Errorf("Unload hit %s %s, want POST /api/models/unload/whisper-stt", gotMethod, gotPath)
+	if err := c.Unload(context.Background(), "stt"); err != nil {
+		t.Fatalf("Unload: %v", err)
+	}
+	if unloaded != "whisper-stt" {
+		t.Errorf("unloaded %q, want the canonical id whisper-stt", unloaded)
+	}
+}
+
+// TestUnloadRefusesAKeepSetMember: zero-always-warm must never take down a seat
+// the llama-swap config marks resident. The refusal is decided from config and
+// nothing is sent to the server.
+func TestUnloadRefusesAKeepSetMember(t *testing.T) {
+	isolateKeepSet(t)
+	t.Setenv("LLAMASWAP_KEEP_SET", "whisper-stt")
+	var unloaded string
+	srv := unloadSwap(t, &unloaded)
+	c := New(srv.URL, 5*time.Second)
+	err := c.Unload(context.Background(), "stt")
+	if !errors.Is(err, llamaswap.ErrKeepsetRefusal) {
+		t.Fatalf("err = %v, want ErrKeepsetRefusal", err)
+	}
+	if unloaded != "" {
+		t.Errorf("a protected seat was unloaded anyway: %q", unloaded)
 	}
 }
 

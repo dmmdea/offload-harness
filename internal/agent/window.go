@@ -14,8 +14,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
 // FallbackContextTokens is the window assumed when the probe cannot answer —
@@ -32,13 +33,23 @@ const FallbackContextTokens = 8192
 //     caller is about to use exactly that model);
 //  2. {base}/props — a bare llama-server.
 //
-// A trailing /v1 on base is stripped first (props lives at the server root).
+// A trailing /v1 on base is stripped first (props lives at the server root), via
+// the one endpoint-normalization rule in internal/swapclient.
 // Returns (n_ctx, true) on success; (0, false) on any failure — callers fall
 // back, never fail, on an unanswerable probe (a generic OpenAI endpoint has no
 // /props and that is fine).
+//
+// This is the ONE llama-swap call the harness does not route through
+// pkg/llamaswap, and the reason is the auto-start above: [llamaswap.Client.Props]
+// checks /running first and returns ErrNotLoaded rather than triggering a
+// multi-GB load — the right default for an operator probe, and exactly wrong
+// here. The planner seat is normally COLD at this point, so a refusing probe
+// would silently drop every cold run back to FallbackContextTokens and re-open
+// finding F4. Alias resolution, the package's other reason to exist, buys nothing
+// here: llama-swap resolves aliases on /upstream itself (verified live: both
+// /upstream/embeddinggemma/props and /upstream/local-embed/props answer 200).
 func ProbeServedWindow(ctx context.Context, base, model string) (int, bool) {
-	b := strings.TrimRight(base, "/")
-	b = strings.TrimSuffix(b, "/v1")
+	b := swapclient.BaseURL(base)
 	if b == "" {
 		return 0, false
 	}

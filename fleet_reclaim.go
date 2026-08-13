@@ -2,14 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
 	"strings"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/swapclient"
+	"llamaswap-pp-cli/pkg/llamaswap"
 )
 
 // The reclaimable-VRAM advertisement needs one fact the node can only learn by
@@ -49,53 +49,66 @@ func oursLoaded(cfg config.Config) (loaded bool, ok bool) {
 }
 
 // llamaSwapHasSwappable asks llama-swap what it currently has loaded and reports
-// whether any SWAPPABLE seat is among them. /running is authoritative — it is the
-// process that loaded them — and its per-seat ttl is what distinguishes the two
-// kinds: ttl 0 means no auto-unload, i.e. a deliberately resident seat.
+// whether any RECLAIMABLE seat is among them. /running is authoritative for WHAT
+// is loaded — it is the process that loaded them — but NOT for which of them are
+// deliberately resident.
 //
-// The bounded error is in the safe direction for the common case and small in the
-// other: a support seat configured with a TTL instead of 0 is counted as
-// reclaimable, over-stating by the size of an embedder (~0.5 GiB).
+// That distinction used to be read off each row's `ttl`, and the server misreports
+// it: a seat configured `ttl: -1` (never unload) is published on /running as
+// `ttl: 0` (verified live on llama-swap v249 — both mem0-stack seats read ttl:0
+// there today). The old rule happened to survive that because it also treated 0 as
+// resident, but it was resting on a value the server is known to get wrong, and it
+// mis-filed the opposite case: a support seat given a real TTL was counted as
+// reclaimable, over-stating capacity by the size of an embedder.
+//
+// The keep-set now comes from the CONFIG instead — pkg/llamaswap reads the
+// llama-swap YAML (ttl:-1 / ttl:0 seats, plus their aliases) and never the API.
+// Matching is by the canonical id, which is exactly what /running reports and what
+// the YAML keys each seat by.
 func llamaSwapHasSwappable(endpoint string) (bool, bool) {
-	base := strings.TrimRight(endpoint, "/")
-	if i := strings.Index(base, "/v1"); i > 0 {
-		base = base[:i]
+	c, err := swapclient.New(endpoint, 3*time.Second)
+	if err != nil {
+		return false, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/running", nil)
+	running, err := c.Running(ctx)
 	if err != nil {
 		return false, false
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false, false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return false, false
-	}
-	var body struct {
-		Running []struct {
-			Model string `json:"model"`
-			State string `json:"state"`
-			TTL   int    `json:"ttl"`
-		} `json:"running"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return false, false
-	}
-	for _, m := range body.Running {
+	keepSet := c.KeepSet()
+	return anyReclaimable(running, func(id string) bool {
+		_, protected := c.IsProtected(id)
+		return protected
+	}, len(keepSet.Members) > 0), true
+}
+
+// anyReclaimable classifies a /running snapshot. Split out from the transport so
+// the classification — the part that has been wrong — is directly testable.
+//
+// keepSetKnown=false means no llama-swap YAML and no keep-set config could be read
+// on this box, so "which seats are deliberately resident" has no config answer. It
+// falls back to the server's ttl field rather than to "nothing is protected":
+// on a node whose config simply is not where the loader looks, the permissive
+// answer would fold a resident embedder into the idle BASELINE and make the node
+// under-advertise reclaimable VRAM forever — the exact failure this file exists to
+// avoid, arrived at from the other side.
+func anyReclaimable(running []llamaswap.RunningModel, protected func(string) bool, keepSetKnown bool) bool {
+	for _, m := range running {
 		// "stopped"/"stopping" seats hold no VRAM; anything else does.
 		if s := strings.ToLower(m.State); s == "stopped" || s == "stopping" {
 			continue
 		}
-		if m.TTL == 0 {
-			continue // deliberately resident: part of the baseline, not capacity
+		if keepSetKnown {
+			if protected(m.ID) {
+				continue // deliberately resident: part of the baseline, not capacity
+			}
+		} else if m.TTL == 0 {
+			continue
 		}
-		return true, true
+		return true
 	}
-	return false, true
+	return false
 }
 
 // gpuLeaseHeld reports whether a render currently owns the single GPU slot. A
