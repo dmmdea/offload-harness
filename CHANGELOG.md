@@ -4,6 +4,18 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed — dual-Blackwell template: reranker moves to GPU
+`setup/templates/llama-swap.win-dual-blackwell.yaml`: `bge-reranker-v2-m3` now serves
+with `-ngl 99` on the utility card (operator decision 2026-08-13). The `-ngl 0` pin was
+an 8 GB-era carryover that cost 2.4–4.6 s per 20-doc rerank against ~143 ms typical on
+GPU (measured on the reference box). Small-VRAM tiers deliberately keep CPU: the
+linux (Lenovo-class) template is unchanged. Raw-logit scores are device-independent,
+so downstream threshold calibration (mem0 admission gate) is unaffected. Brings the
+template back in parity with the live Qube config, which was flipped the same day —
+template regeneration would previously have silently reverted the fix.
+
 ## [0.51.0] - 2026-08-13
 
 ### Added — `tools/llamaswap`: the second printed CLI
