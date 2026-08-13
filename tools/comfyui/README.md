@@ -344,6 +344,10 @@ Completed prompt records, including real execution timings.
 
 - **`comfyui-pp-cli history list`** - Recent prompt history, newest last.
 
+- **`comfyui-pp-cli history clear`** - Wipe the server's ENTIRE prompt history. Destructive and unrecoverable: ComfyUI's history is RAM-only and is the only source of honest per-prompt timings. Prints what it would do; `--execute` sends it. Run `sync-history` first.
+
+- **`comfyui-pp-cli history delete <prompt_id> ...`** - Drop specific prompt records, leaving the rest. The server answers 200 whether or not an id existed, so a success is not proof every id was present. Prints by default; `--execute` sends it.
+
 ### objectinfo
 
 The live node schema — the authority on class names and valid input values.
@@ -381,6 +385,8 @@ Stage input images for LoadImage.
 
 - **`comfyui-pp-cli upload`** - Upload an image into ComfyUI's input dir. LoadImage takes a FILENAME inside that dir, never an absolute host path — passing an absolute path fails validation with "Invalid image file".
 
+- **`comfyui-pp-cli upload mask <mask-file> --original <name>`** - Upload a mask whose ALPHA CHANNEL is composited onto an image already on the server. This is NOT a file copy: post an opaque image and you silently write a fully-opaque mask. `--original` is required (the server 500s without it) and must name a file that already exists — if it does not, nothing is written and you still get a 200. Prints by default; `--execute` sends it.
+
 
 ### userdata
 
@@ -394,6 +400,17 @@ Server-side user files, including saved workflows.
 Fetch rendered outputs.
 
 - **`comfyui-pp-cli view`** - Fetch an output file by filename/subfolder/type.
+
+
+### Server state and reproducibility
+
+- **`comfyui-pp-cli free`** - Ask ComfyUI to release VRAM (`POST /free`). On a box where ComfyUI and a model-serving proxy share the same cards this is the cross-tool handoff primitive — the counterpart to `llamaswap-pp-cli`'s unload/keep-set. Prints by default because evicting a model another process is mid-render with is disruptive; `--execute` sends it. The server replies with an empty 200 and acts **asynchronously**, so confirm with `system stats` rather than trusting the status.
+
+- **`comfyui-pp-cli features`** - Read `GET /features` and compare it to the ComfyUI version this CLI is pinned to. Turns "pinned to 0.32.0" from an invisible assumption into a reported fact. Only the SHAPE (which capability keys exist) is a contract — values follow the server's own CLI args, so a different value is not drift. Exits 0 either way; `doctor` surfaces the same finding.
+
+- **`comfyui-pp-cli deps <graph.json>`** - Which node packs a workflow needs, and which of its classes nothing installed provides. Complements `validate` exactly: validate answers "is this graph well-formed against the current schema", deps answers "what would this box need installed to run it at all". Provenance comes from `/object_info`'s `python_module`; for a class nothing provides, the pack name is recovered from the hints ComfyUI Manager writes into a UI-format workflow (`cnr_id`/`aux_id`) when the file carries them. Exits 13 when something is missing.
+
+`provenance` also now reports the **node set** that produced a file — which classes and custom-node packs the server offered when the run was submitted. Server identity alone cannot answer "was this the same environment", because a custom pack installed or upgraded between two runs changes what a `class_type` means while every server field stays identical. Capture and report only; nothing restores a node set. Runs recorded before this shipped report it as not captured rather than back-filling from the current node set.
 
 
 ### Self-learning loop
@@ -445,7 +462,27 @@ This CLI is designed for AI agent consumption:
 - **Offline-friendly** - sync/search commands can use the local SQLite store when available
 - **Agent-safe by default** - no colors or formatting unless `--human-friendly` is set
 
-Exit codes: `0` success, `2` usage error, `3` not found, `5` API error, `7` rate limited, `10` config error.
+### Exit codes
+
+Framework: `0` success, `1` unclassified, `2` usage error, `3` not found, `4` **ComfyUI unreachable**, `5` API error (reached and refused), `6` partial failure, `7` rate limited, `10` config error.
+
+ComfyUI domain: `12` node class drift, `13` graph invalid / model not visible, `20` wait timeout, `21` job failed / submit rejected, `22` outputs pending / submit partial accept, `23` submit malformed, `24` **execution interrupted**, `25` **upstream OOM**, `26` **upstream 5xx**.
+
+Codes 12/13/21/22 are command-scoped — each carries one meaning per command family. Every command declares its own set in the `pp:typed-exit-codes` annotation, surfaced by `agent-context`; read that rather than assuming. The full registry with the reasoning is `internal/cli/exitcodes.go`, and SKILL.md carries the table with retry guidance.
+
+Two deliberate migrations landed with codes 24/25/26: a **dial failure now exits 4** (was 5), and **interruption exits 24 / OOM exits 25** (both were 21).
+
+### Structured error output
+
+Under `--json` / `--agent`, every failing exit emits one JSON document rather than a bare `Error: …` line — cobra usage errors and dial failures included:
+
+```json
+{"ok": false,
+ "error": {"code": "server_unreachable", "category": "network", "retryable": true,
+           "http_status": 0, "message": "…", "remediation": "…", "exit_code": 4}}
+```
+
+`code` is the stable token to branch on; `retryable` says whether re-running the same invocation unchanged could succeed; `exit_code` always agrees with `$?`. **These field names are identical to `llamaswap-pp-cli`'s**, so one parser reads both. The envelope goes to stdout, or to stderr when the command already wrote a result document there (`wait`, `submit`) so stdout stays exactly one JSON document.
 
 ## Health Check
 

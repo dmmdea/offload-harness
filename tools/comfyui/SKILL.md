@@ -182,6 +182,8 @@ Four cases where a plain reading of the output would mislead you. None affect th
 
 - `comfyui-pp-cli history get` — Full record for one prompt: status (status_str, completed)
 - `comfyui-pp-cli history list` — Recent prompt history, newest last.
+- `comfyui-pp-cli history clear` — Wipe the ENTIRE history. Destructive, unrecoverable, RAM-only source of timings. `--execute` required; run `sync-history` first.
+- `comfyui-pp-cli history delete <prompt_id> ...` — Drop named records. 200 does not prove an id existed. `--execute` required.
 
 **objectinfo** — The live node schema — the authority on class names and valid input values.
 
@@ -214,6 +216,17 @@ Four cases where a plain reading of the output would mislead you. None affect th
 **view** — Fetch rendered outputs.
 
 - `comfyui-pp-cli view` — Fetch an output file by filename/subfolder/type.
+
+**upload mask** — Composite a mask's alpha onto an existing server-side image.
+
+- `comfyui-pp-cli upload mask <mask-file> --original <name>` — NOT a file copy: the server takes the posted file's ALPHA CHANNEL and puts it on the original. An opaque image silently writes an opaque mask. `--original` is required (the server 500s without it) and must already exist — if it does not, nothing is written and you still get a 200. `--execute` required.
+
+**Server state and reproducibility**
+
+- `comfyui-pp-cli free` — `POST /free`: ask ComfyUI to release VRAM. The cross-tool handoff primitive when ComfyUI shares GPUs with a model-serving proxy. `--execute` required. The reply is an empty 200 and the effect is ASYNCHRONOUS — confirm with `system stats`, never from the status code.
+- `comfyui-pp-cli features` — `GET /features` plus drift against the pinned ComfyUI version. Only the key SHAPE is a contract; values follow the server's own CLI args. Always exits 0.
+- `comfyui-pp-cli deps <graph.json>` — Which node packs a graph needs, and which classes nothing installed provides. `validate` asks "is this graph well-formed here"; `deps` asks "what would this box need installed at all". Exits 13 when something is missing.
+- `comfyui-pp-cli provenance` — now also reports the **node set** a run was submitted against (classes + custom-node packs). Two runs can share every server field and still differ, because a custom pack changes what a `class_type` means. Capture only — nothing restores a node set, and runs predating capture report it as absent rather than back-filled.
 
 
 ### Finding the right command
@@ -521,14 +534,54 @@ Explicit flags always win over profile values; profile values win over defaults.
 
 ## Exit Codes
 
-| Code | Meaning |
-|------|---------|
-| 0 | Success |
-| 2 | Usage error (wrong arguments) |
-| 3 | Resource not found |
-| 5 | API error (upstream issue) |
-| 7 | Rate limited (wait and retry) |
-| 10 | Config error |
+Every code is declared as a named constant in `internal/cli/exitcodes.go`. A command that uses one for control flow also declares its own set in the `pp:typed-exit-codes` annotation, which `agent-context` surfaces — **read the per-command annotation, not just this table**, because four codes below are command-scoped.
+
+| Code | Meaning | Retry the same call? |
+|------|---------|----------------------|
+| 0 | Success | — |
+| 1 | Unclassified failure | no |
+| 2 | Usage error (wrong arguments) | no |
+| 3 | Resource not found | no |
+| 4 | **ComfyUI unreachable** — dial failure, or a proxy demanding credentials | yes |
+| 5 | API error (the server was reached and refused the request) | no |
+| 6 | Partial failure in a batch response | no |
+| 7 | Rate limited | yes, after a wait |
+| 10 | Config error | no |
+| 12 | **Node class drift** — `nodes options`/`models why`: class registered but ZERO options (unregistered model CLASS, i.e. a missing `extra_model_paths.yaml` key). `set`: the addressed node no longer holds its asserted class | no |
+| 13 | **Graph invalid** (`validate`, `deps`) — the graph will not run · **Model not visible** (`models why`) — no loader offers the file | no |
+| 20 | `wait --timeout` expired while the job was still running | yes — the render is probably still going |
+| 21 | **Job failed** (`wait`) with a cause that is not 13/24/25 · **Submit rejected** (`submit`) — nothing was queued | no |
+| 22 | **Outputs pending** (`wait`) — success recorded, outputs not published yet · **Submit partial accept** (`submit`) — some branches queued, others dropped | 22-wait: yes. 22-submit: **no** — re-submitting duplicates the branches that DID queue |
+| 23 | Submit malformed — a 2xx carried no `prompt_id` | no |
+| 24 | **Execution interrupted** — the run was interrupted, not broken | yes, unchanged |
+| 25 | **Upstream OOM** — change the resource plan, not the graph | yes, after freeing VRAM |
+| 26 | **Upstream 5xx** — the server failed rather than refused | yes |
+
+Codes 24, 25 and 26 are new. Two deliberate migrations came with them, both visible to anything that branched on the old values:
+
+- A **dial failure now exits 4**, not 5. "The server is down" and "the server refused this request" are different problems with different responses, and they used to share a code.
+- **Interruption now exits 24** and an **OOM 25**, where both were previously 21. Failure classification reuses `exp.ClassifyFailure`, so the sweep runner and the wait path agree on what an OOM looks like.
+
+### Structured error envelope
+
+Under `--json` / `--agent`, **every** failing exit emits one JSON document instead of a bare `Error: …` line. Field names are **identical to `llamaswap-pp-cli`'s** — an agent that reads one reads the other:
+
+```json
+{"ok": false,
+ "error": {"code": "wait_timeout", "category": "domain", "retryable": true,
+           "http_status": 0, "message": "…", "remediation": "…", "exit_code": 20}}
+```
+
+- `code` — the stable token to branch on. Never reworded once shipped.
+- `category` — `usage` | `config` | `network` | `client` | `server` | `domain`.
+- `retryable` — whether re-running the SAME invocation unchanged could succeed. Conservative: `false` when unknown.
+- `http_status` — the upstream status when the failure was an HTTP reply, else `0`. Never invented.
+- `remediation` — one concrete next action, naming a real command where one exists.
+- `exit_code` — always agrees with `$?`.
+
+Cobra usage errors and dial failures are covered too, including a malformed invocation under `--agent` where flag parsing fails before `--agent` can imply `--json`.
+
+The envelope normally goes to **stdout**. When the command already wrote a result document there — `wait`, `submit` — it goes to **stderr** instead, so stdout stays exactly one JSON document for a naive reader.
 
 ## Argument Parsing
 

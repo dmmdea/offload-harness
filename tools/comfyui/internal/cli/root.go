@@ -66,6 +66,15 @@ type rootFlags struct {
 	dataSource              string
 	freshnessMeta           any
 
+	// structuredWritten records that a structured document has already been
+	// written to stdout during this invocation. The error envelope
+	// (errenvelope.go) reads it to decide its stream: without the flag, a
+	// command that prints a result envelope and THEN returns a typed error
+	// would put two JSON documents on stdout and break a naive reader. Set by
+	// the two output funnels, printOutputWithFlags and
+	// wrapPlatformStructuredOutput.
+	structuredWritten bool
+
 	// deliverBuf captures command output when --deliver is set to a
 	// non-stdout sink. Flushed to the sink after Execute returns.
 	deliverBuf  *bytes.Buffer
@@ -115,6 +124,11 @@ func RootCmd() *cobra.Command {
 func Execute() (retErr error) {
 	var flags rootFlags
 	rootCmd := newRootCmd(&flags)
+	// Registered FIRST so it runs LAST (defers are LIFO): the envelope must
+	// describe the error the caller actually receives, after every other
+	// deferred hook — finalizePlatformInvocation among them — has had its
+	// chance to replace retErr.
+	defer func() { finalizeErrorOutput(&flags, retErr) }()
 	defer finalizePlatformInvocation(&flags, &retErr)
 
 	executedCmd, err := rootCmd.ExecuteC()
@@ -140,13 +154,12 @@ func Execute() (retErr error) {
 			// these up.
 			journalFailedFlag = flagStr
 			if suggestion := suggestFlag(flagStr, rootCmd); suggestion != "" {
-				// Cobra already printed `Error: unknown flag: --foob` before
-				// returning; the wrap below attaches the hint to err.Error()
-				// for downstream consumers and exit-code classification, but
-				// would never reach stderr now that main.go no longer prints
-				// err. Emit the hint explicitly so the suggestion still
-				// shows up under Cobra's error line.
-				fmt.Fprintf(os.Stderr, "hint: did you mean --%s?\n", suggestion)
+				// The wrap attaches the hint to err.Error() for downstream
+				// consumers and exit-code classification. It is not ALSO
+				// printed here: finalizeErrorOutput is now the single error
+				// reporting site and renders this same err — for a human as
+				// one prose line, for a machine inside the envelope's
+				// message field. Printing it here too duplicated the hint.
 				err = fmt.Errorf("%w\nhint: did you mean --%s?", err, suggestion)
 				journalSuggestedFlag = "--" + suggestion
 			}
@@ -234,7 +247,14 @@ Highlights (not in the official API docs):
 Add --agent to any command for JSON output + non-interactive mode.
 Run 'comfyui-pp-cli doctor' to verify auth and connectivity.`,
 		SilenceUsage: true,
-		Version:      version,
+		// Cobra's own error printing is suppressed so that finalizeErrorOutput
+		// (errenvelope.go) is the SINGLE error-reporting site. Without this,
+		// a machine caller under --json/--agent received Cobra's bare
+		// `Error: ...` line in addition to the structured envelope, and on
+		// the flag-parse path received ONLY that line. Humans still get one
+		// prose line — finalizeErrorOutput prints it.
+		SilenceErrors: true,
+		Version:       version,
 	}
 	rootCmd.SetVersionTemplate("comfyui-pp-cli {{ .Version }}\n")
 

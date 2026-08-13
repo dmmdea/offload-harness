@@ -151,7 +151,18 @@ type provenanceRecord struct {
 	// per-node text is the only thing that says which branch was rejected.
 	NodeErrors json.RawMessage    `json:"node_errors,omitempty"`
 	Failure    *provenanceFailure `json:"failure,omitempty"`
-	Notes      []string           `json:"notes,omitempty"`
+	// NodeSet is which node classes and custom-node packs the server offered
+	// when this run was submitted. Server identity alone cannot answer "was
+	// this the same environment": a custom pack installed or upgraded between
+	// two runs changes what a class_type means while every server field stays
+	// identical.
+	//
+	// nil for any run recorded before node-set capture shipped, and for a run
+	// submitted with no node schema cached. That absence is reported as
+	// "not captured" rather than filled in from the CURRENT node set, which
+	// would be a fabricated claim about a past run.
+	NodeSet *comfyNodeSetIdentity `json:"node_set,omitempty"`
+	Notes   []string              `json:"notes,omitempty"`
 }
 
 type provenanceReport struct {
@@ -447,6 +458,17 @@ func provenanceEnrich(ctx context.Context, db *sql.DB, rec *provenanceRecord) er
 		if err := provenanceLoadServer(ctx, db, rec.Server); err != nil {
 			return err
 		}
+	}
+	// Node-set identity (comfy_nodeset.go). Absent for runs recorded before
+	// capture shipped; left nil rather than back-filled from the current node
+	// set, which would assert something about the past that was never
+	// observed.
+	if identity, ok := comfyLoadNodeSetForRun(ctx, db, rec.PromptID); ok {
+		rec.NodeSet = &identity
+	} else {
+		rec.Notes = append(rec.Notes,
+			"node set not captured for this run: it predates node-set capture, or no node schema was cached when it was submitted. "+
+				"Runs submitted from now on record which classes and custom-node packs the server offered.")
 	}
 	if rec.Experiment != nil {
 		if err := provenanceLoadArm(ctx, db, rec.Experiment); err != nil {

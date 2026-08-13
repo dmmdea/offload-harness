@@ -315,6 +315,19 @@ Exit codes:
 				return err
 			}
 
+			// ---- node-set fingerprint ---------------------------------------
+			// Which node classes and custom packs the server offered, captured
+			// alongside the run so "same server, different result" has an
+			// explanation to point at later (comfy_nodeset.go).
+			//
+			// Reads the cached schema, so this adds NO network round trip to
+			// the submit path, and fails open: a run that cannot be
+			// fingerprinted is still a run, and refusing to submit over a
+			// missing provenance detail would be a far worse trade.
+			if err := comfyCaptureNodeSetForRun(ctx, flags, db, promptID, ""); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: node-set capture skipped: %v\n", err)
+			}
+
 			// ---- POST -------------------------------------------------------
 			c, err := flags.newClient()
 			if err != nil {
