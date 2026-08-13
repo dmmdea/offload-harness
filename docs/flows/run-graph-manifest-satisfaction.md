@@ -183,9 +183,11 @@ The defer `code` identifies the stage; `ref` identifies the offending pack, mode
 > reports pip's own message. Since v0.22.13 a subprocess that failed to *spawn* is a separate code
 > entirely (`SATISFIER_SPAWN_FAILED`) rather than masquerading as incoherence.
 
-A caller-supplied `out_dir` is **not** created for you — a missing directory produces an ENOENT at
-first output write, surfacing as `RUN_ERROR`. Create it first. (The default output directory, used
-when `out_dir` is empty, is created.)
+A caller-supplied `out_dir` **is** created for you — `resolveOutDir`
+([`internal/pipeline/pipeline.go`](../../internal/pipeline/pipeline.go)) runs `MkdirAll` on the
+caller's path, not only on the defaulted media dir used when `out_dir` is empty; the standalone
+`.mjs` runner also `mkdirSync`s the directory before writing each fetched output. A path the process
+cannot create is not an opaque `RUN_ERROR`: it defers early with `cannot create out_dir: …`.
 
 ## Testing notes
 

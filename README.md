@@ -229,7 +229,7 @@ Transport is **stdio**. Every tool returns the full result JSON — and a `{"def
 
 | Tool | Arguments | What it does |
 |---|---|---|
-| `offload_status` | — | **Capability discovery — call first when inspecting.** The LOCAL model roster (workhorse/triage/escalation/reasoning/vision/stt/embed) + live served models from the local endpoint + this machine's media engines + the (only) remote surface. Everything except `offload_nim` runs on these local models. |
+| `offload_status` | — | **Capability discovery — call first when inspecting.** The LOCAL model roster (workhorse/agent/triage/escalation/reasoning/vision/ocr/stt/stt_hq/embed) + live served models from the local endpoint + this machine's media engines + the (only) remote surface. Everything except `offload_nim` runs on these local models. |
 | `offload_summarize` | `text`, `max_points?` | Summarize text → `{summary, bullets}`, or defer. |
 | `offload_classify` | `text`, `labels[]` | Classify into one of the labels → `{label, confidence}`, or defer. |
 | `offload_extract` | `text`, `schema` | Extract schema-constrained fields → object, or defer. Values grounded in the input. |
@@ -247,7 +247,7 @@ Transport is **stdio**. Every tool returns the full result JSON — and a `{"def
 | `offload_generate_video` | `prompt`, `still?`, `model?`, `frames?`, `seed?`, `fast?`, `upscale?`, `out?` | Animate a still into a short clip (Wan 2.2 I2V two-stage; Hunyuan opt-in) on the local GPU → `{video_path, seed}`, or defer. Quality-first: the NATIVE recipe is the default (tens of minutes); `fast:true` opts into the 8-step distill draft. |
 | `offload_inpaint_image` | `image`, `mask`, `prompt`, `negative?`, `denoise?`, `grow_mask?`, `steps?`, `seed?`, `out?` | **Generative inpainting** — re-render ONLY the masked region of a local image from a prompt on the local ComfyUI (SDXL-family `inpaint_*` binding; mask is white-on-black, same size as the image, **white = repaint**) → `{image_path, seed}`, or defer. Removes gibberish text/objects/blemishes or replaces a region; diffusion cannot WRITE legible text — inpaint-to-clean, then add real type with `offload_edit_image`'s `text` op. |
 | `offload_edit_image` | `image`, `ops[]`, `out?`, `renditions?` | **Deterministic edit pipeline** (crop/resize/convert/composite/text via PIL; `mask_boxes{boxes,pad?,feather?,invert?}` replaces the working image with a white-on-black inpaint mask at its size — ready for `offload_inpaint_image`; `grade{levels?,curve?,wb?}` tone/color grade composed into ONE LUT per channel (single quantize, no banding); `lut_cube{path,strength?}` applies a `.cube` 3D LUT look; `perspective_composite{overlay,quad}` warps an overlay into a destination quad (UL,UR,LR,LL) for mockup placement; `finish{sharpen?,median?}` delivery sharpening — **always the LAST op, after any resize**; `flatten_design` opens `.xcf`/`.psd` via GIMP and returns the layer list; `instantiate_design{set_text,replace_image}` is the GIMP layered-template factory — new copy into named text layers, new images into named pixel layers, then flatten; `renditions[]` exports a platform matrix `{width/height,format,suffix}` from the master out) → `{image_path, width, height, ops_applied, layers?, renditions?}`, or defer. CPU-only — never takes the GPU lock. |
-| `offload_edit_image_generative` | `image`, `prompt`, `negative?`, `preset?`, `steps?`, `cfg?`, `seed?`, `out?` | **Maskless instruction edit** — rewrite a local image from a text instruction on the local ComfyUI (Qwen-Image-Edit class, `gen_edit_*` binding): "make it snowing heavily", "turn the leather into fur" — the model reads the source through its own vision encoder and re-renders the whole frame → `{image_path, seed}`, or defer. Pick among the three edit routes by what you have: `offload_edit_image` for deterministic ops, `offload_inpaint_image` when you can draw a mask (the rest stays pixel-identical), this when the change is global or diffuse. Output follows the source resolution within 0.9-2.0 MP (`gen_edit_megapixels` pins it); `preset` is a matched steps+cfg+LoRA triple (`lightning8` default · `full` · `lightning4`). No hardware tier seeds `gen_edit_*` — the route defers until a machine binds it. |
+| `offload_edit_image_generative` | `image`, `prompt`, `negative?`, `preset?`, `steps?`, `cfg?`, `seed?`, `out?` | **Maskless instruction edit** — rewrite a local image from a text instruction on the local ComfyUI (Qwen-Image-Edit class, `gen_edit_*` binding): "make it snowing heavily", "turn the leather into fur" — the model reads the source through its own vision encoder and re-renders the whole frame → `{image_path, seed}`, or defer. Pick among the three edit routes by what you have: `offload_edit_image` for deterministic ops, `offload_inpaint_image` when you can draw a mask (only the masked region is re-imagined; the rest is preserved in intent but not pixel-identical — `grow_mask` feathers 16 px by default and the frame is VAE round-tripped), this when the change is global or diffuse. Output follows the source resolution within 0.9-2.0 MP (`gen_edit_megapixels` pins it); `preset` is a matched steps+cfg+LoRA triple (`lightning8` default · `full` · `lightning4`). No hardware tier seeds `gen_edit_*` — the route defers until a machine binds it. |
 | `offload_media` | `op`, `in`/`inputs[]`, `out?`, op args | **One ffmpeg av op** — `trim` (stream-copy default), `concat`, `extract_frames`, `convert`, `mux_audio`, `probe` → op-specific JSON, or defer. CPU-only — never takes the GPU lock. |
 | `offload_nim` | `prompt`, `model?`, `system?`, `base?`, `max_tokens?`, `temperature?`, `list_models?` | **Opt-in remote.** Call an NVIDIA NIM endpoint (hosted free catalog or self-hosted) → `{model, content, ...}`, or defer. Key from `$NVIDIA_API_KEY` (sent only to NVIDIA hosts); never ledgered. |
 | `agent_run` | `goal`, `read_root?`, `max_steps?`, `model?`, `timeout_sec?`, `profile?`, `judge?` | **Local read-only agent.** A local model plans and iterates over read-only tools (`list_dir`, `read_file`) + the `offload_*` cascade to do a bounded multi-step read-and-reason job → `{output, steps, stop_reason, tools, effects?, effects_flagged?, judge_report?}`, or defer. `profile` narrows the tool list per task shape; `judge: true` adds one end-of-run **advisory** same-seat completion grading the run's flagged effects for operator review (never gates anything). No writes, no shell, no network; ledger untouched. |
@@ -393,7 +393,7 @@ Copy `config.example.json` and edit. Config is resolved in precedence order: `--
 | `model` | `offload-e4b` | Workhorse text tier (summarize / extract). |
 | `triage_model` | `gemma4-e2b` | Fast entry tier (triage / classify); empty = use `model`. |
 | `escalation_model` | `gemma4-26b-a4b` | Larger tier tried before deferring; empty = no escalation. |
-| `vision_model` | `qwen3vl-4b` | Local vision tier (VQA / OCR / image extract / assess). |
+| `vision_model` | `""` | Local vision tier (VQA / OCR / image extract / assess). Opt-in: a tier earns it by declaring a `vision` media seat. Empty = the route defers rather than naming a seat nothing serves. |
 | `ocr_model` | `""` | Optional dedicated OCR tier routing **only** the `ocr` task (purpose-built OCR models beat a general VLM on dense text, but cannot answer VQA — so it is a separate binding, never a `vision_model` replacement). Deliberately unbound by default: empty = OCR rides `vision_model`, exactly as before. |
 | `stt_model` / `stt_model_hq` | `""` / `""` | Speech-to-text upstreams. Both opt-in: a tier earns `stt_model` by declaring an `stt` media seat (`media_seats` in the tier table), which renders the whisper seat AND this binding from one declaration. Empty = the route defers rather than naming a seat nothing serves. |
 | `stt_hq_api` | `""` | Protocol of the HQ upstream: `""`/`whisper` = whisper-server `/inference`; `openai` = llama-server's `/v1/audio/transcriptions` (mtmd STT like Qwen3-ASR — no timestamps: one full-span segment; language auto-detected; whisper knobs don't apply). |
@@ -414,7 +414,9 @@ qwen-image preset knobs and the opt-in `imagegen_refiner_model` prompt refiner),
 [docs/systems/media-generation.md](docs/systems/media-generation.md); the agent planner seat
 (`agent_model`, `agent_timeout_sec`) in
 [docs/systems/coding-agent.md](docs/systems/coding-agent.md). `config.example.json` carries the full
-key set with commented defaults.
+key set at its built-in defaults (strict JSON, generated by `go generate .`; the per-key rationale
+lives in the doc comments on `Config` in `internal/config/config.go`, since a JSON file cannot hold
+comments).
 
 State (cache, ledger, learned weights, exemplars) defaults to `~/.local-offload/`.
 
@@ -577,7 +579,16 @@ The **coding agent** (`local-agent`) is designed **safe-by-default** for a model
   records which rule fired at what severity. Separately, every tool call is ledgered with an honest
   **effect status** (`committed` / `failed` / `unknown` / `none`), and on unattended runs an
   effectful call the model itself flags `security_risk: high` — or anything unrecognized, which
-  fails closed — is **parked** for operator review instead of executed.
+  fails closed — is **parked** for operator review instead of executed. That parking is a
+  **backstop, not the gate**: measured on the production agent seat, the self-annotation is a
+  near-constant (54/54 emissions `low`, including every destructive call; park-gate recall
+  0/36), so it is telemetry rather than a security control. The gate that fires is the
+  structural rule table, and `--rules` **defaults to empty** — with no table, an unattended run
+  holding `--allow-delete`, `--allow-overwrite`, `--allow-shell`, or `--allow-github` is ungated
+  above the built-in secret-material floor, and the builder says so with an `UNGATED` note naming
+  `examples/agent-rules.json` (a note, never an error, so existing callers keep running;
+  `--allow-write` and `--allow-run` alone do not raise it). That is the CLI/queue path only — the
+  MCP `agent_run` front door passes no write/delete/shell/fetch capability and is unaffected.
 - **The runner (`--allow-run`) — honest posture.** The `run` tool is **OFF by default**. It runs an
   **allowlisted program directly, with no shell** (`Argv = [command, args…]`, never `/bin/sh -c`), so
   the executable allowlist (`go`, `gofmt`, `python`, `python3`, `pytest`, `npm`, `node`, `cargo`,

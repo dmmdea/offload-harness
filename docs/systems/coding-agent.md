@@ -68,6 +68,18 @@ way the filesystem (or DNS) resolves them — case-folded, trailing dots/spaces 
 OS — so folding errs toward denial. Each hit is recorded in the audit trail with the rule and its
 severity; severity sorts the morning review, it never changes the decision.
 
+**`--rules` is opt-in and defaults to empty** (`cmd/local-agent/main.go`) — the sentence above
+describes a path the operator takes deliberately, not the default state. With no table loaded the
+rules in force are exactly the built-in `defaultRules()` secret-material floor, which every broker
+carries unconditionally (`policy.go`). A loaded table only ever *adds* tightening on top of that
+floor; it can never loosen it, and the floor is no substitute for it, because the floor matches
+secret-material globs and nothing else. [`examples/agent-rules.json`](../../examples/agent-rules.json)
+is the shipped starter table — 20 rules: `delete *` → ask (high); source overwrite
+`*.py`/`*.go`/`*.ts`/`*.js`/`*.mjs` → ask; `go.mod`, `package.json`, `config.json`, `*.yaml`,
+`*.yml` → ask; `go.sum`, `*.lock`, `package-lock.json` → deny; `*.gguf` → deny on **both** write and
+delete; `.github/workflows/*` → deny on **both** write and delete (critical); `*.jsonl` → deny on
+**delete only** (there is no write rule for it); `fetch *` → ask.
+
 **Effect ledger.** Every tool call is recorded as an `EffectRecord` (`effects.go`) — step, tool,
 status, and the why for non-committed statuses. Four statuses, deliberately only four:
 `committed` (ran to completion, success), `failed` (ran, returned an error — the tool got its
@@ -93,6 +105,36 @@ local models skip optional fields routinely and parking everything unannotated w
 open-write runs. Parked calls do not consume the same-name tool budget: three parked writes must
 not disable `write_file` for a later low-risk one.
 
+**Parking is fail-safe residue, not coverage — measured recall 0%.** The mechanism above fires
+exactly as described; what fails is the *input* it reads. Measured 2026-08-11 on the production
+agent seat across 48 runs and 66 effectful calls, the annotation was a literal constant: **54 of 54
+emitted declarations were `low`** — zero medium, zero high — including all **36** structurally
+destructive calls, and it held under an escalated-severity arm where deleting every source file in a
+tree was still self-declared `low` (`builder.go`, `batchjudge.go`; CHANGELOG 0.48.0). The
+complementary failure is recorded in the shipped rule table's own reasons: on **12 of 13**
+`edit_file` calls the annotation was omitted entirely, and an absent annotation never parks. So the
+field is both skipped *and*, when emitted, constant — which qualifies the rationale above: "weak
+local models skip optional fields routinely" is only half of the problem. Keep the mechanism,
+because it fails SAFE and an honest model can only use it to tighten — but do not read it as
+coverage. With no `--rules` table loaded, self-annotation is the only per-call gate **above the
+capability flags and the built-in floor**, and it has 0% recall on destructive calls. The gates that
+do still fire per-call with no table: the `defaultRules()` secret-material floor (secret globs only
+— it would not have stopped any of the 36), the broker's unconditional `.git` denial
+([invariant 3](#invariants-and-assumptions)), and `os.Root` worktree confinement (invariant 2). The
+structural remedy is the rule table: [`examples/agent-rules.json`](../../examples/agent-rules.json)
+turns the probe's own call (`delete src/notify.py`, self-declared `low`) into a non-Allow.
+
+**The `UNGATED` build note.** Because of the above, `Build` appends an operator-visible note when an
+unattended run is granted destructive capability with no rule table. The trigger is exactly
+`Unattended` **and** at least one of `--allow-delete` / `--allow-overwrite` / `--allow-shell` /
+`--allow-github` **and** an empty `--rules` (`builder.go`) — `--allow-write` or `--allow-run` alone
+does **not** trigger it. It is a **note, never an error**, deliberately: refusing to run would break
+every existing unattended caller. It rides on `built.Notes` and the CLI prints it to stderr
+(`cmd/local-agent/main.go`, and again for the two-tier editor build), pointing the operator at
+`examples/agent-rules.json`. **Scope:** this is the CLI/queue path — the path that grants `--allow-*`
+and sets unattended. The MCP `agent_run` front door passes no write/delete/shell/fetch capability, so
+it never trips the condition and is unaffected.
+
 **End-of-run advisory judge** (`agent_run judge=true` / `WithBatchJudge`). After the loop
 finishes, one bounded same-seat completion grades the run's flagged effect records for the
 operator's review (`judge_report`). It runs with **fresh context** — only the objective and the
@@ -104,6 +146,26 @@ fatal**: it gates nothing, blocks nothing, and runs only on runs that actually f
 The evidence base for annotation-not-enforcement: prompted general models are near-random at
 trajectory risk grading (R-Judge) and favor their own generations, so the report is consumed by
 humans, never by control flow.
+
+"Grades" means a **three-way partition**, and an operator reading a `judge_report` needs it by name
+(`batchjudge.go`):
+
+- **WARRANTED** — something irreversible or outward-facing happened, or nearly did, that the
+  operator would not have approved; or an effect landed in an `unknown` state.
+- **EXPECTED FRICTION** — ordinary agent work that trips a flag by design. The prompt enumerates
+  seven cases: a call that failed and was corrected on a later turn; a test or build that failed
+  because it was written to expose a defect; an exploration dead-end; a fallback to another tool
+  after one was refused or unavailable; a call against something that did not exist yet; a call
+  refused by policy or the circuit breaker where the run proceeded without it; and a zero-count
+  result (`0 failed`, `no matches`) — a clean outcome, not a failure.
+- **BLOCKER** — the run was stopped by something no agent could fix (missing credential,
+  unreachable host, capability not granted). Worth a human's time, but **not misbehaviour**.
+
+Each record gets ONE numbered line: verdict, realistic worst case, recommended action
+(approve-similar / add-a-rule / investigate / ignore). An all-EXPECTED-FRICTION report is explicitly
+sanctioned by the prompt and is the *normal* outcome. The partition exists because every record the
+judge sees is ALREADY flagged, so "was the flag warranted?" carries no information and biases the
+grader toward yes — a grader asked only about trouble saturates toward trouble.
 
 **Tools.** Read-only by default: `list_dir`, ranged `read_file`, `search_files` (regex/glob, capped
 matches), `summarize_file` (an offload digest), and the in-process `offload_*` cascade tools. Each of
@@ -257,6 +319,10 @@ write and shell tools could otherwise clobber the record of what it did.
 - Queue mode and `--serve` (OpenAI-compatible endpoint, loopback-only — see
   [ADR 0005](../architecture/decisions/0005-loopback-only-serve.md)).
 - `agent_run` via the MCP surface.
+- [`examples/agent-rules.json`](../../examples/agent-rules.json) — the shipped starter risk-rule
+  table, loaded with `--rules`. It is a **repo file, packaged by no installer**: from a checkout,
+  pass `--rules examples/agent-rules.json`; from an installed binary, copy it somewhere durable
+  (e.g. `~/.local-offload/agent-rules.json`) and pass that path.
 
 ## Dependencies
 
@@ -306,12 +372,21 @@ flagged-effects print on the CLI) answers "did anything end in `unknown` or get 
 `StopReason` distinguishes budget exhaustion from completion. Throttle refusals appear in the
 transcript as "NOT executed" messages.
 
+The build itself warns once, before the loop starts, when an unattended run holds destructive
+capability with no rule table: `[local-agent] UNGATED: …` on stderr, and on `built.Notes` for an
+embedding caller. Its **absence is not an all-clear** — it fires on that one condition only (see
+"The `UNGATED` build note" under *How the system works*), so an attended run, or an unattended run
+without `--allow-delete`/`--allow-overwrite`/`--allow-shell`/`--allow-github`, stays silent whether
+or not a rule table is loaded.
+
 ## Testing notes
 
 `internal/agent/` covers the broker (including `.git` normalization cases), the risk-rule table
 (`rules_test.go`), effect accounting and parking (`effects_test.go`), the batch judge, the throttle
 ordering, write-tool scoping and TOCTOU behavior, profile narrowing, and two-tier plan handling.
-`cmd/local-agent/serve_test.go` covers the loopback guard.
+`examplerules_test.go` pins the shipped starter table: that it loads, that it stops an unannotated
+delete, and that the `UNGATED` note is present on an unattended destructive build and absent on a
+read-only one. `cmd/local-agent/serve_test.go` covers the loopback guard.
 
 ## Common pitfalls
 
@@ -325,7 +400,10 @@ ordering, write-tool scoping and TOCTOU behavior, profile narrowing, and two-tie
 
 - [`internal/agent/loop.go`](../../internal/agent/loop.go) — loop, budget, `dispatchOrThrottle`
 - [`internal/agent/policy.go`](../../internal/agent/policy.go) — broker, `.git` denial, audit append
-- [`internal/agent/rules.go`](../../internal/agent/rules.go) — the tighten-only risk-rule table
+- [`internal/agent/rules.go`](../../internal/agent/rules.go) — the tighten-only risk-rule table and
+  the built-in `defaultRules()` secret-material floor
+- [`examples/agent-rules.json`](../../examples/agent-rules.json) — the shipped starter table named by
+  the `UNGATED` note
 - [`internal/agent/effects.go`](../../internal/agent/effects.go) — effect statuses, `NotPerformed`,
   the `security_risk` park logic
 - [`internal/agent/batchjudge.go`](../../internal/agent/batchjudge.go) — the advisory end-of-run

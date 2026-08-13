@@ -443,8 +443,8 @@ to a single-model run of the original objective (logged as `fallback=…`). `--a
 
 The CLI is non-interactive, so every broker "ask" is **deny-and-queue** — deferred approvals and
 parked calls land in the ask queue (`--ask-queue`, default `~/.local-offload/agent-asks.jsonl`) for
-your morning review. Three mechanisms shape what an unattended run may do and how honestly it
-reports it:
+your morning review. Three mechanisms bear on an unattended run, but **only the first actually
+gates** — the other two report:
 
 - `--rules <file>` — a versioned JSON array of **structural, tighten-only** policy rules
   (`{kind, glob, decision, severity, reason}`): action kind + a glob over the worktree-relative
@@ -452,9 +452,49 @@ reports it:
   floor already denies secret-material paths (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`).
   A bad or missing file fails the run rather than silently deactivating the table; the audit trail
   records which rule fired at what severity.
-- **Risk parking** — every effectful tool asks the model to self-annotate `security_risk`
-  (low/medium/high). A call flagged `high` (or with an unrecognized value — fail closed) is
-  **parked**: never executed, recorded in the ask queue, the run continues without it.
+
+  **The flag defaults to empty — no operator table at all.** Out of the box only the built-in
+  secret-material floor above applies, and it matches secret globs and nothing else. On an
+  unattended run this table is the control that discriminates on destructive calls; nothing else in
+  this list does. Start from the shipped starter table, `examples/agent-rules.json` — 20 rules:
+  `delete *` → ask (high); source overwrite `*.py`/`*.go`/`*.ts`/`*.js`/`*.mjs` → ask; `go.mod`,
+  `package.json`, `config.json`, `*.yaml`, `*.yml` → ask; `go.sum`, `*.lock`, `package-lock.json` →
+  deny; `*.gguf` → deny on **both** write and delete; `.github/workflows/*` → deny on **both** write
+  and delete; `*.jsonl` → deny on **delete only**; `fetch *` → ask. It is a **repo file that no
+  installer packages**, so the path depends on how you run the agent: from a repo checkout,
+  `local-agent --rules examples/agent-rules.json …`; from an installed binary
+  (`$OFFLOAD_HOME\harness\local-agent.exe`), copy the file somewhere durable — e.g.
+  `~/.local-offload/agent-rules.json` — and pass that path.
+- **Risk parking (reporting, NOT a gate — measured 0% recall)** — every effectful tool asks the
+  model to self-annotate `security_risk` (low/medium/high). A call flagged `high` (or with an
+  unrecognized value — fail closed) is **parked**: never executed, recorded in the ask queue, the
+  run continues without it.
+
+  **This is a backstop, not a gate — do not rely on it.** The mechanism above is real and fires
+  as described, but the *input* it depends on was measured to be a near-constant. On the
+  production agent seat over 48 runs and 66 effectful calls, **54 of 54** emitted annotations
+  were `low` — zero medium, zero high — *including every structurally destructive call*, and it
+  held under an escalated arm (deleting an entire source tree still self-reported `low`).
+  Park-gate recall was **0/36**. Treat the model's self-annotation as telemetry, never as a
+  security control.
+
+  The control that actually fires is the **structural rule table** (`--rules`), which is
+  evaluated against tool + arguments rather than against the model's opinion of itself. That
+  table is **opt-in and defaults to empty**: with no `--rules` file, the only structural floor is
+  the built-in secret-material deny list. An unattended run with destructive capability and no
+  rules table is therefore ungated in practice, and the builder emits an `UNGATED` note saying
+  so. `examples/agent-rules.json` is a starting table.
+
+  **The `UNGATED` note — when you will see it, and when you will not.** It is not a general startup
+  banner. It is appended by the agent builder and printed to stderr by the CLI
+  (`[local-agent] UNGATED: …`) on exactly one condition: the run is **unattended**, holds at least
+  one of `--allow-delete` / `--allow-overwrite` / `--allow-shell` / `--allow-github`, **and** no
+  `--rules` file was passed. `--allow-write` or `--allow-run` alone does not raise it, and an
+  attended run never raises it. It is a **note, never an error** — the run proceeds, deliberately,
+  so existing unattended callers keep working. Passing a rule table is what clears it.
+  **Scope:** this is the CLI/queue path, the path that grants `--allow-*` and sets unattended. The
+  MCP `agent_run` front door passes no write/delete/shell/fetch capability at all, so it never
+  raises the note and none of this changes what an MCP caller can do.
 - **Effect accounting + the judge** — every tool call gets an honest effect status
   (`committed`/`failed`/`unknown`/`none`); the CLI prints the non-committed records at the end of a
   run, and `agent_run` returns them (`effects`, `effects_flagged`). `agent_run judge=true` adds one
