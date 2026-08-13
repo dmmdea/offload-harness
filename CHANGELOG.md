@@ -52,6 +52,38 @@ next printed CLI follows (`llamaswap-pp-cli` is expected at `tools/llamaswap/`).
 routes agents to `tools/comfyui/SKILL.md` for ComfyUI work and states the
 no-hand-editing rule; `README.md` gains a Tools section.
 
+### Fixed — the vendored ComfyUI CLI handled host paths Windows-only
+Adopting the CLI put it on an `ubuntu-latest` runner for the first time, and
+`internal/comfy/media` failed immediately. Both host-path functions delegated to Go's
+`filepath`, which honors only the *running* OS's separator — so on Linux
+`filepath.Base(`​`D:\refs\portrait.png`​`)` returns the entire string, and
+`filepath.ToSlash` is a no-op.
+
+Two real defects, not cosmetic ones:
+
+- **`StagedName` broke its own guarantee across a mixed fleet.** Its doc comment calls the
+  content hash load-bearing: identical bytes must stage under one name or an archived run's
+  provenance splits. On Linux the same file behind a Windows-style path staged as
+  `D_refs_portrait-<sha>.png` instead of `portrait-<sha>.png` — the exact collision the
+  design exists to prevent.
+- **`ValidateComfyFilename` failed OPEN on every non-Windows node.** Its job is to reject
+  host paths before they reach `LoadImage`; on Linux it silently stopped rejecting UNC and
+  backslash-separated `..` traversal.
+
+Both now handle `/` and `\` explicitly, independent of `runtime.GOOS` (new `hostBase`, and
+`strings.ReplaceAll` in place of `filepath.ToSlash`). Windows behavior is unchanged — only
+the non-Windows path moves, from wrong to correct. Verified by running the cross-compiled
+test binaries under Linux, not just on CI.
+
+This is the same defect class `crossplatform_lint_test.go` catches in the harness, and it is
+recorded as a patch against the generated tree in
+`tools/comfyui/.printing-press-patches/` — a debt owed upstream, since a reprint would
+otherwise revert it.
+
+A generated test fixture also carried a real local username in a path
+(`/home/<user>/refs/portrait.png`); replaced with `/home/user/...` per the `docs/STYLE.md`
+privacy rule, which covers code as well as docs in this public repository.
+
 ### Changed — `.gitignore` covers `tools/*/` build output
 The existing `/bin/` rule is anchored to the repo root and does not cover a nested
 module's `bin/`. Added `tools/*/bin/` and `tools/*/build/` (the ComfyUI `.mcpb` bundle
