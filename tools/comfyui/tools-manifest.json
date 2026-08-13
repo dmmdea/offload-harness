@@ -1,0 +1,177 @@
+{
+  "api_name": "comfyui",
+  "base_url": "http://127.0.0.1:8188",
+  "description": "Drive a local ComfyUI render server from the shell, with a durable record of every run the server itself forgets.",
+  "mcp_ready": "full",
+  "http_transport": "standard",
+  "auth": {
+    "type": "none"
+  },
+  "required_headers": [],
+  "tools": [
+    {
+      "name": "history_get",
+      "description": "Full record for one prompt: status (status_str, completed), the messages array carrying execution_start / execution_success / execution_error timestamps in milliseconds, and the outputs map. The timestamp delta is the ONLY honest source of per-prompt duration — scraping 'Prompt executed in N seconds' from the server log returns a stale line when the current run has not finished, and scraping an s/it progress bar returns a transient intra-run sample, not a rate. Required: prompt_id.",
+      "method": "GET",
+      "path": "/history/{prompt_id}",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "prompt_id",
+          "type": "string",
+          "location": "path",
+          "description": "The prompt_id returned by prompt submit.",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "history_list",
+      "description": "Recent prompt history, newest last. Optional: max_items.",
+      "method": "GET",
+      "path": "/history",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "max_items",
+          "type": "integer",
+          "location": "query",
+          "description": "Cap the number of returned records."
+        }
+      ]
+    },
+    {
+      "name": "objectinfo_all",
+      "description": "Every registered node class and its input schema.",
+      "method": "GET",
+      "path": "/object_info",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "objectinfo_get",
+      "description": "Schema for one node class. Loader COMBO options live at index 1 of the input tuple as {'options' -\u003e [...]}, NOT at index 0 — index 0 is the type string. An EMPTY options list means the model CLASS is unregistered (missing extra_model_paths.yaml key), not that the file is missing. Required: class_type.",
+      "method": "GET",
+      "path": "/object_info/{class_type}",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "class_type",
+          "type": "string",
+          "location": "path",
+          "description": "Node class name, e.g. VAELoader or UNETLoader.",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "prompt_submit",
+      "description": "Queue an API-format graph. Returns {prompt_id, number, node_errors} on success. On validation failure returns HTTP 400 with an error object plus a node_errors map keyed by node id — that detail is the whole diagnostic and must be surfaced verbatim, never summarised.",
+      "method": "POST",
+      "path": "/prompt",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "queue_clear",
+      "description": "Clear pending items. Send {'clear': true}.",
+      "method": "POST",
+      "path": "/queue",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "queue_get",
+      "description": "Returns {queue_running, queue_pending}. A non-empty queue_running with an idle GPU means the job is in a non-sampling stage (VAE decode, video assembly), not stalled.",
+      "method": "GET",
+      "path": "/queue",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "queue_interrupt",
+      "description": "Interrupt the currently executing prompt. Does not clear pending items.",
+      "method": "POST",
+      "path": "/interrupt",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "system_stats",
+      "description": "ComfyUI version, python version, and per-device vram_total / vram_free. Device ordering here is torch ordering, which can be the INVERSE of nvidia-smi ordering — trust this endpoint for cuda:N identity, not nvidia-smi index.",
+      "method": "GET",
+      "path": "/system_stats",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "upload_image",
+      "description": "Upload an image into ComfyUI's input dir. LoadImage takes a FILENAME inside that dir, never an absolute host path — passing an absolute path fails validation with 'Invalid image file'.",
+      "method": "POST",
+      "path": "/upload/image",
+      "no_auth": true,
+      "params": []
+    },
+    {
+      "name": "userdata_get",
+      "description": "Read a user file. Workflow paths are URL-encoded, e.g. workflows%2Fname.json. Required: file.",
+      "method": "GET",
+      "path": "/userdata/{file}",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "file",
+          "type": "string",
+          "location": "path",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "userdata_put",
+      "description": "Write a user file, creating parent dirs. Pass overwrite=true to replace. Required: file. Optional: overwrite.",
+      "method": "POST",
+      "path": "/userdata/{file}",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "file",
+          "type": "string",
+          "location": "path",
+          "required": true
+        },
+        {
+          "name": "overwrite",
+          "type": "boolean",
+          "location": "query"
+        }
+      ]
+    },
+    {
+      "name": "view_get",
+      "description": "Fetch an output file by filename/subfolder/type. Required: filename. Optional: subfolder, type.",
+      "method": "GET",
+      "path": "/view",
+      "no_auth": true,
+      "params": [
+        {
+          "name": "filename",
+          "type": "string",
+          "location": "query",
+          "required": true
+        },
+        {
+          "name": "subfolder",
+          "type": "string",
+          "location": "query"
+        },
+        {
+          "name": "type",
+          "type": "string",
+          "location": "query",
+          "description": "output | input | temp"
+        }
+      ]
+    }
+  ]
+}

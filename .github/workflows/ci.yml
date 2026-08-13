@@ -71,3 +71,37 @@ jobs:
         env:
           OFFLOAD_HARNESS_EXE: ${{ runner.temp }}\local-offload-render.exe
         run: .\setup\render.tests.ps1
+
+  # Printed CLIs under tools/ are SEPARATE Go modules (docs/systems/printed-clis.md),
+  # so the `build` job's `./...` does not reach them — Go excludes nested modules from a
+  # parent's package pattern. Without a job of their own they would be vendored code that
+  # nothing ever compiles. One job per printed CLI; `tools/llamaswap` gets the next one.
+  #
+  # The suite is offline by construction: it touches the network only to assert a FAILURE
+  # path (ProbeReachable against a closed port), so a runner with no ComfyUI installed is
+  # a valid host for every package — nothing is excluded and no mock-mode env var is set.
+  # The PRINTING_PRESS_* vars govern the Printing Press's own verify/dogfood runners, not
+  # `go test`, and are deliberately left unset here.
+  tools-comfyui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/comfyui
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: tools/comfyui/go.sum
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1

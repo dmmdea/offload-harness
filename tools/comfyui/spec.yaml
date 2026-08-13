@@ -1,0 +1,209 @@
+# ComfyUI local HTTP API — hand-authored spec.
+#
+# ComfyUI publishes no OpenAPI document. Every endpoint below was exercised against a live
+# ComfyUI 0.32.0 instance on 2026-08-12 while driving LTX-2.5, MiniMax-H3 and Wan2.2 renders,
+# so the shapes are first-hand-verified rather than inferred from docs.
+#
+# No auth: ComfyUI binds loopback with no credential layer.
+
+name: comfyui
+description: Drive a local ComfyUI render server — submit graphs, poll real timings, inspect the node schema, and manage the queue.
+base_url: http://127.0.0.1:8188
+version: "0.32.0"
+
+auth:
+  type: none
+
+cli_description: Drive a local ComfyUI render server from the shell, with a durable record of every run the server itself forgets.
+
+resources:
+  prompt:
+    description: Submit an API-format graph for execution.
+    endpoints:
+      submit:
+        method: POST
+        path: /prompt
+        no_auth: true
+        description: >
+          Queue an API-format graph. Returns {prompt_id, number, node_errors} on success.
+          On validation failure returns HTTP 400 with an error object plus a node_errors map
+          keyed by node id — that detail is the whole diagnostic and must be surfaced verbatim,
+          never summarised.
+        body_fields:
+          - name: prompt
+            type: object
+            required: true
+            description: The API-format graph (node-id -> {class_type, inputs}).
+          - name: client_id
+            type: string
+            required: false
+            description: Opaque client identifier for websocket correlation.
+
+  history:
+    description: Completed prompt records, including real execution timings.
+    endpoints:
+      get:
+        method: GET
+        path: /history/{prompt_id}
+        no_auth: true
+        description: >
+          Full record for one prompt: status (status_str, completed), the messages array
+          carrying execution_start / execution_success / execution_error timestamps in
+          milliseconds, and the outputs map. The timestamp delta is the ONLY honest source of
+          per-prompt duration — scraping "Prompt executed in N seconds" from the server log
+          returns a stale line when the current run has not finished, and scraping an s/it
+          progress bar returns a transient intra-run sample, not a rate.
+        params:
+          - name: prompt_id
+            in: path
+            type: string
+            required: true
+            description: The prompt_id returned by prompt submit.
+      list:
+        method: GET
+        path: /history
+        no_auth: true
+        description: Recent prompt history, newest last.
+        params:
+          - name: max_items
+            in: query
+            type: integer
+            required: false
+            description: Cap the number of returned records.
+
+  queue:
+    description: Pending and running work.
+    endpoints:
+      get:
+        method: GET
+        path: /queue
+        no_auth: true
+        description: >
+          Returns {queue_running, queue_pending}. A non-empty queue_running with an idle GPU
+          means the job is in a non-sampling stage (VAE decode, video assembly), not stalled.
+      clear:
+        method: POST
+        path: /queue
+        no_auth: true
+        description: 'Clear pending items. Send {"clear": true}.'
+        body_fields:
+          - name: clear
+            type: boolean
+            required: false
+            description: Clear the pending queue.
+          - name: delete
+            type: array
+            required: false
+            description: Delete specific prompt_ids from the pending queue.
+      interrupt:
+        method: POST
+        path: /interrupt
+        no_auth: true
+        description: Interrupt the currently executing prompt. Does not clear pending items.
+
+  objectinfo:
+    description: The live node schema — the authority on class names and valid input values.
+    endpoints:
+      all:
+        method: GET
+        path: /object_info
+        no_auth: true
+        description: Every registered node class and its input schema.
+      get:
+        method: GET
+        path: /object_info/{class_type}
+        no_auth: true
+        description: >
+          Schema for one node class. Loader COMBO options live at index 1 of the input tuple
+          as {"options" -> [...]}, NOT at index 0 — index 0 is the type string. An EMPTY options
+          list means the model CLASS is unregistered (missing extra_model_paths.yaml key), not
+          that the file is missing.
+        params:
+          - name: class_type
+            in: path
+            type: string
+            required: true
+            description: Node class name, e.g. VAELoader or UNETLoader.
+
+  system:
+    description: Server and device state.
+    endpoints:
+      stats:
+        method: GET
+        path: /system_stats
+        no_auth: true
+        description: >
+          ComfyUI version, python version, and per-device vram_total / vram_free. Device
+          ordering here is torch ordering, which can be the INVERSE of nvidia-smi ordering —
+          trust this endpoint for cuda:N identity, not nvidia-smi index.
+
+  userdata:
+    description: Server-side user files, including saved workflows.
+    endpoints:
+      get:
+        method: GET
+        path: /userdata/{file}
+        no_auth: true
+        description: Read a user file. Workflow paths are URL-encoded, e.g. workflows%2Fname.json.
+        params:
+          - name: file
+            in: path
+            type: string
+            required: true
+      put:
+        method: POST
+        path: /userdata/{file}
+        no_auth: true
+        description: Write a user file, creating parent dirs. Pass overwrite=true to replace.
+        params:
+          - name: file
+            in: path
+            type: string
+            required: true
+          - name: overwrite
+            in: query
+            type: boolean
+            required: false
+
+  view:
+    description: Fetch rendered outputs.
+    endpoints:
+      get:
+        method: GET
+        path: /view
+        no_auth: true
+        description: Fetch an output file by filename/subfolder/type.
+        params:
+          - name: filename
+            in: query
+            type: string
+            required: true
+          - name: subfolder
+            in: query
+            type: string
+            required: false
+          - name: type
+            in: query
+            type: string
+            required: false
+            description: output | input | temp
+
+  upload:
+    description: Stage input images for LoadImage.
+    endpoints:
+      image:
+        method: POST
+        path: /upload/image
+        no_auth: true
+        description: >
+          Upload an image into ComfyUI's input dir. LoadImage takes a FILENAME inside that
+          dir, never an absolute host path — passing an absolute path fails validation with
+          "Invalid image file".
+        body_fields:
+          - name: image
+            type: string
+            required: true
+            description: Multipart file field.
+          - name: overwrite
+            type: boolean
+            required: false
