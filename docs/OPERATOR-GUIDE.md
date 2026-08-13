@@ -65,7 +65,7 @@ Logs: `/tmp/agent-server.log`, `/tmp/openwebui.log`.
 |---|---|
 | `doctor: health: DOWN` | llama-swap not running / wrong port. Start it; confirm `--listen 127.0.0.1:11436`. |
 | `stack did not confirm ready` | Read the two `/tmp/*.log` files; usually OpenWebUI still installing or the agent port busy. |
-| alias `FAIL — not in the live roster` | The yaml doesn't serve that alias, or a model file is missing. Check `llama-swap.yaml`. Vision/STT aliases are legitimately absent on a grunt-work-only install. |
+| alias `FAIL — not in the live roster` | The name is served under neither a canonical id nor a `meta.llamaswap.aliases` entry — the yaml doesn't serve it, or a model file is missing. Check `llama-swap.yaml`. Vision/STT aliases are legitimately absent on a grunt-work-only install. |
 
 ### Fleet node (`fleet-serve`) — accept dispatched renders from other boxes
 
@@ -146,7 +146,8 @@ local-offload report --out capability-report.md      # Windows
 
 One read-only Markdown document: harness version and platform, which config file is actually
 loaded, the hardware tier from the installer manifest, every configured model alias measured
-against the live `/v1/models`, and every media route with its derived verdict — plus a
+against the live `/v1/models` (matched against canonical ids **and** `meta.llamaswap.aliases`),
+and every media route with its derived verdict — plus a
 **Needs attention** section that lists only the genuinely broken ones (a route this box never
 bound is a legitimate machine, not a fault).
 
@@ -583,7 +584,7 @@ local-offload --config "$HOME\.local-offload\config.json" doctor   # the new ali
 
 | Failure | Fix |
 |---|---|
-| alias `FAIL — not in roster` | Restart llama-swap so it re-reads the yaml; confirm the alias name matches exactly. |
+| alias `FAIL — not in roster` | Restart llama-swap so it re-reads the yaml; confirm the name matches a model id or one of its `aliases` (the check reads both). |
 | model won't load / device-lost | VRAM too small — add `--cpu-moe` (MoE) or lower `-ngl`. See §6. |
 
 ---

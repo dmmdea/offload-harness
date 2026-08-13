@@ -13,6 +13,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
+	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
 // `local-offload report` answers ONE question for someone who is not at the
@@ -154,7 +155,7 @@ func gatherReport(cfg config.Config, src config.Source, routes []mediacap.Route,
 		return in
 	}
 	in.Health = "OK"
-	roster, err := fetchModelRoster(ctx, cfg.Endpoint)
+	roster, err := swapclient.FetchRoster(ctx, cfg.Endpoint, 10*time.Second)
 	if err != nil {
 		in.Health = "OK, but /v1/models could not be listed (" + err.Error() + ")"
 		return in
@@ -163,7 +164,7 @@ func gatherReport(cfg config.Config, src config.Source, routes []mediacap.Route,
 		v := aliasVerdict{Key: a.Key, Alias: a.Alias, State: "unset"}
 		switch {
 		case a.Alias == "":
-		case roster[a.Alias]:
+		case roster.Serves(a.Alias):
 			v.State = "OK"
 		default:
 			v.State = "**MISSING**"

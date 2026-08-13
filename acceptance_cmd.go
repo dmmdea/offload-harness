@@ -14,6 +14,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/mediaops"
+	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
 // `local-offload acceptance` is the gate a node must pass before it is handed
@@ -110,14 +111,14 @@ func aliasCheck2(ctx context.Context, cfg config.Config) acceptance.Check {
 	const name = "model aliases live"
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	roster, err := fetchModelRoster(cctx, cfg.Endpoint)
+	roster, err := swapclient.FetchRoster(cctx, cfg.Endpoint, 10*time.Second)
 	if err != nil {
 		return acceptance.Check{Name: name, Status: acceptance.Fail,
 			Detail: "cannot list " + cfg.Endpoint + "/v1/models: " + err.Error()}
 	}
 	var missing []string
 	for _, a := range modelAliases(cfg) {
-		if a.Alias != "" && !roster[a.Alias] {
+		if a.Alias != "" && !roster.Serves(a.Alias) {
 			missing = append(missing, a.Key+"="+a.Alias)
 		}
 	}

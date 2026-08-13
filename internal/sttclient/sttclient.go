@@ -22,6 +22,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/swapclient"
+	"llamaswap-pp-cli/pkg/llamaswap"
 )
 
 // inferMu serializes every inference POST to the whisper upstream. whisper-server is
@@ -215,18 +218,24 @@ func buildMultipart(wav []byte, filename string, p Params) (*bytes.Buffer, strin
 // Unload force-frees the whisper upstream's VRAM immediately (zero-always-warm),
 // rather than waiting for the ttl:300 idle timer. Best-effort: any error is the
 // caller's to ignore.
+//
+// Routed through pkg/llamaswap rather than posting /api/models/unload/{model}
+// raw, which buys two guards this call site never had: the name is resolved
+// through the roster first (the harness binds ALIASES — `whisper`, `stt` — and
+// only the canonical id is guaranteed to key the unload route), and a seat the
+// llama-swap config marks resident is REFUSED instead of taken down.
+//
+// Drain is deliberately off: the pre-existing behavior was an unconditional
+// unload, and the caller already holds the single-slot inference mutex when it
+// fires. Passing UnloadOpts{Drain: true} is the one-line change if a future
+// caller unloads a seat it does not own.
 func (c *Client) Unload(ctx context.Context, model string) error {
-	url := c.base + "/api/models/unload/" + model
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	ls, err := swapclient.New(c.base, c.http.Timeout)
 	if err != nil {
 		return err
 	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
-	}
-	_ = resp.Body.Close()
-	return nil
+	_, err = ls.Unload(ctx, model, &llamaswap.UnloadOpts{})
+	return err
 }
 
 // SRT renders segments as SubRip text (1-indexed, HH:MM:SS,mmm timestamps).

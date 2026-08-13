@@ -80,6 +80,69 @@ so downstream threshold calibration (mem0 admission gate) is unaffected. Brings 
 template back in parity with the live Qube config, which was flipped the same day —
 template regeneration would previously have silently reverted the fix.
 
+## [0.52.0] - 2026-08-13
+
+### Fixed — `doctor`, `acceptance` and `report` called every correctly-served alias MISSING
+llama-swap publishes CANONICAL model ids in `/v1/models` `data[].id` and the names the harness
+actually binds only inside `meta.llamaswap.aliases`. The harness had **three** independent readers of
+that endpoint with **two** different response schemas: `main.go`'s `fetchModelRoster` (id-only, used
+by `doctor`, `acceptance` and `report`), `mcpserver`'s `probeServedModels` (id-only), and
+`plannerUnserved` (the only alias-aware one). So on a healthy reference box the shipped default
+config — which binds `offload-e4b`, `gemma4-e2b`, `gemma4-26b-a4b`, every one of them an alias —
+made `doctor` print `FAIL — not in the live /v1/models roster` for four of its eight bindings and
+exit non-zero, `acceptance` refuse the node work, and `report` hand a collaborator a table of
+`**MISSING**` beside seats that were serving the whole time. Verified before/after against the live
+endpoint: same four bindings, `FAIL` → `OK`.
+
+All three readers are now one adapter, [`internal/swapclient`](internal/swapclient/swapclient.go),
+over the vendored public client `tools/llamaswap`'s `pkg/llamaswap` — matching ids first, then
+aliases, case-insensitively, with one endpoint-normalization rule instead of the three that had
+grown (one of which would have fetched `/v1/v1/models` from a `/v1`-suffixed endpoint).
+
+### Fixed — the fleet node read seat residency off a field llama-swap misreports
+`fleet_reclaim.go` decided which loaded seats were reclaimable from each `/running` row's `ttl`.
+llama-swap publishes `ttl: 0` for a seat CONFIGURED `ttl: -1` (verified live on v249 — both support
+seats read `0` there today), so the rule rested on a value the server gets wrong. It survived the
+common case by accident and got the opposite one wrong: a support seat given a real TTL was counted
+as reclaimable, over-stating advertised capacity by the size of an embedder. Residency now comes
+from `pkg/llamaswap`'s `KeepSet()`/`IsProtected()`, which parses the llama-swap YAML and never asks
+the server. The bounded error documented in that file's own comment is gone. A box where no YAML and
+no keep-set config can be read falls back to the old `ttl` reading rather than to "nothing is
+protected" — the permissive answer would fold a resident embedder into the idle baseline and make
+that node under-advertise forever.
+
+### Fixed — the roster table `doctor` gates on and the one `offload_status` publishes had drifted
+Two hardcoded lists of the same thing, 8 keys against 10: `ocr` and `embed` were advertised to an
+autonomous planner by `offload_status` and unknown to every other surface. Both now read
+`config.Config.ModelRoutes`. `offload_status`'s payload is unchanged (asserted by test); the doctor
+gate is unchanged too — `ocr` and `embed` are reported, not gated, because both resolve to a
+non-empty fallback and gating them would fail nodes whose serving tier declares no such seat.
+
+### Changed — STT's zero-always-warm unload goes through `pkg/llamaswap`
+`internal/sttclient`'s `Unload` posted `/api/models/unload/{model}` raw with whatever name it was
+handed. It now resolves the name through the roster first (the harness binds `whisper`/`stt`, and
+only the canonical id is guaranteed to key that route) and REFUSES a seat the llama-swap config
+marks resident. Drain stays off, preserving the previous unconditional behavior; it is one option
+away for a future caller that unloads a seat it does not own.
+
+### Changed — the harness now imports one package from a printed CLI
+Root `go.mod` gains `require llamaswap-pp-cli` + `replace llamaswap-pp-cli => ./tools/llamaswap`.
+This is a deliberate, documented exception to the `tools/` isolation rule
+([docs/systems/printed-clis.md](docs/systems/printed-clis.md#the-one-exception-the-harness-consumes-pkgllamaswap)),
+and it is not free: `pkg/llamaswap` sits on the tool's `internal/mirror`, which also carries the
+epoch mirror engine, so `modernc.org/sqlite` comes with it. Measured: the harness binary went
+18.0 MB → 23.2 MB and the root `go.mod` gained ten indirect requirements (`cobra` and `mcp-go` stay
+out). The follow-up that removes the cost is an upstream reprint splitting the mirror engine off the
+client type. The harness still never shells out to a printed CLI, and no printed CLI is in the
+serving path.
+
+`internal/agent`'s `ProbeServedWindow` is the one llama-swap call deliberately NOT routed through
+the package: `Client.Props` refuses to auto-start an unloaded model, which is right for an operator
+probe and wrong here — the planner seat is normally cold at that point, so a refusing probe would
+drop every cold run back to the 8192-token fallback and re-open finding F4. It shares the package's
+endpoint normalization and nothing else. (Alias resolution buys it nothing: llama-swap resolves
+aliases on `/upstream` itself, verified live.)
+
 ## [0.51.1] - 2026-08-13
 
 ### Fixed — `tools/comfyui`: `validate` failed good graphs from a stale cached schema
@@ -970,7 +1033,8 @@ had gone stale against `groups:` in 0.36.0 (that suite is not in CI, so it drift
   cleared it by hand; that knowledge now lives in the tier. Caught by running the installer end to
   end: the acceptance gate reported `2 alias(es) not served`, and reports them live after the fix.
 - **`.gitattributes` pins `*.sh`, the serving templates and generated docs to LF.** A shell script
-  checked out with CRLF fails at exec with `env: 'bash': No such file or directory`, naming
+  checked out with CRLF fails at exec with `env: 'bash
+': No such file or directory`, naming
   neither the script nor the cause. This repo is developed on Windows and deployed to Linux, so that
   is the normal path, not an edge case — hit twice while testing this slice.
 - `install.sh` warns loudly when no `render/` tree sits beside the binary, instead of leaving the

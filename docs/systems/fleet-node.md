@@ -257,9 +257,21 @@ changes.
 
 **Always-resident seats count as baseline, not capacity.** The support tier (embedder +
 reranker) is co-resident on purpose; unloading it is what made a single RAG query pay
-three model loads. Seats llama-swap reports with `ttl 0` (no auto-unload) are therefore
-treated as part of the baseline. Without that rule a correctly configured node — which
-never reaches "nothing loaded" — would report `unknown` forever.
+three model loads. Those seats are therefore treated as part of the baseline. Without
+that rule a correctly configured node — which never reaches "nothing loaded" — would
+report `unknown` forever.
+
+**Which seats are resident comes from the CONFIG, not from `/running`.** The node used to
+read residency off each `/running` row's `ttl` field, and llama-swap misreports it: a seat
+configured `ttl: -1` (never unload) is published on `/running` as `ttl: 0` (verified live
+on v249 — both support seats read `0` there today). The old rule survived that by accident,
+because it also treated `0` as resident, but it got the opposite case wrong: a support seat
+given a real TTL was counted as reclaimable, over-stating capacity by the size of an
+embedder. The keep-set now comes from `pkg/llamaswap`, which parses the llama-swap YAML
+(`ttl: -1` / `ttl: 0` seats, plus their aliases) and never asks the server. On a box where
+no llama-swap YAML and no keep-set config can be read at all, the node falls back to the
+old `ttl` reading rather than to "nothing is protected" — the permissive answer would fold
+a resident embedder into the idle baseline and make that node under-advertise forever.
 
 **Unknown is published as absence.** Before any idle baseline has been observed, both
 numbers are OMITTED and only `vram_reclaim_source` is sent, explaining why. A consumer
@@ -279,6 +291,8 @@ and a node several releases behind gets debugged against known-fixed bugs.
   persistence
 - [`internal/fleetnode/vram.go`](../../internal/fleetnode/vram.go),
   [`vram_windows.go`](../../internal/fleetnode/vram_windows.go) — the two sampling paths
+- [`fleet_reclaim.go`](../../fleet_reclaim.go) — `oursLoaded` / `anyReclaimable`: the keep-set
+  classification above, over `pkg/llamaswap`'s `Running()` + `IsProtected()`
 - [`main.go`](../../main.go) — `fleet-serve` / `fleet-measure` verbs
 
 ## Related docs

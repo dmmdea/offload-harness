@@ -66,14 +66,40 @@ Each printed CLI keeps its own `go.mod` with the module name the Printing Press 
 load-bearing structural choice:
 
 - Go excludes nested modules from a parent's `./...`, so the harness's `go build ./...`,
-  `go vet ./...`, and `go test ./...` do not see `tools/` at all. The harness's dependency graph
-  stays exactly as small as it was.
+  `go vet ./...`, and `go test ./...` do not COMPILE `tools/` — each tool keeps its own CI job for
+  exactly that reason.
 - A printed CLI pulls dependencies the harness has no business acquiring — `cobra`, `mcp-go`,
   `modernc.org/sqlite`. Merging the modules would inject all of them into the harness binary.
 - A reprint can replace the whole tree without touching the harness module.
 
 The cost is that nothing in `tools/` is covered by the harness's default commands. That is why CI
 runs a separate job per printed CLI (below); without it, these modules would rot silently.
+
+### The one exception: the harness consumes `pkg/llamaswap`
+
+Since 0.52.0 the harness **imports** one package out of one printed CLI:
+[`tools/llamaswap/pkg/llamaswap`](../../tools/llamaswap/pkg/llamaswap), wired in with a
+`require llamaswap-pp-cli` plus `replace llamaswap-pp-cli => ./tools/llamaswap` in the root
+`go.mod`. `llamaswap` publishes that tree as an importable client on purpose, and the harness had
+grown the exact sprawl it exists to end: three independent readers of `GET /v1/models` with two
+response schemas and three URL normalizations, of which only one knew that llama-swap publishes
+harness-bound names under `meta.llamaswap.aliases`. The other two reported every correctly served
+alias as MISSING. See [`internal/swapclient`](../../internal/swapclient/swapclient.go).
+
+This is a deliberate, bounded exception to the isolation rule, and it is not free:
+
+- **It costs binary size.** `pkg/llamaswap` sits on the tool's `internal/mirror`, which also holds
+  the epoch mirror engine and therefore drags in `modernc.org/sqlite`. Measured on the 0.52.0 bump:
+  the harness binary went 18.0 MB → 23.2 MB and the root `go.mod` gained ten indirect requirements.
+  Nothing else from the tool is linked (`cobra` and `mcp-go` stay out).
+- **The direction of the rule is unchanged.** The harness still never SHELLS OUT to a printed CLI,
+  and neither `comfyui-pp-cli` nor `llamaswap-pp-cli` is in the serving path. What is imported is a
+  library package the tool publishes for importers, not the CLI.
+- **`tools/llamaswap` is still not hand-edited here.** A defect in the imported package is fixed
+  upstream and re-vendored like any other.
+- **The follow-up that would remove the size cost** is an upstream reprint that splits the epoch
+  mirror engine (and its sqlite dependency) off the client type `pkg/llamaswap` actually uses.
+  Until then the 5 MB is the documented price of one alias-aware client.
 
 ### The regenerate / re-vendor cycle
 
@@ -191,20 +217,30 @@ Direct links: [comfyui SKILL](../../tools/comfyui/SKILL.md) ·
 
 ## Dependencies
 
-Each printed CLI depends only on its own `go.mod` graph and Go 1.26+. It does not import the harness,
-and the harness does not import it. Each expects its own service reachable at *runtime* — ComfyUI and
-llama-swap respectively — but neither needs one at build or test time.
+Each printed CLI depends only on its own `go.mod` graph and Go 1.26+. Neither imports the harness.
+The harness imports exactly one package from one of them — `llamaswap-pp-cli/pkg/llamaswap`, via the
+`replace` described above — and nothing else under `tools/`. Each expects its own service reachable
+at *runtime* — ComfyUI and llama-swap respectively — but neither needs one at build or test time.
 
 ## Downstream effects
 
-Vendoring or re-vendoring a printed CLI does not change harness behavior: no harness package imports
-`tools/`, and the harness's build and test commands do not reach into it. The blast radius of a
-change here is the tool itself, its CI job, and this doc.
+Re-vendoring `tools/comfyui` does not change harness behavior: no harness package imports it, and the
+harness's build and test commands do not reach into it. The blast radius is the tool, its CI job, and
+this doc.
+
+Re-vendoring `tools/llamaswap` is different, and must be treated as a harness change: the harness
+compiles `pkg/llamaswap` into its own binary, so a reprint that alters that package's surface or
+behavior lands in `doctor`, `acceptance`, `report`, `offload_status`, `agent_run`'s planner check,
+the fleet node's reclaimable-VRAM verdict, and the STT unload. Run the harness's own
+`go build ./... && go vet ./... && go test ./... -count=1` in the same PR, not just the
+`tools-llamaswap` job.
 
 ## Invariants and assumptions
 
 1. **`tools/*/` modules are never merged into the harness module.** Nested `go.mod` is the isolation
-   boundary.
+   boundary. The harness may IMPORT a published `pkg/` package from one across a `replace`
+   (`pkg/llamaswap` is the only one today, and the deliberate exception above); it never imports a
+   tool's `internal/`, never depends on a tool's `cmd/`, and never shells out to a printed CLI.
 2. **Generated files are not hand-edited here.** Fix upstream and re-vendor; use
    `.printing-press-patches/` only for deviations that cannot live upstream.
 3. **No binaries, no run reports.** Enforced by `.gitignore`.

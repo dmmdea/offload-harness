@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,6 +22,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
+	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
 type Server struct{ p *pipeline.Pipeline }
@@ -213,24 +213,14 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 	}
 	cfg := s.p.Cfg()
 
-	roster := map[string]any{
-		"workhorse":  cfg.Model,
-		"agent":      cfg.AgentPlannerModel(""), // the resolved planner seat (agent_model, else workhorse)
-		"triage":     cfg.TriageModel,
-		"escalation": cfg.EscalationModel,
-		"reasoning":  cfg.ReasoningModel,
-		"vision":     cfg.VisionModel,
-		// ocr falls back to vision when unbound, so the roster reports what will
-		// ACTUALLY run rather than an empty slot that reads as "no OCR here".
-		"ocr": func() string {
-			if cfg.OCRModel != "" {
-				return cfg.OCRModel
-			}
-			return cfg.VisionModel
-		}(),
-		"stt":    cfg.STTModel,
-		"stt_hq": cfg.STTModelHQ,
-		"embed":  cfg.EmbedModel(),
+	// One table, shared with doctor/acceptance/report (config.ModelRoutes). The
+	// two lists used to be hardcoded separately and had drifted — this surface
+	// published 10 keys while the doctor gate checked 8. Effective, not
+	// Configured: a planner needs the seat that will ACTUALLY run once the
+	// agent→workhorse, ocr→vision and embed fallbacks are applied.
+	roster := map[string]any{}
+	for _, r := range cfg.ModelRoutes() {
+		roster[r.StatusKey] = r.Effective
 	}
 	local := map[string]any{
 		"endpoint": cfg.Endpoint,
@@ -269,34 +259,20 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 	return jsonResult(map[string]any{"local": local, "media": media, "remote": remote})
 }
 
-// probeServedModels GETs <endpoint>/v1/models (OpenAI list shape — llama-swap
-// serves it) and returns the live model ids. Short timeout: status must stay
-// snappy even when the endpoint is a black hole.
+// probeServedModels reads the live roster and returns the CANONICAL model ids.
+// Short timeout: status must stay snappy even when the endpoint is a black hole.
+//
+// Ids only, deliberately — `served_now` has always been the canonical list and
+// callers read it as such. The alias-aware view is what the roster gate above
+// uses; publishing aliases here would change this tool's payload shape.
 func probeServedModels(ctx context.Context, endpoint string) ([]string, error) {
 	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(cctx, http.MethodGet, strings.TrimRight(endpoint, "/")+"/v1/models", nil)
+	roster, err := swapclient.FetchRoster(cctx, endpoint, 3*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	var body struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, err
-	}
-	ids := make([]string, 0, len(body.Data))
-	for _, d := range body.Data {
-		ids = append(ids, d.ID)
-	}
-	return ids, nil
+	return roster.IDs(), nil
 }
 
 func (s *Server) handleSummarize(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1037,55 +1013,19 @@ func agentTimeout(reqSec int, cfg config.Config) time.Duration {
 // planner seat. checked=false means the roster was unreachable/unparseable —
 // callers proceed and let the loop's first chat call surface the transport
 // error; only a POSITIVE "roster answered and the model is absent" fails loud.
+// llama-swap's /v1/models lists CANONICAL ids in data[].id; a harness-bound ALIAS
+// (the very names tier seeds put in agent_model) appears only in each entry's
+// meta.llamaswap.aliases — matching id alone would fail-loud on a correctly
+// served seat. swapclient.Roster.Serves matches both.
 func plannerUnserved(ctx context.Context, base, model string) (missing, checked bool) {
-	b := strings.TrimRight(base, "/")
-	if b == "" || model == "" {
+	if strings.TrimSpace(base) == "" || model == "" {
 		return false, false
 	}
-	if !strings.HasSuffix(b, "/v1") {
-		b += "/v1"
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b+"/models", nil)
-	if err != nil {
+	roster, err := swapclient.FetchRoster(ctx, base, 10*time.Second)
+	if err != nil || roster.Len() == 0 {
 		return false, false
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		if resp != nil {
-			resp.Body.Close()
-		}
-		return false, false
-	}
-	defer resp.Body.Close()
-	// llama-swap's /v1/models lists CANONICAL ids in data[].id; a harness-bound
-	// ALIAS (the very names tier seeds put in agent_model) appears only in each
-	// entry's meta.llamaswap.aliases — matching id alone would fail-loud on a
-	// correctly served seat.
-	var doc struct {
-		Data []struct {
-			ID   string `json:"id"`
-			Meta struct {
-				Llamaswap struct {
-					Aliases []string `json:"aliases"`
-				} `json:"llamaswap"`
-			} `json:"meta"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil || len(doc.Data) == 0 {
-		return false, false
-	}
-	for _, m := range doc.Data {
-		if m.ID == model {
-			return false, true
-		}
-		for _, a := range m.Meta.Llamaswap.Aliases {
-			if a == model {
-				return false, true
-			}
-		}
-	}
-	return true, true
+	return !roster.Serves(model), true
 }
 
 // jsonResult marshals an arbitrary payload (NIM is not a core.Result) into a
