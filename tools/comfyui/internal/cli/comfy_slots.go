@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"comfyui-pp-cli/internal/comfy/slots"
 	"comfyui-pp-cli/internal/store"
@@ -469,15 +470,22 @@ type slotsValidateReport struct {
 	// ok:true there is a false green, and the false green lands on the FIRST
 	// run, before anyone has synced objectinfo. null means "not answered";
 	// only a real check sets true or false. Read `verdict` for the word form.
-	OK           *bool           `json:"ok"`
-	Verdict      string          `json:"verdict"`
-	SchemaSource string          `json:"schema_source"`
-	ClassesKnown int             `json:"classes_known"`
-	NodeCount    int             `json:"node_count"`
-	ErrorCount   int             `json:"error_count"`
-	WarningCount int             `json:"warning_count"`
-	Findings     []slots.Finding `json:"findings"`
-	Hint         string          `json:"hint,omitempty"`
+	OK           *bool  `json:"ok"`
+	Verdict      string `json:"verdict"`
+	SchemaSource string `json:"schema_source"`
+	// SchemaSyncedAt and SchemaAge are populated only for a schema read from
+	// the local cache. A cached schema can be WRONG rather than merely old —
+	// a checkpoint added after the last sync is absent from it, so a value the
+	// server would accept still reports as out-of-range — and an agent that
+	// cannot see the age has no way to tell that verdict apart from a real one.
+	SchemaSyncedAt *time.Time      `json:"schema_synced_at,omitempty"`
+	SchemaAge      string          `json:"schema_age,omitempty"`
+	ClassesKnown   int             `json:"classes_known"`
+	NodeCount      int             `json:"node_count"`
+	ErrorCount     int             `json:"error_count"`
+	WarningCount   int             `json:"warning_count"`
+	Findings       []slots.Finding `json:"findings"`
+	Hint           string          `json:"hint,omitempty"`
 }
 
 // newValidateCmd returns `comfyui-pp-cli validate <graph.json>`.
@@ -511,9 +519,17 @@ dropping the file in place does not fix it.
 
 The schema comes from the local cache (` + "`comfyui-pp-cli sync --resources objectinfo`" + `)
 or from an explicit --object-info dump. With no schema available the graph-local
-checks still run and the report says so rather than reporting a clean bill.`,
+checks still run and the report says so rather than reporting a clean bill.
+
+A CACHED schema goes stale the moment a model file is dropped in or a custom
+node pack is installed: the value is on the server, absent from the cache, and
+reported as out-of-range. Pass --data-source live to check against the running
+server instead, which is the authority. When a cached run does report an
+out-of-range value, the report carries the cache's age so the verdict can be
+told apart from a real one.`,
 		Example: `  comfyui-pp-cli validate workflow_api.json
   comfyui-pp-cli validate workflow_api.json --json
+  comfyui-pp-cli validate workflow_api.json --data-source live
   comfyui-pp-cli validate workflow_api.json --object-info object_info.json
   comfyui-pp-cli validate workflow_api.json --strict`,
 		Annotations: map[string]string{"mcp:read-only": "true"},
@@ -529,21 +545,26 @@ checks still run and the report says so rather than reporting a clean bill.`,
 				return err
 			}
 
-			schema, source, schemaErr := slotsLoadCachedObjectInfo(cmd.Context(), objectInfoPath)
+			resolved, schemaErr := slotsResolveObjectInfo(cmd.Context(), flags, objectInfoPath)
 			if schemaErr != nil {
 				return schemaErr
 			}
+			schema := resolved.schema
 
 			findings := slots.ValidateGraph(graph, schema)
 			errorCount, warningCount := slots.CountFindings(findings)
 			report := slotsValidateReport{
-				Graph:        args[0],
-				SchemaSource: source,
-				ClassesKnown: len(schema),
-				NodeCount:    len(graph),
-				ErrorCount:   errorCount,
-				WarningCount: warningCount,
-				Findings:     findings,
+				Graph:          args[0],
+				SchemaSource:   resolved.source,
+				SchemaSyncedAt: resolved.syncedAt,
+				ClassesKnown:   len(schema),
+				NodeCount:      len(graph),
+				ErrorCount:     errorCount,
+				WarningCount:   warningCount,
+				Findings:       findings,
+			}
+			if resolved.fromCache {
+				report.SchemaAge = slotsCacheAge(resolved.syncedAt)
 			}
 			passed := errorCount == 0 && (!strict || warningCount == 0)
 			switch {
@@ -557,6 +578,13 @@ checks still run and the report says so rather than reporting a clean bill.`,
 			default:
 				report.Verdict = slotsVerdictPass
 				report.OK = &passed
+			}
+			// A membership finding read from a CACHED schema is the one verdict
+			// staleness can fabricate: the value may be on the server already and
+			// simply postdate the last sync. Say how old the cache is and name the
+			// two ways out, rather than letting a correct graph read as broken.
+			if report.Hint == "" && resolved.fromCache && slotsHasStaleSensitiveFinding(findings) {
+				report.Hint = slotsStaleSchemaHint(resolved.syncedAt)
 			}
 
 			if flags.asJSON || (!isTerminal(cmd.OutOrStdout()) && !flags.csv && !flags.quiet && !flags.plain) {
@@ -583,7 +611,11 @@ checks still run and the report says so rather than reporting a clean bill.`,
 }
 
 func slotsWriteValidateSummary(w io.Writer, report slotsValidateReport) {
-	fmt.Fprintf(w, "  schema: %s (%d classes)\n", report.SchemaSource, report.ClassesKnown)
+	if report.SchemaAge != "" {
+		fmt.Fprintf(w, "  schema: %s, %s (%d classes)\n", report.SchemaSource, report.SchemaAge, report.ClassesKnown)
+	} else {
+		fmt.Fprintf(w, "  schema: %s (%d classes)\n", report.SchemaSource, report.ClassesKnown)
+	}
 	if report.Hint != "" {
 		fmt.Fprintf(w, "  %s %s\n", yellow("INFO"), report.Hint)
 	}
@@ -614,39 +646,113 @@ func slotsWriteValidateSummary(w io.Writer, report slotsValidateReport) {
 	fmt.Fprintf(w, "  %d node(s) checked: %d error(s), %d warning(s)\n", report.NodeCount, report.ErrorCount, report.WarningCount)
 }
 
-// slotsLoadCachedObjectInfo resolves the node schema without touching the network.
+// slotsObjectInfo is a resolved node schema plus enough provenance to judge it.
 //
-// Order: an explicit --object-info dump wins; otherwise the local sync cache
-// (`sync --resources objectinfo`), which lands /object_info in the generic
-// resources table — as ONE row holding the whole class map, or as one row per
-// class depending on how the response was enumerated. Both shapes are read.
+// fromCache is what the caller branches on and is deliberately NOT inferable
+// from source alone: a cached schema is the only one that can be silently wrong
+// about membership, so "where did this come from" has to survive as a fact
+// rather than as a string a future edit might reword.
+type slotsObjectInfo struct {
+	schema    slots.Schema
+	source    string
+	syncedAt  *time.Time
+	fromCache bool
+}
+
+// slotsResolveObjectInfo resolves the node schema, honoring --data-source.
+//
+// Order, matching how every other read command dispatches (see data_source.go):
+//
+//   - an explicit --object-info dump wins — it is a LOCAL source, so combining
+//     it with --data-source live is refused rather than silently resolved one
+//     way, the same refusal validateDataSourceStrategy issues elsewhere;
+//   - --data-source live reads /object_info off the running server. This is the
+//     escape hatch from a stale cache and it must actually leave the machine:
+//     answering it from cache is how a valid graph gets rejected for a
+//     checkpoint the server has had for hours;
+//   - otherwise the local sync cache (`sync --resources objectinfo`), which
+//     lands /object_info in the generic resources table — as ONE row holding the
+//     whole class map, or as one row per class depending on how the response was
+//     enumerated. Both shapes are read.
+//
+// `auto` stays on the cache on purpose. This is the OFFLINE preflight: it is
+// documented to need no server, agents run it before every submit, and turning
+// the default into a network round trip would change what the command IS. The
+// cost of that choice is paid by reporting the cache's age on any finding
+// staleness could have invented.
+//
 // A missing cache is not an error: the caller reports what could not be checked.
-func slotsLoadCachedObjectInfo(ctx context.Context, explicitPath string) (slots.Schema, string, error) {
+func slotsResolveObjectInfo(ctx context.Context, flags *rootFlags, explicitPath string) (slotsObjectInfo, error) {
 	if explicitPath != "" {
+		if flags != nil {
+			if err := validateDataSourceStrategy(flags, "local"); err != nil {
+				return slotsObjectInfo{}, usageErr(err)
+			}
+		}
 		raw, err := os.ReadFile(explicitPath) // #nosec G304 -- operator-supplied schema dump.
 		if err != nil {
-			return nil, "", notFoundErr(fmt.Errorf("reading --object-info %s: %w", explicitPath, err))
+			return slotsObjectInfo{}, notFoundErr(fmt.Errorf("reading --object-info %s: %w", explicitPath, err))
 		}
 		schema, perr := slots.ParseObjectInfo(raw)
 		if perr != nil {
-			return nil, "", usageErr(fmt.Errorf("%s: %w", explicitPath, perr))
+			return slotsObjectInfo{}, usageErr(fmt.Errorf("%s: %w", explicitPath, perr))
 		}
-		return schema, "file:" + explicitPath, nil
+		return slotsObjectInfo{schema: schema, source: "file:" + explicitPath}, nil
 	}
 
+	if flags != nil && flags.dataSource == "live" {
+		schema, err := slotsFetchLiveObjectInfo(ctx, flags)
+		if err != nil {
+			return slotsObjectInfo{}, err
+		}
+		return slotsObjectInfo{schema: schema, source: "live server"}, nil
+	}
+
+	return slotsLoadCachedObjectInfo(ctx)
+}
+
+// slotsFetchLiveObjectInfo pulls the whole schema off the running server.
+//
+// Unlike the cached path a failure here is fatal rather than degraded: the
+// operator asked for live specifically, and quietly falling back to the cache
+// would hand back exactly the answer they were trying to get away from.
+func slotsFetchLiveObjectInfo(ctx context.Context, flags *rootFlags) (slots.Schema, error) {
+	c, err := flags.newClient()
+	if err != nil {
+		return nil, err
+	}
+	data, err := c.Get(ctx, "/object_info", nil)
+	if err != nil {
+		return nil, classifyAPIError(err, flags)
+	}
+	schema, perr := slots.ParseObjectInfo(data)
+	if perr != nil {
+		return nil, apiErr(fmt.Errorf("/object_info did not return a class map: %w", perr))
+	}
+	if len(schema) == 0 {
+		return nil, apiErr(fmt.Errorf("/object_info returned an empty schema; is the ComfyUI server still starting up?"))
+	}
+	return schema, nil
+}
+
+// slotsLoadCachedObjectInfo reads the node schema from the local sync cache
+// without touching the network, and reports when that cache was last filled.
+func slotsLoadCachedObjectInfo(ctx context.Context) (slotsObjectInfo, error) {
 	dbPath := defaultDBPath("comfyui-pp-cli")
 	if _, err := os.Stat(dbPath); err != nil {
-		return nil, "none (no local store)", nil
+		return slotsObjectInfo{source: "none (no local store)"}, nil
 	}
 	s, err := store.OpenReadOnlyContext(ctx, dbPath)
 	if err != nil {
-		return nil, "none (local store unreadable)", nil
+		return slotsObjectInfo{source: "none (local store unreadable)"}, nil
 	}
 	defer s.Close()
 
+	syncedAt := slotsObjectInfoSyncedAt(s)
+
 	rows, err := s.DB().QueryContext(ctx, `SELECT id, data FROM resources WHERE resource_type = 'objectinfo'`)
 	if err != nil {
-		return nil, "none (objectinfo not synced)", nil
+		return slotsObjectInfo{source: "none (objectinfo not synced)"}, nil
 	}
 	defer rows.Close()
 
@@ -660,12 +766,60 @@ func slotsLoadCachedObjectInfo(ctx context.Context, explicitPath string) (slots.
 		slotsMergeObjectInfoRow(schema, id, data)
 	}
 	if err := rows.Err(); err != nil {
-		return schema, "local store (partial read)", nil
+		return slotsObjectInfo{schema: schema, source: "local store (partial read)", syncedAt: syncedAt, fromCache: true}, nil
 	}
 	if len(schema) == 0 {
-		return nil, "none (objectinfo not synced)", nil
+		return slotsObjectInfo{source: "none (objectinfo not synced)"}, nil
 	}
-	return schema, "local store", nil
+	return slotsObjectInfo{schema: schema, source: "local store", syncedAt: syncedAt, fromCache: true}, nil
+}
+
+// slotsObjectInfoSyncedAt reads the objectinfo row's sync timestamp, reusing the
+// same sync_state lookup the freshness hints run on. nil means the schema is in
+// the resources table with no recorded sync — a write-through from a live read
+// rather than a `sync` — which is unknown age, NOT fresh.
+func slotsObjectInfoSyncedAt(s *store.Store) *time.Time {
+	state, err := readSyncHintState(s, "objectinfo")
+	if err != nil || !state.hasState {
+		return nil
+	}
+	at := state.lastSynced
+	return &at
+}
+
+// slotsCacheAge renders a cached schema's age for the report.
+func slotsCacheAge(syncedAt *time.Time) string {
+	if syncedAt == nil {
+		return "age unknown (never synced through 'sync --resources objectinfo')"
+	}
+	return syncHintRoundAge(time.Since(*syncedAt)).String() + " old"
+}
+
+// slotsStaleSensitiveKinds are the finding kinds a stale cache can invent out of
+// nothing. Each is a MEMBERSHIP verdict — this value/class is not in the set the
+// server offers — and the set only ever grows between syncs, as model files are
+// dropped in and custom node packs installed. A dangling link or a host path,
+// by contrast, is wrong in the graph itself and no resync will change it.
+var slotsStaleSensitiveKinds = map[string]bool{
+	slots.KindComboNotInOptions: true,
+	slots.KindUnknownClass:      true,
+	slots.KindClassUnregistered: true,
+}
+
+func slotsHasStaleSensitiveFinding(findings []slots.Finding) bool {
+	for _, f := range findings {
+		if slotsStaleSensitiveKinds[f.Kind] {
+			return true
+		}
+	}
+	return false
+}
+
+func slotsStaleSchemaHint(syncedAt *time.Time) string {
+	return fmt.Sprintf(
+		"this verdict came from the LOCAL CACHED schema (%s): a model file or node pack added since then is absent from it, so a value the server would accept still reports as out of range. Refresh with 'comfyui-pp-cli sync --resources objectinfo', or re-run with --data-source live to check against the running server, which is the authority.",
+		slotsCacheAge(syncedAt),
+	)
 }
 
 // slotsMergeObjectInfoRow folds one cached row into the schema, tolerating either
