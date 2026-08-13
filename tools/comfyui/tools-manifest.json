@@ -4,6 +4,10 @@
   "description": "Drive a local ComfyUI render server from the shell, with a durable record of every run the server itself forgets.",
   "mcp_ready": "full",
   "http_transport": "standard",
+  "mcp": {
+    "endpoint_tools": "hidden",
+    "orchestration": "code"
+  },
   "auth": {
     "type": "none"
   },

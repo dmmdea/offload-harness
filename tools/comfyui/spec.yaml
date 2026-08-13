@@ -207,3 +207,8 @@ resources:
           - name: overwrite
             type: boolean
             required: false
+
+mcp:
+  transport: [stdio, http]
+  orchestration: code
+  endpoint_tools: hidden

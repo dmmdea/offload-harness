@@ -57,23 +57,25 @@ import (
 // Typed exit codes
 // ---------------------------------------------------------------------------
 
-// comfyExitWaitTimeout — `wait --timeout` expired while the job was still
-// non-terminal. Distinct from a failure: the render is very probably still going.
-const comfyExitWaitTimeout = 20
+// The codes themselves live in exitcodes.go, the single registry for every
+// non-zero code this CLI can exit with. These constructors stay here because
+// the jobs family is where they are raised.
+//
+// comfyJobFailedErr is the UNCLASSIFIED terminal failure. When the server gave
+// an exception type and message, prefer comfyTerminalFailureErr (exitcodes.go),
+// which splits interruption and OOM out to their own codes instead of burying
+// them all in 21.
 
-// comfyExitJobFailed — the job reached a terminal FAILED state (execution_error or
-// interruption). The exception text is printed verbatim alongside.
-const comfyExitJobFailed = 21
-
-// comfyExitOutputsPending — the job recorded execution_success but /history still
-// published no outputs when the settle window expired. Not a success, not a failure:
-// an honest "the server has not told us what it made yet".
-const comfyExitOutputsPending = 22
-
-func comfyWaitTimeoutErr(err error) error { return &cliError{code: comfyExitWaitTimeout, err: err} }
-func comfyJobFailedErr(err error) error   { return &cliError{code: comfyExitJobFailed, err: err} }
+func comfyWaitTimeoutErr(err error) error { return &cliError{code: ExitWaitTimeout, err: err} }
+func comfyJobFailedErr(err error) error   { return &cliError{code: ExitJobFailed, err: err} }
 func comfyOutputsPendingErr(err error) error {
-	return &cliError{code: comfyExitOutputsPending, err: err}
+	return &cliError{code: ExitOutputsPending, err: err}
+}
+
+// comfyInterruptedErr — the run was interrupted rather than broken. Retrying
+// the same graph unchanged is the correct response, so it gets its own code.
+func comfyInterruptedErr(err error) error {
+	return &cliError{code: ExitExecutionInterrupted, err: err}
 }
 
 // comfyJobsRequiresInput mirrors the generated commands' bare-invocation contract:
@@ -1194,15 +1196,20 @@ Exit codes:
   2   usage error
   3   the prompt is in neither the queue nor /history (wrong id, or the server
       restarted and dropped its RAM-only history)
+  13  the failure was a validation error, or named a model the server cannot see
   20  --timeout expired while the job was still running
-  21  the job ended in execution_error or was interrupted
-  22  execution_success recorded but no outputs published before --outputs-settle`,
+  21  the job ended in execution_error (cause not one of 13/24/25)
+  22  execution_success recorded but no outputs published before --outputs-settle
+  24  the job was interrupted rather than broken — re-running the same graph is
+      the correct response
+  25  the job died out of memory — change the resource plan (smaller batch or
+      resolution, or free VRAM with 'comfyui-pp-cli free --execute'), not the graph`,
 		Example: `  comfyui-pp-cli wait 6f0e5c4a-1d2b-4a5e-9c88-2f1b7a0d3e44
   comfyui-pp-cli wait 6f0e5c4a-1d2b-4a5e-9c88-2f1b7a0d3e44 --timeout 25m
   comfyui-pp-cli wait 6f0e5c4a-1d2b-4a5e-9c88-2f1b7a0d3e44 --json --interval 5s`,
 		Annotations: map[string]string{
 			"mcp:local-write":     "true",
-			"pp:typed-exit-codes": "0,2,3,20,21,22",
+			"pp:typed-exit-codes": "0,2,3,13,20,21,22,24,25",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 && !flags.dryRun {
@@ -1331,10 +1338,20 @@ func comfyRunWait(ctx context.Context, cmd *cobra.Command, flags *rootFlags, pro
 				comfyIngestOnTerminal(ctx, entry, &out, opts.Record)
 				switch entry.State {
 				case history.StateFailed:
-					return comfyEmitWait(cmd, flags, out, comfyJobFailedErr(fmt.Errorf(
+					// Classify from the server's own exception so the exit
+					// code carries the diagnosis: an OOM exits 25 and an
+					// interruption 24, because the correct response differs
+					// (change the resource plan vs just re-run). Anything
+					// unrecognised still exits 21. The exception text is
+					// printed verbatim either way.
+					var excType, excMessage string
+					if entry.Error != nil {
+						excType, excMessage = entry.Error.ExceptionType, entry.Error.ExceptionMessage
+					}
+					return comfyEmitWait(cmd, flags, out, comfyTerminalFailureErr(excType, excMessage, fmt.Errorf(
 						"prompt %s failed: %s", promptID, comfyErrorSummary(entry.Error))))
 				case history.StateInterrupted:
-					return comfyEmitWait(cmd, flags, out, comfyJobFailedErr(fmt.Errorf(
+					return comfyEmitWait(cmd, flags, out, comfyInterruptedErr(fmt.Errorf(
 						"prompt %s was interrupted before it finished", promptID)))
 				}
 				return comfyEmitWait(cmd, flags, out, nil)

@@ -1,0 +1,51 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "count",
+    "results"
+  ],
+  "properties": {
+    "count": {
+      "type": "integer",
+      "description": "Number of endpoints in results, after the limit cut."
+    },
+    "results": {
+      "type": "array",
+      "description": "Matching endpoints, best match first.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "endpoint_id",
+          "method",
+          "path",
+          "summary",
+          "score"
+        ],
+        "properties": {
+          "endpoint_id": {
+            "type": "string",
+            "description": "Dotted identifier to pass to comfyui_get or comfyui_execute, e.g. \"history.get\"."
+          },
+          "method": {
+            "type": "string",
+            "description": "HTTP method the endpoint is invoked with."
+          },
+          "path": {
+            "type": "string",
+            "description": "Request path template; {name} segments are filled from the params object."
+          },
+          "summary": {
+            "type": "string",
+            "description": "What the endpoint returns and the traps it carries."
+          },
+          "score": {
+            "type": "integer",
+            "description": "Keyword match score; higher sorts first."
+          }
+        }
+      }
+    }
+  }
+}
