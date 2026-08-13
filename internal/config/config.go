@@ -688,6 +688,66 @@ func (c Config) AgentPlannerModel(explicit string) string {
 	return c.Model
 }
 
+// ModelRoute is ONE config key that binds a llama-swap model, in the single
+// table every surface that reports the roster reads from.
+//
+// It exists because two hardcoded lists of the same thing had drifted: `doctor`
+// (and with it `acceptance` and `report`) checked 8 keys while the MCP server's
+// `offload_status` published 10, so the ocr and embed bindings were advertised to
+// an autonomous planner by one surface and unknown to the other. One table, two
+// readers, no drift.
+//
+// The two value fields are not redundant — the surfaces ask different questions:
+//
+//   - Configured is what the OPERATOR wrote. Empty means the binding is unset,
+//     which doctor reports as "(unset)" rather than a failure: an unset non-cascade
+//     route is an honest "this task defers on this box".
+//   - Effective is what will ACTUALLY run once the fallback chains are applied
+//     (agent → workhorse, ocr → vision, embed → the memory stack's embedder). This
+//     is what a planner needs, and what offload_status publishes.
+type ModelRoute struct {
+	// Key is the config-file key, and the label doctor/report/acceptance print.
+	Key string
+	// StatusKey is the name offload_status publishes this route under.
+	StatusKey string
+	// Configured is the raw configured value; "" means unset.
+	Configured string
+	// Effective is the value after fallbacks; what the task will actually call.
+	Effective string
+	// Diffed marks the routes the alias-vs-live-roster gate checks.
+	//
+	// ocr and embed are deliberately NOT diffed. Both are reported, neither is a
+	// gate: `embed` always resolves to a non-empty default ("embeddinggemma"),
+	// so gating on it would fail every correctly-configured node whose serving
+	// tier declares no embedder seat, and `ocr` rides the vision seat when unset.
+	// Widening the gate is a policy change, not a consolidation.
+	Diffed bool
+}
+
+// ModelRoutes returns EVERY llama-swap model binding this config routes to, in
+// report order. NIMModel is deliberately absent — it is a REMOTE endpoint's model
+// id, never served by the local llama-swap.
+func (c Config) ModelRoutes() []ModelRoute {
+	ocr := c.OCRModel
+	if ocr == "" {
+		// ocr falls back to vision when unbound, so the roster reports what will
+		// ACTUALLY run rather than an empty slot that reads as "no OCR here".
+		ocr = c.VisionModel
+	}
+	return []ModelRoute{
+		{Key: "model", StatusKey: "workhorse", Configured: c.Model, Effective: c.Model, Diffed: true},
+		{Key: "agent_model", StatusKey: "agent", Configured: c.AgentModel, Effective: c.AgentPlannerModel(""), Diffed: true},
+		{Key: "triage_model", StatusKey: "triage", Configured: c.TriageModel, Effective: c.TriageModel, Diffed: true},
+		{Key: "escalation_model", StatusKey: "escalation", Configured: c.EscalationModel, Effective: c.EscalationModel, Diffed: true},
+		{Key: "reasoning_model", StatusKey: "reasoning", Configured: c.ReasoningModel, Effective: c.ReasoningModel, Diffed: true},
+		{Key: "vision_model", StatusKey: "vision", Configured: c.VisionModel, Effective: c.VisionModel, Diffed: true},
+		{Key: "ocr_model", StatusKey: "ocr", Configured: c.OCRModel, Effective: ocr},
+		{Key: "stt_model", StatusKey: "stt", Configured: c.STTModel, Effective: c.STTModel, Diffed: true},
+		{Key: "stt_model_hq", StatusKey: "stt_hq", Configured: c.STTModelHQ, Effective: c.STTModelHQ, Diffed: true},
+		{Key: "embed_model", StatusKey: "embed", Configured: c.EmbedModelName, Effective: c.EmbedModel()},
+	}
+}
+
 func Default() Config {
 	base := DefaultBase()
 	return Config{

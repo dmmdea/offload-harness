@@ -58,7 +58,9 @@ side channel and is not part of the Cascade — nothing escalates or falls back 
 timeout honors config `agent_timeout_sec` (else the built-in 180s), and its result reports the
 resolved planner `model` alongside `output`/`steps`/`stop_reason` — visibility is the cure for a
 silent seat. A resolved planner absent from the endpoint's served roster fails loud with
-`deferred: true` naming the model, never a silent fall back to the workhorse. Every response
+`deferred: true` naming the model, never a silent fall back to the workhorse — "served" means
+matched against canonical ids **or** `meta.llamaswap.aliases`, since a tier-seeded `agent_model`
+is normally an alias. Every response
 carries the effect ledger (`effects` counts + `effects_flagged` records) on success AND deferred
 paths, and `judge: true` adds one end-of-run **advisory** same-seat completion (`judge_report`)
 grading the flagged effects for operator review — annotation only, it never gates anything.
@@ -115,8 +117,10 @@ read-only unless deliberately widened. See
 
 ## Observability and debugging
 
-- `offload_status` reports harness state to the calling agent: the configured model roster, a live
-  `/v1/models` probe, and `media.routes` — this machine's media capability **derived** from its
+- `offload_status` reports harness state to the calling agent: the configured model roster (the one
+  table in `config.ModelRoutes`, shared with `doctor`/`acceptance`/`report`), a live `/v1/models`
+  probe through [`internal/swapclient`](../../internal/swapclient/swapclient.go), and
+  `media.routes` — this machine's media capability **derived** from its
   bindings (`internal/mediacap`), never declared. See
   [media-generation.md](media-generation.md#capability-is-derived-never-declared) for the verdicts.
 - `local-offload doctor` checks the serving layer the tools depend on, and prints the same derived
@@ -143,6 +147,10 @@ manifest is a repo-root file.
 
 - [`internal/mcpserver/mcpserver.go`](../../internal/mcpserver/mcpserver.go) — registration and
   handlers
+- [`internal/swapclient`](../../internal/swapclient/swapclient.go) — the harness's single
+  alias-aware llama-swap roster reader, over `tools/llamaswap`'s `pkg/llamaswap`
+  ([systems/printed-clis.md](printed-clis.md#the-one-exception-the-harness-consumes-pkgllamaswap))
+- [`internal/config`](../../internal/config/config.go) — `Config.ModelRoutes`, the one roster table
 - [`.printing-press.json`](../../.printing-press.json) — the declared manifest
 - [`main_test.go`](../../main_test.go) — `TestPrintingPressManifestListsEveryTool` (the drift test)
 - [`main.go`](../../main.go) — subcommand dispatch and MCP entry

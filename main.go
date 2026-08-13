@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -44,10 +43,11 @@ import (
 	"github.com/dmmdea/offload-harness/internal/report"
 	"github.com/dmmdea/offload-harness/internal/router"
 	"github.com/dmmdea/offload-harness/internal/shadow"
+	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.51.1"
+const version = "0.52.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -2036,20 +2036,20 @@ func runDoctor(args []string) error {
 // aliasCheck pairs a config key with its configured llama-swap model alias.
 type aliasCheck struct{ Key, Alias string }
 
-// modelAliases enumerates EVERY llama-swap model alias the config routes to,
-// with its config key. NIMModel is deliberately absent — it is a REMOTE
-// endpoint's model id, never served by the local llama-swap.
+// modelAliases is the subset of config.ModelRoutes the alias-vs-live-roster gate
+// checks — the bindings whose absence from the roster means a route this node
+// advertises cannot actually run. The table itself lives in internal/config so
+// `doctor`, `acceptance`, `report`, and the MCP server's `offload_status` read
+// ONE list; they used to carry two hardcoded ones that had drifted 8 keys to 10.
 func modelAliases(cfg config.Config) []aliasCheck {
-	return []aliasCheck{
-		{"model", cfg.Model},
-		{"agent_model", cfg.AgentModel},
-		{"triage_model", cfg.TriageModel},
-		{"escalation_model", cfg.EscalationModel},
-		{"reasoning_model", cfg.ReasoningModel},
-		{"vision_model", cfg.VisionModel},
-		{"stt_model", cfg.STTModel},
-		{"stt_model_hq", cfg.STTModelHQ},
+	routes := cfg.ModelRoutes()
+	out := make([]aliasCheck, 0, len(routes))
+	for _, r := range routes {
+		if r.Diffed {
+			out = append(out, aliasCheck{Key: r.Key, Alias: r.Configured})
+		}
 	}
+	return out
 }
 
 // doctorRun checks endpoint health, then diffs the LIVE /v1/models roster
@@ -2077,7 +2077,7 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 		return fmt.Errorf("endpoint down: %w", err)
 	}
 	fmt.Fprintln(w, "health:     OK")
-	roster, err := fetchModelRoster(ctx, cfg.Endpoint)
+	roster, err := swapclient.FetchRoster(ctx, cfg.Endpoint, 10*time.Second)
 	if err != nil {
 		fmt.Fprintln(w, "roster:     FAIL - cannot list /v1/models:", err)
 		return err
@@ -2087,7 +2087,7 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 		switch {
 		case a.Alias == "":
 			fmt.Fprintf(w, "%-18s (unset)\n", a.Key+":")
-		case roster[a.Alias]:
+		case roster.Serves(a.Alias):
 			fmt.Fprintf(w, "%-18s OK    %s\n", a.Key+":", a.Alias)
 		default:
 			fmt.Fprintf(w, "%-18s FAIL  %s — not in the live /v1/models roster\n", a.Key+":", a.Alias)
@@ -2126,35 +2126,6 @@ func writeMediaSection(w io.Writer, routes []mediacap.Route) int {
 		fmt.Fprintf(w, "  %-22s %s  %-18s %-15s %s\n", r.Name+":", mark, string(r.State), r.Engine, r.Detail)
 	}
 	return missing
-}
-
-// fetchModelRoster GETs <endpoint>/v1/models and returns the served model ids.
-func fetchModelRoster(ctx context.Context, endpoint string) (map[string]bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(endpoint, "/")+"/v1/models", nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET /v1/models: %s", resp.Status)
-	}
-	var body struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, err
-	}
-	ids := make(map[string]bool, len(body.Data))
-	for _, m := range body.Data {
-		ids[m.ID] = true
-	}
-	return ids, nil
 }
 
 func runModels(args []string) error {
