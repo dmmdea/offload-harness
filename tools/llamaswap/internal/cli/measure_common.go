@@ -479,6 +479,10 @@ func mcEmit(cmd *cobra.Command, flags *rootFlags, payload any, pretty func(w io.
 		return printJSONFiltered(w, payload, flags)
 	}
 	pretty(w)
+	// A prose report has claimed stdout just as surely as a JSON one; an
+	// envelope appended after it would interleave machine output into a
+	// human page.
+	markStdoutDocument(flags)
 	return nil
 }
 
@@ -503,4 +507,19 @@ func mcFmtMiB(mib int) string {
 		return fmt.Sprintf("%.2f GiB", float64(mib)/1024)
 	}
 	return fmt.Sprintf("%d MiB", mib)
+}
+
+// mcHumanCount renders a parameter/element count in the B/M units model cards
+// use, so a 30B-A3B roster reads the way its name does.
+func mcHumanCount(n uint64) string {
+	switch {
+	case n >= 1_000_000_000:
+		return fmt.Sprintf("%.2fB", float64(n)/1e9)
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1e3)
+	default:
+		return strconv.FormatUint(n, 10)
+	}
 }

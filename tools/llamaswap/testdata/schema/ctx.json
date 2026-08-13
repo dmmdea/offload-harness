@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer"
+    },
+    "model": {
+      "type": "string"
+    },
+    "requested_as": {
+      "type": "string"
+    },
+    "loaded": {
+      "type": "boolean"
+    },
+    "n_ctx_live": {
+      "type": "integer"
+    },
+    "n_ctx_source": {
+      "type": "string"
+    },
+    "n_ctx_roster": {
+      "type": "integer"
+    },
+    "seat_ctx_flag": {
+      "type": "integer"
+    },
+    "prompt_label": {
+      "type": "string"
+    },
+    "real_tokens": {
+      "type": "integer"
+    },
+    "token_source": {
+      "type": "string"
+    },
+    "output_budget_tokens": {
+      "type": "integer"
+    },
+    "room_tokens": {
+      "type": "integer"
+    },
+    "verdict": {
+      "type": "string"
+    },
+    "native_ctx_tokens": {
+      "type": "integer"
+    },
+    "declared_ctx_tokens": {
+      "type": "integer"
+    },
+    "context_scaling_note": {
+      "type": "string"
+    },
+    "target_ctx": {
+      "type": "integer"
+    },
+    "kv_at_target_ctx": {
+      "type": "object",
+      "properties": {
+        "ctx_tokens": {
+          "type": "integer"
+        },
+        "head_count": {
+          "type": "integer"
+        },
+        "head_count_kv": {
+          "type": "integer"
+        },
+        "head_count_kv_source": {
+          "type": "string"
+        },
+        "key_length": {
+          "type": "integer"
+        },
+        "value_length": {
+          "type": "integer"
+        },
+        "key_value_length_source": {
+          "type": "string"
+        },
+        "layers_total": {
+          "type": "integer"
+        },
+        "layers_allocating_kv": {
+          "type": "integer"
+        },
+        "layers_full_attention": {
+          "type": "integer"
+        },
+        "layers_sliding_window": {
+          "type": "integer"
+        },
+        "swa_window_tokens": {
+          "type": "integer"
+        },
+        "key_length_swa": {
+          "type": "integer"
+        },
+        "value_length_swa": {
+          "type": "integer"
+        },
+        "cache_type_k": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "bytes_per_element": {
+              "type": "number"
+            },
+            "banned": {
+              "type": "boolean"
+            },
+            "ban_reason": {
+              "type": "string"
+            }
+          },
+          "required": ["bytes_per_element","name"]
+        },
+        "cache_type_v": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "bytes_per_element": {
+              "type": "number"
+            },
+            "banned": {
+              "type": "boolean"
+            },
+            "ban_reason": {
+              "type": "string"
+            }
+          },
+          "required": ["bytes_per_element","name"]
+        },
+        "kv_model": {
+          "type": "string"
+        },
+        "bytes_per_token_full_layers": {
+          "type": "number"
+        },
+        "full_attention_bytes": {
+          "type": "number"
+        },
+        "sliding_window_bytes": {
+          "type": "number"
+        },
+        "total_bytes": {
+          "type": "number"
+        },
+        "total_mib": {
+          "type": "integer"
+        },
+        "contract_dense_bytes_per_token": {
+          "type": "number"
+        },
+        "contract_dense_mib": {
+          "type": "integer"
+        },
+        "assumptions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["assumptions","bytes_per_token_full_layers","cache_type_k","cache_type_v","contract_dense_bytes_per_token","contract_dense_mib","ctx_tokens","full_attention_bytes","head_count","head_count_kv","head_count_kv_source","key_length","key_value_length_source","kv_model","layers_allocating_kv","layers_full_attention","layers_sliding_window","layers_total","sliding_window_bytes","total_bytes","total_mib","value_length"]
+    },
+    "kv_at_target_ctx_gib": {
+      "type": "number"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": ["loaded","model","n_ctx_live","n_ctx_source","output_budget_tokens","prompt_label","real_tokens","room_tokens","schema_version","token_source","verdict"]
+}

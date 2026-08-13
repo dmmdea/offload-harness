@@ -34,9 +34,14 @@ type spinePsRow struct {
 	// State is the proxy's own word for the seat ("ready", "starting", ...).
 	State string `json:"state"`
 	// Ctx is the context size the seat was STARTED with, parsed from the live
-	// cmd line. Nil when the seat declares none (the server default applies and
+	// cmd line, falling back to the roster's meta.n_ctx on llama-swap builds
+	// that expose it. Nil when neither says (the server default applies and
 	// this command will not guess it).
 	Ctx *int `json:"ctx"`
+	// CtxSource names where Ctx came from, because "-c on the command line"
+	// and "meta.n_ctx from the roster" are different claims: the first is what
+	// the process was told, the second is what the config declares.
+	CtxSource string `json:"ctx_source,omitempty"`
 	// TTL comes from the llama-swap YAML, never from /running: the API reports
 	// ttl:0 for a ttl:-1 seat (verified live), so echoing it would launder a
 	// known-wrong value into an operator-facing table.
@@ -174,12 +179,27 @@ func spinePsOnce(ctx context.Context, cmd *cobra.Command, flags *rootFlags, infl
 		rep.Notes = append(rep.Notes, "local store unavailable ("+derr.Error()+"); UPTIME is unknown for every seat")
 	}
 
+	// Backend identity. A llama.cpp router-mode server answers a similarly
+	// shaped roster, and every llama-swap-specific column below (TTL from the
+	// YAML, keep-set, mirrored uptime) is meaningless against one. Reported as
+	// a note rather than an error: the loaded-model table itself is still true.
+	if probe := probeBackend(ctx, flags, 10*time.Second); probe.Kind != backendLlamaSwap && probe.Warning != "" {
+		rep.Notes = append(rep.Notes, probe.Warning)
+	}
+
 	for _, r := range running {
 		entry, _ := roster.Resolve(r.Model)
+		psCtx, psCtxSource := spineParseCtxSize(r.Cmd), ""
+		if psCtx != nil {
+			psCtxSource = "seat -c/--ctx-size"
+		} else if n, ok := rosterNCtx(ctx, flags, r.Model, 10*time.Second); ok {
+			psCtx, psCtxSource = &n, "roster meta.n_ctx (configured, not per-slot live)"
+		}
 		row := spinePsRow{
 			Name:         r.Model,
 			State:        r.State,
-			Ctx:          spineParseCtxSize(r.Cmd),
+			Ctx:          psCtx,
+			CtxSource:    psCtxSource,
 			NGL:          spineParseNGL(r.Cmd),
 			Port:         spineParsePort(r.Proxy, r.Cmd),
 			Aliases:      entry.Aliases,

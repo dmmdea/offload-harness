@@ -23,8 +23,11 @@ type ggufReport struct {
 	Target        string       `json:"target"`
 	ResolvedFrom  string       `json:"resolved_from"`
 	Header        *gguf.Result `json:"header"`
-	Notes         []string     `json:"notes,omitempty"`
-	Raw           bool         `json:"raw_metadata_included"`
+	// Shards is populated when the file is one member of a split set and the
+	// siblings could be located on disk.
+	Shards *gguf.ShardSet `json:"shards,omitempty"`
+	Notes  []string       `json:"notes,omitempty"`
+	Raw    bool           `json:"raw_metadata_included"`
 }
 
 func newMeasureGgufCmd(flags *rootFlags) *cobra.Command {
@@ -54,14 +57,8 @@ non-GGUF result, not an error.`,
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				if flags.asJSON {
-					if err := printJSONFiltered(cmd.OutOrStdout(), map[string]any{
-						"error": "requires a GGUF path or a loaded model name",
-						"usage": cmd.CommandPath() + " --help",
-					}, flags); err != nil {
-						return err
-					}
-					return usageErr(fmt.Errorf("%q requires a path or a loaded model name", cmd.CommandPath()))
+				if wantsAgentErrorEnvelope(flags) {
+					return usageEnvelopeErr(flags, fmt.Errorf("%q requires a path or a loaded model name", cmd.CommandPath()))
 				}
 				return cmd.Help()
 			}
@@ -135,6 +132,25 @@ non-GGUF result, not an error.`,
 				}
 				report.Notes = append(report.Notes, "classified non-llama-server/non-GGUF: GGUF, ctx and fit checks skip this file rather than false-positive on it")
 			}
+			report.Notes = append(report.Notes, ggufHeaderNotes(header)...)
+			if header.Split.IsShard() {
+				set, serr := gguf.ResolveShards(path, header.Split.Count)
+				switch {
+				case serr != nil:
+					report.Notes = append(report.Notes, "shard siblings not resolved: "+serr.Error())
+				default:
+					report.Shards = set
+					if set.Complete {
+						report.Notes = append(report.Notes, fmt.Sprintf(
+							"all %d shards present: %s across the set (this file alone is %s)",
+							set.Count, mcFmtMiB(int(set.TotalBytes/(1024*1024))), mcFmtMiB(int(header.FileSizeBytes/(1024*1024)))))
+					} else {
+						report.Notes = append(report.Notes, fmt.Sprintf(
+							"INCOMPLETE shard set: %d of %d present, missing %v - any whole-model total would under-report",
+							set.Count-len(set.Missing), set.Count, set.Missing))
+					}
+				}
+			}
 			if !flagRaw {
 				header.KV = nil
 			}
@@ -169,6 +185,48 @@ func mcJoinOrNone(items []string) string {
 	return strings.Join(items, ", ")
 }
 
+// ggufHeaderNotes turns the header facts that CHANGE AN ANSWER into operator
+// sentences. Shared by gguf, fit and ctx so a shard, a non-model file or a
+// YaRN-extended context reads the same way wherever it surfaces.
+func ggufHeaderNotes(h *gguf.Result) []string {
+	if h == nil || !h.IsGGUF {
+		return nil
+	}
+	var out []string
+	if h.Split != nil {
+		out = append(out, "split metadata: "+h.Split.Summary)
+		if h.Split.Disagreement != "" {
+			out = append(out, "shard numbering: "+h.Split.Disagreement)
+		}
+	}
+	if !h.IsModel {
+		out = append(out, "NOT A MODEL: "+h.NotAModelReason)
+	}
+	if h.FileTypeGuessed {
+		out = append(out, fmt.Sprintf(
+			"general.file_type carries LLAMA_FTYPE_GUESSED (%d): the quantization was INFERRED by the writer, not declared by the quantizer",
+			gguf.FileTypeGuessedBit))
+	}
+	if h.PoolingRole != "" {
+		out = append(out, "pooling: "+h.PoolingRole)
+	}
+	if native, declared, note := h.NativeContext(); note != "" {
+		out = append(out, fmt.Sprintf("context: native %d, declared %d - %s", native, declared, note))
+	}
+	if h.UnsupportedKVArch != "" {
+		out = append(out, fmt.Sprintf(
+			"architecture-specific KV/state math: %s (keys: %s). fit and ctx REFUSE to size this rather than apply the standard formula",
+			h.UnsupportedKVArch, strings.Join(h.UnsupportedKVKeys, ", ")))
+	}
+	if h.Quant != nil && h.Quant.LabelMismatch {
+		out = append(out, "quantization label: "+h.Quant.MismatchNote)
+	}
+	if h.TensorInfoError != "" {
+		out = append(out, "tensor table not walked ("+h.TensorInfoError+"): bits-per-weight and MoE parameter counts are unavailable")
+	}
+	return out
+}
+
 func mcPrintGguf(w io.Writer, r *ggufReport) {
 	h := r.Header
 	fmt.Fprintf(w, "%s\n", bold(h.Path))
@@ -190,7 +248,40 @@ func mcPrintGguf(w io.Writer, r *ggufReport) {
 	if h.SizeLabel != "" {
 		fmt.Fprintf(w, "  size label      %s\n", h.SizeLabel)
 	}
+	if h.GeneralType != "" {
+		fmt.Fprintf(w, "  general.type    %s\n", h.GeneralType)
+	}
+	if r.Shards != nil {
+		fmt.Fprintf(w, "  shard set       %d shards, %s total, complete=%v  [%s]\n",
+			r.Shards.Count, mcFmtMiB(int(r.Shards.TotalBytes/(1024*1024))), r.Shards.Complete, r.Shards.Convention)
+	}
 	fmt.Fprintf(w, "  quantization    %s (general.file_type=%d)\n", h.Quantization, h.FileType)
+	if q := h.Quant; q != nil {
+		fmt.Fprintf(w, "  bits per weight %.3f measured over %s params in %d tensors\n",
+			q.BitsPerWeight, mcHumanCount(q.Elements), q.Tensors)
+		for _, ts := range q.Types {
+			fmt.Fprintf(w, "                  %-9s %5d tensors  %7s params  %6.2f%% of bytes  %.4g bpw\n",
+				ts.Type, ts.Tensors, mcHumanCount(ts.Elements), ts.ShareBytes*100, ts.BitsPerElem)
+		}
+		if len(q.UnknownTypes) > 0 {
+			fmt.Fprintf(w, "                  %s %d tensors use types this reader cannot size (%s)\n",
+				yellow("unsized:"), q.UnsizedTensors, strings.Join(q.UnknownTypes, ", "))
+		}
+	}
+	if m := h.MoE; m != nil {
+		fmt.Fprintf(w, "  experts         %d total, %d active per token", m.ExpertCount, m.ExpertUsedCount)
+		if m.SharedCount > 0 {
+			fmt.Fprintf(w, " (+%d always-on shared)", m.SharedCount)
+		}
+		fmt.Fprintln(w)
+		if m.ParamsTotal > 0 {
+			fmt.Fprintf(w, "  params total    %s\n", mcHumanCount(m.ParamsTotal))
+		}
+		if m.ParamsActive > 0 {
+			fmt.Fprintf(w, "  params active   %s per token\n", mcHumanCount(m.ParamsActive))
+		}
+		fmt.Fprintf(w, "                  [%s]\n", m.ActiveSource)
+	}
 	fmt.Fprintf(w, "  layers          %d\n", h.BlockCount)
 	fmt.Fprintf(w, "  heads           %d attention / %d KV  [%s]\n", h.HeadCount, h.HeadCountKV, h.HeadCountKVSource)
 	if h.HeadCount > 0 && h.HeadCountKV > 0 && h.HeadCount != h.HeadCountKV {
@@ -199,7 +290,22 @@ func mcPrintGguf(w io.Writer, r *ggufReport) {
 	}
 	fmt.Fprintf(w, "  embedding       %d\n", h.EmbeddingLength)
 	fmt.Fprintf(w, "  K/V per head    %d/%d [%s]\n", h.KeyLength, h.ValueLength, h.LengthSource)
-	fmt.Fprintf(w, "  native ctx      %d tokens\n", h.ContextLength)
+	native, declared, ctxNote := h.NativeContext()
+	if ctxNote != "" && native != declared {
+		fmt.Fprintf(w, "  context         %d native / %d declared  [%s]\n", native, declared, ctxNote)
+	} else {
+		fmt.Fprintf(w, "  native ctx      %d tokens\n", declared)
+	}
+	if h.RoPE != nil && h.RoPE.Type != "" {
+		fmt.Fprintf(w, "  rope scaling    %s factor %.4g", h.RoPE.Type, h.RoPE.Factor)
+		if h.RoPE.YarnBetaFast > 0 || h.RoPE.YarnBetaSlow > 0 {
+			fmt.Fprintf(w, " (yarn beta %.4g/%.4g)", h.RoPE.YarnBetaFast, h.RoPE.YarnBetaSlow)
+		}
+		fmt.Fprintln(w)
+	}
+	if h.PoolingTypeName != "" {
+		fmt.Fprintf(w, "  pooling         %s\n", h.PoolingTypeName)
+	}
 	if h.SlidingWindow > 0 {
 		swa := 0
 		for _, b := range h.SlidingWindowPattern {

@@ -1,0 +1,280 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer"
+    },
+    "target": {
+      "type": "string"
+    },
+    "gguf_path": {
+      "type": "string"
+    },
+    "resolved_from": {
+      "type": "string"
+    },
+    "ctx_tokens": {
+      "type": "integer"
+    },
+    "ctx_source": {
+      "type": "string"
+    },
+    "weights_source": {
+      "type": "string"
+    },
+    "cache_type_k_source": {
+      "type": "string"
+    },
+    "cache_type_v_source": {
+      "type": "string"
+    },
+    "kv": {
+      "type": "object",
+      "properties": {
+        "ctx_tokens": {
+          "type": "integer"
+        },
+        "head_count": {
+          "type": "integer"
+        },
+        "head_count_kv": {
+          "type": "integer"
+        },
+        "head_count_kv_source": {
+          "type": "string"
+        },
+        "key_length": {
+          "type": "integer"
+        },
+        "value_length": {
+          "type": "integer"
+        },
+        "key_value_length_source": {
+          "type": "string"
+        },
+        "layers_total": {
+          "type": "integer"
+        },
+        "layers_allocating_kv": {
+          "type": "integer"
+        },
+        "layers_full_attention": {
+          "type": "integer"
+        },
+        "layers_sliding_window": {
+          "type": "integer"
+        },
+        "swa_window_tokens": {
+          "type": "integer"
+        },
+        "key_length_swa": {
+          "type": "integer"
+        },
+        "value_length_swa": {
+          "type": "integer"
+        },
+        "cache_type_k": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "bytes_per_element": {
+              "type": "number"
+            },
+            "banned": {
+              "type": "boolean"
+            },
+            "ban_reason": {
+              "type": "string"
+            }
+          },
+          "required": ["bytes_per_element","name"]
+        },
+        "cache_type_v": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "bytes_per_element": {
+              "type": "number"
+            },
+            "banned": {
+              "type": "boolean"
+            },
+            "ban_reason": {
+              "type": "string"
+            }
+          },
+          "required": ["bytes_per_element","name"]
+        },
+        "kv_model": {
+          "type": "string"
+        },
+        "bytes_per_token_full_layers": {
+          "type": "number"
+        },
+        "full_attention_bytes": {
+          "type": "number"
+        },
+        "sliding_window_bytes": {
+          "type": "number"
+        },
+        "total_bytes": {
+          "type": "number"
+        },
+        "total_mib": {
+          "type": "integer"
+        },
+        "contract_dense_bytes_per_token": {
+          "type": "number"
+        },
+        "contract_dense_mib": {
+          "type": "integer"
+        },
+        "assumptions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["assumptions","bytes_per_token_full_layers","cache_type_k","cache_type_v","contract_dense_bytes_per_token","contract_dense_mib","ctx_tokens","full_attention_bytes","head_count","head_count_kv","head_count_kv_source","key_length","key_value_length_source","kv_model","layers_allocating_kv","layers_full_attention","layers_sliding_window","layers_total","sliding_window_bytes","total_bytes","total_mib","value_length"]
+    },
+    "fit": {
+      "type": "object",
+      "properties": {
+        "weights_mib": {
+          "type": "integer"
+        },
+        "kv_mib": {
+          "type": "integer"
+        },
+        "activation_cuda_margin_mib": {
+          "type": "integer"
+        },
+        "optimistic_total_mib": {
+          "type": "integer"
+        },
+        "pessimistic_total_mib": {
+          "type": "integer"
+        },
+        "cards": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "uuid": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string"
+              },
+              "total_mib": {
+                "type": "integer"
+              },
+              "resident_now_mib": {
+                "type": "integer"
+              },
+              "reserve_mib": {
+                "type": "integer"
+              },
+              "capacity_mib": {
+                "type": "integer"
+              },
+              "verdict": {
+                "type": "string"
+              },
+              "headroom_optimistic_mib": {
+                "type": "integer"
+              },
+              "shortfall_pessimistic_mib": {
+                "type": "integer"
+              },
+              "straddle": {
+                "type": "string"
+              }
+            },
+            "required": ["capacity_mib","headroom_optimistic_mib","name","reserve_mib","resident_now_mib","shortfall_pessimistic_mib","total_mib","uuid","verdict"]
+          }
+        },
+        "verdict": {
+          "type": "string"
+        },
+        "what_would_settle_it": {
+          "type": "string"
+        }
+      },
+      "required": ["activation_cuda_margin_mib","cards","kv_mib","optimistic_total_mib","pessimistic_total_mib","verdict","weights_mib"]
+    },
+    "shards": {
+      "type": "object",
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "shards": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": {
+                "type": "integer"
+              },
+              "path": {
+                "type": "string"
+              },
+              "bytes": {
+                "type": "integer"
+              },
+              "exists": {
+                "type": "boolean"
+              }
+            },
+            "required": ["bytes","exists","index","path"]
+          }
+        },
+        "total_bytes": {
+          "type": "integer"
+        },
+        "missing_shard_indexes": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "convention": {
+          "type": "string"
+        }
+      },
+      "required": ["complete","convention","count","shards","total_bytes"]
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": ["cache_type_k_source","cache_type_v_source","ctx_source","ctx_tokens","fit","gguf_path","kv","resolved_from","schema_version","target","weights_source"]
+}

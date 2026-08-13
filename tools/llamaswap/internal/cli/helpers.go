@@ -507,14 +507,15 @@ func writeNoop(flags *rootFlags, reason, prose string) error {
 	return nil
 }
 
+// PATCHED (wave LS-1): delegates to the single structured error contract in
+// agent_errors.go. The generated body emitted {error, code} on the HTTP-409
+// branch only, which was both the wrong shape for an agent (no category, no
+// retryable, no remediation) and the wrong coverage (one branch out of every
+// error path). Delegating keeps exactly-once semantics: this call and the
+// process-wide handler deferred from Execute share one emission marker.
+// See .printing-press-patches/internal-cli-helpers.go.md.
 func writeAPIErrorEnvelope(flags *rootFlags, err error, code int) {
-	if flags == nil || !flags.asJSON {
-		return
-	}
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
-		"error": err.Error(),
-		"code":  code,
-	})
+	emitAgentErrorEnvelopeOnce(flags, err, code)
 }
 
 // classifyAPIError maps API errors to structured exit codes with actionable hints.
@@ -1248,11 +1249,15 @@ func responsePayloadParentAtPath(data json.RawMessage, responsePath string) (map
 // pipeline endpoint-mirror commands use. Hand-written novel commands that
 // build a typed slice/struct call this so --select, --compact, --csv, and
 // --quiet all behave the same way as on generator-emitted commands.
+// PATCHED (wave LS-1): records that a RESULT document has claimed stdout, so
+// a later error envelope routes to stderr instead of appending a second
+// top-level document. See .printing-press-patches/internal-cli-helpers.go.md.
 func printJSONFiltered(w io.Writer, v any, flags *rootFlags) error {
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
+	markStdoutDocument(flags)
 	return printOutputWithFlags(w, json.RawMessage(raw), flags)
 }
 

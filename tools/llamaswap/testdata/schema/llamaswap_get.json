@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "endpoint_id": {
+      "type": "string"
+    },
+    "method": {
+      "type": "string"
+    },
+    "path": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "score": {
+      "type": "integer"
+    }
+  },
+  "required": ["endpoint_id","method","path","summary"]
+}

@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer"
+    },
+    "model": {
+      "type": "string"
+    },
+    "requested_as": {
+      "type": "string"
+    },
+    "metrics_enabled": {
+      "type": "boolean"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "http_status": {
+      "type": "integer"
+    },
+    "sampled_at": {
+      "type": "string"
+    },
+    "delta_window_seconds": {
+      "type": "number"
+    },
+    "sample_mode": {
+      "type": "string"
+    },
+    "metrics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "value": {
+            "type": "number"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "rate": {
+            "type": "object",
+            "properties": {
+              "delta": {
+                "type": "number"
+              },
+              "window_seconds": {
+                "type": "number"
+              },
+              "per_second": {
+                "type": "number"
+              },
+              "note": {
+                "type": "string"
+              }
+            },
+            "required": ["delta","per_second","window_seconds"]
+          }
+        },
+        "required": ["kind","name","value"]
+      }
+    },
+    "prompt_tokens_per_second_window": {
+      "type": "number"
+    },
+    "predicted_tokens_per_second_window": {
+      "type": "number"
+    },
+    "speculative_acceptance_rate": {
+      "type": "number"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "severity": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "remediation": {
+            "type": "string"
+          }
+        },
+        "required": ["code","message","severity"]
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unrecognized_metric_names": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": ["http_status","metrics","metrics_enabled","model","sample_mode","sampled_at","schema_version"]
+}
