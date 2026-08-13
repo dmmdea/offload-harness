@@ -455,6 +455,21 @@ reports it:
 - **Risk parking** — every effectful tool asks the model to self-annotate `security_risk`
   (low/medium/high). A call flagged `high` (or with an unrecognized value — fail closed) is
   **parked**: never executed, recorded in the ask queue, the run continues without it.
+
+  **This is a backstop, not a gate — do not rely on it.** The mechanism above is real and fires
+  as described, but the *input* it depends on was measured to be a near-constant. On the
+  production agent seat over 48 runs and 66 effectful calls, **54 of 54** emitted annotations
+  were `low` — zero medium, zero high — *including every structurally destructive call*, and it
+  held under an escalated arm (deleting an entire source tree still self-reported `low`).
+  Park-gate recall was **0/36**. Treat the model's self-annotation as telemetry, never as a
+  security control.
+
+  The control that actually fires is the **structural rule table** (`--rules`), which is
+  evaluated against tool + arguments rather than against the model's opinion of itself. That
+  table is **opt-in and defaults to empty**: with no `--rules` file, the only structural floor is
+  the built-in secret-material deny list. An unattended run with destructive capability and no
+  rules table is therefore ungated in practice, and the builder emits an `UNGATED` note saying
+  so. `examples/agent-rules.json` is a starting table.
 - **Effect accounting + the judge** — every tool call gets an honest effect status
   (`committed`/`failed`/`unknown`/`none`); the CLI prints the non-committed records at the end of a
   run, and `agent_run` returns them (`effects`, `effects_flagged`). `agent_run judge=true` adds one

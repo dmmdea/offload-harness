@@ -229,7 +229,7 @@ Transport is **stdio**. Every tool returns the full result JSON — and a `{"def
 
 | Tool | Arguments | What it does |
 |---|---|---|
-| `offload_status` | — | **Capability discovery — call first when inspecting.** The LOCAL model roster (workhorse/triage/escalation/reasoning/vision/stt/embed) + live served models from the local endpoint + this machine's media engines + the (only) remote surface. Everything except `offload_nim` runs on these local models. |
+| `offload_status` | — | **Capability discovery — call first when inspecting.** The LOCAL model roster (workhorse/agent/triage/escalation/reasoning/vision/ocr/stt/stt_hq/embed) + live served models from the local endpoint + this machine's media engines + the (only) remote surface. Everything except `offload_nim` runs on these local models. |
 | `offload_summarize` | `text`, `max_points?` | Summarize text → `{summary, bullets}`, or defer. |
 | `offload_classify` | `text`, `labels[]` | Classify into one of the labels → `{label, confidence}`, or defer. |
 | `offload_extract` | `text`, `schema` | Extract schema-constrained fields → object, or defer. Values grounded in the input. |
@@ -393,7 +393,7 @@ Copy `config.example.json` and edit. Config is resolved in precedence order: `--
 | `model` | `offload-e4b` | Workhorse text tier (summarize / extract). |
 | `triage_model` | `gemma4-e2b` | Fast entry tier (triage / classify); empty = use `model`. |
 | `escalation_model` | `gemma4-26b-a4b` | Larger tier tried before deferring; empty = no escalation. |
-| `vision_model` | `qwen3vl-4b` | Local vision tier (VQA / OCR / image extract / assess). |
+| `vision_model` | `""` | Local vision tier (VQA / OCR / image extract / assess). Opt-in: a tier earns it by declaring a `vision` media seat. Empty = the route defers rather than naming a seat nothing serves. |
 | `ocr_model` | `""` | Optional dedicated OCR tier routing **only** the `ocr` task (purpose-built OCR models beat a general VLM on dense text, but cannot answer VQA — so it is a separate binding, never a `vision_model` replacement). Deliberately unbound by default: empty = OCR rides `vision_model`, exactly as before. |
 | `stt_model` / `stt_model_hq` | `""` / `""` | Speech-to-text upstreams. Both opt-in: a tier earns `stt_model` by declaring an `stt` media seat (`media_seats` in the tier table), which renders the whisper seat AND this binding from one declaration. Empty = the route defers rather than naming a seat nothing serves. |
 | `stt_hq_api` | `""` | Protocol of the HQ upstream: `""`/`whisper` = whisper-server `/inference`; `openai` = llama-server's `/v1/audio/transcriptions` (mtmd STT like Qwen3-ASR — no timestamps: one full-span segment; language auto-detected; whisper knobs don't apply). |
@@ -577,7 +577,13 @@ The **coding agent** (`local-agent`) is designed **safe-by-default** for a model
   records which rule fired at what severity. Separately, every tool call is ledgered with an honest
   **effect status** (`committed` / `failed` / `unknown` / `none`), and on unattended runs an
   effectful call the model itself flags `security_risk: high` — or anything unrecognized, which
-  fails closed — is **parked** for operator review instead of executed.
+  fails closed — is **parked** for operator review instead of executed. That parking is a
+  **backstop, not the gate**: measured on the production agent seat, the self-annotation is a
+  near-constant (54/54 emissions `low`, including every destructive call; park-gate recall
+  0/36), so it is telemetry rather than a security control. The gate that fires is the
+  structural rule table, and `--rules` **defaults to empty** — with no table, an unattended run
+  with destructive capability is ungated above the built-in secret-material floor, and the
+  builder says so with an `UNGATED` note.
 - **The runner (`--allow-run`) — honest posture.** The `run` tool is **OFF by default**. It runs an
   **allowlisted program directly, with no shell** (`Argv = [command, args…]`, never `/bin/sh -c`), so
   the executable allowlist (`go`, `gofmt`, `python`, `python3`, `pytest`, `npm`, `node`, `cargo`,
