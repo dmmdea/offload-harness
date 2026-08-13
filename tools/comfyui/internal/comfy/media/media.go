@@ -105,7 +105,7 @@ func ShortSHA(s string) string {
 // what every archived run referencing that name actually consumed. With the
 // content hash in the name, a name collision can only mean identical bytes.
 func StagedName(hostPath, sha256Hex string) string {
-	base := filepath.Base(filepath.FromSlash(hostPath))
+	base := hostBase(hostPath)
 	ext := filepath.Ext(base)
 	stem := strings.TrimSuffix(base, ext)
 	if stem == "" {
@@ -123,6 +123,36 @@ func StagedName(hostPath, sha256Hex string) string {
 		return stem + ext
 	}
 	return stem + "-" + short + ext
+}
+
+// hostBase returns the final element of a HOST path, treating both '/' and '\'
+// as separators regardless of the OS this binary is running on.
+//
+// filepath.Base is deliberately not used here. It honors only the running OS's
+// separator, so on Linux filepath.Base(`D:\refs\portrait.png`) returns the whole
+// string and StagedName yields "D_refs_portrait-<sha>.png" instead of
+// "portrait-<sha>.png". A host path is FOREIGN input — it arrives from
+// operators, from graphs archived on another machine, and from fleet nodes that
+// need not share this machine's OS — so the separator set has to be fixed rather
+// than inherited from runtime.GOOS.
+//
+// That is what keeps StagedName's load-bearing guarantee true across a mixed
+// fleet: identical content must stage under an identical name on every node, or
+// the same bytes get two names and the provenance of an archived run splits.
+func hostBase(p string) string {
+	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+		p = p[i+1:]
+	}
+	// "D:portrait.png" is a legal Windows path relative to the drive's current
+	// directory: no separator, but the drive qualifier is not part of the name.
+	if len(p) >= 2 && p[1] == ':' && isASCIILetter(p[0]) {
+		p = p[2:]
+	}
+	return p
+}
+
+func isASCIILetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 // sanitizeSegment reduces a path segment to characters that survive a round
@@ -158,7 +188,12 @@ func ValidateComfyFilename(name string) error {
 	if trimmed == "" {
 		return errors.New("empty filename")
 	}
-	slashed := filepath.ToSlash(trimmed)
+	// Normalise separators explicitly rather than via filepath.ToSlash, which is
+	// a no-op on Linux: there, `\\server\share\x.png` would keep its backslashes,
+	// the UNC and traversal checks below would never fire, and this gate — whose
+	// whole job is to reject host paths — would fail OPEN on every non-Windows
+	// node. The name being validated may well have been written on Windows.
+	slashed := strings.ReplaceAll(trimmed, `\`, "/")
 	if strings.HasPrefix(slashed, "//") {
 		return fmt.Errorf("%q is a UNC path; LoadImage takes a name relative to ComfyUI's input dir, never a host path", name)
 	}

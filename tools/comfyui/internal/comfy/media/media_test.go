@@ -507,7 +507,7 @@ func TestValidateComfyFilename(t *testing.T) {
 		{"whitespace", "   ", true},
 		{"windows absolute", `C:\ComfyUI\input\portrait.png`, true},
 		{"windows absolute forward slash", "C:/ComfyUI/input/portrait.png", true},
-		{"unix absolute", "/home/dmmde/refs/portrait.png", true},
+		{"unix absolute", "/home/user/refs/portrait.png", true},
 		{"unc path", `\\server\share\portrait.png`, true},
 		{"parent escape", "../portrait.png", true},
 		{"embedded parent escape", "refs/../../portrait.png", true},

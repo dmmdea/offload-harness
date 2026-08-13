@@ -88,8 +88,24 @@ tree and the fix disappears with no diff to explain it — the same failure mode
 tier pages instead of `setup/templates/profiles.json`. Fix it upstream so the next print carries it.
 
 `.printing-press-patches/` is the generated tree's designated slot for deviations that genuinely must
-live in the vendored copy. It currently holds only `.gitkeep` for `comfyui-pp-cli` — there are no
-local patches, and adding one should be rare and explained in its PR.
+live in the vendored copy — a fix that cannot wait for a reprint. **Every entry there is a debt, not
+a feature:** a reprint regenerates the tree and reverts the patch, so each one must also be fixed
+upstream, and its entry records that status.
+[`tools/comfyui/.printing-press-patches/README.md`](../../tools/comfyui/.printing-press-patches/README.md)
+is the register.
+
+### Adoption is also a portability test
+
+`comfyui-pp-cli` was generated, verified, and scored on Windows. The first CI run after vendoring it
+— on `ubuntu-latest` — failed, because `internal/comfy/media` handled host paths with Go's
+`filepath`, which honors only the *running* OS's separator. On Linux, `filepath.Base` of a
+Windows-style path returned the whole string, so `StagedName` broke its own
+identical-content-one-name guarantee, and `ValidateComfyFilename` stopped rejecting UNC paths
+entirely — a gate that fails **open**.
+
+This is the same defect class `crossplatform_lint_test.go` exists to catch in the harness: shared
+code that only fits the machine it was written on. Expect it from any printed CLI printed on one OS,
+and treat the first CI run on a vendored tree as a genuine portability test rather than a formality.
 
 ### What is vendored and what is not
 
