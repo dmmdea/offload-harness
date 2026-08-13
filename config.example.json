@@ -73,6 +73,7 @@
   "gen_edit_cfg": 0,
   "gen_edit_sampler": "",
   "gen_edit_scheduler": "",
+  "gen_edit_megapixels": 0,
   "gen_edit_timeout_sec": 1800,
   "videogen_script": "render/comfy-video.mjs",
   "run_graph_script": "render/comfy-run-graph.mjs",

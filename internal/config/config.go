@@ -334,6 +334,16 @@ type Config struct {
 	GenEditCFG       float64 `json:"gen_edit_cfg,omitempty"`
 	GenEditSampler   string  `json:"gen_edit_sampler,omitempty"`
 	GenEditScheduler string  `json:"gen_edit_scheduler,omitempty"`
+	// GenEditMegapixels fixes the edit's working canvas — and therefore its OUTPUT
+	// resolution, since the scaled image is what the sampler denoises. 0 (the default)
+	// means "follow the source": the runner measures the source file and targets its
+	// actual megapixels, held inside 0.9-2.0 so an in-band source renders at exactly its
+	// own size. Set this only to pin every edit on the machine to one fixed size.
+	//
+	// Sized in the same megapixels*1024*1024 units as ComfyUI's ImageScaleToTotalPixels
+	// (so 2.0 is exactly 2048x1024), range 0.01-16.0. Raising it costs VRAM and time
+	// roughly linearly in total pixels, on a seat bound to a ~15 GB unet.
+	GenEditMegapixels float64 `json:"gen_edit_megapixels,omitempty"`
 	// GenEditTimeoutSec bounds one generative edit (default 1800). Measured on a
 	// 2-card 16 GB box: ~4.5 min of fixed overhead (ComfyUI cold start + a 15.4 GB
 	// GGUF load) before sampling starts, then ~7 s/step.

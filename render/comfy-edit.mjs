@@ -13,13 +13,15 @@
 //   node render/comfy-edit.mjs <out.png> <image> "<instruction>" \
 //        [--negative ...] [--unet name] [--preset full|lightning8|lightning4] \
 //        [--lora name] [--lora-strength F] [--steps N] [--cfg F] \
+//        [--megapixels F] \
 //        [--clip name] [--vae name] [--sampler s] [--scheduler s] [--shift F] \
 //        [--seed N] [--api http://127.0.0.1:8188] [--no-lock] [--reserve-vram F]
-import { copyFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { copyFileSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join, basename } from "node:path";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { COMFY_DIR } from "./comfy-lifecycle.mjs";
-import { buildQwenImageEdit, QWEN_EDIT_PRESETS } from "./wf-qwen-image-edit.mjs";
+import { buildQwenImageEdit, QWEN_EDIT_PRESETS, resolveEditMegapixels } from "./wf-qwen-image-edit.mjs";
+import { imageSize } from "./image-size.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 
 const argv = process.argv.slice(2);
@@ -57,6 +59,15 @@ const cfg = Number(flags.cfg || 0) || preset.cfg;
 const lora = flags.lora != null ? flags.lora : preset.lora;
 const seed = Number(flags.seed || Math.floor(Math.random() * 1e15));
 
+// Working canvas. Unset means "keep the source's own resolution, capped" — so the
+// source is measured here, where the real file is still on disk, rather than guessed
+// in the graph builder (which only ever sees the staged filename). An unreadable
+// header is not fatal: resolveEditMegapixels falls back to the cap.
+const configuredMP = Number(flags.megapixels || process.env.COMFY_EDIT_MEGAPIXELS || 0);
+let src = { width: 0, height: 0 };
+try { src = imageSize(readFileSync(imagePath)); } catch { /* size stays unknown */ }
+const megapixels = resolveEditMegapixels({ configured: configuredMP, width: src.width, height: src.height });
+
 let stageN = 0;
 function stageInput(p) {
   const name = "edit_in_" + Date.now() + "_" + (stageN++) + "_" + basename(p);
@@ -78,7 +89,7 @@ async function render() {
       clip: flags.clip || undefined,
       vae: flags.vae || undefined,
       lora, loraStrength: Number(flags["lora-strength"] || 0) || undefined,
-      steps, cfg,
+      steps, cfg, megapixels,
       sampler: flags.sampler || undefined,
       scheduler: flags.scheduler || undefined,
       shift: Number(flags.shift || 0) || undefined,
@@ -88,7 +99,9 @@ async function render() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt: graph, client_id: "edit-" + seed }),
     });
-    console.log("queued", prompt_id, "seed", seed, "preset", presetName, "steps", steps, "cfg", cfg, lora ? "lora " + lora : "no-lora");
+    const srcNote = src.width > 0 ? `${src.width}x${src.height}` : "size-unknown";
+    console.log("queued", prompt_id, "seed", seed, "preset", presetName, "steps", steps, "cfg", cfg,
+      lora ? "lora " + lora : "no-lora", `src ${srcNote}`, `mp ${megapixels}`);
     const waitSec = Number(process.env.COMFY_WAIT_SEC || 1800);
     let file = null;
     for (let i = 0; i < Math.max(1, Math.ceil(waitSec / 2)); i++) {

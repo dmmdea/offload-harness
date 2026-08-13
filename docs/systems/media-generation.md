@@ -125,7 +125,34 @@ triple (`full` | `lightning8`, the default | `lightning4`) — the builder throw
 a half-override, because a Lightning LoRA at full steps/cfg produces mush and the base at 4 steps
 produces noise, and either renders "successfully". Lightning is applied as a **LoRA**, never a
 pre-merged checkpoint, so it composes with any quantisation (GGUF bindings load via
-`UnetLoaderGGUF`). Known limitation: output snaps to ~1 MP (a 2048x2048 source returns ~1024x1024).
+`UnetLoaderGGUF`).
+
+**Output resolution follows the source, within 0.9-2.0 MP.** The graph scales the input once, and
+that scaled image is what the sampler denoises — so the scaler's output size *is* the edit's output
+size. It is `ImageScaleToTotalPixels` at a `resolution_steps: 16` snap (Qwen-Image's 8x VAE stride x
+DiT patch size 2; without the snap the latent needs padding and edits come back soft and subtly
+warped). The runner measures the source file — PNG, JPEG or WebP headers, no decode — and targets its
+actual megapixels, so a source inside the band renders at exactly its own size: 2048x1024 in,
+2048x1024 out. `gen_edit_megapixels` overrides the target when every edit on a machine should land on
+one fixed size; an unreadable header falls back to the ceiling, the non-destructive direction.
+
+The band is deliberate at both ends. The 2.0 ceiling bounds VRAM and time on a seat running under a
+~15 GB unet, so a 24 MP phone photo comes down instead of taking the box out. The 0.9 floor scales a
+small source *up* onto the model's working canvas — which is what the previous node did anyway, and
+what both official templates do; they normalise rather than preserve. 0.9 specifically, because it
+sits just under the whole 1-MP-class grid (1536x640 is the lowest at 0.9375, then 1216x832 at 0.965,
+1344x768 and 1152x896 at 0.984, 1024x1024 at 1.0), so every one of those keeps scale factor 1.0. A
+floor of 1.0 would have quietly stretched a 1344x768 source to 1360x768. The floor also keeps the
+arithmetic out of two holes found by replaying ComfyUI's own formula over real files: a 97x53
+thumbnail resolves to 0.0049 MP, under the node's declared 0.01 minimum, and a pathological aspect
+ratio can snap a dimension to 0 — a graph ComfyUI cannot execute.
+
+This replaced the shipped template's `FluxKontextImageScale` (fixed 0.44.0-0.48.0). That node takes
+no size argument — it hard-snaps to the nearest-aspect entry of Flux-Kontext's 17-entry table, whose
+largest entry is 1024x1024, so **every** edit came back at ~1 MP or less (a 2048x1024 source
+returned 1456x720) with no configuration that could raise it. It bought the graph nothing:
+`TextEncodeQwenImageEditPlus` rescales its own inputs internally (384x384 for the vision tokens,
+~1 MP snapped to 8 for the reference latents), so the pre-scaler only ever fed the canvas.
 
 The three edit-shaped routes in one line each: `edit_image` = deterministic PIL ops (exact, CPU, no
 GPU lock); `inpaint_image` = re-denoise inside a mask you supply (the rest stays pixel-identical);
@@ -179,7 +206,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 |---|---|
 | Image | `imagegen_family`, `imagegen_ckpt`, `imagegen_vae`, `imagegen_steps/cfg/sampler/scheduler`, `imagegen_preset/clip/lora/lora_strength/shift` (qwen-image knobs), `imagegen_refiner_model/refiner_timeout_sec` (opt-in prompt refiner) |
 | Inpaint | `inpaint_ckpt`, `inpaint_vae`, `inpaint_steps/cfg/sampler/scheduler` |
-| Generative edit | `gen_edit_script`, `gen_edit_unet`, `gen_edit_preset` (`full`/`lightning8`/`lightning4`), `gen_edit_clip/vae/lora/lora_strength`, `gen_edit_steps/cfg/sampler/scheduler`, `gen_edit_timeout_sec` |
+| Generative edit | `gen_edit_script`, `gen_edit_unet`, `gen_edit_preset` (`full`/`lightning8`/`lightning4`), `gen_edit_clip/vae/lora/lora_strength`, `gen_edit_steps/cfg/sampler/scheduler`, `gen_edit_megapixels` (0 = follow the source, held within 0.9-2.0), `gen_edit_timeout_sec` |
 | Video | `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model` |
 | Audio | `voicegen_*`, `musicgen_script` |
 | ComfyUI | `comfy_dir`, per-task `*_script` and `*_timeout_sec` |
