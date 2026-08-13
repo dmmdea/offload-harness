@@ -16,6 +16,51 @@ so downstream threshold calibration (mem0 admission gate) is unaffected. Brings 
 template back in parity with the live Qube config, which was flipped the same day —
 template regeneration would previously have silently reverted the fix.
 
+## [0.51.1] - 2026-08-13
+
+### Fixed — `tools/comfyui`: `validate` failed good graphs from a stale cached schema
+Found in live use. `comfyui-pp-cli validate` rejected a valid graph with
+`combo-value-not-in-options` for a checkpoint the server had had for hours: it read a
+5h27m-old **cached** `/object_info` that predated the file, and `--data-source live` did
+not override that cache. The live `nodes options` call on the same input was right the
+whole time, which is what made the failure so misleading — two commands, same server,
+opposite answers.
+
+Two independent defects, both fixed:
+
+- **`--data-source live` was inert here.** `validate` resolved its schema through a
+  cache-only loader that never looked at the flag, so the one escape hatch from a stale
+  cache silently returned the stale cache. It now reads `/object_info` off the running
+  server, and a failure there is fatal rather than degraded — quietly falling back would
+  hand back exactly the answer the operator was trying to get away from. `--object-info
+  <dump>` combined with `--data-source live` is now refused as the contradiction it is,
+  using the same `validateDataSourceStrategy` refusal every other read command issues.
+
+- **A cached verdict did not say it was cached.** Membership findings
+  (`combo-value-not-in-options`, `unknown-class`, `model-class-unregistered`) are the ones
+  staleness can invent out of nothing: the option set only ever grows between syncs, as
+  model files are dropped in and node packs installed. The report now carries
+  `schema_synced_at` and `schema_age` for any cache-sourced schema, and a membership
+  finding read from cache gets a hint naming the age and both ways out (`sync --resources
+  objectinfo`, or `--data-source live`). Graph-local findings — dangling links, host
+  paths — get no such hint: no resync will change them, and suggesting one sends the operator
+  chasing the wrong thing. A live-sourced miss gets none either; the server is the authority.
+
+`auto` deliberately stays on the cache. `validate` is the offline preflight — it is
+documented to need no server, agents run it before every submit, and turning the default
+into a network round trip would change what the command is. The cost of that choice is
+paid by reporting the age instead of hiding it.
+
+Audited for the same defect class elsewhere: `slotsLoadCachedObjectInfo` was the only
+cached-schema reader in the module. `nodes` and `models` always fetch live, and submit's
+preflight (`submit.Lint`) is purely graph-local — its COMBO diagnosis annotates the
+**server's own** rejection, not a cache. Nothing else to fix.
+
+`comfy_slots.go` is a preserved hand-written file, not generated, so this needs no
+`.printing-press-patches/` entry. Covered by table-driven tests over all three
+`--data-source` values, the three cache-age states (backdated, fresh, never synced), and
+the hint's negative space.
+
 ## [0.51.0] - 2026-08-13
 
 ### Added — `tools/llamaswap`: the second printed CLI
