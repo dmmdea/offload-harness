@@ -537,11 +537,17 @@ root `go build ./...`.
 | Tool | What it does |
 |---|---|
 | [`tools/comfyui/`](tools/comfyui/) | `comfyui-pp-cli` — drive a local ComfyUI render server from the shell: submit graphs, read honest timings from the server's own execution timestamps, and keep runs, graphs, node schemas, and outputs in local SQLite so comparisons survive the restarts that tuning requires. Ships an MCP server (`comfyui-pp-mcp`) and an agent skill. |
+| [`tools/llamaswap/`](tools/llamaswap/) | `llamaswap-pp-cli` — operate and inspect the llama-swap server that actually serves the cascade: what is loaded, what a swap cost, seat and model bindings, GGUF header facts read straight off the model files, and the config's own backup history. Ships an MCP server (`llamaswap-pp-mcp`), an agent skill, and an importable Go client at `pkg/llamaswap`. |
+
+Between them these cover both halves of what the harness talks to — ComfyUI for media, llama-swap for
+everything the cascade serves.
 
 Build and test one from its own directory (`cd tools/comfyui && go test ./...`) — the root module
 does not reach into it. Generated files are not hand-edited here; fixes go upstream and the tree is
-re-vendored. See **[`docs/systems/printed-clis.md`](docs/systems/printed-clis.md)** for the adoption
-cycle and the layout contract.
+re-vendored. Some `llamaswap` tests are acceptance gates against a real deployment and `t.Skip` when
+the model volume or reference corpus is absent — that is expected on a bare machine. See
+**[`docs/systems/printed-clis.md`](docs/systems/printed-clis.md)** for the adoption cycle and the
+layout contract.
 
 ## Documentation
 
