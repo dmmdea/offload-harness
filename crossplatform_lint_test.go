@@ -65,6 +65,24 @@ func TestNoUnguardedDriveLetterDefaults(t *testing.T) {
 			if name := info.Name(); name == ".git" || name == "bin" || name == "testdata" || name == "docs" {
 				return filepath.SkipDir
 			}
+			// tools/ is the same exemption, named explicitly because it is easy to
+			// re-add by accident. Printed CLIs there are GENERATED modules we adopt
+			// rather than author (docs/systems/printed-clis.md), and this rule's
+			// heuristic — a drive literal in a file with no runtime.GOOS branch —
+			// misreads two legitimate shapes they contain: a Cobra `Example:` help
+			// string showing an operator how to pass a Windows llama-server command,
+			// and a fake in-process server's canned response payload. Neither is a
+			// default path anything dereferences, so "guard it with runtime.GOOS"
+			// has no meaning for either; obeying it would mean hand-editing
+			// generated code, which the adoption rules forbid.
+			//
+			// Their portability is covered better than this rule could: each has a
+			// dedicated ubuntu CI job running the full suite, and vendoring them is
+			// gated on `GOOS=linux go vet ./...` plus cross-compiled test binaries
+			// executed on Linux.
+			if filepath.ToSlash(path) == "tools" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		name := info.Name()
