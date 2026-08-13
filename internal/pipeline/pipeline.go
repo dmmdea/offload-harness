@@ -1122,6 +1122,7 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 		LoRAStrength: p.cfg.GenEditLoRAStrength, CLIP: p.cfg.GenEditCLIP, VAE: p.cfg.GenEditVAE,
 		Steps: p.cfg.GenEditSteps, CFG: p.cfg.GenEditCFG,
 		Sampler: p.cfg.GenEditSampler, Scheduler: p.cfg.GenEditScheduler,
+		Megapixels: p.cfg.GenEditMegapixels,
 	}
 	timeout := time.Duration(p.cfg.GenEditTimeoutSec) * time.Second
 	leaseEnv, releaseLease, lerr := p.acquireMediaLease("edit", timeout, p.gpuWait())

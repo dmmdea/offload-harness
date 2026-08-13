@@ -4,6 +4,74 @@ All notable changes to `offload-harness` are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.49.0] - 2026-08-13
+
+### Fixed — the generative edit seat was capped at ~1 MP by a Flux-Kontext node
+`render/wf-qwen-image-edit.mjs` built its input scaler as `FluxKontextImageScale`,
+copying ComfyUI's shipped `image_qwen_image_edit_2511` template. That node takes no
+size argument: it lanczos-resamples every input to the nearest-aspect entry of
+Flux-Kontext's fixed 17-entry resolution table, whose LARGEST entry is 1024x1024
+(1.05 MP). A 2048x1024 source came back **1456x720**, every time, and no config could
+raise it.
+
+The cap landed on the OUTPUT, which is why it cost real pixels. That node feeds two
+places and only one of them was ever listening:
+
+- the two `TextEncodeQwenImageEditPlus` encoders, which do **not** care — that node
+  rescales its own inputs internally (384x384 for the vision tokens, ~1 MP snapped to
+  8 for the reference latents), so whatever it is handed, it resizes anyway;
+- `VAEEncode` -> `KSampler.latent_image` at `denoise: 1.0`, which decides the rendered
+  resolution outright.
+
+So the scaler was never buying the encoders anything — it was only ever setting, and
+capping, the canvas.
+
+Node 5 is now `ImageScaleToTotalPixels` with `resolution_steps: 16`. The snap is
+load-bearing, not cosmetic: Qwen-Image's VAE downscales 8x and its DiT patch size is 2,
+so pixel dimensions must be multiples of 16 for the latent to tile without padding —
+that is the one thing the removed node was doing for us, by accident.
+
+**Deviation from the template, deliberately.** The shipped 2511 and 2509 templates do
+use `FluxKontextImageScale` (the original `image_qwen_image_edit` template used
+`ImageScaleToTotalPixels`). Mirroring the template exactly is what produced the bug, so
+this graph now follows the v1 template's scaler instead. Everything else — the
+`ModelSamplingAuraFlow` shift, the dual edit encoders, the Lightning-as-LoRA binding —
+still tracks 2511.
+
+### Added — `gen_edit_megapixels`, and a default that follows the source
+New float config key, `0.01`-`16.0`, in the same `megapixels * 1024 * 1024` units as the
+ComfyUI node (so `2.0` is exactly 2048x1024). Flows
+`config.GenEditMegapixels` -> `imagegen.EditModel.Megapixels` -> `--megapixels` ->
+`buildQwenImageEdit({megapixels})` -> node 5. Omitted from the argv entirely when unset,
+so an unbound machine keeps the runner's default.
+
+Unset (the default) means **follow the source, held within 0.9-2.0 MP**.
+`render/comfy-edit.mjs` measures the source before staging it and targets its actual
+megapixels, so an in-band source renders at exactly its own size — the harness's own
+2048x1024 output round-trips at native resolution (2048x1024 is exactly 2.0 MP under this
+arithmetic, and both dimensions are already multiples of 16, so scale factor 1.0).
+
+Both ends of the band are load-bearing. The 2.0 ceiling bounds VRAM and time on a seat
+running a ~15 GB unet on 16 GB cards. The 0.9 floor scales a small source *up* onto the
+model's working canvas — which is what `FluxKontextImageScale` did anyway (512x512 in,
+1024x1024 out) and what both official templates do; they normalise rather than preserve.
+0.9 specifically, because it sits just under the whole 1-MP-class grid — 1536x640 at
+0.9375, 1216x832 at 0.965, 1344x768 and 1152x896 at 0.984, 1024x1024 at 1.0 — so every
+one of those keeps scale factor 1.0. A floor of 1.0 would have quietly stretched a
+1344x768 source to 1360x768.
+
+The floor also closes two holes that only showed up when ComfyUI's own
+`ImageScaleToTotalPixels` arithmetic was replayed over real files rather than reasoned
+about: a 97x53 thumbnail resolves to 0.0049 MP, under the node's declared 0.01 minimum,
+and a pathological aspect ratio can snap a dimension to **0** — a graph ComfyUI cannot
+execute. Both are now regression-tested.
+
+New `render/image-size.mjs` reads pixel dimensions off PNG, JPEG and WebP headers — no
+decode, no dependency, and no guessing: an unreadable buffer reports `0x0` and the seat
+falls back to the cap, which is the non-destructive direction. Checked against 24
+PIL-written files (including a progressive JPEG, a 50 KB-EXIF JPEG, and all three WebP
+payload headers); it agreed with PIL on every one.
+
 ## [0.48.0] - 2026-08-11
 
 ### Added — the ledger can finally say WHY a call escalated (#94)
