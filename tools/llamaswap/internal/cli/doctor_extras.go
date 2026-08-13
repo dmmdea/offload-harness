@@ -58,6 +58,8 @@ var doctorExtraChecks = []doctorExtraCheck{
 	doctorCheckConfigDirMode,
 	doctorCheckKeepSetAnswering,
 	doctorCheckVersionCapabilities,
+	doctorCheckSurfaceDrift,
+	doctorCheckBackendKind,
 }
 
 // runDoctorExtras executes every registered check and files the results under

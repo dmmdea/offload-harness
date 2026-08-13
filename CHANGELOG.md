@@ -6,6 +6,95 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.54.0] - 2026-08-13
+
+### Added — llamaswap-pp-cli perfection wave 1
+
+Ten scored backlog rows against the vendored `tools/llamaswap` CLI, plus one cross-tool defect the
+comfyui wave surfaced. The organising principle throughout: a measurement command may refuse, but it
+may never emit a number it cannot stand behind.
+
+**GGUF correctness (row 9 + the GGUF-parity report).** `internal/gguf` now reads the tensor-info
+table — names, dims and type tags only, never a byte of weights — and derives from it what the
+metadata alone cannot say:
+
+- **Measured bits-per-weight**, as a per-type histogram (Σ bytes / Σ elements). Block geometry is
+  transcribed from the `static_assert(sizeof(block_*))` lines in `ggml/src/ggml-common.h`, and a
+  ground-truth test asserts the summed tensor bytes account for 98%+ of every real model file on
+  disk and never exceed it. A file whose `general.file_type` names a ggml type that is entirely
+  absent from its own tensors is flagged as mislabelled; the claim is withheld for the IQ ftypes,
+  whose ftype→type correspondence is not one-to-one.
+- **Shard awareness** (`split.count` / `split.no`). A shard header describes a FRACTION of a model:
+  on the reference box, shard 1 of the DeepSeek-V4-Flash set is 5 MiB against 90.18 GiB for the
+  whole set. `gguf` resolves and sums the siblings; `fit` sums them too and **refuses (28)** when
+  any member is missing, because judging capacity against one shard turns a does-not-fit into a
+  fits. `split.no` is zero-based while the filename it generates is one-based; when the two
+  disagree the reader says so rather than picking a side.
+- **MoE total-vs-active parameters**, classified from the stacked `*_exps` tensors. Independently
+  confirmed against a model that carries the answer in its name: Qwen3-Coder-**30B-A3B** measures
+  30.53B total / 3.35B active. With no expert tensors present the active count is withheld, not
+  estimated.
+- **RoPE scaling**, so a YaRN-extended model reports its native (trained) window beside its declared
+  one. DeepSeek-V4-Flash: trained at 65 536, declared 1 048 576.
+- **Refusal guards** for architectures whose cache is not `n_kv_heads × head_dim × 2`: MLA
+  (`attention.kv_lora_rank` / `key_length_mla` / `q_lora_rank`) and SSM/Mamba (`ssm.*`). `fit` and
+  `ctx` exit 28 with the measurement that would settle it instead of applying the wrong formula.
+- **`general.type`** (adapter / imatrix / mmproj identified, never sized as models), `pooling_type`
+  (RANK ⇒ reranker), and the `LLAMA_FTYPE_GUESSED` bit masked and labelled `(guessed)`. The
+  `llama_ftype` and `ggml_type` enums were refreshed from current `llama.h` / `ggml.h`, adding
+  NVFP4, Q1_0 and Q2_0 and keeping every removed format's gap unmapped.
+
+**Bench methodology (rows 10, 11).** `bench` reports prompt processing and generation **separately**,
+each as `mean ± sample standard deviation (n-1)`, and flags a spread over 3% of the mean as
+`UNSTABLE` rather than averaging two machine states into one rate. New `--depth N[,N...]` mirrors
+`llama-bench -d`: tokens are prefilled before the timed window opens, the prefill is excluded from
+the timing, and the observed `cache_n` is reported so a prefill that did not stick is called out as
+`PARTIAL depth` instead of published as a deep-context number. New `--standard` emits the canonical
+pp512/tg128 markdown row with build, hardware and provenance. Every row now carries a 38-field
+**comparability key** over the llama.cpp build, host, weights and seat flags; new `bench compare`
+diffs two rows and **refuses (29)** when their keys differ, naming the fields that moved, and reports
+a delta inside the two rows' combined spread as noise rather than as a regression.
+
+**New `metrics <model>`** parses llama-server's Prometheus exposition into typed telemetry against
+the CURRENT upstream field names, with `--delta` sampling twice so counters are reported as windowed
+rates rather than lifetime totals. `requests_deferred > 0` surfaces as a `slots_too_low` finding.
+`kv_cache_usage_ratio` no longer exists upstream; its absence is reported as a removal, not a fault.
+
+**Server-surface completeness (rows 16, 17, 22).** New `version drift` compares the llama-swap
+surface this CLI was verified against with the live server (exit 25 when the server is older) and
+reports **which backend answered** — llama.cpp's native router mode serves a similarly shaped
+`/models`, and pointing these admin commands at one produced 404s that read as faults. Both checks
+also run inside `doctor`. `ctx` and `ps` use `meta.n_ctx` from the roster as a fast path where the
+server exposes it, falling back with an explicit note rather than substituting a configured value
+for a measured one.
+
+**Agent contracts (rows 3, 4).** Every non-zero exit under `--json`/`--agent` now emits one
+structured envelope — `{ok, error:{code, category, retryable, http_status, message, remediation,
+exit_code}}` — byte-compatible with the shape `comfyui-pp-cli` shipped in 0.53.0. Coverage is total:
+cobra's pre-parse flag errors are caught by scanning argv (a parse failure aborts before flags are
+bound), and the envelope moves to stderr once a command has written a result document to stdout, so
+stdout is always exactly one JSON document. MCP tools with a stable typed envelope now advertise
+`outputSchema` and return `structuredContent`; the schemas are reflected from the Go result structs
+into `tools/llamaswap/testdata/schema/` and gated by a golden test.
+
+**Hygiene (row 15).** `make test` is now `-race -shuffle=on -count=1` with cgo enabled, plus a
+`test-fast` inner-loop target. No races were exposed.
+
+### Fixed
+
+- **`llamaswap_execute` could not reach any templated endpoint.** Every entry in the generated
+  code-orchestration registry shipped `Positional: []string{}`, and the execute handler substitutes
+  path placeholders by iterating exactly that slice — so `/upstream/{model}/props` went out as
+  `/upstream/%7Bmodel%7D/props?model=…` and all **14** templated endpoints were unreachable through
+  the tool. Positionals are now backfilled from the path template at init, which survives a reprint;
+  an httptest substitution test pins the resolved path. Same defect and fix shape as the comfyui
+  twin.
+- **`bench` cold-load timing** no longer reports a load that a preceding tokenize call already paid.
+- **`seat log`'s corpus acceptance gate** asserted frozen counts against a live, growing backup
+  directory and went red on 2026-08-13 when a new backup landed. It now asserts floors and
+  structural invariants (non-glob outlier discovery, content-addressed dedupe, label/mtime
+  detection), which is what the gate was for.
+
 ## [0.53.0] - 2026-08-13
 
 ### Added — comfyui-pp-cli perfection wave 1

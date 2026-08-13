@@ -33,6 +33,10 @@ type fitReport struct {
 	KV  measure.KVEstimate `json:"kv"`
 	Fit measure.FitResult  `json:"fit"`
 
+	// Shards is set when the target was one member of a split set and every
+	// sibling was summed into the weights figure.
+	Shards *gguf.ShardSet `json:"shards,omitempty"`
+
 	Warnings []string `json:"warnings,omitempty"`
 	Notes    []string `json:"notes,omitempty"`
 }
@@ -63,25 +67,31 @@ Context comes from --ctx, else the loaded seat's -c flag, else the GGUF's own
 context_length. There is no 4096 default: an unknown context is reported as
 unknown.
 
+Four header facts make fit REFUSE (exit 28) instead of answering, because each
+one turns the standard formula into a confident wrong number:
+
+  sharded model   a shard header describes a FRACTION of the weights. fit sums
+                  every sibling shard when the whole set is on disk, and
+                  refuses when any member is missing.
+  MLA             compressed latent KV (attention.kv_lora_rank / key_length_mla)
+                  is not n_kv_heads x head_dim x 2.
+  SSM / Mamba     a fixed-size recurrent state does not grow with context.
+  non-model file  adapter / imatrix / mmproj (general.type) have no servable
+                  weights and no KV cache.
+
 fit never loads anything.`,
 		Example: `  llamaswap-pp-cli fit V:/models/gemma-4-E4B-it-qat-GGUF/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf --ctx 131072
   llamaswap-pp-cli fit embeddinggemma --json
   llamaswap-pp-cli fit gemma-4-e4b --ctx 32768 --cache-type-k q8_0`,
 		Annotations: map[string]string{
 			"mcp:read-only":        "true",
-			"pp:typed-exit-codes":  "3=model not loaded / file not found, 4=proxy unreachable, 28=verdict inside the uncertainty band (refused)",
+			"pp:typed-exit-codes":  "3=model not loaded / file not found, 4=proxy unreachable, 28=refused (verdict inside the uncertainty band, incomplete shard set, MLA/SSM architecture, or a non-model GGUF)",
 			"pp:measurement-owner": "wave-c",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				if flags.asJSON {
-					if err := printJSONFiltered(cmd.OutOrStdout(), map[string]any{
-						"error": "requires a GGUF path or a loaded model name",
-						"usage": cmd.CommandPath() + " --help",
-					}, flags); err != nil {
-						return err
-					}
-					return usageErr(fmt.Errorf("%q requires a path or a loaded model name", cmd.CommandPath()))
+				if wantsAgentErrorEnvelope(flags) {
+					return usageEnvelopeErr(flags, fmt.Errorf("%q requires a path or a loaded model name", cmd.CommandPath()))
 				}
 				return cmd.Help()
 			}
@@ -149,6 +159,58 @@ fit never loads anything.`,
 				return usageErr(fmt.Errorf("%s is not a GGUF file (%s); fit math does not apply. %s",
 					path, header.NotGGUFReason, gguf.KnownNonGGUF(header.MagicSeen)))
 			}
+			report.Notes = append(report.Notes, ggufHeaderNotes(header)...)
+
+			// Guard 1: this file is not a model. An adapter/imatrix/mmproj has
+			// no KV cache and no servable weights; sizing it produces a number
+			// for something that is never loaded on its own.
+			if !header.IsModel {
+				return &cliError{code: ExitFitRefusal, err: fmt.Errorf(
+					"REFUSING to size %s: %s.\nfit answers 'will this model fit'; this file is not a model, so there is no honest answer to give",
+					path, header.NotAModelReason)}
+			}
+
+			// Guard 2: MLA / SSM. The standard
+			// n_kv_heads x head_dim x 2 x n_layers x ctx formula does not
+			// describe a compressed latent cache or a fixed recurrent state.
+			// Applying it anyway yields a confident wrong number, which is
+			// strictly worse than no number.
+			if header.UnsupportedKVArch != "" {
+				return &cliError{code: ExitFitRefusal, err: fmt.Errorf(
+					"architecture-specific KV/state math not supported - refusing to guess.\n"+
+						"%s declares %s (keys: %s). This CLI's KV estimator implements grouped-query attention with "+
+						"sliding-window and shared-KV geometry; it has no model of this architecture's cache, and the "+
+						"standard formula would be wrong by an unknown factor rather than by a margin.\n"+
+						"To settle it: load the seat once and read the measured per-UUID delta from `llamaswap-pp-cli bench %s --runs 1`",
+					filepath.Base(path), header.UnsupportedKVArch, strings.Join(header.UnsupportedKVKeys, ", "), target)}
+			}
+
+			// Guard 3: shards. A shard header describes a fraction of the
+			// weights, so an unsummed verdict under-reports by ~the shard
+			// count - which flips does-not-fit into fits.
+			weightsBytes := header.FileSizeBytes
+			if header.Split.IsShard() {
+				set, serr := gguf.ResolveShards(path, header.Split.Count)
+				if serr != nil || set == nil || !set.Complete {
+					missing := "the sibling shards could not be located"
+					if set != nil && len(set.Missing) > 0 {
+						missing = fmt.Sprintf("shards %v are absent from %s", set.Missing, filepath.Dir(path))
+					} else if serr != nil {
+						missing = serr.Error()
+					}
+					return &cliError{code: ExitFitRefusal, err: fmt.Errorf(
+						"REFUSING to answer: %s is %s, and %s.\n"+
+							"This shard's %s is a FRACTION of the model's weights; judging capacity against it would under-report "+
+							"by roughly the shard count and turn a does-not-fit into a fits. Put every shard in one directory and re-run",
+						filepath.Base(path), header.Split.Summary, missing, mcFmtMiB(int(header.FileSizeBytes/(1024*1024))))}
+				}
+				weightsBytes = set.TotalBytes
+				report.Shards = set
+				report.Weights = fmt.Sprintf("summed over all %d shards (%s); this shard alone is %s",
+					set.Count, mcFmtMiB(int(set.TotalBytes/(1024*1024))), mcFmtMiB(int(header.FileSizeBytes/(1024*1024))))
+				report.Notes = append(report.Notes, fmt.Sprintf(
+					"weights summed across the complete %d-shard set; the per-shard header would have under-reported them", set.Count))
+			}
 
 			// Context resolution, in strict precedence order. No default.
 			ctxTokens := 0
@@ -210,7 +272,7 @@ fit never loads anything.`,
 			if err != nil {
 				report.Warnings = append(report.Warnings, "nvidia-smi unavailable: capacity unknown, so no fit verdict can be given: "+err.Error())
 			}
-			report.Fit = measure.Fit(header.FileSizeBytes, kv, gpus, flagMargin, flagReserve)
+			report.Fit = measure.Fit(weightsBytes, kv, gpus, flagMargin, flagReserve)
 			report.Notes = append(report.Notes,
 				fmt.Sprintf("capacity per card = total - resident now (%d MiB reserve held back); resident includes the keep-set, so this is what is actually free",
 					flagReserve))

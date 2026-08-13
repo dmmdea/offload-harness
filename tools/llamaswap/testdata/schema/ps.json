@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer"
+    },
+    "base_url": {
+      "type": "string"
+    },
+    "running": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "ctx": {
+            "type": "integer"
+          },
+          "ctx_source": {
+            "type": "string"
+          },
+          "ttl": {
+            "type": "string"
+          },
+          "ttl_source": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer"
+          },
+          "uptime": {
+            "type": "string"
+          },
+          "uptime_source": {
+            "type": "string"
+          },
+          "n_gpu_layers": {
+            "type": "integer"
+          },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "keep_set": {
+            "type": "boolean"
+          }
+        },
+        "required": ["keep_set","name","state","ttl","ttl_source","uptime","uptime_source"]
+      }
+    },
+    "inflight": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "activity_id": {
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "req_path": {
+            "type": "string"
+          },
+          "since": {
+            "type": "string"
+          }
+        },
+        "required": ["activity_id","model","req_path","since"]
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": ["base_url","running","schema_version"]
+}

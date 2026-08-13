@@ -184,6 +184,19 @@ func TestSeatLogUnknownModel(t *testing.T) {
 // unit test. On failure it prints what it actually found — a fixture number
 // that disagrees with reality is a fact about the corpus, not a licence to
 // bend the code until the expected number appears.
+//
+// The assertions are FLOORS and structural invariants, not frozen equalities.
+// The corpus is a live directory that gains a file every time a seat is
+// changed, so `== 19` was a countdown to a false red: on 2026-08-13 one new
+// backup (llama-swap.backup-2026-08-13-pre-reranker-gpu.yaml, byte-identical
+// to its 08-12 predecessor) moved sources 19->20, flat files 17->18 and
+// identical pairs 2->3 while the code under test was untouched. What the gate
+// is actually for — that non-glob outliers are discovered, that byte-identical
+// copies are detected by content rather than by filename, and that label/mtime
+// lies are surfaced — is expressed directly below instead.
+//
+// The floors are the counts verified by hand on 2026-08-13 (20/18/16/3/5).
+// They may only be raised, and only against a re-verified corpus.
 func TestSeatLogRealCorpusAcceptance(t *testing.T) {
 	const realConfig = `C:\llama-swap\llama-swap.yaml`
 	if _, err := os.Stat(realConfig); err != nil {
@@ -195,20 +208,32 @@ func TestSeatLogRealCorpusAcceptance(t *testing.T) {
 		t.Fatalf("buildSeatLog: %v", err)
 	}
 	c := rep.Corpus
-	if c.HistoricalSources != 19 {
-		t.Errorf("historical sources = %d, want 19; found: %+v", c.HistoricalSources, c.NonFlatSources)
+	floors := []struct {
+		name  string
+		got   int
+		floor int
+		extra any
+	}{
+		{"historical sources", c.HistoricalSources, 20, c.NonFlatSources},
+		{"flat historical files", c.FlatHistoricalFiles, 18, nil},
+		{"distinct content states", c.DistinctContentStates, 15, nil},
+		{"byte-identical pairs", len(c.IdenticalPairs), 3, c.IdenticalPairs},
+		{"label/mtime mismatches", len(c.LabelDateMismatches), 5, c.LabelDateMismatches},
 	}
-	if c.FlatHistoricalFiles != 17 {
-		t.Errorf("flat historical files = %d, want 17", c.FlatHistoricalFiles)
+	for _, f := range floors {
+		if f.got < f.floor {
+			t.Errorf("%s = %d, want at least %d (the corpus only grows; a DROP means discovery regressed): %+v",
+				f.name, f.got, f.floor, f.extra)
+		}
 	}
-	if c.DistinctContentStates != 15 {
-		t.Errorf("distinct content states among flat files = %d, want 15", c.DistinctContentStates)
+	// Content-addressed dedupe must never claim more distinct states than
+	// there are files, and duplicates must actually reduce the count.
+	if c.DistinctContentStates > c.FlatHistoricalFiles {
+		t.Errorf("distinct content states (%d) exceeds flat files (%d)", c.DistinctContentStates, c.FlatHistoricalFiles)
 	}
-	if len(c.IdenticalPairs) != 2 {
-		t.Errorf("byte-identical pairs = %d, want 2: %+v", len(c.IdenticalPairs), c.IdenticalPairs)
-	}
-	if len(c.LabelDateMismatches) != 5 {
-		t.Errorf("label/mtime mismatches = %d, want 5: %+v", len(c.LabelDateMismatches), c.LabelDateMismatches)
+	if len(c.IdenticalPairs) > 0 && c.DistinctContentStates >= c.FlatHistoricalFiles {
+		t.Errorf("%d byte-identical pairs found but distinct states (%d) did not fall below the file count (%d): dedupe is by filename, not content",
+			len(c.IdenticalPairs), c.DistinctContentStates, c.FlatHistoricalFiles)
 	}
 	// The two copies a backup-*.yaml glob would miss.
 	joined := strings.Join(c.NonFlatSources, " ")
@@ -217,7 +242,9 @@ func TestSeatLogRealCorpusAcceptance(t *testing.T) {
 			t.Errorf("non-glob outlier %s not discovered; found: %v", want, c.NonFlatSources)
 		}
 	}
-	if len(c.OrphanBackups) == 0 {
-		t.Error("expected at least one orphan backup (a copy byte-identical to live)")
-	}
+	// Whether any backup happens to be byte-identical to the LIVE file is a
+	// property of the day (it stops being true the moment a seat is edited),
+	// not of the code, so its presence is reported rather than required.
+	t.Logf("corpus: %d sources, %d flat, %d distinct, %d identical pairs, %d orphan backups",
+		c.HistoricalSources, c.FlatHistoricalFiles, c.DistinctContentStates, len(c.IdenticalPairs), len(c.OrphanBackups))
 }

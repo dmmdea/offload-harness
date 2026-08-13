@@ -463,7 +463,7 @@ func TestLoopbackBaseURLRewrite(t *testing.T) {
 		"http://localhost:11436":   "http://127.0.0.1:11436",
 		"http://LOCALHOST:11436/x": "http://127.0.0.1:11436/x",
 		"http://127.0.0.1:11436":   "http://127.0.0.1:11436",
-		"http://node-a:11436":        "http://node-a:11436",
+		"http://node-a:11436":      "http://node-a:11436",
 	}
 	for in, want := range cases {
 		if got := loopbackBaseURL(in); got != want {
