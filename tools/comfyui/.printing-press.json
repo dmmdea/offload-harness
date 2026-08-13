@@ -1,0 +1,117 @@
+{
+  "schema_version": 2,
+  "generated_at": "2026-08-12T21:31:37.8108975Z",
+  "printing_press_version": "4.30.2",
+  "api_name": "comfyui",
+  "display_name": "ComfyUI",
+  "cli_name": "comfyui-pp-cli",
+  "creator": {
+    "handle": "dmmdea",
+    "name": "Daniel Martinez"
+  },
+  "owner": "dmmdea",
+  "printer": "dmmdea",
+  "printer_name": "Daniel Martinez",
+  "spec_path": "spec.yaml",
+  "spec_format": "internal",
+  "spec_checksum": "sha256:849f04dde7342d94f913082c04ab57251a8375c42ccab7ffd5e35dd3f3d8a771",
+  "run_id": "20260812-123958",
+  "description": "Drive a local ComfyUI render server from the shell, with a durable record of every run the server itself forgets.",
+  "mcp_binary": "comfyui-pp-mcp",
+  "mcp_tool_count": 13,
+  "mcp_public_tool_count": 13,
+  "mcp_ready": "full",
+  "api_version": "0.32.0",
+  "auth_type": "none",
+  "auth_env_vars": [
+    "PRINTING_PRESS_CLIENT_PROFILE"
+  ],
+  "auth_env_var_specs": [
+    {
+      "name": "PRINTING_PRESS_CLIENT_PROFILE",
+      "kind": "per_call",
+      "required": true,
+      "sensitive": false
+    }
+  ],
+  "novel_features": [
+    {
+      "name": "Idempotent submit lease",
+      "command": "submit",
+      "description": "Submitting a graph that is already rendering attaches to the running job instead of starting a second one."
+    },
+    {
+      "name": "Model visibility triage",
+      "command": "models why",
+      "description": "Says why ComfyUI cannot see a model file, separating four causes that every other tool collapses into one."
+    },
+    {
+      "name": "COMBO option values",
+      "command": "nodes options",
+      "description": "Prints the values a loader input will actually accept, reading both /object_info spec shapes."
+    },
+    {
+      "name": "Guarded slot patching",
+      "command": "set",
+      "description": "Applies overrides to a graph's inputs, refusing to write when a node no longer holds the class it did when the address was captured."
+    },
+    {
+      "name": "Offline preflight",
+      "command": "validate",
+      "description": "Checks a graph against the cached node schema before submitting — unknown classes, missing required inputs, and COMBO values that are not members of the option list."
+    },
+    {
+      "name": "Honest run timing",
+      "command": "timing",
+      "description": "Reports duration from the server's own execution timestamps, compared against the historical distribution for the same graph shape."
+    },
+    {
+      "name": "Durable history ingest",
+      "command": "sync-history",
+      "description": "Copies the server's in-memory render history into the local store before a restart destroys it."
+    },
+    {
+      "name": "Multi-arm experiments",
+      "command": "exp",
+      "description": "Runs a parameter sweep as one durable object, with failed arms recorded as first-class rows rather than gaps."
+    },
+    {
+      "name": "Output provenance",
+      "command": "provenance",
+      "description": "Given a produced file, reports the run, graph, experiment arm, timing, server identity, and staged input that made it."
+    },
+    {
+      "name": "Stable input identity",
+      "command": "stage",
+      "description": "Stages a host file into ComfyUI's input directory and records its content hash, so archived runs stay reproducible."
+    },
+    {
+      "name": "Attributed replay",
+      "command": "replay",
+      "description": "Re-runs a stored graph and reports a before/after delta including which server configuration each ran under."
+    },
+    {
+      "name": "Probed output properties",
+      "command": "outputs",
+      "description": "Lists produced files and, with --probe, fills in resolution, frame rate, duration, and whether audio is present."
+    }
+  ],
+  "verify": {
+    "mode": "mock",
+    "pass_rate": 100,
+    "passed": 62,
+    "total": 62,
+    "data_pipeline": true,
+    "verdict": "PASS"
+  },
+  "scorecard": {
+    "steinberger": {
+      "percentage": 90,
+      "grade": "A (1 of 24 dimensions unverified: live_api_verification)",
+      "total": 90
+    },
+    "unverified_dimensions": [
+      "live_api_verification"
+    ]
+  }
+}

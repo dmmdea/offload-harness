@@ -25,6 +25,8 @@ where the code lives.
   job semantics, VRAM sampling
 - [systems/setup-installer.md](systems/setup-installer.md) — hardware detection, profiles, serving
   templates, the install runbook
+- [systems/printed-clis.md](systems/printed-clis.md) — the `tools/` printed CLIs: separate Go
+  modules, the regenerate/re-vendor cycle, the layout contract
 
 ## Hardware tiers — what YOUR machine gets
 

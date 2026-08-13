@@ -44,3 +44,17 @@ bin/local-agent-linux
 # fleet-serve stdio redirects (local runtime artifact, never committed)
 fleet-serve.log
 fleet-serve.log.out
+
+# Printed CLIs under tools/ (docs/systems/printed-clis.md) are separate Go modules
+# with their own build outputs. `/bin/` above is anchored to the repo root, so it
+# does NOT cover them — a printed CLI's Makefile writes bin/<name>[.exe] inside its
+# own module, and the printing-press writes release bundles (.mcpb, staged trees)
+# to build/. Neither is source; both are tens of MB.
+tools/*/bin/
+tools/*/build/
+# Run reports the printing-press drops next to the module on every reprint. They
+# are evidence from one machine's run, not the artifact we vendor.
+tools/*/dogfood-results.json
+tools/*/workflow-verify-report.json
+tools/*/apify-actor-audit-report.json
+tools/*/.printing-press-*-polish.json
