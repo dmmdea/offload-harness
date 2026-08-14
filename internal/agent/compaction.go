@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -68,10 +69,16 @@ func estimateTokens(msgs []Msg) int {
 //  3. Elide the bodies of OLDER tool-role messages to a compact marker
 //     (preserving Role + ToolCallID so pairing is intact), oldest-first, until
 //     under budget. Eliding a body is preferred over dropping a message.
-//  4. If still over budget, drop whole OLDER turns oldest-first. A turn is an
-//     assistant message that has ToolCalls PLUS all its matching tool results,
-//     dropped as a unit so assistant<->tool pairing is never broken. The
-//     protected preamble (incl. the objective) is never dropped.
+//  4. If still over budget, drop WHOLE messages. With a Tokenizer configured
+//     (opts.Tok) this is the token-exact middle cut (cutmiddle.go, TO-4):
+//     the served model's real token counts decide what fits, whole
+//     assistant+tool units are dropped from the MIDDLE, and the head/tail
+//     windows survive. Without one (or when the tokenizer fails open) the
+//     legacy estimate-driven rung drops whole OLDER turns oldest-first. In
+//     both paths a turn is an assistant message that has ToolCalls PLUS all
+//     its matching tool results, dropped as a unit so assistant<->tool
+//     pairing is never broken, and the protected preamble (incl. the
+//     objective) is never dropped.
 //
 // keepRecent counts assistant/tool turns to keep verbatim from the end; a
 // non-positive value is treated as 0 (nothing pinned as "recent", though the
@@ -98,11 +105,47 @@ type compactOpts struct {
 	// rung still applies (nothing is lost). emergencyShrink stays pin-blind — at
 	// that point the alternative is a dead run.
 	Pinned map[string]bool
+	// Tok, when non-nil, REPLACES the estimate-driven whole-turn-drop rung
+	// (step 4) with the token-exact middle cut (cutmiddle.go, TO-4): the drop
+	// decision is then made on the served model's REAL token counts against
+	// RealBudget (the real-token allowance, i.e. the loop's uncorrected
+	// inputBudget), never on the chars/4 estimate. The legacy rung below runs
+	// only when Tok is nil or the tokenizer fails open — one truncation
+	// mechanism at a time, by explicit gate.
+	Tok        Tokenizer
+	RealBudget int
 }
 
-func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts compactOpts) []Msg {
+// fitVerdict is what compact KNOWS about the returned transcript's fit — and,
+// critically, which yardstick produced that knowledge.
+type fitVerdict int
+
+const (
+	// fitUnknown: only the estimate ladder ran; the caller judges fit by
+	// estimateTokens, exactly as before the token-exact rung existed.
+	fitUnknown fitVerdict = iota
+	// fitReal: the token-exact rung MEASURED the returned transcript within
+	// the real budget. The estimate must not overrule it — a pessimistic
+	// estimate would otherwise report a verified-fitting request as exhausted
+	// on every remaining step.
+	fitReal
+	// overReal: the token-exact rung measured the transcript OVER the real
+	// budget even after cutting (forced keeps: preamble/pinned/signal/tail).
+	// The caller must count it exhausted — the under-counting estimate would
+	// otherwise hide exactly the overflow the telemetry exists to report.
+	overReal
+)
+
+// compact is the estimate-compatible wrapper over compactWithVerdict for
+// callers that don't consume the fit verdict (replay, tests).
+func compact(ctx context.Context, msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts compactOpts) []Msg {
+	out, _ := compactWithVerdict(ctx, msgs, budget, keepRecent, protectedPrefix, opts)
+	return out
+}
+
+func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts compactOpts) ([]Msg, fitVerdict) {
 	if estimateTokens(msgs) <= budget {
-		return msgs // happy path: untouched, KV cache preserved.
+		return msgs, fitUnknown // happy path: untouched, KV cache preserved.
 	}
 	if keepRecent < 0 {
 		keepRecent = 0
@@ -182,7 +225,7 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts c
 		}
 	}
 	if estimateTokens(out) <= budget {
-		return out
+		return out, fitUnknown
 	}
 
 	// Step 2a (flag-gated, LOSSLESS): re-encode older tool bodies that are
@@ -198,7 +241,7 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts c
 			}
 		}
 		if estimateTokens(out) <= budget {
-			return out
+			return out, fitUnknown
 		}
 	}
 
@@ -214,7 +257,7 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts c
 			}
 		}
 		if estimateTokens(out) <= budget {
-			return out
+			return out, fitUnknown
 		}
 	}
 
@@ -237,12 +280,27 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts c
 		}
 	}
 	if estimateTokens(out) <= budget {
-		return out
+		return out, fitUnknown
 	}
 
-	// Step 4: drop whole OLDER turns oldest-first, keeping assistant<->tool
-	// pairs together. Build a keep-mask so removal is a single pass with stable
-	// order and no pairing breakage.
+	// Step 4 (token-exact, TO-4): with a Tokenizer present the whole-message
+	// middle cut REPLACES the legacy estimate-driven drop rung — real token
+	// counts decide what is dropped, whole messages only, head and tail always
+	// survive. ok=false (endpoint has no /tokenize, or a mid-run outage) falls
+	// open to the legacy rung below; the loop's tokenizer wrapper is sticky, so
+	// a run pays that failed probe once.
+	if opts.Tok != nil {
+		if cut, fits, ok := cutMiddleTurns(ctx, opts.Tok, out, opts.RealBudget, protectedEnd, keepRecent, pinned); ok {
+			if fits {
+				return cut, fitReal
+			}
+			return cut, overReal
+		}
+	}
+
+	// Step 4 (legacy fallback): drop whole OLDER turns oldest-first, keeping
+	// assistant<->tool pairs together. Build a keep-mask so removal is a single
+	// pass with stable order and no pairing breakage.
 	keep := make([]bool, len(out))
 	for i := range keep {
 		keep[i] = true
@@ -289,7 +347,7 @@ func compact(msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts c
 			keep[i] = false
 		}
 	}
-	return masked(out, keep)
+	return masked(out, keep), fitUnknown
 }
 
 // masked returns the subslice of msgs whose keep flag is true, in order.
@@ -504,9 +562,12 @@ type ReplayOpts struct {
 
 // CompactReplay runs the production compaction ladder over msgs at budget with
 // the given optional rungs. keepRecent/protectedPrefix follow compact()'s
-// semantics (see above).
+// semantics (see above). Replay is estimate-ladder only (no Tokenizer): the
+// eval harness measures offline transcripts with no serving endpoint, so it
+// exercises the legacy drop rung — the same path a tokenizer-less production
+// run takes.
 func CompactReplay(msgs []Msg, budget, keepRecent, protectedPrefix int, opts ReplayOpts) []Msg {
-	return compact(msgs, budget, keepRecent, protectedPrefix, compactOpts{GCF: opts.GCF, Skeleton: opts.Skeleton})
+	return compact(context.Background(), msgs, budget, keepRecent, protectedPrefix, compactOpts{GCF: opts.GCF, Skeleton: opts.Skeleton})
 }
 
 // EstimateTokens exposes the ladder's own token estimator so replay callers

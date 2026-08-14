@@ -63,6 +63,41 @@ type wireToolDef struct {
 		Parameters  json.RawMessage `json:"parameters,omitempty"`
 	} `json:"function"`
 }
+
+// wireToolDefs converts the loop's specs to the exact on-wire tool
+// definitions. The ONE producer of that shape — Chat ships it and
+// wireToolsJSON measures it, so the two can never drift (round-3 review
+// finding 2026-08-14: the spec reserve was measuring a marshal of ToolSpec
+// itself — different keys, 34 fewer fixed bytes per tool — under-counting on
+// exactly the path advertised as exact).
+func wireToolDefs(tools []ToolSpec) []wireToolDef {
+	if len(tools) == 0 {
+		return nil
+	}
+	defs := make([]wireToolDef, 0, len(tools))
+	for _, t := range tools {
+		var wd wireToolDef
+		wd.Type = "function"
+		wd.Function.Name = t.Name
+		wd.Function.Description = t.Description
+		wd.Function.Parameters = t.Schema
+		defs = append(defs, wd)
+	}
+	return defs
+}
+
+// wireToolsJSON renders the tool block EXACTLY as Chat adds it to the request
+// — the "tools" array plus the "tool_choice" key — so the spec reserve
+// tokenizes the bytes that actually ship. nil for a tool-less loop.
+func wireToolsJSON(tools []ToolSpec) ([]byte, error) {
+	if len(tools) == 0 {
+		return nil, nil
+	}
+	return json.Marshal(struct {
+		Tools      []wireToolDef `json:"tools"`
+		ToolChoice string        `json:"tool_choice"`
+	}{wireToolDefs(tools), "auto"})
+}
 type wireReq struct {
 	Model       string        `json:"model"`
 	Messages    []wireMsg     `json:"messages"`
@@ -133,14 +168,7 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 		}
 		req.Messages = append(req.Messages, wm)
 	}
-	for _, t := range tools {
-		var wd wireToolDef
-		wd.Type = "function"
-		wd.Function.Name = t.Name
-		wd.Function.Description = t.Description
-		wd.Function.Parameters = t.Schema
-		req.Tools = append(req.Tools, wd)
-	}
+	req.Tools = wireToolDefs(tools)
 	if len(req.Tools) > 0 {
 		req.ToolChoice = "auto"
 	}

@@ -23,6 +23,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
+	"github.com/dmmdea/offload-harness/internal/tokclient"
 )
 
 type Server struct{ p *pipeline.Pipeline }
@@ -929,7 +930,12 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// resolved window is reported in the result so a fallback is visible.
 	probed, probeOK := agent.ProbeServedWindow(cctx, cfg.Endpoint, model)
 	effCtx, _ := agent.ResolveContextTokens(0, probed, probeOK)
-	built.Loop.WithContextTokens(effCtx).WithSkeletonPrune(true).WithGCFCompact(true)
+	// Real-tokenizer seam (TO-4): whole-message middle cut on the planner's own
+	// served token counts; fail-open to the legacy estimate rung when the
+	// endpoint has no /tokenize. Same wiring as the CLI, so the drive modes
+	// cannot drift.
+	built.Loop.WithContextTokens(effCtx).WithSkeletonPrune(true).WithGCFCompact(true).
+		WithTokenizer(tokclient.New(cfg.Endpoint, model, 0))
 	// Task profile. Until now this door could only produce bare `general` — the
 	// one configuration MEASURED to fail (a 4B planner given every tool calls
 	// none of them). An unknown name is a clean defer naming the valid ones, not
@@ -961,6 +967,11 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		"tools":       len(built.Tools),
 		"model":       model,  // the resolved PLANNER seat — visibility is the cure for a silent seat (roast finding)
 		"ctx_window":  effCtx, // the window compaction budgeted against (probed, or the conservative fallback)
+	}
+	if res.TokenizerPath != "" {
+		// Which drop rung the ladder is on — same visibility rule as ctx_window:
+		// a sticky fail-open downgrade must be reportable, not inferred.
+		out["tokenizer_path"] = res.TokenizerPath
 	}
 	if res.CompactionsExhausted > 0 {
 		out["compactions_exhausted"] = res.CompactionsExhausted // fit=false telemetry: best-effort over-budget requests were sent

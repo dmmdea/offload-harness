@@ -88,9 +88,14 @@ func RunTwoTier(ctx context.Context, objective string, architect, editor *Loop) 
 	archRes, err := architect.Run(ctx, objective)
 	if err != nil {
 		// Architect unreachable/failed — fall back to a single-model editor run of
-		// the ORIGINAL objective so the user still gets an attempt.
+		// the ORIGINAL objective so the user still gets an attempt. Cross-tier
+		// telemetry aggregates here exactly as on the happy path (review finding
+		// 2026-08-14: the fallback paths silently dropped the architect's
+		// exhaustion count and tokenizer verdict).
 		res, eerr := editor.Run(ctx, objective)
+		res.CompactionsExhausted += archRes.CompactionsExhausted
 		res.Effects = append(archRes.Effects, res.Effects...) // architect's ledger survives the fallback
+		res.ArchTokenizerPath = archRes.TokenizerPath
 		return res.withFallback(FallbackArchitectError), eerr
 	}
 
@@ -100,7 +105,9 @@ func RunTwoTier(ctx context.Context, objective string, architect, editor *Loop) 
 		// is unrecoverable (it never sees the original request), so fall back to a
 		// single-model editor run of the ORIGINAL objective.
 		res, eerr := editor.Run(ctx, objective)
+		res.CompactionsExhausted += archRes.CompactionsExhausted
 		res.Effects = append(archRes.Effects, res.Effects...)
+		res.ArchTokenizerPath = archRes.TokenizerPath
 		return res.withFallback(FallbackDegeneratePlan), eerr
 	}
 
@@ -109,8 +116,12 @@ func RunTwoTier(ctx context.Context, objective string, architect, editor *Loop) 
 	// Cross-tier telemetry aggregates on the returned Result — an exhausted
 	// architect ladder, or an architect tool abandoned mid-flight (EffectUnknown),
 	// must not vanish just because the editor's Result is the one returned. The
-	// architect's records come FIRST: the ledger is in execution order.
+	// architect's records come FIRST: the ledger is in execution order. The
+	// architect's tokenizer verdict rides its own field: the two tiers cut with
+	// different served tokenizers, so one shared field would let either tier's
+	// degrade mask the other's.
 	res.CompactionsExhausted += archRes.CompactionsExhausted
 	res.Effects = append(archRes.Effects, res.Effects...)
+	res.ArchTokenizerPath = archRes.TokenizerPath
 	return res.withFallback(FallbackNone), eerr
 }

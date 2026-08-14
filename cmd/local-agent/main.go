@@ -18,12 +18,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/sandbox"
+	"github.com/dmmdea/offload-harness/internal/tokclient"
 )
 
 // splitObjective separates the first bare positional (the objective) from flags,
@@ -322,6 +324,11 @@ func main() {
 	loop.WithContextTokens(effCtx)
 	loop.WithSkeletonPrune(*skeletonPrune)
 	loop.WithGCFCompact(*gcfCompact)
+	// Real-tokenizer seam (TO-4): the drop rung cuts whole middle messages on
+	// the SERVED model's own token counts (llama-swap /tokenize). Fail-open by
+	// contract — an endpoint without the route downgrades to the legacy
+	// estimate rung after one probe.
+	loop.WithTokenizer(tokclient.New(plannerBase, plannerModel, 0))
 
 	// Per-task tool profile (Task C6): applied AFTER WithWorktree so a
 	// worktree-registered tool (update_plan) is present for the edit/build/github
@@ -478,19 +485,28 @@ func main() {
 		// the shared preamble probed edModel (the editor, the loop that carries
 		// the long transcript); on this fleet the tiers share one serving config,
 		// and an explicit --ctx-tokens still overrides for both.
-		architect := archBuilt.Loop.WithWorktree(archBuilt.Worktree).WithContextTokens(effCtx).WithSkeletonPrune(*skeletonPrune).WithGCFCompact(*gcfCompact)
-		editor := editBuilt.Loop.WithWorktree(editBuilt.Worktree).WithContextTokens(effCtx).WithSkeletonPrune(*skeletonPrune).WithGCFCompact(*gcfCompact)
+		architect := archBuilt.Loop.WithWorktree(archBuilt.Worktree).WithContextTokens(effCtx).WithSkeletonPrune(*skeletonPrune).WithGCFCompact(*gcfCompact).
+			WithTokenizer(tokclient.New(plannerBase, archModel, 0)) // each tier cuts with ITS OWN served tokenizer
+		editor := editBuilt.Loop.WithWorktree(editBuilt.Worktree).WithContextTokens(effCtx).WithSkeletonPrune(*skeletonPrune).WithGCFCompact(*gcfCompact).
+			WithTokenizer(tokclient.New(plannerBase, edModel, 0))
 		fmt.Fprintf(os.Stderr, "[local-agent] two-tier: architect=%s editor=%s (one swap)\n", archModel, edModel)
 
 		res, err := agent.RunTwoTier(ctx, objective, architect, editor)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
+			// The degrade note matters MOST on the death path — a run that fell
+			// to the legacy rung and then died on a context overflow is exactly
+			// the diagnosis this line carries (round-3 finding 2026-08-14).
+			printTokenizerDegrade("editor", res.TokenizerPath)
+			printTokenizerDegrade("architect", res.ArchTokenizerPath)
 			printFlaggedEffects(res.Effects) // what already touched the world before the death
 			os.Exit(1)
 		}
 		if res.Fallback != agent.FallbackNone {
 			fmt.Fprintf(os.Stderr, "[local-agent] two-tier FELL BACK to a single editor run (%s)\n", res.Fallback)
 		}
+		printTokenizerDegrade("editor", res.TokenizerPath)
+		printTokenizerDegrade("architect", res.ArchTokenizerPath)
 		if *asJSON {
 			b, _ := json.MarshalIndent(res, "", "  ")
 			fmt.Println(string(b))
@@ -504,15 +520,49 @@ func main() {
 	res, err := loop.Run(ctx, objective)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
-		printFlaggedEffects(res.Effects) // what already touched the world before the death
+		printTokenizerDegrade("", res.TokenizerPath) // most diagnostic exactly on the death path (round-3 finding)
+		printFlaggedEffects(res.Effects)             // what already touched the world before the death
 		os.Exit(1)
 	}
+	printTokenizerDegrade("", res.TokenizerPath)
 	if *asJSON {
 		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))
 	} else {
 		fmt.Println(res.Output)
 		fmt.Fprintf(os.Stderr, "[local-agent] steps=%d stop=%s tools=%d\n", res.Steps, res.StopReason, len(built.Tools))
+	}
+}
+
+// printTokenizerDegrade surfaces a sticky tokenizer downgrade on stderr: the
+// token-exact drop rung failing open to the legacy estimate rung is the
+// designed contract, but doing so INVISIBLY would leave 0.57.0 behaving like
+// 0.56.0 with no way to tell (review finding 2026-08-14) — same precedent as
+// reporting the resolved context window. The check anchors on the exported
+// agent.TokenizerDegradedPrefix, never a local literal, so a wording change in
+// the producer cannot silently kill this note. tier labels the loop under
+// --two-tier ("" for the single-loop path).
+func printTokenizerDegrade(tier, path string) {
+	if strings.HasPrefix(path, agent.TokenizerDegradedPrefix) {
+		label := ""
+		if tier != "" {
+			label = tier + " "
+		}
+		fmt.Fprintf(os.Stderr, "[local-agent] %stoken-exact compaction DEGRADED to the legacy estimate rung: %s\n", label, path)
+	}
+}
+
+// tokenizerDegradeNoted guards the once-per-process degrade note for the
+// long-running modes (--serve, --queue), where one shared Loop means one
+// downgrade poisons every later goal/request: the transition is printed
+// exactly once instead of per goal (37 identical lines help nobody), and the
+// per-goal state lives in the queue's trace records. atomic — --serve
+// handlers run concurrently.
+var tokenizerDegradeNoted atomic.Bool
+
+func noteTokenizerDegradeOnce(path string) {
+	if strings.HasPrefix(path, agent.TokenizerDegradedPrefix) && tokenizerDegradeNoted.CompareAndSwap(false, true) {
+		fmt.Fprintf(os.Stderr, "[local-agent] token-exact compaction DEGRADED to the legacy estimate rung for the REST OF THIS PROCESS: %s\n", path)
 	}
 }
 

@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -104,6 +106,24 @@ type Result struct {
 	// per run instead of inferred from outcomes.
 	TokenCal TokenCalReport
 
+	// TokenizerPath reports which drop rung the compaction ladder is on at the
+	// end of the run — the visibility twin of ctx_window for the window probe
+	// (a fail-open feature that can be permanently inert with zero evidence is
+	// not fail-open, it is fail-unobservable). "" = no tokenizer configured
+	// (legacy rung by construction); "token-exact" = the real-tokenizer cut is
+	// live; "legacy (degraded: <why>)" = a tokenizer WAS configured but a
+	// classified endpoint failure (definitive route absence, or two consecutive
+	// transient failures) downgraded this Loop to the legacy rung, with the
+	// recorded reason.
+	TokenizerPath string `json:"tokenizer_path,omitempty"`
+
+	// ArchTokenizerPath is set only by RunTwoTier (like Fallback): the
+	// ARCHITECT tier's TokenizerPath, carried so an architect-only tokenizer
+	// degrade is observable — each tier cuts with its own served tokenizer, so
+	// the two degrade independently, and returning only the editor's verdict
+	// hid a misrouted architect model forever (review finding 2026-08-14).
+	ArchTokenizerPath string `json:"arch_tokenizer_path,omitempty"`
+
 	// Effects is the per-call execution ledger (effects.go): one record per
 	// tool call the model REQUESTED, in call order, present on every return
 	// path including errors. The one consequential distinction it preserves:
@@ -128,6 +148,31 @@ type TokenCalReport struct {
 	Intercept    float64 `json:"intercept,omitempty"`
 	RawBudget    int     `json:"raw_budget"`
 	FinalBudget  int     `json:"final_budget"`
+}
+
+// TokenizerDegradedPrefix is the stable prefix of every degraded
+// Result.TokenizerPath value. Exported as the ONE contract between tokPath
+// (which writes it) and every consumer that branches on degradation (the CLI
+// stderr note, queue traces) — two independent string literals here would let
+// a wording tweak silently kill the operator-facing note (review finding
+// 2026-08-14).
+const TokenizerDegradedPrefix = "legacy (degraded: "
+
+// tokPath snapshots the tokenizer state for Result.TokenizerPath. NOTE the
+// semantics: "token-exact" means the token-exact rung is CONFIGURED and not
+// degraded — a run whose transcript never exceeded the estimate budget never
+// probed the tokenizer, so this value alone is not proof the /tokenize route
+// works; the first over-budget step is where a bad route degrades (visibly).
+func (l *Loop) tokPath() string {
+	if l.tok == nil {
+		return ""
+	}
+	if s, isSticky := l.tok.(*stickyTokenizer); isSticky {
+		if why, down := s.degraded(); down {
+			return TokenizerDegradedPrefix + why + ")"
+		}
+	}
+	return "token-exact"
 }
 
 // calReport snapshots the calibration for the Result.
@@ -170,6 +215,20 @@ type Loop struct {
 	mem        Memory
 	worktree   string // RW worktree root for durable working memory (AGENT.md + .agent/plan.md); "" disables it
 	exemplars  []Msg  // trusted few-shot messages injected after system, before recall/objective (Task C6)
+	// tok is the REAL-tokenizer seam for the token-exact middle cut (TO-4,
+	// cutmiddle.go). Non-nil replaces the estimate-driven whole-turn-drop rung;
+	// wrapped sticky by WithTokenizer so a classified /tokenize failure
+	// downgrades the rest of the run to the legacy rung instead of stalling
+	// every step.
+	tok Tokenizer
+	// specReserve is the token cost of the tool-spec block, reserved out of the
+	// input budget — the specs ship with EVERY chat request, and on a full
+	// --allow-* build they cost several compactionMargins' worth of tokens
+	// (review finding 2026-08-14). Resolved once per Loop by resolveSpecReserve
+	// (real tokenizer when available, conservative estimate otherwise); atomic
+	// because --serve reads budgets from concurrent handlers.
+	specReserve     atomic.Int32
+	specReserveOnce sync.Once
 }
 
 // defaultCtxTokens is the model context window the loop budgets against. It
@@ -180,6 +239,9 @@ const defaultCtxTokens = 8192
 // compactionMargin is a safety headroom (in tokens) subtracted from the input
 // budget on top of the reserved completion tokens, to absorb the crude
 // token-estimate's error and per-request framing the estimate doesn't model.
+// The tool-spec block is NOT part of what this margin absorbs — it is measured
+// and reserved separately (specReserve): on a full build the specs alone run
+// 4-6× this margin, which is exactly why they get their own reservation.
 const compactionMargin = 512
 
 // CompactionMargin exposes the production safety margin so a measurement can
@@ -419,9 +481,23 @@ func (l *Loop) WithSkeletonPrune(on bool) *Loop { l.skeletonPrune = on; return l
 // since the measured flip decision (ADR 0015).
 func (l *Loop) WithGCFCompact(on bool) *Loop { l.gcfCompact = on; return l }
 
+// WithTokenizer attaches the served model's real tokenizer (internal/tokclient
+// pointed at the planner endpoint+model) and thereby switches the ladder's
+// drop rung to the token-exact middle cut (TO-4, cutmiddle.go). nil leaves the
+// legacy estimate-driven rung — the correct configuration for a backend with
+// no /tokenize route. The tokenizer is wrapped sticky here: after one failure
+// every later step skips straight to the legacy rung (fail-open, no per-step
+// network stall), atomically, since --serve shares one *Loop across handlers.
+func (l *Loop) WithTokenizer(t Tokenizer) *Loop {
+	if t != nil {
+		l.tok = &stickyTokenizer{inner: t}
+	}
+	return l
+}
+
 // ladderOpts bundles the loop's rung flags for compact().
 func (l *Loop) ladderOpts() compactOpts {
-	return compactOpts{GCF: l.gcfCompact, Skeleton: l.skeletonPrune}
+	return compactOpts{GCF: l.gcfCompact, Skeleton: l.skeletonPrune, Tok: l.tok, RealBudget: l.inputBudget()}
 }
 
 // WithToolResultCap overrides the per-result character cap applied when a
@@ -435,14 +511,50 @@ func (l *Loop) WithToolResultCap(n int) *Loop {
 
 // inputBudget is the estimated-token ceiling for the transcript SENT to the
 // model: the context window minus the reserved completion tokens minus a safety
-// margin. Clamped to a small positive floor so a mis-set tiny window can never
-// drive the budget to zero/negative (which would compact everything away).
+// margin minus the measured tool-spec block (the specs ship with every request;
+// leaving them un-reserved let the fit verdict pass prompts the server rejects
+// — review finding 2026-08-14). Clamped to a small positive floor so a mis-set
+// tiny window can never drive the budget to zero/negative (which would compact
+// everything away).
 func (l *Loop) inputBudget() int {
-	b := l.ctxTokens - l.maxTokens - compactionMargin
+	b := l.ctxTokens - l.maxTokens - compactionMargin - int(l.specReserve.Load())
 	if b < 256 {
 		b = 256
 	}
 	return b
+}
+
+// resolveSpecReserve measures the tool-spec block's token cost once per Loop:
+// the REAL tokenizer when one is configured and answers (the same sticky seam
+// as the cut — a cancelled-ctx or transient failure here follows the sticky
+// wrapper's own classification rules), else a conservative estimate. JSON is
+// punctuation-dense (~3 chars/token, not 4), so the estimate deliberately
+// divides by 3: for a RESERVATION, over-counting is the safe direction —
+// under-counting re-opens the server-400 class the reservation exists to
+// close. Zero tools reserve nothing, so tool-less Loops (and their tests) are
+// byte-identical to the pre-reservation behavior.
+func (l *Loop) resolveSpecReserve(ctx context.Context) {
+	l.specReserveOnce.Do(func() {
+		if len(l.specs) == 0 {
+			return
+		}
+		// Measure the WIRE serialization (wireToolsJSON — the same producer
+		// Chat ships), never a marshal of the specs themselves: the two shapes
+		// differ by keys and ~34 fixed bytes per tool, and an under-measured
+		// reserve is exactly the defect this exists to close (round-3 review
+		// finding 2026-08-14).
+		b, err := wireToolsJSON(l.specs)
+		if err != nil || len(b) == 0 {
+			return // cannot happen for the harness's own spec types; reserve nothing rather than guess
+		}
+		if l.tok != nil {
+			if lens, ok := l.tok.Pieces(ctx, string(b)); ok {
+				l.specReserve.Store(int32(len(lens)))
+				return
+			}
+		}
+		l.specReserve.Store(int32((len(b) + 2) / 3))
+	})
 }
 
 // budgetForCompaction is inputBudget() corrected by what the server has told us
@@ -489,6 +601,12 @@ func (l *Loop) toolResultCapChars() int {
 // Run executes the loop for objective until the model stops, the step budget is
 // exhausted, or the context is cancelled.
 func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
+	// The tool-spec block ships with EVERY request, so its token cost is part
+	// of every budget this run computes — resolve it once before any budgeting
+	// (review finding 2026-08-14: the un-reserved ~2-3k tokens of tool JSON on
+	// a full build dwarfed compactionMargin and let the fit verdict pass
+	// prompts the server rejects).
+	l.resolveSpecReserve(ctx)
 	msgs := make([]Msg, 0, 8)
 	if l.system != "" {
 		msgs = append(msgs, Msg{Role: "system", Content: l.system})
@@ -569,7 +687,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
-			return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Effects: effects}, err
+			return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), TokenizerPath: l.tokPath(), Effects: effects}, err
 		}
 		specs := l.specs
 		if len(disabledTools) > 0 {
@@ -602,9 +720,20 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		if estimateTokens(msgs) > budget {
 			opts := l.ladderOpts()
 			opts.Pinned = pinned
-			msgs = compact(msgs, budget, l.keepRecent, preambleLen, opts)
-			if estimateTokens(msgs) > budget {
-				exhausted++ // ladder exhausted — best-effort request, honestly counted
+			var verdict fitVerdict
+			msgs, verdict = compactWithVerdict(ctx, msgs, budget, l.keepRecent, preambleLen, opts)
+			// Exhaustion is judged by the yardstick that actually measured the
+			// transcript: the token-exact verdict when the cut rung ran (the
+			// estimate must neither hide a real overflow nor report a
+			// verified-fitting request as exhausted forever), the estimate
+			// otherwise — exactly the pre-tokenizer behavior.
+			switch verdict {
+			case overReal:
+				exhausted++ // forced keeps exceed the REAL budget — honestly counted
+			case fitUnknown:
+				if estimateTokens(msgs) > budget {
+					exhausted++ // ladder exhausted — best-effort request, honestly counted
+				}
 			}
 		}
 		comp, err := l.client.Chat(ctx, msgs, specs, l.maxTokens)
@@ -633,22 +762,33 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				}
 				ropts := l.ladderOpts()
 				ropts.Pinned = pinned
-				msgs = compact(msgs, target, l.keepRecent/2, preambleLen, ropts)
+				// The server just rejected on REAL tokens, so the token-exact cut
+				// halves its real allowance in step with the estimate target —
+				// re-sending anything near the rejected size would only 400 again.
+				ropts.RealBudget = l.inputBudget() / 2
+				var rv fitVerdict
+				msgs, rv = compactWithVerdict(ctx, msgs, target, l.keepRecent/2, preambleLen, ropts)
 				// The harder compact can still be a NO-OP when the oversized body
 				// sits inside keepRecent (observed live: a huge newest tool result
 				// made the retry re-send the same overflow). Emergency shrink is
 				// the last resort before the run dies: it may touch tool bodies
-				// the keep-recent contract normally protects.
-				if estimateTokens(msgs) > target {
+				// the keep-recent contract normally protects. When the token-exact
+				// rung MEASURED the halved transcript as fitting (fitReal), the
+				// pin-blind emergency pass is skipped: acting on the pessimistic
+				// estimate there would destroy exactly the pinned bodies the cut
+				// just refused to drop, on evidence the real tokenizer refutes.
+				if rv != fitReal && estimateTokens(msgs) > target {
 					msgs = emergencyShrink(msgs, target, preambleLen)
 				}
-				if estimateTokens(msgs) > target {
+				if rv == overReal {
+					exhausted++ // forced keeps over the REAL halved budget — counted
+				} else if rv == fitUnknown && estimateTokens(msgs) > target {
 					exhausted++ // even the last resort could not fit — counted, never silent
 				}
 				comp, err = l.client.Chat(ctx, msgs, specs, l.maxTokens)
 			}
 			if err != nil {
-				return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Effects: effects}, err
+				return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), TokenizerPath: l.tokPath(), Effects: effects}, err
 			}
 		}
 		// Learn from the response: estimateTokens(msgs) is what we thought the
@@ -669,7 +809,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// finish_reason "stop", so trusting finish_reason drops the tool call
 		// and returns an empty answer.
 		if len(comp.Msg.ToolCalls) == 0 {
-			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Effects: effects}
+			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), TokenizerPath: l.tokPath(), Effects: effects}
 			if l.batchJudge {
 				res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 			}
@@ -700,7 +840,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			msgs = append(msgs, Msg{Role: "tool", ToolCallID: call.ID, Content: content, IsError: isErr})
 		}
 	}
-	res := Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Effects: effects}
+	res := Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), TokenizerPath: l.tokPath(), Effects: effects}
 	if l.batchJudge {
 		res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 	}
