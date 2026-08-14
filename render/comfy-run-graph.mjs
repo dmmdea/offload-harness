@@ -16,6 +16,7 @@ import { satisfyManifest, defaultSatisfyDeps } from "./manifest-satisfy.mjs";
 import { preflightGraph } from "./preflight-graph-file.mjs";
 import { allOutputsByNode } from "./comfy-output.mjs";
 import { readOwner as _readOwner, writeOwner as _writeOwner } from "./comfy-ownership.mjs";
+import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -142,12 +143,12 @@ async function main() {
   const argv = process.argv.slice(2); const flags = {};
   for (let i = 0; i < argv.length; i++) if (argv[i].startsWith("--")) { flags[argv[i].slice(2)] = argv[i + 1]; i++; }
   const api = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
+  const cli = resolveCli();
   const comfyDir = resolveComfyDir();
   const graph = JSON.parse(readFileSync(flags.graph, "utf8"));
   const manifest = flags.manifest ? JSON.parse(readFileSync(flags.manifest, "utf8")) : { node_packs: [], models: [] };
   const reserveVram = flags["reserve-vram"];
 
-  const j = async (url, opts) => { const r = await fetch(url, opts); if (!r.ok) throw new Error(url + " " + r.status); return r.json(); };
   // Shared with the lifecycle module: this line used to hardcode the Windows venv path
   // with no candidate list and no existence check, so run_graph spawned a binary that
   // cannot exist on Linux — advertised to the fleet, broken on arrival.
@@ -164,11 +165,19 @@ async function main() {
       freeComfy: _freeComfy,
       satisfy: (mm) => satisfyManifest(mm, satDeps),
       preflight: preflightGraph,
-      postGraph: Object.assign(async (g) => j(`${api}/prompt`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: g, client_id: "run-graph" }) }),
-        { history: (pid) => pollHistory(api, pid) }),
+      // Submission/polling via the shared comfy-submit.mjs layer: CLI-preferred submit
+      // (idempotent lease, typed outcomes, provenance) with byte-identical raw fallback;
+      // hardened poll loop (dead-server watchdog — run-graph gains the 2026-07-30 fix
+      // the image runner already had). The runGraphFlow dep-injection shape is unchanged,
+      // so the flow tests keep driving synthetic postGraph/collect implementations.
+      postGraph: Object.assign(
+        async (g) => {
+          const { promptId } = await submitGraph({ api, graph: g, clientId: "run-graph", cli });
+          return { prompt_id: promptId };
+        },
+        { history: (pid) => pollHistoryShared(api, pid, cli) }),
       fetchToDir: async (f, dir) => {
-        const q = new URLSearchParams({ filename: f.filename, subfolder: f.subfolder, type: f.type });
-        const r = await fetch(`${api}/view?` + q); const buf = Buffer.from(await r.arrayBuffer());
+        const buf = await fetchView({ api, file: f });
         mkdirSync(dir, { recursive: true }); // standalone-mjs path: don't ENOENT on a fresh out-dir
         const p = join(dir, f.filename); writeFileSync(p, buf);
         const { width, height } = pngSize(buf);
@@ -185,16 +194,19 @@ async function main() {
   else console.log("WROTE", flags.result);
 }
 
-async function pollHistory(api, pid) {
+// pollHistoryShared: the shared hardened poll loop, returning the outputs map (the shape
+// runGraphFlow's collect expects). Terminal bookkeeping (authoritative timing + lease
+// release) runs through the CLI when one is resolved — warn-only, after outputs exist.
+async function pollHistoryShared(api, pid, cli) {
   const waitSec = Number(process.env.COMFY_WAIT_SEC || 1800);
-  for (let i = 0; i < Math.max(1, Math.ceil(waitSec / 2)); i++) {
-    await new Promise((r) => setTimeout(r, 2000));
-    let h; try { h = (await (await fetch(`${api}/history/${pid}`)).json())[pid]; } catch { continue; }
-    if (!h) continue;
-    if (h.status?.status_str === "error") throw new Error("comfy exec error " + JSON.stringify(h.status).slice(0, 300));
-    if (h.outputs && Object.keys(h.outputs).length) return h.outputs;
-  }
-  throw new Error("no outputs in time");
+  const h = await pollOutputs({
+    api, promptId: pid, waitSec,
+    isDone: (entry) => !!(entry.outputs && Object.keys(entry.outputs).length),
+    noOutputMsg: "no outputs in time",
+    onExecError: () => finalizeRun({ api, promptId: pid, cli }),
+  });
+  await finalizeRun({ api, promptId: pid, cli });
+  return h.outputs;
 }
 
 // Only run main() when invoked directly (not when imported by the test).
