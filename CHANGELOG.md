@@ -6,6 +6,111 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.57.0] - 2026-08-14
+
+TO-4 (plan 2026-08-07): `cut_middle_turns` — token-exact whole-message history compaction
+in the agent loop.
+
+### Added — the drop rung cuts whole middle messages on REAL token counts
+
+- **`internal/tokclient`** — the harness's real-tokenizer path: POST `/tokenize`
+  (llama-swap `/upstream/{model}/tokenize`, bare llama-server `/tokenize`) with
+  `with_pieces`, fail-open on any failure, piece accounting verified to reconstruct the
+  input byte-for-byte before any caller may cut on it. Built once here so the escalation
+  repacking work (TO-3) reuses the same path.
+- **`cut_middle_turns`** (`internal/agent/cutmiddle.go`): when the loop has a tokenizer,
+  the compaction ladder's whole-turn-drop rung is REPLACED by a token-exact middle cut —
+  each message sentinel-indexed by byte span in the serialized transcript, spans mapped to
+  real token positions via the pieces, and whole assistant+tool units dropped from the
+  middle so the head (protected preamble) and tail (recent state) always survive. A
+  message is never split: the mid-JSON tool-result truncation that breaks the next parse
+  on small local models is unrepresentable on this path. Pinned (H8) and signal-residue
+  units keep their existing drop exemptions.
+- Wired identically in all drive modes (CLI single/two-tier — each tier cuts with its own
+  served tokenizer — and the MCP `agent_run` front door).
+
+### Changed
+
+- The legacy estimate-driven oldest-first drop remains ONLY as the explicit fail-open
+  fallback for endpoints with no `/tokenize`; the failure is sticky per Loop (one failed
+  probe, no per-step network stalls). One truncation mechanism at a time, by explicit gate.
+- Exhausted-compaction telemetry follows the yardstick that measured the transcript: the
+  token-exact rung's REAL verdict when it ran (an under-counting estimate can no longer
+  hide a real forced-keep overflow, and a pessimistic estimate can no longer report a
+  verified-fitting request as exhausted on every step), the estimate otherwise. When the
+  token-exact rung measures the reactive-retry transcript as fitting, the pin-blind
+  `emergencyShrink` pass is skipped — it would destroy pinned bodies on evidence the real
+  tokenizer refutes.
+
+### Review hardening (adversarial round, 2026-08-14)
+
+- The sticky downgrade is OBSERVABLE: `Result.TokenizerPath` reports `token-exact` vs
+  `legacy (degraded: <why>)` with per-route failure detail (`tokclient` records why each
+  candidate route failed), `agent_run` returns `tokenizer_path`, the CLI prints a stderr
+  note. Fail-open, never fail-unobservable.
+- A tokenizer failure under an already-cancelled context does not trip the sticky
+  downgrade — a `--serve` client hang-up says nothing about the endpoint, and the Loop
+  (and its sticky bit) lives for the process in `--serve`/`--queue`.
+- `tokclient.Count` fails on a 200 JSON body without a `tokens` array instead of
+  returning a confident zero; token-accounting serialization includes tool-call ids.
+
+### Review hardening (round 2 — three-specialist pass, 2026-08-14)
+
+- **Tool-spec reservation (`specReserve`)**: the tool-spec block ships with every chat
+  request but no yardstick counted it — on a full `--allow-*` build it runs 4-6× the fixed
+  512-token margin, so the token-exact `fitReal` verdict could veto the `emergencyShrink`
+  last resort on a prompt the server rejects (the run died where it previously recovered).
+  Every budget now reserves the block's REAL tokenized cost (measured once per Loop via the
+  same tokenizer seam; conservative chars/3 estimate when no tokenizer answers; zero for
+  tool-less Loops — their arithmetic is byte-identical to before).
+- **Classified sticky downgrade**: a single transient failure (cold-start timeout, 503
+  mid-swap, reset) no longer degrades a healthy endpoint for the process life. Definitive
+  route absence (all candidates 404/405, classified by `tokclient.LastFailDefinitive`)
+  still downgrades immediately; transient failures take two consecutive misses, and a
+  success resets the streak.
+- **Input-scaled read cap**: the flat 8 MiB response cap silently truncated `with_pieces`
+  responses for large transcripts (~26 bytes/token on the wire), tripping the downgrade
+  with a reason blaming the server — deterministic self-disable in exactly the
+  long-transcript regime the feature targets. The cap now scales (`16×input + 1 MiB`).
+- **Garbage-200 route attribution**: a candidate answering 200 with a non-tokenize body
+  (interposing proxy) now counts as that candidate failing — URL-named in the reason — and
+  the fallback route actually runs instead of being masked.
+- **Two-tier telemetry**: `RunTwoTier` no longer drops the architect's verdicts — new
+  `Result.ArchTokenizerPath` on all three return paths (each tier degrades independently),
+  and both fallback paths now aggregate the architect's `CompactionsExhausted` too. The
+  CLI prints per-tier degrade notes.
+- **`--serve`/`--queue` visibility**: the modes where the sticky bit outlives a single run
+  previously surfaced it nowhere. Both now print a once-per-process transition note, and
+  every queue trace records the goal's `tokenizer_path`.
+- **Contract-check honesty**: a tokenizer whose pieces do not reconstruct the transcript
+  now trips the sticky downgrade with a recorded reason (previously a silent per-step
+  refusal while `TokenizerPath` kept claiming token-exact).
+- **Shared degrade prefix**: `agent.TokenizerDegradedPrefix` is the one contract between
+  the producer and every consumer that branches on degradation (CLI notes, queue traces) —
+  two independent string literals could drift and silently kill the operator note.
+- Verdict-yardstick tightening: the survivors' separator tokens are now counted in the
+  `fits` verdict (every asymmetry leans conservative). Docs qualify honestly that the
+  estimate still decides whether the ladder ENGAGES (the reactive retry is the net for the
+  under-count regime), and that `token-exact` means configured-and-not-degraded.
+- Dispositions recorded without code: `tokclient.Count` stays staged (TO-3 consumes it in
+  0.58.0 the same night); the post-`emergencyShrink` exhausted count may over-count in
+  estimate space (honest direction — never hides an overflow).
+
+### Review hardening (round 3, 2026-08-14)
+
+- Read cap multiplier corrected 16×→32×: llama.cpp's real `with_pieces` entry
+  (`{"id":N,"piece":…},`, ≤ ~27 bytes) exceeds 16× at the ~1 token/byte regime the cut
+  targets (CJK/base64/byte-fallback), so 16× re-opened the truncation self-disable it
+  claimed to close. The proving fixture now emits the real id-bearing entry shape and goes
+  red at 16×.
+- `specReserve` now tokenizes the WIRE serialization via `wireToolsJSON` — the same
+  producer `Chat` ships (`tools` array + `tool_choice`) — instead of a marshal of
+  `ToolSpec` itself, which used different keys and 34 fewer fixed bytes per tool
+  (under-counting on exactly the path advertised as exact).
+- The CLI degrade note now also prints on both error-exit paths (single and two-tier) —
+  the run that degraded and then died on a context overflow is where the note carries the
+  most diagnostic value.
+
 ## [0.56.0] - 2026-08-14
 
 Master-plan step-4 remainder: the ComfyUI submission/timing plumbing is re-expressed through the

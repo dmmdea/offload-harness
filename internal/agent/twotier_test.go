@@ -153,3 +153,57 @@ func TestRunTwoTierHappyPathNote(t *testing.T) {
 		t.Errorf("Fallback = %q, want %q (two-tier path ran)", res.Fallback, FallbackNone)
 	}
 }
+
+// The architect's tokenizer verdict must survive RunTwoTier on every return
+// path: each tier cuts with its own served tokenizer, so an architect-only
+// degrade (a misrouted --architect-model, say) was previously invisible — the
+// editor reported token-exact and the operator concluded both tiers were live
+// (review finding 2026-08-14, all three reviewers).
+func TestRunTwoTierSurfacesArchitectTokenizerDegrade(t *testing.T) {
+	archClient := &singleShotClient{output: "PLAN: edit foo.go per the objective, then run the tests."}
+	editClient := &singleShotClient{output: "done"}
+	architect := loopWith(archClient).WithTokenizer(&failTok{})
+	editor := loopWith(editClient).WithTokenizer(&runeTok{})
+	// Trip the architect's sticky wrapper (two transient strikes).
+	architect.tok.Pieces(context.Background(), "x")
+	architect.tok.Pieces(context.Background(), "x")
+
+	res, err := RunTwoTier(context.Background(), "objective", architect, editor)
+	if err != nil {
+		t.Fatalf("RunTwoTier: %v", err)
+	}
+	if !strings.HasPrefix(res.ArchTokenizerPath, TokenizerDegradedPrefix) {
+		t.Fatalf("ArchTokenizerPath = %q, want the architect's degraded verdict surfaced", res.ArchTokenizerPath)
+	}
+	if res.TokenizerPath != "token-exact" {
+		t.Fatalf("TokenizerPath = %q, want the EDITOR's own healthy verdict — the tiers must not share one field", res.TokenizerPath)
+	}
+}
+
+// Both fallback paths must aggregate the architect's telemetry too — they
+// previously dropped ArchTokenizerPath AND the architect's CompactionsExhausted
+// (review finding 2026-08-14).
+func TestRunTwoTierFallbacksCarryArchitectTelemetry(t *testing.T) {
+	// Architect ERRORS: its Result still carries its tokenizer verdict.
+	archClient := &singleShotClient{err: errors.New("boom: planner unreachable")}
+	editClient := &singleShotClient{output: "done"}
+	architect := loopWith(archClient).WithTokenizer(&runeTok{})
+	res, err := RunTwoTier(context.Background(), "objective", architect, loopWith(editClient))
+	if err != nil {
+		t.Fatalf("RunTwoTier falls back on architect error: %v", err)
+	}
+	if res.ArchTokenizerPath != "token-exact" {
+		t.Fatalf("architect-error fallback: ArchTokenizerPath = %q, want the architect's verdict carried", res.ArchTokenizerPath)
+	}
+
+	// Degenerate plan: same carry.
+	archClient2 := &singleShotClient{output: " no "}
+	architect2 := loopWith(archClient2).WithTokenizer(&runeTok{})
+	res2, err := RunTwoTier(context.Background(), "objective", architect2, loopWith(&singleShotClient{output: "done"}))
+	if err != nil {
+		t.Fatalf("RunTwoTier falls back on degenerate plan: %v", err)
+	}
+	if res2.ArchTokenizerPath != "token-exact" {
+		t.Fatalf("degenerate-plan fallback: ArchTokenizerPath = %q, want the architect's verdict carried", res2.ArchTokenizerPath)
+	}
+}

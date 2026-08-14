@@ -115,6 +115,13 @@ func serveOpenAI(listen string, loop *agent.Loop, modelID string) error {
 		}
 
 		res, err := loop.Run(r.Context(), goal)
+		// The sticky downgrade outlives any single request here (--serve keeps
+		// ONE Loop for the process), and this mode previously surfaced it
+		// nowhere (review finding 2026-08-14): every request after a mid-run
+		// degrade silently ran the legacy estimate rung. The OpenAI response
+		// shape is a wire contract we do not extend, so the note goes to the
+		// server's own stderr — once, at the transition.
+		noteTokenizerDegradeOnce(res.TokenizerPath)
 		content := res.Output
 		if err != nil {
 			content = "agent error: " + err.Error()

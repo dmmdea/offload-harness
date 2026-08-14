@@ -75,7 +75,7 @@ func TestCompactUnderBudgetIsNoOp(t *testing.T) {
 	}
 	// Give a budget far above the estimate so nothing is touched. Preamble =
 	// system + objective = 2.
-	out := compact(msgs, 100000, 2, 2, compactOpts{})
+	out := compact(context.Background(), msgs, 100000, 2, 2, compactOpts{})
 	if len(out) != len(msgs) {
 		t.Fatalf("no-op compaction changed message count: %d -> %d", len(msgs), len(out))
 	}
@@ -102,7 +102,7 @@ func TestCompactElidesOldestToolBodyKeepsSystemObjectiveRecent(t *testing.T) {
 	// Budget that the full transcript exceeds but that fits once the oldest
 	// tool body is elided. Keep the most recent 2 turns full.
 	budget := estimateTokens(msgs) - 800
-	out := compact(msgs, budget, 2, 2, compactOpts{}) // preamble = system + objective = 2
+	out := compact(context.Background(), msgs, budget, 2, 2, compactOpts{}) // preamble = system + objective = 2
 
 	// system + objective preserved verbatim.
 	if out[0].Role != "system" || out[0].Content != "SYSTEM-PROMPT" {
@@ -156,7 +156,7 @@ func TestCompactDropsMatchedOlderTurnsAsUnits(t *testing.T) {
 	// alone brings the estimate to ~85 tokens), the estimate must still exceed
 	// this so the assistant framing of older turns is dropped to fit. keepRecent=1.
 	budget := 40
-	out := compact(msgs, budget, 1, 2, compactOpts{}) // preamble = system + objective = 2
+	out := compact(context.Background(), msgs, budget, 1, 2, compactOpts{}) // preamble = system + objective = 2
 
 	// system + objective always survive.
 	var sawSys, sawObj bool
@@ -336,6 +336,90 @@ func TestLoopReactiveRetryGivesUpAfterOne(t *testing.T) {
 	}
 }
 
+// --- reactive retry × token-exact rung (review round 2, 2026-08-14) ---
+
+// When the token-exact cut MEASURES the halved retry transcript as fitting
+// (fitReal), the pin-blind emergencyShrink must be skipped: the huge newest
+// tool body — which keepRecent protects and the estimate still calls
+// over-budget — reaches the retry byte-intact, and the verified-fitting step
+// is NOT counted exhausted. This is the only place new code gates a
+// destructive last resort on the new verdict (pr-test-analyzer gap 1).
+func TestLoopReactiveRetryFitRealSkipsEmergencyShrink(t *testing.T) {
+	huge := strings.Repeat("all work and no play makes a very long tool result line\n", 800)
+	client := &errThenScriptClient{
+		errOnCall: 1, // the request AFTER the tool turn overflows
+		errText:   "chat 400: the request exceeds the available context size",
+	}
+	client.script = []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "read_file", `{}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "done after retry"}, FinishReason: "stop"},
+	}
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) { return huge, nil }}}
+	// sparseTok: ~100 bytes/token, so the REAL count of the huge body is ~450
+	// tokens — far inside the halved real budget — while the chars/4 estimate
+	// (~11k) screams overflow. Exactly the estimate-refuted regime.
+	loop := NewLoop(client, tools, 5).WithSystem("sys").WithContextTokens(4096).WithMaxTokens(1024).
+		WithToolResultCap(1 << 20).WithTokenizer(sparseTok{})
+	res, err := loop.Run(context.Background(), "read the readme")
+	if err != nil {
+		t.Fatalf("Run should recover via the reactive retry, got: %v", err)
+	}
+	if res.Output != "done after retry" {
+		t.Fatalf("output = %q, want the post-retry completion", res.Output)
+	}
+	// The retried request (the LAST call the client saw) must carry the tool
+	// body byte-intact: emergencyShrink running would have truncated it.
+	last := client.seen[len(client.seen)-1]
+	intact := false
+	for _, m := range last {
+		if m.Role == "tool" && m.Content == huge {
+			intact = true
+		}
+	}
+	if !intact {
+		t.Fatal("the huge tool body did not survive byte-intact — emergencyShrink ran despite a fitReal verdict (or the cut dropped a keepRecent message)")
+	}
+	if res.CompactionsExhausted != 0 {
+		t.Fatalf("CompactionsExhausted = %d, want 0: the tokenizer VERIFIED the retry fits — counting it exhausted is the estimate lying", res.CompactionsExhausted)
+	}
+}
+
+// The inverse direction: when the token-exact cut measures the halved retry
+// transcript as still over budget (overReal — forced keeps exceed it), the
+// exhaustion is counted and emergencyShrink still runs as the last resort.
+func TestLoopReactiveRetryOverRealCountsExhaustedAndShrinks(t *testing.T) {
+	huge := strings.Repeat("dense", 4000) // 20k bytes
+	client := &errThenScriptClient{
+		errOnCall: 1,
+		errText:   "chat 400: the request exceeds the available context size",
+	}
+	client.script = []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "read_file", `{}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "done after retry"}, FinishReason: "stop"},
+	}
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) { return huge, nil }}}
+	// runeTok: 1 token/byte — the REAL count (~20k) dwarfs the halved real
+	// budget, and the huge body sits inside keepRecent (forced), so the cut
+	// must report overReal.
+	loop := NewLoop(client, tools, 5).WithSystem("sys").WithContextTokens(4096).WithMaxTokens(1024).
+		WithToolResultCap(1 << 20).WithTokenizer(&runeTok{})
+	res, err := loop.Run(context.Background(), "read the readme")
+	if err != nil {
+		t.Fatalf("Run should still recover (emergencyShrink is the last resort), got: %v", err)
+	}
+	if res.CompactionsExhausted == 0 {
+		t.Fatal("CompactionsExhausted = 0, want >0: forced keeps exceeded the REAL halved budget and the overflow must be counted, never silent")
+	}
+	// emergencyShrink DID run (rv != fitReal): the retried request's tool body
+	// must be smaller than the original.
+	last := client.seen[len(client.seen)-1]
+	for _, m := range last {
+		if m.Role == "tool" && m.Content == huge {
+			t.Fatal("the over-real retry re-sent the huge body untouched — emergencyShrink was skipped on the wrong verdict")
+		}
+	}
+}
+
 // --- emergency shrink (reactive-overflow last resort) ---
 
 // TestEmergencyShrinkNewestHugeTurn pins the exact live failure (flip-decision
@@ -354,7 +438,7 @@ func TestEmergencyShrinkNewestHugeTurn(t *testing.T) {
 	budget := 1000
 	// Precondition: this is the case compact() cannot help (everything is
 	// protected by preamble + keepRecent) — pin it so the test keeps meaning.
-	if compacted := compact(msgs, budget, 2, 2, compactOpts{}); estimateTokens(compacted) <= budget {
+	if compacted := compact(context.Background(), msgs, budget, 2, 2, compactOpts{}); estimateTokens(compacted) <= budget {
 		t.Fatal("fixture invalid: compact() alone fit the budget, the emergency case never arises")
 	}
 	out := emergencyShrink(msgs, budget, 2)
@@ -525,7 +609,7 @@ func skTranscript() []Msg {
 func TestCompactSkeletonizesBeforeMarkerElision(t *testing.T) {
 	msgs := skTranscript()
 	budget := estimateTokens(msgs) - 1200 // fits once the two old bodies shrink to skeletons
-	out := compact(msgs, budget, 2, 2, compactOpts{Skeleton: true})
+	out := compact(context.Background(), msgs, budget, 2, 2, compactOpts{Skeleton: true})
 
 	var c1, c3 Msg
 	for _, m := range out {
@@ -564,7 +648,7 @@ func TestCompactSkeletonFallsThroughToMarkers(t *testing.T) {
 	msgs := skTranscript()
 	// A budget far below what skeletons can reach: forces marker elision (and
 	// possibly drops) after the skeleton rung.
-	out := compact(msgs, 400, 1, 2, compactOpts{Skeleton: true})
+	out := compact(context.Background(), msgs, 400, 1, 2, compactOpts{Skeleton: true})
 	if estimateTokens(out) > 400 {
 		t.Errorf("ladder failed to reach a tight budget: %d > 400", estimateTokens(out))
 	}
@@ -583,7 +667,7 @@ func TestCompactSkeletonFallsThroughToMarkers(t *testing.T) {
 func TestCompactSkeletonOffPinnedLadderBytes(t *testing.T) {
 	msgs := skTranscript()
 	budget := estimateTokens(msgs) - 1200
-	out := compact(msgs, budget, 2, 2, compactOpts{})
+	out := compact(context.Background(), msgs, budget, 2, 2, compactOpts{})
 
 	if len(out) != len(msgs) {
 		t.Fatalf("off-path dropped/added messages: %d -> %d (this budget only needs body elision)", len(msgs), len(out))
@@ -611,7 +695,7 @@ func TestCompactSkeletonOffPinnedLadderBytes(t *testing.T) {
 func TestCompactSkeletonFallThroughMarkerReportsOriginalSize(t *testing.T) {
 	msgs := skTranscript()
 	origLen := len(msgs[3].Content) // c1's verbose body
-	out := compact(msgs, 400, 1, 2, compactOpts{Skeleton: true})
+	out := compact(context.Background(), msgs, 400, 1, 2, compactOpts{Skeleton: true})
 	for _, m := range out {
 		if m.Role == "tool" && m.ToolCallID == "c1" && isElided(m.Content) {
 			// The marker's FIRST line must disclose the ORIGINAL size; the
@@ -654,7 +738,7 @@ func TestCompactGCFRungRunsBeforeSkeleton(t *testing.T) {
 		{Role: "assistant", Content: "thinking"},
 	}
 	budget := estimateTokens(msgs) - 200 // GCF's ~30%+ on the JSON body more than covers this
-	out := compact(msgs, budget, 2, 2, compactOpts{GCF: true, Skeleton: true})
+	out := compact(context.Background(), msgs, budget, 2, 2, compactOpts{GCF: true, Skeleton: true})
 
 	var c1, c2 Msg
 	for _, m := range out {
@@ -685,7 +769,7 @@ func TestCompactGCFRungRunsBeforeSkeleton(t *testing.T) {
 func TestCompactGCFIneligibleFallsToSkeleton(t *testing.T) {
 	msgs := skTranscript()
 	budget := estimateTokens(msgs) - 1200
-	out := compact(msgs, budget, 2, 2, compactOpts{GCF: true, Skeleton: true})
+	out := compact(context.Background(), msgs, budget, 2, 2, compactOpts{GCF: true, Skeleton: true})
 	for _, m := range out {
 		if m.Role == "tool" && m.ToolCallID == "c1" {
 			if !isSkeletonized(m.Content) {
