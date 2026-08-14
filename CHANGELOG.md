@@ -23,13 +23,16 @@ the only per-call gate above the capability flags on an unattended run. 0.48.0 w
 that state (`UNGATED` note); warning an absent operator is exactly the mechanism the
 measurement showed does not work.
 
-- **`internal/agent/unattended-rules.json`** — a 20-rule default table, embedded in the binary
+- **`internal/agent/unattended-rules.json`** — a 25-rule default table, embedded in the binary
   (`unattendedrules.go`) and loaded by `agent.Build` for every UNATTENDED run that passes no
   `--rules` argument. Every `delete` queues for operator review (`delete *` → ask), behind hard
-  denies for append-only evidence (`*.jsonl`), model weights (`*.gguf`), CI workflows
-  (`.github/workflows/*`) and lockfiles; config and dependency-manifest writes queue. Ordinary
-  source writes stay governed by the posture flags — a default that queued every source edit
-  would only push operators to opt out.
+  write-AND-delete denies for append-only evidence (`*.jsonl`), model weights
+  (`*.gguf`/`*.safetensors`) and worktree-root CI workflows (`.github/workflows/*`);
+  lockfile/`go.sum` hand-edits deny (their deletes queue like any other delete); config and
+  dependency-manifest writes queue. Ordinary source writes stay governed by the posture flags —
+  a default that queued every source edit would only push operators to opt out. The table gates
+  the write/delete tools only; file operations inside the shell/run cage are the OS cage's
+  jurisdiction, and the build note says so.
 - **Escape hatches, explicit only:** `--rules <path>` REPLACES the default with the operator's
   own table (replacement is what lets an operator loosen the delete catch-all — rules
   themselves only tighten); `--rules off` (`agent.RulesOff`) restores the pre-0.55.0 ungated
@@ -69,6 +72,34 @@ probe (120 difficulty-graded items) or on 1487 production ledger rows (0 rows un
 - The escalation-reason prerequisite for verifying this change post-hoc (`esc_source`, the
   closed seven-value set on effect/escalation ledger rows) already shipped in 0.48.0 (PR #94)
   and is verified live; no further ledger change was needed.
+- **Upgrading an existing install:** `Load` overlays your config file onto the defaults, so a
+  `config.json` written before 0.55.0 pins the dead constants (`0.45`/`0.35`) and keeps both
+  gates inert. Remove the two keys (or set the calibrated values) to pick up the fix. The
+  harness now warns at load time when either threshold sits at/below the floor of its signal's
+  observed distribution — a gate that structurally cannot fire should never again be silent.
+
+### Fixed — adversarial-review round on the above (same PR)
+
+- The ask-queue path is now defaulted (`~/.local-offload/agent-asks.jsonl`) for EVERY
+  `local-agent` run holding a mutating capability, not just `--queue` mode — the default table
+  queues deletes by design, and a run without a queue denied the calls with nowhere to record
+  them.
+- `Policy.Decide` no longer claims "denied & queued" when nothing was queued: with no ask queue
+  attached (or a failed queue write) the reason now says "NOT queued". The deny outcome was
+  always safe; the record now tells the truth too.
+- A matching Ask rule is recorded as the fired rule even when classify already answered Ask
+  (the default posture, where an Ask rule is not strictly stricter) — previously the rule's
+  severity/glob/reason never reached the ask queue in exactly the most common configuration. A
+  classify Deny keeps its own more precise reason.
+- `--rules off` + `--allow-write` alone now raises the UNGATED note (the default table gates
+  write-new paths too, so opting out with write-only capability is a real downgrade); the
+  ACTIVE note fires only when `--allow-write` grants the tools the table can actually see.
+- `examples/agent-rules.json` had its `delete *` ask catch-all FIRST, which shadowed the
+  table's three critical delete denies into dead code (first match wins). The catch-all now
+  sits last, with the ordering rule documented in the rule itself; the embedded default table's
+  loader test now pins deny-above-catch-all ordering structurally.
+- Two-tier mode now prints the architect build's notes too (previously silently dropped).
+- Stale 0.45/0.35 references in pipeline test comments updated.
 
 ## [0.54.2] - 2026-08-13
 

@@ -10,17 +10,23 @@ import (
 
 // The embedded default table must load and stay tighten-only — it takes every
 // unattended Build down with it if it cannot (fail closed, same contract the
-// shipped example table is held to).
+// shipped example table is held to). The per-rule assertions run against the
+// RAW embedded JSON, not UnattendedRules() — that function already validates,
+// so checking its output would restate its own guarantees and could never fail
+// (review finding 2026-08-14).
 func TestUnattendedRulesTableLoads(t *testing.T) {
-	rules, err := UnattendedRules()
-	if err != nil {
+	if _, err := UnattendedRules(); err != nil {
 		t.Fatalf("embedded default table failed to load: %v", err)
+	}
+	var rules []Rule
+	if err := json.Unmarshal(unattendedRulesJSON, &rules); err != nil {
+		t.Fatalf("raw embedded JSON unparsable: %v", err)
 	}
 	if len(rules) == 0 {
 		t.Fatal("embedded default table is empty — it would provide no gate at all")
 	}
-	var hasDeleteCatchAll bool
-	for _, r := range rules {
+	var catchAllIdx = -1
+	for i, r := range rules {
 		if err := r.validate(); err != nil {
 			t.Errorf("rule %q invalid: %v", r.Glob, err)
 		}
@@ -31,11 +37,19 @@ func TestUnattendedRulesTableLoads(t *testing.T) {
 			t.Errorf("rule %q has no reason; the audit trail would be unreadable", r.Glob)
 		}
 		if r.Kind == ActDelete && r.Glob == "*" {
-			hasDeleteCatchAll = true
+			catchAllIdx = i
 		}
 	}
-	if !hasDeleteCatchAll {
-		t.Error("no `delete *` catch-all — the measured unparked destructive class would sail through")
+	if catchAllIdx < 0 {
+		t.Fatal("no `delete *` catch-all — the measured unparked destructive class would sail through")
+	}
+	// First match wins: every deny in the table must sit ABOVE the ask
+	// catch-all or it is dead code (the shipped example table had exactly this
+	// bug — its catch-all sat first and shadowed three critical denies).
+	for i, r := range rules {
+		if r.Decision == Deny && r.Kind == ActDelete && i > catchAllIdx {
+			t.Errorf("delete deny %q sits BELOW the `delete *` catch-all (index %d > %d) — it can never fire", r.Glob, i, catchAllIdx)
+		}
 	}
 }
 
@@ -106,21 +120,110 @@ func TestDefaultRulesGateConfigNotOrdinarySource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
+	// Effective decision is Deny for BOTH a deny rule and a queued ask on an
+	// unattended run, so pinning `Deny` alone cannot tell them apart — 16 of
+	// 20 rules were mutation-unpinned that way (review finding 2026-08-14).
+	// The reason string separates them: a hard deny carries the severity
+	// marker and NO "denied;"/"denied &" prefix; a queued ask carries both.
 	cases := []struct {
-		name string
-		a    Action
-		want Decision
+		name   string
+		a      Action
+		want   Decision
+		reason string // required substring of the reason ("" = no constraint)
+		queued bool   // true: must be an unattended-queued ask, not a hard deny
 	}{
-		{"config overwrite queues", Action{Kind: ActWrite, Path: "config.json", Exists: true}, Deny},
-		{"lockfile write denies", Action{Kind: ActWrite, Path: "package-lock.json", Exists: true}, Deny},
-		{"workflow write denies", Action{Kind: ActWrite, Path: ".github/workflows/ci.yml", Exists: false}, Deny},
-		{"new source file allowed", Action{Kind: ActWrite, Path: "src/fresh.py", Exists: false}, Allow},
-		{"source overwrite allowed by posture", Action{Kind: ActWrite, Path: "src/app.py", Exists: true}, Allow},
+		{"workflow write hard-denies", Action{Kind: ActWrite, Path: ".github/workflows/ci.yml", Exists: false}, Deny, "[critical]", false},
+		{"workflow delete hard-denies", Action{Kind: ActDelete, Path: ".github/workflows/ci.yml", Exists: true}, Deny, "[critical]", false},
+		{"weights write hard-denies", Action{Kind: ActWrite, Path: "models/m.gguf", Exists: true}, Deny, "[critical]", false},
+		{"weights delete hard-denies", Action{Kind: ActDelete, Path: "models/m.gguf", Exists: true}, Deny, "[critical]", false},
+		{"safetensors write hard-denies", Action{Kind: ActWrite, Path: "models/m.safetensors", Exists: true}, Deny, "[critical]", false},
+		{"evidence write hard-denies", Action{Kind: ActWrite, Path: "runs/ledger.jsonl", Exists: true}, Deny, "[critical]", false},
+		{"go.sum write hard-denies", Action{Kind: ActWrite, Path: "go.sum", Exists: true}, Deny, "[high]", false},
+		{"lockfile write hard-denies", Action{Kind: ActWrite, Path: "package-lock.json", Exists: true}, Deny, "[high]", false},
+		{"pnpm lock write hard-denies", Action{Kind: ActWrite, Path: "pnpm-lock.yaml", Exists: true}, Deny, "[high]", false},
+		{"go.mod write queues", Action{Kind: ActWrite, Path: "go.mod", Exists: true}, Deny, "[high]", true},
+		{"package.json write queues", Action{Kind: ActWrite, Path: "package.json", Exists: true}, Deny, "[high]", true},
+		{"requirements.txt write queues", Action{Kind: ActWrite, Path: "requirements.txt", Exists: true}, Deny, "[high]", true},
+		{"Gemfile write queues (case-folded)", Action{Kind: ActWrite, Path: "Gemfile", Exists: true}, Deny, "[high]", true},
+		{"config overwrite queues", Action{Kind: ActWrite, Path: "config.json", Exists: true}, Deny, "[high]", true},
+		{"settings.json write queues", Action{Kind: ActWrite, Path: ".vscode/settings.json", Exists: true}, Deny, "[high]", true},
+		{"yaml write queues", Action{Kind: ActWrite, Path: "compose.yaml", Exists: false}, Deny, "[medium]", true},
+		{"toml write queues", Action{Kind: ActWrite, Path: "app.toml", Exists: false}, Deny, "[medium]", true},
+		{"new source file allowed", Action{Kind: ActWrite, Path: "src/fresh.py", Exists: false}, Allow, "", false},
+		{"source overwrite allowed by posture", Action{Kind: ActWrite, Path: "src/app.py", Exists: true}, Allow, "", false},
+		{"makefile allowed", Action{Kind: ActWrite, Path: "Makefile", Exists: false}, Allow, "", false},
 	}
 	for _, tc := range cases {
-		if d, reason := res.Policy.Decide(tc.a); d != tc.want {
+		d, reason := res.Policy.Decide(tc.a)
+		if d != tc.want {
 			t.Errorf("%s: got %q (%s), want %q", tc.name, d, reason, tc.want)
+			continue
 		}
+		if tc.reason != "" && !strings.Contains(reason, tc.reason) {
+			t.Errorf("%s: reason %q missing severity marker %q", tc.name, reason, tc.reason)
+		}
+		if tc.want == Deny {
+			if isQueuedAsk := strings.Contains(reason, "denied"); isQueuedAsk != tc.queued {
+				t.Errorf("%s: queued-ask=%v (reason %q), want queued-ask=%v", tc.name, isQueuedAsk, reason, tc.queued)
+			}
+		}
+	}
+}
+
+// The fired rule's severity/glob must reach the ask queue even at the DEFAULT
+// posture (no --allow-delete), where classify already answers Ask and an Ask
+// rule is not strictly stricter — the composition previously dropped the rule
+// there, losing exactly the fields the morning review sorts by (review finding
+// 2026-08-14).
+func TestAskRuleSeverityReachesQueueAtDefaultPosture(t *testing.T) {
+	askQ := filepath.Join(t.TempDir(), "asks.jsonl")
+	res, err := Build(BuildConfig{
+		PlannerBase: "http://127.0.0.1:1", Model: "m", MaxSteps: 1,
+		ReadRoot: t.TempDir(), Unattended: true,
+		AllowWrite:   true, // no AllowDelete: classify's own Ask path
+		AskQueuePath: askQ,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if d, reason := res.Policy.Decide(Action{Kind: ActDelete, Path: "src/notify.py", Exists: true}); d != Deny || !strings.Contains(reason, "denied & queued") {
+		t.Fatalf("default-posture delete = %q (%s), want deny-and-queue", d, reason)
+	}
+	b, rerr := os.ReadFile(askQ)
+	if rerr != nil {
+		t.Fatalf("ask queue not written: %v", rerr)
+	}
+	var entry struct {
+		Severity string `json:"severity"`
+		Rule     string `json:"rule"`
+		Reason   string `json:"reason"`
+	}
+	if jerr := json.Unmarshal([]byte(strings.SplitN(strings.TrimSpace(string(b)), "\n", 2)[0]), &entry); jerr != nil {
+		t.Fatalf("ask queue line unparsable: %v (%q)", jerr, string(b))
+	}
+	if entry.Rule != "*" || entry.Severity != string(SevHigh) {
+		t.Fatalf("queued entry lost the fired rule at default posture: %+v", entry)
+	}
+}
+
+// With no ask queue attached the deny must stand AND the reason must say the
+// truth — "NOT queued" — instead of pointing the morning review at a queue
+// that does not exist (review finding 2026-08-14).
+func TestNoQueueReasonTellsTheTruth(t *testing.T) {
+	res, err := Build(BuildConfig{
+		PlannerBase: "http://127.0.0.1:1", Model: "m", MaxSteps: 1,
+		ReadRoot: t.TempDir(), Unattended: true,
+		AllowWrite: true, AllowDelete: true, // no AskQueuePath
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	d, reason := res.Policy.Decide(Action{Kind: ActDelete, Path: "src/x.py", Exists: true})
+	if d != Deny {
+		t.Fatalf("delete without a queue = %q, want deny", d)
+	}
+	if !strings.Contains(reason, "NOT queued") || strings.Contains(reason, "denied & queued") {
+		t.Fatalf("reason must state nothing was queued; got %q", reason)
 	}
 }
 
@@ -147,6 +250,30 @@ func TestRulesOffEscapeHatchIsUngatedAndAnnounced(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no UNGATED note on an explicit --rules off destructive run; notes=%v", res.Notes)
+	}
+
+	// Write-only is NOT benign under --rules off: the default table would have
+	// hard-denied new CI-workflow files and queued config writes, so opting
+	// out with just --allow-write is a real downgrade and must be announced
+	// too (review finding 2026-08-14 — the note previously keyed only on
+	// delete/overwrite/shell/github).
+	res, err = Build(BuildConfig{
+		PlannerBase: "http://127.0.0.1:1", Model: "m", MaxSteps: 1,
+		ReadRoot: t.TempDir(), Unattended: true,
+		AllowWrite: true,
+		RulesPath:  RulesOff,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	found = false
+	for _, n := range res.Notes {
+		if strings.Contains(n, "UNGATED") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no UNGATED note on a write-only --rules off run; notes=%v", res.Notes)
 	}
 }
 

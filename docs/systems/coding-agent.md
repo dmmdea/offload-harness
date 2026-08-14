@@ -71,9 +71,12 @@ severity; severity sorts the morning review, it never changes the decision.
 **Since 0.55.0, an UNATTENDED run loads a built-in default table when `--rules` is empty**
 (`unattendedrules.go`, embedded from
 [`internal/agent/unattended-rules.json`](../../internal/agent/unattended-rules.json)): every delete
-queues for review behind hard denies for evidence (`*.jsonl`), weights (`*.gguf`), CI workflows and
-lockfiles, and config/dependency-manifest writes queue — while ordinary source writes stay governed
-by the posture flags, so the agent can still do the work it was granted. `--rules <path>` REPLACES
+queues for review behind hard denies (write AND delete) for evidence (`*.jsonl`), weights
+(`*.gguf`/`*.safetensors`) and worktree-root CI workflows; lockfile/`go.sum` hand-edits hard-deny
+(their deletes queue like any other delete); config/dependency-manifest writes queue — while
+ordinary source writes stay governed by the posture flags, so the agent can still do the work it
+was granted. The table gates only the write/delete tools (`ActWrite`/`ActDelete`) — file
+operations inside the shell/run cage are the OS cage's jurisdiction. `--rules <path>` REPLACES
 the default with the operator's own table (replacement, not overlay, is what lets an operator loosen
 the delete catch-all — rules themselves only tighten), and `--rules off` is the explicit ungated
 escape hatch. On an ATTENDED run with `--rules` empty no table loads: ask resolves to a human
@@ -82,11 +85,14 @@ secret-material floor, which every broker carries unconditionally (`policy.go`);
 ever *adds* tightening on top of that floor, and the floor is no substitute for a table, because it
 matches secret-material globs and nothing else.
 [`examples/agent-rules.json`](../../examples/agent-rules.json)
-is the shipped starter table — 20 rules: `delete *` → ask (high); source overwrite
+is the shipped starter table for operator-authored rules — 20 rules: source overwrite
 `*.py`/`*.go`/`*.ts`/`*.js`/`*.mjs` → ask; `go.mod`, `package.json`, `config.json`, `*.yaml`,
 `*.yml` → ask; `go.sum`, `*.lock`, `package-lock.json` → deny; `*.gguf` → deny on **both** write and
 delete; `.github/workflows/*` → deny on **both** write and delete (critical); `*.jsonl` → deny on
-**delete only** (there is no write rule for it); `fetch *` → ask.
+**delete only** (there is no write rule for it); `fetch *` → ask; and `delete *` → ask (high),
+deliberately LAST — first match wins, so a catch-all placed above the critical denies would shadow
+them into dead code (that exact ordering bug shipped in this file until 0.55.0). It trades the
+default table's wider config/manifest coverage for source-overwrite and fetch asks.
 
 **Effect ledger.** Every tool call is recorded as an `EffectRecord` (`effects.go`) — step, tool,
 status, and the why for non-committed statuses. Four statuses, deliberately only four:
@@ -133,11 +139,14 @@ globs only — it would not have stopped any of the 81), the broker's unconditio
 ([invariant 3](#invariants-and-assumptions)), and `os.Root` worktree confinement (invariant 2).
 
 **The `UNGATED` build note.** `Build` appends an operator-visible note when an unattended run is
-granted destructive capability with the rule table explicitly disabled. The trigger is exactly
-`Unattended` **and** at least one of `--allow-delete` / `--allow-overwrite` / `--allow-shell` /
-`--allow-github` **and** `--rules off` (`builder.go`) — `--allow-write` or `--allow-run` alone does
-**not** trigger it, and an empty `--rules` no longer can (the default table loads instead, with its
-own `ACTIVE` note). It is a **note, never an error**. It rides on `built.Notes` and the CLI prints
+granted mutating capability with the rule table explicitly disabled. The trigger is exactly
+`Unattended` **and** at least one of `--allow-write` / `--allow-delete` / `--allow-overwrite` /
+`--allow-shell` / `--allow-github` **and** `--rules off` (`builder.go`) — `--allow-write` counts
+because the default table gates write-new paths too (workflow denies, config asks), so opting out
+with write-only capability is a real downgrade; `--allow-run` alone does **not** trigger it (the
+table cannot gate cage execution), and an empty `--rules` no longer can (the default table loads
+instead, with its own `ACTIVE` note whenever `--allow-write` is granted). It is a **note, never an
+error**. It rides on `built.Notes` and the CLI prints
 it to stderr (`cmd/local-agent/main.go`, and again for the two-tier editor build). **Scope:** this
 is the CLI/queue path — the path that grants `--allow-*` and sets unattended. The MCP `agent_run`
 front door passes no write/delete/shell/fetch capability, so it never trips the condition and is

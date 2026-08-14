@@ -456,15 +456,20 @@ gates** — the other two report:
 
   **With the flag empty, an unattended run loads a built-in default table** (0.55.0; embedded in
   the binary from `internal/agent/unattended-rules.json`, so no path and no installer step): every
-  `delete` queues for your review, behind hard denies for evidence files (`*.jsonl`), model
-  weights (`*.gguf`), CI workflows and lockfiles; config and dependency-manifest writes
-  (`config.json`, `settings.json`, `go.mod`, `package.json`, `*.yaml`, `*.toml`, …) queue too.
+  `delete` queues for your review, behind hard denies (write AND delete) for evidence files
+  (`*.jsonl`), model weights (`*.gguf`/`*.safetensors`) and worktree-root CI workflows; lockfile
+  and `go.sum` **hand-edits** hard-deny (lockfile *deletes* queue like any other delete); config
+  and dependency-manifest writes (`config.json`, `settings.json`, `go.mod`, `package.json`,
+  `requirements.txt`, `*.yaml`, `*.toml`, …) queue too — note this includes **creating** a new
+  config file, so a task like "scaffold a compose file" produces a queued ask rather than a file.
   Ordinary source writes stay governed by your `--allow-*` posture flags, so the agent can still
-  do the work you granted. Two explicit outs: `--rules <path>` **replaces** the default with your
-  own table (replacement is what lets you loosen the delete catch-all — rules themselves only
-  tighten), and `--rules off` runs ungated exactly as before 0.55.0. For a fuller table to start
-  from, use `examples/agent-rules.json` — 20 rules that additionally queue source overwrites
-  (`*.py`/`*.go`/`*.ts`/`*.js`/`*.mjs` → ask) and every fetch. It is a **repo file that no
+  do the work you granted, and the table only sees the write/delete tools — file operations run
+  *inside* the shell/run cage are governed by the OS cage, not by rules. Two explicit outs:
+  `--rules <path>` **replaces** the default with your own table (replacement is what lets you
+  loosen the delete catch-all — rules themselves only tighten), and `--rules off` runs ungated
+  exactly as before 0.55.0. An alternative starter is `examples/agent-rules.json` — it
+  additionally queues source overwrites (`*.py`/`*.go`/`*.ts`/`*.js`/`*.mjs` → ask) and every
+  fetch, but covers fewer config/manifest globs than the default. It is a **repo file that no
   installer packages**: from a repo checkout, `local-agent --rules examples/agent-rules.json …`;
   from an installed binary (`$OFFLOAD_HOME\harness\local-agent.exe`), copy the file somewhere
   durable — e.g. `~/.local-offload/agent-rules.json` — and pass that path.
@@ -490,10 +495,11 @@ gates** — the other two report:
   **The `UNGATED` note — when you will see it, and when you will not.** It is not a general startup
   banner. It is appended by the agent builder and printed to stderr by the CLI
   (`[local-agent] UNGATED: …`) on exactly one condition: the run is **unattended**, holds at least
-  one of `--allow-delete` / `--allow-overwrite` / `--allow-shell` / `--allow-github`, **and** you
-  passed `--rules off`. `--allow-write` or `--allow-run` alone does not raise it, an attended run
-  never raises it, and an empty `--rules` cannot raise it any more (the default table loads
-  instead, announcing itself with a `default unattended rule table ACTIVE` note). It is a
+  one of `--allow-write` / `--allow-delete` / `--allow-overwrite` / `--allow-shell` /
+  `--allow-github`, **and** you passed `--rules off`. `--allow-run` alone does not raise it (the
+  table cannot gate cage execution anyway), an attended run never raises it, and an empty
+  `--rules` cannot raise it any more (the default table loads instead, announcing itself with a
+  `default unattended rule table ACTIVE` note when `--allow-write` is granted). It is a
   **note, never an error** — the run proceeds; you asked for exactly that.
   **Scope:** this is the CLI/queue path, the path that grants `--allow-*` and sets unattended. The
   MCP `agent_run` front door passes no write/delete/shell/fetch capability at all, so it never

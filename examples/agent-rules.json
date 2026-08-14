@@ -1,12 +1,5 @@
 [
   {
-    "kind": "delete",
-    "glob": "*",
-    "decision": "ask",
-    "severity": "high",
-    "reason": "deletion is irreversible inside the worktree; on an unattended run this queues for review instead of executing (measured 2026-08-11: the model self-declared security_risk=low on 36/36 destructive calls, so the park gate caught none of them)"
-  },
-  {
     "kind": "write",
     "glob": "*.py",
     "decision": "ask",
@@ -138,5 +131,12 @@
     "decision": "ask",
     "severity": "medium",
     "reason": "egress leaves the machine; the allowlist grants the host, this makes the call itself reviewable on an unattended run"
+  },
+  {
+    "kind": "delete",
+    "glob": "*",
+    "decision": "ask",
+    "severity": "high",
+    "reason": "catch-all — LAST on purpose: first match wins, so this must sit below the critical delete denies (*.gguf, *.jsonl, .github/workflows/*) or they can never fire. Deletion is irreversible inside the worktree; on an unattended run this queues for review instead of executing (measured 2026-08-11: the model self-declared security_risk=low on 36/36 destructive calls, so the park gate caught none of them)"
   }
 ]

@@ -121,7 +121,7 @@ func TestReasoningClassifyLowConfidenceDefers(t *testing.T) {
 		t.Fatal("reasoning tier not reached")
 	}
 	if res.OK {
-		t.Fatalf("expected a defer on low classify self-confidence (0.30 < 0.45), got OK: %s", res.Data)
+		t.Fatalf("expected a defer on low classify self-confidence (0.30 < 0.88), got OK: %s", res.Data)
 	}
 }
 
