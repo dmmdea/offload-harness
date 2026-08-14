@@ -48,6 +48,14 @@ type Model struct {
 	LoRA         string
 	LoRAStrength float64
 	Shift        float64
+	// PoolVvramGB / PoolCompute / PoolDonor are the 32GB-pool doctrine knobs
+	// (krea2 family): GiB of DiT weights donated from the compute card to the
+	// donor card through the DisTorch2 ratio-mode loader. 0 = single-GPU loader
+	// (the small-fleet shape, no flags emitted). Which boxes pool is per-machine
+	// config, never shared code — same rule as Family.
+	PoolVvramGB float64
+	PoolCompute string
+	PoolDonor   string
 }
 
 // Generate runs `node <script> <out> <prompt> [--negative ..] [--width ..] ...` and
@@ -153,6 +161,15 @@ func bindingArgs(m Model) []string {
 	}
 	if m.Shift > 0 {
 		args = append(args, "--shift", strconv.FormatFloat(m.Shift, 'g', -1, 64))
+	}
+	if m.PoolVvramGB > 0 {
+		args = append(args, "--pool-vvram", strconv.FormatFloat(m.PoolVvramGB, 'g', -1, 64))
+	}
+	if m.PoolCompute != "" {
+		args = append(args, "--pool-compute", m.PoolCompute)
+	}
+	if m.PoolDonor != "" {
+		args = append(args, "--pool-donor", m.PoolDonor)
 	}
 	return args
 }

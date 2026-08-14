@@ -6,8 +6,17 @@
 // Per-job overridable request params vs shared-only machine binding flags. A job may
 // NOT override the binding (ckpt/vae/...): which checkpoint a machine renders with is
 // per-machine config threaded by the Go harness, never per-prompt data.
-const JOB_PARAMS = ["negative", "width", "height", "steps", "seed"];
-const SHARED_ONLY = ["ckpt", "vae", "cfg", "sampler", "scheduler", "family", "preset", "clip", "lora", "lora-strength", "shift"];
+// BOTH lists are exported because comfy-generate.mjs derives its flag COLLECTOR
+// from them: collector = api + JOB_PARAM_FLAGS + SHARED_BINDING_FLAGS. One
+// source of truth, structurally — a flag collected but absent from the emit
+// lists was silently dropped between the two scripts (review-caught
+// 2026-08-14: the pool flags were collected and discarded, leaving the pooled
+// seat rendering single-card through every harness path while 249 tests
+// stayed green).
+export const JOB_PARAM_FLAGS = ["negative", "width", "height", "steps", "seed"];
+export const SHARED_BINDING_FLAGS = ["ckpt", "vae", "cfg", "sampler", "scheduler", "family", "preset", "clip", "lora", "lora-strength", "shift", "pool-vvram", "pool-compute", "pool-donor"];
+const JOB_PARAMS = JOB_PARAM_FLAGS;
+const SHARED_ONLY = SHARED_BINDING_FLAGS;
 
 export function parseJobs(text) {
   const jobs = [];

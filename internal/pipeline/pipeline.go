@@ -2499,6 +2499,9 @@ func imageModelFromConfig(cfg config.Config) imagegen.Model {
 		LoRA:         cfg.ImageGenLoRA,
 		LoRAStrength: cfg.ImageGenLoRAStrength,
 		Shift:        cfg.ImageGenShift,
+		PoolVvramGB:  cfg.ImageGenPoolVvramGB,
+		PoolCompute:  cfg.ImageGenPoolCompute,
+		PoolDonor:    cfg.ImageGenPoolDonor,
 	}
 }
 
