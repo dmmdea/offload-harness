@@ -6,6 +6,46 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.54.1] - 2026-08-13
+
+### Fixed — comfyui-pp-cli MCP code orchestration, from the first live-server run
+
+The deferred live smokes from the comfyui wave (`tools/comfyui/LIVE-SMOKES-DEFERRED.md`) were run
+against a real ComfyUI 0.32.0 server for the first time. §1 and the safe half of §2 passed, and two
+defects surfaced that no fake-server test could reach.
+
+**The tenant gate rejected the entire code-orchestration surface.** `cli.VerifyMCPInvocation`
+returns `(nil, nil)` to mean "this CLI registers no tenant-gated platform source, so there is
+nothing to gate" — and nothing registers one for `comfyui-pp-cli`. `requireFreshTenantGate` read
+that nil session as a misconfiguration and answered every call to `comfyui_search`, `comfyui_get`
+and `comfyui_execute` with `MCP tenant gate is not configured`. The 56 cobra-mirror tools were
+unaffected because they carry `pp:tenant-gate: child-cli` and skip the gate, so the surface added in
+0.53.0 was dead while everything around it worked — a partial outage, not an obvious one.
+`cli.BindMCPClient` already read the same `(nil, nil)` as "proceed"; the gate now agrees with it.
+Once a platform source IS registered the function returns a session or an error and never that pair,
+so no real gate can be skipped.
+
+**An oversized binary body was truncated into corrupt base64.** ComfyUI's `/view` returns file
+bytes, which the client layer base64-wraps into a `_pp_binary` envelope. A 2.7 MB render becomes a
+3.6 MB envelope against a 60 000 byte budget, and the generic bounding turned that into a `preview`
+holding a base64 string cut mid-value — unparseable, and corrupt if an agent decoded it anyway. The
+note attached to it advised narrowing the request with filters or `--select`, neither of which can
+shrink an image. `comfyui_execute` now refuses an oversized binary envelope and names the route to
+the bytes, matching what the typed endpoint-mirror path already did.
+
+Three regression tests close the gaps, each verified to fail with its fix reverted. The existing
+gate conformance tests both stub `verifyFreshMCPInvocation`, so neither exercised the real
+function's no-platform-source branch; the new one calls it directly. No fake-server test had served
+a binary body at all; two new ones cover the round-trip and the refusal.
+
+Also confirmed live and recorded in the smokes file: `progress_state` is **not** among the
+capabilities ComfyUI 0.32.0 serves (`features --json` reports `verdict: MATCH` with an empty
+`added` list, and a real run's `status.messages` carries only `execution_start`,
+`execution_cached`, `execution_success`), so the documented message set is the whole protocol and
+nothing should be built against a `progress_state` assumption.
+
+Detail: `tools/comfyui/.printing-press-patches/0004-mcp-code-orch-gate-and-binary-budget.patch`.
+
 ## [0.54.0] - 2026-08-13
 
 ### Added — llamaswap-pp-cli perfection wave 1

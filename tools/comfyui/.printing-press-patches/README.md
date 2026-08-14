@@ -17,6 +17,7 @@ Two copies drifting is how a fix gets re-lost.
 | `0001-cross-platform-host-path-handling.patch` | `internal/comfy/media` was Windows-only | **Not yet upstreamed** — see below |
 | `0002-mcp-code-orchestration.patch` | MCP shipped 13 endpoint-mirror tools; no tool declared an `outputSchema` | **Not yet upstreamed** — see below |
 | `0003-structured-error-envelope.patch` | `root.go` + `helpers.go` had no machine-readable failure path | **Not yet upstreamed** — see below |
+| `0004-mcp-code-orch-gate-and-binary-budget.patch` | the tenant gate rejected every in-process MCP tool on a CLI with no platform source; an oversized binary body was truncated into corrupt base64 | **Not yet upstreamed** — see below |
 
 ---
 
@@ -224,3 +225,89 @@ edits are needed in the generator's `root.go` and `helpers.go` templates, and th
 `llamaswap-pp-cli` ships the identical field names. Until that lands, re-apply this patch after
 any reprint — and keep the field names byte-identical across the twins, because an agent that
 learns one is expected to read the other without a second parser.
+
+---
+
+## 0004 — MCP code-orchestration: tenant gate and binary budget
+
+**Applied:** 2026-08-13. Both defects were found by the first live run of the deferred smokes in
+`LIVE-SMOKES-DEFERRED.md` against a real ComfyUI 0.32.0 server. Neither is reachable from the
+fake-server suite, which is why 0002 shipped with them.
+
+### What was wrong
+
+**1. The tenant gate rejected the entire code-orchestration surface.**
+
+`installFreshTenantGate` wraps every registered tool. Cobra mirrors carry `pp:tenant-gate:
+child-cli` in their meta and pass straight through, so the 56 mirrored commands kept working. The
+three in-process tools — `comfyui_search`, `comfyui_get`, `comfyui_execute` — do not, so each call
+went through `cli.VerifyMCPInvocation`, whose first branch is:
+
+```go
+if registeredPlatformSource == nil {
+    return nil, nil
+}
+```
+
+That pair means "this CLI has no tenant-gated platform source, so there is nothing to gate", and
+nothing ever registers a source for `comfyui-pp-cli`. The wrapper read the nil session as a
+misconfiguration and returned `MCP tenant gate is not configured` — every time, for every argument.
+`cli.BindMCPClient` reads the same pair the opposite way and proceeds, so the gate was stricter than
+the binder it exists to protect.
+
+The failure mode is what hid it: a partial outage. `tools/list` advertised all 59 tools with
+correct `outputSchema`s, the cobra mirrors answered normally, and only the three tools 0002 was
+written to add were dead.
+
+**2. An oversized binary body was truncated into corrupt base64.**
+
+The client layer base64-wraps non-textual bodies, so `/view` arrives as a `_pp_binary` envelope.
+A real render is megabytes, and base64 adds a third: a 2.7 MB PNG becomes a 3.6 MB envelope against
+a 60 000 byte budget. `bound.EndpointResponse` then applied its generic fallback and returned a
+`preview` holding the base64 string cut mid-value — it no longer parses, and an agent that decoded
+it anyway would write a corrupt file. The attached note advised narrowing the request "with filters,
+search/sql, or a command-mirror tool with --agent/--compact/--select", none of which can shrink an
+image. The typed endpoint-mirror path already refused this case with an actionable message; the
+code-orchestration path silently returned damage.
+
+### The fix
+
+- `platform_gate.go` — `requireFreshTenantGate` continues to the handler on `(nil, nil)`. This
+  cannot skip a real gate: once a platform source is registered, `VerifyMCPInvocation` returns
+  either a verified session or an error, never that pair.
+- `code_orch.go` — new `codeOrchBinaryOversize` runs before `bound.EndpointResponse` and refuses a
+  `_pp_binary` envelope that exceeds the budget, naming the route to the bytes
+  (`comfyui-pp-cli view … --deliver file:<path>`, then decode the envelope's base64 `data` field —
+  the CLI writes the envelope, not raw bytes, and the message says so).
+
+### Why the tests missed both
+
+`TestMCPEveryRegisteredToolHasFreshTenantGate` and `TestMCPTypedInvocationUsesSingleFreshTenantGate`
+both replace `verifyFreshMCPInvocation` with a stub returning an error or a session. Neither
+exercises what the real function returns when no platform source is registered, which is the only
+configuration this CLI ever ships in. No fake-server test served a binary body at all.
+
+Three tests close the gap, each verified to fail with its fix reverted:
+`TestMCPFreshTenantGateAllowsCLIWithoutPlatformSource` calls the real `cli.VerifyMCPInvocation`
+rather than a stub; `TestCodeOrchExecuteBinaryBodyRoundTripsAsBase64` asserts a small binary
+survives byte-for-byte; `TestCodeOrchExecuteOversizedBinaryRefusesInsteadOfTruncating` asserts the
+oversized one is refused with a usable route instead of previewed.
+
+### Verification
+
+`go build ./...` and `go vet ./...` clean, `go test ./... -shuffle=on -count=1` green across all 17
+packages. Live against ComfyUI 0.32.0: `comfyui_execute {endpoint_id: "system.stats"}` returns
+`path: "/system_stats"` with per-device vram; `{endpoint_id: "objectinfo.get", params: {class_type:
+"VAELoader"}}` returns `path: "/object_info/VAELoader"` with a populated option list, and
+`{endpoint_id: "history.get", params: {prompt_id: <real>}}` returns `path: "/history/<real>"` with
+`execution_start` and `execution_success` — the placeholder substitution proven on two different
+parameters. `view.get` against a 4 196-byte input returns `_pp_binary: true`, `encoding: "base64"`,
+and data that decodes to a sha256 identical to the staged source; against a 2.7 MB render it now
+refuses with the byte counts and the CLI route.
+
+### Upstream
+
+**Still owed**, and the gate half is urgent for every printed CLI: any CLI generated without a
+tenant-gated platform source ships a dead code-orchestration surface. Both edits belong in the
+generator's `platform_gate.go` and `code_orch.go` templates. Re-apply this patch after any reprint
+until that lands.
