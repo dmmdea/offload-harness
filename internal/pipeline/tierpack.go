@@ -65,9 +65,10 @@ const probeTTL = 10 * time.Minute
 // shape as contextbudget.Trim's marker, named for this boundary.
 const repackMarker = "\n\n[...content elided to fit the escalation tier's context window...]\n\n"
 
-// minRepackTokens is the smallest input allowance worth re-packing for. Below
-// this the entry packing is at least as informative, and a degenerate cut
-// could shrink the escalated view BELOW the entry view.
+// minRepackTokens is the smallest input allowance worth paying the repack's
+// tokenize round-trips for — a floor against degenerate windows. (Preventing
+// a shrink below the ENTRY view is the separate tokEntry guard on the cut
+// path; this constant does not carry that job.)
 const minRepackTokens = 256
 
 // tierPackState is the per-Pipeline cache behind packForTier. All access goes
@@ -197,7 +198,11 @@ func (p *Pipeline) tokFailFresh(model string) (string, bool) {
 }
 
 // noteTokFail records a tokenize failure for model (TTL-cached) and returns
-// the entry-inherited disposition naming it.
+// the entry-inherited disposition naming it. Deliberately class-blind (no
+// LastFailDefinitive consult, unlike the agent loop's 2-strike sticky): the
+// escalation cadence is low, the fallback is the safe entry packing, and a
+// transient 503 suppressing repacks for one TTL window is a bounded cost —
+// simpler beats a second classifier here.
 func (p *Pipeline) noteTokFail(model, why string) string {
 	p.tierPack.mu.Lock()
 	if p.tierPack.tokFails == nil {

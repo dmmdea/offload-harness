@@ -356,8 +356,11 @@ func TestCacheKeyedOnOriginalInput(t *testing.T) {
 	}
 	// Entry-only runs must generate ZERO repack traffic — the hot path is
 	// untouched by construction, pinned here.
-	if f.propsHits != 0 || f.tokenizeHits != 0 {
-		t.Fatalf("entry-only runs probed the endpoint (props=%d tokenize=%d) — the hot path must stay free", f.propsHits, f.tokenizeHits)
+	f.mu.Lock()
+	props, toks := f.propsHits, f.tokenizeHits
+	f.mu.Unlock()
+	if props != 0 || toks != 0 {
+		t.Fatalf("entry-only runs probed the endpoint (props=%d tokenize=%d) — the hot path must stay free", props, toks)
 	}
 }
 
@@ -554,8 +557,11 @@ func TestRunEscalationDegenerateAndUnderCapDispositions(t *testing.T) {
 	if res2.Meta.TierPack != "full source (under entry cap)" {
 		t.Fatalf("under-cap TierPack = %q, want the unverified-honest label", res2.Meta.TierPack)
 	}
-	if f2.propsHits != 0 || f2.tokenizeHits != 0 {
-		t.Fatalf("under-cap path probed the endpoint (props=%d tokenize=%d) — it must be free", f2.propsHits, f2.tokenizeHits)
+	f2.mu.Lock()
+	props, toks := f2.propsHits, f2.tokenizeHits
+	f2.mu.Unlock()
+	if props != 0 || toks != 0 {
+		t.Fatalf("under-cap path probed the endpoint (props=%d tokenize=%d) — it must be free", props, toks)
 	}
 }
 
