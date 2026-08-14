@@ -69,11 +69,11 @@ func (fc fakeChat) marshal() []byte {
 
 // tokenizeDecision splits a triage answer into per-token logprobs so the
 // reconstructed string is exactly `content` and the chosen "yes" token carries a
-// raw class distribution between yes/no whose margin is `wantMargin` (< 0.35).
+// raw class distribution between yes/no whose margin is `wantMargin` (< 0.65).
 func tokenizeDecision(reason string) []fakeTok {
 	// content == {"decision":"yes","reason":"<reason>"} ; split so one token is
 	// exactly "yes" at the value position. Tokens just need to concatenate back.
-	pYes, pNo := 0.6, 0.4 // margin = (0.6-0.4)/1.0 = 0.2  (non-zero, below 0.35)
+	pYes, pNo := 0.6, 0.4 // margin = (0.6-0.4)/1.0 = 0.2  (non-zero, below 0.65)
 	return []fakeTok{
 		{token: `{"decision":"`},
 		{token: "yes", top: []fakeAlt{
@@ -86,7 +86,7 @@ func tokenizeDecision(reason string) []fakeTok {
 
 // TestRunLabelsAgreementWithEntryMargin drives a real low-confidence triage
 // escalation through Run: the entry tier (TriageModel) returns a valid "yes"
-// whose logprob decision margin (0.2) is below the 0.35 threshold, so it defers
+// whose logprob decision margin (0.2) is below the 0.65 threshold, so it defers
 // escalatable; the escalation tier (Model) returns an AGREEING "yes" with no
 // logprobs (margin N/A -> accepted). The test asserts the sidecar row was
 // snapshotted from res.Meta (FIX 1): EscalatedAgreed == true AND Margin != 0.
@@ -131,7 +131,7 @@ func TestRunLabelsAgreementWithEntryMargin(t *testing.T) {
 	cfg.EscalationModel = ""     // chain = [entry, model]
 	cfg.MaxRetries = 0           // single attempt per tier
 	cfg.ConfHeadLabelsPath = labelsPath
-	// keep the logprob gate on its default 0.35 so margin 0.2 escalates
+	// keep the logprob gate on its default 0.65 so margin 0.2 escalates
 	cfg.ThresholdsPath = ""
 	cfg.RouterWeightsPath = ""
 	cfg.TierOverridesPath = ""

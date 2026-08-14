@@ -180,11 +180,17 @@ func (p *Policy) Decide(a Action) (Decision, string) {
 	// sorts a night's queue by severity, which must never mean parsing prose.
 	d, reason := p.classify(a)
 	var fired Rule
-	if r, ok := p.ruleFor(a); ok && stricter(r.Decision, d) {
+	if r, ok := p.ruleFor(a); ok && (stricter(r.Decision, d) || (r.Decision == d && d == Ask)) {
 		// Tighten-only in BOTH directions of composition: a rule upgrades
 		// classify's Allow to Ask/Deny and its Ask to Deny (the secret floor
 		// must hard-deny even where posture-less classify would merely ask),
-		// but can never soften a classify Deny.
+		// but can never soften a classify Deny. The equal-strictness Ask arm
+		// (review finding 2026-08-14): when classify already asks (e.g. delete
+		// without the open-delete posture) a matching Ask rule is not stricter,
+		// but its severity/glob/reason are exactly what the morning review
+		// sorts the queue by — record it as fired rather than dropping it. A
+		// classify Deny keeps its own reason even when a rule also matches:
+		// the built-in denial (.git, egress) is the more precise record.
 		d = r.Decision
 		fired = r
 		reason = "[" + string(r.Severity) + "] " + r.Reason
@@ -193,12 +199,20 @@ func (p *Policy) Decide(a Action) (Decision, string) {
 	if d == Ask && p.unattended {
 		// Park the pending ask for later human review BEFORE rewriting the reason, so
 		// the queue carries the original "why it needs approval". Best-effort: a queue
-		// write failure must not change the (already safe) deny outcome.
-		if p.askQueue != nil {
-			_ = p.askQueue.record(a, Ask, reason, fired)
+		// write failure must not change the (already safe) deny outcome — but the
+		// reason must tell the truth about whether anything was queued (review
+		// finding 2026-08-14: asserting "queued" with no queue attached sends the
+		// morning review to an empty file believing nothing was attempted).
+		queued := false
+		if p.askQueue != nil && p.askQueue.record(a, Ask, reason, fired) == nil {
+			queued = true
 		}
 		eff = Deny
-		reason = "requires approval; unattended run → denied & queued (" + reason + ")"
+		if queued {
+			reason = "requires approval; unattended run → denied & queued (" + reason + ")"
+		} else {
+			reason = "requires approval; unattended run → denied; NOT queued (no ask-queue attached or queue write failed) (" + reason + ")"
+		}
 	}
 	if p.audit != nil {
 		if err := p.audit.record(a, eff, reason, fired); err != nil && eff == Allow {

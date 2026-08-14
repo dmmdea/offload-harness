@@ -67,9 +67,12 @@ answers "is this good enough, and if not, is it worth trying a bigger model?"
   *computed and logged* for other tasks but only *actioned* for extract — summarization paraphrases
   legitimately, so acting on it would be noise.
 - **Confidence gate.** For classify, a self-reported confidence below `classify_min_confidence`
-  (default **0.45**) escalates. For decision tasks, a logprob decision margin below the task's
+  (default **0.88**) escalates. For decision tasks, a logprob decision margin below the task's
   threshold escalates — a learned per-task conformal value when one exists, otherwise
-  `confidence_margin_threshold` (default **0.35**).
+  `confidence_margin_threshold` (default **0.65**). Both defaults were calibrated 2026-08-14
+  from the confcal probe's observed distributions; the prior constants (0.45 / 0.35) sat below
+  the entire observed support of their signals and had never fired on probe or production
+  traffic.
 - **Confhead gate.** A learned correctness head below its threshold escalates.
 
 An OK result returns immediately. A recoverable failure at a non-final Tier escalates. Infrastructure
