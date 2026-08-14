@@ -22,17 +22,20 @@ import {
 // Records every invocation (cmd, args, stdin) for assertions.
 function fakeSpawn(scripts) {
   const calls = [];
-  const impl = (cmd, args) => {
+  const impl = (cmd, args, opts) => {
     const script = scripts.shift() || { code: 0, stdout: "", stderr: "" };
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
+    child.stdout.destroy = () => {};
+    child.stderr.destroy = () => {};
     let stdin = "";
     child.stdin = { write: (d) => { stdin += d; }, end: () => {}, on: () => {}, destroy: () => {} };
     child.kill = () => {};
-    calls.push({ cmd, args, get stdin() { return stdin; }, script });
+    calls.push({ cmd, args, opts, get stdin() { return stdin; }, script });
     queueMicrotask(() => {
       if (script.error) { child.emit("error", script.error); return; }
+      if (script.hang) return; // never closes — exercises killAfterMs
       if (script.stdout) child.stdout.emit("data", script.stdout);
       if (script.stderr) child.stderr.emit("data", script.stderr);
       child.emit("close", script.code);
@@ -112,9 +115,12 @@ test("resolveCli: repo-local tools/comfyui/bin build is found relative to the sc
 });
 
 test("resolveCli: nothing configured -> a PATH guess (probed at first use)", () => {
-  const cli = resolveCli({ env: {}, scriptDir: mkdtempSync(join(tmpdir(), "cs-")) });
-  assert.equal(cli.source, "path");
-  assert.match(cli.cmd, /^comfyui-pp-cli/);
+  const dir = mkdtempSync(join(tmpdir(), "cs-"));
+  try {
+    const cli = resolveCli({ env: {}, scriptDir: dir });
+    assert.equal(cli.source, "path");
+    assert.match(cli.cmd, /^comfyui-pp-cli/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 // ---------------------------------------------------------------------------------------
@@ -178,6 +184,29 @@ test("submitGraph cli: accepted submit returns the CLI prompt_id; graph goes ove
   assert.equal(r.via, "cli");
   assert.deepEqual(calls[0].args, ["submit", "-", "--json", "--skip-lint"]);
   assert.equal(calls[0].stdin, JSON.stringify(graph));
+  // The env is the ONLY channel by which the runner's --api/COMFY_API reaches the CLI:
+  // dropping it would silently submit every render to the CLI's default server.
+  assert.equal(calls[0].opts.env.COMFYUI_BASE_URL, "http://127.0.0.1:9");
+  assert.equal(calls[0].opts.windowsHide, true); // house rule: no visible console windows
+});
+
+test("submitGraph cli: a LOCAL pre-POST failure (usage/config/generic) falls back to raw LOUDLY instead of killing the render", async () => {
+  for (const code of [1, 2, 10]) {
+    const srv = await serve((req, res) => res.end(JSON.stringify({ prompt_id: "raw-local-" + code })));
+    try {
+      const { impl } = fakeSpawn([{ code, stdout: "", stderr: "local failure " + code }]);
+      let warned = "";
+      const r = await submitGraph({
+        api: srv.api, graph: { a: 1 }, clientId: "render-9",
+        cli: { cmd: "cli.exe", source: "env" }, spawnImpl: impl,
+        stderr: { write: (s) => { warned += s; } },
+      });
+      assert.equal(r.via, "raw", "exit " + code + " must fall back");
+      assert.equal(r.promptId, "raw-local-" + code);
+      assert.match(warned, new RegExp("failed locally before POSTing \\(exit " + code + "\\)"));
+      assert.equal(JSON.parse(srv.requests[0].body).client_id, "render-9");
+    } finally { srv.close(); }
+  }
 });
 
 test("submitGraph cli: PATH guess that ENOENTs falls back to raw with a notice", async () => {
@@ -457,15 +486,39 @@ test("finalizeRun: prints the authoritative timing line from the CLI wait envelo
   assert.deepEqual(calls[0].args, ["wait", "p", "--timeout", "5s", "--json"]);
 });
 
-test("finalizeRun: EVERY failure degrades to a warning — the render outcome is never re-opened", async () => {
-  const { impl } = fakeSpawn([{ code: 21, stdout: "", stderr: "prompt p failed" }]);
+test("finalizeRun: a GENUINE finalization failure (not-found after restart) degrades to a warning — never re-opens the render", async () => {
+  const { impl, calls } = fakeSpawn([{ code: 3, stdout: "", stderr: "prompt p is in neither the queue nor /history" }]);
   let warned = "";
   const r = await finalizeRun({
     api: "http://x", promptId: "p", cli: { cmd: "cli.exe", source: "env" },
     spawnImpl: impl, stdout: devNull, stderr: { write: (s) => { warned += s; } },
   });
   assert.equal(r, null);
-  assert.match(warned, /wait exited 21/);
+  assert.match(warned, /wait exited 3/);
+  assert.equal(calls[0].opts.env.COMFYUI_BASE_URL, "http://x"); // the CLI must be aimed at the caller's server
+});
+
+test("finalizeRun: wait's terminal-OUTCOME codes (13/21/22/24/25) ARE successful finalizations — no cry-wolf warning", async () => {
+  // Exit 21 = the RENDER failed; the run row was finalized with the verbatim error.
+  // The caller already knows the render's fate — warning here would make every failed
+  // render report a bogus bookkeeping failure.
+  const { impl } = fakeSpawn([
+    { code: 21, stdout: '{"prompt_id":"p","outcome":"failed","status":{"duration_ms":0}}', stderr: "FAIL run failed" },
+  ]);
+  let warned = "";
+  const r = await finalizeRun({
+    api: "http://x", promptId: "p", cli: { cmd: "cli.exe", source: "env" },
+    spawnImpl: impl, stdout: devNull, stderr: { write: (s) => { warned += s; } },
+  });
+  assert.deepEqual(r, { durationMs: 0 });
+  assert.equal(warned, "");
+});
+
+test("runCli: killAfterMs tears the child down and resolves with a pseudo spawnError", async () => {
+  const { impl } = fakeSpawn([{ hang: true }]);
+  const r = await runCli("cli.exe", ["wait", "p"], { spawnImpl: impl, killAfterMs: 50 });
+  assert.equal(r.code, null);
+  assert.match(r.spawnError.message, /did not exit within 50ms/);
 });
 
 // ---------------------------------------------------------------------------------------
