@@ -38,7 +38,16 @@ func requireFreshTenantGate(s *server.MCPServer, next server.ToolHandlerFunc) se
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		if session == nil {
-			return mcplib.NewToolResultError("MCP tenant gate is not configured"), nil
+			// A nil session with a nil error means this CLI registers no
+			// tenant-gated platform source, so there is no tenant to gate on.
+			// cli.VerifyMCPInvocation returns that pair ONLY on that branch —
+			// once a source is registered it returns either a verified session
+			// or an error — so continuing here cannot skip a gate that exists.
+			// cli.BindMCPClient already reads the pair that way for the typed
+			// client path; rejecting it here instead made every in-process tool
+			// permanently unreachable on a CLI with no platform source, which
+			// is the whole code-orchestration surface.
+			return next(ctx, request)
 		}
 		defer session.ZeroCredentials()
 		return next(platform.ContextWithSession(ctx, session), request)
