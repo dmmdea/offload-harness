@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
+import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
 
 // ACE-Step's 3.5B all-in-one checkpoint is far lighter than the 14B video models, so the
 // generic 1.0 reserve (held back for the Windows display/WDDM) fits comfortably on 8GB.
@@ -58,25 +59,27 @@ export function buildGraphFromArgs(pos, flags) {
   return { graph: buildAceStep(common), seed };
 }
 
-// generate: POST the graph to ComfyUI, poll /history, fetch the produced audio via /view,
-// write it to out. ComfyUI is already up (ensureComfy ran inside withGpuSlot).
+// generate: submit the graph to ComfyUI, poll /history, fetch the produced audio via
+// /view, write it to out. ComfyUI is already up (ensureComfy ran inside withGpuSlot).
+// Submission/polling/retrieval are the shared comfy-submit.mjs layer: CLI-preferred
+// submit with byte-identical raw fallback; hardened poll loop (dead-server watchdog).
 async function generate(out, API, graph, seed) {
-  const j = async (url, opts) => { const r = await fetch(url, opts); if (!r.ok) throw new Error(url + " -> " + r.status + " " + (await r.text()).slice(0, 300)); return r.json(); };
-  const { prompt_id } = await j(API + "/prompt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: graph, client_id: "music-" + seed }) });
-  console.log("queued", prompt_id, "ace-step seed", seed);
-  let file = null;
-  for (let i = 0; i < 600; i++) { // up to ~20 min (TextEncodeAceStepAudio can be slow on some commits)
-    await new Promise((r) => setTimeout(r, 2000));
-    let hist; try { hist = await j(`${API}/history/${prompt_id}`); } catch { continue; }
-    const h = hist[prompt_id]; if (!h) continue;
-    if (h.status && h.status.status_str === "error") throw new Error("ComfyUI exec error: " + JSON.stringify(h.status).slice(0, 500));
-    file = firstOutputFile(h.outputs); if (file) break;
-  }
-  if (!file) throw new Error("no audio produced in time");
-  const q = new URLSearchParams({ filename: file.filename, subfolder: file.subfolder, type: file.type });
-  const r = await fetch(`${API}/view?` + q.toString()); if (!r.ok) throw new Error("view fetch " + r.status);
-  writeFileSync(out, Buffer.from(await r.arrayBuffer()));
+  const cli = resolveCli();
+  const { promptId } = await submitGraph({ api: API, graph, clientId: "music-" + seed, cli });
+  console.log("queued", promptId, "ace-step seed", seed);
+  // waitSec 1200 = the historical fixed 600 x 2s polls (~20 min; TextEncodeAceStepAudio
+  // can be slow on some commits). Deliberately NOT COMFY_WAIT_SEC-driven — this runner
+  // never honored it, and preserving that is part of the step-4 exact-behavior contract.
+  const h = await pollOutputs({
+    api: API, promptId, waitSec: 1200,
+    isDone: (entry) => !!firstOutputFile(entry.outputs),
+    noOutputMsg: "no audio produced in time",
+    onExecError: () => finalizeRun({ api: API, promptId, cli }),
+  });
+  const file = firstOutputFile(h.outputs);
+  writeFileSync(out, await fetchView({ api: API, file }));
   console.log("WROTE", out);
+  await finalizeRun({ api: API, promptId, cli });
 }
 
 // main: the executable path. Only runs when this file is invoked directly (so importing

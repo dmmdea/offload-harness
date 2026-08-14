@@ -20,6 +20,7 @@ import { firstOutputFile } from "./comfy-output.mjs";
 import { buildHunyuan15I2V } from "./wf-hunyuan15-i2v.mjs";
 import { buildWan22I2V } from "./wf-wan22-i2v.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
+import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
 
 const argv = process.argv.slice(2);
 const pos = []; const flags = {};
@@ -33,8 +34,6 @@ for (let i = 0; i < argv.length; i++) {
 const out = pos[0];
 const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
 if (!out) { console.error('usage: node comfy-video.mjs <out.mp4> <still> "<prompt>" [--model hunyuan|wan] [flags]   |   <out.mp4> --graph wf.json'); process.exit(2); }
-
-const j = async (url, opts) => { const r = await fetch(url, opts); if (!r.ok) throw new Error(url + " -> " + r.status + " " + (await r.text()).slice(0, 300)); return r.json(); };
 
 // ComfyUI's LoadImage reads from C:\ComfyUI\input. Stage the still there.
 function stageInput(stillPath) {
@@ -83,25 +82,25 @@ async function generate() {
     }
     graph = model === "hunyuan" ? buildHunyuan15I2V(common) : buildWan22I2V(common);
   }
-  const { prompt_id } = await j(API + "/prompt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: graph, client_id: "video-" + seed }) });
-  console.log("queued", prompt_id, flags.graph ? `(graph ${flags.graph})` : `${model} seed ${seed}`);
-  let file = null;
+  // Shared submission/polling/retrieval (comfy-submit.mjs): CLI-preferred submit with
+  // byte-identical raw fallback; hardened poll loop (dead-server watchdog).
+  const cli = resolveCli();
+  const { promptId } = await submitGraph({ api: API, graph, clientId: "video-" + seed, cli });
+  console.log("queued", promptId, flags.graph ? `(graph ${flags.graph})` : `${model} seed ${seed}`);
   // Poll budget: the native quality recipe at 720p legitimately exceeds the old ~20-min
   // ceiling. Default 90 min; the Go harness passes COMFY_WAIT_SEC aligned to its own
   // videogen timeout and its process-tree kill remains the hard stop.
   const waitSec = Number(flags["wait-sec"] || process.env.COMFY_WAIT_SEC || 5400);
-  for (let i = 0; i < Math.max(1, Math.ceil(waitSec / 2)); i++) {
-    await new Promise((r) => setTimeout(r, 2000));
-    let hist; try { hist = await j(`${API}/history/${prompt_id}`); } catch { continue; }
-    const h = hist[prompt_id]; if (!h) continue;
-    if (h.status && h.status.status_str === "error") throw new Error("ComfyUI exec error: " + JSON.stringify(h.status).slice(0, 500));
-    file = firstOutputFile(h.outputs); if (file) break;
-  }
-  if (!file) throw new Error("no video produced in time");
-  const q = new URLSearchParams({ filename: file.filename, subfolder: file.subfolder, type: file.type });
-  const r = await fetch(`${API}/view?` + q.toString()); if (!r.ok) throw new Error("view fetch " + r.status);
-  writeFileSync(out, Buffer.from(await r.arrayBuffer()));
+  const h = await pollOutputs({
+    api: API, promptId, waitSec,
+    isDone: (entry) => !!firstOutputFile(entry.outputs),
+    noOutputMsg: "no video produced in time",
+    onExecError: () => finalizeRun({ api: API, promptId, cli }),
+  });
+  const file = firstOutputFile(h.outputs);
+  writeFileSync(out, await fetchView({ api: API, file }));
   console.log("WROTE", out);
+  await finalizeRun({ api: API, promptId, cli });
 }
 
 withGpuSlot(

@@ -69,6 +69,24 @@ Two details of the free step are easy to get wrong:
 
 Full rationale in [ADR 0009](../architecture/decisions/0009-zero-warm-gpu-lifecycle.md).
 
+**One submission layer, CLI-preferred.** Every ComfyUI runner submits, polls, and retrieves
+through `render/comfy-submit.mjs` (0.56.0; before it, six runners each carried their own copy of
+the raw `POST /prompt` → poll `/history` → `GET /view` block, and only `comfy-render.mjs` had the
+dead-server watchdog). Submission goes through the vendored
+[`comfyui-pp-cli`](printed-clis.md) when a binary is resolvable — `COMFYUI_PP_CLI` env (loud-fail
+if wrong), a local `tools/comfyui/bin` build, or PATH — which buys the idempotent submission
+lease (an identical in-flight graph attaches instead of double-rendering; a stale or unverifiable
+lease force-resubmits, preserving the raw path's always-POST behavior), typed
+accept/reject/partial-accept outcomes with `node_errors` verbatim, a durable run row, and, after
+the render, the authoritative `execution_start -> execution_success` timing (one `timing …`
+stdout line; the server log's "Prompt executed" line is never parsed by either side). No binary →
+the raw HTTP path, byte-identical to the pre-0.56.0 runners (per-run `client_id`, same POST
+body); CLI-mode local pre-POST failures also fall back to raw, loudly. Polling never goes through
+the CLI: the loop needs the dead-server watchdog (`COMFY_DEAD_SEC`, default 240 s — abort and
+release the GPU slot when the server stops answering) and the suspend/resume fence, which the
+CLI's `wait` does not provide; `/view` bytes are fetched raw for exact file fidelity. All six
+runners now share that hardened loop.
+
 **Warm batch.** `generate-image --batch` takes a jobs file and runs N renders in one session. The
 only behavioral change is omitting ComfyUI's `--cache-none`, so the checkpoint loads once; teardown
 still happens exactly once, at the batch boundary. A failed render is recorded and the batch
