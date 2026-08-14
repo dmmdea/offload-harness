@@ -6,6 +6,53 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.54.2] - 2026-08-13
+
+### Fixed — llamaswap-pp-cli MCP code orchestration was dead for the same reason as comfyui's
+
+`llamaswap-pp-cli` carried the identical tenant-gate defect fixed in comfyui's copy one release
+earlier (0.54.1, PR #109). The generated `internal/mcp/platform_gate.go` is the same file in both
+trees, so the same branch was wrong in both: `cli.VerifyMCPInvocation` returns `(nil, nil)` on
+exactly one path — its first statement, `if registeredPlatformSource == nil` — meaning "this CLI
+registers no tenant-gated platform source, so there is nothing to gate". `requireFreshTenantGate`
+read that as a misconfiguration and answered `MCP tenant gate is not configured`.
+
+llamaswap's spec is `auth: type: none`, so `registeredPlatformSource` is nil by construction and
+**every** in-process tool hit that branch: `llamaswap_search`, `llamaswap_get`, `llamaswap_execute`
+and the intents — the whole code-orchestration surface — while the 67 cobra mirrors kept working
+because they carry `pp:tenant-gate: child-cli` and bypass the wrapper. As with comfyui, that made it
+look like a partial failure rather than a gate bug, and no static check caught it. The fix is the
+gate half of comfyui's `0004` patch, ported so the two files stay semantically identical: a
+`(nil, nil)` pair now continues ungated, and a real error still denies.
+
+The binary-budget half of that patch is **not applicable** here and was deliberately not ported.
+It exists because ComfyUI's `/view` serves file bytes; llamaswap's 27 code-orchestration endpoints
+all answer JSON or `text/*` (Prometheus exposition, plain-text logs), and
+`isBinaryResponseContentType` returns `false` for every one of those media types, so no `_pp_binary`
+envelope can be produced by this CLI. Porting it would have added unreachable code and a test that
+could only assert against a fabricated response.
+
+Two regression tests, both verified to fail with the fix reverted. The two pre-existing gate
+conformance tests each replace `verifyFreshMCPInvocation` with a stub returning an error or a
+session, so neither could ever reach the real function's `(nil, nil)` branch: the first new test
+calls `cli.VerifyMCPInvocation` directly, and the second drives all six real in-process handlers
+through the real wrapper with nothing stubbed. Both run without a live server.
+
+Live evidence, against llama-swap v249 on `127.0.0.1:11436` with `embeddinggemma` already resident
+and no unloads: the rebuilt MCP binary answered `llamaswap_search` (returned `upstream.props`),
+`llamaswap_get` (`server.version` → `/api/version`), and `llamaswap_execute` on
+`GET /upstream/{model}/props` with `model=embeddinggemma`, which came back with the real
+`model_path`, `model_ftype: Q8_0`, `n_ctx: 2048` and `total_slots: 4` — also re-proving positional
+path-placeholder substitution on the wire. A binary built from the pre-fix source returned
+`isError: true`, `MCP tenant gate is not configured`, for all three.
+
+This is a **generator-template** defect, not a per-CLI one: the emitted `platform_gate.go` carries
+the wrong branch on any printed CLI whose spec declares no auth. Two independent trees have now
+been bitten by it. Filed upstream on `mvanhorn/cli-printing-press`; until that lands, a reprint of
+either tree silently reverts the fix.
+
+Detail: `tools/llamaswap/.printing-press-patches/internal-mcp-platform_gate.go.md`.
+
 ## [0.54.1] - 2026-08-13
 
 ### Fixed — comfyui-pp-cli MCP code orchestration, from the first live-server run
