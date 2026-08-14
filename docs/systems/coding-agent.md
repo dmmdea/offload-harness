@@ -339,10 +339,11 @@ write and shell tools could otherwise clobber the record of what it did.
 - [`internal/agent/unattended-rules.json`](../../internal/agent/unattended-rules.json) — the
   default table EMBEDDED in the binary and loaded automatically on unattended runs with no
   `--rules` argument (so it needs no installer and no path).
-- [`examples/agent-rules.json`](../../examples/agent-rules.json) — the fuller starter risk-rule
-  table for operators writing their own, loaded with `--rules`. It is a **repo file, packaged by
-  no installer**: from a checkout, pass `--rules examples/agent-rules.json`; from an installed
-  binary, copy it somewhere durable (e.g. `~/.local-offload/agent-rules.json`) and pass that path.
+- [`examples/agent-rules.json`](../../examples/agent-rules.json) — the alternative starter
+  risk-rule table for operators writing their own, loaded with `--rules`. It is a **repo file,
+  packaged by no installer**: from a checkout, pass `--rules examples/agent-rules.json`; from an
+  installed binary, copy it somewhere durable (e.g. `~/.local-offload/agent-rules.json`) and pass
+  that path.
 
 ## Dependencies
 

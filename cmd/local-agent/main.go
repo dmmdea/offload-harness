@@ -200,7 +200,10 @@ func main() {
 	// The broker audit trail must live OUTSIDE any worktree; resolve a default
 	// only when a mutating capability is enabled.
 	auditP := *auditPath
-	if auditP == "" && (*allowWrite || *allowFetch || *allowShell || *allowRun) {
+	// allowGitHub included (review round 2, 2026-08-14): a --allow-github-only
+	// run gets a worktree and github_upload_file — an outward-facing write
+	// surface that must not run without an audit trail.
+	if auditP == "" && (*allowWrite || *allowFetch || *allowShell || *allowRun || *allowGitHub) {
 		if home, e := os.UserHomeDir(); e == nil {
 			auditP = filepath.Join(home, ".local-offload", "agent-audit.jsonl")
 		}

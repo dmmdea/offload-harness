@@ -99,6 +99,9 @@ probe (120 difficulty-graded items) or on 1487 production ledger rows (0 rows un
   sits last, with the ordering rule documented in the rule itself; the embedded default table's
   loader test now pins deny-above-catch-all ordering structurally.
 - Two-tier mode now prints the architect build's notes too (previously silently dropped).
+- The default broker-audit path now also covers `--allow-github`-only runs (they get a worktree
+  and `github_upload_file` — an outward-facing write surface that must not run without an audit
+  trail); previously only write/fetch/shell/run triggered the default.
 - Stale 0.45/0.35 references in pipeline test comments updated.
 
 ## [0.54.2] - 2026-08-13

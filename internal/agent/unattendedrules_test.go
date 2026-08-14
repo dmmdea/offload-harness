@@ -141,14 +141,20 @@ func TestDefaultRulesGateConfigNotOrdinarySource(t *testing.T) {
 		{"go.sum write hard-denies", Action{Kind: ActWrite, Path: "go.sum", Exists: true}, Deny, "[high]", false},
 		{"lockfile write hard-denies", Action{Kind: ActWrite, Path: "package-lock.json", Exists: true}, Deny, "[high]", false},
 		{"pnpm lock write hard-denies", Action{Kind: ActWrite, Path: "pnpm-lock.yaml", Exists: true}, Deny, "[high]", false},
+		{"safetensors delete hard-denies", Action{Kind: ActDelete, Path: "models/m.safetensors", Exists: true}, Deny, "[critical]", false},
+		{"generic lockfile write hard-denies", Action{Kind: ActWrite, Path: "yarn.lock", Exists: true}, Deny, "[high]", false},
 		{"go.mod write queues", Action{Kind: ActWrite, Path: "go.mod", Exists: true}, Deny, "[high]", true},
 		{"package.json write queues", Action{Kind: ActWrite, Path: "package.json", Exists: true}, Deny, "[high]", true},
 		{"requirements.txt write queues", Action{Kind: ActWrite, Path: "requirements.txt", Exists: true}, Deny, "[high]", true},
 		{"Gemfile write queues (case-folded)", Action{Kind: ActWrite, Path: "Gemfile", Exists: true}, Deny, "[high]", true},
+		{"pyproject.toml write queues", Action{Kind: ActWrite, Path: "pyproject.toml", Exists: true}, Deny, "[high]", true},
+		{"Cargo.toml write queues (case-folded)", Action{Kind: ActWrite, Path: "Cargo.toml", Exists: true}, Deny, "[high]", true},
 		{"config overwrite queues", Action{Kind: ActWrite, Path: "config.json", Exists: true}, Deny, "[high]", true},
 		{"settings.json write queues", Action{Kind: ActWrite, Path: ".vscode/settings.json", Exists: true}, Deny, "[high]", true},
 		{"yaml write queues", Action{Kind: ActWrite, Path: "compose.yaml", Exists: false}, Deny, "[medium]", true},
+		{"yml write queues", Action{Kind: ActWrite, Path: "ci.yml", Exists: false}, Deny, "[medium]", true},
 		{"toml write queues", Action{Kind: ActWrite, Path: "app.toml", Exists: false}, Deny, "[medium]", true},
+		{"ini write queues", Action{Kind: ActWrite, Path: "setup.ini", Exists: false}, Deny, "[medium]", true},
 		{"new source file allowed", Action{Kind: ActWrite, Path: "src/fresh.py", Exists: false}, Allow, "", false},
 		{"source overwrite allowed by posture", Action{Kind: ActWrite, Path: "src/app.py", Exists: true}, Allow, "", false},
 		{"makefile allowed", Action{Kind: ActWrite, Path: "Makefile", Exists: false}, Allow, "", false},
@@ -163,7 +169,11 @@ func TestDefaultRulesGateConfigNotOrdinarySource(t *testing.T) {
 			t.Errorf("%s: reason %q missing severity marker %q", tc.name, reason, tc.reason)
 		}
 		if tc.want == Deny {
-			if isQueuedAsk := strings.Contains(reason, "denied"); isQueuedAsk != tc.queued {
+			// Anchor on the unattended-ask WRAPPER, not on a word a rule's own
+			// prose could also contain (review round 2, 2026-08-14: a deny rule
+			// whose reason said "denied outright" would have misclassified as a
+			// queued ask under a bare substring check).
+			if isQueuedAsk := strings.HasPrefix(reason, "requires approval; unattended run →"); isQueuedAsk != tc.queued {
 				t.Errorf("%s: queued-ask=%v (reason %q), want queued-ask=%v", tc.name, isQueuedAsk, reason, tc.queued)
 			}
 		}
