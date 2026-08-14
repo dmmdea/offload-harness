@@ -32,8 +32,27 @@ in the agent loop.
 ### Changed
 
 - The legacy estimate-driven oldest-first drop remains ONLY as the explicit fail-open
-  fallback for endpoints with no `/tokenize`; the failure is sticky per run (one failed
+  fallback for endpoints with no `/tokenize`; the failure is sticky per Loop (one failed
   probe, no per-step network stalls). One truncation mechanism at a time, by explicit gate.
+- Exhausted-compaction telemetry follows the yardstick that measured the transcript: the
+  token-exact rung's REAL verdict when it ran (an under-counting estimate can no longer
+  hide a real forced-keep overflow, and a pessimistic estimate can no longer report a
+  verified-fitting request as exhausted on every step), the estimate otherwise. When the
+  token-exact rung measures the reactive-retry transcript as fitting, the pin-blind
+  `emergencyShrink` pass is skipped — it would destroy pinned bodies on evidence the real
+  tokenizer refutes.
+
+### Review hardening (adversarial round, 2026-08-14)
+
+- The sticky downgrade is OBSERVABLE: `Result.TokenizerPath` reports `token-exact` vs
+  `legacy (degraded: <why>)` with per-route failure detail (`tokclient` records why each
+  candidate route failed), `agent_run` returns `tokenizer_path`, the CLI prints a stderr
+  note. Fail-open, never fail-unobservable.
+- A tokenizer failure under an already-cancelled context does not trip the sticky
+  downgrade — a `--serve` client hang-up says nothing about the endpoint, and the Loop
+  (and its sticky bit) lives for the process in `--serve`/`--queue`.
+- `tokclient.Count` fails on a 200 JSON body without a `tokens` array instead of
+  returning a confident zero; token-accounting serialization includes tool-call ids.
 
 ## [0.56.0] - 2026-08-14
 

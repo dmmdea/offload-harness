@@ -968,6 +968,11 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		"model":       model,  // the resolved PLANNER seat — visibility is the cure for a silent seat (roast finding)
 		"ctx_window":  effCtx, // the window compaction budgeted against (probed, or the conservative fallback)
 	}
+	if res.TokenizerPath != "" {
+		// Which drop rung the ladder is on — same visibility rule as ctx_window:
+		// a sticky fail-open downgrade must be reportable, not inferred.
+		out["tokenizer_path"] = res.TokenizerPath
+	}
 	if res.CompactionsExhausted > 0 {
 		out["compactions_exhausted"] = res.CompactionsExhausted // fit=false telemetry: best-effort over-budget requests were sent
 	}

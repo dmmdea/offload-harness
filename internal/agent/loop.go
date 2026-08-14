@@ -104,6 +104,16 @@ type Result struct {
 	// per run instead of inferred from outcomes.
 	TokenCal TokenCalReport
 
+	// TokenizerPath reports which drop rung the compaction ladder is on at the
+	// end of the run — the visibility twin of ctx_window for the window probe
+	// (a fail-open feature that can be permanently inert with zero evidence is
+	// not fail-open, it is fail-unobservable). "" = no tokenizer configured
+	// (legacy rung by construction); "token-exact" = the real-tokenizer cut is
+	// live; "legacy (degraded: <why>)" = a tokenizer WAS configured but its
+	// first endpoint failure downgraded this Loop to the legacy rung, with the
+	// recorded reason.
+	TokenizerPath string `json:"tokenizer_path,omitempty"`
+
 	// Effects is the per-call execution ledger (effects.go): one record per
 	// tool call the model REQUESTED, in call order, present on every return
 	// path including errors. The one consequential distinction it preserves:
@@ -128,6 +138,19 @@ type TokenCalReport struct {
 	Intercept    float64 `json:"intercept,omitempty"`
 	RawBudget    int     `json:"raw_budget"`
 	FinalBudget  int     `json:"final_budget"`
+}
+
+// tokPath snapshots the tokenizer state for Result.TokenizerPath.
+func (l *Loop) tokPath() string {
+	if l.tok == nil {
+		return ""
+	}
+	if s, isSticky := l.tok.(*stickyTokenizer); isSticky {
+		if why, down := s.degraded(); down {
+			return "legacy (degraded: " + why + ")"
+		}
+	}
+	return "token-exact"
 }
 
 // calReport snapshots the calibration for the Result.
@@ -588,7 +611,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
-			return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Effects: effects}, err
+			return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), TokenizerPath: l.tokPath(), Effects: effects}, err
 		}
 		specs := l.specs
 		if len(disabledTools) > 0 {
@@ -621,9 +644,20 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		if estimateTokens(msgs) > budget {
 			opts := l.ladderOpts()
 			opts.Pinned = pinned
-			msgs = compact(ctx, msgs, budget, l.keepRecent, preambleLen, opts)
-			if estimateTokens(msgs) > budget {
-				exhausted++ // ladder exhausted — best-effort request, honestly counted
+			var verdict fitVerdict
+			msgs, verdict = compactWithVerdict(ctx, msgs, budget, l.keepRecent, preambleLen, opts)
+			// Exhaustion is judged by the yardstick that actually measured the
+			// transcript: the token-exact verdict when the cut rung ran (the
+			// estimate must neither hide a real overflow nor report a
+			// verified-fitting request as exhausted forever), the estimate
+			// otherwise — exactly the pre-tokenizer behavior.
+			switch verdict {
+			case overReal:
+				exhausted++ // forced keeps exceed the REAL budget — honestly counted
+			case fitUnknown:
+				if estimateTokens(msgs) > budget {
+					exhausted++ // ladder exhausted — best-effort request, honestly counted
+				}
 			}
 		}
 		comp, err := l.client.Chat(ctx, msgs, specs, l.maxTokens)
@@ -656,22 +690,29 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				// halves its real allowance in step with the estimate target —
 				// re-sending anything near the rejected size would only 400 again.
 				ropts.RealBudget = l.inputBudget() / 2
-				msgs = compact(ctx, msgs, target, l.keepRecent/2, preambleLen, ropts)
+				var rv fitVerdict
+				msgs, rv = compactWithVerdict(ctx, msgs, target, l.keepRecent/2, preambleLen, ropts)
 				// The harder compact can still be a NO-OP when the oversized body
 				// sits inside keepRecent (observed live: a huge newest tool result
 				// made the retry re-send the same overflow). Emergency shrink is
 				// the last resort before the run dies: it may touch tool bodies
-				// the keep-recent contract normally protects.
-				if estimateTokens(msgs) > target {
+				// the keep-recent contract normally protects. When the token-exact
+				// rung MEASURED the halved transcript as fitting (fitReal), the
+				// pin-blind emergency pass is skipped: acting on the pessimistic
+				// estimate there would destroy exactly the pinned bodies the cut
+				// just refused to drop, on evidence the real tokenizer refutes.
+				if rv != fitReal && estimateTokens(msgs) > target {
 					msgs = emergencyShrink(msgs, target, preambleLen)
 				}
-				if estimateTokens(msgs) > target {
+				if rv == overReal {
+					exhausted++ // forced keeps over the REAL halved budget — counted
+				} else if rv == fitUnknown && estimateTokens(msgs) > target {
 					exhausted++ // even the last resort could not fit — counted, never silent
 				}
 				comp, err = l.client.Chat(ctx, msgs, specs, l.maxTokens)
 			}
 			if err != nil {
-				return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Effects: effects}, err
+				return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), TokenizerPath: l.tokPath(), Effects: effects}, err
 			}
 		}
 		// Learn from the response: estimateTokens(msgs) is what we thought the
@@ -692,7 +733,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// finish_reason "stop", so trusting finish_reason drops the tool call
 		// and returns an empty answer.
 		if len(comp.Msg.ToolCalls) == 0 {
-			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Effects: effects}
+			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), TokenizerPath: l.tokPath(), Effects: effects}
 			if l.batchJudge {
 				res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 			}
@@ -723,7 +764,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			msgs = append(msgs, Msg{Role: "tool", ToolCallID: call.ID, Content: content, IsError: isErr})
 		}
 	}
-	res := Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Effects: effects}
+	res := Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), TokenizerPath: l.tokPath(), Effects: effects}
 	if l.batchJudge {
 		res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 	}
