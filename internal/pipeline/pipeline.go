@@ -354,7 +354,7 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 				meta.CacheHit = true
 				meta.TokensIn = cv.TokensIn
 				meta.LatencyMs = time.Since(start).Milliseconds()
-				p.record(req.Task, meta, len(req.Input))
+				p.record(req.Task, meta, entryLen)
 				return core.Result{OK: true, Data: cv.Data, Meta: meta}
 			}
 		}
@@ -413,7 +413,7 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 		}
 		if res.OK {
 			if ci > 0 && entrySnapshot != nil {
-				p.labelAgreement(req.Task, *entrySnapshot, entryCandidate, res, len(req.Input))
+				p.labelAgreement(req.Task, *entrySnapshot, entryCandidate, res, entryLen)
 			}
 			return res
 		}
@@ -3050,7 +3050,6 @@ func (p *Pipeline) knnPreferLargerEntry(task core.TaskType, input string) bool {
 }
 
 // entryFrom builds a ledger entry from per-call meta + the enriched signals.
-
 func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int) ledger.Entry {
 	return ledger.Entry{
 		Task: string(task), TokensIn: meta.TokensIn, TokensOut: meta.TokensOut,
