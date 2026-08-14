@@ -585,13 +585,17 @@ The **coding agent** (`local-agent`) is designed **safe-by-default** for a model
   destructive call; park-gate recall 0/81), so it is telemetry rather than a security control.
   The gate that fires is the structural rule table, and since 0.55.0 an **unattended run loads a
   built-in default table** (`internal/agent/unattended-rules.json`) when `--rules` is not given:
-  deletes and config/dependency-manifest writes queue for operator review; evidence files,
-  model weights, CI workflows, and lockfiles hard-deny; ordinary source writes stay governed by
-  the posture flags. `--rules <path>` replaces the default with your own table
-  (`examples/agent-rules.json` is a fuller starter); `--rules off` is the explicit escape hatch
-  back to the ungated posture, which the builder then announces with an `UNGATED` note. That is
-  the CLI/queue path only — the MCP `agent_run` front door passes no write/delete/shell/fetch
-  capability and is unaffected.
+  deletes and config/dependency-manifest writes queue for operator review; evidence files
+  (`*.jsonl`), model weights (`*.gguf`/`*.safetensors`) and worktree-root CI workflows hard-deny
+  on both write and delete, and lockfile/`go.sum` hand-edits hard-deny (lockfile *deletes* queue
+  like any other delete); ordinary source writes stay governed by the posture flags. The table
+  gates the write/delete tools only — file operations inside the shell/run cage are governed by
+  the OS cage, not by rules. `--rules <path>` replaces the default with your own table
+  (`examples/agent-rules.json` is an alternative starter that additionally queues source
+  overwrites and every fetch); `--rules off` is the explicit escape hatch back to the ungated
+  posture, which the builder then announces with an `UNGATED` note. That is the CLI/queue path
+  only — the MCP `agent_run` front door passes no write/delete/shell/fetch capability and is
+  unaffected.
 - **The runner (`--allow-run`) — honest posture.** The `run` tool is **OFF by default**. It runs an
   **allowlisted program directly, with no shell** (`Argv = [command, args…]`, never `/bin/sh -c`), so
   the executable allowlist (`go`, `gofmt`, `python`, `python3`, `pytest`, `npm`, `node`, `cargo`,

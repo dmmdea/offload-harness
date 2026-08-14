@@ -28,6 +28,27 @@
     "reason": "a deleted quant is a multi-GB re-download"
   },
   {
+    "kind": "write",
+    "glob": "*.safetensors",
+    "decision": "deny",
+    "severity": "critical",
+    "reason": "model weights are never a legitimate agent write target"
+  },
+  {
+    "kind": "delete",
+    "glob": "*.safetensors",
+    "decision": "deny",
+    "severity": "critical",
+    "reason": "see *.gguf"
+  },
+  {
+    "kind": "write",
+    "glob": "*.jsonl",
+    "decision": "deny",
+    "severity": "critical",
+    "reason": "append-only evidence (ledger, queues, run rows, exemplars) — a truncating overwrite destroys it as thoroughly as a delete"
+  },
+  {
     "kind": "delete",
     "glob": "*.jsonl",
     "decision": "deny",
@@ -89,6 +110,20 @@
     "decision": "ask",
     "severity": "high",
     "reason": "dependency manifest"
+  },
+  {
+    "kind": "write",
+    "glob": "requirements.txt",
+    "decision": "ask",
+    "severity": "high",
+    "reason": "dependency manifest"
+  },
+  {
+    "kind": "write",
+    "glob": "gemfile",
+    "decision": "ask",
+    "severity": "high",
+    "reason": "dependency manifest (matching is case-insensitive, so this covers Gemfile)"
   },
   {
     "kind": "write",

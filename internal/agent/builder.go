@@ -34,7 +34,11 @@ type BuildConfig struct {
 	// build stays side-effect-free regardless of the prompt.
 	SystemPromptOverride string
 
-	Unattended   bool   // true => every broker "ask" deny-and-queues (no human in the loop)
+	// Unattended: true => every broker "ask" deny-and-queues (no human in the
+	// loop). Also the key the default rule table loads on (see RulesPath): a
+	// future caller granting mutating capability WITHOUT setting Unattended
+	// gets no default table — set this honestly, not as a UI preference.
+	Unattended bool
 	AuditPath    string // append-only broker audit JSONL; must live OUTSIDE the worktree
 	AskQueuePath string // P5b: reviewable queue of asks deferred on an unattended run (optional)
 	// RulesPath names the structural risk table (rules.go LoadRules); tighten-only.
@@ -145,9 +149,13 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 		// not have stopped any of them. Saying yes to that is the operator's
 		// right; running that way without having said so is not, which is why
 		// this branch exists only behind the explicit sentinel.
-		if cfg.Unattended && (cfg.AllowDelete || cfg.AllowOverwrite || cfg.AllowShell || cfg.AllowGitHub) {
+		// AllowWrite is in this set deliberately (review finding 2026-08-14):
+		// the default table gates write-new paths too (CI workflows deny,
+		// config writes queue), so opting out with write-only capability is a
+		// real policy downgrade and must not be silent.
+		if cfg.Unattended && (cfg.AllowWrite || cfg.AllowDelete || cfg.AllowOverwrite || cfg.AllowShell || cfg.AllowGitHub) {
 			res.Notes = append(res.Notes,
-				"UNGATED (--rules off): unattended run with destructive capability and no rule table. "+
+				"UNGATED (--rules off): unattended run with mutating capability and no rule table. "+
 					"The model's own security_risk annotation is then the only per-call gate, "+
 					"and it measured as a constant 'low' (0% recall on destructive calls).")
 		}
@@ -177,11 +185,18 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 		if _, rerr = pol.WithRules(rs); rerr != nil {
 			return nil, fmt.Errorf("built-in unattended rule table: %w", rerr)
 		}
-		if cfg.AllowWrite || cfg.AllowFetch || cfg.AllowShell || cfg.AllowRun || cfg.AllowGitHub {
+		// Announce only when AllowWrite grants the tools the table actually
+		// gates (write_file/edit_file/delete_file → ActWrite/ActDelete). The
+		// table has no fetch rules by design and CANNOT see shell/run file
+		// operations (the OS cage owns those), so announcing it on a
+		// fetch/shell/run-only run would be false assurance (review finding
+		// 2026-08-14).
+		if cfg.AllowWrite {
 			res.Notes = append(res.Notes, fmt.Sprintf(
-				"default unattended rule table ACTIVE (%d rules): deletes and config/manifest "+
-					"writes queue for review; evidence/weights/workflow/lockfile mutations deny. "+
-					"--rules <path> replaces it; --rules off disables it (see internal/agent/unattended-rules.json).", len(rs)))
+				"default unattended rule table ACTIVE (%d rules, write/delete tools only — shell/run "+
+					"file ops are governed by the OS cage, not this table): deletes and config/manifest "+
+					"writes queue for review; evidence/weights/workflow mutations and lockfile hand-edits "+
+					"deny. --rules <path> replaces it; --rules off disables it (see internal/agent/unattended-rules.json).", len(rs)))
 		}
 	}
 	var askQueue *AuditLog
