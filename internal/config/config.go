@@ -489,11 +489,22 @@ type Config struct {
 	// MaxRetries is how many correction re-prompts before deferring.
 	MaxRetries int `json:"max_retries"`
 	// ClassifyMinConfidence: classify results below this (self-reported) defer.
+	// Default 0.88, calibrated 2026-08-14 from the confcal probe (120 items,
+	// difficulty-graded): the lowest self-report observed ANYWHERE was 0.85 —
+	// carried by two accepted-WRONG escalated rows — while every non-escalated
+	// emission sat at ≥0.90. The prior 0.45 sat below the entire observed
+	// distribution and never fired once (probe + 1487 production rows).
 	ClassifyMinConfidence float64 `json:"classify_min_confidence"`
 	// ConfidenceMarginThreshold: for triage/classify, if the logprob-derived
 	// top-2 legal-class margin at the decision token is below this, escalate to a
 	// larger tier (catches genuinely torn calls, e.g. eager-YES). 0 disables the
-	// logprob gate. Default 0.35.
+	// logprob gate. Per-task conformal thresholds (thresholds.json, `calibrate`)
+	// override this constant. Default 0.65, calibrated 2026-08-14: the margin is
+	// the stronger signal (AUC 0.930 vs the self-report's 0.874 on the same 120
+	// decisions) and 0.65 sits above all three observed wrong-row margins
+	// (max 0.618) while firing on 0/43 easy production classify rows (min margin
+	// 0.985 there). The prior 0.35 sat below the entire observed support
+	// (min 0.372) and never fired.
 	ConfidenceMarginThreshold float64 `json:"confidence_margin_threshold"`
 	// MaxInputChars caps input length before context-budget trimming.
 	MaxInputChars int `json:"max_input_chars"`
@@ -818,8 +829,9 @@ func Default() Config {
 		EmbedModelName:              "embeddinggemma", // explicit; reorder-proof (not MemoryStack position)
 		Temperature:                 0,
 		MaxRetries:                  1,
-		ClassifyMinConfidence:       0.45,
-		ConfidenceMarginThreshold:   0.35,
+		// Both calibrated 2026-08-14 (were 0.45/0.35 — below the observed support, never fired).
+		ClassifyMinConfidence:       0.88,
+		ConfidenceMarginThreshold:   0.65,
 		MaxInputChars:               24000, // ~6k tokens, well under ctx 8192
 		GCFCompact:                  true,  // flip decision 2026-07-24 (lossless, fail-closed; explicit false in a config file still wins)
 		CachePath:                   filepath.Join(base, "cache.db"),
@@ -892,6 +904,7 @@ func Load(path string) (Config, error) {
 	c.PrimaryGPUUUID = strings.TrimSpace(c.PrimaryGPUUUID)
 	warnUnknownKeys(b)
 	warnBadEnumValues(c)
+	warnDeadThresholds(c)
 	if home, herr := os.UserHomeDir(); herr == nil {
 		c.Home = ExpandTilde(c.Home, home)
 		expandUserPaths(&c, home)
@@ -947,6 +960,30 @@ func warnBadEnumValues(c Config) {
 	case "", "whisper", "openai":
 	default:
 		fmt.Fprintf(os.Stderr, "warning: unrecognized stt_hq_api %q (valid: \"\", \"whisper\", \"openai\") — treating as \"whisper\"; an llama-server HQ model will 404\n", c.STTHQAPI)
+	}
+}
+
+// warnDeadThresholds flags confidence-gate thresholds sitting at or below the
+// floor of their signal's observed distribution — a gate that structurally
+// cannot fire (measured 2026-08-11: the pre-0.55.0 defaults 0.45/0.35 sat
+// below every value either signal ever produced, on a 120-item probe AND 1487
+// production rows, so both gates were dead for their entire deployed life).
+// Load overlays the config file onto Default(), so a file written before the
+// 0.55.0 calibration pins the dead constants forever without this warning
+// (same silent-config-state trap as warnBadEnumValues). Zero disables a gate
+// on purpose and is not warned.
+func warnDeadThresholds(c Config) {
+	const (
+		minObservedConfidence = 0.85  // lowest self-reported classify confidence ever observed
+		minObservedMargin     = 0.372 // lowest logprob decision margin ever observed
+	)
+	if c.ClassifyMinConfidence > 0 && c.ClassifyMinConfidence <= minObservedConfidence {
+		fmt.Fprintf(os.Stderr, "warning: classify_min_confidence %.2f is at/below the lowest observed self-confidence (%.2f) — the gate cannot fire; calibrated default is 0.88 (remove the key to inherit it)\n",
+			c.ClassifyMinConfidence, minObservedConfidence)
+	}
+	if c.ConfidenceMarginThreshold > 0 && c.ConfidenceMarginThreshold <= minObservedMargin {
+		fmt.Fprintf(os.Stderr, "warning: confidence_margin_threshold %.2f is at/below the lowest observed decision margin (%.3f) — as the fallback gate it cannot fire (per-task conformal thresholds from thresholds.json, when loaded, override it); calibrated default is 0.65 (remove the key to inherit it)\n",
+			c.ConfidenceMarginThreshold, minObservedMargin)
 	}
 }
 

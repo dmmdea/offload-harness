@@ -22,8 +22,25 @@ func TestBuildOpenWritePosture(t *testing.T) {
 	if d, _ := res.Policy.Decide(Action{Kind: ActWrite, Path: "a.txt", Exists: true}); d != Allow {
 		t.Errorf("built policy overwrite = %q, want allow", d)
 	}
+	// Since TO-1 step 2, an unattended build loads the default rule table, whose
+	// delete catch-all vetoes the open-delete posture to ask → deny-and-queue.
+	if d, _ := res.Policy.Decide(Action{Kind: ActDelete, Path: "a.txt", Exists: true}); d != Deny {
+		t.Errorf("unattended built policy delete = %q, want deny (default rule table)", d)
+	}
+	// The pre-table "fully open" posture is reachable only via the explicit
+	// escape hatch.
+	res, err = Build(BuildConfig{
+		PlannerBase: "http://127.0.0.1:11436", Model: "m", ReadRoot: dir,
+		Unattended: true, AllowWrite: true, AllowOverwrite: true, AllowDelete: true,
+		Worktree:  dir,
+		AuditPath: filepath.Join(t.TempDir(), "audit.jsonl"),
+		RulesPath: RulesOff,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if d, _ := res.Policy.Decide(Action{Kind: ActDelete, Path: "a.txt", Exists: true}); d != Allow {
-		t.Errorf("built policy delete = %q, want allow", d)
+		t.Errorf("built policy delete with --rules off = %q, want allow", d)
 	}
 }
 

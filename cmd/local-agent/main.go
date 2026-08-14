@@ -118,8 +118,8 @@ func main() {
 	allowSearch := fs.Bool("allow-search", false, "enable web_search (DuckDuckGo, keyless; auto-allowlists the search host). Default off.")
 	allowGitHub := fs.Bool("allow-github", false, "enable GitHub tools (github_api/create_repo/upload_file). Token from $GITHUB_TOKEN, default repo from $GITHUB_REPO. Default off.")
 	queuePath := fs.String("queue", "", "P5b standalone: drain a JSONL goal queue UNATTENDED (the capability flags become the pre-authorization envelope) instead of a single objective. No resume — a re-run reprocesses the whole queue.")
-	askQueuePath := fs.String("ask-queue", "", "standalone: file where asks deferred on the unattended run are parked for review (default: ~/.local-offload/agent-asks.jsonl)")
-	rulesPath := fs.String("rules", "", "structural risk rule table (JSON array of {kind,glob,decision,severity,reason}; tighten-only — rules may deny or ask, never allow). Fails closed on a bad or missing file.")
+	askQueuePath := fs.String("ask-queue", "", "file where asks deferred on the unattended run are parked for review (default when any mutating capability is enabled: ~/.local-offload/agent-asks.jsonl)")
+	rulesPath := fs.String("rules", "", "structural risk rule table (JSON array of {kind,glob,decision,severity,reason}; tighten-only — rules may deny or ask, never allow). Fails closed on a bad or missing file. Default (empty): the built-in unattended table loads (deletes + config/manifest writes queue for review; evidence/weights/workflow/lockfile mutations deny). Pass a path to REPLACE it, or 'off' to run ungated (measured 2026-08-11: the model's own security_risk annotation is a constant 'low' — 0% recall on destructive calls).")
 	tracesDir := fs.String("traces", "", "standalone: directory for per-goal trace JSON (default: ~/.local-offload/agent-traces)")
 	goalTimeoutSec := fs.Int("goal-timeout", 300, "standalone: per-goal wall-clock budget in seconds")
 	totalTimeoutSec := fs.Int("total-timeout", 0, "standalone: optional cumulative wall-clock budget for the WHOLE drain in seconds (0 = unbounded; --goal-timeout still bounds each goal)")
@@ -200,22 +200,30 @@ func main() {
 	// The broker audit trail must live OUTSIDE any worktree; resolve a default
 	// only when a mutating capability is enabled.
 	auditP := *auditPath
-	if auditP == "" && (*allowWrite || *allowFetch || *allowShell || *allowRun) {
+	// allowGitHub included (review round 2, 2026-08-14): a --allow-github-only
+	// run gets a worktree and github_upload_file — an outward-facing write
+	// surface that must not run without an audit trail.
+	if auditP == "" && (*allowWrite || *allowFetch || *allowShell || *allowRun || *allowGitHub) {
 		if home, e := os.UserHomeDir(); e == nil {
 			auditP = filepath.Join(home, ".local-offload", "agent-audit.jsonl")
 		}
 	}
 
-	// Standalone (--queue): default the ask-queue + traces dir alongside the audit.
+	// Default the ask-queue for EVERY run with a mutating capability, not just
+	// --queue mode (review finding 2026-08-14): this CLI is always unattended,
+	// so every broker ask resolves to deny-and-queue — and since the default
+	// rule table queues deletes/config writes by design, a run without an ask
+	// queue would deny the calls and have nowhere to record them for the
+	// morning review. Traces stay --queue-only.
 	askQ, tracesD := *askQueuePath, *tracesDir
-	if *queuePath != "" {
+	if askQ == "" && (*allowWrite || *allowFetch || *allowShell || *allowRun || *allowGitHub) {
 		if home, e := os.UserHomeDir(); e == nil {
-			if askQ == "" {
-				askQ = filepath.Join(home, ".local-offload", "agent-asks.jsonl")
-			}
-			if tracesD == "" {
-				tracesD = filepath.Join(home, ".local-offload", "agent-traces")
-			}
+			askQ = filepath.Join(home, ".local-offload", "agent-asks.jsonl")
+		}
+	}
+	if *queuePath != "" && tracesD == "" {
+		if home, e := os.UserHomeDir(); e == nil {
+			tracesD = filepath.Join(home, ".local-offload", "agent-traces")
 		}
 	}
 
@@ -456,6 +464,12 @@ func main() {
 		if eerr != nil {
 			fmt.Fprintln(os.Stderr, "error: building editor:", eerr)
 			os.Exit(1)
+		}
+		// Print BOTH tiers' notes — the architect's were silently dropped before
+		// (review finding 2026-08-14), which would have swallowed any future
+		// architect-side capability warning.
+		for _, n := range archBuilt.Notes {
+			fmt.Fprintln(os.Stderr, "[local-agent] architect: "+n)
 		}
 		for _, n := range editBuilt.Notes {
 			fmt.Fprintln(os.Stderr, "[local-agent] "+n)
