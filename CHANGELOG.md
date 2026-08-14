@@ -54,6 +54,48 @@ in the agent loop.
 - `tokclient.Count` fails on a 200 JSON body without a `tokens` array instead of
   returning a confident zero; token-accounting serialization includes tool-call ids.
 
+### Review hardening (round 2 — three-specialist pass, 2026-08-14)
+
+- **Tool-spec reservation (`specReserve`)**: the tool-spec block ships with every chat
+  request but no yardstick counted it — on a full `--allow-*` build it runs 4-6× the fixed
+  512-token margin, so the token-exact `fitReal` verdict could veto the `emergencyShrink`
+  last resort on a prompt the server rejects (the run died where it previously recovered).
+  Every budget now reserves the block's REAL tokenized cost (measured once per Loop via the
+  same tokenizer seam; conservative chars/3 estimate when no tokenizer answers; zero for
+  tool-less Loops — their arithmetic is byte-identical to before).
+- **Classified sticky downgrade**: a single transient failure (cold-start timeout, 503
+  mid-swap, reset) no longer degrades a healthy endpoint for the process life. Definitive
+  route absence (all candidates 404/405, classified by `tokclient.LastFailDefinitive`)
+  still downgrades immediately; transient failures take two consecutive misses, and a
+  success resets the streak.
+- **Input-scaled read cap**: the flat 8 MiB response cap silently truncated `with_pieces`
+  responses for large transcripts (~26 bytes/token on the wire), tripping the downgrade
+  with a reason blaming the server — deterministic self-disable in exactly the
+  long-transcript regime the feature targets. The cap now scales (`16×input + 1 MiB`).
+- **Garbage-200 route attribution**: a candidate answering 200 with a non-tokenize body
+  (interposing proxy) now counts as that candidate failing — URL-named in the reason — and
+  the fallback route actually runs instead of being masked.
+- **Two-tier telemetry**: `RunTwoTier` no longer drops the architect's verdicts — new
+  `Result.ArchTokenizerPath` on all three return paths (each tier degrades independently),
+  and both fallback paths now aggregate the architect's `CompactionsExhausted` too. The
+  CLI prints per-tier degrade notes.
+- **`--serve`/`--queue` visibility**: the modes where the sticky bit outlives a single run
+  previously surfaced it nowhere. Both now print a once-per-process transition note, and
+  every queue trace records the goal's `tokenizer_path`.
+- **Contract-check honesty**: a tokenizer whose pieces do not reconstruct the transcript
+  now trips the sticky downgrade with a recorded reason (previously a silent per-step
+  refusal while `TokenizerPath` kept claiming token-exact).
+- **Shared degrade prefix**: `agent.TokenizerDegradedPrefix` is the one contract between
+  the producer and every consumer that branches on degradation (CLI notes, queue traces) —
+  two independent string literals could drift and silently kill the operator note.
+- Verdict-yardstick tightening: the survivors' separator tokens are now counted in the
+  `fits` verdict (every asymmetry leans conservative). Docs qualify honestly that the
+  estimate still decides whether the ladder ENGAGES (the reactive retry is the net for the
+  under-count regime), and that `token-exact` means configured-and-not-degraded.
+- Dispositions recorded without code: `tokclient.Count` stays staged (TO-3 consumes it in
+  0.58.0 the same night); the post-`emergencyShrink` exhausted count may over-count in
+  estimate space (honest direction — never hides an overflow).
+
 ## [0.56.0] - 2026-08-14
 
 Master-plan step-4 remainder: the ComfyUI submission/timing plumbing is re-expressed through the

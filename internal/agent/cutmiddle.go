@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync/atomic"
 )
@@ -40,25 +41,47 @@ type Tokenizer interface {
 	Pieces(ctx context.Context, text string) ([]int, bool)
 }
 
-// stickyTokenizer downgrades permanently after the first ENDPOINT failure: an
-// endpoint that could not answer /tokenize once is overwhelmingly an endpoint
-// without the route, and paying a failed round-trip on every over-budget step
-// would put a network stall inside the loop for nothing. A failure while the
-// caller's ctx is already cancelled says NOTHING about the endpoint (the run
-// is shutting down, or a --serve client hung up) — that one is not recorded,
-// or a single mid-run cancellation would silently downgrade every later run
-// sharing this Loop (--serve and --queue keep one Loop for the process).
-// atomic — --serve shares one *Loop (and thus one tokenizer) across
+// stickyTokenizer downgrades permanently once the endpoint is judged unable to
+// answer /tokenize — paying a failed round-trip on every over-budget step would
+// put a network stall inside the loop for nothing. The judgment is classified,
+// not first-failure (review finding 2026-08-14 — one cold-start timeout or one
+// 503 during a model swap must not degrade a healthy endpoint for the process
+// life, which in --serve/--queue is every later goal):
+//   - a DEFINITIVE failure (the endpoint answered 404/405 on every route — the
+//     route positively does not exist, retrying cannot help) downgrades
+//     immediately;
+//   - a TRANSIENT failure (timeout, reset, 5xx, malformed body) downgrades only
+//     on the SECOND consecutive failure; a success in between resets the count.
+//     The cost of the second chance is at most one extra stalled probe.
+//
+// A failure while the caller's ctx is already cancelled says NOTHING about the
+// endpoint (the run is shutting down, or a --serve client hung up) — that one
+// is never counted, or a single mid-run cancellation would silently downgrade
+// every later run sharing this Loop (--serve and --queue keep one Loop for the
+// process). atomic — --serve shares one *Loop (and thus one tokenizer) across
 // concurrent HTTP handlers.
 type stickyTokenizer struct {
-	inner  Tokenizer
-	failed atomic.Bool
-	reason atomic.Value // string: WHY the downgrade happened, for the Result report
+	inner   Tokenizer
+	failed  atomic.Bool
+	strikes atomic.Int32 // consecutive live-ctx transient failures
+	reason  atomic.Value // string: WHY the downgrade happened, for the Result report
 }
 
 // errDetailer is the optional seam for implementations that can say WHY the
 // last call failed (tokclient.Client does). Only consulted at downgrade time.
 type errDetailer interface{ LastErr() string }
+
+// definitiveFailer is the optional seam for implementations that can say the
+// last failure was a positive route absence (tokclient.Client: all candidates
+// answered 404/405). Absent the seam every failure counts as transient, so a
+// second implementation gets the two-strike behavior, never a harsher one.
+type definitiveFailer interface{ LastFailDefinitive() bool }
+
+// stickyStrikeLimit is how many CONSECUTIVE transient failures downgrade the
+// run to the legacy rung. Two: the first may be a cold start or a model swap;
+// two in a row on a live ctx is an endpoint that cannot currently serve the
+// route, and each additional probe is a stall inside the agent loop.
+const stickyStrikeLimit = 2
 
 func (s *stickyTokenizer) Pieces(ctx context.Context, text string) ([]int, bool) {
 	if s.failed.Load() {
@@ -73,12 +96,34 @@ func (s *stickyTokenizer) Pieces(ctx context.Context, text string) ([]int, bool)
 					why = e
 				}
 			}
-			s.reason.Store(why)
-			s.failed.Store(true)
+			definitive := false
+			if df, hasClass := s.inner.(definitiveFailer); hasClass {
+				definitive = df.LastFailDefinitive()
+			}
+			switch {
+			case definitive:
+				s.reason.Store(why)
+				s.failed.Store(true)
+			case s.strikes.Add(1) >= stickyStrikeLimit:
+				s.reason.Store(fmt.Sprintf("%d consecutive failures, last: %s", stickyStrikeLimit, why))
+				s.failed.Store(true)
+			}
 		}
 		return nil, false
 	}
+	s.strikes.Store(0) // a success breaks any transient streak
 	return lens, true
+}
+
+// reportBroken records a CONTRACT failure detected by the caller (pieces that
+// do not reconstruct the input) and downgrades immediately: a tokenizer whose
+// mapping cannot be trusted is broken for this run regardless of transport
+// health, and without recording it Result.TokenizerPath would keep claiming
+// token-exact while every cut silently fell to the legacy rung (review finding
+// 2026-08-14 — the observability field must never lie).
+func (s *stickyTokenizer) reportBroken(why string) {
+	s.reason.Store(why)
+	s.failed.Store(true)
 }
 
 // degraded reports whether (and why) the sticky downgrade fired.
@@ -200,17 +245,20 @@ func cutMiddleTurns(ctx context.Context, tok Tokenizer, msgs []Msg, realBudget, 
 	// Contract check (tokclient verifies this too; a second implementation
 	// might not): the pieces must reconstruct the text's bytes exactly, or the
 	// byte→token mapping below would be built on sand. Fail open, never cut on
-	// an unreliable mapping. Deliberately NOT routed through the sticky
-	// wrapper's downgrade (this return is indistinguishable from a transport
-	// failure to the caller): the shipping implementation self-checks, so this
-	// fires only for a future non-verifying implementation, which then pays a
-	// per-step round-trip — visible in the degraded/latency profile, never in
-	// corrupted cuts.
+	// an unreliable mapping — and REPORT it through the sticky wrapper's
+	// broken-contract seam, so a non-verifying implementation downgrades
+	// observably instead of paying a doomed round-trip per step while
+	// Result.TokenizerPath keeps claiming token-exact (review finding
+	// 2026-08-14: the earlier comment claimed this was "visible in the
+	// degraded/latency profile" — no such profile signal existed).
 	sum := 0
 	for _, n := range pieces {
 		sum += n
 	}
 	if sum != len(text) {
+		if br, canReport := tok.(interface{ reportBroken(string) }); canReport {
+			br.reportBroken(fmt.Sprintf("tokenizer pieces sum to %d bytes for a %d-byte transcript — mapping violates the reconstruction contract", sum, len(text)))
+		}
 		return msgs, false, false
 	}
 
@@ -326,7 +374,17 @@ func cutMiddleTurns(ctx context.Context, tok Tokenizer, msgs []Msg, realBudget, 
 		}
 	}
 	// The REAL-token fit verdict on what survived: forced keeps can exceed the
-	// budget, and only this yardstick may say so (see the doc comment).
-	fits := keptTokens+realMsgOverheadTokens*len(out) <= realBudget
+	// budget, and only this yardstick may say so (see the doc comment). The
+	// separators joining the survivors are counted too (spans start AFTER each
+	// separator, so span sums alone under-count the re-serialized transcript by
+	// one separator per boundary — review finding 2026-08-14: every asymmetry
+	// in this verdict must lean conservative, never loose; a straddling token
+	// already counted in both neighbors over-counts here, which is the safe
+	// direction).
+	sepTokens := 0
+	if len(out) > 1 {
+		sepTokens = len(out) - 1
+	}
+	fits := keptTokens+sepTokens+realMsgOverheadTokens*len(out) <= realBudget
 	return out, fits, true
 }

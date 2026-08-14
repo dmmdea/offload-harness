@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -225,5 +226,111 @@ func TestLastErrNamesBothFailedRoutes(t *testing.T) {
 	e := c.LastErr()
 	if !strings.Contains(e, "/upstream/gemma-4-e4b/tokenize") || !strings.Contains(e, "HTTP 404") {
 		t.Fatalf("LastErr = %q — must name each failed route and its status so the downgrade is diagnosable", e)
+	}
+}
+
+// --- review round 2 (2026-08-14): shape sniff, failure classification, scaled cap ---
+
+// A 200 whose body is NOT a tokenize response (an interposing proxy's page)
+// must count as THAT candidate failing — URL-attributed — and must not mask
+// the fallback route, which may answer correctly.
+func TestGarbage200FallsThroughToBareRoute(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/upstream/") {
+			fmt.Fprint(w, `<html>gateway error page</html>`) // 200, not tokenize-shaped
+			return
+		}
+		if r.URL.Path == "/tokenize" {
+			piecesHandler(t)(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "m", time.Second)
+	if _, ok := c.Pieces(context.Background(), "one two"); !ok {
+		t.Fatalf("Pieces must fall through a garbage-200 first candidate to the healthy bare route (LastErr=%q)", c.LastErr())
+	}
+}
+
+// When EVERY route answers 200-with-garbage, the recorded reason must name
+// each URL (the attribution the reasons machinery exists for) and the failure
+// must classify as transient, not definitive.
+func TestAllRoutesGarbage200FailsWithURLAttribution(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"error":"model loading"}`)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "gemma-4-e4b", time.Second)
+	if _, ok := c.Pieces(context.Background(), "text"); ok {
+		t.Fatal("expected failure when no route returns a tokenize-shaped body")
+	}
+	e := c.LastErr()
+	if !strings.Contains(e, "/upstream/gemma-4-e4b/tokenize") || !strings.Contains(e, "not a tokenize response") {
+		t.Fatalf("LastErr = %q — the garbage-200 must be URL-attributed", e)
+	}
+	if c.LastFailDefinitive() {
+		t.Fatal("a garbage 200 is NOT proof the route is absent — it must classify transient")
+	}
+}
+
+// Failure classification: all-404 is definitive (the route positively does not
+// exist); any 5xx in the mix is not (the server may just be swapping a model);
+// and the mark tracks the MOST RECENT failure rather than sticking.
+func TestLastFailDefinitiveClassification(t *testing.T) {
+	var status atomic.Int32
+	status.Store(http.StatusNotFound)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", int(status.Load()))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "m", time.Second)
+	c.Pieces(context.Background(), "text")
+	if !c.LastFailDefinitive() {
+		t.Fatal("every candidate answered 404 — the failure must classify as definitive route absence")
+	}
+
+	// The same client later hits a 503 (model swap in flight): the definitive
+	// mark must follow the most recent failure (fail() resets it before post()
+	// re-stores), or one old 404 would keep licensing an immediate downgrade.
+	status.Store(http.StatusServiceUnavailable)
+	c.Pieces(context.Background(), "text")
+	if c.LastFailDefinitive() {
+		t.Fatal("a 503 (model swap in flight) must classify as transient, never definitive")
+	}
+}
+
+// The read cap scales with the input: a with_pieces response for a large
+// transcript legitimately exceeds the old flat 8 MiB cap (~26 bytes/token on
+// the wire), and truncating it tripped the sticky downgrade with a reason
+// blaming the server (review finding 2026-08-14). 1 MiB of content ×
+// one-byte string pieces ≈ 14 MiB of response must now decode fine.
+func TestScaledReadCapAdmitsLargePiecesResponse(t *testing.T) {
+	content := strings.Repeat("a", 1<<20)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Content string `json:"content"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tokens":[`))
+		entry := []byte(`{"piece":"a"},`)
+		for i := 0; i < len(req.Content); i++ {
+			if i == len(req.Content)-1 {
+				entry = []byte(`{"piece":"a"}`)
+			}
+			_, _ = w.Write(entry)
+		}
+		_, _ = w.Write([]byte(`]}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "m", 30*time.Second)
+	lens, ok := c.Pieces(context.Background(), content)
+	if !ok {
+		t.Fatalf("Pieces failed on a legitimate oversized response — the read cap must scale with the input (LastErr=%q)", c.LastErr())
+	}
+	if len(lens) != len(content) {
+		t.Fatalf("got %d pieces, want %d", len(lens), len(content))
 	}
 }

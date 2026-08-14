@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
@@ -499,7 +500,8 @@ func main() {
 		if res.Fallback != agent.FallbackNone {
 			fmt.Fprintf(os.Stderr, "[local-agent] two-tier FELL BACK to a single editor run (%s)\n", res.Fallback)
 		}
-		printTokenizerDegrade(res.TokenizerPath)
+		printTokenizerDegrade("editor", res.TokenizerPath)
+		printTokenizerDegrade("architect", res.ArchTokenizerPath)
 		if *asJSON {
 			b, _ := json.MarshalIndent(res, "", "  ")
 			fmt.Println(string(b))
@@ -516,7 +518,7 @@ func main() {
 		printFlaggedEffects(res.Effects) // what already touched the world before the death
 		os.Exit(1)
 	}
-	printTokenizerDegrade(res.TokenizerPath)
+	printTokenizerDegrade("", res.TokenizerPath)
 	if *asJSON {
 		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))
@@ -530,10 +532,31 @@ func main() {
 // token-exact drop rung failing open to the legacy estimate rung is the
 // designed contract, but doing so INVISIBLY would leave 0.57.0 behaving like
 // 0.56.0 with no way to tell (review finding 2026-08-14) — same precedent as
-// reporting the resolved context window.
-func printTokenizerDegrade(path string) {
-	if strings.HasPrefix(path, "legacy (degraded") {
-		fmt.Fprintf(os.Stderr, "[local-agent] token-exact compaction DEGRADED to the legacy estimate rung: %s\n", path)
+// reporting the resolved context window. The check anchors on the exported
+// agent.TokenizerDegradedPrefix, never a local literal, so a wording change in
+// the producer cannot silently kill this note. tier labels the loop under
+// --two-tier ("" for the single-loop path).
+func printTokenizerDegrade(tier, path string) {
+	if strings.HasPrefix(path, agent.TokenizerDegradedPrefix) {
+		label := ""
+		if tier != "" {
+			label = tier + " "
+		}
+		fmt.Fprintf(os.Stderr, "[local-agent] %stoken-exact compaction DEGRADED to the legacy estimate rung: %s\n", label, path)
+	}
+}
+
+// tokenizerDegradeNoted guards the once-per-process degrade note for the
+// long-running modes (--serve, --queue), where one shared Loop means one
+// downgrade poisons every later goal/request: the transition is printed
+// exactly once instead of per goal (37 identical lines help nobody), and the
+// per-goal state lives in the queue's trace records. atomic — --serve
+// handlers run concurrently.
+var tokenizerDegradeNoted atomic.Bool
+
+func noteTokenizerDegradeOnce(path string) {
+	if strings.HasPrefix(path, agent.TokenizerDegradedPrefix) && tokenizerDegradeNoted.CompareAndSwap(false, true) {
+		fmt.Fprintf(os.Stderr, "[local-agent] token-exact compaction DEGRADED to the legacy estimate rung for the REST OF THIS PROCESS: %s\n", path)
 	}
 }
 

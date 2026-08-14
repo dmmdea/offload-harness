@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -62,12 +63,13 @@ func TestAgentRunMCPLive(t *testing.T) {
 	}
 	text := textOf(res)
 	var out struct {
-		Output     string `json:"output"`
-		Steps      int    `json:"steps"`
-		StopReason string `json:"stop_reason"`
-		Tools      int    `json:"tools"`
-		Deferred   bool   `json:"deferred"`
-		Reason     string `json:"reason"`
+		Output        string `json:"output"`
+		Steps         int    `json:"steps"`
+		StopReason    string `json:"stop_reason"`
+		Tools         int    `json:"tools"`
+		Deferred      bool   `json:"deferred"`
+		Reason        string `json:"reason"`
+		TokenizerPath string `json:"tokenizer_path"`
 	}
 	if jerr := json.Unmarshal([]byte(text), &out); jerr != nil {
 		t.Fatalf("parse agent_run result %q: %v", text, jerr)
@@ -81,7 +83,14 @@ func TestAgentRunMCPLive(t *testing.T) {
 	if out.Steps <= 0 {
 		t.Errorf("agent_run should report >=1 step; got %d (%q)", out.Steps, text)
 	}
-	t.Logf("agent_run via MCP: steps=%d stop=%s tools=%d output=%q", out.Steps, out.StopReason, out.Tools, out.Output)
+	// The MCP front door wires a tokenizer against the live planner, so the
+	// result must carry the rung — either healthy or an explicit degrade; an
+	// absent/other value means the omit-when-empty conditional inverted
+	// (pr-test-analyzer gap 5, 2026-08-14).
+	if out.TokenizerPath != "token-exact" && !strings.HasPrefix(out.TokenizerPath, agent.TokenizerDegradedPrefix) {
+		t.Errorf("tokenizer_path = %q, want token-exact or a %q-prefixed degrade", out.TokenizerPath, agent.TokenizerDegradedPrefix)
+	}
+	t.Logf("agent_run via MCP: steps=%d stop=%s tools=%d tokenizer=%s output=%q", out.Steps, out.StopReason, out.Tools, out.TokenizerPath, out.Output)
 }
 
 func textOf(res *mcp.CallToolResult) string {
