@@ -56,6 +56,10 @@ type Entry struct {
 	// grounding/verifier/retries) could not be recovered from telemetry.
 	// Closed set = groupable; the free-text Reason is not.
 	EscSource string `json:"esc_source,omitempty"`
+	// TierPack records how a climbed-to tier's input was packed (TO-3, see
+	// core.Meta.TierPack). Empty on entry-tier rows; old ledger lines without
+	// the field parse fine.
+	TierPack string `json:"tier_pack,omitempty"`
 }
 
 // maxReasonLen bounds a recorded defer reason so a long upstream error can't

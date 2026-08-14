@@ -58,6 +58,37 @@ func TestProbeServedWindowBareServer(t *testing.T) {
 	}
 }
 
+// ProbeUpstreamWindow must NOT fall back to the bare root: the root /props
+// answers for whatever model is currently loaded, so a multi-model caller
+// (the cascade's TO-3 repack) would budget one tier against another tier's
+// window. Reverting the restriction makes this test fail (round-2 review
+// 2026-08-14: the restriction previously had zero regression coverage).
+func TestProbeUpstreamWindowNeverFallsBackToRoot(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/props" { // bare-root only — the WRONG model's window
+			w.Write([]byte(propsJSON(4096)))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	if n, ok := ProbeUpstreamWindow(context.Background(), srv.URL, "m"); ok {
+		t.Fatalf("upstream-only probe fell back to the bare root and returned %d — the cascade would budget with the wrong model's window", n)
+	}
+	// The per-model route still answers.
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/upstream/m/props" {
+			w.Write([]byte(propsJSON(8192)))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv2.Close()
+	if n, ok := ProbeUpstreamWindow(context.Background(), srv2.URL, "m"); !ok || n != 8192 {
+		t.Fatalf("upstream probe = (%d,%v), want (8192,true)", n, ok)
+	}
+}
+
 // A generic OpenAI endpoint with no /props: the probe fails cleanly (callers
 // fall back; a probe must never be able to break a run).
 func TestProbeServedWindowUnanswerable(t *testing.T) {

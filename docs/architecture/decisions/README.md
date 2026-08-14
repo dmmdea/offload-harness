@@ -27,6 +27,11 @@ code, treat everything else as background.
 | [0015](0015-compaction-defaults-on-served-window.md) | Accepted | Compaction rungs default ON (measured flip decision); the budget probes the SERVED window; emergency shrink on the overflow retry |
 | [0016](0016-phase-c-dedupe-pinning-force-preserve.md) | Accepted | Phase C: content-addressed dedupe rung, re-request pinning (H8), FORCE_PRESERVE elide/drop guards, fit=false telemetry, monotonicity invariant |
 | [0017](0017-kv-reuse-is-binary-and-how-we-measure-it.md) | Accepted | KV reuse is append-only (any edit costs the whole cache); the `kvbench` mode measures it, brackets itself with controls, and fails closed |
+| [0018](0018-machine-wide-fenced-gpu-lease.md) | Accepted | Arbitration moves below the render path: a machine-wide fenced GPU lease |
+| [0019](0019-alias-backed-media-is-declared-per-tier.md) | Accepted | Alias-backed media is declared per tier, and the binding is derived from the seat |
+| [0020](0020-residency-is-declared-with-matrix.md) | Accepted | Residency is declared with `matrix:`, not `groups:` |
+| [0021](0021-one-renderer-the-installers-are-wrappers.md) | Accepted | One renderer: the installers are wrappers, not renderers |
+| [0022](0022-escalation-repacks-from-the-original.md) | Accepted | The escalation boundary repacks from the original; the cache key is the logical request |
 
 
 ## Lifecycle

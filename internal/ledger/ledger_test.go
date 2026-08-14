@@ -193,6 +193,49 @@ func TestRecordReasonTruncatedAndRoundTrips(t *testing.T) {
 	}
 }
 
+// TestLedgerRoundTripsTierPack (TO-3): the escalation-boundary repack
+// disposition persists, is omitted when empty, and old lines without the
+// field still parse.
+func TestLedgerRoundTripsTierPack(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "ledger.jsonl")
+	l, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Record(Entry{Task: "classify", ModelTier: "big", Escalations: 1, TierPack: "token-exact (cut 400/1000 tokens)"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Record(Entry{Task: "classify", ModelTier: "small"}); err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o600)
+	_, _ = f.WriteString(`{"ts":1,"task":"classify","model_tier":"big","escalations":1}` + "\n")
+	f.Close()
+
+	got, err := ReadAll(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("want 3 entries, got %d", len(got))
+	}
+	if got[0].TierPack != "token-exact (cut 400/1000 tokens)" {
+		t.Fatalf("tier_pack must round-trip, got %q", got[0].TierPack)
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if strings.Contains(lines[1], "tier_pack") {
+		t.Fatalf("entry-tier row must OMIT tier_pack (omitempty), got: %s", lines[1])
+	}
+	if got[2].TierPack != "" {
+		t.Fatalf("pre-tier_pack line must parse with empty TierPack, got %q", got[2].TierPack)
+	}
+}
+
 // TestTopDeferReasons (LO-8): aggregation counts only deferred entries in the
 // window, groups legacy blank reasons under (unrecorded), sorts by count then
 // alphabetically, and caps at topN.

@@ -6,6 +6,83 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.58.0] - 2026-08-14
+
+TO-3 (plan 2026-08-07): tier-aware repacking at the escalation boundary — a climbed-to tier
+re-reads the ORIGINAL source against its own served window instead of inheriting the entry
+tier's lossy cut.
+
+### Added — the escalation and reasoning tiers re-read the source
+
+- **`internal/pipeline/tierpack.go`**: when a request climbs past the entry tier, the callee's
+  input is re-packed from the retained original against `n_ctx(callee) − task max_tokens −
+  reserve − tokenized(scaffold)` — `n_ctx` probed live per model (`/props`, the agent window
+  probe, cached with a 10-min TTL; failures cached too so a dead route costs one probe per TTL,
+  not one per climb) and every count measured by the callee's own served tokenizer
+  (`internal/tokclient`, the TO-4 path — `Count` gains its first production callers). A source
+  that fits the bigger window arrives WHOLE; an over-window source is cut token-exact, head+tail
+  (2/3–1/3, mirroring the entry trim's bias), on piece boundaries backed off to rune boundaries
+  (the LO-13 mojibake class is unrepresentable). The terminal reasoning tier repacks the same way.
+- **Observability**: new `tier_pack` field on `core.Meta` and the ledger row — empty on entry
+  rows; `token-exact (full source)` / `token-exact (cut K/N tokens)` / `entry-inherited (<why>)`
+  on climbed rows. The fail-open is recorded, never inferred (the TO-4 review rule).
+- **Recursion half of TO-3**: verified structural, nothing to remove — the chain walk is bounded,
+  the confhead gate excludes the escalation tier, `attemptReasoning` has no escalation gate, and
+  no "escalate tool" exists anywhere in this codebase (the plan text's phrasing maps to an
+  architecture this cascade never had; recorded in the nightshift-4 notes).
+
+### Changed
+
+- The cascade cache key is now the ORIGINAL input — the logical request's identity — not the
+  entry packing. Under-cap inputs (the overwhelming majority) key byte-identically, so cache
+  continuity holds; an oversized input re-keys once, and the old key COLLIDED two different
+  originals sharing a trim (a wrong cache hit) — strictly more correct.
+- Per-tier prompt rebuilds re-apply the Phase 6 exemplar injection (`withExemplars`, factored
+  from the entry path) so a climbed tier does not silently lose its few-shot shots.
+- Fail-open contract: any probe/tokenize/build failure on the repack path leaves the climbed
+  tier's input BYTE-IDENTICAL to the entry packing (the pre-TO-3 behavior), with the reason in
+  `tier_pack`.
+- The agent half of TO-3(a) — tool-schema tokens reserved out of every loop budget — shipped in
+  0.57.0 (`specReserve`) because TO-4's fit verdict required it; recorded here for the plan's
+  paper trail.
+
+### Review hardening (three-specialist round, 2026-08-14)
+
+- **CRITICAL — think-budget reservation**: the reasoning tier generates with
+  `MaxTokens+reasoningThinkBudget` (512), but its repack budgeted bare `MaxTokens` — a
+  ~384-token window overshoot on the default config, on exactly the large inputs TO-3
+  serves. `packForTier` now takes the callee's REAL completion request (`genBudget`).
+- **View-shrink inversion closed**: a callee served with a small window could pass the
+  fixed 256-token floor yet see LESS than the entry tier. The cut path now compares its
+  allowance against the ENTRY view's own token count and falls open ("buys no view")
+  when repacking would shrink the view.
+- **Upstream-only probes and tokenize** (`ProbeUpstreamWindow`, `tokclient.NewUpstreamOnly`):
+  the bare-root fallback routes answer for whatever model is CURRENTLY loaded — mid-cascade,
+  the previous tier — so a stale per-model alias would have budgeted and cut one tier with
+  another tier's window and vocabulary, cached under the callee's key. On a bare
+  llama-server the repack now stays entry-inherited (honest; a single-model server cannot
+  meaningfully repack per-tier).
+- **Tokenize failures TTL-cached** per model (the doc claimed stickiness the code lacked):
+  a dead /tokenize route costs one probe per TTL window, not two 60s round-trips per climb;
+  the cached disposition is labeled `tokenize (cached)`.
+- **Exemplars measured and stable**: shots are retrieved ONCE per request (keyed on the
+  entry view) and the SAME shots decorate every tier's rebuild AND the repack's fit
+  measurement — previously the injection landed after the measurement (unbudgeted) and a
+  per-tier re-retrieval could silently hand a climbed tier different or zero shots.
+- **Rebuild-failure restore**: a failed per-tier rebuild now restores the ENTRY prompt
+  outright (retained `entryBuilt`) — previously a 3-chain rebuild failure left the
+  PREVIOUS tier's packing in place while the label claimed the entry packing.
+- **`input_chars` keeps entry-view semantics on every row**: it feeds the confhead
+  `loginput` feature whose label stream is entry-scale; letting it follow the repacked
+  view desynchronized `len_chars` and `loginput` in the same feature row (train/serve
+  skew). Exemplar harvest is gated to entry rows (no sidecar bloat, no marker text as
+  future few-shot content).
+- **Honest under-cap label**: an input under the entry cap never probes anything, and its
+  disposition now says so (`full source (under entry cap)`) instead of claiming a
+  token-exact verification that never ran.
+- New ADR 0022 records the decision (provenance: the operator-approved master plan);
+  ADR index rows 0018–0022 registered.
+
 ## [0.57.0] - 2026-08-14
 
 TO-4 (plan 2026-08-07): `cut_middle_turns` — token-exact whole-message history compaction
