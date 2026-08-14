@@ -6,6 +6,46 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.56.0] - 2026-08-14
+
+Master-plan step-4 remainder: the ComfyUI submission/timing plumbing is re-expressed through the
+vendored `comfyui-pp-cli` (Node render path only; `gpu-lock.mjs` and the model-family `wf-*.mjs`
+builders untouched by design).
+
+### Added — one shared ComfyUI submission layer (`render/comfy-submit.mjs`)
+
+Before this, six runners (`comfy-render`, `comfy-edit`, `comfy-inpaint`, `comfy-video`,
+`comfy-music`, `comfy-run-graph`) each carried their own copy of the raw `POST /prompt` → poll
+`/history` → `GET /view` block, and only `comfy-render.mjs` had the 2026-07-30 dead-server
+watchdog — the siblings would burn their whole poll budget on a wedged server while holding the
+exclusive GPU slot.
+
+- **Submission prefers the vendored CLI** when a binary is resolvable (`COMFYUI_PP_CLI` env —
+  loud-fail if wrong — then a local `tools/comfyui/bin` build, then PATH): idempotent submission
+  lease (an identical in-flight graph attaches instead of double-rendering; stale/unverifiable
+  leases force-resubmit = the raw path's always-POST behavior), typed accept/reject/partial
+  outcomes with `node_errors` verbatim, run-row provenance, and post-render finalization that
+  records the authoritative `execution_start -> execution_success` duration (printed as one
+  `timing …` line; neither side ever parses the server log's "Prompt executed" text). Local
+  pre-POST CLI failures (usage/config/generic) fall back to raw loudly; server-verdict codes stay
+  fatal so a raw retry can never double-render.
+- **No binary → raw HTTP, byte-identical** to the previous runners (same POST body with the
+  per-run `client_id`, same outputs, same error surfaces). CI and binary-less fleet nodes run
+  exactly this path.
+- **Polling stays harness-side by design** (a surfaced CLI gap): every runner now shares the
+  hardened loop — dead-server watchdog (`COMFY_DEAD_SEC`, default 240 s), suspend/resume fence,
+  per-poll 30 s abort, HTTP-error-status-counts-as-answer — and `/view` retrieval stays raw for
+  exact byte fidelity.
+- 37 new offline `node:test` cases (spawn/HTTP doubles + one real-spawn EPIPE regression); the
+  render suite is 240 tests total.
+
+### Fixed
+
+- `comfy-run-graph.mjs` `fetchToDir` no longer writes a non-OK `/view` body to disk as an
+  "output"; it throws and lands as a typed `RUN_ERROR` defer.
+- `rawSubmit` rejects a 200 `/prompt` reply with no `prompt_id` immediately instead of polling
+  `/history/undefined` for the entire budget.
+
 ## [0.55.0] - 2026-08-14
 
 TO-1 rescoped step 2 (plan 2026-08-07, measurement 2026-08-11): stop treating the model's
