@@ -98,6 +98,11 @@ export function runCli(cmd, args, { input = "", env = {}, killAfterMs = 0, spawn
       if (typeof timer.unref === "function") timer.unref();
     }
     child.on("error", (e) => finish({ code: null, stdout, stderr, spawnError: e }));
+    // utf8 decoding at the STREAM level: `+= chunk` on raw Buffers re-decodes each chunk
+    // independently, so a multi-byte sequence split across a chunk boundary becomes
+    // U+FFFD inside node_errors text. (Guarded: test doubles are bare emitters.)
+    if (typeof child.stdout.setEncoding === "function") child.stdout.setEncoding("utf8");
+    if (typeof child.stderr.setEncoding === "function") child.stderr.setEncoding("utf8");
     child.stdout.on("data", (d) => { stdout += d; });
     child.stderr.on("data", (d) => { stderr += d; });
     child.on("close", (code) => finish({ code, stdout, stderr, spawnError: null }));
@@ -197,11 +202,30 @@ export async function submitGraph({ api, graph, clientId, cli, fetchImpl = fetch
       return { promptId: out.prompt_id, via: "cli", submit: out };
     };
 
+    // Exit-code classification (code-review 2026-08-14): a LOCAL pre-POST failure —
+    // 2 usage (flag-skewed binary), 10 config (unwritable state dir / bad SQLite),
+    // 1 generic local (e.g. unusable --home; empirically 0 POSTs issued) — must not
+    // kill a render the raw POST would have completed: the CLI's own store/config is
+    // bookkeeping, not the render path. Fall back to raw LOUDLY, naming the real cause.
+    // Server-verdict / possibly-POSTed codes (21 rejected, 23 malformed, 4/5/26
+    // transport-api — the CLI's own "the POST may have landed" branch exits 5) stay
+    // fatal: retrying those raw could double-render a 20-minute graph.
+    const localOnlyFailure = (code) => code === 1 || code === 2 || code === 10;
+    const submitFailure = (res, label) => {
+      if (localOnlyFailure(res.code)) {
+        stderr.write("comfy-submit WARN: comfyui-pp-cli " + label + " failed locally before POSTing (exit " + res.code + "): "
+          + tail(res.stderr || res.stdout, 300) + " — falling back to raw HTTP submission\n");
+        return null; // caller falls back to rawSubmit
+      }
+      throw new Error("comfyui-pp-cli " + label + " exited " + res.code + ": " + tail(res.stderr || res.stdout, 500));
+    };
+
     if (r.code === 22) {
-      return accept(r, "comfy-submit WARN: partial accept — ComfyUI dropped some output branches (see node_errors): " + tail(r.stderr, 400));
+      return accept(r, "comfy-submit WARN: partial accept — ComfyUI dropped some output branches (see node_errors): " + tail(r.stderr, 600));
     }
     if (r.code !== 0) {
-      throw new Error("comfyui-pp-cli submit exited " + r.code + ": " + tail(r.stderr || r.stdout, 500));
+      submitFailure(r, "submit"); // throws on server-verdict codes
+      return rawSubmit({ api, graph, clientId, fetchImpl });
     }
     const out = parseCliJson(r.stdout);
     if (!out.attached) return accept(r);
@@ -209,15 +233,27 @@ export async function submitGraph({ api, graph, clientId, cli, fetchImpl = fetch
     // Lease hit: identical graph recorded as in flight. Trust it only when live.
     const probe = await runCli(cli.cmd, ["attach", out.prompt_id, "--json"], { env, spawnImpl, killAfterMs: 30_000 });
     let live = "unknown";
+    let liveInFlight = false;
     let probeNote = "";
     if (probe.spawnError) {
       probeNote = " (liveness probe failed to run: " + probe.spawnError.message + ")";
     } else if (probe.code !== 0) {
       probeNote = " (liveness probe exited " + probe.code + ": " + tail(probe.stderr || probe.stdout, 200) + ")";
     } else {
-      try { live = parseCliJson(probe.stdout).live_state || "unknown"; } catch { probeNote = " (liveness probe output unparseable)"; }
+      try {
+        const p = parseCliJson(probe.stdout);
+        live = p.live_state || "unknown";
+        liveInFlight = p.in_flight === true;
+      } catch { probeNote = " (liveness probe output unparseable)"; }
     }
-    if (live === "running" || live === "pending") {
+    // Attach when the server POSITIVELY confirms the identical run alive: running or
+    // queued, or present in /history but not yet terminal (live_state "history" with
+    // in_flight still true — representable if a future ComfyUI writes history entries
+    // mid-run). live_state "unknown" deliberately does NOT attach even when the CLI's
+    // in_flight flag is true: that combination means "could not verify, local record
+    // only", and attaching to an unverified prompt is the budget-burning hang the
+    // stale branch exists to avoid.
+    if (live === "running" || live === "pending" || (live === "history" && liveInFlight)) {
       stderr.write("comfy-submit: identical graph already in flight — attached to " + out.prompt_id + " instead of double-rendering (lease)\n");
       return { promptId: out.prompt_id, via: "cli", submit: out };
     }
@@ -228,9 +264,12 @@ export async function submitGraph({ api, graph, clientId, cli, fetchImpl = fetch
     r = await submitOnce(true);
     if (r.spawnError) throw new Error("comfyui-pp-cli resubmit failed to start: " + r.spawnError.message);
     if (r.code === 22) {
-      return accept(r, "comfy-submit WARN: partial accept — ComfyUI dropped some output branches (see node_errors): " + tail(r.stderr, 400));
+      return accept(r, "comfy-submit WARN: partial accept — ComfyUI dropped some output branches (see node_errors): " + tail(r.stderr, 600));
     }
-    if (r.code !== 0) throw new Error("comfyui-pp-cli submit --force exited " + r.code + ": " + tail(r.stderr || r.stdout, 500));
+    if (r.code !== 0) {
+      submitFailure(r, "submit --force"); // throws on server-verdict codes
+      return rawSubmit({ api, graph, clientId, fetchImpl });
+    }
     return accept(r);
   }
   return rawSubmit({ api, graph, clientId, fetchImpl });
@@ -347,7 +386,14 @@ export async function finalizeRun({ api, promptId, cli, spawnImpl = spawn, stdou
     if (!quiet) stderr.write("comfy-submit WARN: timing capture skipped (" + r.spawnError.message + ")\n");
     return null;
   }
-  if (r.code !== 0) {
+  // `wait`'s terminal-OUTCOME codes (13 validation/model, 21 failed, 22 outputs-pending,
+  // 24 interrupted, 25 OOM) mean the run reached a terminal state and WAS recorded —
+  // finalization succeeded; the code describes the RENDER, whose fate the caller already
+  // knows. Warning on them would make every failed render cry wolf about bookkeeping.
+  // Genuine finalization failures are the rest: 2 usage, 3 not-found (restarted server
+  // dropped its RAM history), 10 config/store, 20 wait-timeout, or a spawn-level death.
+  const finalized = r.code === 0 || [13, 21, 22, 24, 25].includes(r.code);
+  if (!finalized) {
     stderr.write("comfy-submit WARN: comfyui-pp-cli wait exited " + r.code + " during finalization: " + tail(r.stderr || r.stdout, 300) + "\n");
     return null;
   }
