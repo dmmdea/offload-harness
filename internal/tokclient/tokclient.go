@@ -60,6 +60,9 @@ type Client struct {
 	// downgrading (review finding 2026-08-14: one cold-start timeout or one
 	// 503 mid-swap must not degrade a healthy endpoint for the process life).
 	lastDefinitive atomic.Bool
+	// upstreamOnly restricts post() to the per-model passthrough route (see
+	// NewUpstreamOnly).
+	upstreamOnly bool
 }
 
 // LastFailDefinitive reports whether the most recent failure was a definitive
@@ -86,6 +89,19 @@ func New(base, model string, timeout time.Duration) *Client {
 		timeout = DefaultTimeout
 	}
 	return &Client{base: swapclient.BaseURL(base), model: model, http: &http.Client{Timeout: timeout}}
+}
+
+// NewUpstreamOnly builds a client that tries ONLY the llama-swap per-model
+// passthrough — never the bare-server root fallback. The root route answers
+// for WHATEVER model is currently loaded, so in a multi-model process (the
+// cascade) a stale per-model alias falling through to the root would count
+// and cut with the PREVIOUS tier's tokenizer — silently, cached under the
+// callee's key (TO-3 round-1 review finding 2026-08-14: the real cross-model
+// contamination channel). Single-model agent paths keep New's fallback.
+func NewUpstreamOnly(base, model string, timeout time.Duration) *Client {
+	c := New(base, model, timeout)
+	c.upstreamOnly = true
+	return c
 }
 
 // tokenizeReq is llama.cpp's /tokenize request body. add_special is always
@@ -210,6 +226,9 @@ func (c *Client) post(ctx context.Context, req tokenizeReq) ([]byte, bool) {
 	candidates := []string{
 		c.base + "/upstream/" + url.PathEscape(c.model) + "/tokenize",
 		c.base + "/tokenize",
+	}
+	if c.upstreamOnly {
+		candidates = candidates[:1]
 	}
 	// Per-candidate failures are collected, not swallowed: when BOTH routes
 	// fail the recorded reason names each one, so a permanent downgrade is

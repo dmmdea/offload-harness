@@ -77,6 +77,12 @@ type tierPackState struct {
 	mu     sync.Mutex
 	probes map[string]tierProbe
 	toks   map[string]*tokclient.Client
+	// tokFails caches per-model TOKENIZE failures for probeTTL, mirroring the
+	// probe-failure cache: without it every over-window climb re-paid up to
+	// two dead Count round-trips (60s timeouts) against a route that already
+	// failed — the doomed-round-trip class the file's own contract forbids
+	// (round-1 review finding 2026-08-14).
+	tokFails map[string]tierProbe // nCtx unused; why + at only
 }
 
 type tierProbe struct {
@@ -88,61 +94,118 @@ type tierProbe struct {
 // packForTier returns the input the CALLEE tier should see and a `tier_pack`
 // disposition string for the ledger row:
 //
-//	"token-exact (full source)"        — the original fits the callee's window
+//	"full source (under entry cap)"    — nothing was cut at entry; NOTHING was
+//	                                     probed or measured (an honest label —
+//	                                     claiming "token-exact" here converted
+//	                                     "unverified" into a false verification
+//	                                     claim; round-1 review finding)
+//	"token-exact (full source)"        — measured: the original fits the window
 //	"token-exact (cut K/N tokens)"     — token-exact head+tail repack
 //	"entry-inherited (<why>)"          — fail-open to the entry packing
 //
 // orig is the original pre-trim input; entryPacked is what the entry tier saw
 // (today's packing — the fail-open result). req carries the task/params so the
-// scaffold can be rebuilt exactly as attempt() will build it.
-func (p *Pipeline) packForTier(ctx context.Context, model string, orig, entryPacked string, req core.Request) (string, string) {
+// scaffold can be rebuilt exactly as attempt() will build it. genBudget is the
+// CALLEE'S REAL completion request — attemptReasoning generates with
+// MaxTokens+reasoningThinkBudget, and budgeting against bare MaxTokens
+// overshot the served window by ~384 tokens on exactly the large inputs this
+// feature exists for (round-1 CRITICAL finding). decorate re-applies any
+// prompt decoration (exemplar shots) so the measured prompt is the SHIPPED
+// prompt, not a bare build the injection then outgrows.
+func (p *Pipeline) packForTier(ctx context.Context, model string, orig, entryPacked string, req core.Request, genBudget int, decorate func(tasks.Built) tasks.Built) (string, string) {
 	if model == "" {
 		return entryPacked, "entry-inherited (no callee model)"
 	}
 	if orig == entryPacked {
-		// Nothing was cut at entry — the callee's view cannot improve.
-		return entryPacked, "token-exact (full source)"
+		// Nothing was cut at entry — the callee's view cannot improve. No
+		// probe, no measurement: the label must not claim one.
+		return entryPacked, "full source (under entry cap)"
 	}
 
 	nCtx, why := p.tierNCtx(ctx, model)
 	if nCtx <= 0 {
 		return entryPacked, "entry-inherited (" + why + ")"
 	}
+	if why, failed := p.tokFailFresh(model); failed {
+		return entryPacked, "entry-inherited (tokenize (cached): " + why + ")"
+	}
 	tok := p.tierTok(model)
 
-	// Measure the FULL prompt this task would build from the original, then
-	// derive the scaffold cost as full − input. Two Count calls, no scaffold
-	// reconstruction, no estimate.
+	// Measure the FULL prompt this task would build from the original —
+	// decorated exactly as it will ship — then derive the scaffold cost as
+	// full − input. Two Count calls, no scaffold reconstruction, no estimate.
 	fullReq := req
 	fullReq.Input = orig
 	built, err := tasks.Build(fullReq)
 	if err != nil {
 		return entryPacked, "entry-inherited (build: " + err.Error() + ")"
 	}
+	if decorate != nil {
+		built = decorate(built)
+	}
 	prompt := built.System + "\n" + built.User
 	tokFull, ok := tok.Count(ctx, prompt)
 	if !ok {
-		return entryPacked, "entry-inherited (tokenize: " + tok.LastErr() + ")"
+		return entryPacked, p.noteTokFail(model, tok.LastErr())
 	}
-	allowance := nCtx - built.MaxTokens - tierReserveTokens
+	allowance := nCtx - genBudget - tierReserveTokens
 	if tokFull <= allowance {
 		return orig, "token-exact (full source)"
 	}
 
 	tokOrig, ok := tok.Count(ctx, orig)
 	if !ok {
-		return entryPacked, "entry-inherited (tokenize: " + tok.LastErr() + ")"
+		return entryPacked, p.noteTokFail(model, tok.LastErr())
 	}
 	inputAllowance := allowance - (tokFull - tokOrig)
 	if inputAllowance < minRepackTokens {
 		return entryPacked, fmt.Sprintf("entry-inherited (degenerate allowance %d)", inputAllowance)
 	}
+	// The repack must BUY view, never shrink it: a callee served with a small
+	// window (big models routinely get smaller n_ctx to fit VRAM) could pass
+	// the fixed floor yet see LESS than the entry tier — the exact inversion
+	// TO-3 exists to prevent (round-1 review finding, rating 8). Compare
+	// against the entry view's own token count, not a constant.
+	tokEntry, ok := tok.Count(ctx, entryPacked)
+	if !ok {
+		return entryPacked, p.noteTokFail(model, tok.LastErr())
+	}
+	if inputAllowance <= tokEntry {
+		return entryPacked, fmt.Sprintf("entry-inherited (callee window buys no view: allowance %d <= entry view %d)", inputAllowance, tokEntry)
+	}
 
 	packed, kept, ok := cutTokenExact(ctx, tok, orig, inputAllowance)
 	if !ok {
-		return entryPacked, "entry-inherited (cut: " + tok.LastErr() + ")"
+		return entryPacked, p.noteTokFail(model, tok.LastErr())
 	}
+	// kept under-reports the shipped size by the marker's ~16 tokens plus
+	// retokenization drift at the two seams — absorbed by tierReserveTokens,
+	// stated here so nobody reads K as exact-to-the-token.
 	return packed, fmt.Sprintf("token-exact (cut %d/%d tokens)", kept, tokOrig)
+}
+
+// tokFailFresh reports a cached tokenize failure for model, if still inside
+// probeTTL.
+func (p *Pipeline) tokFailFresh(model string) (string, bool) {
+	p.tierPack.mu.Lock()
+	defer p.tierPack.mu.Unlock()
+	e, ok := p.tierPack.tokFails[model]
+	if !ok || p.now().Sub(e.at) >= probeTTL {
+		return "", false
+	}
+	return e.why, true
+}
+
+// noteTokFail records a tokenize failure for model (TTL-cached) and returns
+// the entry-inherited disposition naming it.
+func (p *Pipeline) noteTokFail(model, why string) string {
+	p.tierPack.mu.Lock()
+	if p.tierPack.tokFails == nil {
+		p.tierPack.tokFails = map[string]tierProbe{}
+	}
+	p.tierPack.tokFails[model] = tierProbe{why: why, at: p.now()}
+	p.tierPack.mu.Unlock()
+	return "entry-inherited (tokenize: " + why + ")"
 }
 
 // tierNCtx returns the callee's served context window, cached for probeTTL.
@@ -159,10 +222,15 @@ func (p *Pipeline) tierNCtx(ctx context.Context, model string) (int, string) {
 	if cached && now.Sub(e.at) < probeTTL {
 		return e.nCtx, e.why
 	}
-	// ProbeServedWindow is the agent loop's own /props probe (window.go): it
-	// may cold-start the model, which is acceptable for the same reason there
-	// — the caller is about to run exactly that model.
-	n, ok := agent.ProbeServedWindow(ctx, p.cfg.Endpoint, model)
+	// ProbeUpstreamWindow is the agent /props probe RESTRICTED to the
+	// per-model passthrough: the cascade is multi-model, and the bare-root
+	// fallback answers for whatever model is currently loaded — budgeting one
+	// tier against another tier's window. It may cold-start the model, which
+	// is acceptable for the same reason as the agent probe: the caller is
+	// about to run exactly that model. On a bare llama-server (no /upstream)
+	// this probe fails and the repack stays entry-inherited — honest, and a
+	// single-model server cannot meaningfully repack per-tier anyway.
+	n, ok := agent.ProbeUpstreamWindow(ctx, p.cfg.Endpoint, model)
 	fresh := tierProbe{nCtx: n, at: now}
 	if !ok {
 		fresh.nCtx = 0
@@ -184,7 +252,11 @@ func (p *Pipeline) tierTok(model string) *tokclient.Client {
 	if c, ok := p.tierPack.toks[model]; ok {
 		return c
 	}
-	c := tokclient.New(p.cfg.Endpoint, model, 0)
+	// Upstream-only for the same reason as the window probe: the root
+	// /tokenize answers with the CURRENTLY LOADED model's tokenizer, which
+	// mid-cascade is the previous tier's — counts and cuts would be computed
+	// with the wrong vocabulary and cached under this model's key.
+	c := tokclient.NewUpstreamOnly(p.cfg.Endpoint, model, 0)
 	p.tierPack.toks[model] = c
 	return c
 }

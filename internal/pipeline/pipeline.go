@@ -320,7 +320,24 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	}
 	// Phase 6: prepend retrieved few-shot exemplars to the local-model prompt
 	// (off by default — ExemplarShots=0). Grammar/schema/cache key are unchanged.
-	built = p.withExemplars(built, req)
+	// TO-3 round-1 findings: shots are retrieved ONCE, keyed on the ENTRY view,
+	// and the SAME shots decorate every tier's rebuild — re-retrieving per tier
+	// could silently hand a climbed tier different (or zero) shots, and an
+	// undecorated repack measurement would let the injection outgrow the budget.
+	shots := p.retrieveExemplars(req)
+	decorate := func(b tasks.Built) tasks.Built {
+		if len(shots) > 0 {
+			b.User = injectExemplars(b.User, shots)
+		}
+		return b
+	}
+	built = decorate(built)
+	// entryBuilt is retained so a failed per-tier rebuild restores the ENTRY
+	// prompt outright — leaving a PREDECESSOR tier's packing in place would
+	// make the "entry-inherited (rebuild: ...)" label lie about what the tier
+	// actually saw (round-1 review finding).
+	entryBuilt := built
+	entryLen := len(entryPacked)
 
 	// Cache key is stable on the PRIMARY model so a result produced by any tier
 	// is reused on re-runs (the cascade is an internal detail of one logical call).
@@ -365,21 +382,23 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 		// disposition recorded on the row (tier_pack). The entry tier (ci==0)
 		// is untouched: no probes, no tokenize round-trips on the hot path.
 		if ci > 0 {
-			tierInput, packPath := p.packForTier(ctx, model, orig, entryPacked, req)
+			tierInput, packPath := p.packForTier(ctx, model, orig, entryPacked, req, built.MaxTokens, decorate)
 			meta.TierPack = packPath
 			if tierInput != req.Input {
 				treq := req
 				treq.Input = tierInput
 				if b2, berr := tasks.Build(treq); berr == nil {
 					req.Input = tierInput
-					built = p.withExemplars(b2, req)
+					built = decorate(b2)
 				} else {
 					meta.TierPack = "entry-inherited (rebuild: " + berr.Error() + ")"
+					req.Input = entryPacked
+					built = entryBuilt
 				}
 			}
 		}
 		likelyColdSwap := p.noteTierCall(model) // LO-9: before the attempt, so the window is per-call
-		res, escalatable := p.attempt(ctx, req, built, ck, model, meta, start, true)
+		res, escalatable := p.attempt(ctx, req, built, ck, model, meta, start, true, entryLen)
 		// Phase 3/7: the breaker tracks INFRA health only (ErrClass set); a quality
 		// defer means the tier physically worked. Autoheal fires on infra failure.
 		// LO-9: a TIMEOUT on the first call to an idle tier is exempted from
@@ -426,27 +445,49 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	// falling through to Opus. A failure here defers exactly as before (never calls cloud).
 	if p.cfg.ReasoningModel != "" && built.Grammar != "" && !last.Meta.Truncated {
 		// TO-3: the terminal reasoning tier is a callee too — re-pack from the
-		// original against ITS served window (same fail-open contract).
-		rInput, rPath := p.packForTier(ctx, p.cfg.ReasoningModel, orig, entryPacked, req)
+		// original against ITS served window (same fail-open contract). Its
+		// REAL completion request is MaxTokens+reasoningThinkBudget (the
+		// think-wrapped grammar emits a <think> span before the JSON) — the
+		// round-1 CRITICAL finding: budgeting against bare MaxTokens overshot
+		// the served window by ~384 tokens on exactly the large inputs this
+		// feature exists for.
+		rInput, rPath := p.packForTier(ctx, p.cfg.ReasoningModel, orig, entryPacked, req, built.MaxTokens+reasoningThinkBudget, decorate)
 		meta.TierPack = rPath
 		if rInput != req.Input {
 			treq := req
 			treq.Input = rInput
 			if b2, berr := tasks.Build(treq); berr == nil {
 				req.Input = rInput
-				built = p.withExemplars(b2, req)
+				built = decorate(b2)
 			} else {
 				meta.TierPack = "entry-inherited (rebuild: " + berr.Error() + ")"
+				req.Input = entryPacked
+				built = entryBuilt
 			}
 		}
-		rres, ok := p.attemptReasoning(ctx, req, built, ck, meta, start)
+		rres, ok := p.attemptReasoning(ctx, req, built, ck, meta, start, entryLen)
 		if ok {
 			return rres
 		}
 		last = rres
 	}
-	p.recordDefer(req.Task, last.Meta, len(req.Input), last.Reason)
+	// input_chars keeps its historical ENTRY-view semantics on every row —
+	// req.Input may hold a repacked tier view here, and the column is a
+	// trained confhead feature (loginput) whose label stream is entry-scale
+	// (round-1 review finding: silently shifting it desynchronized the same
+	// row's len_chars and loginput and skewed train vs serve).
+	p.recordDefer(req.Task, last.Meta, entryLen, last.Reason)
 	return last
+}
+
+// retrieveExemplars fetches the Phase 6 few-shot pairs for req, keyed on the
+// ENTRY view of the input. One retrieval per request — every tier decorates
+// with the same shots.
+func (p *Pipeline) retrieveExemplars(req core.Request) []exemplars.Pair {
+	if p.cfg.ExemplarShots <= 0 || p.cfg.ExemplarsDir == "" {
+		return nil
+	}
+	return exemplars.Retrieve(p.cfg.ExemplarsDir, string(req.Task), req.Input, p.cfg.ExemplarShots)
 }
 
 // isVisionTask reports whether a task runs on the vision branch (single VLM tier,
@@ -2718,7 +2759,12 @@ func (p *Pipeline) runExtractImage(ctx context.Context, req core.Request, meta c
 // ledger, the cache write, the shadow-queue capture, and the exemplar harvest.
 // Pass true for normal Run calls; pass false for shadow/counterfactual RunTier
 // calls that must produce a gradeable result but write NO production side-effects.
-func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Built, ck, model string, meta core.Meta, start time.Time, record bool) (core.Result, bool) {
+//
+// entryChars is the ENTRY view's input length: req.Input may hold a TO-3
+// repacked tier view, but input_chars is a trained confhead feature (loginput)
+// whose label stream is entry-scale, so every recorded row keeps the entry
+// semantics (round-1 review finding 2026-08-14).
+func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Built, ck, model string, meta core.Meta, start time.Time, record bool, entryChars int) (core.Result, bool) {
 	attempts := p.cfg.MaxRetries + 1
 	if attempts < 1 {
 		attempts = 1
@@ -2794,7 +2840,11 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 				chHead, chThr := p.confheadSnap()
 				if !low && chHead != nil && len(chThr) > 0 && p.cfg.EscalationModel != "" && model != p.cfg.EscalationModel {
 					if tau, ok := chThr[string(req.Task)]; ok {
-						e := entryFrom(req.Task, meta, false, len(req.Input))
+						// entryChars, NOT len(req.Input): the head's loginput
+						// feature is trained on entry-scale label rows, and a
+						// repacked mid-chain view would be served
+						// out-of-distribution (round-1 review finding).
+						e := entryFrom(req.Task, meta, false, entryChars)
 						pc := chHead.Predict(string(req.Task), confhead.FeatureRow(e))
 						if pc >= 0 && pc < tau {
 							low = true
@@ -2823,11 +2873,15 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 						_ = p.cache.Put(ck, b)
 					}
 				}
-				p.record(req.Task, meta, len(req.Input))
+				p.record(req.Task, meta, entryChars)
 				// Phase A.3: sampled shadow-queue capture (non-escalated classify/triage/extract; config-gated, off by default).
-				p.captureShadow(req, entryFrom(req.Task, meta, false, len(req.Input)), core.Result{OK: true, Data: data, Meta: meta})
+				p.captureShadow(req, entryFrom(req.Task, meta, false, entryChars), core.Result{OK: true, Data: data, Meta: meta})
 				// Phase 6: harvest a verified-good (input, output) exemplar for the sidecar.
-				if p.cfg.ExemplarsDir != "" && goodExemplar(meta) {
+				// ENTRY rows only (TierPack empty): a climbed tier's req.Input may be
+				// the unbounded original (sidecar bloat) or a cut carrying
+				// repackMarker, which future prompts would re-inject as few-shot
+				// CONTENT (round-1 review finding).
+				if p.cfg.ExemplarsDir != "" && goodExemplar(meta) && meta.TierPack == "" {
 					_ = exemplars.Append(p.cfg.ExemplarsDir, string(req.Task), tasks.StableParamsKey(req.Params), req.Input, data, meta.Margin)
 				}
 			}
@@ -2864,7 +2918,7 @@ const reasoningThinkBudget = 512
 // escalate to; a valid answer here reclaims a cloud deferral, an invalid one falls through to
 // the normal defer-to-Opus). Returns (result, ok). On ok the result is recorded + cached; a
 // defer is NOT recorded (Run records the final one once).
-func (p *Pipeline) attemptReasoning(ctx context.Context, req core.Request, built tasks.Built, ck string, meta core.Meta, start time.Time) (core.Result, bool) {
+func (p *Pipeline) attemptReasoning(ctx context.Context, req core.Request, built tasks.Built, ck string, meta core.Meta, start time.Time, entryChars int) (core.Result, bool) {
 	meta.Model = p.cfg.ReasoningModel
 	meta.Reasoning = true // tag every reasoning-tier outcome so a reclaim is distinguishable from an escalation answer (same model)
 	wrapped := gbnf.WrapThinking(built.Grammar)
@@ -2911,7 +2965,7 @@ func (p *Pipeline) attemptReasoning(ctx context.Context, req core.Request, built
 			_ = p.cache.Put(ck, b)
 		}
 	}
-	p.record(req.Task, meta, len(req.Input))
+	p.record(req.Task, meta, entryChars) // input_chars keeps ENTRY semantics (see attempt)
 	return core.Result{OK: true, Data: data, Meta: meta}, true
 }
 
@@ -2996,17 +3050,6 @@ func (p *Pipeline) knnPreferLargerEntry(task core.TaskType, input string) bool {
 }
 
 // entryFrom builds a ledger entry from per-call meta + the enriched signals.
-// withExemplars applies the Phase 6 few-shot injection to a built prompt.
-// Factored so the TO-3 per-tier rebuilds get the SAME injection the entry
-// build does — a climbed tier must not silently lose its shots.
-func (p *Pipeline) withExemplars(b tasks.Built, req core.Request) tasks.Built {
-	if p.cfg.ExemplarShots > 0 && p.cfg.ExemplarsDir != "" {
-		if ex := exemplars.Retrieve(p.cfg.ExemplarsDir, string(req.Task), req.Input, p.cfg.ExemplarShots); len(ex) > 0 {
-			b.User = injectExemplars(b.User, ex)
-		}
-	}
-	return b
-}
 
 func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int) ledger.Entry {
 	return ledger.Entry{
@@ -3427,7 +3470,7 @@ func (p *Pipeline) RunTier(ctx context.Context, req core.Request, model string) 
 	feat := featurize(req.Task, req.Input)
 	ck := cache.Key(string(req.Task), req.Input, tasks.StableParamsKey(req.Params), p.cfg.Model, built.Grammar)
 	meta := core.Meta{Model: model, Feat: feat}
-	res, _ := p.attempt(ctx, req, built, ck, model, meta, start, false /* record=false: no persistent side-effects */)
+	res, _ := p.attempt(ctx, req, built, ck, model, meta, start, false /* record=false: no persistent side-effects */, len(req.Input))
 	// escalatable ignored: RunTier never escalates
 	return res, res.OK
 }
