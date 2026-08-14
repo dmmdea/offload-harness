@@ -190,6 +190,40 @@ test("submitGraph cli: accepted submit returns the CLI prompt_id; graph goes ove
   assert.equal(calls[0].opts.windowsHide, true); // house rule: no visible console windows
 });
 
+test("submitGraph cli: exit 1 with a POSTED envelope must NOT fall back — retrying raw would double-render", async () => {
+  // A post-POST local step (--deliver sink failure, profile teardown) can replace the
+  // error and exit 1 AFTER the server queued the render. The envelope is the evidence:
+  // prompt_id / a real http_status mean the POST landed.
+  const { impl } = fakeSpawn([
+    { code: 1, stdout: '{"action":"submitted","prompt_id":"landed-1","http_status":200}', stderr: "deliver: webhook returned 500" },
+  ]);
+  await assert.rejects(
+    submitGraph({
+      api: "http://127.0.0.1:9", graph: {}, clientId: "x",
+      cli: { cmd: "cli.exe", source: "env" }, spawnImpl: impl, stderr: devNull,
+    }),
+    /exited 1 AFTER the POST landed .*landed-1/,
+  );
+});
+
+test("submitGraph cli: a pre-POST envelope (http_status 0, no prompt_id) still falls back on exit 1", async () => {
+  const srv = await serve((req, res) => res.end(JSON.stringify({ prompt_id: "raw-pre" })));
+  try {
+    const { impl } = fakeSpawn([
+      { code: 1, stdout: '{"error":"opening the local run store: disk I/O error","http_status":0}', stderr: "" },
+    ]);
+    let warned = "";
+    const r = await submitGraph({
+      api: srv.api, graph: {}, clientId: "x",
+      cli: { cmd: "cli.exe", source: "env" }, spawnImpl: impl,
+      stderr: { write: (s) => { warned += s; } },
+    });
+    assert.equal(r.via, "raw");
+    assert.equal(r.promptId, "raw-pre");
+    assert.match(warned, /comfyui-pp-cli \(env: cli\.exe\).*failed locally before POSTing/);
+  } finally { srv.close(); }
+});
+
 test("submitGraph cli: a LOCAL pre-POST failure (usage/config/generic) falls back to raw LOUDLY instead of killing the render", async () => {
   for (const code of [1, 2, 10]) {
     const srv = await serve((req, res) => res.end(JSON.stringify({ prompt_id: "raw-local-" + code })));

@@ -211,9 +211,21 @@ export async function submitGraph({ api, graph, clientId, cli, fetchImpl = fetch
     // transport-api — the CLI's own "the POST may have landed" branch exits 5) stay
     // fatal: retrying those raw could double-render a 20-minute graph.
     const localOnlyFailure = (code) => code === 1 || code === 2 || code === 10;
+    // postedAlready: the code list alone is not proof the POST never happened — a
+    // post-POST local step (a --deliver sink failure, a profile teardown) can replace
+    // the error and exit 1 AFTER the server queued the render. The envelope is the
+    // evidence: a landed POST carries prompt_id (and a real http_status); a genuine
+    // pre-POST failure prints http_status 0 and no prompt_id, or no envelope at all.
+    const postedAlready = (res) => {
+      try { const o = parseCliJson(res.stdout); return !!(o.prompt_id || o.http_status); }
+      catch { return false; }
+    };
     const submitFailure = (res, label) => {
       if (localOnlyFailure(res.code)) {
-        stderr.write("comfy-submit WARN: comfyui-pp-cli " + label + " failed locally before POSTing (exit " + res.code + "): "
+        if (postedAlready(res)) {
+          throw new Error("comfyui-pp-cli " + label + " exited " + res.code + " AFTER the POST landed — not retrying raw, that would double-render; the envelope carries the handle: " + tail(res.stdout || res.stderr, 400));
+        }
+        stderr.write("comfy-submit WARN: comfyui-pp-cli (" + cli.source + ": " + cli.cmd + ") " + label + " failed locally before POSTing (exit " + res.code + "): "
           + tail(res.stderr || res.stdout, 300) + " — falling back to raw HTTP submission\n");
         return null; // caller falls back to rawSubmit
       }
