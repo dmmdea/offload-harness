@@ -301,11 +301,12 @@ func TestLastFailDefinitiveClassification(t *testing.T) {
 	}
 }
 
-// The read cap scales with the input: a with_pieces response for a large
-// transcript legitimately exceeds the old flat 8 MiB cap (~26 bytes/token on
-// the wire), and truncating it tripped the sticky downgrade with a reason
-// blaming the server (review finding 2026-08-14). 1 MiB of content ×
-// one-byte string pieces ≈ 14 MiB of response must now decode fine.
+// The read cap scales with the input, and the bound must hold in the worst
+// legitimate regime: ~1 token/byte content whose wire entries carry llama.cpp's
+// REAL shape — `{"id":N,"piece":"a"},` ≈ 26 bytes/token (round-3 finding
+// 2026-08-14: a fixture without the id field "proved" a 16× cap that truncated
+// real responses). 1 MiB of content × one-byte pieces ≈ 27 MiB of response
+// must decode fine.
 func TestScaledReadCapAdmitsLargePiecesResponse(t *testing.T) {
 	content := strings.Repeat("a", 1<<20)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -315,10 +316,10 @@ func TestScaledReadCapAdmitsLargePiecesResponse(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"tokens":[`))
-		entry := []byte(`{"piece":"a"},`)
+		entry := []byte(`{"id":1234567,"piece":"a"},`)
 		for i := 0; i < len(req.Content); i++ {
 			if i == len(req.Content)-1 {
-				entry = []byte(`{"piece":"a"}`)
+				entry = []byte(`{"id":1234567,"piece":"a"}`)
 			}
 			_, _ = w.Write(entry)
 		}

@@ -196,15 +196,17 @@ func (c *Client) post(ctx context.Context, req tokenizeReq) ([]byte, bool) {
 		c.fail("marshaling tokenize request: %v", err)
 		return nil, false
 	}
-	// Read cap SCALED to the input: a with_pieces response inflates roughly an
-	// order of magnitude over the content (per-token JSON scaffolding, and
-	// byte-fallback pieces rendered as integer arrays), so a flat cap silently
-	// truncates exactly the large-transcript responses the feature exists for —
-	// truncated JSON then reads as "not the expected JSON shape" and trips the
-	// sticky downgrade with a reason blaming the server (review finding
-	// 2026-08-14). 16× input + 1 MiB bounds a hostile/looping server just as
-	// well while making legitimate truncation unreachable by construction.
-	limit := int64(len(req.Content))*16 + (1 << 20)
+	// Read cap SCALED to the input: a flat cap silently truncates exactly the
+	// large-transcript with_pieces responses the feature exists for — truncated
+	// JSON then reads as "not a tokenize response" and helps trip the sticky
+	// downgrade with a reason blaming the server (review finding 2026-08-14).
+	// The bound must hold in the WORST legitimate regime, ~1 token/byte
+	// (CJK/base64/byte-fallback): one wire entry `{"id":N,"piece":"a"},` runs
+	// ≤ ~27 bytes and token count never exceeds the content's byte count, so
+	// 32× input + 1 MiB is a true ceiling (round-3 finding: 16× truncated
+	// 1-byte/token responses and re-opened the self-disable it claimed to
+	// close). A hostile/looping server is still bounded.
+	limit := int64(len(req.Content))*32 + (1 << 20)
 	candidates := []string{
 		c.base + "/upstream/" + url.PathEscape(c.model) + "/tokenize",
 		c.base + "/tokenize",

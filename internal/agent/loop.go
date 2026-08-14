@@ -538,8 +538,13 @@ func (l *Loop) resolveSpecReserve(ctx context.Context) {
 		if len(l.specs) == 0 {
 			return
 		}
-		b, err := json.Marshal(l.specs)
-		if err != nil {
+		// Measure the WIRE serialization (wireToolsJSON — the same producer
+		// Chat ships), never a marshal of the specs themselves: the two shapes
+		// differ by keys and ~34 fixed bytes per tool, and an under-measured
+		// reserve is exactly the defect this exists to close (round-3 review
+		// finding 2026-08-14).
+		b, err := wireToolsJSON(l.specs)
+		if err != nil || len(b) == 0 {
 			return // cannot happen for the harness's own spec types; reserve nothing rather than guess
 		}
 		if l.tok != nil {
