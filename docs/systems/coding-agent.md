@@ -253,9 +253,18 @@ LOSSLESS, round-trip proven); with `--skeleton-prune` (default ON, same decision
 bodies are reduced to deterministic **skeletons** — head/tail windows plus buried
 error/failure/warning lines, elided runs replaced by counted markers — then, as pressure rises, to
 size markers that keep a bounded residue of the body's signal lines (the FORCE_PRESERVE guard),
-and finally whole older turns are dropped as assistant+tool units — except units still carrying
-signal residue or a **pinned** result (a result the model re-requested and the circuit breaker
-refused again — the H8 ramp: content the model re-reads stops being lossily compacted). A ladder
+and finally whole messages are dropped. That drop rung is TOKEN-EXACT when the endpoint can
+tokenize (`cut_middle_turns`, `internal/agent/cutmiddle.go` + `internal/tokclient`): each message
+is sentinel-indexed by its byte span in the one serialized transcript, the SERVED model's
+`/tokenize` (with pieces) maps those spans to real token positions, and whole assistant+tool
+units are dropped from the MIDDLE so the head (protected preamble) and tail (recent state) —
+the first and last budget/2 real tokens — always survive; a message is never split, so a
+truncated-mid-JSON tool result is unrepresentable by construction. The chars/4 estimate never
+decides a drop on this path. Endpoints with no `/tokenize` (or a mid-run outage) fall open —
+once, stickily — to the legacy estimate-driven oldest-first drop; both paths drop units whole,
+and both exempt units still carrying signal residue or a **pinned** result (a result the model
+re-requested and the circuit breaker refused again — the H8 ramp: content the model re-reads
+stops being lossily compacted). A ladder
 that consequently cannot fit exhausts honestly: `Result.CompactionsExhausted` counts it, and the
 standalone runner + `agent_run` surface it (fit=false telemetry, never a silent over-budget
 request). Compaction is idempotent and monotonic (test-pinned): a turn only moves down the ladder,

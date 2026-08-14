@@ -6,6 +6,35 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.57.0] - 2026-08-14
+
+TO-4 (plan 2026-08-07): `cut_middle_turns` — token-exact whole-message history compaction
+in the agent loop.
+
+### Added — the drop rung cuts whole middle messages on REAL token counts
+
+- **`internal/tokclient`** — the harness's real-tokenizer path: POST `/tokenize`
+  (llama-swap `/upstream/{model}/tokenize`, bare llama-server `/tokenize`) with
+  `with_pieces`, fail-open on any failure, piece accounting verified to reconstruct the
+  input byte-for-byte before any caller may cut on it. Built once here so the escalation
+  repacking work (TO-3) reuses the same path.
+- **`cut_middle_turns`** (`internal/agent/cutmiddle.go`): when the loop has a tokenizer,
+  the compaction ladder's whole-turn-drop rung is REPLACED by a token-exact middle cut —
+  each message sentinel-indexed by byte span in the serialized transcript, spans mapped to
+  real token positions via the pieces, and whole assistant+tool units dropped from the
+  middle so the head (protected preamble) and tail (recent state) always survive. A
+  message is never split: the mid-JSON tool-result truncation that breaks the next parse
+  on small local models is unrepresentable on this path. Pinned (H8) and signal-residue
+  units keep their existing drop exemptions.
+- Wired identically in all drive modes (CLI single/two-tier — each tier cuts with its own
+  served tokenizer — and the MCP `agent_run` front door).
+
+### Changed
+
+- The legacy estimate-driven oldest-first drop remains ONLY as the explicit fail-open
+  fallback for endpoints with no `/tokenize`; the failure is sticky per run (one failed
+  probe, no per-step network stalls). One truncation mechanism at a time, by explicit gate.
+
 ## [0.56.0] - 2026-08-14
 
 Master-plan step-4 remainder: the ComfyUI submission/timing plumbing is re-expressed through the
