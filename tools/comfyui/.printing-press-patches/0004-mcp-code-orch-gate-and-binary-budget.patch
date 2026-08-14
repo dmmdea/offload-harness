@@ -1,0 +1,242 @@
+diff --git a/tools/comfyui/internal/mcp/code_orch.go b/tools/comfyui/internal/mcp/code_orch.go
+index 5993b0c..bb9fd1a 100644
+--- a/tools/comfyui/internal/mcp/code_orch.go
++++ b/tools/comfyui/internal/mcp/code_orch.go
+@@ -547,6 +547,9 @@ func handleCodeOrchExecute(ctx context.Context, req mcplib.CallToolRequest) (*mc
+ 	if err != nil {
+ 		return mcplib.NewToolResultError(err.Error()), nil
+ 	}
++	if msg, oversized := codeOrchBinaryOversize(ep, data); oversized {
++		return mcplib.NewToolResultError(msg), nil
++	}
+ 	text := bound.EndpointResponse(ep.Method, data)
+ 	if platformSession != nil {
+ 		text = bound.WithMetadata(text, platformSession.OutputMetadata())
+@@ -554,6 +557,39 @@ func handleCodeOrchExecute(ctx context.Context, req mcplib.CallToolRequest) (*mc
+ 	return mcplib.NewToolResultStructured(codeOrchExecuteStructured(ep, path, text), text), nil
+ }
+ 
++// codeOrchBinaryOversize refuses a base64 binary envelope that cannot survive
++// the MCP result budget, and reports the message to return instead.
++//
++// The client layer base64-wraps non-textual bodies, so an endpoint that serves
++// file bytes (ComfyUI's /view) arrives here as a _pp_binary envelope. A real
++// render is megabytes, and base64 adds a third on top. Left to the generic
++// bounding, that envelope becomes a preview holding a base64 string cut
++// mid-value: it no longer parses, and an agent that decodes it anyway writes a
++// corrupt file. The accompanying note advises narrowing the request with
++// filters or --select, none of which can shrink an image.
++//
++// The typed endpoint-mirror path already refuses this case and names the fix.
++// This keeps the code-orchestration path honest in the same way: a payload that
++// cannot be returned intact is an error with a route to the bytes, never a
++// silently damaged body.
++func codeOrchBinaryOversize(ep *codeOrchEndpoint, data json.RawMessage) (string, bool) {
++	if len(data) <= bound.MaxBytes {
++		return "", false
++	}
++	var probe struct {
++		PPBinary    bool   `json:"_pp_binary"`
++		ContentType string `json:"content_type"`
++		Bytes       int    `json:"bytes"`
++	}
++	if json.Unmarshal(data, &probe) != nil || !probe.PPBinary {
++		return "", false
++	}
++	return fmt.Sprintf(
++		"binary response is too large for MCP text output: endpoint %s returned %d bytes of %s, which base64-encode to a %d byte envelope, exceeding the %d byte budget. Fetch it with the CLI, which writes that envelope to disk instead of this budget: comfyui-pp-cli view --filename <name> --type <output|input|temp> --deliver file:<path>. The bytes are the envelope's base64 \"data\" field, so decode it after writing.",
++		ep.ID, probe.Bytes, probe.ContentType, len(data), bound.MaxBytes,
++	), true
++}
++
+ // codeOrchInlineBodyMax caps how much response body codeOrchExecuteStructured
+ // will mirror into structuredContent. The text content already carries the
+ // whole bounded body, so above this size the duplicate is dropped rather than
+diff --git a/tools/comfyui/internal/mcp/output_schema_test.go b/tools/comfyui/internal/mcp/output_schema_test.go
+index 9e20ade..12a1de7 100644
+--- a/tools/comfyui/internal/mcp/output_schema_test.go
++++ b/tools/comfyui/internal/mcp/output_schema_test.go
+@@ -3,7 +3,9 @@
+ package mcp
+ 
+ import (
++	"bytes"
+ 	"context"
++	"encoding/base64"
+ 	"encoding/json"
+ 	"net/http"
+ 	"net/http/httptest"
+@@ -13,6 +15,7 @@ import (
+ 	"strings"
+ 	"testing"
+ 
++	"comfyui-pp-cli/internal/mcp/bound"
+ 	mcplib "github.com/mark3labs/mcp-go/mcp"
+ 	"github.com/mark3labs/mcp-go/server"
+ )
+@@ -284,6 +287,96 @@ func TestCodeOrchExecuteStructuredContentSatisfiesCommittedSchema(t *testing.T)
+ 	}
+ }
+ 
++// TestCodeOrchExecuteBinaryBodyRoundTripsAsBase64 covers the branch nothing in
++// the fake-server suite reached before a live run: an endpoint that answers
++// with file bytes. The client layer must hand the code-orchestration path a
++// self-describing base64 envelope — not a 406, not an empty body, not raw
++// bytes smuggled into body_text — with no per-endpoint Accept override.
++func TestCodeOrchExecuteBinaryBodyRoundTripsAsBase64(t *testing.T) {
++	payloadBytes := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("p", 512))
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		w.Header().Set("Content-Type", "image/png")
++		_, _ = w.Write(payloadBytes)
++	}))
++	defer srv.Close()
++
++	resetMCPPathEnv(t)
++	t.Setenv("COMFYUI_BASE_URL", srv.URL)
++
++	result := validateAgainstCommittedSchema(t, "comfyui_execute", handleCodeOrchExecute, map[string]any{
++		"endpoint_id": "view.get",
++		"params":      map[string]any{"filename": "render.png", "subfolder": "", "type": "output"},
++	})
++	requireConformingResult(t, "comfyui_execute", result)
++
++	var payload struct {
++		Path string `json:"path"`
++		Body struct {
++			PPBinary    bool   `json:"_pp_binary"`
++			ContentType string `json:"content_type"`
++			Encoding    string `json:"encoding"`
++			Bytes       int    `json:"bytes"`
++			Data        string `json:"data"`
++		} `json:"body"`
++		BodyText string `json:"body_text"`
++	}
++	if err := json.Unmarshal(result.RawStructuredContent, &payload); err != nil {
++		t.Fatalf("decoding structuredContent: %v\n%s", err, result.RawStructuredContent)
++	}
++	if payload.BodyText != "" {
++		t.Fatalf("binary payload leaked into body_text: %q", payload.BodyText)
++	}
++	if !payload.Body.PPBinary || payload.Body.Encoding != "base64" {
++		t.Fatalf("binary response did not arrive as a base64 envelope: %s", result.RawStructuredContent)
++	}
++	if payload.Body.ContentType != "image/png" || payload.Body.Bytes != len(payloadBytes) {
++		t.Fatalf("binary envelope misreports the payload: %s", result.RawStructuredContent)
++	}
++	decoded, err := base64.StdEncoding.DecodeString(payload.Body.Data)
++	if err != nil {
++		t.Fatalf("envelope data is not decodable base64: %v", err)
++	}
++	if !bytes.Equal(decoded, payloadBytes) {
++		t.Fatalf("decoded payload differs from the bytes the server sent (%d vs %d bytes)", len(decoded), len(payloadBytes))
++	}
++}
++
++// TestCodeOrchExecuteOversizedBinaryRefusesInsteadOfTruncating pins the fix for
++// what a live /view fetch of a real render exposed. A multi-megabyte PNG
++// base64-encodes past the MCP budget, and the generic bounding turned it into a
++// `preview` holding a base64 string cut mid-value: unparseable, and corrupt if
++// an agent decoded it anyway. The note attached to that preview advised filters
++// and --select, which cannot shrink an image. Refusing with a route to the
++// bytes is the only honest answer.
++func TestCodeOrchExecuteOversizedBinaryRefusesInsteadOfTruncating(t *testing.T) {
++	payloadBytes := append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte("q"), 3*bound.MaxBytes)...)
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		w.Header().Set("Content-Type", "image/png")
++		_, _ = w.Write(payloadBytes)
++	}))
++	defer srv.Close()
++
++	resetMCPPathEnv(t)
++	t.Setenv("COMFYUI_BASE_URL", srv.URL)
++
++	result := validateAgainstCommittedSchema(t, "comfyui_execute", handleCodeOrchExecute, map[string]any{
++		"endpoint_id": "view.get",
++		"params":      map[string]any{"filename": "render.png", "subfolder": "", "type": "output"},
++	})
++	if !result.IsError {
++		t.Fatalf("oversized binary returned a success result instead of refusing: %s", result.RawStructuredContent)
++	}
++	msg := resultText(t, result)
++	if strings.Contains(msg, "_pp_truncated") || strings.Contains(msg, "\"preview\"") {
++		t.Fatalf("oversized binary was truncated into a preview rather than refused: %s", msg)
++	}
++	for _, want := range []string{"too large", "image/png", "comfyui-pp-cli view", "--deliver file:", "base64"} {
++		if !strings.Contains(msg, want) {
++			t.Fatalf("refusal message is missing %q, so the caller has no route to the bytes: %s", want, msg)
++		}
++	}
++}
++
+ // TestCodeOrchExecuteNonJSONBodyUsesBodyText covers the other branch of the
+ // envelope: a textual, non-JSON response body.
+ func TestCodeOrchExecuteNonJSONBodyUsesBodyText(t *testing.T) {
+diff --git a/tools/comfyui/internal/mcp/platform_gate.go b/tools/comfyui/internal/mcp/platform_gate.go
+index 2367f51..62aa658 100644
+--- a/tools/comfyui/internal/mcp/platform_gate.go
++++ b/tools/comfyui/internal/mcp/platform_gate.go
+@@ -38,7 +38,16 @@ func requireFreshTenantGate(s *server.MCPServer, next server.ToolHandlerFunc) se
+ 			return mcplib.NewToolResultError(err.Error()), nil
+ 		}
+ 		if session == nil {
+-			return mcplib.NewToolResultError("MCP tenant gate is not configured"), nil
++			// A nil session with a nil error means this CLI registers no
++			// tenant-gated platform source, so there is no tenant to gate on.
++			// cli.VerifyMCPInvocation returns that pair ONLY on that branch —
++			// once a source is registered it returns either a verified session
++			// or an error — so continuing here cannot skip a gate that exists.
++			// cli.BindMCPClient already reads the pair that way for the typed
++			// client path; rejecting it here instead made every in-process tool
++			// permanently unreachable on a CLI with no platform source, which
++			// is the whole code-orchestration surface.
++			return next(ctx, request)
+ 		}
+ 		defer session.ZeroCredentials()
+ 		return next(platform.ContextWithSession(ctx, session), request)
+diff --git a/tools/comfyui/internal/mcp/platform_gate_test.go b/tools/comfyui/internal/mcp/platform_gate_test.go
+index d12a8fd..f11d83f 100644
+--- a/tools/comfyui/internal/mcp/platform_gate_test.go
++++ b/tools/comfyui/internal/mcp/platform_gate_test.go
+@@ -76,6 +76,42 @@ func TestMCPEveryRegisteredToolHasFreshTenantGate(t *testing.T) {
+ 	t.Logf("verified %d in-process and %d child-CLI MCP tools", direct, mirrored)
+ }
+ 
++// TestMCPFreshTenantGateAllowsCLIWithoutPlatformSource pins the contract that
++// the two stubbed tests above cannot reach. Both replace verifyFreshMCPInvocation
++// with a fake that returns either an error or a session, so neither exercises
++// what the REAL cli.VerifyMCPInvocation returns on a CLI that registers no
++// tenant-gated platform source: (nil, nil), meaning "there is nothing to gate".
++// Treating that pair as a misconfiguration blocks every in-process tool — the
++// entire code-orchestration surface — while the cobra mirrors keep working, so
++// the failure looks like a partial outage rather than a gate bug.
++func TestMCPFreshTenantGateAllowsCLIWithoutPlatformSource(t *testing.T) {
++	session, err := cli.VerifyMCPInvocation(context.Background())
++	if err != nil {
++		t.Fatalf("VerifyMCPInvocation on a CLI with no platform source: %v", err)
++	}
++	if session != nil {
++		t.Skip("this CLI registers a platform source; the ungated path does not apply")
++	}
++
++	handlerCalls := 0
++	s := server.NewMCPServer("tenant-gate-conformance", "test")
++	result, err := requireFreshTenantGate(s, func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
++		handlerCalls++
++		return mcplib.NewToolResultText("ok"), nil
++	})(context.Background(), mcplib.CallToolRequest{
++		Params: mcplib.CallToolParams{Name: "ungated-conformance", Arguments: map[string]any{}},
++	})
++	if err != nil {
++		t.Fatalf("wrapper returned protocol error: %v", err)
++	}
++	if result == nil || result.IsError {
++		t.Fatalf("in-process tool blocked on a CLI with no platform source: %#v", result)
++	}
++	if handlerCalls != 1 {
++		t.Fatalf("handler calls = %d, want 1", handlerCalls)
++	}
++}
++
+ func TestMCPTypedInvocationUsesSingleFreshTenantGate(t *testing.T) {
+ 	originalVerify := verifyFreshMCPInvocation
+ 	t.Cleanup(func() { verifyFreshMCPInvocation = originalVerify })

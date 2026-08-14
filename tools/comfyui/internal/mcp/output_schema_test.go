@@ -3,7 +3,9 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"comfyui-pp-cli/internal/mcp/bound"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -281,6 +284,96 @@ func TestCodeOrchExecuteStructuredContentSatisfiesCommittedSchema(t *testing.T) 
 	}
 	if !strings.Contains(string(payload.Body), "execution_success") {
 		t.Fatalf("execute envelope body lost the timing messages: %s", payload.Body)
+	}
+}
+
+// TestCodeOrchExecuteBinaryBodyRoundTripsAsBase64 covers the branch nothing in
+// the fake-server suite reached before a live run: an endpoint that answers
+// with file bytes. The client layer must hand the code-orchestration path a
+// self-describing base64 envelope — not a 406, not an empty body, not raw
+// bytes smuggled into body_text — with no per-endpoint Accept override.
+func TestCodeOrchExecuteBinaryBodyRoundTripsAsBase64(t *testing.T) {
+	payloadBytes := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("p", 512))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(payloadBytes)
+	}))
+	defer srv.Close()
+
+	resetMCPPathEnv(t)
+	t.Setenv("COMFYUI_BASE_URL", srv.URL)
+
+	result := validateAgainstCommittedSchema(t, "comfyui_execute", handleCodeOrchExecute, map[string]any{
+		"endpoint_id": "view.get",
+		"params":      map[string]any{"filename": "render.png", "subfolder": "", "type": "output"},
+	})
+	requireConformingResult(t, "comfyui_execute", result)
+
+	var payload struct {
+		Path string `json:"path"`
+		Body struct {
+			PPBinary    bool   `json:"_pp_binary"`
+			ContentType string `json:"content_type"`
+			Encoding    string `json:"encoding"`
+			Bytes       int    `json:"bytes"`
+			Data        string `json:"data"`
+		} `json:"body"`
+		BodyText string `json:"body_text"`
+	}
+	if err := json.Unmarshal(result.RawStructuredContent, &payload); err != nil {
+		t.Fatalf("decoding structuredContent: %v\n%s", err, result.RawStructuredContent)
+	}
+	if payload.BodyText != "" {
+		t.Fatalf("binary payload leaked into body_text: %q", payload.BodyText)
+	}
+	if !payload.Body.PPBinary || payload.Body.Encoding != "base64" {
+		t.Fatalf("binary response did not arrive as a base64 envelope: %s", result.RawStructuredContent)
+	}
+	if payload.Body.ContentType != "image/png" || payload.Body.Bytes != len(payloadBytes) {
+		t.Fatalf("binary envelope misreports the payload: %s", result.RawStructuredContent)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(payload.Body.Data)
+	if err != nil {
+		t.Fatalf("envelope data is not decodable base64: %v", err)
+	}
+	if !bytes.Equal(decoded, payloadBytes) {
+		t.Fatalf("decoded payload differs from the bytes the server sent (%d vs %d bytes)", len(decoded), len(payloadBytes))
+	}
+}
+
+// TestCodeOrchExecuteOversizedBinaryRefusesInsteadOfTruncating pins the fix for
+// what a live /view fetch of a real render exposed. A multi-megabyte PNG
+// base64-encodes past the MCP budget, and the generic bounding turned it into a
+// `preview` holding a base64 string cut mid-value: unparseable, and corrupt if
+// an agent decoded it anyway. The note attached to that preview advised filters
+// and --select, which cannot shrink an image. Refusing with a route to the
+// bytes is the only honest answer.
+func TestCodeOrchExecuteOversizedBinaryRefusesInsteadOfTruncating(t *testing.T) {
+	payloadBytes := append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte("q"), 3*bound.MaxBytes)...)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(payloadBytes)
+	}))
+	defer srv.Close()
+
+	resetMCPPathEnv(t)
+	t.Setenv("COMFYUI_BASE_URL", srv.URL)
+
+	result := validateAgainstCommittedSchema(t, "comfyui_execute", handleCodeOrchExecute, map[string]any{
+		"endpoint_id": "view.get",
+		"params":      map[string]any{"filename": "render.png", "subfolder": "", "type": "output"},
+	})
+	if !result.IsError {
+		t.Fatalf("oversized binary returned a success result instead of refusing: %s", result.RawStructuredContent)
+	}
+	msg := resultText(t, result)
+	if strings.Contains(msg, "_pp_truncated") || strings.Contains(msg, "\"preview\"") {
+		t.Fatalf("oversized binary was truncated into a preview rather than refused: %s", msg)
+	}
+	for _, want := range []string{"too large", "image/png", "comfyui-pp-cli view", "--deliver file:", "base64"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("refusal message is missing %q, so the caller has no route to the bytes: %s", want, msg)
+		}
 	}
 }
 
