@@ -33,6 +33,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { buildHiDreamO1 } from "./wf-hidream-o1.mjs";
+import { buildKrea2 } from "./wf-krea2.mjs";
 import { buildQwenImage, QWEN_IMAGE_PRESETS } from "./wf-qwen-image.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
 
@@ -80,6 +81,54 @@ if (flags.graph) {
     width, height, seed,
     steps: Number(flags.steps || 0), cfg: Number(flags.cfg || 0),
     sampler: flags.sampler || "",
+  });
+} else if (flags.family === "krea2") {
+  // Model-family-correct graph: Krea 2 Turbo rides the Qwen-Image stack (shared
+  // qwen VAE, Qwen3-VL encoder as CLIP type "krea2") but with ITS OWN template —
+  // no shift node, regular latent, turbo recipe baked into the weights. --ckpt
+  // carries the UNET filename (the per-machine imagegen_ckpt binding); encoder +
+  // VAE default to the family's standard split files, overridable via
+  // --clip / --vae. The 32GB-pool doctrine flags (--pool-vvram GiB donated to
+  // --pool-donor, compute on --pool-compute) select the DisTorch2 pooled loader;
+  // 0/absent renders single-GPU (the small-fleet shape).
+  const positive = pos[1] || flags.prompt || "";
+  if (!positive) { console.error("error: a prompt is required (positional or --prompt), unless you pass --graph"); process.exit(2); }
+  if (!flags.ckpt && !process.env.COMFY_CKPT) { console.error("error: --family krea2 requires --ckpt (the krea2 UNET filename)"); process.exit(2); }
+  // Loud here, not as a downstream node error: this family wires no GGUF
+  // loader (the 32GB seat is bf16 by binding decision) — a .gguf name would
+  // otherwise die inside ComfyUI validation with a message that never names
+  // the actual constraint.
+  if (String(flags.ckpt || process.env.COMFY_CKPT).toLowerCase().endsWith(".gguf")) {
+    console.error("error: --family krea2 has no GGUF loader wired (bf16 seat) — bind a .safetensors UNET, or wire UnetLoaderGGUFDisTorch2MultiGPU first");
+    process.exit(2);
+  }
+  // Same half-override trap as qwen-image: steps and cfg travel together or not
+  // at all — the turbo recipe (8/1.0) is the builder's baked default.
+  if ((flags.steps != null) !== (flags.cfg != null)) {
+    console.error("error: --family krea2 takes --steps and --cfg together or not at all — the turbo recipe (8 steps / cfg 1.0) is the sanctioned default; a half-override renders burned-out mush");
+    process.exit(2);
+  }
+  const vaeFlag = flags.vae || process.env.COMFY_VAE || "";
+  if (["builtin", "none", "checkpoint"].includes(String(vaeFlag).toLowerCase())) {
+    console.error("error: --family krea2 has no built-in VAE (the UNET file carries no VAE weights); unset imagegen_vae/--vae or name one (default qwen_image_vae.safetensors)");
+    process.exit(2);
+  }
+  width = Number(pos[3] || flags.width || 1024);
+  height = Number(pos[4] || flags.height || 1024);
+  // Optionals pass undefined so the BUILDER stays the single source of truth
+  // for defaults — same rule as the qwen-image branch.
+  graph = buildKrea2({
+    prompt: positive, negative: flags.negative || "",
+    unet: flags.ckpt || process.env.COMFY_CKPT,
+    clip: flags.clip || undefined,
+    vae: vaeFlag || undefined,
+    steps: flags.steps != null ? Number(flags.steps) : undefined,
+    cfg: flags.cfg != null ? Number(flags.cfg) : undefined,
+    sampler: flags.sampler || undefined, scheduler: flags.scheduler || undefined,
+    poolVvramGb: flags["pool-vvram"] != null ? Number(flags["pool-vvram"]) : undefined,
+    poolCompute: flags["pool-compute"] || undefined,
+    poolDonor: flags["pool-donor"] || undefined,
+    width, height, seed,
   });
 } else if (flags.family === "qwen-image") {
   // Model-family-correct graph: Qwen-Image 2512 is an SD3-latent DiT whose text

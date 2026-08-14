@@ -27,6 +27,9 @@ func TestImageModelFromConfig(t *testing.T) {
 		ImageGenLoRA:         "l.safetensors",
 		ImageGenLoRAStrength: -0.5, // negative is a legitimate inverse weight
 		ImageGenShift:        3.1,
+		ImageGenPoolVvramGB:  12,
+		ImageGenPoolCompute:  "cuda:0",
+		ImageGenPoolDonor:    "cuda:1",
 	}
 	m := imageModelFromConfig(cfg)
 
@@ -35,7 +38,8 @@ func TestImageModelFromConfig(t *testing.T) {
 		m.Scheduler != cfg.ImageGenScheduler || m.Family != cfg.ImageGenFamily ||
 		m.Preset != cfg.ImageGenPreset || m.CLIP != cfg.ImageGenCLIP ||
 		m.LoRA != cfg.ImageGenLoRA || m.LoRAStrength != cfg.ImageGenLoRAStrength ||
-		m.Shift != cfg.ImageGenShift {
+		m.Shift != cfg.ImageGenShift || m.PoolVvramGB != cfg.ImageGenPoolVvramGB ||
+		m.PoolCompute != cfg.ImageGenPoolCompute || m.PoolDonor != cfg.ImageGenPoolDonor {
 		t.Fatalf("field mapping mismatch: %+v", m)
 	}
 

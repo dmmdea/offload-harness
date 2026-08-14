@@ -66,6 +66,23 @@ func TestBuildArgs_QwenPresetBinding(t *testing.T) {
 	}
 }
 
+// TestBuildArgs_Krea2PoolBinding: the 32GB-pool doctrine knobs thread through as
+// flags; unset (the single-GPU fleet shape) emits none, so every existing
+// binding renders byte-for-byte the same command.
+func TestBuildArgs_Krea2PoolBinding(t *testing.T) {
+	m := Model{Ckpt: "krea2_turbo_bf16.safetensors", Family: "krea2",
+		VAE: "qwen_image_vae.safetensors",
+		PoolVvramGB: 12, PoolCompute: "cuda:0", PoolDonor: "cuda:1"}
+	args := buildArgs("out.png", "p", map[string]any{}, m)
+	has(t, args, "--family", "krea2")
+	has(t, args, "--pool-vvram", "12")
+	has(t, args, "--pool-compute", "cuda:0")
+	has(t, args, "--pool-donor", "cuda:1")
+	for _, f := range []string{"--pool-vvram", "--pool-compute", "--pool-donor"} {
+		hasNot(t, buildArgs("out.png", "p", map[string]any{}, Model{Ckpt: "krea2_turbo_bf16.safetensors", Family: "krea2"}), f)
+	}
+}
+
 // TestBuildArgs_ZeroModelIsUnchanged is the compatibility guard for every machine
 // that has NOT set an image-model binding (e.g. the 8GB laptop on SDXL). A zero
 // Model must add no flags at all, so comfy-render.mjs keeps its own defaults and the

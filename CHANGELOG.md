@@ -6,6 +6,63 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.59.0] - 2026-08-14
+
+The 32GB-class image seat: Krea 2 Turbo, pooled. Chosen by the operator's blind bake-off
+verdict (2026-08-14: won both decided pairs against Qwen-Image-2512, including the
+text-rendering probe; two ties) under the house pool doctrine (operator-reaffirmed the same
+day: quality/doctrine outrank speed — speed is reported as fact, never a decision axis).
+
+### Added — `krea2` render family
+
+- **`render/wf-krea2.mjs`** (+ 7-test suite): the official `image_krea2_turbo_t2i` template
+  shape, cross-checked against the bake-off graphs recovered from /history — NO
+  ModelSamplingAuraFlow shift node (unlike qwen-image), regular `EmptyLatentImage`, turbo
+  recipe baked in (8 steps / cfg 1.0 / euler / simple), `CLIPLoader type "krea2"` with the
+  family-standard `qwen3vl_4b_bf16` encoder and the shared `qwen_image_vae`. Dims /16.
+- **Pooled loading (32GB-pool doctrine)**: `poolVvramGb > 0` loads the DiT through
+  ComfyUI-MultiGPU's `UNETLoaderDisTorch2MultiGPU` in RATIO mode — the shape proven on the
+  reference dual-GPU box; the byte-expert allocation string is deliberately unused (the
+  node's reservation half reads only the post-'#' segment expert mode leaves empty, so
+  expert silently collapses to one card). `0` = plain `UNETLoader` (single-GPU fleet
+  shape). Pooled safetensor serving additionally requires launching ComfyUI with
+  `--disable-dynamic-vram` until ComfyUI-MultiGPU #191 lands — a per-box launch concern
+  carried by the `COMFY_EXTRA_ARGS` seam, documented at the config keys.
+- **`--family krea2` in comfy-render.mjs**: mirrors the qwen-image branch — steps/cfg
+  travel together or not at all (a half-override of a distilled recipe renders burned-out
+  mush), "builtin" VAE is a config error for a split-file family, template-native 1024
+  default dims (proven at 2048×1024 in the bake-off).
+- **Config/Go plumbing**: `imagegen_pool_vvram_gb` / `imagegen_pool_compute` /
+  `imagegen_pool_donor` → `imagegen.Model.PoolVvramGB/PoolCompute/PoolDonor` →
+  `--pool-vvram/--pool-compute/--pool-donor` (zero/empty = no flags, existing machines
+  byte-identical; the `TestImageModelFromConfig` reflect drift-guard covers the new
+  fields).
+
+### Review hardening (two-specialist round, 2026-08-14)
+
+- **CRITICAL (both reviewers, empirically proven): the pool flags were collected by
+  `comfy-generate.mjs` and silently DROPPED by `batch-jobs.mjs`'s whitelist** — the hop
+  BOTH the single and batch paths route through — so `imagegen_pool_vvram_gb: 12`
+  produced a plain single-GPU `UNETLoader` on every harness render while all 249
+  per-hop tests stayed green (each hop was tested; the composition never was). Fixed
+  STRUCTURALLY: `batch-jobs.mjs` now exports `JOB_PARAM_FLAGS`/`SHARED_BINDING_FLAGS`
+  and `comfy-generate.mjs` DERIVES its collector from them — one source of truth — plus
+  a composed-chain test that feeds every exported flag through `jobArgs` and asserts
+  emission (mutation-proven red on a list regression).
+- **Load-time binding-trap warnings** (`warnImageGenBindingTraps`): every one of these
+  renders pixel-plausible output with zero client-side symptom — krea2 steps/cfg
+  half-bound (the pair guard would defer every render); pool devices without vvram, or
+  negative vvram (single-GPU with pool keys in the config); pool vvram under a family
+  with no pooled loader; pooled seat without `--disable-dynamic-vram` in
+  `COMFY_EXTRA_ARGS` (DynamicVRAM un-pools every safetensor DisTorch2 load while the
+  allocation banner still prints — MultiGPU #191).
+- `.gguf` bindings on `--family krea2` are rejected LOUD at dispatch (no GGUF loader is
+  wired for the bf16 seat) instead of dying as an unnamed ComfyUI node error.
+- Recorded, no code: a lone per-request `steps` on a zero-bound krea2 seat defers by
+  design (pair guard, identical to qwen-image; the live seat binds 8/1.0 explicitly so
+  request-steps compose with the bound cfg); `Number("")` on a hand-typed empty
+  `--pool-vvram` renders single-GPU silently — manual-invocation-only edge.
+
 ## [0.58.0] - 2026-08-14
 
 TO-3 (plan 2026-08-07): tier-aware repacking at the escalation boundary — a climbed-to tier

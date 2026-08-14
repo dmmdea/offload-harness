@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { withGpuSlot } from "./gpu-lock.mjs";
-import { parseJobs, jobArgs, resultLine } from "./batch-jobs.mjs";
+import { parseJobs, jobArgs, resultLine, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS } from "./batch-jobs.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -49,8 +49,11 @@ function runRenderArgs(tail) {
   });
 }
 
+// The collector is DERIVED from batch-jobs.mjs's emit lists — one source of
+// truth, so a flag can never again be collected here and silently dropped at
+// the jobArgs boundary (review-caught 2026-08-14).
 const sharedFlags = {};
-for (const k of ["api", "negative", "width", "height", "steps", "seed", "ckpt", "vae", "cfg", "sampler", "scheduler", "family", "preset", "clip", "lora", "lora-strength", "shift"]) {
+for (const k of ["api", ...JOB_PARAM_FLAGS, ...SHARED_BINDING_FLAGS]) {
   if (flags[k] != null) sharedFlags[k] = flags[k];
 }
 sharedFlags.api = API;
