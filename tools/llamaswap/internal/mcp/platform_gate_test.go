@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,6 +75,112 @@ func TestMCPEveryRegisteredToolHasFreshTenantGate(t *testing.T) {
 		t.Fatal("no in-process MCP tools exercised the fresh tenant-gate wrapper")
 	}
 	t.Logf("verified %d in-process and %d child-CLI MCP tools", direct, mirrored)
+}
+
+// TestMCPFreshTenantGateAllowsCLIWithoutPlatformSource pins the contract that
+// the two stubbed tests above cannot reach. Both replace verifyFreshMCPInvocation
+// with a fake that returns either an error or a session, so neither exercises
+// what the REAL cli.VerifyMCPInvocation returns on a CLI that registers no
+// tenant-gated platform source: (nil, nil), meaning "there is nothing to gate".
+// Treating that pair as a misconfiguration blocks every in-process tool — the
+// entire code-orchestration surface — while the cobra mirrors keep working, so
+// the failure looks like a partial outage rather than a gate bug.
+func TestMCPFreshTenantGateAllowsCLIWithoutPlatformSource(t *testing.T) {
+	session, err := cli.VerifyMCPInvocation(context.Background())
+	if err != nil {
+		t.Fatalf("VerifyMCPInvocation on a CLI with no platform source: %v", err)
+	}
+	if session != nil {
+		t.Skip("this CLI registers a platform source; the ungated path does not apply")
+	}
+
+	handlerCalls := 0
+	s := server.NewMCPServer("tenant-gate-conformance", "test")
+	result, err := requireFreshTenantGate(s, func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		handlerCalls++
+		return mcplib.NewToolResultText("ok"), nil
+	})(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{Name: "ungated-conformance", Arguments: map[string]any{}},
+	})
+	if err != nil {
+		t.Fatalf("wrapper returned protocol error: %v", err)
+	}
+	if result == nil || result.IsError {
+		t.Fatalf("in-process tool blocked on a CLI with no platform source: %#v", result)
+	}
+	if handlerCalls != 1 {
+		t.Fatalf("handler calls = %d, want 1", handlerCalls)
+	}
+}
+
+// TestMCPInProcessToolsReachTheirHandlersUngated is the end-to-end companion:
+// it drives every REAL in-process handler through the REAL gate wrapper, with
+// nothing stubbed, and fails if any of them comes back as the gate's own
+// refusal. The unit test above proves the wrapper's branch in isolation; this
+// proves the surface an agent actually calls — llamaswap_search, _get,
+// _execute and the intents — is reachable end to end, which is precisely what
+// the outage broke while the child-CLI mirrors kept answering.
+//
+// A handler is free to fail on its own terms here (a missing required argument,
+// an unreachable server on a CI runner): the assertion is only that the gate
+// itself did not turn the tool away. Every tool is called with arguments that
+// short-circuit before any request, so this needs no live server.
+func TestMCPInProcessToolsReachTheirHandlersUngated(t *testing.T) {
+	if session, err := cli.VerifyMCPInvocation(context.Background()); err != nil || session != nil {
+		t.Skip("this CLI registers a platform source; the ungated path does not apply")
+	}
+
+	s := server.NewMCPServer("tenant-gate-conformance", "test")
+	RegisterTools(s)
+	registered := s.ListTools()
+
+	names := make([]string, 0, len(registered))
+	for name := range registered {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	checked := 0
+	for _, name := range names {
+		entry := registered[name]
+		if entry.Tool.Meta != nil && entry.Tool.Meta.AdditionalFields != nil {
+			if owner, _ := entry.Tool.Meta.AdditionalFields[mcpTenantGateOwnerKey].(string); owner == "child-cli" {
+				continue
+			}
+		}
+		checked++
+		result, err := requireFreshTenantGate(s, entry.Handler)(context.Background(), mcplib.CallToolRequest{
+			Params: mcplib.CallToolParams{Name: name, Arguments: map[string]any{}},
+		})
+		if err != nil {
+			t.Fatalf("%s: wrapper returned protocol error: %v", name, err)
+		}
+		if result == nil {
+			t.Fatalf("%s: wrapper returned no result", name)
+		}
+		if text := resultErrorText(result); strings.Contains(text, "tenant gate is not configured") {
+			t.Fatalf("%s: in-process tool refused by the tenant gate: %s", name, text)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no in-process tools were exercised through the tenant gate")
+	}
+	t.Logf("drove %d in-process tools through the real tenant gate", checked)
+}
+
+// resultErrorText returns the text of an error result, or "" when the result is
+// not an error, so a gate refusal can be distinguished from a handler-level one.
+func resultErrorText(result *mcplib.CallToolResult) string {
+	if result == nil || !result.IsError {
+		return ""
+	}
+	var sb strings.Builder
+	for _, c := range result.Content {
+		if tc, ok := c.(mcplib.TextContent); ok {
+			sb.WriteString(tc.Text)
+		}
+	}
+	return sb.String()
 }
 
 func TestMCPTypedInvocationUsesSingleFreshTenantGate(t *testing.T) {
