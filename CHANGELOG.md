@@ -46,6 +46,43 @@ tier's lossy cut.
   0.57.0 (`specReserve`) because TO-4's fit verdict required it; recorded here for the plan's
   paper trail.
 
+### Review hardening (three-specialist round, 2026-08-14)
+
+- **CRITICAL — think-budget reservation**: the reasoning tier generates with
+  `MaxTokens+reasoningThinkBudget` (512), but its repack budgeted bare `MaxTokens` — a
+  ~384-token window overshoot on the default config, on exactly the large inputs TO-3
+  serves. `packForTier` now takes the callee's REAL completion request (`genBudget`).
+- **View-shrink inversion closed**: a callee served with a small window could pass the
+  fixed 256-token floor yet see LESS than the entry tier. The cut path now compares its
+  allowance against the ENTRY view's own token count and falls open ("buys no view")
+  when repacking would shrink the view.
+- **Upstream-only probes and tokenize** (`ProbeUpstreamWindow`, `tokclient.NewUpstreamOnly`):
+  the bare-root fallback routes answer for whatever model is CURRENTLY loaded — mid-cascade,
+  the previous tier — so a stale per-model alias would have budgeted and cut one tier with
+  another tier's window and vocabulary, cached under the callee's key. On a bare
+  llama-server the repack now stays entry-inherited (honest; a single-model server cannot
+  meaningfully repack per-tier).
+- **Tokenize failures TTL-cached** per model (the doc claimed stickiness the code lacked):
+  a dead /tokenize route costs one probe per TTL window, not two 60s round-trips per climb;
+  the cached disposition is labeled `tokenize (cached)`.
+- **Exemplars measured and stable**: shots are retrieved ONCE per request (keyed on the
+  entry view) and the SAME shots decorate every tier's rebuild AND the repack's fit
+  measurement — previously the injection landed after the measurement (unbudgeted) and a
+  per-tier re-retrieval could silently hand a climbed tier different or zero shots.
+- **Rebuild-failure restore**: a failed per-tier rebuild now restores the ENTRY prompt
+  outright (retained `entryBuilt`) — previously a 3-chain rebuild failure left the
+  PREVIOUS tier's packing in place while the label claimed the entry packing.
+- **`input_chars` keeps entry-view semantics on every row**: it feeds the confhead
+  `loginput` feature whose label stream is entry-scale; letting it follow the repacked
+  view desynchronized `len_chars` and `loginput` in the same feature row (train/serve
+  skew). Exemplar harvest is gated to entry rows (no sidecar bloat, no marker text as
+  future few-shot content).
+- **Honest under-cap label**: an input under the entry cap never probes anything, and its
+  disposition now says so (`full source (under entry cap)`) instead of claiming a
+  token-exact verification that never ran.
+- New ADR 0022 records the decision (provenance: the operator-approved master plan);
+  ADR index rows 0018–0022 registered.
+
 ## [0.57.0] - 2026-08-14
 
 TO-4 (plan 2026-08-07): `cut_middle_turns` — token-exact whole-message history compaction
