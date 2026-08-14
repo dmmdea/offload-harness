@@ -34,6 +34,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { buildHiDreamO1 } from "./wf-hidream-o1.mjs";
 import { buildQwenImage, QWEN_IMAGE_PRESETS } from "./wf-qwen-image.mjs";
+import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
 
 const argv = process.argv.slice(2);
 const pos = [];
@@ -162,8 +163,6 @@ if (flags.graph) {
   if (!builtinVAE) graph["10"] = { class_type: "VAELoader", inputs: { vae_name: vae } };
 }
 
-const j = async (url, opts) => { const r = await fetch(url, opts); if (!r.ok) { const e = new Error(url + " -> " + r.status + " " + (await r.text()).slice(0, 200)); e.httpStatus = r.status; throw e; } return r.json(); };
-
 async function waitServer() {
   for (let i = 0; i < 90; i++) {
     // Per-probe abort: a wedged-but-listening server hangs sockets; without a signal the
@@ -174,64 +173,42 @@ async function waitServer() {
   throw new Error("ComfyUI not reachable on " + API + " after ~3min");
 }
 
+// firstImage: the first node output under `images` — this runner produces images, so a
+// graph whose only outputs are e.g. text previews keeps polling until the budget ends
+// (unchanged from the inline loop this replaces).
+const firstImage = (outputs) => {
+  for (const node of Object.values(outputs || {})) { if (node.images && node.images[0]) return node.images[0]; }
+  return null;
+};
+
 async function main() {
   await waitServer();
-  const { prompt_id } = await j(API + "/prompt", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt: graph, client_id: "render-" + seed }),
-  });
-  console.log("queued", prompt_id, flags.graph ? `(graph: ${flags.graph})` : `seed ${seed} ${width}x${height}`);
-  let img = null;
+  // Submission + polling + retrieval live in comfy-submit.mjs (shared by every runner):
+  // submission prefers the vendored comfyui-pp-cli (idempotent lease, typed outcomes,
+  // node_errors verbatim, run-row provenance) with raw POST as the byte-identical
+  // fallback; polling keeps the dead-server watchdog + suspend/resume fence documented
+  // there (2026-07-30 incident class).
+  const cli = resolveCli();
+  const { promptId } = await submitGraph({ api: API, graph, clientId: "render-" + seed, cli });
+  console.log("queued", promptId, flags.graph ? `(graph: ${flags.graph})` : `seed ${seed} ${width}x${height}`);
   // Poll budget: quality-first renders (e.g. HiDream-O1 bf16 at native 2048, 40-step
   // SDE, RAM-offloaded) legitimately run far beyond the old ~6-min ceiling. Default
   // 30 min; the Go harness passes COMFY_WAIT_SEC aligned to its own timeout and its
   // process-tree kill remains the hard stop.
   const waitSec = Number(flags["wait-sec"] || process.env.COMFY_WAIT_SEC || 1800);
-  // Dead-server watchdog (2026-07-30): a ComfyUI that wedges MID-render (queue accepted,
-  // then the server stops answering — model loaded, 0% util, HTTP dead) used to burn the
-  // ENTIRE quality-first budget above while the Go side held the exclusive GPU slot, so
-  // every later job on the node bounced with "gpu busy" until a manual process restart.
-  // "Not reachable" is not "not finished": consecutive FAILED polls (fetch threw) abort
-  // early and release the slot in seconds. A slow render on a HEALTHY server still
-  // answers /history (with no output yet), which resets the counter — the long budget
-  // continues to govern that case, and the Go process-tree kill remains the hard stop.
-  const deadRaw = Number(process.env.COMFY_DEAD_SEC);
-  const deadSec = Number.isFinite(deadRaw) ? Math.max(10, deadRaw) : 240;
-  let lastAnswerAt = Date.now();
-  let prevTickAt = Date.now();
-  for (let i = 0; i < Math.max(1, Math.ceil(waitSec / 2)); i++) {
-    await new Promise(r => setTimeout(r, 2000));
-    // Suspend/resume fence (this fleet closes lids mid-render by design): a timer jump
-    // means the MACHINE slept, not the server — do not count that time as dead.
-    if (Date.now() - prevTickAt > 120_000) lastAnswerAt = Date.now();
-    prevTickAt = Date.now();
-    let hist;
-    // Per-poll abort (30s): sockets that HANG (wedged-but-listening server) must count
-    // as unreachable time too, or the watchdog goes blind exactly when it is needed —
-    // generous because a swap-thrashed quality render answers slowly but honestly. The
-    // counter is WALL time since the last ANSWER of any kind: an HTTP error status IS
-    // an answer (server alive), only network/abort failures accrue dead time.
-    try { hist = await j(`${API}/history/${prompt_id}`, { signal: AbortSignal.timeout(30_000) }); } catch (e) {
-      if (e && e.httpStatus) { lastAnswerAt = Date.now(); continue; }
-      const deadFor = Math.floor((Date.now() - lastAnswerAt) / 1000);
-      if (deadFor >= deadSec) {
-        throw new Error(`ComfyUI stopped answering mid-render (unreachable ${deadFor}s, COMFY_DEAD_SEC=${deadSec}); aborting early to release the GPU slot`);
-      }
-      continue;
-    }
-    lastAnswerAt = Date.now();
-    const h = hist[prompt_id];
-    if (!h) continue;
-    if (h.status && h.status.status_str === "error") throw new Error("ComfyUI exec error: " + JSON.stringify(h.status).slice(0, 400));
-    for (const node of Object.values(h.outputs || {})) { if (node.images && node.images[0]) { img = node.images[0]; break; } }
-    if (img) break;
-  }
-  if (!img) throw new Error("no image produced in time");
-  const q = new URLSearchParams({ filename: img.filename, subfolder: img.subfolder || "", type: img.type || "output" });
-  const r = await fetch(`${API}/view?` + q.toString());
-  if (!r.ok) throw new Error("view fetch " + r.status);
-  const buf = Buffer.from(await r.arrayBuffer());
+  const h = await pollOutputs({
+    api: API, promptId, waitSec,
+    isDone: (entry) => !!firstImage(entry.outputs),
+    noOutputMsg: "no image produced in time",
+    onExecError: () => finalizeRun({ api: API, promptId, cli }),
+  });
+  const img = firstImage(h.outputs);
+  const buf = await fetchView({ api: API, file: img });
   writeFileSync(out, buf);
   console.log("WROTE", out, buf.length, "bytes");
+  // Bookkeeping AFTER the artifact is safe on disk: records authoritative timing
+  // (execution_start -> execution_success) and releases the CLI's submission lease.
+  // Warn-only inside — a finished render is never re-opened by bookkeeping.
+  await finalizeRun({ api: API, promptId, cli });
 }
 main().catch(e => { console.error("RENDER FAILED:", e.message); process.exit(1); });

@@ -23,6 +23,7 @@ import { COMFY_DIR } from "./comfy-lifecycle.mjs";
 import { buildQwenImageEdit, QWEN_EDIT_PRESETS, resolveEditMegapixels } from "./wf-qwen-image-edit.mjs";
 import { imageSize } from "./image-size.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
+import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
 
 const argv = process.argv.slice(2);
 const pos = []; const flags = {};
@@ -75,8 +76,6 @@ function stageInput(p) {
   return name;
 }
 
-const j = async (url, opts) => { const r = await fetch(url, opts); if (!r.ok) throw new Error(url + " -> " + r.status + " " + (await r.text()).slice(0, 200)); return r.json(); };
-
 async function render() {
   const staged = [];
   try {
@@ -95,30 +94,24 @@ async function render() {
       shift: Number(flags.shift || 0) || undefined,
       seed,
     });
-    const { prompt_id } = await j(API + "/prompt", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: graph, client_id: "edit-" + seed }),
-    });
+    // Shared submission/polling/retrieval (comfy-submit.mjs): CLI-preferred submit with
+    // byte-identical raw fallback; hardened poll loop (dead-server watchdog).
+    const cli = resolveCli();
+    const { promptId } = await submitGraph({ api: API, graph, clientId: "edit-" + seed, cli });
     const srcNote = src.width > 0 ? `${src.width}x${src.height}` : "size-unknown";
-    console.log("queued", prompt_id, "seed", seed, "preset", presetName, "steps", steps, "cfg", cfg,
+    console.log("queued", promptId, "seed", seed, "preset", presetName, "steps", steps, "cfg", cfg,
       lora ? "lora " + lora : "no-lora", `src ${srcNote}`, `mp ${megapixels}`);
     const waitSec = Number(process.env.COMFY_WAIT_SEC || 1800);
-    let file = null;
-    for (let i = 0; i < Math.max(1, Math.ceil(waitSec / 2)); i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      let hist; try { hist = await j(`${API}/history/${prompt_id}`); } catch { continue; }
-      const h = hist[prompt_id];
-      if (!h) continue;
-      if (h.status && h.status.status_str === "error") throw new Error("ComfyUI exec error: " + JSON.stringify(h.status).slice(0, 400));
-      file = firstOutputFile(h.outputs);
-      if (file) break;
-    }
-    if (!file) throw new Error("no edited image produced in time");
-    const q = new URLSearchParams({ filename: file.filename, subfolder: file.subfolder, type: file.type });
-    const r = await fetch(`${API}/view?` + q.toString());
-    if (!r.ok) throw new Error("view fetch " + r.status);
-    writeFileSync(out, Buffer.from(await r.arrayBuffer()));
+    const h = await pollOutputs({
+      api: API, promptId, waitSec,
+      isDone: (entry) => !!firstOutputFile(entry.outputs),
+      noOutputMsg: "no edited image produced in time",
+      onExecError: () => finalizeRun({ api: API, promptId, cli }),
+    });
+    const file = firstOutputFile(h.outputs);
+    writeFileSync(out, await fetchView({ api: API, file }));
     console.log("WROTE", out);
+    await finalizeRun({ api: API, promptId, cli });
   } finally {
     for (const n of staged) { try { unlinkSync(join(COMFY_DIR, "input", n)); } catch {} }
   }
