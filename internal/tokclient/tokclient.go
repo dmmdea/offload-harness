@@ -25,9 +25,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/swapclient"
@@ -43,6 +46,24 @@ type Client struct {
 	base  string // normalized server root ("" = unusable; every call fails open)
 	model string
 	http  *http.Client
+	// lastErr remembers WHY the most recent call failed. Fail-open callers
+	// discard the per-call error by contract, so without this a permanently
+	// downgraded tokenizer is undiagnosable — the operator could not even say
+	// whether the route 404'd, timed out, or answered garbage. atomic: one
+	// Client may be shared across --serve handlers.
+	lastErr atomic.Value // string
+}
+
+// LastErr reports why the most recent failing call failed ("" = none yet).
+// Consulted by the agent loop's sticky wrapper at downgrade time so the
+// degradation is reportable, not just observable-by-absence.
+func (c *Client) LastErr() string {
+	s, _ := c.lastErr.Load().(string)
+	return s
+}
+
+func (c *Client) fail(format string, args ...any) {
+	c.lastErr.Store(fmt.Sprintf(format, args...))
 }
 
 // New builds a client for the model served at base (any /v1 suffix is
@@ -95,23 +116,32 @@ func (c *Client) Pieces(ctx context.Context, text string) ([]int, bool) {
 		return nil, false
 	}
 	var payload struct {
-		Tokens []piece `json:"tokens"`
+		Tokens *[]piece `json:"tokens"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
+		c.fail("tokenize response is not the expected JSON shape: %v", err)
 		return nil, false
 	}
-	lens := make([]int, 0, len(payload.Tokens))
+	if payload.Tokens == nil {
+		c.fail("tokenize 200 response carries no tokens array")
+		return nil, false
+	}
+	lens := make([]int, 0, len(*payload.Tokens))
 	total := 0
-	for _, p := range payload.Tokens {
+	for _, p := range *payload.Tokens {
 		n, ok := p.byteLen()
 		if !ok {
+			c.fail("tokenize piece is neither a string nor a byte array")
 			return nil, false
 		}
 		lens = append(lens, n)
 		total += n
 	}
 	if total != len(text) {
-		return nil, false // pieces do not reconstruct the input — mapping unusable
+		// The mapping a caller would build from these pieces is unusable. A
+		// too-large response truncated by the read cap lands here too.
+		c.fail("tokenize pieces sum to %d bytes for a %d-byte input — mapping unreliable (oversized/truncated response, or a non-reconstructing tokenizer)", total, len(text))
+		return nil, false
 	}
 	return lens, true
 }
@@ -125,44 +155,66 @@ func (c *Client) Count(ctx context.Context, text string) (int, bool) {
 		return 0, false
 	}
 	var payload struct {
-		Tokens []json.RawMessage `json:"tokens"`
+		// A pointer distinguishes "tokens present and empty" from "no tokens
+		// key at all": a 200 JSON body WITHOUT the array (a proxy's error
+		// object, say) must fail, not read as a confident zero-token success.
+		Tokens *[]json.RawMessage `json:"tokens"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
+		c.fail("tokenize response is not the expected JSON shape: %v", err)
 		return 0, false
 	}
-	return len(payload.Tokens), true
+	if payload.Tokens == nil {
+		c.fail("tokenize 200 response carries no tokens array")
+		return 0, false
+	}
+	return len(*payload.Tokens), true
 }
 
 // post tries the llama-swap per-model passthrough first, then a bare
 // llama-server root — the same candidate order as the window probe.
 func (c *Client) post(ctx context.Context, req tokenizeReq) ([]byte, bool) {
 	if c.base == "" {
+		c.fail("no endpoint base configured")
 		return nil, false
 	}
 	buf, err := json.Marshal(req)
 	if err != nil {
+		c.fail("marshaling tokenize request: %v", err)
 		return nil, false
 	}
 	candidates := []string{
 		c.base + "/upstream/" + url.PathEscape(c.model) + "/tokenize",
 		c.base + "/tokenize",
 	}
+	// Per-candidate failures are collected, not swallowed: when BOTH routes
+	// fail the recorded reason names each one, so a permanent downgrade is
+	// diagnosable after the fact (which route 404'd vs timed out).
+	var reasons []string
 	for _, u := range candidates {
 		hr, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(buf))
 		if err != nil {
+			reasons = append(reasons, fmt.Sprintf("%s: %v", u, err))
 			continue
 		}
 		hr.Header.Set("Content-Type", "application/json")
 		resp, err := c.http.Do(hr)
 		if err != nil {
+			reasons = append(reasons, fmt.Sprintf("%s: %v", u, err))
 			continue
 		}
 		body, rerr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 		resp.Body.Close()
-		if rerr != nil || resp.StatusCode != http.StatusOK {
+		if rerr != nil {
+			reasons = append(reasons, fmt.Sprintf("%s: reading body: %v", u, rerr))
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			reasons = append(reasons, fmt.Sprintf("%s: HTTP %d", u, resp.StatusCode))
 			continue
 		}
 		return body, true
 	}
+	c.fail("no /tokenize route answered: %s", strings.Join(reasons, "; "))
 	return nil, false
 }

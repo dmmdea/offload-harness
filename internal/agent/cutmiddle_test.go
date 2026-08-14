@@ -125,7 +125,7 @@ func assertPairing(t *testing.T, msgs []Msg) {
 func TestCutMiddleDropsWholeMiddleMessagesHeadTailSurvive(t *testing.T) {
 	msgs := cutFixture(8, 200)
 	tok := &runeTok{}
-	out, ok := cutMiddleTurns(context.Background(), tok, msgs, 800, 2, 2, nil)
+	out, _, ok := cutMiddleTurns(context.Background(), tok, msgs, 800, 2, 2, nil)
 	if !ok {
 		t.Fatal("cut reported tokenizer failure against the healthy fake")
 	}
@@ -181,7 +181,7 @@ func TestCutMiddleNeverEmitsHalfMessageProperty(t *testing.T) {
 		}
 		keepRecent := rng.Intn(4)
 		for _, budget := range []int{1, 50, 200, 500, 1000, 1 << 20} {
-			out, ok := cutMiddleTurns(context.Background(), &runeTok{}, msgs, budget, 2, keepRecent, nil)
+			out, _, ok := cutMiddleTurns(context.Background(), &runeTok{}, msgs, budget, 2, keepRecent, nil)
 			if !ok {
 				t.Fatalf("seed %d budget %d: tokenizer failure from the healthy fake", seed, budget)
 			}
@@ -201,7 +201,7 @@ func TestCutMiddleNeverEmitsHalfMessageProperty(t *testing.T) {
 
 func TestCutMiddleRealFitReturnsUnchanged(t *testing.T) {
 	msgs := cutFixture(4, 50)
-	out, ok := cutMiddleTurns(context.Background(), &runeTok{}, msgs, 1<<20, 2, 2, nil)
+	out, _, ok := cutMiddleTurns(context.Background(), &runeTok{}, msgs, 1<<20, 2, 2, nil)
 	if !ok {
 		t.Fatal("tokenizer failure from the healthy fake")
 	}
@@ -219,7 +219,7 @@ func TestCutMiddlePinnedAndSignalUnitsSurvive(t *testing.T) {
 		}
 	}
 	pinned := map[string]bool{"c4": true} // H8: the model re-requested c4
-	out, ok := cutMiddleTurns(context.Background(), &runeTok{}, msgs, 800, 2, 2, pinned)
+	out, _, ok := cutMiddleTurns(context.Background(), &runeTok{}, msgs, 800, 2, 2, pinned)
 	if !ok {
 		t.Fatal("tokenizer failure from the healthy fake")
 	}
@@ -243,7 +243,7 @@ func TestCutMiddleUnitStraddlingRecentBoundaryKeptWhole(t *testing.T) {
 	// keepRecent=1 forces ONLY the final tool result; its assistant partner
 	// sits before the boundary. The unit must survive whole — a dropped
 	// assistant with a surviving result is a wire error.
-	out, ok := cutMiddleTurns(context.Background(), &runeTok{}, msgs, 600, 2, 1, nil)
+	out, _, ok := cutMiddleTurns(context.Background(), &runeTok{}, msgs, 600, 2, 1, nil)
 	if !ok {
 		t.Fatal("tokenizer failure from the healthy fake")
 	}
@@ -350,5 +350,157 @@ func TestWithTokenizerWiresTheLadder(t *testing.T) {
 	l2 := NewLoop(nil, nil, 1).WithTokenizer(nil)
 	if l2.tok != nil {
 		t.Fatal("WithTokenizer(nil) must leave the legacy rung in place")
+	}
+}
+
+// A failure while the caller's ctx is cancelled says nothing about the
+// endpoint — recording it would let one --serve client hang-up silently
+// downgrade every later request sharing the Loop (review finding 2026-08-14).
+func TestStickyTokenizerIgnoresContextCancellation(t *testing.T) {
+	ft := &failTok{}
+	s := &stickyTokenizer{inner: ft}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, ok := s.Pieces(cancelled, "x"); ok {
+		t.Fatal("failure must still propagate")
+	}
+	if s.failed.Load() {
+		t.Fatal("a cancelled-ctx failure was recorded as an endpoint failure — one hang-up would downgrade the whole process")
+	}
+	// A REAL endpoint failure (live ctx) still trips it.
+	if _, ok := s.Pieces(context.Background(), "x"); ok {
+		t.Fatal("failure must propagate")
+	}
+	if !s.failed.Load() {
+		t.Fatal("a live-ctx endpoint failure must trip the sticky downgrade")
+	}
+}
+
+// The fit verdict is judged on the REAL yardstick, in both directions: a
+// transcript whose forced keeps exceed the real budget reports overReal (the
+// estimate would hide it), and one the tokenizer verified as fitting reports
+// fitReal (the estimate would report it exhausted forever).
+func TestCompactVerdictRealOverridesEstimate(t *testing.T) {
+	// overReal: pin EVERY unit so nothing may drop, tiny real budget.
+	msgs := cutFixture(6, 200)
+	pinned := map[string]bool{}
+	for i := 1; i <= 6; i++ {
+		pinned[fmt.Sprintf("c%d", i)] = true
+	}
+	out, v := compactWithVerdict(context.Background(), msgs, 100, 2, 2, compactOpts{Tok: &runeTok{}, RealBudget: 300, Pinned: pinned})
+	if v != overReal {
+		t.Fatalf("verdict = %v, want overReal: every unit is pinned and the real budget is 300", v)
+	}
+	assertPairing(t, out)
+
+	// fitReal: estimate-space budget forces the ladder in (estimate over), but
+	// the REAL count fits the real budget — the cut must return fitReal so the
+	// loop does not count a verified-fitting request as exhausted.
+	msgs2 := cutFixture(3, 100)
+	_, v2 := compactWithVerdict(context.Background(), msgs2, 1, 2, 2, compactOpts{Tok: &runeTok{}, RealBudget: 1 << 20})
+	if v2 != fitReal {
+		t.Fatalf("verdict = %v, want fitReal: the tokenizer measured the transcript inside the real budget", v2)
+	}
+
+	// fitUnknown: no tokenizer — the estimate path, exactly as before.
+	if _, v3 := compactWithVerdict(context.Background(), msgs2, 1, 2, 2, compactOpts{}); v3 != fitUnknown {
+		t.Fatalf("verdict = %v, want fitUnknown on the estimate-only path", v3)
+	}
+}
+
+// TokenizerPath is the downgrade's visibility: none / token-exact / degraded
+// with the recorded reason (review finding 2026-08-14: fail-open must not be
+// fail-unobservable).
+func TestTokenizerPathReporting(t *testing.T) {
+	if got := NewLoop(nil, nil, 1).tokPath(); got != "" {
+		t.Fatalf("no tokenizer: tokPath = %q, want empty", got)
+	}
+	l := NewLoop(nil, nil, 1).WithTokenizer(&runeTok{})
+	if got := l.tokPath(); got != "token-exact" {
+		t.Fatalf("healthy tokenizer: tokPath = %q, want token-exact", got)
+	}
+	l2 := NewLoop(nil, nil, 1).WithTokenizer(&failTok{})
+	l2.tok.Pieces(context.Background(), "x") // trip it
+	if got := l2.tokPath(); !strings.HasPrefix(got, "legacy (degraded: ") {
+		t.Fatalf("tripped tokenizer: tokPath = %q, want a degraded report with the reason", got)
+	}
+}
+
+// detailFailTok fails and can say why — the errDetailer seam tokclient uses.
+type detailFailTok struct{}
+
+func (detailFailTok) Pieces(context.Context, string) ([]int, bool) { return nil, false }
+func (detailFailTok) LastErr() string                              { return "HTTP 404 on both routes" }
+
+func TestStickyTokenizerCapturesFailureDetail(t *testing.T) {
+	s := &stickyTokenizer{inner: detailFailTok{}}
+	s.Pieces(context.Background(), "x")
+	why, down := s.degraded()
+	if !down || why != "HTTP 404 on both routes" {
+		t.Fatalf("degraded() = (%q, %v), want the implementation's own failure detail", why, down)
+	}
+}
+
+// sparseTok tokenizes ~100 bytes per token: the REAL count sits far BELOW the
+// chars/4 estimate, the regime where the estimate would misreport a
+// verified-fitting request as exhausted forever.
+type sparseTok struct{}
+
+func (sparseTok) Pieces(_ context.Context, text string) ([]int, bool) {
+	var lens []int
+	for len(text) > 0 {
+		n := 100
+		if n > len(text) {
+			n = len(text)
+		}
+		// back off to a rune boundary so pieces reconstruct the bytes exactly
+		for n > 0 && n < len(text) && !utf8.RuneStart(text[n]) {
+			n--
+		}
+		lens = append(lens, n)
+		text = text[n:]
+	}
+	return lens, true
+}
+
+// The loop judges exhaustion by the tokenizer's verdict, not the estimate —
+// both directions, at the REAL call site (Run):
+func TestLoopExhaustionFollowsRealVerdict(t *testing.T) {
+	long := strings.Repeat("tool output line with routine content\n", 200)
+	newClient := func() *fakeClient {
+		return &fakeClient{script: []Completion{
+			{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "read_file", `{"p":"a"}`)}}, FinishReason: "tool_calls"},
+			{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+		}}
+	}
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) { return long, nil }}}
+
+	// Direction 1 (fitReal): the estimate overflows the 256-token floor on
+	// every step, but the sparse REAL count fits comfortably — a verified-
+	// fitting run must report ZERO exhausted compactions.
+	loop := NewLoop(newClient(), tools, 5).WithSystem(strings.Repeat("big system prompt ", 100)).
+		WithContextTokens(300).WithMaxTokens(64).WithToolResultCap(len(long) + 1).WithTokenizer(sparseTok{})
+	res, err := loop.Run(context.Background(), "objective")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.CompactionsExhausted != 0 {
+		t.Fatalf("CompactionsExhausted = %d on a run the tokenizer VERIFIED fits — the estimate overruled the real yardstick", res.CompactionsExhausted)
+	}
+	if res.TokenizerPath != "token-exact" {
+		t.Fatalf("TokenizerPath = %q, want token-exact", res.TokenizerPath)
+	}
+
+	// Direction 2 (overReal): with a one-token-per-rune tokenizer the huge
+	// FORCED preamble alone overflows the real floor — the run must count it,
+	// even though nothing here consults the estimate.
+	loop2 := NewLoop(newClient(), tools, 5).WithSystem(strings.Repeat("big system prompt ", 100)).
+		WithContextTokens(300).WithMaxTokens(64).WithToolResultCap(len(long) + 1).WithTokenizer(&runeTok{})
+	res2, err := loop2.Run(context.Background(), "objective")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res2.CompactionsExhausted == 0 {
+		t.Fatal("forced keeps exceed the REAL budget but CompactionsExhausted = 0 — the real overflow was hidden")
 	}
 }

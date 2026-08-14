@@ -188,3 +188,42 @@ func TestCount(t *testing.T) {
 		t.Fatalf("Count(object shape) = (%d, %v), want (2, true)", n, ok)
 	}
 }
+
+func TestCountFailsOnTokenlessJSON(t *testing.T) {
+	// A 200 JSON body WITHOUT a tokens array (a proxy's error object) must
+	// fail, not read as a confident "0 tokens" (review finding 2026-08-14).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"error":"model loading"}`)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "m", time.Second)
+	if n, ok := c.Count(context.Background(), "some text"); ok {
+		t.Fatalf("Count = (%d, true) on a tokenless 200 body — a confident wrong zero", n)
+	}
+	if c.LastErr() == "" {
+		t.Fatal("LastErr must name the failure so a sticky downgrade is diagnosable")
+	}
+	// An EMPTY tokens array on empty input is a legitimate zero.
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"tokens":[]}`)
+	}))
+	defer srv2.Close()
+	if n, ok := New(srv2.URL, "m", time.Second).Count(context.Background(), ""); !ok || n != 0 {
+		t.Fatalf("Count(empty, tokens:[]) = (%d, %v), want (0, true)", n, ok)
+	}
+}
+
+func TestLastErrNamesBothFailedRoutes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "gemma-4-e4b", time.Second)
+	if _, ok := c.Pieces(context.Background(), "text"); ok {
+		t.Fatal("expected failure")
+	}
+	e := c.LastErr()
+	if !strings.Contains(e, "/upstream/gemma-4-e4b/tokenize") || !strings.Contains(e, "HTTP 404") {
+		t.Fatalf("LastErr = %q — must name each failed route and its status so the downgrade is diagnosable", e)
+	}
+}

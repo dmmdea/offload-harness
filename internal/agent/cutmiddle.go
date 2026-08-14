@@ -40,15 +40,25 @@ type Tokenizer interface {
 	Pieces(ctx context.Context, text string) ([]int, bool)
 }
 
-// stickyTokenizer downgrades permanently after the first failure: an endpoint
-// that could not answer /tokenize once is overwhelmingly an endpoint without
-// the route, and paying a failed round-trip on every over-budget step would
-// put a network stall inside the loop for nothing. atomic — --serve shares one
-// *Loop (and thus one tokenizer) across concurrent HTTP handlers.
+// stickyTokenizer downgrades permanently after the first ENDPOINT failure: an
+// endpoint that could not answer /tokenize once is overwhelmingly an endpoint
+// without the route, and paying a failed round-trip on every over-budget step
+// would put a network stall inside the loop for nothing. A failure while the
+// caller's ctx is already cancelled says NOTHING about the endpoint (the run
+// is shutting down, or a --serve client hung up) — that one is not recorded,
+// or a single mid-run cancellation would silently downgrade every later run
+// sharing this Loop (--serve and --queue keep one Loop for the process).
+// atomic — --serve shares one *Loop (and thus one tokenizer) across
+// concurrent HTTP handlers.
 type stickyTokenizer struct {
 	inner  Tokenizer
 	failed atomic.Bool
+	reason atomic.Value // string: WHY the downgrade happened, for the Result report
 }
+
+// errDetailer is the optional seam for implementations that can say WHY the
+// last call failed (tokclient.Client does). Only consulted at downgrade time.
+type errDetailer interface{ LastErr() string }
 
 func (s *stickyTokenizer) Pieces(ctx context.Context, text string) ([]int, bool) {
 	if s.failed.Load() {
@@ -56,10 +66,28 @@ func (s *stickyTokenizer) Pieces(ctx context.Context, text string) ([]int, bool)
 	}
 	lens, ok := s.inner.Pieces(ctx, text)
 	if !ok {
-		s.failed.Store(true)
+		if ctx.Err() == nil {
+			why := "tokenizer failed (no detail available)"
+			if d, hasDetail := s.inner.(errDetailer); hasDetail {
+				if e := d.LastErr(); e != "" {
+					why = e
+				}
+			}
+			s.reason.Store(why)
+			s.failed.Store(true)
+		}
 		return nil, false
 	}
 	return lens, true
+}
+
+// degraded reports whether (and why) the sticky downgrade fired.
+func (s *stickyTokenizer) degraded() (string, bool) {
+	if !s.failed.Load() {
+		return "", false
+	}
+	why, _ := s.reason.Load().(string)
+	return why, true
 }
 
 // msgSeparator joins serialized messages in the one tokenized transcript. A
@@ -78,16 +106,23 @@ const msgSeparator = "\n"
 const realMsgOverheadTokens = 8
 
 // serializeMsg renders one message the way the cut accounts for it: role tag,
-// content, and any tool-call payloads (name + raw args go on the wire too).
-// This is a token-accounting serialization, not the wire template — the
-// template's framing is covered by realMsgOverheadTokens.
+// call ids, content, and any tool-call payloads (ids, names and raw args go on
+// the wire too — omitting the ids undercounted tool-heavy transcripts, the
+// unsafe direction). This is a token-accounting serialization, not the wire
+// template — the template's framing is covered by realMsgOverheadTokens.
 func serializeMsg(m Msg) string {
 	var b strings.Builder
 	b.WriteString(m.Role)
+	if m.ToolCallID != "" {
+		b.WriteString(" ")
+		b.WriteString(m.ToolCallID)
+	}
 	b.WriteString("\n")
 	b.WriteString(m.Content)
 	for _, c := range m.ToolCalls {
 		b.WriteString("\n")
+		b.WriteString(c.ID)
+		b.WriteString(" ")
 		b.WriteString(c.Name)
 		b.WriteString(" ")
 		b.WriteString(c.Args)
@@ -96,10 +131,16 @@ func serializeMsg(m Msg) string {
 }
 
 // cutMiddleTurns drops whole middle messages until the transcript's REAL token
-// count fits realBudget. Returns (result, true) when the tokenizer answered —
-// including the no-cut case where the real count already fits — and
-// (msgs, false) untouched when it did not (caller falls back to the legacy
-// estimate-driven drop rung).
+// count fits realBudget. Returns (result, fits, true) when the tokenizer
+// answered — including the no-cut case where the real count already fits — and
+// (msgs, false, false) untouched when it did not (caller falls back to the
+// legacy estimate-driven drop rung). fits is the REAL-token verdict on the
+// returned transcript: false means forced keeps (preamble, keepRecent, pinned,
+// signal residue) exceed the budget and the caller must count it exhausted —
+// the chars/4 estimate must never decide that, in either direction (the
+// estimate under-counts dense content, so an over-real-budget transcript can
+// read as "fits" in estimate space and the honest-overflow telemetry would
+// silently never fire).
 //
 // Survival rules, in priority order:
 //   - the protected preamble [0, protectedPrefix) ALWAYS survives (system +
@@ -118,9 +159,9 @@ func serializeMsg(m Msg) string {
 // Forced keeps can leave the result over budget (a huge preamble or pinned
 // unit); that is the ladder's existing honest-overflow contract — the caller's
 // fit telemetry reports it, nothing is half-dropped to hide it.
-func cutMiddleTurns(ctx context.Context, tok Tokenizer, msgs []Msg, realBudget, protectedPrefix, keepRecent int, pinned map[string]bool) ([]Msg, bool) {
+func cutMiddleTurns(ctx context.Context, tok Tokenizer, msgs []Msg, realBudget, protectedPrefix, keepRecent int, pinned map[string]bool) ([]Msg, bool, bool) {
 	if tok == nil || realBudget <= 0 || len(msgs) == 0 {
-		return msgs, false
+		return msgs, false, false
 	}
 	if protectedPrefix < 0 {
 		protectedPrefix = 0
@@ -154,18 +195,23 @@ func cutMiddleTurns(ctx context.Context, tok Tokenizer, msgs []Msg, realBudget, 
 
 	pieces, ok := tok.Pieces(ctx, text)
 	if !ok {
-		return msgs, false
+		return msgs, false, false
 	}
 	// Contract check (tokclient verifies this too; a second implementation
 	// might not): the pieces must reconstruct the text's bytes exactly, or the
 	// byte→token mapping below would be built on sand. Fail open, never cut on
-	// an unreliable mapping.
+	// an unreliable mapping. Deliberately NOT routed through the sticky
+	// wrapper's downgrade (this return is indistinguishable from a transport
+	// failure to the caller): the shipping implementation self-checks, so this
+	// fires only for a future non-verifying implementation, which then pays a
+	// per-step round-trip — visible in the degraded/latency profile, never in
+	// corrupted cuts.
 	sum := 0
 	for _, n := range pieces {
 		sum += n
 	}
 	if sum != len(text) {
-		return msgs, false
+		return msgs, false, false
 	}
 
 	// Map bytes → tokens: tokSpans[i] = [firstTok, lastTok] where firstTok is
@@ -205,7 +251,7 @@ func cutMiddleTurns(ctx context.Context, tok Tokenizer, msgs []Msg, realBudget, 
 	// (unknown) survivor count only over-reserves, which is the safe direction.
 	contentBudget := realBudget - realMsgOverheadTokens*len(msgs)
 	if totalContent+realMsgOverheadTokens*len(msgs) <= realBudget {
-		return msgs, true // real count already fits — the estimate was pessimistic
+		return msgs, true, true // real count already fits — the estimate was pessimistic
 	}
 	if contentBudget < 0 {
 		contentBudget = 0 // only forced keeps survive; honest overflow
@@ -270,10 +316,17 @@ func cutMiddleTurns(ctx context.Context, tok Tokenizer, msgs []Msg, realBudget, 
 		}
 	}
 	out := make([]Msg, 0, len(msgs))
+	keptTokens := 0
 	for i, m := range msgs {
 		if u := unitOf[i]; unitForced[u] || unitAllInWindows[u] {
 			out = append(out, m)
+			// Span length, boundary-shared tokens counted per message — the
+			// conservative (over-counting) side, matching the window tests.
+			keptTokens += tokSpans[i].last - tokSpans[i].first + 1
 		}
 	}
-	return out, true
+	// The REAL-token fit verdict on what survived: forced keeps can exceed the
+	// budget, and only this yardstick may say so (see the doc comment).
+	fits := keptTokens+realMsgOverheadTokens*len(out) <= realBudget
+	return out, fits, true
 }

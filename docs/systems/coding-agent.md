@@ -259,9 +259,19 @@ is sentinel-indexed by its byte span in the one serialized transcript, the SERVE
 `/tokenize` (with pieces) maps those spans to real token positions, and whole assistant+tool
 units are dropped from the MIDDLE so the head (protected preamble) and tail (recent state) —
 the first and last budget/2 real tokens — always survive; a message is never split, so a
-truncated-mid-JSON tool result is unrepresentable by construction. The chars/4 estimate never
-decides a drop on this path. Endpoints with no `/tokenize` (or a mid-run outage) fall open —
-once, stickily — to the legacy estimate-driven oldest-first drop; both paths drop units whole,
+truncated-mid-JSON tool result is unrepresentable on this rung (the reactive `emergencyShrink`
+last resort below, which fires only after a live server rejection, remains the one documented
+exception — and it is skipped when the token-exact rung measured the halved transcript as
+fitting). The chars/4 estimate never decides a drop on this path, in either direction: the
+cut's own REAL-token verdict drives the exhausted telemetry (an under-counting estimate would
+hide a real overflow; a pessimistic one would report a verified-fitting request exhausted
+forever). Endpoints with no `/tokenize` (or a mid-run outage) fall open —
+once, stickily, per Loop; a failure under an already-cancelled context is NOT recorded (a
+--serve client hang-up says nothing about the endpoint) — to the legacy estimate-driven
+oldest-first drop. The downgrade is never silent: `Result.TokenizerPath` reports
+`token-exact` vs `legacy (degraded: <why>)` with the per-route failure detail, `agent_run`
+returns it as `tokenizer_path`, and the CLI prints a stderr note — the same visibility rule
+as the window probe. Both drop paths drop units whole,
 and both exempt units still carrying signal residue or a **pinned** result (a result the model
 re-requested and the circuit breaker refused again — the H8 ramp: content the model re-reads
 stops being lossily compacted). A ladder

@@ -116,9 +116,36 @@ type compactOpts struct {
 	RealBudget int
 }
 
+// fitVerdict is what compact KNOWS about the returned transcript's fit — and,
+// critically, which yardstick produced that knowledge.
+type fitVerdict int
+
+const (
+	// fitUnknown: only the estimate ladder ran; the caller judges fit by
+	// estimateTokens, exactly as before the token-exact rung existed.
+	fitUnknown fitVerdict = iota
+	// fitReal: the token-exact rung MEASURED the returned transcript within
+	// the real budget. The estimate must not overrule it — a pessimistic
+	// estimate would otherwise report a verified-fitting request as exhausted
+	// on every remaining step.
+	fitReal
+	// overReal: the token-exact rung measured the transcript OVER the real
+	// budget even after cutting (forced keeps: preamble/pinned/signal/tail).
+	// The caller must count it exhausted — the under-counting estimate would
+	// otherwise hide exactly the overflow the telemetry exists to report.
+	overReal
+)
+
+// compact is the estimate-compatible wrapper over compactWithVerdict for
+// callers that don't consume the fit verdict (replay, tests).
 func compact(ctx context.Context, msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts compactOpts) []Msg {
+	out, _ := compactWithVerdict(ctx, msgs, budget, keepRecent, protectedPrefix, opts)
+	return out
+}
+
+func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent int, protectedPrefix int, opts compactOpts) ([]Msg, fitVerdict) {
 	if estimateTokens(msgs) <= budget {
-		return msgs // happy path: untouched, KV cache preserved.
+		return msgs, fitUnknown // happy path: untouched, KV cache preserved.
 	}
 	if keepRecent < 0 {
 		keepRecent = 0
@@ -198,7 +225,7 @@ func compact(ctx context.Context, msgs []Msg, budget int, keepRecent int, protec
 		}
 	}
 	if estimateTokens(out) <= budget {
-		return out
+		return out, fitUnknown
 	}
 
 	// Step 2a (flag-gated, LOSSLESS): re-encode older tool bodies that are
@@ -214,7 +241,7 @@ func compact(ctx context.Context, msgs []Msg, budget int, keepRecent int, protec
 			}
 		}
 		if estimateTokens(out) <= budget {
-			return out
+			return out, fitUnknown
 		}
 	}
 
@@ -230,7 +257,7 @@ func compact(ctx context.Context, msgs []Msg, budget int, keepRecent int, protec
 			}
 		}
 		if estimateTokens(out) <= budget {
-			return out
+			return out, fitUnknown
 		}
 	}
 
@@ -253,7 +280,7 @@ func compact(ctx context.Context, msgs []Msg, budget int, keepRecent int, protec
 		}
 	}
 	if estimateTokens(out) <= budget {
-		return out
+		return out, fitUnknown
 	}
 
 	// Step 4 (token-exact, TO-4): with a Tokenizer present the whole-message
@@ -263,8 +290,11 @@ func compact(ctx context.Context, msgs []Msg, budget int, keepRecent int, protec
 	// open to the legacy rung below; the loop's tokenizer wrapper is sticky, so
 	// a run pays that failed probe once.
 	if opts.Tok != nil {
-		if cut, ok := cutMiddleTurns(ctx, opts.Tok, out, opts.RealBudget, protectedEnd, keepRecent, pinned); ok {
-			return cut
+		if cut, fits, ok := cutMiddleTurns(ctx, opts.Tok, out, opts.RealBudget, protectedEnd, keepRecent, pinned); ok {
+			if fits {
+				return cut, fitReal
+			}
+			return cut, overReal
 		}
 	}
 
@@ -317,7 +347,7 @@ func compact(ctx context.Context, msgs []Msg, budget int, keepRecent int, protec
 			keep[i] = false
 		}
 	}
-	return masked(out, keep)
+	return masked(out, keep), fitUnknown
 }
 
 // masked returns the subslice of msgs whose keep flag is true, in order.

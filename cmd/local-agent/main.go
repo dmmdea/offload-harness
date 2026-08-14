@@ -499,6 +499,7 @@ func main() {
 		if res.Fallback != agent.FallbackNone {
 			fmt.Fprintf(os.Stderr, "[local-agent] two-tier FELL BACK to a single editor run (%s)\n", res.Fallback)
 		}
+		printTokenizerDegrade(res.TokenizerPath)
 		if *asJSON {
 			b, _ := json.MarshalIndent(res, "", "  ")
 			fmt.Println(string(b))
@@ -515,12 +516,24 @@ func main() {
 		printFlaggedEffects(res.Effects) // what already touched the world before the death
 		os.Exit(1)
 	}
+	printTokenizerDegrade(res.TokenizerPath)
 	if *asJSON {
 		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))
 	} else {
 		fmt.Println(res.Output)
 		fmt.Fprintf(os.Stderr, "[local-agent] steps=%d stop=%s tools=%d\n", res.Steps, res.StopReason, len(built.Tools))
+	}
+}
+
+// printTokenizerDegrade surfaces a sticky tokenizer downgrade on stderr: the
+// token-exact drop rung failing open to the legacy estimate rung is the
+// designed contract, but doing so INVISIBLY would leave 0.57.0 behaving like
+// 0.56.0 with no way to tell (review finding 2026-08-14) — same precedent as
+// reporting the resolved context window.
+func printTokenizerDegrade(path string) {
+	if strings.HasPrefix(path, "legacy (degraded") {
+		fmt.Fprintf(os.Stderr, "[local-agent] token-exact compaction DEGRADED to the legacy estimate rung: %s\n", path)
 	}
 }
 
