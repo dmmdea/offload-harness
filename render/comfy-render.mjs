@@ -94,6 +94,14 @@ if (flags.graph) {
   const positive = pos[1] || flags.prompt || "";
   if (!positive) { console.error("error: a prompt is required (positional or --prompt), unless you pass --graph"); process.exit(2); }
   if (!flags.ckpt && !process.env.COMFY_CKPT) { console.error("error: --family krea2 requires --ckpt (the krea2 UNET filename)"); process.exit(2); }
+  // Loud here, not as a downstream node error: this family wires no GGUF
+  // loader (the 32GB seat is bf16 by binding decision) — a .gguf name would
+  // otherwise die inside ComfyUI validation with a message that never names
+  // the actual constraint.
+  if (String(flags.ckpt || process.env.COMFY_CKPT).toLowerCase().endsWith(".gguf")) {
+    console.error("error: --family krea2 has no GGUF loader wired (bf16 seat) — bind a .safetensors UNET, or wire UnetLoaderGGUFDisTorch2MultiGPU first");
+    process.exit(2);
+  }
   // Same half-override trap as qwen-image: steps and cfg travel together or not
   // at all — the turbo recipe (8/1.0) is the builder's baked default.
   if ((flags.steps != null) !== (flags.cfg != null)) {

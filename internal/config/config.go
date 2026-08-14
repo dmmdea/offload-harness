@@ -916,6 +916,7 @@ func Load(path string) (Config, error) {
 	warnUnknownKeys(b)
 	warnBadEnumValues(c)
 	warnDeadThresholds(c)
+	warnImageGenBindingTraps(c)
 	if home, herr := os.UserHomeDir(); herr == nil {
 		c.Home = ExpandTilde(c.Home, home)
 		expandUserPaths(&c, home)
@@ -983,6 +984,45 @@ func warnBadEnumValues(c Config) {
 // 0.55.0 calibration pins the dead constants forever without this warning
 // (same silent-config-state trap as warnBadEnumValues). Zero disables a gate
 // on purpose and is not warned.
+// warnImageGenBindingTraps flags image-seat bindings that render successfully
+// while silently violating what the operator configured (review round
+// 2026-08-14 — every one of these produces pixel-plausible output with zero
+// client-side symptom, which is exactly why they warn at LOAD, the one moment
+// somebody is looking):
+//   - krea2 with steps XOR cfg bound: bindingArgs emits the half-pair and the
+//     render route's pair guard defers EVERY render (or, with neither bound,
+//     any per-request steps defers — bind both, e.g. 8/1.0, on seats whose
+//     callers pass steps).
+//   - pool devices set without imagegen_pool_vvram_gb > 0 (or a negative
+//     vvram): no pool flag is emitted and the seat renders single-GPU with
+//     pool keys sitting in the config.
+//   - pool vvram > 0 under a family that has no pooled loader: the flags are
+//     parsed and never consulted.
+//   - pool vvram > 0 without --disable-dynamic-vram in COMFY_EXTRA_ARGS:
+//     ComfyUI DynamicVRAM shadows the DisTorch2 hook (MultiGPU #191), so the
+//     pooled graph loads single-card WHILE the allocation banner still prints
+//     — a misconfigured box is indistinguishable from a pooled one at every
+//     observable surface. Warn-only: the stock launcher may carry the flag on
+//     manually-started servers, so absence of the env is a smell, not proof.
+func warnImageGenBindingTraps(c Config) {
+	if c.ImageGenFamily == "krea2" && (c.ImageGenSteps > 0) != (c.ImageGenCFG > 0) {
+		fmt.Fprintf(os.Stderr, "warning: imagegen_steps/imagegen_cfg are half-bound (%d / %g) on the krea2 seat — the render route rejects the half-pair and EVERY render will defer; bind both (turbo recipe: 8 / 1.0) or neither\n",
+			c.ImageGenSteps, c.ImageGenCFG)
+	}
+	poolAux := c.ImageGenPoolCompute != "" || c.ImageGenPoolDonor != ""
+	if c.ImageGenPoolVvramGB < 0 {
+		fmt.Fprintf(os.Stderr, "warning: imagegen_pool_vvram_gb %g is negative — no pool flag is emitted and the seat renders SINGLE-GPU despite the pool config\n", c.ImageGenPoolVvramGB)
+	} else if poolAux && c.ImageGenPoolVvramGB == 0 {
+		fmt.Fprintln(os.Stderr, "warning: imagegen_pool_compute/donor are set but imagegen_pool_vvram_gb is 0 — pooling never engages and the seat renders SINGLE-GPU; set the vvram GiB to pool")
+	}
+	if c.ImageGenPoolVvramGB > 0 && c.ImageGenFamily != "krea2" {
+		fmt.Fprintf(os.Stderr, "warning: imagegen_pool_vvram_gb is set but imagegen_family is %q — pooled loading is wired for the krea2 family only; the flags are parsed and never consulted\n", c.ImageGenFamily)
+	}
+	if c.ImageGenPoolVvramGB > 0 && !strings.Contains(os.Getenv("COMFY_EXTRA_ARGS"), "--disable-dynamic-vram") {
+		fmt.Fprintln(os.Stderr, "warning: pooled image seat configured but COMFY_EXTRA_ARGS does not carry --disable-dynamic-vram — ComfyUI DynamicVRAM silently un-pools every safetensor DisTorch2 load (MultiGPU #191) unless the launch carries the flag some other way")
+	}
+}
+
 func warnDeadThresholds(c Config) {
 	const (
 		minObservedConfidence = 0.85  // lowest self-reported classify confidence ever observed

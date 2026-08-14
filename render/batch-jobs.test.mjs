@@ -1,7 +1,7 @@
 // node --test render/batch-jobs.test.mjs
 import { test } from "node:test";
 import assert from "node:assert";
-import { parseJobs, jobArgs, resultLine } from "./batch-jobs.mjs";
+import { parseJobs, jobArgs, resultLine, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS } from "./batch-jobs.mjs";
 
 test("parseJobs: valid JSONL, skips blank lines", () => {
   const jobs = parseJobs('{"prompt":"a red bike","out":"a.png","seed":7}\n\n{"prompt":"a green apple","out":"b.png"}\n');
@@ -33,6 +33,26 @@ test("jobArgs: job fields override shared, binding flags come from shared only",
   assert.equal(flag("cfg"), "5");
   assert.equal(flag("family"), "hidream-o1");
   assert.ok(!args.includes("--width"), "unset numerics emit no flag");
+});
+
+test("jobArgs: EVERY exported binding + job flag is emitted — the composed chain, not per-hop lists", () => {
+  // Review-caught 2026-08-14: the pool flags were collected by comfy-generate
+  // and silently dropped here, leaving the pooled seat rendering single-card
+  // through every harness path while all per-hop tests stayed green. The
+  // collector now derives from these exports; this test pins the OTHER half —
+  // jobArgs must emit every key it declares, so a flag can never again vanish
+  // between the two scripts.
+  const shared = { api: "http://x:1" };
+  for (const k of [...JOB_PARAM_FLAGS, ...SHARED_BINDING_FLAGS]) shared[k] = "V-" + k;
+  const args = jobArgs({ prompt: "p", out: "o.png" }, shared);
+  for (const k of [...JOB_PARAM_FLAGS, ...SHARED_BINDING_FLAGS]) {
+    const i = args.indexOf("--" + k);
+    assert.ok(i >= 0, "--" + k + " must be emitted");
+    assert.equal(args[i + 1], "V-" + k, "--" + k + " carries the shared value");
+  }
+  for (const k of ["pool-vvram", "pool-compute", "pool-donor"]) {
+    assert.ok(SHARED_BINDING_FLAGS.includes(k), k + " must stay in the binding list (the pooled-seat regression)");
+  }
 });
 
 test("jobArgs: an EMPTY shared lora still forwards — it strips a preset's LoRA downstream", () => {
