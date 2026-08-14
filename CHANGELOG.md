@@ -36,7 +36,32 @@ day: quality/doctrine outrank speed — speed is reported as fact, never a decis
   `imagegen_pool_donor` → `imagegen.Model.PoolVvramGB/PoolCompute/PoolDonor` →
   `--pool-vvram/--pool-compute/--pool-donor` (zero/empty = no flags, existing machines
   byte-identical; the `TestImageModelFromConfig` reflect drift-guard covers the new
-  fields; `comfy-generate.mjs` forwards the three flags).
+  fields).
+
+### Review hardening (two-specialist round, 2026-08-14)
+
+- **CRITICAL (both reviewers, empirically proven): the pool flags were collected by
+  `comfy-generate.mjs` and silently DROPPED by `batch-jobs.mjs`'s whitelist** — the hop
+  BOTH the single and batch paths route through — so `imagegen_pool_vvram_gb: 12`
+  produced a plain single-GPU `UNETLoader` on every harness render while all 249
+  per-hop tests stayed green (each hop was tested; the composition never was). Fixed
+  STRUCTURALLY: `batch-jobs.mjs` now exports `JOB_PARAM_FLAGS`/`SHARED_BINDING_FLAGS`
+  and `comfy-generate.mjs` DERIVES its collector from them — one source of truth — plus
+  a composed-chain test that feeds every exported flag through `jobArgs` and asserts
+  emission (mutation-proven red on a list regression).
+- **Load-time binding-trap warnings** (`warnImageGenBindingTraps`): every one of these
+  renders pixel-plausible output with zero client-side symptom — krea2 steps/cfg
+  half-bound (the pair guard would defer every render); pool devices without vvram, or
+  negative vvram (single-GPU with pool keys in the config); pool vvram under a family
+  with no pooled loader; pooled seat without `--disable-dynamic-vram` in
+  `COMFY_EXTRA_ARGS` (DynamicVRAM un-pools every safetensor DisTorch2 load while the
+  allocation banner still prints — MultiGPU #191).
+- `.gguf` bindings on `--family krea2` are rejected LOUD at dispatch (no GGUF loader is
+  wired for the bf16 seat) instead of dying as an unnamed ComfyUI node error.
+- Recorded, no code: a lone per-request `steps` on a zero-bound krea2 seat defers by
+  design (pair guard, identical to qwen-image; the live seat binds 8/1.0 explicitly so
+  request-steps compose with the bound cfg); `Number("")` on a hand-typed empty
+  `--pool-vvram` renders single-GPU silently — manual-invocation-only edge.
 
 ## [0.58.0] - 2026-08-14
 
