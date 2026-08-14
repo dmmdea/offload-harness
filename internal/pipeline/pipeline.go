@@ -131,6 +131,9 @@ type Pipeline struct {
 	// recorded follow-up, not wired yet.
 	refineFallbacks   atomic.Int64
 	refineConsecutive atomic.Int64
+	// TO-3 tier-aware repacking state (tierpack.go): per-model /props probes +
+	// tokenizer clients for the escalation-boundary repack. Zero value ready.
+	tierPack tierPackState
 }
 
 // Cfg exposes the loaded config so callers like the MCP server can build
@@ -299,9 +302,17 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	if contextbudget.IsTrivial(req.Input) {
 		return core.Deferf("input too small to offload", "", meta)
 	}
+	// TO-3: retain the ORIGINAL source before any lossy packing. The entry
+	// tier keeps today's char-budget packing exactly (hot path — no probes,
+	// no tokenize round-trips); tiers the request CLIMBS to re-read from orig
+	// against their own served windows (packForTier), instead of inheriting
+	// the entry tier's cut — forwarding a small model's lossy view up the
+	// ladder was a correctness bug class, not a tuning knob.
+	orig := req.Input
 	req.Input = compactForBudget(req.Input, p.cfg.MaxInputChars, p.cfg.GCFCompact)
 	req.Input, _ = contextbudget.Trim(req.Input, p.cfg.MaxInputChars)
-	meta.Feat = featurize(req.Task, req.Input) // cheap input features for the router
+	entryPacked := req.Input
+	meta.Feat = featurize(req.Task, req.Input) // cheap input features for the router (ENTRY view, deliberately — the router routes the entry tier)
 
 	built, err := tasks.Build(req)
 	if err != nil {
@@ -309,15 +320,16 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	}
 	// Phase 6: prepend retrieved few-shot exemplars to the local-model prompt
 	// (off by default — ExemplarShots=0). Grammar/schema/cache key are unchanged.
-	if p.cfg.ExemplarShots > 0 && p.cfg.ExemplarsDir != "" {
-		if ex := exemplars.Retrieve(p.cfg.ExemplarsDir, string(req.Task), req.Input, p.cfg.ExemplarShots); len(ex) > 0 {
-			built.User = injectExemplars(built.User, ex)
-		}
-	}
+	built = p.withExemplars(built, req)
 
 	// Cache key is stable on the PRIMARY model so a result produced by any tier
 	// is reused on re-runs (the cascade is an internal detail of one logical call).
-	ck := cache.Key(string(req.Task), req.Input, tasks.StableParamsKey(req.Params), p.cfg.Model, built.Grammar)
+	// TO-3: keyed on the ORIGINAL input — the logical request's identity —
+	// not the entry packing. For inputs under the char cap (the overwhelming
+	// majority) the two are byte-identical, so cache continuity holds; an
+	// oversized input re-keys once, and the old key COLLIDED two different
+	// originals sharing a trim — the new key is strictly more correct.
+	ck := cache.Key(string(req.Task), orig, tasks.StableParamsKey(req.Params), p.cfg.Model, built.Grammar)
 	if p.cache != nil {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
@@ -347,6 +359,25 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	for ci, model := range chain {
 		meta.Model = model
 		meta.Escalations = ci
+		// TO-3: a climbed-to tier re-reads the ORIGINAL source against its own
+		// served window instead of inheriting the entry cut. Fail-open to the
+		// entry packing — byte-identical to the pre-TO-3 behavior — with the
+		// disposition recorded on the row (tier_pack). The entry tier (ci==0)
+		// is untouched: no probes, no tokenize round-trips on the hot path.
+		if ci > 0 {
+			tierInput, packPath := p.packForTier(ctx, model, orig, entryPacked, req)
+			meta.TierPack = packPath
+			if tierInput != req.Input {
+				treq := req
+				treq.Input = tierInput
+				if b2, berr := tasks.Build(treq); berr == nil {
+					req.Input = tierInput
+					built = p.withExemplars(b2, req)
+				} else {
+					meta.TierPack = "entry-inherited (rebuild: " + berr.Error() + ")"
+				}
+			}
+		}
 		likelyColdSwap := p.noteTierCall(model) // LO-9: before the attempt, so the window is per-call
 		res, escalatable := p.attempt(ctx, req, built, ck, model, meta, start, true)
 		// Phase 3/7: the breaker tracks INFRA health only (ErrClass set); a quality
@@ -394,6 +425,20 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	// a thinking model one shot under a think-wrapped grammar to reclaim the deferral before
 	// falling through to Opus. A failure here defers exactly as before (never calls cloud).
 	if p.cfg.ReasoningModel != "" && built.Grammar != "" && !last.Meta.Truncated {
+		// TO-3: the terminal reasoning tier is a callee too — re-pack from the
+		// original against ITS served window (same fail-open contract).
+		rInput, rPath := p.packForTier(ctx, p.cfg.ReasoningModel, orig, entryPacked, req)
+		meta.TierPack = rPath
+		if rInput != req.Input {
+			treq := req
+			treq.Input = rInput
+			if b2, berr := tasks.Build(treq); berr == nil {
+				req.Input = rInput
+				built = p.withExemplars(b2, req)
+			} else {
+				meta.TierPack = "entry-inherited (rebuild: " + berr.Error() + ")"
+			}
+		}
 		rres, ok := p.attemptReasoning(ctx, req, built, ck, meta, start)
 		if ok {
 			return rres
@@ -2951,6 +2996,18 @@ func (p *Pipeline) knnPreferLargerEntry(task core.TaskType, input string) bool {
 }
 
 // entryFrom builds a ledger entry from per-call meta + the enriched signals.
+// withExemplars applies the Phase 6 few-shot injection to a built prompt.
+// Factored so the TO-3 per-tier rebuilds get the SAME injection the entry
+// build does — a climbed tier must not silently lose its shots.
+func (p *Pipeline) withExemplars(b tasks.Built, req core.Request) tasks.Built {
+	if p.cfg.ExemplarShots > 0 && p.cfg.ExemplarsDir != "" {
+		if ex := exemplars.Retrieve(p.cfg.ExemplarsDir, string(req.Task), req.Input, p.cfg.ExemplarShots); len(ex) > 0 {
+			b.User = injectExemplars(b.User, ex)
+		}
+	}
+	return b
+}
+
 func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int) ledger.Entry {
 	return ledger.Entry{
 		Task: string(task), TokensIn: meta.TokensIn, TokensOut: meta.TokensOut,
@@ -2962,6 +3019,7 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		EscalatedAgreed: meta.EscalatedAgreed, ErrClass: meta.ErrClass,
 		InputChars: inputChars, Feat: meta.Feat,
 		EscSource: string(meta.EscSource),
+		TierPack:  meta.TierPack,
 	}
 }
 
