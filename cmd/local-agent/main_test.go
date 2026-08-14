@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/agent"
 )
 
 // TestModelFlagFallsBackToConfig guards the model-agnostic CLI defaults: a model
@@ -87,5 +89,24 @@ func TestMultiFlag(t *testing.T) {
 	}
 	if m.String() != "a.com,b.com" {
 		t.Errorf("multiFlag.String() = %q, want a.com,b.com", m.String())
+	}
+}
+
+// The long-running modes' degrade note fires only on a REAL degrade and only
+// once per process (review round 2, 2026-08-14: --serve/--queue previously
+// surfaced the sticky downgrade nowhere). Anchored on the exported prefix so
+// producer wording and this consumer cannot drift apart.
+func TestNoteTokenizerDegradeOnceGuard(t *testing.T) {
+	tokenizerDegradeNoted.Store(false)
+	t.Cleanup(func() { tokenizerDegradeNoted.Store(false) })
+
+	noteTokenizerDegradeOnce("")            // no tokenizer configured
+	noteTokenizerDegradeOnce("token-exact") // healthy
+	if tokenizerDegradeNoted.Load() {
+		t.Fatal("the guard fired on a healthy/absent tokenizer path — the note would cry wolf")
+	}
+	noteTokenizerDegradeOnce(agent.TokenizerDegradedPrefix + "HTTP 404 on both routes)")
+	if !tokenizerDegradeNoted.Load() {
+		t.Fatal("a degraded path did not fire the note — the --serve/--queue downgrade would be invisible again")
 	}
 }

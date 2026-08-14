@@ -262,16 +262,30 @@ the first and last budget/2 real tokens — always survive; a message is never s
 truncated-mid-JSON tool result is unrepresentable on this rung (the reactive `emergencyShrink`
 last resort below, which fires only after a live server rejection, remains the one documented
 exception — and it is skipped when the token-exact rung measured the halved transcript as
-fitting). The chars/4 estimate never decides a drop on this path, in either direction: the
-cut's own REAL-token verdict drives the exhausted telemetry (an under-counting estimate would
-hide a real overflow; a pessimistic one would report a verified-fitting request exhausted
-forever). Endpoints with no `/tokenize` (or a mid-run outage) fall open —
-once, stickily, per Loop; a failure under an already-cancelled context is NOT recorded (a
---serve client hang-up says nothing about the endpoint) — to the legacy estimate-driven
-oldest-first drop. The downgrade is never silent: `Result.TokenizerPath` reports
-`token-exact` vs `legacy (degraded: <why>)` with the per-route failure detail, `agent_run`
-returns it as `tokenizer_path`, and the CLI prints a stderr note — the same visibility rule
-as the window probe. Both drop paths drop units whole,
+fitting). Once the ladder reaches this rung, the chars/4 estimate no longer decides the drop in
+either direction: the cut's own REAL-token verdict drives the exhausted telemetry (an
+under-counting estimate would hide a real overflow; a pessimistic one would report a
+verified-fitting request exhausted forever). One honest qualification (review 2026-08-14):
+WHETHER the ladder engages at all is still the estimate's call — a transcript the estimate
+reads as fitting is sent without consulting the tokenizer (a per-step network probe on the
+happy path is the cost the design refuses). The ADR-0017 under-count regime is instead caught
+by the reactive net: the server's own rejection triggers the retry, whose harder compact IS
+token-exact. The budget both yardsticks target reserves the measured token cost of the
+tool-spec block (`specReserve` — the specs ship with every request and dwarf the old fixed
+margin on a full build) on top of the completion reserve and safety margin. Endpoints with no
+`/tokenize` fall open to the legacy estimate-driven oldest-first drop — stickily, per Loop,
+with the failure CLASSIFIED: a definitive route absence (all candidates 404/405) downgrades
+immediately, a transient failure (timeout, reset, 5xx during a model swap) gets one second
+chance and downgrades on the second consecutive miss; a failure under an already-cancelled
+context is never counted (a --serve client hang-up says nothing about the endpoint). The
+downgrade is never silent: `Result.TokenizerPath` reports `token-exact` vs
+`legacy (degraded: <why>)` with the per-route failure detail (under `--two-tier` the
+architect's verdict rides `ArchTokenizerPath` — the tiers degrade independently), `agent_run`
+returns it as `tokenizer_path`, the CLI prints a per-tier stderr note, `--serve`/`--queue`
+print a once-per-process transition note, and every queue trace records the goal's rung —
+the same visibility rule as the window probe. NOTE `token-exact` means configured-and-not-
+degraded: a run that never went over budget never probed the route, so only an over-budget
+step proves it live. Both drop paths drop units whole,
 and both exempt units still carrying signal residue or a **pinned** result (a result the model
 re-requested and the circuit breaker refused again — the H8 ramp: content the model re-reads
 stops being lossily compacted). A ladder

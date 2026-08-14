@@ -180,22 +180,82 @@ func TestCutMiddleNeverEmitsHalfMessageProperty(t *testing.T) {
 			}
 		}
 		keepRecent := rng.Intn(4)
-		for _, budget := range []int{1, 50, 200, 500, 1000, 1 << 20} {
-			out, _, ok := cutMiddleTurns(context.Background(), &runeTok{}, msgs, budget, 2, keepRecent, nil)
-			if !ok {
-				t.Fatalf("seed %d budget %d: tokenizer failure from the healthy fake", seed, budget)
-			}
-			assertIdentitySubsequence(t, msgs, out)
-			assertPairing(t, out)
-			if !reflect.DeepEqual(out[0], msgs[0]) || !reflect.DeepEqual(out[1], msgs[1]) {
-				t.Fatalf("seed %d budget %d: preamble lost", seed, budget)
-			}
-			for k := 1; k <= keepRecent && k <= len(out); k++ {
-				if !reflect.DeepEqual(out[len(out)-k], msgs[len(msgs)-k]) {
-					t.Fatalf("seed %d budget %d: keepRecent tail message %d lost", seed, budget, k)
+		// Tokenizer diversity (review round 2, 2026-08-14): runeTok never lets
+		// a piece cross a message boundary, so it cannot exercise the
+		// straddling-token arm of the byte→token mapping. sparseTok (100-byte
+		// pieces) and chunkTok (pseudo-random 2–7-byte pieces) both produce
+		// boundary-spanning tokens — the real BPE-merge regime.
+		for _, tok := range []Tokenizer{&runeTok{}, sparseTok{}, chunkTok{}} {
+			for _, budget := range []int{1, 50, 200, 500, 1000, 1 << 20} {
+				out, _, ok := cutMiddleTurns(context.Background(), tok, msgs, budget, 2, keepRecent, nil)
+				if !ok {
+					t.Fatalf("seed %d budget %d tok %T: tokenizer failure from the healthy fake", seed, budget, tok)
+				}
+				assertIdentitySubsequence(t, msgs, out)
+				assertPairing(t, out)
+				if !reflect.DeepEqual(out[0], msgs[0]) || !reflect.DeepEqual(out[1], msgs[1]) {
+					t.Fatalf("seed %d budget %d tok %T: preamble lost", seed, budget, tok)
+				}
+				for k := 1; k <= keepRecent && k <= len(out); k++ {
+					if !reflect.DeepEqual(out[len(out)-k], msgs[len(msgs)-k]) {
+						t.Fatalf("seed %d budget %d tok %T: keepRecent tail message %d lost", seed, budget, tok, k)
+					}
 				}
 			}
 		}
+	}
+}
+
+// chunkTok cuts pseudo-random 2–7-byte pieces, seeded from the text length so
+// repeated calls on one text agree: pieces routinely straddle message
+// boundaries AND rune boundaries (byte-fallback regime).
+type chunkTok struct{}
+
+func (chunkTok) Pieces(_ context.Context, text string) ([]int, bool) {
+	rng := rand.New(rand.NewSource(int64(len(text))))
+	var lens []int
+	for rem := len(text); rem > 0; {
+		n := 2 + rng.Intn(6)
+		if n > rem {
+			n = rem
+		}
+		lens = append(lens, n)
+		rem -= n
+	}
+	return lens, true
+}
+
+// liarTok answers ok=true with piece lengths that do NOT reconstruct the text
+// — the contract violation a non-verifying second implementation could ship.
+type liarTok struct{}
+
+func (liarTok) Pieces(_ context.Context, text string) ([]int, bool) {
+	if len(text) < 2 {
+		return []int{len(text)}, true
+	}
+	return []int{len(text) - 1}, true // short by one byte: mapping built on sand
+}
+
+// The cut's own reconstruction check must refuse to cut AND report the broken
+// contract through the sticky wrapper — before this round the refusal was
+// silent and Result.TokenizerPath kept claiming token-exact (review finding
+// 2026-08-14).
+func TestCutMiddleRefusesNonReconstructingPiecesAndReportsBroken(t *testing.T) {
+	msgs := cutFixture(8, 200)
+	s := &stickyTokenizer{inner: liarTok{}}
+	out, fits, ok := cutMiddleTurns(context.Background(), s, msgs, 100, 2, 2, nil)
+	if ok || fits {
+		t.Fatal("a non-reconstructing mapping must fail open (ok=false), never cut")
+	}
+	if !reflect.DeepEqual(out, msgs) {
+		t.Fatal("the transcript must be returned untouched on a refused mapping")
+	}
+	why, down := s.degraded()
+	if !down {
+		t.Fatal("the broken contract must trip the sticky downgrade — otherwise every step pays a doomed round-trip while TokenizerPath lies")
+	}
+	if !strings.Contains(why, "reconstruction contract") {
+		t.Fatalf("degrade reason %q must name the contract violation", why)
 	}
 }
 
@@ -308,17 +368,28 @@ func TestCutMiddleReplacesLegacyDropInCompact(t *testing.T) {
 	}
 }
 
-func TestStickyTokenizerFailsOnceThenShortCircuits(t *testing.T) {
+// The sticky downgrade is CLASSIFIED (review finding 2026-08-14): a transient
+// failure gets one second chance (a cold start or a 503 mid-swap must not
+// degrade a healthy endpoint for the process life), two consecutive transient
+// failures trip it, and after the trip the inner is never consulted again.
+func TestStickyTokenizerTransientFailsTwiceThenShortCircuits(t *testing.T) {
 	ft := &failTok{}
 	s := &stickyTokenizer{inner: ft}
 	if _, ok := s.Pieces(context.Background(), "x"); ok {
 		t.Fatal("sticky must propagate the failure")
 	}
-	if _, ok := s.Pieces(context.Background(), "x"); ok {
-		t.Fatal("sticky must stay failed")
+	if s.failed.Load() {
+		t.Fatal("ONE transient failure must not trip the downgrade — the second chance is the point")
 	}
-	if ft.calls != 1 {
-		t.Fatalf("inner tokenizer called %d times, want exactly 1 — the whole point is not paying a doomed round-trip per step", ft.calls)
+	if _, ok := s.Pieces(context.Background(), "x"); ok {
+		t.Fatal("sticky must propagate the second failure")
+	}
+	if !s.failed.Load() {
+		t.Fatal("two consecutive transient failures must trip the downgrade")
+	}
+	s.Pieces(context.Background(), "x")
+	if ft.calls != 2 {
+		t.Fatalf("inner tokenizer called %d times, want exactly 2 — after the trip no more doomed round-trips", ft.calls)
 	}
 	// A healthy inner stays healthy.
 	rt := &runeTok{}
@@ -327,6 +398,57 @@ func TestStickyTokenizerFailsOnceThenShortCircuits(t *testing.T) {
 	s2.Pieces(context.Background(), "cd")
 	if rt.calls != 2 {
 		t.Fatalf("healthy inner called %d times, want 2", rt.calls)
+	}
+}
+
+// definitiveFailTok models tokclient after an all-404 probe: the route
+// positively does not exist, so the downgrade must not burn a second stall.
+type definitiveFailTok struct{ calls int }
+
+func (d *definitiveFailTok) Pieces(context.Context, string) ([]int, bool) {
+	d.calls++
+	return nil, false
+}
+func (d *definitiveFailTok) LastErr() string          { return "HTTP 404 on both routes" }
+func (d *definitiveFailTok) LastFailDefinitive() bool { return true }
+
+func TestStickyTokenizerDefinitiveFailureTripsImmediately(t *testing.T) {
+	dt := &definitiveFailTok{}
+	s := &stickyTokenizer{inner: dt}
+	s.Pieces(context.Background(), "x")
+	if !s.failed.Load() {
+		t.Fatal("a definitive route absence (all candidates 404/405) must trip on the FIRST failure")
+	}
+	why, _ := s.degraded()
+	if why != "HTTP 404 on both routes" {
+		t.Fatalf("definitive reason = %q, want the implementation's own detail verbatim", why)
+	}
+}
+
+// flakyTok fails on selected calls: pins that a SUCCESS between two transient
+// failures resets the streak (consecutive means consecutive).
+type flakyTok struct {
+	calls    int
+	failOn   map[int]bool
+	delegate runeTok
+}
+
+func (f *flakyTok) Pieces(ctx context.Context, text string) ([]int, bool) {
+	f.calls++
+	if f.failOn[f.calls] {
+		return nil, false
+	}
+	return f.delegate.Pieces(ctx, text)
+}
+
+func TestStickyTokenizerSuccessResetsTransientStreak(t *testing.T) {
+	ft := &flakyTok{failOn: map[int]bool{1: true, 3: true}}
+	s := &stickyTokenizer{inner: ft}
+	s.Pieces(context.Background(), "ab") // transient failure 1
+	s.Pieces(context.Background(), "ab") // success — streak resets
+	s.Pieces(context.Background(), "ab") // transient failure 1 again
+	if s.failed.Load() {
+		t.Fatal("failure-success-failure tripped the downgrade — the streak must reset on success, or a flaky-but-healthy endpoint degrades")
 	}
 }
 
@@ -361,18 +483,21 @@ func TestStickyTokenizerIgnoresContextCancellation(t *testing.T) {
 	s := &stickyTokenizer{inner: ft}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, ok := s.Pieces(cancelled, "x"); ok {
-		t.Fatal("failure must still propagate")
+	// Any number of cancelled-ctx failures must count for NOTHING — not a trip,
+	// not even a strike (or two hang-ups would equal one real strike pair).
+	for i := 0; i < 3; i++ {
+		if _, ok := s.Pieces(cancelled, "x"); ok {
+			t.Fatal("failure must still propagate")
+		}
 	}
-	if s.failed.Load() {
-		t.Fatal("a cancelled-ctx failure was recorded as an endpoint failure — one hang-up would downgrade the whole process")
+	if s.failed.Load() || s.strikes.Load() != 0 {
+		t.Fatalf("cancelled-ctx failures recorded (failed=%v strikes=%d) — one hang-up would help downgrade the whole process", s.failed.Load(), s.strikes.Load())
 	}
-	// A REAL endpoint failure (live ctx) still trips it.
-	if _, ok := s.Pieces(context.Background(), "x"); ok {
-		t.Fatal("failure must propagate")
-	}
+	// REAL endpoint failures (live ctx) still trip it — two, transient class.
+	s.Pieces(context.Background(), "x")
+	s.Pieces(context.Background(), "x")
 	if !s.failed.Load() {
-		t.Fatal("a live-ctx endpoint failure must trip the sticky downgrade")
+		t.Fatal("two live-ctx endpoint failures must trip the sticky downgrade")
 	}
 }
 
@@ -420,9 +545,14 @@ func TestTokenizerPathReporting(t *testing.T) {
 		t.Fatalf("healthy tokenizer: tokPath = %q, want token-exact", got)
 	}
 	l2 := NewLoop(nil, nil, 1).WithTokenizer(&failTok{})
-	l2.tok.Pieces(context.Background(), "x") // trip it
-	if got := l2.tokPath(); !strings.HasPrefix(got, "legacy (degraded: ") {
-		t.Fatalf("tripped tokenizer: tokPath = %q, want a degraded report with the reason", got)
+	l2.tok.Pieces(context.Background(), "x") // strike 1 (transient class)
+	l2.tok.Pieces(context.Background(), "x") // strike 2 — trips
+	// Anchored on the EXPORTED prefix: the CLI's degrade note and the queue
+	// traces branch on it, so producer and consumers must share one constant
+	// (review finding 2026-08-14 — two independent literals let a wording
+	// tweak silently kill the operator-facing note).
+	if got := l2.tokPath(); !strings.HasPrefix(got, TokenizerDegradedPrefix) {
+		t.Fatalf("tripped tokenizer: tokPath = %q, want a degraded report prefixed %q", got, TokenizerDegradedPrefix)
 	}
 }
 
@@ -434,10 +564,14 @@ func (detailFailTok) LastErr() string                              { return "HTT
 
 func TestStickyTokenizerCapturesFailureDetail(t *testing.T) {
 	s := &stickyTokenizer{inner: detailFailTok{}}
-	s.Pieces(context.Background(), "x")
+	s.Pieces(context.Background(), "x") // strike 1 (no definitive seam => transient class)
+	s.Pieces(context.Background(), "x") // strike 2 — trips
 	why, down := s.degraded()
-	if !down || why != "HTTP 404 on both routes" {
-		t.Fatalf("degraded() = (%q, %v), want the implementation's own failure detail", why, down)
+	if !down || !strings.Contains(why, "HTTP 404 on both routes") {
+		t.Fatalf("degraded() = (%q, %v), want the implementation's own failure detail embedded", why, down)
+	}
+	if !strings.Contains(why, "consecutive failures") {
+		t.Fatalf("degraded() = %q, want the transient-streak trip named — the reason must say WHY it stuck (2-strike), not just the last error", why)
 	}
 }
 

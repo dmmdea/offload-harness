@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -109,10 +111,18 @@ type Result struct {
 	// (a fail-open feature that can be permanently inert with zero evidence is
 	// not fail-open, it is fail-unobservable). "" = no tokenizer configured
 	// (legacy rung by construction); "token-exact" = the real-tokenizer cut is
-	// live; "legacy (degraded: <why>)" = a tokenizer WAS configured but its
-	// first endpoint failure downgraded this Loop to the legacy rung, with the
+	// live; "legacy (degraded: <why>)" = a tokenizer WAS configured but a
+	// classified endpoint failure (definitive route absence, or two consecutive
+	// transient failures) downgraded this Loop to the legacy rung, with the
 	// recorded reason.
 	TokenizerPath string `json:"tokenizer_path,omitempty"`
+
+	// ArchTokenizerPath is set only by RunTwoTier (like Fallback): the
+	// ARCHITECT tier's TokenizerPath, carried so an architect-only tokenizer
+	// degrade is observable — each tier cuts with its own served tokenizer, so
+	// the two degrade independently, and returning only the editor's verdict
+	// hid a misrouted architect model forever (review finding 2026-08-14).
+	ArchTokenizerPath string `json:"arch_tokenizer_path,omitempty"`
 
 	// Effects is the per-call execution ledger (effects.go): one record per
 	// tool call the model REQUESTED, in call order, present on every return
@@ -140,14 +150,26 @@ type TokenCalReport struct {
 	FinalBudget  int     `json:"final_budget"`
 }
 
-// tokPath snapshots the tokenizer state for Result.TokenizerPath.
+// TokenizerDegradedPrefix is the stable prefix of every degraded
+// Result.TokenizerPath value. Exported as the ONE contract between tokPath
+// (which writes it) and every consumer that branches on degradation (the CLI
+// stderr note, queue traces) — two independent string literals here would let
+// a wording tweak silently kill the operator-facing note (review finding
+// 2026-08-14).
+const TokenizerDegradedPrefix = "legacy (degraded: "
+
+// tokPath snapshots the tokenizer state for Result.TokenizerPath. NOTE the
+// semantics: "token-exact" means the token-exact rung is CONFIGURED and not
+// degraded — a run whose transcript never exceeded the estimate budget never
+// probed the tokenizer, so this value alone is not proof the /tokenize route
+// works; the first over-budget step is where a bad route degrades (visibly).
 func (l *Loop) tokPath() string {
 	if l.tok == nil {
 		return ""
 	}
 	if s, isSticky := l.tok.(*stickyTokenizer); isSticky {
 		if why, down := s.degraded(); down {
-			return "legacy (degraded: " + why + ")"
+			return TokenizerDegradedPrefix + why + ")"
 		}
 	}
 	return "token-exact"
@@ -195,9 +217,18 @@ type Loop struct {
 	exemplars  []Msg  // trusted few-shot messages injected after system, before recall/objective (Task C6)
 	// tok is the REAL-tokenizer seam for the token-exact middle cut (TO-4,
 	// cutmiddle.go). Non-nil replaces the estimate-driven whole-turn-drop rung;
-	// wrapped sticky by WithTokenizer so one /tokenize failure downgrades the
-	// rest of the run to the legacy rung instead of stalling every step.
+	// wrapped sticky by WithTokenizer so a classified /tokenize failure
+	// downgrades the rest of the run to the legacy rung instead of stalling
+	// every step.
 	tok Tokenizer
+	// specReserve is the token cost of the tool-spec block, reserved out of the
+	// input budget — the specs ship with EVERY chat request, and on a full
+	// --allow-* build they cost several compactionMargins' worth of tokens
+	// (review finding 2026-08-14). Resolved once per Loop by resolveSpecReserve
+	// (real tokenizer when available, conservative estimate otherwise); atomic
+	// because --serve reads budgets from concurrent handlers.
+	specReserve     atomic.Int32
+	specReserveOnce sync.Once
 }
 
 // defaultCtxTokens is the model context window the loop budgets against. It
@@ -208,6 +239,9 @@ const defaultCtxTokens = 8192
 // compactionMargin is a safety headroom (in tokens) subtracted from the input
 // budget on top of the reserved completion tokens, to absorb the crude
 // token-estimate's error and per-request framing the estimate doesn't model.
+// The tool-spec block is NOT part of what this margin absorbs — it is measured
+// and reserved separately (specReserve): on a full build the specs alone run
+// 4-6× this margin, which is exactly why they get their own reservation.
 const compactionMargin = 512
 
 // CompactionMargin exposes the production safety margin so a measurement can
@@ -477,14 +511,45 @@ func (l *Loop) WithToolResultCap(n int) *Loop {
 
 // inputBudget is the estimated-token ceiling for the transcript SENT to the
 // model: the context window minus the reserved completion tokens minus a safety
-// margin. Clamped to a small positive floor so a mis-set tiny window can never
-// drive the budget to zero/negative (which would compact everything away).
+// margin minus the measured tool-spec block (the specs ship with every request;
+// leaving them un-reserved let the fit verdict pass prompts the server rejects
+// — review finding 2026-08-14). Clamped to a small positive floor so a mis-set
+// tiny window can never drive the budget to zero/negative (which would compact
+// everything away).
 func (l *Loop) inputBudget() int {
-	b := l.ctxTokens - l.maxTokens - compactionMargin
+	b := l.ctxTokens - l.maxTokens - compactionMargin - int(l.specReserve.Load())
 	if b < 256 {
 		b = 256
 	}
 	return b
+}
+
+// resolveSpecReserve measures the tool-spec block's token cost once per Loop:
+// the REAL tokenizer when one is configured and answers (the same sticky seam
+// as the cut — a cancelled-ctx or transient failure here follows the sticky
+// wrapper's own classification rules), else a conservative estimate. JSON is
+// punctuation-dense (~3 chars/token, not 4), so the estimate deliberately
+// divides by 3: for a RESERVATION, over-counting is the safe direction —
+// under-counting re-opens the server-400 class the reservation exists to
+// close. Zero tools reserve nothing, so tool-less Loops (and their tests) are
+// byte-identical to the pre-reservation behavior.
+func (l *Loop) resolveSpecReserve(ctx context.Context) {
+	l.specReserveOnce.Do(func() {
+		if len(l.specs) == 0 {
+			return
+		}
+		b, err := json.Marshal(l.specs)
+		if err != nil {
+			return // cannot happen for the harness's own spec types; reserve nothing rather than guess
+		}
+		if l.tok != nil {
+			if lens, ok := l.tok.Pieces(ctx, string(b)); ok {
+				l.specReserve.Store(int32(len(lens)))
+				return
+			}
+		}
+		l.specReserve.Store(int32((len(b) + 2) / 3))
+	})
 }
 
 // budgetForCompaction is inputBudget() corrected by what the server has told us
@@ -531,6 +596,12 @@ func (l *Loop) toolResultCapChars() int {
 // Run executes the loop for objective until the model stops, the step budget is
 // exhausted, or the context is cancelled.
 func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
+	// The tool-spec block ships with EVERY request, so its token cost is part
+	// of every budget this run computes — resolve it once before any budgeting
+	// (review finding 2026-08-14: the un-reserved ~2-3k tokens of tool JSON on
+	// a full build dwarfed compactionMargin and let the fit verdict pass
+	// prompts the server rejects).
+	l.resolveSpecReserve(ctx)
 	msgs := make([]Msg, 0, 8)
 	if l.system != "" {
 		msgs = append(msgs, Msg{Role: "system", Content: l.system})

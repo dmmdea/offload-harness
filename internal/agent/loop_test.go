@@ -620,6 +620,58 @@ func TestLoopReinjectsPlanOnCadenceNotEveryStep(t *testing.T) {
 	}
 }
 
+// --- tool-spec reservation (review round 2, 2026-08-14) ---
+// The tool-spec block ships with EVERY chat request; leaving it out of the
+// budget let the fit verdict pass prompts the server rejects (the specs on a
+// full build run 4-6× compactionMargin).
+
+func TestSpecReserveShrinksInputBudget(t *testing.T) {
+	tools := []Tool{{ToolSpec: ToolSpec{
+		Name:        "read_file",
+		Description: strings.Repeat("reads a file from the workspace ", 20),
+		Schema:      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+	}}}
+	bare := NewLoop(nil, nil, 1).WithContextTokens(8192).WithMaxTokens(1024)
+	withTools := NewLoop(nil, tools, 1).WithContextTokens(8192).WithMaxTokens(1024)
+	withTools.resolveSpecReserve(context.Background())
+
+	specsJSON, err := json.Marshal(withTools.specs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No tokenizer => the conservative estimate: JSON is punctuation-dense, so
+	// the divisor is 3, not the transcript estimate's 4.
+	wantReserve := (len(specsJSON) + 2) / 3
+	if got, want := withTools.inputBudget(), bare.inputBudget()-wantReserve; got != want {
+		t.Fatalf("inputBudget with tools = %d, want %d (bare %d − reserve %d)", got, want, bare.inputBudget(), wantReserve)
+	}
+
+	// Zero tools: resolving reserves nothing — tool-less Loops (and every
+	// pre-existing budget pin) are byte-identical to the old arithmetic.
+	bare.resolveSpecReserve(context.Background())
+	if got, want := bare.inputBudget(), 8192-1024-compactionMargin; got != want {
+		t.Fatalf("tool-less inputBudget = %d, want the unchanged %d", got, want)
+	}
+}
+
+func TestSpecReserveUsesRealTokenizerWhenAvailable(t *testing.T) {
+	tools := []Tool{{ToolSpec: ToolSpec{
+		Name:        "echo",
+		Description: strings.Repeat("d", 300),
+		Schema:      json.RawMessage(`{"type":"object"}`),
+	}}}
+	l := NewLoop(nil, tools, 1).WithContextTokens(8192).WithMaxTokens(1024).WithTokenizer(sparseTok{})
+	l.resolveSpecReserve(context.Background())
+	specsJSON, err := json.Marshal(l.specs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := (len(specsJSON) + 99) / 100 // sparseTok: 100-byte pieces
+	if got := int(l.specReserve.Load()); got != want {
+		t.Fatalf("specReserve = %d, want %d real-tokenized (sparseTok), not the chars/3 estimate %d", got, want, (len(specsJSON)+2)/3)
+	}
+}
+
 func TestLoopUnknownToolDefersNotCrashes(t *testing.T) {
 	client := &fakeClient{script: []Completion{
 		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "ghost", `{}`)}}, FinishReason: "tool_calls"},

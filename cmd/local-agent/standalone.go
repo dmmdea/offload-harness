@@ -65,13 +65,18 @@ func readGoalQueue(path string) ([]goalItem, error) {
 
 // traceRecord is the per-goal trace written to disk for supervision + audit.
 type traceRecord struct {
-	ID         string      `json:"id"`
-	Goal       string      `json:"goal"`
-	StopReason string      `json:"stop_reason"`
-	Steps      int         `json:"steps"`
-	Output     string      `json:"output"`
-	Error      string      `json:"error,omitempty"`
-	Transcript []agent.Msg `json:"transcript"`
+	ID         string `json:"id"`
+	Goal       string `json:"goal"`
+	StopReason string `json:"stop_reason"`
+	Steps      int    `json:"steps"`
+	Output     string `json:"output"`
+	Error      string `json:"error,omitempty"`
+	// TokenizerPath: which compaction rung this goal ran on. The sticky
+	// downgrade outlives a goal (one Loop drains the whole queue), so without
+	// this field the traces could not show WHICH goal degraded the process
+	// (review finding 2026-08-14).
+	TokenizerPath string      `json:"tokenizer_path,omitempty"`
+	Transcript    []agent.Msg `json:"transcript"`
 }
 
 // safeID sanitizes a goal id for use as a trace filename. The id is operator-
@@ -265,7 +270,12 @@ func runStandalone(ctx context.Context, loop *agent.Loop, o standaloneOpts) erro
 			fmt.Fprintf(os.Stderr, "[standalone] %s: token-cal NOT fitted (%d obs) — budget unchanged at %d\n",
 				gid, tc.Observations, tc.RawBudget)
 		}
-		tr := traceRecord{ID: gid, Goal: g.Goal, StopReason: res.StopReason, Steps: res.Steps, Output: res.Output, Transcript: res.Transcript}
+		// Degrade transition note (once per process) + per-goal rung in the
+		// trace: --queue is the unattended mode, so the sticky downgrade must
+		// be visible in BOTH the live stderr and the after-the-fact audit
+		// trail (review finding 2026-08-14).
+		noteTokenizerDegradeOnce(res.TokenizerPath)
+		tr := traceRecord{ID: gid, Goal: g.Goal, StopReason: res.StopReason, Steps: res.Steps, Output: res.Output, TokenizerPath: res.TokenizerPath, Transcript: res.Transcript}
 		if rerr != nil {
 			tr.Error = rerr.Error()
 		}

@@ -52,7 +52,19 @@ type Client struct {
 	// whether the route 404'd, timed out, or answered garbage. atomic: one
 	// Client may be shared across --serve handlers.
 	lastErr atomic.Value // string
+	// lastDefinitive marks the most recent failure as DEFINITIVE route absence
+	// (every candidate answered HTTP 404/405): the endpoint positively said the
+	// route does not exist, so retrying cannot help. Transient classes —
+	// timeouts, resets, 5xx during a model swap, malformed bodies — are NOT
+	// definitive; the sticky wrapper gives those a second chance before
+	// downgrading (review finding 2026-08-14: one cold-start timeout or one
+	// 503 mid-swap must not degrade a healthy endpoint for the process life).
+	lastDefinitive atomic.Bool
 }
+
+// LastFailDefinitive reports whether the most recent failure was a definitive
+// route absence (all candidates 404/405) rather than a transient failure.
+func (c *Client) LastFailDefinitive() bool { return c.lastDefinitive.Load() }
 
 // LastErr reports why the most recent failing call failed ("" = none yet).
 // Consulted by the agent loop's sticky wrapper at downgrade time so the
@@ -63,6 +75,7 @@ func (c *Client) LastErr() string {
 }
 
 func (c *Client) fail(format string, args ...any) {
+	c.lastDefinitive.Store(false) // only post()'s all-404/405 branch marks definitive, after this
 	c.lastErr.Store(fmt.Sprintf(format, args...))
 }
 
@@ -183,6 +196,15 @@ func (c *Client) post(ctx context.Context, req tokenizeReq) ([]byte, bool) {
 		c.fail("marshaling tokenize request: %v", err)
 		return nil, false
 	}
+	// Read cap SCALED to the input: a with_pieces response inflates roughly an
+	// order of magnitude over the content (per-token JSON scaffolding, and
+	// byte-fallback pieces rendered as integer arrays), so a flat cap silently
+	// truncates exactly the large-transcript responses the feature exists for —
+	// truncated JSON then reads as "not the expected JSON shape" and trips the
+	// sticky downgrade with a reason blaming the server (review finding
+	// 2026-08-14). 16× input + 1 MiB bounds a hostile/looping server just as
+	// well while making legitimate truncation unreachable by construction.
+	limit := int64(len(req.Content))*16 + (1 << 20)
 	candidates := []string{
 		c.base + "/upstream/" + url.PathEscape(c.model) + "/tokenize",
 		c.base + "/tokenize",
@@ -190,31 +212,55 @@ func (c *Client) post(ctx context.Context, req tokenizeReq) ([]byte, bool) {
 	// Per-candidate failures are collected, not swallowed: when BOTH routes
 	// fail the recorded reason names each one, so a permanent downgrade is
 	// diagnosable after the fact (which route 404'd vs timed out).
+	// definitive stays true only while every observed failure is an HTTP
+	// 404/405 — a positive "this route does not exist" from the server.
 	var reasons []string
+	definitive := true
 	for _, u := range candidates {
 		hr, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(buf))
 		if err != nil {
 			reasons = append(reasons, fmt.Sprintf("%s: %v", u, err))
+			definitive = false
 			continue
 		}
 		hr.Header.Set("Content-Type", "application/json")
 		resp, err := c.http.Do(hr)
 		if err != nil {
 			reasons = append(reasons, fmt.Sprintf("%s: %v", u, err))
+			definitive = false
 			continue
 		}
-		body, rerr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		body, rerr := io.ReadAll(io.LimitReader(resp.Body, limit))
 		resp.Body.Close()
 		if rerr != nil {
 			reasons = append(reasons, fmt.Sprintf("%s: reading body: %v", u, rerr))
+			definitive = false
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
 			reasons = append(reasons, fmt.Sprintf("%s: HTTP %d", u, resp.StatusCode))
+			if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusMethodNotAllowed {
+				definitive = false
+			}
+			continue
+		}
+		// Shape sniff BEFORE accepting: a 200 whose body is not a tokenize
+		// response (a proxy's HTML error page, a gateway interposing) must be
+		// treated as THIS candidate failing — with the URL in the reason — and
+		// must not mask the fallback route, which might answer correctly
+		// (review finding 2026-08-14: the ambiguous case lost route attribution
+		// AND dead-coded the second candidate).
+		var probe struct {
+			Tokens json.RawMessage `json:"tokens"`
+		}
+		if json.Unmarshal(body, &probe) != nil || probe.Tokens == nil {
+			reasons = append(reasons, fmt.Sprintf("%s: 200 but not a tokenize response (no tokens array)", u))
+			definitive = false
 			continue
 		}
 		return body, true
 	}
 	c.fail("no /tokenize route answered: %s", strings.Join(reasons, "; "))
+	c.lastDefinitive.Store(definitive)
 	return nil, false
 }

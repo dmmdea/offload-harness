@@ -336,6 +336,90 @@ func TestLoopReactiveRetryGivesUpAfterOne(t *testing.T) {
 	}
 }
 
+// --- reactive retry × token-exact rung (review round 2, 2026-08-14) ---
+
+// When the token-exact cut MEASURES the halved retry transcript as fitting
+// (fitReal), the pin-blind emergencyShrink must be skipped: the huge newest
+// tool body — which keepRecent protects and the estimate still calls
+// over-budget — reaches the retry byte-intact, and the verified-fitting step
+// is NOT counted exhausted. This is the only place new code gates a
+// destructive last resort on the new verdict (pr-test-analyzer gap 1).
+func TestLoopReactiveRetryFitRealSkipsEmergencyShrink(t *testing.T) {
+	huge := strings.Repeat("all work and no play makes a very long tool result line\n", 800)
+	client := &errThenScriptClient{
+		errOnCall: 1, // the request AFTER the tool turn overflows
+		errText:   "chat 400: the request exceeds the available context size",
+	}
+	client.script = []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "read_file", `{}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "done after retry"}, FinishReason: "stop"},
+	}
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) { return huge, nil }}}
+	// sparseTok: ~100 bytes/token, so the REAL count of the huge body is ~450
+	// tokens — far inside the halved real budget — while the chars/4 estimate
+	// (~11k) screams overflow. Exactly the estimate-refuted regime.
+	loop := NewLoop(client, tools, 5).WithSystem("sys").WithContextTokens(4096).WithMaxTokens(1024).
+		WithToolResultCap(1 << 20).WithTokenizer(sparseTok{})
+	res, err := loop.Run(context.Background(), "read the readme")
+	if err != nil {
+		t.Fatalf("Run should recover via the reactive retry, got: %v", err)
+	}
+	if res.Output != "done after retry" {
+		t.Fatalf("output = %q, want the post-retry completion", res.Output)
+	}
+	// The retried request (the LAST call the client saw) must carry the tool
+	// body byte-intact: emergencyShrink running would have truncated it.
+	last := client.seen[len(client.seen)-1]
+	intact := false
+	for _, m := range last {
+		if m.Role == "tool" && m.Content == huge {
+			intact = true
+		}
+	}
+	if !intact {
+		t.Fatal("the huge tool body did not survive byte-intact — emergencyShrink ran despite a fitReal verdict (or the cut dropped a keepRecent message)")
+	}
+	if res.CompactionsExhausted != 0 {
+		t.Fatalf("CompactionsExhausted = %d, want 0: the tokenizer VERIFIED the retry fits — counting it exhausted is the estimate lying", res.CompactionsExhausted)
+	}
+}
+
+// The inverse direction: when the token-exact cut measures the halved retry
+// transcript as still over budget (overReal — forced keeps exceed it), the
+// exhaustion is counted and emergencyShrink still runs as the last resort.
+func TestLoopReactiveRetryOverRealCountsExhaustedAndShrinks(t *testing.T) {
+	huge := strings.Repeat("dense", 4000) // 20k bytes
+	client := &errThenScriptClient{
+		errOnCall: 1,
+		errText:   "chat 400: the request exceeds the available context size",
+	}
+	client.script = []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "read_file", `{}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "done after retry"}, FinishReason: "stop"},
+	}
+	tools := []Tool{{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) { return huge, nil }}}
+	// runeTok: 1 token/byte — the REAL count (~20k) dwarfs the halved real
+	// budget, and the huge body sits inside keepRecent (forced), so the cut
+	// must report overReal.
+	loop := NewLoop(client, tools, 5).WithSystem("sys").WithContextTokens(4096).WithMaxTokens(1024).
+		WithToolResultCap(1 << 20).WithTokenizer(&runeTok{})
+	res, err := loop.Run(context.Background(), "read the readme")
+	if err != nil {
+		t.Fatalf("Run should still recover (emergencyShrink is the last resort), got: %v", err)
+	}
+	if res.CompactionsExhausted == 0 {
+		t.Fatal("CompactionsExhausted = 0, want >0: forced keeps exceeded the REAL halved budget and the overflow must be counted, never silent")
+	}
+	// emergencyShrink DID run (rv != fitReal): the retried request's tool body
+	// must be smaller than the original.
+	last := client.seen[len(client.seen)-1]
+	for _, m := range last {
+		if m.Role == "tool" && m.Content == huge {
+			t.Fatal("the over-real retry re-sent the huge body untouched — emergencyShrink was skipped on the wrong verdict")
+		}
+	}
+}
+
 // --- emergency shrink (reactive-overflow last resort) ---
 
 // TestEmergencyShrinkNewestHugeTurn pins the exact live failure (flip-decision
