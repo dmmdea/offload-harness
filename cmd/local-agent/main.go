@@ -24,6 +24,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/sandbox"
+	"github.com/dmmdea/offload-harness/internal/tokclient"
 )
 
 // splitObjective separates the first bare positional (the objective) from flags,
@@ -322,6 +323,11 @@ func main() {
 	loop.WithContextTokens(effCtx)
 	loop.WithSkeletonPrune(*skeletonPrune)
 	loop.WithGCFCompact(*gcfCompact)
+	// Real-tokenizer seam (TO-4): the drop rung cuts whole middle messages on
+	// the SERVED model's own token counts (llama-swap /tokenize). Fail-open by
+	// contract — an endpoint without the route downgrades to the legacy
+	// estimate rung after one probe.
+	loop.WithTokenizer(tokclient.New(plannerBase, plannerModel, 0))
 
 	// Per-task tool profile (Task C6): applied AFTER WithWorktree so a
 	// worktree-registered tool (update_plan) is present for the edit/build/github
@@ -478,8 +484,10 @@ func main() {
 		// the shared preamble probed edModel (the editor, the loop that carries
 		// the long transcript); on this fleet the tiers share one serving config,
 		// and an explicit --ctx-tokens still overrides for both.
-		architect := archBuilt.Loop.WithWorktree(archBuilt.Worktree).WithContextTokens(effCtx).WithSkeletonPrune(*skeletonPrune).WithGCFCompact(*gcfCompact)
-		editor := editBuilt.Loop.WithWorktree(editBuilt.Worktree).WithContextTokens(effCtx).WithSkeletonPrune(*skeletonPrune).WithGCFCompact(*gcfCompact)
+		architect := archBuilt.Loop.WithWorktree(archBuilt.Worktree).WithContextTokens(effCtx).WithSkeletonPrune(*skeletonPrune).WithGCFCompact(*gcfCompact).
+			WithTokenizer(tokclient.New(plannerBase, archModel, 0)) // each tier cuts with ITS OWN served tokenizer
+		editor := editBuilt.Loop.WithWorktree(editBuilt.Worktree).WithContextTokens(effCtx).WithSkeletonPrune(*skeletonPrune).WithGCFCompact(*gcfCompact).
+			WithTokenizer(tokclient.New(plannerBase, edModel, 0))
 		fmt.Fprintf(os.Stderr, "[local-agent] two-tier: architect=%s editor=%s (one swap)\n", archModel, edModel)
 
 		res, err := agent.RunTwoTier(ctx, objective, architect, editor)

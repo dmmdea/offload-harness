@@ -170,6 +170,11 @@ type Loop struct {
 	mem        Memory
 	worktree   string // RW worktree root for durable working memory (AGENT.md + .agent/plan.md); "" disables it
 	exemplars  []Msg  // trusted few-shot messages injected after system, before recall/objective (Task C6)
+	// tok is the REAL-tokenizer seam for the token-exact middle cut (TO-4,
+	// cutmiddle.go). Non-nil replaces the estimate-driven whole-turn-drop rung;
+	// wrapped sticky by WithTokenizer so one /tokenize failure downgrades the
+	// rest of the run to the legacy rung instead of stalling every step.
+	tok Tokenizer
 }
 
 // defaultCtxTokens is the model context window the loop budgets against. It
@@ -419,9 +424,23 @@ func (l *Loop) WithSkeletonPrune(on bool) *Loop { l.skeletonPrune = on; return l
 // since the measured flip decision (ADR 0015).
 func (l *Loop) WithGCFCompact(on bool) *Loop { l.gcfCompact = on; return l }
 
+// WithTokenizer attaches the served model's real tokenizer (internal/tokclient
+// pointed at the planner endpoint+model) and thereby switches the ladder's
+// drop rung to the token-exact middle cut (TO-4, cutmiddle.go). nil leaves the
+// legacy estimate-driven rung — the correct configuration for a backend with
+// no /tokenize route. The tokenizer is wrapped sticky here: after one failure
+// every later step skips straight to the legacy rung (fail-open, no per-step
+// network stall), atomically, since --serve shares one *Loop across handlers.
+func (l *Loop) WithTokenizer(t Tokenizer) *Loop {
+	if t != nil {
+		l.tok = &stickyTokenizer{inner: t}
+	}
+	return l
+}
+
 // ladderOpts bundles the loop's rung flags for compact().
 func (l *Loop) ladderOpts() compactOpts {
-	return compactOpts{GCF: l.gcfCompact, Skeleton: l.skeletonPrune}
+	return compactOpts{GCF: l.gcfCompact, Skeleton: l.skeletonPrune, Tok: l.tok, RealBudget: l.inputBudget()}
 }
 
 // WithToolResultCap overrides the per-result character cap applied when a
@@ -602,7 +621,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		if estimateTokens(msgs) > budget {
 			opts := l.ladderOpts()
 			opts.Pinned = pinned
-			msgs = compact(msgs, budget, l.keepRecent, preambleLen, opts)
+			msgs = compact(ctx, msgs, budget, l.keepRecent, preambleLen, opts)
 			if estimateTokens(msgs) > budget {
 				exhausted++ // ladder exhausted — best-effort request, honestly counted
 			}
@@ -633,7 +652,11 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				}
 				ropts := l.ladderOpts()
 				ropts.Pinned = pinned
-				msgs = compact(msgs, target, l.keepRecent/2, preambleLen, ropts)
+				// The server just rejected on REAL tokens, so the token-exact cut
+				// halves its real allowance in step with the estimate target —
+				// re-sending anything near the rejected size would only 400 again.
+				ropts.RealBudget = l.inputBudget() / 2
+				msgs = compact(ctx, msgs, target, l.keepRecent/2, preambleLen, ropts)
 				// The harder compact can still be a NO-OP when the oversized body
 				// sits inside keepRecent (observed live: a huge newest tool result
 				// made the retry re-send the same overflow). Emergency shrink is

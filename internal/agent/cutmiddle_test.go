@@ -1,0 +1,354 @@
+package agent
+
+import (
+	"context"
+	"fmt"
+	"math/rand"
+	"reflect"
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
+
+// runeTok is the deterministic fake tokenizer: one token per rune, so piece
+// byte lengths are the rune encodings — sum reconstructs the text exactly, as
+// the Tokenizer contract requires. calls counts invocations (sticky tests).
+type runeTok struct{ calls int }
+
+func (r *runeTok) Pieces(_ context.Context, text string) ([]int, bool) {
+	r.calls++
+	lens := make([]int, 0, len(text))
+	for _, ru := range text {
+		lens = append(lens, utf8.RuneLen(ru))
+	}
+	return lens, true
+}
+
+// failTok always fails (an endpoint without /tokenize).
+type failTok struct{ calls int }
+
+func (f *failTok) Pieces(context.Context, string) ([]int, bool) { f.calls++; return nil, false }
+
+// runeTokens counts what runeTok charges for a transcript's serialized form —
+// the test-side mirror of the cut's own arithmetic.
+func runeTokens(msgs []Msg) int {
+	n := 0
+	for i, m := range msgs {
+		if i > 0 {
+			n++ // separator
+		}
+		n += utf8.RuneCountInString(serializeMsg(m))
+	}
+	return n
+}
+
+// cutFixture builds: [system, objective] preamble, then `units` tool cycles
+// (assistant tool-call + one tool result of bodyRunes 'x's).
+func cutFixture(units, bodyRunes int) []Msg {
+	msgs := []Msg{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "do the task"},
+	}
+	for i := 1; i <= units; i++ {
+		id := fmt.Sprintf("c%d", i)
+		msgs = append(msgs,
+			Msg{Role: "assistant", ToolCalls: []ToolCall{{ID: id, Name: "read_file", Args: fmt.Sprintf(`{"path":"f%d"}`, i)}}},
+			Msg{Role: "tool", ToolCallID: id, Content: strings.Repeat("x", bodyRunes)},
+		)
+	}
+	return msgs
+}
+
+// assertIdentitySubsequence fails unless out is an order-preserving
+// subsequence of in with every member DEEP-EQUAL to its original — the
+// never-half-message invariant: the cut may only DROP messages, never edit,
+// split, or synthesize one.
+func assertIdentitySubsequence(t *testing.T, in, out []Msg) {
+	t.Helper()
+	j := 0
+	for i := range out {
+		found := false
+		for j < len(in) {
+			if reflect.DeepEqual(in[j], out[i]) {
+				found = true
+				j++
+				break
+			}
+			j++
+		}
+		if !found {
+			t.Fatalf("output message %d (%q role=%s) is not an unmodified input message in order — a half-message or mutation escaped the cut", i, clipForLog(out[i].Content), out[i].Role)
+		}
+	}
+}
+
+func clipForLog(s string) string {
+	if len(s) > 40 {
+		return s[:40] + "…"
+	}
+	return s
+}
+
+// assertPairing fails on any orphaned tool result or half-dropped unit.
+func assertPairing(t *testing.T, msgs []Msg) {
+	t.Helper()
+	byID := map[string]bool{}
+	for _, m := range msgs {
+		if m.Role == "assistant" {
+			for _, c := range m.ToolCalls {
+				byID[c.ID] = true
+			}
+		}
+	}
+	for _, m := range msgs {
+		if m.Role == "tool" && !byID[m.ToolCallID] {
+			t.Fatalf("orphaned tool result for call %q — its assistant turn was dropped without it", m.ToolCallID)
+		}
+	}
+	have := map[string]bool{}
+	for _, m := range msgs {
+		if m.Role == "tool" {
+			have[m.ToolCallID] = true
+		}
+	}
+	for _, m := range msgs {
+		if m.Role == "assistant" {
+			for _, c := range m.ToolCalls {
+				if !have[c.ID] {
+					t.Fatalf("assistant turn kept but its tool result %q was dropped — half a unit survived", c.ID)
+				}
+			}
+		}
+	}
+}
+
+func TestCutMiddleDropsWholeMiddleMessagesHeadTailSurvive(t *testing.T) {
+	msgs := cutFixture(8, 200)
+	tok := &runeTok{}
+	out, ok := cutMiddleTurns(context.Background(), tok, msgs, 800, 2, 2, nil)
+	if !ok {
+		t.Fatal("cut reported tokenizer failure against the healthy fake")
+	}
+	if len(out) >= len(msgs) {
+		t.Fatalf("nothing dropped: %d -> %d messages (fixture is far over budget)", len(msgs), len(out))
+	}
+	assertIdentitySubsequence(t, msgs, out)
+	assertPairing(t, out)
+	// Head: the protected preamble survives verbatim at the front.
+	if !reflect.DeepEqual(out[0], msgs[0]) || !reflect.DeepEqual(out[1], msgs[1]) {
+		t.Fatal("protected preamble (system + objective) did not survive at the head")
+	}
+	// Tail: the keepRecent tail survives verbatim at the back.
+	if !reflect.DeepEqual(out[len(out)-1], msgs[len(msgs)-1]) || !reflect.DeepEqual(out[len(out)-2], msgs[len(msgs)-2]) {
+		t.Fatal("keepRecent tail did not survive at the back")
+	}
+	// Budget arithmetic on the REAL yardstick: kept content plus the reserved
+	// per-message framing must fit the real budget (nothing here is forced
+	// beyond the windows).
+	if got := runeTokens(out) + realMsgOverheadTokens*len(out); got > 800 {
+		t.Fatalf("kept transcript costs %d real tokens, over the 800 budget", got)
+	}
+}
+
+// The never-half-message property, exercised across random transcripts and
+// budgets: output is always an unmodified, order-preserving subsequence with
+// intact pairing, protected preamble, and keepRecent tail.
+func TestCutMiddleNeverEmitsHalfMessageProperty(t *testing.T) {
+	for seed := int64(0); seed < 25; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		msgs := []Msg{
+			{Role: "system", Content: "sys prompt"},
+			{Role: "user", Content: "objective: seed " + fmt.Sprint(seed)},
+		}
+		units := 3 + rng.Intn(10)
+		for i := 0; i < units; i++ {
+			switch rng.Intn(3) {
+			case 0: // bare assistant note (no tool calls)
+				msgs = append(msgs, Msg{Role: "assistant", Content: strings.Repeat("nota ", 1+rng.Intn(80))})
+			case 1: // multibyte-heavy tool cycle
+				id := fmt.Sprintf("s%dm%d", seed, i)
+				msgs = append(msgs,
+					Msg{Role: "assistant", ToolCalls: []ToolCall{{ID: id, Name: "grep", Args: `{"q":"añíล"}`}}},
+					Msg{Role: "tool", ToolCallID: id, Content: strings.Repeat("áß≠ล", 5+rng.Intn(150))},
+				)
+			default: // plain tool cycle
+				id := fmt.Sprintf("s%dp%d", seed, i)
+				msgs = append(msgs,
+					Msg{Role: "assistant", ToolCalls: []ToolCall{{ID: id, Name: "read_file", Args: `{"p":"x"}`}}},
+					Msg{Role: "tool", ToolCallID: id, Content: strings.Repeat("y", 10+rng.Intn(600))},
+				)
+			}
+		}
+		keepRecent := rng.Intn(4)
+		for _, budget := range []int{1, 50, 200, 500, 1000, 1 << 20} {
+			out, ok := cutMiddleTurns(context.Background(), &runeTok{}, msgs, budget, 2, keepRecent, nil)
+			if !ok {
+				t.Fatalf("seed %d budget %d: tokenizer failure from the healthy fake", seed, budget)
+			}
+			assertIdentitySubsequence(t, msgs, out)
+			assertPairing(t, out)
+			if !reflect.DeepEqual(out[0], msgs[0]) || !reflect.DeepEqual(out[1], msgs[1]) {
+				t.Fatalf("seed %d budget %d: preamble lost", seed, budget)
+			}
+			for k := 1; k <= keepRecent && k <= len(out); k++ {
+				if !reflect.DeepEqual(out[len(out)-k], msgs[len(msgs)-k]) {
+					t.Fatalf("seed %d budget %d: keepRecent tail message %d lost", seed, budget, k)
+				}
+			}
+		}
+	}
+}
+
+func TestCutMiddleRealFitReturnsUnchanged(t *testing.T) {
+	msgs := cutFixture(4, 50)
+	out, ok := cutMiddleTurns(context.Background(), &runeTok{}, msgs, 1<<20, 2, 2, nil)
+	if !ok {
+		t.Fatal("tokenizer failure from the healthy fake")
+	}
+	if !reflect.DeepEqual(out, msgs) {
+		t.Fatal("a transcript whose REAL count fits the budget must be returned unchanged (the estimate was pessimistic)")
+	}
+}
+
+func TestCutMiddlePinnedAndSignalUnitsSurvive(t *testing.T) {
+	msgs := cutFixture(8, 200)
+	// Unit c5's tool result carries an error line — FORCE_PRESERVE residue.
+	for i := range msgs {
+		if msgs[i].Role == "tool" && msgs[i].ToolCallID == "c5" {
+			msgs[i].Content = "error: kaboom at line 3\n" + msgs[i].Content
+		}
+	}
+	pinned := map[string]bool{"c4": true} // H8: the model re-requested c4
+	out, ok := cutMiddleTurns(context.Background(), &runeTok{}, msgs, 800, 2, 2, pinned)
+	if !ok {
+		t.Fatal("tokenizer failure from the healthy fake")
+	}
+	assertPairing(t, out)
+	seen := map[string]bool{}
+	for _, m := range out {
+		if m.Role == "tool" {
+			seen[m.ToolCallID] = true
+		}
+	}
+	if !seen["c4"] {
+		t.Fatal("pinned unit c4 was dropped — H8 exemption not honored by the cut")
+	}
+	if !seen["c5"] {
+		t.Fatal("signal-carrying unit c5 was dropped — FORCE_PRESERVE exemption not honored by the cut")
+	}
+}
+
+func TestCutMiddleUnitStraddlingRecentBoundaryKeptWhole(t *testing.T) {
+	msgs := cutFixture(8, 200)
+	// keepRecent=1 forces ONLY the final tool result; its assistant partner
+	// sits before the boundary. The unit must survive whole — a dropped
+	// assistant with a surviving result is a wire error.
+	out, ok := cutMiddleTurns(context.Background(), &runeTok{}, msgs, 600, 2, 1, nil)
+	if !ok {
+		t.Fatal("tokenizer failure from the healthy fake")
+	}
+	assertPairing(t, out)
+	last := msgs[len(msgs)-1]
+	found := false
+	for _, m := range out {
+		if reflect.DeepEqual(m, last) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("forced keepRecent tail message missing")
+	}
+}
+
+func TestCutMiddleTokenizerFailureFallsBackToLegacyDrop(t *testing.T) {
+	msgs := cutFixture(8, 200)
+	// Estimate-space budget BELOW what body-elision alone can reach (~260 for
+	// this fixture): the ladder must fall through to the drop rung, or neither
+	// path under test executes.
+	budget := 100
+	legacy := compact(context.Background(), msgs, budget, 2, 2, compactOpts{})
+	ft := &failTok{}
+	withTok := compact(context.Background(), msgs, budget, 2, 2, compactOpts{Tok: ft, RealBudget: 800})
+	if ft.calls == 0 {
+		t.Fatal("the cut rung never consulted the tokenizer")
+	}
+	if !reflect.DeepEqual(legacy, withTok) {
+		t.Fatal("tokenizer failure must fall open to the EXACT legacy drop rung — the two paths diverged")
+	}
+}
+
+func TestCutMiddleReplacesLegacyDropInCompact(t *testing.T) {
+	msgs := cutFixture(8, 200)
+	tok := &runeTok{}
+	out := compact(context.Background(), msgs, 100, 2, 2, compactOpts{Tok: tok, RealBudget: 800})
+	if tok.calls == 0 {
+		t.Fatal("compact never reached the token-exact cut (gate not wired)")
+	}
+	assertPairing(t, out)
+	// Ladder rungs before the cut may have elided tool BODIES (whole-body
+	// markers — a different, disclosed artifact class); the cut itself must
+	// still never leave a role/pairing mutation. Every survivor is either
+	// byte-identical to an input message or an input tool message whose body
+	// became a compaction artifact.
+	for _, m := range out {
+		matched := false
+		for _, in := range msgs {
+			if reflect.DeepEqual(in, m) {
+				matched = true
+				break
+			}
+			if in.Role == "tool" && m.Role == "tool" && in.ToolCallID == m.ToolCallID && IsCompactionArtifact(m.Content) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Fatalf("survivor (role=%s id=%s %q) is neither an input message nor a disclosed compaction artifact", m.Role, m.ToolCallID, clipForLog(m.Content))
+		}
+	}
+}
+
+func TestStickyTokenizerFailsOnceThenShortCircuits(t *testing.T) {
+	ft := &failTok{}
+	s := &stickyTokenizer{inner: ft}
+	if _, ok := s.Pieces(context.Background(), "x"); ok {
+		t.Fatal("sticky must propagate the failure")
+	}
+	if _, ok := s.Pieces(context.Background(), "x"); ok {
+		t.Fatal("sticky must stay failed")
+	}
+	if ft.calls != 1 {
+		t.Fatalf("inner tokenizer called %d times, want exactly 1 — the whole point is not paying a doomed round-trip per step", ft.calls)
+	}
+	// A healthy inner stays healthy.
+	rt := &runeTok{}
+	s2 := &stickyTokenizer{inner: rt}
+	s2.Pieces(context.Background(), "ab")
+	s2.Pieces(context.Background(), "cd")
+	if rt.calls != 2 {
+		t.Fatalf("healthy inner called %d times, want 2", rt.calls)
+	}
+}
+
+func TestWithTokenizerWiresTheLadder(t *testing.T) {
+	l := NewLoop(nil, nil, 1).WithContextTokens(4096).WithMaxTokens(512)
+	if opts := l.ladderOpts(); opts.Tok != nil {
+		t.Fatal("no tokenizer configured, yet ladderOpts advertises one")
+	}
+	l.WithTokenizer(&runeTok{})
+	opts := l.ladderOpts()
+	if opts.Tok == nil {
+		t.Fatal("WithTokenizer did not reach ladderOpts")
+	}
+	if _, isSticky := opts.Tok.(*stickyTokenizer); !isSticky {
+		t.Fatal("the loop must wrap the tokenizer sticky (one failure = legacy rung for the rest of the run)")
+	}
+	if opts.RealBudget != l.inputBudget() {
+		t.Fatalf("RealBudget = %d, want the loop's real input budget %d", opts.RealBudget, l.inputBudget())
+	}
+	// nil is a no-op, not a panic and not a sticky-nil wrapper.
+	l2 := NewLoop(nil, nil, 1).WithTokenizer(nil)
+	if l2.tok != nil {
+		t.Fatal("WithTokenizer(nil) must leave the legacy rung in place")
+	}
+}

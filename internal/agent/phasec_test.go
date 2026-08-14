@@ -29,7 +29,7 @@ func TestDedupeCollapsesOlderDuplicate(t *testing.T) {
 	body := strings.Repeat("identical content line\n", 40)
 	msgs := dupTranscript(body)
 	budget := estimateTokens(msgs) - len(body)/bytesPerToken/2 // pressure that one dedupe relieves
-	out := compact(msgs, budget, 1, 2, compactOpts{})
+	out := compact(context.Background(), msgs, budget, 1, 2, compactOpts{})
 	if estimateTokens(out) > budget {
 		t.Fatalf("dedupe alone should have fit the budget")
 	}
@@ -40,7 +40,7 @@ func TestDedupeCollapsesOlderDuplicate(t *testing.T) {
 		t.Fatalf("the LATER copy must stay byte-intact, got %q", out[5].Content[:40])
 	}
 	// Idempotent + deterministic: re-compacting lands on identical bytes.
-	again := compact(out, budget, 1, 2, compactOpts{})
+	again := compact(context.Background(), out, budget, 1, 2, compactOpts{})
 	if !reflect.DeepEqual(out, again) {
 		t.Fatal("re-compaction of a deduped transcript changed bytes")
 	}
@@ -50,7 +50,7 @@ func TestDedupeCollapsesOlderDuplicate(t *testing.T) {
 // appear anywhere in the output, whatever the other rungs do.
 func TestDedupeSkipsTinyBodies(t *testing.T) {
 	msgs := dupTranscript("short")
-	out := compact(msgs, 1, 1, 2, compactOpts{}) // absurd budget → every rung runs
+	out := compact(context.Background(), msgs, 1, 1, 2, compactOpts{}) // absurd budget → every rung runs
 	for i, m := range out {
 		if isDeduped(m.Content) {
 			t.Fatalf("turn %d: a %d-char body must never be deduped: %q", i, len("short"), m.Content)
@@ -74,7 +74,7 @@ func TestPinnedResultSurvivesLossyRungs(t *testing.T) {
 		{Role: "assistant", Content: "final"},
 	}
 	opts := compactOpts{Skeleton: true, Pinned: map[string]bool{"c1": true}}
-	out := compact(msgs, 60, 1, 1, opts) // brutal budget: every rung engages
+	out := compact(context.Background(), msgs, 60, 1, 1, opts) // brutal budget: every rung engages
 	if out[2].Content != body {
 		t.Fatalf("pinned body was modified: %q", out[2].Content[:40])
 	}
@@ -151,7 +151,7 @@ func TestPinFollowsDedupeReference(t *testing.T) {
 		{Role: "tool", ToolCallID: "c3", Content: strings.Repeat("droppable filler\n", 50)},
 		{Role: "assistant", Content: "final"},
 	}
-	out := compact(msgs, 60, 1, 1, compactOpts{Skeleton: true, Pinned: map[string]bool{"c1": true}})
+	out := compact(context.Background(), msgs, 60, 1, 1, compactOpts{Skeleton: true, Pinned: map[string]bool{"c1": true}})
 	var c2 string
 	for _, m := range out {
 		if m.Role == "tool" && m.ToolCallID == "c2" {
@@ -269,7 +269,7 @@ func TestDedupeNeverGrows(t *testing.T) {
 		{Role: "assistant", Content: "final"},
 	}
 	before := estimateTokens(msgs)
-	out := compact(msgs, 1, 1, 1, compactOpts{})
+	out := compact(context.Background(), msgs, 1, 1, 1, compactOpts{})
 	for _, m := range out {
 		if isDeduped(m.Content) && len(m.Content) >= len(body) {
 			t.Fatalf("dedupe grew a body: %d -> %d chars", len(body), len(m.Content))
@@ -294,7 +294,7 @@ func TestElideKeepsSignalResidue(t *testing.T) {
 		{Role: "tool", ToolCallID: "c2", Content: noise},
 		{Role: "assistant", Content: "final"},
 	}
-	out := compact(msgs, 120, 1, 1, compactOpts{})
+	out := compact(context.Background(), msgs, 120, 1, 1, compactOpts{})
 	if !isElided(out[2].Content) {
 		t.Fatalf("signal body not elided: %q", out[2].Content[:40])
 	}
@@ -323,7 +323,7 @@ func TestDropRefusesSignalResidue(t *testing.T) {
 		{Role: "assistant", Content: "final"},
 	}
 	// A budget below what even full elision can reach forces the drop rung.
-	out := compact(msgs, 1, 1, 1, compactOpts{})
+	out := compact(context.Background(), msgs, 1, 1, 1, compactOpts{})
 	sawSignal := false
 	for _, m := range out {
 		if m.Role == "tool" && strings.Contains(m.Content, "the one line that matters") {
@@ -384,14 +384,14 @@ func TestCompactionMonotonicity(t *testing.T) {
 		{Role: "assistant", Content: "final"},
 	}
 	opts := compactOpts{Skeleton: true}
-	hard := compact(msgs, 100, 1, 2, opts)
+	hard := compact(context.Background(), msgs, 100, 1, 2, opts)
 	if reflect.DeepEqual(hard, msgs) {
 		t.Fatal("fixture invalid: hard compaction did nothing")
 	}
-	if again := compact(hard, 100, 1, 2, opts); !reflect.DeepEqual(hard, again) {
+	if again := compact(context.Background(), hard, 100, 1, 2, opts); !reflect.DeepEqual(hard, again) {
 		t.Fatal("re-compaction at the same budget changed bytes (idempotence broken)")
 	}
-	if gentle := compact(hard, 1<<20, 1, 2, opts); !reflect.DeepEqual(hard, gentle) {
+	if gentle := compact(context.Background(), hard, 1<<20, 1, 2, opts); !reflect.DeepEqual(hard, gentle) {
 		t.Fatal("a gentler budget REGRESSED a compacted transcript up the ladder (monotonicity broken)")
 	}
 }
