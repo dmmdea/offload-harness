@@ -40,8 +40,24 @@ A request names a task and carries input. Before the chain runs, oversized input
 budget: with `gcf_compact` on (default off), JSON arrays of flat objects inside an over-budget input
 are first re-encoded columnar by `internal/gcf` — LOSSLESS, round-trip proven — so content that the
 head/tail trim would have cut can instead fit the local window at full fidelity; whatever still
-overflows is trimmed as before. An in-budget input is never touched. The pipeline then builds a
-Tier chain for that task and walks it:
+overflows is trimmed as before. An in-budget input is never touched.
+
+That entry packing belongs to the ENTRY tier only (TO-3, 0.58.0). The original source is retained,
+and every tier the request CLIMBS to — the escalation slot and the terminal reasoning tier — is
+re-packed FROM THE ORIGINAL against its own budget: `n_ctx(callee) − task max_tokens − reserve −
+tokenized(scaffold)`, with `n_ctx` probed live from the serving endpoint (`/props`, cached with a
+TTL) and every count measured by the callee's OWN served tokenizer (`internal/tokclient`) — never
+chars/4. A source that fits the bigger window arrives WHOLE; one that still overflows is cut
+token-exact, head+tail on rune-safe piece boundaries. Any probe/tokenize failure falls open to the
+entry packing — byte-identical to the pre-TO-3 behavior — and the disposition is recorded on the
+ledger row as `tier_pack` ("token-exact (full source)" / "token-exact (cut K/N tokens)" /
+"entry-inherited (<why>)"): fail-open, never fail-unobservable. Forwarding the small tier's lossy
+cut up the ladder was a correctness bug class — the bigger model was paying its VRAM bill and never
+being offered the source it could hold. The cache key is likewise the ORIGINAL input (the logical
+request's identity): under-cap inputs key byte-identically to before, and two different oversized
+originals that share an entry trim no longer collide.
+
+The pipeline then builds a Tier chain for that task and walks it:
 
 ```
 chain = [triage_model?] → model → escalation_model

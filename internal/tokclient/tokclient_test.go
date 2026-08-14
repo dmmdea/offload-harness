@@ -274,6 +274,33 @@ func TestAllRoutesGarbage200FailsWithURLAttribution(t *testing.T) {
 	}
 }
 
+// NewUpstreamOnly must NOT fall back to the bare-root /tokenize: the root
+// route tokenizes with whatever model is currently loaded — mid-cascade, the
+// previous tier — so counts and cuts would use the wrong vocabulary. New's
+// fallback stays (single-model agent paths). Reverting candidates[:1] makes
+// this fail (round-2 review 2026-08-14).
+func TestUpstreamOnlyNeverFallsBackToRoot(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tokenize" { // bare root — the WRONG model's tokenizer
+			piecesHandler(t)(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	strict := NewUpstreamOnly(srv.URL, "m", time.Second)
+	if n, ok := strict.Count(context.Background(), "one two"); ok {
+		t.Fatalf("upstream-only Count fell back to the bare root (n=%d) — the cascade would count with the wrong model's vocabulary", n)
+	}
+	if !strings.Contains(strict.LastErr(), "/upstream/m/tokenize") {
+		t.Fatalf("LastErr = %q, want the upstream route named", strict.LastErr())
+	}
+	// The permissive constructor still falls back — the single-model contract.
+	if _, ok := New(srv.URL, "m", time.Second).Count(context.Background(), "one two"); !ok {
+		t.Fatal("New's root fallback must keep working for single-model callers")
+	}
+}
+
 // Failure classification: all-404 is definitive (the route positively does not
 // exist); any 5xx in the mix is not (the server may just be swapping a model);
 // and the mark tracks the MOST RECENT failure rather than sticking.

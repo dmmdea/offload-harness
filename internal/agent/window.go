@@ -49,11 +49,28 @@ const FallbackContextTokens = 8192
 // here: llama-swap resolves aliases on /upstream itself (verified live: both
 // /upstream/embeddinggemma/props and /upstream/local-embed/props answer 200).
 func ProbeServedWindow(ctx context.Context, base, model string) (int, bool) {
+	return probeWindow(ctx, base, model, false)
+}
+
+// ProbeUpstreamWindow is ProbeServedWindow restricted to the llama-swap
+// per-model passthrough — no bare-root fallback. The root /props answers for
+// WHATEVER model is currently loaded, so a multi-model caller (the cascade's
+// TO-3 repack) falling through to it would budget one tier against another
+// tier's window (review finding 2026-08-14). Single-model callers keep
+// ProbeServedWindow's fallback.
+func ProbeUpstreamWindow(ctx context.Context, base, model string) (int, bool) {
+	return probeWindow(ctx, base, model, true)
+}
+
+func probeWindow(ctx context.Context, base, model string, upstreamOnly bool) (int, bool) {
 	b := swapclient.BaseURL(base)
 	if b == "" {
 		return 0, false
 	}
 	candidates := []string{b + "/upstream/" + url.PathEscape(model) + "/props", b + "/props"}
+	if upstreamOnly {
+		candidates = candidates[:1]
+	}
 	client := &http.Client{Timeout: 60 * time.Second} // cold model swap can take tens of seconds
 	for _, u := range candidates {
 		if n, ok := fetchNCtx(ctx, client, u); ok {
