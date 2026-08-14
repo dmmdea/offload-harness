@@ -50,7 +50,7 @@ function runRenderArgs(tail) {
 }
 
 const sharedFlags = {};
-for (const k of ["api", "negative", "width", "height", "steps", "seed", "ckpt", "vae", "cfg", "sampler", "scheduler", "family", "preset", "clip", "lora", "lora-strength", "shift"]) {
+for (const k of ["api", "negative", "width", "height", "steps", "seed", "ckpt", "vae", "cfg", "sampler", "scheduler", "family", "preset", "clip", "lora", "lora-strength", "shift", "pool-vvram", "pool-compute", "pool-donor"]) {
   if (flags[k] != null) sharedFlags[k] = flags[k];
 }
 sharedFlags.api = API;

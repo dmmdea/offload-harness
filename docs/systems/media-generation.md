@@ -232,7 +232,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 
 | Concern | Keys |
 |---|---|
-| Image | `imagegen_family`, `imagegen_ckpt`, `imagegen_vae`, `imagegen_steps/cfg/sampler/scheduler`, `imagegen_preset/clip/lora/lora_strength/shift` (qwen-image knobs), `imagegen_refiner_model/refiner_timeout_sec` (opt-in prompt refiner) |
+| Image | `imagegen_family`, `imagegen_ckpt`, `imagegen_vae`, `imagegen_steps/cfg/sampler/scheduler`, `imagegen_preset/clip/lora/lora_strength/shift` (qwen-image knobs), `imagegen_pool_vvram_gb/pool_compute/pool_donor` (krea2 pooled loading), `imagegen_refiner_model/refiner_timeout_sec` (opt-in prompt refiner) |
 | Inpaint | `inpaint_ckpt`, `inpaint_vae`, `inpaint_steps/cfg/sampler/scheduler` |
 | Generative edit | `gen_edit_script`, `gen_edit_unet`, `gen_edit_preset` (`full`/`lightning8`/`lightning4`), `gen_edit_clip/vae/lora/lora_strength`, `gen_edit_steps/cfg/sampler/scheduler`, `gen_edit_megapixels` (0 = follow the source, held within 0.9-2.0), `gen_edit_timeout_sec` |
 | Video | `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model` |
@@ -264,6 +264,24 @@ directly (an empty `imagegen_lora` means unset, not LoRA-stripping — bind pres
 LoRA-free run). On a qwen-image seat with no `imagegen_cfg` bound, a per-request `steps`
 override alone trips the route's steps/cfg pair guard by design (exit 2, loud) — callers on
 that seat pick a preset instead of overriding steps.
+
+**Krea 2 Turbo** is the 32GB-class *generation* seat (operator blind-verdict 2026-08-14 — it
+won both decided bake-off pairs against Qwen-Image-2512 bf16, including the text-rendering
+probe): `imagegen_family: "krea2"` selects its model-correct graph, which rides the Qwen-Image
+stack (shared `qwen_image_vae`, Qwen3-VL encoder via `CLIPLoader type "krea2"`, default
+`qwen3vl_4b_bf16.safetensors`) but with its OWN template — **no** `ModelSamplingAuraFlow`
+shift node, the regular `EmptyLatentImage`, and the turbo recipe **baked into the weights**
+(8 steps / cfg 1.0 / euler / simple; no LoRA branch, no `full` preset — many steps at high
+cfg burns a distilled model out). The same two-key binding rule as qwen-image applies
+(`imagegen_vae` must not be `"builtin"`; steps/cfg together or neither). **Pooling (the
+32GB-pool doctrine):** `imagegen_pool_vvram_gb` > 0 loads the DiT through
+`UNETLoaderDisTorch2MultiGPU` in RATIO mode, donating that many GiB from
+`imagegen_pool_compute` (default `cuda:0`) to `imagegen_pool_donor` (default `cuda:1`); the
+byte-expert allocation string is deliberately unused (its reservation half is a structural
+no-op — the node reads only the post-`#` segment expert mode leaves empty). Pooled
+safetensor serving additionally requires launching ComfyUI with `--disable-dynamic-vram`
+until ComfyUI-MultiGPU #191 lands — carried per-box by the `COMFY_EXTRA_ARGS` launch seam,
+never by shared code. Zero/empty pool keys render single-GPU (the small-fleet shape).
 
 The recommended **≥16 GB image-*edit* primitive is Qwen-Image-Edit-2511** (Apache-2.0). Since the
 generative-edit route landed (0.44.0) it is a first-class `gen_edit_*` config binding — set

@@ -241,6 +241,17 @@ type Config struct {
 	ImageGenLoRA         string  `json:"imagegen_lora,omitempty"`
 	ImageGenLoRAStrength float64 `json:"imagegen_lora_strength,omitempty"`
 	ImageGenShift        float64 `json:"imagegen_shift,omitempty"`
+	// ImageGenPoolVvramGB / PoolCompute / PoolDonor thread the 32GB-pool
+	// doctrine knobs (krea2 family, comfy-render --pool-vvram/--pool-compute/
+	// --pool-donor): GiB of DiT weights donated to the donor card through the
+	// DisTorch2 ratio-mode loader. 0/empty = single-GPU loader, no flags —
+	// which boxes pool is per-machine config, never shared code. NOTE pooled
+	// safetensor serving also requires launching ComfyUI with
+	// --disable-dynamic-vram until ComfyUI-MultiGPU #191 lands (the harness
+	// COMFY_EXTRA_ARGS env seam carries it).
+	ImageGenPoolVvramGB float64 `json:"imagegen_pool_vvram_gb,omitempty"`
+	ImageGenPoolCompute string  `json:"imagegen_pool_compute,omitempty"`
+	ImageGenPoolDonor   string  `json:"imagegen_pool_donor,omitempty"`
 	// --- opt-in prompt refiner (generate_image; all engines + batch) ---
 	// ImageGenRefinerModel is the llama-swap model id (e.g. "gemma-4-12b") that
 	// expands an image prompt with concrete photographic detail before the render.

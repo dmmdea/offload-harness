@@ -6,6 +6,38 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.59.0] - 2026-08-14
+
+The 32GB-class image seat: Krea 2 Turbo, pooled. Chosen by the operator's blind bake-off
+verdict (2026-08-14: won both decided pairs against Qwen-Image-2512, including the
+text-rendering probe; two ties) under the house pool doctrine (operator-reaffirmed the same
+day: quality/doctrine outrank speed — speed is reported as fact, never a decision axis).
+
+### Added — `krea2` render family
+
+- **`render/wf-krea2.mjs`** (+ 7-test suite): the official `image_krea2_turbo_t2i` template
+  shape, cross-checked against the bake-off graphs recovered from /history — NO
+  ModelSamplingAuraFlow shift node (unlike qwen-image), regular `EmptyLatentImage`, turbo
+  recipe baked in (8 steps / cfg 1.0 / euler / simple), `CLIPLoader type "krea2"` with the
+  family-standard `qwen3vl_4b_bf16` encoder and the shared `qwen_image_vae`. Dims /16.
+- **Pooled loading (32GB-pool doctrine)**: `poolVvramGb > 0` loads the DiT through
+  ComfyUI-MultiGPU's `UNETLoaderDisTorch2MultiGPU` in RATIO mode — the shape proven on the
+  reference dual-GPU box; the byte-expert allocation string is deliberately unused (the
+  node's reservation half reads only the post-'#' segment expert mode leaves empty, so
+  expert silently collapses to one card). `0` = plain `UNETLoader` (single-GPU fleet
+  shape). Pooled safetensor serving additionally requires launching ComfyUI with
+  `--disable-dynamic-vram` until ComfyUI-MultiGPU #191 lands — a per-box launch concern
+  carried by the `COMFY_EXTRA_ARGS` seam, documented at the config keys.
+- **`--family krea2` in comfy-render.mjs**: mirrors the qwen-image branch — steps/cfg
+  travel together or not at all (a half-override of a distilled recipe renders burned-out
+  mush), "builtin" VAE is a config error for a split-file family, template-native 1024
+  default dims (proven at 2048×1024 in the bake-off).
+- **Config/Go plumbing**: `imagegen_pool_vvram_gb` / `imagegen_pool_compute` /
+  `imagegen_pool_donor` → `imagegen.Model.PoolVvramGB/PoolCompute/PoolDonor` →
+  `--pool-vvram/--pool-compute/--pool-donor` (zero/empty = no flags, existing machines
+  byte-identical; the `TestImageModelFromConfig` reflect drift-guard covers the new
+  fields; `comfy-generate.mjs` forwards the three flags).
+
 ## [0.58.0] - 2026-08-14
 
 TO-3 (plan 2026-08-07): tier-aware repacking at the escalation boundary — a climbed-to tier
