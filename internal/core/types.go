@@ -175,6 +175,12 @@ type Meta struct {
 	EscalatedAgreed *bool              `json:"escalated_agreed,omitempty"` // higher tier agreed with the smaller (nil = no escalation)
 	ErrClass        string             `json:"err_class,omitempty"`        // oom|timeout|http_5xx|conn_refused on infra failure; gpu_busy = vision call skipped, a gen job held the GPU lock (LO-1)
 	Feat            map[string]float64 `json:"feat,omitempty"`             // cheap input features for the entry-tier router
+	// TierPack records how a climbed-to tier's input was packed (TO-3): empty
+	// on entry-tier calls; "token-exact (full source)" / "token-exact (cut
+	// K/N tokens)" when the tier re-read the original against its own window;
+	// "entry-inherited (<why>)" when the repack failed open to the entry
+	// packing. The fail-open must be observable, never inferred (TO-4 rule).
+	TierPack string `json:"tier_pack,omitempty"`
 	// EscSource names WHICH gate sent this call up a tier. Closed set (see
 	// EscalationSource) so it aggregates; a free-text reason does not.
 	// Measured gap 2026-08-11: a SUCCESSFUL escalation recorded no reason at
