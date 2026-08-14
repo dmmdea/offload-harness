@@ -547,11 +547,47 @@ func handleCodeOrchExecute(ctx context.Context, req mcplib.CallToolRequest) (*mc
 	if err != nil {
 		return mcplib.NewToolResultError(err.Error()), nil
 	}
+	if msg, oversized := codeOrchBinaryOversize(ep, data); oversized {
+		return mcplib.NewToolResultError(msg), nil
+	}
 	text := bound.EndpointResponse(ep.Method, data)
 	if platformSession != nil {
 		text = bound.WithMetadata(text, platformSession.OutputMetadata())
 	}
 	return mcplib.NewToolResultStructured(codeOrchExecuteStructured(ep, path, text), text), nil
+}
+
+// codeOrchBinaryOversize refuses a base64 binary envelope that cannot survive
+// the MCP result budget, and reports the message to return instead.
+//
+// The client layer base64-wraps non-textual bodies, so an endpoint that serves
+// file bytes (ComfyUI's /view) arrives here as a _pp_binary envelope. A real
+// render is megabytes, and base64 adds a third on top. Left to the generic
+// bounding, that envelope becomes a preview holding a base64 string cut
+// mid-value: it no longer parses, and an agent that decodes it anyway writes a
+// corrupt file. The accompanying note advises narrowing the request with
+// filters or --select, none of which can shrink an image.
+//
+// The typed endpoint-mirror path already refuses this case and names the fix.
+// This keeps the code-orchestration path honest in the same way: a payload that
+// cannot be returned intact is an error with a route to the bytes, never a
+// silently damaged body.
+func codeOrchBinaryOversize(ep *codeOrchEndpoint, data json.RawMessage) (string, bool) {
+	if len(data) <= bound.MaxBytes {
+		return "", false
+	}
+	var probe struct {
+		PPBinary    bool   `json:"_pp_binary"`
+		ContentType string `json:"content_type"`
+		Bytes       int    `json:"bytes"`
+	}
+	if json.Unmarshal(data, &probe) != nil || !probe.PPBinary {
+		return "", false
+	}
+	return fmt.Sprintf(
+		"binary response is too large for MCP text output: endpoint %s returned %d bytes of %s, which base64-encode to a %d byte envelope, exceeding the %d byte budget. Fetch it with the CLI, which writes that envelope to disk instead of this budget: comfyui-pp-cli view --filename <name> --type <output|input|temp> --deliver file:<path>. The bytes are the envelope's base64 \"data\" field, so decode it after writing.",
+		ep.ID, probe.Bytes, probe.ContentType, len(data), bound.MaxBytes,
+	), true
 }
 
 // codeOrchInlineBodyMax caps how much response body codeOrchExecuteStructured
