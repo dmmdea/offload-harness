@@ -397,8 +397,8 @@ Copy `config.example.json` and edit. Config is resolved in precedence order: `--
 | `ocr_model` | `""` | Optional dedicated OCR tier routing **only** the `ocr` task (purpose-built OCR models beat a general VLM on dense text, but cannot answer VQA — so it is a separate binding, never a `vision_model` replacement). Deliberately unbound by default: empty = OCR rides `vision_model`, exactly as before. |
 | `stt_model` / `stt_model_hq` | `""` / `""` | Speech-to-text upstreams. Both opt-in: a tier earns `stt_model` by declaring an `stt` media seat (`media_seats` in the tier table), which renders the whisper seat AND this binding from one declaration. Empty = the route defers rather than naming a seat nothing serves. |
 | `stt_hq_api` | `""` | Protocol of the HQ upstream: `""`/`whisper` = whisper-server `/inference`; `openai` = llama-server's `/v1/audio/transcriptions` (mtmd STT like Qwen3-ASR — no timestamps: one full-span segment; language auto-detected; whisper knobs don't apply). |
-| `classify_min_confidence` | `0.45` | Self-reported confidence floor for classify. |
-| `confidence_margin_threshold` | `0.35` | Logprob decision margin gate (0 disables). |
+| `classify_min_confidence` | `0.88` | Self-reported confidence floor for classify. Calibrated 2026-08-14 from the confcal probe: the lowest self-report observed anywhere was 0.85 (on two accepted-wrong rows); the prior 0.45 sat below the entire observed distribution and never fired. |
+| `confidence_margin_threshold` | `0.65` | Logprob decision margin gate (0 disables; per-task conformal thresholds override it). Calibrated 2026-08-14: sits above all three observed wrong-row margins (max 0.618) and fires on 0/43 easy production classify rows (min 0.985); the prior 0.35 sat below the entire observed support (min 0.372) and never fired. |
 | `max_input_chars` | `24000` | Inputs above this are trimmed; over-long inputs defer. |
 | `max_retries` | `1` | Retries before escalating. |
 | `cache_path` | `~/.local-offload/cache.db` | bbolt cache file. |
@@ -580,15 +580,18 @@ The **coding agent** (`local-agent`) is designed **safe-by-default** for a model
   **effect status** (`committed` / `failed` / `unknown` / `none`), and on unattended runs an
   effectful call the model itself flags `security_risk: high` — or anything unrecognized, which
   fails closed — is **parked** for operator review instead of executed. That parking is a
-  **backstop, not the gate**: measured on the production agent seat, the self-annotation is a
-  near-constant (54/54 emissions `low`, including every destructive call; park-gate recall
-  0/36), so it is telemetry rather than a security control. The gate that fires is the
-  structural rule table, and `--rules` **defaults to empty** — with no table, an unattended run
-  holding `--allow-delete`, `--allow-overwrite`, `--allow-shell`, or `--allow-github` is ungated
-  above the built-in secret-material floor, and the builder says so with an `UNGATED` note naming
-  `examples/agent-rules.json` (a note, never an error, so existing callers keep running;
-  `--allow-write` and `--allow-run` alone do not raise it). That is the CLI/queue path only — the
-  MCP `agent_run` front door passes no write/delete/shell/fetch capability and is unaffected.
+  **backstop, not the gate**: measured on the production agent seats, the self-annotation is a
+  literal constant (83/83 emissions `low` across two seats and five arms, including every
+  destructive call; park-gate recall 0/81), so it is telemetry rather than a security control.
+  The gate that fires is the structural rule table, and since 0.55.0 an **unattended run loads a
+  built-in default table** (`internal/agent/unattended-rules.json`) when `--rules` is not given:
+  deletes and config/dependency-manifest writes queue for operator review; evidence files,
+  model weights, CI workflows, and lockfiles hard-deny; ordinary source writes stay governed by
+  the posture flags. `--rules <path>` replaces the default with your own table
+  (`examples/agent-rules.json` is a fuller starter); `--rules off` is the explicit escape hatch
+  back to the ungated posture, which the builder then announces with an `UNGATED` note. That is
+  the CLI/queue path only — the MCP `agent_run` front door passes no write/delete/shell/fetch
+  capability and is unaffected.
 - **The runner (`--allow-run`) — honest posture.** The `run` tool is **OFF by default**. It runs an
   **allowlisted program directly, with no shell** (`Argv = [command, args…]`, never `/bin/sh -c`), so
   the executable allowlist (`go`, `gofmt`, `python`, `python3`, `pytest`, `npm`, `node`, `cargo`,
