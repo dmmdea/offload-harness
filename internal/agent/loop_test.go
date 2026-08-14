@@ -635,9 +635,16 @@ func TestSpecReserveShrinksInputBudget(t *testing.T) {
 	withTools := NewLoop(nil, tools, 1).WithContextTokens(8192).WithMaxTokens(1024)
 	withTools.resolveSpecReserve(context.Background())
 
-	specsJSON, err := json.Marshal(withTools.specs)
+	// The reserve must measure the WIRE shape Chat ships — wireToolsJSON is
+	// the shared producer, so this pin means reserve and wire cannot drift
+	// (round-3 finding 2026-08-14: measuring a marshal of ToolSpec itself
+	// under-counted by ~34 fixed bytes per tool).
+	specsJSON, err := wireToolsJSON(withTools.specs)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(string(specsJSON), `"tool_choice"`) || !strings.Contains(string(specsJSON), `"type":"function"`) {
+		t.Fatalf("wireToolsJSON = %q — must be the OpenAI wire shape (tools array + tool_choice), or the reserve measures the wrong bytes", specsJSON)
 	}
 	// No tokenizer => the conservative estimate: JSON is punctuation-dense, so
 	// the divisor is 3, not the transcript estimate's 4.
@@ -662,11 +669,11 @@ func TestSpecReserveUsesRealTokenizerWhenAvailable(t *testing.T) {
 	}}}
 	l := NewLoop(nil, tools, 1).WithContextTokens(8192).WithMaxTokens(1024).WithTokenizer(sparseTok{})
 	l.resolveSpecReserve(context.Background())
-	specsJSON, err := json.Marshal(l.specs)
+	specsJSON, err := wireToolsJSON(l.specs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := (len(specsJSON) + 99) / 100 // sparseTok: 100-byte pieces
+	want := (len(specsJSON) + 99) / 100 // sparseTok: 100-byte pieces over the WIRE serialization
 	if got := int(l.specReserve.Load()); got != want {
 		t.Fatalf("specReserve = %d, want %d real-tokenized (sparseTok), not the chars/3 estimate %d", got, want, (len(specsJSON)+2)/3)
 	}

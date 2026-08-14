@@ -494,6 +494,11 @@ func main() {
 		res, err := agent.RunTwoTier(ctx, objective, architect, editor)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
+			// The degrade note matters MOST on the death path — a run that fell
+			// to the legacy rung and then died on a context overflow is exactly
+			// the diagnosis this line carries (round-3 finding 2026-08-14).
+			printTokenizerDegrade("editor", res.TokenizerPath)
+			printTokenizerDegrade("architect", res.ArchTokenizerPath)
 			printFlaggedEffects(res.Effects) // what already touched the world before the death
 			os.Exit(1)
 		}
@@ -515,7 +520,8 @@ func main() {
 	res, err := loop.Run(ctx, objective)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
-		printFlaggedEffects(res.Effects) // what already touched the world before the death
+		printTokenizerDegrade("", res.TokenizerPath) // most diagnostic exactly on the death path (round-3 finding)
+		printFlaggedEffects(res.Effects)             // what already touched the world before the death
 		os.Exit(1)
 	}
 	printTokenizerDegrade("", res.TokenizerPath)

@@ -96,6 +96,21 @@ in the agent loop.
   0.58.0 the same night); the post-`emergencyShrink` exhausted count may over-count in
   estimate space (honest direction — never hides an overflow).
 
+### Review hardening (round 3, 2026-08-14)
+
+- Read cap multiplier corrected 16×→32×: llama.cpp's real `with_pieces` entry
+  (`{"id":N,"piece":…},`, ≤ ~27 bytes) exceeds 16× at the ~1 token/byte regime the cut
+  targets (CJK/base64/byte-fallback), so 16× re-opened the truncation self-disable it
+  claimed to close. The proving fixture now emits the real id-bearing entry shape and goes
+  red at 16×.
+- `specReserve` now tokenizes the WIRE serialization via `wireToolsJSON` — the same
+  producer `Chat` ships (`tools` array + `tool_choice`) — instead of a marshal of
+  `ToolSpec` itself, which used different keys and 34 fewer fixed bytes per tool
+  (under-counting on exactly the path advertised as exact).
+- The CLI degrade note now also prints on both error-exit paths (single and two-tier) —
+  the run that degraded and then died on a context overflow is where the note carries the
+  most diagnostic value.
+
 ## [0.56.0] - 2026-08-14
 
 Master-plan step-4 remainder: the ComfyUI submission/timing plumbing is re-expressed through the
