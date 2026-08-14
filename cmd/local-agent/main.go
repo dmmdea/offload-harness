@@ -119,7 +119,7 @@ func main() {
 	allowGitHub := fs.Bool("allow-github", false, "enable GitHub tools (github_api/create_repo/upload_file). Token from $GITHUB_TOKEN, default repo from $GITHUB_REPO. Default off.")
 	queuePath := fs.String("queue", "", "P5b standalone: drain a JSONL goal queue UNATTENDED (the capability flags become the pre-authorization envelope) instead of a single objective. No resume — a re-run reprocesses the whole queue.")
 	askQueuePath := fs.String("ask-queue", "", "standalone: file where asks deferred on the unattended run are parked for review (default: ~/.local-offload/agent-asks.jsonl)")
-	rulesPath := fs.String("rules", "", "structural risk rule table (JSON array of {kind,glob,decision,severity,reason}; tighten-only — rules may deny or ask, never allow). Fails closed on a bad or missing file.")
+	rulesPath := fs.String("rules", "", "structural risk rule table (JSON array of {kind,glob,decision,severity,reason}; tighten-only — rules may deny or ask, never allow). Fails closed on a bad or missing file. Default (empty): the built-in unattended table loads (deletes + config/manifest writes queue for review; evidence/weights/workflow/lockfile mutations deny). Pass a path to REPLACE it, or 'off' to run ungated (measured 2026-08-11: the model's own security_risk annotation is a constant 'low' — 0% recall on destructive calls).")
 	tracesDir := fs.String("traces", "", "standalone: directory for per-goal trace JSON (default: ~/.local-offload/agent-traces)")
 	goalTimeoutSec := fs.Int("goal-timeout", 300, "standalone: per-goal wall-clock budget in seconds")
 	totalTimeoutSec := fs.Int("total-timeout", 0, "standalone: optional cumulative wall-clock budget for the WHOLE drain in seconds (0 = unbounded; --goal-timeout still bounds each goal)")

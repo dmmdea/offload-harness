@@ -1,0 +1,142 @@
+[
+  {
+    "kind": "write",
+    "glob": ".github/workflows/*",
+    "decision": "deny",
+    "severity": "critical",
+    "reason": "CI workflow definitions are a spend and supply-chain surface; never mutated on an unattended run"
+  },
+  {
+    "kind": "delete",
+    "glob": ".github/workflows/*",
+    "decision": "deny",
+    "severity": "critical",
+    "reason": "see write .github/workflows/*"
+  },
+  {
+    "kind": "write",
+    "glob": "*.gguf",
+    "decision": "deny",
+    "severity": "critical",
+    "reason": "model weights are never a legitimate agent write target"
+  },
+  {
+    "kind": "delete",
+    "glob": "*.gguf",
+    "decision": "deny",
+    "severity": "critical",
+    "reason": "a deleted quant is a multi-GB re-download"
+  },
+  {
+    "kind": "delete",
+    "glob": "*.jsonl",
+    "decision": "deny",
+    "severity": "critical",
+    "reason": "append-only evidence (ledger, queues, run rows, exemplars); nothing regenerates it"
+  },
+  {
+    "kind": "write",
+    "glob": "go.sum",
+    "decision": "deny",
+    "severity": "high",
+    "reason": "checksum database is generated, never hand-edited (regenerate via the toolchain)"
+  },
+  {
+    "kind": "write",
+    "glob": "*.lock",
+    "decision": "deny",
+    "severity": "high",
+    "reason": "lockfiles are generated; a hand-edit silently desynchronizes the dependency graph"
+  },
+  {
+    "kind": "write",
+    "glob": "package-lock.json",
+    "decision": "deny",
+    "severity": "high",
+    "reason": "see *.lock"
+  },
+  {
+    "kind": "write",
+    "glob": "pnpm-lock.yaml",
+    "decision": "deny",
+    "severity": "high",
+    "reason": "see *.lock"
+  },
+  {
+    "kind": "write",
+    "glob": "go.mod",
+    "decision": "ask",
+    "severity": "high",
+    "reason": "dependency manifest — an edit changes what the whole module builds against"
+  },
+  {
+    "kind": "write",
+    "glob": "package.json",
+    "decision": "ask",
+    "severity": "high",
+    "reason": "dependency manifest"
+  },
+  {
+    "kind": "write",
+    "glob": "pyproject.toml",
+    "decision": "ask",
+    "severity": "high",
+    "reason": "dependency manifest"
+  },
+  {
+    "kind": "write",
+    "glob": "cargo.toml",
+    "decision": "ask",
+    "severity": "high",
+    "reason": "dependency manifest"
+  },
+  {
+    "kind": "write",
+    "glob": "config.json",
+    "decision": "ask",
+    "severity": "high",
+    "reason": "binding configuration; a silent edit re-points live behavior"
+  },
+  {
+    "kind": "write",
+    "glob": "settings.json",
+    "decision": "ask",
+    "severity": "high",
+    "reason": "settings surface (editor/agent/host); an edit changes behavior outside the run's stated goal"
+  },
+  {
+    "kind": "write",
+    "glob": "*.yaml",
+    "decision": "ask",
+    "severity": "medium",
+    "reason": "config/serving surface — a YAML write changes what something else runs"
+  },
+  {
+    "kind": "write",
+    "glob": "*.yml",
+    "decision": "ask",
+    "severity": "medium",
+    "reason": "see *.yaml"
+  },
+  {
+    "kind": "write",
+    "glob": "*.toml",
+    "decision": "ask",
+    "severity": "medium",
+    "reason": "config surface"
+  },
+  {
+    "kind": "write",
+    "glob": "*.ini",
+    "decision": "ask",
+    "severity": "medium",
+    "reason": "config surface"
+  },
+  {
+    "kind": "delete",
+    "glob": "*",
+    "decision": "ask",
+    "severity": "high",
+    "reason": "deletion is irreversible; on an unattended run every delete queues for human review (measured 2026-08-11: the model self-declared security_risk=low on 81/81 structurally destructive calls — 0% park recall — so self-declaration cannot gate this)"
+  }
+]

@@ -68,12 +68,20 @@ way the filesystem (or DNS) resolves them — case-folded, trailing dots/spaces 
 OS — so folding errs toward denial. Each hit is recorded in the audit trail with the rule and its
 severity; severity sorts the morning review, it never changes the decision.
 
-**`--rules` is opt-in and defaults to empty** (`cmd/local-agent/main.go`) — the sentence above
-describes a path the operator takes deliberately, not the default state. With no table loaded the
-rules in force are exactly the built-in `defaultRules()` secret-material floor, which every broker
-carries unconditionally (`policy.go`). A loaded table only ever *adds* tightening on top of that
-floor; it can never loosen it, and the floor is no substitute for it, because the floor matches
-secret-material globs and nothing else. [`examples/agent-rules.json`](../../examples/agent-rules.json)
+**Since 0.55.0, an UNATTENDED run loads a built-in default table when `--rules` is empty**
+(`unattendedrules.go`, embedded from
+[`internal/agent/unattended-rules.json`](../../internal/agent/unattended-rules.json)): every delete
+queues for review behind hard denies for evidence (`*.jsonl`), weights (`*.gguf`), CI workflows and
+lockfiles, and config/dependency-manifest writes queue — while ordinary source writes stay governed
+by the posture flags, so the agent can still do the work it was granted. `--rules <path>` REPLACES
+the default with the operator's own table (replacement, not overlay, is what lets an operator loosen
+the delete catch-all — rules themselves only tighten), and `--rules off` is the explicit ungated
+escape hatch. On an ATTENDED run with `--rules` empty no table loads: ask resolves to a human
+anyway. Beneath any of this the rules in force always include the built-in `defaultRules()`
+secret-material floor, which every broker carries unconditionally (`policy.go`); a loaded table only
+ever *adds* tightening on top of that floor, and the floor is no substitute for a table, because it
+matches secret-material globs and nothing else.
+[`examples/agent-rules.json`](../../examples/agent-rules.json)
 is the shipped starter table — 20 rules: `delete *` → ask (high); source overwrite
 `*.py`/`*.go`/`*.ts`/`*.js`/`*.mjs` → ask; `go.mod`, `package.json`, `config.json`, `*.yaml`,
 `*.yml` → ask; `go.sum`, `*.lock`, `package-lock.json` → deny; `*.gguf` → deny on **both** write and
@@ -116,24 +124,24 @@ complementary failure is recorded in the shipped rule table's own reasons: on **
 field is both skipped *and*, when emitted, constant — which qualifies the rationale above: "weak
 local models skip optional fields routinely" is only half of the problem. Keep the mechanism,
 because it fails SAFE and an honest model can only use it to tighten — but do not read it as
-coverage. With no `--rules` table loaded, self-annotation is the only per-call gate **above the
-capability flags and the built-in floor**, and it has 0% recall on destructive calls. The gates that
-do still fire per-call with no table: the `defaultRules()` secret-material floor (secret globs only
-— it would not have stopped any of the 36), the broker's unconditional `.git` denial
-([invariant 3](#invariants-and-assumptions)), and `os.Root` worktree confinement (invariant 2). The
-structural remedy is the rule table: [`examples/agent-rules.json`](../../examples/agent-rules.json)
-turns the probe's own call (`delete src/notify.py`, self-declared `low`) into a non-Allow.
+coverage. Before 0.55.0, with no `--rules` table loaded, self-annotation was the only per-call gate
+**above the capability flags and the built-in floor**, and it has 0% recall on destructive calls.
+That regime is retired: an unattended run now loads the default table above, which turns the probe's
+own call (`delete src/notify.py`, self-declared `low`) into deny-and-queue on structure alone. The
+gates that fire per-call even with `--rules off`: the `defaultRules()` secret-material floor (secret
+globs only — it would not have stopped any of the 81), the broker's unconditional `.git` denial
+([invariant 3](#invariants-and-assumptions)), and `os.Root` worktree confinement (invariant 2).
 
-**The `UNGATED` build note.** Because of the above, `Build` appends an operator-visible note when an
-unattended run is granted destructive capability with no rule table. The trigger is exactly
+**The `UNGATED` build note.** `Build` appends an operator-visible note when an unattended run is
+granted destructive capability with the rule table explicitly disabled. The trigger is exactly
 `Unattended` **and** at least one of `--allow-delete` / `--allow-overwrite` / `--allow-shell` /
-`--allow-github` **and** an empty `--rules` (`builder.go`) — `--allow-write` or `--allow-run` alone
-does **not** trigger it. It is a **note, never an error**, deliberately: refusing to run would break
-every existing unattended caller. It rides on `built.Notes` and the CLI prints it to stderr
-(`cmd/local-agent/main.go`, and again for the two-tier editor build), pointing the operator at
-`examples/agent-rules.json`. **Scope:** this is the CLI/queue path — the path that grants `--allow-*`
-and sets unattended. The MCP `agent_run` front door passes no write/delete/shell/fetch capability, so
-it never trips the condition and is unaffected.
+`--allow-github` **and** `--rules off` (`builder.go`) — `--allow-write` or `--allow-run` alone does
+**not** trigger it, and an empty `--rules` no longer can (the default table loads instead, with its
+own `ACTIVE` note). It is a **note, never an error**. It rides on `built.Notes` and the CLI prints
+it to stderr (`cmd/local-agent/main.go`, and again for the two-tier editor build). **Scope:** this
+is the CLI/queue path — the path that grants `--allow-*` and sets unattended. The MCP `agent_run`
+front door passes no write/delete/shell/fetch capability, so it never trips the condition and is
+unaffected.
 
 **End-of-run advisory judge** (`agent_run judge=true` / `WithBatchJudge`). After the loop
 finishes, one bounded same-seat completion grades the run's flagged effect records for the
@@ -319,10 +327,13 @@ write and shell tools could otherwise clobber the record of what it did.
 - Queue mode and `--serve` (OpenAI-compatible endpoint, loopback-only — see
   [ADR 0005](../architecture/decisions/0005-loopback-only-serve.md)).
 - `agent_run` via the MCP surface.
-- [`examples/agent-rules.json`](../../examples/agent-rules.json) — the shipped starter risk-rule
-  table, loaded with `--rules`. It is a **repo file, packaged by no installer**: from a checkout,
-  pass `--rules examples/agent-rules.json`; from an installed binary, copy it somewhere durable
-  (e.g. `~/.local-offload/agent-rules.json`) and pass that path.
+- [`internal/agent/unattended-rules.json`](../../internal/agent/unattended-rules.json) — the
+  default table EMBEDDED in the binary and loaded automatically on unattended runs with no
+  `--rules` argument (so it needs no installer and no path).
+- [`examples/agent-rules.json`](../../examples/agent-rules.json) — the fuller starter risk-rule
+  table for operators writing their own, loaded with `--rules`. It is a **repo file, packaged by
+  no installer**: from a checkout, pass `--rules examples/agent-rules.json`; from an installed
+  binary, copy it somewhere durable (e.g. `~/.local-offload/agent-rules.json`) and pass that path.
 
 ## Dependencies
 
@@ -373,11 +384,12 @@ flagged-effects print on the CLI) answers "did anything end in `unknown` or get 
 transcript as "NOT executed" messages.
 
 The build itself warns once, before the loop starts, when an unattended run holds destructive
-capability with no rule table: `[local-agent] UNGATED: …` on stderr, and on `built.Notes` for an
-embedding caller. Its **absence is not an all-clear** — it fires on that one condition only (see
-"The `UNGATED` build note" under *How the system works*), so an attended run, or an unattended run
-without `--allow-delete`/`--allow-overwrite`/`--allow-shell`/`--allow-github`, stays silent whether
-or not a rule table is loaded.
+capability with the rule table explicitly disabled (`--rules off`): `[local-agent] UNGATED: …` on
+stderr, and on `built.Notes` for an embedding caller. Its **absence is not an all-clear** — it
+fires on that one condition only (see "The `UNGATED` build note" under *How the system works*), so
+an attended run, or an unattended run without
+`--allow-delete`/`--allow-overwrite`/`--allow-shell`/`--allow-github`, stays silent whether or not
+a rule table is loaded.
 
 ## Testing notes
 
@@ -385,8 +397,12 @@ or not a rule table is loaded.
 (`rules_test.go`), effect accounting and parking (`effects_test.go`), the batch judge, the throttle
 ordering, write-tool scoping and TOCTOU behavior, profile narrowing, and two-tier plan handling.
 `examplerules_test.go` pins the shipped starter table: that it loads, that it stops an unannotated
-delete, and that the `UNGATED` note is present on an unattended destructive build and absent on a
-read-only one. `cmd/local-agent/serve_test.go` covers the loopback guard.
+delete, and that an unattended destructive build announces the default table (never `UNGATED`)
+while a read-only build stays silent. `unattendedrules_test.go` pins the embedded default table:
+that it loads tighten-only, that a delete parks WITHOUT any reliance on the model-declared risk
+(with the fired rule as structured queue fields), that config/manifest writes gate while ordinary
+source writes do not, that `--rules off` is ungated-and-announced, and that an operator table
+replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 
 ## Common pitfalls
 
@@ -402,8 +418,10 @@ read-only one. `cmd/local-agent/serve_test.go` covers the loopback guard.
 - [`internal/agent/policy.go`](../../internal/agent/policy.go) — broker, `.git` denial, audit append
 - [`internal/agent/rules.go`](../../internal/agent/rules.go) — the tighten-only risk-rule table and
   the built-in `defaultRules()` secret-material floor
-- [`examples/agent-rules.json`](../../examples/agent-rules.json) — the shipped starter table named by
-  the `UNGATED` note
+- [`internal/agent/unattendedrules.go`](../../internal/agent/unattendedrules.go) — the embedded
+  default unattended table and the `RulesOff` escape hatch
+- [`examples/agent-rules.json`](../../examples/agent-rules.json) — the shipped starter table for
+  operator-authored rules
 - [`internal/agent/effects.go`](../../internal/agent/effects.go) — effect statuses, `NotPerformed`,
   the `security_risk` park logic
 - [`internal/agent/batchjudge.go`](../../internal/agent/batchjudge.go) — the advisory end-of-run

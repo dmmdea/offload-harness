@@ -61,9 +61,10 @@ func TestExampleRulesStopAnUnannotatedDelete(t *testing.T) {
 	}
 }
 
-// An unattended run granted destructive capability with no rules table must SAY
-// so. Silence there is what produced a 0%-recall gate nobody knew was inert.
-func TestUngatedUnattendedRunIsAnnounced(t *testing.T) {
+// An unattended destructive run with no --rules argument now loads the DEFAULT
+// table (TO-1 step 2) — it must announce the table, not cry UNGATED: the
+// warning-only regime is exactly what the 2026-08-11 measurement retired.
+func TestUnattendedDefaultTableIsAnnouncedNotUngated(t *testing.T) {
 	res, err := Build(BuildConfig{
 		PlannerBase: "http://127.0.0.1:1", Model: "m", MaxSteps: 1,
 		ReadRoot: t.TempDir(), Unattended: true,
@@ -72,18 +73,21 @@ func TestUngatedUnattendedRunIsAnnounced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	var found bool
+	var active bool
 	for _, n := range res.Notes {
 		if strings.Contains(n, "UNGATED") {
-			found = true
+			t.Fatalf("UNGATED note despite the default table loading: %q", n)
+		}
+		if strings.Contains(n, "default unattended rule table ACTIVE") {
+			active = true
 		}
 	}
-	if !found {
-		t.Fatalf("no UNGATED note for an unattended destructive run; notes=%v", res.Notes)
+	if !active {
+		t.Fatalf("no ACTIVE note for the default unattended table; notes=%v", res.Notes)
 	}
 }
 
-// ...and must NOT cry wolf on a read-only run, or the warning gets tuned out.
+// ...and must NOT cry wolf on a read-only run, or the notes get tuned out.
 func TestReadOnlyUnattendedRunIsNotAnnounced(t *testing.T) {
 	res, err := Build(BuildConfig{
 		PlannerBase: "http://127.0.0.1:1", Model: "m", MaxSteps: 1,
@@ -93,8 +97,8 @@ func TestReadOnlyUnattendedRunIsNotAnnounced(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	for _, n := range res.Notes {
-		if strings.Contains(n, "UNGATED") {
-			t.Fatalf("UNGATED note on a read-only run: %q", n)
+		if strings.Contains(n, "UNGATED") || strings.Contains(n, "rule table ACTIVE") {
+			t.Fatalf("rules note on a read-only run: %q", n)
 		}
 	}
 }

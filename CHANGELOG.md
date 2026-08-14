@@ -6,6 +6,70 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.55.0] - 2026-08-14
+
+TO-1 rescoped step 2 (plan 2026-08-07, measurement 2026-08-11): stop treating the model's
+self-declared `security_risk` as the unattended safety gate, and put the cascade's two
+confidence thresholds inside the distributions they are supposed to police.
+
+### Added — unattended agent runs load a default structural rule table
+
+The 2026-08-11 measurement (pooled over BOTH production agent seats, five arms, 137 effectful
+calls) showed the self-declared `security_risk` annotation is a literal constant: 83/83 emitted
+declarations `low`, park-gate recall **0/81** on structurally destructive calls, and emission
+runs INVERSE to blast radius (`web_fetch`: 0/6 annotated). PR #87 shipped the structural rules
+mechanism tighten-only and fail-closed, but `--rules` defaulted to empty, so the constant was
+the only per-call gate above the capability flags on an unattended run. 0.48.0 warned about
+that state (`UNGATED` note); warning an absent operator is exactly the mechanism the
+measurement showed does not work.
+
+- **`internal/agent/unattended-rules.json`** — a 20-rule default table, embedded in the binary
+  (`unattendedrules.go`) and loaded by `agent.Build` for every UNATTENDED run that passes no
+  `--rules` argument. Every `delete` queues for operator review (`delete *` → ask), behind hard
+  denies for append-only evidence (`*.jsonl`), model weights (`*.gguf`), CI workflows
+  (`.github/workflows/*`) and lockfiles; config and dependency-manifest writes queue. Ordinary
+  source writes stay governed by the posture flags — a default that queued every source edit
+  would only push operators to opt out.
+- **Escape hatches, explicit only:** `--rules <path>` REPLACES the default with the operator's
+  own table (replacement is what lets an operator loosen the delete catch-all — rules
+  themselves only tighten); `--rules off` (`agent.RulesOff`) restores the pre-0.55.0 ungated
+  posture, and the builder then emits the `UNGATED` note. An empty `--rules` can no longer
+  produce an ungated destructive run.
+- **Deliberately absent:** no shell-command rules (rules.go rejects `ActShell` rules by design —
+  command lines are not structurally matchable; the OS cage owns shell containment) and no
+  default fetch rule (the egress allowlist is itself the operator's pre-authorization).
+- Scope: the CLI/queue/serve/two-tier paths (all funnel through `agent.Build`). The MCP
+  `agent_run` front door grants no write/delete/shell/fetch capability and is unaffected.
+- Tests (`unattendedrules_test.go`): the embedded table loads tighten-only; a delete parks on
+  an unattended run WITHOUT any reliance on model-declared risk, with the fired rule as
+  structured ask-queue fields; deny rules outrank the delete catch-all (order pinned);
+  config/manifest writes gate while ordinary source writes do not; `--rules off` is ungated and
+  announced; an operator table replaces the default. Mutation-tested: disabling the default
+  load turns all four gate tests red.
+
+### Changed — cascade confidence thresholds calibrated onto the observed distributions
+
+Both deployed gates were DEAD by threshold: `classify_min_confidence` 0.45 vs a lowest observed
+self-confidence of 0.850 anywhere, `confidence_margin_threshold` 0.35 vs a lowest observed
+margin of 0.372 — below the entire support of their signals, they never fired on the confcal
+probe (120 difficulty-graded items) or on 1487 production ledger rows (0 rows under either).
+
+- `classify_min_confidence` **0.45 → 0.88.** The only observations below 0.88 anywhere in the
+  probe are the two accepted-WRONG escalated rows (self-confidence 0.85, no margin available at
+  the answering tier): the floor now refuses exactly the acceptances measured wrong, and fires
+  on 0/97 non-escalated rows (every entry-tier emission sat at ≥ 0.90).
+- `confidence_margin_threshold` **0.35 → 0.65.** The margin is the stronger signal on the same
+  120 decisions (AUC 0.930 vs 0.874, 118 distinct values vs 5). 0.65 sits above all three
+  observed wrong-row margins (0.382 / 0.492 / 0.618): the gate now catches 3/3 entry-tier
+  errors at a 17/97 escalation rate on the deliberately hard probe — and 0/43 fires on observed
+  easy production classify traffic (min margin there 0.985). Jointly the two gates address 5/5
+  observed probe errors. On production triage (no error labels measured), 22/119 observed
+  margin rows sit under 0.65 and would now climb one local tier — a cheap, quality-first climb;
+  per-task conformal thresholds (`calibrate` / thresholds.json) still override the constant.
+- The escalation-reason prerequisite for verifying this change post-hoc (`esc_source`, the
+  closed seven-value set on effect/escalation ledger rows) already shipped in 0.48.0 (PR #94)
+  and is verified live; no further ledger change was needed.
+
 ## [0.54.2] - 2026-08-13
 
 ### Fixed — llamaswap-pp-cli MCP code orchestration was dead for the same reason as comfyui's
