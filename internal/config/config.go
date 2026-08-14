@@ -982,7 +982,7 @@ func warnDeadThresholds(c Config) {
 			c.ClassifyMinConfidence, minObservedConfidence)
 	}
 	if c.ConfidenceMarginThreshold > 0 && c.ConfidenceMarginThreshold <= minObservedMargin {
-		fmt.Fprintf(os.Stderr, "warning: confidence_margin_threshold %.2f is at/below the lowest observed decision margin (%.3f) — the gate cannot fire; calibrated default is 0.65 (remove the key to inherit it)\n",
+		fmt.Fprintf(os.Stderr, "warning: confidence_margin_threshold %.2f is at/below the lowest observed decision margin (%.3f) — as the fallback gate it cannot fire (per-task conformal thresholds from thresholds.json, when loaded, override it); calibrated default is 0.65 (remove the key to inherit it)\n",
 			c.ConfidenceMarginThreshold, minObservedMargin)
 	}
 }

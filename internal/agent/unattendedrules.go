@@ -13,8 +13,10 @@ package agent
 // What the table gates, and what it deliberately does not:
 //
 //   - Every DELETE queues for review (`delete *` → ask), with hard denies ahead
-//     of it for evidence (*.jsonl), weights (*.gguf) and CI workflows. Deletion
-//     was the measured unparked destructive class, and "recursive" or "mass"
+//     of it for evidence (*.jsonl — on write too: a truncating overwrite
+//     destroys an append-only file as thoroughly as a delete), weights
+//     (*.gguf / *.safetensors) and worktree-root CI workflows. Deletion was
+//     the measured unparked destructive class, and "recursive" or "mass"
 //     deletes are per-call deletes — each one queues.
 //   - Config/settings and dependency-manifest WRITES queue (or are denied where
 //     the file is generated, e.g. lockfiles). Ordinary source writes stay
