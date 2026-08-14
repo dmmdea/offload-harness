@@ -28,7 +28,7 @@ function fakeSpawn(scripts) {
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     let stdin = "";
-    child.stdin = { write: (d) => { stdin += d; }, end: () => {} };
+    child.stdin = { write: (d) => { stdin += d; }, end: () => {}, on: () => {}, destroy: () => {} };
     child.kill = () => {};
     calls.push({ cmd, args, get stdin() { return stdin; }, script });
     queueMicrotask(() => {
@@ -265,18 +265,44 @@ test("submitGraph cli: a STALE lease (live_state unknown) forces a fresh render 
   assert.deepEqual(calls[2].args, ["submit", "-", "--json", "--skip-lint", "--force"]);
 });
 
-test("submitGraph cli: a FAILED liveness probe counts as stale (uncertainty must not hang a render on a dead prompt)", async () => {
+test("submitGraph cli: a FAILED liveness probe counts as stale (uncertainty must not hang a render on a dead prompt) and NAMES the probe failure", async () => {
   const { impl, calls } = fakeSpawn([
     { code: 0, stdout: '{"action":"attached","attached":true,"prompt_id":"stale-2"}' },
     { code: 3, stdout: "", stderr: "no run recorded" },
     { code: 0, stdout: '{"action":"submitted","prompt_id":"fresh-3"}' },
   ]);
+  let note = "";
   const r = await submitGraph({
     api: "http://127.0.0.1:9", graph: {}, clientId: "x",
-    cli: { cmd: "cli.exe", source: "env" }, spawnImpl: impl, stderr: devNull,
+    cli: { cmd: "cli.exe", source: "env" }, spawnImpl: impl,
+    stderr: { write: (s) => { note += s; } },
   });
   assert.equal(r.promptId, "fresh-3");
   assert.equal(calls.length, 3);
+  // A systematically broken `attach` must not read as routine staleness forever.
+  assert.match(note, /liveness probe exited 3: no run recorded/);
+});
+
+test("submitGraph cli: a PATH-guess failure that is NOT ENOENT throws — a broken binary is an error, not the raw tier", async () => {
+  const eacces = Object.assign(new Error("spawn comfyui-pp-cli EACCES"), { code: "EACCES" });
+  const { impl } = fakeSpawn([{ error: eacces }]);
+  await assert.rejects(
+    submitGraph({
+      api: "http://127.0.0.1:9", graph: {}, clientId: "x",
+      cli: { cmd: "comfyui-pp-cli", source: "path" }, spawnImpl: impl, stderr: devNull,
+    }),
+    /failed to start: spawn comfyui-pp-cli EACCES/,
+  );
+});
+
+test("submitGraph raw: a 200 with no prompt_id fails NOW, not after burning the poll budget on /history/undefined", async () => {
+  const srv = await serve((req, res) => { res.end("{}"); });
+  try {
+    await assert.rejects(
+      submitGraph({ api: srv.api, graph: {}, clientId: "x", cli: null }),
+      /\/prompt returned no prompt_id/,
+    );
+  } finally { srv.close(); }
 });
 
 // ---------------------------------------------------------------------------------------
@@ -451,4 +477,57 @@ test("runCli: resolves with code/stdout/stderr and never rejects on spawn error"
   const r = await runCli("comfyui-pp-cli", ["version"], { spawnImpl: impl });
   assert.equal(r.code, null);
   assert.match(r.spawnError.message, /ENOENT/);
+});
+
+test("runCli REAL SPAWN: a child that exits before draining a large stdin resolves with its exit code — never an uncaughtException", async () => {
+  // Regression for the EPIPE/EOF crash class (silent-failure audit, 2026-08-14): a CLI
+  // that prints usage and dies before reading stdin (flag skew, startup panic, missing
+  // DLL) made the pending stdin write emit an unhandled 'error' that killed the whole
+  // runner outside every catch — no typed DEFER, no GPU teardown. Deterministic once
+  // the input exceeds the OS pipe buffer, so 100KB forces it. Uses the real node
+  // binary, so it runs on any CI runner.
+  const r = await runCli(process.execPath, ["-e", "process.exit(2)"], { input: "x".repeat(100_000) });
+  assert.equal(r.spawnError, null);
+  assert.equal(r.code, 2);
+});
+
+test("finalizeRun: a non-ENOENT spawn failure on the PATH guess still WARNS (a wedged wait must not vanish)", async () => {
+  const eacces = Object.assign(new Error("spawn comfyui-pp-cli EACCES"), { code: "EACCES" });
+  const { impl } = fakeSpawn([{ error: eacces }]);
+  let warned = "";
+  const r = await finalizeRun({
+    api: "http://x", promptId: "p", cli: { cmd: "comfyui-pp-cli", source: "path" },
+    spawnImpl: impl, stdout: devNull, stderr: { write: (s) => { warned += s; } },
+  });
+  assert.equal(r, null);
+  assert.match(warned, /timing capture skipped .*EACCES/);
+});
+
+test("finalizeRun: PATH-guess ENOENT stays silent (submit already printed the one raw-fallback notice)", async () => {
+  const { impl } = fakeSpawn([{ error: enoent() }]);
+  let warned = "";
+  const r = await finalizeRun({
+    api: "http://x", promptId: "p", cli: { cmd: "comfyui-pp-cli", source: "path" },
+    spawnImpl: impl, stdout: devNull, stderr: { write: (s) => { warned += s; } },
+  });
+  assert.equal(r, null);
+  assert.equal(warned, "");
+});
+
+test("pollOutputs: an error status whose BODY read fails still counts as an answer, not dead time", async () => {
+  const c = clock();
+  let polls = 0;
+  const fetchImpl = async () => {
+    polls++;
+    if (polls <= 20) {
+      // Server answers 502 but the error-page body read dies mid-stream.
+      return { ok: false, status: 502, text: async () => { throw new Error("aborted mid-body"); }, json: async () => ({}) };
+    }
+    return entry({ p1: { outputs: { 9: { images: [{ filename: "ok.png" }] } }, status: {} } });
+  };
+  const h = await pollOutputs({
+    api: "http://x", promptId: "p1", waitSec: 3600, isDone: (e) => !!e.outputs,
+    fetchImpl, sleep: c.sleep, now: c.now, env: { COMFY_DEAD_SEC: "10" },
+  });
+  assert.equal(h.outputs[9].images[0].filename, "ok.png");
 });

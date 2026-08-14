@@ -90,6 +90,9 @@ export function runCli(cmd, args, { input = "", env = {}, killAfterMs = 0, spawn
     if (killAfterMs > 0) {
       timer = setTimeout(() => {
         try { child.kill(); } catch { /* already gone */ }
+        // Tear the pipes down too: a child that ignores the signal must not keep a
+        // finished runner's event loop alive on its dangling stdio.
+        for (const s of [child.stdout, child.stderr, child.stdin]) { try { s.destroy(); } catch { /* best effort */ } }
         finish({ code: null, stdout, stderr, spawnError: new Error("comfyui-pp-cli did not exit within " + killAfterMs + "ms") });
       }, killAfterMs);
       if (typeof timer.unref === "function") timer.unref();
@@ -98,6 +101,12 @@ export function runCli(cmd, args, { input = "", env = {}, killAfterMs = 0, spawn
     child.stdout.on("data", (d) => { stdout += d; });
     child.stderr.on("data", (d) => { stderr += d; });
     child.on("close", (code) => finish({ code, stdout, stderr, spawnError: null }));
+    // EPIPE/EOF fence: a child that exits before draining stdin (usage error, startup
+    // panic, missing DLL) makes the pending write emit 'error' on the stdin socket —
+    // UNHANDLED, that is an uncaughtException that kills the whole runner OUTSIDE every
+    // catch/finally (no typed DEFER, no GPU teardown). The child's own exit code +
+    // stderr carry the real story, so the write failure itself is deliberately dropped.
+    child.stdin.on("error", () => { /* see fence comment above */ });
     if (input) child.stdin.write(input);
     child.stdin.end();
   });
@@ -129,7 +138,12 @@ const tail = (s, n) => { const t = String(s || "").trim(); return t.length > n ?
 async function jfetch(fetchImpl, url, opts) {
   const r = await fetchImpl(url, opts);
   if (!r.ok) {
-    const e = new Error(url + " -> " + r.status + " " + (await r.text()).slice(0, 300));
+    // The status is already in hand — a body read that itself fails (abort mid-read,
+    // connection reset on an error page) must not demote an ANSWERED error status to
+    // watchdog dead time by throwing without httpStatus.
+    let body = "";
+    try { body = (await r.text()).slice(0, 300); } catch { /* status alone suffices */ }
+    const e = new Error(url + " -> " + r.status + " " + body);
     e.httpStatus = r.status;
     throw e;
   }
@@ -164,11 +178,15 @@ export async function submitGraph({ api, graph, clientId, cli, fetchImpl = fetch
 
     let r = await submitOnce(false);
     if (r.spawnError) {
-      if (cli.source === "path") {
+      if (cli.source === "path" && r.spawnError.code === "ENOENT") {
+        // Only genuinely-absent counts as the raw tier. EACCES/EMFILE/etc. mean a
+        // binary EXISTS but is broken or the box is exhausted — falling back there
+        // would both lie about the cause and silently swap submission semantics.
         stderr.write("comfy-submit: comfyui-pp-cli not found on PATH (raw HTTP submission; set COMFYUI_PP_CLI or `make -C tools/comfyui build` to enable the CLI path)\n");
         return rawSubmit({ api, graph, clientId, fetchImpl });
       }
-      // env/repo-bin resolved to a real file: failing to run it is an error, not a tier.
+      // env/repo-bin resolved to a real file, or a PATH binary failed for a reason
+      // other than absence: that is an error, not a tier.
       throw new Error("comfyui-pp-cli (" + cli.source + ": " + cli.cmd + ") failed to start: " + r.spawnError.message);
     }
 
@@ -191,15 +209,22 @@ export async function submitGraph({ api, graph, clientId, cli, fetchImpl = fetch
     // Lease hit: identical graph recorded as in flight. Trust it only when live.
     const probe = await runCli(cli.cmd, ["attach", out.prompt_id, "--json"], { env, spawnImpl, killAfterMs: 30_000 });
     let live = "unknown";
-    if (!probe.spawnError && probe.code === 0) {
-      try { live = parseCliJson(probe.stdout).live_state || "unknown"; } catch { /* stays unknown */ }
+    let probeNote = "";
+    if (probe.spawnError) {
+      probeNote = " (liveness probe failed to run: " + probe.spawnError.message + ")";
+    } else if (probe.code !== 0) {
+      probeNote = " (liveness probe exited " + probe.code + ": " + tail(probe.stderr || probe.stdout, 200) + ")";
+    } else {
+      try { live = parseCliJson(probe.stdout).live_state || "unknown"; } catch { probeNote = " (liveness probe output unparseable)"; }
     }
     if (live === "running" || live === "pending") {
       stderr.write("comfy-submit: identical graph already in flight — attached to " + out.prompt_id + " instead of double-rendering (lease)\n");
       return { promptId: out.prompt_id, via: "cli", submit: out };
     }
     // Stale or unverifiable lease -> a fresh render is what the raw path always did.
-    stderr.write("comfy-submit: lease for an identical graph is stale (live_state=" + live + "); resubmitting with --force\n");
+    // probeNote distinguishes "the CLI answered not-live" from "the probe itself broke",
+    // so a systematically broken `attach` cannot hide as routine staleness forever.
+    stderr.write("comfy-submit: lease for an identical graph is stale (live_state=" + live + probeNote + "); resubmitting with --force\n");
     r = await submitOnce(true);
     if (r.spawnError) throw new Error("comfyui-pp-cli resubmit failed to start: " + r.spawnError.message);
     if (r.code === 22) {
@@ -213,12 +238,18 @@ export async function submitGraph({ api, graph, clientId, cli, fetchImpl = fetch
 
 // rawSubmit: the exact POST the six runners used to carry (body byte-shape preserved).
 async function rawSubmit({ api, graph, clientId, fetchImpl = fetch }) {
-  const { prompt_id } = await jfetch(fetchImpl, api + "/prompt", {
+  const resp = await jfetch(fetchImpl, api + "/prompt", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ prompt: graph, client_id: clientId }),
   });
-  return { promptId: prompt_id, via: "raw", submit: null };
+  // A 200 with no prompt_id (proxy interference, API drift) must fail HERE: polling
+  // /history/undefined answers 200 {} forever, which would hold the exclusive GPU slot
+  // for the whole budget before dying with a misleading "no output produced in time".
+  if (!resp || !resp.prompt_id) {
+    throw new Error("ComfyUI /prompt returned no prompt_id: " + JSON.stringify(resp).slice(0, 300));
+  }
+  return { promptId: resp.prompt_id, via: "raw", submit: null };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -308,7 +339,12 @@ export async function finalizeRun({ api, promptId, cli, spawnImpl = spawn, stdou
     killAfterMs: 30_000,
   });
   if (r.spawnError) {
-    if (cli.source !== "path") stderr.write("comfy-submit WARN: timing capture skipped (" + r.spawnError.message + ")\n");
+    // Silent ONLY for the PATH-guess-absent case (submit already printed the one raw-
+    // fallback notice). Everything else — kill-timeout, EACCES, a broken env binary —
+    // must warn: a wedged `wait` that vanished silently would also never release the
+    // lease, surfacing later as chronic misleading "stale lease" churn.
+    const quiet = cli.source === "path" && r.spawnError.code === "ENOENT";
+    if (!quiet) stderr.write("comfy-submit WARN: timing capture skipped (" + r.spawnError.message + ")\n");
     return null;
   }
   if (r.code !== 0) {

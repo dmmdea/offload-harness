@@ -143,7 +143,17 @@ async function main() {
   const argv = process.argv.slice(2); const flags = {};
   for (let i = 0; i < argv.length; i++) if (argv[i].startsWith("--")) { flags[argv[i].slice(2)] = argv[i + 1]; i++; }
   const api = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
-  const cli = resolveCli();
+  // resolveCli throws LOUDLY on a set-but-wrong COMFYUI_PP_CLI (deliberate — explicit
+  // config never degrades silently), but run-graph's contract is "every failure is a
+  // typed DEFER in the result file + exit 0", so the throw must become a defer here
+  // rather than escape as an untyped exit-1 the Go side cannot classify.
+  let cli = null;
+  try { cli = resolveCli(); } catch (e) {
+    const out = { deferred: true, code: "RUN_ERROR", ref: "", detail: String(e.message || e) };
+    writeFileSync(flags.result || "run-graph-result.json", JSON.stringify(out));
+    console.error("RUN-GRAPH DEFER", JSON.stringify(out));
+    return;
+  }
   const comfyDir = resolveComfyDir();
   const graph = JSON.parse(readFileSync(flags.graph, "utf8"));
   const manifest = flags.manifest ? JSON.parse(readFileSync(flags.manifest, "utf8")) : { node_packs: [], models: [] };
