@@ -38,9 +38,12 @@ them in step with the upstream Printing Press.
 
 - **The harness's own pipelines.** How the harness decides what to render and on which GPU is
   [systems/media-generation.md](media-generation.md); how it picks and escalates tiers is
-  [systems/offload-pipeline.md](offload-pipeline.md). A printed CLI is an operator/agent tool beside
-  those pipelines, not a component of them — the harness does not shell out to `comfyui-pp-cli` or
-  `llamaswap-pp-cli` at runtime, and neither tool is in the serving path.
+  [systems/offload-pipeline.md](offload-pipeline.md). A printed CLI began as an operator/agent tool
+  beside those pipelines; since 0.56.0 `comfyui-pp-cli` is ALSO the render runners' preferred
+  submission engine — `render/comfy-submit.mjs` spawns it for `submit`/`attach`/`wait` when a
+  binary is resolvable, falling back to raw HTTP byte-identically when none is (see
+  media-generation.md, "One submission layer"). The Go harness itself still never shells out to a
+  printed CLI, and `llamaswap-pp-cli` is not in any serving path.
 - **Generation itself.** Research, codegen, verification, and scoring happen in the Printing Press
   runstate on the machine that prints, not in this repo.
 
@@ -225,9 +228,16 @@ at *runtime* — ComfyUI and llama-swap respectively — but neither needs one a
 
 ## Downstream effects
 
-Re-vendoring `tools/comfyui` does not change harness behavior: no harness package imports it, and the
-harness's build and test commands do not reach into it. The blast radius is the tool, its CI job, and
-this doc.
+Re-vendoring `tools/comfyui` is a render-path change since 0.56.0: no harness GO package imports
+it, but `render/comfy-submit.mjs` spawns the binary (when one is resolvable) for submission,
+attach, and post-render finalization, and depends on this command contract: `submit - --json
+--skip-lint [--force]` (exit 0 accepted/attached, 2 usage, 21 rejected, 22 partial-accept,
+23 malformed; `--json` envelope carries `action`/`attached`/`prompt_id`), `attach <id> --json`
+(`live_state`, `in_flight`), `wait <id> --timeout 5s --json` (`status.duration_ms`; terminal-
+outcome exits 13/21/22/24/25), and the `COMFYUI_BASE_URL` env override. A reprint that alters any
+of those surfaces must run `node --test render/*.test.mjs` in the same PR and update
+`render/comfy-submit.mjs` if the contract moved. On a box with no built binary the runners use
+their raw-HTTP fallback and a reprint cannot affect them.
 
 Re-vendoring `tools/llamaswap` is different, and must be treated as a harness change: the harness
 compiles `pkg/llamaswap` into its own binary, so a reprint that alters that package's surface or
@@ -241,7 +251,10 @@ the fleet node's reclaimable-VRAM verdict, and the STT unload. Run the harness's
 1. **`tools/*/` modules are never merged into the harness module.** Nested `go.mod` is the isolation
    boundary. The harness may IMPORT a published `pkg/` package from one across a `replace`
    (`pkg/llamaswap` is the only one today, and the deliberate exception above); it never imports a
-   tool's `internal/`, never depends on a tool's `cmd/`, and never shells out to a printed CLI.
+   tool's `internal/` and never depends on a tool's `cmd/` at build time. Exactly one runtime
+   shell-out exists: the Node render runners spawn `comfyui-pp-cli` through
+   `render/comfy-submit.mjs` when a binary is present (raw-HTTP fallback otherwise) — the Go
+   harness never shells out to a printed CLI.
 2. **Generated files are not hand-edited here.** Fix upstream and re-vendor; use
    `.printing-press-patches/` only for deviations that cannot live upstream.
 3. **No binaries, no run reports.** Enforced by `.gitignore`.
