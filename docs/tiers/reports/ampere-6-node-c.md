@@ -2,13 +2,13 @@
 
 | | |
 |---|---|
-| host | lenovo-m720q |
+| host | <node-c> |
 | harness version | 0.26.0 |
 | platform | linux/amd64 |
 | generated | 2026-07-27 09:14 UTC |
 | config | /srv/ecosystem_backup/apps/offload-stack/etc/config.json |
-| hardware tier | UNKNOWN — no installer manifest at that path (open /home/anield/offload-stack/installed.json: no such file or directory) |
-| manifest | /home/anield/offload-stack/installed.json |
+| hardware tier | UNKNOWN — no installer manifest at that path (open /home/<user>/offload-stack/installed.json: no such file or directory) |
+| manifest | /home/<user>/offload-stack/installed.json |
 
 ## Serving
 

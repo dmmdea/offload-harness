@@ -1,20 +1,20 @@
 # local-offload capability report
 
-> ⚠️ **HISTORICAL — this is NOT Qube's current hardware.** Generated 2026-07-27, when Qube ran a
+> ⚠️ **HISTORICAL — this is NOT <node-b>'s current hardware.** Generated 2026-07-27, when <node-b> ran a
 > single RTX 5060 Ti (16 GB). On **2026-08-02** a second card (RTX 5070 Ti 16 GB) was installed, so
-> Qube now runs the **`blackwell-2x16`** tier with **~32 GB total VRAM across two cards**
+> <node-b> now runs the **`blackwell-2x16`** tier with **~32 GB total VRAM across two cards**
 > (32614 MiB measured, `nvidia-smi` 2026-08-05). Kept verbatim as a point-in-time record.
 > Do not size anything off the numbers below.
 
 | | |
 |---|---|
-| host | Qube |
+| host | <node-b> |
 | harness version | 0.26.0 |
 | platform | windows/amd64 |
 | generated | 2026-07-27 09:14 UTC |
-| config | D:/Dev/dmmdea/local-offload-public/config.json |
-| hardware tier | UNKNOWN — no installer manifest at that path (open C:\Users\dmmde\offload-stack\installed.json: The system cannot find the path specified.) |
-| manifest | C:\Users\dmmde\offload-stack\installed.json |
+| config | <repo-root>/config.json |
+| hardware tier | UNKNOWN — no installer manifest at that path (open C:\Users\<user>\offload-stack\installed.json: The system cannot find the path specified.) |
+| manifest | C:\Users\<user>\offload-stack\installed.json |
 
 ## Serving
 
@@ -36,12 +36,12 @@ Derived from this machine's bindings, not declared. `CONFIGURED` = bound and the
 
 | route | verdict | engine | bindings |
 |---|---|---|---|
-| generate_image | CONFIGURED | comfyui | imagegen_script=D:/Dev/dmmdea/local-offload-public/render/comfy-generate.mjs |
-| inpaint_image | CONFIGURED | comfyui | inpaint_script=D:/Dev/dmmdea/local-offload-public/render/comfy-inpaint.mjs; inpaint_ckpt=RealVisXL_V5.0_fp16.safetensors (ComfyUI model name, not checked here) |
-| generate_video | CONFIGURED | comfyui | videogen_script=D:/Dev/dmmdea/local-offload-public/render/comfy-video.mjs |
-| generate_audio:voice | CONFIGURED | chatterbox-tts | voicegen_script=D:/Dev/dmmdea/local-offload-public/render/tts.mjs |
-| generate_audio:music | CONFIGURED | acestep | musicgen_script=D:/Dev/dmmdea/local-offload-public/render/comfy-music.mjs |
-| run_graph | CONFIGURED | comfyui | run_graph_script=D:/Dev/dmmdea/local-offload-public/render/comfy-run-graph.mjs |
+| generate_image | CONFIGURED | comfyui | imagegen_script=<repo-root>/render/comfy-generate.mjs |
+| inpaint_image | CONFIGURED | comfyui | inpaint_script=<repo-root>/render/comfy-inpaint.mjs; inpaint_ckpt=RealVisXL_V5.0_fp16.safetensors (ComfyUI model name, not checked here) |
+| generate_video | CONFIGURED | comfyui | videogen_script=<repo-root>/render/comfy-video.mjs |
+| generate_audio:voice | CONFIGURED | chatterbox-tts | voicegen_script=<repo-root>/render/tts.mjs |
+| generate_audio:music | CONFIGURED | acestep | musicgen_script=<repo-root>/render/comfy-music.mjs |
+| run_graph | CONFIGURED | comfyui | run_graph_script=<repo-root>/render/comfy-run-graph.mjs |
 | edit_image | CONFIGURED | pil | edit_python=C:\ComfyUI\.venv\Scripts\python.exe |
 | flatten_design | CONFIGURED | gimp | gimp_console_path=C:/Program Files/GIMP 3/bin/gimp-console-3.2.exe |
 | media | CONFIGURED | ffmpeg | ffmpeg_path=C:/ComfyUI/.venv/Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe |

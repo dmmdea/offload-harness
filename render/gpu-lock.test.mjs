@@ -225,7 +225,7 @@ test("freeLlamaSwap does NOT unload when it cannot list models (better a slow re
   assert.ok(logged.some((m) => /NOT unloading/.test(m)), "and it said so, loudly");
 });
 
-// --- llama-swap v208 compatibility (live-found on lenovo-m720q) ---------------
+// --- llama-swap v208 compatibility (live-found on an ampere-6 node) ---------------
 // MEASURED on llama-swap v208 (commit e8d4384): /upstream/<id>/slots is a PROXY
 // route (`Any /upstream/*` -> proxyToUpstream) — requesting it for a model that
 // is not loaded SWAPS THE MODEL IN. The drain protocol therefore loaded ~3GB of

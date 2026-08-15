@@ -285,7 +285,7 @@ Linux) — an AMD box that cannot be identified must never be silently called `c
 would strip it of the entire Vulkan serving path.
 
 Verified on the fleet: Qube → `blackwell-2x16` (RTX 5060 Ti 16 GB **+** RTX 5070 Ti 16 GB,
-~32 GB total), the Aorus → `ampere-8` (RTX 3070 Laptop, 8 GB), and the Linux node →
+~32 GB total), the <node-a> laptop → `ampere-8` (RTX 3070 Laptop, 8 GB), and the Linux node →
 `ampere-6` (RTX 3050, 6 GB), each matching the tier it actually runs.
 
 > Qube read `blackwell-16` (single RTX 5060 Ti, 15.9 GB) until **2026-08-02**, when the

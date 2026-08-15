@@ -59,7 +59,7 @@ Same harness GBNF tasks, same model, f16 KV:
 
 ## Artifacts / cleanup
 - `~/ik_llama.cpp` (build kept for the watch-list re-test; ~a few GB — safe to remove if disk is needed).
-- Spike test configs/inputs under `C:\Users\dmmde\ik-spike-*` + `.ik-spike\` (throwaway).
+- Spike test configs/inputs under `C:\Users\<user>\ik-spike-*` + `.ik-spike\` (throwaway).
 - No live config changed; live memory stack + Phase A.2 whisper-stt verified healthy after the spike.
 
 ---
