@@ -1206,18 +1206,20 @@ type videoFlags struct {
 }
 
 // buildVideoParams maps the parsed CLI flags to the pipeline params map for a
-// generate_video request. Empty model defaults to "wan" (the PRIMARY I2V path — the
-// best open-weight I2V that fits 16GB, and the only one whose files are complete on
-// this box; Hunyuan 1.5 is the opt-in). The still path is always carried as "still".
+// generate_video request. An EMPTY model is deliberately omitted so the pipeline
+// applies the machine's videogen_family (the seat binding — e.g. ltx25); the old
+// forced-"wan" default silently defeated the family on every CLI call, which is
+// exactly how the Leg-3 verification rendered a broken Wan/LTX hybrid graph
+// (live finding 2026-08-15). A machine with no family still gets wan — the
+// render runner's own default. The still path is always carried as "still".
 // Zero/empty optional flags are omitted so the pipeline/runner apply their own
 // defaults (the workflow builder's settings + the machine's videogen_* config + the
 // runner's --reserve-vram). reserve_vram is stringified to match the MCP wire shape.
 func buildVideoParams(f videoFlags) map[string]any {
-	model := f.model
-	if model == "" {
-		model = "wan"
+	params := map[string]any{}
+	if f.model != "" {
+		params["model"] = f.model
 	}
-	params := map[string]any{"model": model}
 	if f.still != "" {
 		params["still"] = f.still
 	}
@@ -1267,7 +1269,7 @@ func runGenerateVideo(args []string) error {
 	fs := flag.NewFlagSet("generate-video", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "print full result JSON")
-	model := fs.String("model", "wan", "wan (default; Wan 2.2, 4-step LoRA — best 16GB photoreal I2V) | hunyuan (opt-in; needs Hunyuan 1.5 files)")
+	model := fs.String("model", "", "I2V family override: wan | ltx25 | hunyuan. Empty = the machine's videogen_family seat (falls back to wan when no family is configured)")
 	negative := fs.String("negative", "", "hard exclusions, e.g. 'blurry, distorted'")
 	frames := fs.Int("frames", 0, "frame count (default ~33; realistic ceiling ~49)")
 	width := fs.Int("width", 0, "width px")
