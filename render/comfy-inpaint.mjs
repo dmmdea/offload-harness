@@ -132,30 +132,77 @@ function buildGraph(job, staged) {
   });
 }
 
+// Submission deadline for BATCH mode only: a wedged ComfyUI (port accepts,
+// never responds — the classic Windows CUDA-hang/OOM presentation) hangs the
+// raw submit POST FOREVER (no AbortSignal, no fetch default timeout; the poll
+// watchdog never runs because polling never starts). Racing the submit keeps
+// the shared comfy-submit.mjs semantics untouched for other routes while
+// bounding the batch: the dangling POST is abandoned, the job records failed,
+// and the consecutive-failure abort ends the sweep instead of a silent
+// all-night hang. Single-shot keeps the historical unbounded submit.
+const SUBMIT_DEADLINE_MS = Number(process.env.COMFY_SUBMIT_DEADLINE_MS || 120_000);
+function withDeadline(promise, ms, what) {
+  let timer;
+  const gate = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} exceeded ${ms}ms deadline (server wedged?)`)), ms);
+  });
+  return Promise.race([promise, gate]).finally(() => clearTimeout(timer));
+}
+
+// Best-effort interrupt of the currently executing prompt: on a poll TIMEOUT
+// nothing server-side cancels the still-running job, so the next batch job
+// queues BEHIND it and burns its own budget waiting — N x waitSec of serial
+// timeouts. Interrupting on the timeout path makes each job's budget measure
+// its OWN render.
+async function interruptCurrent() {
+  try {
+    await fetch(API + "/interrupt", { method: "POST", signal: AbortSignal.timeout(10_000) });
+    console.error("sent /interrupt after poll timeout");
+  } catch (e) {
+    console.error("could not /interrupt after timeout: " + e.message);
+  }
+}
+
 // One inpaint render, ComfyUI already up (called inside withGpuSlot).
-async function renderJob(job) {
+// batchMode gates the submit deadline + timeout-interrupt (single-shot keeps
+// the historical behavior exactly).
+async function renderJob(job, batchMode = false) {
   const staged = [];
   try {
     staged.push(stageInput(job.image));
     staged.push(stageInput(job.mask));
     const graph = buildGraph(job, staged);
     const cli = resolveCli();
-    const { promptId } = await submitGraph({ api: API, graph, clientId: "inpaint-" + job.seed, cli });
+    const submitP = submitGraph({ api: API, graph, clientId: "inpaint-" + job.seed, cli });
+    const { promptId } = batchMode
+      ? await withDeadline(submitP, SUBMIT_DEADLINE_MS, "submit")
+      : await submitP;
     console.log("queued", promptId, "seed", job.seed, "->", job.out);
     const waitSec = Number(process.env.COMFY_WAIT_SEC || 1800);
-    const h = await pollOutputs({
-      api: API, promptId, waitSec,
-      isDone: (entry) => !!firstOutputFile(entry.outputs),
-      noOutputMsg: "no inpainted image produced in time",
-      onExecError: () => finalizeRun({ api: API, promptId, cli }),
-    });
+    let h;
+    try {
+      h = await pollOutputs({
+        api: API, promptId, waitSec,
+        isDone: (entry) => !!firstOutputFile(entry.outputs),
+        noOutputMsg: "no inpainted image produced in time",
+        onExecError: () => finalizeRun({ api: API, promptId, cli }),
+      });
+    } catch (e) {
+      if (batchMode && /no inpainted image produced in time/.test(e.message)) {
+        await interruptCurrent();
+      }
+      throw e;
+    }
     const file = firstOutputFile(h.outputs);
     mkdirSync(dirname(job.out) || ".", { recursive: true });
     writeFileSync(job.out, await fetchView({ api: API, file }));
     console.log("WROTE", job.out);
     await finalizeRun({ api: API, promptId, cli });
   } finally {
-    for (const n of staged) { try { unlinkSync(join(COMFY_DIR, "input", n)); } catch {} }
+    for (const n of staged) {
+      try { unlinkSync(join(COMFY_DIR, "input", n)); }
+      catch (e) { console.error(`staged input leaked in ${COMFY_DIR}\\input: ${n} (${e.code || e.message})`); }
+    }
   }
 }
 
@@ -187,22 +234,57 @@ function normalizeSeed(job) {
 if (flags.batch) {
   const jobs = parseInpaintJobs(readFileSync(flags.batch, "utf8")).map(normalizeSeed);
   if (jobs.length === 0) { console.error("batch: no jobs in " + flags.batch); process.exit(2); }
+  // Duplicate outs silently score one image under two configs downstream.
+  const seenOut = new Set();
+  for (const j of jobs) {
+    if (seenOut.has(j.out)) { console.error("batch: duplicate out path " + j.out); process.exit(2); }
+    seenOut.add(j.out);
+  }
+  // PRE-FLIGHT before taking the GPU slot: builder/preset/flag validation is
+  // pure and local, and a flag-level config error (bad --preset, half-overridden
+  // steps/cfg) fails EVERY job identically — grinding N recorded failures after
+  // tearing down llama-swap and cold-starting ComfyUI for a sweep that cannot
+  // succeed. Dry-run the graph build for each job and abort cheap, before the
+  // expensive lifecycle. (A wrong --unet/--patch NAME is server-side only — the
+  // consecutive-failure abort below owns that case.)
+  for (let i = 0; i < jobs.length; i++) {
+    try { buildGraph(jobs[i], ["preflight_img.png", "preflight_mask.png"]); }
+    catch (e) { console.error(`batch line ${i + 1} would fail before rendering: ${e.message}`); process.exit(2); }
+  }
   const resultsPath = flags.results || flags.batch + ".results.jsonl";
   mkdirSync(dirname(resultsPath) || ".", { recursive: true });
   writeFileSync(resultsPath, "");
+  const MAX_CONSEC_FAIL = Number(process.env.COMFY_BATCH_MAX_CONSEC_FAIL || 3);
   withGpuSlot(
     { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, reserveVram: flags["reserve-vram"], warm: true },
     async () => {
+      let okCount = 0, failCount = 0, consecFail = 0, firstErr = null;
       for (let i = 0; i < jobs.length; i++) {
         const t0 = Date.now();
+        let ok = false, errMsg = null;
         try {
-          await renderJob(jobs[i]);
-          appendFileSync(resultsPath, JSON.stringify({ i, out: jobs[i].out, ok: true, wall_ms: Date.now() - t0 }) + "\n");
+          await renderJob(jobs[i], true);
+          ok = true; okCount++; consecFail = 0;
         } catch (e) {
-          // A single failed render must not sink the batch: record and continue.
-          appendFileSync(resultsPath, JSON.stringify({ i, out: jobs[i].out, ok: false, wall_ms: Date.now() - t0, error: e.message }) + "\n");
+          // A single failed render must not sink the batch: record and continue —
+          // but LOUDLY, and a run of identical-class failures means the server or
+          // the model binding is dead for every remaining job: abort instead of
+          // grinding the rest of the night against a corpse.
+          errMsg = e.message; failCount++; consecFail++;
+          if (!firstErr) firstErr = e.message;
+          console.error(`batch job ${i + 1}/${jobs.length} FAILED: ${e.message}`);
         }
-        console.error(`batch ${i + 1}/${jobs.length} done (${Math.round((Date.now() - t0) / 1000)}s)`);
+        appendFileSync(resultsPath, JSON.stringify(
+          ok ? { i, out: jobs[i].out, ok: true, wall_ms: Date.now() - t0 }
+             : { i, out: jobs[i].out, ok: false, wall_ms: Date.now() - t0, error: errMsg }) + "\n");
+        console.error(`batch ${i + 1}/${jobs.length} ${ok ? "done" : "FAILED"} (${Math.round((Date.now() - t0) / 1000)}s)`);
+        if (consecFail >= MAX_CONSEC_FAIL) {
+          throw new Error(`${consecFail} consecutive failures (last: ${errMsg}) — aborting the batch; ${jobs.length - i - 1} jobs not attempted`);
+        }
+      }
+      console.error(`batch complete: ${okCount} ok / ${failCount} failed of ${jobs.length}`);
+      if (okCount === 0) {
+        throw new Error(`every job failed (first error: ${firstErr}) — systemic, not per-item`);
       }
     },
   ).catch((e) => { console.error("INPAINT BATCH FAILED:", e.message); process.exit(1); });
