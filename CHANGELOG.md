@@ -6,6 +6,33 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.60.0] - 2026-08-14
+
+The 32GB-class VIDEO seat: LTX-2.5 22B distilled, pooled, with joint audio. Executes the
+measured 2026-08-12 three-way verdict (Seat Frontier plan Leg 3): LTX-2.5 beat Wan 2.2 and
+MiniMax-H3 on every axis at once — 1920×1088 @ 24 fps WITH a generated soundtrack in 247 s per
+5 s clip, vs Wan's silent 1280×720 @ 16 fps in 1134 s (which also OOMs at its shipped vv).
+
+### Added — `ltx25` render family
+
+- `render/wf-ltx25-i2v.mjs`: the official `video_ltx2_5_i2v` template's two-pass joint-AV
+  recipe (half-res base pass + ×2 latent spatial upscale + refine; fixed distilled sigmas;
+  dual CFG 1/1; euler_ancestral) as a param-driven API-format builder. Bench-proven deltas
+  baked in: the gemma4_e2b prompt-enhancer branch is DELETED (the harness planner does prompt
+  expansion), the convrot int8 transformer pairs with the conv video VAE, duration/dims are
+  computed in the builder (seconds×fps+1; /32-aligned; stage 1 at half resolution), and both
+  sampler seeds are caller-pinned (`seed`, `seed+1`).
+- Pooled DiT loading (32GB-pool doctrine): `videogen_pool_vvram_gb/pool_compute/pool_donor`
+  route the 20 GB transformer through DisTorch2 ratio mode, the shape proven for the krea2
+  image seat (same `--disable-dynamic-vram` launch requirement until MultiGPU #191).
+- Config: `videogen_family` (`""`/`wan22` = Wan, unchanged; `ltx25` = this family) plus
+  `videogen_transformer/video_vae/audio_vae/latent_upscaler/fps`. Pipeline threads them to
+  `comfy-video.mjs --model ltx25`; a per-request `model` param still wins over the family.
+- `comfy-video.mjs`: `--model ltx25` with family-native defaults (1920×1088, 121 frames,
+  24 fps) and the new binding flags.
+- blackwell-2x16 tier seed flipped to the ltx25 family (Wan weights stay on disk as the
+  `--model wan` fallback); tier docs + media-generation docs updated.
+
 ## [0.59.0] - 2026-08-14
 
 The 32GB-class image seat: Krea 2 Turbo, pooled. Chosen by the operator's blind bake-off

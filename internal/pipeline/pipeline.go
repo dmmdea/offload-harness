@@ -1837,8 +1837,15 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 		args = append(args, still)
 	}
 	args = append(args, prompt)
-	if m := paramStr(req.Params, "model"); m != "" {
-		args = append(args, "--model", m)
+	// Family routing: an explicit per-request model wins; else the machine's
+	// configured videogen_family (ltx25 = the bound 2026-08-12 video-seat verdict);
+	// else the runner's wan default — same precedence as the imagegen family.
+	model := paramStr(req.Params, "model")
+	if model == "" && p.cfg.VideoGenFamily != "" && p.cfg.VideoGenFamily != "wan22" {
+		model = p.cfg.VideoGenFamily
+	}
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 	if n := paramStr(req.Params, "negative"); n != "" {
 		args = append(args, "--negative", n)
@@ -1872,6 +1879,32 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	}
 	if p.cfg.VideoGenTextEncoder != "" {
 		args = append(args, "--text-encoder", p.cfg.VideoGenTextEncoder)
+	}
+	// LTX-2.5 family bindings (quality-first weight binding, same pattern as the
+	// Wan flags above): filenames + fps + the pooled-DiT placement from config.
+	if p.cfg.VideoGenTransformer != "" {
+		args = append(args, "--transformer", p.cfg.VideoGenTransformer)
+	}
+	if p.cfg.VideoGenVideoVAE != "" {
+		args = append(args, "--video-vae", p.cfg.VideoGenVideoVAE)
+	}
+	if p.cfg.VideoGenAudioVAE != "" {
+		args = append(args, "--audio-vae", p.cfg.VideoGenAudioVAE)
+	}
+	if p.cfg.VideoGenLatentUpscaler != "" {
+		args = append(args, "--latent-upscaler", p.cfg.VideoGenLatentUpscaler)
+	}
+	if p.cfg.VideoGenFPS > 0 {
+		args = append(args, "--fps", strconv.Itoa(p.cfg.VideoGenFPS))
+	}
+	if p.cfg.VideoGenPoolVvramGB > 0 {
+		args = append(args, "--pool-vvram-gb", strconv.FormatFloat(p.cfg.VideoGenPoolVvramGB, 'f', -1, 64))
+		if p.cfg.VideoGenPoolCompute != "" {
+			args = append(args, "--pool-compute", p.cfg.VideoGenPoolCompute)
+		}
+		if p.cfg.VideoGenPoolDonor != "" {
+			args = append(args, "--pool-donor", p.cfg.VideoGenPoolDonor)
+		}
 	}
 	// hero: native no-LoRA quality pass (per-request). upscale: use THIS machine's configured
 	// upscale model + target size (per-machine config; a machine with none just skips it).

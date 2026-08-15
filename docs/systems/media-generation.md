@@ -235,7 +235,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 | Image | `imagegen_family`, `imagegen_ckpt`, `imagegen_vae`, `imagegen_steps/cfg/sampler/scheduler`, `imagegen_preset/clip/lora/lora_strength/shift` (qwen-image knobs), `imagegen_pool_vvram_gb/pool_compute/pool_donor` (krea2 pooled loading), `imagegen_refiner_model/refiner_timeout_sec` (opt-in prompt refiner) |
 | Inpaint | `inpaint_ckpt`, `inpaint_vae`, `inpaint_steps/cfg/sampler/scheduler` |
 | Generative edit | `gen_edit_script`, `gen_edit_unet`, `gen_edit_preset` (`full`/`lightning8`/`lightning4`), `gen_edit_clip/vae/lora/lora_strength`, `gen_edit_steps/cfg/sampler/scheduler`, `gen_edit_megapixels` (0 = follow the source, held within 0.9-2.0), `gen_edit_timeout_sec` |
-| Video | `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model` |
+| Video | `videogen_family` (`""`/`wan22` = Wan 2.2; `ltx25` = LTX-2.5 joint-AV), `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model` (Wan keys); `videogen_transformer`, `videogen_video_vae`, `videogen_audio_vae`, `videogen_latent_upscaler`, `videogen_fps`, `videogen_pool_vvram_gb/pool_compute/pool_donor` (LTX-2.5 keys) |
 | Audio | `voicegen_*`, `musicgen_script` |
 | ComfyUI | `comfy_dir`, per-task `*_script` and `*_timeout_sec` |
 
@@ -243,6 +243,17 @@ Hardware profiles seed these. Tiers at 16 GB and above bind **HiDream-O1 bf16** 
 `imagegen_family` — the official graph for that DiT, never the generic SDXL graph — and **Wan 2.2
 Q8_0** experts with an fp16 text encoder. **RealVisXL** is the SDXL-class inpainting default. The 8 GB
 tiers stay SDXL-class for image generation until O1 on 8 GB is verified on real hardware.
+
+**LTX-2.5** (`videogen_family: "ltx25"`) is the measured 32 GB-class video seat (2026-08-12
+three-way, bound 2026-08-14): the 22B distilled int8 DiT renders 1920×1088 @ 24 fps with a
+**jointly generated soundtrack** through the official template's two-pass recipe (half-res base
+pass + ×2 latent spatial upscale + refine, fixed distilled sigmas, dual CFG 1/1) in ~247 s per
+5 s clip on the reference dual-16 GB box — vs Wan 2.2's silent 1280×720 @ 16 fps in 1134 s. The
+20 GB transformer pools across cards via the `videogen_pool_*` keys (DisTorch2 ratio mode, same
+doctrine and launch-flag requirement as the krea2 image seat). The family builder deliberately
+drops the template's gemma4_e2b prompt-enhancer branch (the harness's own planner does prompt
+expansion) and pairs the convrot transformer with the **conv** video VAE. Wan 2.2 stays
+available per-request via `model: "wan"`.
 
 **Qwen-Image 2512** (Apache-2.0) is the prompt-adherence *generation* alternative at ≥16 GB:
 `imagegen_family: "qwen-image"` selects its model-correct graph — SD3-class 16-channel latent
