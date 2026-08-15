@@ -19,6 +19,7 @@ import { COMFY_DIR } from "./comfy-lifecycle.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { buildHunyuan15I2V } from "./wf-hunyuan15-i2v.mjs";
 import { buildWan22I2V } from "./wf-wan22-i2v.mjs";
+import { buildLtx25I2V } from "./wf-ltx25-i2v.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
 
@@ -62,9 +63,10 @@ async function generate() {
     const imageName = stageInput(still);
     const common = {
       imagePath: imageName, prompt, negative: flags.negative || "", seed,
-      width: Number(flags.width || (model === "hunyuan" ? 848 : 832)),
-      height: Number(flags.height || 480),
-      length: Number(flags.frames || (model === "hunyuan" ? 33 : 49)),
+      // family-native defaults: ltx25 = the bench-proven 1920x1088@24fps 5s recipe
+      width: Number(flags.width || (model === "hunyuan" ? 848 : model === "ltx25" ? 1920 : 832)),
+      height: Number(flags.height || (model === "ltx25" ? 1088 : 480)),
+      length: Number(flags.frames || (model === "hunyuan" ? 33 : model === "ltx25" ? 121 : 49)),
     };
     if (flags.steps) common.steps = Number(flags.steps);
     if (flags.cfg) common.cfg = Number(flags.cfg);
@@ -80,7 +82,22 @@ async function generate() {
       if (flags["upscale-width"]) common.upscaleWidth = Number(flags["upscale-width"]);
       if (flags["upscale-height"]) common.upscaleHeight = Number(flags["upscale-height"]);
     }
-    graph = model === "hunyuan" ? buildHunyuan15I2V(common) : buildWan22I2V(common);
+    if (model === "ltx25") {
+      // LTX-2.5 joint-AV family (Seat Frontier Leg 3): per-machine weight binding
+      // comes from config via these flags; pooled loading per the 32GB doctrine.
+      if (flags.transformer) common.transformer = flags.transformer;
+      if (flags["text-encoder"]) common.textEncoder = flags["text-encoder"];
+      if (flags["video-vae"]) common.videoVae = flags["video-vae"];
+      if (flags["audio-vae"]) common.audioVae = flags["audio-vae"];
+      if (flags["latent-upscaler"]) common.latentUpscaler = flags["latent-upscaler"];
+      if (flags.fps) common.frameRate = Number(flags.fps);
+      if (flags["pool-vvram-gb"]) common.poolVvramGb = Number(flags["pool-vvram-gb"]);
+      if (flags["pool-compute"]) common.poolCompute = flags["pool-compute"];
+      if (flags["pool-donor"]) common.poolDonor = flags["pool-donor"];
+      graph = buildLtx25I2V(common);
+    } else {
+      graph = model === "hunyuan" ? buildHunyuan15I2V(common) : buildWan22I2V(common);
+    }
   }
   // Shared submission/polling/retrieval (comfy-submit.mjs): CLI-preferred submit with
   // byte-identical raw fallback; hardened poll loop (dead-server watchdog).

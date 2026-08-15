@@ -430,6 +430,28 @@ type Config struct {
 	VideoGenUnetHigh    string `json:"videogen_unet_high,omitempty"`
 	VideoGenUnetLow     string `json:"videogen_unet_low,omitempty"`
 	VideoGenTextEncoder string `json:"videogen_text_encoder,omitempty"`
+	// VideoGenFamily selects the I2V graph family the video route renders with:
+	// "" or "wan22" = the Wan 2.2 two-expert graph (legacy default, unchanged);
+	// "ltx25" = the LTX-2.5 22B distilled joint-audio two-pass graph (the measured
+	// 2026-08-12 video-seat verdict, bound by Seat Frontier Leg 3). Mirrors the
+	// imagegen_family switch introduced for the krea2 image seat.
+	VideoGenFamily string `json:"videogen_family,omitempty"`
+	// LTX-2.5 per-machine weight bindings (filenames under the ComfyUI model dirs;
+	// empty = the render script's family defaults). Transformer = the int8 convrot
+	// DiT; the conv VIDEO VAE pairs with it; the AUDIO VAE and ×2 latent spatial
+	// upscaler complete the two-pass joint-AV recipe. VideoGenFPS is the family's
+	// native frame rate (LTX 24; the Wan graph keeps its own 16 default).
+	VideoGenTransformer    string `json:"videogen_transformer,omitempty"`
+	VideoGenVideoVAE       string `json:"videogen_video_vae,omitempty"`
+	VideoGenAudioVAE       string `json:"videogen_audio_vae,omitempty"`
+	VideoGenLatentUpscaler string `json:"videogen_latent_upscaler,omitempty"`
+	VideoGenFPS            int    `json:"videogen_fps,omitempty"`
+	// Pooled loading for the video DiT (house 32GB-pool doctrine, same shape as the
+	// imagegen_pool_* keys): >0 routes the transformer through DisTorch2 ratio mode
+	// with this much VRAM borrowed from the donor card. 0 = plain single-card loader.
+	VideoGenPoolVvramGB float64 `json:"videogen_pool_vvram_gb,omitempty"`
+	VideoGenPoolCompute string  `json:"videogen_pool_compute,omitempty"`
+	VideoGenPoolDonor   string  `json:"videogen_pool_donor,omitempty"`
 	// AudioGenTimeoutSec bounds one audio synthesis (TTS or ACE-Step). Default 720 (12min).
 	AudioGenTimeoutSec int `json:"audiogen_timeout_sec,omitempty"`
 	// GPUWaitMs is how long ANY GPU job queues behind the current lease holder before it
