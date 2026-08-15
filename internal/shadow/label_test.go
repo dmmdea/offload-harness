@@ -553,7 +553,11 @@ func TestLabelQueue_OracleProvenanceTagging(t *testing.T) {
 		e    ledger.Entry
 	}
 	var rows []row
-	var knnInputs []string
+	type knnRow struct {
+		task   string
+		accept bool
+	}
+	var knnRows []knnRow
 	d := LabelDeps{
 		Escalation: "esc-alias",
 		E2B:        "gemma4-e2b",
@@ -568,11 +572,11 @@ func TestLabelQueue_OracleProvenanceTagging(t *testing.T) {
 			rows = append(rows, row{path: path, e: e})
 			return nil
 		},
-		Embed: func(text string) ([]float64, error) {
-			knnInputs = append(knnInputs, text)
-			return []float64{1}, nil
+		Embed: func(text string) ([]float64, error) { return []float64{1}, nil },
+		AppendKNN: func(task string, vec []float64, accept bool) error {
+			knnRows = append(knnRows, knnRow{task: task, accept: accept})
+			return nil
 		},
-		AppendKNN:        func(task string, vec []float64, accept bool) error { return nil },
 		LabelsPath:       "/tmp/confhead.jsonl",
 		RouterLabelsPath: "/tmp/router.jsonl",
 	}
@@ -601,10 +605,10 @@ func TestLabelQueue_OracleProvenanceTagging(t *testing.T) {
 		t.Fatalf("the B1 local-rerun router label must stay untagged, got %d", b1Untagged)
 	}
 	// kNN substrate: knn.Row has no provenance field, so the A4 append (item
-	// "a", oracle-derived) must be SKIPPED; the B1 append (item "b", local E2B
-	// rerun) still lands.
-	if len(knnInputs) != 1 || knnInputs[0] != "b" {
-		t.Fatalf("kNN appends must skip the oracle-derived A4 feed and keep the local B1 feed, got %v", knnInputs)
+	// "a", oracle-derived) must be SKIPPED; exactly one row lands — the B1
+	// append (item "b", local E2B rerun) — with the local agreement label.
+	if len(knnRows) != 1 || knnRows[0].task != "classify" || !knnRows[0].accept {
+		t.Fatalf("kNN appends must skip the oracle-derived A4 feed and keep the local B1 feed, got %+v", knnRows)
 	}
 }
 

@@ -42,23 +42,21 @@ type RunTierFunc func(ctx context.Context, req core.Request, model string) (core
 // (shadow.LabelQueue is sequential); FirstErr keeps the first transport error
 // verbatim because nimclient's errors carry the actionable HTTP status + body.
 type Stats struct {
-	Remote      int // oracle calls attempted against the remote endpoint
-	ChatErr     int // transport/HTTP errors (retryable operator problems)
-	Truncated   int // finish_reason=length (nim_max_tokens too small for this model)
-	Empty       int // empty content (e.g. reasoning model burned the budget thinking)
-	Unadaptable int // reply parsed but rejected by Adapt, or task not promptable
-	FirstErr    error
+	Remote       int // oracle calls attempted against the remote endpoint
+	ChatErr      int // transport/HTTP errors (retryable operator problems)
+	Truncated    int // finish_reason=length (nim_max_tokens too small for this model)
+	Empty        int // empty content (e.g. reasoning model burned the budget thinking)
+	Unpromptable int // task the oracle does not serve — skipped FREE, before any call
+	Unadaptable  int // a PAID reply that Adapt rejected (actionable: the model's answers are unusable)
+	FirstErr     error
 }
 
-// Skipped is the total number of oracle calls that produced no label.
-func (s *Stats) Skipped() int {
-	return s.ChatErr + s.Truncated + s.Empty + s.Unadaptable
-}
-
-// String renders the counters for the CLI run summary.
+// String renders the counters for the CLI run summary. Unpromptable (free,
+// expected for tasks the oracle does not serve) is deliberately separate from
+// Unadaptable (paid calls whose answers were rejected — a nim_model problem).
 func (s *Stats) String() string {
-	msg := fmt.Sprintf("remote=%d chat_err=%d truncated=%d empty=%d unadaptable=%d",
-		s.Remote, s.ChatErr, s.Truncated, s.Empty, s.Unadaptable)
+	msg := fmt.Sprintf("remote=%d chat_err=%d truncated=%d empty=%d unadaptable=%d unpromptable=%d",
+		s.Remote, s.ChatErr, s.Truncated, s.Empty, s.Unadaptable, s.Unpromptable)
 	if s.FirstErr != nil {
 		msg += fmt.Sprintf(" first_err=%q", s.FirstErr.Error())
 	}
@@ -87,13 +85,13 @@ func WrapRunTier(chat ChatFunc, nimModel string, maxTokens int, oracleAlias stri
 		}
 		system, user, ok := Prompt(req.Task, req)
 		if !ok {
-			stats.Unadaptable++
+			stats.Unpromptable++
 			return core.Result{}, false
 		}
 		// Temperature 0: the oracle is a judge substrate, not a generator —
 		// determinism beats diversity for label stability.
 		stats.Remote++
-		cr, err := chat(ctx, nimModel, system, user, maxTokens, 0)
+		cr, err := chat(ctx, nimModel, system, user, budgetFor(req.Task, req.Params, maxTokens), 0)
 		switch {
 		case err != nil:
 			stats.ChatErr++
@@ -168,10 +166,7 @@ func Prompt(task core.TaskType, req core.Request) (system, user string, ok bool)
 		// so the oracle must be told the same summary/bullets split and the
 		// same default point count — otherwise it packs the key points into
 		// "summary" and similarity is systematically depressed.
-		n := paramInt(req.Params, "max_points")
-		if n < 1 {
-			n = 5
-		}
+		n := maxPointsFor(req.Params)
 		system = "You are a precise summarizer. Be faithful to the source; do not invent facts. " +
 			"Reply with ONLY a JSON object of the form {\"summary\": \"<1-2 sentence summary>\", \"bullets\": [\"<key point>\", ...]} — no prose, no code fences."
 		user = fmt.Sprintf("Summarize the text below. Provide a 1-2 sentence \"summary\" and up to %d key points in \"bullets\".\n\nTEXT:\n%s", n, req.Input)
@@ -192,7 +187,10 @@ func Adapt(task core.TaskType, req core.Request, raw string) (core.Result, bool)
 	// in content (nimclient only splits the separate reasoning_content field).
 	// Strip it BEFORE extraction, or the first balanced JSON object inside the
 	// reasoning span would win over the real answer.
-	raw = parser.StripThink(raw)
+	raw = stripReasoning(raw)
+	if raw == "" {
+		return core.Result{}, false
+	}
 	switch task {
 	case core.TaskClassify:
 		obj, err := parser.Extract(raw)
@@ -253,6 +251,85 @@ func Adapt(task core.TaskType, req core.Request, raw string) (core.Result, bool)
 		return dataResult(map[string]string{"summary": text})
 	}
 	return core.Result{}, false
+}
+
+// stripReasoning removes inline reasoning from a reply before JSON extraction.
+// parser.StripThink only handles a <think> span at the very START of the reply;
+// a preamble before the span defeats it, and parser.Extract would then take the
+// first balanced object INSIDE the reasoning. So: after StripThink, cut through
+// the LAST </think> (the answer follows the final close), and if an unclosed
+// <think> still remains the answer never materialized — return "" (un-judgeable).
+func stripReasoning(raw string) string {
+	s := parser.StripThink(raw)
+	if i := strings.LastIndex(s, "</think>"); i >= 0 {
+		s = s[i+len("</think>"):]
+	}
+	if strings.Contains(s, "<think>") {
+		return ""
+	}
+	return strings.TrimSpace(s)
+}
+
+// maxPointsFor resolves the summarize bullet count exactly like
+// tasks.buildSummarize: absent key => 5; explicit value clamped to >= 1.
+func maxPointsFor(params map[string]any) int {
+	if _, present := params["max_points"]; !present {
+		return 5
+	}
+	n := paramInt(params, "max_points")
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// budgetFor sizes the completion budget per task, mirroring the local tiers'
+// philosophy (tasks.summarizeBudget: an over-large budget costs nothing when
+// the model stops early, an under-sized one burns the item). cfgMax alone is
+// fine for the tiny label/decision shapes, but summarize is instructed to emit
+// a summary PLUS up to N bullets — structurally the largest reply — so its
+// budget grows by the same 384+160/bullet the local tier reserves, ON TOP of
+// cfgMax (which on reasoning models is largely consumed by thinking).
+func budgetFor(task core.TaskType, params map[string]any, cfgMax int) int {
+	if task == core.TaskSummarize {
+		return cfgMax + 384 + 160*maxPointsFor(params)
+	}
+	return cfgMax
+}
+
+// preflightInput is a fixed, moderately long text for Preflight — long enough
+// that a reasoning model does real work and the instructed summary+bullets
+// shape is exercised at its real size, so a pass is representative of the
+// LARGEST reply the oracle will be asked for, not the smallest.
+const preflightInput = "The migration moved the primary database from a single 8-core host to a three-node cluster " +
+	"with synchronous replication. Median query latency fell from 41 ms to 12 ms, and the nightly " +
+	"backup window shrank from four hours to fifty minutes. Two incidents occurred during cutover: " +
+	"a stale DNS cache sent five percent of traffic to the old primary for eleven minutes, and a " +
+	"connection-pool ceiling caused brief queueing at peak. Both were resolved without data loss, " +
+	"and the rollback plan was never invoked."
+
+// Preflight proves the remote oracle can serve a full-size judged reply BEFORE
+// the caller destructively drains the shadow queue: one real chat roundtrip
+// with the SUMMARIZE prompt (the structurally largest instructed shape) at its
+// real budget, adapted through the same path items will take. A classify-sized
+// probe would prove auth but pass at budgets that then truncate every
+// summarize item mid-run. Returns nil when the reply arrived un-truncated and
+// adapted cleanly.
+func Preflight(ctx context.Context, chat ChatFunc, model string, cfgMax int) error {
+	req := core.Request{Task: core.TaskSummarize, Input: preflightInput}
+	system, user, _ := Prompt(core.TaskSummarize, req)
+	cr, err := chat(ctx, model, system, user, budgetFor(core.TaskSummarize, nil, cfgMax), 0)
+	switch {
+	case err != nil:
+		return err
+	case cr.Truncated:
+		return fmt.Errorf("preflight reply truncated at the summarize budget (nim_max_tokens=%d + bullets headroom) — "+
+			"raise nim_max_tokens (reasoning models spend tokens thinking before answering) or pick a non-reasoning nim_model", cfgMax)
+	}
+	if _, ok := Adapt(core.TaskSummarize, req, cr.Content); !ok {
+		return fmt.Errorf("preflight reply was not adaptable to the judge shape — model %s did not follow the JSON-only instruction; pick a different nim_model", model)
+	}
+	return nil
 }
 
 // dataResult marshals v as the Result Data payload.

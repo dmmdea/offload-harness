@@ -2270,14 +2270,20 @@ func runShadowLabel(args []string) error {
 	// claims the queue, and per-item chat failures are skipped as un-judgeable —
 	// so a dead endpoint, bad key, wrong model id, or a model that truncates at
 	// the configured budget would otherwise burn every queued item for zero
-	// labels. The preflight is a REPRESENTATIVE oracle roundtrip (real prompt,
-	// real nim_max_tokens, full Adapt) — a 1-token ping would prove auth but
-	// miss the truncation steady state, the failure mode that actually burns
-	// queues on reasoning models. On failure nothing has been drained.
+	// labels. nimoracle.Preflight runs the SUMMARIZE shape (the structurally
+	// largest instructed reply) at its real budget through the same Adapt path
+	// items take — a classify-sized ping would prove auth but pass at budgets
+	// that then truncate every summarize item. On failure nothing has been
+	// drained. The paid preflight is skipped entirely when there is no queued
+	// work to protect (neither a queue file nor a crashed drain's claim file).
 	runTier := p.RunTier
 	oracleTag := ""
 	stats := &nimoracle.Stats{}
 	if *oracle == "nim" {
+		if !fileHasContent(cfg.ShadowQueuePath) && !fileHasContent(cfg.ShadowQueuePath+".draining") {
+			fmt.Println("shadow-label: queue empty")
+			return nil
+		}
 		baseURL := cfg.NIMEndpoint
 		key := nimclient.KeyForBase(baseURL) // env key only for NVIDIA hosts; never transmitted to a non-NVIDIA base
 		if key == "" && nimclient.IsHostedNVIDIA(baseURL) {
@@ -2290,21 +2296,8 @@ func runShadowLabel(args []string) error {
 			timeout = 120 * time.Second
 		}
 		client := nimclient.New(baseURL, key, timeout)
-		preq := core.Request{Task: core.TaskClassify, Input: "The delivery arrived on time and the packaging was intact.",
-			Params: map[string]any{"labels": []string{"positive", "negative"}}}
-		psys, puser, _ := nimoracle.Prompt(core.TaskClassify, preq)
-		cr, err := client.Chat(context.Background(), cfg.NIMModel, psys, puser, cfg.NIMMaxTokens, 0)
-		switch {
-		case err != nil:
+		if err := nimoracle.Preflight(context.Background(), client.Chat, cfg.NIMModel, cfg.NIMMaxTokens); err != nil {
 			return fmt.Errorf("shadow-label: NIM preflight failed (nothing drained): %w", err)
-		case cr.Truncated:
-			return fmt.Errorf("shadow-label: NIM preflight reply truncated at nim_max_tokens=%d (nothing drained) — "+
-				"raise nim_max_tokens (reasoning models spend tokens thinking before answering) or pick a non-reasoning nim_model", cfg.NIMMaxTokens)
-		default:
-			if _, ok := nimoracle.Adapt(core.TaskClassify, preq, cr.Content); !ok {
-				return fmt.Errorf("shadow-label: NIM preflight reply was not adaptable to the judge shape (nothing drained) — "+
-					"model %s did not follow the JSON-only instruction; pick a different nim_model", cfg.NIMModel)
-			}
 		}
 		runTier = nimoracle.WrapRunTier(client.Chat, cfg.NIMModel, cfg.NIMMaxTokens, cfg.EscalationModel, p.RunTier, stats)
 		oracleTag = "nim"
@@ -2346,21 +2339,30 @@ func runShadowLabel(args []string) error {
 	w := shadow.LabelQueue(context.Background(), items, *n, deps)
 	routerWritten := countJSONLLines(cfg.RouterLabelsPath) - routerBefore
 	fmt.Printf("shadow-label: drained %d items, wrote %d confhead labels -> %s\n", len(items), w, cfg.ConfHeadLabelsPath)
-	if oracleTag != "" {
-		fmt.Printf("shadow-label: oracle stats: %s\n", stats)
-		if w == 0 {
-			// Fail LOUD: a zero-label nim run over a non-empty (and destructively
-			// drained) queue is a systemic remote failure until proven otherwise —
-			// exit non-zero so schedulers and operators cannot mistake it for a
-			// clean run over an un-judgeable queue.
-			return fmt.Errorf("shadow-label: oracle=nim wrote 0 labels for %d drained items (drain is destructive — those items are gone); %s", len(items), stats)
-		}
-	}
 	fmt.Printf("shadow-label: wrote %d router labels -> %s\n", routerWritten, cfg.RouterLabelsPath)
 	if cfg.KNNPreFilterEnabled {
 		fmt.Printf("shadow-label: kNN substrate now %d rows -> %s\n", countJSONLLines(cfg.KNNIndexPath), cfg.KNNIndexPath)
 	}
+	if oracleTag != "" {
+		fmt.Printf("shadow-label: oracle stats: %s\n", stats)
+		if w == 0 {
+			// Fail LOUD, and only after every summary line above has printed
+			// (the router count is a diagnostic — e.g. a broken confhead sidecar
+			// path yields w==0 with router rows already on disk): a zero-label
+			// nim run over a non-empty (and destructively drained) queue is a
+			// systemic failure until proven otherwise — exit non-zero so
+			// schedulers cannot mistake it for a clean run.
+			return fmt.Errorf("shadow-label: oracle=nim wrote 0 labels for %d drained items (drain is destructive — those items are gone); %s", len(items), stats)
+		}
+	}
 	return nil
+}
+
+// fileHasContent reports whether path exists with non-zero size. Used to skip
+// the paid NIM preflight when there is no queued shadow work to protect.
+func fileHasContent(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Size() > 0
 }
 
 // runAgentTrajectoryLabel drains the P6 agent-trajectory capture queue, judges each

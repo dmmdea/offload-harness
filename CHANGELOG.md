@@ -18,10 +18,11 @@ GBNF grammar path are untouched, and NIM calls still never enter the savings led
 
 - `internal/nimoracle`: the free-text→`core.Result` adapter the seam analysis called
   out as the non-trivial core. Per task type it builds a JSON-only instruction prompt
-  (classify label set / triage yes-no-unsure / extract schema+verbatim rule /
-  summarize) and parser-extracts + validates the remote reply into exactly the Data
-  shape the shadow judges (`pipeline.AnswersAgree`, `grounding.Check`, the B2
-  summarize judge) consume. Malformed oracle answers (label outside the set, decision
+  (classify label set / triage yes-no-unsure / extract schema / summarize) and
+  parser-extracts + validates the remote reply into exactly the Data shape the shadow
+  judges (`pipeline.AnswersAgree`, `grounding.Check`, the B2 summarize judge) consume.
+  Completion budgets are sized per task (summarize gets the local tier's 384+160/bullet
+  headroom ON TOP of `nim_max_tokens`, which reasoning models largely spend thinking). Malformed oracle answers (label outside the set, decision
   outside yes/no/unsure, non-object extraction, truncated reply) are rejected as
   un-judgeable — never recorded as disagreement.
 - `WrapRunTier` dispatch: only the ESCALATION slot goes remote; the B1 E2B
@@ -33,19 +34,24 @@ GBNF grammar path are untouched, and NIM calls still never enter the savings led
   untagged. The A4 kNN append is SKIPPED under the nim oracle — `knn.Row` has no
   provenance field, so remote-derived accept labels would mix irreversibly into the
   local substrate; the B1 kNN feed (local rerun) is unaffected.
-- Fail-loud batch semantics (the queue drain is destructive): a REPRESENTATIVE
-  preflight (real prompt, real `nim_max_tokens`, full adapt) runs BEFORE the drain —
+- Fail-loud batch semantics (the queue drain is destructive): `nimoracle.Preflight`
+  runs BEFORE the drain using the SUMMARIZE shape — the structurally largest
+  instructed reply — at its real budget, through the same adapt path items take, so
   missing/invalid key, dead endpoint, wrong model id, or a model that truncates or
-  ignores the JSON-only instruction abort with nothing drained. Per-cause skip
-  counters (`remote/chat_err/truncated/empty/unadaptable` + the first transport
-  error verbatim) print in the run summary, and a zero-label run over a non-empty
-  drain exits non-zero.
+  ignores the JSON-only instruction abort with nothing drained. The paid preflight
+  is skipped when no queue (or crashed-drain claim) file has content. Per-cause skip
+  counters (`remote/chat_err/truncated/empty/unadaptable/unpromptable` + the first
+  transport error verbatim) print in the run summary — unadaptable (paid replies
+  rejected) is deliberately separate from unpromptable (free skips of unserved
+  tasks) — and a zero-label run over a non-empty drain exits non-zero after the
+  router/kNN summary lines print.
 - Oracle prompts mirror the local tiers where the judge compares fields: summarize
   instructs the same 1-2 sentence `"summary"` + up-to-N `"bullets"` split (default
-  5) as `tasks.buildSummarize`; extract stays neutral about groundedness (no
-  verbatim coaching of `grounding.Check`, which IS the label); classify without a
-  label set is rejected before any paid call; inline `<think>` spans are stripped
-  before JSON extraction.
+  5, explicit values clamped to >=1) as `tasks.buildSummarize`; extract stays
+  neutral about groundedness (no verbatim coaching of `grounding.Check`, which IS
+  the label); classify without a label set is rejected before any paid call;
+  `<think>` spans are stripped wherever they appear (text after the LAST `</think>`
+  wins; an unclosed span is un-judgeable) before JSON extraction.
 - Config reuse: endpoint/model/timeout/max-tokens come from the existing
   `nim_endpoint`/`nim_model`/`nim_timeout_sec`/`nim_max_tokens` keys; the API key
   comes from `$NVIDIA_API_KEY`/`$NGC_API_KEY` only (never config), with the same
