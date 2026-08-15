@@ -147,6 +147,6 @@ Three facts follow, and they reshape the phase:
 - The bench is live-only by nature; its CI-safe half (metric math, admissibility, relation
   classification, sequencing against a serving simulator that encodes the measured binary rule) runs
   with no GPU and no network.
-- the <node-a> laptop is **UNMEASURED**, not projected: it runs 0.22.22, which predates the
+- The <node-a> laptop (ampere-8) is **UNMEASURED**, not projected: it runs 0.22.22, which predates the
   `compaction-eval` verb entirely, and updating an operator's working laptop across the 0.22.25
   default flip is its own decision, never a silent prerequisite of a measurement.
