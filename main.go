@@ -39,6 +39,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
+	"github.com/dmmdea/offload-harness/internal/nimoracle"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/report"
 	"github.com/dmmdea/offload-harness/internal/router"
@@ -47,7 +48,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.60.0"
+const version = "0.61.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -2240,18 +2241,68 @@ func runTrainRouter(args []string) error {
 // confhead label row to cfg.ConfHeadLabelsPath. It caps processing at --n items
 // (default 200). Only confhead-labels.jsonl is written; the savings ledger is
 // never touched.
+//
+// --oracle nim swaps the counterfactual oracle from the local escalation tier
+// to the remote NIM endpoint (cfg.NIMEndpoint / cfg.NIMModel; key from
+// $NVIDIA_API_KEY, never config): each item's oracle answer is produced by the
+// remote model and adapted to the judge-shaped Data via internal/nimoracle.
+// Only the escalation slot goes remote — the B1 E2B router-counterfactual
+// stays local — and oracle-judged label rows carry "oracle":"nim" for
+// provenance. Deliberate remote experiment: input text leaves the box.
 func runShadowLabel(args []string) error {
 	fs := flag.NewFlagSet("shadow-label", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	n := fs.Int("n", 200, "max items to label this run")
+	oracle := fs.String("oracle", "local", "counterfactual oracle: local (escalation tier) or nim (remote NIM endpoint; tasks "+strings.Join(nimoracle.SupportedTasks(), "/")+")")
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
+	if *oracle != "local" && *oracle != "nim" {
+		return fmt.Errorf("shadow-label: unknown --oracle %q (want local or nim)", *oracle)
+	}
 
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return fmt.Errorf("shadow-label: open pipeline: %w", err)
 	}
 	defer cleanup()
+
+	// The NIM client is built and PREFLIGHTED before Drain: Drain destructively
+	// claims the queue, and per-item chat failures are skipped as un-judgeable —
+	// so a dead endpoint, bad key, wrong model id, or a model that truncates at
+	// the configured budget would otherwise burn every queued item for zero
+	// labels. nimoracle.Preflight runs the SUMMARIZE shape (the structurally
+	// largest instructed reply) at its real budget through the same Adapt path
+	// items take — a classify-sized ping would prove auth but pass at budgets
+	// that then truncate every summarize item. On failure nothing has been
+	// drained. The paid preflight is skipped entirely when there is no queued
+	// work to protect (neither a queue file nor a crashed drain's claim file).
+	runTier := p.RunTier
+	oracleTag := ""
+	stats := &nimoracle.Stats{}
+	if *oracle == "nim" {
+		if !fileHasContent(cfg.ShadowQueuePath) && !fileHasContent(cfg.ShadowQueuePath+".draining") {
+			fmt.Println("shadow-label: queue empty")
+			return nil
+		}
+		baseURL := cfg.NIMEndpoint
+		key := nimclient.KeyForBase(baseURL) // env key only for NVIDIA hosts; never transmitted to a non-NVIDIA base
+		if key == "" && nimclient.IsHostedNVIDIA(baseURL) {
+			return fmt.Errorf("shadow-label: NVIDIA_API_KEY (or NGC_API_KEY) is not set — required for the hosted endpoint %s.\n"+
+				"Get a free key at build.nvidia.com, then: export NVIDIA_API_KEY=nvapi-...\n"+
+				"(A self-hosted NIM via nim_endpoint http://host:8000/v1 needs no key.)", baseURL)
+		}
+		timeout := time.Duration(cfg.NIMTimeoutSec) * time.Second
+		if timeout <= 0 {
+			timeout = 120 * time.Second
+		}
+		client := nimclient.New(baseURL, key, timeout)
+		if err := nimoracle.Preflight(context.Background(), client.Chat, cfg.NIMModel, cfg.NIMMaxTokens); err != nil {
+			return fmt.Errorf("shadow-label: NIM preflight failed (nothing drained): %w", err)
+		}
+		runTier = nimoracle.WrapRunTier(client.Chat, cfg.NIMModel, cfg.NIMMaxTokens, cfg.EscalationModel, p.RunTier, stats)
+		oracleTag = "nim"
+		fmt.Printf("shadow-label: oracle=nim model=%s base=%s (escalation slot only; E2B counterfactual stays local)\n", cfg.NIMModel, baseURL)
+	}
 
 	items, err := shadow.Drain(cfg.ShadowQueuePath)
 	if err != nil {
@@ -2266,7 +2317,8 @@ func runShadowLabel(args []string) error {
 	deps := shadow.LabelDeps{
 		Escalation:            cfg.EscalationModel,
 		E2B:                   cfg.TriageModel,
-		RunTier:               p.RunTier,
+		RunTier:               runTier,
+		Oracle:                oracleTag,
 		AnswersAgree:          pipeline.AnswersAgree,
 		Ground:                grounding.Check,
 		Similar:               emb.Similar,
@@ -2291,7 +2343,26 @@ func runShadowLabel(args []string) error {
 	if cfg.KNNPreFilterEnabled {
 		fmt.Printf("shadow-label: kNN substrate now %d rows -> %s\n", countJSONLLines(cfg.KNNIndexPath), cfg.KNNIndexPath)
 	}
+	if oracleTag != "" {
+		fmt.Printf("shadow-label: oracle stats: %s\n", stats)
+		if w == 0 {
+			// Fail LOUD, and only after every summary line above has printed
+			// (the router count is a diagnostic — e.g. a broken confhead sidecar
+			// path yields w==0 with router rows already on disk): a zero-label
+			// nim run over a non-empty (and destructively drained) queue is a
+			// systemic failure until proven otherwise — exit non-zero so
+			// schedulers cannot mistake it for a clean run.
+			return fmt.Errorf("shadow-label: oracle=nim wrote 0 labels for %d drained items (drain is destructive — those items are gone); %s", len(items), stats)
+		}
+	}
 	return nil
+}
+
+// fileHasContent reports whether path exists with non-zero size. Used to skip
+// the paid NIM preflight when there is no queued shadow work to protect.
+func fileHasContent(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Size() > 0
 }
 
 // runAgentTrajectoryLabel drains the P6 agent-trajectory capture queue, judges each

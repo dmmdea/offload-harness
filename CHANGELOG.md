@@ -6,6 +6,62 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.61.0] - 2026-08-15
+
+The NIM shadow-label oracle (Seat Frontier plan Leg 7, item 1): the self-learning
+flywheel can now judge queued shadow items against a frontier remote model instead of
+the local escalation tier, producing higher-trust counterfactual labels for confhead
+and router training. Explicit, opt-in, provenance-tagged — the local cascade and its
+GBNF grammar path are untouched, and NIM calls still never enter the savings ledger.
+
+### Added — `shadow-label --oracle nim`
+
+- `internal/nimoracle`: the free-text→`core.Result` adapter the seam analysis called
+  out as the non-trivial core. Per task type it builds a JSON-only instruction prompt
+  (classify label set / triage yes-no-unsure / extract schema / summarize) and
+  parser-extracts + validates the remote reply into exactly the Data shape the shadow
+  judges (`pipeline.AnswersAgree`, `grounding.Check`, the B2 summarize judge) consume.
+  Completion budgets are sized per task: summarize gets the local tier's
+  384+160/bullet headroom ON TOP of `nim_max_tokens` (which reasoning models
+  largely spend thinking); other tasks run at the flat `nim_max_tokens`. Malformed oracle answers (label outside the set, decision
+  outside yes/no/unsure, non-object extraction, truncated reply) are rejected as
+  un-judgeable — never recorded as disagreement.
+- `WrapRunTier` dispatch: only the ESCALATION slot goes remote; the B1 E2B
+  router-counterfactual rerun keeps its local provenance. A nil local RunTier panics
+  at wiring time (it would silently starve the B1 feed).
+- Provenance: ledger label rows whose judgment derives from the remote oracle (the
+  confhead row and the A4 E2B-entry router row) carry `"oracle":"nim"`
+  (`ledger.Entry.Oracle`, omitempty — historic rows parse unchanged). B1 rows stay
+  untagged. The A4 kNN append is SKIPPED under the nim oracle — `knn.Row` has no
+  provenance field, so remote-derived accept labels would mix irreversibly into the
+  local substrate; the B1 kNN feed (local rerun) is unaffected.
+- Fail-loud batch semantics (the queue drain is destructive): `nimoracle.Preflight`
+  runs BEFORE the drain using the SUMMARIZE shape — the structurally largest
+  instructed reply — at its real budget, through the same adapt path items take, so
+  missing/invalid key, dead endpoint, wrong model id, or a model that truncates or
+  ignores the JSON-only instruction abort with nothing drained. The paid preflight
+  is skipped when no queue (or crashed-drain claim) file has content. Per-cause skip
+  counters (`remote/chat_err/truncated/empty/unadaptable/unpromptable` + the first
+  transport error verbatim) print in the run summary — unadaptable (paid replies
+  rejected) is deliberately separate from unpromptable (free skips of unserved
+  tasks) — and a zero-label run over a non-empty drain exits non-zero after the
+  router/kNN summary lines print.
+- Oracle prompts mirror the local tiers where the judge compares fields: summarize
+  instructs the same 1-2 sentence `"summary"` + up-to-N `"bullets"` split (default
+  5, explicit values clamped to >=1) as `tasks.buildSummarize`; extract stays
+  neutral about groundedness (no verbatim coaching of `grounding.Check`, which IS
+  the label); classify without a label set is rejected before any paid call;
+  inline reasoning is handled before JSON extraction (the text after the LAST
+  `</think>` is taken as the answer; a reply with an unclosed `<think>` span is
+  un-judgeable). The preflight also fails when the probe's completion spent more
+  than the flat `nim_max_tokens` (classify/triage/extract run at that budget and
+  would truncate mid-run), and names a reasoning-only reply (empty content with
+  `reasoning_content`) as its own condition.
+- Config reuse: endpoint/model/timeout/max-tokens come from the existing
+  `nim_endpoint`/`nim_model`/`nim_timeout_sec`/`nim_max_tokens` keys; the API key
+  comes from `$NVIDIA_API_KEY`/`$NGC_API_KEY` only (never config), with the same
+  hosted-endpoint guard as `nim`.
+
 ## [0.60.0] - 2026-08-14
 
 The 32GB-class VIDEO seat: LTX-2.5 22B distilled, pooled, with joint audio. Executes the

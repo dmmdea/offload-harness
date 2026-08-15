@@ -60,6 +60,11 @@ type Entry struct {
 	// core.Meta.TierPack). Empty on entry-tier rows; old ledger lines without
 	// the field parse fine.
 	TierPack string `json:"tier_pack,omitempty"`
+	// Oracle names a NON-LOCAL counterfactual oracle that produced this label
+	// row's judgment (e.g. "nim" for shadow-label --oracle nim). Empty = the
+	// local escalation tier (the default), so historic rows parse unchanged and
+	// remote-judged labels stay auditable/filterable in the sidecars.
+	Oracle string `json:"oracle,omitempty"`
 }
 
 // maxReasonLen bounds a recorded defer reason so a long upstream error can't

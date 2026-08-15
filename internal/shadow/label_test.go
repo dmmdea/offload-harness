@@ -536,3 +536,82 @@ func TestDrainReconstructedRequestTasksBuildSucceeds(t *testing.T) {
 		})
 	}
 }
+
+// TestLabelQueue_OracleProvenanceTagging: with d.Oracle set ("nim"), the
+// confhead entry and the A4 E2B-entry router label (both derived from the
+// ESCALATION oracle's judgment) carry the tag, while the B1 router label
+// (derived from a LOCAL E2B rerun) stays untagged.
+func TestLabelQueue_OracleProvenanceTagging(t *testing.T) {
+	items := []Item{
+		// E2B-entry row -> confhead label + A4 router label, both oracle-tagged.
+		// Task deliberately DIFFERS from the second item so the kNN assertion
+		// below can tell WHICH feed produced the surviving row.
+		{Task: "classify", Input: "a", EntryTier: "gemma4-e2b", EntryOutput: `{"label":"x"}`},
+		// non-E2B-entry row -> confhead label (tagged) + B1 router label (untagged).
+		{Task: "triage", Input: "b", EntryTier: "gemma4-e4b", EntryOutput: `{"decision":"yes"}`},
+	}
+	type row struct {
+		path string
+		e    ledger.Entry
+	}
+	var rows []row
+	type knnRow struct {
+		task   string
+		accept bool
+	}
+	var knnRows []knnRow
+	d := LabelDeps{
+		Escalation: "esc-alias",
+		E2B:        "gemma4-e2b",
+		Oracle:     "nim",
+		RunTier: func(ctx context.Context, req core.Request, model string) (core.Result, bool) {
+			data, _ := json.Marshal(map[string]any{"label": "x"})
+			return core.Result{OK: true, Data: data}, true
+		},
+		AnswersAgree: func(task, candidate string, finalData []byte) (bool, bool) { return true, true },
+		Ground:       func(task core.TaskType, input string, data []byte) (bool, bool) { return true, true },
+		AppendLabel: func(path string, e ledger.Entry) error {
+			rows = append(rows, row{path: path, e: e})
+			return nil
+		},
+		Embed: func(text string) ([]float64, error) { return []float64{1}, nil },
+		AppendKNN: func(task string, vec []float64, accept bool) error {
+			knnRows = append(knnRows, knnRow{task: task, accept: accept})
+			return nil
+		},
+		LabelsPath:       "/tmp/confhead.jsonl",
+		RouterLabelsPath: "/tmp/router.jsonl",
+	}
+	n := LabelQueue(context.Background(), items, 100, d)
+	if n != 2 {
+		t.Fatalf("expected 2 confhead labels, got %d", n)
+	}
+	var confheadTagged, a4Tagged, b1Untagged int
+	for _, r := range rows {
+		switch {
+		case r.path == "/tmp/confhead.jsonl" && r.e.Oracle == "nim":
+			confheadTagged++
+		case r.path == "/tmp/router.jsonl" && r.e.Oracle == "nim":
+			a4Tagged++
+		case r.path == "/tmp/router.jsonl" && r.e.Oracle == "":
+			b1Untagged++
+		}
+	}
+	if confheadTagged != 2 {
+		t.Fatalf("both confhead labels must carry oracle=nim, got %d (rows %+v)", confheadTagged, rows)
+	}
+	if a4Tagged != 1 {
+		t.Fatalf("the A4 E2B-entry router label must carry oracle=nim, got %d", a4Tagged)
+	}
+	if b1Untagged != 1 {
+		t.Fatalf("the B1 local-rerun router label must stay untagged, got %d", b1Untagged)
+	}
+	// kNN substrate: knn.Row has no provenance field, so the A4 append (item
+	// "a", classify, oracle-derived) must be SKIPPED; exactly one row lands —
+	// the B1 append (item "b", TRIAGE, local E2B rerun) — with the local
+	// agreement label. The task value is what proves WHICH feed survived.
+	if len(knnRows) != 1 || knnRows[0].task != "triage" || !knnRows[0].accept {
+		t.Fatalf("kNN appends must skip the oracle-derived A4 feed (classify) and keep the local B1 feed (triage), got %+v", knnRows)
+	}
+}
+
