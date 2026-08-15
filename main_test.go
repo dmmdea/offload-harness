@@ -234,8 +234,10 @@ func TestBuildAudioParams(t *testing.T) {
 	}
 }
 
-// TestBuildVideoParams pins the generate-video CLI param-building: model defaults
-// to wan, the still path is carried as "still", and optional flags
+// TestBuildVideoParams pins the generate-video CLI param-building: an EMPTY model
+// is OMITTED so the pipeline applies the machine's videogen_family seat (the old
+// forced-wan default silently defeated the family binding on every CLI call —
+// live finding 2026-08-15); the still path is carried as "still"; optional flags
 // (negative/frames/width/height/steps/seed/reserve_vram) are only set when
 // non-zero. reserve_vram is stringified to match the MCP tool's wire shape.
 // Mirrors buildAudioParams so the arg handling is unit-testable without a render.
@@ -251,9 +253,9 @@ func TestBuildVideoParams(t *testing.T) {
 			map[string]any{"model": "hunyuan", "still": "still.png"},
 		},
 		{
-			"empty model emits wan (CLI default)",
+			"empty model is OMITTED — the pipeline applies the machine's videogen_family",
 			videoFlags{model: "", still: "s.png"},
-			map[string]any{"model": "wan", "still": "s.png"},
+			map[string]any{"still": "s.png"},
 		},
 		{
 			"frames + seed + reserve_vram + out + negative",
