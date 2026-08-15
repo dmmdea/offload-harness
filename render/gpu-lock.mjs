@@ -138,7 +138,7 @@ export async function quiesceLlamaSwap(ids, {
     } catch { return null; }
   };
 
-  // /running GATES every probe. On llama-swap v208 (live-found on <node-c>),
+  // /running GATES every probe. On llama-swap v208 (live-found on an ampere-6 node),
   // `/upstream/<id>/slots` is `Any /upstream/*` -> proxyToUpstream: requesting it
   // for a model that is NOT loaded swaps the model IN — the drain was loading ~3GB
   // into VRAM immediately before the render it existed to protect. So:

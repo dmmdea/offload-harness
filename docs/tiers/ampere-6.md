@@ -63,7 +63,7 @@ local-offload report --out capability-report.md
 
 Checked-in examples (real machines, read-only output):
 
-- [ampere-6-<node-c>](reports/ampere-6-<node-c>.md)
+- [ampere-6-node-c](reports/ampere-6-node-c.md)
 
 ---
 
