@@ -46,6 +46,8 @@ where the code lives.
   duplicate-dispatch semantics
 - [flows/zero-warm-generation.md](flows/zero-warm-generation.md) — the GPU lock, teardown, and warm
   batch
+- [flows/nim-research-analyst.md](flows/nim-research-analyst.md) — the overnight research-sweep
+  usage pattern for the explicit remote NIM surface
 
 ## Architecture and decisions
 
