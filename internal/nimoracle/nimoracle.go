@@ -325,6 +325,17 @@ func Preflight(ctx context.Context, chat ChatFunc, model string, cfgMax int) err
 	case cr.Truncated:
 		return fmt.Errorf("preflight reply truncated at the summarize budget (nim_max_tokens=%d + bullets headroom) — "+
 			"raise nim_max_tokens (reasoning models spend tokens thinking before answering) or pick a non-reasoning nim_model", cfgMax)
+	case cr.TokensOut > cfgMax:
+		// The summarize probe runs at cfgMax + bullets headroom, but classify/
+		// triage/extract items run at the FLAT cfgMax — if the completion did
+		// not fit that budget, those items (the majority of most queues) would
+		// truncate mid-run after a passing preflight and burn silently.
+		return fmt.Errorf("preflight spent %d completion tokens; classify/triage/extract run at nim_max_tokens=%d and would truncate — "+
+			"raise nim_max_tokens or pick a non-reasoning nim_model", cr.TokensOut, cfgMax)
+	}
+	if strings.TrimSpace(cr.Content) == "" && cr.ReasoningContent != "" {
+		return fmt.Errorf("preflight reply carried only reasoning_content with no answer — model %s burned the budget thinking; "+
+			"raise nim_max_tokens or pick a non-reasoning nim_model", model)
 	}
 	if _, ok := Adapt(core.TaskSummarize, req, cr.Content); !ok {
 		return fmt.Errorf("preflight reply was not adaptable to the judge shape — model %s did not follow the JSON-only instruction; pick a different nim_model", model)

@@ -360,11 +360,28 @@ func TestPreflight(t *testing.T) {
 	if err := Preflight(context.Background(), chatReturning("a fine prose summary", false, nil), "m", 512); err == nil || !strings.Contains(err.Error(), "not adaptable") {
 		t.Fatalf("unadaptable preflight must error, got %v", err)
 	}
+	// A completion that fit the raised summarize budget but NOT the flat
+	// cfgMax must fail — classify/triage/extract run at cfgMax and would
+	// truncate mid-run after a passing probe.
+	overBudget := func(ctx context.Context, model, system, user string, maxTokens int, temperature float64) (nimclient.ChatResult, error) {
+		return nimclient.ChatResult{Content: `{"summary": "s"}`, TokensOut: 700}, nil
+	}
+	if err := Preflight(context.Background(), overBudget, "m", 512); err == nil || !strings.Contains(err.Error(), "would truncate") {
+		t.Fatalf("completion exceeding the flat budget must error, got %v", err)
+	}
+	// Reasoning-only reply (content empty, reasoning_content set) names the
+	// real condition rather than blaming the JSON instruction.
+	reasoningOnly := func(ctx context.Context, model, system, user string, maxTokens int, temperature float64) (nimclient.ChatResult, error) {
+		return nimclient.ChatResult{Content: "", ReasoningContent: "thinking..."}, nil
+	}
+	if err := Preflight(context.Background(), reasoningOnly, "m", 512); err == nil || !strings.Contains(err.Error(), "reasoning_content") {
+		t.Fatalf("reasoning-only reply must error with the real condition, got %v", err)
+	}
 	// A clean instructed reply passes, and the budget carries bullets headroom.
 	var gotMax int
 	chat := func(ctx context.Context, model, system, user string, maxTokens int, temperature float64) (nimclient.ChatResult, error) {
 		gotMax = maxTokens
-		return nimclient.ChatResult{Content: `{"summary": "It worked.", "bullets": ["a"]}`}, nil
+		return nimclient.ChatResult{Content: `{"summary": "It worked.", "bullets": ["a"]}`, TokensOut: 200}, nil
 	}
 	if err := Preflight(context.Background(), chat, "m", 512); err != nil {
 		t.Fatalf("clean preflight must pass: %v", err)

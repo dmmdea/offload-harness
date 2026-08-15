@@ -21,8 +21,9 @@ GBNF grammar path are untouched, and NIM calls still never enter the savings led
   (classify label set / triage yes-no-unsure / extract schema / summarize) and
   parser-extracts + validates the remote reply into exactly the Data shape the shadow
   judges (`pipeline.AnswersAgree`, `grounding.Check`, the B2 summarize judge) consume.
-  Completion budgets are sized per task (summarize gets the local tier's 384+160/bullet
-  headroom ON TOP of `nim_max_tokens`, which reasoning models largely spend thinking). Malformed oracle answers (label outside the set, decision
+  Completion budgets are sized per task: summarize gets the local tier's
+  384+160/bullet headroom ON TOP of `nim_max_tokens` (which reasoning models
+  largely spend thinking); other tasks run at the flat `nim_max_tokens`. Malformed oracle answers (label outside the set, decision
   outside yes/no/unsure, non-object extraction, truncated reply) are rejected as
   un-judgeable — never recorded as disagreement.
 - `WrapRunTier` dispatch: only the ESCALATION slot goes remote; the B1 E2B
@@ -50,8 +51,12 @@ GBNF grammar path are untouched, and NIM calls still never enter the savings led
   5, explicit values clamped to >=1) as `tasks.buildSummarize`; extract stays
   neutral about groundedness (no verbatim coaching of `grounding.Check`, which IS
   the label); classify without a label set is rejected before any paid call;
-  `<think>` spans are stripped wherever they appear (text after the LAST `</think>`
-  wins; an unclosed span is un-judgeable) before JSON extraction.
+  inline reasoning is handled before JSON extraction (the text after the LAST
+  `</think>` is taken as the answer; a reply with an unclosed `<think>` span is
+  un-judgeable). The preflight also fails when the probe's completion spent more
+  than the flat `nim_max_tokens` (classify/triage/extract run at that budget and
+  would truncate mid-run), and names a reasoning-only reply (empty content with
+  `reasoning_content`) as its own condition.
 - Config reuse: endpoint/model/timeout/max-tokens come from the existing
   `nim_endpoint`/`nim_model`/`nim_timeout_sec`/`nim_max_tokens` keys; the API key
   comes from `$NVIDIA_API_KEY`/`$NGC_API_KEY` only (never config), with the same

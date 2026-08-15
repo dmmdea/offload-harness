@@ -544,9 +544,11 @@ func TestDrainReconstructedRequestTasksBuildSucceeds(t *testing.T) {
 func TestLabelQueue_OracleProvenanceTagging(t *testing.T) {
 	items := []Item{
 		// E2B-entry row -> confhead label + A4 router label, both oracle-tagged.
+		// Task deliberately DIFFERS from the second item so the kNN assertion
+		// below can tell WHICH feed produced the surviving row.
 		{Task: "classify", Input: "a", EntryTier: "gemma4-e2b", EntryOutput: `{"label":"x"}`},
 		// non-E2B-entry row -> confhead label (tagged) + B1 router label (untagged).
-		{Task: "classify", Input: "b", EntryTier: "gemma4-e4b", EntryOutput: `{"label":"x"}`},
+		{Task: "triage", Input: "b", EntryTier: "gemma4-e4b", EntryOutput: `{"decision":"yes"}`},
 	}
 	type row struct {
 		path string
@@ -605,10 +607,11 @@ func TestLabelQueue_OracleProvenanceTagging(t *testing.T) {
 		t.Fatalf("the B1 local-rerun router label must stay untagged, got %d", b1Untagged)
 	}
 	// kNN substrate: knn.Row has no provenance field, so the A4 append (item
-	// "a", oracle-derived) must be SKIPPED; exactly one row lands — the B1
-	// append (item "b", local E2B rerun) — with the local agreement label.
-	if len(knnRows) != 1 || knnRows[0].task != "classify" || !knnRows[0].accept {
-		t.Fatalf("kNN appends must skip the oracle-derived A4 feed and keep the local B1 feed, got %+v", knnRows)
+	// "a", classify, oracle-derived) must be SKIPPED; exactly one row lands —
+	// the B1 append (item "b", TRIAGE, local E2B rerun) — with the local
+	// agreement label. The task value is what proves WHICH feed survived.
+	if len(knnRows) != 1 || knnRows[0].task != "triage" || !knnRows[0].accept {
+		t.Fatalf("kNN appends must skip the oracle-derived A4 feed (classify) and keep the local B1 feed (triage), got %+v", knnRows)
 	}
 }
 
