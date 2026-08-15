@@ -6,6 +6,35 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.61.0] - 2026-08-15
+
+The NIM shadow-label oracle (Seat Frontier plan Leg 7, item 1): the self-learning
+flywheel can now judge queued shadow items against a frontier remote model instead of
+the local escalation tier, producing higher-trust counterfactual labels for confhead
+and router training. Explicit, opt-in, provenance-tagged — the local cascade and its
+GBNF grammar path are untouched, and NIM calls still never enter the savings ledger.
+
+### Added — `shadow-label --oracle nim`
+
+- `internal/nimoracle`: the free-text→`core.Result` adapter the seam analysis called
+  out as the non-trivial core. Per task type it builds a JSON-only instruction prompt
+  (classify label set / triage yes-no-unsure / extract schema+verbatim rule /
+  summarize) and parser-extracts + validates the remote reply into exactly the Data
+  shape the shadow judges (`pipeline.AnswersAgree`, `grounding.Check`, the B2
+  summarize judge) consume. Malformed oracle answers (label outside the set, decision
+  outside yes/no/unsure, non-object extraction, truncated reply) are rejected as
+  un-judgeable — never recorded as disagreement.
+- `WrapRunTier` dispatch: only the ESCALATION slot goes remote; the B1 E2B
+  router-counterfactual rerun keeps its local provenance.
+- Provenance: label rows whose judgment derives from the remote oracle (the confhead
+  row and the A4 E2B-entry router/kNN feed) carry `"oracle":"nim"`
+  (`ledger.Entry.Oracle`, omitempty — historic rows parse unchanged). B1 rows stay
+  untagged.
+- Config reuse: endpoint/model/timeout/max-tokens come from the existing
+  `nim_endpoint`/`nim_model`/`nim_timeout_sec`/`nim_max_tokens` keys; the API key
+  comes from `$NVIDIA_API_KEY`/`$NGC_API_KEY` only (never config), with the same
+  hosted-endpoint guard as `nim`.
+
 ## [0.60.0] - 2026-08-14
 
 The 32GB-class VIDEO seat: LTX-2.5 22B distilled, pooled, with joint audio. Executes the

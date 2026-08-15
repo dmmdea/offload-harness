@@ -131,6 +131,8 @@ offload-harness generate-svg gauge '{"value":72,"max":100,"label":"Score","unit"
 offload-harness nim --list-models                                            # browse available model ids
 offload-harness nim "Explain MoE routing in 3 bullets" --model nvidia/nemotron-3-ultra-550b-a55b --max-tokens 600
 offload-harness nim "Summarize this" --model meta/llama-3.3-70b-instruct --base http://127.0.0.1:8000/v1  # self-hosted NIM (keyless)
+offload-harness shadow-label --oracle nim   # judge queued shadow items against the REMOTE model instead of the local escalation tier
+                                            #   (classify/extract/summarize/triage; label rows carry "oracle":"nim"; E2B router counterfactual stays local; input text leaves the box)
 
 # Operate & inspect
 offload-harness mcp                      # run as an MCP server (stdio)
