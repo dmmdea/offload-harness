@@ -2268,11 +2268,15 @@ func runShadowLabel(args []string) error {
 
 	// The NIM client is built and PREFLIGHTED before Drain: Drain destructively
 	// claims the queue, and per-item chat failures are skipped as un-judgeable —
-	// so a dead endpoint, bad key, or wrong model id during a nim run would
-	// otherwise burn every queued item for zero labels. One cheap real chat call
-	// proves auth+endpoint+model together; on failure nothing has been drained.
+	// so a dead endpoint, bad key, wrong model id, or a model that truncates at
+	// the configured budget would otherwise burn every queued item for zero
+	// labels. The preflight is a REPRESENTATIVE oracle roundtrip (real prompt,
+	// real nim_max_tokens, full Adapt) — a 1-token ping would prove auth but
+	// miss the truncation steady state, the failure mode that actually burns
+	// queues on reasoning models. On failure nothing has been drained.
 	runTier := p.RunTier
 	oracleTag := ""
+	stats := &nimoracle.Stats{}
 	if *oracle == "nim" {
 		baseURL := cfg.NIMEndpoint
 		key := nimclient.KeyForBase(baseURL) // env key only for NVIDIA hosts; never transmitted to a non-NVIDIA base
@@ -2286,10 +2290,23 @@ func runShadowLabel(args []string) error {
 			timeout = 120 * time.Second
 		}
 		client := nimclient.New(baseURL, key, timeout)
-		if _, err := client.Chat(context.Background(), cfg.NIMModel, "", "ping", 1, 0); err != nil {
+		preq := core.Request{Task: core.TaskClassify, Input: "The delivery arrived on time and the packaging was intact.",
+			Params: map[string]any{"labels": []string{"positive", "negative"}}}
+		psys, puser, _ := nimoracle.Prompt(core.TaskClassify, preq)
+		cr, err := client.Chat(context.Background(), cfg.NIMModel, psys, puser, cfg.NIMMaxTokens, 0)
+		switch {
+		case err != nil:
 			return fmt.Errorf("shadow-label: NIM preflight failed (nothing drained): %w", err)
+		case cr.Truncated:
+			return fmt.Errorf("shadow-label: NIM preflight reply truncated at nim_max_tokens=%d (nothing drained) — "+
+				"raise nim_max_tokens (reasoning models spend tokens thinking before answering) or pick a non-reasoning nim_model", cfg.NIMMaxTokens)
+		default:
+			if _, ok := nimoracle.Adapt(core.TaskClassify, preq, cr.Content); !ok {
+				return fmt.Errorf("shadow-label: NIM preflight reply was not adaptable to the judge shape (nothing drained) — "+
+					"model %s did not follow the JSON-only instruction; pick a different nim_model", cfg.NIMModel)
+			}
 		}
-		runTier = nimoracle.WrapRunTier(client.Chat, cfg.NIMModel, cfg.NIMMaxTokens, cfg.EscalationModel, p.RunTier)
+		runTier = nimoracle.WrapRunTier(client.Chat, cfg.NIMModel, cfg.NIMMaxTokens, cfg.EscalationModel, p.RunTier, stats)
 		oracleTag = "nim"
 		fmt.Printf("shadow-label: oracle=nim model=%s base=%s (escalation slot only; E2B counterfactual stays local)\n", cfg.NIMModel, baseURL)
 	}
@@ -2329,8 +2346,15 @@ func runShadowLabel(args []string) error {
 	w := shadow.LabelQueue(context.Background(), items, *n, deps)
 	routerWritten := countJSONLLines(cfg.RouterLabelsPath) - routerBefore
 	fmt.Printf("shadow-label: drained %d items, wrote %d confhead labels -> %s\n", len(items), w, cfg.ConfHeadLabelsPath)
-	if oracleTag != "" && w == 0 {
-		fmt.Println("shadow-label: WARNING — oracle=nim wrote 0 labels for a non-empty drain; every item was skipped as un-judgeable (check the remote model's output quality / nim_max_tokens). The drained items are gone (drain is destructive).")
+	if oracleTag != "" {
+		fmt.Printf("shadow-label: oracle stats: %s\n", stats)
+		if w == 0 {
+			// Fail LOUD: a zero-label nim run over a non-empty (and destructively
+			// drained) queue is a systemic remote failure until proven otherwise —
+			// exit non-zero so schedulers and operators cannot mistake it for a
+			// clean run over an un-judgeable queue.
+			return fmt.Errorf("shadow-label: oracle=nim wrote 0 labels for %d drained items (drain is destructive — those items are gone); %s", len(items), stats)
+		}
 	}
 	fmt.Printf("shadow-label: wrote %d router labels -> %s\n", routerWritten, cfg.RouterLabelsPath)
 	if cfg.KNNPreFilterEnabled {

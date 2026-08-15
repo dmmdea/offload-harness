@@ -25,11 +25,27 @@ GBNF grammar path are untouched, and NIM calls still never enter the savings led
   outside yes/no/unsure, non-object extraction, truncated reply) are rejected as
   un-judgeable — never recorded as disagreement.
 - `WrapRunTier` dispatch: only the ESCALATION slot goes remote; the B1 E2B
-  router-counterfactual rerun keeps its local provenance.
-- Provenance: label rows whose judgment derives from the remote oracle (the confhead
-  row and the A4 E2B-entry router/kNN feed) carry `"oracle":"nim"`
+  router-counterfactual rerun keeps its local provenance. A nil local RunTier panics
+  at wiring time (it would silently starve the B1 feed).
+- Provenance: ledger label rows whose judgment derives from the remote oracle (the
+  confhead row and the A4 E2B-entry router row) carry `"oracle":"nim"`
   (`ledger.Entry.Oracle`, omitempty — historic rows parse unchanged). B1 rows stay
-  untagged.
+  untagged. The A4 kNN append is SKIPPED under the nim oracle — `knn.Row` has no
+  provenance field, so remote-derived accept labels would mix irreversibly into the
+  local substrate; the B1 kNN feed (local rerun) is unaffected.
+- Fail-loud batch semantics (the queue drain is destructive): a REPRESENTATIVE
+  preflight (real prompt, real `nim_max_tokens`, full adapt) runs BEFORE the drain —
+  missing/invalid key, dead endpoint, wrong model id, or a model that truncates or
+  ignores the JSON-only instruction abort with nothing drained. Per-cause skip
+  counters (`remote/chat_err/truncated/empty/unadaptable` + the first transport
+  error verbatim) print in the run summary, and a zero-label run over a non-empty
+  drain exits non-zero.
+- Oracle prompts mirror the local tiers where the judge compares fields: summarize
+  instructs the same 1-2 sentence `"summary"` + up-to-N `"bullets"` split (default
+  5) as `tasks.buildSummarize`; extract stays neutral about groundedness (no
+  verbatim coaching of `grounding.Check`, which IS the label); classify without a
+  label set is rejected before any paid call; inline `<think>` spans are stripped
+  before JSON extraction.
 - Config reuse: endpoint/model/timeout/max-tokens come from the existing
   `nim_endpoint`/`nim_model`/`nim_timeout_sec`/`nim_max_tokens` keys; the API key
   comes from `$NVIDIA_API_KEY`/`$NGC_API_KEY` only (never config), with the same

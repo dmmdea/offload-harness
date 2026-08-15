@@ -48,10 +48,14 @@ type LabelDeps struct {
 	// disabled. Must NOT touch the savings ledger.
 	AppendKNN func(task string, vec []float64, accept bool) error
 	// Oracle names a non-local counterfactual oracle ("nim") for provenance
-	// tagging of the label rows whose judgment derives from the Escalation
-	// rerun: the confhead entry and the A4 E2B-entry router/kNN feed. The B1
-	// block's router rows stay untagged — their agreement comes from a LOCAL
-	// E2B rerun regardless of oracle. Empty = local escalation tier (default).
+	// tagging of the ledger rows whose judgment derives from the Escalation
+	// rerun: the confhead entry and the A4 E2B-entry router row. The A4 kNN
+	// append is SKIPPED entirely when Oracle is set — knn.Row carries no
+	// provenance field, so a remote-derived accept label would mix silently
+	// and irreversibly into the local substrate. The B1 block's router and
+	// kNN rows stay untagged and unfiltered — their agreement comes from a
+	// LOCAL E2B rerun regardless of oracle. Empty = local escalation tier
+	// (default).
 	Oracle string
 }
 
@@ -128,7 +132,10 @@ func LabelQueue(ctx context.Context, items []Item, cap int, d LabelDeps) (writte
 					}
 					_ = d.AppendLabel(d.RouterLabelsPath, routerEntry)
 				}
-				if d.Embed != nil && d.AppendKNN != nil {
+				// kNN substrate rows have no provenance field, so a remote
+				// oracle's accept label cannot be tagged or later filtered —
+				// skip the append rather than silently mix provenances.
+				if d.Embed != nil && d.AppendKNN != nil && d.Oracle == "" {
 					if vec, eerr := d.Embed(it.Input); eerr == nil {
 						_ = d.AppendKNN(it.Task, vec, agreed)
 					}
