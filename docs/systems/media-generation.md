@@ -246,20 +246,21 @@ tiers stay SDXL-class for image generation until O1 on 8 GB is verified on real 
 
 **LTX-2.5** (`videogen_family: "ltx25"`) is the measured 32 GB-class video seat (2026-08-12
 three-way, bound 2026-08-14, behavior-proven 2026-08-15): the 22B distilled int8 DiT renders
-1920×1088 @ 24 fps with a **jointly generated soundtrack** through the official template's
+1920×1088-class output with a **jointly generated soundtrack** through the official template's
 two-pass recipe (half-res base pass + ×2 latent spatial upscale + refine, fixed distilled
-sigmas, dual CFG 1/1) in ~210–250 s per 5 s clip on the reference dual-16 GB box — vs Wan
-2.2's silent 1280×720 @ 16 fps in 1134 s. **Loading is STREAMING, not pooled** (measured
-2026-08-15): the int8 file upcasts to bf16 at compute — **39.11 GB loaded** — which exceeds
-a 2×16 GB physical pool, and DisTorch pooling OOMs at every `virtual_vram_gb` (weights fit
-above ~25, but full-resolution stage-2 activations then don't). Native DynamicVRAM streaming
-from system RAM is the only fitting path and measured faster for these bf16 graphs, so the
-`videogen_pool_*` keys stay UNSET for this family and the video ComfyUI launch must NOT carry
-`--disable-dynamic-vram` (the krea2 image seat, which fits its pool, keeps both). The family
-builder still supports `videogen_pool_*` for future single-big-card or ≥48 GB tiers. The
-builder deliberately drops the template's gemma4_e2b prompt-enhancer branch (the harness's
-own planner does prompt expansion) and pairs the convrot transformer with the **conv** video
-VAE. Wan 2.2 stays available per-request via `model: "wan"`.
+sigmas, dual CFG 1/1) — vs Wan 2.2's silent 1280×720 @ 16 fps in 1134 s. **The dual-16 GB
+binding is POOLED at 1280×704 (operator decision 2026-08-15: the pool doctrine outranks
+resolution).** The measured constraint: the int8 file upcasts to bf16 at compute —
+**39.11 GB loaded** — which exceeds a 2×16 GB physical pool, so at 1920×1088 DisTorch
+pooling OOMs at every `virtual_vram_gb` (weights fit above ~25, but full-resolution stage-2
+activations then don't). At 1280×704 with `videogen_pool_vvram_gb: 30` the pooled render is
+behavior-proven (5 s + joint audio in ~190 s, both cards loaded, zero OOM); pooled serving
+requires the `--disable-dynamic-vram` launch flag (MultiGPU #191), same as the krea2 image
+seat. Full-resolution 1920×1088 remains available as a per-deployment STREAMING alternative
+(pool keys unset, dynamic VRAM on — measured ~210 s and 1.65–2.3× faster for bf16 graphs).
+The builder deliberately drops the template's gemma4_e2b prompt-enhancer branch (the
+harness's own planner does prompt expansion) and pairs the convrot transformer with the
+**conv** video VAE. Wan 2.2 stays available per-request via `model: "wan"`.
 
 **Qwen-Image 2512** (Apache-2.0) is the prompt-adherence *generation* alternative at ≥16 GB:
 `imagegen_family: "qwen-image"` selects its model-correct graph — SD3-class 16-channel latent
