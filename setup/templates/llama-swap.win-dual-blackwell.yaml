@@ -19,9 +19,11 @@
 # if the cards moved. A silent flip inverts every placement decision in this file.
 #
 # Serving invariants (grammar reliability — do NOT change): --jinja, --flash-attn on,
-# no MTP flags on models without an MTP graph, reasoning off. Do NOT add --swa-full here
-# (load-bearing for the LARGE iSWA models only). q8_0 V requires flash-attn on. q4_0 KV
-# is BANNED (92% prefill degradation, measured).
+# no MTP flags on models without an MTP graph, reasoning off — the reasoning-off
+# invariant binds the CASCADE seats; the *-agent and qwen3.8 entries below are
+# explicitly reasoning/thinking seats (agent loop), added 2026-08-16. Do NOT add
+# --swa-full here (load-bearing for the LARGE iSWA models only). q8_0 V requires
+# flash-attn on. q4_0 KV is BANNED (92% prefill degradation, measured).
 healthCheckTimeout: 300
 logLevel: info
 
@@ -49,6 +51,34 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
       __MOE_26B__ --parallel 1 ${common}
+    ttl: 300
+  # AGENT seat: the flagship's rollback seat, matching the live reference box. Same
+  # 26B weights and geometry as the cascade seat above; the ONLY difference is
+  # reasoning ON (thinking agent loop). Flags written explicitly rather than via
+  # ${common} because the macro pins reasoning off. Exists whenever the 26B exists:
+  # the renderer strips it together with the 26B when a tier drops it.
+  gemma-4-26b-agent:
+    aliases: [26b-agent, gemma4-26b-agent]
+    env: [GGML_CUDA_DISABLE_GRAPHS=1, CUDA_VISIBLE_DEVICES=1]
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
+      __MOE_26B__ --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --jinja --reasoning on
+      --port ${PORT} --host 127.0.0.1
+    ttl: 300
+  # CODER + AGENT seat: Seat Frontier Leg 1 winner (2026-08-14) — Qwen3.8-27B
+  # UD-Q4_K_XL, pooled across BOTH cards (-sm layer: 16.7GB does not fit one 16GB
+  # card next to KV). Thinking model: it must NOT take ${common} (the macro pins
+  # --reasoning off); sampling is the Unsloth thinking-mode recipe. Rendered only
+  # when the tier sets include_qwen38 (the Q38 token pair mirrors the M26 one).
+  qwen3.8-27b:
+    aliases: [qwen38, local-coder, coder, agent-loop]
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.8-27B-UD-Q4_K_XL.gguf
+      --mmproj __MODELS__/mmproj-Qwen3.8-27B-F16.gguf -ngl 999 -sm layer --parallel 1
+      --jinja --flash-attn on --cache-type-k __KV_K__ --cache-type-v __KV_V__
+      --ctx-size __CTX__ --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
+      --port ${PORT} --host 127.0.0.1
     ttl: 300
   embeddinggemma:
     env: [CUDA_VISIBLE_DEVICES=0]
@@ -95,6 +125,8 @@ matrix:
     e4b: offload-e4b
     e2b: gemma4-e2b
     m26: gemma4-26b-a4b
+    a26: gemma-4-26b-agent
+    q38: qwen3.8-27b
   # The memory stack is the most expensive thing on this box to lose and the cheapest
   # to keep: maximally expensive to stop, so the solver stops something else first.
   evict_costs:
@@ -102,4 +134,4 @@ matrix:
     rer: 1000
   sets:
     residents: "emb & rer"
-    text: "+residents & (e4b | e2b__M26_ALT____SEATS_SWAPPABLE__)__SEATS_RESIDENT__"
+    text: "+residents & (e4b | e2b__M26_ALT____Q38_ALT____SEATS_SWAPPABLE__)__SEATS_RESIDENT__"

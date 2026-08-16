@@ -47,7 +47,7 @@ media binding for this tier.
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Configs #8/#9 (5060 8GB Blackwell; +64GB adds 26B cpu-moe). E4B resident full-GPU. REQUIRES the Blackwell CUDA-12.8 sm_120 build (Task H4). 26B cpu-moe only when ram_tier mid/high; else dropped. J4: config_seed_ram_mid_high auto-binds the O1 bf16 IMAGE seat on mid/high-RAM boxes (verified on the ampere-8 reference box; image only — no video/music on 8GB by decision 2026-07-23). PROJECTED. J-media 2026-07-28: media_seats = ampere-8's PROVEN CUDA seats verbatim (same 8 GB/E4B/cpu-moe class); tier gpu_env pins the device on both. PROJECTED here (the reference is the ampere-8 laptop, not this exact card).
+> Configs #8/#9 (5060 8GB Blackwell; +64GB adds 26B cpu-moe). E4B resident full-GPU. REQUIRES the Blackwell CUDA-12.8 sm_120 build (Task H4). 26B cpu-moe only when ram_tier mid/high; else dropped. J4: config_seed_ram_mid_high auto-binds the O1 bf16 IMAGE seat on mid/high-RAM boxes (verified on the ampere-8 reference box; image only — no video/music on 8GB by decision 2026-07-23). PROJECTED. J-media 2026-07-28: media_seats = ampere-8's PROVEN CUDA seats verbatim (same 8 GB/E4B/cpu-moe class); tier gpu_env pins the device on both. PROJECTED here (the reference is the ampere-8 laptop, not this exact card). TIER-DOCTRINE PASS 2026-08-16: parity with the twin-arch sibling verified field-identical; the split is build-arch only. Candidate for a single '8gb-cuda' tier id — rename deferred (installer classifier + installed.json compat migration).
 
 ## Capability report
 

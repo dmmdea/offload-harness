@@ -7,7 +7,9 @@
 # accounting: these profiles are only selected at >=24GB dedicated VRAM, and an
 # H3-style selftest on the real box confirms the fit (all values PROJECTED).
 # Serving invariants (grammar reliability — do NOT change): --jinja, no MTP,
-# reasoning off. Context size, KV cache type, flash-attn, and the 26B MoE
+# reasoning off — the reasoning-off invariant binds the CASCADE seats; the
+# qwen3.8 entry below is explicitly a reasoning/thinking seat (agent loop),
+# added 2026-08-16. Context size, KV cache type, flash-attn, and the 26B MoE
 # placement are PROFILE-DRIVEN: install.ps1 (H2) substitutes the CTX / KV-K /
 # KV-V / FLASH-ATTN / MOE-26B tokens from setup/templates/profiles.json.
 # GGML_CUDA_DISABLE_GRAPHS=1 stays set for the 26B tier.
@@ -34,6 +36,23 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
       __MOE_26B__ --parallel 1 ${common}
+  # CODER + AGENT seat: Seat Frontier Leg 1 winner (2026-08-14) — Qwen3.8-27B
+  # UD-Q4_K_XL, single-card here (no -sm layer: the whole file fits a 48/72GB
+  # card). Thinking model: it must NOT take ${common} (the macro pins
+  # --reasoning off); sampling is the Unsloth thinking-mode recipe. Rendered only
+  # when the tier sets include_qwen38 (the Q38 token pair mirrors the M26 one);
+  # blackwell-32 renders WITHOUT it — the 27B cannot join the all-resident set
+  # beside the 26B in 32GB. No ttl, like everything else here: resident.
+  # NO 26b *-agent entry on this template ON PURPOSE: double-loading the same
+  # weights resident contradicts the all-resident premise.
+  qwen3.8-27b:
+    aliases: [qwen38, local-coder, coder, agent-loop]
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.8-27B-UD-Q4_K_XL.gguf
+      --mmproj __MODELS__/mmproj-Qwen3.8-27B-F16.gguf -ngl 999 --parallel 1
+      --jinja --flash-attn on --cache-type-k __KV_K__ --cache-type-v __KV_V__
+      --ctx-size __CTX__ --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
+      --port ${PORT} --host 127.0.0.1
   embeddinggemma:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/embeddinggemma-300m-Q8_0.gguf
@@ -63,7 +82,8 @@ matrix:
     e4b: offload-e4b
     e2b: gemma4-e2b
     m26: gemma4-26b-a4b
+    q38: qwen3.8-27b
   evict_costs:
     emb: 1000
   sets:
-    resident: "emb & e4b & e2b__M26_AND____SEATS_RESIDENT__"
+    resident: "emb & e4b & e2b__M26_AND____Q38_AND____SEATS_RESIDENT__"

@@ -117,6 +117,23 @@ $PINNED = @{
     sha  = 'dcf179a91153e3a7ece792e48ef872180d9d6ef9b7677f0a0bd3e83cfe624d5e'
     version = 'dcf179a9'
   }
+  # Qwen3.8-27B coder/agent seat (Seat Frontier Leg 1 winner, 2026-08-14). Gated on
+  # the resolved profile's include_qwen38 (Step 5) — mirrors the include_26b
+  # mechanism. sha = real LFS oid fetched from the HF tree API 2026-08-16.
+  'model-qwen38' = @{
+    url  = 'https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-Q4_K_XL.gguf'
+    name = 'Qwen3.8-27B-UD-Q4_K_XL.gguf'
+    size = 17923394624
+    sha  = 'bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372'
+    version = 'bee238bb'
+  }
+  'model-qwen38-mmproj' = @{
+    url  = 'https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/mmproj-F16.gguf'
+    name = 'mmproj-Qwen3.8-27B-F16.gguf'   # renamed locally to avoid mmproj collisions (embeddinggemma precedent for rename)
+    size = 927607488
+    sha  = 'cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e'
+    version = 'cbb841a9'
+  }
   'model-embed' = @{
     url  = 'https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf'
     name = 'embeddinggemma-300m-Q8_0.gguf'
@@ -868,12 +885,24 @@ Step "llama-swap -> $swapDir" `
 $manifestComponents['llama-swap'] = $SWAP_TAG
 
 # ---------------------------------------------------------------------------
-# Step 5: models - E4B + embed always; E2B + 26B only when withFamily
+# Step 5: models - E4B + embed always; E2B + 26B only when withFamily; the
+# Qwen3.8-27B coder/agent GGUF + mmproj only when the resolved profile sets
+# include_qwen38 (mirrors the include_26b mechanism — the renderer strips the
+# yaml entry on the same flag, so download set and served roster stay in step).
 # R3.4: SKIP test hashes once (cached via <file>.sha-ok) against the pinned sha; a pin bump
 # (different sha) invalidates both the sentinel comparison and the manifest version check.
 # ---------------------------------------------------------------------------
 $modelKeys = @('model-e4b', 'model-embed')
 if ($withFamily) { $modelKeys += @('model-e2b', 'model-26b') }
+$includeQwen38 = $false
+$profilesJsonStep5 = Join-Path (Join-Path $scriptDir 'templates') 'profiles.json'
+if ($profileId -and (Test-Path $profilesJsonStep5)) {
+  $pdoc5 = Get-Content -Raw $profilesJsonStep5 | ConvertFrom-Json
+  if ($pdoc5.profiles.PSObject.Properties[$profileId]) {
+    $includeQwen38 = [bool]$pdoc5.profiles.$profileId.include_qwen38
+  }
+}
+if ($includeQwen38) { $modelKeys += @('model-qwen38', 'model-qwen38-mmproj') }
 foreach ($key in $modelKeys) {
   $m = $PINNED[$key]
   $dest = Join-Path $modelDir $m.name

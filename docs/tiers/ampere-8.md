@@ -47,7 +47,7 @@ media binding for this tier.
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Configs #5/#6 (3070 8GB laptop; +64GB adds the 26B cpu-moe path). E4B resident full-GPU. 26B via --cpu-moe ONLY when ram_tier is mid/high; dropped on low/min (no RAM path). J4: config_seed_ram_mid_high auto-binds the quality-first O1 bf16 IMAGE seat on mid/high-RAM boxes (VERIFIED on the 8GB 3070 + 64GB reference box, 5.9 min/render via RAM offload; the seat the 8GB reference laptop previously bound manually). IMAGE ONLY by decision 2026-07-23: no video/music seat on the 8GB node. Model downloads stay out-of-band like the >=16GB seeds. PROJECTED.
+> Configs #5/#6 (3070 8GB laptop; +64GB adds the 26B cpu-moe path). E4B resident full-GPU. 26B via --cpu-moe ONLY when ram_tier is mid/high; dropped on low/min (no RAM path). J4: config_seed_ram_mid_high auto-binds the quality-first O1 bf16 IMAGE seat on mid/high-RAM boxes (VERIFIED on the 8GB 3070 + 64GB reference box, 5.9 min/render via RAM offload; the seat the 8GB reference laptop previously bound manually). IMAGE ONLY by decision 2026-07-23: no video/music seat on the 8GB node. Model downloads stay out-of-band like the >=16GB seeds. PROJECTED. TIER-DOCTRINE PASS 2026-08-16: parity with the twin-arch sibling verified field-identical; the split is build-arch only. Candidate for a single '8gb-cuda' tier id — rename deferred (installer classifier + installed.json compat migration).
 
 ## Capability report
 

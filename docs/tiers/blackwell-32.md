@@ -22,7 +22,7 @@ binding can never name a seat that was not rendered:
 
 | seat | kind | binds | model | residency |
 |---|---|---|---|---|
-| `gemma4-e4b-vision` | vision | `vision_model` | `gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf` | resident |
+| `qwen3-vl-8b` | vision | `vision_model` | `Qwen3VL-8B-Instruct-Q8_0.gguf` | resident |
 | `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | resident |
 
 A seat still needs its weights on the box — model downloads stay out-of-band, as with
@@ -32,16 +32,24 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
 |---|---|
-| `imagegen_ckpt` | `hidream_o1_image_bf16.safetensors` |
-| `imagegen_family` | `hidream-o1` |
+| `imagegen_cfg` | `1` |
+| `imagegen_ckpt` | `krea2_turbo_bf16.safetensors` |
+| `imagegen_family` | `krea2` |
+| `imagegen_steps` | `8` |
 | `imagegen_timeout_sec` | `3600` |
-| `imagegen_vae` | `builtin` |
-| `videogen_frames` | `81` |
-| `videogen_height` | `720` |
-| `videogen_text_encoder` | `umt5_xxl_fp16.safetensors` |
+| `imagegen_vae` | `qwen_image_vae.safetensors` |
+| `videogen_audio_vae` | `ltx-2.5-audio-vae-bf16.safetensors` |
+| `videogen_family` | `ltx25` |
+| `videogen_fps` | `24` |
+| `videogen_frames` | `121` |
+| `videogen_height` | `704` |
+| `videogen_latent_upscaler` | `ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors` |
+| `videogen_text_encoder` | `gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors` |
 | `videogen_timeout_sec` | `5400` |
+| `videogen_transformer` | `ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors` |
 | `videogen_unet_high` | `Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf` |
 | `videogen_unet_low` | `Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf` |
+| `videogen_video_vae` | `ltx-2.5-video-vae-conv-bf16.safetensors` |
 | `videogen_width` | `1280` |
 
 `__OFFLOAD_HOME__` is replaced with the install root at render time.
@@ -51,7 +59,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Config #13 (RTX 5090 32GB / RTX PRO 4500 32GB, Blackwell sm_120). ALL-RESIDENT: the whole roster (~21GB weights) stays hot with no swap group; 64K ctx q8_0 KV inside 32GB. config_seed applies only to a FRESH ~/.local-offload/config.json (install Step 8). Spec: docs/superpowers/specs/2026-07-16-blackwell-profile-tiers-design.md. PROJECTED - H3 measures the real ceiling. J-media 2026-07-28: seats are RESIDENT here (win-cuda-resident places only that role - nothing on this tier swaps), so VRAM is ADDITIVE with the roster. Arithmetic, stated so it can be checked: the ~21GB roster figure is THIS TIER'S OWN pre-existing note, not a new measurement; E4B+mmproj at ctx 4096 (~4.5GB) plus whisper (~1.6GB) is about +6GB, which spends roughly HALF of the ~11GB the original 32GB design left implicit for 64K q8_0 KV, leaving ~5GB for four co-resident models. The 8B (~10GB) does not fit at all, which is why 48/72 get it and this tier does not. Because nothing swaps on this template, an operator who finds KV tight must DROP a seat rather than expect the solver to recover. Also note this backend has no Linux template (cuda-resident is Windows-only). PROJECTED - verify the budget on real silicon before relying on it.
+> Config #13 (RTX 5090 32GB / RTX PRO 4500 32GB, Blackwell sm_120). ALL-RESIDENT: the whole roster (~21GB weights) stays hot with no swap group; 64K ctx q8_0 KV inside 32GB. config_seed applies only to a FRESH ~/.local-offload/config.json (install Step 8). Spec: docs/superpowers/specs/2026-07-16-blackwell-profile-tiers-design.md. PROJECTED - H3 measures the real ceiling. J-media 2026-07-28: seats are RESIDENT here (win-cuda-resident places only that role - nothing on this tier swaps), so VRAM is ADDITIVE with the roster. Arithmetic, stated so it can be checked: the ~21GB roster figure is THIS TIER'S OWN pre-existing note, not a new measurement; E4B+mmproj at ctx 4096 (~4.5GB) plus whisper (~1.6GB) is about +6GB, which spends roughly HALF of the ~11GB the original 32GB design left implicit for 64K q8_0 KV, leaving ~5GB for four co-resident models. The 8B (~10GB) does not fit at all, which is why 48/72 get it and this tier does not. Because nothing swaps on this template, an operator who finds KV tight must DROP a seat rather than expect the solver to recover. Also note this backend has no Linux template (cuda-resident is Windows-only). PROJECTED - verify the budget on real silicon before relying on it. TIER-DOCTRINE PASS 2026-08-16 (PROJECTED): vision seat was e4b-vision — WORSE than the 16GB tiers' 8B seat, pure drift — now qwen3-vl-8b. krea2 + ltx25(1280x704) seeded. agent_model stays derived (26b-a4b): the 27B cannot join the all-resident set beside the 26B in 32GB; the thinking-agent upgrade for this tier is an open bake-off item.
 
 ## Capability report
 

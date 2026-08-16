@@ -56,7 +56,9 @@ func TestSeatsLandInBothTheModelsMapAndTheMatrix(t *testing.T) {
 		"    vis: gemma4-e4b-vision", // a matrix var, because a set may name only vars
 		"    stt: whisper-stt",
 		// Swappable seats are ALTERNATIVES: one big seat on the card at a time.
-		`interactive: "+residents & (e4b | e2b | m26 | vis | stt)"`,
+		// a26 is the 26B thinking-agent entry — same weights as m26, so it joins
+		// the same mutually-exclusive alternative group.
+		`interactive: "+residents & (e4b | e2b | m26 | a26 | vis | stt)"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("rendered config missing %q:\n%s", want, got)

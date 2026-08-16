@@ -42,7 +42,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Config #12 (Vega 7/GCN + 32GB, Vulkan). Weakest path: E2B, 8K f16, flash-attn OFF (older Vulkan FA unreliable), 26B dropped. PROJECTED. J-media 2026-07-28: STT via the whisper.cpp Vulkan build (solid). Vision reuses E4B + mmproj but keeps the CLIP encoder on CPU (--no-mmproj-offload) because mmproj on the Vulkan backend is degraded (llama.cpp #20081); the LLM still decodes on the iGPU. flash-attn off (tier). Both pin GGML_VK_VISIBLE_DEVICES=0. PROJECTED — no GCN box measured; needs a whisper.cpp Vulkan build.
+> Config #12 (Vega 7/GCN + 32GB, Vulkan). Weakest path: E2B, 8K f16, flash-attn OFF (older Vulkan FA unreliable), 26B dropped. PROJECTED. J-media 2026-07-28: STT via the whisper.cpp Vulkan build (solid). Vision reuses E4B + mmproj but keeps the CLIP encoder on CPU (--no-mmproj-offload) because mmproj on the Vulkan backend is degraded (llama.cpp #20081); the LLM still decodes on the iGPU. flash-attn off (tier). Both pin GGML_VK_VISIBLE_DEVICES=0. PROJECTED — no GCN box measured; needs a whisper.cpp Vulkan build. TIER-DOCTRINE PASS 2026-08-16: reviewed; seats are the best that fit — no change.
 
 ## Capability report
 

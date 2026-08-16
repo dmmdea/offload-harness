@@ -57,7 +57,11 @@ type servingProfile struct {
 	FlashAttn  string `json:"flash_attn"`
 	Backend    string `json:"backend"`
 	Include26B bool   `json:"include_26b"`
-	MoE26B     string `json:"moe_26b"`
+	// IncludeQwen38 gates the Qwen3.8-27B coder/agent entry (and, in install.ps1,
+	// its GGUF+mmproj downloads) the same way Include26B gates the 26B. Absent =
+	// false: only the tiers that measured (or project) the seat set it.
+	IncludeQwen38 bool   `json:"include_qwen38"`
+	MoE26B        string `json:"moe_26b"`
 	// NCPUMoE is the N for the partial `n_cpu_moe` placement (top N expert layers in
 	// RAM, the rest on the GPU).
 	NCPUMoE int `json:"n_cpu_moe"`
@@ -290,7 +294,7 @@ func runInstallRender(args []string) error {
 	rendered, err := servingtmpl.Render(tmpl, servingtmpl.Params{
 		LlamaBin: *llamaBin, ModelsDir: *modelsDir, Listen: *listen,
 		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
-		MoE26B: moe, Threads: n, Include26B: include26B,
+		MoE26B: moe, Threads: n, Include26B: include26B, IncludeQ38: p.IncludeQwen38,
 		Seats: p.MediaSeats, Home: *home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
 	})
 	if err != nil {

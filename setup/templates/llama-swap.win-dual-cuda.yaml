@@ -9,7 +9,9 @@
 # (cross-GPU per-token transfer latency); the second card hosts the editor.
 #
 # Serving invariants (grammar reliability — do NOT change): --jinja, no MTP,
-# reasoning off. Context size, KV type, flash-attn, and 26B MoE placement are
+# reasoning off — the reasoning-off invariant binds the CASCADE seats; the *-agent
+# entry below is explicitly a reasoning/thinking seat (agent loop), added
+# 2026-08-16. Context size, KV type, flash-attn, and 26B MoE placement are
 # PROFILE-DRIVEN: install.ps1 (H2) substitutes the CTX / KV-K / KV-V / FLASH-ATTN
 # / MOE-26B tokens from profiles.json (dual-gpu -> 32K/q8_0/FA-on). No --swa-full.
 #
@@ -49,6 +51,21 @@ models:
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
       __MOE_26B__ --parallel 1 ${common}
     ttl: 0
+  # AGENT seat: same 26B weights and device-0 pin as the architect above; the ONLY
+  # difference is reasoning ON (thinking agent loop). Flags written explicitly
+  # rather than via ${common} because the macro pins reasoning off. It is an
+  # ALTERNATIVE to the architect (same card, same weights — the matrix alternates
+  # them rather than double-loading), so it takes a ttl instead of the architect's
+  # ttl 0. Exists whenever the 26B exists: the renderer strips it with the 26B.
+  gemma-4-26b-agent:
+    aliases: [26b-agent, gemma4-26b-agent]
+    env: [GGML_CUDA_DISABLE_GRAPHS=1, CUDA_VISIBLE_DEVICES=0]
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
+      __MOE_26B__ --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --jinja --reasoning on
+      --port ${PORT} --host 127.0.0.1
+    ttl: 300
   # Embeddings — device 1 (small; shares the editor card).
   embeddinggemma:
     env: [CUDA_VISIBLE_DEVICES=1]
@@ -83,6 +100,7 @@ matrix:
     e4b: offload-e4b
     e2b: gemma4-e2b
     m26: gemma4-26b-a4b
+    a26: gemma-4-26b-agent
   evict_costs:
     emb: 1000
   sets:

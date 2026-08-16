@@ -38,8 +38,14 @@ type Params struct {
 	// Include26B false removes the 26B seat entirely — model block, matrix var, and
 	// set membership. A set naming a var that does not exist, or a var naming a model
 	// that does not exist, is a config llama-swap rejects at startup, so dropping one
-	// without the others bricks the service.
+	// without the others bricks the service. The 26B *-agent entry (same weights,
+	// reasoning on) rides this same gate: it exists whenever the 26B exists.
 	Include26B bool
+	// IncludeQ38 gates the Qwen3.8-27B coder/agent entry the same way Include26B
+	// gates the 26B: false removes the model block, its matrix var, and its set
+	// membership (the __Q38_ALT__/__Q38_AND__ tokens render empty). It comes from
+	// the tier's include_qwen38 field and defaults to false — mirrors include_26b.
+	IncludeQ38 bool
 
 	// Seats are the tier's alias-backed media seats (vision / STT). Empty is the
 	// common case and MUST render byte-identically to a build that had no seat
@@ -142,6 +148,12 @@ func Render(tmpl string, p Params) (string, error) {
 			return "", err
 		}
 	}
+	if !p.IncludeQ38 {
+		var err error
+		if out, err = dropQ38(out); err != nil {
+			return "", err
+		}
+	}
 	// Seats go in AFTER the 26B removal and BEFORE substitution: after, so a seat
 	// whose text happens to mention the 26B can never trip drop26B's post-check;
 	// before, so seat blocks are written in the same token vocabulary as the rest
@@ -162,10 +174,26 @@ func Render(tmpl string, p Params) (string, error) {
 	m26alt, m26and := "", ""
 	if p.Include26B {
 		m26alt, m26and = " | m26", " & m26"
+		// A template that declares the 26B *-agent entry (same weights, reasoning on)
+		// joins it as an ALTERNATIVE to the cascade seat: one of the two at a time in
+		// a swapping set, and an alternation inside the conjunction on a resident one
+		// — double-loading the same weights is never a valid combination. Detected
+		// from the template (post-drop) so the agent rides the 26B's own gate rather
+		// than growing a second one.
+		if definesModel(out, agentModel26B) {
+			m26alt, m26and = " | m26 | a26", " & (m26 | a26)"
+		}
+	}
+	// The Qwen3.8 membership mirrors the 26B's token pair, gated by IncludeQ38.
+	q38alt, q38and := "", ""
+	if p.IncludeQ38 {
+		q38alt, q38and = " | q38", " & q38"
 	}
 	for from, to := range map[string]string{
 		"__M26_ALT__":         m26alt,
 		"__M26_AND__":         m26and,
+		"__Q38_ALT__":         q38alt,
+		"__Q38_AND__":         q38and,
 		"__SEATS_SWAPPABLE__": seatFrag[roleSwappable],
 		"__SEATS_RESIDENT__":  seatFrag[roleResident],
 		"__LLAMA_BIN__":       strings.TrimRight(p.LlamaBin, "/"),
@@ -663,13 +691,37 @@ func addMember(tmpl, group, member string) (string, error) {
 		"(a model in no group joins llama-swap's implicit default group, which swaps and evicts)", group, member)
 }
 
-// drop26B removes the 26B model block AND its matrix var. Both, or llama-swap refuses
-// the config at startup: a var pointing at a model that does not exist is exactly the
-// dangling reference the old group-members removal existed to prevent. Its SET
-// membership is handled by the __M26_*__ tokens, not here — an expression edit would
-// have to know whether the operator was `|` or `&`, which only the template knows.
+// agentModel26B is the 26B thinking-agent entry: the same weights as the cascade
+// seat with reasoning ON. It has no gate of its own — it exists whenever the 26B
+// exists, so drop26B strips it and the __M26_*__ expansion joins it.
+const agentModel26B = "gemma-4-26b-agent"
+
+// drop26B removes the 26B model block AND its matrix var — and the 26B *-agent
+// entry with them, because the agent seat shares the 26B's weights and gate (a
+// no-op on templates that do not declare it). Both halves of each removal, or
+// llama-swap refuses the config at startup: a var pointing at a model that does
+// not exist is exactly the dangling reference the old group-members removal
+// existed to prevent. SET membership is handled by the __M26_*__ tokens, not here
+// — an expression edit would have to know whether the operator was `|` or `&`,
+// which only the template knows.
 func drop26B(tmpl string) (string, error) {
-	const model = "gemma4-26b-a4b"
+	out, err := dropModel(tmpl, "gemma4-26b-a4b")
+	if err != nil {
+		return "", err
+	}
+	return dropModel(out, agentModel26B)
+}
+
+// dropQ38 removes the Qwen3.8-27B coder/agent entry — the exact mirror of the 26B
+// strip, keyed on the tier's include_qwen38. Its set membership is handled by the
+// __Q38_*__ tokens.
+func dropQ38(tmpl string) (string, error) {
+	return dropModel(tmpl, "qwen3.8-27b")
+}
+
+// dropModel removes one model block AND the matrix var naming it, with a
+// post-check that nothing functional still references it.
+func dropModel(tmpl, model string) (string, error) {
 	lines := strings.Split(tmpl, "\n")
 	var out []string
 	skipping := false

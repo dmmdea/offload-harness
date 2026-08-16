@@ -57,11 +57,14 @@ $merged2 = Merge-ConfigSeed -ConfigText $tplText -Seed ([pscustomobject]@{ video
 Assert (($merged2 | ConvertFrom-Json).videogen_upscale_width -eq 1920) 'absent key added with its value'
 
 Write-Host "== profiles.json: quality-first config_seed on every >=16GB CUDA tier =="
-# 2026-07-16 quality-first policy (spec: 2026-07-16-quality-first-generation-design.md):
-# every >=16GB CUDA tier seeds the PROVEN highest-quality bindings on a fresh install —
-# HiDream-O1 bf16 Base via its family graph + Wan Q8_0 experts + umt5 fp16 + 720p x 81.
+# 2026-07-16 quality-first policy (spec: 2026-07-16-quality-first-generation-design.md),
+# amended by the 2026-08-16 tier-doctrine pass: the 16GB tiers KEEP the proven
+# HiDream-O1 bf16 + Wan Q8_0 + umt5 + 720p x 81 bindings (24.5GB krea2 does not fit
+# one 16GB card — a 32GB-tier seat change is never an argument to change a 16GB seed);
+# the 32GB-class tiers (blackwell-32/48/72) inherit the measured frontier seats —
+# krea2 image + ltx25 video — asserted in the next block.
 $profiles = (Get-Content -Raw (Join-Path (Join-Path $setupDir 'templates') 'profiles.json') | ConvertFrom-Json).profiles
-foreach ($tier in @('blackwell-72','blackwell-48','blackwell-32','blackwell-16','ampere-16','volta-16')) {
+foreach ($tier in @('blackwell-16','ampere-16','volta-16')) {
   $s = $profiles.$tier.config_seed
   Assert ($s.imagegen_family -eq 'hidream-o1')                              "$tier seeds imagegen_family=hidream-o1"
   Assert ($s.imagegen_ckpt -eq 'hidream_o1_image_bf16.safetensors')         "$tier seeds the bf16 Base checkpoint"
@@ -71,7 +74,35 @@ foreach ($tier in @('blackwell-72','blackwell-48','blackwell-32','blackwell-16',
   Assert ($s.videogen_text_encoder -eq 'umt5_xxl_fp16.safetensors')         "$tier seeds the fp16 text encoder"
   Assert ($s.videogen_width -eq 1280 -and $s.videogen_height -eq 720)       "$tier seeds 720p video"
   Assert ($s.videogen_frames -eq 81)                                        "$tier seeds the 81-frame native ceiling"
+  Assert ($s.agent_model -eq 'gemma4-26b-agent')                            "$tier seats the validated thinking-on 26B agent"
 }
+
+Write-Host "== profiles.json: 32GB-class frontier seats (tier-doctrine pass 2026-08-16) =="
+foreach ($tier32 in @('blackwell-32','blackwell-48','blackwell-72')) {
+  $s = $profiles.$tier32.config_seed
+  Assert ($s.imagegen_family -eq 'krea2')                                   "$tier32 seeds imagegen_family=krea2"
+  Assert ($s.imagegen_ckpt -eq 'krea2_turbo_bf16.safetensors')              "$tier32 seeds the Krea 2 Turbo bf16 checkpoint"
+  Assert ($s.imagegen_steps -eq 8 -and $s.imagegen_cfg -eq 1)               "$tier32 seeds the 8-step turbo recipe"
+  Assert ($s.videogen_family -eq 'ltx25')                                   "$tier32 seeds videogen_family=ltx25"
+  Assert ($s.videogen_transformer -eq 'ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors') "$tier32 seeds the LTX-2.5 int8 transformer"
+  Assert ($s.videogen_frames -eq 121 -and $s.videogen_fps -eq 24)           "$tier32 seeds 121 frames @ 24fps"
+  Assert ($null -eq $s.imagegen_pool_vvram_gb -and $null -eq $s.videogen_pool_vvram_gb) "$tier32 seeds NO pool keys (single card - pooling is a 2x16 mechanism)"
+  Assert ($s.videogen_unet_high -eq 'Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf')  "$tier32 keeps the Wan fallback-family keys"
+}
+# 48/72: FULL resolution (39.11GB loaded fits single-card) + the qwen3.8 agent seat;
+# 32: REDUCED resolution (the 32GB card cannot hold the bf16-upcast transformer at
+# full res) and NO qwen3.8 (cannot be all-resident beside the 26B in 32GB).
+foreach ($tierBig in @('blackwell-48','blackwell-72')) {
+  $s = $profiles.$tierBig.config_seed
+  Assert ($s.videogen_width -eq 1920 -and $s.videogen_height -eq 1088)      "$tierBig seeds FULL-RES 1920x1088 video"
+  Assert ($s.agent_model -eq 'qwen3.8-27b')                                 "$tierBig seats the qwen3.8-27b agent/coder"
+  Assert ([bool]$profiles.$tierBig.include_qwen38)                          "$tierBig sets include_qwen38 (yaml entry + download gate)"
+}
+$s32 = $profiles.'blackwell-32'.config_seed
+Assert ($s32.videogen_width -eq 1280 -and $s32.videogen_height -eq 704)     'blackwell-32 seeds REDUCED-RES 1280x704 video (doctrine-conformant recipe)'
+Assert ($null -eq $s32.agent_model)                                         'blackwell-32 agent stays derived (no explicit agent_model)'
+Assert ($null -eq $profiles.'blackwell-32'.include_qwen38)                  'blackwell-32 include_qwen38 stays absent'
+Assert ($profiles.'blackwell-32'.media_seats[0].name -eq 'qwen3-vl-8b')     'blackwell-32 vision seat promoted to qwen3-vl-8b (parity with the 16GB tiers)'
 # 8GB tiers: the BASE seed stays media-free (low-RAM boxes have no offload path);
 # the O1 image seat now lives in the RAM-CONDITIONAL layer asserted in the J4 block below.
 Assert ($null -eq $profiles.'ampere-8'.config_seed.imagegen_family)         'ampere-8 BASE seed does NOT bind the o1 family (media is RAM-conditional)'

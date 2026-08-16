@@ -36,7 +36,7 @@ It ships no file-backed media seed, so `generate_image` / `generate_video` /
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> No usable GPU. E4B on CPU, 8K f16, flash-attn off (CPU backend has no -ngl/--flash-attn; the cpu template omits both). 26B kept when ram_tier is mid OR high (>= ~56GB); dropped on low/min (no RAM path). On CPU 'cpu_moe' is nominal - all layers already run on CPU. PROJECTED. J-media 2026-07-28: media_seats reuse the resident E4B + mmproj (no separate VLM download, ampere-6's approach) and CPU whisper (whisper.cpp is CPU-native). Vision has NO -ngl/--flash-attn (CPU build) and a hard 512 image cap — CPU VLM is correct but SLOW; STT is genuinely usable. Both swappable (RAM is the constraint). PROJECTED — no CPU box measured.
+> No usable GPU. E4B on CPU, 8K f16, flash-attn off (CPU backend has no -ngl/--flash-attn; the cpu template omits both). 26B kept when ram_tier is mid OR high (>= ~56GB); dropped on low/min (no RAM path). On CPU 'cpu_moe' is nominal - all layers already run on CPU. PROJECTED. J-media 2026-07-28: media_seats reuse the resident E4B + mmproj (no separate VLM download, ampere-6's approach) and CPU whisper (whisper.cpp is CPU-native). Vision has NO -ngl/--flash-attn (CPU build) and a hard 512 image cap — CPU VLM is correct but SLOW; STT is genuinely usable. Both swappable (RAM is the constraint). PROJECTED — no CPU box measured. TIER-DOCTRINE PASS 2026-08-16: reviewed; seats are the best that fit — no change.
 
 ## Capability report
 
