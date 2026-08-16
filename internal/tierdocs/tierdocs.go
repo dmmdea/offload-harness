@@ -136,10 +136,10 @@ a Windows class.
 	for _, n := range names {
 		p := profiles[n]
 		media := "—"
-		if len(p.ConfigSeed) > 0 {
-			media = mediaSummary(p.ConfigSeed)
-		} else if len(p.ConfigSeedMidHigh) > 0 {
-			media = mediaSummary(p.ConfigSeedMidHigh) + " (RAM-gated)"
+		if ms := mediaSeed(p.ConfigSeed); len(ms) > 0 {
+			media = mediaSummary(ms)
+		} else if ms := mediaSeed(p.ConfigSeedMidHigh); len(ms) > 0 {
+			media = mediaSummary(ms) + " (RAM-gated)"
 		}
 		if n := len(p.MediaSeats); n > 0 {
 			kinds := make([]string, 0, n)
@@ -228,6 +228,15 @@ func renderTier(name string, p Profile, reports []string) string {
 		b.WriteString("| dual_resident | `true` | two models stay resident; no shared exclusive swap group |\n")
 	}
 
+	// The seed is PARTITIONED before anything renders from it: only the media
+	// subset may appear under the Media heading or count toward "this tier ships
+	// media". Branching on raw seed EMPTINESS is how dual-gpu's text-only seed
+	// ({agent_model}) deleted the honest NOT CONFIGURED prose and rendered a
+	// "media bindings" table whose sole row was the agent seat — a false claim
+	// the README's media column then repeated.
+	mediaBase := mediaSeed(p.ConfigSeed)
+	mediaMidHigh := mediaSeed(p.ConfigSeedMidHigh)
+
 	b.WriteString("\n## Media\n\n")
 	if len(p.MediaSeats) > 0 {
 		b.WriteString("This tier serves these media **seats** — models in its own llama-swap config, rendered\n" +
@@ -243,47 +252,84 @@ func renderTier(name string, p Profile, reports []string) string {
 		}
 		b.WriteString("\nA seat still needs its weights on the box — model downloads stay out-of-band, as with\nevery seed.\n\n")
 	}
-	if len(p.ConfigSeedMidHigh) > 0 {
+	if len(mediaMidHigh) > 0 {
 		b.WriteString("This tier's media bindings are **RAM-gated** (`config_seed_ram_mid_high`): the installer applies\n" +
 			"them only when the detected `ram_tier` is `mid` or `high`, so the same tier on a low-RAM box\n" +
 			"honestly serves text only.\n\n| key | value |\n|---|---|\n")
-		keys := make([]string, 0, len(p.ConfigSeedMidHigh))
-		for k := range p.ConfigSeedMidHigh {
+		keys := make([]string, 0, len(mediaMidHigh))
+		for k := range mediaMidHigh {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			fmt.Fprintf(&b, "| `%s` | `%s` |\n", k, valueString(p.ConfigSeedMidHigh[k]))
+			fmt.Fprintf(&b, "| `%s` | `%s` |\n", k, valueString(mediaMidHigh[k]))
 		}
 		b.WriteString("\n")
 	}
 	switch {
-	case len(p.ConfigSeed) == 0 && len(p.ConfigSeedMidHigh) == 0 && len(p.MediaSeats) > 0:
-		// Seats but no seed: a real combination, and the seed branch below would
-		// print an empty table under a heading claiming bindings exist.
+	case len(mediaBase) == 0 && len(mediaMidHigh) == 0 && len(p.MediaSeats) > 0:
+		// Seats but no media seed: a real combination, and the seed branch below
+		// would print an empty table under a heading claiming bindings exist.
 		b.WriteString("It ships no file-backed media seed, so `generate_image` / `generate_video` /\n" +
 			"`generate_audio` / `run_graph` report `NOT CONFIGURED` until an operator binds them.\n")
-	case len(p.ConfigSeed) == 0 && len(p.ConfigSeedMidHigh) == 0:
+	case len(mediaBase) == 0 && len(mediaMidHigh) == 0:
 		b.WriteString("**This tier ships no media configuration.** It serves text only until an operator binds\n" +
 			"the media routes by hand, so `generate_image`, `generate_video`, `generate_audio` and\n" +
 			"`run_graph` will report `NOT CONFIGURED` — or `BOUND-BUT-MISSING` where a shipped default\n" +
 			"script path does not exist on the machine. Run `local-offload doctor` to see which.\n")
-	case len(p.ConfigSeed) == 0:
+	case len(mediaBase) == 0:
 		// RAM-gated only: the overlay table above IS the whole media story. Falling
 		// through would print an empty `config_seed` table under a heading saying it
 		// has bindings.
 		b.WriteString("It ships no unconditional `config_seed` — the RAM-gated overlay above is the whole\nmedia binding for this tier.\n")
 	default:
 		b.WriteString("The installer seeds this tier's media bindings (`config_seed`):\n\n| key | value |\n|---|---|\n")
-		keys := make([]string, 0, len(p.ConfigSeed))
-		for k := range p.ConfigSeed {
+		keys := make([]string, 0, len(mediaBase))
+		for k := range mediaBase {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			fmt.Fprintf(&b, "| `%s` | `%s` |\n", k, valueString(p.ConfigSeed[k]))
+			fmt.Fprintf(&b, "| `%s` | `%s` |\n", k, valueString(mediaBase[k]))
 		}
 		b.WriteString("\n`__OFFLOAD_HOME__` is replaced with the install root at render time.\n")
+	}
+
+	// Non-media seed keys render in their own clearly-labeled section — never
+	// under the media heading. Overlay-sourced keys keep their RAM gate visible.
+	type nonMediaRow struct {
+		value string
+		gated bool
+	}
+	nonMediaKeys := make([]string, 0, len(p.ConfigSeed)+len(p.ConfigSeedMidHigh))
+	nonMedia := map[string]nonMediaRow{}
+	for k, v := range p.ConfigSeed {
+		if !mediaSeedKey(k) {
+			nonMediaKeys = append(nonMediaKeys, k)
+			nonMedia[k] = nonMediaRow{value: valueString(v)}
+		}
+	}
+	for k, v := range p.ConfigSeedMidHigh {
+		if !mediaSeedKey(k) {
+			if _, seen := nonMedia[k]; !seen {
+				nonMediaKeys = append(nonMediaKeys, k)
+			}
+			nonMedia[k] = nonMediaRow{value: valueString(v), gated: true}
+		}
+	}
+	if len(nonMediaKeys) > 0 {
+		sort.Strings(nonMediaKeys)
+		b.WriteString("\n## Installer-seeded config (non-media)\n\n" +
+			"These `config_seed` keys are applied to a FRESH harness config exactly like the media\n" +
+			"seed, but they bind no media route — the agent/cascade seats and per-node knobs live\n" +
+			"here so they are never mistaken for a media capability:\n\n| key | value |\n|---|---|\n")
+		for _, k := range nonMediaKeys {
+			mark := ""
+			if nonMedia[k].gated {
+				mark = " (RAM-gated: applied on `mid`/`high` only)"
+			}
+			fmt.Fprintf(&b, "| `%s`%s | `%s` |\n", k, mark, nonMedia[k].value)
+		}
 	}
 
 	if strings.TrimSpace(p.Notes) != "" {
@@ -302,6 +348,34 @@ func renderTier(name string, p Profile, reports []string) string {
 	}
 	fmt.Fprintf(&b, "\n---\n\n[All tiers](README.md) · [profiles.json](../../setup/templates/profiles.json) · [installer](../systems/setup-installer.md)\n")
 	return b.String()
+}
+
+// mediaSeedKey reports whether a config_seed key binds a MEDIA route. The
+// prefix set mirrors the pipeline's own media-config vocabulary
+// (internal/config, internal/mediacap): imagegen_*/videogen_*/musicgen_*/
+// voicegen_* are the spawn-per-job media bindings, and sdcpp_* + vae_mode are
+// the sd.cpp image engine's own binding family. Everything else the installer
+// seeds (agent_model, agent_timeout_sec, escalation_model, reasoning_model,
+// fleet_sampler, …) is harness CONFIG, not a media capability.
+func mediaSeedKey(k string) bool {
+	for _, p := range []string{"imagegen_", "videogen_", "musicgen_", "voicegen_", "sdcpp_"} {
+		if strings.HasPrefix(k, p) {
+			return true
+		}
+	}
+	return k == "vae_mode"
+}
+
+// mediaSeed returns the subset of seed that binds media routes — the only
+// subset the Media heading and the README media column may be built from.
+func mediaSeed(seed map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range seed {
+		if mediaSeedKey(k) {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 func mediaSummary(seed map[string]any) string {

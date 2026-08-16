@@ -76,7 +76,7 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.8-27B-UD-Q4_K_XL.gguf
       --mmproj __MODELS__/mmproj-Qwen3.8-27B-F16.gguf -ngl 999 -sm layer --parallel 1
-      --jinja --flash-attn on --cache-type-k __KV_K__ --cache-type-v __KV_V__
+      --jinja --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
       --ctx-size __CTX__ --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
       --port ${PORT} --host 127.0.0.1
     ttl: 300

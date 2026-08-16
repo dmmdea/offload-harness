@@ -32,7 +32,6 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
 |---|---|
-| `fleet_sampler` | `pdh-shared` |
 | `imagegen_cfg` | `1` |
 | `imagegen_engine` | `sdcpp` |
 | `imagegen_family` | `z-image-turbo` |
@@ -46,6 +45,16 @@ The installer seeds this tier's media bindings (`config_seed`):
 | `vae_mode` | `cpu` |
 
 `__OFFLOAD_HOME__` is replaced with the install root at render time.
+
+## Installer-seeded config (non-media)
+
+These `config_seed` keys are applied to a FRESH harness config exactly like the media
+seed, but they bind no media route — the agent/cascade seats and per-node knobs live
+here so they are never mistaken for a media capability:
+
+| key | value |
+|---|---|
+| `fleet_sampler` | `pdh-shared` |
 
 ## Operator notes
 

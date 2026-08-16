@@ -899,10 +899,21 @@ $profilesJsonStep5 = Join-Path (Join-Path $scriptDir 'templates') 'profiles.json
 if ($profileId -and (Test-Path $profilesJsonStep5)) {
   $pdoc5 = Get-Content -Raw $profilesJsonStep5 | ConvertFrom-Json
   if ($pdoc5.profiles.PSObject.Properties[$profileId]) {
-    $includeQwen38 = [bool]$pdoc5.profiles.$profileId.include_qwen38
+    # STRICT bool gate: [bool]'false' is $true in PowerShell, so a string value
+    # here would start the 18.8GB download the Go renderer then refuses (its
+    # struct wants a real JSON boolean). Match Go's strictness BEFORE the
+    # download: only a JSON true opts in, absent/null stays off, anything else
+    # is a malformed profile and fails loud with the offending value.
+    $q38Val = $pdoc5.profiles.$profileId.include_qwen38
+    if ($null -ne $q38Val -and -not ($q38Val -is [bool])) {
+      throw "profile '$profileId': include_qwen38 must be a JSON boolean, got '$q38Val' ($($q38Val.GetType().Name)) - fix setup/templates/profiles.json before the download set is chosen"
+    }
+    $includeQwen38 = ($q38Val -is [bool] -and $q38Val)
   }
 }
-if ($includeQwen38) { $modelKeys += @('model-qwen38', 'model-qwen38-mmproj') }
+# The coder/agent seat rides the family gate: OFFLOAD_WITH_FAMILY=0 (lean install)
+# opts out of the largest download even on an include_qwen38 tier.
+if ($includeQwen38 -and $withFamily) { $modelKeys += @('model-qwen38', 'model-qwen38-mmproj') }
 foreach ($key in $modelKeys) {
   $m = $PINNED[$key]
   $dest = Join-Path $modelDir $m.name
@@ -958,13 +969,41 @@ if ($withMedia) {
 }
 }  # end if (-not $RenderOnly) — Steps 2-5 (artifact acquisition)
 
+# The repo VERSION file is the renderer's REQUIRED version. A harness exe whose
+# embedded templates/structs predate the on-disk profiles.json renders it wrong
+# silently (an unknown include_qwen38 is dropped by the old struct, so the yaml
+# loses entries Step 5 just downloaded 18.8GB for) — every consumer below
+# (Resolve-HarnessExe, the Step 6 refusal, Step 7's rebuild gate) compares
+# against this one value.
+$versionFile = Join-Path $repoRoot 'VERSION'
+if (-not (Test-Path $versionFile)) { throw "no VERSION file at $versionFile - cannot version-gate the renderer" }
+$repoVersion = (Get-Content -Raw $versionFile).Trim()
+
+# Get-HarnessExeVersion reads what a built exe says it is (`local-offload <ver>`).
+# $null on any failure (missing exe, an exe too old to answer) - callers treat
+# $null as a mismatch, so a broken/ancient binary takes the rebuild path.
+# NB: the output is drained into an array, NOT piped through Select-Object -First 1
+# - an early pipeline stop kills the native process and leaves $LASTEXITCODE unset,
+# which read as a failure and sent every render down the version-mismatch throw.
+function Get-HarnessExeVersion {
+  param([string]$Exe)
+  if (-not ($Exe -and (Test-Path $Exe))) { return $null }
+  try {
+    $out = @(& $Exe --version 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $out.Count -lt 1 -or -not $out[0]) { return $null }
+    return ("$($out[0])" -split '\s+')[-1].Trim()   # last token: the format may grow a prefix
+  } catch { return $null }
+}
+
 # Resolve-HarnessExe returns a local-offload.exe able to render a serving config.
 # Step 6 delegates rendering to it, but Step 7 is what BUILDS the installed copy, so
 # at Step 6 time there may not be one yet. Resolution order, cheapest first:
 #   1. $env:OFFLOAD_HARNESS_EXE  - an explicit override; render.tests.ps1 builds once
 #                                  and points every case at it instead of paying a
 #                                  build per render.
-#   2. the already-installed exe - true on every re-install.
+#   2. the already-installed exe - ONLY when its --version matches the repo VERSION
+#                                  file. A stale installed exe on a re-install is the
+#                                  version-skew trap above; it falls through to 3.
 #   3. `go build` into a temp dir - Go is a verified prereq well before Step 6, and
 #                                  this touches NO install artifact, which keeps
 #                                  -RenderOnly side-effect-free with respect to the
@@ -973,7 +1012,7 @@ if ($withMedia) {
 function Resolve-HarnessExe {
   if ($env:OFFLOAD_HARNESS_EXE -and (Test-Path $env:OFFLOAD_HARNESS_EXE)) { return $env:OFFLOAD_HARNESS_EXE }
   $installed = Join-Path (Join-Path $HOME_DIR 'harness') 'local-offload.exe'
-  if (Test-Path $installed) { return $installed }
+  if ((Test-Path $installed) -and ((Get-HarnessExeVersion $installed) -eq $repoVersion)) { return $installed }
   $repoRoot = Split-Path -Parent $scriptDir
   $tmpExe = Join-Path ([System.IO.Path]::GetTempPath()) ("offload-render-" + [guid]::NewGuid().ToString('N').Substring(0,8) + ".exe")
   Push-Location $repoRoot
@@ -1015,7 +1054,7 @@ if ($RenderOnly -and (Test-Path $yamlDest)) { Remove-Item $yamlDest -Force }
 Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $profileId } else { '(defaults)' }) ctx=$(if ($pp.known) { $pp.ctx } else { 'template' }) kv=$(if ($pp.known) { $pp.kv_k } else { 'template' }) 26b=$(if ($pp.known) { $pp.moe_mode } else { 'template' }))" `
   {
     (Test-Path $yamlDest) -and
-    -not (Select-String -Path $yamlDest -Pattern '__(LLAMA_BIN|MODELS|NTHREADS|CTX|KV_K|KV_V|FLASH_ATTN|MOE_26B)__' -Quiet) -and
+    -not (Select-String -Path $yamlDest -Pattern '__(LLAMA_BIN|MODELS|NTHREADS|CTX|KV_K|KV_V|FLASH_ATTN|MOE_26B|M26_ALT|M26_AND|Q38_ALT|Q38_AND)__' -Quiet) -and
     -not (Select-String -Path $yamlDest -SimpleMatch -Pattern $llamaDir -Quiet) -and   # backslash path = stale pre-R3.6 render
     (($tplBackend -ne 'vulkan') -or (Select-String -Path $yamlDest -SimpleMatch -Pattern 'GGML_VK_VISIBLE_DEVICES' -Quiet))   # J1: vulkan render without the device pin = stale pre-0.22.19 render
   } `
@@ -1028,6 +1067,15 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     # ONE renderer, in the binary, consumed by both wrappers - which is what section 3
     # of the first-class-install plan always described.
     $offloadRender = Resolve-HarnessExe
+    # Belt for the version gate: Resolve-HarnessExe already refuses a stale
+    # INSTALLED exe, so a mismatch here means the fallback build itself handed
+    # back something stale, or OFFLOAD_HARNESS_EXE points at an old binary.
+    # Rendering with it would silently drop profile fields the old struct does
+    # not know (include_qwen38) - refuse by version instead.
+    $renderVersion = Get-HarnessExeVersion $offloadRender
+    if ($renderVersion -ne $repoVersion) {
+      throw "renderer $offloadRender reports version '$renderVersion' but the repo VERSION is '$repoVersion' - a stale renderer silently drops newer profile fields; rebuild it (or point OFFLOAD_HARNESS_EXE at a current build) and re-run"
+    }
     $renderArgs = @(
       'install', 'render',
       '--os', 'windows',
@@ -1081,8 +1129,13 @@ if ($RenderOnly) {
 # ---------------------------------------------------------------------------
 $harnessExe = Join-Path $harnessDir 'local-offload.exe'
 $agentExe   = Join-Path $harnessDir 'local-agent.exe'
+# SKIP requires the exe AND its version: a bare Test-Path let a re-install keep a
+# STALE local-offload.exe whose embedded templates/structs render the NEW on-disk
+# profiles.json wrong (silently - see the version-gate note above Resolve-HarnessExe).
+# The exe's own --version is the ground truth, exactly as a $PINNED tag bump forces
+# a re-install of a downloaded component.
 Step 'build local-offload.exe' `
-  { Test-Path $harnessExe } `
+  { (Test-Path $harnessExe) -and ((Get-HarnessExeVersion $harnessExe) -eq $repoVersion) } `
   {
     if (-not (Test-Go126)) { throw "Go >=1.26 not on PATH - cannot build" }
     Push-Location $repoRoot
@@ -1092,8 +1145,11 @@ Step 'build local-offload.exe' `
     } finally { Pop-Location }
     if (-not (Test-Path $harnessExe)) { throw "local-offload.exe not produced" }
   }
+$manifestComponents['local-offload'] = $repoVersion
+# local-agent has no --version verb, so its rebuild gate uses the manifest version
+# idiom instead (same staleness class, same fix shape as every pinned component).
 Step 'build local-agent.exe' `
-  { Test-Path $agentExe } `
+  { (Test-Path $agentExe) -and ((Get-OldVersion 'local-agent') -eq $repoVersion) } `
   {
     if (-not (Test-Go126)) { throw "Go >=1.26 not on PATH - cannot build" }
     Push-Location $repoRoot
@@ -1103,6 +1159,7 @@ Step 'build local-agent.exe' `
     } finally { Pop-Location }
     if (-not (Test-Path $agentExe)) { throw "local-agent.exe not produced" }
   }
+$manifestComponents['local-agent'] = $repoVersion
 
 # ---------------------------------------------------------------------------
 # Step 8: harness config -> ~/.local-offload/config.json (no overwrite)

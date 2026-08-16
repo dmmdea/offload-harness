@@ -74,7 +74,7 @@ foreach ($tier in @('blackwell-16','ampere-16','volta-16')) {
   Assert ($s.videogen_text_encoder -eq 'umt5_xxl_fp16.safetensors')         "$tier seeds the fp16 text encoder"
   Assert ($s.videogen_width -eq 1280 -and $s.videogen_height -eq 720)       "$tier seeds 720p video"
   Assert ($s.videogen_frames -eq 81)                                        "$tier seeds the 81-frame native ceiling"
-  Assert ($s.agent_model -eq 'gemma4-26b-agent')                            "$tier seats the validated thinking-on 26B agent"
+  Assert ($s.agent_model -eq 'gemma-4-26b-agent')                           "$tier seats the validated thinking-on 26B agent (model KEY, not alias)"
 }
 
 Write-Host "== profiles.json: 32GB-class frontier seats (tier-doctrine pass 2026-08-16) =="

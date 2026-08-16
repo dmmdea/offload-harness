@@ -187,6 +187,19 @@ func Render(tmpl string, p Params) (string, error) {
 	// The Qwen3.8 membership mirrors the 26B's token pair, gated by IncludeQ38.
 	q38alt, q38and := "", ""
 	if p.IncludeQ38 {
+		// A template without the entry would still "render": the __Q38_*__ tokens
+		// expand to nothing on a template that never carried them, so the seat the
+		// tier asked for — and whose weights the installer just downloaded — simply
+		// does not exist in the output. That is the silent-capability-loss failure
+		// the seats refusal exists to end, so this is a refusal by name too, never
+		// a quiet omission.
+		if !definesModel(out, modelQ38) {
+			return "", fmt.Errorf("this tier sets include_qwen38 but the target serving template defines no "+
+				"`%s` model entry, so there is nothing to include. Rendering anyway would emit a config without "+
+				"the coder/agent seat while the installer still downloads its weights — add the %s entry (and "+
+				"its matrix var + __Q38_*__ set membership) to the template, or drop include_qwen38 from the tier",
+				modelQ38, modelQ38)
+		}
 		q38alt, q38and = " | q38", " & q38"
 	}
 	for from, to := range map[string]string{
@@ -712,11 +725,15 @@ func drop26B(tmpl string) (string, error) {
 	return dropModel(out, agentModel26B)
 }
 
+// modelQ38 is the Qwen3.8-27B coder/agent entry, gated by the tier's
+// include_qwen38 exactly as agentModel26B rides the 26B's gate.
+const modelQ38 = "qwen3.8-27b"
+
 // dropQ38 removes the Qwen3.8-27B coder/agent entry — the exact mirror of the 26B
 // strip, keyed on the tier's include_qwen38. Its set membership is handled by the
 // __Q38_*__ tokens.
 func dropQ38(tmpl string) (string, error) {
-	return dropModel(tmpl, "qwen3.8-27b")
+	return dropModel(tmpl, modelQ38)
 }
 
 // dropModel removes one model block AND the matrix var naming it, with a

@@ -55,6 +55,29 @@ func TestUnresolvedTokenIsRefused(t *testing.T) {
 	}
 }
 
+// TestIncludeQ38OnAnEntrylessTemplateIsRefused: on a template that never defines
+// the qwen3.8-27b entry (win-cuda), IncludeQ38 used to be a silent no-op — the
+// __Q38_*__ substitution finds no tokens, no token is left over, and the render
+// "succeeds" without the coder/agent seat the tier asked for (and whose weights
+// the installer downloads on the same flag). The refusal must name the entry.
+func TestIncludeQ38OnAnEntrylessTemplateIsRefused(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "setup", "templates", "llama-swap.win-cuda.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := params()
+	p.IncludeQ38 = true
+	_, err = Render(string(b), p)
+	if err == nil || !strings.Contains(err.Error(), "qwen3.8-27b") || !strings.Contains(err.Error(), "include_qwen38") {
+		t.Fatalf("IncludeQ38 against an entryless template must be refused by name, got %v", err)
+	}
+	// IncludeQ38=false keeps the existing behavior: the template renders fine.
+	p.IncludeQ38 = false
+	if _, err := Render(string(b), p); err != nil {
+		t.Fatalf("IncludeQ38=false must still render an entryless template: %v", err)
+	}
+}
+
 // TestDroppingThe26BRemovesItsVarAndSetMembershipToo: llama-swap REJECTS a config
 // whose set names an unknown var, and a var naming a model that does not exist is the
 // same dangling reference one level down. Removing the block without both bricks the

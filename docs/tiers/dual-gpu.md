@@ -29,13 +29,18 @@ binding can never name a seat that was not rendered:
 A seat still needs its weights on the box — model downloads stay out-of-band, as with
 every seed.
 
-The installer seeds this tier's media bindings (`config_seed`):
+It ships no file-backed media seed, so `generate_image` / `generate_video` /
+`generate_audio` / `run_graph` report `NOT CONFIGURED` until an operator binds them.
+
+## Installer-seeded config (non-media)
+
+These `config_seed` keys are applied to a FRESH harness config exactly like the media
+seed, but they bind no media route — the agent/cascade seats and per-node knobs live
+here so they are never mistaken for a media capability:
 
 | key | value |
 |---|---|
-| `agent_model` | `gemma4-26b-agent` |
-
-`__OFFLOAD_HOME__` is replaced with the install root at render time.
+| `agent_model` | `gemma-4-26b-agent` |
 
 ## Operator notes
 
