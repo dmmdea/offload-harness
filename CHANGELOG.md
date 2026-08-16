@@ -6,6 +6,51 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.62.0] - 2026-08-16
+
+The tier-doctrine parity pass (operator doctrine, 2026-08-16): flagship seats trickle
+to every tier they FIT; all tiers are first-class citizens; same-VRAM twin-arch tiers
+are kept in capability parity (the arch split is a build-time concern only).
+
+### Changed — profiles, templates, installer (all 15 tiers reviewed, notes updated)
+
+- Agent seat seeded EXPLICITLY per tier (no tier seeded one before; derivation pointed
+  16GB+ tiers at the reasoning-off cascade seat, measured 0% as an agent):
+  `qwen3.8-27b` on blackwell-2x16/48/72 (the measured Leg-1 winner — it existed in NO
+  template and NO download manifest until now); the validated thinking-on
+  `gemma-4-26b-agent` (12/15 D1) on ampere-16/blackwell-16/volta-16, dual-gpu and
+  amd-rdna3-dgpu; workhorse-by-design below that. blackwell-32 stays derived
+  (27B + 26B cannot both sit all-resident in 32 GB — recorded open bake-off item).
+- blackwell-48/72 inherit the 32GB-class frontier seats they always fit (PROJECTED,
+  selftest-gated): krea2 image single-card, LTX-2.5 video at FULL 1920x1088 (the 39.11GB
+  loaded transformer fits without the 2x16's pooled-resolution compromise), qwen3.8-27b
+  resident. blackwell-32: krea2 + ltx25 at 1280x704, and its vision seat fixed from
+  e4b-vision (worse than the 16GB tiers — pure drift) to qwen3-vl-8b.
+- New `include_qwen38` profile field mirrors the include_26b mechanism end-to-end:
+  internal/servingtmpl gains the `__Q38_ALT__`/`__Q38_AND__` tokens + block strip with
+  the same leftover-token refusal; install.ps1 gains the model-qwen38 (+ renamed mmproj)
+  pins (HF tree-API oids) and the download gate.
+- `gemma-4-26b-agent` entries (26B weights, `--reasoning on`, no new download) render on
+  win-cuda / win-vulkan / win-dual-cuda / win-dual-blackwell / linux-cuda, riding the
+  26B's include gate; matrix membership alternates with the 26B (never double-loads).
+  cuda-resident deliberately gets none (all-resident premise).
+- Hardening from the three review rounds: the harness renderer is VERSION-GATED
+  (a stale installed exe silently dropped newer profile fields — re-installs now rebuild
+  on mismatch, and the render step refuses a wrong-version renderer outright; ADR 0021
+  updated); `Render` refuses `include_qwen38` on a template with no qwen entry; missing
+  gated weights (26B/qwen gguf+mmproj) now WARN with the full file list (the installer's
+  warning filter no longer truncates payload lines); the qwen download rides the
+  `OFFLOAD_WITH_FAMILY` lean-install gate and its profile flag is strictly boolean
+  (fail-loud BEFORE the 18.8 GB download); tier docs partition media vs non-media seed
+  keys (a text-only seed no longer renders as "media bindings" — dual-gpu and amd-gcn
+  pages corrected) with the media key set pinned against mediacap's route keys.
+- Twin-arch parity (ampere-8≡blackwell-8, ampere-16≡blackwell-16≡volta-16) verified
+  field-identical and now STATED in each profile's notes; the single-`8gb`/`16gb` tier-id
+  merge is recorded as a follow-up migration (classifier + installed.json compat).
+  dual-gpu documented as the heterogeneous/other-pairs catch-all (not a 2x16 duplicate);
+  amd-rdna3 vs -dgpu kept separate (iGPU/UMA vs discrete differ in every load-bearing
+  field). docs/tiers regenerated.
+
 ## [0.61.0] - 2026-08-15
 
 The NIM shadow-label oracle (Seat Frontier plan Leg 7, item 1): the self-learning

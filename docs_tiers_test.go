@@ -62,3 +62,34 @@ func TestTierDocsAreCurrent(t *testing.T) {
 }
 
 func norm(s string) string { return strings.ReplaceAll(s, "\r\n", "\n") }
+
+// TestNonMediaSeedDoesNotRenderAsMedia: dual-gpu's config_seed carries only the
+// agent seat and amd-gcn's only cascade blank-outs — neither binds a media
+// route. The generator used to branch on seed EMPTINESS, so both pages rendered
+// a "media bindings" table of non-media keys (a false claim the README media
+// column repeated) and lost the honest NOT CONFIGURED prose. Both tiers declare
+// media seats, so the honest sentence is the seats-but-no-file-backed-seed one.
+func TestNonMediaSeedDoesNotRenderAsMedia(t *testing.T) {
+	got, err := tierdocs.Render(".")
+	if err != nil {
+		t.Fatalf("rendering tier docs: %v", err)
+	}
+	for _, tier := range []string{"dual-gpu", "amd-gcn"} {
+		page, ok := got[filepath.Join("docs", "tiers", tier+".md")]
+		if !ok {
+			t.Fatalf("no page rendered for tier %s", tier)
+		}
+		for _, want := range []string{
+			"It ships no file-backed media seed",
+			"report `NOT CONFIGURED` until an operator binds them",
+			"## Installer-seeded config (non-media)",
+		} {
+			if !strings.Contains(page, want) {
+				t.Errorf("%s page missing %q", tier, want)
+			}
+		}
+		if strings.Contains(page, "media bindings (`config_seed`)") {
+			t.Errorf("%s page still renders its non-media seed under a media heading", tier)
+		}
+	}
+}

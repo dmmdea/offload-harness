@@ -28,21 +28,26 @@ binding can never name a seat that was not rendered:
 A seat still needs its weights on the box — model downloads stay out-of-band, as with
 every seed.
 
-The installer seeds this tier's media bindings (`config_seed`):
+It ships no file-backed media seed, so `generate_image` / `generate_video` /
+`generate_audio` / `run_graph` report `NOT CONFIGURED` until an operator binds them.
+
+## Installer-seeded config (non-media)
+
+These `config_seed` keys are applied to a FRESH harness config exactly like the media
+seed, but they bind no media route — the agent/cascade seats and per-node knobs live
+here so they are never mistaken for a media capability:
 
 | key | value |
 |---|---|
 | `escalation_model` | `` |
 | `reasoning_model` | `` |
 
-`__OFFLOAD_HOME__` is replaced with the install root at render time.
-
 ## Operator notes
 
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Config #12 (Vega 7/GCN + 32GB, Vulkan). Weakest path: E2B, 8K f16, flash-attn OFF (older Vulkan FA unreliable), 26B dropped. PROJECTED. J-media 2026-07-28: STT via the whisper.cpp Vulkan build (solid). Vision reuses E4B + mmproj but keeps the CLIP encoder on CPU (--no-mmproj-offload) because mmproj on the Vulkan backend is degraded (llama.cpp #20081); the LLM still decodes on the iGPU. flash-attn off (tier). Both pin GGML_VK_VISIBLE_DEVICES=0. PROJECTED — no GCN box measured; needs a whisper.cpp Vulkan build.
+> Config #12 (Vega 7/GCN + 32GB, Vulkan). Weakest path: E2B, 8K f16, flash-attn OFF (older Vulkan FA unreliable), 26B dropped. PROJECTED. J-media 2026-07-28: STT via the whisper.cpp Vulkan build (solid). Vision reuses E4B + mmproj but keeps the CLIP encoder on CPU (--no-mmproj-offload) because mmproj on the Vulkan backend is degraded (llama.cpp #20081); the LLM still decodes on the iGPU. flash-attn off (tier). Both pin GGML_VK_VISIBLE_DEVICES=0. PROJECTED — no GCN box measured; needs a whisper.cpp Vulkan build. TIER-DOCTRINE PASS 2026-08-16: reviewed; seats are the best that fit — no change.
 
 ## Capability report
 

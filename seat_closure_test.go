@@ -102,7 +102,7 @@ func renderParams(prof servingProfile, goos string) servingtmpl.Params {
 		LlamaBin: "/opt/offload/bin", ModelsDir: "/opt/offload/models",
 		Listen: "127.0.0.1:11436", Ctx: prof.CtxSize, KVType: prof.KVType,
 		FlashAttn: prof.FlashAttn, MoE26B: moe, Threads: 8,
-		Include26B: include26B,
+		Include26B: include26B, IncludeQ38: prof.IncludeQwen38,
 		Seats:      prof.MediaSeats, Home: "/opt/offload", GOOS: goos, GPUEnv: prof.GPUEnv,
 	}
 }
@@ -143,10 +143,14 @@ func TestNo26BAgentSeatOnRAMDroppable26B(t *testing.T) {
 	if err := json.Unmarshal(embeddedProfiles, &doc); err != nil {
 		t.Fatal(err)
 	}
+	// The 26B *-agent entry (same weights, reasoning on) rides the 26B's include
+	// gate, so an agent seat naming IT is RAM-droppable exactly like one naming the
+	// cascade seat — the lint covers every name that resolves to those weights.
+	seats26B := map[string]bool{"gemma4-26b-a4b": true, "gemma-4-26b-agent": true, "gemma4-26b-agent": true, "26b-agent": true}
 	for id, sp := range doc.Profiles {
 		for _, goos := range []string{"linux", "windows"} {
 			cfg := effectiveConfig(t, seedProfiles[id], id, goos)
-			if agent := cfg.AgentPlannerModel(""); agent == "gemma4-26b-a4b" && sp.MoE26B != "gpu" {
+			if agent := cfg.AgentPlannerModel(""); seats26B[agent] && sp.MoE26B != "gpu" {
 				t.Errorf("tier %s (%s): the resolved agent seat is %q but moe_26b is %q — on a low/min-RAM "+
 					"box the RAM gate drops the 26B from the served roster while agent_model still names it, "+
 					"and low/min RAM has no overlay to blank the seat. Pin the 26B (moe_26b \"gpu\") or seat a "+

@@ -46,8 +46,12 @@ did without them:
 - The wrapper still owns what only it knows: the resolved `ram_tier`, the physical-core
   count, and the install paths. It passes them as flags.
 - The renderer is resolved, not assumed: `$env:OFFLOAD_HARNESS_EXE`, else the installed
-  exe, else a `go build` into a TEMP dir. Step 7 is what builds the *installed* copy, and
-  Step 6 runs before it.
+  exe **only when its `--version` matches the repo `VERSION`** (0.62.0: a stale installed
+  renderer silently drops profile fields its embedded struct predates — the version gate
+  sends it down the rebuild path instead), else a `go build` into a TEMP dir. Step 6 also
+  refuses outright if the exe that would render reports a version other than the repo's.
+  Step 7 is what builds the *installed* copy (also version-gated now), and Step 6 runs
+  before it.
 
 **`-RenderOnly` is no longer build-free**, and its header says so. It remains
 side-effect-free with respect to the install tree, which is the property the tests rely

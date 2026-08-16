@@ -57,7 +57,11 @@ type servingProfile struct {
 	FlashAttn  string `json:"flash_attn"`
 	Backend    string `json:"backend"`
 	Include26B bool   `json:"include_26b"`
-	MoE26B     string `json:"moe_26b"`
+	// IncludeQwen38 gates the Qwen3.8-27B coder/agent entry (and, in install.ps1,
+	// its GGUF+mmproj downloads) the same way Include26B gates the 26B. Absent =
+	// false: only the tiers that measured (or project) the seat set it.
+	IncludeQwen38 bool   `json:"include_qwen38"`
+	MoE26B        string `json:"moe_26b"`
 	// NCPUMoE is the N for the partial `n_cpu_moe` placement (top N expert layers in
 	// RAM, the rest on the GPU).
 	NCPUMoE int `json:"n_cpu_moe"`
@@ -191,6 +195,41 @@ func warnMissingSeatModels(seats []mediaseat.Seat, modelsDir, target string) {
 		"when called. Fetch these before relying on them:\n%s\n", len(missing), strings.Join(missing, "\n"))
 }
 
+// warnMissingGatedModels is warnMissingSeatModels' sibling for the flag-gated
+// chat entries: a tier setting include_26b / include_qwen38 renders the entry
+// into the roster whether or not its weights are on disk, and llama-swap lists
+// models from the CONFIG — so the alias checks pass and the route fails only
+// when called, exactly like a seat. The filenames are the templates' own cmd
+// contract (the same names install.ps1's $PINNED table downloads to).
+// Same shape as the seat warning: a warning, never an error, and skipped when
+// rendering for another machine, where a local miss means nothing.
+func warnMissingGatedModels(include26B, includeQ38 bool, modelsDir, target string) {
+	if modelsDir == "" || target != runtime.GOOS {
+		return
+	}
+	var missing []string
+	check := func(entry, label, rel string) {
+		full := filepath.Join(modelsDir, rel)
+		if _, err := os.Stat(full); err != nil {
+			missing = append(missing, fmt.Sprintf("  %s (%s): %s", entry, label, full))
+		}
+	}
+	if include26B {
+		check("gemma4-26b-a4b", "model", "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf")
+	}
+	if includeQ38 {
+		check("qwen3.8-27b", "model", "Qwen3.8-27B-UD-Q4_K_XL.gguf")
+		check("qwen3.8-27b", "mmproj", "mmproj-Qwen3.8-27B-F16.gguf")
+	}
+	if len(missing) == 0 {
+		return
+	}
+	sort.Strings(missing)
+	fmt.Fprintf(os.Stderr, "WARNING: %d gated model weight(s) are not on this machine. llama-swap lists a model "+
+		"from the CONFIG, so the alias checks in `doctor` and `acceptance` will PASS and the route will fail only "+
+		"when called. Fetch these before relying on them:\n%s\n", len(missing), strings.Join(missing, "\n"))
+}
+
 // seatsPlaceable reports whether the serving template for this target can host
 // tier-declared media seats, so `install seed` can refuse exactly the pairs
 // `install render` refuses instead of writing a binding the node cannot honour.
@@ -290,7 +329,7 @@ func runInstallRender(args []string) error {
 	rendered, err := servingtmpl.Render(tmpl, servingtmpl.Params{
 		LlamaBin: *llamaBin, ModelsDir: *modelsDir, Listen: *listen,
 		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
-		MoE26B: moe, Threads: n, Include26B: include26B,
+		MoE26B: moe, Threads: n, Include26B: include26B, IncludeQ38: p.IncludeQwen38,
 		Seats: p.MediaSeats, Home: *home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
 	})
 	if err != nil {
@@ -298,6 +337,7 @@ func runInstallRender(args []string) error {
 	}
 
 	warnMissingSeatModels(p.MediaSeats, *modelsDir, target)
+	warnMissingGatedModels(include26B, p.IncludeQwen38, *modelsDir, target)
 
 	if *out == "" {
 		fmt.Print(rendered)

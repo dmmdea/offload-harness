@@ -32,26 +32,45 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
 |---|---|
-| `imagegen_ckpt` | `hidream_o1_image_bf16.safetensors` |
-| `imagegen_family` | `hidream-o1` |
+| `imagegen_cfg` | `1` |
+| `imagegen_ckpt` | `krea2_turbo_bf16.safetensors` |
+| `imagegen_family` | `krea2` |
+| `imagegen_steps` | `8` |
 | `imagegen_timeout_sec` | `3600` |
-| `imagegen_vae` | `builtin` |
-| `videogen_frames` | `81` |
-| `videogen_height` | `720` |
-| `videogen_text_encoder` | `umt5_xxl_fp16.safetensors` |
+| `imagegen_vae` | `qwen_image_vae.safetensors` |
+| `videogen_audio_vae` | `ltx-2.5-audio-vae-bf16.safetensors` |
+| `videogen_family` | `ltx25` |
+| `videogen_fps` | `24` |
+| `videogen_frames` | `121` |
+| `videogen_height` | `1088` |
+| `videogen_latent_upscaler` | `ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors` |
+| `videogen_text_encoder` | `gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors` |
 | `videogen_timeout_sec` | `5400` |
+| `videogen_transformer` | `ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors` |
 | `videogen_unet_high` | `Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf` |
 | `videogen_unet_low` | `Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf` |
-| `videogen_width` | `1280` |
+| `videogen_video_vae` | `ltx-2.5-video-vae-conv-bf16.safetensors` |
+| `videogen_width` | `1920` |
 
 `__OFFLOAD_HOME__` is replaced with the install root at render time.
+
+## Installer-seeded config (non-media)
+
+These `config_seed` keys are applied to a FRESH harness config exactly like the media
+seed, but they bind no media route — the agent/cascade seats and per-node knobs live
+here so they are never mistaken for a media capability:
+
+| key | value |
+|---|---|
+| `agent_model` | `qwen3.8-27b` |
+| `agent_timeout_sec` | `600` |
 
 ## Operator notes
 
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Config #15 (RTX PRO 5000 72GB; RTX PRO 6000 96GB shares this until measured — the flagship workstation tier). Serving matches #14 today (all-resident, 128K, f16 KV); the extra headroom is documented for the Q8_0-26B follow-up (out of scope 2026-07-16 spec) and bigger media renders via config_seed (720p + 49 frames on a fresh install). PROJECTED - H3 measures. J-media 2026-07-28: RESIDENT seats, qwen3-vl-8b at full quality — ~33GB of 72GB leaves the most headroom of any tier. PROJECTED. The 'ocr' alias rides on this shared VLM (one seat owns screenshots/GUI/document OCR); the harness routes via vision_model, not the alias, so it is a label rather than a separate model.
+> Config #15 (RTX PRO 5000 72GB; RTX PRO 6000 96GB shares this until measured — the flagship workstation tier). Serving matches #14 today (all-resident, 128K, f16 KV); the extra headroom is documented for the Q8_0-26B follow-up (out of scope 2026-07-16 spec) and bigger media renders via config_seed (720p + 49 frames on a fresh install). PROJECTED - H3 measures. J-media 2026-07-28: RESIDENT seats, qwen3-vl-8b at full quality — ~33GB of 72GB leaves the most headroom of any tier. PROJECTED. The 'ocr' alias rides on this shared VLM (one seat owns screenshots/GUI/document OCR); the harness routes via vision_model, not the alias, so it is a label rather than a separate model. TIER-DOCTRINE PASS 2026-08-16 (PROJECTED, no reference box): inherits the 32GB-class frontier seats — krea2 image (24.5GB fits single-card), ltx25 video at FULL resolution (39.11GB loaded fits), qwen3.8-27b agent/coder (17.9GB file fits resident on 48/72 next to the family per the template's own H3-selftest-on-real-box caveat; KV at 131072/f16 is the tight dimension on 48 — the selftest is the gate). Previous seeds (hidream-o1, derived 26b agent) were blackwell-8-era design that never evolved with the 32GB upgrades.
 
 ## Capability report
 

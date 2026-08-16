@@ -5,7 +5,9 @@
 # 26B block entirely on a tier whose include_26b is false.
 #
 # Serving invariants (grammar reliability — do NOT change): --jinja, --flash-attn on,
-# no MTP, reasoning off. Do NOT add --swa-full here: it was measured as load-bearing
+# no MTP, reasoning off — the reasoning-off invariant binds the CASCADE seats; the
+# *-agent entry below is explicitly a reasoning/thinking seat (agent loop), added
+# 2026-08-16. Do NOT add --swa-full here: it was measured as load-bearing
 # for the LARGE iSWA models only, and forcing a full attention window costs KV memory
 # on exactly the tiers with the least VRAM headroom.
 #
@@ -46,6 +48,22 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
       __MOE_26B__ --parallel 1 ${common}
+    checkEndpoint: /health
+    ttl: 300
+  # AGENT seat: same 26B weights and geometry as the cascade seat above; the ONLY
+  # difference is reasoning ON (thinking agent loop). Flags written explicitly
+  # rather than via ${common} because the macro pins reasoning off. Exists whenever
+  # the 26B exists: the renderer strips it together with the 26B when a tier (or
+  # the RAM gate) drops it. A tier is a HARDWARE class, so the seat the Windows
+  # templates serve must exist here too — same tier, same capabilities.
+  gemma-4-26b-agent:
+    aliases: [26b-agent, gemma4-26b-agent]
+    env: ["GGML_CUDA_DISABLE_GRAPHS=1", "${ld}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
+      __MOE_26B__ --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --threads __NTHREADS__
+      --jinja --reasoning on --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
     ttl: 300
   embeddinggemma:
@@ -109,6 +127,7 @@ matrix:
     e4b: offload-e4b
     e2b: gemma4-e2b
     m26: gemma4-26b-a4b
+    a26: gemma-4-26b-agent
   # The memory stack is the most expensive thing on this box to lose and the cheapest to
   # keep: make it maximally expensive to stop, so if the solver ever does have a choice
   # it stops something else first.

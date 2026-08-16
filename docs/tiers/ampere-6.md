@@ -32,13 +32,11 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
 |---|---|
-| `escalation_model` | `` |
 | `imagegen_cfg` | `1` |
 | `imagegen_engine` | `sdcpp` |
 | `imagegen_family` | `sdxl-turbo` |
 | `imagegen_steps` | `4` |
 | `imagegen_timeout_sec` | `900` |
-| `reasoning_model` | `` |
 | `sdcpp_bin` | `__OFFLOAD_HOME__/sdcpp/sd-cli__EXE__` |
 | `sdcpp_model` | `__OFFLOAD_HOME__/models/sdxl-turbo/stable-diffusion-xl-1.0-turbo-Q4_0.gguf` |
 | `sdcpp_model_kind` | `checkpoint` |
@@ -46,12 +44,23 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 `__OFFLOAD_HOME__` is replaced with the install root at render time.
 
+## Installer-seeded config (non-media)
+
+These `config_seed` keys are applied to a FRESH harness config exactly like the media
+seed, but they bind no media route — the agent/cascade seats and per-node knobs live
+here so they are never mistaken for a media capability:
+
+| key | value |
+|---|---|
+| `escalation_model` | `` |
+| `reasoning_model` | `` |
+
 ## Operator notes
 
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Configs #10/#11 (3050 6GB). **MEASURED 2026-07-26** on an RTX 3050 6GB + i9-9900 + 32GB DDR4-2667 (spec: docs/specs/2026-07-26-ampere-6-tier-design.md). (1) RESIDENT TIER E2B -> E4B: E4B at 16K/q8_0 occupies only 3100 MiB of 6144, so the stronger workhorse fits with room to spare - a pure GPU-side win. (2) CTX 16K -> 32K: the projected 'may downshift to 8K' worry was unfounded; E4B reaches 64K/f16 in 4046 MiB and E2B 64K/f16 in 2078 MiB. 32K is chosen to leave GPU headroom for whatever else shares the card. (3) 'q8_0 KV is MANDATORY' was FALSE: Gemma-4 E-series uses a 512-token sliding window with only periodic global layers, so KV barely grows - f16 at 16K costs just 130 MiB more than q8_0. q8_0 is kept as the conservative default; f16 is available if a deployment wants it. (4) **26B STAYS DROPPED - THIS IS AN ARCHITECTURAL DECISION, NOT A CAPACITY LIMIT. DO NOT 'FIX' IT.** The 26B-A4B was measured to RUN here (--n-cpu-moe 24 serves at 32K, 210 pp / 13.5 tg), so a future reader WILL be tempted to enable it. Don't: any MoE tier puts experts in CPU+RAM, and boxes in this class are SERVERS whose CPU and RAM are reserved for their services - inference is confined to the GPU. Enabling it also pushes VRAM to ~5.3GB of 6144, starving a desktop session sharing the card. If a genuinely dedicated inference box ever lands in this profile, give it its OWN profile id rather than flipping this one. Throughput: E2B 2631 pp / 90.9 tg; E4B 1529 pp / 48.1 tg. The 70W power cap (not raisable) is the real limiter - the card sustains ~1639 MHz of a 2100 MHz max at 58W mean. NOTE for ZFS hosts: ARC grew to 19.9GB of 31GB here and is NOT counted in MemAvailable, so cap zfs_arc_max to keep the memory picture honest for the services.
+> Configs #10/#11 (3050 6GB). **MEASURED 2026-07-26** on an RTX 3050 6GB + i9-9900 + 32GB DDR4-2667 (spec: docs/specs/2026-07-26-ampere-6-tier-design.md). (1) RESIDENT TIER E2B -> E4B: E4B at 16K/q8_0 occupies only 3100 MiB of 6144, so the stronger workhorse fits with room to spare - a pure GPU-side win. (2) CTX 16K -> 32K: the projected 'may downshift to 8K' worry was unfounded; E4B reaches 64K/f16 in 4046 MiB and E2B 64K/f16 in 2078 MiB. 32K is chosen to leave GPU headroom for whatever else shares the card. (3) 'q8_0 KV is MANDATORY' was FALSE: Gemma-4 E-series uses a 512-token sliding window with only periodic global layers, so KV barely grows - f16 at 16K costs just 130 MiB more than q8_0. q8_0 is kept as the conservative default; f16 is available if a deployment wants it. (4) **26B STAYS DROPPED - THIS IS AN ARCHITECTURAL DECISION, NOT A CAPACITY LIMIT. DO NOT 'FIX' IT.** The 26B-A4B was measured to RUN here (--n-cpu-moe 24 serves at 32K, 210 pp / 13.5 tg), so a future reader WILL be tempted to enable it. Don't: any MoE tier puts experts in CPU+RAM, and boxes in this class are SERVERS whose CPU and RAM are reserved for their services - inference is confined to the GPU. Enabling it also pushes VRAM to ~5.3GB of 6144, starving a desktop session sharing the card. If a genuinely dedicated inference box ever lands in this profile, give it its OWN profile id rather than flipping this one. Throughput: E2B 2631 pp / 90.9 tg; E4B 1529 pp / 48.1 tg. The 70W power cap (not raisable) is the real limiter - the card sustains ~1639 MHz of a 2100 MHz max at 58W mean. NOTE for ZFS hosts: ARC grew to 19.9GB of 31GB here and is NOT counted in MemAvailable, so cap zfs_arc_max to keep the memory picture honest for the services. TIER-DOCTRINE PASS 2026-08-16: reviewed; seats are the best that fit — no change.
 
 ## Capability report
 

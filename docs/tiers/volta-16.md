@@ -46,12 +46,22 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 `__OFFLOAD_HOME__` is replaced with the install root at render time.
 
+## Installer-seeded config (non-media)
+
+These `config_seed` keys are applied to a FRESH harness config exactly like the media
+seed, but they bind no media route — the agent/cascade seats and per-node knobs live
+here so they are never mistaken for a media capability:
+
+| key | value |
+|---|---|
+| `agent_model` | `gemma-4-26b-agent` |
+
 ## Operator notes
 
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Config #2 (V100 16GB, Volta sm_70). 26B resident full-GPU. RISK: confirm flash-attn on sm_70 is not a slow fallback (H3 measures). config_seed: quality-first media bindings (bf16, no fp8 hw needed; sm_70 ComfyUI support to confirm at install). PROJECTED. J-media 2026-07-28: qwen3-vl-8b seat, ctx 8192. INHERITS this tier's open sm_70 flash-attn risk — the vision seat takes the tier's flash_attn (on), so if H3 finds FA is a slow fallback on Volta it is wrong for the vision seat too, not just chat. PROJECTED. The 'ocr' alias rides on this shared VLM (one seat owns screenshots/GUI/document OCR); the harness routes via vision_model, not the alias, so it is a label rather than a separate model.
+> Config #2 (V100 16GB, Volta sm_70). 26B resident full-GPU. RISK: confirm flash-attn on sm_70 is not a slow fallback (H3 measures). config_seed: quality-first media bindings (bf16, no fp8 hw needed; sm_70 ComfyUI support to confirm at install). PROJECTED. J-media 2026-07-28: qwen3-vl-8b seat, ctx 8192. INHERITS this tier's open sm_70 flash-attn risk — the vision seat takes the tier's flash_attn (on), so if H3 finds FA is a slow fallback on Volta it is wrong for the vision seat too, not just chat. PROJECTED. The 'ocr' alias rides on this shared VLM (one seat owns screenshots/GUI/document OCR); the harness routes via vision_model, not the alias, so it is a label rather than a separate model. TIER-DOCTRINE PASS 2026-08-16: agent seat pointed at the VALIDATED thinking-on 26B agent entry (0/15->12/15 at D1 with reasoning on, 2026-08-10) instead of the derived reasoning-off cascade seat (measured 0% as agent). Same weights as the 26B — no new download. Capability parity with the twin-arch sibling(s) is field-identical by design; the arch split (sm86/sm120/sm70) is a BUILD concern only.
 
 ## Capability report
 

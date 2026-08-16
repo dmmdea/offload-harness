@@ -46,12 +46,22 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 `__OFFLOAD_HOME__` is replaced with the install root at render time.
 
+## Installer-seeded config (non-media)
+
+These `config_seed` keys are applied to a FRESH harness config exactly like the media
+seed, but they bind no media route — the agent/cascade seats and per-node knobs live
+here so they are never mistaken for a media capability:
+
+| key | value |
+|---|---|
+| `agent_model` | `gemma-4-26b-agent` |
+
 ## Operator notes
 
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Ampere >=12GB band (3090-class defensive). 26B resident full-GPU. config_seed: quality-first media bindings (bf16 needs no fp8 hardware; verified on the 16GB Blackwell tier — needs the model downloads + >=~48GB system RAM). PROJECTED - H3 confirms OOM ceiling. J-media 2026-07-28: same qwen3-vl-8b seat as the MEASURED blackwell-16, but ctx trimmed 16384->8192 because this band's FLOOR is 12GB ('3090-class defensive') and KV has to fit there too; a 24GB 3090 can raise it. ~10GB seat, swappable so it never shares with another heavy seat. PROJECTED on this exact silicon. The 'ocr' alias rides on this shared VLM (one seat owns screenshots/GUI/document OCR); the harness routes via vision_model, not the alias, so it is a label rather than a separate model.
+> Ampere >=12GB band (3090-class defensive). 26B resident full-GPU. config_seed: quality-first media bindings (bf16 needs no fp8 hardware; verified on the 16GB Blackwell tier — needs the model downloads + >=~48GB system RAM). PROJECTED - H3 confirms OOM ceiling. J-media 2026-07-28: same qwen3-vl-8b seat as the MEASURED blackwell-16, but ctx trimmed 16384->8192 because this band's FLOOR is 12GB ('3090-class defensive') and KV has to fit there too; a 24GB 3090 can raise it. ~10GB seat, swappable so it never shares with another heavy seat. PROJECTED on this exact silicon. The 'ocr' alias rides on this shared VLM (one seat owns screenshots/GUI/document OCR); the harness routes via vision_model, not the alias, so it is a label rather than a separate model. TIER-DOCTRINE PASS 2026-08-16: agent seat pointed at the VALIDATED thinking-on 26B agent entry (0/15->12/15 at D1 with reasoning on, 2026-08-10) instead of the derived reasoning-off cascade seat (measured 0% as agent). Same weights as the 26B — no new download. Capability parity with the twin-arch sibling(s) is field-identical by design; the arch split (sm86/sm120/sm70) is a BUILD concern only.
 
 ## Capability report
 

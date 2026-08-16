@@ -142,6 +142,10 @@ $missing = @($models | Where-Object { $r.yaml -notmatch "(?m)^\s{2}$([regex]::Es
 if ($missing.Count -eq 0)                                       { Ok 'blackwell-72 all four models present' } else { Bad "blackwell-72 missing models: $($missing -join ', ')" }
 if ($r.yaml -notmatch 'exclusive:' -and $r.yaml -notmatch '(?m)^\s*swap:' -and $r.yaml -notmatch '(?m)^groups:') { Ok 'blackwell-72 NO swap group (all resident)' } else { Bad 'blackwell-72 swap group present' }
 if ($r.yaml -notmatch '(?m)^\s{4}ttl:')                         { Ok 'blackwell-72 NO ttl (models stay hot)' } else { Bad 'blackwell-72 ttl present' }
+# include_qwen38: the Qwen3.8 coder/agent seat renders on 48/72 (entry + resident-set
+# membership) — the Q38 token pair mirrors the M26 mechanism.
+if ($r.yaml -match '(?m)^\s{2}qwen3\.8-27b:')                   { Ok 'blackwell-72 qwen3.8 coder/agent seat present (include_qwen38)' } else { Bad 'blackwell-72 qwen3.8 seat missing' }
+if ($r.yaml -match '(?m)^\s{4}resident:.*\bq38\b')              { Ok 'blackwell-72 qwen3.8 joins the resident set' } else { Bad 'blackwell-72 q38 resident-set membership' }
 $macro = Get-CommonMacro $r.yaml
 if ($macro -match '--ctx-size 131072')                          { Ok 'blackwell-72 ctx=131072' } else { Bad "blackwell-72 ctx (got: $macro)" }
 if ($macro -match '--cache-type-k f16' -and $macro -match '--cache-type-v f16') { Ok 'blackwell-72 KV=f16 (full precision)' } else { Bad 'blackwell-72 KV f16' }
@@ -167,7 +171,9 @@ if ($r.yaml -match '(?m)^\s{2}bge-reranker-v2-m3:')             { Ok 'b2x16 rera
 # The two-card concurrency contract: fast-card seats are alternatives, the STT seat
 # joins as a CONJUNCTION so it may run concurrently from the other card.
 $setLines = @($r.yaml -split "`r?`n" | Where-Object { $_ -match '^\s{4}(text|residents):' }) -join ' / '
-if ($r.yaml -match '(?m)^\s{4}text:\s*"\+residents & \(e4b \| e2b \| m26 \| vis\) & stt"') { Ok 'b2x16 matrix: one fast-card model + concurrent STT + residents' } else { Bad "b2x16 matrix set (got: $setLines)" }
+if ($r.yaml -match '(?m)^\s{4}text:\s*"\+residents & \(e4b \| e2b \| m26 \| a26 \| q38 \| vis\) & stt"') { Ok 'b2x16 matrix: one fast-card model (incl. 26b-agent + qwen3.8 alternatives) + concurrent STT + residents' } else { Bad "b2x16 matrix set (got: $setLines)" }
+if ($r.yaml -match '(?m)^\s{2}qwen3\.8-27b:')                   { Ok 'b2x16 qwen3.8 coder/agent seat present (include_qwen38)' } else { Bad 'b2x16 qwen3.8 seat missing' }
+if ($r.yaml -match '(?m)^\s{2}gemma-4-26b-agent:')              { Ok 'b2x16 26b-agent rollback seat present' } else { Bad 'b2x16 26b-agent seat missing' }
 if ($r.yaml -notmatch '__[A-Z0-9_]+__')                         { Ok 'b2x16 no unsubstituted tokens' } else { Bad 'b2x16 leftover tokens' }
 
 Write-Host "== blackwell-32 - 5090-class: resident, 65536 ctx, q8_0 KV (cfg13) =="
@@ -176,6 +182,12 @@ if ($r.verdict -and $r.verdict.render_backend -eq 'cuda-resident') { Ok 'blackwe
 $macro = Get-CommonMacro $r.yaml
 if ($macro -match '--ctx-size 65536')                           { Ok 'blackwell-32 ctx=65536' } else { Bad "blackwell-32 ctx (got: $macro)" }
 if ($macro -match '--cache-type-k q8_0')                        { Ok 'blackwell-32 KV=q8_0' } else { Bad 'blackwell-32 KV q8_0' }
+# include_qwen38 is ABSENT on blackwell-32 (the 27B cannot join the all-resident set
+# beside the 26B in 32GB) — the renderer must strip the entry, its var, and its
+# set membership, exactly like the 26B drop path. Comment-insensitive: the template
+# documents the seat in prose that legitimately survives the strip.
+$b32Functional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' }) -join "`n"
+if ($b32Functional -notmatch 'qwen3\.8-27b' -and $b32Functional -notmatch '\bq38\b') { Ok 'blackwell-32 qwen3.8 seat STRIPPED (include_qwen38 absent)' } else { Bad 'blackwell-32 qwen3.8 leaked in' }
 
 # ampere-6 was measured 2026-07-26 on real 3050 6GB hardware (see
 # docs/specs/2026-07-26-ampere-6-tier-design.md): ctx 16384->32768 and resident
@@ -215,7 +227,10 @@ $r = Invoke-Render -Backend 'cuda' -ProfileId 'dual-gpu' -RamTier 'mid' -BigRam 
 # @() is load-bearing: a single match unwraps to a STRING, and then $dualSet[0] indexes
 # the first CHARACTER instead of the line.
 $dualSet = @($r.yaml -split "`r?`n" | Where-Object { $_ -match '(?m)^\s{4}\w+:\s*"[^"]*&[^"]*"' })
-if ($dualSet.Count -eq 1 -and $dualSet[0] -match 'e4b' -and $dualSet[0] -match 'm26' -and $dualSet[0] -notmatch '\|') { Ok 'dual-gpu renders ONE all-co-resident matrix set (nothing swaps)' } else { Bad "dual-gpu co-resident set (got: $($dualSet -join ' / '))" }
+# Since the 26b-agent seat (2026-08-16) the set is no longer alternation-free: the
+# architect and its thinking-agent twin share weights and a card, so they ALTERNATE
+# inside the conjunction — "(m26 | a26)" — while everything else stays co-resident.
+if ($dualSet.Count -eq 1 -and $dualSet[0] -match 'e4b' -and $dualSet[0] -match '\(m26 \| a26\)') { Ok 'dual-gpu renders ONE co-resident matrix set (architect/agent alternate on device 0)' } else { Bad "dual-gpu co-resident set (got: $($dualSet -join ' / '))" }
 if ($r.yaml -notmatch '(?m)^groups:' -and $r.yaml -notmatch 'swap:\s*true') { Ok 'dual-gpu has no legacy swap group' } else { Bad 'dual-gpu legacy swap topology returned' }
 if ($r.yaml -match 'CUDA_VISIBLE_DEVICES=0' -and $r.yaml -match 'CUDA_VISIBLE_DEVICES=1') { Ok 'dual-gpu pins device 0 AND device 1' } else { Bad 'dual-gpu CUDA_VISIBLE_DEVICES' }
 if ($r.yaml -notmatch 'exclusive:\s*true')                     { Ok 'dual-gpu has NO exclusive swap group' } else { Bad 'dual-gpu exclusive:true present' }
@@ -260,14 +275,15 @@ try {
 $seedProfiles = (Get-Content -Raw (Join-Path (Join-Path $here 'templates') 'profiles.json') | ConvertFrom-Json).profiles
 $seedTpl      = Get-Content -Raw (Join-Path (Join-Path $here 'templates') 'config.json')
 
-# blackwell-2x16: resident_tier gemma4-26b-a4b != the workhorse -> the fresh
-# merge must BIND the seat (this is what the Go tierseed path derives too).
+# blackwell-2x16: config_seed.agent_model is EXPLICIT since the 2026-08-16
+# tier-doctrine pass (qwen3.8-27b, the measured Leg-1 winner) — the explicit seed
+# must win over the resident_tier derivation, on both the Go and PS paths.
 $row = $seedProfiles.'blackwell-2x16'
 $mergedSeed = Merge-ConfigSeed -ConfigText $seedTpl -Seed $row.config_seed
 $seat = Get-DerivedAgentModel -ProfileRow $row -Seeds @($row.config_seed)
 if ($seat) { $mergedSeed = Merge-ConfigSeed -ConfigText $mergedSeed -Seed ([pscustomobject]@{ agent_model = $seat }) }
 $mergedObj = $mergedSeed | ConvertFrom-Json
-if ($mergedObj.agent_model -eq 'gemma4-26b-a4b') { Ok 'b2x16 fresh seed-merge binds agent_model=gemma4-26b-a4b' } else { Bad "b2x16 agent_model (got: '$($mergedObj.agent_model)')" }
+if ($mergedObj.agent_model -eq 'qwen3.8-27b') { Ok 'b2x16 fresh seed-merge binds explicit agent_model=qwen3.8-27b' } else { Bad "b2x16 agent_model (got: '$($mergedObj.agent_model)')" }
 
 # ampere-8 (resident_tier=offload-e4b == workhorse): NO agent_model key may
 # appear - materializing the fallback would fork the live chain. Mid-RAM flow

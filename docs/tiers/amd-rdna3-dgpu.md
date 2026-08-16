@@ -32,7 +32,6 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
 |---|---|
-| `fleet_sampler` | `pdh` |
 | `imagegen_cfg` | `1` |
 | `imagegen_engine` | `sdcpp` |
 | `imagegen_family` | `z-image-turbo` |
@@ -47,12 +46,23 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 `__OFFLOAD_HOME__` is replaced with the install root at render time.
 
+## Installer-seeded config (non-media)
+
+These `config_seed` keys are applied to a FRESH harness config exactly like the media
+seed, but they bind no media route — the agent/cascade seats and per-node knobs live
+here so they are never mistaken for a media capability:
+
+| key | value |
+|---|---|
+| `agent_model` | `gemma-4-26b-agent` |
+| `fleet_sampler` | `pdh` |
+
 ## Operator notes
 
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Discrete RDNA3 (RX 7900-class, >=12GB dedicated VRAM, Vulkan). Previously this card fell through to the amd-rdna3 iGPU floor - a severe under-serve (J1 audit finding). 26B resident full-GPU (-ngl 99, 14.2GB Q4 fits >=16GB VRAM; on a 12GB card the load OOMs and selftest's standing remediation switches the 26B to --cpu-moe), 32K ctx, q8_0 KV with FA on (Vulkan FA+q8 supported since Feb-Mar 2026; same >=Mar-2026 build floor as amd-rdna3). No real box measured yet - the H3 canaries gate everything. PROJECTED. J-media 2026-07-28: same Vulkan shape as amd-rdna3 (E4B + mmproj, ICD pinned), image budget raised to 1024 for the dedicated card. Vision keeps the CLIP encoder on CPU (--no-mmproj-offload). The REASON, stated accurately: llama.cpp #20081 reports mmproj quality degradation on Vulkan, but the maintainer could not reproduce it across several devices and the reporter closed it inconclusively - so quality alone is weak evidence. The load-bearing fact is in the same thread: running model + mmproj both on the Vulkan backend of a Radeon 780M iGPU gives a hard vk::DeviceLostError immediately after 'decoding image batch 1/8', reproducibly, on the exact silicon this tier targets. Keeping the encoder on CPU avoids that crash path and costs only encoder throughput; the LLM still decodes on the GPU. WHY NOT THE 8B here, stated correctly: NOT because it could not coexist - the seat is swappable, so llama-swap evicts before starting and it would load alone, exactly as ampere-16's 8B does on the same 12GB floor. It is a CONSERVATIVE choice for an UNMEASURED Vulkan part: CUDA vision on this repo is measured-adjacent (the workstation runs it), Vulkan vision is not, and this tier's own params are PROJECTED with every promotion gated behind H3 canaries. That asymmetry with ampere-16 is deliberate; promote to the 8B when a real RDNA3 dGPU measures it. PROJECTED.
+> Discrete RDNA3 (RX 7900-class, >=12GB dedicated VRAM, Vulkan). Previously this card fell through to the amd-rdna3 iGPU floor - a severe under-serve (J1 audit finding). 26B resident full-GPU (-ngl 99, 14.2GB Q4 fits >=16GB VRAM; on a 12GB card the load OOMs and selftest's standing remediation switches the 26B to --cpu-moe), 32K ctx, q8_0 KV with FA on (Vulkan FA+q8 supported since Feb-Mar 2026; same >=Mar-2026 build floor as amd-rdna3). No real box measured yet - the H3 canaries gate everything. PROJECTED. J-media 2026-07-28: same Vulkan shape as amd-rdna3 (E4B + mmproj, ICD pinned), image budget raised to 1024 for the dedicated card. Vision keeps the CLIP encoder on CPU (--no-mmproj-offload). The REASON, stated accurately: llama.cpp #20081 reports mmproj quality degradation on Vulkan, but the maintainer could not reproduce it across several devices and the reporter closed it inconclusively - so quality alone is weak evidence. The load-bearing fact is in the same thread: running model + mmproj both on the Vulkan backend of a Radeon 780M iGPU gives a hard vk::DeviceLostError immediately after 'decoding image batch 1/8', reproducibly, on the exact silicon this tier targets. Keeping the encoder on CPU avoids that crash path and costs only encoder throughput; the LLM still decodes on the GPU. WHY NOT THE 8B here, stated correctly: NOT because it could not coexist - the seat is swappable, so llama-swap evicts before starting and it would load alone, exactly as ampere-16's 8B does on the same 12GB floor. It is a CONSERVATIVE choice for an UNMEASURED Vulkan part: CUDA vision on this repo is measured-adjacent (the workstation runs it), Vulkan vision is not, and this tier's own params are PROJECTED with every promotion gated behind H3 canaries. That asymmetry with ampere-16 is deliberate; promote to the 8B when a real RDNA3 dGPU measures it. PROJECTED. TIER-DOCTRINE PASS 2026-08-16 (PROJECTED on vulkan): agent -> thinking-on 26b-agent (validated on cuda; vulkan reasoning-on unmeasured — selftest gates it). Kept a SEPARATE tier from amd-rdna3: iGPU/UMA vs discrete are materially different classes (ctx 16k vs 32k, kv f16 vs q8_0, resident e4b vs 26b, MoE cpu vs gpu) — not a merge candidate.
 
 ## Capability report
 
