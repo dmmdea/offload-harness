@@ -350,20 +350,28 @@ func renderTier(name string, p Profile, reports []string) string {
 	return b.String()
 }
 
-// mediaSeedKey reports whether a config_seed key binds a MEDIA route. The
-// prefix set mirrors the pipeline's own media-config vocabulary
-// (internal/config, internal/mediacap): imagegen_*/videogen_*/musicgen_*/
-// voicegen_* are the spawn-per-job media bindings, and sdcpp_* + vae_mode are
-// the sd.cpp image engine's own binding family. Everything else the installer
-// seeds (agent_model, agent_timeout_sec, escalation_model, reasoning_model,
-// fleet_sampler, …) is harness CONFIG, not a media capability.
+// mediaSeedKey reports whether a config_seed key binds a MEDIA route. The set
+// mirrors the pipeline's own media-config vocabulary (internal/config,
+// internal/mediacap): imagegen_*/videogen_*/musicgen_*/voicegen_* are the
+// spawn-per-job media bindings; sdcpp_* + vae_mode are the sd.cpp image
+// engine's binding family; inpaint_*/gen_edit_*/run_graph_* + comfy_dir +
+// edit_python are the route keys mediacap itself derives CONFIGURED /
+// NOT CONFIGURED from — a tier seeding any of those IS shipping media config,
+// and filing them non-media would recreate the false-claim wart from the other
+// side. Everything else the installer seeds (agent_model, agent_timeout_sec,
+// escalation_model, reasoning_model, fleet_sampler, …) is harness CONFIG, not
+// a media capability. TestMediaSeedKeyCoversMediacapRouteKeys pins this set
+// against mediacap's route-deciding keys.
 func mediaSeedKey(k string) bool {
-	for _, p := range []string{"imagegen_", "videogen_", "musicgen_", "voicegen_", "sdcpp_"} {
+	for _, p := range []string{
+		"imagegen_", "videogen_", "musicgen_", "voicegen_", "sdcpp_",
+		"inpaint_", "gen_edit_", "run_graph_",
+	} {
 		if strings.HasPrefix(k, p) {
 			return true
 		}
 	}
-	return k == "vae_mode"
+	return k == "vae_mode" || k == "comfy_dir" || k == "edit_python"
 }
 
 // mediaSeed returns the subset of seed that binds media routes — the only

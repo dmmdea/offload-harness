@@ -1109,7 +1109,9 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     try { $renderOut = & $offloadRender @renderArgs 2>&1 } finally { $ErrorActionPreference = $prevEap }
     if ($LASTEXITCODE -ne 0) { throw "install render failed ($LASTEXITCODE): $($renderOut -join ' ')" }
     # Surface the binary's own warnings (e.g. a declared seat whose weights are absent).
-    $renderOut | Where-Object { $_ -match 'WARNING' } | ForEach-Object { Write-Host "      $_" -ForegroundColor Yellow }
+    # The payload lines are indented continuations under the WARNING header — the old
+    # header-only filter silently truncated every file list the warning exists to show.
+    $renderOut | Where-Object { $_ -match 'WARNING' -or $_ -match '^\s{2}\S' } | ForEach-Object { Write-Host "      $_" -ForegroundColor Yellow }
     if (-not (Test-Path $yamlDest)) { throw "install render reported success but wrote no $yamlDest" }
   }
 

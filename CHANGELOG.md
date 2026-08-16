@@ -34,6 +34,16 @@ are kept in capability parity (the arch split is a build-time concern only).
   win-cuda / win-vulkan / win-dual-cuda / win-dual-blackwell / linux-cuda, riding the
   26B's include gate; matrix membership alternates with the 26B (never double-loads).
   cuda-resident deliberately gets none (all-resident premise).
+- Hardening from the three review rounds: the harness renderer is VERSION-GATED
+  (a stale installed exe silently dropped newer profile fields — re-installs now rebuild
+  on mismatch, and the render step refuses a wrong-version renderer outright; ADR 0021
+  updated); `Render` refuses `include_qwen38` on a template with no qwen entry; missing
+  gated weights (26B/qwen gguf+mmproj) now WARN with the full file list (the installer's
+  warning filter no longer truncates payload lines); the qwen download rides the
+  `OFFLOAD_WITH_FAMILY` lean-install gate and its profile flag is strictly boolean
+  (fail-loud BEFORE the 18.8 GB download); tier docs partition media vs non-media seed
+  keys (a text-only seed no longer renders as "media bindings" — dual-gpu and amd-gcn
+  pages corrected) with the media key set pinned against mediacap's route keys.
 - Twin-arch parity (ampere-8≡blackwell-8, ampere-16≡blackwell-16≡volta-16) verified
   field-identical and now STATED in each profile's notes; the single-`8gb`/`16gb` tier-id
   merge is recorded as a follow-up migration (classifier + installed.json compat).
