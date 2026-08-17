@@ -223,8 +223,15 @@ foreach ($band in @('min','low','mid','high')) {
   # "cleanup" — would silently halve the tier's agent quality. This assertion is the
   # tripwire for exactly that edit.
   $q354Cmd = ([regex]::Match($r.yaml, '(?ms)^\s{2}qwen3\.5-4b-agent:.*?(?=^\s{2}\S|\Z)')).Value
-  if ($q354Cmd -and $q354Cmd -notmatch '--reasoning\s+off')    { Ok "ampere-6/$band qwen3.5-4b seat does NOT pin --reasoning off (measured: off collapses it)" } else { Bad "ampere-6/$band qwen3.5-4b seat pins --reasoning off — measured to collapse 67% -> 28-44%" }
-  if ($q354Cmd -and $q354Cmd -notmatch '\$\{common\}')         { Ok "ampere-6/$band qwen3.5-4b seat writes flags explicitly (not via \${common})" } else { Bad "ampere-6/$band qwen3.5-4b seat uses \${common}, which pins --reasoning off" }
+  # NOTE: plain hyphens, never an em dash, inside these STRINGS. This file has no BOM,
+  # and Windows PowerShell 5.1 (what CI runs) decodes a BOM-less file as cp1252, where
+  # the em dash's third UTF-8 byte 0x94 becomes a RIGHT DOUBLE QUOTATION MARK - which
+  # 5.1's parser accepts as a string delimiter, so the string ends early and the whole
+  # file dies with "Missing closing '}'". pwsh 7 reads UTF-8 and never sees it. Em
+  # dashes in COMMENTS are harmless (a comment runs to end of line) and this file
+  # already has several.
+  if ($q354Cmd -and $q354Cmd -notmatch '--reasoning\s+off')    { Ok "ampere-6/$band qwen3.5-4b seat does NOT pin --reasoning off (measured: off collapses it)" } else { Bad "ampere-6/$band qwen3.5-4b seat pins --reasoning off - measured to collapse 67% -> 28-44%" }
+  if ($q354Cmd -and $q354Cmd -notmatch '\$\{common\}')         { Ok "ampere-6/$band qwen3.5-4b seat writes flags explicitly (not via `${common})" } else { Bad "ampere-6/$band qwen3.5-4b seat uses `${common}, which pins --reasoning off" }
 }
 # NEGATIVE: a tier that does NOT set include_qwen35_4b must have the entry, its var
 # and its set membership stripped — the mirror of the blackwell-32 qwen3.8 check.
