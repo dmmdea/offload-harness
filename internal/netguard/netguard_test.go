@@ -48,3 +48,30 @@ func TestValidateMalformed(t *testing.T) {
 		}
 	}
 }
+
+// TestLoopbackAddr locks the exported loopback FACT (fleet-serve's agent-lane
+// auth gate keys on it): same notion as Validate's guard, but reported rather
+// than enforced. Malformed/unprovable addresses must report FALSE — a listener
+// we cannot prove loopback must be treated as exposed, so the agent lane fails
+// closed on it.
+func TestLoopbackAddr(t *testing.T) {
+	cases := []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1:18811", true},
+		{"127.9.9.9:18811", true}, // any 127/8, not just .0.0.1
+		{"[::1]:18811", true},
+		{"localhost:18811", true},
+		{"100.64.0.10:18811", false}, // tailnet is NOT loopback (token required there)
+		{"0.0.0.0:18811", false},
+		{":18811", false},     // empty host = all interfaces
+		{"127.0.0.1", false},  // missing port: unprovable → treated as exposed
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := LoopbackAddr(c.addr); got != c.want {
+			t.Errorf("LoopbackAddr(%q) = %v, want %v", c.addr, got, c.want)
+		}
+	}
+}

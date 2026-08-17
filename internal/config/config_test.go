@@ -154,13 +154,17 @@ func TestFleetDefaults(t *testing.T) {
 	if c.FleetSampler != "auto" {
 		t.Errorf("FleetSampler = %q, want \"auto\"", c.FleetSampler)
 	}
+	if c.FleetAuthToken != "" {
+		t.Errorf("FleetAuthToken = %q, want \"\" (no auth by default — the agent lane is then loopback-only)", c.FleetAuthToken)
+	}
 }
 
 // TestFleetFieldsRoundTrip: the fleet keys load from JSON (a Tailscale binding
-// + explicit node id + forced global sampler — the FLEET-NODE.md fallback).
+// + explicit node id + forced global sampler — the FLEET-NODE.md fallback —
+// + the agent-lane bearer token).
 func TestFleetFieldsRoundTrip(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "cfg.json")
-	js := `{"fleet_listen":"100.64.0.10:18811","fleet_node_id":"node-a","fleet_sampler":"global"}`
+	js := `{"fleet_listen":"100.64.0.10:18811","fleet_node_id":"node-a","fleet_sampler":"global","fleet_auth_token":"s3cret"}`
 	if err := os.WriteFile(p, []byte(js), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -171,6 +175,9 @@ func TestFleetFieldsRoundTrip(t *testing.T) {
 	if got.FleetListen != "100.64.0.10:18811" || got.FleetNodeID != "node-a" || got.FleetSampler != "global" {
 		t.Fatalf("fleet fields did not round-trip: listen=%q node=%q sampler=%q",
 			got.FleetListen, got.FleetNodeID, got.FleetSampler)
+	}
+	if got.FleetAuthToken != "s3cret" {
+		t.Fatalf("FleetAuthToken = %q, want \"s3cret\"", got.FleetAuthToken)
 	}
 }
 

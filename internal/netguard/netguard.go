@@ -44,6 +44,21 @@ func Validate(addr string, allowNonLocal bool) error {
 		"or pass --listen-trusted-network to override (only on a network you fully trust)", addr)
 }
 
+// LoopbackAddr reports whether a "host:port" listen address is bound to
+// loopback — the same notion Validate enforces, exported as a FACT for
+// callers that need the answer rather than the refusal (fleet-serve's
+// agent-lane auth gate: a tokenless agent lane is acceptable only on a
+// loopback listener). Malformed/unprovable addresses report false — a
+// listener we cannot prove loopback must be treated as exposed, so the
+// caller fails closed.
+func LoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	return isLoopbackHost(host)
+}
+
 // isLoopbackHost reports whether host is a loopback address the guard permits.
 // "localhost" is accepted by name (it resolves to loopback); an empty host is
 // NOT loopback (it binds all interfaces). Numeric hosts are checked via

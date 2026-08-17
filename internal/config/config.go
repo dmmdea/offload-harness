@@ -665,6 +665,19 @@ type Config struct {
 	// FleetNodeID names this node in /fleet/health. Empty = the OS hostname,
 	// resolved at serve time (so a shared config never bakes one box's name).
 	FleetNodeID string `json:"fleet_node_id,omitempty"`
+	// FleetAuthToken, when non-empty, bearer-gates the fleet's AGENT lane:
+	// POST /fleet/dispatch with task_type "agent" and GET /fleet/jobs/{id} for
+	// jobs an agent dispatch created require `Authorization: Bearer <token>`
+	// (constant-time compared). Auth scope v1 is DELIBERATELY the agent lane
+	// only — media dispatch/poll/file traffic stays tokenless so the deployed
+	// media clients (0.62.1 on the laptop node) never start 401ing mid-fleet;
+	// whole-fleet enforcement is a recorded follow-up for a coordinated
+	// deploy window. Empty (the default) = no auth, with one teeth-bearing
+	// exception: a NON-loopback listener then refuses agent dispatches
+	// outright (403 at ack time) — the agent lane drives a coding-agent loop,
+	// so it must never be reachable unauthenticated beyond the box itself.
+	// Set the SAME value on every node and in the delegator's config.
+	FleetAuthToken string `json:"fleet_auth_token,omitempty"`
 	// FleetSampler selects the per-render VRAM footprint source: "auto" (PDH
 	// per-process tree on Windows, nvidia-smi global-delta elsewhere),
 	// "pdh-shared" (J3: the tree summing Dedicated+Shared — REQUIRED on UMA
@@ -917,6 +930,7 @@ func Default() Config {
 		NIMTimeoutSec:                 120,
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
+		FleetAuthToken:                "",                // "" = no agent-lane auth → agent dispatch loopback-only; media lane never auths (v1 scope)
 		FleetSampler:                  "auto",            // auto|pdh|pdh-shared|global (FLEET-NODE.md)
 		PrimaryGPUUUID:                "",                // "" = largest-total headline rule; set to pin by UUID (FLEET-NODE.md)
 		Pipelines:                     nil,               // empty = no pipeline-job routes on this box (opt-in per pipeline)

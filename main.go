@@ -1864,7 +1864,12 @@ func runFleetServe(args []string) error {
 		},
 		GpuVendor: prov.Vendor,
 		GpuArch:   prov.Arch,
-		Cfg:       cfg,
+		// The agent lane's tokenless-listener refusal keys on where the bind
+		// actually landed (the resolved listen address), not on the
+		// --listen-trusted-network permission flag — a trusted-network flag on
+		// a loopback bind is still loopback.
+		LoopbackListener: netguard.LoopbackAddr(listen),
+		Cfg:              cfg,
 	})
 
 	ln, err := net.Listen("tcp", listen)

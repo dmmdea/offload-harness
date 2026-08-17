@@ -56,7 +56,17 @@ type Options struct {
 	Reclaim func(freeGiB, totalGiB float64) ReclaimVerdict
 	GpuVendor  string
 	GpuArch    string
-	Cfg        config.Config
+	// LoopbackListener reports whether the serve listener is bound to a
+	// loopback address. The verb computes it from the RESOLVED listen address
+	// (netguard.LoopbackAddr) — NOT from --listen-trusted-network, which is
+	// permission to bind beyond loopback, not where the bind actually landed.
+	// The agent lane keys on it: with no Cfg.FleetAuthToken configured, agent
+	// dispatches on a non-loopback listener are refused 403 at ack time. The
+	// zero value (false) fails CLOSED for the agent lane — a constructor that
+	// forgets to set it gets the refusal, never an open agent surface; the
+	// media lane never consults it.
+	LoopbackListener bool
+	Cfg              config.Config
 }
 
 // Server is the fleet-node HTTP server: three handlers over a Runner + Jobs
@@ -272,6 +282,34 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "malformed dispatch body: "+err.Error())
 		return
 	}
+
+	// AGENT-LANE AUTH (v1 scope: the agent lane ONLY — the delegation plan's
+	// reshape delta 10; media task types skip this block entirely so deployed
+	// tokenless media clients stay byte-identical, pinned in auth_test.go).
+	// Ordering: the check needs the DECODED task_type, so it cannot precede
+	// the body decode; it sits immediately AFTER decode and BEFORE everything
+	// else — the job_id check, the known-job re-ack/409 lookup, the drain
+	// gate, BuildRequest — so an unauthorized agent caller gets only the auth
+	// verdict (401/403), never a validation 400 to probe the envelope with
+	// and never a re-ack/409 that discloses job existence or state.
+	if env.TaskType == string(core.TaskAgentRun) {
+		if s.opts.Cfg.FleetAuthToken == "" {
+			if !s.opts.LoopbackListener {
+				// Loud refusal, not a silent accept: the agent lane drives a
+				// coding-agent loop, so a tokenless lane beyond loopback would
+				// be an RCE-class surface. Misconfiguration must fail here,
+				// visibly, at ack time.
+				writeError(w, http.StatusForbidden, agentLaneTokenRequired)
+				return
+			}
+			// Loopback + no token: the agent lane is reachable only from this
+			// box — the same trust boundary as the local MCP surface.
+		} else if !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+	}
+
 	if env.JobID == "" {
 		writeError(w, http.StatusBadRequest, "job_id required")
 		return
@@ -341,7 +379,16 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		return nil, errors.New(reason)
 	}
 
-	if !s.jobs.Accept(env.JobID, run) {
+	// An agent dispatch (already authorized above) creates its job through
+	// AcceptAgent so the record carries the marker handleJob's poll auth keys
+	// on. Dead until Task 4 registers the "agent" task (BuildRequest 400s it
+	// today), but wired now so the poll gate is complete the moment the task
+	// lands, not a follow-up.
+	accept := s.jobs.Accept
+	if env.TaskType == string(core.TaskAgentRun) {
+		accept = s.jobs.AcceptAgent
+	}
+	if !accept(env.JobID, run) {
 		cleanup() // duplicate/drain refusal: this request's materialized files never run
 		view, ok := s.jobs.Get(env.JobID)
 		if !ok {
@@ -375,6 +422,19 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	view, ok := s.jobs.Get(r.PathValue("id"))
 	if !ok {
 		writeError(w, http.StatusNotFound, "unknown job")
+		return
+	}
+	// Agent-lane poll auth (v1 scope): only jobs CREATED by an agent dispatch
+	// are gated — media polls never see this branch, so the deployed media
+	// clients stay byte-identical (pinned in auth_test.go). Checked AFTER the
+	// store lookup because the job RECORD carries the marker (see AcceptAgent):
+	// an unknown/evicted id stays a plain 404 — job ids are caller-generated
+	// ULIDs, so a 404 discloses nothing — while a live agent job answers 401
+	// before any state or data crosses the wire. No token configured = the
+	// loopback-only posture, where the lane is open by design (dispatch
+	// enforces that a tokenless listener IS loopback).
+	if view.Agent && s.opts.Cfg.FleetAuthToken != "" && !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	writeJobView(w, http.StatusOK, view)
