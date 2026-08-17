@@ -34,6 +34,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/contextbudget"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/exemplars"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/gbnf"
@@ -47,6 +48,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/knn"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
+	"github.com/dmmdea/offload-harness/internal/mediahash"
 	"github.com/dmmdea/offload-harness/internal/parser"
 	"github.com/dmmdea/offload-harness/internal/router"
 	"github.com/dmmdea/offload-harness/internal/rungraph"
@@ -84,6 +86,18 @@ type Pipeline struct {
 	// LR router trains). Both nil unless cfg.KNNPreFilterEnabled.
 	knn   *knn.Index                      // nil = disabled / no substrate
 	embed func(string) ([]float64, error) // nil = disabled; set to judge.Embedder.Embed
+	// T2-C embed memo backing p.embed. nil when disabled or unopenable — every
+	// Memo method tolerates a nil receiver, so nothing branches on it except the
+	// stats surface, which reports "no memo" rather than a fabricated zero.
+	// embedMemoReason says WHICH of the several "no memo" causes applies; without
+	// it the status surface can only publish an unfalsifiable three-way guess.
+	embedMemo       *embedmemo.Memo
+	embedMemoReason string
+	// T2-D: does RunTier read/write the result cache on THIS pipeline? Set only
+	// by NewInLoopPipeline. False everywhere else — critically on the main
+	// pipeline, whose RunTier the shadow-labelling flywheel drives to evaluate
+	// counterfactual tiers, where a cache hit would replace the measurement.
+	tierCache bool
 	// A2 hot-reload: learnMu guards every self-learning field that the background
 	// reloader can swap (thresholds, router, overrides, confhead, confThresholds).
 	// The request path reads them ONLY through the *Snap accessors (uncontended
@@ -134,6 +148,32 @@ type Pipeline struct {
 	// TO-3 tier-aware repacking state (tierpack.go): per-model /props probes +
 	// tokenizer clients for the escalation-boundary repack. Zero value ready.
 	tierPack tierPackState
+	// T2-A2 test seams (nil = the real thing), following the same pattern as
+	// refineGen/fleetSample/nowFn. They exist because the media identity gates are
+	// otherwise untestable at the pipeline level: a missing file defers inside
+	// ffmpeg long before the gate, and a mid-call rotation cannot be injected
+	// deterministically from outside. Without them the gates had NO regression
+	// guard — deleting every `&& identifiable` / `&& cacheable` left the suite
+	// green, which is exactly the refactor they exist to catch.
+	mediaDigest    func(path string) (mediahash.Ident, error)
+	mediaUnchanged func(id mediahash.Ident, path string) bool
+}
+
+// digestMedia resolves a media file's content identity (test seam aware).
+func (p *Pipeline) digestMedia(path string) (mediahash.Ident, error) {
+	if p.mediaDigest != nil {
+		return p.mediaDigest(path)
+	}
+	return mediahash.Digest(path, p.cfg.MediaHashMaxFullBytes)
+}
+
+// mediaStillMatches re-checks, AFTER the consuming read, that the file is still
+// the one that was hashed (test seam aware).
+func (p *Pipeline) mediaStillMatches(id mediahash.Ident, path string) bool {
+	if p.mediaUnchanged != nil {
+		return p.mediaUnchanged(id, path)
+	}
+	return id.Unchanged(path)
 }
 
 // Cfg exposes the loaded config so callers like the MCP server can build
@@ -141,6 +181,39 @@ type Pipeline struct {
 // configuration without re-loading it. It returns a shallow copy — read-only
 // use only (the slice/map fields share backing with the live config).
 func (p *Pipeline) Cfg() config.Config { return p.cfg }
+
+// Cache exposes this pipeline's result-cache handle so a SECOND pipeline built in
+// the same process (the in-loop offload — see recordless.go) can share the one
+// open bbolt file rather than trying to open it again and losing the lock race
+// against itself. May be nil (caching opted out, or the file is held elsewhere).
+func (p *Pipeline) Cache() *cache.Cache { return p.cache }
+
+// EmbedMemoStats reports the embed memo's counters, or the REASON there are
+// none. A caller must surface the reason rather than printing a zero hit rate,
+// which would report a measured failure where no measurement exists.
+//
+// The reason is non-empty in exactly two cases: there is no memo (disabled, the
+// pre-filter is off, the store could not be opened), or the memo exists but its
+// counters could not be READ — which is a fault, not an empty store, and must
+// never be published as "0 vectors, never consulted".
+func (p *Pipeline) EmbedMemoStats() (embedmemo.Stats, string) {
+	if p.embedMemo == nil {
+		reason := p.embedMemoReason
+		if reason == "" {
+			// Unreachable via New, which sets a reason on both branches. Made
+			// self-reporting rather than generic: a future constructor that builds
+			// a Pipeline literal directly would otherwise silently reintroduce the
+			// exact unfalsifiable "no memo" string this change set out to remove.
+			reason = "BUG: pipeline constructed without New — embed-memo reason was never set"
+		}
+		return embedmemo.Stats{}, reason
+	}
+	st, err := p.embedMemo.Stats()
+	if err != nil {
+		return st, "store opened but unreadable: " + err.Error()
+	}
+	return st, ""
+}
 
 func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Ledger) *Pipeline {
 	p := &Pipeline{cfg: cfg, client: c, cache: ca, led: l, lastHeal: map[string]time.Time{}, learnHashes: map[string]string{}}
@@ -167,7 +240,21 @@ func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Le
 	// so a slow/down embeddinggemma fails open fast on the request path.
 	if cfg.KNNPreFilterEnabled {
 		p.knn = knn.Load(cfg.KNNIndexPath)
-		p.embed = judge.NewEmbedder(cfg.Endpoint, cfg.EmbedModel(), time.Duration(cfg.KNNEmbedTimeoutMs)*time.Millisecond).Embed
+		// T2-C: the embedder is memoized by exact input bytes. This is where the
+		// memo earns most of its keep — the pre-filter runs on the REQUEST path,
+		// so a repeat input skips not just the embedding compute but the ~1-2 s
+		// cold-load the ttl=300 embedder pays after any idle gap. A disabled or
+		// unopenable memo yields the plain live embedder, so the short timeout's
+		// fail-open behaviour below is unchanged either way.
+		mp, me, mx := cfg.EmbedMemoSettings()
+		mz := judge.NewMemoizedEmbedder(cfg.Endpoint, cfg.EmbedModel(), time.Duration(cfg.KNNEmbedTimeoutMs)*time.Millisecond,
+			judge.MemoOptions{Path: mp, Epoch: me, MaxEntries: mx})
+		p.embed, p.embedMemo, p.embedMemoReason = mz.Embed, mz.Memo, mz.Reason
+	} else {
+		// The pre-filter is off (the default), so this pipeline embeds nothing and
+		// deliberately does not open a store. Say so, rather than letting the
+		// status surface guess between five different reasons for "no memo".
+		p.embedMemoReason = "the kNN pre-filter is off (knn_prefilter_enabled=false), so this pipeline embeds nothing"
 	}
 	// Seed the reloader's content hashes from the files just loaded so the first
 	// poll tick is a no-op for unchanged artifacts (and a transient bad initial
@@ -183,6 +270,28 @@ func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Le
 type cacheVal struct {
 	Data     json.RawMessage `json:"data"`
 	TokensIn int             `json:"tokens_in"`
+	// Model is the tier that actually PRODUCED this answer.
+	//
+	// Run and RunTier want different things from an entry: Run's key is
+	// deliberately stable on the PRIMARY model so an answer produced anywhere in
+	// the cascade is reused on a re-run, while RunTier pins ONE named tier and
+	// must get that tier's output. With ExemplarShots at its default of 0 every
+	// other ingredient coincided, so a triage-tier answer cached by Run was served
+	// to an in-loop RunTier call pinned to the workhorse, with meta.Model
+	// reporting the workhorse that never ran.
+	//
+	// That is now expressed in the KEY — see tierKeyspaceTag — because guarding
+	// only the read left both paths writing the same entry and ping-ponging it.
+	// The field is still WRITTEN on every RunTier cache Put; what is unreachable
+	// from production is a MISMATCH, since the keyspace already separates the two
+	// paths. It survives as defence in depth against a hand-crafted or externally
+	// written entry.
+	Model string `json:"model,omitempty"`
+	// InLoop records that this entry was produced by the agent loop's in-loop
+	// offload (T2-D), whose generation is deliberately never costed in the
+	// savings ledger. Absent on every pre-T2-D entry, which reads as false —
+	// correct, since nothing but the in-loop path can set it.
+	InLoop bool `json:"in_loop,omitempty"`
 }
 
 // Run executes req through the Gemma-4 family cascade and always returns a
@@ -355,12 +464,38 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	// majority) the two are byte-identical, so cache continuity holds; an
 	// oversized input re-keys once, and the old key COLLIDED two different
 	// originals sharing a trim — the new key is strictly more correct.
-	ck := cache.Key(string(req.Task), orig, tasks.StableParamsKey(req.Params), p.cfg.Model, built.Grammar)
+	// Call identity (Phase 0.1). Computed once here, where BOTH the original input
+	// and the fully-decorated prompt exist, then carried on meta so every ledger
+	// row — success, defer, or cache hit — records the same fingerprints.
+	meta.InputSHA256 = inputFingerprint(orig)
+	meta.PromptPrefixSHA256 = promptPrefixFingerprint(built.System, userPreambleOf(built.User, orig))
+	meta.ContextHash = p.contextHash()
+	meta.ExemplarIDs = exemplarFingerprints(shots)
+
+	// T2-A CORRECTNESS FIX: the key now also covers the prompt prefix (system +
+	// grammar) and the injected-exemplar set.
+	//
+	// The bug this closes: the old key was (task, input, params, model, grammar)
+	// and did NOT cover the system prompt or the exemplars. So editing a task's
+	// system prompt — or regenerating exemplars/selected.json — left every prior
+	// answer keyed identically, and the cache kept serving PRE-EDIT results
+	// forever, with no signal anywhere. A prompt improvement silently did nothing.
+	//
+	// This can only ever SPLIT keys that were previously shared by mistake, so it
+	// is a correctness change, not a hit-rate optimisation: old entries are not
+	// wiped, they simply stop being reachable from a prompt that no longer matches
+	// the template which produced them — which is exactly the intent.
+	ck := cacheKeyFor(req.Task, orig, tasks.StableParamsKey(req.Params), p.cfg.Model, built, shots)
 	if p.cache != nil {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
 			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 {
 				meta.CacheHit = true
+				// Carry the entry's provenance onto the row. The saving is real
+				// either way, but "how much of the cache-hit rate did the harness
+				// generate for itself?" is only answerable if this is recorded at
+				// the moment of the hit.
+				meta.CacheHitInLoop = cv.InLoop
 				meta.TokensIn = cv.TokensIn
 				meta.LatencyMs = time.Since(start).Milliseconds()
 				p.record(req.Task, meta, entryLen)
@@ -552,7 +687,7 @@ func (p *Pipeline) runVision(ctx context.Context, req core.Request, built tasks.
 		p.recordDefer(req.Task, meta, len(req.Input), "image load: "+err.Error())
 		return core.Deferf("image load: "+err.Error(), "", meta)
 	}
-	return p.runVisionGen(ctx, req, built, meta, start, "img:"+sha256hex(dataURI), func(gctx context.Context) (llamaclient.GenResult, error) {
+	return p.runVisionGen(ctx, req, built, meta, start, "img:"+sha256hex(dataURI), true, func(gctx context.Context) (llamaclient.GenResult, error) {
 		return p.client.GenerateVision(gctx, model, built.System, built.User, []string{dataURI}, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0)
 	})
 }
@@ -566,9 +701,22 @@ func (p *Pipeline) runVision(ctx context.Context, req core.Request, built tasks.
 // LO-1: after the cache check it gates on the render runners' GPU lock (bounded
 // wait, distinct "gpu busy" defer), retries once on http_5xx, and records the
 // final infra outcome into the vision tier's circuit breaker.
-func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tasks.Built, meta core.Meta, start time.Time, cacheKeyExtra string, gen func(context.Context) (llamaclient.GenResult, error)) core.Result {
-	ck := cache.Key(string(req.Task), req.Input+"|"+cacheKeyExtra, tasks.StableParamsKey(req.Params), meta.Model, built.Grammar)
-	if p.cache != nil {
+func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tasks.Built, meta core.Meta, start time.Time, cacheKeyExtra string, cacheable bool, gen func(context.Context) (llamaclient.GenResult, error)) core.Result {
+	// Same correctness fix as the text path (review finding: the first draft fixed
+	// only the text cascade and left this one with the bug it was written to
+	// eliminate). Vision system prompts are long, instruction-dense and exactly the
+	// kind of thing that gets tuned — the OCR reading-order rules, assess_image's
+	// field semantics — so editing one used to leave this cache serving pre-edit
+	// transcriptions forever, silently. No exemplars are injected on the vision
+	// path, so the exemplar tag is not an ingredient here.
+	ck := cache.Key(string(req.Task), req.Input+"|"+cacheKeyExtra, tasks.StableParamsKey(req.Params), meta.Model, built.Grammar,
+		templateCacheTag(built.System, built.Grammar, built.User, req.Input))
+	// cacheable is false when the caller could not establish the source file's
+	// CONTENT identity (T2-A2). Keying on anything else — a path, or a synthetic
+	// error token — makes a transient read failure write a durable entry that a
+	// DIFFERENT file at that path later hits. No identity, no cache: the work is
+	// done and returned, nothing is stored.
+	if p.cache != nil && cacheable {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
 			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 {
@@ -651,8 +799,8 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 	} else {
 		data, _ = json.Marshal(map[string]string{visionResultKey(req.Task): answer})
 	}
-	if p.cache != nil {
-		if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gres.TokensIn}); e == nil {
+	if p.cache != nil && cacheable {
+		if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gres.TokensIn, Model: meta.Model, InLoop: p.tierCache}); e == nil {
 			_ = p.cache.Put(ck, b)
 		}
 	}
@@ -684,6 +832,13 @@ func (p *Pipeline) runVideoDescribe(ctx context.Context, req core.Request, built
 	if width <= 0 {
 		width = 512
 	}
+	// IDENTIFY BEFORE CONSUMING, and ONCE — hoisted above both the retry loop and
+	// the frame sampling. Two reasons: it is loop-invariant, so computing it
+	// inside meant a full cold re-read of a multi-GB clip per retry (up to 4 at a
+	// 2048 frame width); and a file rotated mid-loop would give the retry a
+	// different identity than the attempt that looked it up, storing the result
+	// under a digest for bytes the model never saw.
+	vidID, vdErr := p.digestMedia(req.Video)
 	for {
 		frames, err := videoio.SampleFrames(req.Video, p.cfg.FFmpegPath, p.cfg.VideoFPS, p.cfg.VideoMaxFrames, width, p.cfg.VisionMaxImageBytes)
 		if err != nil {
@@ -695,8 +850,36 @@ func (p *Pipeline) runVideoDescribe(ctx context.Context, req core.Request, built
 		for i := range frames {
 			labels[i] = fmt.Sprintf("<%.1f seconds>", float64(i)/fps)
 		}
-		extra := fmt.Sprintf("vid:%s|fps=%g|n=%d|w=%d|frames=%d", req.Video, p.cfg.VideoFPS, p.cfg.VideoMaxFrames, width, len(frames))
-		res := p.runVisionGen(ctx, req, built, meta, start, extra, func(gctx context.Context) (llamaclient.GenResult, error) {
+		// T2-A2: keyed on the video's CONTENT, not its path. The previous key was
+		// the path STRING plus sampling params and was never hashed at all — so a
+		// file replaced at the same path with the same sampling settings produced a
+		// false HIT, serving the old video's description for the new one. The
+		// sampling params stay in the key because they change what the model saw.
+		//
+		// An empty extra means "no identity": runVisionGen then bypasses the cache
+		// entirely rather than keying on the path, which is what turned a transient
+		// read failure into a durable wrong answer.
+		// Verified AFTER the frames were sampled, not merely hoisted before it.
+		// Hoisting alone bought the I/O win but widened the correctness gap: the
+		// window became digest-at-t0 versus the FINAL successful SampleFrames,
+		// which on a 4K vertical reel is the 4th iteration — minutes, after three
+		// full ffmpeg passes. Worse, `frames=` below comes from that last sampling,
+		// so a mid-loop rotation produced a key that was a hybrid of two file
+		// states. One stat per iteration closes that.
+		cacheable := vdErr == nil && p.mediaStillMatches(vidID, req.Video)
+		extra := ""
+		if cacheable {
+			extra = fmt.Sprintf("vid:%s|fps=%g|n=%d|w=%d|frames=%d",
+				vidID.Digest, p.cfg.VideoFPS, p.cfg.VideoMaxFrames, width, len(frames))
+		} else if meta.CacheBypass == "" && p.cache != nil {
+			why := "source changed during the call"
+			if vdErr != nil {
+				why = vdErr.Error()
+			}
+			meta.CacheBypass = "media identity: " + why
+			log.Printf("video_describe: no stable content identity for %q (%s) — cache bypassed; result computed but not stored", req.Video, why)
+		}
+		res := p.runVisionGen(ctx, req, built, meta, start, extra, cacheable, func(gctx context.Context) (llamaclient.GenResult, error) {
 			return p.client.GenerateVisionInterleaved(gctx, p.cfg.VisionModel, built.System, labels, frames, built.User, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0)
 		})
 		if res.OK || width <= 256 || !isContextOverflow(res.Reason) {
@@ -739,7 +922,16 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		lang = ""
 	}
 
-	// Convert first (cheap, deterministic). A bad/missing file defers here.
+	// IDENTIFY BEFORE CONSUMING. The digest is taken FIRST, ahead of the ffmpeg
+	// convert, so the identity belongs to (as nearly as possible) the same bytes
+	// the conversion then reads. Hashing afterwards opened a TOCTOU window that
+	// content-addressing makes WORSE rather than better: a producer rotating a
+	// file between the convert and the hash would cache take A's transcript under
+	// sha256(take B) — and that poisoned entry is then reachable from ANY path
+	// holding B's bytes, not just the original one.
+	audioID, adErr := p.digestMedia(req.Audio)
+
+	// Convert (cheap, deterministic). A bad/missing file defers here.
 	wav, cleanup, cerr := audioio.ConvertToWav16k(req.Audio, p.cfg.FFmpegPath)
 	if cerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
@@ -748,7 +940,7 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	}
 	defer cleanup()
 
-	// Identity = source file (path+size+mtime) + model + lang. Used for BOTH the
+	// Identity = source file CONTENT (sha256 of its bytes) + model + lang. Used for BOTH the
 	// cache key AND the on-disk media filename so they agree and never collide
 	// across distinct sources that share a basename (recording.m4a is common in
 	// field audio) or across model/lang variants of the same source.
@@ -764,9 +956,41 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		identLang = ""
 		proto = "oai"
 	}
-	ident := req.Audio + "|" + audioCacheExtra(req.Audio, model, identLang) + "|proto=" + proto
+	// Keyed on CONTENT, not on the path: an identical file at a second path must
+	// hit, and a different file at the same path must miss.
+	//
+	// NO IDENTITY, NO CACHE. When the digest failed we do not know which bytes
+	// this result describes, so the work is done and returned but nothing is
+	// stored or looked up. Synthesising a key from the path + error text (an
+	// earlier design) made a transient read failure write a durable PATH-keyed
+	// entry — reintroducing, on the error path, precisely the false hit this
+	// change exists to remove. `identifiable` also gates the on-disk media stem,
+	// so two recordings that hit the same transient error cannot overwrite each
+	// other's .srt/.txt.
+	// VERIFY AFTER CONSUMING. Hashing before the convert did not close the TOCTOU
+	// window, it transposed it — hash-then-read stores the NEW bytes' transcript
+	// under the OLD digest instead of the reverse. One stat afterwards detects
+	// both directions, and also the case no re-ordering can touch: a file still
+	// being appended to, where the digest covers a prefix and ffmpeg read more.
+	identifiable := adErr == nil && p.mediaStillMatches(audioID, req.Audio)
+	// Only report a BYPASS where there was a cache to bypass. On a node with no
+	// cache configured nothing was ever cacheable, so a cache_bypass row there is
+	// noise — and core.Meta.CacheBypass's own doc excludes that case.
+	if !identifiable && p.cache != nil {
+		// Must be OBSERVABLE. Without this the call is byte-identical in telemetry
+		// to an ordinary cold miss, so an input on a flaky mount re-runs whisper at
+		// full cost on every call forever while the ledger shows a healthy run of
+		// misses.
+		why := "source changed during the call"
+		if adErr != nil {
+			why = adErr.Error()
+		}
+		meta.CacheBypass = "media identity: " + why
+		log.Printf("transcribe: no stable content identity for %q (%s) — cache bypassed; result computed but not stored", req.Audio, why)
+	}
+	ident := fmt.Sprintf("%s|model=%s|lang=%s|proto=%s", audioID.Digest, model, identLang, proto)
 	ck := cache.Key("transcribe", ident, tasks.StableParamsKey(req.Params), model, "")
-	if p.cache != nil {
+	if p.cache != nil && identifiable {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
 			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 {
@@ -813,7 +1037,31 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 
 	// Write the full payload to disk (the pointer pattern) — best-effort: a write
 	// failure does not fail the result (the inline data still carries the answer).
-	base := mediaBase(p.cfg.MediaDir, req.Audio, ident)
+	// When the input is unidentifiable, salt the on-disk stem with the start time
+	// so two recordings that hit the same transient error at the same path cannot
+	// overwrite each other's .srt/.txt — the returned srt_path would otherwise
+	// point at a different recording's transcript.
+	stemIdent := ident
+	if !identifiable {
+		// A random nonce, NOT a timestamp. Transcribe is reachable concurrently
+		// (the fleet node serves each request in its own goroutine), so two
+		// parallel calls on different unidentifiable files whose start lands in the
+		// same wall-clock tick would produce the same stem — and, sharing a
+		// basename as field audio routinely does, overwrite each other's
+		// .srt/.txt while each returned a path to the other's transcript. That is
+		// exactly the collision the salt exists to prevent, reproduced through the
+		// salt itself.
+		// crypto/rand.Read cannot fail on this toolchain — since Go 1.24 it always
+		// fills the buffer and crashes the process irrecoverably if the OS source
+		// errors. An earlier version wrapped it in an err check with a timestamp
+		// fallback and a warning log; that branch was unreachable, so the commit
+		// advertised a mitigation the code did not have. Ignoring the return is the
+		// honest expression of the actual guarantee.
+		var nonce [8]byte
+		_, _ = crand.Read(nonce[:])
+		stemIdent = fmt.Sprintf("%s|unidentified=%x", ident, nonce)
+	}
+	base := mediaBase(p.cfg.MediaDir, req.Audio, stemIdent)
 	srtPath, txtPath, jsonPath := base+".srt", base+".txt", base+".segments.json"
 	_ = os.MkdirAll(filepath.Dir(base), 0o755)
 	_ = os.WriteFile(srtPath, []byte(sttclient.SRT(tr.Segments)), 0o644)
@@ -842,8 +1090,11 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		JSONPath:          jsonPath,
 	}
 	data, _ := json.Marshal(out)
-	if p.cache != nil {
-		if b, e := json.Marshal(cacheVal{Data: data}); e == nil {
+	// Storing under a non-content key is what turns a transient read failure into
+	// a permanent wrong answer — so an unidentifiable input is computed, returned,
+	// and deliberately not persisted.
+	if p.cache != nil && identifiable {
+		if b, e := json.Marshal(cacheVal{Data: data, Model: model, InLoop: p.tierCache}); e == nil {
 			_ = p.cache.Put(ck, b)
 		}
 	}
@@ -2706,17 +2957,6 @@ func sttRoute(cfg config.Config, hq bool) (model string, useOAI bool) {
 	return model, useOAI
 }
 
-// audioCacheExtra folds the source file identity (path+size+modtime) + model +
-// language into the cache key so a changed file or a different model/lang misses.
-func audioCacheExtra(audioPath, model, lang string) string {
-	var sz, mt int64
-	if fi, err := os.Stat(audioPath); err == nil {
-		sz = fi.Size()
-		mt = fi.ModTime().UnixNano()
-	}
-	return fmt.Sprintf("sz=%d|mt=%d|model=%s|lang=%s", sz, mt, model, lang)
-}
-
 // preview returns roughly the first n bytes of s trimmed at a word boundary,
 // with an ellipsis when truncated — a cheap, deterministic gist (no model call).
 // It is rune-safe: n may land mid-rune (e.g. a Spanish á/ñ), so any trailing
@@ -2914,7 +3154,7 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 			// that must produce a gradeable result without any production side-effects.
 			if record {
 				if p.cache != nil {
-					if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn}); e == nil {
+					if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn, Model: meta.Model, InLoop: p.tierCache}); e == nil {
 						_ = p.cache.Put(ck, b)
 					}
 				}
@@ -3006,7 +3246,7 @@ func (p *Pipeline) attemptReasoning(ctx context.Context, req core.Request, built
 		return core.Deferf("reasoning tier: "+v.Reason, gen.Content, meta), false
 	}
 	if p.cache != nil {
-		if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn}); e == nil {
+		if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn, Model: meta.Model, InLoop: p.tierCache}); e == nil {
 			_ = p.cache.Put(ck, b)
 		}
 	}
@@ -3107,6 +3347,13 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		InputChars: inputChars, Feat: meta.Feat,
 		EscSource: string(meta.EscSource),
 		TierPack:  meta.TierPack,
+		// Call identity (Phase 0.1) — hashes only, never content.
+		InputSHA256:        meta.InputSHA256,
+		PromptPrefixSHA256: meta.PromptPrefixSHA256,
+		ContextHash:        meta.ContextHash,
+		ExemplarIDs:        meta.ExemplarIDs,
+		CacheBypass:        meta.CacheBypass,
+		CacheHitInLoop:     meta.CacheHitInLoop,
 	}
 }
 
@@ -3512,9 +3759,81 @@ func (p *Pipeline) RunTier(ctx context.Context, req core.Request, model string) 
 		return core.Result{}, false
 	}
 	feat := featurize(req.Task, req.Input)
-	ck := cache.Key(string(req.Task), req.Input, tasks.StableParamsKey(req.Params), p.cfg.Model, built.Grammar)
+	// T2-D / T2-A: the key is built by cacheKeyForTier, which WRAPS the same
+	// cacheKeyFor constructor Run uses inside RunTier's own keyspace — so the
+	// ingredient list has one source and cannot drift, while the two paths can
+	// never collide. Two corrections over the former hand-rolled cache.Key call:
+	//
+	//  1. It keys on the ACTUAL TIER (model), not p.cfg.Model. RunTier pins one
+	//     named tier, so its answer belongs to that tier; keying on the primary
+	//     model would let two different tiers share one entry — harmless while
+	//     nothing read the key, fatal the moment anything did.
+	//  2. It carries the template tag, so editing a task's prompt invalidates
+	//     these entries exactly as it does the cascade's. The old call here had
+	//     the pre-fix shape and was simply never exercised; reviving it as-is
+	//     would have reinstated the stale-prompt bug on a brand-new path.
+	//
+	// ...and it lives in RunTier's OWN keyspace, so Run and RunTier can never
+	// compute the same key and overwrite each other's entries. See
+	// tierKeyspaceTag for why guarding only the read was not enough.
+	ck := cacheKeyForTier(req.Task, req.Input, tasks.StableParamsKey(req.Params), model, built)
 	meta := core.Meta{Model: model, Feat: feat}
-	res, _ := p.attempt(ctx, req, built, ck, model, meta, start, false /* record=false: no persistent side-effects */, len(req.Input))
-	// escalatable ignored: RunTier never escalates
+	meta.InputSHA256 = inputFingerprint(req.Input)
+	meta.PromptPrefixSHA256 = promptPrefixFingerprint(built.System, userPreambleOf(built.User, req.Input))
+	meta.ContextHash = p.contextHash()
+
+	// Cache participation is a property of THIS pipeline, never of RunTier itself.
+	// The shadow-labelling flywheel calls RunTier on the MAIN pipeline (cache
+	// open) to evaluate counterfactual tiers; serving those from cache — or
+	// writing them — would corrupt the very measurement it exists to produce. Only
+	// NewInLoopPipeline sets tierCache.
+	useCache := p.tierCache && p.cache != nil
+	if useCache {
+		if raw, ok := p.cache.Get(ck); ok {
+			var cv cacheVal
+			// cv.Model == model is DEFENCE IN DEPTH and is unreachable by
+			// construction today — say so rather than letting the comment assert a
+			// live hazard that no longer exists.
+			//
+			// It was load-bearing when Run and RunTier shared a keyspace: a RunTier
+			// call pinned to the workhorse was served whatever tier the cascade had
+			// answered with (measured: the E2B triage tier), while meta.Model
+			// reported the workhorse that never ran. Guarding the read fixed the
+			// wrong answer but left both paths WRITING that key, so the real fix was
+			// cacheKeyForTier's separate keyspace — and `model` is already an
+			// ingredient of it, so nothing but a same-tier RunTier can reach here.
+			//
+			// Kept because it costs one comparison and fails CLOSED. Note a pre-0.63
+			// entry cannot reach it either: tierKeyspaceTag is the first ingredient
+			// of this key, so an old entry misses at the LOOKUP, not at this guard.
+			// The only thing it can still catch is a hand-crafted or externally
+			// written entry.
+			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 && cv.Model == model {
+				meta.CacheHit = true
+				meta.CacheHitInLoop = cv.InLoop
+				meta.TokensIn = cv.TokensIn
+				meta.LatencyMs = time.Since(start).Milliseconds()
+				return core.Result{OK: true, Data: cv.Data, Meta: meta}, true
+			}
+		}
+	}
+
+	res, _ := p.attempt(ctx, req, built, ck, model, meta, start, false /* record=false: ledger/shadow/exemplars stay untouched */, len(req.Input))
+	// escalatable ignored: RunTier never escalates.
+	//
+	// The Put lives here rather than inside attempt because `record` means "write
+	// the SAVINGS-ACCOUNTING side-effects" (ledger, shadow queue, exemplar
+	// harvest) and must stay false here — that is invariant (a) in
+	// NewInLoopPipeline's doc. Caching is invariant (b), and only these two lines
+	// grant it. A defer never reaches this point (res.OK is false), so a
+	// low-confidence or ungrounded answer is never cached.
+	if useCache && res.OK && len(res.Data) > 0 {
+		// InLoop stamps the provenance: only NewInLoopPipeline sets tierCache, so
+		// every entry written here came from the agent loop talking to itself,
+		// whose generation was never costed in the savings ledger.
+		if b, e := json.Marshal(cacheVal{Data: res.Data, TokensIn: res.Meta.TokensIn, Model: model, InLoop: true}); e == nil {
+			_ = p.cache.Put(ck, b)
+		}
+	}
 	return res, res.OK
 }

@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
@@ -28,6 +29,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
+	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/eval"
 	"github.com/dmmdea/offload-harness/internal/exemplars"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
@@ -50,7 +52,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.63.0"
+const version = "0.65.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -111,6 +113,12 @@ func main() {
 		err = runFleetMeasure(args)
 	case "ledger":
 		err = runLedger(args)
+	// `loupe` is the identity-aware ledger view (memory-frontier Phase 0.1b).
+	// Deliberately a SEPARATE command from `stats`: `stats` emits a stable
+	// report.Summarize JSON that callers may already script against, and
+	// silently changing its shape would break them.
+	case "loupe":
+		err = runLoupe(args)
 	case "doctor":
 		err = runDoctor(args)
 	case "report":
@@ -245,6 +253,8 @@ Usage:
   local-offload confhead-eval            out-of-fold adoption gate (AURC/AUGRC + paired-bootstrap CI)
   local-offload confhead-calibrate       per-task conformal p(correct) escalation thresholds (ADOPT tasks)
   local-offload stats                    observational per-task ledger telemetry
+  local-offload loupe [--since N] [--json]  call-identity ledger view: duplicate rate,
+                                         prefix reuse, exemplar histogram, artifact A/B arms
   local-offload version
 
 Global: --config <path> (or $LOCAL_OFFLOAD_CONFIG)
@@ -331,6 +341,15 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 		}
 		if led != nil {
 			led.Close()
+		}
+		// The embed memo's persisted hit/miss totals are written ONLY here. A
+		// process that exits without this leaves them at zero, and every reporting
+		// surface then states — in the one number the Phase 0.4 gate reads — that
+		// a memo which served thousands of hits was "never consulted". The error
+		// is surfaced rather than swallowed: losing the counters silently is the
+		// same fabricated-measurement defect in a quieter form.
+		if err := embedmemo.CloseShared(); err != nil {
+			fmt.Fprintln(os.Stderr, "note: embed memo counters may not have been persisted:", err)
 		}
 	}, nil
 }
@@ -1598,7 +1617,47 @@ func runMCP(args []string) error {
 	// one tick, fail-open, with zero IO/parse added to the request path.
 	stopReloader := p.StartReloader(0) // 0 => default interval
 	defer stopReloader()
-	return mcpserver.New(p).Run(context.Background(), version)
+
+	// The MCP server is the ONLY long-running process that accumulates embed-memo
+	// hits, and deferred functions do not run on SIGINT/SIGTERM — so without a
+	// signal context its `defer cleanup()` (the sole caller of the memo's Flush)
+	// never fired, and weeks of hit counters vanished on every stop. fleet-serve
+	// already installs one; this did not.
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
+	// A signal handler still loses everything since the last flush on a kill -9,
+	// and this process can run for weeks. A periodic flush bounds that loss to one
+	// interval instead of one process lifetime. It is cheap: a no-op when no
+	// lookups happened, and one small bbolt transaction when they did.
+	flushDone := make(chan struct{})
+	go func() {
+		defer close(flushDone)
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := embedmemo.FlushShared(); err != nil {
+					fmt.Fprintln(os.Stderr, "note: periodic embed-memo flush failed:", err)
+				}
+			}
+		}
+	}()
+
+	err = mcpserver.New(p).Run(ctx, version)
+	stopSignals()
+	<-flushDone
+	// A cancelled context IS the clean shutdown here, not a failure. Returning it
+	// made main print "error: context canceled" and exit 1 on every SIGTERM, which
+	// a supervisor reads as a crash. runFleetServe — the precedent this signal
+	// handling was copied from — returns nil for exactly this reason.
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
 }
 
 // repeatedFlag collects a repeatable string flag (--remote a --remote b).
@@ -2465,7 +2524,22 @@ func runShadowLabel(args []string) error {
 		return nil
 	}
 
-	emb := judge.NewEmbedder(cfg.Endpoint, cfg.EmbedModel(), 30*time.Second)
+	// T2-C: the drain is THE repetitive embedding workload on this box — it
+	// re-embeds the same stored inputs on every run, and re-scores the same
+	// reference summaries across every item. Memoizing it is where the memo earns
+	// most of its keep, and leaving it on a plain embedder was the gap that made
+	// the package's own stated rationale untrue as shipped.
+	memoPath, memoEpoch, memoMax := cfg.EmbedMemoSettings()
+	emb := judge.NewMemoizedEmbedder(cfg.Endpoint, cfg.EmbedModel(), 30*time.Second,
+		judge.MemoOptions{Path: memoPath, Epoch: memoEpoch, MaxEntries: memoMax})
+	if emb.Memo == nil {
+		fmt.Printf("shadow-label: embed memo not active — %s\n", emb.Reason)
+	}
+	defer func() {
+		if err := embedmemo.CloseShared(); err != nil {
+			fmt.Fprintln(os.Stderr, "note: embed memo counters may not have been persisted:", err)
+		}
+	}()
 	deps := shadow.LabelDeps{
 		Escalation:            cfg.EscalationModel,
 		E2B:                   cfg.TriageModel,

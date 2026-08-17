@@ -196,6 +196,57 @@ type Meta struct {
 	// to the gating could be evaluated after the fact. Empty on calls that
 	// never escalated.
 	EscSource EscalationSource `json:"esc_source,omitempty"`
+	// --- call identity (memory-frontier Phase 0.1) ---------------------------
+	// The ledger recorded THAT a call happened but never WHAT it was about, so
+	// every "measure the duplicate rate / prefix reuse / counterfactual replay"
+	// question was structurally unanswerable from telemetry — each one needed a
+	// bespoke throwaway script, and the ones needing the input text could not be
+	// answered at all. These are HASHES, never content: they make calls
+	// groupable and comparable without turning the ledger into a transcript
+	// store (which was rejected on privacy/brand-isolation grounds).
+	//
+	// InputSHA256 fingerprints the ORIGINAL caller input (pre-trim), so repeats
+	// are countable across tiers and across machines running identical models.
+	InputSHA256 string `json:"input_sha256,omitempty"`
+	// PromptPrefixSHA256 fingerprints the assembled prompt's STABLE prefix (the
+	// bytes before the volatile tail). Two calls sharing it are two calls whose
+	// KV prefix llama.cpp could reuse — which is what makes prefix-reuse work
+	// measurable instead of assumed.
+	PromptPrefixSHA256 string `json:"prompt_prefix_sha256,omitempty"`
+	// ContextHash fingerprints the DECISION ARTIFACTS in force for this call
+	// (router weights, confhead, exemplar selection, template version, seed).
+	// It turns every hot-reload into a free A/B: rows split into buckets by
+	// which artifact set produced them, so a change's effect is attributable
+	// rather than anecdotal. Cheap because the 30s content-hash watcher already
+	// computes the component hashes for reload; this only threads them through.
+	ContextHash string `json:"context_hash,omitempty"`
+	// ExemplarIDs lists the exemplars actually injected into this prompt. Nobody
+	// can answer "which exemplars actually fire?" today; with this the histogram
+	// is one query, and a power-law answer means the selection set can be pruned.
+	ExemplarIDs []string `json:"exemplar_ids,omitempty"`
+	// CacheBypass names why this call could neither read nor write the result
+	// cache, when that happened for a reason other than "no cache configured".
+	//
+	// It exists because the alternative is a genuine silent failure: a media file
+	// whose content identity cannot be established is deliberately not cached
+	// (T2-A2 — keying on anything but content is what produces false hits), and
+	// with no field for it that call is byte-identical in telemetry to an ordinary
+	// cold miss. An input on a flaky mount would then re-run whisper at full cost
+	// on every call, forever, while the ledger showed a healthy run of cache
+	// misses and the hit-rate dashboard invited exactly the wrong diagnosis.
+	CacheBypass string `json:"cache_bypass,omitempty"`
+	// CacheHitInLoop marks a cache hit served from an entry that was WRITTEN by
+	// the agent loop's in-loop offload (T2-D) rather than by a recorded,
+	// caller-facing call.
+	//
+	// Why it exists: in-loop calls run with a nil ledger precisely so the harness
+	// talking to itself cannot inflate savings. Since T2-D they share the result
+	// cache, so a later caller-facing call CAN hit an entry the loop produced.
+	// The saving to that caller is real and is still counted — but the cache-hit
+	// rate is a gate this plan reads, and it must be possible to tell how much of
+	// it the harness generated for itself. Without this field that split is
+	// unrecoverable after the fact.
+	CacheHitInLoop bool `json:"cache_hit_in_loop,omitempty"`
 }
 
 // Result is the harness outcome. On success Data holds the validated task output.

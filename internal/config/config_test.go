@@ -340,7 +340,7 @@ func pathFieldJSONNames(t *testing.T) []string {
 		"confhead_path", "router_labels_path", "confhead_labels_path",
 		"confhead_thresholds_path", "exemplars_dir",
 		"shadow_queue_path", "agent_trajectory_queue_path", "agent_trajectory_labels_path",
-		"knn_index_path",
+		"knn_index_path", "embed_memo_path",
 	}
 }
 

@@ -52,14 +52,29 @@ func TestPreviewRuneSafe(t *testing.T) {
 // Distinct sources that share a basename must NOT collide on disk (the returned
 // srt/txt/json pointers would otherwise reference a different audio's transcript).
 func TestMediaBaseDisambiguates(t *testing.T) {
-	a := mediaBase("/m", "/a/recording.m4a", "/a/recording.m4a|sz=1|mt=2|model=whisper-stt|lang=es")
-	b := mediaBase("/m", "/b/recording.m4a", "/b/recording.m4a|sz=9|mt=3|model=whisper-stt|lang=es")
+	// The ident strings mirror the CONTENT-ADDRESSED shape production now emits
+	// (T2-A2): `media:sha256:sz=N:<hex>|model=..|lang=..|proto=..`. They were
+	// previously hand-written in the pre-change path+size+mtime form, which passed
+	// while exercising a format nothing produces — so the real key shape had no
+	// coverage at all.
+	identA := "media:sha256:sz=1:" + strings.Repeat("a", 64) + "|model=whisper-stt|lang=es|proto=whisper"
+	identB := "media:sha256:sz=9:" + strings.Repeat("b", 64) + "|model=whisper-stt|lang=es|proto=whisper"
+	a := mediaBase("/m", "/a/recording.m4a", identA)
+	b := mediaBase("/m", "/b/recording.m4a", identB)
 	if a == b {
 		t.Fatalf("distinct sources with same basename collided: %q", a)
 	}
 	// Same identity -> stable stem (idempotent overwrite of its own files).
-	if again := mediaBase("/m", "/a/recording.m4a", "/a/recording.m4a|sz=1|mt=2|model=whisper-stt|lang=es"); again != a {
+	if again := mediaBase("/m", "/a/recording.m4a", identA); again != a {
 		t.Errorf("same ident must yield a stable stem: %q != %q", again, a)
+	}
+	// IDENTICAL CONTENT under the same filename in a different DIRECTORY now
+	// resolves to the same stem — the reuse content-addressing exists to enable,
+	// and the case the old path-keyed ident always split. Both runs write the same
+	// .srt/.txt, which is correct: they describe the same bytes.
+	same := mediaBase("/m", "/elsewhere/recording.m4a", identA)
+	if same != a {
+		t.Errorf("identical content+params in another directory should yield the same stem: %q vs %q", same, a)
 	}
 	// Human-readable basename retained.
 	if !strings.Contains(a, "recording-") {

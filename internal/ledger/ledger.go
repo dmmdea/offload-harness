@@ -65,6 +65,26 @@ type Entry struct {
 	// local escalation tier (the default), so historic rows parse unchanged and
 	// remote-judged labels stay auditable/filterable in the sidecars.
 	Oracle string `json:"oracle,omitempty"`
+	// --- call identity (memory-frontier Phase 0.1) ---------------------------
+	// Hashes, never content. The ledger recorded THAT a call happened but not
+	// WHAT it was about, so duplicate-rate, prefix-reuse and counterfactual-replay
+	// questions could not be answered from telemetry at all. Storing full prompts
+	// was rejected (privacy + multi-brand isolation); these fingerprints give the
+	// grouping power without the liability. All omitempty: historic lines parse
+	// unchanged, and the fields simply accrue going forward.
+	InputSHA256        string   `json:"input_sha256,omitempty"`
+	PromptPrefixSHA256 string   `json:"prompt_prefix_sha256,omitempty"`
+	ContextHash        string   `json:"context_hash,omitempty"`
+	ExemplarIDs        []string `json:"exemplar_ids,omitempty"`
+	// CacheBypass names why the result cache was skipped entirely, so
+	// "permanently uncacheable input" is one query away instead of being
+	// indistinguishable from a cold miss.
+	CacheBypass string `json:"cache_bypass,omitempty"`
+	// CacheHitInLoop marks a cache hit served from an entry the agent loop wrote
+	// (T2-D). In-loop generations run with a nil ledger and are never costed, so
+	// without this the share of the cache-hit rate the harness produced for
+	// itself is unrecoverable — and that rate is a gate.
+	CacheHitInLoop bool `json:"cache_hit_in_loop,omitempty"`
 }
 
 // maxReasonLen bounds a recorded defer reason so a long upstream error can't
@@ -174,13 +194,13 @@ func ReadLabelFile(path string) ([]Entry, error) {
 
 // Summary aggregates the ledger.
 type Summary struct {
-	Calls             int            `json:"calls"`
-	CacheHits         int            `json:"cache_hits"`
-	Deferred          int            `json:"deferred"`
-	Completed         int            `json:"completed"`
-	ReasoningReclaims int            `json:"reasoning_reclaims"` // completed via the terminal reasoning tier (deferrals it reclaimed before Opus)
-	TokensSaved       int            `json:"tokens_saved"`       // input tokens kept out of Opus on completed/cache calls
-	TokensOut         int            `json:"tokens_out"`
+	Calls             int `json:"calls"`
+	CacheHits         int `json:"cache_hits"`
+	Deferred          int `json:"deferred"`
+	Completed         int `json:"completed"`
+	ReasoningReclaims int `json:"reasoning_reclaims"` // completed via the terminal reasoning tier (deferrals it reclaimed before Opus)
+	TokensSaved       int `json:"tokens_saved"`       // input tokens kept out of Opus on completed/cache calls
+	TokensOut         int `json:"tokens_out"`
 	// EstValueKeptLocal is the estimated Opus-INPUT value of the tokens kept
 	// local (tokens_saved x opus_input_price_per_mtok / 1M). It is an estimate
 	// of avoided cloud input pricing, NOT literal billed dollars saved (LO-12:
