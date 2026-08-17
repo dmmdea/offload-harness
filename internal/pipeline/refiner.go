@@ -33,7 +33,15 @@ import (
 // whole-output wrap). Quoted spans are how callers request literal rendered
 // text — the model family's whole selling point — so a refinement that touches
 // them is discarded, not trusted.
-const refinerSystem = `You are a professional photography prompt engineer for a text-to-image model. Expand the user's image prompt with concrete photographic detail: lighting, composition, materials, mood, and lens vocabulary. NEVER change the subject of the prompt. NEVER add, remove, or alter any "double-quoted" text span — reproduce each one verbatim, quotes included. Return ONLY the refined prompt as plain text, with no preamble, no explanation, and no surrounding quotation marks.`
+//
+// The closing no-quotes-when-none sentence is load-bearing, not style: with
+// only the span rule stated, Gemma-class refiners wrap the SUBJECT itself in
+// quotes ("a green backpack and a pig"), and the added-quote guard then
+// rejects nearly every span-less refinement — the flag silently self-cancels
+// on exactly the prompts it exists for. Measured on GenEval2 span-less
+// prompts 2026-08-16: gemma-4-12b 2% -> 87% refine rate with the sentence,
+// gemma-4-31b 0% without it; quoted-span prompts were unaffected (90-100%).
+const refinerSystem = `You are a professional photography prompt engineer for a text-to-image model. Expand the user's image prompt with concrete photographic detail: lighting, composition, materials, mood, and lens vocabulary. NEVER change the subject of the prompt. NEVER add, remove, or alter any "double-quoted" text span — reproduce each one verbatim, quotes included. If the user's prompt contains no "double-quoted" text, your output must contain no quotation marks at all. Return ONLY the refined prompt as plain text, with no preamble, no explanation, and no surrounding quotation marks.`
 
 const (
 	refinerMaxTokens      = 256
