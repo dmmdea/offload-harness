@@ -6,6 +6,80 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — delegation lane, round-3 adversarial review
+
+Two fresh-context reviews of the previous round's fixes found several of them reintroduced or
+half-did the thing they were meant to fix. All reproduced before being fixed.
+
+- **A poll `404` is a DENIAL, and was being treated as acceptance.** The 404 arm set the same
+  "the node answered" flag a live `running` answer sets, so a poll deadline landing inside the
+  bounded re-dispatch window (≤2 404s) took the ANSWERED path and published
+  `{deferred:true, class:"budget", reason:"…node accepted the job but did not reach a terminal
+  state"}` stamped with that node's id and seat, at exit 0 — the exact fabrication the previous
+  round's fix exists to forbid, reached through a different door (reproduced: polls=2,
+  dispatches=3, `Summary{Deferred:1}`). Reachable in production because `timeout_sec` has no
+  lower bound and a re-dispatch burns up to 60s. The flag is now split: reachability
+  (`sawNodeAnswer`, message text only) versus OWNERSHIP (`sawJobOwned`, set only by a `200` whose
+  state is accepted/running/done/error). Defer-vs-failure gates on ownership, so a run whose
+  every answer was a 404 — or a 503 — lands in `summary.failed` with the status named.
+- **The agent lane's advertisement and admission still keyed on different inputs.** The previous
+  round unified them on one predicate but left `BuildRequest` deriving its own listener answer
+  with `ConfigLoopbackListen`, while health used the RESOLVED listener. With
+  `fleet_listen: "0.0.0.0:18811"`, `--listen 127.0.0.1:18811` and no token, health advertised
+  `agent_enabled:true` with `agent` in `supported_task_types` while dispatch answered
+  `400 unsupported task_type "agent" (supported: )`. `BuildRequest` now takes the resolved
+  listener as an argument, the dispatch handler consults `AgentLaneSafelyReachable` instead of
+  re-implementing condition 3, and the parity test gained the mismatch row its four original
+  rows could not express (all four left `fleet_listen` unset). The docs that claimed a single
+  predicate over the resolved listener are corrected to describe what the code now does.
+- **A poll error was sticky forever.** One 503 followed by fifty clean `running` answers still
+  ended `defer_class: infrastructure`, exited non-zero, and quoted an error fifty polls stale. A
+  healthy answer now retires it; the failure history survives in the poll summary line.
+- **`route=auto` discarded the placement class.** `route=remote` classes a totally unreachable
+  fleet `infrastructure` and exits non-zero; `route=auto` with a busy local GPU threw the
+  identical verdict away, so a fleet down for a week read green forever. A local placement taken
+  while every configured remote failed its health probe now counts into `summary.infrastructure`.
+  Ordinary idle-local placements and "they answered and did not qualify" stay quiet.
+- **Every non-200 from the seat was filed as broken infrastructure.** The structured re-pack
+  treats a Generate error as transport only when it genuinely is one (`*url.Error` / `net.Error`
+  / 5xx). A 4xx ("context length exceeded", an uncompilable grammar) and a 200 with zero choices
+  are the box ANSWERING, so they are abstentions under the stable `output failed schema:` prefix
+  — previously they told the operator a machine was broken when the fix was a smaller context or
+  a flatter schema. The inverse is fixed too: the transport flag is sticky across the one retry
+  (a 5xx then a wrong-shape retry stays `infrastructure`) instead of last-wins, and the reported
+  error is the transport one. A PARENT cancellation mid-re-pack — a `*url.Error` like any dial
+  failure — is now its own `budget` shape instead of accusing the node.
+- **Caller-contract gate rejections were classed as a broken stack.** Three of the placement
+  gate's five conditions are properties of the CALLER'S contract (no `output_schema` — legal per
+  `Validate` and legal locally; `depth != 0`; a token estimate no advertised ceiling can hold),
+  and all three produced `summary.infrastructure ≥ 1`, so `--route remote` exited non-zero and
+  told the delegating model a node was broken on a run where every node was healthy. New
+  `defer_class: "contract"`, excluded from `BrokenStackDefer`, with a reason naming the property.
+- **Unbounded logging, in the commit that added `sync.Once` for exactly this hazard.** Both poll
+  failure arms fired once PER POLL (~120 lines per subtask in production, ~1000 for an 8-way
+  fan-out at a dead node) and the per-remote probe warning fired once per remote PER SUBTASK. Now:
+  the first occurrence of each distinct failure shape, one summary line per job reporting the
+  totals, and one probe warning per base per run.
+- **Telemetry loss is counted and published.** "This run's corpus rows are LOST" read identically
+  whether 1 of 8 or 8 of 8 failed, and the MCP caller — this lane's primary consumer — could not
+  learn it at all. Atomic counters, one end-of-run "N of M rows lost" line, and
+  `corpus_rows_lost` / `ledger_rows_lost` (`omitempty`) on the published summary.
+- **The loud-exit contract existed only on the CLI.** `handleAgentDelegate` never set `IsError`,
+  so `summary.failed > 0` and `summary.infrastructure > 0` both returned as successful tool calls.
+  Both now flag the call while leaving the JSON body — summary and every per-subtask reason —
+  untouched.
+- **An inert assertion from the previous round.** `TestAgentDispatchAdversarialBodies`' leftover-
+  job-dir check never ran a comparison: all nine rows failed BEFORE materialization, so the jobs
+  root never existed and `ReadDir` always errored. A row that fails AFTER materialization (a doc
+  name no filesystem can hold) was added and the assertion made explicit — mutation-verified:
+  deleting the `os.RemoveAll` it guards now fails the test.
+- **`RefreshAgentResidency` bypassed its own single-flight** (it called the refresher without
+  taking the latch the refresher clears unconditionally), permitting a duplicate probe and a
+  staler answer overwriting a fresher one. It now claims the latch, or waits for the probe
+  already running.
+- **`delegateExitErr` named only the first non-zero class**, so a run with both failures and
+  infrastructure defers hid one of them until the next run. Both counts are reported.
+
 ## [0.63.0] - 2026-08-16
 
 Multi-node agent delegation: the fleet gains an **agent lane** — a delegator hands a

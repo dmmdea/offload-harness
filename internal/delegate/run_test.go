@@ -370,33 +370,77 @@ func TestRunPollDeadlineDefers(t *testing.T) {
 	}
 }
 
-// TestRunPollUnusableAnswersAreInfrastructure (C-1): a node answering 503 to
+// TestRunPollUnusableAnswers (C-1, re-scoped by C-A): a node answering 503 to
 // every poll is not a slow node. The status used to fall through the switch
 // unread, so the run ended in the same "poll deadline" defer a healthy-but-slow
-// node produces. It must keep polling (the state may still resolve) but end
-// classed infrastructure, with the 503 named in the reason.
-func TestRunPollUnusableAnswersAreInfrastructure(t *testing.T) {
-	compressPolls(t, 20*time.Millisecond, 100*time.Millisecond)
-	node := &fakeNode{
-		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
-		pollState: func(int64) (map[string]any, int) {
-			return map[string]any{"status": "error", "error": "vram snapshot stale"}, http.StatusServiceUnavailable
-		},
-	}
-	srv := node.server()
+// node produces. It must keep polling (the state may still resolve) — but WHAT
+// it ends as now depends on whether the node ever reported OWNING the job, and
+// a 503 never does:
+//
+//   - unusable from the first poll to the last: nothing ever said the job was
+//     accepted THERE, so a defer would be authored on that node's behalf. It is
+//     a FAILURE, with the 503 named.
+//   - unusable only AFTER the node reported the job accepted/running: the node
+//     did take the work, so the honest outcome is a defer — classed
+//     infrastructure, never the plain budget defer a healthy node earns.
+func TestRunPollUnusableAnswers(t *testing.T) {
+	t.Run("never owned: a failure naming the 503", func(t *testing.T) {
+		compressPolls(t, 20*time.Millisecond, 100*time.Millisecond)
+		node := &fakeNode{
+			t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
+			pollState: func(int64) (map[string]any, int) {
+				return map[string]any{"status": "error", "error": "vram snapshot stale"}, http.StatusServiceUnavailable
+			},
+		}
+		srv := node.server()
 
-	contract := remoteContract()
-	contract.TimeoutSec = 1
-	results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{srv.URL})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if sum != (Summary{Deferred: 1, Infrastructure: 1}) {
-		t.Fatalf("summary = %+v, want the defer counted as infrastructure", sum)
-	}
-	if r := results[0]; !strings.Contains(r.Result.Reason, "503") {
-		t.Errorf("reason = %q, want the unusable 503 answers named", r.Result.Reason)
-	}
+		contract := remoteContract()
+		contract.TimeoutSec = 1
+		results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{srv.URL})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if sum != (Summary{Failed: 1}) {
+			t.Fatalf("summary = %+v, want a FAILURE — no answer ever reported the job accepted on that node", sum)
+		}
+		r := results[0]
+		if r.Result.Deferred {
+			t.Errorf("result claims a defer for a node that never reported owning the job: %q", r.Result.Reason)
+		}
+		if !strings.Contains(r.Err, "503") {
+			t.Errorf("err = %q, want the unusable 503 answers named", r.Err)
+		}
+		if node.polls.Load() < 3 {
+			t.Errorf("polls = %d — an unusable answer must not abandon the job early; the deadline decides", node.polls.Load())
+		}
+	})
+
+	t.Run("owned, then unusable: an infrastructure defer", func(t *testing.T) {
+		compressPolls(t, 20*time.Millisecond, 100*time.Millisecond)
+		node := &fakeNode{
+			t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
+			pollState: func(n int64) (map[string]any, int) {
+				if n == 1 {
+					return map[string]any{"state": "running"}, http.StatusOK
+				}
+				return map[string]any{"status": "error", "error": "vram snapshot stale"}, http.StatusServiceUnavailable
+			},
+		}
+		srv := node.server()
+
+		contract := remoteContract()
+		contract.TimeoutSec = 1
+		results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{srv.URL})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if sum != (Summary{Deferred: 1, Infrastructure: 1}) {
+			t.Fatalf("summary = %+v, want the defer counted as infrastructure", sum)
+		}
+		if r := results[0]; !strings.Contains(r.Result.Reason, "503") {
+			t.Errorf("reason = %q, want the unusable 503 answers named", r.Result.Reason)
+		}
+	})
 }
 
 // TestRunPollDeadNodeIsAFailureNotAFabricatedDefer (C-1): a node that dies
@@ -441,6 +485,243 @@ func TestRunPollDeadNodeIsAFailureNotAFabricatedDefer(t *testing.T) {
 	}
 	if node.dispatches.Load() == 0 {
 		t.Error("the contract was never dispatched; this test must exercise the POLL path")
+	}
+}
+
+// TestRunPoll404InsideTheRedispatchWindowIsAFailure (C-A): a poll 404 is the
+// node POSITIVELY DENYING it ever held the job — the one answer that proves
+// nothing is running there. It used to set the same "the node answered" flag a
+// live `running` answer sets, so a deadline landing INSIDE the re-dispatch
+// window (≤2 404s) took the ANSWERED path and published
+// {deferred:true, class:"budget", reason:"…node accepted the job but did not
+// reach a terminal state"} stamped with that node's id and seat, at exit 0 —
+// the exact fabrication TestRunPollDeadNodeIsAFailureNotAFabricatedDefer
+// forbids, reached by a different door.
+func TestRunPoll404InsideTheRedispatchWindowIsAFailure(t *testing.T) {
+	// Poll budget = TimeoutSec(1s) + grace(-700ms) = 300ms, polls every 200ms:
+	// two polls land (t≈0, t≈200ms), each spending one of the two allowed
+	// re-dispatches, and the deadline fires at t≈400ms with redispatches STILL
+	// under the cap — i.e. inside the window, never reaching the
+	// "lost job N times" failure that guards the far end of it.
+	compressPolls(t, 200*time.Millisecond, -700*time.Millisecond)
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
+		pollState: func(int64) (map[string]any, int) {
+			return map[string]any{"status": "error", "error": "unknown job"}, http.StatusNotFound
+		},
+	}
+	srv := node.server()
+
+	contract := remoteContract()
+	contract.TimeoutSec = 1
+	results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{srv.URL})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if node.dispatches.Load() != 3 {
+		t.Fatalf("dispatches = %d, want 3 (initial + two 404-triggered re-dispatches) — this test must land the deadline INSIDE the re-dispatch window", node.dispatches.Load())
+	}
+	if sum != (Summary{Failed: 1}) {
+		t.Fatalf("summary = %+v, want exactly one FAILURE — every answer was a 404 denying the job ever existed there", sum)
+	}
+	r := results[0]
+	if r.Result.Deferred {
+		t.Errorf("result claims a defer (%q / class %q) for a node that denied ever holding the job", r.Result.Reason, r.Result.DeferClass)
+	}
+	if r.Result.NodeID != "" || r.Result.Seat != "" {
+		t.Errorf("result carries node/seat %q/%q — nothing that ran the contract ever reported", r.Result.NodeID, r.Result.Seat)
+	}
+	if !strings.Contains(r.Err, "404") {
+		t.Errorf("err = %q, want the 404 denial named", r.Err)
+	}
+}
+
+// TestRunPollErrorIsClearedByHealthyAnswers (C-C): lastPollErr was assigned
+// and never cleared, so ONE early blip followed by dozens of clean `running`
+// answers still ended classed infrastructure, exited non-zero, and quoted an
+// error from tens of polls ago — contradicting the class comment's own claim
+// that "a node that answered every poll normally simply ran out of clock".
+func TestRunPollErrorIsClearedByHealthyAnswers(t *testing.T) {
+	compressPolls(t, 20*time.Millisecond, -900*time.Millisecond) // budget = 100ms
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
+		pollState: func(n int64) (map[string]any, int) {
+			if n == 1 {
+				return map[string]any{"status": "error", "error": "vram snapshot stale"}, http.StatusServiceUnavailable
+			}
+			return map[string]any{"state": "running"}, http.StatusOK
+		},
+	}
+	srv := node.server()
+
+	contract := remoteContract()
+	contract.TimeoutSec = 1
+	results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{srv.URL})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if polls := node.polls.Load(); polls < 3 {
+		t.Fatalf("polls = %d — the healthy-answers-after-the-blip premise never happened", polls)
+	}
+	if sum != (Summary{Deferred: 1}) {
+		t.Fatalf("summary = %+v, want a plain BUDGET defer — the node answered normally after one blip", sum)
+	}
+	r := results[0]
+	if r.Result.DeferClass != core.DeferClassBudget {
+		t.Errorf("defer_class = %q, want %q — a stale error must not outlive the polls that succeeded after it", r.Result.DeferClass, core.DeferClassBudget)
+	}
+	if strings.Contains(r.Result.Reason, "last poll error") {
+		t.Errorf("reason = %q, still quotes an error the node recovered from", r.Result.Reason)
+	}
+}
+
+// TestRunAutoLocalFallbackReportsADeadFleet (C-D): route=remote classes a
+// totally unreachable fleet infrastructure and exits non-zero; route=auto with
+// a busy local GPU used to DISCARD that same class (`why, _ :=`), so a fleet
+// that has been down for a week read green forever. The work still runs
+// locally — the placement is right — but the broken fleet must be reported.
+func TestRunAutoLocalFallbackReportsADeadFleet(t *testing.T) {
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
+		pollState: func(int64) (map[string]any, int) { return nil, http.StatusNotFound },
+	}
+	srv := node.server()
+	base := srv.URL
+	srv.Close() // refused at connect: every probe fails
+
+	leaseDir := filepath.Join(t.TempDir(), "lease")
+	m, err := gpulease.OpenAt(leaseDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "delegate-run-test", TTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lease.Release() }()
+
+	cfg := testCfg(t)
+	cfg.GPULockPath = leaseDir
+	local := func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat",
+			Output: "local qube answer", Structured: json.RawMessage(`{"answer":"local"}`), StopReason: "done"}, nil
+	}
+	results, sum, err := Run(t.Context(), cfg, local, []core.AgentContract{remoteContract()}, "auto", []string{base})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sum != (Summary{Succeeded: 1, Infrastructure: 1}) {
+		t.Fatalf("summary = %+v, want the local success PLUS the dead fleet counted — a fleet that never answers must not read green", sum)
+	}
+	if !strings.Contains(results[0].PlacementReason, "health probe") {
+		t.Errorf("placement reason = %q, want the failed probe named", results[0].PlacementReason)
+	}
+}
+
+// TestRunContractSideGateRejectionIsNotABrokenStack (C-F): remoteEligible
+// rejects on five conditions and three are properties of the CALLER'S
+// CONTRACT (no output_schema — legal per Validate; depth != 0; a token
+// estimate no advertised ceiling can hold). Filing those as `config` put them
+// in BrokenStackDefer, so `--route remote` exited non-zero and told the
+// delegating model a node was broken on a run where every node was healthy.
+func TestRunContractSideGateRejectionIsNotABrokenStack(t *testing.T) {
+	cases := []struct {
+		name      string
+		ctxTokens int
+		mutate    func(*core.AgentContract)
+		wantSub   string
+	}{
+		{"no output_schema", 8192, func(c *core.AgentContract) { c.OutputSchema = nil }, "output_schema"},
+		{"already past the origin hop", 8192, func(c *core.AgentContract) { c.Depth = 1 }, "depth"},
+		{"contract cannot fit any advertised ceiling", 4096,
+			func(c *core.AgentContract) { c.Goal = strings.Repeat("x", 30000) }, "context"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			node := &fakeNode{
+				t: t, agentEnabled: true, resident: true, ctxTokens: tc.ctxTokens, nodeID: "healthy-node",
+				pollState: func(int64) (map[string]any, int) { return nil, http.StatusNotFound },
+			}
+			srv := node.server()
+
+			contract := remoteContract()
+			tc.mutate(&contract)
+			results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{srv.URL})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if sum != (Summary{Deferred: 1}) {
+				t.Fatalf("summary = %+v, want ONE defer and NO infrastructure — every node here is healthy; the contract is what cannot be placed", sum)
+			}
+			r := results[0]
+			if r.Result.DeferClass != core.DeferClassContract {
+				t.Errorf("defer_class = %q, want %q", r.Result.DeferClass, core.DeferClassContract)
+			}
+			if !strings.Contains(r.Result.Reason, tc.wantSub) {
+				t.Errorf("reason = %q, want the contract property named (%q)", r.Result.Reason, tc.wantSub)
+			}
+			if BrokenStackDefer(r.Result.DeferClass) {
+				t.Errorf("class %q counts as a broken stack — a caller-contract mistake must never tell the operator a box is down", r.Result.DeferClass)
+			}
+		})
+	}
+}
+
+// TestRunPollFailureLoggingIsBounded (C-G): both poll-failure log calls fired
+// ONCE PER POLL, in the very commit that added sync.Once because unbounded
+// per-subtask logging buries the results it warns about. One dead node at a
+// production cadence is ~120 lines per subtask; an 8-way fan-out, ~1000.
+func TestRunPollFailureLoggingIsBounded(t *testing.T) {
+	logs := captureLog(t)
+	compressPolls(t, 20*time.Millisecond, -700*time.Millisecond) // budget = 300ms ⇒ ~15 polls
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
+		pollState: func(int64) (map[string]any, int) {
+			return map[string]any{"status": "error", "error": "vram snapshot stale"}, http.StatusServiceUnavailable
+		},
+	}
+	srv := node.server()
+
+	contract := remoteContract()
+	contract.TimeoutSec = 1
+	if _, _, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{srv.URL}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if polls := node.polls.Load(); polls < 5 {
+		t.Fatalf("polls = %d — too few for this test to say anything about per-poll logging", polls)
+	}
+	out := logs.String()
+	if n := strings.Count(out, "delegate: poll"); n > 3 {
+		t.Errorf("poll log lines = %d for %d polls, want the first of each shape plus one summary (log:\n%s)", n, node.polls.Load(), out)
+	}
+	if !strings.Contains(out, "failed poll(s)") {
+		t.Errorf("no end-of-poll summary line: %s", out)
+	}
+}
+
+// TestRunProbeFailureLogsOncePerRemotePerRun (C-G): fetchViews runs inside
+// runOne, so its per-remote probe warning fired once per remote PER SUBTASK —
+// an 8-subtask fan-out against 2 dead remotes printed 16 identical lines.
+func TestRunProbeFailureLogsOncePerRemotePerRun(t *testing.T) {
+	logs := captureLog(t)
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
+		pollState: func(int64) (map[string]any, int) { return nil, http.StatusNotFound },
+	}
+	srv := node.server()
+	base := srv.URL
+	srv.Close()
+
+	results, _, err := Run(t.Context(), testCfg(t), neverLocal(t),
+		[]core.AgentContract{remoteContract(), remoteContract(), remoteContract()}, "remote", []string{base})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("results = %d, want 3", len(results))
+	}
+	if n := strings.Count(logs.String(), "health probe of"); n != 1 {
+		t.Errorf("probe warnings = %d for 3 subtasks against 1 remote, want exactly 1 per base per run (log:\n%s)", n, logs.String())
 	}
 }
 
@@ -793,12 +1074,12 @@ func TestRunTelemetryFailureIsLoudOnceAndNeverFailsTheRun(t *testing.T) {
 	local := func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
 		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat", Output: "the qube answer", Structured: json.RawMessage(`{"answer":"42"}`), StopReason: "done"}, nil
 	}
-	_, sum, err := Run(t.Context(), cfg, local, []core.AgentContract{remoteContract(), remoteContract()}, "local", nil)
+	results, sum, err := Run(t.Context(), cfg, local, []core.AgentContract{remoteContract(), remoteContract()}, "local", nil)
 	if err != nil {
 		t.Fatalf("Run: %v — telemetry must never fail the work it describes", err)
 	}
-	if sum != (Summary{Succeeded: 2}) {
-		t.Fatalf("summary = %+v, want both subtasks delivered", sum)
+	if sum != (Summary{Succeeded: 2, CorpusRowsLost: 2}) {
+		t.Fatalf("summary = %+v, want both subtasks delivered AND both lost corpus rows counted", sum)
 	}
 	out := logs.String()
 	if n := strings.Count(out, "delegation-log write failed"); n != 1 {
@@ -806,6 +1087,17 @@ func TestRunTelemetryFailureIsLoudOnceAndNeverFailsTheRun(t *testing.T) {
 	}
 	if !strings.Contains(out, "ledger") {
 		t.Fatalf("a ledger that could not be opened must say so: %s", out)
+	}
+	// C-H: "this run's corpus rows are LOST" reads identically whether 1 of 8
+	// or 8 of 8 failed. The end-of-run line has to say HOW MANY.
+	if !strings.Contains(out, "2 of 2") {
+		t.Fatalf("no end-of-run tally naming how many rows were lost: %s", out)
+	}
+	// …and the MCP caller — the lane's primary consumer — never saw it at all:
+	// SummaryWire had no field for it, so a delegation that recorded nothing
+	// published byte-identically to one that recorded everything.
+	if got := WireResponse(results, sum).Summary.CorpusRowsLost; got != 2 {
+		t.Fatalf("published summary.corpus_rows_lost = %d, want 2", got)
 	}
 }
 

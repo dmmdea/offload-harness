@@ -131,6 +131,43 @@ type agentResidency struct {
 	resident bool
 	at       time.Time
 	inflight bool
+	// idle broadcasts when inflight clears, so a caller that needs the answer
+	// SYNCHRONOUSLY (RefreshAgentResidency) can wait for the probe already
+	// running instead of starting a second one. Created lazily under mu — a
+	// sync.Cond needs its Locker, and the zero agentResidency must stay usable.
+	idle *sync.Cond
+}
+
+// idleCond returns the broadcast channel, creating it on first use. Caller
+// holds mu.
+func (a *agentResidency) idleCond() *sync.Cond {
+	if a.idle == nil {
+		a.idle = sync.NewCond(&a.mu)
+	}
+	return a.idle
+}
+
+// claimProbe takes the single-flight latch, reporting whether THIS caller now
+// owns the probe (and must therefore clear the latch when it finishes).
+func (a *agentResidency) claimProbe() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.inflight {
+		return false
+	}
+	a.inflight = true
+	return true
+}
+
+// awaitProbe blocks until whoever owns the latch has published its answer.
+// Bounded by the probe's own agentResidencyProbeTimeout, so this cannot hang
+// on a dead llama-swap.
+func (a *agentResidency) awaitProbe() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for a.inflight {
+		a.idleCond().Wait()
+	}
 }
 
 // New builds a Server. The supported-task/family lists are computed here, not
@@ -181,7 +218,13 @@ func (s *Server) agentResident() bool {
 }
 
 // refreshAgentResidency runs one bounded roster probe and publishes the
-// answer. A probe FAILURE publishes resident=false rather than keeping the
+// answer. THE CALLER MUST ALREADY HOLD the single-flight latch
+// (agentResidency.claimProbe, or the inline claim in agentResident) — this
+// function clears it unconditionally on the way out, so a caller that ran
+// without holding it would release someone else's claim and let a duplicate
+// probe race the first one's answer.
+//
+// A probe FAILURE publishes resident=false rather than keeping the
 // last good answer (the VRAM sampler's rule): residency feeds a placement
 // gate, and advertising a seat as servable off a stale success while
 // llama-swap is down would route remote agent work at a node that cannot run
@@ -206,21 +249,36 @@ func (s *Server) refreshAgentResidency() {
 	a.resident = resident && err == nil
 	a.at = time.Now()
 	a.inflight = false
+	a.idleCond().Broadcast() // release any synchronous waiter (RefreshAgentResidency)
 	a.mu.Unlock()
 }
 
-// RefreshAgentResidency runs ONE residency probe synchronously and publishes
-// its answer, warming the cache agent_seat_resident is served from.
+// RefreshAgentResidency ensures ONE residency probe has published an answer
+// before it returns, warming the cache agent_seat_resident is served from.
+//
+// It PARTICIPATES in the single-flight rather than bypassing it: it claims the
+// latch when nothing holds it, and otherwise WAITS for the probe already
+// running. Calling the refresher directly (the previous shape) took no latch
+// while the refresher cleared it unconditionally, which permitted a second
+// concurrent GET against llama-swap and — since the last writer wins the cache
+// — let a staler answer overwrite a fresher one.
 //
 // Exported for CROSS-PACKAGE callers that need the answer deterministically —
 // an end-to-end delegation test cannot otherwise avoid racing the first health
 // GET's background refresh, and would gate-fail on a cold cache that is about
-// to say yes. This package's OWN tests must never call it: production's only
-// trigger is agentResident()'s background single-flight, and a test that runs
-// the probe itself leaves that line uncovered (which is exactly how deleting
-// it once left the whole suite green while the feature was inert in
-// production).
-func (s *Server) RefreshAgentResidency() { s.refreshAgentResidency() }
+// to say yes. This package's OWN residency tests must never call it:
+// production's only trigger is agentResident()'s background single-flight, and
+// a test that runs the probe itself leaves that line uncovered (which is
+// exactly how deleting it once left the whole suite green while the feature was
+// inert in production). The one in-package exception is the test that pins THIS
+// function's latch discipline, which cannot be written any other way.
+func (s *Server) RefreshAgentResidency() {
+	if !s.agentRes.claimProbe() {
+		s.agentRes.awaitProbe()
+		return
+	}
+	s.refreshAgentResidency()
+}
 
 // Handler returns the routed mux for the three contract endpoints.
 func (s *Server) Handler() http.Handler {
@@ -458,11 +516,14 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	// and never a re-ack/409 that discloses job existence or state.
 	if env.TaskType == string(core.TaskAgentRun) {
 		if s.opts.Cfg.FleetAuthToken == "" {
-			if !s.opts.LoopbackListener {
-				// Loud refusal, not a silent accept: the agent lane drives a
-				// coding-agent loop, so a tokenless lane beyond loopback would
-				// be an RCE-class surface. Misconfiguration must fail here,
-				// visibly, at ack time.
+			// The reachability condition is CONSULTED, never re-derived:
+			// AgentLaneSafelyReachable is the same expression AgentLaneAdmissible
+			// applies to the same resolved listener, so this refusal can never
+			// disagree with what health advertised. (With no token configured it
+			// reduces to "is the listener loopback?" — a tokenless lane beyond
+			// loopback drives a coding-agent loop over an open port, an RCE-class
+			// surface. Misconfiguration must fail here, visibly, at ack time.)
+			if !AgentLaneSafelyReachable(s.opts.Cfg, s.opts.LoopbackListener) {
 				writeError(w, http.StatusForbidden, agentLaneTokenRequired)
 				return
 			}
@@ -523,7 +584,11 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req, cleanup, err := BuildRequest(r.Context(), s.opts.Cfg, env.TaskType, env.Payload)
+	// The RESOLVED listener goes down the admission path — the same value
+	// s.tasks/s.agentLane were computed from at New(), so what health
+	// advertises and what this admits can never key on different notions of
+	// "loopback".
+	req, cleanup, err := BuildRequest(r.Context(), s.opts.Cfg, s.opts.LoopbackListener, env.TaskType, env.Payload)
 	if err != nil {
 		cleanup()
 		writeError(w, http.StatusBadRequest, err.Error())

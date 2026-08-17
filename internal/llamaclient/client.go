@@ -325,6 +325,26 @@ func (c *Client) GenerateVisionInterleaved(ctx context.Context, model, system st
 	return decodeGenResult(resp, start)
 }
 
+// StatusError is a non-200 ANSWER from the server — as opposed to a failure to
+// reach it at all, which surfaces as the transport's own *url.Error. The status
+// is carried as a field, not just formatted into the text, because callers have
+// to branch on the CLASS of refusal: a 5xx says the box is in trouble, a 4xx
+// says the box is fine and rejected THIS request (context length exceeded, a
+// grammar it cannot compile). Filing both as "unreachable" is how a contract
+// mistake came to be reported as broken infrastructure.
+//
+// Error() keeps the exact historical text — `llama-server <code>: <body>` — a
+// string other packages already match on (internal/gpugen's "llama-server 5"
+// OOM classifier).
+type StatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("llama-server %d: %s", e.StatusCode, e.Body)
+}
+
 // decodeGenResult turns a llama-server chat response into a GenResult. It owns
 // status handling, body decode, and per-call telemetry (incl. raw logprobs), so
 // both Generate (text) and GenerateVision (multimodal) share one decode path.
@@ -333,7 +353,7 @@ func decodeGenResult(resp *http.Response, start time.Time) (GenResult, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return GenResult{}, fmt.Errorf("llama-server %d: %s", resp.StatusCode, truncate(string(b), 300))
+		return GenResult{}, &StatusError{StatusCode: resp.StatusCode, Body: truncate(string(b), 300)}
 	}
 	var cr chatResp
 	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {

@@ -169,3 +169,28 @@ func TestRunDelegateEnabledStillValidatesItsInputs(t *testing.T) {
 		t.Fatalf("err = %v, want the missing---contract refusal", err)
 	}
 }
+
+// TestDelegateExitErrReportsEveryLoudCount (C-L): the exit-code mapper
+// returned on the FIRST non-zero class, so a run with both failures and
+// infrastructure defers named only the failures — and an operator fixing the
+// transport error would not know a node was also broken until the next run.
+func TestDelegateExitErrReportsEveryLoudCount(t *testing.T) {
+	if err := delegateExitErr(delegate.Summary{Succeeded: 3, Deferred: 1}); err != nil {
+		t.Fatalf("err = %v, want nil — abstentions and budget defers are RESULT shapes, exit 0", err)
+	}
+	both := delegateExitErr(delegate.Summary{Failed: 2, Deferred: 3, Infrastructure: 3})
+	if both == nil {
+		t.Fatal("a run with failures AND infrastructure defers must exit non-zero")
+	}
+	msg := both.Error()
+	if !strings.Contains(msg, "2 subtask") || !strings.Contains(msg, "3 subtask") {
+		t.Errorf("err = %q, want BOTH counts named", msg)
+	}
+	if only := delegateExitErr(delegate.Summary{Failed: 2}); only == nil || !strings.Contains(only.Error(), "2 subtask") {
+		t.Errorf("failed-only err = %v, want the failure count named", only)
+	}
+	if only := delegateExitErr(delegate.Summary{Deferred: 1, Infrastructure: 1}); only == nil ||
+		!strings.Contains(only.Error(), "1 subtask") {
+		t.Errorf("infrastructure-only err = %v, want the infrastructure count named", only)
+	}
+}

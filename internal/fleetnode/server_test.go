@@ -1068,6 +1068,73 @@ func TestHealthAgentResidencyProbeFailureIsLogged(t *testing.T) {
 	}
 }
 
+// TestRefreshAgentResidencyJoinsTheSingleFlight (C-K) is the ONE test in this
+// package allowed to call the exported RefreshAgentResidency, and it is about
+// the helper's LATCH DISCIPLINE, not about residency itself — every residency
+// behavior above is still driven through health GETs only, so the background
+// line production depends on stays covered (see waitForResidencyProbe).
+//
+// The exported helper called the refresher synchronously WITHOUT taking the
+// inflight latch, while the refresher clears that latch unconditionally at the
+// end. Two consequences, both real: a second concurrent GET against a
+// llama-swap that is already being probed, and — because whichever probe
+// finishes LAST wins the cache — a staler answer overwriting a fresher one.
+func TestRefreshAgentResidencyJoinsTheSingleFlight(t *testing.T) {
+	var probes atomic.Int64
+	started := make(chan struct{}, 4)
+	release := make(chan struct{})
+
+	s, _ := newTestServer(t, agentHealthCfg("http://127.0.0.1:1"), &fakeRunner{}, authOpts(true))
+	s.rosterServes = func(ctx context.Context, endpoint, seat string) (bool, error) {
+		probes.Add(1)
+		started <- struct{}{}
+		<-release // hold the probe open so a second one is OBSERVABLE
+		return true, nil
+	}
+
+	do(t, s, http.MethodGet, "/fleet/health", "", nil) // production's only trigger
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the health path never kicked off the background probe")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.RefreshAgentResidency()
+	}()
+
+	// Give the exported call every chance to start a duplicate probe.
+	select {
+	case <-started:
+		t.Fatal("RefreshAgentResidency started a SECOND probe while one was already in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if n := probes.Load(); n != 1 {
+		t.Fatalf("probes = %d while one was in flight, want 1", n)
+	}
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RefreshAgentResidency never returned; it must WAIT for the in-flight answer, not hang")
+	}
+	if n := probes.Load(); n != 1 {
+		t.Fatalf("probes = %d, want exactly 1 — the exported helper must join the single-flight, not race it", n)
+	}
+	// Its contract is "the cache is warm when I return": a cross-package
+	// end-to-end caller uses it precisely so the next health GET is
+	// deterministic.
+	s.agentRes.mu.Lock()
+	published, resident := !s.agentRes.at.IsZero(), s.agentRes.resident
+	s.agentRes.mu.Unlock()
+	if !published || !resident {
+		t.Fatalf("cache after RefreshAgentResidency: published=%v resident=%v, want a warm true answer", published, resident)
+	}
+}
+
 // syncBuffer is a log sink safe to write from a background goroutine and read
 // from the test goroutine.
 type syncBuffer struct {

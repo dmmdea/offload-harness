@@ -314,14 +314,28 @@ is byte-identical to a pre-0.63 node when off, pinned by test), an agent seat re
 listener, or `fleet_auth_token` set).
 
 `AgentLaneAdmissible` is the SINGLE predicate behind both the advertisement (`supported_task_types`
-*and* the four `agent_*` health fields) and the ack-time admission, evaluated over the same
-**resolved** listener (`Options.LoopbackListener`, computed by the verb from where the bind
-actually landed). It is one function rather than two condition lists because the delegator reads
-only the `agent_*` fields: a lane advertised that dispatch would refuse is a mis-route by
-construction, and the two lists had already drifted once (health keyed on `fleet_agent_enabled`
-alone, so a tokenless non-loopback node advertised a placeable lane and 403'd everything sent to
-it). `AgentLaneAdvertisement == dispatch admission` is asserted across all four (listener, token)
-combinations by `TestAgentLaneAdvertisementMatchesAdmission`.
+*and* the four `agent_*` health fields) and the ack-time admission. One function rather than two
+condition lists, because the delegator reads only the `agent_*` fields: a lane advertised that
+dispatch would refuse is a mis-route by construction, and the two lists had already drifted once
+(health keyed on `fleet_agent_enabled` alone, so a tokenless non-loopback node advertised a
+placeable lane and 403'd everything sent to it).
+
+One predicate is only half the guarantee — it also has to be asked about the same **input**. Both
+sides pass the **resolved** listener (`Options.LoopbackListener`, computed by the verb from where
+the bind actually landed): health at construction, and dispatch by threading it into
+`BuildRequest(ctx, cfg, loopbackListener, taskType, payload)`. `BuildRequest` used to derive its
+own answer with `ConfigLoopbackListen(cfg)`, so a node with `fleet_listen: "0.0.0.0:18811"`,
+`--listen 127.0.0.1:18811` and no token advertised `agent` from the resolved (loopback) view and
+answered `400 unsupported task_type "agent" (supported: )` from the config view — the same
+mis-route wearing a 400 instead of a 403. `ConfigLoopbackListen` now survives only for callers
+with no listener at all. The dispatch handler's tokenless refusal consults
+`AgentLaneSafelyReachable` (condition 3 standing alone) rather than re-implementing it, so the
+`403` and the advertisement cannot disagree either.
+
+`AgentLaneAdvertisement == dispatch admission` is asserted by
+`TestAgentLaneAdvertisementMatchesAdmission` across the four (listener, token) combinations **and**
+the config-vs-resolved mismatch row. The inverse mismatch (config loopback, resolved non-loopback,
+tokenless) is not a hole: the auth guard `403`s it before `BuildRequest` runs at all.
 
 ### Contract wire shape (`core.AgentContract`)
 
@@ -361,7 +375,7 @@ remote reasoning is quarantined from the caller's context by construction.
 | `stop_reason` | string | The loop's stop reason. |
 | `deferred` | bool | True = the node ran and honestly could not complete the contract. **A defer is a success shape at the job level**: the job lands `done`, never `error` — `error` is reserved for internal wiring bugs (mirrors the cascade's defer semantics). |
 | `reason` | string | Why it deferred (shapes below). |
-| `defer_class` | string | The machine-branchable WHY: `abstention` \| `budget` \| `infrastructure` \| `config`. Additive and `omitempty` — a pre-0.63 node emits no class, and readers must treat empty as *unknown*, never as abstention. |
+| `defer_class` | string | The machine-branchable WHY: `abstention` \| `budget` \| `infrastructure` \| `config` \| `contract`. Additive and `omitempty` — a pre-0.63 node emits no class, and readers must treat empty as *unknown*, never as abstention. |
 | `wall_ms` | int | Node-observed wall time. |
 | `tokens_out` | int | Re-pack completion tokens, when a structured result was produced. |
 
@@ -378,24 +392,38 @@ it; the class is what code branches on, because a reason string is prose and an 
 | `building agent: …` / `agent loop: …` | `infrastructure` | Build or planner failure — nothing was learned about the task. |
 | `wall timeout after <N>s` | `budget` | The `timeout_sec` deadline fired, in the loop **or** in the re-pack; its own shape so the delegator can size future contracts off it. |
 | `step budget exhausted (<n> steps)` | `budget` | The loop burned `max_steps` with no final answer; `output` is empty, so there is nothing to re-pack. |
-| `output failed schema: …` | `abstention` | The re-pack reached the seat and the emitted JSON failed validation after its one retry. |
-| `structured re-pack unreachable: …` | `infrastructure` | The re-pack could not REACH the seat (dial refused, 5xx). Split from the schema shape deliberately: filed under `output failed schema:` a llama-swap outage reads as a model that cannot follow a schema, and the operator rewrites a schema that was never the problem. |
+| `output failed schema: …` | `abstention` | The re-pack reached the seat and the answer was unusable after its one retry — a validation failure, a **4xx** (the seat refusing *this* request: context length exceeded, an uncompilable grammar), or a 200 carrying zero choices. All three are the box answering; the fix is a smaller context or a flatter schema, not an operator. |
+| `structured re-pack unreachable: …` | `infrastructure` | The re-pack could not REACH the seat: a dial/transport failure or a **5xx**. Split from the schema shape deliberately — filed under `output failed schema:` a llama-swap outage reads as a model that cannot follow a schema. The flag is sticky across the retry: a 5xx followed by a wrong-shape retry stays `infrastructure`, because a transport failure that happened at all is the operator's signal. |
+| `canceled during the structured re-pack (the caller's context ended)` | `budget` | The PARENT context was canceled mid-re-pack (the delegator abandoned the poll, the node is shutting down). It arrives as a `*url.Error` exactly like a dial refusal, so it used to read as broken infrastructure — but nothing on the box failed. |
 
-Three more shapes originate on the **delegator**, not the node:
+More shapes originate on the **delegator**, not the node:
 
 - `poll deadline after <d>: node accepted the job but did not reach a terminal state` — class
   `budget`, or `infrastructure` when the last poll answer was unusable (a 5xx / unknown state,
-  named in the reason). Only produced when the node actually answered at least one poll; a node
-  that never answered yields a FAILURE (`summary.failed`), not a defer.
-- `route=remote: no remote passed the capability gate (enabled+resident+ctx-fit+schema)` —
-  class `config`; with health-probe failures alongside it, the probe errors are appended and
-  the class becomes `infrastructure`.
+  named in the reason). Produced **only** when the node reported OWNING the job — a `200` whose
+  state is `accepted`/`running`/`done`/`error`. Reachability is not ownership: a node that only
+  ever answered `404` (a positive denial that it ever held the job) or `503` yields a FAILURE
+  (`summary.failed`), not a defer, because a defer asserts the node took the work. An early poll
+  error is RETIRED by a later healthy answer, so one 503 followed by clean `running` answers ends
+  `budget`, not `infrastructure`.
+- `route=remote: no remote passed the capability gate (none is both agent-enabled and
+  roster-resident)` — class `config`; with health-probe failures alongside it, the probe errors
+  are appended and the class becomes `infrastructure`.
 - `route=remote: all N configured remote(s) failed the health probe: …` — class
   `infrastructure`; `route=remote: no remote fleet nodes are configured …` — class `config`.
+- The **contract-side** gate rejections — no `output_schema`, a contract already past the origin
+  hop, a token estimate no advertised ceiling can hold — class `contract`. They were `config`
+  until the round-3 review: `config` counts as a broken stack, so a caller's own contract mistake
+  exited non-zero and told the delegating model a node was broken on a run where every node was
+  healthy. The test is who can fix it — these three are fixed by rewriting the contract.
 
 `infrastructure` and `config` defers are counted into the delegator's `summary.infrastructure`
 and make `local-offload delegate` exit non-zero (`delegateExitErr` in `main.go`): a broken or
-misconfigured node must not read as a successful run.
+misconfigured node must not read as a successful run. `contract` deliberately is not.
+`summary.infrastructure` also counts a **local placement taken while every configured remote was
+failing its health probe** (`route=auto`, local GPU busy): the placement is right and the work
+runs, but `route=remote` exited non-zero on that identical fleet state while `route=auto`
+discarded it, so a fleet down for a week read green forever.
 
 ### Auth (v1 scope: the agent lane only)
 

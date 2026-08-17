@@ -675,10 +675,18 @@ self-contained (the remote node never reaches back into your filesystem). `accep
 evaluated by the **delegator** after the result returns: a schema-valid result that fails a
 check comes back `failed_verification`, never a success. Read the response's `summary` block
 first — `{succeeded, deferred, failed_verification, failed, infrastructure}` — eight quiet
-defers are a loud outcome, not eight green jobs. `infrastructure` is the subset of `deferred`
-whose `defer_class` blames the stack or the config (`infrastructure` / `config`) rather than
-the work (`abstention` / `budget`): non-zero means a node is broken or misconfigured, not that
-the small model could not do the job.
+defers are a loud outcome, not eight green jobs. `infrastructure` counts the results whose story
+is a broken stack rather than the work: defers whose `defer_class` says so (`infrastructure` /
+`config`, as opposed to `abstention` / `budget`), plus a local placement taken while every
+configured remote was failing its health probe. Non-zero means a node is broken or
+misconfigured, not that the small model could not do the job — and the MCP tool marks the call
+`isError` on it too, with the JSON body unchanged.
+
+`defer_class: "contract"` is the one class that is **your** problem rather than a box's: the
+contract carries no `output_schema` for a remote placement, is past the origin hop, or needs
+more context than any node advertises. Those stay exit 0 by design. If the summary carries
+`corpus_rows_lost` / `ledger_rows_lost`, the results are still complete — the harness could not
+write that many telemetry rows (usually a full or read-only disk).
 
 CLI equivalent:
 

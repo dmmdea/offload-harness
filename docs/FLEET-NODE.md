@@ -416,21 +416,28 @@ one contract. Unknown payload fields are **ignored** (staggered node deploys mus
 | `steps` / `stop_reason` | int / string | loop telemetry |
 | `deferred` | bool | the node ran and could not complete the contract — **still a `done` job**, never `error` (`error` = internal wiring bug only) |
 | `reason` | string | the defer shape: seat unserved on the roster, `wall timeout after <N>s`, `step budget exhausted (…)`, `output failed schema: …`, `structured re-pack unreachable: …`, build/loop/profile errors |
-| `defer_class` | string | `abstention` \| `budget` \| `infrastructure` \| `config` — the machine-branchable WHY (table below). Absent from a pre-0.63 node: treat empty as *unknown*, never as abstention |
+| `defer_class` | string | `abstention` \| `budget` \| `infrastructure` \| `config` \| `contract` — the machine-branchable WHY (table below). Absent from a pre-0.63 node: treat empty as *unknown*, never as abstention |
 | `wall_ms` / `tokens_out` | int | node wall clock / re-pack completion tokens |
 
 ### Defer classes — which defers mean "a human must act"
 
 | Class | Meaning | Shapes |
 |---|---|---|
-| `abstention` | the stack is healthy; the model could not produce a usable answer | `output failed schema: …` |
-| `budget` | a ceiling stopped it; a bigger budget might succeed | `wall timeout after <N>s`, `step budget exhausted (…)`, delegator-side `poll deadline …` on a node that answered every poll |
-| `infrastructure` | something is broken — nothing was learned, retrying the same contract cannot help | `building agent: …`, `agent loop: …`, `structured re-pack unreachable: …`, delegator-side `poll deadline …` whose last poll answer was unusable, and "all remotes failed the health probe" |
-| `config` | this node/contract pair can never work as configured | no seat resolvable, seat not in the served roster, unknown profile, and the delegator's "no remote passed the capability gate" / "no remotes configured" |
+| `abstention` | the stack is healthy; the model could not produce a usable answer | `output failed schema: …` — validation failure, a **4xx** from the seat (it refused *this* request), or a 200 with zero choices |
+| `budget` | a ceiling stopped it; a bigger budget might succeed | `wall timeout after <N>s`, `step budget exhausted (…)`, `canceled during the structured re-pack …`, delegator-side `poll deadline …` on a node that reported OWNING the job |
+| `infrastructure` | something is broken — nothing was learned, retrying the same contract cannot help | `building agent: …`, `agent loop: …`, `structured re-pack unreachable: …` (dial failure or **5xx**, sticky across the retry), delegator-side `poll deadline …` whose last poll answer was unusable, and "all remotes failed the health probe" |
+| `config` | this node's configuration can never run this | no seat resolvable, seat not in the served roster, unknown profile, and the delegator's "no remote passed the capability gate" / "no remotes configured" |
+| `contract` | the CALLER'S contract cannot be placed anywhere, however healthy the fleet | no `output_schema` for a remote placement, a contract past the origin hop (`depth != 0`), a token estimate no advertised ceiling can hold |
 
-The delegator counts `infrastructure` + `config` defers into `summary.infrastructure`, and
-`local-offload delegate` **exits non-zero** when that count is non-zero: a broken node must not
-read as a successful run just because its defers were polite.
+The delegator counts `infrastructure` + `config` defers into `summary.infrastructure` — plus a
+local placement taken while every configured remote failed its health probe — and
+`local-offload delegate` **exits non-zero** when that count is non-zero (the MCP tool sets
+`isError`): a broken node must not read as a successful run just because its defers were polite.
+`contract` is deliberately excluded: nobody has to touch a box to fix it.
+
+A poll `404` is a **denial**, not an answer: it says the node never held the job, so it can never
+earn the "node accepted the job" defer — after the bounded re-dispatches it is a
+`summary.failed` failure.
 
 No transcript field exists — remote reasoning never crosses the wire.
 

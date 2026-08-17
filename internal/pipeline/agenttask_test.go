@@ -39,8 +39,16 @@ type agentFake struct {
 	loop      func(n int64) string // returns the raw chat-completions response body
 	repack    func(n int64) string // content of the grammar completion (a JSON object string)
 	// repackStatus, when non-zero, is returned for every grammar completion
-	// instead of a body: the seat is UNREACHABLE, not wrong.
+	// instead of a body: the seat ANSWERED with that status rather than with a
+	// result. 5xx = unreachable-class; 4xx = the seat refusing THIS request.
 	repackStatus int
+	// repackStatusFor, when set, wins over repackStatus and scripts the status
+	// per attempt (1-based) — the seam a transport-THEN-validation test needs,
+	// since the two attempts must fail differently.
+	repackStatusFor func(n int64) int
+	// repackEmptyChoices returns a 200 carrying zero choices: the seat is up
+	// and answered, it just produced nothing.
+	repackEmptyChoices bool
 	// repackDelay stalls every grammar completion — used to expire the
 	// contract's wall deadline inside the re-pack.
 	repackDelay time.Duration
@@ -83,8 +91,17 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 			if f.repackDelay > 0 {
 				time.Sleep(f.repackDelay)
 			}
-			if f.repackStatus != 0 {
-				w.WriteHeader(f.repackStatus)
+			status := f.repackStatus
+			if f.repackStatusFor != nil {
+				status = f.repackStatusFor(n)
+			}
+			if status != 0 {
+				w.WriteHeader(status)
+				return
+			}
+			if f.repackEmptyChoices {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":0}}`))
 				return
 			}
 			content, _ := json.Marshal(f.repack(n))
@@ -346,6 +363,140 @@ func TestRunAgentTaskRepackTransportFailureIsNotASchemaFailure(t *testing.T) {
 	}
 	if wire.Output != "The answer is 42." {
 		t.Fatalf("output = %q, want the loop text preserved", wire.Output)
+	}
+}
+
+// TestRunAgentTaskRepack4xxIsAnAbstentionNotABrokenBox (C-E): decodeGenResult
+// errors on EVERY non-200, and the re-pack re-packed any such error as a
+// TRANSPORT failure — so a 400 "context length exceeded" or a bad-grammar 400
+// came back as defer_class infrastructure, exited non-zero, and told the
+// operator a box was broken when the real fix was a smaller context or a
+// flatter schema. A 4xx is the seat REFUSING this request: model/contract
+// side, i.e. an abstention under the stable "output failed schema:" prefix.
+func TestRunAgentTaskRepack4xxIsAnAbstentionNotABrokenBox(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs:    []string{agentTestSeat},
+		loop:         func(int64) string { return doneChat("The answer is 42.") },
+		repack:       func(int64) string { return `{"answer":"42"}` },
+		repackStatus: http.StatusBadRequest,
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+	wire := decodeWire(t, res)
+
+	if !wire.Deferred {
+		t.Fatalf("want deferred, got %+v", wire)
+	}
+	if wire.DeferClass != core.DeferClassAbstention {
+		t.Fatalf("defer_class = %q (reason %q), want %q — a 4xx is the seat refusing THIS request, not a box an operator has to fix",
+			wire.DeferClass, wire.Reason, core.DeferClassAbstention)
+	}
+	if !strings.HasPrefix(wire.Reason, "output failed schema: ") {
+		t.Fatalf("reason = %q, want the stable schema-side prefix", wire.Reason)
+	}
+	if !strings.Contains(wire.Reason, "400") {
+		t.Fatalf("reason = %q, want the refusal's status still named for the operator", wire.Reason)
+	}
+}
+
+// TestRunAgentTaskRepackEmptyChoicesIsAnAbstention (C-E): a 200 carrying zero
+// choices means the seat is UP and answered — it just produced nothing. Filed
+// as transport, it made a healthy endpoint read as unreachable.
+func TestRunAgentTaskRepackEmptyChoicesIsAnAbstention(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs:          []string{agentTestSeat},
+		loop:               func(int64) string { return doneChat("The answer is 42.") },
+		repack:             func(int64) string { return `{"answer":"42"}` },
+		repackEmptyChoices: true,
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+	wire := decodeWire(t, res)
+
+	if !wire.Deferred {
+		t.Fatalf("want deferred, got %+v", wire)
+	}
+	if wire.DeferClass != core.DeferClassAbstention {
+		t.Fatalf("defer_class = %q (reason %q), want %q — the endpoint answered 200; nothing about it is unreachable",
+			wire.DeferClass, wire.Reason, core.DeferClassAbstention)
+	}
+	if !strings.HasPrefix(wire.Reason, "output failed schema: ") {
+		t.Fatalf("reason = %q, want the stable schema-side prefix", wire.Reason)
+	}
+}
+
+// TestRunAgentTaskRepackTransportThenValidationStaysInfrastructure (C-E,
+// inverse): the transport flag was LAST-WINS, so a 500 on the first attempt
+// followed by a wrong-shape answer on the retry ended classed abstention —
+// "the model got the shape wrong" — while the box had in fact just failed a
+// request. A transport failure that happened AT ALL is the operator's signal.
+func TestRunAgentTaskRepackTransportThenValidationStaysInfrastructure(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop:      func(int64) string { return doneChat("The answer is 42.") },
+		repack:    func(int64) string { return `{"wrong":"shape"}` }, // attempt 2 fails validation
+		repackStatusFor: func(n int64) int {
+			if n == 1 {
+				return http.StatusInternalServerError
+			}
+			return 0
+		},
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+	wire := decodeWire(t, res)
+
+	if !wire.Deferred {
+		t.Fatalf("want deferred, got %+v", wire)
+	}
+	if wire.DeferClass != core.DeferClassInfrastructure {
+		t.Fatalf("defer_class = %q (reason %q), want %q — the seat failed a request during this re-pack",
+			wire.DeferClass, wire.Reason, core.DeferClassInfrastructure)
+	}
+	if !strings.HasPrefix(wire.Reason, "structured re-pack unreachable: ") {
+		t.Fatalf("reason = %q, want the transport-specific prefix", wire.Reason)
+	}
+	if !strings.Contains(wire.Reason, "500") {
+		t.Fatalf("reason = %q, want the transport failure itself named, not the retry's validation error", wire.Reason)
+	}
+}
+
+// TestRunAgentTaskRepackParentCancellationIsNotInfrastructure: when the
+// DELEGATOR (or the node's shutdown) cancels the parent context mid-re-pack,
+// the failed request is a *url.Error like any dial refusal — so it read as a
+// broken endpoint. Nothing on this box failed; the caller went away.
+func TestRunAgentTaskRepackParentCancellationIsNotInfrastructure(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs:   []string{agentTestSeat},
+		loop:        func(int64) string { return doneChat("The answer is 42.") },
+		repack:      func(int64) string { return `{"answer":"42"}` },
+		repackDelay: 3 * time.Second,
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	time.AfterFunc(150*time.Millisecond, cancel)
+
+	res := agentTestPipeline(t, srv.URL).Run(ctx, agentTestRequest(t, testContract()))
+	wire := decodeWire(t, res)
+
+	if !wire.Deferred {
+		t.Fatalf("want deferred, got %+v", wire)
+	}
+	if wire.DeferClass == core.DeferClassInfrastructure {
+		t.Fatalf("defer_class = %q (reason %q) — a caller-side cancellation must not accuse the node's stack",
+			wire.DeferClass, wire.Reason)
+	}
+	if !strings.Contains(wire.Reason, "cancel") {
+		t.Fatalf("reason = %q, want the cancellation named", wire.Reason)
 	}
 }
 

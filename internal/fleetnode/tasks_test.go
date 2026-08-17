@@ -82,7 +82,7 @@ func TestFamiliesDerivation(t *testing.T) {
 
 func mustBuild(t *testing.T, cfg config.Config, task string, payload string) (core.Request, func()) {
 	t.Helper()
-	req, cleanup, err := BuildRequest(context.Background(), cfg, task, json.RawMessage(payload))
+	req, cleanup, err := BuildRequest(context.Background(), cfg, true, task, json.RawMessage(payload))
 	if err != nil {
 		t.Fatalf("BuildRequest(%s): %v", task, err)
 	}
@@ -110,7 +110,7 @@ func TestBuildRequestImageGen(t *testing.T) {
 		}
 	})
 	t.Run("prompt required", func(t *testing.T) {
-		_, _, err := BuildRequest(context.Background(), fullCfg(), "image-gen", json.RawMessage(`{"width":512}`))
+		_, _, err := BuildRequest(context.Background(), fullCfg(), true, "image-gen", json.RawMessage(`{"width":512}`))
 		if err == nil || !strings.Contains(err.Error(), "prompt") {
 			t.Fatalf("err = %v, want prompt-required", err)
 		}
@@ -138,7 +138,7 @@ func TestBuildRequestVideoGen(t *testing.T) {
 		}
 	})
 	t.Run("prompt required", func(t *testing.T) {
-		_, _, err := BuildRequest(context.Background(), fullCfg(), "video-gen", json.RawMessage(`{"still":"s.png"}`))
+		_, _, err := BuildRequest(context.Background(), fullCfg(), true, "video-gen", json.RawMessage(`{"still":"s.png"}`))
 		if err == nil || !strings.Contains(err.Error(), "prompt") {
 			t.Fatalf("err = %v, want prompt-required", err)
 		}
@@ -165,7 +165,7 @@ func TestBuildRequestSTT(t *testing.T) {
 		}
 	})
 	t.Run("audio required", func(t *testing.T) {
-		_, _, err := BuildRequest(context.Background(), fullCfg(), "stt", json.RawMessage(`{"language":"es"}`))
+		_, _, err := BuildRequest(context.Background(), fullCfg(), true, "stt", json.RawMessage(`{"language":"es"}`))
 		if err == nil || !strings.Contains(err.Error(), "audio") {
 			t.Fatalf("err = %v, want audio-required", err)
 		}
@@ -197,7 +197,7 @@ func TestBuildRequestAudioGen(t *testing.T) {
 		}
 	})
 	t.Run("text required", func(t *testing.T) {
-		_, _, err := BuildRequest(context.Background(), fullCfg(), "audio-gen", json.RawMessage(`{"kind":"voice"}`))
+		_, _, err := BuildRequest(context.Background(), fullCfg(), true, "audio-gen", json.RawMessage(`{"kind":"voice"}`))
 		if err == nil || !strings.Contains(err.Error(), "text") {
 			t.Fatalf("err = %v, want text-required", err)
 		}
@@ -280,7 +280,7 @@ func TestBuildRequestRunGraphValidationMatrix(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, cleanup, err := BuildRequest(context.Background(), fullCfg(), "run-graph", json.RawMessage(c.payload))
+			_, cleanup, err := BuildRequest(context.Background(), fullCfg(), true, "run-graph", json.RawMessage(c.payload))
 			if cleanup != nil {
 				cleanup()
 			}
@@ -294,7 +294,7 @@ func TestBuildRequestRunGraphValidationMatrix(t *testing.T) {
 // --- error taxonomy: unknown / unconfigured / malformed ---
 
 func TestBuildRequestUnknownTaskListsSupported(t *testing.T) {
-	_, _, err := BuildRequest(context.Background(), fullCfg(), "mine-bitcoin", nil)
+	_, _, err := BuildRequest(context.Background(), fullCfg(), true, "mine-bitcoin", nil)
 	if err == nil {
 		t.Fatal("unknown task_type must error")
 	}
@@ -309,7 +309,7 @@ func TestBuildRequestUnconfiguredTaskUnsupported(t *testing.T) {
 	// image-gen is a KNOWN type, but this box has no image route — the dispatcher
 	// only dispatches advertised tasks, so this is the same 400 as unknown.
 	cfg := config.Config{STTModel: "large-v3-turbo"}
-	_, _, err := BuildRequest(context.Background(), cfg, "image-gen", json.RawMessage(`{"prompt":"p"}`))
+	_, _, err := BuildRequest(context.Background(), cfg, true, "image-gen", json.RawMessage(`{"prompt":"p"}`))
 	if err == nil || !strings.Contains(err.Error(), "unsupported task_type") {
 		t.Fatalf("err = %v, want unsupported", err)
 	}
@@ -320,7 +320,7 @@ func TestBuildRequestUnconfiguredTaskUnsupported(t *testing.T) {
 
 func TestBuildRequestMalformedPayload(t *testing.T) {
 	for _, task := range []string{"image-gen", "video-gen", "stt", "audio-gen", "run-graph"} {
-		if _, _, err := BuildRequest(context.Background(), fullCfg(), task, json.RawMessage(`{not json`)); err == nil {
+		if _, _, err := BuildRequest(context.Background(), fullCfg(), true, task, json.RawMessage(`{not json`)); err == nil {
 			t.Fatalf("%s: malformed payload must error", task)
 		}
 	}
@@ -333,7 +333,7 @@ func TestBuildRequestNilPayloadHitsRequiredFields(t *testing.T) {
 		"image-gen": "prompt", "video-gen": "prompt", "stt": "audio",
 		"audio-gen": "text", "run-graph": "graph",
 	} {
-		_, _, err := BuildRequest(context.Background(), fullCfg(), task, nil)
+		_, _, err := BuildRequest(context.Background(), fullCfg(), true, task, nil)
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("%s with nil payload: err = %v, want %q mentioned", task, err, want)
 		}
@@ -342,7 +342,7 @@ func TestBuildRequestNilPayloadHitsRequiredFields(t *testing.T) {
 
 // TestBuildRequestCleanupNeverNil: callers defer cleanup unconditionally.
 func TestBuildRequestCleanupNeverNil(t *testing.T) {
-	_, cleanup, err := BuildRequest(context.Background(), fullCfg(), "image-gen", json.RawMessage(`{"prompt":"p"}`))
+	_, cleanup, err := BuildRequest(context.Background(), fullCfg(), true, "image-gen", json.RawMessage(`{"prompt":"p"}`))
 	if err != nil || cleanup == nil {
 		t.Fatalf("cleanup must be non-nil on success (err=%v)", err)
 	}

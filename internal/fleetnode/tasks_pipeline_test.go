@@ -499,7 +499,7 @@ func TestFamilyFor_PipelineTaskClaimsNoFamily(t *testing.T) {
 func TestBuildRequest_RoutesConfiguredPipeline(t *testing.T) {
 	srv := pngServer(t)
 	cfg := testPipelineConfig(t)
-	req, cleanup, err := BuildRequest(context.Background(), cfg, "scene-swap", validPipelinePayload(srv, "routed-case"))
+	req, cleanup, err := BuildRequest(context.Background(), cfg, true, "scene-swap", validPipelinePayload(srv, "routed-case"))
 	if err != nil {
 		t.Fatalf("BuildRequest: unexpected error: %v", err)
 	}
@@ -514,7 +514,7 @@ func TestBuildRequest_RoutesConfiguredPipeline(t *testing.T) {
 // exactly like today, naming the supported set.
 func TestBuildRequest_UnconfiguredPipelineRejected(t *testing.T) {
 	cfg := config.Default()
-	_, cleanup, err := BuildRequest(context.Background(), cfg, "scene-swap", []byte(`{}`))
+	_, cleanup, err := BuildRequest(context.Background(), cfg, true, "scene-swap", []byte(`{}`))
 	cleanup()
 	if err == nil {
 		t.Fatal("expected an unsupported task_type error")

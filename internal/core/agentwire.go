@@ -74,6 +74,15 @@ const (
 	// configured — no seat resolvable, the seat is not served, an unknown
 	// profile. Also an operator fix, but of config rather than of a service.
 	DeferClassConfig = "config"
+	// DeferClassContract: the CALLER'S CONTRACT is what cannot be placed or
+	// run, on any node, however healthy the fleet is — no output_schema for a
+	// remote placement, a contract already past the origin hop, a token
+	// estimate no advertised ceiling can hold. Split out of `config` because
+	// `config` counts as a broken stack (delegate.BrokenStackDefer): a caller
+	// mistake was exiting non-zero and telling the delegating model that a node
+	// was down. The fix belongs to whoever wrote the contract, and it is one
+	// they can make without touching a box.
+	DeferClassContract = "contract"
 )
 
 // AgentContract is the versioned, self-contained delegation request (§S2).

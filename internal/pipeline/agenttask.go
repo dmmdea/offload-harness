@@ -24,6 +24,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +34,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gbnf"
+	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
 	"github.com/dmmdea/offload-harness/internal/validator"
@@ -234,6 +237,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			// not a schema shape — reporting it as "output failed schema" sends
 			// the operator to rewrite a schema that was never the problem.
 			return deferWire(core.DeferClassBudget, fmt.Sprintf("wall timeout after %ds", timeoutSec))
+		case errors.Is(cctx.Err(), context.Canceled):
+			// The PARENT went away mid-re-pack (the delegator abandoned the
+			// poll, the node is shutting down). The failed request looks exactly
+			// like a dial refusal — a *url.Error — so it used to be reported as
+			// infrastructure: an operator told to fix a box that never
+			// misbehaved. Budget is the honest class: a ceiling outside the
+			// model's control stopped the run.
+			return deferWire(core.DeferClassBudget, "canceled during the structured re-pack (the caller's context ended)")
 		case transport:
 			// The seat could not be REACHED (llama-swap down/500/dial refused).
 			// Its own prefix and class: a transport failure filed under
@@ -321,11 +332,24 @@ func (p *Pipeline) RunAgentContract(ctx context.Context, contract core.AgentCont
 // the validator — the grammar constrains shape, the validator enforces the
 // parts a grammar cannot (required fields, value constraints).
 //
-// The returned transport flag reports whether the LAST attempt died on the
-// wire rather than on validation. Both used to merge into one lastErr under
-// the caller's "output failed schema:" prefix, so a llama-swap 500 was
-// reported as a model that cannot follow a schema — and the operator went to
-// rewrite the schema instead of restarting the endpoint.
+// The returned transport flag reports whether the seat could not be REACHED.
+// Everything used to merge into one lastErr under the caller's "output failed
+// schema:" prefix, so a llama-swap 500 read as a model that cannot follow a
+// schema and the operator rewrote a schema that was never the problem. Two
+// later corrections, both from the same root question — "is this the BOX or the
+// REQUEST?":
+//
+//   - The flag is set by genErrIsTransport, not by "the call returned an
+//     error". decodeGenResult errors on every non-200 AND on a 200 with zero
+//     choices, so a 400 "context length exceeded" and an empty completion were
+//     both filed as a dead endpoint: defer_class infrastructure, a non-zero
+//     exit, and an operator sent to check a box that was answering fine when
+//     the real fix was a smaller context or a flatter schema.
+//   - The flag is STICKY across the retry, not last-wins. A 500 followed by a
+//     wrong-shape retry used to end as an abstention ("the model got the shape
+//     wrong") even though the seat had just failed a request; when a transport
+//     failure happened AT ALL, that is the operator's signal, and the returned
+//     error is the transport one so the message names it.
 func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema json.RawMessage, output string) (structured json.RawMessage, tokensOut int, transport bool, err error) {
 	var schema map[string]any
 	if uerr := json.Unmarshal(rawSchema, &schema); uerr != nil {
@@ -348,20 +372,60 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 	system := "You extract structured data from text. Output ONLY a JSON object with exactly the requested fields. Use empty values when a field is absent."
 	user := fmt.Sprintf("Extract these fields from the text: %s.\n\nTEXT:\n%s", strings.Join(names, ", "), output)
 
-	var lastErr error
-	lastWasTransport := false
+	var lastErr, transportErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		gres, gerr := p.client.Generate(ctx, seat, system, user, grammar, agentRepackMaxTokens, p.cfg.Temperature, 0)
 		if gerr != nil {
-			lastErr, lastWasTransport = gerr, true
+			lastErr = gerr
+			if transportErr == nil && genErrIsTransport(gerr) {
+				transportErr = gerr
+			}
 			continue
 		}
 		content := []byte(strings.TrimSpace(gres.Content))
 		if verr := validator.Validate(content, schema); verr != nil {
-			lastErr, lastWasTransport = verr, false
+			lastErr = verr
 			continue
 		}
 		return json.RawMessage(content), gres.TokensOut, false, nil
 	}
-	return nil, 0, lastWasTransport, lastErr
+	if transportErr != nil {
+		// Report the TRANSPORT failure itself, not whatever the other attempt
+		// produced: the caller prefixes this with "structured re-pack
+		// unreachable", and a message pairing that prefix with a schema
+		// validation error would be an unreadable diagnosis.
+		return nil, 0, true, transportErr
+	}
+	return nil, 0, false, lastErr
+}
+
+// genErrIsTransport reports whether a Generate error means the SEAT COULD NOT
+// BE REACHED, as opposed to reached-and-unusable. Only three shapes qualify:
+// the transport's own *url.Error / net.Error (dial refused, connection reset,
+// TLS), and a 5xx — a server saying it is in trouble.
+//
+// Everything else is deliberately NOT transport, because the endpoint answered:
+// a 4xx is it refusing THIS request (context length exceeded, an uncompilable
+// grammar — fix the contract, not the box), an unparseable body is a protocol
+// mismatch, and a 200 with zero choices is a model that produced nothing. Those
+// three used to be classed infrastructure, which exits non-zero and tells an
+// operator a machine is broken while it is answering perfectly well.
+//
+// A CANCELLATION is not transport either. It arrives wrapped in a *url.Error
+// like any dial failure, but nothing on this box failed — the caller went away
+// — and the caller (runAgentTask) has its own arm for it.
+func genErrIsTransport(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var se *llamaclient.StatusError
+	if errors.As(err, &se) {
+		return se.StatusCode >= 500
+	}
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		return true
+	}
+	var nerr net.Error
+	return errors.As(err, &nerr)
 }

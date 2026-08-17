@@ -220,7 +220,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	if s.p != nil && s.p.Cfg().AgentDelegationEnabled {
 		srv.AddTool(&mcp.Tool{
 			Name:        "agent_delegate",
-			Description: "Fan out 1-8 self-contained subtasks to the FREE local delegation engine: each subtask is a contract {goal, context docs, output_schema, acceptance} run by an autonomous read-only agent loop on THIS box or on a fleet node over the operator's tailnet (never cloud). Placement is quality-first: an idle local box always runs the work; a remote node is used only when the local GPU is busy AND the node passes the capability gate (route=auto; force with local|remote). context_paths inlines files DELEGATOR-side (confined to read_root) so your context never pays for them. acceptance is a machine-checkable DSL evaluated by the delegator before a result counts as done: contains:<s>, not_contains:<s>, regex:<re>, min_items:<field>:<n>, nonempty:<field> — a schema-valid result failing a check comes back as failed_verification, NOT a success. Returns {summary:{succeeded,deferred,failed_verification,failed,infrastructure}, results:[{node,seat,placement,job_id,output,structured,deferred,reason,defer_class,failed,acceptance_failures,wall_ms}]} — read summary FIRST. summary.infrastructure counts the defers whose defer_class blames the STACK or the config (infrastructure|config) rather than the work (abstention|budget): non-zero means a node is broken or misconfigured, so do NOT read those subtasks as work the local stack honestly could not do. On any failure it returns deferred:true with a reason and you do the work yourself.",
+			Description: "Fan out 1-8 self-contained subtasks to the FREE local delegation engine: each subtask is a contract {goal, context docs, output_schema, acceptance} run by an autonomous read-only agent loop on THIS box or on a fleet node over the operator's tailnet (never cloud). Placement is quality-first: an idle local box always runs the work; a remote node is used only when the local GPU is busy AND the node passes the capability gate (route=auto; force with local|remote). context_paths inlines files DELEGATOR-side (confined to read_root) so your context never pays for them. acceptance is a machine-checkable DSL evaluated by the delegator before a result counts as done: contains:<s>, not_contains:<s>, regex:<re>, min_items:<field>:<n>, nonempty:<field> — a schema-valid result failing a check comes back as failed_verification, NOT a success. Returns {summary:{succeeded,deferred,failed_verification,failed,infrastructure,corpus_rows_lost,ledger_rows_lost}, results:[{node,seat,placement,job_id,output,structured,deferred,reason,defer_class,failed,acceptance_failures,wall_ms}]} — read summary FIRST. summary.infrastructure counts the results whose story is a broken STACK rather than the work: defers whose defer_class is infrastructure|config, plus a local placement taken while every configured remote failed its health probe. Non-zero means a node is broken or misconfigured, so do NOT read those subtasks as work the local stack honestly could not do — and the call comes back flagged as an error, with this same JSON body intact. defer_class \"contract\" is YOUR contract, not a box: no output_schema for a remote placement, past the origin hop, or bigger than any node's advertised context — rewrite the contract and retry. abstention|budget defers and failed_verification are ordinary result shapes. On any refusal before placement it returns deferred:true with a reason and you do the work yourself.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"subtasks":{"type":"array","minItems":1,"maxItems":8,"description":"the delegation contracts to place and run","items":{"type":"object","properties":{"goal":{"type":"string","description":"the self-contained task for the sub-agent (it sees ONLY this + the context docs)"},"context":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"text":{"type":"string"}},"required":["name","text"]},"description":"inline context documents (name is a flat filename; total across docs <= 256 KiB)"},"context_paths":{"type":"array","items":{"type":"string"},"description":"files to inline as context docs, read by the DELEGATOR under read_root confinement (<=128 KiB each)"},"output_schema":{"type":"object","description":"JSON Schema with a properties map; the sub-agent's final answer is re-packed into it. REQUIRED for any remote placement"},"acceptance":{"type":"array","items":{"type":"string"},"description":"machine-checkable checks evaluated delegator-side: contains:<s> | not_contains:<s> | regex:<re> | min_items:<field>:<n> | nonempty:<field>"},"profile":{"type":"string","description":"agent task profile (default research)"},"max_steps":{"type":"integer","description":"loop step budget (default 12, cap 12)"},"timeout_sec":{"type":"integer","description":"wall ceiling per subtask (default 300, cap 900)"}},"required":["goal"]}},"route":{"type":"string","enum":["auto","local","remote"],"description":"placement: auto (default; idle-local wins, busy-local considers remotes), local (force in-process), remote (force a fleet node; defers if none eligible)"},"read_root":{"type":"string","description":"absolute directory context_paths may be read from (default: the server working dir)"},"remotes":{"type":"array","items":{"type":"string"},"description":"fleet node base URLs, tailnet-only (e.g. http://lenovo-m720q:18811)"}},"required":["subtasks"]}`),
 		}, s.handleAgentDelegate)
 	}
@@ -1087,7 +1087,25 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 	}
 	// WireResponse is a struct, so "summary" marshals FIRST (roast delta 14) —
 	// jsonResult over a map would alphabetize results ahead of it.
-	return jsonResult(delegate.WireResponse(results, sum))
+	res, jerr := jsonResult(delegate.WireResponse(results, sum))
+	if jerr != nil || res == nil {
+		return res, jerr
+	}
+	// The loud-exit contract used to live ONLY on the CLI (main.go's
+	// delegateExitErr): every one of these came back to the MCP caller — this
+	// lane's primary consumer — as a plain successful tool call, so a fleet with
+	// a dead llama-swap read like a clean run to the delegating model. Same two
+	// triggers as the exit code, same meaning: a human has to look.
+	//
+	// House style stays intact in the important half: the BODY is unchanged, so
+	// the summary and every per-subtask reason/defer_class are still there to
+	// read. The flag is the loudness the JSON alone could not carry. Ordinary
+	// defers (abstention, budget) and failed verification remain successes —
+	// those are RESULT shapes, exactly as on the CLI.
+	if sum.Failed > 0 || sum.Infrastructure > 0 {
+		res.IsError = true
+	}
+	return res, nil
 }
 
 // addEffects folds a run's effect ledger into an agent_run response — counts

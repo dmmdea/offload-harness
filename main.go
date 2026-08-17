@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -1675,17 +1676,27 @@ func runDelegate(args []string) error {
 //     without this it exits 0 — a broken fleet reading as a good run is exactly
 //     the silent failure this contract exists to prevent.
 //
-// Everything else — honest abstentions, budget defers, failed verification —
-// stays exit 0: those are RESULT shapes, reported in the JSON above, matching
-// every other verb's defer posture.
+// Everything else — honest abstentions, budget defers, CONTRACT-classed defers
+// (a contract no healthy node would accept: no output_schema, past the origin
+// hop, too big for any advertised ceiling), and failed verification — stays
+// exit 0: those are RESULT shapes, reported in the JSON above, matching every
+// other verb's defer posture.
+//
+// BOTH counts are reported when both are non-zero. Returning on the first
+// non-zero class named only the failures, so an operator who fixed the
+// transport error learned about the broken node only on the next run.
 func delegateExitErr(sum delegate.Summary) error {
+	var parts []string
 	if sum.Failed > 0 {
-		return fmt.Errorf("%d subtask(s) failed (transport/config) — see results[].reason", sum.Failed)
+		parts = append(parts, fmt.Sprintf("%d subtask(s) failed (transport/config) — see results[].reason", sum.Failed))
 	}
 	if sum.Infrastructure > 0 {
-		return fmt.Errorf("%d subtask(s) deferred on infrastructure/config, not on the work — see results[].defer_class and reason", sum.Infrastructure)
+		parts = append(parts, fmt.Sprintf("%d subtask(s) hit infrastructure/config rather than the work (a defer blaming the stack, or a local fallback taken because the fleet failed its health probe) — see results[].defer_class, reason, and placement", sum.Infrastructure))
 	}
-	return nil
+	if len(parts) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(parts, "; "))
 }
 
 // parseContractFile reads a delegation contract file: either ONE subtask

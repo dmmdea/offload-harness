@@ -34,10 +34,12 @@ var fleetTaskOrder = []string{"image-gen", "video-gen", "stt", "audio-gen", "run
 // route gates the pipeline uses (empty script/model = the task defers there, so
 // advertising it to the fleet would be a lie).
 //
-// Listener-independent callers (BuildRequest's error text, Families) get the
-// CONFIG-side view of the bind; the server threads the RESOLVED one through
-// taskConfiguredFor — see AgentLaneAdmissible for why that distinction is
-// load-bearing for the agent lane and irrelevant for every other task.
+// Only callers with NO listener to consult may use it (Families, which feeds
+// the model-family advertisement and is listener-independent for every family
+// it names). Everything on the serve path — advertisement AND admission —
+// takes taskConfiguredFor with the RESOLVED listener: see AgentLaneAdmissible
+// for why that distinction is load-bearing for the agent lane and irrelevant
+// for every other task.
 func taskConfigured(cfg config.Config, taskType string) bool {
 	return taskConfiguredFor(cfg, taskType, ConfigLoopbackListen(cfg))
 }
@@ -97,6 +99,14 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 // landed) and must use it, while config-only callers pass
 // ConfigLoopbackListen(cfg). Deriving it internally is what let the two sides
 // key on different notions of "loopback" in the first place.
+//
+// Making it a parameter was not enough on its own: the ADMISSION path reached
+// this function through BuildRequest, which hardcoded ConfigLoopbackListen —
+// so with `fleet_listen: "0.0.0.0:18811"` and `--listen 127.0.0.1:18811` and no
+// token, health (resolved: loopback) advertised the lane while dispatch
+// (config: not loopback) answered 400 `unsupported task_type "agent"`. Both
+// sides now pass the SAME resolved answer down: BuildRequest takes it as an
+// argument rather than deriving one.
 func AgentLaneAdmissible(cfg config.Config, loopbackListener bool) bool {
 	if !cfg.FleetAgentEnabled {
 		return false
@@ -104,6 +114,19 @@ func AgentLaneAdmissible(cfg config.Config, loopbackListener bool) bool {
 	if cfg.AgentPlannerModel("") == "" {
 		return false
 	}
+	return AgentLaneSafelyReachable(cfg, loopbackListener)
+}
+
+// AgentLaneSafelyReachable is condition 3 of AgentLaneAdmissible standing
+// alone: a loopback listener, or a bearer token for anything beyond it.
+//
+// It is its own function because the dispatch handler needs exactly this
+// condition — and only this one — to pick its refusal: a tokenless lane past
+// loopback is a 403 naming the missing token, while a lane that is merely off
+// or seatless is a plain 400 "unsupported task_type" like any other unbound
+// task. The handler used to re-implement the expression inline, so condition 3
+// existed twice under a doc claiming ONE predicate governs the lane.
+func AgentLaneSafelyReachable(cfg config.Config, loopbackListener bool) bool {
 	return loopbackListener || cfg.FleetAuthToken != ""
 }
 
@@ -202,11 +225,21 @@ func Families(cfg config.Config) []string {
 // (buildPipelineJob -> FetchRefs): the caller is server.go's handleDispatch,
 // which passes r.Context(), so a dispatch whose client vanishes mid-ack stops
 // fetching refs instead of racing to completion against context.Background().
-func BuildRequest(ctx context.Context, cfg config.Config, taskType string, payload json.RawMessage) (core.Request, func(), error) {
+//
+// loopbackListener is the RESOLVED serve listener's verdict, threaded from
+// Options.LoopbackListener — the SAME value health advertises from — so
+// admission and advertisement are one predicate over one input. It is a
+// required argument rather than a defaulted one precisely because it was
+// derived internally before: BuildRequest called ConfigLoopbackListen while
+// health used the resolved listener, and the two disagreed for every node whose
+// --listen flag diverges from fleet_listen in the loopback dimension. The agent
+// lane is the only task whose verdict depends on it; every other task ignores
+// it entirely.
+func BuildRequest(ctx context.Context, cfg config.Config, loopbackListener bool, taskType string, payload json.RawMessage) (core.Request, func(), error) {
 	noop := func() {}
-	if !taskConfigured(cfg, taskType) {
+	if !taskConfiguredFor(cfg, taskType, loopbackListener) {
 		return core.Request{}, noop, fmt.Errorf("unsupported task_type %q (supported: %s)",
-			taskType, strings.Join(SupportedTasks(cfg), ", "))
+			taskType, strings.Join(SupportedTasksFor(cfg, loopbackListener), ", "))
 	}
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
@@ -231,9 +264,9 @@ func BuildRequest(ctx context.Context, cfg config.Config, taskType string, paylo
 	if pipelineNameConfigured(cfg, taskType) {
 		return buildPipelineJob(ctx, cfg, taskType, payload)
 	}
-	// Unreachable: taskConfigured gates membership. Kept for defense.
+	// Unreachable: taskConfiguredFor gates membership. Kept for defense.
 	return core.Request{}, noop, fmt.Errorf("unsupported task_type %q (supported: %s)",
-		taskType, strings.Join(SupportedTasks(cfg), ", "))
+		taskType, strings.Join(SupportedTasksFor(cfg, loopbackListener), ", "))
 }
 
 // buildImageGen mirrors mcpserver.handleGenerateImage.

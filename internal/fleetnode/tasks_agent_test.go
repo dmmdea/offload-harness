@@ -83,7 +83,7 @@ func TestAgentTaskAdvertisementGate(t *testing.T) {
 // TestAgentTaskUnconfiguredIsUnsupported: a media-only box 400s an agent
 // dispatch exactly like any other unconfigured task_type.
 func TestAgentTaskUnconfiguredIsUnsupported(t *testing.T) {
-	_, _, err := BuildRequest(context.Background(), fullCfg(), "agent", json.RawMessage(`{}`))
+	_, _, err := BuildRequest(context.Background(), fullCfg(), true, "agent", json.RawMessage(`{}`))
 	if err == nil || !strings.Contains(err.Error(), "unsupported task_type") {
 		t.Fatalf("err = %v, want unsupported task_type", err)
 	}
@@ -97,7 +97,7 @@ const agentSchemaJSON = `{"properties":{"answer":{"type":"string"}},"required":[
 // after the network round-trip and loop budget were already spent.
 func TestBuildRequestAgentRequiresOutputSchema(t *testing.T) {
 	payload := `{"schema_version":1,"goal":"summarize the docs"}`
-	_, cleanup, err := BuildRequest(context.Background(), agentNodeCfg(t), "agent", json.RawMessage(payload))
+	_, cleanup, err := BuildRequest(context.Background(), agentNodeCfg(t), true, "agent", json.RawMessage(payload))
 	if cleanup != nil {
 		cleanup()
 	}
@@ -122,7 +122,7 @@ func TestBuildRequestAgentContractValidation(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, cleanup, err := BuildRequest(context.Background(), agentNodeCfg(t), "agent", json.RawMessage(c.payload))
+			_, cleanup, err := BuildRequest(context.Background(), agentNodeCfg(t), true, "agent", json.RawMessage(c.payload))
 			if cleanup != nil {
 				cleanup()
 			}
@@ -142,7 +142,7 @@ func TestBuildRequestAgentHappyPath(t *testing.T) {
 	payload := `{"schema_version":1,"goal":"summarize the docs","output_schema":` + agentSchemaJSON + `,
 		"context":[{"name":"a.md","text":"alpha"},{"name":"b.md","text":"beta"}],
 		"max_steps":99,"timeout_sec":30}`
-	req, cleanup, err := BuildRequest(context.Background(), cfg, "agent", json.RawMessage(payload))
+	req, cleanup, err := BuildRequest(context.Background(), cfg, true, "agent", json.RawMessage(payload))
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestBuildRequestAgentDepthDerived(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			payload := `{"schema_version":1,"goal":"g","output_schema":` + agentSchemaJSON + `,
 				"depth":` + jsonInt(c.wireDepth) + `}`
-			req, cleanup, err := BuildRequest(context.Background(), agentNodeCfg(t), "agent", json.RawMessage(payload))
+			req, cleanup, err := BuildRequest(context.Background(), agentNodeCfg(t), true, "agent", json.RawMessage(payload))
 			if err != nil {
 				t.Fatalf("BuildRequest: %v", err)
 			}
@@ -239,14 +239,29 @@ func TestAgentLaneAdvertisementMatchesAdmission(t *testing.T) {
 		name     string
 		loopback bool
 		token    string
-		want     bool // the lane is usable at all in this configuration
+		// fleetListen is the CONFIG's bind. Left empty it agrees with every
+		// resolved listener (ConfigLoopbackListen reads "" as the loopback
+		// default), which is exactly why the four original rows could not see
+		// the admission path keying on the config instead of the resolution.
+		fleetListen string
+		want        bool // the lane is usable at all in this configuration
 	}{
-		{"loopback listener, tokenless (open by locality)", true, "", true},
-		{"loopback listener, token set", true, "tok", true},
-		{"non-loopback listener, token set", false, "tok", true},
+		{"loopback listener, tokenless (open by locality)", true, "", "", true},
+		{"loopback listener, token set", true, "tok", "", true},
+		{"non-loopback listener, token set", false, "tok", "", true},
 		// The row the drift produced: advertised a placeable lane, 403'd the
 		// dispatch that followed.
-		{"non-loopback listener, tokenless (RCE-class surface, refused)", false, "", false},
+		{"non-loopback listener, tokenless (RCE-class surface, refused)", false, "", "", false},
+		// The row the FIX for that drift still missed: a --listen flag that
+		// diverges from fleet_listen in the loopback dimension. Health asked
+		// the predicate about the RESOLVED listener (loopback ⇒ advertise),
+		// while BuildRequest's ack-time admission asked it about the CONFIG
+		// (0.0.0.0 ⇒ not loopback, tokenless ⇒ refuse), so health advertised
+		// agent and dispatch answered 400 `unsupported task_type "agent"`.
+		// The inverse direction is not a hole: config-loopback with a resolved
+		// non-loopback listener and no token is 403'd by the auth guard before
+		// BuildRequest ever runs.
+		{"config bind non-loopback, RESOLVED listener loopback, tokenless", true, "", "0.0.0.0:18811", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -256,6 +271,7 @@ func TestAgentLaneAdvertisementMatchesAdmission(t *testing.T) {
 				AgentModel:        "agent-seat",
 				AgentCtxTokens:    16384,
 				FleetAuthToken:    tc.token,
+				FleetListen:       tc.fleetListen,
 			}
 			s, _ := newTestServer(t, cfg, &fakeRunner{}, authOpts(tc.loopback))
 
@@ -314,23 +330,38 @@ func TestAgentDispatchAdversarialBodies(t *testing.T) {
 		name    string
 		payload string
 		wantSub string
+		// materializes marks a row that fails AFTER buildAgentRun has created
+		// the job dir. Every other row dies in DecodeAgentContract or the
+		// output_schema check — i.e. BEFORE os.MkdirAll(jobsRoot) — so jobsRoot
+		// never exists, ReadDir always errors, and the leftover-dir assertion
+		// below never runs a single comparison: the os.RemoveAll calls it is
+		// supposed to protect could be deleted and this test stayed green.
+		materializes bool
 	}{
 		// A truncated contract also truncates the ENVELOPE it is embedded in, so
 		// the strict envelope decoder catches it first — pinned here because the
 		// caller-facing outcome (a 400 in the taxonomy's JSON shape) is what
 		// matters, and "which decoder said no" must not change it.
-		{"malformed contract JSON", `{"schema_version":1,"goal":`, "malformed dispatch body"},
-		{"contract is a JSON array, not an object", `[{"goal":"g"}]`, "agent contract"},
-		{"contract is a bare string", `"just a goal"`, "agent contract"},
-		{"unsupported schema_version", `{"schema_version":99,"goal":"g","output_schema":` + agentSchemaJSON + `}`, "schema_version"},
-		{"no goal", `{"schema_version":1,"output_schema":` + agentSchemaJSON + `}`, "goal"},
-		{"no output_schema (remote execution requires one)", `{"schema_version":1,"goal":"g"}`, "output_schema"},
+		{"malformed contract JSON", `{"schema_version":1,"goal":`, "malformed dispatch body", false},
+		{"contract is a JSON array, not an object", `[{"goal":"g"}]`, "agent contract", false},
+		{"contract is a bare string", `"just a goal"`, "agent contract", false},
+		{"unsupported schema_version", `{"schema_version":99,"goal":"g","output_schema":` + agentSchemaJSON + `}`, "schema_version", false},
+		{"no goal", `{"schema_version":1,"output_schema":` + agentSchemaJSON + `}`, "goal", false},
+		{"no output_schema (remote execution requires one)", `{"schema_version":1,"goal":"g"}`, "output_schema", false},
 		{"context over the 256 KiB cap", `{"schema_version":1,"goal":"g","output_schema":` + agentSchemaJSON +
-			`,"context":[` + string(docJSON) + `]}`, "cap"},
+			`,"context":[` + string(docJSON) + `]}`, "cap", false},
 		{"reserved device name as a context doc", `{"schema_version":1,"goal":"g","output_schema":` + agentSchemaJSON +
-			`,"context":[{"name":"NUL","text":"vanishes"}]}`, "reserved Windows device name"},
+			`,"context":[{"name":"NUL","text":"vanishes"}]}`, "reserved Windows device name", false},
 		{"traversal doc name", `{"schema_version":1,"goal":"g","output_schema":` + agentSchemaJSON +
-			`,"context":[{"name":"../escape.md","text":"x"}]}`, "flat filename"},
+			`,"context":[{"name":"../escape.md","text":"x"}]}`, "flat filename", false},
+		// The row that actually exercises the cleanup: a doc name that is a
+		// perfectly legal flat filename by the contract's rules but exceeds
+		// every mainstream filesystem's 255-byte component limit, so the
+		// failure lands in os.WriteFile — after the job dir and its context/
+		// subdir are on disk. This is the only row that can catch a missing
+		// os.RemoveAll.
+		{"context doc name no filesystem can hold", `{"schema_version":1,"goal":"g","output_schema":` + agentSchemaJSON +
+			`,"context":[{"name":"` + strings.Repeat("n", 400) + `.md","text":"x"}]}`, "writing context doc", true},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -345,7 +376,18 @@ func TestAgentDispatchAdversarialBodies(t *testing.T) {
 			// its job dir before writing docs, so a mid-validation bail that
 			// forgot to clean up would strand a directory per bad request.
 			jobsRoot := filepath.Join(cfg.BaseDir(), "pipeline-jobs")
-			if entries, rerr := os.ReadDir(jobsRoot); rerr == nil && len(entries) != 0 {
+			entries, rerr := os.ReadDir(jobsRoot)
+			switch {
+			case tc.materializes:
+				// The dir MUST exist here — otherwise this row died early too
+				// and proves nothing about cleanup.
+				if rerr != nil {
+					t.Fatalf("reading %s: %v — this row is supposed to fail AFTER materialization", jobsRoot, rerr)
+				}
+			case rerr != nil && !os.IsNotExist(rerr):
+				t.Fatalf("reading %s: %v", jobsRoot, rerr)
+			}
+			if len(entries) != 0 {
 				t.Fatalf("refused dispatch left %d job dir(s) under %s", len(entries), jobsRoot)
 			}
 		})

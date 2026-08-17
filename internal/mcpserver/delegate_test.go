@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -171,6 +172,71 @@ func TestAgentDelegateHandlerAcceptanceFailure(t *testing.T) {
 	summary, _ := m["summary"].(map[string]any)
 	if summary["failed_verification"] != float64(1) || summary["succeeded"] != float64(0) {
 		t.Fatalf("summary = %v, want the acceptance failure counted", summary)
+	}
+}
+
+// TestAgentDelegateHandlerLoudOnFailureAndInfrastructure (C-I): the loud-exit
+// contract existed only on the CLI (delegateExitErr). handleAgentDelegate
+// never set IsError, so both summary.failed > 0 and summary.infrastructure > 0
+// came back as SUCCESSFUL tool calls — and the MCP caller is this lane's
+// primary consumer. The JSON body must stay intact either way: the summary and
+// the per-subtask reasons are the whole diagnosis.
+func TestAgentDelegateHandlerLoudOnFailureAndInfrastructure(t *testing.T) {
+	cases := []struct {
+		name        string
+		local       func(context.Context, core.AgentContract) (core.AgentWireResult, error)
+		wantIsError bool
+		wantKey     string
+	}{
+		{
+			name: "a transport/config failure",
+			local: func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
+				return core.AgentWireResult{}, errors.New("planner endpoint refused")
+			},
+			wantIsError: true,
+			wantKey:     "failed",
+		},
+		{
+			name: "a defer that blames the stack",
+			local: func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
+				return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "fake-seat",
+					Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: "agent loop: llama-server 500"}, nil
+			},
+			wantIsError: true,
+			wantKey:     "infrastructure",
+		},
+		{
+			name: "an honest abstention (the control: still a success)",
+			local: func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
+				return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "fake-seat",
+					Deferred: true, DeferClass: core.DeferClassAbstention, Reason: "output failed schema: missing answer"}, nil
+			},
+			wantIsError: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := delegateTestServer(t, tc.local)
+			res, err := s.handleAgentDelegate(context.Background(), callReq(
+				`{"subtasks":[{"goal":"answer it"}],"route":"local"}`))
+			if err != nil {
+				t.Fatalf("handleAgentDelegate: %v", err)
+			}
+			if res.IsError != tc.wantIsError {
+				t.Fatalf("IsError = %v, want %v — a broken stack must not return as a successful tool call", res.IsError, tc.wantIsError)
+			}
+			m := decodeResult(t, res)
+			summary, _ := m["summary"].(map[string]any)
+			if summary == nil {
+				t.Fatalf("the JSON body must survive the error flag: %v", m)
+			}
+			if tc.wantKey != "" && summary[tc.wantKey] != float64(1) {
+				t.Fatalf("summary[%q] = %v, want 1 (%v)", tc.wantKey, summary[tc.wantKey], summary)
+			}
+			if results, _ := m["results"].([]any); len(results) != 1 {
+				t.Fatalf("results = %v, want the per-subtask diagnosis intact", m["results"])
+			}
+		})
 	}
 }
 

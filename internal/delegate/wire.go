@@ -19,6 +19,14 @@ type SummaryWire struct {
 	FailedVerification int `json:"failed_verification"`
 	Failed             int `json:"failed"`
 	Infrastructure     int `json:"infrastructure"`
+	// CorpusRowsLost / LedgerRowsLost publish telemetry loss to the CALLER.
+	// omitempty: a healthy run's response stays byte-identical to before these
+	// fields existed. They are not outcome buckets — the four counts above
+	// still add up to len(results) — but a delegation that wrote nothing to the
+	// standing corpus published identically to one that wrote everything, and
+	// the MCP caller had no way to learn it.
+	CorpusRowsLost int `json:"corpus_rows_lost,omitempty"`
+	LedgerRowsLost int `json:"ledger_rows_lost,omitempty"`
 }
 
 // ResultWire is one subtask's published outcome. Failed marks a
@@ -56,6 +64,8 @@ func WireResponse(results []PlacedResult, sum Summary) ResponseWire {
 			FailedVerification: sum.FailedVerification,
 			Failed:             sum.Failed,
 			Infrastructure:     sum.Infrastructure,
+			CorpusRowsLost:     sum.CorpusRowsLost,
+			LedgerRowsLost:     sum.LedgerRowsLost,
 		},
 		Results: make([]ResultWire, 0, len(results)),
 	}
