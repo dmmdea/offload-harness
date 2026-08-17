@@ -98,6 +98,13 @@ foreach ($tierBig in @('blackwell-48','blackwell-72')) {
   Assert ($s.agent_model -eq 'qwen3.8-27b')                                 "$tierBig seats the qwen3.8-27b agent/coder"
   Assert ([bool]$profiles.$tierBig.include_qwen38)                          "$tierBig sets include_qwen38 (yaml entry + download gate)"
 }
+# ampere-6: the measured 6GB agent seat (bake-off 2026-08-17). Both halves must move
+# together — a seeded agent_model whose weights never download, or a download whose
+# seat nothing binds, is the split-brain the gate mechanism exists to prevent.
+$sA6 = $profiles.'ampere-6'.config_seed
+Assert ($sA6.agent_model -eq 'qwen3.5-4b-agent')                           'ampere-6 seats the qwen3.5-4b agent (measured bake-off winner)'
+Assert ([bool]$profiles.'ampere-6'.include_qwen35_4b)                      'ampere-6 sets include_qwen35_4b (yaml entry + download gate)'
+Assert ($null -eq $profiles.'ampere-8'.include_qwen35_4b)                  'ampere-8 include_qwen35_4b stays absent (not measured there)'
 $s32 = $profiles.'blackwell-32'.config_seed
 Assert ($s32.videogen_width -eq 1280 -and $s32.videogen_height -eq 704)     'blackwell-32 seeds REDUCED-RES 1280x704 video (doctrine-conformant recipe)'
 Assert ($null -eq $s32.agent_model)                                         'blackwell-32 agent stays derived (no explicit agent_model)'

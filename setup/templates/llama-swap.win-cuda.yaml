@@ -53,6 +53,29 @@ models:
       --cache-type-k __KV_K__ --cache-type-v __KV_V__ --jinja --reasoning on
       --port ${PORT} --host 127.0.0.1
     ttl: 300
+  # AGENT seat for the SMALL tiers: Qwen3.5-4B. Gated on the tier's
+  # include_qwen35_4b, exactly as the 26B agent entry rides include_26b — the
+  # renderer strips this block, its matrix var and its set membership together.
+  # MEASURED 2026-08-17 (6GB-tier bake-off, RTX 3050): the only candidate of 15 that
+  # is strong on BOTH task shapes — 67% extraction recall vs the e4b incumbent's 50%,
+  # and 4/5 on search+reason where the higher-scoring 2B collapses to 1/5. 3681 MiB at
+  # ctx 32768 q8_0, so it fits a 6GB card beside the resident support tier.
+  #
+  # Flags are written EXPLICITLY instead of via ${common} for one measured reason:
+  # ${common} pins `--reasoning off`, and every score this seat was chosen on was
+  # measured under llama.cpp's DEFAULT reasoning behaviour. Shipping a flag the
+  # measurement never exercised would be shipping an unmeasured configuration.
+  # NO sampling flags on purpose: the agent loop sends `temperature: 0` on every
+  # request (internal/agent/client.go wireReq — the field has no omitempty and is
+  # never assigned), so a server-side --temp/--top-p is inert on this lane.
+  qwen3.5-4b-agent:
+    aliases: [qwen35-4b, agent-seat]
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.5-4B-UD-Q4_K_XL.gguf
+      -ngl 99 --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --jinja
+      --port ${PORT} --host 127.0.0.1
+    ttl: 300
   embeddinggemma:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/embeddinggemma-300m-Q8_0.gguf
@@ -89,8 +112,9 @@ matrix:
     e2b: gemma4-e2b
     m26: gemma4-26b-a4b
     a26: gemma-4-26b-agent
+    q354: qwen3.5-4b-agent
   evict_costs:
     emb: 1000
   sets:
     residents: "emb__SEATS_RESIDENT__"
-    interactive: "+residents & (e4b | e2b__M26_ALT____SEATS_SWAPPABLE__)"
+    interactive: "+residents & (e4b | e2b__M26_ALT____Q354B_ALT____SEATS_SWAPPABLE__)"

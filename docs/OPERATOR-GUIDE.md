@@ -542,9 +542,11 @@ low so a stuck model gets its tool disabled quickly.
 The installer resolves a hardware **profile** (`detect.ps1` → `install.ps1`, see
 `setup/SETUP-AGENT.md`) and renders the serving template + writes the profile's `agent_ctx_tokens`
 to `installed.json`. The install seed also binds the agent's planner seat automatically: config
-`agent_model` is derived from the profile's `resident_tier` when it differs from the workhorse, so
-running the agent no longer requires `-model <resident_tier>` — the `-model` flag remains an
-override. Run with `-ctx-tokens <agent_ctx_tokens>` matching the profile. These are **projected
+`agent_model` comes from the profile's explicit `config_seed.agent_model` when it names one (the
+measured seat for that tier), and otherwise is DERIVED from `resident_tier` when that differs from
+the workhorse. So running the agent no longer requires `-model <resident_tier>` — the `-model` flag
+remains an override. A seeded tier is the normal case wherever a bake-off has run: an explicit seed
+is how a tier binds a planner that is neither its resident nor its workhorse. Run with `-ctx-tokens <agent_ctx_tokens>` matching the profile. These are **projected
 defaults**; `selftest.ps1` measures on the real box and its `receipt.profile_measure.tuned` block
 carries any measured override to apply.
 
@@ -555,7 +557,7 @@ carries any measured override to apply.
 | `ampere-8` / `blackwell-8` | `offload-e4b` | 16384 | q8_0 | via `--cpu-moe` only when RAM ≥ ~56 GB; else dropped |
 | `amd-rdna3` | `offload-e4b` (Vulkan) | 16384 (floor; canary → 32768) | f16 (floor; canary → q8_0) | `--cpu-moe` floor; canary → full-offload `-ngl 99` (~20–25 t/s on dual-channel DDR5) — see SETUP-AGENT.md, AMD RDNA3 chapter |
 | `amd-rdna3-dgpu` | `gemma4-26b-a4b` (Vulkan, discrete RX 7900-class ≥12 GB) | 32768 | q8_0 | full-GPU `-ngl 99` resident |
-| `ampere-6` | `gemma4-e2b` | 16384 | q8_0 (**mandatory** for 16K on 6 GB) | dropped |
+| `ampere-6` | `offload-e4b` | 32768 | q8_0 (conservative default; f16 measured viable) | dropped (architectural — see the tier page) |
 | `amd-gcn` | `gemma4-e2b` (Vulkan) | 8192 | f16, flash-attn off | dropped |
 | `cpu` | `offload-e4b` (CPU) | 8192 | f16, flash-attn off | `--cpu-moe` when RAM ≥ ~56 GB; else dropped |
 

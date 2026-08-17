@@ -60,8 +60,11 @@ type servingProfile struct {
 	// IncludeQwen38 gates the Qwen3.8-27B coder/agent entry (and, in install.ps1,
 	// its GGUF+mmproj downloads) the same way Include26B gates the 26B. Absent =
 	// false: only the tiers that measured (or project) the seat set it.
-	IncludeQwen38 bool   `json:"include_qwen38"`
-	MoE26B        string `json:"moe_26b"`
+	IncludeQwen38 bool `json:"include_qwen38"`
+	// IncludeQwen354B gates the Qwen3.5-4B agent entry (and, in install.ps1, its
+	// GGUF download) the same way IncludeQwen38 gates the 27B. Absent = false.
+	IncludeQwen354B bool   `json:"include_qwen35_4b"`
+	MoE26B          string `json:"moe_26b"`
 	// NCPUMoE is the N for the partial `n_cpu_moe` placement (top N expert layers in
 	// RAM, the rest on the GPU).
 	NCPUMoE int `json:"n_cpu_moe"`
@@ -203,7 +206,7 @@ func warnMissingSeatModels(seats []mediaseat.Seat, modelsDir, target string) {
 // contract (the same names install.ps1's $PINNED table downloads to).
 // Same shape as the seat warning: a warning, never an error, and skipped when
 // rendering for another machine, where a local miss means nothing.
-func warnMissingGatedModels(include26B, includeQ38 bool, modelsDir, target string) {
+func warnMissingGatedModels(include26B, includeQ38, includeQ354B bool, modelsDir, target string) {
 	if modelsDir == "" || target != runtime.GOOS {
 		return
 	}
@@ -220,6 +223,9 @@ func warnMissingGatedModels(include26B, includeQ38 bool, modelsDir, target strin
 	if includeQ38 {
 		check("qwen3.8-27b", "model", "Qwen3.8-27B-UD-Q4_K_XL.gguf")
 		check("qwen3.8-27b", "mmproj", "mmproj-Qwen3.8-27B-F16.gguf")
+	}
+	if includeQ354B {
+		check("qwen3.5-4b-agent", "model", "Qwen3.5-4B-UD-Q4_K_XL.gguf")
 	}
 	if len(missing) == 0 {
 		return
@@ -330,14 +336,15 @@ func runInstallRender(args []string) error {
 		LlamaBin: *llamaBin, ModelsDir: *modelsDir, Listen: *listen,
 		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
 		MoE26B: moe, Threads: n, Include26B: include26B, IncludeQ38: p.IncludeQwen38,
-		Seats: p.MediaSeats, Home: *home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
+		IncludeQ354B: p.IncludeQwen354B,
+		Seats:        p.MediaSeats, Home: *home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
 	})
 	if err != nil {
 		return fmt.Errorf("tier %s: %w", id, err)
 	}
 
 	warnMissingSeatModels(p.MediaSeats, *modelsDir, target)
-	warnMissingGatedModels(include26B, p.IncludeQwen38, *modelsDir, target)
+	warnMissingGatedModels(include26B, p.IncludeQwen38, p.IncludeQwen354B, *modelsDir, target)
 
 	if *out == "" {
 		fmt.Print(rendered)

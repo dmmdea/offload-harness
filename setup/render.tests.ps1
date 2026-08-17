@@ -209,7 +209,37 @@ foreach ($band in @('min','low','mid','high')) {
   if ($r.yaml -notmatch '(?m)^\s+cmd:.*--n?-?cpu-moe')         { Ok "ampere-6/$band renders no CPU-offload flag" } else { Bad "ampere-6/$band emitted a cpu-moe flag" }
   if ($r.verdict -and $r.verdict.moe_mode -eq 'drop')          { Ok "ampere-6/$band moe_mode=drop" } else { Bad "ampere-6/$band moe_mode (got: $($r.verdict.moe_mode))" }
   if ($r.yaml -notmatch '__MOE_26B__')                         { Ok "ampere-6/${band}: no unsubstituted MoE token" } else { Bad "ampere-6/$band left __MOE_26B__" }
+  # include_qwen35_4b: the measured agent seat renders (entry + swappable-set
+  # membership) — the Q354B token pair mirrors the Q38 mechanism. RAM-band
+  # insensitive on purpose: this seat lives entirely in VRAM, so no RAM gate may
+  # remove it (that is what would silently return the tier to the 50% planner).
+  if ($r.yaml -match '(?m)^\s{2}qwen3\.5-4b-agent:')           { Ok "ampere-6/$band qwen3.5-4b agent seat present (include_qwen35_4b)" } else { Bad "ampere-6/$band qwen3.5-4b agent seat missing" }
+  if ($r.yaml -match '(?m)^\s{4}interactive:.*\bq354\b')       { Ok "ampere-6/$band qwen3.5-4b joins the interactive set" } else { Bad "ampere-6/$band q354 set membership" }
+  if ($r.yaml -notmatch '__Q354B_')                            { Ok "ampere-6/${band}: no unsubstituted Q354B token" } else { Bad "ampere-6/$band left __Q354B_*__" }
+  # MEASURED INVARIANT, not style: this seat is a THINKING model and scores 67% under
+  # llama.cpp's default reasoning but collapses to 28-44% with `--reasoning off`
+  # (Phase F, 2026-08-17, at the deployed ctx). The cascade's ${common} macro pins
+  # reasoning off, so folding this entry into ${common} — the obvious future
+  # "cleanup" — would silently halve the tier's agent quality. This assertion is the
+  # tripwire for exactly that edit.
+  $q354Cmd = ([regex]::Match($r.yaml, '(?ms)^\s{2}qwen3\.5-4b-agent:.*?(?=^\s{2}\S|\Z)')).Value
+  # NOTE: plain hyphens, never an em dash, inside these STRINGS. This file has no BOM,
+  # and Windows PowerShell 5.1 (what CI runs) decodes a BOM-less file as cp1252, where
+  # the em dash's third UTF-8 byte 0x94 becomes a RIGHT DOUBLE QUOTATION MARK - which
+  # 5.1's parser accepts as a string delimiter, so the string ends early and the whole
+  # file dies with "Missing closing '}'". pwsh 7 reads UTF-8 and never sees it. Em
+  # dashes in COMMENTS are harmless (a comment runs to end of line) and this file
+  # already has several.
+  if ($q354Cmd -and $q354Cmd -notmatch '--reasoning\s+off')    { Ok "ampere-6/$band qwen3.5-4b seat does NOT pin --reasoning off (measured: off collapses it)" } else { Bad "ampere-6/$band qwen3.5-4b seat pins --reasoning off - measured to collapse 67% -> 28-44%" }
+  if ($q354Cmd -and $q354Cmd -notmatch '\$\{common\}')         { Ok "ampere-6/$band qwen3.5-4b seat writes flags explicitly (not via `${common})" } else { Bad "ampere-6/$band qwen3.5-4b seat uses `${common}, which pins --reasoning off" }
 }
+# NEGATIVE: a tier that does NOT set include_qwen35_4b must have the entry, its var
+# and its set membership stripped — the mirror of the blackwell-32 qwen3.8 check.
+# Comment-insensitive: the template documents the seat in prose that survives the strip.
+Write-Host "== ampere-8 - qwen3.5-4b agent seat STRIPPED (include_qwen35_4b absent) =="
+$r = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-8' -RamTier 'mid' -BigRam $false
+$a8Functional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' }) -join "`n"
+if ($a8Functional -notmatch 'qwen3\.5-4b-agent' -and $a8Functional -notmatch '\bq354\b') { Ok 'ampere-8 qwen3.5-4b seat STRIPPED (include_qwen35_4b absent)' } else { Bad 'ampere-8 qwen3.5-4b leaked in' }
 Write-Host "== amd-gcn - 8192 / f16 / flash-attn off (vulkan) =="
 $r = Invoke-Render -Backend 'vulkan' -ProfileId 'amd-gcn' -RamTier 'low' -BigRam $false
 $macro = Get-CommonMacro $r.yaml
