@@ -4,14 +4,17 @@
 // (write_file/delete_file, P2), web_fetch (P3), and run_shell in an OS sandbox
 // (P4.6) are OPT-IN (--allow-write / --allow-fetch / --allow-shell) and gated by
 // one deny→ask→allow policy broker (single chokepoint
-// + audit trail). Offload calls go through the harness pipeline's RunTier
-// (record=false) so they never touch the savings ledger / cache / shadow queue.
+// + audit trail). Offload calls go through the harness pipeline's RunTier with a
+// nil ledger, so they never touch the savings ledger / shadow queue / exemplars;
+// they DO share the result cache (T2-D), so the loop stops re-running the model
+// on byte-identical input.
 // The planner backend is any OpenAI-compatible endpoint (local llama-swap default).
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -21,8 +24,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	bolt "go.etcd.io/bbolt"
+
 	"github.com/dmmdea/offload-harness/internal/agent"
+	"github.com/dmmdea/offload-harness/internal/cache"
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/sandbox"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
@@ -193,11 +200,39 @@ func main() {
 	}
 	timeout := time.Duration(effTimeoutSec) * time.Second
 
-	// In-process offload (record=false, nil cache+ledger) — the SINGLE shared
+	// In-process offload (nil LEDGER, shared result cache) — the SINGLE shared
 	// constructor, so every drive mode's ledger-pristine guarantee is identical.
 	// The in-loop cascade stays on the WORKHORSE (an explicit -model still drives
 	// both, preserving the old override semantics; the agent seat does not).
-	offload := pipeline.NewRecordlessOffload(cfg, orCfg(*model, cfg.Model), timeout)
+	//
+	// T2-D: this binary owns no pipeline, so it opens the result cache itself.
+	// A failure here is EXPECTED and benign — the MCP server holds the bbolt lock
+	// whenever it is running — so it degrades to the previous cache-free
+	// behaviour rather than refusing to start. Same policy as the main binary's
+	// cache open.
+	var agentCache *cache.Cache
+	if cfg.CachePath != "" {
+		if c, cerr := cache.Open(cfg.CachePath); cerr == nil {
+			agentCache = c
+			defer agentCache.Close()
+		} else if errors.Is(cerr, bolt.ErrTimeout) {
+			// The expected, benign case: the MCP server holds the exclusive lock.
+			fmt.Fprintln(os.Stderr, "note: cache is held by another local-offload process; continuing without cache")
+		} else {
+			// Anything else — permissions, a corrupt file, a bad path — is NOT
+			// lock contention, and reporting it as such sends the operator to
+			// diagnose the wrong thing entirely.
+			fmt.Fprintln(os.Stderr, "note: cache unavailable, continuing without it:", cerr)
+		}
+	}
+	// Persist the embed memo's hit/miss totals on the way out; see
+	// embedmemo.CloseShared for why every binary that may open one must do this.
+	defer func() {
+		if err := embedmemo.CloseShared(); err != nil {
+			fmt.Fprintln(os.Stderr, "note: embed memo counters may not have been persisted:", err)
+		}
+	}()
+	offload := pipeline.NewInLoopOffload(cfg, orCfg(*model, cfg.Model), timeout, agentCache)
 
 	// The broker audit trail must live OUTSIDE any worktree; resolve a default
 	// only when a mutating capability is enabled.

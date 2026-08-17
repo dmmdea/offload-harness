@@ -123,7 +123,35 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
 - **Ledger** — append-only JSONL at the configured `ledger_path`, `fsync`ed per entry so a crash
   cannot lose recorded savings. Carries `tokens_saved` (input tokens kept out of the calling model)
   and per-call metadata.
-- **Cache** — keyed result reuse; bypassed entirely on the recordless path.
+- **Cache** — keyed result reuse. Bypassed on the *recordless* path (`NewRecordlessPipeline`);
+  **shared** on the *in-loop* path (`NewInLoopPipeline`) — see Interfaces below for why those are two
+  different things.
+- **Embed memo** — `internal/embedmemo`, a bbolt store at `embed_memo_path` keyed on
+  `sha256(embedder_id, epoch, exact input bytes)`. Embedding is a pure function of (model, text) and
+  the harness re-embeds the same strings by construction, so a hit skips the call — and, because the
+  embedder carries `ttl=300` like every other seat, it also skips the ~1–2 s cold load the first
+  embed after an idle gap would pay.
+  - **Wired consumers:** the shadow-label drain (`shadow-label`), which re-embeds the same stored
+    inputs and re-scores the same reference summaries on every run; and the kNN pre-filter, which is
+    off unless `knn_prefilter_enabled` is set. Exemplar selection is **not** a consumer —
+    `internal/exemplars` retrieves lexically and contains no embedder.
+  - Keys are **never normalized**: casefolding or whitespace collapsing would let two different texts
+    share a key and return a vector computed for the other one, which is a silent correctness bug in
+    a semantic quantity rather than a cache miss. Vectors are stored as verbatim `float64`, so a hit
+    is bit-identical to what the embedder returned.
+  - Every key, counter and prune-order entry is scoped to a **namespace** derived from
+    (embedder id, epoch), so switching embedders cannot serve the previous model's vectors — the two
+    address disjoint keyspaces rather than relying on a check. A namespace records its vector
+    dimension on first store; a later disagreement proves the model changed behind a stable id and is
+    reported rather than mixed into a cosine routine.
+  - Every failure path (disabled, file held by another process, malformed record, embedder error)
+    degrades to a plain live call, and each is **counted and published** — `offload_status` and
+    `loupe` both report decode/read/write faults, because an unpublished fault counter cannot
+    distinguish a working memo from one whose store fails every write.
+  - **Persisting the counters requires `embedmemo.CloseShared()` on the owning binary's shutdown
+    path.** It is the only writer of the lifetime hit/miss totals; a process that exits without it
+    leaves them at zero, and the reports then state that a memo serving thousands of hits was "never
+    consulted".
 - **Learned thresholds** — per-task conformal values loaded from `thresholds.json` when present,
   falling back to config defaults.
 - **Circuit breakers** — per-Tier, consulted during chain construction.
@@ -131,12 +159,42 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
 ## Interfaces and entry points
 
 - `Run` — the full cascade with recording.
-- `RunTier` — one specific Tier, no escalation, no recording.
-- `NewRecordlessPipeline` / `NewRecordlessOffload` — the agent-facing construction. This is the single
-  place the nil-store invariant is built: nil cache and nil ledger, so agent-internal offload calls
-  leave no trace in savings accounting. A defer here is returned as a *successful tool result*
+- `RunTier` — one specific Tier, no escalation, **no ledger/shadow/exemplar recording**. It reads and
+  writes the result cache only when the pipeline it belongs to opted in (below).
+- `NewRecordlessPipeline` / `NewRecordlessOffload` — nil cache **and** nil ledger. For callers that
+  must share no state at all: the shadow-labelling flywheel and prompt A/B arms.
+- `NewInLoopPipeline` / `NewInLoopOffload` — nil ledger, **shared result cache**. This is what the
+  ordinary drive modes (MCP front door, `local-agent` CLI) use.
+
+  A defer on either path is returned as a *successful tool result*
   (`{"deferred": true, "reason": ...}`) rather than an error, because the agent loop should read it
   and move on.
+
+### Why "recordless" split into two constructors
+
+The original single invariant bundled two unrelated guarantees:
+
+1. **the agent's internal offload calls must not pollute the savings ledger** — those are the harness
+   talking to itself, not work a caller delegated, so counting them inflates every savings number; and
+2. **those calls must not read or write the result cache.**
+
+(1) is a real accounting invariant and is kept exactly. (2) was collateral damage: it made the loop
+re-run the model on byte-identical input, so an agent that summarized the same file twice in one run
+paid twice. Nothing about ledger hygiene requires that, and the cache key binds the prompt template
+and exemplar set, so an entry written by one caller is valid for any other.
+
+**Cache participation is a property of the pipeline, never of `RunTier`.** That distinction is
+load-bearing: the shadow-labelling flywheel drives `RunTier` on the *main* pipeline — the one with an
+open cache — to evaluate what a counterfactual tier *would* have answered. A cache hit there would
+grade a stored answer instead of the tier, and a cache write would fill the store with counterfactual
+results. Only `NewInLoopPipeline` opts in.
+
+`RunTier` has its **own keyspace** (`cacheKeyForTier`), disjoint from `Run`'s, keyed on the **actual
+tier** and carrying the template tag. Sharing `Run`'s constructor was not enough: with
+`exemplar_shots` at its default of 0 every other ingredient coincided, so both paths computed the
+same key whenever the pinned tier was the primary model, and they overwrote each other's entries
+repeatedly. The consequence of the split is that an in-loop offload does not reuse a cascade answer
+— which was never sound anyway, since a pinned tier must get *that tier's* output.
 
 ## Dependencies
 
