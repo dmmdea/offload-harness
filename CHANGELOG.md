@@ -39,6 +39,30 @@ config default?" The measured answer is yes, as a **caller-overridable** default
   actually measured. No other tier is seeded: the effect is measured on this silicon only, and a
   benchmark result is not a mandate elsewhere. `tierseed`'s `configKeys()` reflects over the
   Config struct, so the new key validates as a legal seed with no per-key plumbing.
+- **Review round (independent, pre-merge) — 2 critical + 4 important, all fixed:**
+  - `agent_run` reported `len(BuildResult.Tools)`, a snapshot taken BEFORE narrowing, so a
+    seeded box advertised 3 tools while the response said 11 — and carried no `profile`
+    field at all. That is the exact hazard this entry claims to fix, fixed on the CLI half
+    and missed on the MCP half. Now reports the post-narrowing count via a new
+    `Loop.AdvertisedTools()` plus the applied `profile`.
+  - The `agent_run` TOOL description still promised "plus the offload_* cascade", which a
+    narrowed profile drops entirely. An MCP client reads that to decide whether to
+    delegate. Reworded; only the `profile` PROPERTY description had been updated.
+  - `agent_profile` was not trimmed (only the explicit argument was), so
+    `"research "` would fail every lookup and brick the lane on a trailing space.
+  - The doc comment claimed an unknown name is "a loud startup-time error" — true for
+    `local-agent`, false for the MCP door, which returns a per-call defer. Corrected to
+    state each door precisely, and `tierseed.validate` now checks the VALUE against
+    `agent.LookupProfile` at tier-authoring time (it previously validated only that the
+    KEY was a real config field, so `"reserch"` would ship in a template).
+  - Docs claimed "every front door honours it" while listing the delegation lane, which
+    hardcodes `research` and never reads the key. That is deliberate — the lane's default
+    describes the TASK SHAPE, not the box — so the doc now says so instead of overclaiming.
+  - `docs/OPERATOR-GUIDE.md`'s profile table and the repo's own `CLAUDE.md` still called
+    `general` "the default"; both corrected to "fallback" with the resolution order.
+  - New tests: `TestAdvertisedToolsReflectsProfileNarrowing` and
+    `TestAdvertisedToolsUnchangedByGeneral` — the latter pins the "byte-identical for an
+    unseeded box" claim on the tool set AND the system prompt.
 - Docs updated in the same change: `docs/systems/coding-agent.md` (new "Tool-profile seat"
   section), `docs/OPERATOR-GUIDE.md`, the regenerated `docs/tiers/*.md`, `config.example.json`,
   the `agent_run` schema text, and the ampere-6 tier note — whose previous wording called this

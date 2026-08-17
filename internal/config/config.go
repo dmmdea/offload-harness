@@ -155,8 +155,12 @@ type Config struct {
 	// Per-tier because it is a property of the SEAT's capability, not of the task: a
 	// 27B planner handles the full tool set, a 4B does not. The caller's explicit
 	// profile always wins, so a box seeded "research" can still run an edit task with
-	// --profile edit. An unknown name here is a loud startup-time error, never a
-	// silent fall back to the one configuration measured to fail.
+	// --profile edit. An unknown name here NEVER silently falls back to the one
+	// configuration measured to fail — it fails by name. Where that surfaces differs
+	// by door, so be precise: `local-agent` exits 2 before any network work, `doctor`
+	// reports it, and `tierseed` refuses it at tier-authoring time; the MCP `agent_run`
+	// door returns a per-call defer naming the valid profiles, because a long-lived
+	// server must not die on a config it can report instead.
 	AgentProfile string `json:"agent_profile,omitempty"`
 	// AgentTimeoutSec is the default wall-clock budget for an agent run when the call
 	// passes no timeout. 0 = the built-in default (180s). Tiers binding a big planner
@@ -880,8 +884,11 @@ func (c Config) AgentTaskProfile(explicit string) string {
 	if explicit != "" {
 		return explicit
 	}
-	if c.AgentProfile != "" {
-		return c.AgentProfile
+	// Trim the CONFIGURED value too, not just the explicit one: a hand-edited
+	// `"agent_profile": "research "` would otherwise fail every lookup by name and
+	// brick the agent lane on a box whose only mistake was a trailing space.
+	if p := strings.TrimSpace(c.AgentProfile); p != "" {
+		return p
 	}
 	return "general"
 }

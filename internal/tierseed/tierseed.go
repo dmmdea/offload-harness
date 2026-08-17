@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/mediaseat"
 )
@@ -196,6 +197,23 @@ func validate(seed map[string]any, backend, id string) error {
 		}
 		if s, ok := seed[k].(string); ok && strings.Contains(strings.ToLower(s), ".exe") {
 			problems = append(problems, fmt.Sprintf("%s carries a literal \".exe\" — use the %s token so the tier renders on every OS", k, TokenExe))
+		}
+	}
+	// A seeded agent_profile is a NAME the agent loop must be able to resolve. The key
+	// check above only proves it is a real config field, so "reserch" would ship in a
+	// tier template and surface as a per-call defer on every box that installed it.
+	// Validate the VALUE here, at authoring time, exactly as vae_mode does below.
+	if v, ok := seed["agent_profile"]; ok {
+		s, isStr := v.(string)
+		switch {
+		case !isStr:
+			problems = append(problems, "agent_profile must be a string")
+		case strings.TrimSpace(s) != s:
+			problems = append(problems, fmt.Sprintf("agent_profile %q has surrounding whitespace", s))
+		case s != "":
+			if _, err := agent.LookupProfile(s); err != nil {
+				problems = append(problems, "agent_profile: "+err.Error())
+			}
 		}
 	}
 	if mode, ok := seed["vae_mode"]; ok {
