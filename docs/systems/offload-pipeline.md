@@ -124,6 +124,23 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
   cannot lose recorded savings. Carries `tokens_saved` (input tokens kept out of the calling model)
   and per-call metadata.
 - **Cache** — keyed result reuse; bypassed entirely on the recordless path.
+- **Media artifact addressing** (`internal/mediahash`) — audio and video cache keys identify the
+  source file by `sha256` of its **bytes**, matching what the image path has always done
+  (`"img:"+sha256hex(loaded bytes)`).
+  - Audio previously keyed on (path, size, mtime) and video on the **path string**, unhashed. Both
+    failed in two directions: a file replaced at the same path could produce a **false hit** —
+    serving the old file's transcript or description — and an identical file at a second path always
+    missed, which is the reuse an artifact cache exists to capture.
+  - `media_hash_max_full_bytes` defaults to **0 = always hash the whole file**. Hashing runs
+    ~1.2 GB/s against work that takes seconds to minutes, so exactness is nearly free. A positive
+    value switches larger files to a **sampled** digest (size + three 8 MiB windows); that is opt-in
+    because its failure mode is a false hit between two same-size files agreeing on those windows.
+    The mode is encoded in the digest, so sampled and full digests can never be confused.
+  - Unreadable/missing/directory inputs get distinct, self-describing digests rather than a shared
+    zero — two different missing files must not serve each other's cached results, and a transient
+    read failure must not poison the key permanently.
+  - **Migration:** this changes every existing audio and video key once. Intended — those entries
+    were keyed on an identity that could be wrong.
 - **Learned thresholds** — per-task conformal values loaded from `thresholds.json` when present,
   falling back to config defaults.
 - **Circuit breakers** — per-Tier, consulted during chain construction.

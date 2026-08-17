@@ -624,6 +624,21 @@ type Config struct {
 	// KNNEmbedTimeoutMs bounds the request-path embedding call (fail-open on
 	// timeout). Default 2000.
 	KNNEmbedTimeoutMs int `json:"knn_embed_timeout_ms,omitempty"`
+	// --- media artifact addressing (T2-A2) ---
+	// MediaHashMaxFullBytes selects how audio/video cache keys identify a file.
+	//
+	// 0 (the default) = always hash the WHOLE file. That is the only mode with an
+	// exact identity guarantee, and it is cheap next to what it guards: SHA256
+	// runs ~1.2 GB/s while the cached work (whisper transcription, ffmpeg frame
+	// sampling plus a VLM pass) takes seconds to minutes.
+	//
+	// A positive value switches files LARGER than it to a sampled digest (size +
+	// three 8 MiB windows). That is opt-in on purpose: its failure mode is a
+	// FALSE HIT between two same-size files that agree on the sampled windows —
+	// i.e. serving one file's transcript for another, the exact defect
+	// content-addressing was introduced to remove. The mode is encoded in the
+	// digest, so sampled and full digests can never be confused.
+	MediaHashMaxFullBytes int64 `json:"media_hash_max_full_bytes,omitempty"`
 	// --- explicit remote NIM tool (`nim` subcommand / offload_nim) ---
 	// An opt-in path to an OpenAI-compatible NVIDIA NIM endpoint, separate from the
 	// local cascade: the GBNF grammar path and the savings ledger are untouched.

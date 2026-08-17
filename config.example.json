@@ -157,6 +157,7 @@
   "knn_min_neighbors": 20,
   "knn_prefilter_threshold": 0.5,
   "knn_embed_timeout_ms": 2000,
+  "media_hash_max_full_bytes": 0,
   "nim_endpoint": "https://integrate.api.nvidia.com/v1",
   "nim_model": "nvidia/nemotron-3-ultra-550b-a55b",
   "nim_max_tokens": 1024,

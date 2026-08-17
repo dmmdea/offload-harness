@@ -47,6 +47,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/knn"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
+	"github.com/dmmdea/offload-harness/internal/mediahash"
 	"github.com/dmmdea/offload-harness/internal/parser"
 	"github.com/dmmdea/offload-harness/internal/router"
 	"github.com/dmmdea/offload-harness/internal/rungraph"
@@ -715,7 +716,13 @@ func (p *Pipeline) runVideoDescribe(ctx context.Context, req core.Request, built
 		for i := range frames {
 			labels[i] = fmt.Sprintf("<%.1f seconds>", float64(i)/fps)
 		}
-		extra := fmt.Sprintf("vid:%s|fps=%g|n=%d|w=%d|frames=%d", req.Video, p.cfg.VideoFPS, p.cfg.VideoMaxFrames, width, len(frames))
+		// T2-A2: keyed on the video's CONTENT, not its path. The previous key was
+		// the path STRING plus sampling params and was never hashed at all — so a
+		// file replaced at the same path with the same sampling settings produced a
+		// false HIT, serving the old video's description for the new one. The
+		// sampling params stay in the key because they change what the model saw.
+		extra := fmt.Sprintf("vid:%s|fps=%g|n=%d|w=%d|frames=%d",
+			mediahash.Digest(req.Video, p.cfg.MediaHashMaxFullBytes), p.cfg.VideoFPS, p.cfg.VideoMaxFrames, width, len(frames))
 		res := p.runVisionGen(ctx, req, built, meta, start, extra, func(gctx context.Context) (llamaclient.GenResult, error) {
 			return p.client.GenerateVisionInterleaved(gctx, p.cfg.VisionModel, built.System, labels, frames, built.User, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0)
 		})
@@ -784,7 +791,9 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		identLang = ""
 		proto = "oai"
 	}
-	ident := req.Audio + "|" + audioCacheExtra(req.Audio, model, identLang) + "|proto=" + proto
+	// Keyed on CONTENT, not on the path: an identical file at a second path must
+	// hit, and a different file at the same path must miss.
+	ident := p.audioCacheExtra(req.Audio, model, identLang) + "|proto=" + proto
 	ck := cache.Key("transcribe", ident, tasks.StableParamsKey(req.Params), model, "")
 	if p.cache != nil {
 		if raw, ok := p.cache.Get(ck); ok {
@@ -2726,15 +2735,21 @@ func sttRoute(cfg config.Config, hq bool) (model string, useOAI bool) {
 	return model, useOAI
 }
 
-// audioCacheExtra folds the source file identity (path+size+modtime) + model +
-// language into the cache key so a changed file or a different model/lang misses.
-func audioCacheExtra(audioPath, model, lang string) string {
-	var sz, mt int64
-	if fi, err := os.Stat(audioPath); err == nil {
-		sz = fi.Size()
-		mt = fi.ModTime().UnixNano()
-	}
-	return fmt.Sprintf("sz=%d|mt=%d|model=%s|lang=%s", sz, mt, model, lang)
+// audioCacheExtra folds the source file's CONTENT identity + model + language
+// into the cache key.
+//
+// T2-A2: this used to be (size, mtime, model, lang) with the path carried
+// alongside it. That is not a content address, and it failed in both directions:
+// a same-size replacement with a preserved mtime produced a false HIT (the old
+// file's transcript served for the new one), while an identical file copied to a
+// second path always missed. Now it is sha256 of the bytes, which is what the
+// image path has always done.
+//
+// The key change makes every pre-existing audio entry unreachable. That is
+// intended and one-time: those entries were keyed on an identity that could be
+// wrong, so re-transcribing once is the correct cost of no longer trusting them.
+func (p *Pipeline) audioCacheExtra(audioPath, model, lang string) string {
+	return fmt.Sprintf("%s|model=%s|lang=%s", mediahash.Digest(audioPath, p.cfg.MediaHashMaxFullBytes), model, lang)
 }
 
 // preview returns roughly the first n bytes of s trimmed at a word boundary,
