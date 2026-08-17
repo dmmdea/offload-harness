@@ -83,6 +83,11 @@ const (
 	recVersion = byte(2)
 	recHeadLen = 1 + 8 + 4 // version + seq + dim
 	nsLen      = 16        // hex chars of the namespace digest
+	// corruptCountFloor is a live-entry count no configuration could produce. It
+	// separates "the operator lowered the cap" (transient, converges) from "the
+	// counter is corrupt" (persistent, absurd), so the first is not reported as a
+	// fault and the second is not silent.
+	corruptCountFloor = 1 << 32
 )
 
 // Per-namespace meta keys. Suffixed with the namespace so two embedders sharing
@@ -516,14 +521,26 @@ func (m *Memo) pruneTx(vb, sb, mb *bolt.Bucket) error {
 	// which propagates out through Wrap and kills the process — breaking this
 	// package's own contract that every failure degrades to a live call.
 	//
-	// Clamped SILENTLY on purpose. An earlier version counted this as a fault,
-	// but n > 2*maxEntries is not an impossible state: it is exactly what LOWERING
-	// embed_memo_max_entries produces, and that config edit then fabricated a
-	// permanent "underflow" fault on every subsequent put — nine of them from one
-	// legitimate change, reported forever by both surfaces. In a package whose
-	// whole thesis is that the instrument must never claim a fault that did not
-	// happen, manufacturing one is the worse error. Genuine bookkeeping
-	// violations are still counted, by bumpNS, where they are unambiguous.
+	// The clamp itself is silent for the ordinary case, but a count that no
+	// configuration could produce is still counted.
+	//
+	// The history matters. First version counted every n > 2*maxEntries as a
+	// fault — but that is exactly what LOWERING embed_memo_max_entries produces,
+	// so one legitimate config edit fabricated nine permanent "underflow" faults.
+	// Making it fully silent then removed the ONLY signal for a counter corrupted
+	// HIGH: with mkCount set to 1<<40 the namespace is wiped on the next put
+	// (insert, then prune evicts everything), the memo goes permanently 100% miss,
+	// and every fault counter reads zero.
+	//
+	// The two cases are separable because lowering the cap is TRANSIENT — it
+	// converges within a few puts — while corruption is persistent and absurd in
+	// magnitude. corruptCountFloor is far above any cap a config can express, so
+	// it fires on the second and never on the first.
+	if n > corruptCountFloor {
+		_ = m.bumpNS(mb, mkUnderflow, 1)
+		_ = mb.Put([]byte(mkLastFault+m.ns), []byte(fmt.Sprintf(
+			"live-entry counter read %d, which no configuration can produce — the count is corrupt; delete the store to rebuild it", n)))
+	}
 	if lim := m.maxEntries * 2; n > lim {
 		n = lim
 	}
@@ -604,9 +621,11 @@ type Stats struct {
 	ErrorsRead    int64 `json:"errors_read"`
 	ErrorsWrite   int64 `json:"errors_write"`
 	DimMismatches int64 `json:"dim_mismatches"`
-	// CountUnderflows records an impossible bookkeeping state (a counter asked to
-	// go below zero, or a live count larger than twice the cap). Clamping without
-	// counting would erase the evidence of the bug that produced it.
+	// CountUnderflows records an impossible bookkeeping state: a counter asked to
+	// go below zero, or a live-entry count so large no configuration could produce
+	// it. Clamping without counting would erase the evidence of the bug that
+	// produced it. Deliberately NOT counted: a count merely above the current cap,
+	// which is what lowering embed_memo_max_entries legitimately produces.
 	CountUnderflows int64 `json:"count_underflows"`
 	// LastFault is the most recent human-readable fault with its remediation.
 	LastFault string `json:"last_fault,omitempty"`
@@ -725,7 +744,14 @@ func (m *Memo) Flush() error {
 	// authoritative — this only RESETS the session view. Without it, a periodic
 	// flush left session_hits meaning "since the last tick" while session_stores
 	// still meant "since process start", and both were published side by side.
-	m.stores.Store(0)
+	//
+	// Swap, not Store: it is restored with the others on failure. Zeroing it
+	// unconditionally reinstated the very defect this line fixes, one path over —
+	// session_hits would mean "since the last SUCCESSFUL flush" while
+	// session_stores meant "since the last ATTEMPTED one", and the MCP server's
+	// periodic flush logs-and-continues on failure, so every later status read
+	// stayed skewed until the next success.
+	st := m.stores.Swap(0)
 	if h == 0 && mi == 0 && ed == 0 && er == 0 && ew == 0 {
 		return nil
 	}
@@ -757,6 +783,7 @@ func (m *Memo) Flush() error {
 		// reality — a fabricated measurement, not merely a missing one.
 		m.hits.Add(h)
 		m.misses.Add(mi)
+		m.stores.Add(st)
 		m.errsDecode.Add(ed)
 		m.errsRead.Add(er)
 		m.errsWrite.Add(ew)

@@ -13,8 +13,10 @@ Versioning: [SemVer](https://semver.org/).
 - **Embed memo** (`internal/embedmemo`, memory-frontier T2-C) — a bbolt store that
   memoizes embedding vectors by exact input bytes plus the embedder id. Embedding is a
   pure function of (model, text) and the harness re-embeds the same strings by
-  construction (the kNN pre-filter embeds each request input, the shadow drain re-embeds
-  the same stored inputs on every run, exemplar selection re-embeds a fixed pool). The
+  construction — the shadow-label drain re-embeds the same stored inputs on every run and
+  re-scores the same reference summaries, and the kNN pre-filter embeds each request input
+  (off unless `knn_prefilter_enabled`). Exemplar selection is **not** a consumer:
+  `internal/exemplars` retrieves lexically and contains no embedder. The
   larger payoff is the swap, not the compute: the embedder carries `ttl=300` like every
   other seat, so the first embed after an idle gap pays a ~1–2 s cold load, and a memo
   hit skips the HTTP call entirely. New config: `embed_memo_enabled` (default on),
@@ -57,12 +59,18 @@ Versioning: [SemVer](https://semver.org/).
 
 ### Fixed
 
-- `RunTier`'s cache key now goes through `cacheKeyFor`, the same constructor `Run` uses.
-  It was a hand-rolled `cache.Key` call with the pre-0.62 shape: keyed on the primary
-  model rather than the tier actually run, and missing the template tag. It was dead code
-  (nothing read or wrote that key), so nothing was ever mis-served — but reviving it
-  as-is for T2-D would have reinstated both defects on a live path: two different tiers
-  sharing one entry, and a prompt edit silently serving pre-edit answers.
+- **`RunTier` now has its OWN cache keyspace** (`cacheKeyForTier`), disjoint from `Run`'s.
+  Its key was previously a hand-rolled `cache.Key` call with the pre-0.62 shape: keyed on
+  the primary model rather than the tier actually run, and missing the template tag. It was
+  dead code (nothing read or wrote that key), so nothing was ever mis-served — but reviving
+  it for T2-D reinstated both defects on a live path. Routing it through `Run`'s
+  constructor fixed the ingredients but not the collision: with `exemplar_shots` at its
+  default of 0 the two paths computed the **same key** whenever the pinned tier was the
+  primary model, so `Run` cached an E2B answer, `RunTier` refused it and overwrote the
+  entry with the workhorse's, and the two ping-ponged one key.
+  - **User-visible consequence:** an in-loop agent offload no longer reuses a cascade
+    answer, or vice versa. That sharing was never sound — a pinned tier must get *that
+    tier's* output — but it does mean the two populate the cache independently.
 
 ## [0.62.1] - 2026-08-16
 

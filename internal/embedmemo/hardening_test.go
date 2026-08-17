@@ -604,8 +604,22 @@ func TestCorruptHeaderDoesNotStrandAnotherRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Distinct > max {
-		t.Fatalf("distinct=%d exceeds cap %d — stranded records are holding slots", st.Distinct, max)
+	// Assert the count MATCHES what is on disk, not merely that it is under the
+	// cap. A stranded record does not push the count above cap — the defining
+	// symptom is that everything reports healthy and exactly AT cap — so a
+	// `Distinct > max` check reads as coverage while being unable to fire.
+	onDisk := 0
+	if err := m.db.View(func(tx *bolt.Tx) error {
+		onDisk = tx.Bucket(bktVecs).Stats().KeyN
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if st.Distinct != onDisk {
+		t.Fatalf("Distinct=%d but %d vectors on disk — the live count drifted from reality", st.Distinct, onDisk)
+	}
+	if onDisk > max {
+		t.Fatalf("%d vectors on disk exceeds cap %d", onDisk, max)
 	}
 }
 

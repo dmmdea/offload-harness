@@ -245,18 +245,18 @@ type cacheVal struct {
 	TokensIn int             `json:"tokens_in"`
 	// Model is the tier that actually PRODUCED this answer.
 	//
-	// It exists because Run and RunTier want different things from the same
-	// entry, and the difference is not expressible in the key. Run's key is
-	// deliberately stable on the PRIMARY model so that an answer produced
-	// anywhere in the cascade is reused on a re-run — the cascade is an internal
-	// detail of one logical call. RunTier pins ONE named tier and must get that
-	// tier's answer. With ExemplarShots at its default of 0 every other key
-	// ingredient coincides, so before this field a triage-tier answer cached by
-	// Run could be served to an in-loop RunTier call pinned to the workhorse,
-	// with meta.Model reporting the workhorse that never ran.
+	// Run and RunTier want different things from an entry: Run's key is
+	// deliberately stable on the PRIMARY model so an answer produced anywhere in
+	// the cascade is reused on a re-run, while RunTier pins ONE named tier and
+	// must get that tier's output. With ExemplarShots at its default of 0 every
+	// other ingredient coincided, so a triage-tier answer cached by Run was served
+	// to an in-loop RunTier call pinned to the workhorse, with meta.Model
+	// reporting the workhorse that never ran.
 	//
-	// Absent on pre-0.63 entries, which RunTier treats as a miss rather than
-	// guessing — an unknown producer is not a match.
+	// That is now expressed in the KEY — see tierKeyspaceTag — because guarding
+	// only the read left both paths writing the same entry and ping-ponging it.
+	// This field survives as defence in depth for a hand-crafted or externally
+	// written entry; it is not reachable from any production write path.
 	Model string `json:"model,omitempty"`
 	// InLoop records that this entry was produced by the agent loop's in-loop
 	// offload (T2-D), whose generation is deliberately never costed in the
@@ -3666,8 +3666,11 @@ func (p *Pipeline) RunTier(ctx context.Context, req core.Request, model string) 
 			// cacheKeyForTier's separate keyspace — and `model` is already an
 			// ingredient of it, so nothing but a same-tier RunTier can reach here.
 			//
-			// Kept because it costs one comparison and it fails CLOSED: a pre-0.63
-			// entry carries no producer and is correctly treated as a miss.
+			// Kept because it costs one comparison and fails CLOSED. Note a pre-0.63
+			// entry cannot reach it either: tierKeyspaceTag is the first ingredient
+			// of this key, so an old entry misses at the LOOKUP, not at this guard.
+			// The only thing it can still catch is a hand-crafted or externally
+			// written entry.
 			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 && cv.Model == model {
 				meta.CacheHit = true
 				meta.CacheHitInLoop = cv.InLoop

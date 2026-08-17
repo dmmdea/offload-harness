@@ -189,10 +189,12 @@ open cache — to evaluate what a counterfactual tier *would* have answered. A c
 grade a stored answer instead of the tier, and a cache write would fill the store with counterfactual
 results. Only `NewInLoopPipeline` opts in.
 
-`RunTier`'s cache key is built by the same `cacheKeyFor` constructor `Run` uses, keyed on the
-**actual tier** rather than the primary model, and carrying the template tag — so two tiers can never
-share an entry, and editing a task's prompt invalidates these entries exactly as it does the
-cascade's.
+`RunTier` has its **own keyspace** (`cacheKeyForTier`), disjoint from `Run`'s, keyed on the **actual
+tier** and carrying the template tag. Sharing `Run`'s constructor was not enough: with
+`exemplar_shots` at its default of 0 every other ingredient coincided, so both paths computed the
+same key whenever the pinned tier was the primary model, and they overwrote each other's entries
+repeatedly. The consequence of the split is that an in-loop offload does not reuse a cascade answer
+— which was never sound anyway, since a pinned tier must get *that tier's* output.
 
 ## Dependencies
 
