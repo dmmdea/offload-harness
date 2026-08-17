@@ -6,6 +6,46 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.69.0] - 2026-08-17
+### Fixed — an UPGRADE install downloaded a gated seat's weights and never rendered it
+Found by independent review of 0.68.0, reproduced against the real predicate.
+
+- **The defect.** Step 6's render SKIP test had no invalidation signal for a gated
+  seat. On a box with an existing `llama-swap.yaml`, upgrading to a version that adds
+  one (0.68.0's `qwen3.5-4b-agent` on `ampere-6`) ran: Step 5 **downloads 2.9 GB** →
+  Step 6 **SKIPs** (yaml exists, no leftover tokens, path fine) → Step 8 SKIPs (config
+  exists). The installer printed all-OK while the yaml never gained the seat and the
+  agent lane silently kept the previous, measurably weaker planner. The whole feature
+  was a no-op on the upgrade path — on exactly the tier it was measured for.
+- **Why the existing guards missed it.** Adding the seat's `__TOKEN__` pair to the
+  staleness regex does NOT help: `Render` refuses to emit a leftover token, so a
+  rendered file can never contain one — that regex only detects hand-edited files.
+  This needs a CONTENT probe, the same shape as the existing `GGML_VK_VISIBLE_DEVICES`
+  probe (which exists because a vulkan render without the device pin is stale).
+- **The fix.** A `$gatedSeats` table (model id → does this tier enable it) drives one
+  extra SKIP condition: a gated seat the tier enables but the rendered yaml does not
+  contain means that yaml predates the seat, so re-render. Covers `qwen3.8-27b` as
+  well as `qwen3.5-4b-agent` — the same latent gap existed for the Q38 gate, it simply
+  was not load-bearing there yet (its tiers were newly declared, with no prior render).
+- **Deliberately NOT probed: the 26B agent.** `gemma-4-26b-agent` is legitimately
+  absent from the `win-cpu` and `win-cuda-resident` templates while those backends
+  still set `include_26b`, so probing for it would force a re-render on every install
+  run. The probe is only sound for EXPLICITLY gated seats, where `Render` refuses a
+  gate set against a template lacking the entry — so gate-on provably implies the
+  entry exists in a current render.
+- **Behavior-verified** against the real predicate under Windows PowerShell 5.1, with a
+  negative control: current render → SKIP stays true (no churn); simulated pre-0.68
+  render → SKIP true BEFORE the fix (the bug, reproduced) and false AFTER; the same
+  file with the gate OFF → SKIP true (tiers that do not enable a seat are unaffected).
+
+### Added — a Go regression test for the `include_qwen35_4b` refusal
+`TestIncludeQ354BOnAnEntrylessTemplateIsRefused`, mirroring the Q38 tripwire. Nothing
+in Go locked this refusal before, so a change weakening it would have made the gate a
+silent no-op while the installer still downloaded the weights. Uses
+`win-cuda-resident`, which defines `qwen3.8-27b` but NOT `qwen3.5-4b-agent`, so it also
+proves the two gates are independent. Mutation-verified: forcing the `definesModel`
+guard false still COMPILES and turns the test red with `got <nil>`.
+
 ## [0.68.0] - 2026-08-17
 
 ### Added — the `ampere-6` agent seat: Qwen3.5-4B, the first MEASURED sub-27B agent-seat decision
