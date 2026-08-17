@@ -23,8 +23,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -400,16 +402,26 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 }
 
 // genErrIsTransport reports whether a Generate error means the SEAT COULD NOT
-// BE REACHED, as opposed to reached-and-unusable. Only three shapes qualify:
-// the transport's own *url.Error / net.Error (dial refused, connection reset,
-// TLS), and a 5xx — a server saying it is in trouble.
+// BE REACHED (or was never what answered), as opposed to reached-and-unusable.
+// What qualifies:
 //
-// Everything else is deliberately NOT transport, because the endpoint answered:
-// a 4xx is it refusing THIS request (context length exceeded, an uncompilable
-// grammar — fix the contract, not the box), an unparseable body is a protocol
-// mismatch, and a 200 with zero choices is a model that produced nothing. Those
-// three used to be classed infrastructure, which exits non-zero and tells an
-// operator a machine is broken while it is answering perfectly well.
+//   - the transport's own *url.Error / net.Error — dial refused, TLS, a reset
+//     before the response headers;
+//   - a 5xx — a server saying it is in trouble;
+//   - a 429 — llama-server does not rate-limit, so a 429 means something in
+//     FRONT of the seat answered instead of it;
+//   - a *llamaclient.BodyError — a 200 whose body could not be read or parsed.
+//     A non-JSON body from something claiming to be llama-server means SOMETHING
+//     ELSE ANSWERED (a proxy, a captive portal), and a body that stops mid-read
+//     is a connection that died AFTER Do() succeeded, so no *url.Error and no
+//     net.Error is in the chain to catch it. Both were previously filed as "an
+//     unparseable body is a protocol mismatch" and came back as abstentions at
+//     exit 0 — the fleet-side silent failure this classifier exists to prevent.
+//
+// Everything else is deliberately NOT transport, because the SEAT answered: a
+// non-429 4xx is it refusing THIS request (context length exceeded, an
+// uncompilable grammar — fix the contract, not the box), and a 200 with zero
+// choices is a model that produced nothing.
 //
 // A CANCELLATION is not transport either. It arrives wrapped in a *url.Error
 // like any dial failure, but nothing on this box failed — the caller went away
@@ -420,7 +432,17 @@ func genErrIsTransport(err error) bool {
 	}
 	var se *llamaclient.StatusError
 	if errors.As(err, &se) {
-		return se.StatusCode >= 500
+		return se.StatusCode >= 500 || se.StatusCode == http.StatusTooManyRequests
+	}
+	var be *llamaclient.BodyError
+	if errors.As(err, &be) {
+		return true
+	}
+	// Defense for any path that surfaces a decode/read failure unwrapped: the
+	// two shapes a broken body produces, recognized on their own.
+	var syn *json.SyntaxError
+	if errors.As(err, &syn) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
 	}
 	var uerr *url.Error
 	if errors.As(err, &uerr) {

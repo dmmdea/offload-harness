@@ -1193,3 +1193,49 @@ func TestServeTimeoutTable(t *testing.T) {
 			srv.ReadHeaderTimeout, srv.ReadTimeout, srv.WriteTimeout, srv.IdleTimeout)
 	}
 }
+
+// TestRefreshAgentResidencyPublishesEvenOnPanic (R4-9): the roster probe ran
+// OUTSIDE any deferred unlock, and `inflight = false` + Broadcast happened only
+// on the normal return path. A panic anywhere in that seam therefore froze
+// residency for the life of the process — the cached answer could never be
+// refreshed again, and every awaitProbe (RefreshAgentResidency, which has no
+// timeout of its own) blocked forever waiting for a probe that had already died.
+// Latent today because production's only trigger runs on a goroutine and no
+// production caller panics; one deferred publish removes the whole class.
+func TestRefreshAgentResidencyPublishesEvenOnPanic(t *testing.T) {
+	s, _ := newTestServer(t, agentHealthCfg("http://127.0.0.1:1"), &fakeRunner{}, authOpts(true))
+	s.rosterServes = func(ctx context.Context, endpoint, seat string) (bool, error) {
+		panic("roster probe blew up")
+	}
+
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("the panic must still propagate — the fix is the latch, not swallowing failures")
+			}
+		}()
+		s.RefreshAgentResidency()
+	}()
+
+	s.agentRes.mu.Lock()
+	inflight, published, resident := s.agentRes.inflight, !s.agentRes.at.IsZero(), s.agentRes.resident
+	s.agentRes.mu.Unlock()
+	if inflight {
+		t.Fatal("inflight stayed set after a panicking probe: residency can never refresh again and every waiter blocks forever")
+	}
+	if !published || resident {
+		t.Fatalf("published=%v resident=%v, want a published FAIL-CLOSED answer (an unverified seat reads as not resident)", published, resident)
+	}
+
+	// The load-bearing consequence: a synchronous waiter must not hang.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.agentRes.awaitProbe()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("awaitProbe never returned: the Broadcast that releases waiters was skipped")
+	}
+}

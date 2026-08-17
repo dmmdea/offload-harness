@@ -27,26 +27,22 @@ import (
 )
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
-// messages). Membership is decided per-config by taskConfigured.
+// messages). Membership is decided per-config by taskConfiguredFor.
 var fleetTaskOrder = []string{"image-gen", "video-gen", "stt", "audio-gen", "run-graph", "agent"}
 
-// taskConfigured reports whether THIS box actually serves taskType — the same
+// taskConfiguredFor reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
-// advertising it to the fleet would be a lie).
+// advertising it to the fleet would be a lie) — keyed on a caller-supplied answer
+// to "is the serve listener loopback?", the only input that is not derivable from
+// config alone (a --listen flag can diverge from cfg.FleetListen).
 //
-// Only callers with NO listener to consult may use it (Families, which feeds
-// the model-family advertisement and is listener-independent for every family
-// it names). Everything on the serve path — advertisement AND admission —
-// takes taskConfiguredFor with the RESOLVED listener: see AgentLaneAdmissible
-// for why that distinction is load-bearing for the agent lane and irrelevant
-// for every other task.
-func taskConfigured(cfg config.Config, taskType string) bool {
-	return taskConfiguredFor(cfg, taskType, ConfigLoopbackListen(cfg))
-}
-
-// taskConfiguredFor is taskConfigured keyed on a caller-supplied answer to
-// "is the serve listener loopback?" — the only input that is not derivable
-// from config alone (a --listen flag can diverge from cfg.FleetListen).
+// There is deliberately no config-only wrapper: the listener-resolving one that
+// used to exist here had ZERO production callers (its own doc named Families,
+// which goes through SupportedTasks instead) while claiming to be the path for
+// callers with no listener to consult. Everything on the serve path — both
+// advertisement and admission — supplies the RESOLVED listener; see
+// AgentLaneAdmissible for why that distinction is load-bearing for the agent lane
+// and irrelevant for every other task.
 func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool) bool {
 	switch taskType {
 	case "image-gen":

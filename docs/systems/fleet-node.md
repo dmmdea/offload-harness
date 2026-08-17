@@ -392,30 +392,45 @@ it; the class is what code branches on, because a reason string is prose and an 
 | `building agent: …` / `agent loop: …` | `infrastructure` | Build or planner failure — nothing was learned about the task. |
 | `wall timeout after <N>s` | `budget` | The `timeout_sec` deadline fired, in the loop **or** in the re-pack; its own shape so the delegator can size future contracts off it. |
 | `step budget exhausted (<n> steps)` | `budget` | The loop burned `max_steps` with no final answer; `output` is empty, so there is nothing to re-pack. |
-| `output failed schema: …` | `abstention` | The re-pack reached the seat and the answer was unusable after its one retry — a validation failure, a **4xx** (the seat refusing *this* request: context length exceeded, an uncompilable grammar), or a 200 carrying zero choices. All three are the box answering; the fix is a smaller context or a flatter schema, not an operator. |
-| `structured re-pack unreachable: …` | `infrastructure` | The re-pack could not REACH the seat: a dial/transport failure or a **5xx**. Split from the schema shape deliberately — filed under `output failed schema:` a llama-swap outage reads as a model that cannot follow a schema. The flag is sticky across the retry: a 5xx followed by a wrong-shape retry stays `infrastructure`, because a transport failure that happened at all is the operator's signal. |
+| `output failed schema: …` | `abstention` | The re-pack reached the seat and the answer was unusable after its one retry — a validation failure, a **non-429 4xx** (the seat refusing *this* request: context length exceeded, an uncompilable grammar), or a 200 carrying zero choices. All three are the box answering; the fix is a smaller context or a flatter schema, not an operator. |
+| `structured re-pack unreachable: …` | `infrastructure` | The re-pack could not REACH the seat, or the seat is not what answered: a dial/transport failure, a **5xx**, a **429** (llama-server does not rate-limit — a 429 means something in FRONT of it answered), or a **body that could not be read or parsed** (`llama-server response body unusable: …`). The last shape covers a proxy or captive portal returning HTML with a 200, and a connection dropped mid-body: both happen AFTER the request succeeds, so no `*url.Error` / `net.Error` exists to catch them, and all three used to be filed as abstentions at exit 0. Split from the schema shape deliberately — filed under `output failed schema:` a llama-swap outage reads as a model that cannot follow a schema. The flag is sticky across the retry: a 5xx followed by a wrong-shape retry stays `infrastructure`, because a transport failure that happened at all is the operator's signal. |
 | `canceled during the structured re-pack (the caller's context ended)` | `budget` | The PARENT context was canceled mid-re-pack (the delegator abandoned the poll, the node is shutting down). It arrives as a `*url.Error` exactly like a dial refusal, so it used to read as broken infrastructure — but nothing on the box failed. |
 
 More shapes originate on the **delegator**, not the node:
 
 - `poll deadline after <d>: node accepted the job but did not reach a terminal state` — class
   `budget`, or `infrastructure` when the last poll answer was unusable (a 5xx / unknown state,
-  named in the reason). Produced **only** when the node reported OWNING the job — a `200` whose
-  state is `accepted`/`running`/`done`/`error`. Reachability is not ownership: a node that only
-  ever answered `404` (a positive denial that it ever held the job) or `503` yields a FAILURE
-  (`summary.failed`), not a defer, because a defer asserts the node took the work. An early poll
-  error is RETIRED by a later healthy answer, so one 503 followed by clean `running` answers ends
-  `budget`, not `infrastructure`.
+  named in the reason) **or when the node LOST the job at least once** (each loss is named with
+  its re-dispatch count: a node that forgets jobs is broken, not slow). Produced **only** when the
+  node reported OWNING the job — a `200` whose state is `accepted`/`running`/`done`/`error`.
+  Reachability is not ownership: a node that only ever answered `404` (a positive denial that it
+  ever held the job) or `503` yields a FAILURE (`summary.failed`), not a defer, because a defer
+  asserts the node took the work. An early poll error is RETIRED by a later healthy answer, so one
+  503 followed by clean `running` answers ends `budget`, not `infrastructure`.
+- The FAILURE that a poll deadline produces names what the node actually did, in three shapes:
+  it never answered; it answered **with a 404**, quoted as the denial it is; or it answered and
+  neither claimed nor denied the job (a 5xx, or a state this delegator does not know — a newer
+  peer's `queued`). The third used to print the 404 sentence, so a node returning only 503s
+  published a denial nobody ever made.
 - `route=remote: no remote passed the capability gate (none is both agent-enabled and
-  roster-resident)` — class `config`; with health-probe failures alongside it, the probe errors
-  are appended and the class becomes `infrastructure`.
+  roster-resident)` — class `config`; with health-probe failures alongside it the probe errors are
+  appended and the class becomes `infrastructure`.
+- `route=remote: the N agent-enabled remote(s) advertise no context ceiling (agent_ctx_tokens is
+  unset or 0 …)` — class `config`. `agent_ctx_tokens` is `omitempty` on the wire and an operator
+  sets it on the node (a pre-0.63 peer never sends it at all), so a ceiling nobody advertised is a
+  node verdict, never a statement about the caller's contract.
 - `route=remote: all N configured remote(s) failed the health probe: …` — class
   `infrastructure`; `route=remote: no remote fleet nodes are configured …` — class `config`.
 - The **contract-side** gate rejections — no `output_schema`, a contract already past the origin
-  hop, a token estimate no advertised ceiling can hold — class `contract`. They were `config`
-  until the round-3 review: `config` counts as a broken stack, so a caller's own contract mistake
-  exited non-zero and told the delegating model a node was broken on a run where every node was
-  healthy. The test is who can fix it — these three are fixed by rewriting the contract.
+  hop, a token estimate no advertised ceiling can hold — class `contract`, **but only when the
+  node side is positively established as fine**: every configured remote answered its health
+  probe, at least one offers the agent lane, and that lane advertises a real ceiling. Otherwise
+  the class is the loud one and the reason names both causes. The class was introduced in the
+  round-3 review (`config` counts as a broken stack, so a caller's own contract mistake exited
+  non-zero and accused a healthy node) and the round-4 review found the mirror defect: the
+  contract check ran FIRST and short-circuited even a totally dead fleet, so a schemaless contract
+  published `{succeeded:1, infrastructure:0}` at exit 0 over a fleet that had been unreachable for
+  a week. Absence of evidence about the fleet is never evidence about the contract.
 
 `infrastructure` and `config` defers are counted into the delegator's `summary.infrastructure`
 and make `local-offload delegate` exit non-zero (`delegateExitErr` in `main.go`): a broken or
@@ -423,7 +438,8 @@ misconfigured node must not read as a successful run. `contract` deliberately is
 `summary.infrastructure` also counts a **local placement taken while every configured remote was
 failing its health probe** (`route=auto`, local GPU busy): the placement is right and the work
 runs, but `route=remote` exited non-zero on that identical fleet state while `route=auto`
-discarded it, so a fleet down for a week read green forever.
+discarded it, so a fleet down for a week read green forever. That same case is why the MCP tool's
+`isError` is NOT the exit code's rule — see [coding-agent](coding-agent.md#delegation-surfaces).
 
 ### Auth (v1 scope: the agent lane only)
 

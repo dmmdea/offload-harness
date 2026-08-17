@@ -1102,10 +1102,28 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 	// read. The flag is the loudness the JSON alone could not carry. Ordinary
 	// defers (abstention, budget) and failed verification remain successes —
 	// those are RESULT shapes, exactly as on the CLI.
-	if sum.Failed > 0 || sum.Infrastructure > 0 {
+	if delegateIsError(sum) {
 		res.IsError = true
 	}
 	return res, nil
+}
+
+// delegateIsError decides the tool-call error flag for one delegation run. It is
+// NOT the CLI's exit rule, and the difference is the point.
+//
+// IsError:true means, in MCP, THE CALL FAILED — most models react by discarding
+// or redoing the work. Summary.Infrastructure alone cannot carry that: it counts
+// a SUCCESSFUL local placement taken while the fleet was down (delegate's
+// remotesUnreachable), so a run whose every subtask completed, validated, and
+// passed acceptance came back flagged as a failure. The fleet-down verdict is
+// still fully published — it is in the body's summary and per-subtask reasons,
+// and `local-offload delegate` still exits non-zero on it, because an exit code
+// can sit BESIDE printed results in a way a boolean cannot.
+//
+// So: a subtask that actually failed is an error, and a broken stack is an error
+// when NOTHING usable came back — never when finished work did.
+func delegateIsError(sum delegate.Summary) bool {
+	return sum.Failed > 0 || (sum.Infrastructure > 0 && sum.Succeeded == 0)
 }
 
 // addEffects folds a run's effect ledger into an agent_run response — counts

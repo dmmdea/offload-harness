@@ -1078,8 +1078,12 @@ func TestRunTelemetryFailureIsLoudOnceAndNeverFailsTheRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v — telemetry must never fail the work it describes", err)
 	}
-	if sum != (Summary{Succeeded: 2, CorpusRowsLost: 2}) {
-		t.Fatalf("summary = %+v, want both subtasks delivered AND both lost corpus rows counted", sum)
+	// R4-6: this scenario ALSO kills the ledger (its path is under the
+	// uncreatable dir), and the ledger loss used to count as zero — record()'s
+	// `if r.led != nil` guard skipped a ledger that never opened, so the summary
+	// asserted here was the total-loss case published as no loss at all.
+	if sum != (Summary{Succeeded: 2, CorpusRowsAttempted: 2, CorpusRowsLost: 2, LedgerRowsAttempted: 2, LedgerRowsLost: 2}) {
+		t.Fatalf("summary = %+v, want both subtasks delivered AND both telemetry losses counted with their denominators", sum)
 	}
 	out := logs.String()
 	if n := strings.Count(out, "delegation-log write failed"); n != 1 {
@@ -1096,8 +1100,13 @@ func TestRunTelemetryFailureIsLoudOnceAndNeverFailsTheRun(t *testing.T) {
 	// …and the MCP caller — the lane's primary consumer — never saw it at all:
 	// SummaryWire had no field for it, so a delegation that recorded nothing
 	// published byte-identically to one that recorded everything.
-	if got := WireResponse(results, sum).Summary.CorpusRowsLost; got != 2 {
-		t.Fatalf("published summary.corpus_rows_lost = %d, want 2", got)
+	published := WireResponse(results, sum).Summary
+	if published.CorpusRowsLost != 2 || published.CorpusRowsAttempted != 2 {
+		t.Fatalf("published corpus rows = %d lost of %d attempted, want 2 of 2", published.CorpusRowsLost, published.CorpusRowsAttempted)
+	}
+	if published.LedgerRowsLost != 2 || published.LedgerRowsAttempted != 2 {
+		t.Fatalf("published ledger rows = %d lost of %d attempted, want 2 of 2 — a ledger that never opened published as a ledger that wrote everything",
+			published.LedgerRowsLost, published.LedgerRowsAttempted)
 	}
 }
 
@@ -1271,5 +1280,300 @@ func TestRunFansOutBoundedAndOrdered(t *testing.T) {
 	}
 	if len(logged) != n {
 		t.Fatalf("distinct goals in the corpus = %d, want %d (a lost or duplicated line)", len(logged), n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Round-4 review: DEFAULT TO LOUD.
+//
+// Every review round's new defects clustered in one place — the loud/quiet
+// classification (defer classes, Summary.Infrastructure, exit codes) — because
+// each added nuance encoded "whose fault is this" from ever-thinner evidence.
+// The rule the tests below pin: a result may be classed QUIET (contract-side,
+// abstention, budget) ONLY when the quiet explanation is positively
+// established — every configured node answered and the node side is
+// demonstrably fine. Absence of evidence about the fleet is never evidence the
+// CALLER is at fault. A false alarm costs an operator one look; a silent
+// failure costs a night.
+// ---------------------------------------------------------------------------
+
+// deadRemoteBase returns the base URL of a fleet node that is NOT listening:
+// every health probe is refused at connect.
+func deadRemoteBase(t *testing.T) string {
+	t.Helper()
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "dead-node",
+		pollState: func(int64) (map[string]any, int) { return nil, http.StatusNotFound },
+	}
+	srv := node.server()
+	base := srv.URL
+	srv.Close() // refused at connect from here on
+	return base
+}
+
+// heldLease acquires the machine-wide GPU lease for the test's duration through
+// gpulease's own write path, so LocalBusy reads busy=true inside Run.
+func heldLease(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "lease")
+	m, err := gpulease.OpenAt(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "delegate-run-test", TTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lease.Release() })
+	return dir
+}
+
+// TestRunContractSideClassRequiresAHealthyFleet (R4-1): contractIneligible ran
+// BEFORE the "every remote failed its probe" cases, and two of its conditions
+// (no output_schema, a non-origin depth) had NO node-side guard — so a caller's
+// contract property short-circuited the whole classification even when not one
+// node had answered. The same fleet state WITH a schema counted infrastructure,
+// so adding a schema to a contract was what made a week-dead fleet audible.
+func TestRunContractSideClassRequiresAHealthyFleet(t *testing.T) {
+	mutations := []struct {
+		name   string
+		mutate func(*core.AgentContract)
+	}{
+		{"no output_schema", func(c *core.AgentContract) { c.OutputSchema = nil }},
+		{"already past the origin hop", func(c *core.AgentContract) { c.Depth = 1 }},
+		{"too big for any advertised ceiling", func(c *core.AgentContract) { c.Goal = strings.Repeat("x", 30000) }},
+	}
+	for _, tc := range mutations {
+		t.Run("route=remote/"+tc.name, func(t *testing.T) {
+			contract := remoteContract()
+			tc.mutate(&contract)
+			results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{deadRemoteBase(t)})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if sum != (Summary{Deferred: 1, Infrastructure: 1}) {
+				t.Fatalf("summary = %+v, want the dead fleet counted — NOT ONE node answered, so nothing establishes the contract as the story", sum)
+			}
+			r := results[0]
+			if r.Result.DeferClass == core.DeferClassContract {
+				t.Errorf("defer_class = contract (reason %q) for a fleet that never answered", r.Result.Reason)
+			}
+			if !BrokenStackDefer(r.Result.DeferClass) {
+				t.Errorf("defer_class = %q does not count as a broken stack; a totally dead fleet must exit non-zero", r.Result.DeferClass)
+			}
+			if !strings.Contains(r.Result.Reason, "health probe") {
+				t.Errorf("reason = %q, want the failed probe named", r.Result.Reason)
+			}
+		})
+	}
+
+	// The reported repro: route=auto, local GPU busy, the remote refusing
+	// connections, a contract with no output_schema. The work runs locally and
+	// SUCCEEDS — that placement is right — but runOne's deadFleet keys off this
+	// same class, so the contract short-circuit published {succeeded:1,
+	// infrastructure:0} at exit 0 while the fleet had been down for a week.
+	t.Run("route=auto: a local success must not hide a dead fleet", func(t *testing.T) {
+		cfg := testCfg(t)
+		cfg.GPULockPath = heldLease(t)
+		contract := remoteContract()
+		contract.OutputSchema = nil
+		contract.Acceptance = []string{"contains:qube"} // text-verb only: nothing structured was asked for
+		local := func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+			return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat",
+				Output: "local qube answer", StopReason: "done"}, nil
+		}
+		results, sum, err := Run(t.Context(), cfg, local, []core.AgentContract{contract}, "auto", []string{deadRemoteBase(t)})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if sum != (Summary{Succeeded: 1, Infrastructure: 1}) {
+			t.Fatalf("summary = %+v, want the local success PLUS the dead fleet — a caller-contract property must never mask an unreachable fleet", sum)
+		}
+		if !strings.Contains(results[0].PlacementReason, "health probe") {
+			t.Errorf("placement reason = %q, want the failed probe named", results[0].PlacementReason)
+		}
+	})
+}
+
+// TestRunCtxFitIsContractSideOnlyWithARealCeiling (R4-2): agent_ctx_tokens is
+// omitempty on the wire and config documents 0 as "not advertised — set it when
+// opting a node in", i.e. an OPERATOR fix on a box. An unset value (or any
+// pre-0.63 peer that never emits the field) decodes as 0, still counts into
+// lanes, and so satisfied `lanes > 0 && tooSmall == lanes` — blaming a 30-token
+// goal on the caller's contract at exit 0.
+func TestRunCtxFitIsContractSideOnlyWithARealCeiling(t *testing.T) {
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 0, nodeID: "no-ceiling-node",
+		pollState: func(int64) (map[string]any, int) { return nil, http.StatusNotFound },
+	}
+	srv := node.server()
+
+	contract := remoteContract()
+	contract.Goal = "name the capital" // nothing about this contract is big
+	results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{srv.URL})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sum != (Summary{Deferred: 1, Infrastructure: 1}) {
+		t.Fatalf("summary = %+v, want a LOUD class — nobody advertised a ceiling, which an operator fixes on the node", sum)
+	}
+	r := results[0]
+	if r.Result.DeferClass == core.DeferClassContract {
+		t.Errorf("defer_class = contract (reason %q) — a 30-token goal is not what makes an unadvertised ceiling unusable", r.Result.Reason)
+	}
+	if !strings.Contains(r.Result.Reason, "agent_ctx_tokens") {
+		t.Errorf("reason = %q, want the unset node-side field named", r.Result.Reason)
+	}
+}
+
+// TestRunPollFailureNeverInventsA404Denial (R4-4): unownedDetail printed the
+// 404-denial sentence for EVERY answering node, so a node that returned only
+// 503s published "a poll 404 DENIES it ever held it (0 re-dispatch(es) made)" —
+// the delegator authoring a claim on the node's behalf, which is the exact class
+// of defect the surrounding message was written to fix.
+func TestRunPollFailureNeverInventsA404Denial(t *testing.T) {
+	compressPolls(t, 20*time.Millisecond, -900*time.Millisecond) // budget = 100ms
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
+		pollState: func(int64) (map[string]any, int) {
+			return map[string]any{"status": "error", "error": "vram snapshot stale"}, http.StatusServiceUnavailable
+		},
+	}
+	srv := node.server()
+
+	contract := remoteContract()
+	contract.TimeoutSec = 1
+	results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{srv.URL})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sum != (Summary{Failed: 1}) {
+		t.Fatalf("summary = %+v, want one failure", sum)
+	}
+	r := results[0]
+	if strings.Contains(r.Err, "404") || strings.Contains(r.Err, "DENIES") {
+		t.Errorf("err = %q asserts a 404 denial; this node answered only 503 and never 404ed", r.Err)
+	}
+	if !strings.Contains(r.Err, "503") {
+		t.Errorf("err = %q, want the answers the node ACTUALLY gave named", r.Err)
+	}
+}
+
+// TestRunDeferAfterLostJobsIsInfrastructure (R4-5): the 404 arm set neither
+// lastPollErr nor pollFails.note, so a node that DROPPED the job twice and then
+// answered normally to the deadline published a plain budget defer — "node
+// accepted the job but did not reach a terminal state", exit 0 — with nothing
+// anywhere saying it had lost the work. unownedDetail renders the re-dispatch
+// count on the FAILURE path; the defer path discarded it.
+func TestRunDeferAfterLostJobsIsInfrastructure(t *testing.T) {
+	compressPolls(t, 20*time.Millisecond, -900*time.Millisecond) // budget = 100ms
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
+		pollState: func(n int64) (map[string]any, int) {
+			if n <= 2 {
+				return map[string]any{"status": "error", "error": "unknown job"}, http.StatusNotFound
+			}
+			return map[string]any{"state": "running"}, http.StatusOK
+		},
+	}
+	srv := node.server()
+
+	contract := remoteContract()
+	contract.TimeoutSec = 1
+	results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{srv.URL})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if d := node.dispatches.Load(); d != 3 {
+		t.Fatalf("dispatches = %d, want 3 (initial + two 404-triggered re-dispatches) — the premise never happened", d)
+	}
+	if sum != (Summary{Deferred: 1, Infrastructure: 1}) {
+		t.Fatalf("summary = %+v, want the defer counted as infrastructure — a node that loses jobs is broken, not slow", sum)
+	}
+	if r := results[0]; !strings.Contains(r.Result.Reason, "re-dispatch") {
+		t.Errorf("reason = %q, want the lost job and its re-dispatches named", r.Result.Reason)
+	}
+}
+
+// TestRunTotalLedgerLossIsPublished (R4-6): the `if r.led != nil` guard meant a
+// ledger that never OPENED incremented nothing, so LedgerRowsLost stayed 0 and
+// omitempty dropped it — a run that recorded not one row published byte-for-byte
+// what a run that recorded every row publishes. The doc promised "N of M
+// attempted" while shipping only N.
+func TestRunTotalLedgerLossIsPublished(t *testing.T) {
+	logs := captureLog(t)
+	cfg := testCfg(t)
+	// A DIRECTORY where the ledger file belongs: ledger.Open's O_WRONLY open
+	// fails on every platform — the total-loss shape a read-only or full disk
+	// produces in production.
+	cfg.LedgerPath = filepath.Join(t.TempDir(), "ledger-as-a-dir")
+	if err := os.MkdirAll(cfg.LedgerPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	local := func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat",
+			Output: "the qube answer", Structured: json.RawMessage(`{"answer":"42"}`), StopReason: "done"}, nil
+	}
+	results, sum, err := Run(t.Context(), cfg, local, []core.AgentContract{remoteContract(), remoteContract()}, "local", nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sum.Succeeded != 2 {
+		t.Fatalf("summary = %+v, want both subtasks to succeed — telemetry never fails the work", sum)
+	}
+	blob, merr := json.Marshal(WireResponse(results, sum))
+	if merr != nil {
+		t.Fatal(merr)
+	}
+	var published struct {
+		Summary map[string]any `json:"summary"`
+	}
+	if uerr := json.Unmarshal(blob, &published); uerr != nil {
+		t.Fatal(uerr)
+	}
+	if published.Summary["ledger_rows_lost"] != float64(2) {
+		t.Errorf("ledger_rows_lost = %v, want 2 — a TOTAL ledger loss published as no loss at all", published.Summary["ledger_rows_lost"])
+	}
+	if published.Summary["ledger_rows_attempted"] != float64(2) {
+		t.Errorf("ledger_rows_attempted = %v, want 2 — without M the caller cannot read the documented N-of-M",
+			published.Summary["ledger_rows_attempted"])
+	}
+	if !strings.Contains(logs.String(), "ledger") {
+		t.Errorf("log = %q, want the ledger loss named once", logs.String())
+	}
+}
+
+// TestPollFailLogCountsEveryShapePastTheCap (R4-7): note() returned at the shape
+// cap BEFORE incrementing the counter, so occurrences of the 9th and later
+// shapes vanished — 36 failures presented as a 24-occurrence breakdown with
+// nothing marking the omission, and the TEXT of those shapes appeared nowhere at
+// all.
+func TestPollFailLogCountsEveryShapePastTheCap(t *testing.T) {
+	logs := captureLog(t)
+	p := newPollFailLog("agd-test", "http://node:18811")
+	const shapes, each = 12, 3
+	for i := 0; i < shapes; i++ {
+		for j := 0; j < each; j++ {
+			p.note(fmt.Errorf("poll: unusable answer (status %d)", 500+i))
+		}
+	}
+	if p.total != shapes*each {
+		t.Fatalf("total = %d, want %d", p.total, shapes*each)
+	}
+	counted := 0
+	for _, n := range p.counts {
+		counted += n
+	}
+	if counted != p.total {
+		t.Errorf("counts sum to %d of %d occurrences — every failure past the shape cap was dropped from the tally", counted, p.total)
+	}
+	p.summarize()
+	out := logs.String()
+	if !strings.Contains(out, "omitted") {
+		t.Errorf("summary line = %q, presents a partial breakdown as a complete one", out)
+	}
+	residual := (shapes - pollFailShapeCap) * each
+	if !strings.Contains(out, fmt.Sprintf("%d", residual)) {
+		t.Errorf("summary line = %q, want the %d occurrences behind the omitted shapes counted", out, residual)
 	}
 }

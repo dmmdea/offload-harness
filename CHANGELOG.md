@@ -6,6 +6,51 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — delegation lane, round-4 adversarial review (quiet classes now require positive evidence)
+
+A fourth review round found that every previous round's new defects clustered in one place: the
+loud/quiet classification, which encodes "whose fault is this" and grew a new wrong case with each
+added nuance. This round applies a governing rule instead of another patch — **default to loud; a
+result may be classed quiet (contract / abstention / budget) only when the quiet explanation is
+POSITIVELY ESTABLISHED, meaning every configured remote answered and the node side is demonstrably
+fine. Absence of evidence about the fleet is never evidence the caller is at fault.** The classifier
+is now two independent verdicts (`contractIneligible` and `nodeSideVerdict`) composed by that rule,
+where an empty node-side class is the single positive statement that makes a quiet class honest.
+
+- **A caller-contract property masked a totally dead fleet.** The contract check ran ahead of the
+  probe verdict, so a contract merely missing `output_schema` — optional in the `agent_delegate`
+  input schema and legal for local runs — reported `Summary{Infrastructure:0}` and exit 0 while
+  every remote was refusing connections; the identical state WITH a schema correctly reported
+  infrastructure. A regression from the previous round. Both verdicts are now computed
+  independently; when both are true the reason names both and the class is the loud one.
+- **A node-side misconfiguration was blamed on the caller.** `agent_ctx_tokens` is `omitempty` and
+  documented as "0 = not advertised, set it when opting a node in", i.e. an operator fix on a box —
+  yet a node advertising 0 made a 30-token goal report `defer_class: "contract"`, "the contract
+  needs ~3102 tokens and the roomiest remote advertises 0", quietly, at exit 0. No contract can
+  clear a 0 ceiling because `specReserve` alone is 3072. Ctx-fit is contract-side only when some
+  lane advertises a ceiling a contract could actually clear.
+- **Genuine wire failures were filed as the model failing the schema.** `decodeGenResult` returns
+  the decoder's error after `client.Do` already succeeded, so no `*url.Error`/`net.Error` is in the
+  chain: a captive-portal 200 with an HTML body, a connection cut mid-body, and a proxy 429 all
+  read as abstention at exit 0. A non-JSON body from something claiming to be llama-server means
+  something else answered — that is infrastructure, and is now classed as such.
+- **The failure message asserted a 404 denial that never happened.** Any "answered but never owned"
+  case printed the 404 sentence, so a node that returned only 503s was reported as having DENIED
+  holding the job, with zero re-dispatches — the same authoring-a-claim-on-the-node's-behalf defect
+  as the round-3 fix, reappearing inside the message that fix wrote.
+- **A job-LOSING node read as a budget defer.** The 404 arm recorded no history and healthy answers
+  now clear the poll error, so a node that dropped the job twice and then timed out reported
+  "ran out of clock" at exit 0 with nothing saying it lost the work. Re-dispatches are carried into
+  the defer reason and class it infrastructure.
+- **TOTAL ledger loss published as NO loss** (a nil ledger skipped the counters entirely, so the
+  worst outcome was byte-identical to a healthy run), **the poll-log shape cap dropped counts and
+  never printed shapes past the cap**, and **MCP `IsError` fired on runs where every subtask
+  succeeded** (a successful local placement taken while the fleet was down set the flag, telling
+  the calling model that completed, schema-valid, acceptance-passing work had failed).
+- **Two more tests were vacuous** and are now assertions of the behavior their guards produce
+  rather than of what they avoid; the residency latch publishes its fail-closed answer from a
+  `defer`, so a panic in the probe seam can no longer freeze residency or park every waiter.
+
 ### Fixed — delegation lane, round-3 adversarial review
 
 Two fresh-context reviews of the previous round's fixes found several of them reintroduced or

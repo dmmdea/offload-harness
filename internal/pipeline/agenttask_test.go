@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -49,6 +50,15 @@ type agentFake struct {
 	// repackEmptyChoices returns a 200 carrying zero choices: the seat is up
 	// and answered, it just produced nothing.
 	repackEmptyChoices bool
+	// repackRawBody, when set, answers the grammar completion with a 200 whose
+	// body is this raw text instead of a chat completion — the shape a proxy or
+	// captive portal produces when it, not llama-server, is what answered.
+	repackRawBody func(n int64) string
+	// repackCutBody makes repackRawBody's answer arrive with a Content-Length
+	// that LIES and the connection dropped mid-body: the failure then happens
+	// during the body READ, after client.Do already succeeded, so no *url.Error
+	// and no net.Error is anywhere in the returned error's chain.
+	repackCutBody bool
 	// repackDelay stalls every grammar completion — used to expire the
 	// contract's wall deadline inside the re-pack.
 	repackDelay time.Duration
@@ -97,6 +107,29 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 			}
 			if status != 0 {
 				w.WriteHeader(status)
+				return
+			}
+			if f.repackRawBody != nil {
+				body := f.repackRawBody(n)
+				if !f.repackCutBody {
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(body))
+					return
+				}
+				hj, ok := w.(http.Hijacker)
+				if !ok {
+					t.Errorf("test server does not support hijacking; the cut-body shape cannot be scripted")
+					return
+				}
+				conn, bufrw, herr := hj.Hijack()
+				if herr != nil {
+					t.Errorf("hijack: %v", herr)
+					return
+				}
+				// Promise more bytes than we send, then drop the connection.
+				fmt.Fprintf(bufrw, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body)+64, body)
+				_ = bufrw.Flush()
+				_ = conn.Close()
 				return
 			}
 			if f.repackEmptyChoices {
@@ -467,11 +500,18 @@ func TestRunAgentTaskRepackTransportThenValidationStaysInfrastructure(t *testing
 	}
 }
 
-// TestRunAgentTaskRepackParentCancellationIsNotInfrastructure: when the
-// DELEGATOR (or the node's shutdown) cancels the parent context mid-re-pack,
-// the failed request is a *url.Error like any dial refusal — so it read as a
-// broken endpoint. Nothing on this box failed; the caller went away.
-func TestRunAgentTaskRepackParentCancellationIsNotInfrastructure(t *testing.T) {
+// TestRunAgentTaskRepackParentCancellation: when the DELEGATOR (or the node's
+// shutdown) cancels the parent context mid-re-pack, the failed request is a
+// *url.Error like any dial refusal — so it read as a broken endpoint. Nothing on
+// this box failed; the caller went away, which is a BUDGET shape.
+//
+// It asserts what the cancellation arm PRODUCES, not merely what it avoids. The
+// earlier version checked `!= infrastructure` plus "cancel" in the reason, and
+// both held with the arm deleted: the error then fell through to the default
+// case as `abstention` with "output failed schema: … context canceled". So the
+// test passed on code that had lost the behavior entirely — it was pinning
+// genErrIsTransport's context.Canceled exclusion, never this arm.
+func TestRunAgentTaskRepackParentCancellation(t *testing.T) {
 	fake := &agentFake{
 		rosterIDs:   []string{agentTestSeat},
 		loop:        func(int64) string { return doneChat("The answer is 42.") },
@@ -491,12 +531,12 @@ func TestRunAgentTaskRepackParentCancellationIsNotInfrastructure(t *testing.T) {
 	if !wire.Deferred {
 		t.Fatalf("want deferred, got %+v", wire)
 	}
-	if wire.DeferClass == core.DeferClassInfrastructure {
-		t.Fatalf("defer_class = %q (reason %q) — a caller-side cancellation must not accuse the node's stack",
-			wire.DeferClass, wire.Reason)
+	if wire.DeferClass != core.DeferClassBudget {
+		t.Fatalf("defer_class = %q (reason %q), want %q — a ceiling outside the model's control stopped the run; it is neither a broken box nor a model that got the shape wrong",
+			wire.DeferClass, wire.Reason, core.DeferClassBudget)
 	}
-	if !strings.Contains(wire.Reason, "cancel") {
-		t.Fatalf("reason = %q, want the cancellation named", wire.Reason)
+	if !strings.Contains(wire.Reason, "structured re-pack") || !strings.Contains(wire.Reason, "cancel") {
+		t.Fatalf("reason = %q, want this arm's own message naming the cancelled re-pack (not the default arm's \"output failed schema\")", wire.Reason)
 	}
 }
 
@@ -656,5 +696,77 @@ func TestRunAgentTaskUnknownProfileIsConfig(t *testing.T) {
 
 	if !wire.Deferred || wire.DeferClass != core.DeferClassConfig {
 		t.Fatalf("deferred/class = %v/%q (reason %q), want a config defer", wire.Deferred, wire.DeferClass, wire.Reason)
+	}
+}
+
+// TestRunAgentTaskRepackWireFailuresAreInfrastructure (R4-3): genErrIsTransport
+// recognized only *url.Error, net.Error and a 5xx — and llamaclient returned the
+// JSON decoder's error UNWRAPPED for a body it could not read or parse, which
+// happens AFTER client.Do already succeeded, so neither of those two types is
+// anywhere in the chain. Measured against scripted servers, three real WIRE
+// failures came back as abstentions at exit 0 ("the model got the shape wrong"):
+//
+//   - a proxy / captive portal answering 200 with an HTML page,
+//   - a 200 whose connection died mid-body (a Content-Length that lied),
+//   - a 429 from a rate limiter sitting in front of the seat.
+//
+// A non-JSON body from something claiming to be llama-server means SOMETHING
+// ELSE ANSWERED, and llama-server itself never emits 429 — both are the wire,
+// not the request. Default to loud: the operator's box is what needs a look.
+func TestRunAgentTaskRepackWireFailuresAreInfrastructure(t *testing.T) {
+	cases := []struct {
+		name    string
+		script  func(*agentFake)
+		wantSub string
+	}{
+		{
+			name: "a proxy answers 200 with an HTML error page",
+			script: func(f *agentFake) {
+				f.repackRawBody = func(int64) string { return "<html><body>502 Bad Gateway</body></html>" }
+			},
+			wantSub: "body",
+		},
+		{
+			name: "the connection dies mid-body (Content-Length lied)",
+			script: func(f *agentFake) {
+				f.repackRawBody = func(int64) string { return `{"choices":[{"message":{"role":"assis` }
+				f.repackCutBody = true
+			},
+			wantSub: "body",
+		},
+		{
+			name: "a rate limiter answers 429",
+			script: func(f *agentFake) { f.repackStatus = http.StatusTooManyRequests },
+			wantSub: "429",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &agentFake{
+				rosterIDs: []string{agentTestSeat},
+				loop:      func(int64) string { return doneChat("The answer is 42.") },
+				repack:    func(int64) string { return `{"answer":"42"}` },
+			}
+			tc.script(fake)
+			srv := fake.server(t)
+			defer srv.Close()
+
+			res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+			wire := decodeWire(t, res)
+
+			if !wire.Deferred {
+				t.Fatalf("want deferred, got %+v", wire)
+			}
+			if wire.DeferClass != core.DeferClassInfrastructure {
+				t.Fatalf("defer_class = %q (reason %q), want %q — the seat was never REACHED; something else answered for it",
+					wire.DeferClass, wire.Reason, core.DeferClassInfrastructure)
+			}
+			if !strings.HasPrefix(wire.Reason, "structured re-pack unreachable: ") {
+				t.Fatalf("reason = %q, want the transport-specific prefix, not the schema one", wire.Reason)
+			}
+			if !strings.Contains(wire.Reason, tc.wantSub) {
+				t.Fatalf("reason = %q, want the wire failure itself named (%q)", wire.Reason, tc.wantSub)
+			}
+		})
 	}
 }

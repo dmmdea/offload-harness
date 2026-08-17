@@ -345,6 +345,22 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("llama-server %d: %s", e.StatusCode, e.Body)
 }
 
+// BodyError is a 200 whose BODY could not be read or parsed as a llama-server
+// chat completion. It is its own type because the CAUSE is not the model and not
+// the request: either something that is NOT llama-server answered (a proxy's
+// HTML error page, a captive portal) or the connection died mid-body (a
+// Content-Length that lied). Both happen AFTER Do() returned, so no *url.Error
+// and no net.Error is anywhere in the chain — which is exactly why an unwrapped
+// decoder error read as "the model got the shape wrong" to every classifier
+// downstream. Consumers branch on this type to call it what it is: the wire.
+type BodyError struct{ Err error }
+
+func (e *BodyError) Error() string { return "llama-server response body unusable: " + e.Err.Error() }
+
+// Unwrap keeps errors.Is reaching the cause — notably context.Canceled, so a
+// caller-side cancellation during the body read is still recognizable as one.
+func (e *BodyError) Unwrap() error { return e.Err }
+
 // decodeGenResult turns a llama-server chat response into a GenResult. It owns
 // status handling, body decode, and per-call telemetry (incl. raw logprobs), so
 // both Generate (text) and GenerateVision (multimodal) share one decode path.
@@ -357,7 +373,10 @@ func decodeGenResult(resp *http.Response, start time.Time) (GenResult, error) {
 	}
 	var cr chatResp
 	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
-		return GenResult{}, err
+		// Wrapped, not returned bare: a bare *json.SyntaxError or io.ErrUnexpectedEOF
+		// carries no evidence of WHERE it came from, and callers were classing it
+		// as a model failure.
+		return GenResult{}, &BodyError{Err: err}
 	}
 	if len(cr.Choices) == 0 {
 		return GenResult{}, fmt.Errorf("llama-server returned no choices")

@@ -14,12 +14,14 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
 
@@ -268,5 +270,69 @@ func TestAgentDelegateHandlerBadInputsDefer(t *testing.T) {
 				t.Fatalf("reason %q must mention %q", reason, tc.want)
 			}
 		})
+	}
+}
+
+// TestDelegateIsErrorRequiresNothingUsableCameBack (R4-8): IsError fired on
+// `Infrastructure > 0` alone, and Infrastructure counts a SUCCESSFUL local
+// placement taken while the fleet was down (delegate.Summary's
+// remotesUnreachable). So a run whose every subtask completed, validated against
+// its schema, and passed acceptance returned IsError:true — and in MCP semantics
+// that says THE CALL FAILED, which most models answer by discarding or redoing
+// correct work.
+//
+// This is the one place where "default to loud" cuts the other way: the
+// fleet-down signal must stay fully visible (it is in the body, and the CLI still
+// exits non-zero on it), but a boolean that means "your call failed" must not be
+// set on work that succeeded. A CLI exit code can carry that nuance beside the
+// printed results; a boolean cannot.
+func TestDelegateIsErrorRequiresNothingUsableCameBack(t *testing.T) {
+	cases := []struct {
+		name string
+		sum  delegate.Summary
+		want bool
+	}{
+		{"a local success taken while the whole fleet was down", delegate.Summary{Succeeded: 1, Infrastructure: 1}, false},
+		{"nothing came back and the stack is why", delegate.Summary{Deferred: 1, Infrastructure: 1}, true},
+		{"a subtask outright failed", delegate.Summary{Succeeded: 7, Failed: 1}, true},
+		{"honest abstentions only", delegate.Summary{Succeeded: 1, Deferred: 1}, false},
+		{"failed verification is a RESULT shape", delegate.Summary{FailedVerification: 2}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := delegateIsError(tc.sum); got != tc.want {
+				t.Fatalf("delegateIsError(%+v) = %v, want %v", tc.sum, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAgentDelegateHandlerSucceededWorkIsNeverAToolError (R4-8, end to end): the
+// same rule through the real handler — one subtask completes, another defers
+// blaming the stack. The summary must report the infrastructure defer (an
+// operator has to look) while the call itself is NOT an error, because usable
+// work came back in it.
+func TestAgentDelegateHandlerSucceededWorkIsNeverAToolError(t *testing.T) {
+	var calls atomic.Int64
+	s := delegateTestServer(t, func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
+		if calls.Add(1) == 1 {
+			return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "fake-seat",
+				Output: "done on qube", StopReason: "done"}, nil
+		}
+		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "fake-seat",
+			Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: "agent loop: llama-server 500"}, nil
+	})
+	res, err := s.handleAgentDelegate(context.Background(), callReq(
+		`{"subtasks":[{"goal":"answer it"},{"goal":"answer it too"}],"route":"local"}`))
+	if err != nil {
+		t.Fatalf("handleAgentDelegate: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true on a run that delivered finished work; MCP reads that as \"the call failed\"")
+	}
+	m := decodeResult(t, res)
+	summary, _ := m["summary"].(map[string]any)
+	if summary["succeeded"] != float64(1) || summary["infrastructure"] != float64(1) {
+		t.Fatalf("summary = %v, want the success AND the broken stack both reported in the body", summary)
 	}
 }

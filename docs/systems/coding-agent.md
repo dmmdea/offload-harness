@@ -368,15 +368,26 @@ over the operator's tailnet. Two surfaces exist, both delegator-side:
 Both surfaces publish the same summary-first response, and both read the same way: a
 `deferred` subtask carries a `defer_class` (`abstention` | `budget` | `infrastructure` |
 `config` | `contract`), and the `infrastructure` + `config` ones are counted separately in
-`summary.infrastructure` — the CLI exits non-zero when that is non-zero, and the MCP tool sets
-`isError` on the same condition (the body is unchanged, so the summary and every per-subtask
-reason are still there to read), because a node whose llama-swap is down defers every subtask
-and must not read as a clean run. `contract`-classed defers are the caller's own contract, not a
-broken box, and stay quiet ([defer classes](fleet-node.md#defer-shapes-and-their-classes)).
+`summary.infrastructure` — because a node whose llama-swap is down defers every subtask and must
+not read as a clean run. `contract`-classed defers are the caller's own contract, not a broken
+box, and stay quiet ([defer classes](fleet-node.md#defer-shapes-and-their-classes)) — but only
+when the fleet is positively established as healthy: with any node unreachable the loud class
+wins and the reason names both causes.
 
-The summary also carries `corpus_rows_lost` / `ledger_rows_lost` (`omitempty`): telemetry never
-fails the work, but a delegation that recorded nothing to the standing corpus used to publish
-byte-identically to one that recorded everything.
+The two surfaces report that verdict differently, on purpose. **The CLI exits non-zero on
+`summary.infrastructure > 0`** — an exit code sits beside the printed results, so it can say
+"look at this" without denying the results. **The MCP tool sets `isError` only when the call
+produced nothing usable**: `summary.failed > 0`, or `infrastructure > 0` with `succeeded == 0`.
+`infrastructure` includes a successful LOCAL placement taken while the fleet was down, and
+`isError` means *the call failed* in MCP — flagging a run whose subtasks all completed, validated
+and passed acceptance is how a model comes to discard or redo correct work. The body is identical
+either way, so the summary and every per-subtask reason are always there to read.
+
+The summary also carries `corpus_rows_lost` / `ledger_rows_lost` and, whenever one is non-zero,
+its `corpus_rows_attempted` / `ledger_rows_attempted` denominator (all `omitempty`): telemetry
+never fails the work, but a delegation that recorded nothing used to publish byte-identically to
+one that recorded everything — including the total-loss case where the ledger file never opened
+at all — and "N rows lost" is unreadable without the M it was lost out of.
 
 A **local** placement is not a special case: it runs the identical `Pipeline.Run` route a fleet
 node runs (`pipeline.RunAgentContract` → the `agent` task → this loop, read-only over the

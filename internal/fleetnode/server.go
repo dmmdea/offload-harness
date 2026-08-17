@@ -232,9 +232,27 @@ func (s *Server) agentResident() bool {
 // cached for a full TTL so a dead endpoint is probed once per window, not
 // hammered per request.
 func (s *Server) refreshAgentResidency() {
+	var resident bool
+	var err error
+	// The publish is DEFERRED, not tail-appended: the probe below runs outside
+	// any lock, and clearing the latch only on the normal path meant a panic
+	// anywhere in that seam froze residency for the life of the process — never
+	// refreshable again — and parked every awaitProbe waiter forever, since
+	// RefreshAgentResidency has no timeout of its own. On a panic the zero
+	// values here publish the fail-closed answer (resident=false), which is the
+	// same verdict a failed probe gets, and the panic still propagates.
+	defer func() {
+		a := &s.agentRes
+		a.mu.Lock()
+		a.resident = resident && err == nil
+		a.at = time.Now()
+		a.inflight = false
+		a.idleCond().Broadcast() // release any synchronous waiter (RefreshAgentResidency)
+		a.mu.Unlock()
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), agentResidencyProbeTimeout)
 	defer cancel()
-	resident, err := s.rosterServes(ctx, s.opts.Cfg.Endpoint, s.agentSeat)
+	resident, err = s.rosterServes(ctx, s.opts.Cfg.Endpoint, s.agentSeat)
 	if err != nil {
 		// agent_seat_resident:false is the one field that stops EVERY remote
 		// placement at this node, and the probe error was the only evidence of
@@ -244,13 +262,6 @@ func (s *Server) refreshAgentResidency() {
 		log.Printf("fleet: agent seat %q residency probe against %s failed; advertising agent_seat_resident:false for up to %s: %v",
 			s.agentSeat, s.opts.Cfg.Endpoint, agentResidencyTTL, err)
 	}
-	a := &s.agentRes
-	a.mu.Lock()
-	a.resident = resident && err == nil
-	a.at = time.Now()
-	a.inflight = false
-	a.idleCond().Broadcast() // release any synchronous waiter (RefreshAgentResidency)
-	a.mu.Unlock()
 }
 
 // RefreshAgentResidency ensures ONE residency probe has published an answer

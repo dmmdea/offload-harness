@@ -19,14 +19,21 @@ type SummaryWire struct {
 	FailedVerification int `json:"failed_verification"`
 	Failed             int `json:"failed"`
 	Infrastructure     int `json:"infrastructure"`
-	// CorpusRowsLost / LedgerRowsLost publish telemetry loss to the CALLER.
-	// omitempty: a healthy run's response stays byte-identical to before these
-	// fields existed. They are not outcome buckets — the four counts above
-	// still add up to len(results) — but a delegation that wrote nothing to the
-	// standing corpus published identically to one that wrote everything, and
-	// the MCP caller had no way to learn it.
-	CorpusRowsLost int `json:"corpus_rows_lost,omitempty"`
-	LedgerRowsLost int `json:"ledger_rows_lost,omitempty"`
+	// CorpusRows*/LedgerRows* publish telemetry loss to the CALLER. omitempty:
+	// a healthy run's response stays byte-identical to before these fields
+	// existed. They are not outcome buckets — the four counts above still add
+	// up to len(results) — but a delegation that wrote nothing to the standing
+	// corpus published identically to one that wrote everything, and the MCP
+	// caller had no way to learn it.
+	//
+	// The *Attempted counts ride ALONGSIDE their losses — Summary carries them
+	// only when there IS a loss, so the byte-identity promise above still holds
+	// for a healthy run: "N rows lost" is unreadable without the M it was lost
+	// out of, and 1 of 8 is a transient while 8 of 8 is a full disk.
+	CorpusRowsLost      int `json:"corpus_rows_lost,omitempty"`
+	CorpusRowsAttempted int `json:"corpus_rows_attempted,omitempty"`
+	LedgerRowsLost      int `json:"ledger_rows_lost,omitempty"`
+	LedgerRowsAttempted int `json:"ledger_rows_attempted,omitempty"`
 }
 
 // ResultWire is one subtask's published outcome. Failed marks a
@@ -64,8 +71,10 @@ func WireResponse(results []PlacedResult, sum Summary) ResponseWire {
 			FailedVerification: sum.FailedVerification,
 			Failed:             sum.Failed,
 			Infrastructure:     sum.Infrastructure,
-			CorpusRowsLost:     sum.CorpusRowsLost,
-			LedgerRowsLost:     sum.LedgerRowsLost,
+			CorpusRowsLost:      sum.CorpusRowsLost,
+			CorpusRowsAttempted: sum.CorpusRowsAttempted,
+			LedgerRowsLost:      sum.LedgerRowsLost,
+			LedgerRowsAttempted: sum.LedgerRowsAttempted,
 		},
 		Results: make([]ResultWire, 0, len(results)),
 	}
