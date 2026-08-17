@@ -7,6 +7,7 @@ import (
 	"context"
 	crand "crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -716,7 +717,7 @@ func (p *Pipeline) runVideoDescribe(ctx context.Context, req core.Request, built
 	// 2048 frame width); and a file rotated mid-loop would give the retry a
 	// different identity than the attempt that looked it up, storing the result
 	// under a digest for bytes the model never saw.
-	vidDigest, vdErr := mediahash.Digest(req.Video, p.cfg.MediaHashMaxFullBytes)
+	vidID, vdErr := mediahash.Digest(req.Video, p.cfg.MediaHashMaxFullBytes)
 	for {
 		frames, err := videoio.SampleFrames(req.Video, p.cfg.FFmpegPath, p.cfg.VideoFPS, p.cfg.VideoMaxFrames, width, p.cfg.VisionMaxImageBytes)
 		if err != nil {
@@ -737,12 +738,27 @@ func (p *Pipeline) runVideoDescribe(ctx context.Context, req core.Request, built
 		// An empty extra means "no identity": runVisionGen then bypasses the cache
 		// entirely rather than keying on the path, which is what turned a transient
 		// read failure into a durable wrong answer.
+		// Verified AFTER the frames were sampled, not merely hoisted before it.
+		// Hoisting alone bought the I/O win but widened the correctness gap: the
+		// window became digest-at-t0 versus the FINAL successful SampleFrames,
+		// which on a 4K vertical reel is the 4th iteration — minutes, after three
+		// full ffmpeg passes. Worse, `frames=` below comes from that last sampling,
+		// so a mid-loop rotation produced a key that was a hybrid of two file
+		// states. One stat per iteration closes that.
+		cacheable := vdErr == nil && vidID.Unchanged(req.Video)
 		extra := ""
-		if vdErr == nil {
+		if cacheable {
 			extra = fmt.Sprintf("vid:%s|fps=%g|n=%d|w=%d|frames=%d",
-				vidDigest, p.cfg.VideoFPS, p.cfg.VideoMaxFrames, width, len(frames))
+				vidID.Digest, p.cfg.VideoFPS, p.cfg.VideoMaxFrames, width, len(frames))
+		} else if meta.CacheBypass == "" {
+			why := "source changed during the call"
+			if vdErr != nil {
+				why = vdErr.Error()
+			}
+			meta.CacheBypass = "media identity: " + why
+			log.Printf("video_describe: no stable content identity for %q (%s) — cache bypassed; result computed but not stored", req.Video, why)
 		}
-		res := p.runVisionGen(ctx, req, built, meta, start, extra, vdErr == nil, func(gctx context.Context) (llamaclient.GenResult, error) {
+		res := p.runVisionGen(ctx, req, built, meta, start, extra, cacheable, func(gctx context.Context) (llamaclient.GenResult, error) {
 			return p.client.GenerateVisionInterleaved(gctx, p.cfg.VisionModel, built.System, labels, frames, built.User, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0)
 		})
 		if res.OK || width <= 256 || !isContextOverflow(res.Reason) {
@@ -792,7 +808,7 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	// file between the convert and the hash would cache take A's transcript under
 	// sha256(take B) — and that poisoned entry is then reachable from ANY path
 	// holding B's bytes, not just the original one.
-	audioDigest, adErr := mediahash.Digest(req.Audio, p.cfg.MediaHashMaxFullBytes)
+	audioID, adErr := mediahash.Digest(req.Audio, p.cfg.MediaHashMaxFullBytes)
 
 	// Convert (cheap, deterministic). A bad/missing file defers here.
 	wav, cleanup, cerr := audioio.ConvertToWav16k(req.Audio, p.cfg.FFmpegPath)
@@ -830,8 +846,25 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	// change exists to remove. `identifiable` also gates the on-disk media stem,
 	// so two recordings that hit the same transient error cannot overwrite each
 	// other's .srt/.txt.
-	identifiable := adErr == nil
-	ident := fmt.Sprintf("%s|model=%s|lang=%s|proto=%s", audioDigest, model, identLang, proto)
+	// VERIFY AFTER CONSUMING. Hashing before the convert did not close the TOCTOU
+	// window, it transposed it — hash-then-read stores the NEW bytes' transcript
+	// under the OLD digest instead of the reverse. One stat afterwards detects
+	// both directions, and also the case no re-ordering can touch: a file still
+	// being appended to, where the digest covers a prefix and ffmpeg read more.
+	identifiable := adErr == nil && audioID.Unchanged(req.Audio)
+	if !identifiable {
+		// Must be OBSERVABLE. Without this the call is byte-identical in telemetry
+		// to an ordinary cold miss, so an input on a flaky mount re-runs whisper at
+		// full cost on every call forever while the ledger shows a healthy run of
+		// misses.
+		why := "source changed during the call"
+		if adErr != nil {
+			why = adErr.Error()
+		}
+		meta.CacheBypass = "media identity: " + why
+		log.Printf("transcribe: no stable content identity for %q (%s) — cache bypassed; result computed but not stored", req.Audio, why)
+	}
+	ident := fmt.Sprintf("%s|model=%s|lang=%s|proto=%s", audioID.Digest, model, identLang, proto)
 	ck := cache.Key("transcribe", ident, tasks.StableParamsKey(req.Params), model, "")
 	if p.cache != nil && identifiable {
 		if raw, ok := p.cache.Get(ck); ok {
@@ -886,7 +919,22 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	// point at a different recording's transcript.
 	stemIdent := ident
 	if !identifiable {
-		stemIdent = fmt.Sprintf("%s|unidentified=%d", ident, start.UnixNano())
+		// A random nonce, NOT a timestamp. Transcribe is reachable concurrently
+		// (the fleet node serves each request in its own goroutine), so two
+		// parallel calls on different unidentifiable files whose start lands in the
+		// same wall-clock tick would produce the same stem — and, sharing a
+		// basename as field audio routinely does, overwrite each other's
+		// .srt/.txt while each returned a path to the other's transcript. That is
+		// exactly the collision the salt exists to prevent, reproduced through the
+		// salt itself.
+		var nonce [8]byte
+		if _, err := crand.Read(nonce[:]); err != nil {
+			// Fall back rather than fail the call, but say so — a degraded nonce is
+			// a real (if rare) increase in collision risk.
+			log.Printf("transcribe: nonce generation failed (%v); falling back to a timestamp salt", err)
+			binary.BigEndian.PutUint64(nonce[:], uint64(start.UnixNano()))
+		}
+		stemIdent = fmt.Sprintf("%s|unidentified=%x", ident, nonce)
 	}
 	base := mediaBase(p.cfg.MediaDir, req.Audio, stemIdent)
 	srtPath, txtPath, jsonPath := base+".srt", base+".txt", base+".segments.json"
@@ -3179,6 +3227,7 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		PromptPrefixSHA256: meta.PromptPrefixSHA256,
 		ContextHash:        meta.ContextHash,
 		ExemplarIDs:        meta.ExemplarIDs,
+		CacheBypass:        meta.CacheBypass,
 	}
 }
 

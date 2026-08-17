@@ -131,12 +131,25 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
     failed in two directions: a file replaced at the same path could produce a **false hit** —
     serving the old file's transcript or description — and an identical file at a second path always
     missed, which is the reuse an artifact cache exists to capture.
-  - **Identity is established BEFORE the file is consumed** — the digest is taken ahead of the
-    ffmpeg convert / frame sampling, and for video it is hoisted above the width-halving retry loop
-    (it is loop-invariant, and re-reading a multi-GB clip per retry is pure waste). Hashing
-    afterwards leaves a TOCTOU window that content-addressing makes *worse*, not better: a file
-    rotated mid-call would store take A's transcript under `sha256(take B)`, and that poisoned entry
-    is then reachable from **any** path holding B's bytes.
+  - **A TOCTOU window remains, and is DETECTED rather than prevented.** The digest and ffmpeg are
+    two independent opens of a path, so ordering alone cannot close the gap — hashing first merely
+    transposes which side is misattributed (hash-then-read stores the *new* bytes' transcript under
+    the *old* digest; read-then-hash does the reverse). Both are false hits reachable from any path
+    holding the misattributed bytes. Closing it outright would mean sharing one descriptor with
+    ffmpeg. Instead the file is re-`stat`ed **after** the consuming read and compared against what
+    the digest saw; on any difference the call is treated as unidentifiable and **nothing is
+    stored**. One stat, and it covers audio, video, and the case no re-ordering can touch at all: a
+    file still being *appended to*, where the digest covers a prefix and ffmpeg reads more.
+    `mediahash` also verifies it hashed exactly the number of bytes `stat` reported, so a growing
+    file yields an error rather than a confident prefix-identity.
+  - The video digest is hoisted above the width-halving retry loop (it is loop-invariant, and
+    re-reading a multi-GB clip per retry is pure waste), but the verification runs **per iteration** —
+    hoisting alone widened the window to *digest-at-t₀ versus the final successful sampling*, which
+    on a 4K vertical reel is the 4th attempt, minutes later.
+  - **A bypassed cache is observable.** `cache_bypass` on the ledger row names why, because a
+    permanently unidentifiable input is otherwise byte-identical in telemetry to an ordinary cold
+    miss — it would re-run the model at full cost forever while the ledger looked healthy and the
+    hit-rate dashboard invited the wrong diagnosis.
   - **No identity, no cache.** When the digest fails, the work is computed and returned but nothing
     is looked up or stored, and the on-disk media stem is salted so two failures at one path cannot
     overwrite each other's `.srt`/`.txt`. `mediahash.Digest` returns an **error** rather than a

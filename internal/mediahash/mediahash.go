@@ -43,6 +43,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 )
 
 // sampleWindow is how many bytes are read from each of the head, middle and tail
@@ -71,41 +72,95 @@ const sampleWindow = 8 << 20 // 8 MiB
 //
 // So the contract is: no identity, no key. A caller that cannot obtain a digest
 // must bypass the cache entirely — compute the answer, return it, store nothing.
-func Digest(path string, maxFullBytes int64) (string, error) {
+func Digest(path string, maxFullBytes int64) (Ident, error) {
 	if path == "" {
-		return "", errors.New("mediahash: empty path")
+		return Ident{}, errors.New("mediahash: empty path")
 	}
 	fi, err := os.Stat(path)
 	if err != nil {
-		return "", fmt.Errorf("mediahash: stat: %w", err)
+		return Ident{}, fmt.Errorf("mediahash: stat: %w", err)
 	}
 	if fi.IsDir() {
-		return "", fmt.Errorf("mediahash: %s is a directory", path)
+		return Ident{}, fmt.Errorf("mediahash: %s is a directory", path)
 	}
 	size := fi.Size()
+	id := Ident{size: size, mtime: fi.ModTime()}
 	if maxFullBytes > 0 && size > maxFullBytes {
 		d, serr := sampled(path, size)
 		if serr != nil {
-			return "", fmt.Errorf("mediahash: sampled read: %w", serr)
+			return Ident{}, fmt.Errorf("mediahash: sampled read: %w", serr)
 		}
-		return fmt.Sprintf("media:sampled:sz=%d:%s", size, d), nil
+		id.Digest = fmt.Sprintf("media:sampled:sz=%d:%s", size, d)
+		return id, nil
 	}
-	d, herr := full(path)
+	d, herr := full(path, size)
 	if herr != nil {
-		return "", fmt.Errorf("mediahash: read: %w", herr)
+		return Ident{}, fmt.Errorf("mediahash: read: %w", herr)
 	}
-	return fmt.Sprintf("media:sha256:sz=%d:%s", size, d), nil
+	id.Digest = fmt.Sprintf("media:sha256:sz=%d:%s", size, d)
+	return id, nil
 }
 
-func full(path string) (string, error) {
+// Ident is a content identity plus the file metadata it was taken against, so a
+// caller can ask afterwards whether the file it actually consumed is still the
+// one that was hashed.
+type Ident struct {
+	Digest string
+	size   int64
+	mtime  time.Time
+}
+
+// OK reports whether this Ident carries a usable identity.
+func (i Ident) OK() bool { return i.Digest != "" }
+
+// Unchanged re-stats path and reports whether it still matches what Digest saw.
+//
+// # Why hashing first is not enough on its own
+//
+// Digest and the code that CONSUMES the file (ffmpeg) are two independent opens
+// of a path. Hashing first rather than last does not close that window, it only
+// transposes which side gets misattributed: hash-then-read stores the transcript
+// of the NEW bytes under the OLD digest, read-then-hash does the reverse. Both
+// are false hits reachable from any path holding the misattributed bytes.
+//
+// Preventing it would mean sharing one descriptor with ffmpeg. Detecting it costs
+// one stat, works for audio and video alike, and also catches the case a
+// re-order cannot touch at all: a file still being APPENDED to, where the digest
+// covers a prefix and ffmpeg reads more. So the contract here is honest
+// detection, not prevention — a caller that sees false must not store.
+func (i Ident) Unchanged(path string) bool {
+	if !i.OK() {
+		return false
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return fi.Size() == i.size && fi.ModTime().Equal(i.mtime)
+}
+
+// full hashes the whole file and verifies it read exactly the number of bytes
+// stat reported.
+//
+// The length check is not paranoia: a file still being written grows between the
+// stat and the read, so the digest would describe a PREFIX while carrying the
+// stat's size — an internally inconsistent identity that arrives at the caller
+// as a success. Whisper would then transcribe the longer audio and store it under
+// sha256(prefix), so a later, genuinely-truncated copy of that prefix would get a
+// false hit returning audio it does not contain.
+func full(path string, wantSize int64) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	n, err := io.Copy(h, f)
+	if err != nil {
 		return "", err
+	}
+	if n != wantSize {
+		return "", fmt.Errorf("file changed while hashing: stat said %d bytes, read %d", wantSize, n)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

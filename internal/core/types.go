@@ -216,6 +216,17 @@ type Meta struct {
 	// can answer "which exemplars actually fire?" today; with this the histogram
 	// is one query, and a power-law answer means the selection set can be pruned.
 	ExemplarIDs []string `json:"exemplar_ids,omitempty"`
+	// CacheBypass names why this call could neither read nor write the result
+	// cache, when that happened for a reason other than "no cache configured".
+	//
+	// It exists because the alternative is a genuine silent failure: a media file
+	// whose content identity cannot be established is deliberately not cached
+	// (T2-A2 — keying on anything but content is what produces false hits), and
+	// with no field for it that call is byte-identical in telemetry to an ordinary
+	// cold miss. An input on a flaky mount would then re-run whisper at full cost
+	// on every call, forever, while the ledger showed a healthy run of cache
+	// misses and the hit-rate dashboard invited exactly the wrong diagnosis.
+	CacheBypass string `json:"cache_bypass,omitempty"`
 }
 
 // Result is the harness outcome. On success Data holds the validated task output.

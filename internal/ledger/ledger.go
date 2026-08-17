@@ -76,6 +76,10 @@ type Entry struct {
 	PromptPrefixSHA256 string   `json:"prompt_prefix_sha256,omitempty"`
 	ContextHash        string   `json:"context_hash,omitempty"`
 	ExemplarIDs        []string `json:"exemplar_ids,omitempty"`
+	// CacheBypass names why the result cache was skipped entirely, so
+	// "permanently uncacheable input" is one query away instead of being
+	// indistinguishable from a cold miss.
+	CacheBypass string `json:"cache_bypass,omitempty"`
 }
 
 // maxReasonLen bounds a recorded defer reason so a long upstream error can't

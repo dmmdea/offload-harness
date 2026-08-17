@@ -10,11 +10,14 @@ import (
 
 func mustDigest(t *testing.T, path string, maxFull int64) string {
 	t.Helper()
-	d, err := Digest(path, maxFull)
+	id, err := Digest(path, maxFull)
 	if err != nil {
 		t.Fatalf("Digest(%s): %v", path, err)
 	}
-	return d
+	if !id.OK() {
+		t.Fatalf("Digest(%s) returned no error but no identity", path)
+	}
+	return id.Digest
 }
 
 func write(t *testing.T, dir, name string, b []byte) string {
@@ -121,12 +124,12 @@ func TestUnidentifiableInputsReturnAnErrorNotADigest(t *testing.T) {
 		{"empty path", ""},
 		{"directory", dir},
 	} {
-		d, err := Digest(tc.path, 0)
+		id, err := Digest(tc.path, 0)
 		if err == nil {
-			t.Errorf("%s: got digest %q with no error — it would be used as a cache key", tc.name, d)
+			t.Errorf("%s: got identity %q with no error — it would be used as a cache key", tc.name, id.Digest)
 		}
-		if d != "" {
-			t.Errorf("%s: digest must be empty on error, got %q", tc.name, d)
+		if id.OK() {
+			t.Errorf("%s: identity must be unusable on error, got %q", tc.name, id.Digest)
 		}
 	}
 }
@@ -136,15 +139,15 @@ func TestUnidentifiableInputsReturnAnErrorNotADigest(t *testing.T) {
 func TestNoErrorPathYieldsAUsableKey(t *testing.T) {
 	dir := t.TempDir()
 	for _, p := range []string{filepath.Join(dir, "a.wav"), filepath.Join(dir, "b.wav")} {
-		if d, err := Digest(p, 0); err == nil || d != "" {
-			t.Fatalf("%s produced a usable key (%q, err=%v)", p, d, err)
+		if id, err := Digest(p, 0); err == nil || id.OK() {
+			t.Fatalf("%s produced a usable key (%q, err=%v)", p, id.Digest, err)
 		}
 	}
 	// Once the file exists it must produce a real digest — a transient failure
 	// must not be sticky.
 	real := write(t, dir, "a.wav", []byte("now it exists"))
-	if d, err := Digest(real, 0); err != nil || !strings.Contains(d, ":sha256:") {
-		t.Fatalf("digest did not recover once readable: %q err=%v", d, err)
+	if id, err := Digest(real, 0); err != nil || !strings.Contains(id.Digest, ":sha256:") {
+		t.Fatalf("digest did not recover once readable: %q err=%v", id.Digest, err)
 	}
 }
 
