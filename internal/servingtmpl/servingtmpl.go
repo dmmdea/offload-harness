@@ -46,6 +46,13 @@ type Params struct {
 	// membership (the __Q38_ALT__/__Q38_AND__ tokens render empty). It comes from
 	// the tier's include_qwen38 field and defaults to false — mirrors include_26b.
 	IncludeQ38 bool
+	// IncludeQ354B gates the Qwen3.5-4B AGENT entry exactly as IncludeQ38 gates the
+	// 27B: false removes the model block, its matrix var, and its set membership
+	// (the __Q354B_ALT__/__Q354B_AND__ tokens render empty). It comes from the tier's
+	// include_qwen35_4b field and defaults to false. This is the SMALL-tier agent
+	// seat: 3.5GB of VRAM on a 6GB card, for tiers whose workhorse plans poorly but
+	// which have no room for a 27B.
+	IncludeQ354B bool
 
 	// Seats are the tier's alias-backed media seats (vision / STT). Empty is the
 	// common case and MUST render byte-identically to a build that had no seat
@@ -154,6 +161,12 @@ func Render(tmpl string, p Params) (string, error) {
 			return "", err
 		}
 	}
+	if !p.IncludeQ354B {
+		var err error
+		if out, err = dropQ354B(out); err != nil {
+			return "", err
+		}
+	}
 	// Seats go in AFTER the 26B removal and BEFORE substitution: after, so a seat
 	// whose text happens to mention the 26B can never trip drop26B's post-check;
 	// before, so seat blocks are written in the same token vocabulary as the rest
@@ -202,11 +215,28 @@ func Render(tmpl string, p Params) (string, error) {
 		}
 		q38alt, q38and = " | q38", " & q38"
 	}
+	// The Qwen3.5-4B agent membership mirrors the Q38 token pair, gated by
+	// IncludeQ354B. Same refusal-by-name rule: a tier that asked for the seat (and
+	// whose installer just downloaded its weights) must never render a config
+	// silently missing it.
+	q354balt, q354band := "", ""
+	if p.IncludeQ354B {
+		if !definesModel(out, modelQ354B) {
+			return "", fmt.Errorf("this tier sets include_qwen35_4b but the target serving template defines no "+
+				"`%s` model entry, so there is nothing to include. Rendering anyway would emit a config without "+
+				"the agent seat while the installer still downloads its weights — add the %s entry (and "+
+				"its matrix var + __Q354B_*__ set membership) to the template, or drop include_qwen35_4b from the tier",
+				modelQ354B, modelQ354B)
+		}
+		q354balt, q354band = " | q354", " & q354"
+	}
 	for from, to := range map[string]string{
 		"__M26_ALT__":         m26alt,
 		"__M26_AND__":         m26and,
 		"__Q38_ALT__":         q38alt,
 		"__Q38_AND__":         q38and,
+		"__Q354B_ALT__":       q354balt,
+		"__Q354B_AND__":       q354band,
 		"__SEATS_SWAPPABLE__": seatFrag[roleSwappable],
 		"__SEATS_RESIDENT__":  seatFrag[roleResident],
 		"__LLAMA_BIN__":       strings.TrimRight(p.LlamaBin, "/"),
@@ -734,6 +764,16 @@ const modelQ38 = "qwen3.8-27b"
 // __Q38_*__ tokens.
 func dropQ38(tmpl string) (string, error) {
 	return dropModel(tmpl, modelQ38)
+}
+
+// modelQ354B is the Qwen3.5-4B agent entry, gated by the tier's
+// include_qwen35_4b exactly as modelQ38 rides include_qwen38.
+const modelQ354B = "qwen3.5-4b-agent"
+
+// dropQ354B removes the Qwen3.5-4B agent entry — the exact mirror of the Q38
+// strip. Its set membership is handled by the __Q354B_*__ tokens.
+func dropQ354B(tmpl string) (string, error) {
+	return dropModel(tmpl, modelQ354B)
 }
 
 // dropModel removes one model block AND the matrix var naming it, with a

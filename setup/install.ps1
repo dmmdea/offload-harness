@@ -134,6 +134,19 @@ $PINNED = @{
     sha  = 'cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e'
     version = 'cbb841a9'
   }
+  # Qwen3.5-4B AGENT seat for the small tiers (6GB-tier bake-off winner, 2026-08-17:
+  # the only candidate strong on BOTH task shapes across ~40 runs). Gated on the
+  # resolved profile's include_qwen35_4b (Step 5) — mirrors the include_qwen38
+  # mechanism. NO mmproj: this seat is the agent planner, not a vision seat, and the
+  # tier keeps its own vision seat. sha = real LFS oid fetched from the HF tree API
+  # 2026-08-17.
+  'model-qwen35-4b' = @{
+    url  = 'https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-UD-Q4_K_XL.gguf'
+    name = 'Qwen3.5-4B-UD-Q4_K_XL.gguf'
+    size = 2912109728
+    sha  = 'b252c5610a42ca82d20fe2a12813e9d069eed89292907e26c783eeb0bc961bc7'
+    version = 'b252c561'
+  }
   'model-embed' = @{
     url  = 'https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf'
     name = 'embeddinggemma-300m-Q8_0.gguf'
@@ -895,6 +908,7 @@ $manifestComponents['llama-swap'] = $SWAP_TAG
 $modelKeys = @('model-e4b', 'model-embed')
 if ($withFamily) { $modelKeys += @('model-e2b', 'model-26b') }
 $includeQwen38 = $false
+$includeQwen354B = $false
 $profilesJsonStep5 = Join-Path (Join-Path $scriptDir 'templates') 'profiles.json'
 if ($profileId -and (Test-Path $profilesJsonStep5)) {
   $pdoc5 = Get-Content -Raw $profilesJsonStep5 | ConvertFrom-Json
@@ -909,11 +923,22 @@ if ($profileId -and (Test-Path $profilesJsonStep5)) {
       throw "profile '$profileId': include_qwen38 must be a JSON boolean, got '$q38Val' ($($q38Val.GetType().Name)) - fix setup/templates/profiles.json before the download set is chosen"
     }
     $includeQwen38 = ($q38Val -is [bool] -and $q38Val)
+    # Same STRICT bool gate for the small-tier agent seat.
+    $q354Val = $pdoc5.profiles.$profileId.include_qwen35_4b
+    if ($null -ne $q354Val -and -not ($q354Val -is [bool])) {
+      throw "profile '$profileId': include_qwen35_4b must be a JSON boolean, got '$q354Val' ($($q354Val.GetType().Name)) - fix setup/templates/profiles.json before the download set is chosen"
+    }
+    $includeQwen354B = ($q354Val -is [bool] -and $q354Val)
   }
 }
 # The coder/agent seat rides the family gate: OFFLOAD_WITH_FAMILY=0 (lean install)
 # opts out of the largest download even on an include_qwen38 tier.
 if ($includeQwen38 -and $withFamily) { $modelKeys += @('model-qwen38', 'model-qwen38-mmproj') }
+# The Qwen3.5-4B agent seat does NOT ride the family gate. It is 2.9GB (not 18.8GB),
+# and on the small tiers it is the ONLY thing standing between the agent lane and a
+# planner measured at 50% recall — a lean install that silently drops it would ship
+# the tier's weakest configuration while the yaml still names the seat.
+if ($includeQwen354B) { $modelKeys += @('model-qwen35-4b') }
 foreach ($key in $modelKeys) {
   $m = $PINNED[$key]
   $dest = Join-Path $modelDir $m.name

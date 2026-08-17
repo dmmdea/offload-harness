@@ -6,6 +6,55 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.68.0] - 2026-08-17
+
+### Added — the `ampere-6` agent seat: Qwen3.5-4B, the first MEASURED sub-27B agent-seat decision
+
+The 6GB tier's agent planner was the workhorse by default (`offload-e4b`, via the
+workhorse chain) because no sub-27B agent-capability data existed anywhere in the house.
+It exists now: 15 candidates across families were served on the reference RTX 3050 and
+scored on TWO task shapes with FABRICATION as the disqualifying axis. **Qwen3.5-4B
+(UD-Q4_K_XL) is the only candidate strong on BOTH** — 67% extraction recall against the
+incumbent's 50%, and 4/5 on search+reason where the higher-scoring 2B collapses to 1/5.
+
+- New profile field **`include_qwen35_4b`** mirrors the `include_qwen38` mechanism
+  end-to-end: `servingtmpl.Params.IncludeQ354B` strips the model block, its matrix var
+  and its `__Q354B_ALT__`/`__Q354B_AND__` set membership together; `Render` refuses a
+  tier that sets the flag against a template with no `qwen3.5-4b-agent` entry (rendering
+  a config without the seat while the installer downloads its weights is the
+  silent-capability-loss failure the refusal exists to end); `install.ps1` gains the
+  pinned `model-qwen35-4b` download behind the same STRICT JSON-boolean gate.
+- `ampere-6` sets the flag and seeds `config_seed.agent_model = "qwen3.5-4b-agent"`.
+  Only the AGENT seat moves — `offload-e4b` remains the resident tier and cascade
+  workhorse.
+- The seat renders into **both** CUDA templates (linux + windows): a tier is a hardware
+  class, so a capability cannot exist on one OS and not the other.
+- **The download does NOT ride the `OFFLOAD_WITH_FAMILY` gate.** At 2.9GB it is not in
+  the class that gate exists to skip, and on this tier it is the only thing between the
+  agent lane and a planner measured at 50%.
+
+**Two configuration facts are load-bearing and MEASURED — do not "tidy" them away.**
+
+1. The seat writes its llama-server flags **explicitly instead of using `${common}`**,
+   because `${common}` pins `--reasoning off` and this is a thinking model. Measured at
+   the deployed ctx 32768: **67%/67% under llama.cpp's default reasoning, 28%/44% with
+   `--reasoning off`.** Folding this entry into `${common}` — the obvious future cleanup
+   — would silently halve the tier's agent quality, so `render.tests.ps1` now asserts
+   both that the seat omits `--reasoning off` and that it does not use `${common}`.
+2. No sampling flags. The agent loop sends `temperature: 0` on every request
+   (`internal/agent/client.go` `wireReq` — the field has no `omitempty` and is never
+   assigned), so a server-side `--temp`/`--top-p` is inert on this lane.
+
+### Fixed — stale `ampere-6` row and an incomplete `agent_model` rule in the operator guide
+
+The per-profile table still described `ampere-6` as resident `gemma4-e2b` at ctx 16384
+with "q8_0 **mandatory** for 16K on 6 GB" — all three contradicted by the tier's own
+measured 2026-07-26 pass (resident is `offload-e4b`, ctx is 32768, and the mandatory-q8_0
+claim was measured FALSE). The neighbouring paragraph also described `agent_model` as
+purely *derived* from `resident_tier`, which was already incomplete for every seeded tier
+and would have been actively wrong for `ampere-6` after this change, whose resident tier
+equals its workhorse.
+
 ## [0.67.0] - 2026-08-17
 
 ### Added
