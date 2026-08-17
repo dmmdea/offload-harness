@@ -38,6 +38,28 @@ Found by independent review of 0.68.0, reproduced against the real predicate.
   render → SKIP true BEFORE the fix (the bug, reproduced) and false AFTER; the same
   file with the gate OFF → SKIP true (tiers that do not enable a seat are unaffected).
 
+### Added — the measured reasoning invariant is now guarded on BOTH templates
+`TestQ354BSeatKeepsItsMeasuredReasoningInvariant` renders `llama-swap.linux-cuda.yaml`
+AND `llama-swap.win-cuda.yaml` with the gate on and asserts the seat block pins neither
+`--reasoning off` nor `${common}`.
+
+The existing assertions live in `setup/render.tests.ps1`, which renders for the HOST OS,
+and CI pins that job to `windows-latest` — so every one of them covered the WINDOWS
+template only. **Proven, not assumed:** injecting `--reasoning off` into the LINUX seat
+block leaves `render.tests.ps1` reporting `ALL PASS` while the new Go test fails on its
+`linux-cuda` subtest. The `ampere-6` reference box is a Linux server, so the unguarded
+template was the likelier deployment target for the regression that halves this tier's
+agent recall (67% -> 28%, n=3, zero spread).
+
+The two checks are a non-redundant pair: folding the seat into `${common}` does not put
+the literal `--reasoning off` in the rendered block (`${common}` is a llama-swap runtime
+macro the renderer never expands), so only the second check catches that edit.
+
+### Fixed — the ampere-8 strip assertion could not catch an unsubstituted token
+`setup/render.tests.ps1` gated on `-notmatch 'q354'`, but in `__Q354B_ALT__` the
+character after `354` is `B`, a word character, so `q354` finds no boundary and a
+leftover token would pass. ampere-6 already had a `__Q354B_` check; ampere-8 now does too.
+
 ### Added — a Go regression test for the `include_qwen35_4b` refusal
 `TestIncludeQ354BOnAnEntrylessTemplateIsRefused`, mirroring the Q38 tripwire. Nothing
 in Go locked this refusal before, so a change weakening it would have made the gate a
