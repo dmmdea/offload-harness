@@ -239,7 +239,11 @@ foreach ($band in @('min','low','mid','high')) {
 Write-Host "== ampere-8 - qwen3.5-4b agent seat STRIPPED (include_qwen35_4b absent) =="
 $r = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-8' -RamTier 'mid' -BigRam $false
 $a8Functional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' }) -join "`n"
-if ($a8Functional -notmatch 'qwen3\.5-4b-agent' -and $a8Functional -notmatch '\bq354\b') { Ok 'ampere-8 qwen3.5-4b seat STRIPPED (include_qwen35_4b absent)' } else { Bad 'ampere-8 qwen3.5-4b leaked in' }
+# The __Q354B_ check is NOT redundant with '\bq354\b': in '__Q354B_ALT__' the character
+# after 354 is 'B', a word char, so \bq354\b finds no boundary and an unsubstituted token
+# would slip through both of the other two patterns. ampere-6 has this check at :218;
+# ampere-8 needs it for the same reason.
+if ($a8Functional -notmatch 'qwen3\.5-4b-agent' -and $a8Functional -notmatch '\bq354\b' -and $a8Functional -notmatch '__Q354B_') { Ok 'ampere-8 qwen3.5-4b seat STRIPPED (include_qwen35_4b absent)' } else { Bad 'ampere-8 qwen3.5-4b leaked in' }
 Write-Host "== amd-gcn - 8192 / f16 / flash-attn off (vulkan) =="
 $r = Invoke-Render -Backend 'vulkan' -ProfileId 'amd-gcn' -RamTier 'low' -BigRam $false
 $macro = Get-CommonMacro $r.yaml

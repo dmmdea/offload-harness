@@ -200,3 +200,28 @@ func section(doc, key string) string {
 	}
 	return strings.Join(out, "\n")
 }
+
+// TestIncludeQ354BOnAnEntrylessTemplateIsRefused mirrors the Q38 tripwire above for
+// the ampere-6 agent seat. Without it, nothing in Go locks the refusal: a future
+// change that weakened the check would leave IncludeQ354B a silent no-op on a
+// template with no qwen3.5-4b-agent entry, and the installer would still download
+// the 2.9 GB of weights on the same flag. win-cuda-resident is used because it
+// defines qwen3.8-27b but NOT qwen3.5-4b-agent, so it also proves the two gates are
+// independent rather than one flag standing in for the other.
+func TestIncludeQ354BOnAnEntrylessTemplateIsRefused(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "setup", "templates", "llama-swap.win-cuda-resident.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := params()
+	p.IncludeQ354B = true
+	_, err = Render(string(b), p)
+	if err == nil || !strings.Contains(err.Error(), "qwen3.5-4b-agent") || !strings.Contains(err.Error(), "include_qwen35_4b") {
+		t.Fatalf("IncludeQ354B against an entryless template must be refused by name, got %v", err)
+	}
+	// IncludeQ354B=false keeps the existing behavior: the template renders fine.
+	p.IncludeQ354B = false
+	if _, err := Render(string(b), p); err != nil {
+		t.Fatalf("IncludeQ354B=false must still render an entryless template: %v", err)
+	}
+}
