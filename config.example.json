@@ -165,6 +165,8 @@
   "fleet_listen": "127.0.0.1:18811",
   "fleet_node_id": "",
   "fleet_auth_token": "",
+  "fleet_agent_enabled": false,
+  "agent_delegation_enabled": false,
   "fleet_sampler": "auto",
   "primary_gpu_uuid": "",
   "pipelines": null

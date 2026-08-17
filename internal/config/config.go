@@ -678,6 +678,21 @@ type Config struct {
 	// so it must never be reachable unauthenticated beyond the box itself.
 	// Set the SAME value on every node and in the delegator's config.
 	FleetAuthToken string `json:"fleet_auth_token,omitempty"`
+	// FleetAgentEnabled opts this NODE into executing fleet "agent" tasks
+	// (docs/specs/2026-08-16-multi-node-agent-delegation.md). Default false:
+	// the agent lane runs a coding-agent loop on caller-supplied contracts, so
+	// a node advertises and accepts that work only when the operator turns it
+	// on — capability is derived from bindings everywhere else in the fleet,
+	// but THIS one is an explicit switch because the binding (an agent seat)
+	// exists on every tier while the ROLE (sub-agent worker) is a per-box
+	// decision.
+	FleetAgentEnabled bool `json:"fleet_agent_enabled,omitempty"`
+	// AgentDelegationEnabled opts the DELEGATOR side in: it gates the
+	// agent_delegate MCP tool's registration (tools/list stays byte-identical
+	// when off) and the delegate CLI verb's willingness to place work.
+	// Default false. Distinct from FleetAgentEnabled deliberately — a box can
+	// be a worker without being a delegator and vice versa.
+	AgentDelegationEnabled bool `json:"agent_delegation_enabled,omitempty"`
 	// FleetSampler selects the per-render VRAM footprint source: "auto" (PDH
 	// per-process tree on Windows, nvidia-smi global-delta elsewhere),
 	// "pdh-shared" (J3: the tree summing Dedicated+Shared — REQUIRED on UMA
@@ -931,6 +946,8 @@ func Default() Config {
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
 		FleetAuthToken:                "",                // "" = no agent-lane auth → agent dispatch loopback-only; media lane never auths (v1 scope)
+		FleetAgentEnabled:             false,             // node-side agent-lane worker role: explicit operator opt-in
+		AgentDelegationEnabled:        false,             // delegator-side surfaces (agent_delegate MCP + CLI placement): opt-in
 		FleetSampler:                  "auto",            // auto|pdh|pdh-shared|global (FLEET-NODE.md)
 		PrimaryGPUUUID:                "",                // "" = largest-total headline rule; set to pin by UUID (FLEET-NODE.md)
 		Pipelines:                     nil,               // empty = no pipeline-job routes on this box (opt-in per pipeline)
