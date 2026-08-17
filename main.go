@@ -296,6 +296,16 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 	// is byte-identical to a pre-seat build.
 	client := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, time.Duration(cfg.RequestTimeoutSec)*time.Second).
 		WithSeatEndpoints(cfg.SeatEndpoints)
+	// WithRemoteLanes threads the busy-aware cascade lanes (cascade_remote_lanes,
+	// roast delta 7): while the machine-wide GPU lease is held, a cascade call
+	// whose model a lane roster-serves rides that lane instead of queueing behind
+	// the local card. Guarded so the absent key stays byte-identical (pinned).
+	if len(cfg.CascadeRemoteLanes) > 0 {
+		gpuLockPath, stateDir := cfg.GPULockPath, cfg.StateDir
+		client = client.WithRemoteLanes(cfg.CascadeRemoteLanes,
+			func() bool { return delegate.LocalBusy(gpuLockPath, stateDir) },
+			llamaclient.RosterResident())
+	}
 	// Cache + ledger are bbolt (single-writer, exclusive file lock). When the
 	// long-running MCP server holds the lock, a CLI invocation degrades to
 	// cache-less rather than aborting — they speed things up / report savings,

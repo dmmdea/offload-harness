@@ -34,6 +34,13 @@ type Client struct {
 	// overrides — the nil path is byte-identical to a pre-seat client.
 	seatEndpoints map[string]string
 	safeHTTP      *http.Client
+	// remoteLanes maps a model id/alias to a busy-aware failover base
+	// (lanes.go, roast delta 7); laneBusy and laneResident are its two
+	// per-call gates. All three stay nil unless WithRemoteLanes installs
+	// them — the nil path is byte-identical to a pre-lanes client.
+	remoteLanes  map[string]string
+	laneBusy     func() bool
+	laneResident func(base, model string) bool
 }
 
 // New builds a client. path is the generation route (default
@@ -167,8 +174,10 @@ type chatResp struct {
 // default (empty = use the default); this is how the family cascade routes to
 // different tiers (e2b / e4b / 26b-a4b) per call. The resolved model also
 // picks the BASE: a seat-endpoint override (endpoints.go) routes the request
-// to that seat's remote tailnet base through the dial-guarded client — the
-// vision paths below thread the same pair. When topLogprobs > 0 the
+// to that seat's remote tailnet base through the dial-guarded client, and a
+// busy-aware cascade remote lane (lanes.go) does the same only while the
+// local GPU lease is held — the vision paths below thread the same pair.
+// When topLogprobs > 0 the
 // server returns per-token raw (pre-grammar-mask) logprobs in GenResult.Logprobs
 // — used by the confidence gate to detect a genuinely uncertain decision.
 func (c *Client) Generate(ctx context.Context, model, system, user, grammar string, maxTokens int, temperature float64, topLogprobs int) (GenResult, error) {
@@ -197,12 +206,13 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 		return GenResult{}, err
 	}
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseFor(model)+c.path, bytes.NewReader(buf))
+	base, hc := c.resolveEndpoint(model) // ONE decision: base and client must never split (lanes.go)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+c.path, bytes.NewReader(buf))
 	if err != nil {
 		return GenResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpFor(model).Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return GenResult{}, err
 	}
@@ -246,12 +256,13 @@ func (c *Client) GenerateVision(ctx context.Context, model, system, user string,
 		return GenResult{}, err
 	}
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseFor(model)+c.path, bytes.NewReader(buf))
+	base, hc := c.resolveEndpoint(model) // ONE decision: base and client must never split (lanes.go)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+c.path, bytes.NewReader(buf))
 	if err != nil {
 		return GenResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpFor(model).Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return GenResult{}, err
 	}
@@ -301,12 +312,13 @@ func (c *Client) GenerateVisionInterleaved(ctx context.Context, model, system st
 		return GenResult{}, err
 	}
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseFor(model)+c.path, bytes.NewReader(buf))
+	base, hc := c.resolveEndpoint(model) // ONE decision: base and client must never split (lanes.go)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+c.path, bytes.NewReader(buf))
 	if err != nil {
 		return GenResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpFor(model).Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return GenResult{}, err
 	}

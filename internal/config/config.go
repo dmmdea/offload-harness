@@ -100,6 +100,18 @@ type Config struct {
 	// (the RESOLVED address must be loopback/tailnet — the DNS-rebinding guard
 	// a load-time string check cannot provide).
 	SeatEndpoints map[string]string `json:"seat_endpoints,omitempty"`
+	// CascadeRemoteLanes maps a model seat (same key rule as SeatEndpoints) to a
+	// remote OpenAI-compatible base URL that ALSO serves that model — the
+	// busy-aware failover lane for the daily cascade (roast delta 7), distinct
+	// from SeatEndpoints' static always-remote pin: a lane is consulted per call
+	// and taken only while the local machine-wide GPU lease is held AND a cached
+	// roster probe confirms the lane serves the model; every other call stays on
+	// Endpoint. Quality-identical models only — the SAME model id served
+	// remotely, never a downgrade: routing never changes WHICH model answers,
+	// only WHERE. Empty/absent = the cascade never leaves this box. Values are
+	// vetted by the same double guard as SeatEndpoints: netguard.TailnetURL at
+	// load (naming the key) and the SafeTransport dial gate on every request.
+	CascadeRemoteLanes map[string]string `json:"cascade_remote_lanes,omitempty"`
 	// Model is the default workhorse (E4B) — used for summarize/extract and as
 	// the fallback for any task without a specific route. Empty = dedicated server.
 	Model string `json:"model"`
@@ -963,6 +975,7 @@ func Default() Config {
 		PrimaryGPUUUID:                "",                // "" = largest-total headline rule; set to pin by UUID (FLEET-NODE.md)
 		Pipelines:                     nil,               // empty = no pipeline-job routes on this box (opt-in per pipeline)
 		SeatEndpoints:                 nil,               // empty = every seat on Endpoint (opt-in per box, like Pipelines)
+		CascadeRemoteLanes:            nil,               // empty = the cascade never fails over off-box (opt-in per box)
 	}
 }
 
@@ -1009,21 +1022,26 @@ func Load(path string) (Config, error) {
 	if err := validatePipelines(c.Pipelines); err != nil {
 		return c, err
 	}
-	if err := validateSeatEndpoints(c.SeatEndpoints); err != nil {
+	if err := validateTailnetEndpoints("seat_endpoints", c.SeatEndpoints); err != nil {
+		return c, err
+	}
+	if err := validateTailnetEndpoints("cascade_remote_lanes", c.CascadeRemoteLanes); err != nil {
 		return c, err
 	}
 	return c, nil
 }
 
-// validateSeatEndpoints checks every seat_endpoints value against the tailnet
-// guard so a public/LAN base URL fails LOUDLY at config load — never silently
-// at the first overridden completion (the same load-time doctrine as
-// validatePipelines). Each error names the seat KEY: a config with several
-// seats bound must not leave the operator guessing which one is broken. Keys
-// are visited in SORTED order so that with more than one bad value the FIRST
+// validateTailnetEndpoints checks every value of a model→base-URL map (the
+// seat_endpoints static pins and the cascade_remote_lanes busy-aware lanes —
+// one validator so the two keys cannot drift) against the tailnet guard, so a
+// public/LAN base URL fails LOUDLY at config load — never silently at the
+// first routed completion (the same load-time doctrine as validatePipelines).
+// Each error names the JSON key AND the map KEY: a config with several seats
+// bound must not leave the operator guessing which one is broken. Keys are
+// visited in SORTED order so that with more than one bad value the FIRST
 // error returned is deterministic across runs (Go randomizes map iteration),
 // which matters to anyone diffing a failing load or testing the error text.
-func validateSeatEndpoints(endpoints map[string]string) error {
+func validateTailnetEndpoints(jsonKey string, endpoints map[string]string) error {
 	keys := make([]string, 0, len(endpoints))
 	for key := range endpoints {
 		keys = append(keys, key)
@@ -1031,7 +1049,7 @@ func validateSeatEndpoints(endpoints map[string]string) error {
 	sort.Strings(keys)
 	for _, key := range keys {
 		if err := netguard.TailnetURL(endpoints[key]); err != nil {
-			return fmt.Errorf("seat_endpoints[%q]: %w", key, err)
+			return fmt.Errorf("%s[%q]: %w", jsonKey, key, err)
 		}
 	}
 	return nil

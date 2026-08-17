@@ -691,6 +691,37 @@ under the harness base dir at `delegation-log/YYYY-MM-DD.jsonl`.
 | deferred `poll deadline` | The node outran `timeout_sec` + 60 s grace (or died mid-run). Check the worker's serve log; the job id in `delegation-log/` reconciles it. |
 | deferred `output failed schema: …` | The schema was too ambitious for the seat. Flatten it — a `properties` map of string / number / integer / boolean / string-array / enum fields is the supported subset. |
 
+### Busy-hour cascade failover (`cascade_remote_lanes`)
+
+The daily lane — the `offload_summarize` / `offload_classify` / `offload_extract` /
+`offload_triage` calls a session fires dozens of times a week — can fail over **per call**
+to another node while this box's GPU is held by a render. Opt in on the box whose cascade
+should fail over, in its `~/.local-offload/config.json`:
+
+```json
+{
+  "cascade_remote_lanes": { "offload-e4b": "http://<node-b>:11436" }
+}
+```
+
+Key = the exact model id or llama-swap alias a cascade call names; value = a tailnet base
+URL whose llama-swap **serves that same model**. Semantics, in order:
+
+- A `seat_endpoints` static pin on the same model always wins — a pinned seat is *always*
+  remote; a lane is *busy-hours only*.
+- A lane is taken only when the local machine-wide GPU lease is held **and** a roster probe
+  (alias-aware, cached 30 s per lane, fail-closed) confirms the lane serves the model.
+  Idle GPU, probe failure, or a roster miss → the call stays local, silently and safely.
+- **Quality-identical by construction**: the lane must serve the SAME model — the failover
+  never changes *which* model answers, only *where*. Never point a lane at a smaller tier.
+- Every reroute writes one serve-log line: `cascade remote lane: <model> -> <base> (local
+  GPU lease held)`. No lines during a render = the lane never engaged — check that the
+  lane's llama-swap actually serves the alias (`curl http://<node-b>:11436/v1/models`).
+
+Lane URLs pass the same tailnet guard as everything else here (loopback, `100.64.0.0/10`,
+dotless MagicDNS, or your own tailnet zone; validated at config load naming the key, and
+again at every dial).
+
 ---
 
 ## 5. Add / replace a model in llama-swap.yaml

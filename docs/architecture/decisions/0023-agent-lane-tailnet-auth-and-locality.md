@@ -52,7 +52,8 @@ model. What delegation may reach is enforced structurally, in two layers
   seat endpoints exist to name MagicDNS hosts, so this lane pins instead of banning.
 
 The same guard pair covers the Phase-A `seat_endpoints` config (per-model remote completion
-bases): values are vetted at load, naming the offending key, and again at every dial.
+bases) and the `cascade_remote_lanes` config (busy-aware cascade failover bases, roast
+delta 7): values are vetted at load, naming the offending key, and again at every dial.
 
 ### 2. Transport: tailnet WireGuard; bearer token on the agent lane only (v1)
 
@@ -125,12 +126,16 @@ joins the agent lane by config alone**: set `fleet_agent_enabled: true`, the sha
 delegator's remotes. No code change; the placement gate picks it up from its own
 `/fleet/health` advertisement.
 
-### 6. Remote completion lanes (`seat_endpoints`) are tokenless-on-tailnet — accepted, noted
+### 6. Remote completion lanes (`seat_endpoints`, `cascade_remote_lanes`) are tokenless-on-tailnet — accepted, noted
 
-Phase A lets any model seat resolve to a remote llama-swap base over the tailnet. llama-swap
-itself has no authentication, so these lanes carry no credential — accepted on the same
-WireGuard-transport grounds as above, and noted here so the gap is a recorded decision rather
-than an oversight. The lanes still ride the full dial-time tailnet guard.
+Phase A lets any model seat resolve to a remote llama-swap base over the tailnet — statically
+(`seat_endpoints`: that seat is always remote) or busy-aware (`cascade_remote_lanes`, roast
+delta 7: the daily cascade's calls ride a lane only while the local machine-wide GPU lease is
+held and the lane's roster verifiably serves the SAME model — quality-identical failover,
+fail-closed to local, logged per rerouted call). llama-swap itself has no authentication, so
+these lanes carry no credential — accepted on the same WireGuard-transport grounds as above,
+and noted here so the gap is a recorded decision rather than an oversight. The lanes still
+ride the full dial-time tailnet guard.
 
 ### 7. `delegate_subtask` (the in-loop tool) is parked to v2
 

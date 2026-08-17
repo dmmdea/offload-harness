@@ -28,6 +28,15 @@ no transcript ever crosses the wire. Decisions recorded in ADR 0023.
   (`llamaclient.BaseFor`), guarded twice — `netguard.TailnetURL` at config load (loopback,
   `100.64.0.0/10` literals, dotless MagicDNS names, house-tailnet-zone hosts only) and the
   resolve-and-pin `SafeTransport` dial gate on every request (DNS-rebinding defense).
+- **Busy-aware cascade remote lanes** (`cascade_remote_lanes` config): the DAILY lane's
+  invisible failover — while the local machine-wide GPU lease is held
+  (`delegate.LocalBusy`), a cascade text call (summarize/classify/extract/triage) whose
+  model a configured lane roster-serves routes to that lane instead of queueing behind the
+  local card; logged per rerouted call. Distinct from `seat_endpoints`' static
+  always-remote pin, and quality-identical by construction: the lane must serve the SAME
+  model id/alias (verified by a 30s-cached alias-aware roster probe, fail-closed to
+  local), so routing never changes WHICH model answers, only WHERE. Same double guard as
+  seat endpoints: `TailnetURL` at load naming the key, `SafeTransport` at every dial.
 - **Agent-lane bearer auth** (`fleet_auth_token`): agent dispatches and polls of
   agent-created jobs require the token (SHA-256 + constant-time compare); a tokenless
   non-loopback listener refuses agent dispatches 403 at ack and withholds the task from
@@ -61,9 +70,10 @@ no transcript ever crosses the wire. Decisions recorded in ADR 0023.
   context-budget table (at an 8k seat, ~2–4k tokens of practical contract content) in
   `docs/OPERATOR-GUIDE.md`; delegation surfaces in `docs/systems/coding-agent.md`.
 
-Config keys added: `seat_endpoints`, `agent_ctx_tokens`, `fleet_auth_token`,
-`fleet_agent_enabled`, `agent_delegation_enabled` — all default off/empty; every existing
-path behaves byte-identically when they are absent (pinned by test).
+Config keys added: `seat_endpoints`, `cascade_remote_lanes`, `agent_ctx_tokens`,
+`fleet_auth_token`, `fleet_agent_enabled`, `agent_delegation_enabled` — all default
+off/empty; every existing path behaves byte-identically when they are absent (pinned by
+test).
 
 Deliberately parked to v2: the in-loop `delegate_subtask` tool. v1's surfaces are the MCP
 tool and the CLI; the hop limit holds structurally meanwhile — no delegate tool is
