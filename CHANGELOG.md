@@ -6,7 +6,7 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.65.0] - 2026-08-17
+## [0.66.0] - 2026-08-17
 
 Multi-node sub-agent delegation. Released as 0.65.0 rather than 0.63.0 because a
 concurrent session shipped 0.63.0 and 0.64.0 from the same repo while this branch
@@ -421,6 +421,39 @@ test).
 Deliberately parked to v2: the in-loop `delegate_subtask` tool. v1's surfaces are the MCP
 tool and the CLI; the hop limit holds structurally meanwhile — no delegate tool is
 registered for any caller, and a wire contract executes at derived depth ≥ 1.
+
+## [0.65.0] - 2026-08-17
+
+### Added
+
+- **Agent-loop prefill instrument** (`internal/agent/prefillstats.go`, memory-frontier
+  T2-B *re-aimed*). Aggregates the SERVER's own prefill accounting across an agent run
+  and reports it on `Result.Prefill` and on the `local-agent` stderr summary: KV reuse
+  %, tokens prefilled, prefill ms, and per-step averages.
+  - **Why it replaced what T2-B originally proposed.** T2-B was ranked "highest
+    leverage/effort in track" — restructure task prompts so the BM25 exemplar injection
+    stops mutating the FRONT of consecutive prompts and defeating llama.cpp's prefix
+    reuse. Then the ledger was measured: the text cascade's prompts have a **median of
+    177 tokens**, and the *entire* 34.5-day prefill is ~412 s, i.e. **~12 seconds per
+    day**. Eliminating 100% of it saves 12 s/day, against a restructure carrying a
+    stated accept-rate-parity (quality) risk. Falsified by arithmetic.
+  - **But the ledger never sees the agent loop**, which re-sends a long system prompt
+    plus tool schemas plus a growing transcript on *every step* — structurally the one
+    workload here with a large repeated prefix, and entirely unmeasured. So the
+    instrument ships first and decides whether the expensive change is worth making.
+  - The per-call half already existed (`Completion.Serve`); what was missing was any
+    **aggregation** — `Serve` was consumed only by the token calibrator and
+    `compaction_eval`, so the question could not be answered from a real run at all.
+  - `KVReusePct` is `CacheN/(CacheN+PromptN)`, **not** `CacheN/PromptN` — the latter
+    excludes the cached tokens from its own denominator and runs past 100%.
+  - **Unmeasured is not zero.** A backend reporting no `timings` yields
+    `basis: "insufficient_data"` and a `null` rate, never a fabricated 0% reuse. This
+    is the same defect class as the `duplicate_input_rate` fix in 0.62.x, where an
+    unmeasured 0 would have closed a gate that was never measured.
+  - **Always-on, and therefore mutex-guarded.** `--serve` shares one `*Loop` across
+    concurrent HTTP handlers — the race that gated the token calibrator OFF by default.
+    An instrument that must be switched on measures a special mode rather than real
+    traffic, so this one is unconditional and pays for that with a lock.
 
 ## [0.64.0] - 2026-08-17
 

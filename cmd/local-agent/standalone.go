@@ -270,6 +270,29 @@ func runStandalone(ctx context.Context, loop *agent.Loop, o standaloneOpts) erro
 			fmt.Fprintf(os.Stderr, "[standalone] %s: token-cal NOT fitted (%d obs) — budget unchanged at %d\n",
 				gid, tc.Observations, tc.RawBudget)
 		}
+		// T2-B: the server's own prefill accounting for this run. This is the
+		// measurement that DECIDES whether prefix-stability work is worth doing
+		// here — the ledger killed the original target (median 177-token cascade
+		// prompts, ~12 s/day of prefill in total) but never sees the agent loop,
+		// which re-sends a long system prompt plus tool schemas plus a growing
+		// transcript on every step.
+		//
+		// Basis is printed, not just the rate: a backend that reports no timings
+		// must read as "unmeasured", never as a measured 0% reuse.
+		if pf := res.Prefill; pf.Basis == "measured" {
+			reuse := "n/a"
+			if pf.KVReusePct != nil {
+				reuse = fmt.Sprintf("%.1f%%", *pf.KVReusePct)
+			}
+			avg := 0.0
+			if pf.AvgPrefillTokensPerStep != nil {
+				avg = *pf.AvgPrefillTokensPerStep
+			}
+			fmt.Fprintf(os.Stderr, "[standalone] %s: prefill over %d step(s) — KV reuse %s, %d tokens prefilled in %.0f ms (avg %.0f tok/step)\n",
+				gid, pf.ObservedSteps, reuse, pf.PrefillTokens, pf.PrefillMS, avg)
+		} else {
+			fmt.Fprintf(os.Stderr, "[standalone] %s: prefill UNMEASURED (backend reported no timings on any step)\n", gid)
+		}
 		// Degrade transition note (once per process) + per-goal rung in the
 		// trace: --queue is the unattended mode, so the sticky downgrade must
 		// be visible in BOTH the live stderr and the after-the-fact audit
