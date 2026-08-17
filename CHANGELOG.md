@@ -8,6 +8,37 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [0.66.0] - 2026-08-17
 
+### Added
+
+- **Reliability bands** (`loupe`, memory-frontier R2-14) — per-(task, tier) success/defer/
+  escalate counts, with a rate published only above a 20-sample floor. **Report half only:
+  the routing half is deliberately not built.** At this call volume most cells hold well under
+  a sample a day; smoothing would make noisy cells look confident, and a mis-ordered
+  escalation rung is a quality regression on a quality-first stack. Cells below the floor
+  report their count and `insufficient_data` — never a rate. Against the live ledger:
+  **15 cells measured, 32 suppressed**, which is exactly the thinness that killed the routing
+  half.
+- **Failure atlas** (`loupe`, memory-frontier R2-16) — defer classes histogrammed with a
+  per-month recurrence and a **self-stated verdict**, so the gate ("a non-obsolete class
+  recurring >= 5/month") cannot be quietly reinterpreted later. Obsolete classes are excluded
+  from the gate but still **reported with their counts**, so the exclusion is auditable rather
+  than a silent filter.
+  - **The exclusion pattern had to be measured, not assumed — twice.** The first version
+    matched `"exceeds the available context size"`, which never fires: **the ledger truncates
+    reasons**, so the stored string is cut mid-word to `"(10532 tokens) exceeds the availa"`.
+    It reported *0 obsolete* against a ledger holding **12**. Matching `"tokens) exceeds"`
+    survives truncation.
+  - **And the opposite direction is the more dangerous one.** `context deadline exceeded` /
+    `context canceled` are Go HTTP timeout errors, not context-*window* overflow. A loose
+    `"context ..."` pattern would classify them obsolete and silently drop a **live** failure
+    class out of the gate. Four such rows exist in the live ledger across three tiers; a test
+    guards that direction specifically.
+  - **Obsolescence is evidenced, not asserted:** all 12 occurrences are on `gemma-4-26b`,
+    dated 2026-07-23/24, at 8.6k-11.4k tokens — before the cascade seats moved to 131k
+    windows. Checked by tier, date and request size.
+
+## [0.66.0] - 2026-08-17
+
 Multi-node sub-agent delegation. Released as 0.65.0 rather than 0.63.0 because a
 concurrent session shipped 0.63.0 and 0.64.0 from the same repo while this branch
 was in adversarial review; the entries below were written across that review cycle.
