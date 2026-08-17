@@ -26,6 +26,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/confhead"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/eval"
 	"github.com/dmmdea/offload-harness/internal/exemplars"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
@@ -101,6 +102,8 @@ func main() {
 		err = runAssessImage(args)
 	case "mcp":
 		err = runMCP(args)
+	case "delegate":
+		err = runDelegate(args)
 	case "fleet-serve":
 		err = runFleetServe(args)
 	case "fleet-measure":
@@ -224,6 +227,7 @@ Usage:
   local-offload nim <file|-|"text"> [--model id] [--base url] [--system "..."] [--max-tokens N] [--temp F] [--json]
   local-offload nim --list-models        list a NIM endpoint's model ids (free hosted catalog or self-hosted)
   local-offload mcp                      run as an MCP server (stdio)
+  local-offload delegate --contract file.json [--route auto|local|remote] [--read-root DIR] [--remote http://node:18811]...   place delegation-contract subtasks on this box or tailnet fleet nodes (needs agent_delegation_enabled)
   local-offload fleet-serve [--listen ADDR] [--listen-trusted-network] [--node-id NAME]   join the fleet-dispatcher fleet (health/dispatch/jobs on :18811; docs/FLEET-NODE.md)
   local-offload fleet-measure            prime the fleet footprint store: one minimal render per configured task, then print the recorded entries
   local-offload ledger [--since DAYS]    token-savings report
@@ -1584,6 +1588,102 @@ func runMCP(args []string) error {
 	stopReloader := p.StartReloader(0) // 0 => default interval
 	defer stopReloader()
 	return mcpserver.New(p).Run(context.Background(), version)
+}
+
+// repeatedFlag collects a repeatable string flag (--remote a --remote b).
+type repeatedFlag []string
+
+func (r *repeatedFlag) String() string { return strings.Join(*r, ",") }
+func (r *repeatedFlag) Set(v string) error {
+	*r = append(*r, v)
+	return nil
+}
+
+// runDelegate is the CLI surface onto delegate.Run (multi-node delegation,
+// Task 6): same intake, engine, and response JSON as the MCP agent_delegate
+// tool, for testing and scripts. Exit code contract: 0 even when subtasks
+// DEFER (a defer is a success shape — the result JSON says what happened);
+// non-zero only for transport/config errors (bad flags, disabled role,
+// unreadable contract file, failed subtasks).
+func runDelegate(args []string) error {
+	fs := flag.NewFlagSet("delegate", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	contractPath := fs.String("contract", "", "path to the delegation contract JSON: one subtask object or an array of up to 8 (fields: goal, context, context_paths, output_schema, acceptance, profile, max_steps, timeout_sec)")
+	route := fs.String("route", "auto", "placement route: auto (idle-local wins) | local (force in-process) | remote (force a fleet node)")
+	readRoot := fs.String("read-root", "", "directory context_paths may be read from (default: the current dir)")
+	var remotes repeatedFlag
+	fs.Var(&remotes, "remote", "remote fleet node base URL, tailnet-only (repeatable)")
+	_ = fs.Parse(args)
+	if err := leftoverArgErr(fs, "delegate"); err != nil {
+		return err
+	}
+	cfg := loadCfg(fs)
+	// Same switch that gates the MCP tool's registration (roast delta 13): a
+	// box is a DELEGATOR only by explicit opt-in.
+	if !cfg.AgentDelegationEnabled {
+		return fmt.Errorf("agent delegation is disabled on this box — set \"agent_delegation_enabled\": true in the config")
+	}
+	if *contractPath == "" {
+		return fmt.Errorf("--contract required (a subtask JSON file)")
+	}
+	specs, err := parseContractFile(*contractPath)
+	if err != nil {
+		return err
+	}
+	contracts := make([]core.AgentContract, 0, len(specs))
+	for i, spec := range specs {
+		c, perr := delegate.PrepareContract(spec, *readRoot)
+		if perr != nil {
+			return fmt.Errorf("subtask %d: %w", i, perr)
+		}
+		contracts = append(contracts, c)
+	}
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	results, sum, err := delegate.Run(context.Background(), cfg, p.RunAgentContract, contracts, *route, remotes)
+	if err != nil {
+		return err
+	}
+	out, err := json.MarshalIndent(delegate.WireResponse(results, sum), "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(out))
+	if sum.Failed > 0 {
+		// Failed = transport/config-class per-subtask errors (auth rejected,
+		// dispatch refused, broken wire) — the non-zero class. Defers and
+		// failed-verification are RESULT shapes: the JSON above reports them
+		// and the exit stays 0, matching every other verb's defer posture.
+		return fmt.Errorf("%d subtask(s) failed (transport/config) — see results[].reason", sum.Failed)
+	}
+	return nil
+}
+
+// parseContractFile reads a delegation contract file: either ONE subtask
+// object or an array of them. Tolerant decode (the wire's reader posture) —
+// unknown fields are ignored, so a contract file written for a newer harness
+// still parses here.
+func parseContractFile(path string) ([]delegate.SubtaskSpec, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading contract file: %w", err)
+	}
+	trimmed := strings.TrimSpace(string(b))
+	if strings.HasPrefix(trimmed, "[") {
+		var specs []delegate.SubtaskSpec
+		if err := json.Unmarshal([]byte(trimmed), &specs); err != nil {
+			return nil, fmt.Errorf("contract file %s: %w", path, err)
+		}
+		return specs, nil
+	}
+	var spec delegate.SubtaskSpec
+	if err := json.Unmarshal([]byte(trimmed), &spec); err != nil {
+		return nil, fmt.Errorf("contract file %s: %w", path, err)
+	}
+	return []delegate.SubtaskSpec{spec}, nil
 }
 
 // nvidiaSmiMemory shells the global VRAM query (MiB CSV) that feeds the

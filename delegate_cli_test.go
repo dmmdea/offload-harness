@@ -1,0 +1,87 @@
+package main
+
+// CLI-surface coverage for the `delegate` verb (multi-node delegation,
+// Task 6), in the refiner_cli_test.go pattern: unit-test the verb's parsing
+// helpers directly — a full-process smoke needs a live planner seat and lives
+// in the Task-8 e2e instead. parseContractFile must accept BOTH file shapes
+// (one subtask object, or an array) and carry context_paths through, since
+// the file is the CLI's whole intake surface.
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func writeContract(t *testing.T, content string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "contract.json")
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestParseContractFileSingleObject(t *testing.T) {
+	p := writeContract(t, `{
+		"goal": "digest the docs",
+		"context": [{"name": "a.md", "text": "alpha"}],
+		"context_paths": ["notes/b.md"],
+		"output_schema": {"properties": {"answer": {"type": "string"}}},
+		"acceptance": ["nonempty:answer"],
+		"max_steps": 6
+	}`)
+	specs, err := parseContractFile(p)
+	if err != nil {
+		t.Fatalf("parseContractFile: %v", err)
+	}
+	if len(specs) != 1 {
+		t.Fatalf("specs = %d, want 1", len(specs))
+	}
+	s := specs[0]
+	if s.Goal != "digest the docs" || s.MaxSteps != 6 {
+		t.Errorf("spec = %+v", s.AgentContract)
+	}
+	if len(s.Context) != 1 || s.Context[0].Name != "a.md" {
+		t.Errorf("context = %+v", s.Context)
+	}
+	if len(s.ContextPaths) != 1 || s.ContextPaths[0] != "notes/b.md" {
+		t.Errorf("context_paths = %v (the delegator-side extension must ride the file format)", s.ContextPaths)
+	}
+	if len(s.Acceptance) != 1 || len(s.OutputSchema) == 0 {
+		t.Errorf("acceptance/schema = %v/%s", s.Acceptance, s.OutputSchema)
+	}
+}
+
+func TestParseContractFileArray(t *testing.T) {
+	p := writeContract(t, `[{"goal": "one"}, {"goal": "two", "timeout_sec": 30}]`)
+	specs, err := parseContractFile(p)
+	if err != nil {
+		t.Fatalf("parseContractFile: %v", err)
+	}
+	if len(specs) != 2 || specs[0].Goal != "one" || specs[1].TimeoutSec != 30 {
+		t.Fatalf("specs = %+v", specs)
+	}
+}
+
+func TestParseContractFileErrors(t *testing.T) {
+	if _, err := parseContractFile(filepath.Join(t.TempDir(), "absent.json")); err == nil {
+		t.Error("a missing file must error, not return zero subtasks")
+	}
+	p := writeContract(t, `{"goal": unquoted}`)
+	if _, err := parseContractFile(p); err == nil {
+		t.Error("malformed JSON must error")
+	}
+}
+
+func TestRepeatedFlagCollectsEveryValue(t *testing.T) {
+	var r repeatedFlag
+	for _, v := range []string{"http://a:18811", "http://b:18811"} {
+		if err := r.Set(v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(r) != 2 || r[0] != "http://a:18811" || r[1] != "http://b:18811" {
+		t.Fatalf("repeatedFlag = %v", r)
+	}
+}

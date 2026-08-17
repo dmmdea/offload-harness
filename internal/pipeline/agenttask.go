@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -209,6 +210,65 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	wire.Structured = structured
 	wire.TokensOut = tokensOut
 	return finish(wire)
+}
+
+// RunAgentContract executes one delegation contract IN-PROCESS on this
+// pipeline — the delegator-side LOCAL placement entry (Task 6; it satisfies
+// delegate.LocalRunner). It mirrors fleetnode.buildAgentRun's materialization
+// discipline — a job-scoped dir under BaseDir()/pipeline-jobs/ (so
+// SweepOrphanedPipelineJobs reclaims a crash's leftovers), context docs under
+// <dir>/context/, removed when the run ends — then goes through Pipeline.Run
+// (NOT runAgentTask directly) so a local placement takes byte-for-byte the
+// same route a fleet node's Runner.Run takes. Differences from the wire path,
+// both deliberate: Depth stays caller-set (a delegator-side local run IS the
+// origin; buildAgentRun derives ≥1 only for wire arrivals), and OutputSchema
+// is NOT required (roast delta 3 gates REMOTE placement on it; a local run's
+// text-verb acceptance can stand alone).
+func (p *Pipeline) RunAgentContract(ctx context.Context, contract core.AgentContract) (core.AgentWireResult, error) {
+	if err := contract.Validate(); err != nil {
+		return core.AgentWireResult{}, err
+	}
+	jobsRoot := filepath.Join(p.cfg.BaseDir(), "pipeline-jobs")
+	if err := os.MkdirAll(jobsRoot, 0o755); err != nil {
+		return core.AgentWireResult{}, fmt.Errorf("agent contract: creating pipeline-jobs dir: %w", err)
+	}
+	// MkdirTemp is the exclusive create (buildAgentRun's rule): the id is
+	// minted here, so uniqueness comes by construction, not caller discipline.
+	jobDir, err := os.MkdirTemp(jobsRoot, "agent-local-*")
+	if err != nil {
+		return core.AgentWireResult{}, fmt.Errorf("agent contract: creating job dir: %w", err)
+	}
+	defer os.RemoveAll(jobDir) // docs live exactly as long as the run
+	contextDir := filepath.Join(jobDir, "context")
+	if err := os.MkdirAll(contextDir, 0o755); err != nil {
+		return core.AgentWireResult{}, fmt.Errorf("agent contract: creating context dir: %w", err)
+	}
+	for _, d := range contract.Context {
+		// Validate held every Name to flat-filename shape, so this Join
+		// cannot escape contextDir (same invariant as buildAgentRun).
+		if werr := os.WriteFile(filepath.Join(contextDir, d.Name), []byte(d.Text), 0o644); werr != nil {
+			return core.AgentWireResult{}, fmt.Errorf("agent contract: writing context doc %q: %w", d.Name, werr)
+		}
+	}
+	res := p.Run(ctx, core.Request{
+		Task:  core.TaskAgentRun,
+		Input: contract.Goal,
+		Params: map[string]any{
+			"contract":    contract,
+			"context_dir": contextDir,
+			"job_id":      filepath.Base(jobDir),
+		},
+	})
+	if !res.OK {
+		// OK:false is runAgentTask's internal-wiring-bug shape (a defer is a
+		// SUCCESS with wire.Deferred) — surface it as a real error.
+		return core.AgentWireResult{}, errors.New(res.Reason)
+	}
+	var wire core.AgentWireResult
+	if err := json.Unmarshal(res.Data, &wire); err != nil {
+		return core.AgentWireResult{}, fmt.Errorf("agent result decode: %w", err)
+	}
+	return wire, nil
 }
 
 // repackStructured runs the v1 structured-output mechanism (§S2): ONE

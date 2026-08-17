@@ -30,7 +30,8 @@
       "offload_edit_image_generative",
       "offload_media",
       "offload_nim",
-      "agent_run"
+      "agent_run",
+      "agent_delegate"
     ]
   }
 }
