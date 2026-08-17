@@ -7,7 +7,6 @@ import (
 	"context"
 	crand "crypto/rand"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -136,6 +135,32 @@ type Pipeline struct {
 	// TO-3 tier-aware repacking state (tierpack.go): per-model /props probes +
 	// tokenizer clients for the escalation-boundary repack. Zero value ready.
 	tierPack tierPackState
+	// T2-A2 test seams (nil = the real thing), following the same pattern as
+	// refineGen/fleetSample/nowFn. They exist because the media identity gates are
+	// otherwise untestable at the pipeline level: a missing file defers inside
+	// ffmpeg long before the gate, and a mid-call rotation cannot be injected
+	// deterministically from outside. Without them the gates had NO regression
+	// guard — deleting every `&& identifiable` / `&& cacheable` left the suite
+	// green, which is exactly the refactor they exist to catch.
+	mediaDigest    func(path string) (mediahash.Ident, error)
+	mediaUnchanged func(id mediahash.Ident, path string) bool
+}
+
+// digestMedia resolves a media file's content identity (test seam aware).
+func (p *Pipeline) digestMedia(path string) (mediahash.Ident, error) {
+	if p.mediaDigest != nil {
+		return p.mediaDigest(path)
+	}
+	return mediahash.Digest(path, p.cfg.MediaHashMaxFullBytes)
+}
+
+// mediaStillMatches re-checks, AFTER the consuming read, that the file is still
+// the one that was hashed (test seam aware).
+func (p *Pipeline) mediaStillMatches(id mediahash.Ident, path string) bool {
+	if p.mediaUnchanged != nil {
+		return p.mediaUnchanged(id, path)
+	}
+	return id.Unchanged(path)
 }
 
 // Cfg exposes the loaded config so callers like the MCP server can build
@@ -717,7 +742,7 @@ func (p *Pipeline) runVideoDescribe(ctx context.Context, req core.Request, built
 	// 2048 frame width); and a file rotated mid-loop would give the retry a
 	// different identity than the attempt that looked it up, storing the result
 	// under a digest for bytes the model never saw.
-	vidID, vdErr := mediahash.Digest(req.Video, p.cfg.MediaHashMaxFullBytes)
+	vidID, vdErr := p.digestMedia(req.Video)
 	for {
 		frames, err := videoio.SampleFrames(req.Video, p.cfg.FFmpegPath, p.cfg.VideoFPS, p.cfg.VideoMaxFrames, width, p.cfg.VisionMaxImageBytes)
 		if err != nil {
@@ -745,12 +770,12 @@ func (p *Pipeline) runVideoDescribe(ctx context.Context, req core.Request, built
 		// full ffmpeg passes. Worse, `frames=` below comes from that last sampling,
 		// so a mid-loop rotation produced a key that was a hybrid of two file
 		// states. One stat per iteration closes that.
-		cacheable := vdErr == nil && vidID.Unchanged(req.Video)
+		cacheable := vdErr == nil && p.mediaStillMatches(vidID, req.Video)
 		extra := ""
 		if cacheable {
 			extra = fmt.Sprintf("vid:%s|fps=%g|n=%d|w=%d|frames=%d",
 				vidID.Digest, p.cfg.VideoFPS, p.cfg.VideoMaxFrames, width, len(frames))
-		} else if meta.CacheBypass == "" {
+		} else if meta.CacheBypass == "" && p.cache != nil {
 			why := "source changed during the call"
 			if vdErr != nil {
 				why = vdErr.Error()
@@ -808,7 +833,7 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	// file between the convert and the hash would cache take A's transcript under
 	// sha256(take B) — and that poisoned entry is then reachable from ANY path
 	// holding B's bytes, not just the original one.
-	audioID, adErr := mediahash.Digest(req.Audio, p.cfg.MediaHashMaxFullBytes)
+	audioID, adErr := p.digestMedia(req.Audio)
 
 	// Convert (cheap, deterministic). A bad/missing file defers here.
 	wav, cleanup, cerr := audioio.ConvertToWav16k(req.Audio, p.cfg.FFmpegPath)
@@ -851,8 +876,11 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	// under the OLD digest instead of the reverse. One stat afterwards detects
 	// both directions, and also the case no re-ordering can touch: a file still
 	// being appended to, where the digest covers a prefix and ffmpeg read more.
-	identifiable := adErr == nil && audioID.Unchanged(req.Audio)
-	if !identifiable {
+	identifiable := adErr == nil && p.mediaStillMatches(audioID, req.Audio)
+	// Only report a BYPASS where there was a cache to bypass. On a node with no
+	// cache configured nothing was ever cacheable, so a cache_bypass row there is
+	// noise — and core.Meta.CacheBypass's own doc excludes that case.
+	if !identifiable && p.cache != nil {
 		// Must be OBSERVABLE. Without this the call is byte-identical in telemetry
 		// to an ordinary cold miss, so an input on a flaky mount re-runs whisper at
 		// full cost on every call forever while the ledger shows a healthy run of
@@ -927,13 +955,14 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		// .srt/.txt while each returned a path to the other's transcript. That is
 		// exactly the collision the salt exists to prevent, reproduced through the
 		// salt itself.
+		// crypto/rand.Read cannot fail on this toolchain — since Go 1.24 it always
+		// fills the buffer and crashes the process irrecoverably if the OS source
+		// errors. An earlier version wrapped it in an err check with a timestamp
+		// fallback and a warning log; that branch was unreachable, so the commit
+		// advertised a mitigation the code did not have. Ignoring the return is the
+		// honest expression of the actual guarantee.
 		var nonce [8]byte
-		if _, err := crand.Read(nonce[:]); err != nil {
-			// Fall back rather than fail the call, but say so — a degraded nonce is
-			// a real (if rare) increase in collision risk.
-			log.Printf("transcribe: nonce generation failed (%v); falling back to a timestamp salt", err)
-			binary.BigEndian.PutUint64(nonce[:], uint64(start.UnixNano()))
-		}
+		_, _ = crand.Read(nonce[:])
 		stemIdent = fmt.Sprintf("%s|unidentified=%x", ident, nonce)
 	}
 	base := mediaBase(p.cfg.MediaDir, req.Audio, stemIdent)

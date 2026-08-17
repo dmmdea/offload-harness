@@ -59,3 +59,21 @@ func (c *Cache) Put(key string, val []byte) error {
 		return tx.Bucket(bucket).Put([]byte(key), val)
 	})
 }
+
+// Count returns how many entries the cache holds.
+//
+// Exists so a test can assert "nothing was stored" against the STORE rather than
+// inferring it from a call count — the difference between a real gate test and
+// one that passes because the code under test was never reached.
+func (c *Cache) Count() (int, error) {
+	n := 0
+	err := c.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucket)
+		if b == nil {
+			return nil
+		}
+		n = b.Stats().KeyN
+		return nil
+	})
+	return n, err
+}

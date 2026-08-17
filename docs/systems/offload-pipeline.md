@@ -137,11 +137,20 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
     the *old* digest; read-then-hash does the reverse). Both are false hits reachable from any path
     holding the misattributed bytes. Closing it outright would mean sharing one descriptor with
     ffmpeg. Instead the file is re-`stat`ed **after** the consuming read and compared against what
-    the digest saw; on any difference the call is treated as unidentifiable and **nothing is
+    the digest saw; on a detected difference the call is treated as unidentifiable and **nothing is
     stored**. One stat, and it covers audio, video, and the case no re-ordering can touch at all: a
     file still being *appended to*, where the digest covers a prefix and ffmpeg reads more.
     `mediahash` also verifies it hashed exactly the number of bytes `stat` reported, so a growing
     file yields an error rather than a confident prefix-identity.
+  - **The detector is (size, mtime), so it narrows the window rather than closing it.** A same-size
+    overwrite inside one mtime tick is invisible to it, and 1–2 s mtime granularity is common on
+    FAT/SMB/FUSE and Drive-backed mounts. Stating this because the alternative — implying "any
+    difference is detected" — is the same overclaim this section previously made about ordering.
+  - **Cost of an unidentifiable input:** it is never cached, so it re-runs the model on every call,
+    and each call writes a fresh nonce-salted `.srt`/`.txt`/`.segments.json` triple. Nothing reaps
+    `media_dir`, so a file on a persistently flaky mount accumulates three files per invocation.
+    That is a deliberate trade — a wrong cached transcript is worse than a repeated one — but it is
+    a real cost and an operator may need to reclaim the directory.
   - The video digest is hoisted above the width-halving retry loop (it is loop-invariant, and
     re-reading a multi-GB clip per retry is pure waste), but the verification runs **per iteration** —
     hoisting alone widened the window to *digest-at-t₀ versus the final successful sampling*, which

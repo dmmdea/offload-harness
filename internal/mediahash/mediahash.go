@@ -128,6 +128,15 @@ func (i Ident) OK() bool { return i.Digest != "" }
 // re-order cannot touch at all: a file still being APPENDED to, where the digest
 // covers a prefix and ffmpeg reads more. So the contract here is honest
 // detection, not prevention — a caller that sees false must not store.
+//
+// # What this does NOT catch, stated rather than implied
+//
+// The comparison is (size, mtime). A same-SIZE overwrite landing inside a single
+// mtime tick is therefore invisible to it, and coarse mtime granularity is real
+// on the volumes this fleet uses — ext3, HFS+, FAT, SMB/CIFS and FUSE/Drive-backed
+// mounts commonly quantize to 1–2 s. So this NARROWS the window; it does not
+// eliminate it. Anything stronger needs a shared descriptor or a re-hash, and a
+// re-hash would double the read this design is trying to keep cheap.
 func (i Ident) Unchanged(path string) bool {
 	if !i.OK() {
 		return false
