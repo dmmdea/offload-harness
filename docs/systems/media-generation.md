@@ -102,7 +102,10 @@ It is fail-safe by construction: any refiner problem — transport error, timeou
 truncated or empty output, output shorter than the input, a prompt already over the ~200-token
 refiner budget (skipped up front), a dropped/altered `"double-quoted"` span, or **added** quoted
 text (a whole-output quote wrap is stripped first; net-new quotes beyond that are rejected) —
-falls back to the raw prompt, records the reason, and renders anyway. Span guarding is computed in
+falls back to the raw prompt, records the reason, and renders anyway. The no-new-quotes rule is
+also STATED in the system prompt (0.62.1), not just enforced: with only the span rule stated,
+Gemma-class refiners quoted the prompt's subject itself and the guard rejected nearly every
+span-less refinement (measured: gemma-4-12b 2% -> 87% refine rate with the sentence). Span guarding is computed in
 normalized-quote space (curly `“”` count as `"`); an odd quote count drops the trailing quote
 before pairing, so a trailing inch mark never pairs into a bogus span (a LEADING stray still can —
 that mis-pair falls back safely, and the distinct `altered (glyphs/whitespace)` vs `dropped`

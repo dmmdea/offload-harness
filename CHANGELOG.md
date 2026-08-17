@@ -6,6 +6,21 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.62.1] - 2026-08-16
+
+### Fixed
+
+- Image-prompt refiner system prompt now states the no-new-quotes rule its own
+  guard enforces — verbatim: If the user's prompt contains no "double-quoted"
+  text, your output must contain no quotation marks at all. Without it, span-rule-only
+  instructions taught Gemma-class refiners to wrap the prompt's SUBJECT in
+  quotes, and the added-quote guard then rejected nearly every span-less
+  refinement — `imagegen_refiner_model` silently self-cancelled on exactly the
+  prompts it exists for. Measured on GenEval2 span-less prompts (2026-08-16):
+  gemma-4-12b 2% -> 87% refine rate with the sentence (gemma-4-31b measured 0%
+  without it); quoted-span prompts unaffected (90-100% both before and after).
+  The prompt now states the rule the guard enforces; no guard behavior changed.
+
 ## [0.62.0] - 2026-08-16
 
 The tier-doctrine parity pass (operator doctrine, 2026-08-16): flagship seats trickle
