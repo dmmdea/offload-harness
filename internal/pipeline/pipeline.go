@@ -346,7 +346,28 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	// majority) the two are byte-identical, so cache continuity holds; an
 	// oversized input re-keys once, and the old key COLLIDED two different
 	// originals sharing a trim — the new key is strictly more correct.
-	ck := cache.Key(string(req.Task), orig, tasks.StableParamsKey(req.Params), p.cfg.Model, built.Grammar)
+	// Call identity (Phase 0.1). Computed once here, where BOTH the original input
+	// and the fully-decorated prompt exist, then carried on meta so every ledger
+	// row — success, defer, or cache hit — records the same fingerprints.
+	meta.InputSHA256 = inputFingerprint(orig)
+	meta.PromptPrefixSHA256 = promptPrefixFingerprint(built.System, userPreambleOf(built.User, orig))
+	meta.ContextHash = p.contextHash()
+	meta.ExemplarIDs = exemplarFingerprints(shots)
+
+	// T2-A CORRECTNESS FIX: the key now also covers the prompt prefix (system +
+	// grammar) and the injected-exemplar set.
+	//
+	// The bug this closes: the old key was (task, input, params, model, grammar)
+	// and did NOT cover the system prompt or the exemplars. So editing a task's
+	// system prompt — or regenerating exemplars/selected.json — left every prior
+	// answer keyed identically, and the cache kept serving PRE-EDIT results
+	// forever, with no signal anywhere. A prompt improvement silently did nothing.
+	//
+	// This can only ever SPLIT keys that were previously shared by mistake, so it
+	// is a correctness change, not a hit-rate optimisation: old entries are not
+	// wiped, they simply stop being reachable from a prompt that no longer matches
+	// the template which produced them — which is exactly the intent.
+	ck := cacheKeyFor(req.Task, orig, tasks.StableParamsKey(req.Params), p.cfg.Model, built, shots)
 	if p.cache != nil {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
@@ -558,7 +579,15 @@ func (p *Pipeline) runVision(ctx context.Context, req core.Request, built tasks.
 // wait, distinct "gpu busy" defer), retries once on http_5xx, and records the
 // final infra outcome into the vision tier's circuit breaker.
 func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tasks.Built, meta core.Meta, start time.Time, cacheKeyExtra string, gen func(context.Context) (llamaclient.GenResult, error)) core.Result {
-	ck := cache.Key(string(req.Task), req.Input+"|"+cacheKeyExtra, tasks.StableParamsKey(req.Params), meta.Model, built.Grammar)
+	// Same correctness fix as the text path (review finding: the first draft fixed
+	// only the text cascade and left this one with the bug it was written to
+	// eliminate). Vision system prompts are long, instruction-dense and exactly the
+	// kind of thing that gets tuned — the OCR reading-order rules, assess_image's
+	// field semantics — so editing one used to leave this cache serving pre-edit
+	// transcriptions forever, silently. No exemplars are injected on the vision
+	// path, so the exemplar tag is not an ingredient here.
+	ck := cache.Key(string(req.Task), req.Input+"|"+cacheKeyExtra, tasks.StableParamsKey(req.Params), meta.Model, built.Grammar,
+		templateCacheTag(built.System, built.Grammar, built.User, req.Input))
 	if p.cache != nil {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
@@ -3098,6 +3127,11 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		InputChars: inputChars, Feat: meta.Feat,
 		EscSource: string(meta.EscSource),
 		TierPack:  meta.TierPack,
+		// Call identity (Phase 0.1) — hashes only, never content.
+		InputSHA256:        meta.InputSHA256,
+		PromptPrefixSHA256: meta.PromptPrefixSHA256,
+		ContextHash:        meta.ContextHash,
+		ExemplarIDs:        meta.ExemplarIDs,
 	}
 }
 

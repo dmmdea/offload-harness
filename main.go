@@ -107,6 +107,12 @@ func main() {
 		err = runFleetMeasure(args)
 	case "ledger":
 		err = runLedger(args)
+	// `loupe` is the identity-aware ledger view (memory-frontier Phase 0.1b).
+	// Deliberately a SEPARATE command from `stats`: `stats` emits a stable
+	// report.Summarize JSON that callers may already script against, and
+	// silently changing its shape would break them.
+	case "loupe":
+		err = runLoupe(args)
 	case "doctor":
 		err = runDoctor(args)
 	case "report":
@@ -240,6 +246,8 @@ Usage:
   local-offload confhead-eval            out-of-fold adoption gate (AURC/AUGRC + paired-bootstrap CI)
   local-offload confhead-calibrate       per-task conformal p(correct) escalation thresholds (ADOPT tasks)
   local-offload stats                    observational per-task ledger telemetry
+  local-offload loupe [--since N] [--json]  call-identity ledger view: duplicate rate,
+                                         prefix reuse, exemplar histogram, artifact A/B arms
   local-offload version
 
 Global: --config <path> (or $LOCAL_OFFLOAD_CONFIG)

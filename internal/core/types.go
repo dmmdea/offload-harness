@@ -188,6 +188,34 @@ type Meta struct {
 	// to the gating could be evaluated after the fact. Empty on calls that
 	// never escalated.
 	EscSource EscalationSource `json:"esc_source,omitempty"`
+	// --- call identity (memory-frontier Phase 0.1) ---------------------------
+	// The ledger recorded THAT a call happened but never WHAT it was about, so
+	// every "measure the duplicate rate / prefix reuse / counterfactual replay"
+	// question was structurally unanswerable from telemetry — each one needed a
+	// bespoke throwaway script, and the ones needing the input text could not be
+	// answered at all. These are HASHES, never content: they make calls
+	// groupable and comparable without turning the ledger into a transcript
+	// store (which was rejected on privacy/brand-isolation grounds).
+	//
+	// InputSHA256 fingerprints the ORIGINAL caller input (pre-trim), so repeats
+	// are countable across tiers and across machines running identical models.
+	InputSHA256 string `json:"input_sha256,omitempty"`
+	// PromptPrefixSHA256 fingerprints the assembled prompt's STABLE prefix (the
+	// bytes before the volatile tail). Two calls sharing it are two calls whose
+	// KV prefix llama.cpp could reuse — which is what makes prefix-reuse work
+	// measurable instead of assumed.
+	PromptPrefixSHA256 string `json:"prompt_prefix_sha256,omitempty"`
+	// ContextHash fingerprints the DECISION ARTIFACTS in force for this call
+	// (router weights, confhead, exemplar selection, template version, seed).
+	// It turns every hot-reload into a free A/B: rows split into buckets by
+	// which artifact set produced them, so a change's effect is attributable
+	// rather than anecdotal. Cheap because the 30s content-hash watcher already
+	// computes the component hashes for reload; this only threads them through.
+	ContextHash string `json:"context_hash,omitempty"`
+	// ExemplarIDs lists the exemplars actually injected into this prompt. Nobody
+	// can answer "which exemplars actually fire?" today; with this the histogram
+	// is one query, and a power-law answer means the selection set can be pruned.
+	ExemplarIDs []string `json:"exemplar_ids,omitempty"`
 }
 
 // Result is the harness outcome. On success Data holds the validated task output.
