@@ -6,6 +6,47 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.67.0] - 2026-08-17
+
+### Added
+
+- **CPU proof farm** (`internal/grounding/proofs.go`, memory-frontier R2-10) — two
+  deterministic validators needing no GPU and no model. **Its own precondition reassigned the
+  first slot:** R2-10 said to check whether `extract` is GBNF-constrained and, if so, spend
+  that slot on citation/path-existence instead. It is (`gbnf.Object(fields)`), so a
+  JSON-validity validator could only ever pass. The two slots are therefore `PathsExist` (a
+  path-shaped value must exist on disk — the source cannot tell you a copied-from-a-stale-doc
+  path is wrong, only the filesystem can) and `CitedSpans` (a quoted span must appear
+  *contiguously* in the source — a quote assembled from words that each appear separately
+  passes per-value grounding while being invented).
+  - **`Applicable` is distinct from passing.** A validator that found nothing of its kind
+    reports `OK() == false`, so "0 failures" over 0 candidates can never be read as a clean
+    bill of health.
+- **Context pager instrument** (`internal/agent/contextpager.go`, R2-13) — **instrument only.**
+  Records evicted payload hashes and whether identical content is re-fetched later in the run,
+  and reports its own gate verdict (<10% re-fetch closes the whole pager family for free, and
+  also proves compaction discards the right things). No eviction store, no paging, no
+  retrieval — building those first would be building the thing the measurement exists to
+  justify. Hashes and sizes only, never payloads.
+  - A run that evicted **nothing** reports `insufficient_data`, never a confident 0% — the
+    failure that would close the item on a question it never asked.
+- **Decision-path golden tests** (`decisionpath_golden_test.go`, R2-11) — the narrowed form
+  that survives the objection which killed round 1's Golden-State Fixtures. CUDA decode is
+  non-deterministic here, so fixtures asserting model OUTPUT are flaky by construction; these
+  assert **decisions** (defer classification, gate reachability in both directions, the
+  reliability sample-floor boundary, grounding verdicts, and the division of labour between
+  grounding and the proof validators). Each case asserts a *relation*, not a hard-coded hash —
+  a hash fixture must be regenerated on every legitimate change, and regenerating a fixture is
+  indistinguishable from silencing it.
+
+### Fixed
+
+- **Quoted-span extraction mispaired quotes.** A minimum length *inside* the regex
+  (`"([^"]{3,})"`) made the engine skip a short quoted fragment and pair its closing quote
+  with the NEXT fragment's opening quote — capturing the text *between* quotes and flagging it
+  as a fabricated citation. Pairing is now decided by adjacency and the length filter applied
+  afterwards, with a regression test.
+
 ## [0.66.1] - 2026-08-17
 
 ### Fixed — the structured re-pack must not think (found by LIVE end-to-end testing, after 0.66.0 merged)
