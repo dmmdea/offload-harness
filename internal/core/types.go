@@ -227,6 +227,18 @@ type Meta struct {
 	// on every call, forever, while the ledger showed a healthy run of cache
 	// misses and the hit-rate dashboard invited exactly the wrong diagnosis.
 	CacheBypass string `json:"cache_bypass,omitempty"`
+	// CacheHitInLoop marks a cache hit served from an entry that was WRITTEN by
+	// the agent loop's in-loop offload (T2-D) rather than by a recorded,
+	// caller-facing call.
+	//
+	// Why it exists: in-loop calls run with a nil ledger precisely so the harness
+	// talking to itself cannot inflate savings. Since T2-D they share the result
+	// cache, so a later caller-facing call CAN hit an entry the loop produced.
+	// The saving to that caller is real and is still counted — but the cache-hit
+	// rate is a gate this plan reads, and it must be possible to tell how much of
+	// it the harness generated for itself. Without this field that split is
+	// unrecoverable after the fact.
+	CacheHitInLoop bool `json:"cache_hit_in_loop,omitempty"`
 }
 
 // Result is the harness outcome. On success Data holds the validated task output.

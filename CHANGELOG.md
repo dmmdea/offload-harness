@@ -6,6 +6,114 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.64.0] - 2026-08-17
+
+### Fixed
+
+- **Audio and video cache keys are now content-addressed** (`internal/mediahash`,
+  memory-frontier T2-A2). The image path has always keyed on the loaded bytes
+  (`"img:"+sha256hex(...)`); audio keyed on (path, size, mtime) and video on the **path
+  string**, unhashed. Both failed in two directions: a file replaced at the same path could
+  produce a **false hit** — serving the previous file's transcript or description — and an
+  identical file at a second path always missed, which is the reuse an artifact cache
+  exists to capture. New config `media_hash_max_full_bytes` (default `0` = always hash the
+  whole file).
+  - **Migration:** every existing audio and video cache entry is invalidated once, by
+    design — those entries were keyed on an identity that could be wrong.
+  - **A TOCTOU window remains and is DETECTED, not prevented.** The digest and ffmpeg are
+    two independent opens of a path, so ordering alone cannot close it — hashing first
+    merely transposes which side is misattributed. The file is re-`stat`ed **after** the
+    consuming read; on a difference the call is treated as unidentifiable and nothing is
+    stored. The detector is (size, mtime), so a same-size overwrite inside one mtime tick
+    is invisible to it — 1–2 s granularity is common on FAT/SMB/FUSE and Drive-backed
+    mounts. This narrows the window; it does not eliminate it.
+  - **No identity, no cache.** `mediahash.Digest` returns an **error** rather than a
+    synthetic key. An earlier design returned `media:staterr:<hash(path+error)>` — a *path*
+    key — so a transient read failure wrote a durable entry a different file at that path
+    later hit, reintroducing the exact false hit this change removes.
+  - **A bypassed cache is observable**: `cache_bypass` on the ledger row names why, so a
+    permanently unidentifiable input is no longer byte-identical in telemetry to an
+    ordinary cold miss.
+  - **Cost of an unidentifiable input:** it is never cached, so it re-runs the model on
+    every call and writes a fresh nonce-salted `.srt`/`.txt`/`.segments.json` triple.
+    Nothing reaps `media_dir`, so a file on a persistently flaky mount accumulates three
+    files per invocation — a deliberate trade (a wrong cached transcript is worse than a
+    repeated one), but a real cost.
+- **Corrected the 0.63.0 embed-memo justification, on both surfaces.** The feature was
+  documented as existing because "the shadow-label drain re-embeds the same stored inputs
+  on every run and re-scores the same reference summaries". Reading the code refutes all
+  three parts: `shadow.Drain` is **destructive**, so each run consumes a fresh item set;
+  `label.go` calls `Similar` on summaries derived from *that item's own* output, so there
+  is no shared reference set; and the drain's `Embed` path is itself gated on
+  `knn_prefilter_enabled`. The genuine repeat sources are the request-path pre-filter and
+  within-run repeats inside one drain. **With `knn_prefilter_enabled` at its default of
+  `false` the memo is close to inert** — correct, cheap and free when idle, but its value
+  is gated on a separate decision. No code changed; the claim did.
+
+## [0.63.0] - 2026-08-17
+
+### Added
+
+- **Embed memo** (`internal/embedmemo`, memory-frontier T2-C) — a bbolt store that
+  memoizes embedding vectors by exact input bytes plus the embedder id. Embedding is a
+  pure function of (model, text). Consumers are the kNN pre-filter on the request path and
+  the shadow-label drain; exemplar selection is **not** one (`internal/exemplars` retrieves
+  lexically and contains no embedder). The
+  larger payoff is the swap, not the compute: the embedder carries `ttl=300` like every
+  other seat, so the first embed after an idle gap pays a ~1–2 s cold load, and a memo
+  hit skips the HTTP call entirely. New config: `embed_memo_enabled` (default on),
+  `embed_memo_path`, `embed_memo_max_entries` (50000 ≈ **640 MB on disk** — bbolt costs
+  ~12.8 KB/entry once fill factor and overflow pages are counted, not the ~6 KB the
+  payload arithmetic suggests, and bbolt never shrinks the file after a prune),
+  `embed_memo_epoch`.
+  - Keys are **exact bytes, never normalized**. Normalizing for a higher hit rate would
+    let two different texts share a key and return a vector computed for the other one —
+    a silent correctness bug in a semantic quantity, not a cache miss.
+  - Vectors are stored as verbatim `float64`; a hit is bit-identical to what the
+    embedder returned. Narrowing to `float32` would perturb cosine scores near a
+    decision threshold.
+  - Every failure degrades to a plain live call. Embedder errors are never stored, and a
+    malformed record reads as a miss rather than an empty vector (an empty `[]float64`
+    scores 0 against everything, which is indistinguishable from a legitimate "nothing
+    similar" answer).
+  - `embed_memo_epoch` is the manual lever for the one case the id cannot see: a model
+    re-quantized or re-trained and republished under an unchanged name.
+- **Memo counters on two surfaces.** `local-offload loupe` reports the memo read-only
+  (short timeout, so it never contends with a live server), and `offload_status` reports
+  the live counters from the process that owns the handle. Both distinguish
+  "unavailable" and "never consulted" from a measured zero.
+
+### Changed
+
+- **The agent loop now shares the result cache** (memory-frontier T2-D). "Recordless"
+  bundled two unrelated guarantees: (a) in-loop offloads must not pollute the savings
+  ledger, and (b) they must not touch the result cache. (a) is a real accounting
+  invariant and is unchanged; (b) was collateral, and made the loop re-run the model on
+  byte-identical input. New `NewInLoopPipeline` / `NewInLoopOffload` keep the nil ledger
+  and share the cache; the MCP front door and the `local-agent` CLI use them.
+  `NewRecordlessPipeline` / `NewRecordlessOffload` are unchanged and still used where no
+  shared state is wanted (the shadow-labelling flywheel, prompt A/B arms).
+- **Cache participation is a property of the pipeline, not of `RunTier`.** The
+  shadow-labelling flywheel drives `RunTier` on the main pipeline — which has an open
+  cache — to evaluate counterfactual tiers; a hit there would grade a stored answer
+  instead of the tier, and a write would fill the store with counterfactual results.
+  Only `NewInLoopPipeline` opts in.
+
+### Fixed
+
+- **`RunTier` now has its OWN cache keyspace** (`cacheKeyForTier`), disjoint from `Run`'s.
+  Its key was previously a hand-rolled `cache.Key` call with the pre-0.62 shape: keyed on
+  the primary model rather than the tier actually run, and missing the template tag. It was
+  dead code (nothing read or wrote that key), so nothing was ever mis-served — but reviving
+  it for T2-D reinstated both defects on a live path. Routing it through `Run`'s
+  constructor fixed the ingredients but not the collision: with `exemplar_shots` at its
+  default of 0 the two paths computed the **same key** whenever the pinned tier was the
+  primary model, so `Run` cached an E2B answer, `RunTier` refused it and overwrote the
+  entry with the workhorse's, and the two ping-ponged one key.
+  - **User-visible consequence:** an in-loop agent offload no longer reuses a cascade
+    answer, or vice versa. That sharing was never sound — a pinned tier must get *that
+    tier's* output — but it does mean the two populate the cache independently.
+
 ## [0.62.1] - 2026-08-16
 
 ### Fixed

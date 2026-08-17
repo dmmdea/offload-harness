@@ -19,6 +19,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
@@ -257,7 +258,91 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 		"note":              "offload_nim is the ONLY remote/cloud tool on this server (opt-in escalation)",
 	}
 
-	return jsonResult(map[string]any{"local": local, "media": media, "remote": remote})
+	// T2-C: the embed memo's live counters. This server owns the bbolt handle, so
+	// it is the ONLY process that can read them while it runs — `loupe` reports
+	// "held by a running local-offload process" and points here. Publishing them
+	// from both places is what keeps the measurement answerable in either state
+	// rather than only when the server happens to be down.
+	reuse := map[string]any{}
+	st, reason := s.p.EmbedMemoStats()
+	// THIS PROCESS may hold no memo (the kNN pre-filter is off by default), while
+	// the STORE on disk is being written by `shadow-label` against the same file.
+	// Reporting only "enabled: false" then told the operator the feature was off
+	// while `loupe` on the same box showed vectors and a hit rate — two surfaces,
+	// opposite answers. Worse, the fault counters this block exists to publish
+	// would be unreachable on the one configuration everyone actually runs.
+	// So: fall back to a read-only look at the store, exactly as loupe does.
+	storeOnly := false
+	if reason != "" {
+		if ro, err := embedmemo.OpenReadOnly(cfg.EmbedMemoPath, cfg.EmbedModel(), cfg.EmbedMemoEpoch); err == nil {
+			if rst, rerr := ro.Stats(); rerr == nil {
+				st, storeOnly = rst, true
+			}
+			ro.Close()
+		}
+	}
+	if reason == "" || storeOnly {
+		reuse["embed_memo"] = map[string]any{
+			"enabled":            reason == "",
+			"scope":              map[bool]string{true: "read from the store on disk; this process is not memoizing", false: "live in this process"}[storeOnly],
+			"process_reason":     reason,
+			"count_underflows":   st.CountUnderflows,
+			"last_fault":         st.LastFault,
+			"foreign_namespaces": st.ForeignNamespaces,
+			"foreign_vectors":    st.ForeignVectors,
+			"file_bytes":         st.FileBytes,
+			"embedder":           st.EmbedderID,
+			"epoch":              st.Epoch,
+			"dim":                st.Dim,
+			"distinct":           st.Distinct,
+			"session_hits":       st.SessionHits,
+			"session_misses":     st.SessionMisses,
+			"session_stores":     st.SessionStores,
+			"lifetime_hits":      st.LifetimeHits,
+			"lifetime_misses":    st.LifetimeMisses,
+			"lifetime_stores":    st.LifetimeStores,
+			// Fault counters are published, not merely incremented. An unpublished
+			// fault counter is not a fault signal: without these there is no
+			// observable difference between a memo that is working, one whose store
+			// fails every write, and one full of corrupt records.
+			"errors_decode":  st.ErrorsDecode,
+			"errors_read":    st.ErrorsRead,
+			"errors_write":   st.ErrorsWrite,
+			"dim_mismatches": st.DimMismatches,
+			// nil, not 0, when nothing has been looked up — a zero here would
+			// report a measured failure where there is no measurement.
+			"hit_rate": st.HitRate,
+			"note":     "each hit skips an embedding call, and therefore also skips the ~1-2s cold load the ttl=300 embedder pays after an idle gap",
+		}
+	} else {
+		// One specific reason, never a menu of possibilities the caller has to
+		// guess between — and it names WHERE the answer is, since a store may
+		// exist and be in use by another process.
+		reuse["embed_memo"] = map[string]any{
+			"enabled": false,
+			"reason":  reason,
+			"store":   "not readable from this process either; run `local-offload loupe` with the server stopped to inspect the store on disk",
+		}
+	}
+	// The result cache is the other half of T2-D and was previously reported
+	// nowhere. If it failed to open at startup, every agent_run silently loses
+	// the in-loop cache and the only signal was one stderr line an MCP stdio
+	// client never sees.
+	if s.p.Cache() != nil {
+		reuse["result_cache"] = map[string]any{
+			"available": true,
+			"path":      cfg.CachePath,
+			"note":      "agent_run's in-loop offloads share this cache (nil ledger, shared cache)",
+		}
+	} else {
+		reuse["result_cache"] = map[string]any{
+			"available": false,
+			"path":      cfg.CachePath,
+			"reason":    "not opened (cache_path empty, or the file is held by another process); agent_run re-runs the model on repeated identical input",
+		}
+	}
+
+	return jsonResult(map[string]any{"local": local, "media": media, "remote": remote, "reuse": reuse})
 }
 
 // probeServedModels reads the live roster and returns the CANONICAL model ids.
@@ -903,11 +988,15 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		}
 		return jsonResult(map[string]any{"deferred": true, "reason": reason})
 	}
-	// In-process offload (record=false, nil cache+ledger) + the SHARED loop
+	// In-process offload (nil LEDGER; shared result cache) + the SHARED loop
 	// builder — identical construction to the CLI and the standalone runner, so
 	// the three drive modes stay at parity. Read-only front door: no
 	// write/fetch/shell, no audit (the offload cannot write the ledger anyway).
-	offload := pipeline.NewRecordlessOffload(cfg, offloadModel, timeout)
+	//
+	// T2-D: the cache handle is the server's own already-open one. This process
+	// holds the bbolt lock, so re-opening by path here would lose a lock race
+	// against itself and silently fall back to no cache on every agent_run.
+	offload := pipeline.NewInLoopOffload(cfg, offloadModel, timeout, s.p.Cache())
 	built, err := agent.Build(agent.BuildConfig{
 		PlannerBase: cfg.Endpoint,
 		Model:       model,

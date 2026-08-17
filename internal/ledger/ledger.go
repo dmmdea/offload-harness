@@ -80,6 +80,11 @@ type Entry struct {
 	// "permanently uncacheable input" is one query away instead of being
 	// indistinguishable from a cold miss.
 	CacheBypass string `json:"cache_bypass,omitempty"`
+	// CacheHitInLoop marks a cache hit served from an entry the agent loop wrote
+	// (T2-D). In-loop generations run with a nil ledger and are never costed, so
+	// without this the share of the cache-hit rate the harness produced for
+	// itself is unrecoverable — and that rate is a gate.
+	CacheHitInLoop bool `json:"cache_hit_in_loop,omitempty"`
 }
 
 // maxReasonLen bounds a recorded defer reason so a long upstream error can't
