@@ -123,7 +123,19 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
 - **Ledger** — append-only JSONL at the configured `ledger_path`, `fsync`ed per entry so a crash
   cannot lose recorded savings. Carries `tokens_saved` (input tokens kept out of the calling model)
   and per-call metadata.
-- **Cache** — keyed result reuse; bypassed entirely on the recordless path.
+- **Cache** — keyed result reuse. Bypassed on the *recordless* path (`NewRecordlessPipeline`);
+  **shared** on the *in-loop* path (`NewInLoopPipeline`) — see Interfaces below for why those are two
+  different things.
+- **Embed memo** — `internal/embedmemo`, a bbolt store at `embed_memo_path` keyed on
+  `sha256(embedder_id, epoch, exact input bytes)`. Embedding is a pure function of (model, text) and
+  the harness re-embeds the same strings by construction, so a hit skips the call — and, because the
+  embedder carries `ttl=300` like every other seat, it also skips the ~1–2 s cold load the first
+  embed after an idle gap would pay. Keys are **never normalized**: casefolding or whitespace
+  collapsing would let two different texts share a key and return a vector computed for the other
+  one, which is a silent correctness bug in a semantic quantity rather than a cache miss. Vectors are
+  stored as verbatim `float64`, so a hit is bit-identical to what the embedder returned. Every
+  failure path (disabled, file held by another process, malformed record, embedder error) degrades to
+  a plain live call; errors are never stored.
 - **Learned thresholds** — per-task conformal values loaded from `thresholds.json` when present,
   falling back to config defaults.
 - **Circuit breakers** — per-Tier, consulted during chain construction.
@@ -131,12 +143,40 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
 ## Interfaces and entry points
 
 - `Run` — the full cascade with recording.
-- `RunTier` — one specific Tier, no escalation, no recording.
-- `NewRecordlessPipeline` / `NewRecordlessOffload` — the agent-facing construction. This is the single
-  place the nil-store invariant is built: nil cache and nil ledger, so agent-internal offload calls
-  leave no trace in savings accounting. A defer here is returned as a *successful tool result*
+- `RunTier` — one specific Tier, no escalation, **no ledger/shadow/exemplar recording**. It reads and
+  writes the result cache only when the pipeline it belongs to opted in (below).
+- `NewRecordlessPipeline` / `NewRecordlessOffload` — nil cache **and** nil ledger. For callers that
+  must share no state at all: the shadow-labelling flywheel and prompt A/B arms.
+- `NewInLoopPipeline` / `NewInLoopOffload` — nil ledger, **shared result cache**. This is what the
+  ordinary drive modes (MCP front door, `local-agent` CLI) use.
+
+  A defer on either path is returned as a *successful tool result*
   (`{"deferred": true, "reason": ...}`) rather than an error, because the agent loop should read it
   and move on.
+
+### Why "recordless" split into two constructors
+
+The original single invariant bundled two unrelated guarantees:
+
+1. **the agent's internal offload calls must not pollute the savings ledger** — those are the harness
+   talking to itself, not work a caller delegated, so counting them inflates every savings number; and
+2. **those calls must not read or write the result cache.**
+
+(1) is a real accounting invariant and is kept exactly. (2) was collateral damage: it made the loop
+re-run the model on byte-identical input, so an agent that summarized the same file twice in one run
+paid twice. Nothing about ledger hygiene requires that, and the cache key binds the prompt template
+and exemplar set, so an entry written by one caller is valid for any other.
+
+**Cache participation is a property of the pipeline, never of `RunTier`.** That distinction is
+load-bearing: the shadow-labelling flywheel drives `RunTier` on the *main* pipeline — the one with an
+open cache — to evaluate what a counterfactual tier *would* have answered. A cache hit there would
+grade a stored answer instead of the tier, and a cache write would fill the store with counterfactual
+results. Only `NewInLoopPipeline` opts in.
+
+`RunTier`'s cache key is built by the same `cacheKeyFor` constructor `Run` uses, keyed on the
+**actual tier** rather than the primary model, and carrying the template tag — so two tiers can never
+share an entry, and editing a task's prompt invalidates these entries exactly as it does the
+cascade's.
 
 ## Dependencies
 

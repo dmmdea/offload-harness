@@ -51,6 +51,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"math"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -83,6 +84,10 @@ type Memo struct {
 	embedderID string
 	epoch      string
 	maxEntries int
+	// readOnly memos are inspection handles (OpenReadOnly). Wrap refuses to
+	// memoize through one rather than attempting a write bolt will reject on
+	// every single call — a silent per-call error is worse than no memo.
+	readOnly bool
 
 	// Session counters. They are reported alongside the persisted totals so a
 	// single run's behaviour is legible without differencing two snapshots.
@@ -124,6 +129,38 @@ func Open(path, embedderID, epoch string, maxEntries int) (*Memo, error) {
 	return &Memo{db: db, embedderID: embedderID, epoch: epoch, maxEntries: maxEntries}, nil
 }
 
+// ErrNoStore reports that the memo file does not exist yet — nothing has been
+// embedded on this machine. Distinct from a lock failure, because "empty" and
+// "cannot look" are different answers.
+var ErrNoStore = errors.New("embedmemo: no store file yet")
+
+// OpenReadOnly opens an EXISTING memo for inspection only.
+//
+// For read-only reporting paths (the loupe), which document a hard constraint
+// that they must never contend with a live MCP server. bbolt still takes a
+// shared lock that an exclusive read-write handle blocks, so this CAN fail while
+// the server runs — the point is that it fails FAST and legibly instead of
+// stalling a full second and returning a lock error the caller has to interpret.
+//
+// The returned Memo cannot store: Wrap on it would attempt writes bolt rejects.
+// Use it for Stats only.
+func OpenReadOnly(path, embedderID, epoch string) (*Memo, error) {
+	if path == "" {
+		return nil, ErrDisabled
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrNoStore
+		}
+		return nil, err
+	}
+	db, err := bolt.Open(path, 0o400, &bolt.Options{ReadOnly: true, Timeout: 200 * time.Millisecond})
+	if err != nil {
+		return nil, err
+	}
+	return &Memo{db: db, embedderID: embedderID, epoch: epoch, readOnly: true}, nil
+}
+
 // Close releases the db. Safe on a nil Memo.
 func (m *Memo) Close() error {
 	if m == nil || m.db == nil {
@@ -150,7 +187,7 @@ func (m *Memo) key(text string) string {
 // On a nil Memo it returns next unchanged, so a disabled memo costs exactly one
 // nil check at construction and nothing at all per call.
 func (m *Memo) Wrap(next func(string) ([]float64, error)) func(string) ([]float64, error) {
-	if m == nil || m.db == nil || next == nil {
+	if m == nil || m.db == nil || next == nil || m.readOnly {
 		return next
 	}
 	return func(text string) ([]float64, error) {
@@ -319,7 +356,7 @@ func (m *Memo) Stats() Stats {
 // Flush persists the session counters into the meta bucket. Called on Close by
 // owners that want lifetime totals to survive the process.
 func (m *Memo) Flush() error {
-	if m == nil || m.db == nil {
+	if m == nil || m.db == nil || m.readOnly {
 		return nil
 	}
 	h, mi := m.hits.Swap(0), m.misses.Swap(0)

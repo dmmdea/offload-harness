@@ -257,7 +257,33 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 		"note":              "offload_nim is the ONLY remote/cloud tool on this server (opt-in escalation)",
 	}
 
-	return jsonResult(map[string]any{"local": local, "media": media, "remote": remote})
+	// T2-C: the embed memo's live counters. This server owns the bbolt handle, so
+	// it is the ONLY process that can read them while it runs — `loupe` reports
+	// "held by a running local-offload process" and points here. Publishing them
+	// from both places is what keeps the measurement answerable in either state
+	// rather than only when the server happens to be down.
+	reuse := map[string]any{}
+	if st, ok := s.p.EmbedMemoStats(); ok {
+		reuse["embed_memo"] = map[string]any{
+			"enabled":         true,
+			"distinct":        st.Distinct,
+			"session_hits":    st.SessionHits,
+			"session_misses":  st.SessionMisses,
+			"lifetime_hits":   st.LifetimeHits,
+			"lifetime_misses": st.LifetimeMisses,
+			// nil, not 0, when nothing has been looked up — a zero here would
+			// report a measured failure where there is no measurement.
+			"hit_rate": st.HitRate,
+			"note":     "each hit skips an embedding call, and therefore also skips the ~1-2s cold load the ttl=300 embedder pays after an idle gap",
+		}
+	} else {
+		reuse["embed_memo"] = map[string]any{
+			"enabled": false,
+			"note":    "disabled (embed_memo_enabled/embed_memo_path), the kNN pre-filter is off, or the store could not be opened; embeddings run live",
+		}
+	}
+
+	return jsonResult(map[string]any{"local": local, "media": media, "remote": remote, "reuse": reuse})
 }
 
 // probeServedModels reads the live roster and returns the CANONICAL model ids.

@@ -6,6 +6,61 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.63.0] - 2026-08-17
+
+### Added
+
+- **Embed memo** (`internal/embedmemo`, memory-frontier T2-C) — a bbolt store that
+  memoizes embedding vectors by exact input bytes plus the embedder id. Embedding is a
+  pure function of (model, text) and the harness re-embeds the same strings by
+  construction (the kNN pre-filter embeds each request input, the shadow drain re-embeds
+  the same stored inputs on every run, exemplar selection re-embeds a fixed pool). The
+  larger payoff is the swap, not the compute: the embedder carries `ttl=300` like every
+  other seat, so the first embed after an idle gap pays a ~1–2 s cold load, and a memo
+  hit skips the HTTP call entirely. New config: `embed_memo_enabled` (default on),
+  `embed_memo_path`, `embed_memo_max_entries` (50000 ≈ 300 MB), `embed_memo_epoch`.
+  - Keys are **exact bytes, never normalized**. Normalizing for a higher hit rate would
+    let two different texts share a key and return a vector computed for the other one —
+    a silent correctness bug in a semantic quantity, not a cache miss.
+  - Vectors are stored as verbatim `float64`; a hit is bit-identical to what the
+    embedder returned. Narrowing to `float32` would perturb cosine scores near a
+    decision threshold.
+  - Every failure degrades to a plain live call. Embedder errors are never stored, and a
+    malformed record reads as a miss rather than an empty vector (an empty `[]float64`
+    scores 0 against everything, which is indistinguishable from a legitimate "nothing
+    similar" answer).
+  - `embed_memo_epoch` is the manual lever for the one case the id cannot see: a model
+    re-quantized or re-trained and republished under an unchanged name.
+- **Memo counters on two surfaces.** `local-offload loupe` reports the memo read-only
+  (short timeout, so it never contends with a live server), and `offload_status` reports
+  the live counters from the process that owns the handle. Both distinguish
+  "unavailable" and "never consulted" from a measured zero.
+
+### Changed
+
+- **The agent loop now shares the result cache** (memory-frontier T2-D). "Recordless"
+  bundled two unrelated guarantees: (a) in-loop offloads must not pollute the savings
+  ledger, and (b) they must not touch the result cache. (a) is a real accounting
+  invariant and is unchanged; (b) was collateral, and made the loop re-run the model on
+  byte-identical input. New `NewInLoopPipeline` / `NewInLoopOffload` keep the nil ledger
+  and share the cache; the MCP front door and the `local-agent` CLI use them.
+  `NewRecordlessPipeline` / `NewRecordlessOffload` are unchanged and still used where no
+  shared state is wanted (the shadow-labelling flywheel, prompt A/B arms).
+- **Cache participation is a property of the pipeline, not of `RunTier`.** The
+  shadow-labelling flywheel drives `RunTier` on the main pipeline — which has an open
+  cache — to evaluate counterfactual tiers; a hit there would grade a stored answer
+  instead of the tier, and a write would fill the store with counterfactual results.
+  Only `NewInLoopPipeline` opts in.
+
+### Fixed
+
+- `RunTier`'s cache key now goes through `cacheKeyFor`, the same constructor `Run` uses.
+  It was a hand-rolled `cache.Key` call with the pre-0.62 shape: keyed on the primary
+  model rather than the tier actually run, and missing the template tag. It was dead code
+  (nothing read or wrote that key), so nothing was ever mis-served — but reviving it
+  as-is for T2-D would have reinstated both defects on a live path: two different tiers
+  sharing one entry, and a prompt edit silently serving pre-edit answers.
+
 ## [0.62.1] - 2026-08-16
 
 ### Fixed

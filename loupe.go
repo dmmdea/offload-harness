@@ -24,11 +24,16 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"sort"
 	"time"
 
+	bolt "go.etcd.io/bbolt"
+
+	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
@@ -100,6 +105,10 @@ type statsReport struct {
 	// across buckets to attribute the effect of a hot-reloaded artifact.
 	ContextBuckets []contextBucket `json:"context_buckets,omitempty"`
 
+	// --- gate 0.4: is the embed memo earning its keep? ---
+	// Always present so a consumer can tell "memo unavailable" from "memo idle".
+	EmbedMemo embedMemoReport `json:"embed_memo"`
+
 	// --- routing health ---
 	ByTask       []statRow `json:"by_task,omitempty"`
 	ByTier       []statRow `json:"by_tier,omitempty"`
@@ -108,6 +117,26 @@ type statsReport struct {
 	TopDefers    []statRow `json:"top_defer_reasons,omitempty"`
 	Escalated    int       `json:"escalated"`
 	EscalateRate float64   `json:"escalate_rate"`
+}
+
+// embedMemoReport answers Phase 0.4 ("embed distinct/total") from the memo's own
+// bookkeeping rather than from a bolted-on counter that would later need removing.
+//
+// Unavailable is a FIRST-CLASS state, not an absence. The memo lives in a bbolt
+// file the MCP server holds open while it runs, so a loupe run alongside the
+// server legitimately cannot read it. Reporting zeros in that case would state a
+// measured "the memo never hits" where nothing was measured at all — the exact
+// silent-zero defect the duplicate-rate basis field exists to prevent.
+type embedMemoReport struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"` // why not, when Available is false
+	Path      string `json:"path,omitempty"`
+	Distinct  int    `json:"distinct,omitempty"`
+	Hits      int64  `json:"lifetime_hits,omitempty"`
+	Misses    int64  `json:"lifetime_misses,omitempty"`
+	// HitRate is nil when nothing has been looked up yet — see the Stats doc in
+	// internal/embedmemo for why this is a pointer.
+	HitRate *float64 `json:"hit_rate"`
 }
 
 // contextBucket is one artifact-set arm, with the outcome rates that make it
@@ -175,6 +204,7 @@ func runLoupe(args []string) error {
 	}
 
 	rep := statsReport{LedgerPath: cfg.LedgerPath, Rows: len(rows), WindowDays: *since}
+	rep.EmbedMemo = readEmbedMemoReport(cfg)
 	if len(rows) == 0 {
 		return emitStats(rep, *asJSON)
 	}
@@ -316,6 +346,43 @@ func runLoupe(args []string) error {
 
 // filterRepeats drops single-occurrence rows: "seen once" is not a repeat, and
 // listing them buries the signal.
+// readEmbedMemoReport opens the embed memo read-only for its counters.
+//
+// Every failure is reported WITH ITS CAUSE rather than folded into zeros: a
+// disabled memo, a memo held by the running MCP server, and a memo that exists
+// but has never been consulted are three different answers to "is it earning its
+// keep?", and only the third is a measurement.
+func readEmbedMemoReport(cfg config.Config) embedMemoReport {
+	if !cfg.EmbedMemoOn() {
+		return embedMemoReport{Available: false, Reason: "disabled (embed_memo_enabled=false or embed_memo_path empty)"}
+	}
+	// READ-ONLY, short timeout. This command's contract is that it never contends
+	// with a live MCP server (see the file header); a read-write open here would
+	// take an exclusive bolt lock and stall for its full timeout on every run
+	// while the server is up.
+	m, err := embedmemo.OpenReadOnly(cfg.EmbedMemoPath, cfg.EmbedModel(), cfg.EmbedMemoEpoch)
+	if err != nil {
+		reason := "cannot read: " + err.Error()
+		switch {
+		case errors.Is(err, embedmemo.ErrNoStore):
+			reason = "no store yet — nothing has been embedded on this machine"
+		case errors.Is(err, bolt.ErrTimeout):
+			reason = "held by a running local-offload process — ask it directly via offload_status, or stop it and re-run"
+		}
+		return embedMemoReport{Available: false, Path: cfg.EmbedMemoPath, Reason: reason}
+	}
+	defer m.Close()
+	st := m.Stats()
+	return embedMemoReport{
+		Available: true,
+		Path:      cfg.EmbedMemoPath,
+		Distinct:  st.Distinct,
+		Hits:      st.LifetimeHits,
+		Misses:    st.LifetimeMisses,
+		HitRate:   st.HitRate,
+	}
+}
+
 func filterRepeats(rows []statRow) []statRow {
 	out := rows[:0]
 	for _, r := range rows {
@@ -374,6 +441,17 @@ func emitStats(rep statsReport, asJSON bool) error {
 	}
 	printRows(p, "  most-reused prefixes", rep.TopPrefixes)
 	printRows(p, "  most-repeated inputs", rep.TopRepeatedInputs)
+	em := rep.EmbedMemo
+	switch {
+	case !em.Available:
+		p("  embed memo          n/a — %s", em.Reason)
+	case em.HitRate == nil:
+		p("  embed memo          %d vectors stored, never consulted yet", em.Distinct)
+	default:
+		p("  embed memo          %.1f%% hit (%d hit / %d miss) over %d stored vectors",
+			*em.HitRate*100, em.Hits, em.Misses, em.Distinct)
+		p("                      ^ each hit also skips a possible ~1-2s cold-embedder load (ttl=300)")
+	}
 	p("")
 	p("ROUTING")
 	p("  deferred            %d (%.1f%%)", rep.Deferred, rep.DeferRate*100)
