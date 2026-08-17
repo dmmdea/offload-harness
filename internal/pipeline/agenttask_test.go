@@ -214,6 +214,44 @@ func TestRunAgentTaskHappyPath(t *testing.T) {
 	}
 }
 
+// TestRunAgentTaskSchemalessContractReturnsOutput is the DEFAULT idle-local
+// path (route:local, and route:auto with an idle GPU — the quality-first path
+// the whole design centers on). A schemaless contract is explicitly legal
+// there: RunAgentContract's doc says so, delegate/gate.go makes the schema a
+// REMOTE-eligibility condition only, contracts/README.md documents it, and the
+// MCP InputSchema requires nothing but `goal`. With no output_schema there is
+// nothing to re-pack, so the loop's answer must come back AS IS — Deferred
+// false, Output populated, Structured empty — and the seat must never be asked
+// for a grammar completion it was given no grammar for.
+func TestRunAgentTaskSchemalessContractReturnsOutput(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop:      func(int64) string { return doneChat("The answer is 42.") },
+		repack:    func(int64) string { t.Error("re-pack ran for a contract with no output_schema"); return `{}` },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	contract := testContract()
+	contract.OutputSchema = nil
+	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, contract))
+	wire := decodeWire(t, res)
+
+	if wire.Deferred {
+		t.Fatalf("a schemaless contract deferred (%s / %s) — the perfect answer %q was thrown away",
+			wire.DeferClass, wire.Reason, wire.Output)
+	}
+	if wire.Output != "The answer is 42." {
+		t.Fatalf("output = %q, want the loop's answer returned verbatim", wire.Output)
+	}
+	if len(wire.Structured) != 0 {
+		t.Fatalf("structured = %s, want empty — no schema was asked for", wire.Structured)
+	}
+	if got := fake.grammarCNT.Load(); got != 0 {
+		t.Fatalf("re-pack completions = %d, want 0 — an absent schema means the re-pack is SKIPPED, not attempted", got)
+	}
+}
+
 // TestRunAgentTaskTimeoutDefersNotErrors: the contract's TimeoutSec is a ctx
 // deadline; hitting it yields a DEFERRED wire result on a job-level success —
 // the fleet job must land terminal-done, never error.

@@ -1974,6 +1974,11 @@ func runFleetServe(args []string) error {
 	// which must not block on llama-swap) — see fleet_reclaim.go for why the idle
 	// baseline, not free or total, is the right denominator for a shared card.
 	reclaim := startReclaimTracking(ctx, cfg, sampler.Load, 5*time.Second)
+	// One resolved answer, used by BOTH the server and the startup banner: the
+	// agent lane's advertisement keys on it (fleetnode.AgentLaneAdmissible), so
+	// a banner computing it separately from the config could print a task list
+	// health does not serve.
+	loopbackListener := netguard.LoopbackAddr(listen)
 	srv := fleetnode.New(p, jobs, fleetnode.Options{
 		NodeID:   nodeID,
 		Version:  version,
@@ -1994,7 +1999,7 @@ func runFleetServe(args []string) error {
 		// actually landed (the resolved listen address), not on the
 		// --listen-trusted-network permission flag — a trusted-network flag on
 		// a loopback bind is still loopback.
-		LoopbackListener: netguard.LoopbackAddr(listen),
+		LoopbackListener: loopbackListener,
 		Cfg:              cfg,
 	})
 
@@ -2011,7 +2016,7 @@ func runFleetServe(args []string) error {
 		devicesLabel = fmt.Sprintf(", %d GPUs (headlining the largest)", len(snap.Devices))
 	}
 	fmt.Fprintf(os.Stderr, "[fleet-serve] node %q serving /fleet on %s (%.1f GiB VRAM via %s, vendor=%s arch=%s%s%s; tasks: %s)\n",
-		nodeID, listen, total, prov.Source, prov.Vendor, prov.Arch, umaLabel, devicesLabel, strings.Join(fleetnode.SupportedTasks(cfg), ", "))
+		nodeID, listen, total, prov.Source, prov.Vendor, prov.Arch, umaLabel, devicesLabel, strings.Join(fleetnode.SupportedTasksFor(cfg, loopbackListener), ", "))
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ln) }()

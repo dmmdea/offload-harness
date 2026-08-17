@@ -396,8 +396,8 @@ one contract. Unknown payload fields are **ignored** (staggered node deploys mus
 |---|---|---|
 | `schema_version` | int | must be `1`; anything else is a 400 at ack |
 | `goal` | string | **required** — the self-contained task; the sub-agent sees only this + `context` |
-| `context` | `[{name, text}]` | inline docs, ≤ 16, ≤ 256 KiB total; `name` = flat filename (no separators/colons, no duplicates) — each becomes a file the sub-agent can read |
-| `output_schema` | object | JSON Schema with a `properties` map of string/number/integer/boolean/string-array/enum fields. **Required** — an agent dispatch without one is refused at ack |
+| `context` | `[{name, text}]` | inline docs, ≤ 16, ≤ 256 KiB total; each becomes a file the sub-agent can read, so `name` must be a flat filename: no `/` `\` `:` NUL, not `.`/`..`, **not a reserved Windows device name** (`CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9`, any case, with or without extensions — a write to one succeeds and reads back EMPTY), and no trailing space or dot (Windows strips them). Duplicates are rejected on a normalized key (trailing space/dot trimmed, case-folded), so `notes.md` / `notes.md ` / `Notes.MD` cannot shadow each other |
+| `output_schema` | object | JSON Schema with a `properties` map of string/number/integer/boolean/string-array/enum fields. **Required over the wire** — an agent dispatch without one is refused at ack, because the delegator would have no mechanical check before merging. A LOCAL placement (`route: local`, or `auto` with an idle GPU) may omit it: the run then returns its `output` with `structured` empty, and acceptance's text verbs carry the verification |
 | `acceptance` | `[string]` | delegator-evaluated checks: `contains:<s>` \| `not_contains:<s>` \| `regex:<re>` \| `min_items:<field>:<n>` \| `nonempty:<field>`; malformed or unfalsifiable checks are a 400 |
 | `profile` | string | agent task profile, default `research`; unknown names defer naming the valid set |
 | `max_steps` | int | default 12, clamped to 12 |
@@ -412,7 +412,7 @@ one contract. Unknown payload fields are **ignored** (staggered node deploys mus
 | `node_id` | string | this node (`fleet_node_id`, else hostname) |
 | `seat` | string | the planner model that ran |
 | `output` | string | final assistant text (kept even when the structured re-pack failed) |
-| `structured` | object | present iff `output_schema` given AND the post-loop grammar re-pack validated (one retry) |
+| `structured` | object | present iff `output_schema` given AND the post-loop grammar re-pack validated (one retry). With no `output_schema` the re-pack is **skipped entirely** — not attempted and failed — so a schemaless local run is a plain success with `structured` absent |
 | `steps` / `stop_reason` | int / string | loop telemetry |
 | `deferred` | bool | the node ran and could not complete the contract — **still a `done` job**, never `error` (`error` = internal wiring bug only) |
 | `reason` | string | the defer shape: seat unserved on the roster, `wall timeout after <N>s`, `step budget exhausted (…)`, `output failed schema: …`, `structured re-pack unreachable: …`, build/loop/profile errors |
@@ -449,12 +449,17 @@ No transcript field exists — remote reasoning never crosses the wire.
   deployed tokenless media clients keep working byte-identically. Whole-fleet enforcement is a
   recorded follow-up for a coordinated whole-fleet deploy window (ADR 0023).
 
-### Health advertisement (only when `fleet_agent_enabled`)
+### Health advertisement (only when the lane is admissible)
 
 ```json
 "agent_enabled": true, "agent_seat": "offload-e4b",
 "agent_ctx_tokens": 16384, "agent_seat_resident": true
 ```
+
+All four fields are published under the SAME predicate that admits a dispatch
+(`fleetnode.AgentLaneAdmissible`: `fleet_agent_enabled` + a resolvable seat + a loopback
+listener or a token, judged on the RESOLVED listener) — a delegator reads only these fields, so
+advertising a lane dispatch would 403 is a mis-route rather than a near miss.
 
 `agent_ctx_tokens` comes from config (`0` = omitted = the delegator never places here).
 `agent_seat_resident` is a cached, alias-aware roster probe refreshed in the background at most

@@ -307,11 +307,21 @@ delegator side (placement gate, acceptance evaluation, the `agent_delegate`/`del
 surfaces) lives in `internal/delegate` and is summarized in
 [coding-agent.md](coding-agent.md#delegation-surfaces).
 
-The task is advertised only when all three hold (`agentTaskConfigured`): `fleet_agent_enabled`
-is true (explicit operator opt-in — default false, and the health payload is byte-identical to
-a pre-0.63 node when off, pinned by test), an agent seat resolves (config `agent_model`, else
-the workhorse `model`), and the lane is safely reachable (loopback listener, or
-`fleet_auth_token` set).
+The task is advertised only when all three hold (`fleetnode.AgentLaneAdmissible`):
+`fleet_agent_enabled` is true (explicit operator opt-in — default false, and the health payload
+is byte-identical to a pre-0.63 node when off, pinned by test), an agent seat resolves (config
+`agent_model`, else the workhorse `model`), and the lane is safely reachable (loopback
+listener, or `fleet_auth_token` set).
+
+`AgentLaneAdmissible` is the SINGLE predicate behind both the advertisement (`supported_task_types`
+*and* the four `agent_*` health fields) and the ack-time admission, evaluated over the same
+**resolved** listener (`Options.LoopbackListener`, computed by the verb from where the bind
+actually landed). It is one function rather than two condition lists because the delegator reads
+only the `agent_*` fields: a lane advertised that dispatch would refuse is a mis-route by
+construction, and the two lists had already drifted once (health keyed on `fleet_agent_enabled`
+alone, so a tokenless non-loopback node advertised a placeable lane and 403'd everything sent to
+it). `AgentLaneAdvertisement == dispatch admission` is asserted across all four (listener, token)
+combinations by `TestAgentLaneAdvertisementMatchesAdmission`.
 
 ### Contract wire shape (`core.AgentContract`)
 
@@ -324,7 +334,7 @@ decode error is an ack-time 400 with the decoder's reason.
 |---|---|---|
 | `schema_version` | int | Must be `1`. Any other version is refused at decode — a mismatched peer defers loudly rather than half-understanding a contract. |
 | `goal` | string | Required. The self-contained task; the sub-agent sees only this plus the context docs. |
-| `context` | `[{name, text}]` | Inline documents: ≤ 16 docs, ≤ 256 KiB total (name+text bytes — a transport bound, not a context-fit promise). Each `name` must be a flat filename (no separators, colons, NUL, or `.`/`..`; duplicates rejected) because it becomes a file under the job's context dir. |
+| `context` | `[{name, text}]` | Inline documents: ≤ 16 docs, ≤ 256 KiB total (name+text bytes — a transport bound, not a context-fit promise). Each `name` must be a flat filename because it becomes a file under the job's context dir — see [Context doc names](#context-doc-names) for the exact rules. |
 | `output_schema` | object | JSON Schema for the structured result. Must yield at least one grammar-compilable property — a `properties` map of string / number / integer / boolean / string-array / enum fields. **Required for remote execution**: without it the dispatch is refused at ack, because the delegator would have no mechanical check before merging. |
 | `acceptance` | `[string]` | Machine-checkable checks, parsed at validation and **evaluated by the delegator**, never the node: `contains:<s>`, `not_contains:<s>`, `regex:<re>`, `min_items:<field>:<n>` (n ≥ 1), `nonempty:<field>`. Unfalsifiable shapes (empty substrings, a zero minimum) are parse errors. Text verbs read `output`, falling back to the raw `structured` bytes when `output` is empty; field verbs require `structured` and fail closed without it. |
 | `profile` | string | Agent task profile; empty = `research`. An unknown name defers loudly, naming the valid set. |
@@ -400,18 +410,39 @@ existence.
 
 With **no token configured**, a non-loopback listener refuses agent dispatches outright —
 `403 agent lane requires fleet_auth_token on a non-loopback listener` — and
-`agentTaskConfigured` withholds `agent` from the advertised `supported_task_types` too, so a
-task-list-driven dispatcher never learns the capability just to eat a 403. (The four `agent_*`
-health fields below key off `fleet_agent_enabled` alone.) Loopback with no token is the
+`AgentLaneAdmissible` withholds `agent` from the advertised `supported_task_types` **and** from
+the four `agent_*` health fields below, so neither a task-list-driven dispatcher nor a delegator
+learns the capability just to eat a 403. Loopback with no token is the
 local-MCP trust boundary and stays open. Every media path — media dispatch, media job polls, `/fleet/media/*`, health — ignores
 the token entirely, so already-deployed tokenless media clients keep working byte-identically
 (pinned by test); whole-fleet enforcement is a recorded follow-up
 ([ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)).
 
+### Context doc names
+
+A `context[].name` is a future FILENAME on the receiving node, and the delegator and the node
+can be different operating systems — so the contract enforces the **strictest** platform's rules
+everywhere, on both sides. Rejected at `Validate` (i.e. an ack-time `400`, before any file is
+touched):
+
+| Shape | Why |
+|---|---|
+| empty, or `.` / `..` | not a filename / a directory reference |
+| contains `/`, `\`, `:`, or NUL | traversal, a Windows drive/ADS hazard, or a C-string truncation |
+| a reserved Windows device name — `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, any case, with or without extensions (`nul.md.txt` counts; the stem before the first dot is what matters) | Windows resolves these in every directory: the write **succeeds** and the readback is EMPTY, so the doc vanishes with no error anywhere |
+| a trailing space or trailing dot (`notes.md `, `notes.md.`) | Windows strips them, so the name silently becomes a different one |
+
+Duplicates are rejected on a **normalized** key — trailing spaces/dots trimmed, case-folded —
+so `notes.md`, `notes.md ` and `Notes.MD` cannot shadow one another. Raw string comparison let
+those pairs through as "distinct", and the second write then overwrote the first with nothing
+reporting it. `COM10`/`LPT10` and names that merely *start* like a device (`console.md`,
+`nullify.go`) are ordinary files and stay legal.
+
 ### Health advertisement — four agent fields, fail-closed residency
 
 All four are additive and `omitempty` (`schema_version` stays 1; a lane-off node emits a
-byte-identical payload), populated only when `fleet_agent_enabled` is true:
+byte-identical payload), populated only when `AgentLaneAdmissible` holds — i.e. opted in, a seat
+resolves, AND the listener posture is one dispatch will accept:
 
 | Field | Meaning |
 |---|---|

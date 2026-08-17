@@ -97,8 +97,15 @@ type Server struct {
 	// agentSeat is the resolved agent planner seat (config.AgentPlannerModel:
 	// agent_model > workhorse Model), computed once here like tasks/families —
 	// the config cannot change under a running server. Advertised (and probed
-	// for residency) only when Cfg.FleetAgentEnabled.
+	// for residency) only when agentLane holds.
 	agentSeat string
+	// agentLane is fleetnode.AgentLaneAdmissible over the RESOLVED listener —
+	// the one predicate dispatch's ack-time guard and this advertisement share,
+	// computed once here like tasks/families. Health must never advertise a
+	// lane dispatch would refuse: the delegator reads ONLY the agent_* fields,
+	// so a lane advertised past a tokenless non-loopback listener sends it
+	// through placement and straight into a 403.
+	agentLane bool
 	// rosterServes answers "does the llama-swap behind endpoint serve seat?"
 	// (alias-aware). A seam so tests drive the residency cache without a live
 	// llama-swap; production always gets swapRosterServes.
@@ -133,9 +140,10 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		runner:       runner,
 		jobs:         jobs,
 		opts:         opts,
-		tasks:        SupportedTasks(opts.Cfg),
+		tasks:        SupportedTasksFor(opts.Cfg, opts.LoopbackListener),
 		families:     Families(opts.Cfg),
 		agentSeat:    opts.Cfg.AgentPlannerModel(""),
+		agentLane:    AgentLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		rosterServes: swapRosterServes,
 	}
 }
@@ -200,6 +208,19 @@ func (s *Server) refreshAgentResidency() {
 	a.inflight = false
 	a.mu.Unlock()
 }
+
+// RefreshAgentResidency runs ONE residency probe synchronously and publishes
+// its answer, warming the cache agent_seat_resident is served from.
+//
+// Exported for CROSS-PACKAGE callers that need the answer deterministically —
+// an end-to-end delegation test cannot otherwise avoid racing the first health
+// GET's background refresh, and would gate-fail on a cold cache that is about
+// to say yes. This package's OWN tests must never call it: production's only
+// trigger is agentResident()'s background single-flight, and a test that runs
+// the probe itself leaves that line uncovered (which is exactly how deleting
+// it once left the whole suite green while the feature was inert in
+// production).
+func (s *Server) RefreshAgentResidency() { s.refreshAgentResidency() }
 
 // Handler returns the routed mux for the three contract endpoints.
 func (s *Server) Handler() http.Handler {
@@ -278,10 +299,13 @@ type healthPayload struct {
 	// a node with the lane off — which includes every pre-0.63 node — emits a
 	// byte-identical payload (pinned in TestHealthAgentFieldsAbsentWhenDisabled),
 	// and the dispatcher decodes health loosely per FLEET-NODE.md, so old and
-	// new nodes interoperate in both directions. Populated ONLY when the
-	// operator opted the node in (fleet_agent_enabled): the fields advertise a
-	// CAPABILITY, and every tier binds an agent seat, so keying off the seat's
-	// mere presence would advertise the lane fleet-wide overnight.
+	// new nodes interoperate in both directions. Populated ONLY when
+	// AgentLaneAdmissible says the lane is usable: the operator opted the node
+	// in (fleet_agent_enabled — every tier binds an agent seat, so keying off
+	// the seat's mere presence would advertise the lane fleet-wide overnight),
+	// a seat resolves, AND the listener posture is one dispatch will accept.
+	// These four fields are the ONLY ones a delegator reads, so an
+	// advertisement dispatch would refuse is a mis-route, not a near miss.
 	AgentSeat string `json:"agent_seat,omitempty"` // resolved planner seat (config.AgentPlannerModel)
 	// AgentCtxTokens is the seat's serving ceiling from config (the tier's
 	// agent_ctx_tokens) — the delegator's placement gate does its ctx
@@ -354,10 +378,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			payload.VramSchedulableGb = &schedulable
 		}
 	}
-	// Agent lane (§S3): advertised only on operator opt-in — see the payload
-	// field comments. agentResident() is a cached read + at most one background
-	// refresh per TTL; it never blocks this handler on llama-swap.
-	if s.opts.Cfg.FleetAgentEnabled {
+	// Agent lane (§S3): advertised only when the lane is actually ADMISSIBLE —
+	// the same AgentLaneAdmissible predicate the ack-time guard uses, over the
+	// same resolved listener, so health can never promise a lane dispatch will
+	// 403. agentResident() is a cached read + at most one background refresh
+	// per TTL; it never blocks this handler on llama-swap.
+	if s.agentLane {
 		payload.AgentEnabled = true
 		payload.AgentSeat = s.agentSeat
 		payload.AgentCtxTokens = s.opts.Cfg.AgentCtxTokens

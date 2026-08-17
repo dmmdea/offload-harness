@@ -16,12 +16,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -52,6 +54,13 @@ type fakeNode struct {
 
 	// pollState returns (the jobWire body, HTTP status) for the nth poll (1-based).
 	pollState func(n int64) (map[string]any, int)
+	// pollByJob, when set, wins over pollState: a fan-out test needs to answer
+	// PER JOB (each subtask gets its own result) rather than per poll ordinal.
+	pollByJob func(jobID string, n int64) (map[string]any, int)
+	// onDispatch, when set, runs inside the dispatch handler with the decoded
+	// job id and contract — the seam a concurrency test uses to hold a slot and
+	// sample how many dispatches overlap.
+	onDispatch func(jobID string, contract core.AgentContract)
 	// dispatchStatus overrides the 202 ack; 0 = normal ack.
 	dispatchStatus int
 	// killOnPoll models a node that DIES after acking: the first poll's
@@ -104,10 +113,14 @@ func (f *fakeNode) server() *httptest.Server {
 		}
 		// The payload must be a real v1 contract — decode it exactly as the
 		// node would (schema_version check included).
-		if _, err := core.DecodeAgentContract(strings.NewReader(string(env.Payload))); err != nil {
+		contract, err := core.DecodeAgentContract(strings.NewReader(string(env.Payload)))
+		if err != nil {
 			f.t.Errorf("payload is not a dispatchable contract: %v", err)
 		}
 		f.lastJobID.Store(env.JobID)
+		if f.onDispatch != nil {
+			f.onDispatch(env.JobID, contract)
+		}
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(map[string]string{"job_id": env.JobID, "status": "accepted"})
 	})
@@ -128,7 +141,13 @@ func (f *fakeNode) server() *httptest.Server {
 			}
 			return
 		}
-		body, status := f.pollState(n)
+		var body map[string]any
+		var status int
+		if f.pollByJob != nil {
+			body, status = f.pollByJob(r.PathValue("id"), n)
+		} else {
+			body, status = f.pollState(n)
+		}
 		if body != nil {
 			if _, has := body["job_id"]; !has {
 				body["job_id"] = r.PathValue("id")
@@ -814,5 +833,151 @@ func TestRunRejectsBadInputs(t *testing.T) {
 	}
 	if _, _, err := Run(t.Context(), cfg, local, one, "auto", []string{"https://api.evil.com"}); err == nil {
 		t.Error("a non-tailnet remote must be refused (never-cloud)")
+	}
+}
+
+// TestRunFansOutBoundedAndOrdered is the concurrency pin the engine never had:
+// every other Run test passes exactly ONE subtask, so the fan-out — the
+// semaphore, the per-goroutine result slot, the delegation-log's interleaving
+// guard — ran unexercised in every green suite.
+//
+// Eight subtasks, one node, route=remote. Four things must hold at once:
+//
+//   - EIGHT dispatches with eight DISTINCT job ids. A shared or reused id would
+//     make the node's own idempotent re-ack path silently collapse subtasks
+//     into one run, and seven results would be a copy of the first.
+//   - Results in SUBMISSION order. Callers index results against the subtasks
+//     they sent; goroutines finishing out of order must not reorder them.
+//   - Never more than runConcurrency in flight. The bound exists so a local
+//     fallback burst cannot stampede the one GPU; an unbounded fan-out would
+//     pass every single-subtask test.
+//   - Exactly EIGHT well-formed JSONL corpus lines. delegationLogMu's own
+//     comment says O_APPEND atomicity is insufficient at these line sizes
+//     (a corpus line carries the whole contract), and it had zero coverage —
+//     an interleaved write corrupts the standing agent-task dataset silently.
+func TestRunFansOutBoundedAndOrdered(t *testing.T) {
+	compressPolls(t, 2*time.Millisecond, time.Second)
+	const n = 8
+
+	var (
+		mu       sync.Mutex
+		goalByID = map[string]string{}
+		idOrder  []string
+
+		inFlight    atomic.Int64
+		maxInFlight atomic.Int64
+	)
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 16384, nodeID: "fan-node",
+		onDispatch: func(jobID string, c core.AgentContract) {
+			cur := inFlight.Add(1)
+			for {
+				peak := maxInFlight.Load()
+				if cur <= peak || maxInFlight.CompareAndSwap(peak, cur) {
+					break
+				}
+			}
+			mu.Lock()
+			goalByID[jobID] = c.Goal
+			idOrder = append(idOrder, jobID)
+			mu.Unlock()
+			// Hold the slot so overlapping dispatches are OBSERVABLE: without a
+			// hold, an unbounded fan-out and a serial one both sample 1.
+			time.Sleep(20 * time.Millisecond)
+			inFlight.Add(-1)
+		},
+		pollByJob: func(jobID string, _ int64) (map[string]any, int) {
+			mu.Lock()
+			goal := goalByID[jobID]
+			mu.Unlock()
+			// Echo the subtask's own goal back as the output: that is what makes
+			// "results came back in submission order" checkable at all.
+			return doneWire(t, remoteWire(goal, `{"answer":"ok"}`)), http.StatusOK
+		},
+	}
+	srv := node.server()
+
+	subtasks := make([]core.AgentContract, 0, n)
+	for i := 0; i < n; i++ {
+		c := remoteContract()
+		c.Goal = fmt.Sprintf("subtask-%d", i)
+		c.Acceptance = nil // acceptance is pinned elsewhere; this test is about the fan-out
+		subtasks = append(subtasks, c)
+	}
+
+	cfg := testCfg(t)
+	results, sum, err := Run(t.Context(), cfg, neverLocal(t), subtasks, "remote", []string{srv.URL})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sum != (Summary{Succeeded: n}) {
+		t.Fatalf("summary = %+v, want %d successes", sum, n)
+	}
+
+	if got := node.dispatches.Load(); got != n {
+		t.Fatalf("dispatches = %d, want %d (one per subtask)", got, n)
+	}
+	seen := map[string]bool{}
+	for _, id := range idOrder {
+		if !strings.HasPrefix(id, "agd-") {
+			t.Errorf("job id %q lacks the delegator-minted agd- prefix", id)
+		}
+		if seen[id] {
+			t.Fatalf("job id %q dispatched twice — a shared id makes the node's idempotent re-ack collapse two subtasks into one run", id)
+		}
+		seen[id] = true
+	}
+	if len(seen) != n {
+		t.Fatalf("distinct job ids = %d, want %d", len(seen), n)
+	}
+
+	for i, r := range results {
+		want := fmt.Sprintf("subtask-%d", i)
+		if r.Result.Output != want {
+			t.Errorf("results[%d].output = %q, want %q — results must stay in SUBMISSION order however the goroutines finish", i, r.Result.Output, want)
+		}
+	}
+
+	peak := maxInFlight.Load()
+	if peak > runConcurrency {
+		t.Errorf("peak concurrent dispatches = %d, want at most runConcurrency (%d) — the bound keeps a local-fallback burst off the one GPU", peak, runConcurrency)
+	}
+	if peak < 2 {
+		t.Errorf("peak concurrent dispatches = %d — the fan-out never actually overlapped, so this test proved nothing about the bound", peak)
+	}
+
+	// The corpus: exactly n well-formed lines, none shredded by an interleaved
+	// concurrent append.
+	logDir := filepath.Join(cfg.BaseDir(), "delegation-log")
+	entries, derr := os.ReadDir(logDir)
+	if derr != nil || len(entries) != 1 {
+		t.Fatalf("delegation-log dir: %v (entries %d)", derr, len(entries))
+	}
+	raw, rerr := os.ReadFile(filepath.Join(logDir, entries[0].Name()))
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) != n {
+		t.Fatalf("delegation-log lines = %d, want %d (interleaved appends shred the corpus)", len(lines), n)
+	}
+	logged := map[string]bool{}
+	for i, ln := range lines {
+		var rec struct {
+			JobID    string `json:"job_id"`
+			Contract struct {
+				Goal string `json:"goal"`
+			} `json:"contract"`
+		}
+		if err := json.Unmarshal([]byte(ln), &rec); err != nil {
+			t.Fatalf("delegation-log line %d is not well-formed JSON (%v): %q", i, err, ln)
+		}
+		if !seen[rec.JobID] {
+			t.Errorf("delegation-log line %d names job %q, which was never dispatched", i, rec.JobID)
+		}
+		logged[rec.Contract.Goal] = true
+	}
+	if len(logged) != n {
+		t.Fatalf("distinct goals in the corpus = %d, want %d (a lost or duplicated line)", len(logged), n)
 	}
 }

@@ -377,6 +377,12 @@ node runs (`pipeline.RunAgentContract` → the `agent` task → this loop, read-
 contract's materialized context docs, `research` profile by default, no
 write/run/fetch/github tools), so local and remote results share one execution semantics.
 
+The one deliberate difference is `output_schema`: **remote** placement requires it (the gate's
+mechanical-verifiability condition, and the node refuses a schemaless contract at ack), while a
+local run may omit it. A schemaless local contract skips the structured re-pack entirely and
+returns its `output` with `structured` empty — it is a plain success, not a defer, and the
+contract's text-verb acceptance (`contains:` / `not_contains:` / `regex:`) is what verifies it.
+
 An in-loop `delegate_subtask` tool — the loop delegating onward itself — is **deliberately
 parked to v2**; no delegate tool is registered for any caller today, which is what makes the
 hop limit structural. Contract wire shape, auth, and placement:

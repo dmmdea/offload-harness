@@ -210,6 +210,19 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	}
 	wire.Output = res.Output
 
+	// No schema, no re-pack. A schemaless contract is legal on the LOCAL
+	// placement path (RunAgentContract's doc; delegate/gate.go makes the schema
+	// a REMOTE-eligibility condition only; the MCP tool requires only `goal`) —
+	// and that is the default idle-local, quality-first path. Calling
+	// repackStructured anyway handed json.Unmarshal a nil schema, which errors,
+	// which deferred the run with "output failed schema: ... unexpected end of
+	// JSON input" and THREW AWAY a finished answer. Skipping leaves
+	// wire.Structured empty and wire.Deferred false, which is the honest shape:
+	// nothing structured was asked for, so nothing structured is missing.
+	if len(contract.OutputSchema) == 0 {
+		return finish(wire)
+	}
+
 	structured, tokensOut, transport, serr := p.repackStructured(cctx, seat, contract.OutputSchema, res.Output)
 	if serr != nil {
 		// wire.Output stays populated on every branch below: the delegator's

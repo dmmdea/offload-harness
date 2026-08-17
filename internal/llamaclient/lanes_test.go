@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -18,18 +19,18 @@ import (
 // (counted into chatHits) and the llama-swap roster on /v1/models (counted
 // into rosterHits) listing the given model ids — so the real RosterResident
 // prober can verify residency against it, end to end.
-func laneServer(t *testing.T, chatHits, rosterHits *int, rosterJSON string) *httptest.Server {
+func laneServer(t *testing.T, chatHits, rosterHits *atomic.Int64, rosterJSON string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/models":
-			*rosterHits++
+			rosterHits.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			if _, err := w.Write([]byte(rosterJSON)); err != nil {
 				t.Errorf("write roster: %v", err)
 			}
 		case "/v1/chat/completions":
-			*chatHits++
+			chatHits.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			if _, err := w.Write([]byte(cannedChatResp)); err != nil {
 				t.Errorf("write canned response: %v", err)
@@ -134,11 +135,11 @@ func TestWithRemoteLanesEmptyIsIdentity(t *testing.T) {
 // flips on and come home when it flips off — and the roster is probed ONCE
 // for both busy calls (the 30s per-base cache).
 func TestCascadeRemoteLaneMovesWithBusy(t *testing.T) {
-	var defaultHits int
+	var defaultHits atomic.Int64
 	defSrv := countingServer(t, &defaultHits)
 	defer defSrv.Close()
 
-	var laneChat, laneRoster int
+	var laneChat, laneRoster atomic.Int64
 	lane := laneServer(t, &laneChat, &laneRoster,
 		`{"object":"list","data":[{"id":"canonical-e4b","meta":{"llamaswap":{"aliases":["offload-e4b"]}}}]}`)
 	defer lane.Close()
@@ -159,24 +160,24 @@ func TestCascadeRemoteLaneMovesWithBusy(t *testing.T) {
 	}
 
 	gen("idle call")
-	if defaultHits != 1 || laneChat != 0 {
-		t.Fatalf("idle: hits = (default %d, lane %d), want (1, 0)", defaultHits, laneChat)
+	if defaultHits.Load() != 1 || laneChat.Load() != 0 {
+		t.Fatalf("idle: hits = (default %d, lane %d), want (1, 0)", defaultHits.Load(), laneChat.Load())
 	}
 
 	setBusy(true)
 	gen("busy call 1")
 	gen("busy call 2")
-	if defaultHits != 1 || laneChat != 2 {
-		t.Fatalf("busy: hits = (default %d, lane %d), want (1, 2)", defaultHits, laneChat)
+	if defaultHits.Load() != 1 || laneChat.Load() != 2 {
+		t.Fatalf("busy: hits = (default %d, lane %d), want (1, 2)", defaultHits.Load(), laneChat.Load())
 	}
-	if laneRoster != 1 {
-		t.Fatalf("roster probes = %d, want exactly 1 (cached across the second busy call)", laneRoster)
+	if laneRoster.Load() != 1 {
+		t.Fatalf("roster probes = %d, want exactly 1 (cached across the second busy call)", laneRoster.Load())
 	}
 
 	setBusy(false)
 	gen("idle again")
-	if defaultHits != 2 || laneChat != 2 {
-		t.Fatalf("idle again: hits = (default %d, lane %d), want (2, 2)", defaultHits, laneChat)
+	if defaultHits.Load() != 2 || laneChat.Load() != 2 {
+		t.Fatalf("idle again: hits = (default %d, lane %d), want (2, 2)", defaultHits.Load(), laneChat.Load())
 	}
 }
 
@@ -185,14 +186,14 @@ func TestCascadeRemoteLaneMovesWithBusy(t *testing.T) {
 // the default base instead of gambling on an unverified lane. "The roster is
 // empty" and "the roster could not be read" both fail toward local.
 func TestCascadeRemoteLaneFailsClosedOnProbeError(t *testing.T) {
-	var defaultHits int
+	var defaultHits atomic.Int64
 	defSrv := countingServer(t, &defaultHits)
 	defer defSrv.Close()
 
-	var laneChat int
+	var laneChat atomic.Int64
 	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/chat/completions" {
-			laneChat++
+			laneChat.Add(1)
 		}
 		http.NotFound(w, r)
 	}))
@@ -205,9 +206,61 @@ func TestCascadeRemoteLaneFailsClosedOnProbeError(t *testing.T) {
 	if _, err := c.Generate(context.Background(), "", "sys", "hi", "", 16, 0, 0); err != nil {
 		t.Fatalf("busy call with an unprobeable lane must still answer locally: %v", err)
 	}
-	if defaultHits != 1 || laneChat != 0 {
-		t.Fatalf("hits = (default %d, lane %d), want (1, 0) — fail-closed to local", defaultHits, laneChat)
+	if defaultHits.Load() != 1 || laneChat.Load() != 0 {
+		t.Fatalf("hits = (default %d, lane %d), want (1, 0) — fail-closed to local", defaultHits.Load(), laneChat.Load())
 	}
+}
+
+// TestRosterResidentRefusesOffTailnetAtDial closes the one outbound hole in
+// the delegation lanes. Five of six outbound paths ride netguard.SafeTransport;
+// this lane's ROSTER PROBE did not — swapclient.New passed only a Timeout, so
+// the vendored client built a plain &http.Client{} on the DEFAULT transport,
+// with ProxyFromEnvironment live and no dial-time address check. That made
+// ADR 0023's "re-checked at every dial" claim false for this path: a dotless
+// MagicDNS name admitted by SHAPE alone (TailnetURL cannot resolve at config
+// time, by design) could resolve off-tailnet and the probe would happily
+// connect to it.
+//
+// 203.0.113.0/24 is RFC 5737 TEST-NET-3: unroutable, so an unguarded dial
+// merely times out (and the failure message never names the guard), while a
+// guarded one is refused at the socket with zero network activity.
+func TestRosterResidentRefusesOffTailnetAtDial(t *testing.T) {
+	buf := &syncBuffer{}
+	oldOut, oldFlags := log.Writer(), log.Flags()
+	log.SetOutput(buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(oldOut); log.SetFlags(oldFlags) })
+
+	resident := RosterResident()
+	start := time.Now()
+	if resident("http://203.0.113.9:11436", "offload-e4b") {
+		t.Fatal("an off-tailnet lane must never read as resident")
+	}
+	if elapsed := time.Since(start); elapsed > laneProbeTimeout/2 {
+		t.Errorf("refusal took %s — a dial-time refusal costs zero network activity, so it must be immediate", elapsed)
+	}
+	if out := buf.String(); !strings.Contains(out, "tailnet guard") {
+		t.Fatalf("probe-failure log = %q, want the tailnet guard's refusal — an off-tailnet base must die at DIAL, not merely fail to connect", out)
+	}
+}
+
+// syncBuffer is a log sink safe to write from a probe goroutine and read from
+// the test goroutine.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // TestRosterResidentLogsProbeFailureOncePerWindow (M-1): fail-closed is right,

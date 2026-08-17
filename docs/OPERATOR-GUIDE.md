@@ -604,6 +604,13 @@ curl http://<tailscale-ip>:18811/fleet/health
 `agent_seat_resident` starts `false` (the roster probe is cached, background-refreshed, and
 fail-closed) — give it one health request plus a few seconds before concluding anything.
 
+**If the four `agent_*` fields are missing entirely**, the lane is not admissible and no
+delegator will ever place here — by design, since a dispatch would be refused. The three
+conditions are the same ones the ack-time guard applies: `fleet_agent_enabled: true`, a
+resolvable agent seat (`agent_model`, else the workhorse `model`), and a safe listener —
+loopback, **or** `fleet_auth_token` set for anything beyond it. Serving on a Tailscale address
+with no token is the common miss: the advertisement is withheld rather than published-then-403'd.
+
 **Enable — delegator** (the box that *places* contracts), in its config:
 
 ```json

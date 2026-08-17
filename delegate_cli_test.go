@@ -125,3 +125,47 @@ func TestRepeatedFlagCollectsEveryValue(t *testing.T) {
 		t.Fatalf("repeatedFlag = %v", r)
 	}
 }
+
+// TestRunDelegateRefusesWhenDelegationDisabled invokes runDelegate itself —
+// the verb had NO test that ever called it, while its MCP twin's registration
+// gate is byte-pinned (TestAgentDelegateToolGated). The two surfaces share one
+// switch (roast delta 13: a box is a DELEGATOR only by explicit opt-in), so the
+// CLI half needs the same pin or the flag could be honored on one surface and
+// ignored on the other with a fully green suite.
+//
+// The refusal must also come BEFORE any work: no contract read, no pipeline
+// opened, no network. Asserted by passing a --contract path that does not
+// exist — if the gate ever moved below the file read, the error would name the
+// missing file instead of the disabled role.
+func TestRunDelegateRefusesWhenDelegationDisabled(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"agent_delegation_enabled": false}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := runDelegate([]string{"--config", cfgPath, "--contract", filepath.Join(dir, "no-such-contract.json")})
+	if err == nil {
+		t.Fatal("runDelegate succeeded with agent_delegation_enabled false — the CLI must refuse exactly as the MCP tool refuses to register")
+	}
+	if !strings.Contains(err.Error(), "agent_delegation_enabled") {
+		t.Fatalf("err = %q, want the disabled-role refusal naming agent_delegation_enabled", err)
+	}
+	if strings.Contains(err.Error(), "no-such-contract") {
+		t.Fatalf("err = %q — the gate must precede the contract read, so a disabled box never touches the caller's files", err)
+	}
+}
+
+// TestRunDelegateEnabledStillValidatesItsInputs: with the role ON the gate is
+// out of the way and the verb's own argument contract takes over — a missing
+// --contract is the verb's error, not a silent no-op run.
+func TestRunDelegateEnabledStillValidatesItsInputs(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"agent_delegation_enabled": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := runDelegate([]string{"--config", cfgPath})
+	if err == nil || !strings.Contains(err.Error(), "--contract required") {
+		t.Fatalf("err = %v, want the missing---contract refusal", err)
+	}
+}

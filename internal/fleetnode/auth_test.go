@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -265,5 +266,74 @@ func TestJobsAgentMarker(t *testing.T) {
 	}
 	if v, ok := j.Get("m"); !ok || v.Agent {
 		t.Errorf("Accept job: Agent marker set, want false (media polls must stay open)")
+	}
+}
+
+// agentLaneCfg is a node with the agent lane genuinely ON: enabled, a seat, a
+// token, and a test-owned BaseDir for the materialized job dir. The matrix
+// above runs with the lane OFF, so every authorized row there dies at
+// "unsupported task_type" — which proves the auth ORDER but exercises none of
+// the lane it is guarding. With the lane on, an authorized row must reach 202.
+func agentLaneCfg(t *testing.T, token string) config.Config {
+	t.Helper()
+	return config.Config{
+		Home:              t.TempDir(),
+		FleetAgentEnabled: true,
+		AgentModel:        "agent-seat",
+		FleetAuthToken:    token,
+	}
+}
+
+const agentLaneSchema = `{"properties":{"answer":{"type":"string"}}}`
+
+// agentLaneBody is a VALID agent dispatch envelope — one that reaches 202 when
+// authorized, so an auth row's outcome is unambiguous.
+func agentLaneBody(jobID string) string {
+	return `{"job_id":"` + jobID + `","task_type":"agent","payload":` +
+		`{"schema_version":1,"goal":"summarize","output_schema":` + agentLaneSchema + `}}`
+}
+
+// TestAgentLaneBearerHeaderShapes drives the credential parser's edges with the
+// lane ON. bearerOK matches the SCHEME case-insensitively (RFC 7235 says the
+// scheme is case-insensitive) and the TOKEN byte-exactly — a refactor to a
+// plain HasPrefix("Bearer ") would break every RFC-compliant client that sends
+// "bearer", and today it would break with zero test failures. The negative rows
+// pin the other half: no separator, an empty token, and any whitespace the
+// header picked up are all NOT the token, however close they look.
+func TestAgentLaneBearerHeaderShapes(t *testing.T) {
+	const token = "s3cret"
+	cases := []struct {
+		name   string
+		header string
+		want   int
+	}{
+		{"canonical scheme", "Bearer " + token, http.StatusAccepted},
+		{"lowercase scheme (RFC 7235: scheme is case-insensitive)", "bearer " + token, http.StatusAccepted},
+		{"uppercase scheme", "BEARER " + token, http.StatusAccepted},
+		{"mixed-case scheme", "BeArEr " + token, http.StatusAccepted},
+		{"empty token after the scheme", "Bearer ", http.StatusUnauthorized},
+		{"bare scheme, no separator", "Bearer", http.StatusUnauthorized},
+		{"double space before the token", "Bearer  " + token, http.StatusUnauthorized},
+		{"trailing space inside the token", "Bearer " + token + " ", http.StatusUnauthorized},
+		{"leading tab instead of a space", "Bearer\t" + token, http.StatusUnauthorized},
+		{"header absent", "", http.StatusUnauthorized},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newTestServer(t, agentLaneCfg(t, token), &fakeRunner{}, authOpts(true))
+			var hdr map[string]string
+			if tc.header != "" {
+				hdr = map[string]string{"Authorization": tc.header}
+			}
+			rec := do(t, s, http.MethodPost, "/fleet/dispatch", agentLaneBody(fmt.Sprintf("agd-hdr-%d", i)), hdr)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body %s)", rec.Code, tc.want, rec.Body.String())
+			}
+			if tc.want == http.StatusUnauthorized {
+				if msg, _ := decodeMap(t, rec)["error"].(string); msg != "unauthorized" {
+					t.Fatalf("error = %q, want exactly \"unauthorized\"", msg)
+				}
+			}
+		})
 	}
 }

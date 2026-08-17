@@ -5,16 +5,20 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // countingServer returns an httptest server that counts requests and answers
-// every one with the canned chat response.
-func countingServer(t *testing.T, hits *int) *httptest.Server {
+// every one with the canned chat response. The counter is an atomic because
+// it is written from the SERVER's goroutine and read from the test's — a plain
+// int here is a data race that only shows under -race (and the sibling fakes
+// in internal/pipeline and internal/delegate already use atomic.Int64).
+func countingServer(t *testing.T, hits *atomic.Int64) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*hits++
+		hits.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		if _, err := w.Write([]byte(cannedChatResp)); err != nil {
 			t.Errorf("write canned response: %v", err)
@@ -62,7 +66,7 @@ func TestBaseFor(t *testing.T) {
 // Both bases are loopback httptest servers, so the tailnet dial gate passes
 // and what is measured is purely the routing.
 func TestSeatEndpointOverrideRoutesRequests(t *testing.T) {
-	var defaultHits, overrideHits int
+	var defaultHits, overrideHits atomic.Int64
 	defSrv := countingServer(t, &defaultHits)
 	defer defSrv.Close()
 	ovrSrv := countingServer(t, &overrideHits)
@@ -74,15 +78,15 @@ func TestSeatEndpointOverrideRoutesRequests(t *testing.T) {
 	if _, err := c.Generate(context.Background(), "", "sys", "hi", "", 16, 0, 0); err != nil {
 		t.Fatalf("default-model Generate: %v", err)
 	}
-	if defaultHits != 1 || overrideHits != 0 {
-		t.Fatalf("default-model call: hits = (default %d, override %d), want (1, 0)", defaultHits, overrideHits)
+	if defaultHits.Load() != 1 || overrideHits.Load() != 0 {
+		t.Fatalf("default-model call: hits = (default %d, override %d), want (1, 0)", defaultHits.Load(), overrideHits.Load())
 	}
 
 	if _, err := c.Generate(context.Background(), "lenovo-e4b", "sys", "hi", "", 16, 0, 0); err != nil {
 		t.Fatalf("overridden-model Generate: %v", err)
 	}
-	if defaultHits != 1 || overrideHits != 1 {
-		t.Fatalf("overridden-model call: hits = (default %d, override %d), want (1, 1)", defaultHits, overrideHits)
+	if defaultHits.Load() != 1 || overrideHits.Load() != 1 {
+		t.Fatalf("overridden-model call: hits = (default %d, override %d), want (1, 1)", defaultHits.Load(), overrideHits.Load())
 	}
 }
 
@@ -92,7 +96,7 @@ func TestSeatEndpointOverrideRoutesRequests(t *testing.T) {
 // be the only line: a Client can be assembled in code with any map). The
 // default seat on the same client stays untouched and keeps working.
 func TestSeatEndpointOverrideRidesTheTailnetGuard(t *testing.T) {
-	var defaultHits int
+	var defaultHits atomic.Int64
 	defSrv := countingServer(t, &defaultHits)
 	defer defSrv.Close()
 
@@ -110,8 +114,8 @@ func TestSeatEndpointOverrideRidesTheTailnetGuard(t *testing.T) {
 	if _, err := c.Generate(context.Background(), "", "sys", "hi", "", 16, 0, 0); err != nil {
 		t.Fatalf("default seat must be unaffected by a rogue override on another seat: %v", err)
 	}
-	if defaultHits != 1 {
-		t.Fatalf("default hits = %d, want 1", defaultHits)
+	if defaultHits.Load() != 1 {
+		t.Fatalf("default hits = %d, want 1", defaultHits.Load())
 	}
 }
 

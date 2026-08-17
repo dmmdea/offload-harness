@@ -103,6 +103,55 @@ Diagnostics hardening (adversarial silent-failure review of this arc, same relea
 - A deferred LOCAL result no longer has acceptance checks run against it — matching the remote
   path, so a defer can never be reported as a verification failure.
 
+Correctness hardening (adversarial code + test review of this arc, same release):
+
+- **A schemaless contract no longer defers on the default local path.** The node-side run
+  called the structured re-pack unconditionally, so with no `output_schema` the re-pack's
+  `json.Unmarshal(nil, …)` errored and a finished, correct answer was thrown away as
+  `deferred: output failed schema: … unexpected end of JSON input`. That broke `route: local`
+  and `route: auto` on an idle GPU — the quality-first path the design centers on, and the one
+  place a schemaless contract is explicitly legal. The re-pack is now SKIPPED when no schema
+  was asked for: `structured` stays empty, the run is a plain success.
+- **Health can no longer advertise an agent lane dispatch would refuse.** The advertisement
+  keyed on `fleet_agent_enabled` alone while the ack-time guard keyed on enabled + seat +
+  (loopback-or-token), and the two read different notions of "loopback" (`fleet_listen` vs the
+  resolved listener). A node with the lane on, a non-loopback listener and no token therefore
+  published a placeable lane, the delegator placed on it, and every dispatch 403'd into
+  `summary.failed`. Both sides now call one exported predicate, `fleetnode.AgentLaneAdmissible`,
+  over the RESOLVED listener; advertisement-equals-admission is asserted across all four
+  (listener, token) combinations.
+- **Hostile context-doc names are refused instead of silently losing data.** A doc named `NUL`
+  (or `CON`/`PRN`/`AUX`/`COM1-9`/`LPT1-9`, any case, with or without extensions) passed
+  validation on Windows, "wrote" successfully, and read back EMPTY — a context doc vanishing
+  with no error anywhere. Names with a trailing space or dot bypassed the duplicate guard the
+  same way (`notes.md ` and `notes.md` are two Go strings and one Windows file), so one doc
+  could shadow another. Both shapes are now rejected, and duplicates are detected on a
+  normalized key (trailing space/dot trimmed, case-folded).
+- **The cascade remote lane's roster probe now rides the dial guard.** It was the one outbound
+  path on Go's default transport — proxy live, no dial-time address check — which made ADR
+  0023's "re-checked at every dial" false for it: `TailnetURL` admits a dotless MagicDNS name
+  on shape alone, so only a per-dial check can prove where it still resolves. New
+  `swapclient.FetchRosterGuarded` (used for LANE probes only; the node's own loopback
+  llama-swap keeps the plain reader).
+
+Test coverage this release adds, for gaps that let the above through:
+
+- The first test that crosses a package boundary: MCP handler → `delegate.Run` → real HTTP →
+  the real fleetnode mux → a real pipeline → `runAgentTask`, faking only the leaf llama seat.
+  It asserts the node a result NAMES is the node health ADVERTISED and the node that RAN it,
+  that the quarantine holds end to end (a marker emitted only inside a remote tool turn never
+  appears in the caller's bytes), and that a dropped delegator token is a 401 FAILURE, not a
+  defer. Renaming the job wire's `data` field — invisible to `internal/delegate`'s and
+  `internal/pipeline`'s own suites, which each fake the other side — fails it.
+- The agent-seat residency tests now drive the health path only, so the background probe
+  production actually uses is covered; deleting that one line previously left the suite green
+  while, in production, `agent_seat_resident` would be false forever and every delegation would
+  silently fall local.
+- Fan-out coverage (8 subtasks: distinct job ids, submission order, the concurrency bound, one
+  well-formed corpus line each), adversarial agent-lane HTTP with the lane ON (malformed and
+  oversize contracts through the mux; bearer-header edge shapes including the case-insensitive
+  scheme), and the `delegate` CLI's disabled-role refusal.
+
 Config keys added: `seat_endpoints`, `cascade_remote_lanes`, `agent_ctx_tokens`,
 `fleet_auth_token`, `fleet_agent_enabled`, `agent_delegation_enabled` — all default
 off/empty; every existing path behaves byte-identically when they are absent (pinned by

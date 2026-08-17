@@ -11,6 +11,8 @@ package fleetnode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -213,4 +215,139 @@ func TestBuildRequestAgentDepthDerived(t *testing.T) {
 func jsonInt(n int) string {
 	b, _ := json.Marshal(n)
 	return string(b)
+}
+
+// TestAgentLaneAdvertisementMatchesAdmission is the ADVERTISE==ADMIT pin.
+// Health's four agent_* fields are the ONLY thing delegate/nodeview.go reads,
+// so they alone decide whether a delegator will place work here; the ack-time
+// guard decides whether that work is then accepted. When those two disagree,
+// the delegator does everything right — reads health, passes the gate, mints a
+// job, dispatches — and collects a 403 into Summary.Failed. It fails CLOSED,
+// but it is precisely the mis-routing the design says it prevents.
+//
+// The disagreement was structural: health keyed on cfg.FleetAgentEnabled ALONE
+// while the ack keyed on enabled + seat + (loopback-or-token), and the two
+// read DIFFERENT notions of "loopback" (cfg.FleetListen vs the RESOLVED
+// Options.LoopbackListener). One shared predicate over the resolved listener
+// is what makes them undriftable, so this test asserts equality rather than
+// two hardcoded expectations — a future change that moves only one side fails
+// here whichever side it moves.
+func TestAgentLaneAdvertisementMatchesAdmission(t *testing.T) {
+	contract := `{"schema_version":1,"goal":"g","output_schema":` + agentSchemaJSON + `}`
+	body := `{"job_id":"agd-parity","task_type":"agent","payload":` + contract + `}`
+	cases := []struct {
+		name     string
+		loopback bool
+		token    string
+		want     bool // the lane is usable at all in this configuration
+	}{
+		{"loopback listener, tokenless (open by locality)", true, "", true},
+		{"loopback listener, token set", true, "tok", true},
+		{"non-loopback listener, token set", false, "tok", true},
+		// The row the drift produced: advertised a placeable lane, 403'd the
+		// dispatch that followed.
+		{"non-loopback listener, tokenless (RCE-class surface, refused)", false, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Config{
+				Home:              t.TempDir(), // BaseDir() → any materialized job dir stays test-owned
+				FleetAgentEnabled: true,
+				AgentModel:        "agent-seat",
+				AgentCtxTokens:    16384,
+				FleetAuthToken:    tc.token,
+			}
+			s, _ := newTestServer(t, cfg, &fakeRunner{}, authOpts(tc.loopback))
+
+			m := decodeMap(t, do(t, s, http.MethodGet, "/fleet/health", "", nil))
+			advertisedFields := m["agent_enabled"] == true
+			advertisedTask := false
+			tasks, _ := m["supported_task_types"].([]any)
+			for _, task := range tasks {
+				if task == "agent" {
+					advertisedTask = true
+				}
+			}
+
+			var hdr map[string]string
+			if tc.token != "" {
+				hdr = map[string]string{"Authorization": "Bearer " + tc.token}
+			}
+			rec := do(t, s, http.MethodPost, "/fleet/dispatch", body, hdr)
+			admitted := rec.Code == http.StatusAccepted
+
+			if admitted != tc.want {
+				t.Fatalf("dispatch admitted = %v (status %d), want %v (body %s)", admitted, rec.Code, tc.want, rec.Body.String())
+			}
+			if advertisedFields != admitted {
+				t.Errorf("health agent_enabled = %v but dispatch admitted = %v — the delegator reads ONLY these fields, so an advertisement dispatch will refuse is a mis-route by construction (health %s)",
+					advertisedFields, admitted, m)
+			}
+			if advertisedTask != admitted {
+				t.Errorf("supported_task_types lists agent = %v but dispatch admitted = %v", advertisedTask, admitted)
+			}
+			if !tc.want {
+				wantErrorShape(t, rec, http.StatusForbidden, agentLaneTokenRequired)
+			}
+		})
+	}
+}
+
+// TestAgentDispatchAdversarialBodies drives the malformed/oversize contract
+// shapes THROUGH THE MUX with the lane ON. The unit tests around BuildRequest
+// prove the decoder refuses these; only an end-to-end dispatch proves the
+// refusal survives the handler sequence — that it arrives as the taxonomy's
+// 400 JSON envelope rather than a panic, a 500, or a silent accept, and that
+// nothing was materialized on the way.
+//
+// The >256KiB row is the spec's Task-4 boundary demand: the cap existed only as
+// a core unit test, while the wire path it bounds — a body that sails under the
+// 1 MiB maxDispatchBody and is refused by the CONTRACT's own cap — was never
+// exercised at the boundary.
+func TestAgentDispatchAdversarialBodies(t *testing.T) {
+	oversize := strings.Repeat("x", core.AgentContextMaxBytes+1)
+	docJSON, err := json.Marshal(core.ContextDoc{Name: "big.md", Text: oversize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name    string
+		payload string
+		wantSub string
+	}{
+		// A truncated contract also truncates the ENVELOPE it is embedded in, so
+		// the strict envelope decoder catches it first — pinned here because the
+		// caller-facing outcome (a 400 in the taxonomy's JSON shape) is what
+		// matters, and "which decoder said no" must not change it.
+		{"malformed contract JSON", `{"schema_version":1,"goal":`, "malformed dispatch body"},
+		{"contract is a JSON array, not an object", `[{"goal":"g"}]`, "agent contract"},
+		{"contract is a bare string", `"just a goal"`, "agent contract"},
+		{"unsupported schema_version", `{"schema_version":99,"goal":"g","output_schema":` + agentSchemaJSON + `}`, "schema_version"},
+		{"no goal", `{"schema_version":1,"output_schema":` + agentSchemaJSON + `}`, "goal"},
+		{"no output_schema (remote execution requires one)", `{"schema_version":1,"goal":"g"}`, "output_schema"},
+		{"context over the 256 KiB cap", `{"schema_version":1,"goal":"g","output_schema":` + agentSchemaJSON +
+			`,"context":[` + string(docJSON) + `]}`, "cap"},
+		{"reserved device name as a context doc", `{"schema_version":1,"goal":"g","output_schema":` + agentSchemaJSON +
+			`,"context":[{"name":"NUL","text":"vanishes"}]}`, "reserved Windows device name"},
+		{"traversal doc name", `{"schema_version":1,"goal":"g","output_schema":` + agentSchemaJSON +
+			`,"context":[{"name":"../escape.md","text":"x"}]}`, "flat filename"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := agentNodeCfg(t)
+			s, _ := newTestServer(t, cfg, &fakeRunner{}, authOpts(true))
+			body := fmt.Sprintf(`{"job_id":"agd-bad-%d","task_type":"agent","payload":%s}`, i, tc.payload)
+			rec := do(t, s, http.MethodPost, "/fleet/dispatch", body,
+				map[string]string{"Authorization": "Bearer " + cfg.FleetAuthToken})
+			wantErrorShape(t, rec, http.StatusBadRequest, tc.wantSub)
+
+			// A refused dispatch must leave nothing behind: buildAgentRun mints
+			// its job dir before writing docs, so a mid-validation bail that
+			// forgot to clean up would strand a directory per bad request.
+			jobsRoot := filepath.Join(cfg.BaseDir(), "pipeline-jobs")
+			if entries, rerr := os.ReadDir(jobsRoot); rerr == nil && len(entries) != 0 {
+				t.Fatalf("refused dispatch left %d job dir(s) under %s", len(entries), jobsRoot)
+			}
+		})
+	}
 }

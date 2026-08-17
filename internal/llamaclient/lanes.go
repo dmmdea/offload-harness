@@ -117,8 +117,14 @@ func RosterResident() func(base, model string) bool {
 		defer mu.Unlock()
 		e, cached := cache[base]
 		if !cached || time.Since(e.at) > laneResidencyTTL {
+			// GUARDED fetch: a lane base is a REMOTE, operator-configured
+			// endpoint, and netguard.TailnetURL admits a dotless MagicDNS name
+			// on shape alone (it resolves nothing at config time). Only the
+			// per-dial check inside FetchRosterGuarded can prove the name still
+			// lands inside the tailnet — the plain FetchRoster used here before
+			// rode the default transport, proxy and all.
 			ctx, cancel := context.WithTimeout(context.Background(), laneProbeTimeout)
-			roster, err := swapclient.FetchRoster(ctx, base, laneProbeTimeout)
+			roster, err := swapclient.FetchRosterGuarded(ctx, base, laneProbeTimeout)
 			cancel()
 			if err != nil {
 				// A TAKEN lane logs a line (resolveEndpoint above); a lane that

@@ -33,7 +33,19 @@ var fleetTaskOrder = []string{"image-gen", "video-gen", "stt", "audio-gen", "run
 // taskConfigured reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
 // advertising it to the fleet would be a lie).
+//
+// Listener-independent callers (BuildRequest's error text, Families) get the
+// CONFIG-side view of the bind; the server threads the RESOLVED one through
+// taskConfiguredFor — see AgentLaneAdmissible for why that distinction is
+// load-bearing for the agent lane and irrelevant for every other task.
 func taskConfigured(cfg config.Config, taskType string) bool {
+	return taskConfiguredFor(cfg, taskType, ConfigLoopbackListen(cfg))
+}
+
+// taskConfiguredFor is taskConfigured keyed on a caller-supplied answer to
+// "is the serve listener loopback?" — the only input that is not derivable
+// from config alone (a --listen flag can diverge from cfg.FleetListen).
+func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool) bool {
 	switch taskType {
 	case "image-gen":
 		return cfg.ImageRouteConfigured()   // ComfyUI script OR the sdcpp engine (J2)
@@ -46,15 +58,25 @@ func taskConfigured(cfg config.Config, taskType string) bool {
 	case "run-graph":
 		return cfg.RunGraphScript != ""
 	case "agent":
-		return agentTaskConfigured(cfg)
+		return AgentLaneAdmissible(cfg, loopbackListener)
 	}
 	// Anything else is only "configured" when it is a VALID cfg.Pipelines key
 	// (Task 6): 100% config-driven, so a new pipeline needs no new case here.
 	return pipelineNameConfigured(cfg, taskType)
 }
 
-// agentTaskConfigured gates the fleet "agent" task's advertisement and
-// dispatch (multi-node delegation, Task 4). Three conditions, all required:
+// AgentLaneAdmissible is THE ONE predicate behind the fleet "agent" lane
+// (multi-node delegation, Task 4). Both sides of the lane consult it — the
+// ADVERTISEMENT (health's supported_task_types AND its four agent_* fields)
+// and the ADMISSION (server.go's ack-time guard) — because when those two
+// disagree the delegator does everything right and still fails: it reads
+// health, passes the capability gate, mints a job, dispatches, and eats a 403
+// into Summary.Failed. Advertising a lane that will refuse is a mis-route by
+// construction, so the two must be the SAME function of the SAME inputs, not
+// two hand-kept-in-sync condition lists (they drifted once already, and health
+// advertised a lane dispatch would 403).
+//
+// Three conditions, all required:
 //
 //  1. cfg.FleetAgentEnabled — an explicit operator opt-in, unlike every other
 //     task here (see the config field's doc: the BINDING exists on every tier,
@@ -66,23 +88,33 @@ func taskConfigured(cfg config.Config, taskType string) bool {
 //     and network-free; whether the seat is actually served is health's
 //     roster-probe job (Task 5) and runAgentTask's own probe at run time.
 //  3. Safe reachability: a loopback listener, or a bearer token for anything
-//     beyond it — the same posture server.go enforces at ack time. Checked
-//     here too so an unsafe lane is never even ADVERTISED: a dispatcher must
-//     not learn "this node does agent work" from health and then eat a 403.
-//     cfg.FleetListen is the config-side view of the bind; an empty value
-//     means the operator never overrode config.Default()'s loopback bind, so
-//     it counts as loopback (netguard.LoopbackAddr itself fails closed on
-//     ""). The ack-time gate keys on the RESOLVED listener and stays
-//     authoritative if a --listen flag ever diverges from the config.
-func agentTaskConfigured(cfg config.Config) bool {
+//     beyond it — an agent lane drives a coding-agent loop, so a tokenless one
+//     past loopback is an RCE-class surface.
+//
+// loopbackListener is a PARAMETER, not derived from cfg, because the two
+// callers know different things: the server holds the RESOLVED listen address
+// (Options.LoopbackListener, computed by the verb from where the bind actually
+// landed) and must use it, while config-only callers pass
+// ConfigLoopbackListen(cfg). Deriving it internally is what let the two sides
+// key on different notions of "loopback" in the first place.
+func AgentLaneAdmissible(cfg config.Config, loopbackListener bool) bool {
 	if !cfg.FleetAgentEnabled {
 		return false
 	}
 	if cfg.AgentPlannerModel("") == "" {
 		return false
 	}
-	loopback := cfg.FleetListen == "" || netguard.LoopbackAddr(cfg.FleetListen)
-	return loopback || cfg.FleetAuthToken != ""
+	return loopbackListener || cfg.FleetAuthToken != ""
+}
+
+// ConfigLoopbackListen is the CONFIG-side view of the bind, for callers with
+// no resolved listener to consult. An empty fleet_listen means the operator
+// never overrode config.Default()'s loopback bind, so it counts as loopback
+// (netguard.LoopbackAddr itself fails closed on ""). Anything the server
+// decides keys on Options.LoopbackListener instead, which stays authoritative
+// when a --listen flag diverges from the config.
+func ConfigLoopbackListen(cfg config.Config) bool {
+	return cfg.FleetListen == "" || netguard.LoopbackAddr(cfg.FleetListen)
 }
 
 // pipelineNameConfigured reports whether taskType is one of cfg.Pipelines'
@@ -97,11 +129,20 @@ func pipelineNameConfigured(cfg config.Config, taskType string) bool {
 }
 
 // SupportedTasks returns the fleet task_types this machine's config actually
-// serves, in stable order. nil when nothing is bound.
+// serves, in stable order. nil when nothing is bound. The agent lane's
+// listener condition is judged from the config (ConfigLoopbackListen); a
+// server with a resolved listen address calls SupportedTasksFor instead.
 func SupportedTasks(cfg config.Config) []string {
+	return SupportedTasksFor(cfg, ConfigLoopbackListen(cfg))
+}
+
+// SupportedTasksFor is SupportedTasks with the RESOLVED listener answer
+// supplied — what /fleet/health advertises, so supported_task_types and the
+// agent_* block can never disagree with what dispatch will admit.
+func SupportedTasksFor(cfg config.Config, loopbackListener bool) []string {
 	var out []string
 	for _, t := range fleetTaskOrder {
-		if taskConfigured(cfg, t) {
+		if taskConfiguredFor(cfg, t, loopbackListener) {
 			out = append(out, t)
 		}
 	}

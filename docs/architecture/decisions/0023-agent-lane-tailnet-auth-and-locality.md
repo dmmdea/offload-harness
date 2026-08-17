@@ -135,7 +135,12 @@ held and the lane's roster verifiably serves the SAME model — quality-identica
 fail-closed to local, logged per rerouted call). llama-swap itself has no authentication, so
 these lanes carry no credential — accepted on the same WireGuard-transport grounds as above,
 and noted here so the gap is a recorded decision rather than an oversight. The lanes still
-ride the full dial-time tailnet guard.
+ride the full dial-time tailnet guard — including the lane's own **roster probe**, which reaches
+llama-swap through `swapclient.FetchRosterGuarded` rather than the plain reader. (The plain
+`swapclient.New` builds its client on Go's default transport, proxy and all: correct for this
+node's own loopback llama-swap, and the one hole in "re-checked at every dial" while the lane
+probe used it — `TailnetURL` admits a dotless MagicDNS name on shape alone, so only the per-dial
+check can prove where that name still resolves.)
 
 ### 7. `delegate_subtask` (the in-loop tool) is parked to v2
 

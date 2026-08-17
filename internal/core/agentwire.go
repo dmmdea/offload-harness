@@ -172,18 +172,27 @@ func (c AgentContract) Validate() error {
 		return fmt.Errorf("agent contract: %d context docs exceeds the max of %d", len(c.Context), AgentContextMaxDocs)
 	}
 	total := 0
+	// Keyed on the NORMALIZED name, not the raw one: two names that differ only
+	// by case or by trailing space/dot are distinct Go strings that name the
+	// SAME file on Windows (and, for case, on macOS). Comparing raw strings let
+	// {"notes.md"} and {"notes.md "} both through, and the second write then
+	// shadowed the first — exactly the silent overwrite the check below exists
+	// to prevent. Those shapes are ALSO rejected outright by validDocName; the
+	// normalized key is the second layer, so no future relaxation there can
+	// re-open shadowing here.
 	seen := make(map[string]bool, len(c.Context))
 	for i, d := range c.Context {
 		if err := validDocName(d.Name); err != nil {
 			return fmt.Errorf("agent contract: context doc %d: %w", i, err)
 		}
-		if seen[d.Name] {
+		key := normalizeDocName(d.Name)
+		if seen[key] {
 			// Duplicates would silently overwrite each other at
 			// materialization — the sub-agent would read ONE of them and
 			// nobody would know which.
-			return fmt.Errorf("agent contract: context doc name %q appears more than once", d.Name)
+			return fmt.Errorf("agent contract: context doc name %q collides with an earlier doc (names that differ only by case or by trailing spaces/dots are the same file)", d.Name)
 		}
-		seen[d.Name] = true
+		seen[key] = true
 		total += len(d.Name) + len(d.Text)
 	}
 	if total > AgentContextMaxBytes {
@@ -220,10 +229,31 @@ func validateOutputSchema(raw json.RawMessage) error {
 	return nil
 }
 
+// windowsDeviceNames is the set of legacy DOS device names Windows still
+// resolves in EVERY directory. Opening one of these — by any case, with or
+// without extensions — opens the DEVICE, not a file: a write to "NUL"
+// succeeds and reads back empty, so a context doc named that way vanishes
+// with no error anywhere. COM0/LPT0 are deliberately absent (not reserved),
+// as are COM10+/LPT10+, so "com10.txt" stays an ordinary file.
+var windowsDeviceNames = map[string]bool{
+	"con": true, "prn": true, "aux": true, "nul": true,
+	"com1": true, "com2": true, "com3": true, "com4": true, "com5": true,
+	"com6": true, "com7": true, "com8": true, "com9": true,
+	"lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true, "lpt5": true,
+	"lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
+}
+
 // validDocName holds a ContextDoc name to flat-filename shape. Ban list, not
 // allow list, kept minimal: separators and ".." are traversal, ":" is a
 // Windows drive/ADS hazard ("C:evil" is drive-relative and escapes Join),
 // and NUL truncates paths in C-heritage syscalls.
+//
+// The Windows-specific rules below are enforced on EVERY platform on purpose.
+// A contract is a WIRE object: it is validated on the delegator and again on
+// the receiving node, and those two can be different operating systems. A
+// Linux-only check would accept a name the Windows node then swallows, which
+// is the silent-data-loss shape this whole function exists to prevent — so the
+// strictest platform's rules are the contract's rules.
 func validDocName(name string) error {
 	if name == "" {
 		return errors.New("name is required")
@@ -234,7 +264,34 @@ func validDocName(name string) error {
 	if name == "." || name == ".." {
 		return fmt.Errorf("name %q is a directory reference", name)
 	}
+	// Trailing spaces and dots are STRIPPED by the Windows filesystem layer, so
+	// "notes.md " and "notes.md" name one file while staying two distinct Go
+	// strings — the proven bypass of the duplicate guard above.
+	if trimmed := strings.TrimRight(name, " ."); trimmed != name {
+		if trimmed == "" {
+			return fmt.Errorf("name %q is only spaces and dots", name)
+		}
+		return fmt.Errorf("name %q has a trailing space or dot (Windows strips those, so it would silently become %q)", name, trimmed)
+	}
+	// The device rule matches the stem — everything before the FIRST dot —
+	// because "nul.md.txt" opens the null device just as "nul" does.
+	stem := name
+	if i := strings.Index(stem, "."); i >= 0 {
+		stem = stem[:i]
+	}
+	if windowsDeviceNames[strings.ToLower(stem)] {
+		return fmt.Errorf("name %q is a reserved Windows device name (writes to it succeed and read back EMPTY — the doc would vanish silently)", name)
+	}
 	return nil
+}
+
+// normalizeDocName is the duplicate-detection key: two names that normalize
+// alike would be ONE file on at least one platform the fleet runs on, so the
+// contract must refuse the pair rather than let one shadow the other.
+// Trailing spaces/dots go because Windows strips them; case folds because
+// Windows and macOS filesystems are case-insensitive.
+func normalizeDocName(name string) string {
+	return strings.ToLower(strings.TrimRight(name, " ."))
 }
 
 // ---- Acceptance check DSL (roast delta 3) ----

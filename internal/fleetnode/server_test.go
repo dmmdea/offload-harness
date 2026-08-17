@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -879,13 +880,18 @@ func TestMediaRejectsSymlinkEscape(t *testing.T) {
 // fakeRoster serves GET /v1/models in llama-swap's REAL shape: a canonical id
 // the config never mentions, with the harness-bound name published only under
 // meta.llamaswap.aliases (the exact deployment shape that broke every id-only
-// roster reader — see internal/swapclient's package doc).
-func fakeRoster(t *testing.T, canonical string, aliases ...string) *httptest.Server {
+// roster reader — see internal/swapclient's package doc). Every fetch is
+// COUNTED into hits: the count is how the residency tests prove single-flight
+// and the TTL from the OUTSIDE, without any test running the probe itself.
+func fakeRoster(t *testing.T, hits *atomic.Int64, canonical string, aliases ...string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
 			http.NotFound(w, r)
 			return
+		}
+		if hits != nil {
+			hits.Add(1)
 		}
 		quoted := make([]string, len(aliases))
 		for i, a := range aliases {
@@ -909,17 +915,50 @@ func agentHealthCfg(endpoint string) config.Config {
 	return cfg
 }
 
-// TestHealthAgentFieldsPresentWhenEnabled drives the §S3 agent advertisement:
-// with fleet_agent_enabled the payload carries agent_enabled/agent_seat/
+// waitForResidencyProbe blocks until a background refresh has PUBLISHED an
+// answer into the residency cache.
+//
+// Why it exists, and why no residency test may call refreshAgentResidency
+// itself: production's ONLY trigger is the `go s.refreshAgentResidency()`
+// inside agentResident(), on the health path. Tests that called the refresh
+// synchronously never exercised that line — deleting it left the whole suite
+// green while, in production, agent_seat_resident would be false forever,
+// remoteEligible would never pass, EVERY delegation would silently fall local,
+// and the feature would be inert. So the tests drive health GETs only and
+// merely OBSERVE the cache's own timestamp here (an in-package read; the
+// timestamp is set exclusively by refreshAgentResidency).
+func waitForResidencyProbe(t *testing.T, s *Server) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.agentRes.mu.Lock()
+		published := !s.agentRes.at.IsZero()
+		s.agentRes.mu.Unlock()
+		if published {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no residency answer was ever published: the health path never kicked off a background probe — agent_seat_resident would stay false forever and every delegation would silently fall local")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestHealthAgentFieldsPresentWhenEnabled drives the §S3 agent advertisement
+// end to end THROUGH THE HEALTH HANDLER, never by calling the refresh: with
+// fleet_agent_enabled the payload carries agent_enabled/agent_seat/
 // agent_ctx_tokens immediately, while agent_seat_resident starts ABSENT
-// (false) — the residency cache is cold and the handler must NEVER block on a
-// llama-swap round-trip (same rule as the reclaim tracker) — and turns true
-// once the roster probe lands. The fake roster serves the seat ONLY as an
+// (false) — the cache is cold and the handler must NEVER block on a llama-swap
+// round-trip (same rule as the reclaim tracker) — and turns true once the
+// BACKGROUND probe the first GET kicked off lands. The roster hit count pins
+// the other half of the cache contract: one probe, single-flighted, reused by
+// every request inside the TTL. The fake roster serves the seat ONLY as an
 // alias, pinning alias-awareness (the plannerUnserved idiom): an id-only
 // reader would advertise a correctly-served seat as non-resident forever.
 func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
-	roster := fakeRoster(t, "gemma-4-e4b", "offload-e4b")
-	s, _ := newTestServer(t, agentHealthCfg(roster.URL), &fakeRunner{}, nil)
+	var probes atomic.Int64
+	roster := fakeRoster(t, &probes, "gemma-4-e4b", "offload-e4b")
+	s, _ := newTestServer(t, agentHealthCfg(roster.URL), &fakeRunner{}, authOpts(true))
 
 	rec := do(t, s, http.MethodGet, "/fleet/health", "", nil)
 	if rec.Code != http.StatusOK {
@@ -941,13 +980,31 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 	if v, present := m["agent_seat_resident"]; present {
 		t.Fatalf("agent_seat_resident = %v on the FIRST health (cache cold) — must fail closed until the probe lands, never block the handler", v)
 	}
+	if n := probes.Load(); n > 1 {
+		t.Fatalf("roster probes after ONE health request = %d, want at most 1", n)
+	}
 
-	// Deterministic warm: run the same refresh the background single-flight
-	// path runs, synchronously, then re-read.
-	s.refreshAgentResidency()
+	// The background refresh the GET above kicked off is the only thing that
+	// can flip the field. Wait for it to publish, then re-read health.
+	waitForResidencyProbe(t, s)
 	m = decodeMap(t, do(t, s, http.MethodGet, "/fleet/health", "", nil))
 	if m["agent_seat_resident"] != true {
 		t.Fatalf("agent_seat_resident = %v after a successful ALIAS-served roster probe, want true", m["agent_seat_resident"])
+	}
+	if n := probes.Load(); n != 1 {
+		t.Fatalf("roster probes = %d, want exactly 1 (single-flight: concurrent/repeat health requests share one probe)", n)
+	}
+
+	// Inside the TTL every further request is served from the cache — health
+	// must not probe per request whatever the request rate.
+	for i := 0; i < 20; i++ {
+		m = decodeMap(t, do(t, s, http.MethodGet, "/fleet/health", "", nil))
+		if m["agent_seat_resident"] != true {
+			t.Fatalf("agent_seat_resident = %v on cached health request %d, want true", m["agent_seat_resident"], i)
+		}
+	}
+	if n := probes.Load(); n != 1 {
+		t.Fatalf("roster probes after 20 more health requests = %d, want still exactly 1 (the %s TTL)", n, agentResidencyTTL)
 	}
 }
 
@@ -955,19 +1012,21 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 // (or endpoint unset) must read as NOT resident — the delegator then keeps
 // work local, the conservative direction — while health itself stays 200 and
 // the other agent fields keep advertising (the media lane and the capability
-// advertisement do not depend on llama-swap being up).
+// advertisement do not depend on llama-swap being up). Driven through health
+// GETs only, like every residency test (see waitForResidencyProbe).
 func TestHealthAgentResidencyFailsClosedWhenRosterUnreachable(t *testing.T) {
-	roster := fakeRoster(t, "gemma-4-e4b", "offload-e4b")
+	roster := fakeRoster(t, nil, "gemma-4-e4b", "offload-e4b")
 	base := roster.URL
 	roster.Close() // now refused at connect
 
-	s, _ := newTestServer(t, agentHealthCfg(base), &fakeRunner{}, nil)
-	s.refreshAgentResidency()
-	rec := do(t, s, http.MethodGet, "/fleet/health", "", nil)
+	s, _ := newTestServer(t, agentHealthCfg(base), &fakeRunner{}, authOpts(true))
+	rec := do(t, s, http.MethodGet, "/fleet/health", "", nil) // kicks off the probe
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 — a dead llama-swap must not 503 health (body %s)", rec.Code, rec.Body.String())
 	}
-	m := decodeMap(t, rec)
+	waitForResidencyProbe(t, s)
+
+	m := decodeMap(t, do(t, s, http.MethodGet, "/fleet/health", "", nil))
 	if v, present := m["agent_seat_resident"]; present {
 		t.Fatalf("agent_seat_resident = %v with the roster unreachable, want absent (fail closed)", v)
 	}
@@ -983,18 +1042,22 @@ func TestHealthAgentResidencyFailsClosedWhenRosterUnreachable(t *testing.T) {
 // node advertises itself as unusable. One line per probe (the probe runs at
 // most once per TTL window, so this cannot become per-request spam).
 func TestHealthAgentResidencyProbeFailureIsLogged(t *testing.T) {
-	var buf bytes.Buffer
+	// The probe logs from a BACKGROUND goroutine while this one reads the
+	// buffer, so the sink must be mutex-guarded — a bare bytes.Buffer is a data
+	// race the moment the test stops running the probe itself.
+	buf := &syncBuffer{}
 	oldOut, oldFlags := log.Writer(), log.Flags()
-	log.SetOutput(&buf)
+	log.SetOutput(buf)
 	log.SetFlags(0)
 	t.Cleanup(func() { log.SetOutput(oldOut); log.SetFlags(oldFlags) })
 
-	roster := fakeRoster(t, "gemma-4-e4b", "offload-e4b")
+	roster := fakeRoster(t, nil, "gemma-4-e4b", "offload-e4b")
 	base := roster.URL
 	roster.Close()
 
-	s, _ := newTestServer(t, agentHealthCfg(base), &fakeRunner{}, nil)
-	s.refreshAgentResidency()
+	s, _ := newTestServer(t, agentHealthCfg(base), &fakeRunner{}, authOpts(true))
+	do(t, s, http.MethodGet, "/fleet/health", "", nil) // the only trigger there is
+	waitForResidencyProbe(t, s)
 
 	out := buf.String()
 	if !strings.Contains(out, "residency probe") {
@@ -1003,6 +1066,25 @@ func TestHealthAgentResidencyProbeFailureIsLogged(t *testing.T) {
 	if !strings.Contains(out, "offload-e4b") {
 		t.Fatalf("log = %q, want the seat named — it is what stops every remote placement", out)
 	}
+}
+
+// syncBuffer is a log sink safe to write from a background goroutine and read
+// from the test goroutine.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // TestHealthAgentFieldsAbsentWhenDisabled is the additive-off pin, byte level:

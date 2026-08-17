@@ -206,6 +206,80 @@ func TestAgentContractValidateDocNames(t *testing.T) {
 	}
 }
 
+// TestAgentContractValidateHostileDocNames covers the shapes a ban-list of
+// `/ \ : NUL . ..` lets through and Windows then eats SILENTLY — the worst
+// class of bug this lane can have, because the contract is accepted, the write
+// "succeeds", and the doc simply is not there when the sub-agent reads:
+//
+//   - Reserved DEVICE names (CON/PRN/AUX/NUL/COM1-9/LPT1-9, any case, with or
+//     without an extension, and with further extensions after it): opening
+//     "NUL" opens the null device, so the write reports success and the
+//     readback is EMPTY. A context doc vanishes on the exact quality-first path.
+//   - Trailing spaces and trailing dots: Windows normalizes them away at the
+//     filesystem layer, so "notes.md " and "notes.md" are DISTINCT Go strings
+//     that name the SAME file — which walks straight through the duplicate
+//     guard whose own comment says duplicates "would silently overwrite each
+//     other… nobody would know which".
+//
+// The duplicate guard therefore keys on a NORMALIZED name (trailing space/dot
+// trimmed, casefolded), so shadowing is impossible rather than merely unlikely.
+func TestAgentContractValidateHostileDocNames(t *testing.T) {
+	base := AgentContract{SchemaVersion: 1, Goal: "g"}
+	hostile := []struct {
+		name string
+		docs []ContextDoc
+	}{
+		{"bare NUL device", []ContextDoc{{Name: "NUL", Text: "t"}}},
+		{"lowercase nul device", []ContextDoc{{Name: "nul", Text: "t"}}},
+		{"NUL with an extension", []ContextDoc{{Name: "nul.txt", Text: "t"}}},
+		{"NUL with two extensions", []ContextDoc{{Name: "NuL.md.txt", Text: "t"}}},
+		{"CON device", []ContextDoc{{Name: "con", Text: "t"}}},
+		{"CON with an extension", []ContextDoc{{Name: "CON.md", Text: "t"}}},
+		{"PRN device", []ContextDoc{{Name: "PRN", Text: "t"}}},
+		{"AUX device", []ContextDoc{{Name: "aux.log", Text: "t"}}},
+		{"COM1 device", []ContextDoc{{Name: "COM1", Text: "t"}}},
+		{"COM9 with an extension", []ContextDoc{{Name: "com9.txt", Text: "t"}}},
+		{"LPT1 device", []ContextDoc{{Name: "lpt1", Text: "t"}}},
+		{"LPT9 with an extension", []ContextDoc{{Name: "LPT9.md", Text: "t"}}},
+		{"trailing space", []ContextDoc{{Name: "notes.md ", Text: "t"}}},
+		{"trailing dot", []ContextDoc{{Name: "notes.md.", Text: "t"}}},
+		{"trailing space then dot", []ContextDoc{{Name: "notes.md .", Text: "t"}}},
+		{"all spaces", []ContextDoc{{Name: "  ", Text: "t"}}},
+		{"all dots", []ContextDoc{{Name: "...", Text: "t"}}},
+		// The proven shadowing pair: two distinct Go strings, ONE Windows file.
+		{"trailing-space shadow of a real doc",
+			[]ContextDoc{{Name: "notes.md", Text: "real"}, {Name: "notes.md ", Text: "shadow"}}},
+		{"trailing-dot shadow of a real doc",
+			[]ContextDoc{{Name: "notes.md", Text: "real"}, {Name: "notes.md.", Text: "shadow"}}},
+		// Case-only difference: one file on Windows/macOS, two on Linux —
+		// "which one did the sub-agent read?" must never be a per-OS question.
+		{"case-only shadow of a real doc",
+			[]ContextDoc{{Name: "notes.md", Text: "real"}, {Name: "Notes.MD", Text: "shadow"}}},
+	}
+	for _, tt := range hostile {
+		t.Run(tt.name, func(t *testing.T) {
+			c := base
+			c.Context = tt.docs
+			if err := c.Validate(); err == nil {
+				t.Fatalf("docs %v must fail validation — Windows would silently swallow or shadow the doc", tt.docs)
+			}
+		})
+	}
+
+	// Names that merely LOOK reserved must keep working: the device rule is an
+	// exact match on the stem, never a prefix match, and COM10+/LPT10+ are
+	// ordinary files.
+	for _, ok := range []string{"notes.md", "console.md", "conf", "auxiliary.txt", "com10.txt", "lpt10.md", "nullify.go", "prnt.md"} {
+		t.Run("legit "+ok, func(t *testing.T) {
+			c := base
+			c.Context = []ContextDoc{{Name: ok, Text: "fine"}}
+			if err := c.Validate(); err != nil {
+				t.Fatalf("doc name %q must validate: %v", ok, err)
+			}
+		})
+	}
+}
+
 // TestAgentContractValidateOutputSchema (roast delta 3): remote placement
 // requires a schema the receiving node can actually CONSTRAIN with — so
 // Validate compiles OutputSchema through the same gbnf path the extract task
