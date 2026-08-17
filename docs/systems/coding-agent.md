@@ -351,6 +351,77 @@ re-runs on the result — residual PII refuses the harvest — and the corpus is
 destination. Methodology harvested from the OmniRoute compression service's
 eval approach (MIT); metrics and signals are this harness's own.
 
+## Delegation surfaces
+
+Since 0.65.0 the same loop can be driven by a **delegation contract** — a self-contained
+`{goal, context docs, output_schema, acceptance}` unit placed on this box or on a fleet node
+over the operator's tailnet. Two surfaces exist, both delegator-side:
+
+- **MCP `agent_delegate`** — registration is gated on config `agent_delegation_enabled`, so
+  `tools/list` is byte-identical when the delegator role is off. Fans out 1–8 subtasks with
+  bounded concurrency; placement is quality-first (an idle local box always runs the work);
+  results are verified against the contract's acceptance DSL **by the delegator** before
+  anything counts as done.
+- **CLI `local-offload delegate --contract file.json`** — the same intake, engine, and response
+  JSON, for testing and scripts (template contracts: [`contracts/`](../../contracts/README.md)).
+
+Both surfaces publish the same summary-first response, and both read the same way: a
+`deferred` subtask carries a `defer_class` (`abstention` | `budget` | `infrastructure` |
+`config` | `contract`), and the `infrastructure` + `config` ones are counted separately in
+`summary.infrastructure` — because a node whose llama-swap is down defers every subtask and must
+not read as a clean run. `contract`-classed defers are the caller's own contract, not a broken
+box, and stay quiet ([defer classes](fleet-node.md#defer-shapes-and-their-classes)) — but only
+when the fleet is positively established as healthy: with any node unreachable, or any agent lane
+advertising no `agent_ctx_tokens` ceiling at all, the loud class wins and the reason names both
+causes.
+
+`summary.infrastructure` covers two situations a caller acts on differently, so
+**`summary.lost_to_stack`** (omitted when zero) splits out the one that is lost WORK: subtasks
+that **delivered no usable result — the contracted output never arrived** because the stack failed
+them. The remainder of `infrastructure` is a successful LOCAL placement annotated with "the fleet
+was down" — nothing lost.
+
+It counts the missing DELIVERABLE, not missing bytes, and one counted member proves the
+difference: `structured re-pack unreachable` fires after the agent loop has already FINISHED, so
+that result publishes `output` populated, `structured` absent, `defer_class: "infrastructure"`.
+It is still lost work — a contract carrying an `output_schema` asked for a mechanically checked
+deliverable, and prose nothing validated is not one, so the caller is told rather than left to
+merge it.
+
+The two surfaces report that verdict differently, on purpose, and they agree on the case that
+matters. **The CLI exits non-zero on `summary.infrastructure > 0`** — an exit code sits beside the
+printed results, so it can say "look at this" without denying the results. **The MCP tool sets
+`isError` on `summary.failed > 0` or `summary.lost_to_stack > 0`**: a subtask whose contracted
+output never arrived is loud whether the stack or a transport error ate it, and a sibling
+succeeding does not un-lose it. The one deliberate difference is the fleet-down run that still delivered every
+subtask (`infrastructure > 0`, `lost_to_stack == 0`): non-zero on the CLI, a quiet success on
+MCP, because `isError` means *the call failed* and flagging a run whose subtasks all completed,
+validated and passed acceptance is how a model comes to discard or redo correct work. The body is
+identical either way, so the summary and every per-subtask reason are always there to read.
+
+The summary also carries `corpus_rows_lost` / `ledger_rows_lost` and, whenever one is non-zero,
+its `corpus_rows_attempted` / `ledger_rows_attempted` denominator (all `omitempty`): telemetry
+never fails the work, but a delegation that recorded nothing used to publish byte-identically to
+one that recorded everything — including the total-loss case where the ledger file never opened
+at all — and "N rows lost" is unreadable without the M it was lost out of.
+
+A **local** placement is not a special case: it runs the identical `Pipeline.Run` route a fleet
+node runs (`pipeline.RunAgentContract` → the `agent` task → this loop, read-only over the
+contract's materialized context docs, `research` profile by default, no
+write/run/fetch/github tools), so local and remote results share one execution semantics.
+
+The one deliberate difference is `output_schema`: **remote** placement requires it (the gate's
+mechanical-verifiability condition, and the node refuses a schemaless contract at ack), while a
+local run may omit it. A schemaless local contract skips the structured re-pack entirely and
+returns its `output` with `structured` empty — it is a plain success, not a defer, and the
+contract's text-verb acceptance (`contains:` / `not_contains:` / `regex:`) is what verifies it.
+
+An in-loop `delegate_subtask` tool — the loop delegating onward itself — is **deliberately
+parked to v2**; no delegate tool is registered for any caller today, which is what makes the
+hop limit structural. Contract wire shape, auth, and placement:
+[fleet-node.md](fleet-node.md#the-agent-task-task_type-agent) and
+[ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md).
+
 ## Data and state
 
 - **Audit trail** — append-only JSONL, mode `0600`, at `~/.local-offload/agent-audit.jsonl` by
@@ -473,6 +544,10 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 - [`internal/agent/writetools.go`](../../internal/agent/writetools.go) — `os.Root` scoping
 - [`internal/agent/builder.go`](../../internal/agent/builder.go) — capability grants, audit-path check
 - [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go), [`internal/compeval/`](../../internal/compeval/)
+- [`internal/delegate/`](../../internal/delegate/) — delegator-side placement, intake, execution
+  engine, acceptance evaluation
+- [`internal/pipeline/agenttask.go`](../../internal/pipeline/agenttask.go) — contract execution
+  through this loop (local and fleet placements alike)
 - [`internal/sandbox/`](../../internal/sandbox/) — platform cages
 - [`cmd/local-agent/`](../../cmd/local-agent/) — CLI and server
 

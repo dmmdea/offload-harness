@@ -261,7 +261,8 @@ repeatedly. The consequence of the split is that an in-loop offload does not reu
 
 ## Dependencies
 
-`internal/llamaclient` (local completion endpoint), `internal/gbnf` (schema→grammar),
+`internal/llamaclient` (completion client — including the per-model `seat_endpoints` static
+pins and the busy-aware `cascade_remote_lanes` failover), `internal/gbnf` (schema→grammar),
 `internal/grounding`, `internal/confidence`, `internal/ledger`, `internal/config`. Media, vision, and
 speech tasks dispatch out to their own backends.
 
@@ -291,8 +292,16 @@ reason and any partial output preserved in `Partial`.
 
 ## Security and privacy notes
 
-The cascade holds no credentials and reaches no network beyond the configured local endpoint. Task
-input passes through the ledger only as metadata and token counts, not as content.
+The cascade holds no credentials. By default it reaches no network beyond the configured local
+endpoint; since 0.65.0 two opt-in config keys can route a seat's completions to a base on the
+operator's OWN tailnet, never cloud (ADR 0023): `seat_endpoints` (a static per-model pin — that
+seat is always remote) and `cascade_remote_lanes` (busy-aware failover — the lane is taken per
+call, only while the local machine-wide GPU lease is held and a cached alias-aware roster probe
+confirms the lane serves the SAME model, fail-closed to local, one serve-log line per reroute).
+Routing never changes WHICH model answers, only WHERE. Both keys are vetted by the tailnet guard
+at config load (naming the offending key) and by the resolve-and-pin `SafeTransport` dial gate on
+every request. Task input passes through the ledger only as metadata and token counts, not as
+content.
 
 ## Prefix reuse — why the prompt shape is load-bearing
 

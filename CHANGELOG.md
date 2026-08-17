@@ -6,6 +6,422 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.66.0] - 2026-08-17
+
+Multi-node sub-agent delegation. Released as 0.65.0 rather than 0.63.0 because a
+concurrent session shipped 0.63.0 and 0.64.0 from the same repo while this branch
+was in adversarial review; the entries below were written across that review cycle.
+
+### Fixed — delegation lane, round-7 adversarial review (the prose is preserved for the CALLER, not for acceptance)
+
+A seventh round confirmed the logic clean with a full state-transition table and mutation-verified
+that round 6's new end-to-end test binds. Every finding is **wording only** — no predicate,
+condition or assertion changed, and no behavioral rule moved. The round is two shapes: round 6
+replaced one false justification with another, and it missed the sites where the wording it existed
+to eliminate mattered most.
+
+- **The replacement justification asserted something the code does not do.** Round 6 explained the
+  preserved `output` on the `structured re-pack unreachable` shape as "so the delegator's text-verb
+  acceptance reads it" — it never does. `evalAcceptance` is reached only under `if !wire.Deferred`
+  on both placement paths (`runLocal`, `runRemote`), every re-pack failure branch returns
+  `deferWire`, which sets `Deferred`, and `TestRunLocalDeferSkipsAcceptance` pins that a deferred
+  result is skipped on purpose — running checks over an answer that was never claimed manufactures
+  verification failures. The true reason is stronger for the argument round 6 was making: the prose
+  is preserved because it is **published to the caller** in the result's `output` field, which is
+  exactly what `TestDelegationEndToEndRepackUnreachableIsLostWork` asserts. Corrected at all eight
+  sites carrying the claim — the five round 6 introduced (`internal/delegate/run.go`,
+  `docs/FLEET-NODE.md`, `docs/systems/fleet-node.md`, `internal/mcpserver/integration_test.go`, this
+  changelog) and the three that predate it (`internal/pipeline/agenttask.go`, the `output` field row
+  in `docs/systems/fleet-node.md`, `internal/pipeline/agenttask_test.go`) — each now stating the
+  negative outright, so the claim is not re-derived a third round running.
+- **The round-6 rewording missed the predicate line itself.** `run.go`'s comment directly above
+  `lost := pr.Result.Deferred && BrokenStackDefer(...)` still read "this subtask produced NOTHING",
+  160 lines below the `Summary.LostToStack` doc that round 6 corrected — the literal wording the
+  round existed to remove, in the same file. Same defect in the doc comments of `delegateIsError`'s
+  own table test (`internal/mcpserver/delegate_test.go`). All now say "delivered no usable result:
+  the contracted output never arrived", and say outright that this is not "no bytes".
+- **This changelog's round-6 entry miscounted and overclaimed.** It said "Six places" and listed
+  seven paths, omitting `docs/systems/fleet-node.md`, which the same commit also reworded — eight
+  files carry the change. "All six sites now say what is counted" was falsified by the two sites
+  above. Both corrected.
+- **The round-5 entry still repeated the falsehood it documents as corrected.** Its
+  `Summary.Infrastructure` bullet said the flag conflated a successful local placement with "a defer
+  that produced NOTHING" — in the same bullet whose later sentence notes that round 6 corrected
+  exactly that wording. Two occurrences were fixed there and a third left six lines earlier.
+
+Test coverage, same round: `TestRunContractSideGateRejectionIsNotABrokenStack`'s ctx-fit row
+asserted only the substring `"context"`, which both the scoped and the unscoped ceiling wording
+contain — so mutating `if unadvertised > 0` to `>= 0` in `contractIneligible` (always the scoped
+phrasing) left the whole tree green. The healthy-fleet row now pins the unscoped "the roomiest
+agent-enabled remote advertises 4096" wording, mirroring the `wantCtxFit` assertion its mixed-fleet
+sibling already carries, and that mutation is red.
+
+### Fixed — delegation lane, round-6 adversarial review (say what the flag counts, and name both causes)
+
+A sixth round found no Criticals and confirmed by mutation that the round-5 fixes bind. Its one
+Important finding, and two below-bar ones, are all the same shape: **a justification that describes
+something the code does not do.** No behavioral rule changed except where noted.
+
+- **`lost_to_stack`'s stated premise was false for a reachable member of the set it counts.** Eight
+  files (`internal/delegate/run.go`, `wire.go`, `internal/mcpserver/mcpserver.go`, `main.go`,
+  `docs/systems/coding-agent.md`, `docs/systems/fleet-node.md`, `docs/FLEET-NODE.md`,
+  `docs/OPERATOR-GUIDE.md`) defined it as "the subtasks that PRODUCED NOTHING … came back EMPTY",
+  but the predicate is
+  `deferred && (infrastructure|config)` — and one infrastructure defer carries a **populated**
+  `output`: `structured re-pack unreachable` fires after the agent loop has FINISHED, and
+  `agenttask.go` keeps `wire.Output` set on every re-pack failure branch so the CALLER still
+  receives the loop's answer. So a run that returned real prose was counted as lost and flagged
+  `isError`, under a comment saying it came back empty. **The predicate is correct and unchanged;
+  the wording was wrong.** A contract carrying an `output_schema` asked for a mechanically checked
+  deliverable, and prose with no `structured` is not one — the contracted output genuinely did not
+  arrive, and a calling model must not merge an unchecked answer as if the schema had passed. Those
+  eight files now say what is counted ("delivered no usable result: the contracted output never
+  arrived"), and the `infrastructure` rows of both defer-class tables state outright that `output`
+  may be populated on this class. Pinned end to end (only the seat faked) by
+  `TestDelegationEndToEndRepackUnreachableIsLostWork`. (Round 7 finished the sweep: the `lost`
+  predicate's own inline comment in `run.go` and the `delegateIsError` table test still carried the
+  old wording — see below.)
+- **The ctx-fit sentence was suppressed rather than merged on a mixed fleet.** With one lane silent
+  and every ADVERTISED lane genuinely too small, `contractIneligible` returned "" — so
+  `noEligibleRemote`'s both-causes path never fired and the operator was told "set `agent_ctx_tokens`
+  on node-C", fixed it, and only discovered on the NEXT run that the contract needs ~13096 against
+  the 4096 the others advertise. Suppression was the safe reading of a real hazard (the old phrasing,
+  "the roomiest agent-enabled remote advertises 4096", is a fleet-wide MAX claim that implies the
+  silent node is smaller — a ceiling authored on behalf of a node that published none). The sentence
+  is now **scoped instead of suppressed**: "every remote that DID advertise a ceiling tops out at
+  4096", spoken only over lanes that sent a number, so both true causes reach the operator in one run
+  and neither is a claim about the silent box. The class is untouched — a silent lane still makes it
+  the loud `config`, never `contract`.
+- **The internal rationale for the per-lane rule named a path that cannot happen.** `run.go`,
+  `docs/systems/fleet-node.md` and the round-5 test's own comment motivated it with "a peer predating
+  the agent lane / the mixed fleet a staggered rollout produces" — but such a peer sends no
+  `agent_enabled` either, decodes as `AgentEnabled:false`, and is filtered out of `lanes` before any
+  ceiling is considered, so it can never reach that branch. The genuinely reachable producer is a
+  node running the lane with `agent_ctx_tokens` unset: `AgentLaneAdmissible` gates on
+  `fleet_agent_enabled` + a resolvable planner seat + a safely reachable listener, never on a
+  ceiling, and health advertises whatever is configured (0 included) — which is also the state the
+  round-5 fixture actually builds (both nodes `agent_enabled: true`). The operator-facing message was
+  already accurate and is unchanged.
+
+### Fixed — delegation lane, round-5 adversarial review (an unknown ceiling is not a small one; a lost subtask is always loud)
+
+A fifth round found both remaining defects in the same seam round 4 restructured — the boundary
+between "the node side is fine" and "the caller is at fault" — and both were cases where a
+statement about ONE node was quietly extended to cover another.
+
+- **The ctx-fit guard was FLEET-WIDE where its own doc said per-lane, so an unadvertised ceiling
+  still produced a quiet contract verdict — and a fabricated claim about the silent node.** The
+  round-4 fix rejected the ctx-fit contract class when `roomiest == 0`, but `roomiest` is a
+  fleet-wide MAX: one node advertising a real ceiling supplied it for every peer advertising none,
+  so a mixed fleet (`agent_ctx_tokens` 4096 and unset) published `defer_class: "contract"`,
+  "the roomiest agent-enabled remote advertises 4096", exit 0 — the operator sent to rewrite a
+  contract when the fix was to set one field on the silent box. Worse, the sentence asserted a
+  ceiling for a node that had published none: docs define an absent `agent_ctx_tokens` as
+  **unknown**, not small, and it may be a 128k machine — the same authoring-a-claim-on-a-node's-
+  behalf defect as the invented 404 denial two rounds earlier. This is a reachable state because
+  the agent lane is admitted without any ceiling, so an opted-in node whose operator never set the
+  `omitempty` field advertises the lane and nothing else (round 6 corrected the original wording
+  here, which credited it to a peer predating the lane — such a peer sends no `agent_enabled`
+  either and never reaches the ceiling logic at all). The rule is
+  now per lane: any lane with no advertised ceiling yields the LOUD `config` verdict and the reason
+  NAMES those nodes, and the ctx-fit contract branch requires that EVERY lane supplied a real
+  number to be too big for. The round-4 test covering this was itself vacuous — it exercised only
+  the all-zero fleet and passed with the guard deleted; it now carries the mixed-fleet row and
+  asserts that no ceiling verdict is spoken over a fleet with a silent lane.
+- **A subtask genuinely lost to a broken box was silenced on the MCP surface whenever a sibling
+  succeeded.** `Summary.Infrastructure` conflates a local placement that SUCCEEDED while the fleet
+  was down with a defer that DELIVERED NO USABLE RESULT — its contracted output never arrived
+  (which is not the same as no bytes) — and the round-4 `isError` rule gated on
+  `Succeeded == 0` — justified only by the first, but silencing the second too. Two subtasks, one
+  finished and one eaten by a dead llama-server, returned to the calling model as a clean tool
+  call, while `local-offload delegate` exited NON-ZERO on the identical run: the two surfaces
+  disagreed, and the quiet one belonged to the caller with no exit code to read. **New
+  `summary.lost_to_stack`** counts exactly the subtasks that delivered no usable result because of
+  the stack — the contracted output never arrived (published, `omitempty`, so a healthy run is
+  byte-identical; round 6 corrected the original "came back empty" wording, which was false for the
+  `structured re-pack unreachable` shape) — and `isError` is now
+  `failed > 0 || lost_to_stack > 0`. The original motivation is untouched — a fleet-down run that
+  delivered every subtask is still a quiet success on MCP — and the surfaces now agree wherever
+  work was lost. (`deferred > 0 && infrastructure > 0` is NOT a safe substitute: a contract-classed
+  defer beside a fleet-down local success satisfies it with nothing lost.)
+- **Eight "since 0.63.0" claims in shipped docs, plus the spec's acceptance item, were falsified by
+  the 0.65.0 renumbering** — and main shipped a real, unrelated 0.63.0, so a reader following them
+  landed in the wrong changelog section. Corrected across `docs/FLEET-NODE.md`,
+  `docs/systems/{fleet-node,coding-agent,offload-pipeline}.md`, ADR 0023 and the spec, along with
+  the `pre-0.63` spellings of the same boundary. Main's own 0.63.0 section is untouched.
+
+### Fixed — delegation lane, round-4 adversarial review (quiet classes now require positive evidence)
+
+A fourth review round found that every previous round's new defects clustered in one place: the
+loud/quiet classification, which encodes "whose fault is this" and grew a new wrong case with each
+added nuance. This round applies a governing rule instead of another patch — **default to loud; a
+result may be classed quiet (contract / abstention / budget) only when the quiet explanation is
+POSITIVELY ESTABLISHED, meaning every configured remote answered and the node side is demonstrably
+fine. Absence of evidence about the fleet is never evidence the caller is at fault.** The classifier
+is now two independent verdicts (`contractIneligible` and `nodeSideVerdict`) composed by that rule,
+where an empty node-side class is the single positive statement that makes a quiet class honest.
+
+- **A caller-contract property masked a totally dead fleet.** The contract check ran ahead of the
+  probe verdict, so a contract merely missing `output_schema` — optional in the `agent_delegate`
+  input schema and legal for local runs — reported `Summary{Infrastructure:0}` and exit 0 while
+  every remote was refusing connections; the identical state WITH a schema correctly reported
+  infrastructure. A regression from the previous round. Both verdicts are now computed
+  independently; when both are true the reason names both and the class is the loud one.
+- **A node-side misconfiguration was blamed on the caller.** `agent_ctx_tokens` is `omitempty` and
+  documented as "0 = not advertised, set it when opting a node in", i.e. an operator fix on a box —
+  yet a node advertising 0 made a 30-token goal report `defer_class: "contract"`, "the contract
+  needs ~3102 tokens and the roomiest remote advertises 0", quietly, at exit 0. No contract can
+  clear a 0 ceiling because `specReserve` alone is 3072. Ctx-fit is contract-side only when some
+  lane advertises a ceiling a contract could actually clear.
+- **Genuine wire failures were filed as the model failing the schema.** `decodeGenResult` returns
+  the decoder's error after `client.Do` already succeeded, so no `*url.Error`/`net.Error` is in the
+  chain: a captive-portal 200 with an HTML body, a connection cut mid-body, and a proxy 429 all
+  read as abstention at exit 0. A non-JSON body from something claiming to be llama-server means
+  something else answered — that is infrastructure, and is now classed as such.
+- **The failure message asserted a 404 denial that never happened.** Any "answered but never owned"
+  case printed the 404 sentence, so a node that returned only 503s was reported as having DENIED
+  holding the job, with zero re-dispatches — the same authoring-a-claim-on-the-node's-behalf defect
+  as the round-3 fix, reappearing inside the message that fix wrote.
+- **A job-LOSING node read as a budget defer.** The 404 arm recorded no history and healthy answers
+  now clear the poll error, so a node that dropped the job twice and then timed out reported
+  "ran out of clock" at exit 0 with nothing saying it lost the work. Re-dispatches are carried into
+  the defer reason and class it infrastructure.
+- **TOTAL ledger loss published as NO loss** (a nil ledger skipped the counters entirely, so the
+  worst outcome was byte-identical to a healthy run), **the poll-log shape cap dropped counts and
+  never printed shapes past the cap**, and **MCP `IsError` fired on runs where every subtask
+  succeeded** (a successful local placement taken while the fleet was down set the flag, telling
+  the calling model that completed, schema-valid, acceptance-passing work had failed).
+- **Two more tests were vacuous** and are now assertions of the behavior their guards produce
+  rather than of what they avoid; the residency latch publishes its fail-closed answer from a
+  `defer`, so a panic in the probe seam can no longer freeze residency or park every waiter.
+
+### Fixed — delegation lane, round-3 adversarial review
+
+Two fresh-context reviews of the previous round's fixes found several of them reintroduced or
+half-did the thing they were meant to fix. All reproduced before being fixed.
+
+- **A poll `404` is a DENIAL, and was being treated as acceptance.** The 404 arm set the same
+  "the node answered" flag a live `running` answer sets, so a poll deadline landing inside the
+  bounded re-dispatch window (≤2 404s) took the ANSWERED path and published
+  `{deferred:true, class:"budget", reason:"…node accepted the job but did not reach a terminal
+  state"}` stamped with that node's id and seat, at exit 0 — the exact fabrication the previous
+  round's fix exists to forbid, reached through a different door (reproduced: polls=2,
+  dispatches=3, `Summary{Deferred:1}`). Reachable in production because `timeout_sec` has no
+  lower bound and a re-dispatch burns up to 60s. The flag is now split: reachability
+  (`sawNodeAnswer`, message text only) versus OWNERSHIP (`sawJobOwned`, set only by a `200` whose
+  state is accepted/running/done/error). Defer-vs-failure gates on ownership, so a run whose
+  every answer was a 404 — or a 503 — lands in `summary.failed` with the status named.
+- **The agent lane's advertisement and admission still keyed on different inputs.** The previous
+  round unified them on one predicate but left `BuildRequest` deriving its own listener answer
+  with `ConfigLoopbackListen`, while health used the RESOLVED listener. With
+  `fleet_listen: "0.0.0.0:18811"`, `--listen 127.0.0.1:18811` and no token, health advertised
+  `agent_enabled:true` with `agent` in `supported_task_types` while dispatch answered
+  `400 unsupported task_type "agent" (supported: )`. `BuildRequest` now takes the resolved
+  listener as an argument, the dispatch handler consults `AgentLaneSafelyReachable` instead of
+  re-implementing condition 3, and the parity test gained the mismatch row its four original
+  rows could not express (all four left `fleet_listen` unset). The docs that claimed a single
+  predicate over the resolved listener are corrected to describe what the code now does.
+- **A poll error was sticky forever.** One 503 followed by fifty clean `running` answers still
+  ended `defer_class: infrastructure`, exited non-zero, and quoted an error fifty polls stale. A
+  healthy answer now retires it; the failure history survives in the poll summary line.
+- **`route=auto` discarded the placement class.** `route=remote` classes a totally unreachable
+  fleet `infrastructure` and exits non-zero; `route=auto` with a busy local GPU threw the
+  identical verdict away, so a fleet down for a week read green forever. A local placement taken
+  while every configured remote failed its health probe now counts into `summary.infrastructure`.
+  Ordinary idle-local placements and "they answered and did not qualify" stay quiet.
+- **Every non-200 from the seat was filed as broken infrastructure.** The structured re-pack
+  treats a Generate error as transport only when it genuinely is one (`*url.Error` / `net.Error`
+  / 5xx). A 4xx ("context length exceeded", an uncompilable grammar) and a 200 with zero choices
+  are the box ANSWERING, so they are abstentions under the stable `output failed schema:` prefix
+  — previously they told the operator a machine was broken when the fix was a smaller context or
+  a flatter schema. The inverse is fixed too: the transport flag is sticky across the one retry
+  (a 5xx then a wrong-shape retry stays `infrastructure`) instead of last-wins, and the reported
+  error is the transport one. A PARENT cancellation mid-re-pack — a `*url.Error` like any dial
+  failure — is now its own `budget` shape instead of accusing the node.
+- **Caller-contract gate rejections were classed as a broken stack.** Three of the placement
+  gate's five conditions are properties of the CALLER'S contract (no `output_schema` — legal per
+  `Validate` and legal locally; `depth != 0`; a token estimate no advertised ceiling can hold),
+  and all three produced `summary.infrastructure ≥ 1`, so `--route remote` exited non-zero and
+  told the delegating model a node was broken on a run where every node was healthy. New
+  `defer_class: "contract"`, excluded from `BrokenStackDefer`, with a reason naming the property.
+- **Unbounded logging, in the commit that added `sync.Once` for exactly this hazard.** Both poll
+  failure arms fired once PER POLL (~120 lines per subtask in production, ~1000 for an 8-way
+  fan-out at a dead node) and the per-remote probe warning fired once per remote PER SUBTASK. Now:
+  the first occurrence of each distinct failure shape, one summary line per job reporting the
+  totals, and one probe warning per base per run.
+- **Telemetry loss is counted and published.** "This run's corpus rows are LOST" read identically
+  whether 1 of 8 or 8 of 8 failed, and the MCP caller — this lane's primary consumer — could not
+  learn it at all. Atomic counters, one end-of-run "N of M rows lost" line, and
+  `corpus_rows_lost` / `ledger_rows_lost` (`omitempty`) on the published summary.
+- **The loud-exit contract existed only on the CLI.** `handleAgentDelegate` never set `IsError`,
+  so `summary.failed > 0` and `summary.infrastructure > 0` both returned as successful tool calls.
+  Both now flag the call while leaving the JSON body — summary and every per-subtask reason —
+  untouched.
+- **An inert assertion from the previous round.** `TestAgentDispatchAdversarialBodies`' leftover-
+  job-dir check never ran a comparison: all nine rows failed BEFORE materialization, so the jobs
+  root never existed and `ReadDir` always errored. A row that fails AFTER materialization (a doc
+  name no filesystem can hold) was added and the assertion made explicit — mutation-verified:
+  deleting the `os.RemoveAll` it guards now fails the test.
+- **`RefreshAgentResidency` bypassed its own single-flight** (it called the refresher without
+  taking the latch the refresher clears unconditionally), permitting a duplicate probe and a
+  staler answer overwriting a fresher one. It now claims the latch, or waits for the probe
+  already running.
+- **`delegateExitErr` named only the first non-zero class**, so a run with both failures and
+  infrastructure defers hid one of them until the next run. Both counts are reported.
+
+Multi-node agent delegation: the fleet gains an **agent lane** — a delegator hands a
+self-contained contract (goal + inline context docs + output JSON Schema + acceptance
+checks) to a fleet node on the operator's tailnet, the node runs it with its own local
+read-only agent loop, and the delegator mechanically verifies the result before anything
+counts as done. Quality-first by construction: an idle local box always runs the work, and
+no transcript ever crosses the wire. Decisions recorded in ADR 0023.
+
+### Added
+
+- **Wire contract v1** (`internal/core/agentwire.go`): `AgentContract` /
+  `AgentWireResult`, tolerant reader (unknown fields ignored; `schema_version` skew and
+  size/count caps refuse loudly), MaxSteps/TimeoutSec clamps (12 / 900s), and the
+  machine-checkable acceptance DSL (`contains:` / `not_contains:` / `regex:` /
+  `min_items:<field>:<n>` / `nonempty:<field>`) — evaluated by the DELEGATOR before merge,
+  with unfalsifiable checks rejected at parse.
+- **Per-model seat endpoints** (`seat_endpoints` config): any model seat can resolve to a
+  remote OpenAI-compatible base over the tailnet with zero job machinery
+  (`llamaclient.BaseFor`), guarded twice — `netguard.TailnetURL` at config load (loopback,
+  `100.64.0.0/10` literals, dotless MagicDNS names, house-tailnet-zone hosts only) and the
+  resolve-and-pin `SafeTransport` dial gate on every request (DNS-rebinding defense).
+- **Busy-aware cascade remote lanes** (`cascade_remote_lanes` config): the DAILY lane's
+  invisible failover — while the local machine-wide GPU lease is held
+  (`delegate.LocalBusy`), a cascade text call (summarize/classify/extract/triage) whose
+  model a configured lane roster-serves routes to that lane instead of queueing behind the
+  local card; logged per rerouted call. Distinct from `seat_endpoints`' static
+  always-remote pin, and quality-identical by construction: the lane must serve the SAME
+  model id/alias (verified by a 30s-cached alias-aware roster probe, fail-closed to
+  local), so routing never changes WHICH model answers, only WHERE. Same double guard as
+  seat endpoints: `TailnetURL` at load naming the key, `SafeTransport` at every dial.
+- **Agent-lane bearer auth** (`fleet_auth_token`): agent dispatches and polls of
+  agent-created jobs require the token (SHA-256 + constant-time compare); a tokenless
+  non-loopback listener refuses agent dispatches 403 at ack and withholds the task from
+  advertisement. v1 scope is the agent lane ONLY — every media path stays tokenless and
+  byte-identical (pinned by test); whole-fleet enforcement is a recorded follow-up.
+- **Node-side `agent` fleet task**: contract materialized to a job-scoped context dir, run
+  through the same read-only `agent.Build` loop as `agent_run` (no write/run/fetch/github
+  tools, no delegate tool), wall deadline from `timeout_sec`, structured re-pack via one
+  grammar-constrained completion (one retry), depth derived `max(1, wire)` on arrival. A
+  defer is a `done` job carrying `deferred:true` — never `error`.
+- **Health agent fields + placement gate**: `agent_enabled` / `agent_seat` /
+  `agent_ctx_tokens` / `agent_seat_resident` (cached alias-aware roster probe,
+  fail-closed), consumed by `delegate.Place` — idle-local-always-wins, and a remote is
+  eligible only when enabled + resident + the conservative token estimate plus the
+  3072-token loop reserve fits the advertised ceiling + the contract carries a schema +
+  requester depth 0.
+- **Defer classes** (`defer_class` on `AgentWireResult`): every defer says WHY in a
+  machine-branchable word — `abstention` (the model answered wrongly), `budget` (step or wall
+  ceiling), `infrastructure` (the stack failed: agent build, loop transport, an unreachable
+  structured re-pack), `config` (no seat resolvable, seat unserved, unknown profile, no
+  eligible remote). The delegator counts `infrastructure` + `config` defers into
+  `summary.infrastructure` and the `delegate` CLI **exits non-zero** on it: a node with a dead
+  llama-swap defers every subtask, and that must not read as a clean run. Additive and
+  `omitempty` — a pre-0.65 node's empty class means *unknown*, never abstention.
+- **Delegator surfaces**: MCP `agent_delegate` (registration gated on
+  `agent_delegation_enabled`, so tools/list is byte-identical when off; summary-first
+  response) and the `local-offload delegate` CLI verb. Both accept `context_paths` inlined
+  DELEGATOR-side under `read_root` confinement (≤128 KiB/file). Job protocol: `agd-` ids
+  delegator-minted, 202-reack idempotent re-dispatch, poll deadline = timeout + 60s grace.
+  Every subtask writes a ledger row (`task=agent_delegate`) plus a full
+  contract/placement/result/verdict line under `delegation-log/` — the standing
+  small-model agent-task corpus.
+- **`contracts/` template library**: four canned contract shapes (docs-drift-scan,
+  bench-log-digest, schema-extraction, research-digest) matching the `--contract` file
+  shape, with the field and DSL guidance in `contracts/README.md`.
+- **Docs**: ADR 0023 (tailnet auth, never-cloud carve-out, quality-first placement, hop
+  limit, N-node door); contract/result wire tables in `docs/systems/fleet-node.md` and
+  `docs/FLEET-NODE.md`; the operator enable recipe for both roles plus the honest
+  context-budget table (at an 8k seat, ~2–4k tokens of practical contract content) in
+  `docs/OPERATOR-GUIDE.md`; delegation surfaces in `docs/systems/coding-agent.md`.
+
+Diagnostics hardening (adversarial silent-failure review of this arc, same release):
+
+- A poll that never reaches the node is no longer laundered into a defer. The delegator
+  tracks the last poll error and whether the node ever answered: a node that answered but
+  never finished defers honestly (`poll deadline after <d>: node accepted the job but did not
+  reach a terminal state`, plus the last error when one exists), while a node that **never**
+  answered — dial refused, connection dropped, unusable body — is a `summary.failed` failure
+  with a non-zero exit. Previously any of those produced a fabricated
+  `{deferred:true, reason:"poll deadline"}` stamped with the chosen node's id and seat, and
+  the CLI exited 0. Unrecognized poll answers (5xx, unknown states) are captured and logged
+  instead of falling through the switch unread.
+- "No eligible remote" now names the real cause instead of always blaming the gate: health
+  probe errors are collected and logged, and the reason distinguishes *no remotes configured*
+  (class `config`), *every remote failed its health probe* (listed; class `infrastructure`),
+  and *remotes answered but none passed the gate* (class `config`).
+- Telemetry failures are loud once per run: a `delegation-log` corpus write failure or a
+  ledger open/write failure warns (once, never per subtask) instead of being discarded — a
+  delegator writing nothing looked identical to one writing everything.
+- Probe failures that only ever produced silence now log: the cascade remote lane's roster
+  probe (once per TTL window per base, so a lane that never engages is diagnosable), the node
+  agent-seat roster probe (which fails open by design), and the node's `agent_seat_resident`
+  residency probe (the one field that stops every remote placement).
+- A deferred LOCAL result no longer has acceptance checks run against it — matching the remote
+  path, so a defer can never be reported as a verification failure.
+
+Correctness hardening (adversarial code + test review of this arc, same release):
+
+- **A schemaless contract no longer defers on the default local path.** The node-side run
+  called the structured re-pack unconditionally, so with no `output_schema` the re-pack's
+  `json.Unmarshal(nil, …)` errored and a finished, correct answer was thrown away as
+  `deferred: output failed schema: … unexpected end of JSON input`. That broke `route: local`
+  and `route: auto` on an idle GPU — the quality-first path the design centers on, and the one
+  place a schemaless contract is explicitly legal. The re-pack is now SKIPPED when no schema
+  was asked for: `structured` stays empty, the run is a plain success.
+- **Health can no longer advertise an agent lane dispatch would refuse.** The advertisement
+  keyed on `fleet_agent_enabled` alone while the ack-time guard keyed on enabled + seat +
+  (loopback-or-token), and the two read different notions of "loopback" (`fleet_listen` vs the
+  resolved listener). A node with the lane on, a non-loopback listener and no token therefore
+  published a placeable lane, the delegator placed on it, and every dispatch 403'd into
+  `summary.failed`. Both sides now call one exported predicate, `fleetnode.AgentLaneAdmissible`,
+  over the RESOLVED listener; advertisement-equals-admission is asserted across all four
+  (listener, token) combinations.
+- **Hostile context-doc names are refused instead of silently losing data.** A doc named `NUL`
+  (or `CON`/`PRN`/`AUX`/`COM1-9`/`LPT1-9`, any case, with or without extensions) passed
+  validation on Windows, "wrote" successfully, and read back EMPTY — a context doc vanishing
+  with no error anywhere. Names with a trailing space or dot bypassed the duplicate guard the
+  same way (`notes.md ` and `notes.md` are two Go strings and one Windows file), so one doc
+  could shadow another. Both shapes are now rejected, and duplicates are detected on a
+  normalized key (trailing space/dot trimmed, case-folded).
+- **The cascade remote lane's roster probe now rides the dial guard.** It was the one outbound
+  path on Go's default transport — proxy live, no dial-time address check — which made ADR
+  0023's "re-checked at every dial" false for it: `TailnetURL` admits a dotless MagicDNS name
+  on shape alone, so only a per-dial check can prove where it still resolves. New
+  `swapclient.FetchRosterGuarded` (used for LANE probes only; the node's own loopback
+  llama-swap keeps the plain reader).
+
+Test coverage this release adds, for gaps that let the above through:
+
+- The first test that crosses a package boundary: MCP handler → `delegate.Run` → real HTTP →
+  the real fleetnode mux → a real pipeline → `runAgentTask`, faking only the leaf llama seat.
+  It asserts the node a result NAMES is the node health ADVERTISED and the node that RAN it,
+  that the quarantine holds end to end (a marker emitted only inside a remote tool turn never
+  appears in the caller's bytes), and that a dropped delegator token is a 401 FAILURE, not a
+  defer. Renaming the job wire's `data` field — invisible to `internal/delegate`'s and
+  `internal/pipeline`'s own suites, which each fake the other side — fails it.
+- The agent-seat residency tests now drive the health path only, so the background probe
+  production actually uses is covered; deleting that one line previously left the suite green
+  while, in production, `agent_seat_resident` would be false forever and every delegation would
+  silently fall local.
+- Fan-out coverage (8 subtasks: distinct job ids, submission order, the concurrency bound, one
+  well-formed corpus line each), adversarial agent-lane HTTP with the lane ON (malformed and
+  oversize contracts through the mux; bearer-header edge shapes including the case-insensitive
+  scheme), and the `delegate` CLI's disabled-role refusal.
+
+Config keys added: `seat_endpoints`, `cascade_remote_lanes`, `agent_ctx_tokens`,
+`fleet_auth_token`, `fleet_agent_enabled`, `agent_delegation_enabled` — all default
+off/empty; every existing path behaves byte-identically when they are absent (pinned by
+test).
+
+Deliberately parked to v2: the in-loop `delegate_subtask` tool. v1's surfaces are the MCP
+tool and the CLI; the hop limit holds structurally meanwhile — no delegate tool is
+registered for any caller, and a wire contract executes at derived depth ≥ 1.
+
 ## [0.65.0] - 2026-08-17
 
 ### Added

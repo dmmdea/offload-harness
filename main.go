@@ -28,6 +28,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/confhead"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/eval"
 	"github.com/dmmdea/offload-harness/internal/exemplars"
@@ -51,7 +52,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.65.0"
+const version = "0.66.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -104,6 +105,8 @@ func main() {
 		err = runAssessImage(args)
 	case "mcp":
 		err = runMCP(args)
+	case "delegate":
+		err = runDelegate(args)
 	case "fleet-serve":
 		err = runFleetServe(args)
 	case "fleet-measure":
@@ -233,6 +236,7 @@ Usage:
   local-offload nim <file|-|"text"> [--model id] [--base url] [--system "..."] [--max-tokens N] [--temp F] [--json]
   local-offload nim --list-models        list a NIM endpoint's model ids (free hosted catalog or self-hosted)
   local-offload mcp                      run as an MCP server (stdio)
+  local-offload delegate --contract file.json [--route auto|local|remote] [--read-root DIR] [--remote http://node:18811]...   place delegation-contract subtasks on this box or tailnet fleet nodes (needs agent_delegation_enabled)
   local-offload fleet-serve [--listen ADDR] [--listen-trusted-network] [--node-id NAME]   join the fleet-dispatcher fleet (health/dispatch/jobs on :18811; docs/FLEET-NODE.md)
   local-offload fleet-measure            prime the fleet footprint store: one minimal render per configured task, then print the recorded entries
   local-offload ledger [--since DAYS]    token-savings report
@@ -297,7 +301,22 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 	if err := cfg.EnsureDirs(); err != nil {
 		return nil, nil, err
 	}
-	client := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, time.Duration(cfg.RequestTimeoutSec)*time.Second)
+	// WithSeatEndpoints threads the Phase-A per-model overrides (seat_endpoints):
+	// an overridden seat's completions leave for its remote tailnet base through
+	// the dial-guarded client; with the key absent this is a no-op and the client
+	// is byte-identical to a pre-seat build.
+	client := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, time.Duration(cfg.RequestTimeoutSec)*time.Second).
+		WithSeatEndpoints(cfg.SeatEndpoints)
+	// WithRemoteLanes threads the busy-aware cascade lanes (cascade_remote_lanes,
+	// roast delta 7): while the machine-wide GPU lease is held, a cascade call
+	// whose model a lane roster-serves rides that lane instead of queueing behind
+	// the local card. Guarded so the absent key stays byte-identical (pinned).
+	if len(cfg.CascadeRemoteLanes) > 0 {
+		gpuLockPath, stateDir := cfg.GPULockPath, cfg.StateDir
+		client = client.WithRemoteLanes(cfg.CascadeRemoteLanes,
+			func() bool { return delegate.LocalBusy(gpuLockPath, stateDir) },
+			llamaclient.RosterResident())
+	}
 	// Cache + ledger are bbolt (single-writer, exclusive file lock). When the
 	// long-running MCP server holds the lock, a CLI invocation degrades to
 	// cache-less rather than aborting — they speed things up / report savings,
@@ -1641,6 +1660,143 @@ func runMCP(args []string) error {
 	return err
 }
 
+// repeatedFlag collects a repeatable string flag (--remote a --remote b).
+type repeatedFlag []string
+
+func (r *repeatedFlag) String() string { return strings.Join(*r, ",") }
+func (r *repeatedFlag) Set(v string) error {
+	*r = append(*r, v)
+	return nil
+}
+
+// runDelegate is the CLI surface onto delegate.Run (multi-node delegation,
+// Task 6): same intake, engine, and response JSON as the MCP agent_delegate
+// tool, for testing and scripts. Exit code contract: 0 even when subtasks
+// DEFER (a defer is a success shape — the result JSON says what happened);
+// non-zero only for transport/config errors (bad flags, disabled role,
+// unreadable contract file, failed subtasks).
+func runDelegate(args []string) error {
+	fs := flag.NewFlagSet("delegate", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	contractPath := fs.String("contract", "", "path to the delegation contract JSON: one subtask object or an array of up to 8 (fields: goal, context, context_paths, output_schema, acceptance, profile, max_steps, timeout_sec)")
+	route := fs.String("route", "auto", "placement route: auto (idle-local wins) | local (force in-process) | remote (force a fleet node)")
+	readRoot := fs.String("read-root", "", "directory context_paths may be read from (default: the current dir)")
+	var remotes repeatedFlag
+	fs.Var(&remotes, "remote", "remote fleet node base URL, tailnet-only (repeatable)")
+	_ = fs.Parse(args)
+	if err := leftoverArgErr(fs, "delegate"); err != nil {
+		return err
+	}
+	cfg := loadCfg(fs)
+	// Same switch that gates the MCP tool's registration (roast delta 13): a
+	// box is a DELEGATOR only by explicit opt-in.
+	if !cfg.AgentDelegationEnabled {
+		return fmt.Errorf("agent delegation is disabled on this box — set \"agent_delegation_enabled\": true in the config")
+	}
+	if *contractPath == "" {
+		return fmt.Errorf("--contract required (a subtask JSON file)")
+	}
+	specs, err := parseContractFile(*contractPath)
+	if err != nil {
+		return err
+	}
+	contracts := make([]core.AgentContract, 0, len(specs))
+	for i, spec := range specs {
+		c, perr := delegate.PrepareContract(spec, *readRoot)
+		if perr != nil {
+			return fmt.Errorf("subtask %d: %w", i, perr)
+		}
+		contracts = append(contracts, c)
+	}
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	results, sum, err := delegate.Run(context.Background(), cfg, p.RunAgentContract, contracts, *route, remotes)
+	if err != nil {
+		return err
+	}
+	out, err := json.MarshalIndent(delegate.WireResponse(results, sum), "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(out))
+	return delegateExitErr(sum)
+}
+
+// delegateExitErr maps a run summary onto the verb's exit code. Two things
+// exit non-zero, and both mean "a human has to look":
+//
+//   - Failed: transport/config per-subtask errors (auth rejected, dispatch
+//     refused, broken wire, a node that never answered).
+//   - Infrastructure: defers whose class blames the STACK or the config rather
+//     than the work. A node with a dead llama-swap defers every subtask, and
+//     without this it exits 0 — a broken fleet reading as a good run is exactly
+//     the silent failure this contract exists to prevent.
+//
+// Everything else — honest abstentions, budget defers, CONTRACT-classed defers
+// (a contract no healthy node would accept: no output_schema, past the origin
+// hop, too big for any advertised ceiling), and failed verification — stays
+// exit 0: those are RESULT shapes, reported in the JSON above, matching every
+// other verb's defer posture.
+//
+// BOTH counts are reported when both are non-zero. Returning on the first
+// non-zero class named only the failures, so an operator who fixed the
+// transport error learned about the broken node only on the next run.
+//
+// SURFACE PARITY with mcpserver.delegateIsError (R5-2). The two surfaces must
+// agree on the case that matters — a subtask LOST to the stack (Summary's
+// LostToStack: its contracted output never arrived and a box is why, which
+// includes a finished loop whose structured re-pack seat was unreachable — the
+// prose rides along, but the checked deliverable the contract asked for does
+// not) is loud on both. It used
+// not to be: the MCP flag gated on `Succeeded == 0`, so one of two subtasks
+// eaten by a dead llama-server exited non-zero HERE and returned a clean tool
+// call THERE, and the quiet surface was the one whose caller cannot read an exit
+// code. The one REMAINING difference is deliberate and narrow: a fleet-down
+// LOCAL SUCCESS (Infrastructure with no LostToStack — every subtask delivered,
+// but the fleet failed its probe) exits non-zero here and stays a quiet success
+// there, because an exit code sits beside the printed results while
+// IsError:true tells a model its work failed.
+func delegateExitErr(sum delegate.Summary) error {
+	var parts []string
+	if sum.Failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d subtask(s) failed (transport/config) — see results[].reason", sum.Failed))
+	}
+	if sum.Infrastructure > 0 {
+		parts = append(parts, fmt.Sprintf("%d subtask(s) hit infrastructure/config rather than the work (a defer blaming the stack, or a local fallback taken because the fleet failed its health probe) — see results[].defer_class, reason, and placement", sum.Infrastructure))
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(parts, "; "))
+}
+
+// parseContractFile reads a delegation contract file: either ONE subtask
+// object or an array of them. Tolerant decode (the wire's reader posture) —
+// unknown fields are ignored, so a contract file written for a newer harness
+// still parses here.
+func parseContractFile(path string) ([]delegate.SubtaskSpec, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading contract file: %w", err)
+	}
+	trimmed := strings.TrimSpace(string(b))
+	if strings.HasPrefix(trimmed, "[") {
+		var specs []delegate.SubtaskSpec
+		if err := json.Unmarshal([]byte(trimmed), &specs); err != nil {
+			return nil, fmt.Errorf("contract file %s: %w", path, err)
+		}
+		return specs, nil
+	}
+	var spec delegate.SubtaskSpec
+	if err := json.Unmarshal([]byte(trimmed), &spec); err != nil {
+		return nil, fmt.Errorf("contract file %s: %w", path, err)
+	}
+	return []delegate.SubtaskSpec{spec}, nil
+}
+
 // nvidiaSmiMemory shells the global VRAM query (MiB CSV) that feeds the
 // fleet-serve startup GATE probe (ResolveProvider's "does nvidia-smi work at
 // all" check); fleetnode.ParseSmiMemory parses it. The ONGOING 2s health
@@ -1903,6 +2059,11 @@ func runFleetServe(args []string) error {
 	// which must not block on llama-swap) — see fleet_reclaim.go for why the idle
 	// baseline, not free or total, is the right denominator for a shared card.
 	reclaim := startReclaimTracking(ctx, cfg, sampler.Load, 5*time.Second)
+	// One resolved answer, used by BOTH the server and the startup banner: the
+	// agent lane's advertisement keys on it (fleetnode.AgentLaneAdmissible), so
+	// a banner computing it separately from the config could print a task list
+	// health does not serve.
+	loopbackListener := netguard.LoopbackAddr(listen)
 	srv := fleetnode.New(p, jobs, fleetnode.Options{
 		NodeID:   nodeID,
 		Version:  version,
@@ -1919,7 +2080,12 @@ func runFleetServe(args []string) error {
 		},
 		GpuVendor: prov.Vendor,
 		GpuArch:   prov.Arch,
-		Cfg:       cfg,
+		// The agent lane's tokenless-listener refusal keys on where the bind
+		// actually landed (the resolved listen address), not on the
+		// --listen-trusted-network permission flag — a trusted-network flag on
+		// a loopback bind is still loopback.
+		LoopbackListener: loopbackListener,
+		Cfg:              cfg,
 	})
 
 	ln, err := net.Listen("tcp", listen)
@@ -1935,7 +2101,7 @@ func runFleetServe(args []string) error {
 		devicesLabel = fmt.Sprintf(", %d GPUs (headlining the largest)", len(snap.Devices))
 	}
 	fmt.Fprintf(os.Stderr, "[fleet-serve] node %q serving /fleet on %s (%.1f GiB VRAM via %s, vendor=%s arch=%s%s%s; tasks: %s)\n",
-		nodeID, listen, total, prov.Source, prov.Vendor, prov.Arch, umaLabel, devicesLabel, strings.Join(fleetnode.SupportedTasks(cfg), ", "))
+		nodeID, listen, total, prov.Source, prov.Vendor, prov.Arch, umaLabel, devicesLabel, strings.Join(fleetnode.SupportedTasksFor(cfg, loopbackListener), ", "))
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ln) }()

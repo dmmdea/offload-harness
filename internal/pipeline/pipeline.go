@@ -360,6 +360,15 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 		return p.runPipelineJob(ctx, req, meta, start)
 	}
 
+	// agent executes a fleet-delegated coding-agent contract (agenttask.go) on
+	// this node's agent seat. Its own branch — no text cascade, no grammar
+	// build here (the structured re-pack builds its own), and its terminal
+	// defers are encoded INSIDE the wire result as job-level successes, never
+	// as pipeline defers (a defer is a SUCCESS shape at the job level).
+	if req.Task == core.TaskAgentRun {
+		return p.runAgentTask(ctx, req, meta, start)
+	}
+
 	// generate_svg renders a brand-agnostic parametric SVG component (kind + spec in
 	// params) via internal/svgkit. Its own branch — pure Go, no text cascade, no
 	// grammar, no GPU lock.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -112,4 +113,39 @@ func TestFetchRosterErrorsAreErrors(t *testing.T) {
 			t.Fatal("an unreachable roster must be an error")
 		}
 	})
+}
+
+// TestFetchRosterGuardedRefusesOffTailnet pins the guarded constructor at its
+// own seam: an off-tailnet base is refused at DIAL, by the tailnet guard,
+// naming itself — never merely "failed to connect", which is what an
+// unroutable address produces anyway and therefore proves nothing.
+// 203.0.113.9 is RFC 5737 TEST-NET-3, so an unguarded client would spend the
+// whole timeout; the guard costs zero network activity.
+func TestFetchRosterGuardedRefusesOffTailnet(t *testing.T) {
+	start := time.Now()
+	_, err := FetchRosterGuarded(context.Background(), "http://203.0.113.9:11436", 5*time.Second)
+	if err == nil {
+		t.Fatal("an off-tailnet base must fail, not fetch")
+	}
+	if !strings.Contains(err.Error(), "tailnet guard") {
+		t.Fatalf("err = %v, want the tailnet guard's dial refusal", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("refusal took %s — the guard refuses before any connect attempt", elapsed)
+	}
+}
+
+// TestFetchRosterGuardedReadsALoopbackRoster: the gate must not cost the
+// guarded path its actual job — loopback (and CGNAT) bases still read a roster
+// alias-aware, exactly like the ungated FetchRoster.
+func TestFetchRosterGuardedReadsALoopbackRoster(t *testing.T) {
+	var path string
+	srv := rosterServer(t, &path)
+	r, err := FetchRosterGuarded(context.Background(), srv.URL, 5*time.Second)
+	if err != nil {
+		t.Fatalf("FetchRosterGuarded against loopback: %v", err)
+	}
+	if path != "/v1/models" || !r.Serves("offload-e4b") {
+		t.Fatalf("path = %q, serves alias = %v", path, r.Serves("offload-e4b"))
+	}
 }

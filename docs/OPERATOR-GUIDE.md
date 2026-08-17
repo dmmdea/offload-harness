@@ -572,6 +572,189 @@ over the projected table when they differ.
 | agent stops with `stop=step-cap` / loops | Raise `--max-steps`, or the model is stuck — lower `--max-same-tool`, narrow the prompt (edit+upload shape). |
 | GitHub tool refuses | `$GITHUB_TOKEN` unset or under-scoped, or `$GITHUB_REPO` unset. See §6. |
 
+### Delegate subtasks across fleet nodes (`agent_delegate` / `delegate`)
+
+Fan self-contained sub-agent contracts out to this box or to fleet nodes on your tailnet
+(never cloud — [ADR 0023](architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)).
+Placement is **quality-first**: an idle local box always runs the work; a remote node is used
+only when the local GPU is busy *and* the node passes the capability gate. Wire details:
+`docs/FLEET-NODE.md`. Template contracts to start from: [`contracts/`](../contracts/README.md).
+
+**Enable — worker node** (the box that will *execute* contracts), in its
+`~/.local-offload/config.json`:
+
+```json
+{
+  "fleet_agent_enabled": true,
+  "fleet_auth_token": "<one shared secret, same on every node>",
+  "agent_ctx_tokens": 16384
+}
+```
+
+`agent_ctx_tokens` is the tier's served agent-seat window (the installer records it in
+`installed.json`); `0` means the node advertises no ceiling and is **never** chosen for remote
+agent work. Then serve beyond loopback on the machine's Tailscale address:
+
+```powershell
+local-offload fleet-serve --listen <tailscale-ip>:18811 --listen-trusted-network
+curl http://<tailscale-ip>:18811/fleet/health
+# ... "agent_enabled":true,"agent_seat":"offload-e4b","agent_ctx_tokens":16384,"agent_seat_resident":true ...
+```
+
+`agent_seat_resident` starts `false` (the roster probe is cached, background-refreshed, and
+fail-closed) — give it one health request plus a few seconds before concluding anything.
+
+**If the four `agent_*` fields are missing entirely**, the lane is not admissible and no
+delegator will ever place here — by design, since a dispatch would be refused. The three
+conditions are the same ones the ack-time guard applies: `fleet_agent_enabled: true`, a
+resolvable agent seat (`agent_model`, else the workhorse `model`), and a safe listener —
+loopback, **or** `fleet_auth_token` set for anything beyond it. Serving on a Tailscale address
+with no token is the common miss: the advertisement is withheld rather than published-then-403'd.
+
+**Enable — delegator** (the box that *places* contracts), in its config:
+
+```json
+{
+  "agent_delegation_enabled": true,
+  "fleet_auth_token": "<the same shared secret>"
+}
+```
+
+That registers the MCP `agent_delegate` tool (tools/list is byte-identical when off) and
+unlocks the CLI verb. Remote nodes are named per call, not in config: `--remote` (repeatable)
+on the CLI, `remotes: [...]` on the MCP tool — tailnet URLs only (loopback, `100.64.0.0/10`,
+a dotless MagicDNS name, or a host under your own tailnet DNS zone; anything else is refused
+by name).
+
+**Context budget — read this before writing a contract.** The 256 KiB wire cap is a transport
+bound only; what actually decides remote placement is the gate's arithmetic:
+`ceil(chars/3)` over goal + context docs + schema + acceptance, **plus a 3072-token reserve**
+(system prompt + tool specs + per-step transcript growth × the 12-step cap), must fit the
+node's advertised `agent_ctx_tokens`. The `chars/3` estimate is a deliberately conservative
+upper bound (v1 has no remote tokenizer to ask; typical prose runs ~4 chars/token), so the
+practical budget is smaller than the raw window suggests:
+
+| Advertised `agent_ctx_tokens` | Estimate budget after the reserve | ≈ contract text that fits | ≈ real prose tokens |
+|---|---|---|---|
+| 4096 | 1024 | ~3 KiB | ~0.8k — goal + a snippet, no real docs |
+| 8192 | 5120 | ~15 KiB | **~2–4k** |
+| 16384 | 13312 | ~39 KiB | ~10k |
+| 32768 | 29696 | ~87 KiB | ~20k+ |
+
+At an 8k seat, budget **~2–4k tokens of actual document content** per contract; split bigger
+inputs across subtasks. A contract that does not fit is not an error — it places locally
+(route `auto`) or defers (route `remote`), and the placement reason says why.
+
+**Worked example** (MCP `agent_delegate`; the CLI takes the identical subtask object as
+`--contract file.json`):
+
+```json
+{
+  "subtasks": [{
+    "goal": "Read the two release-notes docs and produce a migration digest: list every config key added between them, and summarize the upgrade in two sentences.",
+    "context_paths": ["notes/release-a.md", "notes/release-b.md"],
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "added_keys": {"type": "array", "items": {"type": "string"}},
+        "summary": {"type": "string"}
+      },
+      "required": ["added_keys", "summary"]
+    },
+    "acceptance": ["min_items:added_keys:1", "nonempty:summary", "not_contains:TODO"]
+  }],
+  "route": "auto",
+  "read_root": "/abs/path/to/project",
+  "remotes": ["http://<node-b>:18811"]
+}
+```
+
+`context_paths` are read and inlined **by the delegator**, confined to `read_root`
+(≤ 128 KiB per file) — your session's context never pays for them, and the wire contract stays
+self-contained (the remote node never reaches back into your filesystem). `acceptance` is
+evaluated by the **delegator** after the result returns: a schema-valid result that fails a
+check comes back `failed_verification`, never a success. Read the response's `summary` block
+first — `{succeeded, deferred, failed_verification, failed, infrastructure}` — eight quiet
+defers are a loud outcome, not eight green jobs. `infrastructure` counts the results whose story
+is a broken stack rather than the work: defers whose `defer_class` says so (`infrastructure` /
+`config`, as opposed to `abstention` / `budget`), plus a local placement taken while every
+configured remote was failing its health probe. Non-zero means a node is broken or
+misconfigured, not that the small model could not do the job.
+
+`lost_to_stack` rides beside it (omitted when zero) and is the half that is **lost work** —
+subtasks that delivered no usable result because the stack failed them: the contracted output
+never arrived, as opposed to a local placement that succeeded while the fleet was down. It is not
+a "the result is blank" count — a `structured re-pack unreachable` defer carries the finished
+loop's prose in `output` with `structured` absent, and still counts, because a contract with an
+`output_schema` asked for a checked deliverable. The MCP tool marks the call `isError` on
+`failed > 0 || lost_to_stack > 0`, with the JSON body unchanged; the CLI's exit code is the wider
+`infrastructure > 0` rule below.
+
+`defer_class: "contract"` is the one class that is **your** problem rather than a box's: the
+contract carries no `output_schema` for a remote placement, is past the origin hop, or needs
+more context than **every** node advertises — a node that advertises no `agent_ctx_tokens` at all
+makes it a `config` verdict on that node instead, because an unadvertised ceiling is unknown, not
+small. Those stay exit 0 by design. If the summary carries
+`corpus_rows_lost` / `ledger_rows_lost`, the results are still complete — the harness could not
+write that many telemetry rows (usually a full or read-only disk).
+
+CLI equivalent:
+
+```powershell
+local-offload delegate --contract contracts/research-digest.json --route auto --remote http://<node-b>:18811
+```
+
+Exit 0 covers honest defers (`abstention` / `budget`) and failed verification — the JSON says
+what happened. Non-zero is reserved for transport/config failures **and** for
+`summary.infrastructure > 0`: a worker whose llama-swap is down defers every subtask, and a
+scripted caller reading only the exit code must not take that for a good run. Every subtask
+also writes a ledger row
+(`task=agent_delegate` in `local-offload ledger`) and a full contract+result+verdict line
+under the harness base dir at `delegation-log/YYYY-MM-DD.jsonl`.
+
+| Failure | Fix |
+|---|---|
+| `403 agent lane requires fleet_auth_token on a non-loopback listener` | The worker is bound beyond loopback with no token. Set `fleet_auth_token` (same value) on both sides and restart `fleet-serve`. |
+| `401 unauthorized` on dispatch or poll | Token mismatch between delegator and worker configs. |
+| `agent delegation is disabled on this box` | Set `"agent_delegation_enabled": true` in the **delegator's** config. |
+| Everything places local although a remote exists | Usually correct — idle-local always wins. Force `--route remote` to surface the gate's verdict: the defer reason now names the actual cause — no remotes configured, every remote failing its health probe (each error quoted), or a healthy remote failing the gate (`agent_enabled` + `agent_seat_resident` + `output_schema` + the ctx arithmetic above). |
+| `remote "…": hostname … not allowed` | Non-tailnet URL. Loopback, `100.64.0.0/10`, a dotless MagicDNS name, or your own tailnet-zone hostname only. |
+| deferred `poll deadline after …: node accepted the job but did not reach a terminal state` | The node acked and outran `timeout_sec` + 60 s grace. Check the worker's serve log; the job id in `delegation-log/` reconciles it. A quoted "last poll error" means the node was also answering badly (5xx) — fix that first. |
+| failed `poll deadline after …: node never answered` | The node died or became unreachable after acking: nothing came back at all, so nothing is claimed on its behalf. The quoted last error (dial refused, dropped connection) is the lead. |
+| deferred `output failed schema: …` | The schema was too ambitious for the seat. Flatten it — a `properties` map of string / number / integer / boolean / string-array / enum fields is the supported subset. |
+| deferred `structured re-pack unreachable: …` | Not a schema problem: the worker's llama-swap could not be reached for the final grammar completion. Restart/check the worker's endpoint. |
+
+### Busy-hour cascade failover (`cascade_remote_lanes`)
+
+The daily lane — the `offload_summarize` / `offload_classify` / `offload_extract` /
+`offload_triage` calls a session fires dozens of times a week — can fail over **per call**
+to another node while this box's GPU is held by a render. Opt in on the box whose cascade
+should fail over, in its `~/.local-offload/config.json`:
+
+```json
+{
+  "cascade_remote_lanes": { "offload-e4b": "http://<node-b>:11436" }
+}
+```
+
+Key = the exact model id or llama-swap alias a cascade call names; value = a tailnet base
+URL whose llama-swap **serves that same model**. Semantics, in order:
+
+- A `seat_endpoints` static pin on the same model always wins — a pinned seat is *always*
+  remote; a lane is *busy-hours only*.
+- A lane is taken only when the local machine-wide GPU lease is held **and** a roster probe
+  (alias-aware, cached 30 s per lane, fail-closed) confirms the lane serves the model.
+  Idle GPU, probe failure, or a roster miss → the call stays local, silently and safely.
+- **Quality-identical by construction**: the lane must serve the SAME model — the failover
+  never changes *which* model answers, only *where*. Never point a lane at a smaller tier.
+- Every reroute writes one serve-log line: `cascade remote lane: <model> -> <base> (local
+  GPU lease held)`. No lines during a render = the lane never engaged — check that the
+  lane's llama-swap actually serves the alias (`curl http://<node-b>:11436/v1/models`).
+
+Lane URLs pass the same tailnet guard as everything else here (loopback, `100.64.0.0/10`,
+dotless MagicDNS, or your own tailnet zone; validated at config load naming the key, and
+again at every dial).
+
 ---
 
 ## 5. Add / replace a model in llama-swap.yaml

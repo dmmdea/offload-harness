@@ -19,15 +19,23 @@ import (
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
+	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
 )
 
-type Server struct{ p *pipeline.Pipeline }
+type Server struct {
+	p *pipeline.Pipeline
+	// localAgent is agent_delegate's LOCAL execution seam: nil (production)
+	// resolves to p.RunAgentContract at call time; tests inject a fake so the
+	// handler is exercisable without a live planner.
+	localAgent delegate.LocalRunner
+}
 
 func New(p *pipeline.Pipeline) *Server { return &Server{p: p} }
 
@@ -51,6 +59,13 @@ func parseArgs(raw json.RawMessage, in any) *mcp.CallToolResult {
 
 // Run serves the MCP tools on stdin/stdout until the client disconnects.
 func (s *Server) Run(ctx context.Context, version string) error {
+	return s.buildServer(version).Run(ctx, &mcp.StdioTransport{})
+}
+
+// buildServer assembles the tool surface. Split from Run so the registration
+// SET is testable over an in-memory transport — the delta-13 pin: tools/list
+// must be byte-identical with agent_delegation_enabled off.
+func (s *Server) buildServer(version string) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "local-offload", Version: version}, nil)
 
 	// Discovery FIRST (LO-18): before this tool existed, offload_nim was the only
@@ -198,7 +213,20 @@ func (s *Server) Run(ctx context.Context, version string) error {
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"goal":{"type":"string","description":"the task for the local agent to accomplish"},"read_root":{"type":"string","description":"absolute directory the agent may read; it cannot read outside it (default: the server working dir)"},"max_steps":{"type":"integer","description":"hard step budget (default 12)"},"model":{"type":"string","description":"planner model id; must support tool-calling (default: the tier's agent seat (agent_model), falling back to the configured workhorse)"},"timeout_sec":{"type":"integer","description":"wall-clock budget in seconds (default: the tier's agent_timeout_sec, else 180)"},"profile":{"type":"string","enum":["general","edit","build","research","github"],"description":"task profile: narrows the tool list and injects worked examples. MEASURED: a small planner given the full tool set often calls NO tool at all, so a narrowed profile is the single most effective lever. Prefer \"build\" for reading and reasoning over a codebase; \"general\" (the default) advertises everything. Tools this read-only front door does not grant are dropped, along with their examples."},"judge":{"type":"boolean","description":"end-of-run ADVISORY audit: one extra same-seat completion grading the run's flagged effects (parked/failed/unknown/self-flagged) for the operator review. Never gates anything. Default false"}},"required":["goal"]}`),
 	}, s.handleAgentRun)
 
-	return srv.Run(ctx, &mcp.StdioTransport{})
+	// agent_delegate (multi-node delegation, Task 6): registration is GATED on
+	// agent_delegation_enabled (roast delta 13) so tools/list stays
+	// byte-identical when the delegator role is off — pinned in
+	// TestAgentDelegateRegistrationGated. The s.p nil-guard mirrors the
+	// badargs-test constructor; production always has a pipeline.
+	if s.p != nil && s.p.Cfg().AgentDelegationEnabled {
+		srv.AddTool(&mcp.Tool{
+			Name:        "agent_delegate",
+			Description: "Fan out 1-8 self-contained subtasks to the FREE local delegation engine: each subtask is a contract {goal, context docs, output_schema, acceptance} run by an autonomous read-only agent loop on THIS box or on a fleet node over the operator's tailnet (never cloud). Placement is quality-first: an idle local box always runs the work; a remote node is used only when the local GPU is busy AND the node passes the capability gate (route=auto; force with local|remote). context_paths inlines files DELEGATOR-side (confined to read_root) so your context never pays for them. acceptance is a machine-checkable DSL evaluated by the delegator before a result counts as done: contains:<s>, not_contains:<s>, regex:<re>, min_items:<field>:<n>, nonempty:<field> — a schema-valid result failing a check comes back as failed_verification, NOT a success. Returns {summary:{succeeded,deferred,failed_verification,failed,infrastructure,corpus_rows_lost,ledger_rows_lost}, results:[{node,seat,placement,job_id,output,structured,deferred,reason,defer_class,failed,acceptance_failures,wall_ms}]} — read summary FIRST. summary.infrastructure counts the results whose story is a broken STACK rather than the work: defers whose defer_class is infrastructure|config, plus a local placement taken while every configured remote failed its health probe. Non-zero means a node is broken or misconfigured, so do NOT read those subtasks as work the local stack honestly could not do — and the call comes back flagged as an error, with this same JSON body intact. defer_class \"contract\" is YOUR contract, not a box: no output_schema for a remote placement, past the origin hop, or bigger than any node's advertised context — rewrite the contract and retry. abstention|budget defers and failed_verification are ordinary result shapes. On any refusal before placement it returns deferred:true with a reason and you do the work yourself.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"subtasks":{"type":"array","minItems":1,"maxItems":8,"description":"the delegation contracts to place and run","items":{"type":"object","properties":{"goal":{"type":"string","description":"the self-contained task for the sub-agent (it sees ONLY this + the context docs)"},"context":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"text":{"type":"string"}},"required":["name","text"]},"description":"inline context documents (name is a flat filename; total across docs <= 256 KiB)"},"context_paths":{"type":"array","items":{"type":"string"},"description":"files to inline as context docs, read by the DELEGATOR under read_root confinement (<=128 KiB each)"},"output_schema":{"type":"object","description":"JSON Schema with a properties map; the sub-agent's final answer is re-packed into it. REQUIRED for any remote placement"},"acceptance":{"type":"array","items":{"type":"string"},"description":"machine-checkable checks evaluated delegator-side: contains:<s> | not_contains:<s> | regex:<re> | min_items:<field>:<n> | nonempty:<field>"},"profile":{"type":"string","description":"agent task profile (default research)"},"max_steps":{"type":"integer","description":"loop step budget (default 12, cap 12)"},"timeout_sec":{"type":"integer","description":"wall ceiling per subtask (default 300, cap 900)"}},"required":["goal"]}},"route":{"type":"string","enum":["auto","local","remote"],"description":"placement: auto (default; idle-local wins, busy-local considers remotes), local (force in-process), remote (force a fleet node; defers if none eligible)"},"read_root":{"type":"string","description":"absolute directory context_paths may be read from (default: the server working dir)"},"remotes":{"type":"array","items":{"type":"string"},"description":"fleet node base URLs, tailnet-only (e.g. http://lenovo-m720q:18811)"}},"required":["subtasks"]}`),
+		}, s.handleAgentDelegate)
+	}
+
+	return srv
 }
 
 // --- tool handlers (named methods so they are directly unit-testable) ---
@@ -1070,6 +1098,146 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		out["judge_report"] = res.JudgeReport // ADVISORY end-of-run audit of flagged effects
 	}
 	return jsonResult(out)
+}
+
+// handleAgentDelegate is the MCP front door onto delegate.Run (Task 6). It
+// prepares contracts (delegator-mints version/depth, inlines context_paths
+// under read_root, validates — all BEFORE any placement or network), then
+// hands them to the shared engine. House style throughout: every failure path
+// is a deferred-shape result, never an MCP error (see handleAgentRun).
+func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var in struct {
+		Subtasks []struct {
+			Goal         string            `json:"goal"`
+			Context      []core.ContextDoc `json:"context"`
+			ContextPaths []string          `json:"context_paths"`
+			OutputSchema json.RawMessage   `json:"output_schema"`
+			Acceptance   []string          `json:"acceptance"`
+			Profile      string            `json:"profile"`
+			MaxSteps     int               `json:"max_steps"`
+			TimeoutSec   int               `json:"timeout_sec"`
+		} `json:"subtasks"`
+		Route    string   `json:"route"`
+		ReadRoot string   `json:"read_root"`
+		Remotes  []string `json:"remotes"`
+	}
+	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+		return bad, nil
+	}
+	if len(in.Subtasks) == 0 {
+		return jsonResult(map[string]any{"deferred": true, "reason": "at least one subtask required"})
+	}
+	// Remotes are vetted HERE too (delegate.Run re-checks): a caller mistake
+	// should die naming the URL before any contract prep work is spent.
+	for _, base := range in.Remotes {
+		if err := netguard.TailnetURL(base); err != nil {
+			return jsonResult(map[string]any{"deferred": true, "reason": "remote " + base + ": " + err.Error()})
+		}
+	}
+	// read_root defaulting mirrors handleAgentRun: the server working dir.
+	readRoot := in.ReadRoot
+	if readRoot == "" {
+		wd, werr := os.Getwd()
+		if werr != nil {
+			return jsonResult(map[string]any{"deferred": true, "reason": "cannot determine working dir for read_root: " + werr.Error()})
+		}
+		readRoot = wd
+	}
+	absRoot, err := filepath.Abs(readRoot)
+	if err != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": "bad read_root: " + err.Error()})
+	}
+	contracts := make([]core.AgentContract, 0, len(in.Subtasks))
+	for i, st := range in.Subtasks {
+		c, perr := delegate.PrepareContract(delegate.SubtaskSpec{
+			AgentContract: core.AgentContract{
+				Goal:         st.Goal,
+				Context:      st.Context,
+				OutputSchema: st.OutputSchema,
+				Acceptance:   st.Acceptance,
+				Profile:      st.Profile,
+				MaxSteps:     st.MaxSteps,
+				TimeoutSec:   st.TimeoutSec,
+			},
+			ContextPaths: st.ContextPaths,
+		}, absRoot)
+		if perr != nil {
+			return jsonResult(map[string]any{"deferred": true, "reason": fmt.Sprintf("subtask %d: %v", i, perr)})
+		}
+		contracts = append(contracts, c)
+	}
+	localRun := s.localAgent
+	if localRun == nil {
+		localRun = s.p.RunAgentContract
+	}
+	results, sum, rerr := delegate.Run(ctx, s.p.Cfg(), localRun, contracts, in.Route, in.Remotes)
+	if rerr != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
+	}
+	// WireResponse is a struct, so "summary" marshals FIRST (roast delta 14) —
+	// jsonResult over a map would alphabetize results ahead of it.
+	res, jerr := jsonResult(delegate.WireResponse(results, sum))
+	if jerr != nil || res == nil {
+		return res, jerr
+	}
+	// The loud-exit contract used to live ONLY on the CLI (main.go's
+	// delegateExitErr): every one of these came back to the MCP caller — this
+	// lane's primary consumer — as a plain successful tool call, so a fleet with
+	// a dead llama-swap read like a clean run to the delegating model. Same two
+	// triggers as the exit code, same meaning: a human has to look.
+	//
+	// House style stays intact in the important half: the BODY is unchanged, so
+	// the summary and every per-subtask reason/defer_class are still there to
+	// read. The flag is the loudness the JSON alone could not carry. Ordinary
+	// defers (abstention, budget) and failed verification remain successes —
+	// those are RESULT shapes, exactly as on the CLI.
+	if delegateIsError(sum) {
+		res.IsError = true
+	}
+	return res, nil
+}
+
+// delegateIsError decides the tool-call error flag for one delegation run. It is
+// NOT the CLI's exit rule, and the difference is the point.
+//
+// IsError:true means, in MCP, THE CALL FAILED — most models react by discarding
+// or redoing the work. Summary.Infrastructure alone cannot carry that: it counts
+// a SUCCESSFUL local placement taken while the fleet was down (delegate's
+// remotesUnreachable), so a run whose every subtask completed, validated, and
+// passed acceptance came back flagged as a failure. The fleet-down verdict is
+// still fully published — it is in the body's summary and per-subtask reasons,
+// and `local-offload delegate` still exits non-zero on it, because an exit code
+// can sit BESIDE printed results in a way a boolean cannot.
+//
+// The rule that expresses that WITHOUT a silent path is stated on lost WORK, not
+// on the presence of successes. `Succeeded == 0` was the previous spelling and it
+// over-reached: Infrastructure covers both remotesUnreachable (a result that
+// succeeded) and a broken-stack DEFER (a subtask whose contracted output never
+// arrived), and only the first justifies staying quiet — yet the gate silenced
+// the second too the moment ANY sibling succeeded. One of two subtasks eaten by a box with a dead
+// llama-server reached the calling model as a clean tool call, while the CLI
+// exited non-zero on the identical run: two surfaces disagreeing, with the quiet
+// one belonging to the caller that has no exit code to read.
+//
+// LostToStack counts exactly the subtasks that DELIVERED NO USABLE RESULT
+// because the stack failed them, so the rule needs no proxy.
+// `Deferred > 0 && Infrastructure > 0` is NOT one — a contract-classed defer
+// beside a fleet-down local success satisfies it with nothing lost, re-creating
+// the flag-on-finished-work defect.
+//
+// The count is stated on the CONTRACTED output, not on empty bytes, and the flag
+// inherits that meaning: a finished agent loop whose structured re-pack seat was
+// unreachable publishes its prose with `structured` absent, and is flagged. That
+// is the right call for an MCP caller — a contract carrying an output_schema is
+// owed a mechanically checked deliverable, and a model handed unchecked prose
+// under a green flag would merge it as if it had been validated.
+//
+// So: a subtask that actually failed is an error, and a subtask lost to the
+// stack is an error — a sibling succeeding never un-loses it, exactly as it never
+// un-fails a Failed one. A fleet-down run that still delivered every subtask
+// stays a quiet success.
+func delegateIsError(sum delegate.Summary) bool {
+	return sum.Failed > 0 || sum.LostToStack > 0
 }
 
 // addEffects folds a run's effect ledger into an agent_run response — counts

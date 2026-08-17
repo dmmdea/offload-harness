@@ -1,0 +1,24 @@
+{
+  "goal": "Compare every factual claim in the doc under review against the source excerpts in the other context files. A claim has drifted when the doc states a behavior, default, path, or name that a source excerpt contradicts. Report each drifted claim as one string: the doc's claim verbatim, then ' -> ', then what the source actually says. Count every claim you checked, drifted or not. Verdict is 'clean' when nothing drifted, 'drift-found' otherwise. Do not report a drift you cannot ground in a specific source line.",
+  "context_paths": [
+    "docs/REPLACE-doc-under-review.md",
+    "src/REPLACE-source-excerpt-a",
+    "src/REPLACE-source-excerpt-b"
+  ],
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "claims_checked": { "type": "integer" },
+      "drifted": { "type": "array", "items": { "type": "string" } },
+      "verdict": { "type": "string", "enum": ["clean", "drift-found"] }
+    },
+    "required": ["claims_checked", "drifted", "verdict"]
+  },
+  "acceptance": [
+    "nonempty:verdict",
+    "nonempty:claims_checked"
+  ],
+  "profile": "research",
+  "max_steps": 12,
+  "timeout_sec": 300
+}

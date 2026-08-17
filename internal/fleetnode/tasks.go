@@ -11,6 +11,7 @@
 package fleetnode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,16 +23,27 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
-// messages). Membership is decided per-config by taskConfigured.
-var fleetTaskOrder = []string{"image-gen", "video-gen", "stt", "audio-gen", "run-graph"}
+// messages). Membership is decided per-config by taskConfiguredFor.
+var fleetTaskOrder = []string{"image-gen", "video-gen", "stt", "audio-gen", "run-graph", "agent"}
 
-// taskConfigured reports whether THIS box actually serves taskType — the same
+// taskConfiguredFor reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
-// advertising it to the fleet would be a lie).
-func taskConfigured(cfg config.Config, taskType string) bool {
+// advertising it to the fleet would be a lie) — keyed on a caller-supplied answer
+// to "is the serve listener loopback?", the only input that is not derivable from
+// config alone (a --listen flag can diverge from cfg.FleetListen).
+//
+// There is deliberately no config-only wrapper: the listener-resolving one that
+// used to exist here had ZERO production callers (its own doc named Families,
+// which goes through SupportedTasks instead) while claiming to be the path for
+// callers with no listener to consult. Everything on the serve path — both
+// advertisement and admission — supplies the RESOLVED listener; see
+// AgentLaneAdmissible for why that distinction is load-bearing for the agent lane
+// and irrelevant for every other task.
+func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool) bool {
 	switch taskType {
 	case "image-gen":
 		return cfg.ImageRouteConfigured()   // ComfyUI script OR the sdcpp engine (J2)
@@ -43,10 +55,85 @@ func taskConfigured(cfg config.Config, taskType string) bool {
 		return cfg.VoiceGenScript != "" || cfg.MusicGenScript != ""
 	case "run-graph":
 		return cfg.RunGraphScript != ""
+	case "agent":
+		return AgentLaneAdmissible(cfg, loopbackListener)
 	}
 	// Anything else is only "configured" when it is a VALID cfg.Pipelines key
 	// (Task 6): 100% config-driven, so a new pipeline needs no new case here.
 	return pipelineNameConfigured(cfg, taskType)
+}
+
+// AgentLaneAdmissible is THE ONE predicate behind the fleet "agent" lane
+// (multi-node delegation, Task 4). Both sides of the lane consult it — the
+// ADVERTISEMENT (health's supported_task_types AND its four agent_* fields)
+// and the ADMISSION (server.go's ack-time guard) — because when those two
+// disagree the delegator does everything right and still fails: it reads
+// health, passes the capability gate, mints a job, dispatches, and eats a 403
+// into Summary.Failed. Advertising a lane that will refuse is a mis-route by
+// construction, so the two must be the SAME function of the SAME inputs, not
+// two hand-kept-in-sync condition lists (they drifted once already, and health
+// advertised a lane dispatch would 403).
+//
+// Three conditions, all required:
+//
+//  1. cfg.FleetAgentEnabled — an explicit operator opt-in, unlike every other
+//     task here (see the config field's doc: the BINDING exists on every tier,
+//     the worker ROLE is a per-box decision), so default-off keeps the
+//     advertisement byte-identical for nodes that never opted in.
+//  2. A resolvable agent seat (config.AgentPlannerModel's fallback chain).
+//     Roster LIVENESS is deliberately NOT checked here — this function feeds
+//     ack-time 400s and health advertisement, both of which must stay cheap
+//     and network-free; whether the seat is actually served is health's
+//     roster-probe job (Task 5) and runAgentTask's own probe at run time.
+//  3. Safe reachability: a loopback listener, or a bearer token for anything
+//     beyond it — an agent lane drives a coding-agent loop, so a tokenless one
+//     past loopback is an RCE-class surface.
+//
+// loopbackListener is a PARAMETER, not derived from cfg, because the two
+// callers know different things: the server holds the RESOLVED listen address
+// (Options.LoopbackListener, computed by the verb from where the bind actually
+// landed) and must use it, while config-only callers pass
+// ConfigLoopbackListen(cfg). Deriving it internally is what let the two sides
+// key on different notions of "loopback" in the first place.
+//
+// Making it a parameter was not enough on its own: the ADMISSION path reached
+// this function through BuildRequest, which hardcoded ConfigLoopbackListen —
+// so with `fleet_listen: "0.0.0.0:18811"` and `--listen 127.0.0.1:18811` and no
+// token, health (resolved: loopback) advertised the lane while dispatch
+// (config: not loopback) answered 400 `unsupported task_type "agent"`. Both
+// sides now pass the SAME resolved answer down: BuildRequest takes it as an
+// argument rather than deriving one.
+func AgentLaneAdmissible(cfg config.Config, loopbackListener bool) bool {
+	if !cfg.FleetAgentEnabled {
+		return false
+	}
+	if cfg.AgentPlannerModel("") == "" {
+		return false
+	}
+	return AgentLaneSafelyReachable(cfg, loopbackListener)
+}
+
+// AgentLaneSafelyReachable is condition 3 of AgentLaneAdmissible standing
+// alone: a loopback listener, or a bearer token for anything beyond it.
+//
+// It is its own function because the dispatch handler needs exactly this
+// condition — and only this one — to pick its refusal: a tokenless lane past
+// loopback is a 403 naming the missing token, while a lane that is merely off
+// or seatless is a plain 400 "unsupported task_type" like any other unbound
+// task. The handler used to re-implement the expression inline, so condition 3
+// existed twice under a doc claiming ONE predicate governs the lane.
+func AgentLaneSafelyReachable(cfg config.Config, loopbackListener bool) bool {
+	return loopbackListener || cfg.FleetAuthToken != ""
+}
+
+// ConfigLoopbackListen is the CONFIG-side view of the bind, for callers with
+// no resolved listener to consult. An empty fleet_listen means the operator
+// never overrode config.Default()'s loopback bind, so it counts as loopback
+// (netguard.LoopbackAddr itself fails closed on ""). Anything the server
+// decides keys on Options.LoopbackListener instead, which stays authoritative
+// when a --listen flag diverges from the config.
+func ConfigLoopbackListen(cfg config.Config) bool {
+	return cfg.FleetListen == "" || netguard.LoopbackAddr(cfg.FleetListen)
 }
 
 // pipelineNameConfigured reports whether taskType is one of cfg.Pipelines'
@@ -61,11 +148,20 @@ func pipelineNameConfigured(cfg config.Config, taskType string) bool {
 }
 
 // SupportedTasks returns the fleet task_types this machine's config actually
-// serves, in stable order. nil when nothing is bound.
+// serves, in stable order. nil when nothing is bound. The agent lane's
+// listener condition is judged from the config (ConfigLoopbackListen); a
+// server with a resolved listen address calls SupportedTasksFor instead.
 func SupportedTasks(cfg config.Config) []string {
+	return SupportedTasksFor(cfg, ConfigLoopbackListen(cfg))
+}
+
+// SupportedTasksFor is SupportedTasks with the RESOLVED listener answer
+// supplied — what /fleet/health advertises, so supported_task_types and the
+// agent_* block can never disagree with what dispatch will admit.
+func SupportedTasksFor(cfg config.Config, loopbackListener bool) []string {
 	var out []string
 	for _, t := range fleetTaskOrder {
-		if taskConfigured(cfg, t) {
+		if taskConfiguredFor(cfg, t, loopbackListener) {
 			out = append(out, t)
 		}
 	}
@@ -125,11 +221,21 @@ func Families(cfg config.Config) []string {
 // (buildPipelineJob -> FetchRefs): the caller is server.go's handleDispatch,
 // which passes r.Context(), so a dispatch whose client vanishes mid-ack stops
 // fetching refs instead of racing to completion against context.Background().
-func BuildRequest(ctx context.Context, cfg config.Config, taskType string, payload json.RawMessage) (core.Request, func(), error) {
+//
+// loopbackListener is the RESOLVED serve listener's verdict, threaded from
+// Options.LoopbackListener — the SAME value health advertises from — so
+// admission and advertisement are one predicate over one input. It is a
+// required argument rather than a defaulted one precisely because it was
+// derived internally before: BuildRequest called ConfigLoopbackListen while
+// health used the resolved listener, and the two disagreed for every node whose
+// --listen flag diverges from fleet_listen in the loopback dimension. The agent
+// lane is the only task whose verdict depends on it; every other task ignores
+// it entirely.
+func BuildRequest(ctx context.Context, cfg config.Config, loopbackListener bool, taskType string, payload json.RawMessage) (core.Request, func(), error) {
 	noop := func() {}
-	if !taskConfigured(cfg, taskType) {
+	if !taskConfiguredFor(cfg, taskType, loopbackListener) {
 		return core.Request{}, noop, fmt.Errorf("unsupported task_type %q (supported: %s)",
-			taskType, strings.Join(SupportedTasks(cfg), ", "))
+			taskType, strings.Join(SupportedTasksFor(cfg, loopbackListener), ", "))
 	}
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
@@ -145,6 +251,8 @@ func BuildRequest(ctx context.Context, cfg config.Config, taskType string, paylo
 		return buildAudioGen(payload)
 	case "run-graph":
 		return buildRunGraph(payload)
+	case "agent":
+		return buildAgentRun(cfg, payload)
 	}
 	// Any other taskType that reaches here (taskConfigured already gated
 	// membership) must be a configured cfg.Pipelines key (Task 6) — 100%
@@ -152,9 +260,9 @@ func BuildRequest(ctx context.Context, cfg config.Config, taskType string, paylo
 	if pipelineNameConfigured(cfg, taskType) {
 		return buildPipelineJob(ctx, cfg, taskType, payload)
 	}
-	// Unreachable: taskConfigured gates membership. Kept for defense.
+	// Unreachable: taskConfiguredFor gates membership. Kept for defense.
 	return core.Request{}, noop, fmt.Errorf("unsupported task_type %q (supported: %s)",
-		taskType, strings.Join(SupportedTasks(cfg), ", "))
+		taskType, strings.Join(SupportedTasksFor(cfg, loopbackListener), ", "))
 }
 
 // buildImageGen mirrors mcpserver.handleGenerateImage.
@@ -428,6 +536,82 @@ func materializeRaw(raw json.RawMessage, pattern string) (string, error) {
 		return "", err
 	}
 	return f.Name(), nil
+}
+
+// buildAgentRun translates a fleet "agent" dispatch (multi-node delegation,
+// Task 4) into the core.Request pipeline.runAgentTask executes. Strict path:
+// core.DecodeAgentContract owns decode + Validate + the MaxSteps/TimeoutSec
+// ceilings (roast delta 5 — clamped THERE, never re-clamped here), so every
+// error out of it is an ack-time 400 with the decoder's reason intact.
+//
+// Two Task-4 rules land here on top of the decoder:
+//
+//   - Roast delta 3: remote execution REQUIRES OutputSchema. Without one the
+//     delegator has nothing mechanical to verify before merging weak-node
+//     output, so the contract is refused at ACK — after the network round-trip
+//     and loop budget are spent is too late to discover unverifiability.
+//   - Roast delta 2: depth is DERIVED on the receiving node — anything arriving
+//     over the fleet wire executes at max(1, wireDepth); the wire field is
+//     advisory. The derived value REPLACES contract.Depth before the pipeline
+//     sees it, so no downstream reader can accidentally trust a wire claim of
+//     "origin". In v1 this denies nothing node-side: agent.Build registers no
+//     delegate tool for ANY caller, so the hop limit holds structurally
+//     (tool absent) — the derived depth is carried so the day a delegate tool
+//     exists, its depth>0 registration gate keys off this value, not the wire.
+//
+// Materialization follows buildPipelineJob's discipline: a job-scoped dir
+// under BaseDir()/pipeline-jobs/ (so SweepOrphanedPipelineJobs reclaims a
+// crash's leftovers at startup), context docs written under <dir>/context/,
+// and a cleanup closure that removes the WHOLE dir — the docs live exactly as
+// long as the job. Unlike buildPipelineJob the id is NODE-MINTED (the contract
+// carries none), so os.MkdirTemp is the exclusive create: uniqueness by
+// construction instead of a caller-collision 400.
+func buildAgentRun(cfg config.Config, payload json.RawMessage) (core.Request, func(), error) {
+	noop := func() {}
+	contract, err := core.DecodeAgentContract(bytes.NewReader(payload))
+	if err != nil {
+		return core.Request{}, noop, err
+	}
+	if len(contract.OutputSchema) == 0 {
+		return core.Request{}, noop, fmt.Errorf(
+			"agent contract: output_schema required for remote execution (the delegator must have a mechanical check before merging)")
+	}
+	if contract.Depth < 1 {
+		contract.Depth = 1
+	}
+
+	jobsRoot := filepath.Join(cfg.BaseDir(), "pipeline-jobs")
+	if mkErr := os.MkdirAll(jobsRoot, 0o755); mkErr != nil {
+		return core.Request{}, noop, fmt.Errorf("agent contract: creating pipeline-jobs dir: %w", mkErr)
+	}
+	jobDir, mkErr := os.MkdirTemp(jobsRoot, "agent-*")
+	if mkErr != nil {
+		return core.Request{}, noop, fmt.Errorf("agent contract: creating job dir: %w", mkErr)
+	}
+	contextDir := filepath.Join(jobDir, "context")
+	if mkErr := os.MkdirAll(contextDir, 0o755); mkErr != nil {
+		os.RemoveAll(jobDir)
+		return core.Request{}, noop, fmt.Errorf("agent contract: creating context dir: %w", mkErr)
+	}
+	for _, d := range contract.Context {
+		// Validate held every Name to flat-filename shape (no separators,
+		// colons, or dot-dirs), so this Join cannot escape contextDir.
+		if werr := os.WriteFile(filepath.Join(contextDir, d.Name), []byte(d.Text), 0o644); werr != nil {
+			os.RemoveAll(jobDir)
+			return core.Request{}, noop, fmt.Errorf("agent contract: writing context doc %q: %w", d.Name, werr)
+		}
+	}
+
+	cleanup := func() { os.RemoveAll(jobDir) }
+	return core.Request{
+		Task:  core.TaskAgentRun,
+		Input: contract.Goal,
+		Params: map[string]any{
+			"contract":    contract,
+			"context_dir": contextDir,
+			"job_id":      filepath.Base(jobDir),
+		},
+	}, cleanup, nil
 }
 
 // pipelineJobIDPattern validates job_spec.id: it becomes the materialization

@@ -17,10 +17,13 @@ package swapclient
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"time"
 
 	"llamaswap-pp-cli/pkg/llamaswap"
+
+	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
 // DefaultTimeout is the per-request deadline used when a caller passes none.
@@ -52,6 +55,49 @@ func New(endpoint string, timeout time.Duration) (*llamaswap.Client, error) {
 		timeout = DefaultTimeout
 	}
 	return llamaswap.New(BaseURL(endpoint), &llamaswap.Options{Timeout: timeout})
+}
+
+// NewGuarded is New with the tailnet DIAL gate installed — for probes whose
+// endpoint is REMOTE and operator-configured (the cascade remote lanes), as
+// opposed to this box's own llama-swap.
+//
+// It exists because the vendored client builds a plain &http.Client{} on the
+// DEFAULT transport when no HTTPClient is supplied: ProxyFromEnvironment live,
+// no dial-time address check. That is fine for a loopback probe and wrong for
+// a configured remote, because netguard.TailnetURL admits a dotless MagicDNS
+// short name on SHAPE alone (it deliberately touches no DNS at config time),
+// so the only thing that can prove where that name actually resolves is the
+// per-dial check in netguard.SafeTransport — which also strips the proxy, so
+// nothing can dial on our behalf outside the gate. Without this, ADR 0023's
+// "re-checked at every dial" was false for the lane roster probe.
+//
+// Timeout is carried on BOTH the Options and the supplied client: the vendored
+// New honors a supplied client's own Timeout as-is, so leaving it zero would
+// silently hand a remote probe an unbounded deadline.
+func NewGuarded(endpoint string, timeout time.Duration) (*llamaswap.Client, error) {
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	return llamaswap.New(BaseURL(endpoint), &llamaswap.Options{
+		Timeout:    timeout,
+		HTTPClient: &http.Client{Timeout: timeout, Transport: netguard.SafeTransport(nil)},
+	})
+}
+
+// FetchRosterGuarded is FetchRoster for a REMOTE endpoint: same roster read,
+// over NewGuarded's tailnet-gated client. Use it for any base the operator
+// configured as remote; FetchRoster stays the right call for this node's own
+// local llama-swap, which is loopback by construction and needs no gate.
+func FetchRosterGuarded(ctx context.Context, endpoint string, timeout time.Duration) (Roster, error) {
+	c, err := NewGuarded(endpoint, timeout)
+	if err != nil {
+		return Roster{}, err
+	}
+	models, err := c.Models(ctx)
+	if err != nil {
+		return Roster{}, err
+	}
+	return Roster{models: models}, nil
 }
 
 // Roster is one alias-aware snapshot of GET /v1/models.

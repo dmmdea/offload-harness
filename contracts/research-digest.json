@@ -1,0 +1,24 @@
+{
+  "goal": "Synthesize the context documents into one digest. Produce at least three concrete findings, each one string that names the source document it is grounded in. List any open questions the documents raise but do not answer. Close with a three-sentence executive summary. A finding that appears in no document is a fabrication; leave it out.",
+  "context_paths": [
+    "notes/REPLACE-source-a.md",
+    "notes/REPLACE-source-b.md",
+    "notes/REPLACE-source-c.md"
+  ],
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "findings": { "type": "array", "items": { "type": "string" } },
+      "open_questions": { "type": "array", "items": { "type": "string" } },
+      "summary": { "type": "string" }
+    },
+    "required": ["findings", "summary"]
+  },
+  "acceptance": [
+    "min_items:findings:3",
+    "nonempty:summary"
+  ],
+  "profile": "research",
+  "max_steps": 12,
+  "timeout_sec": 600
+}

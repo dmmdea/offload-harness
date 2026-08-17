@@ -32,6 +32,11 @@ type JobView struct {
 	State JobState
 	Data  json.RawMessage
 	Error string
+	// Agent marks a job created by an AGENT dispatch (AcceptAgent). The server
+	// keys /fleet/jobs/{id} bearer auth on it — media-created jobs stay
+	// tokenless (auth scope v1 = the agent lane only). Never serialized to the
+	// wire: jobWire's shape is unchanged.
+	Agent bool
 }
 
 // job is the mutable store entry; guarded by Jobs.mu.
@@ -39,6 +44,7 @@ type job struct {
 	state      JobState
 	data       json.RawMessage
 	err        string
+	agent      bool      // created via AcceptAgent → poll auth applies (server.go handleJob)
 	terminalAt time.Time // set when state turns done|error; drives ttl eviction
 }
 
@@ -88,6 +94,20 @@ func newJobs(ttl time.Duration, now func() time.Time, janitorTick time.Duration)
 // rule). During drain it refuses all new work (false; the server maps that to
 // 503 via Draining()).
 func (j *Jobs) Accept(id string, run func(context.Context) (json.RawMessage, error)) (created bool) {
+	return j.accept(id, false, run)
+}
+
+// AcceptAgent is Accept for a job created by an AGENT dispatch: identical
+// lifecycle, but the record carries the agent marker the server's poll-auth
+// gate keys on. The marker lives ON the job record — not in a server-side id
+// set — so it is written atomically with creation (no window where a poller
+// can observe the job before it is marked) and is evicted WITH the record
+// (an id set would outlive the janitor's sweep and leak forever).
+func (j *Jobs) AcceptAgent(id string, run func(context.Context) (json.RawMessage, error)) (created bool) {
+	return j.accept(id, true, run)
+}
+
+func (j *Jobs) accept(id string, agent bool, run func(context.Context) (json.RawMessage, error)) (created bool) {
 	j.mu.Lock()
 	if j.draining {
 		j.mu.Unlock()
@@ -97,7 +117,7 @@ func (j *Jobs) Accept(id string, run func(context.Context) (json.RawMessage, err
 		j.mu.Unlock()
 		return false
 	}
-	j.m[id] = &job{state: JobAccepted}
+	j.m[id] = &job{state: JobAccepted, agent: agent}
 	j.wg.Add(1)
 	j.mu.Unlock()
 
@@ -122,7 +142,7 @@ func (j *Jobs) Get(id string) (*JobView, bool) {
 	if !ok {
 		return nil, false
 	}
-	return &JobView{ID: id, State: jb.state, Data: jb.data, Error: jb.err}, true
+	return &JobView{ID: id, State: jb.state, Data: jb.data, Error: jb.err, Agent: jb.agent}, true
 }
 
 // QueueDepth counts accepted+running jobs (the health field). Terminal entries

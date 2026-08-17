@@ -9,6 +9,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/cache"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 )
 
@@ -18,7 +19,19 @@ import (
 // SINGLE place the nil-store invariant is constructed; NewRecordlessOffload and the
 // agent-trajectory flywheel (agent-trajectory-label) both use it so it can't drift.
 func NewRecordlessPipeline(cfg config.Config, timeout time.Duration) *Pipeline {
-	oc := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, timeout)
+	// WithSeatEndpoints + WithRemoteLanes mirror openPipeline's construction:
+	// the recordless pipeline must route an overridden seat — and fail a busy
+	// hour over to the same cascade lane — exactly as the recorded one does; a
+	// per-model endpoint is a property of the seat, not of which pipeline shape
+	// happens to call it. Absent keys = no-ops, byte-identical client.
+	oc := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, timeout).
+		WithSeatEndpoints(cfg.SeatEndpoints)
+	if len(cfg.CascadeRemoteLanes) > 0 {
+		gpuLockPath, stateDir := cfg.GPULockPath, cfg.StateDir
+		oc = oc.WithRemoteLanes(cfg.CascadeRemoteLanes,
+			func() bool { return delegate.LocalBusy(gpuLockPath, stateDir) },
+			llamaclient.RosterResident())
+	}
 	return New(cfg, oc, nil, nil)
 }
 

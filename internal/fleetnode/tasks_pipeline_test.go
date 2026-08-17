@@ -462,7 +462,7 @@ func TestSweepOrphanedPipelineJobs_UnblocksReusedID(t *testing.T) {
 
 // TestSupportedTasks_IncludesPipelineIffConfigured: SupportedTasks advertises
 // a pipeline's task_type key exactly when cfg.Pipelines has a valid entry for
-// it — mirroring every hardcoded route's taskConfigured gate.
+// it — mirroring every hardcoded route's taskConfiguredFor gate.
 func TestSupportedTasks_IncludesPipelineIffConfigured(t *testing.T) {
 	cfg := config.Default()
 	if contains(SupportedTasks(cfg), "scene-swap") {
@@ -476,8 +476,8 @@ func TestSupportedTasks_IncludesPipelineIffConfigured(t *testing.T) {
 	if !contains(SupportedTasks(cfg), "scene-swap") {
 		t.Fatal("scene-swap should be advertised once configured")
 	}
-	if !taskConfigured(cfg, "scene-swap") {
-		t.Fatal("taskConfigured should report scene-swap configured")
+	if !taskConfiguredFor(cfg, "scene-swap", ConfigLoopbackListen(cfg)) {
+		t.Fatal("taskConfiguredFor should report scene-swap configured")
 	}
 }
 
@@ -499,7 +499,7 @@ func TestFamilyFor_PipelineTaskClaimsNoFamily(t *testing.T) {
 func TestBuildRequest_RoutesConfiguredPipeline(t *testing.T) {
 	srv := pngServer(t)
 	cfg := testPipelineConfig(t)
-	req, cleanup, err := BuildRequest(context.Background(), cfg, "scene-swap", validPipelinePayload(srv, "routed-case"))
+	req, cleanup, err := BuildRequest(context.Background(), cfg, true, "scene-swap", validPipelinePayload(srv, "routed-case"))
 	if err != nil {
 		t.Fatalf("BuildRequest: unexpected error: %v", err)
 	}
@@ -514,7 +514,7 @@ func TestBuildRequest_RoutesConfiguredPipeline(t *testing.T) {
 // exactly like today, naming the supported set.
 func TestBuildRequest_UnconfiguredPipelineRejected(t *testing.T) {
 	cfg := config.Default()
-	_, cleanup, err := BuildRequest(context.Background(), cfg, "scene-swap", []byte(`{}`))
+	_, cleanup, err := BuildRequest(context.Background(), cfg, true, "scene-swap", []byte(`{}`))
 	cleanup()
 	if err == nil {
 		t.Fatal("expected an unsupported task_type error")

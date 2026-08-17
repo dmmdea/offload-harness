@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
 // PipelineSpec describes one externally-provided pipeline CLI this node can run
@@ -85,6 +87,31 @@ type Config struct {
 	Endpoint string `json:"endpoint"`
 	// CompletionPath is the native completion route used to pass a GBNF grammar.
 	CompletionPath string `json:"completion_path"`
+	// SeatEndpoints maps a model seat (the exact llama-swap model id or alias a
+	// call names) to a REMOTE OpenAI-compatible base URL serving that model —
+	// Phase A of multi-node delegation: {"lenovo-e4b": "http://lenovo-m720q:11436"}
+	// makes every completion for that seat resolve to the Lenovo's llama-swap
+	// instead of Endpoint, with zero job machinery. Empty/absent = every seat
+	// stays on Endpoint, byte-identical to a pre-seat build (pinned by test).
+	// Values are vetted TWICE to hold the never-cloud rule (ADR 0001): at load
+	// by netguard.TailnetURL (loopback, 100.64.0.0/10 literals, dotless MagicDNS
+	// names, or hosts under the house tailnet suffix — anything else fails the
+	// load loudly, naming the key), and at every dial by netguard.SafeTransport
+	// (the RESOLVED address must be loopback/tailnet — the DNS-rebinding guard
+	// a load-time string check cannot provide).
+	SeatEndpoints map[string]string `json:"seat_endpoints,omitempty"`
+	// CascadeRemoteLanes maps a model seat (same key rule as SeatEndpoints) to a
+	// remote OpenAI-compatible base URL that ALSO serves that model — the
+	// busy-aware failover lane for the daily cascade (roast delta 7), distinct
+	// from SeatEndpoints' static always-remote pin: a lane is consulted per call
+	// and taken only while the local machine-wide GPU lease is held AND a cached
+	// roster probe confirms the lane serves the model; every other call stays on
+	// Endpoint. Quality-identical models only — the SAME model id served
+	// remotely, never a downgrade: routing never changes WHICH model answers,
+	// only WHERE. Empty/absent = the cascade never leaves this box. Values are
+	// vetted by the same double guard as SeatEndpoints: netguard.TailnetURL at
+	// load (naming the key) and the SafeTransport dial gate on every request.
+	CascadeRemoteLanes map[string]string `json:"cascade_remote_lanes,omitempty"`
 	// Model is the default workhorse (E4B) — used for summarize/extract and as
 	// the fallback for any task without a specific route. Empty = dedicated server.
 	Model string `json:"model"`
@@ -116,6 +143,17 @@ type Config struct {
 	// seat seed this higher: a cold big-model load plus low tok/s inside 180s is a
 	// timeout machine, not an agent.
 	AgentTimeoutSec int `json:"agent_timeout_sec,omitempty"`
+	// AgentCtxTokens is the agent seat's SERVED context window in tokens — the tier
+	// profile's agent_ctx_tokens value (setup/templates/profiles.json; the installer
+	// records it in installed.json). It exists as a config key so /fleet/health can
+	// advertise the ceiling (agent_ctx_tokens, §S3 of the multi-node delegation spec)
+	// from CONFIG rather than probing: the live-window probe (/upstream/{model}/props)
+	// can cold-start a multi-GB model, which is unacceptable on a health cadence.
+	// 0 (the default) = not advertised — the delegator's placement gate then never
+	// selects this node for remote agent work (its ctx arithmetic cannot pass), which
+	// is the safe reading of "ceiling unknown". Set it to the tier's agent_ctx_tokens
+	// when opting a node in with fleet_agent_enabled.
+	AgentCtxTokens int `json:"agent_ctx_tokens,omitempty"`
 	// VisionModel is the VLM alias used for the vqa task (multimodal). Empty = no
 	// vision route (vqa defers).
 	VisionModel string `json:"vision_model,omitempty"`
@@ -699,6 +737,34 @@ type Config struct {
 	// FleetNodeID names this node in /fleet/health. Empty = the OS hostname,
 	// resolved at serve time (so a shared config never bakes one box's name).
 	FleetNodeID string `json:"fleet_node_id,omitempty"`
+	// FleetAuthToken, when non-empty, bearer-gates the fleet's AGENT lane:
+	// POST /fleet/dispatch with task_type "agent" and GET /fleet/jobs/{id} for
+	// jobs an agent dispatch created require `Authorization: Bearer <token>`
+	// (constant-time compared). Auth scope v1 is DELIBERATELY the agent lane
+	// only — media dispatch/poll/file traffic stays tokenless so the deployed
+	// media clients (0.62.1 on the laptop node) never start 401ing mid-fleet;
+	// whole-fleet enforcement is a recorded follow-up for a coordinated
+	// deploy window. Empty (the default) = no auth, with one teeth-bearing
+	// exception: a NON-loopback listener then refuses agent dispatches
+	// outright (403 at ack time) — the agent lane drives a coding-agent loop,
+	// so it must never be reachable unauthenticated beyond the box itself.
+	// Set the SAME value on every node and in the delegator's config.
+	FleetAuthToken string `json:"fleet_auth_token,omitempty"`
+	// FleetAgentEnabled opts this NODE into executing fleet "agent" tasks
+	// (docs/specs/2026-08-16-multi-node-agent-delegation.md). Default false:
+	// the agent lane runs a coding-agent loop on caller-supplied contracts, so
+	// a node advertises and accepts that work only when the operator turns it
+	// on — capability is derived from bindings everywhere else in the fleet,
+	// but THIS one is an explicit switch because the binding (an agent seat)
+	// exists on every tier while the ROLE (sub-agent worker) is a per-box
+	// decision.
+	FleetAgentEnabled bool `json:"fleet_agent_enabled,omitempty"`
+	// AgentDelegationEnabled opts the DELEGATOR side in: it gates the
+	// agent_delegate MCP tool's registration (tools/list stays byte-identical
+	// when off) and the delegate CLI verb's willingness to place work.
+	// Default false. Distinct from FleetAgentEnabled deliberately — a box can
+	// be a worker without being a delegator and vice versa.
+	AgentDelegationEnabled bool `json:"agent_delegation_enabled,omitempty"`
 	// FleetSampler selects the per-render VRAM footprint source: "auto" (PDH
 	// per-process tree on Windows, nvidia-smi global-delta elsewhere),
 	// "pdh-shared" (J3: the tree summing Dedicated+Shared — REQUIRED on UMA
@@ -954,9 +1020,14 @@ func Default() Config {
 		NIMTimeoutSec:                 120,
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
+		FleetAuthToken:                "",                // "" = no agent-lane auth → agent dispatch loopback-only; media lane never auths (v1 scope)
+		FleetAgentEnabled:             false,             // node-side agent-lane worker role: explicit operator opt-in
+		AgentDelegationEnabled:        false,             // delegator-side surfaces (agent_delegate MCP + CLI placement): opt-in
 		FleetSampler:                  "auto",            // auto|pdh|pdh-shared|global (FLEET-NODE.md)
 		PrimaryGPUUUID:                "",                // "" = largest-total headline rule; set to pin by UUID (FLEET-NODE.md)
 		Pipelines:                     nil,               // empty = no pipeline-job routes on this box (opt-in per pipeline)
+		SeatEndpoints:                 nil,               // empty = every seat on Endpoint (opt-in per box, like Pipelines)
+		CascadeRemoteLanes:            nil,               // empty = the cascade never fails over off-box (opt-in per box)
 	}
 }
 
@@ -1003,7 +1074,37 @@ func Load(path string) (Config, error) {
 	if err := validatePipelines(c.Pipelines); err != nil {
 		return c, err
 	}
+	if err := validateTailnetEndpoints("seat_endpoints", c.SeatEndpoints); err != nil {
+		return c, err
+	}
+	if err := validateTailnetEndpoints("cascade_remote_lanes", c.CascadeRemoteLanes); err != nil {
+		return c, err
+	}
 	return c, nil
+}
+
+// validateTailnetEndpoints checks every value of a model→base-URL map (the
+// seat_endpoints static pins and the cascade_remote_lanes busy-aware lanes —
+// one validator so the two keys cannot drift) against the tailnet guard, so a
+// public/LAN base URL fails LOUDLY at config load — never silently at the
+// first routed completion (the same load-time doctrine as validatePipelines).
+// Each error names the JSON key AND the map KEY: a config with several seats
+// bound must not leave the operator guessing which one is broken. Keys are
+// visited in SORTED order so that with more than one bad value the FIRST
+// error returned is deterministic across runs (Go randomizes map iteration),
+// which matters to anyone diffing a failing load or testing the error text.
+func validateTailnetEndpoints(jsonKey string, endpoints map[string]string) error {
+	keys := make([]string, 0, len(endpoints))
+	for key := range endpoints {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := netguard.TailnetURL(endpoints[key]); err != nil {
+			return fmt.Errorf("%s[%q]: %w", jsonKey, key, err)
+		}
+	}
+	return nil
 }
 
 // rebaseHome moves every DERIVED path onto c.Home. A field the operator wrote in the
