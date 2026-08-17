@@ -8,6 +8,7 @@
   "escalation_model": "gemma4-26b-a4b",
   "reasoning_model": "gemma4-26b-a4b",
   "agent_model": "",
+  "agent_profile": "",
   "agent_timeout_sec": 0,
   "agent_ctx_tokens": 0,
   "vision_model": "",

@@ -545,7 +545,11 @@ to `installed.json`. The install seed also binds the agent's planner seat automa
 `agent_model` comes from the profile's explicit `config_seed.agent_model` when it names one (the
 measured seat for that tier), and otherwise is DERIVED from `resident_tier` when that differs from
 the workhorse. So running the agent no longer requires `-model <resident_tier>` — the `-model` flag
-remains an override. A seeded tier is the normal case wherever a bake-off has run: an explicit seed
+remains an override. A tier may also seed `agent_profile`, the box's DEFAULT agent tool profile when
+a call names none (resolution: explicit `--profile`/argument > config `agent_profile` > `general`).
+`ampere-6` seeds `research` because on that tier the same model scored 0% under `general` and 72%
+narrowed — the profile outweighed the choice of model. `--two-tier` ignores the box default, since
+it sets its own architect/editor toolsets. A seeded tier is the normal case wherever a bake-off has run: an explicit seed
 is how a tier binds a planner that is neither its resident nor its workhorse. Run with `-ctx-tokens <agent_ctx_tokens>` matching the profile. These are **projected
 defaults**; `selftest.ps1` measures on the real box and its `receipt.profile_measure.tuned` block
 carries any measured override to apply.

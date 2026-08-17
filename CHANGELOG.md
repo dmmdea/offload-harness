@@ -6,6 +6,44 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.69.0] - 2026-08-17
+### Added — `agent_profile`: a per-tier DEFAULT tool profile for the agent loop
+Closes the standing question "should a non-general agent profile be enforced as a per-tier
+config default?" The measured answer is yes, as a **caller-overridable** default.
+
+- **Why.** `general` (every enabled tool, no tuned prompt, no exemplars) is a measured trap on
+  a small planner. On the ampere-6 reference box (RTX 3050 6GB) the SAME model on the SAME
+  contract scored **0% under `general`** — twelve steps burned calling tools, zero output bytes
+  — and **72% narrowed**. That is a larger factor than the choice of model. The house recorded
+  it qualitatively in July 2026 as ampere-6 "decision 8, never enforced in config"; this is the
+  enforcement. The `agent_run` tool schema already DOCUMENTED the hazard while still defaulting
+  to it.
+- **New config key `agent_profile`** (`internal/config`), with
+  `Config.AgentTaskProfile(explicit)` resolving **explicit > `agent_profile` > `general`** —
+  deliberately the same shape as `AgentPlannerModel`. The chain stays LIVE at rest: an unset key
+  is never materialized into the config file (pinned by a round-trip test), so a later change to
+  the default still reaches existing installs.
+- **Every front door honours it.** `agent_run` (MCP) now resolves through the config instead of
+  applying a profile only when the caller named one, and always calls `WithProfile` — `general`
+  is a documented no-op on the tool set, so a box that does not set the key is byte-identical.
+  `local-agent`'s `--profile` default changes from `"general"` to `""` so "unset" is
+  distinguishable from "explicitly general", and its stderr notice now names the SOURCE
+  (`--profile` vs `config agent_profile`) — silently changing which tools a run advertises
+  should never be invisible.
+- **`--two-tier` is exempt**, deliberately: it builds its own architect/editor loops and sets
+  their toolsets itself, so a box default must not bleed in. `validateFlagCombo` already refused
+  an EXPLICIT profile there; the new `resolveProfileName` refuses the implicit one. Mutation-
+  verified: deleting the exemption turns `TestResolveProfileName/two-tier_IGNORES_the_box_default`
+  red with `"research", want "general"`.
+- **Seeded on `ampere-6`** (`config_seed.agent_profile: "research"`) — the profile the bake-off
+  actually measured. No other tier is seeded: the effect is measured on this silicon only, and a
+  benchmark result is not a mandate elsewhere. `tierseed`'s `configKeys()` reflects over the
+  Config struct, so the new key validates as a legal seed with no per-key plumbing.
+- Docs updated in the same change: `docs/systems/coding-agent.md` (new "Tool-profile seat"
+  section), `docs/OPERATOR-GUIDE.md`, the regenerated `docs/tiers/*.md`, `config.example.json`,
+  the `agent_run` schema text, and the ampere-6 tier note — whose previous wording called this
+  "an open per-tier config question" and is now corrected to say it is closed.
+
 ## [0.68.0] - 2026-08-17
 
 ### Added — the `ampere-6` agent seat: Qwen3.5-4B, the first MEASURED sub-27B agent-seat decision

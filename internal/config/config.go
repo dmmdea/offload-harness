@@ -138,6 +138,26 @@ type Config struct {
 	// two-tier seats are NOT this key (architect=EscalationModel, editor=Model), and
 	// the agent's in-loop offload cascade stays on Model.
 	AgentModel string `json:"agent_model,omitempty"`
+	// AgentProfile is this box's DEFAULT agent tool profile — the one the loop uses
+	// when the caller names none. Empty = "general", the pre-key behavior, and the
+	// chain stays LIVE exactly like AgentModel: nothing may materialize the fallback
+	// into this field at rest.
+	//
+	// It exists because "general" is a MEASURED trap on a small planner. general
+	// advertises every enabled tool with no tuned prompt and no exemplars; on the
+	// ampere-6 reference box (RTX 3050 6GB) the SAME model on the SAME contract
+	// scored 0% under general — twelve steps burned calling tools, zero output bytes
+	// — and 72% under a narrowed profile. That is the single largest factor measured
+	// on that tier, larger than the choice of model. The house recorded it
+	// qualitatively in July 2026 as ampere-6 "decision 8, never enforced in config";
+	// this key is the enforcement.
+	//
+	// Per-tier because it is a property of the SEAT's capability, not of the task: a
+	// 27B planner handles the full tool set, a 4B does not. The caller's explicit
+	// profile always wins, so a box seeded "research" can still run an edit task with
+	// --profile edit. An unknown name here is a loud startup-time error, never a
+	// silent fall back to the one configuration measured to fail.
+	AgentProfile string `json:"agent_profile,omitempty"`
 	// AgentTimeoutSec is the default wall-clock budget for an agent run when the call
 	// passes no timeout. 0 = the built-in default (180s). Tiers binding a big planner
 	// seat seed this higher: a cold big-model load plus low tok/s inside 180s is a
@@ -845,6 +865,25 @@ func (c Config) AgentPlannerModel(explicit string) string {
 		return c.AgentModel
 	}
 	return c.Model
+}
+
+// AgentTaskProfile resolves the agent loop's TOOL PROFILE for a call that named
+// none. Precedence mirrors AgentPlannerModel: an explicit per-call/per-flag value
+// > the configured AgentProfile > "general". Resolved at call time, never
+// persisted.
+//
+// Returning the literal "general" rather than "" keeps the caller honest: every
+// front door then hands a real profile name to agent.LookupProfile, so an
+// unknown configured value fails by NAME instead of silently degrading to the
+// un-narrowed set that was measured to score 0% on a small seat.
+func (c Config) AgentTaskProfile(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if c.AgentProfile != "" {
+		return c.AgentProfile
+	}
+	return "general"
 }
 
 // ModelRoute is ONE config key that binds a llama-swap model, in the single

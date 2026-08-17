@@ -72,6 +72,26 @@ func validateFlagCombo(twoTier bool, profile string) error {
 	return nil
 }
 
+// resolveProfileName picks the agent tool profile for this run. An explicit
+// --profile always wins. Otherwise the BOX's configured agent_profile applies, so
+// a small-seat box is never left on bare `general` — the one configuration
+// MEASURED to fail (on the ampere-6 reference box the same model on the same
+// contract scored 0% under general and 72% under a narrowed profile).
+//
+// --two-tier is the deliberate exception: it builds its own architect/editor
+// loops and sets their role-appropriate toolsets itself, so the box default must
+// not bleed into it. validateFlagCombo already refuses an EXPLICIT profile there,
+// which is why the only value that can reach this branch is "" or "general".
+func resolveProfileName(flagProfile string, twoTier bool, cfg config.Config) string {
+	if twoTier {
+		if strings.TrimSpace(flagProfile) == "" {
+			return "general"
+		}
+		return flagProfile
+	}
+	return cfg.AgentTaskProfile(strings.TrimSpace(flagProfile))
+}
+
 // orCfg returns flag if the user set it, else the config fallback — so a model flag
 // left at its empty default resolves to this machine's configured model, never a
 // hardcoded alias. Keeps the CLI hardware/model-agnostic.
@@ -134,7 +154,7 @@ func main() {
 	totalTimeoutSec := fs.Int("total-timeout", 0, "standalone: optional cumulative wall-clock budget for the WHOLE drain in seconds (0 = unbounded; --goal-timeout still bounds each goal)")
 	resume := fs.Bool("resume", false, "standalone: skip goals already completed in the checkpoint (and record completions) so a re-run RESUMES instead of reprocessing. Give each goal an explicit id (bare goals get positional ids that shift if the queue is reordered). Resume is goal-granular, not transactional: an interrupted goal re-runs in full over any partial side effects.")
 	checkpointPath := fs.String("checkpoint", "", "standalone: --resume checkpoint file (default: <traces>/_checkpoint.jsonl)")
-	profile := fs.String("profile", "general", "per-task tool profile: general (all tools, default) | edit | build | research | github. A profile NARROWS the advertised tools to a curated subset (better small-model tool selection) and adds a tuned prompt + few-shot exemplars; it can only narrow, never grant a tool the --allow-* flags didn't enable.")
+	profile := fs.String("profile", "", "per-task tool profile: general (all tools) | edit | build | research | github. A profile NARROWS the advertised tools to a curated subset (better small-model tool selection) and adds a tuned prompt + few-shot exemplars; it can only narrow, never grant a tool the --allow-* flags didn't enable. UNSET falls back to the box's config `agent_profile`, then to general — so a small-seat box seeded with a narrowed profile gets it without passing this flag.")
 	twoTier := fs.Bool("two-tier", false, "architect/editor two-tier mode (aider one-shot handoff): a planning model drafts a complete plan, then a separate edit model executes it as its sole instruction. One cold model swap. Uses --architect-model / --editor-model. --allow-* flags gate the EDITOR's write tools.")
 	architectModel := fs.String("architect-model", "", "two-tier: planning model id (read/search tools, no write; default: the configured escalation model)")
 	editorModel := fs.String("editor-model", "", "two-tier: edit model id (executes the plan with the write tools your --allow-* flags granted; default: the configured model)")
@@ -323,7 +343,7 @@ func main() {
 	loop := built.Loop
 	// Resolve the profile BEFORE any network work: a typo'd --profile must be
 	// a fast usage error, not one paid for after a possible cold model start.
-	prof, err := agent.LookupProfile(*profile)
+	prof, err := agent.LookupProfile(resolveProfileName(*profile, *twoTier, cfg))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(2)
@@ -371,7 +391,15 @@ func main() {
 	// invariant in WithProfile) + add a tuned prompt and few-shot exemplars.
 	loop.WithProfile(prof)
 	if prof.Name != "general" {
-		fmt.Fprintf(os.Stderr, "[local-agent] profile=%s (tools narrowed to %d; %d exemplars)\n", prof.Name, len(prof.Tools), len(prof.Exemplars))
+		// Name the SOURCE: a profile the operator did not type came from the box's
+		// config, and silently changing which tools a run advertises is exactly the
+		// kind of thing that should never be invisible.
+		src := "--profile"
+		if strings.TrimSpace(*profile) == "" {
+			src = "config agent_profile"
+		}
+		fmt.Fprintf(os.Stderr, "[local-agent] profile=%s via %s (tools narrowed to %d; %d exemplars)\n",
+			prof.Name, src, len(prof.Tools), len(prof.Exemplars))
 	}
 
 	// Server drive mode: expose the loop as an OpenAI-compatible HTTP endpoint so a
