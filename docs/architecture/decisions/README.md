@@ -32,6 +32,7 @@ code, treat everything else as background.
 | [0020](0020-residency-is-declared-with-matrix.md) | Accepted | Residency is declared with `matrix:`, not `groups:` |
 | [0021](0021-one-renderer-the-installers-are-wrappers.md) | Accepted | One renderer: the installers are wrappers, not renderers |
 | [0022](0022-escalation-repacks-from-the-original.md) | Accepted | The escalation boundary repacks from the original; the cache key is the logical request |
+| [0023](0023-agent-lane-tailnet-auth-and-locality.md) | Accepted | The agent lane is tailnet-only, bearer-gated, quality-first-placed, and hop-limited |
 
 
 ## Lifecycle

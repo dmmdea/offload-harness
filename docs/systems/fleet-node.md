@@ -13,11 +13,13 @@ This document explains the behavior. For running a node, see [../FLEET-NODE.md](
 - What happens when the same job is dispatched twice?
 - Where do the advertised VRAM footprints come from, and how much do I trust them?
 - Why does health return 503 sometimes?
+- What does an `agent` job carry over the wire, what comes back, and who needs the token?
 
 ## Scope
 
 The HTTP contract surface, the job state machine and its idempotency semantics, VRAM sampling,
-footprint measurement and persistence, and node startup and drain.
+footprint measurement and persistence, node startup and drain, and the agent task's wire
+contract and auth.
 
 ## Non-scope
 
@@ -163,12 +165,21 @@ implications.
 3. Advertised `vram_peak_gb` is never zero or negative.
 4. Health answers 503 rather than serving a stale snapshot.
 5. The node refuses to start without a working GPU memory source.
+6. An agent dispatch on a non-loopback listener with no `fleet_auth_token` is refused (403), and
+   `agent` is withheld from the advertised `supported_task_types`.
+7. An agent defer is a `done` job carrying `deferred: true`, never an `error` job.
+8. No transcript crosses the fleet wire — the agent result envelope has no field for one.
 
 ## Security and privacy notes
 
-The contract is unauthenticated and assumes a trusted network — in practice a tailnet. That
-assumption is acknowledged by the explicit `--listen-trusted-network` flag. Node identity defaults to
-the hostname, so operator documentation uses placeholders rather than real names.
+The **media** contract is unauthenticated and assumes a trusted network — in practice a tailnet.
+That assumption is acknowledged by the explicit `--listen-trusted-network` flag. Since 0.63.0
+the **agent lane** is the deliberate exception: bearer-gated when `fleet_auth_token` is set,
+refused outright beyond loopback without one, because it executes caller-supplied agent
+contracts rather than renders (see [The agent task](#the-agent-task-task_type-agent) and
+[ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)). Node
+identity defaults to the hostname, so operator documentation uses placeholders rather than real
+names.
 
 ## Observability and debugging
 
@@ -185,7 +196,10 @@ the hostname, so operator documentation uses placeholders rather than real names
 
 `internal/fleetnode/` covers the health golden shape and its 503 paths, the dispatch rejection matrix,
 both duplicate-dispatch cases, the job state machine, footprint padding/merge/persistence, and the
-PDH instance parser. `fleet_verbs_test.go` covers parameter resolution and the bind guard.
+PDH instance parser. `auth_test.go` pins the agent-lane auth matrix and the media lane's tokenless
+bypass; `tasks_agent_test.go` the advertisement gate and contract materialization;
+`internal/pipeline/agenttask_test.go` the defer shapes over a fake chat client.
+`fleet_verbs_test.go` covers parameter resolution and the bind guard.
 
 ## Common pitfalls
 
@@ -282,11 +296,153 @@ reclaim capacity while holding nothing.
 `harness_version` ships in the same payload — node/repo drift used to be found by hand,
 and a node several releases behind gets debugged against known-fixed bugs.
 
+## The agent task (`task_type: "agent"`)
+
+Since 0.63.0 a node can execute a **delegation contract**: a self-contained sub-agent task it
+runs with its own local `agent.Build` loop — read-only over the contract's materialized context
+docs, no write/run/fetch/github capability, no delegate tool — and answers with a versioned
+result. Decisions and rationale:
+[ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md). The
+delegator side (placement gate, acceptance evaluation, the `agent_delegate`/`delegate`
+surfaces) lives in `internal/delegate` and is summarized in
+[coding-agent.md](coding-agent.md#delegation-surfaces).
+
+The task is advertised only when all three hold (`agentTaskConfigured`): `fleet_agent_enabled`
+is true (explicit operator opt-in — default false, and the health payload is byte-identical to
+a pre-0.63 node when off, pinned by test), an agent seat resolves (config `agent_model`, else
+the workhorse `model`), and the lane is safely reachable (loopback listener, or
+`fleet_auth_token` set).
+
+### Contract wire shape (`core.AgentContract`)
+
+The dispatch envelope's `payload` for an agent job is one contract. The reader is **tolerant on
+unknown fields** — nodes deploy staggered, and a strict decoder would make every additive field
+a flag-day upgrade — while `schema_version` skew and the size/count caps are strict. Every
+decode error is an ack-time 400 with the decoder's reason.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schema_version` | int | Must be `1`. Any other version is refused at decode — a mismatched peer defers loudly rather than half-understanding a contract. |
+| `goal` | string | Required. The self-contained task; the sub-agent sees only this plus the context docs. |
+| `context` | `[{name, text}]` | Inline documents: ≤ 16 docs, ≤ 256 KiB total (name+text bytes — a transport bound, not a context-fit promise). Each `name` must be a flat filename (no separators, colons, NUL, or `.`/`..`; duplicates rejected) because it becomes a file under the job's context dir. |
+| `output_schema` | object | JSON Schema for the structured result. Must yield at least one grammar-compilable property — a `properties` map of string / number / integer / boolean / string-array / enum fields. **Required for remote execution**: without it the dispatch is refused at ack, because the delegator would have no mechanical check before merging. |
+| `acceptance` | `[string]` | Machine-checkable checks, parsed at validation and **evaluated by the delegator**, never the node: `contains:<s>`, `not_contains:<s>`, `regex:<re>`, `min_items:<field>:<n>` (n ≥ 1), `nonempty:<field>`. Unfalsifiable shapes (empty substrings, a zero minimum) are parse errors. Text verbs read `output`, falling back to the raw `structured` bytes when `output` is empty; field verbs require `structured` and fail closed without it. |
+| `profile` | string | Agent task profile; empty = `research`. An unknown name defers loudly, naming the valid set. |
+| `max_steps` | int | Loop step budget. Default 12, clamped to 12 — an over-ask is clamped, not rejected. |
+| `timeout_sec` | int | Wall ceiling, enforced node-side as a context deadline over probe + build + loop + re-pack. Default 300, clamped to 900. |
+| `depth` | int | **Advisory on the wire**: the node derives `max(1, depth)` for anything that arrives over the fleet wire, so a wire claim of "origin" is never trusted. The delegator's placement gate separately requires the requester's depth to be 0 (hop limit 1). |
+
+Context docs are materialized to a job-scoped dir under `pipeline-jobs/` (the same
+sweep-at-startup discipline as pipeline jobs) and removed when the job ends.
+
+### Result wire shape (`core.AgentWireResult`)
+
+The **only** thing that crosses back — the remote transcript has no field to travel in, so
+remote reasoning is quarantined from the caller's context by construction.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schema_version` | int | `1`. |
+| `node_id` | string | Executing node (`fleet_node_id`, else the OS hostname). |
+| `seat` | string | The resolved planner model that ran the loop. |
+| `output` | string | The loop's final assistant text. Stays populated even when the structured re-pack failed, so the delegator's text-verb acceptance checks can still read the answer. |
+| `structured` | object | Present iff `output_schema` was given AND the re-pack validated: after the loop, one grammar-constrained completion on the same seat re-packs `output` into the schema, with one retry before deferring. |
+| `steps` | int | Steps consumed. |
+| `stop_reason` | string | The loop's stop reason. |
+| `deferred` | bool | True = the node ran and honestly could not complete the contract. **A defer is a success shape at the job level**: the job lands `done`, never `error` — `error` is reserved for internal wiring bugs (mirrors the cascade's defer semantics). |
+| `reason` | string | Why it deferred (shapes below). |
+| `wall_ms` | int | Node-observed wall time. |
+| `tokens_out` | int | Re-pack completion tokens, when a structured result was produced. |
+
+### Defer shapes
+
+Each is a distinct, stable string so a delegator (and the delegation ledger) can key on it:
+
+- `no agent seat resolvable (agent_model and model both empty)`
+- `agent seat "…" is not in the endpoint's served roster` — a *positive* roster miss; an
+  unreachable or empty roster proceeds instead, letting the loop's first call surface the real
+  transport error
+- `building agent: …` / `agent loop: …` — build or planner failure
+- an unknown-profile message naming the valid profiles
+- `wall timeout after <N>s` — the `timeout_sec` deadline fired (its own shape, so the delegator
+  can size future contracts off it)
+- `step budget exhausted (<n> steps)` — the loop burned `max_steps` with no final answer;
+  `output` is empty on this path, so there is nothing to re-pack
+- `output failed schema: …` — the re-pack failed validation after its one retry; the prefix is
+  stable, the detail after the colon is for the operator
+
+Two more shapes originate on the **delegator**, not the node: `poll deadline` (below) and
+`route=remote: no eligible remote node (gate: enabled+resident+ctx-fit+schema)` (a forced
+remote route with nothing eligible defers loudly rather than silently falling local).
+
+### Auth (v1 scope: the agent lane only)
+
+`fleet_auth_token`, when set, bearer-gates exactly two things: agent dispatches, and
+`/fleet/jobs/{id}` polls of jobs an agent dispatch created (the job record carries an agent
+marker, written atomically at creation and evicted with the record). The comparison hashes both
+sides with SHA-256 before a constant-time compare, making it length-independent. Wrong or
+missing credential → `401` with the standard error envelope (`"error": "unauthorized"`),
+checked immediately after the body decode and **before** the job_id validation and the re-ack
+lookup, so an unauthorized caller can neither probe the field validators nor learn job
+existence.
+
+With **no token configured**, a non-loopback listener refuses agent dispatches outright —
+`403 agent lane requires fleet_auth_token on a non-loopback listener` — and
+`agentTaskConfigured` withholds `agent` from the advertised `supported_task_types` too, so a
+task-list-driven dispatcher never learns the capability just to eat a 403. (The four `agent_*`
+health fields below key off `fleet_agent_enabled` alone.) Loopback with no token is the
+local-MCP trust boundary and stays open. Every media path — media dispatch, media job polls, `/fleet/media/*`, health — ignores
+the token entirely, so already-deployed tokenless media clients keep working byte-identically
+(pinned by test); whole-fleet enforcement is a recorded follow-up
+([ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)).
+
+### Health advertisement — four agent fields, fail-closed residency
+
+All four are additive and `omitempty` (`schema_version` stays 1; a lane-off node emits a
+byte-identical payload), populated only when `fleet_agent_enabled` is true:
+
+| Field | Meaning |
+|---|---|
+| `agent_enabled` | The operator opted this node into the lane. |
+| `agent_seat` | The resolved planner seat (`agent_model`, else the workhorse). |
+| `agent_ctx_tokens` | The seat's serving ceiling, **from config** (`agent_ctx_tokens`) — never probed on the health cadence, because the live-window probe can cold-start a multi-GB model. `0` = omitted = "ceiling unknown", which the delegator's gate reads as never-fits. |
+| `agent_seat_resident` | Roster-**verified**: a cached probe of llama-swap's `/v1/models` (alias-aware) saw the seat. The cache refreshes in the background at most once per 30 s; the handler never blocks on llama-swap. |
+
+Residency **fails closed** twice over: until the first probe lands the answer is `false`, and a
+probe *failure* publishes `false` rather than keeping the last good answer — advertising a seat
+off a stale success while llama-swap is down would route agent work at a node that cannot run
+it, whereas `false` only costs a conservative local placement. The failure is still cached for
+a full TTL window, so a dead endpoint is probed once per window, not hammered per request.
+
+### Job protocol (delegator ↔ node)
+
+- The **delegator mints the job id**: `agd-` + 24 hex chars from `crypto/rand`, minted before
+  placement so even a local run correlates its telemetry.
+- Dispatch is the normal envelope (`job_id`, `task_type: "agent"`, `payload` = the contract);
+  the ack is the standard `202`. A transport-level failure is retried **once with the same id**
+  — if the first POST actually landed, the store's duplicate path re-acks `202` idempotently,
+  so the retry can never buy a second run (the same 202-reack semantics the media lane has
+  always had). A non-202 answer is a refusal, not doubt, and is surfaced without retry.
+- The delegator polls `/fleet/jobs/{id}` every 3 s. A poll `404` is the lost-ack shape (the
+  node never saw, or evicted, the job): re-dispatch the same id, bounded at 2 re-dispatches — a
+  node that keeps forgetting the job is broken, and re-POSTing forever would re-run the
+  contract on every node restart.
+- **Poll deadline** = the contract's `timeout_sec` + 60 s grace. Past it the delegator marks
+  the subtask deferred (reason `poll deadline`) and stops polling — the node may still finish
+  server-side; the job id in the telemetry line lets an operator reconcile by hand.
+
 ## Source map
 
 - [`internal/fleetnode/server.go`](../../internal/fleetnode/server.go) — routes, payloads, duplicate
-  semantics
-- [`internal/fleetnode/jobs.go`](../../internal/fleetnode/jobs.go) — state machine, eviction, drain
+  semantics, agent-lane auth gates, agent health advertisement
+- [`internal/fleetnode/auth.go`](../../internal/fleetnode/auth.go) — the bearer credential check
+- [`internal/fleetnode/jobs.go`](../../internal/fleetnode/jobs.go) — state machine, eviction, drain,
+  the agent job marker
+- [`internal/fleetnode/tasks.go`](../../internal/fleetnode/tasks.go) — `agentTaskConfigured`,
+  `buildAgentRun` (contract decode, depth derivation, context materialization)
+- [`internal/core/agentwire.go`](../../internal/core/agentwire.go) — contract, result, acceptance DSL
+- [`internal/pipeline/agenttask.go`](../../internal/pipeline/agenttask.go) — node-side execution,
+  structured re-pack, defer shapes
 - [`internal/fleetnode/footprints.go`](../../internal/fleetnode/footprints.go) — padding, merge,
   persistence
 - [`internal/fleetnode/vram.go`](../../internal/fleetnode/vram.go),

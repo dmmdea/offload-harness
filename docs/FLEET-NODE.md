@@ -3,8 +3,10 @@
 Operator guide for running this box as a **fleet node**: a small HTTP server that lets the
 Fleet Dispatcher send GPU render jobs (image / video / audio / stt / run-graph) to this
 machine through the same pipeline, GPU lock, and zero-always-warm lifecycle every local call
-uses. Wire protocol: fleet-dispatcher `CONTRACT.md` **v2** — three endpoints, JSON
-everywhere, GiB everywhere, every failure a non-2xx.
+uses — and, since 0.63.0, lets a delegator send **agent** jobs (self-contained sub-agent
+contracts, see [The agent task](#the-agent-task-task_type-agent) below). Wire protocol:
+fleet-dispatcher `CONTRACT.md` **v2** — three endpoints, JSON everywhere, GiB everywhere,
+every failure a non-2xx.
 
 | Endpoint | What it returns |
 |---|---|
@@ -122,12 +124,17 @@ source, which has no `gpu_devices[]` to match against. Implementation:
 | `fleet_node_id` | `""` | Node id in `/fleet/health`. Empty = the OS hostname at serve time (`--node-id` overrides). |
 | `fleet_sampler` | `auto` | Per-render VRAM footprint source: `auto` \| `pdh` \| `pdh-shared` \| `global` (see [Sampler modes](#sampler-modes)). |
 | `primary_gpu_uuid` | `""` | Pins the headline `vram_total_gb`/`vram_free_gb` to one card by nvidia-smi UUID, overriding the largest-total rule (see [`primary_gpu_uuid`](#primary_gpu_uuid--pin-the-headline-device-deterministically) above). Empty = unchanged largest-total behavior. |
+| `fleet_agent_enabled` | `false` | Opts this node into executing fleet **agent** jobs (see [The agent task](#the-agent-task-task_type-agent)). Explicit opt-in: the binding (an agent seat) exists on every tier, the worker ROLE is a per-box decision. Off = the task is not advertised and health is byte-identical to a pre-0.63 node. |
+| `fleet_auth_token` | `""` | Bearer token for the **agent lane only** (agent dispatches + polls of agent-created jobs; media stays tokenless in v1). Same value on every node and in the delegator's config. Empty + non-loopback listener = agent dispatches refused 403. |
+| `agent_ctx_tokens` | `0` | The agent seat's served context window, advertised in health for the delegator's placement arithmetic. From config, never probed (a live probe could cold-start a multi-GB model on the health cadence). `0` = not advertised = this node is never chosen for remote agent work. |
 
 ## Binding guidance (read before exposing anything)
 
-The fleet endpoints are **unauthenticated by design** (matching the dispatcher's posture):
-anyone who can reach them can run renders on this GPU. The same rules as
-`local-agent --serve` apply, enforced by the same shared guard:
+The **media** endpoints are unauthenticated by design (matching the dispatcher's posture):
+anyone who can reach them can run renders on this GPU. The **agent lane is the exception**
+since 0.63.0 — it executes caller-supplied agent contracts, so beyond loopback it requires
+`fleet_auth_token` (details in [The agent task](#the-agent-task-task_type-agent)). The same
+rules as `local-agent --serve` apply, enforced by the same shared guard:
 
 - **Loopback is the default** and needs no flag.
 - A non-loopback `--listen` is **refused** unless you pass `--listen-trusted-network`
@@ -231,6 +238,7 @@ is not advertised, so the dispatcher can't send work the box would defer:
 | `stt` | `transcribe` | `stt_model` set | `whisper` (llama-swap-resident — no footprint sampling) |
 | `audio-gen` | `generate_audio` | voice or music script set | `acestep` (music) / `chatterbox` (voice) |
 | `run-graph` | `run_graph` | `run_graph_script` set | payload-declared `model_family`, else `comfy-graph` |
+| `agent` | `agent` | `fleet_agent_enabled` **and** a resolvable agent seat **and** (loopback listener **or** `fleet_auth_token` set) | none — llama-swap-resident text work, no render footprint |
 | *(config-driven)* | `pipeline-job` | a valid `pipelines.<task_type>` entry (see below) | none — sizing rides on the task-scoped `Record("", "", task_type, peak)` entry |
 
 run-graph payloads carry `graph` and `manifest` as **raw nested JSON** (no base64) and are
@@ -368,6 +376,87 @@ verbatim; otherwise the generic exec error (including a timeout-kill) is used.
   every directory present at that instant is orphaned by definition (this process has not
   accepted a single dispatch yet) — and logs how many it removed.
 
+## The agent task (`task_type: "agent"`)
+
+An **agent** job carries a self-contained delegation contract; the node runs it with its own
+local read-only agent loop (planner = this box's `agent_model`, falling back to the workhorse;
+no write/run/fetch/github tools, no delegate tool) over the contract's inlined context docs,
+then returns a versioned result. Full behavior:
+[systems/fleet-node.md](systems/fleet-node.md#the-agent-task-task_type-agent); the decisions:
+[ADR 0023](architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md). Enable recipe
+for both roles: [OPERATOR-GUIDE.md](OPERATOR-GUIDE.md#delegate-subtasks-across-fleet-nodes-agent_delegate--delegate).
+
+### Dispatch payload — the contract
+
+The envelope is the normal `{"job_id", "task_type": "agent", "payload": {…}}`; the payload is
+one contract. Unknown payload fields are **ignored** (staggered node deploys must not flag-day);
+`schema_version` skew and the size caps refuse loudly at ack (400).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schema_version` | int | must be `1`; anything else is a 400 at ack |
+| `goal` | string | **required** — the self-contained task; the sub-agent sees only this + `context` |
+| `context` | `[{name, text}]` | inline docs, ≤ 16, ≤ 256 KiB total; `name` = flat filename (no separators/colons, no duplicates) — each becomes a file the sub-agent can read |
+| `output_schema` | object | JSON Schema with a `properties` map of string/number/integer/boolean/string-array/enum fields. **Required** — an agent dispatch without one is refused at ack |
+| `acceptance` | `[string]` | delegator-evaluated checks: `contains:<s>` \| `not_contains:<s>` \| `regex:<re>` \| `min_items:<field>:<n>` \| `nonempty:<field>`; malformed or unfalsifiable checks are a 400 |
+| `profile` | string | agent task profile, default `research`; unknown names defer naming the valid set |
+| `max_steps` | int | default 12, clamped to 12 |
+| `timeout_sec` | int | default 300, clamped to 900; enforced node-side as a hard wall deadline |
+| `depth` | int | advisory — the node executes anything off the wire at `max(1, depth)`, so a wire "origin" claim is never trusted |
+
+### Job result — what `data` holds on `done`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schema_version` | int | `1` |
+| `node_id` | string | this node (`fleet_node_id`, else hostname) |
+| `seat` | string | the planner model that ran |
+| `output` | string | final assistant text (kept even when the structured re-pack failed) |
+| `structured` | object | present iff `output_schema` given AND the post-loop grammar re-pack validated (one retry) |
+| `steps` / `stop_reason` | int / string | loop telemetry |
+| `deferred` | bool | the node ran and could not complete the contract — **still a `done` job**, never `error` (`error` = internal wiring bug only) |
+| `reason` | string | the defer shape: seat unserved on the roster, `wall timeout after <N>s`, `step budget exhausted (…)`, `output failed schema: …`, build/loop/profile errors |
+| `wall_ms` / `tokens_out` | int | node wall clock / re-pack completion tokens |
+
+No transcript field exists — remote reasoning never crosses the wire.
+
+### Auth — the one token-gated lane
+
+- `fleet_auth_token` set → agent dispatches **and** polls of agent-created jobs require
+  `Authorization: Bearer <token>` (constant-time compared); wrong/missing → `401` with the
+  standard error envelope (`"error": "unauthorized"`), answered before the job_id validation
+  and the known-job lookup, so an unauthorized caller can neither probe field validation nor
+  learn job state.
+- Token empty + non-loopback listener → agent dispatches are refused
+  `403 agent lane requires fleet_auth_token on a non-loopback listener`, and `agent` is
+  withheld from the advertised `supported_task_types`. Loopback + no token stays open (same
+  trust boundary as the local MCP surface).
+- **Media dispatch, media job polls, `/fleet/media/*`, and health never check the token** —
+  deployed tokenless media clients keep working byte-identically. Whole-fleet enforcement is a
+  recorded follow-up for a coordinated whole-fleet deploy window (ADR 0023).
+
+### Health advertisement (only when `fleet_agent_enabled`)
+
+```json
+"agent_enabled": true, "agent_seat": "offload-e4b",
+"agent_ctx_tokens": 16384, "agent_seat_resident": true
+```
+
+`agent_ctx_tokens` comes from config (`0` = omitted = the delegator never places here).
+`agent_seat_resident` is a cached, alias-aware roster probe refreshed in the background at most
+once per 30 s — **fail-closed**: `false` until the first probe lands, and `false` again on any
+probe failure (a stale "resident" while llama-swap is down would route work at a node that
+cannot run it; `false` only costs a conservative local placement).
+
+### Job ids and polling (what a delegator does)
+
+Agent job ids are delegator-minted (`agd-` + 24 random hex chars). Dispatch doubt is retried
+once under the **same id** — the store re-acks `202` idempotently, so a lost ack never buys a
+second run. The delegator polls every 3 s; a poll `404` triggers a bounded re-dispatch of the
+same id (max 2); past `timeout_sec` + 60 s grace it marks the subtask deferred
+(`poll deadline`) and stops — the node may still finish server-side, and the job id in the
+delegation log lets you reconcile by hand.
+
 ## Known limits (v1)
 
 - Jobs are **in-memory**: a node restart loses in-flight jobs (the dispatcher's failure
@@ -381,10 +470,15 @@ verbatim; otherwise the generic exec error (including a timeout-kill) is used.
 - **`stt` has no measured footprint** (it's llama-swap-resident, not a ComfyUI render), so
   stt jobs route only with caller-supplied `params_b`.
 - **The dispatch envelope rejects unknown fields** (strict decode): a future dispatcher
-  field addition needs a node upgrade first.
+  field addition needs a node upgrade first. (The agent contract **inside** the envelope is
+  the deliberate exception — its payload decoder ignores unknown fields so staggered node
+  deploys interoperate; version skew is caught by its explicit `schema_version` instead.)
 - **Payload paths (`out` / `out_dir` / `still` / `audio`) are node-local writable paths**,
   taken as given. That's the tailnet-trust posture restated: anyone who can dispatch can
   already run renders; don't extend reach beyond the tailnet.
 - `priority` is accepted and ignored (contract-reserved).
-- No auth — the trusted-network posture above is the boundary; revisit if the fleet ever
-  leaves the tailnet.
+- **Media lanes carry no auth** — the trusted-network posture above is the boundary; revisit
+  if the fleet ever leaves the tailnet. The agent lane is bearer-gated (see
+  [The agent task](#the-agent-task-task_type-agent)); its accepted v1 weaknesses — one shared
+  token, no rotation — are recorded in
+  [ADR 0023](architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md).

@@ -1,0 +1,24 @@
+{
+  "goal": "Digest the benchmark log. Identify the best-performing configuration by the log's own primary metric and report its name and headline number. List every configuration the log shows regressing against its stated baseline, one string each: the configuration name, the metric, and the delta. Close with a two-sentence summary an operator can act on. Use only numbers that appear in the log.",
+  "context_paths": [
+    "bench/REPLACE-latest-run.log"
+  ],
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "best_config": { "type": "string" },
+      "best_value": { "type": "number" },
+      "regressions": { "type": "array", "items": { "type": "string" } },
+      "summary": { "type": "string" }
+    },
+    "required": ["best_config", "best_value", "summary"]
+  },
+  "acceptance": [
+    "nonempty:best_config",
+    "nonempty:summary",
+    "regex:[0-9]"
+  ],
+  "profile": "research",
+  "max_steps": 10,
+  "timeout_sec": 300
+}

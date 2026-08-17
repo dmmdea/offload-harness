@@ -572,6 +572,125 @@ over the projected table when they differ.
 | agent stops with `stop=step-cap` / loops | Raise `--max-steps`, or the model is stuck — lower `--max-same-tool`, narrow the prompt (edit+upload shape). |
 | GitHub tool refuses | `$GITHUB_TOKEN` unset or under-scoped, or `$GITHUB_REPO` unset. See §6. |
 
+### Delegate subtasks across fleet nodes (`agent_delegate` / `delegate`)
+
+Fan self-contained sub-agent contracts out to this box or to fleet nodes on your tailnet
+(never cloud — [ADR 0023](architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)).
+Placement is **quality-first**: an idle local box always runs the work; a remote node is used
+only when the local GPU is busy *and* the node passes the capability gate. Wire details:
+`docs/FLEET-NODE.md`. Template contracts to start from: [`contracts/`](../contracts/README.md).
+
+**Enable — worker node** (the box that will *execute* contracts), in its
+`~/.local-offload/config.json`:
+
+```json
+{
+  "fleet_agent_enabled": true,
+  "fleet_auth_token": "<one shared secret, same on every node>",
+  "agent_ctx_tokens": 16384
+}
+```
+
+`agent_ctx_tokens` is the tier's served agent-seat window (the installer records it in
+`installed.json`); `0` means the node advertises no ceiling and is **never** chosen for remote
+agent work. Then serve beyond loopback on the machine's Tailscale address:
+
+```powershell
+local-offload fleet-serve --listen <tailscale-ip>:18811 --listen-trusted-network
+curl http://<tailscale-ip>:18811/fleet/health
+# ... "agent_enabled":true,"agent_seat":"offload-e4b","agent_ctx_tokens":16384,"agent_seat_resident":true ...
+```
+
+`agent_seat_resident` starts `false` (the roster probe is cached, background-refreshed, and
+fail-closed) — give it one health request plus a few seconds before concluding anything.
+
+**Enable — delegator** (the box that *places* contracts), in its config:
+
+```json
+{
+  "agent_delegation_enabled": true,
+  "fleet_auth_token": "<the same shared secret>"
+}
+```
+
+That registers the MCP `agent_delegate` tool (tools/list is byte-identical when off) and
+unlocks the CLI verb. Remote nodes are named per call, not in config: `--remote` (repeatable)
+on the CLI, `remotes: [...]` on the MCP tool — tailnet URLs only (loopback, `100.64.0.0/10`,
+a dotless MagicDNS name, or a host under your own tailnet DNS zone; anything else is refused
+by name).
+
+**Context budget — read this before writing a contract.** The 256 KiB wire cap is a transport
+bound only; what actually decides remote placement is the gate's arithmetic:
+`ceil(chars/3)` over goal + context docs + schema + acceptance, **plus a 3072-token reserve**
+(system prompt + tool specs + per-step transcript growth × the 12-step cap), must fit the
+node's advertised `agent_ctx_tokens`. The `chars/3` estimate is a deliberately conservative
+upper bound (v1 has no remote tokenizer to ask; typical prose runs ~4 chars/token), so the
+practical budget is smaller than the raw window suggests:
+
+| Advertised `agent_ctx_tokens` | Estimate budget after the reserve | ≈ contract text that fits | ≈ real prose tokens |
+|---|---|---|---|
+| 4096 | 1024 | ~3 KiB | ~0.8k — goal + a snippet, no real docs |
+| 8192 | 5120 | ~15 KiB | **~2–4k** |
+| 16384 | 13312 | ~39 KiB | ~10k |
+| 32768 | 29696 | ~87 KiB | ~20k+ |
+
+At an 8k seat, budget **~2–4k tokens of actual document content** per contract; split bigger
+inputs across subtasks. A contract that does not fit is not an error — it places locally
+(route `auto`) or defers (route `remote`), and the placement reason says why.
+
+**Worked example** (MCP `agent_delegate`; the CLI takes the identical subtask object as
+`--contract file.json`):
+
+```json
+{
+  "subtasks": [{
+    "goal": "Read the two release-notes docs and produce a migration digest: list every config key added between them, and summarize the upgrade in two sentences.",
+    "context_paths": ["notes/release-a.md", "notes/release-b.md"],
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "added_keys": {"type": "array", "items": {"type": "string"}},
+        "summary": {"type": "string"}
+      },
+      "required": ["added_keys", "summary"]
+    },
+    "acceptance": ["min_items:added_keys:1", "nonempty:summary", "not_contains:TODO"]
+  }],
+  "route": "auto",
+  "read_root": "/abs/path/to/project",
+  "remotes": ["http://<node-b>:18811"]
+}
+```
+
+`context_paths` are read and inlined **by the delegator**, confined to `read_root`
+(≤ 128 KiB per file) — your session's context never pays for them, and the wire contract stays
+self-contained (the remote node never reaches back into your filesystem). `acceptance` is
+evaluated by the **delegator** after the result returns: a schema-valid result that fails a
+check comes back `failed_verification`, never a success. Read the response's `summary` block
+first — `{succeeded, deferred, failed_verification, failed}` — eight quiet defers are a loud
+outcome, not eight green jobs.
+
+CLI equivalent:
+
+```powershell
+local-offload delegate --contract contracts/research-digest.json --route auto --remote http://<node-b>:18811
+```
+
+Exit 0 covers defers and failed verification (the JSON says what happened); non-zero is
+reserved for transport/config failures. Every subtask also writes a ledger row
+(`task=agent_delegate` in `local-offload ledger`) and a full contract+result+verdict line
+under the harness base dir at `delegation-log/YYYY-MM-DD.jsonl`.
+
+| Failure | Fix |
+|---|---|
+| `403 agent lane requires fleet_auth_token on a non-loopback listener` | The worker is bound beyond loopback with no token. Set `fleet_auth_token` (same value) on both sides and restart `fleet-serve`. |
+| `401 unauthorized` on dispatch or poll | Token mismatch between delegator and worker configs. |
+| `agent delegation is disabled on this box` | Set `"agent_delegation_enabled": true` in the **delegator's** config. |
+| Everything places local although a remote exists | Usually correct — idle-local always wins. Force `--route remote` to surface the gate's verdict: the node must advertise `agent_enabled` + `agent_seat_resident`, the contract must carry `output_schema`, and the ctx arithmetic above must pass. |
+| `remote "…": hostname … not allowed` | Non-tailnet URL. Loopback, `100.64.0.0/10`, a dotless MagicDNS name, or your own tailnet-zone hostname only. |
+| deferred `poll deadline` | The node outran `timeout_sec` + 60 s grace (or died mid-run). Check the worker's serve log; the job id in `delegation-log/` reconciles it. |
+| deferred `output failed schema: …` | The schema was too ambitious for the seat. Flatten it — a `properties` map of string / number / integer / boolean / string-array / enum fields is the supported subset. |
+
 ---
 
 ## 5. Add / replace a model in llama-swap.yaml

@@ -351,6 +351,31 @@ re-runs on the result — residual PII refuses the harvest — and the corpus is
 destination. Methodology harvested from the OmniRoute compression service's
 eval approach (MIT); metrics and signals are this harness's own.
 
+## Delegation surfaces
+
+Since 0.63.0 the same loop can be driven by a **delegation contract** — a self-contained
+`{goal, context docs, output_schema, acceptance}` unit placed on this box or on a fleet node
+over the operator's tailnet. Two surfaces exist, both delegator-side:
+
+- **MCP `agent_delegate`** — registration is gated on config `agent_delegation_enabled`, so
+  `tools/list` is byte-identical when the delegator role is off. Fans out 1–8 subtasks with
+  bounded concurrency; placement is quality-first (an idle local box always runs the work);
+  results are verified against the contract's acceptance DSL **by the delegator** before
+  anything counts as done.
+- **CLI `local-offload delegate --contract file.json`** — the same intake, engine, and response
+  JSON, for testing and scripts (template contracts: [`contracts/`](../../contracts/README.md)).
+
+A **local** placement is not a special case: it runs the identical `Pipeline.Run` route a fleet
+node runs (`pipeline.RunAgentContract` → the `agent` task → this loop, read-only over the
+contract's materialized context docs, `research` profile by default, no
+write/run/fetch/github tools), so local and remote results share one execution semantics.
+
+An in-loop `delegate_subtask` tool — the loop delegating onward itself — is **deliberately
+parked to v2**; no delegate tool is registered for any caller today, which is what makes the
+hop limit structural. Contract wire shape, auth, and placement:
+[fleet-node.md](fleet-node.md#the-agent-task-task_type-agent) and
+[ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md).
+
 ## Data and state
 
 - **Audit trail** — append-only JSONL, mode `0600`, at `~/.local-offload/agent-audit.jsonl` by
@@ -473,6 +498,10 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 - [`internal/agent/writetools.go`](../../internal/agent/writetools.go) — `os.Root` scoping
 - [`internal/agent/builder.go`](../../internal/agent/builder.go) — capability grants, audit-path check
 - [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go), [`internal/compeval/`](../../internal/compeval/)
+- [`internal/delegate/`](../../internal/delegate/) — delegator-side placement, intake, execution
+  engine, acceptance evaluation
+- [`internal/pipeline/agenttask.go`](../../internal/pipeline/agenttask.go) — contract execution
+  through this loop (local and fleet placements alike)
 - [`internal/sandbox/`](../../internal/sandbox/) — platform cages
 - [`cmd/local-agent/`](../../cmd/local-agent/) — CLI and server
 

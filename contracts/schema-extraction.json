@@ -1,0 +1,21 @@
+{
+  "goal": "Extract every configuration key the reference document defines: an identifier documented with a default value or an explicit type. Return the key names exactly as written, in document order, and their count. Do not invent keys the document does not contain, and do not include prose headings or example values.",
+  "context_paths": [
+    "docs/REPLACE-config-reference.md"
+  ],
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "keys": { "type": "array", "items": { "type": "string" } },
+      "key_count": { "type": "integer" }
+    },
+    "required": ["keys", "key_count"]
+  },
+  "acceptance": [
+    "min_items:keys:1",
+    "nonempty:key_count"
+  ],
+  "profile": "research",
+  "max_steps": 8,
+  "timeout_sec": 240
+}
