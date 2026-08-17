@@ -208,8 +208,10 @@ func TestRunTierRefusesAnEntryProducedByADifferentTier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tasks.Build: %v", err)
 	}
-	// Hand-seed the entry the CASCADE would write: same key RunTier computes when
-	// pinned to cfg.Model, but produced by the small tier.
+	// Seed an entry in RunTier's OWN keyspace carrying a different producer. The
+	// separate keyspace means production can no longer create this state — this
+	// asserts the guard still fails CLOSED against a hand-crafted or pre-0.63
+	// entry, which is why it is kept as defence in depth.
 	ck := cacheKeyForTier(req.Task, req.Input, tasks.StableParamsKey(req.Params), cfg.Model, built)
 	seeded, _ := json.Marshal(cacheVal{
 		Data:     json.RawMessage(`{"verdict":"STALE-FROM-ANOTHER-TIER","reason":"x"}`),

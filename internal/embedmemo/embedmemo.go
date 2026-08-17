@@ -153,13 +153,12 @@ type Memo struct {
 	// The atomics exist because the faults that matter most cannot be written at
 	// the moment they happen: a failed read or a failed write transaction is
 	// precisely when the store will not accept a counter update.
-	hits        atomic.Int64
-	misses      atomic.Int64
-	stores      atomic.Int64
-	errsDecode  atomic.Int64 // records that failed to decode (corrupt / wrong version)
-	errsRead    atomic.Int64 // View transactions that failed outright
-	errsWrite   atomic.Int64 // Update transactions that failed
-	dimMismatch atomic.Int64 // vectors whose dimension disagreed with the namespace
+	hits       atomic.Int64
+	misses     atomic.Int64
+	stores     atomic.Int64
+	errsDecode atomic.Int64 // records that failed to decode (corrupt / wrong version)
+	errsRead   atomic.Int64 // View transactions that failed outright
+	errsWrite  atomic.Int64 // Update transactions that failed
 
 	// statMu serialises Stats against Flush. Without it, Stats loads the session
 	// atomics, Flush swaps them to zero and commits, and Stats then adds the
@@ -372,11 +371,25 @@ func (m *Memo) dropCorrupt(k string) {
 			}
 		}
 		// A seq entry that outlives its vector would let the prune walk delete a
-		// key since legitimately re-stored. Deleting a key that is not there is a
-		// no-op in bbolt, which is the right behaviour for a header-less record
-		// (seq 0): pruneTx tolerates a dangling seq entry, so nothing is lost.
-		if sb != nil {
-			return sb.Delete(m.seqKey(seq))
+		// key since legitimately re-stored.
+		//
+		// VERIFY BEFORE DELETING. `seq` came out of a record decode() has already
+		// REJECTED, so the header is exactly the part of it that is not
+		// trustworthy — addressing the seq bucket with it can point at a
+		// DIFFERENT, LIVE record's entry. Deleting that strands the victim: it
+		// stays counted in mkCount but becomes unreachable by pruneTx (which can
+		// only walk vectors through the seq bucket), so it owns a cap slot
+		// permanently while every counter reports the store healthy and at cap.
+		// Confirmed reproducible; the documented trigger — a recVersion bump,
+		// where "EVERY record is corrupt" — would strand the whole namespace.
+		//
+		// If the entry does not point back at this key, leave it: pruneTx counts
+		// only vectors it actually removed, so a dangling entry costs one victim
+		// slot and nothing else.
+		if sb != nil && seq != 0 {
+			if string(sb.Get(m.seqKey(seq))) == k {
+				return sb.Delete(m.seqKey(seq))
+			}
 		}
 		return nil
 	}); err != nil {
@@ -422,7 +435,22 @@ func (m *Memo) put(k string, vec []float64) {
 			if _, ok := decode(existing); ok {
 				return nil // live and readable: nothing to do
 			}
+			// Same untrusted-header problem as dropCorrupt: reuse the slot ONLY if
+			// the seq bucket agrees it belongs to this key. Otherwise allocate a
+			// fresh slot — a second entry may then point at this key, which
+			// pruneTx tolerates (it counts vectors actually removed), whereas
+			// re-encoding a wrong slot number propagates the corruption into a
+			// record that is now decodable and therefore trusted.
 			seq := seqOfRecord(existing)
+			if seq == 0 || string(sb.Get(m.seqKey(seq))) != k {
+				seq = readCounter(mb, mkCounter+m.ns) + 1
+				if err := writeCounter(mb, mkCounter+m.ns, seq); err != nil {
+					return err
+				}
+				if err := sb.Put(m.seqKey(seq), []byte(k)); err != nil {
+					return err
+				}
+			}
 			if err := vb.Put([]byte(k), encode(seq, vec)); err != nil {
 				return err
 			}
@@ -483,14 +511,21 @@ func (m *Memo) pruneTx(vb, sb, mb *bolt.Bucket) error {
 	if n <= m.maxEntries {
 		return nil
 	}
-	// n comes off disk with no bound. A corrupt counter — the same corruption
-	// class dropCorrupt exists to handle for records — would otherwise reach the
+	// n comes off disk with no bound. A corrupt counter would otherwise reach the
 	// make() below with a multi-exabyte capacity and panic inside db.Update,
-	// which propagates out through Wrap and kills the process. That would break
-	// this package's own contract that every failure degrades to a live call.
-	if cap := m.maxEntries * 2; n > cap {
-		_ = m.bumpNS(mb, mkUnderflow, 1) // an impossible count is itself a fault
-		n = cap
+	// which propagates out through Wrap and kills the process — breaking this
+	// package's own contract that every failure degrades to a live call.
+	//
+	// Clamped SILENTLY on purpose. An earlier version counted this as a fault,
+	// but n > 2*maxEntries is not an impossible state: it is exactly what LOWERING
+	// embed_memo_max_entries produces, and that config edit then fabricated a
+	// permanent "underflow" fault on every subsequent put — nine of them from one
+	// legitimate change, reported forever by both surfaces. In a package whose
+	// whole thesis is that the instrument must never claim a fault that did not
+	// happen, manufacturing one is the worse error. Genuine bookkeeping
+	// violations are still counted, by bumpNS, where they are unambiguous.
+	if lim := m.maxEntries * 2; n > lim {
+		n = lim
 	}
 	target := m.maxEntries * 9 / 10
 	if target < 1 {
@@ -657,7 +692,6 @@ func (m *Memo) Stats() (Stats, error) {
 	s.ErrorsDecode += m.errsDecode.Load()
 	s.ErrorsRead += m.errsRead.Load()
 	s.ErrorsWrite += m.errsWrite.Load()
-	s.DimMismatches += m.dimMismatch.Load()
 	if err != nil {
 		return s, fmt.Errorf("embedmemo: read stats: %w", err)
 	}
@@ -686,8 +720,13 @@ func (m *Memo) Flush() error {
 	m.statMu.Lock()
 	defer m.statMu.Unlock()
 	h, mi := m.hits.Swap(0), m.misses.Swap(0)
-	ed, er, ew, dm := m.errsDecode.Swap(0), m.errsRead.Swap(0), m.errsWrite.Swap(0), m.dimMismatch.Swap(0)
-	if h == 0 && mi == 0 && ed == 0 && er == 0 && ew == 0 && dm == 0 {
+	ed, er, ew := m.errsDecode.Swap(0), m.errsRead.Swap(0), m.errsWrite.Swap(0)
+	// stores is bumped transactionally inside put, so mkStores is already
+	// authoritative — this only RESETS the session view. Without it, a periodic
+	// flush left session_hits meaning "since the last tick" while session_stores
+	// still meant "since process start", and both were published side by side.
+	m.stores.Store(0)
+	if h == 0 && mi == 0 && ed == 0 && er == 0 && ew == 0 {
 		return nil
 	}
 	err := m.db.Update(func(tx *bolt.Tx) error {
@@ -700,7 +739,7 @@ func (m *Memo) Flush() error {
 			n   int64
 		}{
 			{mkHits, h}, {mkMisses, mi},
-			{mkErrDecode, ed}, {mkErrRead, er}, {mkErrWrite, ew}, {mkDimMiss, dm},
+			{mkErrDecode, ed}, {mkErrRead, er}, {mkErrWrite, ew},
 		} {
 			if p.n == 0 {
 				continue
@@ -721,7 +760,6 @@ func (m *Memo) Flush() error {
 		m.errsDecode.Add(ed)
 		m.errsRead.Add(er)
 		m.errsWrite.Add(ew)
-		m.dimMismatch.Add(dm)
 		m.errsWrite.Add(1)
 		return err
 	}
@@ -836,12 +874,4 @@ func writeCounter(b *bolt.Bucket, name string, v int64) error {
 	buf := make([]byte, 8)
 	binary.BigEndian.PutUint64(buf, uint64(v))
 	return b.Put([]byte(name), buf)
-}
-
-func bump(b *bolt.Bucket, name string, delta int64) error {
-	n := readCounter(b, name) + delta
-	if n < 0 {
-		n = 0 // a count can never be negative; clamping beats persisting nonsense
-	}
-	return writeCounter(b, name, n)
 }

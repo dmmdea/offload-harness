@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -1630,6 +1631,13 @@ func runMCP(args []string) error {
 	err = mcpserver.New(p).Run(ctx, version)
 	stopSignals()
 	<-flushDone
+	// A cancelled context IS the clean shutdown here, not a failure. Returning it
+	// made main print "error: context canceled" and exit 1 on every SIGTERM, which
+	// a supervisor reads as a crash. runFleetServe — the precedent this signal
+	// handling was copied from — returns nil for exactly this reason.
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
 	return err
 }
 

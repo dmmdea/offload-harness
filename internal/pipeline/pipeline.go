@@ -3654,14 +3654,20 @@ func (p *Pipeline) RunTier(ctx context.Context, req core.Request, model string) 
 	if useCache {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
-			// cv.Model == model is the load-bearing clause, not a formality.
-			// Run keys on p.cfg.Model whatever tier answers, so its entries land on
-			// the SAME key this call computes whenever the pinned tier happens to be
-			// the primary model — which is the default for both in-loop drive modes.
-			// Without this check a RunTier call pinned to the workhorse is served
-			// whatever tier the cascade happened to answer with (measured: the E2B
-			// triage tier), while meta.Model reports the workhorse that never ran.
-			// An entry with no recorded producer is a miss: unknown is not a match.
+			// cv.Model == model is DEFENCE IN DEPTH and is unreachable by
+			// construction today — say so rather than letting the comment assert a
+			// live hazard that no longer exists.
+			//
+			// It was load-bearing when Run and RunTier shared a keyspace: a RunTier
+			// call pinned to the workhorse was served whatever tier the cascade had
+			// answered with (measured: the E2B triage tier), while meta.Model
+			// reported the workhorse that never ran. Guarding the read fixed the
+			// wrong answer but left both paths WRITING that key, so the real fix was
+			// cacheKeyForTier's separate keyspace — and `model` is already an
+			// ingredient of it, so nothing but a same-tier RunTier can reach here.
+			//
+			// Kept because it costs one comparison and it fails CLOSED: a pre-0.63
+			// entry carries no producer and is correctly treated as a miss.
 			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 && cv.Model == model {
 				meta.CacheHit = true
 				meta.CacheHitInLoop = cv.InLoop
