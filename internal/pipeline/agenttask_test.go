@@ -62,10 +62,33 @@ type agentFake struct {
 	// repackDelay stalls every grammar completion — used to expire the
 	// contract's wall deadline inside the re-pack.
 	repackDelay time.Duration
+	// repackThinkingSeat models a THINKING agent seat (Qwen3-class, e.g. Qube's
+	// own qwen3.8-27b) as measured live: with a grammar active and thinking
+	// left ON, the constrained output lands in `reasoning_content` and
+	// `content` comes back EMPTY. Sending
+	// chat_template_kwargs.enable_thinking=false makes the same seat answer in
+	// `content`. When set, every grammar completion that does NOT carry the
+	// flag answers empty-content; the ones that do are answered normally.
+	repackThinkingSeat bool
+	// repackBodies records every grammar completion's decoded request body, so
+	// a test can assert on what the re-pack actually sent.
+	repackBodies chan map[string]any
 	// rosterStatus, when non-zero, is the status /v1/models answers with.
 	rosterStatus int
 	loopCalls    atomic.Int64
 	grammarCNT   atomic.Int64
+}
+
+// repackDisablesThinking reports whether a captured grammar-completion body
+// carries chat_template_kwargs.enable_thinking=false — the exact wire shape the
+// live fix depends on.
+func repackDisablesThinking(body map[string]any) bool {
+	kw, ok := body["chat_template_kwargs"].(map[string]any)
+	if !ok {
+		return false
+	}
+	et, ok := kw["enable_thinking"].(bool)
+	return ok && !et
 }
 
 func (f *agentFake) server(t *testing.T) *httptest.Server {
@@ -98,6 +121,20 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 				t.Errorf("chat request with neither tools nor grammar: %v", body)
 			}
 			n := f.grammarCNT.Add(1)
+			if f.repackBodies != nil {
+				select {
+				case f.repackBodies <- body:
+				default: // never block the seat on an un-drained recorder
+				}
+			}
+			if f.repackThinkingSeat && !repackDisablesThinking(body) {
+				// The live defect: grammar + thinking template ⇒ the answer is
+				// emitted into reasoning_content and content is empty, which
+				// the re-pack then hands to json.Unmarshal as "".
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","reasoning_content":"The user wants the answer field. It is 42."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":67}}`))
+				return
+			}
 			if f.repackDelay > 0 {
 				time.Sleep(f.repackDelay)
 			}
@@ -769,5 +806,98 @@ func TestRunAgentTaskRepackWireFailuresAreInfrastructure(t *testing.T) {
 				t.Fatalf("reason = %q, want the wire failure itself named (%q)", wire.Reason, tc.wantSub)
 			}
 		})
+	}
+}
+
+// TestRepackStructuredDisablesThinking pins the request the re-pack sends: the
+// grammar AND chat_template_kwargs.enable_thinking=false, together. The re-pack
+// is a mechanical shape transformation over text the loop already produced —
+// there is nothing left to reason about — and on a thinking seat the two
+// interact destructively (see TestRunAgentTaskThinkingSeatRepackSucceeds).
+func TestRepackStructuredDisablesThinking(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop: func(int64) string {
+			t.Error("the agent loop must not run: this test calls the re-pack directly")
+			return doneChat("")
+		},
+		repack:       func(int64) string { return `{"answer":"42"}` },
+		repackBodies: make(chan map[string]any, 4),
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	p := agentTestPipeline(t, srv.URL)
+	schema := json.RawMessage(`{"properties":{"answer":{"type":"string"}},"required":["answer"]}`)
+	structured, _, _, err := p.repackStructured(context.Background(), agentTestSeat, schema, "The answer is 42.")
+	if err != nil {
+		t.Fatalf("repackStructured: %v", err)
+	}
+	if !bytes.Contains(structured, []byte(`"42"`)) {
+		t.Fatalf("structured = %s", structured)
+	}
+
+	select {
+	case body := <-fake.repackBodies:
+		if !repackDisablesThinking(body) {
+			t.Fatalf("the re-pack did not ask for a NON-thinking completion: chat_template_kwargs = %#v", body["chat_template_kwargs"])
+		}
+		// The flag must ride ALONGSIDE the grammar, not replace it: the schema
+		// seam is the grammar, and a re-pack that quietly dropped it would
+		// still pass a thinking check while losing its shape constraint.
+		if g, _ := body["grammar"].(string); g == "" {
+			t.Fatalf("the re-pack sent no grammar: %#v", body)
+		}
+	default:
+		t.Fatal("the re-pack sent no grammar completion at all")
+	}
+}
+
+// TestRunAgentTaskThinkingSeatRepackSucceeds is the LIVE defect as a test.
+// Found by end-to-end testing on real seats after 0.66.0 merged — no unit test
+// could have caught it, because every one of them fakes the seat, and the
+// interaction lives in the seat's chat template.
+//
+// Measured, same request at temp 0 / max_tokens 512 against llama-swap:
+//
+//	seat          grammar  len(content)  len(reasoning)
+//	qwen3.8-27b   none      73 (valid)    326
+//	qwen3.8-27b   GBNF       0            67     <- the defect
+//	gemma-4-e4b   none      85             0
+//	gemma-4-e4b   GBNF      67 (valid)     0
+//
+// A thinking template emits the grammar-constrained output into
+// `reasoning_content` and leaves `content` empty, so the re-pack failed both
+// attempts and the run deferred as an abstention — throwing away a finished,
+// correct answer. Qube's own agent seat is a thinking model, so this broke the
+// DEFAULT idle-local path. The seat below reproduces exactly that: empty
+// content for a grammar completion with thinking left on, valid JSON when the
+// flag is present.
+func TestRunAgentTaskThinkingSeatRepackSucceeds(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs:          []string{agentTestSeat},
+		loop:               func(int64) string { return doneChat("The answer is 42.") },
+		repack:             func(int64) string { return `{"answer":"42"}` },
+		repackThinkingSeat: true,
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+	wire := decodeWire(t, res)
+
+	if wire.Deferred {
+		t.Fatalf("a thinking agent seat deferred (%s / %s) — the finished answer %q was thrown away",
+			wire.DeferClass, wire.Reason, wire.Output)
+	}
+	var structured map[string]string
+	if err := json.Unmarshal(wire.Structured, &structured); err != nil || structured["answer"] != "42" {
+		t.Fatalf("structured = %s (%v)", wire.Structured, err)
+	}
+	// One completion, not two: the flag has to be on the FIRST attempt. A fix
+	// that only reached the shape via the retry would still pass the assertions
+	// above while doubling the cost of every re-pack on a thinking seat.
+	if got := fake.grammarCNT.Load(); got != 1 {
+		t.Fatalf("re-pack completions = %d, want exactly 1 — the non-thinking flag belongs on the first attempt", got)
 	}
 }

@@ -370,7 +370,7 @@ remote reasoning is quarantined from the caller's context by construction.
 | `node_id` | string | Executing node (`fleet_node_id`, else the OS hostname). |
 | `seat` | string | The resolved planner model that ran the loop. |
 | `output` | string | The loop's final assistant text. Stays populated even when the structured re-pack failed, so the CALLER still receives the loop's answer. It is preserved for the caller, **not** for delegator-side acceptance — acceptance runs only when `deferred` is false, and every re-pack failure branch defers. |
-| `structured` | object | Present iff `output_schema` was given AND the re-pack validated: after the loop, one grammar-constrained completion on the same seat re-packs `output` into the schema, with one retry before deferring. |
+| `structured` | object | Present iff `output_schema` was given AND the re-pack validated: after the loop, one grammar-constrained completion on the same seat re-packs `output` into the schema, with one retry before deferring. The re-pack call sends `chat_template_kwargs: {"enable_thinking": false}` — it is a mechanical shape transformation, not a reasoning step, and on a THINKING seat the grammar-constrained output otherwise lands in `reasoning_content` while `content` comes back empty, failing both attempts and discarding a finished answer. Harmless on non-thinking templates (measured identical output with and without). |
 | `steps` | int | Steps consumed. |
 | `stop_reason` | string | The loop's stop reason. |
 | `deferred` | bool | True = the node ran and honestly could not complete the contract. **A defer is a success shape at the job level**: the job lands `done`, never `error` — `error` is reserved for internal wiring bugs (mirrors the cascade's defer semantics). |
