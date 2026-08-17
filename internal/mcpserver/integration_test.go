@@ -354,8 +354,10 @@ func TestDelegationEndToEndRejectsAMissingToken(t *testing.T) {
 //
 // The seat answers the LOOP normally and then refuses the structured re-pack, so
 // the node's agent loop FINISHES: agenttask.go has already set wire.Output, and
-// keeps it populated on the re-pack failure branch so the delegator's text-verb
-// acceptance can still read it. What the caller receives is prose beside
+// keeps it populated on the re-pack failure branch so the CALLER still receives
+// the loop's answer — which is exactly what the `output` assertion below reads.
+// (Not acceptance: delegate.Run gates evalAcceptance on !wire.Deferred, and this
+// result IS deferred.) What the caller receives is prose beside
 // `deferred:true, defer_class:"infrastructure"` with no `structured` at all.
 //
 // That result IS lost work, and the wording — not the predicate — was what got
@@ -414,7 +416,7 @@ func TestDelegationEndToEndRepackUnreachableIsLostWork(t *testing.T) {
 	// cannot be described as "came back empty": the loop's answer is THERE, and
 	// the schema-checked deliverable is NOT.
 	if r0["output"] != finalAnswer {
-		t.Errorf("output = %v, want the finished loop's prose %q preserved — text-verb acceptance reads it", r0["output"], finalAnswer)
+		t.Errorf("output = %v, want the finished loop's prose %q preserved — the caller still receives the loop's answer", r0["output"], finalAnswer)
 	}
 	if st, has := r0["structured"]; has {
 		t.Errorf("structured = %v, want it ABSENT: the re-pack never produced one", st)

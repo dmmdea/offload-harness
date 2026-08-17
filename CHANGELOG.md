@@ -12,28 +12,75 @@ Multi-node sub-agent delegation. Released as 0.65.0 rather than 0.63.0 because a
 concurrent session shipped 0.63.0 and 0.64.0 from the same repo while this branch
 was in adversarial review; the entries below were written across that review cycle.
 
+### Fixed — delegation lane, round-7 adversarial review (the prose is preserved for the CALLER, not for acceptance)
+
+A seventh round confirmed the logic clean with a full state-transition table and mutation-verified
+that round 6's new end-to-end test binds. Every finding is **wording only** — no predicate,
+condition or assertion changed, and no behavioral rule moved. The round is two shapes: round 6
+replaced one false justification with another, and it missed the sites where the wording it existed
+to eliminate mattered most.
+
+- **The replacement justification asserted something the code does not do.** Round 6 explained the
+  preserved `output` on the `structured re-pack unreachable` shape as "so the delegator's text-verb
+  acceptance reads it" — it never does. `evalAcceptance` is reached only under `if !wire.Deferred`
+  on both placement paths (`runLocal`, `runRemote`), every re-pack failure branch returns
+  `deferWire`, which sets `Deferred`, and `TestRunLocalDeferSkipsAcceptance` pins that a deferred
+  result is skipped on purpose — running checks over an answer that was never claimed manufactures
+  verification failures. The true reason is stronger for the argument round 6 was making: the prose
+  is preserved because it is **published to the caller** in the result's `output` field, which is
+  exactly what `TestDelegationEndToEndRepackUnreachableIsLostWork` asserts. Corrected at all eight
+  sites carrying the claim — the five round 6 introduced (`internal/delegate/run.go`,
+  `docs/FLEET-NODE.md`, `docs/systems/fleet-node.md`, `internal/mcpserver/integration_test.go`, this
+  changelog) and the three that predate it (`internal/pipeline/agenttask.go`, the `output` field row
+  in `docs/systems/fleet-node.md`, `internal/pipeline/agenttask_test.go`) — each now stating the
+  negative outright, so the claim is not re-derived a third round running.
+- **The round-6 rewording missed the predicate line itself.** `run.go`'s comment directly above
+  `lost := pr.Result.Deferred && BrokenStackDefer(...)` still read "this subtask produced NOTHING",
+  160 lines below the `Summary.LostToStack` doc that round 6 corrected — the literal wording the
+  round existed to remove, in the same file. Same defect in the doc comments of `delegateIsError`'s
+  own table test (`internal/mcpserver/delegate_test.go`). All now say "delivered no usable result:
+  the contracted output never arrived", and say outright that this is not "no bytes".
+- **This changelog's round-6 entry miscounted and overclaimed.** It said "Six places" and listed
+  seven paths, omitting `docs/systems/fleet-node.md`, which the same commit also reworded — eight
+  files carry the change. "All six sites now say what is counted" was falsified by the two sites
+  above. Both corrected.
+- **The round-5 entry still repeated the falsehood it documents as corrected.** Its
+  `Summary.Infrastructure` bullet said the flag conflated a successful local placement with "a defer
+  that produced NOTHING" — in the same bullet whose later sentence notes that round 6 corrected
+  exactly that wording. Two occurrences were fixed there and a third left six lines earlier.
+
+Test coverage, same round: `TestRunContractSideGateRejectionIsNotABrokenStack`'s ctx-fit row
+asserted only the substring `"context"`, which both the scoped and the unscoped ceiling wording
+contain — so mutating `if unadvertised > 0` to `>= 0` in `contractIneligible` (always the scoped
+phrasing) left the whole tree green. The healthy-fleet row now pins the unscoped "the roomiest
+agent-enabled remote advertises 4096" wording, mirroring the `wantCtxFit` assertion its mixed-fleet
+sibling already carries, and that mutation is red.
+
 ### Fixed — delegation lane, round-6 adversarial review (say what the flag counts, and name both causes)
 
 A sixth round found no Criticals and confirmed by mutation that the round-5 fixes bind. Its one
 Important finding, and two below-bar ones, are all the same shape: **a justification that describes
 something the code does not do.** No behavioral rule changed except where noted.
 
-- **`lost_to_stack`'s stated premise was false for a reachable member of the set it counts.** Six
-  places (`internal/delegate/run.go`, `wire.go`, `internal/mcpserver/mcpserver.go`, `main.go`,
-  `docs/systems/coding-agent.md`, `docs/FLEET-NODE.md`, `docs/OPERATOR-GUIDE.md`) defined it as "the
-  subtasks that PRODUCED NOTHING … came back EMPTY", but the predicate is
+- **`lost_to_stack`'s stated premise was false for a reachable member of the set it counts.** Eight
+  files (`internal/delegate/run.go`, `wire.go`, `internal/mcpserver/mcpserver.go`, `main.go`,
+  `docs/systems/coding-agent.md`, `docs/systems/fleet-node.md`, `docs/FLEET-NODE.md`,
+  `docs/OPERATOR-GUIDE.md`) defined it as "the subtasks that PRODUCED NOTHING … came back EMPTY",
+  but the predicate is
   `deferred && (infrastructure|config)` — and one infrastructure defer carries a **populated**
   `output`: `structured re-pack unreachable` fires after the agent loop has FINISHED, and
-  `agenttask.go` keeps `wire.Output` set on every re-pack failure branch so delegator-side text-verb
-  acceptance can read it. So a run that returned real prose was counted as lost and flagged
+  `agenttask.go` keeps `wire.Output` set on every re-pack failure branch so the CALLER still
+  receives the loop's answer. So a run that returned real prose was counted as lost and flagged
   `isError`, under a comment saying it came back empty. **The predicate is correct and unchanged;
   the wording was wrong.** A contract carrying an `output_schema` asked for a mechanically checked
   deliverable, and prose with no `structured` is not one — the contracted output genuinely did not
-  arrive, and a calling model must not merge an unchecked answer as if the schema had passed. All
-  six sites now say what is counted ("delivered no usable result: the contracted output never
+  arrive, and a calling model must not merge an unchecked answer as if the schema had passed. Those
+  eight files now say what is counted ("delivered no usable result: the contracted output never
   arrived"), and the `infrastructure` rows of both defer-class tables state outright that `output`
   may be populated on this class. Pinned end to end (only the seat faked) by
-  `TestDelegationEndToEndRepackUnreachableIsLostWork`.
+  `TestDelegationEndToEndRepackUnreachableIsLostWork`. (Round 7 finished the sweep: the `lost`
+  predicate's own inline comment in `run.go` and the `delegateIsError` table test still carried the
+  old wording — see below.)
 - **The ctx-fit sentence was suppressed rather than merged on a mixed fleet.** With one lane silent
   and every ADVERTISED lane genuinely too small, `contractIneligible` returned "" — so
   `noEligibleRemote`'s both-causes path never fired and the operator was told "set `agent_ctx_tokens`
@@ -83,7 +130,8 @@ statement about ONE node was quietly extended to cover another.
   asserts that no ceiling verdict is spoken over a fleet with a silent lane.
 - **A subtask genuinely lost to a broken box was silenced on the MCP surface whenever a sibling
   succeeded.** `Summary.Infrastructure` conflates a local placement that SUCCEEDED while the fleet
-  was down with a defer that produced NOTHING, and the round-4 `isError` rule gated on
+  was down with a defer that DELIVERED NO USABLE RESULT — its contracted output never arrived
+  (which is not the same as no bytes) — and the round-4 `isError` rule gated on
   `Succeeded == 0` — justified only by the first, but silencing the second too. Two subtasks, one
   finished and one eaten by a dead llama-server, returned to the calling model as a clean tool
   call, while `local-offload delegate` exited NON-ZERO on the identical run: the two surfaces

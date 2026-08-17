@@ -118,9 +118,13 @@ type Summary struct {
 	// "No usable result" is not always "no bytes", and the distinction is load-
 	// bearing because the PREDICATE is what ships: pipeline/agenttask.go sets
 	// wire.Output before the re-pack and keeps it populated on every failure
-	// branch below (the delegator's text-verb acceptance reads it), so a subtask
-	// whose agent loop FINISHED and whose re-pack seat was unreachable publishes
-	// prose beside defer_class:"infrastructure" and IS counted here. That is
+	// branch below, so the CALLER still receives the loop's answer in the
+	// result's `output` field. (It is preserved for the caller, NOT for
+	// acceptance: both evalAcceptance call sites guard on !wire.Deferred and
+	// every re-pack failure branch defers, so no check ever runs over it —
+	// pinned by TestRunLocalDeferSkipsAcceptance.) So a subtask whose agent loop
+	// FINISHED and whose re-pack seat was unreachable publishes prose beside
+	// defer_class:"infrastructure" and IS counted here. That is
 	// deliberate, not an oversight: a contract carrying an output_schema asked for
 	// a mechanically checkable deliverable, and prose with no `structured` is not
 	// one — the contracted output genuinely did not arrive, so the caller must be
@@ -268,11 +272,15 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 		// local placement can succeed while the fleet it declined to use is
 		// down, and that must still count as infrastructure.
 		//
-		// lost is the STRICTER half — this subtask produced NOTHING and the
-		// stack is why — kept apart from remotesUnreachable, which annotates a
-		// result that succeeded. Both are infrastructure; only one is lost work,
-		// and a consumer that must decide "did anything get eaten?" (the MCP
-		// error flag) cannot answer it from the merged count.
+		// lost is the STRICTER half — this subtask delivered no usable result,
+		// the contracted output never arrived, and the stack is why — kept apart
+		// from remotesUnreachable, which annotates a result that succeeded. Note
+		// what "no usable result" does NOT mean: `output` may be populated here
+		// (a finished loop whose re-pack seat was unreachable), and the count is
+		// on the CONTRACTED deliverable — see Summary.LostToStack above. Both are
+		// infrastructure; only one is lost work, and a consumer that must decide
+		// "did anything get eaten?" (the MCP error flag) cannot answer it from
+		// the merged count.
 		lost := pr.Result.Deferred && BrokenStackDefer(pr.Result.DeferClass)
 		infra := pr.remotesUnreachable || lost
 		switch {

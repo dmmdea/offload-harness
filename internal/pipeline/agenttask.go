@@ -230,9 +230,12 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 
 	structured, tokensOut, transport, serr := p.repackStructured(cctx, seat, contract.OutputSchema, res.Output)
 	if serr != nil {
-		// wire.Output stays populated on every branch below: the delegator's
-		// text-verb acceptance checks can still read the loop's answer even when
-		// the structured shape never arrived.
+		// wire.Output stays populated on every branch below so the CALLER still
+		// receives the loop's answer even when the structured shape never
+		// arrived. It is preserved for the caller, NOT for delegator-side
+		// acceptance: every branch below returns deferWire, which sets
+		// Deferred, and delegate.runLocal/runRemote both run acceptance only
+		// when !wire.Deferred — so no check can ever read it on this path.
 		switch {
 		case errors.Is(cctx.Err(), context.DeadlineExceeded):
 			// The wall expired DURING the re-pack. That is the timeout shape,

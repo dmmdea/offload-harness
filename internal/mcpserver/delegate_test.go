@@ -290,16 +290,20 @@ func TestAgentDelegateHandlerBadInputsDefer(t *testing.T) {
 // R5-2 — the round-4 fix expressed that motivation as `Succeeded == 0`, which
 // silenced far more than it meant to. Summary.Infrastructure conflates two
 // states: remotesUnreachable annotates a result that SUCCEEDED, while a
-// broken-stack DEFER is a subtask that produced NOTHING. Only the first
-// justified the gate, but the gate also swallowed the second the moment any
-// sibling succeeded — one of two subtasks eaten by a box with a dead
-// llama-server came back as a clean tool call, while `local-offload delegate`
-// exited NON-ZERO on the identical run. The quiet surface was the one whose
-// caller has no exit code to read.
+// broken-stack DEFER is a subtask that delivered no usable result — its
+// contracted output never arrived. Only the first justified the gate, but the
+// gate also swallowed the second the moment any sibling succeeded — one of two
+// subtasks eaten by a box with a dead llama-server came back as a clean tool
+// call, while `local-offload delegate` exited NON-ZERO on the identical run.
+// The quiet surface was the one whose caller has no exit code to read.
 //
 // So the rule is now stated on the thing it actually means: LostToStack, the
-// count of subtasks that came back empty because the stack failed them. Note
-// what CANNOT stand in for it — the rows below pin both directions.
+// count of subtasks that delivered no usable result because the stack failed
+// them — the contracted output never arrived. That is NOT "no bytes": one
+// counted shape (a finished loop whose re-pack seat was unreachable) publishes
+// prose in `output`, and it is still lost, because a contract carrying an
+// output_schema asked for a checked deliverable. Note what CANNOT stand in for
+// it — the rows below pin both directions.
 func TestDelegateIsErrorRequiresNothingUsableCameBack(t *testing.T) {
 	cases := []struct {
 		name string
@@ -309,9 +313,9 @@ func TestDelegateIsErrorRequiresNothingUsableCameBack(t *testing.T) {
 		{"a local success taken while the whole fleet was down", delegate.Summary{Succeeded: 1, Infrastructure: 1}, false},
 		{"nothing came back and the stack is why", delegate.Summary{Deferred: 1, Infrastructure: 1, LostToStack: 1}, true},
 		// R5-2, the hole: a sibling succeeding never un-loses the subtask the
-		// broken box ate. Both this and the Failed row below produced nothing and
-		// both need the caller to act — gating one on Succeeded and not the other
-		// was the asymmetry that made the old rule indefensible.
+		// broken box ate. Both this and the Failed row below delivered no usable
+		// result and both need the caller to act — gating one on Succeeded and not
+		// the other was the asymmetry that made the old rule indefensible.
 		{"a sibling succeeded, but a subtask was still lost to a broken box", delegate.Summary{Succeeded: 1, Deferred: 1, Infrastructure: 1, LostToStack: 1}, true},
 		// Why `Deferred > 0 && Infrastructure > 0` is NOT a safe proxy for the
 		// rule above: this run's Infrastructure comes from a fleet-down LOCAL
@@ -339,8 +343,10 @@ func TestDelegateIsErrorRequiresNothingUsableCameBack(t *testing.T) {
 // the requested work being eaten by a broken box reached the calling model as a
 // clean tool call with no flag on it at all.
 //
-// A subtask lost to the stack is never a "result shape". It produced nothing,
-// the fix is on a box, and a sibling succeeding does not change either fact —
+// A subtask lost to the stack is never a "result shape". Its contracted output
+// never arrived (which is not the same as no bytes: a finished loop whose
+// re-pack seat was unreachable publishes prose and is still lost), the fix is
+// on a box, and a sibling succeeding does not change either fact —
 // exactly as a Failed subtask beside seven successes has always been loud. The
 // motivation R4-8 was written for survives intact and is pinned in the table
 // above: a fleet-down LOCAL SUCCESS (Infrastructure with no LostToStack) is

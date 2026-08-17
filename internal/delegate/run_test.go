@@ -630,11 +630,21 @@ func TestRunContractSideGateRejectionIsNotABrokenStack(t *testing.T) {
 		ctxTokens int
 		mutate    func(*core.AgentContract)
 		wantSub   string
+		// wantCtxFit pins the exact ceiling PHRASING on the ctx-fit row (R7).
+		// `wantSub: "context"` alone cannot: it is common to both the fleet-wide
+		// wording and the scoped one contractIneligible switches to when a lane
+		// advertised nothing, so flipping that switch to always-scoped left the
+		// whole tree green. This fleet is fully advertised, so the unscoped
+		// MAX claim is the honest one and the scoped phrasing would be a
+		// silent regression — the mixed-fleet sibling test
+		// (TestRunCtxFitIsContractSideOnlyWithARealCeiling) pins the other side.
+		wantCtxFit []string
 	}{
-		{"no output_schema", 8192, func(c *core.AgentContract) { c.OutputSchema = nil }, "output_schema"},
-		{"already past the origin hop", 8192, func(c *core.AgentContract) { c.Depth = 1 }, "depth"},
+		{"no output_schema", 8192, func(c *core.AgentContract) { c.OutputSchema = nil }, "output_schema", nil},
+		{"already past the origin hop", 8192, func(c *core.AgentContract) { c.Depth = 1 }, "depth", nil},
 		{"contract cannot fit any advertised ceiling", 4096,
-			func(c *core.AgentContract) { c.Goal = strings.Repeat("x", 30000) }, "context"},
+			func(c *core.AgentContract) { c.Goal = strings.Repeat("x", 30000) }, "context",
+			[]string{"the contract needs ~", "the roomiest agent-enabled remote advertises 4096"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -659,6 +669,11 @@ func TestRunContractSideGateRejectionIsNotABrokenStack(t *testing.T) {
 			}
 			if !strings.Contains(r.Result.Reason, tc.wantSub) {
 				t.Errorf("reason = %q, want the contract property named (%q)", r.Result.Reason, tc.wantSub)
+			}
+			for _, want := range tc.wantCtxFit {
+				if !strings.Contains(r.Result.Reason, want) {
+					t.Errorf("reason = %q, want %q — every lane here ADVERTISED a ceiling, so the fleet-wide MAX claim is measured, not authored on a silent node's behalf", r.Result.Reason, want)
+				}
 			}
 			if BrokenStackDefer(r.Result.DeferClass) {
 				t.Errorf("class %q counts as a broken stack — a caller-contract mistake must never tell the operator a box is down", r.Result.DeferClass)

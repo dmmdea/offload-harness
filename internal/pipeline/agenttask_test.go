@@ -336,7 +336,8 @@ func TestRunAgentTaskTimeoutDefersNotErrors(t *testing.T) {
 // TestRunAgentTaskSchemaFailRetriesOnceThenDefers: the structured re-pack
 // gets exactly ONE retry; a second schema failure defers with the stable
 // "output failed schema" prefix while the loop's text Output is preserved
-// (the delegator's text-verb acceptance checks still have something to read).
+// (the CALLER still receives the loop's answer — not delegator-side acceptance,
+// which never runs over a deferred result).
 func TestRunAgentTaskSchemaFailRetriesOnceThenDefers(t *testing.T) {
 	fake := &agentFake{
 		rosterIDs: []string{agentTestSeat},
