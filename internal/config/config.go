@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
 // PipelineSpec describes one externally-provided pipeline CLI this node can run
@@ -85,6 +87,19 @@ type Config struct {
 	Endpoint string `json:"endpoint"`
 	// CompletionPath is the native completion route used to pass a GBNF grammar.
 	CompletionPath string `json:"completion_path"`
+	// SeatEndpoints maps a model seat (the exact llama-swap model id or alias a
+	// call names) to a REMOTE OpenAI-compatible base URL serving that model —
+	// Phase A of multi-node delegation: {"lenovo-e4b": "http://lenovo-m720q:11436"}
+	// makes every completion for that seat resolve to the Lenovo's llama-swap
+	// instead of Endpoint, with zero job machinery. Empty/absent = every seat
+	// stays on Endpoint, byte-identical to a pre-seat build (pinned by test).
+	// Values are vetted TWICE to hold the never-cloud rule (ADR 0001): at load
+	// by netguard.TailnetURL (loopback, 100.64.0.0/10 literals, dotless MagicDNS
+	// names, or hosts under the house tailnet suffix — anything else fails the
+	// load loudly, naming the key), and at every dial by netguard.SafeTransport
+	// (the RESOLVED address must be loopback/tailnet — the DNS-rebinding guard
+	// a load-time string check cannot provide).
+	SeatEndpoints map[string]string `json:"seat_endpoints,omitempty"`
 	// Model is the default workhorse (E4B) — used for summarize/extract and as
 	// the fallback for any task without a specific route. Empty = dedicated server.
 	Model string `json:"model"`
@@ -905,6 +920,7 @@ func Default() Config {
 		FleetSampler:                  "auto",            // auto|pdh|pdh-shared|global (FLEET-NODE.md)
 		PrimaryGPUUUID:                "",                // "" = largest-total headline rule; set to pin by UUID (FLEET-NODE.md)
 		Pipelines:                     nil,               // empty = no pipeline-job routes on this box (opt-in per pipeline)
+		SeatEndpoints:                 nil,               // empty = every seat on Endpoint (opt-in per box, like Pipelines)
 	}
 }
 
@@ -951,7 +967,32 @@ func Load(path string) (Config, error) {
 	if err := validatePipelines(c.Pipelines); err != nil {
 		return c, err
 	}
+	if err := validateSeatEndpoints(c.SeatEndpoints); err != nil {
+		return c, err
+	}
 	return c, nil
+}
+
+// validateSeatEndpoints checks every seat_endpoints value against the tailnet
+// guard so a public/LAN base URL fails LOUDLY at config load — never silently
+// at the first overridden completion (the same load-time doctrine as
+// validatePipelines). Each error names the seat KEY: a config with several
+// seats bound must not leave the operator guessing which one is broken. Keys
+// are visited in SORTED order so that with more than one bad value the FIRST
+// error returned is deterministic across runs (Go randomizes map iteration),
+// which matters to anyone diffing a failing load or testing the error text.
+func validateSeatEndpoints(endpoints map[string]string) error {
+	keys := make([]string, 0, len(endpoints))
+	for key := range endpoints {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := netguard.TailnetURL(endpoints[key]); err != nil {
+			return fmt.Errorf("seat_endpoints[%q]: %w", key, err)
+		}
+	}
+	return nil
 }
 
 // rebaseHome moves every DERIVED path onto c.Home. A field the operator wrote in the

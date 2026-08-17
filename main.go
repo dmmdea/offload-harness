@@ -286,7 +286,12 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 	if err := cfg.EnsureDirs(); err != nil {
 		return nil, nil, err
 	}
-	client := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, time.Duration(cfg.RequestTimeoutSec)*time.Second)
+	// WithSeatEndpoints threads the Phase-A per-model overrides (seat_endpoints):
+	// an overridden seat's completions leave for its remote tailnet base through
+	// the dial-guarded client; with the key absent this is a no-op and the client
+	// is byte-identical to a pre-seat build.
+	client := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, time.Duration(cfg.RequestTimeoutSec)*time.Second).
+		WithSeatEndpoints(cfg.SeatEndpoints)
 	// Cache + ledger are bbolt (single-writer, exclusive file lock). When the
 	// long-running MCP server holds the lock, a CLI invocation degrades to
 	// cache-less rather than aborting — they speed things up / report savings,

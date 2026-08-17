@@ -17,7 +17,12 @@ import (
 // SINGLE place the nil-store invariant is constructed; NewRecordlessOffload and the
 // agent-trajectory flywheel (agent-trajectory-label) both use it so it can't drift.
 func NewRecordlessPipeline(cfg config.Config, timeout time.Duration) *Pipeline {
-	oc := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, timeout)
+	// WithSeatEndpoints mirrors openPipeline's construction: the recordless
+	// pipeline must route an overridden seat to the same remote base the
+	// recorded one does — a per-model endpoint is a property of the seat, not
+	// of which pipeline shape happens to call it. Absent key = no-op.
+	oc := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, timeout).
+		WithSeatEndpoints(cfg.SeatEndpoints)
 	return New(cfg, oc, nil, nil)
 }
 

@@ -28,6 +28,12 @@ type Client struct {
 	path  string
 	model string
 	http  *http.Client
+	// seatEndpoints maps a model id/alias to a remote base URL and safeHTTP is
+	// the tailnet-guarded client every overridden request rides (endpoints.go,
+	// Phase A delegation). Both stay nil unless WithSeatEndpoints installs
+	// overrides — the nil path is byte-identical to a pre-seat client.
+	seatEndpoints map[string]string
+	safeHTTP      *http.Client
 }
 
 // New builds a client. path is the generation route (default
@@ -39,14 +45,22 @@ func New(base, path, model string, timeout time.Duration) *Client {
 	if path == "" {
 		path = "/v1/chat/completions"
 	}
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.DialContext = (&net.Dialer{Timeout: connectTimeout, KeepAlive: 30 * time.Second}).DialContext
 	return &Client{
 		base:  strings.TrimRight(base, "/"),
 		path:  path,
 		model: model,
-		http:  &http.Client{Timeout: timeout, Transport: tr},
+		http:  &http.Client{Timeout: timeout, Transport: newTransport()},
 	}
+}
+
+// newTransport builds the split-budget transport New has always used: connect
+// gets connectTimeout, everything else rides the client Timeout. Extracted so
+// WithSeatEndpoints wraps the SAME transport shape in the tailnet dial gate
+// rather than drifting a second hand-rolled copy.
+func newTransport() *http.Transport {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = (&net.Dialer{Timeout: connectTimeout, KeepAlive: 30 * time.Second}).DialContext
+	return tr
 }
 
 // AltToken is one candidate at a generated position (raw, pre-grammar-mask).
@@ -151,7 +165,10 @@ type chatResp struct {
 // Generate sends system+user as a chat request constrained by grammar (may be
 // empty) and returns the content plus telemetry. model overrides the client's
 // default (empty = use the default); this is how the family cascade routes to
-// different tiers (e2b / e4b / 26b-a4b) per call. When topLogprobs > 0 the
+// different tiers (e2b / e4b / 26b-a4b) per call. The resolved model also
+// picks the BASE: a seat-endpoint override (endpoints.go) routes the request
+// to that seat's remote tailnet base through the dial-guarded client — the
+// vision paths below thread the same pair. When topLogprobs > 0 the
 // server returns per-token raw (pre-grammar-mask) logprobs in GenResult.Logprobs
 // — used by the confidence gate to detect a genuinely uncertain decision.
 func (c *Client) Generate(ctx context.Context, model, system, user, grammar string, maxTokens int, temperature float64, topLogprobs int) (GenResult, error) {
@@ -180,12 +197,12 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 		return GenResult{}, err
 	}
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+c.path, bytes.NewReader(buf))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseFor(model)+c.path, bytes.NewReader(buf))
 	if err != nil {
 		return GenResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req)
+	resp, err := c.httpFor(model).Do(req)
 	if err != nil {
 		return GenResult{}, err
 	}
@@ -229,12 +246,12 @@ func (c *Client) GenerateVision(ctx context.Context, model, system, user string,
 		return GenResult{}, err
 	}
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+c.path, bytes.NewReader(buf))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseFor(model)+c.path, bytes.NewReader(buf))
 	if err != nil {
 		return GenResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req)
+	resp, err := c.httpFor(model).Do(req)
 	if err != nil {
 		return GenResult{}, err
 	}
@@ -284,12 +301,12 @@ func (c *Client) GenerateVisionInterleaved(ctx context.Context, model, system st
 		return GenResult{}, err
 	}
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+c.path, bytes.NewReader(buf))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseFor(model)+c.path, bytes.NewReader(buf))
 	if err != nil {
 		return GenResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req)
+	resp, err := c.httpFor(model).Do(req)
 	if err != nil {
 		return GenResult{}, err
 	}
@@ -338,7 +355,10 @@ func decodeGenResult(resp *http.Response, start time.Time) (GenResult, error) {
 	return out, nil
 }
 
-// Health reports whether the server answers /health with 200.
+// Health reports whether the server answers /health with 200. It probes the
+// DEFAULT base on purpose — health is a property of this client's own
+// endpoint, not of any per-model seat override (a remote seat is health-checked
+// by its dispatcher via its own roster fetch, never through this client).
 func (c *Client) Health(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/health", nil)
 	if err != nil {
