@@ -624,6 +624,32 @@ type Config struct {
 	// KNNEmbedTimeoutMs bounds the request-path embedding call (fail-open on
 	// timeout). Default 2000.
 	KNNEmbedTimeoutMs int `json:"knn_embed_timeout_ms,omitempty"`
+	// --- embed memo (T2-C): memoize embedding vectors by exact input bytes ---
+	// Embedding is a pure function of (model, text) and the harness re-embeds the
+	// same strings by construction (kNN pre-filter inputs, the shadow drain
+	// re-reading stored inputs, a fixed exemplar pool). The larger payoff is not
+	// the saved compute but the saved SWAP: the embedder carries ttl=300 like
+	// every other seat, so the first embed after an idle gap pays a ~1-2 s cold
+	// load — a memo hit skips the HTTP call and therefore skips the load.
+	//
+	// EmbedMemoEnabled gates it. On by default: a hit returns the identical
+	// vector the embedder would have returned (see internal/embedmemo for why the
+	// key is exact bytes and never normalized), and every failure path degrades
+	// to a plain live call.
+	EmbedMemoEnabled *bool `json:"embed_memo_enabled,omitempty"`
+	// EmbedMemoPath is the bbolt store. Default <base>/embed-memo.db. Empty
+	// disables the memo as surely as the flag does.
+	EmbedMemoPath string `json:"embed_memo_path,omitempty"`
+	// EmbedMemoMaxEntries bounds the store; the oldest entries by insertion order
+	// are pruned back to 90% of the cap when it is exceeded. A 768-dim float64
+	// vector is ~6 KB, so the 50000 default is ~300 MB. 0 = unbounded.
+	EmbedMemoMaxEntries int `json:"embed_memo_max_entries,omitempty"`
+	// EmbedMemoEpoch is the manual invalidation lever. The memo key already binds
+	// the embedder ID, so switching embedders can never serve stale vectors — but
+	// a re-quantized or re-trained model republished under the SAME id is
+	// invisible at this layer. Bump this string in that case and every prior
+	// entry becomes unreachable. Normally "".
+	EmbedMemoEpoch string `json:"embed_memo_epoch,omitempty"`
 	// --- explicit remote NIM tool (`nim` subcommand / offload_nim) ---
 	// An opt-in path to an OpenAI-compatible NVIDIA NIM endpoint, separate from the
 	// local cascade: the GBNF grammar path and the savings ledger are untouched.
@@ -868,6 +894,9 @@ func Default() Config {
 		MaxInputChars:               24000, // ~6k tokens, well under ctx 8192
 		GCFCompact:                  true,  // flip decision 2026-07-24 (lossless, fail-closed; explicit false in a config file still wins)
 		CachePath:                   filepath.Join(base, "cache.db"),
+		EmbedMemoPath:               filepath.Join(base, "embed-memo.db"),
+		EmbedMemoMaxEntries:         50000, // ~300 MB at 768-dim float64
+
 		LedgerPath:                  filepath.Join(base, "ledger.jsonl"), // append-only JSONL (concurrent read/append)
 		ThresholdsPath:              filepath.Join(base, "thresholds.json"),
 		TierOverridesPath:           filepath.Join(base, "tier_overrides.json"),
@@ -1130,7 +1159,7 @@ func pathFields(c *Config) []*string {
 		&c.ConfHeadPath, &c.RouterLabelsPath, &c.ConfHeadLabelsPath,
 		&c.ConfHeadThresholdsPath, &c.ExemplarsDir,
 		&c.ShadowQueuePath, &c.AgentTrajectoryQueuePath, &c.AgentTrajectoryLabelsPath,
-		&c.KNNIndexPath,
+		&c.KNNIndexPath, &c.EmbedMemoPath,
 	}
 }
 
@@ -1281,6 +1310,21 @@ func (c Config) EmbedModel() string {
 	return "embeddinggemma"
 }
 
+// EmbedMemoOn reports whether the embed memo should run. The field is *bool
+// rather than bool so an ABSENT key and an EXPLICIT false are distinguishable:
+// the memo defaults ON, and a plain bool would make every config file written
+// before this feature existed read as a deliberate opt-out. An empty
+// EmbedMemoPath disables it just as firmly, because there is nowhere to store.
+func (c Config) EmbedMemoOn() bool {
+	if c.EmbedMemoPath == "" {
+		return false
+	}
+	if c.EmbedMemoEnabled == nil {
+		return true
+	}
+	return *c.EmbedMemoEnabled
+}
+
 // BaseDir returns this node's resolved install root: c.Home when set, else
 // DefaultBase() ($LOCAL_OFFLOAD_HOME, else ~/.local-offload) — the same root
 // Default()'s derived paths (media, cache, ledger, ...) hang off. Added for
@@ -1296,7 +1340,7 @@ func (c Config) BaseDir() string {
 
 // EnsureDirs creates the parent dirs for the store files.
 func (c Config) EnsureDirs() error {
-	for _, p := range []string{c.CachePath, c.LedgerPath, c.ThresholdsPath, c.RouterWeightsPath, c.TierOverridesPath, c.ConfHeadPath, c.ConfHeadLabelsPath, c.ConfHeadThresholdsPath, c.KNNIndexPath} {
+	for _, p := range []string{c.CachePath, c.LedgerPath, c.ThresholdsPath, c.RouterWeightsPath, c.TierOverridesPath, c.ConfHeadPath, c.ConfHeadLabelsPath, c.ConfHeadThresholdsPath, c.KNNIndexPath, c.EmbedMemoPath} {
 		if p == "" {
 			continue
 		}

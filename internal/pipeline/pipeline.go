@@ -34,6 +34,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/contextbudget"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/exemplars"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/gbnf"
@@ -84,6 +85,15 @@ type Pipeline struct {
 	// LR router trains). Both nil unless cfg.KNNPreFilterEnabled.
 	knn   *knn.Index                      // nil = disabled / no substrate
 	embed func(string) ([]float64, error) // nil = disabled; set to judge.Embedder.Embed
+	// T2-C embed memo backing p.embed. nil when disabled or unopenable — every
+	// Memo method tolerates a nil receiver, so nothing branches on it except the
+	// stats surface, which reports "no memo" rather than a fabricated zero.
+	embedMemo *embedmemo.Memo
+	// T2-D: does RunTier read/write the result cache on THIS pipeline? Set only
+	// by NewInLoopPipeline. False everywhere else — critically on the main
+	// pipeline, whose RunTier the shadow-labelling flywheel drives to evaluate
+	// counterfactual tiers, where a cache hit would replace the measurement.
+	tierCache bool
 	// A2 hot-reload: learnMu guards every self-learning field that the background
 	// reloader can swap (thresholds, router, overrides, confhead, confThresholds).
 	// The request path reads them ONLY through the *Snap accessors (uncontended
@@ -142,6 +152,24 @@ type Pipeline struct {
 // use only (the slice/map fields share backing with the live config).
 func (p *Pipeline) Cfg() config.Config { return p.cfg }
 
+// Cache exposes this pipeline's result-cache handle so a SECOND pipeline built in
+// the same process (the in-loop offload — see recordless.go) can share the one
+// open bbolt file rather than trying to open it again and losing the lock race
+// against itself. May be nil (caching opted out, or the file is held elsewhere).
+func (p *Pipeline) Cache() *cache.Cache { return p.cache }
+
+// EmbedMemoStats reports the embed memo's counters, and whether there is a memo
+// at all. The second return is false when the memo is disabled or could not be
+// opened — callers must surface that as "not measured" rather than printing a
+// zero hit rate, which would report a measured failure where no measurement
+// exists.
+func (p *Pipeline) EmbedMemoStats() (embedmemo.Stats, bool) {
+	if p.embedMemo == nil {
+		return embedmemo.Stats{}, false
+	}
+	return p.embedMemo.Stats(), true
+}
+
 func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Ledger) *Pipeline {
 	p := &Pipeline{cfg: cfg, client: c, cache: ca, led: l, lastHeal: map[string]time.Time{}, learnHashes: map[string]string{}}
 	p.stt = sttclient.New(cfg.Endpoint, time.Duration(cfg.STTRequestTimeoutSec)*time.Second)
@@ -167,7 +195,17 @@ func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Le
 	// so a slow/down embeddinggemma fails open fast on the request path.
 	if cfg.KNNPreFilterEnabled {
 		p.knn = knn.Load(cfg.KNNIndexPath)
-		p.embed = judge.NewEmbedder(cfg.Endpoint, cfg.EmbedModel(), time.Duration(cfg.KNNEmbedTimeoutMs)*time.Millisecond).Embed
+		// T2-C: the embedder is memoized by exact input bytes. This is where the
+		// memo earns most of its keep — the pre-filter runs on the REQUEST path,
+		// so a repeat input skips not just the embedding compute but the ~1-2 s
+		// cold-load the ttl=300 embedder pays after any idle gap. A disabled or
+		// unopenable memo yields the plain live embedder, so the short timeout's
+		// fail-open behaviour below is unchanged either way.
+		var memoOpts judge.MemoOptions
+		if cfg.EmbedMemoOn() {
+			memoOpts = judge.MemoOptions{Path: cfg.EmbedMemoPath, Epoch: cfg.EmbedMemoEpoch, MaxEntries: cfg.EmbedMemoMaxEntries}
+		}
+		p.embed, p.embedMemo = judge.NewMemoizedEmbedder(cfg.Endpoint, cfg.EmbedModel(), time.Duration(cfg.KNNEmbedTimeoutMs)*time.Millisecond, memoOpts)
 	}
 	// Seed the reloader's content hashes from the files just loaded so the first
 	// poll tick is a no-op for unchanged artifacts (and a transient bad initial
@@ -3537,9 +3575,59 @@ func (p *Pipeline) RunTier(ctx context.Context, req core.Request, model string) 
 		return core.Result{}, false
 	}
 	feat := featurize(req.Task, req.Input)
-	ck := cache.Key(string(req.Task), req.Input, tasks.StableParamsKey(req.Params), p.cfg.Model, built.Grammar)
+	// T2-D / T2-A: the key is built by cacheKeyFor, the SAME constructor Run uses,
+	// so this path cannot drift back to a weaker key. Two corrections over the
+	// former hand-rolled cache.Key call here:
+	//
+	//  1. It keys on the ACTUAL TIER (model), not p.cfg.Model. RunTier pins one
+	//     named tier, so its answer belongs to that tier; keying on the primary
+	//     model would let two different tiers share one entry — harmless while
+	//     nothing read the key, fatal the moment anything did.
+	//  2. It carries the template tag, so editing a task's prompt invalidates
+	//     these entries exactly as it does the cascade's. The old call here had
+	//     the pre-fix shape and was simply never exercised; reviving it as-is
+	//     would have reinstated the stale-prompt bug on a brand-new path.
+	//
+	// shots is nil because RunTier injects no exemplars — and nil hashes to a
+	// different tag than any non-empty set, so a Run answer built WITH exemplars
+	// can never be served to a RunTier caller that had none.
+	ck := cacheKeyFor(req.Task, req.Input, tasks.StableParamsKey(req.Params), model, built, nil)
 	meta := core.Meta{Model: model, Feat: feat}
-	res, _ := p.attempt(ctx, req, built, ck, model, meta, start, false /* record=false: no persistent side-effects */, len(req.Input))
-	// escalatable ignored: RunTier never escalates
+	meta.InputSHA256 = inputFingerprint(req.Input)
+	meta.PromptPrefixSHA256 = promptPrefixFingerprint(built.System, userPreambleOf(built.User, req.Input))
+	meta.ContextHash = p.contextHash()
+
+	// Cache participation is a property of THIS pipeline, never of RunTier itself.
+	// The shadow-labelling flywheel calls RunTier on the MAIN pipeline (cache
+	// open) to evaluate counterfactual tiers; serving those from cache — or
+	// writing them — would corrupt the very measurement it exists to produce. Only
+	// NewInLoopPipeline sets tierCache.
+	useCache := p.tierCache && p.cache != nil
+	if useCache {
+		if raw, ok := p.cache.Get(ck); ok {
+			var cv cacheVal
+			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 {
+				meta.CacheHit = true
+				meta.TokensIn = cv.TokensIn
+				meta.LatencyMs = time.Since(start).Milliseconds()
+				return core.Result{OK: true, Data: cv.Data, Meta: meta}, true
+			}
+		}
+	}
+
+	res, _ := p.attempt(ctx, req, built, ck, model, meta, start, false /* record=false: ledger/shadow/exemplars stay untouched */, len(req.Input))
+	// escalatable ignored: RunTier never escalates.
+	//
+	// The Put lives here rather than inside attempt because `record` means "write
+	// the SAVINGS-ACCOUNTING side-effects" (ledger, shadow queue, exemplar
+	// harvest) and must stay false here — that is invariant (a) in
+	// NewInLoopPipeline's doc. Caching is invariant (b), and only these two lines
+	// grant it. A defer never reaches this point (res.OK is false), so a
+	// low-confidence or ungrounded answer is never cached.
+	if useCache && res.OK && len(res.Data) > 0 {
+		if b, e := json.Marshal(cacheVal{Data: res.Data, TokensIn: res.Meta.TokensIn}); e == nil {
+			_ = p.cache.Put(ck, b)
+		}
+	}
 	return res, res.OK
 }

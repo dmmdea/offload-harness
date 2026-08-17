@@ -903,11 +903,15 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		}
 		return jsonResult(map[string]any{"deferred": true, "reason": reason})
 	}
-	// In-process offload (record=false, nil cache+ledger) + the SHARED loop
+	// In-process offload (nil LEDGER; shared result cache) + the SHARED loop
 	// builder — identical construction to the CLI and the standalone runner, so
 	// the three drive modes stay at parity. Read-only front door: no
 	// write/fetch/shell, no audit (the offload cannot write the ledger anyway).
-	offload := pipeline.NewRecordlessOffload(cfg, offloadModel, timeout)
+	//
+	// T2-D: the cache handle is the server's own already-open one. This process
+	// holds the bbolt lock, so re-opening by path here would lose a lock race
+	// against itself and silently fall back to no cache on every agent_run.
+	offload := pipeline.NewInLoopOffload(cfg, offloadModel, timeout, s.p.Cache())
 	built, err := agent.Build(agent.BuildConfig{
 		PlannerBase: cfg.Endpoint,
 		Model:       model,
