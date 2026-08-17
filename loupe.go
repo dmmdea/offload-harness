@@ -138,10 +138,18 @@ type embedMemoReport struct {
 	Stores    int64  `json:"lifetime_stores,omitempty"`
 	// Fault counters. A memo full of corrupt records or failing every write is
 	// otherwise indistinguishable from a healthy idle one.
-	ErrorsDecode  int64 `json:"errors_decode,omitempty"`
-	ErrorsRead    int64 `json:"errors_read,omitempty"`
-	ErrorsWrite   int64 `json:"errors_write,omitempty"`
-	DimMismatches int64 `json:"dim_mismatches,omitempty"`
+	ErrorsDecode    int64  `json:"errors_decode,omitempty"`
+	ErrorsRead      int64  `json:"errors_read,omitempty"`
+	ErrorsWrite     int64  `json:"errors_write,omitempty"`
+	DimMismatches   int64  `json:"dim_mismatches,omitempty"`
+	CountUnderflows int64  `json:"count_underflows,omitempty"`
+	LastFault       string `json:"last_fault,omitempty"`
+	// Orphaned namespaces (a prior embedder id or epoch) are never deleted, so
+	// without these a 640 MB store full of unreachable vectors reports "0 vectors
+	// stored" — simultaneously "empty" and at its size cap.
+	ForeignNamespaces int   `json:"foreign_namespaces,omitempty"`
+	ForeignVectors    int   `json:"foreign_vectors,omitempty"`
+	FileBytes         int64 `json:"file_bytes,omitempty"`
 	// HitRate is nil when nothing has been looked up yet — see the Stats doc in
 	// internal/embedmemo for why this is a pointer.
 	HitRate *float64 `json:"hit_rate"`
@@ -388,18 +396,23 @@ func readEmbedMemoReport(cfg config.Config) embedMemoReport {
 		return embedMemoReport{Available: false, Path: cfg.EmbedMemoPath, Reason: "opened but unreadable: " + serr.Error()}
 	}
 	return embedMemoReport{
-		Available:     true,
-		Path:          cfg.EmbedMemoPath,
-		Embedder:      st.EmbedderID,
-		Distinct:      st.Distinct,
-		Hits:          st.LifetimeHits,
-		Misses:        st.LifetimeMisses,
-		Stores:        st.LifetimeStores,
-		ErrorsDecode:  st.ErrorsDecode,
-		ErrorsRead:    st.ErrorsRead,
-		ErrorsWrite:   st.ErrorsWrite,
-		DimMismatches: st.DimMismatches,
-		HitRate:       st.HitRate,
+		Available:         true,
+		Path:              cfg.EmbedMemoPath,
+		Embedder:          st.EmbedderID,
+		Distinct:          st.Distinct,
+		Hits:              st.LifetimeHits,
+		Misses:            st.LifetimeMisses,
+		Stores:            st.LifetimeStores,
+		ErrorsDecode:      st.ErrorsDecode,
+		ErrorsRead:        st.ErrorsRead,
+		ErrorsWrite:       st.ErrorsWrite,
+		DimMismatches:     st.DimMismatches,
+		CountUnderflows:   st.CountUnderflows,
+		LastFault:         st.LastFault,
+		ForeignNamespaces: st.ForeignNamespaces,
+		ForeignVectors:    st.ForeignVectors,
+		FileBytes:         st.FileBytes,
+		HitRate:           st.HitRate,
 	}
 }
 
@@ -478,9 +491,21 @@ func emitStats(rep statsReport, asJSON bool) error {
 			*em.HitRate*100, em.Hits, em.Misses, em.Distinct)
 		p("                      ^ each hit also skips a possible ~1-2s cold-embedder load (ttl=300)")
 	}
-	if em.Available && (em.ErrorsDecode+em.ErrorsRead+em.ErrorsWrite+em.DimMismatches) > 0 {
-		p("                      FAULTS: decode=%d read=%d write=%d dim-mismatch=%d",
-			em.ErrorsDecode, em.ErrorsRead, em.ErrorsWrite, em.DimMismatches)
+	if em.Available && (em.ErrorsDecode+em.ErrorsRead+em.ErrorsWrite+em.DimMismatches+em.CountUnderflows) > 0 {
+		p("                      FAULTS: decode=%d read=%d write=%d dim-mismatch=%d underflow=%d",
+			em.ErrorsDecode, em.ErrorsRead, em.ErrorsWrite, em.DimMismatches, em.CountUnderflows)
+		if em.LastFault != "" {
+			p("                      LAST: %s", em.LastFault)
+		}
+	}
+	// An orphaned namespace is unreachable AND undeletable by the live one, so a
+	// store can be simultaneously "empty" and at its size cap. Say so.
+	if em.Available && em.ForeignNamespaces > 0 {
+		p("                      ORPHANED: %d vector(s) in %d namespace(s) from a previous embedder/epoch — unreachable, not reclaimed",
+			em.ForeignVectors, em.ForeignNamespaces)
+	}
+	if em.Available && em.FileBytes > 0 {
+		p("                      store file: %.1f MB on disk (bbolt never shrinks after a prune)", float64(em.FileBytes)/(1024*1024))
 	}
 	p("")
 	p("ROUTING")

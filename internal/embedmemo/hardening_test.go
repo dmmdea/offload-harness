@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -422,6 +423,126 @@ func TestReadOnlyHandleDoesNotMemoize(t *testing.T) {
 	}
 	if _, err := ro.Stats(); err != nil {
 		t.Fatalf("read-only Stats: %v", err)
+	}
+}
+
+// THE DEAD-INSTRUMENT TEST. Fault counters held only as process-local atomics
+// were rendered by surfaces that open their OWN handle (the loupe does), whose
+// atomics are zero by construction — so the fault display could never be
+// non-zero, and a memo failing every write read as healthy. They must survive
+// the process that recorded them.
+func TestFaultCountersSurviveTheProcessThatRecordedThem(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "memo.db")
+
+	m, err := Open(path, "e", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Wrap(func(string) ([]float64, error) { return []float64{1, 2, 3}, nil })("x"); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt it, then force a decode fault by looking it up.
+	if err := m.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bktVecs).Put([]byte(m.key("x")), []byte{9, 9, 9})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Wrap(func(string) ([]float64, error) { return []float64{1, 2, 3}, nil })("x"); err != nil {
+		t.Fatal(err)
+	}
+	live, err := m.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.ErrorsDecode == 0 {
+		t.Fatal("the live handle did not record a decode fault")
+	}
+	if err := m.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	m.Close()
+
+	// A DIFFERENT handle — the loupe's situation exactly.
+	ro, err := OpenReadOnly(path, "e", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	st, err := ro.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ErrorsDecode == 0 {
+		t.Fatal("a fresh handle reports zero faults — the fault display is dead code and a broken memo reads as healthy")
+	}
+}
+
+// A dimension change is not a disk failure. Conflating them sent the operator to
+// diagnose a dying store when the real cause was a re-quantized embedder.
+func TestDimMismatchIsNotCountedAsAWriteFaultAndKeepsItsRemediation(t *testing.T) {
+	m := openTemp(t, 0)
+	if _, err := m.Wrap(func(string) ([]float64, error) { return []float64{1, 2, 3}, nil })("a"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if _, err := m.Wrap(func(string) ([]float64, error) { return []float64{1, 2}, nil })(fmt.Sprintf("b%d", i)); err != nil {
+			t.Fatalf("the caller must still get its vector: %v", err)
+		}
+	}
+	st, err := m.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.DimMismatches != 4 {
+		t.Fatalf("dim mismatches = %d, want 4", st.DimMismatches)
+	}
+	if st.ErrorsWrite != 0 {
+		t.Fatalf("errors_write = %d, want 0 — a dimension change is not a write fault", st.ErrorsWrite)
+	}
+	if st.LastFault == "" {
+		t.Fatal("the remediation message was discarded; it is the only text telling an operator what to do")
+	}
+	if !strings.Contains(st.LastFault, "embed_memo_epoch") {
+		t.Errorf("last fault does not name the remedy: %q", st.LastFault)
+	}
+}
+
+// An orphaned namespace is unreachable by the live one AND not reclaimed, so a
+// store can be simultaneously "empty" and at its size cap. That must be visible.
+func TestOrphanedNamespacesAreReported(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memo.db")
+	m1, err := Open(path, "e", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := m1.Wrap(func(string) ([]float64, error) { return []float64{1}, nil })(fmt.Sprintf("t%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m1.Close()
+
+	m2, err := Open(path, "e", "epoch-2", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m2.Close()
+	st, err := m2.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Distinct != 0 {
+		t.Fatalf("distinct = %d, want 0 in the fresh namespace", st.Distinct)
+	}
+	if st.ForeignNamespaces != 1 {
+		t.Fatalf("foreign namespaces = %d, want 1 — a store reporting 0 vectors while holding 3 is not honest", st.ForeignNamespaces)
+	}
+	if st.ForeignVectors != 3 {
+		t.Fatalf("foreign vectors = %d, want 3", st.ForeignVectors)
+	}
+	if st.FileBytes <= 0 {
+		t.Error("file size not reported; it is the only honest capacity signal since bbolt never shrinks")
 	}
 }
 

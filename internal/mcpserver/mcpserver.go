@@ -19,6 +19,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
@@ -263,19 +264,43 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// from both places is what keeps the measurement answerable in either state
 	// rather than only when the server happens to be down.
 	reuse := map[string]any{}
-	if st, reason := s.p.EmbedMemoStats(); reason == "" {
+	st, reason := s.p.EmbedMemoStats()
+	// THIS PROCESS may hold no memo (the kNN pre-filter is off by default), while
+	// the STORE on disk is being written by `shadow-label` against the same file.
+	// Reporting only "enabled: false" then told the operator the feature was off
+	// while `loupe` on the same box showed vectors and a hit rate — two surfaces,
+	// opposite answers. Worse, the fault counters this block exists to publish
+	// would be unreachable on the one configuration everyone actually runs.
+	// So: fall back to a read-only look at the store, exactly as loupe does.
+	storeOnly := false
+	if reason != "" {
+		if ro, err := embedmemo.OpenReadOnly(cfg.EmbedMemoPath, cfg.EmbedModel(), cfg.EmbedMemoEpoch); err == nil {
+			if rst, rerr := ro.Stats(); rerr == nil {
+				st, storeOnly = rst, true
+			}
+			ro.Close()
+		}
+	}
+	if reason == "" || storeOnly {
 		reuse["embed_memo"] = map[string]any{
-			"enabled":         true,
-			"embedder":        st.EmbedderID,
-			"epoch":           st.Epoch,
-			"dim":             st.Dim,
-			"distinct":        st.Distinct,
-			"session_hits":    st.SessionHits,
-			"session_misses":  st.SessionMisses,
-			"session_stores":  st.SessionStores,
-			"lifetime_hits":   st.LifetimeHits,
-			"lifetime_misses": st.LifetimeMisses,
-			"lifetime_stores": st.LifetimeStores,
+			"enabled":            reason == "",
+			"scope":              map[bool]string{true: "read from the store on disk; this process is not memoizing", false: "live in this process"}[storeOnly],
+			"process_reason":     reason,
+			"count_underflows":   st.CountUnderflows,
+			"last_fault":         st.LastFault,
+			"foreign_namespaces": st.ForeignNamespaces,
+			"foreign_vectors":    st.ForeignVectors,
+			"file_bytes":         st.FileBytes,
+			"embedder":           st.EmbedderID,
+			"epoch":              st.Epoch,
+			"dim":                st.Dim,
+			"distinct":           st.Distinct,
+			"session_hits":       st.SessionHits,
+			"session_misses":     st.SessionMisses,
+			"session_stores":     st.SessionStores,
+			"lifetime_hits":      st.LifetimeHits,
+			"lifetime_misses":    st.LifetimeMisses,
+			"lifetime_stores":    st.LifetimeStores,
 			// Fault counters are published, not merely incremented. An unpublished
 			// fault counter is not a fault signal: without these there is no
 			// observable difference between a memo that is working, one whose store
@@ -291,8 +316,13 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 		}
 	} else {
 		// One specific reason, never a menu of possibilities the caller has to
-		// guess between.
-		reuse["embed_memo"] = map[string]any{"enabled": false, "reason": reason}
+		// guess between — and it names WHERE the answer is, since a store may
+		// exist and be in use by another process.
+		reuse["embed_memo"] = map[string]any{
+			"enabled": false,
+			"reason":  reason,
+			"store":   "not readable from this process either; run `local-offload loupe` with the server stopped to inspect the store on disk",
+		}
 	}
 	// The result cache is the other half of T2-D and was previously reported
 	// nowhere. If it failed to open at startup, every agent_run silently loses

@@ -9,7 +9,7 @@ import (
 
 // Shared returns one process-wide Memo per (path, embedderID, epoch).
 //
-// WHY A SINGLETON AND NOT A PLAIN Open PER CALLER
+// # WHY A SINGLETON AND NOT A PLAIN Open PER CALLER
 //
 // bbolt takes an exclusive file lock. A single harness process legitimately
 // builds SEVERAL pipelines — the main one plus an in-loop one — and several CLI
@@ -20,7 +20,7 @@ import (
 // startup latency paid per failed open. Sharing one handle makes every
 // in-process caller a real participant.
 //
-// WHY THE KEY IS THE FULL IDENTITY AND NOT JUST THE PATH
+// # WHY THE KEY IS THE FULL IDENTITY AND NOT JUST THE PATH
 //
 // Keying on the path alone meant a second caller asking for a DIFFERENT embedder
 // id or epoch received the first caller's handle — and was then served the other
@@ -93,6 +93,27 @@ func pathOfKey(k string) string {
 		}
 	}
 	return k
+}
+
+// FlushShared persists every shared memo's counters WITHOUT closing them.
+//
+// For long-running processes: a shutdown-only flush bounds the loss to the whole
+// process lifetime, and this one can run for weeks. A `kill -9` (or any exit that
+// skips defers) then destroys every hit counter accumulated since start, and the
+// hit-rate gate reads a fabricated zero. Calling this periodically bounds the
+// loss to one interval.
+func FlushShared() error {
+	sharedMu.Lock()
+	defer sharedMu.Unlock()
+	var firstErr error
+	for _, e := range shared {
+		if e.memo != nil {
+			if err := e.memo.Flush(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
 }
 
 // CloseShared flushes and closes every shared memo, returning the first error

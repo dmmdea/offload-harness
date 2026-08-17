@@ -59,6 +59,45 @@ func cacheKeyFor(task core.TaskType, orig, paramsKey, model string, built tasks.
 	)
 }
 
+// tierKeyspaceTag separates RunTier's entries from Run's.
+//
+// WHY A SEPARATE KEYSPACE RATHER THAN A SHARED ONE WITH A GUARD
+//
+// Run and RunTier want different things from an entry. Run keys on the PRIMARY
+// model whatever tier answered, because the cascade is an internal detail of one
+// logical call and any tier's answer is the call's answer. RunTier pins ONE named
+// tier and must get that tier's output.
+//
+// With ExemplarShots at its default of 0 every other ingredient coincides, so
+// before this the two computed the SAME key whenever the pinned tier was the
+// primary model — the default for both in-loop drive modes. Guarding only the
+// READ (refuse a hit whose recorded producer differs) fixed the wrong-answer bug
+// but left both paths WRITING that key: Run stored an E2B answer, RunTier refused
+// it, ran the workhorse and overwrote the entry, Run then served the workhorse
+// answer where the cascade would have used E2B, and the two ping-ponged one key
+// forever. The hit rate collapses and nothing records it, because in-loop calls
+// run with a nil ledger and a producer-mismatch miss is indistinguishable from a
+// cold cache.
+//
+// Disjoint keyspaces make the collision impossible instead of survivable. The
+// cost is that an in-loop call cannot reuse a cascade answer — which was never
+// sound anyway, for exactly the reason the read guard existed.
+const tierKeyspaceTag = "keyspace=runtier"
+
+// cacheKeyForTier is cacheKeyFor in RunTier's own keyspace.
+func cacheKeyForTier(task core.TaskType, orig, paramsKey, model string, built tasks.Built) string {
+	return cache.Key(
+		tierKeyspaceTag,
+		string(task),
+		orig,
+		paramsKey,
+		model,
+		built.Grammar,
+		templateCacheTag(built.System, built.Grammar, built.User, orig),
+		exemplarCacheTag(nil), // RunTier injects no exemplars
+	)
+}
+
 // idHashLen bounds a recorded fingerprint. 16 hex chars = 64 bits: collision
 // probability stays negligible at any ledger size this estate will reach
 // (~1e-9 at a million rows), while keeping the one-line JSONL records small —

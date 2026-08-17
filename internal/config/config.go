@@ -900,7 +900,7 @@ func Default() Config {
 		GCFCompact:                  true,  // flip decision 2026-07-24 (lossless, fail-closed; explicit false in a config file still wins)
 		CachePath:                   filepath.Join(base, "cache.db"),
 		EmbedMemoPath:               filepath.Join(base, "embed-memo.db"),
-		EmbedMemoMaxEntries:         50000, // ~300 MB at 768-dim float64
+		EmbedMemoMaxEntries:         50000, // ~640 MB on disk (bbolt ~12.8 KB/entry); see the field doc
 
 		LedgerPath:                  filepath.Join(base, "ledger.jsonl"), // append-only JSONL (concurrent read/append)
 		ThresholdsPath:              filepath.Join(base, "thresholds.json"),

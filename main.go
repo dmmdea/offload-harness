@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
@@ -26,12 +27,12 @@ import (
 	"github.com/dmmdea/offload-harness/internal/confhead"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/eval"
 	"github.com/dmmdea/offload-harness/internal/exemplars"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/grounding"
 	"github.com/dmmdea/offload-harness/internal/health"
-	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/judge"
 	"github.com/dmmdea/offload-harness/internal/knn"
 	"github.com/dmmdea/offload-harness/internal/ledger"
@@ -1596,7 +1597,40 @@ func runMCP(args []string) error {
 	// one tick, fail-open, with zero IO/parse added to the request path.
 	stopReloader := p.StartReloader(0) // 0 => default interval
 	defer stopReloader()
-	return mcpserver.New(p).Run(context.Background(), version)
+
+	// The MCP server is the ONLY long-running process that accumulates embed-memo
+	// hits, and deferred functions do not run on SIGINT/SIGTERM — so without a
+	// signal context its `defer cleanup()` (the sole caller of the memo's Flush)
+	// never fired, and weeks of hit counters vanished on every stop. fleet-serve
+	// already installs one; this did not.
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
+	// A signal handler still loses everything since the last flush on a kill -9,
+	// and this process can run for weeks. A periodic flush bounds that loss to one
+	// interval instead of one process lifetime. It is cheap: a no-op when no
+	// lookups happened, and one small bbolt transaction when they did.
+	flushDone := make(chan struct{})
+	go func() {
+		defer close(flushDone)
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := embedmemo.FlushShared(); err != nil {
+					fmt.Fprintln(os.Stderr, "note: periodic embed-memo flush failed:", err)
+				}
+			}
+		}
+	}()
+
+	err = mcpserver.New(p).Run(ctx, version)
+	stopSignals()
+	<-flushDone
+	return err
 }
 
 // nvidiaSmiMemory shells the global VRAM query (MiB CSV) that feeds the

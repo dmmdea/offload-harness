@@ -63,6 +63,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -94,6 +95,28 @@ const (
 	mkMisses  = "misses:"
 	mkStores  = "stores:"
 	mkDim     = "dim:"
+	// Fault counters are PERSISTED, not just held in memory.
+	//
+	// Holding them only as process-local atomics made every reporting surface
+	// that opens its own handle — which is what the loupe does — read zeros by
+	// construction. The counters were incremented in one process and rendered in
+	// another, so the whole fault display was unfalsifiable: a memo failing 100%
+	// of its writes printed no fault line at all. That is the same
+	// "instrument reports the opposite of the truth" defect this package was
+	// already fixed for once.
+	mkErrDecode = "err_decode:"
+	mkErrRead   = "err_read:"
+	mkErrWrite  = "err_write:"
+	mkDimMiss   = "err_dim:"
+	// mkUnderflow counts times a counter was asked to go below zero. A clamp that
+	// silently normalizes an impossible state erases the evidence of the bug that
+	// produced it — most reachably, a layout change that orphans records the live
+	// namespace never counted.
+	mkUnderflow = "err_underflow:"
+	// mkLastFault stores the most recent human-readable fault, so the one message
+	// that tells an operator what to DO (e.g. "bump embed_memo_epoch") survives
+	// the process that produced it.
+	mkLastFault = "last_fault:"
 )
 
 var (
@@ -119,15 +142,31 @@ type Memo struct {
 	maxEntries int
 	readOnly   bool
 
-	// Session counters. Reported alongside the persisted totals so a single run's
-	// behaviour is legible without differencing two snapshots.
-	hits       atomic.Int64
-	misses     atomic.Int64
-	stores     atomic.Int64
-	errsDecode atomic.Int64 // records that failed to decode (corrupt / wrong version)
-	errsRead   atomic.Int64 // View transactions that failed outright
-	errsWrite  atomic.Int64 // Update transactions that failed
+	// Session counters.
+	//
+	// INVARIANT: these hold only what is NOT YET on disk. Flush drains them into
+	// the persisted mk* keys, and Stats reports (persisted + session). A fault
+	// recorded inside a successful transaction is persisted there and must NOT
+	// also bump an atomic, or it is counted twice — which is how the first version
+	// of the dimension counter reported 8 mismatches for 4 events.
+	//
+	// The atomics exist because the faults that matter most cannot be written at
+	// the moment they happen: a failed read or a failed write transaction is
+	// precisely when the store will not accept a counter update.
+	hits        atomic.Int64
+	misses      atomic.Int64
+	stores      atomic.Int64
+	errsDecode  atomic.Int64 // records that failed to decode (corrupt / wrong version)
+	errsRead    atomic.Int64 // View transactions that failed outright
+	errsWrite   atomic.Int64 // Update transactions that failed
 	dimMismatch atomic.Int64 // vectors whose dimension disagreed with the namespace
+
+	// statMu serialises Stats against Flush. Without it, Stats loads the session
+	// atomics, Flush swaps them to zero and commits, and Stats then adds the
+	// already-persisted values again — reporting double the real hit count. The
+	// reverse interleaving loses a whole session instead. Either way the Phase
+	// 0.4 gate reads a fabricated number, which is worse than a stale one.
+	statMu sync.Mutex
 }
 
 func namespaceOf(embedderID, epoch string) string {
@@ -309,34 +348,35 @@ func (m *Memo) dropCorrupt(k string) {
 	}
 	if err := m.db.Update(func(tx *bolt.Tx) error {
 		vb, sb, mb := tx.Bucket(bktVecs), tx.Bucket(bktSeq), tx.Bucket(bktMeta)
-		if vb == nil || vb.Get([]byte(k)) == nil {
+		if vb == nil {
+			return nil
+		}
+		rec := vb.Get([]byte(k))
+		if rec == nil {
 			return nil // already gone; do not decrement a count we did not remove
 		}
+		// The record's own header carries its sequence number, so the seq entry is
+		// addressable DIRECTLY. The previous version scanned the namespace to find
+		// it — an O(bucket) cursor walk inside an exclusive write transaction, on
+		// the request path, executed once per corrupt record. Its documented
+		// trigger is a version bump, where EVERY record is corrupt: that made the
+		// first run after an upgrade a full-bucket scan plus an fsync on every
+		// single lookup, for the whole migration window, with no progress signal.
+		seq := seqOfRecord(rec)
 		if err := vb.Delete([]byte(k)); err != nil {
 			return err
 		}
 		if mb != nil {
-			if err := bump(mb, mkCount+m.ns, -1); err != nil {
+			if err := m.bumpNS(mb, mkCount, -1); err != nil {
 				return err
 			}
 		}
-		// The seq index must not outlive the vector it points at, or the prune
-		// walk later deletes a key that has since been legitimately re-stored.
+		// A seq entry that outlives its vector would let the prune walk delete a
+		// key since legitimately re-stored. Deleting a key that is not there is a
+		// no-op in bbolt, which is the right behaviour for a header-less record
+		// (seq 0): pruneTx tolerates a dangling seq entry, so nothing is lost.
 		if sb != nil {
-			// Find first, delete after — never delete through the cursor mid-walk
-			// (see pruneTx for why bbolt's Cursor.Delete + Next skips an entry).
-			var found []byte
-			c := sb.Cursor()
-			pfx := []byte(m.ns)
-			for sk, kv := c.Seek(pfx); sk != nil && hasPrefix(sk, pfx); sk, kv = c.Next() {
-				if string(kv) == k {
-					found = append([]byte(nil), sk...)
-					break
-				}
-			}
-			if found != nil {
-				return sb.Delete(found)
-			}
+			return sb.Delete(m.seqKey(seq))
 		}
 		return nil
 	}); err != nil {
@@ -358,8 +398,21 @@ func (m *Memo) put(k string, vec []float64) {
 				return err
 			}
 		} else if int(d) != len(vec) {
-			m.dimMismatch.Add(1)
-			return fmt.Errorf("embedmemo: dimension %d does not match namespace dimension %d — the embedder changed behind a stable id; bump embed_memo_epoch", len(vec), d)
+			// A dimension change is NOT a write fault, and conflating them sent the
+			// operator to diagnose a failing disk when the real cause is a
+			// re-quantized embedder. Record it as its own class, persist the
+			// remediation message (it is the only text in this package that tells
+			// an operator what to DO), and return nil so the caller is not also
+			// charged an errsWrite.
+			//
+			// Persisted ONLY — deliberately no session-atomic bump. The invariant
+			// is that the atomics hold faults NOT YET on disk (Flush drains them),
+			// and Stats adds the two. Doing both here double-counted.
+			_ = m.bumpNS(mb, mkDimMiss, 1)
+			_ = mb.Put([]byte(mkLastFault+m.ns), []byte(fmt.Sprintf(
+				"vector dimension %d does not match this namespace's dimension %d — the embedder changed behind a stable id; bump embed_memo_epoch to start a clean namespace",
+				len(vec), d)))
+			return nil
 		}
 		// An overwrite of a LIVE key must not consume a new sequence slot, or the
 		// seq bucket accumulates entries pointing at one key and the prune walk
@@ -371,6 +424,13 @@ func (m *Memo) put(k string, vec []float64) {
 			}
 			seq := seqOfRecord(existing)
 			if err := vb.Put([]byte(k), encode(seq, vec)); err != nil {
+				return err
+			}
+			// A repair IS a write. Omitting this bump made session_stores and
+			// lifetime_stores disagree with no explanation available to a reader —
+			// and the loupe's "counters unflushed" detector keys on the persisted
+			// total, so a store whose only writes were repairs took the wrong branch.
+			if err := m.bumpNS(mb, mkStores, 1); err != nil {
 				return err
 			}
 			stored = true
@@ -386,10 +446,10 @@ func (m *Memo) put(k string, vec []float64) {
 		if err := sb.Put(m.seqKey(seq), []byte(k)); err != nil {
 			return err
 		}
-		if err := bump(mb, mkCount+m.ns, 1); err != nil {
+		if err := m.bumpNS(mb, mkCount, 1); err != nil {
 			return err
 		}
-		if err := bump(mb, mkStores+m.ns, 1); err != nil {
+		if err := m.bumpNS(mb, mkStores, 1); err != nil {
 			return err
 		}
 		stored = true
@@ -423,6 +483,15 @@ func (m *Memo) pruneTx(vb, sb, mb *bolt.Bucket) error {
 	if n <= m.maxEntries {
 		return nil
 	}
+	// n comes off disk with no bound. A corrupt counter — the same corruption
+	// class dropCorrupt exists to handle for records — would otherwise reach the
+	// make() below with a multi-exabyte capacity and panic inside db.Update,
+	// which propagates out through Wrap and kills the process. That would break
+	// this package's own contract that every failure degrades to a live call.
+	if cap := m.maxEntries * 2; n > cap {
+		_ = m.bumpNS(mb, mkUnderflow, 1) // an impossible count is itself a fault
+		n = cap
+	}
 	target := m.maxEntries * 9 / 10
 	if target < 1 {
 		target = 1
@@ -446,16 +515,26 @@ func (m *Memo) pruneTx(vb, sb, mb *bolt.Bucket) error {
 			vecKey: append([]byte(nil), kv...),
 		})
 	}
+	// Count the vectors ACTUALLY removed, not the seq entries walked. bbolt's
+	// Delete on a missing key is a silent no-op, so a dangling seq entry (left by
+	// a header-less corrupt record, or by a layout change) would otherwise
+	// decrement the live count for a vector that was never there — drifting the
+	// counter low until prune stops firing and the store grows past its cap
+	// forever, silently.
+	removed := 0
 	for _, v := range victims {
-		if err := vb.Delete(v.vecKey); err != nil {
-			return err
+		if vb.Get(v.vecKey) != nil {
+			if err := vb.Delete(v.vecKey); err != nil {
+				return err
+			}
+			removed++
 		}
 		if err := sb.Delete(v.seqKey); err != nil {
 			return err
 		}
 	}
-	if len(victims) > 0 {
-		return bump(mb, mkCount+m.ns, int64(-len(victims)))
+	if removed > 0 {
+		return m.bumpNS(mb, mkCount, int64(-removed))
 	}
 	return nil
 }
@@ -490,6 +569,20 @@ type Stats struct {
 	ErrorsRead    int64 `json:"errors_read"`
 	ErrorsWrite   int64 `json:"errors_write"`
 	DimMismatches int64 `json:"dim_mismatches"`
+	// CountUnderflows records an impossible bookkeeping state (a counter asked to
+	// go below zero, or a live count larger than twice the cap). Clamping without
+	// counting would erase the evidence of the bug that produced it.
+	CountUnderflows int64 `json:"count_underflows"`
+	// LastFault is the most recent human-readable fault with its remediation.
+	LastFault string `json:"last_fault,omitempty"`
+	// ForeignNamespaces/ForeignVectors describe entries this handle can never
+	// reach (a prior embedder id or epoch). They are not deleted, so without this
+	// a store at its size cap reports "0 vectors stored".
+	ForeignNamespaces int `json:"foreign_namespaces,omitempty"`
+	ForeignVectors    int `json:"foreign_vectors,omitempty"`
+	// FileBytes is the store's on-disk size. bbolt never shrinks after a prune,
+	// so this is a high-water mark and the only honest capacity signal.
+	FileBytes int64 `json:"file_bytes,omitempty"`
 	// HitRate is nil when nothing has been looked up. It is deliberately a
 	// pointer and not a bare 0.0: publishing "0% hit rate" for a memo that has
 	// never been consulted reports a measured failure where there is no
@@ -502,19 +595,22 @@ type Stats struct {
 // "available, 0 vectors, never consulted" for a store it failed to read — which
 // would turn a read fault into a confident claim of emptiness.
 func (m *Memo) Stats() (Stats, error) {
-	s := Stats{
-		EmbedderID:    m.EmbedderID(),
-		Epoch:         m.Epoch(),
-		SessionHits:   loadAtomic(m, func(x *Memo) int64 { return x.hits.Load() }),
-		SessionMisses: loadAtomic(m, func(x *Memo) int64 { return x.misses.Load() }),
-		SessionStores: loadAtomic(m, func(x *Memo) int64 { return x.stores.Load() }),
-		ErrorsDecode:  loadAtomic(m, func(x *Memo) int64 { return x.errsDecode.Load() }),
-		ErrorsRead:    loadAtomic(m, func(x *Memo) int64 { return x.errsRead.Load() }),
-		ErrorsWrite:   loadAtomic(m, func(x *Memo) int64 { return x.errsWrite.Load() }),
-		DimMismatches: loadAtomic(m, func(x *Memo) int64 { return x.dimMismatch.Load() }),
-	}
 	if m == nil || m.db == nil {
-		return s, nil
+		return Stats{}, nil
+	}
+	// Held across BOTH the atomic loads and the read transaction, so a concurrent
+	// Flush cannot swap the session counters to zero and commit them between the
+	// two halves — which would report double the real hit count (or lose a whole
+	// session, depending on the interleaving).
+	m.statMu.Lock()
+	defer m.statMu.Unlock()
+
+	s := Stats{
+		EmbedderID:    m.embedderID,
+		Epoch:         m.epoch,
+		SessionHits:   m.hits.Load(),
+		SessionMisses: m.misses.Load(),
+		SessionStores: m.stores.Load(),
 	}
 	var missing bool
 	err := m.db.View(func(tx *bolt.Tx) error {
@@ -528,16 +624,46 @@ func (m *Memo) Stats() (Stats, error) {
 		s.LifetimeHits = readCounter(mb, mkHits+m.ns)
 		s.LifetimeMisses = readCounter(mb, mkMisses+m.ns)
 		s.LifetimeStores = readCounter(mb, mkStores+m.ns)
+		// Faults come from DISK, so a surface that opened its own handle (the
+		// loupe does) reports what actually happened rather than the zeros its own
+		// untouched atomics would give it.
+		s.ErrorsDecode = readCounter(mb, mkErrDecode+m.ns)
+		s.ErrorsRead = readCounter(mb, mkErrRead+m.ns)
+		s.ErrorsWrite = readCounter(mb, mkErrWrite+m.ns)
+		s.DimMismatches = readCounter(mb, mkDimMiss+m.ns)
+		s.CountUnderflows = readCounter(mb, mkUnderflow+m.ns)
+		s.LastFault = string(mb.Get([]byte(mkLastFault + m.ns)))
+		// Namespaces other than the live one are orphaned-but-not-deleted (an
+		// epoch bump or a model switch). Without this, a 640 MB store full of
+		// unreachable vectors reports "0 vectors stored" and the operator is told
+		// the file is empty while it sits at its size cap.
+		if c := mb.Cursor(); c != nil {
+			pfx := []byte(mkCount)
+			live := mkCount + m.ns
+			for k, v := c.Seek(pfx); k != nil && hasPrefix(k, pfx); k, v = c.Next() {
+				if string(k) != live && len(v) == 8 && int64(binary.BigEndian.Uint64(v)) > 0 {
+					s.ForeignNamespaces++
+					s.ForeignVectors += int(binary.BigEndian.Uint64(v))
+				}
+			}
+		}
+		s.FileBytes = tx.Size()
 		return nil
 	})
+	// Fold the unflushed session counters in, keeping every Lifetime* field on one
+	// time base. Session faults are added the same way: they are persisted
+	// opportunistically, but the ones since the last successful write are only in
+	// memory.
+	s.ErrorsDecode += m.errsDecode.Load()
+	s.ErrorsRead += m.errsRead.Load()
+	s.ErrorsWrite += m.errsWrite.Load()
+	s.DimMismatches += m.dimMismatch.Load()
 	if err != nil {
 		return s, fmt.Errorf("embedmemo: read stats: %w", err)
 	}
 	if missing {
 		return s, errors.New("embedmemo: store has no meta bucket — the file is not a memo store (foreign or truncated)")
 	}
-	// Session counters have not been flushed yet, so fold them in for a live view
-	// and keep every Lifetime* field on the same time base.
 	s.LifetimeHits += s.SessionHits
 	s.LifetimeMisses += s.SessionMisses
 	if s.LifetimeHits+s.LifetimeMisses > 0 {
@@ -545,13 +671,6 @@ func (m *Memo) Stats() (Stats, error) {
 		s.HitRate = &r
 	}
 	return s, nil
-}
-
-func loadAtomic(m *Memo, f func(*Memo) int64) int64 {
-	if m == nil {
-		return 0
-	}
-	return f(m)
 }
 
 // Flush persists the session hit/miss counters into this namespace's totals.
@@ -564,8 +683,11 @@ func (m *Memo) Flush() error {
 	if m == nil || m.db == nil || m.readOnly {
 		return nil
 	}
+	m.statMu.Lock()
+	defer m.statMu.Unlock()
 	h, mi := m.hits.Swap(0), m.misses.Swap(0)
-	if h == 0 && mi == 0 {
+	ed, er, ew, dm := m.errsDecode.Swap(0), m.errsRead.Swap(0), m.errsWrite.Swap(0), m.dimMismatch.Swap(0)
+	if h == 0 && mi == 0 && ed == 0 && er == 0 && ew == 0 && dm == 0 {
 		return nil
 	}
 	err := m.db.Update(func(tx *bolt.Tx) error {
@@ -573,18 +695,56 @@ func (m *Memo) Flush() error {
 		if mb == nil {
 			return errors.New("embedmemo: missing meta bucket")
 		}
-		if e := bump(mb, mkHits+m.ns, h); e != nil {
-			return e
+		for _, p := range []struct {
+			key string
+			n   int64
+		}{
+			{mkHits, h}, {mkMisses, mi},
+			{mkErrDecode, ed}, {mkErrRead, er}, {mkErrWrite, ew}, {mkDimMiss, dm},
+		} {
+			if p.n == 0 {
+				continue
+			}
+			if e := m.bumpNS(mb, p.key, p.n); e != nil {
+				return e
+			}
 		}
-		return bump(mb, mkMisses+m.ns, mi)
+		return nil
 	})
 	if err != nil {
+		// Restore everything so a retry (or a later periodic flush) can still
+		// persist it. Zeroing before the write meant a failed flush silently
+		// DELETED the counters, making the next report show a rate lower than
+		// reality — a fabricated measurement, not merely a missing one.
 		m.hits.Add(h)
 		m.misses.Add(mi)
+		m.errsDecode.Add(ed)
+		m.errsRead.Add(er)
+		m.errsWrite.Add(ew)
+		m.dimMismatch.Add(dm)
 		m.errsWrite.Add(1)
 		return err
 	}
 	return nil
+}
+
+// bumpNS adds delta to a per-namespace counter, recording an underflow rather
+// than silently normalizing one.
+func (m *Memo) bumpNS(b *bolt.Bucket, key string, delta int64) error {
+	name := key + m.ns
+	n := readCounter(b, name) + delta
+	if n < 0 {
+		n = 0
+		// Only count the underflow itself; recursing through bumpNS for the
+		// underflow counter could loop.
+		u := readCounter(b, mkUnderflow+m.ns) + 1
+		buf := make([]byte, 8)
+		binary.BigEndian.PutUint64(buf, uint64(u))
+		if e := b.Put([]byte(mkUnderflow+m.ns), buf); e != nil {
+			return e
+		}
+	}
+	return writeCounter(b, name, n)
 }
 
 // ---- record encoding -------------------------------------------------------
@@ -621,10 +781,21 @@ func decode(rec []byte) ([]float64, bool) {
 	return out, true
 }
 
-// seqOfRecord recovers the sequence slot of an existing (possibly corrupt)
-// record so a repair can reuse it instead of orphaning the seq entry. A record
-// too short to carry a header gets 0, which sorts first and is pruned first —
-// the correct fate for something unreadable.
+// seqOfRecord recovers the sequence slot recorded in a record's header.
+//
+// Two callers, both of which need the slot NUMBER and neither of which changes
+// prune order by writing it:
+//   - put's repair branch re-encodes the record with the same slot, so the
+//     existing seq-bucket entry (which already points at this key) stays valid
+//     and is neither orphaned nor duplicated;
+//   - dropCorrupt uses it to address that seq entry DIRECTLY instead of scanning
+//     the namespace for it.
+//
+// Prune order comes exclusively from the seq BUCKET's key ordering; the header
+// copy is never sorted on. A record too short to carry a header yields 0, whose
+// seq key will simply not exist — deleting a missing key is a no-op in bbolt, and
+// pruneTx tolerates a dangling seq entry by counting only vectors it actually
+// removed.
 func seqOfRecord(rec []byte) int64 {
 	if len(rec) < recHeadLen {
 		return 0

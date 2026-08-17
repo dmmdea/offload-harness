@@ -173,7 +173,11 @@ func (p *Pipeline) EmbedMemoStats() (embedmemo.Stats, string) {
 	if p.embedMemo == nil {
 		reason := p.embedMemoReason
 		if reason == "" {
-			reason = "no memo"
+			// Unreachable via New, which sets a reason on both branches. Made
+			// self-reporting rather than generic: a future constructor that builds
+			// a Pipeline literal directly would otherwise silently reintroduce the
+			// exact unfalsifiable "no memo" string this change set out to remove.
+			reason = "BUG: pipeline constructed without New — embed-memo reason was never set"
 		}
 		return embedmemo.Stats{}, reason
 	}
@@ -753,7 +757,7 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 		data, _ = json.Marshal(map[string]string{visionResultKey(req.Task): answer})
 	}
 	if p.cache != nil {
-		if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gres.TokensIn, Model: meta.Model}); e == nil {
+		if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gres.TokensIn, Model: meta.Model, InLoop: p.tierCache}); e == nil {
 			_ = p.cache.Put(ck, b)
 		}
 	}
@@ -944,7 +948,7 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	}
 	data, _ := json.Marshal(out)
 	if p.cache != nil {
-		if b, e := json.Marshal(cacheVal{Data: data, Model: model}); e == nil {
+		if b, e := json.Marshal(cacheVal{Data: data, Model: model, InLoop: p.tierCache}); e == nil {
 			_ = p.cache.Put(ck, b)
 		}
 	}
@@ -3015,7 +3019,7 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 			// that must produce a gradeable result without any production side-effects.
 			if record {
 				if p.cache != nil {
-					if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn, Model: meta.Model}); e == nil {
+					if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn, Model: meta.Model, InLoop: p.tierCache}); e == nil {
 						_ = p.cache.Put(ck, b)
 					}
 				}
@@ -3107,7 +3111,7 @@ func (p *Pipeline) attemptReasoning(ctx context.Context, req core.Request, built
 		return core.Deferf("reasoning tier: "+v.Reason, gen.Content, meta), false
 	}
 	if p.cache != nil {
-		if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn, Model: meta.Model}); e == nil {
+		if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn, Model: meta.Model, InLoop: p.tierCache}); e == nil {
 			_ = p.cache.Put(ck, b)
 		}
 	}
@@ -3632,10 +3636,10 @@ func (p *Pipeline) RunTier(ctx context.Context, req core.Request, model string) 
 	//     the pre-fix shape and was simply never exercised; reviving it as-is
 	//     would have reinstated the stale-prompt bug on a brand-new path.
 	//
-	// shots is nil because RunTier injects no exemplars — and nil hashes to a
-	// different tag than any non-empty set, so a Run answer built WITH exemplars
-	// can never be served to a RunTier caller that had none.
-	ck := cacheKeyFor(req.Task, req.Input, tasks.StableParamsKey(req.Params), model, built, nil)
+	// ...and it lives in RunTier's OWN keyspace, so Run and RunTier can never
+	// compute the same key and overwrite each other's entries. See
+	// tierKeyspaceTag for why guarding only the read was not enough.
+	ck := cacheKeyForTier(req.Task, req.Input, tasks.StableParamsKey(req.Params), model, built)
 	meta := core.Meta{Model: model, Feat: feat}
 	meta.InputSHA256 = inputFingerprint(req.Input)
 	meta.PromptPrefixSHA256 = promptPrefixFingerprint(built.System, userPreambleOf(built.User, req.Input))

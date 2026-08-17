@@ -18,7 +18,10 @@ Versioning: [SemVer](https://semver.org/).
   larger payoff is the swap, not the compute: the embedder carries `ttl=300` like every
   other seat, so the first embed after an idle gap pays a ~1–2 s cold load, and a memo
   hit skips the HTTP call entirely. New config: `embed_memo_enabled` (default on),
-  `embed_memo_path`, `embed_memo_max_entries` (50000 ≈ 300 MB), `embed_memo_epoch`.
+  `embed_memo_path`, `embed_memo_max_entries` (50000 ≈ **640 MB on disk** — bbolt costs
+  ~12.8 KB/entry once fill factor and overflow pages are counted, not the ~6 KB the
+  payload arithmetic suggests, and bbolt never shrinks the file after a prune),
+  `embed_memo_epoch`.
   - Keys are **exact bytes, never normalized**. Normalizing for a higher hit rate would
     let two different texts share a key and return a vector computed for the other one —
     a silent correctness bug in a semantic quantity, not a cache miss.

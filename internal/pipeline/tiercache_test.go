@@ -210,7 +210,7 @@ func TestRunTierRefusesAnEntryProducedByADifferentTier(t *testing.T) {
 	}
 	// Hand-seed the entry the CASCADE would write: same key RunTier computes when
 	// pinned to cfg.Model, but produced by the small tier.
-	ck := cacheKeyFor(req.Task, req.Input, tasks.StableParamsKey(req.Params), cfg.Model, built, nil)
+	ck := cacheKeyForTier(req.Task, req.Input, tasks.StableParamsKey(req.Params), cfg.Model, built)
 	seeded, _ := json.Marshal(cacheVal{
 		Data:     json.RawMessage(`{"verdict":"STALE-FROM-ANOTHER-TIER","reason":"x"}`),
 		TokensIn: 5,
@@ -272,7 +272,7 @@ func TestRunTierKeyBindsThePromptTemplateAtTheCallSite(t *testing.T) {
 	// it. If RunTier stopped folding the template into its key (or folded in a
 	// different one), this entry becomes unreachable and the sentinel never comes
 	// back — which is precisely the mutation "drop Built from the key".
-	realKey := cacheKeyFor(req.Task, req.Input, paramsKey, cfg.TriageModel, built, nil)
+	realKey := cacheKeyForTier(req.Task, req.Input, paramsKey, cfg.TriageModel, built)
 	sentinel, _ := json.Marshal(cacheVal{
 		Data:  json.RawMessage(`{"verdict":"SEEDED-UNDER-REAL-TEMPLATE","reason":"x"}`),
 		Model: cfg.TriageModel,
@@ -302,7 +302,7 @@ func TestRunTierKeyBindsThePromptTemplateAtTheCallSite(t *testing.T) {
 	// NEGATIVE direction — an edited template must NOT reach that entry.
 	edited := built
 	edited.User = built.User + "\nAlways answer in French."
-	editedKey := cacheKeyFor(req.Task, req.Input, paramsKey, cfg.TriageModel, edited, nil)
+	editedKey := cacheKeyForTier(req.Task, req.Input, paramsKey, cfg.TriageModel, edited)
 	if editedKey == realKey {
 		t.Fatal("editing the user template did not change the key — a prompt edit would serve pre-edit answers forever")
 	}
@@ -331,7 +331,7 @@ func TestDeferredRunTierResultIsNotCached(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tasks.Build: %v", err)
 	}
-	ck := cacheKeyFor(req.Task, req.Input, tasks.StableParamsKey(req.Params), cfg.TriageModel, built, nil)
+	ck := cacheKeyForTier(req.Task, req.Input, tasks.StableParamsKey(req.Params), cfg.TriageModel, built)
 	if _, ok := ca.Get(ck); ok {
 		t.Fatal("a deferred result was cached — the defer would become permanent for this input")
 	}
@@ -418,7 +418,7 @@ func TestInLoopProvenanceIsStampedAndSurfacedOnAHit(t *testing.T) {
 	}
 
 	built, _ := tasks.Build(req)
-	ck := cacheKeyFor(req.Task, req.Input, tasks.StableParamsKey(req.Params), cfg.TriageModel, built, nil)
+	ck := cacheKeyForTier(req.Task, req.Input, tasks.StableParamsKey(req.Params), cfg.TriageModel, built)
 	raw, ok := ca.Get(ck)
 	if !ok {
 		t.Fatal("entry missing")
@@ -432,6 +432,33 @@ func TestInLoopProvenanceIsStampedAndSurfacedOnAHit(t *testing.T) {
 	}
 	if cv.Model != cfg.TriageModel {
 		t.Errorf("stored producer = %q, want %q", cv.Model, cfg.TriageModel)
+	}
+}
+
+// Run and RunTier must occupy DISJOINT keyspaces. Guarding only the read left
+// both paths writing the same key: Run stored an E2B answer, RunTier refused it,
+// ran the workhorse and overwrote the entry, Run then served the workhorse
+// answer, and the two ping-ponged one key forever — collapsing the hit rate with
+// nothing recording it, since in-loop calls run with a nil ledger.
+func TestRunAndRunTierNeverComputeTheSameKey(t *testing.T) {
+	cfg := tierTestCfg(t, "http://127.0.0.1:1")
+	req := triageReq()
+	built, err := tasks.Build(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paramsKey := tasks.StableParamsKey(req.Params)
+
+	// The exact coincidence that used to collide: the pinned tier IS the primary
+	// model, no exemplars, identical Built.
+	runKey := cacheKeyFor(req.Task, req.Input, paramsKey, cfg.Model, built, nil)
+	tierKey := cacheKeyForTier(req.Task, req.Input, paramsKey, cfg.Model, built)
+	if runKey == tierKey {
+		t.Fatal("Run and RunTier compute the same key — they will overwrite each other's entries")
+	}
+	// And RunTier still separates its own tiers.
+	if cacheKeyForTier(req.Task, req.Input, paramsKey, cfg.TriageModel, built) == tierKey {
+		t.Fatal("RunTier keys collide across tiers")
 	}
 }
 
