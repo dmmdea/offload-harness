@@ -19,10 +19,12 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
 // maxDispatchBody is the dispatch request-body cap (1 MiB per the spec — a
@@ -35,6 +37,19 @@ const maxDispatchBody = 1 << 20
 // serve hours-stale 200s and mislead the dispatcher's routing. Past this bound
 // a stale snapshot is the same class of failure as no snapshot: 503.
 const maxSnapshotAge = 30 * time.Second
+
+// agentResidencyTTL is how long one roster answer backs agent_seat_resident
+// before the next health request triggers a background refresh. Set to the
+// SAME bound as maxSnapshotAge on purpose: health already promises its cached
+// data (the VRAM snapshot) is no staler than that, and the roster answer
+// rides the same freshness contract rather than inventing a second cadence.
+const agentResidencyTTL = maxSnapshotAge
+
+// agentResidencyProbeTimeout bounds ONE background roster GET. Deliberately
+// shorter than swapclient.DefaultTimeout: the probe informs a cached health
+// field, and against a dead llama-swap a long-hanging refresh would just
+// delay the (negative) answer the next TTL window serves anyway.
+const agentResidencyProbeTimeout = 5 * time.Second
 
 // Runner runs one translated request to completion. The real pipeline
 // satisfies it; tests inject fakes.
@@ -78,18 +93,102 @@ type Server struct {
 	opts     Options
 	tasks    []string
 	families []string
+	// agentSeat is the resolved agent planner seat (config.AgentPlannerModel:
+	// agent_model > workhorse Model), computed once here like tasks/families —
+	// the config cannot change under a running server. Advertised (and probed
+	// for residency) only when Cfg.FleetAgentEnabled.
+	agentSeat string
+	// rosterServes answers "does the llama-swap behind endpoint serve seat?"
+	// (alias-aware). A seam so tests drive the residency cache without a live
+	// llama-swap; production always gets swapRosterServes.
+	rosterServes func(ctx context.Context, endpoint, seat string) (bool, error)
+	agentRes     agentResidency
+}
+
+// agentResidency caches the roster's answer for the agent seat between health
+// requests. The cache exists because BOTH of these hold at once:
+//   - agent_seat_resident must be roster-verified (§S3) — config alone cannot
+//     know whether the seat is actually served;
+//   - the health handler must NEVER block on an HTTP call to llama-swap (the
+//     same rule the reclaim tracker documents — fleet_reclaim.go), and must
+//     not probe per request either.
+//
+// So a health request serves the cached answer and, when it is older than
+// agentResidencyTTL, triggers ONE background refresh (inflight = the
+// single-flight latch). Until the first probe lands the answer is false —
+// fail CLOSED: an unverified seat reads as not resident, and the delegator
+// keeps the work local, which is always the safe placement.
+type agentResidency struct {
+	mu       sync.Mutex
+	resident bool
+	at       time.Time
+	inflight bool
 }
 
 // New builds a Server. The supported-task/family lists are computed here, not
 // per health request — the config cannot change under a running server.
 func New(runner Runner, jobs *Jobs, opts Options) *Server {
 	return &Server{
-		runner:   runner,
-		jobs:     jobs,
-		opts:     opts,
-		tasks:    SupportedTasks(opts.Cfg),
-		families: Families(opts.Cfg),
+		runner:       runner,
+		jobs:         jobs,
+		opts:         opts,
+		tasks:        SupportedTasks(opts.Cfg),
+		families:     Families(opts.Cfg),
+		agentSeat:    opts.Cfg.AgentPlannerModel(""),
+		rosterServes: swapRosterServes,
 	}
+}
+
+// swapRosterServes is the production residency probe: one GET /v1/models via
+// the shared swapclient adapter, answered alias-aware (Roster.Serves matches
+// canonical ids AND meta.llamaswap.aliases — the plannerUnserved lesson: every
+// harness-bound seat name on the reference deployment is an alias, so an
+// id-only match would report a correctly-served seat missing forever).
+func swapRosterServes(ctx context.Context, endpoint, seat string) (bool, error) {
+	roster, err := swapclient.FetchRoster(ctx, endpoint, agentResidencyProbeTimeout)
+	if err != nil {
+		return false, err
+	}
+	return roster.Serves(seat), nil
+}
+
+// agentResident returns the cached residency answer, kicking off a background
+// refresh when the cache has aged past agentResidencyTTL. It never blocks and
+// never probes more than once per TTL window regardless of request rate.
+func (s *Server) agentResident() bool {
+	a := &s.agentRes
+	a.mu.Lock()
+	fresh := !a.at.IsZero() && time.Since(a.at) <= agentResidencyTTL
+	if fresh || a.inflight {
+		v := a.resident
+		a.mu.Unlock()
+		return v
+	}
+	a.inflight = true
+	v := a.resident // serve the previous answer while the refresh runs
+	a.mu.Unlock()
+	go s.refreshAgentResidency()
+	return v
+}
+
+// refreshAgentResidency runs one bounded roster probe and publishes the
+// answer. A probe FAILURE publishes resident=false rather than keeping the
+// last good answer (the VRAM sampler's rule): residency feeds a placement
+// gate, and advertising a seat as servable off a stale success while
+// llama-swap is down would route remote agent work at a node that cannot run
+// it — false only costs a conservative local placement. The failure is still
+// cached for a full TTL so a dead endpoint is probed once per window, not
+// hammered per request.
+func (s *Server) refreshAgentResidency() {
+	ctx, cancel := context.WithTimeout(context.Background(), agentResidencyProbeTimeout)
+	defer cancel()
+	resident, err := s.rosterServes(ctx, s.opts.Cfg.Endpoint, s.agentSeat)
+	a := &s.agentRes
+	a.mu.Lock()
+	a.resident = resident && err == nil
+	a.at = time.Now()
+	a.inflight = false
+	a.mu.Unlock()
 }
 
 // Handler returns the routed mux for the three contract endpoints.
@@ -164,6 +263,26 @@ type healthPayload struct {
 	// VramReclaimSource states HOW the number was reached, so a measured zero is
 	// never mistaken for an unknown.
 	VramReclaimSource string `json:"vram_reclaim_source,omitempty"`
+	// ---- Agent lane advertisement (§S3, multi-node delegation) ----
+	// All four fields are ADDITIVE and omitempty, so schema_version stays 1:
+	// a node with the lane off — which includes every pre-0.63 node — emits a
+	// byte-identical payload (pinned in TestHealthAgentFieldsAbsentWhenDisabled),
+	// and the dispatcher decodes health loosely per FLEET-NODE.md, so old and
+	// new nodes interoperate in both directions. Populated ONLY when the
+	// operator opted the node in (fleet_agent_enabled): the fields advertise a
+	// CAPABILITY, and every tier binds an agent seat, so keying off the seat's
+	// mere presence would advertise the lane fleet-wide overnight.
+	AgentSeat string `json:"agent_seat,omitempty"` // resolved planner seat (config.AgentPlannerModel)
+	// AgentCtxTokens is the seat's serving ceiling from config (the tier's
+	// agent_ctx_tokens) — the delegator's placement gate does its ctx
+	// arithmetic against this. 0 = omitted = "ceiling unknown", which the gate
+	// reads as never-fits.
+	AgentCtxTokens int `json:"agent_ctx_tokens,omitempty"`
+	// AgentResident is the CACHED roster verification (agentResidency): true
+	// only when a probe inside the TTL window saw the seat in the llama-swap
+	// roster. False/omitted until the first probe lands, and on probe failure.
+	AgentResident bool `json:"agent_seat_resident,omitempty"`
+	AgentEnabled  bool `json:"agent_enabled,omitempty"`
 }
 
 // handleHealth assembles the contract health JSON from cached/cheap reads
@@ -224,6 +343,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			payload.VramReclaimableGb = &reclaimable
 			payload.VramSchedulableGb = &schedulable
 		}
+	}
+	// Agent lane (§S3): advertised only on operator opt-in — see the payload
+	// field comments. agentResident() is a cached read + at most one background
+	// refresh per TTL; it never blocks this handler on llama-swap.
+	if s.opts.Cfg.FleetAgentEnabled {
+		payload.AgentEnabled = true
+		payload.AgentSeat = s.agentSeat
+		payload.AgentCtxTokens = s.opts.Cfg.AgentCtxTokens
+		payload.AgentResident = s.agentResident()
 	}
 	writeJSON(w, http.StatusOK, payload)
 }

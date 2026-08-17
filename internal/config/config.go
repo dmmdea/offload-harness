@@ -131,6 +131,17 @@ type Config struct {
 	// seat seed this higher: a cold big-model load plus low tok/s inside 180s is a
 	// timeout machine, not an agent.
 	AgentTimeoutSec int `json:"agent_timeout_sec,omitempty"`
+	// AgentCtxTokens is the agent seat's SERVED context window in tokens — the tier
+	// profile's agent_ctx_tokens value (setup/templates/profiles.json; the installer
+	// records it in installed.json). It exists as a config key so /fleet/health can
+	// advertise the ceiling (agent_ctx_tokens, §S3 of the multi-node delegation spec)
+	// from CONFIG rather than probing: the live-window probe (/upstream/{model}/props)
+	// can cold-start a multi-GB model, which is unacceptable on a health cadence.
+	// 0 (the default) = not advertised — the delegator's placement gate then never
+	// selects this node for remote agent work (its ctx arithmetic cannot pass), which
+	// is the safe reading of "ceiling unknown". Set it to the tier's agent_ctx_tokens
+	// when opting a node in with fleet_agent_enabled.
+	AgentCtxTokens int `json:"agent_ctx_tokens,omitempty"`
 	// VisionModel is the VLM alias used for the vqa task (multimodal). Empty = no
 	// vision route (vqa defers).
 	VisionModel string `json:"vision_model,omitempty"`

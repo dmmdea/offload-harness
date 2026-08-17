@@ -1,6 +1,7 @@
 package fleetnode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -872,6 +873,136 @@ func TestMediaRejectsSymlinkEscape(t *testing.T) {
 		t.Fatalf("SECURITY: symlink escape not rejected, served %q", rec.Body.String())
 	}
 	wantErrorShape(t, rec, http.StatusNotFound, "not found")
+}
+
+// fakeRoster serves GET /v1/models in llama-swap's REAL shape: a canonical id
+// the config never mentions, with the harness-bound name published only under
+// meta.llamaswap.aliases (the exact deployment shape that broke every id-only
+// roster reader — see internal/swapclient's package doc).
+func fakeRoster(t *testing.T, canonical string, aliases ...string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		quoted := make([]string, len(aliases))
+		for i, a := range aliases {
+			quoted[i] = fmt.Sprintf("%q", a)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"object":"list","data":[{"id":%q,"object":"model","meta":{"llamaswap":{"aliases":[%s]}}}]}`,
+			canonical, strings.Join(quoted, ","))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// agentHealthCfg opts the node into the agent lane against a fake roster.
+func agentHealthCfg(endpoint string) config.Config {
+	cfg := imageCfg()
+	cfg.FleetAgentEnabled = true
+	cfg.AgentModel = "offload-e4b"
+	cfg.AgentCtxTokens = 16384
+	cfg.Endpoint = endpoint
+	return cfg
+}
+
+// TestHealthAgentFieldsPresentWhenEnabled drives the §S3 agent advertisement:
+// with fleet_agent_enabled the payload carries agent_enabled/agent_seat/
+// agent_ctx_tokens immediately, while agent_seat_resident starts ABSENT
+// (false) — the residency cache is cold and the handler must NEVER block on a
+// llama-swap round-trip (same rule as the reclaim tracker) — and turns true
+// once the roster probe lands. The fake roster serves the seat ONLY as an
+// alias, pinning alias-awareness (the plannerUnserved idiom): an id-only
+// reader would advertise a correctly-served seat as non-resident forever.
+func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
+	roster := fakeRoster(t, "gemma-4-e4b", "offload-e4b")
+	s, _ := newTestServer(t, agentHealthCfg(roster.URL), &fakeRunner{}, nil)
+
+	rec := do(t, s, http.MethodGet, "/fleet/health", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	m := decodeMap(t, rec)
+	if m["schema_version"] != float64(1) {
+		t.Fatalf("schema_version = %v, want 1 — the agent fields are additive, never a version bump", m["schema_version"])
+	}
+	if m["agent_enabled"] != true {
+		t.Fatalf("agent_enabled = %v, want true", m["agent_enabled"])
+	}
+	if m["agent_seat"] != "offload-e4b" {
+		t.Fatalf("agent_seat = %v, want the resolved planner seat offload-e4b", m["agent_seat"])
+	}
+	if m["agent_ctx_tokens"] != float64(16384) {
+		t.Fatalf("agent_ctx_tokens = %v, want 16384", m["agent_ctx_tokens"])
+	}
+	if v, present := m["agent_seat_resident"]; present {
+		t.Fatalf("agent_seat_resident = %v on the FIRST health (cache cold) — must fail closed until the probe lands, never block the handler", v)
+	}
+
+	// Deterministic warm: run the same refresh the background single-flight
+	// path runs, synchronously, then re-read.
+	s.refreshAgentResidency()
+	m = decodeMap(t, do(t, s, http.MethodGet, "/fleet/health", "", nil))
+	if m["agent_seat_resident"] != true {
+		t.Fatalf("agent_seat_resident = %v after a successful ALIAS-served roster probe, want true", m["agent_seat_resident"])
+	}
+}
+
+// TestHealthAgentResidencyFailsClosedWhenRosterUnreachable: llama-swap down
+// (or endpoint unset) must read as NOT resident — the delegator then keeps
+// work local, the conservative direction — while health itself stays 200 and
+// the other agent fields keep advertising (the media lane and the capability
+// advertisement do not depend on llama-swap being up).
+func TestHealthAgentResidencyFailsClosedWhenRosterUnreachable(t *testing.T) {
+	roster := fakeRoster(t, "gemma-4-e4b", "offload-e4b")
+	base := roster.URL
+	roster.Close() // now refused at connect
+
+	s, _ := newTestServer(t, agentHealthCfg(base), &fakeRunner{}, nil)
+	s.refreshAgentResidency()
+	rec := do(t, s, http.MethodGet, "/fleet/health", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — a dead llama-swap must not 503 health (body %s)", rec.Code, rec.Body.String())
+	}
+	m := decodeMap(t, rec)
+	if v, present := m["agent_seat_resident"]; present {
+		t.Fatalf("agent_seat_resident = %v with the roster unreachable, want absent (fail closed)", v)
+	}
+	if m["agent_enabled"] != true || m["agent_seat"] != "offload-e4b" {
+		t.Fatalf("static agent fields must still advertise: enabled=%v seat=%v", m["agent_enabled"], m["agent_seat"])
+	}
+}
+
+// TestHealthAgentFieldsAbsentWhenDisabled is the additive-off pin, byte level:
+// with fleet_agent_enabled false (the default), a config that ALSO carries an
+// agent seat + ctx ceiling must produce a health body byte-identical to a
+// config with no agent keys at all — the advertisement keys off the operator
+// opt-in, never off the mere presence of a seat (every tier binds one).
+func TestHealthAgentFieldsAbsentWhenDisabled(t *testing.T) {
+	plain, _ := newTestServer(t, imageCfg(), &fakeRunner{}, nil)
+
+	seeded := imageCfg()
+	seeded.AgentModel = "offload-e4b"
+	seeded.AgentCtxTokens = 16384
+	seeded.Endpoint = "http://127.0.0.1:1" // must never be dialed while disabled
+	withSeat, _ := newTestServer(t, seeded, &fakeRunner{}, nil)
+
+	recPlain := do(t, plain, http.MethodGet, "/fleet/health", "", nil)
+	recSeeded := do(t, withSeat, http.MethodGet, "/fleet/health", "", nil)
+	if recPlain.Code != http.StatusOK || recSeeded.Code != http.StatusOK {
+		t.Fatalf("status = %d/%d, want 200/200", recPlain.Code, recSeeded.Code)
+	}
+	if !bytes.Equal(recPlain.Body.Bytes(), recSeeded.Body.Bytes()) {
+		t.Fatalf("disabled-lane health is not byte-identical:\n plain: %s\nseeded: %s",
+			recPlain.Body.String(), recSeeded.Body.String())
+	}
+	for _, key := range []string{"agent_seat", "agent_ctx_tokens", "agent_seat_resident", "agent_enabled"} {
+		if strings.Contains(recSeeded.Body.String(), key) {
+			t.Fatalf("disabled health leaks %q: %s", key, recSeeded.Body.String())
+		}
+	}
 }
 
 func TestServeTimeoutTable(t *testing.T) {
