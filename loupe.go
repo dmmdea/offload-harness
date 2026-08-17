@@ -131,9 +131,17 @@ type embedMemoReport struct {
 	Available bool   `json:"available"`
 	Reason    string `json:"reason,omitempty"` // why not, when Available is false
 	Path      string `json:"path,omitempty"`
+	Embedder  string `json:"embedder,omitempty"`
 	Distinct  int    `json:"distinct,omitempty"`
 	Hits      int64  `json:"lifetime_hits,omitempty"`
 	Misses    int64  `json:"lifetime_misses,omitempty"`
+	Stores    int64  `json:"lifetime_stores,omitempty"`
+	// Fault counters. A memo full of corrupt records or failing every write is
+	// otherwise indistinguishable from a healthy idle one.
+	ErrorsDecode  int64 `json:"errors_decode,omitempty"`
+	ErrorsRead    int64 `json:"errors_read,omitempty"`
+	ErrorsWrite   int64 `json:"errors_write,omitempty"`
+	DimMismatches int64 `json:"dim_mismatches,omitempty"`
 	// HitRate is nil when nothing has been looked up yet — see the Stats doc in
 	// internal/embedmemo for why this is a pointer.
 	HitRate *float64 `json:"hit_rate"`
@@ -372,14 +380,26 @@ func readEmbedMemoReport(cfg config.Config) embedMemoReport {
 		return embedMemoReport{Available: false, Path: cfg.EmbedMemoPath, Reason: reason}
 	}
 	defer m.Close()
-	st := m.Stats()
+	st, serr := m.Stats()
+	if serr != nil {
+		// Opened but unreadable is a FAULT, not an empty store. Publishing
+		// "available, 0 vectors, never consulted" here would convert a read
+		// failure into a confident claim that nothing was ever embedded.
+		return embedMemoReport{Available: false, Path: cfg.EmbedMemoPath, Reason: "opened but unreadable: " + serr.Error()}
+	}
 	return embedMemoReport{
-		Available: true,
-		Path:      cfg.EmbedMemoPath,
-		Distinct:  st.Distinct,
-		Hits:      st.LifetimeHits,
-		Misses:    st.LifetimeMisses,
-		HitRate:   st.HitRate,
+		Available:     true,
+		Path:          cfg.EmbedMemoPath,
+		Embedder:      st.EmbedderID,
+		Distinct:      st.Distinct,
+		Hits:          st.LifetimeHits,
+		Misses:        st.LifetimeMisses,
+		Stores:        st.LifetimeStores,
+		ErrorsDecode:  st.ErrorsDecode,
+		ErrorsRead:    st.ErrorsRead,
+		ErrorsWrite:   st.ErrorsWrite,
+		DimMismatches: st.DimMismatches,
+		HitRate:       st.HitRate,
 	}
 }
 
@@ -445,12 +465,22 @@ func emitStats(rep statsReport, asJSON bool) error {
 	switch {
 	case !em.Available:
 		p("  embed memo          n/a — %s", em.Reason)
+	case em.HitRate == nil && em.Stores > 0:
+		// Stores without lookups is arithmetically impossible — every store is
+		// preceded by a miss. It means the counters were never flushed, so say
+		// that instead of the flatly false "never consulted".
+		p("  embed memo          %d vectors stored but NO lookups recorded — counters unflushed", em.Distinct)
+		p("                      (a process wrote vectors and exited without persisting its hit/miss totals)")
 	case em.HitRate == nil:
 		p("  embed memo          %d vectors stored, never consulted yet", em.Distinct)
 	default:
 		p("  embed memo          %.1f%% hit (%d hit / %d miss) over %d stored vectors",
 			*em.HitRate*100, em.Hits, em.Misses, em.Distinct)
 		p("                      ^ each hit also skips a possible ~1-2s cold-embedder load (ttl=300)")
+	}
+	if em.Available && (em.ErrorsDecode+em.ErrorsRead+em.ErrorsWrite+em.DimMismatches) > 0 {
+		p("                      FAULTS: decode=%d read=%d write=%d dim-mismatch=%d",
+			em.ErrorsDecode, em.ErrorsRead, em.ErrorsWrite, em.DimMismatches)
 	}
 	p("")
 	p("ROUTING")

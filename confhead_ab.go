@@ -246,6 +246,11 @@ func redirectWrites(cfg config.Config, scratch string) config.Config {
 	c.ExemplarsDir = filepath.Join(scratch, "exemplars")
 	c.MediaDir = filepath.Join(scratch, "media")
 	c.SVGDir = filepath.Join(scratch, "svg")
+	// The embed memo is shared state exactly like the result cache, and for the
+	// same reason must not be: arm 1 would populate it and arm 2 would get its
+	// embeddings free, handing whichever arm runs second a systematic latency
+	// advantage in the very comparison this harness exists to make.
+	c.EmbedMemoPath = filepath.Join(scratch, "embed-memo.db")
 	// Self-learning side files that the live pipeline only READS: leave the head/
 	// threshold paths to the arm-specific wiring; redirect the rest defensively.
 	return c

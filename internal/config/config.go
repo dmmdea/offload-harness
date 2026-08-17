@@ -641,8 +641,13 @@ type Config struct {
 	// disables the memo as surely as the flag does.
 	EmbedMemoPath string `json:"embed_memo_path,omitempty"`
 	// EmbedMemoMaxEntries bounds the store; the oldest entries by insertion order
-	// are pruned back to 90% of the cap when it is exceeded. A 768-dim float64
-	// vector is ~6 KB, so the 50000 default is ~300 MB. 0 = unbounded.
+	// are pruned back to 90% of the cap when it is exceeded.
+	//
+	// SIZING, measured rather than derived: a 768-dim float64 vector is ~6 KB of
+	// payload, but bbolt costs ~12.8 KB per entry once fill factor and overflow
+	// pages are counted — so the 50000 default is roughly **640 MB**, not the
+	// ~300 MB the payload arithmetic suggests. bbolt also never shrinks the file
+	// after a prune, so that is a high-water mark. 0 = unbounded.
 	EmbedMemoMaxEntries int `json:"embed_memo_max_entries,omitempty"`
 	// EmbedMemoEpoch is the manual invalidation lever. The memo key already binds
 	// the embedder ID, so switching embedders can never serve stale vectors — but
@@ -1323,6 +1328,16 @@ func (c Config) EmbedMemoOn() bool {
 		return true
 	}
 	return *c.EmbedMemoEnabled
+}
+
+// EmbedMemoSettings returns the memo's (path, epoch, maxEntries) with the path
+// blanked when the memo is off — one resolution point, so a second call site
+// cannot accidentally enable the memo by forgetting the EmbedMemoOn check.
+func (c Config) EmbedMemoSettings() (path, epoch string, maxEntries int) {
+	if !c.EmbedMemoOn() {
+		return "", "", 0
+	}
+	return c.EmbedMemoPath, c.EmbedMemoEpoch, c.EmbedMemoMaxEntries
 }
 
 // BaseDir returns this node's resolved install root: c.Home when set, else

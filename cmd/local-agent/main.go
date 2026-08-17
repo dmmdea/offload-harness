@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -23,9 +24,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	bolt "go.etcd.io/bbolt"
+
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/cache"
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/sandbox"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
@@ -211,10 +215,23 @@ func main() {
 		if c, cerr := cache.Open(cfg.CachePath); cerr == nil {
 			agentCache = c
 			defer agentCache.Close()
+		} else if errors.Is(cerr, bolt.ErrTimeout) {
+			// The expected, benign case: the MCP server holds the exclusive lock.
+			fmt.Fprintln(os.Stderr, "note: cache is held by another local-offload process; continuing without cache")
 		} else {
-			fmt.Fprintln(os.Stderr, "note: cache unavailable (held by the MCP server?); continuing without cache")
+			// Anything else — permissions, a corrupt file, a bad path — is NOT
+			// lock contention, and reporting it as such sends the operator to
+			// diagnose the wrong thing entirely.
+			fmt.Fprintln(os.Stderr, "note: cache unavailable, continuing without it:", cerr)
 		}
 	}
+	// Persist the embed memo's hit/miss totals on the way out; see
+	// embedmemo.CloseShared for why every binary that may open one must do this.
+	defer func() {
+		if err := embedmemo.CloseShared(); err != nil {
+			fmt.Fprintln(os.Stderr, "note: embed memo counters may not have been persisted:", err)
+		}
+	}()
 	offload := pipeline.NewInLoopOffload(cfg, orCfg(*model, cfg.Model), timeout, agentCache)
 
 	// The broker audit trail must live OUTSIDE any worktree; resolve a default

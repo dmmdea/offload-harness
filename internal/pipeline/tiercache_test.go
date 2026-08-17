@@ -16,18 +16,24 @@ import (
 	"github.com/dmmdea/offload-harness/internal/tasks"
 )
 
-// fakeSeat is a minimal OpenAI-compatible completion endpoint that counts calls
-// and answers every triage request with the same valid verdict, so a "did the
-// model run?" assertion is exact rather than inferred from timing.
-func fakeSeat(t *testing.T, calls *atomic.Int64) *httptest.Server {
+// seatAnswering returns a fake OpenAI-compatible endpoint that answers every
+// request with the given verdict and counts calls, so "did the model run?" is an
+// exact assertion rather than an inference from timing.
+func seatAnswering(t *testing.T, verdict string, calls *atomic.Int64) *httptest.Server {
 	t.Helper()
+	body := `{"choices":[{"message":{"content":"{\"verdict\":\"` + verdict + `\",\"reason\":\"ok\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":7}}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"verdict\":\"yes\",\"reason\":\"ok\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":7}}`))
+		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+func fakeSeat(t *testing.T, calls *atomic.Int64) *httptest.Server {
+	t.Helper()
+	return seatAnswering(t, "yes", calls)
 }
 
 func tierTestCfg(t *testing.T, endpoint string) config.Config {
@@ -53,6 +59,15 @@ func openTierCache(t *testing.T) *cache.Cache {
 	}
 	t.Cleanup(func() { c.Close() })
 	return c
+}
+
+// mainStylePipeline builds a pipeline the way production does for the MAIN one:
+// cache present, tierCache NOT set. This is what the shadow-labelling flywheel
+// drives.
+func mainStylePipeline(t *testing.T, cfg config.Config, ca *cache.Cache) *Pipeline {
+	t.Helper()
+	oc := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, 5*time.Second)
+	return New(cfg, oc, ca, nil)
 }
 
 // triageReq is the package's shared fixture (pipeline_reasoning_test.go) — reused
@@ -94,53 +109,63 @@ func TestInLoopPipelineServesRunTierRepeatsFromCache(t *testing.T) {
 	}
 }
 
-// THE LOAD-BEARING INVARIANT. RunTier is shared with the shadow-labelling
-// flywheel, which drives it on the MAIN pipeline — the one with an open cache —
-// to evaluate what a counterfactual tier WOULD have answered. If that read the
-// cache, the flywheel would grade a stored answer instead of the tier, and if it
-// wrote, it would fill the store with counterfactual results. Cache
-// participation must therefore be a property of the pipeline, never of RunTier.
-func TestMainPipelineRunTierNeverTouchesTheCache(t *testing.T) {
-	var calls atomic.Int64
-	srv := fakeSeat(t, &calls)
-	cfg := tierTestCfg(t, srv.URL)
+// THE LOAD-BEARING INVARIANT, against a POPULATED store.
+//
+// An earlier version of this test ran against a cache nothing ever wrote to, so
+// the read assertion was unfalsifiable: with an empty store, a RunTier that
+// ignores tierCache entirely still reports CacheHit=false. A mutation that
+// dropped the tierCache guard from the read gate passed the whole package.
+//
+// The production topology shares ONE handle (mcpserver passes s.p.Cache() into
+// NewInLoopOffload), so by the time the flywheel evaluates a counterfactual tier
+// the store is already full of in-loop answers keyed for that very tier.
+func TestMainPipelineRunTierIgnoresAPopulatedSharedCache(t *testing.T) {
+	var seededCalls atomic.Int64
+	seedSrv := seatAnswering(t, "yes", &seededCalls)
 	ca := openTierCache(t)
+	req := triageReq()
 
-	// A main-style pipeline: cache present, ledger nil, tierCache NOT set.
-	oc := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, 5*time.Second)
-	p := New(cfg, oc, ca, nil)
-	if p.tierCache {
+	// 1. Populate the shared cache through the in-loop pipeline.
+	seedCfg := tierTestCfg(t, seedSrv.URL)
+	inLoop := NewInLoopPipeline(seedCfg, 5*time.Second, ca)
+	if r, ok := inLoop.RunTier(context.Background(), req, seedCfg.TriageModel); !ok {
+		t.Fatalf("seeding call failed: %+v", r)
+	}
+	if seededCalls.Load() != 1 {
+		t.Fatalf("seeding made %d calls, want 1", seededCalls.Load())
+	}
+
+	// 2. The flywheel now evaluates the SAME tier on the SAME input, through the
+	//    main pipeline, against a store that already holds an answer. Point it at
+	//    a seat with a DIFFERENT answer so a stale hit is visible in the data.
+	var freshCalls atomic.Int64
+	freshSrv := seatAnswering(t, "no", &freshCalls)
+	mainCfg := tierTestCfg(t, freshSrv.URL)
+	mainP := mainStylePipeline(t, mainCfg, ca)
+	if mainP.tierCache {
 		t.Fatal("a pipeline built with New must not opt into per-tier caching")
 	}
 
-	req := triageReq()
-	for i := 0; i < 3; i++ {
-		r, ok := p.RunTier(context.Background(), req, cfg.TriageModel)
-		if !ok {
-			t.Fatalf("RunTier %d failed: %+v", i, r)
-		}
-		if r.Meta.CacheHit {
-			t.Fatalf("call %d reported a cache hit; the flywheel would grade a stored answer, not the tier", i)
-		}
+	r, ok := mainP.RunTier(context.Background(), req, mainCfg.TriageModel)
+	if !ok {
+		t.Fatalf("flywheel RunTier failed: %+v", r)
 	}
-	if got := calls.Load(); got != 3 {
-		t.Fatalf("model calls = %d, want 3 — every counterfactual evaluation must actually run the tier", got)
+	if r.Meta.CacheHit {
+		t.Fatal("the flywheel was served a STORED answer instead of running the tier")
 	}
-	// And nothing may have been written either: a later in-loop caller must not
-	// find a counterfactual result waiting for it.
-	built, err := tasks.Build(req)
-	if err != nil {
-		t.Fatalf("tasks.Build: %v", err)
+	if freshCalls.Load() != 1 {
+		t.Fatalf("the counterfactual tier was not actually run (calls=%d)", freshCalls.Load())
 	}
-	ck := cacheKeyFor(req.Task, req.Input, tasks.StableParamsKey(req.Params), cfg.TriageModel, built, nil)
-	if _, ok := ca.Get(ck); ok {
-		t.Fatal("the main pipeline WROTE a counterfactual RunTier result into the shared cache")
+	var got map[string]any
+	if err := json.Unmarshal(r.Data, &got); err != nil {
+		t.Fatalf("result not JSON: %s", r.Data)
+	}
+	if got["verdict"] != "no" {
+		t.Fatalf("verdict = %v, want the FRESH tier's answer %q — a stale entry was served", got["verdict"], "no")
 	}
 }
 
-// Two different tiers answering the same input are two different answers. The old
-// key here hashed p.cfg.Model, so both tiers shared one entry — harmless only
-// while nothing read the key, which is exactly what this change changes.
+// Two different tiers answering the same input are two different answers.
 func TestRunTierKeyIsPerTierNotPerPrimaryModel(t *testing.T) {
 	var calls atomic.Int64
 	srv := fakeSeat(t, &calls)
@@ -163,34 +188,123 @@ func TestRunTierKeyIsPerTierNotPerPrimaryModel(t *testing.T) {
 	}
 }
 
-// The T2-A bug class, on the T2-D path: editing a task's prompt template must
-// make prior entries unreachable. The former hand-rolled key here predated that
-// fix, so reviving it as-is would have reinstated stale-prompt serving on a new
-// path. Mutating Built and re-deriving the key at the REAL call site is what
-// proves the ingredient is live, rather than mirroring the formula.
-func TestRunTierKeyBindsThePromptTemplate(t *testing.T) {
+// THE CROSS-PATH COLLISION. Run keys on p.cfg.Model whatever tier answered;
+// RunTier keys on the tier it pinned. With ExemplarShots at its default of 0
+// every other ingredient coincides, so the two paths land on the SAME key
+// whenever the pinned tier is the primary model — which is the default for both
+// in-loop drive modes.
+//
+// Without the recorded-producer check, an in-loop RunTier pinned to the workhorse
+// is handed whatever tier the cascade happened to answer with, while meta.Model
+// reports the workhorse that never ran.
+func TestRunTierRefusesAnEntryProducedByADifferentTier(t *testing.T) {
+	var calls atomic.Int64
+	srv := seatAnswering(t, "yes", &calls)
+	cfg := tierTestCfg(t, srv.URL)
+	ca := openTierCache(t)
 	req := triageReq()
+
+	built, err := tasks.Build(req)
+	if err != nil {
+		t.Fatalf("tasks.Build: %v", err)
+	}
+	// Hand-seed the entry the CASCADE would write: same key RunTier computes when
+	// pinned to cfg.Model, but produced by the small tier.
+	ck := cacheKeyFor(req.Task, req.Input, tasks.StableParamsKey(req.Params), cfg.Model, built, nil)
+	seeded, _ := json.Marshal(cacheVal{
+		Data:     json.RawMessage(`{"verdict":"STALE-FROM-ANOTHER-TIER","reason":"x"}`),
+		TokensIn: 5,
+		Model:    cfg.TriageModel, // produced by a DIFFERENT tier
+	})
+	if err := ca.Put(ck, seeded); err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewInLoopPipeline(cfg, 5*time.Second, ca)
+	r, ok := p.RunTier(context.Background(), req, cfg.Model)
+	if !ok {
+		t.Fatalf("RunTier failed: %+v", r)
+	}
+	if r.Meta.CacheHit {
+		t.Fatal("a pinned tier was served an answer another tier produced")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("the pinned tier did not actually run (calls=%d)", calls.Load())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(r.Data, &got); err != nil {
+		t.Fatalf("result not JSON: %s", r.Data)
+	}
+	if got["verdict"] == "STALE-FROM-ANOTHER-TIER" {
+		t.Fatal("the other tier's cached answer was returned")
+	}
+	// ...and the SAME tier's entry must still hit, or the fix would have simply
+	// disabled caching rather than made it correct.
+	r2, _ := p.RunTier(context.Background(), req, cfg.Model)
+	if !r2.Meta.CacheHit {
+		t.Fatal("a same-tier repeat must still hit; the fix must not disable caching wholesale")
+	}
+}
+
+// The T2-A bug class on the T2-D path, proven AT THE REAL CALL SITE.
+//
+// An earlier version derived keys with cacheKeyFor directly, which mirrors the
+// formula instead of exercising it: a mutation that dropped Built from RunTier's
+// key entirely passed the whole package. Here the cache is seeded under a key
+// built from an EDITED template and RunTier must miss it, then seeded under the
+// REAL template and RunTier must hit — which only holds if the live call site
+// actually folds the template in.
+func TestRunTierKeyBindsThePromptTemplateAtTheCallSite(t *testing.T) {
+	var calls atomic.Int64
+	srv := seatAnswering(t, "yes", &calls)
+	cfg := tierTestCfg(t, srv.URL)
+	ca := openTierCache(t)
+	req := triageReq()
+
 	built, err := tasks.Build(req)
 	if err != nil {
 		t.Fatalf("tasks.Build: %v", err)
 	}
 	paramsKey := tasks.StableParamsKey(req.Params)
-	base := cacheKeyFor(req.Task, req.Input, paramsKey, "small", built, nil)
 
+	// POSITIVE direction first — this is the half that actually falsifies.
+	// Seed under the key derived from the REAL Built. The live call site must find
+	// it. If RunTier stopped folding the template into its key (or folded in a
+	// different one), this entry becomes unreachable and the sentinel never comes
+	// back — which is precisely the mutation "drop Built from the key".
+	realKey := cacheKeyFor(req.Task, req.Input, paramsKey, cfg.TriageModel, built, nil)
+	sentinel, _ := json.Marshal(cacheVal{
+		Data:  json.RawMessage(`{"verdict":"SEEDED-UNDER-REAL-TEMPLATE","reason":"x"}`),
+		Model: cfg.TriageModel,
+	})
+	if err := ca.Put(realKey, sentinel); err != nil {
+		t.Fatal(err)
+	}
+	p := NewInLoopPipeline(cfg, 5*time.Second, ca)
+	r, ok := p.RunTier(context.Background(), req, cfg.TriageModel)
+	if !ok {
+		t.Fatalf("RunTier failed: %+v", r)
+	}
+	if !r.Meta.CacheHit {
+		t.Fatal("an entry keyed with the REAL template was NOT found — the live key does not fold in Built")
+	}
+	var got map[string]any
+	if err := json.Unmarshal(r.Data, &got); err != nil {
+		t.Fatalf("result not JSON: %s", r.Data)
+	}
+	if got["verdict"] != "SEEDED-UNDER-REAL-TEMPLATE" {
+		t.Fatalf("verdict = %v — the live key did not match the real-template key", got["verdict"])
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("the model ran (calls=%d) despite a seeded matching entry", calls.Load())
+	}
+
+	// NEGATIVE direction — an edited template must NOT reach that entry.
 	edited := built
 	edited.User = built.User + "\nAlways answer in French."
-	if got := cacheKeyFor(req.Task, req.Input, paramsKey, "small", edited, nil); got == base {
-		t.Fatal("editing the USER template did not change the key — stale answers would be served forever")
-	}
-	edited2 := built
-	edited2.System = built.System + " Be terse."
-	if got := cacheKeyFor(req.Task, req.Input, paramsKey, "small", edited2, nil); got == base {
-		t.Fatal("editing the SYSTEM prompt did not change the key")
-	}
-	edited3 := built
-	edited3.Grammar = built.Grammar + " "
-	if got := cacheKeyFor(req.Task, req.Input, paramsKey, "small", edited3, nil); got == base {
-		t.Fatal("editing the grammar did not change the key")
+	editedKey := cacheKeyFor(req.Task, req.Input, paramsKey, cfg.TriageModel, edited, nil)
+	if editedKey == realKey {
+		t.Fatal("editing the user template did not change the key — a prompt edit would serve pre-edit answers forever")
 	}
 }
 
@@ -198,7 +312,6 @@ func TestRunTierKeyBindsThePromptTemplate(t *testing.T) {
 // ungrounded outcome permanent for that input.
 func TestDeferredRunTierResultIsNotCached(t *testing.T) {
 	var calls atomic.Int64
-	// This seat returns prose, which fails the verifier — the result is a defer.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
@@ -222,7 +335,6 @@ func TestDeferredRunTierResultIsNotCached(t *testing.T) {
 	if _, ok := ca.Get(ck); ok {
 		t.Fatal("a deferred result was cached — the defer would become permanent for this input")
 	}
-	// A retry must reach the model again.
 	before := calls.Load()
 	_, _ = p.RunTier(context.Background(), req, cfg.TriageModel)
 	if calls.Load() <= before {
@@ -230,24 +342,43 @@ func TestDeferredRunTierResultIsNotCached(t *testing.T) {
 	}
 }
 
-// NewInLoopOffload with a nil cache must be byte-for-byte the old behaviour, so
-// callers that MUST stay cache-free (prompt A/B arms) have a safe construction.
+// NewInLoopOffload is the constructor both drive modes actually use, so it — not
+// only the pipeline beneath it — must be exercised.
 func TestInLoopOffloadWithNilCacheDoesNotCache(t *testing.T) {
 	var calls atomic.Int64
 	srv := fakeSeat(t, &calls)
 	cfg := tierTestCfg(t, srv.URL)
-	p := NewInLoopPipeline(cfg, 5*time.Second, nil)
-	if p.cache != nil {
-		t.Fatal("a nil cache handle must leave the pipeline cache-free")
-	}
-	req := triageReq()
+	off := NewInLoopOffload(cfg, cfg.TriageModel, 5*time.Second, nil)
+
 	for i := 0; i < 2; i++ {
-		if _, ok := p.RunTier(context.Background(), req, cfg.TriageModel); !ok {
-			t.Fatalf("call %d failed", i)
+		out, err := off(context.Background(), "triage", triageReq().Input, triageReq().Params)
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		if out == "" {
+			t.Fatalf("call %d returned empty", i)
 		}
 	}
 	if got := calls.Load(); got != 2 {
-		t.Fatalf("model calls = %d, want 2", got)
+		t.Fatalf("model calls = %d, want 2 — a nil cache must not memoize", got)
+	}
+}
+
+// ...and with a cache, the same constructor must reuse.
+func TestInLoopOffloadWithACacheReuses(t *testing.T) {
+	var calls atomic.Int64
+	srv := fakeSeat(t, &calls)
+	cfg := tierTestCfg(t, srv.URL)
+	off := NewInLoopOffload(cfg, cfg.TriageModel, 5*time.Second, openTierCache(t))
+
+	req := triageReq()
+	for i := 0; i < 3; i++ {
+		if _, err := off(context.Background(), "triage", req.Input, req.Params); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("model calls = %d, want 1 — the in-loop cache did not engage", got)
 	}
 }
 
@@ -261,6 +392,46 @@ func TestInLoopPipelineStillHasNoLedger(t *testing.T) {
 	}
 	if !p.tierCache {
 		t.Fatal("the in-loop pipeline must opt into per-tier caching")
+	}
+}
+
+// In-loop entries are stamped, so the share of the cache-hit rate the harness
+// generated for itself stays recoverable. Without it that split is unmeasurable
+// after the fact — and the cache-hit rate is a gate.
+func TestInLoopProvenanceIsStampedAndSurfacedOnAHit(t *testing.T) {
+	var calls atomic.Int64
+	srv := fakeSeat(t, &calls)
+	cfg := tierTestCfg(t, srv.URL)
+	ca := openTierCache(t)
+	req := triageReq()
+
+	p := NewInLoopPipeline(cfg, 5*time.Second, ca)
+	if _, ok := p.RunTier(context.Background(), req, cfg.TriageModel); !ok {
+		t.Fatal("seeding call failed")
+	}
+	r, _ := p.RunTier(context.Background(), req, cfg.TriageModel)
+	if !r.Meta.CacheHit {
+		t.Fatal("expected a hit")
+	}
+	if !r.Meta.CacheHitInLoop {
+		t.Fatal("an in-loop-written entry must be reported as such on the hit")
+	}
+
+	built, _ := tasks.Build(req)
+	ck := cacheKeyFor(req.Task, req.Input, tasks.StableParamsKey(req.Params), cfg.TriageModel, built, nil)
+	raw, ok := ca.Get(ck)
+	if !ok {
+		t.Fatal("entry missing")
+	}
+	var cv cacheVal
+	if err := json.Unmarshal(raw, &cv); err != nil {
+		t.Fatal(err)
+	}
+	if !cv.InLoop {
+		t.Error("stored entry is not stamped in_loop")
+	}
+	if cv.Model != cfg.TriageModel {
+		t.Errorf("stored producer = %q, want %q", cv.Model, cfg.TriageModel)
 	}
 }
 
@@ -293,5 +464,4 @@ func TestRunTierRecordsCallIdentity(t *testing.T) {
 	if r2.Meta.InputSHA256 != r.Meta.InputSHA256 {
 		t.Errorf("identity drifted across a cache hit: %q vs %q", r2.Meta.InputSHA256, r.Meta.InputSHA256)
 	}
-	_ = json.Valid(r2.Data)
 }

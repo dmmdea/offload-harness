@@ -31,6 +31,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/grounding"
 	"github.com/dmmdea/offload-harness/internal/health"
+	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/judge"
 	"github.com/dmmdea/offload-harness/internal/knn"
 	"github.com/dmmdea/offload-harness/internal/ledger"
@@ -319,6 +320,15 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 		}
 		if led != nil {
 			led.Close()
+		}
+		// The embed memo's persisted hit/miss totals are written ONLY here. A
+		// process that exits without this leaves them at zero, and every reporting
+		// surface then states — in the one number the Phase 0.4 gate reads — that
+		// a memo which served thousands of hits was "never consulted". The error
+		// is surfaced rather than swallowed: losing the counters silently is the
+		// same fabricated-measurement defect in a quieter form.
+		if err := embedmemo.CloseShared(); err != nil {
+			fmt.Fprintln(os.Stderr, "note: embed memo counters may not have been persisted:", err)
 		}
 	}, nil
 }
@@ -2321,7 +2331,22 @@ func runShadowLabel(args []string) error {
 		return nil
 	}
 
-	emb := judge.NewEmbedder(cfg.Endpoint, cfg.EmbedModel(), 30*time.Second)
+	// T2-C: the drain is THE repetitive embedding workload on this box — it
+	// re-embeds the same stored inputs on every run, and re-scores the same
+	// reference summaries across every item. Memoizing it is where the memo earns
+	// most of its keep, and leaving it on a plain embedder was the gap that made
+	// the package's own stated rationale untrue as shipped.
+	memoPath, memoEpoch, memoMax := cfg.EmbedMemoSettings()
+	emb := judge.NewMemoizedEmbedder(cfg.Endpoint, cfg.EmbedModel(), 30*time.Second,
+		judge.MemoOptions{Path: memoPath, Epoch: memoEpoch, MaxEntries: memoMax})
+	if emb.Memo == nil {
+		fmt.Printf("shadow-label: embed memo not active — %s\n", emb.Reason)
+	}
+	defer func() {
+		if err := embedmemo.CloseShared(); err != nil {
+			fmt.Fprintln(os.Stderr, "note: embed memo counters may not have been persisted:", err)
+		}
+	}()
 	deps := shadow.LabelDeps{
 		Escalation:            cfg.EscalationModel,
 		E2B:                   cfg.TriageModel,

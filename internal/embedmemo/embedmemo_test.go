@@ -198,7 +198,10 @@ func TestPruneEvictsOldestAndKeepsNewest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	st := m.Stats()
+	st, serr := m.Stats()
+	if serr != nil {
+		t.Fatal(serr)
+	}
 	if st.Distinct > max {
 		t.Fatalf("distinct=%d exceeds cap %d", st.Distinct, max)
 	}
@@ -226,7 +229,7 @@ func TestPruneEvictsOldestAndKeepsNewest(t *testing.T) {
 // failure where no measurement exists. nil is the honest answer.
 func TestHitRateIsNilUntilSomethingIsLookedUp(t *testing.T) {
 	m := openTemp(t, 0)
-	if st := m.Stats(); st.HitRate != nil {
+	if st, err := m.Stats(); err != nil { t.Fatal(err) } else if st.HitRate != nil {
 		t.Fatalf("HitRate = %v, want nil before any lookup", *st.HitRate)
 	}
 	wrapped := m.Wrap(func(string) ([]float64, error) { return []float64{1}, nil })
@@ -236,7 +239,10 @@ func TestHitRateIsNilUntilSomethingIsLookedUp(t *testing.T) {
 	if _, err := wrapped("a"); err != nil {
 		t.Fatal(err)
 	}
-	st := m.Stats()
+	st, serr := m.Stats()
+	if serr != nil {
+		t.Fatal(serr)
+	}
 	if st.HitRate == nil {
 		t.Fatal("HitRate is still nil after two lookups")
 	}
@@ -259,7 +265,7 @@ func TestNilMemoIsATransparentPassThrough(t *testing.T) {
 	if calls != 3 {
 		t.Fatalf("calls=%d, want 3 — a nil memo must not memoize", calls)
 	}
-	if st := m.Stats(); st.Distinct != 0 || st.HitRate != nil {
+	if st, err := m.Stats(); err != nil { t.Fatalf("Stats on nil memo: %v", err) } else if st.Distinct != 0 || st.HitRate != nil {
 		t.Errorf("nil memo stats should be empty, got %+v", st)
 	}
 	if err := m.Flush(); err != nil {
@@ -301,7 +307,10 @@ func TestFlushPersistsCountersExactlyOnce(t *testing.T) {
 
 	m2, _ := Open(path, "e", "", 0)
 	defer m2.Close()
-	st := m2.Stats()
+	st, serr := m2.Stats()
+	if serr != nil {
+		t.Fatal(serr)
+	}
 	if st.LifetimeHits != 2 || st.LifetimeMisses != 1 {
 		t.Fatalf("lifetime hits/misses = %d/%d, want 2/1", st.LifetimeHits, st.LifetimeMisses)
 	}
@@ -316,7 +325,7 @@ func TestSharedReturnsOneHandlePerPath(t *testing.T) {
 	// is deleted while bolt still holds the file open and cleanup fails on
 	// Windows, where an open handle blocks unlink.
 	dir := t.TempDir()
-	t.Cleanup(CloseShared)
+	t.Cleanup(func() { _ = CloseShared() })
 	path := filepath.Join(dir, "memo.db")
 	a, err := Shared(path, "e", "", 0)
 	if err != nil {

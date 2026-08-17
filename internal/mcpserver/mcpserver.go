@@ -263,23 +263,52 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// from both places is what keeps the measurement answerable in either state
 	// rather than only when the server happens to be down.
 	reuse := map[string]any{}
-	if st, ok := s.p.EmbedMemoStats(); ok {
+	if st, reason := s.p.EmbedMemoStats(); reason == "" {
 		reuse["embed_memo"] = map[string]any{
 			"enabled":         true,
+			"embedder":        st.EmbedderID,
+			"epoch":           st.Epoch,
+			"dim":             st.Dim,
 			"distinct":        st.Distinct,
 			"session_hits":    st.SessionHits,
 			"session_misses":  st.SessionMisses,
+			"session_stores":  st.SessionStores,
 			"lifetime_hits":   st.LifetimeHits,
 			"lifetime_misses": st.LifetimeMisses,
+			"lifetime_stores": st.LifetimeStores,
+			// Fault counters are published, not merely incremented. An unpublished
+			// fault counter is not a fault signal: without these there is no
+			// observable difference between a memo that is working, one whose store
+			// fails every write, and one full of corrupt records.
+			"errors_decode":  st.ErrorsDecode,
+			"errors_read":    st.ErrorsRead,
+			"errors_write":   st.ErrorsWrite,
+			"dim_mismatches": st.DimMismatches,
 			// nil, not 0, when nothing has been looked up — a zero here would
 			// report a measured failure where there is no measurement.
 			"hit_rate": st.HitRate,
 			"note":     "each hit skips an embedding call, and therefore also skips the ~1-2s cold load the ttl=300 embedder pays after an idle gap",
 		}
 	} else {
-		reuse["embed_memo"] = map[string]any{
-			"enabled": false,
-			"note":    "disabled (embed_memo_enabled/embed_memo_path), the kNN pre-filter is off, or the store could not be opened; embeddings run live",
+		// One specific reason, never a menu of possibilities the caller has to
+		// guess between.
+		reuse["embed_memo"] = map[string]any{"enabled": false, "reason": reason}
+	}
+	// The result cache is the other half of T2-D and was previously reported
+	// nowhere. If it failed to open at startup, every agent_run silently loses
+	// the in-loop cache and the only signal was one stderr line an MCP stdio
+	// client never sees.
+	if s.p.Cache() != nil {
+		reuse["result_cache"] = map[string]any{
+			"available": true,
+			"path":      cfg.CachePath,
+			"note":      "agent_run's in-loop offloads share this cache (nil ledger, shared cache)",
+		}
+	} else {
+		reuse["result_cache"] = map[string]any{
+			"available": false,
+			"path":      cfg.CachePath,
+			"reason":    "not opened (cache_path empty, or the file is held by another process); agent_run re-runs the model on repeated identical input",
 		}
 	}
 

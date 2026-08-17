@@ -76,6 +76,11 @@ type Entry struct {
 	PromptPrefixSHA256 string   `json:"prompt_prefix_sha256,omitempty"`
 	ContextHash        string   `json:"context_hash,omitempty"`
 	ExemplarIDs        []string `json:"exemplar_ids,omitempty"`
+	// CacheHitInLoop marks a cache hit served from an entry the agent loop wrote
+	// (T2-D). In-loop generations run with a nil ledger and are never costed, so
+	// without this the share of the cache-hit rate the harness produced for
+	// itself is unrecoverable — and that rate is a gate.
+	CacheHitInLoop bool `json:"cache_hit_in_loop,omitempty"`
 }
 
 // maxReasonLen bounds a recorded defer reason so a long upstream error can't

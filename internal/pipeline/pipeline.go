@@ -88,7 +88,10 @@ type Pipeline struct {
 	// T2-C embed memo backing p.embed. nil when disabled or unopenable — every
 	// Memo method tolerates a nil receiver, so nothing branches on it except the
 	// stats surface, which reports "no memo" rather than a fabricated zero.
-	embedMemo *embedmemo.Memo
+	// embedMemoReason says WHICH of the several "no memo" causes applies; without
+	// it the status surface can only publish an unfalsifiable three-way guess.
+	embedMemo       *embedmemo.Memo
+	embedMemoReason string
 	// T2-D: does RunTier read/write the result cache on THIS pipeline? Set only
 	// by NewInLoopPipeline. False everywhere else — critically on the main
 	// pipeline, whose RunTier the shadow-labelling flywheel drives to evaluate
@@ -158,16 +161,27 @@ func (p *Pipeline) Cfg() config.Config { return p.cfg }
 // against itself. May be nil (caching opted out, or the file is held elsewhere).
 func (p *Pipeline) Cache() *cache.Cache { return p.cache }
 
-// EmbedMemoStats reports the embed memo's counters, and whether there is a memo
-// at all. The second return is false when the memo is disabled or could not be
-// opened — callers must surface that as "not measured" rather than printing a
-// zero hit rate, which would report a measured failure where no measurement
-// exists.
-func (p *Pipeline) EmbedMemoStats() (embedmemo.Stats, bool) {
+// EmbedMemoStats reports the embed memo's counters, or the REASON there are
+// none. A caller must surface the reason rather than printing a zero hit rate,
+// which would report a measured failure where no measurement exists.
+//
+// The reason is non-empty in exactly two cases: there is no memo (disabled, the
+// pre-filter is off, the store could not be opened), or the memo exists but its
+// counters could not be READ — which is a fault, not an empty store, and must
+// never be published as "0 vectors, never consulted".
+func (p *Pipeline) EmbedMemoStats() (embedmemo.Stats, string) {
 	if p.embedMemo == nil {
-		return embedmemo.Stats{}, false
+		reason := p.embedMemoReason
+		if reason == "" {
+			reason = "no memo"
+		}
+		return embedmemo.Stats{}, reason
 	}
-	return p.embedMemo.Stats(), true
+	st, err := p.embedMemo.Stats()
+	if err != nil {
+		return st, "store opened but unreadable: " + err.Error()
+	}
+	return st, ""
 }
 
 func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Ledger) *Pipeline {
@@ -201,11 +215,15 @@ func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Le
 		// cold-load the ttl=300 embedder pays after any idle gap. A disabled or
 		// unopenable memo yields the plain live embedder, so the short timeout's
 		// fail-open behaviour below is unchanged either way.
-		var memoOpts judge.MemoOptions
-		if cfg.EmbedMemoOn() {
-			memoOpts = judge.MemoOptions{Path: cfg.EmbedMemoPath, Epoch: cfg.EmbedMemoEpoch, MaxEntries: cfg.EmbedMemoMaxEntries}
-		}
-		p.embed, p.embedMemo = judge.NewMemoizedEmbedder(cfg.Endpoint, cfg.EmbedModel(), time.Duration(cfg.KNNEmbedTimeoutMs)*time.Millisecond, memoOpts)
+		mp, me, mx := cfg.EmbedMemoSettings()
+		mz := judge.NewMemoizedEmbedder(cfg.Endpoint, cfg.EmbedModel(), time.Duration(cfg.KNNEmbedTimeoutMs)*time.Millisecond,
+			judge.MemoOptions{Path: mp, Epoch: me, MaxEntries: mx})
+		p.embed, p.embedMemo, p.embedMemoReason = mz.Embed, mz.Memo, mz.Reason
+	} else {
+		// The pre-filter is off (the default), so this pipeline embeds nothing and
+		// deliberately does not open a store. Say so, rather than letting the
+		// status surface guess between five different reasons for "no memo".
+		p.embedMemoReason = "the kNN pre-filter is off (knn_prefilter_enabled=false), so this pipeline embeds nothing"
 	}
 	// Seed the reloader's content hashes from the files just loaded so the first
 	// poll tick is a no-op for unchanged artifacts (and a transient bad initial
@@ -221,6 +239,26 @@ func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Le
 type cacheVal struct {
 	Data     json.RawMessage `json:"data"`
 	TokensIn int             `json:"tokens_in"`
+	// Model is the tier that actually PRODUCED this answer.
+	//
+	// It exists because Run and RunTier want different things from the same
+	// entry, and the difference is not expressible in the key. Run's key is
+	// deliberately stable on the PRIMARY model so that an answer produced
+	// anywhere in the cascade is reused on a re-run — the cascade is an internal
+	// detail of one logical call. RunTier pins ONE named tier and must get that
+	// tier's answer. With ExemplarShots at its default of 0 every other key
+	// ingredient coincides, so before this field a triage-tier answer cached by
+	// Run could be served to an in-loop RunTier call pinned to the workhorse,
+	// with meta.Model reporting the workhorse that never ran.
+	//
+	// Absent on pre-0.63 entries, which RunTier treats as a miss rather than
+	// guessing — an unknown producer is not a match.
+	Model string `json:"model,omitempty"`
+	// InLoop records that this entry was produced by the agent loop's in-loop
+	// offload (T2-D), whose generation is deliberately never costed in the
+	// savings ledger. Absent on every pre-T2-D entry, which reads as false —
+	// correct, since nothing but the in-loop path can set it.
+	InLoop bool `json:"in_loop,omitempty"`
 }
 
 // Run executes req through the Gemma-4 family cascade and always returns a
@@ -411,6 +449,11 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 			var cv cacheVal
 			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 {
 				meta.CacheHit = true
+				// Carry the entry's provenance onto the row. The saving is real
+				// either way, but "how much of the cache-hit rate did the harness
+				// generate for itself?" is only answerable if this is recorded at
+				// the moment of the hit.
+				meta.CacheHitInLoop = cv.InLoop
 				meta.TokensIn = cv.TokensIn
 				meta.LatencyMs = time.Since(start).Milliseconds()
 				p.record(req.Task, meta, entryLen)
@@ -710,7 +753,7 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 		data, _ = json.Marshal(map[string]string{visionResultKey(req.Task): answer})
 	}
 	if p.cache != nil {
-		if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gres.TokensIn}); e == nil {
+		if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gres.TokensIn, Model: meta.Model}); e == nil {
 			_ = p.cache.Put(ck, b)
 		}
 	}
@@ -901,7 +944,7 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	}
 	data, _ := json.Marshal(out)
 	if p.cache != nil {
-		if b, e := json.Marshal(cacheVal{Data: data}); e == nil {
+		if b, e := json.Marshal(cacheVal{Data: data, Model: model}); e == nil {
 			_ = p.cache.Put(ck, b)
 		}
 	}
@@ -2972,7 +3015,7 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 			// that must produce a gradeable result without any production side-effects.
 			if record {
 				if p.cache != nil {
-					if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn}); e == nil {
+					if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn, Model: meta.Model}); e == nil {
 						_ = p.cache.Put(ck, b)
 					}
 				}
@@ -3064,7 +3107,7 @@ func (p *Pipeline) attemptReasoning(ctx context.Context, req core.Request, built
 		return core.Deferf("reasoning tier: "+v.Reason, gen.Content, meta), false
 	}
 	if p.cache != nil {
-		if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn}); e == nil {
+		if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn, Model: meta.Model}); e == nil {
 			_ = p.cache.Put(ck, b)
 		}
 	}
@@ -3170,6 +3213,7 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		PromptPrefixSHA256: meta.PromptPrefixSHA256,
 		ContextHash:        meta.ContextHash,
 		ExemplarIDs:        meta.ExemplarIDs,
+		CacheHitInLoop:     meta.CacheHitInLoop,
 	}
 }
 
@@ -3606,8 +3650,17 @@ func (p *Pipeline) RunTier(ctx context.Context, req core.Request, model string) 
 	if useCache {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
-			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 {
+			// cv.Model == model is the load-bearing clause, not a formality.
+			// Run keys on p.cfg.Model whatever tier answers, so its entries land on
+			// the SAME key this call computes whenever the pinned tier happens to be
+			// the primary model — which is the default for both in-loop drive modes.
+			// Without this check a RunTier call pinned to the workhorse is served
+			// whatever tier the cascade happened to answer with (measured: the E2B
+			// triage tier), while meta.Model reports the workhorse that never ran.
+			// An entry with no recorded producer is a miss: unknown is not a match.
+			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 && cv.Model == model {
 				meta.CacheHit = true
+				meta.CacheHitInLoop = cv.InLoop
 				meta.TokensIn = cv.TokensIn
 				meta.LatencyMs = time.Since(start).Milliseconds()
 				return core.Result{OK: true, Data: cv.Data, Meta: meta}, true
@@ -3625,7 +3678,10 @@ func (p *Pipeline) RunTier(ctx context.Context, req core.Request, model string) 
 	// grant it. A defer never reaches this point (res.OK is false), so a
 	// low-confidence or ungrounded answer is never cached.
 	if useCache && res.OK && len(res.Data) > 0 {
-		if b, e := json.Marshal(cacheVal{Data: res.Data, TokensIn: res.Meta.TokensIn}); e == nil {
+		// InLoop stamps the provenance: only NewInLoopPipeline sets tierCache, so
+		// every entry written here came from the agent loop talking to itself,
+		// whose generation was never costed in the savings ledger.
+		if b, e := json.Marshal(cacheVal{Data: res.Data, TokensIn: res.Meta.TokensIn, Model: model, InLoop: true}); e == nil {
 			_ = p.cache.Put(ck, b)
 		}
 	}

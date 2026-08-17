@@ -15,25 +15,63 @@ type MemoOptions struct {
 	MaxEntries int
 }
 
-// NewMemoizedEmbedder builds the usual Embedder and returns its Embed function
-// wrapped in the process-wide embed memo, plus the memo itself for stats.
+// Memoized bundles a memoized embed function with the memo behind it and the
+// reason there is no memo, when there isn't one.
 //
-// The memo is a strict optimisation: when opts.Path is empty, when the store
-// cannot be opened (another process holds it), or on any read problem, the
-// returned function is the plain live embedder. Callers therefore never branch
-// on whether memoization succeeded — there is exactly one code path.
+// Reason is not decoration. Disabled-by-config, feature-off, lock-timeout,
+// permission-denied and corrupt-file are five different answers, and a caller
+// that collapses them into "enabled: false" cannot tell an operator which one
+// happened. The error is carried here precisely so the reporting surfaces can
+// say which.
+type Memoized struct {
+	Embed  func(string) ([]float64, error)
+	Memo   *embedmemo.Memo // nil when memoization is not active
+	Reason string          // "" when Memo != nil
+}
+
+// NewMemoizedEmbedder builds the usual Embedder and wraps its Embed in the
+// process-wide embed memo.
 //
-// The returned *Memo may be nil; every Memo method tolerates a nil receiver.
-func NewMemoizedEmbedder(endpoint, model string, timeout time.Duration, opts MemoOptions) (func(string) ([]float64, error), *embedmemo.Memo) {
+// The memo is a strict optimisation: when opts.Path is empty, or the store
+// cannot be opened, Embed is the plain live embedder. Callers therefore never
+// branch on whether memoization succeeded — there is exactly one code path for
+// embedding, and a separate one for REPORTING what happened.
+func NewMemoizedEmbedder(endpoint, model string, timeout time.Duration, opts MemoOptions) Memoized {
 	e := NewEmbedder(endpoint, model, timeout)
 	if opts.Path == "" {
-		return e.Embed, nil
+		return Memoized{Embed: e.Embed, Reason: "disabled (embed_memo_enabled=false or embed_memo_path empty)"}
 	}
-	// The embedder id is part of the memo key, so a model switch can never serve
-	// the previous model's vectors — see internal/embedmemo's package doc.
+	// The embedder id is part of the memo key AND of the shared-handle identity,
+	// so a model switch can neither serve nor be served the other model's vectors.
 	m, err := embedmemo.Shared(opts.Path, model, opts.Epoch, opts.MaxEntries)
 	if err != nil || m == nil {
-		return e.Embed, nil
+		reason := "store unavailable"
+		if err != nil {
+			reason = "store unavailable: " + err.Error()
+		}
+		return Memoized{Embed: e.Embed, Reason: reason}
 	}
-	return m.Wrap(e.Embed), m
+	return Memoized{Embed: m.Wrap(e.Embed), Memo: m}
+}
+
+// Similar embeds a and b through the memoized path and returns their cosine
+// similarity.
+//
+// The plain Embedder.Similar sends both texts in ONE batched request. That is
+// cheaper on a total miss but cannot memoize, and this call site (the shadow
+// drain grading a counterfactual summary against a reference) re-scores the SAME
+// reference text across every item of every run — the single most repetitive
+// embedding workload in the harness. Two memoized single calls therefore beat
+// one batched call in the case that actually dominates, and on a double hit the
+// cost is zero calls instead of one.
+func (mz Memoized) Similar(a, b string) (float64, error) {
+	va, err := mz.Embed(a)
+	if err != nil {
+		return 0, err
+	}
+	vb, err := mz.Embed(b)
+	if err != nil {
+		return 0, err
+	}
+	return cosine(va, vb), nil
 }
