@@ -628,9 +628,12 @@ type Config struct {
 	// MediaHashMaxFullBytes selects how audio/video cache keys identify a file.
 	//
 	// 0 (the default) = always hash the WHOLE file. That is the only mode with an
-	// exact identity guarantee, and it is cheap next to what it guards: SHA256
-	// runs ~1.2 GB/s while the cached work (whisper transcription, ffmpeg frame
-	// sampling plus a VLM pass) takes seconds to minutes.
+	// exact identity guarantee, and it is cheap RELATIVE TO WHAT IT GUARDS: both
+	// call sites already read the same file through ffmpeg (whisper conversion,
+	// frame sampling) before hashing it, and the model pass that follows takes
+	// seconds to minutes. Note the cost is a cold file read — I/O-bound, not
+	// SHA-bound — so on V: or a Drive-backed mount it tracks that device, not
+	// memory bandwidth.
 	//
 	// A positive value switches files LARGER than it to a sampled digest (size +
 	// three 8 MiB windows). That is opt-in on purpose: its failure mode is a

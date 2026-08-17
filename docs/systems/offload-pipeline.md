@@ -131,14 +131,25 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
     failed in two directions: a file replaced at the same path could produce a **false hit** —
     serving the old file's transcript or description — and an identical file at a second path always
     missed, which is the reuse an artifact cache exists to capture.
-  - `media_hash_max_full_bytes` defaults to **0 = always hash the whole file**. Hashing runs
-    ~1.2 GB/s against work that takes seconds to minutes, so exactness is nearly free. A positive
-    value switches larger files to a **sampled** digest (size + three 8 MiB windows); that is opt-in
-    because its failure mode is a false hit between two same-size files agreeing on those windows.
-    The mode is encoded in the digest, so sampled and full digests can never be confused.
-  - Unreadable/missing/directory inputs get distinct, self-describing digests rather than a shared
-    zero — two different missing files must not serve each other's cached results, and a transient
-    read failure must not poison the key permanently.
+  - **Identity is established BEFORE the file is consumed** — the digest is taken ahead of the
+    ffmpeg convert / frame sampling, and for video it is hoisted above the width-halving retry loop
+    (it is loop-invariant, and re-reading a multi-GB clip per retry is pure waste). Hashing
+    afterwards leaves a TOCTOU window that content-addressing makes *worse*, not better: a file
+    rotated mid-call would store take A's transcript under `sha256(take B)`, and that poisoned entry
+    is then reachable from **any** path holding B's bytes.
+  - **No identity, no cache.** When the digest fails, the work is computed and returned but nothing
+    is looked up or stored, and the on-disk media stem is salted so two failures at one path cannot
+    overwrite each other's `.srt`/`.txt`. `mediahash.Digest` returns an **error** rather than a
+    synthetic key: an earlier design returned `media:staterr:<hash(path+error)>`, which is a *path*
+    key — so a transient read failure wrote a durable entry that a different file at that path later
+    hit, reintroducing the exact false hit this change removes.
+  - `media_hash_max_full_bytes` defaults to **0 = always hash the whole file**. The cost is a cold
+    file read, so it is **I/O-bound, not SHA-bound** — on `V:` or a `G:\My Drive` mount a large clip
+    is nowhere near memory-speed. It is still cheap *relative to the work it guards*, because both
+    call sites already read the same file through ffmpeg before hashing it. A positive value
+    switches larger files to a **sampled** digest (size + up to three 8 MiB windows, de-duplicated);
+    that is opt-in because its failure mode is a false hit between two same-size files agreeing on
+    those windows. The mode is encoded in the digest, so sampled and full can never be confused.
   - **Migration:** this changes every existing audio and video key once. Intended — those entries
     were keyed on an identity that could be wrong.
 - **Learned thresholds** — per-task conformal values loaded from `thresholds.json` when present,

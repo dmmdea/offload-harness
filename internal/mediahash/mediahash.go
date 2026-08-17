@@ -19,10 +19,13 @@
 //
 // # Full hash by default, and why
 //
-// Hashing is cheap relative to what it guards: SHA256 runs at ~1.2 GB/s on this
-// class of machine, while the calls being cached (whisper transcription, ffmpeg
-// frame sampling plus a VLM pass) take seconds to minutes. Paying ~1 s on a 1 GB
-// video to make its identity exact is not a trade-off worth agonising over.
+// Hashing is cheap RELATIVE TO WHAT IT GUARDS, which is the only comparison that
+// matters here: every caller already reads the same file through ffmpeg before
+// hashing it, and the model pass that follows takes seconds to minutes. The cost
+// is a cold file READ, so it is I/O-bound rather than SHA-bound — on a
+// network- or Drive-backed mount it tracks that device's throughput, not memory
+// bandwidth. No absolute rate is claimed here because none has been measured on
+// the volumes this fleet actually stores media on.
 //
 // A SAMPLED mode exists for pathological sizes, but it is OPT-IN and never the
 // default, because its failure mode is the one this package was written to
@@ -46,7 +49,7 @@ import (
 // in sampled mode.
 const sampleWindow = 8 << 20 // 8 MiB
 
-// Digest returns a stable content identity for the file at path.
+// Digest returns a stable content identity for the file at path, or an error.
 //
 // maxFullBytes selects the mode:
 //
@@ -55,38 +58,43 @@ const sampleWindow = 8 << 20 // 8 MiB
 //	>  0  → files larger than this use a sampled digest instead.
 //
 // The returned string always names its own mode, so digests taken under
-// different settings cannot collide. On any error the caller receives a digest
-// that encodes the FAILURE rather than a zero value: a file that cannot be read
-// must not silently share a key with every other unreadable file, and must not
-// look like a successful hash of empty content.
-func Digest(path string, maxFullBytes int64) string {
+// different settings cannot collide.
+//
+// # Failure MUST be an error, never a digest
+//
+// An earlier version returned a synthetic string like `media:staterr:<hash of
+// path+error>` so callers never had to branch. That was wrong in the most
+// damaging possible way: the caller used it as a cache key, so a transient read
+// failure wrote a durable entry under a key derived from the PATH — exactly the
+// path-keyed identity this package exists to abolish. Two different files that
+// hit the same error at the same path then served each other's results.
+//
+// So the contract is: no identity, no key. A caller that cannot obtain a digest
+// must bypass the cache entirely — compute the answer, return it, store nothing.
+func Digest(path string, maxFullBytes int64) (string, error) {
 	if path == "" {
-		return "media:none"
+		return "", errors.New("mediahash: empty path")
 	}
 	fi, err := os.Stat(path)
 	if err != nil {
-		// Distinct per path AND per error, so an unreadable file neither collides
-		// with another unreadable file nor is mistaken for a hashed one. It also
-		// means a transient failure does not permanently poison a key: once the
-		// file is readable the digest changes to the real one.
-		return "media:staterr:" + shortHex(path+"\x00"+err.Error())
+		return "", fmt.Errorf("mediahash: stat: %w", err)
 	}
 	if fi.IsDir() {
-		return "media:isdir:" + shortHex(path)
+		return "", fmt.Errorf("mediahash: %s is a directory", path)
 	}
 	size := fi.Size()
 	if maxFullBytes > 0 && size > maxFullBytes {
 		d, serr := sampled(path, size)
 		if serr != nil {
-			return "media:readerr:" + shortHex(path+"\x00"+serr.Error())
+			return "", fmt.Errorf("mediahash: sampled read: %w", serr)
 		}
-		return fmt.Sprintf("media:sampled:sz=%d:%s", size, d)
+		return fmt.Sprintf("media:sampled:sz=%d:%s", size, d), nil
 	}
 	d, herr := full(path)
 	if herr != nil {
-		return "media:readerr:" + shortHex(path+"\x00"+herr.Error())
+		return "", fmt.Errorf("mediahash: read: %w", herr)
 	}
-	return fmt.Sprintf("media:sha256:sz=%d:%s", size, d)
+	return fmt.Sprintf("media:sha256:sz=%d:%s", size, d), nil
 }
 
 func full(path string) (string, error) {
@@ -116,12 +124,13 @@ func sampled(path string, size int64) (string, error) {
 	defer f.Close()
 	h := sha256.New()
 	fmt.Fprintf(h, "size=%d\x00", size)
-	offsets := []int64{0, (size - sampleWindow) / 2, size - sampleWindow}
+	// De-duplicated. For a file at or under one window all three offsets clamp to
+	// 0, and the previous version then read and hashed the SAME bytes three
+	// times — making sampled mode cost 3x the I/O of the full hash it exists to
+	// avoid, for identical exactness. Any maxFullBytes below 8 MiB hit that range.
+	offsets := dedupeOffsets(size)
 	buf := make([]byte, sampleWindow)
 	for _, off := range offsets {
-		if off < 0 {
-			off = 0
-		}
 		n, rerr := f.ReadAt(buf, off)
 		// io.EOF with n > 0 is a short final window, not a failure.
 		if rerr != nil && !errors.Is(rerr, io.EOF) {
@@ -136,7 +145,25 @@ func sampled(path string, size int64) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func shortHex(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:])[:32]
+// dedupeOffsets returns the distinct, ascending window starts for a file of the
+// given size: head, middle, tail — collapsed when they coincide.
+func dedupeOffsets(size int64) []int64 {
+	raw := []int64{0, (size - sampleWindow) / 2, size - sampleWindow}
+	out := make([]int64, 0, 3)
+	for _, off := range raw {
+		if off < 0 {
+			off = 0
+		}
+		dup := false
+		for _, seen := range out {
+			if seen == off {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, off)
+		}
+	}
+	return out
 }
