@@ -19,10 +19,18 @@ type SummaryWire struct {
 	FailedVerification int `json:"failed_verification"`
 	Failed             int `json:"failed"`
 	Infrastructure     int `json:"infrastructure"`
-	// LostToStack is the half of Infrastructure that is LOST WORK: subtasks that
-	// came back EMPTY because the stack failed them, as opposed to a successful
-	// local placement annotated with "the fleet was down". omitempty — a run
-	// that lost nothing publishes byte-identically to before this field existed.
+	// LostToStack is the half of Infrastructure that is LOST WORK: subtasks whose
+	// CONTRACTED OUTPUT never arrived because the stack failed them, as opposed to
+	// a successful local placement annotated with "the fleet was down". omitempty —
+	// a run that lost nothing publishes byte-identically to before this field
+	// existed.
+	//
+	// `output` on such a result may be NON-EMPTY, and a reader must not treat this
+	// count as "the result is blank": an agent loop that finished and then could
+	// not reach the re-pack seat publishes its prose beside
+	// defer_class:"infrastructure" with `structured` absent. It still counts as
+	// lost, because a contract carrying an output_schema asked for a checkable
+	// deliverable and unchecked prose is not one.
 	//
 	// It is published rather than kept internal because it is what makes the MCP
 	// surface's error flag legible: `infrastructure: 1` beside `succeeded: 1` no

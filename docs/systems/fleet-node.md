@@ -393,7 +393,7 @@ it; the class is what code branches on, because a reason string is prose and an 
 | `wall timeout after <N>s` | `budget` | The `timeout_sec` deadline fired, in the loop **or** in the re-pack; its own shape so the delegator can size future contracts off it. |
 | `step budget exhausted (<n> steps)` | `budget` | The loop burned `max_steps` with no final answer; `output` is empty, so there is nothing to re-pack. |
 | `output failed schema: …` | `abstention` | The re-pack reached the seat and the answer was unusable after its one retry — a validation failure, a **non-429 4xx** (the seat refusing *this* request: context length exceeded, an uncompilable grammar), or a 200 carrying zero choices. All three are the box answering; the fix is a smaller context or a flatter schema, not an operator. |
-| `structured re-pack unreachable: …` | `infrastructure` | The re-pack could not REACH the seat, or the seat is not what answered: a dial/transport failure, a **5xx**, a **429** (llama-server does not rate-limit — a 429 means something in FRONT of it answered), or a **body that could not be read or parsed** (`llama-server response body unusable: …`). The last shape covers a proxy or captive portal returning HTML with a 200, and a connection dropped mid-body: both happen AFTER the request succeeds, so no `*url.Error` / `net.Error` exists to catch them, and all three used to be filed as abstentions at exit 0. Split from the schema shape deliberately — filed under `output failed schema:` a llama-swap outage reads as a model that cannot follow a schema. The flag is sticky across the retry: a 5xx followed by a wrong-shape retry stays `infrastructure`, because a transport failure that happened at all is the operator's signal. |
+| `structured re-pack unreachable: …` | `infrastructure` | The re-pack could not REACH the seat, or the seat is not what answered: a dial/transport failure, a **5xx**, a **429** (llama-server does not rate-limit — a 429 means something in FRONT of it answered), or a **body that could not be read or parsed** (`llama-server response body unusable: …`). The last shape covers a proxy or captive portal returning HTML with a 200, and a connection dropped mid-body: both happen AFTER the request succeeds, so no `*url.Error` / `net.Error` exists to catch them, and all three used to be filed as abstentions at exit 0. Split from the schema shape deliberately — filed under `output failed schema:` a llama-swap outage reads as a model that cannot follow a schema. The flag is sticky across the retry: a 5xx followed by a wrong-shape retry stays `infrastructure`, because a transport failure that happened at all is the operator's signal. **This is the one broken-stack shape that carries a POPULATED `output`**: the agent loop already finished, so its prose is preserved (`agenttask.go` sets `wire.Output` before the re-pack, and every failure branch below keeps it so the delegator's text-verb acceptance can read it) while `structured` stays absent. It is still counted into `summary.lost_to_stack` — a contract with an `output_schema` asked for a mechanically checked deliverable, and unchecked prose is not one. |
 | `canceled during the structured re-pack (the caller's context ended)` | `budget` | The PARENT context was canceled mid-re-pack (the delegator abandoned the poll, the node is shutting down). It arrives as a `*url.Error` exactly like a dial refusal, so it used to read as broken infrastructure — but nothing on the box failed. |
 
 More shapes originate on the **delegator**, not the node:
@@ -417,15 +417,22 @@ More shapes originate on the **delegator**, not the node:
   appended and the class becomes `infrastructure`.
 - `route=remote: M of N agent-enabled remote(s) advertise no context ceiling (agent_ctx_tokens is
   unset or 0 on <node ids> …)` — class `config`. `agent_ctx_tokens` is `omitempty` on the wire and
-  an operator sets it on the node (a pre-0.65 peer never sends it at all), so a ceiling nobody
-  advertised is a node verdict, never a statement about the caller's contract. The test is
+  an operator sets it on the node, so a ceiling nobody advertised is a node verdict, never a
+  statement about the caller's contract. The state is produced by **a node running the agent lane
+  with `agent_ctx_tokens` unset** — the lane is admitted on `fleet_agent_enabled` + a resolvable
+  planner seat + a safely reachable listener, never on a ceiling, and health publishes whatever is
+  configured (0 included). It is *not* a peer predating the lane: that peer sends no
+  `agent_enabled` either, so it is filtered out before any ceiling is considered. The test is
   **per lane, not fleet-wide**: ANY lane that advertised nothing produces this verdict, and the
   message names those nodes because the fix is on those boxes. A silent lane's ceiling is
-  UNKNOWN, not small — it may be a 128k machine — so no ctx-fit sentence may be spoken over a
-  fleet containing one. (An earlier form keyed off the roomiest ceiling in the fleet, a MAX, so
-  one upgraded node supplied a ceiling on behalf of every peer that had published none, and the
-  mixed fleet a staggered rollout produces still got a quiet `contract` verdict quoting a
-  number the silent node never sent.)
+  UNKNOWN, not small — it may be a 128k machine — so no ceiling claim may be made *about that
+  lane*. (An earlier form keyed off the roomiest ceiling in the fleet, a MAX, so one node with a
+  real ceiling supplied one on behalf of every peer that had published none, and that mixed fleet
+  still got a quiet `contract` verdict quoting a number the silent node never sent.) When every
+  lane that DID advertise a ceiling is too small for the contract, that second cause is appended
+  to this reason — scoped to the advertised lanes ("every remote that DID advertise a ceiling tops
+  out at N"), so both true causes reach the operator in one run and neither is a claim about the
+  silent box.
 - `route=remote: all N configured remote(s) failed the health probe: …` — class
   `infrastructure`; `route=remote: no remote fleet nodes are configured …` — class `config`.
 - The **contract-side** gate rejections — no `output_schema`, a contract already past the origin
@@ -448,8 +455,11 @@ failing its health probe** (`route=auto`, local GPU busy): the placement is righ
 runs, but `route=remote` exited non-zero on that identical fleet state while `route=auto`
 discarded it, so a fleet down for a week read green forever. That same case is why the MCP tool's
 `isError` is NOT the exit code's rule — it fires on `summary.failed` plus `summary.lost_to_stack`
-(the defers that LOST a subtask, published separately for exactly this reason) rather than on the
-whole of `summary.infrastructure` — see [coding-agent](coding-agent.md#delegation-surfaces).
+(the defers that LOST a subtask — it delivered no usable result because the contracted output
+never arrived, published separately for exactly this reason) rather than on the whole of
+`summary.infrastructure` — see [coding-agent](coding-agent.md#delegation-surfaces). The counted
+set includes the `structured re-pack unreachable` shape, whose `output` is populated: what was
+lost is the schema-checked deliverable, not the bytes.
 
 ### Auth (v1 scope: the agent lane only)
 

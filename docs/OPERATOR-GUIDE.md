@@ -682,8 +682,11 @@ configured remote was failing its health probe. Non-zero means a node is broken 
 misconfigured, not that the small model could not do the job.
 
 `lost_to_stack` rides beside it (omitted when zero) and is the half that is **lost work** —
-subtasks that came back empty because the stack failed them, as opposed to a local placement that
-succeeded while the fleet was down. The MCP tool marks the call `isError` on
+subtasks that delivered no usable result because the stack failed them: the contracted output
+never arrived, as opposed to a local placement that succeeded while the fleet was down. It is not
+a "the result is blank" count — a `structured re-pack unreachable` defer carries the finished
+loop's prose in `output` with `structured` absent, and still counts, because a contract with an
+`output_schema` asked for a checked deliverable. The MCP tool marks the call `isError` on
 `failed > 0 || lost_to_stack > 0`, with the JSON body unchanged; the CLI's exit code is the wider
 `infrastructure > 0` rule below.
 

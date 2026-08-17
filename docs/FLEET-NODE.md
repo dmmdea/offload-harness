@@ -425,7 +425,7 @@ one contract. Unknown payload fields are **ignored** (staggered node deploys mus
 |---|---|---|
 | `abstention` | the stack is healthy; the model could not produce a usable answer | `output failed schema: …` — validation failure, a **4xx** from the seat (it refused *this* request), or a 200 with zero choices |
 | `budget` | a ceiling stopped it; a bigger budget might succeed | `wall timeout after <N>s`, `step budget exhausted (…)`, `canceled during the structured re-pack …`, delegator-side `poll deadline …` on a node that reported OWNING the job |
-| `infrastructure` | something is broken — nothing was learned, retrying the same contract cannot help | `building agent: …`, `agent loop: …`, `structured re-pack unreachable: …` (dial failure or **5xx**, sticky across the retry), delegator-side `poll deadline …` whose last poll answer was unusable, and "all remotes failed the health probe" |
+| `infrastructure` | something is broken — the contracted output never arrived, and retrying the same contract cannot help | `building agent: …`, `agent loop: …`, `structured re-pack unreachable: …` (dial failure or **5xx**, sticky across the retry), delegator-side `poll deadline …` whose last poll answer was unusable, and "all remotes failed the health probe". **`output` may be POPULATED on this class**: `structured re-pack unreachable` means the agent loop FINISHED and only the re-pack seat was out of reach, so the loop's prose rides along (the delegator's text-verb acceptance reads it) with `structured` absent. It still counts into `summary.lost_to_stack` — the checked deliverable the `output_schema` asked for is what did not arrive |
 | `config` | this node's configuration can never run this | no seat resolvable, seat not in the served roster, unknown profile, and the delegator's "no remote passed the capability gate" / "no remotes configured" |
 | `contract` | the CALLER'S contract cannot be placed anywhere, however healthy the fleet | no `output_schema` for a remote placement, a contract past the origin hop (`depth != 0`), a token estimate too big for every advertised ceiling — and only when **every** agent lane advertised one, since an absent `agent_ctx_tokens` means the ceiling is unknown, not small |
 
@@ -435,10 +435,14 @@ local placement taken while every configured remote failed its health probe — 
 read as a successful run just because its defers were polite. `contract` is deliberately
 excluded: nobody has to touch a box to fix it.
 
-The subset of those defers that LOST a subtask (it came back empty because the stack failed it)
-is published separately as `summary.lost_to_stack`, omitted when zero. That is the count the MCP
-tool sets `isError` on, alongside `summary.failed` — a fleet-down run that still delivered every
-subtask stays a quiet success there, while the CLI's exit code still reports it.
+The subset of those defers that LOST a subtask — it **delivered no usable result: the contracted
+output never arrived** (a broken stack, not the model abstaining) — is published separately as
+`summary.lost_to_stack`, omitted when zero. That is the count the MCP tool sets `isError` on,
+alongside `summary.failed` — a fleet-down run that still delivered every subtask stays a quiet
+success there, while the CLI's exit code still reports it. Read it as "the contracted output was
+lost", not as "the result is blank": the `structured re-pack unreachable` shape counts here with
+`output` **populated** and `structured` absent, because a contract carrying an `output_schema`
+asked for a mechanically checked deliverable and unchecked prose is not one.
 
 A poll `404` is a **denial**, not an answer: it says the node never held the job, so it can never
 earn the "node accepted the job" defer — after the bounded re-dispatches it is a

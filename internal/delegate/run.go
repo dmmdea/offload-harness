@@ -107,13 +107,25 @@ type Summary struct {
 	// counted: the fleet is healthy and the CALLER has a contract to fix, so
 	// telling the operator a box is broken sends them to the wrong machine.
 	Infrastructure int
-	// LostToStack counts the subtasks that PRODUCED NOTHING because the stack
-	// failed them — a defer whose class is infrastructure|config. It is the
+	// LostToStack counts the subtasks that DELIVERED NO USABLE RESULT because the
+	// stack failed them — a defer whose class is infrastructure|config. It is the
 	// half of Infrastructure that represents lost WORK, split out because
 	// Infrastructure conflates two states a caller must act on differently:
 	//
 	//	remotesUnreachable → a result that SUCCEEDED anyway (local took it)
-	//	BrokenStackDefer   → a subtask that came back EMPTY
+	//	BrokenStackDefer   → a subtask whose contracted output never arrived
+	//
+	// "No usable result" is not always "no bytes", and the distinction is load-
+	// bearing because the PREDICATE is what ships: pipeline/agenttask.go sets
+	// wire.Output before the re-pack and keeps it populated on every failure
+	// branch below (the delegator's text-verb acceptance reads it), so a subtask
+	// whose agent loop FINISHED and whose re-pack seat was unreachable publishes
+	// prose beside defer_class:"infrastructure" and IS counted here. That is
+	// deliberate, not an oversight: a contract carrying an output_schema asked for
+	// a mechanically checkable deliverable, and prose with no `structured` is not
+	// one — the contracted output genuinely did not arrive, so the caller must be
+	// told rather than left to merge an unchecked answer. Read this field as "the
+	// contracted output was lost", never as "the result is empty".
 	//
 	// Without the split, "was anything lost?" had no answer in the summary, and
 	// the MCP surface approximated it with `Succeeded == 0` — which silenced a
@@ -947,8 +959,8 @@ func (r *runner) noEligibleRemote(st Subtask, views []NodeView, probeErrs []stri
 	if len(r.remotes) == 0 {
 		return "no remote fleet nodes are configured (pass --remote / the remotes argument)", core.DeferClassConfig
 	}
-	lanes, tooSmall, roomiest, unadvertised := laneStats(st, views)
-	contractWhy := contractIneligible(st, lanes, tooSmall, roomiest, len(unadvertised))
+	lanes, advertisedTooSmall, roomiest, unadvertised := laneStats(st, views)
+	contractWhy := contractIneligible(st, lanes, advertisedTooSmall, roomiest, len(unadvertised))
 	nodeWhy, nodeClass := nodeSideVerdict(lanes, unadvertised, views, probeErrs)
 	if nodeClass == "" {
 		// The ONE positively-established quiet case: everything answered, the
@@ -987,20 +999,31 @@ func nodeSideVerdict(lanes int, unadvertised []string, views []NodeView, probeEr
 	case len(unadvertised) > 0:
 		// agent_ctx_tokens is omitempty on the wire and config documents 0 as
 		// "not advertised — set it when opting a node in": an OPERATOR fix on a
-		// box, and the only thing a peer predating the agent lane can send. A
-		// ceiling NOBODY advertised cannot make the caller's contract too big,
-		// but an unset value counted into lanes and then into tooSmall, so a
-		// 30-token goal came back as "needs ~3102 tokens, the roomiest remote
-		// advertises 0" — quiet, contract-classed, exit 0.
+		// box. A ceiling NOBODY advertised cannot make the caller's contract too
+		// big, but an unset value counted into lanes and then into the too-small
+		// tally, so a 30-token goal came back as "needs ~3102 tokens, the roomiest
+		// remote advertises 0" — quiet, contract-classed, exit 0.
+		//
+		// WHO ACTUALLY PRODUCES A SILENT LANE (R6): a node running the agent lane
+		// with agent_ctx_tokens unset. fleetnode.AgentLaneAdmissible gates the lane
+		// on fleet_agent_enabled + a resolvable planner seat + a safely reachable
+		// listener — never on a ceiling — and health advertises whatever is
+		// configured, 0 included. It is NOT a peer predating the lane: such a peer
+		// sends no agent_enabled either, decodes as AgentEnabled:false, and is
+		// filtered out of `lanes` before this branch can see it. Getting that
+		// wrong matters here because it is the whole justification for the class:
+		// the reachable state is a fleet where one operator set the field and
+		// another did not, and the fix is on the box that did not.
 		//
 		// PER-LANE, not fleet-wide (R5): this fires on ANY silent lane, not only
 		// on a fleet where every lane is silent. The predecessor keyed off
-		// `roomiest == 0`, a fleet-wide MAX, so one upgraded node supplied a
-		// ceiling for every peer that had published none and the mixed fleet a
-		// staggered rollout produces — the state nodeview.go's loose decode is
-		// explicitly built for — fell straight through to the quiet class.
-		// UNKNOWN is not SMALL: a silent node may be a 128k box, and the fix for
-		// it is on that box, so the class is loud and the reason names it.
+		// `roomiest == 0`, a fleet-wide MAX, so one node with a real ceiling
+		// supplied one for every peer that had published none, and that mixed
+		// fleet fell straight through to the quiet class. UNKNOWN is not SMALL: a
+		// silent node may be a 128k box, and the fix for it is on that box, so the
+		// class is loud and the reason names it. The ctx-fit sentence still rides
+		// along when every ADVERTISED lane is too small (contractIneligible) —
+		// both causes are true and the operator is owed both.
 		return fmt.Sprintf("%d of %d agent-enabled remote(s) advertise no context ceiling (agent_ctx_tokens is unset or 0 on %s — an operator sets it on the node), and an unadvertised ceiling can never satisfy the placement gate",
 			len(unadvertised), lanes, strings.Join(unadvertised, ", ")), core.DeferClassConfig
 	}
@@ -1008,30 +1031,37 @@ func nodeSideVerdict(lanes int, unadvertised []string, views []NodeView, probeEr
 }
 
 // laneStats summarizes the ANSWERING remotes' agent lane for this contract: how
-// many offer it at all (agent-enabled AND roster-resident), how many of those
-// are too small for it, the roomiest ceiling any of them advertises, and the ids
-// of the ones that advertise NO ceiling at all.
+// many offer it at all (agent-enabled AND roster-resident), how many of the ones
+// that ADVERTISED a ceiling are too small for it, the roomiest ceiling any of
+// them advertises, and the ids of the ones that advertise NO ceiling at all.
+//
+// advertisedTooSmall deliberately excludes the silent lanes rather than counting
+// them (`est+reserve > 0` is trivially true, so they used to inflate it): UNKNOWN
+// is not SMALL, and the only honest ceiling arithmetic is over numbers the nodes
+// themselves sent. It is what lets the ctx-fit sentence be spoken about the
+// advertised half of a mixed fleet without claiming anything about the other.
 //
 // unadvertised is a list rather than a count because it is the operator's
 // worklist: "some node did not publish agent_ctx_tokens" is unactionable across
 // a fleet, "qube-2 did not" is one ssh away.
-func laneStats(st Subtask, views []NodeView) (lanes, tooSmall, roomiest int, unadvertised []string) {
+func laneStats(st Subtask, views []NodeView) (lanes, advertisedTooSmall, roomiest int, unadvertised []string) {
 	for _, v := range views {
 		if !v.AgentEnabled || !v.AgentResident {
 			continue
 		}
 		lanes++
+		if v.AgentCtxTokens == 0 {
+			unadvertised = append(unadvertised, laneID(v))
+			continue
+		}
 		if v.AgentCtxTokens > roomiest {
 			roomiest = v.AgentCtxTokens
 		}
-		if v.AgentCtxTokens == 0 {
-			unadvertised = append(unadvertised, laneID(v))
-		}
 		if st.EstTokens+specReserve > v.AgentCtxTokens {
-			tooSmall++
+			advertisedTooSmall++
 		}
 	}
-	return lanes, tooSmall, roomiest, unadvertised
+	return lanes, advertisedTooSmall, roomiest, unadvertised
 }
 
 // laneID names a node for an operator-facing message. A node that answered
@@ -1055,30 +1085,43 @@ func laneID(v NodeView) string {
 // no advertised ceiling can hold. The test that separates them from a node
 // problem is WHO CAN FIX IT: these three are fixed by rewriting the contract,
 // without touching a box.
-func contractIneligible(st Subtask, lanes, tooSmall, roomiest, unadvertised int) string {
+func contractIneligible(st Subtask, lanes, advertisedTooSmall, roomiest, unadvertised int) string {
 	if len(st.Contract.OutputSchema) == 0 {
 		return "the contract carries no output_schema, which REMOTE placement requires — the delegator must hold a mechanical check before it merges a weak node's output (a schemaless contract is still legal locally)"
 	}
 	if st.Contract.Depth != 0 {
 		return fmt.Sprintf("the contract is already at depth %d; only an ORIGIN contract (depth 0) may travel — hop limit 1", st.Contract.Depth)
 	}
-	// Ctx-fit is a contract property only when the NODE side supplies a real
-	// number to be too big for: at least one remote offers the lane, EVERY such
-	// remote advertises a ceiling (any silent lane is nodeSideVerdict's case, not
-	// this one), and every one of them is simply too small.
+	// Ctx-fit needs a real number to be too big for, so it is spoken only over the
+	// lanes that ADVERTISED one, and every one of those must be too small. Silent
+	// lanes are excluded from both sides of that test (laneStats keeps them out of
+	// advertisedTooSmall): their ceiling is UNKNOWN, and no verdict may be built
+	// on an unknown.
 	//
-	// `unadvertised == 0` is the whole per-lane rule, and it is strictly stronger
-	// than the `roomiest > 0` it replaced. roomiest is a fleet-wide MAX: with two
-	// lanes advertising 4096 and nothing, it is 4096, so the old guard passed and
-	// this sentence went on to claim "the roomiest agent-enabled remote advertises
-	// 4096" — a ceiling verdict on a node that published none, which docs define
-	// as UNKNOWN, not small. Requiring every lane to have supplied a number means
-	// the sentence is only ever spoken about numbers the nodes themselves sent.
-	// (roomiest > 0 is implied here — with no silent lane, every ceiling is
-	// non-zero — so it is not restated.)
-	if lanes > 0 && unadvertised == 0 && tooSmall == lanes {
-		return fmt.Sprintf("the contract needs ~%d context tokens (%d estimated + %d reserved for the loop) and the roomiest agent-enabled remote advertises %d",
-			st.EstTokens+specReserve, st.EstTokens, specReserve, roomiest)
+	// Whether this makes the CLASS `contract` is still noEligibleRemote's call and
+	// still requires a positively-fine node side — with a silent lane present the
+	// class stays LOUD and this sentence rides along as the second cause. That
+	// composition is the R6 fix: the predecessor keyed the whole sentence off
+	// `unadvertised == 0`, so on a mixed fleet it was SUPPRESSED entirely and the
+	// operator was told to set agent_ctx_tokens on one box, fixed it, and only
+	// then discovered on the next run that the contract does not fit the other
+	// box's advertised ceiling either. Two true causes, one reported.
+	//
+	// The WORDING carries the scope, because the suppression was not gratuitous:
+	// "the roomiest agent-enabled remote advertises 4096" is a fleet-wide MAX
+	// claim, and over a fleet with a silent lane it implies that lane is SMALLER —
+	// authoring a ceiling for a node that published none (docs: unknown, not
+	// small; it may be a 128k box), the same defect class as the invented 404
+	// denial a previous round removed. "every remote that DID advertise a ceiling
+	// tops out at N" says exactly what was measured and nothing about the rest.
+	advertised := lanes - unadvertised
+	if advertised > 0 && advertisedTooSmall == advertised {
+		ceiling := fmt.Sprintf("the roomiest agent-enabled remote advertises %d", roomiest)
+		if unadvertised > 0 {
+			ceiling = fmt.Sprintf("every remote that DID advertise a ceiling tops out at %d", roomiest)
+		}
+		return fmt.Sprintf("the contract needs ~%d context tokens (%d estimated + %d reserved for the loop) and %s",
+			st.EstTokens+specReserve, st.EstTokens, specReserve, ceiling)
 	}
 	return ""
 }

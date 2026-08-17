@@ -1212,17 +1212,25 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 // The rule that expresses that WITHOUT a silent path is stated on lost WORK, not
 // on the presence of successes. `Succeeded == 0` was the previous spelling and it
 // over-reached: Infrastructure covers both remotesUnreachable (a result that
-// succeeded) and a broken-stack DEFER (a subtask that produced nothing), and only
-// the first justifies staying quiet — yet the gate silenced the second too the
-// moment ANY sibling succeeded. One of two subtasks eaten by a box with a dead
+// succeeded) and a broken-stack DEFER (a subtask whose contracted output never
+// arrived), and only the first justifies staying quiet — yet the gate silenced
+// the second too the moment ANY sibling succeeded. One of two subtasks eaten by a box with a dead
 // llama-server reached the calling model as a clean tool call, while the CLI
 // exited non-zero on the identical run: two surfaces disagreeing, with the quiet
 // one belonging to the caller that has no exit code to read.
 //
-// LostToStack counts exactly the subtasks that came back EMPTY because the stack
-// failed them, so the rule needs no proxy. `Deferred > 0 && Infrastructure > 0`
-// is NOT one — a contract-classed defer beside a fleet-down local success
-// satisfies it with nothing lost, re-creating the flag-on-finished-work defect.
+// LostToStack counts exactly the subtasks that DELIVERED NO USABLE RESULT
+// because the stack failed them, so the rule needs no proxy.
+// `Deferred > 0 && Infrastructure > 0` is NOT one — a contract-classed defer
+// beside a fleet-down local success satisfies it with nothing lost, re-creating
+// the flag-on-finished-work defect.
+//
+// The count is stated on the CONTRACTED output, not on empty bytes, and the flag
+// inherits that meaning: a finished agent loop whose structured re-pack seat was
+// unreachable publishes its prose with `structured` absent, and is flagged. That
+// is the right call for an MCP caller — a contract carrying an output_schema is
+// owed a mechanically checked deliverable, and a model handed unchecked prose
+// under a green flag would merge it as if it had been validated.
 //
 // So: a subtask that actually failed is an error, and a subtask lost to the
 // stack is an error — a sibling succeeding never un-loses it, exactly as it never

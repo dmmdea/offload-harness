@@ -77,8 +77,12 @@ const (
 //     and the structured re-pack (requests carrying "grammar"), told apart by
 //     shape exactly as internal/pipeline's own fake does.
 //
+// repackStatus, when non-zero, is the status the RE-PACK completions answer with
+// instead of a result — the seat refusing only the second half of the run, which
+// is how a real llama-swap outage lands between the loop and the re-pack.
+//
 // Everything else (/props, /tokenize) 404s, which every consumer fails open on.
-func integrationSeatServer(t *testing.T, loopCalls *atomic.Int64) *httptest.Server {
+func integrationSeatServer(t *testing.T, loopCalls *atomic.Int64, repackStatus int) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -108,6 +112,10 @@ func integrationSeatServer(t *testing.T, loopCalls *atomic.Int64) *httptest.Serv
 			}
 			if g, _ := body["grammar"].(string); g == "" {
 				t.Errorf("chat request with neither tools nor grammar: %v", body)
+			}
+			if repackStatus != 0 {
+				w.WriteHeader(repackStatus)
+				return
 			}
 			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"{\"answer\":\"42\"}"},"finish_reason":"stop"}],`+
 				`"usage":{"prompt_tokens":11,"completion_tokens":5}}`)
@@ -225,7 +233,7 @@ func integrationArgs(base string) string {
 // TestDelegationEndToEndAcrossPackages is the whole chain, faking only the seat.
 func TestDelegationEndToEndAcrossPackages(t *testing.T) {
 	var loopCalls atomic.Int64
-	seat := integrationSeatServer(t, &loopCalls)
+	seat := integrationSeatServer(t, &loopCalls, 0)
 	base, nodeCfg := startIntegrationNode(t, seat.URL)
 	wantNode, wantSeat := advertisedIdentity(t, base)
 
@@ -311,7 +319,7 @@ func TestDelegationEndToEndAcrossPackages(t *testing.T) {
 // defer, which is what a caller reads as "the model tried and abstained".
 func TestDelegationEndToEndRejectsAMissingToken(t *testing.T) {
 	var loopCalls atomic.Int64
-	seat := integrationSeatServer(t, &loopCalls)
+	seat := integrationSeatServer(t, &loopCalls, 0)
 	base, _ := startIntegrationNode(t, seat.URL)
 	advertisedIdentity(t, base) // health stays OPEN: the lane is advertised either way
 
@@ -336,5 +344,82 @@ func TestDelegationEndToEndRejectsAMissingToken(t *testing.T) {
 	}
 	if n := loopCalls.Load(); n != 0 {
 		t.Errorf("agent loop turns = %d, want 0 — a rejected dispatch must never reach the seat", n)
+	}
+}
+
+// TestDelegationEndToEndRepackUnreachableIsLostWork (R6) pins the one member of
+// lost_to_stack's counted set whose `output` is NOT empty — the case that made
+// the old "the subtasks that PRODUCED NOTHING … came back EMPTY" wording false
+// about the code shipping under it.
+//
+// The seat answers the LOOP normally and then refuses the structured re-pack, so
+// the node's agent loop FINISHES: agenttask.go has already set wire.Output, and
+// keeps it populated on the re-pack failure branch so the delegator's text-verb
+// acceptance can still read it. What the caller receives is prose beside
+// `deferred:true, defer_class:"infrastructure"` with no `structured` at all.
+//
+// That result IS lost work, and the wording — not the predicate — was what got
+// corrected: a contract carrying an output_schema asked for a mechanically
+// checked deliverable, and prose nothing validated is not one, so the contracted
+// output genuinely did not arrive. Flagging it is what stops a calling model from
+// merging an unchecked answer as if the schema had passed.
+//
+// Only the seat is faked, so this pins the whole chain in one run: the pipeline
+// PRODUCES the shape, delegate.Run COUNTS it into lost_to_stack, and the MCP
+// handler FLAGS the call. Confirmed red by mutation — adding
+// `&& pr.Result.Output == ""` to run.go's `lost` predicate (the literal reading of
+// the old comment) drops lost_to_stack to 0 and clears IsError.
+func TestDelegationEndToEndRepackUnreachableIsLostWork(t *testing.T) {
+	var loopCalls atomic.Int64
+	seat := integrationSeatServer(t, &loopCalls, http.StatusInternalServerError)
+	base, _ := startIntegrationNode(t, seat.URL)
+	advertisedIdentity(t, base)
+
+	s := integrationDelegator(t, integrationToken)
+	res, err := s.handleAgentDelegate(context.Background(), callReq(integrationArgs(base)))
+	if err != nil {
+		t.Fatalf("handleAgentDelegate: %v", err)
+	}
+	if !res.IsError {
+		t.Errorf("IsError = false: the contracted output never arrived and a box is why — the CLI exits NON-ZERO on this same run")
+	}
+
+	m := decodeResult(t, res)
+	summary, _ := m["summary"].(map[string]any)
+	if summary["deferred"] != float64(1) || summary["infrastructure"] != float64(1) {
+		t.Fatalf("summary = %v, want one broken-stack defer", m["summary"])
+	}
+	if summary["succeeded"] != float64(0) {
+		t.Errorf("summary = %v, want nothing counted as succeeded — no schema-checked result exists", summary)
+	}
+	if summary["lost_to_stack"] != float64(1) {
+		t.Fatalf("summary = %v, want lost_to_stack:1 — a POPULATED output does not un-lose the contracted deliverable", summary)
+	}
+
+	results, _ := m["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("results = %v", m["results"])
+	}
+	r0, _ := results[0].(map[string]any)
+	if r0["deferred"] != true {
+		t.Errorf("results[0].deferred = %v, want true", r0["deferred"])
+	}
+	if r0["defer_class"] != core.DeferClassInfrastructure {
+		t.Errorf("defer_class = %v, want %q — the seat was unreachable, not wrong", r0["defer_class"], core.DeferClassInfrastructure)
+	}
+	if reason, _ := r0["reason"].(string); !strings.HasPrefix(reason, "structured re-pack unreachable: ") {
+		t.Errorf("reason = %q, want the transport-specific prefix", reason)
+	}
+	// The two halves that make this case what it is, and the reason the count
+	// cannot be described as "came back empty": the loop's answer is THERE, and
+	// the schema-checked deliverable is NOT.
+	if r0["output"] != finalAnswer {
+		t.Errorf("output = %v, want the finished loop's prose %q preserved — text-verb acceptance reads it", r0["output"], finalAnswer)
+	}
+	if st, has := r0["structured"]; has {
+		t.Errorf("structured = %v, want it ABSENT: the re-pack never produced one", st)
+	}
+	if n := loopCalls.Load(); n < 2 {
+		t.Errorf("agent loop turns = %d, want ≥2 — the loop must have genuinely finished before the re-pack failed", n)
 	}
 }

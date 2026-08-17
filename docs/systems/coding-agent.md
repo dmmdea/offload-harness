@@ -377,15 +377,23 @@ causes.
 
 `summary.infrastructure` covers two situations a caller acts on differently, so
 **`summary.lost_to_stack`** (omitted when zero) splits out the one that is lost WORK: subtasks
-that came back EMPTY because the stack failed them. The remainder of `infrastructure` is a
-successful LOCAL placement annotated with "the fleet was down" — nothing lost.
+that **delivered no usable result — the contracted output never arrived** because the stack failed
+them. The remainder of `infrastructure` is a successful LOCAL placement annotated with "the fleet
+was down" — nothing lost.
+
+It counts the missing DELIVERABLE, not missing bytes, and one counted member proves the
+difference: `structured re-pack unreachable` fires after the agent loop has already FINISHED, so
+that result publishes `output` populated, `structured` absent, `defer_class: "infrastructure"`.
+It is still lost work — a contract carrying an `output_schema` asked for a mechanically checked
+deliverable, and prose nothing validated is not one, so the caller is told rather than left to
+merge it.
 
 The two surfaces report that verdict differently, on purpose, and they agree on the case that
 matters. **The CLI exits non-zero on `summary.infrastructure > 0`** — an exit code sits beside the
 printed results, so it can say "look at this" without denying the results. **The MCP tool sets
-`isError` on `summary.failed > 0` or `summary.lost_to_stack > 0`**: a subtask that produced
-nothing is loud whether the stack or a transport error ate it, and a sibling succeeding does not
-un-lose it. The one deliberate difference is the fleet-down run that still delivered every
+`isError` on `summary.failed > 0` or `summary.lost_to_stack > 0`**: a subtask whose contracted
+output never arrived is loud whether the stack or a transport error ate it, and a sibling
+succeeding does not un-lose it. The one deliberate difference is the fleet-down run that still delivered every
 subtask (`infrastructure > 0`, `lost_to_stack == 0`): non-zero on the CLI, a quiet success on
 MCP, because `isError` means *the call failed* and flagging a run whose subtasks all completed,
 validated and passed acceptance is how a model comes to discard or redo correct work. The body is

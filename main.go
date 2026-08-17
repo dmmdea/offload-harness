@@ -1747,7 +1747,10 @@ func runDelegate(args []string) error {
 //
 // SURFACE PARITY with mcpserver.delegateIsError (R5-2). The two surfaces must
 // agree on the case that matters — a subtask LOST to the stack (Summary's
-// LostToStack: it produced nothing and a box is why) is loud on both. It used
+// LostToStack: its contracted output never arrived and a box is why, which
+// includes a finished loop whose structured re-pack seat was unreachable — the
+// prose rides along, but the checked deliverable the contract asked for does
+// not) is loud on both. It used
 // not to be: the MCP flag gated on `Succeeded == 0`, so one of two subtasks
 // eaten by a dead llama-server exited non-zero HERE and returned a clean tool
 // call THERE, and the quiet surface was the one whose caller cannot read an exit

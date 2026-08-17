@@ -1398,10 +1398,12 @@ func TestRunContractSideClassRequiresAHealthyFleet(t *testing.T) {
 // TestRunCtxFitIsContractSideOnlyWithARealCeiling (R4-2, widened R5-1):
 // agent_ctx_tokens is omitempty on the wire and config documents 0 as "not
 // advertised — set it when opting a node in", i.e. an OPERATOR fix on a box. An
-// unset value (or any peer predating the agent lane, which never emits the
-// field) decodes as 0, still counts into lanes, and so satisfied
+// unset value decodes as 0, still counts into lanes, and so satisfied
 // `lanes > 0 && tooSmall == lanes` — blaming a 30-token goal on the caller's
-// contract at exit 0.
+// contract at exit 0. Both fixtures below are ordinary agent-enabled nodes
+// (`agentEnabled: true`), which is what this state actually takes: the lane is
+// admitted without any ceiling, so a peer PREDATING the lane is not the producer
+// and could not be — it sends no agent_enabled and never reaches `lanes`.
 //
 // R5-1 — the round-4 guard was FLEET-WIDE where its own doc claimed per-lane,
 // and this test was VACUOUS about it: it exercised only the ALL-zero fleet,
@@ -1409,13 +1411,18 @@ func TestRunContractSideClassRequiresAHealthyFleet(t *testing.T) {
 // `roomiest > 0 &&` could be deleted from contractIneligible with the whole tree
 // still green (verified by mutation). Because `roomiest` is a fleet-wide MAX,
 // ONE node advertising a real ceiling supplied it for EVERY node advertising
-// none — a mixed fleet (the DOCUMENTED staggered-rollout state) still shipped a
-// quiet exit-0 contract-classed defer whose reason ALSO authored a claim on the
-// silent node's behalf ("the roomiest agent-enabled remote advertises 4096").
-// An absent agent_ctx_tokens means the ceiling is UNKNOWN, not small; the box
-// may be a 128k machine. So the mixed row is here, and BOTH rows now assert the
-// two halves the old test never separated: the class is loud, AND no ceiling
-// claim is made for a lane that advertised none.
+// none — a mixed fleet still shipped a quiet exit-0 contract-classed defer whose
+// reason ALSO authored a claim on the silent node's behalf ("the roomiest
+// agent-enabled remote advertises 4096"). An absent agent_ctx_tokens means the
+// ceiling is UNKNOWN, not small; the box may be a 128k machine. So the mixed row
+// is here, and BOTH rows now assert the two halves the old test never separated:
+// the class is loud, AND no ceiling claim is made for a lane that advertised
+// none.
+//
+// R6 — the R5 fix over-corrected into SUPPRESSION: with a silent lane present,
+// the ctx-fit sentence vanished even when every ADVERTISED lane was genuinely
+// too small, so the operator heard one of two true causes per run. The mixed row
+// now pins the merged reason, scoped to the lanes that sent a number.
 func TestRunCtxFitIsContractSideOnlyWithARealCeiling(t *testing.T) {
 	type lane struct {
 		id  string
@@ -1428,6 +1435,11 @@ func TestRunCtxFitIsContractSideOnlyWithARealCeiling(t *testing.T) {
 		// wantNamed are the node ids the reason must name — the operator has to
 		// know WHICH box to go set the field on.
 		wantNamed []string
+		// wantCtxFit is the SECOND truth the reason must also carry when the
+		// contract does not fit any ceiling that WAS advertised (R6). Empty means
+		// no ctx-fit sentence may be spoken at all — there is no advertised number
+		// for the contract to be too big for.
+		wantCtxFit []string
 	}{
 		{
 			name:      "no remote advertises a ceiling",
@@ -1436,14 +1448,27 @@ func TestRunCtxFitIsContractSideOnlyWithARealCeiling(t *testing.T) {
 			wantNamed: []string{"no-ceiling-node"},
 		},
 		{
-			// The mixed fleet: one upgraded node answers with a real ceiling, one
-			// peer never sends the field at all. nodeview.go's loose decode exists
-			// precisely so staggered deploys work, so this is the normal rollout
-			// state, not an exotic one.
-			name:      "one remote advertises, one does not",
-			fleet:     []lane{{"advertised-node", 4096}, {"no-ceiling-node", 0}},
-			goal:      strings.Repeat("x", 30000), // ~13k tokens with the reserve: genuinely past 4096
-			wantNamed: []string{"no-ceiling-node"},
+			// The mixed fleet: one node answers with a real ceiling, one runs the
+			// lane with agent_ctx_tokens unset. AgentLaneAdmissible gates the lane
+			// on fleet_agent_enabled + a resolvable planner seat + a safely
+			// reachable listener — never on a ceiling — and health advertises
+			// whatever is configured, 0 included, so both nodes here are ordinary
+			// agent-enabled peers whose operators made different choices. (A peer
+			// PREDATING the lane cannot produce this state: it sends no
+			// agent_enabled either, decodes as AgentEnabled:false, and never enters
+			// `lanes`.)
+			//
+			// R6: the ctx-fit sentence used to be SUPPRESSED here rather than
+			// merged, so the operator heard "set agent_ctx_tokens on
+			// no-ceiling-node" and never "and the contract does not fit the 4096
+			// the other one advertises" — one fix, then a second run to discover
+			// the second. Both truths must survive, and the ceiling clause must be
+			// phrased so it claims nothing about the silent node.
+			name:       "one remote advertises, one does not",
+			fleet:      []lane{{"advertised-node", 4096}, {"no-ceiling-node", 0}},
+			goal:       strings.Repeat("x", 30000), // ~13k tokens with the reserve: genuinely past 4096
+			wantNamed:  []string{"no-ceiling-node"},
+			wantCtxFit: []string{"the contract needs ~", "every remote that DID advertise a ceiling tops out at 4096"},
 		},
 	}
 	for _, tc := range cases {
@@ -1477,13 +1502,25 @@ func TestRunCtxFitIsContractSideOnlyWithARealCeiling(t *testing.T) {
 					t.Errorf("reason = %q, want the silent node %q named — the fix is on THAT box", r.Result.Reason, id)
 				}
 			}
-			// The FABRICATION half, and the assertion the old test lacked: the
-			// ctx-fit sentence may only be spoken when EVERY lane supplied a real
-			// number to be too big for. With one lane silent it is a claim about a
-			// ceiling nobody published — the same defect class as the invented
-			// 404 denial a previous round removed.
+			// The FABRICATION half, and the assertion the old test lacked: no
+			// "roomiest" verdict may be spoken over a fleet with a silent lane —
+			// "roomiest" is a fleet-wide MAX, so it implies the silent node is
+			// SMALLER, a claim about a ceiling nobody published (the same defect
+			// class as the invented 404 denial a previous round removed).
 			if strings.Contains(r.Result.Reason, "roomiest") {
 				t.Errorf("reason = %q asserts a roomiest-ceiling verdict over a fleet where a lane advertised nothing", r.Result.Reason)
+			}
+			// R6, the other half of the same sentence: suppressing it entirely
+			// costs the operator the SECOND truth. When every ADVERTISED lane is
+			// genuinely too small, that must be said too — scoped to the lanes that
+			// actually sent a number, which fabricates nothing.
+			for _, want := range tc.wantCtxFit {
+				if !strings.Contains(r.Result.Reason, want) {
+					t.Errorf("reason = %q, want it to ALSO carry %q — both causes are true and the operator needs both", r.Result.Reason, want)
+				}
+			}
+			if len(tc.wantCtxFit) == 0 && strings.Contains(r.Result.Reason, "the contract needs ~") {
+				t.Errorf("reason = %q speaks a ctx-fit verdict although no lane advertised a ceiling to be too big for", r.Result.Reason)
 			}
 		})
 	}

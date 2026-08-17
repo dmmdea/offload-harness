@@ -12,6 +12,50 @@ Multi-node sub-agent delegation. Released as 0.65.0 rather than 0.63.0 because a
 concurrent session shipped 0.63.0 and 0.64.0 from the same repo while this branch
 was in adversarial review; the entries below were written across that review cycle.
 
+### Fixed — delegation lane, round-6 adversarial review (say what the flag counts, and name both causes)
+
+A sixth round found no Criticals and confirmed by mutation that the round-5 fixes bind. Its one
+Important finding, and two below-bar ones, are all the same shape: **a justification that describes
+something the code does not do.** No behavioral rule changed except where noted.
+
+- **`lost_to_stack`'s stated premise was false for a reachable member of the set it counts.** Six
+  places (`internal/delegate/run.go`, `wire.go`, `internal/mcpserver/mcpserver.go`, `main.go`,
+  `docs/systems/coding-agent.md`, `docs/FLEET-NODE.md`, `docs/OPERATOR-GUIDE.md`) defined it as "the
+  subtasks that PRODUCED NOTHING … came back EMPTY", but the predicate is
+  `deferred && (infrastructure|config)` — and one infrastructure defer carries a **populated**
+  `output`: `structured re-pack unreachable` fires after the agent loop has FINISHED, and
+  `agenttask.go` keeps `wire.Output` set on every re-pack failure branch so delegator-side text-verb
+  acceptance can read it. So a run that returned real prose was counted as lost and flagged
+  `isError`, under a comment saying it came back empty. **The predicate is correct and unchanged;
+  the wording was wrong.** A contract carrying an `output_schema` asked for a mechanically checked
+  deliverable, and prose with no `structured` is not one — the contracted output genuinely did not
+  arrive, and a calling model must not merge an unchecked answer as if the schema had passed. All
+  six sites now say what is counted ("delivered no usable result: the contracted output never
+  arrived"), and the `infrastructure` rows of both defer-class tables state outright that `output`
+  may be populated on this class. Pinned end to end (only the seat faked) by
+  `TestDelegationEndToEndRepackUnreachableIsLostWork`.
+- **The ctx-fit sentence was suppressed rather than merged on a mixed fleet.** With one lane silent
+  and every ADVERTISED lane genuinely too small, `contractIneligible` returned "" — so
+  `noEligibleRemote`'s both-causes path never fired and the operator was told "set `agent_ctx_tokens`
+  on node-C", fixed it, and only discovered on the NEXT run that the contract needs ~13096 against
+  the 4096 the others advertise. Suppression was the safe reading of a real hazard (the old phrasing,
+  "the roomiest agent-enabled remote advertises 4096", is a fleet-wide MAX claim that implies the
+  silent node is smaller — a ceiling authored on behalf of a node that published none). The sentence
+  is now **scoped instead of suppressed**: "every remote that DID advertise a ceiling tops out at
+  4096", spoken only over lanes that sent a number, so both true causes reach the operator in one run
+  and neither is a claim about the silent box. The class is untouched — a silent lane still makes it
+  the loud `config`, never `contract`.
+- **The internal rationale for the per-lane rule named a path that cannot happen.** `run.go`,
+  `docs/systems/fleet-node.md` and the round-5 test's own comment motivated it with "a peer predating
+  the agent lane / the mixed fleet a staggered rollout produces" — but such a peer sends no
+  `agent_enabled` either, decodes as `AgentEnabled:false`, and is filtered out of `lanes` before any
+  ceiling is considered, so it can never reach that branch. The genuinely reachable producer is a
+  node running the lane with `agent_ctx_tokens` unset: `AgentLaneAdmissible` gates on
+  `fleet_agent_enabled` + a resolvable planner seat + a safely reachable listener, never on a
+  ceiling, and health advertises whatever is configured (0 included) — which is also the state the
+  round-5 fixture actually builds (both nodes `agent_enabled: true`). The operator-facing message was
+  already accurate and is unchanged.
+
 ### Fixed — delegation lane, round-5 adversarial review (an unknown ceiling is not a small one; a lost subtask is always loud)
 
 A fifth round found both remaining defects in the same seam round 4 restructured — the boundary
@@ -27,8 +71,11 @@ statement about ONE node was quietly extended to cover another.
   contract when the fix was to set one field on the silent box. Worse, the sentence asserted a
   ceiling for a node that had published none: docs define an absent `agent_ctx_tokens` as
   **unknown**, not small, and it may be a 128k machine — the same authoring-a-claim-on-a-node's-
-  behalf defect as the invented 404 denial two rounds earlier. This is the documented rollout
-  state, since the field is `omitempty` and a peer predating the lane never sends it. The rule is
+  behalf defect as the invented 404 denial two rounds earlier. This is a reachable state because
+  the agent lane is admitted without any ceiling, so an opted-in node whose operator never set the
+  `omitempty` field advertises the lane and nothing else (round 6 corrected the original wording
+  here, which credited it to a peer predating the lane — such a peer sends no `agent_enabled`
+  either and never reaches the ceiling logic at all). The rule is
   now per lane: any lane with no advertised ceiling yields the LOUD `config` verdict and the reason
   NAMES those nodes, and the ctx-fit contract branch requires that EVERY lane supplied a real
   number to be too big for. The round-4 test covering this was itself vacuous — it exercised only
@@ -41,8 +88,10 @@ statement about ONE node was quietly extended to cover another.
   finished and one eaten by a dead llama-server, returned to the calling model as a clean tool
   call, while `local-offload delegate` exited NON-ZERO on the identical run: the two surfaces
   disagreed, and the quiet one belonged to the caller with no exit code to read. **New
-  `summary.lost_to_stack`** counts exactly the subtasks that came back empty because of the stack
-  (published, `omitempty`, so a healthy run is byte-identical), and `isError` is now
+  `summary.lost_to_stack`** counts exactly the subtasks that delivered no usable result because of
+  the stack — the contracted output never arrived (published, `omitempty`, so a healthy run is
+  byte-identical; round 6 corrected the original "came back empty" wording, which was false for the
+  `structured re-pack unreachable` shape) — and `isError` is now
   `failed > 0 || lost_to_stack > 0`. The original motivation is untouched — a fleet-down run that
   delivered every subtask is still a quiet success on MCP — and the surfaces now agree wherever
   work was lost. (`deferred > 0 && infrastructure > 0` is NOT a safe substitute: a contract-classed
