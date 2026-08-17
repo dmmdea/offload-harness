@@ -6,6 +6,69 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.63.0] - 2026-08-16
+
+Multi-node agent delegation: the fleet gains an **agent lane** — a delegator hands a
+self-contained contract (goal + inline context docs + output JSON Schema + acceptance
+checks) to a fleet node on the operator's tailnet, the node runs it with its own local
+read-only agent loop, and the delegator mechanically verifies the result before anything
+counts as done. Quality-first by construction: an idle local box always runs the work, and
+no transcript ever crosses the wire. Decisions recorded in ADR 0023.
+
+### Added
+
+- **Wire contract v1** (`internal/core/agentwire.go`): `AgentContract` /
+  `AgentWireResult`, tolerant reader (unknown fields ignored; `schema_version` skew and
+  size/count caps refuse loudly), MaxSteps/TimeoutSec clamps (12 / 900s), and the
+  machine-checkable acceptance DSL (`contains:` / `not_contains:` / `regex:` /
+  `min_items:<field>:<n>` / `nonempty:<field>`) — evaluated by the DELEGATOR before merge,
+  with unfalsifiable checks rejected at parse.
+- **Per-model seat endpoints** (`seat_endpoints` config): any model seat can resolve to a
+  remote OpenAI-compatible base over the tailnet with zero job machinery
+  (`llamaclient.BaseFor`), guarded twice — `netguard.TailnetURL` at config load (loopback,
+  `100.64.0.0/10` literals, dotless MagicDNS names, house-tailnet-zone hosts only) and the
+  resolve-and-pin `SafeTransport` dial gate on every request (DNS-rebinding defense).
+- **Agent-lane bearer auth** (`fleet_auth_token`): agent dispatches and polls of
+  agent-created jobs require the token (SHA-256 + constant-time compare); a tokenless
+  non-loopback listener refuses agent dispatches 403 at ack and withholds the task from
+  advertisement. v1 scope is the agent lane ONLY — every media path stays tokenless and
+  byte-identical (pinned by test); whole-fleet enforcement is a recorded follow-up.
+- **Node-side `agent` fleet task**: contract materialized to a job-scoped context dir, run
+  through the same read-only `agent.Build` loop as `agent_run` (no write/run/fetch/github
+  tools, no delegate tool), wall deadline from `timeout_sec`, structured re-pack via one
+  grammar-constrained completion (one retry), depth derived `max(1, wire)` on arrival. A
+  defer is a `done` job carrying `deferred:true` — never `error`.
+- **Health agent fields + placement gate**: `agent_enabled` / `agent_seat` /
+  `agent_ctx_tokens` / `agent_seat_resident` (cached alias-aware roster probe,
+  fail-closed), consumed by `delegate.Place` — idle-local-always-wins, and a remote is
+  eligible only when enabled + resident + the conservative token estimate plus the
+  3072-token loop reserve fits the advertised ceiling + the contract carries a schema +
+  requester depth 0.
+- **Delegator surfaces**: MCP `agent_delegate` (registration gated on
+  `agent_delegation_enabled`, so tools/list is byte-identical when off; summary-first
+  response) and the `local-offload delegate` CLI verb. Both accept `context_paths` inlined
+  DELEGATOR-side under `read_root` confinement (≤128 KiB/file). Job protocol: `agd-` ids
+  delegator-minted, 202-reack idempotent re-dispatch, poll deadline = timeout + 60s grace.
+  Every subtask writes a ledger row (`task=agent_delegate`) plus a full
+  contract/placement/result/verdict line under `delegation-log/` — the standing
+  small-model agent-task corpus.
+- **`contracts/` template library**: four canned contract shapes (docs-drift-scan,
+  bench-log-digest, schema-extraction, research-digest) matching the `--contract` file
+  shape, with the field and DSL guidance in `contracts/README.md`.
+- **Docs**: ADR 0023 (tailnet auth, never-cloud carve-out, quality-first placement, hop
+  limit, N-node door); contract/result wire tables in `docs/systems/fleet-node.md` and
+  `docs/FLEET-NODE.md`; the operator enable recipe for both roles plus the honest
+  context-budget table (at an 8k seat, ~2–4k tokens of practical contract content) in
+  `docs/OPERATOR-GUIDE.md`; delegation surfaces in `docs/systems/coding-agent.md`.
+
+Config keys added: `seat_endpoints`, `agent_ctx_tokens`, `fleet_auth_token`,
+`fleet_agent_enabled`, `agent_delegation_enabled` — all default off/empty; every existing
+path behaves byte-identically when they are absent (pinned by test).
+
+Deliberately parked to v2: the in-loop `delegate_subtask` tool. v1's surfaces are the MCP
+tool and the CLI; the hop limit holds structurally meanwhile — no delegate tool is
+registered for any caller, and a wire contract executes at derived depth ≥ 1.
+
 ## [0.62.1] - 2026-08-16
 
 ### Fixed
