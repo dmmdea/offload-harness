@@ -370,11 +370,16 @@ turn on.
 
 | Profile | Use it for | Advertised tools (subject to your `--allow-*`) |
 |---|---|---|
-| `general` (default) | anything; today's full capability-gated set | all enabled tools |
+| `general` (fallback) | anything; today's full capability-gated set | all enabled tools |
 | `edit` | a focused code edit in an existing repo | `list_dir`, `read_file`, `search_files`, `edit_file`, `write_file`, `update_plan` |
 | `build` | edit-then-verify (needs `--allow-run` / `--allow-shell`) | edit set **+ `run` / `run_shell`** |
 | `research` | find + read sources (needs `--allow-search`/`--allow-fetch`) | `web_search`, `web_fetch`, `summarize_file`, `read_file`, `list_dir` |
 | `github` | prepare files then publish (needs `--allow-github`) | edit set **+ `github_api` / `github_create_repo` / `github_upload_file`** |
+
+`general` is the FALLBACK, not necessarily your box's default: with no `--profile`, the resolution
+is explicit > config `agent_profile` > `general`, so a tier that seeds `agent_profile` (today
+`ampere-6` seeds `research`) uses that instead. `local-agent` prints which profile it applied and
+whether it came from the flag or the config; `agent_run` reports it in the response.
 
 `--two-tier` conflicts with any **non-default** `--profile` (two-tier picks the architect/editor
 toolsets itself); the CLI rejects that combination, while `--profile general` or an empty value
@@ -545,7 +550,11 @@ to `installed.json`. The install seed also binds the agent's planner seat automa
 `agent_model` comes from the profile's explicit `config_seed.agent_model` when it names one (the
 measured seat for that tier), and otherwise is DERIVED from `resident_tier` when that differs from
 the workhorse. So running the agent no longer requires `-model <resident_tier>` — the `-model` flag
-remains an override. A seeded tier is the normal case wherever a bake-off has run: an explicit seed
+remains an override. A tier may also seed `agent_profile`, the box's DEFAULT agent tool profile when
+a call names none (resolution: explicit `--profile`/argument > config `agent_profile` > `general`).
+`ampere-6` seeds `research` because on that tier the same model scored 0% under `general` and 72%
+narrowed — the profile outweighed the choice of model. `--two-tier` ignores the box default, since
+it sets its own architect/editor toolsets. A seeded tier is the normal case wherever a bake-off has run: an explicit seed
 is how a tier binds a planner that is neither its resident nor its workhorse. Run with `-ctx-tokens <agent_ctx_tokens>` matching the profile. These are **projected
 defaults**; `selftest.ps1` measures on the real box and its `receipt.profile_measure.tuned` block
 carries any measured override to apply.

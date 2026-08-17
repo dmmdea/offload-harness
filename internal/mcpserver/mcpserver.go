@@ -209,8 +209,8 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// net); a failure is a clean defer, not a server error.
 	srv.AddTool(&mcp.Tool{
 		Name:        "agent_run",
-		Description: "Run the LOCAL autonomous agent loop on a goal: a free local model plans and iterates over read-only tools (list_dir, read_file) plus the offload_* cascade, multi-step, and returns a final answer. DELEGATE a bounded multi-step read-and-reason job — map how X flows through a repo, summarize a doc set, extract facts across many files — to the local stack to keep that work out of your own context. It is READ-ONLY: it cannot write files, run commands, or touch the network. The savings ledger is untouched (the agent's offload calls run record=false). Returns {output, steps, stop_reason, tools, model}; on any failure it returns deferred:true with a reason and you do the task yourself.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"goal":{"type":"string","description":"the task for the local agent to accomplish"},"read_root":{"type":"string","description":"absolute directory the agent may read; it cannot read outside it (default: the server working dir)"},"max_steps":{"type":"integer","description":"hard step budget (default 12)"},"model":{"type":"string","description":"planner model id; must support tool-calling (default: the tier's agent seat (agent_model), falling back to the configured workhorse)"},"timeout_sec":{"type":"integer","description":"wall-clock budget in seconds (default: the tier's agent_timeout_sec, else 180)"},"profile":{"type":"string","enum":["general","edit","build","research","github"],"description":"task profile: narrows the tool list and injects worked examples. MEASURED: a small planner given the full tool set often calls NO tool at all, so a narrowed profile is the single most effective lever. Prefer \"build\" for reading and reasoning over a codebase; \"general\" (the default) advertises everything. Tools this read-only front door does not grant are dropped, along with their examples."},"judge":{"type":"boolean","description":"end-of-run ADVISORY audit: one extra same-seat completion grading the run's flagged effects (parked/failed/unknown/self-flagged) for the operator review. Never gates anything. Default false"}},"required":["goal"]}`),
+		Description: "Run the LOCAL autonomous agent loop on a goal: a free local model plans and iterates over read-only tools (list_dir, read_file) plus the offload_* cascade, multi-step, and returns a final answer. NOTE the advertised set may be NARROWED: a box can set a default agent_profile (small-seat tiers do, because an un-narrowed tool list measurably collapses a small planner), and a narrowed profile such as \"research\" drops search_files and the whole offload_* cascade. The response reports the profile applied and the post-narrowing tool count, so check those rather than assuming the full set. DELEGATE a bounded multi-step read-and-reason job — map how X flows through a repo, summarize a doc set, extract facts across many files — to the local stack to keep that work out of your own context. It is READ-ONLY: it cannot write files, run commands, or touch the network. The savings ledger is untouched (the agent's offload calls run record=false). Returns {output, steps, stop_reason, tools, model}; on any failure it returns deferred:true with a reason and you do the task yourself.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"goal":{"type":"string","description":"the task for the local agent to accomplish"},"read_root":{"type":"string","description":"absolute directory the agent may read; it cannot read outside it (default: the server working dir)"},"max_steps":{"type":"integer","description":"hard step budget (default 12)"},"model":{"type":"string","description":"planner model id; must support tool-calling (default: the tier's agent seat (agent_model), falling back to the configured workhorse)"},"timeout_sec":{"type":"integer","description":"wall-clock budget in seconds (default: the tier's agent_timeout_sec, else 180)"},"profile":{"type":"string","enum":["general","edit","build","research","github"],"description":"task profile: narrows the tool list and injects worked examples. MEASURED: a small planner given the full tool set often calls NO tool at all, so a narrowed profile is the single most effective lever. Prefer \"build\" for reading and reasoning over a codebase; \"general\" advertises everything. OMITTING this falls back to the box's configured agent_profile, and only then to \"general\" — so a small-seat tier seeded with a narrowed profile gets it without every caller remembering to ask. Tools this read-only front door does not grant are dropped, along with their examples."},"judge":{"type":"boolean","description":"end-of-run ADVISORY audit: one extra same-seat completion grading the run's flagged effects (parked/failed/unknown/self-flagged) for the operator review. Never gates anything. Default false"}},"required":["goal"]}`),
 	}, s.handleAgentRun)
 
 	// agent_delegate (multi-node delegation, Task 6): registration is GATED on
@@ -1057,13 +1057,17 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// one configuration MEASURED to fail (a 4B planner given every tool calls
 	// none of them). An unknown name is a clean defer naming the valid ones, not
 	// a silent fall back to the configuration we know does not work.
-	if p := strings.TrimSpace(in.Profile); p != "" {
-		prof, perr := agent.LookupProfile(p)
-		if perr != nil {
-			return jsonResult(map[string]any{"deferred": true, "reason": perr.Error()})
-		}
-		built.Loop.WithProfile(prof)
+	// A caller that names none now falls back to the BOX's configured agent_profile
+	// before general, so a small-seat box is never left on the un-narrowed set by
+	// omission — which is what "the default" meant in every measurement that scored
+	// 0%. Resolution is explicit > config agent_profile > general, and general is
+	// still a no-op on the tool set (Loop.WithProfile), so this is byte-identical
+	// behavior for any box that does not set the key.
+	prof, perr := agent.LookupProfile(cfg.AgentTaskProfile(strings.TrimSpace(in.Profile)))
+	if perr != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": perr.Error()})
 	}
+	built.Loop.WithProfile(prof)
 	if in.Judge {
 		built.Loop.WithBatchJudge(true)
 	}
@@ -1081,7 +1085,13 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		"output":      res.Output,
 		"steps":       res.Steps,
 		"stop_reason": res.StopReason,
-		"tools":       len(built.Tools),
+		// POST-narrowing, and the profile that did it. built.Tools is a snapshot taken
+		// before WithProfile runs, so reporting it would tell an ampere-6 caller "11
+		// tools" on a run that advertised 3 — and with the box-level agent_profile the
+		// narrowing can now happen with no caller action at all. Silently changing which
+		// tools a run advertises must not be invisible on this door either.
+		"tools":       len(built.Loop.AdvertisedTools()),
+		"profile":     prof.Name,
 		"model":       model,  // the resolved PLANNER seat — visibility is the cure for a silent seat (roast finding)
 		"ctx_window":  effCtx, // the window compaction budgeted against (probed, or the conservative fallback)
 	}

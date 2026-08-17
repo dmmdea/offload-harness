@@ -363,6 +363,19 @@ func (l *Loop) WithMaxTokens(n int) *Loop {
 // "general" default) leaves the tool set untouched. Safe to call after NewLoop
 // and WithWorktree (call it AFTER so a worktree-registered tool like update_plan
 // is present to be kept).
+// AdvertisedTools returns the tool names this loop will actually advertise to the
+// planner, AFTER any profile narrowing. Report this rather than the pre-narrowing
+// BuildResult.Tools snapshot: WithProfile replaces l.specs with a fresh container,
+// so that snapshot never reflects the narrowing and a run that advertises 3 tools
+// would otherwise be reported as advertising 11.
+func (l *Loop) AdvertisedTools() []string {
+	out := make([]string, 0, len(l.specs))
+	for _, s := range l.specs {
+		out = append(out, s.Name)
+	}
+	return out
+}
+
 func (l *Loop) WithProfile(p Profile) *Loop {
 	if len(p.Tools) > 0 {
 		keep := make(map[string]bool, len(p.Tools))

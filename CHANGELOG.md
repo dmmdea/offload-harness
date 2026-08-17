@@ -6,6 +6,68 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.70.0] - 2026-08-17
+### Added — `agent_profile`: a per-tier DEFAULT tool profile for the agent loop
+Closes the standing question "should a non-general agent profile be enforced as a per-tier
+config default?" The measured answer is yes, as a **caller-overridable** default.
+
+- **Why.** `general` (every enabled tool, no tuned prompt, no exemplars) is a measured trap on
+  a small planner. On the ampere-6 reference box (RTX 3050 6GB) the SAME model on the SAME
+  contract scored **0% under `general`** — twelve steps burned calling tools, zero output bytes
+  — and **72% narrowed**. That is a larger factor than the choice of model. The house recorded
+  it qualitatively in July 2026 as ampere-6 "decision 8, never enforced in config"; this is the
+  enforcement. The `agent_run` tool schema already DOCUMENTED the hazard while still defaulting
+  to it.
+- **New config key `agent_profile`** (`internal/config`), with
+  `Config.AgentTaskProfile(explicit)` resolving **explicit > `agent_profile` > `general`** —
+  deliberately the same shape as `AgentPlannerModel`. The chain stays LIVE at rest: an unset key
+  is never materialized into the config file (pinned by a round-trip test), so a later change to
+  the default still reaches existing installs.
+- **Every front door honours it.** `agent_run` (MCP) now resolves through the config instead of
+  applying a profile only when the caller named one, and always calls `WithProfile` — `general`
+  is a documented no-op on the tool set, so a box that does not set the key is byte-identical.
+  `local-agent`'s `--profile` default changes from `"general"` to `""` so "unset" is
+  distinguishable from "explicitly general", and its stderr notice now names the SOURCE
+  (`--profile` vs `config agent_profile`) — silently changing which tools a run advertises
+  should never be invisible.
+- **`--two-tier` is exempt**, deliberately: it builds its own architect/editor loops and sets
+  their toolsets itself, so a box default must not bleed in. `validateFlagCombo` already refused
+  an EXPLICIT profile there; the new `resolveProfileName` refuses the implicit one. Mutation-
+  verified: deleting the exemption turns `TestResolveProfileName/two-tier_IGNORES_the_box_default`
+  red with `"research", want "general"`.
+- **Seeded on `ampere-6`** (`config_seed.agent_profile: "research"`) — the profile the bake-off
+  actually measured. No other tier is seeded: the effect is measured on this silicon only, and a
+  benchmark result is not a mandate elsewhere. `tierseed`'s `configKeys()` reflects over the
+  Config struct, so the new key validates as a legal seed with no per-key plumbing.
+- **Review round (independent, pre-merge) — 2 critical + 4 important, all fixed:**
+  - `agent_run` reported `len(BuildResult.Tools)`, a snapshot taken BEFORE narrowing, so a
+    seeded box advertised 3 tools while the response said 11 — and carried no `profile`
+    field at all. That is the exact hazard this entry claims to fix, fixed on the CLI half
+    and missed on the MCP half. Now reports the post-narrowing count via a new
+    `Loop.AdvertisedTools()` plus the applied `profile`.
+  - The `agent_run` TOOL description still promised "plus the offload_* cascade", which a
+    narrowed profile drops entirely. An MCP client reads that to decide whether to
+    delegate. Reworded; only the `profile` PROPERTY description had been updated.
+  - `agent_profile` was not trimmed (only the explicit argument was), so
+    `"research "` would fail every lookup and brick the lane on a trailing space.
+  - The doc comment claimed an unknown name is "a loud startup-time error" — true for
+    `local-agent`, false for the MCP door, which returns a per-call defer. Corrected to
+    state each door precisely, and `tierseed.validate` now checks the VALUE against
+    `agent.LookupProfile` at tier-authoring time (it previously validated only that the
+    KEY was a real config field, so `"reserch"` would ship in a template).
+  - Docs claimed "every front door honours it" while listing the delegation lane, which
+    hardcodes `research` and never reads the key. That is deliberate — the lane's default
+    describes the TASK SHAPE, not the box — so the doc now says so instead of overclaiming.
+  - `docs/OPERATOR-GUIDE.md`'s profile table and the repo's own `CLAUDE.md` still called
+    `general` "the default"; both corrected to "fallback" with the resolution order.
+  - New tests: `TestAdvertisedToolsReflectsProfileNarrowing` and
+    `TestAdvertisedToolsUnchangedByGeneral` — the latter pins the "byte-identical for an
+    unseeded box" claim on the tool set AND the system prompt.
+- Docs updated in the same change: `docs/systems/coding-agent.md` (new "Tool-profile seat"
+  section), `docs/OPERATOR-GUIDE.md`, the regenerated `docs/tiers/*.md`, `config.example.json`,
+  the `agent_run` schema text, and the ampere-6 tier note — whose previous wording called this
+  "an open per-tier config question" and is now corrected to say it is closed.
+
 ## [0.69.0] - 2026-08-17
 ### Fixed — an UPGRADE install downloaded a gated seat's weights and never rendered it
 Found by independent review of 0.68.0, reproduced against the real predicate.
@@ -67,6 +129,7 @@ silent no-op while the installer still downloaded the weights. Uses
 `win-cuda-resident`, which defines `qwen3.8-27b` but NOT `qwen3.5-4b-agent`, so it also
 proves the two gates are independent. Mutation-verified: forcing the `definesModel`
 guard false still COMPILES and turns the test red with `got <nil>`.
+
 
 ## [0.68.0] - 2026-08-17
 

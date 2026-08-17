@@ -104,6 +104,10 @@ foreach ($tierBig in @('blackwell-48','blackwell-72')) {
 $sA6 = $profiles.'ampere-6'.config_seed
 Assert ($sA6.agent_model -eq 'qwen3.5-4b-agent')                           'ampere-6 seats the qwen3.5-4b agent (measured bake-off winner)'
 Assert ([bool]$profiles.'ampere-6'.include_qwen35_4b)                      'ampere-6 sets include_qwen35_4b (yaml entry + download gate)'
+# The seat is only half the measurement: the SAME model scores 0% on the default
+# `general` profile and 72% narrowed, so shipping the model without the profile
+# ships the configuration that was measured to fail.
+Assert ($sA6.agent_profile -eq 'research')                                 'ampere-6 seeds agent_profile=research (general scored 0% on this tier)'
 Assert ($null -eq $profiles.'ampere-8'.include_qwen35_4b)                  'ampere-8 include_qwen35_4b stays absent (not measured there)'
 $s32 = $profiles.'blackwell-32'.config_seed
 Assert ($s32.videogen_width -eq 1280 -and $s32.videogen_height -eq 704)     'blackwell-32 seeds REDUCED-RES 1280x704 video (doctrine-conformant recipe)'

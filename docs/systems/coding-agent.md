@@ -216,6 +216,24 @@ search only; the editor gets whatever capabilities were granted.
 > `--profile` and `--two-tier` conflict only for a *non-default* profile. `--profile general` or an
 > empty value coexists with two-tier, because two-tier sets its own toolsets.
 
+**Tool-profile seat.** The profile resolves per-call/flag override > config `agent_profile` >
+`general` (`config.AgentTaskProfile`), the same shape as the model seat below and equally live at
+rest — an unset `agent_profile` is never materialized into the config file. It exists because
+`general` is a MEASURED trap on a small planner: on the ampere-6 reference box the same model on
+the same contract scored **0% under `general`** (twelve steps burned calling tools, zero output
+bytes) and **72% under a narrowed profile** — a larger factor than the choice of model. It is
+per-TIER because it is a property of the seat's capability, not of the task: a 27B planner handles
+the full tool set, a 4B does not. **Two front doors honour it: the `agent_run` MCP tool and the
+`local-agent` CLI.** Two paths deliberately do NOT, and the distinction is load-bearing:
+
+- **The delegation lane** (`internal/pipeline/agenttask.go`) hardcodes its own `research` default
+  and never reads `agent_profile`. That is intentional — the lane's default describes the TASK
+  SHAPE (a delegated contract is a read-over-docs job), not the box, so a box seeded `build` must
+  not turn delegated research contracts into build runs. A contract's own `profile` field still wins.
+- **`--two-tier`** builds its own architect/editor loops and sets their toolsets itself, so a box
+  default must not bleed in (it never calls `WithProfile` on those loops at all). An unknown configured name fails by
+NAME rather than silently degrading to the one configuration measured to fail.
+
 **Model seats.** The single-loop planner resolves per-call/flag override > config `agent_model` >
 config `model` (`config.AgentPlannerModel`). `agent_model` is the tier-seeded planner seat: the
 install seed (`internal/tierseed`) derives it from the tier row's `resident_tier` when that differs

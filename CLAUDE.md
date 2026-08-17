@@ -81,7 +81,8 @@ behind an `--allow-*`): `write_file`/`edit_file`/`delete_file`, `web_fetch`, `we
 Key flags (all `--allow-*` OFF by default): `-ctx-tokens` (default 0 = AUTO: probe the endpoint's
 live `n_ctx`, 8192 fallback; an explicit value overrides the probe with the served `--ctx-size`),
 `-profile general|edit|build|research|github` (narrows tools + adds a tuned
-prompt/exemplars; can only narrow), `-allow-run` (the allowlisted direct-exec `run` tool),
+prompt/exemplars; can only narrow — UNSET resolves to config `agent_profile`, then
+`general`, so a small-seat tier seeded with a narrowed profile gets it without the flag), `-allow-run` (the allowlisted direct-exec `run` tool),
 `-allow-shell` (Linux-only `run_shell`), `-two-tier` + `-architect-model` (default `gemma4-26b-a4b`)
 / `-editor-model` (default `offload-e4b`). `--profile` and `--two-tier` conflict only for a
 **non-default** profile — `general` or empty coexists with two-tier, which sets its own toolsets.
