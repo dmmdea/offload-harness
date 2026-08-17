@@ -546,6 +546,69 @@ func TestOrphanedNamespacesAreReported(t *testing.T) {
 	}
 }
 
+// A corrupt record's HEADER is not trustworthy — it is part of what decode()
+// rejected. Addressing the seq bucket with the seq number stored in it can point
+// at a DIFFERENT, LIVE record's entry; deleting that strands the victim, which
+// stays counted in mkCount but becomes unreachable by pruneTx (which can only
+// walk vectors through the seq bucket). It then owns a cap slot forever while
+// every counter reports the store healthy and exactly at cap.
+func TestCorruptHeaderDoesNotStrandAnotherRecord(t *testing.T) {
+	const max = 8
+	m := openTemp(t, max)
+	embed := func(v float64) func(string) ([]float64, error) {
+		return func(string) ([]float64, error) { return []float64{v}, nil }
+	}
+	// victim gets seq 1, saboteur gets seq 2.
+	if _, err := m.Wrap(embed(1))("victim"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Wrap(embed(2))("saboteur"); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt the saboteur's record so its header points at the VICTIM's slot.
+	if err := m.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bktVecs)
+		rec := append([]byte(nil), b.Get([]byte(m.key("saboteur")))...)
+		binary.BigEndian.PutUint64(rec[1:9], 1) // claim the victim's seq
+		rec[9] = 0xFF                           // and make it undecodable
+		return b.Put([]byte(m.key("saboteur")), rec)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Touch the saboteur: get -> decode fails -> dropCorrupt runs.
+	if _, err := m.Wrap(embed(3))("saboteur"); err != nil {
+		t.Fatal(err)
+	}
+	// The victim's prune-order entry must survive.
+	var victimSeqIntact bool
+	if err := m.db.View(func(tx *bolt.Tx) error {
+		victimSeqIntact = string(tx.Bucket(bktSeq).Get(m.seqKey(1))) == m.key("victim")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !victimSeqIntact {
+		t.Fatal("a corrupt record's untrusted header deleted a LIVE record's seq entry — that record is now permanently unevictable while still counted")
+	}
+	// And the victim must still be evictable: push well past the cap and confirm
+	// it does not survive as a stranded, uncountable resident.
+	for i := 0; i < max*6; i++ {
+		if _, err := m.Wrap(embed(float64(i)))(fmt.Sprintf("filler-%03d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := m.get(m.key("victim")); ok {
+		t.Fatal("the victim survived far past the cap — it was stranded outside prune's reach")
+	}
+	st, err := m.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Distinct > max {
+		t.Fatalf("distinct=%d exceeds cap %d — stranded records are holding slots", st.Distinct, max)
+	}
+}
+
 func TestOpenReadOnlyDistinguishesMissingFromDisabled(t *testing.T) {
 	if _, err := OpenReadOnly("", "e", ""); !errors.Is(err, ErrDisabled) {
 		t.Errorf("empty path: got %v, want ErrDisabled", err)
