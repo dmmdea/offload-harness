@@ -379,7 +379,27 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 
 	var lastErr, transportErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		gres, gerr := p.client.Generate(ctx, seat, system, user, grammar, agentRepackMaxTokens, p.cfg.Temperature, 0)
+		// WithoutThinking: the re-pack is a mechanical shape transformation over
+		// text the loop has ALREADY finished reasoning about, so it should never
+		// think — and on a thinking seat, thinking is not merely wasted, it
+		// destroys the answer. A thinking chat template emits the
+		// grammar-constrained output into `reasoning_content` and leaves
+		// `content` EMPTY, so both attempts fail and a finished, correct run
+		// defers as an abstention. Measured live, same request, temp 0,
+		// max_tokens 512:
+		//
+		//	seat          grammar  len(content)  len(reasoning)
+		//	qwen3.8-27b   none      73 (valid)    326
+		//	qwen3.8-27b   GBNF       0            67     <- the defect
+		//	gemma-4-e4b   none      85             0
+		//	gemma-4-e4b   GBNF      67 (valid)     0
+		//
+		// It is NOT a token budget: 512/1024/2048/4096 all return the identical
+		// completion (140 tokens, finish "stop"). The grammar is the trigger.
+		// The flag is harmless on a non-thinking template — gemma-4-e4b's output
+		// with it is identical to its output without it — so it rides every
+		// re-pack rather than being gated on a seat guess we cannot make.
+		gres, gerr := p.client.Generate(ctx, seat, system, user, grammar, agentRepackMaxTokens, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
 		if gerr != nil {
 			lastErr = gerr
 			if transportErr == nil && genErrIsTransport(gerr) {

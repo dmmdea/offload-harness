@@ -6,6 +6,59 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.66.1] - 2026-08-17
+
+### Fixed — the structured re-pack must not think (found by LIVE end-to-end testing, after 0.66.0 merged)
+
+**What was broken:** on the DEFAULT idle-local agent path, a finished and correct answer was thrown
+away whenever the agent seat is a thinking model. `repackStructured` (`internal/pipeline/agenttask.go`)
+re-packs the agent loop's final text into the contract's `output_schema` with one GBNF-constrained
+completion on the same seat. A THINKING chat template (Qwen3-class) emits that grammar-constrained
+output into `reasoning_content` and returns `content` EMPTY — so the re-pack failed, retried, failed
+again, and the run deferred as `abstention` with `output failed schema: invalid json: unexpected end
+of JSON input`, discarding a result the loop had already produced correctly. Qube's own agent seat
+(`qwen3.8-27b`, the Leg-1 winner) is a thinking model, so this broke the quality-first default path.
+
+**The trigger is the grammar, not the budget.** Measured live against `http://127.0.0.1:11436`, same
+request, temp 0, `max_tokens: 512`:
+
+| seat | grammar | len(content) | len(reasoning) |
+|---|---|---|---|
+| `qwen3.8-27b` | none | 73 (valid JSON) | 326 |
+| `qwen3.8-27b` | GBNF | **0** | 67 |
+| `gemma-4-e4b` | none | 85 | 0 |
+| `gemma-4-e4b` | GBNF | 67 (valid JSON) | 0 |
+
+The obvious wrong hypothesis was falsified first: at 512 / 1024 / 2048 / 4096 `max_tokens` the seat
+returns the identical completion (`completion_tokens=140`, `finish_reason=stop`), so
+`agentRepackMaxTokens = 512` was never the problem.
+
+**The fix:** the re-pack now sends `chat_template_kwargs: {"enable_thinking": false}` alongside the
+grammar. The re-pack is a mechanical shape transformation over text the loop has already finished
+reasoning about — it should never think. Validated on both seat types: `qwen3.8-27b` + grammar +
+the flag returns 67 chars of parseable JSON in `content` (control with grammar alone: 0 chars), and
+`gemma-4-e4b` + grammar + the flag is identical to its own control, so the flag is harmless on a
+non-thinking template and rides every re-pack rather than a seat guess we cannot make. Two
+alternatives were measured and rejected: `reasoning_format: "none"` leaks a literal `<think>` prefix
+into `content` (not valid JSON), and a `json_schema` `response_format` works but abandons the house's
+gbnf seam and still burns 326 reasoning tokens.
+
+**Why no unit test caught it:** they all fake the seat. The interaction lives in the model's own chat
+template, which a scripted httptest server does not have — only a real seat could produce it. The
+regression test added here encodes the live shape (a fake seat that answers EMPTY content for a
+grammar completion with thinking on, and valid JSON when the flag is present) so the defect cannot
+return.
+
+- `internal/llamaclient`: `Generate` gained a variadic `...GenOption` and `WithoutThinking()`
+  (`thinking.go`). It serializes as `chat_template_kwargs: {"enable_thinking": false}` and is
+  OMITTED ENTIRELY when not requested — a pointer field with `omitempty`, pinned byte-for-byte by
+  `TestGenerateWithoutOptionOmitsChatTemplateKwargs`, so every existing call site's wire payload is
+  unchanged. A variadic option rather than a tenth positional parameter or a `GenerateNoThink` twin:
+  no existing call site changes, and this package already carries three near-duplicate `Generate`
+  methods that a second axis of boolean variants would multiply.
+- `docs/systems/fleet-node.md`: the `structured` field row now documents the non-thinking re-pack.
+
+
 ## [0.66.0] - 2026-08-17
 
 Multi-node sub-agent delegation. Released as 0.65.0 rather than 0.63.0 because a

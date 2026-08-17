@@ -107,10 +107,16 @@ type chatReq struct {
 	Temperature float64   `json:"temperature"`
 	MaxTokens   int       `json:"max_tokens,omitempty"`
 	Grammar     string    `json:"grammar,omitempty"`
-	Logprobs    bool      `json:"logprobs,omitempty"`
-	TopLogprobs int       `json:"top_logprobs,omitempty"`
-	CachePrompt bool      `json:"cache_prompt"`
-	Stream      bool      `json:"stream"`
+	// ChatTemplateKwargs is nil for every call that does not ask for it, and
+	// `omitempty` on a POINTER means the key is then absent from the body
+	// entirely — a plain bool field would have serialized `false` into every
+	// request and changed the payload of call sites that never opted in
+	// (thinking.go owns the option and the rationale).
+	ChatTemplateKwargs *chatTemplateKwargs `json:"chat_template_kwargs,omitempty"`
+	Logprobs           bool                `json:"logprobs,omitempty"`
+	TopLogprobs        int                 `json:"top_logprobs,omitempty"`
+	CachePrompt        bool                `json:"cache_prompt"`
+	Stream             bool                `json:"stream"`
 }
 
 // --- multimodal (vision) request types ---
@@ -180,7 +186,9 @@ type chatResp struct {
 // When topLogprobs > 0 the
 // server returns per-token raw (pre-grammar-mask) logprobs in GenResult.Logprobs
 // — used by the confidence gate to detect a genuinely uncertain decision.
-func (c *Client) Generate(ctx context.Context, model, system, user, grammar string, maxTokens int, temperature float64, topLogprobs int) (GenResult, error) {
+// opts are per-call knobs (thinking.go); passing none is the historical
+// behavior, byte-for-byte on the wire.
+func (c *Client) Generate(ctx context.Context, model, system, user, grammar string, maxTokens int, temperature float64, topLogprobs int, opts ...GenOption) (GenResult, error) {
 	if model == "" {
 		model = c.model
 	}
@@ -191,6 +199,10 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 		Grammar:     grammar,
 		CachePrompt: true,
 		Messages:    []chatMsg{},
+		// nil unless a caller passed WithoutThinking(), and nil serializes to
+		// nothing — so an option-free call's body is byte-identical to the
+		// pre-option one (pinned by TestGenerateWithoutOptionOmitsChatTemplateKwargs).
+		ChatTemplateKwargs: applyGenOptions(opts).templateKwargs(),
 	}
 	if topLogprobs > 0 {
 		body.Logprobs = true
