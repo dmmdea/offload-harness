@@ -624,6 +624,24 @@ type Config struct {
 	// KNNEmbedTimeoutMs bounds the request-path embedding call (fail-open on
 	// timeout). Default 2000.
 	KNNEmbedTimeoutMs int `json:"knn_embed_timeout_ms,omitempty"`
+	// --- media artifact addressing (T2-A2) ---
+	// MediaHashMaxFullBytes selects how audio/video cache keys identify a file.
+	//
+	// 0 (the default) = always hash the WHOLE file. That is the only mode with an
+	// exact identity guarantee, and it is cheap RELATIVE TO WHAT IT GUARDS: both
+	// call sites already read the same file through ffmpeg (whisper conversion,
+	// frame sampling) before hashing it, and the model pass that follows takes
+	// seconds to minutes. Note the cost is a cold file read — I/O-bound, not
+	// SHA-bound — so on V: or a Drive-backed mount it tracks that device, not
+	// memory bandwidth.
+	//
+	// A positive value switches files LARGER than it to a sampled digest (size +
+	// three 8 MiB windows). That is opt-in on purpose: its failure mode is a
+	// FALSE HIT between two same-size files that agree on the sampled windows —
+	// i.e. serving one file's transcript for another, the exact defect
+	// content-addressing was introduced to remove. The mode is encoded in the
+	// digest, so sampled and full digests can never be confused.
+	MediaHashMaxFullBytes int64 `json:"media_hash_max_full_bytes,omitempty"`
 	// --- embed memo (T2-C): memoize embedding vectors by exact input bytes ---
 	// Embedding is a pure function of (model, text) and the harness re-embeds the
 	// same strings by construction (kNN pre-filter inputs, the shadow drain

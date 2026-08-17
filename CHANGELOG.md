@@ -6,17 +6,59 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.64.0] - 2026-08-17
+
+### Fixed
+
+- **Audio and video cache keys are now content-addressed** (`internal/mediahash`,
+  memory-frontier T2-A2). The image path has always keyed on the loaded bytes
+  (`"img:"+sha256hex(...)`); audio keyed on (path, size, mtime) and video on the **path
+  string**, unhashed. Both failed in two directions: a file replaced at the same path could
+  produce a **false hit** — serving the previous file's transcript or description — and an
+  identical file at a second path always missed, which is the reuse an artifact cache
+  exists to capture. New config `media_hash_max_full_bytes` (default `0` = always hash the
+  whole file).
+  - **Migration:** every existing audio and video cache entry is invalidated once, by
+    design — those entries were keyed on an identity that could be wrong.
+  - **A TOCTOU window remains and is DETECTED, not prevented.** The digest and ffmpeg are
+    two independent opens of a path, so ordering alone cannot close it — hashing first
+    merely transposes which side is misattributed. The file is re-`stat`ed **after** the
+    consuming read; on a difference the call is treated as unidentifiable and nothing is
+    stored. The detector is (size, mtime), so a same-size overwrite inside one mtime tick
+    is invisible to it — 1–2 s granularity is common on FAT/SMB/FUSE and Drive-backed
+    mounts. This narrows the window; it does not eliminate it.
+  - **No identity, no cache.** `mediahash.Digest` returns an **error** rather than a
+    synthetic key. An earlier design returned `media:staterr:<hash(path+error)>` — a *path*
+    key — so a transient read failure wrote a durable entry a different file at that path
+    later hit, reintroducing the exact false hit this change removes.
+  - **A bypassed cache is observable**: `cache_bypass` on the ledger row names why, so a
+    permanently unidentifiable input is no longer byte-identical in telemetry to an
+    ordinary cold miss.
+  - **Cost of an unidentifiable input:** it is never cached, so it re-runs the model on
+    every call and writes a fresh nonce-salted `.srt`/`.txt`/`.segments.json` triple.
+    Nothing reaps `media_dir`, so a file on a persistently flaky mount accumulates three
+    files per invocation — a deliberate trade (a wrong cached transcript is worse than a
+    repeated one), but a real cost.
+- **Corrected the 0.63.0 embed-memo justification, on both surfaces.** The feature was
+  documented as existing because "the shadow-label drain re-embeds the same stored inputs
+  on every run and re-scores the same reference summaries". Reading the code refutes all
+  three parts: `shadow.Drain` is **destructive**, so each run consumes a fresh item set;
+  `label.go` calls `Similar` on summaries derived from *that item's own* output, so there
+  is no shared reference set; and the drain's `Embed` path is itself gated on
+  `knn_prefilter_enabled`. The genuine repeat sources are the request-path pre-filter and
+  within-run repeats inside one drain. **With `knn_prefilter_enabled` at its default of
+  `false` the memo is close to inert** — correct, cheap and free when idle, but its value
+  is gated on a separate decision. No code changed; the claim did.
+
 ## [0.63.0] - 2026-08-17
 
 ### Added
 
 - **Embed memo** (`internal/embedmemo`, memory-frontier T2-C) — a bbolt store that
   memoizes embedding vectors by exact input bytes plus the embedder id. Embedding is a
-  pure function of (model, text) and the harness re-embeds the same strings by
-  construction — the shadow-label drain re-embeds the same stored inputs on every run and
-  re-scores the same reference summaries, and the kNN pre-filter embeds each request input
-  (off unless `knn_prefilter_enabled`). Exemplar selection is **not** a consumer:
-  `internal/exemplars` retrieves lexically and contains no embedder. The
+  pure function of (model, text). Consumers are the kNN pre-filter on the request path and
+  the shadow-label drain; exemplar selection is **not** one (`internal/exemplars` retrieves
+  lexically and contains no embedder). The
   larger payoff is the swap, not the compute: the embedder carries `ttl=300` like every
   other seat, so the first embed after an idle gap pays a ~1–2 s cold load, and a memo
   hit skips the HTTP call entirely. New config: `embed_memo_enabled` (default on),

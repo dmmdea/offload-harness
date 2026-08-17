@@ -48,6 +48,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/knn"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
+	"github.com/dmmdea/offload-harness/internal/mediahash"
 	"github.com/dmmdea/offload-harness/internal/parser"
 	"github.com/dmmdea/offload-harness/internal/router"
 	"github.com/dmmdea/offload-harness/internal/rungraph"
@@ -147,6 +148,32 @@ type Pipeline struct {
 	// TO-3 tier-aware repacking state (tierpack.go): per-model /props probes +
 	// tokenizer clients for the escalation-boundary repack. Zero value ready.
 	tierPack tierPackState
+	// T2-A2 test seams (nil = the real thing), following the same pattern as
+	// refineGen/fleetSample/nowFn. They exist because the media identity gates are
+	// otherwise untestable at the pipeline level: a missing file defers inside
+	// ffmpeg long before the gate, and a mid-call rotation cannot be injected
+	// deterministically from outside. Without them the gates had NO regression
+	// guard — deleting every `&& identifiable` / `&& cacheable` left the suite
+	// green, which is exactly the refactor they exist to catch.
+	mediaDigest    func(path string) (mediahash.Ident, error)
+	mediaUnchanged func(id mediahash.Ident, path string) bool
+}
+
+// digestMedia resolves a media file's content identity (test seam aware).
+func (p *Pipeline) digestMedia(path string) (mediahash.Ident, error) {
+	if p.mediaDigest != nil {
+		return p.mediaDigest(path)
+	}
+	return mediahash.Digest(path, p.cfg.MediaHashMaxFullBytes)
+}
+
+// mediaStillMatches re-checks, AFTER the consuming read, that the file is still
+// the one that was hashed (test seam aware).
+func (p *Pipeline) mediaStillMatches(id mediahash.Ident, path string) bool {
+	if p.mediaUnchanged != nil {
+		return p.mediaUnchanged(id, path)
+	}
+	return id.Unchanged(path)
 }
 
 // Cfg exposes the loaded config so callers like the MCP server can build
@@ -651,7 +678,7 @@ func (p *Pipeline) runVision(ctx context.Context, req core.Request, built tasks.
 		p.recordDefer(req.Task, meta, len(req.Input), "image load: "+err.Error())
 		return core.Deferf("image load: "+err.Error(), "", meta)
 	}
-	return p.runVisionGen(ctx, req, built, meta, start, "img:"+sha256hex(dataURI), func(gctx context.Context) (llamaclient.GenResult, error) {
+	return p.runVisionGen(ctx, req, built, meta, start, "img:"+sha256hex(dataURI), true, func(gctx context.Context) (llamaclient.GenResult, error) {
 		return p.client.GenerateVision(gctx, model, built.System, built.User, []string{dataURI}, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0)
 	})
 }
@@ -665,7 +692,7 @@ func (p *Pipeline) runVision(ctx context.Context, req core.Request, built tasks.
 // LO-1: after the cache check it gates on the render runners' GPU lock (bounded
 // wait, distinct "gpu busy" defer), retries once on http_5xx, and records the
 // final infra outcome into the vision tier's circuit breaker.
-func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tasks.Built, meta core.Meta, start time.Time, cacheKeyExtra string, gen func(context.Context) (llamaclient.GenResult, error)) core.Result {
+func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tasks.Built, meta core.Meta, start time.Time, cacheKeyExtra string, cacheable bool, gen func(context.Context) (llamaclient.GenResult, error)) core.Result {
 	// Same correctness fix as the text path (review finding: the first draft fixed
 	// only the text cascade and left this one with the bug it was written to
 	// eliminate). Vision system prompts are long, instruction-dense and exactly the
@@ -675,7 +702,12 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 	// path, so the exemplar tag is not an ingredient here.
 	ck := cache.Key(string(req.Task), req.Input+"|"+cacheKeyExtra, tasks.StableParamsKey(req.Params), meta.Model, built.Grammar,
 		templateCacheTag(built.System, built.Grammar, built.User, req.Input))
-	if p.cache != nil {
+	// cacheable is false when the caller could not establish the source file's
+	// CONTENT identity (T2-A2). Keying on anything else — a path, or a synthetic
+	// error token — makes a transient read failure write a durable entry that a
+	// DIFFERENT file at that path later hits. No identity, no cache: the work is
+	// done and returned, nothing is stored.
+	if p.cache != nil && cacheable {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
 			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 {
@@ -758,7 +790,7 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 	} else {
 		data, _ = json.Marshal(map[string]string{visionResultKey(req.Task): answer})
 	}
-	if p.cache != nil {
+	if p.cache != nil && cacheable {
 		if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gres.TokensIn, Model: meta.Model, InLoop: p.tierCache}); e == nil {
 			_ = p.cache.Put(ck, b)
 		}
@@ -791,6 +823,13 @@ func (p *Pipeline) runVideoDescribe(ctx context.Context, req core.Request, built
 	if width <= 0 {
 		width = 512
 	}
+	// IDENTIFY BEFORE CONSUMING, and ONCE — hoisted above both the retry loop and
+	// the frame sampling. Two reasons: it is loop-invariant, so computing it
+	// inside meant a full cold re-read of a multi-GB clip per retry (up to 4 at a
+	// 2048 frame width); and a file rotated mid-loop would give the retry a
+	// different identity than the attempt that looked it up, storing the result
+	// under a digest for bytes the model never saw.
+	vidID, vdErr := p.digestMedia(req.Video)
 	for {
 		frames, err := videoio.SampleFrames(req.Video, p.cfg.FFmpegPath, p.cfg.VideoFPS, p.cfg.VideoMaxFrames, width, p.cfg.VisionMaxImageBytes)
 		if err != nil {
@@ -802,8 +841,36 @@ func (p *Pipeline) runVideoDescribe(ctx context.Context, req core.Request, built
 		for i := range frames {
 			labels[i] = fmt.Sprintf("<%.1f seconds>", float64(i)/fps)
 		}
-		extra := fmt.Sprintf("vid:%s|fps=%g|n=%d|w=%d|frames=%d", req.Video, p.cfg.VideoFPS, p.cfg.VideoMaxFrames, width, len(frames))
-		res := p.runVisionGen(ctx, req, built, meta, start, extra, func(gctx context.Context) (llamaclient.GenResult, error) {
+		// T2-A2: keyed on the video's CONTENT, not its path. The previous key was
+		// the path STRING plus sampling params and was never hashed at all — so a
+		// file replaced at the same path with the same sampling settings produced a
+		// false HIT, serving the old video's description for the new one. The
+		// sampling params stay in the key because they change what the model saw.
+		//
+		// An empty extra means "no identity": runVisionGen then bypasses the cache
+		// entirely rather than keying on the path, which is what turned a transient
+		// read failure into a durable wrong answer.
+		// Verified AFTER the frames were sampled, not merely hoisted before it.
+		// Hoisting alone bought the I/O win but widened the correctness gap: the
+		// window became digest-at-t0 versus the FINAL successful SampleFrames,
+		// which on a 4K vertical reel is the 4th iteration — minutes, after three
+		// full ffmpeg passes. Worse, `frames=` below comes from that last sampling,
+		// so a mid-loop rotation produced a key that was a hybrid of two file
+		// states. One stat per iteration closes that.
+		cacheable := vdErr == nil && p.mediaStillMatches(vidID, req.Video)
+		extra := ""
+		if cacheable {
+			extra = fmt.Sprintf("vid:%s|fps=%g|n=%d|w=%d|frames=%d",
+				vidID.Digest, p.cfg.VideoFPS, p.cfg.VideoMaxFrames, width, len(frames))
+		} else if meta.CacheBypass == "" && p.cache != nil {
+			why := "source changed during the call"
+			if vdErr != nil {
+				why = vdErr.Error()
+			}
+			meta.CacheBypass = "media identity: " + why
+			log.Printf("video_describe: no stable content identity for %q (%s) — cache bypassed; result computed but not stored", req.Video, why)
+		}
+		res := p.runVisionGen(ctx, req, built, meta, start, extra, cacheable, func(gctx context.Context) (llamaclient.GenResult, error) {
 			return p.client.GenerateVisionInterleaved(gctx, p.cfg.VisionModel, built.System, labels, frames, built.User, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0)
 		})
 		if res.OK || width <= 256 || !isContextOverflow(res.Reason) {
@@ -846,7 +913,16 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		lang = ""
 	}
 
-	// Convert first (cheap, deterministic). A bad/missing file defers here.
+	// IDENTIFY BEFORE CONSUMING. The digest is taken FIRST, ahead of the ffmpeg
+	// convert, so the identity belongs to (as nearly as possible) the same bytes
+	// the conversion then reads. Hashing afterwards opened a TOCTOU window that
+	// content-addressing makes WORSE rather than better: a producer rotating a
+	// file between the convert and the hash would cache take A's transcript under
+	// sha256(take B) — and that poisoned entry is then reachable from ANY path
+	// holding B's bytes, not just the original one.
+	audioID, adErr := p.digestMedia(req.Audio)
+
+	// Convert (cheap, deterministic). A bad/missing file defers here.
 	wav, cleanup, cerr := audioio.ConvertToWav16k(req.Audio, p.cfg.FFmpegPath)
 	if cerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
@@ -855,7 +931,7 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	}
 	defer cleanup()
 
-	// Identity = source file (path+size+mtime) + model + lang. Used for BOTH the
+	// Identity = source file CONTENT (sha256 of its bytes) + model + lang. Used for BOTH the
 	// cache key AND the on-disk media filename so they agree and never collide
 	// across distinct sources that share a basename (recording.m4a is common in
 	// field audio) or across model/lang variants of the same source.
@@ -871,9 +947,41 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		identLang = ""
 		proto = "oai"
 	}
-	ident := req.Audio + "|" + audioCacheExtra(req.Audio, model, identLang) + "|proto=" + proto
+	// Keyed on CONTENT, not on the path: an identical file at a second path must
+	// hit, and a different file at the same path must miss.
+	//
+	// NO IDENTITY, NO CACHE. When the digest failed we do not know which bytes
+	// this result describes, so the work is done and returned but nothing is
+	// stored or looked up. Synthesising a key from the path + error text (an
+	// earlier design) made a transient read failure write a durable PATH-keyed
+	// entry — reintroducing, on the error path, precisely the false hit this
+	// change exists to remove. `identifiable` also gates the on-disk media stem,
+	// so two recordings that hit the same transient error cannot overwrite each
+	// other's .srt/.txt.
+	// VERIFY AFTER CONSUMING. Hashing before the convert did not close the TOCTOU
+	// window, it transposed it — hash-then-read stores the NEW bytes' transcript
+	// under the OLD digest instead of the reverse. One stat afterwards detects
+	// both directions, and also the case no re-ordering can touch: a file still
+	// being appended to, where the digest covers a prefix and ffmpeg read more.
+	identifiable := adErr == nil && p.mediaStillMatches(audioID, req.Audio)
+	// Only report a BYPASS where there was a cache to bypass. On a node with no
+	// cache configured nothing was ever cacheable, so a cache_bypass row there is
+	// noise — and core.Meta.CacheBypass's own doc excludes that case.
+	if !identifiable && p.cache != nil {
+		// Must be OBSERVABLE. Without this the call is byte-identical in telemetry
+		// to an ordinary cold miss, so an input on a flaky mount re-runs whisper at
+		// full cost on every call forever while the ledger shows a healthy run of
+		// misses.
+		why := "source changed during the call"
+		if adErr != nil {
+			why = adErr.Error()
+		}
+		meta.CacheBypass = "media identity: " + why
+		log.Printf("transcribe: no stable content identity for %q (%s) — cache bypassed; result computed but not stored", req.Audio, why)
+	}
+	ident := fmt.Sprintf("%s|model=%s|lang=%s|proto=%s", audioID.Digest, model, identLang, proto)
 	ck := cache.Key("transcribe", ident, tasks.StableParamsKey(req.Params), model, "")
-	if p.cache != nil {
+	if p.cache != nil && identifiable {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
 			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 {
@@ -920,7 +1028,31 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 
 	// Write the full payload to disk (the pointer pattern) — best-effort: a write
 	// failure does not fail the result (the inline data still carries the answer).
-	base := mediaBase(p.cfg.MediaDir, req.Audio, ident)
+	// When the input is unidentifiable, salt the on-disk stem with the start time
+	// so two recordings that hit the same transient error at the same path cannot
+	// overwrite each other's .srt/.txt — the returned srt_path would otherwise
+	// point at a different recording's transcript.
+	stemIdent := ident
+	if !identifiable {
+		// A random nonce, NOT a timestamp. Transcribe is reachable concurrently
+		// (the fleet node serves each request in its own goroutine), so two
+		// parallel calls on different unidentifiable files whose start lands in the
+		// same wall-clock tick would produce the same stem — and, sharing a
+		// basename as field audio routinely does, overwrite each other's
+		// .srt/.txt while each returned a path to the other's transcript. That is
+		// exactly the collision the salt exists to prevent, reproduced through the
+		// salt itself.
+		// crypto/rand.Read cannot fail on this toolchain — since Go 1.24 it always
+		// fills the buffer and crashes the process irrecoverably if the OS source
+		// errors. An earlier version wrapped it in an err check with a timestamp
+		// fallback and a warning log; that branch was unreachable, so the commit
+		// advertised a mitigation the code did not have. Ignoring the return is the
+		// honest expression of the actual guarantee.
+		var nonce [8]byte
+		_, _ = crand.Read(nonce[:])
+		stemIdent = fmt.Sprintf("%s|unidentified=%x", ident, nonce)
+	}
+	base := mediaBase(p.cfg.MediaDir, req.Audio, stemIdent)
 	srtPath, txtPath, jsonPath := base+".srt", base+".txt", base+".segments.json"
 	_ = os.MkdirAll(filepath.Dir(base), 0o755)
 	_ = os.WriteFile(srtPath, []byte(sttclient.SRT(tr.Segments)), 0o644)
@@ -949,7 +1081,10 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		JSONPath:          jsonPath,
 	}
 	data, _ := json.Marshal(out)
-	if p.cache != nil {
+	// Storing under a non-content key is what turns a transient read failure into
+	// a permanent wrong answer — so an unidentifiable input is computed, returned,
+	// and deliberately not persisted.
+	if p.cache != nil && identifiable {
 		if b, e := json.Marshal(cacheVal{Data: data, Model: model, InLoop: p.tierCache}); e == nil {
 			_ = p.cache.Put(ck, b)
 		}
@@ -2813,17 +2948,6 @@ func sttRoute(cfg config.Config, hq bool) (model string, useOAI bool) {
 	return model, useOAI
 }
 
-// audioCacheExtra folds the source file identity (path+size+modtime) + model +
-// language into the cache key so a changed file or a different model/lang misses.
-func audioCacheExtra(audioPath, model, lang string) string {
-	var sz, mt int64
-	if fi, err := os.Stat(audioPath); err == nil {
-		sz = fi.Size()
-		mt = fi.ModTime().UnixNano()
-	}
-	return fmt.Sprintf("sz=%d|mt=%d|model=%s|lang=%s", sz, mt, model, lang)
-}
-
 // preview returns roughly the first n bytes of s trimmed at a word boundary,
 // with an ellipsis when truncated — a cheap, deterministic gist (no model call).
 // It is rune-safe: n may land mid-rune (e.g. a Spanish á/ñ), so any trailing
@@ -3219,6 +3343,7 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		PromptPrefixSHA256: meta.PromptPrefixSHA256,
 		ContextHash:        meta.ContextHash,
 		ExemplarIDs:        meta.ExemplarIDs,
+		CacheBypass:        meta.CacheBypass,
 		CacheHitInLoop:     meta.CacheHitInLoop,
 	}
 }

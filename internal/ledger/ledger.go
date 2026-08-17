@@ -76,6 +76,10 @@ type Entry struct {
 	PromptPrefixSHA256 string   `json:"prompt_prefix_sha256,omitempty"`
 	ContextHash        string   `json:"context_hash,omitempty"`
 	ExemplarIDs        []string `json:"exemplar_ids,omitempty"`
+	// CacheBypass names why the result cache was skipped entirely, so
+	// "permanently uncacheable input" is one query away instead of being
+	// indistinguishable from a cold miss.
+	CacheBypass string `json:"cache_bypass,omitempty"`
 	// CacheHitInLoop marks a cache hit served from an entry the agent loop wrote
 	// (T2-D). In-loop generations run with a nil ledger and are never costed, so
 	// without this the share of the cache-hit rate the harness produced for

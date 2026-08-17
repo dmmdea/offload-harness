@@ -126,15 +126,78 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
 - **Cache** — keyed result reuse. Bypassed on the *recordless* path (`NewRecordlessPipeline`);
   **shared** on the *in-loop* path (`NewInLoopPipeline`) — see Interfaces below for why those are two
   different things.
+- **Media artifact addressing** (`internal/mediahash`) — audio and video cache keys identify the
+  source file by `sha256` of its **bytes**, matching what the image path has always done
+  (`"img:"+sha256hex(loaded bytes)`).
+  - Audio previously keyed on (path, size, mtime) and video on the **path string**, unhashed. Both
+    failed in two directions: a file replaced at the same path could produce a **false hit** —
+    serving the old file's transcript or description — and an identical file at a second path always
+    missed, which is the reuse an artifact cache exists to capture.
+  - **A TOCTOU window remains, and is DETECTED rather than prevented.** The digest and ffmpeg are
+    two independent opens of a path, so ordering alone cannot close the gap — hashing first merely
+    transposes which side is misattributed (hash-then-read stores the *new* bytes' transcript under
+    the *old* digest; read-then-hash does the reverse). Both are false hits reachable from any path
+    holding the misattributed bytes. Closing it outright would mean sharing one descriptor with
+    ffmpeg. Instead the file is re-`stat`ed **after** the consuming read and compared against what
+    the digest saw; on a detected difference the call is treated as unidentifiable and **nothing is
+    stored**. One stat, and it covers audio, video, and the case no re-ordering can touch at all: a
+    file still being *appended to*, where the digest covers a prefix and ffmpeg reads more.
+    `mediahash` also verifies it hashed exactly the number of bytes `stat` reported, so a growing
+    file yields an error rather than a confident prefix-identity.
+  - **The detector is (size, mtime), so it narrows the window rather than closing it.** A same-size
+    overwrite inside one mtime tick is invisible to it, and 1–2 s mtime granularity is common on
+    FAT/SMB/FUSE and Drive-backed mounts. Stating this because the alternative — implying "any
+    difference is detected" — is the same overclaim this section previously made about ordering.
+  - **Cost of an unidentifiable input:** it is never cached, so it re-runs the model on every call,
+    and each call writes a fresh nonce-salted `.srt`/`.txt`/`.segments.json` triple. Nothing reaps
+    `media_dir`, so a file on a persistently flaky mount accumulates three files per invocation.
+    That is a deliberate trade — a wrong cached transcript is worse than a repeated one — but it is
+    a real cost and an operator may need to reclaim the directory.
+  - The video digest is hoisted above the width-halving retry loop (it is loop-invariant, and
+    re-reading a multi-GB clip per retry is pure waste), but the verification runs **per iteration** —
+    hoisting alone widened the window to *digest-at-t₀ versus the final successful sampling*, which
+    on a 4K vertical reel is the 4th attempt, minutes later.
+  - **A bypassed cache is observable.** `cache_bypass` on the ledger row names why, because a
+    permanently unidentifiable input is otherwise byte-identical in telemetry to an ordinary cold
+    miss — it would re-run the model at full cost forever while the ledger looked healthy and the
+    hit-rate dashboard invited the wrong diagnosis.
+  - **No identity, no cache.** When the digest fails, the work is computed and returned but nothing
+    is looked up or stored, and the on-disk media stem is salted so two failures at one path cannot
+    overwrite each other's `.srt`/`.txt`. `mediahash.Digest` returns an **error** rather than a
+    synthetic key: an earlier design returned `media:staterr:<hash(path+error)>`, which is a *path*
+    key — so a transient read failure wrote a durable entry that a different file at that path later
+    hit, reintroducing the exact false hit this change removes.
+  - `media_hash_max_full_bytes` defaults to **0 = always hash the whole file**. The cost is a cold
+    file read, so it is **I/O-bound, not SHA-bound** — on `V:` or a `G:\My Drive` mount a large clip
+    is nowhere near memory-speed. It is still cheap *relative to the work it guards*, because both
+    call sites already read the same file through ffmpeg before hashing it. A positive value
+    switches larger files to a **sampled** digest (size + up to three 8 MiB windows, de-duplicated);
+    that is opt-in because its failure mode is a false hit between two same-size files agreeing on
+    those windows. The mode is encoded in the digest, so sampled and full can never be confused.
+  - **Migration:** this changes every existing audio and video key once. Intended — those entries
+    were keyed on an identity that could be wrong.
 - **Embed memo** — `internal/embedmemo`, a bbolt store at `embed_memo_path` keyed on
   `sha256(embedder_id, epoch, exact input bytes)`. Embedding is a pure function of (model, text) and
   the harness re-embeds the same strings by construction, so a hit skips the call — and, because the
   embedder carries `ttl=300` like every other seat, it also skips the ~1–2 s cold load the first
   embed after an idle gap would pay.
-  - **Wired consumers:** the shadow-label drain (`shadow-label`), which re-embeds the same stored
-    inputs and re-scores the same reference summaries on every run; and the kNN pre-filter, which is
-    off unless `knn_prefilter_enabled` is set. Exemplar selection is **not** a consumer —
-    `internal/exemplars` retrieves lexically and contains no embedder.
+  - **Wired consumers:** the kNN pre-filter on the request path, and the shadow-label drain
+    (`shadow-label`). Exemplar selection is **not** a consumer — `internal/exemplars` retrieves
+    lexically and contains no embedder.
+  - **Where the repeats actually come from — the original justification was wrong, and this states
+    the corrected one.** The memo was introduced on the claim that the drain "re-embeds the same
+    stored inputs and re-scores the same reference summaries on every run". Reading the code
+    refutes all three parts: `shadow.Drain` is **destructive** (it renames the queue to
+    `.draining`, reads it, and drops the claim), so each run consumes a **fresh** item set and only
+    a crash-recovered claim ever replays; there is **no shared reference set**, because `label.go`
+    calls `Similar(entrySummary, escSummary)` on summaries derived from *that item's own* output;
+    and the drain's `Embed` path is itself gated on `knn_prefilter_enabled`. The genuine repeat
+    sources are the **request-path pre-filter** (repeat inputs are real and measurable — that is
+    what the Phase 0.1 identity fields count) and **within-run** repeats inside one drain.
+  - **Consequence: with `knn_prefilter_enabled` at its default of `false`, this feature is close to
+    inert.** It is correct, cheap and hardened, and it costs nothing when idle — but enabling the
+    pre-filter is a separate decision with its own quality implications, and the memo's value is
+    gated on it. Do not read a zero hit count on a stock config as a fault.
   - Keys are **never normalized**: casefolding or whitespace collapsing would let two different texts
     share a key and return a vector computed for the other one, which is a silent correctness bug in
     a semantic quantity rather than a cache miss. Vectors are stored as verbatim `float64`, so a hit
