@@ -434,7 +434,7 @@ func TestRunPollUnusableAnswers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
-		if sum != (Summary{Deferred: 1, Infrastructure: 1}) {
+		if sum != (Summary{Deferred: 1, Infrastructure: 1, LostToStack: 1}) {
 			t.Fatalf("summary = %+v, want the defer counted as infrastructure", sum)
 		}
 		if r := results[0]; !strings.Contains(r.Result.Reason, "503") {
@@ -746,7 +746,7 @@ func TestRunInfrastructureDeferCountsSeparately(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if sum != (Summary{Deferred: 1, Infrastructure: 1}) {
+	if sum != (Summary{Deferred: 1, Infrastructure: 1, LostToStack: 1}) {
 		t.Fatalf("summary = %+v, want one defer ALSO counted as infrastructure", sum)
 	}
 	resp := WireResponse(results, sum)
@@ -856,7 +856,7 @@ func TestRunRouteRemoteNoEligibleRemoteDefers(t *testing.T) {
 	// Config-classed: an explicit remote route with nothing eligible is an
 	// operator problem, so it also trips the infrastructure counter (non-zero
 	// CLI exit) rather than passing as a routine defer.
-	if sum != (Summary{Deferred: 1, Infrastructure: 1}) {
+	if sum != (Summary{Deferred: 1, Infrastructure: 1, LostToStack: 1}) {
 		t.Fatalf("summary = %+v, want one config-classed defer", sum)
 	}
 	if !strings.Contains(results[0].Result.Reason, "route=remote") || !strings.Contains(results[0].Result.Reason, "capability gate") {
@@ -905,7 +905,7 @@ func TestRunNoEligibleRemoteNamesTheRealCause(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
-		if sum != (Summary{Deferred: 1, Infrastructure: 1}) {
+		if sum != (Summary{Deferred: 1, Infrastructure: 1, LostToStack: 1}) {
 			t.Fatalf("summary = %+v, want an infrastructure-classed defer", sum)
 		}
 		reason := results[0].Result.Reason
@@ -1351,7 +1351,7 @@ func TestRunContractSideClassRequiresAHealthyFleet(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Run: %v", err)
 			}
-			if sum != (Summary{Deferred: 1, Infrastructure: 1}) {
+			if sum != (Summary{Deferred: 1, Infrastructure: 1, LostToStack: 1}) {
 				t.Fatalf("summary = %+v, want the dead fleet counted — NOT ONE node answered, so nothing establishes the contract as the story", sum)
 			}
 			r := results[0]
@@ -1395,34 +1395,97 @@ func TestRunContractSideClassRequiresAHealthyFleet(t *testing.T) {
 	})
 }
 
-// TestRunCtxFitIsContractSideOnlyWithARealCeiling (R4-2): agent_ctx_tokens is
-// omitempty on the wire and config documents 0 as "not advertised — set it when
-// opting a node in", i.e. an OPERATOR fix on a box. An unset value (or any
-// pre-0.63 peer that never emits the field) decodes as 0, still counts into
-// lanes, and so satisfied `lanes > 0 && tooSmall == lanes` — blaming a 30-token
-// goal on the caller's contract at exit 0.
+// TestRunCtxFitIsContractSideOnlyWithARealCeiling (R4-2, widened R5-1):
+// agent_ctx_tokens is omitempty on the wire and config documents 0 as "not
+// advertised — set it when opting a node in", i.e. an OPERATOR fix on a box. An
+// unset value (or any peer predating the agent lane, which never emits the
+// field) decodes as 0, still counts into lanes, and so satisfied
+// `lanes > 0 && tooSmall == lanes` — blaming a 30-token goal on the caller's
+// contract at exit 0.
+//
+// R5-1 — the round-4 guard was FLEET-WIDE where its own doc claimed per-lane,
+// and this test was VACUOUS about it: it exercised only the ALL-zero fleet,
+// where `nodeSideVerdict`'s roomiest==0 case alone satisfied every assertion, so
+// `roomiest > 0 &&` could be deleted from contractIneligible with the whole tree
+// still green (verified by mutation). Because `roomiest` is a fleet-wide MAX,
+// ONE node advertising a real ceiling supplied it for EVERY node advertising
+// none — a mixed fleet (the DOCUMENTED staggered-rollout state) still shipped a
+// quiet exit-0 contract-classed defer whose reason ALSO authored a claim on the
+// silent node's behalf ("the roomiest agent-enabled remote advertises 4096").
+// An absent agent_ctx_tokens means the ceiling is UNKNOWN, not small; the box
+// may be a 128k machine. So the mixed row is here, and BOTH rows now assert the
+// two halves the old test never separated: the class is loud, AND no ceiling
+// claim is made for a lane that advertised none.
 func TestRunCtxFitIsContractSideOnlyWithARealCeiling(t *testing.T) {
-	node := &fakeNode{
-		t: t, agentEnabled: true, resident: true, ctxTokens: 0, nodeID: "no-ceiling-node",
-		pollState: func(int64) (map[string]any, int) { return nil, http.StatusNotFound },
+	type lane struct {
+		id  string
+		ctx int // advertised agent_ctx_tokens; 0 = the field never arrived
 	}
-	srv := node.server()
-
-	contract := remoteContract()
-	contract.Goal = "name the capital" // nothing about this contract is big
-	results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{srv.URL})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	cases := []struct {
+		name  string
+		fleet []lane
+		goal  string
+		// wantNamed are the node ids the reason must name — the operator has to
+		// know WHICH box to go set the field on.
+		wantNamed []string
+	}{
+		{
+			name:      "no remote advertises a ceiling",
+			fleet:     []lane{{"no-ceiling-node", 0}},
+			goal:      "name the capital", // nothing about this contract is big
+			wantNamed: []string{"no-ceiling-node"},
+		},
+		{
+			// The mixed fleet: one upgraded node answers with a real ceiling, one
+			// peer never sends the field at all. nodeview.go's loose decode exists
+			// precisely so staggered deploys work, so this is the normal rollout
+			// state, not an exotic one.
+			name:      "one remote advertises, one does not",
+			fleet:     []lane{{"advertised-node", 4096}, {"no-ceiling-node", 0}},
+			goal:      strings.Repeat("x", 30000), // ~13k tokens with the reserve: genuinely past 4096
+			wantNamed: []string{"no-ceiling-node"},
+		},
 	}
-	if sum != (Summary{Deferred: 1, Infrastructure: 1}) {
-		t.Fatalf("summary = %+v, want a LOUD class — nobody advertised a ceiling, which an operator fixes on the node", sum)
-	}
-	r := results[0]
-	if r.Result.DeferClass == core.DeferClassContract {
-		t.Errorf("defer_class = contract (reason %q) — a 30-token goal is not what makes an unadvertised ceiling unusable", r.Result.Reason)
-	}
-	if !strings.Contains(r.Result.Reason, "agent_ctx_tokens") {
-		t.Errorf("reason = %q, want the unset node-side field named", r.Result.Reason)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bases := make([]string, 0, len(tc.fleet))
+			for _, l := range tc.fleet {
+				node := &fakeNode{
+					t: t, agentEnabled: true, resident: true, ctxTokens: l.ctx, nodeID: l.id,
+					pollState: func(int64) (map[string]any, int) { return nil, http.StatusNotFound },
+				}
+				bases = append(bases, node.server().URL)
+			}
+			contract := remoteContract()
+			contract.Goal = tc.goal
+			results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", bases)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if sum != (Summary{Deferred: 1, Infrastructure: 1, LostToStack: 1}) {
+				t.Fatalf("summary = %+v, want a LOUD class — a lane advertised no ceiling, which an operator fixes on the node", sum)
+			}
+			r := results[0]
+			if r.Result.DeferClass == core.DeferClassContract {
+				t.Errorf("defer_class = contract (reason %q) — an unadvertised ceiling is UNKNOWN, and the caller cannot rewrite a contract to fit an unknown", r.Result.Reason)
+			}
+			if !strings.Contains(r.Result.Reason, "agent_ctx_tokens") {
+				t.Errorf("reason = %q, want the unset node-side field named", r.Result.Reason)
+			}
+			for _, id := range tc.wantNamed {
+				if !strings.Contains(r.Result.Reason, id) {
+					t.Errorf("reason = %q, want the silent node %q named — the fix is on THAT box", r.Result.Reason, id)
+				}
+			}
+			// The FABRICATION half, and the assertion the old test lacked: the
+			// ctx-fit sentence may only be spoken when EVERY lane supplied a real
+			// number to be too big for. With one lane silent it is a claim about a
+			// ceiling nobody published — the same defect class as the invented
+			// 404 denial a previous round removed.
+			if strings.Contains(r.Result.Reason, "roomiest") {
+				t.Errorf("reason = %q asserts a roomiest-ceiling verdict over a fleet where a lane advertised nothing", r.Result.Reason)
+			}
+		})
 	}
 }
 
@@ -1487,7 +1550,7 @@ func TestRunDeferAfterLostJobsIsInfrastructure(t *testing.T) {
 	if d := node.dispatches.Load(); d != 3 {
 		t.Fatalf("dispatches = %d, want 3 (initial + two 404-triggered re-dispatches) — the premise never happened", d)
 	}
-	if sum != (Summary{Deferred: 1, Infrastructure: 1}) {
+	if sum != (Summary{Deferred: 1, Infrastructure: 1, LostToStack: 1}) {
 		t.Fatalf("summary = %+v, want the defer counted as infrastructure — a node that loses jobs is broken, not slow", sum)
 	}
 	if r := results[0]; !strings.Contains(r.Result.Reason, "re-dispatch") {

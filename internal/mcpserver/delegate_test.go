@@ -286,6 +286,20 @@ func TestAgentDelegateHandlerBadInputsDefer(t *testing.T) {
 // exits non-zero on it), but a boolean that means "your call failed" must not be
 // set on work that succeeded. A CLI exit code can carry that nuance beside the
 // printed results; a boolean cannot.
+//
+// R5-2 — the round-4 fix expressed that motivation as `Succeeded == 0`, which
+// silenced far more than it meant to. Summary.Infrastructure conflates two
+// states: remotesUnreachable annotates a result that SUCCEEDED, while a
+// broken-stack DEFER is a subtask that produced NOTHING. Only the first
+// justified the gate, but the gate also swallowed the second the moment any
+// sibling succeeded — one of two subtasks eaten by a box with a dead
+// llama-server came back as a clean tool call, while `local-offload delegate`
+// exited NON-ZERO on the identical run. The quiet surface was the one whose
+// caller has no exit code to read.
+//
+// So the rule is now stated on the thing it actually means: LostToStack, the
+// count of subtasks that came back empty because the stack failed them. Note
+// what CANNOT stand in for it — the rows below pin both directions.
 func TestDelegateIsErrorRequiresNothingUsableCameBack(t *testing.T) {
 	cases := []struct {
 		name string
@@ -293,7 +307,18 @@ func TestDelegateIsErrorRequiresNothingUsableCameBack(t *testing.T) {
 		want bool
 	}{
 		{"a local success taken while the whole fleet was down", delegate.Summary{Succeeded: 1, Infrastructure: 1}, false},
-		{"nothing came back and the stack is why", delegate.Summary{Deferred: 1, Infrastructure: 1}, true},
+		{"nothing came back and the stack is why", delegate.Summary{Deferred: 1, Infrastructure: 1, LostToStack: 1}, true},
+		// R5-2, the hole: a sibling succeeding never un-loses the subtask the
+		// broken box ate. Both this and the Failed row below produced nothing and
+		// both need the caller to act — gating one on Succeeded and not the other
+		// was the asymmetry that made the old rule indefensible.
+		{"a sibling succeeded, but a subtask was still lost to a broken box", delegate.Summary{Succeeded: 1, Deferred: 1, Infrastructure: 1, LostToStack: 1}, true},
+		// Why `Deferred > 0 && Infrastructure > 0` is NOT a safe proxy for the
+		// rule above: this run's Infrastructure comes from a fleet-down LOCAL
+		// SUCCESS and its defer is contract-classed (the caller has a contract to
+		// fix, the fleet is fine). Nothing was lost to the stack, so the proxy
+		// would fire on finished work — the exact defect R4-8 removed.
+		{"a contract-classed defer beside a fleet-down local success", delegate.Summary{Succeeded: 1, Deferred: 1, Infrastructure: 1}, false},
 		{"a subtask outright failed", delegate.Summary{Succeeded: 7, Failed: 1}, true},
 		{"honest abstentions only", delegate.Summary{Succeeded: 1, Deferred: 1}, false},
 		{"failed verification is a RESULT shape", delegate.Summary{FailedVerification: 2}, false},
@@ -307,12 +332,20 @@ func TestDelegateIsErrorRequiresNothingUsableCameBack(t *testing.T) {
 	}
 }
 
-// TestAgentDelegateHandlerSucceededWorkIsNeverAToolError (R4-8, end to end): the
-// same rule through the real handler — one subtask completes, another defers
-// blaming the stack. The summary must report the infrastructure defer (an
-// operator has to look) while the call itself is NOT an error, because usable
-// work came back in it.
-func TestAgentDelegateHandlerSucceededWorkIsNeverAToolError(t *testing.T) {
+// TestAgentDelegateHandlerASubtaskLostToTheStackIsAlwaysLoud (R5-2, end to end):
+// this scenario — one subtask completes, another defers blaming the stack — is
+// where R4-8's `Succeeded == 0` gate did its damage, and this test's own
+// expectation was what locked the hole in: it asserted IsError == false, so half
+// the requested work being eaten by a broken box reached the calling model as a
+// clean tool call with no flag on it at all.
+//
+// A subtask lost to the stack is never a "result shape". It produced nothing,
+// the fix is on a box, and a sibling succeeding does not change either fact —
+// exactly as a Failed subtask beside seven successes has always been loud. The
+// motivation R4-8 was written for survives intact and is pinned in the table
+// above: a fleet-down LOCAL SUCCESS (Infrastructure with no LostToStack) is
+// still a quiet, successful call.
+func TestAgentDelegateHandlerASubtaskLostToTheStackIsAlwaysLoud(t *testing.T) {
 	var calls atomic.Int64
 	s := delegateTestServer(t, func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
 		if calls.Add(1) == 1 {
@@ -327,12 +360,21 @@ func TestAgentDelegateHandlerSucceededWorkIsNeverAToolError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleAgentDelegate: %v", err)
 	}
-	if res.IsError {
-		t.Fatalf("IsError = true on a run that delivered finished work; MCP reads that as \"the call failed\"")
+	if !res.IsError {
+		t.Fatalf("IsError = false although a subtask was eaten by a broken box; the CLI exits NON-ZERO on this same run, and the MCP caller has no exit code to read")
 	}
+	// The body is the diagnosis and must survive the flag intact — including the
+	// count that DECIDED the flag, or the caller is told "this failed" with no
+	// way to see which half.
 	m := decodeResult(t, res)
 	summary, _ := m["summary"].(map[string]any)
 	if summary["succeeded"] != float64(1) || summary["infrastructure"] != float64(1) {
 		t.Fatalf("summary = %v, want the success AND the broken stack both reported in the body", summary)
+	}
+	if summary["lost_to_stack"] != float64(1) {
+		t.Fatalf("summary = %v, want lost_to_stack:1 published — it is what the error flag is asserting", summary)
+	}
+	if results, _ := m["results"].([]any); len(results) != 2 {
+		t.Fatalf("results = %v, want both subtasks' diagnoses intact behind the error flag", m["results"])
 	}
 }

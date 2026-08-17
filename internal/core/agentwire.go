@@ -124,7 +124,7 @@ type AgentWireResult struct {
 	Deferred      bool            `json:"deferred"`
 	Reason        string          `json:"reason,omitempty"`
 	// DeferClass is the machine-branchable WHY behind Deferred (one of the
-	// DeferClass* constants). Additive and omitempty: a pre-0.63 node's result
+	// DeferClass* constants). Additive and omitempty: a pre-0.65 node's result
 	// decodes with an empty class, which readers must treat as "unknown", never
 	// as abstention.
 	DeferClass string `json:"defer_class,omitempty"`

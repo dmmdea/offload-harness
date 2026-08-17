@@ -19,6 +19,16 @@ type SummaryWire struct {
 	FailedVerification int `json:"failed_verification"`
 	Failed             int `json:"failed"`
 	Infrastructure     int `json:"infrastructure"`
+	// LostToStack is the half of Infrastructure that is LOST WORK: subtasks that
+	// came back EMPTY because the stack failed them, as opposed to a successful
+	// local placement annotated with "the fleet was down". omitempty — a run
+	// that lost nothing publishes byte-identically to before this field existed.
+	//
+	// It is published rather than kept internal because it is what makes the MCP
+	// surface's error flag legible: `infrastructure: 1` beside `succeeded: 1` no
+	// longer says on its own whether a subtask was eaten, and the caller reading
+	// "this call failed" is owed the count that decided it.
+	LostToStack int `json:"lost_to_stack,omitempty"`
 	// CorpusRows*/LedgerRows* publish telemetry loss to the CALLER. omitempty:
 	// a healthy run's response stays byte-identical to before these fields
 	// existed. They are not outcome buckets — the four counts above still add
@@ -66,11 +76,12 @@ type ResponseWire struct {
 func WireResponse(results []PlacedResult, sum Summary) ResponseWire {
 	out := ResponseWire{
 		Summary: SummaryWire{
-			Succeeded:          sum.Succeeded,
-			Deferred:           sum.Deferred,
-			FailedVerification: sum.FailedVerification,
-			Failed:             sum.Failed,
-			Infrastructure:     sum.Infrastructure,
+			Succeeded:           sum.Succeeded,
+			Deferred:            sum.Deferred,
+			FailedVerification:  sum.FailedVerification,
+			Failed:              sum.Failed,
+			Infrastructure:      sum.Infrastructure,
+			LostToStack:         sum.LostToStack,
 			CorpusRowsLost:      sum.CorpusRowsLost,
 			CorpusRowsAttempted: sum.CorpusRowsAttempted,
 			LedgerRowsLost:      sum.LedgerRowsLost,

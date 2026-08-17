@@ -365,7 +365,7 @@ type healthPayload struct {
 	VramReclaimSource string `json:"vram_reclaim_source,omitempty"`
 	// ---- Agent lane advertisement (§S3, multi-node delegation) ----
 	// All four fields are ADDITIVE and omitempty, so schema_version stays 1:
-	// a node with the lane off — which includes every pre-0.63 node — emits a
+	// a node with the lane off — which includes every pre-0.65 node — emits a
 	// byte-identical payload (pinned in TestHealthAgentFieldsAbsentWhenDisabled),
 	// and the dispatcher decodes health loosely per FLEET-NODE.md, so old and
 	// new nodes interoperate in both directions. Populated ONLY when

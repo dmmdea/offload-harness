@@ -92,8 +92,14 @@ func TestDelegateExitContract(t *testing.T) {
 		{"an honest abstention stays zero", delegate.Summary{Succeeded: 1, Deferred: 1}, ""},
 		{"failed verification stays zero", delegate.Summary{FailedVerification: 2}, ""},
 		{"transport failure exits non-zero", delegate.Summary{Failed: 1}, "failed (transport/config)"},
-		{"a broken node exits non-zero", delegate.Summary{Deferred: 2, Infrastructure: 2}, "infrastructure/config"},
-		{"failures win the message", delegate.Summary{Failed: 1, Deferred: 1, Infrastructure: 1}, "failed (transport/config)"},
+		{"a broken node exits non-zero", delegate.Summary{Deferred: 2, Infrastructure: 2, LostToStack: 2}, "infrastructure/config"},
+		{"failures win the message", delegate.Summary{Failed: 1, Deferred: 1, Infrastructure: 1, LostToStack: 1}, "failed (transport/config)"},
+		// R5-2, the SURFACE-PARITY row. This exact summary is what the MCP tool's
+		// delegateIsError now flags (its table pins the same shape): a subtask
+		// eaten by a broken box while a sibling finished. The two surfaces had
+		// silently diverged here — the CLI exited non-zero while the MCP call came
+		// back clean — and the divergence must not return from the CLI side either.
+		{"a subtask lost to a broken box beside a sibling success", delegate.Summary{Succeeded: 1, Deferred: 1, Infrastructure: 1, LostToStack: 1}, "infrastructure/config"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

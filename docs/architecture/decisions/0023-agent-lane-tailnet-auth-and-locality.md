@@ -12,7 +12,7 @@ ownership rule in the index README.
 ## Context
 
 The fleet contract ([systems/fleet-node.md](../../systems/fleet-node.md)) carried media render
-jobs between self-hosted nodes on the operator's tailnet. 0.63.0 adds an **agent lane**: a fleet
+jobs between self-hosted nodes on the operator's tailnet. 0.65.0 adds an **agent lane**: a fleet
 node can now execute a self-contained delegation contract with its own local `agent.Build` loop
 and return a versioned result, so a weaker second box does meaningful sub-agent work while the
 primary GPU is busy.
@@ -164,7 +164,7 @@ real use says what the loop actually needs.
 - The shared token means a compromised node compromises the lane fleet-wide until every config
   is rotated by hand. Accepted at 2 nodes; recorded as the first thing to revisit at N > 2 or
   any non-personal deployment.
-- Media traffic stays observably byte-identical through 0.63.0 (pinned by test), at the cost of
+- Media traffic stays observably byte-identical through 0.65.0 (pinned by test), at the cost of
   a two-posture auth story until the whole-fleet enforcement window.
 
 ## Alternatives considered

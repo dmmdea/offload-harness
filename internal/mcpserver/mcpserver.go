@@ -1209,10 +1209,27 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 // and `local-offload delegate` still exits non-zero on it, because an exit code
 // can sit BESIDE printed results in a way a boolean cannot.
 //
-// So: a subtask that actually failed is an error, and a broken stack is an error
-// when NOTHING usable came back — never when finished work did.
+// The rule that expresses that WITHOUT a silent path is stated on lost WORK, not
+// on the presence of successes. `Succeeded == 0` was the previous spelling and it
+// over-reached: Infrastructure covers both remotesUnreachable (a result that
+// succeeded) and a broken-stack DEFER (a subtask that produced nothing), and only
+// the first justifies staying quiet — yet the gate silenced the second too the
+// moment ANY sibling succeeded. One of two subtasks eaten by a box with a dead
+// llama-server reached the calling model as a clean tool call, while the CLI
+// exited non-zero on the identical run: two surfaces disagreeing, with the quiet
+// one belonging to the caller that has no exit code to read.
+//
+// LostToStack counts exactly the subtasks that came back EMPTY because the stack
+// failed them, so the rule needs no proxy. `Deferred > 0 && Infrastructure > 0`
+// is NOT one — a contract-classed defer beside a fleet-down local success
+// satisfies it with nothing lost, re-creating the flag-on-finished-work defect.
+//
+// So: a subtask that actually failed is an error, and a subtask lost to the
+// stack is an error — a sibling succeeding never un-loses it, exactly as it never
+// un-fails a Failed one. A fleet-down run that still delivered every subtask
+// stays a quiet success.
 func delegateIsError(sum delegate.Summary) bool {
-	return sum.Failed > 0 || (sum.Infrastructure > 0 && sum.Succeeded == 0)
+	return sum.Failed > 0 || sum.LostToStack > 0
 }
 
 // addEffects folds a run's effect ledger into an agent_run response — counts

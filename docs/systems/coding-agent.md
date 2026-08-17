@@ -353,7 +353,7 @@ eval approach (MIT); metrics and signals are this harness's own.
 
 ## Delegation surfaces
 
-Since 0.63.0 the same loop can be driven by a **delegation contract** — a self-contained
+Since 0.65.0 the same loop can be driven by a **delegation contract** — a self-contained
 `{goal, context docs, output_schema, acceptance}` unit placed on this box or on a fleet node
 over the operator's tailnet. Two surfaces exist, both delegator-side:
 
@@ -371,17 +371,25 @@ Both surfaces publish the same summary-first response, and both read the same wa
 `summary.infrastructure` — because a node whose llama-swap is down defers every subtask and must
 not read as a clean run. `contract`-classed defers are the caller's own contract, not a broken
 box, and stay quiet ([defer classes](fleet-node.md#defer-shapes-and-their-classes)) — but only
-when the fleet is positively established as healthy: with any node unreachable the loud class
-wins and the reason names both causes.
+when the fleet is positively established as healthy: with any node unreachable, or any agent lane
+advertising no `agent_ctx_tokens` ceiling at all, the loud class wins and the reason names both
+causes.
 
-The two surfaces report that verdict differently, on purpose. **The CLI exits non-zero on
-`summary.infrastructure > 0`** — an exit code sits beside the printed results, so it can say
-"look at this" without denying the results. **The MCP tool sets `isError` only when the call
-produced nothing usable**: `summary.failed > 0`, or `infrastructure > 0` with `succeeded == 0`.
-`infrastructure` includes a successful LOCAL placement taken while the fleet was down, and
-`isError` means *the call failed* in MCP — flagging a run whose subtasks all completed, validated
-and passed acceptance is how a model comes to discard or redo correct work. The body is identical
-either way, so the summary and every per-subtask reason are always there to read.
+`summary.infrastructure` covers two situations a caller acts on differently, so
+**`summary.lost_to_stack`** (omitted when zero) splits out the one that is lost WORK: subtasks
+that came back EMPTY because the stack failed them. The remainder of `infrastructure` is a
+successful LOCAL placement annotated with "the fleet was down" — nothing lost.
+
+The two surfaces report that verdict differently, on purpose, and they agree on the case that
+matters. **The CLI exits non-zero on `summary.infrastructure > 0`** — an exit code sits beside the
+printed results, so it can say "look at this" without denying the results. **The MCP tool sets
+`isError` on `summary.failed > 0` or `summary.lost_to_stack > 0`**: a subtask that produced
+nothing is loud whether the stack or a transport error ate it, and a sibling succeeding does not
+un-lose it. The one deliberate difference is the fleet-down run that still delivered every
+subtask (`infrastructure > 0`, `lost_to_stack == 0`): non-zero on the CLI, a quiet success on
+MCP, because `isError` means *the call failed* and flagging a run whose subtasks all completed,
+validated and passed acceptance is how a model comes to discard or redo correct work. The body is
+identical either way, so the summary and every per-subtask reason are always there to read.
 
 The summary also carries `corpus_rows_lost` / `ledger_rows_lost` and, whenever one is non-zero,
 its `corpus_rows_attempted` / `ledger_rows_attempted` denominator (all `omitempty`): telemetry

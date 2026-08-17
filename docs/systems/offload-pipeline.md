@@ -293,7 +293,7 @@ reason and any partial output preserved in `Partial`.
 ## Security and privacy notes
 
 The cascade holds no credentials. By default it reaches no network beyond the configured local
-endpoint; since 0.63.0 two opt-in config keys can route a seat's completions to a base on the
+endpoint; since 0.65.0 two opt-in config keys can route a seat's completions to a base on the
 operator's OWN tailnet, never cloud (ADR 0023): `seat_endpoints` (a static per-model pin — that
 seat is always remote) and `cascade_remote_lanes` (busy-aware failover — the lane is taken per
 call, only while the local machine-wide GPU lease is held and a cached alias-aware roster probe

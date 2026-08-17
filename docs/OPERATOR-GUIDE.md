@@ -679,12 +679,19 @@ defers are a loud outcome, not eight green jobs. `infrastructure` counts the res
 is a broken stack rather than the work: defers whose `defer_class` says so (`infrastructure` /
 `config`, as opposed to `abstention` / `budget`), plus a local placement taken while every
 configured remote was failing its health probe. Non-zero means a node is broken or
-misconfigured, not that the small model could not do the job — and the MCP tool marks the call
-`isError` on it too, with the JSON body unchanged.
+misconfigured, not that the small model could not do the job.
+
+`lost_to_stack` rides beside it (omitted when zero) and is the half that is **lost work** —
+subtasks that came back empty because the stack failed them, as opposed to a local placement that
+succeeded while the fleet was down. The MCP tool marks the call `isError` on
+`failed > 0 || lost_to_stack > 0`, with the JSON body unchanged; the CLI's exit code is the wider
+`infrastructure > 0` rule below.
 
 `defer_class: "contract"` is the one class that is **your** problem rather than a box's: the
 contract carries no `output_schema` for a remote placement, is past the origin hop, or needs
-more context than any node advertises. Those stay exit 0 by design. If the summary carries
+more context than **every** node advertises — a node that advertises no `agent_ctx_tokens` at all
+makes it a `config` verdict on that node instead, because an unadvertised ceiling is unknown, not
+small. Those stay exit 0 by design. If the summary carries
 `corpus_rows_lost` / `ledger_rows_lost`, the results are still complete — the harness could not
 write that many telemetry rows (usually a full or read-only disk).
 

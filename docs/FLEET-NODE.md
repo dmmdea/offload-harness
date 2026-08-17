@@ -3,7 +3,7 @@
 Operator guide for running this box as a **fleet node**: a small HTTP server that lets the
 Fleet Dispatcher send GPU render jobs (image / video / audio / stt / run-graph) to this
 machine through the same pipeline, GPU lock, and zero-always-warm lifecycle every local call
-uses — and, since 0.63.0, lets a delegator send **agent** jobs (self-contained sub-agent
+uses — and, since 0.65.0, lets a delegator send **agent** jobs (self-contained sub-agent
 contracts, see [The agent task](#the-agent-task-task_type-agent) below). Wire protocol:
 fleet-dispatcher `CONTRACT.md` **v2** — three endpoints, JSON everywhere, GiB everywhere,
 every failure a non-2xx.
@@ -124,7 +124,7 @@ source, which has no `gpu_devices[]` to match against. Implementation:
 | `fleet_node_id` | `""` | Node id in `/fleet/health`. Empty = the OS hostname at serve time (`--node-id` overrides). |
 | `fleet_sampler` | `auto` | Per-render VRAM footprint source: `auto` \| `pdh` \| `pdh-shared` \| `global` (see [Sampler modes](#sampler-modes)). |
 | `primary_gpu_uuid` | `""` | Pins the headline `vram_total_gb`/`vram_free_gb` to one card by nvidia-smi UUID, overriding the largest-total rule (see [`primary_gpu_uuid`](#primary_gpu_uuid--pin-the-headline-device-deterministically) above). Empty = unchanged largest-total behavior. |
-| `fleet_agent_enabled` | `false` | Opts this node into executing fleet **agent** jobs (see [The agent task](#the-agent-task-task_type-agent)). Explicit opt-in: the binding (an agent seat) exists on every tier, the worker ROLE is a per-box decision. Off = the task is not advertised and health is byte-identical to a pre-0.63 node. |
+| `fleet_agent_enabled` | `false` | Opts this node into executing fleet **agent** jobs (see [The agent task](#the-agent-task-task_type-agent)). Explicit opt-in: the binding (an agent seat) exists on every tier, the worker ROLE is a per-box decision. Off = the task is not advertised and health is byte-identical to a pre-0.65 node. |
 | `fleet_auth_token` | `""` | Bearer token for the **agent lane only** (agent dispatches + polls of agent-created jobs; media stays tokenless in v1). Same value on every node and in the delegator's config. Empty + non-loopback listener = agent dispatches refused 403. |
 | `agent_ctx_tokens` | `0` | The agent seat's served context window, advertised in health for the delegator's placement arithmetic. From config, never probed (a live probe could cold-start a multi-GB model on the health cadence). `0` = not advertised = this node is never chosen for remote agent work. |
 
@@ -132,7 +132,7 @@ source, which has no `gpu_devices[]` to match against. Implementation:
 
 The **media** endpoints are unauthenticated by design (matching the dispatcher's posture):
 anyone who can reach them can run renders on this GPU. The **agent lane is the exception**
-since 0.63.0 — it executes caller-supplied agent contracts, so beyond loopback it requires
+since 0.65.0 — it executes caller-supplied agent contracts, so beyond loopback it requires
 `fleet_auth_token` (details in [The agent task](#the-agent-task-task_type-agent)). The same
 rules as `local-agent --serve` apply, enforced by the same shared guard:
 
@@ -416,7 +416,7 @@ one contract. Unknown payload fields are **ignored** (staggered node deploys mus
 | `steps` / `stop_reason` | int / string | loop telemetry |
 | `deferred` | bool | the node ran and could not complete the contract — **still a `done` job**, never `error` (`error` = internal wiring bug only) |
 | `reason` | string | the defer shape: seat unserved on the roster, `wall timeout after <N>s`, `step budget exhausted (…)`, `output failed schema: …`, `structured re-pack unreachable: …`, build/loop/profile errors |
-| `defer_class` | string | `abstention` \| `budget` \| `infrastructure` \| `config` \| `contract` — the machine-branchable WHY (table below). Absent from a pre-0.63 node: treat empty as *unknown*, never as abstention |
+| `defer_class` | string | `abstention` \| `budget` \| `infrastructure` \| `config` \| `contract` — the machine-branchable WHY (table below). Absent from a pre-0.65 node: treat empty as *unknown*, never as abstention |
 | `wall_ms` / `tokens_out` | int | node wall clock / re-pack completion tokens |
 
 ### Defer classes — which defers mean "a human must act"
@@ -427,13 +427,18 @@ one contract. Unknown payload fields are **ignored** (staggered node deploys mus
 | `budget` | a ceiling stopped it; a bigger budget might succeed | `wall timeout after <N>s`, `step budget exhausted (…)`, `canceled during the structured re-pack …`, delegator-side `poll deadline …` on a node that reported OWNING the job |
 | `infrastructure` | something is broken — nothing was learned, retrying the same contract cannot help | `building agent: …`, `agent loop: …`, `structured re-pack unreachable: …` (dial failure or **5xx**, sticky across the retry), delegator-side `poll deadline …` whose last poll answer was unusable, and "all remotes failed the health probe" |
 | `config` | this node's configuration can never run this | no seat resolvable, seat not in the served roster, unknown profile, and the delegator's "no remote passed the capability gate" / "no remotes configured" |
-| `contract` | the CALLER'S contract cannot be placed anywhere, however healthy the fleet | no `output_schema` for a remote placement, a contract past the origin hop (`depth != 0`), a token estimate no advertised ceiling can hold |
+| `contract` | the CALLER'S contract cannot be placed anywhere, however healthy the fleet | no `output_schema` for a remote placement, a contract past the origin hop (`depth != 0`), a token estimate too big for every advertised ceiling — and only when **every** agent lane advertised one, since an absent `agent_ctx_tokens` means the ceiling is unknown, not small |
 
 The delegator counts `infrastructure` + `config` defers into `summary.infrastructure` — plus a
 local placement taken while every configured remote failed its health probe — and
-`local-offload delegate` **exits non-zero** when that count is non-zero (the MCP tool sets
-`isError`): a broken node must not read as a successful run just because its defers were polite.
-`contract` is deliberately excluded: nobody has to touch a box to fix it.
+`local-offload delegate` **exits non-zero** when that count is non-zero: a broken node must not
+read as a successful run just because its defers were polite. `contract` is deliberately
+excluded: nobody has to touch a box to fix it.
+
+The subset of those defers that LOST a subtask (it came back empty because the stack failed it)
+is published separately as `summary.lost_to_stack`, omitted when zero. That is the count the MCP
+tool sets `isError` on, alongside `summary.failed` — a fleet-down run that still delivered every
+subtask stays a quiet success there, while the CLI's exit code still reports it.
 
 A poll `404` is a **denial**, not an answer: it says the node never held the job, so it can never
 earn the "node accepted the job" defer — after the bounded re-dispatches it is a

@@ -1744,6 +1744,18 @@ func runDelegate(args []string) error {
 // BOTH counts are reported when both are non-zero. Returning on the first
 // non-zero class named only the failures, so an operator who fixed the
 // transport error learned about the broken node only on the next run.
+//
+// SURFACE PARITY with mcpserver.delegateIsError (R5-2). The two surfaces must
+// agree on the case that matters — a subtask LOST to the stack (Summary's
+// LostToStack: it produced nothing and a box is why) is loud on both. It used
+// not to be: the MCP flag gated on `Succeeded == 0`, so one of two subtasks
+// eaten by a dead llama-server exited non-zero HERE and returned a clean tool
+// call THERE, and the quiet surface was the one whose caller cannot read an exit
+// code. The one REMAINING difference is deliberate and narrow: a fleet-down
+// LOCAL SUCCESS (Infrastructure with no LostToStack — every subtask delivered,
+// but the fleet failed its probe) exits non-zero here and stays a quiet success
+// there, because an exit code sits beside the printed results while
+// IsError:true tells a model its work failed.
 func delegateExitErr(sum delegate.Summary) error {
 	var parts []string
 	if sum.Failed > 0 {

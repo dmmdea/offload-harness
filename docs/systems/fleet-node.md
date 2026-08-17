@@ -173,7 +173,7 @@ implications.
 ## Security and privacy notes
 
 The **media** contract is unauthenticated and assumes a trusted network — in practice a tailnet.
-That assumption is acknowledged by the explicit `--listen-trusted-network` flag. Since 0.63.0
+That assumption is acknowledged by the explicit `--listen-trusted-network` flag. Since 0.65.0
 the **agent lane** is the deliberate exception: bearer-gated when `fleet_auth_token` is set,
 refused outright beyond loopback without one, because it executes caller-supplied agent
 contracts rather than renders (see [The agent task](#the-agent-task-task_type-agent) and
@@ -298,7 +298,7 @@ and a node several releases behind gets debugged against known-fixed bugs.
 
 ## The agent task (`task_type: "agent"`)
 
-Since 0.63.0 a node can execute a **delegation contract**: a self-contained sub-agent task it
+Since 0.65.0 a node can execute a **delegation contract**: a self-contained sub-agent task it
 runs with its own local `agent.Build` loop — read-only over the contract's materialized context
 docs, no write/run/fetch/github capability, no delegate tool — and answers with a versioned
 result. Decisions and rationale:
@@ -309,7 +309,7 @@ surfaces) lives in `internal/delegate` and is summarized in
 
 The task is advertised only when all three hold (`fleetnode.AgentLaneAdmissible`):
 `fleet_agent_enabled` is true (explicit operator opt-in — default false, and the health payload
-is byte-identical to a pre-0.63 node when off, pinned by test), an agent seat resolves (config
+is byte-identical to a pre-0.65 node when off, pinned by test), an agent seat resolves (config
 `agent_model`, else the workhorse `model`), and the lane is safely reachable (loopback
 listener, or `fleet_auth_token` set).
 
@@ -375,7 +375,7 @@ remote reasoning is quarantined from the caller's context by construction.
 | `stop_reason` | string | The loop's stop reason. |
 | `deferred` | bool | True = the node ran and honestly could not complete the contract. **A defer is a success shape at the job level**: the job lands `done`, never `error` — `error` is reserved for internal wiring bugs (mirrors the cascade's defer semantics). |
 | `reason` | string | Why it deferred (shapes below). |
-| `defer_class` | string | The machine-branchable WHY: `abstention` \| `budget` \| `infrastructure` \| `config` \| `contract`. Additive and `omitempty` — a pre-0.63 node emits no class, and readers must treat empty as *unknown*, never as abstention. |
+| `defer_class` | string | The machine-branchable WHY: `abstention` \| `budget` \| `infrastructure` \| `config` \| `contract`. Additive and `omitempty` — a pre-0.65 node emits no class, and readers must treat empty as *unknown*, never as abstention. |
 | `wall_ms` | int | Node-observed wall time. |
 | `tokens_out` | int | Re-pack completion tokens, when a structured result was produced. |
 
@@ -415,16 +415,24 @@ More shapes originate on the **delegator**, not the node:
 - `route=remote: no remote passed the capability gate (none is both agent-enabled and
   roster-resident)` — class `config`; with health-probe failures alongside it the probe errors are
   appended and the class becomes `infrastructure`.
-- `route=remote: the N agent-enabled remote(s) advertise no context ceiling (agent_ctx_tokens is
-  unset or 0 …)` — class `config`. `agent_ctx_tokens` is `omitempty` on the wire and an operator
-  sets it on the node (a pre-0.63 peer never sends it at all), so a ceiling nobody advertised is a
-  node verdict, never a statement about the caller's contract.
+- `route=remote: M of N agent-enabled remote(s) advertise no context ceiling (agent_ctx_tokens is
+  unset or 0 on <node ids> …)` — class `config`. `agent_ctx_tokens` is `omitempty` on the wire and
+  an operator sets it on the node (a pre-0.65 peer never sends it at all), so a ceiling nobody
+  advertised is a node verdict, never a statement about the caller's contract. The test is
+  **per lane, not fleet-wide**: ANY lane that advertised nothing produces this verdict, and the
+  message names those nodes because the fix is on those boxes. A silent lane's ceiling is
+  UNKNOWN, not small — it may be a 128k machine — so no ctx-fit sentence may be spoken over a
+  fleet containing one. (An earlier form keyed off the roomiest ceiling in the fleet, a MAX, so
+  one upgraded node supplied a ceiling on behalf of every peer that had published none, and the
+  mixed fleet a staggered rollout produces still got a quiet `contract` verdict quoting a
+  number the silent node never sent.)
 - `route=remote: all N configured remote(s) failed the health probe: …` — class
   `infrastructure`; `route=remote: no remote fleet nodes are configured …` — class `config`.
 - The **contract-side** gate rejections — no `output_schema`, a contract already past the origin
   hop, a token estimate no advertised ceiling can hold — class `contract`, **but only when the
   node side is positively established as fine**: every configured remote answered its health
-  probe, at least one offers the agent lane, and that lane advertises a real ceiling. Otherwise
+  probe, at least one offers the agent lane, and EVERY such lane advertises a real ceiling for the
+  contract to be too big for (one silent lane is enough to make the class loud). Otherwise
   the class is the loud one and the reason names both causes. The class was introduced in the
   round-3 review (`config` counts as a broken stack, so a caller's own contract mistake exited
   non-zero and accused a healthy node) and the round-4 review found the mirror defect: the
@@ -439,7 +447,9 @@ misconfigured node must not read as a successful run. `contract` deliberately is
 failing its health probe** (`route=auto`, local GPU busy): the placement is right and the work
 runs, but `route=remote` exited non-zero on that identical fleet state while `route=auto`
 discarded it, so a fleet down for a week read green forever. That same case is why the MCP tool's
-`isError` is NOT the exit code's rule — see [coding-agent](coding-agent.md#delegation-surfaces).
+`isError` is NOT the exit code's rule — it fires on `summary.failed` plus `summary.lost_to_stack`
+(the defers that LOST a subtask, published separately for exactly this reason) rather than on the
+whole of `summary.infrastructure` — see [coding-agent](coding-agent.md#delegation-surfaces).
 
 ### Auth (v1 scope: the agent lane only)
 

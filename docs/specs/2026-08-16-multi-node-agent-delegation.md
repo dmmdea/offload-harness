@@ -18,7 +18,7 @@
 - **Additive + reversible:** every existing path (media fleet, local agent_run, cascade) must behave byte-identically when the new config keys are absent. Pinned by tests.
 - **Hop limit 1:** a remotely-executed agent NEVER gets the delegate tool. Enforced structurally (tool not registered when depth>0), not by prompt.
 - **No new deps.** Go stdlib + existing internals only.
-- **Version 0.63.0** on completion (minor: new capability, additive). Bump ritual: VERSION + main.go const + .printing-press.json + CHANGELOG in one commit; `go test -count=1 .` after, unpiped.
+- **Version 0.65.0** on completion (minor: new capability, additive). Bump ritual: VERSION + main.go const + .printing-press.json + CHANGELOG in one commit; `go test -count=1 .` after, unpiped.
 - **Do NOT build (research-killed, do not resurrect):** llama.cpp RPC/exo tensor distribution · A2A protocol adoption (steal its state *semantics* only) · MCP-tasks node-to-node wire · durable-execution/queue clusters · learned routers · cross-machine speculative decoding · weak-node-as-judge · voting ensembles · worker re-delegation.
 - **Tier matrix:** arc 1 adds NO model seats — no matrix edit. (The Lenovo agent-seat MODEL is arc 2's decision; this build binds whatever `agent_model` the tier config names, today `offload-e4b`.)
 
@@ -184,7 +184,7 @@ Hard gate for a REMOTE placement (every condition must hold): remote `AgentEnabl
 
 ### S5. Verification, docs, deploy
 
-E2E acceptance on the REAL fleet (Qube delegator → Lenovo node): a schema-outputting research subtask over inline context docs; assert structured output validates, placement log correct, defer path fires when the contract exceeds ctx, auth rejection fires without token, byte-identical media fleet behavior with keys absent. Docs updated same PR: `docs/systems/fleet-node.md`, `docs/systems/coding-agent.md`, `docs/FLEET-NODE.md` (contract + result wire tables), `docs/OPERATOR-GUIDE.md` (enable recipe), new ADR `0023-agent-lane-tailnet-auth-and-locality.md`. CHANGELOG + 0.63.0 bump. Deploy: Qube bin + Lenovo binary/render-tree (established pattern) + Lenovo `fleet_agent_enabled: true` + token on both + service restart + live e2e re-run.
+E2E acceptance on the REAL fleet (Qube delegator → Lenovo node): a schema-outputting research subtask over inline context docs; assert structured output validates, placement log correct, defer path fires when the contract exceeds ctx, auth rejection fires without token, byte-identical media fleet behavior with keys absent. Docs updated same PR: `docs/systems/fleet-node.md`, `docs/systems/coding-agent.md`, `docs/FLEET-NODE.md` (contract + result wire tables), `docs/OPERATOR-GUIDE.md` (enable recipe), new ADR `0023-agent-lane-tailnet-auth-and-locality.md`. CHANGELOG + 0.65.0 bump. Deploy: Qube bin + Lenovo binary/render-tree (established pattern) + Lenovo `fleet_agent_enabled: true` + token on both + service restart + live e2e re-run.
 
 ---
 
@@ -277,10 +277,10 @@ E2E acceptance on the REAL fleet (Qube delegator → Lenovo node): a schema-outp
 
 **Files:**
 - Create: `docs/architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md` (never-cloud carve-out reasoning; tailnet=WireGuard transport, bearer token, hop limit, quarantine; quality-first placement)
-- Modify: `docs/systems/fleet-node.md`, `docs/FLEET-NODE.md` (contract/result wire tables, task_type agent, auth), `docs/systems/coding-agent.md` (delegate tool), `docs/OPERATOR-GUIDE.md` (enable recipe both nodes), `CHANGELOG.md`, `VERSION`→0.63.0, `main.go` const, `.printing-press.json`
+- Modify: `docs/systems/fleet-node.md`, `docs/FLEET-NODE.md` (contract/result wire tables, task_type agent, auth), `docs/systems/coding-agent.md` (delegate tool), `docs/OPERATOR-GUIDE.md` (enable recipe both nodes), `CHANGELOG.md`, `VERSION`→0.65.0, `main.go` const, `.printing-press.json`
 - Run docs lint test (`TestDocsLint`, `TestTierDocsAreCurrent`), `go test -count=1 .` after bump (ritual), full `go test ./... -count=1`
 
-- [ ] All green; two commits: `docs: multi-node agent delegation` + `chore: bump version to 0.63.0`.
+- [ ] All green; two commits: `docs: multi-node agent delegation` + `chore: bump version to 0.65.0`.
 
 ### Task 8: live E2E on the real fleet + deploy (execution gated on operator's standing merge-when-green grant)
 

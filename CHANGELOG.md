@@ -12,6 +12,47 @@ Multi-node sub-agent delegation. Released as 0.65.0 rather than 0.63.0 because a
 concurrent session shipped 0.63.0 and 0.64.0 from the same repo while this branch
 was in adversarial review; the entries below were written across that review cycle.
 
+### Fixed — delegation lane, round-5 adversarial review (an unknown ceiling is not a small one; a lost subtask is always loud)
+
+A fifth round found both remaining defects in the same seam round 4 restructured — the boundary
+between "the node side is fine" and "the caller is at fault" — and both were cases where a
+statement about ONE node was quietly extended to cover another.
+
+- **The ctx-fit guard was FLEET-WIDE where its own doc said per-lane, so an unadvertised ceiling
+  still produced a quiet contract verdict — and a fabricated claim about the silent node.** The
+  round-4 fix rejected the ctx-fit contract class when `roomiest == 0`, but `roomiest` is a
+  fleet-wide MAX: one node advertising a real ceiling supplied it for every peer advertising none,
+  so a mixed fleet (`agent_ctx_tokens` 4096 and unset) published `defer_class: "contract"`,
+  "the roomiest agent-enabled remote advertises 4096", exit 0 — the operator sent to rewrite a
+  contract when the fix was to set one field on the silent box. Worse, the sentence asserted a
+  ceiling for a node that had published none: docs define an absent `agent_ctx_tokens` as
+  **unknown**, not small, and it may be a 128k machine — the same authoring-a-claim-on-a-node's-
+  behalf defect as the invented 404 denial two rounds earlier. This is the documented rollout
+  state, since the field is `omitempty` and a peer predating the lane never sends it. The rule is
+  now per lane: any lane with no advertised ceiling yields the LOUD `config` verdict and the reason
+  NAMES those nodes, and the ctx-fit contract branch requires that EVERY lane supplied a real
+  number to be too big for. The round-4 test covering this was itself vacuous — it exercised only
+  the all-zero fleet and passed with the guard deleted; it now carries the mixed-fleet row and
+  asserts that no ceiling verdict is spoken over a fleet with a silent lane.
+- **A subtask genuinely lost to a broken box was silenced on the MCP surface whenever a sibling
+  succeeded.** `Summary.Infrastructure` conflates a local placement that SUCCEEDED while the fleet
+  was down with a defer that produced NOTHING, and the round-4 `isError` rule gated on
+  `Succeeded == 0` — justified only by the first, but silencing the second too. Two subtasks, one
+  finished and one eaten by a dead llama-server, returned to the calling model as a clean tool
+  call, while `local-offload delegate` exited NON-ZERO on the identical run: the two surfaces
+  disagreed, and the quiet one belonged to the caller with no exit code to read. **New
+  `summary.lost_to_stack`** counts exactly the subtasks that came back empty because of the stack
+  (published, `omitempty`, so a healthy run is byte-identical), and `isError` is now
+  `failed > 0 || lost_to_stack > 0`. The original motivation is untouched — a fleet-down run that
+  delivered every subtask is still a quiet success on MCP — and the surfaces now agree wherever
+  work was lost. (`deferred > 0 && infrastructure > 0` is NOT a safe substitute: a contract-classed
+  defer beside a fleet-down local success satisfies it with nothing lost.)
+- **Eight "since 0.63.0" claims in shipped docs, plus the spec's acceptance item, were falsified by
+  the 0.65.0 renumbering** — and main shipped a real, unrelated 0.63.0, so a reader following them
+  landed in the wrong changelog section. Corrected across `docs/FLEET-NODE.md`,
+  `docs/systems/{fleet-node,coding-agent,offload-pipeline}.md`, ADR 0023 and the spec, along with
+  the `pre-0.63` spellings of the same boundary. Main's own 0.63.0 section is untouched.
+
 ### Fixed — delegation lane, round-4 adversarial review (quiet classes now require positive evidence)
 
 A fourth review round found that every previous round's new defects clustered in one place: the
@@ -183,7 +224,7 @@ no transcript ever crosses the wire. Decisions recorded in ADR 0023.
   eligible remote). The delegator counts `infrastructure` + `config` defers into
   `summary.infrastructure` and the `delegate` CLI **exits non-zero** on it: a node with a dead
   llama-swap defers every subtask, and that must not read as a clean run. Additive and
-  `omitempty` — a pre-0.63 node's empty class means *unknown*, never abstention.
+  `omitempty` — a pre-0.65 node's empty class means *unknown*, never abstention.
 - **Delegator surfaces**: MCP `agent_delegate` (registration gated on
   `agent_delegation_enabled`, so tools/list is byte-identical when off; summary-first
   response) and the `local-offload delegate` CLI verb. Both accept `context_paths` inlined
