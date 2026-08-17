@@ -211,3 +211,94 @@ func TestSampledModeBlindSpotIsDocumentedByTest(t *testing.T) {
 	}
 	t.Log("CONFIRMED known limitation: sampled mode cannot see content outside its windows — this is why it is opt-in and never the default")
 }
+
+// --- Ident.Unchanged: the TOCTOU detector itself ---
+//
+// These exist because the detector had NO direct coverage. The pipeline's gate
+// tests inject a `mediaUnchanged` seam, so they exercise what the pipeline does
+// with the answer but never the logic that produces it — replacing the whole of
+// Unchanged with `return true` left the entire suite green. That is the same
+// shape as the round-3 finding on this branch ("the gate tests never constructed
+// a Pipeline"), one layer down: a load-bearing claim in CHANGELOG.md and
+// docs/systems/offload-pipeline.md ("the file is re-stat'ed after the consuming
+// read and compared against what the digest saw") rested on untested code.
+
+func TestUnchangedIsTrueForAnUntouchedFile(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, "steady.wav", []byte("bytes that do not move"))
+	id, err := Digest(p, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !id.Unchanged(p) {
+		t.Fatal("Unchanged reported a difference on a file nothing touched — every call would be treated as unidentifiable and nothing would ever cache")
+	}
+}
+
+func TestUnchangedDetectsASizeChange(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, "grow.wav", []byte("short"))
+	id, err := Digest(p, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The append case: the digest covers a prefix, ffmpeg would read more.
+	if err := os.WriteFile(p, []byte("short plus considerably more"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if id.Unchanged(p) {
+		t.Fatal("a file that grew after hashing passed the re-stat — the transcript of the LONGER audio would be stored under sha256(prefix)")
+	}
+}
+
+func TestUnchangedDetectsAnMtimeChangeAtEqualSize(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, "swap.wav", []byte("take one"))
+	id, err := Digest(p, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same LENGTH, different content — the replacement case the digest exists to
+	// catch, distinguished here only by mtime.
+	if err := os.WriteFile(p, []byte("take two"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Force a distinct mtime: the (size, mtime) detector is explicitly documented
+	// as blind to a same-size overwrite inside one tick, so pinning it is what
+	// makes this test about the comparison rather than about clock granularity.
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(p, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if id.Unchanged(p) {
+		t.Fatal("a same-size replacement with a moved mtime passed the re-stat — take one's transcript would be cached under take two's digest")
+	}
+}
+
+func TestUnchangedIsFalseWhenTheFileIsGone(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, "vanish.wav", []byte("here for now"))
+	id, err := Digest(p, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if id.Unchanged(p) {
+		t.Fatal("a deleted file passed the re-stat — a failed stat must never read as agreement")
+	}
+}
+
+func TestUnchangedIsFalseOnAnIdentWithNoIdentity(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, "real.wav", []byte("a real file"))
+	// The zero Ident is what Digest returns alongside an error. It must never
+	// validate against anything: `Ident{}.Unchanged(p)` returning true would make
+	// a failed digest look like a confirmed identity and re-open the path-keyed
+	// false hit this package exists to remove.
+	var zero Ident
+	if zero.Unchanged(p) {
+		t.Fatal("the zero Ident validated against a real file — a failed digest would be treated as a confirmed identity")
+	}
+}
