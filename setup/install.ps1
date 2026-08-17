@@ -1074,6 +1074,17 @@ if ($tplBackend -in @('dual-cuda', 'cuda-resident', 'dual-blackwell') -and $back
 $agentCtxTokens = $pp.agent_ctx   # Deliverable 4 (summary)
 
 if ($RenderOut) { $yamlDest = $RenderOut } else { $yamlDest = Join-Path $HOME_DIR 'llama-swap.yaml' }
+# GATED SEATS: llama-swap model id -> does this tier enable it. Consumed by the Step 6
+# SKIP test below as a CONTENT probe. Only explicitly-gated seats belong here: `Render`
+# REFUSES a gate set against a template that defines no such entry, so "gate on" always
+# implies the entry exists in a CURRENT render, which is what makes absence a reliable
+# staleness signal. Do NOT add the 26B agent here - it is legitimately absent from the
+# win-cpu and win-cuda-resident templates while those backends still set include_26b,
+# so probing for it would force a re-render on every single install run.
+$gatedSeats = [ordered]@{
+  'qwen3.8-27b'      = $includeQwen38
+  'qwen3.5-4b-agent' = $includeQwen354B
+}
 # -RenderOnly always renders fresh: drop any stale output so the Step SKIP test can't short-circuit it.
 if ($RenderOnly -and (Test-Path $yamlDest)) { Remove-Item $yamlDest -Force }
 Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $profileId } else { '(defaults)' }) ctx=$(if ($pp.known) { $pp.ctx } else { 'template' }) kv=$(if ($pp.known) { $pp.kv_k } else { 'template' }) 26b=$(if ($pp.known) { $pp.moe_mode } else { 'template' }))" `
@@ -1081,7 +1092,15 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     (Test-Path $yamlDest) -and
     -not (Select-String -Path $yamlDest -Pattern '__(LLAMA_BIN|MODELS|NTHREADS|CTX|KV_K|KV_V|FLASH_ATTN|MOE_26B|M26_ALT|M26_AND|Q38_ALT|Q38_AND)__' -Quiet) -and
     -not (Select-String -Path $yamlDest -SimpleMatch -Pattern $llamaDir -Quiet) -and   # backslash path = stale pre-R3.6 render
-    (($tplBackend -ne 'vulkan') -or (Select-String -Path $yamlDest -SimpleMatch -Pattern 'GGML_VK_VISIBLE_DEVICES' -Quiet))   # J1: vulkan render without the device pin = stale pre-0.22.19 render
+    (($tplBackend -ne 'vulkan') -or (Select-String -Path $yamlDest -SimpleMatch -Pattern 'GGML_VK_VISIBLE_DEVICES' -Quiet)) -and   # J1: vulkan render without the device pin = stale pre-0.22.19 render
+    # A gated seat this tier enables but the rendered yaml does not contain = that yaml
+    # PREDATES the seat. Without this probe an UPGRADE on an existing box downloads the
+    # weights in Step 5 and then SKIPs the render here, so the installer prints all-OK
+    # while the agent lane silently keeps its old seat and the new weights sit unused.
+    # Adding the seat's __TOKEN__ pair to the regex above does NOT catch this: Render
+    # refuses to emit a leftover token, so a rendered file can never contain one - that
+    # list only detects hand-edited files. This has to be a CONTENT probe.
+    (@($gatedSeats.GetEnumerator() | Where-Object { $_.Value -and -not (Select-String -Path $yamlDest -SimpleMatch -Pattern $_.Key -Quiet) }).Count -eq 0)
   } `
   {
     # DELEGATED to `local-offload install render` (ADR 0021). This script used to
