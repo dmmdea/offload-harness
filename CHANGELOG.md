@@ -6,7 +6,7 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.69.0] - 2026-08-17
+## [0.70.0] - 2026-08-17
 ### Added — `agent_profile`: a per-tier DEFAULT tool profile for the agent loop
 Closes the standing question "should a non-general agent profile be enforced as a per-tier
 config default?" The measured answer is yes, as a **caller-overridable** default.
