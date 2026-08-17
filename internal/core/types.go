@@ -92,12 +92,20 @@ const (
 	// shells out to the configured script, like TaskRunGraph shells out to
 	// comfy-run-graph.mjs. Returns pipeline-defined result fields.
 	TaskPipelineJob TaskType = "pipeline-job"
+	// TaskAgentRun executes a self-contained delegation contract (agentwire.go
+	// AgentContract) with the node's OWN local agent.Build loop: read-only over
+	// the contract's materialized ContextDocs, no delegate tool (hop limit 1),
+	// planner = this node's agent_model. Its own branch in pipeline.Run (no
+	// prompt cascade — the contract IS the task). Returns a marshaled
+	// AgentWireResult; a defer is a SUCCESS shape (job done, contract unmet),
+	// mirroring the cascade's defer semantics.
+	TaskAgentRun TaskType = "agent"
 )
 
 // Valid reports whether t is a known task type.
 func (t TaskType) Valid() bool {
 	switch t {
-	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskGenerateSVG, TaskGenerateVideo, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskRunGraph, TaskPipelineJob:
+	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskGenerateSVG, TaskGenerateVideo, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskRunGraph, TaskPipelineJob, TaskAgentRun:
 		return true
 	}
 	return false
