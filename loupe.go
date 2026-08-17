@@ -109,6 +109,16 @@ type statsReport struct {
 	// Always present so a consumer can tell "memo unavailable" from "memo idle".
 	EmbedMemo embedMemoReport `json:"embed_memo"`
 
+	// --- gate R2-14: which (task,tier) cells are reliable ENOUGH to quote? ---
+	// Report half only. The routing half is deliberately not built: at this call volume most
+	// cells hold under a sample a day, and a mis-ordered escalation rung is a quality
+	// regression on a quality-first stack.
+	Reliability ReliabilityReport `json:"reliability"`
+
+	// --- gate R2-16: does any NON-OBSOLETE failure class recur often enough to act on? ---
+	// Carries its own verdict so the gate cannot be quietly reinterpreted later.
+	Atlas AtlasReport `json:"failure_atlas"`
+
 	// --- routing health ---
 	ByTask       []statRow `json:"by_task,omitempty"`
 	ByTier       []statRow `json:"by_tier,omitempty"`
@@ -306,6 +316,12 @@ func runLoupe(args []string) error {
 	rep.CacheHitRate = rate(rep.CacheHits, len(rows))
 	rep.DeferRate = rate(rep.Deferred, len(rows))
 	rep.EscalateRate = rate(rep.Escalated, len(rows))
+
+	// Built AFTER SpanDays exists: the atlas gate is a per-MONTH recurrence, so it needs the
+	// observation window. Passing a zero span makes it report insufficient_data rather than
+	// dividing by a guess.
+	rep.Reliability = buildReliability(rows)
+	rep.Atlas = buildAtlas(rows, rep.SpanDays)
 
 	// Duplicate rate is computed ONLY over rows that carry an identity, so the
 	// pre-Phase-0.1 backlog cannot silently dilute it toward zero and make a real
@@ -518,6 +534,38 @@ func emitStats(rep statsReport, asJSON bool) error {
 		p("")
 		p("EXEMPLARS  (%d injections)", rep.ExemplarInjections)
 		printRows(p, "  most-injected", rep.TopExemplars)
+	}
+	// R2-14. Cells below the sample floor print their COUNT and the word
+	// insufficient_data rather than a rate — a 2-sample cell showing "100.0%" is how a
+	// report talks somebody into trusting noise.
+	if len(rep.Reliability.Cells) > 0 {
+		p("")
+		p("RELIABILITY  (report only — never used for routing; >=%d samples to quote a rate)", rep.Reliability.MinSamples)
+		p("  %d cell(s) measured, %d suppressed as insufficient_data", rep.Reliability.CellsMeasured, rep.Reliability.CellsSuppressed)
+		for _, c := range rep.Reliability.Cells {
+			if c.SuccessRate != nil {
+				p("  %-22s %-18s n=%-5d success %.1f%%  (defer %d, escalate %d)", c.Task, c.Tier, c.N, *c.SuccessRate, c.Deferred, c.Escalated)
+			} else {
+				p("  %-22s %-18s n=%-5d insufficient_data", c.Task, c.Tier, c.N)
+			}
+		}
+	}
+	// R2-16. The verdict line is the deliverable: this view exists to close itself.
+	if rep.Atlas.TotalDefers > 0 {
+		a := rep.Atlas
+		p("")
+		p("FAILURE ATLAS  (gate: a NON-OBSOLETE class recurring >=%.0f/month)", a.GatePerMonth)
+		p("  %d defers total — %d live, %d obsolete (pre-131k context-overflow class, excluded from the gate)", a.TotalDefers, a.LiveDefers, a.ObsoleteDefers)
+		for _, c := range a.Classes {
+			tag := ""
+			if c.Obsolete {
+				tag = "  [obsolete — cannot recur at current context sizes]"
+			} else if c.ClearsGate {
+				tag = "  [CLEARS GATE]"
+			}
+			p("  %-6d %5.1f/mo  %s%s", c.Count, c.PerMonth, truncReason(c.Reason), tag)
+		}
+		p("  => %s", a.Verdict)
 	}
 	if len(rep.ContextBuckets) > 0 {
 		p("")
