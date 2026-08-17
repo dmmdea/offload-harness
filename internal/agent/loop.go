@@ -106,6 +106,21 @@ type Result struct {
 	// per run instead of inferred from outcomes.
 	TokenCal TokenCalReport
 
+	// Prefill reports the SERVER's own prefill accounting for this run
+	// (memory-frontier T2-B, re-aimed): how much of each step's prompt llama.cpp
+	// served from its KV cache versus had to prefill again.
+	//
+	// It exists to DECIDE whether prefix-stability work is worth doing here. The
+	// ledger measured the text cascade and killed the original target — a median
+	// 177-token prompt, ~12 s/day of prefill in total. But the ledger never sees
+	// the agent loop, which re-sends a long system prompt plus tool schemas plus a
+	// growing transcript on every single step. This is the missing measurement.
+	//
+	// Always populated; read Basis before the rate. A run against a backend that
+	// reports no timings yields ObservedSteps 0 and Basis "insufficient_data"
+	// rather than a fabricated 0% reuse.
+	Prefill PrefillReport
+
 	// TokenizerPath reports which drop rung the compaction ladder is on at the
 	// end of the run — the visibility twin of ctx_window for the window probe
 	// (a fail-open feature that can be permanently inert with zero evidence is
@@ -211,6 +226,13 @@ type Loop struct {
 	// transcripts be rejected while the ladder declined to compact (ADR 0017).
 	tokenCal   TokenCalibrator
 	tokenCalOn bool // OFF by default — see WithTokenCalibration
+	// prefill accumulates the server's own prefill accounting across the run
+	// (memory-frontier T2-B). Unlike tokenCal this is NOT gated behind a flag:
+	// it only sums numbers the backend already returned, performs no work when
+	// Serve is nil, and its whole purpose is to be present on ordinary runs so
+	// the decision it informs is made from real traffic rather than a special
+	// measurement mode nobody remembers to switch on.
+	prefill PrefillStats
 	system     string
 	mem        Memory
 	worktree   string // RW worktree root for durable working memory (AGENT.md + .agent/plan.md); "" disables it
@@ -687,7 +709,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
-			return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), TokenizerPath: l.tokPath(), Effects: effects}, err
+			return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects}, err
 		}
 		specs := l.specs
 		if len(disabledTools) > 0 {
@@ -788,7 +810,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				comp, err = l.client.Chat(ctx, msgs, specs, l.maxTokens)
 			}
 			if err != nil {
-				return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), TokenizerPath: l.tokPath(), Effects: effects}, err
+				return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects}, err
 			}
 		}
 		// Learn from the response: estimateTokens(msgs) is what we thought the
@@ -801,6 +823,14 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		if l.tokenCalOn && comp.Serve != nil {
 			l.tokenCal.Observe(estimateTokens(msgs), comp.Serve.UsagePromptTokens)
 		}
+		// T2-B instrument. UNGATED on purpose, unlike the calibrator above: it only
+		// sums numbers the backend already returned, and an instrument that must be
+		// switched on measures a special mode rather than real traffic. It is
+		// mutex-guarded because --serve shares one *Loop across concurrent handlers,
+		// which is the very race that gated the calibrator. Observe ignores a nil
+		// Serve, so a backend that reports no timings yields "insufficient_data"
+		// rather than a fabricated 0% reuse.
+		l.prefill.Observe(comp.Serve)
 		msgs = append(msgs, comp.Msg)
 
 		// The model is finished when it stops REQUESTING TOOLS. Key on the
@@ -809,7 +839,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// finish_reason "stop", so trusting finish_reason drops the tool call
 		// and returns an empty answer.
 		if len(comp.Msg.ToolCalls) == 0 {
-			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), TokenizerPath: l.tokPath(), Effects: effects}
+			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects}
 			if l.batchJudge {
 				res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 			}
@@ -840,7 +870,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			msgs = append(msgs, Msg{Role: "tool", ToolCallID: call.ID, Content: content, IsError: isErr})
 		}
 	}
-	res := Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), TokenizerPath: l.tokPath(), Effects: effects}
+	res := Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects}
 	if l.batchJudge {
 		res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 	}
