@@ -255,8 +255,10 @@ type cacheVal struct {
 	//
 	// That is now expressed in the KEY — see tierKeyspaceTag — because guarding
 	// only the read left both paths writing the same entry and ping-ponging it.
-	// This field survives as defence in depth for a hand-crafted or externally
-	// written entry; it is not reachable from any production write path.
+	// The field is still WRITTEN on every RunTier cache Put; what is unreachable
+	// from production is a MISMATCH, since the keyspace already separates the two
+	// paths. It survives as defence in depth against a hand-crafted or externally
+	// written entry.
 	Model string `json:"model,omitempty"`
 	// InLoop records that this entry was produced by the agent loop's in-loop
 	// offload (T2-D), whose generation is deliberately never costed in the
@@ -3623,9 +3625,10 @@ func (p *Pipeline) RunTier(ctx context.Context, req core.Request, model string) 
 		return core.Result{}, false
 	}
 	feat := featurize(req.Task, req.Input)
-	// T2-D / T2-A: the key is built by cacheKeyFor, the SAME constructor Run uses,
-	// so this path cannot drift back to a weaker key. Two corrections over the
-	// former hand-rolled cache.Key call here:
+	// T2-D / T2-A: the key is built by cacheKeyForTier, which WRAPS the same
+	// cacheKeyFor constructor Run uses inside RunTier's own keyspace — so the
+	// ingredient list has one source and cannot drift, while the two paths can
+	// never collide. Two corrections over the former hand-rolled cache.Key call:
 	//
 	//  1. It keys on the ACTUAL TIER (model), not p.cfg.Model. RunTier pins one
 	//     named tier, so its answer belongs to that tier; keying on the primary

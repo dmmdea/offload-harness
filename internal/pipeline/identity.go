@@ -61,7 +61,7 @@ func cacheKeyFor(task core.TaskType, orig, paramsKey, model string, built tasks.
 
 // tierKeyspaceTag separates RunTier's entries from Run's.
 //
-// WHY A SEPARATE KEYSPACE RATHER THAN A SHARED ONE WITH A GUARD
+// # WHY A SEPARATE KEYSPACE RATHER THAN A SHARED ONE WITH A GUARD
 //
 // Run and RunTier want different things from an entry. Run keys on the PRIMARY
 // model whatever tier answered, because the cascade is an internal detail of one
@@ -85,17 +85,17 @@ func cacheKeyFor(task core.TaskType, orig, paramsKey, model string, built tasks.
 const tierKeyspaceTag = "keyspace=runtier"
 
 // cacheKeyForTier is cacheKeyFor in RunTier's own keyspace.
+//
+// COMPOSED, not re-listed. An earlier version enumerated all seven ingredients a
+// second time — which silently undid the whole reason cacheKeyFor is a named
+// function (see its doc): an ingredient added there would not have reached
+// RunTier's key, would have compiled clean, and would have passed every test.
+// That is precisely the drift cacheKeyFor exists to make impossible, reintroduced
+// on a live path. Wrapping keeps one source of ingredients.
+//
+// shots is nil because RunTier injects no exemplars.
 func cacheKeyForTier(task core.TaskType, orig, paramsKey, model string, built tasks.Built) string {
-	return cache.Key(
-		tierKeyspaceTag,
-		string(task),
-		orig,
-		paramsKey,
-		model,
-		built.Grammar,
-		templateCacheTag(built.System, built.Grammar, built.User, orig),
-		exemplarCacheTag(nil), // RunTier injects no exemplars
-	)
+	return cache.Key(tierKeyspaceTag, cacheKeyFor(task, orig, paramsKey, model, built, nil))
 }
 
 // idHashLen bounds a recorded fingerprint. 16 hex chars = 64 bits: collision

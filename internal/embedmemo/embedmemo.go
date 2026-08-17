@@ -3,18 +3,29 @@
 //
 // WHY THIS EXISTS (two payoffs, the second larger than the first):
 //
-//  1. Embedding is a pure function of (model, text). The harness re-embeds the
-//     same strings by construction. The two real sources, both wired:
-//     the shadow-label drain (re-embeds the SAME stored inputs on every run, and
-//     re-scores the same reference summaries across every item), and the kNN
-//     pre-filter (embeds each request input; off unless knn_prefilter_enabled).
-//     Recomputing a deterministic function is pure waste.
+//  1. Embedding is a pure function of (model, text), so recomputing it is pure
+//     waste. Where that recomputation actually happens, stated narrowly because
+//     two earlier drafts of this list were wrong:
 //
-//     Deliberately NOT claimed: exemplar selection. internal/exemplars retrieves
-//     lexically (tokenise + an inverted index) and contains no embedder at all,
-//     so it is not a memo consumer. An earlier draft of this doc listed it; that
-//     was wrong, and a false claim about which paths are covered is worse than a
-//     shorter list.
+//     - The kNN pre-filter embeds every request input. Repeat inputs are real
+//     (the ledger's duplicate-input rate is what T2-A's identity fields exist
+//     to measure), so this is the genuine source — but it is OFF unless
+//     knn_prefilter_enabled, which is false by default.
+//     - The shadow-label drain calls Similar per item, so identical summary text
+//     recurring WITHIN a run hits. Its Embed path is also gated on
+//     knn_prefilter_enabled.
+//
+//     Deliberately NOT claimed, both corrected after review:
+//     - Exemplar selection does not embed at all. internal/exemplars retrieves
+//     lexically (tokenise + an inverted index) and contains no embedder.
+//     - The drain does NOT "re-embed the same stored inputs on every run".
+//     shadow.Drain is destructive — it renames the queue to .draining, reads
+//     it, and removes the claim — so each run consumes a FRESH item set. Only a
+//     crash-recovered claim replays. Nor does it re-score a shared reference
+//     set: Similar compares each item's own entry and escalation summaries.
+//
+//     Being accurate about this matters more than the feature looking good: a
+//     false claim about which paths are covered is worse than a shorter list.
 //
 //  2. The bigger win is not the compute, it is the SWAP. Every seat on this
 //     fleet carries ttl=300, the embedder included, so the first embed after a
@@ -83,11 +94,6 @@ const (
 	recVersion = byte(2)
 	recHeadLen = 1 + 8 + 4 // version + seq + dim
 	nsLen      = 16        // hex chars of the namespace digest
-	// corruptCountFloor is a live-entry count no configuration could produce. It
-	// separates "the operator lowered the cap" (transient, converges) from "the
-	// counter is corrupt" (persistent, absurd), so the first is not reported as a
-	// fault and the second is not silent.
-	corruptCountFloor = 1 << 32
 )
 
 // Per-namespace meta keys. Suffixed with the namespace so two embedders sharing
@@ -113,10 +119,13 @@ const (
 	mkErrRead   = "err_read:"
 	mkErrWrite  = "err_write:"
 	mkDimMiss   = "err_dim:"
-	// mkUnderflow counts times a counter was asked to go below zero. A clamp that
-	// silently normalizes an impossible state erases the evidence of the bug that
-	// produced it — most reachably, a layout change that orphans records the live
-	// namespace never counted.
+	// mkUnderflow counts IMPOSSIBLE bookkeeping states: a counter asked to go below
+	// zero, a live count read back negative, or a count claiming more entries than
+	// the prune order can reach. Deliberately NOT counted: a count merely above the
+	// current cap, which is what lowering embed_memo_max_entries legitimately
+	// produces — counting that fabricated nine permanent faults from one config
+	// edit. Silently normalizing a genuinely impossible state, though, erases the
+	// evidence of the bug that produced it.
 	mkUnderflow = "err_underflow:"
 	// mkLastFault stores the most recent human-readable fault, so the one message
 	// that tells an operator what to DO (e.g. "bump embed_memo_epoch") survives
@@ -154,6 +163,11 @@ type Memo struct {
 	// recorded inside a successful transaction is persisted there and must NOT
 	// also bump an atomic, or it is counted twice — which is how the first version
 	// of the dimension counter reported 8 mismatches for 4 events.
+	//
+	// `stores` is the deliberate exception: mkStores is bumped transactionally in
+	// put, so it is already authoritative. Flush only RESETS the session view of
+	// it, and Stats correspondingly does not fold SessionStores into
+	// LifetimeStores the way it does hits and misses.
 	//
 	// The atomics exist because the faults that matter most cannot be written at
 	// the moment they happen: a failed read or a failed write transaction is
@@ -512,10 +526,22 @@ func (m *Memo) pruneTx(vb, sb, mb *bolt.Bucket) error {
 	if m.maxEntries <= 0 {
 		return nil
 	}
-	n := int(readCounter(mb, mkCount+m.ns))
-	if n <= m.maxEntries {
+	// Read as int64 and validate BEFORE narrowing. A count stored as all-ones
+	// reads back negative, `n <= maxEntries` returns immediately, and prune never
+	// runs again — the store then grows past its cap forever with no signal at
+	// all. A negative count is unambiguously impossible (bumpNS clamps every write
+	// at 0), so flagging it carries no phantom-fault risk.
+	raw := readCounter(mb, mkCount+m.ns)
+	if raw < 0 {
+		_ = m.bumpNS(mb, mkUnderflow, 1)
+		_ = mb.Put([]byte(mkLastFault+m.ns), []byte(fmt.Sprintf(
+			"live-entry counter read %d — negative counts are impossible; the count is corrupt, delete the store to rebuild it", raw)))
 		return nil
 	}
+	if raw <= int64(m.maxEntries) {
+		return nil
+	}
+	n := int(raw)
 	// n comes off disk with no bound. A corrupt counter would otherwise reach the
 	// make() below with a multi-exabyte capacity and panic inside db.Update,
 	// which propagates out through Wrap and kills the process — breaking this
@@ -532,15 +558,12 @@ func (m *Memo) pruneTx(vb, sb, mb *bolt.Bucket) error {
 	// (insert, then prune evicts everything), the memo goes permanently 100% miss,
 	// and every fault counter reads zero.
 	//
-	// The two cases are separable because lowering the cap is TRANSIENT — it
-	// converges within a few puts — while corruption is persistent and absurd in
-	// magnitude. corruptCountFloor is far above any cap a config can express, so
-	// it fires on the second and never on the first.
-	if n > corruptCountFloor {
-		_ = m.bumpNS(mb, mkUnderflow, 1)
-		_ = mb.Put([]byte(mkLastFault+m.ns), []byte(fmt.Sprintf(
-			"live-entry counter read %d, which no configuration can produce — the count is corrupt; delete the store to rebuild it", n)))
-	}
+	// A magnitude threshold was tried and is not enough on its own: a count
+	// corrupted to 1<<20 wipes the namespace just as thoroughly as 1<<40 while
+	// sitting far below any plausible floor. The reliable discriminator is
+	// STRUCTURAL and needs no threshold — see the victim-walk check below, which
+	// compares what the counter claims against what the prune order can actually
+	// reach. The clamp here only bounds the allocation.
 	if lim := m.maxEntries * 2; n > lim {
 		n = lim
 	}
@@ -584,6 +607,18 @@ func (m *Memo) pruneTx(vb, sb, mb *bolt.Bucket) error {
 		if err := sb.Delete(v.seqKey); err != nil {
 			return err
 		}
+	}
+	// STRUCTURAL corruption check, config-independent and threshold-free. The walk
+	// asked for n-target victims; if the prune order could not supply them, the
+	// counter claims more live vectors than the seq bucket can reach. That is
+	// impossible in a consistent store and is exactly the state a corrupt count
+	// produces — at ANY magnitude, which is why this replaces the magnitude floor
+	// that missed everything below it.
+	if want := n - target; len(victims) < want {
+		_ = m.bumpNS(mb, mkUnderflow, 1)
+		_ = mb.Put([]byte(mkLastFault+m.ns), []byte(fmt.Sprintf(
+			"live-entry counter claims %d entries but the prune order holds only %d reachable — the count is corrupt; delete the store to rebuild it",
+			n, len(victims)+target)))
 	}
 	if removed > 0 {
 		return m.bumpNS(mb, mkCount, int64(-removed))
