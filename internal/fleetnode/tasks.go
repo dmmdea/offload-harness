@@ -11,6 +11,7 @@
 package fleetnode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,11 +23,12 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
 // messages). Membership is decided per-config by taskConfigured.
-var fleetTaskOrder = []string{"image-gen", "video-gen", "stt", "audio-gen", "run-graph"}
+var fleetTaskOrder = []string{"image-gen", "video-gen", "stt", "audio-gen", "run-graph", "agent"}
 
 // taskConfigured reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
@@ -43,10 +45,44 @@ func taskConfigured(cfg config.Config, taskType string) bool {
 		return cfg.VoiceGenScript != "" || cfg.MusicGenScript != ""
 	case "run-graph":
 		return cfg.RunGraphScript != ""
+	case "agent":
+		return agentTaskConfigured(cfg)
 	}
 	// Anything else is only "configured" when it is a VALID cfg.Pipelines key
 	// (Task 6): 100% config-driven, so a new pipeline needs no new case here.
 	return pipelineNameConfigured(cfg, taskType)
+}
+
+// agentTaskConfigured gates the fleet "agent" task's advertisement and
+// dispatch (multi-node delegation, Task 4). Three conditions, all required:
+//
+//  1. cfg.FleetAgentEnabled — an explicit operator opt-in, unlike every other
+//     task here (see the config field's doc: the BINDING exists on every tier,
+//     the worker ROLE is a per-box decision), so default-off keeps the
+//     advertisement byte-identical for nodes that never opted in.
+//  2. A resolvable agent seat (config.AgentPlannerModel's fallback chain).
+//     Roster LIVENESS is deliberately NOT checked here — this function feeds
+//     ack-time 400s and health advertisement, both of which must stay cheap
+//     and network-free; whether the seat is actually served is health's
+//     roster-probe job (Task 5) and runAgentTask's own probe at run time.
+//  3. Safe reachability: a loopback listener, or a bearer token for anything
+//     beyond it — the same posture server.go enforces at ack time. Checked
+//     here too so an unsafe lane is never even ADVERTISED: a dispatcher must
+//     not learn "this node does agent work" from health and then eat a 403.
+//     cfg.FleetListen is the config-side view of the bind; an empty value
+//     means the operator never overrode config.Default()'s loopback bind, so
+//     it counts as loopback (netguard.LoopbackAddr itself fails closed on
+//     ""). The ack-time gate keys on the RESOLVED listener and stays
+//     authoritative if a --listen flag ever diverges from the config.
+func agentTaskConfigured(cfg config.Config) bool {
+	if !cfg.FleetAgentEnabled {
+		return false
+	}
+	if cfg.AgentPlannerModel("") == "" {
+		return false
+	}
+	loopback := cfg.FleetListen == "" || netguard.LoopbackAddr(cfg.FleetListen)
+	return loopback || cfg.FleetAuthToken != ""
 }
 
 // pipelineNameConfigured reports whether taskType is one of cfg.Pipelines'
@@ -145,6 +181,8 @@ func BuildRequest(ctx context.Context, cfg config.Config, taskType string, paylo
 		return buildAudioGen(payload)
 	case "run-graph":
 		return buildRunGraph(payload)
+	case "agent":
+		return buildAgentRun(cfg, payload)
 	}
 	// Any other taskType that reaches here (taskConfigured already gated
 	// membership) must be a configured cfg.Pipelines key (Task 6) — 100%
@@ -428,6 +466,82 @@ func materializeRaw(raw json.RawMessage, pattern string) (string, error) {
 		return "", err
 	}
 	return f.Name(), nil
+}
+
+// buildAgentRun translates a fleet "agent" dispatch (multi-node delegation,
+// Task 4) into the core.Request pipeline.runAgentTask executes. Strict path:
+// core.DecodeAgentContract owns decode + Validate + the MaxSteps/TimeoutSec
+// ceilings (roast delta 5 — clamped THERE, never re-clamped here), so every
+// error out of it is an ack-time 400 with the decoder's reason intact.
+//
+// Two Task-4 rules land here on top of the decoder:
+//
+//   - Roast delta 3: remote execution REQUIRES OutputSchema. Without one the
+//     delegator has nothing mechanical to verify before merging weak-node
+//     output, so the contract is refused at ACK — after the network round-trip
+//     and loop budget are spent is too late to discover unverifiability.
+//   - Roast delta 2: depth is DERIVED on the receiving node — anything arriving
+//     over the fleet wire executes at max(1, wireDepth); the wire field is
+//     advisory. The derived value REPLACES contract.Depth before the pipeline
+//     sees it, so no downstream reader can accidentally trust a wire claim of
+//     "origin". In v1 this denies nothing node-side: agent.Build registers no
+//     delegate tool for ANY caller, so the hop limit holds structurally
+//     (tool absent) — the derived depth is carried so the day a delegate tool
+//     exists, its depth>0 registration gate keys off this value, not the wire.
+//
+// Materialization follows buildPipelineJob's discipline: a job-scoped dir
+// under BaseDir()/pipeline-jobs/ (so SweepOrphanedPipelineJobs reclaims a
+// crash's leftovers at startup), context docs written under <dir>/context/,
+// and a cleanup closure that removes the WHOLE dir — the docs live exactly as
+// long as the job. Unlike buildPipelineJob the id is NODE-MINTED (the contract
+// carries none), so os.MkdirTemp is the exclusive create: uniqueness by
+// construction instead of a caller-collision 400.
+func buildAgentRun(cfg config.Config, payload json.RawMessage) (core.Request, func(), error) {
+	noop := func() {}
+	contract, err := core.DecodeAgentContract(bytes.NewReader(payload))
+	if err != nil {
+		return core.Request{}, noop, err
+	}
+	if len(contract.OutputSchema) == 0 {
+		return core.Request{}, noop, fmt.Errorf(
+			"agent contract: output_schema required for remote execution (the delegator must have a mechanical check before merging)")
+	}
+	if contract.Depth < 1 {
+		contract.Depth = 1
+	}
+
+	jobsRoot := filepath.Join(cfg.BaseDir(), "pipeline-jobs")
+	if mkErr := os.MkdirAll(jobsRoot, 0o755); mkErr != nil {
+		return core.Request{}, noop, fmt.Errorf("agent contract: creating pipeline-jobs dir: %w", mkErr)
+	}
+	jobDir, mkErr := os.MkdirTemp(jobsRoot, "agent-*")
+	if mkErr != nil {
+		return core.Request{}, noop, fmt.Errorf("agent contract: creating job dir: %w", mkErr)
+	}
+	contextDir := filepath.Join(jobDir, "context")
+	if mkErr := os.MkdirAll(contextDir, 0o755); mkErr != nil {
+		os.RemoveAll(jobDir)
+		return core.Request{}, noop, fmt.Errorf("agent contract: creating context dir: %w", mkErr)
+	}
+	for _, d := range contract.Context {
+		// Validate held every Name to flat-filename shape (no separators,
+		// colons, or dot-dirs), so this Join cannot escape contextDir.
+		if werr := os.WriteFile(filepath.Join(contextDir, d.Name), []byte(d.Text), 0o644); werr != nil {
+			os.RemoveAll(jobDir)
+			return core.Request{}, noop, fmt.Errorf("agent contract: writing context doc %q: %w", d.Name, werr)
+		}
+	}
+
+	cleanup := func() { os.RemoveAll(jobDir) }
+	return core.Request{
+		Task:  core.TaskAgentRun,
+		Input: contract.Goal,
+		Params: map[string]any{
+			"contract":    contract,
+			"context_dir": contextDir,
+			"job_id":      filepath.Base(jobDir),
+		},
+	}, cleanup, nil
 }
 
 // pipelineJobIDPattern validates job_spec.id: it becomes the materialization
