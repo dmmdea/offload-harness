@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,15 +97,21 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		}
 		return core.Result{OK: true, Data: data, Meta: meta}
 	}
-	deferWire := func(reason string) core.Result {
+	// Every defer names its CLASS (core.DeferClass*): the reason is prose for a
+	// human, the class is what the delegator's exit code and the corpus can
+	// branch on. Passing it as a parameter — rather than inferring it from the
+	// reason string downstream — is what keeps "llama-swap is down" from
+	// arriving as the same quiet green defer as "the model answered wrongly".
+	deferWire := func(class, reason string) core.Result {
 		w := wire
 		w.Deferred = true
+		w.DeferClass = class
 		w.Reason = reason
 		return finish(w)
 	}
 
 	if seat == "" {
-		return deferWire("no agent seat resolvable (agent_model and model both empty)")
+		return deferWire(core.DeferClassConfig, "no agent seat resolvable (agent_model and model both empty)")
 	}
 
 	// The contract's TimeoutSec is the WALL ceiling, enforced as a context
@@ -123,8 +130,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// POSITIVE "roster answered and the seat is absent" defers before any
 	// planner call; an unreachable/empty roster proceeds and lets the loop's
 	// first chat call surface the real transport error.
-	if roster, rerr := swapclient.FetchRoster(cctx, p.cfg.Endpoint, agentRosterProbeTimeout); rerr == nil && roster.Len() > 0 && !roster.Serves(seat) {
-		return deferWire(fmt.Sprintf("agent seat %q is not in the endpoint's served roster", seat))
+	if roster, rerr := swapclient.FetchRoster(cctx, p.cfg.Endpoint, agentRosterProbeTimeout); rerr != nil {
+		// Fail-open is right (the loop's first chat call surfaces the real
+		// transport error with far more detail), but SILENT fail-open is not:
+		// this is the first place a dead or misconfigured endpoint shows, and
+		// swallowing it turns the follow-on loop error into a mystery.
+		log.Printf("agent task: seat roster probe of %s failed (proceeding; the loop will surface any real transport failure): %v", p.cfg.Endpoint, rerr)
+	} else if roster.Len() > 0 && !roster.Serves(seat) {
+		return deferWire(core.DeferClassConfig, fmt.Sprintf("agent seat %q is not in the endpoint's served roster", seat))
 	}
 
 	// Depth (roast delta 2): buildAgentRun already derived
@@ -150,7 +163,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		Unattended:  true,
 	})
 	if berr != nil {
-		return deferWire("building agent: " + berr.Error())
+		return deferWire(core.DeferClassInfrastructure, "building agent: "+berr.Error())
 	}
 
 	// Window budgeting parity with handleAgentRun: probe the SERVED window
@@ -172,7 +185,9 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	}
 	prof, perr := agent.LookupProfile(profileName)
 	if perr != nil {
-		return deferWire(perr.Error())
+		// A profile this build does not have can never run here, however healthy
+		// the box is — the contract, not the model, is what needs fixing.
+		return deferWire(core.DeferClassConfig, perr.Error())
 	}
 	built.Loop.WithProfile(prof)
 
@@ -183,29 +198,42 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// Wall timeout is its own defer shape — the delegator sizes future
 		// contracts off it, so it must be distinguishable from a planner error.
 		if errors.Is(cctx.Err(), context.DeadlineExceeded) {
-			return deferWire(fmt.Sprintf("wall timeout after %ds", timeoutSec))
+			return deferWire(core.DeferClassBudget, fmt.Sprintf("wall timeout after %ds", timeoutSec))
 		}
-		return deferWire("agent loop: " + rerr.Error())
+		return deferWire(core.DeferClassInfrastructure, "agent loop: "+rerr.Error())
 	}
 	if res.StopReason == "budget" {
 		// The loop burned MaxSteps without a final answer. Output is empty on
 		// this path, so there is nothing to re-pack — defer, don't dress an
 		// unfinished run as a result.
-		return deferWire(fmt.Sprintf("step budget exhausted (%d steps)", res.Steps))
+		return deferWire(core.DeferClassBudget, fmt.Sprintf("step budget exhausted (%d steps)", res.Steps))
 	}
 	wire.Output = res.Output
 
-	structured, tokensOut, serr := p.repackStructured(cctx, seat, contract.OutputSchema, res.Output)
+	structured, tokensOut, transport, serr := p.repackStructured(cctx, seat, contract.OutputSchema, res.Output)
 	if serr != nil {
-		// Stable prefix (§S2 verbatim) so the delegator can key on it; the
-		// detail after the colon is for the operator — "failed" without a why
-		// is unactionable telemetry. wire.Output stays populated: the
-		// delegator's text-verb acceptance checks can still read the loop's
-		// answer even when the structured shape failed.
-		w := wire
-		w.Deferred = true
-		w.Reason = "output failed schema: " + serr.Error()
-		return finish(w)
+		// wire.Output stays populated on every branch below: the delegator's
+		// text-verb acceptance checks can still read the loop's answer even when
+		// the structured shape never arrived.
+		switch {
+		case errors.Is(cctx.Err(), context.DeadlineExceeded):
+			// The wall expired DURING the re-pack. That is the timeout shape,
+			// not a schema shape — reporting it as "output failed schema" sends
+			// the operator to rewrite a schema that was never the problem.
+			return deferWire(core.DeferClassBudget, fmt.Sprintf("wall timeout after %ds", timeoutSec))
+		case transport:
+			// The seat could not be REACHED (llama-swap down/500/dial refused).
+			// Its own prefix and class: a transport failure filed under
+			// "output failed schema" is what makes a dead endpoint read as a
+			// model that cannot follow a schema.
+			return deferWire(core.DeferClassInfrastructure, "structured re-pack unreachable: "+serr.Error())
+		default:
+			// Stable prefix (§S2 verbatim) so the delegator can key on it; the
+			// detail after the colon is for the operator — "failed" without a
+			// why is unactionable telemetry. The model answered and got the
+			// shape wrong: an abstention.
+			return deferWire(core.DeferClassAbstention, "output failed schema: "+serr.Error())
+		}
 	}
 	wire.Structured = structured
 	wire.TokensOut = tokensOut
@@ -279,16 +307,22 @@ func (p *Pipeline) RunAgentContract(ctx context.Context, contract core.AgentCont
 // (gbnf.FromJSONSchema), and the schema itself re-checks the emitted JSON via
 // the validator — the grammar constrains shape, the validator enforces the
 // parts a grammar cannot (required fields, value constraints).
-func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema json.RawMessage, output string) (json.RawMessage, int, error) {
+//
+// The returned transport flag reports whether the LAST attempt died on the
+// wire rather than on validation. Both used to merge into one lastErr under
+// the caller's "output failed schema:" prefix, so a llama-swap 500 was
+// reported as a model that cannot follow a schema — and the operator went to
+// rewrite the schema instead of restarting the endpoint.
+func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema json.RawMessage, output string) (structured json.RawMessage, tokensOut int, transport bool, err error) {
 	var schema map[string]any
-	if err := json.Unmarshal(rawSchema, &schema); err != nil {
-		return nil, 0, fmt.Errorf("output_schema is not a JSON object: %w", err)
+	if uerr := json.Unmarshal(rawSchema, &schema); uerr != nil {
+		return nil, 0, false, fmt.Errorf("output_schema is not a JSON object: %w", uerr)
 	}
 	fields := gbnf.FromJSONSchema(schema)
 	if len(fields) == 0 {
 		// Unreachable off the wire (contract Validate gates on this), kept for
 		// in-process callers: an empty grammar would constrain nothing.
-		return nil, 0, errors.New("output_schema has no gbnf-compilable properties")
+		return nil, 0, false, errors.New("output_schema has no gbnf-compilable properties")
 	}
 	names := make([]string, 0, len(fields))
 	for _, f := range fields {
@@ -302,18 +336,19 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 	user := fmt.Sprintf("Extract these fields from the text: %s.\n\nTEXT:\n%s", strings.Join(names, ", "), output)
 
 	var lastErr error
+	lastWasTransport := false
 	for attempt := 0; attempt < 2; attempt++ {
 		gres, gerr := p.client.Generate(ctx, seat, system, user, grammar, agentRepackMaxTokens, p.cfg.Temperature, 0)
 		if gerr != nil {
-			lastErr = gerr
+			lastErr, lastWasTransport = gerr, true
 			continue
 		}
 		content := []byte(strings.TrimSpace(gres.Content))
 		if verr := validator.Validate(content, schema); verr != nil {
-			lastErr = verr
+			lastErr, lastWasTransport = verr, false
 			continue
 		}
-		return json.RawMessage(content), gres.TokensOut, nil
+		return json.RawMessage(content), gres.TokensOut, false, nil
 	}
-	return nil, 0, lastErr
+	return nil, 0, lastWasTransport, lastErr
 }

@@ -1,9 +1,12 @@
 package llamaclient
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -204,5 +207,38 @@ func TestCascadeRemoteLaneFailsClosedOnProbeError(t *testing.T) {
 	}
 	if defaultHits != 1 || laneChat != 0 {
 		t.Fatalf("hits = (default %d, lane %d), want (1, 0) — fail-closed to local", defaultHits, laneChat)
+	}
+}
+
+// TestRosterResidentLogsProbeFailureOncePerWindow (M-1): fail-closed is right,
+// fail-SILENT is not. A successful reroute logs a line, so a lane that quietly
+// never engages leaves no trace at all — the operator sees cascade calls
+// staying local during a render and has nothing to look at. The failure is
+// announced once per TTL window per base (the probe itself runs at most that
+// often), never once per call.
+func TestRosterResidentLogsProbeFailureOncePerWindow(t *testing.T) {
+	var buf bytes.Buffer
+	oldOut, oldFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(oldOut); log.SetFlags(oldFlags) })
+
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer dead.Close()
+
+	resident := RosterResident()
+	for i := 0; i < 3; i++ {
+		if resident(dead.URL, "offload-e4b") {
+			t.Fatal("an unprobeable lane must never read as resident")
+		}
+	}
+	out := buf.String()
+	if n := strings.Count(out, dead.URL); n != 1 {
+		t.Fatalf("probe-failure lines naming the lane = %d, want exactly 1 for the window (log: %s)", n, out)
+	}
+	if !strings.Contains(out, "roster probe") {
+		t.Fatalf("log = %q, want it to name the failed roster probe", out)
 	}
 }

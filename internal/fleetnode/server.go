@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"mime"
 	"net"
 	"net/http"
@@ -183,6 +184,15 @@ func (s *Server) refreshAgentResidency() {
 	ctx, cancel := context.WithTimeout(context.Background(), agentResidencyProbeTimeout)
 	defer cancel()
 	resident, err := s.rosterServes(ctx, s.opts.Cfg.Endpoint, s.agentSeat)
+	if err != nil {
+		// agent_seat_resident:false is the one field that stops EVERY remote
+		// placement at this node, and the probe error was the only evidence of
+		// why. Without this line an operator sees a node advertising itself as
+		// unusable and has nothing, on either side of the wire, to look at. The
+		// probe runs at most once per TTL window, so this cannot spam.
+		log.Printf("fleet: agent seat %q residency probe against %s failed; advertising agent_seat_resident:false for up to %s: %v",
+			s.agentSeat, s.opts.Cfg.Endpoint, agentResidencyTTL, err)
+	}
 	a := &s.agentRes
 	a.mu.Lock()
 	a.resident = resident && err == nil

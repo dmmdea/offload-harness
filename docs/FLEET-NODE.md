@@ -415,8 +415,22 @@ one contract. Unknown payload fields are **ignored** (staggered node deploys mus
 | `structured` | object | present iff `output_schema` given AND the post-loop grammar re-pack validated (one retry) |
 | `steps` / `stop_reason` | int / string | loop telemetry |
 | `deferred` | bool | the node ran and could not complete the contract — **still a `done` job**, never `error` (`error` = internal wiring bug only) |
-| `reason` | string | the defer shape: seat unserved on the roster, `wall timeout after <N>s`, `step budget exhausted (…)`, `output failed schema: …`, build/loop/profile errors |
+| `reason` | string | the defer shape: seat unserved on the roster, `wall timeout after <N>s`, `step budget exhausted (…)`, `output failed schema: …`, `structured re-pack unreachable: …`, build/loop/profile errors |
+| `defer_class` | string | `abstention` \| `budget` \| `infrastructure` \| `config` — the machine-branchable WHY (table below). Absent from a pre-0.63 node: treat empty as *unknown*, never as abstention |
 | `wall_ms` / `tokens_out` | int | node wall clock / re-pack completion tokens |
+
+### Defer classes — which defers mean "a human must act"
+
+| Class | Meaning | Shapes |
+|---|---|---|
+| `abstention` | the stack is healthy; the model could not produce a usable answer | `output failed schema: …` |
+| `budget` | a ceiling stopped it; a bigger budget might succeed | `wall timeout after <N>s`, `step budget exhausted (…)`, delegator-side `poll deadline …` on a node that answered every poll |
+| `infrastructure` | something is broken — nothing was learned, retrying the same contract cannot help | `building agent: …`, `agent loop: …`, `structured re-pack unreachable: …`, delegator-side `poll deadline …` whose last poll answer was unusable, and "all remotes failed the health probe" |
+| `config` | this node/contract pair can never work as configured | no seat resolvable, seat not in the served roster, unknown profile, and the delegator's "no remote passed the capability gate" / "no remotes configured" |
+
+The delegator counts `infrastructure` + `config` defers into `summary.infrastructure`, and
+`local-offload delegate` **exits non-zero** when that count is non-zero: a broken node must not
+read as a successful run just because its defers were polite.
 
 No transcript field exists — remote reasoning never crosses the wire.
 
@@ -453,9 +467,19 @@ cannot run it; `false` only costs a conservative local placement).
 Agent job ids are delegator-minted (`agd-` + 24 random hex chars). Dispatch doubt is retried
 once under the **same id** — the store re-acks `202` idempotently, so a lost ack never buys a
 second run. The delegator polls every 3 s; a poll `404` triggers a bounded re-dispatch of the
-same id (max 2); past `timeout_sec` + 60 s grace it marks the subtask deferred
-(`poll deadline`) and stops — the node may still finish server-side, and the job id in the
-delegation log lets you reconcile by hand.
+same id (max 2); past `timeout_sec` + 60 s grace it stops polling — the node may still finish
+server-side, and the job id in the delegation log lets you reconcile by hand.
+
+What the deadline produces depends on whether the node ever **answered** about the job:
+
+- it answered (any `202`/`200` job state) → the subtask is **deferred**, reason prefixed
+  `poll deadline after <d>: node accepted the job but did not reach a terminal state` (class
+  `budget`, or `infrastructure` when the last answer was unusable — a 5xx or an unknown state,
+  which is then named in the reason).
+- it never answered (dial refused, connection dropped, unparseable body) → the subtask is a
+  **failure**, `poll deadline after <d>: node never answered (last: …)`, counted in
+  `summary.failed`. A node that said nothing never deferred, and reporting a defer stamped with
+  its id and seat would be the delegator inventing an answer on its behalf.
 
 ## Known limits (v1)
 

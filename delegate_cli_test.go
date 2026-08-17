@@ -10,7 +10,10 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/delegate"
 )
 
 func writeContract(t *testing.T, content string) string {
@@ -71,6 +74,43 @@ func TestParseContractFileErrors(t *testing.T) {
 	p := writeContract(t, `{"goal": unquoted}`)
 	if _, err := parseContractFile(p); err == nil {
 		t.Error("malformed JSON must error")
+	}
+}
+
+// TestDelegateExitContract pins the verb's exit code against the run summary
+// (H-1). Defers and failed-verification are RESULT shapes — the JSON reports
+// them and the exit stays 0 — but a BROKEN node is not a result: an
+// infrastructure/config-class defer means an operator has to act, and a
+// scripted caller that only checks the exit code must not read it as success.
+func TestDelegateExitContract(t *testing.T) {
+	cases := []struct {
+		name    string
+		sum     delegate.Summary
+		wantErr string // "" = exit 0
+	}{
+		{"all green", delegate.Summary{Succeeded: 3}, ""},
+		{"an honest abstention stays zero", delegate.Summary{Succeeded: 1, Deferred: 1}, ""},
+		{"failed verification stays zero", delegate.Summary{FailedVerification: 2}, ""},
+		{"transport failure exits non-zero", delegate.Summary{Failed: 1}, "failed (transport/config)"},
+		{"a broken node exits non-zero", delegate.Summary{Deferred: 2, Infrastructure: 2}, "infrastructure/config"},
+		{"failures win the message", delegate.Summary{Failed: 1, Deferred: 1, Infrastructure: 1}, "failed (transport/config)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := delegateExitErr(tc.sum)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("err = %v, want exit 0", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("summary %+v must exit non-zero", tc.sum)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %q, want it to mention %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 

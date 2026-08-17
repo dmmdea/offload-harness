@@ -120,6 +120,14 @@ func RosterResident() func(base, model string) bool {
 			ctx, cancel := context.WithTimeout(context.Background(), laneProbeTimeout)
 			roster, err := swapclient.FetchRoster(ctx, base, laneProbeTimeout)
 			cancel()
+			if err != nil {
+				// A TAKEN lane logs a line (resolveEndpoint above); a lane that
+				// never engages because its probe fails logged nothing at all,
+				// so "my cascade calls never left the busy box" had no evidence
+				// anywhere. Once per TTL window per base — the probe itself runs
+				// at most that often, so this cannot become per-call spam.
+				log.Printf("cascade remote lane: roster probe of %s failed; lane treated as NOT resident for %s (calls stay local): %v", base, laneResidencyTTL, err)
+			}
 			e = entry{at: time.Now(), roster: roster, ok: err == nil}
 			cache[base] = e
 		}

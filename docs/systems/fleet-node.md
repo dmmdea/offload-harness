@@ -351,29 +351,41 @@ remote reasoning is quarantined from the caller's context by construction.
 | `stop_reason` | string | The loop's stop reason. |
 | `deferred` | bool | True = the node ran and honestly could not complete the contract. **A defer is a success shape at the job level**: the job lands `done`, never `error` — `error` is reserved for internal wiring bugs (mirrors the cascade's defer semantics). |
 | `reason` | string | Why it deferred (shapes below). |
+| `defer_class` | string | The machine-branchable WHY: `abstention` \| `budget` \| `infrastructure` \| `config`. Additive and `omitempty` — a pre-0.63 node emits no class, and readers must treat empty as *unknown*, never as abstention. |
 | `wall_ms` | int | Node-observed wall time. |
 | `tokens_out` | int | Re-pack completion tokens, when a structured result was produced. |
 
-### Defer shapes
+### Defer shapes and their classes
 
-Each is a distinct, stable string so a delegator (and the delegation ledger) can key on it:
+Each reason is a distinct, stable string so a delegator (and the delegation ledger) can key on
+it; the class is what code branches on, because a reason string is prose and an exit code is not.
 
-- `no agent seat resolvable (agent_model and model both empty)`
-- `agent seat "…" is not in the endpoint's served roster` — a *positive* roster miss; an
-  unreachable or empty roster proceeds instead, letting the loop's first call surface the real
-  transport error
-- `building agent: …` / `agent loop: …` — build or planner failure
-- an unknown-profile message naming the valid profiles
-- `wall timeout after <N>s` — the `timeout_sec` deadline fired (its own shape, so the delegator
-  can size future contracts off it)
-- `step budget exhausted (<n> steps)` — the loop burned `max_steps` with no final answer;
-  `output` is empty on this path, so there is nothing to re-pack
-- `output failed schema: …` — the re-pack failed validation after its one retry; the prefix is
-  stable, the detail after the colon is for the operator
+| Reason shape | Class | Note |
+|---|---|---|
+| `no agent seat resolvable (agent_model and model both empty)` | `config` | |
+| `agent seat "…" is not in the endpoint's served roster` | `config` | A *positive* roster miss. An unreachable or empty roster proceeds instead (logged), letting the loop's first call surface the real transport error. |
+| unknown-profile message naming the valid profiles | `config` | The contract asked for a profile this build does not have. |
+| `building agent: …` / `agent loop: …` | `infrastructure` | Build or planner failure — nothing was learned about the task. |
+| `wall timeout after <N>s` | `budget` | The `timeout_sec` deadline fired, in the loop **or** in the re-pack; its own shape so the delegator can size future contracts off it. |
+| `step budget exhausted (<n> steps)` | `budget` | The loop burned `max_steps` with no final answer; `output` is empty, so there is nothing to re-pack. |
+| `output failed schema: …` | `abstention` | The re-pack reached the seat and the emitted JSON failed validation after its one retry. |
+| `structured re-pack unreachable: …` | `infrastructure` | The re-pack could not REACH the seat (dial refused, 5xx). Split from the schema shape deliberately: filed under `output failed schema:` a llama-swap outage reads as a model that cannot follow a schema, and the operator rewrites a schema that was never the problem. |
 
-Two more shapes originate on the **delegator**, not the node: `poll deadline` (below) and
-`route=remote: no eligible remote node (gate: enabled+resident+ctx-fit+schema)` (a forced
-remote route with nothing eligible defers loudly rather than silently falling local).
+Three more shapes originate on the **delegator**, not the node:
+
+- `poll deadline after <d>: node accepted the job but did not reach a terminal state` — class
+  `budget`, or `infrastructure` when the last poll answer was unusable (a 5xx / unknown state,
+  named in the reason). Only produced when the node actually answered at least one poll; a node
+  that never answered yields a FAILURE (`summary.failed`), not a defer.
+- `route=remote: no remote passed the capability gate (enabled+resident+ctx-fit+schema)` —
+  class `config`; with health-probe failures alongside it, the probe errors are appended and
+  the class becomes `infrastructure`.
+- `route=remote: all N configured remote(s) failed the health probe: …` — class
+  `infrastructure`; `route=remote: no remote fleet nodes are configured …` — class `config`.
+
+`infrastructure` and `config` defers are counted into the delegator's `summary.infrastructure`
+and make `local-offload delegate` exit non-zero (`delegateExitErr` in `main.go`): a broken or
+misconfigured node must not read as a successful run.
 
 ### Auth (v1 scope: the agent lane only)
 
@@ -427,9 +439,14 @@ a full TTL window, so a dead endpoint is probed once per window, not hammered pe
   node never saw, or evicted, the job): re-dispatch the same id, bounded at 2 re-dispatches — a
   node that keeps forgetting the job is broken, and re-POSTing forever would re-run the
   contract on every node restart.
-- **Poll deadline** = the contract's `timeout_sec` + 60 s grace. Past it the delegator marks
-  the subtask deferred (reason `poll deadline`) and stops polling — the node may still finish
-  server-side; the job id in the telemetry line lets an operator reconcile by hand.
+- **Poll deadline** = the contract's `timeout_sec` + 60 s grace. Past it the delegator stops
+  polling — the node may still finish server-side; the job id in the telemetry line lets an
+  operator reconcile by hand. The outcome depends on whether the node ever ANSWERED about the
+  job: a node that answered gets an honest `poll deadline …` defer (it acked and never reached
+  a terminal state), while a node that never answered — dial refused, connection dropped,
+  unparseable body — is a **failure**, because a delegator that manufactures a defer stamped
+  with a silent node's id and seat is inventing a report nobody on that node ever made. Every
+  poll failure is logged, and the last one is quoted in the reason.
 
 ## Source map
 

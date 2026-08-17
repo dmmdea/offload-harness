@@ -365,6 +365,13 @@ over the operator's tailnet. Two surfaces exist, both delegator-side:
 - **CLI `local-offload delegate --contract file.json`** — the same intake, engine, and response
   JSON, for testing and scripts (template contracts: [`contracts/`](../../contracts/README.md)).
 
+Both surfaces publish the same summary-first response, and both read the same way: a
+`deferred` subtask carries a `defer_class` (`abstention` | `budget` | `infrastructure` |
+`config`), and the `infrastructure` + `config` ones are counted separately in
+`summary.infrastructure` — the CLI exits non-zero when that is non-zero, because a node whose
+llama-swap is down defers every subtask and must not read as a clean run
+([defer classes](fleet-node.md#defer-shapes-and-their-classes)).
+
 A **local** placement is not a special case: it runs the identical `Pipeline.Run` route a fleet
 node runs (`pipeline.RunAgentContract` → the `agent` task → this loop, read-only over the
 contract's materialized context docs, `research` profile by default, no

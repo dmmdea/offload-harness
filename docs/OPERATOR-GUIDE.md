@@ -667,8 +667,11 @@ inputs across subtasks. A contract that does not fit is not an error — it plac
 self-contained (the remote node never reaches back into your filesystem). `acceptance` is
 evaluated by the **delegator** after the result returns: a schema-valid result that fails a
 check comes back `failed_verification`, never a success. Read the response's `summary` block
-first — `{succeeded, deferred, failed_verification, failed}` — eight quiet defers are a loud
-outcome, not eight green jobs.
+first — `{succeeded, deferred, failed_verification, failed, infrastructure}` — eight quiet
+defers are a loud outcome, not eight green jobs. `infrastructure` is the subset of `deferred`
+whose `defer_class` blames the stack or the config (`infrastructure` / `config`) rather than
+the work (`abstention` / `budget`): non-zero means a node is broken or misconfigured, not that
+the small model could not do the job.
 
 CLI equivalent:
 
@@ -676,8 +679,11 @@ CLI equivalent:
 local-offload delegate --contract contracts/research-digest.json --route auto --remote http://<node-b>:18811
 ```
 
-Exit 0 covers defers and failed verification (the JSON says what happened); non-zero is
-reserved for transport/config failures. Every subtask also writes a ledger row
+Exit 0 covers honest defers (`abstention` / `budget`) and failed verification — the JSON says
+what happened. Non-zero is reserved for transport/config failures **and** for
+`summary.infrastructure > 0`: a worker whose llama-swap is down defers every subtask, and a
+scripted caller reading only the exit code must not take that for a good run. Every subtask
+also writes a ledger row
 (`task=agent_delegate` in `local-offload ledger`) and a full contract+result+verdict line
 under the harness base dir at `delegation-log/YYYY-MM-DD.jsonl`.
 
@@ -686,10 +692,12 @@ under the harness base dir at `delegation-log/YYYY-MM-DD.jsonl`.
 | `403 agent lane requires fleet_auth_token on a non-loopback listener` | The worker is bound beyond loopback with no token. Set `fleet_auth_token` (same value) on both sides and restart `fleet-serve`. |
 | `401 unauthorized` on dispatch or poll | Token mismatch between delegator and worker configs. |
 | `agent delegation is disabled on this box` | Set `"agent_delegation_enabled": true` in the **delegator's** config. |
-| Everything places local although a remote exists | Usually correct — idle-local always wins. Force `--route remote` to surface the gate's verdict: the node must advertise `agent_enabled` + `agent_seat_resident`, the contract must carry `output_schema`, and the ctx arithmetic above must pass. |
+| Everything places local although a remote exists | Usually correct — idle-local always wins. Force `--route remote` to surface the gate's verdict: the defer reason now names the actual cause — no remotes configured, every remote failing its health probe (each error quoted), or a healthy remote failing the gate (`agent_enabled` + `agent_seat_resident` + `output_schema` + the ctx arithmetic above). |
 | `remote "…": hostname … not allowed` | Non-tailnet URL. Loopback, `100.64.0.0/10`, a dotless MagicDNS name, or your own tailnet-zone hostname only. |
-| deferred `poll deadline` | The node outran `timeout_sec` + 60 s grace (or died mid-run). Check the worker's serve log; the job id in `delegation-log/` reconciles it. |
+| deferred `poll deadline after …: node accepted the job but did not reach a terminal state` | The node acked and outran `timeout_sec` + 60 s grace. Check the worker's serve log; the job id in `delegation-log/` reconciles it. A quoted "last poll error" means the node was also answering badly (5xx) — fix that first. |
+| failed `poll deadline after …: node never answered` | The node died or became unreachable after acking: nothing came back at all, so nothing is claimed on its behalf. The quoted last error (dial refused, dropped connection) is the lead. |
 | deferred `output failed schema: …` | The schema was too ambitious for the seat. Flatten it — a `properties` map of string / number / integer / boolean / string-array / enum fields is the supported subset. |
+| deferred `structured re-pack unreachable: …` | Not a schema problem: the worker's llama-swap could not be reached for the final grammar completion. Restart/check the worker's endpoint. |
 
 ### Busy-hour cascade failover (`cascade_remote_lanes`)
 

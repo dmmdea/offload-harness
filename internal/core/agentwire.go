@@ -53,6 +53,29 @@ const (
 	AgentTimeoutSecCap     = 900
 )
 
+// Defer classes: WHY a defer happened, in the four kinds that call for
+// different operator action. The reason string is prose for a human; the class
+// is what a delegator, a dashboard, or an exit code can branch on — without it
+// "the model produced the wrong shape" and "llama-swap is down" arrive as the
+// same quiet green defer, and a broken node reads as a working one.
+const (
+	// DeferClassAbstention: the model was asked, ran, and could not produce a
+	// usable answer. The stack is healthy; the work is what failed.
+	DeferClassAbstention = "abstention"
+	// DeferClassBudget: a ceiling stopped it — step budget or wall clock. The
+	// answer may exist behind a larger budget.
+	DeferClassBudget = "budget"
+	// DeferClassInfrastructure: something in the stack failed — endpoint
+	// unreachable, agent build failed, transport died mid-run. Nothing about
+	// the task was learned, and NO amount of retrying the same contract helps
+	// until an operator fixes the box.
+	DeferClassInfrastructure = "infrastructure"
+	// DeferClassConfig: the node/contract combination can never work as
+	// configured — no seat resolvable, the seat is not served, an unknown
+	// profile. Also an operator fix, but of config rather than of a service.
+	DeferClassConfig = "config"
+)
+
 // AgentContract is the versioned, self-contained delegation request (§S2).
 // Self-contained means: everything the remote loop may read is INLINE in
 // Context — the remote node never reaches back into the delegator's
@@ -91,8 +114,13 @@ type AgentWireResult struct {
 	StopReason    string          `json:"stop_reason"`
 	Deferred      bool            `json:"deferred"`
 	Reason        string          `json:"reason,omitempty"`
-	WallMs        int64           `json:"wall_ms"`
-	TokensOut     int             `json:"tokens_out,omitempty"`
+	// DeferClass is the machine-branchable WHY behind Deferred (one of the
+	// DeferClass* constants). Additive and omitempty: a pre-0.63 node's result
+	// decodes with an empty class, which readers must treat as "unknown", never
+	// as abstention.
+	DeferClass string `json:"defer_class,omitempty"`
+	WallMs     int64  `json:"wall_ms"`
+	TokensOut  int    `json:"tokens_out,omitempty"`
 }
 
 // DecodeAgentContract reads one contract from r, tolerating unknown fields

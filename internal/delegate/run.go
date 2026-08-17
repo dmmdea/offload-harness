@@ -11,9 +11,13 @@
 // Job protocol (roast delta 14): the DELEGATOR mints every job id
 // ("agd-" + crypto/rand hex) so a re-dispatch on transport doubt carries the
 // SAME id and the node's store re-acks 202 idempotently — a lost ack can never
-// buy a duplicate run. Polling stops hard at TimeoutSec + a grace window;
-// past it the subtask is marked deferred (reason "poll deadline"), because a
-// delegator that polls forever pins a goroutine on a dead node.
+// buy a duplicate run. Polling stops hard at TimeoutSec + a grace window,
+// because a delegator that polls forever pins a goroutine on a dead node.
+//
+// What the deadline PRODUCES depends on whether the node ever answered about
+// the job: one that answered gets an honest "poll deadline …" defer, one that
+// never answered gets a FAILURE. The delegator may report what a node said; it
+// may never author a report on a silent node's behalf.
 
 package delegate
 
@@ -25,6 +29,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -77,6 +82,13 @@ type Summary struct {
 	Deferred           int
 	FailedVerification int
 	Failed             int
+	// Infrastructure counts the SUBSET of Deferred whose defer_class says the
+	// stack or the config — not the work — is what failed (infrastructure or
+	// config). It is a subset, not a fifth bucket: the totals still add up to
+	// len(results) without it. It exists because a node with a dead llama-swap
+	// otherwise reports exactly what a small model honestly abstaining reports,
+	// and both exit 0. A non-zero Infrastructure makes the CLI exit non-zero.
+	Infrastructure int
 }
 
 const (
@@ -159,6 +171,11 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 		if l, err := ledger.Open(cfg.LedgerPath); err == nil {
 			led = l
 			defer led.Close()
+		} else {
+			// Not fatal — but not silent either. Without this line a run that
+			// records nothing looks exactly like a run that records everything,
+			// and `local-offload stats` quietly under-reports forever.
+			log.Printf("delegate: ledger %s could not be opened; this run records no ledger rows: %v", cfg.LedgerPath, err)
 		}
 	}
 
@@ -184,6 +201,9 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 			sum.Failed++
 		case pr.Result.Deferred:
 			sum.Deferred++
+			if BrokenStackDefer(pr.Result.DeferClass) {
+				sum.Infrastructure++
+			}
 		case len(pr.AcceptanceFailures) > 0:
 			sum.FailedVerification++
 		default:
@@ -193,12 +213,26 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 	return results, sum, nil
 }
 
+// BrokenStackDefer reports whether a defer_class means an OPERATOR, not a
+// bigger model, has to act: the stack failed (infrastructure) or the
+// node/contract combination can never work as configured (config). An empty
+// class — a pre-0.63 node, which cannot classify — is deliberately NOT broken:
+// assuming the worst about an older peer would fail every mixed-version fleet.
+func BrokenStackDefer(class string) bool {
+	return class == core.DeferClassInfrastructure || class == core.DeferClassConfig
+}
+
 type runner struct {
 	cfg     config.Config
 	local   LocalRunner
 	route   string
 	remotes []string
 	led     *ledger.Ledger
+	// warnCorpus/warnLedger fire at most ONE warning each per Run. Once, not
+	// per subtask: an 8-subtask fan-out against a full disk would otherwise
+	// print the same line eight times and bury the results it is warning about.
+	warnCorpus sync.Once
+	warnLedger sync.Once
 }
 
 // runOne places and executes one subtask, then verifies and records it. Every
@@ -238,8 +272,9 @@ func (r *runner) runOne(ctx context.Context, contract core.AgentContract) Placed
 	}
 	var views []NodeView
 	var bases []string
+	var probeErrs []string
 	if busy && r.route != "local" {
-		views, bases = r.fetchViews(ctx)
+		views, bases, probeErrs = r.fetchViews(ctx)
 	}
 	chosen := Place(st, localView, views, busy)
 
@@ -249,18 +284,26 @@ func (r *runner) runOne(ctx context.Context, contract core.AgentContract) Placed
 		reason = "route=local forced"
 	case r.route == "remote" && chosen.Local:
 		// An explicit remote route with nothing eligible must NOT silently
-		// fall local — defer loudly and let the caller decide.
+		// fall local — defer loudly and let the caller decide. The diagnosis
+		// distinguishes the three causes that used to share one sentence.
+		why, class := r.noEligibleRemote(views, probeErrs)
 		return finish(PlacedResult{
 			Node: localView.NodeID, Seat: localView.AgentSeat,
 			PlacementReason: "route=remote: no eligible remote",
-			Result:          core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Deferred: true, Reason: "route=remote: no eligible remote node (gate: enabled+resident+ctx-fit+schema)"},
+			Result: core.AgentWireResult{
+				SchemaVersion: core.AgentWireSchemaVersion,
+				Deferred:      true,
+				DeferClass:    class,
+				Reason:        "route=remote: " + why,
+			},
 		})
 	case r.route == "remote":
 		reason = "route=remote forced → " + chosen.NodeID
 	case !busy:
 		reason = "local idle"
 	case chosen.Local:
-		reason = "local busy; no eligible remote (queued-local beats ineligible-remote)"
+		why, _ := r.noEligibleRemote(views, probeErrs)
+		reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
 	default:
 		reason = "local busy; placed on " + chosen.NodeID
 	}
@@ -310,7 +353,13 @@ func (r *runner) runLocal(ctx context.Context, contract core.AgentContract, view
 	if wire.Seat != "" {
 		pr.Seat = wire.Seat
 	}
-	pr.AcceptanceFailures = evalAcceptance(contract, wire)
+	if !wire.Deferred {
+		// Same guard runRemote applies: a defer produced no answer, so running
+		// acceptance over it manufactures "failures" about content that was
+		// never claimed — turning an honest defer into a verification failure
+		// in the ledger and the corpus.
+		pr.AcceptanceFailures = evalAcceptance(contract, wire)
+	}
 	return pr
 }
 
@@ -333,30 +382,64 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	if timeoutSec <= 0 {
 		timeoutSec = core.AgentTimeoutSecDefault
 	}
-	deadline := time.Now().Add(time.Duration(timeoutSec)*time.Second + pollGrace)
+	pollBudget := time.Duration(timeoutSec)*time.Second + pollGrace
+	deadline := time.Now().Add(pollBudget)
 	redispatches := 0
+	// A poll failure is NOT nothing. Before these two, pollOnce's error was
+	// bound and dropped, so a node that died after acking (refused dial, per-poll
+	// deadline, 500/502/503, a 200 whose body is not JSON) ran out the clock and
+	// was handed a MANUFACTURED defer that runOne then stamped with that node's
+	// id and seat — the delegator inventing a sentence the node never said, and
+	// exiting 0. lastPollErr keeps the newest failure for the operator;
+	// sawNodeAnswer records whether the node ever answered about this job AT
+	// ALL, and that is what decides defer-vs-failure at the deadline.
+	var lastPollErr error
+	sawNodeAnswer := false
 	for {
 		if err := ctx.Err(); err != nil {
 			pr.Err = "canceled: " + err.Error()
 			return pr
 		}
 		if time.Now().After(deadline) {
-			// Roast delta 14, verbatim: mark deferred, reason "poll deadline",
-			// and STOP. The node may still finish server-side; the job id in
-			// the telemetry line lets an operator reconcile by hand.
-			pr.Result = core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Deferred: true, Reason: "poll deadline"}
+			if !sawNodeAnswer {
+				// Never a defer: nothing on that node ever reported anything, so
+				// there is no defer to report. A FAILURE (Summary.Failed, non-zero
+				// CLI exit) is the honest outcome — a broken node must read broken.
+				pr.Err = fmt.Sprintf("poll deadline after %s: node never answered (last: %s)", pollBudget, errText(lastPollErr))
+				return pr
+			}
+			// Roast delta 14: mark deferred, reason PREFIXED "poll deadline"
+			// (stable key), and STOP. The node may still finish server-side; the
+			// job id in the telemetry line lets an operator reconcile by hand.
+			// The wording says only what is known: it acked and it never reached
+			// a terminal state — not that it "could not complete the contract".
+			reason := fmt.Sprintf("poll deadline after %s: node accepted the job but did not reach a terminal state", pollBudget)
+			// A node that answered every poll normally simply ran out of clock:
+			// a BUDGET defer. One whose last answer we could not use (a 5xx, an
+			// unknown state) is a broken box, and classing the two alike is how
+			// a broken node keeps reading as a slow one.
+			class := core.DeferClassBudget
+			if lastPollErr != nil {
+				reason += " (last poll error: " + lastPollErr.Error() + ")"
+				class = core.DeferClassInfrastructure
+			}
+			pr.Result = core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Deferred: true, DeferClass: class, Reason: reason}
 			return pr
 		}
 		state, data, jobErr, status, perr := r.pollOnce(ctx, base, jobID)
 		switch {
 		case perr != nil:
 			// Transient transport noise: keep polling until the deadline —
-			// the deadline, not one dropped packet, decides abandonment.
+			// the deadline, not one dropped packet, decides abandonment. But
+			// RECORD it: this is the only trace a dead node leaves.
+			lastPollErr = perr
+			log.Printf("delegate: poll %s at %s failed: %v", jobID, base, perr)
 		case status == http.StatusNotFound:
-			// The node never saw (or forgot) the job: the lost-ack shape.
+			// The node answered — with "I have no such job": the lost-ack shape.
 			// Re-dispatch the SAME id — the store's duplicate path re-acks
 			// 202 without a second run — bounded so a state-losing node
 			// cannot be made to re-run the contract forever.
+			sawNodeAnswer = true
 			if redispatches >= maxRedispatches {
 				pr.Err = fmt.Sprintf("node lost job %s %d times (poll 404 after re-dispatch)", jobID, redispatches+1)
 				return pr
@@ -369,7 +452,8 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 		case status == http.StatusUnauthorized:
 			pr.Err = "poll: 401 unauthorized (fleet_auth_token mismatch)"
 			return pr
-		case state == "done":
+		case status == http.StatusOK && state == "done":
+			sawNodeAnswer = true
 			var wire core.AgentWireResult
 			if uerr := json.Unmarshal(data, &wire); uerr != nil {
 				pr.Err = "job done but data is not an AgentWireResult: " + uerr.Error()
@@ -382,9 +466,23 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 				pr.AcceptanceFailures = evalAcceptance(contract, wire)
 			}
 			return pr
-		case state == "error":
+		case status == http.StatusOK && state == "error":
 			pr.Err = "remote job error: " + jobErr
 			return pr
+		case status == http.StatusOK && (state == "accepted" || state == "running"):
+			// The node answered and owns the job: the only shape that earns a
+			// defer at the deadline.
+			sawNodeAnswer = true
+		default:
+			// Anything else IS an answer we cannot act on — a 500/502/503 from
+			// the node or something in front of it, or a 200 carrying a state
+			// this delegator does not know. Something answered, so this is not
+			// the never-answered shape; keep polling (the state may still
+			// resolve) but record it, because silently discarding it is what let
+			// a broken node look like a busy one.
+			sawNodeAnswer = true
+			lastPollErr = fmt.Errorf("poll: unusable answer (status %d, state %q)", status, state)
+			log.Printf("delegate: poll %s at %s: %v", jobID, base, lastPollErr)
 		}
 		select {
 		case <-ctx.Done():
@@ -393,6 +491,16 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 		case <-time.After(pollEvery):
 		}
 	}
+}
+
+// errText renders a possibly-nil error for an operator-facing message. A
+// never-answered node with no recorded error means the deadline was already
+// spent before the first poll — say that, don't print "<nil>".
+func errText(err error) string {
+	if err == nil {
+		return "no poll completed before the deadline"
+	}
+	return err.Error()
 }
 
 // dispatch POSTs the job envelope, expecting the contract's one acceptance
@@ -496,21 +604,49 @@ func evalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []st
 }
 
 // fetchViews probes every configured remote's /fleet/health, returning the
-// views and a PARALLEL base-URL slice (NodeView carries no base — placement
-// is pure; the pairing is the runner's business). A node that cannot answer
-// is simply not a candidate — the gate's fail-toward-local posture.
-func (r *runner) fetchViews(ctx context.Context) ([]NodeView, []string) {
-	var views []NodeView
-	var bases []string
+// views, a PARALLEL base-URL slice (NodeView carries no base — placement is
+// pure; the pairing is the runner's business), and the probe FAILURES. A node
+// that cannot answer is not a candidate — the gate's fail-toward-local posture
+// — but the reason it could not answer is the operator's whole diagnosis: a
+// wrong token (401), a node that is down (dial refused), and a stale VRAM
+// snapshot (503) all end as "not a candidate", and dropping the error made
+// them indistinguishable from a node that merely failed the gate.
+func (r *runner) fetchViews(ctx context.Context) (views []NodeView, bases []string, probeErrs []string) {
 	for _, base := range r.remotes {
 		v, err := FetchNodeView(ctx, base, r.cfg.FleetAuthToken)
 		if err != nil {
+			log.Printf("delegate: health probe of %s failed (not a placement candidate): %v", base, err)
+			probeErrs = append(probeErrs, err.Error())
 			continue
 		}
 		views = append(views, v)
 		bases = append(bases, base)
 	}
-	return views, bases
+	return views, bases, probeErrs
+}
+
+// noEligibleRemote turns "nothing eligible" into the cause an operator can act
+// on, plus the defer class that goes with it. Three distinct situations used
+// to share one manufactured sentence that always blamed the gate:
+//
+//	no remotes configured        → config: nothing was ever asked to run this
+//	every remote failed to answer → infrastructure: the fleet is down/unreachable
+//	remotes answered, gate said no → config: the gate really is the reason
+//
+// A mix (some answered and failed the gate, some never answered) reports both
+// and is classed infrastructure — part of the fleet is genuinely broken.
+func (r *runner) noEligibleRemote(views []NodeView, probeErrs []string) (reason, class string) {
+	switch {
+	case len(r.remotes) == 0:
+		return "no remote fleet nodes are configured (pass --remote / the remotes argument)", core.DeferClassConfig
+	case len(views) == 0 && len(probeErrs) > 0:
+		return fmt.Sprintf("all %d configured remote(s) failed the health probe: %s", len(probeErrs), strings.Join(probeErrs, "; ")), core.DeferClassInfrastructure
+	case len(probeErrs) > 0:
+		return fmt.Sprintf("no remote passed the capability gate (enabled+resident+ctx-fit+schema); %d other remote(s) failed the health probe: %s",
+			len(probeErrs), strings.Join(probeErrs, "; ")), core.DeferClassInfrastructure
+	default:
+		return "no remote passed the capability gate (enabled+resident+ctx-fit+schema)", core.DeferClassConfig
+	}
 }
 
 // localNodeID mirrors runAgentTask's rule: configured fleet_node_id, else the
@@ -557,6 +693,7 @@ type delegationLogLine struct {
 	Seat               string             `json:"seat"`
 	PlacementReason    string             `json:"placement_reason"`
 	Deferred           bool               `json:"deferred"`
+	DeferClass         string             `json:"defer_class,omitempty"`
 	AcceptancePass     bool               `json:"acceptance_pass"`
 	WallMs             int64              `json:"wall_ms"`
 	EstTokens          int                `json:"est_tokens"`
@@ -577,6 +714,7 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 		Seat:               pr.Seat,
 		PlacementReason:    pr.PlacementReason,
 		Deferred:           pr.Result.Deferred,
+		DeferClass:         pr.Result.DeferClass,
 		AcceptancePass:     pr.Err == "" && !pr.Result.Deferred && len(pr.AcceptanceFailures) == 0,
 		WallMs:             pr.wallMs,
 		EstTokens:          EstimateTokens(contract),
@@ -588,7 +726,14 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 		res := pr.Result
 		line.Result = &res
 	}
-	_ = appendDelegationLog(r.cfg.BaseDir(), line)
+	if err := appendDelegationLog(r.cfg.BaseDir(), line); err != nil {
+		// The corpus is a DELIVERABLE of this lane (the standing small-model
+		// agent-task dataset), not incidental logging: an unwritable corpus is
+		// worth an operator's attention even though it can never fail the work.
+		r.warnCorpus.Do(func() {
+			log.Printf("delegate: delegation-log write failed under %s; this run's corpus rows are LOST (results unaffected): %v", r.cfg.BaseDir(), err)
+		})
+	}
 
 	if r.led != nil {
 		reason := pr.Err
@@ -598,7 +743,7 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 		if reason == "" && len(pr.AcceptanceFailures) > 0 {
 			reason = "failed verification: " + pr.AcceptanceFailures[0]
 		}
-		_ = r.led.Record(ledger.Entry{
+		if err := r.led.Record(ledger.Entry{
 			Task:      "agent_delegate",
 			LatencyMs: pr.wallMs,
 			// TokensIn stays 0 ON PURPOSE: the summary counts a completed
@@ -610,7 +755,11 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 			// ModelTier carries placement:seat — the ledger has no placement
 			// column, and "which node/seat ran it" is the row's whole story.
 			ModelTier: pr.Node + ":" + pr.Seat,
-		})
+		}); err != nil {
+			r.warnLedger.Do(func() {
+				log.Printf("delegate: ledger row write failed for %s; this run's savings accounting is incomplete (results unaffected): %v", r.cfg.LedgerPath, err)
+			})
+		}
 	}
 }
 

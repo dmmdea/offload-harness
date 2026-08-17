@@ -1662,12 +1662,28 @@ func runDelegate(args []string) error {
 		return err
 	}
 	fmt.Println(string(out))
+	return delegateExitErr(sum)
+}
+
+// delegateExitErr maps a run summary onto the verb's exit code. Two things
+// exit non-zero, and both mean "a human has to look":
+//
+//   - Failed: transport/config per-subtask errors (auth rejected, dispatch
+//     refused, broken wire, a node that never answered).
+//   - Infrastructure: defers whose class blames the STACK or the config rather
+//     than the work. A node with a dead llama-swap defers every subtask, and
+//     without this it exits 0 — a broken fleet reading as a good run is exactly
+//     the silent failure this contract exists to prevent.
+//
+// Everything else — honest abstentions, budget defers, failed verification —
+// stays exit 0: those are RESULT shapes, reported in the JSON above, matching
+// every other verb's defer posture.
+func delegateExitErr(sum delegate.Summary) error {
 	if sum.Failed > 0 {
-		// Failed = transport/config-class per-subtask errors (auth rejected,
-		// dispatch refused, broken wire) — the non-zero class. Defers and
-		// failed-verification are RESULT shapes: the JSON above reports them
-		// and the exit stays 0, matching every other verb's defer posture.
 		return fmt.Errorf("%d subtask(s) failed (transport/config) — see results[].reason", sum.Failed)
+	}
+	if sum.Infrastructure > 0 {
+		return fmt.Errorf("%d subtask(s) deferred on infrastructure/config, not on the work — see results[].defer_class and reason", sum.Infrastructure)
 	}
 	return nil
 }

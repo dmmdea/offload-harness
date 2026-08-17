@@ -55,4 +55,6 @@ local-offload delegate --contract contracts/research-digest.json --read-root . -
 ```
 
 Read the response's `summary` block first (`succeeded` / `deferred` / `failed_verification` /
-`failed`); exit 0 covers defers and failed verification, non-zero is transport/config only.
+`failed` / `infrastructure`); exit 0 covers honest defers and failed verification, non-zero is
+transport/config failures **and** `infrastructure > 0` — the defers whose `defer_class` blames
+a broken or misconfigured node rather than the work.

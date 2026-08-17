@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -972,6 +973,35 @@ func TestHealthAgentResidencyFailsClosedWhenRosterUnreachable(t *testing.T) {
 	}
 	if m["agent_enabled"] != true || m["agent_seat"] != "offload-e4b" {
 		t.Fatalf("static agent fields must still advertise: enabled=%v seat=%v", m["agent_enabled"], m["agent_seat"])
+	}
+}
+
+// TestHealthAgentResidencyProbeFailureIsLogged (M-5): failing closed is right,
+// failing closed SILENTLY is not. `agent_seat_resident:false` is the single
+// field that stops every remote placement, and with the probe error discarded
+// there was nothing anywhere — on the node or on the delegator — saying WHY the
+// node advertises itself as unusable. One line per probe (the probe runs at
+// most once per TTL window, so this cannot become per-request spam).
+func TestHealthAgentResidencyProbeFailureIsLogged(t *testing.T) {
+	var buf bytes.Buffer
+	oldOut, oldFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(oldOut); log.SetFlags(oldFlags) })
+
+	roster := fakeRoster(t, "gemma-4-e4b", "offload-e4b")
+	base := roster.URL
+	roster.Close()
+
+	s, _ := newTestServer(t, agentHealthCfg(base), &fakeRunner{}, nil)
+	s.refreshAgentResidency()
+
+	out := buf.String()
+	if !strings.Contains(out, "residency probe") {
+		t.Fatalf("log = %q, want the failed residency probe named", out)
+	}
+	if !strings.Contains(out, "offload-e4b") {
+		t.Fatalf("log = %q, want the seat named — it is what stops every remote placement", out)
 	}
 }
 

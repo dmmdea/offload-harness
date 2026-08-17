@@ -11,8 +11,10 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,11 +35,19 @@ const agentTestSeat = "seat-x"
 // /v1/models; loop answers the tool-calling chat requests (nth call, 1-based);
 // repack answers the grammar-constrained re-pack completions.
 type agentFake struct {
-	rosterIDs  []string
-	loop       func(n int64) string // returns the raw chat-completions response body
-	repack     func(n int64) string // content of the grammar completion (a JSON object string)
-	loopCalls  atomic.Int64
-	grammarCNT atomic.Int64
+	rosterIDs []string
+	loop      func(n int64) string // returns the raw chat-completions response body
+	repack    func(n int64) string // content of the grammar completion (a JSON object string)
+	// repackStatus, when non-zero, is returned for every grammar completion
+	// instead of a body: the seat is UNREACHABLE, not wrong.
+	repackStatus int
+	// repackDelay stalls every grammar completion — used to expire the
+	// contract's wall deadline inside the re-pack.
+	repackDelay time.Duration
+	// rosterStatus, when non-zero, is the status /v1/models answers with.
+	rosterStatus int
+	loopCalls    atomic.Int64
+	grammarCNT   atomic.Int64
 }
 
 func (f *agentFake) server(t *testing.T) *httptest.Server {
@@ -45,6 +55,10 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/models":
+			if f.rosterStatus != 0 {
+				w.WriteHeader(f.rosterStatus)
+				return
+			}
 			type m struct {
 				ID string `json:"id"`
 			}
@@ -66,6 +80,13 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 				t.Errorf("chat request with neither tools nor grammar: %v", body)
 			}
 			n := f.grammarCNT.Add(1)
+			if f.repackDelay > 0 {
+				time.Sleep(f.repackDelay)
+			}
+			if f.repackStatus != 0 {
+				w.WriteHeader(f.repackStatus)
+				return
+			}
 			content, _ := json.Marshal(f.repack(n))
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":` + string(content) + `},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":7}}`))
@@ -219,6 +240,9 @@ func TestRunAgentTaskTimeoutDefersNotErrors(t *testing.T) {
 	if !strings.Contains(wire.Reason, "timeout") {
 		t.Fatalf("reason = %q, want a wall-timeout reason", wire.Reason)
 	}
+	if wire.DeferClass != core.DeferClassBudget {
+		t.Fatalf("defer_class = %q, want %q — a wall ceiling is a BUDGET defer, not a broken box", wire.DeferClass, core.DeferClassBudget)
+	}
 }
 
 // TestRunAgentTaskSchemaFailRetriesOnceThenDefers: the structured re-pack
@@ -240,11 +264,77 @@ func TestRunAgentTaskSchemaFailRetriesOnceThenDefers(t *testing.T) {
 	if !wire.Deferred || !strings.HasPrefix(wire.Reason, "output failed schema") {
 		t.Fatalf("deferred/reason = %v/%q, want the output-failed-schema defer", wire.Deferred, wire.Reason)
 	}
+	if wire.DeferClass != core.DeferClassAbstention {
+		t.Fatalf("defer_class = %q, want %q — the seat answered, its SHAPE was wrong", wire.DeferClass, core.DeferClassAbstention)
+	}
 	if got := fake.grammarCNT.Load(); got != 2 {
 		t.Fatalf("re-pack attempts = %d, want exactly 2 (one retry)", got)
 	}
 	if wire.Output != "The answer is 42." {
 		t.Fatalf("output = %q, want the loop text preserved on a schema defer", wire.Output)
+	}
+}
+
+// TestRunAgentTaskRepackTransportFailureIsNotASchemaFailure (H-2): when the
+// re-pack cannot REACH the seat, the defer must say so — its own prefix
+// ("structured re-pack unreachable: ") and the infrastructure class. Filed
+// under "output failed schema:" (the old behavior, one merged lastErr), a
+// llama-swap 500 reads as a model that cannot follow a schema and sends the
+// operator to rewrite a schema that was never the problem.
+func TestRunAgentTaskRepackTransportFailureIsNotASchemaFailure(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs:    []string{agentTestSeat},
+		loop:         func(int64) string { return doneChat("The answer is 42.") },
+		repack:       func(int64) string { return `{"answer":"42"}` },
+		repackStatus: http.StatusInternalServerError,
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+	wire := decodeWire(t, res)
+
+	if !wire.Deferred {
+		t.Fatalf("want deferred, got %+v", wire)
+	}
+	if !strings.HasPrefix(wire.Reason, "structured re-pack unreachable: ") {
+		t.Fatalf("reason = %q, want the transport-specific prefix", wire.Reason)
+	}
+	if wire.DeferClass != core.DeferClassInfrastructure {
+		t.Fatalf("defer_class = %q, want %q", wire.DeferClass, core.DeferClassInfrastructure)
+	}
+	if got := fake.grammarCNT.Load(); got != 2 {
+		t.Fatalf("re-pack attempts = %d, want 2 (the one retry still applies to transport)", got)
+	}
+	if wire.Output != "The answer is 42." {
+		t.Fatalf("output = %q, want the loop text preserved", wire.Output)
+	}
+}
+
+// TestRunAgentTaskRepackDeadlineIsAWallTimeout (H-2): when the contract's wall
+// expires DURING the re-pack, the defer is the wall-timeout shape — not a
+// schema failure and not an "unreachable" endpoint. The delegator sizes future
+// contracts off this shape, so mislabeling it teaches it the wrong lesson.
+func TestRunAgentTaskRepackDeadlineIsAWallTimeout(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs:   []string{agentTestSeat},
+		loop:        func(int64) string { return doneChat("The answer is 42.") },
+		repack:      func(int64) string { return `{"answer":"42"}` },
+		repackDelay: 2500 * time.Millisecond, // past the 1s contract wall
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	contract := testContract()
+	contract.TimeoutSec = 1
+	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, contract))
+	wire := decodeWire(t, res)
+
+	if !wire.Deferred || !strings.HasPrefix(wire.Reason, "wall timeout after") {
+		t.Fatalf("deferred/reason = %v/%q, want the wall-timeout defer", wire.Deferred, wire.Reason)
+	}
+	if wire.DeferClass != core.DeferClassBudget {
+		t.Fatalf("defer_class = %q, want %q", wire.DeferClass, core.DeferClassBudget)
 	}
 }
 
@@ -266,6 +356,9 @@ func TestRunAgentTaskBudgetDefers(t *testing.T) {
 
 	if !wire.Deferred || !strings.Contains(wire.Reason, "step budget") {
 		t.Fatalf("deferred/reason = %v/%q, want a step-budget defer", wire.Deferred, wire.Reason)
+	}
+	if wire.DeferClass != core.DeferClassBudget {
+		t.Fatalf("defer_class = %q, want %q", wire.DeferClass, core.DeferClassBudget)
 	}
 	if wire.StopReason != "budget" {
 		t.Fatalf("stop_reason = %q", wire.StopReason)
@@ -292,7 +385,87 @@ func TestRunAgentTaskSeatUnservedDefers(t *testing.T) {
 	if !wire.Deferred || !strings.Contains(wire.Reason, "roster") {
 		t.Fatalf("deferred/reason = %v/%q, want a seat-unserved defer", wire.Deferred, wire.Reason)
 	}
+	if wire.DeferClass != core.DeferClassConfig {
+		t.Fatalf("defer_class = %q, want %q — a seat this node does not serve is a CONFIG defect, not an abstention", wire.DeferClass, core.DeferClassConfig)
+	}
 	if fake.loopCalls.Load() != 0 {
 		t.Fatalf("loop chats = %d, want 0 (defer BEFORE any planner call)", fake.loopCalls.Load())
+	}
+}
+
+// TestRunAgentTaskRosterProbeFailureIsLogged (M-4): the seat-residency probe
+// fails OPEN by design (the loop's first chat call carries a better error), but
+// failing open silently hid the first and clearest evidence that the endpoint
+// is wrong or down — the operator then debugs the loop error with no idea the
+// roster was already unreachable.
+func TestRunAgentTaskRosterProbeFailureIsLogged(t *testing.T) {
+	var buf bytes.Buffer
+	oldOut, oldFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(oldOut); log.SetFlags(oldFlags) })
+
+	fake := &agentFake{
+		rosterStatus: http.StatusInternalServerError, // the probe cannot answer
+		loop:         func(int64) string { return doneChat("The answer is 42.") },
+		repack:       func(int64) string { return `{"answer":"42"}` },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+	wire := decodeWire(t, res)
+
+	if wire.Deferred {
+		t.Fatalf("an unreachable roster must fail OPEN, not defer: %q", wire.Reason)
+	}
+	if out := buf.String(); !strings.Contains(out, "roster probe") {
+		t.Fatalf("log = %q, want the swallowed roster-probe failure surfaced", out)
+	}
+}
+
+// TestRunAgentTaskLoopErrorIsInfrastructure: the planner endpoint failing
+// mid-loop is an INFRASTRUCTURE defer — nothing was learned about the task and
+// no retry of the same contract can help until the box is fixed. Classing it
+// with abstentions is what lets a dead llama-swap read as "the small model
+// couldn't do it".
+func TestRunAgentTaskLoopErrorIsInfrastructure(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop:      func(int64) string { return `{"error":{"message":"model load failed"}}` },
+		repack:    func(int64) string { return `{"answer":"x"}` },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+	wire := decodeWire(t, res)
+
+	if !wire.Deferred {
+		t.Fatalf("want deferred, got %+v", wire)
+	}
+	if wire.DeferClass != core.DeferClassInfrastructure {
+		t.Fatalf("defer_class = %q (reason %q), want %q", wire.DeferClass, wire.Reason, core.DeferClassInfrastructure)
+	}
+}
+
+// TestRunAgentTaskUnknownProfileIsConfig: a contract naming a profile this
+// build does not have can never run here — config, not abstention.
+func TestRunAgentTaskUnknownProfileIsConfig(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop:      func(int64) string { return doneChat("never reached") },
+		repack:    func(int64) string { return `{"answer":"x"}` },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	contract := testContract()
+	contract.Profile = "no-such-profile"
+	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, contract))
+	wire := decodeWire(t, res)
+
+	if !wire.Deferred || wire.DeferClass != core.DeferClassConfig {
+		t.Fatalf("deferred/class = %v/%q (reason %q), want a config defer", wire.Deferred, wire.DeferClass, wire.Reason)
 	}
 }

@@ -9,12 +9,16 @@ package delegate
 
 import "encoding/json"
 
-// SummaryWire is the top-of-response tally.
+// SummaryWire is the top-of-response tally. Infrastructure is a SUBSET of
+// Deferred (the defers whose class blames the stack or the config, not the
+// work), published beside it so "one node is broken" cannot hide inside a
+// green-looking defer count.
 type SummaryWire struct {
 	Succeeded          int `json:"succeeded"`
 	Deferred           int `json:"deferred"`
 	FailedVerification int `json:"failed_verification"`
 	Failed             int `json:"failed"`
+	Infrastructure     int `json:"infrastructure"`
 }
 
 // ResultWire is one subtask's published outcome. Failed marks a
@@ -30,6 +34,7 @@ type ResultWire struct {
 	Structured         json.RawMessage `json:"structured,omitempty"`
 	Deferred           bool            `json:"deferred"`
 	Reason             string          `json:"reason,omitempty"`
+	DeferClass         string          `json:"defer_class,omitempty"`
 	Failed             bool            `json:"failed,omitempty"`
 	AcceptanceFailures []string        `json:"acceptance_failures,omitempty"`
 	WallMs             int64           `json:"wall_ms"`
@@ -50,6 +55,7 @@ func WireResponse(results []PlacedResult, sum Summary) ResponseWire {
 			Deferred:           sum.Deferred,
 			FailedVerification: sum.FailedVerification,
 			Failed:             sum.Failed,
+			Infrastructure:     sum.Infrastructure,
 		},
 		Results: make([]ResultWire, 0, len(results)),
 	}
@@ -63,6 +69,7 @@ func WireResponse(results []PlacedResult, sum Summary) ResponseWire {
 			Structured:         pr.Result.Structured,
 			Deferred:           pr.Result.Deferred,
 			Reason:             pr.Result.Reason,
+			DeferClass:         pr.Result.DeferClass,
 			AcceptanceFailures: pr.AcceptanceFailures,
 			WallMs:             pr.wallMs,
 		}

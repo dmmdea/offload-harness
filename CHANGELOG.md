@@ -53,6 +53,14 @@ no transcript ever crosses the wire. Decisions recorded in ADR 0023.
   eligible only when enabled + resident + the conservative token estimate plus the
   3072-token loop reserve fits the advertised ceiling + the contract carries a schema +
   requester depth 0.
+- **Defer classes** (`defer_class` on `AgentWireResult`): every defer says WHY in a
+  machine-branchable word — `abstention` (the model answered wrongly), `budget` (step or wall
+  ceiling), `infrastructure` (the stack failed: agent build, loop transport, an unreachable
+  structured re-pack), `config` (no seat resolvable, seat unserved, unknown profile, no
+  eligible remote). The delegator counts `infrastructure` + `config` defers into
+  `summary.infrastructure` and the `delegate` CLI **exits non-zero** on it: a node with a dead
+  llama-swap defers every subtask, and that must not read as a clean run. Additive and
+  `omitempty` — a pre-0.63 node's empty class means *unknown*, never abstention.
 - **Delegator surfaces**: MCP `agent_delegate` (registration gated on
   `agent_delegation_enabled`, so tools/list is byte-identical when off; summary-first
   response) and the `local-offload delegate` CLI verb. Both accept `context_paths` inlined
@@ -69,6 +77,31 @@ no transcript ever crosses the wire. Decisions recorded in ADR 0023.
   `docs/FLEET-NODE.md`; the operator enable recipe for both roles plus the honest
   context-budget table (at an 8k seat, ~2–4k tokens of practical contract content) in
   `docs/OPERATOR-GUIDE.md`; delegation surfaces in `docs/systems/coding-agent.md`.
+
+Diagnostics hardening (adversarial silent-failure review of this arc, same release):
+
+- A poll that never reaches the node is no longer laundered into a defer. The delegator
+  tracks the last poll error and whether the node ever answered: a node that answered but
+  never finished defers honestly (`poll deadline after <d>: node accepted the job but did not
+  reach a terminal state`, plus the last error when one exists), while a node that **never**
+  answered — dial refused, connection dropped, unusable body — is a `summary.failed` failure
+  with a non-zero exit. Previously any of those produced a fabricated
+  `{deferred:true, reason:"poll deadline"}` stamped with the chosen node's id and seat, and
+  the CLI exited 0. Unrecognized poll answers (5xx, unknown states) are captured and logged
+  instead of falling through the switch unread.
+- "No eligible remote" now names the real cause instead of always blaming the gate: health
+  probe errors are collected and logged, and the reason distinguishes *no remotes configured*
+  (class `config`), *every remote failed its health probe* (listed; class `infrastructure`),
+  and *remotes answered but none passed the gate* (class `config`).
+- Telemetry failures are loud once per run: a `delegation-log` corpus write failure or a
+  ledger open/write failure warns (once, never per subtask) instead of being discarded — a
+  delegator writing nothing looked identical to one writing everything.
+- Probe failures that only ever produced silence now log: the cascade remote lane's roster
+  probe (once per TTL window per base, so a lane that never engages is diagnosable), the node
+  agent-seat roster probe (which fails open by design), and the node's `agent_seat_resident`
+  residency probe (the one field that stops every remote placement).
+- A deferred LOCAL result no longer has acceptance checks run against it — matching the remote
+  path, so a defer can never be reported as a verification failure.
 
 Config keys added: `seat_endpoints`, `cascade_remote_lanes`, `agent_ctx_tokens`,
 `fleet_auth_token`, `fleet_agent_enabled`, `agent_delegation_enabled` — all default
