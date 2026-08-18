@@ -49,8 +49,8 @@ func laneServer(t *testing.T, chatHits, rosterHits *atomic.Int64, rosterJSON str
 func TestResolveEndpointOrder(t *testing.T) {
 	const (
 		defBase  = "http://127.0.0.1:11436"
-		seatBase = "http://lenovo-m720q:11436"
-		laneBase = "http://qube:11436"
+		seatBase = "http://node-c:11436"
+		laneBase = "http://workstation:11436"
 	)
 	mk := func(withSeat, withLanes, busy, resident bool) *Client {
 		c := New(defBase, "", "offload-e4b", time.Second)
@@ -119,11 +119,11 @@ func TestWithRemoteLanesEmptyIsIdentity(t *testing.T) {
 		t.Fatal("WithRemoteLanes(empty map) must return the same client")
 	}
 	pristine(t, c)
-	if got := c.WithRemoteLanes(map[string]string{"m": "http://qube:11436"}, nil, resident); got != c {
+	if got := c.WithRemoteLanes(map[string]string{"m": "http://workstation:11436"}, nil, resident); got != c {
 		t.Fatal("WithRemoteLanes(nil busy) must return the same client")
 	}
 	pristine(t, c)
-	if got := c.WithRemoteLanes(map[string]string{"m": "http://qube:11436"}, busy, nil); got != c {
+	if got := c.WithRemoteLanes(map[string]string{"m": "http://workstation:11436"}, busy, nil); got != c {
 		t.Fatal("WithRemoteLanes(nil resident) must return the same client")
 	}
 	pristine(t, c)

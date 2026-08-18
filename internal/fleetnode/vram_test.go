@@ -59,8 +59,8 @@ func TestParseSmiMemory(t *testing.T) {
 // 2026-08-04) — reused across the multi-device AND the UUID-pin tests so the
 // fixtures stay honest to the actual hardware that shipped this bug.
 const (
-	node5060TiUUID = "GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97" // index 0, 16311 MiB total
-	node5070TiUUID = "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7" // index 1, 16303 MiB total
+	node5060TiUUID = "GPU-1111aaaa-2222-3333-4444-555566667777" // index 0, 16311 MiB total
+	node5070TiUUID = "GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000" // index 1, 16303 MiB total
 )
 
 // TestParseSmiMemoryDevices_MultiDevice locks the multi-device parse this bug

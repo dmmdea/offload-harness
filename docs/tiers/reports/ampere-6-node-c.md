@@ -6,7 +6,7 @@
 | harness version | 0.26.0 |
 | platform | linux/amd64 |
 | generated | 2026-07-27 09:14 UTC |
-| config | /srv/ecosystem_backup/apps/offload-stack/etc/config.json |
+| config | /srv/offload-stack/etc/config.json |
 | hardware tier | UNKNOWN — no installer manifest at that path (open /home/<user>/offload-stack/installed.json: no such file or directory) |
 | manifest | /home/<user>/offload-stack/installed.json |
 
@@ -30,17 +30,17 @@ Derived from this machine's bindings, not declared. `CONFIGURED` = bound and the
 
 | route | verdict | engine | bindings |
 |---|---|---|---|
-| generate_image | CONFIGURED | sdcpp | sdcpp_bin=/srv/ecosystem_backup/apps/offload-stack/build/sd.cpp/build/bin/sd-cli; sdcpp_model=/srv/ecosystem_backup/apps/offload-stack/models/sdxl-turbo/stable-diffusion-xl-1.0-turbo-Q4_0.gguf; sdcpp_script=/srv/ecosystem_backup/apps/offload-stack/src/offload-harness/render/sdcpp-generate.mjs |
+| generate_image | CONFIGURED | sdcpp | sdcpp_bin=/srv/offload-stack/build/sd.cpp/build/bin/sd-cli; sdcpp_model=/srv/offload-stack/models/sdxl-turbo/stable-diffusion-xl-1.0-turbo-Q4_0.gguf; sdcpp_script=/srv/offload-stack/src/offload-harness/render/sdcpp-generate.mjs |
 | inpaint_image | NOT CONFIGURED | comfyui | inpaint_script/inpaint_ckpt is unset |
-| generate_video | CONFIGURED | comfyui | videogen_script=/srv/ecosystem_backup/apps/offload-stack/src/offload-harness/render/comfy-video.mjs |
-| generate_audio:voice | CONFIGURED | chatterbox-tts | voicegen_script=/srv/ecosystem_backup/apps/offload-stack/src/offload-harness/render/tts.mjs |
-| generate_audio:music | CONFIGURED | acestep | musicgen_script=/srv/ecosystem_backup/apps/offload-stack/src/offload-harness/render/comfy-music.mjs |
-| run_graph | CONFIGURED | comfyui | run_graph_script=/srv/ecosystem_backup/apps/offload-stack/src/offload-harness/render/comfy-run-graph.mjs |
-| edit_image | CONFIGURED | pil | edit_python=/srv/ecosystem_backup/apps/comfyui/.venv/bin/python |
+| generate_video | CONFIGURED | comfyui | videogen_script=/srv/offload-stack/src/offload-harness/render/comfy-video.mjs |
+| generate_audio:voice | CONFIGURED | chatterbox-tts | voicegen_script=/srv/offload-stack/src/offload-harness/render/tts.mjs |
+| generate_audio:music | CONFIGURED | acestep | musicgen_script=/srv/offload-stack/src/offload-harness/render/comfy-music.mjs |
+| run_graph | CONFIGURED | comfyui | run_graph_script=/srv/offload-stack/src/offload-harness/render/comfy-run-graph.mjs |
+| edit_image | CONFIGURED | pil | edit_python=/srv/apps/comfyui/.venv/bin/python |
 | flatten_design | NOT CONFIGURED | gimp | gimp_console_path is unset |
 | media | CONFIGURED | ffmpeg | ffmpeg_path=/usr/bin/ffmpeg |
 | node _(prereq)_ | CONFIGURED | runtime | node_path=/usr/bin/node — every render script runs under it |
-| comfyui _(prereq)_ | CONFIGURED | runtime | comfy_dir=/srv/ecosystem_backup/apps/comfyui |
+| comfyui _(prereq)_ | CONFIGURED | runtime | comfy_dir=/srv/apps/comfyui |
 
 ---
 

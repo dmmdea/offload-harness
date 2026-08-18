@@ -5,13 +5,13 @@ package measure
 import "testing"
 
 // Real nvidia-smi output shape from this box (--format=csv,noheader,nounits).
-const smiFixture = `GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97, NVIDIA GeForce RTX 5060 Ti, 721, 16311
-GPU-2a44210f-6739-2d89-0e21-44cd5143faf7, NVIDIA GeForce RTX 5070 Ti, 1607, 16303`
+const smiFixture = `GPU-1111aaaa-2222-3333-4444-555566667777, NVIDIA GeForce RTX 5060 Ti, 721, 16311
+GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000, NVIDIA GeForce RTX 5070 Ti, 1607, 16303`
 
 func TestParseGPUCSVKeysByUUID(t *testing.T) {
 	roles := map[string]string{
-		"GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97": "utility-card",
-		"GPU-2a44210f-6739-2d89-0e21-44cd5143faf7": "fast-card",
+		"GPU-1111aaaa-2222-3333-4444-555566667777": "utility-card",
+		"GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000": "fast-card",
 	}
 	gpus, err := parseGPUCSV(smiFixture, roles)
 	if err != nil {
@@ -24,14 +24,14 @@ func TestParseGPUCSVKeysByUUID(t *testing.T) {
 	for _, g := range gpus {
 		byUUID[g.UUID] = g
 	}
-	util := byUUID["GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97"]
+	util := byUUID["GPU-1111aaaa-2222-3333-4444-555566667777"]
 	if util.Name != "NVIDIA GeForce RTX 5060 Ti" || util.UsedMiB != 721 || util.TotalMiB != 16311 {
 		t.Errorf("utility card parsed as %+v", util)
 	}
 	if util.Role != "utility-card" || util.Label() != "utility-card" {
 		t.Errorf("role label = %q/%q", util.Role, util.Label())
 	}
-	fast := byUUID["GPU-2a44210f-6739-2d89-0e21-44cd5143faf7"]
+	fast := byUUID["GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000"]
 	if fast.UsedMiB != 1607 || fast.Role != "fast-card" {
 		t.Errorf("fast card parsed as %+v", fast)
 	}
@@ -51,7 +51,7 @@ func TestLabelFallsBackToNameAndShortUUID(t *testing.T) {
 			t.Errorf("Label() = %q, want %q", g.Label(), want)
 		}
 	}
-	if got := ShortUUID("GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97"); got != "3ee161b5" {
+	if got := ShortUUID("GPU-1111aaaa-2222-3333-4444-555566667777"); got != "1111aaaa" {
 		t.Errorf("ShortUUID = %q", got)
 	}
 }

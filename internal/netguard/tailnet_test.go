@@ -20,27 +20,36 @@ import (
 // config point a "local" seat at an arbitrary public server wearing a
 // tailnet-looking name.
 func TestTailnetURL(t *testing.T) {
+	// The zone is CONFIGURED, not compiled in (public repo). Install one for the
+	// duration of this test and restore whatever was there, so ordering between
+	// tests can never make this pass or fail by accident.
+	prev := TailnetSuffix()
+	if err := SetTailnetSuffix("tailnnnnnn.ts.net"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = SetTailnetSuffix(prev) })
+
 	accept := []string{
-		"http://127.0.0.1:11436",              // loopback literal
-		"http://100.127.9.110:18811",          // tailnet CGNAT literal
-		"http://lenovo-m720q:11436",           // dotless MagicDNS short name
-		"http://qube.tail38a707.ts.net:11436", // FQDN under the house suffix
-		"https://qube.tail38a707.ts.net:11436",
+		"http://127.0.0.1:11436",                     // loopback literal
+		"http://100.64.0.1:18811",                    // tailnet CGNAT literal
+		"http://node-c:11436",                        // dotless MagicDNS short name
+		"http://workstation.tailnnnnnn.ts.net:11436", // FQDN under the house suffix
+		"https://workstation.tailnnnnnn.ts.net:11436",
 		"http://[::1]:11436",     // bracketed IPv6 loopback
 		"http://localhost:11436", // dotless by shape; resolves loopback
-		"http://qube:11436",
+		"http://workstation:11436",
 		"http://100.64.0.0:80", // CGNAT range floor is inside the /10
 	}
 	reject := []string{
-		"http://example.com",     // public FQDN
-		"http://8.8.8.8",         // public IP literal (port defaulted, still checked)
-		"https://api.openai.com", // the exact cloud egress ADR 0001 forbids
-		"http://evil.ts.net:443", // generic .ts.net NOT under the house suffix
+		"http://example.com",               // public FQDN
+		"http://8.8.8.8",                   // public IP literal (port defaulted, still checked)
+		"https://api.openai.com",           // the exact cloud egress ADR 0001 forbids
+		"http://evil.ts.net:443",           // generic .ts.net NOT under the house suffix
 		"http://192.168.1.5:11436",         // LAN literal: reachable, but not the tailnet
 		"http://100.63.255.255:80",         // one address below the CGNAT /10
 		"http://100.128.0.0:80",            // one address above the CGNAT /10
-		"http://eviltail38a707.ts.net:443", // suffix match without the label boundary dot
-		"http://tail38a707.ts.net:443",     // the bare zone is not a host UNDER it
+		"http://eviltailnnnnnn.ts.net:443", // suffix match without the label boundary dot
+		"http://tailnnnnnn.ts.net:443",     // the bare zone is not a host UNDER it
 		"gopher://100.64.1.2/x",            // non-http scheme, even with a tailnet host
 		"ftp://127.0.0.1/x",
 		"",
@@ -124,10 +133,10 @@ func TestSafeDialContextResolvesAndPins(t *testing.T) {
 
 	mustAddr := func(s string) netip.Addr { return netip.MustParseAddr(s) }
 	answers := map[string][]netip.Addr{
-		"lenovo-m720q": {mustAddr("100.77.1.9")},
-		"evil-host":    {mustAddr("203.0.113.7")},                          // rebound to a public address
-		"mixed-host":   {mustAddr("203.0.113.7"), mustAddr("100.77.1.9")}, // poisoned answer alongside a real one
-		"mapped-host":  {mustAddr("::ffff:100.77.1.9")},                   // IPv4-mapped IPv6 form of a tailnet address
+		"node-c":      {mustAddr("100.77.1.9")},
+		"evil-host":   {mustAddr("203.0.113.7")},                         // rebound to a public address
+		"mixed-host":  {mustAddr("203.0.113.7"), mustAddr("100.77.1.9")}, // poisoned answer alongside a real one
+		"mapped-host": {mustAddr("::ffff:100.77.1.9")},                   // IPv4-mapped IPv6 form of a tailnet address
 	}
 	lookupNetIP = func(ctx context.Context, host string) ([]netip.Addr, error) {
 		a, ok := answers[host]
@@ -142,7 +151,7 @@ func TestSafeDialContextResolvesAndPins(t *testing.T) {
 		addr     string
 		wantDial string // "" = must refuse without dialing
 	}{
-		{"tailnet answer dials the pinned literal", "lenovo-m720q:11436", "100.77.1.9:11436"},
+		{"tailnet answer dials the pinned literal", "node-c:11436", "100.77.1.9:11436"},
 		{"public answer refused", "evil-host:11436", ""},
 		{"mixed answers dial ONLY the tailnet one", "mixed-host:11436", "100.77.1.9:11436"},
 		{"IPv4-mapped answer unmapped then dialed", "mapped-host:11436", "100.77.1.9:11436"},
@@ -199,12 +208,12 @@ func TestSafeTransportEndToEnd(t *testing.T) {
 	restore := lookupNetIP
 	defer func() { lookupNetIP = restore }()
 	lookupNetIP = func(ctx context.Context, host string) ([]netip.Addr, error) {
-		if host == "qube.tail38a707.ts.net" {
+		if host == "workstation.tailnnnnnn.ts.net" {
 			return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
 		}
 		return nil, fmt.Errorf("no such host %q", host)
 	}
-	resp, err = client.Get("http://qube.tail38a707.ts.net:" + u.Port() + "/")
+	resp, err = client.Get("http://workstation.tailnnnnnn.ts.net:" + u.Port() + "/")
 	if err != nil {
 		t.Fatalf("hostname GET through resolve-and-pin: %v", err)
 	}
@@ -244,5 +253,66 @@ func TestSafeTransportPreservesFallbackShape(t *testing.T) {
 	}
 	if orig.Proxy == nil {
 		t.Error("the fallback transport was mutated (its Proxy was nilled)")
+	}
+}
+
+// TestTailnetURLFailsClosedWithNoSuffix pins the default. The zone moved from a
+// compiled-in constant to config (it was one operator's private tailnet name,
+// shipped in a public repo), and the ONLY safe default for a security gate is
+// the narrower one: with no suffix configured, loopback / CGNAT literals /
+// dotless MagicDNS names still pass and every dotted FQDN — including a real
+// tailnet one — is refused. If this ever goes green for a dotted host, the
+// default has been widened and the "generic .ts.net would admit any tailnet's
+// Funnel host" hazard is back.
+func TestTailnetURLFailsClosedWithNoSuffix(t *testing.T) {
+	prev := TailnetSuffix()
+	if err := SetTailnetSuffix(""); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = SetTailnetSuffix(prev) })
+
+	for _, raw := range []string{
+		"http://workstation.tailnnnnnn.ts.net:11436", // a REAL tailnet FQDN
+		"http://anything.ts.net:11436",
+		"http://example.com",
+	} {
+		if err := TailnetURL(raw); err == nil {
+			t.Errorf("TailnetURL(%q) = nil with no suffix configured; the default must be fail-CLOSED", raw)
+		}
+	}
+	// The shapes that never depended on the suffix must still pass.
+	for _, raw := range []string{
+		"http://127.0.0.1:11436",
+		"http://100.64.0.1:18811",
+		"http://node-c:11436",
+	} {
+		if err := TailnetURL(raw); err != nil {
+			t.Errorf("TailnetURL(%q) = %v; suffix-independent shapes must still pass", raw, err)
+		}
+	}
+}
+
+// TestSetTailnetSuffixNormalizesAndRefuses: a typo here fails OPEN in the
+// reader's mind ("I set it, so my host is allowed") while failing closed in the
+// gate, so a non-zone value is refused rather than stored.
+func TestSetTailnetSuffixNormalizesAndRefuses(t *testing.T) {
+	prev := TailnetSuffix()
+	t.Cleanup(func() { _ = SetTailnetSuffix(prev) })
+
+	for _, in := range []string{"TAILNNNNNN.TS.NET", ".tailnnnnnn.ts.net", "tailnnnnnn.ts.net.", "  tailnnnnnn.ts.net  "} {
+		if err := SetTailnetSuffix(in); err != nil {
+			t.Fatalf("SetTailnetSuffix(%q) errored: %v", in, err)
+		}
+		if got := TailnetSuffix(); got != "tailnnnnnn.ts.net" {
+			t.Errorf("SetTailnetSuffix(%q) stored %q, want the normalized zone", in, got)
+		}
+		if err := TailnetURL("http://workstation.tailnnnnnn.ts.net:11436"); err != nil {
+			t.Errorf("after SetTailnetSuffix(%q) a host under the zone was refused: %v", in, err)
+		}
+	}
+	for _, bad := range []string{"notazone", "has space.ts.net", "http://tailnnnnnn.ts.net"} {
+		if err := SetTailnetSuffix(bad); err == nil {
+			t.Errorf("SetTailnetSuffix(%q) = nil, want a refusal", bad)
+		}
 	}
 }
