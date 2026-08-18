@@ -6,6 +6,50 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.71.0] - 2026-08-17
+### Fixed — a fresh Windows install wrote a broken sdcpp binding on three tiers
+`Merge-ConfigSeed` is the PowerShell parity copy of `tierseed.Resolve` and writes the
+FRESH `~/.local-offload/config.json` at Step 8, bypassing Go. When `vae_mode` was
+introduced on the Go side, this copy was never taught either half of it:
+
+- **`__EXE__` was never expanded.** Only `__OFFLOAD_HOME__` was substituted, so
+  `sdcpp_bin` shipped as a literal `.../sdcpp/sd-cli__EXE__` — a path that does not
+  exist. Affects every tier whose seed carries the token: **ampere-6, amd-rdna3,
+  amd-rdna3-dgpu**. Now expanded unconditionally (this script only runs on Windows, and
+  the token is OS-dependent, not install-root-dependent — it must expand even with no
+  `-OffloadHome`).
+- **`vae_mode` was copied through verbatim.** It is a seed-only DIRECTIVE that Go
+  translates into an `sdcpp_extra_args` flag and never emits. So a fresh install wrote a
+  meaningless `vae_mode` key AND never got the flag — on `amd-rdna3` that flag is
+  `--vae-on-cpu`, which the tier notes record as REQUIRED on an AMD iGPU or the VAE
+  renders all black (sd.cpp #563/#1621). Now mirrored from Go's `vaeArgs` map.
+
+**These were not new bugs.** `setup/tests/install-config-seed.test.ps1` had been
+reporting them for five assertions — it was simply never wired into CI, so it sat red
+and nobody read it. Four of the five "stale failures" were the suite correctly reporting
+real defects; only one assertion was genuinely out of date (it read `sdcpp_extra_args`
+off the raw seed, which stopped existing when `vae_mode` replaced it) and is rewritten to
+assert the translation end-to-end instead.
+
+### Added — the download half of the gate mechanism is now testable and tested
+The gate→download-set mapping lived inline in the main flow, BELOW the dot-source test
+seam, so nothing could reach it: deleting the `model-qwen35-4b` download line left the
+entire suite green while the seat still rendered into the yaml and `config_seed` still
+named it — the exact split-brain the gate exists to prevent. Extracted as
+`Get-GatedModelKeys` and pinned, including the DELIBERATE asymmetry in both directions
+(qwen3.8-27b rides the `OFFLOAD_WITH_FAMILY` gate at 18.8GB; the 2.9GB qwen3.5-4b agent
+seat does not, because a lean install that dropped it would ship the tier's weakest
+configuration while the yaml still named the seat). Mutation-verified: deleting the
+download line turns three assertions red.
+
+Note the extracted function returns WITHOUT the `,@()` no-unroll wrapper, deliberately:
+that guard is right where a 1-element array must survive JSON serialization, but on an
+empty result it produces a 1-element array holding an empty array.
+
+### Added — `install-config-seed.test.ps1` runs in CI
+Previously only `detect.tests.ps1` and `render.tests.ps1` ran, so the suite covering what
+an install SEEDS and DOWNLOADS had no gate at all.
+
 ## [0.70.0] - 2026-08-17
 ### Added — `agent_profile`: a per-tier DEFAULT tool profile for the agent loop
 Closes the standing question "should a non-general agent profile be enforced as a per-tier
