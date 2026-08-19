@@ -4,6 +4,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1237,28 +1238,49 @@ func warnBadEnumValues(c Config) {
 //     pool keys sitting in the config.
 //   - pool vvram > 0 under a family that has no pooled loader: the flags are
 //     parsed and never consulted.
-//   - pool vvram > 0 without --disable-dynamic-vram in COMFY_EXTRA_ARGS:
-//     ComfyUI DynamicVRAM shadows the DisTorch2 hook (MultiGPU #191), so the
-//     pooled graph loads single-card WHILE the allocation banner still prints
-//     — a misconfigured box is indistinguishable from a pooled one at every
-//     observable surface. Warn-only: the stock launcher may carry the flag on
-//     manually-started servers, so absence of the env is a smell, not proof.
+//   - EITHER pooled seat (imagegen_pool_vvram_gb / videogen_pool_vvram_gb) > 0
+//     without --disable-dynamic-vram in COMFY_EXTRA_ARGS: ComfyUI DynamicVRAM
+//     shadows the DisTorch2 hook (MultiGPU #191), so the pooled graph loads
+//     single-card WHILE the allocation banner still prints — a misconfigured box
+//     is indistinguishable from a pooled one at every observable surface.
+//     Warn-only: the stock launcher may carry the flag on manually-started
+//     servers, so absence of the env is a smell, not proof. The two seats warn
+//     independently so the message names the config key actually at fault.
 func warnImageGenBindingTraps(c Config) {
+	warnMediaGenBindingTrapsTo(c, os.Stderr)
+}
+
+// warnMediaGenBindingTrapsTo carries the body with an injectable sink so the
+// warnings are testable. The wrapper above keeps the production call site
+// unchanged. It covers BOTH pooled media seats: the video seat carries the
+// identical MultiGPU #191 requirement as the image one, and warning on only one
+// of them meant a pooled video seat could silently un-pool with no signal.
+func warnMediaGenBindingTrapsTo(c Config, w io.Writer) {
 	if c.ImageGenFamily == "krea2" && (c.ImageGenSteps > 0) != (c.ImageGenCFG > 0) {
-		fmt.Fprintf(os.Stderr, "warning: imagegen_steps/imagegen_cfg are half-bound (%d / %g) on the krea2 seat — the render route rejects the half-pair and EVERY render will defer; bind both (turbo recipe: 8 / 1.0) or neither\n",
+		fmt.Fprintf(w, "warning: imagegen_steps/imagegen_cfg are half-bound (%d / %g) on the krea2 seat — the render route rejects the half-pair and EVERY render will defer; bind both (turbo recipe: 8 / 1.0) or neither\n",
 			c.ImageGenSteps, c.ImageGenCFG)
 	}
 	poolAux := c.ImageGenPoolCompute != "" || c.ImageGenPoolDonor != ""
 	if c.ImageGenPoolVvramGB < 0 {
-		fmt.Fprintf(os.Stderr, "warning: imagegen_pool_vvram_gb %g is negative — no pool flag is emitted and the seat renders SINGLE-GPU despite the pool config\n", c.ImageGenPoolVvramGB)
+		fmt.Fprintf(w, "warning: imagegen_pool_vvram_gb %g is negative — no pool flag is emitted and the seat renders SINGLE-GPU despite the pool config\n", c.ImageGenPoolVvramGB)
 	} else if poolAux && c.ImageGenPoolVvramGB == 0 {
-		fmt.Fprintln(os.Stderr, "warning: imagegen_pool_compute/donor are set but imagegen_pool_vvram_gb is 0 — pooling never engages and the seat renders SINGLE-GPU; set the vvram GiB to pool")
+		fmt.Fprintln(w, "warning: imagegen_pool_compute/donor are set but imagegen_pool_vvram_gb is 0 — pooling never engages and the seat renders SINGLE-GPU; set the vvram GiB to pool")
 	}
 	if c.ImageGenPoolVvramGB > 0 && c.ImageGenFamily != "krea2" {
-		fmt.Fprintf(os.Stderr, "warning: imagegen_pool_vvram_gb is set but imagegen_family is %q — pooled loading is wired for the krea2 family only; the flags are parsed and never consulted\n", c.ImageGenFamily)
+		fmt.Fprintf(w, "warning: imagegen_pool_vvram_gb is set but imagegen_family is %q — pooled loading is wired for the krea2 family only; the flags are parsed and never consulted\n", c.ImageGenFamily)
 	}
-	if c.ImageGenPoolVvramGB > 0 && !strings.Contains(os.Getenv("COMFY_EXTRA_ARGS"), "--disable-dynamic-vram") {
-		fmt.Fprintln(os.Stderr, "warning: pooled image seat configured but COMFY_EXTRA_ARGS does not carry --disable-dynamic-vram — ComfyUI DynamicVRAM silently un-pools every safetensor DisTorch2 load (MultiGPU #191) unless the launch carries the flag some other way")
+	dynVRAMDisabled := strings.Contains(os.Getenv("COMFY_EXTRA_ARGS"), "--disable-dynamic-vram")
+	if c.ImageGenPoolVvramGB > 0 && !dynVRAMDisabled {
+		fmt.Fprintln(w, "warning: pooled image seat configured but COMFY_EXTRA_ARGS does not carry --disable-dynamic-vram — ComfyUI DynamicVRAM silently un-pools every safetensor DisTorch2 load (MultiGPU #191) unless the launch carries the flag some other way")
+	}
+	// The pooled VIDEO seat carries the IDENTICAL MultiGPU #191 requirement
+	// (docs/tiers/blackwell-2x16.md; render/wf-ltx25-i2v.mjs). Un-pooled, an
+	// int8 DiT that upcasts to ~39 GB at compute no longer fits the virtual pool
+	// it was measured against, so the render OOMs or silently loads single-card.
+	// Warn-only, same reasoning as the image case: a manually-started server may
+	// carry the flag, so an absent env var is a smell rather than proof.
+	if c.VideoGenPoolVvramGB > 0 && !dynVRAMDisabled {
+		fmt.Fprintln(w, "warning: pooled video seat configured but COMFY_EXTRA_ARGS does not carry --disable-dynamic-vram — ComfyUI DynamicVRAM silently un-pools every safetensor DisTorch2 load (MultiGPU #191) unless the launch carries the flag some other way")
 	}
 }
 
