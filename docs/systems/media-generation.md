@@ -229,9 +229,10 @@ the output envelope shape.
    through this system so it takes the machine-wide lease; a direct POST is unprotected
    rather than refused (see [gpu-lease](gpu-lease.md) and
    [ADR 0018](../architecture/decisions/0018-machine-wide-fenced-gpu-lease.md)). This covers
-   any tool that drives ComfyUI directly, the official Comfy-MCP server included: it is
-   adoptable only behind the harness, never pointed at `:8188`. Use `run-graph` for graphs
-   the templates do not cover, or `gpu reserve --class media` to hold the lease by hand.
+   any tool that drives ComfyUI directly — the official Comfy-MCP server, and this repo's own
+   `tools/comfyui` CLI, whose supported posture is as the harness's submit backend (where the
+   lease is already held) rather than standalone. Use `run-graph` for graphs the templates do
+   not cover, or `gpu reserve --class media` to hold the lease by hand.
 4. **No FLUX-family model is ever added** — see
    [ADR 0011](../architecture/decisions/0011-flux-family-license-prohibition.md). The binding reason
    is the non-commercial licence, not VRAM; a bigger card does not reopen it.

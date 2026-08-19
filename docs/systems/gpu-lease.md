@@ -245,5 +245,9 @@ renewing holder stale the moment its declared window lapsed.
   while holding the lease.
 - **The lease reduces the number of teardowns; the drain is what makes one safe.** Both needed.
 - **Head-of-line blocking is structural** — a 45-minute video blocks everything behind it.
-- `internal/pipeline` does not yet take a `media` lease around its own generation calls; the Node
-  runner does, on the same path, so arbitration holds today.
+- ~~`internal/pipeline` does not yet take a `media` lease around its own generation calls.~~
+  **No longer true, corrected 2026-08-19.** `acquireMediaLease` wraps every generation route in
+  `internal/pipeline/pipeline.go`: image-gen, image-gen (sdcpp), inpaint, edit, image-gen batch,
+  run-graph, video-gen and audio-gen. The one deliberate exception is `runPipelineJob`, which
+  takes the in-process `mediaSlot` only and documents why; its nested per-stage calls do take the
+  lease. This bullet had gone stale and then directly contradicted the rule added above it.
