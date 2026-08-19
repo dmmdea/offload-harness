@@ -2067,7 +2067,16 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	if serr != nil {
 		return p.deferGen(req, meta, start, len(req.Input), serr.Error())
 	}
-	meta.Model = videoModelLabel(p.cfg)
+	// Resolve the family ONCE, here, and derive every downstream use from it.
+	// 0.73.0 computed the ledger label from config alone while the runner arg was
+	// resolved 30 lines below with the OPPOSITE precedence (an explicit per-request
+	// `model` wins), so any caller using the documented override got a ledger row
+	// naming this box's configured seat for a render that used another family —
+	// a false provenance value, which is worse than the vague label it replaced.
+	// Two call sites re-deriving the same precedence is what caused that, so they
+	// are now one call.
+	argModel, renderFamily := resolveVideoFamily(p.cfg, paramStr(req.Params, "model"))
+	meta.Model = videoModelLabel(renderFamily)
 
 	seed := paramIntOr(req.Params, "seed", 0)
 	if seed <= 0 {
@@ -2097,15 +2106,14 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 		args = append(args, still)
 	}
 	args = append(args, prompt)
-	// Family routing: an explicit per-request model wins; else the machine's
-	// configured videogen_family (ltx25 = the bound 2026-08-12 video-seat verdict);
-	// else the runner's wan default — same precedence as the imagegen family.
-	model := paramStr(req.Params, "model")
-	if model == "" && p.cfg.VideoGenFamily != "" && p.cfg.VideoGenFamily != "wan22" {
-		model = p.cfg.VideoGenFamily
-	}
-	if model != "" {
-		args = append(args, "--model", model)
+	// Family routing: resolved ONCE above by resolveVideoFamily (an explicit
+	// per-request model wins; else the machine's configured videogen_family;
+	// else the runner's own wan default, expressed by passing no --model at all).
+	// argModel is byte-identical to what this block computed before 0.73.1 — the
+	// change is that the ledger label and the footprint family are now derived
+	// from the SAME resolution instead of re-implementing its precedence.
+	if argModel != "" {
+		args = append(args, "--model", argModel)
 	}
 	if n := paramStr(req.Params, "negative"); n != "" {
 		args = append(args, "--negative", n)
@@ -2204,9 +2212,15 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 		Out:     out,
 		Timeout: timeout,
 	}
-	// Passive fleet footprint: the bound recipe family is Wan 2.2; quant q8_0
-	// only when this box binds the Q8_0 GGUF experts.
-	p.footprintSampling("wan2.2", videoFootprintQuant(p.cfg), "video-gen").ApplyTo(&spec)
+	// Passive fleet footprint, keyed on the family that ACTUALLY renders.
+	// Until 0.73.1 this hardcoded "wan2.2" and derived the quant from the Wan
+	// GGUF filenames, which stay bound on this box as the fallback family — so on
+	// an ltx25 box every LTX render was recorded as `wan2.2/q8_0`, poisoning a
+	// store the fleet reads for placement with a family whose real VRAM profile is
+	// nothing like it (measured: an int8-convrot LTX-2.5 render logged 24.1 GiB
+	// under Wan's key). The quant only means anything for the Wan GGUF recipe, so
+	// it is reported for that family alone rather than guessed for the others.
+	p.footprintSampling(videoFootprintFamily(renderFamily), videoFootprintQuant(p.cfg, renderFamily), "video-gen").ApplyTo(&spec)
 	outPath, gerr := gpugen.Generate(ctx, spec)
 	if gerr != nil {
 		meta.ErrClass = gpugen.ClassifyErr(gerr)
@@ -2779,27 +2793,6 @@ func runNvidiaSmiMemory() (string, error) {
 // helper deletes. TestImageModelFromConfig reflect-checks that every field
 // added to imagegen.Model gets mapped here.
 
-// videoModelLabel reports the video graph family this machine actually renders
-// with, mirroring runGenerateImage's checkpoint labeling. An UNBOUND family keeps
-// the historical "comfyui-video" label so health tiers don't fragment.
-//
-// Recording the family is what makes a family-binding verdict provable from
-// telemetry. The ledger previously recorded only THAT a video render happened, so
-// after the 2026-08-12 ltx25 seat binding the record could not distinguish an
-// ltx25 render from a wan22 one — and the binding's status was still being
-// questioned six days later while config, code and binary all carried it.
-//
-// "wan22" is deliberately labeled rather than folded into the unbound case: the
-// family router treats it as "leave --model unset" (see runGenerateVideo), but
-// "rendered with wan22" and "family unbound" are different facts and collapsing
-// them would recreate the ambiguity this label removes.
-func videoModelLabel(cfg config.Config) string {
-	if cfg.VideoGenFamily == "" {
-		return "comfyui-video"
-	}
-	return "comfyui-video:" + cfg.VideoGenFamily
-}
-
 func imageModelFromConfig(cfg config.Config) imagegen.Model {
 	return imagegen.Model{
 		Ckpt:         cfg.ImageGenCkpt,
@@ -2854,14 +2847,103 @@ func imageFootprintKey(cfg config.Config) (family, quant string) {
 	return family, quant
 }
 
+// videoFamilyWanSentinel is the config value that means "the runner's own default
+// family" rather than a distinct graph. The runner spells that family "wan" on its
+// command line while config spells it "wan22"; both denote Wan 2.2, so provenance
+// canonicalises to the config spelling and never records two keys for one family.
+const videoFamilyWanSentinel = "wan22"
+
+// resolveVideoFamily is the SINGLE source of truth for "which video family does
+// this request render with". It returns the runner argument (argModel — "" means
+// pass no --model and let the runner apply its own default) and the canonical
+// family for provenance (renderFamily — "" only when nothing is bound anywhere).
+//
+// Precedence, unchanged from the router it replaces: an explicit per-request
+// `model` wins; else the machine's configured videogen_family; else the runner
+// default. It exists because 0.73.0 derived the ledger label from config while
+// the runner arg was derived here, and the two disagreed on exactly the requests
+// that used the documented override.
+func resolveVideoFamily(cfg config.Config, reqModel string) (argModel, renderFamily string) {
+	req := strings.TrimSpace(reqModel)
+	if req != "" {
+		// An explicit request is passed through verbatim (the runner owns the
+		// arg namespace, including values this function has never heard of), but
+		// provenance is canonicalised.
+		return req, canonicalVideoFamily(req)
+	}
+	if fam := strings.TrimSpace(cfg.VideoGenFamily); fam != "" {
+		if fam == videoFamilyWanSentinel {
+			// Bound to the runner default: pass no arg (byte-identical to the
+			// pre-0.73.1 behavior) but the render IS Wan, so say so.
+			return "", videoFamilyWanSentinel
+		}
+		return fam, canonicalVideoFamily(fam)
+	}
+	// Nothing bound: the runner picks its own default. renderFamily stays ""
+	// so the ledger keeps the historical "comfyui-video" label — changing it on
+	// every unbound box would fragment existing health tiers, which is the one
+	// thing this label is documented not to do.
+	return "", ""
+}
+
+// canonicalVideoFamily maps the runner's argument spelling onto the config
+// family namespace so one family never keys two tiers.
+func canonicalVideoFamily(fam string) string {
+	if strings.EqualFold(fam, "wan") {
+		return videoFamilyWanSentinel
+	}
+	return fam
+}
+
+// videoFootprintFamily is the footprint-store key for a render family. The store
+// is keyed by family+quant+task and read by the fleet for placement, so it must
+// name the family that ran. "" (nothing bound) falls back to the runner's actual
+// default rather than an empty key, because an unbound box still renders Wan.
+func videoFootprintFamily(renderFamily string) string {
+	if renderFamily == "" {
+		return videoFamilyWanSentinel
+	}
+	return renderFamily
+}
+
 // videoFootprintQuant reports "q8_0" when this box's bound Wan expert weights
 // are the Q8_0 GGUFs, else "" (node default — fp8_scaled/fp16 bindings and the
 // script's own defaults).
-func videoFootprintQuant(cfg config.Config) string {
+//
+// It is scoped to the Wan family ON PURPOSE. The Wan GGUF keys stay bound on a
+// box whose seat is another family (they are the recorded fallback), so before
+// 0.73.1 this returned "q8_0" for LTX-2.5 renders whose transformer is
+// int8-convrot — a quant the render never used, stamped on a store the fleet
+// reads. Other families carry their quant in their own weight filenames; until a
+// family declares one, "" (unknown) is the honest answer.
+func videoFootprintQuant(cfg config.Config, renderFamily string) string {
+	if videoFootprintFamily(renderFamily) != videoFamilyWanSentinel {
+		return ""
+	}
 	if strings.Contains(strings.ToUpper(cfg.VideoGenUnetHigh+cfg.VideoGenUnetLow), "Q8_0") {
 		return "q8_0"
 	}
 	return ""
+}
+
+// videoModelLabel is the ledger's model_tier for a video render: the family that
+// ACTUALLY rendered, resolved by resolveVideoFamily. An unbound family keeps the
+// historical "comfyui-video" label so health tiers don't fragment.
+//
+// Recording the family is what makes a family-binding verdict provable from
+// telemetry. The ledger previously recorded only THAT a video render happened, so
+// after the 2026-08-12 ltx25 seat binding the record could not distinguish an
+// ltx25 render from a wan22 one — and the binding's status was still being
+// questioned six days later while config, code and binary all carried it.
+//
+// It takes the RESOLVED family, not the config, because taking the config was the
+// 0.73.0 defect: a per-request override changed what rendered without changing
+// what was recorded. Do not reintroduce a cfg parameter here.
+func videoModelLabel(renderFamily string) string {
+	if renderFamily == "" {
+		return "comfyui-video"
+	}
+	return "comfyui-video:" + renderFamily
 }
 
 // runGraphFootprintFamily is the run-graph footprint family: payload-declared

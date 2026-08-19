@@ -68,20 +68,20 @@ func TestImageFootprintKey(t *testing.T) {
 // Q8_0 GGUFs (either unet; case-insensitive), else node default.
 func TestVideoFootprintQuant(t *testing.T) {
 	cfg := config.Default()
-	if q := videoFootprintQuant(cfg); q != "" {
+	if q := videoFootprintQuant(cfg, "wan22"); q != "" {
 		t.Errorf("unbound unets: quant = %q, want \"\"", q)
 	}
 	cfg.VideoGenUnetHigh = "wan2.2_i2v_high_noise_14B_Q8_0.gguf"
-	if q := videoFootprintQuant(cfg); q != "q8_0" {
+	if q := videoFootprintQuant(cfg, "wan22"); q != "q8_0" {
 		t.Errorf("Q8_0 high unet: quant = %q, want \"q8_0\"", q)
 	}
 	cfg.VideoGenUnetHigh = "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
 	cfg.VideoGenUnetLow = "wan2.2_i2v_low_noise_14B_q8_0.gguf"
-	if q := videoFootprintQuant(cfg); q != "q8_0" {
+	if q := videoFootprintQuant(cfg, "wan22"); q != "q8_0" {
 		t.Errorf("q8_0 low unet (lowercase): quant = %q, want \"q8_0\"", q)
 	}
 	cfg.VideoGenUnetLow = "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
-	if q := videoFootprintQuant(cfg); q != "" {
+	if q := videoFootprintQuant(cfg, "wan22"); q != "" {
 		t.Errorf("fp8 binding: quant = %q, want \"\" (node default)", q)
 	}
 }
@@ -141,8 +141,11 @@ func TestRunGenerateImage_RecordsFootprint(t *testing.T) {
 	}
 }
 
-// TestRunGenerateVideo_RecordsFootprint: same E2E proof for the video path —
-// family wan2.2, quant from the unet binding.
+// TestRunGenerateVideo_RecordsFootprint: same E2E proof for the video path.
+// The family key is the RESOLVED render family in the config namespace ("wan22"),
+// not the legacy "wan2.2" spelling: 0.73.0 and earlier hardcoded that string for
+// every video render regardless of family, so an ltx25 box wrote its LTX renders
+// into Wan's key. One namespace, one key per family (0.73.1).
 func TestRunGenerateVideo_RecordsFootprint(t *testing.T) {
 	requireNodePipeline(t)
 	dir := t.TempDir()
@@ -156,7 +159,7 @@ func TestRunGenerateVideo_RecordsFootprint(t *testing.T) {
 	if !res.OK {
 		t.Fatalf("expected ok via stub, got defer: %s", res.Reason)
 	}
-	e := findEntry(t, p.FootprintStore().Entries(), "wan2.2", "video-gen")
+	e := findEntry(t, p.FootprintStore().Entries(), "wan22", "video-gen")
 	if e.Quant != "q8_0" {
 		t.Errorf("quant = %q, want \"q8_0\"", e.Quant)
 	}
