@@ -48,7 +48,7 @@ type Params struct {
 	IncludeQ38 bool
 	// IncludeQ354B gates the Qwen3.5-4B AGENT entry exactly as IncludeQ38 gates the
 	// 27B: false removes the model block, its matrix var, and its set membership
-	// (the __Q354B_ALT__/__Q354B_AND__ tokens render empty). It comes from the tier's
+	// (the __Q354B_ALT__ token renders empty). It comes from the tier's
 	// include_qwen35_4b field and defaults to false. This is the SMALL-tier agent
 	// seat: 3.5GB of VRAM on a 6GB card, for tiers whose workhorse plans poorly but
 	// which have no room for a 27B.
@@ -219,7 +219,13 @@ func Render(tmpl string, p Params) (string, error) {
 	// IncludeQ354B. Same refusal-by-name rule: a tier that asked for the seat (and
 	// whose installer just downloaded its weights) must never render a config
 	// silently missing it.
-	q354balt, q354band := "", ""
+	// Only the _ALT_ half exists here. Its _AND_ sibling was substituted but
+	// consumed by NO template, unlike __M26_AND__ (2) and __Q38_AND__ (1) which
+	// are live — the small-tier agent seat is never a member of an interactive
+	// "&" group, so there was nothing for it to render into. Dead substitution
+	// removed 2026-08-19 (0.72.0 review finding I-3); TestQ354BAndTokenIsGone
+	// keeps it from creeping back by symmetry with its siblings.
+	q354balt := ""
 	if p.IncludeQ354B {
 		if !definesModel(out, modelQ354B) {
 			return "", fmt.Errorf("this tier sets include_qwen35_4b but the target serving template defines no "+
@@ -228,7 +234,7 @@ func Render(tmpl string, p Params) (string, error) {
 				"its matrix var + __Q354B_*__ set membership) to the template, or drop include_qwen35_4b from the tier",
 				modelQ354B, modelQ354B)
 		}
-		q354balt, q354band = " | q354", " & q354"
+		q354balt = " | q354"
 	}
 	for from, to := range map[string]string{
 		"__M26_ALT__":         m26alt,
@@ -236,7 +242,6 @@ func Render(tmpl string, p Params) (string, error) {
 		"__Q38_ALT__":         q38alt,
 		"__Q38_AND__":         q38and,
 		"__Q354B_ALT__":       q354balt,
-		"__Q354B_AND__":       q354band,
 		"__SEATS_SWAPPABLE__": seatFrag[roleSwappable],
 		"__SEATS_RESIDENT__":  seatFrag[roleResident],
 		"__LLAMA_BIN__":       strings.TrimRight(p.LlamaBin, "/"),

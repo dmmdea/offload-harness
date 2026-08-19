@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -207,6 +208,13 @@ func warnMissingSeatModels(seats []mediaseat.Seat, modelsDir, target string) {
 // Same shape as the seat warning: a warning, never an error, and skipped when
 // rendering for another machine, where a local miss means nothing.
 func warnMissingGatedModels(include26B, includeQ38, includeQ354B bool, modelsDir, target string) {
+	warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, modelsDir, target, os.Stderr)
+}
+
+// warnMissingGatedModelsTo carries the body with an injectable sink so the warning
+// is testable (it had no coverage at all — 0.72.0 review finding I-2). The wrapper
+// above keeps every production call site unchanged.
+func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B bool, modelsDir, target string, w io.Writer) {
 	if modelsDir == "" || target != runtime.GOOS {
 		return
 	}
@@ -231,7 +239,7 @@ func warnMissingGatedModels(include26B, includeQ38, includeQ354B bool, modelsDir
 		return
 	}
 	sort.Strings(missing)
-	fmt.Fprintf(os.Stderr, "WARNING: %d gated model weight(s) are not on this machine. llama-swap lists a model "+
+	fmt.Fprintf(w, "WARNING: %d gated model weight(s) are not on this machine. llama-swap lists a model "+
 		"from the CONFIG, so the alias checks in `doctor` and `acceptance` will PASS and the route will fail only "+
 		"when called. Fetch these before relying on them:\n%s\n", len(missing), strings.Join(missing, "\n"))
 }

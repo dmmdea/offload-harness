@@ -218,7 +218,7 @@ incumbent's 50%, and 4/5 on search+reason where the higher-scoring 2B collapses 
 
 - New profile field **`include_qwen35_4b`** mirrors the `include_qwen38` mechanism
   end-to-end: `servingtmpl.Params.IncludeQ354B` strips the model block, its matrix var
-  and its `__Q354B_ALT__`/`__Q354B_AND__` set membership together; `Render` refuses a
+  and its `__Q354B_ALT__` set membership together; `Render` refuses a
   tier that sets the flag against a template with no `qwen3.5-4b-agent` entry (rendering
   a config without the seat while the installer downloads its weights is the
   silent-capability-loss failure the refusal exists to end); `install.ps1` gains the
