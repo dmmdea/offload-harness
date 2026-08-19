@@ -46,7 +46,7 @@ var fleetTaskOrder = []string{"image-gen", "video-gen", "stt", "audio-gen", "run
 func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool) bool {
 	switch taskType {
 	case "image-gen":
-		return cfg.ImageRouteConfigured()   // ComfyUI script OR the sdcpp engine (J2)
+		return cfg.ImageRouteConfigured() // ComfyUI script OR the sdcpp engine (J2)
 	case "video-gen":
 		return cfg.VideoGenScript != ""
 	case "stt":
@@ -189,12 +189,24 @@ func familyFor(cfg config.Config, taskType string) string {
 		// store (pipeline.videoFootprintFamily): the ADVERTISED family and the
 		// RECORDED family are one namespace. This arm hardcoded "wan2.2" while
 		// the writer emitted the configured family, so an ltx25 box advertised
-		// Wan and its measurements landed under a key nothing advertised. The
-		// wan22 sentinel and "" both mean the runner's own default family.
-		if f := strings.TrimSpace(cfg.VideoGenFamily); f != "" && f != "wan22" {
+		// Wan and its measurements landed under a key nothing advertised.
+		//
+		// The switch is an ALLOWLIST, mirroring pipeline.canonicalVideoFamily,
+		// not a passthrough: the runner dispatches on exactly these strings,
+		// case-sensitively, and silently renders Wan for everything else — so
+		// "", the wan22 sentinel, and ANY unrecognized value (wrong case, a
+		// typo, the runner's request-level "wan" spelling pasted into config)
+		// all render Wan and all must advertise Wan. A passthrough here split
+		// the advertiser from the writer for exactly those inputs (round-3
+		// review, measured), while the writer correctly folded them to Wan.
+		// TestVideoFootprintFamilyMatchesTheAdvertisedFamily pins the two
+		// packages together over that full input space.
+		switch f := strings.TrimSpace(cfg.VideoGenFamily); f {
+		case "ltx25", "hunyuan", "ace":
 			return f
+		default:
+			return "wan2.2"
 		}
-		return "wan2.2"
 	case "stt":
 		return "whisper"
 	case "audio-gen":

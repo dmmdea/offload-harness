@@ -63,6 +63,34 @@ func TestFamiliesDerivation(t *testing.T) {
 			t.Fatalf("Families = %v", got)
 		}
 	})
+	t.Run("videogen_family derivation is an allowlist", func(t *testing.T) {
+		// The video arm advertises what the RUNNER will render, which is a closed
+		// case-sensitive set: recognized families verbatim; "", the wan22
+		// sentinel, and any unrecognized value (wrong case, typo, the
+		// request-level "wan" spelling pasted into config) all render Wan and
+		// must all advertise Wan. The round-2 passthrough version echoed
+		// unrecognized values verbatim while the footprint WRITER folded them to
+		// Wan, splitting the two namespaces exactly there (round-3 review,
+		// measured). The cross-package pin lives in internal/pipeline's
+		// TestVideoFootprintFamilyMatchesTheAdvertisedFamily; this arm covers the
+		// derivation in its own package.
+		for _, c := range []struct{ family, want string }{
+			{"", "wan2.2"},
+			{"wan22", "wan2.2"},
+			{"ltx25", "ltx25"},
+			{"hunyuan", "hunyuan"},
+			{"ace", "ace"},
+			{" ltx25 ", "ltx25"}, // trimmed
+			{"wan", "wan2.2"},    // request-level spelling in config -> renders Wan
+			{"LTX25", "wan2.2"},  // wrong case -> the runner falls through to Wan
+			{"ltx2.5", "wan2.2"}, // typo -> Wan
+		} {
+			cfg := config.Config{VideoGenScript: "v.mjs", VideoGenFamily: c.family}
+			if got := Families(cfg); !reflect.DeepEqual(got, []string{c.want}) {
+				t.Errorf("videogen_family=%q: Families = %v, want [%s]", c.family, got, c.want)
+			}
+		}
+	})
 	t.Run("deduplicated", func(t *testing.T) {
 		// A (contrived) machine whose image binding is named like the video family
 		// must not advertise the family twice.
@@ -131,7 +159,7 @@ func TestBuildRequestVideoGen(t *testing.T) {
 			"still": "C:/s.png", "model": "wan", "negative": "blurry", "out": "C:/v.mp4",
 			"frames": 33, "width": 960, "height": 544, "steps": 4, "seed": 9,
 			"reserve_vram": "2.5", // stringified, matching the MCP wire shape
-			"fast": true, "hero": true, "upscale": true,
+			"fast":         true, "hero": true, "upscale": true,
 		}
 		if !reflect.DeepEqual(req.Params, want) {
 			t.Fatalf("params = %#v, want %#v", req.Params, want)

@@ -192,18 +192,26 @@ func TestGlobalDeltaSampleFunc(t *testing.T) {
 	}
 }
 
-// TestRunGenerateVideo_OverrideProvenanceEndToEnd is the guard that kills the
-// 0.73.0 defect class at the WIRING level rather than in a helper.
+// The two provenance wiring guards. They exist as a PAIR because each covers a
+// half the other structurally cannot:
 //
-// The fix-round review proved that helper-level tests are not enough: with
-// resolveVideoFamily/videoModelLabel/videoFootprintFamily all correct and fully
-// unit-tested, re-introducing the original bug at the CALL SITES — passing p.cfg
-// to the label, or a hardcoded "wan2.2" to the footprint — left `go test ./...`
-// entirely green, because no test read either value through a real Run().
+//   - The OVERRIDE arm (seat ltx25, request wan) is the only shape where the
+//     LEDGER LABEL differs between fixed and broken — 0.73.0 wrote the seat.
+//     But its correct FOOTPRINT answer is "wan2.2", byte-identical to the old
+//     hardcode, so it cannot see the footprint half AT ALL.
+//   - The SEATED arm (seat ltx25, no override) is the only shape where the
+//     FOOTPRINT KEY differs from the hardcode — the round-3 review proved the
+//     override arm alone left the literal 0.73.0 footprint hardcode green across
+//     the entire suite, while this round's own CHANGELOG claimed it verified red.
 //
-// This exercises the shape that broke: a box seated to ltx25 with an explicit
-// per-request override to Wan. Both provenance surfaces must name WAN, because Wan
-// is what renders.
+// Helper-level tests cannot replace either: with every helper correct and
+// unit-tested, re-introducing the bug at the CALL SITES is invisible unless a
+// test reads the surfaces out of a real Run().
+
+// TestRunGenerateVideo_OverrideProvenanceEndToEnd: seat ltx25, request wan.
+// Both surfaces must name WAN, because Wan is what renders. This arm is the
+// LABEL half of the pair (mutation-verified red: passing p.cfg to the label
+// fails here with model_tier "comfyui-video:ltx25").
 func TestRunGenerateVideo_OverrideProvenanceEndToEnd(t *testing.T) {
 	requireNodePipeline(t)
 	dir := t.TempDir()
@@ -232,17 +240,60 @@ func TestRunGenerateVideo_OverrideProvenanceEndToEnd(t *testing.T) {
 			res.Meta.Model, "comfyui-video:wan22")
 	}
 
-	// SURFACE 2 — the footprint key the fleet reads for placement. Must be Wan's
-	// store spelling, and must carry Wan's quant (the override DID render Wan).
+	// SURFACE 2 — sanity only in THIS arm: the correct answer here equals the old
+	// hardcode, so this assertion cannot distinguish fixed from broken. The
+	// discriminating footprint assertion lives in the SEATED arm below.
 	e := findEntry(t, p.FootprintStore().Entries(), "wan2.2", "video-gen")
 	if e.Quant != "q8_0" {
 		t.Errorf("footprint quant = %q, want \"q8_0\" — the override rendered the Wan GGUF recipe", e.Quant)
 	}
+}
 
-	// And the ltx25 key must NOT exist: nothing rendered LTX in this run.
+// TestRunGenerateVideo_SeatedProvenanceEndToEnd: seat ltx25, NO override — the
+// live 2x16 box's everyday render, and the FOOTPRINT half of the pair. This is
+// the only shape where the correct key ("ltx25") differs from 0.73.0's hardcode
+// ("wan2.2"), so it is the arm that actually goes red when the hardcode returns.
+// It also pins the quant scoping: the Wan GGUFs stay bound as the fallback
+// family, and 0.73.0 stamped their q8_0 onto LTX renders.
+func TestRunGenerateVideo_SeatedProvenanceEndToEnd(t *testing.T) {
+	requireNodePipeline(t)
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.VideoGenScript = writeStub(t, dir)
+	cfg.MediaDir = dir
+	cfg.VideoGenFamily = "ltx25"
+	cfg.VideoGenUnetHigh = "wan2.2_i2v_high_noise_14B_Q8_0.gguf"
+	p := footprintTestPipeline(t, cfg, 5.5)
+
+	res := p.Run(context.Background(), core.Request{
+		Task:  core.TaskGenerateVideo,
+		Input: "a calm ocean at dawn",
+	})
+	if !res.OK {
+		t.Fatalf("expected ok via stub, got defer: %s", res.Reason)
+	}
+
+	if res.Meta.Model != "comfyui-video:ltx25" {
+		t.Errorf("ledger model_tier = %q, want %q", res.Meta.Model, "comfyui-video:ltx25")
+	}
+
+	// THE discriminating assertion: the key must be the seated family. Under the
+	// 0.73.0 hardcode this store holds exactly one entry, keyed wan2.2, and
+	// findEntry fails with it in the message.
+	e := findEntry(t, p.FootprintStore().Entries(), "ltx25", "video-gen")
+	// And the quant must NOT be inherited from the Wan GGUF filenames: this
+	// render's transformer is not the Wan recipe, so "unknown" is the honest key.
+	if e.Quant != "" {
+		t.Errorf("footprint quant = %q, want \"\" — an ltx25 render must not inherit the Wan GGUFs' q8_0", e.Quant)
+	}
+	// No Wan entry may exist: nothing rendered Wan in this run. Placed HERE, not
+	// in the override arm, because here it is reachable — findEntry above passes
+	// on fixed code, so this loop actually runs (in the override arm the
+	// equivalent loop sat behind a t.Fatalf that fired first under any mutation
+	// that could have created the entry, making it dead code as a detector).
 	for _, entry := range p.FootprintStore().Entries() {
-		if entry.ModelFamily == "ltx25" {
-			t.Errorf("footprint store gained an ltx25 entry (%+v) for a render that used Wan — this is the store-poisoning half of the defect", entry)
+		if entry.ModelFamily == "wan2.2" {
+			t.Errorf("footprint store gained a wan2.2 entry (%+v) for a render that used LTX — the store-poisoning half of the 0.73.0 defect", entry)
 		}
 	}
 }

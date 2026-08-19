@@ -66,9 +66,16 @@ and proved three of the new guards vacuous by mutation. All corrected here befor
   attempt unified on the config spelling — which split the writer from
   `fleetnode.familyFor`, the function that ADVERTISES the family on `/fleet/health`, fleet-wide
   and on the happy path. `familyFor` now derives the video family too (it hardcoded Wan while
-  the image arm already derived from config), so writer and advertiser are one namespace again
-  and the store's accumulated Wan history is preserved. This also makes the earlier
-  "prune the orphaned entry" note unnecessary — there is no orphan.
+  the image arm already derived from config), and the store's accumulated Wan history is
+  preserved. This also makes the earlier "prune the orphaned entry" note unnecessary — there is
+  no orphan. **Round-3 correction:** `familyFor`'s first derivation was a PASSTHROUGH, so
+  writer and advertiser agreed only on the recognized family set and still split for
+  unrecognized config values (`wan`, `LTX25`, a typo) — the writer folded them to Wan while the
+  advertiser echoed them verbatim, measured across 10 inputs. `familyFor` is now the same
+  allowlist the writer uses (`ltx25`/`hunyuan`/`ace`, else `wan2.2`), and the cross-package
+  guard asserts against the REAL `fleetnode.Families` over that full input space — its first
+  version compared the writer to three hardcoded strings, behind a comment claiming an import
+  cycle that does not exist, and reverting the `familyFor` fix left every package green.
 - **An unrecognized `model` override no longer echoes the caller's string.** The runner matches
   its families EXACTLY and case-sensitively and silently falls through to Wan, so recording the
   caller's spelling recreated the false-provenance class one layer out: `model:"LTX25"` rendered
@@ -84,12 +91,22 @@ and proved three of the new guards vacuous by mutation. All corrected here befor
   SUBSET stayed green while the header claimed that mutation closed. Now asserted per template
   that DEFINES the model, which is the real contract (`templateFor` picks exactly one template
   per goos/backend), with a guard against the probe matching nothing.
-- **Added the wiring-level guard the helper tests could not provide.** With every helper correct
+- **Added the wiring-level guards the helper tests could not provide.** With every helper correct
   and unit-tested, re-introducing the original defect at the CALL SITES left `go test ./...`
-  fully green, because nothing read either provenance value through a real `Run()`.
-  `TestRunGenerateVideo_OverrideProvenanceEndToEnd` exercises the shape that broke — a box seated
-  to `ltx25` with an explicit override to Wan — and asserts both surfaces name Wan. Verified red
-  against both re-introduction mutations.
+  fully green, because nothing read either provenance value through a real `Run()`. Two arms,
+  because each covers a half the other structurally cannot:
+  `TestRunGenerateVideo_OverrideProvenanceEndToEnd` (seat `ltx25`, request `wan`) is the LABEL
+  half — verified red under `meta.Model = videoModelLabel(p.cfg…)` with
+  `model_tier = "comfyui-video:ltx25", want "comfyui-video:wan22"`.
+  `TestRunGenerateVideo_SeatedProvenanceEndToEnd` (seat `ltx25`, no override) is the FOOTPRINT
+  half — verified red under the literal 0.73.0 hardcode with
+  `no (ltx25, video-gen) entry in […ModelFamily:"wan2.2"…]`.
+  **Correction from the round-3 review:** an earlier revision shipped only the override arm and
+  claimed it was "verified red against both re-introduction mutations". That was FALSE for the
+  footprint mutation — the override arm's correct footprint answer is `"wan2.2"`, byte-identical
+  to the hardcode, so it structurally cannot see that half; the whole suite stayed green under
+  the literal 0.73.0 footprint hardcode. The seated arm is the fix, and the red lines above are
+  pasted from the actual mutation runs rather than asserted.
 - **Corrected a false claim of our own:** `argModel` was described as byte-identical to the old
   router. It is not — the resolver trims where the old block did not, which changes the rendered
   graph for `model:" "` on a bound box and for a config family with stray whitespace (both

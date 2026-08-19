@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/fleetnode"
 )
 
 // TestResolveVideoFamilyPrecedence pins the precedence itself: request beats
@@ -158,18 +159,28 @@ func TestVideoProvenanceNamespaceMapping(t *testing.T) {
 // advertises a family whose measurements land under a key nothing advertised, and
 // the dispatcher has nothing to admit against.
 //
-// Asserted by value rather than by importing fleetnode (which would be an import
-// cycle): the expected strings are fleetnode.familyFor's own video arm.
+// It asserts against the REAL advertiser — fleetnode.Families — never against
+// hardcoded strings. Two prior versions of this guard were vacuous and each was
+// proven so by mutation: the first compared videoFootprintFamily to a 3-row table
+// of literals (reverting the familyFor fix left every package green, because
+// nothing read the advertiser), justified by a comment claiming importing
+// fleetnode "would be an import cycle" — which was false; internal/pipeline
+// already imports it. The input list deliberately includes the unrecognized
+// values (wrong case, typos, the request-level "wan" spelling pasted into
+// config), because that is exactly the subspace where the passthrough advertiser
+// and the folding writer used to split.
 func TestVideoFootprintFamilyMatchesTheAdvertisedFamily(t *testing.T) {
-	for _, c := range []struct{ cfgFamily, advertised string }{
-		{"", "wan2.2"},      // familyFor: no binding -> the runner default
-		{"wan22", "wan2.2"}, // familyFor: the sentinel means the runner default
-		{"ltx25", "ltx25"},  // familyFor: derives the bound family
+	for _, cfgFamily := range []string{
+		"", "wan22", "ltx25", "hunyuan", "ace", // the recognized space
+		"wan", "LTX25", "ltx2.5", " ltx25 ", "Wan22", // the split-prone space
 	} {
-		_, fam := resolveVideoFamily(config.Config{VideoGenFamily: c.cfgFamily}, "")
-		if got := videoFootprintFamily(fam); got != c.advertised {
-			t.Errorf("videogen_family=%q: pipeline WRITES footprint family %q but fleetnode.familyFor ADVERTISES %q — writer and advertiser must be one namespace",
-				c.cfgFamily, got, c.advertised)
+		cfg := config.Config{VideoGenScript: "render/comfy-video.mjs", VideoGenFamily: cfgFamily}
+		_, fam := resolveVideoFamily(cfg, "")
+		writes := videoFootprintFamily(fam)
+		advertised := fleetnode.Families(cfg)
+		if len(advertised) != 1 || advertised[0] != writes {
+			t.Errorf("videogen_family=%q: pipeline WRITES footprint family %q but fleetnode ADVERTISES %v — writer and advertiser must be one namespace",
+				cfgFamily, writes, advertised)
 		}
 	}
 }
