@@ -6,7 +6,7 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.71.0] - 2026-08-18
+## [0.72.0] - 2026-08-18
 ### Security/privacy — the operator's tailnet zone was compiled into this PUBLIC repo
 `internal/netguard/tailnet.go` carried `const houseTailnetSuffix = "<a real tailnet>.ts.net"`
 — one operator's private Tailscale DNS zone, hardcoded in an Apache-licensed public
