@@ -2109,9 +2109,16 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	// Family routing: resolved ONCE above by resolveVideoFamily (an explicit
 	// per-request model wins; else the machine's configured videogen_family;
 	// else the runner's own wan default, expressed by passing no --model at all).
-	// argModel is byte-identical to what this block computed before 0.73.1 — the
-	// change is that the ledger label and the footprint family are now derived
-	// from the SAME resolution instead of re-implementing its precedence.
+	// argModel matches what this block computed before 0.73.1 for every
+	// non-whitespace input. It is NOT byte-identical in general, and an earlier
+	// revision of this comment wrongly claimed it was: resolveVideoFamily now
+	// TrimSpaces both the request and the config family, where the old block
+	// trimmed neither. So `model:" "` on a bound box used to send a single space
+	// (which the runner's exact-match dispatch rejected, silently rendering Wan)
+	// and now sends the configured family; a config family with stray whitespace
+	// behaves the same way. Both changes are CORRECTIVE — the old behavior was to
+	// silently ignore the binding — but they are behavior changes, so they are
+	// stated rather than papered over.
 	if argModel != "" {
 		args = append(args, "--model", argModel)
 	}
@@ -2886,22 +2893,59 @@ func resolveVideoFamily(cfg config.Config, reqModel string) (argModel, renderFam
 	return "", ""
 }
 
-// canonicalVideoFamily maps the runner's argument spelling onto the config
-// family namespace so one family never keys two tiers.
-func canonicalVideoFamily(fam string) string {
-	if strings.EqualFold(fam, "wan") {
-		return videoFamilyWanSentinel
-	}
-	return fam
+// videoRunnerFamilies is the CLOSED set the render runner dispatches on, and it is
+// matched EXACTLY and CASE-SENSITIVELY because that is what the runner does:
+// render/comfy-video.mjs tests `flags.model === "ace"`, `model === "ltx25"` and
+// `model === "hunyuan"`, then falls through to the Wan builder for everything else
+// — silently, with Wan's own resolution and frame defaults. "wan" is absent from
+// this map on purpose: it takes the same fallthrough as any unrecognized value.
+// TestVideoRunnerFamiliesMatchTheRunner pins the set against the runner's own
+// dispatch literals so a family added there cannot drift away from this resolver.
+var videoRunnerFamilies = map[string]string{
+	"ltx25":   "ltx25",
+	"hunyuan": "hunyuan",
+	"ace":     "ace",
 }
 
+// canonicalVideoFamily maps a runner argument onto the config family namespace, so
+// one family never keys two tiers AND provenance never names a family that did not
+// render.
+//
+// The unrecognized case is the load-bearing one. An earlier revision passed unknown
+// strings through verbatim, reasoning that "the runner owns the arg namespace" — but
+// the runner's namespace is CLOSED, so `model:"LTX25"` (wrong case) or a typo like
+// "ltx2.5" renders WAN while the ledger row claimed `comfyui-video:LTX25` and the
+// footprint store gained a key holding Wan's VRAM profile. That is exactly the
+// false-provenance class this change exists to end, re-created one layer out.
+//
+// Matching is case-SENSITIVE for the same reason: "LTX25" does not match the
+// runner's `=== "ltx25"`, so it renders Wan, so it must be RECORDED as Wan.
+// Lower-casing here would report ltx25 for a Wan render — the same lie in a
+// friendlier shape. Unrecognized input records the family that WILL run.
+func canonicalVideoFamily(fam string) string {
+	if canon, ok := videoRunnerFamilies[fam]; ok {
+		return canon
+	}
+	return videoFamilyWanSentinel
+}
+
+// videoFootprintWanFamily is the Wan family's spelling in the FOOTPRINT-STORE
+// namespace, which is not the config namespace: the store has always keyed Wan as
+// "wan2.2" (with the dot) and `fleetnode.familyFor` advertises that same string on
+// /fleet/health. They must intersect exactly — an earlier revision of this fix
+// keyed the writer as "wan22" while the advertiser still said "wan2.2", which
+// split the namespace FLEET-WIDE and orphaned the store's accumulated Wan history
+// on the happy path. Keeping the store's own spelling preserves that history and
+// keeps writer and advertiser on one key.
+const videoFootprintWanFamily = "wan2.2"
+
 // videoFootprintFamily is the footprint-store key for a render family. The store
-// is keyed by family+quant+task and read by the fleet for placement, so it must
-// name the family that ran. "" (nothing bound) falls back to the runner's actual
-// default rather than an empty key, because an unbound box still renders Wan.
+// is keyed family+quant+task and read by the fleet for placement, so it must name
+// the family that ran. "" (nothing bound) and the wan22 sentinel both mean Wan —
+// an unbound box still renders Wan — and both map to the store's spelling.
 func videoFootprintFamily(renderFamily string) string {
-	if renderFamily == "" {
-		return videoFamilyWanSentinel
+	if renderFamily == "" || renderFamily == videoFamilyWanSentinel {
+		return videoFootprintWanFamily
 	}
 	return renderFamily
 }
@@ -2917,7 +2961,10 @@ func videoFootprintFamily(renderFamily string) string {
 // reads. Other families carry their quant in their own weight filenames; until a
 // family declares one, "" (unknown) is the honest answer.
 func videoFootprintQuant(cfg config.Config, renderFamily string) string {
-	if videoFootprintFamily(renderFamily) != videoFamilyWanSentinel {
+	// Gate on the CONFIG-namespace family, not on videoFootprintFamily's return:
+	// that helper now yields "wan2.2", so comparing it to the "wan22" sentinel
+	// would be false for every input and silently suppress the quant everywhere.
+	if renderFamily != "" && renderFamily != videoFamilyWanSentinel {
 		return ""
 	}
 	if strings.Contains(strings.ToUpper(cfg.VideoGenUnetHigh+cfg.VideoGenUnetLow), "Q8_0") {

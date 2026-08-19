@@ -173,7 +173,8 @@ func SupportedTasksFor(cfg config.Config, loopbackListener bool) []string {
 
 // familyFor returns the footprint/advertisement model family for a task on this
 // box (the spec's table): image = the machine's imagegen_family binding (else
-// "sdxl"), video = "wan2.2" (the bound recipe family), stt = "whisper",
+// "sdxl"), video = the machine's videogen_family binding in the FOOTPRINT
+// namespace (else "wan2.2", the runner's default family), stt = "whisper",
 // audio = "acestep", run-graph = "comfy-graph" (payload-declared families are a
 // per-job concern, not an advertisement).
 func familyFor(cfg config.Config, taskType string) string {
@@ -184,6 +185,15 @@ func familyFor(cfg config.Config, taskType string) string {
 		}
 		return "sdxl"
 	case "video-gen":
+		// Must agree EXACTLY with what the pipeline WRITES into the footprint
+		// store (pipeline.videoFootprintFamily): the ADVERTISED family and the
+		// RECORDED family are one namespace. This arm hardcoded "wan2.2" while
+		// the writer emitted the configured family, so an ltx25 box advertised
+		// Wan and its measurements landed under a key nothing advertised. The
+		// wan22 sentinel and "" both mean the runner's own default family.
+		if f := strings.TrimSpace(cfg.VideoGenFamily); f != "" && f != "wan22" {
+			return f
+		}
 		return "wan2.2"
 	case "stt":
 		return "whisper"

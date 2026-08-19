@@ -142,10 +142,11 @@ func TestRunGenerateImage_RecordsFootprint(t *testing.T) {
 }
 
 // TestRunGenerateVideo_RecordsFootprint: same E2E proof for the video path.
-// The family key is the RESOLVED render family in the config namespace ("wan22"),
-// not the legacy "wan2.2" spelling: 0.73.0 and earlier hardcoded that string for
-// every video render regardless of family, so an ltx25 box wrote its LTX renders
-// into Wan's key. One namespace, one key per family (0.73.1).
+// The Wan family keeps the STORE's own spelling "wan2.2" — that is the key
+// fleetnode.familyFor advertises, and writer and advertiser must intersect. What
+// 0.73.1 fixes is that the key is now DERIVED: 0.73.0 and earlier hardcoded
+// "wan2.2" for every video render regardless of family, so an ltx25 box wrote its
+// LTX renders into Wan's key.
 func TestRunGenerateVideo_RecordsFootprint(t *testing.T) {
 	requireNodePipeline(t)
 	dir := t.TempDir()
@@ -159,7 +160,7 @@ func TestRunGenerateVideo_RecordsFootprint(t *testing.T) {
 	if !res.OK {
 		t.Fatalf("expected ok via stub, got defer: %s", res.Reason)
 	}
-	e := findEntry(t, p.FootprintStore().Entries(), "wan22", "video-gen")
+	e := findEntry(t, p.FootprintStore().Entries(), "wan2.2", "video-gen")
 	if e.Quant != "q8_0" {
 		t.Errorf("quant = %q, want \"q8_0\"", e.Quant)
 	}
@@ -188,5 +189,60 @@ func TestGlobalDeltaSampleFunc(t *testing.T) {
 	}
 	if g, _ := sample(1); g != 0 { // below baseline clamps to 0, never negative
 		t.Errorf("below-baseline delta = %v, want 0", g)
+	}
+}
+
+// TestRunGenerateVideo_OverrideProvenanceEndToEnd is the guard that kills the
+// 0.73.0 defect class at the WIRING level rather than in a helper.
+//
+// The fix-round review proved that helper-level tests are not enough: with
+// resolveVideoFamily/videoModelLabel/videoFootprintFamily all correct and fully
+// unit-tested, re-introducing the original bug at the CALL SITES — passing p.cfg
+// to the label, or a hardcoded "wan2.2" to the footprint — left `go test ./...`
+// entirely green, because no test read either value through a real Run().
+//
+// This exercises the shape that broke: a box seated to ltx25 with an explicit
+// per-request override to Wan. Both provenance surfaces must name WAN, because Wan
+// is what renders.
+func TestRunGenerateVideo_OverrideProvenanceEndToEnd(t *testing.T) {
+	requireNodePipeline(t)
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.VideoGenScript = writeStub(t, dir)
+	cfg.MediaDir = dir
+	// The live 2x16 shape: seated to ltx25, with the Wan GGUFs still bound as the
+	// recorded fallback family.
+	cfg.VideoGenFamily = "ltx25"
+	cfg.VideoGenUnetHigh = "wan2.2_i2v_high_noise_14B_Q8_0.gguf"
+	p := footprintTestPipeline(t, cfg, 5.5)
+
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskGenerateVideo,
+		Input:  "a calm ocean at dawn",
+		Params: map[string]any{"model": "wan"},
+	})
+	if !res.OK {
+		t.Fatalf("expected ok via stub, got defer: %s", res.Reason)
+	}
+
+	// SURFACE 1 — the ledger label. 0.73.0 wrote "comfyui-video:ltx25" here for
+	// this exact request: the configured seat, not the family that rendered.
+	if res.Meta.Model != "comfyui-video:wan22" {
+		t.Errorf("ledger model_tier = %q, want %q — the request overrode the seat, so the label must follow the render, not the config",
+			res.Meta.Model, "comfyui-video:wan22")
+	}
+
+	// SURFACE 2 — the footprint key the fleet reads for placement. Must be Wan's
+	// store spelling, and must carry Wan's quant (the override DID render Wan).
+	e := findEntry(t, p.FootprintStore().Entries(), "wan2.2", "video-gen")
+	if e.Quant != "q8_0" {
+		t.Errorf("footprint quant = %q, want \"q8_0\" — the override rendered the Wan GGUF recipe", e.Quant)
+	}
+
+	// And the ltx25 key must NOT exist: nothing rendered LTX in this run.
+	for _, entry := range p.FootprintStore().Entries() {
+		if entry.ModelFamily == "ltx25" {
+			t.Errorf("footprint store gained an ltx25 entry (%+v) for a render that used Wan — this is the store-poisoning half of the defect", entry)
+		}
 	}
 }
