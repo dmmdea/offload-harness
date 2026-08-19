@@ -72,6 +72,16 @@ jobs:
           OFFLOAD_HARNESS_EXE: ${{ runner.temp }}\local-offload-render.exe
         run: .\setup\render.tests.ps1
 
+      # The config-seed suite covers the OTHER half of the tier mechanism: what the
+      # install SEEDS and DOWNLOADS, where render.tests.ps1 covers what it RENDERS.
+      # It was never wired in, and unwired it rotted: it sat red for five assertions
+      # that were correctly reporting two real defects in Merge-ConfigSeed (an
+      # unexpanded __EXE__ in sdcpp_bin, and vae_mode never translated to its flag),
+      # while new assertions added to it inherited zero regression value.
+      - name: install.ps1 config-seed self-test
+        shell: powershell
+        run: .\setup\tests\install-config-seed.test.ps1
+
   # Printed CLIs under tools/ are SEPARATE Go modules (docs/systems/printed-clis.md),
   # so the `build` job's `./...` does not reach them — Go excludes nested modules from a
   # parent's package pattern. Without a job of their own they would be vendored code that
