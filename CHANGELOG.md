@@ -6,6 +6,66 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.73.1] - 2026-08-19
+Follow-up to 0.73.0, entirely from its own post-merge adversarial review. Five
+fresh-context reviewers ran; three INDEPENDENTLY found the same defect below, and six
+refutation passes upheld it. 0.73.0 is not reverted — nothing in it changes a render path —
+but its headline feature was wrong on an opt-in path, and two of its new guards were vacuous.
+
+### FIXED — the video family label could assert a family that did not render
+0.73.0 computed `model_tier` from config while the runner argument was resolved 30 lines later
+with the OPPOSITE precedence: an explicit per-request `model` wins. So any caller using the
+documented override got a ledger row naming this box's configured seat for a render that used
+a different family — a **false** provenance value, strictly worse than the vague label it
+replaced, and the exact opposite of the change's stated purpose. Both ingresses plumb `model`
+verbatim with no validation (MCP `offload_generate_video`, CLI `--model`), and the MCP schema
+advertised `wan` as the default while omitting `ltx25`, which made the broken call the
+*likeliest* one rather than an edge case.
+
+Two call sites re-deriving one precedence rule is what caused it, so they are now **one**:
+`resolveVideoFamily` returns both the runner argument (byte-identical to the old router — no
+render behavior changes) and the canonical render family, and `videoModelLabel` takes the
+RESOLVED family rather than the config. `wan` normalises to `wan22` so one family never keys
+two tiers. Guarded by a test comparing the two derived provenance surfaces against each other
+rather than each against its own input — the assertion whose absence let this ship.
+
+### FIXED — the footprint store was recording every video render as Wan
+Same defect class, one surface over, and this one feeds decisions rather than reports:
+`footprintSampling` hardcoded family `"wan2.2"` and derived the quant from the **Wan** GGUF
+filenames, which stay bound on a box whose seat is another family. Measured on the reference
+box: an LTX-2.5 render logged 24.1 GiB into `wan2.2/q8_0/video-gen`, a store the fleet reads
+for placement. Both keys now come from the resolved family, and the quant is scoped to the Wan
+family instead of guessed for the others. **Operator note:** the legacy `wan2.2/q8_0` entry in
+`footprints.json` holds 4 mixed-provenance samples and is now orphaned — prune it.
+
+### FIXED — two 0.73.0 guards were vacuous
+- The gate-token guard asserted no literal `__TOKEN__` survived rendering, but `Render`'s own
+  `uniqueTokens` gate already errors on that, so the assertion was **unreachable**. It was
+  blind to the mutation a reader would really make — emptying a substitution's VALUE instead of
+  removing its key — which leaves no token behind and kept the suite green. Rewritten to compare
+  the token's own group-expression line with its gate flipped, one gate at a time. (Two
+  intermediate rewrites were ALSO vacuous, for the same reason each time: flipping a gate adds
+  or removes the model block too, so any whole-document comparison is satisfied by that churn.
+  Both were caught by re-running the mutation rather than by inspection.)
+- The gated-weight filename consts claimed to pin "the templates' own cmd contract", but both
+  sides of every comparison were Go literals in this repo — a template-side rename passed green.
+  Now asserted against the real contracts: the shipped templates AND `install.ps1`.
+- Both 0.73.0 `*To` refactors left the PRODUCTION call unpinned — deleting
+  `warnMissingGatedModels(...)` or `warnImageGenBindingTraps(c)` left every test green while the
+  warning stopped existing. Finding I-2 was "this function has zero tests"; covering the body
+  while the call can vanish reproduced it one layer out. Both call sites are now pinned.
+
+### Docs corrections
+- `docs/systems/gpu-lease.md` still listed "`internal/pipeline` does not yet take a `media`
+  lease" as a known gap. False — `acquireMediaLease` wraps all eight generation routes — and it
+  directly contradicted the rule 0.73.0 added four lines above it.
+- The new `:8188` prohibition named the external Comfy-MCP server but not **this repo's own**
+  `tools/comfyui` CLI, which defaults to `127.0.0.1:8188` and POSTs graphs without the lease —
+  making the rule one the repo appeared to violate. Now named, with its supported posture (the
+  harness's submit backend, where the lease is already held) stated.
+- 0.73.0 edited a RELEASED 0.68.0 changelog entry, erasing the record of when the dead token was
+  introduced. Restored; the removal is recorded here instead.
+
 ## [0.73.0] - 2026-08-19
 ### Media telemetry records WHICH family rendered
 `model_tier` on a video row was a flat `comfyui-video`, so the ledger recorded only THAT a
@@ -267,7 +327,7 @@ incumbent's 50%, and 4/5 on search+reason where the higher-scoring 2B collapses 
 
 - New profile field **`include_qwen35_4b`** mirrors the `include_qwen38` mechanism
   end-to-end: `servingtmpl.Params.IncludeQ354B` strips the model block, its matrix var
-  and its `__Q354B_ALT__` set membership together; `Render` refuses a
+  and its `__Q354B_ALT__`/`__Q354B_AND__` set membership together; `Render` refuses a
   tier that sets the flag against a template with no `qwen3.5-4b-agent` entry (rendering
   a config without the seat while the installer downloads its weights is the
   silent-capability-loss failure the refusal exists to end); `install.ps1` gains the

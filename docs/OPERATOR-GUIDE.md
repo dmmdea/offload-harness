@@ -228,9 +228,18 @@ can start a diffusion run on top of a live llama-swap tier or a second render �
 collision the lease exists to prevent. The lease is a **convention**: it binds only code
 paths that take it, so a bypass is not refused, it is simply unprotected.
 
-Same class, same rule: **any tool that drives ComfyUI directly** — including the official
-Comfy-MCP server — bypasses the lease unless the harness mediates it. Do not point one at
-this box's `:8188`.
+Same class, same rule: **any tool that drives ComfyUI directly** bypasses the lease unless the
+harness mediates it. That includes the official Comfy-MCP server
+(`Comfy-Org/comfy-mcp`) — do not point one at this box's `:8188`.
+
+**It also includes this repo's own `tools/comfyui` CLI (`comfyui-pp-cli`)**, named here so the
+rule is not one the repo quietly violates. That binary defaults to
+`http://127.0.0.1:8188` and POSTs graphs without taking the machine-wide lease (its
+`graph_sha` dedupe is a submit-idempotency mechanism, not an arbitration one). Its SUPPORTED
+posture is as the harness's submit backend: `render/comfy-submit.mjs` auto-upgrades to it when
+the binary is present, and on that path the harness has already taken the lease, so the CLI
+inherits it. Invoking `comfyui-pp-cli` **standalone** against a live box is the bypass — wrap
+it in `gpu reserve --class media` if you need to.
 
 Two escape hatches, both of which keep the lease:
 
