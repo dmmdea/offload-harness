@@ -6,6 +6,35 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.72.0] - 2026-08-18
+### Security/privacy — the operator's tailnet zone was compiled into this PUBLIC repo
+`internal/netguard/tailnet.go` carried `const houseTailnetSuffix = "<a real tailnet>.ts.net"`
+— one operator's private Tailscale DNS zone, hardcoded in an Apache-licensed public
+repo, and load-bearing in a security gate. It is now the config key `tailnet_suffix`.
+
+- **The default is FAIL-CLOSED, not the old value.** Empty = the suffix branch is skipped
+  entirely, so the admitted set is strictly NARROWER than before: loopback,
+  `100.64.0.0/10` literals and dotless MagicDNS names still pass; a dotted tailnet FQDN
+  does not until the operator sets their own zone. A generic `.ts.net` fallback was
+  deliberately NOT used — it would admit ANY tailnet's Funnel-published hostname, i.e. a
+  public-internet endpoint wearing a tailnet-looking name, which is the exact hazard the
+  original constant existed to prevent. Widening a security boundary to solve a privacy
+  problem would have been the wrong trade.
+- `SetTailnetSuffix` normalizes (lowercase, strips a leading dot and a trailing root dot)
+  and REFUSES a value that is not a plausible DNS zone, because a typo there fails open in
+  the reader's mind ("I set it, so my host is allowed") while failing closed in the gate.
+- Installed BEFORE endpoint validation in the config loader — setting it afterwards would
+  judge this load's endpoints against the previous value.
+- New tests pin all of it: the fail-closed default (a real tailnet FQDN must be refused
+  with no suffix configured, while loopback/CGNAT/dotless still pass), and
+  normalization + refusal.
+
+### Also stripped from the public tree
+Operator identity that had no business in a public repo, replaced with examples:
+a tailnet zone, a Tailscale CGNAT IP, a node hostname, two real GPU UUIDs, and private
+`/srv/...` filesystem paths. RFC1918 literals in `fetchtool_test.go` were KEPT — they are
+generic addresses used to test the private-IP block, not the operator's network.
+
 ## [0.71.0] - 2026-08-17
 ### Fixed — a fresh Windows install wrote a broken sdcpp binding on three tiers
 `Merge-ConfigSeed` is the PowerShell parity copy of `tierseed.Resolve` and writes the
@@ -49,6 +78,7 @@ empty result it produces a 1-element array holding an empty array.
 ### Added — `install-config-seed.test.ps1` runs in CI
 Previously only `detect.tests.ps1` and `render.tests.ps1` ran, so the suite covering what
 an install SEEDS and DOWNLOADS had no gate at all.
+
 
 ## [0.70.0] - 2026-08-17
 ### Added — `agent_profile`: a per-tier DEFAULT tool profile for the agent loop
@@ -2912,13 +2942,13 @@ had gone stale against `groups:` in 0.36.0 (that suite is not in CI, so it drift
   choice; among the rest most free space wins.
   - **Ties break on path depth, then name.** On ZFS every dataset of a pool reports the same free
     space, so a name-only tie-break puts the harness under whatever sorts first — measured on the
-    Lenovo, that is `/srv/ecosystem_backup/apps/adventurelog` rather than the pool root.
+    Lenovo, that is `/srv/apps/adventurelog` rather than the pool root.
   - Selection (`internal/volumes.Pick`) is **pure and unit-tested**; only enumeration is
     platform-specific (kernel32 on Windows, `/proc/mounts` + `statfs` on Unix), so the policy cannot
     drift between operating systems. Free space uses the UNPRIVILEGED figure on Unix (`Bavail`, not
     `Bfree`) — reserved blocks are not space an install can use.
   - Verified on both: <node-b> picks `V:` (its weights volume, 308 GiB free) over `C:` with 640 GiB free
-    because `C:` is the OS volume; the <node-c> node picks `/srv/ecosystem_backup` out of **39** enumerated
+    because `C:` is the OS volume; the <node-c> node picks `/srv/apps` out of **39** enumerated
     filesystems.
   - `--json` carries the full enumeration plus `{volume, because}` for wrapper consumption; the
     console view shows the roomiest few and says how many it withheld.

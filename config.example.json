@@ -1,6 +1,7 @@
 {
   "endpoint": "http://127.0.0.1:11436",
   "completion_path": "/v1/chat/completions",
+  "tailnet_suffix": "",
   "seat_endpoints": null,
   "cascade_remote_lanes": null,
   "model": "offload-e4b",

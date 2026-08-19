@@ -299,7 +299,7 @@ sysbench memory --memory-block-size=1M --memory-total-size=16G --memory-oper=rea
 
 # the stack (models + build live on the ZFS dataset, not root)
 GPU_ARCH=86 WITH_FAMILY=1 \
-MODELS_ROOT=/srv/ecosystem_backup/apps/offload-stack/models \
-LLAMACPP_DIR=/srv/ecosystem_backup/apps/offload-stack/build/llamacpp \
+MODELS_ROOT=/srv/offload-stack/models \
+LLAMACPP_DIR=/srv/offload-stack/build/llamacpp \
   ./setup.sh
 ```

@@ -70,7 +70,7 @@ type GPUDevice struct {
 
 // ParseSmiMemoryDevices parses `nvidia-smi --query-gpu=index,uuid,name,
 // memory.total,memory.used --format=csv,noheader,nounits` output — one line
-// per GPU, e.g. "0, GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97, NVIDIA GeForce
+// per GPU, e.g. "0, GPU-1111aaaa-2222-3333-4444-555566667777, NVIDIA GeForce
 // RTX 5060 Ti, 16311, 867" — into an ordered []GPUDevice (nvidia-smi's own
 // enumeration order, i.e. PCI bus order; NOT necessarily CUDA device order —
 // see HeadlineDevice's doc comment for why that distinction is the whole bug

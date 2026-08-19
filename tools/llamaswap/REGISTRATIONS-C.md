@@ -141,8 +141,8 @@ generator-owned:
 {
   "base_url": "http://127.0.0.1:11436",
   "gpu_roles": {
-    "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7": "fast-card",
-    "GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97": "utility-card"
+    "GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000": "fast-card",
+    "GPU-1111aaaa-2222-3333-4444-555566667777": "utility-card"
   },
   "keep_set": ["embeddinggemma", "bge-reranker-v2-m3"],
   "probe_tolerance": 0.05

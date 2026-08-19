@@ -31,30 +31,30 @@ func TestCascadeRemoteLanesLoadValidation(t *testing.T) {
 	}{
 		{
 			name: "tailnet lanes load and round-trip",
-			json: `{"cascade_remote_lanes":{` +
-				`"offload-e4b":"http://lenovo-m720q:11436",` +
-				`"gemma4-e2b":"http://qube.tail38a707.ts.net:11436",` +
+			json: `{"tailnet_suffix":"tailnnnnnn.ts.net","cascade_remote_lanes":{` +
+				`"offload-e4b":"http://node-c:11436",` +
+				`"gemma4-e2b":"http://workstation.tailnnnnnn.ts.net:11436",` +
 				`"local-loop":"http://127.0.0.1:11436",` +
-				`"cgnat-literal":"http://100.127.9.110:18811"}}`,
+				`"cgnat-literal":"http://100.64.0.1:18811"}}`,
 		},
 		{
 			name:    "public FQDN fails naming the key",
-			json:    `{"cascade_remote_lanes":{"offload-e4b":"http://example.com"}}`,
+			json:    `{"tailnet_suffix":"tailnnnnnn.ts.net","cascade_remote_lanes":{"offload-e4b":"http://example.com"}}`,
 			wantErr: `cascade_remote_lanes["offload-e4b"]`,
 		},
 		{
 			name:    "public IP literal fails naming the key",
-			json:    `{"cascade_remote_lanes":{"lane-seat":"http://8.8.8.8:80"}}`,
+			json:    `{"tailnet_suffix":"tailnnnnnn.ts.net","cascade_remote_lanes":{"lane-seat":"http://8.8.8.8:80"}}`,
 			wantErr: `cascade_remote_lanes["lane-seat"]`,
 		},
 		{
 			name:    "cloud API endpoint fails naming the key",
-			json:    `{"cascade_remote_lanes":{"gpt":"https://api.openai.com"}}`,
+			json:    `{"tailnet_suffix":"tailnnnnnn.ts.net","cascade_remote_lanes":{"gpt":"https://api.openai.com"}}`,
 			wantErr: `cascade_remote_lanes["gpt"]`,
 		},
 		{
 			name:    "generic .ts.net outside the house suffix fails",
-			json:    `{"cascade_remote_lanes":{"spoof":"http://evil.ts.net:443"}}`,
+			json:    `{"tailnet_suffix":"tailnnnnnn.ts.net","cascade_remote_lanes":{"spoof":"http://evil.ts.net:443"}}`,
 			wantErr: `cascade_remote_lanes["spoof"]`,
 		},
 	}
@@ -69,7 +69,7 @@ func TestCascadeRemoteLanesLoadValidation(t *testing.T) {
 				if err != nil {
 					t.Fatalf("expected a clean load, got error: %v", err)
 				}
-				if got := c.CascadeRemoteLanes["offload-e4b"]; got != "http://lenovo-m720q:11436" {
+				if got := c.CascadeRemoteLanes["offload-e4b"]; got != "http://node-c:11436" {
 					t.Fatalf(`CascadeRemoteLanes["offload-e4b"] = %q, did not round-trip`, got)
 				}
 				if len(c.CascadeRemoteLanes) != 4 {
@@ -92,7 +92,7 @@ func TestCascadeRemoteLanesLoadValidation(t *testing.T) {
 // depend on Go's randomized map iteration (the same determinism rule, pinned
 // on the shared validator through this second call site).
 func TestCascadeRemoteLanesMultiErrorDeterministic(t *testing.T) {
-	body := `{"cascade_remote_lanes":{` +
+	body := `{"tailnet_suffix":"tailnnnnnn.ts.net","cascade_remote_lanes":{` +
 		`"zzz-second":"http://example.com",` +
 		`"aaa-first":"http://example.org"}}`
 	for i := 0; i < 5; i++ {

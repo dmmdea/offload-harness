@@ -54,8 +54,8 @@ identity to report.
 ```json
 "vram_total_gb": 15.93, "vram_free_gb": 15.08,
 "gpu_devices": [
-  {"index": 0, "uuid": "GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97", "name": "NVIDIA GeForce RTX 5060 Ti", "vram_total_gb": 15.93, "vram_free_gb": 15.08},
-  {"index": 1, "uuid": "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7", "name": "NVIDIA GeForce RTX 5070 Ti", "vram_total_gb": 15.92, "vram_free_gb": 13.46}
+  {"index": 0, "uuid": "GPU-1111aaaa-2222-3333-4444-555566667777", "name": "NVIDIA GeForce RTX 5060 Ti", "vram_total_gb": 15.93, "vram_free_gb": 15.08},
+  {"index": 1, "uuid": "GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000", "name": "NVIDIA GeForce RTX 5070 Ti", "vram_total_gb": 15.92, "vram_free_gb": 13.46}
 ]
 ```
 
@@ -93,14 +93,14 @@ own `gpu_devices[]` (see the JSON example above) and that device — regardless 
 free VRAM — becomes the headline `vram_total_gb`/`vram_free_gb`:
 
 ```json
-{ "primary_gpu_uuid": "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7" }
+{ "primary_gpu_uuid": "GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000" }
 ```
 
 On <node-b>, `gpu_devices[]` shows the RTX 5060 Ti at index 0 with the marginally larger total
 (16311 vs 16303 MiB), so the default largest-total rule headlines it — but ComfyUI's CUDA
 ordering actually computes on the RTX 5070 Ti (index 1, verified via ComfyUI's own
 `/system_stats`). Pinning `primary_gpu_uuid` to the 5070 Ti's UUID
-(`GPU-2a44210f-6739-2d89-0e21-44cd5143faf7`) makes the health payload finally describe the card
+(`GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000`) makes the health payload finally describe the card
 that is actually doing the work.
 
 Behavior: unset (`""`, the default) = the largest-total rule, unchanged. Set and found among the

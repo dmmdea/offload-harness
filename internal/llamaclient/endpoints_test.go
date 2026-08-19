@@ -42,14 +42,14 @@ func TestBaseFor(t *testing.T) {
 
 	c := New("http://127.0.0.1:11436", "", "offload-e4b", time.Second).
 		WithSeatEndpoints(map[string]string{
-			"lenovo-e4b":  "http://lenovo-m720q:11436/", // trailing slash must be trimmed like New's base
+			"lenovo-e4b":  "http://node-c:11436/", // trailing slash must be trimmed like New's base
 			"offload-e4b": "http://100.77.1.9:11436",    // the DEFAULT model seat, remoted
 		})
 	cases := []struct {
 		model string
 		want  string
 	}{
-		{"lenovo-e4b", "http://lenovo-m720q:11436"},
+		{"lenovo-e4b", "http://node-c:11436"},
 		{"offload-e4b", "http://100.77.1.9:11436"},
 		{"", "http://100.77.1.9:11436"}, // "" = default model, which is overridden here
 		{"gemma4-e2b", "http://127.0.0.1:11436"},

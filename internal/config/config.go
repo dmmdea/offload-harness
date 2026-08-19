@@ -89,7 +89,7 @@ type Config struct {
 	CompletionPath string `json:"completion_path"`
 	// SeatEndpoints maps a model seat (the exact llama-swap model id or alias a
 	// call names) to a REMOTE OpenAI-compatible base URL serving that model —
-	// Phase A of multi-node delegation: {"lenovo-e4b": "http://lenovo-m720q:11436"}
+	// Phase A of multi-node delegation: {"lenovo-e4b": "http://node-c:11436"}
 	// makes every completion for that seat resolve to the Lenovo's llama-swap
 	// instead of Endpoint, with zero job machinery. Empty/absent = every seat
 	// stays on Endpoint, byte-identical to a pre-seat build (pinned by test).
@@ -99,6 +99,16 @@ type Config struct {
 	// load loudly, naming the key), and at every dial by netguard.SafeTransport
 	// (the RESOLVED address must be loopback/tailnet — the DNS-rebinding guard
 	// a load-time string check cannot provide).
+	// TailnetSuffix is the operator's OWN tailnet DNS zone (e.g. "tailnnnnnn.ts.net"),
+	// the one netguard.TailnetURL admits dotted hostnames under. It lives in config
+	// rather than compiled into the binary because this is a public repo: one
+	// operator's zone is private to them and wrong for everyone else. Empty is
+	// FAIL-CLOSED and is the default — loopback, 100.64.0.0/10 literals and dotless
+	// MagicDNS names still pass, a dotted tailnet FQDN does not. A generic ".ts.net"
+	// rule is deliberately NOT the fallback: it would admit ANY tailnet's
+	// Funnel-published hostname, i.e. a public-internet endpoint wearing a
+	// tailnet-looking name.
+	TailnetSuffix string `json:"tailnet_suffix,omitempty"`
 	SeatEndpoints map[string]string `json:"seat_endpoints,omitempty"`
 	// CascadeRemoteLanes maps a model seat (same key rule as SeatEndpoints) to a
 	// remote OpenAI-compatible base URL that ALSO serves that model — the
@@ -1119,6 +1129,14 @@ func Load(path string) (Config, error) {
 	// relative just because validation ran before expansion did.
 	if err := validatePipelines(c.Pipelines); err != nil {
 		return c, err
+	}
+	// Install the operator's tailnet zone BEFORE any endpoint is vetted — the
+	// endpoint checks below consult it, so setting it afterwards would judge this
+	// load's endpoints against the PREVIOUS value (empty on a first load, i.e.
+	// every dotted tailnet FQDN wrongly rejected). A malformed zone is refused
+	// here rather than stored, so it can be attributed to its key.
+	if err := netguard.SetTailnetSuffix(c.TailnetSuffix); err != nil {
+		return c, fmt.Errorf("tailnet_suffix: %w", err)
 	}
 	if err := validateTailnetEndpoints("seat_endpoints", c.SeatEndpoints); err != nil {
 		return c, err

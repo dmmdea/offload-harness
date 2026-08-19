@@ -72,7 +72,7 @@
     must not 401. Full-fleet token enforcement is a recorded follow-up for a
     whole-fleet-deploy window.
 11. **TailnetURL tightened:** allowed = loopback, 100.64.0.0/10 literals, and hostnames
-    ONLY under the house tailnet suffix `.tail38a707.ts.net` or dotless names that resolve
+    ONLY under the house tailnet suffix `.tailnnnnnn.ts.net` or dotless names that resolve
     (checked in a custom DialContext at dial time) into 100.64.0.0/10. Generic `.ts.net`
     is NOT allowed (Funnel spoof surface).
 12. **`delegate_subtask` (in-loop tool) is PARKED to v2.** v1 surfaces: MCP
@@ -98,7 +98,7 @@
 New config key `seat_endpoints` (map model→base URL, default empty):
 
 ```json
-"seat_endpoints": { "lenovo-e4b": "http://lenovo-m720q:11436" }
+"seat_endpoints": { "lenovo-e4b": "http://node-c:11436" }
 ```
 
 `llamaclient` gains per-model base resolution: `Client.BaseFor(model)` consults the map (exact model id or llama-swap alias), else the default base. Every completion/embedding call site resolves through it. A remote base MUST pass the tailnet guard (loopback or 100.64.0.0/10 after literal-IP parse; MagicDNS hostnames allowed and resolved lazily by the HTTP layer — the guard checks the URL host is not a public FQDN/IP literal; a non-IP hostname is allowed only when it has no dots or ends in `.ts.net`).
@@ -214,7 +214,7 @@ E2E acceptance on the REAL fleet (Qube delegator → Lenovo node): a schema-outp
 - Produces: `netguard.TailnetURL(string) error`; `Client.BaseFor(model) string`.
 - Consumes: nothing from other tasks.
 
-- [ ] Failing tests: TailnetURL accepts `http://127.0.0.1:11436`, `http://100.127.9.110:18811`, `http://lenovo-m720q:11436`, `http://qube.tail38a707.ts.net:11436`; rejects `http://example.com`, `http://8.8.8.8:80`, `https://api.openai.com`. BaseFor returns override for exact model else default. Config with a public URL fails load with a named error.
+- [ ] Failing tests: TailnetURL accepts `http://127.0.0.1:11436`, `http://100.64.0.1:18811`, `http://node-c:11436`, `http://workstation.tailnnnnnn.ts.net:11436`; rejects `http://example.com`, `http://8.8.8.8:80`, `https://api.openai.com`. BaseFor returns override for exact model else default. Config with a public URL fails load with a named error.
 - [ ] Implement; full package tests; pin the absent-key path byte-identical (existing client tests still green). Commit `feat(client): per-model seat endpoint overrides, tailnet-guarded`.
 
 ### Task 3: fleet auth middleware

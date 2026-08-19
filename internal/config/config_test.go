@@ -310,14 +310,14 @@ func TestLoadExpandsTildeInEveryPathField(t *testing.T) {
 // fail SelectHeadlineDevice's match and drop to the fallback rule + warning.
 func TestLoadTrimsPrimaryGPUUUID(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(p, []byte(`{"primary_gpu_uuid": "  GPU-2a44210f-6739-2d89-0e21-44cd5143faf7\n"}`), 0o600); err != nil {
+	if err := os.WriteFile(p, []byte(`{"primary_gpu_uuid": "  GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000\n"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	got, err := Load(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.PrimaryGPUUUID != "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7" {
+	if got.PrimaryGPUUUID != "GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000" {
 		t.Errorf("PrimaryGPUUUID = %q, want the whitespace trimmed off", got.PrimaryGPUUUID)
 	}
 }
