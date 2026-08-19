@@ -2067,7 +2067,7 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	if serr != nil {
 		return p.deferGen(req, meta, start, len(req.Input), serr.Error())
 	}
-	meta.Model = "comfyui-video"
+	meta.Model = videoModelLabel(p.cfg)
 
 	seed := paramIntOr(req.Params, "seed", 0)
 	if seed <= 0 {
@@ -2778,6 +2778,28 @@ func runNvidiaSmiMemory() (string, error) {
 // recipe in batch, review-caught pre-merge 2026-08-10) — a drift class this
 // helper deletes. TestImageModelFromConfig reflect-checks that every field
 // added to imagegen.Model gets mapped here.
+
+// videoModelLabel reports the video graph family this machine actually renders
+// with, mirroring runGenerateImage's checkpoint labeling. An UNBOUND family keeps
+// the historical "comfyui-video" label so health tiers don't fragment.
+//
+// Recording the family is what makes a family-binding verdict provable from
+// telemetry. The ledger previously recorded only THAT a video render happened, so
+// after the 2026-08-12 ltx25 seat binding the record could not distinguish an
+// ltx25 render from a wan22 one — and the binding's status was still being
+// questioned six days later while config, code and binary all carried it.
+//
+// "wan22" is deliberately labeled rather than folded into the unbound case: the
+// family router treats it as "leave --model unset" (see runGenerateVideo), but
+// "rendered with wan22" and "family unbound" are different facts and collapsing
+// them would recreate the ambiguity this label removes.
+func videoModelLabel(cfg config.Config) string {
+	if cfg.VideoGenFamily == "" {
+		return "comfyui-video"
+	}
+	return "comfyui-video:" + cfg.VideoGenFamily
+}
+
 func imageModelFromConfig(cfg config.Config) imagegen.Model {
 	return imagegen.Model{
 		Ckpt:         cfg.ImageGenCkpt,
