@@ -6,6 +6,55 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.73.0] - 2026-08-19
+### Media telemetry records WHICH family rendered
+`model_tier` on a video row was a flat `comfyui-video`, so the ledger recorded only THAT a
+render happened. That is why the 2026-08-12 LTX-2.5 seat binding was still being questioned
+six days later while config, code, binary and the tier matrix all carried it: the record
+could not distinguish an `ltx25` render from a `wan22` one, so the binding was unprovable
+from telemetry. Rows now carry `comfyui-video:<family>`, mirroring the image route's
+checkpoint label. An unbound family keeps the historic label so health tiers don't fragment;
+`wan22` is labeled rather than folded into the unbound case, because "rendered with wan22"
+and "family unbound" are different facts.
+
+### The pooled VIDEO seat now warns without `--disable-dynamic-vram`
+The pooled IMAGE seat has warned since 0.59.0. The video seat carries the identical
+ComfyUI-MultiGPU #191 requirement — the `blackwell-2x16` tier seeds
+`videogen_pool_vvram_gb=30` — and had **no check at all**. Un-pooled, an int8 DiT that
+upcasts to ~39 GB at compute no longer fits the virtual pool it was measured against, and
+DynamicVRAM prints the pool allocation banner either way, so a misconfigured box was
+indistinguishable from a pooled one at every observable surface. The two seats warn
+independently so the message names the config key actually at fault. Warn-only, as before: a
+manually-started server may carry the flag, so an absent env var is a smell, not proof.
+Live-fired three arms on real binaries against the live config — new binary without the flag
+emits both warnings, with the flag emits neither, and the previous 0.72.0 binary without the
+flag emits the image warning only (the control proving the video branch is new behavior).
+
+### Review follow-ups from the 0.72.0 round
+- **`warnMissingGatedModels` had zero tests** (finding I-2). It is the last line of defence
+  for a specific silent failure: llama-swap lists models from the CONFIG, so a gated entry
+  whose weights were never downloaded makes `doctor` and `acceptance` PASS while the route
+  fails only when called. Now covered, each case with its silent arm — including the
+  cross-machine skip, whose correctness is invisible in production because it produces no
+  output either way.
+- **`__Q354B_AND__` was substituted but consumed by no template** (finding I-3), while its
+  siblings are live (`__M26_AND__` in 2 templates, `__Q38_AND__` in 1) — the small-tier agent
+  seat is never a member of an interactive `&` group. Removed, with guards on BOTH halves of
+  the asymmetry, because the obvious cleanup in either direction is wrong: re-adding the dead
+  one restores dead code, while deleting a live one leaves an unexpanded literal that
+  llama-swap rejects at startup. The rendered-output guard derives each template's gates the
+  way `Render` does, so it covers all 7 shipped templates rather than the 2 a hardcoded gate
+  set would reach — the same blind spot that let a Linux-template regression pass a
+  fully-green suite.
+
+### Docs — direct `:8188` posts are now forbidden by rule
+ADR 0018 recorded the lease bypass as a *consequence* but no document forbade it, and the
+operator guide had no prohibition. Since the gap cannot be closed at the mechanism level (the
+lease binds only code paths that take it), it is closed by rule in the three places a reader
+lands, with the `run-graph` and `gpu reserve --class media` escape hatches that keep the
+lease. Names the official Comfy-MCP server as the same bypass class: it drives ComfyUI
+directly, so it is adoptable only behind the harness.
+
 ## [0.72.0] - 2026-08-18
 ### Security/privacy — the operator's tailnet zone was compiled into this PUBLIC repo
 `internal/netguard/tailnet.go` carried `const houseTailnetSuffix = "<a real tailnet>.ts.net"`
@@ -218,7 +267,7 @@ incumbent's 50%, and 4/5 on search+reason where the higher-scoring 2B collapses 
 
 - New profile field **`include_qwen35_4b`** mirrors the `include_qwen38` mechanism
   end-to-end: `servingtmpl.Params.IncludeQ354B` strips the model block, its matrix var
-  and its `__Q354B_ALT__`/`__Q354B_AND__` set membership together; `Render` refuses a
+  and its `__Q354B_ALT__` set membership together; `Render` refuses a
   tier that sets the flag against a template with no `qwen3.5-4b-agent` entry (rendering
   a config without the seat while the installer downloads its weights is the
   silent-capability-loss failure the refusal exists to end); `install.ps1` gains the

@@ -219,6 +219,34 @@ first job ~32s (absorbs the checkpoint load), warm jobs ~22s. A failed job is re
 its result item and does not abort the rest. Single (unbatched) renders keep the zero-warm
 default — nothing changes unless you pass `--batch`.
 
+### Never post a graph to `:8188` directly ⛔
+
+Every render goes through the harness — `generate-image`, `generate-video`, `run-graph`, or
+the MCP tools. A raw `POST http://127.0.0.1:8188/prompt` skips the
+[machine-wide GPU lease](architecture/decisions/0018-machine-wide-fenced-gpu-lease.md), so it
+can start a diffusion run on top of a live llama-swap tier or a second render — the exact
+collision the lease exists to prevent. The lease is a **convention**: it binds only code
+paths that take it, so a bypass is not refused, it is simply unprotected.
+
+Same class, same rule: **any tool that drives ComfyUI directly** — including the official
+Comfy-MCP server — bypasses the lease unless the harness mediates it. Do not point one at
+this box's `:8188`.
+
+Two escape hatches, both of which keep the lease:
+
+```powershell
+# a graph the templates do not cover — run-graph takes the lease for you
+local-offload run-graph --graph wf.json --out-dir out/
+
+# you genuinely need a bare server (benchmarking) — hold the lease explicitly
+local-offload gpu reserve --class media -- <your command>
+```
+
+If you started ComfyUI by hand, check that the process owning `:8188` is the one you think
+it is before rendering: a flagless instance can keep the port while a correctly-flagged one
+fails to bind, and nothing reports it (its argv carries no `ComfyUI` substring, so a naive
+kill-filter misses it).
+
 ### Run an arbitrary ComfyUI graph (run-graph) ✅
 
 ```powershell
