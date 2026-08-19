@@ -223,8 +223,11 @@ func Render(tmpl string, p Params) (string, error) {
 	// consumed by NO template, unlike __M26_AND__ (2) and __Q38_AND__ (1) which
 	// are live — the small-tier agent seat is never a member of an interactive
 	// "&" group, so there was nothing for it to render into. Dead substitution
-	// removed 2026-08-19 (0.72.0 review finding I-3); TestQ354BAndTokenIsGone
-	// keeps it from creeping back by symmetry with its siblings.
+	// removed 2026-08-19 (0.72.0 review finding I-3). Two guards live in
+	// q354b_deadtoken_test.go — TestRenderCarriesNoQ354BAndSubstitution keeps the
+	// dead token from creeping back by symmetry with its siblings, and
+	// TestGateTokenSubstitutionsActuallySubstitute pins that the LIVE siblings
+	// still expand, so the removal is never over-applied to them.
 	q354balt := ""
 	if p.IncludeQ354B {
 		if !definesModel(out, modelQ354B) {
