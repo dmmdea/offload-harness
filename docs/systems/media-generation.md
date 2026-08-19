@@ -225,6 +225,13 @@ the output envelope shape.
 1. **Zero-warm by default.** Nothing GPU-resident survives a job.
 2. **The CPU memory stack is never unloaded** by the free step.
 3. Only one GPU-heavy job at a time, per machine.
+   **Corollary — never post a graph straight to ComfyUI (`:8188`).** Every render enters
+   through this system so it takes the machine-wide lease; a direct POST is unprotected
+   rather than refused (see [gpu-lease](gpu-lease.md) and
+   [ADR 0018](../architecture/decisions/0018-machine-wide-fenced-gpu-lease.md)). This covers
+   any tool that drives ComfyUI directly, the official Comfy-MCP server included: it is
+   adoptable only behind the harness, never pointed at `:8188`. Use `run-graph` for graphs
+   the templates do not cover, or `gpu reserve --class media` to hold the lease by hand.
 4. **No FLUX-family model is ever added** — see
    [ADR 0011](../architecture/decisions/0011-flux-family-license-prohibition.md). The binding reason
    is the non-commercial licence, not VRAM; a bigger card does not reopen it.

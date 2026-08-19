@@ -237,7 +237,12 @@ renewing holder stale the moment its declared window lapsed.
 ## Known gaps
 
 - **The reservation is a convention.** A raw `curl :11436` loop, a graph posted straight to
-  ComfyUI, or a forgotten `gpu reserve` gets no protection.
+  ComfyUI, or a forgotten `gpu reserve` gets no protection. Because the gap cannot be closed
+  at the mechanism level, it is closed by RULE: posting to `:8188` directly is forbidden —
+  see [OPERATOR-GUIDE](../OPERATOR-GUIDE.md) ("Never post a graph to `:8188` directly"). The
+  rule covers any tool that drives ComfyUI directly, the official Comfy-MCP server included.
+  `run-graph` and `gpu reserve --class media` are the supported ways to do the same work
+  while holding the lease.
 - **The lease reduces the number of teardowns; the drain is what makes one safe.** Both needed.
 - **Head-of-line blocking is structural** — a 45-minute video blocks everything behind it.
 - `internal/pipeline` does not yet take a `media` lease around its own generation calls; the Node
