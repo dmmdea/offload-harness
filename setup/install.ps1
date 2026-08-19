@@ -601,6 +601,31 @@ function Select-CudaBuild {
 # string value, including strings inside array values. "" = no substitution
 # (keeps every pre-J2 caller/test byte-identical).
 # ---------------------------------------------------------------------------
+# Which PINNED model keys a tier's GATES add to the download set. Extracted as a pure
+# function so the SPLIT-BRAIN this mechanism exists to prevent is actually testable: a
+# seeded seat whose weights never download, or a download whose seat nothing renders.
+# Previously this lived inline in the main flow, below the dot-source test seam, so no
+# test could reach it and deleting the qwen3.5-4b line left the whole suite green.
+function Get-GatedModelKeys {
+  param([bool]$IncludeQwen38, [bool]$IncludeQwen354B, [bool]$WithFamily)
+  $keys = @()
+  # The 27B coder/agent seat RIDES the family gate: OFFLOAD_WITH_FAMILY=0 (a lean
+  # install) opts out of an 18.8GB download even on an include_qwen38 tier.
+  if ($IncludeQwen38 -and $WithFamily) { $keys += @('model-qwen38', 'model-qwen38-mmproj') }
+  # The Qwen3.5-4B agent seat deliberately does NOT ride it: 2.9GB, and on the small
+  # tiers it is the only thing standing between the agent lane and a planner measured at
+  # 50% recall, so a lean install that silently dropped it would ship the tier's weakest
+  # configuration while the yaml still named the seat. This asymmetry is intentional -
+  # do NOT "make it consistent" with the line above.
+  if ($IncludeQwen354B) { $keys += @('model-qwen35-4b') }
+  # Returned WITHOUT the ,@() no-unroll wrapper on purpose. That guard is correct where a
+  # 1-element array must survive JSON SERIALIZATION (Merge-ConfigSeed), but here the only
+  # consumer is `$modelKeys += ...`, where unrolling is exactly what is wanted - and on an
+  # EMPTY result the wrapper produces a 1-element array holding an empty array, which
+  # reads downstream as "one model to download" whose key is not a string.
+  return $keys
+}
+
 function Merge-ConfigSeed {
   param([string]$ConfigText, $Seed, [string]$OffloadHome = '')
   if ($null -eq $Seed) { return $ConfigText }
@@ -616,21 +641,58 @@ function Merge-ConfigSeed {
   function Expand-SeedValue {
     param($Value, [string]$HomeFwd)
     if ($Value -is [string]) {
-      if ($HomeFwd) { return $Value.Replace('__OFFLOAD_HOME__', $HomeFwd) }
-      return $Value
+      $s = $Value
+      if ($HomeFwd) { $s = $s.Replace('__OFFLOAD_HOME__', $HomeFwd) }
+      # __EXE__ is unconditional: this script only ever runs on Windows, and
+      # internal/tierseed (the authoritative rule) expands it to ".exe" there. Without
+      # this a fresh install on any tier whose seed carries it - ampere-6, amd-rdna3,
+      # amd-rdna3-dgpu all bind sdcpp_bin that way - shipped a config naming a binary
+      # path that does not exist. It is NOT gated on -OffloadHome: the token is
+      # OS-dependent, not install-root-dependent.
+      return $s.Replace('__EXE__', '.exe')
     }
     if ($Value -is [System.Array]) {
-      $out = @($Value | ForEach-Object { if ($_ -is [string] -and $HomeFwd) { $_.Replace('__OFFLOAD_HOME__', $HomeFwd) } else { $_ } })
+      $out = @($Value | ForEach-Object {
+          if ($_ -is [string]) {
+            $e = $_
+            if ($HomeFwd) { $e = $e.Replace('__OFFLOAD_HOME__', $HomeFwd) }
+            $e.Replace('__EXE__', '.exe')
+          } else { $_ }
+        })
       return ,([object[]]$out)
     }
     return $Value
   }
+  # vae_mode is a seed-only DIRECTIVE, not a config key: tierseed.Resolve translates it
+  # into an sdcpp_extra_args flag and never emits it. This parity copy previously copied
+  # it through verbatim, so a fresh Windows install wrote a meaningless "vae_mode" key
+  # AND never got the flag - on amd-rdna3 that is --vae-on-cpu, which the tier notes
+  # record as REQUIRED on an AMD iGPU (without it the VAE renders all black, sd.cpp
+  # #563/#1621). Mirror of tierseed's vaeArgs map; change tierseed FIRST, then here.
+  $vaeArgs = @{ 'tiling' = '--vae-tiling'; 'cpu' = '--vae-on-cpu'; 'none' = '' }
   $cfg = $ConfigText | ConvertFrom-Json
   foreach ($p in $props) {
+    if ($p.Name -eq 'vae_mode') { continue }   # translated below, never emitted
     $v = Expand-SeedValue -Value $p.Value -HomeFwd $homeFwd
     if ($p.Value -is [System.Array]) { $v = [object[]]@($v) }   # belt: never let an array degrade
     if ($cfg.PSObject.Properties[$p.Name]) { $cfg.($p.Name) = $v }
     else { $cfg | Add-Member -NotePropertyName $p.Name -NotePropertyValue $v }
+  }
+  $mode = $Seed.PSObject.Properties['vae_mode']
+  if ($mode) {
+    $flag = $vaeArgs[[string]$mode.Value]
+    if ($flag) {
+      $cur = @()
+      if ($cfg.PSObject.Properties['sdcpp_extra_args']) { $cur = @($cfg.sdcpp_extra_args) }
+      if ($cur -notcontains $flag) { $cur = @($cur) + $flag }
+      # ,@() again: a 1-element sdcpp_extra_args must serialize as a JSON ARRAY. The
+      # unroll makes it a bare string and Go rejects the whole config - the original
+      # review CRITICAL this guard was written for, now genuinely reachable again
+      # because the translation above is what PRODUCES the 1-element array.
+      $arr = ,([object[]]@($cur | Where-Object { $_ }))
+      if ($cfg.PSObject.Properties['sdcpp_extra_args']) { $cfg.sdcpp_extra_args = $arr[0] }
+      else { $cfg | Add-Member -NotePropertyName 'sdcpp_extra_args' -NotePropertyValue $arr[0] }
+    }
   }
   return ($cfg | ConvertTo-Json -Depth 8)
 }
@@ -931,14 +993,9 @@ if ($profileId -and (Test-Path $profilesJsonStep5)) {
     $includeQwen354B = ($q354Val -is [bool] -and $q354Val)
   }
 }
-# The coder/agent seat rides the family gate: OFFLOAD_WITH_FAMILY=0 (lean install)
-# opts out of the largest download even on an include_qwen38 tier.
-if ($includeQwen38 -and $withFamily) { $modelKeys += @('model-qwen38', 'model-qwen38-mmproj') }
-# The Qwen3.5-4B agent seat does NOT ride the family gate. It is 2.9GB (not 18.8GB),
-# and on the small tiers it is the ONLY thing standing between the agent lane and a
-# planner measured at 50% recall — a lean install that silently drops it would ship
-# the tier's weakest configuration while the yaml still names the seat.
-if ($includeQwen354B) { $modelKeys += @('model-qwen35-4b') }
+# Gate -> download-set mapping lives in Get-GatedModelKeys (above the test seam) so it
+# can be regression-pinned; the rules and their deliberate asymmetry are documented there.
+$modelKeys += Get-GatedModelKeys -IncludeQwen38 $includeQwen38 -IncludeQwen354B $includeQwen354B -WithFamily $withFamily
 foreach ($key in $modelKeys) {
   $m = $PINNED[$key]
   $dest = Join-Path $modelDir $m.name

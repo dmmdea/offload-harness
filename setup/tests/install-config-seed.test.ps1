@@ -125,7 +125,13 @@ Write-Host "== J2: sdcpp seed + __OFFLOAD_HOME__ token =="
 $amdSeed = $profiles.'amd-rdna3'.config_seed
 Assert ($amdSeed.imagegen_engine -eq 'sdcpp')                               'amd-rdna3 seeds the sdcpp engine'
 Assert ($amdSeed.sdcpp_model_kind -eq 'diffusion')                          'amd-rdna3 seeds model_kind diffusion (Z-Image DiT)'
-Assert ($amdSeed.sdcpp_extra_args -contains '--vae-on-cpu')                 'amd-rdna3 seeds --vae-on-cpu (iGPU VAE stability, sd.cpp #563/#1621)'
+# The tier declares the DIRECTIVE `vae_mode: cpu`; Merge-ConfigSeed (parity copy of
+# tierseed.Resolve) is what turns it into the flag. Assert BOTH halves: the old
+# assertion read sdcpp_extra_args straight off the raw seed, which stopped existing when
+# vae_mode was introduced - and because this suite was never wired into CI, it sat red
+# instead of reporting that the PowerShell side had never learned the translation.
+Assert ($amdSeed.vae_mode -eq 'cpu')                                        'amd-rdna3 declares vae_mode cpu (iGPU VAE stability, sd.cpp #563/#1621)'
+Assert ($null -eq $amdSeed.sdcpp_extra_args)                                'amd-rdna3 does NOT hand-write sdcpp_extra_args (vae_mode is the single writer)'
 Assert ($amdSeed.imagegen_cfg -eq 1 -and $amdSeed.imagegen_steps -eq 8)     'amd-rdna3 seeds turbo sampling (cfg 1, 8 steps)'
 Assert ($profiles.'amd-rdna3-dgpu'.config_seed.imagegen_engine -eq 'sdcpp') 'amd-rdna3-dgpu seeds the sdcpp engine too'
 # J3: the UMA tier MUST sample Dedicated+Shared (Dedicated reads ~0 on an iGPU);
@@ -146,6 +152,16 @@ Assert ($merged -match '"sdcpp_extra_args":\s*\[')                          '1-e
 Assert (@($mo.sdcpp_extra_args) -contains '--vae-on-cpu')                   'array seed values survive the merge'
 $mergedNoHomeArr = Merge-ConfigSeed -ConfigText $tpl -Seed $amdSeed
 Assert ($mergedNoHomeArr -match '"sdcpp_extra_args":\s*\[')                 'array stays an array with no -OffloadHome too'
+
+# The translation itself, end to end: vae_mode cpu MUST reach the shipped config as the
+# flag, and vae_mode MUST NOT survive as a key (it is not a harness config field).
+Assert (@($mo.sdcpp_extra_args) -contains '--vae-on-cpu')                   'vae_mode cpu translates to --vae-on-cpu in the merged config'
+Assert ($null -eq $mo.vae_mode)                                             'vae_mode does NOT leak into the shipped config (seed-only directive)'
+# __EXE__ is OS-dependent, not install-root-dependent: it must expand even with no
+# -OffloadHome, or a fresh install writes a binary path that does not exist.
+$mergedNoHomeObj = $mergedNoHomeArr | ConvertFrom-Json
+Assert (-not ($mergedNoHomeArr -match '__EXE__'))                           'no unexpanded __EXE__ remains without -OffloadHome either'
+Assert ($mergedNoHomeObj.sdcpp_bin -match 'sd-cli\.exe$')                   'sdcpp_bin ends in sd-cli.exe (token expanded)'
 $mergedNoHome = Merge-ConfigSeed -ConfigText $tpl -Seed $amdSeed
 Assert ($mergedNoHome -match '__OFFLOAD_HOME__')                            'without -OffloadHome the token is left as-is (pre-J2 behavior preserved)'
 $arrTok = [pscustomobject]@{ sdcpp_extra_args = @('__OFFLOAD_HOME__/x', '--flag') }
@@ -169,5 +185,39 @@ $condMerged = (Merge-ConfigSeed -ConfigText $tpl -Seed $profiles.'ampere-8'.conf
 Assert ($condMerged.imagegen_family -eq 'hidream-o1')                       'conditional seed merges cleanly'
 
 Write-Host ""
+
+# --- Gate -> download set (closes the untested half of the split-brain) ---------------
+# Deleting the qwen3.5-4b download line used to leave the ENTIRE suite green: the seat
+# rendered into the yaml, config_seed named it, and the weights never arrived.
+Write-Host ""
+Write-Host "== Get-GatedModelKeys: the download half of the gate =="
+Assert ([bool](Get-Command Get-GatedModelKeys -ErrorAction SilentlyContinue)) 'dot-source seam defines Get-GatedModelKeys'
+
+$none = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -WithFamily $true)
+Assert ($none.Count -eq 0)                                                  'no gates -> no extra downloads'
+
+$q354 = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $true -WithFamily $true)
+Assert ($q354 -contains 'model-qwen35-4b')                                  'include_qwen35_4b pulls model-qwen35-4b'
+Assert ($q354.Count -eq 1)                                                  'include_qwen35_4b pulls ONLY its own weights'
+
+# The deliberate asymmetry, pinned in BOTH directions so a future "consistency" edit fails.
+$leanQ354 = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $true -WithFamily $false)
+Assert ($leanQ354 -contains 'model-qwen35-4b')                              'qwen3.5-4b survives a LEAN install (does NOT ride the family gate)'
+$leanQ38 = @(Get-GatedModelKeys -IncludeQwen38 $true -IncludeQwen354B $false -WithFamily $false)
+Assert ($leanQ38.Count -eq 0)                                               'qwen3.8-27b IS dropped by a lean install (rides the family gate)'
+$fullQ38 = @(Get-GatedModelKeys -IncludeQwen38 $true -IncludeQwen354B $false -WithFamily $true)
+Assert ($fullQ38 -contains 'model-qwen38' -and $fullQ38 -contains 'model-qwen38-mmproj') 'qwen3.8-27b pulls weights + mmproj on a full install'
+
+# Every key a gate can emit must exist in $PINNED, or the install dies mid-download.
+foreach ($k in @('model-qwen35-4b', 'model-qwen38', 'model-qwen38-mmproj')) {
+  Assert ([bool]$PINNED[$k])                                                "PINNED defines $k (gate cannot name a key with no pin)"
+}
+# Closure the other way: a tier that sets the flag must have its pin present.
+foreach ($t in @($profiles.PSObject.Properties.Name)) {
+  if ($profiles.$t.include_qwen35_4b -eq $true) {
+    Assert ([bool]$PINNED['model-qwen35-4b'])                               "tier $t sets include_qwen35_4b and the pin exists"
+  }
+}
+
 if ($failures -eq 0) { Write-Host 'ALL PASS' -ForegroundColor Green; exit 0 }
 Write-Host "FAILURES: $failures" -ForegroundColor Red; exit 1
