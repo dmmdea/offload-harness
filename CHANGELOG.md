@@ -6,6 +6,35 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.74.0] - 2026-08-19
+Nightshift-9 batch: one pre-existing render defect fixed, plus the measurement-free half of the
+operator-tasked 8GB-class re-evaluation (full proposal + bake plan:
+`Benchmarks and Optimizations/2026-08-19-8gb-tier-reeval-proposal.md`).
+
+### FIXED — `model:"ace"` with a still rendered music conditioned on an image file path
+The ace (text-to-music) arm read its style-tags prompt from `pos[1]` unconditionally, but the
+pipeline builds `<out> <still> <prompt>` whenever a still is supplied — for every model. Found
+by 0.73.1's round-3 reviewer, pre-existing since the arm shipped. Prompt now resolves
+`pos[2] || pos[1] || --prompt`, a "prompt" naming an existing file refuses loudly, and the
+resolved style prompt is logged (output audio alone cannot show which text conditioned it).
+E2E under a real lease: still + tags rendered 30.0 s FLAC with
+`ace style prompt: upbeat corporate, 120 bpm, bright synth` in the log; mutation red pasted in
+the commit.
+
+### 8GB tiers (ampere-8 / blackwell-8) — hygiene from the re-evaluation
+- **`agent_profile: "research"` seeded on both** — the measured 0%→72% small-seat lever
+  (ampere-6 parity); the class previously fell to `general` by omission, the configuration the
+  house measured as broken. Seed-lint typo mutation verified red.
+- **`gpu_env` parity**: ampere-8 gains blackwell-8's `CUDA_VISIBLE_DEVICES=0` +
+  `CUDA_MODULE_LOADING=LAZY` — its reference box is a hybrid-graphics laptop, the exact failure
+  class the field exists for.
+- **Notes corrected**: the class's serving params are UNMEASURED-ON-REFERENCE (the reference box
+  never ran the installer); the missing `ocr` alias is BY DESIGN pending ocrprobe measurement.
+- **Deliberately NOT shipped**: the low-RAM sdcpp image seed (the mid/high overlay MERGES over
+  `config_seed`, so it needs a `config_seed_ram_low` schema arm — build work); `ctx_size`
+  16384→32768 and every seat candidate (Z-Image Turbo, Qwen3.5-9B agent, Qwen3VL-8B, …) wait for
+  the measured bake on the reference box per the seat-lifecycle rule.
+
 ## [0.73.1] - 2026-08-19
 Follow-up to 0.73.0, entirely from its own post-merge adversarial review. Five
 fresh-context reviewers ran; three INDEPENDENTLY found the same defect below, and six
