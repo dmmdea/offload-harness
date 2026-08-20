@@ -12,7 +12,7 @@
 //        [--api http://127.0.0.1:8188] [--no-lock] [--keep-comfy]   |   <out.mp4> --graph wf.json
 //   --hero: native no-LoRA quality pass (wan; slower, better motion).  --upscale-model:
 //   post-decode ESRGAN upscale (+ --upscale-width/height to resize, e.g. 720p->1080p).
-import { writeFileSync, copyFileSync, readFileSync } from "node:fs";
+import { writeFileSync, copyFileSync, readFileSync, existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { COMFY_DIR } from "./comfy-lifecycle.mjs";
@@ -51,9 +51,23 @@ async function generate() {
   if (flags.graph) {
     graph = JSON.parse(readFileSync(flags.graph, "utf8"));
   } else if (flags.model === "ace") {
-    // text-to-music (ACE-Step): no still — the prompt (style tags) is the first positional.
-    const prompt = pos[1] || flags.prompt;
+    // text-to-music (ACE-Step): no still is USED — but a caller may still SUPPLY one,
+    // because the Go pipeline builds `<out> <still> <prompt>` whenever a still is
+    // present, for every model. Reading pos[1] unconditionally therefore passed the
+    // IMAGE PATH as the style-tags prompt for `model:"ace"` + still (found by the
+    // 0.73.1 review round). When three positionals arrive the prompt is the third;
+    // with two it is the second, matching the documented CLI shape.
+    const prompt = pos[2] || pos[1] || flags.prompt;
     if (!prompt) { console.error('error: --model ace needs a "<style tags>" prompt (e.g. "upbeat corporate, 120 bpm")'); process.exit(2); }
+    // Fail-loud guard for the residual shape (still supplied, prompt omitted): a
+    // "prompt" that names an existing file is the bug, not a style description.
+    // Log the resolved style prompt: output audio alone cannot show WHICH text
+    // conditioned it, and this line is what makes that provable from a run log.
+    console.log("ace style prompt:", prompt);
+    if (existsSync(prompt)) {
+      console.error('error: --model ace received a file path (' + prompt + ') where style tags belong — text-to-music uses no still image; pass a prompt like "upbeat corporate, 120 bpm"');
+      process.exit(2);
+    }
     const common = { prompt, seed, seconds: Number(flags.seconds || 30) };
     if (flags.steps) common.steps = Number(flags.steps);
     graph = buildAceStep(common);
