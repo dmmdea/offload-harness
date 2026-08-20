@@ -42,12 +42,22 @@ honestly serves text only.
 It ships no unconditional `config_seed` — the RAM-gated overlay above is the whole
 media binding for this tier.
 
+## Installer-seeded config (non-media)
+
+These `config_seed` keys are applied to a FRESH harness config exactly like the media
+seed, but they bind no media route — the agent/cascade seats and per-node knobs live
+here so they are never mistaken for a media capability:
+
+| key | value |
+|---|---|
+| `agent_profile` | `research` |
+
 ## Operator notes
 
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Configs #8/#9 (5060 8GB Blackwell; +64GB adds 26B cpu-moe). E4B resident full-GPU. REQUIRES the Blackwell CUDA-12.8 sm_120 build (Task H4). 26B cpu-moe only when ram_tier mid/high; else dropped. J4: config_seed_ram_mid_high auto-binds the O1 bf16 IMAGE seat on mid/high-RAM boxes (verified on the ampere-8 reference box; image only — no video/music on 8GB by decision 2026-07-23). PROJECTED. J-media 2026-07-28: media_seats = ampere-8's PROVEN CUDA seats verbatim (same 8 GB/E4B/cpu-moe class); tier gpu_env pins the device on both. PROJECTED here (the reference is the ampere-8 laptop, not this exact card). TIER-DOCTRINE PASS 2026-08-16: parity with the twin-arch sibling verified field-identical; the split is build-arch only. Candidate for a single '8gb-cuda' tier id — rename deferred (installer classifier + installed.json compat migration).
+> Configs #8/#9 (5060 8GB Blackwell; +64GB adds 26B cpu-moe). E4B resident full-GPU. REQUIRES the Blackwell CUDA-12.8 sm_120 build (Task H4). 26B cpu-moe only when ram_tier mid/high; else dropped. J4: config_seed_ram_mid_high auto-binds the O1 bf16 IMAGE seat on mid/high-RAM boxes (verified on the ampere-8 reference box; image only — no video/music on 8GB by decision 2026-07-23). PROJECTED. J-media 2026-07-28: media_seats = ampere-8's PROVEN CUDA seats verbatim (same 8 GB/E4B/cpu-moe class); tier gpu_env pins the device on both. PROJECTED here (the reference is the ampere-8 laptop, not this exact card). TIER-DOCTRINE PASS 2026-08-16: parity with the twin-arch sibling verified field-identical; the split is build-arch only. Candidate for a single '8gb-cuda' tier id — rename deferred (installer classifier + installed.json compat migration). HYGIENE PASS 2026-08-19 (8GB re-eval, nightshift-9; full proposal in Benchmarks and Optimizations/2026-08-19-8gb-tier-reeval-proposal.md): (H1) serving params are UNMEASURED-ON-REFERENCE -- the ampere-8 reference box (Aorus RTX 3070) never ran the installer (ADR 0017 records it UNMEASURED on harness 0.22.22; its capability report shows tier UNKNOWN), so the class's one verified datum is the HiDream ~5.9 min/render; any redesign bake starts with a real install + selftest on the 3070. (H2) the vision seat carries NO ocr alias BY DESIGN pending ocrprobe measurement -- blackwell-16 records Q4 as the measured OCR-fidelity cliff, so the omission is a quality statement, not an oversight; routing uses vision_model, so nothing breaks either way. (H4) agent_profile=research seeded in config_seed (the measured 0-to-72 percent small-seat lever; ampere-6 parity) -- the exact profile value is a bake question, but shipping UNSEEDED is the configuration the house already measured as broken. Low-RAM sdcpp image seed (proposal H5) DEFERRED, not forgotten: config_seed_ram_mid_high MERGES OVER config_seed (tierseed.Resolve), so a base sdcpp block would leak engine keys into the verified HiDream arm unless ~10 counter-keys neutralize it -- that is schema work (a config_seed_ram_low arm), not hygiene.
 
 ## Capability report
 
