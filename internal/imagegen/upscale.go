@@ -2,9 +2,11 @@ package imagegen
 
 import (
 	"context"
+	"encoding/binary"
 	"image"
 	_ "image/jpeg" // DecodeConfig registration for OutputSize
 	_ "image/png"  // DecodeConfig registration for OutputSize
+	"io"
 	"os"
 	"strconv"
 	"time"
@@ -62,18 +64,51 @@ func Upscale(ctx context.Context, node, script, comfyDir, out, image string, par
 	})
 }
 
-// OutputSize reads a PNG/JPEG header and returns its pixel size; (0, 0) when the
-// file is unreadable or not one of those formats — the caller omits the fields
-// rather than reporting a guess.
+// OutputSize reads a PNG/JPEG/WebP header and returns its pixel size — the same three
+// formats render/image-size.mjs measures, so the Go-side verification of an upscale
+// sees every source the runner can pin a size for. (0, 0) when the file is unreadable
+// or none of those formats; this never guesses a size it did not read.
 func OutputSize(path string) (int, int) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, 0
 	}
 	defer f.Close()
-	c, _, err := image.DecodeConfig(f)
-	if err != nil {
+	if c, _, err := image.DecodeConfig(f); err == nil {
+		return c.Width, c.Height
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return 0, 0
 	}
-	return c.Width, c.Height
+	head := make([]byte, 30)
+	if n, _ := io.ReadFull(f, head); n < 30 {
+		return 0, 0
+	}
+	return webpSize(head)
+}
+
+// webpSize mirrors image-size.mjs's webpSize: a RIFF/WEBP container, then one of the
+// three payload headers with three different dimension encodings. (0, 0) for anything
+// else — the stdlib has no WebP decoder and this route only needs the size.
+func webpSize(b []byte) (int, int) {
+	if len(b) < 30 || string(b[0:4]) != "RIFF" || string(b[8:12]) != "WEBP" {
+		return 0, 0
+	}
+	le24 := func(i int) int { return int(b[i]) | int(b[i+1])<<8 | int(b[i+2])<<16 }
+	switch string(b[12:16]) {
+	case "VP8X": // extended: 24-bit little-endian canvas dimensions, stored minus one
+		return le24(24) + 1, le24(27) + 1
+	case "VP8 ": // lossy: 3-byte frame tag, 3-byte sync code, then 14-bit dimensions
+		if b[23] != 0x9d || b[24] != 0x01 || b[25] != 0x2a {
+			return 0, 0
+		}
+		return int(binary.LittleEndian.Uint16(b[26:28]) & 0x3fff), int(binary.LittleEndian.Uint16(b[28:30]) & 0x3fff)
+	case "VP8L": // lossless: 0x2f signature, then 14 bits width-1 and 14 bits height-1
+		if b[20] != 0x2f {
+			return 0, 0
+		}
+		bits := binary.LittleEndian.Uint32(b[21:25])
+		return int(bits&0x3fff) + 1, int((bits>>14)&0x3fff) + 1
+	}
+	return 0, 0
 }

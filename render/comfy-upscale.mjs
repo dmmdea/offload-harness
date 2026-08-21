@@ -13,11 +13,12 @@
 //   node render/comfy-upscale.mjs <out.png> <image> --model 4x-UltraSharp.pth \
 //        [--scale F] [--width N --height N] [--method lanczos|bicubic|bilinear|area|nearest-exact] \
 //        [--api http://127.0.0.1:8188] [--no-lock] [--reserve-vram F]
-import { copyFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
+import { copyFileSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { COMFY_DIR } from "./comfy-lifecycle.mjs";
 import { buildUpscale } from "./wf-upscale.mjs";
+import { imageSize } from "./image-size.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
 
@@ -48,6 +49,22 @@ const opts = {
   height: flags.height != null ? Number(flags.height) : undefined,
   method: flags.method || "lanczos",
 };
+// A requested --scale is made EXACT by measuring the source here (PNG/JPEG/WebP header,
+// no decode) and pinning the output size, so the result does not depend on what the
+// model's filename claims its factor is. Only when the header cannot be read does the
+// builder's scale/nativeFactor fallback apply — and it says so.
+if (opts.scale != null && opts.width == null) {
+  let src = { width: 0, height: 0 };
+  try { src = imageSize(readFileSync(imagePath)); } catch { /* size stays unknown */ }
+  if (src.width > 0 && src.height > 0) {
+    opts.width = Math.round(src.width * opts.scale);
+    opts.height = Math.round(src.height * opts.scale);
+    opts.scale = undefined;
+    console.error(`scale ${flags.scale} on a ${src.width}x${src.height} source -> exact ${opts.width}x${opts.height}`);
+  } else {
+    console.error(`warning: could not read the source size; --scale ${flags.scale} falls back to the model's filename factor`);
+  }
+}
 // PRE-FLIGHT before taking the GPU slot: the builder's validation is pure and local,
 // and a flag error (half-given size, bad method) cannot be fixed by a cold ComfyUI
 // start — fail cheap here instead of after tearing down llama-swap.

@@ -21,12 +21,22 @@ Versioning: [SemVer](https://semver.org/).
   that upscales video upscales stills on day one with no new key. `upscale_script` ships as a
   default like `run_graph_script`; `upscale_timeout_sec` defaults to 600 (the render is seconds,
   the budget is the cold ComfyUI start).
-- **Params:** `scale` (relative to the SOURCE; the model's native factor is read from its
-  filename, unknown names assume 4; below-native values downscale the model output with lanczos),
-  `width`+`height` (exact, win over `scale`), `method`, `model` (per-request override), `out`.
-  A half-given size or a non-positive scale defers before any GPU work; the runner re-validates
-  before taking the slot. Returns `{image_path, model, width, height}` with the size read back
-  from the written PNG.
+- **Params:** `scale` (overall factor relative to the SOURCE, made EXACT: the runner measures the
+  source header and pins the output size, so it holds for any model regardless of what its
+  filename claims; the filename-derived factor is only the fallback for an unreadable header),
+  `width`+`height` (exact, ≤ 16384, win over `scale`), `method` (the five core resamplers),
+  `model` (per-request bare-filename override), `out`. The pipeline defers before any GPU work on
+  a half-given/negative/oversized size, a non-positive scale, a bad method, or a path-shaped
+  model; the runner pre-flights the builder (incl. ComfyUI's `scale_by` 0.01–8) before the slot.
+- **Post-render verification:** the written file must decode (an undecodable file defers instead
+  of returning a size-less success) and, when a size was requested, match it within 2 px — a
+  mismatch defers naming produced-vs-expected. Returns `{image_path, model, width, height,
+  factor}` with the size read back from the file and `factor` the measured output/source ratio.
+- Review rounds (fresh-context code-reviewer + silent-failure-hunter) caught, before ship: a
+  negative `width`+`height` pair passing the "given together" gate and rendering at native factor
+  with `OK:true`; the `nativeFactor` regex reading `2xLexicaRRDBNet_Sharp` as 4 (so `scale:2`
+  would have returned a 1× image); `scale: 0` silently treated as unset by the MCP handler;
+  ComfyUI's resolution/`scale_by` limits only discovered inside the GPU slot.
 - **Why a route and not Upscayl:** the operator asked whether Upscayl was in the harness. It is
   not, and installing it would duplicate models already on disk (`RealESRGAN_x4plus`,
   `4x-UltraSharp`, `HAT_SRx4`) outside the queue/lease/ledger discipline. The gap was a tool.

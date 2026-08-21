@@ -140,15 +140,30 @@ runner `render/comfy-upscale.mjs`). The model is per-machine: `upscale_model` na
 `upscale_models/` filename, and when it is empty the route binds `videogen_upscale_model` — the video
 route's post-decode upscaler is the same kind of file, so a box that upscales video upscales stills
 with no extra key (`config.EffectiveUpscaleModel`; the pipeline gate and `offload_status` both read
-it). The output is the model's native factor (read from the filename — `4x-UltraSharp` → 4; unknown
-names assume 4); `scale` rescales that result with `ImageScaleBy` (2 on a 4x model = 4x then 0.5),
-and `width`+`height` pin it with `ImageScale` (crop disabled), winning over `scale`. A half-given size
-or a non-positive scale defers in the pipeline before any GPU work, and the runner re-validates the
-same way before taking the slot. `ImageUpscaleWithModel` tiles on OOM by itself, so there is no tile
-knob. The reported `width`/`height` are read back from the written PNG, never predicted. It
-synthesizes detail, so it is an enlargement tool, not a faithful restore — an exact resample is
-`edit-image`'s `resize`. `upscale_script` ships as a default (the runner is generic, like
-`run_graph_script`); only the model is a binding.
+it). With no size request the output is whatever the model produces (its own factor). `scale` is
+the overall factor relative to the SOURCE and is made exact: the runner measures the source header
+(PNG/JPEG/WebP, no decode) and pins `round(src × scale)` with `ImageScale` (crop disabled), so the
+result does not depend on what the model's filename claims — a `2xLexicaRRDBNet` and a
+`4x-UltraSharp` both return exactly 2× for `scale: 2`. Only when the header cannot be read does the
+builder fall back to `ImageScaleBy` at `scale / nativeFactor(filename)` (`4x-UltraSharp` → 4,
+`RealESRGAN_x2plus` → 2, unknown → 4), and the runner says so on stderr. `width`+`height` pin the
+size yourself and win over `scale`. The pipeline gates before any GPU work — a half-given or
+negative size, a size above ComfyUI's 16384 limit, a non-positive `scale`, a `method` outside the
+five core resamplers, a `scale` whose result would exceed that limit, or an absolute / parent-escaping
+`model` override (subfolder names such as `ESRGAN/4x.pth` are valid ComfyUI names and pass) all defer
+with the offending value named — and the runner pre-flights the same builder before taking the slot
+(ComfyUI's `scale_by` range 0.01–8 is enforced there too). **After the render the written file is
+verified**: it must decode as PNG/JPEG (an undecodable file defers rather than returning a size-less
+success), and when a size was requested its dimensions must match within 2 px or the call defers
+naming produced-vs-expected. Both sides measure the same three source formats (PNG/JPEG/WebP — Go has
+its own header reader mirroring `image-size.mjs`), so for every advertised format the expectation
+exists and the fallback path is unreachable; a source only Go can read (GIF) takes the fallback in the
+runner and is then caught by this check, with the defer naming the fix. The result carries
+`width`/`height` read from the file and `factor`, the measured output/source ratio.
+`ImageUpscaleWithModel` tiles on OOM by itself, so there is no tile knob. It synthesizes detail, so
+it is an enlargement tool, not a faithful restore — an exact resample is `edit-image`'s `resize`.
+`upscale_script` ships as a default (the runner is generic, like `run_graph_script`); only the model
+is a binding, and a per-request `model` override (bare filename) works even on a box that binds none.
 
 **Generative instruction edit** (`offload_edit_image_generative`, MCP-only — no CLI verb) is the
 third edit-shaped route, for changes that are global or diffuse and have no drawable region: "make

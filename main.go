@@ -881,7 +881,7 @@ func runUpscaleImage(args []string) error {
 	fs := flag.NewFlagSet("upscale-image", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "print full result JSON")
-	scale := fs.Float64("scale", 0, "overall factor relative to the source (default: the model's native factor)")
+	scale := fs.Float64("scale", 0, "overall factor relative to the source, made exact by measuring it (0 = unset: the model's own factor)")
 	width := fs.Int("width", 0, "exact output width (give with --height; wins over --scale)")
 	height := fs.Int("height", 0, "exact output height (give with --width)")
 	method := fs.String("method", "", "resampler for the scale/size step: lanczos (default) | bicubic | bilinear | area | nearest-exact")

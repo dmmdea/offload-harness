@@ -46,10 +46,27 @@ test("width+height pin the output exactly via ImageScale (crop disabled) and win
 test("nativeFactor reads the filename; unknown names assume 4", () => {
   assert.equal(nativeFactor("4x-UltraSharp.pth"), 4);
   assert.equal(nativeFactor("RealESRGAN_x4plus.pth"), 4);
+  assert.equal(nativeFactor("RealESRGAN_x2plus.pth"), 2);
   assert.equal(nativeFactor("2x_NMKD-Superscale.pth"), 2);
   assert.equal(nativeFactor("8x_NMKD-Superscale_150000_G.pth"), 8);
   assert.equal(nativeFactor("HAT_SRx4_ImageNet-pretrain.pth"), 4);
+  assert.equal(nativeFactor("1x_NMKD-DeJPG.pth"), 1);
+  assert.equal(nativeFactor("realesr-general-x4v3.pth"), 4);
+  assert.equal(nativeFactor("OmniSR_X3_DIV2K.pth"), 3);
+  // separator-less OpenModelDB style, with a later 'x' inside the same run (review round 1 miss)
+  assert.equal(nativeFactor("2xLexicaRRDBNet_Sharp.pth"), 2);
+  assert.equal(nativeFactor("2xLexica.pth"), 2);
+  assert.equal(nativeFactor("4xLexicaDAT2_otf.pth"), 4);
+  assert.equal(nativeFactor("2xHFA2kAVCSRFormer_light.pth"), 2);
   assert.equal(nativeFactor("mystery.pth"), 4);
+});
+
+test("ComfyUI core limits are enforced in the builder (so pre-flight fails before the GPU slot)", () => {
+  assert.throws(() => buildUpscale({ image: "in.png", model: "m.pth", width: 20000, height: 100 }), /16384/);
+  assert.throws(() => buildUpscale({ image: "in.png", model: "4x-m.pth", scale: 40 }), /outside ComfyUI/);   // scale_by 10
+  assert.throws(() => buildUpscale({ image: "in.png", model: "4x-m.pth", scale: 0.03 }), /outside ComfyUI/); // scale_by 0.0075
+  assert.ok(buildUpscale({ image: "in.png", model: "m.pth", width: 16384, height: 16384 }), "limit itself is allowed");
+  assert.ok(buildUpscale({ image: "in.png", model: "4x-m.pth", scale: 32 }), "scale_by 8 is allowed");
 });
 
 test("rejects a half-given size, a bad method, a non-positive scale, and missing image/model", () => {

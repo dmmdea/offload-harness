@@ -184,8 +184,8 @@ func (s *Server) buildServer(version string) *mcp.Server {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_upscale_image",
-		Description: "AI-UPSCALE a local image on the LOCAL ComfyUI for FREE with an ESRGAN-family model (this machine's upscale_model binding, e.g. 4x-UltraSharp / RealESRGAN_x4plus). Use it to export a 1024-class render for delivery or print, to recover crispness before compositing, or to enlarge a small asset. It SYNTHESIZES plausible detail, so it is an enlargement tool, not a faithful photo restore; for an exact resample with no invented detail use offload_edit_image's resize op (CPU, free). Default output is the model's native factor (4x for a 4x model); scale rescales that result (scale:2 on a 4x model = 4x then 0.5 lanczos), or pin width+height exactly. Takes the shared single-slot GPU lock (serializes with other local gen; the render is seconds, a cold ComfyUI start adds ~1-2 min). Returns {image_path, model, width, height}. On any failure (no upscale binding on this machine, missing file, half-given size, render error) it returns deferred:true.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local path of the image to enlarge (.png/.jpg/.webp)"},"scale":{"type":"number","description":"overall factor relative to the SOURCE (default: the model's native factor, 4 for a 4x model); values below native downscale the model's output with lanczos"},"width":{"type":"integer","description":"exact output width — give with height; wins over scale"},"height":{"type":"integer","description":"exact output height — give with width; wins over scale"},"method":{"type":"string","description":"resampler for the scale/size step: lanczos (default) | bicubic | bilinear | area | nearest-exact"},"model":{"type":"string","description":"override this machine's upscale_model (a ComfyUI upscale_models filename)"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"}},"required":["image"]}`),
+		Description: "AI-UPSCALE a local image on the LOCAL ComfyUI for FREE with an ESRGAN-family model (this machine's upscale_model binding, e.g. 4x-UltraSharp / RealESRGAN_x4plus). Use it to export a 1024-class render for delivery or print, to recover crispness before compositing, or to enlarge a small asset. It SYNTHESIZES plausible detail, so it is an enlargement tool, not a faithful photo restore; for an exact resample with no invented detail use offload_edit_image's resize op (CPU, free). Default output is the model's own factor (4x for a 4x model); scale sets the overall factor relative to the source exactly (the source is measured and the output size pinned), or pin width+height yourself. The written file's size is verified against the request before success is reported. Takes the shared single-slot GPU lock (serializes with other local gen; the render is seconds, a cold ComfyUI start adds ~1-2 min). Returns {image_path, model, width, height, factor} — factor is the MEASURED output/source ratio. On any failure (no upscale binding on this machine, missing file, half-given or out-of-range size, bad scale/method, render error, size mismatch) it returns deferred:true.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local path of the image to enlarge (.png/.jpg/.webp)"},"scale":{"type":"number","description":"overall factor relative to the SOURCE, made exact by measuring the source and pinning the output size (so it holds for any model). Omit for the model's own factor (4x for a 4x model). Must be > 0; the output is verified against source*scale and a mismatch defers"},"width":{"type":"integer","description":"exact output width (<= 16384) — give with height; wins over scale"},"height":{"type":"integer","description":"exact output height (<= 16384) — give with width; wins over scale"},"method":{"type":"string","description":"resampler for the scale/size step: lanczos (default) | bicubic | bilinear | area | nearest-exact"},"model":{"type":"string","description":"override this machine's upscale_model — a ComfyUI upscale_models name (subfolders allowed, e.g. ESRGAN/4x.pth; never an absolute path); works even on a box that binds none (offload_status then still reports the route NOT CONFIGURED for the default path)"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"}},"required":["image"]}`),
 	}, s.handleUpscaleImage)
 
 	srv.AddTool(&mcp.Tool{
@@ -650,13 +650,13 @@ func (s *Server) handleInpaintImage(ctx context.Context, req *mcp.CallToolReques
 
 func (s *Server) handleUpscaleImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		Image  string  `json:"image"`
-		Scale  float64 `json:"scale"`
-		Width  int     `json:"width"`
-		Height int     `json:"height"`
-		Method string  `json:"method"`
-		Model  string  `json:"model"`
-		Out    string  `json:"out"`
+		Image  string   `json:"image"`
+		Scale  *float64 `json:"scale"` // pointer: an explicit 0 is forwarded and defers, never "unset"
+		Width  int      `json:"width"`
+		Height int      `json:"height"`
+		Method string   `json:"method"`
+		Model  string   `json:"model"`
+		Out    string   `json:"out"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -665,10 +665,10 @@ func (s *Server) handleUpscaleImage(ctx context.Context, req *mcp.CallToolReques
 	if in.Image != "" {
 		params["image"] = in.Image
 	}
-	// Forwarded whenever set (including a non-positive value) so the pipeline can name
-	// the bad value in its defer instead of silently rendering at native factor.
-	if in.Scale != 0 {
-		params["scale"] = in.Scale
+	// Forwarded whenever PRESENT (including 0 and negatives) so the pipeline names the
+	// bad value in its defer instead of silently rendering at the model's factor.
+	if in.Scale != nil {
+		params["scale"] = *in.Scale
 	}
 	if in.Width != 0 {
 		params["width"] = in.Width
