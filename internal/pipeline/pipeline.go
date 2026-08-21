@@ -343,6 +343,12 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	if req.Task == core.TaskInpaintImage {
 		return p.runInpaintImage(ctx, req, meta, start)
 	}
+	// upscale_image enlarges params.image with an ESRGAN-family model on the local
+	// ComfyUI by shelling out to comfy-upscale.mjs (shared GPU lock + ComfyUI
+	// lifecycle). Its own branch — no text cascade, no grammar, no vision call.
+	if req.Task == core.TaskUpscaleImage {
+		return p.runUpscaleImage(ctx, req, meta, start)
+	}
 
 	// run_graph executes an arbitrary ComfyUI API-format graph + satisfies its node
 	// manifest on the local ComfyUI by shelling out to comfy-run-graph.mjs (shared GPU
@@ -1418,6 +1424,69 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	data, _ := json.Marshal(map[string]any{"image_path": outPath, "seed": seed})
 	p.record(req.Task, meta, len(prompt))
+	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// runUpscaleImage enlarges params.image with this machine's ESRGAN-family model on
+// the LOCAL ComfyUI. No prompt, no seed: the model is deterministic for a given
+// input, so the out-path hash is input + params only. Any failure defers.
+func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+	defer1 := func(reason string) core.Result {
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		p.recordDefer(req.Task, meta, len(req.Input), reason)
+		return core.Deferf(reason, "", meta)
+	}
+	model := p.cfg.EffectiveUpscaleModel()
+	if s, ok := req.Params["model"].(string); ok && s != "" {
+		model = s
+	}
+	if p.cfg.UpscaleScript == "" || model == "" {
+		return defer1("no upscale route configured (upscale_model / videogen_upscale_model unset)")
+	}
+	image := paramStr(req.Params, "image")
+	if image == "" {
+		return defer1("upscale requires params.image")
+	}
+	if fi, err := os.Stat(image); err != nil || fi.IsDir() {
+		return defer1("upscale input not found: " + image)
+	}
+	w, h := paramIntOr(req.Params, "width", 0), paramIntOr(req.Params, "height", 0)
+	if (w > 0) != (h > 0) {
+		return defer1("upscale width and height must be given together")
+	}
+	if f, ok := req.Params["scale"].(float64); ok && f <= 0 {
+		return defer1("upscale scale must be > 0")
+	}
+	script, serr := gpugen.ResolveScript(p.cfg.UpscaleScript)
+	if serr != nil {
+		return defer1(serr.Error())
+	}
+	meta.Model = "comfyui-upscale:" + model
+	out := paramStr(req.Params, "out")
+	if out == "" {
+		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
+		out = filepath.Join(p.cfg.MediaDir, "upscale-"+sha256hex(image + tasks.StableParamsKey(req.Params))[:8]+".png")
+	}
+	timeout := time.Duration(p.cfg.UpscaleTimeoutSec) * time.Second
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("upscale", timeout, p.gpuWait())
+	if lerr != nil {
+		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
+	}
+	defer releaseLease()
+	outPath, gerr := imagegen.Upscale(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, image, req.Params, imagegen.UpscaleModel{Model: model}, timeout, leaseEnv...)
+	if gerr != nil {
+		meta.ErrClass = classifyErr(gerr)
+		return defer1("upscale failed: " + gerr.Error())
+	}
+	meta.LatencyMs = time.Since(start).Milliseconds()
+	result := map[string]any{"image_path": outPath, "model": model}
+	// Size is read from the file the runner wrote, never predicted from the model's
+	// factor: a pinned width/height or a rescale changes it, and the file is the truth.
+	if ow, oh := imagegen.OutputSize(outPath); ow > 0 && oh > 0 {
+		result["width"], result["height"] = ow, oh
+	}
+	data, _ := json.Marshal(result)
+	p.record(req.Task, meta, 0)
 	return core.Result{OK: true, Data: data, Meta: meta}
 }
 

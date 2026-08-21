@@ -6,6 +6,34 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.77.0] - 2026-08-21
+
+### Added — `offload_upscale_image` / `upscale-image`: ESRGAN enlargement as a first-class route
+
+- A still can now be AI-upscaled on the local ComfyUI through the harness (GPU lease, ledger,
+  `offload_status` route) instead of a hand-built `run_graph`. Graph: `LoadImage` →
+  `UpscaleModelLoader` → `ImageUpscaleWithModel` → optional `ImageScaleBy` / `ImageScale` →
+  `SaveImage` (`render/wf-upscale.mjs`; runner `render/comfy-upscale.mjs`, standard
+  `withGpuSlot` lifecycle).
+- **Binding:** `upscale_model` (a ComfyUI `upscale_models/` filename). Empty falls back to
+  `videogen_upscale_model` — the same ESRGAN file the video route already binds — via
+  `config.EffectiveUpscaleModel`, which the pipeline gate and `mediacap` both read, so a box
+  that upscales video upscales stills on day one with no new key. `upscale_script` ships as a
+  default like `run_graph_script`; `upscale_timeout_sec` defaults to 600 (the render is seconds,
+  the budget is the cold ComfyUI start).
+- **Params:** `scale` (relative to the SOURCE; the model's native factor is read from its
+  filename, unknown names assume 4; below-native values downscale the model output with lanczos),
+  `width`+`height` (exact, win over `scale`), `method`, `model` (per-request override), `out`.
+  A half-given size or a non-positive scale defers before any GPU work; the runner re-validates
+  before taking the slot. Returns `{image_path, model, width, height}` with the size read back
+  from the written PNG.
+- **Why a route and not Upscayl:** the operator asked whether Upscayl was in the harness. It is
+  not, and installing it would duplicate models already on disk (`RealESRGAN_x4plus`,
+  `4x-UltraSharp`, `HAT_SRx4`) outside the queue/lease/ledger discipline. The gap was a tool.
+- Tests: builder (`wf-upscale.test.mjs`), `upscaleArgs` + `OutputSize`, pipeline defer reasons,
+  GPU-lease coverage case, tools/list advertisement + bad-args, `mediacap` route, `tierdocs`
+  media-key classification.
+
 ## [0.76.0] - 2026-08-21
 
 ### Added

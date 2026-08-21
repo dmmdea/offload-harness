@@ -134,6 +134,22 @@ evaluation passed 3/3. Its safety envelope is validation rather than a gate — 
 no boxes, or absurd boxes covering more than 60% of the image all error out so the caller defers,
 with the manual `mask_boxes` workflow named. It never silently repaints unverified regions.
 
+**Upscale** (`upscale-image` / `offload_upscale_image`) enlarges a still with an ESRGAN-family model
+through the core ComfyUI nodes (`UpscaleModelLoader` → `ImageUpscaleWithModel`; `render/wf-upscale.mjs`,
+runner `render/comfy-upscale.mjs`). The model is per-machine: `upscale_model` names a ComfyUI
+`upscale_models/` filename, and when it is empty the route binds `videogen_upscale_model` — the video
+route's post-decode upscaler is the same kind of file, so a box that upscales video upscales stills
+with no extra key (`config.EffectiveUpscaleModel`; the pipeline gate and `offload_status` both read
+it). The output is the model's native factor (read from the filename — `4x-UltraSharp` → 4; unknown
+names assume 4); `scale` rescales that result with `ImageScaleBy` (2 on a 4x model = 4x then 0.5),
+and `width`+`height` pin it with `ImageScale` (crop disabled), winning over `scale`. A half-given size
+or a non-positive scale defers in the pipeline before any GPU work, and the runner re-validates the
+same way before taking the slot. `ImageUpscaleWithModel` tiles on OOM by itself, so there is no tile
+knob. The reported `width`/`height` are read back from the written PNG, never predicted. It
+synthesizes detail, so it is an enlargement tool, not a faithful restore — an exact resample is
+`edit-image`'s `resize`. `upscale_script` ships as a default (the runner is generic, like
+`run_graph_script`); only the model is a binding.
+
 **Generative instruction edit** (`offload_edit_image_generative`, MCP-only — no CLI verb) is the
 third edit-shaped route, for changes that are global or diffuse and have no drawable region: "make
 it snowing heavily", "turn the leather into fur". A Qwen-Image-Edit-class model reads the source
@@ -246,6 +262,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 | Image | `imagegen_family`, `imagegen_ckpt`, `imagegen_vae`, `imagegen_steps/cfg/sampler/scheduler`, `imagegen_preset/clip/lora/lora_strength/shift` (qwen-image knobs), `imagegen_pool_vvram_gb/pool_compute/pool_donor` (krea2 pooled loading), `imagegen_refiner_model/refiner_timeout_sec` (opt-in prompt refiner) |
 | Inpaint | `inpaint_ckpt`, `inpaint_vae`, `inpaint_steps/cfg/sampler/scheduler` |
 | Generative edit | `gen_edit_script`, `gen_edit_unet`, `gen_edit_preset` (`full`/`lightning8`/`lightning4`), `gen_edit_clip/vae/lora/lora_strength`, `gen_edit_steps/cfg/sampler/scheduler`, `gen_edit_megapixels` (0 = follow the source, held within 0.9-2.0), `gen_edit_timeout_sec` |
+| Upscale | `upscale_script` (shipped default `render/comfy-upscale.mjs`), `upscale_model` (ComfyUI `upscale_models/` filename; empty = `videogen_upscale_model`), `upscale_timeout_sec` (600) |
 | Video | `videogen_family` (`""`/`wan22` = Wan 2.2; `ltx25` = LTX-2.5 joint-AV), `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model` (Wan keys); `videogen_transformer`, `videogen_video_vae`, `videogen_audio_vae`, `videogen_latent_upscaler`, `videogen_fps`, `videogen_pool_vvram_gb/pool_compute/pool_donor` (LTX-2.5 keys) |
 | Audio | `voicegen_*`, `musicgen_script` |
 | ComfyUI | `comfy_dir`, per-task `*_script` and `*_timeout_sec` |

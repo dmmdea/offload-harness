@@ -51,6 +51,13 @@ const (
 	// Its own branch in pipeline.Run — shells out to render/comfy-edit.mjs via
 	// internal/gpugen (shared GPU lock + ComfyUI lifecycle). Returns {image_path, seed}.
 	TaskEditImageGenerative TaskType = "edit_image_generative"
+	// TaskUpscaleImage enlarges a local image with an ESRGAN-family model on the LOCAL
+	// ComfyUI (UpscaleModelLoader + ImageUpscaleWithModel; this machine's upscale_model
+	// binding). Model-synthesized detail at the model's native factor, optionally
+	// rescaled or pinned to a size — enlargement, not a faithful restore. Its own branch
+	// in pipeline.Run — shells out to render/comfy-upscale.mjs via internal/gpugen
+	// (shared GPU lock + ComfyUI lifecycle). Returns {image_path, model, width, height}.
+	TaskUpscaleImage TaskType = "upscale_image"
 	// TaskGenerateSVG renders a brand-agnostic parametric SVG component (gauge,
 	// comparison-bar, chromatogram, icon) from a JSON spec via internal/svgkit —
 	// pure Go, no model/GPU. Its own branch in pipeline.Run. params: kind (string),
@@ -105,7 +112,7 @@ const (
 // Valid reports whether t is a known task type.
 func (t TaskType) Valid() bool {
 	switch t {
-	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskGenerateSVG, TaskGenerateVideo, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskRunGraph, TaskPipelineJob, TaskAgentRun:
+	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskUpscaleImage, TaskGenerateSVG, TaskGenerateVideo, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskRunGraph, TaskPipelineJob, TaskAgentRun:
 		return true
 	}
 	return false

@@ -183,6 +183,12 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	}, s.handleInpaintImage)
 
 	srv.AddTool(&mcp.Tool{
+		Name:        "offload_upscale_image",
+		Description: "AI-UPSCALE a local image on the LOCAL ComfyUI for FREE with an ESRGAN-family model (this machine's upscale_model binding, e.g. 4x-UltraSharp / RealESRGAN_x4plus). Use it to export a 1024-class render for delivery or print, to recover crispness before compositing, or to enlarge a small asset. It SYNTHESIZES plausible detail, so it is an enlargement tool, not a faithful photo restore; for an exact resample with no invented detail use offload_edit_image's resize op (CPU, free). Default output is the model's native factor (4x for a 4x model); scale rescales that result (scale:2 on a 4x model = 4x then 0.5 lanczos), or pin width+height exactly. Takes the shared single-slot GPU lock (serializes with other local gen; the render is seconds, a cold ComfyUI start adds ~1-2 min). Returns {image_path, model, width, height}. On any failure (no upscale binding on this machine, missing file, half-given size, render error) it returns deferred:true.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local path of the image to enlarge (.png/.jpg/.webp)"},"scale":{"type":"number","description":"overall factor relative to the SOURCE (default: the model's native factor, 4 for a 4x model); values below native downscale the model's output with lanczos"},"width":{"type":"integer","description":"exact output width — give with height; wins over scale"},"height":{"type":"integer","description":"exact output height — give with width; wins over scale"},"method":{"type":"string","description":"resampler for the scale/size step: lanczos (default) | bicubic | bilinear | area | nearest-exact"},"model":{"type":"string","description":"override this machine's upscale_model (a ComfyUI upscale_models filename)"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"}},"required":["image"]}`),
+	}, s.handleUpscaleImage)
+
+	srv.AddTool(&mcp.Tool{
 		Name:        "offload_edit_image_generative",
 		Description: "Rewrite a local image from a TEXT INSTRUCTION on the LOCAL ComfyUI for FREE — no mask (Qwen-Image-Edit class: the model reads the source through its own vision encoder and re-renders the whole frame). This is the route for instruction edits that have no drawable region: \"make it snowing heavily\", \"turn the leather into fur\", \"make it night\", \"change the sofa to green\". Pick between the three edit routes by what you have: offload_edit_image for DETERMINISTIC ops (crop/resize/text/composite — free, CPU, exact); offload_inpaint_image when you can supply a MASK and want the rest untouched pixel-for-pixel; THIS when the change is global or diffuse and you cannot draw a mask. Note it re-renders everything, so fine detail outside the intended change will shift — prefer inpaint when a mask is possible. Output is snapped to ~1MP (a 2048x2048 source returns ~1024x1024). preset trades speed for fidelity: lightning8 (default, ~4x faster) or full. Takes the shared single-slot GPU lock (serializes with other local gen); expect several minutes, most of it fixed model-load overhead. Returns {image_path, seed}. On any failure (no edit binding on this machine, missing file, render error) it returns deferred:true.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local path of the source image"},"prompt":{"type":"string","description":"the edit INSTRUCTION, e.g. 'make it snowing heavily, winter atmosphere' — describe the change, not the whole scene"},"negative":{"type":"string","description":"hard exclusions"},"preset":{"type":"string","description":"full | lightning8 | lightning4 — a MATCHED steps+cfg+LoRA triple. Prefer switching preset over setting steps/cfg by hand: half-overriding the pairing renders successfully and looks wrong"},"steps":{"type":"integer","description":"sampler steps (advanced; overrides the preset — see preset)"},"cfg":{"type":"number","description":"guidance (advanced; a Lightning preset needs 1.0 — see preset)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"}},"required":["image","prompt"]}`),
@@ -642,6 +648,46 @@ func (s *Server) handleInpaintImage(ctx context.Context, req *mcp.CallToolReques
 	return result(s.p.Run(ctx, core.Request{Task: core.TaskInpaintImage, Input: in.Prompt, Params: params}))
 }
 
+func (s *Server) handleUpscaleImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var in struct {
+		Image  string  `json:"image"`
+		Scale  float64 `json:"scale"`
+		Width  int     `json:"width"`
+		Height int     `json:"height"`
+		Method string  `json:"method"`
+		Model  string  `json:"model"`
+		Out    string  `json:"out"`
+	}
+	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+		return bad, nil
+	}
+	params := map[string]any{}
+	if in.Image != "" {
+		params["image"] = in.Image
+	}
+	// Forwarded whenever set (including a non-positive value) so the pipeline can name
+	// the bad value in its defer instead of silently rendering at native factor.
+	if in.Scale != 0 {
+		params["scale"] = in.Scale
+	}
+	if in.Width != 0 {
+		params["width"] = in.Width
+	}
+	if in.Height != 0 {
+		params["height"] = in.Height
+	}
+	if in.Method != "" {
+		params["method"] = in.Method
+	}
+	if in.Model != "" {
+		params["model"] = in.Model
+	}
+	if in.Out != "" {
+		params["out"] = in.Out
+	}
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskUpscaleImage, Params: params}))
+}
+
 func (s *Server) handleRunGraph(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
 		GraphPath    string `json:"graph_path"`
@@ -1090,10 +1136,10 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		// tools" on a run that advertised 3 — and with the box-level agent_profile the
 		// narrowing can now happen with no caller action at all. Silently changing which
 		// tools a run advertises must not be invisible on this door either.
-		"tools":       len(built.Loop.AdvertisedTools()),
-		"profile":     prof.Name,
-		"model":       model,  // the resolved PLANNER seat — visibility is the cure for a silent seat (roast finding)
-		"ctx_window":  effCtx, // the window compaction budgeted against (probed, or the conservative fallback)
+		"tools":      len(built.Loop.AdvertisedTools()),
+		"profile":    prof.Name,
+		"model":      model,  // the resolved PLANNER seat — visibility is the cure for a silent seat (roast finding)
+		"ctx_window": effCtx, // the window compaction budgeted against (probed, or the conservative fallback)
 	}
 	if res.TokenizerPath != "" {
 		// Which drop rung the ladder is on — same visibility rule as ctx_window:

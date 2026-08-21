@@ -53,7 +53,7 @@ type Route struct {
 	// Engine is what actually runs it on this box ("sdcpp", "comfyui",
 	// "chatterbox-tts", "acestep", "pil", "gimp", "ffmpeg", "runtime").
 	Engine string
-	State State
+	State  State
 	// Detail names the bindings behind the verdict: what resolved, or exactly
 	// which path is absent / which config key is empty.
 	Detail string
@@ -139,6 +139,25 @@ func routesIn(cfg config.Config, exeDir string) []Route {
 		)
 		r.Detail += fmt.Sprintf("; gen_edit_unet=%s preset=%s (ComfyUI model name, not checked here)",
 			cfg.GenEditUnet, cfg.GenEditPreset)
+		out = append(out, r)
+	}
+
+	// --- upscale_image: script AND an ESRGAN filename, matching the pipeline's gate
+	// (config.EffectiveUpscaleModel: upscale_model, else videogen_upscale_model). The
+	// filename is a ComfyUI model NAME, reported but never stat'd — same rule as inpaint_ckpt.
+	if model := cfg.EffectiveUpscaleModel(); cfg.UpscaleScript == "" || model == "" {
+		out = append(out, Route{Name: "upscale_image", Engine: "comfyui", State: NotConfigured,
+			Detail: "upscale_script/upscale_model is unset (videogen_upscale_model is the fallback)"})
+	} else {
+		comfyUsed, nodeUsed = true, true
+		r := fileRoute("upscale_image", "comfyui", exeDir,
+			binding{key: "upscale_script", value: cfg.UpscaleScript, kind: scriptBinding},
+		)
+		src := "upscale_model"
+		if cfg.UpscaleModel == "" {
+			src = "videogen_upscale_model fallback"
+		}
+		r.Detail += fmt.Sprintf("; upscale_model=%s (%s; ComfyUI model name, not checked here)", model, src)
 		out = append(out, r)
 	}
 

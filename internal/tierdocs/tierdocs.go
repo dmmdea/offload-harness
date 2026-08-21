@@ -365,7 +365,7 @@ func renderTier(name string, p Profile, reports []string) string {
 func mediaSeedKey(k string) bool {
 	for _, p := range []string{
 		"imagegen_", "videogen_", "musicgen_", "voicegen_", "sdcpp_",
-		"inpaint_", "gen_edit_", "run_graph_",
+		"inpaint_", "gen_edit_", "run_graph_", "upscale_",
 	} {
 		if strings.HasPrefix(k, p) {
 			return true

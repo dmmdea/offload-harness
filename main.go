@@ -52,7 +52,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.76.0"
+const version = "0.77.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -83,6 +83,8 @@ func main() {
 		err = runGenerateImage(args)
 	case "inpaint-image":
 		err = runInpaintImage(args)
+	case "upscale-image":
+		err = runUpscaleImage(args)
 	case "generate-svg":
 		err = runGenerateSVG(args)
 	case "generate-audio":
@@ -231,6 +233,7 @@ Usage:
   local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false]
   local-offload generate-image --batch jobs.jsonl    N prompts through ONE warm ComfyUI session (checkpoint loads once)
   local-offload inpaint-image <image> --mask m.png --prompt "..."   re-render ONLY the masked region (white=repaint)
+  local-offload upscale-image <image> [--scale F] [--width N --height N] [--method lanczos] [--model name] [--out path]   ESRGAN enlarge (this machine's upscale_model)
   local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F]
   local-offload run-graph --graph <g.json> [--manifest <m.json>] [--out-dir <d>] [--reserve-vram F] [--json]
   local-offload nim <file|-|"text"> [--model id] [--base url] [--system "..."] [--max-tokens N] [--temp F] [--json]
@@ -866,6 +869,61 @@ func runInpaintImage(args []string) error {
 		Input:  *prompt,
 		Params: params,
 	})
+	emitResult(res, *asJSON, "", *compactFlag)
+	return nil
+}
+
+// runUpscaleImage handles `local-offload upscale-image <image> [--scale F]
+// [--width N --height N] [--method m] [--model name] [--out path] [--json]
+// [--compact]`. The positional argument is the IMAGE PATH. It enlarges the image
+// with this machine's ESRGAN-family upscale_model on the LOCAL ComfyUI for free.
+func runUpscaleImage(args []string) error {
+	fs := flag.NewFlagSet("upscale-image", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	scale := fs.Float64("scale", 0, "overall factor relative to the source (default: the model's native factor)")
+	width := fs.Int("width", 0, "exact output width (give with --height; wins over --scale)")
+	height := fs.Int("height", 0, "exact output height (give with --width)")
+	method := fs.String("method", "", "resampler for the scale/size step: lanczos (default) | bicubic | bilinear | area | nearest-exact")
+	model := fs.String("model", "", "override this machine's upscale_model (ComfyUI upscale_models filename)")
+	out := fs.String("out", "", "output PNG path (default under the media dir)")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "scale": true, "width": true, "height": true, "method": true, "model": true, "out": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	if positional == "" || positional == "-" {
+		return fmt.Errorf("upscale-image requires an image path (not stdin): local-offload upscale-image <image> [--scale 2]")
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	params := map[string]any{"image": positional}
+	if *scale != 0 {
+		params["scale"] = *scale
+	}
+	if *width != 0 {
+		params["width"] = *width
+	}
+	if *height != 0 {
+		params["height"] = *height
+	}
+	if *method != "" {
+		params["method"] = *method
+	}
+	if *model != "" {
+		params["model"] = *model
+	}
+	if *out != "" {
+		params["out"] = *out
+	}
+	res := p.Run(context.Background(), core.Request{Task: core.TaskUpscaleImage, Params: params})
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }

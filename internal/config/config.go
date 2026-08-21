@@ -109,7 +109,7 @@ type Config struct {
 	// rule is deliberately NOT the fallback: it would admit ANY tailnet's
 	// Funnel-published hostname, i.e. a public-internet endpoint wearing a
 	// tailnet-looking name.
-	TailnetSuffix string `json:"tailnet_suffix,omitempty"`
+	TailnetSuffix string            `json:"tailnet_suffix,omitempty"`
 	SeatEndpoints map[string]string `json:"seat_endpoints,omitempty"`
 	// CascadeRemoteLanes maps a model seat (same key rule as SeatEndpoints) to a
 	// remote OpenAI-compatible base URL that ALSO serves that model — the
@@ -432,6 +432,19 @@ type Config struct {
 	// 2-card 16 GB box: ~4.5 min of fixed overhead (ComfyUI cold start + a 15.4 GB
 	// GGUF load) before sampling starts, then ~7 s/step.
 	GenEditTimeoutSec int `json:"gen_edit_timeout_sec,omitempty"`
+	// --- ESRGAN-family image upscale (upscale_image) ---
+	// UpscaleScript is the path to render/comfy-upscale.mjs; shipped as a default like
+	// RunGraphScript because the runner is generic — only the MODEL is per-machine.
+	UpscaleScript string `json:"upscale_script,omitempty"`
+	// UpscaleModel is the ComfyUI upscale_models filename this machine enlarges with
+	// (e.g. 4x-UltraSharp.pth, RealESRGAN_x4plus.pth). Empty falls back to
+	// VideoGenUpscaleModel — the same ESRGAN file the video route already binds — so a
+	// box that upscales video upscales stills with no extra key (EffectiveUpscaleModel).
+	// Both empty = no upscale route (the task defers cleanly).
+	UpscaleModel string `json:"upscale_model,omitempty"`
+	// UpscaleTimeoutSec bounds one upscale (default 600): the render itself is seconds,
+	// the budget is the cold ComfyUI start.
+	UpscaleTimeoutSec int `json:"upscale_timeout_sec,omitempty"`
 	// --- video / audio generation (generate_video / generate_audio) ---
 	// VideoGenScript is the path to render/comfy-video.mjs (the I2V lifecycle wrapper).
 	// Empty = no video route (the task defers cleanly), like an empty ImageGenScript.
@@ -1009,6 +1022,9 @@ func Default() Config {
 		GenEditUnet:                 "",
 		GenEditPreset:               "lightning8", // matched steps+cfg+LoRA; ~4x faster than full at close quality
 		GenEditTimeoutSec:           1800,
+		UpscaleScript:               "render/comfy-upscale.mjs",
+		UpscaleModel:                "", // per-machine ESRGAN filename; falls back to videogen_upscale_model; both empty = defer
+		UpscaleTimeoutSec:           600,
 		VideoGenScript:              "render/comfy-video.mjs",
 		RunGraphScript:              "render/comfy-run-graph.mjs",
 		VoiceGenScript:              "render/tts.mjs",
@@ -1035,31 +1051,31 @@ func Default() Config {
 		Temperature:                 0,
 		MaxRetries:                  1,
 		// Both calibrated 2026-08-14 (were 0.45/0.35 — below the observed support, never fired).
-		ClassifyMinConfidence:       0.88,
-		ConfidenceMarginThreshold:   0.65,
-		MaxInputChars:               24000, // ~6k tokens, well under ctx 8192
-		GCFCompact:                  true,  // flip decision 2026-07-24 (lossless, fail-closed; explicit false in a config file still wins)
-		CachePath:                   filepath.Join(base, "cache.db"),
-		EmbedMemoPath:               filepath.Join(base, "embed-memo.db"),
-		EmbedMemoMaxEntries:         50000, // ~640 MB on disk (bbolt ~12.8 KB/entry); see the field doc
+		ClassifyMinConfidence:     0.88,
+		ConfidenceMarginThreshold: 0.65,
+		MaxInputChars:             24000, // ~6k tokens, well under ctx 8192
+		GCFCompact:                true,  // flip decision 2026-07-24 (lossless, fail-closed; explicit false in a config file still wins)
+		CachePath:                 filepath.Join(base, "cache.db"),
+		EmbedMemoPath:             filepath.Join(base, "embed-memo.db"),
+		EmbedMemoMaxEntries:       50000, // ~640 MB on disk (bbolt ~12.8 KB/entry); see the field doc
 
-		LedgerPath:                  filepath.Join(base, "ledger.jsonl"), // append-only JSONL (concurrent read/append)
-		ThresholdsPath:              filepath.Join(base, "thresholds.json"),
-		TierOverridesPath:           filepath.Join(base, "tier_overrides.json"),
-		RouterWeightsPath:           filepath.Join(base, "router-weights.json"),
-		RouterLabelsPath:            filepath.Join(base, "router-labels.jsonl"),
-		ConfHeadPath:                filepath.Join(base, "confhead-weights.json"),
-		ConfHeadLabelsPath:          filepath.Join(base, "confhead-labels.jsonl"),
-		ConfHeadThresholdsPath:      filepath.Join(base, "confhead-thresholds.json"),
-		ExemplarsDir:                filepath.Join(base, "exemplars"),
-		ExemplarShots:               0, // off until the pool is built + measured
-		AutoHeal:                    false,
-		OpusInputPricePerMTok:       15.0,
-		RequestTimeoutSec:           120,
-		ShadowEnabled:               false,
-		ShadowRate:                  0.10,
-		ShadowQueuePath:             filepath.Join(base, "shadow-queue.jsonl"),
-		SummarizeSimThreshold:       0.80,
+		LedgerPath:             filepath.Join(base, "ledger.jsonl"), // append-only JSONL (concurrent read/append)
+		ThresholdsPath:         filepath.Join(base, "thresholds.json"),
+		TierOverridesPath:      filepath.Join(base, "tier_overrides.json"),
+		RouterWeightsPath:      filepath.Join(base, "router-weights.json"),
+		RouterLabelsPath:       filepath.Join(base, "router-labels.jsonl"),
+		ConfHeadPath:           filepath.Join(base, "confhead-weights.json"),
+		ConfHeadLabelsPath:     filepath.Join(base, "confhead-labels.jsonl"),
+		ConfHeadThresholdsPath: filepath.Join(base, "confhead-thresholds.json"),
+		ExemplarsDir:           filepath.Join(base, "exemplars"),
+		ExemplarShots:          0, // off until the pool is built + measured
+		AutoHeal:               false,
+		OpusInputPricePerMTok:  15.0,
+		RequestTimeoutSec:      120,
+		ShadowEnabled:          false,
+		ShadowRate:             0.10,
+		ShadowQueuePath:        filepath.Join(base, "shadow-queue.jsonl"),
+		SummarizeSimThreshold:  0.80,
 
 		AgentTrajectoryCaptureEnabled: false,
 		AgentTrajectoryRate:           0.10,
@@ -1352,6 +1368,17 @@ func validatePipelines(pipelines map[string]PipelineSpec) error {
 	return nil
 }
 
+// EffectiveUpscaleModel is the ESRGAN filename the upscale_image route binds:
+// UpscaleModel, else VideoGenUpscaleModel (the video route's post-decode upscaler is
+// the same kind of file), else "" = no route. Pipeline gate and capability report
+// both read THIS so they cannot disagree about whether the box upscales.
+func (c *Config) EffectiveUpscaleModel() string {
+	if c.UpscaleModel != "" {
+		return c.UpscaleModel
+	}
+	return c.VideoGenUpscaleModel
+}
+
 // pathFields enumerates every path-typed Config field (file, dir, script, or
 // executable path) for tilde expansion. Keep in sync with the struct — a new
 // *Path/*Dir/*Script field belongs here.
@@ -1360,7 +1387,7 @@ func pathFields(c *Config) []*string {
 		&c.FFmpegPath, &c.MediaDir, &c.SVGDir,
 		&c.ImageGenScript, &c.NodePath, &c.ComfyDir,
 		&c.SdcppScript, &c.SdcppBin, &c.SdcppModel, &c.SdcppVAE, &c.SdcppClipL, &c.SdcppClipG, &c.SdcppT5, &c.SdcppLLM,
-		&c.InpaintScript, &c.GenEditScript,
+		&c.InpaintScript, &c.GenEditScript, &c.UpscaleScript,
 		&c.VideoGenScript, &c.RunGraphScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath, &c.StateDir,
 		&c.VoiceGenRef, &c.VoiceGenFTModel, &c.VoiceGenFTBaseDir, &c.VoiceGenFTRef,
 		&c.EditPython, &c.GimpConsolePath,
