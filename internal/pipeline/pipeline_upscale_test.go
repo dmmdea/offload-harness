@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"image"
 	"image/color"
+	"image/gif"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -180,17 +181,50 @@ copyFileSync(process.env.UPSCALE_STUB_SRC, process.argv[2]);
 		return p.Run(context.Background(), core.Request{Task: core.TaskUpscaleImage, Params: params})
 	}
 
-	// scale 3 on a 4x4 source expects 12x12; the stub writes 8x8 → defer naming both
+	// scale 3 on a 4x4 PNG source expects 12x12; the stub writes 8x8 → defer naming both,
+	// and — since the runner measures PNG too — blaming the renderer, not a fallback
 	t.Setenv("UPSCALE_STUB_SRC", eight)
 	res := run(map[string]any{"image": src, "scale": 3.0, "out": filepath.Join(dir, "o1.png")})
-	if res.OK || !strings.Contains(res.Reason, "upscale produced 8x8, expected 12x12 for scale 3 on a 4x4 source") {
+	if res.OK || !strings.Contains(res.Reason, "upscale produced 8x8, expected 12x12 for scale 3 on a 4x4 png source (the runner pinned that size and the renderer did not honor it)") {
 		t.Fatalf("want size-mismatch defer, got %+v", res)
 	}
 	// a pinned size that the runner did not honor defers the same way
 	res = run(map[string]any{"image": src, "width": 16, "height": 16, "out": filepath.Join(dir, "o2.png")})
-	if res.OK || !strings.Contains(res.Reason, "upscale produced 8x8, expected 16x16 for the pinned 16x16") {
+	if res.OK || !strings.Contains(res.Reason, "upscale produced 8x8, expected 16x16 for the pinned 16x16 (the renderer did not honor the requested size)") {
 		t.Fatalf("want pinned-size mismatch defer, got %+v", res)
 	}
+	// a GIF source is measured by Go but NOT by the runner (image-size.mjs has no GIF),
+	// so the same mismatch names the filename-factor fallback and the fix
+	gifSrc := filepath.Join(dir, "src.gif")
+	{
+		f, err := os.Create(gifSrc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := gif.Encode(f, image.NewPaletted(image.Rect(0, 0, 4, 4), color.Palette{color.Black, color.White}), nil); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+	}
+	res = run(map[string]any{"image": gifSrc, "scale": 3.0, "out": filepath.Join(dir, "o1g.png")})
+	if res.OK || !strings.Contains(res.Reason, "for scale 3 on a 4x4 gif source (the runner cannot measure this format and used the model's filename factor instead") {
+		t.Fatalf("want GIF mismatch naming the fallback, got %+v", res)
+	}
+	// a non-uniform pinned size reports factor_x / factor_y instead of a single factor
+	wide := writePNG(t, filepath.Join(dir, "wide.png"), 8, 2)
+	t.Setenv("UPSCALE_STUB_SRC", wide)
+	res = run(map[string]any{"image": src, "width": 8, "height": 2, "out": filepath.Join(dir, "o2w.png")})
+	if !res.OK {
+		t.Fatalf("want OK on a non-uniform pinned size, got %+v", res)
+	}
+	var nu map[string]any
+	if err := json.Unmarshal(res.Data, &nu); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := nu["factor"]; has || nu["factor_x"] != 2.0 || nu["factor_y"] != 0.5 {
+		t.Fatalf("non-uniform result = %v, want factor_x 2 factor_y 0.5 and no factor", nu)
+	}
+	t.Setenv("UPSCALE_STUB_SRC", eight)
 	// scale 2 → 8x8 expected, 8x8 written → OK with the size and the MEASURED factor
 	res = run(map[string]any{"image": src, "scale": 2.0, "out": filepath.Join(dir, "o3.png")})
 	if !res.OK {
@@ -222,7 +256,7 @@ copyFileSync(process.env.UPSCALE_STUB_SRC, process.argv[2]);
 		t.Fatal(err)
 	}
 	res = run(map[string]any{"image": webp, "scale": 3.0, "out": filepath.Join(dir, "o6.png")})
-	if res.OK || !strings.Contains(res.Reason, "upscale produced 8x8, expected 12x12 for scale 3 on a 4x4 source") {
+	if res.OK || !strings.Contains(res.Reason, "upscale produced 8x8, expected 12x12 for scale 3 on a 4x4 webp source (the runner pinned that size") {
 		t.Fatalf("want WebP source measured → size-mismatch defer, got %+v", res)
 	}
 	res = run(map[string]any{"image": webp, "scale": 2.0, "out": filepath.Join(dir, "o7.png")})

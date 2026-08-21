@@ -30,8 +30,10 @@ Versioning: [SemVer](https://semver.org/).
   model; the runner pre-flights the builder (incl. ComfyUI's `scale_by` 0.01–8) before the slot.
 - **Post-render verification:** the written file must decode (an undecodable file defers instead
   of returning a size-less success) and, when a size was requested, match it within 2 px — a
-  mismatch defers naming produced-vs-expected. Returns `{image_path, model, width, height,
-  factor}` with the size read back from the file and `factor` the measured output/source ratio.
+  mismatch defers naming produced-vs-expected — and whether the renderer ignored a pinned size or
+  the runner could not measure the source (GIF) and used the model's filename factor. Returns
+  `{image_path, model, width, height, factor}` with the size read back from the file and `factor`
+  the measured output/source ratio (`factor_x`/`factor_y` for a non-uniform pinned size).
 - Review rounds (fresh-context code-reviewer + silent-failure-hunter) caught, before ship: a
   negative `width`+`height` pair passing the "given together" gate and rendering at native factor
   with `OK:true`; the `nativeFactor` regex reading `2xLexicaRRDBNet_Sharp` as 4 (so `scale:2`

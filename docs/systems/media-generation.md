@@ -153,13 +153,17 @@ five core resamplers, a `scale` whose result would exceed that limit, or an abso
 `model` override (subfolder names such as `ESRGAN/4x.pth` are valid ComfyUI names and pass) all defer
 with the offending value named — and the runner pre-flights the same builder before taking the slot
 (ComfyUI's `scale_by` range 0.01–8 is enforced there too). **After the render the written file is
-verified**: it must decode as PNG/JPEG (an undecodable file defers rather than returning a size-less
-success), and when a size was requested its dimensions must match within 2 px or the call defers
-naming produced-vs-expected. Both sides measure the same three source formats (PNG/JPEG/WebP — Go has
-its own header reader mirroring `image-size.mjs`), so for every advertised format the expectation
-exists and the fallback path is unreachable; a source only Go can read (GIF) takes the fallback in the
-runner and is then caught by this check, with the defer naming the fix. The result carries
-`width`/`height` read from the file and `factor`, the measured output/source ratio.
+verified**: its header must be readable (PNG/JPEG/WebP, plus GIF through the decoder the binary
+already registers — an unreadable file defers rather than returning a size-less success), and when a
+size was requested its dimensions must match within 2 px or the call defers naming produced-vs-
+expected. Both sides measure the same three advertised source formats (PNG/JPEG/WebP — Go has its own
+header reader mirroring `image-size.mjs`), so for those the runner pins the size and a mismatch means
+the renderer did not honor it, which the defer says. A GIF source is the one shape Go measures and the
+runner cannot: the runner falls back to the model's filename factor, Go still expects `src × scale`,
+and the two agree only when that guess was right — a wrong guess is caught as a mismatch whose defer
+names the fallback and the fix (pin the size, or use PNG/JPEG/WebP). The result carries
+`width`/`height` read from the file and `factor`, the measured output/source ratio — or `factor_x` /
+`factor_y` when a pinned size is non-uniform.
 `ImageUpscaleWithModel` tiles on OOM by itself, so there is no tile knob. It synthesizes detail, so
 it is an enlargement tool, not a faithful restore — an exact resample is `edit-image`'s `resize`.
 `upscale_script` ships as a default (the runner is generic, like `run_graph_script`); only the model

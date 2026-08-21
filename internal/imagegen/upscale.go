@@ -87,6 +87,32 @@ func OutputSize(path string) (int, int) {
 	return webpSize(head)
 }
 
+// SourceFormat names the reader that can measure path's header HERE: "png", "jpeg",
+// "gif" (registered elsewhere in the binary), "webp" (webpSize), or "" for none. The
+// pipeline uses it to tell a source the RUNNER can also measure (png/jpeg/webp —
+// image-size.mjs) from one only Go reads (gif), which changes what a size mismatch means.
+func SourceFormat(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	if _, name, err := image.DecodeConfig(f); err == nil {
+		return name
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return ""
+	}
+	head := make([]byte, 30)
+	if n, _ := io.ReadFull(f, head); n < 30 {
+		return ""
+	}
+	if w, _ := webpSize(head); w > 0 {
+		return "webp"
+	}
+	return ""
+}
+
 // webpSize mirrors image-size.mjs's webpSize: a RIFF/WEBP container, then one of the
 // three payload headers with three different dimension encodings. (0, 0) for anything
 // else — the stdlib has no WebP decoder and this route only needs the size.

@@ -1445,7 +1445,7 @@ func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta c
 		// loader lists them as "ESRGAN/4x.pth"). An absolute or parent-escaping path
 		// can only be a typo or a different models root, and ComfyUI would reject it
 		// after the cold start — refuse it here.
-		if filepath.IsAbs(s) || filepath.VolumeName(s) != "" || strings.HasPrefix(s, "/") || strings.HasPrefix(s, `\`) || hasParentSegment(s) {
+		if filepath.IsAbs(s) || hasDriveLetter(s) || strings.HasPrefix(s, "/") || strings.HasPrefix(s, `\`) || hasParentSegment(s) {
 			return defer1("upscale model must be a name relative to ComfyUI's upscale_models/ (subfolders allowed), got " + s)
 		}
 		model = s
@@ -1487,6 +1487,7 @@ func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta c
 	// runner, which pins the size itself when it can read the header). The written file
 	// is compared against it after the render: a silent wrong size never reports OK.
 	srcW, srcH := imagegen.OutputSize(image)
+	srcFormat := imagegen.SourceFormat(image)
 	expW, expH := 0, 0
 	switch {
 	case w > 0:
@@ -1526,11 +1527,17 @@ func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta c
 		return defer1("upscale wrote an undecodable file at " + outPath)
 	}
 	if expW > 0 && (absInt(ow-expW) > 2 || absInt(oh-expH) > 2) {
-		return defer1(fmt.Sprintf("upscale produced %dx%d, expected %dx%d for %s — the written file is at %s", ow, oh, expW, expH, upscaleSizeRequest(w, h, scale, srcW, srcH), outPath))
+		return defer1(fmt.Sprintf("upscale produced %dx%d, expected %dx%d for %s — the written file is at %s", ow, oh, expW, expH, upscaleSizeRequest(w, h, scale, srcW, srcH, srcFormat), outPath))
 	}
 	result := map[string]any{"image_path": outPath, "model": model, "width": ow, "height": oh}
-	if srcW > 0 {
-		result["factor"] = float64(int(float64(ow)/float64(srcW)*100+0.5)) / 100
+	// factor is the measured output/source ratio; a pinned non-uniform size has two.
+	if srcW > 0 && srcH > 0 {
+		fx, fy := round2(float64(ow)/float64(srcW)), round2(float64(oh)/float64(srcH))
+		if fx == fy {
+			result["factor"] = fx
+		} else {
+			result["factor_x"], result["factor_y"] = fx, fy
+		}
 	}
 	data, _ := json.Marshal(result)
 	p.record(req.Task, meta, 0)
@@ -1557,6 +1564,13 @@ func hasParentSegment(s string) bool {
 	return false
 }
 
+// hasDriveLetter is the platform-independent "C:..." test: filepath.VolumeName only
+// knows drive letters on Windows, and this gate must behave the same on a Linux fleet
+// node (a drive-relative name is a typo everywhere).
+func hasDriveLetter(s string) bool {
+	return len(s) >= 2 && s[1] == ':' && ((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z'))
+}
+
 func absInt(v int) int {
 	if v < 0 {
 		return -v
@@ -1564,14 +1578,26 @@ func absInt(v int) int {
 	return v
 }
 
-// upscaleSizeRequest names what fixed the expected size, for the mismatch defer. On
-// the scale path a mismatch means the runner could not measure the source and fell
-// back to the model's filename factor, so the fix is named too.
-func upscaleSizeRequest(w, h int, scale float64, srcW, srcH int) string {
+func round2(v float64) float64 { return float64(int(v*100+0.5)) / 100 }
+
+// runnerMeasures reports whether render/image-size.mjs can read this source format —
+// the three it implements. For those a size mismatch means the renderer did not honor
+// the pinned size; for anything else (gif: Go reads it, the runner cannot) the runner
+// fell back to the model's filename factor, and the fix is different.
+func runnerMeasures(format string) bool {
+	return format == "png" || format == "jpeg" || format == "webp"
+}
+
+// upscaleSizeRequest names what fixed the expected size, for the mismatch defer, and
+// why it can have been missed.
+func upscaleSizeRequest(w, h int, scale float64, srcW, srcH int, srcFormat string) string {
 	if w > 0 {
-		return fmt.Sprintf("the pinned %dx%d", w, h)
+		return fmt.Sprintf("the pinned %dx%d (the renderer did not honor the requested size)", w, h)
 	}
-	return fmt.Sprintf("scale %g on a %dx%d source (the runner could not measure the source and used the model's filename factor instead — pin width+height, or use a PNG/JPEG/WebP source)", scale, srcW, srcH)
+	if runnerMeasures(srcFormat) {
+		return fmt.Sprintf("scale %g on a %dx%d %s source (the runner pinned that size and the renderer did not honor it)", scale, srcW, srcH, srcFormat)
+	}
+	return fmt.Sprintf("scale %g on a %dx%d %s source (the runner cannot measure this format and used the model's filename factor instead — pin width+height, or use a PNG/JPEG/WebP source)", scale, srcW, srcH, srcFormat)
 }
 
 // runEditImageGenerative rewrites the WHOLE of params.image from a text instruction

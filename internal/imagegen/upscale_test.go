@@ -106,6 +106,39 @@ func TestOutputSize(t *testing.T) {
 	}
 }
 
+func TestSourceFormat(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.png")
+	f, err := os.Create(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, image.NewRGBA(image.Rect(0, 0, 3, 3))); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if got := SourceFormat(p); got != "png" {
+		t.Fatalf("png: SourceFormat = %q", got)
+	}
+	w := filepath.Join(dir, "a.webp")
+	if err := os.WriteFile(w, WebPHeader("VP8L", 5, 7), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := SourceFormat(w); got != "webp" {
+		t.Fatalf("webp: SourceFormat = %q", got)
+	}
+	j := filepath.Join(dir, "junk.bin")
+	if err := os.WriteFile(j, []byte("definitely not an image header at all"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := SourceFormat(j); got != "" {
+		t.Fatalf("junk: SourceFormat = %q, want empty", got)
+	}
+	if got := SourceFormat(filepath.Join(dir, "missing.png")); got != "" {
+		t.Fatalf("missing: SourceFormat = %q, want empty", got)
+	}
+}
+
 // TestOutputSizeRealWebP reads REAL encoder output (opt-in: UPSCALE_REAL_WEBP_DIR
 // holds files named like real-37x23-lossy.webp) so the header reader and the
 // header-only fixtures above cannot share one mistake. Skipped when unset.
