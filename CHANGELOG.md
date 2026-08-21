@@ -6,6 +6,22 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.75.0] - 2026-08-20
+### blackwell-8 image seat: Z-Image + SDXL (operator decision 2026-08-20)
+The tier's reference box exists now (OptiPlex 7060, RTX 5060 8GB @ Gen3 x4, rebuilt 2026-08-19),
+and the operator decided its image lane: **Z-Image Turbo primary** via the sdcpp engine — the
+amd-rdna3-proven binding (Q8_0 diffusion GGUF + zimage_ae VAE + Qwen3-4B text encoder,
+steps 8 / cfg 1) — with **SDXL pre-staged** on the ComfyUI route (`imagegen_ckpt`
+RealVisXL_V5.0_fp16 seeded inert; the comfy route's unknown-family fallthrough IS the SDXL
+builder with that exact default). The flip to SDXL is three keys and the notes say so
+(clear `imagegen_engine` AND `imagegen_steps`/`imagegen_cfg` — 8/1 is Z-Image's turbo recipe and
+renders mush on RealVis). `vae_mode` is `tiling`, not the AMD seed's `cpu`: the seed lint
+rejected the verbatim copy with its measured reason (cpu = 7.8x slower on CUDA backends) —
+the gate working as designed. This DELIBERATELY breaks ampere-8/blackwell-8 field parity on
+hardware grounds (sm_120 FP8-class model); ampere-8 keeps HiDream-O1, its one verified
+measurement, and both tiers' notes record the split. The Dell's LIVE config is owned by its
+own session; this seed is the durable tier encoding for fresh installs.
+
 ## [0.74.0] - 2026-08-19
 Nightshift-9 batch: one pre-existing render defect fixed, plus the measurement-free half of the
 operator-tasked 8GB-class re-evaluation (full proposal + bake plan:
