@@ -6,6 +6,42 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.76.0] - 2026-08-21
+
+### Added
+
+- **Agent-loop prefill now lands in the ledger** (`prefill_steps`, `prefill_tokens`,
+  `cache_tokens`, `prefill_ms` on `core.Meta` and `ledger.Entry`), plus an `agent_prefill`
+  view in `loupe` that carries its own verdict.
+  - **Why this was needed even though the instrument already existed.** The prefill
+    aggregator shipped in 0.65.0 and worked correctly — but its output went nowhere durable.
+    `PrefillReport` rode home on the in-process `Result` and on a `local-agent` stderr line,
+    neither of which survives the call. So the question it exists to answer (memory-frontier
+    T2-B: *does the agent loop have a repeated prefix worth stabilising?*) still could not be
+    answered from real traffic, while the numbers arrived on every step and were dropped.
+    **An instrument whose output nothing captures cannot decide anything.**
+  - Captured **immediately after `Loop.Run`, before the defer branches**. Every one of those
+    branches still records a ledger row, and a budget-exhausted or timed-out run is precisely
+    where prefill is largest. Reading it only on the success path would systematically exclude
+    the expensive runs and bias the number this exists to produce.
+  - **`prefill_steps` is the discriminator, not a statistic.** Present (>0) means the row was
+    measured; absent means unobserved. Without it `prefill_tokens: 0` is ambiguous between
+    "the server reused everything" and "nothing was ever observed" — opposite conclusions, and
+    the second one is the only result that would justify building prefix-stability work.
+  - The `loupe` view refuses a verdict below a 20-row floor, and reports `insufficient_data`
+    rather than a fabricated 0% when nothing has been observed. Verdict bands: HIGH REUSE
+    (≥80%, work not justified) · PARTIAL · LOW REUSE (<40%, the case that justifies it).
+  - `kv_reuse_pct` is `CacheN/(CacheN+PromptN)`, never `CacheN/PromptN` — the latter leaves the
+    cached tokens out of its own denominator and reports past 100%.
+
+### Notes
+
+- Verified **end-to-end on a real agent contract**, not only in unit tests: a live
+  `delegate --contract` run against an isolated scratch ledger produced
+  `{"task":"agent","prefill_steps":2,"prefill_tokens":988,"cache_tokens":854,"prefill_ms":2231}`
+  — 46.4% KV reuse. The outer `agent_delegate` row correctly carries no prefill, since that is
+  the dispatch layer rather than the loop.
+
 ## [0.75.0] - 2026-08-20
 ### blackwell-8 image seat: Z-Image + SDXL (operator decision 2026-08-20)
 The tier's reference box exists now (OptiPlex 7060, RTX 5060 8GB @ Gen3 x4, rebuilt 2026-08-19),

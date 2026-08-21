@@ -199,6 +199,21 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	res, rerr := built.Loop.Run(cctx, contract.Goal)
 	wire.Steps = res.Steps
 	wire.StopReason = res.StopReason
+	// T2-B: capture the run's prefill accounting HERE, immediately after the loop and
+	// BEFORE the defer branches below. Every one of those branches still records a
+	// ledger row via finish()/deferWire(), and a budget-exhausted or timed-out run is
+	// precisely where prefill is most interesting -- it burned the most steps. Reading
+	// it only on the success path would systematically exclude the expensive runs from
+	// the measurement, biasing the very number this exists to produce.
+	//
+	// meta is captured by reference by the finish/deferWire closures defined above, so
+	// mutating it now reaches every recording path.
+	if pf := res.Prefill; pf.ObservedSteps > 0 {
+		meta.PrefillSteps = pf.ObservedSteps
+		meta.PrefillTokens = pf.PrefillTokens
+		meta.CacheTokens = pf.CacheTokens
+		meta.PrefillMS = pf.PrefillMS
+	}
 	if rerr != nil {
 		// Wall timeout is its own defer shape — the delegator sizes future
 		// contracts off it, so it must be distinguishable from a planner error.

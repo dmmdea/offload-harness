@@ -115,6 +115,10 @@ type statsReport struct {
 	// regression on a quality-first stack.
 	Reliability ReliabilityReport `json:"reliability"`
 
+	// --- gate T2-B: does the AGENT LOOP have a repeated prefix worth stabilising? ---
+	// Carries its own verdict and refuses to offer one below the sample floor.
+	Prefill PrefillReport `json:"agent_prefill"`
+
 	// --- gate R2-16: does any NON-OBSOLETE failure class recur often enough to act on? ---
 	// Carries its own verdict so the gate cannot be quietly reinterpreted later.
 	Atlas AtlasReport `json:"failure_atlas"`
@@ -321,6 +325,7 @@ func runLoupe(args []string) error {
 	// observation window. Passing a zero span makes it report insufficient_data rather than
 	// dividing by a guess.
 	rep.Reliability = buildReliability(rows)
+	rep.Prefill = buildPrefill(rows)
 	rep.Atlas = buildAtlas(rows, rep.SpanDays)
 
 	// Duplicate rate is computed ONLY over rows that carry an identity, so the
@@ -538,6 +543,24 @@ func emitStats(rep statsReport, asJSON bool) error {
 	// R2-14. Cells below the sample floor print their COUNT and the word
 	// insufficient_data rather than a rate — a 2-sample cell showing "100.0%" is how a
 	// report talks somebody into trusting noise.
+	// T2-B. Prints the DISCRIMINATOR (measured rows) before any rate, so an unobserved
+	// workload can never be read as a measured zero.
+	{
+		pf := rep.Prefill
+		p("")
+		p("AGENT PREFILL  (T2-B — decides whether prefix-stability work is justified)")
+		if pf.MeasuredRows == 0 {
+			p("  no agent run has reported prefill timings yet — unobserved, not answered")
+		} else {
+			reuse := "n/a"
+			if pf.KVReusePct != nil {
+				reuse = fmt.Sprintf("%.1f%%", *pf.KVReusePct)
+			}
+			p("  %d row(s) measured over %d step(s) — KV reuse %s", pf.MeasuredRows, pf.ObservedSteps, reuse)
+			p("  %d tokens prefilled in %.0f ms", pf.PrefillTokens, pf.PrefillMS)
+		}
+		p("  => %s", pf.Verdict)
+	}
 	if len(rep.Reliability.Cells) > 0 {
 		p("")
 		p("RELIABILITY  (report only — never used for routing; >=%d samples to quote a rate)", rep.Reliability.MinSamples)
