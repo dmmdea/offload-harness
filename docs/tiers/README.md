@@ -23,7 +23,7 @@ a Windows class.
 | [blackwell-32](blackwell-32.md) | cuda-resident | 65536 | q8_0 | gemma4-26b-a4b | `gpu` | comfyui (krea2) + stt/vision seat | — |
 | [blackwell-48](blackwell-48.md) | cuda-resident | 131072 | f16 | gemma4-26b-a4b | `gpu` | comfyui (krea2) + stt/vision seat | — |
 | [blackwell-72](blackwell-72.md) | cuda-resident | 131072 | f16 | gemma4-26b-a4b | `gpu` | comfyui (krea2) + stt/vision seat | — |
-| [blackwell-8](blackwell-8.md) | cuda | 16384 | q8_0 | offload-e4b | `cpu_moe` | comfyui (hidream-o1) (RAM-gated) + stt/vision seat | — |
+| [blackwell-8](blackwell-8.md) | cuda | 16384 | q8_0 | offload-e4b | `cpu_moe` | `sdcpp` (z-image-turbo) (RAM-gated) + stt/vision seat | — |
 | [cpu](cpu.md) | cpu | 8192 | f16 | offload-e4b | `cpu_moe` | stt/vision seat | — |
 | [dual-gpu](dual-gpu.md) | dual-cuda | 32768 | q8_0 | gemma4-26b-a4b | `gpu` | stt/vision seat | — |
 | [volta-16](volta-16.md) | cuda | 32768 | q8_0 | gemma4-26b-a4b | `gpu` | comfyui (hidream-o1) + stt/vision seat | — |
