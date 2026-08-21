@@ -43,7 +43,7 @@ results, not errors.
 | Vision | `offload_vqa`, `offload_assess_image`, `offload_extract_image`, `offload_video_describe` |
 | Speech / OCR | `offload_transcribe`, `offload_ocr` |
 | Media generation | `offload_generate_image`, `offload_generate_video`, `offload_generate_audio`, `offload_generate_svg` |
-| Media editing | `offload_edit_image`, `offload_inpaint_image`, `offload_edit_image_generative`, `offload_media` |
+| Media editing | `offload_edit_image`, `offload_inpaint_image`, `offload_edit_image_generative`, `offload_upscale_image`, `offload_media` |
 | Graph execution | `offload_run_graph` |
 | Agent | `agent_run` |
 | Remote (opt-in) | `offload_nim` |

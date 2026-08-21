@@ -177,3 +177,20 @@ cleanly after (`freeComfy`) and the llama-swap memory stack unaffected (embedder
 The runner's on-demand ComfyUI auto-spawn (`.venv` python) is verified too. Builders + GPU
 scheduler unit-tested (green). Settled config: cfg_distilled @ 50 steps / CFG 1 / shift 5,
 `vaeTemporalSize 16`, `--reserve-vram 2.0`. 49 frames is the realistic ceiling on 8 GB.
+
+---
+
+## Upscale (ESRGAN-family, `comfy-upscale.mjs`)
+
+```bash
+node render/comfy-upscale.mjs out.png in.png --model 4x-UltraSharp.pth            # native factor (4x)
+node render/comfy-upscale.mjs out.png in.png --model 4x-UltraSharp.pth --scale 2  # 4x, then 0.5 lanczos
+node render/comfy-upscale.mjs out.png in.png --model 4x-UltraSharp.pth --width 3000 --height 2000 --method bicubic
+```
+Core nodes only (`UpscaleModelLoader` → `ImageUpscaleWithModel` → optional `ImageScaleBy`/`ImageScale`;
+graph in `wf-upscale.mjs`, unit-tested). `--model` is a filename under ComfyUI's `upscale_models/`
+(or `COMFY_UPSCALE_MODEL`); the native factor is read from it (`4x-…` → 4, unknown → 4). A half-given
+size or a bad `--method` exits 2 **before** the GPU slot is taken. Same lifecycle as the other runners:
+single-slot GPU lock, on-demand ComfyUI, zero-always-warm teardown. The harness route is
+`local-offload upscale-image` / `offload_upscale_image` (binding `upscale_model`, falling back to
+`videogen_upscale_model`).

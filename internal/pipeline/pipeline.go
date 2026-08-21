@@ -343,6 +343,12 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	if req.Task == core.TaskInpaintImage {
 		return p.runInpaintImage(ctx, req, meta, start)
 	}
+	// upscale_image enlarges params.image with an ESRGAN-family model on the local
+	// ComfyUI by shelling out to comfy-upscale.mjs (shared GPU lock + ComfyUI
+	// lifecycle). Its own branch — no text cascade, no grammar, no vision call.
+	if req.Task == core.TaskUpscaleImage {
+		return p.runUpscaleImage(ctx, req, meta, start)
+	}
 
 	// run_graph executes an arbitrary ComfyUI API-format graph + satisfies its node
 	// manifest on the local ComfyUI by shelling out to comfy-run-graph.mjs (shared GPU
@@ -1419,6 +1425,183 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 	data, _ := json.Marshal(map[string]any{"image_path": outPath, "seed": seed})
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// runUpscaleImage enlarges params.image with this machine's ESRGAN-family model on
+// the LOCAL ComfyUI. No prompt, no seed: the model is deterministic for a given
+// input, so the out-path hash is input + params only. Any failure defers.
+func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+	defer1 := func(reason string) core.Result {
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		p.recordDefer(req.Task, meta, len(req.Input), reason)
+		return core.Deferf(reason, "", meta)
+	}
+	if p.cfg.UpscaleScript == "" {
+		return defer1("no upscale route configured (upscale_script unset)")
+	}
+	model := p.cfg.EffectiveUpscaleModel()
+	if s, ok := req.Params["model"].(string); ok && s != "" {
+		// A ComfyUI model NAME relative to upscale_models/ (subfolders are fine — the
+		// loader lists them as "ESRGAN/4x.pth"). An absolute or parent-escaping path
+		// can only be a typo or a different models root, and ComfyUI would reject it
+		// after the cold start — refuse it here.
+		if filepath.IsAbs(s) || hasDriveLetter(s) || strings.HasPrefix(s, "/") || strings.HasPrefix(s, `\`) || hasParentSegment(s) {
+			return defer1("upscale model must be a name relative to ComfyUI's upscale_models/ (subfolders allowed), got " + s)
+		}
+		model = s
+	}
+	if model == "" {
+		return defer1("no upscale route configured (upscale_model / videogen_upscale_model unset)")
+	}
+	meta.Model = "comfyui-upscale:" + model
+	image := paramStr(req.Params, "image")
+	if image == "" {
+		return defer1("upscale requires params.image")
+	}
+	if fi, err := os.Stat(image); err != nil || fi.IsDir() {
+		return defer1("upscale input not found: " + image)
+	}
+	w, h := paramIntOr(req.Params, "width", 0), paramIntOr(req.Params, "height", 0)
+	if w < 0 || h < 0 {
+		return defer1("upscale width and height must be positive integers")
+	}
+	if (w > 0) != (h > 0) {
+		return defer1("upscale width and height must be given together")
+	}
+	if w > upscaleMaxResolution || h > upscaleMaxResolution {
+		return defer1(fmt.Sprintf("upscale width and height must be <= %d (ComfyUI limit), got %dx%d", upscaleMaxResolution, w, h))
+	}
+	scale := 0.0
+	if _, present := req.Params["scale"]; present {
+		scale = paramFloat(req.Params, "scale")
+		if scale <= 0 {
+			return defer1("upscale scale must be > 0")
+		}
+		req.Params["scale"] = scale // normalized: upscaleArgs forwards float64 only
+	}
+	if m := paramStr(req.Params, "method"); m != "" && !upscaleMethods[m] {
+		return defer1("upscale method must be one of lanczos|bicubic|bilinear|area|nearest-exact, got " + m)
+	}
+	// The size the request fixes, if any: a pinned width/height exactly; a scale from the
+	// measured source (PNG/JPEG here — an unmeasurable source leaves the check to the
+	// runner, which pins the size itself when it can read the header). The written file
+	// is compared against it after the render: a silent wrong size never reports OK.
+	srcW, srcH := imagegen.OutputSize(image)
+	srcFormat := imagegen.SourceFormat(image)
+	expW, expH := 0, 0
+	switch {
+	case w > 0:
+		expW, expH = w, h
+	case scale > 0 && srcW > 0:
+		expW, expH = int(float64(srcW)*scale+0.5), int(float64(srcH)*scale+0.5)
+		if expW > upscaleMaxResolution || expH > upscaleMaxResolution {
+			return defer1(fmt.Sprintf("upscale scale %g on a %dx%d source needs %dx%d, above ComfyUI's %d limit", scale, srcW, srcH, expW, expH, upscaleMaxResolution))
+		}
+	}
+	script, serr := gpugen.ResolveScript(p.cfg.UpscaleScript)
+	if serr != nil {
+		return defer1(serr.Error())
+	}
+	out := paramStr(req.Params, "out")
+	if out == "" {
+		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
+		out = filepath.Join(p.cfg.MediaDir, "upscale-"+sha256hex(image + tasks.StableParamsKey(req.Params))[:8]+".png")
+	}
+	timeout := time.Duration(p.cfg.UpscaleTimeoutSec) * time.Second
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("upscale", timeout, p.gpuWait())
+	if lerr != nil {
+		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
+	}
+	defer releaseLease()
+	outPath, gerr := imagegen.Upscale(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, image, req.Params, imagegen.UpscaleModel{Model: model}, timeout, leaseEnv...)
+	if gerr != nil {
+		meta.ErrClass = classifyErr(gerr)
+		return defer1("upscale failed: " + gerr.Error())
+	}
+	meta.LatencyMs = time.Since(start).Milliseconds()
+	// Size is read from the file the runner wrote, never predicted: gpugen proved the
+	// file exists and is non-empty, so a header that does not decode means the bytes
+	// are not the PNG this route promises — a defer, not a size-less success.
+	ow, oh := imagegen.OutputSize(outPath)
+	if ow <= 0 || oh <= 0 {
+		return defer1("upscale wrote an undecodable file at " + outPath)
+	}
+	if expW > 0 && (absInt(ow-expW) > 2 || absInt(oh-expH) > 2) {
+		return defer1(fmt.Sprintf("upscale produced %dx%d, expected %dx%d for %s — the written file is at %s", ow, oh, expW, expH, upscaleSizeRequest(w, h, scale, srcW, srcH, srcFormat), outPath))
+	}
+	result := map[string]any{"image_path": outPath, "model": model, "width": ow, "height": oh}
+	// factor is the measured output/source ratio; a pinned non-uniform size has two.
+	// "Uniform" is decided in pixels, not ratios: a uniform scale on a small odd-sized
+	// source rounds each axis independently (3x5 at 2.33 → 7x12, ratios 2.33 vs 2.4),
+	// so the height is uniform when it is within 1 px of what the width's factor predicts.
+	if srcW > 0 && srcH > 0 {
+		fx, fy := round2(float64(ow)/float64(srcW)), round2(float64(oh)/float64(srcH))
+		uniformH := int(float64(ow)*float64(srcH)/float64(srcW) + 0.5)
+		if absInt(oh-uniformH) <= 1 {
+			result["factor"] = fx
+		} else {
+			result["factor_x"], result["factor_y"] = fx, fy
+		}
+	}
+	data, _ := json.Marshal(result)
+	p.record(req.Task, meta, 0)
+	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// upscaleMaxResolution is ComfyUI's core MAX_RESOLUTION for ImageScale width/height;
+// a larger value is rejected server-side AFTER the GPU slot and cold start.
+const upscaleMaxResolution = 16384
+
+// upscaleMethods are ImageScale/ImageScaleBy's resamplers (ComfyUI core), the same
+// five the graph builder accepts.
+var upscaleMethods = map[string]bool{"lanczos": true, "bicubic": true, "bilinear": true, "area": true, "nearest-exact": true}
+
+// hasParentSegment reports whether a relative model name climbs out of its root: a
+// ".." PATH SEGMENT on either separator. A ".." inside a filename ("4x..pth") is odd
+// but legal and must not trip it.
+func hasParentSegment(s string) bool {
+	for _, seg := range strings.FieldsFunc(s, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// hasDriveLetter is the platform-independent "C:..." test: filepath.VolumeName only
+// knows drive letters on Windows, and this gate must behave the same on a Linux fleet
+// node (a drive-relative name is a typo everywhere).
+func hasDriveLetter(s string) bool {
+	return len(s) >= 2 && s[1] == ':' && ((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z'))
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+func round2(v float64) float64 { return float64(int(v*100+0.5)) / 100 }
+
+// runnerMeasures reports whether render/image-size.mjs can read this source format —
+// the three it implements. For those a size mismatch means the renderer did not honor
+// the pinned size; for anything else (gif: Go reads it, the runner cannot) the runner
+// fell back to the model's filename factor, and the fix is different.
+func runnerMeasures(format string) bool {
+	return format == "png" || format == "jpeg" || format == "webp"
+}
+
+// upscaleSizeRequest names what fixed the expected size, for the mismatch defer, and
+// why it can have been missed.
+func upscaleSizeRequest(w, h int, scale float64, srcW, srcH int, srcFormat string) string {
+	if w > 0 {
+		return fmt.Sprintf("the pinned %dx%d (the renderer did not honor the requested size)", w, h)
+	}
+	if runnerMeasures(srcFormat) {
+		return fmt.Sprintf("scale %g on a %dx%d %s source (the runner pinned that size and the renderer did not honor it)", scale, srcW, srcH, srcFormat)
+	}
+	return fmt.Sprintf("scale %g on a %dx%d %s source (the runner cannot measure this format and used the model's filename factor instead — pin width+height, or use a PNG/JPEG/WebP source)", scale, srcW, srcH, srcFormat)
 }
 
 // runEditImageGenerative rewrites the WHOLE of params.image from a text instruction

@@ -212,7 +212,7 @@ func TestDefaultConfigNamesEveryShippedRoute(t *testing.T) {
 	for _, want := range []string{
 		"generate_image", "inpaint_image", "generate_video",
 		"generate_audio:voice", "generate_audio:music", "run_graph",
-		"edit_image", "flatten_design", "media",
+		"edit_image", "flatten_design", "media", "upscale_image",
 	} {
 		if _, ok := got[want]; !ok {
 			t.Errorf("no route reported for %s", want)

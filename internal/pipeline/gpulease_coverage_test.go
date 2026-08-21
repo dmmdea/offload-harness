@@ -125,6 +125,23 @@ func gpuLeaseCases() []gpuLeaseCase {
 			},
 		},
 		{
+			name:   "upscale_image",
+			runner: "comfy-upscale.mjs",
+			setup: func(t *testing.T, cfg *config.Config, stub, dir string) {
+				t.Helper()
+				cfg.UpscaleScript = stub
+				cfg.UpscaleModel = "4x-UltraSharp.pth"
+				if err := os.WriteFile(filepath.Join(dir, "a.png"), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			invoke: func(t *testing.T, p *Pipeline, dir string) {
+				t.Helper()
+				p.Run(context.Background(), core.Request{Task: core.TaskUpscaleImage,
+					Params: map[string]any{"image": filepath.Join(dir, "a.png")}})
+			},
+		},
+		{
 			name:   "image batch",
 			runner: "comfy-generate.mjs",
 			setup: func(_ *testing.T, cfg *config.Config, stub, _ string) {

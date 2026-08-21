@@ -57,6 +57,7 @@ func TestAllHandlersSurfaceBadArguments(t *testing.T) {
 		{"ocr", s.handleOCR, `{"image":{}}`},
 		{"generate_image", s.handleGenerateImage, `{"prompt":"p","width":"wide"}`},
 		{"inpaint_image", s.handleInpaintImage, `{"image":"a.png","mask":"m.png","prompt":"p","denoise":"deep"}`},
+		{"upscale_image", s.handleUpscaleImage, `{"image":"a.png","scale":"double"}`},
 		{"generate_svg", s.handleGenerateSVG, `{"kind":"gauge","spec":"not-an-object"}`},
 		{"generate_video", s.handleGenerateVideo, `{"prompt":"p","frames":"many"}`},
 		{"generate_audio", s.handleGenerateAudio, `{"text":"t","seconds":"ten"}`},
