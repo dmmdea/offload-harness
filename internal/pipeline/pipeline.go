@@ -1531,9 +1531,13 @@ func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta c
 	}
 	result := map[string]any{"image_path": outPath, "model": model, "width": ow, "height": oh}
 	// factor is the measured output/source ratio; a pinned non-uniform size has two.
+	// "Uniform" is decided in pixels, not ratios: a uniform scale on a small odd-sized
+	// source rounds each axis independently (3x5 at 2.33 → 7x12, ratios 2.33 vs 2.4),
+	// so the height is uniform when it is within 1 px of what the width's factor predicts.
 	if srcW > 0 && srcH > 0 {
 		fx, fy := round2(float64(ow)/float64(srcW)), round2(float64(oh)/float64(srcH))
-		if fx == fy {
+		uniformH := int(float64(ow)*float64(srcH)/float64(srcW) + 0.5)
+		if absInt(oh-uniformH) <= 1 {
 			result["factor"] = fx
 		} else {
 			result["factor_x"], result["factor_y"] = fx, fy

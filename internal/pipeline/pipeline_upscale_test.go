@@ -224,6 +224,22 @@ copyFileSync(process.env.UPSCALE_STUB_SRC, process.argv[2]);
 	if _, has := nu["factor"]; has || nu["factor_x"] != 2.0 || nu["factor_y"] != 0.5 {
 		t.Fatalf("non-uniform result = %v, want factor_x 2 factor_y 0.5 and no factor", nu)
 	}
+	// ...but per-axis rounding noise on a uniform scale is NOT non-uniform: a 3x5 source
+	// at scale 2.33 renders 7x12 (2.33 vs 2.4 per axis) and still reports one factor
+	odd := writePNG(t, filepath.Join(dir, "odd.png"), 3, 5)
+	oddOut := writePNG(t, filepath.Join(dir, "odd-out.png"), 7, 12)
+	t.Setenv("UPSCALE_STUB_SRC", oddOut)
+	res = run(map[string]any{"image": odd, "scale": 2.33, "out": filepath.Join(dir, "o2o.png")})
+	if !res.OK {
+		t.Fatalf("want OK on the odd-size uniform scale, got %+v", res)
+	}
+	nu = nil
+	if err := json.Unmarshal(res.Data, &nu); err != nil {
+		t.Fatal(err)
+	}
+	if _, split := nu["factor_x"]; split || nu["factor"] != 2.33 {
+		t.Fatalf("odd-size uniform result = %v, want a single factor 2.33", nu)
+	}
 	t.Setenv("UPSCALE_STUB_SRC", eight)
 	// scale 2 → 8x8 expected, 8x8 written → OK with the size and the MEASURED factor
 	res = run(map[string]any{"image": src, "scale": 2.0, "out": filepath.Join(dir, "o3.png")})
