@@ -3505,6 +3505,10 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		ExemplarIDs:        meta.ExemplarIDs,
 		CacheBypass:        meta.CacheBypass,
 		CacheHitInLoop:     meta.CacheHitInLoop,
+		PrefillSteps:       meta.PrefillSteps,
+		PrefillTokens:      meta.PrefillTokens,
+		CacheTokens:        meta.CacheTokens,
+		PrefillMS:          meta.PrefillMS,
 	}
 }
 

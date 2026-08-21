@@ -85,6 +85,13 @@ type Entry struct {
 	// without this the share of the cache-hit rate the harness produced for
 	// itself is unrecoverable — and that rate is a gate.
 	CacheHitInLoop bool `json:"cache_hit_in_loop,omitempty"`
+	// Agent-loop prefill (T2-B). PrefillSteps present (>0) is what marks the row as
+	// MEASURED; a row without it made no observation, which is not the same as a row
+	// that observed zero prefill.
+	PrefillSteps  int     `json:"prefill_steps,omitempty"`
+	PrefillTokens int64   `json:"prefill_tokens,omitempty"`
+	CacheTokens   int64   `json:"cache_tokens,omitempty"`
+	PrefillMS     float64 `json:"prefill_ms,omitempty"`
 }
 
 // maxReasonLen bounds a recorded defer reason so a long upstream error can't

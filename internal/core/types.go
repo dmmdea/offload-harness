@@ -235,6 +235,23 @@ type Meta struct {
 	// on every call, forever, while the ledger showed a healthy run of cache
 	// misses and the hit-rate dashboard invited exactly the wrong diagnosis.
 	CacheBypass string `json:"cache_bypass,omitempty"`
+	// --- agent-loop prefill accounting (memory-frontier T2-B) ---
+	//
+	// The instrument that produces these shipped in 0.65.0 and works, but its output
+	// went nowhere durable: PrefillReport rode home on the in-process Result and on a
+	// local-agent stderr line, neither of which survives the call. So the question it
+	// exists to answer -- does the agent loop have a repeated prefix worth stabilising?
+	// -- still could not be answered from real traffic. These fields land it in the
+	// ledger, where every other measurement in this program accrues.
+	//
+	// PrefillSteps is the DISCRIMINATOR, not a statistic: it counts steps whose backend
+	// actually reported timings. Present (>0) means the rest were measured; absent means
+	// unmeasured. Without it, prefill_tokens:0 is ambiguous between "the server reused
+	// everything" and "nothing was ever observed" -- opposite conclusions.
+	PrefillSteps  int     `json:"prefill_steps,omitempty"`
+	PrefillTokens int64   `json:"prefill_tokens,omitempty"`
+	CacheTokens   int64   `json:"cache_tokens,omitempty"`
+	PrefillMS     float64 `json:"prefill_ms,omitempty"`
 	// CacheHitInLoop marks a cache hit served from an entry that was WRITTEN by
 	// the agent loop's in-loop offload (T2-D) rather than by a recorded,
 	// caller-facing call.
