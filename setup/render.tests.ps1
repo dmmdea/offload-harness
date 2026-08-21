@@ -111,7 +111,14 @@ if ($b26 -match '--cpu-moe')                                   { Ok 'ampere-8/mi
 if ($r.yaml -match '(?m)^\s{4}m26:\s*gemma4-26b-a4b\s*$' -and $r.yaml -match '(?m)^\s{4}interactive:.*\bm26\b') { Ok 'ampere-8/mid 26B is a matrix var referenced by the interactive set' } else { Bad 'ampere-8/mid 26B matrix membership' }
 if ($r.yaml -notmatch '__[A-Z0-9_]+__')                        { Ok 'ampere-8/mid no unsubstituted tokens' } else { Bad 'ampere-8/mid leftover tokens' }
 if ($r.verdict -and [int]$r.verdict.agent_ctx_tokens -eq 16384) { Ok 'ampere-8/mid agent_ctx_tokens=16384' } else { Bad 'ampere-8/mid agent_ctx_tokens' }
-if ($r.yaml -notmatch 'CUDA_MODULE_LOADING')                   { Ok 'ampere-8/mid NO Blackwell runtime env (H4 is blackwell-only)' } else { Bad 'ampere-8/mid unexpected Blackwell env' }
+# gpu_env on ampere-8 is INTENTIONAL as of the 2026-08-19 8GB hygiene pass (H3): the
+# reference box is a hybrid-graphics laptop, which is the exact failure class
+# _fields.gpu_env exists for -- CUDA can resolve the default device to -1 there, so the
+# tier pins CUDA_VISIBLE_DEVICES=0. That superseded the older 'H4 is blackwell-only'
+# rule this line used to assert, and the assertion was left behind, reddening main.
+# Inverted rather than deleted: the tier must still DECLARE its gpu_env, so a future
+# render that silently drops it is still caught.
+if ($r.yaml -match 'CUDA_VISIBLE_DEVICES=0' -and $r.yaml -match 'CUDA_MODULE_LOADING=LAZY') { Ok 'ampere-8/mid declares its gpu_env (H3 hybrid-graphics pin)' } else { Bad 'ampere-8/mid MISSING gpu_env (H3 regression)' }
 
 Write-Host "== ampere-8, ram_tier=low - 26B must DROP (no RAM path) =="
 $r = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-8' -RamTier 'low' -BigRam $false
