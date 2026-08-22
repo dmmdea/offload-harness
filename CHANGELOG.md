@@ -6,6 +6,23 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.78.0] - 2026-08-21
+
+### Changed — `upscale_model` seeded on every image-capable tier
+
+- Operator decision (2026-08-21): every tier that has an image route now seeds
+  `upscale_model: 4x-UltraSharp.pth` (64 MB, ComfyUI `upscale_models/`) — blackwell-16/32/2x16/48/72,
+  ampere-16, volta-16, ampere-8, blackwell-8, ampere-6, amd-rdna3, amd-rdna3-dgpu. A fresh install no
+  longer depends on the `videogen_upscale_model` fallback for stills; the three tiers with no image
+  route (amd-gcn, dual-gpu, cpu) stay unseeded and the route defers there by design. Seeded in the
+  BASE `config_seed` (ESRGAN is RAM-tier independent), so the 8 GB tiers carry it on low RAM too.
+- The route still needs a ComfyUI install on the box (the runner is the ComfyUI graph): on an
+  sd.cpp-primary tier without ComfyUI, `offload_status` shows the `comfyui` prereq missing and the
+  call defers. An sd.cpp arm for the upscale route (stable-diffusion.cpp has native ESRGAN support)
+  is a documented follow-up, not part of this seed.
+- Tier docs regenerated (`go generate .`), tier matrix xlsx regenerated from the seeded profiles
+  (ground truth updated first, per house rule).
+
 ## [0.77.0] - 2026-08-21
 
 ### Added — `offload_upscale_image` / `upscale-image`: ESRGAN enlargement as a first-class route

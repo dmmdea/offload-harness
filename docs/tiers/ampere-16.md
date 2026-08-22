@@ -36,6 +36,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 | `imagegen_family` | `hidream-o1` |
 | `imagegen_timeout_sec` | `3600` |
 | `imagegen_vae` | `builtin` |
+| `upscale_model` | `4x-UltraSharp.pth` |
 | `videogen_frames` | `81` |
 | `videogen_height` | `720` |
 | `videogen_text_encoder` | `umt5_xxl_fp16.safetensors` |
