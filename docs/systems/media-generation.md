@@ -166,8 +166,12 @@ names the fallback and the fix (pin the size, or use PNG/JPEG/WebP). The result 
 `factor_y` when a pinned size is non-uniform.
 `ImageUpscaleWithModel` tiles on OOM by itself, so there is no tile knob. It synthesizes detail, so
 it is an enlargement tool, not a faithful restore — an exact resample is `edit-image`'s `resize`.
-`upscale_script` ships as a default (the runner is generic, like `run_graph_script`); only the model
-is a binding, and a per-request `model` override (bare filename) works even on a box that binds none.
+`upscale_script` ships as a default (the runner is generic, like `run_graph_script`); the model is a
+binding, and since 0.78.0 every image-capable tier seeds `upscale_model: 4x-UltraSharp.pth` (the
+three tiers with no image route stay unseeded and defer). A per-request `model` override (a name
+relative to `upscale_models/`) works even on a box that binds none. The runner is the ComfyUI graph,
+so an sd.cpp-primary box without ComfyUI defers with the `comfyui` prereq missing — an sd.cpp arm
+(stable-diffusion.cpp has native ESRGAN support) is a documented follow-up.
 
 **Generative instruction edit** (`offload_edit_image_generative`, MCP-only — no CLI verb) is the
 third edit-shaped route, for changes that are global or diffuse and have no drawable region: "make

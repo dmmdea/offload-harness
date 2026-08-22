@@ -31,6 +31,7 @@
         "CUDA_MODULE_LOADING=LAZY"
       ],
       "config_seed": {
+        "upscale_model": "4x-UltraSharp.pth",
         "imagegen_family": "hidream-o1",
         "imagegen_ckpt": "hidream_o1_image_bf16.safetensors",
         "imagegen_vae": "builtin",
@@ -96,6 +97,7 @@
         "CUDA_MODULE_LOADING=LAZY"
       ],
       "config_seed": {
+        "upscale_model": "4x-UltraSharp.pth",
         "imagegen_family": "krea2",
         "imagegen_ckpt": "krea2_turbo_bf16.safetensors",
         "imagegen_vae": "qwen_image_vae.safetensors",
@@ -169,6 +171,7 @@
         "CUDA_MODULE_LOADING=LAZY"
       ],
       "config_seed": {
+        "upscale_model": "4x-UltraSharp.pth",
         "imagegen_family": "krea2",
         "imagegen_ckpt": "krea2_turbo_bf16.safetensors",
         "imagegen_vae": "qwen_image_vae.safetensors",
@@ -254,6 +257,7 @@
         "CUDA_MODULE_LOADING=LAZY"
       ],
       "config_seed": {
+        "upscale_model": "4x-UltraSharp.pth",
         "agent_model": "qwen3.8-27b",
         "agent_timeout_sec": 600,
         "imagegen_family": "krea2",
@@ -329,6 +333,7 @@
         "CUDA_MODULE_LOADING=LAZY"
       ],
       "config_seed": {
+        "upscale_model": "4x-UltraSharp.pth",
         "agent_model": "qwen3.8-27b",
         "agent_timeout_sec": 600,
         "imagegen_family": "krea2",
@@ -399,6 +404,7 @@
       "flash_attn": "on",
       "backend": "cuda",
       "config_seed": {
+        "upscale_model": "4x-UltraSharp.pth",
         "imagegen_family": "hidream-o1",
         "imagegen_ckpt": "hidream_o1_image_bf16.safetensors",
         "imagegen_vae": "builtin",
@@ -460,6 +466,7 @@
       "flash_attn": "on",
       "backend": "cuda",
       "config_seed": {
+        "upscale_model": "4x-UltraSharp.pth",
         "imagegen_family": "hidream-o1",
         "imagegen_ckpt": "hidream_o1_image_bf16.safetensors",
         "imagegen_vae": "builtin",
@@ -522,6 +529,7 @@
       "backend": "cuda",
       "gpu_env": ["CUDA_VISIBLE_DEVICES=0", "CUDA_MODULE_LOADING=LAZY"],
       "config_seed": {
+        "upscale_model": "4x-UltraSharp.pth",
         "agent_profile": "research"
       },
       "config_seed_ram_mid_high": {
@@ -582,6 +590,7 @@
         "CUDA_MODULE_LOADING=LAZY"
       ],
       "config_seed": {
+        "upscale_model": "4x-UltraSharp.pth",
         "agent_profile": "research"
       },
       "config_seed_ram_mid_high": {
@@ -648,6 +657,7 @@
       "flash_attn": "on",
       "backend": "cuda",
       "config_seed": {
+        "upscale_model": "4x-UltraSharp.pth",
         "imagegen_engine": "sdcpp",
         "sdcpp_bin": "__OFFLOAD_HOME__/sdcpp/sd-cli__EXE__",
         "sdcpp_model": "__OFFLOAD_HOME__/models/sdxl-turbo/stable-diffusion-xl-1.0-turbo-Q4_0.gguf",
@@ -705,6 +715,7 @@
       "flash_attn": "on",
       "backend": "vulkan",
       "config_seed": {
+        "upscale_model": "4x-UltraSharp.pth",
         "imagegen_engine": "sdcpp",
         "sdcpp_bin": "__OFFLOAD_HOME__/sdcpp/sd-cli__EXE__",
         "sdcpp_model": "__OFFLOAD_HOME__/models/z_image_turbo-Q8_0.gguf",
@@ -772,6 +783,7 @@
       "flash_attn": "on",
       "backend": "vulkan",
       "config_seed": {
+        "upscale_model": "4x-UltraSharp.pth",
         "imagegen_engine": "sdcpp",
         "sdcpp_bin": "__OFFLOAD_HOME__/sdcpp/sd-cli__EXE__",
         "sdcpp_model": "__OFFLOAD_HOME__/models/z_image_turbo-Q8_0.gguf",

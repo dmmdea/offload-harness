@@ -41,6 +41,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 | `imagegen_steps` | `8` |
 | `imagegen_timeout_sec` | `3600` |
 | `imagegen_vae` | `qwen_image_vae.safetensors` |
+| `upscale_model` | `4x-UltraSharp.pth` |
 | `videogen_audio_vae` | `ltx-2.5-audio-vae-bf16.safetensors` |
 | `videogen_family` | `ltx25` |
 | `videogen_fps` | `24` |

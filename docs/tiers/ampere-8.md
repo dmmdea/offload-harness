@@ -39,8 +39,13 @@ honestly serves text only.
 | `imagegen_timeout_sec` | `3600` |
 | `imagegen_vae` | `builtin` |
 
-It ships no unconditional `config_seed` — the RAM-gated overlay above is the whole
-media binding for this tier.
+The installer seeds this tier's media bindings (`config_seed`):
+
+| key | value |
+|---|---|
+| `upscale_model` | `4x-UltraSharp.pth` |
+
+`__OFFLOAD_HOME__` is replaced with the install root at render time.
 
 ## Installer-seeded config (non-media)
 

@@ -42,6 +42,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 | `sdcpp_model` | `__OFFLOAD_HOME__/models/z_image_turbo-Q8_0.gguf` |
 | `sdcpp_model_kind` | `diffusion` |
 | `sdcpp_vae` | `__OFFLOAD_HOME__/models/zimage_ae.safetensors` |
+| `upscale_model` | `4x-UltraSharp.pth` |
 | `vae_mode` | `cpu` |
 
 `__OFFLOAD_HOME__` is replaced with the install root at render time.

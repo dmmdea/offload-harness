@@ -40,6 +40,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 | `sdcpp_bin` | `__OFFLOAD_HOME__/sdcpp/sd-cli__EXE__` |
 | `sdcpp_model` | `__OFFLOAD_HOME__/models/sdxl-turbo/stable-diffusion-xl-1.0-turbo-Q4_0.gguf` |
 | `sdcpp_model_kind` | `checkpoint` |
+| `upscale_model` | `4x-UltraSharp.pth` |
 | `vae_mode` | `tiling` |
 
 `__OFFLOAD_HOME__` is replaced with the install root at render time.
