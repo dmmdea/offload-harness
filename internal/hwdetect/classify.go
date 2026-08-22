@@ -70,6 +70,11 @@ type Verdict struct {
 	// a tier served the 26B on a box with no RAM path for it, and the mid/high-only
 	// image seed never applied.
 	RAMTier string `json:"ram_tier"`
+	// Accelerators lists additive devices found BESIDE the GPU (ADR 0024), e.g.
+	// "hailo-8l". Classify never fills it — detection is a separate probe
+	// (DetectAccelerators) the installers run and merge, so a box with no NPU
+	// serialises exactly as before (omitempty).
+	Accelerators []string `json:"accelerators,omitempty"`
 }
 
 // RAM tier boundaries, in GB. A straight port of detect.ps1's Get-RamTier, asserted
@@ -192,4 +197,38 @@ func orUnknown(s string) string {
 		return "unknown arch"
 	}
 	return s
+}
+
+// AcceleratorsFromHailortcli classifies the Hailo device from hailortcli's own
+// output: `scan` must list at least one "Device:" line and `identify` must
+// report the 8L architecture. A full Hailo-8 is deliberately NOT matched — its
+// model-zoo HEFs are a different build (hailo8/ vs hailo8l/) and would be
+// rejected at load with an architecture mismatch.
+func AcceleratorsFromHailortcli(scanOut, identifyOut string) []string {
+	if !strings.Contains(scanOut, "Device:") {
+		return nil
+	}
+	for _, line := range strings.Split(identifyOut, "\n") {
+		k, v, ok := strings.Cut(line, ":")
+		if ok && strings.TrimSpace(k) == "Device Architecture" && strings.TrimSpace(v) == "HAILO8L" {
+			return []string{"hailo-8l"}
+		}
+	}
+	return nil
+}
+
+// DetectAccelerators probes for accelerators with an injected runner so the
+// decision stays pure and testable. run executes `hailortcli <args...>`; any
+// error (tool absent, driver down) means "no accelerator" — never a failure,
+// because a missing NPU is the normal case on most boxes.
+func DetectAccelerators(run func(args ...string) (string, error)) []string {
+	scan, err := run("scan")
+	if err != nil {
+		return nil
+	}
+	ident, err := run("fw-control", "identify")
+	if err != nil {
+		return nil
+	}
+	return AcceleratorsFromHailortcli(scan, ident)
 }

@@ -4,11 +4,25 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"os/exec"
+	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/hwdetect"
 	"github.com/dmmdea/offload-harness/internal/tierseed"
 )
+
+// hailortcliRun executes `hailortcli <args...>` for accelerator detection
+// (hwdetect.DetectAccelerators). A package var so tests can stand in a fake
+// device; the real runner's error (tool absent, driver down) is the normal
+// no-NPU case and DetectAccelerators treats it as "no accelerator".
+var hailortcliRun = func(args ...string) (string, error) {
+	out, err := exec.Command("hailortcli", args...).Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
 
 // `install detect` and `install plan` answer the two questions an install begins
 // with — what IS this machine, and what would an install do here — on any OS.
@@ -29,6 +43,7 @@ func runInstallDetect(args []string) error {
 
 	facts := hwdetect.Detect()
 	verdict := hwdetect.Classify(facts)
+	verdict.Accelerators = hwdetect.DetectAccelerators(hailortcliRun)
 
 	if *asJSON {
 		b, err := json.MarshalIndent(map[string]any{"facts": facts, "verdict": verdict}, "", "  ")
@@ -53,6 +68,9 @@ func runInstallDetect(args []string) error {
 	if verdict.BigRAM {
 		fmt.Println("  big_ram: true")
 	}
+	if len(verdict.Accelerators) > 0 {
+		fmt.Println("accel:   ", strings.Join(verdict.Accelerators, ", "))
+	}
 	return nil
 }
 
@@ -65,6 +83,7 @@ func runInstallPlan(args []string) error {
 
 	facts := hwdetect.Detect()
 	verdict := hwdetect.Classify(facts)
+	verdict.Accelerators = hwdetect.DetectAccelerators(hailortcliRun)
 	installHome := *home
 	if installHome == "" {
 		installHome = config.DefaultBase()

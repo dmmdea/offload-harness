@@ -136,6 +136,21 @@ function Get-RamTier {
   return 'min'
 }
 
+# Accelerators (ADR 0024): additive devices beside the GPU. Mirror of
+# internal/hwdetect.AcceleratorsFromHailortcli — change the Go rule FIRST, then
+# this. A missing hailortcli or a failed probe is "no accelerator", never an error.
+function Get-Accelerators {
+  $cli = Get-Command hailortcli -ErrorAction SilentlyContinue
+  if (-not $cli) { $cli = Get-Item 'C:\Program Files\HailoRT\bin\hailortcli.exe' -ErrorAction SilentlyContinue }
+  if (-not $cli) { return @() }
+  $exe = if ($cli.PSObject.Properties['Source']) { $cli.Source } else { $cli.FullName }
+  try { $scan = (& $exe scan 2>$null) -join "`n" } catch { return @() }
+  if ($scan -notmatch 'Device:') { return @() }
+  try { $ident = (& $exe fw-control identify 2>$null) -join "`n" } catch { return @() }
+  if ($ident -match '(?m)^\s*Device Architecture:\s*HAILO8L\s*$') { return @('hailo-8l') }
+  return @()
+}
+
 # Choose the arch-class profile id from (vendor, arch, vram, gpu_count, ram).
 # Returns @{ profile=<id>; big_ram=<bool> }. big_ram is only meaningful for the
 # dual-gpu profile (config #4 = the 128GB Optane variant) — detect cannot see the
@@ -496,6 +511,10 @@ if (@($gpuArchsAll).Count -eq 0) {
 $sel       = Get-Profile -Vendor $vendor -Arch $gpuArch -VramGb $vramGB -GpuCount $gpuCount -RamGb $ramGB -ArchsAll $gpuArchsAll
 $profileId = $sel.profile
 $bigRam    = [bool]$sel.big_ram
+# Accelerators beside the GPU (ADR 0024). OFFLOAD_ACCELERATORS overrides the probe
+# so installs can be tested/forced without a physical device on the bench.
+$accelerators = @(Get-Accelerators)
+if ($env:OFFLOAD_ACCELERATORS) { $accelerators = @($env:OFFLOAD_ACCELERATORS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
 # J1 guard: a large BIOS UMA carve-out can make an iGPU report >=12GB 'dedicated', which
 # would band it into the DISCRETE profile. The name says iGPU -> the UMA floor profile wins.
 if ($profileId -eq 'amd-rdna3-dgpu' -and (Test-AmdIgpuName -Name $gpuName)) {
@@ -542,11 +561,13 @@ if ($vendor -eq 'amd') {
 Write-Host "OS: windows | GPUs: $gpuNames"
 Write-Host "Vendor: $vendor | Arch: $gpuArch | GPUs(discrete): $gpuCount | Backend: $backend | Dedicated VRAM: ${vramGB}GB | RAM: ${ramGB}GB (tier=$ramTier) | Free disk: ${diskGB}GB on ${targetDrive}: (install target)"
 Write-Host "Profile: $profileId$(if ($bigRam) { ' (big_ram)' } else { '' })"
+Write-Host "Accelerators: $(if ($accelerators.Count) { $accelerators -join ', ' } else { 'none' })"
 $warnings | ForEach-Object { Write-Host "WARN: $_" }
 
 @{ os=$os; gpu_vendor=$vendor; gpu_name=$gpuName; gpu_arch=$gpuArch; gpu_count=$gpuCount;
    gpu_archs=@($gpuArchsAll);
    vram_dedicated_gb=$vramGB; ram_gb=$ramGB; ram_tier=$ramTier; profile=$profileId; big_ram=$bigRam;
+   accelerators=@($accelerators);
    cuda_driver=$cuda.driver_cuda; cuda_driver_version=$cuda.driver_version; cuda_toolkit=$cuda.toolkit_cuda;
    amd_adrenalin=$amdAdrenalin;
    disk_free_gb=$diskGB; backend=$backend; warnings=$warnings } | ConvertTo-Json -Compress
