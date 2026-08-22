@@ -6,7 +6,7 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.79.0] - 2026-08-21
+## [0.80.0] - 2026-08-21
 
 ### Added — `route: spread`, retry on a different seat, `delegate_remotes`; the agent-loop cap raised
 
@@ -26,6 +26,57 @@ Versioning: [SemVer](https://semver.org/).
   reconnaissance (the 27B planner hit "read_file is now DISABLED" twice in one day while doing what it
   was asked); the exact-repeat refusal remains the loop guard.
 - Docs: fleet-node.md gains "Placement routes and the retry"; coding-agent.md cap text; README row.
+
+## [0.79.0] - 2026-08-21
+
+### Added
+
+Four fixes with one theme: **stop discarding values the harness already computes.** Each closes
+a case where something is calculated on every call and thrown away, leaving a question
+unanswerable while the data flows past. Same defect class as the agent-prefill accrual; these
+are the remaining instances found by the memory-frontier Phase 2 re-aim pass.
+
+- **`agent_profile` on agent ledger rows.** Resolved in `runAgentTask` (from `contract.Profile`,
+  defaulting to `research`) and previously used to configure the loop and discarded. It matters
+  because profile is the largest measured lever on small seats — **0 → 72% recall on a 6 GB tier
+  came from changing nothing else** — so any prefill or quality figure aggregated across profiles
+  averages materially different configurations. Set **before `Loop.Run`** so the defer branches
+  carry it: a run that times out is when knowing its profile matters most. Records the
+  **resolved** name, so defaulted runs are not misattributed to the empty string.
+- **`labelDrops` counter on `labelAgreement`.** It previously returned silently whenever
+  `answersAgree` could not judge a candidate. That silence is not neutral: an unparseable
+  candidate is disproportionately an **extreme disagreement**, so dropping it quietly biases the
+  published agreement rate **upward** — in the direction that argues against acting. Exposed via
+  `LabelDrops()` so the rate can state its own coverage instead of implying it is total.
+- **`arm` on the delegation log**, from `OFFLOAD_DELEGATE_ARM`. An **enabler, not a convenience**:
+  the log is append-only and written concurrently by whatever sessions are running, so once arms
+  interleave unlabelled they cannot be separated afterwards — timestamps do not distinguish an
+  experiment from ordinary traffic. Empty for ordinary traffic, so existing rows read as *not part
+  of any arm* rather than as a missing value.
+- **Escalation-agreement view in `loupe`.** This reads a counterfactual that was **already running
+  in production and merely had no reader**: `confhead-labels.jsonl` records, at 1:1 coverage of
+  escalated rows, whether the entry tier agreed with the final tier. The Counterfactual-replay
+  gate was held for a month as "blocked on identity coverage" — it never was, and could not have
+  been: identity hashes are one-way, so the ledger could not replay an input at any coverage.
+  - The view **refuses to publish an unconditional flip rate.** Labels exist only for escalated
+    calls, and escalation is triggered by low confidence, so they are drawn from the calls most
+    likely to disagree — an **upper bound**. The unconditional rate is reported as
+    `insufficient_data` alongside the conditional one so the two cannot be confused.
+- **Gate reopen tripwires** (`internal/config/gate_tripwire_test.go`). Several Phase 2 gates were
+  closed on arguments that hold only while a specific default is off. Those arguments were written
+  down; the conditions that would invalidate them were enforced nowhere. Flipping `exemplar_shots`,
+  `shadow_enabled` or `knn_prefilter_enabled` now fails a test that **names the gate to reopen**.
+  It is a tripwire, not a lock — the correct response is to make the change, update the test, and
+  reopen that gate.
+
+### Fixed
+
+- The escalation view's entry-tier column is labelled **"as recorded"**, not "pooled". On the live
+  corpus the two distinct values are `gemma-4-e2b` and `gemma4-e2b`, which `llama-swap.yaml`
+  declares to be **one seat and its alias**, split cleanly by task. Calling that "pooled tiers"
+  would imply different models were averaged and manufacture a caveat that does not apply — the
+  entry tier was constant. It is still printed, because an alias masquerading as a second identity
+  is the same defect that makes the result-cache key machine-specific.
 
 ## [0.78.0] - 2026-08-21
 

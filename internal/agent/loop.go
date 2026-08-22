@@ -283,7 +283,7 @@ const defaultKeepRecent = 4
 // regardless of this cap; this cap catches near-duplicate repeats (e.g.
 // slightly reworded search queries) that the exact-match check would miss.
 //
-// 8, not 3 (0.79.0): at 3 the cap was the thing that starved legitimate work —
+// 8, not 3 (0.80.0): at 3 the cap was the thing that starved legitimate work —
 // a six-question repo reconnaissance needs more than three read_file calls on
 // DIFFERENT paths, and the 27B planner on the reference box hit "read_file is
 // now DISABLED" twice in one day while doing exactly what it was asked. The

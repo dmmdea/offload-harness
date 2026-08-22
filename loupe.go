@@ -119,6 +119,11 @@ type statsReport struct {
 	// Carries its own verdict and refuses to offer one below the sample floor.
 	Prefill PrefillReport `json:"agent_prefill"`
 
+	// --- the counterfactual that was already running, unreported ---
+	// Conditional on escalation by construction; the unconditional flip rate is reported
+	// as insufficient_data so the two cannot be confused.
+	Agreement AgreementReport `json:"escalation_agreement"`
+
 	// --- gate R2-16: does any NON-OBSOLETE failure class recur often enough to act on? ---
 	// Carries its own verdict so the gate cannot be quietly reinterpreted later.
 	Atlas AtlasReport `json:"failure_atlas"`
@@ -235,6 +240,14 @@ func runLoupe(args []string) error {
 
 	rep := statsReport{LedgerPath: cfg.LedgerPath, Rows: len(rows), WindowDays: *since}
 	rep.EmbedMemo = readEmbedMemoReport(cfg)
+
+	// Built BEFORE the empty-ledger early return, deliberately. Labels live in their OWN
+	// append-only sidecar and are a different population from the ledger: an empty ledger
+	// window says nothing about them. Previously `loupe --since 1` on a quiet day, or a
+	// freshly rotated ledger, suppressed weeks of labels entirely AND emitted a zero-value
+	// AgreementReport whose basis fields were empty strings -- publishing "" where a
+	// consumer keys on "insufficient_data".
+	rep.Agreement = readAgreement(cfg, sinceTS, *since)
 	if len(rows) == 0 {
 		return emitStats(rep, *asJSON)
 	}
@@ -571,6 +584,64 @@ func emitStats(rep statsReport, asJSON bool) error {
 			} else {
 				p("  %-22s %-18s n=%-5d insufficient_data", c.Task, c.Tier, c.N)
 			}
+		}
+	}
+	// The agreement view. Prints the DENOMINATOR and every caveat inline, because this
+	// number's danger is being quoted as "the flip rate" once it leaves this report.
+	{
+		ag := rep.Agreement
+		p("")
+		p("ESCALATION AGREEMENT  (a counterfactual already running in production)")
+		if ag.Rows == 0 {
+			// Distinct from "0% disagreement". Say which, and say it in the same words the
+			// JSON basis uses so the two surfaces cannot be read differently.
+			p("  no live-escalation labels in window — %s", ag.Basis)
+		} else {
+			rate := "n/a"
+			if ag.DisagreementRate != nil {
+				rate = fmt.Sprintf("%.1f%%", *ag.DisagreementRate)
+			}
+			win := "all time"
+			if ag.WindowDays > 0 {
+				win = fmt.Sprintf("last %dd", ag.WindowDays)
+			}
+			p("  %d labelled rows (%s): %d agreed / %d disagreed  -> %s DISAGREEMENT", ag.Rows, win, ag.Agreed, ag.Disagreed, rate)
+			if ag.FirstTS != "" {
+				p("  window %s .. %s across %d arrival burst(s)", safeDate(ag.FirstTS), safeDate(ag.LastTS), ag.Bursts)
+			}
+			printRows(p, "  disagreements by task", ag.ByTask)
+			// "as recorded", not "pooled": on the live corpus the two values are
+			// gemma-4-e2b and gemma4-e2b, which llama-swap.yaml declares to be ONE seat and
+			// its alias, split by task. Calling that pooled would manufacture a caveat.
+			printRows(p, "  entry tier AS RECORDED (alias spellings are one seat)", ag.Tiers)
+			p("  ^ CONDITIONAL ON ESCALATION — escalation is triggered by low confidence, so")
+			p("    these are the calls most likely to disagree. This is an UPPER bound.")
+			p("  ^ unconditional flip rate: %s", ag.UnconditionalBasis)
+		}
+		// The other writer, never merged. Its population is the exact complement.
+		if ag.ShadowRows > 0 {
+			sr := "n/a"
+			if ag.ShadowRate != nil {
+				sr = fmt.Sprintf("%.1f%%", *ag.ShadowRate)
+			}
+			p("  shadow-counterfactual rows (NON-escalated, summarize judged by cosine): %d, %s disagreement", ag.ShadowRows, sr)
+			p("    ^ reported separately ON PURPOSE — opposite population, different judge")
+		}
+		if ag.UnknownSourceRows > 0 {
+			ur := "n/a"
+			if ag.UnknownSourceRate != nil {
+				ur = fmt.Sprintf("%.1f%%", *ag.UnknownSourceRate)
+			}
+			p("  %d row(s) predate provenance stamping: %d disagreed -> %s", ag.UnknownSourceRows, ag.UnknownSourceDisagreed, ur)
+			p("    ^ kept OUT of both rates above because the writer is unknown, but rated here:")
+			p("      the rows are real measurements; only their provenance is missing. Check")
+			p("      whether shadow-label has ever run on this box before reading them as escalation-only.")
+		}
+		// Coverage. nil is unknown, not zero: an absent counter must not read as perfect.
+		if ag.UnparseableDrops != nil {
+			p("  judge coverage: %d unparseable candidate(s) dropped (bias is UPWARD)", *ag.UnparseableDrops)
+		} else {
+			p("  judge coverage: UNKNOWN (no drop counter beside the sidecar)")
 		}
 	}
 	// R2-16. The verdict line is the deliverable: this view exists to close itself.
