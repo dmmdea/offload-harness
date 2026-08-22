@@ -6,6 +6,30 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.83.0] - 2026-08-22
+
+### Fixed — fresh Windows installs never bound the media seats they rendered
+
+`install.ps1` Step 8 (the fresh-config path) is a parity copy of `tierseed.Resolve` that
+mirrored every seed layer EXCEPT the final one: `mediaseat.Bindings`, the sole writer of
+`vision_model`/`stt_model`. So a seat-declaring tier rendered its vision/STT seats into
+llama-swap.yaml while writing a config.json that never routed to them — `offload_vqa`/
+`offload_ocr`/`offload_transcribe` deferred "no route" with the seats sitting in the roster
+(field case: OptiPlex 7060 blackwell-8, 2026-08-22, wired by hand). New
+`Get-MediaSeatBindings` mirrors the Go rule (change `tierseed.Resolve` FIRST, then the copy)
+and merges as the last tier layer, before the accelerator seed. Closure-tested across every
+seat-declaring tier in `install-config-seed.test.ps1`.
+
+### Added — host-tool discovery for the complementary media routes (fresh config only)
+
+Best-effort, Windows-installer-only probing for the two host-tool routes that previously
+required hand-wiring: `gimp_console_path` (newest `Program Files\GIMP*\bin\gimp-console*.exe`,
+unversioned name preferred — versioned paths rot on GIMP updates) and `edit_python` (PATH
+python / `py -3`, Store-shim excluded, seeded ONLY when it can `import PIL` and no ComfyUI
+venv exists — a ComfyUI box keeps deriving it at runtime, and a Pillow-less python would make
+`edit_image` report CONFIGURED then fail at call time). Nothing found → config byte-identical;
+existing configs are never touched, as with every seed layer.
+
 ## [0.82.0] - 2026-08-22
 
 ### Added — hailo-8l accelerator (ADR 0024)

@@ -721,6 +721,77 @@ function Get-AcceleratorSeed {
   return [pscustomobject]$out
 }
 
+# Media-seat bindings: deliberate PARITY COPY of the FINAL layer of
+# internal/tierseed.Resolve (authoritative — change Go FIRST, then mirror here).
+# In Go the seat is the SOLE writer of the config key it binds
+# (mediaseat.Bindings, landing after every config_seed layer), which is what
+# guarantees the rendered llama-swap seat and the config key that routes to it
+# can never disagree. Step 8's raw-merge path mirrored every OTHER layer of
+# Resolve (config_seed, the RAM-conditional layer, the agent-seat derivation,
+# the accelerator seed) but never this one — so a fresh Windows install rendered
+# the yaml seats while writing a config with NO vision_model/stt_model, and
+# vqa/ocr/transcribe deferred "no route" while llama-swap named the seats
+# (field case: OptiPlex 7060 blackwell-8, 2026-08-22).
+function Get-MediaSeatBindings {
+  param($ProfileRow)
+  if (-not $ProfileRow -or -not $ProfileRow.PSObject.Properties['media_seats']) { return $null }
+  # Mirror of mediaseat.configKey: seat kind -> the config field it binds.
+  $keyByKind = @{ vision = 'vision_model'; stt = 'stt_model' }
+  $out = [ordered]@{}
+  foreach ($s in @($ProfileRow.media_seats)) {
+    if ($null -eq $s) { continue }
+    $k = $keyByKind[[string]$s.kind]
+    if ($k) { $out[$k] = [string]$s.name }
+    elseif ($s.kind) {
+      # A kind this mirror does not know = the parity copy is BEHIND Go, and
+      # silently skipping it re-creates the rendered-but-unrouted seat bug this
+      # function exists to fix — say so instead of hiding it.
+      Write-Host "      WARNING: unrecognized media seat kind '$($s.kind)' - update Get-MediaSeatBindings (parity copy of internal/mediaseat.Bindings)" -ForegroundColor Yellow
+    }
+  }
+  if ($out.Count -eq 0) { return $null }
+  return [pscustomobject]$out
+}
+
+# Host-tool seed for the complementary media routes (flatten_design / edit_image).
+# Which GIMP or python a BOX carries is machine state, not tier state, so there
+# is no Go/tier authority to mirror — this is best-effort DISCOVERY, applied only
+# on the fresh-config path like every other seed layer (an existing config.json
+# is never touched). Pure decision function; the impure probes live at the Step 8
+# call site so the rule stays unit-testable.
+function Get-HostToolSeed {
+  param([string]$GimpConsole, [string]$PythonExe, [bool]$PythonHasPil, [bool]$ComfyVenvPresent)
+  $out = [ordered]@{}
+  if ($GimpConsole) { $out['gimp_console_path'] = $GimpConsole.Replace('\', '/') }
+  # edit_python: the runtime derives it from <comfy_dir>/.venv when unset
+  # (mediaops.ResolveEditPython), so a box with a ComfyUI venv needs NO key.
+  # And seed only a python that can actually import PIL — a key naming a
+  # Pillow-less python makes the route report CONFIGURED and then fail at call
+  # time, which is worse than an honest NOT CONFIGURED.
+  if (-not $ComfyVenvPresent -and $PythonExe -and $PythonHasPil) {
+    $out['edit_python'] = $PythonExe.Replace('\', '/')
+  }
+  if ($out.Count -eq 0) { return $null }
+  return [pscustomobject]$out
+}
+
+# Locate a gimp-console executable: newest GIMP major first ("GIMP 3" sorts
+# after "GIMP 2"), and within one install prefer the UNVERSIONED exe name
+# (shortest) — versioned paths rot when GIMP updates in place.
+function Find-GimpConsole {
+  $roots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
+  $hits = @()
+  foreach ($r in $roots) {
+    $hits += @(Get-ChildItem -Path (Join-Path $r 'GIMP*\bin') -Filter 'gimp-console*.exe' -File -ErrorAction SilentlyContinue)
+  }
+  if (@($hits).Count -eq 0) { return '' }
+  $best = $hits |
+    Sort-Object @{ Expression = { $_.Directory.Parent.Name }; Descending = $true },
+                @{ Expression = { $_.Name.Length } } |
+    Select-Object -First 1
+  return $best.FullName
+}
+
 # ---------------------------------------------------------------------------
 # Agent planner seat derivation for the FRESH-config path - a deliberate PARITY
 # COPY of internal/tierseed.Resolve (Go), which is the AUTHORITATIVE rule.
@@ -1345,6 +1416,55 @@ Step 'harness config -> ~/.local-offload/config.json' `
     if ($agentSeat) {
       $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed ([pscustomobject]@{ agent_model = $agentSeat })
       Write-Host "      agent seat ($profileId): agent_model=$agentSeat (derived from resident_tier)" -ForegroundColor DarkGray
+    }
+    # Media-seat bindings: the LAST tier layer, exactly as in tierseed.Resolve —
+    # the seat is the sole writer of vision_model/stt_model (see
+    # Get-MediaSeatBindings). Without this a fresh install ships yaml seats the
+    # config never routes to.
+    $seatBind = Get-MediaSeatBindings -ProfileRow $profRow
+    if ($seatBind) {
+      $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $seatBind
+      Write-Host "      media seats ($profileId): $(@($seatBind.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ', ')" -ForegroundColor DarkGray
+    }
+    # Host-tool discovery (best-effort, fresh config only): gimp_console_path /
+    # edit_python for the flatten_design and edit_image routes. Probes are
+    # impure and live here; the seeding rule is Get-HostToolSeed (pure).
+    # Safe defaults FIRST: a mid-probe throw must leave Get-HostToolSeed callable
+    # with "nothing found" values, never abort an optional discovery step.
+    $gimpConsole = ''; $pyExe = ''; $pyHasPil = $false; $comfyVenv = $false
+    $prevEapProbe = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'   # native stderr must not kill the install
+    try {
+      $gimpConsole = Find-GimpConsole
+      $pyCmd = Get-Command python -ErrorAction SilentlyContinue
+      # The WindowsApps store shim answers `python` on clean boxes but is not a python.
+      if ($pyCmd -and $pyCmd.Source -and $pyCmd.Source -notmatch 'WindowsApps') { $pyExe = $pyCmd.Source }
+      if (-not $pyExe -and (Get-Command py -ErrorAction SilentlyContinue)) {
+        $resolved = & py -3 -c "import sys; print(sys.executable)" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $resolved) { $pyExe = [string]@($resolved)[0] }
+      }
+      $pyHasPil = $false
+      if ($pyExe) {
+        & $pyExe -c "import PIL" 2>$null | Out-Null
+        $pyHasPil = ($LASTEXITCODE -eq 0)
+      }
+      $comfyProbeDir = if ($env:COMFY_DIR) { $env:COMFY_DIR } else { 'C:/ComfyUI' }
+      $comfyVenv = Test-Path (Join-Path $comfyProbeDir '.venv/Scripts/python.exe')
+    } catch {
+      # Engine-level throws (a vanished interpreter, AV blocking process creation,
+      # a stale `py` registration) ignore $ErrorActionPreference — an optional
+      # discovery probe must never abort the install. Defaults above stay valid.
+      Write-Host "      host tools: probe failed, continuing without discovery ($($_.Exception.Message))" -ForegroundColor Yellow
+    } finally { $ErrorActionPreference = $prevEapProbe }
+    $hostSeed = Get-HostToolSeed -GimpConsole $gimpConsole -PythonExe $pyExe -PythonHasPil $pyHasPil -ComfyVenvPresent $comfyVenv
+    if ($hostSeed) {
+      $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $hostSeed
+      Write-Host "      host tools: $(@($hostSeed.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ', ')" -ForegroundColor DarkGray
+    }
+    if (-not $comfyVenv -and -not ($pyExe -and $pyHasPil)) {
+      $whyNoEdit = if ($pyExe) { "$pyExe has no Pillow (pip install pillow, then set edit_python)" }
+                   else        { 'no python found (install Python 3 + pip install pillow, or set edit_python)' }
+      Write-Host "      host tools: edit_image stays unbound - $whyNoEdit" -ForegroundColor Yellow
     }
     # Accelerator seed LAST (ADR 0024): merged after every tier layer so an
     # accelerator key can never be overwritten by the GPU tier's own seed.
