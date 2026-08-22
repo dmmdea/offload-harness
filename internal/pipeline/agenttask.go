@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
@@ -56,6 +57,11 @@ const (
 // runAgentTask executes one delegation contract. req.Params carries the
 // DECODED contract + the materialized context dir (fleetnode.buildAgentRun
 // owns decode/validation/materialization; nothing is re-validated here).
+// warnSeatPin gates the seat-pin-probe failure warning to once per process —
+// the same loud-once posture as the delegate corpus-loss warning: the failure
+// matters to an operator, repeating it per run is noise.
+var warnSeatPin sync.Once
+
 func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
 	// Params shape errors are internal wiring bugs (this task type is only
 	// reachable through buildAgentRun), so they are honest job-level ERRORS —
@@ -254,6 +260,15 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	if pin, ok := agent.ProbeSeatPin(context.Background(), p.cfg.Endpoint, seat); ok {
 		wire.SeatConfigSHA256 = pin.SHA256
 		wire.SeatConfigBasis = pin.Basis
+	} else {
+		// LOUD-once (the delegate corpus-loss posture): this run SERVED — real
+		// tokens were spent and its row is exactly what a paired experiment
+		// scores — so a silent pin failure would only surface at analysis
+		// time, as a pile of unpinned served rows, when the operator can no
+		// longer restart the run or fix the endpoint. Results unaffected.
+		warnSeatPin.Do(func() {
+			log.Printf("agent task: seat-pin probe of %s/%s failed after a served run; seat_config_* will be ABSENT on such rows until it recovers (results unaffected, but the rows cannot enter a paired experiment)", p.cfg.Endpoint, seat)
+		})
 	}
 
 	if res.StopReason == "budget" {

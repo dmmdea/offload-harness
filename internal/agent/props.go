@@ -136,6 +136,23 @@ func ProbeSeatPin(ctx context.Context, base, model string) (SeatPin, bool) {
 	if payload.DGS.NCtx <= 0 {
 		return SeatPin{}, false
 	}
+	// build_info and chat_template are REQUIRED discriminators, not optional
+	// decoration: an answer missing either (an older llama.cpp build, a proxy
+	// mangling the payload) would hash the empty string, and two DIFFERENT
+	// builds both missing the field would then produce the SAME pin — a
+	// produced value that is wrong, the worse failure mode. No pin beats a
+	// pin that can falsely say "same config". Every seat on this fleet
+	// reports both (verified live on both node classes).
+	// build_info and chat_template are REQUIRED discriminators, not optional
+	// decoration: an answer missing either (an older llama.cpp build, a proxy
+	// mangling the payload) would hash the empty string, and two DIFFERENT
+	// builds both missing the field would then produce the SAME pin — a
+	// produced value that is wrong, the worse failure mode. No pin beats a
+	// pin that can falsely say "same config". Every seat on this fleet
+	// reports both (verified live on both node classes).
+	if payload.BuildInfo == "" || payload.ChatTemplate == "" {
+		return SeatPin{}, false
+	}
 
 	tmplSHA := ""
 	if payload.ChatTemplate != "" {

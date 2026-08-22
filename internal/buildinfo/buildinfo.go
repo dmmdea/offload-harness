@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"log"
 	"os"
 	"sync"
 )
@@ -43,17 +44,29 @@ var (
 // other.)
 func BuildSHA256() string {
 	buildOnce.Do(func() {
+		// Failures are LOUD-once (the delegate corpus-loss posture): sync.Once
+		// latches whatever happens here for the process lifetime, so a
+		// transient failure — an AV lock on the exe at startup, a slow mount —
+		// silently disables build-hash pinning on EVERY row a long-lived
+		// process ever writes. Absent-with-a-logged-why is honest; absent
+		// indistinguishable from "pre-0.81 binary" is a lost diagnostic.
+		fail := func(stage string, err error) {
+			log.Printf("buildinfo: executable self-hash failed (%s: %v); harness_build_sha256 will be ABSENT on every row this process writes — restart to retry", stage, err)
+		}
 		exe, err := os.Executable()
 		if err != nil {
+			fail("resolve", err)
 			return
 		}
 		f, err := os.Open(exe)
 		if err != nil {
+			fail("open", err)
 			return
 		}
 		defer f.Close()
 		h := sha256.New()
 		if _, err := io.Copy(h, f); err != nil {
+			fail("read", err)
 			return
 		}
 		buildSHA = hex.EncodeToString(h.Sum(nil))

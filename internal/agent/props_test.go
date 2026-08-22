@@ -148,6 +148,25 @@ func TestProbeSeatPinRefusals(t *testing.T) {
 		t.Error("dead endpoint produced a pin")
 	}
 
+	// An answer MISSING a required discriminator (older llama.cpp build, a
+	// proxy mangling the payload): two different builds both missing
+	// build_info would hash IDENTICALLY — a pin that can falsely say "same
+	// config" — so the probe must refuse rather than pin.
+	noBuild := propsFixture()
+	noBuild["build_info"] = ""
+	srvNB := propsServer(t, "seat-a", noBuild)
+	if _, ok := ProbeSeatPin(context.Background(), srvNB.URL, "seat-a"); ok {
+		t.Error("empty build_info produced a pin — two different builds could pair")
+	}
+	srvNB.Close()
+	noTmpl := propsFixture()
+	noTmpl["chat_template"] = ""
+	srvNT := propsServer(t, "seat-a", noTmpl)
+	if _, ok := ProbeSeatPin(context.Background(), srvNT.URL, "seat-a"); ok {
+		t.Error("empty chat_template produced a pin — two different templates could pair")
+	}
+	srvNT.Close()
+
 	// Non-JSON body.
 	srvHTML := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("<html>proxy error</html>"))
