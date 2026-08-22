@@ -33,6 +33,7 @@ code, treat everything else as background.
 | [0021](0021-one-renderer-the-installers-are-wrappers.md) | Accepted | One renderer: the installers are wrappers, not renderers |
 | [0022](0022-escalation-repacks-from-the-original.md) | Accepted | The escalation boundary repacks from the original; the cache key is the logical request |
 | [0023](0023-agent-lane-tailnet-auth-and-locality.md) | Accepted | The agent lane is tailnet-only, bearer-gated, quality-first-placed, and hop-limited |
+| [0024](0024-accelerators-are-additive-to-the-gpu-tier.md) | Accepted | Accelerators are additive to the GPU tier |
 
 
 ## Lifecycle
