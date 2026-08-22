@@ -23,6 +23,8 @@ where the code lives.
   the GPU lifecycle and model bindings
 - [systems/fleet-node.md](systems/fleet-node.md) — `fleet-serve` / `fleet-measure`: the node contract,
   job semantics, VRAM sampling
+- [systems/accelerators.md](systems/accelerators.md) — devices beside the GPU tier (hailo-8l NPU):
+  detection, seeding, the on-demand sidecar, tool ownership
 - [systems/setup-installer.md](systems/setup-installer.md) — hardware detection, profiles, serving
   templates, the install runbook
 - [systems/printed-clis.md](systems/printed-clis.md) — the `tools/` printed CLIs: separate Go

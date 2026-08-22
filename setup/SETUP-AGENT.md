@@ -549,6 +549,25 @@ pinned version — so bumping a pin forces exactly that component to refresh. Th
 `$PINNED` table at the top of `setup\install.ps1` (URLs + sizes) and the model list. A partial
 install can be resumed safely — completed components SKIP on the next run.
 
+### Accelerators (hailo-8l)
+
+Accelerators are additive devices beside the GPU tier (ADR 0024;
+`docs/systems/accelerators.md`). Detection is automatic (`hailortcli` probe); two env
+overrides matter:
+
+- `$env:HAILO_HOME` — the Hailo repo checkout `__HAILO_HOME__` expands to in the seeded
+  `hailo_sidecar_cmd`. Default: `<OFFLOAD_HOME>\hailo`. Set it BEFORE running install when the
+  repo lives elsewhere.
+- `$env:OFFLOAD_ACCELERATORS` — comma-separated ids replacing the hardware probe
+  (e.g. `'hailo-8l'`), for testing or forcing an install without the device on the bench.
+
+**An EXISTING `~\.local-offload\config.json` is never touched by the installer** (it prints
+SKIP). On an already-installed box, hand-seed these exact keys into the existing config —
+`accelerators`, `hailo_endpoint`, `hailo_sidecar_cmd`, `hailo_timeout_sec`, `hailo_idle_sec` —
+and append `"accelerators": ["hailo-8l"]` to `installed.json` so `/fleet/health` advertises
+the device. Values: see the `accelerators.hailo-8l.config_seed` block in
+`setup/templates/profiles.json` (back both files up first).
+
 ---
 
 ## Step 2 — selftest (the integrity gate)

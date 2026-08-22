@@ -16,6 +16,27 @@
     "media_seats": "ALIAS-backed media capabilities this tier serves, rendered into BOTH the llama-swap models map and the harness config binding that routes to them (internal/mediaseat). Each seat: kind (vision|stt), name (the llama-swap model id AND the binding value), aliases, model/mmproj/vad_model (relative to the models dir), bin + lib_dir for a seat that is not llama-server (may carry __OFFLOAD_HOME__/__EXE__), ctx_size (vision runs its own smaller window), residency (swappable|resident - a ROLE, since group names are per-template), ttl. A tier declaring NO seat leaves vision_model/stt_model empty and the route honestly defers. FILE-backed media (image/video/music) is NOT here - those are spawn-per-job subprocesses under the GPU lease, seeded via config_seed and derived by internal/mediacap.",
     "notes": "operator-facing caveats."
   },
+  "_accelerator_fields": {
+    "kind": "npu — the only kind today. An accelerator is ADDITIVE to a box's GPU tier (ADR 0024): `profile` stays one string and `accelerators` lists what rides beside it.",
+    "owns": "the offload_* capabilities this accelerator serves EXCLUSIVELY when present; the GPU tier keeps everything else (VQA/description stay on the VLM; OCR stays GPU-primary with engine:npu as the caller's explicit fast path).",
+    "config_seed": "config.json keys merged AFTER the GPU tier's seed (internal/tierseed.ResolveAccelerators). __HAILO_HOME__ expands to the Hailo repo checkout (installer env HAILO_HOME, default <OFFLOAD_HOME>/hailo).",
+    "detect": "how detect.ps1 / hwdetect recognise the device — documentation of the rule implemented in code."
+  },
+  "accelerators": {
+    "hailo-8l": {
+      "kind": "npu",
+      "owns": ["face_detect", "face_embed", "object_detect", "person_embed", "depth", "enhance_low_light", "image_embed"],
+      "detect": "hailortcli scan lists a device AND hailortcli fw-control identify reports 'Device Architecture: HAILO8L'",
+      "config_seed": {
+        "accelerators": ["hailo-8l"],
+        "hailo_endpoint": "http://127.0.0.1:18813",
+        "hailo_sidecar_cmd": "__HAILO_HOME__/hailo-http.cmd",
+        "hailo_timeout_sec": 60,
+        "hailo_idle_sec": 300
+      },
+      "notes": "Hailo-8L M.2 (HM21LB1C2KAE), HailoRT 4.24.0 + model zoo v2.19.0 hailo8l HEFs — the current matched pair (5.x is the Hailo-10/15 line). Sidecar = harness-spawned on demand over loopback HTTP, self-exits idle (operator decision 2026-08-22: no scheduler, clean box). Measured on the OptiPlex 7060: ArcFace same-person 0.853 vs different ≤0.106; YOLOv8s on-chip NMS; TinyCLIP-61M 512-d. Windows cannot see the device as an NPU (no MCDM driver) — irrelevant to this route."
+    }
+  },
   "profiles": {
     "blackwell-16": {
       "ctx_size": 32768,

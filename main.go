@@ -2142,6 +2142,9 @@ func runFleetServe(args []string) error {
 		},
 		GpuVendor: prov.Vendor,
 		GpuArch:   prov.Arch,
+		// ADR 0024: the manifest's additive-device list, advertised verbatim so
+		// a delegator can route NPU-owned work here.
+		Accelerators: info.Accelerators,
 		// The agent lane's tokenless-listener refusal keys on where the bind
 		// actually landed (the resolved listen address), not on the
 		// --listen-trusted-network permission flag — a trusted-network flag on

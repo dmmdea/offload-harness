@@ -6,6 +6,41 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.82.0] - 2026-08-22
+
+### Added — hailo-8l accelerator (ADR 0024)
+
+Accelerators are ADDITIVE to the GPU tier: `profile` stays the one tier id, and
+`accelerators: []` lists devices beside it. First device: the Hailo-8L M.2 NPU, served through
+an on-demand loopback HTTP sidecar (port 18813) the harness spawns and that self-exits idle.
+Everywhere the list is empty, tool REGISTRATION is unchanged — no tool is added or removed —
+with one universal exception: `offload_ocr`'s schema gains an optional `engine` parameter
+(`gpu`/`npu` enum) on every box.
+
+- **Declaration + matrix**: `setup/templates/profiles.json` gains an `accelerators` map beside
+  `profiles` — per device: `kind`, exclusively-`owns` capability list, detection rule,
+  `config_seed`; the hardware/tier matrix gains an Accelerators sheet.
+- **Config**: `accelerators`, `hailo_endpoint`, `hailo_sidecar_cmd`, `hailo_timeout_sec`,
+  `hailo_idle_sec` keys (defaults inert) + `Config.HasAccelerator` — THE registration gate.
+- **Detection**: `hwdetect.DetectAccelerators` (Go) / `Get-Accelerators` (detect.ps1) —
+  `hailortcli scan` + `fw-control identify` → `Device Architecture: HAILO8L`; a full Hailo-8
+  deliberately does not match (different HEF build). `OFFLOAD_ACCELERATORS` overrides the
+  probe for benches without the device.
+- **Seeding**: `tierseed.ResolveAccelerators` (authority; `Get-AcceleratorSeed` is the
+  install.ps1 parity copy) merges accelerator seeds AFTER the tier seed with `__HAILO_HOME__`
+  expansion (installer env `HAILO_HOME`, default `<OFFLOAD_HOME>/hailo`).
+- **Installer + manifest + fleet**: install detects, seeds, and writes `accelerators` into
+  `installed.json`; `fleet-serve` advertises the list in `/fleet/health` so a delegator can
+  route NPU-owned work to the box.
+- **`internal/hailoclient`**: loopback client + on-demand `Sidecar` (spawn once, shared across
+  concurrent first calls, poll `/health`, idle self-exit; a 200 `{"error":true,...}` is a
+  structured result, not a transport error).
+- **MCP tools**: 7 NPU tools registered only on a box listing the device —
+  `offload_face_detect`, `offload_face_embed`, `offload_object_detect`,
+  `offload_person_embed`, `offload_depth`, `offload_enhance_low_light`,
+  `offload_image_embed` — plus `offload_ocr engine:"npu"` (explicit caller-selected PaddleOCR
+  path; GPU stays primary) and an `offload_status.accelerators` block whose health probe never
+  spawns the sidecar. NPU calls are not in the savings ledger in v1 (recorded follow-up).
 ## [0.81.0] - 2026-08-22
 
 ### Added — A1 config pinning for the delegate lane; `arm` on the ledger row; prefill on the wire result

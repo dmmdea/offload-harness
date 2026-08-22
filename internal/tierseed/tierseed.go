@@ -50,6 +50,8 @@ type Options struct {
 	GOOS string
 	// RAMTier selects the optional config_seed_ram_mid_high overlay ("mid"/"high").
 	RAMTier string
+	// HailoHome is the Hailo repo checkout __HAILO_HOME__ expands to.
+	HailoHome string
 }
 
 // vaeArgs maps the declared vae_mode to the sd.cpp flag it stands for. Free-text
@@ -73,30 +75,51 @@ type Profile struct {
 	MediaSeats []mediaseat.Seat `json:"media_seats"`
 }
 
-type profilesDoc struct {
-	Profiles map[string]Profile `json:"profiles"`
+// Doc is the whole profiles.json document this package reads: the GPU tier table
+// plus the additive accelerators table (ADR 0024).
+type Doc struct {
+	Profiles     map[string]Profile     `json:"profiles"`
+	Accelerators map[string]Accelerator `json:"accelerators"`
 }
 
 // Load reads the profile table from a repo root.
 func Load(root string) (map[string]Profile, error) {
-	raw, err := os.ReadFile(filepath.Join(root, "setup", "templates", "profiles.json"))
+	d, err := LoadDoc(root)
 	if err != nil {
 		return nil, err
 	}
-	return Parse(raw)
+	return d.Profiles, nil
+}
+
+// LoadDoc reads the whole document (profiles + accelerators) from a repo root.
+func LoadDoc(root string) (Doc, error) {
+	raw, err := os.ReadFile(filepath.Join(root, "setup", "templates", "profiles.json"))
+	if err != nil {
+		return Doc{}, err
+	}
+	return ParseDoc(raw)
 }
 
 // Parse reads the profile table from bytes — the install case, where the table is
 // embedded in the binary because the machine has no checkout.
 func Parse(raw []byte) (map[string]Profile, error) {
-	var d profilesDoc
-	if err := json.Unmarshal(raw, &d); err != nil {
-		return nil, fmt.Errorf("profiles.json: %w", err)
-	}
-	if len(d.Profiles) == 0 {
-		return nil, fmt.Errorf("profiles.json has no profiles — the schema moved")
+	d, err := ParseDoc(raw)
+	if err != nil {
+		return nil, err
 	}
 	return d.Profiles, nil
+}
+
+// ParseDoc reads the whole document from bytes.
+func ParseDoc(raw []byte) (Doc, error) {
+	var d Doc
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return Doc{}, fmt.Errorf("profiles.json: %w", err)
+	}
+	if len(d.Profiles) == 0 {
+		return Doc{}, fmt.Errorf("profiles.json has no profiles — the schema moved")
+	}
+	return d, nil
 }
 
 // Resolve renders one tier's seed for a target machine: overlay applied, tokens
@@ -171,6 +194,60 @@ func Resolve(p Profile, id string, opt Options) (map[string]any, error) {
 	// config key that routes to it, and the two cannot disagree.
 	for k, v := range mediaseat.Bindings(p.MediaSeats) {
 		out[k] = v
+	}
+	return out, nil
+}
+
+// Accelerator is one profiles.json `accelerators` entry: an additive device
+// beside the GPU tier (ADR 0024). Its seed merges AFTER the tier's own seed.
+type Accelerator struct {
+	Kind       string         `json:"kind"`
+	Owns       []string       `json:"owns"`
+	ConfigSeed map[string]any `json:"config_seed"`
+	Notes      string         `json:"notes"`
+}
+
+// ResolveAccelerators merges the seeds of the listed accelerator ids, validates
+// every key against config.Config, and expands __HAILO_HOME__ (plus the usual
+// __OFFLOAD_HOME__/__EXE__). An id with no entry is an authoring error — an
+// installer that detected a device the table does not describe must say so.
+//
+// This function is the single authority on the rule; install.ps1 carries a
+// PowerShell parity copy for the no-Go-binary path — change it here first.
+func ResolveAccelerators(accs map[string]Accelerator, ids []string, opt Options) (map[string]any, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	merged := map[string]any{}
+	for _, id := range ids {
+		a, ok := accs[id]
+		if !ok {
+			return nil, fmt.Errorf("accelerator %q detected but not declared in profiles.json accelerators", id)
+		}
+		for k, v := range a.ConfigSeed {
+			merged[k] = v
+		}
+	}
+	if err := validate(merged, "", "accelerators:"+strings.Join(ids, "+")); err != nil {
+		return nil, err
+	}
+	goos := opt.GOOS
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	exe := ""
+	if goos == "windows" {
+		exe = ".exe"
+	}
+	home := strings.TrimRight(strings.ReplaceAll(opt.Home, `\`, "/"), "/")
+	hailoHome := strings.TrimRight(strings.ReplaceAll(opt.HailoHome, `\`, "/"), "/")
+	out := map[string]any{}
+	for k, v := range merged {
+		ev := expand(v, home, exe)
+		if s, ok := ev.(string); ok {
+			ev = strings.ReplaceAll(s, "__HAILO_HOME__", hailoHome)
+		}
+		out[k] = ev
 	}
 	return out, nil
 }

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -21,6 +22,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/embedmemo"
+	"github.com/dmmdea/offload-harness/internal/hailoclient"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
@@ -35,6 +37,10 @@ type Server struct {
 	// resolves to p.RunAgentContract at call time; tests inject a fake so the
 	// handler is exercisable without a live planner.
 	localAgent delegate.LocalRunner
+	// hailo is the lazily-built accelerator lane (ADR 0024): one Sidecar shared
+	// by every NPU tool so concurrent first calls share a single spawn.
+	hailo     *hailoclient.Sidecar
+	hailoOnce sync.Once
 }
 
 func New(p *pipeline.Pipeline) *Server { return &Server{p: p} }
@@ -76,7 +82,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// + which media engines this machine has + the (only) remote surface.
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_status",
-		Description: "Discover this harness's capability — call this FIRST when inspecting what the harness can do. Returns {local:{endpoint, roster{workhorse,agent,triage,escalation,reasoning,vision,ocr,stt,stt_hq,embed}, served_now[...] (live model ids from the LOCAL llama-swap endpoint)}, media:{...this machine's configured generation engines}, remote:{nim_endpoint, nim_default_model, nim_key_present}}. Every offload_* tool except offload_nim runs on the LOCAL models in the roster (free, on-box, no cloud); offload_nim is the ONLY remote/cloud surface. An empty roster entry means that capability defers on this machine.",
+		Description: "Discover this harness's capability — call this FIRST when inspecting what the harness can do. Returns {local:{endpoint, roster{workhorse,agent,triage,escalation,reasoning,vision,ocr,stt,stt_hq,embed}, served_now[...] (live model ids from the LOCAL llama-swap endpoint)}, media:{...this machine's configured generation engines}, remote:{nim_endpoint, nim_default_model, nim_key_present}, accelerators:{...} (present only when this box lists an accelerator device, e.g. hailo-8l: its endpoint, sidecar config, owned tools and a live health probe)}. Every offload_* tool except offload_nim runs LOCAL — the GPU roster or a listed accelerator (free, on-box, no cloud); offload_nim is the ONLY remote/cloud surface. An empty roster entry means that capability defers on this machine.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
 	}, s.handleStatus)
 
@@ -137,7 +143,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_ocr",
 		Description: "Transcribe ALL text in an IMAGE on a free local vision model (OCR). image is a local file path or a data:image/... URI. Returns {text} with the transcribed text in reading order; if it can't transcribe confidently it returns deferred:true and you should read the image yourself.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local image file path or a data:image/...;base64 URI"}},"required":["image"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local image file path or a data:image/...;base64 URI"},"engine":{"type":"string","enum":["gpu","npu"],"description":"gpu (default): the local vision model; npu: the Hailo-8L PaddleOCR path when this box has the accelerator (fast batch transcription)"}},"required":["image"]}`),
 	}, s.handleOCR)
 
 	srv.AddTool(&mcp.Tool{
@@ -232,6 +238,26 @@ func (s *Server) buildServer(version string) *mcp.Server {
 		}, s.handleAgentDelegate)
 	}
 
+	// Accelerator tools (ADR 0024): registered ONLY when the box lists the
+	// device, so tools/list is byte-identical without it — the same pin as
+	// agent_delegate. Each maps 1:1 to a sidecar tool; ownership is exclusive
+	// (the GPU VLM never serves these; see docs/systems/accelerators.md).
+	if s.p != nil && s.p.Cfg().HasAccelerator("hailo-8l") {
+		type npuTool struct{ name, sidecar, desc, schema string }
+		img := `"image_path":{"type":"string","description":"local image file path (JPEG/PNG)"}`
+		for _, t := range []npuTool{
+			{"offload_face_detect", "face_detect", "Detect faces in an image on the LOCAL Hailo-8L NPU (free, on-box, ~300 FPS). Returns {faces:[{x,y,w,h,score,kps}],count}; kps = 5 landmarks (eyes, nose, mouth corners) in image pixels.", `{"type":"object","properties":{` + img + `},"required":["image_path"]}`},
+			{"offload_face_embed", "face_embed", "Face IDENTITY vectors on the LOCAL Hailo-8L NPU: every face -> a 512-d ArcFace embedding. Cosine similarity between two is the identity score (same person ~0.5+, different ~0.3-). Use to cluster who appears where across a project, no cloud. Returns {faces:[{x,y,w,h,score,kps,embedding}],count}.", `{"type":"object","properties":{` + img + `,"max_faces":{"type":"integer","description":"strongest-score faces to embed (default 16)"}},"required":["image_path"]}`},
+			{"offload_object_detect", "object_detect", "Detect the 80 COCO object classes (person, car, dog, laptop, ...) on the LOCAL Hailo-8L NPU (YOLOv8s, on-chip NMS). Returns {objects:[{label,class_id,x,y,w,h,score}],count} sorted by score.", `{"type":"object","properties":{` + img + `,"score_threshold":{"type":"number","description":"minimum score (default 0.3)"}},"required":["image_path"]}`},
+			{"offload_person_embed", "person_embed", "Person RE-IDENTIFICATION vectors on the LOCAL Hailo-8L NPU (YOLOv8s person boxes -> OSNet 512-d). Works with NO visible face (clothing/body) — tracks the same person across shots. Returns {people:[{x,y,w,h,score,embedding}],count}.", `{"type":"object","properties":{` + img + `},"required":["image_path"]}`},
+			{"offload_depth", "depth", "Preview-grade relative depth map on the LOCAL Hailo-8L NPU (Depth-Anything-V2, 224 px). Writes an 8-bit PNG (bright = near). Returns {depth_path,min,max,mean}. Shot analysis / parallax previews, not a production depth pass.", `{"type":"object","properties":{` + img + `,"out_path":{"type":"string","description":"output PNG (default: next to the input as <name>.depth.png)"}},"required":["image_path"]}`},
+			{"offload_enhance_low_light", "enhance_low_light", "Brighten an under-exposed frame on the LOCAL Hailo-8L NPU (Zero-DCE) at the original resolution. Returns {enhanced_path,width,height}. Preview-grade.", `{"type":"object","properties":{` + img + `,"out_path":{"type":"string","description":"output PNG (default: <name>.enhanced.png)"}},"required":["image_path"]}`},
+			{"offload_image_embed", "embed", "512-d IMAGE embedding on the LOCAL Hailo-8L NPU (TinyCLIP ViT-61M) for similarity search / clustering of frames and thumbnails. Returns {embedding,dim}.", `{"type":"object","properties":{` + img + `},"required":["image_path"]}`},
+		} {
+			srv.AddTool(&mcp.Tool{Name: t.name, Description: t.desc, InputSchema: json.RawMessage(t.schema)}, s.handleHailoTool(t.sidecar))
+		}
+	}
+
 	return srv
 }
 
@@ -261,7 +287,7 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 	local := map[string]any{
 		"endpoint": cfg.Endpoint,
 		"roster":   roster,
-		"note":     "every offload_* tool except offload_nim runs on these LOCAL models — free, on-box, no cloud; an empty entry means that capability defers on this machine",
+		"note":     "every offload_* tool except offload_nim runs on LOCAL models — the GPU roster or a listed accelerator — free, on-box, no cloud; an empty entry means that capability defers on this machine",
 	}
 	if ids, err := probeServedModels(ctx, cfg.Endpoint); err != nil {
 		local["served_probe_error"] = err.Error()
@@ -290,6 +316,26 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 		"nim_default_model": cfg.NIMModel,
 		"nim_key_present":   nimclient.KeyForBase(cfg.NIMEndpoint) != "",
 		"note":              "offload_nim is the ONLY remote/cloud tool on this server (opt-in escalation)",
+	}
+
+	// Accelerators (ADR 0024): reported only when listed; a quick health probe
+	// that NEVER spawns the sidecar — status must stay side-effect free.
+	var accel map[string]any
+	if cfg.HasAccelerator("hailo-8l") {
+		pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		entry := map[string]any{
+			"endpoint":               cfg.HailoEndpoint,
+			"sidecar_cmd_configured": cfg.HailoSidecarCmd != "",
+			"owns":                   []string{"face_detect", "face_embed", "object_detect", "person_embed", "depth", "enhance_low_light", "image_embed"},
+			"note":                   "on-demand loopback sidecar; the first NPU call starts it (cold ~2 s + HEF load), it exits itself after hailo_idle_sec idle",
+		}
+		if h, err := hailoclient.New(cfg.HailoEndpoint, 2*time.Second).Health(pctx); err != nil {
+			entry["health_error"] = err.Error() + " (not running — normal between uses)"
+		} else {
+			entry["health"] = h
+		}
+		accel = map[string]any{"hailo-8l": entry}
 	}
 
 	// T2-C: the embed memo's live counters. This server owns the bbolt handle, so
@@ -376,7 +422,11 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 		}
 	}
 
-	return jsonResult(map[string]any{"local": local, "media": media, "remote": remote, "reuse": reuse})
+	payload := map[string]any{"local": local, "media": media, "remote": remote, "reuse": reuse}
+	if accel != nil {
+		payload["accelerators"] = accel
+	}
+	return jsonResult(payload)
 }
 
 // probeServedModels reads the live roster and returns the CANONICAL model ids.
@@ -517,10 +567,20 @@ func (s *Server) handleAssessImage(ctx context.Context, req *mcp.CallToolRequest
 
 func (s *Server) handleOCR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		Image string `json:"image"`
+		Image  string `json:"image"`
+		Engine string `json:"engine"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
+	}
+	// OCR ownership (2026-08-22): GPU VLM is primary; the NPU's PaddleOCR is the
+	// caller's EXPLICIT fast-batch path, never an automatic fallback — the two
+	// read stylised text differently and a silent switch would change results.
+	if in.Engine == "npu" {
+		if !s.p.Cfg().HasAccelerator("hailo-8l") {
+			return jsonResult(map[string]any{"deferred": true, "reason": "engine:npu requested but this box lists no hailo-8l accelerator"})
+		}
+		return s.hailoCall(ctx, "ocr", map[string]any{"image_path": in.Image})
 	}
 	return result(s.p.Run(ctx, core.Request{Task: core.TaskOCR, Image: in.Image}))
 }
@@ -1354,6 +1414,56 @@ func plannerUnserved(ctx context.Context, base, model string) (missing, checked 
 
 // jsonResult marshals an arbitrary payload (NIM is not a core.Result) into a
 // single MCP text-content result.
+// hailoSidecar lazily builds the accelerator lane from config: one client, one
+// spawn function (nil when hailo_sidecar_cmd is unset), one Sidecar shared by
+// every NPU tool so concurrent first calls share a single spawn.
+func (s *Server) hailoSidecar() *hailoclient.Sidecar {
+	s.hailoOnce.Do(func() {
+		cfg := s.p.Cfg()
+		timeout := time.Duration(cfg.HailoTimeoutSec) * time.Second
+		if timeout <= 0 {
+			timeout = 60 * time.Second
+		}
+		var spawn func() error
+		if cfg.HailoSidecarCmd != "" {
+			spawn = hailoclient.SpawnCmd(cfg.HailoSidecarCmd, cfg.HailoIdleSec)
+		}
+		s.hailo = hailoclient.NewSidecar(hailoclient.New(cfg.HailoEndpoint, timeout), spawn, 45*time.Second)
+	})
+	return s.hailo
+}
+
+// hailoCall is the one path every NPU tool takes: ensure the sidecar, call the
+// tool, pass the dict through. Transport/spawn failures become defers (the
+// caller does the work another way); the sidecar's own structured refusals
+// ({"error":true,"kind":...}) pass through untouched — they are results.
+func (s *Server) hailoCall(ctx context.Context, tool string, args map[string]any) (*mcp.CallToolResult, error) {
+	sc := s.hailoSidecar()
+	if err := sc.Ensure(ctx); err != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": "hailo-8l: " + err.Error()})
+	}
+	out, err := sc.Client().Call(ctx, tool, args)
+	if err != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": "hailo-8l: " + err.Error()})
+	}
+	return jsonResult(out)
+}
+
+// handleHailoTool adapts one sidecar tool to an MCP handler. The MCP argument
+// names are the sidecar's keyword names, so the JSON passes through unchanged.
+func (s *Server) handleHailoTool(tool string) mcp.ToolHandler {
+	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var in map[string]any
+		if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+			return bad, nil
+		}
+		if in["image_path"] == nil || in["image_path"] == "" {
+			return jsonResult(map[string]any{"deferred": true, "reason": "empty image_path"})
+		}
+		return s.hailoCall(ctx, tool, in)
+	}
+}
+
 func jsonResult(v any) (*mcp.CallToolResult, error) {
 	b, err := json.Marshal(v)
 	if err != nil {

@@ -4,11 +4,27 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/hwdetect"
 	"github.com/dmmdea/offload-harness/internal/tierseed"
 )
+
+// hailortcliRun executes `hailortcli <args...>` for accelerator detection
+// (hwdetect.DetectAccelerators). A package var so tests can stand in a fake
+// device; the real runner's error (tool absent, driver down) is the normal
+// no-NPU case and DetectAccelerators treats it as "no accelerator".
+var hailortcliRun = func(args ...string) (string, error) {
+	out, err := exec.Command("hailortcli", args...).Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
 
 // `install detect` and `install plan` answer the two questions an install begins
 // with — what IS this machine, and what would an install do here — on any OS.
@@ -29,6 +45,7 @@ func runInstallDetect(args []string) error {
 
 	facts := hwdetect.Detect()
 	verdict := hwdetect.Classify(facts)
+	verdict.Accelerators = hwdetect.DetectAccelerators(hailortcliRun)
 
 	if *asJSON {
 		b, err := json.MarshalIndent(map[string]any{"facts": facts, "verdict": verdict}, "", "  ")
@@ -53,6 +70,9 @@ func runInstallDetect(args []string) error {
 	if verdict.BigRAM {
 		fmt.Println("  big_ram: true")
 	}
+	if len(verdict.Accelerators) > 0 {
+		fmt.Println("accel:   ", strings.Join(verdict.Accelerators, ", "))
+	}
 	return nil
 }
 
@@ -65,6 +85,7 @@ func runInstallPlan(args []string) error {
 
 	facts := hwdetect.Detect()
 	verdict := hwdetect.Classify(facts)
+	verdict.Accelerators = hwdetect.DetectAccelerators(hailortcliRun)
 	installHome := *home
 	if installHome == "" {
 		installHome = config.DefaultBase()
@@ -75,16 +96,40 @@ func runInstallPlan(args []string) error {
 	if err != nil {
 		return err
 	}
-	profiles, err := tierseed.Parse(rawProfiles)
+	doc, err := tierseed.ParseDoc(rawProfiles)
 	if err != nil {
 		return err
 	}
-	p, ok := profiles[verdict.Profile]
+	p, ok := doc.Profiles[verdict.Profile]
 	if !ok {
 		return fmt.Errorf("classified as %q but that tier is not in profiles.json", verdict.Profile)
 	}
 	if seed, err = tierseed.Resolve(p, verdict.Profile, tierseed.Options{Home: installHome}); err != nil {
 		return err
+	}
+	// Accelerator seeds merge OVER the tier seed — same order as install.ps1, so the
+	// plan predicts exactly the config the install would write. HAILO_HOME resolution
+	// mirrors install.ps1 verbatim ($env:HAILO_HOME else <OFFLOAD_HOME>\hailo) and is
+	// never empty: an empty HailoHome would expand __HAILO_HOME__ to "" and produce
+	// the plausible-wrong "/hailo-http.cmd".
+	if len(verdict.Accelerators) > 0 {
+		hailoHome := os.Getenv("HAILO_HOME")
+		if hailoHome == "" {
+			hailoHome = filepath.Join(installHome, "hailo")
+		}
+		accSeed, err := tierseed.ResolveAccelerators(doc.Accelerators, verdict.Accelerators,
+			tierseed.Options{Home: installHome, HailoHome: hailoHome})
+		if err != nil {
+			return err
+		}
+		if len(accSeed) > 0 {
+			if seed == nil {
+				seed = map[string]any{}
+			}
+			for k, v := range accSeed {
+				seed[k] = v
+			}
+		}
 	}
 
 	if *asJSON {

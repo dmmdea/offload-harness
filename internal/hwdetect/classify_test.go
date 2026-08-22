@@ -1,6 +1,11 @@
 package hwdetect
 
-import "testing"
+import (
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+)
 
 // The tables below are ported from setup/detect.tests.ps1 verbatim. Two
 // implementations of one classifier exist while the Windows installer still calls
@@ -157,4 +162,40 @@ func TestDetectDescribesThisMachine(t *testing.T) {
 	}
 	t.Logf("detected: %s %s %s %.1f GB VRAM x%d, %d GB RAM, driver %q -> %s",
 		f.OS, f.Vendor, f.Arch, f.VRAMGb, f.GPUCount, f.RAMGb, f.DriverVersion, Classify(f).Profile)
+}
+
+func TestAcceleratorsFromHailortcli(t *testing.T) {
+	scan := "Hailo Devices:\n[-] Device: 0000:03:00.0\n"
+	ident := "Executing on device: 0000:03:00.0\nIdentifying board\nDevice Architecture: HAILO8L\nPart Number: HM21LB1C2KAE\n"
+	if got := AcceleratorsFromHailortcli(scan, ident); len(got) != 1 || got[0] != "hailo-8l" {
+		t.Fatalf("got %v, want [hailo-8l]", got)
+	}
+	// A full Hailo-8 is NOT an 8L: its HEFs are a different build and must not claim the tier.
+	if got := AcceleratorsFromHailortcli(scan, "Device Architecture: HAILO8\n"); len(got) != 0 {
+		t.Fatalf("HAILO8 classified as %v, want none", got)
+	}
+	if got := AcceleratorsFromHailortcli("Hailo Devices:\n", ""); len(got) != 0 {
+		t.Fatalf("no device classified as %v, want none", got)
+	}
+}
+
+func TestDetectAcceleratorsToleratesMissingTool(t *testing.T) {
+	run := func(args ...string) (string, error) { return "", errors.New("exec: hailortcli: not found") }
+	if got := DetectAccelerators(run); got != nil {
+		t.Fatalf("got %v, want nil when hailortcli is absent", got)
+	}
+}
+
+func TestVerdictCarriesAccelerators(t *testing.T) {
+	v := Classify(Facts{Vendor: "nvidia", Arch: "blackwell", VRAMGb: 8, GPUCount: 1, RAMGb: 64})
+	if v.Profile != "blackwell-8" {
+		t.Fatalf("profile = %q", v.Profile)
+	}
+	if v.Accelerators != nil {
+		t.Fatalf("Classify must not populate accelerators (detection is a separate probe); got %v", v.Accelerators)
+	}
+	b, _ := json.Marshal(v)
+	if strings.Contains(string(b), `"accelerators":null`) {
+		t.Fatalf("nil accelerators must be omitted from JSON, got %s", b)
+	}
 }

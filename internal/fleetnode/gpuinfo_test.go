@@ -71,6 +71,23 @@ func TestReadInstalledInfo(t *testing.T) {
 	}
 }
 
+func TestReadInstalledInfoCarriesAccelerators(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "installed.json")
+	os.WriteFile(p, []byte(`{"profile":"blackwell-8","backend":"cuda","accelerators":["hailo-8l"]}`), 0o644)
+	info, err := ReadInstalledInfo(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Accelerators) != 1 || info.Accelerators[0] != "hailo-8l" {
+		t.Fatalf("accelerators = %v", info.Accelerators)
+	}
+	os.WriteFile(p, []byte(`{"profile":"blackwell-8","backend":"cuda"}`), 0o644)
+	info, _ = ReadInstalledInfo(p)
+	if info.Accelerators != nil {
+		t.Fatalf("absent field must stay nil, got %v", info.Accelerators)
+	}
+}
+
 func okProbe(total, used float64) MemProbe {
 	return func() (float64, float64, error) { return total, used, nil }
 }

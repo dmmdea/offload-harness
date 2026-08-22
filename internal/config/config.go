@@ -776,6 +776,22 @@ type Config struct {
 	// NOTE: the NIM API key is deliberately NOT a config field — it is read from the
 	// NVIDIA_API_KEY (or NGC_API_KEY) env var so a secret never lands in a tracked
 	// config file or the public repo. A self-hosted NIM needs no key.
+	// --- accelerators (ADR 0024): devices that ride BESIDE the GPU tier ---
+	// Accelerators lists the additive accelerator ids present on this box
+	// (today: "hailo-8l"). `profile` stays the one GPU tier; an empty list is
+	// byte-identical to a box with no accelerator — tools/list does not change.
+	Accelerators []string `json:"accelerators,omitempty"`
+	// HailoEndpoint is the loopback HTTP sidecar base (server/http_server.py in
+	// the Hailo repo). Loopback only — the sidecar is not an authenticated service.
+	HailoEndpoint string `json:"hailo_endpoint,omitempty"`
+	// HailoSidecarCmd launches the sidecar on demand (hailo-http.cmd). Empty =
+	// never spawn: the harness expects something else to have started it and
+	// defers when /health is unreachable.
+	HailoSidecarCmd string `json:"hailo_sidecar_cmd,omitempty"`
+	// HailoTimeoutSec bounds one NPU call (cold HEF load is ~1-8 s). Default 60.
+	HailoTimeoutSec int `json:"hailo_timeout_sec,omitempty"`
+	// HailoIdleSec is passed to the sidecar as its self-exit idle window. Default 300.
+	HailoIdleSec int `json:"hailo_idle_sec,omitempty"`
 	// --- fleet-node server (`fleet-serve` / `fleet-measure`; docs/FLEET-NODE.md) ---
 	// FleetListen is the fleet-serve bind address. Loopback by default; the
 	// production binding is the machine's TAILSCALE address behind
@@ -985,6 +1001,18 @@ func (c Config) ModelRoutes() []ModelRoute {
 	}
 }
 
+// HasAccelerator reports whether id is listed in Accelerators. It is THE gate
+// for accelerator-backed tools and status blocks: registration, not routing
+// heuristics, so tools/list stays byte-identical on a box without the device.
+func (c Config) HasAccelerator(id string) bool {
+	for _, a := range c.Accelerators {
+		if a == id {
+			return true
+		}
+	}
+	return false
+}
+
 func Default() Config {
 	base := DefaultBase()
 	return Config{
@@ -1099,6 +1127,9 @@ func Default() Config {
 		NIMModel:                      "nvidia/nemotron-3-ultra-550b-a55b",
 		NIMMaxTokens:                  1024,
 		NIMTimeoutSec:                 120,
+		HailoEndpoint:                 "http://127.0.0.1:18813", // loopback sidecar base; inert while Accelerators is empty
+		HailoTimeoutSec:               60,
+		HailoIdleSec:                  300,
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
 		FleetAuthToken:                "",                // "" = no agent-lane auth → agent dispatch loopback-only; media lane never auths (v1 scope)

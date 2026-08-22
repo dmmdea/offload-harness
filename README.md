@@ -237,7 +237,7 @@ Transport is **stdio**. Every tool returns the full result JSON — and a `{"def
 | `offload_extract` | `text`, `schema` | Extract schema-constrained fields → object, or defer. Values grounded in the input. |
 | `offload_triage` | `text`, `question` | Yes/no/unsure check → `{decision, reason}`, or defer. |
 | `offload_vqa` | `image`, `question` | Visual Q&A on a local image → `{answer}`, or defer. |
-| `offload_ocr` | `image` | Transcribe all text in an image → `{text}`, or defer. |
+| `offload_ocr` | `image`, `engine?` | Transcribe all text in an image → `{text}`, or defer. `engine:"npu"` selects the Hailo-8L PaddleOCR path on a box with the accelerator (explicit fast-batch path, never an automatic fallback); default is the GPU vision model. |
 | `offload_extract_image` | `image`, `schema` | OCR then extract grounded fields from the image → object, or defer. |
 | `offload_assess_image` | `image`, `brief?` | QA a render against exclusions → `{has_people, has_text, matches_brief, notes}`. |
 | `offload_video_describe` | `video`, `question` | Sample frames from a local video and answer → `{answer}`, or defer. |
@@ -254,6 +254,13 @@ Transport is **stdio**. Every tool returns the full result JSON — and a `{"def
 | `offload_media` | `op`, `in`/`inputs[]`, `out?`, op args | **One ffmpeg av op** — `trim` (stream-copy default), `concat`, `extract_frames`, `convert`, `mux_audio`, `probe` → op-specific JSON, or defer. CPU-only — never takes the GPU lock. |
 | `offload_nim` | `prompt`, `model?`, `system?`, `base?`, `max_tokens?`, `temperature?`, `list_models?` | **Opt-in remote.** Call an NVIDIA NIM endpoint (hosted free catalog or self-hosted) → `{model, content, ...}`, or defer. Key from `$NVIDIA_API_KEY` (sent only to NVIDIA hosts); never ledgered. |
 | `agent_run` | `goal`, `read_root?`, `max_steps?`, `model?`, `timeout_sec?`, `profile?`, `judge?` | **Local read-only agent.** A local model plans and iterates over read-only tools (`list_dir`, `read_file`) + the `offload_*` cascade to do a bounded multi-step read-and-reason job → `{output, steps, stop_reason, tools, effects?, effects_flagged?, judge_report?}`, or defer. `profile` narrows the tool list per task shape; `judge: true` adds one end-of-run **advisory** same-seat completion grading the run's flagged effects for operator review (never gates anything). No writes, no shell, no network; ledger untouched. |
+| `offload_face_detect` | `image_path` | Detect faces on the local Hailo-8L NPU → `{faces:[{x,y,w,h,score,kps}],count}` with 5-landmark keypoints. *Accelerator-gated: registered only on a box listing `hailo-8l` ([docs/systems/accelerators.md](docs/systems/accelerators.md)).* |
+| `offload_face_embed` | `image_path`, `max_faces?` | Face identity vectors (512-d ArcFace per face) on the local NPU — cosine similarity is the identity score → `{faces:[{…,embedding}],count}`. *Accelerator-gated.* |
+| `offload_object_detect` | `image_path`, `score_threshold?` | Detect the 80 COCO classes (YOLOv8s, on-chip NMS) on the local NPU → `{objects:[{label,class_id,x,y,w,h,score}],count}`. *Accelerator-gated.* |
+| `offload_person_embed` | `image_path` | Person re-identification vectors (OSNet 512-d, works with no visible face) on the local NPU → `{people:[{x,y,w,h,score,embedding}],count}`. *Accelerator-gated.* |
+| `offload_depth` | `image_path`, `out_path?` | Preview-grade relative depth map (Depth-Anything-V2) on the local NPU; writes an 8-bit PNG (bright = near) → `{depth_path,min,max,mean}`. *Accelerator-gated.* |
+| `offload_enhance_low_light` | `image_path`, `out_path?` | Brighten an under-exposed frame (Zero-DCE) at the original resolution on the local NPU → `{enhanced_path,width,height}`. *Accelerator-gated.* |
+| `offload_image_embed` | `image_path` | 512-d image embedding (TinyCLIP ViT-61M) for similarity search / clustering on the local NPU → `{embedding,dim}`. *Accelerator-gated.* |
 
 > **Inputs stay local.** Images, audio, and video are accepted as a **local file path** or a `data:` URI — **never a remote URL**, so there is no network egress for media.
 

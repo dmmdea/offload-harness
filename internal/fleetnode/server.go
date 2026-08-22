@@ -72,6 +72,10 @@ type Options struct {
 	Reclaim func(freeGiB, totalGiB float64) ReclaimVerdict
 	GpuVendor  string
 	GpuArch    string
+	// Accelerators is the additive-device list from the installer's manifest
+	// (installed.json `accelerators`, ADR 0024) — advertised verbatim in health
+	// so a delegator can route NPU-owned work to this node. Empty = omitted.
+	Accelerators []string
 	// LoopbackListener reports whether the serve listener is bound to a
 	// loopback address. The verb computes it from the RESOLVED listen address
 	// (netguard.LoopbackAddr) — NOT from --listen-trusted-network, which is
@@ -332,6 +336,9 @@ type healthPayload struct {
 	SchemaVersion         int              `json:"schema_version"`
 	GpuVendor             string           `json:"gpu_vendor"`
 	GpuArch               string           `json:"gpu_arch"`
+	// Accelerators is the installer-manifest additive-device list (ADR 0024).
+	// Additive + omitempty: a node with none emits a byte-identical payload.
+	Accelerators []string `json:"accelerators,omitempty"`
 	VramTotalGb           float64          `json:"vram_total_gb"`
 	VramFreeGb            float64          `json:"vram_free_gb"`
 	// GpuDevices is the full per-device breakdown behind VramTotalGb/
@@ -424,6 +431,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		SchemaVersion:         1,
 		GpuVendor:             s.opts.GpuVendor,
 		GpuArch:               s.opts.GpuArch,
+		Accelerators:          s.opts.Accelerators,
 		VramTotalGb:           snap.TotalGiB,
 		VramFreeGb:            snap.FreeGiB,
 		GpuDevices:            snap.Devices,
