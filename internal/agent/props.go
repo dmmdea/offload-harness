@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -76,6 +77,16 @@ type seatPinBasis struct {
 // minutes of load as a telemetry side effect — so the probe gives up long
 // before that completes and the pin stays absent (unknown), which is the
 // honest outcome for "the state I meant to pin is already gone".
+//
+// Known limitation (reviewed, accepted): the 3s timeout bounds the CLIENT'S
+// wait; if an external eviction races the probe on a shared box, llama-swap
+// may continue the spawn server-side after this client disconnects. The
+// residual effect is a warm seat nobody asked for — one load's GPU-seconds,
+// no wrong data — and the race needs a concurrent eviction inside the
+// milliseconds between a run finishing and its probe, which the 5-min-TTL
+// eviction policy makes narrow. This client cannot prove llama-swap's
+// disconnect handling either way; claiming more would be asserting another
+// process's behavior from this one's timeout.
 var seatPinClient = &http.Client{Timeout: 3 * time.Second}
 
 // ProbeSeatPin GETs the llama-swap per-model /props passthrough (upstream
@@ -186,12 +197,23 @@ func ProbeSeatPin(ctx context.Context, base, model string) (SeatPin, bool) {
 	if len(short) > 8 {
 		short = short[:8]
 	}
+	// The basis names EVERY hashed field (review finding: a basis that omits
+	// hashed fields lets two configs show different hashes over an identical
+	// basis line, defeating its "what changed?" purpose).
+	mods := make([]string, 0, len(basis.Modalities))
+	for k, v := range basis.Modalities {
+		if v {
+			mods = append(mods, k)
+		}
+	}
+	sort.Strings(mods)
 	return SeatPin{
 		SHA256: hex.EncodeToString(sum[:]),
-		Basis: strings.TrimSpace(fmt.Sprintf("%s %s %s n_ctx=%d slots=%d temp=%g top_k=%d top_p=%g min_p=%g rf=%s tmpl=%s",
+		Basis: strings.TrimSpace(fmt.Sprintf("%s %s %s n_ctx=%d slots=%d temp=%g top_k=%d top_p=%g min_p=%g rf=%s ric=%t cf=%s smp=%s mod=%s tmpl=%s",
 			basis.BuildInfo, path.Base(strings.ReplaceAll(basis.ModelPath, `\`, "/")), basis.ModelFtype,
 			basis.NCtx, basis.TotalSlots, basis.Temperature, basis.TopK, basis.TopP, basis.MinP,
-			orUnset(basis.ReasoningFormat), orUnset(short))),
+			orUnset(basis.ReasoningFormat), basis.ReasoningInContent, orUnset(basis.ChatFormat),
+			orUnset(strings.Join(basis.Samplers, ",")), orUnset(strings.Join(mods, ",")), orUnset(short))),
 	}, true
 }
 
