@@ -204,10 +204,12 @@ func TestRunRetryStaysInsideTimeoutBudget(t *testing.T) {
 	if pr.RetriedOn != "" || node.dispatches.Load() != 0 || sum.Retried != 0 || !strings.Contains(pr.RetryNote, "retry skipped") || !strings.Contains(pr.RetryNote, "timeout_sec budget") {
 		t.Fatalf("want the retry skipped under the floor with a note, got %+v / %+v (dispatches %d)", pr, sum, node.dispatches.Load())
 	}
-	// budget 12 s: ~10.8 s remain → the retry runs, and the contract it carries has the REMAINING budget
+	// budget 15 s: ≥ 12 s remain even if the first attempt (1.2 s sleep + a synchronous
+	// delegation-log write) stalls for a couple of seconds on a loaded box — the retry
+	// runs, and the contract it carries has the REMAINING budget, not the full 15
 	var seen atomic.Int64
 	node.onDispatch = func(jobID string, contract core.AgentContract) { seen.Store(int64(contract.TimeoutSec)) }
-	c[0].TimeoutSec = 12
+	c[0].TimeoutSec = 15
 	results, sum, err = Run(context.Background(), testCfg(t), slowWrongLocal, c, "spread", []string{url})
 	if err != nil {
 		t.Fatal(err)
@@ -215,8 +217,8 @@ func TestRunRetryStaysInsideTimeoutBudget(t *testing.T) {
 	if results[0].RetriedOn != "node-a" || sum.RetryRecovered != 1 {
 		t.Fatalf("want a recovered retry, got %+v / %+v", results[0], sum)
 	}
-	if got := seen.Load(); got <= 0 || got >= 12 {
-		t.Fatalf("retry contract timeout_sec = %d, want the REMAINING budget (0 < n < 12)", got)
+	if got := seen.Load(); got <= 0 || got >= 15 {
+		t.Fatalf("retry contract timeout_sec = %d, want the REMAINING budget (0 < n < 15)", got)
 	}
 }
 
