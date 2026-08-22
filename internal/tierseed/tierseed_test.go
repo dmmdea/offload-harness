@@ -86,6 +86,59 @@ func TestTextOnlyTierIsNotAnError(t *testing.T) {
 	}
 }
 
+func TestResolveAcceleratorsExpandsAndValidates(t *testing.T) {
+	accs := map[string]Accelerator{
+		"hailo-8l": {Kind: "npu", ConfigSeed: map[string]any{
+			"accelerators": []any{"hailo-8l"}, "hailo_endpoint": "http://127.0.0.1:18813",
+			"hailo_sidecar_cmd": "__HAILO_HOME__/hailo-http.cmd", "hailo_timeout_sec": 60,
+		}},
+	}
+	out, err := ResolveAccelerators(accs, []string{"hailo-8l"}, Options{Home: `C:\stack`, HailoHome: `D:\Dev\Hailo`, GOOS: "windows"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["hailo_sidecar_cmd"] != "D:/Dev/Hailo/hailo-http.cmd" {
+		t.Fatalf("token not expanded: %v", out["hailo_sidecar_cmd"])
+	}
+	if _, err := ResolveAccelerators(accs, []string{"tpu"}, Options{}); err == nil {
+		t.Fatal("unknown accelerator id must be an error, not a silent skip")
+	}
+	bad := map[string]Accelerator{"x": {ConfigSeed: map[string]any{"no_such_key": 1}}}
+	if _, err := ResolveAccelerators(bad, []string{"x"}, Options{}); err == nil {
+		t.Fatal("a seed key that is not a config.Config json tag must fail at authoring time")
+	}
+	if out, _ := ResolveAccelerators(accs, nil, Options{}); out != nil {
+		t.Fatalf("no ids -> nil seed, got %v", out)
+	}
+}
+
+// TestEveryShippedAcceleratorSeedIsValid guards the real accelerators table the same
+// way TestEveryShippedSeedIsValid guards the tiers: a typo'd key in a shipped
+// config_seed would otherwise be dropped on every box that has the device.
+func TestEveryShippedAcceleratorSeedIsValid(t *testing.T) {
+	d, err := LoadDoc("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Accelerators) == 0 {
+		t.Fatal("profiles.json declares no accelerators — hailo-8l should be there")
+	}
+	for id := range d.Accelerators {
+		for _, goos := range []string{"windows", "linux"} {
+			out, err := ResolveAccelerators(d.Accelerators, []string{id}, Options{Home: "/tmp/x", HailoHome: "/tmp/hailo", GOOS: goos})
+			if err != nil {
+				t.Errorf("accelerator %s does not resolve for %s: %v", id, goos, err)
+				continue
+			}
+			for k, v := range out {
+				if s, ok := v.(string); ok && strings.Contains(s, "__HAILO_HOME__") {
+					t.Errorf("accelerator %s/%s: %s still carries __HAILO_HOME__ after expansion: %v", id, goos, k, s)
+				}
+			}
+		}
+	}
+}
+
 // TestEveryShippedSeedIsValid guards the real table: every tier in profiles.json must
 // resolve for BOTH platforms. This is the gate that would have caught `sd-cli.exe`.
 func TestEveryShippedSeedIsValid(t *testing.T) {
