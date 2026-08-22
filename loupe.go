@@ -119,6 +119,11 @@ type statsReport struct {
 	// Carries its own verdict and refuses to offer one below the sample floor.
 	Prefill PrefillReport `json:"agent_prefill"`
 
+	// --- the counterfactual that was already running, unreported ---
+	// Conditional on escalation by construction; the unconditional flip rate is reported
+	// as insufficient_data so the two cannot be confused.
+	Agreement AgreementReport `json:"escalation_agreement"`
+
 	// --- gate R2-16: does any NON-OBSOLETE failure class recur often enough to act on? ---
 	// Carries its own verdict so the gate cannot be quietly reinterpreted later.
 	Atlas AtlasReport `json:"failure_atlas"`
@@ -326,6 +331,16 @@ func runLoupe(args []string) error {
 	// dividing by a guess.
 	rep.Reliability = buildReliability(rows)
 	rep.Prefill = buildPrefill(rows)
+	// Read from the confhead-label sidecar, NOT from `rows`: labels live in their own
+	// append-only file and are a different population from the ledger.
+	if lrows, lerr := ledger.ReadAll(cfg.ConfHeadLabelsPath); lerr == nil {
+		rep.Agreement = buildAgreement(lrows)
+	} else {
+		rep.Agreement = AgreementReport{
+			Basis:              "insufficient_data (label sidecar unreadable)",
+			UnconditionalBasis: "insufficient_data",
+		}
+	}
 	rep.Atlas = buildAtlas(rows, rep.SpanDays)
 
 	// Duplicate rate is computed ONLY over rows that carry an identity, so the
@@ -572,6 +587,30 @@ func emitStats(rep statsReport, asJSON bool) error {
 				p("  %-22s %-18s n=%-5d insufficient_data", c.Task, c.Tier, c.N)
 			}
 		}
+	}
+	// The agreement view. Prints the DENOMINATOR and every caveat inline, because this
+	// number's danger is being quoted as "the flip rate" once it leaves this report.
+	if ag := rep.Agreement; ag.Rows > 0 {
+		p("")
+		p("ESCALATION AGREEMENT  (a counterfactual already running in production)")
+		rate := "n/a"
+		if ag.DisagreementRate != nil {
+			rate = fmt.Sprintf("%.1f%%", *ag.DisagreementRate)
+		}
+		p("  %d labelled rows: %d agreed / %d disagreed  -> %s DISAGREEMENT", ag.Rows, ag.Agreed, ag.Disagreed, rate)
+		p("  window %s .. %s across %d arrival burst(s)", safeDate(ag.FirstTS), safeDate(ag.LastTS), ag.Bursts)
+		printRows(p, "  disagreements by task", ag.ByTask)
+		// Deliberately "as RECORDED" rather than "pooled": on the live corpus the two
+		// distinct values are `gemma-4-e2b` and `gemma4-e2b`, which llama-swap.yaml
+		// declares to be ONE seat and its alias -- split cleanly by task, not by model.
+		// Labelling that "pooled tiers" would imply different models were averaged and
+		// manufacture a caveat that does not apply. It is still worth printing: an alias
+		// masquerading as a second identity is the same defect that makes the result-cache
+		// key machine-specific, and it is worth seeing wherever it appears.
+		printRows(p, "  entry tier AS RECORDED (alias spellings are one seat)", ag.Tiers)
+		p("  ^ CONDITIONAL ON ESCALATION -- escalation is triggered by low confidence, so")
+		p("    these are the calls most likely to disagree. This is an UPPER bound.")
+		p("  ^ unconditional flip rate: %s", ag.UnconditionalBasis)
 	}
 	// R2-16. The verdict line is the deliverable: this view exists to close itself.
 	if rep.Atlas.TotalDefers > 0 {

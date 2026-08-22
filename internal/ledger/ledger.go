@@ -89,6 +89,8 @@ type Entry struct {
 	// MEASURED; a row without it made no observation, which is not the same as a row
 	// that observed zero prefill.
 	PrefillSteps  int     `json:"prefill_steps,omitempty"`
+	// AgentProfile: which agent profile the run resolved to. Absent on non-agent rows.
+	AgentProfile string `json:"agent_profile,omitempty"`
 	PrefillTokens int64   `json:"prefill_tokens,omitempty"`
 	CacheTokens   int64   `json:"cache_tokens,omitempty"`
 	PrefillMS     float64 `json:"prefill_ms,omitempty"`

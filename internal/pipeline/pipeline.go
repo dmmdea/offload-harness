@@ -93,6 +93,10 @@ type Pipeline struct {
 	// it the status surface can only publish an unfalsifiable three-way guess.
 	embedMemo       *embedmemo.Memo
 	embedMemoReason string
+	// labelDrops counts confhead-label candidates answersAgree could not judge. Exposed on
+	// the loupe surface so the agreement rate can state its own coverage instead of
+	// implying it is total. atomic: --serve shares one Pipeline across handlers.
+	labelDrops atomic.Int64
 	// T2-D: does RunTier read/write the result cache on THIS pipeline? Set only
 	// by NewInLoopPipeline. False everywhere else — critically on the main
 	// pipeline, whose RunTier the shadow-labelling flywheel drives to evaluate
@@ -187,6 +191,14 @@ func (p *Pipeline) Cfg() config.Config { return p.cfg }
 // open bbolt file rather than trying to open it again and losing the lock race
 // against itself. May be nil (caching opted out, or the file is held elsewhere).
 func (p *Pipeline) Cache() *cache.Cache { return p.cache }
+
+// LabelDrops reports how many confhead-label candidates were discarded unjudged.
+//
+// Read this beside any agreement rate derived from confhead-labels.jsonl: the rate is
+// computed only over rows that WERE judged, so without this number it silently implies
+// full coverage. Drops skew toward extreme disagreements (unparseable candidates), so an
+// unreported drop count biases the rate upward.
+func (p *Pipeline) LabelDrops() int64 { return p.labelDrops.Load() }
 
 // EmbedMemoStats reports the embed memo's counters, or the REASON there are
 // none. A caller must surface the reason rather than printing a zero hit rate,
@@ -3689,6 +3701,7 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		CacheBypass:        meta.CacheBypass,
 		CacheHitInLoop:     meta.CacheHitInLoop,
 		PrefillSteps:       meta.PrefillSteps,
+		AgentProfile:       meta.AgentProfile,
 		PrefillTokens:      meta.PrefillTokens,
 		CacheTokens:        meta.CacheTokens,
 		PrefillMS:          meta.PrefillMS,
@@ -4046,6 +4059,16 @@ func (p *Pipeline) labelAgreement(task core.TaskType, entry ledger.Entry, candid
 	}
 	agreed, ok := answersAgree(task, candidate, final.Data)
 	if !ok {
+		// COUNT WHAT IS DISCARDED. answersAgree returns ok=false for two very different
+		// reasons -- a task it does not judge (anything but classify/triage), and a
+		// candidate it could not parse -- and both used to vanish here without trace.
+		//
+		// That silence is not neutral: an unparseable candidate is disproportionately an
+		// EXTREME disagreement (a truncated or malformed answer), so dropping it quietly
+		// biases the measured agreement rate UPWARD, in the direction that argues against
+		// acting. A rate whose losses are uncountable cannot state its own coverage, and
+		// this file's whole job is to produce a rate somebody will make a decision from.
+		p.labelDrops.Add(1)
 		return
 	}
 	entry.Grounded = nil
