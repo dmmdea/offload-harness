@@ -260,5 +260,48 @@ Assert ($m2 -match '"accelerators":\s*\[') 'config accelerators serializes as a 
 $mjson = [ordered]@{ big_ram = $false; accelerators = @(@('hailo-8l')) } | ConvertTo-Json -Depth 6
 Assert ($mjson -match '"accelerators":\s*\[') 'manifest accelerators serializes as a JSON array (1 element, no unroll)'
 
+# --- Media-seat bindings: the missing tierseed.Resolve layer (field: OptiPlex 7060) ---
+Write-Host ""
+Write-Host "== Get-MediaSeatBindings: seats bind vision_model/stt_model on the fresh path =="
+Assert ([bool](Get-Command Get-MediaSeatBindings -ErrorAction SilentlyContinue)) 'dot-source seam defines Get-MediaSeatBindings'
+$b8 = Get-MediaSeatBindings -ProfileRow $profiles.'blackwell-8'
+Assert ($null -ne $b8)                                                      'blackwell-8 produces seat bindings'
+Assert ($b8.vision_model -eq 'qwen3vl-4b')                                  'blackwell-8 binds vision_model=qwen3vl-4b (the seat name, not the file)'
+Assert ($b8.stt_model -eq 'whisper-stt')                                    'blackwell-8 binds stt_model=whisper-stt'
+$b8m = (Merge-ConfigSeed -ConfigText $tplText -Seed $b8) | ConvertFrom-Json
+Assert ($b8m.vision_model -eq 'qwen3vl-4b' -and $b8m.stt_model -eq 'whisper-stt') 'bindings survive the merge into the shipped config'
+# Closure: EVERY tier that declares media_seats must bind BOTH keys — a seat the
+# config never routes to is exactly the split-brain mediaseat.Bindings exists to prevent.
+foreach ($t in @($profiles.PSObject.Properties.Name)) {
+  $row = $profiles.$t
+  if ($row.PSObject.Properties['media_seats'] -and @($row.media_seats).Count -gt 0) {
+    $bt = Get-MediaSeatBindings -ProfileRow $row
+    $kinds = @($row.media_seats | ForEach-Object { $_.kind })
+    if ($kinds -contains 'vision') { Assert ($null -ne $bt.vision_model -and $bt.vision_model -ne '') "$t vision seat binds vision_model" }
+    if ($kinds -contains 'stt')    { Assert ($null -ne $bt.stt_model -and $bt.stt_model -ne '')       "$t stt seat binds stt_model" }
+  }
+}
+Assert ($null -eq (Get-MediaSeatBindings -ProfileRow $null))                'null profile row -> no bindings'
+Assert ($null -eq (Get-MediaSeatBindings -ProfileRow ([pscustomobject]@{ config_seed = @{} }))) 'row without media_seats -> no bindings'
+$unknownKind = [pscustomobject]@{ media_seats = @([pscustomobject]@{ kind = 'aroma'; name = 'x' }) }
+Assert ($null -eq (Get-MediaSeatBindings -ProfileRow $unknownKind))         'unknown seat kind binds nothing (mirror of mediaseat.configKey)'
+
+# --- Host-tool seed: gimp_console_path / edit_python discovery rule -------------------
+Write-Host ""
+Write-Host "== Get-HostToolSeed: discovery rule (pure half) =="
+Assert ([bool](Get-Command Get-HostToolSeed -ErrorAction SilentlyContinue)) 'dot-source seam defines Get-HostToolSeed'
+$hs = Get-HostToolSeed -GimpConsole 'C:\Program Files\GIMP 3\bin\gimp-console.exe' -PythonExe 'C:\Py\python.exe' -PythonHasPil $true -ComfyVenvPresent $false
+Assert ($hs.gimp_console_path -eq 'C:/Program Files/GIMP 3/bin/gimp-console.exe') 'gimp path seeded with forward slashes'
+Assert ($hs.edit_python -eq 'C:/Py/python.exe')                             'edit_python seeded when PIL present and no comfy venv'
+$hsComfy = Get-HostToolSeed -GimpConsole '' -PythonExe 'C:\Py\python.exe' -PythonHasPil $true -ComfyVenvPresent $true
+Assert ($null -eq $hsComfy)                                                 'comfy venv present -> edit_python NOT seeded (runtime derives it)'
+$hsNoPil = Get-HostToolSeed -GimpConsole '' -PythonExe 'C:\Py\python.exe' -PythonHasPil $false -ComfyVenvPresent $false
+Assert ($null -eq $hsNoPil)                                                 'python without Pillow -> edit_python NOT seeded (no lying CONFIGURED route)'
+$hsGimpOnly = Get-HostToolSeed -GimpConsole 'C:\Program Files\GIMP 3\bin\gimp-console.exe' -PythonExe '' -PythonHasPil $false -ComfyVenvPresent $false
+Assert ($hsGimpOnly.gimp_console_path -like '*gimp-console.exe' -and $null -eq $hsGimpOnly.PSObject.Properties['edit_python'].Value) 'gimp alone seeds only gimp_console_path'
+Assert ($null -eq (Get-HostToolSeed -GimpConsole '' -PythonExe '' -PythonHasPil $false -ComfyVenvPresent $false)) 'nothing found -> no seed (config byte-identical)'
+$hsMerged = (Merge-ConfigSeed -ConfigText $tplText -Seed $hs) | ConvertFrom-Json
+Assert ($hsMerged.gimp_console_path -eq 'C:/Program Files/GIMP 3/bin/gimp-console.exe') 'host-tool seed merges into the shipped config'
+
 if ($failures -eq 0) { Write-Host 'ALL PASS' -ForegroundColor Green; exit 0 }
 Write-Host "FAILURES: $failures" -ForegroundColor Red; exit 1

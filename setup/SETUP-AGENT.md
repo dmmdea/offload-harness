@@ -191,6 +191,24 @@ an 8GB 3070 + 64GB RAM box, 2026-07-16). **J4: this binding is now AUTOMATIC on 
 binding; existing configs are never touched (bind manually there); model downloads stay
 out-of-band like the ≥16GB seeds.
 
+### Media seat weights (vision/STT) — out-of-band provisioning gotchas
+
+The tier's `media_seats` render into llama-swap.yaml and bind `vision_model`/`stt_model` in a
+fresh config automatically (0.83.0), but the WEIGHTS stay operator-provisioned by design; the
+renderer WARNs on missing seat files. Two field-measured traps (OptiPlex 7060, 2026-08-22):
+
+- **Qwen3VL-4B**: the HF repo is the HYPHENATED `unsloth/Qwen3-VL-4B-Instruct-GGUF` — the
+  unhyphenated `unsloth/Qwen3VL-4B-Instruct-GGUF` name returns 401, which reads like an auth
+  problem and is just a wrong repo id. Save the files AS the yaml's expected names
+  (`Qwen3VL-4B-Instruct-Q4_K_M.gguf`, `mmproj-Qwen3VL-4B-Instruct-F16.gguf`).
+- **whisper-server**: never copy a binary built on another box without checking its ISA.
+  A default (`GGML_NATIVE=ON`) build inherits the BUILDER's CPU features — an AVX-512 build
+  loads the model fine, then dies `0xC000001D STATUS_ILLEGAL_INSTRUCTION` right after
+  `whisper_backend_init_gpu`, which reads like a CUDA fault and is a CPU-ISA one. Build
+  portable: `cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=<sm> -DGGML_NATIVE=OFF
+  -DBUILD_SHARED_LIBS=ON`, and ship the CUDA runtime DLLs (`cudart64_12`/`cublas64_12`/
+  `cublasLt64_12`) beside the exe when the target box has no CUDA toolkit of that major.
+
 ### run-graph satisfier prerequisite (`offload_run_graph`)
 
 `offload_run_graph` self-provisions a workflow's node manifest against the ComfyUI install.
