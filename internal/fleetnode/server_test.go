@@ -287,6 +287,36 @@ func TestHealthOmitsGpuDevicesWhenAbsent(t *testing.T) {
 	}
 }
 
+// TestHealthAdvertisesAccelerators: the manifest-declared accelerator list
+// (Options.Accelerators — the fleet-serve verb reads it from installed.json's
+// `accelerators`, ADR 0024) must reach the health payload so a delegator can
+// route NPU-owned work here; a node with none must OMIT the key entirely (the
+// pre-accelerator payload stays byte-identical, same rule as gpu_devices).
+func TestHealthAdvertisesAccelerators(t *testing.T) {
+	opts := &Options{
+		NodeID:       "node-acc",
+		Snapshot:     goodSnapshot,
+		GpuVendor:    "nvidia",
+		GpuArch:      "ampere",
+		Accelerators: []string{"hailo-8l"},
+	}
+	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, opts)
+	rec := do(t, s, http.MethodGet, "/fleet/health", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	m := decodeMap(t, rec)
+	accs, ok := m["accelerators"].([]any)
+	if !ok || len(accs) != 1 || accs[0] != "hailo-8l" {
+		t.Fatalf("accelerators = %v, want [hailo-8l]", m["accelerators"])
+	}
+	plain, _ := newTestServer(t, imageCfg(), &fakeRunner{}, nil)
+	mp := decodeMap(t, do(t, plain, http.MethodGet, "/fleet/health", "", nil))
+	if _, present := mp["accelerators"]; present {
+		t.Fatalf("accelerators key must be absent when the node has none, got %v", mp["accelerators"])
+	}
+}
+
 func TestDispatchEchoExactness(t *testing.T) {
 	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, nil)
 	const id = "a3f9-XYZ_0123456789abcdef.fleet~job"

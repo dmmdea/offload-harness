@@ -697,6 +697,30 @@ function Merge-ConfigSeed {
   return ($cfg | ConvertTo-Json -Depth 8)
 }
 
+# Accelerator seed (ADR 0024): parity copy of internal/tierseed.ResolveAccelerators
+# (authoritative; change Go FIRST). Merged AFTER the tier seed so an accelerator can
+# never be overwritten by the GPU tier's keys. __HAILO_HOME__ = the Hailo repo dir.
+function Get-AcceleratorSeed {
+  param($ProfilesDoc, [string[]]$Ids, [string]$HailoHome)
+  if (-not $Ids -or $Ids.Count -eq 0) { return $null }
+  $merged = [ordered]@{}
+  foreach ($id in $Ids) {
+    if (-not $ProfilesDoc.accelerators -or -not $ProfilesDoc.accelerators.PSObject.Properties[$id]) {
+      throw "accelerator '$id' detected but not declared in profiles.json accelerators"
+    }
+    $seed = $ProfilesDoc.accelerators.$id.config_seed
+    foreach ($p in $seed.PSObject.Properties) { $merged[$p.Name] = $p.Value }
+  }
+  $hh = ($HailoHome -replace '\\', '/').TrimEnd('/')
+  $out = [ordered]@{}
+  foreach ($k in $merged.Keys) {
+    $v = $merged[$k]
+    if ($v -is [string]) { $v = $v.Replace('__HAILO_HOME__', $hh) }
+    $out[$k] = $v
+  }
+  return [pscustomobject]$out
+}
+
 # ---------------------------------------------------------------------------
 # Agent planner seat derivation for the FRESH-config path - a deliberate PARITY
 # COPY of internal/tierseed.Resolve (Go), which is the AUTHORITATIVE rule.
@@ -795,6 +819,10 @@ if ($env:OFFLOAD_INSTALL_DOT_SOURCE -eq '1') { return }
 # Resolve config
 # ---------------------------------------------------------------------------
 if ($env:OFFLOAD_HOME) { $HOME_DIR = $env:OFFLOAD_HOME } else { $HOME_DIR = Join-Path $HOME 'offload-stack' }
+# HAILO_HOME must ALWAYS be non-empty (Task 5 review finding: an empty value expands
+# __HAILO_HOME__ to "" and silently produces the plausible-wrong "/hailo-http.cmd").
+# Set here, beside HOME_DIR, so EVERY path that can reach the seed merge has it.
+if ($env:HAILO_HOME) { $HAILO_HOME = $env:HAILO_HOME } else { $HAILO_HOME = Join-Path $HOME_DIR 'hailo' }
 if ($null -ne $env:OFFLOAD_WITH_FAMILY) { $withFamily = ($env:OFFLOAD_WITH_FAMILY -ne '0') } else { $withFamily = $true }
 $llamaDir = Join-Path $HOME_DIR 'llama'
 $swapDir  = Join-Path $HOME_DIR 'llama-swap'
@@ -843,7 +871,7 @@ else {
 # overridable: OFFLOAD_BACKEND, OFFLOAD_PROFILE, OFFLOAD_RAM_TIER (for testing a
 # synthetic box / a render-only dry run without the real hardware).
 # ---------------------------------------------------------------------------
-$profileId = $null; $ramTier = $null; $bigRam = $false
+$profileId = $null; $ramTier = $null; $bigRam = $false; $accelerators = @()
 $cudaDriver = $null; $cudaToolkit = $null   # H4: detect's cuda_driver / cuda_toolkit
 if ($RenderOnly -and -not $env:OFFLOAD_BACKEND) {
   throw "-RenderOnly requires OFFLOAD_BACKEND (and OFFLOAD_PROFILE) set so no hardware detection runs"
@@ -868,6 +896,8 @@ if ($env:OFFLOAD_BACKEND) {
   if ($null -ne $verdictObj.big_ram) { $bigRam = [bool]$verdictObj.big_ram }
   $cudaDriver  = $verdictObj.cuda_driver
   $cudaToolkit = $verdictObj.cuda_toolkit
+  # ADR 0024: additive accelerators beside the GPU tier (array, possibly empty/absent).
+  $accelerators = @($verdictObj.accelerators | Where-Object { $_ })
 }
 # Overrides win over detect (and cover the OFFLOAD_BACKEND-override path, where
 # detect never ran and $profileId/$ramTier are still null).
@@ -876,6 +906,7 @@ if ($env:OFFLOAD_RAM_TIER) { $ramTier   = $env:OFFLOAD_RAM_TIER.Trim().ToLower()
 if ($null -ne $env:OFFLOAD_BIG_RAM) { $bigRam = ($env:OFFLOAD_BIG_RAM -ne '0') }
 if ($env:OFFLOAD_CUDA_DRIVER)  { $cudaDriver  = $env:OFFLOAD_CUDA_DRIVER.Trim() }   # H4: synthetic-box testing
 if ($env:OFFLOAD_CUDA_TOOLKIT) { $cudaToolkit = $env:OFFLOAD_CUDA_TOOLKIT.Trim() }
+if ($env:OFFLOAD_ACCELERATORS) { $accelerators = @($env:OFFLOAD_ACCELERATORS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
 if ($backend -notin @('cuda','vulkan','cpu')) { throw "unsupported backend '$backend' (expected cuda|vulkan|cpu)" }
 if (-not $ramTier) { $ramTier = 'min' }   # conservative default when unknown (drops the RAM-gated 26B path)
 Write-Host "OK    backend = $backend | profile = $(if ($profileId) { $profileId } else { '(none - backend defaults)' }) | ram_tier = $ramTier$(if ($bigRam) { ' | big_ram' } else { '' })" -ForegroundColor Green
@@ -1280,8 +1311,13 @@ Step 'harness config -> ~/.local-offload/config.json' `
     $seed = $null
     $seedCond = $null
     $profRow = $null
-    if ($profileId -and (Test-Path $profilesJson)) {
+    # $pdoc is hoisted above the profile guard: an accelerator on a profile-less
+    # render must still seed (ADR 0024 — accelerators are ADDITIVE to the tier).
+    $pdoc = $null
+    if (Test-Path $profilesJson) {
       $pdoc = Get-Content -Raw $profilesJson | ConvertFrom-Json
+    }
+    if ($profileId -and $pdoc) {
       if ($pdoc.profiles.PSObject.Properties[$profileId]) {
         $profRow = $pdoc.profiles.$profileId
         $seed = $profRow.config_seed
@@ -1309,6 +1345,13 @@ Step 'harness config -> ~/.local-offload/config.json' `
     if ($agentSeat) {
       $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed ([pscustomobject]@{ agent_model = $agentSeat })
       Write-Host "      agent seat ($profileId): agent_model=$agentSeat (derived from resident_tier)" -ForegroundColor DarkGray
+    }
+    # Accelerator seed LAST (ADR 0024): merged after every tier layer so an
+    # accelerator key can never be overwritten by the GPU tier's own seed.
+    $accSeed = Get-AcceleratorSeed -ProfilesDoc $pdoc -Ids $accelerators -HailoHome $HAILO_HOME
+    if ($accSeed) {
+      $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $accSeed -OffloadHome $HOME_DIR
+      Write-Host "      accelerators ($($accelerators -join ',')): $(@($accSeed.PSObject.Properties.Name) -join ', ')" -ForegroundColor DarkGray
     }
     $noBomCfg = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($cfgDest, $cfgText, $noBomCfg)
@@ -1346,6 +1389,7 @@ $manifest = [ordered]@{
   profile        = $profileId
   ram_tier       = $ramTier
   big_ram        = $bigRam
+  accelerators   = @($accelerators)
   agent_ctx_tokens = $agentCtxTokens
   render_backend = $tplBackend
   install_date   = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')

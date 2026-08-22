@@ -235,5 +235,30 @@ foreach ($t in @($profiles.PSObject.Properties.Name)) {
   }
 }
 
+# --- Task 6: accelerator seed (ADR 0024) ----------------------------------------------
+Write-Host ""
+Write-Host "== accelerator seed: merged after the tier seed, __HAILO_HOME__ expanded =="
+Assert ([bool](Get-Command Get-AcceleratorSeed -ErrorAction SilentlyContinue)) 'dot-source seam defines Get-AcceleratorSeed'
+$pdoc = Get-Content -Raw (Join-Path (Join-Path $setupDir 'templates') 'profiles.json') | ConvertFrom-Json
+$accSeed = Get-AcceleratorSeed -ProfilesDoc $pdoc -Ids @('hailo-8l') -HailoHome 'D:\Dev\Hailo'
+Assert ($null -ne $accSeed) 'seed returned for hailo-8l'
+$m2 = Merge-ConfigSeed -ConfigText $tplText -Seed $accSeed -OffloadHome 'C:\stack'
+$o2 = $m2 | ConvertFrom-Json
+Assert (@($o2.accelerators) -contains 'hailo-8l') 'config.accelerators lists hailo-8l'
+Assert ($o2.hailo_sidecar_cmd -eq 'D:/Dev/Hailo/hailo-http.cmd') 'hailo_sidecar_cmd expanded __HAILO_HOME__'
+Assert ($o2.hailo_endpoint -eq 'http://127.0.0.1:18813') 'hailo_endpoint seeded'
+$none = Get-AcceleratorSeed -ProfilesDoc $pdoc -Ids @() -HailoHome 'D:\x'
+Assert ($null -eq $none) 'no accelerators -> no seed (config byte-identical to today)'
+$threw = $false
+try { Get-AcceleratorSeed -ProfilesDoc $pdoc -Ids @('tpu') -HailoHome 'D:\x' | Out-Null } catch { $threw = $true }
+Assert $threw 'undeclared accelerator id throws (authoring error, never silent)'
+# The config's accelerators list must survive as a JSON ARRAY (1 element - the PS unroll
+# would hand Go a bare string and the whole config is rejected), same pin as sdcpp_extra_args.
+Assert ($m2 -match '"accelerators":\s*\[') 'config accelerators serializes as a JSON array (no PS unroll)'
+# Manifest idiom pin: installed.json writes `accelerators = @($accelerators)` into an
+# [ordered] hashtable serialized via ConvertTo-Json - a 1-element list must stay an ARRAY.
+$mjson = [ordered]@{ big_ram = $false; accelerators = @(@('hailo-8l')) } | ConvertTo-Json -Depth 6
+Assert ($mjson -match '"accelerators":\s*\[') 'manifest accelerators serializes as a JSON array (1 element, no unroll)'
+
 if ($failures -eq 0) { Write-Host 'ALL PASS' -ForegroundColor Green; exit 0 }
 Write-Host "FAILURES: $failures" -ForegroundColor Red; exit 1

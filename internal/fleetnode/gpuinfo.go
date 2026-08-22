@@ -70,6 +70,9 @@ func SmiDeviceProbe(run func() (string, error)) DeviceProbe {
 type InstalledInfo struct {
 	Profile string `json:"profile"`
 	Backend string `json:"backend"`
+	// Accelerators are the additive devices the installer detected (ADR 0024);
+	// advertised so a delegator can route NPU-owned work here.
+	Accelerators []string `json:"accelerators,omitempty"`
 }
 
 // ReadInstalledInfo loads InstalledInfo from an installed.json path. A missing
