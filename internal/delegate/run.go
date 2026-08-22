@@ -433,17 +433,40 @@ func (r *runner) reportTelemetryLoss() {
 // 27B seat and the 4B seat each missed a different one; acceptance caught both,
 // and the retry is what turns "caught" into "recovered".
 func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract) PlacedResult {
+	start := time.Now()
 	first := r.attempt(ctx, i, contract, nil)
 	if !retryable(first) {
+		return first
+	}
+	// The retry lives INSIDE the subtask's own timeout_sec: the caller was told
+	// that number is the wall ceiling per subtask, and a second full attempt would
+	// have doubled it silently. What is left after the first attempt is the
+	// retry's budget; under the floor there is no honest retry to run.
+	budget := contract.TimeoutSec
+	if budget <= 0 {
+		budget = core.AgentTimeoutSecDefault
+	}
+	// Elapsed rounds UP: a ceiling that credits a 1.2 s attempt as 1 s overstates
+	// what is left, and the retry must never be promised time it does not have.
+	remaining := budget - int((time.Since(start).Milliseconds()+999)/1000)
+	if remaining < minRetrySec {
+		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after the first attempt (floor %ds)", remaining, budget, minRetrySec)
 		return first
 	}
 	alt, ok := r.alternativeNode(ctx, first, contract)
 	if !ok {
 		return first
 	}
-	second := r.attempt(ctx, i, contract, &alt)
+	retryContract := contract
+	retryContract.TimeoutSec = remaining
+	second := r.attempt(ctx, i, retryContract, &alt)
 	return mergeAttempts(first, second)
 }
+
+// minRetrySec is the least timeout_sec budget a retry is worth starting with: a
+// cold seat needs seconds to load and a contract that cannot finish in this
+// would only add a budget defer on top of the verified failure.
+const minRetrySec = 10
 
 // retryable: the node answered and the ANSWER was the problem — a verified
 // wrong result, or a seat honestly abstaining. A transport failure, a budget

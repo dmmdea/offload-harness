@@ -182,6 +182,44 @@ func TestRunRetryBothFailKeepsFirstAttemptAnnotated(t *testing.T) {
 	}
 }
 
+// TestRunRetryStaysInsideTimeoutBudget: the retry gets what the first attempt
+// left of timeout_sec, and is skipped under the floor — timeout_sec remains the
+// per-subtask wall ceiling the caller was told it is.
+func TestRunRetryStaysInsideTimeoutBudget(t *testing.T) {
+	compressPolls(t, 10*time.Millisecond, 2*time.Second)
+	node, url := eligibleNode(t, "node-a", "qube from A")
+	slowWrongLocal := func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+		time.Sleep(1200 * time.Millisecond)
+		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "local", Seat: "local-seat",
+			Output: "no idea", Structured: json.RawMessage(`{"answer":"no idea"}`), StopReason: "done"}, nil
+	}
+	// budget 11 s: after a ~1.2 s first attempt, 9 s remain — under the 10 s floor → no retry
+	c := contracts(1)
+	c[0].TimeoutSec = 11
+	results, sum, err := Run(context.Background(), testCfg(t), slowWrongLocal, c, "spread", []string{url})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := results[0]
+	if pr.RetriedOn != "" || node.dispatches.Load() != 0 || sum.Retried != 0 || !strings.Contains(pr.RetryNote, "retry skipped") || !strings.Contains(pr.RetryNote, "timeout_sec budget") {
+		t.Fatalf("want the retry skipped under the floor with a note, got %+v / %+v (dispatches %d)", pr, sum, node.dispatches.Load())
+	}
+	// budget 12 s: ~10.8 s remain → the retry runs, and the contract it carries has the REMAINING budget
+	var seen atomic.Int64
+	node.onDispatch = func(jobID string, contract core.AgentContract) { seen.Store(int64(contract.TimeoutSec)) }
+	c[0].TimeoutSec = 12
+	results, sum, err = Run(context.Background(), testCfg(t), slowWrongLocal, c, "spread", []string{url})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].RetriedOn != "node-a" || sum.RetryRecovered != 1 {
+		t.Fatalf("want a recovered retry, got %+v / %+v", results[0], sum)
+	}
+	if got := seen.Load(); got <= 0 || got >= 12 {
+		t.Fatalf("retry contract timeout_sec = %d, want the REMAINING budget (0 < n < 12)", got)
+	}
+}
+
 // TestRunNoRetryWithoutADifferentNode: route=local with a failed verification
 // has nowhere else to go — no retry, no annotation, the original result stands.
 func TestRunNoRetryWithoutADifferentNode(t *testing.T) {

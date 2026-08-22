@@ -17,7 +17,9 @@ Versioning: [SemVer](https://semver.org/).
 - **Retry on a different node** after `failed_verification` or an `abstention` defer: one more attempt
   (local → best eligible remote, remote → local) under a fresh job id; the better attempt is published
   with `retried_on` / `retry_note`, the summary gains `retried` / `retry_recovered`. Transport
-  failures and infrastructure/config/contract defers are not retried.
+  failures and infrastructure/config/contract defers are not retried. The retry runs INSIDE the
+  subtask's `timeout_sec` (what the first attempt left; skipped with a note under 10 s), so the
+  documented per-subtask wall ceiling still holds.
 - **`delegate_remotes`** config key: the fleet nodes the delegator considers when a call passes none —
   fleet membership as durable config instead of per-call knowledge. A call's own `remotes` replaces it.
 - **Agent-loop same-tool cap 3 → 8** (`defaultMaxSameTool`): at 3 the cap starved legitimate multi-file
