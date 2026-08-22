@@ -755,3 +755,41 @@ func TestPipelinePathsTildeExpand(t *testing.T) {
 		t.Errorf("pipeline workdir = %q, want %q", spec.Workdir, wantWorkdir)
 	}
 }
+
+func TestAcceleratorDefaultsAreInert(t *testing.T) {
+	c := Default()
+	if len(c.Accelerators) != 0 {
+		t.Fatalf("Accelerators default = %v, want empty (a box with no NPU is byte-identical to today)", c.Accelerators)
+	}
+	if c.HasAccelerator("hailo-8l") {
+		t.Fatal("HasAccelerator(hailo-8l) true on a default config")
+	}
+	if c.HailoEndpoint != "http://127.0.0.1:18813" {
+		t.Errorf("HailoEndpoint = %q, want loopback :18813", c.HailoEndpoint)
+	}
+	if c.HailoSidecarCmd != "" {
+		t.Errorf("HailoSidecarCmd = %q, want \"\" (an installer seeds it; never a baked path)", c.HailoSidecarCmd)
+	}
+	if c.HailoTimeoutSec != 60 || c.HailoIdleSec != 300 {
+		t.Errorf("timeout/idle = %d/%d, want 60/300", c.HailoTimeoutSec, c.HailoIdleSec)
+	}
+}
+
+func TestAcceleratorFieldsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.json")
+	body := `{"accelerators":["hailo-8l"],"hailo_endpoint":"http://127.0.0.1:19999","hailo_sidecar_cmd":"D:/x/hailo-http.cmd","hailo_timeout_sec":7,"hailo_idle_sec":9}`
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.HasAccelerator("hailo-8l") || c.HasAccelerator("tpu") {
+		t.Fatalf("HasAccelerator: got %v", c.Accelerators)
+	}
+	if c.HailoEndpoint != "http://127.0.0.1:19999" || c.HailoSidecarCmd != "D:/x/hailo-http.cmd" || c.HailoTimeoutSec != 7 || c.HailoIdleSec != 9 {
+		t.Fatalf("round-trip lost a field: %+v", c)
+	}
+}
