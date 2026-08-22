@@ -52,7 +52,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.78.0"
+const version = "0.79.0"
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
@@ -239,7 +239,7 @@ Usage:
   local-offload nim <file|-|"text"> [--model id] [--base url] [--system "..."] [--max-tokens N] [--temp F] [--json]
   local-offload nim --list-models        list a NIM endpoint's model ids (free hosted catalog or self-hosted)
   local-offload mcp                      run as an MCP server (stdio)
-  local-offload delegate --contract file.json [--route auto|local|remote] [--read-root DIR] [--remote http://node:18811]...   place delegation-contract subtasks on this box or tailnet fleet nodes (needs agent_delegation_enabled)
+  local-offload delegate --contract file.json [--route auto|spread|local|remote] [--read-root DIR] [--remote http://node:18811]...   place delegation-contract subtasks on this box or tailnet fleet nodes (needs agent_delegation_enabled; remotes default to delegate_remotes)
   local-offload fleet-serve [--listen ADDR] [--listen-trusted-network] [--node-id NAME]   join the fleet-dispatcher fleet (health/dispatch/jobs on :18811; docs/FLEET-NODE.md)
   local-offload fleet-measure            prime the fleet footprint store: one minimal render per configured task, then print the recorded entries
   local-offload ledger [--since DAYS]    token-savings report
@@ -1737,7 +1737,7 @@ func runDelegate(args []string) error {
 	fs := flag.NewFlagSet("delegate", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	contractPath := fs.String("contract", "", "path to the delegation contract JSON: one subtask object or an array of up to 8 (fields: goal, context, context_paths, output_schema, acceptance, profile, max_steps, timeout_sec)")
-	route := fs.String("route", "auto", "placement route: auto (idle-local wins) | local (force in-process) | remote (force a fleet node)")
+	route := fs.String("route", "auto", "placement route: auto (idle-local wins) | spread (round-robin across the local seat AND every eligible fleet node, concurrently) | local (force in-process) | remote (force a fleet node)")
 	readRoot := fs.String("read-root", "", "directory context_paths may be read from (default: the current dir)")
 	var remotes repeatedFlag
 	fs.Var(&remotes, "remote", "remote fleet node base URL, tailnet-only (repeatable)")

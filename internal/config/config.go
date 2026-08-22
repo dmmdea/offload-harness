@@ -813,6 +813,14 @@ type Config struct {
 	// Default false. Distinct from FleetAgentEnabled deliberately — a box can
 	// be a worker without being a delegator and vice versa.
 	AgentDelegationEnabled bool `json:"agent_delegation_enabled,omitempty"`
+	// DelegateRemotes are the fleet node base URLs (tailnet-only, e.g.
+	// "http://lenovo-m720q:18811") the delegator considers when a call passes no
+	// remotes of its own. Durable fleet membership belongs in config, not in every
+	// agent_delegate call: measured 2026-08-21, a delegator whose remotes lived
+	// only in the per-call argument ran every fan-out on one box. A call's own
+	// remotes argument REPLACES this list (it does not merge) so a caller can
+	// still target one node deliberately.
+	DelegateRemotes []string `json:"delegate_remotes,omitempty"`
 	// FleetSampler selects the per-render VRAM footprint source: "auto" (PDH
 	// per-process tree on Windows, nvidia-smi global-delta elsewhere),
 	// "pdh-shared" (J3: the tree summing Dedicated+Shared — REQUIRED on UMA
@@ -1096,6 +1104,7 @@ func Default() Config {
 		FleetAuthToken:                "",                // "" = no agent-lane auth → agent dispatch loopback-only; media lane never auths (v1 scope)
 		FleetAgentEnabled:             false,             // node-side agent-lane worker role: explicit operator opt-in
 		AgentDelegationEnabled:        false,             // delegator-side surfaces (agent_delegate MCP + CLI placement): opt-in
+		DelegateRemotes:               nil,               // fleet node base URLs the delegator considers by default (tailnet-only); per-call remotes replace it
 		FleetSampler:                  "auto",            // auto|pdh|pdh-shared|global (FLEET-NODE.md)
 		PrimaryGPUUUID:                "",                // "" = largest-total headline rule; set to pin by UUID (FLEET-NODE.md)
 		Pipelines:                     nil,               // empty = no pipeline-job routes on this box (opt-in per pipeline)

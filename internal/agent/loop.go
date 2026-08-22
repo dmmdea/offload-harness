@@ -232,11 +232,11 @@ type Loop struct {
 	// Serve is nil, and its whole purpose is to be present on ordinary runs so
 	// the decision it informs is made from real traffic rather than a special
 	// measurement mode nobody remembers to switch on.
-	prefill PrefillStats
-	system     string
-	mem        Memory
-	worktree   string // RW worktree root for durable working memory (AGENT.md + .agent/plan.md); "" disables it
-	exemplars  []Msg  // trusted few-shot messages injected after system, before recall/objective (Task C6)
+	prefill   PrefillStats
+	system    string
+	mem       Memory
+	worktree  string // RW worktree root for durable working memory (AGENT.md + .agent/plan.md); "" disables it
+	exemplars []Msg  // trusted few-shot messages injected after system, before recall/objective (Task C6)
 	// tok is the REAL-tokenizer seam for the token-exact middle cut (TO-4,
 	// cutmiddle.go). Non-nil replaces the estimate-driven whole-turn-drop rung;
 	// wrapped sticky by WithTokenizer so a classified /tokenize failure
@@ -282,7 +282,16 @@ const defaultKeepRecent = 4
 // repeat (same name + same args) is refused on its SECOND occurrence
 // regardless of this cap; this cap catches near-duplicate repeats (e.g.
 // slightly reworded search queries) that the exact-match check would miss.
-const defaultMaxSameTool = 3
+//
+// 8, not 3 (0.79.0): at 3 the cap was the thing that starved legitimate work —
+// a six-question repo reconnaissance needs more than three read_file calls on
+// DIFFERENT paths, and the 27B planner on the reference box hit "read_file is
+// now DISABLED" twice in one day while doing exactly what it was asked. The
+// exact-repeat refusal above is what stops a genuine loop; this cap only has
+// to bound the near-duplicate drift, and 8 distinct calls inside a 12-step run
+// is still a bound. Small-seat tiers that measured better under a tighter cap
+// set it explicitly (builder.Config.MaxSameTool / --max-same-tool).
+const defaultMaxSameTool = 8
 
 // defaultToolTimeout bounds ONE tool call. Until this existed, Loop.dispatch
 // handed t.Exec the whole run context with no deadline, so a single tool could

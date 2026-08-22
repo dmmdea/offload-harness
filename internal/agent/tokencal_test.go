@@ -285,8 +285,12 @@ func TestLoopCalibratesAndCompactsSooner(t *testing.T) {
 		// only regime where enabling calibration is indicated. At the shipped
 		// default (4096) the reservation covers the error on its own — measured,
 		// which is why calibration ships OFF.
+		// The same-tool cap is pinned to the value this fixture was measured at:
+		// the scripted client issues five distinct read_file calls, and the
+		// transcript shape the assertions below were calibrated against is the one
+		// where calls 4-5 are refused. The test is about calibration, not the cap.
 		loop := NewLoop(c, tools, 8).WithSystem("sys").WithContextTokens(8192).WithMaxTokens(1024).
-			WithToolResultCap(len(body) + 1).WithSkeletonPrune(true).
+			WithToolResultCap(len(body) + 1).WithSkeletonPrune(true).WithMaxSameTool(3).
 			WithTokenCalibration(withCal)
 		res, err := loop.Run(context.Background(), "objective: read several dense files")
 		if err != nil {
