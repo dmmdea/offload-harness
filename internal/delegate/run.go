@@ -41,6 +41,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
@@ -1412,6 +1413,14 @@ type delegationLogLine struct {
 	// exemplars, router weights and confhead labels -- relocating it would run the
 	// experiment against an empty cache, which changes the thing being measured.
 	Arm string `json:"arm,omitempty"`
+	// DelegatorVersion / DelegatorBuildSHA256 pin the DELEGATOR-side code that
+	// produced this row (A1, 0.81.0): acceptance evaluation, retry policy and
+	// placement all run here, so a corpus row is only pairable with another
+	// when BOTH ends are pinned — the node's end travels inside Result
+	// (harness_version / harness_build_sha256 / seat_config_*), this is the
+	// other end. Omitempty: pre-0.81 rows read as unknown, never as a value.
+	DelegatorVersion     string `json:"delegator_version,omitempty"`
+	DelegatorBuildSHA256 string `json:"delegator_build_sha256,omitempty"`
 }
 
 // record writes one subtask's telemetry: the delegation-log corpus line and a
@@ -1433,6 +1442,9 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 		Contract:           contract,
 		AcceptanceFailures: pr.AcceptanceFailures,
 		Arm:                strings.TrimSpace(os.Getenv("OFFLOAD_DELEGATE_ARM")),
+		DelegatorVersion:   buildinfo.Version,
+		// Computed once per process (sync.Once) — the per-row cost is a read.
+		DelegatorBuildSHA256: buildinfo.BuildSHA256(),
 	}
 	if pr.Err == "" {
 		res := pr.Result

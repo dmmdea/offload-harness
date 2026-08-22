@@ -6,6 +6,42 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.81.0] - 2026-08-22
+
+### Added — A1 config pinning for the delegate lane; `arm` on the ledger row; prefill on the wire result
+
+Tier 2 of the Phase 2 re-aim (delegate seat-quality experiment) requires that paired cross-seat
+runs REFUSE to compare rows produced under differing serving configs — the 2026-08-17 corpus was
+invalidated by exactly that (config unpinned across the `enable_thinking` fix). Pinning is now
+recorded at the source, on every delegate run, both arms:
+
+- **`seat_config_sha256` / `seat_config_basis` on the agent wire result** — the SERVER-side pin:
+  `agent.ProbeSeatPin` reduces the seat's live `/upstream/{model}/props` answer (build, weights
+  path, quant, `n_ctx`, slots, server sampler defaults, `reasoning_format`, chat-template hash,
+  modalities) to a stable hash over a closed field set, plus a one-line human-readable basis.
+  Stamped by `runAgentTask` only when the seat demonstrably served (the loop completed); pre-loop
+  defers stay unpinned — probing `/props` on a non-resident seat would cold-start a model as a
+  telemetry side effect, so the probe also gives up in 3 s rather than ever waiting out a load.
+- **`harness_version` / `harness_build_sha256` on the agent wire result** — the REQUEST-side pin:
+  per-call temperature, the re-pack's `enable_thinking:false`, and profile toolsets are code, so
+  the exact binary is named (self-SHA-256, computed once per process). A version string alone
+  cannot pin code identity — two checkouts can both say "0.81.0" while one carries uncommitted
+  changes. This is the half the 2026-08-17 defect actually lived on; the `/props` hash alone
+  would not have caught it, and is not sold as if it would.
+- **`delegator_version` / `delegator_build_sha256` on the delegation-log row** — acceptance
+  evaluation, retry policy and placement run delegator-side; a pairable row pins both ends.
+- **`arm` on the LEDGER row** (`OFFLOAD_DELEGATE_ARM`, read at record time like the delegation
+  log's field) — the prefill/cache columns shipped in 0.65.0 were measured under experiment arms
+  and recorded without them: "computed then discarded", one file over from the 0.79.0 fixes.
+- **`prefill_steps`/`prefill_tokens`/`cache_tokens`/`prefill_ms` on the agent wire result** —
+  previously node-ledger-only, so a REMOTE run's prefill economics never reached the delegator's
+  standing corpus. Budget-stopped runs carry them too (they burn the most steps).
+- The delegate CLI/MCP response surfaces the four pins per subtask.
+- All fields additive + omitempty: a pre-0.81 row or node decodes with empty pins, which readers
+  MUST treat as "unknown — refuse to pair", never as a value.
+- `internal/buildinfo`: new home of the version const (main.go aliases it; the VERSION-file
+  agreement test still binds) plus the executable self-hash.
+
 ## [0.80.0] - 2026-08-21
 
 ### Added — `route: spread`, retry on a different seat, `delegate_remotes`; the agent-loop cap raised

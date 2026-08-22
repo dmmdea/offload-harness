@@ -130,6 +130,36 @@ type AgentWireResult struct {
 	DeferClass string `json:"defer_class,omitempty"`
 	WallMs     int64  `json:"wall_ms"`
 	TokensOut  int    `json:"tokens_out,omitempty"`
+
+	// --- A1 config pinning (0.81.0, Tier 2 of the Phase 2 re-aim). Stamped by
+	// runAgentTask only when the seat DEMONSTRABLY SERVED this run (the loop
+	// completed its chat traffic) — a config/infrastructure defer that fired
+	// before any model call carries no pins, because probing /props on a
+	// non-resident seat would cold-start a model as a telemetry side effect.
+	// All omitempty: a pre-0.81 node's result decodes with every pin empty,
+	// which readers MUST treat as "unknown config — refuse to pair", never as
+	// a pinned value (same additive rule as DeferClass above).
+	//
+	// Two halves, deliberately: SeatConfig* pins the SERVER (weights, quant,
+	// build, window, template, server sampler defaults) via agent.ProbeSeatPin;
+	// HarnessVersion + HarnessBuildSHA256 pin the REQUEST-side code (per-call
+	// temperature, the re-pack's enable_thinking:false, profile toolsets) —
+	// the side the 2026-08-17 corpus-invalidating defect actually lived on.
+	HarnessVersion     string `json:"harness_version,omitempty"`
+	HarnessBuildSHA256 string `json:"harness_build_sha256,omitempty"`
+	SeatConfigSHA256   string `json:"seat_config_sha256,omitempty"`
+	SeatConfigBasis    string `json:"seat_config_basis,omitempty"`
+
+	// --- Node-side prefill accounting (T2-B), previously ledger-only. The
+	// node's ledger row already carried these; the DELEGATOR could not see
+	// them, so the standing delegation-log corpus recorded a remote run's
+	// prefill economics nowhere ("computed then discarded", the Tier 1 defect
+	// class). Zero values are omitted — a pre-0.81 node's result reads as
+	// "not measured", never as "zero prefill".
+	PrefillSteps  int     `json:"prefill_steps,omitempty"`
+	PrefillTokens int64   `json:"prefill_tokens,omitempty"`
+	CacheTokens   int64   `json:"cache_tokens,omitempty"`
+	PrefillMS     float64 `json:"prefill_ms,omitempty"`
 }
 
 // DecodeAgentContract reads one contract from r, tolerating unknown fields

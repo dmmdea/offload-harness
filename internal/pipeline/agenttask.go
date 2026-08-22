@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
+	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gbnf"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
@@ -218,6 +219,16 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		meta.PrefillTokens = pf.PrefillTokens
 		meta.CacheTokens = pf.CacheTokens
 		meta.PrefillMS = pf.PrefillMS
+		// Mirror onto the WIRE result too: the node's ledger row already had
+		// these, the delegator's corpus did not — a remote run's prefill
+		// economics were computed then discarded from the delegation log's
+		// point of view. `wire` is copied by finish/deferWire at call time, so
+		// every recording path below (budget defers included — the expensive
+		// runs) carries them.
+		wire.PrefillSteps = pf.ObservedSteps
+		wire.PrefillTokens = pf.PrefillTokens
+		wire.CacheTokens = pf.CacheTokens
+		wire.PrefillMS = pf.PrefillMS
 	}
 	if rerr != nil {
 		// Wall timeout is its own defer shape — the delegator sizes future
@@ -227,6 +238,24 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		}
 		return deferWire(core.DeferClassInfrastructure, "agent loop: "+rerr.Error())
 	}
+
+	// A1 config pinning — stamped HERE, after the loop completed its chat
+	// traffic and before any terminal branch, so success, budget-stop and
+	// every re-pack abstention below all carry the pins (deferWire copies
+	// `wire` at call time). Pre-loop defers (roster, profile, build) stay
+	// unpinned on purpose: their seat never served, and probing /props on a
+	// non-resident seat would COLD-START a model as a telemetry side effect —
+	// which is why the probe also runs on its own short context rather than
+	// cctx (a wall that expired mid-run must not also cost the pin, but the
+	// probe must never wait out a cold load either; ProbeSeatPin's client
+	// gives up in 3s and the pin honestly stays absent).
+	wire.HarnessVersion = buildinfo.Version
+	wire.HarnessBuildSHA256 = buildinfo.BuildSHA256()
+	if pin, ok := agent.ProbeSeatPin(context.Background(), p.cfg.Endpoint, seat); ok {
+		wire.SeatConfigSHA256 = pin.SHA256
+		wire.SeatConfigBasis = pin.Basis
+	}
+
 	if res.StopReason == "budget" {
 		// The loop burned MaxSteps without a final answer. Output is empty on
 		// this path, so there is nothing to re-pack — defer, don't dress an

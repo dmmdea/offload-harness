@@ -75,6 +75,12 @@ type agentFake struct {
 	repackBodies chan map[string]any
 	// rosterStatus, when non-zero, is the status /v1/models answers with.
 	rosterStatus int
+	// props, when non-nil, is served (as JSON) at the seat's
+	// /upstream/{seat}/props passthrough — the A1 pin probe's source. Nil
+	// keeps the historical 404, under which every consumer fails open and the
+	// pin stays absent.
+	props    any
+	propsCNT atomic.Int64
 	loopCalls    atomic.Int64
 	grammarCNT   atomic.Int64
 }
@@ -178,6 +184,12 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":` + string(content) + `},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":7}}`))
 		default:
+			if f.props != nil && r.URL.Path == "/upstream/"+agentTestSeat+"/props" {
+				f.propsCNT.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(f.props)
+				return
+			}
 			// /upstream/... /props, /tokenize, ...: absent — every consumer
 			// fails open (window fallback, legacy tokenizer rung).
 			http.NotFound(w, r)

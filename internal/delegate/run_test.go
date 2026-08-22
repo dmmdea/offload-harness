@@ -15,8 +15,11 @@ package delegate
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -28,11 +31,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 )
+
+// hashOwnExecutable independently hashes the running test binary — the
+// EXPECTED value for buildinfo.BuildSHA256, computed without buildinfo so the
+// assertion compares two implementations rather than the package with itself.
+func hashOwnExecutable(t *testing.T) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	f, err := os.Open(exe)
+	if err != nil {
+		t.Fatalf("open %s: %v", exe, err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		t.Fatalf("hash %s: %v", exe, err)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
 
 // compressPolls shrinks the poll cadence/grace for a test and restores them.
 func compressPolls(t *testing.T, every, grace time.Duration) {
@@ -280,6 +305,9 @@ func TestRunRemoteHappyPathWithAcceptance(t *testing.T) {
 		EstTokens      int             `json:"est_tokens"`
 		Contract       json.RawMessage `json:"contract"`
 		Result         json.RawMessage `json:"result"`
+		// A1 delegator-side pins (0.81.0).
+		DelegatorVersion     string `json:"delegator_version"`
+		DelegatorBuildSHA256 string `json:"delegator_build_sha256"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &line); err != nil {
 		t.Fatalf("delegation-log line: %v (%s)", err, raw)
@@ -289,6 +317,15 @@ func TestRunRemoteHappyPathWithAcceptance(t *testing.T) {
 	}
 	if line.EstTokens <= 0 || line.Placement == "" || len(line.Contract) == 0 || len(line.Result) == 0 {
 		t.Errorf("log line missing corpus fields: %+v", line)
+	}
+	// The delegator pin must name THIS build: version from buildinfo, and the
+	// self-hash equal to hashing the running test binary independently — not
+	// merely non-empty, which would also pass a hash of the wrong file.
+	if line.DelegatorVersion != buildinfo.Version {
+		t.Errorf("delegator_version = %q, want %q", line.DelegatorVersion, buildinfo.Version)
+	}
+	if want := hashOwnExecutable(t); line.DelegatorBuildSHA256 != want {
+		t.Errorf("delegator_build_sha256 = %q, want the running binary's own sha256 %q", line.DelegatorBuildSHA256, want)
 	}
 	rows, lerr := ledger.ReadAll(cfg.LedgerPath)
 	if lerr != nil || len(rows) != 1 {
