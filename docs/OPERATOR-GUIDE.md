@@ -760,6 +760,16 @@ also writes a ledger row
 (`task=agent_delegate` in `local-offload ledger`) and a full contract+result+verdict line
 under the harness base dir at `delegation-log/YYYY-MM-DD.jsonl`.
 
+Experiment support (0.79.0–0.81.0): setting `OFFLOAD_DELEGATE_ARM=<label>` tags every
+delegation-log line **and every ledger row** the process records with `arm:<label>`, so an
+experiment's rows separate cleanly from ordinary traffic after the fact. Each served run's
+result also carries A1 config pins — `harness_version`/`harness_build_sha256` (which binary
+constructed the requests) and `seat_config_sha256`/`seat_config_basis` (what the seat's
+llama-server actually served, hashed from live `/props`) — and the log line adds
+`delegator_version`/`delegator_build_sha256` for the acceptance/placement side. Paired
+cross-seat comparisons must refuse rows whose pins differ or are absent; absent means
+*unknown* (pre-0.81, or the seat was gone by probe time), never "same config".
+
 | Failure | Fix |
 |---|---|
 | `403 agent lane requires fleet_auth_token on a non-loopback listener` | The worker is bound beyond loopback with no token. Set `fleet_auth_token` (same value) on both sides and restart `fleet-serve`. |

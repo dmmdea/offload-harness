@@ -3713,6 +3713,10 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		PrefillTokens:      meta.PrefillTokens,
 		CacheTokens:        meta.CacheTokens,
 		PrefillMS:          meta.PrefillMS,
+		// Same read the delegation log does (delegate.record): per-row, so a
+		// long-lived process whose environment never changes still labels
+		// every row consistently, and an untagged process writes nothing.
+		Arm: strings.TrimSpace(os.Getenv("OFFLOAD_DELEGATE_ARM")),
 	}
 }
 

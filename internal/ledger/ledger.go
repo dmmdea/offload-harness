@@ -108,6 +108,17 @@ type Entry struct {
 	PrefillTokens int64   `json:"prefill_tokens,omitempty"`
 	CacheTokens   int64   `json:"cache_tokens,omitempty"`
 	PrefillMS     float64 `json:"prefill_ms,omitempty"`
+	// Arm labels which experimental arm this row was recorded under — the
+	// LEDGER twin of the delegation log's field of the same name (see
+	// delegate.delegationLogLine.Arm for the full argument: once rows from an
+	// experiment and ordinary traffic interleave unlabelled in one file, no
+	// timestamp separates them afterwards). Set from OFFLOAD_DELEGATE_ARM at
+	// record time, process-wide: every row a tagged process records (agent,
+	// agent_delegate, cascade offloads it triggers) belongs to that arm's run.
+	// Without this, the prefill columns above are measured under an arm and
+	// recorded without it — the exact "computed then discarded" defect class
+	// the 0.79.0 instrument-honesty round was about, one file over.
+	Arm string `json:"arm,omitempty"`
 }
 
 // Label provenance values for Entry.LabelSource. Constants rather than string literals so

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
+	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/cache"
 	"github.com/dmmdea/offload-harness/internal/calibration"
 	"github.com/dmmdea/offload-harness/internal/confhead"
@@ -52,7 +53,10 @@ import (
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
 
-const version = "0.81.0"
+// version aliases buildinfo.Version — the const moved to a shared package in
+// 0.81.0 so the pipeline/fleet A1 stampers can read it without plumbing; the
+// VERSION-file agreement test in main_test.go still binds through this alias.
+const version = buildinfo.Version
 
 // Keep config.example.json in lockstep with config.Default() (LO-17):
 //go:generate go run ./cmd/genexample
