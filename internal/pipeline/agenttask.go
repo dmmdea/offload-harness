@@ -195,6 +195,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		return deferWire(core.DeferClassConfig, perr.Error())
 	}
 	built.Loop.WithProfile(prof)
+	// Record the RESOLVED profile, not contract.Profile: an empty contract field defaults to
+	// "research" just above, and logging the empty string would misattribute every defaulted
+	// run. Set here, before Loop.Run, so the defer branches below carry it too -- a run that
+	// times out is exactly when knowing its profile matters most.
+	meta.AgentProfile = profileName
 
 	res, rerr := built.Loop.Run(cctx, contract.Goal)
 	wire.Steps = res.Steps

@@ -256,6 +256,17 @@ type Meta struct {
 	// unmeasured. Without it, prefill_tokens:0 is ambiguous between "the server reused
 	// everything" and "nothing was ever observed" -- opposite conclusions.
 	PrefillSteps  int     `json:"prefill_steps,omitempty"`
+	// AgentProfile is the agent profile this run actually resolved to.
+	//
+	// It is chosen at internal/pipeline/agenttask.go (contract.Profile, defaulting to
+	// "research") and was previously used to configure the loop and then discarded -- the
+	// same "computed then thrown away" defect the prefill fields above were added to close.
+	//
+	// It matters because profile is the single largest measured lever on small seats
+	// (0 -> 72% recall on a 6GB tier came from changing nothing but this), so a prefill or
+	// quality figure aggregated across profiles is an average over materially different
+	// configurations. Without it, per-(seat, profile) cost cannot be separated at all.
+	AgentProfile string `json:"agent_profile,omitempty"`
 	PrefillTokens int64   `json:"prefill_tokens,omitempty"`
 	CacheTokens   int64   `json:"cache_tokens,omitempty"`
 	PrefillMS     float64 `json:"prefill_ms,omitempty"`

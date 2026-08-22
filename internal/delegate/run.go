@@ -1172,20 +1172,37 @@ var delegationLogMu sync.Mutex
 // small-model agent-task corpus (no sub-27B agent data exists anywhere; this
 // accumulates it from real work).
 type delegationLogLine struct {
-	TS                 int64              `json:"ts"`
-	JobID              string             `json:"job_id"`
-	Node               string             `json:"node"`
-	Seat               string             `json:"seat"`
-	PlacementReason    string             `json:"placement_reason"`
-	Deferred           bool               `json:"deferred"`
-	DeferClass         string             `json:"defer_class,omitempty"`
-	AcceptancePass     bool               `json:"acceptance_pass"`
-	WallMs             int64              `json:"wall_ms"`
-	EstTokens          int                `json:"est_tokens"`
-	Error              string             `json:"error,omitempty"`
-	Contract           core.AgentContract `json:"contract"`
+	TS                 int64                 `json:"ts"`
+	JobID              string                `json:"job_id"`
+	Node               string                `json:"node"`
+	Seat               string                `json:"seat"`
+	PlacementReason    string                `json:"placement_reason"`
+	Deferred           bool                  `json:"deferred"`
+	DeferClass         string                `json:"defer_class,omitempty"`
+	AcceptancePass     bool                  `json:"acceptance_pass"`
+	WallMs             int64                 `json:"wall_ms"`
+	EstTokens          int                   `json:"est_tokens"`
+	Error              string                `json:"error,omitempty"`
+	Contract           core.AgentContract    `json:"contract"`
 	Result             *core.AgentWireResult `json:"result,omitempty"`
-	AcceptanceFailures []string           `json:"acceptance_failures,omitempty"`
+	AcceptanceFailures []string              `json:"acceptance_failures,omitempty"`
+	// Arm labels which experimental arm produced this row.
+	//
+	// This is an ENABLER, not a convenience. The delegation log is append-only and is
+	// written CONCURRENTLY by whatever sessions are running -- during one review pass it
+	// grew 20 -> 24 rows, and some of those new rows were themselves a cross-seat replay.
+	// Once arms are interleaved in one file with no label, they cannot be separated after
+	// the fact: timestamps do not distinguish an experiment from ordinary traffic.
+	//
+	// Set from OFFLOAD_DELEGATE_ARM. Empty (omitted) for ordinary traffic, which is what
+	// makes the field safe to add: existing rows and unlabelled runs read as "not part of
+	// any arm" rather than as a missing value.
+	//
+	// NOTE the rejected alternative: pointing the delegation log at a scratch directory to
+	// isolate a run. BaseDir() is the single state root for cache.db, ledger.jsonl, media,
+	// exemplars, router weights and confhead labels -- relocating it would run the
+	// experiment against an empty cache, which changes the thing being measured.
+	Arm string `json:"arm,omitempty"`
 }
 
 // record writes one subtask's telemetry: the delegation-log corpus line and a
@@ -1206,6 +1223,7 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 		Error:              pr.Err,
 		Contract:           contract,
 		AcceptanceFailures: pr.AcceptanceFailures,
+		Arm:                strings.TrimSpace(os.Getenv("OFFLOAD_DELEGATE_ARM")),
 	}
 	if pr.Err == "" {
 		res := pr.Result
