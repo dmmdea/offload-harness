@@ -83,6 +83,20 @@ type PlacedResult struct {
 	// fleet down for a week read green forever. Counted into
 	// Summary.Infrastructure, which is what makes it audible.
 	remotesUnreachable bool
+	// RetriedOn names the node a second attempt ran on after the first attempt
+	// came back failed_verification or an honest abstention. The published
+	// result is the BETTER attempt (a success beats any failure; otherwise the
+	// first attempt stands), and RetryNote says what the other attempt did, so a
+	// reader can tell "the 27B fixed what the 4B missed" from "both seats missed".
+	// Empty when no retry ran (no different node was available, or the first
+	// attempt did not qualify).
+	RetriedOn string
+	RetryNote string
+	// retryRecovered: this published result IS the retry, and it succeeded where
+	// the first attempt did not (Summary.RetryRecovered). ranLocal records where
+	// the attempt ran so the retry can pick a DIFFERENT node.
+	retryRecovered bool
+	ranLocal       bool
 }
 
 // Summary is the per-run outcome tally, reported AT THE TOP of every surface's
@@ -157,6 +171,12 @@ type Summary struct {
 	CorpusRowsLost      int
 	LedgerRowsAttempted int
 	LedgerRowsLost      int
+	// Retried counts subtasks that got a second attempt on a different node
+	// after a failed_verification / abstention; RetryRecovered is the subset the
+	// second attempt turned into a success. Annotations, not buckets: the four
+	// outcome counts above still add up to len(results).
+	Retried        int
+	RetryRecovered int
 }
 
 const (
@@ -213,15 +233,21 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 	switch route {
 	case "":
 		route = "auto"
-	case "auto", "local", "remote":
+	case "auto", "local", "remote", "spread":
 	default:
-		return nil, Summary{}, fmt.Errorf("delegate: route %q not recognized (want auto, local, or remote)", route)
+		return nil, Summary{}, fmt.Errorf("delegate: route %q not recognized (want auto, spread, local, or remote)", route)
 	}
 	if len(subtasks) == 0 {
 		return nil, Summary{}, fmt.Errorf("delegate: at least one subtask required")
 	}
 	if len(subtasks) > maxSubtasks {
 		return nil, Summary{}, fmt.Errorf("delegate: %d subtasks exceeds the max of %d", len(subtasks), maxSubtasks)
+	}
+	// Fleet membership is configuration: a call that names no remotes uses the
+	// config's delegate_remotes. A call's own list REPLACES it (never merges) so
+	// one node can still be targeted deliberately.
+	if len(remotes) == 0 {
+		remotes = cfg.DelegateRemotes
 	}
 	for _, base := range remotes {
 		if err := netguard.TailnetURL(base); err != nil {
@@ -252,6 +278,12 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 	}
 
 	r := &runner{cfg: cfg, local: local, route: route, remotes: remotes, led: led, ledgerUnopened: ledgerUnopened}
+	// route=spread probes the fleet ONCE per run: every subtask deals itself
+	// across the same roster, so per-subtask probing would be N identical GETs
+	// and could even deal two subtasks against different snapshots.
+	if route == "spread" {
+		r.spreadViews, r.spreadBases, r.spreadProbeErrs = r.fetchViews(ctx)
+	}
 	results := make([]PlacedResult, len(subtasks))
 	sem := make(chan struct{}, runConcurrency)
 	var wg sync.WaitGroup
@@ -261,13 +293,19 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 		go func(i int, contract core.AgentContract) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			results[i] = r.runOne(ctx, contract)
+			results[i] = r.runOne(ctx, i, contract)
 		}(i, c)
 	}
 	wg.Wait()
 
 	var sum Summary
 	for _, pr := range results {
+		if pr.RetriedOn != "" {
+			sum.Retried++
+		}
+		if pr.retryRecovered {
+			sum.RetryRecovered++
+		}
 		// The bucket and the broken-stack ANNOTATION are decided separately: a
 		// local placement can succeed while the fleet it declined to use is
 		// down, and that must still count as infrastructure.
@@ -361,6 +399,19 @@ type runner struct {
 	corpusLost  atomic.Int64
 	ledgerTried atomic.Int64
 	ledgerLost  atomic.Int64
+	// spreadViews/Bases/ProbeErrs are the ONE fleet snapshot a route=spread run
+	// deals its subtasks across (fetched in Run, read-only afterwards).
+	spreadViews     []NodeView
+	spreadBases     []string
+	spreadProbeErrs []string
+}
+
+// placement is a resolved "run it HERE" — the node, its dial base ("" for
+// local) and the human-readable reason that rides the result.
+type placement struct {
+	view   NodeView
+	base   string
+	reason string
 }
 
 // reportTelemetryLoss emits the ONE end-of-run line naming how much telemetry
@@ -375,12 +426,163 @@ func (r *runner) reportTelemetryLoss() {
 	}
 }
 
-// runOne places and executes one subtask, then verifies and records it. Every
-// return path passes through finish() so no outcome can skip telemetry.
-func (r *runner) runOne(ctx context.Context, contract core.AgentContract) PlacedResult {
+// runOne runs one subtask: a first attempt placed per route, then — when the
+// first attempt came back failed_verification or an honest abstention and a
+// DIFFERENT node is available — exactly one retry there, publishing the better
+// of the two. Measured motivation (2026-08-21): on the same four contracts the
+// 27B seat and the 4B seat each missed a different one; acceptance caught both,
+// and the retry is what turns "caught" into "recovered".
+func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract) PlacedResult {
 	start := time.Now()
-	// Delegator-mints-the-id (roast delta 14): minted per subtask, BEFORE
-	// placement, so even a local run correlates its telemetry line.
+	first := r.attempt(ctx, i, contract, nil)
+	if !retryable(first) {
+		return first
+	}
+	// The retry lives INSIDE the subtask's own timeout_sec: the caller was told
+	// that number is the wall ceiling per subtask, and a second full attempt would
+	// have doubled it silently. What is left after the first attempt is the
+	// retry's budget; under the floor there is no honest retry to run.
+	budget := contract.TimeoutSec
+	if budget <= 0 {
+		budget = core.AgentTimeoutSecDefault
+	}
+	// Elapsed rounds UP: a ceiling that credits a 1.2 s attempt as 1 s overstates
+	// what is left, and the retry must never be promised time it does not have.
+	remaining := budget - int((time.Since(start).Milliseconds()+999)/1000)
+	if remaining < minRetrySec {
+		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after the first attempt (floor %ds)", remaining, budget, minRetrySec)
+		return first
+	}
+	alt, ok := r.alternativeNode(ctx, first, contract)
+	if !ok {
+		return first
+	}
+	retryContract := contract
+	retryContract.TimeoutSec = remaining
+	second := r.attempt(ctx, i, retryContract, &alt)
+	return mergeAttempts(first, second)
+}
+
+// minRetrySec is the least timeout_sec budget a retry is worth starting with: a
+// cold seat needs seconds to load and a contract that cannot finish in this
+// would only add a budget defer on top of the verified failure.
+const minRetrySec = 10
+
+// retryable: the node answered and the ANSWER was the problem — a verified
+// wrong result, or a seat honestly abstaining. A transport failure, a budget
+// defer, or a broken/misconfigured stack is not something another seat fixes,
+// and a contract-classed defer is the caller's to fix.
+func retryable(pr PlacedResult) bool {
+	if pr.Err != "" {
+		return false
+	}
+	if len(pr.AcceptanceFailures) > 0 {
+		return true
+	}
+	return pr.Result.Deferred && pr.Result.DeferClass == core.DeferClassAbstention
+}
+
+// alternativeNode picks the node a retry runs on: the best eligible remote
+// when the first attempt ran locally (probing the fleet now if this run has
+// not yet), the local seat when it ran remotely. ok=false when no different
+// node can take the contract.
+func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contract core.AgentContract) (placement, bool) {
+	st := Subtask{Contract: contract, EstTokens: EstimateTokens(contract)}
+	localView := NodeView{NodeID: r.localNodeID(), AgentSeat: r.cfg.AgentPlannerModel(""), Local: true}
+	why := attemptOutcome(first)
+	if !first.ranLocal {
+		return placement{view: localView, reason: "retry on local after " + first.Node + " " + why}, true
+	}
+	if r.route == "local" {
+		return placement{}, false
+	}
+	views, bases := r.spreadViews, r.spreadBases
+	if r.route != "spread" {
+		views, bases, _ = r.fetchViews(ctx)
+	}
+	chosen := Place(st, localView, views, true)
+	if chosen.Local {
+		return placement{}, false
+	}
+	return placement{view: chosen, base: baseFor(chosen, views, bases), reason: "retry on " + chosen.NodeID + " after local " + why}, true
+}
+
+// attemptOutcome names an attempt's outcome for the retry annotations.
+func attemptOutcome(pr PlacedResult) string {
+	switch {
+	case pr.Err != "":
+		return "failed: " + pr.Err
+	case pr.Result.Deferred:
+		return "deferred (" + pr.Result.DeferClass + "): " + pr.Result.Reason
+	case len(pr.AcceptanceFailures) > 0:
+		return fmt.Sprintf("failed_verification: %v", pr.AcceptanceFailures)
+	}
+	return "succeeded"
+}
+
+// mergeAttempts publishes the better attempt: a clean second attempt wins
+// (and is marked recovered); otherwise the FIRST attempt stands — its
+// verified-wrong answer is still the more informative artifact — annotated
+// with what the retry did. Both attempts were recorded by finish() already.
+func mergeAttempts(first, second PlacedResult) PlacedResult {
+	clean := second.Err == "" && !second.Result.Deferred && len(second.AcceptanceFailures) == 0
+	if clean {
+		second.RetriedOn = second.Node
+		second.RetryNote = "first attempt on " + first.Node + " " + attemptOutcome(first) + "; this result is the retry"
+		second.retryRecovered = true
+		return second
+	}
+	first.RetriedOn = second.Node
+	first.RetryNote = "retry on " + second.Node + " also " + attemptOutcome(second) + "; this result is the first attempt"
+	return first
+}
+
+// baseFor resolves the dial base of a chosen remote view ("" when absent).
+func baseFor(chosen NodeView, views []NodeView, bases []string) string {
+	for i := range views {
+		if views[i] == chosen {
+			return bases[i]
+		}
+	}
+	return ""
+}
+
+// placeSpread deals subtask i across the run's fleet snapshot: slot 0 is the
+// local seat, then every remote that passes the hard gate FOR THIS SUBTASK in
+// roster order; i mod len picks the slot. The eligible set is per subtask on
+// purpose — a contract too big for the 8k seat must not be dealt to it just
+// because its sibling fit. With nothing eligible the subtask runs local and
+// the reason says why; an infrastructure-class reason is flagged deadFleet
+// exactly as route=auto flags it.
+func (r *runner) placeSpread(i int, st Subtask, localView NodeView) (placement, bool) {
+	nodes := []NodeView{localView}
+	bases := []string{""}
+	for j, v := range r.spreadViews {
+		if remoteEligible(st, v) {
+			nodes = append(nodes, v)
+			bases = append(bases, r.spreadBases[j])
+		}
+	}
+	if len(nodes) == 1 {
+		why, class := r.noEligibleRemote(st, r.spreadViews, r.spreadProbeErrs)
+		return placement{view: localView, reason: "route=spread: no eligible remote — local (" + why + ")"}, class == core.DeferClassInfrastructure
+	}
+	k := i % len(nodes)
+	name := "local"
+	if !nodes[k].Local {
+		name = nodes[k].NodeID
+	}
+	return placement{view: nodes[k], base: bases[k], reason: fmt.Sprintf("route=spread → %s (slot %d of %d)", name, k+1, len(nodes))}, false
+}
+
+// attempt places (per route, or as forced by a retry) and executes one
+// subtask, then verifies and records it. Every return path passes through
+// finish() so no outcome can skip telemetry.
+func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract, forced *placement) PlacedResult {
+	start := time.Now()
+	// Delegator-mints-the-id (roast delta 14): minted per attempt, BEFORE
+	// placement, so even a local run correlates its telemetry line — and a
+	// retry never reuses the id a node may still hold.
 	jobID := mintJobID()
 
 	finish := func(pr PlacedResult) PlacedResult {
@@ -399,80 +601,87 @@ func (r *runner) runOne(ctx context.Context, contract core.AgentContract) Placed
 	st := Subtask{Contract: contract, EstTokens: EstimateTokens(contract)}
 	localView := NodeView{NodeID: r.localNodeID(), AgentSeat: r.cfg.AgentPlannerModel(""), Local: true}
 
-	// Placement. Health is fetched ONLY when a remote could actually be
-	// chosen (route=remote, or route=auto with the local GPU spoken for):
-	// Place ignores remotes entirely when the local node is idle, so probing
-	// them would be pure chatter.
-	busy := false
-	switch r.route {
-	case "remote":
-		busy = true // forced remote behaves as "local unavailable" for Place
-	case "auto":
-		busy = LocalBusy(r.cfg.GPULockPath, r.cfg.StateDir)
-	}
-	var views []NodeView
-	var bases []string
-	var probeErrs []string
-	if busy && r.route != "local" {
-		views, bases, probeErrs = r.fetchViews(ctx)
-	}
-	chosen := Place(st, localView, views, busy)
-
-	var reason string
+	var chosen NodeView
+	var base, reason string
 	// deadFleet marks a LOCAL placement taken while the configured fleet was
 	// failing its health probe — see PlacedResult.remotesUnreachable.
 	deadFleet := false
 	switch {
-	case r.route == "local":
-		reason = "route=local forced"
-	case r.route == "remote" && chosen.Local:
-		// An explicit remote route with nothing eligible must NOT silently
-		// fall local — defer loudly and let the caller decide. The diagnosis
-		// distinguishes the causes that used to share one sentence, and the
-		// class separates "a box is broken" from "this contract cannot be
-		// placed anywhere, however healthy the fleet".
-		why, class := r.noEligibleRemote(st, views, probeErrs)
-		return finish(PlacedResult{
-			Node: localView.NodeID, Seat: localView.AgentSeat,
-			PlacementReason: "route=remote: no eligible remote",
-			Result: core.AgentWireResult{
-				SchemaVersion: core.AgentWireSchemaVersion,
-				Deferred:      true,
-				DeferClass:    class,
-				Reason:        "route=remote: " + why,
-			},
-		})
-	case r.route == "remote":
-		reason = "route=remote forced → " + chosen.NodeID
-	case !busy:
-		reason = "local idle"
-	case chosen.Local:
-		why, class := r.noEligibleRemote(st, views, probeErrs)
-		reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
-		// USE the class here too. route=remote already exits non-zero on a
-		// fleet that failed every probe; route=auto discarded the identical
-		// verdict (`why, _ :=`), so a fleet that had been down for a week read
-		// green forever behind a series of correct local placements. The
-		// placement stays right — the work runs locally — but the broken fleet
-		// gets reported. Only the INFRASTRUCTURE class is loud: "no remotes
-		// configured" and "they answered and did not qualify" are ordinary
-		// idle-local life and must never make a normal run exit non-zero.
-		deadFleet = class == core.DeferClassInfrastructure
+	case forced != nil:
+		chosen, base, reason = forced.view, forced.base, forced.reason
+	case r.route == "spread":
+		var p placement
+		p, deadFleet = r.placeSpread(i, st, localView)
+		chosen, base, reason = p.view, p.base, p.reason
 	default:
-		reason = "local busy; placed on " + chosen.NodeID
+		// Placement. Health is fetched ONLY when a remote could actually be
+		// chosen (route=remote, or route=auto with the local GPU spoken for):
+		// Place ignores remotes entirely when the local node is idle, so probing
+		// them would be pure chatter.
+		busy := false
+		switch r.route {
+		case "remote":
+			busy = true // forced remote behaves as "local unavailable" for Place
+		case "auto":
+			busy = LocalBusy(r.cfg.GPULockPath, r.cfg.StateDir)
+		}
+		var views []NodeView
+		var bases []string
+		var probeErrs []string
+		if busy && r.route != "local" {
+			views, bases, probeErrs = r.fetchViews(ctx)
+		}
+		chosen = Place(st, localView, views, busy)
+
+		switch {
+		case r.route == "local":
+			reason = "route=local forced"
+		case r.route == "remote" && chosen.Local:
+			// An explicit remote route with nothing eligible must NOT silently
+			// fall local — defer loudly and let the caller decide. The diagnosis
+			// distinguishes the causes that used to share one sentence, and the
+			// class separates "a box is broken" from "this contract cannot be
+			// placed anywhere, however healthy the fleet".
+			why, class := r.noEligibleRemote(st, views, probeErrs)
+			return finish(PlacedResult{
+				Node: localView.NodeID, Seat: localView.AgentSeat,
+				PlacementReason: "route=remote: no eligible remote",
+				Result: core.AgentWireResult{
+					SchemaVersion: core.AgentWireSchemaVersion,
+					Deferred:      true,
+					DeferClass:    class,
+					Reason:        "route=remote: " + why,
+				},
+			})
+		case r.route == "remote":
+			reason = "route=remote forced → " + chosen.NodeID
+		case !busy:
+			reason = "local idle"
+		case chosen.Local:
+			why, class := r.noEligibleRemote(st, views, probeErrs)
+			reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
+			// USE the class here too. route=remote already exits non-zero on a
+			// fleet that failed every probe; route=auto discarded the identical
+			// verdict (`why, _ :=`), so a fleet that had been down for a week read
+			// green forever behind a series of correct local placements. The
+			// placement stays right — the work runs locally — but the broken fleet
+			// gets reported. Only the INFRASTRUCTURE class is loud: "no remotes
+			// configured" and "they answered and did not qualify" are ordinary
+			// idle-local life and must never make a normal run exit non-zero.
+			deadFleet = class == core.DeferClassInfrastructure
+		default:
+			reason = "local busy; placed on " + chosen.NodeID
+		}
+		if !chosen.Local {
+			base = baseFor(chosen, views, bases)
+		}
 	}
 
 	if chosen.Local {
 		pr := r.runLocal(ctx, contract, localView, reason)
 		pr.remotesUnreachable = deadFleet
+		pr.ranLocal = true
 		return finish(pr)
-	}
-	base := ""
-	for i := range views {
-		if views[i] == chosen {
-			base = bases[i]
-			break
-		}
 	}
 	if base == "" {
 		// Unreachable (chosen came from views); kept for defense — a placement

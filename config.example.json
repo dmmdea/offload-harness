@@ -179,6 +179,7 @@
   "fleet_auth_token": "",
   "fleet_agent_enabled": false,
   "agent_delegation_enabled": false,
+  "delegate_remotes": null,
   "fleet_sampler": "auto",
   "primary_gpu_uuid": "",
   "pipelines": null

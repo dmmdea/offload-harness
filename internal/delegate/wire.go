@@ -52,6 +52,11 @@ type SummaryWire struct {
 	CorpusRowsAttempted int `json:"corpus_rows_attempted,omitempty"`
 	LedgerRowsLost      int `json:"ledger_rows_lost,omitempty"`
 	LedgerRowsAttempted int `json:"ledger_rows_attempted,omitempty"`
+	// Retried / RetryRecovered: second attempts on a different node after a
+	// failed_verification or abstention, and how many of them recovered.
+	// omitempty — a run with no retry publishes byte-identically to before.
+	Retried        int `json:"retried,omitempty"`
+	RetryRecovered int `json:"retry_recovered,omitempty"`
 }
 
 // ResultWire is one subtask's published outcome. Failed marks a
@@ -71,6 +76,10 @@ type ResultWire struct {
 	Failed             bool            `json:"failed,omitempty"`
 	AcceptanceFailures []string        `json:"acceptance_failures,omitempty"`
 	WallMs             int64           `json:"wall_ms"`
+	// RetriedOn / RetryNote: the published result is the better of two attempts
+	// when a retry ran; the note says what the other attempt did.
+	RetriedOn string `json:"retried_on,omitempty"`
+	RetryNote string `json:"retry_note,omitempty"`
 }
 
 // ResponseWire is the full response: summary first, then per-subtask results
@@ -94,6 +103,8 @@ func WireResponse(results []PlacedResult, sum Summary) ResponseWire {
 			CorpusRowsAttempted: sum.CorpusRowsAttempted,
 			LedgerRowsLost:      sum.LedgerRowsLost,
 			LedgerRowsAttempted: sum.LedgerRowsAttempted,
+			Retried:             sum.Retried,
+			RetryRecovered:      sum.RetryRecovered,
 		},
 		Results: make([]ResultWire, 0, len(results)),
 	}
@@ -110,6 +121,8 @@ func WireResponse(results []PlacedResult, sum Summary) ResponseWire {
 			DeferClass:         pr.Result.DeferClass,
 			AcceptanceFailures: pr.AcceptanceFailures,
 			WallMs:             pr.wallMs,
+			RetriedOn:          pr.RetriedOn,
+			RetryNote:          pr.RetryNote,
 		}
 		if pr.Err != "" {
 			rw.Failed = true

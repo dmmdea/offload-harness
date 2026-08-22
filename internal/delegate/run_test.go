@@ -316,12 +316,15 @@ func TestRunAcceptanceFailureFlipsToFailedVerification(t *testing.T) {
 	}
 	srv := node.server()
 
-	results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{remoteContract()}, "remote", []string{srv.URL})
+	// 0.79.0: a failed verification earns ONE retry on a different node — here
+	// the local seat, which answers just as wrongly, so the first (remote)
+	// attempt stands and the summary reports the retry without a recovery.
+	results, sum, err := Run(t.Context(), testCfg(t), failingLocal(new(atomic.Int64)), []core.AgentContract{remoteContract()}, "remote", []string{srv.URL})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if sum != (Summary{FailedVerification: 1}) {
-		t.Fatalf("summary = %+v, want exactly one failed-verification", sum)
+	if sum != (Summary{FailedVerification: 1, Retried: 1}) {
+		t.Fatalf("summary = %+v, want exactly one failed-verification (retried once, not recovered)", sum)
 	}
 	r := results[0]
 	if len(r.AcceptanceFailures) != 1 || !strings.Contains(r.AcceptanceFailures[0], "contains:qube") {
@@ -788,12 +791,14 @@ func TestRunAbstentionDeferIsNotInfrastructure(t *testing.T) {
 	}
 	srv := node.server()
 
-	_, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{remoteContract()}, "remote", []string{srv.URL})
+	// 0.79.0: an abstention earns ONE retry on a different node; the local seat
+	// abstains too, so the defer stands — plain, retried, not infrastructure.
+	_, sum, err := Run(t.Context(), testCfg(t), abstainingLocal(), []core.AgentContract{remoteContract()}, "remote", []string{srv.URL})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if sum != (Summary{Deferred: 1}) {
-		t.Fatalf("summary = %+v, want a plain defer (abstention is not a broken node)", sum)
+	if sum != (Summary{Deferred: 1, Retried: 1}) {
+		t.Fatalf("summary = %+v, want a plain defer (abstention is not a broken node), retried once", sum)
 	}
 }
 

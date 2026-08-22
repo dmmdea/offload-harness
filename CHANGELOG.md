@@ -6,6 +6,27 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.80.0] - 2026-08-21
+
+### Added — `route: spread`, retry on a different seat, `delegate_remotes`; the agent-loop cap raised
+
+- **`route: "spread"`** for `agent_delegate` / `delegate`: one call deals its subtasks round-robin across
+  the local seat AND every fleet node that passes the hard gate, concurrently. Measured on 2026-08-21
+  before this existed: four concurrent contracts under `auto` all ran on Qube's 27B seat ("local
+  idle"), and under `remote` all four ran on Lenovo — the fleet never ran in parallel from one call.
+- **Retry on a different node** after `failed_verification` or an `abstention` defer: one more attempt
+  (local → best eligible remote, remote → local) under a fresh job id; the better attempt is published
+  with `retried_on` / `retry_note`, the summary gains `retried` / `retry_recovered`. Transport
+  failures and infrastructure/config/contract defers are not retried. The retry runs INSIDE the
+  subtask's `timeout_sec` (what the first attempt left; skipped with a note under 10 s), so the
+  documented per-subtask wall ceiling still holds.
+- **`delegate_remotes`** config key: the fleet nodes the delegator considers when a call passes none —
+  fleet membership as durable config instead of per-call knowledge. A call's own `remotes` replaces it.
+- **Agent-loop same-tool cap 3 → 8** (`defaultMaxSameTool`): at 3 the cap starved legitimate multi-file
+  reconnaissance (the 27B planner hit "read_file is now DISABLED" twice in one day while doing what it
+  was asked); the exact-repeat refusal remains the loop guard.
+- Docs: fleet-node.md gains "Placement routes and the retry"; coding-agent.md cap text; README row.
+
 ## [0.79.0] - 2026-08-21
 
 ### Added

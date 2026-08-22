@@ -40,9 +40,12 @@ Two independent limits keep a weak model from burning the budget on nothing:
 - **A step budget** — the loop stops with `StopReason: "budget"`.
 - **Tool-call caps** — `dispatchOrThrottle` sits between the model's request and execution. It
   refuses an exact repeat (same tool, byte-identical arguments), and it caps calls per tool name
-  (`--max-same-tool`, default 3). A tool that breaches the name cap is *also removed from the tool
-  list sent on every later request* — structural enforcement, added after a 9B model re-issued an
-  already-refused identical call seventeen times in a row.
+  (`--max-same-tool`, default 8 since 0.80.0 — it was 3, and at 3 the cap starved legitimate
+  multi-file reconnaissance: a six-question repo recon needs more than three `read_file` calls on
+  different paths, and the exact-repeat refusal is what actually stops a stuck loop). A tool that
+  breaches the name cap is *also removed from the tool list sent on every later request* —
+  structural enforcement, added after a 9B model re-issued an already-refused identical call
+  seventeen times in a row.
 
 The ordering here is load-bearing and documented in the code: the name cap must be checked before the
 exact-repeat check, or a model stuck on an identical call matches the repeat branch forever and never
