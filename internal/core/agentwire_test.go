@@ -462,8 +462,15 @@ func TestAgentWireJSONTags(t *testing.T) {
 		SchemaVersion: 1, NodeID: "lenovo", Seat: "offload-e4b", Output: "o",
 		Structured: json.RawMessage(`{}`), Steps: 3, StopReason: "done",
 		Deferred: true, Reason: "r", WallMs: 12, TokensOut: 9,
+		// A1 pins + prefill (0.81.0) — populated here so the enumeration below
+		// actually covers them (they are omitempty; an unset fixture would let
+		// a renamed json tag slip through this test unseen).
+		HarnessVersion: "0.81.0", HarnessBuildSHA256: "hb", SeatConfigSHA256: "sc", SeatConfigBasis: "b",
+		PrefillSteps: 2, PrefillTokens: 100, CacheTokens: 40, PrefillMS: 3.5,
 	}
-	wantResult := []string{"schema_version", "node_id", "seat", "output", "structured", "steps", "stop_reason", "deferred", "reason", "wall_ms", "tokens_out"}
+	wantResult := []string{"schema_version", "node_id", "seat", "output", "structured", "steps", "stop_reason", "deferred", "reason", "wall_ms", "tokens_out",
+		"harness_version", "harness_build_sha256", "seat_config_sha256", "seat_config_basis",
+		"prefill_steps", "prefill_tokens", "cache_tokens", "prefill_ms"}
 	got = keysOf(t, result)
 	for _, k := range wantResult {
 		if !got[k] {

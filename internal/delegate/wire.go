@@ -80,6 +80,14 @@ type ResultWire struct {
 	// when a retry ran; the note says what the other attempt did.
 	RetriedOn string `json:"retried_on,omitempty"`
 	RetryNote string `json:"retry_note,omitempty"`
+	// A1 config pins, passed through from the node's wire result (see
+	// core.AgentWireResult) so a caller can verify WHAT served its subtask
+	// without opening the delegation log. Absent = the node predates pinning:
+	// unknown, never a value.
+	HarnessVersion     string `json:"harness_version,omitempty"`
+	HarnessBuildSHA256 string `json:"harness_build_sha256,omitempty"`
+	SeatConfigSHA256   string `json:"seat_config_sha256,omitempty"`
+	SeatConfigBasis    string `json:"seat_config_basis,omitempty"`
 }
 
 // ResponseWire is the full response: summary first, then per-subtask results
@@ -123,6 +131,10 @@ func WireResponse(results []PlacedResult, sum Summary) ResponseWire {
 			WallMs:             pr.wallMs,
 			RetriedOn:          pr.RetriedOn,
 			RetryNote:          pr.RetryNote,
+			HarnessVersion:     pr.Result.HarnessVersion,
+			HarnessBuildSHA256: pr.Result.HarnessBuildSHA256,
+			SeatConfigSHA256:   pr.Result.SeatConfigSHA256,
+			SeatConfigBasis:    pr.Result.SeatConfigBasis,
 		}
 		if pr.Err != "" {
 			rw.Failed = true
