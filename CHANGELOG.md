@@ -13,7 +13,9 @@ Versioning: [SemVer](https://semver.org/).
 Accelerators are ADDITIVE to the GPU tier: `profile` stays the one tier id, and
 `accelerators: []` lists devices beside it. First device: the Hailo-8L M.2 NPU, served through
 an on-demand loopback HTTP sidecar (port 18813) the harness spawns and that self-exits idle.
-Everywhere the list is empty, every payload and `tools/list` is byte-identical to 0.80.0.
+Everywhere the list is empty, tool REGISTRATION is unchanged — no tool is added or removed —
+with one universal exception: `offload_ocr`'s schema gains an optional `engine` parameter
+(`gpu`/`npu` enum) on every box.
 
 - **Declaration + matrix**: `setup/templates/profiles.json` gains an `accelerators` map beside
   `profiles` — per device: `kind`, exclusively-`owns` capability list, detection rule,

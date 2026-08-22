@@ -32,7 +32,8 @@ working HTTP inference sidecar in its own repository (Hailo-8L-Analysis-Pipeline
 `accelerators: []` list rides beside it in `installed.json`, in `hwdetect.Verdict`, and in the
 harness config (`config.Accelerators`). An empty list serializes to nothing (`omitempty`
 everywhere), so a box with no accelerator is byte-identical to one from before the field
-existed — in its manifest, its health payload, and its `tools/list`.
+existed in its manifest and its health payload; its `tools/list` registers no new tool
+either, though `offload_ocr`'s schema gains an optional `engine` parameter on every box.
 
 ### 2. Each accelerator declares the capabilities it OWNS exclusively
 
@@ -73,7 +74,8 @@ result, not a transport error); 404 `unknown_tool`; 400 `bad_request`.
 ## Consequences
 
 - `tools/list` grows only on boxes that list the device — registration is gated on
-  `config.HasAccelerator`, so every other box's MCP surface is byte-identical.
+  `config.HasAccelerator`, so every other box registers exactly the same tool set (the one
+  universal schema change is `offload_ocr`'s optional `engine` parameter).
 - Tier docs and templates are untouched: no tier page changes, no serving template changes,
   and `docs/tiers/` needs no regeneration for an accelerator.
 - The hardware/tier matrix gains an **Accelerators** sheet (declared in `profiles.json`,

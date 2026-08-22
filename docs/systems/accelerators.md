@@ -111,8 +111,10 @@ become defers, so the calling agent does the task another way.
 
 ## Tools and ownership
 
-Registered **only** when the box lists the device (`HasAccelerator("hailo-8l")`), so
-`tools/list` is byte-identical elsewhere. Each maps 1:1 to a sidecar tool:
+Registered **only** when the box lists the device (`HasAccelerator("hailo-8l")`), so no NPU
+tool appears in `tools/list` elsewhere (the one universal change on every box is
+`offload_ocr`'s schema gaining an optional `engine` parameter). Each maps 1:1 to a sidecar
+tool:
 
 | MCP tool | Sidecar tool | Result |
 |---|---|---|
