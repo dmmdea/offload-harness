@@ -176,6 +176,13 @@ func LabelQueue(ctx context.Context, items []Item, cap int, d LabelDeps) (writte
 			continue
 		}
 
+		// Stamp provenance BEFORE the append. These rows come from captureShadow, which
+		// enqueues only NON-escalated traffic, and the summarize branch above judges by
+		// embedding cosine rather than answersAgree. They share a file with the
+		// live-escalation writer whose population is the exact opposite, so a reader that
+		// cannot tell them apart computes a rate that is conditional and unconditional at
+		// once. Once written unlabelled they are indistinguishable after the fact.
+		entry.LabelSource = ledger.LabelSourceShadowCounterfactual
 		if err := d.AppendLabel(d.LabelsPath, entry); err != nil {
 			continue
 		}

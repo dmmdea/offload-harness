@@ -93,10 +93,12 @@ type Pipeline struct {
 	// it the status surface can only publish an unfalsifiable three-way guess.
 	embedMemo       *embedmemo.Memo
 	embedMemoReason string
-	// labelDrops counts confhead-label candidates answersAgree could not judge. Exposed on
-	// the loupe surface so the agreement rate can state its own coverage instead of
-	// implying it is total. atomic: --serve shares one Pipeline across handlers.
-	labelDrops atomic.Int64
+	// Label-judge coverage losses, split by cause because they support different
+	// conclusions -- see labelAgreement. Only the unparseable count is a bias term, and only
+	// it is persisted (loupe is a separate process). atomic: --serve shares one Pipeline
+	// across concurrent handlers.
+	labelDropsUnparseable     atomic.Int64
+	labelDropsUnjudgeableTask atomic.Int64
 	// T2-D: does RunTier read/write the result cache on THIS pipeline? Set only
 	// by NewInLoopPipeline. False everywhere else — critically on the main
 	// pipeline, whose RunTier the shadow-labelling flywheel drives to evaluate
@@ -192,13 +194,19 @@ func (p *Pipeline) Cfg() config.Config { return p.cfg }
 // against itself. May be nil (caching opted out, or the file is held elsewhere).
 func (p *Pipeline) Cache() *cache.Cache { return p.cache }
 
-// LabelDrops reports how many confhead-label candidates were discarded unjudged.
+// LabelDrops reports coverage losses for the confhead label corpus, split by cause.
 //
-// Read this beside any agreement rate derived from confhead-labels.jsonl: the rate is
-// computed only over rows that WERE judged, so without this number it silently implies
-// full coverage. Drops skew toward extreme disagreements (unparseable candidates), so an
-// unreported drop count biases the rate upward.
-func (p *Pipeline) LabelDrops() int64 { return p.labelDrops.Load() }
+// unparseable is the BIAS term: those candidates were judgeable in principle and are
+// disproportionately extreme disagreements, so losing them pulls the published agreement
+// rate upward. unjudgeableTask is a structural exclusion (not classify/triage) and carries
+// no bias implication -- it is returned so a caller can explain the denominator, never to
+// be added to the bias figure.
+//
+// These are this PROCESS's counts. The durable figure loupe reads is the persisted
+// unparseable counter beside the sidecar; see appendDropCounter.
+func (p *Pipeline) LabelDrops() (unparseable, unjudgeableTask int64) {
+	return p.labelDropsUnparseable.Load(), p.labelDropsUnjudgeableTask.Load()
+}
 
 // EmbedMemoStats reports the embed memo's counters, or the REASON there are
 // none. A caller must surface the reason rather than printing a zero hit rate,
@@ -4068,11 +4076,29 @@ func (p *Pipeline) labelAgreement(task core.TaskType, entry ledger.Entry, candid
 		// biases the measured agreement rate UPWARD, in the direction that argues against
 		// acting. A rate whose losses are uncountable cannot state its own coverage, and
 		// this file's whole job is to produce a rate somebody will make a decision from.
-		p.labelDrops.Add(1)
+		// SPLIT, because the two causes support different conclusions. A task answersAgree
+		// does not judge (anything but classify/triage) is a STRUCTURAL exclusion with no
+		// bias implication -- it never belonged to this population. An unparseable candidate
+		// IS a bias term: it is disproportionately an extreme disagreement, so losing it
+		// pulls the published rate upward. Counting both in one number would let a box whose
+		// escalations are mostly summarize report "92% dropped, the rate is badly biased"
+		// when zero judgeable candidates were lost and coverage is in fact 100%.
+		if task == core.TaskClassify || task == core.TaskTriage {
+			p.labelDropsUnparseable.Add(1)
+			// PERSISTED, because the consumer is a different process. loupe reads the
+			// sidecar from disk; an in-memory counter on a serving Pipeline could only ever
+			// describe that process's uptime against a file spanning weeks -- and
+			// NewInLoopPipeline is a second instance writing the same file. Best-effort:
+			// telemetry must never fail the work it describes.
+			appendDropCounter(p.cfg.ConfHeadLabelsPath, p.labelDropsUnparseable.Load())
+		} else {
+			p.labelDropsUnjudgeableTask.Add(1)
+		}
 		return
 	}
 	entry.Grounded = nil
 	entry.EscalatedAgreed = &agreed
+	entry.LabelSource = ledger.LabelSourceLiveEscalation
 	_ = ledger.AppendLabel(p.cfg.ConfHeadLabelsPath, entry)
 }
 
@@ -4197,4 +4223,18 @@ func (p *Pipeline) RunTier(ctx context.Context, req core.Request, model string) 
 		}
 	}
 	return res, res.OK
+}
+
+// appendDropCounter writes the running unparseable-drop count beside the label sidecar so a
+// SEPARATE process (loupe) can read it.
+//
+// Whole-file rewrite of a tiny integer rather than an append: the value is a running total,
+// so an append-only log would need summing and would grow without bound for one number.
+// Best-effort throughout -- a telemetry write must never fail the work it describes, which
+// is the same posture pipeline.record takes.
+func appendDropCounter(labelsPath string, n int64) {
+	if labelsPath == "" {
+		return
+	}
+	_ = os.WriteFile(labelsPath+".drops", []byte(strconv.FormatInt(n, 10)), 0o644)
 }

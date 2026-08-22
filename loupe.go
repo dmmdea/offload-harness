@@ -240,6 +240,14 @@ func runLoupe(args []string) error {
 
 	rep := statsReport{LedgerPath: cfg.LedgerPath, Rows: len(rows), WindowDays: *since}
 	rep.EmbedMemo = readEmbedMemoReport(cfg)
+
+	// Built BEFORE the empty-ledger early return, deliberately. Labels live in their OWN
+	// append-only sidecar and are a different population from the ledger: an empty ledger
+	// window says nothing about them. Previously `loupe --since 1` on a quiet day, or a
+	// freshly rotated ledger, suppressed weeks of labels entirely AND emitted a zero-value
+	// AgreementReport whose basis fields were empty strings -- publishing "" where a
+	// consumer keys on "insufficient_data".
+	rep.Agreement = readAgreement(cfg, sinceTS, *since)
 	if len(rows) == 0 {
 		return emitStats(rep, *asJSON)
 	}
@@ -331,16 +339,6 @@ func runLoupe(args []string) error {
 	// dividing by a guess.
 	rep.Reliability = buildReliability(rows)
 	rep.Prefill = buildPrefill(rows)
-	// Read from the confhead-label sidecar, NOT from `rows`: labels live in their own
-	// append-only file and are a different population from the ledger.
-	if lrows, lerr := ledger.ReadAll(cfg.ConfHeadLabelsPath); lerr == nil {
-		rep.Agreement = buildAgreement(lrows)
-	} else {
-		rep.Agreement = AgreementReport{
-			Basis:              "insufficient_data (label sidecar unreadable)",
-			UnconditionalBasis: "insufficient_data",
-		}
-	}
 	rep.Atlas = buildAtlas(rows, rep.SpanDays)
 
 	// Duplicate rate is computed ONLY over rows that carry an identity, so the
@@ -590,27 +588,61 @@ func emitStats(rep statsReport, asJSON bool) error {
 	}
 	// The agreement view. Prints the DENOMINATOR and every caveat inline, because this
 	// number's danger is being quoted as "the flip rate" once it leaves this report.
-	if ag := rep.Agreement; ag.Rows > 0 {
+	{
+		ag := rep.Agreement
 		p("")
 		p("ESCALATION AGREEMENT  (a counterfactual already running in production)")
-		rate := "n/a"
-		if ag.DisagreementRate != nil {
-			rate = fmt.Sprintf("%.1f%%", *ag.DisagreementRate)
+		if ag.Rows == 0 {
+			// Distinct from "0% disagreement". Say which, and say it in the same words the
+			// JSON basis uses so the two surfaces cannot be read differently.
+			p("  no live-escalation labels in window — %s", ag.Basis)
+		} else {
+			rate := "n/a"
+			if ag.DisagreementRate != nil {
+				rate = fmt.Sprintf("%.1f%%", *ag.DisagreementRate)
+			}
+			win := "all time"
+			if ag.WindowDays > 0 {
+				win = fmt.Sprintf("last %dd", ag.WindowDays)
+			}
+			p("  %d labelled rows (%s): %d agreed / %d disagreed  -> %s DISAGREEMENT", ag.Rows, win, ag.Agreed, ag.Disagreed, rate)
+			if ag.FirstTS != "" {
+				p("  window %s .. %s across %d arrival burst(s)", safeDate(ag.FirstTS), safeDate(ag.LastTS), ag.Bursts)
+			}
+			printRows(p, "  disagreements by task", ag.ByTask)
+			// "as recorded", not "pooled": on the live corpus the two values are
+			// gemma-4-e2b and gemma4-e2b, which llama-swap.yaml declares to be ONE seat and
+			// its alias, split by task. Calling that pooled would manufacture a caveat.
+			printRows(p, "  entry tier AS RECORDED (alias spellings are one seat)", ag.Tiers)
+			p("  ^ CONDITIONAL ON ESCALATION — escalation is triggered by low confidence, so")
+			p("    these are the calls most likely to disagree. This is an UPPER bound.")
+			p("  ^ unconditional flip rate: %s", ag.UnconditionalBasis)
 		}
-		p("  %d labelled rows: %d agreed / %d disagreed  -> %s DISAGREEMENT", ag.Rows, ag.Agreed, ag.Disagreed, rate)
-		p("  window %s .. %s across %d arrival burst(s)", safeDate(ag.FirstTS), safeDate(ag.LastTS), ag.Bursts)
-		printRows(p, "  disagreements by task", ag.ByTask)
-		// Deliberately "as RECORDED" rather than "pooled": on the live corpus the two
-		// distinct values are `gemma-4-e2b` and `gemma4-e2b`, which llama-swap.yaml
-		// declares to be ONE seat and its alias -- split cleanly by task, not by model.
-		// Labelling that "pooled tiers" would imply different models were averaged and
-		// manufacture a caveat that does not apply. It is still worth printing: an alias
-		// masquerading as a second identity is the same defect that makes the result-cache
-		// key machine-specific, and it is worth seeing wherever it appears.
-		printRows(p, "  entry tier AS RECORDED (alias spellings are one seat)", ag.Tiers)
-		p("  ^ CONDITIONAL ON ESCALATION -- escalation is triggered by low confidence, so")
-		p("    these are the calls most likely to disagree. This is an UPPER bound.")
-		p("  ^ unconditional flip rate: %s", ag.UnconditionalBasis)
+		// The other writer, never merged. Its population is the exact complement.
+		if ag.ShadowRows > 0 {
+			sr := "n/a"
+			if ag.ShadowRate != nil {
+				sr = fmt.Sprintf("%.1f%%", *ag.ShadowRate)
+			}
+			p("  shadow-counterfactual rows (NON-escalated, summarize judged by cosine): %d, %s disagreement", ag.ShadowRows, sr)
+			p("    ^ reported separately ON PURPOSE — opposite population, different judge")
+		}
+		if ag.UnknownSourceRows > 0 {
+			ur := "n/a"
+			if ag.UnknownSourceRate != nil {
+				ur = fmt.Sprintf("%.1f%%", *ag.UnknownSourceRate)
+			}
+			p("  %d row(s) predate provenance stamping: %d disagreed -> %s", ag.UnknownSourceRows, ag.UnknownSourceDisagreed, ur)
+			p("    ^ kept OUT of both rates above because the writer is unknown, but rated here:")
+			p("      the rows are real measurements; only their provenance is missing. Check")
+			p("      whether shadow-label has ever run on this box before reading them as escalation-only.")
+		}
+		// Coverage. nil is unknown, not zero: an absent counter must not read as perfect.
+		if ag.UnparseableDrops != nil {
+			p("  judge coverage: %d unparseable candidate(s) dropped (bias is UPWARD)", *ag.UnparseableDrops)
+		} else {
+			p("  judge coverage: UNKNOWN (no drop counter beside the sidecar)")
+		}
 	}
 	// R2-16. The verdict line is the deliverable: this view exists to close itself.
 	if rep.Atlas.TotalDefers > 0 {

@@ -88,13 +88,34 @@ type Entry struct {
 	// Agent-loop prefill (T2-B). PrefillSteps present (>0) is what marks the row as
 	// MEASURED; a row without it made no observation, which is not the same as a row
 	// that observed zero prefill.
-	PrefillSteps  int     `json:"prefill_steps,omitempty"`
+	PrefillSteps int `json:"prefill_steps,omitempty"`
 	// AgentProfile: which agent profile the run resolved to. Absent on non-agent rows.
 	AgentProfile string `json:"agent_profile,omitempty"`
+	// LabelSource names WHICH WRITER produced a confhead-label row.
+	//
+	// confhead-labels.jsonl has two writers with OPPOSITE populations, and nothing
+	// previously distinguished them:
+	//   "live-escalation"       - pipeline.labelAgreement, only ESCALATED calls, judged by
+	//                             answersAgree (classify/triage only).
+	//   "shadow-counterfactual" - shadow.LabelQueue, only NON-escalated calls (captureShadow
+	//                             skips anything with Escalations != 0), and it judges
+	//                             summarize by embedding cosine rather than by answersAgree.
+	//
+	// Pooling those yields a rate that is conditional on escalation and unconditional at the
+	// same time, which is no rate at all. Absent on pre-existing rows, which is why readers
+	// must treat "" as unknown-provenance rather than as either source.
+	LabelSource   string  `json:"label_source,omitempty"`
 	PrefillTokens int64   `json:"prefill_tokens,omitempty"`
 	CacheTokens   int64   `json:"cache_tokens,omitempty"`
 	PrefillMS     float64 `json:"prefill_ms,omitempty"`
 }
+
+// Label provenance values for Entry.LabelSource. Constants rather than string literals so
+// a reader that filters on one cannot silently miss rows because of a typo at the writer.
+const (
+	LabelSourceLiveEscalation       = "live-escalation"
+	LabelSourceShadowCounterfactual = "shadow-counterfactual"
+)
 
 // maxReasonLen bounds a recorded defer reason so a long upstream error can't
 // bloat the one-line ledger records (they must stay O_APPEND-atomic-small).
