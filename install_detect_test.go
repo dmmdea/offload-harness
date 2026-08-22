@@ -50,6 +50,9 @@ func TestInstallDetectEmitsAccelerators(t *testing.T) {
 // through the full plan resolution against the repo's own
 // setup/templates/profiles.json (root "." — tests run from the repo root).
 // Facts are probed from real hardware, exactly as a real `install plan` would.
+// The plan must also predict the SEED the install would write (final review
+// finding): the accelerator's config_seed merges over the tier seed with
+// __HAILO_HOME__ expanded, exactly as install.ps1 does.
 func TestInstallPlanEmitsAccelerators(t *testing.T) {
 	orig := hailortcliRun
 	defer func() { hailortcliRun = orig }()
@@ -62,6 +65,7 @@ func TestInstallPlanEmitsAccelerators(t *testing.T) {
 		}
 		return "", errors.New("unexpected args")
 	}
+	t.Setenv("HAILO_HOME", "") // pin the default <home>/hailo resolution, not this box's env
 
 	out := captureStdout(t, func() {
 		if err := runInstallPlan([]string{"-json", "-root", ".", "-home", t.TempDir()}); err != nil {
@@ -74,6 +78,7 @@ func TestInstallPlanEmitsAccelerators(t *testing.T) {
 			Profile      string   `json:"profile"`
 			Accelerators []string `json:"accelerators"`
 		} `json:"verdict"`
+		ConfigSeed map[string]any `json:"config_seed"`
 	}
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("emitted JSON did not parse: %v\n%s", err, out)
@@ -83,6 +88,19 @@ func TestInstallPlanEmitsAccelerators(t *testing.T) {
 	}
 	if len(got.Verdict.Accelerators) != 1 || got.Verdict.Accelerators[0] != "hailo-8l" {
 		t.Fatalf("verdict.accelerators = %v, want [hailo-8l]", got.Verdict.Accelerators)
+	}
+	// The seed half: all five accelerator keys, with the token expanded.
+	for _, k := range []string{"accelerators", "hailo_endpoint", "hailo_sidecar_cmd", "hailo_timeout_sec", "hailo_idle_sec"} {
+		if _, ok := got.ConfigSeed[k]; !ok {
+			t.Errorf("config_seed missing accelerator key %q — the plan does not predict the install's seed", k)
+		}
+	}
+	cmd, _ := got.ConfigSeed["hailo_sidecar_cmd"].(string)
+	if strings.Contains(cmd, "__HAILO_HOME__") {
+		t.Errorf("hailo_sidecar_cmd still carries the __HAILO_HOME__ token: %q", cmd)
+	}
+	if !strings.HasSuffix(cmd, "/hailo/hailo-http.cmd") {
+		t.Errorf("hailo_sidecar_cmd = %q, want the default <home>/hailo expansion ending in /hailo/hailo-http.cmd", cmd)
 	}
 }
 
