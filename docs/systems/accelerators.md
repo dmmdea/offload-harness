@@ -35,8 +35,10 @@ vision routed only to llama-swap by model id. [ADR 0024](../architecture/decisio
 makes accelerators **additive**: each is declared in `setup/templates/profiles.json` under the
 `accelerators` map (beside `profiles`), lists the capabilities it **owns exclusively**, and is
 carried as an id list in `installed.json`, `hwdetect.Verdict`, the harness config, and
-`/fleet/health` — all `omitempty`, so a box without one is byte-identical to before the field
-existed, `tools/list` included.
+`/fleet/health` — all `omitempty`, so a box without one serialises those payloads byte-identically
+to before the field existed. Tool REGISTRATION is likewise unchanged when the list is empty (no
+tool added or removed), with one universal exception: `offload_ocr`'s schema gains an optional
+`engine` parameter on every box (see Tools and ownership below).
 
 ## Detection
 
