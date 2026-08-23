@@ -23,7 +23,7 @@ func allRegisteredSpecs(t *testing.T) map[string]ToolSpec {
 	pol := NewPolicy(false, nil)
 	offload := func(context.Context, string, string, map[string]any) (string, error) { return "{}", nil }
 
-	tools, err := ReadOnlyTools(root, offload)
+	tools, err := ReadOnlyTools(root, offload, nil)
 	if err != nil {
 		t.Fatalf("ReadOnlyTools: %v", err)
 	}

@@ -6,6 +6,26 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.85.0] - 2026-08-23
+
+### Added — the agent loop gets the NPU (ADR 0024 completed for the loop surface)
+
+The local agent loop (`agent_run` / `agent_delegate` / `local-agent` / `agent` CLI — all
+via the shared builder) can now use the Hailo-8L accelerator, closing the gap where the
+MCP surface had 7 NPU tools while a loop on the same box had zero:
+
+- **`agent.NPUFunc`** — accelerator capability injected like `OffloadFunc` (the agent
+  package stays free of hailoclient imports); `pipeline.NewLoopNPU` wires it to the same
+  on-demand sidecar the MCP tools use (own `Sidecar` per holder is safe: `Ensure`
+  health-checks before spawning). Defer-not-crash: transport/spawn failures come back as
+  `{"deferred":true,...}` strings, never tool errors.
+- **7 NPU tools in the loop** (face_detect, face_embed, object_detect, person_embed,
+  depth, enhance_low_light, image_embed), registered ONLY when the box lists the
+  accelerator — a box without the device advertises a byte-identical tool list (pinned).
+- **Loop `offload_ocr` gains the `engine` param** (gpu|npu) — universal like the MCP
+  surface's 0.82.0 decision; `engine:npu` without the accelerator defers honestly, never
+  silently falls back (the two engines read stylised text differently). Mutation-tested.
+
 ## [0.84.0] - 2026-08-23
 
 ### Added — blackwell-8 agent seat: qwen3.5-9b-agent (measured on-box, operator-approved)

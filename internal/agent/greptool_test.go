@@ -17,7 +17,7 @@ func TestSearchFilesFindsUniqueString(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tools, err := ReadOnlyTools(root, nil)
+	tools, err := ReadOnlyTools(root, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestSearchFilesCapsAt100(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "many.txt"), []byte(b.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tools, _ := ReadOnlyTools(root, nil)
+	tools, _ := ReadOnlyTools(root, nil, nil)
 	sf := findTool(tools, "search_files")
 	out, err := sf.Exec(context.Background(), `{"pattern":"hit line"}`)
 	if err != nil {
@@ -83,7 +83,7 @@ func TestSearchFilesGlobExcludesNonGo(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "skip.txt"), []byte("var target = 2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tools, _ := ReadOnlyTools(root, nil)
+	tools, _ := ReadOnlyTools(root, nil, nil)
 	sf := findTool(tools, "search_files")
 	out, err := sf.Exec(context.Background(), `{"pattern":"target","glob":"*.go"}`)
 	if err != nil {
@@ -108,7 +108,7 @@ func TestSearchFilesRejectsEscape(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(parent, "secret.txt"), []byte("TOPSECRET"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tools, _ := ReadOnlyTools(root, nil)
+	tools, _ := ReadOnlyTools(root, nil, nil)
 	sf := findTool(tools, "search_files")
 	out, err := sf.Exec(context.Background(), `{"pattern":"TOPSECRET","path":"../"}`)
 	if err == nil {
@@ -125,7 +125,7 @@ func TestSearchFilesNoMatchIsCleanString(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("nothing here\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tools, _ := ReadOnlyTools(root, nil)
+	tools, _ := ReadOnlyTools(root, nil, nil)
 	sf := findTool(tools, "search_files")
 	out, err := sf.Exec(context.Background(), `{"pattern":"willNotBeFound12345"}`)
 	if err != nil {
@@ -146,7 +146,7 @@ func TestSearchFilesNoMatchSuggestsCaseInsensitiveRetry(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "limits.md"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tools, _ := ReadOnlyTools(root, nil)
+	tools, _ := ReadOnlyTools(root, nil, nil)
 	sf := findTool(tools, "search_files")
 
 	// The exact query a planner produced live — wrong case AND wrong word form.
@@ -206,7 +206,7 @@ func TestSearchFilesNoMatchSuggestsCaseInsensitiveRetry(t *testing.T) {
 // green. Pin that it parses and that it still states the case-sensitivity
 // contract the no-match hint depends on.
 func TestSearchFilesSchemaIsValidJSONAndStatesCaseSensitivity(t *testing.T) {
-	tools, err := ReadOnlyTools(t.TempDir(), nil)
+	tools, err := ReadOnlyTools(t.TempDir(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

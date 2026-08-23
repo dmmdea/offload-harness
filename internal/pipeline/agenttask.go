@@ -172,6 +172,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		MaxSteps:    contract.MaxSteps,
 		ReadRoot:    contextDir,
 		Offload:     NewRecordlessOffload(p.cfg, p.cfg.Model, wall),
+		NPU:         NewLoopNPU(p.cfg),
 		Unattended:  true,
 	})
 	if berr != nil {

@@ -118,6 +118,12 @@ tool appears in `tools/list` elsewhere (the one universal change on every box is
 `offload_ocr`'s schema gaining an optional `engine` parameter). Each maps 1:1 to a sidecar
 tool:
 
+**Both surfaces carry the same set (0.85.0):** the MCP server registers the tools for
+Claude, and the agent loop registers the same 7 (plus the loop OCR `engine` param) for
+`agent_run`/`agent_delegate`/`local-agent` — injected as `agent.NPUFunc` via
+`pipeline.NewLoopNPU`, gated identically, so a delegated contract on an accelerator box can
+use the NPU while the same contract on any other node advertises no such tool.
+
 | MCP tool | Sidecar tool | Result |
 |---|---|---|
 | `offload_face_detect` | `face_detect` | faces + 5-landmark keypoints |
