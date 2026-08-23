@@ -6,6 +6,36 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.84.0] - 2026-08-23
+
+### Added — blackwell-8 agent seat: qwen3.5-9b-agent (measured on-box, operator-approved)
+
+The blackwell-8 tier seats **Qwen3.5-9B UD-Q4_K_XL** as its agent planner
+(`include_qwen35_9b` + `config_seed.agent_model: qwen3.5-9b-agent`), replacing the
+E4B-by-fallback lane that the 2026-08-22 on-box quality bake measured at **0% extraction
+×2** (zero tool calls) on the tier's own reference box (OptiPlex 7060, RTX 5060 8GB).
+The seated configuration swept the same bake: **100% extraction ×2 + 5/5 search+reason ×2**
+under default (off) thinking, at **6344 MiB @16K / 6696 MiB @32K** — the Gated-DeltaNet
+hybrid's small KV is why a 9B fits an 8GB card at 32K, and the entry serves an explicit
+`--ctx-size 32768` for that measured fit. Thinking ON was measured strictly worse (89% ×2,
+reasoning prose leaking into content, 3.5× wall) — the seat ships llama.cpp's default
+thinking-off and its invariant tests refuse `--reasoning off`, `${common}`, and
+`--chat-template-kwargs` alike. Evidence:
+`Benchmarks and Optimizations/2026-08-22-blackwell8-agent-bake/` (fixtures included) +
+nightshift8-notes §25.
+
+Mechanism mirrors the ampere-6 4B seat end-to-end: new `include_qwen35_9b` gate →
+`IncludeQ359B` in `servingtmpl` (entry + `q359` matrix var + `__Q359B_ALT__` set
+membership strip/expand together, refusal-by-name on an entryless template), the
+`model-qwen35-9b` pin in `install.ps1` (5.6GB, HF LFS oid verified against the staged
+reference copy; deliberately NOT family-gated — it is the only thing between the 8GB agent
+lane and a 0% planner), and `warnMissingGatedModels`. The 4B and 9B seats are **mutually
+exclusive** (both claim the `agent-seat` alias): `Render` refuses a tier setting both, and
+the profile table is lint-pinned. SECOND deliberate twin-parity break: **ampere-8 keeps its
+E4B fallback lane** pending its own on-box bake (Aorus offline; seat-lifecycle rule) —
+recorded in both tiers' notes. Deploys to existing boxes are config-regen + weight
+download; the Dell (powered off today) picks the seat up at its next config regen.
+
 ## [0.83.0] - 2026-08-22
 
 ### Fixed — fresh Windows installs never bound the media seats they rendered

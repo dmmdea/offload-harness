@@ -39,6 +39,7 @@ var tokenTemplates = map[string][]string{
 	"__Q38_ALT__":   {"llama-swap.win-dual-blackwell.yaml"},
 	"__Q38_AND__":   {"llama-swap.win-cuda-resident.yaml"},
 	"__Q354B_ALT__": {"llama-swap.linux-cuda.yaml", "llama-swap.win-cuda.yaml"},
+	"__Q359B_ALT__": {"llama-swap.linux-cuda.yaml", "llama-swap.win-cuda.yaml"},
 }
 
 // tokenVar is the matrix VARIABLE each token's expansion must reference when its
@@ -53,6 +54,7 @@ var tokenVar = map[string]string{
 	"__Q38_ALT__":   "q38",
 	"__Q38_AND__":   "q38",
 	"__Q354B_ALT__": "q354",
+	"__Q359B_ALT__": "q359",
 }
 
 func deadTokenTemplate(t *testing.T, name string) string {
@@ -72,6 +74,11 @@ func gatesFor(tmpl string) Params {
 	p.Include26B = definesModel(tmpl, "gemma4-26b-a4b")
 	p.IncludeQ38 = definesModel(tmpl, modelQ38)
 	p.IncludeQ354B = definesModel(tmpl, modelQ354B)
+	// NOT derived like the others: the 4B and 9B seats are mutually exclusive
+	// (shared agent-seat alias — validate() refuses both), and every shipping
+	// template that defines one defines the other. The base holds the 9B off;
+	// setGate flips it on while clearing the 4B, keeping each flip single-variable.
+	p.IncludeQ359B = false
 	return p
 }
 
@@ -86,6 +93,10 @@ func setGate(p Params, tok string, on bool) Params {
 		p.IncludeQ38 = on
 	case "q354":
 		p.IncludeQ354B = on
+		p.IncludeQ359B = false // mutually exclusive seats; keep the flip renderable
+	case "q359":
+		p.IncludeQ359B = on
+		p.IncludeQ354B = false // both arms clear the 4B so only q359 varies
 	}
 	return p
 }
@@ -212,7 +223,7 @@ func TestRenderCarriesNoQ354BAndSubstitution(t *testing.T) {
 	}
 	// Pin that the live siblings are still substituted, so this file's
 	// "remove the dead one" lesson is never over-applied to them.
-	for _, live := range []string{`"__M26_ALT__":`, `"__M26_AND__":`, `"__Q38_ALT__":`, `"__Q38_AND__":`, `"__Q354B_ALT__":`} {
+	for _, live := range []string{`"__M26_ALT__":`, `"__M26_AND__":`, `"__Q38_ALT__":`, `"__Q38_AND__":`, `"__Q354B_ALT__":`, `"__Q359B_ALT__":`} {
 		if !strings.Contains(src, live) {
 			t.Errorf("substitution %s is gone — it IS consumed by a shipped template, and an unexpanded token bricks llama-swap at startup", live)
 		}

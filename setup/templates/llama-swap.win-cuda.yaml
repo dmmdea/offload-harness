@@ -76,6 +76,35 @@ models:
       --cache-type-k __KV_K__ --cache-type-v __KV_V__ --jinja
       --port ${PORT} --host 127.0.0.1
     ttl: 300
+  # AGENT seat for the 8GB tiers: Qwen3.5-9B. Gated on the tier's
+  # include_qwen35_9b, exactly as the 4B entry rides include_qwen35_4b — the
+  # renderer strips this block, its matrix var and its set membership together.
+  # Mutually exclusive with the 4B seat (shared `agent-seat` alias); the renderer
+  # refuses a tier that sets both.
+  # MEASURED 2026-08-22 (blackwell-8 quality bake, RTX 5060 8GB reference box,
+  # on-box, fresh server per rep, n=2 per shape): 100% extraction recall x2 and
+  # 5/5 search+reason x2 where the tier's E4B fallback planner scored 0% x2 (zero
+  # tool calls); 6344 MiB at ctx 16384 q8_0 and 6696 MiB at ctx 32768 — the
+  # Gated-DeltaNet hybrid's small KV is why a 9B fits an 8GB card at 32K. Served
+  # at an explicit 32768 (measured fit; headroom for per-call profiles — the
+  # tier's agent_ctx_tokens stays the loop's compaction budget).
+  # Flags are EXPLICIT, not ${common}: ${common} pins `--reasoning off`, the 4B
+  # seat's measured collapse trap for this THINKING family. No thinking kwargs
+  # are pinned either: llama.cpp's default for this template is thinking OFF —
+  # the configuration every winning score was measured under (default-flag Qube
+  # runs and explicit-off on-box runs, consistent 100%). Thinking ON was measured
+  # WORSE: 89% extraction with reasoning prose leaking into content at 3.5x the
+  # wall. Never enable thinking on this seat without a re-bake.
+  # NO sampling flags on purpose: the agent loop sends `temperature: 0` on every
+  # request (internal/agent/client.go wireReq), so server-side sampling is inert.
+  qwen3.5-9b-agent:
+    aliases: [qwen35-9b, agent-seat]
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.5-9B-UD-Q4_K_XL.gguf
+      -ngl 999 --parallel 1 --ctx-size 32768 --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --jinja
+      --port ${PORT} --host 127.0.0.1
+    ttl: 300
   embeddinggemma:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/embeddinggemma-300m-Q8_0.gguf
@@ -113,8 +142,9 @@ matrix:
     m26: gemma4-26b-a4b
     a26: gemma-4-26b-agent
     q354: qwen3.5-4b-agent
+    q359: qwen3.5-9b-agent
   evict_costs:
     emb: 1000
   sets:
     residents: "emb__SEATS_RESIDENT__"
-    interactive: "+residents & (e4b | e2b__M26_ALT____Q354B_ALT____SEATS_SWAPPABLE__)"
+    interactive: "+residents & (e4b | e2b__M26_ALT____Q354B_ALT____Q359B_ALT____SEATS_SWAPPABLE__)"
