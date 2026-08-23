@@ -251,6 +251,36 @@ $a8Functional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Tri
 # would slip through both of the other two patterns. ampere-6 has this check at :218;
 # ampere-8 needs it for the same reason.
 if ($a8Functional -notmatch 'qwen3\.5-4b-agent' -and $a8Functional -notmatch '\bq354\b' -and $a8Functional -notmatch '__Q354B_') { Ok 'ampere-8 qwen3.5-4b seat STRIPPED (include_qwen35_4b absent)' } else { Bad 'ampere-8 qwen3.5-4b leaked in' }
+# ampere-8 also strips the 9B seat: its agent lane stays E4B-by-fallback until its own
+# on-box bake (the Aorus has never run one) - the deliberate twin-parity break recorded
+# in both tiers' notes. Same three-pattern check as the 4B strip above.
+if ($a8Functional -notmatch 'qwen3\.5-9b-agent' -and $a8Functional -notmatch '\bq359\b' -and $a8Functional -notmatch '__Q359B_') { Ok 'ampere-8 qwen3.5-9b seat STRIPPED (include_qwen35_9b absent - own bake pending)' } else { Bad 'ampere-8 qwen3.5-9b leaked in' }
+
+# blackwell-8: the measured 8GB agent seat renders (entry + swappable-set membership).
+# MEASURED 2026-08-22 on the tier's reference box (OptiPlex 7060, RTX 5060): 100%
+# extraction x2 + 5/5 x2 where the E4B fallback scored 0% x2; 6344 MiB @16K / 6696 @32K.
+# RAM-band insensitive on purpose (same doctrine as the ampere-6 4B seat: the seat
+# lives entirely in VRAM, so no RAM gate may remove it).
+foreach ($band in @('low','mid')) {
+  Write-Host "== blackwell-8 / ram=$band - qwen3.5-9b agent seat (include_qwen35_9b) =="
+  $r = Invoke-Render -Backend 'cuda' -ProfileId 'blackwell-8' -RamTier $band -BigRam $false
+  if ($r.yaml -match '(?m)^\s{2}qwen3\.5-9b-agent:')           { Ok "blackwell-8/$band qwen3.5-9b agent seat present (include_qwen35_9b)" } else { Bad "blackwell-8/$band qwen3.5-9b agent seat missing" }
+  if ($r.yaml -match '(?m)^\s{4}interactive:.*\bq359\b')       { Ok "blackwell-8/$band qwen3.5-9b joins the interactive set" } else { Bad "blackwell-8/$band q359 set membership" }
+  if ($r.yaml -notmatch '__Q359B_')                            { Ok "blackwell-8/${band}: no unsubstituted Q359B token" } else { Bad "blackwell-8/$band left __Q359B_*__" }
+  # MEASURED INVARIANTS (plain hyphens in these strings - see the cp1252 note above):
+  # no --reasoning off / no ${common} (thinking-family collapse trap, 4B precedent);
+  # no thinking kwargs (default = thinking OFF is the measured winning config; ON was
+  # measured WORSE - 89% with prose leaking into content at 3.5x the wall); explicit
+  # ctx 32768 (measured fit on the 8GB card - the tier macro would halve it).
+  $q359Cmd = ([regex]::Match($r.yaml, '(?ms)^\s{2}qwen3\.5-9b-agent:.*?(?=^\s{2}\S|\Z)')).Value
+  if ($q359Cmd -and $q359Cmd -notmatch '--reasoning\s+off')    { Ok "blackwell-8/$band 9b seat does NOT pin --reasoning off" } else { Bad "blackwell-8/$band 9b seat pins --reasoning off - the measured thinking-family collapse" }
+  if ($q359Cmd -and $q359Cmd -notmatch '\$\{common\}')         { Ok "blackwell-8/$band 9b seat writes flags explicitly (not via `${common})" } else { Bad "blackwell-8/$band 9b seat uses `${common}, which pins --reasoning off" }
+  if ($q359Cmd -and $q359Cmd -notmatch '--chat-template-kwargs') { Ok "blackwell-8/$band 9b seat ships default thinking (OFF - the measured config)" } else { Bad "blackwell-8/$band 9b seat pins thinking kwargs - unmeasured or measured-worse configuration" }
+  if ($q359Cmd -and $q359Cmd -match '--ctx-size 32768')        { Ok "blackwell-8/$band 9b seat serves explicit ctx 32768 (measured 6696 MiB fit)" } else { Bad "blackwell-8/$band 9b seat lost its measured ctx 32768" }
+  # The 4B stays OUT on this tier (shared agent-seat alias; renderer refuses both).
+  $bw8Functional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' }) -join "`n"
+  if ($bw8Functional -notmatch 'qwen3\.5-4b-agent' -and $bw8Functional -notmatch '\bq354\b' -and $bw8Functional -notmatch '__Q354B_') { Ok "blackwell-8/$band qwen3.5-4b seat stays stripped (9B holds the agent-seat alias)" } else { Bad "blackwell-8/$band qwen3.5-4b leaked in beside the 9B" }
+}
 Write-Host "== amd-gcn - 8192 / f16 / flash-attn off (vulkan) =="
 $r = Invoke-Render -Backend 'vulkan' -ProfileId 'amd-gcn' -RamTier 'low' -BigRam $false
 $macro = Get-CommonMacro $r.yaml

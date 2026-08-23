@@ -53,6 +53,15 @@ type Params struct {
 	// seat: 3.5GB of VRAM on a 6GB card, for tiers whose workhorse plans poorly but
 	// which have no room for a 27B.
 	IncludeQ354B bool
+	// IncludeQ359B gates the Qwen3.5-9B AGENT entry exactly as IncludeQ354B gates
+	// the 4B: false removes the model block, its matrix var, and its set membership
+	// (the __Q359B_ALT__ token renders empty). It comes from the tier's
+	// include_qwen35_9b field and defaults to false. This is the 8GB-class agent
+	// seat: 6.3 GiB of VRAM at 16K (6.5 GiB at 32K — Gated-DeltaNet hybrid KV), for
+	// tiers with room the 6GB class does not have. Mutually exclusive with
+	// IncludeQ354B: both entries claim the `agent-seat` alias, so a tier enabling
+	// both would render a config llama-swap rejects — validate() refuses it by name.
+	IncludeQ359B bool
 
 	// Seats are the tier's alias-backed media seats (vision / STT). Empty is the
 	// common case and MUST render byte-identically to a build that had no seat
@@ -167,6 +176,12 @@ func Render(tmpl string, p Params) (string, error) {
 			return "", err
 		}
 	}
+	if !p.IncludeQ359B {
+		var err error
+		if out, err = dropQ359B(out); err != nil {
+			return "", err
+		}
+	}
 	// Seats go in AFTER the 26B removal and BEFORE substitution: after, so a seat
 	// whose text happens to mention the 26B can never trip drop26B's post-check;
 	// before, so seat blocks are written in the same token vocabulary as the rest
@@ -239,12 +254,26 @@ func Render(tmpl string, p Params) (string, error) {
 		}
 		q354balt = " | q354"
 	}
+	// The Qwen3.5-9B membership mirrors Q354B exactly (only the _ALT_ half exists,
+	// for the same never-in-an-"&"-group reason). Same refusal-by-name rule.
+	q359balt := ""
+	if p.IncludeQ359B {
+		if !definesModel(out, modelQ359B) {
+			return "", fmt.Errorf("this tier sets include_qwen35_9b but the target serving template defines no "+
+				"`%s` model entry, so there is nothing to include. Rendering anyway would emit a config without "+
+				"the agent seat while the installer still downloads its weights — add the %s entry (and "+
+				"its matrix var + __Q359B_*__ set membership) to the template, or drop include_qwen35_9b from the tier",
+				modelQ359B, modelQ359B)
+		}
+		q359balt = " | q359"
+	}
 	for from, to := range map[string]string{
 		"__M26_ALT__":         m26alt,
 		"__M26_AND__":         m26and,
 		"__Q38_ALT__":         q38alt,
 		"__Q38_AND__":         q38and,
 		"__Q354B_ALT__":       q354balt,
+		"__Q359B_ALT__":       q359balt,
 		"__SEATS_SWAPPABLE__": seatFrag[roleSwappable],
 		"__SEATS_RESIDENT__":  seatFrag[roleResident],
 		"__LLAMA_BIN__":       strings.TrimRight(p.LlamaBin, "/"),
@@ -292,6 +321,13 @@ func (p Params) validate() error {
 	}
 	if p.Include26B && strings.TrimSpace(p.MoE26B) == "" {
 		missing = append(missing, "26B MoE placement (the tier includes the 26B but named no placement flag)")
+	}
+	// One small-tier agent seat per tier: the 4B and 9B entries both claim the
+	// `agent-seat` alias, so rendering both produces a duplicate-alias config
+	// llama-swap rejects at startup. Refuse at render time, by name.
+	if p.IncludeQ354B && p.IncludeQ359B {
+		missing = append(missing, "a single agent seat (include_qwen35_4b and include_qwen35_9b are both set, "+
+			"but the 4B and 9B entries share the `agent-seat` alias — pick one)")
 	}
 	if len(p.Seats) > 0 && p.Home == "" && seatsNeedHome(p.Seats) {
 		missing = append(missing, "install home (a media seat names a path under "+tokenHome+")")
@@ -782,6 +818,16 @@ const modelQ354B = "qwen3.5-4b-agent"
 // strip. Its set membership is handled by the __Q354B_*__ tokens.
 func dropQ354B(tmpl string) (string, error) {
 	return dropModel(tmpl, modelQ354B)
+}
+
+// modelQ359B is the Qwen3.5-9B agent entry, gated by the tier's
+// include_qwen35_9b exactly as modelQ354B rides include_qwen35_4b.
+const modelQ359B = "qwen3.5-9b-agent"
+
+// dropQ359B removes the Qwen3.5-9B agent entry — the exact mirror of the Q354B
+// strip. Its set membership is handled by the __Q359B_*__ tokens.
+func dropQ359B(tmpl string) (string, error) {
+	return dropModel(tmpl, modelQ359B)
 }
 
 // dropModel removes one model block AND the matrix var naming it, with a

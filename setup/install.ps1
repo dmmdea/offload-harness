@@ -147,6 +147,20 @@ $PINNED = @{
     sha  = 'b252c5610a42ca82d20fe2a12813e9d069eed89292907e26c783eeb0bc961bc7'
     version = 'b252c561'
   }
+  # Qwen3.5-9B AGENT seat for the 8GB tiers (blackwell-8 on-box quality bake winner,
+  # 2026-08-22: 100% extraction x2 + 5/5 search+reason x2 vs the E4B fallback's 0%;
+  # 6344 MiB at 16K / 6696 MiB at 32K on the RTX 5060 reference box). Gated on the
+  # resolved profile's include_qwen35_9b (Step 5) — mirrors the include_qwen35_4b
+  # mechanism, and is mutually exclusive with it (shared agent-seat alias). NO
+  # mmproj: agent planner, not a vision seat. sha = real LFS oid fetched from the
+  # HF tree API 2026-08-23 and byte-verified against the staged reference copy.
+  'model-qwen35-9b' = @{
+    url  = 'https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-UD-Q4_K_XL.gguf'
+    name = 'Qwen3.5-9B-UD-Q4_K_XL.gguf'
+    size = 5966095584
+    sha  = '6f5d30666c2d8ae16a306e616d95341dcf3cc46810df84d7e6f5a7d1e4c1b293'
+    version = '6f5d3066'
+  }
   'model-embed' = @{
     url  = 'https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf'
     name = 'embeddinggemma-300m-Q8_0.gguf'
@@ -607,7 +621,7 @@ function Select-CudaBuild {
 # Previously this lived inline in the main flow, below the dot-source test seam, so no
 # test could reach it and deleting the qwen3.5-4b line left the whole suite green.
 function Get-GatedModelKeys {
-  param([bool]$IncludeQwen38, [bool]$IncludeQwen354B, [bool]$WithFamily)
+  param([bool]$IncludeQwen38, [bool]$IncludeQwen354B, [bool]$IncludeQwen359B, [bool]$WithFamily)
   $keys = @()
   # The 27B coder/agent seat RIDES the family gate: OFFLOAD_WITH_FAMILY=0 (a lean
   # install) opts out of an 18.8GB download even on an include_qwen38 tier.
@@ -618,6 +632,11 @@ function Get-GatedModelKeys {
   # configuration while the yaml still named the seat. This asymmetry is intentional -
   # do NOT "make it consistent" with the line above.
   if ($IncludeQwen354B) { $keys += @('model-qwen35-4b') }
+  # The Qwen3.5-9B agent seat does not ride the family gate either, for the stronger
+  # version of the same reason: 5.6GB, and on the 8GB tiers the fallback planner it
+  # replaces was MEASURED at 0% extraction (2026-08-22 blackwell-8 on-box bake) - a
+  # lean install that dropped it would ship a broken agent lane by omission.
+  if ($IncludeQwen359B) { $keys += @('model-qwen35-9b') }
   # Returned WITHOUT the ,@() no-unroll wrapper on purpose. That guard is correct where a
   # 1-element array must survive JSON SERIALIZATION (Merge-ConfigSeed), but here the only
   # consumer is `$modelKeys += ...`, where unrolling is exactly what is wanted - and on an
@@ -1073,6 +1092,7 @@ $modelKeys = @('model-e4b', 'model-embed')
 if ($withFamily) { $modelKeys += @('model-e2b', 'model-26b') }
 $includeQwen38 = $false
 $includeQwen354B = $false
+$includeQwen359B = $false
 $profilesJsonStep5 = Join-Path (Join-Path $scriptDir 'templates') 'profiles.json'
 if ($profileId -and (Test-Path $profilesJsonStep5)) {
   $pdoc5 = Get-Content -Raw $profilesJsonStep5 | ConvertFrom-Json
@@ -1093,11 +1113,17 @@ if ($profileId -and (Test-Path $profilesJsonStep5)) {
       throw "profile '$profileId': include_qwen35_4b must be a JSON boolean, got '$q354Val' ($($q354Val.GetType().Name)) - fix setup/templates/profiles.json before the download set is chosen"
     }
     $includeQwen354B = ($q354Val -is [bool] -and $q354Val)
+    # Same STRICT bool gate for the 8GB-class agent seat.
+    $q359Val = $pdoc5.profiles.$profileId.include_qwen35_9b
+    if ($null -ne $q359Val -and -not ($q359Val -is [bool])) {
+      throw "profile '$profileId': include_qwen35_9b must be a JSON boolean, got '$q359Val' ($($q359Val.GetType().Name)) - fix setup/templates/profiles.json before the download set is chosen"
+    }
+    $includeQwen359B = ($q359Val -is [bool] -and $q359Val)
   }
 }
 # Gate -> download-set mapping lives in Get-GatedModelKeys (above the test seam) so it
 # can be regression-pinned; the rules and their deliberate asymmetry are documented there.
-$modelKeys += Get-GatedModelKeys -IncludeQwen38 $includeQwen38 -IncludeQwen354B $includeQwen354B -WithFamily $withFamily
+$modelKeys += Get-GatedModelKeys -IncludeQwen38 $includeQwen38 -IncludeQwen354B $includeQwen354B -IncludeQwen359B $includeQwen359B -WithFamily $withFamily
 foreach ($key in $modelKeys) {
   $m = $PINNED[$key]
   $dest = Join-Path $modelDir $m.name

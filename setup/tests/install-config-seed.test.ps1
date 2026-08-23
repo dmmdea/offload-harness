@@ -109,6 +109,20 @@ Assert ([bool]$profiles.'ampere-6'.include_qwen35_4b)                      'ampe
 # ships the configuration that was measured to fail.
 Assert ($sA6.agent_profile -eq 'research')                                 'ampere-6 seeds agent_profile=research (general scored 0% on this tier)'
 Assert ($null -eq $profiles.'ampere-8'.include_qwen35_4b)                  'ampere-8 include_qwen35_4b stays absent (not measured there)'
+# blackwell-8: the measured 8GB agent seat (on-box quality bake 2026-08-22: 9B
+# thinking-off 100% extraction x2 + 5/5 x2 vs the E4B fallback's 0% x2; 6344 MiB
+# @16K / 6696 @32K on the RTX 5060 reference box). Same both-halves rule as ampere-6.
+$sB8 = $profiles.'blackwell-8'.config_seed
+Assert ($sB8.agent_model -eq 'qwen3.5-9b-agent')                           'blackwell-8 seats the qwen3.5-9b agent (measured on-box winner)'
+Assert ([bool]$profiles.'blackwell-8'.include_qwen35_9b)                   'blackwell-8 sets include_qwen35_9b (yaml entry + download gate)'
+Assert ($sB8.agent_profile -eq 'research')                                 'blackwell-8 keeps agent_profile=research (the measured 0-to-72 lever)'
+Assert ($null -eq $profiles.'blackwell-8'.include_qwen35_4b)               'blackwell-8 include_qwen35_4b stays absent (9B holds the shared agent-seat alias)'
+Assert ($null -eq $profiles.'ampere-8'.include_qwen35_9b)                  'ampere-8 include_qwen35_9b stays absent (own on-box bake pending - twin-parity break recorded)'
+# The 4B and 9B seats are mutually exclusive EVERYWHERE (shared agent-seat alias;
+# the Go renderer refuses both) - pin the whole table so a future tier cannot ship it.
+foreach ($t in @($profiles.PSObject.Properties.Name)) {
+  Assert (-not (($profiles.$t.include_qwen35_4b -eq $true) -and ($profiles.$t.include_qwen35_9b -eq $true))) "tier ${t}: include_qwen35_4b and include_qwen35_9b are mutually exclusive"
+}
 $s32 = $profiles.'blackwell-32'.config_seed
 Assert ($s32.videogen_width -eq 1280 -and $s32.videogen_height -eq 704)     'blackwell-32 seeds REDUCED-RES 1280x704 video (doctrine-conformant recipe)'
 Assert ($null -eq $s32.agent_model)                                         'blackwell-32 agent stays derived (no explicit agent_model)'
@@ -224,14 +238,26 @@ Assert ($leanQ38.Count -eq 0)                                               'qwe
 $fullQ38 = @(Get-GatedModelKeys -IncludeQwen38 $true -IncludeQwen354B $false -WithFamily $true)
 Assert ($fullQ38 -contains 'model-qwen38' -and $fullQ38 -contains 'model-qwen38-mmproj') 'qwen3.8-27b pulls weights + mmproj on a full install'
 
+# The 9B agent seat: same gate mechanism, same deliberate non-family asymmetry (it
+# replaces a fallback planner MEASURED at 0% extraction, so a lean install must not
+# silently drop it).
+$q359 = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeQwen359B $true -WithFamily $true)
+Assert ($q359 -contains 'model-qwen35-9b')                                  'include_qwen35_9b pulls model-qwen35-9b'
+Assert ($q359.Count -eq 1)                                                  'include_qwen35_9b pulls ONLY its own weights'
+$leanQ359 = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeQwen359B $true -WithFamily $false)
+Assert ($leanQ359 -contains 'model-qwen35-9b')                              'qwen3.5-9b survives a LEAN install (does NOT ride the family gate)'
+
 # Every key a gate can emit must exist in $PINNED, or the install dies mid-download.
-foreach ($k in @('model-qwen35-4b', 'model-qwen38', 'model-qwen38-mmproj')) {
+foreach ($k in @('model-qwen35-4b', 'model-qwen35-9b', 'model-qwen38', 'model-qwen38-mmproj')) {
   Assert ([bool]$PINNED[$k])                                                "PINNED defines $k (gate cannot name a key with no pin)"
 }
 # Closure the other way: a tier that sets the flag must have its pin present.
 foreach ($t in @($profiles.PSObject.Properties.Name)) {
   if ($profiles.$t.include_qwen35_4b -eq $true) {
     Assert ([bool]$PINNED['model-qwen35-4b'])                               "tier $t sets include_qwen35_4b and the pin exists"
+  }
+  if ($profiles.$t.include_qwen35_9b -eq $true) {
+    Assert ([bool]$PINNED['model-qwen35-9b'])                               "tier $t sets include_qwen35_9b and the pin exists"
   }
 }
 

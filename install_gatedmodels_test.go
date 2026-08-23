@@ -28,12 +28,13 @@ const (
 	weightQ38   = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
 	mmprojQ38   = "mmproj-Qwen3.8-27B-F16.gguf"
 	weightQ354B = "Qwen3.5-4B-UD-Q4_K_XL.gguf"
+	weightQ359B = "Qwen3.5-9B-UD-Q4_K_XL.gguf"
 )
 
-func gatedWarn(t *testing.T, in26B, inQ38, inQ354B bool, dir, target string) string {
+func gatedWarn(t *testing.T, in26B, inQ38, inQ354B, inQ359B bool, dir, target string) string {
 	t.Helper()
 	var buf bytes.Buffer
-	warnMissingGatedModelsTo(in26B, inQ38, inQ354B, dir, target, &buf)
+	warnMissingGatedModelsTo(in26B, inQ38, inQ354B, inQ359B, dir, target, &buf)
 	return buf.String()
 }
 
@@ -50,12 +51,12 @@ func TestWarnMissingGatedModelsNamesOnlyAbsentGatedWeights(t *testing.T) {
 	touchWeight(t, dir, weightQ38)
 	touchWeight(t, dir, mmprojQ38)
 
-	out := gatedWarn(t, false, true, true, dir, runtime.GOOS)
+	out := gatedWarn(t, false, true, true, true, dir, runtime.GOOS)
 
 	if strings.Contains(out, weightQ38) || strings.Contains(out, mmprojQ38) {
 		t.Fatalf("a PRESENT gated weight must not be reported missing:\n%s", out)
 	}
-	if !strings.Contains(out, weightQ354B) {
+	if !strings.Contains(out, weightQ354B) || !strings.Contains(out, weightQ359B) {
 		t.Fatalf("an ABSENT gated weight must be reported:\n%s", out)
 	}
 	// The 26B gate was OFF, so its weight is absent-but-not-asked-for. Reporting
@@ -64,23 +65,24 @@ func TestWarnMissingGatedModelsNamesOnlyAbsentGatedWeights(t *testing.T) {
 		t.Fatalf("an ungated model must never be reported:\n%s", out)
 	}
 	// The count in the header must match the number of entries listed, or the
-	// message misstates the size of the problem.
-	if !strings.Contains(out, "1 gated model weight(s)") {
-		t.Fatalf("want a count of exactly 1, got:\n%s", out)
+	// message misstates the size of the problem (Q354B + Q359B weights are the
+	// two absent gated files here).
+	if !strings.Contains(out, "2 gated model weight(s)") {
+		t.Fatalf("want a count of exactly 2, got:\n%s", out)
 	}
 }
 
 func TestWarnMissingGatedModelsCountsEachMissingFileIncludingMmproj(t *testing.T) {
 	dir := t.TempDir() // nothing on disk at all
-	out := gatedWarn(t, true, true, true, dir, runtime.GOOS)
+	out := gatedWarn(t, true, true, true, true, dir, runtime.GOOS)
 
-	// 26B weight + Q38 weight + Q38 mmproj + Q354B weight = 4. The mmproj is a
-	// SEPARATE check: a vision entry with its weights but no projector loads and
-	// then fails on the first image, so it must be counted on its own.
-	if !strings.Contains(out, "4 gated model weight(s)") {
-		t.Fatalf("want a count of 4, got:\n%s", out)
+	// 26B weight + Q38 weight + Q38 mmproj + Q354B weight + Q359B weight = 5. The
+	// mmproj is a SEPARATE check: a vision entry with its weights but no projector
+	// loads and then fails on the first image, so it must be counted on its own.
+	if !strings.Contains(out, "5 gated model weight(s)") {
+		t.Fatalf("want a count of 5, got:\n%s", out)
 	}
-	for _, name := range []string{weight26B, weightQ38, mmprojQ38, weightQ354B} {
+	for _, name := range []string{weight26B, weightQ38, mmprojQ38, weightQ354B, weightQ359B} {
 		if !strings.Contains(out, name) {
 			t.Fatalf("missing weight %q not reported:\n%s", name, out)
 		}
@@ -95,15 +97,16 @@ func TestWarnMissingGatedModelsSilentArms(t *testing.T) {
 	touchWeight(t, dir, weightQ38)
 	touchWeight(t, dir, mmprojQ38)
 	touchWeight(t, dir, weightQ354B)
+	touchWeight(t, dir, weightQ359B)
 
 	// 1. Everything gated is present => silence.
-	if out := gatedWarn(t, true, true, true, dir, runtime.GOOS); strings.TrimSpace(out) != "" {
+	if out := gatedWarn(t, true, true, true, true, dir, runtime.GOOS); strings.TrimSpace(out) != "" {
 		t.Fatalf("all gated weights present must be silent, got:\n%s", out)
 	}
 
 	// 2. No gates set => silence, even on an empty dir. A tier that asked for
 	//    nothing cannot be missing anything.
-	if out := gatedWarn(t, false, false, false, t.TempDir(), runtime.GOOS); strings.TrimSpace(out) != "" {
+	if out := gatedWarn(t, false, false, false, false, t.TempDir(), runtime.GOOS); strings.TrimSpace(out) != "" {
 		t.Fatalf("no gates set must be silent, got:\n%s", out)
 	}
 
@@ -116,12 +119,12 @@ func TestWarnMissingGatedModelsSilentArms(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		otherOS = "windows"
 	}
-	if out := gatedWarn(t, true, true, true, t.TempDir(), otherOS); strings.TrimSpace(out) != "" {
+	if out := gatedWarn(t, true, true, true, true, t.TempDir(), otherOS); strings.TrimSpace(out) != "" {
 		t.Fatalf("cross-machine render must be silent, got:\n%s", out)
 	}
 
 	// 4. Empty modelsDir => silence (nothing to resolve a relative path against).
-	if out := gatedWarn(t, true, true, true, "", runtime.GOOS); strings.TrimSpace(out) != "" {
+	if out := gatedWarn(t, true, true, true, true, "", runtime.GOOS); strings.TrimSpace(out) != "" {
 		t.Fatalf("empty modelsDir must be silent, got:\n%s", out)
 	}
 }
