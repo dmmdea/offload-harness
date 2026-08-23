@@ -196,7 +196,7 @@ func runCompactionEval(args []string) error {
 		// measured real/estimated ratio — and therefore every implied safety
 		// margin — understate the error by that constant.
 		var specs []agent.ToolSpec
-		if tools, terr := agent.ReadOnlyTools(".", nil); terr == nil {
+		if tools, terr := agent.ReadOnlyTools(".", nil, nil); terr == nil {
 			for _, t := range tools {
 				specs = append(specs, t.ToolSpec)
 			}

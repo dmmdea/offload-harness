@@ -2775,6 +2775,7 @@ func runAgentTrajectoryGate(args []string) error {
 		Timeout:              timeout,
 		ReadRoot:             absRoot,
 		Offload:              pipeline.NewRecordlessOffload(cfg, plannerModel, timeout),
+		NPU:                  pipeline.NewLoopNPU(cfg),
 		SystemPromptOverride: string(candidate),
 	})
 	if err != nil {

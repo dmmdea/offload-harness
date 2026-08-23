@@ -31,7 +31,7 @@ func TestReadFileWithinRootOK(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("world"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tools, err := ReadOnlyTools(root, nil)
+	tools, err := ReadOnlyTools(root, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestReadFileRejectsParentEscape(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(filepath.Dir(root), "secret.txt"), []byte("TOPSECRET"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tools, _ := ReadOnlyTools(root, nil)
+	tools, _ := ReadOnlyTools(root, nil, nil)
 	rf := findTool(tools, "read_file")
 	out, err := rf.Exec(context.Background(), `{"path":"../secret.txt"}`)
 	if err == nil {
@@ -67,7 +67,7 @@ func TestReadFileRejectsParentEscape(t *testing.T) {
 
 func TestReadFileRejectsAbsoluteOutside(t *testing.T) {
 	root := t.TempDir()
-	tools, _ := ReadOnlyTools(root, nil)
+	tools, _ := ReadOnlyTools(root, nil, nil)
 	rf := findTool(tools, "read_file")
 	abs := filepath.Join(filepath.Dir(root), "secret.txt")
 	_, err := rf.Exec(context.Background(), `{"path":`+jsonStr(abs)+`}`)
@@ -95,7 +95,7 @@ func TestReadFileRejectsWindowsJunctionEscape(t *testing.T) {
 	if out, err := exec.Command("cmd", "/c", "mklink", "/J", jx, parent).CombinedOutput(); err != nil {
 		t.Skipf("could not create junction (mklink /J): %v — %s", err, out)
 	}
-	tools, _ := ReadOnlyTools(root, nil)
+	tools, _ := ReadOnlyTools(root, nil, nil)
 	rf := findTool(tools, "read_file")
 	got, err := rf.Exec(context.Background(), `{"path":"jx\\secret.txt"}`)
 	if err == nil {
@@ -118,7 +118,7 @@ func TestReadFileRejectsSymlinkEscape(t *testing.T) {
 	if err := os.Symlink(parent, filepath.Join(root, "ln")); err != nil {
 		t.Skipf("symlink creation unsupported here: %v", err)
 	}
-	tools, _ := ReadOnlyTools(root, nil)
+	tools, _ := ReadOnlyTools(root, nil, nil)
 	rf := findTool(tools, "read_file")
 	got, err := rf.Exec(context.Background(), `{"path":"ln/secret.txt"}`)
 	if err == nil || strings.Contains(got, "SEKRET") {
@@ -132,7 +132,7 @@ func TestPathRejectsDriveRelativeWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("drive-relative paths are Windows-specific")
 	}
-	tools, _ := ReadOnlyTools(t.TempDir(), nil)
+	tools, _ := ReadOnlyTools(t.TempDir(), nil, nil)
 	rf := findTool(tools, "read_file")
 	if _, err := rf.Exec(context.Background(), `{"path":"C:secret.txt"}`); err == nil {
 		t.Fatal("drive-relative C:secret.txt was not rejected")
@@ -143,7 +143,7 @@ func TestListDirWithinRoot(t *testing.T) {
 	root := t.TempDir()
 	_ = os.WriteFile(filepath.Join(root, "a.txt"), []byte("x"), 0o644)
 	_ = os.Mkdir(filepath.Join(root, "sub"), 0o755)
-	tools, _ := ReadOnlyTools(root, nil)
+	tools, _ := ReadOnlyTools(root, nil, nil)
 	ld := findTool(tools, "list_dir")
 	if ld == nil {
 		t.Fatal("list_dir tool missing")
@@ -159,7 +159,7 @@ func TestListDirWithinRoot(t *testing.T) {
 
 func TestListDirRejectsEscape(t *testing.T) {
 	root := t.TempDir()
-	tools, _ := ReadOnlyTools(root, nil)
+	tools, _ := ReadOnlyTools(root, nil, nil)
 	ld := findTool(tools, "list_dir")
 	if _, err := ld.Exec(context.Background(), `{"path":"../.."}`); err == nil {
 		t.Fatal("expected list_dir escape rejection")
@@ -172,7 +172,7 @@ func TestOffloadToolInvokesOffloaderAndReturnsResult(t *testing.T) {
 		gotTask, gotInput = task, input
 		return `{"summary":"ok"}`, nil
 	}
-	tools, _ := ReadOnlyTools(t.TempDir(), off)
+	tools, _ := ReadOnlyTools(t.TempDir(), off, nil)
 	st := findTool(tools, "offload_summarize")
 	if st == nil {
 		t.Fatal("offload_summarize tool missing when offloader provided")
@@ -193,7 +193,7 @@ func TestOffloadToolPropagatesError(t *testing.T) {
 	off := func(_ context.Context, _, _ string, _ map[string]any) (string, error) {
 		return "", errors.New("model down")
 	}
-	tools, _ := ReadOnlyTools(t.TempDir(), off)
+	tools, _ := ReadOnlyTools(t.TempDir(), off, nil)
 	st := findTool(tools, "offload_summarize")
 	if _, err := st.Exec(context.Background(), `{"text":"x"}`); err == nil {
 		t.Fatal("expected offloader error to propagate to the tool")
@@ -201,7 +201,7 @@ func TestOffloadToolPropagatesError(t *testing.T) {
 }
 
 func TestNoOffloadToolsWhenOffloaderNil(t *testing.T) {
-	tools, _ := ReadOnlyTools(t.TempDir(), nil)
+	tools, _ := ReadOnlyTools(t.TempDir(), nil, nil)
 	if findTool(tools, "offload_summarize") != nil {
 		t.Error("offload tools must be absent when no offloader is wired")
 	}
@@ -222,7 +222,7 @@ func TestReadFileRangedOffsetLimit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte(strings.Join(lines, "\n")), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tools, _ := ReadOnlyTools(root, nil)
+	tools, _ := ReadOnlyTools(root, nil, nil)
 	rf := findTool(tools, "read_file")
 	out, err := rf.Exec(context.Background(), `{"path":"f.txt","offset":10,"limit":5}`)
 	if err != nil {
@@ -252,7 +252,7 @@ func TestReadFilePastEOF(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("a\nb\nc"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tools, _ := ReadOnlyTools(root, nil)
+	tools, _ := ReadOnlyTools(root, nil, nil)
 	rf := findTool(tools, "read_file")
 	out, err := rf.Exec(context.Background(), `{"path":"f.txt","offset":100}`)
 	if err != nil {
@@ -270,7 +270,7 @@ func TestReadFileDefaultFromLineOne(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("first\nsecond\nthird"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tools, _ := ReadOnlyTools(root, nil)
+	tools, _ := ReadOnlyTools(root, nil, nil)
 	rf := findTool(tools, "read_file")
 	out, err := rf.Exec(context.Background(), `{"path":"f.txt"}`)
 	if err != nil {
@@ -294,7 +294,7 @@ func TestReadFileLongLineTruncatedOnRuneBoundary(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte(long), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tools, _ := ReadOnlyTools(root, nil)
+	tools, _ := ReadOnlyTools(root, nil, nil)
 	rf := findTool(tools, "read_file")
 	out, err := rf.Exec(context.Background(), `{"path":"f.txt"}`)
 	if err != nil {
@@ -332,7 +332,7 @@ func TestSummarizeFileReadsFileAndReturnsSummary(t *testing.T) {
 		gotTask, gotInput = task, input
 		return "a lazy dog and a quick fox, repeated", nil
 	}
-	tools, _ := ReadOnlyTools(root, off)
+	tools, _ := ReadOnlyTools(root, off, nil)
 	sf := findTool(tools, "summarize_file")
 	if sf == nil {
 		t.Fatal("summarize_file tool missing when offloader provided")
@@ -363,7 +363,7 @@ func TestSummarizeFileDefersOnOffloadError(t *testing.T) {
 	off := func(_ context.Context, _, _ string, _ map[string]any) (string, error) {
 		return "", errors.New("model down")
 	}
-	tools, _ := ReadOnlyTools(root, off)
+	tools, _ := ReadOnlyTools(root, off, nil)
 	sf := findTool(tools, "summarize_file")
 	out, err := sf.Exec(context.Background(), `{"path":"doc.txt"}`)
 	if err != nil {
@@ -393,7 +393,7 @@ func TestSummarizeFileRejectsEscape(t *testing.T) {
 		called = true
 		return input, nil // echo — would leak the file if ever called
 	}
-	tools, _ := ReadOnlyTools(root, off)
+	tools, _ := ReadOnlyTools(root, off, nil)
 	sf := findTool(tools, "summarize_file")
 	out, err := sf.Exec(context.Background(), `{"path":"../secret.txt"}`)
 	if err == nil {
@@ -410,7 +410,7 @@ func TestSummarizeFileRejectsEscape(t *testing.T) {
 // (d) when no offloader is wired, summarize_file must NOT be registered (it needs
 // the offload cascade, so it hides under the same offload != nil guard).
 func TestSummarizeFileAbsentWhenOffloaderNil(t *testing.T) {
-	tools, _ := ReadOnlyTools(t.TempDir(), nil)
+	tools, _ := ReadOnlyTools(t.TempDir(), nil, nil)
 	if findTool(tools, "summarize_file") != nil {
 		t.Error("summarize_file must be absent when no offloader is wired")
 	}
@@ -418,7 +418,7 @@ func TestSummarizeFileAbsentWhenOffloaderNil(t *testing.T) {
 
 // P0 is read-only: no write/shell/net tools may be registered.
 func TestNoMutatingToolsRegistered(t *testing.T) {
-	tools, _ := ReadOnlyTools(t.TempDir(), func(_ context.Context, _, _ string, _ map[string]any) (string, error) { return "", nil })
+	tools, _ := ReadOnlyTools(t.TempDir(), func(_ context.Context, _, _ string, _ map[string]any) (string, error) { return "", nil }, nil)
 	banned := []string{"write_file", "edit_file", "shell", "exec", "run", "fetch", "http", "delete", "rm"}
 	for _, tl := range tools {
 		for _, b := range banned {

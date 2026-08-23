@@ -576,13 +576,21 @@ func (s *Server) handleOCR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	// OCR ownership (2026-08-22): GPU VLM is primary; the NPU's PaddleOCR is the
 	// caller's EXPLICIT fast-batch path, never an automatic fallback — the two
 	// read stylised text differently and a silent switch would change results.
-	if in.Engine == "npu" {
+	switch in.Engine {
+	case "", "gpu":
+		return result(s.p.Run(ctx, core.Request{Task: core.TaskOCR, Image: in.Image}))
+	case "npu":
 		if !s.p.Cfg().HasAccelerator("hailo-8l") {
 			return jsonResult(map[string]any{"deferred": true, "reason": "engine:npu requested but this box lists no hailo-8l accelerator"})
 		}
 		return s.hailoCall(ctx, "ocr", map[string]any{"image_path": in.Image})
+	default:
+		// An unrecognized engine must not silently become a GPU call — the
+		// result would be indistinguishable from an intentional one (loop-side
+		// twin of this rule lives in agent.offloadTools' ocr tool).
+		return jsonResult(map[string]any{"deferred": true,
+			"reason": fmt.Sprintf("unrecognized engine %q; use \"gpu\" or \"npu\"", in.Engine)})
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskOCR, Image: in.Image}))
 }
 
 func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1138,6 +1146,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		MaxSteps:    maxSteps,
 		ReadRoot:    absRoot,
 		Offload:     offload,
+		NPU:         pipeline.NewLoopNPU(cfg),
 	})
 	if err != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": "building agent: " + err.Error()})

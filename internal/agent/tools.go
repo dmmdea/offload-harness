@@ -33,7 +33,7 @@ const maxReadBytes = 256 * 1024 // P0 read cap: keeps a single read from blowing
 // errors, never a silent fall-through). This replaces the earlier hand-rolled
 // EvalSymlinks check, which a fresh-context review proved bypassable by a
 // non-privileged Windows junction.
-func ReadOnlyTools(root string, offload OffloadFunc) ([]Tool, error) {
+func ReadOnlyTools(root string, offload OffloadFunc, npu NPUFunc) ([]Tool, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -66,8 +66,14 @@ func ReadOnlyTools(root string, offload OffloadFunc) ([]Tool, error) {
 	tools = append(tools, searchTool)
 
 	if offload != nil {
-		tools = append(tools, offloadTools(offload)...)
+		tools = append(tools, offloadTools(offload, npu)...)
 		tools = append(tools, summarizeFileTool(s, offload))
+	}
+	// Accelerator tools (ADR 0024): registered ONLY when the box wires an
+	// NPUFunc, so the advertised tool list is byte-identical without the
+	// device — the same pin as the MCP surface's HasAccelerator gate.
+	if npu != nil {
+		tools = append(tools, npuTools(npu)...)
 	}
 	return tools, nil
 }
@@ -290,7 +296,7 @@ func (s *scope) readFile(_ context.Context, args string) (string, error) {
 // offloadTools wraps the in-process offloader as four local tools. Each returns
 // the offload Result JSON as the tool result; an offloader error propagates and
 // the loop feeds it back as an is_error tool result (defer-not-crash).
-func offloadTools(offload OffloadFunc) []Tool {
+func offloadTools(offload OffloadFunc, npu NPUFunc) []Tool {
 	mk := func(name, task, desc, schema string, build func(json.RawMessage) (string, map[string]any, error)) Tool {
 		return Tool{
 			ToolSpec: ToolSpec{Name: name, Description: desc, Schema: json.RawMessage(schema)},
@@ -387,18 +393,44 @@ func offloadTools(offload OffloadFunc) []Tool {
 				}
 				return in.Question, map[string]any{"image": in.Path, "question": in.Question}, nil
 			}),
-		mk("offload_ocr", "ocr",
-			"Transcribe the text in an IMAGE on a free local vision model, without the image entering the agent's context. path must be a real image file. Returns {text} or a defer.",
-			`{"type":"object","properties":{"path":{"type":"string","description":"path to the image file to transcribe"}},"required":["path"]}`,
-			func(a json.RawMessage) (string, map[string]any, error) {
+		// offload_ocr is built by hand rather than via mk: the engine param can
+		// route to the NPU sidecar, which is a different executor than the
+		// offload closure. The `engine` param is UNIVERSAL (advertised on every
+		// box) for parity with the MCP surface's 0.82.0 decision — a box
+		// without the accelerator answers engine:npu with an honest defer.
+		// OCR ownership (2026-08-22): GPU VLM is primary; the NPU path is the
+		// caller's EXPLICIT fast-batch choice, never an automatic fallback.
+		{
+			ToolSpec: ToolSpec{
+				Name:        "offload_ocr",
+				Description: "Transcribe the text in an IMAGE on a free local vision model, without the image entering the agent's context. path must be a real image file. Optional engine: gpu (default) = the local vision model; npu = the Hailo-8L fast-batch OCR when this box has the accelerator. Returns {text} or a defer.",
+				Schema:      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"path to the image file to transcribe"},"engine":{"type":"string","enum":["gpu","npu"],"description":"gpu (default): the local vision model; npu: the Hailo-8L fast-batch OCR when this box has the accelerator"}},"required":["path"]}`),
+			},
+			Exec: func(ctx context.Context, args string) (string, error) {
 				var in struct {
-					Path string `json:"path"`
+					Path   string `json:"path"`
+					Engine string `json:"engine"`
 				}
-				if err := json.Unmarshal(a, &in); err != nil {
-					return "", nil, err
+				if err := json.Unmarshal([]byte(args), &in); err != nil {
+					return "", err
 				}
-				return "", map[string]any{"image": in.Path}, nil
-			}),
+				switch in.Engine {
+				case "", "gpu":
+					return offload(ctx, "ocr", "", map[string]any{"image": in.Path})
+				case "npu":
+					if npu == nil {
+						return `{"deferred":true,"reason":"engine:npu requested but this box lists no hailo-8l accelerator; omit engine to use the vision model"}`, nil
+					}
+					return npu(ctx, "ocr", map[string]any{"image_path": in.Path})
+				default:
+					// An unrecognized engine must not silently become a GPU call —
+					// the result would be indistinguishable from an intentional one.
+					b, _ := json.Marshal(map[string]any{"deferred": true,
+						"reason": fmt.Sprintf("unrecognized engine %q; use \"gpu\" or \"npu\"", in.Engine)})
+					return string(b), nil
+				}
+			},
+		},
 		mk("offload_transcribe", "transcribe",
 			"Transcribe an AUDIO file on a free local speech model, without the audio entering the agent's context. path must be a real audio file. Returns the transcript or a defer.",
 			`{"type":"object","properties":{"path":{"type":"string","description":"path to the audio file to transcribe"},"language":{"type":"string","description":"optional ISO language hint, e.g. \"en\""}},"required":["path"]}`,
