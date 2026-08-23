@@ -44,7 +44,9 @@ func TestAdvertisedToolsReflectsProfileNarrowing(t *testing.T) {
 
 	got := loop.AdvertisedTools()
 	// research keeps only what it lists AND what was registered (narrow-only).
-	want := map[string]bool{"list_dir": true, "read_file": true, "summarize_file": true}
+	// Since 0.85.1 its list carries the read-only senses too, so a registered
+	// offload_vqa survives the narrowing (the loop-NPU field fix).
+	want := map[string]bool{"list_dir": true, "read_file": true, "summarize_file": true, "offload_vqa": true}
 	if len(got) != len(want) {
 		t.Fatalf("after research narrowing want %d advertised tools, got %d (%v)", len(want), len(got), got)
 	}

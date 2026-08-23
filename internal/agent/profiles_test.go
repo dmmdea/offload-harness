@@ -252,3 +252,70 @@ func TestWithProfileInjectsExemplarsAfterSystemBeforeObjective(t *testing.T) {
 		t.Errorf("exemplars must include both a user and an assistant message (user=%v assistant=%v)", sawUser, sawAssistant)
 	}
 }
+
+// TestResearchProfileCarriesTheSenses pins the 2026-08-23 fix: the loop-NPU
+// wiring (0.85.0) was unreachable under the DEFAULT delegation profile — the
+// tools existed in the binary and the research allowlist stripped them (found
+// live on the accelerator box, not by any unit test: the loop advertised 3
+// tools). The senses ride the allowlist; boxes without them are unchanged
+// because WithProfile intersects with the tools actually enabled.
+func TestResearchProfileCarriesTheSenses(t *testing.T) {
+	prof, err := LookupProfile("research")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"offload_vqa", "offload_ocr", "offload_transcribe",
+		"offload_face_detect", "offload_face_embed", "offload_object_detect",
+		"offload_person_embed", "offload_depth", "offload_enhance_low_light",
+		"offload_image_embed"} {
+		found := false
+		for _, tn := range prof.Tools {
+			if tn == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("research profile is missing the %s sense", name)
+		}
+	}
+}
+
+// TestResearchProfileNPUToolsSurviveNarrowing: end-to-end through the real
+// narrowing — a loop built WITH an NPUFunc and narrowed to research must still
+// advertise the NPU tools; without an NPUFunc the names simply do not resolve.
+func TestResearchProfileNPUToolsSurviveNarrowing(t *testing.T) {
+	off := func(context.Context, string, string, map[string]any) (string, error) { return "", nil }
+	npu := func(context.Context, string, map[string]any) (string, error) { return "{}", nil }
+	tools, err := ReadOnlyTools(t.TempDir(), off, npu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop := NewLoop(nil, tools, 4)
+	prof, err := LookupProfile("research")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop.WithProfile(prof)
+	adv := loop.AdvertisedTools()
+	has := func(n string) bool {
+		for _, a := range adv {
+			if a == n {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("offload_face_detect") || !has("offload_ocr") {
+		t.Fatalf("research narrowing stripped the senses: %v", adv)
+	}
+	// And WITHOUT the NPUFunc the npu names must not appear (no phantom tools).
+	tools2, _ := ReadOnlyTools(t.TempDir(), off, nil)
+	loop2 := NewLoop(nil, tools2, 4)
+	loop2.WithProfile(prof)
+	for _, a := range loop2.AdvertisedTools() {
+		if a == "offload_face_detect" {
+			t.Fatal("NPU tool advertised on a box without the accelerator")
+		}
+	}
+}

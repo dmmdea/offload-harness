@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.85.1] - 2026-08-23
+
+### Fixed — the default delegation profile stripped the loop's senses
+
+Live verification on the accelerator box caught what no unit test could: the
+`research` profile's tool allowlist predates every media/NPU tool, so the
+0.85.0 loop-NPU wiring was unreachable under the DEFAULT profile — the loop
+advertised 3 tools. The research allowlist now carries the read-only senses
+(`offload_vqa`/`offload_ocr`/`offload_transcribe` + the 7 NPU tools) and its
+system prompt names them. `WithProfile` intersects with the tools actually
+enabled, so boxes without a vision seat or accelerator advertise exactly what
+they did before — the measured small-seat narrowing is untouched there.
+Pinned end-to-end through the real narrowing (with and without an NPUFunc).
+
 ## [0.85.0] - 2026-08-23
 
 ### Added — the agent loop gets the NPU (ADR 0024 completed for the loop surface)
