@@ -8,7 +8,8 @@ import (
 )
 
 var npuToolNames = []string{"offload_face_detect", "offload_face_embed", "offload_object_detect",
-	"offload_person_embed", "offload_depth", "offload_enhance_low_light", "offload_image_embed"}
+	"offload_person_embed", "offload_depth", "offload_enhance_low_light", "offload_image_embed",
+	"offload_pose", "offload_segment", "offload_text_embed", "offload_zero_shot"}
 
 func toolByName(t *testing.T, tools []Tool, name string) *Tool {
 	t.Helper()

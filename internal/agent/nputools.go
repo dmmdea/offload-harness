@@ -25,7 +25,14 @@ type NPUFunc func(ctx context.Context, tool string, args map[string]any) (string
 // sidecar's own keyword names, so the JSON passes through unchanged (the same
 // adapter shape as mcpserver.handleHailoTool).
 func npuTools(npu NPUFunc) []Tool {
+	// requiredArg: the one argument each sidecar tool cannot run without —
+	// image_path for the vision tools, text for the text tower.
+	requiredArg := map[string]string{"text_embed": "text"}
 	mk := func(name, sidecar, desc, schema string) Tool {
+		arg := requiredArg[sidecar]
+		if arg == "" {
+			arg = "image_path"
+		}
 		return Tool{
 			ToolSpec: ToolSpec{Name: name, Description: desc, Schema: json.RawMessage(schema)},
 			Exec: func(ctx context.Context, args string) (string, error) {
@@ -33,17 +40,18 @@ func npuTools(npu NPUFunc) []Tool {
 				if err := json.Unmarshal([]byte(args), &in); err != nil {
 					return "", err
 				}
-				raw, present := in["image_path"]
+				raw, present := in[arg]
 				s, isStr := raw.(string)
 				if present && !isStr {
 					// A wrong TYPE must not be reported as "empty" — that sends
 					// the caller debugging a defect that did not occur.
 					b, _ := json.Marshal(map[string]any{"deferred": true,
-						"reason": fmt.Sprintf("image_path must be a string, got %T", raw)})
+						"reason": fmt.Sprintf("%s must be a string, got %T", arg, raw)})
 					return string(b), nil
 				}
 				if strings.TrimSpace(s) == "" {
-					return `{"deferred":true,"reason":"empty image_path"}`, nil
+					b, _ := json.Marshal(map[string]any{"deferred": true, "reason": "empty " + arg})
+					return string(b), nil
 				}
 				return npu(ctx, sidecar, in)
 			},
@@ -72,5 +80,17 @@ func npuTools(npu NPUFunc) []Tool {
 		mk("offload_image_embed", "embed",
 			"512-d IMAGE embedding on the LOCAL Hailo-8L NPU (TinyCLIP) for similarity search / clustering of frames and thumbnails. Returns {embedding,dim} or a defer.",
 			`{"type":"object","properties":{`+img+`},"required":["image_path"]}`),
+		mk("offload_pose", "pose",
+			"Human POSE estimation on the LOCAL Hailo-8L NPU: people with 17 named COCO keypoints each, in image pixels. Returns {people:[{x,y,w,h,score,keypoints:{...}}],count} or a defer.",
+			`{"type":"object","properties":{`+img+`,"score_threshold":{"type":"number","description":"minimum person score (default 0.3)"}},"required":["image_path"]}`),
+		mk("offload_segment", "segment",
+			"Instance SEGMENTATION on the LOCAL Hailo-8L NPU (80 COCO classes; everything=true = class-agnostic FastSAM). Writes an instance-id mask PNG. Returns {instances:[{label,class_id,x,y,w,h,score}],mask_path,count} or a defer.",
+			`{"type":"object","properties":{`+img+`,"everything":{"type":"boolean","description":"true = class-agnostic segment-everything (default false)"},"score_threshold":{"type":"number","description":"minimum instance score (default 0.25)"},"out_path":{"type":"string","description":"output mask PNG (default: <name>.mask.png)"}},"required":["image_path"]}`),
+		mk("offload_text_embed", "text_embed",
+			"TEXT embedding ON the LOCAL Hailo-8L NPU in the SAME space as offload_image_embed (space=tinyclip default, 512-d) — text-to-image similarity over frames. Returns {embedding,dim,space} or a defer.",
+			`{"type":"object","properties":{"text":{"type":"string","description":"the text to embed"},"space":{"type":"string","enum":["tinyclip","siglip2"],"description":"embedding space (default tinyclip)"}},"required":["text"]}`),
+		mk("offload_zero_shot", "zero_shot",
+			"ZERO-SHOT image classification on the LOCAL Hailo-8L NPU: score an image against free-text labels, both towers on-NPU. Returns {results:[{label,similarity,prob}],best} or a defer.",
+			`{"type":"object","properties":{`+img+`,"labels":{"type":"array","items":{"type":"string"},"description":"candidate labels"},"space":{"type":"string","enum":["tinyclip","siglip2"],"description":"model pair (default tinyclip)"}},"required":["image_path","labels"]}`),
 	}
 }

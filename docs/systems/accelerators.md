@@ -114,12 +114,12 @@ become defers, so the calling agent does the task another way.
 ## Tools and ownership
 
 Registered **only** when the box lists the device (`HasAccelerator("hailo-8l")`), so no NPU
-tool appears in `tools/list` elsewhere (the one universal change on every box is
-`offload_ocr`'s schema gaining an optional `engine` parameter). Each maps 1:1 to a sidecar
-tool:
+tool appears in `tools/list` elsewhere (the universal changes on every box are
+`offload_ocr` and `offload_transcribe` each gaining an optional `engine` parameter). Each
+maps 1:1 to a sidecar tool:
 
-**Both surfaces carry the same set (0.85.0):** the MCP server registers the tools for
-Claude, and the agent loop registers the same 7 (plus the loop OCR `engine` param) for
+**Both surfaces carry the same set (0.86.0):** the MCP server registers the tools for
+Claude, and the agent loop registers the same 11 (plus the loop OCR `engine` param) for
 `agent_run`/`agent_delegate`/`local-agent` — injected as `agent.NPUFunc` via
 `pipeline.NewLoopNPU`, gated identically, so a delegated contract on an accelerator box can
 use the NPU while the same contract on any other node advertises no such tool.
@@ -133,9 +133,16 @@ use the NPU while the same contract on any other node advertises no such tool.
 | `offload_depth` | `depth` | preview-grade relative depth PNG (Depth-Anything-V2) |
 | `offload_enhance_low_light` | `enhance_low_light` | Zero-DCE brightening at source resolution |
 | `offload_image_embed` | `embed` | 512-d TinyCLIP image embedding |
+| `offload_pose` | `pose` | people with 17 named COCO keypoints (YOLOv8s-pose, host decode) |
+| `offload_segment` | `segment` | instance masks + id-map PNG; `everything=true` = FastSAM class-agnostic |
+| `offload_text_embed` | `text_embed` | text vectors ON the NPU, same 512-d space as `offload_image_embed` (siglip2 optional) |
+| `offload_zero_shot` | `zero_shot` | free-text labels → ranked similarities, both towers on-NPU |
 
-Plus `offload_ocr` gains `engine:"npu"` — the Hailo PaddleOCR path, **explicitly
-caller-selected**, never an automatic fallback.
+Plus `offload_ocr` gains `engine:"npu"` (the Hailo PaddleOCR path) and `offload_transcribe`
+gains `engine:"npu"` (whisper-base fast preview) — both **explicitly caller-selected**,
+never an automatic fallback. Whisper-on-NPU is PLATFORM-BLOCKED on Windows HailoRT 4.24
+(the sidecar returns a typed diagnosis; Linux-validated upstream), so `engine:"npu"`
+transcription on such a box defers honestly with the reason.
 
 Ownership when both devices are present:
 
