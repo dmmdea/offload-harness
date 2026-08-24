@@ -25,6 +25,8 @@ Detailed documentation lives in `docs/`. This file only routes you there.
   satisfaction, fleet job lifecycle, zero-warm generation).
 - [`docs/systems/printed-clis.md`](docs/systems/printed-clis.md) — the `tools/` printed CLIs: what
   they are, why they are separate Go modules, and the regenerate/re-vendor cycle.
+- [`docs/systems/opencode-integration.md`](docs/systems/opencode-integration.md) — the harness inside
+  opencode: MCP registration, rules parity, and the `opencode-local-offload` plugin.
 - [`docs/architecture/decisions/`](docs/architecture/decisions/README.md) — Architecture Decision
   Records. **Only `Accepted` status is current guidance.**
 - [`docs/glossary.md`](docs/glossary.md) — terms with a specific meaning here (Defer, Tier,
