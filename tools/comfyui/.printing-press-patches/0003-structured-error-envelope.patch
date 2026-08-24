@@ -1,5 +1,5 @@
---- a/tools/comfyui/internal/cli/root.go
-+++ b/tools/comfyui/internal/cli/root.go
+--- a/internal/cli/root.go
++++ b/internal/cli/root.go
 @@ -66,6 +66,15 @@
  	dataSource              string
  	freshnessMeta           any
@@ -64,8 +64,8 @@
  	}
  	rootCmd.SetVersionTemplate("comfyui-pp-cli {{ .Version }}\n")
  
---- a/tools/comfyui/internal/cli/helpers.go
-+++ b/tools/comfyui/internal/cli/helpers.go
+--- a/internal/cli/helpers.go
++++ b/internal/cli/helpers.go
 @@ -507,14 +507,22 @@
  	return nil
  }

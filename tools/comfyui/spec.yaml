@@ -173,6 +173,7 @@ resources:
         path: /view
         no_auth: true
         description: Fetch an output file by filename/subfolder/type.
+        happy_args: "--filename=example.png;--type=input"
         params:
           - name: filename
             in: query

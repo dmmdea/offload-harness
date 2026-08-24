@@ -311,3 +311,5 @@ refuses with the byte counts and the CLI route.
 tenant-gated platform source ships a dead code-orchestration surface. Both edits belong in the
 generator's `platform_gate.go` and `code_orch.go` templates. Re-apply this patch after any reprint
 until that lands.
+
+- `0005-verify-noop-contract-and-classifier-recarry.patch` (2026-08-24): 4.31.x writeNoop sentinel contract adapted via `noopOK()` in errenvelope.go (7 verify short-circuits); patch 0003 classifier hunk (exit 4 unreachable / 26 upstream-5xx) re-carried after the reprint dropped it.
