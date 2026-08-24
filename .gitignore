@@ -72,3 +72,7 @@ tools/*/captures.jsonl
 # in a diff. Negations must come after the pattern they undo.
 !tools/**/config.json
 !tools/**/config-*.json
+
+# integrations/* are per-agent integration paths with their own package managers
+integrations/**/node_modules/
+integrations/**/bun.lock

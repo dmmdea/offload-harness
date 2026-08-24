@@ -1,0 +1,38 @@
+{
+  "name": "@offload-harness/opencode",
+  "version": "0.91.0",
+  "private": true,
+  "description": "The local-offload harness's opencode integration path (lives in the offload-harness repo, versioned with it): plan-time dispatch protocol, read-only task rerouting to a free local subagent, H14/H15 nudges, dispatch instrument, bundled offload agent + commands.",
+  "type": "module",
+  "main": "src/plugin.ts",
+  "exports": {
+    ".": "./src/plugin.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.18.21"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "~5.9.3"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dmmdea/offload-harness.git",
+    "directory": "integrations/opencode"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "local-offload",
+    "llama-swap",
+    "local-llm"
+  ]
+}

@@ -152,3 +152,30 @@ jobs:
 
       - name: Test
         run: go test ./... -count=1
+
+  # integrations/opencode is the harness's opencode integration path — a TypeScript plugin
+  # opencode runs under Bun. It ships and is versioned WITH the harness (one harness for
+  # every agent; never a separate repo), so its gates run here: typecheck + bun test
+  # (hooks driven directly with synthetic inputs; no opencode, no model, no network).
+  integrations-opencode:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/opencode
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install
+        run: bun install
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
