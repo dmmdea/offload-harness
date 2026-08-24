@@ -6,6 +6,30 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.88.0] - 2026-08-23
+
+### Added — warn-at-intake acceptance lint on the delegate lane (`results[].acceptance_lint`)
+
+Acceptance is the lane's verifiability gate (failed_verification vs success, and whether the
+cross-seat retry fires), and three authoring shapes — each MEASURED in the standing corpus —
+quietly disable it: PARROT-PASSABLE (every content check also satisfied by the goal text; an
+echoed question passes as verified and the retry never fires — 5/5 of the first organic
+contracts), UNGROUNDED (`contains:`/`regex:` matching nothing in the contract's own context
+docs — `contains:OptiPlex` failed both seats on a task both did right), and SHAPE-ONLY
+(`nonempty:`/`min_items:` alone — "the docs directory does not exist" passed
+`nonempty:summary`).
+
+- `delegate.LintAcceptance` classifies a PREPARED contract (context_paths already inlined) with
+  the same `ParseAcceptanceCheck` the evaluator uses; `not_contains:<s>` counts parrot-passable
+  exactly when `s` is absent from the goal (an echoed question trivially lacks it).
+- WARN-ONLY on both surfaces (CLI + MCP): the warnings ride the response per subtask so the
+  calling model sees them beside the result they weaken and fixes the acceptance for the next
+  call. A single grounded, non-echoable check beside an echoable one suppresses the parrot
+  warning — acceptance is a conjunction and still discriminates.
+- Authoring rule documented (contracts/README.md, OPERATOR-GUIDE): anchor ≥1 check to content
+  that appears in the docs but not in the goal.
+- Mirrored into the memory-frontier Python A3 classifier (lockstep noted in both).
+
 ## [0.87.0] - 2026-08-23
 
 ### Changed — blackwell-8 media roster: measured seats for the editor box (operator-approved)

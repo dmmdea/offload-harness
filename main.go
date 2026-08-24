@@ -1763,12 +1763,16 @@ func runDelegate(args []string) error {
 		return err
 	}
 	contracts := make([]core.AgentContract, 0, len(specs))
+	lints := make([][]string, 0, len(specs))
 	for i, spec := range specs {
 		c, perr := delegate.PrepareContract(spec, *readRoot)
 		if perr != nil {
 			return fmt.Errorf("subtask %d: %w", i, perr)
 		}
 		contracts = append(contracts, c)
+		// Linted on the PREPARED contract (context_paths already inlined —
+		// grounding is judged against everything the sub-agent will see).
+		lints = append(lints, delegate.LintAcceptance(c))
 	}
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
@@ -1779,7 +1783,7 @@ func runDelegate(args []string) error {
 	if err != nil {
 		return err
 	}
-	out, err := json.MarshalIndent(delegate.WireResponse(results, sum), "", "  ")
+	out, err := json.MarshalIndent(delegate.WireResponse(results, sum, lints), "", "  ")
 	if err != nil {
 		return err
 	}
