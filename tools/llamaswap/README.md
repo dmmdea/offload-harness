@@ -159,6 +159,20 @@ These capabilities aren't available in any other tool for this API.
   ```bash
   llamaswap-pp-cli swaps --thrash --json
   ```
+- **`residency`** — Reconstruct each seat's load/evict timeline from request gaps, and cost a different idle-TTL with keep-set and eviction-group safety.
+
+  _Answers "what would a longer/shorter TTL on this seat save or cost" with measured numbers before you edit the YAML. A simulation over history, not a traffic re-run; `replay` is a hidden alias._
+
+  ```bash
+  llamaswap-pp-cli residency --ttl qwen3.8-27b=900 --since 7d --json
+  ```
+- **`saturation`** — Per-seat error and load pressure: 429/5xx counts and rates, request volume, and the hourly load curve.
+
+  _Reach for it during or after a 429 storm to see which seats are rejecting and when the load lands. In-flight concurrency is intentionally omitted — llama-swap timestamps are whole-second, so depth would be a clock artifact._
+
+  ```bash
+  llamaswap-pp-cli saturation --since 24h --json
+  ```
 
 ### Guardrails with teeth
 - **`verify`** — Embeds a fixed probe on the embedder and reranks a fixed pair on the reranker, asserting both against stored calibrated baselines — catching dropped flags that roster counting cannot.

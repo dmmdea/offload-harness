@@ -39,5 +39,22 @@ The handler is a no-op unless the invocation asked for machine output
    Guarded by `TestExecuteEmitsEnvelopeForACobraUsageError` and
    `TestExecuteEmitsEnvelopeForADialFailure`, which drive the real `Execute()`
    rather than `RootCmd()` precisely because this wiring is what they test.
-2. Nothing else — the implementation lives entirely in the hand-authored
+2. The implementation lives entirely in the hand-authored
    `internal/cli/agent_errors.go`.
+
+## Wave D addition (2026-08-24) — novel analytics command registrations
+
+Two `addNovelCommandIfAbsent` lines were added in the novel-command block,
+between `newNovelSwapsCmd` and `newNovelVerifyCmd`:
+
+```go
+addNovelCommandIfAbsent(rootCmd, newNovelResidencyCmd(flags))
+addNovelCommandIfAbsent(rootCmd, newNovelSaturationCmd(flags))
+```
+
+A regen re-emits the block without them (they are hand-authored novel commands,
+not generated endpoints). Preserve both — their bodies live in the hand-authored
+`internal/cli/residency.go`, `internal/cli/saturation.go`, and shared
+`internal/cli/analytics_common.go`. Registration is covered by the wave-D
+acceptance tests (`analytics_verbs_test.go`), which run `RootCmd()` and would
+fail if either command were absent.

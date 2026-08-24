@@ -407,6 +407,8 @@ See README.md or the bundled SKILL.md for recipes.`,
 	addNovelCommandIfAbsent(rootCmd, newNovelKeepsetCmd(flags))
 	addNovelCommandIfAbsent(rootCmd, newNovelSeatCmd(flags))
 	addNovelCommandIfAbsent(rootCmd, newNovelSwapsCmd(flags))
+	addNovelCommandIfAbsent(rootCmd, newNovelResidencyCmd(flags))
+	addNovelCommandIfAbsent(rootCmd, newNovelSaturationCmd(flags))
 	addNovelCommandIfAbsent(rootCmd, newNovelVerifyCmd(flags))
 	// Attach the conditional platform identity command last so ordinary,
 	// promoted, and novel API-owned `whoami` commands all win the name.

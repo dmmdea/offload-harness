@@ -6,6 +6,35 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.90.0] - 2026-08-24
+
+### Added — `residency` and `saturation` analytics verbs (llamaswap CLI)
+
+The two deferred llamaswap-pp-cli analytics verbs, defined from 10 days of
+accumulated mirror data and reshaped by a five-persona roast (which killed the
+premises of the original three-verb design):
+
+- **`residency`** (alias `replay`) — reconstructs each seat's load/eviction
+  timeline from mirrored request gaps and costs a different idle-TTL
+  (`--ttl model=seconds`). Correct completion-stamped interval math
+  (`idle = next.ts − next.duration − prev.ts`), per-model TTL from config with
+  the `-1` keep-set sentinel special-cased, structured keep-set / eviction-group
+  safety fields, and correctly-signed bounds (reloads-avoided = optimistic
+  ceiling, resident-minutes-added = upper bound). Print-only; simulates over
+  history, never re-issues traffic or edits config.
+- **`saturation`** — per-seat 429/5xx counts + rates, request volume, busiest
+  hour, and hourly load curve. In-flight concurrency is deliberately NOT
+  reported: llama-swap timestamps are whole-second, so depth would be a clock
+  artifact (a measured slots=1 seat "showed" depth 6).
+
+Both carry an honest coverage block distinguishing mirrored rows from prepoll
+loss, with `coverage_pct` null (not a fabricated 100%) when a hole makes it
+unsound. The dropped third verb (`overflow`) folded its one real signal
+(walk-cap vs genuine loss) into that coverage block. New files:
+`internal/cli/{residency,saturation,analytics_common}.go` + acceptance tests;
+`which` index and reprint-guards updated. Interval-direction guard mutation-
+verified red.
+
 ## [0.89.1] - 2026-08-23
 
 ### Changed — spread's pair guarantee stated at the decision point (doc-only)

@@ -68,6 +68,18 @@ These capabilities aren't available in any other tool for this API.
   ```bash
   llamaswap-pp-cli swaps --thrash --json
   ```
+- **`residency`** (alias `replay`) — Per-seat load/evict timeline from request gaps + an idle-TTL what-if (`--ttl model=seconds`) with keep-set/eviction-group safety fields and correct bound labels (reloads-avoided = ceiling, resident-minutes-added = upper bound).
+
+  _The measured answer to "should this seat's TTL differ from the uniform default". Simulates over mirrored history; never re-issues traffic or edits the config._
+
+  ```bash
+  llamaswap-pp-cli residency --ttl qwen3.8-27b=900 --since 7d --json
+  ```
+- **`saturation`** — Per-seat 429/5xx counts + rates, request volume, busiest hour, and the hourly load curve. In-flight concurrency is deliberately NOT reported (unreconstructable at llama-swap's whole-second timestamp resolution).
+
+  ```bash
+  llamaswap-pp-cli saturation --since 24h --json
+  ```
 
 ### Guardrails with teeth
 - **`verify`** — Embeds a fixed probe on the embedder and reranks a fixed pair on the reranker, asserting both against stored calibrated baselines — catching dropped flags that roster counting cannot.
@@ -105,6 +117,8 @@ Generated from the shipped binary's own command tree. Run `llamaswap-pp-cli <com
 - `llamaswap-pp-cli keepset audit` — See when the memory-stack models were actually resident, every eviction attributed to its cause. Requires accumulated `sync` history; a cold mirror reports UNKNOWN, not clean.
 - `llamaswap-pp-cli sync` — Sync API data to local SQLite for offline search and analysis.
 - `llamaswap-pp-cli swaps` — Cold-load percentiles per model, time lost to swapping, and which model pairs repeatedly evict each other. Requires accumulated `sync` history; a cold mirror reports UNKNOWN, not clean.
+- `llamaswap-pp-cli residency` (alias `replay`) — Per-seat load/evict timeline + idle-TTL what-if with keep-set/group safety. Requires accumulated `sync` history; a cold mirror reports no seats.
+- `llamaswap-pp-cli saturation` — Per-seat 429/5xx pressure, request volume, and hourly load curve (no in-flight depth: second-resolution timestamps). Requires accumulated `sync` history.
 - `llamaswap-pp-cli events` — Consume the /api/events SSE stream as NDJSON — drain briefly by default, follow with `-f`.
 - `llamaswap-pp-cli logs` — Buffered recent logs as plain text (proxy + upstream stdout/stderr interleaved). One-shot: there is no follow mode here — use `events -f`.
 - `llamaswap-pp-cli logs triage` — Classify the buffered proxy log into the error taxonomy, with counts and buffer positions.
