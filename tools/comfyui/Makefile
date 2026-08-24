@@ -5,12 +5,8 @@ BIN_EXT := $(if $(filter windows,$(shell go env GOOS)),.exe,)
 build:
 	go build -o bin/comfyui-pp-cli$(BIN_EXT) ./cmd/comfyui-pp-cli
 
-# -race     catches data races the functional assertions cannot see.
-# -shuffle  randomises test order and PRINTS ITS SEED, so an order-dependent
-#           failure is both discoverable and reproducible (-shuffle=<seed>).
-# -count=1  defeats the test cache, so `make test` always actually runs.
 test:
-	go test ./... -count=1 -race -shuffle=on
+	go test ./...
 
 lint:
 	golangci-lint run

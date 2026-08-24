@@ -805,7 +805,7 @@ on the exact graph hash. Resubmitting instead of attaching once burned ~30 GPU-m
 				return cmd.Help()
 			}
 			if expVerifyShortCircuit() {
-				return writeNoop(flags, "verify_short_circuit", "verify mode: refusing to queue real renders")
+				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: refusing to queue real renders")
 			}
 			name := strings.TrimSpace(args[0])
 
@@ -887,7 +887,7 @@ on the exact graph hash. Resubmitting instead of attaching once burned ~30 GPU-m
 
 				identity, serverID, err := expProbeServer(cmd.Context(), c, db)
 				if err != nil {
-					return classifyAPIError(err, flags)
+					return classifyAPIError(cmd.OutOrStdout(), err, flags)
 				}
 				armReport.ServerID = serverID
 				if serverID != "" {
@@ -964,7 +964,7 @@ on the exact graph hash. Resubmitting instead of attaching once burned ~30 GPU-m
 				submission, err := expSubmitGraph(cmd.Context(), c, graph, promptID)
 				if err != nil {
 					_ = store.SetRunState(cmd.Context(), db, promptID, "failed", "transport")
-					return classifyAPIError(err, flags)
+					return classifyAPIError(cmd.OutOrStdout(), err, flags)
 				}
 				if submission.PromptID != promptID {
 					// The server minted its own id; follow it rather than tracking a phantom.

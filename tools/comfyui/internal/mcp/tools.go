@@ -40,6 +40,7 @@ func RegisterTools(s *server.MCPServer) {
 	// Code-orchestration mode — the full surface is covered by registry tools
 	// (comfyui_search, comfyui_get, and comfyui_execute). Endpoint-mirror tools are suppressed.
 	RegisterCodeOrchestrationTools(s)
+	RegisterIntents(s)
 	// Search tool — faster than iterating list endpoints for finding specific items
 	s.AddTool(
 		mcplib.NewTool("search",

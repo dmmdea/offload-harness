@@ -1,6 +1,6 @@
 ---
 name: pp-comfyui
-description: "Drive a local ComfyUI render server from the shell, with a durable record of every run the server itself forgets."
+description: "Drive a local ComfyUI render server from the shell, with a durable record of every run the server itself forgets. Trigger phrases: `submit a comfyui graph`, `why can't comfyui see my model`, `how long did that render take`, `what made this output file`, `check what this loader accepts`, `use comfyui`, `run comfyui`."
 author: "Daniel Martinez"
 license: "Apache-2.0"
 argument-hint: "<command> [args] | install cli|mcp"
@@ -10,6 +10,10 @@ metadata:
     requires:
       bins:
         - comfyui-pp-cli
+    install:
+      - kind: go
+        bins: [comfyui-pp-cli]
+        module: github.com/mvanhorn/printing-press-library/library/ai/comfyui/cmd/comfyui-pp-cli
 ---
 
 # ComfyUI — Printing Press CLI
@@ -25,11 +29,20 @@ This skill drives the `comfyui-pp-cli` binary. **You must verify the CLI is inst
 2. Verify: `comfyui-pp-cli --version`
 3. Ensure the reported install directory is on `$PATH` for the agent/runtime that will invoke this skill.
 
-If the `npx` install fails before this CLI has a public-library category, install Node or use the category-specific Go fallback after publish.
+If the `npx` install fails (no Node, offline, etc.), fall back to a direct Go install (requires Go 1.26.6 or newer). This installs into `$GOPATH/bin` (default `$HOME/go/bin`), so add that directory to `$PATH` instead:
+
+```bash
+go install github.com/mvanhorn/printing-press-library/library/ai/comfyui/cmd/comfyui-pp-cli@latest
+```
 
 If `--version` reports "command not found" after install, the runtime cannot see the binary directory on `$PATH`. Do not proceed with skill commands until verification succeeds.
 
 ComfyUI keeps its render history in RAM and loses it on every restart. This CLI submits graphs, reads honest timings from the server's own execution timestamps, and keeps runs, graphs, node schemas and outputs in local SQLite so comparisons survive the restarts that tuning requires. It attaches to an in-flight render rather than starting a second one, and it answers questions the server cannot: why a model is invisible, what a loader will actually accept, and which configuration produced a given file.
+
+## When to Use This CLI
+
+Reach for this when driving a local ComfyUI server programmatically: submitting graphs, comparing configurations, or tracing a rendered file back to what produced it. It is the right tool when a comparison must survive a server restart, when a model appears invisible to a loader, or when a duration needs to be trustworthy rather than scraped from a log. It is not an installer or a node manager — use comfy-cli for installing ComfyUI and its custom nodes.
+
 
 ## Unique Capabilities
 
@@ -69,7 +82,7 @@ These capabilities aren't available in any other tool for this API.
   _Use to confirm a change actually moved the number, rather than comparing against a stale baseline._
 
   ```bash
-  comfyui-pp-cli replay --json
+  comfyui-pp-cli replay demo-run --json
   ```
 
 ### Answers the server cannot give
@@ -122,8 +135,59 @@ These capabilities aren't available in any other tool for this API.
   _Stage inputs rather than copying them by hand when a comparison needs to hold for months._
 
   ```bash
-  comfyui-pp-cli stage examples/minimal-graph.json --json
+  comfyui-pp-cli stage ./still.png --json
   ```
+
+## Command Reference
+
+**history** — Completed prompt records, including real execution timings.
+
+- `comfyui-pp-cli history get` — Full record for one prompt: status (status_str, completed)
+- `comfyui-pp-cli history list` — Recent prompt history, newest last.
+
+**objectinfo** — The live node schema — the authority on class names and valid input values.
+
+- `comfyui-pp-cli objectinfo all` — Every registered node class and its input schema.
+- `comfyui-pp-cli objectinfo get` — Schema for one node class. Loader COMBO options live at index 1 of the input tuple as {'options' -> [...
+
+**prompt** — Submit an API-format graph for execution.
+
+- `comfyui-pp-cli prompt` — Queue an API-format graph. Returns {prompt_id, number, node_errors} on success.
+
+**queue** — Pending and running work.
+
+- `comfyui-pp-cli queue clear` — Clear pending items. Send {'clear': true}.
+- `comfyui-pp-cli queue get` — Returns {queue_running, queue_pending}.
+- `comfyui-pp-cli queue interrupt` — Interrupt the currently executing prompt. Does not clear pending items.
+
+**system** — Server and device state.
+
+- `comfyui-pp-cli system` — ComfyUI version, python version, and per-device vram_total / vram_free.
+
+**upload** — Stage input images for LoadImage.
+
+- `comfyui-pp-cli upload` — Upload an image into ComfyUI's input dir.
+
+**userdata** — Server-side user files, including saved workflows.
+
+- `comfyui-pp-cli userdata get` — Read a user file. Workflow paths are URL-encoded, e.g. workflows%2Fname.json.
+- `comfyui-pp-cli userdata put` — Write a user file, creating parent dirs. Pass overwrite=true to replace.
+
+**view** — Fetch rendered outputs.
+
+- `comfyui-pp-cli view` — Fetch an output file by filename/subfolder/type.
+
+
+### Finding the right command
+
+When you know what you want to do but not which command does it, ask the CLI directly:
+
+```bash
+comfyui-pp-cli which "<capability in your own words>"
+```
+
+`which` resolves a natural-language capability query to the best matching command from this CLI's curated feature index. Exit code `0` means at least one match; exit code `2` means no confident match — fall back to `--help` or use a narrower query.
+
 
 ## Recipes
 
@@ -167,78 +231,6 @@ comfyui-pp-cli sync-history --json --select results
 
 The server's history is a RAM dict destroyed on restart; ingest it first or the runs being compared vanish.
 
-## Known Gaps
-
-Four cases where a plain reading of the output would mislead you. None affect the render path.
-
-- **`queue clear` on its own clears nothing.** It posts an empty body, which the server accepts and ignores, and exits 0 — so never report the queue as cleared on the strength of that exit code. Send the body instead: `echo '{"clear": true}' | comfyui-pp-cli queue clear --stdin`, or `echo '{"delete": ["<prompt_id>"]}' | comfyui-pp-cli queue clear --stdin` for specific items. Neither stops the running prompt; that is `comfyui-pp-cli queue interrupt`.
-- **`models why` is only definitive when scoped.** Unscoped, any empty model-folder COMBO anywhere on the server wins the verdict as `class-unregistered` (exit 12) even when `not-listed` is likelier — read `empty_combos` against `same_kind_loaders` before repeating the verdict. Scope it to settle the question: `comfyui-pp-cli models why <filename> --class CheckpointLoaderSimple --input ckpt_name`.
-- **`sync` counts failed resources without naming them.** An `errored` count above zero has no accompanying event identifying which resource failed or why; sync one resource at a time when the answer matters.
-- **`--json` unicode-escapes `<`, `>` and `&`** inside human-readable strings such as `timing.meta.outlier_rule`. Parse the JSON rather than pattern-matching its raw text and the values come back correct.
-
-## Command Reference
-
-**history** — Completed prompt records, including real execution timings.
-
-- `comfyui-pp-cli history get` — Full record for one prompt: status (status_str, completed)
-- `comfyui-pp-cli history list` — Recent prompt history, newest last.
-- `comfyui-pp-cli history clear` — Wipe the ENTIRE history. Destructive, unrecoverable, RAM-only source of timings. `--execute` required; run `sync-history` first.
-- `comfyui-pp-cli history delete <prompt_id> ...` — Drop named records. 200 does not prove an id existed. `--execute` required.
-
-**objectinfo** — The live node schema — the authority on class names and valid input values.
-
-- `comfyui-pp-cli objectinfo all` — Every registered node class and its input schema.
-- `comfyui-pp-cli objectinfo get` — Schema for one node class. Loader COMBO options live at index 1 of the input tuple as {'options' -> [...
-
-**prompt** — Submit an API-format graph for execution.
-
-- `comfyui-pp-cli prompt` — Queue an API-format graph. Returns {prompt_id, number, node_errors} on success.
-
-**queue** — Pending and running work.
-
-- `comfyui-pp-cli queue clear` — Clear pending items. Send {'clear': true}.
-- `comfyui-pp-cli queue get` — Returns {queue_running, queue_pending}.
-- `comfyui-pp-cli queue interrupt` — Interrupt the currently executing prompt. Does not clear pending items.
-
-**system** — Server and device state.
-
-- `comfyui-pp-cli system` — ComfyUI version, python version, and per-device vram_total / vram_free.
-
-**upload** — Stage input images for LoadImage.
-
-- `comfyui-pp-cli upload` — Upload an image into ComfyUI's input dir.
-
-**userdata** — Server-side user files, including saved workflows.
-
-- `comfyui-pp-cli userdata get` — Read a user file. Workflow paths are URL-encoded, e.g. workflows%2Fname.json.
-- `comfyui-pp-cli userdata put` — Write a user file, creating parent dirs. Pass overwrite=true to replace.
-
-**view** — Fetch rendered outputs.
-
-- `comfyui-pp-cli view` — Fetch an output file by filename/subfolder/type.
-
-**upload mask** — Composite a mask's alpha onto an existing server-side image.
-
-- `comfyui-pp-cli upload mask <mask-file> --original <name>` — NOT a file copy: the server takes the posted file's ALPHA CHANNEL and puts it on the original. An opaque image silently writes an opaque mask. `--original` is required (the server 500s without it) and must already exist — if it does not, nothing is written and you still get a 200. `--execute` required.
-
-**Server state and reproducibility**
-
-- `comfyui-pp-cli free` — `POST /free`: ask ComfyUI to release VRAM. The cross-tool handoff primitive when ComfyUI shares GPUs with a model-serving proxy. `--execute` required. The reply is an empty 200 and the effect is ASYNCHRONOUS — confirm with `system stats`, never from the status code.
-- `comfyui-pp-cli features` — `GET /features` plus drift against the pinned ComfyUI version. Only the key SHAPE is a contract; values follow the server's own CLI args. Always exits 0.
-- `comfyui-pp-cli deps <graph.json>` — Which node packs a graph needs, and which classes nothing installed provides. `validate` asks "is this graph well-formed here"; `deps` asks "what would this box need installed at all". Exits 13 when something is missing.
-- `comfyui-pp-cli provenance` — now also reports the **node set** a run was submitted against (classes + custom-node packs). Two runs can share every server field and still differ, because a custom pack changes what a `class_type` means. Capture only — nothing restores a node set, and runs predating capture report it as absent rather than back-filled.
-
-
-### Finding the right command
-
-When you know what you want to do but not which command does it, ask the CLI directly:
-
-```bash
-comfyui-pp-cli which "<capability in your own words>"
-```
-
-`which` resolves a natural-language capability query to the best matching command from this CLI's curated feature index. Exit code `0` means at least one match; exit code `2` means no confident match — fall back to `--help` or use a narrower query.
-
 ## Auth Setup
 
 No authentication required.
@@ -247,7 +239,7 @@ Run `comfyui-pp-cli doctor` to verify setup.
 
 ## Agent Mode
 
-Add `--agent` to any command. Expands to: `--json --compact --no-input --no-color --yes`.
+Add `--agent` to any command. Expands to: `--json --compact --no-input --no-color`.
 
 - **Pipeable** — JSON on stdout, errors on stderr
 - **Filterable** — `--select` keeps a subset of fields. Dotted paths descend into nested structures; arrays traverse element-wise. Critical for keeping context small on verbose APIs:
@@ -258,6 +250,7 @@ Add `--agent` to any command. Expands to: `--json --compact --no-input --no-colo
 - **Previewable** — `--dry-run` shows the request without sending
 - **Offline-friendly** — sync/search commands can use the local SQLite store when available
 - **Non-interactive** — never prompts, every input is a flag
+- **Explicit confirmation** — `--agent` does not imply `--yes`; pass `--yes` separately only after the target, arguments, and side effects are clear
 - **Explicit retries** — use `--idempotent` only when an already-existing create should count as success
 
 ### Response envelope
@@ -534,54 +527,14 @@ Explicit flags always win over profile values; profile values win over defaults.
 
 ## Exit Codes
 
-Every code is declared as a named constant in `internal/cli/exitcodes.go`. A command that uses one for control flow also declares its own set in the `pp:typed-exit-codes` annotation, which `agent-context` surfaces — **read the per-command annotation, not just this table**, because four codes below are command-scoped.
-
-| Code | Meaning | Retry the same call? |
-|------|---------|----------------------|
-| 0 | Success | — |
-| 1 | Unclassified failure | no |
-| 2 | Usage error (wrong arguments) | no |
-| 3 | Resource not found | no |
-| 4 | **ComfyUI unreachable** — dial failure, or a proxy demanding credentials | yes |
-| 5 | API error (the server was reached and refused the request) | no |
-| 6 | Partial failure in a batch response | no |
-| 7 | Rate limited | yes, after a wait |
-| 10 | Config error | no |
-| 12 | **Node class drift** — `nodes options`/`models why`: class registered but ZERO options (unregistered model CLASS, i.e. a missing `extra_model_paths.yaml` key). `set`: the addressed node no longer holds its asserted class | no |
-| 13 | **Graph invalid** (`validate`, `deps`) — the graph will not run · **Model not visible** (`models why`) — no loader offers the file | no |
-| 20 | `wait --timeout` expired while the job was still running | yes — the render is probably still going |
-| 21 | **Job failed** (`wait`) with a cause that is not 13/24/25 · **Submit rejected** (`submit`) — nothing was queued | no |
-| 22 | **Outputs pending** (`wait`) — success recorded, outputs not published yet · **Submit partial accept** (`submit`) — some branches queued, others dropped | 22-wait: yes. 22-submit: **no** — re-submitting duplicates the branches that DID queue |
-| 23 | Submit malformed — a 2xx carried no `prompt_id` | no |
-| 24 | **Execution interrupted** — the run was interrupted, not broken | yes, unchanged |
-| 25 | **Upstream OOM** — change the resource plan, not the graph | yes, after freeing VRAM |
-| 26 | **Upstream 5xx** — the server failed rather than refused | yes |
-
-Codes 24, 25 and 26 are new. Two deliberate migrations came with them, both visible to anything that branched on the old values:
-
-- A **dial failure now exits 4**, not 5. "The server is down" and "the server refused this request" are different problems with different responses, and they used to share a code.
-- **Interruption now exits 24** and an **OOM 25**, where both were previously 21. Failure classification reuses `exp.ClassifyFailure`, so the sweep runner and the wait path agree on what an OOM looks like.
-
-### Structured error envelope
-
-Under `--json` / `--agent`, **every** failing exit emits one JSON document instead of a bare `Error: …` line. Field names are **identical to `llamaswap-pp-cli`'s** — an agent that reads one reads the other:
-
-```json
-{"ok": false,
- "error": {"code": "wait_timeout", "category": "domain", "retryable": true,
-           "http_status": 0, "message": "…", "remediation": "…", "exit_code": 20}}
-```
-
-- `code` — the stable token to branch on. Never reworded once shipped.
-- `category` — `usage` | `config` | `network` | `client` | `server` | `domain`.
-- `retryable` — whether re-running the SAME invocation unchanged could succeed. Conservative: `false` when unknown.
-- `http_status` — the upstream status when the failure was an HTTP reply, else `0`. Never invented.
-- `remediation` — one concrete next action, naming a real command where one exists.
-- `exit_code` — always agrees with `$?`.
-
-Cobra usage errors and dial failures are covered too, including a malformed invocation under `--agent` where flag parsing fails before `--agent` can imply `--json`.
-
-The envelope normally goes to **stdout**. When the command already wrote a result document there — `wait`, `submit` — it goes to **stderr** instead, so stdout stays exactly one JSON document for a naive reader.
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 2 | Usage error (wrong arguments) |
+| 3 | Resource not found |
+| 5 | API error (upstream issue) |
+| 7 | Rate limited (wait and retry) |
+| 10 | Config error |
 
 ## Argument Parsing
 
@@ -593,13 +546,15 @@ Parse `$ARGUMENTS`:
 
 ## MCP Server Installation
 
-Install the MCP binary from this CLI's published public-library entry or pre-built release, then register it:
-
-```bash
-claude mcp add comfyui-pp-mcp -- comfyui-pp-mcp
-```
-
-Verify: `claude mcp list`
+1. Install the MCP server:
+   ```bash
+   go install github.com/mvanhorn/printing-press-library/library/ai/comfyui/cmd/comfyui-pp-mcp@latest
+   ```
+2. Register with Claude Code:
+   ```bash
+   claude mcp add comfyui-pp-mcp -- comfyui-pp-mcp
+   ```
+3. Verify: `claude mcp list`
 
 ## Direct Use
 

@@ -1,7 +1,7 @@
-diff --git a/tools/comfyui/internal/mcp/code_orch.go b/tools/comfyui/internal/mcp/code_orch.go
+diff --git a/internal/mcp/code_orch.go b/internal/mcp/code_orch.go
 index 5993b0c..bb9fd1a 100644
---- a/tools/comfyui/internal/mcp/code_orch.go
-+++ b/tools/comfyui/internal/mcp/code_orch.go
+--- a/internal/mcp/code_orch.go
++++ b/internal/mcp/code_orch.go
 @@ -547,6 +547,9 @@ func handleCodeOrchExecute(ctx context.Context, req mcplib.CallToolRequest) (*mc
  	if err != nil {
  		return mcplib.NewToolResultError(err.Error()), nil
@@ -52,10 +52,10 @@ index 5993b0c..bb9fd1a 100644
  // codeOrchInlineBodyMax caps how much response body codeOrchExecuteStructured
  // will mirror into structuredContent. The text content already carries the
  // whole bounded body, so above this size the duplicate is dropped rather than
-diff --git a/tools/comfyui/internal/mcp/output_schema_test.go b/tools/comfyui/internal/mcp/output_schema_test.go
+diff --git a/internal/mcp/output_schema_test.go b/internal/mcp/output_schema_test.go
 index 9e20ade..12a1de7 100644
---- a/tools/comfyui/internal/mcp/output_schema_test.go
-+++ b/tools/comfyui/internal/mcp/output_schema_test.go
+--- a/internal/mcp/output_schema_test.go
++++ b/internal/mcp/output_schema_test.go
 @@ -3,7 +3,9 @@
  package mcp
  
@@ -171,10 +171,10 @@ index 9e20ade..12a1de7 100644
  // TestCodeOrchExecuteNonJSONBodyUsesBodyText covers the other branch of the
  // envelope: a textual, non-JSON response body.
  func TestCodeOrchExecuteNonJSONBodyUsesBodyText(t *testing.T) {
-diff --git a/tools/comfyui/internal/mcp/platform_gate.go b/tools/comfyui/internal/mcp/platform_gate.go
+diff --git a/internal/mcp/platform_gate.go b/internal/mcp/platform_gate.go
 index 2367f51..62aa658 100644
---- a/tools/comfyui/internal/mcp/platform_gate.go
-+++ b/tools/comfyui/internal/mcp/platform_gate.go
+--- a/internal/mcp/platform_gate.go
++++ b/internal/mcp/platform_gate.go
 @@ -38,7 +38,16 @@ func requireFreshTenantGate(s *server.MCPServer, next server.ToolHandlerFunc) se
  			return mcplib.NewToolResultError(err.Error()), nil
  		}
@@ -193,10 +193,10 @@ index 2367f51..62aa658 100644
  		}
  		defer session.ZeroCredentials()
  		return next(platform.ContextWithSession(ctx, session), request)
-diff --git a/tools/comfyui/internal/mcp/platform_gate_test.go b/tools/comfyui/internal/mcp/platform_gate_test.go
+diff --git a/internal/mcp/platform_gate_test.go b/internal/mcp/platform_gate_test.go
 index d12a8fd..f11d83f 100644
---- a/tools/comfyui/internal/mcp/platform_gate_test.go
-+++ b/tools/comfyui/internal/mcp/platform_gate_test.go
+--- a/internal/mcp/platform_gate_test.go
++++ b/internal/mcp/platform_gate_test.go
 @@ -76,6 +76,42 @@ func TestMCPEveryRegisteredToolHasFreshTenantGate(t *testing.T) {
  	t.Logf("verified %d in-process and %d child-CLI MCP tools", direct, mirrored)
  }

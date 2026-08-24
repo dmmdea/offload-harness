@@ -217,7 +217,7 @@ conditions is exactly how a false "+49% regression" gets published.`,
 				return usageErr(fmt.Errorf("replay takes exactly one prompt-id or run name (got %d)", len(args)))
 			}
 			if expVerifyShortCircuit() {
-				return writeNoop(flags, "verify_short_circuit", "verify mode: refusing to queue a real render")
+				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: refusing to queue a real render")
 			}
 			ref := strings.TrimSpace(args[0])
 
@@ -257,7 +257,7 @@ conditions is exactly how a false "+49% regression" gets published.`,
 			}
 			identity, serverID, err := expProbeServer(cmd.Context(), c, db)
 			if err != nil {
-				return classifyAPIError(err, flags)
+				return classifyAPIError(cmd.OutOrStdout(), err, flags)
 			}
 
 			report := replayReport{Ref: ref, GraphSHA: original.GraphSHA, ShapeSHA: original.ShapeSHA}
@@ -312,7 +312,7 @@ conditions is exactly how a false "+49% regression" gets published.`,
 				submission, err := expSubmitGraph(cmd.Context(), c, graph, promptID)
 				if err != nil {
 					_ = store.SetRunState(cmd.Context(), db, promptID, "failed", "transport")
-					return classifyAPIError(err, flags)
+					return classifyAPIError(cmd.OutOrStdout(), err, flags)
 				}
 				if submission.PromptID != promptID {
 					if _, err := db.ExecContext(cmd.Context(),

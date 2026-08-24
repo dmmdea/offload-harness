@@ -83,7 +83,7 @@ Exit codes:
 				})
 			}
 			if cliutil.IsVerifyEnv() && !cliutil.IsVerifyLiveHTTPEnv() {
-				return writeNoop(flags, "verify_short_circuit", "verify mode: no POST /history was issued")
+				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /history was issued")
 			}
 			c, err := flags.newClient()
 			if err != nil {
@@ -91,7 +91,7 @@ Exit codes:
 			}
 			_, statusCode, err := c.Post(cmd.Context(), "/history", map[string]any{"clear": true})
 			if err != nil {
-				return classifyAPIError(err, flags)
+				return classifyAPIError(cmd.OutOrStdout(), err, flags)
 			}
 			return comfyHistoryMutateEmit(cmd, flags, comfyHistoryMutateResult{
 				Action:     "clear",
@@ -162,7 +162,7 @@ Exit codes:
 				})
 			}
 			if cliutil.IsVerifyEnv() && !cliutil.IsVerifyLiveHTTPEnv() {
-				return writeNoop(flags, "verify_short_circuit", "verify mode: no POST /history was issued")
+				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /history was issued")
 			}
 			c, err := flags.newClient()
 			if err != nil {
@@ -170,7 +170,7 @@ Exit codes:
 			}
 			_, statusCode, err := c.Post(cmd.Context(), "/history", map[string]any{"delete": ids})
 			if err != nil {
-				return classifyAPIError(err, flags)
+				return classifyAPIError(cmd.OutOrStdout(), err, flags)
 			}
 			return comfyHistoryMutateEmit(cmd, flags, comfyHistoryMutateResult{
 				Action:     "delete",

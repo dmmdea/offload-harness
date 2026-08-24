@@ -171,7 +171,7 @@ Exit codes:
 			}
 
 			if cliutil.IsVerifyEnv() && !cliutil.IsVerifyLiveHTTPEnv() {
-				return writeNoop(flags, "verify_short_circuit", "verify mode: no POST /upload/mask was issued")
+				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /upload/mask was issued")
 			}
 
 			cfg, err := config.Load(flags.configPath)

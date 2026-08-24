@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 
@@ -420,7 +421,7 @@ func comfyFetchObjectInfo(ctx context.Context, flags *rootFlags) (map[string]jso
 	}
 	data, err := c.Get(ctx, "/object_info", nil)
 	if err != nil {
-		return nil, classifyAPIError(err, flags)
+		return nil, classifyAPIError(os.Stdout, err, flags)
 	}
 	var classes map[string]json.RawMessage
 	if err := json.Unmarshal(data, &classes); err != nil {
@@ -443,7 +444,7 @@ func comfyFetchClass(ctx context.Context, flags *rootFlags, classType string) (*
 	path := replacePathParam("/object_info/{class_type}", "class_type", classType)
 	data, err := c.Get(ctx, path, nil)
 	if err != nil {
-		return nil, classifyAPIError(err, flags)
+		return nil, classifyAPIError(os.Stdout, err, flags)
 	}
 	var classes map[string]json.RawMessage
 	if err := json.Unmarshal(data, &classes); err != nil {

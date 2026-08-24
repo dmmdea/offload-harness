@@ -864,10 +864,8 @@ func TestPlatformMigrationAdoptsOnlyVerifiedTenantDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recoverable backup missing: err=%v", err)
 	}
-	// POSIX-only assertion: NTFS has no mode bits, os.Chmod is a no-op there, and Go reports
-	// a writable file as 0666 — so this fails for a backup written correctly on Windows.
-	// Permanent fix is upstream in mvanhorn/cli-printing-press#4106; applied here because the
-	// regen preserved the pre-fix copy of this generated file.
+	// NTFS does not expose POSIX mode bits, so assert the backup mode only where
+	// it is meaningful while retaining the cross-platform recoverability check.
 	if runtime.GOOS != "windows" && backupInfo.Mode().Perm() != 0o600 {
 		t.Fatalf("recoverable backup perm = %04o, want 0600", backupInfo.Mode().Perm())
 	}

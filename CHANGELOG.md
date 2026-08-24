@@ -6,6 +6,92 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.90.1] - 2026-08-24
+
+### Changed — `tools/comfyui`: re-vendored from the Printing Press 4.31.1 reprint
+
+Clean tree replacement of the vendored `comfyui-pp-cli` (press 4.30.2, run
+`20260812-123958` → press 4.31.1, run `20260823-231507-1cd84666`), copied from the
+library tree that passed the press's own shipcheck. The four post-publish patches in
+`.printing-press-patches/` (cross-platform host paths, MCP code orchestration, the
+structured error envelope, the code-orch gate + binary budget) are carried into the
+reprint rather than re-applied by hand; their `.patch` files only refresh context lines.
+Same module name (`comfyui-pp-cli`), same standalone-module contract: the root
+`./...` still never sees it, and no harness package imports it.
+
+What the reprint brings, as visible in the diff (71 files, +2042/−826):
+
+- **MCP intents** (`internal/mcp/intents.go`, new) — composed higher-level tools
+  registered beside the endpoint mirror; the hand-maintained `mcp-descriptions.json`
+  is retired with it, so `mcp-sync` no longer has a locked description file to fight.
+- **Typed shell-out** — `cobratree.RunCLICommand` returns a `CLICommandResult`
+  (stdout, stderr hint lines, exit code) instead of a bare string, and MCP tool results
+  are built from it, so a companion-CLI failure surfaces its stderr instead of an empty
+  success.
+- **`--agent` no longer implies `--yes`** — a mutating command run with `--agent`
+  needs the explicit confirmation flag. Harness-detection helpers also land
+  (`cliutil.CurrentHarness`/`IsAnyHarness`, `writeHarnessRefusal`) but nothing wires
+  them into a command yet — they are latent in this reprint, not a behaviour change.
+  The harness's own render path (`render/comfy-submit.mjs`) shells out as
+  `submit - --json --skip-lint [--force]`, then `attach` / `wait`, never `--agent`,
+  so it is unaffected by either.
+- **Honest pagination and error bodies** — repeated-page and stuck-cursor guards on
+  `--all`/sync (`paginationEndUnprovable`, `syncPaginationPageIsStuck`), a named
+  `liveAllUnsupportedError` instead of a silent partial read, and HTML error pages
+  collapsed to their title before they reach the envelope.
+
+Verified in the worktree with the exact `tools-comfyui` CI contract: `go build ./...`,
+`go vet ./...`, `go test ./... -count=1` — 17 packages ok, 0 failing (Go 1.26.6). Semgrep
+`p/default` reports 17 findings on the new tree and the identical 17 on the unmodified
+4.30.2 tree (same files, rules, and sites; only line offsets moved) — zero introduced,
+all in press-generated SQLite identifier interpolation / companion-CLI exec sites that
+the press's gosec pass already annotates. Library-side evidence for the reprint itself:
+phase-5 acceptance `status: pass`, 161/161 matrix tests passed (167 skipped as
+unverifiable offline); scorecard 91/A with `live_api_verification` the one unverified
+dimension.
+
+**Known press-side regressions, disclosed and deliberately not hand-patched.** Fresh-context
+review of this diff found two, both confirmed by reading the code and by A/B-running the
+4.30.2 and 4.31.1 binaries.
+
+*(1) Carried patch 0003 was only partly carried.* `classifyAPIErrorOnly`'s default branch
+(`internal/cli/helpers.go`) no longer maps a dial failure to `unreachableErr` (exit 4) or
+an HTTP 5xx to `upstream5xxErr` (exit 26) — every generated read command that funnels
+through it now exits 5 for those, and the regenerated README exit table dropped code 4 to
+match. The carried `.printing-press-patches/0003-structured-error-envelope.patch` still
+specifies that branch, comment `DELIBERATE MIGRATION` included, so the tree contradicts
+its own patch. The JSON envelope's `code` field is still derived independently and still
+says `server_unreachable`; only the numeric exit code regressed. The harness's render
+runner is unaffected: its `submit` path already exited 5 on an unreachable server in
+4.30.2 (the run is recorded before the POST, and that branch is `apiErr`), proven by A/B
+against isolated `--home` stores (both: exit 5, `code: server_unreachable`), `attach`/`wait`
+outcomes are identical (3 / 20), `exitcodes.go` is byte-unchanged, and
+`render/comfy-submit.mjs` treats 4/5/26 identically by design (`localOnlyFailure` is
+`{1, 2, 10}`). Standalone agent use of the CLI loses the 4-vs-5 discrimination by exit
+code.
+
+*(2)* The reprint's `writeNoop` now returns a `*cliError{code:5}` unconditionally where
+4.30.2 returned `nil`. Only `classifyAPIError`'s idempotent-409 branch unwraps it
+(`successfulNoop`); the seven direct `return writeNoop(...)` sites — `submit`, `replay`,
+`exp`, `history` ×2, `server` free, `upload mask` — do not, so under
+`PRINTING_PRESS_VERIFY=1` they print the noop document *and* an `api_error` envelope and
+exit 5 instead of 0. This is what turned the library's own mock-verify from 62/62 PASS
+(4.30.2) to 66/67 WARN (4.31.1). Every one of those sites is behind
+`cliutil.IsVerifyEnv()`; the harness never sets `PRINTING_PRESS_VERIFY` (the variable
+appears outside `tools/` only in the docs that say so), so no harness path reaches it.
+Both are press-generated code, so the fix belongs in the Printing Press / the library as
+carried patches (re-carry 0003's classifier hunk; make `writeNoop` return `nil` on a
+successful write), not as hand-edits here that the next reprint would clobber. Also
+observed, not fixed: `store.ensureSQLiteJournalPrivate` is defined with a doc comment
+promising a private journal for the whole transaction but has no caller (`lockForWrite`
+only re-hardens files that already exist); the generated `Makefile` `test` target dropped `-count=1 -race
+-shuffle=on` (CI does not use it — the `tools-comfyui` job calls `go test` directly with
+`-count=1`), `Config.StoreScopeCredential` and `defaultDBPathInDir`'s `unscoped` local
+are generator scaffolds with no callers, and `.printing-press.json` lost its trailing
+newline.
+
+Harness version bumped for the changelog gate only — no harness code path changed.
+
 ## [0.90.0] - 2026-08-24
 
 ### Added — `residency` and `saturation` analytics verbs (llamaswap CLI)

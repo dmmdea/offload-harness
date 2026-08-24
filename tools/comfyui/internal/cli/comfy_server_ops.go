@@ -132,7 +132,7 @@ Exit codes:
 			// Verify mode short-circuits before the POST so a verification run
 			// never evicts a real model from a real card.
 			if cliutil.IsVerifyEnv() && !cliutil.IsVerifyLiveHTTPEnv() {
-				return writeNoop(flags, "verify_short_circuit", "verify mode: no POST /free was issued")
+				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /free was issued")
 			}
 
 			c, err := flags.newClient()
@@ -141,7 +141,7 @@ Exit codes:
 			}
 			_, statusCode, err := c.Post(cmd.Context(), "/free", req)
 			if err != nil {
-				return classifyAPIError(err, flags)
+				return classifyAPIError(cmd.OutOrStdout(), err, flags)
 			}
 
 			return comfyFreeEmit(cmd, flags, comfyFreeResult{
@@ -266,7 +266,7 @@ Exit codes:
 			}
 			data, err := c.Get(cmd.Context(), "/features", map[string]string{})
 			if err != nil {
-				return classifyAPIError(err, flags)
+				return classifyAPIError(cmd.OutOrStdout(), err, flags)
 			}
 			result, err := comfyBuildFeaturesResult(data)
 			if err != nil {

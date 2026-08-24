@@ -1,7 +1,7 @@
-diff --git a/tools/comfyui/internal/comfy/media/media.go b/tools/comfyui/internal/comfy/media/media.go
+diff --git a/internal/comfy/media/media.go b/internal/comfy/media/media.go
 index 146915e..f59e76e 100644
---- a/tools/comfyui/internal/comfy/media/media.go
-+++ b/tools/comfyui/internal/comfy/media/media.go
+--- a/internal/comfy/media/media.go
++++ b/internal/comfy/media/media.go
 @@ -105,7 +105,7 @@ func ShortSHA(s string) string {
  // what every archived run referencing that name actually consumed. With the
  // content hash in the name, a name collision can only mean identical bytes.
@@ -62,10 +62,10 @@ index 146915e..f59e76e 100644
  	if strings.HasPrefix(slashed, "//") {
  		return fmt.Errorf("%q is a UNC path; LoadImage takes a name relative to ComfyUI's input dir, never a host path", name)
  	}
-diff --git a/tools/comfyui/internal/comfy/media/media_test.go b/tools/comfyui/internal/comfy/media/media_test.go
+diff --git a/internal/comfy/media/media_test.go b/internal/comfy/media/media_test.go
 index b4e5b54..862a148 100644
---- a/tools/comfyui/internal/comfy/media/media_test.go
-+++ b/tools/comfyui/internal/comfy/media/media_test.go
+--- a/internal/comfy/media/media_test.go
++++ b/internal/comfy/media/media_test.go
 @@ -507,7 +507,7 @@ func TestValidateComfyFilename(t *testing.T) {
  		{"whitespace", "   ", true},
  		{"windows absolute", `C:\ComfyUI\input\portrait.png`, true},
