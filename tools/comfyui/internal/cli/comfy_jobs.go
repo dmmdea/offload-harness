@@ -1541,7 +1541,7 @@ Idempotent: re-running inserts nothing twice.`,
 
 			entries, skipped, err := comfyFetchHistory(ctx, flags, maxItems)
 			if err != nil {
-				return classifyAPIError(err, flags)
+				return classifyAPIError(cmd.OutOrStdout(), err, flags)
 			}
 
 			db, err := comfyJobsOpenWritable(ctx)

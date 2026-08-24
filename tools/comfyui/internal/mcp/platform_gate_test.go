@@ -76,42 +76,6 @@ func TestMCPEveryRegisteredToolHasFreshTenantGate(t *testing.T) {
 	t.Logf("verified %d in-process and %d child-CLI MCP tools", direct, mirrored)
 }
 
-// TestMCPFreshTenantGateAllowsCLIWithoutPlatformSource pins the contract that
-// the two stubbed tests above cannot reach. Both replace verifyFreshMCPInvocation
-// with a fake that returns either an error or a session, so neither exercises
-// what the REAL cli.VerifyMCPInvocation returns on a CLI that registers no
-// tenant-gated platform source: (nil, nil), meaning "there is nothing to gate".
-// Treating that pair as a misconfiguration blocks every in-process tool — the
-// entire code-orchestration surface — while the cobra mirrors keep working, so
-// the failure looks like a partial outage rather than a gate bug.
-func TestMCPFreshTenantGateAllowsCLIWithoutPlatformSource(t *testing.T) {
-	session, err := cli.VerifyMCPInvocation(context.Background())
-	if err != nil {
-		t.Fatalf("VerifyMCPInvocation on a CLI with no platform source: %v", err)
-	}
-	if session != nil {
-		t.Skip("this CLI registers a platform source; the ungated path does not apply")
-	}
-
-	handlerCalls := 0
-	s := server.NewMCPServer("tenant-gate-conformance", "test")
-	result, err := requireFreshTenantGate(s, func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		handlerCalls++
-		return mcplib.NewToolResultText("ok"), nil
-	})(context.Background(), mcplib.CallToolRequest{
-		Params: mcplib.CallToolParams{Name: "ungated-conformance", Arguments: map[string]any{}},
-	})
-	if err != nil {
-		t.Fatalf("wrapper returned protocol error: %v", err)
-	}
-	if result == nil || result.IsError {
-		t.Fatalf("in-process tool blocked on a CLI with no platform source: %#v", result)
-	}
-	if handlerCalls != 1 {
-		t.Fatalf("handler calls = %d, want 1", handlerCalls)
-	}
-}
-
 func TestMCPTypedInvocationUsesSingleFreshTenantGate(t *testing.T) {
 	originalVerify := verifyFreshMCPInvocation
 	t.Cleanup(func() { verifyFreshMCPInvocation = originalVerify })
@@ -155,5 +119,38 @@ func TestMCPTypedInvocationUsesSingleFreshTenantGate(t *testing.T) {
 	}
 	if handlerCalls != 1 {
 		t.Fatalf("typed handler calls = %d, want 1", handlerCalls)
+	}
+}
+
+func TestMCPUngatedInvocationUsesRealVerifier(t *testing.T) {
+	originalVerify := verifyFreshMCPInvocation
+	t.Cleanup(func() { verifyFreshMCPInvocation = originalVerify })
+	verifyFreshMCPInvocation = cli.VerifyMCPInvocation
+
+	session, err := cli.VerifyMCPInvocation(context.Background())
+	if err != nil {
+		t.Fatalf("real MCP verifier returned an error: %v", err)
+	}
+	if session != nil {
+		session.ZeroCredentials()
+		t.Skip("this CLI registers a platform source")
+	}
+
+	handlerCalls := 0
+	s := server.NewMCPServer("tenant-gate-conformance", "test")
+	result, err := requireFreshTenantGate(s, func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		handlerCalls++
+		return mcplib.NewToolResultText("ok"), nil
+	})(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{Name: "ungated-conformance", Arguments: map[string]any{}},
+	})
+	if err != nil {
+		t.Fatalf("ungated wrapper returned protocol error: %v", err)
+	}
+	if handlerCalls != 1 {
+		t.Fatalf("ungated handler calls = %d, want 1", handlerCalls)
+	}
+	if result == nil || result.IsError {
+		t.Fatalf("ungated handler was blocked by the tenant gate: %#v", result)
 	}
 }

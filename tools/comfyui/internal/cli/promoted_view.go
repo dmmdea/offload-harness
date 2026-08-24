@@ -21,7 +21,7 @@ func newViewPromotedCmd(flags *rootFlags) *cobra.Command {
 		Short:       "Fetch an output file by filename/subfolder/type.",
 		Long:        "Fetch an output file by filename/subfolder/type.",
 		Example:     "  comfyui-pp-cli view --filename example-resource",
-		Annotations: map[string]string{"pp:endpoint": "view.get", "pp:method": "GET", "pp:path": "/view", "mcp:read-only": "true"},
+		Annotations: map[string]string{"pp:endpoint": "view.get", "pp:method": "GET", "pp:path": "/view", "mcp:read-only": "true", "pp:happy-args": "--filename=example.png;--type=input"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Bare invocation of a command with a required flag/body prints help
 			// instead of pflag's terse "required flag not set" error. Optional-
@@ -62,7 +62,7 @@ func newViewPromotedCmd(flags *rootFlags) *cobra.Command {
 			}
 			data, prov, err := resolveReadWithStrategyAndResponsePath(cmd.Context(), c, flags, "auto", "view", false, path, params, nil, "", cmd.ErrOrStderr())
 			if err != nil {
-				return classifyAPIError(err, flags)
+				return classifyAPIError(cmd.OutOrStdout(), err, flags)
 			}
 			outputData := data
 			// Print provenance to stderr for human-facing output only.
@@ -88,7 +88,7 @@ func newViewPromotedCmd(flags *rootFlags) *cobra.Command {
 				if flags.selectFields != "" {
 					filtered = filterFields(filtered, flags.selectFields)
 				} else if flags.compact {
-					filtered = compactFields(filtered)
+					filtered = compactFields(filtered, nil)
 				}
 				wrapped, wrapErr := wrapWithProvenance(filtered, prov)
 				if wrapErr != nil {
@@ -116,7 +116,7 @@ func newViewPromotedCmd(flags *rootFlags) *cobra.Command {
 			if flags.csv || flags.plain {
 				formatData = outputData
 			}
-			return printOutputWithFlagsMeta(cmd.OutOrStdout(), formatData, flags, map[string]any{"source": "live"})
+			return printOutputWithFlagsMeta(cmd.OutOrStdout(), formatData, flags, map[string]any{"source": "live"}, nil)
 		},
 	}
 	cmd.Flags().StringVar(&flagFilename, "filename", "", "")

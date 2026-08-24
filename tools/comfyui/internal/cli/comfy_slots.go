@@ -142,7 +142,7 @@ hidden unless --include-links is passed. Pass - as the path to read stdin.`,
   comfyui-pp-cli slots workflow_api.json --role seed
   comfyui-pp-cli slots workflow_api.json --class KSampler --json
   comfyui-pp-cli slots workflow_api.json --include-links`,
-		Annotations: map[string]string{"mcp:read-only": "true"},
+		Annotations: map[string]string{"mcp:read-only": "true", "pp:happy-args": "<graph.json>=examples/minimal-graph.json", "pp:typed-exit-codes": "0,2,3"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if dryRunOK(flags) {
 				return writeDryRun(cmd.OutOrStdout(), flags, "list the slots of a graph file")
@@ -536,6 +536,7 @@ told apart from a real one.`,
   comfyui-pp-cli validate workflow_api.json --object-info object_info.json
   comfyui-pp-cli validate workflow_api.json --strict`,
 		Annotations: map[string]string{
+			"pp:happy-args":       "<graph.json>=examples/minimal-graph.json",
 			"mcp:read-only":       "true",
 			"pp:typed-exit-codes": "0,2,3,13",
 		},
@@ -729,7 +730,7 @@ func slotsFetchLiveObjectInfo(ctx context.Context, flags *rootFlags) (slots.Sche
 	}
 	data, err := c.Get(ctx, "/object_info", nil)
 	if err != nil {
-		return nil, classifyAPIError(err, flags)
+		return nil, classifyAPIError(os.Stdout, err, flags)
 	}
 	schema, perr := slots.ParseObjectInfo(data)
 	if perr != nil {

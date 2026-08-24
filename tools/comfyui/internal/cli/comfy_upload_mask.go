@@ -115,6 +115,9 @@ Exit codes:
 			// No mcp:read-only — this writes a file on the server.
 			"pp:data-source":      "live",
 			"pp:typed-exit-codes": "0,2,4,5",
+			// Live-dogfood happy path: an existing host file + a plausible
+			// original; without --execute nothing is sent (would-upload).
+			"pp:happy-args": "<mask-file>=examples/minimal-graph.json;--original=example.png",
 		},
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -122,6 +125,14 @@ Exit codes:
 				return usageErr(errors.New("no mask file given: comfyui-pp-cli upload mask <mask-file> --original <server-filename>"))
 			}
 			hostPath := args[0]
+			if dryRunOK(flags) {
+				// Verify-friendly contract: --dry-run short-circuits BEFORE the
+				// required-input checks and before any filesystem read, so the
+				// press verifier's dry-run probe exits 0 without --original.
+				return writeDryRun(cmd.OutOrStdout(), flags,
+					fmt.Sprintf("POST /upload/mask with %s onto original %s",
+						filepath.Base(filepath.FromSlash(hostPath)), originalFilename))
+			}
 			if strings.TrimSpace(originalFilename) == "" {
 				return usageErr(errors.New(
 					"--original is required: /upload/mask composites onto an EXISTING server-side image and the server 500s without it"))
@@ -153,11 +164,6 @@ Exit codes:
 			}
 			filename := filepath.Base(filepath.FromSlash(hostPath))
 
-			if dryRunOK(flags) {
-				return writeDryRun(cmd.OutOrStdout(), flags,
-					fmt.Sprintf("POST /upload/mask with %s onto original %s", filename, originalFilename))
-			}
-
 			if !execute {
 				return comfyUploadMaskEmit(cmd, flags, comfyUploadMaskResult{
 					Action:      "would-upload",
@@ -171,7 +177,7 @@ Exit codes:
 			}
 
 			if cliutil.IsVerifyEnv() && !cliutil.IsVerifyLiveHTTPEnv() {
-				return writeNoop(flags, "verify_short_circuit", "verify mode: no POST /upload/mask was issued")
+				return noopOK(writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /upload/mask was issued"))
 			}
 
 			cfg, err := config.Load(flags.configPath)

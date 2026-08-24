@@ -1,0 +1,181 @@
+From: Claude (nightshift 2026-08-24) on behalf of Daniel Martinez
+Subject: [PATCH 0005] verify-mode noop contract, 0003 classifier re-carry, upload-mask dry-run order
+
+Press 4.31.x changed writeNoop to return a typed *cliError sentinel (unwrap with
+successfulNoop); the 7 hand-authored verify short-circuits returned it raw and
+exited 5 -> noopOK() in errenvelope.go adapts the contract. The 4.31.1 reprint also
+dropped patch 0003's classifyAPIErrorOnly hunk (no-status network failure ->
+ExitServerUnreachable 4; 5xx -> ExitUpstream5xx 26): re-carried verbatim. upload mask:
+dryRunOK now short-circuits BEFORE the --original requirement (press verifier's
+dry-run probe) and declares pp:happy-args. Press verify 67/67 PASS; live matrix 163/163.
+---diff --git a/internal/cli/comfy_exp.go b/internal/cli/comfy_exp.go
+index 6bb6e69..bc26f9f 100644
+--- a/internal/cli/comfy_exp.go
++++ b/internal/cli/comfy_exp.go
+@@ -805,7 +805,7 @@ on the exact graph hash. Resubmitting instead of attaching once burned ~30 GPU-m
+ 				return cmd.Help()
+ 			}
+ 			if expVerifyShortCircuit() {
+-				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: refusing to queue real renders")
++				return noopOK(writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: refusing to queue real renders"))
+ 			}
+ 			name := strings.TrimSpace(args[0])
+ 
+diff --git a/internal/cli/comfy_history_ops.go b/internal/cli/comfy_history_ops.go
+index e97a3ca..e0a4e93 100644
+--- a/internal/cli/comfy_history_ops.go
++++ b/internal/cli/comfy_history_ops.go
+@@ -83,7 +83,7 @@ Exit codes:
+ 				})
+ 			}
+ 			if cliutil.IsVerifyEnv() && !cliutil.IsVerifyLiveHTTPEnv() {
+-				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /history was issued")
++				return noopOK(writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /history was issued"))
+ 			}
+ 			c, err := flags.newClient()
+ 			if err != nil {
+@@ -162,7 +162,7 @@ Exit codes:
+ 				})
+ 			}
+ 			if cliutil.IsVerifyEnv() && !cliutil.IsVerifyLiveHTTPEnv() {
+-				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /history was issued")
++				return noopOK(writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /history was issued"))
+ 			}
+ 			c, err := flags.newClient()
+ 			if err != nil {
+diff --git a/internal/cli/comfy_replay.go b/internal/cli/comfy_replay.go
+index 3062188..d351a64 100644
+--- a/internal/cli/comfy_replay.go
++++ b/internal/cli/comfy_replay.go
+@@ -217,7 +217,7 @@ conditions is exactly how a false "+49% regression" gets published.`,
+ 				return usageErr(fmt.Errorf("replay takes exactly one prompt-id or run name (got %d)", len(args)))
+ 			}
+ 			if expVerifyShortCircuit() {
+-				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: refusing to queue a real render")
++				return noopOK(writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: refusing to queue a real render"))
+ 			}
+ 			ref := strings.TrimSpace(args[0])
+ 
+diff --git a/internal/cli/comfy_server_ops.go b/internal/cli/comfy_server_ops.go
+index fdc076c..0fd3e02 100644
+--- a/internal/cli/comfy_server_ops.go
++++ b/internal/cli/comfy_server_ops.go
+@@ -132,7 +132,7 @@ Exit codes:
+ 			// Verify mode short-circuits before the POST so a verification run
+ 			// never evicts a real model from a real card.
+ 			if cliutil.IsVerifyEnv() && !cliutil.IsVerifyLiveHTTPEnv() {
+-				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /free was issued")
++				return noopOK(writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /free was issued"))
+ 			}
+ 
+ 			c, err := flags.newClient()
+diff --git a/internal/cli/comfy_submit.go b/internal/cli/comfy_submit.go
+index d0ba86f..9c50f25 100644
+--- a/internal/cli/comfy_submit.go
++++ b/internal/cli/comfy_submit.go
+@@ -246,7 +246,7 @@ Exit codes:
+ 			// Verify mode short-circuits before any local write, so a verification run
+ 			// never leaves a phantom run row holding the lease.
+ 			if cliutil.IsVerifyEnv() && !cliutil.IsVerifyLiveHTTPEnv() {
+-				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /prompt was issued and no run was recorded")
++				return noopOK(writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /prompt was issued and no run was recorded"))
+ 			}
+ 
+ 			ctx := cmd.Context()
+diff --git a/internal/cli/comfy_upload_mask.go b/internal/cli/comfy_upload_mask.go
+index 8758e20..335130e 100644
+--- a/internal/cli/comfy_upload_mask.go
++++ b/internal/cli/comfy_upload_mask.go
+@@ -115,6 +115,9 @@ Exit codes:
+ 			// No mcp:read-only — this writes a file on the server.
+ 			"pp:data-source":      "live",
+ 			"pp:typed-exit-codes": "0,2,4,5",
++			// Live-dogfood happy path: an existing host file + a plausible
++			// original; without --execute nothing is sent (would-upload).
++			"pp:happy-args": "<mask-file>=examples/minimal-graph.json;--original=example.png",
+ 		},
+ 		Args: cobra.MaximumNArgs(1),
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+@@ -122,6 +125,14 @@ Exit codes:
+ 				return usageErr(errors.New("no mask file given: comfyui-pp-cli upload mask <mask-file> --original <server-filename>"))
+ 			}
+ 			hostPath := args[0]
++			if dryRunOK(flags) {
++				// Verify-friendly contract: --dry-run short-circuits BEFORE the
++				// required-input checks and before any filesystem read, so the
++				// press verifier's dry-run probe exits 0 without --original.
++				return writeDryRun(cmd.OutOrStdout(), flags,
++					fmt.Sprintf("POST /upload/mask with %s onto original %s",
++						filepath.Base(filepath.FromSlash(hostPath)), originalFilename))
++			}
+ 			if strings.TrimSpace(originalFilename) == "" {
+ 				return usageErr(errors.New(
+ 					"--original is required: /upload/mask composites onto an EXISTING server-side image and the server 500s without it"))
+@@ -153,11 +164,6 @@ Exit codes:
+ 			}
+ 			filename := filepath.Base(filepath.FromSlash(hostPath))
+ 
+-			if dryRunOK(flags) {
+-				return writeDryRun(cmd.OutOrStdout(), flags,
+-					fmt.Sprintf("POST /upload/mask with %s onto original %s", filename, originalFilename))
+-			}
+-
+ 			if !execute {
+ 				return comfyUploadMaskEmit(cmd, flags, comfyUploadMaskResult{
+ 					Action:      "would-upload",
+@@ -171,7 +177,7 @@ Exit codes:
+ 			}
+ 
+ 			if cliutil.IsVerifyEnv() && !cliutil.IsVerifyLiveHTTPEnv() {
+-				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /upload/mask was issued")
++				return noopOK(writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /upload/mask was issued"))
+ 			}
+ 
+ 			cfg, err := config.Load(flags.configPath)
+diff --git a/internal/cli/errenvelope.go b/internal/cli/errenvelope.go
+index e87fdd4..a21c453 100644
+--- a/internal/cli/errenvelope.go
++++ b/internal/cli/errenvelope.go
+@@ -327,3 +327,16 @@ func finalizeErrorOutput(flags *rootFlags, err error) {
+ 		fmt.Fprintln(os.Stderr, "Error:", err)
+ 	}
+ }
++
++// noopOK adapts the generated writeNoop contract (4.31.x): writeNoop returns a
++// typed *cliError wrapping noopWriteError even on success, and callers are
++// expected to unwrap it with successfulNoop. Hand-authored verify-mode
++// short-circuits return the noop document as a SUCCESS (exit 0); anything else
++// (a failed write) stays an error. Kept in this hand file so a regen cannot
++// silently drop it again (carried as patch 0005).
++func noopOK(err error) error {
++	if successfulNoop(err) {
++		return nil
++	}
++	return err
++}
+diff --git a/internal/cli/helpers.go b/internal/cli/helpers.go
+index 587e68f..f0a541b 100644
+--- a/internal/cli/helpers.go
++++ b/internal/cli/helpers.go
+@@ -601,6 +601,21 @@ func classifyAPIErrorOnly(err error) error {
+ 	case strings.Contains(msg, "HTTP 429"):
+ 		return rateLimitErr(err)
+ 	default:
++		// A failure with no HTTP status that names a dead socket is not an
++		// API error -- the API never answered. Give it ExitServerUnreachable
++		// so the process exit code agrees with the error envelope's
++		// server_unreachable classification, and so an unattended caller can
++		// tell "ComfyUI is down" (wait and retry, or start it) from "ComfyUI
++		// rejected this" (fix the request) without parsing prose.
++		//
++		// DELIBERATE MIGRATION (carried patch 0003): these previously exited 5.
++		// Documented in the README/SKILL exit tables and in exitcodes.go.
++		if httpStatusFromError(err) == 0 && isNetworkFailure(err) {
++			return unreachableErr(err)
++		}
++		if status := httpStatusFromError(err); status >= 500 {
++			return upstream5xxErr(err)
++		}
+ 		return apiErr(err)
+ 	}
+ }

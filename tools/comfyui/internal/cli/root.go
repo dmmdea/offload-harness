@@ -24,17 +24,21 @@ import (
 )
 
 type rootFlags struct {
-	asJSON     bool
-	compact    bool
-	csv        bool
-	plain      bool
-	quiet      bool
-	dryRun     bool
-	noCache    bool
-	noInput    bool
-	idempotent bool
-	yes        bool
-	agent      bool
+	asJSON  bool
+	compact bool
+	csv     bool
+	plain   bool
+	quiet   bool
+	dryRun  bool
+	// structuredWritten records that a structured document has already been
+	// written to stdout by an output funnel, so the end-of-run error envelope
+	// (errenvelope.go) goes to stderr instead of making stdout invalid JSON.
+	structuredWritten bool
+	noCache           bool
+	noInput           bool
+	idempotent        bool
+	yes               bool
+	agent             bool
 	// noLearn disables both teach (write) and recall (read) for this
 	// invocation. Mirrors the COMFYUI_NO_LEARN env var.
 	noLearn bool
@@ -65,15 +69,6 @@ type rootFlags struct {
 	maxAge                  time.Duration
 	dataSource              string
 	freshnessMeta           any
-
-	// structuredWritten records that a structured document has already been
-	// written to stdout during this invocation. The error envelope
-	// (errenvelope.go) reads it to decide its stream: without the flag, a
-	// command that prints a result envelope and THEN returns a typed error
-	// would put two JSON documents on stdout and break a naive reader. Set by
-	// the two output funnels, printOutputWithFlags and
-	// wrapPlatformStructuredOutput.
-	structuredWritten bool
 
 	// deliverBuf captures command output when --deliver is set to a
 	// non-stdout sink. Flushed to the sink after Execute returns.
@@ -154,12 +149,12 @@ func Execute() (retErr error) {
 			// these up.
 			journalFailedFlag = flagStr
 			if suggestion := suggestFlag(flagStr, rootCmd); suggestion != "" {
-				// The wrap attaches the hint to err.Error() for downstream
-				// consumers and exit-code classification. It is not ALSO
-				// printed here: finalizeErrorOutput is now the single error
-				// reporting site and renders this same err — for a human as
-				// one prose line, for a machine inside the envelope's
-				// message field. Printing it here too duplicated the hint.
+				// Cobra already printed `Error: unknown flag: --foob` before
+				// returning; the wrap below attaches the hint to err.Error()
+				// for downstream consumers and exit-code classification, but
+				// would never reach stderr now that main.go no longer prints
+				// err. Emit the hint explicitly so the suggestion still
+				// shows up under Cobra's error line.
 				err = fmt.Errorf("%w\nhint: did you mean --%s?", err, suggestion)
 				journalSuggestedFlag = "--" + suggestion
 			}
@@ -244,15 +239,14 @@ Highlights (not in the official API docs):
   • replay   Re-runs a stored graph and reports a before/after delta including which server configuration each ran under.
   • outputs   Lists produced files and, with --probe, fills in resolution, frame rate, duration, and whether audio is present.
 
-Add --agent to any command for JSON output + non-interactive mode.
-Run 'comfyui-pp-cli doctor' to verify auth and connectivity.`,
+Agent mode: add --agent to any command for JSON output + non-interactive mode.
+Health check: run 'comfyui-pp-cli doctor' to verify auth and connectivity.
+See README.md or the bundled SKILL.md for recipes.`,
 		SilenceUsage: true,
 		// Cobra's own error printing is suppressed so that finalizeErrorOutput
-		// (errenvelope.go) is the SINGLE error-reporting site. Without this,
-		// a machine caller under --json/--agent received Cobra's bare
-		// `Error: ...` line in addition to the structured envelope, and on
-		// the flag-parse path received ONLY that line. Humans still get one
-		// prose line — finalizeErrorOutput prints it.
+		// (errenvelope.go) is the single error-reporting site: JSON callers get
+		// one structured envelope, human callers get one prose line —
+		// finalizeErrorOutput prints it.
 		SilenceErrors: true,
 		Version:       version,
 	}
@@ -274,10 +268,10 @@ Run 'comfyui-pp-cli doctor' to verify auth and connectivity.`,
 	rootCmd.PersistentFlags().BoolVar(&flags.noInput, "no-input", false, "Disable all interactive prompts (for CI/agents)")
 	rootCmd.PersistentFlags().BoolVar(&flags.idempotent, "idempotent", false, "Treat already-existing create results as a successful no-op")
 	rootCmd.PersistentFlags().StringVar(&flags.selectFields, "select", "", "Comma-separated fields to include in output")
-	rootCmd.PersistentFlags().BoolVar(&flags.yes, "yes", false, "Skip confirmation prompts (for agents and scripts)")
+	rootCmd.PersistentFlags().BoolVar(&flags.yes, "yes", false, "Skip confirmation prompts (explicit confirmation for scripts)")
 	rootCmd.PersistentFlags().BoolVar(&noColor, "no-color", false, "Disable colored output")
 	rootCmd.PersistentFlags().BoolVar(&humanFriendly, "human-friendly", false, "Enable colored output and rich formatting")
-	rootCmd.PersistentFlags().BoolVar(&flags.agent, "agent", false, "Set all agent-friendly defaults (--json --compact --no-input --no-color --yes)")
+	rootCmd.PersistentFlags().BoolVar(&flags.agent, "agent", false, "Set agent-friendly output defaults (--json --compact --no-input --no-color)")
 	rootCmd.PersistentFlags().BoolVar(&flags.noLearn, "no-learn", false, "Disable the teach/recall learning loop for this invocation")
 	rootCmd.PersistentFlags().BoolVar(&flags.allowPartialFailure, "allow-partial-failure", false, "Downgrade response-body partial-failure (e.g. partialFailureError) to a warning instead of a non-zero exit")
 	rootCmd.PersistentFlags().StringVar(&flags.dataSource, "data-source", "auto", "Data source for read commands: auto (live with local fallback), live (API only), local (synced data only)")
@@ -358,9 +352,6 @@ Run 'comfyui-pp-cli doctor' to verify auth and connectivity.`,
 			}
 			if !cmd.Flags().Changed("no-input") {
 				flags.noInput = true
-			}
-			if !cmd.Flags().Changed("yes") {
-				flags.yes = true
 			}
 			if !cmd.Flags().Changed("no-color") {
 				noColor = true

@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "generated_at": "2026-08-12T21:31:37.8108975Z",
-  "printing_press_version": "4.30.2",
+  "generated_at": "2026-08-24T04:55:45.5683342Z",
+  "printing_press_version": "4.31.1",
   "api_name": "comfyui",
   "display_name": "ComfyUI",
   "cli_name": "comfyui-pp-cli",
@@ -14,8 +14,9 @@
   "printer_name": "Daniel Martinez",
   "spec_path": "spec.yaml",
   "spec_format": "internal",
-  "spec_checksum": "sha256:849f04dde7342d94f913082c04ab57251a8375c42ccab7ffd5e35dd3f3d8a771",
-  "run_id": "20260812-123958",
+  "spec_checksum": "sha256:842720280c62bcfd2ca65883e32cb5c14adb395e3b00cc34e645cbb03bc294c7",
+  "run_id": "20260823-231507-1cd84666",
+  "category": "ai",
   "description": "Drive a local ComfyUI render server from the shell, with a durable record of every run the server itself forgets.",
   "mcp_binary": "comfyui-pp-mcp",
   "mcp_tool_count": 13,
@@ -96,22 +97,23 @@
       "description": "Lists produced files and, with --probe, fills in resolution, frame rate, duration, and whether audio is present."
     }
   ],
-  "verify": {
-    "mode": "mock",
-    "pass_rate": 100,
-    "passed": 62,
-    "total": 62,
-    "data_pipeline": true,
-    "verdict": "PASS"
-  },
   "scorecard": {
     "steinberger": {
-      "percentage": 90,
+      "percentage": 91,
       "grade": "A (1 of 24 dimensions unverified: live_api_verification)",
-      "total": 90
+      "total": 91
     },
     "unverified_dimensions": [
       "live_api_verification"
     ]
+  },
+  "verify": {
+    "mode": "mock",
+    "pass_rate": 98.50746268656717,
+    "passed": 66,
+    "total": 67,
+    "failed": 1,
+    "data_pipeline": true,
+    "verdict": "WARN"
   }
 }
