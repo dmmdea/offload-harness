@@ -16,7 +16,9 @@ package cli
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"llamaswap-pp-cli/internal/mirror"
@@ -51,25 +53,31 @@ const analyticsSchemaVersion = 1
 // consumer must use Start()/End() below rather than re-deriving the interval, so
 // the direction is decided in exactly one place.
 type mirrorRequest struct {
-	EpochID  int64
-	Model    string
-	TS       time.Time
-	Duration time.Duration
-	Status   int
-	ReqPath  string
-	InTok    sql.NullInt64
-	OutTok   sql.NullInt64
+	EpochID       int64
+	Model         string
+	TS            time.Time
+	Duration      time.Duration
+	DurationKnown bool // false when duration_ms was NULL — Duration is 0 but unknown
+	Status        int
+	StatusKnown   bool // false when status was NULL — Status is 0 but unknown
+	ReqPath       string
+	InTok         sql.NullInt64
+	OutTok        sql.NullInt64
 }
 
 // Start is the reconstructed dispatch time. End is the completion time (TS).
 func (r mirrorRequest) Start() time.Time { return r.TS.Add(-r.Duration) }
 func (r mirrorRequest) End() time.Time   { return r.TS }
 
-// loadMirrorRequests reads request rows (optionally since a cutoff), newest
-// ordering by ts then activity_id for a stable sweep. A row with an unparseable
-// ts is skipped, not guessed.
-func loadMirrorRequests(ctx context.Context, db *store.Store, since time.Time, model string) ([]mirrorRequest, error) {
-	q := `SELECT epoch_id, COALESCE(model,''), ts, COALESCE(duration_ms,0), COALESCE(status,0),
+// loadMirrorRequests reads request rows (optionally since a cutoff), ordered by
+// ts then activity_id for a stable sweep. A row whose ts is NULL or unparseable
+// is skipped and COUNTED (returned as skippedBadTS) rather than dropped
+// silently — an invisible skip would understate every downstream metric with no
+// signal. duration_ms/status are read as nullable: a NULL is NOT coalesced to 0
+// here (0 would masquerade as an instant success); Duration/Status carry the
+// null-ness so consumers and the coverage block can account for it.
+func loadMirrorRequests(ctx context.Context, db *store.Store, since time.Time, model string) (out []mirrorRequest, skippedBadTS int, err error) {
+	q := `SELECT epoch_id, COALESCE(model,''), ts, duration_ms, status,
 	             COALESCE(req_path,''), input_tokens, output_tokens
 	        FROM requests`
 	var conds []string
@@ -90,28 +98,39 @@ func loadMirrorRequests(ctx context.Context, db *store.Store, since time.Time, m
 		}
 	}
 	q += ` ORDER BY ts, activity_id`
-	rows, err := db.DB().QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, err
+	rows, qerr := db.DB().QueryContext(ctx, q, args...)
+	if qerr != nil {
+		return nil, 0, qerr
 	}
 	defer rows.Close()
-	var out []mirrorRequest
 	for rows.Next() {
 		var r mirrorRequest
-		var ts string
-		var durMS int64
-		if err := rows.Scan(&r.EpochID, &r.Model, &ts, &durMS, &r.Status, &r.ReqPath, &r.InTok, &r.OutTok); err != nil {
-			return nil, err
+		var ts sql.NullString
+		var durMS, status sql.NullInt64
+		if serr := rows.Scan(&r.EpochID, &r.Model, &ts, &durMS, &status, &r.ReqPath, &r.InTok, &r.OutTok); serr != nil {
+			return nil, 0, serr
 		}
-		t, perr := time.Parse(time.RFC3339, ts)
+		if !ts.Valid || strings.TrimSpace(ts.String) == "" {
+			skippedBadTS++
+			continue
+		}
+		t, perr := time.Parse(time.RFC3339, ts.String)
 		if perr != nil {
+			skippedBadTS++
 			continue
 		}
 		r.TS = t
-		r.Duration = time.Duration(durMS) * time.Millisecond
+		r.DurationKnown = durMS.Valid
+		if durMS.Valid {
+			r.Duration = time.Duration(durMS.Int64) * time.Millisecond
+		}
+		r.StatusKnown = status.Valid
+		if status.Valid {
+			r.Status = int(status.Int64)
+		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	return out, skippedBadTS, rows.Err()
 }
 
 // analyticsCoverage is the honesty block both verbs print. It answers "how much
@@ -132,6 +151,9 @@ type analyticsCoverage struct {
 	PrepollLoss      int64    `json:"prepoll_loss"`
 	EvictedLoss      *int64   `json:"evicted_loss"`
 	EpochsWithHole   int      `json:"epochs_with_unknown_loss"`
+	SkippedBadTS     int      `json:"skipped_bad_ts"`
+	NullDuration     int      `json:"rows_null_duration"`
+	NullStatus       int      `json:"rows_null_status"`
 	CoveragePct      *float64 `json:"coverage_pct"`
 	SecondResolution bool     `json:"second_resolution_ts"`
 	Sampled          bool     `json:"sampled"`
@@ -142,8 +164,16 @@ type analyticsCoverage struct {
 // the loaded request window. CoveragePct is mirrored-rows over
 // (mirrored + prepoll + evicted) across the covered epochs — nil when a hole
 // makes the denominator unsound rather than a fabricated 100%.
-func fillAnalyticsCoverage(ctx context.Context, db *store.Store, reqs []mirrorRequest) (analyticsCoverage, error) {
-	c := analyticsCoverage{Sampled: true, SecondResolution: true, RequestRows: len(reqs)}
+func fillAnalyticsCoverage(ctx context.Context, db *store.Store, reqs []mirrorRequest, skippedBadTS int) (analyticsCoverage, error) {
+	c := analyticsCoverage{Sampled: true, SecondResolution: true, RequestRows: len(reqs), SkippedBadTS: skippedBadTS}
+	for _, r := range reqs {
+		if !r.DurationKnown {
+			c.NullDuration++
+		}
+		if !r.StatusKnown {
+			c.NullStatus++
+		}
+	}
 	if len(reqs) > 0 {
 		c.WindowStart = reqs[0].TS.UTC().Format(time.RFC3339)
 		c.WindowEnd = reqs[len(reqs)-1].TS.UTC().Format(time.RFC3339)
@@ -191,12 +221,22 @@ func fillAnalyticsCoverage(ctx context.Context, db *store.Store, reqs []mirrorRe
 	}
 	c.Caveats = append(c.Caveats,
 		"mirror timestamps are whole-second resolution: sub-second concurrency cannot be reconstructed, so in-flight depth is not reported.",
-		"SAMPLED: covers rows this CLI mirrored. Activity dropped before the first poll of an epoch (prepoll_loss) or evicted from the server before a sync is absent.")
+		"SAMPLED: covers rows this CLI mirrored. Activity dropped before the first poll of an epoch (prepoll_loss) or evicted from the server before a sync is absent.",
+		"coverage_pct: JSON null means 'unsound / no data' (a hole, or zero rows); a numeric 0 is a real (very low) measurement. Check for null explicitly, not falsiness.")
 	if prepoll > 0 {
 		c.Caveats = append(c.Caveats, "prepoll_loss > 0: some activity existed before this CLI first polled the open epoch; per-model counts are lower bounds. A full re-sync from activity id 1 may recover it.")
 	}
 	if c.EpochsWithHole > 0 {
 		c.Caveats = append(c.Caveats, "one or more epochs have unknown eviction loss (id density broke); coverage_pct is null rather than a fabricated number.")
+	}
+	if skippedBadTS > 0 {
+		c.Caveats = append(c.Caveats, fmt.Sprintf("%d row(s) had a NULL or unparseable timestamp and were excluded from every metric.", skippedBadTS))
+	}
+	if c.NullStatus > 0 {
+		c.Caveats = append(c.Caveats, fmt.Sprintf("%d row(s) have a NULL status (e.g. aborted requests): they count toward request volume but not toward error counts, so error rates are lower bounds.", c.NullStatus))
+	}
+	if c.NullDuration > 0 {
+		c.Caveats = append(c.Caveats, fmt.Sprintf("%d row(s) have a NULL duration: they are excluded from cold-load and percentile math (a null duration is unknown, not zero).", c.NullDuration))
 	}
 	return c, nil
 }

@@ -34,7 +34,8 @@ type residencySeat struct {
 	TTLEvictions   int      `json:"ttl_evictions"`
 	ColdLoadP50MS  *int64   `json:"cold_load_p50_ms"`
 	ColdLoadMaxMS  *int64   `json:"cold_load_max_ms"`
-	ColdMinutes    float64  `json:"cold_minutes_total"`
+	ColdSamples    int      `json:"cold_load_samples"`
+	ColdMinutes    *float64 `json:"cold_minutes_total"`
 	KeepSet        bool     `json:"keepset"`
 	SharesEviction []string `json:"shares_eviction_group_with,omitempty"`
 	CoveragePct    *float64 `json:"coverage_pct"`
@@ -51,12 +52,12 @@ type residencyWhatIf struct {
 	Model              string  `json:"model"`
 	FromTTL            string  `json:"from_ttl"`
 	ToTTL              string  `json:"to_ttl"`
-	ReloadsAvoidedMax  int     `json:"reloads_avoided_ceiling"`
-	ReloadsAddedMin    int     `json:"reloads_added_floor"`
-	ColdMinSaved       float64 `json:"cold_minutes_saved_ceiling"`
-	ResidentMinutesAdd float64 `json:"resident_minutes_added_upper_bound"`
-	Safe               *bool   `json:"safe_for_keepset_and_groups"`
-	Rationale          string  `json:"rationale"`
+	ReloadsAvoidedMax  int      `json:"reloads_avoided_ceiling"`
+	ReloadsAddedMin    int      `json:"reloads_added_floor"`
+	ColdMinSaved       *float64 `json:"cold_minutes_saved_ceiling"`
+	ResidentMinutesAdd float64  `json:"resident_minutes_added_upper_bound"`
+	Safe               *bool    `json:"safe_for_keepset_and_groups"`
+	Rationale          string   `json:"rationale"`
 }
 
 type residencyReport struct {
@@ -163,13 +164,14 @@ func parseTTLOverrides(in []string) (map[string]int, error) {
 // residencyGap is one same-epoch idle gap for a model, in seconds, plus the
 // duration of the request that FOLLOWS it (the cold-load candidate).
 type residencyGap struct {
-	idleSec    float64
-	followMS   int64
-	crossEpoch bool
+	idleSec     float64
+	followMS    int64
+	followKnown bool // false when the following request's duration was NULL
+	crossEpoch  bool
 }
 
 func buildResidencyReport(ctx context.Context, db *store.Store, since time.Time, sinceText string, whatif map[string]int) (*residencyReport, error) {
-	reqs, err := loadMirrorRequests(ctx, db, since, "")
+	reqs, skipped, err := loadMirrorRequests(ctx, db, since, "")
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +179,7 @@ func buildResidencyReport(ctx context.Context, db *store.Store, since time.Time,
 
 	seatIdx, seatWarns := analyticsYAMLSeats()
 	keep := mirror.LoadKeepSet(mirror.KeepSetOptions{})
-	evictGroups := analyticsEvictionGroups()
+	evictGroups, matrixPresent := analyticsEvictionGroups()
 
 	// Group requests by model, preserving order (reqs is ts,activity_id sorted).
 	byModel := map[string][]mirrorRequest{}
@@ -190,7 +192,7 @@ func buildResidencyReport(ctx context.Context, db *store.Store, since time.Time,
 	}
 	sort.Strings(order)
 
-	cov, err := fillAnalyticsCoverage(ctx, db, reqs)
+	cov, err := fillAnalyticsCoverage(ctx, db, reqs, skipped)
 	if err != nil {
 		return nil, err
 	}
@@ -200,20 +202,21 @@ func buildResidencyReport(ctx context.Context, db *store.Store, since time.Time,
 		rs := byModel[m]
 		gaps := residencyGaps(rs)
 		seat := seatIdx[m]
-		ttl, ttlText := seatTTL(seatIdx, m)
+		ttl, ttlText, ttlSet, found := seatTTL(seatIdx, m)
 		_, isKeep := keep.MatchAny(append([]string{m}, seat.Aliases...)...)
 
 		st := residencySeat{
-			Model:         m,
-			ConfiguredTTL: ttlText,
-			Requests:      len(rs),
-			KeepSet:       isKeep,
-			CoveragePct:   cov.CoveragePct,
+			Model:          m,
+			ConfiguredTTL:  ttlText,
+			Requests:       len(rs),
+			KeepSet:        isKeep,
+			CoveragePct:    cov.CoveragePct,
 			SharesEviction: evictGroups[m],
 		}
 		// Cold-load cost samples: the request following a TTL-eviction gap, minus
-		// this model's steady median duration. A negative delta is clamped to 0
-		// (a fast follow-up is not a cold load), never fabricated.
+		// this model's steady median duration. A negative delta is clamped out
+		// (a fast follow-up is not a cold load), never fabricated. Rows with an
+		// unknown duration cannot contribute a sample.
 		steady := steadyMedianMS(rs)
 		var coldSamples []int64
 		loads := 1 // the first mirrored request is a load (or the seat was already up — a lower bound either way)
@@ -228,12 +231,15 @@ func buildResidencyReport(ctx context.Context, db *store.Store, since time.Time,
 			if ttl > 0 && g.idleSec > float64(ttl) {
 				st.TTLEvictions++
 				loads++
-				if d := g.followMS - steady; d > 0 {
-					coldSamples = append(coldSamples, d)
+				if g.followKnown {
+					if d := g.followMS - steady; d > 0 {
+						coldSamples = append(coldSamples, d)
+					}
 				}
 			}
 		}
 		st.InferredLoads = loads
+		st.ColdSamples = len(coldSamples)
 		if len(coldSamples) > 0 {
 			sort.Slice(coldSamples, func(i, j int) bool { return coldSamples[i] < coldSamples[j] })
 			p50 := analyticsPercentile(coldSamples, 0.50)
@@ -244,13 +250,17 @@ func buildResidencyReport(ctx context.Context, db *store.Store, since time.Time,
 			for _, c := range coldSamples {
 				tot += c
 			}
-			st.ColdMinutes = round2(float64(tot) / 60000)
+			cm := round2(float64(tot) / 60000)
+			st.ColdMinutes = &cm // stays nil when no priced sample: null != a measured 0
 		}
+		// Note branches are distinct so they never contradict the keepset field.
 		switch {
-		case ttl == -1:
-			st.Note = "keep-set / never-evict (ttl -1): no idle TTL evictions; a TTL what-if is moot."
-		case ttl == 0:
-			st.Note = "no per-seat TTL configured; evictions shown are 0 unless a globalTTL applies (not modelled here)."
+		case !found:
+			st.Note = "seat not found in the llama-swap config: TTL unknown; evictions shown are 0 (no TTL to apply)."
+		case !ttlSet:
+			st.Note = "no per-seat ttl key (inherits globalTTL, which is not modelled here): evictions shown are 0."
+		case ttl == -1 || ttl == 0:
+			st.Note = fmt.Sprintf("resident / never-evict (ttl %s): no idle-TTL evictions; matches keepset=%t. A raise what-if is moot.", ttlText, isKeep)
 		}
 		rep.Seats = append(rep.Seats, st)
 	}
@@ -270,26 +280,58 @@ func buildResidencyReport(ctx context.Context, db *store.Store, since time.Time,
 	for _, m := range wmodels {
 		alt := whatif[m]
 		rs := byModel[m]
-		ttl, ttlText := seatTTL(seatIdx, m)
+		ttl, ttlText, ttlSet, _ := seatTTL(seatIdx, m)
+		seat := seatIdx[m]
+		_, isKeep := keep.MatchAny(append([]string{m}, seat.Aliases...)...)
 		wi := residencyWhatIf{
 			Model:   m,
 			FromTTL: ttlText,
 			ToTTL:   fmt.Sprintf("%ds", alt),
+			Safe:    evictionSafety(isKeep, evictGroups[m], matrixPresent),
 		}
 		if len(rs) == 0 {
 			wi.Rationale = "no mirrored requests for this seat in the window; nothing to simulate."
-			safe := true
-			wi.Safe = &safe
 			rep.WhatIf = append(rep.WhatIf, wi)
 			continue
 		}
-		seat := seatIdx[m]
-		_, isKeep := keep.MatchAny(append([]string{m}, seat.Aliases...)...)
 		gaps := residencyGaps(rs)
 		steady := steadyMedianMS(rs)
-		coldCost := medianColdCostMS(gaps, ttl, steady)
-		if alt > ttl && ttl > 0 {
-			// Raising the TTL: gaps in (cur, alt] no longer evict.
+		// setSaved records a cold-minutes figure, or leaves it nil when there is
+		// no priced cold-load sample — a null, never a fabricated 0 next to a
+		// nonzero reload count.
+		setSaved := func(reloads int, coldCost int64, sign float64) {
+			if reloads > 0 && coldCost > 0 {
+				v := sign * round2(float64(reloads)*float64(coldCost)/60000)
+				wi.ColdMinSaved = &v
+			} else if reloads > 0 {
+				wi.Rationale += " (no priced cold-load sample at the base TTL, so cold_minutes_saved is null, not zero.)"
+			} else {
+				zero := 0.0
+				wi.ColdMinSaved = &zero
+			}
+		}
+		resident := ttl == -1 || (ttl == 0 && ttlSet)
+		switch {
+		case resident && alt > 0:
+			// From never-evict to a finite TTL: every same-epoch idle gap > alt
+			// becomes a new eviction. No cold-load samples exist at the base
+			// (nothing evicted), so cost is unknown.
+			var added int
+			var residentFreeSec float64
+			for _, g := range gaps {
+				if g.crossEpoch {
+					continue
+				}
+				if g.idleSec > float64(alt) {
+					added++
+					residentFreeSec += g.idleSec - float64(alt)
+				}
+			}
+			wi.ReloadsAddedMin = added
+			wi.ResidentMinutesAdd = -round2(residentFreeSec / 60)
+			wi.Rationale = fmt.Sprintf("setting ttl %s→%ds would START evicting this resident seat: at least %d reloads (floor), freeing up to %.1f resident-min.", ttlText, alt, added, -wi.ResidentMinutesAdd)
+			setSaved(added, 0, -1) // no base samples → cost null
+		case alt > ttl && ttl > 0:
 			var avoided int
 			var residentAddSec float64
 			for _, g := range gaps {
@@ -300,16 +342,14 @@ func buildResidencyReport(ctx context.Context, db *store.Store, since time.Time,
 					avoided++
 					residentAddSec += g.idleSec - float64(ttl)
 				} else if g.idleSec > float64(alt) {
-					// still evicts, but later: resident from cur..alt extra.
 					residentAddSec += float64(alt - ttl)
 				}
 			}
 			wi.ReloadsAvoidedMax = avoided
-			wi.ColdMinSaved = round2(float64(avoided) * float64(coldCost) / 60000)
 			wi.ResidentMinutesAdd = round2(residentAddSec / 60)
 			wi.Rationale = fmt.Sprintf("raising ttl %s→%ds avoids up to %d reloads (idle-only ceiling); resident time grows by up to %.1f min.", ttlText, alt, avoided, wi.ResidentMinutesAdd)
-		} else if ttl > 0 && alt < ttl {
-			// Lowering the TTL: gaps in (alt, cur] now evict.
+			setSaved(avoided, medianColdCostMS(gaps, ttl, steady), 1)
+		case ttl > 0 && alt < ttl:
 			var added int
 			var residentFreeSec float64
 			for _, g := range gaps {
@@ -324,18 +364,24 @@ func buildResidencyReport(ctx context.Context, db *store.Store, since time.Time,
 				}
 			}
 			wi.ReloadsAddedMin = added
-			wi.ColdMinSaved = -round2(float64(added) * float64(coldCost) / 60000)
 			wi.ResidentMinutesAdd = -round2(residentFreeSec / 60)
 			wi.Rationale = fmt.Sprintf("lowering ttl %s→%ds adds at least %d reloads (floor); frees up to %.1f resident-min.", ttlText, alt, added, -wi.ResidentMinutesAdd)
-		} else {
-			wi.Rationale = fmt.Sprintf("ttl %s→%ds: no idle-TTL change to simulate (seat is keep-set/unset, or the value is unchanged).", ttlText, alt)
+			setSaved(added, medianColdCostMS(gaps, ttl, steady), -1)
+		default:
+			zero := 0.0
+			wi.ColdMinSaved = &zero
+			if !ttlSet {
+				wi.Rationale = fmt.Sprintf("ttl %s→%ds: this seat has no per-seat ttl (inherits globalTTL, not modelled); nothing to simulate.", ttlText, alt)
+			} else {
+				wi.Rationale = fmt.Sprintf("ttl %s→%ds: unchanged; nothing to simulate.", ttlText, alt)
+			}
 		}
-		safe := !isKeep && len(evictGroups[m]) == 0
-		wi.Safe = &safe
 		if isKeep {
-			wi.Rationale += " UNSAFE-BASE: keep-set seat — do not shorten its residency."
+			wi.Rationale += " UNSAFE: keep-set seat — do not shorten its residency."
 		} else if len(evictGroups[m]) > 0 {
 			wi.Rationale += fmt.Sprintf(" CAUTION: shares an eviction group with %s — raising residency may crowd them; VRAM contention is NOT modelled.", strings.Join(evictGroups[m], ", "))
+		} else if matrixPresent {
+			wi.Rationale += " SAFETY UNKNOWN: this deployment uses a matrix eviction policy that is not modelled here — verify manually before raising residency."
 		}
 		rep.WhatIf = append(rep.WhatIf, wi)
 	}
@@ -356,9 +402,10 @@ func residencyGaps(rs []mirrorRequest) []residencyGap {
 	for i := 1; i < len(rs); i++ {
 		prev, cur := rs[i-1], rs[i]
 		g := residencyGap{
-			idleSec:    cur.Start().Sub(prev.End()).Seconds(),
-			followMS:   cur.Duration.Milliseconds(),
-			crossEpoch: cur.EpochID != prev.EpochID,
+			idleSec:     cur.Start().Sub(prev.End()).Seconds(),
+			followMS:    cur.Duration.Milliseconds(),
+			followKnown: cur.DurationKnown,
+			crossEpoch:  cur.EpochID != prev.EpochID,
 		}
 		if g.idleSec < 0 {
 			g.idleSec = 0 // overlapping second-resolution stamps; not a negative idle
@@ -376,7 +423,12 @@ func steadyMedianMS(rs []mirrorRequest) int64 {
 	}
 	ds := make([]int64, 0, len(rs))
 	for _, r := range rs {
-		ds = append(ds, r.Duration.Milliseconds())
+		if r.DurationKnown { // a NULL duration is unknown, not 0 — don't drag the median down
+			ds = append(ds, r.Duration.Milliseconds())
+		}
+	}
+	if len(ds) == 0 {
+		return 0
 	}
 	sort.Slice(ds, func(i, j int) bool { return ds[i] < ds[j] })
 	return ds[len(ds)/2]
@@ -387,7 +439,7 @@ func steadyMedianMS(rs []mirrorRequest) int64 {
 func medianColdCostMS(gaps []residencyGap, ttl int, steady int64) int64 {
 	var samples []int64
 	for _, g := range gaps {
-		if g.crossEpoch {
+		if g.crossEpoch || !g.followKnown {
 			continue
 		}
 		if ttl > 0 && g.idleSec > float64(ttl) {
@@ -403,20 +455,23 @@ func medianColdCostMS(gaps []residencyGap, ttl int, steady int64) int64 {
 	return samples[len(samples)/2]
 }
 
-// seatTTL returns the configured idle TTL in seconds for a model (or its alias)
-// and a human label. Unknown config yields (0, "unknown").
-func seatTTL(idx map[string]mirror.YAMLSeat, model string) (int, string) {
+// seatTTL returns the configured idle TTL in seconds for a model (or its alias),
+// a human label, whether a ttl key was set, and whether the seat was found in
+// the config at all. The four return values let the caller keep "not found",
+// "no ttl key (inherits globalTTL)", "resident (ttl 0/-1)", and "finite ttl"
+// distinct — collapsing them was how the note contradicted the keepset field.
+func seatTTL(idx map[string]mirror.YAMLSeat, model string) (ttl int, label string, ttlSet bool, found bool) {
 	s, ok := idx[model]
 	if !ok {
-		return 0, "unknown"
+		return 0, "unknown", false, false
 	}
 	if !s.TTLSet {
-		return 0, "unset"
+		return 0, "unset", false, true
 	}
 	if s.TTL == -1 {
-		return -1, "never (-1)"
+		return -1, "never (-1)", true, true
 	}
-	return s.TTL, fmt.Sprintf("%ds", s.TTL)
+	return s.TTL, fmt.Sprintf("%ds", s.TTL), true, true
 }
 
 func writeResidencyReport(cmd *cobra.Command, flags *rootFlags, rep *residencyReport) error {
@@ -430,9 +485,9 @@ func writeResidencyReport(cmd *cobra.Command, flags *rootFlags, rep *residencyRe
 		tw := newTabWriter(w)
 		fmt.Fprintln(tw, "MODEL\tTTL\tREQUESTS\tLOADS\tTTL-EVICT\tCOLD-P50\tCOLD-MIN\tKEEPSET")
 		for _, s := range rep.Seats {
-			fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%s\t%.2f\t%t\n",
+			fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%s\t%s\t%t\n",
 				s.Model, s.ConfiguredTTL, s.Requests, s.InferredLoads, s.TTLEvictions,
-				msPtrText(s.ColdLoadP50MS), s.ColdMinutes, s.KeepSet)
+				msPtrText(s.ColdLoadP50MS), floatPtrText(s.ColdMinutes), s.KeepSet)
 		}
 		if err := tw.Flush(); err != nil {
 			return err
@@ -447,9 +502,9 @@ func writeResidencyReport(cmd *cobra.Command, flags *rootFlags, rep *residencyRe
 			if wi.Safe != nil {
 				safe = fmt.Sprintf("%t", *wi.Safe)
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%.2f\t%.2f\t%s\n",
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%.2f\t%s\n",
 				wi.Model, wi.FromTTL, wi.ToTTL, wi.ReloadsAvoidedMax,
-				wi.ColdMinSaved, wi.ResidentMinutesAdd, safe)
+				floatPtrText(wi.ColdMinSaved), wi.ResidentMinutesAdd, safe)
 		}
 		if err := tw.Flush(); err != nil {
 			return err
@@ -474,19 +529,35 @@ func msPtrText(v *int64) string {
 	return fmt.Sprintf("%dms", *v)
 }
 
+// floatPtrText renders a *float64 as its value or "unknown" (nil) — nil is a
+// real state here (no priced cold-load sample), distinct from a measured 0.
+func floatPtrText(v *float64) string {
+	if v == nil {
+		return "unknown"
+	}
+	return fmt.Sprintf("%.2f", *v)
+}
+
 // analyticsEvictionGroups returns, per model, the other models it shares a
-// swap/eviction grouping with — read structurally from the config's matrix sets
-// (v239+) or the legacy exclusive/swap groups. Best-effort and caveated: it
-// reports co-membership, not a simulation of the solver.
-func analyticsEvictionGroups() map[string][]string {
+// swap/eviction grouping with — read from the config's LEGACY exclusive/swap
+// groups only — plus whether the config uses a v239+ matrix eviction policy.
+//
+// The matrix `sets` are NOT parsed into co-membership: they are solver boolean
+// expressions over `vars` aliases (e.g. "+residents & (w | s)"), not model
+// lists, and resolving them wrongly would let a crowding raise be reported
+// "safe" — the one error that could evict a keep-set model. So a matrix
+// deployment yields matrixPresent=true and the safety verdict for its seats is
+// UNKNOWN (nil), with a caveat, rather than a fabricated true. Legacy groups
+// resolve precisely.
+func analyticsEvictionGroups() (groups map[string][]string, matrixPresent bool) {
 	out := map[string][]string{}
 	path := yamlConfigPath()
 	if path == "" {
-		return out
+		return out, false
 	}
 	f, err := loadConfigFile(path)
 	if err != nil || f == nil {
-		return out
+		return out, false
 	}
 	add := func(members []string) {
 		for _, a := range members {
@@ -498,22 +569,31 @@ func analyticsEvictionGroups() map[string][]string {
 			}
 		}
 	}
-	// Legacy groups with exclusive/swap semantics.
 	for _, g := range f.Groups {
 		if (g.Exclusive != nil && *g.Exclusive) || (g.Swap != nil && *g.Swap) {
 			add(g.Members)
 		}
 	}
-	// Matrix sets (v239+): each set value lists co-scheduled members.
-	if f.Matrix != nil {
-		for _, v := range f.Matrix.Sets {
-			add(strings.Fields(strings.NewReplacer(",", " ", "[", " ", "]", " ", "\"", " ").Replace(v)))
-		}
-	}
 	for k := range out {
 		sort.Strings(out[k])
 	}
-	return out
+	matrixPresent = f.Matrix != nil && (len(f.Matrix.Sets) > 0 || len(f.Matrix.Vars) > 0)
+	return out, matrixPresent
+}
+
+// evictionSafety decides whether raising a seat's residency is safe from
+// crowding a protected seat. false = unsafe (keep-set, or a known exclusive
+// co-member); nil = UNKNOWN (a matrix policy governs eviction and is not
+// modelled here — verify manually); true = affirmatively no exclusivity known.
+func evictionSafety(isKeep bool, coMembers []string, matrixPresent bool) *bool {
+	f, tr := false, true
+	if isKeep || len(coMembers) > 0 {
+		return &f
+	}
+	if matrixPresent {
+		return nil
+	}
+	return &tr
 }
 
 func appendUnique(s []string, v string) []string {

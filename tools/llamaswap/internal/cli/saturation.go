@@ -112,16 +112,16 @@ This command PRINTS. It never edits groups, ttl, or model placement.`, "\n"),
 }
 
 func buildSaturationReport(ctx context.Context, db *store.Store, since time.Time, sinceText string) (*saturationReport, error) {
-	reqs, err := loadMirrorRequests(ctx, db, since, "")
+	reqs, skipped, err := loadMirrorRequests(ctx, db, since, "")
 	if err != nil {
 		return nil, err
 	}
 	rep := &saturationReport{SchemaVersion: analyticsSchemaVersion, Since: sinceText}
 
 	type acc struct {
-		n, err429, err5xx, errOther int
-		durs                        []int64
-		byHour                      map[string]int
+		n, knownStatus, err429, err5xx, errOther int
+		durs                                      []int64
+		byHour                                    map[string]int
 	}
 	seats := map[string]*acc{}
 	hourly := map[string]*saturationHourBucket{}
@@ -132,17 +132,26 @@ func buildSaturationReport(ctx context.Context, db *store.Store, since time.Time
 			seats[r.Model] = a
 		}
 		a.n++
-		a.durs = append(a.durs, r.Duration.Milliseconds())
+		if r.DurationKnown {
+			a.durs = append(a.durs, r.Duration.Milliseconds())
+		}
 		hour := r.TS.UTC().Format("2006-01-02T15")
 		a.byHour[hour]++
-		isErr := r.Status == 429 || r.Status >= 500
-		if r.Status == 429 {
-			a.err429++
-		} else if r.Status >= 500 {
-			a.err5xx++
-		} else if r.Status >= 400 {
-			a.errOther++
-			isErr = true
+		// A NULL status is unknown, not a success: it neither errors nor counts
+		// in the error-rate denominator (it would dilute the rate downward).
+		isErr := false
+		if r.StatusKnown {
+			a.knownStatus++
+			if r.Status == 429 {
+				a.err429++
+				isErr = true
+			} else if r.Status >= 500 {
+				a.err5xx++
+				isErr = true
+			} else if r.Status >= 400 {
+				a.errOther++
+				isErr = true
+			}
 		}
 		hb := hourly[hour]
 		if hb == nil {
@@ -171,9 +180,9 @@ func buildSaturationReport(ctx context.Context, db *store.Store, since time.Time
 			Rejections: a.err429,
 			ServerErr:  a.err5xx,
 		}
-		if a.n > 0 {
-			st.ErrorRate = round2(float64(totalErr) / float64(a.n))
-			st.RejectRate = round2(float64(a.err429) / float64(a.n))
+		if a.knownStatus > 0 {
+			st.ErrorRate = round2(float64(totalErr) / float64(a.knownStatus))
+			st.RejectRate = round2(float64(a.err429) / float64(a.knownStatus))
 		}
 		if len(a.durs) > 0 {
 			st.P95DurMS = analyticsPercentile(a.durs, 0.95)
@@ -214,13 +223,13 @@ func buildSaturationReport(ctx context.Context, db *store.Store, since time.Time
 		rep.HourlyLoad = append(rep.HourlyLoad, *hourly[h])
 	}
 
-	cov, err := fillAnalyticsCoverage(ctx, db, reqs)
+	cov, err := fillAnalyticsCoverage(ctx, db, reqs, skipped)
 	if err != nil {
 		return nil, err
 	}
 	rep.Coverage = cov
 	rep.Notes = append(rep.Notes,
-		"rejections_429 and server_errors_5xx are exact from status codes; error_rate = errors/requests.",
+		"rejections_429 and server_errors_5xx are exact from status codes; error_rate = errors / requests-with-known-status.",
 		"in-flight concurrency is intentionally omitted (unreconstructable at second-resolution timestamps).",
 		"prints only: never edits groups, ttl, or model placement.")
 	return rep, nil

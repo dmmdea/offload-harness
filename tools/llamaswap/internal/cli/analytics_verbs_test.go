@@ -47,6 +47,26 @@ func (e *analyticsTestEnv) seedRequest(t *testing.T, db *store.Store, epoch, act
 	}
 }
 
+// seedRequestNull inserts a request with NULL status and/or NULL duration, to
+// exercise the "unknown, not zero" handling.
+func (e *analyticsTestEnv) seedRequestNull(t *testing.T, db *store.Store, epoch, actID int64, ts, model string, nullStatus, nullDuration bool, status, durMS int64) {
+	t.Helper()
+	var st, dur any = status, durMS
+	if nullStatus {
+		st = nil
+	}
+	if nullDuration {
+		dur = nil
+	}
+	_, err := db.DB().Exec(
+		`INSERT INTO requests (epoch_id, activity_id, ts, model, req_path, status, duration_ms, input_tokens, output_tokens, censored)
+		 VALUES (?,?,?,?,?,?,?,?,?,0)`,
+		epoch, actID, ts, model, "/v1/embeddings", st, dur, 5, 0)
+	if err != nil {
+		t.Fatalf("seed null request: %v", err)
+	}
+}
+
 func (e *analyticsTestEnv) seedEpoch(t *testing.T, db *store.Store, id int64, state string, maxAct, totalLast, prepoll int64, dense int) {
 	t.Helper()
 	_, err := db.DB().Exec(
@@ -59,10 +79,14 @@ func (e *analyticsTestEnv) seedEpoch(t *testing.T, db *store.Store, id int64, st
 }
 
 func newAnalyticsTestEnv(t *testing.T) (*analyticsTestEnv, *store.Store) {
+	return newAnalyticsTestEnvYAML(t, analyticsTestYAML)
+}
+
+func newAnalyticsTestEnvYAML(t *testing.T, yaml string) (*analyticsTestEnv, *store.Store) {
 	t.Helper()
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "llama-swap.yaml")
-	if err := os.WriteFile(yamlPath, []byte(analyticsTestYAML), 0o600); err != nil {
+	if err := os.WriteFile(yamlPath, []byte(yaml), 0o600); err != nil {
 		t.Fatalf("write yaml: %v", err)
 	}
 	t.Setenv(mirror.EnvYAMLPath, yamlPath)
@@ -323,6 +347,213 @@ func TestParseTTLOverrides(t *testing.T) {
 		if _, err := parseTTLOverrides([]string{bad}); err == nil {
 			t.Fatalf("%q should be rejected", bad)
 		}
+	}
+}
+
+// --- review-fix regressions -------------------------------------------------
+
+// A matrix eviction policy is not modelled, so a raise must be safe=UNKNOWN
+// (JSON null), never a fabricated true. This is the CRITICAL review finding.
+const matrixYAML = `
+models:
+  "qwen3.8-27b":
+    cmd: "llama-server --port ${PORT} -m V:/models/q27.gguf"
+    ttl: 300
+  "gemma-4-12b":
+    cmd: "llama-server --port ${PORT} -m V:/models/g12.gguf"
+    ttl: 300
+matrix:
+  vars:
+    a: qwen3.8-27b
+    b: gemma-4-12b
+  sets:
+    both: "a & b"
+`
+
+func TestResidency_MatrixConfigMakesSafetyUnknownNotTrue(t *testing.T) {
+	env, db := newAnalyticsTestEnvYAML(t, matrixYAML)
+	base := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	env.seedEpoch(t, db, 1, "open", 3, 3, 0, 1)
+	env.seedRequest(t, db, 1, 1, rfc(base, 0), "qwen3.8-27b", "/v1/chat/completions", 200, 100, 1, 1)
+	env.seedRequest(t, db, 1, 2, rfc(base, 500), "qwen3.8-27b", "/v1/chat/completions", 200, 8000, 1, 1)
+	env.seedRequest(t, db, 1, 3, rfc(base, 505), "qwen3.8-27b", "/v1/chat/completions", 200, 100, 1, 1)
+
+	out, _, err := runSpine(t, "residency", "--ttl", "qwen3.8-27b=900", "--json", "--db", env.dbPath)
+	if err != nil {
+		t.Fatalf("residency: %v\n%s", err, out)
+	}
+	w := lastJSONObject(t, out)["what_if"].([]any)[0].(map[string]any)
+	if w["safe_for_keepset_and_groups"] != nil {
+		t.Fatalf("matrix config must yield safe=null (unknown), got %v\n%s", w["safe_for_keepset_and_groups"], out)
+	}
+	if r, _ := w["rationale"].(string); !strings.Contains(strings.ToLower(r), "matrix") {
+		t.Fatalf("rationale must warn about the unmodelled matrix policy, got %q\n%s", r, out)
+	}
+}
+
+// A legacy exclusive group must populate shares_eviction_group_with and flag
+// safe=false with a CAUTION rationale.
+const groupsYAML = `
+models:
+  "qwen3.8-27b":
+    cmd: "llama-server --port ${PORT} -m V:/models/q27.gguf"
+    ttl: 300
+  "gemma-4-12b":
+    cmd: "llama-server --port ${PORT} -m V:/models/g12.gguf"
+    ttl: 300
+groups:
+  pool:
+    exclusive: true
+    members: ["qwen3.8-27b", "gemma-4-12b"]
+`
+
+func TestResidency_LegacyExclusiveGroupFlagsUnsafe(t *testing.T) {
+	env, db := newAnalyticsTestEnvYAML(t, groupsYAML)
+	base := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	env.seedEpoch(t, db, 1, "open", 3, 3, 0, 1)
+	env.seedRequest(t, db, 1, 1, rfc(base, 0), "qwen3.8-27b", "/v1/chat/completions", 200, 100, 1, 1)
+	env.seedRequest(t, db, 1, 2, rfc(base, 500), "qwen3.8-27b", "/v1/chat/completions", 200, 8000, 1, 1)
+	env.seedRequest(t, db, 1, 3, rfc(base, 505), "qwen3.8-27b", "/v1/chat/completions", 200, 100, 1, 1)
+
+	out, _, err := runSpine(t, "residency", "--ttl", "qwen3.8-27b=900", "--json", "--db", env.dbPath)
+	if err != nil {
+		t.Fatalf("residency: %v\n%s", err, out)
+	}
+	obj := lastJSONObject(t, out)
+	var seat map[string]any
+	for _, s := range obj["seats"].([]any) {
+		if s.(map[string]any)["model"] == "qwen3.8-27b" {
+			seat = s.(map[string]any)
+		}
+	}
+	shares := seat["shares_eviction_group_with"].([]any)
+	if len(shares) != 1 || shares[0] != "gemma-4-12b" {
+		t.Fatalf("shares_eviction_group_with = %v, want [gemma-4-12b]\n%s", shares, out)
+	}
+	w := obj["what_if"].([]any)[0].(map[string]any)
+	if safe, ok := w["safe_for_keepset_and_groups"].(bool); !ok || safe {
+		t.Fatalf("exclusive-group seat what-if must be safe=false, got %v\n%s", w["safe_for_keepset_and_groups"], out)
+	}
+	if r, _ := w["rationale"].(string); !strings.Contains(r, "CAUTION") {
+		t.Fatalf("rationale must CAUTION about the group, got %q\n%s", r, out)
+	}
+}
+
+// --ttl against a keep-set (ttl -1) seat must model the -1→N conversion
+// coherently: reloads_added computed, safe=false, and NO contradictory
+// "nothing to simulate" text.
+func TestResidency_WhatIfOnKeepSetSeatIsCoherentAndUnsafe(t *testing.T) {
+	env, db := newAnalyticsTestEnv(t) // embeddinggemma is ttl -1 in the default fixture
+	base := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	env.seedEpoch(t, db, 1, "open", 3, 3, 0, 1)
+	env.seedRequest(t, db, 1, 1, rfc(base, 0), "embeddinggemma", "/v1/embeddings", 200, 50, 5, 0)
+	env.seedRequest(t, db, 1, 2, rfc(base, 700), "embeddinggemma", "/v1/embeddings", 200, 50, 5, 0)
+	env.seedRequest(t, db, 1, 3, rfc(base, 1400), "embeddinggemma", "/v1/embeddings", 200, 50, 5, 0)
+
+	out, _, err := runSpine(t, "residency", "--ttl", "embeddinggemma=300", "--json", "--db", env.dbPath)
+	if err != nil {
+		t.Fatalf("residency: %v\n%s", err, out)
+	}
+	w := lastJSONObject(t, out)["what_if"].([]any)[0].(map[string]any)
+	if got := w["reloads_added_floor"].(float64); got < 1 {
+		t.Fatalf("lowering a keep-set seat to 300s should add reloads, got %v\n%s", got, out)
+	}
+	if safe, ok := w["safe_for_keepset_and_groups"].(bool); !ok || safe {
+		t.Fatalf("keep-set what-if must be safe=false, got %v\n%s", w["safe_for_keepset_and_groups"], out)
+	}
+	r, _ := w["rationale"].(string)
+	if !strings.Contains(r, "UNSAFE") {
+		t.Fatalf("rationale must say UNSAFE, got %q\n%s", r, out)
+	}
+	if strings.Contains(r, "nothing to simulate") {
+		t.Fatalf("rationale contradicts itself with 'nothing to simulate', got %q\n%s", r, out)
+	}
+}
+
+// An explicit ttl:0 (resident) seat must be labelled consistently with
+// keepset=true, not "no per-seat TTL configured".
+func TestResidency_ExplicitTTLZeroNoteMatchesKeepset(t *testing.T) {
+	const y = `
+models:
+  "resident-seat":
+    cmd: "llama-server --port ${PORT} -m V:/models/r.gguf"
+    ttl: 0
+`
+	env, db := newAnalyticsTestEnvYAML(t, y)
+	base := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	env.seedEpoch(t, db, 1, "open", 2, 2, 0, 1)
+	env.seedRequest(t, db, 1, 1, rfc(base, 0), "resident-seat", "/v1/chat/completions", 200, 100, 1, 1)
+	env.seedRequest(t, db, 1, 2, rfc(base, 100000), "resident-seat", "/v1/chat/completions", 200, 100, 1, 1)
+
+	out, _, err := runSpine(t, "residency", "--json", "--db", env.dbPath)
+	if err != nil {
+		t.Fatalf("residency: %v\n%s", err, out)
+	}
+	s := lastJSONObject(t, out)["seats"].([]any)[0].(map[string]any)
+	if !s["keepset"].(bool) {
+		t.Fatalf("ttl:0 seat must be keepset=true (Resident), got false\n%s", out)
+	}
+	note, _ := s["note"].(string)
+	if strings.Contains(note, "no per-seat TTL configured") {
+		t.Fatalf("ttl:0 note contradicts keepset=true: %q\n%s", note, out)
+	}
+	if !strings.Contains(strings.ToLower(note), "resident") {
+		t.Fatalf("ttl:0 note should say resident, got %q\n%s", note, out)
+	}
+}
+
+// cold_minutes_total must be null (not 0) when a seat has evictions but no
+// priced cold-load sample — a fast follow-up under the steady median.
+func TestResidency_ColdMinutesNullWhenNoPricedSample(t *testing.T) {
+	env, db := newAnalyticsTestEnv(t)
+	base := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	env.seedEpoch(t, db, 1, "open", 3, 3, 0, 1)
+	// All same duration → steady median == follow duration → delta 0 → no sample,
+	// even though the 600s gap is a TTL eviction.
+	env.seedRequest(t, db, 1, 1, rfc(base, 0), "qwen3.8-27b", "/v1/chat/completions", 200, 100, 1, 1)
+	env.seedRequest(t, db, 1, 2, rfc(base, 700), "qwen3.8-27b", "/v1/chat/completions", 200, 100, 1, 1)
+	env.seedRequest(t, db, 1, 3, rfc(base, 705), "qwen3.8-27b", "/v1/chat/completions", 200, 100, 1, 1)
+
+	out, _, err := runSpine(t, "residency", "--json", "--db", env.dbPath)
+	if err != nil {
+		t.Fatalf("residency: %v\n%s", err, out)
+	}
+	s := lastJSONObject(t, out)["seats"].([]any)[0].(map[string]any)
+	if got := s["ttl_evictions"].(float64); got < 1 {
+		t.Fatalf("expected a TTL eviction, got %v\n%s", got, out)
+	}
+	if s["cold_minutes_total"] != nil {
+		t.Fatalf("cold_minutes_total must be null when no priced sample, got %v\n%s", s["cold_minutes_total"], out)
+	}
+}
+
+// NULL status/duration rows are counted in coverage and excluded from metrics.
+func TestAnalytics_NullColumnsAreAccountedNotZeroed(t *testing.T) {
+	env, db := newAnalyticsTestEnv(t)
+	base := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	env.seedEpoch(t, db, 1, "open", 4, 4, 0, 1)
+	env.seedRequest(t, db, 1, 1, rfc(base, 0), "embeddinggemma", "/v1/embeddings", 200, 50, 5, 0)
+	env.seedRequest(t, db, 1, 2, rfc(base, 1), "embeddinggemma", "/v1/embeddings", 429, 5, 5, 0)
+	env.seedRequestNull(t, db, 1, 3, rfc(base, 2), "embeddinggemma", true, false, 0, 5)   // null status
+	env.seedRequestNull(t, db, 1, 4, rfc(base, 3), "embeddinggemma", false, true, 200, 0) // null duration
+
+	out, _, err := runSpine(t, "saturation", "--json", "--db", env.dbPath)
+	if err != nil {
+		t.Fatalf("saturation: %v\n%s", err, out)
+	}
+	obj := lastJSONObject(t, out)
+	cov := obj["coverage"].(map[string]any)
+	if got := cov["rows_null_status"].(float64); got != 1 {
+		t.Fatalf("rows_null_status = %v, want 1\n%s", got, out)
+	}
+	if got := cov["rows_null_duration"].(float64); got != 1 {
+		t.Fatalf("rows_null_duration = %v, want 1\n%s", got, out)
+	}
+	// error_rate denominator excludes the null-status row: 1 error (429) / 3
+	// known-status rows = 0.33, NOT 1/4 = 0.25.
+	s := obj["seats"].([]any)[0].(map[string]any)
+	if got := s["error_rate"].(float64); got < 0.32 || got > 0.34 {
+		t.Fatalf("error_rate = %v, want ~0.33 (429 / 3 known-status)\n%s", got, out)
 	}
 }
 
