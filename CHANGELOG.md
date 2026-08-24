@@ -6,6 +6,22 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.91.0] - 2026-08-24
+
+### Added — `integrations/opencode/`: the harness's opencode integration path, in-tree
+
+The opencode plugin that gives the harness full feature parity inside opencode now lives IN
+this repo (operator rule: there is ONE offload harness — every agent/CLI integration is an
+integration path here, versioned and released with the harness, never a separate repo).
+`integrations/opencode/` = the TypeScript plugin (`src/`: plan-time three-lane protocol
+injection, `task` description rewrite, read-only task reroute to the local `offload`
+subagent, H14 nudge + `agent_delegate` placement digest with honest failure/escalation
+notes, idempotent agent/command/small_model provisioning, the cross-harness dispatch
+instrument, `offload_plugin_status`), its bun:test suite (47 tests), and an example
+`opencode.jsonc`. New CI job `integrations-opencode` (typecheck + bun test). Install = a
+one-line loader in `~/.config/opencode/plugins/` pointing at the checkout — see
+`docs/systems/opencode-integration.md`.
+
 ## [0.90.1] - 2026-08-24
 
 ### Added — `docs/systems/opencode-integration.md` (doc-only)
