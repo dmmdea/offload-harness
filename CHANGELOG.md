@@ -6,6 +6,22 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.89.1] - 2026-08-23
+
+### Changed — spread's pair guarantee stated at the decision point (doc-only)
+
+The `agent_delegate` `route` description and `docs/systems/fleet-node.md` now
+state what the scheduler already pins by test (`placeSpread`,
+`TestRunSpreadDealsAcrossLocalAndEveryEligibleRemote`): the spread deal is
+positional with subtask 0 always on the local seat, so a 2-contract spread with
+an eligible remote is guaranteed one local + one remote — the local+server pair.
+Per-subtask eligibility (missing `output_schema`, over-size contract) silently
+deals local, so `results[].placement` is the pair's confirmation. No behavior
+change. Motivation: the measured all-cloud dispatch anti-pattern — sessions
+spawned cloud subagents for read legs while the fleet idled; the in-context tool
+schema is the one surface always present at the moment the dispatch is composed,
+so the guarantee has to be readable there, not only in the scheduler's tests.
+
 ## [0.89.0] - 2026-08-23
 
 ### Added — `ocr` media-seat kind: the OCR specialist becomes declarable
