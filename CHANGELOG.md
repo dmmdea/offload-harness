@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.90.1] - 2026-08-24
+
+### Added — `docs/systems/opencode-integration.md` (doc-only)
+
+The harness now has full support inside opencode, documented here: the same MCP launch
+registered as `mcp.harness` (24 tools as `harness_<tool>`), house-rules parity via
+`instructions: ~/.claude/rules/*.md`, and the [`opencode-local-offload`](https://github.com/dmmdea/opencode-local-offload)
+plugin — plan-time injection of the three-lane dispatch protocol, automatic rerouting of
+read-only subagent legs to a free local `offload` subagent, H14-parity nudges, an
+`agent_delegate` placement digest, and the cross-harness dispatch instrument. Every surface
+was verified live on 2026-08-24 with local primaries (the doc records each proof). One
+measured caveat recorded: opencode's `mcp.*.timeout` bounds tool CALLS as well as tool
+listing (agent_run died at 20 s, completed at 600 s) despite the SDK type comment.
+
 ## [0.90.0] - 2026-08-24
 
 ### Added — `residency` and `saturation` analytics verbs (llamaswap CLI)
