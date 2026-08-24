@@ -49,9 +49,9 @@ type residencySeat struct {
 // resident time (an upper bound — the seat cannot stay resident longer than the
 // gap, and contention can cut it short).
 type residencyWhatIf struct {
-	Model              string  `json:"model"`
-	FromTTL            string  `json:"from_ttl"`
-	ToTTL              string  `json:"to_ttl"`
+	Model              string   `json:"model"`
+	FromTTL            string   `json:"from_ttl"`
+	ToTTL              string   `json:"to_ttl"`
 	ReloadsAvoidedMax  int      `json:"reloads_avoided_ceiling"`
 	ReloadsAddedMin    int      `json:"reloads_added_floor"`
 	ColdMinSaved       *float64 `json:"cold_minutes_saved_ceiling"`

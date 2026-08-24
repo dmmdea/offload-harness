@@ -38,12 +38,12 @@ type saturationSeatStat struct {
 }
 
 type saturationReport struct {
-	SchemaVersion int                   `json:"schema_version"`
-	Since         string                `json:"since,omitempty"`
-	Seats         []saturationSeatStat  `json:"seats"`
+	SchemaVersion int                    `json:"schema_version"`
+	Since         string                 `json:"since,omitempty"`
+	Seats         []saturationSeatStat   `json:"seats"`
 	HourlyLoad    []saturationHourBucket `json:"hourly_load"`
-	Coverage      analyticsCoverage     `json:"coverage"`
-	Notes         []string              `json:"notes"`
+	Coverage      analyticsCoverage      `json:"coverage"`
+	Notes         []string               `json:"notes"`
 }
 
 type saturationHourBucket struct {
@@ -120,8 +120,8 @@ func buildSaturationReport(ctx context.Context, db *store.Store, since time.Time
 
 	type acc struct {
 		n, knownStatus, err429, err5xx, errOther int
-		durs                                      []int64
-		byHour                                    map[string]int
+		durs                                     []int64
+		byHour                                   map[string]int
 	}
 	seats := map[string]*acc{}
 	hourly := map[string]*saturationHourBucket{}
