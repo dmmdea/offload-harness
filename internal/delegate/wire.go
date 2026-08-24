@@ -80,6 +80,12 @@ type ResultWire struct {
 	// when a retry ran; the note says what the other attempt did.
 	RetriedOn string `json:"retried_on,omitempty"`
 	RetryNote string `json:"retry_note,omitempty"`
+	// AcceptanceLint carries the intake lint's warnings for THIS subtask's
+	// acceptance (delegate.LintAcceptance): parrot-passable / ungrounded /
+	// shape-only. Warn-only — the run above happened regardless. It rides the
+	// response so the CALLER (usually a model mid-session) sees it beside the
+	// result it weakens, and can fix the acceptance before the next call.
+	AcceptanceLint []string `json:"acceptance_lint,omitempty"`
 	// A1 config pins, passed through from the node's wire result (see
 	// core.AgentWireResult) so a caller can verify WHAT served its subtask
 	// without opening the delegation log. Absent = the node predates pinning:
@@ -97,8 +103,19 @@ type ResponseWire struct {
 	Results []ResultWire `json:"results"`
 }
 
-// WireResponse shapes Run's raw outcome for publication.
-func WireResponse(results []PlacedResult, sum Summary) ResponseWire {
+// lintFor is bounds-safe indexing into the per-subtask lint slice.
+func lintFor(lints [][]string, i int) []string {
+	if i < len(lints) {
+		return lints[i]
+	}
+	return nil
+}
+
+// WireResponse shapes Run's raw outcome for publication. lints is the intake
+// lint per subtask, indexed in SUBMISSION order (the same order results keep);
+// nil, or a shorter slice, simply leaves the remaining results unlinted —
+// absence of a warning must never be manufactured into an error.
+func WireResponse(results []PlacedResult, sum Summary, lints [][]string) ResponseWire {
 	out := ResponseWire{
 		Summary: SummaryWire{
 			Succeeded:           sum.Succeeded,
@@ -116,7 +133,7 @@ func WireResponse(results []PlacedResult, sum Summary) ResponseWire {
 		},
 		Results: make([]ResultWire, 0, len(results)),
 	}
-	for _, pr := range results {
+	for i, pr := range results {
 		rw := ResultWire{
 			Node:               pr.Node,
 			Seat:               pr.Seat,
@@ -131,6 +148,7 @@ func WireResponse(results []PlacedResult, sum Summary) ResponseWire {
 			WallMs:             pr.wallMs,
 			RetriedOn:          pr.RetriedOn,
 			RetryNote:          pr.RetryNote,
+			AcceptanceLint:     lintFor(lints, i),
 			HarnessVersion:     pr.Result.HarnessVersion,
 			HarnessBuildSHA256: pr.Result.HarnessBuildSHA256,
 			SeatConfigSHA256:   pr.Result.SeatConfigSHA256,

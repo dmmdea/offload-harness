@@ -760,6 +760,14 @@ also writes a ledger row
 (`task=agent_delegate` in `local-offload ledger`) and a full contract+result+verdict line
 under the harness base dir at `delegation-log/YYYY-MM-DD.jsonl`.
 
+Acceptance lint (0.88.0, warn-only): every subtask's acceptance is linted at intake and the
+warnings ride the response as `results[].acceptance_lint` — PARROT-PASSABLE (every content
+check also matches the goal text: an echoed question passes as verified and the retry never
+fires), UNGROUNDED (`contains:`/`regex:` matching nothing in the contract's own docs — fails
+right answers), SHAPE-ONLY (`nonempty:`/`min_items:` alone — passes garbage). The run still
+happens; fix the acceptance before reusing the contract (authoring rule: anchor ≥1 check to
+content that appears in the docs but not in the goal; contracts/README.md).
+
 Experiment support (0.79.0–0.81.0): setting `OFFLOAD_DELEGATE_ARM=<label>` tags every
 delegation-log line **and every ledger row** the process records with `arm:<label>`, so an
 experiment's rows separate cleanly from ordinary traffic after the fact. Each served run's

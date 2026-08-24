@@ -384,3 +384,37 @@ func TestAgentDelegateHandlerASubtaskLostToTheStackIsAlwaysLoud(t *testing.T) {
 		t.Fatalf("results = %v, want both subtasks' diagnoses intact behind the error flag", m["results"])
 	}
 }
+
+// TestAgentDelegateHandlerAcceptanceLint: the intake lint's warnings ride the
+// response per subtask, through the FULL handler path — a parrot-passable
+// acceptance (its only content check also matches the goal) is flagged, and a
+// discriminating one on the same call is not. Position must line up with
+// submission order, because that is the only key the caller has.
+func TestAgentDelegateHandlerAcceptanceLint(t *testing.T) {
+	s := delegateTestServer(t, func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "this-box",
+			Seat: "fake-seat", Output: "mentions qube and 412", StopReason: "done"}, nil
+	})
+	res, err := s.handleAgentDelegate(context.Background(), callReq(
+		`{"subtasks":[`+
+			`{"goal":"does the doc mention qube?","context":[{"name":"d.md","text":"qube is the workstation"}],"acceptance":["contains:qube"]},`+
+			`{"goal":"how many pallets?","context":[{"name":"d.md","text":"Rotterdam holds 412 pallets"}],"acceptance":["contains:412"]}`+
+			`],"route":"local"}`))
+	if err != nil {
+		t.Fatalf("handleAgentDelegate: %v", err)
+	}
+	m := decodeResult(t, res)
+	results, _ := m["results"].([]any)
+	if len(results) != 2 {
+		t.Fatalf("results = %v", m["results"])
+	}
+	r0, _ := results[0].(map[string]any)
+	lint0, _ := r0["acceptance_lint"].([]any)
+	if len(lint0) != 1 || !strings.Contains(lint0[0].(string), "PARROT-PASSABLE") {
+		t.Errorf("subtask 0 (echoable contains:qube) lint = %v, want one PARROT-PASSABLE warning", r0["acceptance_lint"])
+	}
+	r1, _ := results[1].(map[string]any)
+	if _, present := r1["acceptance_lint"]; present {
+		t.Errorf("subtask 1 (grounded, non-echoable) carries a lint: %v", r1["acceptance_lint"])
+	}
+}

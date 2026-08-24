@@ -431,6 +431,13 @@ func ParseAcceptanceCheck(s string) (AcceptanceCheck, error) {
 	return c, nil
 }
 
+// Pattern returns the compiled regex for an AccRegex check (nil for every
+// other kind, and for a zero AcceptanceCheck). Exposed so consumers that
+// analyze checks — the intake lint — reuse the parse-time compilation instead
+// of recompiling, which would re-introduce a can-never-fail error branch
+// whose correctness silently depends on staying dead.
+func (c AcceptanceCheck) Pattern() *regexp.Regexp { return c.re }
+
 // Eval runs the check against a result. reason is empty exactly when pass is
 // true; on failure it names the check and what was observed, because these
 // reasons surface verbatim in the delegator's merge decision and the
