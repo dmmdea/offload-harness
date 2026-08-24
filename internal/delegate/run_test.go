@@ -519,7 +519,7 @@ func TestRunPollDeadNodeIsAFailureNotAFabricatedDefer(t *testing.T) {
 		t.Errorf("err = %q, want it to say the node never answered", r.Err)
 	}
 	// The PUBLISHED shape is what an operator and the MCP caller read.
-	rw := WireResponse(results, sum).Results[0]
+	rw := WireResponse(results, sum, nil).Results[0]
 	if rw.Deferred || !rw.Failed {
 		t.Errorf("published result = deferred:%v failed:%v, want a loud failure", rw.Deferred, rw.Failed)
 	}
@@ -804,7 +804,7 @@ func TestRunInfrastructureDeferCountsSeparately(t *testing.T) {
 	if sum != (Summary{Deferred: 1, Infrastructure: 1, LostToStack: 1}) {
 		t.Fatalf("summary = %+v, want one defer ALSO counted as infrastructure", sum)
 	}
-	resp := WireResponse(results, sum)
+	resp := WireResponse(results, sum, nil)
 	if resp.Summary.Infrastructure != 1 {
 		t.Errorf("published summary.infrastructure = %d, want 1", resp.Summary.Infrastructure)
 	}
@@ -1157,7 +1157,7 @@ func TestRunTelemetryFailureIsLoudOnceAndNeverFailsTheRun(t *testing.T) {
 	// …and the MCP caller — the lane's primary consumer — never saw it at all:
 	// SummaryWire had no field for it, so a delegation that recorded nothing
 	// published byte-identically to one that recorded everything.
-	published := WireResponse(results, sum).Summary
+	published := WireResponse(results, sum, nil).Summary
 	if published.CorpusRowsLost != 2 || published.CorpusRowsAttempted != 2 {
 		t.Fatalf("published corpus rows = %d lost of %d attempted, want 2 of 2", published.CorpusRowsLost, published.CorpusRowsAttempted)
 	}
@@ -1678,7 +1678,7 @@ func TestRunTotalLedgerLossIsPublished(t *testing.T) {
 	if sum.Succeeded != 2 {
 		t.Fatalf("summary = %+v, want both subtasks to succeed — telemetry never fails the work", sum)
 	}
-	blob, merr := json.Marshal(WireResponse(results, sum))
+	blob, merr := json.Marshal(WireResponse(results, sum, nil))
 	if merr != nil {
 		t.Fatal(merr)
 	}

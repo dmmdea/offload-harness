@@ -278,14 +278,14 @@ func TestRunRemotesDefaultFromConfig(t *testing.T) {
 // TestWireCarriesRetryFields: the published JSON names the retry.
 func TestWireCarriesRetryFields(t *testing.T) {
 	pr := PlacedResult{Node: "node-a", RetriedOn: "node-a", RetryNote: "first attempt on local failed_verification; this result is the retry", retryRecovered: true}
-	w := WireResponse([]PlacedResult{pr}, Summary{Succeeded: 1, Retried: 1, RetryRecovered: 1})
+	w := WireResponse([]PlacedResult{pr}, Summary{Succeeded: 1, Retried: 1, RetryRecovered: 1}, nil)
 	b, _ := json.Marshal(w)
 	for _, want := range []string{`"retried":1`, `"retry_recovered":1`, `"retried_on":"node-a"`, `"retry_note":"first attempt on local`} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("wire lacks %s: %s", want, b)
 		}
 	}
-	clean, _ := json.Marshal(WireResponse([]PlacedResult{{Node: "x"}}, Summary{Succeeded: 1}))
+	clean, _ := json.Marshal(WireResponse([]PlacedResult{{Node: "x"}}, Summary{Succeeded: 1}, nil))
 	if strings.Contains(string(clean), "retr") {
 		t.Errorf("a run without retries must publish no retry fields: %s", clean)
 	}
