@@ -83,7 +83,7 @@ Exit codes:
 				})
 			}
 			if cliutil.IsVerifyEnv() && !cliutil.IsVerifyLiveHTTPEnv() {
-				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /history was issued")
+				return noopOK(writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /history was issued"))
 			}
 			c, err := flags.newClient()
 			if err != nil {
@@ -162,7 +162,7 @@ Exit codes:
 				})
 			}
 			if cliutil.IsVerifyEnv() && !cliutil.IsVerifyLiveHTTPEnv() {
-				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /history was issued")
+				return noopOK(writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /history was issued"))
 			}
 			c, err := flags.newClient()
 			if err != nil {

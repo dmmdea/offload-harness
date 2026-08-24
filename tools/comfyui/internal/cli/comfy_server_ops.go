@@ -132,7 +132,7 @@ Exit codes:
 			// Verify mode short-circuits before the POST so a verification run
 			// never evicts a real model from a real card.
 			if cliutil.IsVerifyEnv() && !cliutil.IsVerifyLiveHTTPEnv() {
-				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /free was issued")
+				return noopOK(writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /free was issued"))
 			}
 
 			c, err := flags.newClient()

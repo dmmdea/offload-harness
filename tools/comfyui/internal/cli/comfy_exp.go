@@ -805,7 +805,7 @@ on the exact graph hash. Resubmitting instead of attaching once burned ~30 GPU-m
 				return cmd.Help()
 			}
 			if expVerifyShortCircuit() {
-				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: refusing to queue real renders")
+				return noopOK(writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: refusing to queue real renders"))
 			}
 			name := strings.TrimSpace(args[0])
 

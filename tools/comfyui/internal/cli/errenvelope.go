@@ -327,3 +327,16 @@ func finalizeErrorOutput(flags *rootFlags, err error) {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 	}
 }
+
+// noopOK adapts the generated writeNoop contract (4.31.x): writeNoop returns a
+// typed *cliError wrapping noopWriteError even on success, and callers are
+// expected to unwrap it with successfulNoop. Hand-authored verify-mode
+// short-circuits return the noop document as a SUCCESS (exit 0); anything else
+// (a failed write) stays an error. Kept in this hand file so a regen cannot
+// silently drop it again (carried as patch 0005).
+func noopOK(err error) error {
+	if successfulNoop(err) {
+		return nil
+	}
+	return err
+}

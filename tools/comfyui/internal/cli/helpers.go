@@ -601,6 +601,21 @@ func classifyAPIErrorOnly(err error) error {
 	case strings.Contains(msg, "HTTP 429"):
 		return rateLimitErr(err)
 	default:
+		// A failure with no HTTP status that names a dead socket is not an
+		// API error -- the API never answered. Give it ExitServerUnreachable
+		// so the process exit code agrees with the error envelope's
+		// server_unreachable classification, and so an unattended caller can
+		// tell "ComfyUI is down" (wait and retry, or start it) from "ComfyUI
+		// rejected this" (fix the request) without parsing prose.
+		//
+		// DELIBERATE MIGRATION (carried patch 0003): these previously exited 5.
+		// Documented in the README/SKILL exit tables and in exitcodes.go.
+		if httpStatusFromError(err) == 0 && isNetworkFailure(err) {
+			return unreachableErr(err)
+		}
+		if status := httpStatusFromError(err); status >= 500 {
+			return upstream5xxErr(err)
+		}
 		return apiErr(err)
 	}
 }

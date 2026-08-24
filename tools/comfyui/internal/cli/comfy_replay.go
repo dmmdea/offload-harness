@@ -217,7 +217,7 @@ conditions is exactly how a false "+49% regression" gets published.`,
 				return usageErr(fmt.Errorf("replay takes exactly one prompt-id or run name (got %d)", len(args)))
 			}
 			if expVerifyShortCircuit() {
-				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: refusing to queue a real render")
+				return noopOK(writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: refusing to queue a real render"))
 			}
 			ref := strings.TrimSpace(args[0])
 

@@ -246,7 +246,7 @@ Exit codes:
 			// Verify mode short-circuits before any local write, so a verification run
 			// never leaves a phantom run row holding the lease.
 			if cliutil.IsVerifyEnv() && !cliutil.IsVerifyLiveHTTPEnv() {
-				return writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /prompt was issued and no run was recorded")
+				return noopOK(writeNoop(cmd.OutOrStdout(), flags, "verify_short_circuit", "verify mode: no POST /prompt was issued and no run was recorded"))
 			}
 
 			ctx := cmd.Context()

@@ -50,45 +50,32 @@ phase-5 acceptance `status: pass`, 161/161 matrix tests passed (167 skipped as
 unverifiable offline); scorecard 91/A with `live_api_verification` the one unverified
 dimension.
 
-**Known press-side regressions, disclosed and deliberately not hand-patched.** Fresh-context
-review of this diff found two, both confirmed by reading the code and by A/B-running the
-4.30.2 and 4.31.1 binaries.
+**Two press-side regressions found by fresh-context review, fixed at the source and carried
+as patch 0005** (`.printing-press-patches/0005-verify-noop-contract-and-classifier-recarry.patch`),
+both confirmed by reading the code and by A/B-running the 4.30.2 and 4.31.1 binaries:
 
 *(1) Carried patch 0003 was only partly carried.* `classifyAPIErrorOnly`'s default branch
-(`internal/cli/helpers.go`) no longer maps a dial failure to `unreachableErr` (exit 4) or
-an HTTP 5xx to `upstream5xxErr` (exit 26) — every generated read command that funnels
-through it now exits 5 for those, and the regenerated README exit table dropped code 4 to
-match. The carried `.printing-press-patches/0003-structured-error-envelope.patch` still
-specifies that branch, comment `DELIBERATE MIGRATION` included, so the tree contradicts
-its own patch. The JSON envelope's `code` field is still derived independently and still
-says `server_unreachable`; only the numeric exit code regressed. The harness's render
-runner is unaffected: its `submit` path already exited 5 on an unreachable server in
-4.30.2 (the run is recorded before the POST, and that branch is `apiErr`), proven by A/B
-against isolated `--home` stores (both: exit 5, `code: server_unreachable`), `attach`/`wait`
-outcomes are identical (3 / 20), `exitcodes.go` is byte-unchanged, and
-`render/comfy-submit.mjs` treats 4/5/26 identically by design (`localOnlyFailure` is
-`{1, 2, 10}`). Standalone agent use of the CLI loses the 4-vs-5 discrimination by exit
-code.
+(`internal/cli/helpers.go`) had lost the `DELIBERATE MIGRATION` mapping of a dial failure to
+`unreachableErr` (exit 4) and an HTTP 5xx to `upstream5xxErr` (exit 26). Re-carried
+verbatim. (The harness render runner was never affected — `render/comfy-submit.mjs` treats
+4/5/26 identically and its `submit` path exited 5 in both versions — but standalone agent
+use regains the 4-vs-5 discrimination by exit code.)
 
-*(2)* The reprint's `writeNoop` now returns a `*cliError{code:5}` unconditionally where
-4.30.2 returned `nil`. Only `classifyAPIError`'s idempotent-409 branch unwraps it
-(`successfulNoop`); the seven direct `return writeNoop(...)` sites — `submit`, `replay`,
-`exp`, `history` ×2, `server` free, `upload mask` — do not, so under
-`PRINTING_PRESS_VERIFY=1` they print the noop document *and* an `api_error` envelope and
-exit 5 instead of 0. This is what turned the library's own mock-verify from 62/62 PASS
-(4.30.2) to 66/67 WARN (4.31.1). Every one of those sites is behind
-`cliutil.IsVerifyEnv()`; the harness never sets `PRINTING_PRESS_VERIFY` (the variable
-appears outside `tools/` only in the docs that say so), so no harness path reaches it.
-Both are press-generated code, so the fix belongs in the Printing Press / the library as
-carried patches (re-carry 0003's classifier hunk; make `writeNoop` return `nil` on a
-successful write), not as hand-edits here that the next reprint would clobber. Also
-observed, not fixed: `store.ensureSQLiteJournalPrivate` is defined with a doc comment
-promising a private journal for the whole transaction but has no caller (`lockForWrite`
-only re-hardens files that already exist); the generated `Makefile` `test` target dropped `-count=1 -race
--shuffle=on` (CI does not use it — the `tools-comfyui` job calls `go test` directly with
-`-count=1`), `Config.StoreScopeCredential` and `defaultDBPathInDir`'s `unscoped` local
-are generator scaffolds with no callers, and `.printing-press.json` lost its trailing
-newline.
+*(2)* The press 4.31.x `writeNoop` returns a typed `*cliError` sentinel (callers unwrap
+with `successfulNoop`); the seven hand-authored verify short-circuits (`submit`, `replay`,
+`exp`, `history` ×2, `server free`, `upload mask`) returned it raw and so printed the noop
+document *and* an `api_error` envelope, exiting 5 under `PRINTING_PRESS_VERIFY=1`. A
+`noopOK()` adapter in the hand-authored `errenvelope.go` wraps all seven sites. Same patch:
+`upload mask` now short-circuits `--dry-run` before its `--original` requirement (the press
+verifier's dry-run probe) and declares `pp:happy-args`. Result at the library: press
+`verify` 66/67 WARN → **67/67 PASS**; live dogfood matrix **163/163** (re-run after the
+fixes; acceptance marker re-embedded).
+
+Observed and left as-is (generator scaffolding, not behaviour): `store.ensureSQLiteJournalPrivate`
+has no caller (new in 4.31.1, not a lost patch); the generated `Makefile` `test` target
+dropped `-count=1 -race -shuffle=on` (CI calls `go test -count=1` directly);
+`Config.StoreScopeCredential` / `defaultDBPathInDir`'s `unscoped` are unused scaffolds;
+`.printing-press.json` has no trailing newline.
 
 Harness version bumped for the changelog gate only — no harness code path changed.
 
