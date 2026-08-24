@@ -26,7 +26,7 @@
   "accelerators": {
     "hailo-8l": {
       "kind": "npu",
-      "owns": ["face_detect", "face_embed", "object_detect", "person_embed", "depth", "enhance_low_light", "image_embed"],
+      "owns": ["face_detect", "face_embed", "object_detect", "person_embed", "depth", "enhance_low_light", "image_embed", "pose", "segment", "text_embed", "zero_shot"],
       "detect": "hailortcli scan lists a device AND hailortcli fw-control identify reports 'Device Architecture: HAILO8L'",
       "config_seed": {
         "accelerators": ["hailo-8l"],
