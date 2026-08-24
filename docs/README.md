@@ -29,6 +29,9 @@ where the code lives.
   templates, the install runbook
 - [systems/printed-clis.md](systems/printed-clis.md) — the `tools/` printed CLIs: separate Go
   modules, the regenerate/re-vendor cycle, the layout contract
+- [systems/opencode-integration.md](systems/opencode-integration.md) — full harness support inside
+  opencode: MCP registration, rules parity, the `opencode-local-offload` plugin (plan-time
+  protocol, read-only task reroute, nudges, instrument)
 
 ## Hardware tiers — what YOUR machine gets
 

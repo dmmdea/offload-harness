@@ -8,76 +8,17 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [0.90.1] - 2026-08-24
 
-### Changed — `tools/comfyui`: re-vendored from the Printing Press 4.31.1 reprint
+### Added — `docs/systems/opencode-integration.md` (doc-only)
 
-Clean tree replacement of the vendored `comfyui-pp-cli` (press 4.30.2, run
-`20260812-123958` → press 4.31.1, run `20260823-231507-1cd84666`), copied from the
-library tree that passed the press's own shipcheck. The four post-publish patches in
-`.printing-press-patches/` (cross-platform host paths, MCP code orchestration, the
-structured error envelope, the code-orch gate + binary budget) are carried into the
-reprint rather than re-applied by hand; their `.patch` files only refresh context lines.
-Same module name (`comfyui-pp-cli`), same standalone-module contract: the root
-`./...` still never sees it, and no harness package imports it.
-
-What the reprint brings, as visible in the diff (71 files, +2042/−826):
-
-- **MCP intents** (`internal/mcp/intents.go`, new) — composed higher-level tools
-  registered beside the endpoint mirror; the hand-maintained `mcp-descriptions.json`
-  is retired with it, so `mcp-sync` no longer has a locked description file to fight.
-- **Typed shell-out** — `cobratree.RunCLICommand` returns a `CLICommandResult`
-  (stdout, stderr hint lines, exit code) instead of a bare string, and MCP tool results
-  are built from it, so a companion-CLI failure surfaces its stderr instead of an empty
-  success.
-- **`--agent` no longer implies `--yes`** — a mutating command run with `--agent`
-  needs the explicit confirmation flag. Harness-detection helpers also land
-  (`cliutil.CurrentHarness`/`IsAnyHarness`, `writeHarnessRefusal`) but nothing wires
-  them into a command yet — they are latent in this reprint, not a behaviour change.
-  The harness's own render path (`render/comfy-submit.mjs`) shells out as
-  `submit - --json --skip-lint [--force]`, then `attach` / `wait`, never `--agent`,
-  so it is unaffected by either.
-- **Honest pagination and error bodies** — repeated-page and stuck-cursor guards on
-  `--all`/sync (`paginationEndUnprovable`, `syncPaginationPageIsStuck`), a named
-  `liveAllUnsupportedError` instead of a silent partial read, and HTML error pages
-  collapsed to their title before they reach the envelope.
-
-Verified in the worktree with the exact `tools-comfyui` CI contract: `go build ./...`,
-`go vet ./...`, `go test ./... -count=1` — 17 packages ok, 0 failing (Go 1.26.6). Semgrep
-`p/default` reports 17 findings on the new tree and the identical 17 on the unmodified
-4.30.2 tree (same files, rules, and sites; only line offsets moved) — zero introduced,
-all in press-generated SQLite identifier interpolation / companion-CLI exec sites that
-the press's gosec pass already annotates. Library-side evidence for the reprint itself:
-phase-5 acceptance `status: pass`, 161/161 matrix tests passed (167 skipped as
-unverifiable offline); scorecard 91/A with `live_api_verification` the one unverified
-dimension.
-
-**Two press-side regressions found by fresh-context review, fixed at the source and carried
-as patch 0005** (`.printing-press-patches/0005-verify-noop-contract-and-classifier-recarry.patch`),
-both confirmed by reading the code and by A/B-running the 4.30.2 and 4.31.1 binaries:
-
-*(1) Carried patch 0003 was only partly carried.* `classifyAPIErrorOnly`'s default branch
-(`internal/cli/helpers.go`) had lost the `DELIBERATE MIGRATION` mapping of a dial failure to
-`unreachableErr` (exit 4) and an HTTP 5xx to `upstream5xxErr` (exit 26). Re-carried
-verbatim. (The harness render runner was never affected — `render/comfy-submit.mjs` treats
-4/5/26 identically and its `submit` path exited 5 in both versions — but standalone agent
-use regains the 4-vs-5 discrimination by exit code.)
-
-*(2)* The press 4.31.x `writeNoop` returns a typed `*cliError` sentinel (callers unwrap
-with `successfulNoop`); the seven hand-authored verify short-circuits (`submit`, `replay`,
-`exp`, `history` ×2, `server free`, `upload mask`) returned it raw and so printed the noop
-document *and* an `api_error` envelope, exiting 5 under `PRINTING_PRESS_VERIFY=1`. A
-`noopOK()` adapter in the hand-authored `errenvelope.go` wraps all seven sites. Same patch:
-`upload mask` now short-circuits `--dry-run` before its `--original` requirement (the press
-verifier's dry-run probe) and declares `pp:happy-args`. Result at the library: press
-`verify` 66/67 WARN → **67/67 PASS**; live dogfood matrix **163/163** (re-run after the
-fixes; acceptance marker re-embedded).
-
-Observed and left as-is (generator scaffolding, not behaviour): `store.ensureSQLiteJournalPrivate`
-has no caller (new in 4.31.1, not a lost patch); the generated `Makefile` `test` target
-dropped `-count=1 -race -shuffle=on` (CI calls `go test -count=1` directly);
-`Config.StoreScopeCredential` / `defaultDBPathInDir`'s `unscoped` are unused scaffolds;
-`.printing-press.json` has no trailing newline.
-
-Harness version bumped for the changelog gate only — no harness code path changed.
+The harness now has full support inside opencode, documented here: the same MCP launch
+registered as `mcp.harness` (24 tools as `harness_<tool>`), house-rules parity via
+`instructions: ~/.claude/rules/*.md`, and the [`opencode-local-offload`](https://github.com/dmmdea/opencode-local-offload)
+plugin — plan-time injection of the three-lane dispatch protocol, automatic rerouting of
+read-only subagent legs to a free local `offload` subagent, H14-parity nudges, an
+`agent_delegate` placement digest, and the cross-harness dispatch instrument. Every surface
+was verified live on 2026-08-24 with local primaries (the doc records each proof). One
+measured caveat recorded: opencode's `mcp.*.timeout` bounds tool CALLS as well as tool
+listing (agent_run died at 20 s, completed at 600 s) despite the SDK type comment.
 
 ## [0.90.0] - 2026-08-24
 
