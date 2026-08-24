@@ -43,9 +43,15 @@ that already attaches `keepset audit`), so root.go is untouched:
 | Command | Registered at | Wave A change |
 |---|---|---|
 | `sync` | root.go:376 `rootCmd.AddCommand(newSyncCmd(flags))` | added `--watch/--interval/--seal/--event-window/--no-mirror` and the epoch-aware mirror pass |
-| `swaps` | root.go:403 `addNovelCommandIfAbsent(rootCmd, newNovelSwapsCmd(flags))` | TODO scaffold replaced with the real implementation |
+| `swaps` | root.go `addNovelCommandIfAbsent(rootCmd, newNovelSwapsCmd(flags))` | TODO scaffold replaced with the real implementation |
+| `residency` (alias `replay`) | root.go `addNovelCommandIfAbsent(rootCmd, newNovelResidencyCmd(flags))` | wave D: new — idle-TTL what-if over mirror gaps (`internal/cli/residency.go` + `analytics_common.go`) |
+| `saturation` | root.go `addNovelCommandIfAbsent(rootCmd, newNovelSaturationCmd(flags))` | wave D: new — per-seat 429/5xx + load pressure (`internal/cli/saturation.go`) |
 | `keepset` / `keepset audit` | root.go:401 | TODO scaffold replaced; `status` added |
 | `models unload` / `models unload-all` | via `newModelsCmd` | generated endpoint mirrors replaced with keep-set- and drain-aware versions |
+
+Wave D added two novel commands and one shared helper file (`internal/cli/analytics_common.go`).
+The `whichIndex` (`internal/cli/which.go`) now holds SEVEN entries (was five): the two new verbs
+were added alongside `keepset audit`, `seat log`, `sync`, `swaps`, `verify`.
 
 ## Files created by wave A
 

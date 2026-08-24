@@ -16,7 +16,9 @@ what the harness actually talks to:
   way to inspect, submit, time, and attribute those renders from the shell.
 - **`tools/llamaswap/`** — every offload task the cascade runs is served by llama-swap;
   `llamaswap-pp-cli` is the way to see what is loaded, what a swap cost, which model a seat is
-  bound to, and what the config's backup history actually says.
+  bound to, and what the config's backup history actually says. As of 0.90.0 it also answers
+  idle-TTL what-ifs (`residency`) and per-seat error/load pressure (`saturation`) from its local
+  mirror — read-only, still not in any serving path.
 
 A printed CLI is **generated code that we adopt, not code we author here.** That distinction drives
 every rule below.
