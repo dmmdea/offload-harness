@@ -196,8 +196,22 @@ foreach ($tier8 in @('ampere-8', 'blackwell-8')) {
   $wantFamily = if ($tier8 -eq 'blackwell-8') { 'z-image-turbo' } else { 'hidream-o1' }
   Assert ($cond.imagegen_family -eq $wantFamily)                            "$tier8 conditional seed binds $wantFamily (operator image-seat decision)"
   Assert ($cond.imagegen_vae -eq 'builtin')                                 "$tier8 conditional seed uses the builtin VAE (O1 is pixel-space)"
-  $mediaKeys = @($cond.PSObject.Properties.Name | Where-Object { $_ -like 'videogen_*' -or $_ -like 'musicgen_*' })
-  Assert ($mediaKeys.Count -eq 0)                                           "$tier8 conditional seed has NO video/music keys AT ALL (8GB decision 2026-07-23)"
+  if ($tier8 -eq 'blackwell-8') {
+    # The 2026-07-23 'no video on 8GB' decision was REVERSED BY THE OPERATOR for
+    # blackwell-8 on 2026-08-23 (editor-box role) and the seats were MEASURED on the
+    # reference box (520s @832x480x81 I2V, peak 7751MiB — results doc section 0-R).
+    Assert ($cond.videogen_family -eq 'wan22')                              'blackwell-8 conditional seed binds wan22 video (operator reversal 2026-08-23, measured)'
+    Assert ($cond.videogen_unet_high -like 'Wan2.2-I2V-A14B-HighNoise*')    'blackwell-8 seeds the measured high-noise unet'
+    Assert ($cond.videogen_unet_low -like 'Wan2.2-I2V-A14B-LowNoise*')      'blackwell-8 seeds the measured low-noise unet'
+    Assert ($cond.gen_edit_unet -like 'qwen-image-edit-2511*')              'blackwell-8 seeds the measured edit unet (2511)'
+    Assert ($cond.gen_edit_preset -eq 'lightning8')                         'blackwell-8 edit preset lightning8 (measured)'
+    Assert ($cond.inpaint_ckpt -like 'RealVisXL*')                          'blackwell-8 seeds the RealVisXL inpaint ckpt'
+    $musicKeys = @($cond.PSObject.Properties.Name | Where-Object { $_ -like 'musicgen_*' })
+    Assert ($musicKeys.Count -eq 0)                                         'blackwell-8 conditional seed still has NO music keys'
+  } else {
+    $mediaKeys = @($cond.PSObject.Properties.Name | Where-Object { $_ -like 'videogen_*' -or $_ -like 'musicgen_*' })
+    Assert ($mediaKeys.Count -eq 0)                                         "$tier8 conditional seed has NO video/music keys (2026-07-23 decision stands on ampere-8 pending its own bake)"
+  }
   # The INTENT here is "low-RAM boxes get no MEDIA binding", and that still holds. What
   # changed is that a base config_seed now exists at all: the 2026-08-19 hygiene pass (H4)
   # seeds agent_profile there, because shipping the agent seat UNSEEDED is the
@@ -292,10 +306,10 @@ Write-Host "== Get-MediaSeatBindings: seats bind vision_model/stt_model on the f
 Assert ([bool](Get-Command Get-MediaSeatBindings -ErrorAction SilentlyContinue)) 'dot-source seam defines Get-MediaSeatBindings'
 $b8 = Get-MediaSeatBindings -ProfileRow $profiles.'blackwell-8'
 Assert ($null -ne $b8)                                                      'blackwell-8 produces seat bindings'
-Assert ($b8.vision_model -eq 'qwen3vl-4b')                                  'blackwell-8 binds vision_model=qwen3vl-4b (the seat name, not the file)'
+Assert ($b8.vision_model -eq 'qwen3.5-9b-vl')                               'blackwell-8 binds vision_model=qwen3.5-9b-vl (measured seat 2026-08-23; the seat name, not the file)'
 Assert ($b8.stt_model -eq 'whisper-stt')                                    'blackwell-8 binds stt_model=whisper-stt'
 $b8m = (Merge-ConfigSeed -ConfigText $tplText -Seed $b8) | ConvertFrom-Json
-Assert ($b8m.vision_model -eq 'qwen3vl-4b' -and $b8m.stt_model -eq 'whisper-stt') 'bindings survive the merge into the shipped config'
+Assert ($b8m.vision_model -eq 'qwen3.5-9b-vl' -and $b8m.stt_model -eq 'whisper-stt') 'bindings survive the merge into the shipped config'
 # Closure: EVERY tier that declares media_seats must bind BOTH keys — a seat the
 # config never routes to is exactly the split-brain mediaseat.Bindings exists to prevent.
 foreach ($t in @($profiles.PSObject.Properties.Name)) {

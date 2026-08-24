@@ -169,11 +169,14 @@ box, set the same keys in its config.json. Model download set (SHA256 from the H
 ComfyUI ≥ v0.21.1 (the HiDream-O1 nodes) and ≥~48GB system RAM for the offload path.
 
 The **≥16GB image-EDIT primitive is Qwen-Image-Edit-2511** (Apache-2.0, commercial-safe — the
-8GB→16GB compositing/edit unlock). This is a *recommended-model designation*, **not** a `config_seed`
-binding: edit workflows (e.g. the creative-marketing-pipelines scene-swap) run through `run-graph`
-with the model set declared in their own node manifest, so the harness never binds an edit checkpoint
-in `config.json`. HiDream-O1 (t2i) and Wan (video) stay the config_seed bindings; RealVisXL is the
-SDXL-class inpaint binding. **FLUX-family stays prohibited** (BFL non-commercial — ADR 0011).
+8GB→16GB compositing/edit unlock). On the ≥16GB tiers this is a *recommended-model designation*,
+**not** a `config_seed` binding: edit workflows (e.g. the creative-marketing-pipelines scene-swap)
+run through `run-graph` with the model set declared in their own node manifest, so the harness binds
+no edit checkpoint in `config.json` there. **Exception (2026-08-23): `blackwell-8` DOES seed
+`gen_edit_unet`/`gen_edit_preset` + `inpaint_ckpt` in its RAM-conditional layer** — measured on its
+reference box, see the 8GB section below. HiDream-O1 (t2i) and Wan (video) stay the config_seed
+bindings; RealVisXL is the SDXL-class inpaint binding. **FLUX-family stays prohibited** (BFL
+non-commercial — ADR 0011).
 
 > **GGUF quant caveat — pin a `_1` quant, never a `_K_` one.** Qwen-Image-Edit-2511 K-quants
 > (`Q5_K_S` and friends, including the common unsloth default) **fail to load** in ComfyUI-GGUF's
@@ -186,10 +189,22 @@ SDXL-class inpaint binding. **FLUX-family stays prohibited** (BFL non-commercial
 8GB tiers: **VERIFIED** — O1 bf16 @2048 runs on an 8GB 3070 with 64GB RAM (5.9 min/render,
 an 8GB 3070 + 64GB RAM box, 2026-07-16). **J4: this binding is now AUTOMATIC on fresh installs** —
 `ampere-8`/`blackwell-8` carry a `config_seed_ram_mid_high` layer that install.ps1 merges only when
-`ram_tier` is mid/high (same RAM gate as the 26B cpu-moe path): the O1 bf16 IMAGE seat, image only
-(no video/music on the 8GB node — decision 2026-07-23). Low-RAM 8GB boxes still get no media
+`ram_tier` is mid/high (same RAM gate as the 26B cpu-moe path). The two tiers DIVERGE by operator
+decision: **`ampere-8` = the O1 bf16 IMAGE seat, image only** (no video/music — decision
+2026-07-23, standing for that tier pending its own bake). **`blackwell-8` (2026-08-23 REVERSAL,
+editor-box role; every seat measured on the OptiPlex reference box)** additionally seeds the wan22
+VIDEO lane (`videogen_unet_high/low` = `Wan2.2-I2V-A14B-{High,Low}Noise-Q8_0.gguf` + the lightx2v
+4-step LoRAs via per-request `fast`), `gen_edit_unet` = `qwen-image-edit-2511-Q5_1.gguf`
+(preset lightning8), `inpaint_ckpt` = `RealVisXL_V5.0_fp16.safetensors`, and
+`videogen_upscale_model`/`upscale_model` = `4x-UltraSharp.pth` — so a fresh blackwell-8 provision
+must stage those weight files too (out-of-band, LAN pre-seed), plus the vision seat's
+`Qwen3.5-9B-UD-Q4_K_XL.gguf` + `mmproj-Qwen3.5-9B-F16.gguf`. Low-RAM 8GB boxes still get no media
 binding; existing configs are never touched (bind manually there); model downloads stay
 out-of-band like the ≥16GB seeds.
+> K-quant caveat update, measured 2026-08-23 on `blackwell-8` at ComfyUI-GGUF HEAD:
+> `qwen-image-edit-2511-Q3_K_S` **loaded and rendered correctly** (quality-equal to Q5_1 on
+> text-fix + removal), so the issue-#247 reshape failure appears FIXED upstream. The seed still
+> pins Q5_1 (the fleet-proven quant); treat K-quants as usable-after-verifying on current nodes.
 
 ### Media seat weights (vision/STT) — out-of-band provisioning gotchas
 

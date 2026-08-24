@@ -6,6 +6,32 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.86.0] - 2026-08-23
+
+### Changed — blackwell-8 media roster: measured seats for the editor box (operator-approved)
+
+The blackwell-8 tier encodes the roster MEASURED on its reference box (OptiPlex 7060,
+2026-08-23 nightshift; full results: the ecosystem benchmarks doc
+`2026-08-23-dell-media-roster-research.md` §0-R):
+
+- **Video (REVERSAL of the 2026-07-23 "IMAGE ONLY on 8GB" decision, by the operator, for
+  this tier's editor role):** `config_seed_ram_mid_high` seeds the wan22 I2V lane —
+  A14B Q8_0 two-stage unets at 832×480×81f (measured 520 s with the lightx2v 4-step LoRAs
+  via the per-request `fast` param, peak 7751 MiB; distilled path stays opt-in), plus
+  `videogen_upscale_model`. Wan2.2-TI2V-5B (720p, 567 s E2E) is validated as the
+  run_graph/manual lane; VAEDecodeTiled is mandatory for video on 8 GB (plain VAEDecode
+  measured non-completing). Low-RAM boxes still seed no video path.
+- **Edit:** `gen_edit_unet` qwen-image-edit-2511 Q5_1 + `gen_edit_preset` lightning8
+  (text-fix exact, removal professional; Q3_K_S measured quality-equal — the 9.2 GB
+  option). Inpaint seeds RealVisXL.
+- **Vision seat → `qwen3.5-9b-vl`:** the tier's agent-seat GGUF + its mmproj at ctx 8192
+  (7660 MiB measured with vision; EN+ES OCR 100 %, VQA 3/3) — supersedes qwen3vl-4b.
+  Seat weights stay out-of-band (SETUP-AGENT LAN pre-seed; warnMissingSeatModels covers
+  absence).
+- Recorded follow-ups (not encoded): PaddleOCR-VL OCR-specialist seat needs a mediaseat
+  schema extension (chat-template-file + temp); LFM2.5-VL / gemma-E4B-mmproj extra
+  registrations; ampere-8 media parity pending its own bake.
+
 ## [0.85.1] - 2026-08-23
 
 ### Fixed — the default delegation profile stripped the loop's senses

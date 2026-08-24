@@ -101,8 +101,11 @@ See [ADR 0002](../architecture/decisions/0002-grammar-reliable-serving-flags.md)
 
 **Config seeds** bind media models per profile. Tiers at 16 GB and above seed HiDream-O1 bf16 and Wan
 2.2 Q8_0. 8 GB tiers gained a **RAM-conditional layer** (J4): `config_seed_ram_mid_high` merges on
-top of the base seed only when `ram_tier` is mid/high — the verified O1 bf16 image seat (image only;
-no 8 GB video seat by decision), so a 64 GB 8 GB box auto-binds what previously needed manual config. The AMD profiles
+top of the base seed only when `ram_tier` is mid/high, so a 64 GB 8 GB box auto-binds what previously
+needed manual config. The two 8 GB tiers diverge by operator decision: `ampere-8`'s overlay stays the
+verified O1 bf16 image seat, image only (2026-07-23 decision, standing there); `blackwell-8`'s
+overlay ALSO seeds the wan22 video lane, `gen_edit_*`, and `inpaint_*` (2026-08-23 reversal, every
+seat measured on its reference box — see `docs/tiers/blackwell-8.md`). The AMD profiles
 seed the **sdcpp engine** (J2): `imagegen_engine:"sdcpp"` with the Apache-2.0 Z-Image-Turbo GGUF
 set, full paths carried via the `__OFFLOAD_HOME__` token that `Merge-ConfigSeed` expands at install
 time. The media leg itself (Step 5b: the pinned sd.cpp win-vulkan zip + roster downloads) defaults
