@@ -12,6 +12,27 @@ func good() []Seat {
 	}
 }
 
+// ocrSeat is the PaddleOCR-VL shape: llama-server VLM seat + shipped chat
+// template + the vendor-required temp 0.
+func ocrSeat() Seat {
+	zero := 0.0
+	return Seat{Kind: KindOCR, Name: "ocr-seat", Model: "p.gguf", MMProj: "pm.gguf",
+		ChatTemplate: "p-template.jinja", Temp: &zero, CtxSize: 4096, Residency: Swappable}
+}
+
+// TestOCRSeatPassesAndBinds: the ocr kind is a first-class seat — valid alongside
+// vision+stt, and it binds ocr_model without touching the other keys.
+func TestOCRSeatPassesAndBinds(t *testing.T) {
+	s := append(good(), ocrSeat())
+	if err := Validate(s, "tier"); err != nil {
+		t.Fatal(err)
+	}
+	b := Bindings(s)
+	if b["ocr_model"] != "ocr-seat" || b["vision_model"] != "vlm-seat" || b["stt_model"] != "whisper-stt" {
+		t.Errorf("bindings = %v", b)
+	}
+}
+
 func TestAValidSeatSetPasses(t *testing.T) {
 	if err := Validate(good(), "tier"); err != nil {
 		t.Fatal(err)
@@ -70,15 +91,32 @@ func TestValidateRejects(t *testing.T) {
 		{"home token in model", func(s []Seat) []Seat { s[0].Model = "__OFFLOAD_HOME__/m.gguf"; return s },
 			"may not carry __OFFLOAD_HOME__"},
 		{"vision with bin", func(s []Seat) []Seat { s[0].Bin = "/x/llama-server"; return s }, "always"},
-		{"stt with mmproj", func(s []Seat) []Seat { s[1].MMProj = "p.gguf"; return s }, "vision-only"},
+		{"stt with mmproj", func(s []Seat) []Seat { s[1].MMProj = "p.gguf"; return s }, "vision/ocr-only"},
 		// Kind-mismatched knobs are refused rather than silently ignored: a tier author
 		// who sets one believes it applies.
-		{"stt with image_max_tokens", func(s []Seat) []Seat { s[1].ImageMaxTokens = 512; return s }, "vision-only"},
-		{"stt with no_context_shift", func(s []Seat) []Seat { s[1].NoContextShift = true; return s }, "vision-only"},
-		{"stt with no_mmproj_offload", func(s []Seat) []Seat { s[1].NoMmprojOffload = true; return s }, "vision-only"},
+		{"stt with image_max_tokens", func(s []Seat) []Seat { s[1].ImageMaxTokens = 512; return s }, "vision/ocr-only"},
+		{"stt with no_context_shift", func(s []Seat) []Seat { s[1].NoContextShift = true; return s }, "vision/ocr-only"},
+		{"stt with no_mmproj_offload", func(s []Seat) []Seat { s[1].NoMmprojOffload = true; return s }, "vision/ocr-only"},
 		{"vision with no_flash_attn", func(s []Seat) []Seat { s[0].NoFlashAttn = true; return s }, "whisper.cpp flag"},
 		{"two vision seats", func(s []Seat) []Seat {
 			s[1] = Seat{Kind: KindVision, Name: "other", Model: "m", MMProj: "p", CtxSize: 1, Residency: Resident}
+			return s
+		}, "at most one"},
+		// OCR-kind refusals mirror vision's (same llama-server seat class) plus its own knobs.
+		{"ocr without mmproj", func(s []Seat) []Seat { s[0] = ocrSeat(); s[0].MMProj = ""; return s }, "needs an mmproj"},
+		{"ocr without ctx", func(s []Seat) []Seat { s[0] = ocrSeat(); s[0].CtxSize = 0; return s }, "needs its own ctx_size"},
+		{"ocr with bin", func(s []Seat) []Seat { s[0] = ocrSeat(); s[0].Bin = "/x/llama-server"; return s }, "always"},
+		{"stt with chat_template", func(s []Seat) []Seat { s[1].ChatTemplate = "t.jinja"; return s }, "vision/ocr only"},
+		{"stt with temp", func(s []Seat) []Seat { z := 0.0; s[1].Temp = &z; return s }, "vision/ocr only"},
+		{"home token in chat_template", func(s []Seat) []Seat {
+			s[0] = ocrSeat()
+			s[0].ChatTemplate = "__OFFLOAD_HOME__/t.jinja"
+			return s
+		}, "may not carry __OFFLOAD_HOME__"},
+		{"temp out of range", func(s []Seat) []Seat { s[0] = ocrSeat(); v := 3.0; s[0].Temp = &v; return s }, "outside [0, 2]"},
+		{"two ocr seats", func(s []Seat) []Seat {
+			s[0] = ocrSeat()
+			s[1] = Seat{Kind: KindOCR, Name: "other-ocr", Model: "m", MMProj: "p", CtxSize: 1, Residency: Swappable}
 			return s
 		}, "at most one"},
 	} {

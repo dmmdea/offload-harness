@@ -112,9 +112,14 @@ func TestReportMatchesAliasOnlySeats(t *testing.T) {
 // TestModelRoutesAreOneTable: doctor's gate and offload_status's roster used to be
 // two hardcoded lists that had drifted 8 keys to 10. They now read one table, so
 // this asserts the table itself: every route carries both labels, the diffed set
-// is exactly the bindings that gate a node, and ocr/embed are reported but not
-// gated (both resolve to a non-empty fallback, so gating them would fail nodes
-// whose serving tier declares no such seat).
+// is exactly the bindings that gate a node, and embed is reported but not gated
+// (it resolves to a non-empty fallback, so gating it would fail nodes with no
+// embed seat). ocr_model JOINED the gated set in 0.88.0: the `ocr` media-seat
+// kind makes it tier-seeded like vision_model/stt_model, the gate reads the
+// CONFIGURED value (not the vision fallback), and every consumer skips an empty
+// alias — so a tier with no ocr seat is untouched while a declared one is
+// closure-checked (the 0.87.0 "reported, not gated" fear assumed the fallback
+// was what gated).
 func TestModelRoutesAreOneTable(t *testing.T) {
 	routes := config.Default().ModelRoutes()
 	if len(routes) != 10 {
@@ -135,12 +140,12 @@ func TestModelRoutesAreOneTable(t *testing.T) {
 		}
 	}
 	want := []string{"model", "agent_model", "triage_model", "escalation_model",
-		"reasoning_model", "vision_model", "stt_model", "stt_model_hq"}
+		"reasoning_model", "vision_model", "ocr_model", "stt_model", "stt_model_hq"}
 	if strings.Join(diffed, ",") != strings.Join(want, ",") {
 		t.Errorf("diffed set = %v, want %v", diffed, want)
 	}
 	for _, r := range routes {
-		if r.Key == "ocr_model" || r.Key == "embed_model" {
+		if r.Key == "embed_model" {
 			if r.Diffed {
 				t.Errorf("%s must be reported, not gated", r.Key)
 			}

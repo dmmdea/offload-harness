@@ -144,6 +144,42 @@ func TestVisionSeatCarriesItsVramBound(t *testing.T) {
 	}
 }
 
+// TestOCRSeatRendersItsTemplateAndTemp: the ocr kind's whole reason to exist —
+// PaddleOCR-VL without its shipped chat template silently degrades transcription,
+// and the vendor requires temp 0 (a value a non-pointer field would drop as the
+// zero value). Both must render, resolved into the models dir, and neither may
+// leak onto a seat that did not declare them.
+func TestOCRSeatRendersItsTemplateAndTemp(t *testing.T) {
+	zero := 0.0
+	s := mediaseat.Seat{Kind: mediaseat.KindOCR, Name: "paddle-ocr", Model: "p.gguf",
+		MMProj: "pm.gguf", ChatTemplate: "p-template.jinja", Temp: &zero,
+		CtxSize: 4096, Residency: mediaseat.Swappable}
+	got, err := Render(linuxCUDA(t), seatParams(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "--chat-template-file /srv/offload/models/p-template.jinja") {
+		t.Errorf("ocr seat lost its chat template (transcription silently degrades without it):\n%s", got)
+	}
+	if !strings.Contains(got, "--temp 0") {
+		t.Errorf("ocr seat lost its temp 0 pin (the vendor-required value — the pointer exists so 0 survives):\n%s", got)
+	}
+	// A plain vision seat must render neither flag. Scoped to the SEAT'S OWN block:
+	// the template's prose comments legitimately mention --temp (the 4B agent seat's
+	// sampling note), so a whole-document grep false-positives on commentary.
+	plain, err := Render(linuxCUDA(t), seatParams(visionSeat()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := seatBlockOf(plain, visionSeat().Name)
+	if strings.TrimSpace(block) == "" {
+		t.Fatalf("no rendered block for %q — the scoping helper found nothing", visionSeat().Name)
+	}
+	if strings.Contains(block, "--chat-template-file") || strings.Contains(block, "--temp") {
+		t.Error("chat_template/temp leaked onto a seat that did not declare them")
+	}
+}
+
 // TestVisionSeatKeepsMmprojOnCPUWhenAsked: on a Vulkan backend the mmproj is degraded
 // (llama.cpp #20081), so a Vulkan vision tier decodes the LLM on the GPU but keeps the
 // CLIP encoder on CPU. The flag must render, and only when asked.

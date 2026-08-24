@@ -6,6 +6,26 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.88.0] - 2026-08-23
+
+### Added — `ocr` media-seat kind: the OCR specialist becomes declarable
+
+`media_seats` gains kind `"ocr"` — a llama-server VLM seat bound to `ocr_model`
+(so it coexists with the tier's general vision seat), carrying the two knobs the
+PaddleOCR-VL class needs that plain vision does not: `chat_template` (a models-dir
+template file rendered as `--chat-template-file`; the model transcribes DEGRADED
+without it) and `temp` (a JSON-pointer field so the vendor-required `0` survives
+omitempty). Validation mirrors vision (mmproj + own ctx required, llama-server
+only, one per tier) plus temp-range and template-path checks; stt seats refuse
+both knobs by name. Rendered flags are declared-only — every existing vision seat
+renders byte-identically (pinned by test, mutation-verified red).
+
+blackwell-8 declares the first one: **paddleocr-vl** (PaddleOCR-VL-1.6, measured
+on the reference box 2026-08-23: ~2 s crop/doc answers at 4 GB loaded, ES factura
+exact) — closing the recorded follow-up from 0.87.0; the box's hand-wired live
+entry and the seed now agree. Fresh installs bind `ocr_model` automatically
+(`Get-MediaSeatBindings` mirror extended).
+
 ## [0.87.0] - 2026-08-23
 
 ### Changed — blackwell-8 media roster: measured seats for the editor box (operator-approved)

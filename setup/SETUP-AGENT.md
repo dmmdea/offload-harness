@@ -206,11 +206,16 @@ out-of-band like the ≥16GB seeds.
 > text-fix + removal), so the issue-#247 reshape failure appears FIXED upstream. The seed still
 > pins Q5_1 (the fleet-proven quant); treat K-quants as usable-after-verifying on current nodes.
 
-### Media seat weights (vision/STT) — out-of-band provisioning gotchas
+### Media seat weights (vision/STT/OCR) — out-of-band provisioning gotchas
 
-The tier's `media_seats` render into llama-swap.yaml and bind `vision_model`/`stt_model` in a
-fresh config automatically (0.83.0), but the WEIGHTS stay operator-provisioned by design; the
-renderer WARNs on missing seat files. Two field-measured traps (OptiPlex 7060, 2026-08-22):
+The tier's `media_seats` render into llama-swap.yaml and bind `vision_model`/`stt_model`/
+`ocr_model` in a fresh config automatically (0.83.0; `ocr` kind since 0.88.0), but the WEIGHTS
+stay operator-provisioned by design; the renderer WARNs on missing seat files. An `ocr` seat
+additionally needs its **chat template file** in the models dir (blackwell-8's paddleocr-vl:
+`PaddleOCR-VL-1.6.gguf` + `mmproj-PaddleOCR-VL-1.6.gguf` + `PaddleOCR-VL-1.6-chat_template.jinja`,
+all from `PaddlePaddle/PaddleOCR-VL-1.6-GGUF` — the model transcribes DEGRADED without the
+template, and it is crops/region-driven by design: full scattered pages degrade without the
+vendor's layout stage). Field-measured traps (OptiPlex 7060, 2026-08-22):
 
 - **Qwen3VL-4B**: the HF repo is the HYPHENATED `unsloth/Qwen3-VL-4B-Instruct-GGUF` — the
   unhyphenated `unsloth/Qwen3VL-4B-Instruct-GGUF` name returns 401, which reads like an auth

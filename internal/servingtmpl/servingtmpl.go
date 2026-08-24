@@ -458,7 +458,7 @@ func matrixJoin(role string) string {
 // tier may declare at most one seat per kind, which makes the id both stable and
 // unique by construction.
 func seatVarID(s mediaseat.Seat, taken map[string]bool) (string, error) {
-	base := map[string]string{mediaseat.KindVision: "vis", mediaseat.KindSTT: "stt"}[s.Kind]
+	base := map[string]string{mediaseat.KindVision: "vis", mediaseat.KindSTT: "stt", mediaseat.KindOCR: "ocr"}[s.Kind]
 	if base == "" {
 		return "", fmt.Errorf("seat %q: no matrix var id for kind %q", s.Name, s.Kind)
 	}
@@ -553,7 +553,7 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 		fmt.Fprintf(&b, "    aliases: [%s]\n", strings.Join(s.Aliases, ", "))
 	}
 	switch s.Kind {
-	case mediaseat.KindVision:
+	case mediaseat.KindVision, mediaseat.KindOCR:
 		var envEntries []string
 		if env != "" {
 			envEntries = append(envEntries, fmt.Sprintf("%q", env))
@@ -579,6 +579,15 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 		// llama.cpp #20081). The LLM still decodes on the GPU (-ngl 99).
 		if s.NoMmprojOffload {
 			bound += " --no-mmproj-offload"
+		}
+		// OCR-class seats (PaddleOCR-VL) ship their own chat template and a vendor-
+		// required temperature pin; both render only when declared, so every existing
+		// vision seat renders byte-identically.
+		if s.ChatTemplate != "" {
+			bound += " --chat-template-file __MODELS__/" + s.ChatTemplate
+		}
+		if s.Temp != nil {
+			bound += fmt.Sprintf(" --temp %g", *s.Temp)
 		}
 		// On the cpu backend the template's own chat models carry neither -ngl nor
 		// --flash-attn; a GPU-less build would only ignore them, so the vision seat
