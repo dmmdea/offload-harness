@@ -125,7 +125,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_transcribe",
 		Description: "Transcribe a local AUDIO or VIDEO file to text on a free local whisper model (STT). audio is a LOCAL file path (mp3/m4a/wav/mp4/...); language is optional ('en','es', or 'auto' — default auto-detect); set hq=true for the higher-quality (slower) model on hard/noisy clips. Returns {gist (preview), language, duration_sec, num_segments, segments[{id,start,end,text}] (timestamped spans — pull only the ones you need), srt_path, text_path, json_path}. The full transcript + SRT are written to disk; read the spans/paths you need. If it can't transcribe confidently it returns deferred:true and you should handle the audio yourself.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"audio":{"type":"string","description":"local audio or video file path"},"language":{"type":"string","description":"en, es, or auto (default auto-detect); ignored by an openai-protocol hq tier (mtmd ASR detects language itself)"},"hq":{"type":"boolean","description":"use the configured higher-accuracy STT tier (slower) for hard/noisy/multilingual audio; note the accuracy tier may return a single full-span segment instead of timestamps"},"engine":{"type":"string","enum":["gpu","npu"],"description":"gpu (default): the local whisper seat (quality path, timestamps, long-form); npu: whisper-base on the Hailo-8L accelerator — fast preview tier (5 s chunks, no timestamps) WHERE the platform runs it; on Windows HailoRT 4.24 boxes the sidecar returns a typed platform-blocked diagnosis instead (whisper HEFs are Linux-validated upstream), so gpu remains the STT path there"},"select":{"type":"array","items":{"type":"string"},"description":"optional: return ONLY these top-level result fields (e.g. [\"gist\",\"language\",\"num_segments\",\"srt_path\"]) to skip the verbose segments[] and keep your context lean — read the full transcript/spans from srt_path or json_path when you need them"}},"required":["audio"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"audio":{"type":"string","description":"local audio or video file path"},"language":{"type":"string","description":"en, es, or auto (default auto-detect); ignored by an openai-protocol hq tier (mtmd ASR detects language itself)"},"hq":{"type":"boolean","description":"use the configured higher-accuracy STT tier (slower) for hard/noisy/multilingual audio; note the accuracy tier may return a single full-span segment instead of timestamps. Does not apply under engine:npu (one NPU model)"},"engine":{"type":"string","enum":["gpu","npu"],"description":"gpu (default): the local whisper seat (quality path, timestamps, long-form); npu: whisper-base on the Hailo-8L accelerator — fast preview tier (5 s chunks, no timestamps) WHERE the platform runs it; on Windows HailoRT 4.24 boxes the sidecar returns a typed platform-blocked diagnosis instead (whisper HEFs are Linux-validated upstream), so gpu remains the STT path there"},"select":{"type":"array","items":{"type":"string"},"description":"optional: return ONLY these top-level result fields (e.g. [\"gist\",\"language\",\"num_segments\",\"srt_path\"]) to skip the verbose segments[] and keep your context lean — read the full transcript/spans from srt_path or json_path when you need them"}},"required":["audio"]}`),
 	}, s.handleTranscribe)
 
 	srv.AddTool(&mcp.Tool{
@@ -552,7 +552,27 @@ func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest)
 		if in.Language != "" && in.Language != "auto" {
 			args["language"] = in.Language
 		}
-		return s.hailoCall(ctx, "transcribe", args)
+		// hq does not apply here (one NPU model — the schema says so); select
+		// DOES: the npu result honors the same top-level projection as the GPU
+		// path, so a caller's context-lean contract holds on both engines.
+		sc := s.hailoSidecar()
+		if err := sc.Ensure(ctx); err != nil {
+			return jsonResult(map[string]any{"deferred": true, "reason": "hailo-8l: " + err.Error()})
+		}
+		out, err := sc.Client().Call(ctx, "transcribe", args)
+		if err != nil {
+			return jsonResult(map[string]any{"deferred": true, "reason": "hailo-8l: " + err.Error()})
+		}
+		if len(in.Select) > 0 {
+			keep := map[string]any{}
+			for _, k := range in.Select {
+				if v, ok := out[k]; ok {
+					keep[k] = v
+				}
+			}
+			out = keep
+		}
+		return jsonResult(out)
 	default:
 		return jsonResult(map[string]any{"deferred": true,
 			"reason": fmt.Sprintf("unrecognized engine %q; use \"gpu\" or \"npu\"", in.Engine)})

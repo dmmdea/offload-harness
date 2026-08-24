@@ -63,7 +63,42 @@ func fakeHailo(t *testing.T) *httptest.Server {
 		w.Write([]byte(`{"faces":[{"x":1,"y":2,"w":3,"h":4,"score":0.9,"embedding":[0.5,0.5]}],"count":1}`))
 	})
 	mux.HandleFunc("/v1/ocr", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"text":"NPU READ THIS","char_count":13,"boxes":[]}`)) })
+	mux.HandleFunc("/v1/transcribe", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"text":"NPU HEARD THIS","chunks":1,"language":"en","duration_sec":3.4}`))
+	})
 	return httptest.NewServer(mux)
+}
+
+func TestTranscribeEngineNPURoutesToSidecarAndProjects(t *testing.T) {
+	srv := fakeHailo(t)
+	defer srv.Close()
+	s := hailoServer(t, srv.URL)
+	res, _ := s.handleTranscribe(context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"audio":"a.wav","engine":"npu"}`)}})
+	if out := callText(t, res); !strings.Contains(out, "NPU HEARD THIS") {
+		t.Fatalf("engine:npu did not reach the sidecar: %s", out)
+	}
+	// select projects the npu result too — same contract as the GPU path.
+	res, _ = s.handleTranscribe(context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"audio":"a.wav","engine":"npu","select":["language"]}`)}})
+	out := callText(t, res)
+	if strings.Contains(out, "NPU HEARD THIS") || !strings.Contains(out, `"language"`) {
+		t.Fatalf("select did not project the npu result: %s", out)
+	}
+}
+
+func TestTranscribeEngineNPUWithoutAcceleratorDefers(t *testing.T) {
+	s := New(pipeline.New(config.Default(), nil, nil, nil))
+	res, _ := s.handleTranscribe(context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"audio":"a.wav","engine":"npu"}`)}})
+	if out := callText(t, res); !strings.Contains(out, `"deferred":true`) || !strings.Contains(out, "no hailo-8l") {
+		t.Fatalf("engine:npu on a box without the accelerator must defer plainly, got %s", out)
+	}
+}
+
+func TestTranscribeUnknownEngineDefers(t *testing.T) {
+	s := New(pipeline.New(config.Default(), nil, nil, nil))
+	res, _ := s.handleTranscribe(context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"audio":"a.wav","engine":"cloud"}`)}})
+	if out := callText(t, res); !strings.Contains(out, `"deferred":true`) || !strings.Contains(out, "cloud") {
+		t.Fatalf("unknown engine must defer naming the value, got %s", out)
+	}
 }
 
 func hailoServer(t *testing.T, endpoint string) *Server {

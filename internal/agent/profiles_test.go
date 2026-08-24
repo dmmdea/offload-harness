@@ -267,7 +267,8 @@ func TestResearchProfileCarriesTheSenses(t *testing.T) {
 	for _, name := range []string{"offload_vqa", "offload_ocr", "offload_transcribe",
 		"offload_face_detect", "offload_face_embed", "offload_object_detect",
 		"offload_person_embed", "offload_depth", "offload_enhance_low_light",
-		"offload_image_embed"} {
+		"offload_image_embed", "offload_pose", "offload_segment",
+		"offload_text_embed", "offload_zero_shot"} {
 		found := false
 		for _, tn := range prof.Tools {
 			if tn == name {
