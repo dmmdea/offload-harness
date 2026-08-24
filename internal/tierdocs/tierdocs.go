@@ -245,8 +245,11 @@ func renderTier(name string, p Profile, reports []string) string {
 			"| seat | kind | binds | model | residency |\n|---|---|---|---|---|\n")
 		for _, s := range p.MediaSeats {
 			bind := "`vision_model`"
-			if s.Kind == mediaseat.KindSTT {
+			switch s.Kind {
+			case mediaseat.KindSTT:
 				bind = "`stt_model`"
+			case mediaseat.KindOCR:
+				bind = "`ocr_model`"
 			}
 			fmt.Fprintf(&b, "| `%s` | %s | %s | `%s` | %s |\n", s.Name, s.Kind, bind, s.Model, s.Residency)
 		}

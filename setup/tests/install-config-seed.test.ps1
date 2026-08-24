@@ -308,9 +308,10 @@ $b8 = Get-MediaSeatBindings -ProfileRow $profiles.'blackwell-8'
 Assert ($null -ne $b8)                                                      'blackwell-8 produces seat bindings'
 Assert ($b8.vision_model -eq 'qwen3.5-9b-vl')                               'blackwell-8 binds vision_model=qwen3.5-9b-vl (measured seat 2026-08-23; the seat name, not the file)'
 Assert ($b8.stt_model -eq 'whisper-stt')                                    'blackwell-8 binds stt_model=whisper-stt'
+Assert ($b8.ocr_model -eq 'paddleocr-vl')                                   'blackwell-8 binds ocr_model=paddleocr-vl (the ocr seat kind, 0.88.0)'
 $b8m = (Merge-ConfigSeed -ConfigText $tplText -Seed $b8) | ConvertFrom-Json
-Assert ($b8m.vision_model -eq 'qwen3.5-9b-vl' -and $b8m.stt_model -eq 'whisper-stt') 'bindings survive the merge into the shipped config'
-# Closure: EVERY tier that declares media_seats must bind BOTH keys — a seat the
+Assert ($b8m.vision_model -eq 'qwen3.5-9b-vl' -and $b8m.stt_model -eq 'whisper-stt' -and $b8m.ocr_model -eq 'paddleocr-vl') 'bindings survive the merge into the shipped config'
+# Closure: EVERY tier that declares media_seats must bind EVERY kind's key — a seat the
 # config never routes to is exactly the split-brain mediaseat.Bindings exists to prevent.
 foreach ($t in @($profiles.PSObject.Properties.Name)) {
   $row = $profiles.$t
@@ -319,6 +320,7 @@ foreach ($t in @($profiles.PSObject.Properties.Name)) {
     $kinds = @($row.media_seats | ForEach-Object { $_.kind })
     if ($kinds -contains 'vision') { Assert ($null -ne $bt.vision_model -and $bt.vision_model -ne '') "$t vision seat binds vision_model" }
     if ($kinds -contains 'stt')    { Assert ($null -ne $bt.stt_model -and $bt.stt_model -ne '')       "$t stt seat binds stt_model" }
+    if ($kinds -contains 'ocr')    { Assert ($null -ne $bt.ocr_model -and $bt.ocr_model -ne '')       "$t ocr seat binds ocr_model" }
   }
 }
 Assert ($null -eq (Get-MediaSeatBindings -ProfileRow $null))                'null profile row -> no bindings'

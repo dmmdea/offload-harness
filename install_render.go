@@ -185,7 +185,7 @@ func warnMissingSeatModels(seats []mediaseat.Seat, modelsDir, target string) {
 	}
 	var missing []string
 	for _, s := range seats {
-		for label, rel := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel} {
+		for label, rel := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel, "chat_template": s.ChatTemplate} {
 			if rel == "" {
 				continue
 			}

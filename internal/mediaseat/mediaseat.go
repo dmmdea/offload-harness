@@ -1,7 +1,7 @@
 // Package mediaseat is the tier schema's declaration of the ALIAS-backed media
-// capabilities a hardware tier serves: a vision (VLM) seat and a speech-to-text
-// seat, each rendered into the node's llama-swap config AND into the harness
-// config binding that routes to it.
+// capabilities a hardware tier serves: a vision (VLM) seat, a speech-to-text
+// seat, and an OCR-specialist seat — each rendered into the node's llama-swap
+// config AND into the harness config binding that routes to it.
 //
 // One declaration, two artifacts, on purpose. Before this existed the two were
 // authored separately and drifted immediately: config.Default() bound
@@ -37,6 +37,12 @@ var safeID = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 const (
 	KindVision = "vision"
 	KindSTT    = "stt"
+	// KindOCR is a llama-server VLM seat specialized for document OCR, bound to
+	// `ocr_model` so it can coexist with the tier's general vision seat. Added for
+	// PaddleOCR-VL-class models (measured blackwell-8 2026-08-23: crops-driven,
+	// ~2 s answers at 1.8 GB), which need a shipped chat template file and temp 0 —
+	// the two knobs this kind carries that plain vision does not.
+	KindOCR = "ocr"
 )
 
 // Residency is a ROLE, not a group name. Group names are a per-TEMPLATE
@@ -102,6 +108,15 @@ type Seat struct {
 	GPUEnv    []string `json:"gpu_env,omitempty"`
 	Residency string   `json:"residency"`
 	TTL       int      `json:"ttl,omitempty"`
+	// ChatTemplate names a template file in the models dir, rendered as
+	// --chat-template-file (vision/ocr only). PaddleOCR-VL ships its own
+	// chat_template.jinja and produces degraded transcription without it —
+	// exactly the silent-quality-loss shape that must be declared, not hand-wired.
+	ChatTemplate string `json:"chat_template,omitempty"`
+	// Temp pins the seat's server-side sampling temperature (vision/ocr only).
+	// A POINTER so an explicit 0 — PaddleOCR-VL's vendor-required value — survives
+	// JSON omitempty; nil = no --temp flag, the server's default stands.
+	Temp *float64 `json:"temp,omitempty"`
 }
 
 // configKey is the harness config field a seat of this kind binds.
@@ -111,6 +126,8 @@ func configKey(kind string) string {
 		return "vision_model"
 	case KindSTT:
 		return "stt_model"
+	case KindOCR:
+		return "ocr_model"
 	}
 	return ""
 }
@@ -129,7 +146,7 @@ func Bindings(seats []Seat) map[string]any {
 }
 
 // BoundKeys is every config key seats may write, for the seed validator.
-func BoundKeys() []string { return []string{"stt_model", "vision_model"} }
+func BoundKeys() []string { return []string{"ocr_model", "stt_model", "vision_model"} }
 
 // Validate rejects a seat set at AUTHORING time — in a test over the committed
 // tier table — rather than on someone's machine, where the symptom is a service
@@ -145,12 +162,12 @@ func Validate(seats []Seat, tier string) error {
 			where = fmt.Sprintf("seat %q", s.Name)
 		}
 		switch s.Kind {
-		case KindVision, KindSTT:
+		case KindVision, KindSTT, KindOCR:
 			perKind[s.Kind]++
 		case "":
-			problems = append(problems, where+": no kind (want "+KindVision+" or "+KindSTT+")")
+			problems = append(problems, where+": no kind (want "+KindVision+", "+KindSTT+" or "+KindOCR+")")
 		default:
-			problems = append(problems, fmt.Sprintf("%s: unknown kind %q (want %s or %s)", where, s.Kind, KindVision, KindSTT))
+			problems = append(problems, fmt.Sprintf("%s: unknown kind %q (want %s, %s or %s)", where, s.Kind, KindVision, KindSTT, KindOCR))
 		}
 		switch {
 		case s.Name == "":
@@ -180,13 +197,23 @@ func Validate(seats []Seat, tier string) error {
 		if s.Residency != Swappable && s.Residency != Resident {
 			problems = append(problems, fmt.Sprintf("%s: residency %q is not %s or %s", where, s.Residency, Swappable, Resident))
 		}
-		if s.Kind == KindVision {
+		// vision and ocr are both llama-server VLM seats and share the same
+		// requirements; ocr additionally may carry chat_template/temp.
+		if s.Kind == KindVision || s.Kind == KindOCR {
 			if s.MMProj == "" {
-				problems = append(problems, where+": a vision seat needs an mmproj — without one it loads as a text model "+
+				problems = append(problems, where+": a "+s.Kind+" seat needs an mmproj — without one it loads as a text model "+
 					"and answers image questions blind instead of failing")
 			}
 			if s.CtxSize <= 0 {
-				problems = append(problems, where+": a vision seat needs its own ctx_size (it is not the chat tier's)")
+				problems = append(problems, where+": a "+s.Kind+" seat needs its own ctx_size (it is not the chat tier's)")
+			}
+			if s.Bin != "" || s.LibDir != "" {
+				problems = append(problems, where+": bin/lib_dir are for a seat that is NOT llama-server; a "+s.Kind+" seat "+
+					"always runs the template's llama-server and would silently ignore them")
+			}
+			if s.NoFlashAttn {
+				problems = append(problems, where+": no_flash_attn is a whisper.cpp flag (stt only); a "+s.Kind+" seat's "+
+					"flash-attn comes from the tier's flash_attn")
 			}
 		}
 		if s.Kind == KindSTT {
@@ -197,17 +224,11 @@ func Validate(seats []Seat, tier string) error {
 			// tier author believe a knob applies when it does nothing.
 			if s.MMProj != "" || s.CtxSize > 0 || s.ImageMaxTokens > 0 || s.NoContextShift || s.NoMmprojOffload {
 				problems = append(problems, where+": mmproj/ctx_size/image_max_tokens/no_context_shift/no_mmproj_offload "+
-					"are vision-only and are ignored on an stt seat")
+					"are vision/ocr-only and are ignored on an stt seat")
 			}
-		}
-		if s.Kind == KindVision {
-			if s.Bin != "" || s.LibDir != "" {
-				problems = append(problems, where+": bin/lib_dir are for a seat that is NOT llama-server; a vision seat "+
-					"always runs the template's llama-server and would silently ignore them")
-			}
-			if s.NoFlashAttn {
-				problems = append(problems, where+": no_flash_attn is a whisper.cpp flag (stt only); a vision seat's "+
-					"flash-attn comes from the tier's flash_attn")
+			if s.ChatTemplate != "" || s.Temp != nil {
+				problems = append(problems, where+": chat_template/temp are llama-server flags (vision/ocr only) and are "+
+					"ignored on an stt seat")
 			}
 		}
 		for field, v := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel, "bin": s.Bin, "lib_dir": s.LibDir} {
@@ -218,13 +239,17 @@ func Validate(seats []Seat, tier string) error {
 		// Only bin/lib_dir are resolved against the install root. The model fields are
 		// relative to the models dir, so a home token there renders nowhere and would
 		// die at the token guard with no hint as to which field caused it.
-		for field, v := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel} {
+		for field, v := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel, "chat_template": s.ChatTemplate} {
 			if strings.Contains(v, "__OFFLOAD_HOME__") {
 				problems = append(problems, fmt.Sprintf("%s: %s is relative to the models dir and may not carry __OFFLOAD_HOME__", where, field))
 			}
 		}
+		if s.Temp != nil && (*s.Temp < 0 || *s.Temp > 2) {
+			problems = append(problems, fmt.Sprintf("%s: temp %v is outside [0, 2] — an out-of-range pin renders a server "+
+				"that refuses to start or samples garbage", where, *s.Temp))
+		}
 	}
-	for _, k := range []string{KindVision, KindSTT} {
+	for _, k := range []string{KindVision, KindSTT, KindOCR} {
 		if perKind[k] > 1 {
 			problems = append(problems, fmt.Sprintf("%d %s seats: %q is a single config field, so a tier may declare at most one",
 				perKind[k], k, configKey(k)))

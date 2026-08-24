@@ -994,7 +994,11 @@ func (c Config) ModelRoutes() []ModelRoute {
 		{Key: "escalation_model", StatusKey: "escalation", Configured: c.EscalationModel, Effective: c.EscalationModel, Diffed: true},
 		{Key: "reasoning_model", StatusKey: "reasoning", Configured: c.ReasoningModel, Effective: c.ReasoningModel, Diffed: true},
 		{Key: "vision_model", StatusKey: "vision", Configured: c.VisionModel, Effective: c.VisionModel, Diffed: true},
-		{Key: "ocr_model", StatusKey: "ocr", Configured: c.OCRModel, Effective: ocr},
+		// Diffed since 0.88.0: ocr_model is no longer only a hand-set override — the
+		// `ocr` media-seat kind makes it tier-seeded, so doctor and the alias-closure
+		// gate must verify a declared OCR seat is actually served, exactly like
+		// vision_model/stt_model. Unset stays skipped (empty Configured).
+		{Key: "ocr_model", StatusKey: "ocr", Configured: c.OCRModel, Effective: ocr, Diffed: true},
 		{Key: "stt_model", StatusKey: "stt", Configured: c.STTModel, Effective: c.STTModel, Diffed: true},
 		{Key: "stt_model_hq", StatusKey: "stt_hq", Configured: c.STTModelHQ, Effective: c.STTModelHQ, Diffed: true},
 		{Key: "embed_model", StatusKey: "embed", Configured: c.EmbedModelName, Effective: c.EmbedModel()},
