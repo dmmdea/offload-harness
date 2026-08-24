@@ -16,7 +16,8 @@ import (
 )
 
 var hailoTools = []string{"offload_face_detect", "offload_face_embed", "offload_object_detect",
-	"offload_person_embed", "offload_depth", "offload_enhance_low_light", "offload_image_embed"}
+	"offload_person_embed", "offload_depth", "offload_enhance_low_light", "offload_image_embed",
+	"offload_pose", "offload_segment", "offload_text_embed", "offload_zero_shot"}
 
 func TestHailoToolsRegistrationGatedOnAccelerator(t *testing.T) {
 	off := listTools(t, config.Default())
@@ -82,7 +83,7 @@ func TestFaceEmbedPassesSidecarResultThrough(t *testing.T) {
 	srv := fakeHailo(t)
 	defer srv.Close()
 	s := hailoServer(t, srv.URL)
-	res, err := s.handleHailoTool("face_embed")(context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"image_path":"a.jpg"}`)}})
+	res, err := s.handleHailoTool("face_embed", "image_path")(context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"image_path":"a.jpg"}`)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +95,7 @@ func TestFaceEmbedPassesSidecarResultThrough(t *testing.T) {
 
 func TestNPUToolDefersWhenSidecarDownAndUnspawnable(t *testing.T) {
 	s := hailoServer(t, "http://127.0.0.1:1")
-	res, _ := s.handleHailoTool("face_embed")(context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"image_path":"a.jpg"}`)}})
+	res, _ := s.handleHailoTool("face_embed", "image_path")(context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"image_path":"a.jpg"}`)}})
 	out := callText(t, res)
 	if !strings.Contains(out, `"deferred":true`) || !strings.Contains(out, "hailo_sidecar_cmd") {
 		t.Fatalf("want a defer naming the missing sidecar cmd, got %s", out)

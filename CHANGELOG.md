@@ -6,6 +6,29 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.86.0] - 2026-08-23
+
+### Added — the frontier NPU tools reach both harness surfaces
+
+The Hailo sidecar grew five capabilities (Hailo repo PRs #7/#8: pose, instance
+segmentation + FastSAM, on-NPU text embeddings, zero-shot classification,
+whisper transcription); the harness now exposes them, gated on the accelerator
+exactly like the first seven:
+
+- **MCP + agent loop**: `offload_pose`, `offload_segment` (everything=true =
+  FastSAM), `offload_text_embed` (same 512-d space as `offload_image_embed`;
+  siglip2 optional), `offload_zero_shot` — registered on accelerator boxes
+  only; the research profile carries them; `handleHailoTool` / the loop's
+  adapter gained a per-tool required-arg (text_embed takes `text`).
+- **`offload_transcribe` gains the universal `engine` (gpu|npu) param** —
+  ownership mirrors OCR's: the GPU whisper seat stays the quality primary
+  (timestamps, long-form); `engine:npu` is the caller's explicit fast preview
+  path; unrecognized engines defer. NOTE: whisper-on-NPU is PLATFORM-BLOCKED
+  on Windows HailoRT 4.24 (both HEF builds time out; Linux-validated upstream)
+  — the sidecar returns a typed diagnosis, so engine:npu is honest, not lying.
+- Accelerator `owns` list + profiles.json + the tier-matrix Accelerators sheet
+  regenerated FIRST per the house rule.
+
 ## [0.85.1] - 2026-08-23
 
 ### Fixed — the default delegation profile stripped the loop's senses

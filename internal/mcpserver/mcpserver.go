@@ -125,7 +125,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_transcribe",
 		Description: "Transcribe a local AUDIO or VIDEO file to text on a free local whisper model (STT). audio is a LOCAL file path (mp3/m4a/wav/mp4/...); language is optional ('en','es', or 'auto' — default auto-detect); set hq=true for the higher-quality (slower) model on hard/noisy clips. Returns {gist (preview), language, duration_sec, num_segments, segments[{id,start,end,text}] (timestamped spans — pull only the ones you need), srt_path, text_path, json_path}. The full transcript + SRT are written to disk; read the spans/paths you need. If it can't transcribe confidently it returns deferred:true and you should handle the audio yourself.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"audio":{"type":"string","description":"local audio or video file path"},"language":{"type":"string","description":"en, es, or auto (default auto-detect); ignored by an openai-protocol hq tier (mtmd ASR detects language itself)"},"hq":{"type":"boolean","description":"use the configured higher-accuracy STT tier (slower) for hard/noisy/multilingual audio; note the accuracy tier may return a single full-span segment instead of timestamps"},"select":{"type":"array","items":{"type":"string"},"description":"optional: return ONLY these top-level result fields (e.g. [\"gist\",\"language\",\"num_segments\",\"srt_path\"]) to skip the verbose segments[] and keep your context lean — read the full transcript/spans from srt_path or json_path when you need them"}},"required":["audio"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"audio":{"type":"string","description":"local audio or video file path"},"language":{"type":"string","description":"en, es, or auto (default auto-detect); ignored by an openai-protocol hq tier (mtmd ASR detects language itself)"},"hq":{"type":"boolean","description":"use the configured higher-accuracy STT tier (slower) for hard/noisy/multilingual audio; note the accuracy tier may return a single full-span segment instead of timestamps"},"engine":{"type":"string","enum":["gpu","npu"],"description":"gpu (default): the local whisper seat (quality path, timestamps, long-form); npu: whisper-base on the Hailo-8L accelerator — fast preview tier (5 s chunks, no timestamps) WHERE the platform runs it; on Windows HailoRT 4.24 boxes the sidecar returns a typed platform-blocked diagnosis instead (whisper HEFs are Linux-validated upstream), so gpu remains the STT path there"},"select":{"type":"array","items":{"type":"string"},"description":"optional: return ONLY these top-level result fields (e.g. [\"gist\",\"language\",\"num_segments\",\"srt_path\"]) to skip the verbose segments[] and keep your context lean — read the full transcript/spans from srt_path or json_path when you need them"}},"required":["audio"]}`),
 	}, s.handleTranscribe)
 
 	srv.AddTool(&mcp.Tool{
@@ -244,6 +244,9 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// (the GPU VLM never serves these; see docs/systems/accelerators.md).
 	if s.p != nil && s.p.Cfg().HasAccelerator("hailo-8l") {
 		type npuTool struct{ name, sidecar, desc, schema string }
+		// requiredArg: the one argument each sidecar tool cannot run without —
+		// image_path for the vision tools, text for the text tower.
+		requiredArg := map[string]string{"text_embed": "text"}
 		img := `"image_path":{"type":"string","description":"local image file path (JPEG/PNG)"}`
 		for _, t := range []npuTool{
 			{"offload_face_detect", "face_detect", "Detect faces in an image on the LOCAL Hailo-8L NPU (free, on-box, ~300 FPS). Returns {faces:[{x,y,w,h,score,kps}],count}; kps = 5 landmarks (eyes, nose, mouth corners) in image pixels.", `{"type":"object","properties":{` + img + `},"required":["image_path"]}`},
@@ -253,8 +256,16 @@ func (s *Server) buildServer(version string) *mcp.Server {
 			{"offload_depth", "depth", "Preview-grade relative depth map on the LOCAL Hailo-8L NPU (Depth-Anything-V2, 224 px). Writes an 8-bit PNG (bright = near). Returns {depth_path,min,max,mean}. Shot analysis / parallax previews, not a production depth pass.", `{"type":"object","properties":{` + img + `,"out_path":{"type":"string","description":"output PNG (default: next to the input as <name>.depth.png)"}},"required":["image_path"]}`},
 			{"offload_enhance_low_light", "enhance_low_light", "Brighten an under-exposed frame on the LOCAL Hailo-8L NPU (Zero-DCE) at the original resolution. Returns {enhanced_path,width,height}. Preview-grade.", `{"type":"object","properties":{` + img + `,"out_path":{"type":"string","description":"output PNG (default: <name>.enhanced.png)"}},"required":["image_path"]}`},
 			{"offload_image_embed", "embed", "512-d IMAGE embedding on the LOCAL Hailo-8L NPU (TinyCLIP ViT-61M) for similarity search / clustering of frames and thumbnails. Returns {embedding,dim}.", `{"type":"object","properties":{` + img + `},"required":["image_path"]}`},
+			{"offload_pose", "pose", "Human POSE estimation on the LOCAL Hailo-8L NPU (YOLOv8s-pose): people with 17 named COCO keypoints each (nose, eyes, shoulders, ..., ankles), in the image's own pixel space. Returns {people:[{x,y,w,h,score,keypoints:{nose:{x,y,score},...}}],count}.", `{"type":"object","properties":{` + img + `,"score_threshold":{"type":"number","description":"minimum person score (default 0.3)"}},"required":["image_path"]}`},
+			{"offload_segment", "segment", "Instance SEGMENTATION on the LOCAL Hailo-8L NPU. Default: YOLOv8s-seg, 80 COCO classes; everything=true: FastSAM (class-agnostic segment-everything). Writes an instance-id mask PNG (uint8: 0=background, i=instances[i-1]) next to the input or to out_path. Returns {instances:[{label,class_id,x,y,w,h,score}],mask_path,count}.", `{"type":"object","properties":{` + img + `,"everything":{"type":"boolean","description":"true = FastSAM class-agnostic masks (default false = 80 COCO classes)"},"score_threshold":{"type":"number","description":"minimum instance score (default 0.25)"},"out_path":{"type":"string","description":"output mask PNG (default: <name>.mask.png)"}},"required":["image_path"]}`},
+			{"offload_text_embed", "text_embed", "TEXT embedding computed ON the LOCAL Hailo-8L NPU, in the SAME space as offload_image_embed's image vectors (space=tinyclip, 512-d, the default) — text-to-image similarity search over frames with zero cloud. space=siglip2 (768-d) pairs only with the siglip2 image side used by offload_zero_shot. Returns {embedding,dim,space}.", `{"type":"object","properties":{"text":{"type":"string","description":"the text to embed"},"space":{"type":"string","enum":["tinyclip","siglip2"],"description":"embedding space (default tinyclip = matches offload_image_embed)"}},"required":["text"]}`},
+			{"offload_zero_shot", "zero_shot", "ZERO-SHOT image classification on the LOCAL Hailo-8L NPU — score an image against free-text labels, BOTH towers (image + text) on the NPU. space=tinyclip (default) or siglip2 (stronger: 73.0 vs 67.8 top-1). Returns {results:[{label,similarity,prob}],best} ranked best-first.", `{"type":"object","properties":{` + img + `,"labels":{"type":"array","items":{"type":"string"},"description":"candidate labels, free text"},"space":{"type":"string","enum":["tinyclip","siglip2"],"description":"model pair (default tinyclip)"},"template":{"type":"string","description":"prompt template (default \"a photo of a {}\")"}},"required":["image_path","labels"]}`},
 		} {
-			srv.AddTool(&mcp.Tool{Name: t.name, Description: t.desc, InputSchema: json.RawMessage(t.schema)}, s.handleHailoTool(t.sidecar))
+			arg := requiredArg[t.sidecar]
+			if arg == "" {
+				arg = "image_path"
+			}
+			srv.AddTool(&mcp.Tool{Name: t.name, Description: t.desc, InputSchema: json.RawMessage(t.schema)}, s.handleHailoTool(t.sidecar, arg))
 		}
 	}
 
@@ -327,7 +338,7 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 		entry := map[string]any{
 			"endpoint":               cfg.HailoEndpoint,
 			"sidecar_cmd_configured": cfg.HailoSidecarCmd != "",
-			"owns":                   []string{"face_detect", "face_embed", "object_detect", "person_embed", "depth", "enhance_low_light", "image_embed"},
+			"owns":                   []string{"face_detect", "face_embed", "object_detect", "person_embed", "depth", "enhance_low_light", "image_embed", "pose", "segment", "text_embed", "zero_shot"},
 			"note":                   "on-demand loopback sidecar; the first NPU call starts it (cold ~2 s + HEF load), it exits itself after hailo_idle_sec idle",
 		}
 		if h, err := hailoclient.New(cfg.HailoEndpoint, 2*time.Second).Health(pctx); err != nil {
@@ -520,10 +531,31 @@ func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest)
 		Audio    string   `json:"audio"`
 		Language string   `json:"language"`
 		HQ       bool     `json:"hq"`
+		Engine   string   `json:"engine"`
 		Select   []string `json:"select"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
+	}
+	// STT ownership mirrors OCR's (2026-08-23): the GPU whisper seat is the
+	// quality primary; the NPU's whisper-base is the caller's EXPLICIT fast
+	// preview path, never an automatic fallback, and an unrecognized engine
+	// defers rather than silently becoming a GPU call.
+	switch in.Engine {
+	case "", "gpu":
+		// fall through to the GPU seat below
+	case "npu":
+		if !s.p.Cfg().HasAccelerator("hailo-8l") {
+			return jsonResult(map[string]any{"deferred": true, "reason": "engine:npu requested but this box lists no hailo-8l accelerator"})
+		}
+		args := map[string]any{"audio_path": in.Audio}
+		if in.Language != "" && in.Language != "auto" {
+			args["language"] = in.Language
+		}
+		return s.hailoCall(ctx, "transcribe", args)
+	default:
+		return jsonResult(map[string]any{"deferred": true,
+			"reason": fmt.Sprintf("unrecognized engine %q; use \"gpu\" or \"npu\"", in.Engine)})
 	}
 	params := map[string]any{}
 	if in.Language != "" {
@@ -1460,14 +1492,14 @@ func (s *Server) hailoCall(ctx context.Context, tool string, args map[string]any
 
 // handleHailoTool adapts one sidecar tool to an MCP handler. The MCP argument
 // names are the sidecar's keyword names, so the JSON passes through unchanged.
-func (s *Server) handleHailoTool(tool string) mcp.ToolHandler {
+func (s *Server) handleHailoTool(tool, requiredArg string) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var in map[string]any
 		if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 			return bad, nil
 		}
-		if in["image_path"] == nil || in["image_path"] == "" {
-			return jsonResult(map[string]any{"deferred": true, "reason": "empty image_path"})
+		if in[requiredArg] == nil || in[requiredArg] == "" {
+			return jsonResult(map[string]any{"deferred": true, "reason": "empty " + requiredArg})
 		}
 		return s.hailoCall(ctx, tool, in)
 	}
