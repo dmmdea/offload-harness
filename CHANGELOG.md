@@ -6,6 +6,30 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.94.3] - 2026-08-25
+
+### Fixed — a fresh ampere-8 install shipped no image route (seed lacked `imagegen_script`)
+- `ampere-8`'s `config_seed_ram_mid_high` bound the HiDream-O1 family/ckpt/vae but not
+  `imagegen_script`, and `ImageRouteConfigured()` keys on the script — so a fresh install
+  bound a family it could not serve: doctor showed no image route and the fleet node never
+  advertised `image-gen`. Found live on the reference box (which had ComfyUI + the bf16
+  checkpoint on disk the whole time). The seed now carries
+  `imagegen_script: __OFFLOAD_HOME__/render/comfy-generate.mjs`, mirroring blackwell-8.
+  Fix verified live: after binding + a process restart the node advertises
+  `[image-gen, ...]` / family `hidream-o1`, and a real 1024² HiDream render passed (278s).
+
+### Added — Windows fleet-node launcher template + runbook section
+- `setup/templates/start-fleet-node.win.ps1` (tokenized: `__OFFLOAD_HOME__`, `__NODE_ID__`)
+  encodes the three launcher facts measured on the ampere-8 box: the Tailscale CLI returns
+  nothing under an S4U session-0 task (read `Get-NetIPAddress -InterfaceAlias Tailscale`
+  instead); at boot the address exists before it is BINDABLE (readiness = a real TcpListener
+  bind, retried); an immediately-exiting child is detected and surfaced (the task's own
+  lastResult is a false liveness signal for a detached child).
+- `docs/FLEET-NODE.md` gains "Running as a Windows scheduled task": S4U-not-SYSTEM (profile
+  config resolution) and S4U-not-Interactive (boot trigger), plus the config-reload gotcha —
+  cycling the task does NOT reload config; the detached child survives and the duplicate
+  guard declines, so a config change needs the process killed.
+
 ## [0.94.2] - 2026-08-25
 
 ### Fixed — the qwen3.5-9b agent seat shipped with thinking ON (measured live, both 8GB tiers)
