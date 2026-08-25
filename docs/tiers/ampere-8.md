@@ -36,6 +36,7 @@ honestly serves text only.
 |---|---|
 | `imagegen_ckpt` | `hidream_o1_image_bf16.safetensors` |
 | `imagegen_family` | `hidream-o1` |
+| `imagegen_script` | `__OFFLOAD_HOME__/render/comfy-generate.mjs` |
 | `imagegen_timeout_sec` | `3600` |
 | `imagegen_vae` | `builtin` |
 

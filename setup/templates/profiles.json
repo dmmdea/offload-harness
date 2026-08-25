@@ -559,6 +559,7 @@
       "config_seed_ram_mid_high": {
         "imagegen_family": "hidream-o1",
         "imagegen_ckpt": "hidream_o1_image_bf16.safetensors",
+        "imagegen_script": "__OFFLOAD_HOME__/render/comfy-generate.mjs",
         "imagegen_vae": "builtin",
         "imagegen_timeout_sec": 3600
       },

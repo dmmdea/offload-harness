@@ -41,6 +41,39 @@ about (running, done, or previously failed) still re-acks 202 — or 409 if it p
 failed — even mid-drain, since that's not new work. In-flight renders get up to 30s to finish, survivors are marked terminal
 `error:"interrupted"` so pollers always reach a terminal state.
 
+## Running as a Windows scheduled task
+
+Linux nodes run under systemd. On Windows, run the shipped template
+`setup/templates/start-fleet-node.win.ps1` (replace `__OFFLOAD_HOME__` and `__NODE_ID__`)
+from a scheduled task, invoked through a hidden `wscript`/VBS shim so no console window is
+ever shown. Registration that actually survives a reboot (proven on the ampere-8 reference
+box, 2026-08-25):
+
+- **Principal: `-LogonType S4U -RunLevel Limited`, as the harness user — not SYSTEM, not
+  Interactive.** SYSTEM resolves a different `%USERPROFILE%`, so `fleet-serve` silently runs
+  on built-in defaults instead of `~/.local-offload/config.json`. Interactive cannot carry a
+  boot trigger, so an unattended reboot leaves the node down until someone logs in. S4U runs
+  as the user with no interactive session and no stored password.
+- **Trigger: `-AtStartup`** (with the launcher's own readiness loop absorbing early-boot races).
+
+Three measured gotchas the template encodes — do not "simplify" them away:
+
+1. **Under S4U (session 0) the Tailscale CLI returns nothing.** `tailscale ip -4` produced
+   empty output and the old launcher spun silently. Read the address from the interface:
+   `Get-NetIPAddress -InterfaceAlias 'Tailscale'`.
+2. **At boot the Tailscale address exists before it is bindable.** `fleet-serve` died with
+   `bind: The requested address is not valid in its context` even though the resolve
+   succeeded. Readiness is a REAL bind test (open + close a `TcpListener` on the exact
+   address:port), retried — never a resolve.
+3. **Cycling the task does NOT reload config.** The detached `fleet-serve` child survives a
+   task stop, and the launcher's duplicate-guard then sees 18811 listening and declines — so
+   the OLD process keeps serving the OLD config, while the task reports success. To pick up a
+   config change: kill the `local-offload` process, then start the task.
+
+The advertisement (`/fleet/health` `supported_task_types`) is derived from the node's OWN
+config at process start — a route bound in the config after the process started (e.g. adding
+`imagegen_script`) does not advertise until the process is restarted the hard way above.
+
 ## Multi-GPU: `gpu_devices[]` and the headline VRAM numbers
 
 On any node whose VRAM source is `nvidia-smi`, `/fleet/health` always adds a per-device
