@@ -6,6 +6,28 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.94.0] - 2026-08-25
+
+### Changed — ampere-8 agent seat: qwen3.5-9b adopted on its own reference bake (twin parity restored)
+- Operator-approved 2026-08-25 after the tier's OWN on-reference leg-2 quality bake (Aorus RTX 3070,
+  2026-08-24; blackwell-8 protocol replicated exactly — same fixtures/grader, fresh server per rep,
+  /props-verified, n=2 per shape, thinking OFF): **9B think-off 100%x2 extraction + 5/5x2
+  search+reason at 3 steps (6s reasoning wall)** vs the E4B incumbent's **0%x2 extraction** (zero
+  tool calls — replicating blackwell) and 4B at 100%/5-5 but 10 steps (106-112s wall). Fit
+  on-reference: 5759 MiB @16K / 6111 @32K q8_0, tg 56.6 t/s.
+- `ampere-8` now sets `include_qwen35_9b: true` + seeds `agent_model: "qwen3.5-9b-agent"`
+  (both-halves rule, mirroring blackwell-8), and raises `ctx_size`/`agent_ctx_tokens`
+  16384 -> 32768 on the same measurements (E4B 3187 MiB @32K; ampere-6 already serves 32K on 6GB).
+  Same seat rules as blackwell-8: default thinking OFF (never enable without a re-bake), never
+  fold into the reasoning-off cascade macro. Twin FIELD-PARITY with blackwell-8 restored on the
+  agent seat; the image-seat split stays deliberate.
+- H1 ("serving params unmeasured-on-reference") RESOLVED in the tier notes: 0.93.2 ran
+  detect/plan/render/acceptance on the reference box (acceptance 6/6 PASS; the box's BOM-corrupt
+  home config was repaired bytewise, backup kept).
+- Tier-matrix xlsx regenerated FIRST and row-verified (ground-truth rule). Evidence:
+  `Benchmarks and Optimizations/2026-08-24-aorus-ampere8-standup.md`.
+- `install-config-seed.test.ps1` pin flipped: asserts the adopted seat (both halves + 32K).
+
 ## [0.93.2] - 2026-08-25
 
 ### Fixed — `video_watch` synthesis: shots, not seconds; a clipped answer says so

@@ -117,7 +117,13 @@ Assert ($sB8.agent_model -eq 'qwen3.5-9b-agent')                           'blac
 Assert ([bool]$profiles.'blackwell-8'.include_qwen35_9b)                   'blackwell-8 sets include_qwen35_9b (yaml entry + download gate)'
 Assert ($sB8.agent_profile -eq 'research')                                 'blackwell-8 keeps agent_profile=research (the measured 0-to-72 lever)'
 Assert ($null -eq $profiles.'blackwell-8'.include_qwen35_4b)               'blackwell-8 include_qwen35_4b stays absent (9B holds the shared agent-seat alias)'
-Assert ($null -eq $profiles.'ampere-8'.include_qwen35_9b)                  'ampere-8 include_qwen35_9b stays absent (own on-box bake pending - twin-parity break recorded)'
+# ampere-8: seat ADOPTED (operator-approved 2026-08-25; on-reference leg-2 bake 2026-08-24:
+# 9B think-off 100% x2 + 5/5 x2 at 3 steps vs E4B 0% x2; fit 6111 MiB @32K on the 3070).
+# Twin field-parity with blackwell-8 RESTORED on the agent seat. Same both-halves rule.
+$sA8 = $profiles.'ampere-8'.config_seed
+Assert ($sA8.agent_model -eq 'qwen3.5-9b-agent')                           'ampere-8 seats the qwen3.5-9b agent (on-reference bake winner)'
+Assert ([bool]$profiles.'ampere-8'.include_qwen35_9b)                      'ampere-8 sets include_qwen35_9b (yaml entry + download gate)'
+Assert ($profiles.'ampere-8'.ctx_size -eq 32768)                           'ampere-8 serves 32K (measured on-reference: E4B 3187 MiB, 9B 6111 MiB @32K)'
 # The 4B and 9B seats are mutually exclusive EVERYWHERE (shared agent-seat alias;
 # the Go renderer refuses both) - pin the whole table so a future tier cannot ship it.
 foreach ($t in @($profiles.PSObject.Properties.Name)) {
