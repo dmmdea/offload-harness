@@ -34,6 +34,7 @@
   "node_path": "node",
   "comfy_dir": "C:/ComfyUI",
   "imagegen_timeout_sec": 720,
+  "imagegen_reserve_vram": 0,
   "imagegen_ckpt": "",
   "imagegen_family": "",
   "imagegen_vae": "",

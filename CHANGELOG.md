@@ -6,6 +6,15 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.93.2] - 2026-08-25
+
+### Fixed — `video_watch` synthesis: shots, not seconds; a clipped answer says so
+- The 0.93.1 live run produced a full 4/4-window sweep (30 frames, 0 deferred) but the final
+  answer stopped at ~22 s of 30: the synthesis enumerated every second and hit its 700-token
+  budget silently. Now the synthesis groups consecutive seconds into spans, the budget is 1400,
+  and a truncated answer carries `answer_truncated:true` plus an in-band marker pointing at
+  `windows[]` (which always holds the complete notes).
+
 ## [0.93.1] - 2026-08-25
 
 ### Fixed — `video_watch`: a truncated window is kept as partial evidence

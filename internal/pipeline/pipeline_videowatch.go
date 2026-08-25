@@ -36,7 +36,7 @@ const (
 	videoWatchDefaultWindowSec = 8.0
 	videoWatchDefaultFPS       = 1.0
 	videoWatchMaxWindows       = 240 // 32 min @ 8 s; a longer file needs a bigger window_sec (reported, never silent)
-	videoWatchSynthMaxTokens   = 700
+	videoWatchSynthMaxTokens   = 1400
 )
 
 // videoWatchWindow is one planned time window (absolute seconds).
@@ -244,7 +244,7 @@ func (p *Pipeline) runVideoWatch(ctx context.Context, req core.Request, built ta
 			}
 			fmt.Fprintf(&sb, "[%.1f-%.1fs] %s\n", n.Start, n.End, n.Notes)
 		}
-		system := "You are answering a question about a whole video from timestamped notes written by a vision model that watched it window by window. Answer using ONLY the notes. Cite seconds (e.g. 'at 13-16s') for every claim, flag any window that has no notes as unverified, and keep it concise and concrete. If the notes do not settle the question, say what is missing."
+		system := "You are answering a question about a whole video from timestamped notes written by a vision model that watched it window by window. Answer using ONLY the notes. GROUP consecutive seconds that show the same thing into one span (e.g. '13-16s: engine bay close-up, title 212 HP') — never list every second. Cite spans for every claim, flag any window that has no notes (or truncated notes) as unverified, and keep it concise and concrete. If the notes do not settle the question, say what is missing."
 		user := "Question: " + paramStr(req.Params, "question") + "\n\nNotes (" + fmt.Sprintf("%d windows, %.1fs total", len(notes), duration) + "):\n" + sb.String() + "\nAnswer:"
 		gres, gerr := p.client.Generate(ctx, p.cfg.Model, system, user, "", videoWatchSynthMaxTokens, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
 		if gerr != nil || strings.TrimSpace(gres.Content) == "" {
@@ -256,6 +256,12 @@ func (p *Pipeline) runVideoWatch(ctx context.Context, req core.Request, built ta
 			log.Printf("video_watch: synthesis on %s failed (%s); returning notes only", p.cfg.Model, why)
 		} else {
 			out["answer"] = strings.TrimSpace(gres.Content)
+			if gres.Truncated {
+				// Say so, loudly and in-band: a silently clipped shot list reads as
+				// "the video ends here" (it did, on the first 0.93.1 run at ~22 s of 30).
+				out["answer_truncated"] = true
+				out["answer"] = out["answer"].(string) + "\n[answer truncated at the text seat's output limit — read windows[] for the rest]"
+			}
 			meta.TokensIn += gres.TokensIn
 			meta.TokensOut += gres.TokensOut
 		}
