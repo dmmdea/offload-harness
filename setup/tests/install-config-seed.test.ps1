@@ -188,12 +188,14 @@ Write-Host "== J4: config_seed_ram_mid_high (8GB tiers) =="
 foreach ($tier8 in @('ampere-8', 'blackwell-8')) {
   $cond = $profiles.$tier8.config_seed_ram_mid_high
   Assert ($null -ne $cond)                                                  "$tier8 carries the RAM-conditional seed"
-  # The 8GB twins are NO LONGER field-identical. The operator split them on hardware
-  # grounds 2026-08-20: blackwell-8 runs Z-Image Turbo via sdcpp (an FP8-class model on
-  # sm_120), while ampere-8 KEEPS HiDream-O1, which is that tier's one verified datum
-  # (~5.9 min/render on the reference box). Asserting one family for both encoded the
-  # old parity claim and turned a deliberate decision into a red build.
-  $wantFamily = if ($tier8 -eq 'blackwell-8') { 'z-image-turbo' } else { 'hidream-o1' }
+  # The 8GB twins are NO LONGER field-identical. Operator QUALITY-FIRST ruling 2026-08-24
+  # (supersedes the 2026-08-20 z-image split): blackwell-8's DEFAULT image seat is
+  # HiDream-O1-Image-Dev (hidream-o1-dev, mxfp8 via ComfyUI, RAM offload) — validated on-box
+  # 2026-08-25 (2048^2, ~118s, editorial quality, ~7.8GB peak); Z-Image Turbo is DEMOTED to
+  # the operator-selectable SPEED opt-in (sdcpp_* keys retained). ampere-8 KEEPS HiDream-O1
+  # (base bf16) pending its own bake. The 2026-08-20 'resident in 8GB/speed' choice violated
+  # the 2026-08-02 canonical media-quality-only rule.
+  $wantFamily = if ($tier8 -eq 'blackwell-8') { 'hidream-o1-dev' } else { 'hidream-o1' }
   Assert ($cond.imagegen_family -eq $wantFamily)                            "$tier8 conditional seed binds $wantFamily (operator image-seat decision)"
   Assert ($cond.imagegen_vae -eq 'builtin')                                 "$tier8 conditional seed uses the builtin VAE (O1 is pixel-space)"
   if ($tier8 -eq 'blackwell-8') {

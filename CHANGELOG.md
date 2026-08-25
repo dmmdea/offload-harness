@@ -6,6 +6,25 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.92.0] - 2026-08-25
+
+### Changed — blackwell-8 image seat: HiDream-O1-dev is the quality DEFAULT (Z-Image -> speed opt-in)
+- Operator quality-first ruling (2026-08-24): the `blackwell-8` `config_seed_ram_mid_high` image
+  seat now defaults to **HiDream-O1-Image-Dev-2604** (MIT, arena Elo 1174 — the highest
+  permissively-licensed image model) via the ComfyUI engine (`imagegen_engine:""`,
+  `imagegen_family:"hidream-o1-dev"`, `imagegen_ckpt:"hidream_o1_image_dev_mxfp8.safetensors"`,
+  `imagegen_script:comfy-generate.mjs`, 28 steps / cfg 1; VAE + text-encoder come from the
+  checkpoint). **Validated on-box** 2026-08-25 on the OptiPlex 7060 reference box: 2048^2 render,
+  ~118 s incl. cold load, editorial quality, ~7.8 GB peak (fits 8 GB with minimal RAM offload).
+- **Z-Image Turbo demoted to the operator-selectable SPEED opt-in** — the `sdcpp_*` keys are
+  retained in the seed; flip `imagegen_engine` to `"sdcpp"` + `imagegen_family` to `"z-image-turbo"`
+  + `imagegen_steps` to `8` for fast GPU-resident drafts. Quality is the default.
+- Rationale: the 2026-08-20 "resident in 8 GB / speed" choice violated the 2026-08-02 canonical
+  media-quality-only rule (quality is the whole purpose of every media/generation seat; speed is
+  never a reason to pick a lower-quality model — offload to system RAM instead). HiDream mxfp8
+  weights are staged out-of-band (LAN), as with the >=16 GB HiDream bf16 seed.
+- `setup/tests/install-config-seed.test.ps1` updated to assert the new blackwell-8 family.
+
 ## [0.91.0] - 2026-08-24
 
 ### Added — `integrations/opencode/`: the harness's opencode integration path, in-tree
