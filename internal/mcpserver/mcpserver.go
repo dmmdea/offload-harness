@@ -7,6 +7,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"llamaswap-pp-cli/pkg/llamaswap"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -439,11 +442,184 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 		}
 	}
 
-	payload := map[string]any{"local": local, "media": media, "remote": remote, "reuse": reuse}
+	payload := map[string]any{"local": local, "media": media, "remote": remote, "reuse": reuse, "fleet": s.fleetView(ctx, cfg)}
 	if accel != nil {
 		payload["accelerators"] = accel
 	}
 	return jsonResult(payload)
+}
+
+// fleetProbeTimeout bounds the whole fleet section. Node health is a CACHED
+// read on the node side (it never blocks on llama-swap), so a node that cannot
+// answer inside this is down, not busy — and status must stay snappy. Probes
+// run concurrently, so this is the wall for the section, not per node.
+const fleetProbeTimeout = 8 * time.Second
+
+// fleetView is the LIVE delegation roster: who the delegation seats are and
+// what they can take RIGHT NOW.
+//
+// It exists because capability was being ASSERTED in documents instead of
+// reported by the system, and the documents went stale in a way that silently
+// suppressed delegation for weeks. Three independent sources (a rules file, a
+// tier matrix, and the config this server loads) each described a live, resident
+// agent seat as absent or half-capable; there was no runtime surface that could
+// contradict them. A caller could not learn the truth at any price.
+//
+// So the numbers a caller needs to size and place work — the agent seat, its
+// context ceiling, whether it is enabled and resident, and how deep its queue is
+// — are published here, probed, every call. A written figure is now always the
+// weaker source.
+//
+// A probe failure is REPORTED, never swallowed and never a defer: "the node is
+// unreachable" and "the node is busy" route completely differently for the
+// caller, and the local seat's answer is still the answer.
+func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]any {
+	out := map[string]any{
+		"delegation_enabled": cfg.AgentDelegationEnabled,
+		"note": "LIVE capability, probed at call time — trust this over any rules file, matrix or doc. " +
+			"Size contracts from ctx_tokens here, never from a written figure.",
+	}
+	out["local_agent_seat"] = localSeatView(ctx, cfg)
+
+	// One specific reason, never a menu the caller has to guess between. These
+	// two states look identical from the outside (no nodes) and have completely
+	// different fixes.
+	switch {
+	case !cfg.AgentDelegationEnabled:
+		out["nodes"] = []any{}
+		out["reason"] = "agent_delegation_enabled is false in the config THIS server loaded — agent_delegate is absent from tools/list and no node can be placed on"
+		return out
+	case len(cfg.DelegateRemotes) == 0:
+		out["nodes"] = []any{}
+		out["reason"] = "no delegate_remotes in the config THIS server loaded — delegation can only run on the local seat. If a node is live but missing here, the server is reading a different config file than the one being edited"
+		return out
+	}
+
+	// The node probes get their OWN budget, deliberately not shared with the
+	// local-seat probe above. Sharing one deadline across both made a slow local
+	// probe eat the entire allowance and report every node as "context deadline
+	// exceeded" — nodes that answer a curl in ~130 ms were published as
+	// unreachable. A local stall must never be reported as a fleet outage.
+	nodeCtx, cancel := context.WithTimeout(ctx, fleetProbeTimeout)
+	defer cancel()
+
+	type probe struct {
+		base string
+		view delegate.NodeView
+		err  error
+	}
+	results := make([]probe, len(cfg.DelegateRemotes))
+	var wg sync.WaitGroup
+	for i, base := range cfg.DelegateRemotes {
+		wg.Add(1)
+		go func(i int, base string) {
+			defer wg.Done()
+			v, err := delegate.FetchNodeView(nodeCtx, base, cfg.FleetAuthToken)
+			results[i] = probe{base: base, view: v, err: err}
+		}(i, base)
+	}
+	wg.Wait()
+
+	nodes := make([]any, 0, len(results))
+	var capable, idle int
+	for _, r := range results {
+		n := map[string]any{"base": r.base}
+		if r.err != nil {
+			n["reachable"] = false
+			n["probe_error"] = r.err.Error()
+			nodes = append(nodes, n)
+			continue
+		}
+		n["reachable"] = true
+		n["node_id"] = r.view.NodeID
+		n["agent_enabled"] = r.view.AgentEnabled
+		n["agent_seat"] = r.view.AgentSeat
+		n["agent_ctx_tokens"] = r.view.AgentCtxTokens
+		n["agent_seat_resident"] = r.view.AgentResident
+		n["queue_depth"] = r.view.QueueDepth
+		if r.view.AgentEnabled {
+			capable++
+			if r.view.QueueDepth == 0 {
+				idle++
+			}
+		}
+		nodes = append(nodes, n)
+	}
+	out["nodes"] = nodes
+	// Published, not merely computed: an idle seat is capacity already paid for
+	// in electricity, and the whole point of this surface is that a caller can
+	// see it without reading anything.
+	out["agent_capable_nodes"] = capable
+	out["idle_agent_nodes"] = idle
+	return out
+}
+
+// localSeatProbeTimeout bounds the local seat probe. It is a NON-loading read
+// (/running, then /props only when the seat already holds VRAM), so it is fast
+// or it is broken — there is no legitimate slow case to wait for.
+const localSeatProbeTimeout = 4 * time.Second
+
+// localSeatView reports the local agent seat WITHOUT loading it.
+//
+// The local seat runs agent_run and is ALWAYS subtask 0 of an agent_delegate
+// spread, so its window is the ceiling for the contract a caller is about to
+// write — and it is the one number no config file holds (it lives in the serving
+// stack's launch flags, which is exactly why the written guidance about it
+// drifted to a quarter of reality).
+//
+// It deliberately does NOT use agent.ProbeServedWindow: that helper documents
+// itself as "may cold-start the model, which is acceptable: the caller is about
+// to use exactly that model", and names the non-loading path "the right default
+// for an operator probe, and exactly wrong here". offload_status IS an operator
+// probe. Using it here made a capability *question* cost a multi-GB load that
+// evicts whatever is resident — including a media render mid-flight.
+//
+// So a cold seat reports cold. That is the honest answer, and the caller loses
+// nothing: agent_run and agent_delegate probe the real ceiling when they warm
+// the seat, which is the moment the number is actually needed.
+func localSeatView(ctx context.Context, cfg config.Config) map[string]any {
+	seat := cfg.AgentPlannerModel("")
+	v := map[string]any{"model": seat}
+
+	c, err := swapclient.New(cfg.Endpoint, localSeatProbeTimeout)
+	if err != nil {
+		v["ctx_probe_error"] = err.Error()
+		return v
+	}
+	pctx, cancel := context.WithTimeout(ctx, localSeatProbeTimeout)
+	defer cancel()
+
+	props, err := c.Props(pctx, seat)
+	switch {
+	case errors.Is(err, llamaswap.ErrNotLoaded):
+		v["loaded"] = false
+		v["note"] = "seat is cold; its window is not readable without loading it, and a status call must never trigger a multi-GB load. agent_run/agent_delegate probe the real ceiling when they warm it."
+		return v
+	case err != nil:
+		v["ctx_probe_error"] = err.Error()
+		return v
+	}
+	v["loaded"] = true
+	if n, ok := nCtxFromProps(props); ok {
+		v["ctx_tokens"] = n
+	}
+	return v
+}
+
+// nCtxFromProps pulls the live window out of a llama.cpp /props payload. n_ctx
+// lives under default_generation_settings on current builds and at the root on
+// older ones; both are accepted so a server upgrade cannot silently turn the
+// ceiling into "unknown".
+func nCtxFromProps(props map[string]any) (int, bool) {
+	if dgs, ok := props["default_generation_settings"].(map[string]any); ok {
+		if f, ok := dgs["n_ctx"].(float64); ok && f > 0 {
+			return int(f), true
+		}
+	}
+	if f, ok := props["n_ctx"].(float64); ok && f > 0 {
+		return int(f), true
+	}
+	return 0, false
 }
 
 // probeServedModels reads the live roster and returns the CANONICAL model ids.
@@ -534,15 +710,15 @@ func (s *Server) handleVideoDescribe(ctx context.Context, req *mcp.CallToolReque
 
 func (s *Server) handleVideoWatch(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		Video      string   `json:"video"`
-		Question   string   `json:"question"`
-		WindowSec  float64  `json:"window_sec"`
-		FPS        float64  `json:"fps"`
-		MaxFrames  int      `json:"max_frames"`
-		FrameWidth int      `json:"frame_width"`
-		Start      float64  `json:"start"`
-		End        float64  `json:"end"`
-		Synthesize *bool    `json:"synthesize"`
+		Video      string  `json:"video"`
+		Question   string  `json:"question"`
+		WindowSec  float64 `json:"window_sec"`
+		FPS        float64 `json:"fps"`
+		MaxFrames  int     `json:"max_frames"`
+		FrameWidth int     `json:"frame_width"`
+		Start      float64 `json:"start"`
+		End        float64 `json:"end"`
+		Synthesize *bool   `json:"synthesize"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
