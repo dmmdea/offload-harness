@@ -63,7 +63,7 @@ func PrepareContract(spec SubtaskSpec, readRoot string) (core.AgentContract, err
 	}
 
 	if len(spec.ContextPaths) > 0 {
-		docs, err := inlineContextPaths(spec.ContextPaths, readRoot)
+		docs, err := InlineContextPaths(spec.ContextPaths, readRoot)
 		if err != nil {
 			return core.AgentContract{}, err
 		}
@@ -76,14 +76,21 @@ func PrepareContract(spec SubtaskSpec, readRoot string) (core.AgentContract, err
 	return c, nil
 }
 
-// inlineContextPaths reads each path into a ContextDoc named by its base name.
+// InlineContextPaths reads each path into a ContextDoc named by its base name.
 // Containment follows the house idiom (internal/agent ReadOnlyTools):
 // OS-ENFORCED via os.Root — `..`, absolute escapes, and reparse points
 // (symlinks / Windows junctions) are rejected by the kernel-level traversal,
 // failing CLOSED. An absolute path is first re-rooted via filepath.Rel so a
 // caller may name files either way; anything that lands outside readRoot is a
 // hard error, never a silent skip.
-func inlineContextPaths(paths []string, readRoot string) ([]core.ContextDoc, error) {
+//
+// Exported (it was package-private until askjob) because it is the ONE
+// delegator-side confined reader: internal/askjob needs the same os.Root
+// containment and the same per-file cap, but owns its own doc NAMING (it
+// de-collides duplicate base names instead of letting Validate reject the
+// pair), so it cannot go through PrepareContract's context_paths. A second
+// reader would be a second place to get containment wrong.
+func InlineContextPaths(paths []string, readRoot string) ([]core.ContextDoc, error) {
 	if strings.TrimSpace(readRoot) == "" {
 		// Mirror handleAgentRun's read_root default: the process working dir.
 		wd, err := os.Getwd()

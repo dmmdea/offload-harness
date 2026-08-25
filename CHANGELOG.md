@@ -6,6 +6,47 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.96.0] - 2026-08-25
+
+### Added — `offload_ask`: the one-call delegation entry point
+- Measured organic adoption of `agent_delegate` is ~0, and three rounds of steering pressure
+  (prose rules, a nudge hook, a blocking gate) moved it not at all. The diagnosis is
+  arithmetic, not discipline: at the moment of deciding, authoring a contract (goal +
+  context + output schema + a non-parrot acceptance check) costs far more than opening the
+  files and reading them. `offload_ask` removes that cost — **question + paths in,
+  `{answer, evidence}` out** — with the harness (`internal/askjob`) authoring the entire
+  contract and running it on the local agent seat through `Pipeline.RunAgentContract`, the
+  same entry a local delegation placement takes. Registered unconditionally, beside
+  `agent_run`: a cheap path behind a config flag is one more reason not to take it.
+- The hard part is the acceptance check, and it is the whole of this package. A caller-free
+  check must still be GROUNDED — anchored to content appearing only in the supplied files —
+  or it is exactly the PARROT-PASSABLE / UNGROUNDED pathology `delegate.LintAcceptance`
+  exists to catch, and the answer reads as verified while nothing verified it. So the anchor
+  is mined from the files: the rarest sufficiently-long identifier that appears NOWHERE in
+  the built goal. Two corrections proved out while building it: (1) the disqualifier is the
+  full GOAL, not the question — the goal's own boilerplate carries ≥8-character words
+  (`QUESTION`, `attached`, `inferring`) and the lint measures against `c.Goal`, so a
+  question-only exclusion trips the very lint the feature exists to satisfy; (2) rarity
+  ALONE picked `delegate` out of a code comment on a realistic file — grounded, lint-clean,
+  and a token no correct answer would ever cite — so identifier-shaped tokens (underscore,
+  digit, or internal capital) are preferred, with prose kept as a fallback so attaching
+  markdown or a log still works. When nothing survives, `BuildContract` REFUSES
+  (`ErrNoAnchor`) rather than emit a check that would pass garbage. Pinned by
+  `LintAcceptance(BuildContract(...))` returning zero warnings on a realistic source file.
+- Contract hygiene the caller no longer has to think about: files are inlined through the
+  delegator's one confined reader (`delegate.InlineContextPaths` — `os.Root` containment,
+  128 KiB per file), duplicate base names are de-collided deterministically
+  (`config.go` + `config.go` → `config.go` + `config-2.go`) instead of hitting `Validate`'s
+  silent-overwrite refusal, and the 16-doc / 256 KiB wire caps are refused UP FRONT with
+  typed errors naming the numbers and the fix (`ErrTooManyPaths`, `ErrContextTooLarge`).
+  `profile` is deliberately left empty so the executing box's `agent_profile` decides.
+- The generated acceptance is EVALUATED, not decorative: this lane runs one local seat
+  rather than going through `delegate.Run`, so the handler evaluates it and publishes
+  `verified` plus `acceptance` and `acceptance_failures`. `delegate.evalAcceptance` and
+  `delegate.inlineContextPaths` are exported for this (`EvalAcceptance`,
+  `InlineContextPaths`) — visibility only, no behavior change, so the two lanes cannot drift
+  into two sets of rules.
+
 ## [0.95.0] - 2026-08-25
 
 ### Added — `offload_status` publishes the LIVE fleet roster (`fleet` section)
