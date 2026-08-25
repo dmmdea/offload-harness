@@ -8,12 +8,17 @@ import { preflightGraph } from "./preflight-graph-file.mjs";
 // fails here instead of in production, where it defers a graph ComfyUI would accept.
 const AUTOGROW = ["COMFY_AUTOGROW_V3", { template: { names: ["a", "b", "c"], min: 1 } }];
 const AUTOGROW_MIN2 = ["COMFY_AUTOGROW_V3", { template: { names: ["a", "b", "c"], min: 2 } }];
+// min:0 — an OPTIONAL autogrow group, satisfied by NO wires at all. The old
+// `children === 0 -> false` early-out deferred exactly this valid shape (found live
+// 2026-08-24 on the Mage-Flow T2I template, worked around with a dummy `images: {}`).
+const AUTOGROW_MIN0 = ["COMFY_AUTOGROW_V3", { template: { names: ["a", "b"], min: 0 } }];
 
 const OBJ = {
   KSampler: { input: { required: { model: {}, positive: {}, negative: {}, latent_image: {} } } },
   SaveImage: { input: { required: { images: {} } } },
   ComfyMathExpression: { input: { required: { expression: {}, values: AUTOGROW } } },
   NeedsTwo: { input: { required: { values: AUTOGROW_MIN2 } } },
+  OptionalGroup: { input: { required: { model: {}, images: AUTOGROW_MIN0 } } },
 };
 const fetchInfo = (cls) => (OBJ[cls] ? OBJ[cls] : null);
 
@@ -70,4 +75,24 @@ test("preflightGraph flags an unknown node class", async () => {
   const r = await preflightGraph(graph, fetchInfo);
   assert.equal(r.ok, false);
   assert.deepEqual(r.unknownClasses, [{ node: "3", class_type: "NoSuchNode" }]);
+});
+
+test("autogrow group with min:0 is satisfied by NO children (optional group)", async () => {
+  const graph = { "1": { class_type: "OptionalGroup", inputs: { model: ["4", 0] } } };
+  const r = await preflightGraph(graph, fetchInfo);
+  assert.equal(r.ok, true, "an empty min:0 autogrow group must NOT defer");
+  assert.deepEqual(r.missing, []);
+});
+
+test("autogrow min:0 still flags a genuinely missing non-group input", async () => {
+  const graph = { "1": { class_type: "OptionalGroup", inputs: {} } };
+  const r = await preflightGraph(graph, fetchInfo);
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.missing, [{ node: "1", class_type: "OptionalGroup", inputs: ["model"] }]);
+});
+
+test("autogrow min:1 (default) still requires at least one child", async () => {
+  const graph = { "1": { class_type: "ComfyMathExpression", inputs: { expression: "a" } } };
+  const r = await preflightGraph(graph, fetchInfo);
+  assert.equal(r.ok, false, "min:1 group with zero children must still defer");
 });
