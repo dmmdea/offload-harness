@@ -38,6 +38,8 @@ func Build(req core.Request) (Built, error) {
 		return buildAssessImage(req)
 	case core.TaskVideoDescribe:
 		return buildVideoDescribe(req)
+	case core.TaskVideoWatch:
+		return buildVideoWatch(req)
 	default:
 		return Built{}, fmt.Errorf("unknown task %q", req.Task)
 	}
@@ -58,6 +60,24 @@ func buildVideoDescribe(req core.Request) (Built, error) {
 		User:      q,
 		Grammar:   "",
 		MaxTokens: 512,
+	}, nil
+}
+
+// buildVideoWatch builds the PER-WINDOW prompt of video_watch. The frames the
+// pipeline attaches are one time window of a longer video, each preceded by its
+// ABSOLUTE timestamp; the model is asked for concrete, timestamped notes that
+// bear on the question for that window only — the synthesis over all windows
+// happens on the text seat afterwards. No grammar — notes are natural language.
+func buildVideoWatch(req core.Request) (Built, error) {
+	q := paramString(req.Params, "question")
+	if q == "" {
+		return Built{}, fmt.Errorf("video_watch requires a question")
+	}
+	return Built{
+		System: "You are watching one time window of a longer video. The images are frames from that window in chronological order, each preceded by its absolute timestamp in the video (e.g. <83.0 seconds>). Write concrete, timestamped notes about what happens in these frames that bears on the question: what is shown, what changes, anything that looks wrong (upside down, mirrored text, tilted horizon, camera pointing away from the subject, dark or unreadable frames), and any on-screen text you can read verbatim. Use ONLY what is visible. If nothing in this window bears on the question, say so in one line.",
+		User:      "Question about the whole video: " + q + "\nNotes for this window:",
+		Grammar:   "",
+		MaxTokens: 400,
 	}, nil
 }
 

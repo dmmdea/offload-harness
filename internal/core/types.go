@@ -28,6 +28,12 @@ const (
 	// vqa; it is its own branch (frame sampling happens first), so it is NOT in
 	// isVisionTask.
 	TaskVideoDescribe TaskType = "video_describe"
+	// TaskVideoWatch watches a video END TO END: the pipeline splits it into
+	// time windows, runs each window's sampled frames (absolute timestamps)
+	// through the vision seat with the same question, then synthesizes the
+	// per-window notes into one answer on the text seat. video_describe sees
+	// only the first max_frames/fps seconds; this sees the whole file.
+	TaskVideoWatch TaskType = "video_watch"
 	// TaskTranscribe converts a local audio/video file to text on a free local
 	// whisper.cpp whisper-server (STT). The audio NEVER passes through the text
 	// Gemma cascade; it is dispatched directly in pipeline.Run (no prompt, no
@@ -112,7 +118,7 @@ const (
 // Valid reports whether t is a known task type.
 func (t TaskType) Valid() bool {
 	switch t {
-	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskUpscaleImage, TaskGenerateSVG, TaskGenerateVideo, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskRunGraph, TaskPipelineJob, TaskAgentRun:
+	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskVideoWatch, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskUpscaleImage, TaskGenerateSVG, TaskGenerateVideo, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskRunGraph, TaskPipelineJob, TaskAgentRun:
 		return true
 	}
 	return false

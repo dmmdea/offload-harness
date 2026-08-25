@@ -81,6 +81,8 @@ func main() {
 		err = runVQA(args)
 	case "video-describe":
 		err = runVideoDescribe(args)
+	case "video-watch":
+		err = runVideoWatch(args)
 	case "transcribe":
 		err = runTranscribe(args)
 	case "generate-image":
@@ -229,6 +231,8 @@ Usage:
   local-offload triage    <file|-> --question "..." [--json]
   local-offload vqa       <image-path> --question "..." [--json]
   local-offload video-describe <video-path> --question "..." [--json]
+  local-offload video-watch <video-path> --question "..." [--window-sec 8] [--fps 1] [--max-frames N] [--frame-width N] [--start S] [--end S] [--no-synthesize] [--json]
+                                         watch the WHOLE file window by window (video-describe sees only its first frames)
   local-offload transcribe <audio-path> [--language es] [--hq] [--json]
   local-offload ocr       <image-path> [--json]
   local-offload extract-image <image-path> --schema schema.json [--json]
@@ -457,6 +461,52 @@ func runVQA(args []string) error {
 		return nil
 	}
 	printHuman(res)
+	return nil
+}
+
+// runVideoWatch handles `local-offload video-watch <video-path> --question "..."
+// [--window-sec 8] [--fps 1] [--max-frames N] [--frame-width N] [--start S]
+// [--end S] [--no-synthesize] [--json]`: the whole-file sweep (video_watch).
+func runVideoWatch(args []string) error {
+	fs := flag.NewFlagSet("video-watch", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	question := fs.String("question", "", "the question to answer about the whole video")
+	windowSec := fs.Float64("window-sec", 0, "seconds per window (default 8)")
+	fps := fs.Float64("fps", 0, "frames per second inside each window (default 1)")
+	maxFrames := fs.Int("max-frames", 0, "cap on frames per window (default: config video_max_frames)")
+	frameWidth := fs.Int("frame-width", 0, "frame width px (default: config video_frame_width)")
+	startS := fs.Float64("start", 0, "start second")
+	endS := fs.Float64("end", 0, "end second (0 = end of file)")
+	noSynth := fs.Bool("no-synthesize", false, "return the per-window notes only (skip the text-seat answer)")
+	selectFlag := fs.String("select", "", "comma-separated top-level result fields to keep")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "question": true, "select": true, "window-sec": true, "fps": true,
+		"max-frames": true, "frame-width": true, "start": true, "end": true,
+	})
+	_ = fs.Parse(flagArgs)
+	if positional == "" || positional == "-" {
+		return fmt.Errorf("video-watch requires a video path (not stdin): local-offload video-watch <video> --question \"...\"")
+	}
+	if *question == "" {
+		return fmt.Errorf("video-watch requires --question \"...\"")
+	}
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	res := p.Run(context.Background(), core.Request{
+		Task:  core.TaskVideoWatch,
+		Video: positional,
+		Params: map[string]any{
+			"question": *question, "window_sec": *windowSec, "fps": *fps, "max_frames": *maxFrames,
+			"frame_width": *frameWidth, "start": *startS, "end": *endS, "synthesize": !*noSynth,
+		},
+	})
+	emitResult(res, *asJSON, *selectFlag, *compactFlag)
 	return nil
 }
 

@@ -6,6 +6,36 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.93.0] - 2026-08-25
+
+### Added — `video-watch` / `offload_video_watch`: watch a video END TO END
+- `video_describe` samples `video_max_frames` at `video_fps` from the HEAD of a file — on the
+  defaults (12 @ 2 fps) it sees the first six seconds of a thirty-second short and answers
+  "I cannot tell" about the rest (measured 2026-08-24 on the OptiPlex 7060 while reviewing a
+  Danmar RX-8 short). `video_watch` removes that ceiling: it probes the duration (ffprobe next
+  to `ffmpeg_path`), plans fixed windows (`window_sec`, default 8), samples each window at `fps`
+  (default 1 frame per second of the ENTIRE file, `max_frames`/`frame_width` per window), runs
+  every window through the SAME per-call machinery as `video_describe` (cache keyed on the
+  file's content digest + window, GPU-lock gate, breaker, 5xx retry, context-overflow
+  halve-and-retry, ledger) with ABSOLUTE `<T seconds>` frame labels, then synthesizes the
+  timestamped per-window notes into one answer on the text seat (`WithoutThinking`). Returns
+  `{answer, duration_sec, windows_total, windows_deferred, frames_total, windows[...]}`; a
+  window that defers is reported in place, the call defers only when every window did; a
+  file that would exceed the 240-window cap fails LOUDLY (raise `window_sec`) instead of
+  truncating. `start`/`end` narrow the sweep; `synthesize:false` returns notes only.
+- New `internal/videoio.SampleFramesWindow` (input-side `-ss`/`-t`), `videoio.Duration`,
+  `videoio.ProbePath`; `internal/tasks.buildVideoWatch`; `pipeline_videowatch.go` with the
+  pure `planVideoWatchWindows` under test.
+
+### Fixed — vision calls no longer die on THINKING vision seats (#168)
+- `GenerateVision` / `GenerateVisionInterleaved` accept `...GenOption`; `vqa`, `ocr`,
+  `assess_image`, `video_describe` and `video_watch` now pass `WithoutThinking()`
+  (`chat_template_kwargs.enable_thinking:false`). Measured 2026-08-24 on `qwen3.5-9b-vl`: the
+  default template spent all 512 tokens in `reasoning_content` and every vision verb deferred
+  with `empty vision output`; with the kwarg the same seat answers in 8 tokens. Non-thinking
+  templates ignore the key, so `qwen3vl-4b`-class seats are byte-for-byte unaffected in
+  behaviour.
+
 ## [0.92.0] - 2026-08-25
 
 ### Changed — blackwell-8 image seat: HiDream-O1-dev is the quality DEFAULT (Z-Image -> speed opt-in)

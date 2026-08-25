@@ -127,7 +127,7 @@ type imageURL struct {
 	URL string `json:"url"`
 }
 type contentPart struct {
-	Type     string    `json:"type"` // "text" | "image_url"
+	Type     string    `json:"type"` // "text" | "image_url" (mmChatReq below carries ChatTemplateKwargs, see thinking.go)
 	Text     string    `json:"text,omitempty"`
 	ImageURL *imageURL `json:"image_url,omitempty"`
 }
@@ -141,10 +141,16 @@ type mmChatReq struct {
 	Temperature float64 `json:"temperature"`
 	MaxTokens   int     `json:"max_tokens,omitempty"`
 	Grammar     string  `json:"grammar,omitempty"`
-	Logprobs    bool    `json:"logprobs,omitempty"`
-	TopLogprobs int     `json:"top_logprobs,omitempty"`
-	CachePrompt bool    `json:"cache_prompt"`
-	Stream      bool    `json:"stream"`
+	// ChatTemplateKwargs: same contract as chatReq — nil (key absent) unless a
+	// caller passed WithoutThinking(). A THINKING vision template (Qwen3.5-VL and
+	// friends) otherwise spends the whole max_tokens budget in reasoning_content
+	// and returns EMPTY content, which the pipeline can only report as "empty
+	// vision output" (offload-harness#168).
+	ChatTemplateKwargs *chatTemplateKwargs `json:"chat_template_kwargs,omitempty"`
+	Logprobs           bool                `json:"logprobs,omitempty"`
+	TopLogprobs        int                 `json:"top_logprobs,omitempty"`
+	CachePrompt        bool                `json:"cache_prompt"`
+	Stream             bool                `json:"stream"`
 }
 
 type respAlt struct {
@@ -237,7 +243,7 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 // it); grammar may be empty. It shares decodeGenResult with Generate, so
 // telemetry/logprob handling is identical. CachePrompt is forced OFF on the
 // vision path (llama.cpp #17200: consecutive-image KV reuse can corrupt output).
-func (c *Client) GenerateVision(ctx context.Context, model, system, user string, imageDataURIs []string, grammar string, maxTokens int, temperature float64, topLogprobs int) (GenResult, error) {
+func (c *Client) GenerateVision(ctx context.Context, model, system, user string, imageDataURIs []string, grammar string, maxTokens int, temperature float64, topLogprobs int, opts ...GenOption) (GenResult, error) {
 	if model == "" {
 		model = c.model
 	}
@@ -247,12 +253,13 @@ func (c *Client) GenerateVision(ctx context.Context, model, system, user string,
 		userParts = append(userParts, contentPart{Type: "image_url", ImageURL: &imageURL{URL: uri}})
 	}
 	body := mmChatReq{
-		Model:       model,
-		Temperature: temperature,
-		MaxTokens:   maxTokens,
-		Grammar:     grammar,
-		CachePrompt: false, // vision: KV reuse across images can corrupt (llama.cpp #17200)
-		Messages:    []mmMsg{},
+		Model:              model,
+		Temperature:        temperature,
+		MaxTokens:          maxTokens,
+		Grammar:            grammar,
+		CachePrompt:        false, // vision: KV reuse across images can corrupt (llama.cpp #17200)
+		Messages:           []mmMsg{},
+		ChatTemplateKwargs: applyGenOptions(opts).templateKwargs(),
 	}
 	if topLogprobs > 0 {
 		body.Logprobs = true
@@ -288,7 +295,7 @@ func (c *Client) GenerateVision(ctx context.Context, model, system, user string,
 // tokens for temporal localization). frameLabels and imageDataURIs pair by index;
 // a missing/empty label is skipped for that image. Shares decodeGenResult; like
 // GenerateVision, CachePrompt is forced OFF (llama.cpp #17200).
-func (c *Client) GenerateVisionInterleaved(ctx context.Context, model, system string, frameLabels, imageDataURIs []string, trailingUser, grammar string, maxTokens int, temperature float64, topLogprobs int) (GenResult, error) {
+func (c *Client) GenerateVisionInterleaved(ctx context.Context, model, system string, frameLabels, imageDataURIs []string, trailingUser, grammar string, maxTokens int, temperature float64, topLogprobs int, opts ...GenOption) (GenResult, error) {
 	if model == "" {
 		model = c.model
 	}
@@ -303,12 +310,13 @@ func (c *Client) GenerateVisionInterleaved(ctx context.Context, model, system st
 		userParts = append(userParts, contentPart{Type: "text", Text: trailingUser})
 	}
 	body := mmChatReq{
-		Model:       model,
-		Temperature: temperature,
-		MaxTokens:   maxTokens,
-		Grammar:     grammar,
-		CachePrompt: false,
-		Messages:    []mmMsg{},
+		Model:              model,
+		Temperature:        temperature,
+		MaxTokens:          maxTokens,
+		Grammar:            grammar,
+		CachePrompt:        false,
+		Messages:           []mmMsg{},
+		ChatTemplateKwargs: applyGenOptions(opts).templateKwargs(),
 	}
 	if topLogprobs > 0 {
 		body.Logprobs = true
