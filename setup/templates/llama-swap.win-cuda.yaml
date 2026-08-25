@@ -89,16 +89,22 @@ models:
   # at an explicit 32768 (measured fit; headroom for per-call profiles — the
   # tier's agent_ctx_tokens stays the loop's compaction budget).
   # Flags are EXPLICIT, not ${common}: ${common} pins `--reasoning off`, the 4B
-  # seat's measured collapse trap for this THINKING family. No thinking kwargs
-  # are pinned either: llama.cpp's default for this template is thinking OFF —
-  # the configuration every winning score was measured under (default-flag Qube
-  # runs and explicit-off on-box runs, consistent 100%). Thinking ON was measured
-  # WORSE: 89% extraction with reasoning prose leaking into content at 3.5x the
-  # wall. Never enable thinking on this seat without a re-bake.
+  # seat's measured collapse trap for this THINKING family. Thinking is pinned OFF
+  # via the env twin LLAMA_ARG_CHAT_TEMPLATE_KWARGS, NOT left to the default.
+  # MEASURED 2026-08-25 on llama.cpp b10615 (Aorus + OptiPlex, live): the old claim
+  # that llama.cpp defaults this template to thinking OFF is FALSE on this build.
+  # The seat served with reasoning_content populated and, at a small max_tokens,
+  # returned EMPTY content (174 to 2 completion tokens after the fix). The CLI form
+  # cannot be used: llama-swap's tokenizer strips the inner quotes of the
+  # chat-template-kwargs flag (json parse_error) and reasoning-budget 0 is inert;
+  # the env var is the working channel. Thinking ON was measured WORSE: 89%
+  # extraction with reasoning prose leaking into content at 3.5x the wall.
+  # Never enable thinking on this seat without a re-bake.
   # NO sampling flags on purpose: the agent loop sends `temperature: 0` on every
   # request (internal/agent/client.go wireReq), so server-side sampling is inert.
   qwen3.5-9b-agent:
     aliases: [qwen35-9b, agent-seat]
+    env: ['LLAMA_ARG_CHAT_TEMPLATE_KWARGS={"enable_thinking":false}']
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.5-9B-UD-Q4_K_XL.gguf
       -ngl 999 --parallel 1 --ctx-size 32768 --flash-attn __FLASH_ATTN__

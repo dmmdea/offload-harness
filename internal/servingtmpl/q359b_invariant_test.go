@@ -13,11 +13,16 @@ import (
 //
 //  1. No `--reasoning off` and no ${common} (which pins it) — the same measured
 //     thinking-family trap the 4B seat guards (28% vs 67% there).
-//  2. No thinking kwargs pinned: llama.cpp's default for this template is thinking
-//     OFF, the configuration every winning score was measured under. Thinking ON
-//     was measured strictly WORSE (89% x2, reasoning prose leaking into content,
-//     3.5x the wall) — so `--chat-template-kwargs` appearing on this seat means an
-//     unmeasured (or measured-worse) configuration is being shipped.
+//  2. Thinking is pinned OFF via the ENV twin LLAMA_ARG_CHAT_TEMPLATE_KWARGS.
+//     CORRECTED 2026-08-25 (measured live on llama.cpp b10615, both 8GB reference
+//     boxes): the previous premise — "llama.cpp's default for this template is
+//     thinking OFF" — is FALSE on this build. Unpinned, the seat served with
+//     reasoning_content populated and returned EMPTY content at a small
+//     max_tokens (174 -> 2 completion tokens once pinned). Thinking ON was
+//     measured strictly WORSE (89% x2, prose leaking into content, 3.5x wall),
+//     so the OFF pin must be present and must never say true. The CLI form is NOT
+//     usable: llama-swap strips the inner quotes of the chat-template-kwargs flag
+//     (json parse_error), so a seat carrying the CLI flag is broken, not equivalent.
 //  3. ctx is the explicit measured 32768 (6696 MiB on the 8GB reference card —
 //     the Gated-DeltaNet hybrid's small KV), not the tier macro: "tidying" it to
 //     __CTX__ silently halves the served window on the 16384 tiers that seat it.
@@ -54,7 +59,13 @@ func TestQ359BSeatKeepsItsMeasuredInvariants(t *testing.T) {
 				t.Errorf("seat uses ${common}, which pins --reasoning off. Block:\n%s", block)
 			}
 			if strings.Contains(block, "--chat-template-kwargs") {
-				t.Errorf("seat pins thinking kwargs; the measured configuration is llama.cpp's default (thinking OFF, 100%% extraction) and thinking ON was measured WORSE (89%%, 3.5x wall). Re-bake before pinning. Block:\n%s", block)
+				t.Errorf("seat pins thinking kwargs on the COMMAND LINE; llama-swap strips the inner quotes and llama-server rejects it (json parse_error). Use the LLAMA_ARG_CHAT_TEMPLATE_KWARGS env twin. Block:\n%s", block)
+			}
+			if !strings.Contains(block, `LLAMA_ARG_CHAT_TEMPLATE_KWARGS={"enable_thinking":false}`) {
+				t.Errorf("seat does NOT pin thinking OFF via the env twin. Measured live on b10615: unpinned, this seat serves with reasoning_content populated and returns EMPTY content at a small max_tokens. Block:\n%s", block)
+			}
+			if strings.Contains(block, `"enable_thinking":true`) {
+				t.Errorf("seat pins thinking ON - measured strictly WORSE (89%%, prose leaking into content, 3.5x wall). Block:\n%s", block)
 			}
 			if !strings.Contains(block, "--ctx-size 32768") {
 				t.Errorf("seat lost its explicit measured ctx 32768 (6696 MiB on the 8GB reference card). Block:\n%s", block)

@@ -6,6 +6,30 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.94.2] - 2026-08-25
+
+### Fixed — the qwen3.5-9b agent seat shipped with thinking ON (measured live, both 8GB tiers)
+- Both CUDA serving templates omitted any thinking pin on `qwen3.5-9b-agent`, on the
+  documented premise that "llama.cpp's default for this template is thinking OFF".
+  **That premise is FALSE on llama.cpp b10615** — verified live on BOTH 8GB reference
+  boxes: the seat served with `reasoning_content` populated and, at a small
+  `max_tokens`, returned **EMPTY content** (all budget consumed by reasoning).
+  This is the configuration the 2026-08-22 bake measured as strictly WORSE (89%
+  extraction with prose leaking into content, 3.5x the wall) — silently shipped as
+  the seat every 8GB tier binds.
+- Thinking is now pinned OFF via the ENV twin
+  `LLAMA_ARG_CHAT_TEMPLATE_KWARGS={"enable_thinking":false}` in
+  `llama-swap.win-cuda.yaml` and `llama-swap.linux-cuda.yaml`. The CLI form cannot be
+  used: llama-swap's tokenizer strips the inner quotes of `--chat-template-kwargs`
+  (json parse_error) and `--reasoning-budget 0` is inert for this template.
+  The tier's `gpu_env` still merges into the same line (render-verified on both
+  ampere-8 and blackwell-8).
+- `TestQ359BSeatKeepsItsMeasuredInvariants` inverted accordingly: it now REQUIRES the
+  env pin, still forbids the broken CLI form, and forbids `enable_thinking:true`.
+  Mutation-proven — deleting the pin fails the guard.
+- Measured after the fix on both boxes: 174 -> **2** completion tokens, `content` "OK",
+  no `reasoning_content`.
+
 ## [0.94.1] - 2026-08-25
 
 ### Fixed — run-graph preflight deferred a VALID empty `min:0` autogrow group
