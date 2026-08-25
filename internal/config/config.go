@@ -807,6 +807,21 @@ type Config struct {
 	// FleetNodeID names this node in /fleet/health. Empty = the OS hostname,
 	// resolved at serve time (so a shared config never bakes one box's name).
 	FleetNodeID string `json:"fleet_node_id,omitempty"`
+	// FleetMaxQueueDepth caps how many jobs this node will hold in
+	// accepted/running at once; a NEW dispatch beyond it is refused 503, which
+	// the dispatch contract already defines as "re-dispatch elsewhere" — so a
+	// full node sheds load to its siblings with no delegator change. 0 = the
+	// built-in default (32); negative = unlimited (the pre-cap behavior).
+	//
+	// The default is deliberately GENEROUS: normal use never touches it (a full
+	// agent_delegate call is 8 subtasks; the delegator runs 4 at a time), so it
+	// only bites on a runaway pile-up across many concurrent delegators — the
+	// measured failure mode here was unbounded queue LATENCY behind the single
+	// llama-swap slot, not a crash. An over-tight cap is the worse defect: this
+	// fleet's history includes written limits quietly suppressing real use.
+	// Enforced at ack time before any request materialization; re-acks of jobs
+	// this node already owns and result polls are never refused by it.
+	FleetMaxQueueDepth int `json:"fleet_max_queue_depth,omitempty"`
 	// FleetAuthToken, when non-empty, bearer-gates the fleet's AGENT lane:
 	// POST /fleet/dispatch with task_type "agent" and GET /fleet/jobs/{id} for
 	// jobs an agent dispatch created require `Authorization: Bearer <token>`
@@ -1142,6 +1157,7 @@ func Default() Config {
 		HailoIdleSec:                  300,
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
+		FleetMaxQueueDepth:            0,                 // 0 = built-in default (32 accepted+running); negative = unlimited
 		FleetAuthToken:                "",                // "" = no agent-lane auth → agent dispatch loopback-only; media lane never auths (v1 scope)
 		FleetAgentEnabled:             false,             // node-side agent-lane worker role: explicit operator opt-in
 		AgentDelegationEnabled:        false,             // delegator-side surfaces (agent_delegate MCP + CLI placement): opt-in
@@ -1511,6 +1527,20 @@ func DefaultComfyDir() string {
 // the ComfyUI path (imagegen_script) OR the sdcpp engine (J2: sdcpp_bin + model;
 // imagegen_script stays empty there). The fleet capability gate and fleet-measure
 // key on this, matching the pipeline's engine-first routing.
+// FleetQueueLimit resolves FleetMaxQueueDepth: 0 → the built-in default,
+// negative → 0 meaning unlimited. Callers compare depth >= limit only when
+// limit > 0.
+func (c Config) FleetQueueLimit() int {
+	switch {
+	case c.FleetMaxQueueDepth < 0:
+		return 0
+	case c.FleetMaxQueueDepth == 0:
+		return 32
+	default:
+		return c.FleetMaxQueueDepth
+	}
+}
+
 func (c Config) ImageRouteConfigured() bool {
 	if c.ImageGenEngine == "sdcpp" {
 		return c.SdcppBin != "" && c.SdcppModel != ""

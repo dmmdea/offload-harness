@@ -38,7 +38,16 @@ advertising an empty GPU. The serve log names the resolved source
 (`... via nvidia-smi|windows-generic, vendor=... arch=...`). Ctrl-C drains: dispatches for a
 job_id this node has never seen get 503; a re-dispatch of a job_id this node already knows
 about (running, done, or previously failed) still re-acks 202 — or 409 if it previously
-failed — even mid-drain, since that's not new work. In-flight renders get up to 30s to finish, survivors are marked terminal
+failed — even mid-drain, since that's not new work.
+
+**Queue-depth back-pressure** (`fleet_max_queue_depth`, 0.95.0): a NEW dispatch is refused
+`503` ("queue full") once accepted+running jobs reach the cap — default 32, configurable,
+negative = unlimited. Any non-202 already means "re-dispatch elsewhere" to the dispatcher,
+so a full node sheds load to its siblings with no dispatcher change. The check runs before
+request materialization; re-acks of jobs this node owns and result polls are never refused
+by it. The default is deliberately generous (a full `agent_delegate` call is 8 subtasks;
+the delegator runs 4 at a time): it guards runaway pile-up latency behind the single
+inference slot, and an over-tight cap suppressing real use is the worse defect. In-flight renders get up to 30s to finish, survivors are marked terminal
 `error:"interrupted"` so pollers always reach a terminal state.
 
 ## Running as a Windows scheduled task

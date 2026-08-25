@@ -6,6 +6,40 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.95.0] - 2026-08-25
+
+### Added — `offload_status` publishes the LIVE fleet roster (`fleet` section)
+- Capability was asserted in documents and the documents went stale in a way that silently
+  suppressed delegation: three independent sources (a rules file, the tier matrix, and the
+  config the MCP loads) each described a live, resident 9B agent seat as absent or
+  half-capable, and no runtime surface could contradict them. `offload_status` now probes
+  every configured `delegate_remotes` node concurrently and publishes `node_id`,
+  `agent_seat`, `agent_ctx_tokens`, `agent_enabled`, `agent_seat_resident`, `queue_depth`,
+  plus `agent_capable_nodes` / `idle_agent_nodes` and the local planner seat. A written
+  figure is now always the weaker source. The local-seat probe is NON-loading (the
+  `ErrNotLoaded` Props path): a status question must never cost a multi-GB model load. A
+  probe failure is reported per node, never a defer — and the node probes hold their own
+  timeout budget so a local stall cannot be published as a fleet outage.
+
+### Changed — delegation contracts resolve the per-seat profile (was: hardcoded `research`)
+- `RunAgentContract` now resolves contract `profile` > the executing box's configured
+  `agent_profile` > `general` — the same `AgentTaskProfile` chain `agent_run` uses. The old
+  hardcoded `research` default forced every spread's subtask 0 (always the local seat) into
+  the narrowed shape the 2026-08-19 D3 bake measured worse on big planners (27B: general
+  100%, research 94% and 5x slower on one shape); small tiers keep `research` via their
+  `config_seed`, which is where a per-seat decision belongs. `agent_delegate`'s description
+  now also directs callers to size contracts from the live `agent_ctx_tokens` instead of
+  remembered figures.
+
+### Added — fleet node queue-depth back-pressure (`fleet_max_queue_depth`)
+- `POST /fleet/dispatch` refuses NEW work 503 ("queue full") once accepted+running reaches
+  the cap — the dispatch contract already defines any non-202 as "re-dispatch elsewhere",
+  so a full node sheds load to siblings with no delegator change. Deliberately generous:
+  default 32 (a full `agent_delegate` call is 8 subtasks), configurable, negative =
+  unlimited; enforced before request materialization; re-acks of owned jobs and result
+  polls are never refused by it. Guards the measured failure mode (unbounded queue LATENCY
+  behind the single inference slot), not a crash.
+
 ## [0.94.3] - 2026-08-25
 
 ### Fixed — a fresh ampere-8 install shipped no image route (seed lacked `imagegen_script`)

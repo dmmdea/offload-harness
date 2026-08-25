@@ -69,9 +69,9 @@ type Options struct {
 	Version string
 	// Reclaim reports how much VRAM this node could free right now. nil (or an
 	// unknown verdict) omits the reclaim fields entirely rather than guessing.
-	Reclaim func(freeGiB, totalGiB float64) ReclaimVerdict
-	GpuVendor  string
-	GpuArch    string
+	Reclaim   func(freeGiB, totalGiB float64) ReclaimVerdict
+	GpuVendor string
+	GpuArch   string
 	// Accelerators is the additive-device list from the installer's manifest
 	// (installed.json `accelerators`, ADR 0024) — advertised verbatim in health
 	// so a delegator can route NPU-owned work to this node. Empty = omitted.
@@ -332,15 +332,15 @@ func (s *Server) Serve(l net.Listener) error {
 
 // healthPayload is CONTRACT.md v2's health shape, field for field.
 type healthPayload struct {
-	NodeID                string           `json:"node_id"`
-	SchemaVersion         int              `json:"schema_version"`
-	GpuVendor             string           `json:"gpu_vendor"`
-	GpuArch               string           `json:"gpu_arch"`
+	NodeID        string `json:"node_id"`
+	SchemaVersion int    `json:"schema_version"`
+	GpuVendor     string `json:"gpu_vendor"`
+	GpuArch       string `json:"gpu_arch"`
 	// Accelerators is the installer-manifest additive-device list (ADR 0024).
 	// Additive + omitempty: a node with none emits a byte-identical payload.
 	Accelerators []string `json:"accelerators,omitempty"`
-	VramTotalGb           float64          `json:"vram_total_gb"`
-	VramFreeGb            float64          `json:"vram_free_gb"`
+	VramTotalGb  float64  `json:"vram_total_gb"`
+	VramFreeGb   float64  `json:"vram_free_gb"`
 	// GpuDevices is the full per-device breakdown behind VramTotalGb/
 	// VramFreeGb's headline pick (nvidia-smi multi-device source only — see
 	// HeadlineDevice for the largest-total-wins rule those two fields apply).
@@ -349,7 +349,7 @@ type healthPayload struct {
 	// source can't enumerate devices, so "no gpu_devices key" unambiguously
 	// means "single-device source" — the exact shape every pre-fix node and
 	// consumer already expects.
-	GpuDevices []GPUDevice `json:"gpu_devices,omitempty"`
+	GpuDevices            []GPUDevice      `json:"gpu_devices,omitempty"`
 	SupportedTaskTypes    []string         `json:"supported_task_types"`
 	LoadableModelFamilies []string         `json:"loadable_model_families"`
 	ModelFootprints       []FootprintEntry `json:"model_footprints"`
@@ -601,6 +601,23 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	if s.jobs.Draining() {
 		writeError(w, http.StatusServiceUnavailable, "node draining")
 		return
+	}
+
+	// Queue-depth back-pressure, NEW work only — known jobs re-acked above are
+	// never refused by it, and result polls don't come through here at all.
+	// A non-202 is the dispatch contract's "re-dispatch elsewhere", so a full
+	// node sheds load to its siblings with no delegator change. Checked before
+	// BuildRequest so a refused dispatch materializes nothing. Two concurrent
+	// dispatches can both pass and overshoot the cap by a few — this is
+	// back-pressure against unbounded queue latency behind the single
+	// inference slot, not an exact invariant, and exactness under a lock is
+	// not worth coupling admission to the jobs mutex.
+	if limit := s.opts.Cfg.FleetQueueLimit(); limit > 0 {
+		if d := s.jobs.QueueDepth(); d >= limit {
+			writeError(w, http.StatusServiceUnavailable,
+				fmt.Sprintf("queue full (depth %d at limit %d): re-dispatch elsewhere or retry later", d, limit))
+			return
+		}
 	}
 
 	// The RESOLVED listener goes down the admission path — the same value

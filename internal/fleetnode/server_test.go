@@ -1269,3 +1269,78 @@ func TestRefreshAgentResidencyPublishesEvenOnPanic(t *testing.T) {
 		t.Fatal("awaitProbe never returned: the Broadcast that releases waiters was skipped")
 	}
 }
+
+// --- queue-depth back-pressure (FleetMaxQueueDepth → Config.FleetQueueLimit) ---
+
+// dispatchImage posts one image-gen dispatch with the given job id.
+func dispatchImage(t *testing.T, s *Server, id string) *httptest.ResponseRecorder {
+	t.Helper()
+	return do(t, s, http.MethodPost, "/fleet/dispatch",
+		`{"job_id":"`+id+`","task_type":"image-gen","payload":{"prompt":"hi"}}`, nil)
+}
+
+// TestDispatchQueueFull503NewWorkOnly proves all four properties of the cap in
+// one lifecycle: (1) a NEW dispatch beyond the limit is refused 503 naming
+// "queue full" — the dispatch contract's re-dispatch-elsewhere signal; (2) a
+// re-dispatch of a job the node already OWNS is re-acked 202 even while full
+// (a lost ack must never become a fleet-wide duplicate because the node was
+// busy); (3) the refusal is the GUARD's, not an artifact — the control arm
+// below runs the identical sequence with the cap disabled and is admitted; and
+// (4) capacity frees when a job finishes.
+func TestDispatchQueueFull503NewWorkOnly(t *testing.T) {
+	release := make(chan struct{})
+	blocked := &fakeRunner{fn: func(ctx context.Context, req core.Request) core.Result {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return core.Result{OK: true, Data: json.RawMessage(`{"image_path":"x.png"}`)}
+	}}
+	cfg := imageCfg()
+	cfg.FleetMaxQueueDepth = 1
+	s, _ := newTestServer(t, cfg, blocked, nil)
+
+	if rec := dispatchImage(t, s, "qf-1"); rec.Code != http.StatusAccepted {
+		t.Fatalf("first dispatch = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	// The store is at the limit: new work is refused, owned work is re-acked.
+	wantErrorShape(t, dispatchImage(t, s, "qf-2"), http.StatusServiceUnavailable, "queue full")
+	if rec := dispatchImage(t, s, "qf-1"); rec.Code != http.StatusAccepted {
+		t.Fatalf("re-ack of owned job while full = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	close(release)
+	pollJob(t, s, "qf-1", JobDone)
+	// Terminal jobs are results awaiting pollers, not load: capacity is free.
+	if rec := dispatchImage(t, s, "qf-3"); rec.Code != http.StatusAccepted {
+		t.Fatalf("dispatch after completion = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	pollJob(t, s, "qf-3", JobDone)
+}
+
+// TestDispatchQueueUnlimitedControlArm is the control for the test above: the
+// identical fill-then-dispatch sequence with the cap disabled (negative =
+// unlimited) admits everything — proof the 503 above comes from the guard.
+func TestDispatchQueueUnlimitedControlArm(t *testing.T) {
+	release := make(chan struct{})
+	blocked := &fakeRunner{fn: func(ctx context.Context, req core.Request) core.Result {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return core.Result{OK: true, Data: json.RawMessage(`{"image_path":"x.png"}`)}
+	}}
+	cfg := imageCfg()
+	cfg.FleetMaxQueueDepth = -1
+	s, _ := newTestServer(t, cfg, blocked, nil)
+
+	if rec := dispatchImage(t, s, "qu-1"); rec.Code != http.StatusAccepted {
+		t.Fatalf("first dispatch = %d, want 202", rec.Code)
+	}
+	if rec := dispatchImage(t, s, "qu-2"); rec.Code != http.StatusAccepted {
+		t.Fatalf("second dispatch under unlimited = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	close(release)
+	pollJob(t, s, "qu-1", JobDone)
+	pollJob(t, s, "qu-2", JobDone)
+}
