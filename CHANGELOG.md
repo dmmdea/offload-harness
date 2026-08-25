@@ -6,6 +6,16 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.93.1] - 2026-08-25
+
+### Fixed — `video_watch`: a truncated window is kept as partial evidence
+- First live sweep on the OptiPlex (30-s short, 4 windows) lost 2 windows to `vision output
+  truncated`: 8 verbose per-frame notes overflowed the 400-token per-window budget and the
+  window was dropped, so the synthesis reported those seconds as unverified. Now: the per-window
+  prompt asks for COMPACT one-line notes (`<T s> …`, `same` for unchanged frames), the budget is
+  768, and a note that still hits the limit is kept with `truncated:true` (the frames count, the
+  synthesis treats the tail of that window as unverified) instead of being discarded.
+
 ## [0.93.0] - 2026-08-25
 
 ### Added — `video-watch` / `offload_video_watch`: watch a video END TO END

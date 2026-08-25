@@ -3021,6 +3021,7 @@ func imageModelFromConfig(cfg config.Config) imagegen.Model {
 		CFG:          cfg.ImageGenCFG,
 		Sampler:      cfg.ImageGenSampler,
 		Scheduler:    cfg.ImageGenScheduler,
+		ReserveVRAM:  cfg.ImageGenReserveVRAM,
 		Family:       cfg.ImageGenFamily,
 		Preset:       cfg.ImageGenPreset,
 		CLIP:         cfg.ImageGenCLIP,

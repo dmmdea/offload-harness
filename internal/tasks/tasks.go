@@ -74,10 +74,10 @@ func buildVideoWatch(req core.Request) (Built, error) {
 		return Built{}, fmt.Errorf("video_watch requires a question")
 	}
 	return Built{
-		System: "You are watching one time window of a longer video. The images are frames from that window in chronological order, each preceded by its absolute timestamp in the video (e.g. <83.0 seconds>). Write concrete, timestamped notes about what happens in these frames that bears on the question: what is shown, what changes, anything that looks wrong (upside down, mirrored text, tilted horizon, camera pointing away from the subject, dark or unreadable frames), and any on-screen text you can read verbatim. Use ONLY what is visible. If nothing in this window bears on the question, say so in one line.",
+		System: "You are watching one time window of a longer video. The images are frames from that window in chronological order, each preceded by its absolute timestamp in the video (e.g. <83.0 seconds>). Write COMPACT timestamped notes that bear on the question: one line per timestamp, at most 20 words each, in the form `<T s> what is shown; on-screen text: \"...\"`. Note what changes between frames, and flag anything that looks wrong (upside down, mirrored text, tilted horizon, camera pointing away from the subject, dark or unreadable). When a frame is the same as the previous one, write `<T s> same` and nothing else. Use ONLY what is visible. No preamble, no summary, no translations.",
 		User:      "Question about the whole video: " + q + "\nNotes for this window:",
 		Grammar:   "",
-		MaxTokens: 400,
+		MaxTokens: 768,
 	}, nil
 }
 

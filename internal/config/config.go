@@ -264,6 +264,12 @@ type Config struct {
 	// ImageGenTimeoutSec bounds one render: ComfyUI cold-start (~4min) + first SDXL
 	// render (~6min) + margin. Default 720 (12min).
 	ImageGenTimeoutSec int `json:"imagegen_timeout_sec,omitempty"`
+	// ImageGenReserveVRAM is ComfyUI's --reserve-vram (GiB held back for the
+	// display/WDDM) for the generate_image comfy path. 0 = the script default (1.0).
+	// Lowering it on a box whose display needs less keeps MORE model weights resident
+	// during diffusion (less per-step offload streaming) for a small speed-up; too low
+	// risks OOM at the VAE-decode peak. Per-machine (measure before lowering).
+	ImageGenReserveVRAM float64 `json:"imagegen_reserve_vram,omitempty"`
 	// --- image model binding (PER-MACHINE; the harness stays model-agnostic) ---
 	// Each box serves the image model its hardware can actually run — an 8GB laptop
 	// runs SDXL; a 16GB workstation may run a DiT (HiDream) instead. NONE of those

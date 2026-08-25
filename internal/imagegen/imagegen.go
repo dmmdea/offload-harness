@@ -30,6 +30,10 @@ type Model struct {
 	CFG       float64 // 0 = script default
 	Sampler   string  // "" = script default
 	Scheduler string  // "" = script default
+	// ReserveVRAM is ComfyUI's --reserve-vram (GiB held back for the display) for
+	// this render. 0 = the script default (1.0). Lower = more weights resident during
+	// diffusion (small speed-up), at OOM risk near the VAE-decode peak. Per-machine.
+	ReserveVRAM float64
 	// Family selects the MODEL-CORRECT graph in comfy-render.mjs ("" = the generic
 	// SDXL-shaped graph). "hidream-o1" / "hidream-o1-dev" render the official
 	// pixel-space DiT graph (ModelNoiseScale, patch-seam smoothing, SamplerCustom,
@@ -143,6 +147,9 @@ func bindingArgs(m Model) []string {
 	}
 	if m.Family != "" {
 		args = append(args, "--family", m.Family)
+	}
+	if m.ReserveVRAM > 0 {
+		args = append(args, "--reserve-vram", strconv.FormatFloat(m.ReserveVRAM, 'g', -1, 64))
 	}
 	if m.Preset != "" {
 		args = append(args, "--preset", m.Preset)

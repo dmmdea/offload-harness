@@ -89,9 +89,10 @@ type videoWatchNote struct {
 	Start    float64 `json:"start"`
 	End      float64 `json:"end"`
 	Frames   int     `json:"frames"`
-	Notes    string  `json:"notes,omitempty"`
-	Deferred bool    `json:"deferred,omitempty"`
-	Reason   string  `json:"reason,omitempty"`
+	Notes     string  `json:"notes,omitempty"`
+	Truncated bool    `json:"truncated,omitempty"` // notes are partial (hit max_tokens); still evidence
+	Deferred  bool    `json:"deferred,omitempty"`
+	Reason    string  `json:"reason,omitempty"`
 }
 
 // runVideoWatch implements TaskVideoWatch. Params: question (required),
@@ -188,6 +189,19 @@ func (p *Pipeline) runVideoWatch(ctx context.Context, req core.Request, built ta
 			if wwidth > 256 && isContextOverflow(res.Reason) {
 				wwidth /= 2 // same halve-and-retry as video_describe: keep coverage, shrink pixels
 				continue
+			}
+			// A window whose notes hit max_tokens is still EVIDENCE for the seconds it
+			// did cover — video_describe rightly defers a truncated single answer, but
+			// dropping a whole window here would leave a hole in the sweep (measured on
+			// the first live run: 2 of 4 windows lost to "vision output truncated").
+			// Keep the partial notes, mark them, and let the synthesis treat the tail
+			// of the window as unverified.
+			if strings.HasPrefix(res.Reason, "vision output truncated") && strings.TrimSpace(res.Partial) != "" {
+				note.Notes = strings.TrimSpace(res.Partial) + "\n(notes truncated at the model's output limit — the rest of this window is unverified)"
+				note.Frames = len(frames)
+				note.Truncated = true
+				framesTotal += len(frames)
+				break
 			}
 			note.Deferred, note.Reason = true, res.Reason
 			break
