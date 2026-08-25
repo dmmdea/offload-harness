@@ -21,6 +21,7 @@ func TestImageModelFromConfig(t *testing.T) {
 		ImageGenCFG:          1.0,
 		ImageGenSampler:      "euler",
 		ImageGenScheduler:    "simple",
+		ImageGenReserveVRAM:  0.6,
 		ImageGenFamily:       "qwen-image",
 		ImageGenPreset:       "lightning4",
 		ImageGenCLIP:         "te.safetensors",

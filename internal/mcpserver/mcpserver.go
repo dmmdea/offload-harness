@@ -123,6 +123,12 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	}, s.handleVideoDescribe)
 
 	srv.AddTool(&mcp.Tool{
+		Name:        "offload_video_watch",
+		Description: "WATCH a VIDEO END TO END on a free local vision model and answer a question about the whole thing. It splits the file into time windows (default 8 s), samples every window at fps (default 1 frame/s, i.e. one frame per second of the ENTIRE video), runs each window through the vision seat with absolute timestamps, then synthesizes one answer on the text seat. Use this instead of offload_video_describe whenever the video is longer than a few seconds or the answer depends on something not in the first seconds (shot list, continuity, defects at a given time, on-screen text over time). Returns {answer, duration_sec, windows_total, windows_deferred, frames_total, windows[{start,end,frames,notes|deferred,reason}]} — the per-window notes cite seconds. Slower than video_describe (one vision call per window); scale window_sec/fps for very long files. video is a LOCAL file path.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"video":{"type":"string","description":"local video file path"},"question":{"type":"string","description":"the question to answer about the whole video"},"window_sec":{"type":"number","description":"seconds per window (default 8)"},"fps":{"type":"number","description":"frames sampled per second inside each window (default 1)"},"max_frames":{"type":"integer","description":"cap on frames per window (default: the box's video_max_frames)"},"frame_width":{"type":"integer","description":"frame width in px sent to the model (default: the box's video_frame_width; raise for small text)"},"start":{"type":"number","description":"start second (default 0)"},"end":{"type":"number","description":"end second (default: end of file)"},"synthesize":{"type":"boolean","description":"also produce the final answer on the text seat (default true); false returns the per-window notes only"}},"required":["video","question"]}`),
+	}, s.handleVideoWatch)
+
+	srv.AddTool(&mcp.Tool{
 		Name:        "offload_transcribe",
 		Description: "Transcribe a local AUDIO or VIDEO file to text on a free local whisper model (STT). audio is a LOCAL file path (mp3/m4a/wav/mp4/...); language is optional ('en','es', or 'auto' — default auto-detect); set hq=true for the higher-quality (slower) model on hard/noisy clips. Returns {gist (preview), language, duration_sec, num_segments, segments[{id,start,end,text}] (timestamped spans — pull only the ones you need), srt_path, text_path, json_path}. The full transcript + SRT are written to disk; read the spans/paths you need. If it can't transcribe confidently it returns deferred:true and you should handle the audio yourself.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"audio":{"type":"string","description":"local audio or video file path"},"language":{"type":"string","description":"en, es, or auto (default auto-detect); ignored by an openai-protocol hq tier (mtmd ASR detects language itself)"},"hq":{"type":"boolean","description":"use the configured higher-accuracy STT tier (slower) for hard/noisy/multilingual audio; note the accuracy tier may return a single full-span segment instead of timestamps. Does not apply under engine:npu (one NPU model)"},"engine":{"type":"string","enum":["gpu","npu"],"description":"gpu (default): the local whisper seat (quality path, timestamps, long-form); npu: whisper-base on the Hailo-8L accelerator — fast preview tier (5 s chunks, no timestamps) WHERE the platform runs it; on Windows HailoRT 4.24 boxes the sidecar returns a typed platform-blocked diagnosis instead (whisper HEFs are Linux-validated upstream), so gpu remains the STT path there"},"select":{"type":"array","items":{"type":"string"},"description":"optional: return ONLY these top-level result fields (e.g. [\"gist\",\"language\",\"num_segments\",\"srt_path\"]) to skip the verbose segments[] and keep your context lean — read the full transcript/spans from srt_path or json_path when you need them"}},"required":["audio"]}`),
@@ -524,6 +530,28 @@ func (s *Server) handleVideoDescribe(ctx context.Context, req *mcp.CallToolReque
 		return bad, nil
 	}
 	return result(s.p.Run(ctx, core.Request{Task: core.TaskVideoDescribe, Video: in.Video, Params: map[string]any{"question": in.Question}}))
+}
+
+func (s *Server) handleVideoWatch(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var in struct {
+		Video      string   `json:"video"`
+		Question   string   `json:"question"`
+		WindowSec  float64  `json:"window_sec"`
+		FPS        float64  `json:"fps"`
+		MaxFrames  int      `json:"max_frames"`
+		FrameWidth int      `json:"frame_width"`
+		Start      float64  `json:"start"`
+		End        float64  `json:"end"`
+		Synthesize *bool    `json:"synthesize"`
+	}
+	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+		return bad, nil
+	}
+	params := map[string]any{"question": in.Question, "window_sec": in.WindowSec, "fps": in.FPS, "max_frames": in.MaxFrames, "frame_width": in.FrameWidth, "start": in.Start, "end": in.End}
+	if in.Synthesize != nil {
+		params["synthesize"] = *in.Synthesize
+	}
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskVideoWatch, Video: in.Video, Params: params}))
 }
 
 func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

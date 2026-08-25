@@ -114,8 +114,10 @@ offload-harness assess-image  render.png --brief "a red sports car at sunset" --
 offload-harness transcribe    clip.mp4 --language es --json
 offload-harness transcribe    noisy.m4a --language es --hq        # high-quality model for hard audio
 
-# Video understanding (samples frames)
+# Video understanding (samples frames from the head of the file)
 offload-harness video-describe clip.mp4 --question "What happens here?" --json
+# Watch a WHOLE video end to end (windowed sweep, 1 frame/s of the entire file, timestamped notes + answer)
+offload-harness video-watch reel.mp4 --question "List every shot; flag anything mirrored, upside-down or off the subject" --json
 
 # Generate (free, local GPU)
 offload-harness generate-image "a product photo of a coffee mug on white" --negative "people, text, watermark"
@@ -240,7 +242,8 @@ Transport is **stdio**. Every tool returns the full result JSON — and a `{"def
 | `offload_ocr` | `image`, `engine?` | Transcribe all text in an image → `{text}`, or defer. `engine:"npu"` selects the Hailo-8L PaddleOCR path on a box with the accelerator (explicit fast-batch path, never an automatic fallback); default is the GPU vision model. |
 | `offload_extract_image` | `image`, `schema` | OCR then extract grounded fields from the image → object, or defer. |
 | `offload_assess_image` | `image`, `brief?` | QA a render against exclusions → `{has_people, has_text, matches_brief, notes}`. |
-| `offload_video_describe` | `video`, `question` | Sample frames from a local video and answer → `{answer}`, or defer. |
+| `offload_video_describe` | `video`, `question` | Sample frames from the head of a local video and answer → `{answer}`, or defer. |
+| `offload_video_watch` | `video`, `question`, `window_sec?`, `fps?`, `max_frames?`, `frame_width?`, `start?`, `end?`, `synthesize?` | Watch a local video END TO END: fixed windows (default 8 s) sampled at `fps` (default 1/s of the whole file) through the vision seat with absolute timestamps, then one answer on the text seat → `{answer, duration_sec, windows_total, windows_deferred, frames_total, windows[{start,end,frames,notes}]}`; a window that defers is reported, the call defers only when every window did. |
 | `offload_transcribe` | `audio`, `language?`, `hq?`, `engine?`, `select?` | Transcribe local audio/video → `{gist, segments[], srt_path, ...}`, or defer. `engine:"npu"` = the accelerator's whisper-base fast preview where the platform runs it (Windows HailoRT 4.24 boxes return a typed platform-blocked defer). |
 | `offload_generate_image` | `prompt`, `negative?`, `width?`, `height?`, `steps?`, `seed?`, `out?`, `refine?` | Generate an image on the local GPU (ComfyUI; this machine's configured model at its highest-quality settings — e.g. HiDream-O1 bf16 via its official family graph at native 2048, or SDXL on smaller boxes) → `{image_path, ...}`, or defer. Quality-first: renders may take minutes by design. Where `imagegen_refiner_model` is configured, the prompt is first expanded on the free local text tier (double-quoted spans guarded both ways; any refiner problem falls back to the raw prompt); `refine:false` renders the prompt verbatim. |
 | `offload_run_graph` | `graph_path`\|`graph_json`, `manifest_path?`\|`manifest_json?`, `out_dir?`, `reserve_vram?` | **Generic ComfyUI graph execution.** Run an arbitrary API-format graph in the same GPU-lock/zero-warm lifecycle, satisfying a per-workflow **node manifest** first (custom node packs @ pinned commits via cm-cli with a unified uv resolve under host-torch constraints; models downloaded + sha-verified when a hash is given) → `{outputs:{node_id:[{path,type,kind,width,height}]}, image_path, unverified_models}`, or a **typed defer** `{code, ref, detail}`. The harness never interprets graph semantics — conditioning/prompt/model choices belong to the calling repo. |

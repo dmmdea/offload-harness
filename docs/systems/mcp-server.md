@@ -40,7 +40,7 @@ results, not errors.
 | Family | Tools |
 |---|---|
 | Text offload | `offload_summarize`, `offload_classify`, `offload_extract`, `offload_triage` |
-| Vision | `offload_vqa`, `offload_assess_image`, `offload_extract_image`, `offload_video_describe` |
+| Vision | `offload_vqa`, `offload_assess_image`, `offload_extract_image`, `offload_video_describe`, `offload_video_watch` |
 | Speech / OCR | `offload_transcribe`, `offload_ocr` |
 | Media generation | `offload_generate_image`, `offload_generate_video`, `offload_generate_audio`, `offload_generate_svg` |
 | Media editing | `offload_edit_image`, `offload_inpaint_image`, `offload_edit_image_generative`, `offload_upscale_image`, `offload_media` |

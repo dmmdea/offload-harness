@@ -340,6 +340,13 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 		}
 		return p.runVideoDescribe(ctx, req, built, meta, start)
 	}
+	if req.Task == core.TaskVideoWatch {
+		built, err := tasks.Build(req)
+		if err != nil {
+			return core.Deferf("build error: "+err.Error(), "", meta)
+		}
+		return p.runVideoWatch(ctx, req, built, meta, start)
+	}
 
 	// transcribe converts req.Audio to 16kHz WAV then calls whisper-server. Its
 	// own branch (audio in, no prompt/grammar, never the text cascade).
@@ -713,8 +720,11 @@ func (p *Pipeline) runVision(ctx context.Context, req core.Request, built tasks.
 		p.recordDefer(req.Task, meta, len(req.Input), "image load: "+err.Error())
 		return core.Deferf("image load: "+err.Error(), "", meta)
 	}
+	// WithoutThinking (offload-harness#168): a THINKING vision template spends
+	// the whole budget in reasoning_content and returns empty content; every
+	// vision task here is a describe/read/judge, never a reasoning step.
 	return p.runVisionGen(ctx, req, built, meta, start, "img:"+sha256hex(dataURI), true, func(gctx context.Context) (llamaclient.GenResult, error) {
-		return p.client.GenerateVision(gctx, model, built.System, built.User, []string{dataURI}, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0)
+		return p.client.GenerateVision(gctx, model, built.System, built.User, []string{dataURI}, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
 	})
 }
 
@@ -906,7 +916,7 @@ func (p *Pipeline) runVideoDescribe(ctx context.Context, req core.Request, built
 			log.Printf("video_describe: no stable content identity for %q (%s) — cache bypassed; result computed but not stored", req.Video, why)
 		}
 		res := p.runVisionGen(ctx, req, built, meta, start, extra, cacheable, func(gctx context.Context) (llamaclient.GenResult, error) {
-			return p.client.GenerateVisionInterleaved(gctx, p.cfg.VisionModel, built.System, labels, frames, built.User, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0)
+			return p.client.GenerateVisionInterleaved(gctx, p.cfg.VisionModel, built.System, labels, frames, built.User, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
 		})
 		if res.OK || width <= 256 || !isContextOverflow(res.Reason) {
 			return res
@@ -3011,6 +3021,7 @@ func imageModelFromConfig(cfg config.Config) imagegen.Model {
 		CFG:          cfg.ImageGenCFG,
 		Sampler:      cfg.ImageGenSampler,
 		Scheduler:    cfg.ImageGenScheduler,
+		ReserveVRAM:  cfg.ImageGenReserveVRAM,
 		Family:       cfg.ImageGenFamily,
 		Preset:       cfg.ImageGenPreset,
 		CLIP:         cfg.ImageGenCLIP,
