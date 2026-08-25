@@ -21,12 +21,15 @@ async function defaultFetchInfo(cls) {
 //
 // Satisfaction rule: the exact key, or at least `min` dotted children (autogrow declares
 // its own minimum; default 1). Counting children rather than just detecting one keeps the
-// check honest for groups that require more than one wire.
+// check honest for groups that require more than one wire. `min` is read BEFORE the
+// zero-children early-out: an autogrow group declaring min=0 is satisfied by an EMPTY
+// group (e.g. an optional `images` group serialised with no wires), and the old
+// `children === 0 → false` deferred exactly that valid shape (found live 2026-08-24 on
+// the Mage-Flow T2I template; the workaround was a dummy `"images": {}` key).
 function satisfies(spec, key, def) {
   const have = Object.keys(spec.inputs || {});
   if (have.includes(key)) return true;
   const children = have.filter((h) => h.startsWith(`${key}.`)).length;
-  if (children === 0) return false;
   const min = Number(def?.[1]?.template?.min ?? 1);
   return children >= (Number.isFinite(min) ? min : 1);
 }

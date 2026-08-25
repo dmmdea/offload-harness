@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.94.1] - 2026-08-25
+
+### Fixed — run-graph preflight deferred a VALID empty `min:0` autogrow group
+- `satisfies()` in `render/preflight-graph-file.mjs` returned false on `children === 0`
+  BEFORE reading the group's declared `min`, so an OPTIONAL autogrow group (`min: 0`,
+  e.g. an `images` group serialised with no wires) was reported as a missing required
+  input and the whole graph deferred. Found live 2026-08-24 running the official
+  Mage-Flow T2I template on the blackwell-8 reference box; the field workaround was a
+  dummy `"images": {}` key in the graph, which is no longer needed.
+- `min` is now read before the zero-children early-out: zero children satisfy `min: 0`,
+  while `min: 1` (the default) and `min: 2` groups still require their wires.
+- Three regression tests pinned: empty `min:0` group passes, a genuinely missing
+  non-group input on the same node still flags, and `min:1`-with-zero-children still defers.
+
 ## [0.94.0] - 2026-08-25
 
 ### Changed — ampere-8 agent seat: qwen3.5-9b adopted on its own reference bake (twin parity restored)
