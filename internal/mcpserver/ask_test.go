@@ -8,6 +8,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,17 +45,18 @@ func askFixture(t *testing.T) (string, string) {
 	return dir, p
 }
 
-// anchorOf recovers the token the harness chose, so a fake answer can cite it (or not) on
-// purpose instead of the test hard-coding the builder's current choice.
-func anchorOf(t *testing.T, c core.AgentContract) string {
+// anchorsOf recovers the tokens the harness chose out of the generated regex alternation,
+// so a fake answer can cite one (or none) on purpose instead of the test hard-coding the
+// builder's current choice.
+func anchorsOf(t *testing.T, c core.AgentContract) []string {
 	t.Helper()
 	for _, a := range c.Acceptance {
-		if rest, ok := strings.CutPrefix(a, "contains:"); ok {
-			return rest
+		if rest, ok := strings.CutPrefix(a, "regex:("); ok {
+			return strings.Split(strings.TrimSuffix(rest, ")"), "|")
 		}
 	}
-	t.Fatalf("no contains: check in %v", c.Acceptance)
-	return ""
+	t.Fatalf("no regex: grounding check in %v", c.Acceptance)
+	return nil
 }
 
 // TestAskAdvertisedUnconditionally: the whole point of this lane is that the cheap path is
@@ -76,7 +78,7 @@ func TestAskHandlerPublishesTheAnswerAndAVerdict(t *testing.T) {
 	var got core.AgentContract
 	s := askTestServer(t, func(_ context.Context, c core.AgentContract) (core.AgentWireResult, error) {
 		got = c
-		anchor := anchorOf(t, c)
+		anchor := anchorsOf(t, c)[0]
 		return core.AgentWireResult{
 			SchemaVersion: core.AgentWireSchemaVersion,
 			Seat:          "fake-seat",
@@ -220,7 +222,7 @@ func TestAskHandlerPublishesProseWhenTheRePackFailed(t *testing.T) {
 		return core.AgentWireResult{
 			SchemaVersion: core.AgentWireSchemaVersion,
 			Seat:          "fake-seat",
-			Output:        "the cap is 32 (const " + anchorOf(t, c) + ")",
+			Output:        "the cap is 32 (const " + anchorsOf(t, c)[0] + ")",
 			Steps:         1,
 			StopReason:    "done",
 		}, nil
@@ -236,6 +238,60 @@ func TestAskHandlerPublishesProseWhenTheRePackFailed(t *testing.T) {
 	}
 	if m["verified"] != false {
 		t.Fatal("a result with no structured evidence must not read verified")
+	}
+}
+
+// TestAskHandlerDefersWhenTheRunnerErrors covers the one failure branch nothing else
+// reaches: RunAgentContract returning a real error (contract rejected at Validate, the job
+// dir unwritable, the result undecodable). House posture — a deferred RESULT naming the
+// cause, never an MCP error, because a caller told "the call failed" discards the work
+// instead of reading the files itself.
+func TestAskHandlerDefersWhenTheRunnerErrors(t *testing.T) {
+	dir, p := askFixture(t)
+	s := askTestServer(t, func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
+		return core.AgentWireResult{}, errors.New("agent contract: creating job dir: disk full")
+	})
+
+	res, err := s.handleAsk(context.Background(), callReq(askArgs("what is the queue cap", p, dir)))
+	if err != nil {
+		t.Fatalf("a runner error must be a deferred RESULT, not an MCP error: %v", err)
+	}
+	m := decodeResult(t, res)
+	if m["deferred"] != true {
+		t.Fatalf("a runner error must defer: %v", m)
+	}
+	if !strings.Contains(m["reason"].(string), "disk full") {
+		t.Fatalf("the underlying cause must survive to the caller: %v", m["reason"])
+	}
+}
+
+// TestAskHandlerDefersOnAnEmptyAnswer: a non-deferred result carrying neither prose nor a
+// structured answer must not be published as answer:"" — that reads as "the seat answered,
+// and the answer is nothing", which is the silent shape this lane exists to avoid.
+func TestAskHandlerDefersOnAnEmptyAnswer(t *testing.T) {
+	dir, p := askFixture(t)
+	s := askTestServer(t, func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
+		return core.AgentWireResult{
+			SchemaVersion: core.AgentWireSchemaVersion,
+			Seat:          "fake-seat",
+			Output:        "   ",
+			StopReason:    "budget",
+		}, nil
+	})
+
+	res, err := s.handleAsk(context.Background(), callReq(askArgs("what is the queue cap", p, dir)))
+	if err != nil {
+		t.Fatalf("handleAsk: %v", err)
+	}
+	m := decodeResult(t, res)
+	if m["deferred"] != true {
+		t.Fatalf("an empty answer must defer, not publish an empty string: %v", m)
+	}
+	if m["defer_class"] != core.DeferClassAbstention {
+		t.Fatalf("defer_class = %v, want %q", m["defer_class"], core.DeferClassAbstention)
+	}
+	if _, published := m["answer"]; published {
+		t.Fatalf("a defer must not also publish an answer field: %v", m)
 	}
 }
 

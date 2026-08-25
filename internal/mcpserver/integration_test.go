@@ -356,7 +356,7 @@ func TestDelegationEndToEndRejectsAMissingToken(t *testing.T) {
 // the node's agent loop FINISHES: agenttask.go has already set wire.Output, and
 // keeps it populated on the re-pack failure branch so the CALLER still receives
 // the loop's answer — which is exactly what the `output` assertion below reads.
-// (Not acceptance: delegate.Run gates evalAcceptance on !wire.Deferred, and this
+// (Not acceptance: delegate.Run gates EvalAcceptance on !wire.Deferred, and this
 // result IS deferred.) What the caller receives is prose beside
 // `deferred:true, defer_class:"infrastructure"` with no `structured` at all.
 //

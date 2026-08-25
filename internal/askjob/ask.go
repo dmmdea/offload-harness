@@ -42,6 +42,9 @@ var (
 	// ErrNoAnchor means no token distinctive enough to ground an acceptance check was
 	// found — every candidate was too short, or already appears in the goal.
 	ErrNoAnchor = errors.New("askjob: no grounded anchor found in the supplied files")
+	// ErrNoQuestion means the caller sent no question. Typed like the rest so a
+	// surface can branch on it rather than string-matching a reason.
+	ErrNoQuestion = errors.New("askjob: question is required")
 	// ErrNoPaths means there is nothing to ground against. A question with no files is
 	// agent_run's shape (it searches for its own files), not this one's.
 	ErrNoPaths = errors.New("askjob: at least one path is required")
@@ -64,7 +67,18 @@ const anchorMinLen = 8
 // apostrophes, which no identifier has. It is also unexported, alongside every helper
 // around it. What is wanted here is the opposite bias: whole identifiers, underscores
 // included, nothing else.
-var identRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]{` + fmt.Sprint(anchorMinLen-1) + `,}`)
+var identRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]{` + strconv.Itoa(anchorMinLen-1) + `,}`)
+
+// anchorAlternatives is how many mined tokens ride the grounding check.
+//
+// Betting the whole check on ONE token was measured wrong three separate ways (see
+// pickAnchors): the single highest-ranked token is frequently something a correct answer
+// had no reason to quote, and with no cross-seat retry on this lane a false negative is
+// terminal — the caller simply learns not to trust the verdict, which is the exact failure
+// offload_ask exists to prevent. Three alternatives turn the check into the question
+// actually worth asking ("did the answer cite ANYTHING that appears only in these files?")
+// while staying ONE content check, still grounded, still non-parrot, and still deterministic.
+const anchorAlternatives = 3
 
 // askOutputSchema is the flat {answer, evidence} shape. Flat and string-only because the
 // contract's structured re-pack is grammar-constrained through gbnf.FromJSONSchema, whose
@@ -84,11 +98,15 @@ var askOutputSchema = json.RawMessage(`{"type":"object","properties":{"answer":{
 func BuildContract(question string, paths []string, readRoot string) (core.AgentContract, error) {
 	question = strings.TrimSpace(question)
 	if question == "" {
-		return core.AgentContract{}, errors.New("askjob: question is required")
+		return core.AgentContract{}, ErrNoQuestion
 	}
 	if len(paths) == 0 {
 		return core.AgentContract{}, ErrNoPaths
 	}
+	// Deduped BEFORE the cap so a repeat spends neither a doc slot nor context bytes: the
+	// same path twice is one document, and inlining it twice would double-charge the
+	// 256 KiB ceiling and hand the seat the same file under two names.
+	paths = dedupePaths(paths, readRoot)
 	// Counted before any I/O: an over-ask should cost nothing to refuse.
 	if len(paths) > core.AgentContextMaxDocs {
 		return core.AgentContract{}, fmt.Errorf("%w: %d paths exceeds the %d-doc contract cap — narrow the list, or split the question",
@@ -115,8 +133,8 @@ func BuildContract(question string, paths []string, readRoot string) (core.Agent
 			ErrContextTooLarge, total, core.AgentContextMaxBytes)
 	}
 
-	goal := buildGoal(question, docs)
-	anchor, err := pickAnchor(goal, docs)
+	goal := buildGoal(question, len(docs))
+	anchors, err := pickAnchors(goal, docs)
 	if err != nil {
 		return core.AgentContract{}, err
 	}
@@ -132,44 +150,111 @@ func BuildContract(question string, paths []string, readRoot string) (core.Agent
 			Goal:         goal,
 			Context:      docs,
 			OutputSchema: askOutputSchema,
-			// contains:<anchor> is the grounding check — it can only pass if the
-			// answer cites something that appears solely in the files.
+			// The regex is the grounding check — it can only pass if the answer
+			// cites one of a handful of tokens that appear solely in the files.
 			// nonempty:evidence is the tool's own promise made checkable: an
 			// answer with an empty evidence field defeats the spot-check the
 			// caller skipped re-reading the files for.
-			Acceptance: []string{"contains:" + anchor, "nonempty:evidence"},
+			Acceptance: []string{groundingCheck(anchors), "nonempty:evidence"},
 		},
 	}, readRoot)
 }
 
-// buildGoal writes the whole instruction the seat sees — it gets the goal and a directory
-// of the attached docs, nothing else. The names are listed because the seat would
-// otherwise spend a step on list_dir to find them, and a bounded question should not cost
-// a step to discover its own inputs.
-func buildGoal(question string, docs []core.ContextDoc) string {
-	names := make([]string, 0, len(docs))
-	for _, d := range docs {
-		names = append(names, d.Name)
-	}
+// buildGoal writes the whole instruction the seat sees — it gets this goal and a directory
+// holding exactly the attached docs, nothing else.
+//
+// The doc BASENAMES are deliberately NOT listed. Naming them saved the seat one list_dir
+// step, and cost far more than it saved: every basename lands in the goal, and the goal is
+// the anchor's disqualifier, so every identifier that is a substring of a filename stops
+// being a citable anchor. Measured on the first live run — attaching buildinfo.go removed
+// `buildinfo` from the pool, leaving only tokens the right answer never touched. The count
+// is given instead, which steers the seat to read all of them without spending candidates.
+func buildGoal(question string, docCount int) string {
 	var b strings.Builder
-	b.WriteString("Answer the QUESTION below using ONLY the attached files. Read them first. ")
+	b.WriteString("Answer the QUESTION below using ONLY the attached files. ")
+	b.WriteString("They are the only files you can read: list the directory, then read all ")
+	b.WriteString(strconv.Itoa(docCount))
+	b.WriteString(" of them before answering. ")
 	b.WriteString("Put the direct answer in \"answer\", and in \"evidence\" quote the exact lines you relied on, each with the file it came from. ")
-	b.WriteString("If the attached files do not answer the question, say so plainly in \"answer\" rather than inferring.\n\n")
-	b.WriteString("ATTACHED FILES: ")
-	b.WriteString(strings.Join(names, ", "))
-	b.WriteString("\n\nQUESTION: ")
+	b.WriteString("If the attached files do not answer the question, say so plainly in \"answer\" rather than inferring.\n\nQUESTION: ")
 	b.WriteString(question)
 	return b.String()
 }
 
-// pickAnchor returns the anchor: the rarest sufficiently-long token that appears in the
-// docs and NOWHERE in the goal, preferring identifier-shaped tokens over prose (see the
+// groundingCheck renders the mined anchors as ONE regex acceptance check. It is only ever
+// reached with a non-empty set: pickAnchors returns ErrNoAnchor instead of an empty slice,
+// and BuildContract returns on that error two lines earlier — which matters, because
+// "regex:()" would compile to a pattern matching everything and pass silently.
+//
+// regex: rather than contains: because the DSL has no "any of these" verb and a second
+// contains: would be a second check the answer must ALSO satisfy — the opposite of what is
+// wanted. The alternatives are QuoteMeta'd: identRe cannot currently emit a metacharacter,
+// so this is defence against a future widening of the token shape rather than a live bug.
+func groundingCheck(anchors []string) string {
+	alts := make([]string, 0, len(anchors))
+	for _, a := range anchors {
+		alts = append(alts, regexp.QuoteMeta(a))
+	}
+	return "regex:(" + strings.Join(alts, "|") + ")"
+}
+
+// dedupePaths drops repeats while preserving caller order.
+//
+// Keyed on the path RE-ROOTED the way InlineContextPaths re-roots it, because a caller may
+// legitimately name one file either way and "\\abs\\cfg.go" beside "./cfg.go" is one
+// document, not two. Left undetected it produced exactly the harm the doc-name de-collision
+// exists to prevent, only worse: cfg.go AND cfg-2.go, the same bytes handed to the seat
+// twice under two names, charged twice against the 256 KiB ceiling.
+//
+// Cleaned but NOT case-folded: on Linux, Config.go and config.go are two different files,
+// and folding would silently drop one the caller asked for. A path that cannot be re-rooted
+// keeps its own cleaned form as the key — an unresolvable path must never be dropped here;
+// InlineContextPaths is what refuses it, with a message naming it.
+func dedupePaths(paths []string, readRoot string) []string {
+	absRoot, err := filepath.Abs(readRoot) // "" resolves to the process working dir
+	seen := make(map[string]bool, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		key := p
+		if err == nil && filepath.IsAbs(p) {
+			if rel, rerr := filepath.Rel(absRoot, p); rerr == nil {
+				key = rel
+			}
+		}
+		key = filepath.Clean(key)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+// pickAnchors returns up to anchorAlternatives tokens that appear in the docs and NOWHERE
+// in the goal, MOST FREQUENT first, preferring identifier-shaped tokens over prose (see the
 // tier comment below).
 //
-// Rarest-wins because a token used once is far likelier to be the specific thing the
-// answer must cite than a token used everywhere. Ties break lexicographically so the same
-// question over the same files is always the same contract — a non-deterministic
-// acceptance check would make a re-run unfalsifiable against its predecessor.
+// Most-frequent-wins, and the inversion is the whole point. The original rule was
+// rarest-wins, on the reasoning that a token used once is likelier to be the specific thing
+// the answer must cite. Measurement said the opposite, three independent times: on a
+// realistic Go file it chose `delegate` out of a comment; on the first live run over
+// buildinfo.go it chose `EncodeToString` and a correct, well-cited answer read
+// verified:false; and reproduced on this package's own fixture the pool was
+// {ErrQueueSaturated:3, defaultMaxQueueDepth:3, dispatchRetryBackoff:1} and rarity picked
+// the retry-backoff constant while the two tokens the answer must quote both LOST for being
+// more frequent. Within one file, centrality and frequency correlate — a name the file
+// repeats is a name the file is ABOUT — so ranking by rarity ranks away from what a right
+// answer will quote. Ties break lexicographically so the same question over the same files
+// is always the same contract; a non-deterministic acceptance check would make a re-run
+// unfalsifiable against its predecessor.
+//
+// Nothing about grounding or anti-parrot moves with the inversion: the goal exclusion still
+// runs BEFORE ranking, so every candidate is still present in the docs and still absent
+// from the goal, whatever order they come out in. The generic-boilerplate hazard the
+// inversion could in principle introduce is closed twice over — the 8-character bound
+// already excludes `error`, `string`, `import`, `package`, and the alternation means one
+// weak alternative cannot fail a right answer on its own.
 //
 // The goal exclusion is a SUBSTRING test, case-insensitive, and both halves are
 // load-bearing. Substring because that is precisely what delegate.LintAcceptance's
@@ -177,7 +262,7 @@ func buildGoal(question string, docs []core.ContextDoc) string {
 // STRICTER than the lint — a token differing from a goal word only in case is still
 // something a parroting model emits for free, and over-excluding costs at most a refusal
 // while under-excluding ships a check that verifies nothing.
-func pickAnchor(goal string, docs []core.ContextDoc) (string, error) {
+func pickAnchors(goal string, docs []core.ContextDoc) ([]string, error) {
 	lowerGoal := strings.ToLower(goal)
 	counts := map[string]int{}
 	shaped := map[string]int{}
@@ -204,7 +289,7 @@ func pickAnchor(goal string, docs []core.ContextDoc) (string, error) {
 		counts = shaped
 	}
 	if len(counts) == 0 {
-		return "", fmt.Errorf("%w: no token of %d+ characters appears in the attached files without also appearing in the question or the file names — there is nothing here a right answer could cite that a restatement of the question could not, so read the files yourself or attach one that names what you are asking about",
+		return nil, fmt.Errorf("%w: no token of %d+ characters appears in the attached files without also appearing in the question — there is nothing here a right answer could cite that a restatement of the question could not, so read the files yourself, or attach a file that names what you are asking about",
 			ErrNoAnchor, anchorMinLen)
 	}
 	keys := make([]string, 0, len(counts))
@@ -213,11 +298,14 @@ func pickAnchor(goal string, docs []core.ContextDoc) (string, error) {
 	}
 	sort.Slice(keys, func(i, j int) bool {
 		if counts[keys[i]] != counts[keys[j]] {
-			return counts[keys[i]] < counts[keys[j]]
+			return counts[keys[i]] > counts[keys[j]] // MOST frequent first
 		}
 		return keys[i] < keys[j] // deterministic tie-break
 	})
-	return keys[0], nil
+	if len(keys) > anchorAlternatives {
+		keys = keys[:anchorAlternatives]
+	}
+	return keys, nil
 }
 
 // deCollideNames makes the doc names unique IN PLACE, keeping them flat.

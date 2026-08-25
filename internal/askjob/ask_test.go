@@ -2,8 +2,10 @@ package askjob
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -61,9 +63,15 @@ func TestBuildContractProducesFlatSchemaAndGroundedAcceptance(t *testing.T) {
 	if err := c.Validate(); err != nil {
 		t.Fatalf("BuildContract returned a contract that Validate rejects: %v", err)
 	}
-	// The question has to reach the seat, and the doc names save it a list_dir step.
-	if !strings.Contains(c.Goal, "what is the queue cap") || !strings.Contains(c.Goal, "cfg.go") {
-		t.Fatalf("goal must carry the question and the attached names: %q", c.Goal)
+	// The question has to reach the seat.
+	if !strings.Contains(c.Goal, "what is the queue cap") {
+		t.Fatalf("goal must carry the question: %q", c.Goal)
+	}
+	// ...and must NOT carry the basenames. The goal is the anchor's disqualifier, so a
+	// listed filename silently removes every identifier that is a substring of it —
+	// measured on the first live run, where attaching buildinfo.go cost `buildinfo`.
+	if strings.Contains(c.Goal, "cfg.go") {
+		t.Fatalf("basenames in the goal disqualify the anchors they name: %q", c.Goal)
 	}
 }
 
@@ -84,6 +92,21 @@ func TestBuildContractPassesTheDelegatorLint(t *testing.T) {
 			len(warns), strings.Join(warns, "\n"), c.Acceptance, c.Goal)
 	}
 }
+
+// ledgerSource has SIX candidates for THREE anchor slots: three names the file repeats
+// and three one-offs. Which three survive the cut is therefore decided entirely by the
+// ranking, which is what this fixture exists to hold still.
+const ledgerSource = `package ledger
+
+// SessionLedgerWriter batches rows. TemporaryScratchPath is incidental.
+type SessionLedgerWriter struct{ RotateThreshold, FlushInterval int }
+
+func (w *SessionLedgerWriter) Flush() { _ = w.FlushInterval; _ = w.RotateThreshold }
+
+func (w *SessionLedgerWriter) Rotate() { _ = w.RotateThreshold; _ = w.FlushInterval }
+
+var UnusedLegacyHook, DeprecatedShimName any
+`
 
 // sampleSource is a realistic (not toy) Go file: comments, imports, exported and
 // unexported identifiers, and repeated tokens — the shape a caller actually attaches.
@@ -113,6 +136,85 @@ const sampleSource = "// Package fleet holds the dispatcher back-pressure knobs.
 	"\td.accepted++\n" +
 	"\treturn nil\n" +
 	"}\n"
+
+// TestBuildContractAnchorsOnWhatAnAnswerWouldCite is the citability regression pin, and the
+// reason the ranking was inverted. On this fixture the candidate pool is
+// {ErrQueueSaturated:3, defaultMaxQueueDepth:3, dispatchRetryBackoff:1}. The two tokens a
+// correct answer to "what happens when the dispatcher is full" MUST quote are the two
+// frequent ones — and under the original rarest-wins rule they both LOST to the
+// retry-backoff constant, which no right answer would ever mention.
+func TestBuildContractAnchorsOnWhatAnAnswerWouldCite(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, "queue.go", sampleSource)
+
+	c, err := BuildContract("what happens when the dispatcher is full", []string{p}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := c.Acceptance[0]
+	for _, must := range []string{"ErrQueueSaturated", "defaultMaxQueueDepth"} {
+		if !strings.Contains(check, must) {
+			t.Fatalf("the grounding check must offer %q, the token a right answer cites: %q", must, check)
+		}
+	}
+	if !strings.HasPrefix(check, "regex:(") {
+		t.Fatalf("the grounding check must be one regex alternation: %q", check)
+	}
+}
+
+// TestBuildContractAnchorsSurviveTheCutByCentrality is the ordering half of the citability
+// pin. The fixture above has exactly three candidates, so ALL of them ride the alternation
+// whatever the ranking does — it proves the tokens are offered, not that the ranking chose
+// them. Here there are six candidates for three slots, so membership is decided purely by
+// the ranking: the repeated, central names must make the cut and the one-off incidentals
+// must not. Reverting the ranking to rarest-wins inverts this exactly.
+func TestBuildContractAnchorsSurviveTheCutByCentrality(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, "writer.go", ledgerSource)
+
+	c, err := BuildContract("how often does the writer flush and when does it rotate", []string{p}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := c.Acceptance[0]
+	for _, central := range []string{"SessionLedgerWriter", "FlushInterval", "RotateThreshold"} {
+		if !strings.Contains(check, central) {
+			t.Fatalf("the repeated, central name %q lost its slot: %q", central, check)
+		}
+	}
+	for _, incidental := range []string{"TemporaryScratchPath", "UnusedLegacyHook", "DeprecatedShimName"} {
+		if strings.Contains(check, incidental) {
+			t.Fatalf("the one-off %q took a slot from a central name: %q", incidental, check)
+		}
+	}
+}
+
+// TestBuildContractAcceptanceAcceptsARightAnswerAndRejectsAParrot exercises the check the
+// way the delegator actually does — through core's Eval — instead of only asserting on its
+// text. Lint-cleanliness says the check is well FORMED; this says it is well AIMED.
+func TestBuildContractAcceptanceAcceptsARightAnswerAndRejectsAParrot(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, "queue.go", sampleSource)
+
+	c, err := BuildContract("what happens when the dispatcher is full", []string{p}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chk, err := core.ParseAcceptanceCheck(c.Acceptance[0])
+	if err != nil {
+		t.Fatalf("the generated check must parse: %v", err)
+	}
+
+	right := "Admit refuses: once accepted+running reaches defaultMaxQueueDepth (32) it returns ErrQueueSaturated."
+	if pass, reason := chk.Eval(nil, right); !pass {
+		t.Fatalf("a correct, well-cited answer must PASS the generated check: %s", reason)
+	}
+	// A model that echoes the instructions back must NOT pass — that is the whole point
+	// of excluding every candidate the goal already contains.
+	if pass, _ := chk.Eval(nil, c.Goal); pass {
+		t.Fatalf("the goal text itself passed the check — it is parrot-passable: %q", c.Acceptance[0])
+	}
+}
 
 func TestBuildContractRefusesWhenNoAnchorExists(t *testing.T) {
 	dir := t.TempDir()
@@ -174,13 +276,38 @@ func TestBuildContractDeCollidesBasenames(t *testing.T) {
 	}
 }
 
+// TestBuildContractDedupesRepeatedPaths: the same path twice is one document. Inlining it
+// twice would double-charge the 256 KiB ceiling and hand the seat one file under two names.
+func TestBuildContractDedupesRepeatedPaths(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, "cfg.go", "package x\n\nconst FleetMaxQueueDepth = 32\n")
+
+	c, err := BuildContract("what is the queue cap", []string{p, p, "./cfg.go"}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Context) != 1 {
+		t.Fatalf("repeats must collapse to one doc, got %d: %+v", len(c.Context), c.Context)
+	}
+	// A repeat must not consume a doc slot either: 16 copies of one file is one document.
+	many := make([]string, core.AgentContextMaxDocs+4)
+	for i := range many {
+		many[i] = p
+	}
+	if _, err := BuildContract("what is the queue cap", many, dir); err != nil {
+		t.Fatalf("repeats must not spend the doc cap: %v", err)
+	}
+}
+
 func TestBuildContractRefusesTooManyPaths(t *testing.T) {
 	dir := t.TempDir()
 	paths := make([]string, core.AgentContextMaxDocs+1)
 	for i := range paths {
-		// Deliberately NOT created: the count is a cheap up-front refusal, so it must
-		// fire before any file I/O.
-		paths[i] = filepath.Join(dir, "f.go")
+		// DISTINCT names: repeats collapse to one document (see dedupePaths), so a
+		// cap test built from one path repeated would prove nothing. Deliberately NOT
+		// created either: the count is a cheap up-front refusal, so it must fire
+		// before any file I/O.
+		paths[i] = filepath.Join(dir, fmt.Sprintf("f%d.go", i))
 	}
 	_, err := BuildContract("what is here", paths, dir)
 	if !errors.Is(err, ErrTooManyPaths) {
@@ -203,26 +330,62 @@ func TestBuildContractRefusesOversizeContext(t *testing.T) {
 
 // TestBuildContractConfinesReadsToReadRoot: read_root is the only containment this
 // surface has, and a caller-supplied path list is exactly where an escape would arrive.
+//
+// Each case asserts WHY the read was refused, not merely that something failed. A bare
+// err != nil would pass just as happily on a mistyped filename, which would leave the
+// containment itself unproven — so the control case below reads the very same file with
+// read_root moved, and must SUCCEED.
 func TestBuildContractConfinesReadsToReadRoot(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
 	write(t, root, "in.go", "package x\n\nconst InsideTheRootMarker = 1\n")
 	secret := write(t, outside, "secret.go", "package y\n\nconst OutsideTheRootMarker = 2\n")
 
-	if _, err := BuildContract("what is here", []string{secret}, root); err == nil {
-		t.Fatal("a path outside read_root must be refused, not read")
+	// Control: the file is readable and groundable — so every refusal below is about the
+	// ROOT, not about the file.
+	if _, err := BuildContract("what is here", []string{secret}, outside); err != nil {
+		t.Fatalf("control: the same file inside its own root must be readable: %v", err)
 	}
+
+	_, err := BuildContract("what is here", []string{secret}, root)
+	if err == nil {
+		t.Fatal("an absolute path outside read_root must be refused, not read")
+	}
+	if !strings.Contains(err.Error(), "outside read_root") || !strings.Contains(err.Error(), "secret.go") {
+		t.Fatalf("the refusal must name the path and the reason, got: %v", err)
+	}
+
 	rel := filepath.Join("..", filepath.Base(outside), "secret.go")
-	if _, err := BuildContract("what is here", []string{rel}, root); err == nil {
+	_, err = BuildContract("what is here", []string{rel}, root)
+	if err == nil {
 		t.Fatal("a relative traversal out of read_root must be refused")
 	}
+	// os.Root refuses this in the KERNEL traversal; the wording is what proves the
+	// refusal came from containment rather than from a missing file.
+	if !strings.Contains(err.Error(), "escapes") {
+		t.Fatalf("the traversal must be refused by os.Root containment, got: %v", err)
+	}
+
+	// A symlink inside the root pointing out of it is the escape a path check alone
+	// cannot see — os.Root rejects the reparse point itself. Creating one needs
+	// privileges Windows does not grant by default, so an unsupported host SKIPS rather
+	// than failing the suite.
+	t.Run("symlink out of the root", func(t *testing.T) {
+		link := filepath.Join(root, "link.go")
+		if lerr := os.Symlink(secret, link); lerr != nil {
+			t.Skipf("symlinks unsupported for this process: %v", lerr)
+		}
+		if _, err := BuildContract("what is here", []string{link}, root); err == nil {
+			t.Fatal("a symlink escaping read_root must be refused, not followed")
+		}
+	})
 }
 
 func TestBuildContractRefusesEmptyInput(t *testing.T) {
 	dir := t.TempDir()
 	p := write(t, dir, "cfg.go", "package x\n\nconst FleetMaxQueueDepth = 32\n")
-	if _, err := BuildContract("   ", []string{p}, dir); err == nil {
-		t.Fatal("an empty question must be refused")
+	if _, err := BuildContract("   ", []string{p}, dir); !errors.Is(err, ErrNoQuestion) {
+		t.Fatalf("an empty question must be a typed refusal, got %v", err)
 	}
 	if _, err := BuildContract("what is the queue cap", nil, dir); !errors.Is(err, ErrNoPaths) {
 		t.Fatal("no paths means nothing to ground against; must be a typed refusal")
@@ -236,16 +399,23 @@ func TestBuildContractRefusesEmptyInput(t *testing.T) {
 func TestPickAnchorPrefersIdentifiersOverCommentProse(t *testing.T) {
 	docs := []core.ContextDoc{{
 		Name: "a.go",
-		// "unsurprising" is rarer (1) than the identifier (2) and sorts earlier, so
-		// rarity alone would take it.
-		Text: "// an unsurprising note\nfunc admitOneJob() {}\nfunc caller() { admitOneJob() }\n",
+		// The comment word is deliberately MORE frequent than the identifier, so
+		// frequency ranking alone would take it and only the tier explains the result.
+		Text: "// unsurprising unsurprising unsurprising note\nfunc admitOneJob() {}\n",
 	}}
-	got, err := pickAnchor("goal with nothing distinctive", docs)
+	got, err := pickAnchors("goal with nothing distinctive", docs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "admitOneJob" {
-		t.Fatalf("pickAnchor = %q, want the identifier admitOneJob over the comment word", got)
+	if len(got) == 0 || got[0] != "admitOneJob" {
+		t.Fatalf("pickAnchors = %v, want the identifier admitOneJob over the comment word", got)
+	}
+	// The shaped tier REPLACES the pool, it does not merely reorder it: prose must not
+	// ride along as an alternative when real identifiers exist.
+	for _, a := range got {
+		if a == "unsurprising" {
+			t.Fatalf("prose leaked into the anchor set alongside identifiers: %v", got)
+		}
 	}
 }
 
@@ -254,30 +424,46 @@ func TestPickAnchorPrefersIdentifiersOverCommentProse(t *testing.T) {
 // anchor. The tier is a preference, not a filter.
 func TestPickAnchorFallsBackToProseWhenNoIdentifierExists(t *testing.T) {
 	docs := []core.ContextDoc{{Name: "notes.md", Text: "provisioning happens during the quarterly reconciliation window"}}
-	got, err := pickAnchor("goal with nothing in common", docs)
+	got, err := pickAnchors("goal with nothing in common", docs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got == "" {
-		t.Fatal("a prose-only file must still yield an anchor")
-	}
-	if !strings.Contains(docs[0].Text, got) {
-		t.Fatalf("anchor %q is not grounded in the doc", got)
+	// Every candidate here occurs once, so the lexicographic tie-break fully determines
+	// the result — asserted exactly, because a fallback that just returned the first
+	// token it happened to see would pass a mere non-empty-and-grounded check.
+	want := []string{"provisioning", "quarterly", "reconciliation"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("pickAnchors = %v, want %v", got, want)
 	}
 }
 
-// TestPickAnchorPrefersTheRarestToken: a token used once is far likelier to be the
-// specific thing the answer must cite than a token used everywhere.
-func TestPickAnchorPrefersTheRarestToken(t *testing.T) {
+// TestPickAnchorsRankMostFrequentFirst pins the INVERSION. This test previously asserted
+// the opposite (rarest-wins, from the original design). Within one file, centrality and
+// frequency correlate — a name the file repeats is a name the file is ABOUT — so the token
+// a right answer will quote is the frequent one, and ranking by rarity ranked away from it.
+func TestPickAnchorsRankMostFrequentFirst(t *testing.T) {
 	docs := []core.ContextDoc{
 		{Name: "a.go", Text: "CommonHelper CommonHelper CommonHelper RareSingleton"},
 		{Name: "b.go", Text: "CommonHelper CommonHelper"},
 	}
-	got, err := pickAnchor("goal text with nothing distinctive", docs)
+	got, err := pickAnchors("goal text with nothing distinctive", docs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "RareSingleton" {
-		t.Fatalf("pickAnchor = %q, want the rarest token RareSingleton", got)
+	want := []string{"CommonHelper", "RareSingleton"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("pickAnchors = %v, want %v (most frequent first)", got, want)
+	}
+}
+
+// TestPickAnchorsCapsTheAlternatives keeps the check readable and the regex bounded.
+func TestPickAnchorsCapsTheAlternatives(t *testing.T) {
+	docs := []core.ContextDoc{{Name: "a.go", Text: "AlphaMarkerOne BetaMarkerTwo GammaMarkerThree DeltaMarkerFour EpsilonMarkerFive"}}
+	got, err := pickAnchors("goal text with nothing distinctive", docs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != anchorAlternatives {
+		t.Fatalf("pickAnchors returned %d anchors, want the cap of %d: %v", len(got), anchorAlternatives, got)
 	}
 }

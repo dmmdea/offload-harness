@@ -12,7 +12,7 @@ plus one lever Claude Code cannot offer: the three-lane dispatch protocol is inj
 
 | Piece | Where | What |
 |---|---|---|
-| Harness MCP registration | `~/.config/opencode/opencode.jsonc` → `mcp.harness` | The SAME launch as Claude Code (`local-offload.exe mcp --config …`); all 24 tools appear as `harness_<tool>`; `timeout` raised to 600 s so `agent_run` / `agent_delegate` / media renders complete |
+| Harness MCP registration | `~/.config/opencode/opencode.jsonc` → `mcp.harness` | The SAME launch as Claude Code (`local-offload.exe mcp --config …`); all 25 unconditional tools appear as `harness_<tool>` (26 registrations, of which `agent_delegate` is gated on `agent_delegation_enabled`); `timeout` raised to 600 s so `agent_run` / `agent_delegate` / media renders complete |
 | House rules | `instructions: ["~/.claude/rules/*.md"]` | Every rule file auto-loads; `~/.claude/CLAUDE.md` stays the global rules file (a global `AGENTS.md` would replace it) |
 | Plugin | [`integrations/opencode/`](../../integrations/opencode/) in THIS repo (one harness for every agent — never a separate repo); a one-line loader in `~/.config/opencode/plugins/` re-exports `src/plugin.ts` from the checkout | Protocol injection, `task` description rewrite, read-only task reroute, H14 nudge, delegate placement digest, agent/command provisioning, instrument, `offload_plugin_status`; gated by the `integrations-opencode` CI job (tsc + bun test) |
 | Offload subagent | `agent.offload` | `mode: subagent`, pinned to the local agent seat, `edit`/`bash`/`webfetch` denied, `external_directory` allowed (read-only recon anywhere) |

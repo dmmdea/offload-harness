@@ -52,8 +52,13 @@ func TestAskMCPLive(t *testing.T) {
 	res, err := sess.CallTool(ctx, &mcp.CallToolParams{
 		Name: "offload_ask",
 		Arguments: map[string]any{
-			"question":  "Which constant holds the compiled-in version, and what value is it set to?",
-			"paths":     []string{"internal/buildinfo/buildinfo.go"},
+			// A representative bounded question over a real repo file — the shape the
+			// tool advertises. NOT a question whose subject is a short or
+			// question-named identifier: those leave nothing anchorable (see
+			// askjob.pickAnchors), and using one here would measure that known
+			// limitation instead of the lane.
+			"question":  "What confinement does the delegator apply when it inlines a file into a contract, and what happens if the path escapes it?",
+			"paths":     []string{"internal/delegate/intake.go"},
 			"read_root": repoRoot,
 		},
 	})

@@ -67,7 +67,8 @@ grading the flagged effects for operator review — annotation only, it never ga
 
 `offload_ask` is the ONE-CALL delegation entry: question + paths in, `{answer, evidence}` out,
 with the harness (`internal/askjob`) authoring the whole contract — goal, output schema, and an
-acceptance check anchored to a distinctive token mined from the attached files. It runs on the
+acceptance check anchored to the distinctive tokens mined from the attached files (one
+`regex:` alternation over the three most frequent tokens the goal does not already contain). It runs on the
 local seat through `Pipeline.RunAgentContract`, the same entry a local delegation placement
 takes. It exists because contract-authoring cost, not caller discipline, is what kept measured
 `agent_delegate` adoption at ~0. Two properties are load-bearing rather than incidental: the
@@ -79,6 +80,12 @@ this lane does not go through `delegate.Run`, and a check nothing evaluates is d
 check, not a quality verdict: the anchor is mined mechanically, so `verified: false` is often just
 a correct answer that had no reason to cite the token that was picked (measured on the first live
 run). It is a prompt to read the evidence, never a reason to discard the answer.
+
+One deliberate gap to know about: the ask lane writes **no delegation ledger or corpus row**.
+`delegate.Run` records one per subtask; `Pipeline.RunAgentContract` on its own does not, so
+`offload_ask` traffic will not appear in the delegation corpus or in any analysis built on it.
+The pipeline's own task ledger still sees the run. Nothing depends on this today — it is
+recorded so nobody later reads an empty delegation corpus as "nobody used the tool".
 
 ## Important flows
 

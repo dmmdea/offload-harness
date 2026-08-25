@@ -135,9 +135,17 @@ type Summary struct {
 	// wire.Output before the re-pack and keeps it populated on every failure
 	// branch below, so the CALLER still receives the loop's answer in the
 	// result's `output` field. (It is preserved for the caller, NOT for
-	// acceptance: both EvalAcceptance call sites guard on !wire.Deferred and
-	// every re-pack failure branch defers, so no check ever runs over it —
-	// pinned by TestRunLocalDeferSkipsAcceptance.) So a subtask whose agent loop
+	// acceptance. THE RULE, binding on every caller of EvalAcceptance in any
+	// package: never evaluate a DEFERRED result. A defer's preserved prose was
+	// never offered as an answer, so checking it manufactures failures about
+	// content nobody claimed — an honest defer would land in the ledger and the
+	// corpus as a verification failure. This package keeps the rule by guarding
+	// both call sites on !wire.Deferred, pinned by
+	// TestRunLocalDeferSkipsAcceptance; mcpserver's ask lane keeps it by
+	// returning on wire.Deferred before it ever reaches the call. Stated as a
+	// rule rather than as a tally of call sites on purpose: the tally said "both"
+	// while there were three, and a doc comment reads back as evidence the code
+	// obeys it.) So a subtask whose agent loop
 	// FINISHED and whose re-pack seat was unreachable publishes prose beside
 	// defer_class:"infrastructure" and IS counted here. That is
 	// deliberate, not an oversight: a contract carrying an output_schema asked for

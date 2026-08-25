@@ -22,17 +22,35 @@ Versioning: [SemVer](https://semver.org/).
   check must still be GROUNDED — anchored to content appearing only in the supplied files —
   or it is exactly the PARROT-PASSABLE / UNGROUNDED pathology `delegate.LintAcceptance`
   exists to catch, and the answer reads as verified while nothing verified it. So the anchor
-  is mined from the files: the rarest sufficiently-long identifier that appears NOWHERE in
-  the built goal. Two corrections proved out while building it: (1) the disqualifier is the
-  full GOAL, not the question — the goal's own boilerplate carries ≥8-character words
-  (`QUESTION`, `attached`, `inferring`) and the lint measures against `c.Goal`, so a
-  question-only exclusion trips the very lint the feature exists to satisfy; (2) rarity
-  ALONE picked `delegate` out of a code comment on a realistic file — grounded, lint-clean,
-  and a token no correct answer would ever cite — so identifier-shaped tokens (underscore,
-  digit, or internal capital) are preferred, with prose kept as a fallback so attaching
-  markdown or a log still works. When nothing survives, `BuildContract` REFUSES
-  (`ErrNoAnchor`) rather than emit a check that would pass garbage. Pinned by
-  `LintAcceptance(BuildContract(...))` returning zero warnings on a realistic source file.
+  is mined from the files: the tokens that appear NOWHERE in the built goal, MOST FREQUENT
+  first, rendered as one `regex:(A|B|C)` alternation over the top three. Three corrections
+  proved out while building it, each from a measurement rather than a preference:
+  (1) the disqualifier is the full GOAL, not the question — the goal's own boilerplate
+  carries ≥8-character words (`QUESTION`, `attached`, `inferring`) and the lint measures
+  against `c.Goal`, so a question-only exclusion trips the very lint the feature exists to
+  satisfy; (2) identifier-shaped tokens (underscore, digit, or internal capital) are
+  preferred over prose, because ranking alone picked `delegate` out of a code comment —
+  prose stays as a FALLBACK so attaching markdown or a log still works; (3) the ranking is
+  MOST-frequent, not rarest. Rarest-wins was the original rule and measurement contradicted
+  it three independent times, most starkly on this package's own fixture, where the pool was
+  `{ErrQueueSaturated:3, defaultMaxQueueDepth:3, dispatchRetryBackoff:1}` and rarity picked
+  the retry-backoff constant while the two tokens a right answer must quote both LOST for
+  being more frequent. Within one file centrality and frequency correlate — a name the file
+  repeats is a name the file is ABOUT — so rarity ranks away from what an answer will cite,
+  and with no cross-seat retry on this lane a false `verified:false` is terminal. The
+  alternation is the safety net: a right answer passes if ANY of the three appears. When
+  nothing survives, `BuildContract` REFUSES (`ErrNoAnchor`) rather than emit a check that
+  would pass garbage. Pinned by `LintAcceptance(BuildContract(...))` returning zero warnings
+  on a realistic source file, and by a check that a right answer PASSES while the goal text
+  itself does not.
+- Known limitation, stated rather than hidden: a question whose answer turns on a SHORT
+  (<8-character) or question-named identifier can leave nothing anchorable — `verified` then
+  reads false on a correct answer. The tool description says so; it is a prompt to read the
+  evidence, never proof the answer is wrong.
+- The ask lane writes **no delegation ledger or corpus row**: `delegate.Run` records one per
+  subtask, `Pipeline.RunAgentContract` on its own does not. The pipeline's own task ledger
+  still sees the run. Recorded so an empty delegation corpus is never misread as "nobody used
+  the tool".
 - Contract hygiene the caller no longer has to think about: files are inlined through the
   delegator's one confined reader (`delegate.InlineContextPaths` — `os.Root` containment,
   128 KiB per file), duplicate base names are de-collided deterministically

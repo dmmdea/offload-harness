@@ -246,7 +246,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// only question + paths.
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_ask",
-		Description: "Ask a bounded question ABOUT SPECIFIC FILES and have a FREE local seat answer it — the one-call form of agent_delegate. You supply question + paths and nothing else: the harness builds the whole contract (goal, {answer,evidence} output schema, and an acceptance check ANCHORED to a distinctive token mined from the files themselves) and runs it on the local agent seat. REACH FOR IT THE MOMENT YOU ARE ABOUT TO OPEN MORE THAN TWO FILES to answer something bounded — that is exactly where reading them yourself costs more than asking. The files are read and inlined by the HARNESS under read_root, so your own context never pays for them. Good fits: \"which key sets the queue cap\" over three config files; \"does this handler validate the token before dispatch\" over a handler plus its helpers; \"what changed between these two versions of the spec\". Not this tool: unbounded exploration with no file list (use agent_run — it searches for its own files), anything that writes or runs (this lane is read-only), or a multi-part job needing several contracts (agent_delegate). Returns {answer, evidence, verified, acceptance, seat, steps, stop_reason} — evidence is the exact lines the seat relied on so you can spot-check instead of re-reading. verified is the harness own MACHINE check, not a quality verdict: the anchor is mined mechanically, so verified:true means the answer provably quoted something that appears only in these files, while verified:false frequently just means a correct answer had no reason to cite the particular token that was picked (MEASURED on the first live run: a right, well-cited answer read verified:false). Read acceptance_failures and the evidence rather than discarding the answer. Caps: at most 16 files, 128 KiB per file, 256 KiB total. It REFUSES (deferred:true) when the files hold no token distinctive enough to ground the check, rather than handing back an answer nothing verified. On any failure it returns deferred:true with a reason and you read the files yourself.",
+		Description: "Ask a bounded question ABOUT SPECIFIC FILES and have a FREE local seat answer it — the one-call form of agent_delegate. You supply question + paths and nothing else: the harness builds the whole contract (goal, {answer,evidence} output schema, and an acceptance check ANCHORED to distinctive tokens mined from the files themselves) and runs it on the local agent seat. REACH FOR IT THE MOMENT YOU ARE ABOUT TO OPEN MORE THAN TWO FILES to answer something bounded — that is exactly where reading them yourself costs more than asking. The files are read and inlined by the HARNESS under read_root, so your own context never pays for them. Good fits: \"which key sets the queue cap\" over three config files; \"which function does this handler call before dispatch\" over a handler plus its helpers; \"what changed between these two versions of the spec\". NOT this tool: unbounded exploration with no file list (use agent_run — it searches for its own files); anything that writes or runs (this lane is read-only); a multi-part job needing several contracts (agent_delegate); and above all anything whose answer is a JUDGEMENT rather than a fact the files state — security or credential review, an architecture decision, or the final does-it-actually-work verification. A free seat reports what the files say; it does not own a call you are accountable for. Returns {answer, evidence, verified, acceptance, seat, steps, stop_reason} — evidence is the exact lines the seat relied on so you can spot-check instead of re-reading. verified means the answer quoted something that appears ONLY in these files, checked mechanically against acceptance; verified:false is a prompt to read the evidence, not proof the answer is wrong — a question whose subject is a short or question-named identifier can leave nothing anchorable. Caps: at most 16 files, 128 KiB per file, 256 KiB total. It REFUSES (deferred:true) when the files hold no token distinctive enough to ground the check, rather than handing back an answer nothing verified. On any failure it returns deferred:true with a reason and you read the files yourself.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"question":{"type":"string","description":"the bounded question to answer FROM THESE FILES — one question, answerable from what you attach"},"paths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":16,"description":"the files to answer from, relative to read_root or absolute inside it (<=16 files, <=128 KiB each, <=256 KiB total)"},"read_root":{"type":"string","description":"absolute directory the paths are read from; nothing outside it can be read (default: the server working dir)"}},"required":["question","paths"]}`),
 	}, s.handleAsk)
 
@@ -1586,6 +1586,21 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	}
 	if structured.Answer == "" {
 		structured.Answer = wire.Output
+	}
+	if strings.TrimSpace(structured.Answer) == "" {
+		// A non-deferred result with neither prose nor a structured answer has nothing
+		// to publish. Returning answer:"" with no deferred key would read to the caller
+		// as "the seat answered, and the answer is nothing" — the silent shape this
+		// lane's defer-not-crash posture exists to avoid. It should not be reachable
+		// (the loop defers on an empty final message), which is exactly why it must not
+		// be the one path that fails quietly if it ever becomes reachable.
+		return jsonResult(map[string]any{
+			"deferred":    true,
+			"reason":      "the seat returned no answer (stop_reason " + wire.StopReason + ")",
+			"defer_class": core.DeferClassAbstention,
+			"seat":        wire.Seat,
+			"steps":       wire.Steps,
+		})
 	}
 	failures := delegate.EvalAcceptance(contract, wire)
 	out := map[string]any{
