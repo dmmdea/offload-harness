@@ -99,7 +99,7 @@ Write-Host "== this box (ampere-8, ram_tier=mid) - the primary validation =="
 $r = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-8' -RamTier 'mid' -BigRam $false
 $macro = Get-CommonMacro $r.yaml
 Write-Host "   common: $macro"
-if ($macro -match '--ctx-size 16384')                          { Ok 'ampere-8/mid ctx=16384' }        else { Bad "ampere-8/mid ctx (got: $macro)" }
+if ($macro -match '--ctx-size 32768')                          { Ok 'ampere-8/mid ctx=32768' }        else { Bad "ampere-8/mid ctx (got: $macro)" }
 if ($macro -match '--cache-type-k q8_0' -and $macro -match '--cache-type-v q8_0') { Ok 'ampere-8/mid KV=q8_0 (symmetric)' } else { Bad 'ampere-8/mid KV q8_0' }
 if ($macro -match '--flash-attn on')                           { Ok 'ampere-8/mid flash-attn on' }    else { Bad 'ampere-8/mid flash-attn' }
 if ($r.yaml -match '(?m)^\s{2}gemma4-26b-a4b:')                 { Ok 'ampere-8/mid includes 26B tier' } else { Bad 'ampere-8/mid 26B present' }
@@ -110,7 +110,7 @@ if ($b26 -match '--cpu-moe')                                   { Ok 'ampere-8/mi
 # rejects a set naming an unknown var, and a var naming an undefined model.
 if ($r.yaml -match '(?m)^\s{4}m26:\s*gemma4-26b-a4b\s*$' -and $r.yaml -match '(?m)^\s{4}interactive:.*\bm26\b') { Ok 'ampere-8/mid 26B is a matrix var referenced by the interactive set' } else { Bad 'ampere-8/mid 26B matrix membership' }
 if ($r.yaml -notmatch '__[A-Z0-9_]+__')                        { Ok 'ampere-8/mid no unsubstituted tokens' } else { Bad 'ampere-8/mid leftover tokens' }
-if ($r.verdict -and [int]$r.verdict.agent_ctx_tokens -eq 16384) { Ok 'ampere-8/mid agent_ctx_tokens=16384' } else { Bad 'ampere-8/mid agent_ctx_tokens' }
+if ($r.verdict -and [int]$r.verdict.agent_ctx_tokens -eq 32768) { Ok 'ampere-8/mid agent_ctx_tokens=32768' } else { Bad 'ampere-8/mid agent_ctx_tokens' }
 # gpu_env on ampere-8 is INTENTIONAL as of the 2026-08-19 8GB hygiene pass (H3): the
 # reference box is a hybrid-graphics laptop, which is the exact failure class
 # _fields.gpu_env exists for -- CUDA can resolve the default device to -1 there, so the
@@ -251,10 +251,10 @@ $a8Functional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Tri
 # would slip through both of the other two patterns. ampere-6 has this check at :218;
 # ampere-8 needs it for the same reason.
 if ($a8Functional -notmatch 'qwen3\.5-4b-agent' -and $a8Functional -notmatch '\bq354\b' -and $a8Functional -notmatch '__Q354B_') { Ok 'ampere-8 qwen3.5-4b seat STRIPPED (include_qwen35_4b absent)' } else { Bad 'ampere-8 qwen3.5-4b leaked in' }
-# ampere-8 also strips the 9B seat: its agent lane stays E4B-by-fallback until its own
-# on-box bake (the Aorus has never run one) - the deliberate twin-parity break recorded
-# in both tiers' notes. Same three-pattern check as the 4B strip above.
-if ($a8Functional -notmatch 'qwen3\.5-9b-agent' -and $a8Functional -notmatch '\bq359\b' -and $a8Functional -notmatch '__Q359B_') { Ok 'ampere-8 qwen3.5-9b seat STRIPPED (include_qwen35_9b absent - own bake pending)' } else { Bad 'ampere-8 qwen3.5-9b leaked in' }
+# ampere-8 RENDERS the 9B agent seat: "stays E4B-by-fallback until its own
+# on-box bake" was the OLD state: PR #173 flipped include_qwen35_9b after the
+# blackwell-8 reference bake (100% vs E4B 0%); live aorus-ampere8 serves it resident at 32k (verified /fleet/health 2026-08-25). The stale strip expectation kept main red for four merges.
+if ($a8Functional -match 'qwen3\.5-9b-agent' -and $a8Functional -notmatch '__Q359B_') { Ok 'ampere-8 renders the qwen3.5-9b agent seat (include_qwen35_9b, PR #173)' } else { Bad 'ampere-8 qwen3.5-9b seat missing or unsubstituted' }
 
 # blackwell-8: the measured 8GB agent seat renders (entry + swappable-set membership).
 # MEASURED 2026-08-22 on the tier's reference box (OptiPlex 7060, RTX 5060): 100%
@@ -356,8 +356,8 @@ if ($seat) { $mergedSeed = Merge-ConfigSeed -ConfigText $mergedSeed -Seed ([pscu
 $mergedObj = $mergedSeed | ConvertFrom-Json
 if ($mergedObj.agent_model -eq 'qwen3.8-27b') { Ok 'b2x16 fresh seed-merge binds explicit agent_model=qwen3.8-27b' } else { Bad "b2x16 agent_model (got: '$($mergedObj.agent_model)')" }
 
-# ampere-8 (resident_tier=offload-e4b == workhorse): NO agent_model key may
-# appear - materializing the fallback would fork the live chain. Mid-RAM flow
+# ampere-8 binds agent_model=qwen3.5-9b-agent explicitly in config_seed (PR #173,
+# measured seat, profile research). Mid-RAM flow
 # (base seed + overlay), the widest seed path an 8GB box gets.
 $row8 = $seedProfiles.'ampere-8'
 $merged8 = Merge-ConfigSeed -ConfigText $seedTpl -Seed $row8.config_seed
@@ -365,7 +365,7 @@ if ($row8.PSObject.Properties['config_seed_ram_mid_high']) { $merged8 = Merge-Co
 $seat8 = Get-DerivedAgentModel -ProfileRow $row8 -Seeds @($row8.config_seed, $row8.config_seed_ram_mid_high)
 if ($seat8) { $merged8 = Merge-ConfigSeed -ConfigText $merged8 -Seed ([pscustomobject]@{ agent_model = $seat8 }) }
 $merged8Obj = $merged8 | ConvertFrom-Json
-if (-not $merged8Obj.PSObject.Properties['agent_model']) { Ok 'ampere-8 fresh seed-merge yields NO agent_model key (resident==workhorse)' } else { Bad "ampere-8 unexpected agent_model (got: '$($merged8Obj.agent_model)')" }
+if ($merged8Obj.agent_model -eq 'qwen3.5-9b-agent') { Ok 'ampere-8 fresh seed-merge binds explicit agent_model=qwen3.5-9b-agent' } else { Bad "ampere-8 agent_model (got: '$($merged8Obj.agent_model)')" }
 
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 

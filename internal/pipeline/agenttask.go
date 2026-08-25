@@ -187,15 +187,26 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	built.Loop.WithContextTokens(effCtx).WithSkeletonPrune(true).WithGCFCompact(true).
 		WithTokenizer(tokclient.New(p.cfg.Endpoint, seat, 0))
 
-	// Task profile, default "research" (§S2: a delegated contract is a
-	// read-over-docs research shape unless it says otherwise). Profiles can
-	// only NARROW the read-only tool set; an unknown name defers loudly with
-	// the valid names rather than silently falling back to bare `general` —
-	// the one configuration measured to fail on small planners.
-	profileName := strings.TrimSpace(contract.Profile)
-	if profileName == "" {
-		profileName = "research"
-	}
+	// Task profile: the caller's explicit choice > this box's configured
+	// agent_profile > "general" — the same resolver handleAgentRun uses, so the
+	// two agent doors can no longer disagree about the same seat.
+	//
+	// This used to hard-default to "research" (§S2: a delegated contract is a
+	// read-over-docs research shape unless it says otherwise), which bypassed
+	// the per-tier key that exists precisely to decide this. AgentProfile is
+	// documented as "a property of the SEAT's capability, not of the task: a 27B
+	// planner handles the full tool set, a 4B does not" — and a spread's subtask
+	// 0 ALWAYS lands on the local seat, so on a big-planner box every fan-out
+	// was silently forced into the narrowed shape. Measured on the 27B seat
+	// (2026-08-19 D3 bake): general 100%, research 94% and 5x slower on one
+	// shape. Meanwhile the small tiers (ampere-6/8, blackwell-8) seed
+	// "research" in config_seed and keep it, which is where that decision
+	// belongs — in per-tier data, not in a constant here.
+	//
+	// Profiles can only NARROW the read-only tool set; an unknown name defers
+	// loudly with the valid names rather than silently falling back to bare
+	// `general` — the one configuration measured to fail on small planners.
+	profileName := p.cfg.AgentTaskProfile(strings.TrimSpace(contract.Profile))
 	prof, perr := agent.LookupProfile(profileName)
 	if perr != nil {
 		// A profile this build does not have can never run here, however healthy

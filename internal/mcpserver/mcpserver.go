@@ -7,6 +7,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"llamaswap-pp-cli/pkg/llamaswap"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -82,7 +85,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// + which media engines this machine has + the (only) remote surface.
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_status",
-		Description: "Discover this harness's capability — call this FIRST when inspecting what the harness can do. Returns {local:{endpoint, roster{workhorse,agent,triage,escalation,reasoning,vision,ocr,stt,stt_hq,embed}, served_now[...] (live model ids from the LOCAL llama-swap endpoint)}, media:{...this machine's configured generation engines}, remote:{nim_endpoint, nim_default_model, nim_key_present}, accelerators:{...} (present only when this box lists an accelerator device, e.g. hailo-8l: its endpoint, sidecar config, owned tools and a live health probe)}. Every offload_* tool except offload_nim runs LOCAL — the GPU roster or a listed accelerator (free, on-box, no cloud); offload_nim is the ONLY remote/cloud surface. An empty roster entry means that capability defers on this machine.",
+		Description: "Discover this harness's capability — call this FIRST when inspecting what the harness can do. Returns {local:{endpoint, roster{workhorse,agent,triage,escalation,reasoning,vision,ocr,stt,stt_hq,embed}, served_now[...] (live model ids from the LOCAL llama-swap endpoint)}, fleet:{delegation_enabled, local_agent_seat{model, loaded, ctx_tokens?}, nodes[{base, reachable, node_id, agent_enabled, agent_seat, agent_ctx_tokens, agent_seat_resident, queue_depth}], agent_capable_nodes, idle_agent_nodes} — the LIVE delegation roster, probed at call time: who the delegation seats are, their real context ceilings, and how deep their queues run. Trust it over any rules file or written figure; idle_agent_nodes > 0 means paid-for capacity is sitting unused, media:{...this machine's configured generation engines}, remote:{nim_endpoint, nim_default_model, nim_key_present}, accelerators:{...} (present only when this box lists an accelerator device, e.g. hailo-8l: its endpoint, sidecar config, owned tools and a live health probe)}. Every offload_* tool except offload_nim runs LOCAL — the GPU roster or a listed accelerator (free, on-box, no cloud); offload_nim is the ONLY remote/cloud surface. An empty roster entry means that capability defers on this machine.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
 	}, s.handleStatus)
 
@@ -239,8 +242,8 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	if s.p != nil && s.p.Cfg().AgentDelegationEnabled {
 		srv.AddTool(&mcp.Tool{
 			Name:        "agent_delegate",
-			Description: "Fan out 1-8 self-contained subtasks to the FREE local delegation engine: each subtask is a contract {goal, context docs, output_schema, acceptance} run by an autonomous read-only agent loop on THIS box or on a fleet node over the operator's tailnet (never cloud). Placement is quality-first: an idle local box always runs the work; a remote node is used only when the local GPU is busy AND the node passes the capability gate (route=auto; force with local|remote). context_paths inlines files DELEGATOR-side (confined to read_root) so your context never pays for them. acceptance is a machine-checkable DSL evaluated by the delegator before a result counts as done: contains:<s>, not_contains:<s>, regex:<re>, min_items:<field>:<n>, nonempty:<field> — a schema-valid result failing a check comes back as failed_verification, NOT a success. Returns {summary:{succeeded,deferred,failed_verification,failed,infrastructure,corpus_rows_lost,ledger_rows_lost}, results:[{node,seat,placement,job_id,output,structured,deferred,reason,defer_class,failed,acceptance_failures,wall_ms,acceptance_lint}]} — read summary FIRST. results[].acceptance_lint (warn-only, the run still happened) flags acceptance that verifies less than it looks: PARROT-PASSABLE (every content check also matches the goal text, so an echoed question passes as verified and the retry never fires), UNGROUNDED (a contains:/regex: matching nothing in the contract's own context docs — fails right answers), or SHAPE-ONLY (nonempty:/min_items: alone — passes garbage). When present, fix the acceptance (anchor >=1 contains:/regex: to content that appears only in the docs) before reusing the contract. summary.infrastructure counts the results whose story is a broken STACK rather than the work: defers whose defer_class is infrastructure|config, plus a local placement taken while every configured remote failed its health probe. Non-zero means a node is broken or misconfigured, so do NOT read those subtasks as work the local stack honestly could not do — and the call comes back flagged as an error, with this same JSON body intact. defer_class \"contract\" is YOUR contract, not a box: no output_schema for a remote placement, past the origin hop, or bigger than any node's advertised context — rewrite the contract and retry. abstention|budget defers and failed_verification are ordinary result shapes. On any refusal before placement it returns deferred:true with a reason and you do the work yourself.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"subtasks":{"type":"array","minItems":1,"maxItems":8,"description":"the delegation contracts to place and run","items":{"type":"object","properties":{"goal":{"type":"string","description":"the self-contained task for the sub-agent (it sees ONLY this + the context docs)"},"context":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"text":{"type":"string"}},"required":["name","text"]},"description":"inline context documents (name is a flat filename; total across docs <= 256 KiB)"},"context_paths":{"type":"array","items":{"type":"string"},"description":"files to inline as context docs, read by the DELEGATOR under read_root confinement (<=128 KiB each)"},"output_schema":{"type":"object","description":"JSON Schema with a properties map; the sub-agent's final answer is re-packed into it. REQUIRED for any remote placement"},"acceptance":{"type":"array","items":{"type":"string"},"description":"machine-checkable checks evaluated delegator-side: contains:<s> | not_contains:<s> | regex:<re> | min_items:<field>:<n> | nonempty:<field>"},"profile":{"type":"string","description":"agent task profile (default research)"},"max_steps":{"type":"integer","description":"loop step budget (default 12, cap 12)"},"timeout_sec":{"type":"integer","description":"wall ceiling per subtask INCLUDING its cross-seat retry (default 300, cap 900): a retry runs only inside what is left of this budget and is skipped, with a note, under 10 s"}},"required":["goal"]}},"route":{"type":"string","enum":["auto","spread","local","remote"],"description":"placement: auto (default; idle-local wins, busy-local considers remotes), spread (deal the subtasks round-robin across the local seat AND every eligible fleet node, concurrently — use for any fan-out of 2+ contracts. The deal is deterministic: subtask 0 ALWAYS lands on the local seat, so a 2-contract spread with an eligible remote is guaranteed one local + one remote — the local+server pair. Eligibility is PER SUBTASK — a contract with no output_schema, or too big for every node, silently deals local; read results[].placement to confirm the pair landed), local (force in-process), remote (force a fleet node; defers if none eligible). A subtask whose answer fails acceptance (or abstains) is retried once on a different node and the better attempt is published (retried_on / retry_note)"},"read_root":{"type":"string","description":"absolute directory context_paths may be read from (default: the server working dir)"},"remotes":{"type":"array","items":{"type":"string"},"description":"fleet node base URLs, tailnet-only (e.g. http://node-c:18811)"}},"required":["subtasks"]}`),
+			Description: "Fan out 1-8 self-contained subtasks to the FREE local delegation engine: each subtask is a contract {goal, context docs, output_schema, acceptance} run by an autonomous read-only agent loop on THIS box or on a fleet node over the operator's tailnet (never cloud). Placement is quality-first: an idle local box always runs the work; a remote node is used only when the local GPU is busy AND the node passes the capability gate (route=auto; force with local|remote). context_paths inlines files DELEGATOR-side (confined to read_root) so your context never pays for them. SIZE CONTRACTS FROM THE LIVE CEILING, never from a remembered or written figure: offload_status's fleet section reports each seat's agent_ctx_tokens. Written guidance drifted to a quarter of the real window and work that fits trivially was declined as 'too big for the seat' for weeks, so a figure you did not just read from offload_status is not a number. acceptance is a machine-checkable DSL evaluated by the delegator before a result counts as done: contains:<s>, not_contains:<s>, regex:<re>, min_items:<field>:<n>, nonempty:<field> — a schema-valid result failing a check comes back as failed_verification, NOT a success. Returns {summary:{succeeded,deferred,failed_verification,failed,infrastructure,corpus_rows_lost,ledger_rows_lost}, results:[{node,seat,placement,job_id,output,structured,deferred,reason,defer_class,failed,acceptance_failures,wall_ms,acceptance_lint}]} — read summary FIRST. results[].acceptance_lint (warn-only, the run still happened) flags acceptance that verifies less than it looks: PARROT-PASSABLE (every content check also matches the goal text, so an echoed question passes as verified and the retry never fires), UNGROUNDED (a contains:/regex: matching nothing in the contract's own context docs — fails right answers), or SHAPE-ONLY (nonempty:/min_items: alone — passes garbage). When present, fix the acceptance (anchor >=1 contains:/regex: to content that appears only in the docs) before reusing the contract. summary.infrastructure counts the results whose story is a broken STACK rather than the work: defers whose defer_class is infrastructure|config, plus a local placement taken while every configured remote failed its health probe. Non-zero means a node is broken or misconfigured, so do NOT read those subtasks as work the local stack honestly could not do — and the call comes back flagged as an error, with this same JSON body intact. defer_class \"contract\" is YOUR contract, not a box: no output_schema for a remote placement, past the origin hop, or bigger than any node's advertised context — rewrite the contract and retry. abstention|budget defers and failed_verification are ordinary result shapes. On any refusal before placement it returns deferred:true with a reason and you do the work yourself.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"subtasks":{"type":"array","minItems":1,"maxItems":8,"description":"the delegation contracts to place and run","items":{"type":"object","properties":{"goal":{"type":"string","description":"the self-contained task for the sub-agent (it sees ONLY this + the context docs)"},"context":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"text":{"type":"string"}},"required":["name","text"]},"description":"inline context documents (name is a flat filename; total across docs <= 256 KiB)"},"context_paths":{"type":"array","items":{"type":"string"},"description":"files to inline as context docs, read by the DELEGATOR under read_root confinement (<=128 KiB each)"},"output_schema":{"type":"object","description":"JSON Schema with a properties map; the sub-agent's final answer is re-packed into it. REQUIRED for any remote placement"},"acceptance":{"type":"array","items":{"type":"string"},"description":"machine-checkable checks evaluated delegator-side: contains:<s> | not_contains:<s> | regex:<re> | min_items:<field>:<n> | nonempty:<field>"},"profile":{"type":"string","description":"agent task profile. Default = the EXECUTING box's configured agent_profile, else general — a per-SEAT property: small tiers seed research (narrowing measured 0%->72% there), big planners run un-narrowed (research measured 94% and 5x slower vs general 100% on the 27B). Omit unless the task genuinely needs a specific toolset"},"max_steps":{"type":"integer","description":"loop step budget (default 12, cap 12)"},"timeout_sec":{"type":"integer","description":"wall ceiling per subtask INCLUDING its cross-seat retry (default 300, cap 900): a retry runs only inside what is left of this budget and is skipped, with a note, under 10 s"}},"required":["goal"]}},"route":{"type":"string","enum":["auto","spread","local","remote"],"description":"placement: auto (default; idle-local wins, busy-local considers remotes), spread (deal the subtasks round-robin across the local seat AND every eligible fleet node, concurrently — use for any fan-out of 2+ contracts. The deal is deterministic: subtask 0 ALWAYS lands on the local seat, so a 2-contract spread with an eligible remote is guaranteed one local + one remote — the local+server pair. Eligibility is PER SUBTASK — a contract with no output_schema, or too big for every node, silently deals local; read results[].placement to confirm the pair landed), local (force in-process), remote (force a fleet node; defers if none eligible). A subtask whose answer fails acceptance (or abstains) is retried once on a different node and the better attempt is published (retried_on / retry_note)"},"read_root":{"type":"string","description":"absolute directory context_paths may be read from (default: the server working dir)"},"remotes":{"type":"array","items":{"type":"string"},"description":"fleet node base URLs, tailnet-only (e.g. http://node-c:18811)"}},"required":["subtasks"]}`),
 		}, s.handleAgentDelegate)
 	}
 
@@ -439,11 +442,184 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 		}
 	}
 
-	payload := map[string]any{"local": local, "media": media, "remote": remote, "reuse": reuse}
+	payload := map[string]any{"local": local, "media": media, "remote": remote, "reuse": reuse, "fleet": s.fleetView(ctx, cfg)}
 	if accel != nil {
 		payload["accelerators"] = accel
 	}
 	return jsonResult(payload)
+}
+
+// fleetProbeTimeout bounds the whole fleet section. Node health is a CACHED
+// read on the node side (it never blocks on llama-swap), so a node that cannot
+// answer inside this is down, not busy — and status must stay snappy. Probes
+// run concurrently, so this is the wall for the section, not per node.
+const fleetProbeTimeout = 8 * time.Second
+
+// fleetView is the LIVE delegation roster: who the delegation seats are and
+// what they can take RIGHT NOW.
+//
+// It exists because capability was being ASSERTED in documents instead of
+// reported by the system, and the documents went stale in a way that silently
+// suppressed delegation for weeks. Three independent sources (a rules file, a
+// tier matrix, and the config this server loads) each described a live, resident
+// agent seat as absent or half-capable; there was no runtime surface that could
+// contradict them. A caller could not learn the truth at any price.
+//
+// So the numbers a caller needs to size and place work — the agent seat, its
+// context ceiling, whether it is enabled and resident, and how deep its queue is
+// — are published here, probed, every call. A written figure is now always the
+// weaker source.
+//
+// A probe failure is REPORTED, never swallowed and never a defer: "the node is
+// unreachable" and "the node is busy" route completely differently for the
+// caller, and the local seat's answer is still the answer.
+func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]any {
+	out := map[string]any{
+		"delegation_enabled": cfg.AgentDelegationEnabled,
+		"note": "LIVE capability, probed at call time — trust this over any rules file, matrix or doc. " +
+			"Size contracts from ctx_tokens here, never from a written figure.",
+	}
+	out["local_agent_seat"] = localSeatView(ctx, cfg)
+
+	// One specific reason, never a menu the caller has to guess between. These
+	// two states look identical from the outside (no nodes) and have completely
+	// different fixes.
+	switch {
+	case !cfg.AgentDelegationEnabled:
+		out["nodes"] = []any{}
+		out["reason"] = "agent_delegation_enabled is false in the config THIS server loaded — agent_delegate is absent from tools/list and no node can be placed on"
+		return out
+	case len(cfg.DelegateRemotes) == 0:
+		out["nodes"] = []any{}
+		out["reason"] = "no delegate_remotes in the config THIS server loaded — delegation can only run on the local seat. If a node is live but missing here, the server is reading a different config file than the one being edited"
+		return out
+	}
+
+	// The node probes get their OWN budget, deliberately not shared with the
+	// local-seat probe above. Sharing one deadline across both made a slow local
+	// probe eat the entire allowance and report every node as "context deadline
+	// exceeded" — nodes that answer a curl in ~130 ms were published as
+	// unreachable. A local stall must never be reported as a fleet outage.
+	nodeCtx, cancel := context.WithTimeout(ctx, fleetProbeTimeout)
+	defer cancel()
+
+	type probe struct {
+		base string
+		view delegate.NodeView
+		err  error
+	}
+	results := make([]probe, len(cfg.DelegateRemotes))
+	var wg sync.WaitGroup
+	for i, base := range cfg.DelegateRemotes {
+		wg.Add(1)
+		go func(i int, base string) {
+			defer wg.Done()
+			v, err := delegate.FetchNodeView(nodeCtx, base, cfg.FleetAuthToken)
+			results[i] = probe{base: base, view: v, err: err}
+		}(i, base)
+	}
+	wg.Wait()
+
+	nodes := make([]any, 0, len(results))
+	var capable, idle int
+	for _, r := range results {
+		n := map[string]any{"base": r.base}
+		if r.err != nil {
+			n["reachable"] = false
+			n["probe_error"] = r.err.Error()
+			nodes = append(nodes, n)
+			continue
+		}
+		n["reachable"] = true
+		n["node_id"] = r.view.NodeID
+		n["agent_enabled"] = r.view.AgentEnabled
+		n["agent_seat"] = r.view.AgentSeat
+		n["agent_ctx_tokens"] = r.view.AgentCtxTokens
+		n["agent_seat_resident"] = r.view.AgentResident
+		n["queue_depth"] = r.view.QueueDepth
+		if r.view.AgentEnabled {
+			capable++
+			if r.view.QueueDepth == 0 {
+				idle++
+			}
+		}
+		nodes = append(nodes, n)
+	}
+	out["nodes"] = nodes
+	// Published, not merely computed: an idle seat is capacity already paid for
+	// in electricity, and the whole point of this surface is that a caller can
+	// see it without reading anything.
+	out["agent_capable_nodes"] = capable
+	out["idle_agent_nodes"] = idle
+	return out
+}
+
+// localSeatProbeTimeout bounds the local seat probe. It is a NON-loading read
+// (/running, then /props only when the seat already holds VRAM), so it is fast
+// or it is broken — there is no legitimate slow case to wait for.
+const localSeatProbeTimeout = 4 * time.Second
+
+// localSeatView reports the local agent seat WITHOUT loading it.
+//
+// The local seat runs agent_run and is ALWAYS subtask 0 of an agent_delegate
+// spread, so its window is the ceiling for the contract a caller is about to
+// write — and it is the one number no config file holds (it lives in the serving
+// stack's launch flags, which is exactly why the written guidance about it
+// drifted to a quarter of reality).
+//
+// It deliberately does NOT use agent.ProbeServedWindow: that helper documents
+// itself as "may cold-start the model, which is acceptable: the caller is about
+// to use exactly that model", and names the non-loading path "the right default
+// for an operator probe, and exactly wrong here". offload_status IS an operator
+// probe. Using it here made a capability *question* cost a multi-GB load that
+// evicts whatever is resident — including a media render mid-flight.
+//
+// So a cold seat reports cold. That is the honest answer, and the caller loses
+// nothing: agent_run and agent_delegate probe the real ceiling when they warm
+// the seat, which is the moment the number is actually needed.
+func localSeatView(ctx context.Context, cfg config.Config) map[string]any {
+	seat := cfg.AgentPlannerModel("")
+	v := map[string]any{"model": seat}
+
+	c, err := swapclient.New(cfg.Endpoint, localSeatProbeTimeout)
+	if err != nil {
+		v["ctx_probe_error"] = err.Error()
+		return v
+	}
+	pctx, cancel := context.WithTimeout(ctx, localSeatProbeTimeout)
+	defer cancel()
+
+	props, err := c.Props(pctx, seat)
+	switch {
+	case errors.Is(err, llamaswap.ErrNotLoaded):
+		v["loaded"] = false
+		v["note"] = "seat is cold; its window is not readable without loading it, and a status call must never trigger a multi-GB load. agent_run/agent_delegate probe the real ceiling when they warm it."
+		return v
+	case err != nil:
+		v["ctx_probe_error"] = err.Error()
+		return v
+	}
+	v["loaded"] = true
+	if n, ok := nCtxFromProps(props); ok {
+		v["ctx_tokens"] = n
+	}
+	return v
+}
+
+// nCtxFromProps pulls the live window out of a llama.cpp /props payload. n_ctx
+// lives under default_generation_settings on current builds and at the root on
+// older ones; both are accepted so a server upgrade cannot silently turn the
+// ceiling into "unknown".
+func nCtxFromProps(props map[string]any) (int, bool) {
+	if dgs, ok := props["default_generation_settings"].(map[string]any); ok {
+		if f, ok := dgs["n_ctx"].(float64); ok && f > 0 {
+			return int(f), true
+		}
+	}
+	if f, ok := props["n_ctx"].(float64); ok && f > 0 {
+		return int(f), true
+	}
+	return 0, false
 }
 
 // probeServedModels reads the live roster and returns the CANONICAL model ids.
@@ -534,15 +710,15 @@ func (s *Server) handleVideoDescribe(ctx context.Context, req *mcp.CallToolReque
 
 func (s *Server) handleVideoWatch(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		Video      string   `json:"video"`
-		Question   string   `json:"question"`
-		WindowSec  float64  `json:"window_sec"`
-		FPS        float64  `json:"fps"`
-		MaxFrames  int      `json:"max_frames"`
-		FrameWidth int      `json:"frame_width"`
-		Start      float64  `json:"start"`
-		End        float64  `json:"end"`
-		Synthesize *bool    `json:"synthesize"`
+		Video      string  `json:"video"`
+		Question   string  `json:"question"`
+		WindowSec  float64 `json:"window_sec"`
+		FPS        float64 `json:"fps"`
+		MaxFrames  int     `json:"max_frames"`
+		FrameWidth int     `json:"frame_width"`
+		Start      float64 `json:"start"`
+		End        float64 `json:"end"`
+		Synthesize *bool   `json:"synthesize"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil

@@ -226,13 +226,20 @@ rest — an unset `agent_profile` is never materialized into the config file. It
 the same contract scored **0% under `general`** (twelve steps burned calling tools, zero output
 bytes) and **72% under a narrowed profile** — a larger factor than the choice of model. It is
 per-TIER because it is a property of the seat's capability, not of the task: a 27B planner handles
-the full tool set, a 4B does not. **Two front doors honour it: the `agent_run` MCP tool and the
-`local-agent` CLI.** Two paths deliberately do NOT, and the distinction is load-bearing:
+the full tool set, a 4B does not. **Three front doors honour it: the `agent_run` MCP tool, the
+`local-agent` CLI, and the delegation lane.** One path deliberately does not (below).
 
-- **The delegation lane** (`internal/pipeline/agenttask.go`) hardcodes its own `research` default
-  and never reads `agent_profile`. That is intentional — the lane's default describes the TASK
-  SHAPE (a delegated contract is a read-over-docs job), not the box, so a box seeded `build` must
-  not turn delegated research contracts into build runs. A contract's own `profile` field still wins.
+- **The delegation lane** (`internal/pipeline/agenttask.go`) resolves contract `profile` >
+  configured `agent_profile` > `general` — the same `AgentTaskProfile` chain as `agent_run`.
+  It previously hardcoded its own `research` default on the argument that the default describes
+  the TASK SHAPE (a delegated contract is a read-over-docs job), not the box. That was reversed
+  after the 2026-08-19 D3 bake: a spread's subtask 0 ALWAYS lands on the local seat, so on a
+  big-planner box every fan-out was forced into the narrowed shape the bake measured WORSE there
+  (27B: general 100%, research 94% and 5x slower on one shape), while the small tiers already
+  carry `research` in their `config_seed` — the per-tier key is where that decision belongs.
+  The task-shape concern is bounded: this lane builds read-only regardless, so a box seeded a
+  non-research profile can only select a different narrowed READ-ONLY subset, never add mutating
+  tools. A contract's own `profile` field still wins.
 - **`--two-tier`** builds its own architect/editor loops and sets their toolsets itself, so a box
   default must not bleed in (it never calls `WithProfile` on those loops at all). An unknown configured name fails by
 NAME rather than silently degrading to the one configuration measured to fail.
@@ -428,8 +435,9 @@ at all — and "N rows lost" is unreadable without the M it was lost out of.
 
 A **local** placement is not a special case: it runs the identical `Pipeline.Run` route a fleet
 node runs (`pipeline.RunAgentContract` → the `agent` task → this loop, read-only over the
-contract's materialized context docs, `research` profile by default, no
-write/run/fetch/github tools), so local and remote results share one execution semantics.
+contract's materialized context docs, profile resolved contract > configured `agent_profile` >
+`general`, no write/run/fetch/github tools), so local and remote results share one execution
+semantics.
 
 The one deliberate difference is `output_schema`: **remote** placement requires it (the gate's
 mechanical-verifiability condition, and the node refuses a schemaless contract at ack), while a

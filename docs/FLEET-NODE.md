@@ -38,7 +38,16 @@ advertising an empty GPU. The serve log names the resolved source
 (`... via nvidia-smi|windows-generic, vendor=... arch=...`). Ctrl-C drains: dispatches for a
 job_id this node has never seen get 503; a re-dispatch of a job_id this node already knows
 about (running, done, or previously failed) still re-acks 202 — or 409 if it previously
-failed — even mid-drain, since that's not new work. In-flight renders get up to 30s to finish, survivors are marked terminal
+failed — even mid-drain, since that's not new work.
+
+**Queue-depth back-pressure** (`fleet_max_queue_depth`, 0.95.0): a NEW dispatch is refused
+`503` ("queue full") once accepted+running jobs reach the cap — default 32, configurable,
+negative = unlimited. Any non-202 already means "re-dispatch elsewhere" to the dispatcher,
+so a full node sheds load to its siblings with no dispatcher change. The check runs before
+request materialization; re-acks of jobs this node owns and result polls are never refused
+by it. The default is deliberately generous (a full `agent_delegate` call is 8 subtasks;
+the delegator runs 4 at a time): it guards runaway pile-up latency behind the single
+inference slot, and an over-tight cap suppressing real use is the worse defect. In-flight renders get up to 30s to finish, survivors are marked terminal
 `error:"interrupted"` so pollers always reach a terminal state.
 
 ## Running as a Windows scheduled task
@@ -432,7 +441,7 @@ one contract. Unknown payload fields are **ignored** (staggered node deploys mus
 | `context` | `[{name, text}]` | inline docs, ≤ 16, ≤ 256 KiB total; each becomes a file the sub-agent can read, so `name` must be a flat filename: no `/` `\` `:` NUL, not `.`/`..`, **not a reserved Windows device name** (`CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9`, any case, with or without extensions — a write to one succeeds and reads back EMPTY), and no trailing space or dot (Windows strips them). Duplicates are rejected on a normalized key (trailing space/dot trimmed, case-folded), so `notes.md` / `notes.md ` / `Notes.MD` cannot shadow each other |
 | `output_schema` | object | JSON Schema with a `properties` map of string/number/integer/boolean/string-array/enum fields. **Required over the wire** — an agent dispatch without one is refused at ack, because the delegator would have no mechanical check before merging. A LOCAL placement (`route: local`, or `auto` with an idle GPU) may omit it: the run then returns its `output` with `structured` empty, and acceptance's text verbs carry the verification |
 | `acceptance` | `[string]` | delegator-evaluated checks: `contains:<s>` \| `not_contains:<s>` \| `regex:<re>` \| `min_items:<field>:<n>` \| `nonempty:<field>`; malformed or unfalsifiable checks are a 400 |
-| `profile` | string | agent task profile, default `research`; unknown names defer naming the valid set |
+| `profile` | string | agent task profile; default = the executing node's configured `agent_profile`, else `general` (small tiers seed `research` in `config_seed`); unknown names defer naming the valid set |
 | `max_steps` | int | default 12, clamped to 12 |
 | `timeout_sec` | int | default 300, clamped to 900; enforced node-side as a hard wall deadline |
 | `depth` | int | advisory — the node executes anything off the wire at `max(1, depth)`, so a wire "origin" claim is never trusted |
