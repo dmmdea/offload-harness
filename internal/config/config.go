@@ -1523,10 +1523,6 @@ func DefaultComfyDir() string {
 	return ""
 }
 
-// ImageRouteConfigured reports whether THIS box serves generate_image at all —
-// the ComfyUI path (imagegen_script) OR the sdcpp engine (J2: sdcpp_bin + model;
-// imagegen_script stays empty there). The fleet capability gate and fleet-measure
-// key on this, matching the pipeline's engine-first routing.
 // FleetQueueLimit resolves FleetMaxQueueDepth: 0 → the built-in default,
 // negative → 0 meaning unlimited. Callers compare depth >= limit only when
 // limit > 0.
@@ -1541,6 +1537,10 @@ func (c Config) FleetQueueLimit() int {
 	}
 }
 
+// ImageRouteConfigured reports whether THIS box serves generate_image at all —
+// the ComfyUI path (imagegen_script) OR the sdcpp engine (J2: sdcpp_bin + model;
+// imagegen_script stays empty there). The fleet capability gate and fleet-measure
+// key on this, matching the pipeline's engine-first routing.
 func (c Config) ImageRouteConfigured() bool {
 	if c.ImageGenEngine == "sdcpp" {
 		return c.SdcppBin != "" && c.SdcppModel != ""

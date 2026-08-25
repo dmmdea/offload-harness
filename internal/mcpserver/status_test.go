@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -179,5 +181,98 @@ func TestStatusEndpointDownStillReportsRoster(t *testing.T) {
 	}
 	if _, ok := local["served_now"]; ok {
 		t.Errorf("served_now must be absent when the probe failed, got %v", local["served_now"])
+	}
+}
+
+// TestStatusFleetLocalSeatColdNeverLoads is the regression guard on the fleet
+// section's one hard requirement: a status question must NEVER cost a model
+// load. The fake llama-swap records every path it serves; the seat is reported
+// not-running, so the probe must stop at /running + /v1/models — any request
+// that could auto-start the seat (/upstream/..., /v1/chat/completions) fails
+// the test by name. The payload must report the seat honestly cold.
+func TestStatusFleetLocalSeatColdNeverLoads(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"object": "list",
+				"data":   []map[string]any{{"id": "qwen38-27b"}},
+			})
+		case "/running":
+			// The seat is COLD: nothing is loaded.
+			_ = json.NewEncoder(w).Encode(map[string]any{"running": []any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.Endpoint = upstream.URL
+	cfg.AgentModel = "qwen38-27b"
+	t.Setenv("NVIDIA_API_KEY", "")
+	t.Setenv("NGC_API_KEY", "")
+
+	s := New(pipeline.New(cfg, nil, nil, nil))
+	res, err := s.handleStatus(context.Background(), callReq(`{}`))
+	if err != nil {
+		t.Fatalf("handleStatus error: %v", err)
+	}
+	m := decodeResult(t, res)
+	fleet, ok := m["fleet"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload has no fleet section: %v", m)
+	}
+	seat, ok := fleet["local_agent_seat"].(map[string]any)
+	if !ok {
+		t.Fatalf("fleet has no local_agent_seat: %v", fleet)
+	}
+	if seat["model"] != "qwen38-27b" {
+		t.Fatalf("local seat model = %v, want qwen38-27b", seat["model"])
+	}
+	if seat["loaded"] != false {
+		t.Fatalf("cold seat must report loaded=false, got %v", seat)
+	}
+	if _, present := seat["ctx_tokens"]; present {
+		t.Fatalf("cold seat must not invent a ctx_tokens value: %v", seat)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, p := range paths {
+		if strings.HasPrefix(p, "/upstream/") || strings.Contains(p, "/chat/completions") {
+			t.Fatalf("status probe hit %q — a path that can auto-start the seat; the probe must never load", p)
+		}
+	}
+}
+
+// TestNCtxFromProps: the window extractor must read both llama.cpp schema
+// generations (default_generation_settings.n_ctx on current builds, root n_ctx
+// on older ones) and answer "unknown" — never zero-as-a-value — otherwise.
+func TestNCtxFromProps(t *testing.T) {
+	cases := []struct {
+		name  string
+		props map[string]any
+		want  int
+		ok    bool
+	}{
+		{"current schema", map[string]any{"default_generation_settings": map[string]any{"n_ctx": float64(131072)}}, 131072, true},
+		{"legacy root schema", map[string]any{"n_ctx": float64(32768)}, 32768, true},
+		{"nested wins over root", map[string]any{"default_generation_settings": map[string]any{"n_ctx": float64(131072)}, "n_ctx": float64(8192)}, 131072, true},
+		{"zero is not a window", map[string]any{"n_ctx": float64(0)}, 0, false},
+		{"absent", map[string]any{"model": "x"}, 0, false},
+		{"wrong type", map[string]any{"n_ctx": "big"}, 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := nCtxFromProps(c.props)
+			if got != c.want || ok != c.ok {
+				t.Fatalf("nCtxFromProps(%v) = (%d, %v), want (%d, %v)", c.props, got, ok, c.want, c.ok)
+			}
+		})
 	}
 }
