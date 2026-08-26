@@ -135,9 +135,17 @@ type Summary struct {
 	// wire.Output before the re-pack and keeps it populated on every failure
 	// branch below, so the CALLER still receives the loop's answer in the
 	// result's `output` field. (It is preserved for the caller, NOT for
-	// acceptance: both evalAcceptance call sites guard on !wire.Deferred and
-	// every re-pack failure branch defers, so no check ever runs over it —
-	// pinned by TestRunLocalDeferSkipsAcceptance.) So a subtask whose agent loop
+	// acceptance. THE RULE, binding on every caller of EvalAcceptance in any
+	// package: never evaluate a DEFERRED result. A defer's preserved prose was
+	// never offered as an answer, so checking it manufactures failures about
+	// content nobody claimed — an honest defer would land in the ledger and the
+	// corpus as a verification failure. This package keeps the rule by guarding
+	// both call sites on !wire.Deferred, pinned by
+	// TestRunLocalDeferSkipsAcceptance; mcpserver's ask lane keeps it by
+	// returning on wire.Deferred before it ever reaches the call. Stated as a
+	// rule rather than as a tally of call sites on purpose: the tally said "both"
+	// while there were three, and a doc comment reads back as evidence the code
+	// obeys it.) So a subtask whose agent loop
 	// FINISHED and whose re-pack seat was unreachable publishes prose beside
 	// defer_class:"infrastructure" and IS counted here. That is
 	// deliberate, not an oversight: a contract carrying an output_schema asked for
@@ -724,7 +732,7 @@ func (r *runner) runLocal(ctx context.Context, contract core.AgentContract, view
 		// acceptance over it manufactures "failures" about content that was
 		// never claimed — turning an honest defer into a verification failure
 		// in the ledger and the corpus.
-		pr.AcceptanceFailures = evalAcceptance(contract, wire)
+		pr.AcceptanceFailures = EvalAcceptance(contract, wire)
 	}
 	return pr
 }
@@ -871,7 +879,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			pr.Node = wire.NodeID
 			pr.Seat = wire.Seat
 			if !wire.Deferred {
-				pr.AcceptanceFailures = evalAcceptance(contract, wire)
+				pr.AcceptanceFailures = EvalAcceptance(contract, wire)
 			}
 			return pr
 		case status == http.StatusOK && state == "error":
@@ -1103,11 +1111,16 @@ func (r *runner) pollOnce(ctx context.Context, base, jobID string) (state string
 	return wire.State, wire.Data, wire.Error, resp.StatusCode, nil
 }
 
-// evalAcceptance runs every contract acceptance check against the result —
+// EvalAcceptance runs every contract acceptance check against the result —
 // DELEGATOR-side, before merge (roast delta 3). An unparseable check fails
 // closed with the parse error as the failure: Validate should have caught it,
 // and an unmet precondition is a failed check, never a skipped one.
-func evalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []string {
+//
+// Exported (package-private until askjob) so the single-seat offload_ask lane,
+// which runs its contract through Pipeline.RunAgentContract instead of
+// delegate.Run, evaluates acceptance by the SAME rules rather than a second
+// copy of them. An acceptance check nothing evaluates is decoration.
+func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []string {
 	var failures []string
 	for _, a := range contract.Acceptance {
 		chk, err := core.ParseAcceptanceCheck(a)

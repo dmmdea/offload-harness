@@ -35,7 +35,7 @@ The server runs over **stdio** and registers its tools at startup. A calling age
 calls them with JSON arguments, and receives JSON results — including Defers, which are successful
 results, not errors.
 
-**Twenty-two tools** are registered, in families:
+**Twenty-five tools** are registered, in families:
 
 | Family | Tools |
 |---|---|
@@ -45,7 +45,7 @@ results, not errors.
 | Media generation | `offload_generate_image`, `offload_generate_video`, `offload_generate_audio`, `offload_generate_svg` |
 | Media editing | `offload_edit_image`, `offload_inpaint_image`, `offload_edit_image_generative`, `offload_upscale_image`, `offload_media` |
 | Graph execution | `offload_run_graph` |
-| Agent | `agent_run` |
+| Agent | `agent_run`, `offload_ask` |
 | Remote (opt-in) | `offload_nim` |
 | Status | `offload_status` |
 
@@ -64,6 +64,40 @@ is normally an alias. Every response
 carries the effect ledger (`effects` counts + `effects_flagged` records) on success AND deferred
 paths, and `judge: true` adds one end-of-run **advisory** same-seat completion (`judge_report`)
 grading the flagged effects for operator review — annotation only, it never gates anything.
+
+`offload_ask` is the ONE-CALL delegation entry: question + paths in, `{answer, evidence}` out,
+with the harness (`internal/askjob`) authoring the whole contract — goal, output schema, and an
+acceptance check anchored to the distinctive tokens mined from the attached files (one
+`regex:` alternation over the three most frequent tokens the goal does not already contain). It runs on the
+local seat through `Pipeline.RunAgentContract`, the same entry a local delegation placement
+takes. It exists because contract-authoring cost, not caller discipline, is what kept measured
+`agent_delegate` adoption at ~0. Two properties are load-bearing rather than incidental: the
+anchor is excluded against the FULL BUILT GOAL (the lint measures parrot-passability against
+`c.Goal`, whose boilerplate carries its own long words), and when no distinctive anchor survives
+the builder REFUSES instead of emitting a check that would pass anything. The generated
+acceptance is evaluated by the handler and published as `verified` / `acceptance_failures` —
+this lane does not go through `delegate.Run`, and a check nothing evaluates is decoration. `verified` is a
+CITATION check, not a correctness verdict: it asks whether the published answer quoted one of a
+few distinctive tokens mined from the attached files, never whether the answer is right. Those
+tokens are picked to be things only these files would say — real identifiers wherever the files
+have them, and ordinary words only when they are long enough to be domain terms or actually name
+one of the attached files — but it stays a heuristic, so read `verified: true` as "this answer
+demonstrably read the files", not as proof of a verbatim quotation.
+
+The graded text is built from the fields the caller is SHOWN (`answer` + `evidence`, decoded),
+never from the loop's prose or the raw structured bytes. Both of the other choices were measured
+wrong, one per direction: grading the prose gives `verified: true` beside a published answer that
+cites nothing, and grading the bytes gives `verified: false` when the re-pack returned an empty
+`answer` and the handler fell back to publishing the prose. `verified: false` is a prompt to read
+`acceptance_failures` and then the evidence, never a reason to discard the answer: the residual
+case is a question whose subject is a SHORT (<8-character) or question-named identifier, which
+leaves nothing anchorable at all.
+
+One deliberate gap to know about: the ask lane writes **no delegation ledger or corpus row**.
+`delegate.Run` records one per subtask; `Pipeline.RunAgentContract` on its own does not, so
+`offload_ask` traffic will not appear in the delegation corpus or in any analysis built on it.
+The pipeline's own task ledger still sees the run. Nothing depends on this today — it is
+recorded so nobody later reads an empty delegation corpus as "nobody used the tool".
 
 ## Important flows
 
@@ -147,6 +181,8 @@ manifest is a repo-root file.
 
 - [`internal/mcpserver/mcpserver.go`](../../internal/mcpserver/mcpserver.go) — registration and
   handlers
+- [`internal/askjob`](../../internal/askjob/ask.go) — `offload_ask`’s contract builder (goal,
+  output schema, and the grounded acceptance anchor)
 - [`internal/swapclient`](../../internal/swapclient/swapclient.go) — the harness's single
   alias-aware llama-swap roster reader, over `tools/llamaswap`'s `pkg/llamaswap`
   ([systems/printed-clis.md](printed-clis.md#the-one-exception-the-harness-consumes-pkgllamaswap))

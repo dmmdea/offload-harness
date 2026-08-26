@@ -21,6 +21,7 @@ import (
 	"llamaswap-pp-cli/pkg/llamaswap"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
+	"github.com/dmmdea/offload-harness/internal/askjob"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
@@ -36,7 +37,8 @@ import (
 
 type Server struct {
 	p *pipeline.Pipeline
-	// localAgent is agent_delegate's LOCAL execution seam: nil (production)
+	// localAgent is the LOCAL execution seam shared by agent_delegate and offload_ask:
+	// nil (production)
 	// resolves to p.RunAgentContract at call time; tests inject a fake so the
 	// handler is exercisable without a live planner.
 	localAgent delegate.LocalRunner
@@ -233,6 +235,21 @@ func (s *Server) buildServer(version string) *mcp.Server {
 		Description: "Run the LOCAL autonomous agent loop on a goal: a free local model plans and iterates over read-only tools (list_dir, read_file) plus the offload_* cascade, multi-step, and returns a final answer. NOTE the advertised set may be NARROWED: a box can set a default agent_profile (small-seat tiers do, because an un-narrowed tool list measurably collapses a small planner), and a narrowed profile such as \"research\" drops search_files and the whole offload_* cascade. The response reports the profile applied and the post-narrowing tool count, so check those rather than assuming the full set. DELEGATE a bounded multi-step read-and-reason job — map how X flows through a repo, summarize a doc set, extract facts across many files — to the local stack to keep that work out of your own context. It is READ-ONLY: it cannot write files, run commands, or touch the network. The savings ledger is untouched (the agent's offload calls run record=false). Returns {output, steps, stop_reason, tools, model}; on any failure it returns deferred:true with a reason and you do the task yourself.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"goal":{"type":"string","description":"the task for the local agent to accomplish"},"read_root":{"type":"string","description":"absolute directory the agent may read; it cannot read outside it (default: the server working dir)"},"max_steps":{"type":"integer","description":"hard step budget (default 12)"},"model":{"type":"string","description":"planner model id; must support tool-calling (default: the tier's agent seat (agent_model), falling back to the configured workhorse)"},"timeout_sec":{"type":"integer","description":"wall-clock budget in seconds (default: the tier's agent_timeout_sec, else 180)"},"profile":{"type":"string","enum":["general","edit","build","research","github"],"description":"task profile: narrows the tool list and injects worked examples. MEASURED: a small planner given the full tool set often calls NO tool at all, so a narrowed profile is the single most effective lever. Prefer \"build\" for reading and reasoning over a codebase; \"general\" advertises everything. OMITTING this falls back to the box's configured agent_profile, and only then to \"general\" — so a small-seat tier seeded with a narrowed profile gets it without every caller remembering to ask. Tools this read-only front door does not grant are dropped, along with their examples."},"judge":{"type":"boolean","description":"end-of-run ADVISORY audit: one extra same-seat completion grading the run's flagged effects (parked/failed/unknown/self-flagged) for the operator review. Never gates anything. Default false"}},"required":["goal"]}`),
 	}, s.handleAgentRun)
+
+	// offload_ask: the ONE-CALL delegation entry. Registered unconditionally and
+	// beside agent_run on purpose — the whole point is that the cheap path is
+	// cheap, and a tool gated behind a config flag is one more reason not to
+	// reach for it. Measured organic adoption of agent_delegate is ~0 and three
+	// rounds of steering pressure (prose, a nudge hook, a blocking gate) moved
+	// it not at all; the diagnosis is arithmetic, not discipline — authoring a
+	// contract costs more at the decision point than a Read does. So the
+	// harness authors the contract (internal/askjob) and the caller supplies
+	// only question + paths.
+	srv.AddTool(&mcp.Tool{
+		Name:        "offload_ask",
+		Description: "Ask a bounded question ABOUT SPECIFIC FILES and have a FREE local seat answer it — the one-call form of agent_delegate. You supply question + paths and nothing else: the harness builds the whole contract (goal, {answer,evidence} output schema, and an acceptance check ANCHORED to distinctive tokens mined from the files themselves) and runs it on the local agent seat. REACH FOR IT THE MOMENT YOU ARE ABOUT TO OPEN MORE THAN TWO FILES to answer something bounded — that is exactly where reading them yourself costs more than asking. The files are read and inlined by the HARNESS under read_root, so your own context never pays for them. Good fits: \"which key sets the queue cap\" over three config files; \"which function does this handler call before dispatch\" over a handler plus its helpers; \"what changed between these two versions of the spec\". NOT this tool: unbounded exploration with no file list (use agent_run — it searches for its own files); anything that writes or runs (this lane is read-only); a multi-part job needing several contracts (agent_delegate); and above all anything whose answer is a JUDGEMENT rather than a fact the files state — security or credential review, an architecture decision, or the final does-it-actually-work verification. A free seat reports what the files say; it does not own a call you are accountable for. Returns {answer, evidence, verified, acceptance, acceptance_failures?, seat, steps, stop_reason} — evidence is the exact lines the seat relied on so you can spot-check instead of re-reading. verified is a CITATION check, not a correctness verdict: it asks whether the published answer quoted one of a few distinctive tokens mined from these files, never whether the answer is right. Those tokens are chosen to be things only these files would say — real identifiers wherever the files have them — but it is a heuristic, so treat verified:true as \"this answer demonstrably read the files\", not as proof of a verbatim quotation. On verified:false read acceptance_failures (which names the check that did not match) and then the evidence — it is a prompt to look, not proof the answer is wrong, and a question whose subject is a short or question-named identifier can leave nothing anchorable at all. Typical latency is 30-90 s: this buys back the context those files would have cost you, not wall-clock. Caps: at most 16 files, 128 KiB per file, 256 KiB total. It REFUSES (deferred:true) when the files hold no token distinctive enough to ground the check, rather than handing back an answer nothing verified. On any failure it returns deferred:true with a reason and you read the files yourself.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"question":{"type":"string","description":"the bounded question to answer FROM THESE FILES — one question, answerable from what you attach"},"paths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":16,"description":"the files to answer from, relative to read_root or absolute inside it (<=16 files, <=128 KiB each, <=256 KiB total)"},"read_root":{"type":"string","description":"absolute directory the paths are read from; nothing outside it can be read (default: the server working dir)"}},"required":["question","paths"]}`),
+	}, s.handleAsk)
 
 	// agent_delegate (multi-node delegation, Task 6): registration is GATED on
 	// agent_delegation_enabled (roast delta 13) so tools/list stays
@@ -1482,6 +1499,152 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	addEffects(out, res.Effects)
 	if res.JudgeReport != "" {
 		out["judge_report"] = res.JudgeReport // ADVISORY end-of-run audit of flagged effects
+	}
+	return jsonResult(out)
+}
+
+// handleAsk is the MCP front door onto the one-call ask lane. It authors the
+// contract (internal/askjob), runs it on the local seat through the SAME entry
+// a local delegation placement takes (Pipeline.RunAgentContract), evaluates the
+// generated acceptance, and returns {answer, evidence} plus the verdict.
+//
+// House style throughout: every failure path is a deferred-shape result, never
+// an MCP error (see handleAgentRun) — a caller told "the call failed" discards
+// the work, while a caller told "deferred, here is why" reads the files itself,
+// which is the correct next action every time this lane cannot deliver.
+//
+// The acceptance is evaluated HERE and not left implicit. This lane runs one
+// local seat rather than going through delegate.Run, so nothing downstream
+// would ever check it — and a generated acceptance check that nothing evaluates
+// is decoration, which is precisely the "reads as verified" failure the whole
+// grounded-anchor design exists to prevent.
+func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var in struct {
+		Question string   `json:"question"`
+		Paths    []string `json:"paths"`
+		ReadRoot string   `json:"read_root"`
+	}
+	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+		return bad, nil
+	}
+	// read_root defaulting mirrors handleAgentRun and handleAgentDelegate: the
+	// server working dir.
+	readRoot := in.ReadRoot
+	if readRoot == "" {
+		wd, werr := os.Getwd()
+		if werr != nil {
+			return jsonResult(map[string]any{"deferred": true, "reason": "cannot determine working dir for read_root: " + werr.Error()})
+		}
+		readRoot = wd
+	}
+	absRoot, err := filepath.Abs(readRoot)
+	if err != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": "bad read_root: " + err.Error()})
+	}
+	// Every caller-input refusal — empty question, no paths, over a cap, a path
+	// outside read_root, no groundable anchor — arrives as one typed error from
+	// the builder, so the reason the caller reads is the reason askjob wrote.
+	contract, berr := askjob.BuildContract(in.Question, in.Paths, absRoot)
+	if berr != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": berr.Error()})
+	}
+	run := s.localAgent // test seam, shared with agent_delegate
+	if run == nil {
+		run = s.p.RunAgentContract
+	}
+	// No context deadline is imposed here: the contract's TimeoutSec is the wall
+	// ceiling and runAgentTask enforces it as its own deadline, so wrapping it
+	// again would give the run two budgets that could disagree.
+	wire, rerr := run(ctx, contract)
+	if rerr != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
+	}
+	if wire.Deferred {
+		return jsonResult(map[string]any{
+			"deferred":    true,
+			"reason":      wire.Reason,
+			"defer_class": wire.DeferClass,
+			"seat":        wire.Seat,
+			"steps":       wire.Steps,
+		})
+	}
+	// The contracted deliverable is the structured pair. When the re-pack seat
+	// could not be reached the loop's prose still arrived, so it is published as
+	// the answer rather than thrown away — with evidence empty, which is exactly
+	// what nonempty:evidence then reports, so the caller is never handed
+	// unchecked prose under a green verdict.
+	var structured struct {
+		Answer   string `json:"answer"`
+		Evidence string `json:"evidence"`
+	}
+	if len(wire.Structured) > 0 {
+		// Error deliberately ignored, not swallowed: the re-pack only publishes
+		// Structured after validating it against this contract's own schema, so a
+		// decode failure here would mean a shape that cannot occur — and if it ever
+		// did, the fallback below still publishes the loop's prose rather than an
+		// empty answer, which is the right outcome either way.
+		_ = json.Unmarshal(wire.Structured, &structured)
+	}
+	if structured.Answer == "" {
+		structured.Answer = wire.Output
+	}
+	if strings.TrimSpace(structured.Answer) == "" {
+		// A non-deferred result with neither prose nor a structured answer has nothing
+		// to publish. Returning answer:"" with no deferred key would read to the caller
+		// as "the seat answered, and the answer is nothing" — the silent shape this
+		// lane's defer-not-crash posture exists to avoid. It should not be reachable
+		// (the loop defers on an empty final message), which is exactly why it must not
+		// be the one path that fails quietly if it ever becomes reachable.
+		return jsonResult(map[string]any{
+			"deferred":    true,
+			"reason":      "the seat returned no answer (stop_reason " + wire.StopReason + ")",
+			"defer_class": core.DeferClassAbstention,
+			"seat":        wire.Seat,
+			"steps":       wire.Steps,
+		})
+	}
+	// THE INVARIANT: grade exactly the text the caller is shown — the two fields placed
+	// in `out` below, nothing else. Everything about this line is that one rule.
+	//
+	// core.evalText prefers wire.Output whenever it is non-empty, and runAgentTask always
+	// sets Output before the re-pack, so grading the wire as it arrives grades the loop's
+	// final PROSE, which this handler never publishes. Both ways of getting that wrong
+	// have now been measured, one per direction:
+	//
+	//   - grading the prose: it is longer than the condensed pair and so likelier to
+	//     contain a frequent token, giving verified:true beside a published answer that
+	//     cites nothing — "reads as verified while nothing verified it";
+	//   - blanking Output to fall through to the raw bytes: when the re-pack emits
+	//     {"answer":"","evidence":"<text>"} — schema-legal, and its own system prompt
+	//     says "Use empty values when a field is absent" — the fallback above publishes
+	//     PROSE as the answer while only the JSON gets graded, giving verified:false on a
+	//     properly cited answer.
+	//
+	// Building the graded text from the DECODED fields closes both, and closes a third
+	// hole for free: the gbnf grammar permits \uXXXX escapes, so an anchor plainly
+	// readable in the published evidence could be invisible in the raw bytes.
+	//
+	// Joined with a newline so a match cannot span the seam between two fields, and
+	// Structured is left intact because nonempty:evidence reads it. With no Structured at
+	// all, Answer already holds the prose and Evidence is empty, so this degenerates to
+	// grading the prose — which is exactly what that path publishes.
+	//
+	// delegate.Run grades prose and PUBLISHES prose, so it is coherent and untouched;
+	// this is the first lane that publishes only the structured pair.
+	graded := wire
+	graded.Output = structured.Answer + "\n" + structured.Evidence
+	failures := delegate.EvalAcceptance(contract, graded)
+	out := map[string]any{
+		"answer":      structured.Answer,
+		"evidence":    structured.Evidence,
+		"verified":    len(failures) == 0,
+		"acceptance":  contract.Acceptance, // what "verified" actually means, published so it can be judged
+		"seat":        wire.Seat,
+		"steps":       wire.Steps,
+		"stop_reason": wire.StopReason,
+	}
+	if len(failures) > 0 {
+		out["acceptance_failures"] = failures
 	}
 	return jsonResult(out)
 }

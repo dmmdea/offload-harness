@@ -104,7 +104,7 @@ export function offloadAgentDefinition(o: Options) {
     model: o.offloadModel,
     prompt: [
       "You are the OFFLOAD subagent: a read-only reconnaissance and digest specialist running on a free local seat.",
-      `Use the ${o.mcp}_* harness tools for bulk work: ${o.mcp}_agent_delegate (route:"spread", 2+ contracts with context_paths + output_schema + content acceptance) for multi-file legs, ${o.mcp}_agent_run for one bounded leg, the ${o.mcp}_offload_summarize / ${o.mcp}_offload_classify / ${o.mcp}_offload_extract / ${o.mcp}_offload_triage cascade for mechanical text, ${o.mcp}_offload_ocr / ${o.mcp}_offload_vqa / ${o.mcp}_offload_extract_image for images.`,
+      `Use the ${o.mcp}_* harness tools for bulk work: ${o.mcp}_offload_ask (question + paths, the harness writes the whole contract) the moment you have NAMED FILES and one bounded question, ${o.mcp}_agent_delegate (route:"spread", 2+ contracts with context_paths + output_schema + content acceptance) for multi-file legs, ${o.mcp}_agent_run for one bounded leg, the ${o.mcp}_offload_summarize / ${o.mcp}_offload_classify / ${o.mcp}_offload_extract / ${o.mcp}_offload_triage cascade for mechanical text, ${o.mcp}_offload_ocr / ${o.mcp}_offload_vqa / ${o.mcp}_offload_extract_image for images.`,
       "Read files with your own read/glob/grep tools when a leg is small. Hand the harness NAMED FILES, never a search problem.",
       "Return structured findings with exact file paths and line references. Quote, do not paraphrase, identifiers.",
       "If a leg needs the web, writes, or a judgment call (review, design, architecture), start a line with the exact marker [needs-primary] saying what is needed, and return what you could establish read-only; the primary agent owns those legs.",
@@ -306,7 +306,7 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
         if (tier && !s.nudged.has(tier)) {
           s.nudged.add(tier);
           log({ event: "nudge", sid: input.sessionID, tier, reads: s.reads });
-          output.output += `\n\n[offload] ${s.reads} file reads this session, local-offload unused. Bounded read-and-reason legs (repo recon, doc sweep, log scan, classify/extract/OCR) run for free on the local seat: ${o.mcp}_agent_run for one leg, ${o.mcp}_agent_delegate route:"spread" for 2+, or task subagent_type "${o.offloadAgent}". Ignore if every read feeds your own judgment.`;
+          output.output += `\n\n[offload] ${s.reads} file reads this session, local-offload unused. Bounded read-and-reason legs (repo recon, doc sweep, log scan, classify/extract/OCR) run for free on the local seat: ${o.mcp}_offload_ask (cheapest — just a question plus the paths you were about to open), ${o.mcp}_agent_run for one leg that must find its own files, ${o.mcp}_agent_delegate route:"spread" for 2+, or task subagent_type "${o.offloadAgent}". Ignore if every read feeds your own judgment.`;
         }
       } catch (e) {
         warn("tool.execute.after hook", e);

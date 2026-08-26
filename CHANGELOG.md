@@ -6,6 +6,96 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.96.0] - 2026-08-25
+
+### Added — `offload_ask`: the one-call delegation entry point
+- Measured organic adoption of `agent_delegate` is ~0, and three rounds of steering pressure
+  (prose rules, a nudge hook, a blocking gate) moved it not at all. The diagnosis is
+  arithmetic, not discipline: at the moment of deciding, authoring a contract (goal +
+  context + output schema + a non-parrot acceptance check) costs far more than opening the
+  files and reading them. `offload_ask` removes that cost — **question + paths in,
+  `{answer, evidence}` out** — with the harness (`internal/askjob`) authoring the entire
+  contract and running it on the local agent seat through `Pipeline.RunAgentContract`, the
+  same entry a local delegation placement takes. Registered unconditionally, beside
+  `agent_run`: a cheap path behind a config flag is one more reason not to take it.
+- The hard part is the acceptance check, and it is the whole of this package. A caller-free
+  check must still be GROUNDED — anchored to content appearing only in the supplied files —
+  or it is exactly the PARROT-PASSABLE / UNGROUNDED pathology `delegate.LintAcceptance`
+  exists to catch, and the answer reads as verified while nothing verified it. So the anchor
+  is mined from the files: the tokens that appear NOWHERE in the built goal, MOST FREQUENT
+  first, rendered as one `regex:(A|B|C)` alternation over the top three. Three corrections
+  proved out while building it, each from a measurement rather than a preference:
+  (1) the disqualifier is the full GOAL, not the question — the goal's own boilerplate
+  carries ≥8-character words (`QUESTION`, `attached`, `inferring`) and the lint measures
+  against `c.Goal`, so a question-only exclusion trips the very lint the feature exists to
+  satisfy; (2) identifier-shaped tokens (underscore, digit, or internal capital) fill
+  the slots first, because ranking alone picked `delegate` out of a code comment — ordinary
+  words top up whatever slots are left over (see below), so attaching markdown or a log
+  still works; (3) the ranking is
+  MOST-frequent, not rarest. Rarest-wins was the original rule and measurement contradicted
+  it three independent times, most starkly on this package's own fixture, where the pool was
+  `{ErrQueueSaturated:3, defaultMaxQueueDepth:3, dispatchRetryBackoff:1}` and rarity picked
+  the retry-backoff constant while the two tokens a right answer must quote both LOST for
+  being more frequent. Within one file centrality and frequency correlate — a name the file
+  repeats is a name the file is ABOUT — so rarity ranks away from what an answer will cite,
+  and with no cross-seat retry on this lane a false `verified:false` is terminal. The
+  alternation is the safety net: a right answer passes if ANY of the three appears. When
+  nothing survives, `BuildContract` REFUSES (`ErrNoAnchor`) rather than emit a check that
+  would pass garbage. Pinned by `LintAcceptance(BuildContract(...))` returning zero warnings
+  on a realistic source file, and by a check that a right answer PASSES while the goal text
+  itself does not.
+- The verdict grades the text the caller RECEIVES. `core.evalText` prefers `wire.Output`
+  whenever it is non-empty and `runAgentTask` always sets it before the re-pack, so grading
+  the wire as it arrives would grade the loop's final prose — which this lane never
+  publishes, since the caller gets only the condensed `{answer, evidence}` pair. The
+  divergence is one-directional (prose is longer, so likelier to contain a frequent token),
+  which made the error mode `verified:true` beside a published answer citing nothing from
+  the files: the "reads as verified while nothing verified it" pathology, one layer up from
+  where the anchor design closes it. `handleAsk` now blanks `Output` when `Structured` is
+  present so `evalText` falls through to the bytes that actually ship. `delegate.Run` grades
+  prose and publishes prose, so it is coherent and untouched — this is the first lane that
+  publishes only the structured pair. Grading the raw JSON cannot self-match on its own
+  field names: `answer` is 6 characters (under the 8-character anchor bound) and `evidence`
+  is 8 but appears in the goal.
+- Anchor candidates are bounded at 40 characters (`anchorMaxLen`). `identRe` has no upper
+  bound and identifier-shaped says yes to anything carrying a digit, so a lockfile hash,
+  checksum table or minified bundle could seat a 40-to-500-character blob as a "name" — an
+  acceptance check no answer could cite, and an absurd `acceptance` field. Reachable from an
+  ordinary input (a config directory holding a lockfile).
+- The identifier-shaped tier TOPS UP instead of REPLACING. Shaped tokens fill the three
+  alternation slots first; any spare slots go to the best plain tokens rather than being
+  left empty. Those passed the same goal exclusion, and a spare alternative is one more
+  branch of an OR, and that cuts BOTH ways: it eases passing for a citing answer AND for
+  an uncited one, so a plain token must clear a higher bar than an identifier —
+  `plainAnchorMinLen` (12 characters), or it must NAME one of the attached files. Measured
+  without that bar, the check became `regex:(FleetMaxQueueDepth|accepted)`, and "accepted"
+  is ordinary English that a wrong answer contains for free. Replacing outright was
+  silently dropping good candidates: `buildinfo` is nine characters and not question-named,
+  yet never reached the pool on the live run purely because that file had shaped tokens.
+- Known limitation, stated rather than hidden: a question whose answer turns on a SHORT
+  (<8-character) or question-named identifier can leave nothing anchorable — `verified` then
+  reads false on a correct answer. `verified` is a CITATION check, not a correctness verdict:
+  it asks whether the published answer quoted one of a few distinctive tokens taken from the
+  files, never whether the answer is right — and the graded text is built from the decoded
+  `answer` + `evidence` the caller is SHOWN, so what is graded is exactly what is published.
+- The ask lane writes **no delegation ledger or corpus row**: `delegate.Run` records one per
+  subtask, `Pipeline.RunAgentContract` on its own does not. The pipeline's own task ledger
+  still sees the run. Recorded so an empty delegation corpus is never misread as "nobody used
+  the tool".
+- Contract hygiene the caller no longer has to think about: files are inlined through the
+  delegator's one confined reader (`delegate.InlineContextPaths` — `os.Root` containment,
+  128 KiB per file), duplicate base names are de-collided deterministically
+  (`config.go` + `config.go` → `config.go` + `config-2.go`) instead of hitting `Validate`'s
+  silent-overwrite refusal, and the 16-doc / 256 KiB wire caps are refused UP FRONT with
+  typed errors naming the numbers and the fix (`ErrTooManyPaths`, `ErrContextTooLarge`).
+  `profile` is deliberately left empty so the executing box's `agent_profile` decides.
+- The generated acceptance is EVALUATED, not decorative: this lane runs one local seat
+  rather than going through `delegate.Run`, so the handler evaluates it and publishes
+  `verified` plus `acceptance` and `acceptance_failures`. `delegate.evalAcceptance` and
+  `delegate.inlineContextPaths` are exported for this (`EvalAcceptance`,
+  `InlineContextPaths`) — visibility only, no behavior change, so the two lanes cannot drift
+  into two sets of rules.
+
 ## [0.95.0] - 2026-08-25
 
 ### Added — `offload_status` publishes the LIVE fleet roster (`fleet` section)

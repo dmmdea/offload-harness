@@ -63,6 +63,7 @@ func TestAllHandlersSurfaceBadArguments(t *testing.T) {
 		{"generate_audio", s.handleGenerateAudio, `{"text":"t","seconds":"ten"}`},
 		{"nim", s.handleNIM, `{"prompt":"p","max_tokens":"lots"}`},
 		{"agent_run", s.handleAgentRun, `{"goal":"g","max_steps":"all"}`},
+		{"ask", s.handleAsk, `{"question":"q","paths":"not-an-array"}`},
 		{"status", s.handleStatus, `[1,2,3]`},
 		{"edit_image", s.handleEditImage, `{"image":1,"ops":[]}`},
 		{"media", s.handleMedia, `{"op":["not","a","string"]}`},
