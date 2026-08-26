@@ -50,7 +50,7 @@ var (
 	// work. The bare `how\s` alternative is deliberate — a genuine
 	// how-question ("how the retry path interacts with the queue cap") is
 	// reasoning — and it is SAFE only because quantityRe runs first.
-	explanationRe = regexp.MustCompile(`(?i)(?:\b(?:explains?|explaining|explanation|why|interacts?|interacting|interaction|traces?|tracing|compares?|comparing|comparison|contrasts?|implications?|rationale|architecture|relationships?|reason\s+about|across\s+(?:these|the|both)\s+(?:files|modules|packages))\b|\bhow\s)`)
+	explanationRe = regexp.MustCompile(`(?i)(?:\b(?:explains?|explaining|explanation|why|interacts?|interacting|interaction|traces?|tracing|compares?|comparing|comparison|contrasts?|implications?|rationale|architecture|relationships?|reason\s+about|across\s+(?:these|the|both|all)\s+(?:files|modules|packages))\b|\bhow\s)`)
 
 	// mechanicalRe catches the grunt-work verbs.
 	mechanicalRe = regexp.MustCompile(`(?i)\b(?:extracts?|extracting|lists?|listing|enumerates?|enumerating|counts?|counting|tall(?:y|ies|ied)|tabulates?|tabulating|inventor(?:y|ies)|collects?|collecting|gathers?|gathering|digests?|summari[sz]e[sd]?|summari[sz]ing|classif(?:y|ies|ied|ying)|triage[sd]?|filters?|filtering|grep|report\s+the|find\s+(?:all|every))\b`)
@@ -109,6 +109,20 @@ func matchShape(goal string) (kind Kind, rule string, ok bool) {
 func inferKind(st Subtask) Kind {
 	k, _, _ := matchShape(st.Contract.Goal)
 	return k
+}
+
+// shapeOf reports the shape AND the name of the rule that decided it, naming
+// the no-match branch "default" rather than leaving it blank. It exists so a
+// placement reason can say WHY a seat was chosen: "fit=mechanical/default" and
+// "fit=mechanical/mechanical-verb" send an operator to completely different
+// fixes — rephrase the goal, versus the vocabulary read it correctly — and a
+// bare shape name cannot tell them apart.
+func shapeOf(st Subtask) (Kind, string) {
+	k, rule, ok := matchShape(st.Contract.Goal)
+	if !ok {
+		return k, "default"
+	}
+	return k, rule
 }
 
 // adequate reports whether v's ADVERTISED context ceiling provably holds this

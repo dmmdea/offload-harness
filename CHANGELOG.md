@@ -13,8 +13,8 @@ Versioning: [SemVer](https://semver.org/).
   seats that is a coin flip on the thing that matters: a mechanical triage contract and a
   cross-file reasoning contract had exactly the same chance of landing on the biggest seat.
   The remote slots now go to the seat that suits the contract's **shape**, inferred from the
-  contract's own goal text. The rotation still picks where the contest starts, so the change is
-  strictly a re-pick among seats the hard gate had already cleared.
+  contract's own goal text — chosen from the seats not yet dealt in the current cycle, so the
+  fan-out itself is untouched.
 - **Shape is a deterministic ORDERED pre-filter (`internal/delegate/fit.go`), not a classifier
   call.** `mechanical` (extraction, listing, counting, filtering, digesting) or `reasoning`
   (explanation, causation, cross-file interaction, tracing, comparison), decided by a quantity
@@ -47,14 +47,38 @@ Versioning: [SemVer](https://semver.org/).
   advertises no context ceiling in a delegator run, so scoring it would mean inventing a number
   for it. The documented pair shape (a 2-contract spread = one local + one remote) therefore
   still holds, and the existing spread distribution test passes unchanged.
-- **Ties keep rotating** (the comparison is strict), so a fan-out of same-shaped contracts across
-  equal-ceiling seats still deals one per seat instead of stacking on one.
-- `results[].placement` now names the shape a remote placement was scored on
-  (`route=spread → node-a (slot 2 of 3, fit=mechanical)`); the local slot's reason is byte-identical
-  to before.
-- **Mutation-proven**: make `placeSpread` ignore the fit score (a compiling mutant that leaves the
-  rotation's pick in place) and the placement test goes red in BOTH directions — the mechanical
-  contract lands on the big seat and the reasoning contract on the small one.
+- **Fit chooses WITHIN a deal cycle; it never re-picks freely.** A subtask takes the best-fitting
+  seat *among those not yet dealt in the current cycle*, and a local slot reshuffles the deck, so
+  each aligned window of `len(nodes)` slots still gives every eligible seat at most one subtask.
+  This is not a refinement, it is the whole safety property: an unconstrained re-pick sends the
+  smallest seat every mechanical subtask and the roomiest every reasoning one. Measured on a
+  `{local, qube 131k, aorus 32k, lenovo 32k}` roster — 8 mechanical subtasks landed
+  `local 2 / aorus 4 / lenovo 2 / qube 0` and 8 reasoning subtasks landed `local 2 / qube 6`, with
+  `runConcurrency = 4` dispatching siblings to the same seat while another sat idle. That is the
+  stacking `route:"spread"` was built to remove. Constrained, both deal `2/2/2/2`, mechanical
+  dispatching the small seats first and reasoning the roomiest first.
+- **The deal is JOINT — computed for the whole run in one pass before dispatch — because it cannot
+  be anything else.** No per-subtask function of (index, own shape, roster) can hold the invariant:
+  distinctness within a cycle forces the slot-to-seat map to be a bijection for each shape, and
+  distinctness within a MIXED-shape cycle then forces both shapes' bijections to be identical —
+  which is to say, forces the shape to have no effect at all. Fit scoring and one-per-seat coexist
+  only when the deal can see its siblings. Computing it up front also keeps placement deterministic
+  and free of shared mutable state: the dispatch goroutines read the deal, they never build it.
+- **Ties keep rotating** (the comparison is strict), so an all-equal roster deals exactly as it did
+  before fit scoring existed.
+- `results[].placement` now names the deciding RULE as well as the shape
+  (`route=spread → node-a (slot 2 of 4, fit=mechanical/mechanical-verb)`). `slot N of M` remains the
+  rotation slot, not the winner's roster index — an operator reading placements counts subtasks —
+  and `fit=mechanical/default` versus `fit=mechanical/mechanical-verb` is the difference between
+  "rephrase the goal" and "the vocabulary read it correctly". The local slot's reason is
+  byte-identical to before.
+- **Mutation-proven, twice.** (a) Make `placeSpread` ignore the fit score — a compiling mutant that
+  leaves the rotation's pick in place — and the placement test goes red in both directions, the
+  mechanical contract landing on the big seat and the reasoning one on the small seat. (b) Drop the
+  cycle bookkeeping so the fit score re-picks freely, and the fan-out test goes red reproducing the
+  collapse above exactly (`qube 0` under mechanical, `qube 6` under reasoning). The fan-out test
+  uses an UNEQUAL-ceiling roster on purpose: with equal ceilings every implementation passes, which
+  is how such a collapse ships green.
 
 ## [0.98.0] - 2026-08-26
 

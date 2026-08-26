@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -58,6 +59,7 @@ func TestInferKindRoutesRealisticGoals(t *testing.T) {
 		{"describe the relationship between the lease and the placement gate", KindReasoning, "relationship"},
 		{"explain why the extraction step fails on an empty file", KindReasoning, "explanation outranks the mechanical verb it contains"},
 		{"how the retry path interacts with the queue cap", KindReasoning, "a genuine how-question still reads as reasoning"},
+		{"work out where the cap is enforced across all files", KindReasoning, "`across all files` is the natural cross-file phrasing"},
 	}
 	for _, c := range cases {
 		if got := inferKind(fitSubtask(c.goal, 100)); got != c.want {
@@ -124,96 +126,214 @@ func fitLocal() NodeView {
 
 var (
 	fitBigRemote   = NodeView{NodeID: "big-remote", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 131072}
+	fitMidRemote   = NodeView{NodeID: "mid-remote", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 65536}
 	fitSmallRemote = NodeView{NodeID: "small-remote", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 32768}
 )
 
-// TestPlaceSpreadFitScoresTheRemoteSlots is the behaviour change: the remote
-// slots stop being a blind rotation. Round-robin hands subtask 1 the FIRST
-// remote and subtask 2 the SECOND whatever their shape; fit scoring sends the
-// mechanical one to the small seat and the reasoning one to the big seat.
-func TestPlaceSpreadFitScoresTheRemoteSlots(t *testing.T) {
-	// Roster order deliberately puts the BIG remote first, so round-robin and
-	// fit scoring disagree on BOTH subtasks.
-	r := fitRunner(fitBigRemote, fitSmallRemote)
-	local := fitLocal()
+const (
+	fitMechGoal   = "list every exported function name in these files"
+	fitReasonGoal = "explain how the retry path interacts with the queue cap"
+)
 
-	mech := fitSubtask("list every exported function name in these files", 100)
-	p, dead := r.placeSpread(1, mech, local)
-	if dead {
-		t.Fatal("a healthy fleet must not read as dead")
+// deal runs the REAL dealSpread over these goals and returns the node id each
+// subtask landed on. It calls the production function rather than
+// re-implementing its loop: a test that mirrors the code under test stops
+// covering it the moment the code changes.
+func deal(r *runner, goals ...string) ([]string, []spreadSlot) {
+	contracts := make([]core.AgentContract, len(goals))
+	for i, g := range goals {
+		contracts[i] = fitSubtask(g, 100).Contract
 	}
-	if p.view.NodeID != "small-remote" {
-		t.Errorf("mechanical subtask 1 landed on %s (%s), want small-remote", p.view.NodeID, p.reason)
+	slots := r.dealSpread(contracts, fitLocal())
+	where := make([]string, len(slots))
+	for i, sl := range slots {
+		where[i] = sl.view.NodeID
 	}
+	return where, slots
+}
 
-	reason := fitSubtask("explain how the retry path interacts with the queue cap", 100)
-	p, _ = r.placeSpread(2, reason, local)
-	if p.view.NodeID != "big-remote" {
-		t.Errorf("reasoning subtask 2 landed on %s (%s), want big-remote", p.view.NodeID, p.reason)
+func repeatGoal(goal string, n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = goal
+	}
+	return out
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestDealSpreadSameShapedFanOutReachesEverySeat is the property the fit score
+// is NOT allowed to buy: within each deal cycle every eligible seat takes at
+// most one subtask, so a same-shaped fan-out still reaches all of them.
+//
+// A free per-slot re-pick fails this outright — the smallest seat wins every
+// mechanical slot and the roomiest wins every reasoning slot, which is exactly
+// the stacking route=spread exists to remove. The roster is UNEQUAL on purpose:
+// with equal ceilings every implementation passes, which is how a collapse can
+// ship green.
+func TestDealSpreadSameShapedFanOutReachesEverySeat(t *testing.T) {
+	qube := NodeView{NodeID: "qube", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 131072}
+	aorus := NodeView{NodeID: "aorus", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 32768}
+	lenovo := NodeView{NodeID: "lenovo", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 32768}
+
+	for _, tc := range []struct{ name, goal string }{
+		{"mechanical", fitMechGoal},
+		{"reasoning", fitReasonGoal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := fitRunner(qube, aorus, lenovo)
+			where, _ := deal(r, repeatGoal(tc.goal, 8)...)
+
+			counts := map[string]int{}
+			for _, id := range where {
+				counts[id]++
+			}
+			for _, id := range []string{"local-box", "qube", "aorus", "lenovo"} {
+				if counts[id] != 2 {
+					t.Errorf("%s got %d of 8 subtasks, want 2 — deal was %v", id, counts[id], where)
+				}
+			}
+			// The invariant itself, asserted directly: no seat twice in a cycle.
+			for c := 0; c < 2; c++ {
+				cycle := where[c*4 : c*4+4]
+				seen := map[string]bool{}
+				for _, id := range cycle {
+					if seen[id] {
+						t.Errorf("cycle %d dealt %s twice: %v", c, id, cycle)
+					}
+					seen[id] = true
+				}
+			}
+		})
 	}
 }
 
-// TestPlaceSpreadKeepsSubtaskZeroLocal pins the guarantee the fit score is NOT
+// TestDealSpreadFitPicksWithinTheCycle: fit still decides WHICH seat a subtask
+// gets, it just cannot re-pick the same winner every slot. On a three-tier
+// roster the first remote slot of a cycle goes to the smallest seat for
+// mechanical work and the roomiest for reasoning work, and the rest of the
+// cycle follows in fit order.
+func TestDealSpreadFitPicksWithinTheCycle(t *testing.T) {
+	// Roster order deliberately puts the BIG remote first, so rotation and fit
+	// disagree about the first remote slot under both shapes.
+	r := fitRunner(fitBigRemote, fitMidRemote, fitSmallRemote)
+	mech, _ := deal(r, repeatGoal(fitMechGoal, 4)...)
+	if want := []string{"local-box", "small-remote", "mid-remote", "big-remote"}; !equalStrings(mech, want) {
+		t.Errorf("mechanical deal = %v, want %v (smallest adequate seat first)", mech, want)
+	}
+
+	r = fitRunner(fitBigRemote, fitMidRemote, fitSmallRemote)
+	reason, _ := deal(r, repeatGoal(fitReasonGoal, 4)...)
+	if want := []string{"local-box", "big-remote", "mid-remote", "small-remote"}; !equalStrings(reason, want) {
+		t.Errorf("reasoning deal = %v, want %v (roomiest seat first)", reason, want)
+	}
+}
+
+// TestDealSpreadMixedShapesStillFillTheCycle: the deal is joint, so a cycle
+// holding contracts of DIFFERENT shapes still touches every seat once — the
+// case no per-subtask pick can satisfy (see dealSpread's proof).
+func TestDealSpreadMixedShapesStillFillTheCycle(t *testing.T) {
+	r := fitRunner(fitBigRemote, fitMidRemote, fitSmallRemote)
+	where, _ := deal(r, fitMechGoal, fitMechGoal, fitReasonGoal, fitMechGoal)
+	seen := map[string]bool{}
+	for _, id := range where {
+		if seen[id] {
+			t.Fatalf("a mixed-shape cycle dealt %s twice: %v", id, where)
+		}
+		seen[id] = true
+	}
+	if where[1] != "small-remote" {
+		t.Errorf("the mechanical slot went to %s, want small-remote — %v", where[1], where)
+	}
+}
+
+// TestDealSpreadKeepsSubtaskZeroLocal pins the guarantee the fit score is NOT
 // allowed to break: subtask 0 lands on the local seat whatever its shape. A
 // single-subtask spread is the riskiest case for a shape heuristic — getting it
 // wrong sends the entire run off-box on one regex match.
-func TestPlaceSpreadKeepsSubtaskZeroLocal(t *testing.T) {
-	r := fitRunner(fitBigRemote, fitSmallRemote)
-	local := fitLocal()
-	for _, goal := range []string{
-		"list every exported function name in these files",
-		"explain how the retry path interacts with the queue cap",
-		"what is the default queue cap",
-	} {
-		p, _ := r.placeSpread(0, fitSubtask(goal, 100), local)
-		if !p.view.Local {
-			t.Errorf("subtask 0 (%q) landed on %s — slot 0 must stay local", goal, p.view.NodeID)
+func TestDealSpreadKeepsSubtaskZeroLocal(t *testing.T) {
+	for _, goal := range []string{fitMechGoal, fitReasonGoal, "what is the default queue cap"} {
+		r := fitRunner(fitBigRemote, fitSmallRemote)
+		where, slots := deal(r, goal)
+		if !slots[0].view.Local {
+			t.Errorf("subtask 0 (%q) landed on %s — slot 0 must stay local", goal, where[0])
 		}
 	}
 }
 
-// TestPlaceSpreadLeavesTheLocalRotationSlotAlone: the fit contest ranks seats by
+// TestDealSpreadLeavesTheLocalRotationSlotAlone: the fit contest ranks seats by
 // ADVERTISED ceiling, and the local seat advertises none in a delegator run, so
 // it is never entered into the contest — it keeps every rotation slot it already
 // had (i mod len == 0), not only subtask 0.
-func TestPlaceSpreadLeavesTheLocalRotationSlotAlone(t *testing.T) {
+func TestDealSpreadLeavesTheLocalRotationSlotAlone(t *testing.T) {
 	r := fitRunner(fitBigRemote, fitSmallRemote)
-	local := fitLocal()
-	mech := fitSubtask("list every exported function name in these files", 100)
-	if p, _ := r.placeSpread(3, mech, local); !p.view.Local {
-		t.Errorf("subtask 3 of a 3-seat spread landed on %s, want the local rotation slot", p.view.NodeID)
+	_, slots := deal(r, repeatGoal(fitMechGoal, 4)...)
+	if !slots[3].view.Local {
+		t.Errorf("subtask 3 of a 3-seat spread landed on %s, want the local rotation slot", slots[3].view.NodeID)
 	}
 }
 
-// TestPlaceSpreadTiesKeepRotating: with equal-ceiling remotes the fit score
-// cannot separate them, so the old rotation must still deal them one each —
-// otherwise a fan-out of same-shaped contracts stacks on a single seat.
-func TestPlaceSpreadTiesKeepRotating(t *testing.T) {
+// TestDealSpreadTiesKeepRotating: with equal-ceiling remotes the fit score
+// cannot separate them, so the deal must reproduce the old rotation exactly —
+// the compatibility pin for every fleet whose seats match.
+func TestDealSpreadTiesKeepRotating(t *testing.T) {
 	a := NodeView{NodeID: "node-a", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 32768}
 	b := NodeView{NodeID: "node-b", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 32768}
 	r := fitRunner(a, b)
-	local := fitLocal()
-	st := fitSubtask("list every exported function name in these files", 100)
-
-	want := []string{"local-box", "node-a", "node-b", "local-box"}
-	for i, w := range want {
-		p, _ := r.placeSpread(i, st, local)
-		if p.view.NodeID != w {
-			t.Errorf("subtask %d landed on %s, want %s", i, p.view.NodeID, w)
-		}
+	where, _ := deal(r, repeatGoal(fitMechGoal, 4)...)
+	if want := []string{"local-box", "node-a", "node-b", "local-box"}; !equalStrings(where, want) {
+		t.Errorf("deal = %v, want %v", where, want)
 	}
 }
 
-// TestPlaceSpreadSkipsASeatThatCannotHoldTheContract: per-subtask eligibility
+// TestDealSpreadSkipsASeatThatCannotHoldTheContract: per-subtask eligibility
 // drops an over-size seat before the fit score ever sees it, so a mechanical
 // contract cannot be dealt to the small seat merely because it is the cheapest.
-func TestPlaceSpreadSkipsASeatThatCannotHoldTheContract(t *testing.T) {
+func TestDealSpreadSkipsASeatThatCannotHoldTheContract(t *testing.T) {
 	tiny := NodeView{NodeID: "tiny-remote", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 8192}
 	r := fitRunner(fitBigRemote, tiny)
-	local := fitLocal()
-	mech := fitSubtask("list every exported function name in these files", 20000)
-	p, _ := r.placeSpread(1, mech, local)
-	if p.view.NodeID != "big-remote" {
-		t.Errorf("landed on %s (%s), want big-remote — the tiny seat cannot hold the contract", p.view.NodeID, p.reason)
+	// A REAL over-size contract: dealSpread recomputes EstTokens from the
+	// contract itself (as production does), so the bulk has to be genuine —
+	// 60 KiB of context doc estimates to ~20k tokens, past the 8192 seat and
+	// well inside the 131072 one.
+	big := fitSubtask(fitMechGoal, 0).Contract
+	big.Context = []core.ContextDoc{{Name: "big.txt", Text: strings.Repeat("x", 60000)}}
+	if est := EstimateTokens(big); est+specReserve <= tiny.AgentCtxTokens || est+specReserve > fitBigRemote.AgentCtxTokens {
+		t.Fatalf("fixture off: est=%d must exceed the tiny seat and fit the big one", est)
+	}
+	slots := r.dealSpread([]core.AgentContract{big, big}, fitLocal())
+	if slots[1].view.NodeID != "big-remote" {
+		t.Errorf("landed on %s (%s), want big-remote — the tiny seat cannot hold the contract",
+			slots[1].view.NodeID, slots[1].reason)
+	}
+}
+
+// TestDealSpreadReasonNamesTheRotationSlotAndRule: "slot N of M" must stay the
+// ROTATION slot (an operator reading results[].placement counts subtasks, not
+// roster indices), and the reason must name the rule that read the shape —
+// "mechanical/default" and "mechanical/mechanical-verb" send you to different
+// fixes.
+func TestDealSpreadReasonNamesTheRotationSlotAndRule(t *testing.T) {
+	r := fitRunner(fitBigRemote, fitMidRemote, fitSmallRemote)
+	_, slots := deal(r, fitMechGoal, fitMechGoal, "what is the default queue cap")
+
+	if got := slots[1].reason; !strings.Contains(got, "slot 2 of 4") || !strings.Contains(got, "fit=mechanical/mechanical-verb") {
+		t.Errorf("subtask 1 reason = %q, want the rotation slot 2 of 4 and the deciding rule", got)
+	}
+	if got := slots[2].reason; !strings.Contains(got, "slot 3 of 4") || !strings.Contains(got, "fit=mechanical/default") {
+		t.Errorf("subtask 2 reason = %q, want slot 3 of 4 and the no-match rule named `default`", got)
+	}
+	if got := slots[0].reason; got != "route=spread → local (slot 1 of 4)" {
+		t.Errorf("local reason = %q, want the unchanged local form", got)
 	}
 }
