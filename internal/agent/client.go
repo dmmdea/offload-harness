@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 )
 
 // LLMClient is the concrete OpenAI-compatible tool-calling Client. It targets
@@ -98,6 +100,7 @@ func wireToolsJSON(tools []ToolSpec) ([]byte, error) {
 		ToolChoice string        `json:"tool_choice"`
 	}{wireToolDefs(tools), "auto"})
 }
+
 type wireReq struct {
 	Model       string        `json:"model"`
 	Messages    []wireMsg     `json:"messages"`
@@ -185,6 +188,17 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 	if c.apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
+	// The agent seat shares one llama-swap endpoint with every cascade text seat
+	// in the default config, and this path does NOT go through
+	// internal/llamaclient — so the gate has to be taken here too, or the
+	// cascade side would be the only lane observing it. Keyed on this client's
+	// base; a client pointed at a hosted multi-model endpoint keys on ITS base
+	// and, since one LLMClient names one model, always matches the resident one.
+	tk, err := modelaffinity.Admit(ctx, c.base, c.model, c.http.Timeout)
+	if err != nil {
+		return Completion{}, err
+	}
+	defer tk.Release()
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
 		return Completion{}, err

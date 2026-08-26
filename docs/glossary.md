@@ -89,6 +89,18 @@ repository. See
 [architecture/decisions/0012-public-canonical-repository.md](architecture/decisions/0012-public-canonical-repository.md)
 (which supersedes 0006).
 
+## Model Affinity Gate
+
+The in-process admission gate that keeps one llama-swap serving slot on one model at a time. Requests
+naming the same model on the same base run concurrently; a request naming a different model parks
+until the in-flight batch drains, so N interleaved model switches become one switch per batch. Keyed
+on the **resolved base URL** — two models served by two llama-swap instances do not contend — and
+taken by both the cascade lane (`internal/llamaclient`) and the agent seat
+(`internal/agent.LLMClient.Chat`). It is process-local: two harness processes on one box still
+contend. Distinct from the GPU Lock, which arbitrates whole GPU-heavy jobs across processes and
+deliberately excludes interactive text. See
+[architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md](architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md).
+
 ## Node Manifest
 
 The declaration accompanying a run-graph request: which ComfyUI custom node packs are required (at

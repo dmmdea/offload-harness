@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 )
 
 // connectTimeout bounds only the TCP dial (LO-9): a dead/unreachable endpoint
@@ -230,6 +232,16 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 		return GenResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// Admission is keyed on the base resolveEndpoint just decided, never on the
+	// model: two models on two llama-swap instances do not contend, and gating
+	// them together would serialise lanes that never conflicted. The ticket is
+	// held until decodeGenResult has finished with the body, because llama-swap
+	// only stops needing the model resident when the response is fully served.
+	tk, err := modelaffinity.Admit(ctx, base, model, hc.Timeout)
+	if err != nil {
+		return GenResult{}, err
+	}
+	defer tk.Release()
 	resp, err := hc.Do(req)
 	if err != nil {
 		return GenResult{}, err
@@ -281,6 +293,16 @@ func (c *Client) GenerateVision(ctx context.Context, model, system, user string,
 		return GenResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// Admission is keyed on the base resolveEndpoint just decided, never on the
+	// model: two models on two llama-swap instances do not contend, and gating
+	// them together would serialise lanes that never conflicted. The ticket is
+	// held until decodeGenResult has finished with the body, because llama-swap
+	// only stops needing the model resident when the response is fully served.
+	tk, err := modelaffinity.Admit(ctx, base, model, hc.Timeout)
+	if err != nil {
+		return GenResult{}, err
+	}
+	defer tk.Release()
 	resp, err := hc.Do(req)
 	if err != nil {
 		return GenResult{}, err
@@ -338,6 +360,16 @@ func (c *Client) GenerateVisionInterleaved(ctx context.Context, model, system st
 		return GenResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// Admission is keyed on the base resolveEndpoint just decided, never on the
+	// model: two models on two llama-swap instances do not contend, and gating
+	// them together would serialise lanes that never conflicted. The ticket is
+	// held until decodeGenResult has finished with the body, because llama-swap
+	// only stops needing the model resident when the response is fully served.
+	tk, err := modelaffinity.Admit(ctx, base, model, hc.Timeout)
+	if err != nil {
+		return GenResult{}, err
+	}
+	defer tk.Release()
 	resp, err := hc.Do(req)
 	if err != nil {
 		return GenResult{}, err
