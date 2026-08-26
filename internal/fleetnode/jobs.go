@@ -73,6 +73,17 @@ type job struct {
 	// outlive it. Cleared at claim so a long-lived terminal entry stops
 	// pinning the request's materialized payload for the whole TTL window.
 	run func(context.Context) (json.RawMessage, error)
+	// onDropped releases resources that were materialized for a job which then
+	// NEVER RAN. Its existence is a direct consequence of the split: the
+	// server parks its temp-file cleanup in a `defer` inside run, which was
+	// airtight while Accept was start (every admitted job's closure executed)
+	// and leaks the moment a job can be marked terminal without its closure
+	// ever being called. Cleared at claim — from then on the run's own defer
+	// owns the cleanup and calling both would double-free.
+	onDropped func()
+	// capped records whether this job's EXECUTION counts against
+	// maxConcurrent. See AcceptSpec.Uncapped.
+	capped bool
 }
 
 // Jobs is the concurrency-safe ack-then-poll job store AND its scheduler.
@@ -164,6 +175,32 @@ func (j *Jobs) Counts() (queued, running int) {
 	return queued, running
 }
 
+// AcceptSpec carries the per-admission facts the store needs but cannot infer
+// from the run closure. It exists so the three flags stay ORTHOGONAL: there is
+// no Accept-method-per-combination to keep in sync, and adding a fourth fact
+// later does not multiply the API surface.
+type AcceptSpec struct {
+	// Agent marks a job created by an AGENT dispatch, which the server's
+	// poll-auth gate keys on. The marker lives ON the job record — not in a
+	// server-side id set — so it is written atomically with creation (no window
+	// where a poller can observe the job before it is marked) and is evicted
+	// WITH the record (an id set would outlive the janitor and leak forever).
+	Agent bool
+	// Uncapped exempts this job's EXECUTION from maxConcurrent. The exemption
+	// is for lanes that already serialize themselves and whose work never
+	// touches the shared llama-swap text endpoint the cap exists to protect —
+	// see the server's concurrencyCapped for the rule and the reasoning. An
+	// uncapped job still occupies backlog (queue_depth) exactly like any other,
+	// so the node's admission ceiling still bounds it.
+	Uncapped bool
+	// OnDropped is invoked EXACTLY ONCE if this job is admitted and then never
+	// runs — today, only when drain marks it ErrNeverStarted. It is the seam
+	// that keeps the server's "temp files live exactly as long as the job"
+	// promise true now that admission and execution are separate. Never called
+	// for a job that was claimed: the run's own defer owns cleanup from then on.
+	OnDropped func()
+}
+
 // Accept ADMITS id — it records the job as `accepted` and queues it for the
 // scheduler — returning immediately (the ack). It does NOT start the run: that
 // happens when an execution slot frees, which may be at once or may be a while
@@ -175,20 +212,24 @@ func (j *Jobs) Counts() (queued, running int) {
 // refuses all new work (false; the server maps that to 503 via Draining()).
 // Accept never enforces a backlog limit; admission is the server's gate.
 func (j *Jobs) Accept(id string, run func(context.Context) (json.RawMessage, error)) (created bool) {
-	return j.accept(id, false, run)
+	return j.Admit(id, AcceptSpec{}, run)
 }
 
-// AcceptAgent is Accept for a job created by an AGENT dispatch: identical
-// lifecycle, but the record carries the agent marker the server's poll-auth
-// gate keys on. The marker lives ON the job record — not in a server-side id
-// set — so it is written atomically with creation (no window where a poller
-// can observe the job before it is marked) and is evicted WITH the record
-// (an id set would outlive the janitor's sweep and leak forever).
+// AcceptAgent is Accept for a job created by an AGENT dispatch.
 func (j *Jobs) AcceptAgent(id string, run func(context.Context) (json.RawMessage, error)) (created bool) {
-	return j.accept(id, true, run)
+	return j.Admit(id, AcceptSpec{Agent: true}, run)
 }
 
-func (j *Jobs) accept(id string, agent bool, run func(context.Context) (json.RawMessage, error)) (created bool) {
+// Admit is Accept with the full per-job spec; Accept/AcceptAgent are its two
+// common shapes.
+// OnDropped is deliberately NOT invoked when Admit returns false. A refusal
+// (drain, duplicate id) never took ownership of anything, and the caller is
+// still holding its own cleanup at that point — handleDispatch calls it right
+// there on the refusal path, and has since before this store had a queue.
+// Firing the hook here as well would free the same temp files twice and split
+// ownership across two layers for one resource; "admitted and then never ran"
+// stays the hook's ONLY meaning.
+func (j *Jobs) Admit(id string, spec AcceptSpec, run func(context.Context) (json.RawMessage, error)) (created bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.draining {
@@ -197,7 +238,13 @@ func (j *Jobs) accept(id string, agent bool, run func(context.Context) (json.Raw
 	if _, exists := j.m[id]; exists {
 		return false
 	}
-	j.m[id] = &job{state: JobAccepted, agent: agent, run: run}
+	j.m[id] = &job{
+		state:     JobAccepted,
+		agent:     spec.Agent,
+		capped:    !spec.Uncapped,
+		run:       run,
+		onDropped: spec.OnDropped,
+	}
 	j.pending = append(j.pending, id)
 	j.cond.Broadcast() // wake the scheduler: there is work
 	return true
@@ -216,19 +263,21 @@ func (j *Jobs) accept(id string, agent bool, run func(context.Context) (json.Raw
 func (j *Jobs) schedule() {
 	for {
 		j.mu.Lock()
-		for !j.draining && !j.claimableLocked() {
+		var id string
+		var run func(context.Context) (json.RawMessage, error)
+		for {
+			if j.draining {
+				j.mu.Unlock()
+				return
+			}
+			var ok bool
+			if id, run, ok = j.claimLocked(); ok {
+				break
+			}
+			// Nothing claimable. claimLocked is the ONE predicate — there is no
+			// separate "is anything claimable?" check that could disagree with
+			// what the claim then does.
 			j.cond.Wait()
-		}
-		if j.draining {
-			j.mu.Unlock()
-			return
-		}
-		id, run, ok := j.claimLocked()
-		if !ok {
-			// Every pending id was stale (evicted, or already terminal). The
-			// FIFO is drained; loop back and wait for real work.
-			j.mu.Unlock()
-			continue
 		}
 		// wg.Add happens HERE, under the same mu that guards j.draining, and
 		// DrainAndStop sets draining under that mu BEFORE it starts waiting on
@@ -241,52 +290,63 @@ func (j *Jobs) schedule() {
 	}
 }
 
-// claimableLocked reports whether the scheduler has something to do right now.
-// Caller holds mu.
-func (j *Jobs) claimableLocked() bool {
-	if len(j.pending) == 0 {
-		return false
-	}
-	if j.maxConcurrent <= 0 {
-		return true // unlimited
-	}
-	return j.runningLocked() < j.maxConcurrent
-}
-
-// runningLocked counts jobs currently EXECUTING. Derived from the map rather
-// than kept as a side counter on purpose: the number the scheduler admits
-// against and the number health publishes are then the same fact and cannot
-// drift. Caller holds mu.
-func (j *Jobs) runningLocked() int {
+// runningCappedLocked counts executing jobs that COUNT AGAINST maxConcurrent.
+// Derived from the map rather than kept as a side counter on purpose: the
+// number the scheduler admits against and the number health publishes come
+// from the same walk and cannot drift. Caller holds mu.
+func (j *Jobs) runningCappedLocked() int {
 	n := 0
 	for _, jb := range j.m {
-		if jb.state == JobRunning {
+		if jb.state == JobRunning && jb.capped {
 			n++
 		}
 	}
 	return n
 }
 
-// claimLocked pops the oldest genuinely-runnable job, marking it running in the
-// same critical section, and returns its work. Stale ids (evicted, or marked
-// terminal by drain) are discarded as it goes. Caller holds mu.
+// claimLocked pops the oldest CLAIMABLE job — the first entry in arrival order
+// whose lane has room — marks it running in the same critical section, and
+// returns its work. Stale ids (evicted, or marked terminal by drain) are
+// discarded as it goes. Caller holds mu.
+//
+// It scans past a blocked entry rather than stopping at the head, and that is
+// load-bearing rather than an optimization: an uncapped job must not queue
+// behind capped ones, or its exemption would be undone by FIFO position — four
+// running agent jobs would stall every media dispatch behind them, which is
+// precisely the coupling the exemption exists to remove. Arrival order is still
+// strict WITHIN a lane; only across lanes can a later job go first, and only
+// when the earlier one could not have run anyway.
 func (j *Jobs) claimLocked() (string, func(context.Context) (json.RawMessage, error), bool) {
-	for len(j.pending) > 0 {
-		id := j.pending[0]
-		j.pending = j.pending[1:]
-		if len(j.pending) == 0 {
-			j.pending = nil // drop the advanced backing array
-		}
-		jb, ok := j.m[id]
+	capped := j.runningCappedLocked()
+	full := j.maxConcurrent > 0 && capped >= j.maxConcurrent
+	for i := 0; i < len(j.pending); i++ {
+		jb, ok := j.m[j.pending[i]]
 		if !ok || jb.state != JobAccepted || jb.run == nil {
+			j.dropPendingLocked(i) // stale: evicted, or already terminal/claimed
+			i--
 			continue
 		}
+		if jb.capped && full {
+			continue // this lane is at its limit; a later uncapped entry may still go
+		}
+		id := j.pending[i]
+		j.dropPendingLocked(i)
 		run := jb.run
 		jb.run = nil
+		jb.onDropped = nil // the run's own defer owns cleanup from here on
 		jb.state = JobRunning
 		return id, run, true
 	}
 	return "", nil, false
+}
+
+// dropPendingLocked removes index i from the FIFO, preserving order. Caller
+// holds mu.
+func (j *Jobs) dropPendingLocked(i int) {
+	j.pending = append(j.pending[:i], j.pending[i+1:]...)
+	if len(j.pending) == 0 {
+		j.pending = nil // drop the backing array rather than hold it forever
+	}
 }
 
 // execute runs one claimed job to completion and then frees its slot. The
@@ -390,6 +450,11 @@ func (j *Jobs) DrainAndStop(timeout time.Duration) {
 	}
 
 	j.mu.Lock()
+	// Collected under the lock, INVOKED after it. Each hook deletes temp files;
+	// holding the store mutex across that would stall every in-flight poll and
+	// every health read behind the filesystem, on the one code path where the
+	// process is already trying to exit.
+	var dropped []func()
 	for _, jb := range j.m {
 		switch jb.state {
 		case JobRunning:
@@ -400,9 +465,20 @@ func (j *Jobs) DrainAndStop(timeout time.Duration) {
 			jb.state = JobError
 			jb.err = ErrNeverStarted
 			jb.terminalAt = j.now()
+			// This job's run closure will never execute, so the cleanup parked
+			// inside it never fires. Release here or the materialized request
+			// leaks for good — for run-graph that is a file in the OS temp dir
+			// that nothing on this machine ever reclaims.
+			if jb.onDropped != nil {
+				dropped = append(dropped, jb.onDropped)
+				jb.onDropped = nil // exactly once, even if DrainAndStop is called twice
+			}
 		}
 	}
 	j.mu.Unlock()
+	for _, f := range dropped {
+		f()
+	}
 
 	j.cancel() // release runs blocked on ctx so their goroutines can exit
 	// Second bounded wait: give the released runs time to return — i.e. for

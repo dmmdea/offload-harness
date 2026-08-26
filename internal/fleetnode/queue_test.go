@@ -3,7 +3,11 @@ package fleetnode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -254,12 +258,48 @@ func TestJobsDrainDistinguishesNeverStartedFromInterrupted(t *testing.T) {
 
 // --- server surface ---
 
+// agentQueueCfg opts the node into the AGENT lane — the one task type
+// fleet_max_concurrent_jobs actually caps (see Server.concurrencyCapped) — with
+// the two limits set for a queueing test.
+func agentQueueCfg(t *testing.T, depth, concurrency int) config.Config {
+	t.Helper()
+	return config.Config{
+		Home:                   t.TempDir(),
+		FleetAgentEnabled:      true,
+		AgentModel:             "agent-seat",
+		FleetMaxQueueDepth:     depth,
+		FleetMaxConcurrentJobs: concurrency,
+	}
+}
+
+// loopbackAgentServer builds a server whose listener posture admits the
+// tokenless agent lane (loopback), over the given runner.
+func loopbackAgentServer(t *testing.T, cfg config.Config, r Runner) (*Server, *Jobs) {
+	t.Helper()
+	return newTestServer(t, cfg, r, &Options{
+		NodeID:           "testnode",
+		Snapshot:         goodSnapshot,
+		Footprints:       func() []FootprintEntry { return nil },
+		GpuVendor:        "nvidia",
+		GpuArch:          "ampere",
+		LoopbackListener: true,
+	})
+}
+
+// dispatchAgent posts one valid agent dispatch with the given job id.
+func dispatchAgent(t *testing.T, s *Server, id string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := `{"job_id":"` + id + `","task_type":"agent","payload":` +
+		`{"schema_version":1,"goal":"summarize","output_schema":{"properties":{"answer":{"type":"string"}}}}}`
+	return do(t, s, http.MethodPost, "/fleet/dispatch", body, nil)
+}
+
 // TestDispatchAdmitsWhileWorkersBusyRefusesOnlyWhenFull binds the two limits
-// as SEPARATE things over the real HTTP surface: with one worker and an
-// admission ceiling of 3, dispatches 2 and 3 are ACCEPTED (202) while the
-// single worker is busy — busy is not full — and only the 4th, which would
-// exceed the ceiling, is refused 503. Before 0.100.0 the same config ran three
-// jobs at once against one endpoint.
+// as SEPARATE things over the real HTTP surface, on the lane the concurrency
+// cap governs: with one execution slot and an admission ceiling of 3,
+// dispatches 2 and 3 are ACCEPTED (202) while the slot is busy — busy is not
+// full — and only the 4th, which would exceed the ceiling, is refused 503.
+// Before 0.100.0 the same config ran three jobs at once against one endpoint.
 func TestDispatchAdmitsWhileWorkersBusyRefusesOnlyWhenFull(t *testing.T) {
 	release := make(chan struct{})
 	var entries atomic.Int32
@@ -269,19 +309,16 @@ func TestDispatchAdmitsWhileWorkersBusyRefusesOnlyWhenFull(t *testing.T) {
 		case <-release:
 		case <-ctx.Done():
 		}
-		return core.Result{OK: true, Data: json.RawMessage(`{"image_path":"x.png"}`)}
+		return core.Result{OK: true, Data: json.RawMessage(`{"schema_version":1,"output":"ok"}`)}
 	}}
-	cfg := imageCfg()
-	cfg.FleetMaxQueueDepth = 3     // admission ceiling on accepted+running
-	cfg.FleetMaxConcurrentJobs = 1 // one execution at a time
-	s, _ := newTestServer(t, cfg, blocked, nil)
+	s, _ := loopbackAgentServer(t, agentQueueCfg(t, 3, 1), blocked)
 
 	for _, id := range []string{"sp-1", "sp-2", "sp-3"} {
-		if rec := dispatchImage(t, s, id); rec.Code != http.StatusAccepted {
-			t.Fatalf("dispatch %s = %d, want 202 — a busy worker pool must BACKLOG, not refuse (body %s)", id, rec.Code, rec.Body.String())
+		if rec := dispatchAgent(t, s, id); rec.Code != http.StatusAccepted {
+			t.Fatalf("dispatch %s = %d, want 202 — a busy execution slot must BACKLOG, not refuse (body %s)", id, rec.Code, rec.Body.String())
 		}
 	}
-	wantErrorShape(t, dispatchImage(t, s, "sp-4"), http.StatusServiceUnavailable, "queue full")
+	wantErrorShape(t, dispatchAgent(t, s, "sp-4"), http.StatusServiceUnavailable, "queue full")
 
 	// Exactly one is executing; the other two wait.
 	time.Sleep(100 * time.Millisecond)
@@ -303,6 +340,231 @@ func TestDispatchAdmitsWhileWorkersBusyRefusesOnlyWhenFull(t *testing.T) {
 	if n := entries.Load(); n != 3 {
 		t.Fatalf("%d runs entered after release, want 3 — backlogged jobs must eventually run", n)
 	}
+}
+
+// TestDispatchMediaLaneIsNotConcurrencyCapped is the other half of the lane
+// decision, and it is the one that would silently regress: with
+// fleet_max_concurrent_jobs at 1, three MEDIA dispatches must all execute
+// concurrently. Media serializes itself far harder than this cap would (the
+// in-process mediaSlot has capacity ONE, under a machine-wide gpulease), so a
+// media job held in `accepted` is not protecting anything — it is occupying a
+// fleet execution slot while doing no work, and with the cap applied four such
+// jobs would starve the agent lane the cap exists to protect.
+func TestDispatchMediaLaneIsNotConcurrencyCapped(t *testing.T) {
+	release := make(chan struct{})
+	var entries atomic.Int32
+	blocked := &fakeRunner{fn: func(ctx context.Context, req core.Request) core.Result {
+		entries.Add(1)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return core.Result{OK: true, Data: json.RawMessage(`{"image_path":"x.png"}`)}
+	}}
+	cfg := imageCfg()
+	cfg.FleetMaxConcurrentJobs = 1 // would cap the agent lane to one
+	s, _ := newTestServer(t, cfg, blocked, nil)
+
+	for _, id := range []string{"ml-1", "ml-2", "ml-3"} {
+		if rec := dispatchImage(t, s, id); rec.Code != http.StatusAccepted {
+			t.Fatalf("dispatch %s = %d, want 202", id, rec.Code)
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for entries.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if n := entries.Load(); n != 3 {
+		t.Fatalf("%d media runs entered, want 3 — media was held behind the text lane's concurrency cap", n)
+	}
+	m := decodeMap(t, do(t, s, http.MethodGet, "/fleet/health", "", nil))
+	if m["jobs_running"] != float64(3) || m["jobs_queued"] != float64(0) {
+		t.Fatalf("health running/queued = %v/%v, want 3/0", m["jobs_running"], m["jobs_queued"])
+	}
+	close(release)
+	for _, id := range []string{"ml-1", "ml-2", "ml-3"} {
+		pollJob(t, s, id, JobDone)
+	}
+}
+
+// TestConcurrencyCappedRule pins the lane rule task type by task type, so an
+// exemption can never be added or lost silently. The DEFAULT matters as much
+// as the list: an unrecognized task type must be CAPPED, because being wrong
+// that way costs queue latency and a visible `queue deadline`, while being
+// wrong the other way silently reinstates unbounded inference against one
+// llama-swap — the defect this release exists to remove.
+func TestConcurrencyCappedRule(t *testing.T) {
+	cfg := imageCfg()
+	cfg.Pipelines = map[string]config.PipelineSpec{"scene-swap": {}}
+	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
+
+	for _, tc := range []struct {
+		task string
+		want bool
+		why  string
+	}{
+		{"agent", true, "the llama-swap text lane — the only thing the cap was written for"},
+		{"image-gen", false, "acquireMediaLease: mediaSlot (cap 1) + gpulease ClassMedia"},
+		{"video-gen", false, "acquireMediaLease"},
+		{"audio-gen", false, "acquireMediaLease"},
+		{"run-graph", false, "acquireMediaLease"},
+		{"stt", false, "whisper-server: a different process on a different endpoint"},
+		{"scene-swap", false, "a configured pipeline route — runPipelineJob takes the same mediaSlot"},
+		{"some-task-from-2027", true, "unknown task types are capped by default (fail safe for the text endpoint)"},
+	} {
+		if got := s.concurrencyCapped(tc.task); got != tc.want {
+			t.Errorf("concurrencyCapped(%q) = %v, want %v — %s", tc.task, got, tc.want, tc.why)
+		}
+	}
+}
+
+// TestDrainReleasesNeverStartedMaterialization is the leak test. handleDispatch
+// parks its temp-file cleanup in a `defer` INSIDE the run closure, which was
+// airtight while Accept was start — every admitted job's closure ran. Once a
+// job can be admitted and then marked terminal without its closure ever
+// executing, that deferred cleanup never fires and the materialized request
+// leaks for good. This drives the real HTTP surface and asserts on the real
+// filesystem: an agent dispatch materializes a job dir under
+// BaseDir()/pipeline-jobs/, and after a drain that never started it, the dir
+// must be gone.
+func TestDrainReleasesNeverStartedMaterialization(t *testing.T) {
+	cfg := agentQueueCfg(t, 8, 1) // one slot: the second dispatch is guaranteed to queue
+	started := make(chan struct{})
+	var once sync.Once
+	blocked := &fakeRunner{fn: func(ctx context.Context, req core.Request) core.Result {
+		once.Do(func() { close(started) })
+		<-ctx.Done() // released only by the drain's cancel
+		return core.Result{OK: false, Reason: "cancelled"}
+	}}
+	s, jobs := loopbackAgentServer(t, cfg, blocked)
+
+	if rec := dispatchAgent(t, s, "leak-running"); rec.Code != http.StatusAccepted {
+		t.Fatalf("first dispatch = %d (body %s)", rec.Code, rec.Body.String())
+	}
+	<-started // the first job OWNS the only slot
+	if rec := dispatchAgent(t, s, "leak-queued"); rec.Code != http.StatusAccepted {
+		t.Fatalf("second dispatch = %d (body %s)", rec.Code, rec.Body.String())
+	}
+	waitCount(t, 1, func() int { q, _ := jobs.Counts(); return q })
+
+	jobsRoot := filepath.Join(cfg.BaseDir(), "pipeline-jobs")
+	before, err := os.ReadDir(jobsRoot)
+	if err != nil {
+		t.Fatalf("reading %s: %v", jobsRoot, err)
+	}
+	if len(before) != 2 {
+		t.Fatalf("%d materialized job dir(s), want 2 — the fixture must have materialized BOTH jobs for this test to mean anything", len(before))
+	}
+
+	jobs.DrainAndStop(2 * time.Second)
+
+	// The running job's own deferred cleanup fires when its cancelled run
+	// returns; the QUEUED job's never ran, so only the drop hook can release it.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		after, rerr := os.ReadDir(jobsRoot)
+		if rerr != nil {
+			t.Fatalf("reading %s: %v", jobsRoot, rerr)
+		}
+		if len(after) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			names := make([]string, 0, len(after))
+			for _, e := range after {
+				names = append(names, e.Name())
+			}
+			t.Fatalf("%d materialized job dir(s) survived the drain (%v) — a job that never started leaked its materialization", len(after), names)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// And the queued job still reports the honest terminal state.
+	if v, ok := jobs.Get("leak-queued"); !ok || v.State != JobError || !strings.Contains(v.Error, "not started") {
+		t.Fatalf("queued job: ok=%v view=%+v, want error/not started", ok, v)
+	}
+}
+
+// TestJobsDropHookFiresOnceAndOnlyForNeverStarted pins the hook's contract at
+// the store level, where both arms are observable: a job that RAN must never
+// have its drop hook called (its own deferred cleanup owns that, and calling
+// both would double-free), and a job that never ran must have it called
+// exactly once even if DrainAndStop is invoked twice.
+func TestJobsDropHookFiresOnceAndOnlyForNeverStarted(t *testing.T) {
+	j := newJobs(time.Hour, time.Now, time.Hour, 1)
+
+	var ranDrops, queuedDrops atomic.Int32
+	started := make(chan struct{})
+	j.Admit("ran", AcceptSpec{OnDropped: func() { ranDrops.Add(1) }},
+		func(ctx context.Context) (json.RawMessage, error) {
+			close(started)
+			<-ctx.Done()
+			return nil, errors.New("cancelled")
+		})
+	<-started
+	j.Admit("never-ran", AcceptSpec{OnDropped: func() { queuedDrops.Add(1) }},
+		func(ctx context.Context) (json.RawMessage, error) {
+			t.Error("the queued job's run must never execute")
+			return nil, nil
+		})
+	waitCount(t, 1, func() int { q, _ := j.Counts(); return q })
+
+	j.DrainAndStop(50 * time.Millisecond)
+	j.DrainAndStop(50 * time.Millisecond) // idempotent: must not double-drop
+
+	if n := queuedDrops.Load(); n != 1 {
+		t.Fatalf("never-started drop hook fired %d time(s), want exactly 1", n)
+	}
+	if n := ranDrops.Load(); n != 0 {
+		t.Fatalf("a job that RAN had its drop hook fired %d time(s); its own deferred cleanup owns that, so this is a double free", n)
+	}
+}
+
+// TestJobsUncappedNeverQueuesBehindCapped: the exemption must not be undone by
+// FIFO position. With one execution slot held by a capped job and more capped
+// jobs waiting ahead of it in arrival order, an uncapped job admitted LAST must
+// still run immediately — otherwise media dispatches would stall behind the
+// text lane, which is the exact coupling the exemption removes.
+func TestJobsUncappedNeverQueuesBehindCapped(t *testing.T) {
+	j := newJobs(time.Hour, time.Now, time.Hour, 1)
+	defer j.DrainAndStop(time.Second)
+
+	release := make(chan struct{})
+	block := func(ctx context.Context) (json.RawMessage, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return json.RawMessage(`1`), nil
+	}
+	// Fill the single capped slot, then pile three more capped jobs behind it.
+	for _, id := range []string{"cap-0", "cap-1", "cap-2", "cap-3"} {
+		if !j.Admit(id, AcceptSpec{}, block) {
+			t.Fatalf("Admit(%s) must create", id)
+		}
+	}
+	waitCount(t, 3, func() int { q, _ := j.Counts(); return q })
+
+	// Admitted LAST, behind three blocked capped jobs.
+	uncappedRunning := make(chan struct{})
+	if !j.Admit("media-late", AcceptSpec{Uncapped: true}, func(ctx context.Context) (json.RawMessage, error) {
+		close(uncappedRunning)
+		<-ctx.Done()
+		return nil, errors.New("cancelled")
+	}) {
+		t.Fatal("Admit(media-late) must create")
+	}
+	select {
+	case <-uncappedRunning:
+	case <-time.After(5 * time.Second):
+		q, r := j.Counts()
+		t.Fatalf("the uncapped job never started (queued %d, running %d) — it is stuck behind the capped lane's FIFO position", q, r)
+	}
+	// And it did NOT consume the capped lane's slot: still exactly one capped
+	// job running.
+	if _, running := j.Counts(); running != 2 { // cap-0 + media-late
+		t.Fatalf("running = %d, want 2 (one capped + the uncapped one)", running)
+	}
+	close(release)
 }
 
 // TestHealthPublishesCapacity: the delegator could see a node's DEPTH but

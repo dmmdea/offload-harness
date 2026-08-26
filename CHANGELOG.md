@@ -77,6 +77,14 @@ Versioning: [SemVer](https://semver.org/).
   indistinguishable from "a node too old to publish a limit", and those route in opposite
   directions. Wire compatibility is pinned by an external-package test that runs the
   delegator's real `FetchNodeView` decoder against the real health handler.
+- `offload_status` publishes `jobs_running` / `jobs_queued` / `max_concurrent_jobs` per node
+  alongside `queue_depth` — the exact surface a `queue deadline` failure sends an operator to.
+- **`queue_depth`'s meaning is unchanged but its DISTRIBUTION shifts sharply.** It always counted
+  `accepted` + `running`; before this release those were all executing, so the number topped out
+  near what a box could sustain and a high reading was a real alarm. Now most of it can be
+  backlog, and a healthy node can legitimately read 31. Placement is unaffected (lower is still
+  better, and the tie-break compares like with like), but an operator meeting it cold will
+  misjudge it — read `jobs_running` / `jobs_queued` beside it.
 
 ### Changed — drain tells "never started" from "interrupted"
 - `DrainAndStop` marked every non-terminal survivor `error:"interrupted"`. With a real backlog
@@ -112,6 +120,21 @@ Versioning: [SemVer](https://semver.org/).
   `docs/flows/fleet-job-lifecycle.md` and the same sentence copied into `server.go`'s
   admission comment.
 
+### Fixed — a job that never started leaked its materialized request
+- `handleDispatch` parks its temp-file cleanup in a `defer` **inside** the run closure. That was
+  airtight while `Accept` was `start` — every admitted job's closure ran, so every
+  materialization was released. Once a job can be admitted and then marked terminal without its
+  closure ever executing (drain's never-started arm), the deferred cleanup never fires.
+- Scope, checked per builder: `run-graph` materializes `os.CreateTemp("", "fleet-run-graph-*.json")`
+  in the **OS temp dir, which nothing ever reclaims**; `agent` and pipeline jobs land under
+  `pipeline-jobs/`, which `SweepOrphanedPipelineJobs` wipes at next start. With this release's own
+  worked example of 28 queued jobs at shutdown, that is 28 skipped cleanups.
+- Fixed with `AcceptSpec.OnDropped`, carried on the record beside `run`, **cleared at claim** (the
+  run's own defer owns cleanup from then on, and firing both would double-free) and invoked by
+  drain's never-started arm — outside the store mutex, since it touches the filesystem. It is
+  deliberately NOT fired when admission is REFUSED: a refusal never took ownership, and
+  `handleDispatch` already releases its own materialization there.
+
 ### Fixed — queued time no longer consumes a subtask's execution budget (delegator side)
 - **This regression was caused by the queue above and is fixed in the same release.** The
   delegator sets its poll deadline at DISPATCH time (`pollBudget = timeout_sec + 60s grace`).
@@ -124,10 +147,19 @@ Versioning: [SemVer](https://semver.org/).
   replaced.
 - **Queued time is credited back.** While a job is observed in `accepted`, the delegator moves the
   deadline out by the wait, so the contract still gets the execution budget it asked for. Only
-  intervals whose BOTH endpoints were observed `accepted` are banked — the partial spans either
-  side are at most one poll each, and under-crediting is the safe direction (over-crediting would
-  hand a job more budget than the contract granted, which is the same class of defect in the
+  intervals bracketed by two CONSECUTIVE `accepted` observations are banked — the partial spans
+  either side are at most one poll each, and under-crediting is the safe direction (over-crediting
+  would hand a job more budget than the contract granted, which is the same class of defect in the
   other direction). A node with no queue accrues no credit and behaves byte-identically.
+- **The "consecutive" part is a fix in its own right.** The first implementation cleared its span
+  marker only in the `running` arm, so the transport-error, `404` and `5xx` arms all left it open:
+  an interval bracketed by two `accepted` answers was banked IN FULL even when the node spent the
+  middle of it returning 503s — or denying, with a `404`, that it had ever held the job. Measured:
+  a node scripted `accepted` / 503 for 500 ms / `accepted` credited the whole 500 ms as backlog
+  wait. Both harms point the wrong way — more execution budget than the contract granted, and a
+  give-up message *asserting* the job "waited in the node's backlog" across a window the node
+  spent failing. Every observation now closes the span and only `accepted` re-opens it, so a
+  future poll arm cannot silently inherit an open one.
 - **The wait is bounded**: `min(timeout_sec + grace, 5 minutes)`. An unbounded wait is its own
   failure mode. A subtask that has not been given a worker in five minutes is behind a backlog no
   fan-out will clear in time, and the caller is better served by a loud failure than a longer wait
@@ -136,8 +168,15 @@ Versioning: [SemVer](https://semver.org/).
   yields a FAILURE with the stable prefix `queue deadline after <d>: the node accepted the job but
   never started it — it waited in the node's backlog and never reached running (<n> poll(s)
   answered `accepted`)`. The count is of polls that ACTUALLY answered `accepted`, not the total —
-  a run that also saw 404s must not have them folded into a claim about queueing. Deliberately a failure and not a defer: a defer is a report about the WORK and
-  carries the node's id and seat, and a job that never started has no such report to make.
+  a run that also saw 404s must not have them folded into a claim about queueing. Deliberately a failure and not a defer, for three reasons — and note that
+  "a defer carries the node id and seat" is **not** one of them, since the failure path is stamped
+  with those too: (1) a defer manufactures an `AgentWireResult{Deferred:true}`, a payload shaped
+  like something the *seat* produced, and no seat ever saw this contract; (2) the only honest class
+  would be `budget`, which teaches every consumer of that class — the sizing path especially —
+  that the seat needed more time, when the seat was never asked; and (3) decisively, **what this
+  replaces was already a failure** (a saturated node answered `503` at dispatch → `pr.Err` →
+  `summary.failed`), so filing it as a defer would quietly downgrade the severity of a refusal
+  while changing nothing about the work not getting done.
   A job that reached `running` still produces the existing `poll deadline` defer, unchanged.
 - Deadline messages now name the credit (`poll deadline after 5m0s (+42s credited back for time
   queued on the node): …`) and render nothing at all when there was none, so every pre-queue
@@ -145,10 +184,54 @@ Versioning: [SemVer](https://semver.org/).
 - Scope note: this is the budget-accounting half only. **Re-placement on refusal and
   capacity-aware placement are still a separate change** — a `503 queue full` remains terminal.
 
+### Changed — the concurrency cap governs the TEXT lane only; media is exempt
+- **An earlier draft of this entry claimed "the media/`gpulease` path is untouched". That was
+  false.** `handleDispatch` routes every task type through one store, so media, video, STT,
+  run-graph and pipeline dispatches were admitted, queued and capped exactly like agent jobs —
+  the `gpulease` *code* was untouched, but media *scheduling* took the same 8x cut. Corrected
+  here rather than quietly dropped, because a media operator reading the old sentence would
+  have had no reason to look.
+- **DECISION: `fleet_max_concurrent_jobs` applies to `agent` only.** `image-gen`, `video-gen`,
+  `audio-gen`, `run-graph`, `stt` and every configured pipeline route are exempt. An
+  unrecognized (future) task type is **capped by default** — of the two ways to be wrong, that
+  one fails loudly (queue latency, then a visible `queue deadline`) while the other silently
+  reinstates the unbounded-inference defect this release exists to remove.
+- Why exempt, in order of weight:
+  1. **Redundant.** Media goes through `Pipeline.acquireMediaLease`, which takes the in-process
+     `mediaSlot` — capacity **one** — and then the machine-wide `gpulease` ClassMedia. A cap of
+     4 above a cap of 1 changes nothing about how much media runs at once.
+  2. **Actively harmful, and precisely backwards.** A media job blocked inside `takeMediaSlot`
+     holds a fleet execution slot while doing NO work. With `mediaSlot` at one, four queued
+     media dispatches occupy all four slots while three sit parked — starving the agent lane,
+     which is the lane the cap was written to protect.
+  3. **It destroys media's own back-pressure.** A media job that cannot get the card waits
+     `gpu_wait_ms` and defers `gpu_busy` — bounded, well-tested, and immediately actionable.
+     Held in `accepted` it never reaches `takeMediaSlot`, so `gpu_busy` never fires and the
+     caller gets queue latency instead of a fast, honest defer.
+  4. **It makes "media untouched" true again.** With the exemption, media scheduling is
+     byte-identical to 0.99.0: admitted up to `fleet_max_queue_depth`, goroutine-per-job,
+     arbitrated by `mediaSlot` + `gpulease`.
+- The store keeps arrival order **within** a lane but scans past a blocked entry across lanes,
+  so an uncapped media job never queues behind four running agent jobs — otherwise FIFO
+  position would reinstate the coupling the exemption removes.
+
+### DEPLOY NOTE — the out-of-repo media dispatcher
+- The deployed media dispatcher (0.62.1, a **different repository**) is an ack-then-poll client
+  that sets its poll deadline at dispatch time, exactly as `internal/delegate` did before the
+  fix below. It has no queued-time credit and cannot get one from this repo.
+- **The media exemption is what keeps it correct**, not a documentation note: media jobs never
+  linger in `accepted`, so that dispatcher never spends a contract's budget waiting for a slot.
+- **Therefore: do not cap a media task type until that dispatcher credits queued time.** If a
+  future change adds a media type to the capped set, it inherits precisely the regression that
+  made this merge-blocking here — a loud immediate `503` replaced by a slow timeout that burns
+  the budget — with no fix available from this side. `Server.concurrencyCapped` carries the
+  rule; this is the reason behind it.
+
 ### Notes
 - No durability was added: the store stays in-memory, and a node restart still loses its
   backlog (now reported honestly as never-started). No pull/claim endpoint — placement stays
-  PUSH. The media/`gpulease` path is untouched.
+  PUSH. The `gpulease` / reclaim code is untouched, and with the exemption above media
+  SCHEDULING is unchanged from 0.99.0 too.
 - `-race` could not be run: it requires cgo and this box has no C toolchain
   (`go: -race requires cgo`). Compensated with single-mutex lock discipline (one `sync.Cond`
   over the same mutex that guards the store, so deciding and claiming are one critical

@@ -48,8 +48,24 @@ endpoint. A dispatch is now **admitted** and waits its turn.
 
 | Key | Bounds | Default | Refuses? |
 |---|---|---|---|
-| `fleet_max_queue_depth` | `accepted` + `running` (health's `queue_depth`) | 32 | Yes — `503 queue full` |
-| `fleet_max_concurrent_jobs` | jobs actually executing | 4 | No — extra jobs WAIT in `accepted` |
+| `fleet_max_queue_depth` | `accepted` + `running` (health's `queue_depth`), **all task types** | 32 | Yes — `503 queue full` |
+| `fleet_max_concurrent_jobs` | jobs actually executing, **`agent` only** | 4 | No — extra jobs WAIT in `accepted` |
+
+**The concurrency cap governs the text lane only.** It exists to protect one thing — the shared
+llama-swap endpoint, where the measured defect was N simultaneous inferences against a single
+serving slot. `image-gen`, `video-gen`, `audio-gen`, `run-graph`, `stt` and every configured
+pipeline route are **exempt**, because capping them would be both redundant and backwards: media
+already serializes itself at capacity **one** (the in-process `mediaSlot`, under the machine-wide
+`gpulease` ClassMedia), and a media job blocked waiting for the card would hold a fleet execution
+slot while doing no work — four of them would starve the very lane the cap protects. It would also
+suppress media's own back-pressure, since a job held in `accepted` never reaches the wait that
+produces a `gpu_busy` defer. An unrecognized future task type is capped by default: that way of
+being wrong is visible, the other is silent. Media scheduling is therefore unchanged from 0.99.0.
+
+> **Deploy note.** The media dispatcher (a different repository) sets its poll deadline at dispatch
+> time and has no queued-time credit. The exemption above is what keeps it correct — media jobs
+> never linger in `accepted`, so they never spend a contract's budget waiting for a slot. **Do not
+> cap a media task type until that dispatcher credits queued time.**
 
 Both take `0` = built-in default and a negative value = unlimited. `fleet_max_queue_depth`
 keeps exactly the meaning it has always had — the ceiling on `queue_depth`, which still

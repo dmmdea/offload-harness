@@ -155,11 +155,14 @@ func TestRunQueuedWaitIsBoundedAndDistinct(t *testing.T) {
 		t.Fatalf("summary = %+v, want one failure", sum)
 	}
 
-	// 3) BOUNDED. The wait must end near the queued-wait bound, not run on to
-	//    the extended execution deadline (budget + bound) and certainly not
-	//    forever.
-	if elapsed > 3*time.Second {
-		t.Fatalf("gave up after %v — the queued wait is not bounded tightly enough", elapsed)
+	// 3) BOUNDED, and bounded by the QUEUED-WAIT bound specifically. The
+	//    ceiling is deliberately just above the 1.02s bound rather than a loose
+	//    "not forever": with the bound removed, the run instead survives to the
+	//    CREDITED execution deadline (budget + credit ≈ 2.04s), so a 3s ceiling
+	//    would let that mutant through on timing and leave the whole property
+	//    resting on the shape assertions above.
+	if elapsed > 1600*time.Millisecond {
+		t.Fatalf("gave up after %v — that is past the queued-wait bound and into the credited execution deadline; the bound is not binding", elapsed)
 	}
 	if elapsed < 900*time.Millisecond {
 		t.Fatalf("gave up after only %v — it abandoned the backlog before the bound; a queued job must actually get its wait", elapsed)
@@ -182,7 +185,13 @@ func TestRunQueuedThenRunningStillHonoursTheExecutionDeadline(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 20*time.Millisecond)
 
 	var sawAccepted, sawRunning atomic.Int64
-	node := scriptedNode(t, 300*time.Millisecond, 24*time.Hour, // runs "forever"
+	// 600ms of backlog, not 300: the queued window starts when the fake node
+	// starts, but the delegator only begins polling after a health fetch,
+	// placement and a dispatch. A 300ms window left only a sliver of observed
+	// queue time, which is both the tightest timing margin in the suite and the
+	// thing this arm needs to be generous about — it is asserting that credit
+	// happened at all, not how little of it is enough.
+	node := scriptedNode(t, 600*time.Millisecond, 24*time.Hour, // runs "forever"
 		func() (map[string]any, int) { return map[string]any{"state": "running"}, http.StatusOK },
 		&sawAccepted, &sawRunning)
 	srv := node.server()
@@ -209,6 +218,10 @@ func TestRunQueuedThenRunningStillHonoursTheExecutionDeadline(t *testing.T) {
 	// The execution budget still applies — it is simply measured from when the
 	// work could start. It waited ~300ms and then got its ~1.02s of run time,
 	// so the total is meaningfully more than the budget alone but still bounded.
+	// Budget alone is 1.02s; with ~600ms of backlog credited the give-up lands
+	// near 1.6s. The floor sits at 1.2s — comfortably above the uncredited
+	// deadline, comfortably below the expected one — so it detects "the credit
+	// was not applied" without depending on exactly how much was banked.
 	if elapsed < 1200*time.Millisecond {
 		t.Fatalf("gave up after %v — the queued wait was charged to the execution budget after all", elapsed)
 	}
@@ -217,5 +230,72 @@ func TestRunQueuedThenRunningStillHonoursTheExecutionDeadline(t *testing.T) {
 	}
 	if sawAccepted.Load() < 3 {
 		t.Fatalf("only %d queued poll(s) — this control arm never exercised a backlog", sawAccepted.Load())
+	}
+}
+
+// TestRunQueuedCreditExcludesNonQueuedIntervals is the over-credit test. The
+// credit is meant to bank time the job PROVABLY spent in the node's backlog,
+// and the endpoints test ("both ends of this interval answered `accepted`") is
+// not sufficient on its own: an interval can be bracketed by two `accepted`
+// answers and still contain a long stretch during which the node said
+// something else entirely.
+//
+// The node here answers `accepted`, then 503 for half a second, then `accepted`
+// again. Nothing about that 503 window is backlog wait — the node was not
+// telling us the job was queued, it was failing to answer about it — and
+// banking it does BOTH of the harms this mechanism exists to prevent: it hands
+// the job more execution budget than the contract granted, and it makes the
+// give-up message assert the job "waited in the node's backlog" across time the
+// node spent returning 5xx. (The 404 arm is worse in kind: crediting an
+// interval in which the node positively DENIED ever holding the job.)
+//
+// The assertion is on the give-up TIMING, because the credit is not otherwise
+// observable: with the gap excluded the queued-wait bound is reached only by
+// real queued time, so the run must outlast the gap it refused to count.
+func TestRunQueuedCreditExcludesNonQueuedIntervals(t *testing.T) {
+	compressPolls(t, 10*time.Millisecond, 20*time.Millisecond)
+
+	const gapStart = 200 * time.Millisecond
+	const gapEnd = 700 * time.Millisecond // a 500ms window of 5xx in the middle
+
+	start := time.Now()
+	var sawGap atomic.Int64
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
+		pollState: func(int64) (map[string]any, int) {
+			if e := time.Since(start); e >= gapStart && e < gapEnd {
+				sawGap.Add(1)
+				return map[string]any{"status": "error", "error": "scripted 503"}, http.StatusServiceUnavailable
+			}
+			return map[string]any{"state": "accepted"}, http.StatusOK
+		},
+	}
+	srv := node.server()
+
+	contract := remoteContract()
+	contract.TimeoutSec = 1 // queued-wait bound = 1.02s of REAL queued time
+
+	began := time.Now()
+	results, _, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{srv.URL})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	elapsed := time.Since(began)
+	r := results[0]
+
+	if sawGap.Load() < 5 {
+		t.Fatalf("only %d poll(s) hit the 5xx window — the fixture never produced a gap, so this test proved nothing", sawGap.Load())
+	}
+	if !strings.HasPrefix(r.Err, "queue deadline") {
+		t.Fatalf("err = %q, want the queued give-up (the node never started the job)", r.Err)
+	}
+	// The bound is 1.02s of QUEUED time. Crediting the 500ms gap as backlog
+	// would reach it after ~1.02s of wall clock; excluding it cannot get there
+	// before ~1.52s. The floor sits between the two.
+	if elapsed < 1350*time.Millisecond {
+		t.Fatalf("gave up after %v — a window the node spent answering 5xx was banked as backlog wait", elapsed)
+	}
+	if elapsed > 2500*time.Millisecond {
+		t.Fatalf("gave up after %v — the wait is no longer bounded", elapsed)
 	}
 }

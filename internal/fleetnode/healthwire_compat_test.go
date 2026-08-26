@@ -107,6 +107,13 @@ func TestHealthWireStaysDecodableByTheDelegator(t *testing.T) {
 	if view.QueueDepth != 5 {
 		t.Fatalf("QueueDepth decoded as %d, want 5 (2 running + 3 queued) — queue_depth changed meaning on the wire", view.QueueDepth)
 	}
+	// The capacity triad decodes too (offload_status publishes it, and an
+	// operator sent here by a `queue deadline` failure needs it to be right).
+	// All three values differ, so a decoder wired to the wrong key is caught.
+	if view.JobsRunning != 2 || view.JobsQueued != 3 || view.MaxConcurrentJobs != 2 {
+		t.Fatalf("capacity decoded as running=%d queued=%d max=%d, want 2/3/2",
+			view.JobsRunning, view.JobsQueued, view.MaxConcurrentJobs)
+	}
 
 	// 2) The new fields really are ON that payload (otherwise (1) proves
 	//    nothing about tolerating them).
@@ -146,6 +153,12 @@ func TestHealthWireStaysDecodableByTheDelegator(t *testing.T) {
 	}
 	if fv.NodeID != "future-node" || fv.QueueDepth != 9 {
 		t.Fatalf("future payload decoded as %+v", fv)
+	}
+	// A pre-0.100.0 node publishes no capacity fields at all; they must decode
+	// to zero rather than fail, and a consumer reads 0 as "no usable number".
+	if fv.JobsRunning != 0 || fv.JobsQueued != 0 || fv.MaxConcurrentJobs != 0 {
+		t.Fatalf("absent capacity fields decoded as %d/%d/%d, want zeros",
+			fv.JobsRunning, fv.JobsQueued, fv.MaxConcurrentJobs)
 	}
 	if !strings.Contains(future, "a_field_from_2027") {
 		t.Fatal("test fixture lost its unknown field")

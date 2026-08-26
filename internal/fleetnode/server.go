@@ -508,6 +508,51 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, payload)
 }
 
+// concurrencyCapped reports whether a job of this task type counts against
+// fleet_max_concurrent_jobs.
+//
+// THE RULE: the cap exists to protect ONE thing — the shared llama-swap text
+// endpoint, where the measured defect was N simultaneous inferences against a
+// single serving slot. A task type is exempt when its execution cannot cause
+// that, and every exemption below is a fact about how the pipeline runs it, not
+// a preference:
+//
+//   - image-gen / video-gen / audio-gen / run-graph and every configured
+//     pipeline route go through Pipeline.acquireMediaLease, which takes the
+//     in-process mediaSlot (capacity ONE) and then the machine-wide gpulease
+//     ClassMedia. They are already serialized far harder than this cap would
+//     serialize them.
+//   - stt runs against whisper-server, a different process with a different
+//     endpoint. It never touches llama-swap.
+//
+// Capping those would be both redundant and actively harmful. A media job
+// blocked inside takeMediaSlot holds a fleet execution slot while doing NO
+// work; with mediaSlot at capacity one, four queued media dispatches would
+// occupy all four slots while three of them sit parked — starving the agent
+// lane, which is the lane the cap was written to protect. It would also destroy
+// media's own designed back-pressure: a media job that cannot get the card
+// waits gpu_wait_ms and defers `gpu_busy`, a bounded and well-tested signal a
+// job held in `accepted` never reaches.
+//
+// DEFAULT IS CAPPED, deliberately. An unrecognized (future) task type is
+// assumed to contend for the text endpoint, because of the two ways to be
+// wrong that one fails loudly — queue latency, then a visible `queue deadline`
+// — while the other silently reinstates the exact unbounded-inference defect
+// this release exists to remove.
+func (s *Server) concurrencyCapped(taskType string) bool {
+	switch taskType {
+	case "image-gen", "video-gen", "audio-gen", "run-graph", "stt":
+		return false
+	}
+	// Config-driven pipeline routes run through runPipelineJob, which takes the
+	// same mediaSlot. Their names are operator-chosen, so they cannot be listed
+	// above and must be recognized from config.
+	if _, ok := s.opts.Cfg.Pipelines[taskType]; ok {
+		return false
+	}
+	return true
+}
+
 // dispatchEnvelope is the strict dispatch wire shape. DisallowUnknownFields
 // applies to THIS struct only — payload passes through raw for the per-task
 // translators. model_family/quant and the sizing fields are contract-reserved
@@ -665,8 +710,15 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	// waits is work that still gets done; a job that is refused is not.
 	if limit := s.opts.Cfg.FleetQueueLimit(); limit > 0 {
 		if d := s.jobs.QueueDepth(); d >= limit {
+			// Wording matters here more than anywhere else in this file: this
+			// string is what an operator actually reads. It used to say
+			// "re-dispatch elsewhere", which is true of the media dispatcher
+			// (a different repository) and FALSE of this repo's delegator,
+			// which treats any non-202 as terminal and does not re-place the
+			// subtask. Promising a recovery that does not happen sent people
+			// looking for a rebalancer that was never there.
 			writeError(w, http.StatusServiceUnavailable,
-				fmt.Sprintf("queue full (depth %d at limit %d): re-dispatch elsewhere or retry later", d, limit))
+				fmt.Sprintf("queue full (%d jobs accepted+running, limit %d): retry later, or raise fleet_max_queue_depth", d, limit))
 			return
 		}
 	}
@@ -695,16 +747,25 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		return nil, errors.New(reason)
 	}
 
-	// An agent dispatch (already authorized above) creates its job through
-	// AcceptAgent so the record carries the marker handleJob's poll auth keys
-	// on. Dead until Task 4 registers the "agent" task (BuildRequest 400s it
-	// today), but wired now so the poll gate is complete the moment the task
-	// lands, not a follow-up.
-	accept := s.jobs.Accept
-	if env.TaskType == string(core.TaskAgentRun) {
-		accept = s.jobs.AcceptAgent
+	// An agent dispatch (already authorized above) is admitted with Agent set,
+	// so the record carries the marker handleJob's poll auth keys on.
+	//
+	// OnDropped is the OTHER half of the `defer cleanup()` above. That defer
+	// was airtight while Accept was start — every admitted job's closure ran,
+	// so every materialization was released. Since 0.100.0 a job can be
+	// admitted and then marked terminal WITHOUT its closure ever executing
+	// (drain's never-started arm), and the deferred cleanup then never fires.
+	// For run-graph that strands an os.CreateTemp file in the OS temp dir that
+	// nothing on this machine ever reclaims; for agent and pipeline jobs it
+	// strands a directory under pipeline-jobs/ until the next start sweeps it.
+	// The store clears the hook at claim, so exactly one of the two paths ever
+	// runs the cleanup.
+	spec := AcceptSpec{
+		Agent:     env.TaskType == string(core.TaskAgentRun),
+		Uncapped:  !s.concurrencyCapped(env.TaskType),
+		OnDropped: cleanup,
 	}
-	if !accept(env.JobID, run) {
+	if !s.jobs.Admit(env.JobID, spec, run) {
 		cleanup() // duplicate/drain refusal: this request's materialized files never run
 		view, ok := s.jobs.Get(env.JobID)
 		if !ok {

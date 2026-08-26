@@ -922,14 +922,16 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	if queuedWaitBudget > maxQueuedWait {
 		queuedWaitBudget = maxQueuedWait
 	}
-	// queuedCredit is time PROVABLY spent in the backlog: only intervals whose
-	// BOTH endpoints were observed as `accepted` are banked. The partial spans
-	// either side (dispatch → first queued poll, last queued poll → first
-	// running poll) are deliberately NOT credited — each is at most one
-	// pollEvery, and under-crediting is the safe direction. Over-crediting
-	// would silently hand a job more execution budget than the contract
-	// granted, which is the failure this whole mechanism exists to prevent in
-	// the other direction.
+	// queuedCredit is time PROVABLY spent in the backlog: an interval is banked
+	// only when it is bracketed by two CONSECUTIVE `accepted` observations with
+	// nothing else in between — see the reset at the top of the poll loop. The
+	// partial spans either side (dispatch → first queued poll, last queued poll
+	// → first running poll) and any interval interrupted by a transport error,
+	// a 404 or a 5xx are deliberately NOT credited. Each omission is at most
+	// one pollEvery of real backlog, and under-crediting is the safe direction:
+	// over-crediting silently hands a job more execution budget than the
+	// contract granted, and makes the give-up message assert the job "waited in
+	// the node's backlog" across time the node was doing something else.
 	var queuedCredit time.Duration
 	var lastQueuedAt time.Time
 	// queuedPolls counts ONLY the polls that actually answered `accepted`.
@@ -1017,6 +1019,17 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			return pr
 		}
 		state, data, jobErr, status, perr := r.pollOnce(ctx, base, jobID)
+		// EVERY observation closes the queued span; only the `accepted` arm
+		// below re-opens it. Reset-then-re-arm is deliberate structure, not
+		// style: lastQueuedAt used to be cleared only in the `running` arm, so
+		// the transport-error, 404 and 5xx arms all left it set — and an
+		// interval bracketed by two `accepted` answers was banked IN FULL even
+		// when the node spent the middle of it returning 503s, or denying with
+		// a 404 that it had ever held the job. The endpoints being `accepted`
+		// does not make the interior backlog wait. Written this way a future
+		// poll arm cannot silently inherit an open span.
+		prevQueuedAt := lastQueuedAt
+		lastQueuedAt = time.Time{}
 		switch {
 		case perr != nil:
 			// Transient transport noise: keep polling until the deadline —
@@ -1079,8 +1092,8 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			if state == "accepted" {
 				queuedPolls++
 				now := time.Now()
-				if !lastQueuedAt.IsZero() {
-					queuedCredit += now.Sub(lastQueuedAt)
+				if !prevQueuedAt.IsZero() {
+					queuedCredit += now.Sub(prevQueuedAt)
 					if queuedCredit > queuedWaitBudget {
 						queuedCredit = queuedWaitBudget
 					}
@@ -1092,23 +1105,36 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 				lastQueuedAt = now
 				if queuedCredit >= queuedWaitBudget {
 					// Bounded give-up while STILL QUEUED. Deliberately an
-					// error, not a defer: a defer is a report ABOUT THE WORK,
-					// and the delegator stamps it with the node's id and seat —
-					// which for a job that never started would be the delegator
-					// authoring a sentence no seat ever earned. This says only
-					// what was observed: the node acked it, and every poll it
-					// answered said `accepted`. The "queue deadline" prefix is
-					// stable and distinct from the "poll deadline" one a job
-					// that actually ran produces.
+					// ERROR, not a defer, for three reasons — and note that
+					// "a defer carries the node id and seat" is NOT among them:
+					// runOne stamps those onto the failure path too.
+					//
+					//  1. A defer manufactures an AgentWireResult{Deferred:
+					//     true} — a payload shaped like something the SEAT
+					//     produced. No seat ever saw this contract.
+					//  2. The only honest class would be `budget`, which
+					//     teaches every consumer of that class (the sizing
+					//     path especially) that the seat needed more time.
+					//     The seat needed nothing; it was never asked.
+					//  3. Decisive: what this replaces was ALREADY A FAILURE.
+					//     Before the node had a queue, a saturated node
+					//     answered 503 at dispatch, which becomes pr.Err and
+					//     counts in summary.failed. Filing this as a defer
+					//     would quietly downgrade the severity of a refusal
+					//     while changing nothing about the work not getting
+					//     done.
+					//
+					// The message says only what was observed: the node acked
+					// it, and N polls answered `accepted`. The "queue deadline"
+					// prefix is stable and distinct from the "poll deadline"
+					// one a job that actually ran produces.
 					pr.Err = fmt.Sprintf("queue deadline after %s: the node accepted the job but never started it — it waited in the node's backlog and never reached running (%d poll(s) answered `accepted`)",
 						queuedWaitBudget, queuedPolls)
 					return pr
 				}
-			} else {
-				// Work began: close the queued span. Anything already banked
-				// stays banked — the job earned that credit.
-				lastQueuedAt = time.Time{}
 			}
+			// `running`: the span stays closed by the reset above. Anything
+			// already banked stays banked — the job earned that credit.
 			// A healthy answer RETIRES the previous failure. lastPollErr was
 			// assigned and never cleared, so ONE early 503 followed by fifty
 			// clean `running` answers still ended classed infrastructure, exited

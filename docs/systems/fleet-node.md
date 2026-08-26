@@ -72,6 +72,13 @@ the delegator's placement tie-break) plus `jobs_running`, `jobs_queued`, `max_co
 `max_queue_depth`. Publishing the limits is what lets a delegator see a node's *capacity* rather than
 only its current depth.
 
+> **`queue_depth`'s meaning is unchanged, but its DISTRIBUTION shifts sharply.** It always counted
+> `accepted` + `running`; before 0.100.0 those were all executing, so the number topped out near what
+> the box could sustain and a high reading was a real alarm. Now most of it can be backlog, so a
+> healthy node can legitimately sit at 31. Placement is unaffected — lower is still better, and the
+> delegator's tie-break compares like with like across nodes — but an operator reading it cold will
+> misjudge it. Read `jobs_running` / `jobs_queued` beside it.
+
 Dequeue and `accepted` → `running` happen in one critical section, which is what makes the drain
 distinction below trustworthy: a job still `accepted` when shutdown begins provably never started.
 
