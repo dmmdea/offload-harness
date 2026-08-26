@@ -6,6 +6,103 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.97.0] - 2026-08-26
+
+### Added — `offload_review_diff`: the clean-context review lane
+- Every other lane in this harness competes with "read the file yourself" on cost, and that
+  competition is measurably lost: organic `agent_delegate` adoption is ~0 and three rounds of
+  steering pressure moved it not at all. This lane is different in kind. It offers something a
+  lead agent **cannot produce from inside its own context at all** — a reviewer that never saw
+  the work. You pass a diff and a task statement; a free local seat returns severity-ranked
+  findings with file/line/claim/why.
+- **The isolation is the mechanism, not a side effect.** A reviewer that has not accumulated the
+  author's context catches defects the author's own judgement has stopped seeing. The supporting
+  evidence is worth separating carefully. Cognition **reports** a dedicated reviewer in their
+  Fusion setup catching ~2 bugs per PR, ~58% of them severe — that is the vendor's own published
+  figure, with no sample size, no A/B baseline and no external audit, so it is cited here as a
+  claim and nothing more. What IS independently supported is the underlying effect: long-context
+  degradation, measured across 18 SOTA models by Chroma's context-rot study and by Stanford's
+  lost-in-the-middle work. The lane rests on the mechanism, not on the vendor's number.
+- **Advisory, and the tool description says so in as many words.** It never gates a merge and
+  never substitutes for the final does-it-actually-work verification, which stays with the lead —
+  as do security review, architecture judgement, and any call the lead is accountable for. The
+  findings are TRIAGE INPUT: a `severe` label from a small local model is a prompt to go read
+  those lines, never proof, and nothing is ever applied unread.
+- Design decisions worth knowing, each forced by something measurable:
+  - **The diff rides in the GOAL, not in a context doc.** A context doc becomes a file the seat
+    must find with `list_dir` and open with `read_file`, and the measured failure mode of a small
+    planner is calling no tool at all — which would produce confident findings about a diff never
+    read. The cost is that `core.AgentContract.Validate`'s 256 KiB context cap never sees the
+    diff, so `internal/reviewlane` owns that bound itself (`MaxDiffBytes`) and refuses early with
+    the real numbers instead of overflowing a seat's window.
+  - **No acceptance check, deliberately.** An empty findings list is a CORRECT outcome here, so
+    any content check would either punish a clean diff or pass anything — exactly the decorative
+    acceptance `delegate.LintAcceptance` exists to name. What replaces it is a check the harness
+    can actually make: a finding naming a file the diff never touched is dropped and REPORTED as
+    `dropped_ungrounded`, because an invented path is how a small seat fails here.
+  - **A findings array of strings, parsed delegator-side.** `gbnf.FromJSONSchema` compiles any
+    array to an array of strings, so a schema of `{severity,file,line,...}` objects would have
+    become strings anyway. The prompt asks for one `severity | file:line | claim | why` line per
+    defect and `ParseFindings` reads them back tolerantly — keeping anything it cannot parse as
+    an unranked claim rather than dropping it, because a discarded line turns a reviewer that did
+    work into a clean bill of health nobody issued.
+  - **An empty findings list is never published unless the seat EARNED it.** "No findings" is
+    the one result a lead might read as reassurance, so it must never be what a broken run
+    collapses into — and a broken run reaches exactly that shape. Traced: `agent/loop.go` returns
+    `stop_reason:"done"` the moment the model stops requesting tools, with no check that the
+    final message carries content (empty content is live-measured in this codebase — see the
+    re-pack's own comment on a GBNF + thinking seat stranding its answer in
+    `reasoning_content`); `agenttask.go` special-cases only `"budget"`, so `"done"` with an
+    empty `Output` reaches `repackStructured`, which extracts findings from an empty string and
+    returns a schema-valid `{"findings":[]}`. `steps:1` and `stop_reason:"done"` describe both
+    cases; `wire.Output` was the one field that differed and it was being discarded. So a
+    zero-finding result is now cross-checked against the seat's own raw answer for the explicit
+    `NONE` verdict the prompt already asks for, and defers with a distinct reason when it is
+    absent. This checks for a signal, not for quality — no judgement is made about findings.
+    When the list IS genuinely empty, the response says in words that it is not a verification.
+    The gate requires an AFFIRMATIVE all-clear — the bare `NONE` token alone on a line, or an
+    explicit no-defects statement — and never a length test. Its first version accepted any
+    answer of 16+ characters, and **the lane caught that itself**: run live against this very
+    diff, the seat reported that `"I could not read the diff"` (25 characters, a seat reporting
+    FAILURE) would have published an empty findings list instead of deferring, and that a bare
+    `none` match would read `"I tried but none of the tools worked"` as clean. Both verified
+    by running the function on those exact strings, both now pinned as not-clean.
+  - **Three counts, published on the same terms**, because a short findings list is the shape a
+    reader most easily misreads and each has a different meaning: `dropped_ungrounded` (named a
+    file the diff never touched), `dropped_echo` (handed the prompt's own template back), and
+    `truncated_by_cap` (more was found than `max_findings` asked to see). Counting drops loudly
+    while truncating silently just moved the blind spot. The `note` on an empty list is now
+    gated on those counts too: "found nothing" printed beside a non-zero drop count was simply
+    false — the reviewer found things and the harness discarded them.
+  - **The worked example cannot be republished as a finding.** It is parseable and grounds
+    against any diff touching a file of that base name, and echoing it is MEASURED behaviour of
+    this seat. Choosing a neutral defect class for the example makes an echo distinguishable to
+    a person; it does nothing for the harness. `dropTemplateEchoes` drops any line
+    byte-identical (after the parser's own normalisation) to the field spec or the example, and
+    counts it. Byte equality, never resemblance — a finding that merely resembles the example is
+    a finding.
+  - **An unrecognised severity label no longer shreds the line.** "critical", "high", "blocker",
+    "P0" — small seats drift to these routinely. The label failed the known-severity test, then
+    failed the path test, and so became the *claim*, with the real claim, path and why rejoined
+    into `why`. `File` came out empty, so grounding skipped the wreckage and it reached the
+    caller UNCOUNTED, looking like an ordinary finding. Now an unknown label in the severity
+    slot (recognised by the NEXT field being path-shaped) is kept as an unranked severity and
+    the rest parses normally — so an invented path riding with it is visible to grounding again.
+  - **The format spec is restated AFTER the diff.** At `MaxDiffBytes` the first statement sits a
+    quarter of a megabyte from the point where it must be applied. Resting the whole design on
+    lost-in-the-middle and then burying the one instruction that has already failed live at the
+    far end of the context would be incoherent.
+  - **The format spec carries a filled-in example**, found the only way it could be: a live run.
+    With an abstract `severity | file:line | claim | why` template the 27B seat located both
+    planted defects and then wrote back `severe | file:16` — it had copied the placeholder name
+    instead of the path, and lost claim and why entirely. An angle-bracketed spec plus one worked
+    example (of a DIFFERENT defect class, so an echo of it is distinguishable from a real finding)
+    produced fully-formed findings on the same diff. Seven passing unit tests did not and could
+    not catch this.
+- Registered unconditionally beside `offload_ask`; runs on the local seat through
+  `Pipeline.RunAgentContract`, the same entry a local delegation placement takes. Like every
+  other tool here, any failure comes back as `deferred: true` with a reason, never an MCP error.
+
 ## [0.96.0] - 2026-08-25
 
 ### Added — `offload_ask`: the one-call delegation entry point
