@@ -469,6 +469,16 @@ it; the class is what code branches on, because a reason string is prose and an 
 
 More shapes originate on the **delegator**, not the node:
 
+- `queue deadline after <d>: the node accepted the job but never started it …` — a **FAILURE**
+  (`summary.failed`), not a defer. The node admitted the job and every poll answered `accepted`:
+  it sat in the backlog and was never given one of the node's concurrency slots. Introduced with
+  the node-side queue in 0.100.0, because until then `accepted` lasted microseconds and this state
+  could not persist. Two properties make it safe: **queued time is credited back** to the
+  execution deadline (a job that waits and then runs is never penalised for the wait — the
+  contract's `timeout_sec` is a budget for work), and the wait itself is **bounded** by
+  `min(timeout_sec + grace, 5 minutes)`. It is a failure rather than a defer on purpose — a defer
+  is a report about the work and carries the node's id and seat, and a job that never started has
+  no such report to make.
 - `poll deadline after <d>: node accepted the job but did not reach a terminal state` — class
   `budget`, or `infrastructure` when the last poll answer was unusable (a 5xx / unknown state,
   named in the reason) **or when the node LOST the job at least once** (each loss is named with

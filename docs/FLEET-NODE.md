@@ -567,7 +567,29 @@ second run. The delegator polls every 3 s; a poll `404` triggers a bounded re-di
 same id (max 2); past `timeout_sec` + 60 s grace it stops polling — the node may still finish
 server-side, and the job id in the delegation log lets you reconcile by hand.
 
-What the deadline produces depends on whether the node ever **answered** about the job:
+**Queued time does not consume the execution budget** (0.100.0). `timeout_sec` + grace is a
+budget for *work*, and since nodes gained a real backlog a job can sit in `accepted` without any
+work having started. The delegator credits that wait back: the deadline moves out by the time the
+job provably spent queued, so a busy node costs a subtask latency, never its budget. Deadline
+messages name the credit (`poll deadline after 5m0s (+42s credited back for time queued on the
+node)`) and say nothing extra when there was none.
+
+The wait is **bounded** — a job may wait for a slot at most as long as it was allowed to run, and
+never more than **5 minutes**. Hitting that bound while the job is *still queued* is a **failure**,
+not a defer, with its own stable prefix:
+
+```
+queue deadline after <d>: the node accepted the job but never started it — it waited in
+the node's backlog and never reached running (<n> poll(s), every one `accepted`)
+```
+
+That is deliberately distinct from the `poll deadline` shapes below, which all concern a job that
+was *running*. A defer is a report about the work, stamped with the node's id and seat; a job that
+never started has no such report to make, and manufacturing one would be the delegator inventing a
+sentence no seat earned.
+
+What the deadline produces for a job that DID reach `running` depends on whether the node ever
+**answered** about it:
 
 - it answered (any `202`/`200` job state) → the subtask is **deferred**, reason prefixed
   `poll deadline after <d>: node accepted the job but did not reach a terminal state` (class

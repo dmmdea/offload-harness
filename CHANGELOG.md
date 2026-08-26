@@ -50,10 +50,20 @@ Versioning: [SemVer](https://semver.org/).
   than or equal to** what that setting produced before it (`fleet_max_queue_depth: 2` ran at
   most 2 concurrently and still does; the default 32 now runs at most 4). No node starts doing
   more at once than it did in 0.99.0, and nothing that was admitted before is refused now.
-- The concurrency default is **4** because that is what this fleet actually runs — the
-  delegator dispatches a fan-out four subtasks at a time — so it preserves the observed steady
-  state while removing the pathological one. A job that waits is strictly better than a job
-  that thrashes, and (see below) far better than one that is refused.
+- **OPERATORS WILL SEE FEWER CONCURRENT JOBS PER NODE, and that is the point.** Stated plainly
+  because it is a real throughput change, not a footnote: before this release a node ran up to
+  `fleet_max_queue_depth` jobs simultaneously — 32 by default. It now runs 4. That is an **8x
+  reduction in node parallelism** at the default settings, and anyone who tuned
+  `fleet_max_queue_depth` upward expecting it to buy parallelism will get backlog instead.
+- Why 4, rather than leaving it to be discovered: it is the concurrency this fleet already
+  operates at — the delegator dispatches a fan-out four subtasks at a time — so it preserves the
+  observed steady state rather than inventing a new one. And the parallelism being removed was
+  mostly fictitious: a node fronts ONE llama-swap, which serializes model residency, so the 5th
+  through 32nd concurrent jobs were manufacturing contention (swap thrash, VRAM pressure, longer
+  wall clock for every job in the set) rather than doing more work. A job that waits is strictly
+  better than a job that thrashes, and far better than one that is refused. Operators whose box
+  genuinely runs more at once should set `fleet_max_concurrent_jobs` explicitly — it is now the
+  key that means what they want, which was never true of the one they were reaching for before.
 
 ### Added — `/fleet/health` publishes capacity, not just depth
 - `queue_depth` keeps its **exact** meaning and shape for existing readers (the delegator's
@@ -75,9 +85,21 @@ Versioning: [SemVer](https://semver.org/).
   still `accepted` → `"not started: node shut down while this job was queued"`.
 - Drain **finishes what it started and does not start what it never began**: the backlog is
   dropped when drain begins rather than worked through, so shutdown never launches an
-  inference it cannot finish. `TestJobsDrainWaitsForFastJobs` now pins the job as `running`
-  before draining — under separate admission and execution, a job accepted microseconds before
-  drain is a genuine race, and the test was about the drain timeout, not that race.
+  inference it cannot finish.
+- **`TestJobsDrainWaitsForFastJobs` was adjusted, and here is exactly what changed.** Before: it
+  called `Accept` with a 30 ms run and immediately called `DrainAndStop(5s)`, asserting the job
+  ended `done` with its data. After: it waits for the job to reach `running` (via a channel the
+  run closes plus `waitJobState`) and only then drains, asserting the same `done` + data. Nothing
+  else about the assertion changed. The reason the old form had to go is that it silently relied
+  on `Accept` being `start` — with admission and execution separated, `Accept` and `DrainAndStop`
+  contend for the same mutex and neither ordering is guaranteed, so "was this job claimed before
+  drain began?" became a genuine coin flip *in production as much as in the test*: the same code
+  would legitimately produce `done` sometimes and `not started` other times. Keeping the old
+  assertion would have made the test flaky rather than made the behaviour deterministic. The
+  test's intent — a job that completes inside the drain timeout drains clean rather than being
+  marked `interrupted` — is preserved exactly; what it no longer *incidentally* covers is "a
+  just-accepted job gets started", which was an artifact of the old design and is now covered
+  deliberately (and correctly) by the queue tests instead.
 
 ### Fixed — docs asserted a load-shedding behaviour this repo does not have
 - `docs/FLEET-NODE.md` claimed "Any non-202 already means 're-dispatch elsewhere' to the
@@ -90,6 +112,39 @@ Versioning: [SemVer](https://semver.org/).
   `docs/flows/fleet-job-lifecycle.md` and the same sentence copied into `server.go`'s
   admission comment.
 
+### Fixed — queued time no longer consumes a subtask's execution budget (delegator side)
+- **This regression was caused by the queue above and is fixed in the same release.** The
+  delegator sets its poll deadline at DISPATCH time (`pollBudget = timeout_sec + 60s grace`).
+  That was harmless while `Accept` was `start` — dispatch → running was microseconds, so the whole
+  budget went to execution by construction. With a real backlog, a job waiting for a slot spent
+  the contract's own timeout doing nothing, which converted a node's **loud, immediate
+  `503 queue full`** into a **slow timeout that burned the budget and then manufactured a defer**
+  ("node accepted the job but did not reach a terminal state", stamped with that node's id and
+  seat). Same lost work, less signal, more wall clock — strictly worse than the refusal it
+  replaced.
+- **Queued time is credited back.** While a job is observed in `accepted`, the delegator moves the
+  deadline out by the wait, so the contract still gets the execution budget it asked for. Only
+  intervals whose BOTH endpoints were observed `accepted` are banked — the partial spans either
+  side are at most one poll each, and under-crediting is the safe direction (over-crediting would
+  hand a job more budget than the contract granted, which is the same class of defect in the
+  other direction). A node with no queue accrues no credit and behaves byte-identically.
+- **The wait is bounded**: `min(timeout_sec + grace, 5 minutes)`. An unbounded wait is its own
+  failure mode. A subtask that has not been given a worker in five minutes is behind a backlog no
+  fan-out will clear in time, and the caller is better served by a loud failure than a longer wait
+  it did not ask for.
+- **Giving up while QUEUED is distinguishable from giving up while RUNNING.** A never-started job
+  yields a FAILURE with the stable prefix `queue deadline after <d>: the node accepted the job but
+  never started it — it waited in the node's backlog and never reached running (<n> poll(s)
+  answered `accepted`)`. The count is of polls that ACTUALLY answered `accepted`, not the total —
+  a run that also saw 404s must not have them folded into a claim about queueing. Deliberately a failure and not a defer: a defer is a report about the WORK and
+  carries the node's id and seat, and a job that never started has no such report to make.
+  A job that reached `running` still produces the existing `poll deadline` defer, unchanged.
+- Deadline messages now name the credit (`poll deadline after 5m0s (+42s credited back for time
+  queued on the node): …`) and render nothing at all when there was none, so every pre-queue
+  node's message — and the tests pinning that wording — stay byte-identical.
+- Scope note: this is the budget-accounting half only. **Re-placement on refusal and
+  capacity-aware placement are still a separate change** — a `503 queue full` remains terminal.
+
 ### Notes
 - No durability was added: the store stays in-memory, and a node restart still loses its
   backlog (now reported honestly as never-started). No pull/claim endpoint — placement stays
@@ -99,7 +154,8 @@ Versioning: [SemVer](https://semver.org/).
   over the same mutex that guards the store, so deciding and claiming are one critical
   section), a 24-job concurrent burst test sampling peak overlap from inside the runs, the
   pre-existing 32-goroutine concurrent-`Accept` test now running through the scheduler,
-  repeated `-count` runs, and `go vet ./...`.
+  repeated `-count` runs, and `go vet ./...`. The delegator-side change adds no shared mutable
+  state (the queued accumulator is local to one `runRemote` call, on the goroutine that owns it).
 
 ## [0.99.0] - 2026-08-26
 
