@@ -21,6 +21,7 @@ import (
 	"llamaswap-pp-cli/pkg/llamaswap"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
+	"github.com/dmmdea/offload-harness/internal/askcache"
 	"github.com/dmmdea/offload-harness/internal/askjob"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -47,9 +48,20 @@ type Server struct {
 	// by every NPU tool so concurrent first calls share a single spawn.
 	hailo     *hailoclient.Sidecar
 	hailoOnce sync.Once
+	// askCache short-circuits an IDENTICAL repeat of an offload_ask call — same
+	// question, same read_root, same file BYTES — with the answer the seat
+	// already produced, so the 46-75 s of seat time is not spent twice.
+	//
+	// It lives on the Server rather than behind a caller-supplied session id
+	// because the MCP server is spawned per client over stdio: one connection
+	// is one process is one cache, born and destroyed with the connection.
+	// That is exactly the scope a session_id argument would express, without
+	// adding a required input to the one-call tool whose entire purpose is
+	// having no arguments to think about. See internal/askcache.
+	askCache *askcache.Cache
 }
 
-func New(p *pipeline.Pipeline) *Server { return &Server{p: p} }
+func New(p *pipeline.Pipeline) *Server { return &Server{p: p, askCache: askcache.New()} }
 
 // parseArgs unmarshals the raw tool arguments into in. On a decode error it
 // returns a non-nil {deferred:true, reason:"bad arguments: <err>"} result that
@@ -248,7 +260,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// only question + paths.
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_ask",
-		Description: "Ask a bounded question ABOUT SPECIFIC FILES and have a FREE local seat answer it — the one-call form of agent_delegate. You supply question + paths and nothing else: the harness builds the whole contract (goal, {answer,evidence} output schema, and an acceptance check ANCHORED to distinctive tokens mined from the files themselves) and runs it on the local agent seat. REACH FOR IT THE MOMENT YOU ARE ABOUT TO OPEN MORE THAN TWO FILES to answer something bounded — that is exactly where reading them yourself costs more than asking. The files are read and inlined by the HARNESS under read_root, so your own context never pays for them. Good fits: \"which key sets the queue cap\" over three config files; \"which function does this handler call before dispatch\" over a handler plus its helpers; \"what changed between these two versions of the spec\". NOT this tool: unbounded exploration with no file list (use agent_run — it searches for its own files); anything that writes or runs (this lane is read-only); a multi-part job needing several contracts (agent_delegate); and above all anything whose answer is a JUDGEMENT rather than a fact the files state — security or credential review, an architecture decision, or the final does-it-actually-work verification. A free seat reports what the files say; it does not own a call you are accountable for. Returns {answer, evidence, verified, acceptance, acceptance_failures?, seat, steps, stop_reason} — evidence is the exact lines the seat relied on so you can spot-check instead of re-reading. verified is a CITATION check, not a correctness verdict: it asks whether the published answer quoted one of a few distinctive tokens mined from these files, never whether the answer is right. Those tokens are chosen to be things only these files would say — real identifiers wherever the files have them — but it is a heuristic, so treat verified:true as \"this answer demonstrably read the files\", not as proof of a verbatim quotation. On verified:false read acceptance_failures (which names the check that did not match) and then the evidence — it is a prompt to look, not proof the answer is wrong, and a question whose subject is a short or question-named identifier can leave nothing anchorable at all. Typical latency is 30-90 s: this buys back the context those files would have cost you, not wall-clock. Caps: at most 16 files, 128 KiB per file, 256 KiB total. It REFUSES (deferred:true) when the files hold no token distinctive enough to ground the check, rather than handing back an answer nothing verified. On any failure it returns deferred:true with a reason and you read the files yourself.",
+		Description: "Ask a bounded question ABOUT SPECIFIC FILES and have a FREE local seat answer it — the one-call form of agent_delegate. You supply question + paths and nothing else: the harness builds the whole contract (goal, {answer,evidence} output schema, and an acceptance check ANCHORED to distinctive tokens mined from the files themselves) and runs it on the local agent seat. REACH FOR IT THE MOMENT YOU ARE ABOUT TO OPEN MORE THAN TWO FILES to answer something bounded — that is exactly where reading them yourself costs more than asking. The files are read and inlined by the HARNESS under read_root, so your own context never pays for them. Good fits: \"which key sets the queue cap\" over three config files; \"which function does this handler call before dispatch\" over a handler plus its helpers; \"what changed between these two versions of the spec\". NOT this tool: unbounded exploration with no file list (use agent_run — it searches for its own files); anything that writes or runs (this lane is read-only); a multi-part job needing several contracts (agent_delegate); and above all anything whose answer is a JUDGEMENT rather than a fact the files state — security or credential review, an architecture decision, or the final does-it-actually-work verification. A free seat reports what the files say; it does not own a call you are accountable for. Returns {answer, evidence, verified, acceptance, acceptance_failures?, seat, steps, stop_reason, cache_hit} — evidence is the exact lines the seat relied on so you can spot-check instead of re-reading. verified is a CITATION check, not a correctness verdict: it asks whether the published answer quoted one of a few distinctive tokens mined from these files, never whether the answer is right. Those tokens are chosen to be things only these files would say — real identifiers wherever the files have them — but it is a heuristic, so treat verified:true as \"this answer demonstrably read the files\", not as proof of a verbatim quotation. On verified:false read acceptance_failures (which names the check that did not match) and then the evidence — it is a prompt to look, not proof the answer is wrong, and a question whose subject is a short or question-named identifier can leave nothing anchorable at all. Typical latency is 30-90 s: this buys back the context those files would have cost you, not wall-clock. cache_hit tells you how the answer was obtained: an IDENTICAL repeat within the same session — same question, same read_root, and the same file BYTES — returns the stored answer without spending the seat again, and reports cache_hit:true. A REPEAT DOES NOT RE-ROLL THE SEAT: an identical call after a verified:false answer returns that same unverified answer again, cache_hit:true, with no new seat run — to get a second attempt, change the question, which is a different key and always a fresh run. It is keyed on CONTENT, so editing any attached file also makes the next call a fresh run automatically; a stale answer cannot be served. Do NOT read this as a general speedup: a DIFFERENT question over the same files pays full seat time, because nothing keeps a warm model context between calls. Caps: at most 16 files, 128 KiB per file, 256 KiB total. It REFUSES (deferred:true) when the files hold no token distinctive enough to ground the check, rather than handing back an answer nothing verified. On any failure it returns deferred:true with a reason and you read the files yourself.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"question":{"type":"string","description":"the bounded question to answer FROM THESE FILES — one question, answerable from what you attach"},"paths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":16,"description":"the files to answer from, relative to read_root or absolute inside it (<=16 files, <=128 KiB each, <=256 KiB total)"},"read_root":{"type":"string","description":"absolute directory the paths are read from; nothing outside it can be read (default: the server working dir)"}},"required":["question","paths"]}`),
 	}, s.handleAsk)
 
@@ -1563,6 +1575,39 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	if berr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": berr.Error()})
 	}
+	// THE RESULT CACHE, and its position in this function is the design.
+	//
+	// It is consulted AFTER BuildContract and not before, because the key is the resolved
+	// file CONTENT and BuildContract is what resolves it — reading the files is what makes
+	// a hit provably safe, and that read is microseconds against the 46-75 s of seat time a
+	// hit skips. Keying on the caller's paths instead would be cheaper by nothing that
+	// matters and would make an answer about a file's old bytes servable after an edit.
+	//
+	// Every refusal BuildContract can raise (no anchor, over a cap, outside read_root)
+	// therefore still happens on every call, cached or not: a refusal is never short-
+	// circuited, only a finished answer is.
+	//
+	// What this does NOT do: make a DIFFERENT question over the same files any cheaper. It
+	// pays on an exact repeat and nothing else. Warm-context reuse across different
+	// questions would need a pinned llama-swap slot, which trades seat availability for
+	// cache warmth and was declined.
+	cacheKey := askcache.Key(strings.TrimSpace(in.Question), absRoot, contract.Context)
+	if cached, hit := s.askCache.Get(cacheKey); hit {
+		// Never present a cached answer as a fresh run. The caller decides whether a
+		// re-read is warranted, and the adoption instrument has to be able to tell a
+		// seat that ran from a seat that did not.
+		cached["cache_hit"] = true
+		return jsonResult(cached)
+	}
+	// Known gap: no single-flight / in-flight dedup on a miss. Two concurrent identical asks
+	// (same cacheKey) that both arrive before either has stored a result will both fall
+	// through here and both pay full seat time — the second one's Put simply overwrites the
+	// first's. Unlikely today: MCP over stdio serves one request at a time per connection, so
+	// nothing in this codebase can actually issue that second call concurrently. If a caller
+	// shape ever changes that (a concurrent client, or a fan-out that awaits offload_ask
+	// itself), the fix is a per-key in-flight map — e.g. golang.org/x/sync/singleflight —
+	// wrapped around the run(ctx, contract) call below, coalescing concurrent misses on one
+	// key into a single seat run.
 	run := s.localAgent // test seam, shared with agent_delegate
 	if run == nil {
 		run = s.p.RunAgentContract
@@ -1657,10 +1702,26 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 		"seat":        wire.Seat,
 		"steps":       wire.Steps,
 		"stop_reason": wire.StopReason,
+		// Published as FALSE rather than omitted: an absent field reads as unknown, and
+		// "was this answer computed just now" is exactly the question a caller — and the
+		// adoption instrument — must never have to guess at. It rides the ANSWER shape
+		// only; a deferred result carries no cache_hit because a defer is never stored,
+		// so it is always a fresh run and the field would have nothing to distinguish.
+		"cache_hit": false,
 	}
 	if len(failures) > 0 {
 		out["acceptance_failures"] = failures
 	}
+	// Only a SUCCESSFUL, non-deferred result is stored, and every other exit from this
+	// handler returned above: a defer, a refusal and a runner error are all statements
+	// about this minute rather than about these files, and caching one would turn a
+	// transient seat failure into a lane that stays dead for the rest of the connection.
+	//
+	// A verified:false answer IS cached — the seat ran and answered, the citation check
+	// simply did not match — so an identical repeat returns the same unverified answer
+	// instead of re-rolling the seat. That is the deliberate cost of caching by content:
+	// a caller who wants another attempt changes the question, which is a different key.
+	s.askCache.Put(cacheKey, out)
 	return jsonResult(out)
 }
 

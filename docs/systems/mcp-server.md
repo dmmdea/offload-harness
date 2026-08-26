@@ -96,6 +96,58 @@ cites nothing, and grading the bytes gives `verified: false` when the re-pack re
 case is a question whose subject is a SHORT (<8-character) or question-named identifier, which
 leaves nothing anchorable at all.
 
+### The ask lane's result cache
+
+An IDENTICAL repeat of an `offload_ask` call — same question, same `read_root`, and the same
+file **bytes** — is served from an in-process cache (`internal/askcache`) without spending the
+seat again, and the response says so with `cache_hit: true`. A fresh run publishes
+`cache_hit: false`; an absent field would read as unknown, and "was this answer computed just
+now" is not something a caller or the adoption instrument should have to guess at. A
+**deferred** result carries no `cache_hit` at all, by design rather than omission: a defer is
+never stored, so it is always a fresh run.
+
+**Say what this buys, and no more.** It pays on an exact repeat and on nothing else. A
+*different* question over the same files still pays full seat time (46–75 s measured), because
+the seat has to reason about the new question. The only mechanism that would fix that is
+keeping a model context resident between calls, which needs llama-swap slot pinning — trading
+a seat's availability for cache warmth, and explicitly declined. Nothing here is a general
+speedup, and the tool description says so in as many words.
+
+Four properties are load-bearing:
+
+- **Keyed on CONTENT, never on path.** The key covers the question, the resolved `read_root`,
+  and each resolved doc's name plus the SHA-256 of its bytes. A file edited between two
+  otherwise-identical calls is a different key, so the seat runs again — a stale answer is not
+  merely unlikely, it is unreachable. That single property is the whole safety argument for
+  serving a cached answer at all, and it is mutation-proven (key on the path instead and both
+  the unit test and the wired front-door test go red).
+- **The lookup happens AFTER `askjob.BuildContract`**, because the key *is* the resolved file
+  content and `BuildContract` is what resolves it. Reading the files is microseconds against
+  the seat time a hit skips. It also means every refusal (no anchor, over a cap, outside
+  `read_root`) still happens on every call: only a finished answer is short-circuited, never a
+  refusal. Keying on the resolved docs rather than the caller's raw path strings is what makes
+  `/abs/cfg.go` and `cfg.go` one key — both hand the seat identical bytes.
+- **Only successful, non-deferred results are stored.** A defer, a refusal or a runner error is
+  a statement about this minute, not about these files; caching one would turn a transient seat
+  failure into a lane that stays dead for the rest of the connection. A `verified: false`
+  answer *is* cached — the seat ran and answered, the citation check simply did not match — so
+  an identical repeat returns the same unverified answer rather than re-rolling the seat. A
+  caller wanting another attempt changes the question, which is a different key.
+- **Bounded at 32 entries, oldest out, and scoped to the process.** The MCP server is spawned
+  per client over stdio, so one connection is one process is one cache, born and destroyed with
+  the connection. That is why there is **no `session_id` argument**: it would be a second,
+  weaker spelling of a boundary the process already draws exactly, and adding a required input
+  to the one-call tool would undercut the friction removal the tool exists for.
+
+The repeat returns without touching the seat at all, and editing one attached file makes the
+next call miss and go back to the seat. That is not a timed measurement — no run log exists to
+attribute a number to, and the only number ever in hand was a cold-swap-degraded figure (the
+seat's llama-swap slot was mid-load for a different model during the attempt) that does not
+belong here. What IS provable: `TestAskSecondIdenticalCallSkipsTheSeatAndSaysSo` asserts the
+seat ran exactly once across two identical calls, and the mutation proof named in the "Keyed on
+CONTENT" property above (key on the path instead and both the unit test and the wired
+front-door test go red) pins the edited-file-misses behaviour directly.
+
 One deliberate gap to know about: the ask lane writes **no delegation ledger or corpus row**.
 `delegate.Run` records one per subtask; `Pipeline.RunAgentContract` on its own does not, so
 `offload_ask` traffic will not appear in the delegation corpus or in any analysis built on it.
@@ -241,6 +293,8 @@ manifest is a repo-root file.
   handlers
 - [`internal/askjob`](../../internal/askjob/ask.go) — `offload_ask`’s contract builder (goal,
   output schema, and the grounded acceptance anchor)
+- [`internal/askcache`](../../internal/askcache/askcache.go) — `offload_ask`’s content-addressed,
+  bounded, per-process result cache (the `cache_hit` field)
 - [`internal/reviewlane`](../../internal/reviewlane/review.go) — `offload_review_diff`’s contract
   builder, finding parser, diff-grounding filter and severity ranking
 - [`internal/swapclient`](../../internal/swapclient/swapclient.go) — the harness's single
