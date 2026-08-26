@@ -70,7 +70,10 @@ a full node** — that distinction is the entire point of the split.
 Health reports both sides: `queue_depth` (unchanged meaning and shape, for existing readers such as
 the delegator's placement tie-break) plus `jobs_running`, `jobs_queued`, `max_concurrent_jobs` and
 `max_queue_depth`. Publishing the limits is what lets a delegator see a node's *capacity* rather than
-only its current depth.
+only its current depth — and since 0.101.0 the delegator uses them: a node whose `queue_depth` has
+reached its `max_queue_depth` is the node that will answer `503`, so it now ranks below every node
+that is not provably full, and a node with a free worker and an empty backlog ranks above one whose
+workers are all busy. `queue_depth` still decides everything those two keys do not.
 
 > **`queue_depth`'s meaning is unchanged, but its DISTRIBUTION shifts sharply.** It always counted
 > `accepted` + `running`; before 0.100.0 those were all executing, so the number topped out near what
@@ -252,9 +255,12 @@ bypass; `tasks_agent_test.go` the advertisement gate and contract materializatio
   *waiting* state. A job sitting in `accepted` for a while is a queued job, not a stuck one.
 - Reading `fleet_max_queue_depth` as a concurrency limit. It caps the backlog (`queue_depth`);
   `fleet_max_concurrent_jobs` caps execution.
-- Assuming a `503 queue full` sheds the job to a sibling node. **It does not** — `internal/delegate`
-  treats any non-`202` as terminal and does not re-place the subtask. That shedding behaviour is the
-  media dispatcher's, in a different repository.
+- Assuming a `503 queue full` is the end of that subtask. Since 0.101.0 `internal/delegate`
+  **re-places** it on another eligible remote and then on the local seat (bounded: the first choice
+  plus `maxRemoteReplacements` = 2 more remotes, then local). What it does NOT re-place is a
+  `400`/`401`/`403` — those are about the request, not the node — nor anything after a `202` ack.
+- Assuming re-placement makes a saturated fleet free. Every placement spends from the contract's own
+  `timeout_sec`, and when nobody takes the job the subtask fails with `placement refused: …`.
 - Expecting a duplicate dispatch to return an error. Only `error` jobs do.
 - Binding with `:18811` and expecting it to work as loopback.
 - Treating Afterburner as required.
@@ -617,7 +623,11 @@ a full TTL window, so a dead endpoint is probed once per window, not hammered pe
   the ack is the standard `202`. A transport-level failure is retried **once with the same id**
   — if the first POST actually landed, the store's duplicate path re-acks `202` idempotently,
   so the retry can never buy a second run (the same 202-reack semantics the media lane has
-  always had). A non-202 answer is a refusal, not doubt, and is surfaced without retry.
+  always had). A non-202 answer is a refusal, not doubt, and is never re-POSTed to the SAME node
+  — it goes to the RE-PLACEMENT rule instead (0.101.0), which decides from the status whether
+  another node is worth asking. The two are separate mechanisms with separate bounds:
+  `dispatchAttempts` (2) is about transport doubt at one node, `maxRemoteReplacements` (2) is
+  about finding a different node.
 - The delegator polls `/fleet/jobs/{id}` every 3 s. A poll `404` is the lost-ack shape (the
   node never saw, or evicted, the job): re-dispatch the same id, bounded at 2 re-dispatches — a
   node that keeps forgetting the job is broken, and re-POSTing forever would re-run the

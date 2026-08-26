@@ -57,6 +57,19 @@ type SummaryWire struct {
 	// omitempty — a run with no retry publishes byte-identically to before.
 	Retried        int `json:"retried,omitempty"`
 	RetryRecovered int `json:"retry_recovered,omitempty"`
+	// Replaced / ReplacementRecovered: subtasks a node REFUSED at dispatch and
+	// the delegator re-placed on another node, and how many of those then
+	// reached a node that took the work. omitempty — a run where nothing was
+	// refused publishes byte-identically to before this existed.
+	//
+	// They are published rather than kept internal because a fleet quietly
+	// shedding load onto one box is otherwise invisible: every subtask still
+	// completes, the four buckets read green, and nothing anywhere says the
+	// roster is saturated. `replaced: 6` on a healthy-looking run is the line
+	// that sends an operator to fleet_max_queue_depth before the next run has
+	// nowhere left to go.
+	Replaced             int `json:"replaced,omitempty"`
+	ReplacementRecovered int `json:"replacement_recovered,omitempty"`
 }
 
 // ResultWire is one subtask's published outcome. Failed marks a
@@ -80,6 +93,11 @@ type ResultWire struct {
 	// when a retry ran; the note says what the other attempt did.
 	RetriedOn string `json:"retried_on,omitempty"`
 	RetryNote string `json:"retry_note,omitempty"`
+	// Replacements / ReplacementNote: how many times a node refused this
+	// subtask at dispatch before one took it, and which nodes those were with
+	// what each of them said.
+	Replacements    int    `json:"replacements,omitempty"`
+	ReplacementNote string `json:"replacement_note,omitempty"`
 	// AcceptanceLint carries the intake lint's warnings for THIS subtask's
 	// acceptance (delegate.LintAcceptance): parrot-passable / ungrounded /
 	// shape-only. Warn-only — the run above happened regardless. It rides the
@@ -130,6 +148,9 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			LedgerRowsAttempted: sum.LedgerRowsAttempted,
 			Retried:             sum.Retried,
 			RetryRecovered:      sum.RetryRecovered,
+
+			Replaced:             sum.Replaced,
+			ReplacementRecovered: sum.ReplacementRecovered,
 		},
 		Results: make([]ResultWire, 0, len(results)),
 	}
@@ -148,6 +169,8 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			WallMs:             pr.wallMs,
 			RetriedOn:          pr.RetriedOn,
 			RetryNote:          pr.RetryNote,
+			Replacements:       pr.Replacements,
+			ReplacementNote:    pr.ReplacementNote,
 			AcceptanceLint:     lintFor(lints, i),
 			HarnessVersion:     pr.Result.HarnessVersion,
 			HarnessBuildSHA256: pr.Result.HarnessBuildSHA256,

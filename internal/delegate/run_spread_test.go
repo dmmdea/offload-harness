@@ -236,7 +236,11 @@ func TestRunNoRetryWithoutADifferentNode(t *testing.T) {
 }
 
 // TestRunTransportFailureIsNotRetried: a node refusing dispatch is a FAILURE,
-// not a wrong answer — another seat does not fix a broken wire.
+// not a wrong answer, so it never enters the VERIFICATION retry (RetriedOn
+// stays empty — another seat does not fix a broken wire). Since 0.101.0 it does
+// enter RE-PLACEMENT, which is a different mechanism with a different bound;
+// here there is no other node to re-place onto and route=remote never falls
+// back to local, so the outcome is still one failure and zero local calls.
 func TestRunTransportFailureIsNotRetried(t *testing.T) {
 	f := &fakeNode{t: t, agentEnabled: true, resident: true, ctxTokens: 32768, nodeID: "node-a", dispatchStatus: 500}
 	url := f.server().URL

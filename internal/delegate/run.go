@@ -98,6 +98,35 @@ type PlacedResult struct {
 	// the attempt ran so the retry can pick a DIFFERENT node.
 	retryRecovered bool
 	ranLocal       bool
+	// ranBase is the dial base this attempt used ("" for local). It is what the
+	// re-placement loop excludes on, rather than the node id: a node that
+	// answered health without a node_id would otherwise collide with every
+	// other such node under one empty key, and the dial target is the thing
+	// actually being re-tried.
+	ranBase string
+	// refusalStatus records a DISPATCH-TIME refusal: the node answered the
+	// dispatch with something other than the one 202 ack (the status it sent),
+	// or the delegator never reached it at all (0). Only set when Err is also
+	// set. It is the input to replaceableRefusal — the class decision keys on
+	// the STATUS the node actually sent, never on the text of an error string.
+	//
+	// refused is separate from `refusalStatus != 0` because 0 is a real value
+	// (a transport failure), and because a marshaling error inside dispatch is
+	// a delegator bug rather than any node's answer.
+	refused       bool
+	refusalStatus int
+
+	// Replacements counts how many times this subtask was RE-PLACED on a
+	// different node after a node REFUSED it at dispatch. 0 on the
+	// overwhelming majority of results, so a healthy run publishes exactly
+	// what it published before this existed.
+	Replacements int
+	// ReplacementNote names every node that refused and what it said, in the
+	// order they were tried. Present whenever Replacements > 0 — on the result
+	// that finally ran as much as on the one that ran out of nodes — because a
+	// fleet quietly shedding load onto one box otherwise looks identical to a
+	// healthy one.
+	ReplacementNote string
 }
 
 // Summary is the per-run outcome tally, reported AT THE TOP of every surface's
@@ -186,6 +215,17 @@ type Summary struct {
 	// outcome counts above still add up to len(results).
 	Retried        int
 	RetryRecovered int
+	// Replaced counts subtasks RE-PLACED at least once after a node refused
+	// them at dispatch. ReplacementRecovered is the subset that then reached a
+	// node which TOOK the work — the subtask stopped being a refusal.
+	//
+	// Read ReplacementRecovered precisely: it says the work was PLACED, not
+	// that the answer was good. A re-placed subtask whose seat then deferred,
+	// or whose result failed acceptance, still counts here, because the defect
+	// this fixes is work that nobody ran at all. The four outcome counts above
+	// say what the answer was. Annotations, not buckets.
+	Replaced             int
+	ReplacementRecovered int
 }
 
 const (
@@ -201,6 +241,31 @@ const (
 	// node that keeps forgetting the job after two re-acks is broken, and
 	// re-POSTing forever would re-run the contract on every node restart.
 	maxRedispatches = 2
+	// maxRemoteReplacements bounds how many ADDITIONAL REMOTE nodes one subtask
+	// may be offered to after its first-choice node refused it at dispatch.
+	// Local is NOT counted against it — the fallback to the one seat that
+	// always exists is reserved, so a wide roster can never spend the bound
+	// before reaching it. Total placements per subtask are therefore at most
+	// 1 (first choice) + maxRemoteReplacements + 1 (local) = 4.
+	//
+	// Why 2, and why a bound at all:
+	//
+	//   - Walking the whole roster is its own failure mode. Each refused
+	//     placement costs up to dispatchAttempts × dispatchRequestTimeout = 60s
+	//     of dial time before a transport verdict, so an unbounded walk turns
+	//     one saturated fleet into minutes of wall clock spent collecting
+	//     refusals — and the contract's budget is being spent the whole time.
+	//   - The first choice plus two alternates covers a three-node remote fleet
+	//     completely. A refusal that survives three DISTINCT nodes is a
+	//     fleet-wide condition (everything saturated, everything draining), not
+	//     a node condition, and a fourth dial does not fix a fleet-wide one.
+	//   - Local is the one seat that is always able to take the contract, so
+	//     the bound is a bound on HUNTING, not on getting the work done.
+	//
+	// Two independent things also bound the loop tighter in practice: each node
+	// is tried at most once (the base-URL exclusion set), and every placement
+	// must fit in what is LEFT of the contract's timeout_sec.
+	maxRemoteReplacements = 2
 	// dispatchRequestTimeout / pollRequestTimeout bound ONE HTTP exchange;
 	// the overall poll deadline is the contract's business, not the client's.
 	dispatchRequestTimeout = 30 * time.Second
@@ -336,6 +401,15 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 		if pr.retryRecovered {
 			sum.RetryRecovered++
 		}
+		if pr.Replacements > 0 {
+			sum.Replaced++
+			// "Recovered" is stated on the REFUSAL, not on the answer: Err == ""
+			// means some node took the work and reported on it. Whether that
+			// report was good is what the four buckets below are for.
+			if pr.Err == "" {
+				sum.ReplacementRecovered++
+			}
+		}
 		// The bucket and the broken-stack ANNOTATION are decided separately: a
 		// local placement can succeed while the fleet it declined to use is
 		// down, and that must still count as infrastructure.
@@ -467,7 +541,15 @@ func (r *runner) reportTelemetryLoss() {
 // and the retry is what turns "caught" into "recovered".
 func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract) PlacedResult {
 	start := time.Now()
-	first := r.attempt(ctx, i, contract, nil)
+	// The subtask's timeout_sec is the WALL CEILING the caller was told about,
+	// and every mechanism inside runOne spends from this one budget: the
+	// re-placement loop below and the verification retry both measure what is
+	// left against `start`, so neither can silently extend the other's.
+	budget := contract.TimeoutSec
+	if budget <= 0 {
+		budget = core.AgentTimeoutSecDefault
+	}
+	first := r.placeAndRun(ctx, i, contract, nil, start, budget)
 	if !retryable(first) {
 		return first
 	}
@@ -475,13 +557,7 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// that number is the wall ceiling per subtask, and a second full attempt would
 	// have doubled it silently. What is left after the first attempt is the
 	// retry's budget; under the floor there is no honest retry to run.
-	budget := contract.TimeoutSec
-	if budget <= 0 {
-		budget = core.AgentTimeoutSecDefault
-	}
-	// Elapsed rounds UP: a ceiling that credits a 1.2 s attempt as 1 s overstates
-	// what is left, and the retry must never be promised time it does not have.
-	remaining := budget - int((time.Since(start).Milliseconds()+999)/1000)
+	remaining := remainingSec(start, budget)
 	if remaining < minRetrySec {
 		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after the first attempt (floor %ds)", remaining, budget, minRetrySec)
 		return first
@@ -492,8 +568,254 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	}
 	retryContract := contract
 	retryContract.TimeoutSec = remaining
-	second := r.attempt(ctx, i, retryContract, &alt)
+	second := r.placeAndRun(ctx, i, retryContract, &alt, start, budget)
 	return mergeAttempts(first, second)
+}
+
+// remainingSec is what is LEFT of a subtask's timeout_sec budget. Elapsed
+// rounds UP: crediting a 1.2 s attempt as 1 s overstates what is left, and no
+// later placement may be promised time the subtask does not have. It can go
+// negative, which every caller reads as "nothing left" through a floor check.
+func remainingSec(start time.Time, budget int) int {
+	return budget - int((time.Since(start).Milliseconds()+999)/1000)
+}
+
+// replacementExhaustedPrefix opens the message for a subtask NO NODE TOOK. It
+// is a stable grep key and is deliberately distinct from the two deadline
+// sentences 0.100.0 already produces, because they are three different facts
+// about three different failures:
+//
+//	"placement refused"  — every node the delegator was willing to ask said no
+//	                       (or could not be reached). No seat ever saw the
+//	                       contract, so there is nothing to defer about.
+//	"queue deadline"     — ONE node accepted it and never started it.
+//	"poll deadline"      — ONE node started it and never finished it.
+//
+// It is an Err (Summary.Failed, non-zero CLI exit, IsError on the MCP surface)
+// and never a defer, for the same reason the queue deadline is: a defer
+// manufactures an AgentWireResult shaped like something a SEAT produced, and
+// the only class that would fit — `budget` — teaches every consumer that the
+// seat needed more time. No seat was ever asked.
+const replacementExhaustedPrefix = "placement refused"
+
+// placeAndRun runs ONE placement and, for as long as the node REFUSES the job
+// at dispatch, re-places the subtask on another node — other eligible remotes
+// first, then the local seat.
+//
+// WHY ONLY AT DISPATCH, and why that is a safety property rather than a
+// convenience: a refusal is a NON-ACK. The node never took ownership, so no
+// seat anywhere can be running the contract, and re-placing it cannot produce
+// two concurrent runs. Everything that happens after a 202 — a poll 404, a
+// queue deadline, a poll deadline — leaves a job the node may still hold, and
+// re-placing THOSE would be the delegator arranging a double run. They stay
+// exactly as they were.
+//
+// The one honest residual: when both dispatch attempts fail at TRANSPORT level
+// (status 0), the first POST may have landed and had its ack lost, so the
+// abandoned node could still run the contract once. That costs wasted compute
+// on a node nobody is polling any more — the agent lane is the read-only
+// agent.Build path, so there are no effects to duplicate — and the alternative
+// is losing the work with certainty. Named here rather than left implicit.
+func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentContract, forced *placement, start time.Time, budget int) PlacedResult {
+	pr := r.attempt(ctx, i, contract, forced)
+	if !isReplaceable(pr) {
+		return pr
+	}
+	tried := map[string]bool{pr.ranBase: true}
+	refusals := []string{refusalLine(pr)}
+	for {
+		// Deadline discipline, identical to the retry's: a re-placement is
+		// handed what is LEFT of the contract's own timeout_sec, never a fresh
+		// copy of it, and under the floor there is no honest placement to make.
+		remaining := remainingSec(start, budget)
+		if remaining < minRetrySec {
+			return exhausted(pr, refusals, fmt.Sprintf(
+				"%ds of the %ds timeout_sec budget was left after %d placement(s), under the %ds floor for another",
+				remaining, budget, len(refusals), minRetrySec))
+		}
+		next, why, ok := r.replacementNode(ctx, contract, tried, len(refusals)-1)
+		if !ok {
+			return exhausted(pr, refusals, why)
+		}
+		tried[next.base] = true
+		replaced := contract
+		replaced.TimeoutSec = remaining
+		pr = r.attempt(ctx, i, replaced, &next)
+		pr.Replacements = len(refusals)
+		if !isReplaceable(pr) {
+			// Some node TOOK it. Whether its answer was any good is the four
+			// outcome buckets' business, not this loop's.
+			pr.ReplacementNote = replacementNote(refusals, true)
+			return pr
+		}
+		refusals = append(refusals, refusalLine(pr))
+	}
+}
+
+// isReplaceable: this attempt ended because a node DECLINED the job at
+// dispatch, and the answer it declined with is one another node may answer
+// differently.
+func isReplaceable(pr PlacedResult) bool {
+	return pr.refused && replaceableRefusal(pr.refusalStatus)
+}
+
+// replaceableRefusal decides, from the status a node answered a DISPATCH with,
+// whether offering the job to a DIFFERENT node is worth the wall clock.
+//
+// The line is WHO THE ANSWER IS ABOUT.
+//
+// About THIS NODE, RIGHT NOW → re-place. Another node answers these
+// differently, and the whole point of a fleet is that it can:
+//
+//	0   the delegator never reached it at all (dial refused, dropped
+//	    connection, per-request deadline) — a statement about one address.
+//	404 nothing at this address serves /fleet/dispatch.
+//	408 it ran out of time reading THIS request.
+//	409 "job previously failed on this node" — the node's own message says
+//	    on this node; it is a fact about that node's job store, and no other
+//	    node holds that record.
+//	429 too many requests, to it.
+//	5xx it, or something in front of it, is failing: `503 queue full`,
+//	    `503 node draining`, `503 vram snapshot stale`, a 500 from a proxy.
+//	    An unknown 5xx is still an "it is broken" answer, so the default for
+//	    that range is to re-place.
+//
+// About THE REQUEST → terminal. Every other 4xx: 400 (a malformed envelope, a
+// body over the node's 1 MiB cap, an unsupported task_type, a contract the
+// node's own Validate rejects), 401 (the fleet_auth_token — the delegator
+// sends the SAME token to every node, so a fleet-wide credential mismatch is
+// an operator fix, not a routing one), 403 (the agent lane requires a token
+// this delegator does not have), 405, 413, 415, 422, and any future 4xx. The
+// next node is handed byte-identical bytes and the same bearer, so it returns
+// the same answer; re-placing only collects it N times and spends the
+// contract's budget doing it. An unknown 4xx defaults to terminal for exactly
+// that reason — the 4xx range means "your request", by definition.
+//
+// The rule keys on the STATUS, never on the text of an error string: a node's
+// prose is not a protocol, and matching on it is how a reworded message
+// silently changes routing.
+//
+// KNOWN BOUND, stated rather than hidden: a fleet whose nodes carry DIFFERENT
+// bearer tokens gets no re-placement out of a 401/403. That is deliberate —
+// docs/FLEET-NODE.md specifies one shared token for the whole fleet, and
+// spraying a rejected credential across a roster is not something to build in
+// on the chance the deployment disobeys it.
+func replaceableRefusal(status int) bool {
+	if status >= 400 && status < 500 {
+		switch status {
+		case http.StatusNotFound, http.StatusRequestTimeout, http.StatusConflict, http.StatusTooManyRequests:
+			return true
+		}
+		return false
+	}
+	// status 0 (never reached), any 5xx, and the pathological non-202 2xx/3xx
+	// (something at that address is not a fleet node) are all about the node.
+	return true
+}
+
+// replacementNode picks where a refused subtask goes next: the best eligible
+// remote not yet tried, and — reserved as the last resort — the local seat.
+//
+// used is how many re-placements have already been made, checked against
+// maxRemoteReplacements. Local is deliberately NOT charged against that bound:
+// it is the one seat always able to take the contract, so a wide roster must
+// not be able to spend the bound before reaching it.
+//
+// ok=false returns the sentence the exhausted message ends with. It is built
+// from BOTH facts (the bound, and whether local was available) because a reader
+// who is told only one of them will look in the wrong place.
+func (r *runner) replacementNode(ctx context.Context, contract core.AgentContract, tried map[string]bool, used int) (placement, string, bool) {
+	boundHit := used >= maxRemoteReplacements
+	if r.route != "local" && !boundHit {
+		st := Subtask{Contract: contract, EstTokens: EstimateTokens(contract)}
+		views, bases := r.spreadViews, r.spreadBases
+		if r.route != "spread" {
+			// Re-probe: the roster this subtask was placed against is now known
+			// to be at least partly wrong (a node just refused), and health is
+			// the only thing that can say which of the others has room.
+			views, bases, _ = r.fetchViews(ctx)
+		}
+		freshViews, freshBases := untried(views, bases, tried)
+		if chosen := Place(st, r.localView(), freshViews, true); !chosen.Local {
+			return placement{
+				view:   chosen,
+				base:   baseFor(chosen, freshViews, freshBases),
+				reason: fmt.Sprintf("re-placed on %s after %d refusal(s)", chosen.NodeID, used+1),
+			}, "", true
+		}
+	}
+	// Local is the reserved last resort. route=remote never takes it: an
+	// explicit remote route must not silently fall local, which is the same
+	// posture the "no eligible remote" defer already holds.
+	head := "no further eligible remote was available"
+	if boundHit {
+		head = fmt.Sprintf("the re-placement bound of %d further node(s) was reached", maxRemoteReplacements)
+	}
+	if r.route == "remote" {
+		return placement{}, head + ", and route=remote never falls back to local", false
+	}
+	if tried[""] {
+		return placement{}, head + ", and the local seat had already been tried", false
+	}
+	return placement{
+		view:   r.localView(),
+		reason: fmt.Sprintf("re-placed on the local seat after %d refusal(s) — queued-local beats work nobody ran", used+1),
+	}, "", true
+}
+
+// untried filters a fleet snapshot down to the nodes this subtask has not
+// already been refused by, keeping views and bases index-parallel.
+//
+// It excludes on the DIAL BASE, not the node id: a node that answered health
+// without a node_id would otherwise share one empty key with every other such
+// node, and the dial target is the thing actually being re-tried.
+func untried(views []NodeView, bases []string, tried map[string]bool) ([]NodeView, []string) {
+	outV := make([]NodeView, 0, len(views))
+	outB := make([]string, 0, len(bases))
+	for j := range views {
+		if tried[bases[j]] {
+			continue
+		}
+		outV = append(outV, views[j])
+		outB = append(outB, bases[j])
+	}
+	return outV, outB
+}
+
+// refusalLine renders ONE node's refusal for the operator-facing list. The node
+// is named from what it advertised; a node that published no node_id gets a
+// shape that reads as MISSING rather than a fabricated name.
+func refusalLine(pr PlacedResult) string {
+	name := pr.Node
+	if name == "" {
+		name = "(a remote that reported no node_id)"
+	}
+	return name + ": " + pr.Err
+}
+
+// replacementNote is the annotation carried on every re-placed result — the one
+// that finally ran as much as the one nobody took. landed separates the two,
+// because one wording cannot describe both without lying about one of them:
+// "re-placed after 2 refusals" on a subtask nobody ran claims a placement that
+// never happened.
+func replacementNote(refusals []string, landed bool) string {
+	if landed {
+		return fmt.Sprintf("re-placed after %d refusal(s) — %s", len(refusals), strings.Join(refusals, "; "))
+	}
+	return fmt.Sprintf("%d refusal(s) and no node took it — %s", len(refusals), strings.Join(refusals, "; "))
+}
+
+// exhausted turns "nobody took it" into the one honest outcome: a FAILURE
+// naming every node that refused and what it said, plus why the delegator
+// stopped asking. last is the final refused attempt, whose telemetry row was
+// already written by finish(); only what is PUBLISHED is rewritten here (the
+// same posture mergeAttempts takes with its retry annotations).
+func exhausted(last PlacedResult, refusals []string, why string) PlacedResult {
+	last.Replacements = len(refusals) - 1
+	last.ReplacementNote = replacementNote(refusals, false)
+	last.Err = fmt.Sprintf("%s: %d node(s) refused this subtask and none of them ran it (%s); %s",
+		replacementExhaustedPrefix, len(refusals), strings.Join(refusals, "; "), why)
+	return last
 }
 
 // minRetrySec is the least timeout_sec budget a retry is worth starting with: a
@@ -570,11 +892,29 @@ func mergeAttempts(first, second PlacedResult) PlacedResult {
 		second.RetriedOn = second.Node
 		second.RetryNote = "first attempt on " + first.Node + " " + attemptOutcome(first) + "; this result is the retry"
 		second.retryRecovered = true
-		return second
+		return carryReplacements(first, second)
 	}
 	first.RetriedOn = second.Node
 	first.RetryNote = "retry on " + second.Node + " also " + attemptOutcome(second) + "; this result is the first attempt"
-	return first
+	return carryReplacements(second, first)
+}
+
+// carryReplacements folds the LOSING attempt's re-placement history onto the
+// published one. A node that refused the first attempt still refused it even
+// when the retry is what gets published, and dropping that would make
+// summary.replaced silently under-report a fleet shedding load — the exact
+// blindness this release exists to remove.
+func carryReplacements(from, to PlacedResult) PlacedResult {
+	if from.Replacements == 0 {
+		return to
+	}
+	to.Replacements += from.Replacements
+	if to.ReplacementNote == "" {
+		to.ReplacementNote = from.ReplacementNote
+	} else {
+		to.ReplacementNote = from.ReplacementNote + "; then " + to.ReplacementNote
+	}
+	return to
 }
 
 // baseFor resolves the dial base of a chosen remote view ("" when absent).
@@ -841,6 +1181,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 		return finish(PlacedResult{Node: chosen.NodeID, PlacementReason: reason, Err: "internal: placed node has no base URL"})
 	}
 	pr := r.runRemote(ctx, base, jobID, contract)
+	pr.ranBase = base
 	pr.PlacementReason = reason
 	if pr.Node == "" {
 		pr.Node = chosen.NodeID
@@ -890,8 +1231,12 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 		pr.Err = "marshaling contract: " + err.Error()
 		return pr
 	}
-	if err := r.dispatch(ctx, base, jobID, payload); err != nil {
+	if refused, status, err := r.dispatch(ctx, base, jobID, payload); err != nil {
 		pr.Err = err.Error()
+		// Carry the class so runOne can decide whether ANOTHER node is worth
+		// asking. Set here and nowhere else: this is the one moment at which
+		// the node has answered and no seat can possibly hold the contract.
+		pr.refused, pr.refusalStatus = refused, status
 		return pr
 	}
 
@@ -1055,7 +1400,13 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 				return pr
 			}
 			redispatches++
-			if err := r.dispatch(ctx, base, jobID, payload); err != nil {
+			// A refusal HERE is deliberately NOT marked re-placeable. This node
+			// already acked this job id once; its 404 denies holding it NOW,
+			// which is not a promise it never ran it and never will. Moving the
+			// contract to a second node from inside the polling window is the
+			// one shape that could arrange two concurrent runs, and no amount of
+			// saved work is worth buying that.
+			if _, _, err := r.dispatch(ctx, base, jobID, payload); err != nil {
 				pr.Err = err.Error()
 				return pr
 			}
@@ -1293,15 +1644,29 @@ func (p *pollFailLog) summarize() {
 // dispatch POSTs the job envelope, expecting the contract's one acceptance
 // shape (202). A transport-level failure is retried ONCE with the same job id
 // — if the first POST actually landed, the node's known-job path re-acks
-// idempotently, so the retry can never buy a second run.
-func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.RawMessage) error {
-	env, err := json.Marshal(map[string]any{
+// idempotently, so the retry can never buy a second run. That bounded retry
+// (dispatchAttempts) is about DOUBT over one node's transport and is entirely
+// separate from re-placement, which is about a node that answered no.
+//
+// The returns say which of three things happened:
+//
+//	err == nil                     the node acked 202.
+//	err != nil, refused == true    the node DECLINED (status = what it sent) or
+//	                               could not be reached at all (status = 0).
+//	                               placeAndRun classifies it; nothing here
+//	                               decides routing.
+//	err != nil, refused == false   a DELEGATOR-side fault (an envelope that
+//	                               will not marshal, a request that will not
+//	                               build). No node said anything, so there is
+//	                               nothing for another node to say differently.
+func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.RawMessage) (refused bool, status int, err error) {
+	env, merr := json.Marshal(map[string]any{
 		"job_id":    jobID,
 		"task_type": string(core.TaskAgentRun),
 		"payload":   payload,
 	})
-	if err != nil {
-		return fmt.Errorf("marshaling dispatch envelope: %w", err)
+	if merr != nil {
+		return false, 0, fmt.Errorf("marshaling dispatch envelope: %w", merr)
 	}
 	u := strings.TrimRight(strings.TrimSpace(base), "/") + "/fleet/dispatch"
 	var lastErr error
@@ -1310,7 +1675,7 @@ func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.
 		req, rerr := http.NewRequestWithContext(rctx, http.MethodPost, u, bytes.NewReader(env))
 		if rerr != nil {
 			cancel()
-			return fmt.Errorf("dispatch request: %w", rerr)
+			return false, 0, fmt.Errorf("dispatch request: %w", rerr)
 		}
 		req.Header.Set("Content-Type", "application/json")
 		if r.cfg.FleetAuthToken != "" {
@@ -1327,13 +1692,16 @@ func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.
 		cancel()
 		if resp.StatusCode != http.StatusAccepted {
 			// A non-202 is the node REFUSING (400/401/403/409/503) — an
-			// answer, not doubt; retrying the same bytes would get the same
-			// answer, so surface it.
-			return fmt.Errorf("dispatch %s: status %d: %s", u, resp.StatusCode, truncate(body, 256))
+			// answer, not doubt; re-POSTing the same bytes to the SAME node
+			// would get the same answer. Whether ANOTHER node is worth asking
+			// is replaceableRefusal's decision, made from this status.
+			return true, resp.StatusCode, fmt.Errorf("dispatch %s: status %d: %s", u, resp.StatusCode, truncate(body, 256))
 		}
-		return nil
+		return false, resp.StatusCode, nil
 	}
-	return lastErr
+	// Both POSTs failed at transport level: the delegator never reached this
+	// node. Status 0 says exactly that — no node authored this answer.
+	return true, 0, lastErr
 }
 
 // pollOnce GETs the job state. perr covers transport-level failure only; an
