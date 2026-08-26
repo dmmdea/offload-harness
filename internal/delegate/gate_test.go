@@ -51,6 +51,12 @@ func localNode() NodeView {
 // AgentResident && EstTokens+specReserve <= AgentCtxTokens && OutputSchema
 // present && Depth == 0; remote chosen ONLY when localBusy; lowest QueueDepth
 // among eligible remotes; no eligible remote => local regardless.
+//
+// Every node here publishes NO capacity numbers, which is what keeps these
+// cases pinning the ORIGINAL queue_depth rule after 0.101.0 added the two
+// capacity keys above it: with max_queue_depth and max_concurrent_jobs unknown,
+// neither new key can fire and depth decides, exactly as it always did. The
+// capacity keys themselves are pinned in TestPlaceIsCapacityAware.
 func TestPlace(t *testing.T) {
 	fit := 8192 - specReserve // the exact EstTokens that fills the ceiling
 

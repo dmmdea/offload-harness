@@ -80,13 +80,24 @@ owns and result polls are never refused by it. The queue-depth default is delibe
 generous (a full `agent_delegate` call is 8 subtasks; the delegator runs 4 at a time), and
 an over-tight cap suppressing real use is the worse defect.
 
-> **The `503` is terminal for this repo's delegator.** `internal/delegate` surfaces any
-> non-`202` dispatch response as an error and does **not** re-place the subtask on another
-> node — the work simply does not get done. The "any non-202 means re-dispatch elsewhere, so
-> a full node sheds load to its siblings" behaviour belongs to the **media dispatcher, which
-> lives in a different repository**; it was never true of the delegator here. Re-placement on
-> the delegator side is a separate change. Until it lands, prefer widening
-> `fleet_max_queue_depth` (a job that waits still gets done) over lowering it.
+> **Since 0.101.0 the `503` sheds to a sibling** — within a bound, and only for the refusals
+> that are about THIS node. `internal/delegate` re-places a refused subtask: another eligible
+> remote first, then the local seat. That covers `503` (queue full, draining, stale VRAM
+> snapshot), `409`, `429`, `404`, `408`, any 5xx, and a node the delegator could not reach at
+> all. It deliberately does **not** cover `400`/`401`/`403` or any other 4xx — those are the
+> node rejecting *this request*, and the next node is handed byte-identical bytes and the same
+> bearer token, so re-placing only collects the same answer while spending the contract's
+> budget. See [Re-placement on refusal](#re-placement-on-refusal) for the bound, the deadline
+> rule and the outcome when every node refuses.
+>
+> This is NOT the media dispatcher's rule imported. That dispatcher (a different repository)
+> treats *any* non-202 as "try elsewhere"; this one classifies first, re-places at DISPATCH
+> time only, and never after a `202` — a job the node has acked may be running, and moving it
+> would arrange two concurrent runs.
+>
+> Widening `fleet_max_queue_depth` is still the better lever than lowering it: a job that waits
+> gets done on the node that already has the context warm, whereas a re-placed job pays a fresh
+> placement out of its own budget.
 
 On shutdown, in-flight renders get up to 30s to finish. Survivors are then marked terminal so
 pollers always reach a terminal state, with the two cases kept **distinct**: a job that was
@@ -574,6 +585,133 @@ advertising a lane dispatch would 403 is a mis-route rather than a near miss.
 once per 30 s — **fail-closed**: `false` until the first probe lands, and `false` again on any
 probe failure (a stale "resident" while llama-swap is down would route work at a node that
 cannot run it; `false` only costs a conservative local placement).
+
+### Re-placement on refusal
+
+**A node saying no is no longer the end of the subtask** (0.101.0). Before it, `internal/delegate`
+surfaced any non-`202` as an error and stopped: one `503 queue full` from the first-choice node meant
+that subtask's work was simply not done, on a healthy fleet, with idle siblings one hop away.
+
+**What counts as a refusal.** Anything that is not the one `202` ack, plus a node the delegator could
+not reach at all. Re-placement is decided from the STATUS the node sent, never from the text of its
+message — a node's prose is not a protocol.
+
+| Answer | Re-placed? | Why |
+|---|---|---|
+| dial refused / dropped / request deadline (status `0`) | Yes | a statement about one address, not about the contract |
+| `404` | Yes | nothing at this address serves `/fleet/dispatch` |
+| `408`, `429` | Yes | about that node's timing right now |
+| `409` | Yes | *"job previously failed on **this node**"* — no other node holds that record |
+| `500`, `502`, `503`, `504`, any 5xx | Yes | it, or something in front of it, is failing: queue full, draining, stale VRAM snapshot |
+| `400`, `401`, `403`, `405`, `413`, `415`, `422`, any other 4xx | **No** | the node is rejecting *this request*. The delegator hands the next node byte-identical bytes and the same bearer token, so it returns the same answer; re-placing collects it N times and spends the contract's budget doing it |
+
+The `401`/`403` line has a stated bound: this delegator sends ONE `fleet_auth_token` to the whole
+fleet (that is the documented posture), so a rejected credential is an operator fix, not a routing
+one. A fleet running mismatched tokens gets no re-placement out of an auth refusal, deliberately.
+
+**Where it goes.** Another eligible remote first — chosen by the same capability gate and the same
+capacity-aware ranking as the original placement, excluding every node already tried — and then the
+local seat. `route=remote` never falls back to local: an explicit remote route is not silently
+overridden, exactly as with "no eligible remote".
+
+**The bound, per SUBTASK.** The bound and the exclusion set live in ONE per-subtask ledger that every
+placement consults — the first attempt's re-placement loop and the verification retry's both — so the
+retry draws from what the first attempt left rather than starting a fresh copy. The ceiling is **five**
+placements, and the arithmetic is worth spelling out:
+
+| | |
+|---|---|
+| 1 | the first placement |
+| 2 | at most `maxRemoteReplacements` re-placements onto further remotes |
+| 1 | at most one fall-back to the local seat |
+| 1 | at most one verification-retry placement — a **separate** mechanism, bounded at exactly one, deliberately not folded into the number above |
+
+**Every one of those five targets a dial base the subtask has not used before.** Local is not charged
+against the numeric bound — it is the one seat always able to take the contract, so a wide roster must
+not spend the bound before reaching it — but it is in the exclusion set, which is what holds it to one
+use per subtask (and therefore stops a "retry" from landing on the seat the first attempt already
+used). Rationale for bounding at all: each refused placement costs up to `dispatchAttempts` × 30 s of
+dial time before a transport verdict, so walking a roster unbounded turns one saturated fleet into
+minutes of wall clock spent collecting refusals; and a refusal that survives three DISTINCT nodes is a
+fleet-wide condition, which a fourth dial does not fix.
+
+**Deadline.** Re-placement lives INSIDE the subtask's `timeout_sec`, the same discipline the
+verification retry follows: every placement is handed what is LEFT of the budget (elapsed rounded UP)
+and below a 10 s floor there is no placement left to make. The remaining budget is **re-measured
+immediately before dispatch**, because choosing a node blocks on a sequential fleet probe and the
+number taken before that probe can be badly stale by the time it would be written into a contract;
+the probe itself runs under a context carrying whatever the contract has left, so a roster of
+blackholing nodes cannot spend a budget the subtask no longer owns.
+
+> **`timeout_sec` is the EXECUTION budget, not an end-to-end wall ceiling.** A re-placed subtask can
+> never be given more *execution* time than its contract granted — that part is exact. But two legs
+> are bounded without being charged to it, because neither can be known before it is paid: placement
+> overhead (the fleet probe, plus up to `dispatchAttempts` × `dispatchRequestTimeout` of dial time
+> before a transport verdict) and 0.100.0's queued-time credit, which extends the poll wall past
+> `timeout_sec` by design and is bounded by `maxQueuedWait`. So the wall a subtask can consume is
+> `timeout_sec` + `pollGrace` + queued credit + placement overhead — all bounded, and the
+> re-placement loop converges because every blocking leg is charged to the next measurement.
+
+**Dispatch time only.** A refusal is a NON-ack: the node never took ownership, so no seat can be
+running the contract and re-placing it cannot produce two concurrent runs. Everything after a `202` —
+a poll `404`, a queue deadline, a poll deadline — leaves a job the node may still hold, and is never
+moved. One honest residual: when BOTH dispatch attempts fail at transport level the first POST may
+have landed and had its ack lost, so the abandoned node could still run the contract once. That costs
+wasted compute on a node nobody is polling (the agent lane is read-only, so there are no effects to
+duplicate) and the alternative is losing the work with certainty.
+
+**When nobody takes it** the subtask is a **FAILURE**, with its own stable prefix:
+
+```
+placement refused: <n> node(s) refused this subtask and none of them ran it
+(<node>: <what it said>; <node>: <what it said>); <why the delegator stopped asking>
+```
+
+Never a defer — no seat ever saw the contract, so there is no report to author on a node's behalf,
+and the only class that would fit (`budget`) would teach every consumer that a seat needed more time.
+The three sentences are deliberately distinct: `placement refused` = nobody took it; `queue deadline`
+= one node accepted it and never started it; `poll deadline` = one node started it and never finished.
+
+**What the response publishes.** `summary.replaced` / `summary.replacement_recovered` (subtasks
+re-placed, and how many then reached a node that took the work), and per subtask `replacements` +
+`replacement_note` naming every node that refused and what it said. All `omitempty`, so a run where
+nothing was refused publishes byte-identically to before. Read `replaced: 6` on an otherwise green run
+as "the fleet is shedding load" — that is the line that sends you to `fleet_max_queue_depth` before
+the next run has nowhere left to go.
+
+### Capacity-aware placement
+
+`queue_depth` alone was never a placement signal: it is a count with no scale. A node at depth 1 of a
+1-deep queue is a certain `503`; a node at depth 500 with no published ceiling is not. Since 0.101.0
+the delegator ranks eligible remotes on three ordered keys:
+
+1. **Not provably saturated** beats saturated — `max_queue_depth > 0 && queue_depth >= max_queue_depth`
+   is precisely the condition that produces `503 queue full`.
+2. **A provably free execution slot** beats one that is not provable — `queue_depth == 0`, or
+   `jobs_running < max_concurrent_jobs` with `jobs_queued == 0`. The job starts *now* rather than
+   waiting in `accepted`, which is the state the `queue deadline` failure reports.
+3. **Lower `queue_depth`** — the original rule, original meaning, still deciding everything the two
+   keys above do not. Ties keep roster order.
+
+For BOTH limits, `0` means **unknown**, never "unlimited" and never "full": a node publishes `0` for
+unlimited and a node too old to publish the field decodes to `0` as well, and the delegator cannot
+tell those apart. An unknown node is neither credited nor blamed — which is why key 2 counts
+`queue_depth == 0` as proof on its own, so a completely idle node that publishes no limits is not
+demoted below a loaded node that does.
+
+Saturation is a RANKING input, not a capability: `remoteEligible` is unchanged, and a saturated node
+is still chosen when nothing better exists. The reason is that the **delegator's copy** of these
+numbers is stale by construction — the snapshot ages between the health `GET` and the dispatch `POST`
+(placement is not atomic with admission), and this run's own concurrent siblings (`runConcurrency`)
+eat the headroom it measured, since they probe within milliseconds of each other and can all read the
+same free slot. Hard-excluding on a number that is stale by construction would strand a node that has
+since drained, on evidence that was never current; demoting costs nothing when the reading was right
+and forfeits nothing when it was wrong, and re-placement covers the case where it WAS right.
+
+> The node itself does **not** cache these counters: `handleHealth` walks the job store live, in the
+> same request, so `queue_depth` / `jobs_queued` / `jobs_running` are current as of the moment it
+> answered. What *is* cached on the node side is the VRAM snapshot (max 30 s, `503` past that) and
+> `agent_seat_resident`. An earlier draft of this section said otherwise; it was wrong about the node.
 
 ### Job ids and polling (what a delegator does)
 

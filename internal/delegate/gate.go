@@ -63,10 +63,11 @@ func EstimateTokens(c core.AgentContract) int {
 //     wins — delegation exists to keep work flowing while the local GPU is
 //     occupied, never to chase throughput on a weaker seat (quality-first,
 //     operator verbatim: "not a race about speed").
-//   - localBusy true ⇒ the lowest-QueueDepth remote that passes the hard
-//     gate (ties: first listed, so the caller's roster order is the stable
-//     preference order). No remote passes ⇒ LOCAL regardless — queued-local
-//     beats ineligible-remote every time.
+//   - localBusy true ⇒ the best remote that passes the hard gate, ranked by
+//     capacity then by QueueDepth (ties: first listed, so the caller's roster
+//     order is the stable preference order — see betterRemote). No remote
+//     passes ⇒ LOCAL regardless — queued-local beats ineligible-remote every
+//     time.
 //
 // Place is pure: it never probes anything. Callers build the inputs from
 // FetchNodeView + LocalBusy.
@@ -80,7 +81,7 @@ func Place(st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeV
 		if !remoteEligible(st, r) {
 			continue
 		}
-		if !found || r.QueueDepth < best.QueueDepth {
+		if !found || betterRemote(r, best) {
 			best, found = r, true
 		}
 	}
@@ -88,6 +89,106 @@ func Place(st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeV
 		return local
 	}
 	return best
+}
+
+// betterRemote reports whether candidate should displace the incumbent. Only a
+// STRICTLY better candidate displaces, so equal seats are kept in roster order
+// and the caller's list stays the stable preference order it has always been.
+//
+// Three ordered keys, all boolean-or-int, so the ordering is a total preorder
+// and cannot be intransitive on a MIXED fleet (some nodes publish capacity,
+// some do not — a key like "more free slots" is uncomparable across those and
+// would need a number invented for the silent half):
+//
+//  1. NOT provably saturated beats saturated. `queue_depth` alone was never a
+//     placement signal — it is a count with no scale, and the node that
+//     produces `503 queue full` is precisely the one whose depth has reached
+//     max_queue_depth. A node at 1 of 1 is a certain refusal; a node at 500
+//     with no published ceiling is not, and must win. This is the key that
+//     makes placement capacity-aware.
+//
+//     It DEMOTES, it does not exclude, and that is deliberate — see saturated()
+//     for why the delegator's copy of these numbers is stale BY CONSTRUCTION
+//     rather than by caching. Re-placement (run.go) is the net that catches the
+//     case where this demotion guessed wrong in the other direction.
+//
+//  2. A provably free execution slot beats one that is not provable. The job
+//     starts NOW there rather than waiting in `accepted` — which is exactly
+//     the state 0.100.0's `queue deadline` failure reports, so preferring it
+//     removes refusals AND queue-deadline losses. See provablyStartsNow for
+//     why an idle node that publishes nothing still qualifies: without that,
+//     this key would demote every pre-0.100.0 node in a mixed fleet, including
+//     a completely idle one.
+//
+//  3. Lower QueueDepth — the original rule, with its original meaning
+//     (accepted + running), unchanged and still deciding every case the two
+//     keys above do not.
+func betterRemote(candidate, incumbent NodeView) bool {
+	if c, i := saturated(candidate), saturated(incumbent); c != i {
+		return i // candidate wins only when the incumbent is the saturated one
+	}
+	if c, i := provablyStartsNow(candidate), provablyStartsNow(incumbent); c != i {
+		return c
+	}
+	return candidate.QueueDepth < incumbent.QueueDepth
+}
+
+// saturated reports whether v's own advertisement says the next dispatch will
+// be REFUSED: its admission ceiling on queue_depth is already met.
+//
+// It is a RANKING input, never a capability: remoteEligible is untouched, and a
+// saturated node is still chosen when nothing better exists.
+//
+// The reason is that the DELEGATOR'S COPY of these numbers is stale by
+// construction. (Not because the node caches them — it does not. fleetnode's
+// health handler walks the job store live, in the same request, for exactly
+// these counters; what IS cached over there is the VRAM snapshot and
+// agent_seat_resident. An earlier draft of this comment said "cached read on
+// the node side", which was simply false about how the node works.) Two things
+// make the number old the moment it arrives:
+//
+//   - The snapshot ages between the health GET and the dispatch POST. Placement
+//     is not atomic with admission, and any node can admit or finish jobs in
+//     that gap in either direction.
+//   - This run's own siblings eat the headroom it measured. Run fans out at
+//     runConcurrency, and those subtasks probe within milliseconds of each
+//     other — so several of them can read the same free slot and then compete
+//     for it.
+//
+// Hard-excluding on a number that is stale by construction would strand a node
+// that has since drained, on evidence that was never current. Demoting costs
+// nothing when the reading was right and forfeits nothing when it was wrong,
+// and re-placement (run.go) is what covers the case where it WAS right.
+//
+// MaxQueueDepth == 0 is UNKNOWN, not unlimited and not full: the node publishes
+// 0 for unlimited and a node too old to publish the field decodes to 0 as well.
+// Neither credited nor blamed — the same treatment AgentCtxTokens == 0 gets.
+func saturated(v NodeView) bool {
+	return v.MaxQueueDepth > 0 && v.QueueDepth >= v.MaxQueueDepth
+}
+
+// provablyStartsNow reports whether v's own numbers prove the next job begins
+// executing immediately rather than sitting in the backlog. PROVABLY: an
+// unknown is never counted as a yes.
+//
+// Two ways to prove it, and the first is what keeps this fair across a mixed
+// fleet:
+//
+//   - QueueDepth == 0 — the node holds no job at all, neither running nor
+//     queued, so whatever its concurrency limit is (every node has at least
+//     one worker) the next job starts. True for a node that publishes no
+//     limits whatsoever, which is why an idle pre-0.100.0 node is not demoted
+//     below a loaded node that does publish them.
+//   - a free worker AND nobody ahead in line: JobsRunning < MaxConcurrentJobs
+//     with MaxConcurrentJobs published, and JobsQueued == 0. The queued check
+//     is not redundant — a node with a free worker and a non-empty backlog is
+//     a node mid-transition, and the honest reading of that snapshot is "not
+//     proven".
+func provablyStartsNow(v NodeView) bool {
+	if v.QueueDepth == 0 {
+		return true
+	}
+	return v.MaxConcurrentJobs > 0 && v.JobsRunning < v.MaxConcurrentJobs && v.JobsQueued == 0
 }
 
 // remoteEligible is the §S3 HARD gate — every condition must hold, and each

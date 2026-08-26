@@ -88,10 +88,36 @@ type fakeNode struct {
 	onDispatch func(jobID string, contract core.AgentContract)
 	// dispatchStatus overrides the 202 ack; 0 = normal ack.
 	dispatchStatus int
+	// dispatchHook, when set, runs FIRST inside the dispatch handler with this
+	// node's 1-based dispatch ordinal. A non-zero status it returns is written
+	// as a refusal and the ack path never runs; 0 falls through to
+	// dispatchStatus and then to the normal ack. It is the seam a re-placement
+	// test uses to script "refuse the first dispatch, take the second" and to
+	// spend wall clock before refusing.
+	dispatchHook func(n int64) int
+	// healthDelay makes this node's /fleet/health spend real wall clock, which
+	// is how a test makes the SELECTION step expensive: fetchViews probes every
+	// remote sequentially, so a slow health handler is time the delegator
+	// spends between measuring its remaining budget and using it.
+	healthDelay time.Duration
+	// killOnDispatch models a node the delegator can never REACH: the dispatch
+	// connection is hijacked and dropped with no HTTP answer at all, so both
+	// dispatch attempts end as transport errors. Distinct from a node that is
+	// simply down — health still answers, so it is still a placement candidate.
+	killOnDispatch bool
 	// killOnPoll models a node that DIES after acking: the first poll's
 	// connection is hijacked and dropped with no HTTP answer at all, and the
 	// server itself goes down, so every later poll is refused at connect.
 	killOnPoll bool
+
+	// The capacity advertisement (0.100.0). All zero by default, which is what
+	// a node too old to publish them decodes to — so every pre-existing fake
+	// keeps advertising exactly what it advertised before.
+	queueDepth        int
+	jobsQueued        int
+	jobsRunning       int
+	maxConcurrentJobs int
+	maxQueueDepth     int
 
 	dispatches atomic.Int64
 	polls      atomic.Int64
@@ -101,17 +127,45 @@ type fakeNode struct {
 func (f *fakeNode) server() *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /fleet/health", func(w http.ResponseWriter, r *http.Request) {
+		if f.healthDelay > 0 {
+			select {
+			case <-time.After(f.healthDelay):
+			case <-r.Context().Done():
+				return
+			}
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"node_id":             f.nodeID,
-			"queue_depth":         0,
+			"queue_depth":         f.queueDepth,
 			"agent_seat":          "remote-seat",
 			"agent_ctx_tokens":    f.ctxTokens,
 			"agent_seat_resident": f.resident,
 			"agent_enabled":       f.agentEnabled,
+			"jobs_queued":         f.jobsQueued,
+			"jobs_running":        f.jobsRunning,
+			"max_concurrent_jobs": f.maxConcurrentJobs,
+			"max_queue_depth":     f.maxQueueDepth,
 		})
 	})
 	mux.HandleFunc("POST /fleet/dispatch", func(w http.ResponseWriter, r *http.Request) {
-		f.dispatches.Add(1)
+		n := f.dispatches.Add(1)
+		if f.killOnDispatch {
+			// No status line, no body: the delegator sees a transport error and
+			// never an HTTP answer, on both dispatch attempts.
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, herr := hj.Hijack(); herr == nil {
+					_ = conn.Close()
+				}
+			}
+			return
+		}
+		if f.dispatchHook != nil {
+			if status := f.dispatchHook(n); status != 0 {
+				w.WriteHeader(status)
+				_ = json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "scripted refusal"})
+				return
+			}
+		}
 		if f.token != "" && r.Header.Get("Authorization") != "Bearer "+f.token {
 			w.WriteHeader(http.StatusUnauthorized)
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "unauthorized"})

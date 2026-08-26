@@ -65,9 +65,14 @@ executes when one of `fleet_max_concurrent_jobs` slots frees. `accepted` can the
 which is legitimate and visible in health as `jobs_queued`. Only `fleet_max_queue_depth`
 (`accepted` + `running`) produces `503 queue full`; a node with every worker busy still accepts.
 
-Note that this repo's delegator does **not** re-place a refused subtask — `internal/delegate` returns
-any non-`202` as an error. The "refusal means try another node" behaviour is the media dispatcher's,
-in a separate repository.
+Since 0.101.0 this repo's delegator **re-places** a refused subtask rather than failing it — but only
+a refusal that is about the node (`503`, `409`, `429`, `404`, `408`, any 5xx, or a node it could not
+reach). A `400`/`401`/`403` is about the request and stays terminal, because the next node is handed
+identical bytes. Re-placement happens at DISPATCH time only: once a node has acked `202` the job may
+be running there, so nothing after the ack is ever moved. The bound is the first choice plus two more
+remotes, then the local seat; every placement is handed only what is left of the contract's
+`timeout_sec`. When no node takes it the subtask FAILS with `placement refused: …` naming each node
+and what it said — never a manufactured defer, because no seat ever saw the contract.
 
 > After terminal-state TTL eviction, a re-dispatched id looks new and **will re-render**. Documented
 > and accepted.

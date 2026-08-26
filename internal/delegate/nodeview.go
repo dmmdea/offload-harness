@@ -27,16 +27,25 @@ type NodeView struct {
 	AgentResident  bool
 	AgentCtxTokens int
 	QueueDepth     int
-	// JobsRunning / JobsQueued split QueueDepth, and MaxConcurrentJobs is the
-	// node's execution limit (0 = unlimited, or "not advertised" by a node too
-	// old to publish it — both decode to 0 here, so a consumer must treat 0 as
-	// "no usable number" rather than as a limit). Read-only reporting: nothing
-	// in gate.go consults them, so placement is unchanged. They exist because
-	// a `queue deadline` failure sends an operator straight to "is that node
-	// saturated?", and depth alone cannot answer it.
+	// JobsRunning / JobsQueued split QueueDepth. MaxConcurrentJobs is the node's
+	// execution limit and MaxQueueDepth its ADMISSION ceiling on QueueDepth —
+	// the one and only thing that produces a `503 queue full`.
+	//
+	// For BOTH limits, 0 means "no usable number": the node publishes 0 for
+	// unlimited, and a node too old to publish the field at all also decodes to
+	// 0, and this decoder cannot tell those apart. So 0 is read as UNKNOWN
+	// everywhere — never as a limit, never as unlimited. Same house rule
+	// AgentCtxTokens already follows: unknown is not a capacity.
+	//
+	// gate.go DOES consult these (capacity-aware placement, 0.101.0): a node
+	// whose published ceiling is already met loses to any node that is not
+	// provably full, and a node with a provably free execution slot outranks
+	// one whose workers are all busy. QueueDepth keeps its own meaning and its
+	// own role as the ordering key — this is added on top, not in place of it.
 	JobsRunning       int
 	JobsQueued        int
 	MaxConcurrentJobs int
+	MaxQueueDepth     int
 	Local             bool
 }
 
@@ -78,6 +87,7 @@ type healthWire struct {
 	JobsRunning       int `json:"jobs_running"`
 	JobsQueued        int `json:"jobs_queued"`
 	MaxConcurrentJobs int `json:"max_concurrent_jobs"`
+	MaxQueueDepth     int `json:"max_queue_depth"`
 }
 
 // FetchNodeView reads one node's /fleet/health into a NodeView (Local=false —
@@ -125,6 +135,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		JobsRunning:       w.JobsRunning,
 		JobsQueued:        w.JobsQueued,
 		MaxConcurrentJobs: w.MaxConcurrentJobs,
+		MaxQueueDepth:     w.MaxQueueDepth,
 		Local:             false,
 	}, nil
 }
