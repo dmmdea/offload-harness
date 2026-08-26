@@ -35,7 +35,10 @@ The server runs over **stdio** and registers its tools at startup. A calling age
 calls them with JSON arguments, and receives JSON results — including Defers, which are successful
 results, not errors.
 
-**Twenty-five tools** are registered, in families:
+**Twenty-six tools** are registered on every box, in families. The advertised set is per-box and
+larger elsewhere: `agent_delegate` is gated on `agent_delegation_enabled`, and a box listing an
+accelerator registers 11 more (see [accelerators.md](accelerators.md)). Read `tools/list` rather
+than any number written down:
 
 | Family | Tools |
 |---|---|
@@ -45,7 +48,7 @@ results, not errors.
 | Media generation | `offload_generate_image`, `offload_generate_video`, `offload_generate_audio`, `offload_generate_svg` |
 | Media editing | `offload_edit_image`, `offload_inpaint_image`, `offload_edit_image_generative`, `offload_upscale_image`, `offload_media` |
 | Graph execution | `offload_run_graph` |
-| Agent | `agent_run`, `offload_ask` |
+| Agent | `agent_run`, `offload_ask`, `offload_review_diff` |
 | Remote (opt-in) | `offload_nim` |
 | Status | `offload_status` |
 
@@ -98,6 +101,49 @@ One deliberate gap to know about: the ask lane writes **no delegation ledger or 
 `offload_ask` traffic will not appear in the delegation corpus or in any analysis built on it.
 The pipeline's own task ledger still sees the run. Nothing depends on this today — it is
 recorded so nobody later reads an empty delegation corpus as "nobody used the tool".
+
+`offload_review_diff` is the CLEAN-CONTEXT review lane: a diff plus a task statement in,
+severity-ranked findings out, run on the local seat through the same
+`Pipeline.RunAgentContract` entry. Its argument is different in kind from every other lane's.
+The others compete with "read the file yourself" on cost, and lose — this one offers something
+a lead cannot produce from inside its own context at all: a reviewer that never saw the work.
+The isolation is the mechanism, so the contract ships the task and the diff and **nothing
+else** (`internal/reviewlane`), and the tool is registered unconditionally beside `offload_ask`
+for the same reason — a lane behind a config flag is one more reason not to take it.
+
+On the evidence for it, keep two things apart. Cognition **reports** a dedicated reviewer in
+their Fusion setup catching ~2 bugs per PR, ~58% of them severe; that is the vendor's own
+published figure, with no sample size, no A/B baseline and no external audit, so treat it as a
+claim rather than a citation. The MECHANISM is independently supported: long-context
+degradation, measured across 18 SOTA models by Chroma's context-rot study and by Stanford's
+lost-in-the-middle work. The lane rests on the mechanism.
+
+Four design choices are load-bearing rather than incidental:
+
+- **The diff rides in the GOAL, not in a context doc.** A context doc becomes a file the seat
+  must find with `list_dir` and open with `read_file`, and the measured failure mode of a small
+  planner is calling no tool at all — which would produce confident findings about a diff never
+  read. The cost is that `AgentContract.Validate`'s 256 KiB context cap never sees the diff, so
+  `reviewlane.MaxDiffBytes` owns that bound and refuses early with the real numbers.
+- **No acceptance check, deliberately.** An empty findings list is a CORRECT outcome, so any
+  content check would either punish a clean diff or pass anything — the decorative acceptance
+  `delegate.LintAcceptance` exists to name. What replaces it is a check the harness can actually
+  make: a finding naming a file the diff never touched is dropped and reported as
+  `dropped_ungrounded`, since an invented path is how a small seat fails here.
+- **Findings arrive as an array of strings.** `gbnf.FromJSONSchema` compiles any array to an
+  array of strings, so an object-item schema would have become strings anyway; the prompt asks
+  for one `severity | file:line | claim | why` line per defect and `ParseFindings` reads them
+  back tolerantly, keeping what it cannot parse as an unranked claim rather than dropping it.
+- **A seat returning no structured findings DEFERS**, rather than degrading into an empty list.
+  "No findings" is the one result a reader might take as reassurance, so it must never be what a
+  broken run collapses into — and when it is genuine, the response says in words that it is not
+  a verification.
+
+Everything the lane returns is ADVISORY: it never gates a merge and never substitutes for the
+final does-it-actually-work verification, which stays with the caller — as do security review,
+architecture judgement, and any call the caller is accountable for. Findings are triage input;
+a `severe` label from a small local model is a prompt to read those lines, not proof. It shares
+the ask lane's ledger gap above: `RunAgentContract` writes no delegation corpus row.
 
 ## Important flows
 
@@ -183,6 +229,8 @@ manifest is a repo-root file.
   handlers
 - [`internal/askjob`](../../internal/askjob/ask.go) — `offload_ask`’s contract builder (goal,
   output schema, and the grounded acceptance anchor)
+- [`internal/reviewlane`](../../internal/reviewlane/review.go) — `offload_review_diff`’s contract
+  builder, finding parser, diff-grounding filter and severity ranking
 - [`internal/swapclient`](../../internal/swapclient/swapclient.go) — the harness's single
   alias-aware llama-swap roster reader, over `tools/llamaswap`'s `pkg/llamaswap`
   ([systems/printed-clis.md](printed-clis.md#the-one-exception-the-harness-consumes-pkgllamaswap))

@@ -31,6 +31,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
+	"github.com/dmmdea/offload-harness/internal/reviewlane"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
 )
@@ -250,6 +251,20 @@ func (s *Server) buildServer(version string) *mcp.Server {
 		Description: "Ask a bounded question ABOUT SPECIFIC FILES and have a FREE local seat answer it — the one-call form of agent_delegate. You supply question + paths and nothing else: the harness builds the whole contract (goal, {answer,evidence} output schema, and an acceptance check ANCHORED to distinctive tokens mined from the files themselves) and runs it on the local agent seat. REACH FOR IT THE MOMENT YOU ARE ABOUT TO OPEN MORE THAN TWO FILES to answer something bounded — that is exactly where reading them yourself costs more than asking. The files are read and inlined by the HARNESS under read_root, so your own context never pays for them. Good fits: \"which key sets the queue cap\" over three config files; \"which function does this handler call before dispatch\" over a handler plus its helpers; \"what changed between these two versions of the spec\". NOT this tool: unbounded exploration with no file list (use agent_run — it searches for its own files); anything that writes or runs (this lane is read-only); a multi-part job needing several contracts (agent_delegate); and above all anything whose answer is a JUDGEMENT rather than a fact the files state — security or credential review, an architecture decision, or the final does-it-actually-work verification. A free seat reports what the files say; it does not own a call you are accountable for. Returns {answer, evidence, verified, acceptance, acceptance_failures?, seat, steps, stop_reason} — evidence is the exact lines the seat relied on so you can spot-check instead of re-reading. verified is a CITATION check, not a correctness verdict: it asks whether the published answer quoted one of a few distinctive tokens mined from these files, never whether the answer is right. Those tokens are chosen to be things only these files would say — real identifiers wherever the files have them — but it is a heuristic, so treat verified:true as \"this answer demonstrably read the files\", not as proof of a verbatim quotation. On verified:false read acceptance_failures (which names the check that did not match) and then the evidence — it is a prompt to look, not proof the answer is wrong, and a question whose subject is a short or question-named identifier can leave nothing anchorable at all. Typical latency is 30-90 s: this buys back the context those files would have cost you, not wall-clock. Caps: at most 16 files, 128 KiB per file, 256 KiB total. It REFUSES (deferred:true) when the files hold no token distinctive enough to ground the check, rather than handing back an answer nothing verified. On any failure it returns deferred:true with a reason and you read the files yourself.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"question":{"type":"string","description":"the bounded question to answer FROM THESE FILES — one question, answerable from what you attach"},"paths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":16,"description":"the files to answer from, relative to read_root or absolute inside it (<=16 files, <=128 KiB each, <=256 KiB total)"},"read_root":{"type":"string","description":"absolute directory the paths are read from; nothing outside it can be read (default: the server working dir)"}},"required":["question","paths"]}`),
 	}, s.handleAsk)
+
+	// offload_review_diff: the CLEAN-CONTEXT review lane. Registered
+	// unconditionally beside offload_ask, and for the same reason — but the
+	// argument for it is different in kind. Every other lane competes with
+	// "read the file yourself" on cost; this one offers something the caller
+	// cannot produce from inside its own context AT ALL: a reviewer that never
+	// saw the work. The seat's clean context is the mechanism, not a side
+	// effect, so the contract ships the task statement and the diff and nothing
+	// else (internal/reviewlane).
+	srv.AddTool(&mcp.Tool{
+		Name:        "offload_review_diff",
+		Description: "Review a code DIFF on a FREE local seat with CLEAN context — the reviewer sees only the diff and the task statement, never this conversation's history. That isolation is the mechanism: a reviewer without the author's accumulated context catches defects the author's own judgement has stopped seeing (long-window context degradation is the well-studied effect this exploits). Pass diff (inline) or diff_path (a file holding a unified diff) — exactly one — plus task, which is what the change was SUPPOSED to do: without stated intent a reviewer cannot tell a defect from a decision. Returns {findings:[{severity,file,line,claim,why}] ranked severe|moderate|minor first, reviewed_bytes, seat, steps, stop_reason, dropped_ungrounded?}. HOW TO USE THE RESULT: findings are TRIAGE INPUT, not verdicts. Read the flagged lines yourself and decide — never apply a finding unread, and treat a `severe` label from a small local model as a prompt to look, not as proof anything is wrong. Equally, an EMPTY findings list means this reviewer found nothing; it is not a verification that the change works. ADVISORY ONLY: this lane never gates a merge and never substitutes for the final does-it-actually-work check, which stays yours — as do security review, architecture judgement, and any call you are accountable for. dropped_ungrounded counts findings naming a file the diff never touched (an invented path is how a small seat fails here); they are removed and reported rather than silently kept. Caps: at most 10 findings (max_findings only narrows it), a diff of <=256 KiB inline or <=128 KiB via diff_path — split a larger one by path (git diff -- <dir>), which also keeps each review inside the seat's context window. On any failure it returns deferred:true with a reason and you review the diff yourself.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"diff":{"type":"string","description":"the unified diff text, inline (mutually exclusive with diff_path; <=256 KiB)"},"diff_path":{"type":"string","description":"path to a file holding the unified diff, read by the HARNESS under read_root so your context never pays for it (<=128 KiB)"},"task":{"type":"string","description":"what this change was SUPPOSED to accomplish — the intent the reviewer judges the diff against"},"max_findings":{"type":"integer","description":"cap on returned findings (default 10, which is also the ceiling: the seat is never asked for more)"},"read_root":{"type":"string","description":"absolute directory diff_path is read from; nothing outside it can be read (default: the server working dir)"}},"required":["task"]}`),
+	}, s.handleReviewDiff)
 
 	// agent_delegate (multi-node delegation, Task 6): registration is GATED on
 	// agent_delegation_enabled (roast delta 13) so tools/list stays
@@ -1645,6 +1660,145 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	}
 	if len(failures) > 0 {
 		out["acceptance_failures"] = failures
+	}
+	return jsonResult(out)
+}
+
+// handleReviewDiff is the MCP front door onto the clean-context review lane. It
+// authors the contract (internal/reviewlane), runs it on the local seat through
+// the SAME entry a local delegation placement takes (Pipeline.RunAgentContract),
+// then parses, grounds and ranks the seat's findings before publishing them.
+//
+// House style throughout: every failure path is a deferred-shape result, never an
+// MCP error (see handleAgentRun) — a caller told "the call failed" discards the
+// work, while a caller told "deferred, here is why" reviews the diff itself, which
+// is the correct next action every time this lane cannot deliver.
+//
+// Unlike handleAsk there is no `verified` verdict, and its absence is deliberate
+// rather than an omission: an empty findings list is a CORRECT outcome here, so no
+// acceptance check could distinguish a clean review from a review that never
+// happened without punishing one of them. What stands in its place is a check the
+// harness can actually make — a finding naming a file the diff never touched is
+// dropped and counted (reviewlane.Ground) — plus the refusal to publish an empty
+// findings list when the seat returned no structured answer at all.
+func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var in struct {
+		Diff        string `json:"diff"`
+		DiffPath    string `json:"diff_path"`
+		Task        string `json:"task"`
+		MaxFindings int    `json:"max_findings"`
+		ReadRoot    string `json:"read_root"`
+	}
+	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+		return bad, nil
+	}
+	// EXACTLY one source. Accepting both and silently preferring one would let a
+	// caller review a diff it did not think it was reviewing — the review is only
+	// worth anything if the caller knows which bytes were judged.
+	hasInline, hasPath := strings.TrimSpace(in.Diff) != "", strings.TrimSpace(in.DiffPath) != ""
+	switch {
+	case hasInline && hasPath:
+		return jsonResult(map[string]any{"deferred": true, "reason": "pass diff OR diff_path, not both — the review must be unambiguous about which bytes it judged"})
+	case !hasInline && !hasPath:
+		return jsonResult(map[string]any{"deferred": true, "reason": "one of diff (inline text) or diff_path (a file holding a unified diff) is required"})
+	}
+	diff := in.Diff
+	if hasPath {
+		// read_root defaulting mirrors handleAsk and handleAgentRun: the server
+		// working dir. The diff file goes through delegate.InlineContextPaths —
+		// the ONE delegator-side confined reader (os.Root containment, 128 KiB
+		// cap, an error naming the offending path) — rather than a bare ReadFile,
+		// so this lane cannot become the one door that reads outside read_root.
+		readRoot := in.ReadRoot
+		if readRoot == "" {
+			wd, werr := os.Getwd()
+			if werr != nil {
+				return jsonResult(map[string]any{"deferred": true, "reason": "cannot determine working dir for read_root: " + werr.Error()})
+			}
+			readRoot = wd
+		}
+		absRoot, aerr := filepath.Abs(readRoot)
+		if aerr != nil {
+			return jsonResult(map[string]any{"deferred": true, "reason": "bad read_root: " + aerr.Error()})
+		}
+		docs, ierr := delegate.InlineContextPaths([]string{in.DiffPath}, absRoot)
+		if ierr != nil {
+			return jsonResult(map[string]any{"deferred": true, "reason": ierr.Error()})
+		}
+		if len(docs) != 1 {
+			return jsonResult(map[string]any{"deferred": true, "reason": "diff_path read returned no content"})
+		}
+		diff = docs[0].Text
+	}
+	// Every caller-input refusal — no task, an empty diff, a diff over the byte
+	// ceiling — arrives as one typed error from the builder, so the reason the
+	// caller reads is the reason reviewlane wrote.
+	contract, berr := reviewlane.BuildContract(in.Task, diff, in.MaxFindings)
+	if berr != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": berr.Error()})
+	}
+	run := s.localAgent // test seam, shared with agent_delegate and offload_ask
+	if run == nil {
+		run = s.p.RunAgentContract
+	}
+	// No context deadline is imposed here: the contract's TimeoutSec is the wall
+	// ceiling and runAgentTask enforces it as its own deadline, so wrapping it
+	// again would give the run two budgets that could disagree.
+	wire, rerr := run(ctx, contract)
+	if rerr != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
+	}
+	if wire.Deferred {
+		return jsonResult(map[string]any{
+			"deferred":    true,
+			"reason":      wire.Reason,
+			"defer_class": wire.DeferClass,
+			"seat":        wire.Seat,
+			"steps":       wire.Steps,
+		})
+	}
+	var structured struct {
+		Findings []string `json:"findings"`
+	}
+	// A non-deferred run with an OutputSchema always carries Structured
+	// (runAgentTask defers on every re-pack failure), so neither branch below
+	// should be reachable. They defer rather than publishing an empty findings
+	// list precisely because of what that list would MEAN: "this reviewer found
+	// nothing" is the one shape a caller might read as reassurance, so it must
+	// never be what a broken result degrades into.
+	if len(wire.Structured) == 0 {
+		return jsonResult(map[string]any{
+			"deferred": true, "reason": "the seat returned no structured findings (stop_reason " + wire.StopReason + ")",
+			"defer_class": core.DeferClassAbstention, "seat": wire.Seat, "steps": wire.Steps,
+		})
+	}
+	if uerr := json.Unmarshal(wire.Structured, &structured); uerr != nil {
+		return jsonResult(map[string]any{
+			"deferred": true, "reason": "could not decode the seat's findings: " + uerr.Error(),
+			"defer_class": core.DeferClassAbstention, "seat": wire.Seat, "steps": wire.Steps,
+		})
+	}
+	findings, dropped := reviewlane.Report(structured.Findings, diff, in.MaxFindings)
+	if findings == nil {
+		// [] rather than null: "no findings" is a real answer here, and a JSON
+		// null would read to a caller as a missing field.
+		findings = []reviewlane.Finding{}
+	}
+	out := map[string]any{
+		"findings":       findings,
+		"reviewed_bytes": len(diff),
+		"seat":           wire.Seat,
+		"steps":          wire.Steps,
+		"stop_reason":    wire.StopReason,
+	}
+	if dropped > 0 {
+		out["dropped_ungrounded"] = dropped
+	}
+	if len(findings) == 0 {
+		// Said in words, because this is the result most easily misread. A clean
+		// review is evidence about one reviewer's reading of one diff, and this
+		// lane never claims more than that.
+		out["note"] = "this reviewer found nothing in the diff — that is not a verification that the change works, which stays yours"
 	}
 	return jsonResult(out)
 }

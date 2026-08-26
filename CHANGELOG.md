@@ -6,6 +6,54 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.97.0] - 2026-08-26
+
+### Added — `offload_review_diff`: the clean-context review lane
+- Every other lane in this harness competes with "read the file yourself" on cost, and that
+  competition is measurably lost: organic `agent_delegate` adoption is ~0 and three rounds of
+  steering pressure moved it not at all. This lane is different in kind. It offers something a
+  lead agent **cannot produce from inside its own context at all** — a reviewer that never saw
+  the work. You pass a diff and a task statement; a free local seat returns severity-ranked
+  findings with file/line/claim/why.
+- **The isolation is the mechanism, not a side effect.** A reviewer that has not accumulated the
+  author's context catches defects the author's own judgement has stopped seeing. The supporting
+  evidence is worth separating carefully. Cognition **reports** a dedicated reviewer in their
+  Fusion setup catching ~2 bugs per PR, ~58% of them severe — that is the vendor's own published
+  figure, with no sample size, no A/B baseline and no external audit, so it is cited here as a
+  claim and nothing more. What IS independently supported is the underlying effect: long-context
+  degradation, measured across 18 SOTA models by Chroma's context-rot study and by Stanford's
+  lost-in-the-middle work. The lane rests on the mechanism, not on the vendor's number.
+- **Advisory, and the tool description says so in as many words.** It never gates a merge and
+  never substitutes for the final does-it-actually-work verification, which stays with the lead —
+  as do security review, architecture judgement, and any call the lead is accountable for. The
+  findings are TRIAGE INPUT: a `severe` label from a small local model is a prompt to go read
+  those lines, never proof, and nothing is ever applied unread.
+- Design decisions worth knowing, each forced by something measurable:
+  - **The diff rides in the GOAL, not in a context doc.** A context doc becomes a file the seat
+    must find with `list_dir` and open with `read_file`, and the measured failure mode of a small
+    planner is calling no tool at all — which would produce confident findings about a diff never
+    read. The cost is that `core.AgentContract.Validate`'s 256 KiB context cap never sees the
+    diff, so `internal/reviewlane` owns that bound itself (`MaxDiffBytes`) and refuses early with
+    the real numbers instead of overflowing a seat's window.
+  - **No acceptance check, deliberately.** An empty findings list is a CORRECT outcome here, so
+    any content check would either punish a clean diff or pass anything — exactly the decorative
+    acceptance `delegate.LintAcceptance` exists to name. What replaces it is a check the harness
+    can actually make: a finding naming a file the diff never touched is dropped and REPORTED as
+    `dropped_ungrounded`, because an invented path is how a small seat fails here.
+  - **A findings array of strings, parsed delegator-side.** `gbnf.FromJSONSchema` compiles any
+    array to an array of strings, so a schema of `{severity,file,line,...}` objects would have
+    become strings anyway. The prompt asks for one `severity | file:line | claim | why` line per
+    defect and `ParseFindings` reads them back tolerantly — keeping anything it cannot parse as
+    an unranked claim rather than dropping it, because a discarded line turns a reviewer that did
+    work into a clean bill of health nobody issued.
+  - **A seat that returns no structured findings DEFERS** rather than degrading into an empty
+    list. "No findings" is the one result a lead might read as reassurance, so it must never be
+    what a broken run collapses into — and when it is genuine, the response says in words that it
+    is not a verification.
+- Registered unconditionally beside `offload_ask`; runs on the local seat through
+  `Pipeline.RunAgentContract`, the same entry a local delegation placement takes. Like every
+  other tool here, any failure comes back as `deferred: true` with a reason, never an MCP error.
+
 ## [0.96.0] - 2026-08-25
 
 ### Added — `offload_ask`: the one-call delegation entry point
