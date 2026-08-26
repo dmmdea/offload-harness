@@ -150,7 +150,7 @@ func startIntegrationNode(t *testing.T, seatURL string) (base string, nodeCfg co
 	nodeCfg = integrationNodeConfig(t, seatURL)
 	nodePipeline := pipeline.New(nodeCfg, llamaclient.New(seatURL, "", nodeCfg.Model, 30*time.Second), nil, nil)
 
-	jobs := fleetnode.NewJobs(time.Hour)
+	jobs := fleetnode.NewJobs(time.Hour, nodeCfg.FleetConcurrencyLimit())
 	t.Cleanup(func() { jobs.DrainAndStop(5 * time.Second) })
 	node := fleetnode.New(nodePipeline, jobs, fleetnode.Options{
 		NodeID:     nodeCfg.FleetNodeID,

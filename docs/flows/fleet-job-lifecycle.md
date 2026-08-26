@@ -60,6 +60,15 @@ Two edges worth knowing: a duplicate refusal cleans up the second request's mate
 before responding, and if acceptance is refused while the job store reports nothing, drain has begun
 and the node answers `503`.
 
+Since 0.100.0 an accepted job is not necessarily a *started* job: admission puts it in a FIFO, and it
+executes when one of `fleet_max_concurrent_jobs` slots frees. `accepted` can therefore last a while,
+which is legitimate and visible in health as `jobs_queued`. Only `fleet_max_queue_depth`
+(`accepted` + `running`) produces `503 queue full`; a node with every worker busy still accepts.
+
+Note that this repo's delegator does **not** re-place a refused subtask — `internal/delegate` returns
+any non-`202` as an error. The "refusal means try another node" behaviour is the media dispatcher's,
+in a separate repository.
+
 > After terminal-state TTL eviction, a re-dispatched id looks new and **will re-render**. Documented
 > and accepted.
 

@@ -353,7 +353,37 @@ type healthPayload struct {
 	SupportedTaskTypes    []string         `json:"supported_task_types"`
 	LoadableModelFamilies []string         `json:"loadable_model_families"`
 	ModelFootprints       []FootprintEntry `json:"model_footprints"`
-	QueueDepth            int              `json:"queue_depth"`
+	// QueueDepth keeps its ORIGINAL meaning and shape across the 0.100.0
+	// backlog/concurrency split: accepted + running, i.e. every job this node
+	// owns that has not reached a terminal state. Every existing reader (the
+	// delegator's placement tie-break at internal/delegate/gate.go, the media
+	// dispatcher in its own repo) keeps working unchanged.
+	QueueDepth int `json:"queue_depth"`
+	// The four fields below are the 0.100.0 ADDITIVE capacity advertisement.
+	// They are always present (never omitempty) on purpose: 0 is a real,
+	// meaningful value for each — zero jobs, or "unlimited" for a limit — so a
+	// reader must be able to tell a published 0 from a pre-0.100.0 node that
+	// publishes nothing at all. omitempty would collapse those two into the
+	// same absent key, and "unlimited" and "unknown" route very differently.
+	//
+	// jobs_queued + jobs_running == queue_depth, always (QueueDepth is their
+	// sum by construction).
+	JobsQueued  int `json:"jobs_queued"`  // admitted, waiting for a worker
+	JobsRunning int `json:"jobs_running"` // executing right now
+	// MaxConcurrentJobs is this node's execution limit (fleet_max_concurrent_jobs);
+	// 0 = unlimited. MaxQueueDepth is its admission ceiling on queue_depth
+	// (fleet_max_queue_depth); 0 = unlimited. A delegator could previously see
+	// only how loaded a node was and never how much it could take — publishing
+	// both limits is the point of the pair.
+	//
+	// Each is read from whatever actually ENFORCES it: the concurrency number
+	// comes from the Jobs store (Jobs.MaxConcurrent), the admission number from
+	// the config this handler's own gate consults. A store constructed with a
+	// limit other than the config's would then be reported as it truly is,
+	// rather than as the config wishes it were — health must never advertise a
+	// capacity the node does not have.
+	MaxConcurrentJobs int `json:"max_concurrent_jobs"`
+	MaxQueueDepth     int `json:"max_queue_depth"`
 	// HarnessVersion closes the node/repo drift gap: fleet drift used to be found
 	// by hand, and a node several releases behind is debugged against known-fixed
 	// bugs.
@@ -426,6 +456,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if families == nil {
 		families = []string{}
 	}
+	// ONE walk of the job store feeds queue_depth and the split beside it, so
+	// the three numbers are consistent by construction rather than by luck —
+	// two separate reads could straddle a job's accepted→running transition and
+	// publish a queue_depth that is not jobs_queued + jobs_running.
+	queued, running := s.jobs.Counts()
 	payload := healthPayload{
 		NodeID:                s.opts.NodeID,
 		SchemaVersion:         1,
@@ -438,7 +473,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		SupportedTaskTypes:    tasks,
 		LoadableModelFamilies: families,
 		ModelFootprints:       fps,
-		QueueDepth:            s.jobs.QueueDepth(),
+		QueueDepth:            queued + running,
+		JobsQueued:            queued,
+		JobsRunning:           running,
+		MaxConcurrentJobs:     s.jobs.MaxConcurrent(),
+		MaxQueueDepth:         s.opts.Cfg.FleetQueueLimit(),
 		HarnessVersion:        s.opts.Version,
 	}
 	// Reclaim is advertised ONLY when measured. An unknown verdict omits both
@@ -605,13 +644,25 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 
 	// Queue-depth back-pressure, NEW work only — known jobs re-acked above are
 	// never refused by it, and result polls don't come through here at all.
-	// A non-202 is the dispatch contract's "re-dispatch elsewhere", so a full
-	// node sheds load to its siblings with no delegator change. Checked before
-	// BuildRequest so a refused dispatch materializes nothing. Two concurrent
-	// dispatches can both pass and overshoot the cap by a few — this is
-	// back-pressure against unbounded queue latency behind the single
-	// inference slot, not an exact invariant, and exactness under a lock is
-	// not worth coupling admission to the jobs mutex.
+	// Checked before BuildRequest so a refused dispatch materializes nothing.
+	// Two concurrent dispatches can both pass and overshoot the cap by a few —
+	// this is back-pressure against unbounded queue latency, not an exact
+	// invariant, and exactness is not worth coupling admission to the jobs
+	// mutex.
+	//
+	// This is the BACKLOG limit, and since 0.100.0 it is ONLY that. Admitted
+	// jobs no longer all execute on arrival: fleet_max_concurrent_jobs bounds
+	// execution inside the store, so a node whose workers are all busy still
+	// ADMITS — busy is not full — and refuses only once accepted+running
+	// reaches this cap. The refusal boundary itself is byte-identical to
+	// 0.99.0's: the comparison is the same expression over the same
+	// QueueDepth() (accepted+running) against the same config key.
+	//
+	// This 503 is TERMINAL for the delegator in this repo: internal/delegate's
+	// dispatcher surfaces any non-202 as an error and does not re-place the
+	// subtask (run.go, the dispatch loop). Widening the backlog rather than
+	// the concurrency is therefore the safer half of the split — a job that
+	// waits is work that still gets done; a job that is refused is not.
 	if limit := s.opts.Cfg.FleetQueueLimit(); limit > 0 {
 		if d := s.jobs.QueueDepth(); d >= limit {
 			writeError(w, http.StatusServiceUnavailable,

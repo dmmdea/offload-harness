@@ -6,6 +6,101 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.100.0] - 2026-08-26
+
+### Added — the fleet node has an actual job queue; backlog and concurrency are now two limits
+- **`Accept` used to BE `start`.** It wrote the record and immediately launched
+  `go func(){ … markRunning … }`, so `JobAccepted` lasted microseconds, there was no pending
+  list, no worker pool and no scheduler anywhere in `internal/fleetnode/`. The consequence is
+  the part that matters: `fleet_max_queue_depth` (default 32) did not bound a backlog, it
+  bounded **simultaneously executing jobs**. A node reporting "depth 31" was running 31 jobs
+  at once against ONE llama-swap endpoint, and `QueueDepth()` — counting `accepted || running`
+  — was really reporting "in flight".
+- **Admit-then-schedule.** `Accept` now admits: it writes the record and appends the id to a
+  FIFO. One scheduler goroutine claims a job only while an execution slot is free, and
+  dequeue plus `accepted → running` happen in a **single critical section**. `accepted` is a
+  real state a job can sit in. Everything a poller can observe is otherwise unchanged — same
+  ids, same idempotent re-ack and `409`-on-failed asymmetry, same write-once terminal states,
+  same TTL janitor — except that `accepted` may now legitimately last a while.
+- **Two independent limits**, both configurable, both taking `0` = built-in default and a
+  negative value = unlimited (one rule for both, matching the existing `FleetQueueLimit`
+  convention):
+  - `fleet_max_queue_depth` (32) — the admission ceiling on `accepted + running`. The only
+    thing that produces `503 queue full`.
+  - `fleet_max_concurrent_jobs` (**new**, 4) — how many admitted jobs execute at once. Never
+    refuses anything; extra jobs wait. This is what protects the shared endpoint.
+- **A busy node is no longer a full node.** With the defaults, the 5th dispatch is accepted
+  and queued; only the 33rd is refused.
+
+### Changed — the config-key decision, and why `fleet_max_queue_depth` was NOT redefined
+- A config key that quietly changes meaning between versions is worse than an awkward name,
+  so the existing key keeps the meaning its own name, its own doc comment and the health
+  field it caps all already stated: **the ceiling on `queue_depth`, which counts
+  `accepted + running`**. That sentence was true in 0.99.0 and is true now. What changed is
+  what it no longer *also* does — before this release it doubled as the concurrency limit,
+  because with no waiting state "accepted+running" and "executing right now" were the same
+  number. Concurrency now has its own key.
+- The alternative — keeping the old key as the *concurrency* limit and adding a new key for
+  the backlog — was rejected because it would break the one invariant that makes the pair
+  legible: `fleet_max_queue_depth` would no longer bound `queue_depth`. Two names sharing a
+  word would have meant two different things, on the same payload.
+- **Migration is a no-op, and provably safe in the conservative direction.** The refusal
+  boundary is byte-identical: the same expression over the same `QueueDepth()` against the
+  same key. And under *any* existing setting, actual concurrency after this release is **less
+  than or equal to** what that setting produced before it (`fleet_max_queue_depth: 2` ran at
+  most 2 concurrently and still does; the default 32 now runs at most 4). No node starts doing
+  more at once than it did in 0.99.0, and nothing that was admitted before is refused now.
+- The concurrency default is **4** because that is what this fleet actually runs — the
+  delegator dispatches a fan-out four subtasks at a time — so it preserves the observed steady
+  state while removing the pathological one. A job that waits is strictly better than a job
+  that thrashes, and (see below) far better than one that is refused.
+
+### Added — `/fleet/health` publishes capacity, not just depth
+- `queue_depth` keeps its **exact** meaning and shape for existing readers (the delegator's
+  placement tie-break at `internal/delegate/gate.go`, and the media dispatcher in its own
+  repo). It is now computed as `jobs_queued + jobs_running` from one walk of the store, so the
+  three numbers cannot disagree.
+- Added alongside it: `jobs_running`, `jobs_queued`, `max_concurrent_jobs`, `max_queue_depth`.
+  A delegator could previously see how loaded a node was but never how much it could take.
+- These four are **always present, never `omitempty`**: `0` is a meaningful value for each —
+  and for the two limits it means *unlimited* — so omitting it would make "unlimited"
+  indistinguishable from "a node too old to publish a limit", and those route in opposite
+  directions. Wire compatibility is pinned by an external-package test that runs the
+  delegator's real `FetchNodeView` decoder against the real health handler.
+
+### Changed — drain tells "never started" from "interrupted"
+- `DrainAndStop` marked every non-terminal survivor `error:"interrupted"`. With a real backlog
+  that would have the node claim it began work it never touched. Survivors are now marked by
+  state — which the scheduler's atomic claim makes trustworthy: `running` → `"interrupted"`,
+  still `accepted` → `"not started: node shut down while this job was queued"`.
+- Drain **finishes what it started and does not start what it never began**: the backlog is
+  dropped when drain begins rather than worked through, so shutdown never launches an
+  inference it cannot finish. `TestJobsDrainWaitsForFastJobs` now pins the job as `running`
+  before draining — under separate admission and execution, a job accepted microseconds before
+  drain is a genuine race, and the test was about the drain timeout, not that race.
+
+### Fixed — docs asserted a load-shedding behaviour this repo does not have
+- `docs/FLEET-NODE.md` claimed "Any non-202 already means 're-dispatch elsewhere' to the
+  dispatcher, so a full node sheds load to its siblings with no dispatcher change." That is
+  **false here**. `internal/delegate/run.go` is the only POST to `/fleet/dispatch` in this
+  repo and it surfaces any non-`202` as an error without re-placing the subtask: the work
+  simply does not get done. The described behaviour belongs to the **media dispatcher, which
+  lives in a different repository**. The claim is corrected (not fixed — delegator-side
+  re-placement is a separate change) in `docs/FLEET-NODE.md`, `docs/systems/fleet-node.md`,
+  `docs/flows/fleet-job-lifecycle.md` and the same sentence copied into `server.go`'s
+  admission comment.
+
+### Notes
+- No durability was added: the store stays in-memory, and a node restart still loses its
+  backlog (now reported honestly as never-started). No pull/claim endpoint — placement stays
+  PUSH. The media/`gpulease` path is untouched.
+- `-race` could not be run: it requires cgo and this box has no C toolchain
+  (`go: -race requires cgo`). Compensated with single-mutex lock discipline (one `sync.Cond`
+  over the same mutex that guards the store, so deciding and claiming are one critical
+  section), a 24-job concurrent burst test sampling peak overlap from inside the runs, the
+  pre-existing 32-goroutine concurrent-`Accept` test now running through the scheduler,
+  repeated `-count` runs, and `go vet ./...`.
+
 ## [0.99.0] - 2026-08-26
 
 ### Changed — `route:"spread"`: the remote slots are fit-scored instead of dealt blind

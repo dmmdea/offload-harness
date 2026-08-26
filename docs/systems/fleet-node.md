@@ -39,7 +39,7 @@ stops accepting work while remaining readable.
 
 | Route | Purpose |
 |---|---|
-| `GET /fleet/health` | Node identity, GPU vendor and architecture, live total and free VRAM, supported task types, loadable model families, measured footprints, queue depth |
+| `GET /fleet/health` | Node identity, GPU vendor and architecture, live total and free VRAM, supported task types, loadable model families, measured footprints, queue depth, and the node's job capacity (running / queued / both limits) |
 | `POST /fleet/dispatch` | Submit a job; returns `202` with an ack |
 | `GET /fleet/jobs/{id}` | Poll job state and result |
 
@@ -50,6 +50,30 @@ needing to change first.
 **Job states are `accepted` → `running` → `done` | `error`.** Terminal states are write-once: a late
 completion cannot overwrite a finished job. Terminal entries are evicted after a TTL by a periodic
 janitor, and `queue_depth` counts only non-terminal jobs.
+
+**`accepted` is a real waiting state (0.100.0).** Accepting a job used to start it, so `accepted`
+lasted microseconds and the node had no queue at all — just an unbounded pile of concurrent
+executions that one config key happened to cap. A dispatch is now *admitted* to a FIFO, and a single
+scheduler goroutine claims jobs only while an execution slot is free. Two independent limits fall
+out of that:
+
+- **`fleet_max_queue_depth`** (default 32) — the admission ceiling on `accepted` + `running`, i.e. on
+  `queue_depth`. Exceeding it is the only thing that produces `503 queue full`. Unchanged in meaning
+  from 0.99.0.
+- **`fleet_max_concurrent_jobs`** (default 4) — how many admitted jobs execute at once. Exceeding it
+  never refuses anything; the job waits in `accepted`. This is the limit that protects the single
+  llama-swap endpoint and the GPU behind it.
+
+Both read `0` as "use the built-in default" and a negative value as "unlimited". A **busy node is not
+a full node** — that distinction is the entire point of the split.
+
+Health reports both sides: `queue_depth` (unchanged meaning and shape, for existing readers such as
+the delegator's placement tie-break) plus `jobs_running`, `jobs_queued`, `max_concurrent_jobs` and
+`max_queue_depth`. Publishing the limits is what lets a delegator see a node's *capacity* rather than
+only its current depth.
+
+Dequeue and `accepted` → `running` happen in one critical section, which is what makes the drain
+distinction below trustworthy: a job still `accepted` when shutdown begins provably never started.
 
 **Duplicate dispatch is idempotent, with one deliberate exception.** Re-dispatching a job id that is
 `accepted`, `running`, or `done` re-acks `202` and does **not** start a second run. A job in `error`
@@ -68,6 +92,14 @@ beats answering with stale numbers a dispatcher would place work against.
 `fleet-serve` refuses to start without a working GPU probe — advertising a zero-VRAM node would make
 the dispatcher treat the box as broken rather than absent. Shutdown drains before closing the
 listener, so pollers can still read final state.
+
+**Drain finishes what it started; it does not start what it never began.** The backlog is dropped the
+moment drain begins, in-flight runs get the drain timeout, and every surviving job is then marked
+terminal with the honest reason: `error: "interrupted"` for one that was executing, and
+`error: "not started: node shut down while this job was queued"` for one that only ever waited.
+Collapsing those two would have the node claim it began work it never touched — and they route
+differently for a caller, since a never-started job is the cheapest possible thing to re-issue while
+an interrupted one may have left partial output behind.
 
 ## Data and state
 
@@ -196,7 +228,12 @@ names.
 
 `internal/fleetnode/` covers the health golden shape and its 503 paths, the dispatch rejection matrix,
 both duplicate-dispatch cases, the job state machine, footprint padding/merge/persistence, and the
-PDH instance parser. `auth_test.go` pins the agent-lane auth matrix and the media lane's tokenless
+PDH instance parser. `queue_test.go` pins the backlog/concurrency split — a job waiting while the
+workers are busy, a burst whose peak overlap never exceeds the limit (with an unlimited control arm),
+the server admitting while busy and refusing only when full, and drain telling never-started from
+interrupted. `healthwire_compat_test.go` is an EXTERNAL test package so it can run the delegator's
+real `FetchNodeView` decoder against the real health handler: the additive capacity fields must not
+break a reader that has never heard of them. `auth_test.go` pins the agent-lane auth matrix and the media lane's tokenless
 bypass; `tasks_agent_test.go` the advertisement gate and contract materialization;
 `internal/pipeline/agenttask_test.go` the defer shapes over a fake chat client.
 `fleet_verbs_test.go` covers parameter resolution and the bind guard.
@@ -204,7 +241,13 @@ bypass; `tasks_agent_test.go` the advertisement gate and contract materializatio
 ## Common pitfalls
 
 - Believing the per-process PDH tree supplies health's VRAM numbers. It does not — that is the resolved provider (`nvidia-smi`, or the ADAPTER-level WDDM counters on the generic path).
-- Expecting `queued` as a state. The first state is `accepted`.
+- Expecting `queued` as a state. The first state is `accepted` — which, since 0.100.0, is also the
+  *waiting* state. A job sitting in `accepted` for a while is a queued job, not a stuck one.
+- Reading `fleet_max_queue_depth` as a concurrency limit. It caps the backlog (`queue_depth`);
+  `fleet_max_concurrent_jobs` caps execution.
+- Assuming a `503 queue full` sheds the job to a sibling node. **It does not** — `internal/delegate`
+  treats any non-`202` as terminal and does not re-place the subtask. That shedding behaviour is the
+  media dispatcher's, in a different repository.
 - Expecting a duplicate dispatch to return an error. Only `error` jobs do.
 - Binding with `:18811` and expecting it to work as loopback.
 - Treating Afterburner as required.
@@ -576,8 +619,8 @@ a full TTL window, so a dead endpoint is probed once per window, not hammered pe
 - [`internal/fleetnode/server.go`](../../internal/fleetnode/server.go) — routes, payloads, duplicate
   semantics, agent-lane auth gates, agent health advertisement
 - [`internal/fleetnode/auth.go`](../../internal/fleetnode/auth.go) — the bearer credential check
-- [`internal/fleetnode/jobs.go`](../../internal/fleetnode/jobs.go) — state machine, eviction, drain,
-  the agent job marker
+- [`internal/fleetnode/jobs.go`](../../internal/fleetnode/jobs.go) — state machine, the admit-then-
+  schedule queue and its concurrency limit, eviction, drain, the agent job marker
 - [`internal/fleetnode/tasks.go`](../../internal/fleetnode/tasks.go) — `agentTaskConfigured`,
   `buildAgentRun` (contract decode, depth derivation, context materialization)
 - [`internal/core/agentwire.go`](../../internal/core/agentwire.go) — contract, result, acceptance DSL

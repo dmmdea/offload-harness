@@ -257,7 +257,7 @@ func TestAgentJobPollOpenWithoutToken(t *testing.T) {
 // ON the job (set atomically at creation, evicted with it), so there is no
 // window where a poller can observe an agent job unmarked.
 func TestJobsAgentMarker(t *testing.T) {
-	j := newJobs(time.Hour, time.Now, time.Hour)
+	j := newJobs(time.Hour, time.Now, time.Hour, 0)
 	t.Cleanup(func() { j.DrainAndStop(2 * time.Second) })
 	j.AcceptAgent("a", func(ctx context.Context) (json.RawMessage, error) { return nil, nil })
 	j.Accept("m", func(ctx context.Context) (json.RawMessage, error) { return nil, nil })
