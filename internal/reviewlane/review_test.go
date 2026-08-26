@@ -24,6 +24,23 @@ func TestBuildPromptCarriesTaskAndDiffButNoSessionContext(t *testing.T) {
 	}
 }
 
+// Regression guard for the one defect only a live run could find (see promptFormatTail): an
+// abstract placeholder template made the seat write back the placeholder NAME instead of the
+// path. The prompt must carry a filled-in example, and must not present a bare metavariable
+// line the seat can copy verbatim.
+func TestPromptCarriesAFilledInExampleRatherThanABareTemplate(t *testing.T) {
+	p := buildPrompt("make it work", "--- a/x.go\n+++ b/x.go\n+ok\n")
+	if !strings.Contains(p, "internal/store/load.go:57") {
+		t.Fatal("the format spec must show a filled-in example line — an abstract template gets copied verbatim")
+	}
+	if strings.Contains(p, "severity | file:line") {
+		t.Fatal("the bare metavariable template is exactly what the seat echoed back as content")
+	}
+	if !strings.Contains(p, "<severity> | <path>:<line> | <claim> | <why>") {
+		t.Fatal("the field spec must be unmistakably placeholders, not words a seat can read as literals")
+	}
+}
+
 func TestRankFindingsPutsSevereFirstAndCaps(t *testing.T) {
 	in := []Finding{
 		{Severity: "minor", Claim: "naming"},
@@ -64,7 +81,7 @@ func TestRankFindingsSortsUnknownSeverityLastAndKeepsInputOrderWithin(t *testing
 // The contract must be dispatchable as-is and carry NOTHING but the task and the diff:
 // no context docs, because there is no session history to ship.
 func TestBuildContractIsValidAndShipsNoContextDocs(t *testing.T) {
-	c, err := BuildContract("stop the retry loop from spinning forever", "--- a/run.go\n+++ b/run.go\n+for attempts < maxAttempts {\n", 0)
+	c, err := BuildContract("stop the retry loop from spinning forever", "--- a/run.go\n+++ b/run.go\n+for attempts < maxAttempts {\n")
 	if err != nil {
 		t.Fatalf("BuildContract: %v", err)
 	}
@@ -89,10 +106,10 @@ func TestBuildContractIsValidAndShipsNoContextDocs(t *testing.T) {
 }
 
 func TestBuildContractRefusesEmptyTaskOrDiff(t *testing.T) {
-	if _, err := BuildContract("  ", "--- a/x\n+++ b/x\n+ok\n", 0); !errors.Is(err, ErrNoTask) {
+	if _, err := BuildContract("  ", "--- a/x\n+++ b/x\n+ok\n"); !errors.Is(err, ErrNoTask) {
 		t.Fatalf("empty task must refuse with ErrNoTask, got %v", err)
 	}
-	if _, err := BuildContract("do the thing", "   \n", 0); !errors.Is(err, ErrNoDiff) {
+	if _, err := BuildContract("do the thing", "   \n"); !errors.Is(err, ErrNoDiff) {
 		t.Fatalf("empty diff must refuse with ErrNoDiff, got %v", err)
 	}
 }
@@ -102,7 +119,7 @@ func TestBuildContractRefusesEmptyTaskOrDiff(t *testing.T) {
 // than shipping an unbounded prompt at a seat whose window cannot hold it.
 func TestBuildContractRefusesAnOversizeDiffWithTheNumbers(t *testing.T) {
 	big := strings.Repeat("+x\n", (MaxDiffBytes/3)+16)
-	_, err := BuildContract("review it", big, 0)
+	_, err := BuildContract("review it", big)
 	if !errors.Is(err, ErrDiffTooLarge) {
 		t.Fatalf("an oversize diff must refuse with ErrDiffTooLarge, got %v", err)
 	}

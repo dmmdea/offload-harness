@@ -50,6 +50,13 @@ Versioning: [SemVer](https://semver.org/).
     list. "No findings" is the one result a lead might read as reassurance, so it must never be
     what a broken run collapses into — and when it is genuine, the response says in words that it
     is not a verification.
+  - **The format spec carries a filled-in example**, found the only way it could be: a live run.
+    With an abstract `severity | file:line | claim | why` template the 27B seat located both
+    planted defects and then wrote back `severe | file:16` — it had copied the placeholder name
+    instead of the path, and lost claim and why entirely. An angle-bracketed spec plus one worked
+    example (of a DIFFERENT defect class, so an echo of it is distinguishable from a real finding)
+    produced fully-formed findings on the same diff. Seven passing unit tests did not and could
+    not catch this.
 - Registered unconditionally beside `offload_ask`; runs on the local seat through
   `Pipeline.RunAgentContract`, the same entry a local delegation placement takes. Like every
   other tool here, any failure comes back as `deferred: true` with a reason, never an MCP error.

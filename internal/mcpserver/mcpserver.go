@@ -1733,7 +1733,7 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	// Every caller-input refusal — no task, an empty diff, a diff over the byte
 	// ceiling — arrives as one typed error from the builder, so the reason the
 	// caller reads is the reason reviewlane wrote.
-	contract, berr := reviewlane.BuildContract(in.Task, diff, in.MaxFindings)
+	contract, berr := reviewlane.BuildContract(in.Task, diff)
 	if berr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": berr.Error()})
 	}

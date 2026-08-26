@@ -90,7 +90,7 @@ type Finding struct {
 // halves are forced by gbnf.FromJSONSchema's supported subset: nested object items compile
 // to `stringarray` regardless of what the schema says, so an array of {severity,file,...}
 // objects would silently become an array of strings anyway. Asking for the line format
-// explicitly (see promptFormat) and parsing it delegator-side is the honest version of the
+// explicitly (see promptFormatTail) and parsing it delegator-side is the honest version of the
 // same thing — and ParseFindings keeps whatever it cannot parse rather than dropping it.
 var reviewOutputSchema = json.RawMessage(`{"type":"object","properties":{"findings":{"type":"array","items":{"type":"string"}}},"required":["findings"]}`)
 
@@ -107,24 +107,37 @@ on style, naming, or formatting. Do NOT invent anything you cannot see in the di
 defect you cannot point at a changed line is not a finding.
 `
 
-// promptFormat is the line shape ParseFindings reads back, split around the finding count
-// so the number the seat is asked for is DefaultMaxFindings itself and cannot drift from
-// the cap the re-pack budget forces. It is stated as the whole of the answer ("nothing
-// else") because the structured re-pack is an extract over this text: a preamble the seat
-// adds becomes a finding-shaped string that survives as an unranked claim, which is noise
-// the lead then has to triage.
+// promptFormatHead/promptFormatTail are the line shape ParseFindings reads back, split around
+// the finding count so the number the seat is asked for is DefaultMaxFindings itself and
+// cannot drift from the cap the re-pack budget forces. It is stated as the whole of the
+// answer ("nothing else") because the structured re-pack is an extract over this text: a
+// preamble the seat adds becomes a finding-shaped string that survives as an unranked claim,
+// which is noise the lead then has to triage.
+//
+// The FILLED-IN example is load-bearing and was added from a live run, not from review. With
+// an abstract `severity | file:line | claim | why` template the 27B seat found both planted
+// defects in a probe diff and then wrote `severe | file:16` — it had copied the placeholder
+// name instead of the path and lost claim and why entirely. The example is deliberately a
+// DIFFERENT defect class from anything a test diff is likely to plant: the first version used
+// an off-by-one, the seat replied in the example's exact wording, and "found it" became
+// indistinguishable from "parroted it".
 const promptFormatHead = `
 Answer with ONE LINE PER DEFECT, at most `
 
-const promptFormatTail = ` lines, most serious first, in EXACTLY this format
-and nothing else:
+const promptFormatTail = ` lines, most serious first, each with
+FOUR fields separated by | and nothing else around them:
 
-severity | file:line | claim | why
+<severity> | <path>:<line> | <claim> | <why>
 
-severity is one of: severe, moderate, minor. file is a path that appears in the diff. line
-is the line number in the new file. claim states the defect in under 15 words; why states
-the consequence in under 20 words. If the diff has no defects, answer with the single word:
-NONE
+A filled-in example of one line, for shape only — it is not about the diff below:
+
+moderate | internal/store/load.go:57 | the returned error is discarded with _ | a failed load reads as an empty store
+
+<severity> is one of: severe, moderate, minor. <path> is the file's REAL path, copied from
+the diff — never the literal word "file". <line> is its line number in the new file.
+<claim> states the defect in under 15 words. <why> states the consequence in under 20 words.
+Fill in all four every time; do not copy the placeholder names, and write nothing before or
+after the lines. If the diff has no defects, answer with the single word: NONE
 
 TASK:
 `
@@ -147,12 +160,11 @@ func buildPrompt(task, diff string) string {
 
 // BuildContract assembles the complete, validated contract for one clean-context review.
 //
-// maxFindings is accepted for symmetry with the tool's own argument but does not change the
-// contract: the seat is always asked for at most DefaultMaxFindings (see that constant),
-// and the caller's cap is applied delegator-side in Report. Taking it here keeps the
-// argument's meaning in one place — "how many findings do I want back" — rather than
-// splitting it across two layers.
-func BuildContract(task, diff string, maxFindings int) (core.AgentContract, error) {
+// It takes no findings cap: the seat is always asked for DefaultMaxFindings, because that
+// number is set by what the structured re-pack's token budget can carry, not by caller
+// preference. A caller's max_findings NARROWS the published list and is applied
+// delegator-side in Report, where it is checkable.
+func BuildContract(task, diff string) (core.AgentContract, error) {
 	task = strings.TrimSpace(task)
 	if task == "" {
 		return core.AgentContract{}, ErrNoTask
@@ -164,8 +176,6 @@ func BuildContract(task, diff string, maxFindings int) (core.AgentContract, erro
 		return core.AgentContract{}, fmt.Errorf("%w: %d bytes exceeds the %d-byte ceiling — split it by path (git diff -- <dir>) and review each part, which also keeps each review inside the seat's context window",
 			ErrDiffTooLarge, len(diff), MaxDiffBytes)
 	}
-	_ = maxFindings // applied in Report; see the doc comment above.
-
 	// PrepareContract mints schema_version/depth and clamps max_steps/timeout to the same
 	// ceilings the wire decoder applies, then runs the full Validate — so a contract this
 	// package builds obeys exactly the rules a hand-written one does. readRoot is unused
