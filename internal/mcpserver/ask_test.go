@@ -202,6 +202,43 @@ func TestAskHandlerGradesTheAnswerItPublishesNotTheProseItDiscards(t *testing.T)
 	}
 }
 
+// TestAskHandlerGradesTheProseItFallsBackToPublishing closes the second door on the same
+// invariant. When the re-pack emits an empty `answer` — schema-legal, and its own system
+// prompt says "Use empty values when a field is absent" — the handler falls back to
+// publishing the loop's prose as the answer. Grading only the JSON at that point would
+// grade a text the caller never sees, and in THIS direction the error is a false negative:
+// verified:false on a properly cited answer. The graded text is built from the decoded
+// fields after the fallback has run, so what is graded is what is shown.
+func TestAskHandlerGradesTheProseItFallsBackToPublishing(t *testing.T) {
+	dir, p := askFixture(t)
+	var prose string
+	s := askTestServer(t, func(_ context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+		anchor := anchorsOf(t, c)[0]
+		prose = "The cap is 32."
+		return core.AgentWireResult{
+			SchemaVersion: core.AgentWireSchemaVersion,
+			Seat:          "fake-seat",
+			Output:        prose, // published as the answer, and it does NOT carry the anchor
+			// answer empty, evidence carries the citation the caller is shown
+			Structured: json.RawMessage(`{"answer":"","evidence":"const ` + anchor + ` = 32"}`),
+			Steps:      2,
+			StopReason: "done",
+		}, nil
+	})
+
+	res, err := s.handleAsk(context.Background(), callReq(askArgs("what is the queue cap", p, dir)))
+	if err != nil {
+		t.Fatalf("handleAsk: %v", err)
+	}
+	m := decodeResult(t, res)
+	if m["answer"] != prose {
+		t.Fatalf("an empty structured answer must fall back to the prose: %v", m)
+	}
+	if m["verified"] != true {
+		t.Fatalf("the evidence the caller is shown carries the citation, so this must verify: %v", m)
+	}
+}
+
 // TestAskHandlerGradesProseWhenThereIsNoStructured: the other half of the rule. With no
 // structured pair the handler publishes the prose, so grading the prose is what keeps the
 // verdict about the text the caller actually got.

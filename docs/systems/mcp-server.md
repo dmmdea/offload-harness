@@ -77,10 +77,18 @@ anchor is excluded against the FULL BUILT GOAL (the lint measures parrot-passabi
 the builder REFUSES instead of emitting a check that would pass anything. The generated
 acceptance is evaluated by the handler and published as `verified` / `acceptance_failures` —
 this lane does not go through `delegate.Run`, and a check nothing evaluates is decoration. `verified` is a
-CITATION check, not a correctness verdict: it asks whether the answer quoted something that
-appears only in the attached files, never whether the answer is right. `verified: true` means the
-published `{answer, evidence}` pair matched one of the mined tokens — the pair is what is graded,
-not the loop's prose, which this lane discards. `verified: false` is a prompt to read
+CITATION check, not a correctness verdict: it asks whether the published answer quoted one of a
+few distinctive tokens mined from the attached files, never whether the answer is right. Those
+tokens are picked to be things only these files would say — real identifiers wherever the files
+have them, and ordinary words only when they are long enough to be domain terms or actually name
+one of the attached files — but it stays a heuristic, so read `verified: true` as "this answer
+demonstrably read the files", not as proof of a verbatim quotation.
+
+The graded text is built from the fields the caller is SHOWN (`answer` + `evidence`, decoded),
+never from the loop's prose or the raw structured bytes. Both of the other choices were measured
+wrong, one per direction: grading the prose gives `verified: true` beside a published answer that
+cites nothing, and grading the bytes gives `verified: false` when the re-pack returned an empty
+`answer` and the handler fell back to publishing the prose. `verified: false` is a prompt to read
 `acceptance_failures` and then the evidence, never a reason to discard the answer: the residual
 case is a question whose subject is a SHORT (<8-character) or question-named identifier, which
 leaves nothing anchorable at all.

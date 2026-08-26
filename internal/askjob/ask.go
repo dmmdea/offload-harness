@@ -59,6 +59,24 @@ var (
 // wrong answer contains by accident, so a check anchored on one verifies nothing.
 const anchorMinLen = 8
 
+// plainAnchorMinLen is the higher bar a NON-identifier token must clear to take one of the
+// spare alternation slots. Identifiers keep anchorMinLen; ordinary words do not.
+//
+// Measured: with one bar for both pools, the handler fixture's check went from
+// regex:(FleetMaxQueueDepth) to regex:(FleetMaxQueueDepth|accepted). "accepted" is eight
+// characters of ordinary English, so a wrong answer — "requests are accepted until the
+// cap" — passes the grounding branch without having read anything. Easing the check eases
+// it for an UNCITED answer too, which is the verified:true-beside-nothing pathology from
+// the other direction.
+//
+// Twelve because English word frequency falls off a cliff around there: `accepted`,
+// `returned`, `different`, `following` are out, while a word long enough to survive
+// (`provisioning`, `reconciliation`, `authentication`) is a domain term an answer only
+// produces by reading the source. See docNameStems for the second, narrower door — length
+// alone would also have excluded `buildinfo`, which is nine characters and the very case
+// the top-up exists to serve.
+const plainAnchorMinLen = 12
+
 // anchorMaxLen is the longest token that can still be a NAME rather than a blob. identRe
 // has no upper bound and identifierShaped answers yes to anything carrying a digit, so a
 // lockfile hash, a checksum table, an integrity map, a minified bundle or a data URI puts
@@ -275,6 +293,7 @@ func dedupePaths(paths []string, readRoot string) []string {
 // while under-excluding ships a check that verifies nothing.
 func pickAnchors(goal string, docs []core.ContextDoc) ([]string, error) {
 	lowerGoal := strings.ToLower(goal)
+	stems := docNameStems(docs)
 	shaped := map[string]int{} // identifier-shaped: fills the slots first
 	plain := map[string]int{}  // everything else: tops up whatever is left over
 	for _, d := range docs {
@@ -287,14 +306,19 @@ func pickAnchors(goal string, docs []core.ContextDoc) ([]string, error) {
 			}
 			if identifierShaped(m) {
 				shaped[m]++
-			} else {
+				continue
+			}
+			// An ordinary word needs more than length 8 to be worth citing: either it
+			// is long enough to be a domain term, or it NAMES one of the attached
+			// files, which makes it a proper noun of this corpus.
+			if len(m) >= plainAnchorMinLen || stems[strings.ToLower(m)] {
 				plain[m]++
 			}
 		}
 	}
 	if len(shaped) == 0 && len(plain) == 0 {
-		return nil, fmt.Errorf("%w: no token of %d-%d characters appears in the attached files without also appearing in the goal (your question plus the instructions the harness adds around it) — there is nothing here a right answer could cite that a restatement of the question could not, so read the files yourself, or attach a file that names what you are asking about",
-			ErrNoAnchor, anchorMinLen, anchorMaxLen)
+		return nil, fmt.Errorf("%w: nothing in the attached files is distinctive enough to anchor a check (identifiers need %d-%d characters, ordinary words %d unless they name one of the files) that does not also appear in the goal — your question plus the instructions the harness adds around it. There is nothing here a right answer could cite that a restatement of the question could not, so read the files yourself, or attach a file that names what you are asking about",
+			ErrNoAnchor, anchorMinLen, anchorMaxLen, plainAnchorMinLen)
 	}
 	// Identifier-shaped tokens FILL the slots first, and the tier is not cosmetic:
 	// measured while building this, ranking alone picked "delegate" out of a comment
@@ -305,10 +329,15 @@ func pickAnchors(goal string, docs []core.ContextDoc) ([]string, error) {
 	// But the tier TOPS UP rather than REPLACES. When fewer than anchorAlternatives
 	// identifiers survive, the spare slots go to the best plain tokens instead of being
 	// left empty — those went through the very same goal exclusion, so grounding and
-	// anti-parrot are untouched, and because a spare slot is another branch of an OR it
-	// can only ease passing, never block it. Replacing the pool outright also silently
-	// dropped good candidates: `buildinfo` is nine characters and not question-named, yet
-	// it never reached the pool on the live run because buildinfo.go had shaped tokens.
+	// anti-parrot are untouched. Replacing the pool outright silently dropped good
+	// candidates: `buildinfo` is nine characters and not question-named, yet it never
+	// reached the pool on the live run purely because buildinfo.go had shaped tokens.
+	//
+	// A spare slot is another branch of an OR, and that cuts BOTH ways — it eases passing
+	// for a citing answer AND for an uncited one. It was first justified here as "can only
+	// ease passing, never block it", which is only half the story and is why a plain
+	// candidate must clear plainAnchorMinLen (or name one of the files) before it is
+	// allowed anywhere near a slot.
 	picked := rankByCentrality(shaped)
 	if len(picked) > anchorAlternatives {
 		picked = picked[:anchorAlternatives]
@@ -362,6 +391,25 @@ func deCollideNames(docs []core.ContextDoc) {
 		seen[normalizeName(name)] = true
 		docs[i].Name = name
 	}
+}
+
+// docNameStems is the set of attached file names with their extension dropped, lowercased.
+//
+// A token matching one is a proper noun of THIS corpus — `buildinfo` for buildinfo.go — and
+// is exactly what a citing answer reaches for ("in package buildinfo", "buildinfo.go line
+// 31"), which is why it earns a spare slot at a length ordinary words do not. The base
+// anchorMinLen still applies, so a short stem like `cfg` never qualifies. Safe against a
+// stem that happens to be a common word: it would be a file the CALLER chose to attach and
+// name, so an answer citing this corpus would plausibly say it.
+func docNameStems(docs []core.ContextDoc) map[string]bool {
+	stems := make(map[string]bool, len(docs))
+	for _, d := range docs {
+		stem := strings.TrimSuffix(d.Name, filepath.Ext(d.Name))
+		if stem != "" {
+			stems[strings.ToLower(stem)] = true
+		}
+	}
+	return stems
 }
 
 // identifierShaped reports whether a token reads as a source IDENTIFIER rather than an

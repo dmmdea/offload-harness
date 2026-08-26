@@ -28,9 +28,10 @@ Versioning: [SemVer](https://semver.org/).
   (1) the disqualifier is the full GOAL, not the question — the goal's own boilerplate
   carries ≥8-character words (`QUESTION`, `attached`, `inferring`) and the lint measures
   against `c.Goal`, so a question-only exclusion trips the very lint the feature exists to
-  satisfy; (2) identifier-shaped tokens (underscore, digit, or internal capital) are
-  preferred over prose, because ranking alone picked `delegate` out of a code comment —
-  prose stays as a FALLBACK so attaching markdown or a log still works; (3) the ranking is
+  satisfy; (2) identifier-shaped tokens (underscore, digit, or internal capital) fill
+  the slots first, because ranking alone picked `delegate` out of a code comment — ordinary
+  words top up whatever slots are left over (see below), so attaching markdown or a log
+  still works; (3) the ranking is
   MOST-frequent, not rarest. Rarest-wins was the original rule and measurement contradicted
   it three independent times, most starkly on this package's own fixture, where the pool was
   `{ErrQueueSaturated:3, defaultMaxQueueDepth:3, dispatchRetryBackoff:1}` and rarity picked
@@ -64,13 +65,19 @@ Versioning: [SemVer](https://semver.org/).
 - The identifier-shaped tier TOPS UP instead of REPLACING. Shaped tokens fill the three
   alternation slots first; any spare slots go to the best plain tokens rather than being
   left empty. Those passed the same goal exclusion, and a spare alternative is one more
-  branch of an OR — it can only ease passing, never block it. Replacing outright was
+  branch of an OR, and that cuts BOTH ways: it eases passing for a citing answer AND for
+  an uncited one, so a plain token must clear a higher bar than an identifier —
+  `plainAnchorMinLen` (12 characters), or it must NAME one of the attached files. Measured
+  without that bar, the check became `regex:(FleetMaxQueueDepth|accepted)`, and "accepted"
+  is ordinary English that a wrong answer contains for free. Replacing outright was
   silently dropping good candidates: `buildinfo` is nine characters and not question-named,
   yet never reached the pool on the live run purely because that file had shaped tokens.
 - Known limitation, stated rather than hidden: a question whose answer turns on a SHORT
   (<8-character) or question-named identifier can leave nothing anchorable — `verified` then
   reads false on a correct answer. `verified` is a CITATION check, not a correctness verdict:
-  it asks whether the answer quoted the files, never whether the answer is right.
+  it asks whether the published answer quoted one of a few distinctive tokens taken from the
+  files, never whether the answer is right — and the graded text is built from the decoded
+  `answer` + `evidence` the caller is SHOWN, so what is graded is exactly what is published.
 - The ask lane writes **no delegation ledger or corpus row**: `delegate.Run` records one per
   subtask, `Pipeline.RunAgentContract` on its own does not. The pipeline's own task ledger
   still sees the run. Recorded so an empty delegation corpus is never misread as "nobody used

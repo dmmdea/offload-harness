@@ -411,10 +411,11 @@ func TestPickAnchorPrefersIdentifiersOverCommentProse(t *testing.T) {
 		t.Fatalf("pickAnchors = %v, want the identifier admitOneJob to LEAD", got)
 	}
 	// ...and the tier TOPS UP rather than replaces: only one identifier survives here, so
-	// the two spare slots go to the best plain tokens instead of being left empty. Those
-	// passed the same goal exclusion, and a spare alternative is another branch of an OR —
-	// it can only ease passing, never block it. (This assertion previously demanded the
-	// opposite; replacing the pool outright was silently dropping good plain candidates.)
+	// a spare slot goes to the best plain token instead of being left empty. "unsurprising"
+	// is twelve characters, so it clears plainAnchorMinLen — the bar that keeps an ordinary
+	// eight-letter word out, because easing the check eases it for an UNCITED answer too.
+	// (This assertion previously demanded the opposite; replacing the pool outright was
+	// silently dropping good plain candidates.)
 	if !slices.Contains(got, "unsurprising") {
 		t.Fatalf("a spare slot must be topped up from the plain pool, got %v", got)
 	}
@@ -454,7 +455,11 @@ func TestPickAnchorFallsBackToProseWhenNoIdentifierExists(t *testing.T) {
 	// Every candidate here occurs once, so the lexicographic tie-break fully determines
 	// the result — asserted exactly, because a fallback that just returned the first
 	// token it happened to see would pass a mere non-empty-and-grounded check.
-	want := []string{"provisioning", "quarterly", "reconciliation"}
+	//
+	// "quarterly" is nine characters and names no attached file, so it does not clear
+	// plainAnchorMinLen: ordinary words need more than length 8 before they may anchor
+	// anything. Two alternatives is the honest result, not three.
+	want := []string{"provisioning", "reconciliation"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("pickAnchors = %v, want %v", got, want)
 	}
@@ -476,6 +481,55 @@ func TestPickAnchorsRankMostFrequentFirst(t *testing.T) {
 	want := []string{"CommonHelper", "RareSingleton"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("pickAnchors = %v, want %v (most frequent first)", got, want)
+	}
+}
+
+// TestPickAnchorsKeepCommonWordsOutOfSpareSlots is the pin for the bar the plain pool has
+// to clear. MEASURED on this exact text: with one bar for both pools the check became
+// regex:(FleetMaxQueueDepth|accepted), and "accepted" is eight characters of ordinary
+// English — a wrong answer ("requests are accepted until the cap") passes the grounding
+// branch without having read anything. Easing the check eases it for an UNCITED answer too.
+func TestPickAnchorsKeepCommonWordsOutOfSpareSlots(t *testing.T) {
+	docs := []core.ContextDoc{{
+		Name: "cfg.go",
+		Text: "// FleetMaxQueueDepth caps accepted+running work.\nconst FleetMaxQueueDepth = 32\n",
+	}}
+	got, err := pickAnchors("what is the queue cap", docs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(got, "accepted") {
+		t.Fatalf("an ordinary English word took a spare slot: %v", got)
+	}
+	want := []string{"FleetMaxQueueDepth"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("pickAnchors = %v, want %v — a spare slot left empty beats a citable-by-accident one", got, want)
+	}
+}
+
+// TestPickAnchorsTopUpWithADocNameStem is the second, narrower door into the plain pool.
+// `buildinfo` is NINE characters, so a length bar alone would exclude it — yet it is the
+// name of an attached file, which makes it a proper noun of this corpus and exactly what a
+// citing answer reaches for. It is also the real case the top-up exists to serve: on the
+// live run it never reached the pool at all.
+func TestPickAnchorsTopUpWithADocNameStem(t *testing.T) {
+	docs := []core.ContextDoc{{
+		Name: "buildinfo.go",
+		Text: "package buildinfo\n\n// buildinfo carries the compiled-in version.\nfunc SelfHash() string { return \"\" }\n",
+	}}
+	got, err := pickAnchors("goal with nothing distinctive", docs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(got, "buildinfo") {
+		t.Fatalf("a token naming an attached file must earn a spare slot: %v", got)
+	}
+	if got[0] != "SelfHash" {
+		t.Fatalf("the identifier must still LEAD the alternation: %v", got)
+	}
+	// "compiled" is eight characters and names no file — it must not ride along.
+	if slices.Contains(got, "compiled") {
+		t.Fatalf("a short ordinary word slipped in beside the stem: %v", got)
 	}
 }
 
