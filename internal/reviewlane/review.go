@@ -297,14 +297,27 @@ func dropTemplateEchoes(lines []string) ([]string, int) {
 	return out, dropped
 }
 
-// noneVerdictRe matches the NONE token promptFormatTail asks for when a diff has no defects.
-var noneVerdictRe = regexp.MustCompile(`(?i)\bnone\b`)
-
-// minCleanVerdictChars is the shortest raw answer that may stand in for the NONE token. It
-// separates "the seat said something" from "the seat said nothing" — NOT "the seat said
-// something good", which is a judgement this lane does not make. A one-sentence clean verdict
-// ("no defects found in this diff") clears it; "ok" does not, and neither does "".
-const minCleanVerdictChars = 16
+// noneLineRe and noDefectRe are the two AFFIRMATIVE shapes of "I looked and found nothing":
+// the bare NONE token promptFormatTail asks for, standing alone on its own line, or an
+// explicit no-defects statement.
+//
+// Both were tightened after the lane REVIEWED ITS OWN DIFF and flagged the first version:
+//
+//   - the token test was `\bnone\b` anywhere in the answer, so "I tried but none of the
+//     tools worked" read as a clean verdict. It is now anchored to a whole line;
+//   - the fallback was a length test — any answer of 16+ characters. The seat's own finding:
+//     "I could not read the diff" is 25 characters and would have published an empty findings
+//     list instead of deferring. Verified by running the function on that exact string.
+//
+// Length was never affirmative evidence of anything; it only said the seat had said SOMETHING.
+// This gate exists because the dangerous failure is a broken run reading as clean, so it now
+// requires a positive signal and defers on everything else. That direction costs a re-read
+// when a seat phrases a clean verdict some third way; the other direction costs a false
+// all-clear on work nobody reviewed.
+var (
+	noneLineRe = regexp.MustCompile(`(?im)^\W*none\W*$`)
+	noDefectRe = regexp.MustCompile(`(?i)\bno\s+(defects?|issues?|problems?|bugs?|findings?|errors?)\b`)
+)
 
 // VerdictReadsClean reports whether the seat's OWN raw answer supports publishing an empty
 // findings list as a genuine clean review rather than as a broken run.
@@ -323,15 +336,12 @@ const minCleanVerdictChars = 16
 // signal the prompt already requests; it does not grade the answer.
 func VerdictReadsClean(output string) bool {
 	t := strings.TrimSpace(output)
-	switch {
-	case t == "":
+	if t == "" {
 		return false // the traced broken-run shape: the seat said nothing at all
-	case noneVerdictRe.MatchString(t):
-		return true // the token the prompt asks for
-	default:
-		// A seat that wrote a sentence instead of the token still reviewed something.
-		return len(t) >= minCleanVerdictChars
 	}
+	// An affirmative verdict, or nothing. A seat that reports a FAILURE ("I could not read
+	// the diff") must land here as not-clean, which is why neither branch is a length test.
+	return noneLineRe.MatchString(t) || noDefectRe.MatchString(t)
 }
 
 // capFindings resolves the caller's cap: unset or over the ceiling means DefaultMaxFindings,

@@ -329,12 +329,22 @@ func TestReportDropsAndCountsTemplateEchoes(t *testing.T) {
 // empty findings array with stop_reason "done"; the seat's raw answer is the only field that
 // differs, which is why it is read.
 func TestVerdictReadsCleanSeparatesASilentRunFromACleanOne(t *testing.T) {
-	for _, notClean := range []string{"", "   \n  ", "ok", "."} {
+	for _, notClean := range []string{
+		"", "   \n  ", "ok", ".",
+		// Both of these were flagged by the LANE ITSELF reviewing this diff, and both
+		// passed the first version of the gate. The first defeated a bare \bnone\b
+		// token match; the second defeated a "long enough to be an answer" fallback —
+		// it is 25 characters and is a seat reporting FAILURE, the exact case the gate
+		// exists to catch.
+		"I tried but none of the tools worked",
+		"I could not read the diff",
+		"The seat was unable to complete the review of this rather large diff.",
+	} {
 		if VerdictReadsClean(notClean) {
-			t.Errorf("%q must not read as a clean verdict — it is the broken-run shape", notClean)
+			t.Errorf("%q must not read as a clean verdict — it is not an affirmative all-clear", notClean)
 		}
 	}
-	for _, clean := range []string{"NONE", "none", "None.", "I found no defects in this diff."} {
+	for _, clean := range []string{"NONE", "none", "None.", "I found no defects in this diff.", "no issues found", "reviewed all hunks:\nNONE\n"} {
 		if !VerdictReadsClean(clean) {
 			t.Errorf("%q must read as a clean verdict", clean)
 		}

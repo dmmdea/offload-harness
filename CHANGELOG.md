@@ -60,6 +60,13 @@ Versioning: [SemVer](https://semver.org/).
     `NONE` verdict the prompt already asks for, and defers with a distinct reason when it is
     absent. This checks for a signal, not for quality — no judgement is made about findings.
     When the list IS genuinely empty, the response says in words that it is not a verification.
+    The gate requires an AFFIRMATIVE all-clear — the bare `NONE` token alone on a line, or an
+    explicit no-defects statement — and never a length test. Its first version accepted any
+    answer of 16+ characters, and **the lane caught that itself**: run live against this very
+    diff, the seat reported that `"I could not read the diff"` (25 characters, a seat reporting
+    FAILURE) would have published an empty findings list instead of deferring, and that a bare
+    `none` match would read `"I tried but none of the tools worked"` as clean. Both verified
+    by running the function on those exact strings, both now pinned as not-clean.
   - **Three counts, published on the same terms**, because a short findings list is the shape a
     reader most easily misreads and each has a different meaning: `dropped_ungrounded` (named a
     file the diff never touched), `dropped_echo` (handed the prompt's own template back), and
