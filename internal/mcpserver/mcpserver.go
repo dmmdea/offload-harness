@@ -262,7 +262,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// else (internal/reviewlane).
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_review_diff",
-		Description: "Review a code DIFF on a FREE local seat with CLEAN context — the reviewer sees only the diff and the task statement, never this conversation's history. That isolation is the mechanism: a reviewer without the author's accumulated context catches defects the author's own judgement has stopped seeing (long-window context degradation is the well-studied effect this exploits). Pass diff (inline) or diff_path (a file holding a unified diff) — exactly one — plus task, which is what the change was SUPPOSED to do: without stated intent a reviewer cannot tell a defect from a decision. Returns {findings:[{severity,file,line,claim,why}] ranked severe|moderate|minor first, reviewed_bytes, seat, steps, stop_reason, dropped_ungrounded?}. HOW TO USE THE RESULT: findings are TRIAGE INPUT, not verdicts. Read the flagged lines yourself and decide — never apply a finding unread, and treat a `severe` label from a small local model as a prompt to look, not as proof anything is wrong. Equally, an EMPTY findings list means this reviewer found nothing; it is not a verification that the change works. ADVISORY ONLY: this lane never gates a merge and never substitutes for the final does-it-actually-work check, which stays yours — as do security review, architecture judgement, and any call you are accountable for. dropped_ungrounded counts findings naming a file the diff never touched (an invented path is how a small seat fails here); they are removed and reported rather than silently kept. Caps: at most 10 findings (max_findings only narrows it), a diff of <=256 KiB inline or <=128 KiB via diff_path — split a larger one by path (git diff -- <dir>), which also keeps each review inside the seat's context window. On any failure it returns deferred:true with a reason and you review the diff yourself.",
+		Description: "Review a code DIFF on a FREE local seat with CLEAN context — the reviewer sees only the diff and the task statement, never this conversation's history. That isolation is the mechanism: a reviewer without the author's accumulated context catches defects the author's own judgement has stopped seeing (long-window context degradation is the well-studied effect this exploits). Pass diff (inline) or diff_path (a file holding a unified diff) — exactly one — plus task, which is what the change was SUPPOSED to do: without stated intent a reviewer cannot tell a defect from a decision. Returns {findings:[{severity,file,line,claim,why}] ranked severe|moderate|minor first, reviewed_bytes, seat, steps, stop_reason, note?, dropped_ungrounded?, dropped_echo?, truncated_by_cap?}. note explains an EMPTY findings list in words — read it, the two cases mean different things. The three counts say what is not in the list: dropped_ungrounded named a file the diff never touched, dropped_echo handed the prompt's own template back, truncated_by_cap is what your max_findings hid. HOW TO USE THE RESULT: findings are TRIAGE INPUT, not verdicts. Read the flagged lines yourself and decide — never apply a finding unread, and treat a `severe` label from a small local model as a prompt to look, not as proof anything is wrong. Equally, an EMPTY findings list means this reviewer found nothing; it is not a verification that the change works. ADVISORY ONLY: this lane never gates a merge and never substitutes for the final does-it-actually-work check, which stays yours — as do security review, architecture judgement, and any call you are accountable for. dropped_ungrounded counts findings naming a file the diff never touched (an invented path is how a small seat fails here); they are removed and reported rather than silently kept. If the seat returns nothing AND its raw answer does not read as an explicit clean verdict, this DEFERS rather than reporting an empty list — a broken run must never arrive looking like a clean diff. Caps: at most 10 findings (max_findings only narrows it), a diff of <=256 KiB inline or <=128 KiB via diff_path — split a larger one by path (git diff -- <dir>), which also keeps each review inside the seat's context window. On any failure it returns deferred:true with a reason and you review the diff yourself.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"diff":{"type":"string","description":"the unified diff text, inline (mutually exclusive with diff_path; <=256 KiB)"},"diff_path":{"type":"string","description":"path to a file holding the unified diff, read by the HARNESS under read_root so your context never pays for it (<=128 KiB)"},"task":{"type":"string","description":"what this change was SUPPOSED to accomplish — the intent the reviewer judges the diff against"},"max_findings":{"type":"integer","description":"cap on returned findings (default 10, which is also the ceiling: the seat is never asked for more)"},"read_root":{"type":"string","description":"absolute directory diff_path is read from; nothing outside it can be read (default: the server working dir)"}},"required":["task"]}`),
 	}, s.handleReviewDiff)
 
@@ -1778,7 +1778,35 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 			"defer_class": core.DeferClassAbstention, "seat": wire.Seat, "steps": wire.Steps,
 		})
 	}
-	findings, dropped := reviewlane.Report(structured.Findings, diff, in.MaxFindings)
+	rep := reviewlane.Report(structured.Findings, diff, in.MaxFindings)
+	// THE GATE. A zero-finding result is only published as a clean review when the seat's
+	// OWN raw answer says so. A structurally valid but UNEARNED empty array is reachable
+	// and indistinguishable from a real clean review at every other field: agent/loop.go
+	// returns stop_reason "done" as soon as the model stops requesting tools, with no check
+	// that the final message carries content (empty content is live-measured here — see
+	// pipeline/agenttask.go's re-pack comment on a thinking seat stranding its answer in
+	// reasoning_content); agenttask.go special-cases only "budget", so "done" with an empty
+	// Output reaches the re-pack, which extracts findings from an empty string and returns
+	// a schema-valid {"findings":[]}. steps:1 and stop_reason "done" describe both cases.
+	// wire.Output is the ONE field that differs, and it was previously read by the re-pack
+	// and then discarded. So it is read here, once, for the explicit NONE verdict the prompt
+	// already asks for — never as a judgement about the answer's quality.
+	//
+	// Ordering matters: this fires only when NOTHING was filtered out. A run whose findings
+	// were all dropped as ungrounded or as template echoes is a run that produced text, so
+	// it is not this failure, and it gets its own note below instead of a defer.
+	if len(rep.Findings) == 0 && rep.DroppedUngrounded == 0 && rep.DroppedEcho == 0 &&
+		!reviewlane.VerdictReadsClean(wire.Output) {
+		return jsonResult(map[string]any{
+			"deferred":    true,
+			"reason":      "the seat produced no findings and its raw answer did not read as a clean NONE verdict — likely a broken run, not a clean diff; review it yourself",
+			"defer_class": core.DeferClassAbstention,
+			"seat":        wire.Seat,
+			"steps":       wire.Steps,
+			"stop_reason": wire.StopReason,
+		})
+	}
+	findings := rep.Findings
 	if findings == nil {
 		// [] rather than null: "no findings" is a real answer here, and a JSON
 		// null would read to a caller as a missing field.
@@ -1791,14 +1819,30 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 		"steps":          wire.Steps,
 		"stop_reason":    wire.StopReason,
 	}
-	if dropped > 0 {
-		out["dropped_ungrounded"] = dropped
+	// All three counts are published on the same terms: present when non-zero, absent when
+	// not. Surfacing one and swallowing the others was an asymmetry with no justification —
+	// "we found more than we are showing you" is one situation, and truncating silently
+	// while counting drops loudly just moved the blind spot.
+	if rep.DroppedUngrounded > 0 {
+		out["dropped_ungrounded"] = rep.DroppedUngrounded
+	}
+	if rep.DroppedEcho > 0 {
+		out["dropped_echo"] = rep.DroppedEcho
+	}
+	if rep.TruncatedByCap > 0 {
+		out["truncated_by_cap"] = rep.TruncatedByCap
 	}
 	if len(findings) == 0 {
-		// Said in words, because this is the result most easily misread. A clean
-		// review is evidence about one reviewer's reading of one diff, and this
-		// lane never claims more than that.
-		out["note"] = "this reviewer found nothing in the diff — that is not a verification that the change works, which stays yours"
+		// Said in words, because this is the result most easily misread. Which words
+		// depends on WHY the list is empty: "found nothing" beside a non-zero drop count
+		// is simply false — the reviewer found things and the harness discarded them, and
+		// an invented path is documented right here as the ordinary way a small seat
+		// fails, so that combination is live rather than theoretical.
+		if rep.DroppedUngrounded > 0 || rep.DroppedEcho > 0 {
+			out["note"] = "this reviewer produced findings but NONE survived filtering — they named files the diff does not touch, or echoed the prompt's own template back. That is a signal about the reviewer, not about the diff: nothing here says the change is correct, and nothing here says it is wrong"
+		} else {
+			out["note"] = "this reviewer found nothing in the diff — that is not a verification that the change works, which stays yours"
+		}
 	}
 	return jsonResult(out)
 }

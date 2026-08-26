@@ -46,10 +46,45 @@ Versioning: [SemVer](https://semver.org/).
     defect and `ParseFindings` reads them back tolerantly — keeping anything it cannot parse as
     an unranked claim rather than dropping it, because a discarded line turns a reviewer that did
     work into a clean bill of health nobody issued.
-  - **A seat that returns no structured findings DEFERS** rather than degrading into an empty
-    list. "No findings" is the one result a lead might read as reassurance, so it must never be
-    what a broken run collapses into — and when it is genuine, the response says in words that it
-    is not a verification.
+  - **An empty findings list is never published unless the seat EARNED it.** "No findings" is
+    the one result a lead might read as reassurance, so it must never be what a broken run
+    collapses into — and a broken run reaches exactly that shape. Traced: `agent/loop.go` returns
+    `stop_reason:"done"` the moment the model stops requesting tools, with no check that the
+    final message carries content (empty content is live-measured in this codebase — see the
+    re-pack's own comment on a GBNF + thinking seat stranding its answer in
+    `reasoning_content`); `agenttask.go` special-cases only `"budget"`, so `"done"` with an
+    empty `Output` reaches `repackStructured`, which extracts findings from an empty string and
+    returns a schema-valid `{"findings":[]}`. `steps:1` and `stop_reason:"done"` describe both
+    cases; `wire.Output` was the one field that differed and it was being discarded. So a
+    zero-finding result is now cross-checked against the seat's own raw answer for the explicit
+    `NONE` verdict the prompt already asks for, and defers with a distinct reason when it is
+    absent. This checks for a signal, not for quality — no judgement is made about findings.
+    When the list IS genuinely empty, the response says in words that it is not a verification.
+  - **Three counts, published on the same terms**, because a short findings list is the shape a
+    reader most easily misreads and each has a different meaning: `dropped_ungrounded` (named a
+    file the diff never touched), `dropped_echo` (handed the prompt's own template back), and
+    `truncated_by_cap` (more was found than `max_findings` asked to see). Counting drops loudly
+    while truncating silently just moved the blind spot. The `note` on an empty list is now
+    gated on those counts too: "found nothing" printed beside a non-zero drop count was simply
+    false — the reviewer found things and the harness discarded them.
+  - **The worked example cannot be republished as a finding.** It is parseable and grounds
+    against any diff touching a file of that base name, and echoing it is MEASURED behaviour of
+    this seat. Choosing a neutral defect class for the example makes an echo distinguishable to
+    a person; it does nothing for the harness. `dropTemplateEchoes` drops any line
+    byte-identical (after the parser's own normalisation) to the field spec or the example, and
+    counts it. Byte equality, never resemblance — a finding that merely resembles the example is
+    a finding.
+  - **An unrecognised severity label no longer shreds the line.** "critical", "high", "blocker",
+    "P0" — small seats drift to these routinely. The label failed the known-severity test, then
+    failed the path test, and so became the *claim*, with the real claim, path and why rejoined
+    into `why`. `File` came out empty, so grounding skipped the wreckage and it reached the
+    caller UNCOUNTED, looking like an ordinary finding. Now an unknown label in the severity
+    slot (recognised by the NEXT field being path-shaped) is kept as an unranked severity and
+    the rest parses normally — so an invented path riding with it is visible to grounding again.
+  - **The format spec is restated AFTER the diff.** At `MaxDiffBytes` the first statement sits a
+    quarter of a megabyte from the point where it must be applied. Resting the whole design on
+    lost-in-the-middle and then burying the one instruction that has already failed live at the
+    far end of the context would be incoherent.
   - **The format spec carries a filled-in example**, found the only way it could be: a live run.
     With an abstract `severity | file:line | claim | why` template the 27B seat located both
     planted defects and then wrote back `severe | file:16` — it had copied the placeholder name

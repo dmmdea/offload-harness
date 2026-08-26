@@ -2,6 +2,7 @@ package reviewlane
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -38,6 +39,24 @@ func TestPromptCarriesAFilledInExampleRatherThanABareTemplate(t *testing.T) {
 	}
 	if !strings.Contains(p, "<severity> | <path>:<line> | <claim> | <why>") {
 		t.Fatal("the field spec must be unmistakably placeholders, not words a seat can read as literals")
+	}
+}
+
+// At MaxDiffBytes the first statement of the format sits a quarter of a megabyte from the
+// point where it has to be applied — and attention decay over a long window is this lane's
+// own founding thesis, so burying the one instruction that has already failed live at the far
+// end of the context would be incoherent.
+func TestPromptRepeatsTheFormatSpecAfterTheDiff(t *testing.T) {
+	p := buildPrompt("make it work", "--- a/x.go\n+++ b/x.go\n+MARKER_IN_THE_DIFF\n")
+	if n := strings.Count(p, fieldSpec); n < 2 {
+		t.Fatalf("the field spec must be stated on BOTH sides of the diff; found %d occurrence(s)", n)
+	}
+	after := p[strings.Index(p, "MARKER_IN_THE_DIFF"):]
+	if !strings.Contains(after, fieldSpec) {
+		t.Fatal("the repeat must come AFTER the diff body, where it has to be applied")
+	}
+	if !strings.Contains(after, "NONE") {
+		t.Fatal("the NONE instruction must be restated after the diff too")
 	}
 }
 
@@ -200,23 +219,125 @@ func TestGroundKeepsEverythingWhenTheDiffNamedNoFiles(t *testing.T) {
 
 func TestReportGroundsRanksAndCaps(t *testing.T) {
 	diff := "--- a/run.go\n+++ b/run.go\n@@ -1 +1 @@\n+x\n"
-	got, dropped := Report([]string{
+	rep := Report([]string{
 		"minor | run.go:3 | naming | cosmetic",
 		"severe | ghost.go:1 | invented file | not in the diff",
 		"severe | run.go:42 | off-by-one | reads past the end",
 		"moderate | run.go:9 | missing nil check | panics on empty input",
 	}, diff, 2)
-	if dropped != 1 {
-		t.Fatalf("the ungrounded finding must be counted: %d", dropped)
+	if rep.DroppedUngrounded != 1 {
+		t.Fatalf("the ungrounded finding must be counted: %d", rep.DroppedUngrounded)
 	}
-	if len(got) != 2 {
-		t.Fatalf("cap not applied: %+v", got)
+	if len(rep.Findings) != 2 {
+		t.Fatalf("cap not applied: %+v", rep.Findings)
 	}
-	if got[0].Severity != "severe" || got[0].Claim != "off-by-one" {
-		t.Fatalf("severe must lead: %+v", got)
+	if rep.TruncatedByCap != 1 {
+		t.Fatalf("what the cap hid must be counted too, not silently dropped: %d", rep.TruncatedByCap)
 	}
-	if got[1].Severity != "moderate" {
-		t.Fatalf("moderate must follow severe: %+v", got)
+	if rep.Findings[0].Severity != "severe" || rep.Findings[0].Claim != "off-by-one" {
+		t.Fatalf("severe must lead: %+v", rep.Findings)
+	}
+	if rep.Findings[1].Severity != "moderate" {
+		t.Fatalf("moderate must follow severe: %+v", rep.Findings)
+	}
+}
+
+// The ceiling has to bind THROUGH Report, not just inside capFindings. Asserting on
+// capFindings alone left the whole suite green with the clamp deleted from Report entirely —
+// a test that cannot fail is decorative. Mutation-verified: removing capFindings from Report
+// makes this test RED.
+func TestReportAppliesTheCeilingEvenWhenTheCallerAsksForMore(t *testing.T) {
+	diff := "--- a/run.go\n+++ b/run.go\n@@ -1 +1 @@\n+x\n"
+	lines := make([]string, 0, 12)
+	for i := 0; i < 12; i++ {
+		lines = append(lines, fmt.Sprintf("minor | run.go:%d | finding %d | why %d", i+1, i, i))
+	}
+	rep := Report(lines, diff, 999)
+	if len(rep.Findings) != DefaultMaxFindings {
+		t.Fatalf("a cap above the ceiling must clamp to DefaultMaxFindings (%d); got %d", DefaultMaxFindings, len(rep.Findings))
+	}
+	if rep.TruncatedByCap != 12-DefaultMaxFindings {
+		t.Fatalf("truncation must be counted: got %d, want %d", rep.TruncatedByCap, 12-DefaultMaxFindings)
+	}
+	if rep = Report(lines, diff, 3); len(rep.Findings) != 3 || rep.TruncatedByCap != 9 {
+		t.Fatalf("a caller narrowing the list must be honoured and counted: %d findings, %d truncated", len(rep.Findings), rep.TruncatedByCap)
+	}
+}
+
+// An unrecognised severity label used to SHRED the line: the label became the claim and the
+// real claim, path and why were rejoined into Why. File came out empty, so Ground skipped it
+// (it only judges findings that name a file) and the wreckage reached the caller UNCOUNTED,
+// looking like an ordinary finding. Small seats drift to critical/high/blocker/P0 routinely.
+func TestParseFindingsKeepsAnUnrecognisedSeverityInsteadOfShreddingTheLine(t *testing.T) {
+	got := ParseFindings([]string{"critical | run.go:5 | off-by-one | indexes past the end"})
+	if len(got) != 1 {
+		t.Fatalf("want one finding: %+v", got)
+	}
+	f := got[0]
+	if f.File != "run.go" || f.Line != 5 {
+		t.Fatalf("the path must still be parsed, or Ground can never judge it: %+v", f)
+	}
+	if f.Claim != "off-by-one" || f.Why != "indexes past the end" {
+		t.Fatalf("claim and why must survive an unknown label: %+v", f)
+	}
+	if f.Severity != "critical" {
+		t.Fatalf("the label the seat actually used must be kept, not discarded: %+v", f)
+	}
+	if ranked := rankFindings([]Finding{f, {Severity: "minor", Claim: "m"}}, 0); ranked[0].Severity != "minor" {
+		t.Fatalf("an unrecognised label must not outrank a real severity: %+v", ranked)
+	}
+}
+
+// The consequence of the fix above, and the reason it matters: with the path parsed, an
+// invented one is now visible to Ground and COUNTED instead of escaping.
+func TestAnUnrecognisedSeverityFindingStillFacesGrounding(t *testing.T) {
+	rep := Report([]string{"critical | ghost.go:1 | invented | not in the diff"},
+		"--- a/run.go\n+++ b/run.go\n@@ -1 +1 @@\n+x\n", 0)
+	if rep.DroppedUngrounded != 1 {
+		t.Fatalf("an invented path must be counted whatever severity label rode with it: %+v", rep)
+	}
+	if len(rep.Findings) != 0 {
+		t.Fatalf("and it must not reach the caller: %+v", rep.Findings)
+	}
+}
+
+// The worked example is parseable and grounds against any diff touching a file with that base
+// name, so an echo of it would arrive as an ordinary finding. Echoing it is MEASURED
+// behaviour of this seat, so the guard is a machine check rather than a human's vigilance.
+func TestReportDropsAndCountsTemplateEchoes(t *testing.T) {
+	diff := "--- a/load.go\n+++ b/load.go\n@@ -1 +1 @@\n+x\n" // grounds the example's own path
+	rep := Report([]string{
+		exampleFinding,               // the worked example, verbatim
+		"- " + exampleFinding + "  ", // ...wearing the decoration a seat adds
+		fieldSpec,                    // the placeholder line itself
+		"severe | load.go:3 | real finding | genuine",
+	}, diff, 0)
+	if rep.DroppedEcho != 3 {
+		t.Fatalf("every echo of the prompt's own template must be dropped and counted: %+v", rep)
+	}
+	if len(rep.Findings) != 1 || rep.Findings[0].Claim != "real finding" {
+		t.Fatalf("the genuine finding must survive: %+v", rep.Findings)
+	}
+	// Byte-equality, never resemblance: a finding that merely looks like the example is a
+	// finding, and dropping it would be the quality judgement this lane does not make.
+	if near := Report([]string{exampleFinding + " and also this"}, diff, 0); near.DroppedEcho != 0 {
+		t.Fatalf("only a byte-identical echo is dropped: %+v", near)
+	}
+}
+
+// The gate that separates a clean review from a broken run. Both arrive as a schema-valid
+// empty findings array with stop_reason "done"; the seat's raw answer is the only field that
+// differs, which is why it is read.
+func TestVerdictReadsCleanSeparatesASilentRunFromACleanOne(t *testing.T) {
+	for _, notClean := range []string{"", "   \n  ", "ok", "."} {
+		if VerdictReadsClean(notClean) {
+			t.Errorf("%q must not read as a clean verdict — it is the broken-run shape", notClean)
+		}
+	}
+	for _, clean := range []string{"NONE", "none", "None.", "I found no defects in this diff."} {
+		if !VerdictReadsClean(clean) {
+			t.Errorf("%q must read as a clean verdict", clean)
+		}
 	}
 }
 

@@ -23,17 +23,38 @@ import (
 const reviewDiff = "diff --git a/run.go b/run.go\n--- a/run.go\n+++ b/run.go\n@@ -1,3 +1,4 @@\n+for i := 0; i <= len(xs); i++ {\n"
 
 // seatFindings builds the wire result a healthy seat produces: the structured re-pack's
-// {findings:[...]} string array.
+// {findings:[...]} string array, alongside the raw answer it was extracted from.
+//
+// With no lines the raw answer is the NONE token, because that is what a GENUINE clean review
+// looks like. Leaving it empty would make this fixture the BROKEN-run shape instead — and
+// those two were indistinguishable until the clean-verdict gate landed, which is precisely
+// why the fixture has to commit to being one of them. seatRaw builds the other.
 func seatFindings(lines ...string) core.AgentWireResult {
+	if lines == nil {
+		lines = []string{}
+	}
 	arr, _ := json.Marshal(map[string]any{"findings": lines})
+	raw := strings.Join(lines, "\n")
+	if raw == "" {
+		raw = "NONE"
+	}
 	return core.AgentWireResult{
 		SchemaVersion: core.AgentWireSchemaVersion,
 		Seat:          "fake-seat",
-		Output:        strings.Join(lines, "\n"),
+		Output:        raw,
 		Structured:    arr,
 		Steps:         2,
 		StopReason:    "done",
 	}
+}
+
+// seatRaw sets the seat's raw answer independently of its structured findings. The two CAN
+// disagree, and they disagree exactly when a run is broken — an empty final message re-packs
+// into a schema-valid empty array.
+func seatRaw(output string, lines ...string) core.AgentWireResult {
+	w := seatFindings(lines...)
+	w.Output = output
+	return w
 }
 
 func reviewArgs(t *testing.T, args map[string]any) string {
@@ -154,6 +175,96 @@ func TestReviewDiffEmptyFindingsSaysWhatItIsNot(t *testing.T) {
 	}
 }
 
+// THE CRITICAL CASE. A structurally valid but UNEARNED empty findings array: agent/loop.go
+// returns stop_reason "done" the moment the model stops requesting tools, with no check that
+// the final message carries content, so an empty Output reaches the re-pack, which extracts
+// findings from an empty string and returns a schema-valid {"findings":[]}. steps, stop_reason
+// and the array are all identical to a real clean review — the raw answer is the only field
+// that differs, so it is what decides.
+func TestReviewDiffDefersOnAnEmptyReviewItDidNotEarn(t *testing.T) {
+	for name, raw := range map[string]string{"empty": "", "whitespace": "  \n ", "too short to be a verdict": "ok"} {
+		s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
+			return seatRaw(raw), nil
+		})
+		res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
+			"diff": reviewDiff, "task": "iterate over every element exactly once",
+		})))
+		if err != nil {
+			t.Fatalf("%s: handleReviewDiff: %v", name, err)
+		}
+		m := decodeResult(t, res)
+		if m["deferred"] != true {
+			t.Fatalf("%s: an unearned empty review must defer, not publish a clean bill of health: %v", name, m)
+		}
+		if reason, _ := m["reason"].(string); !strings.Contains(reason, "clean NONE verdict") {
+			t.Errorf("%s: the defer must name WHY it is not trusted: %q", name, reason)
+		}
+		if m["findings"] != nil || m["note"] != nil {
+			t.Errorf("%s: a defer must carry neither a findings list nor the clean-review note: %v", name, m)
+		}
+	}
+}
+
+// "found nothing" beside a non-zero drop count is simply false: the reviewer found things and
+// the harness discarded them. An invented path is documented as the ordinary way a small seat
+// fails here, so this combination is live rather than theoretical.
+func TestReviewDiffNoteDoesNotContradictTheDropCount(t *testing.T) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
+		return seatFindings(
+			"severe | ghost.go:1 | invented file | not in the diff",
+			"minor | phantom.go:2 | also invented | still not in the diff",
+		), nil
+	})
+	res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
+		"diff": reviewDiff, "task": "iterate over every element exactly once",
+	})))
+	if err != nil {
+		t.Fatalf("handleReviewDiff: %v", err)
+	}
+	m := decodeResult(t, res)
+	if m["deferred"] != nil {
+		t.Fatalf("a run that produced text is not the broken-run shape: %v", m)
+	}
+	if m["dropped_ungrounded"].(float64) != 2 {
+		t.Fatalf("both invented findings must be counted: %v", m["dropped_ungrounded"])
+	}
+	note, _ := m["note"].(string)
+	if strings.Contains(note, "found nothing in the diff") {
+		t.Errorf("the note contradicts the drop count it ships beside: %q", note)
+	}
+	if !strings.Contains(note, "survived filtering") {
+		t.Errorf("the note must say what actually happened: %q", note)
+	}
+}
+
+// max_findings had no front-door test at all, and truncation was silent while drops were
+// counted — two structurally identical "we found more than we are showing you" situations
+// treated differently.
+func TestReviewDiffHonoursMaxFindingsAndReportsWhatItHid(t *testing.T) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
+		return seatFindings(
+			"severe | run.go:1 | one | why one",
+			"severe | run.go:2 | two | why two",
+			"moderate | run.go:3 | three | why three",
+			"minor | run.go:4 | four | why four",
+			"minor | run.go:5 | five | why five",
+		), nil
+	})
+	res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
+		"diff": reviewDiff, "task": "iterate over every element exactly once", "max_findings": 3,
+	})))
+	if err != nil {
+		t.Fatalf("handleReviewDiff: %v", err)
+	}
+	m := decodeResult(t, res)
+	if findings, _ := m["findings"].([]any); len(findings) != 3 {
+		t.Fatalf("max_findings must narrow the published list: %v", m["findings"])
+	}
+	if m["truncated_by_cap"].(float64) != 2 {
+		t.Fatalf("what the cap hid must be reported the way drops are: %v", m["truncated_by_cap"])
+	}
+}
+
 func TestReviewDiffRequiresExactlyOneDiffSource(t *testing.T) {
 	s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
 		t.Error("the seat must never be reached on a caller-input refusal")
@@ -198,7 +309,7 @@ func TestReviewDiffDefersOnASeatFailure(t *testing.T) {
 
 // A seat that comes back with no structured findings must DEFER, never degrade into an
 // empty findings list — the one shape a caller could misread as "the diff is clean".
-func TestReviewDiffDefersRatherThanPublishingAnEmptyReviewItDidNotEarn(t *testing.T) {
+func TestReviewDiffDefersWhenTheSeatReturnedNoStructuredFindings(t *testing.T) {
 	s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Seat: "fake-seat", Output: "I could not read the diff", StopReason: "done"}, nil
 	})

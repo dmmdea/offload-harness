@@ -134,10 +134,22 @@ Four design choices are load-bearing rather than incidental:
   array of strings, so an object-item schema would have become strings anyway; the prompt asks
   for one `severity | file:line | claim | why` line per defect and `ParseFindings` reads them
   back tolerantly, keeping what it cannot parse as an unranked claim rather than dropping it.
-- **A seat returning no structured findings DEFERS**, rather than degrading into an empty list.
-  "No findings" is the one result a reader might take as reassurance, so it must never be what a
-  broken run collapses into — and when it is genuine, the response says in words that it is not
-  a verification.
+- **An empty findings list is never published unless the seat EARNED it.** "No findings" is the
+  one result a reader might take as reassurance, and a broken run reaches exactly that shape:
+  `agent/loop.go` returns `stop_reason:"done"` as soon as the model stops requesting tools with
+  no check that the final message carries content (empty content is live-measured here — the
+  re-pack's comment on a GBNF + thinking seat stranding its answer in `reasoning_content`),
+  `agenttask.go` special-cases only `"budget"`, and `repackStructured` extracts findings from an
+  empty string into a schema-valid `{"findings":[]}`. `steps` and `stop_reason` describe both
+  cases. So `reviewlane.VerdictReadsClean` cross-checks the seat's OWN raw answer for the
+  explicit `NONE` verdict the prompt asks for, and the handler defers with a distinct reason
+  when it is absent. It checks for a signal, never for quality. When the list is genuinely
+  empty, the response says in words that it is not a verification.
+- **Three counts say what is NOT in the list**, published on the same terms (present when
+  non-zero): `dropped_ungrounded`, `dropped_echo` (the prompt's own field spec or worked example
+  handed back as a finding — measured behaviour, so it is a byte-equality guard rather than a
+  human's vigilance), and `truncated_by_cap`. The `note` on an empty list is gated on them:
+  "found nothing" beside a non-zero drop count is false, and says so differently.
 
 Everything the lane returns is ADVISORY: it never gates a merge and never substitutes for the
 final does-it-actually-work verification, which stays with the caller — as do security review,

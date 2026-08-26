@@ -40,6 +40,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -97,9 +98,14 @@ var reviewOutputSchema = json.RawMessage(`{"type":"object","properties":{"findin
 // promptHeader is the whole of the reviewer's instructions. It says "you have no prior
 // knowledge" in as many words: the isolation is not merely a fact of how the seat is
 // invoked, it is what the reviewer is asked to lean on.
+//
+// It does NOT claim that nothing else is reachable, which an earlier draft did. That claim
+// was false: BuildContract leaves Profile empty so the executing box's own agent_profile
+// decides the toolset, and an un-narrowed profile hands the loop list_dir/read_file over the
+// job dir. So the instruction is phrased as something the reviewer must DO ("do not look
+// anything up") rather than as a fact about its sandbox that the sandbox does not enforce.
 const promptHeader = `You are reviewing a code diff. You have NO prior knowledge of this work — you were not
-present for it, and nothing beyond this message is available to you. Judge ONLY the diff
-below, against the stated task.
+present for it. Do not look anything up: judge ONLY the diff below, against the stated task.
 
 Report concrete defects: logic errors, off-by-one and boundary mistakes, unhandled errors,
 missing edge cases, security problems, and changes that contradict the task. Do NOT comment
@@ -121,17 +127,29 @@ defect you cannot point at a changed line is not a finding.
 // DIFFERENT defect class from anything a test diff is likely to plant: the first version used
 // an off-by-one, the seat replied in the example's exact wording, and "found it" became
 // indistinguishable from "parroted it".
+//
+// fieldSpec and exampleFinding are their own constants because they are read TWICE: once to
+// build the prompt, and once by dropTemplateEchoes to discard those same two lines if the
+// seat hands them back AS findings. Echoing the example is measured behaviour of this seat
+// (see the CHANGELOG's 0.97.0 entry), so the guard must compare against the exact text the
+// prompt shipped — a second copy of either string would stop matching the moment one was
+// edited, and the guard would go quietly inert.
+const (
+	fieldSpec      = `<severity> | <path>:<line> | <claim> | <why>`
+	exampleFinding = `moderate | internal/store/load.go:57 | the returned error is discarded with _ | a failed load reads as an empty store`
+)
+
 const promptFormatHead = `
 Answer with ONE LINE PER DEFECT, at most `
 
 const promptFormatTail = ` lines, most serious first, each with
 FOUR fields separated by | and nothing else around them:
 
-<severity> | <path>:<line> | <claim> | <why>
+` + fieldSpec + `
 
 A filled-in example of one line, for shape only — it is not about the diff below:
 
-moderate | internal/store/load.go:57 | the returned error is discarded with _ | a failed load reads as an empty store
+` + exampleFinding + `
 
 <severity> is one of: severe, moderate, minor. <path> is the file's REAL path, copied from
 the diff — never the literal word "file". <line> is its line number in the new file.
@@ -142,19 +160,46 @@ after the lines. If the diff has no defects, answer with the single word: NONE
 TASK:
 `
 
+// promptReminderHead/promptReminderTail repeat the field spec AFTER the diff.
+//
+// Not redundancy — arithmetic. The diff may run to MaxDiffBytes (256 KiB), which puts the
+// original spec a quarter of a megabyte above the point where it has to be applied, and
+// attention decay over a long window is this lane's own founding thesis. It would be
+// incoherent to rest the whole design on lost-in-the-middle and then bury the one
+// instruction that has ALREADY failed live (see promptFormatTail) at the far end of the
+// context.
+const promptReminderHead = `
+REMINDER, now that you have read the diff — the answer format, repeated here because it was
+stated a long way above and this is where it has to be applied:
+
+` + fieldSpec + `
+
+One line per defect, at most `
+
+const promptReminderTail = ` lines, most serious first, nothing before or after them.
+Use the file's REAL path from the diff. If the diff has no defects, answer with the single
+word: NONE
+`
+
 // buildPrompt assembles the seat's entire instruction: header, format, task, diff. Nothing
 // else reaches the reviewer — no history, no file list, no prior findings.
 func buildPrompt(task, diff string) string {
+	n := strconv.Itoa(DefaultMaxFindings)
 	var b strings.Builder
-	b.Grow(len(promptHeader) + len(promptFormatHead) + len(promptFormatTail) + len(task) + len(diff) + 32)
+	b.Grow(len(promptHeader) + len(promptFormatHead) + len(promptFormatTail) +
+		len(promptReminderHead) + len(promptReminderTail) + len(task) + len(diff) + 32)
 	b.WriteString(promptHeader)
 	b.WriteString(promptFormatHead)
-	b.WriteString(strconv.Itoa(DefaultMaxFindings))
+	b.WriteString(n)
 	b.WriteString(promptFormatTail)
 	b.WriteString(task)
 	b.WriteString("\n\nDIFF:\n")
 	b.WriteString(diff)
 	b.WriteString("\n")
+	// The format spec again, on the near side of the diff — see promptReminderHead.
+	b.WriteString(promptReminderHead)
+	b.WriteString(n)
+	b.WriteString(promptReminderTail)
 	return b.String()
 }
 
@@ -191,12 +236,102 @@ func BuildContract(task, diff string) (core.AgentContract, error) {
 	}, "")
 }
 
-// Report turns the seat's raw finding lines into what the caller is shown: parsed, grounded
-// against the diff's own files, severity-ranked, and capped. The second return is how many
-// findings named a file the diff never touched — surfaced, never silently swallowed.
-func Report(lines []string, diff string, max int) ([]Finding, int) {
-	kept, dropped := Ground(ParseFindings(lines), FilesInDiff(diff))
-	return rankFindings(kept, capFindings(max)), dropped
+// Result is everything one review publishes: the findings the caller is shown, plus the
+// three counts that say what is NOT in that list.
+//
+// The counts are not telemetry. A short or empty findings list is the shape a reader most
+// easily misreads, and each count means something different about WHY it is short:
+// DroppedUngrounded says the seat named a file the diff does not touch (it invented a path),
+// DroppedEcho says it handed the prompt's own template back instead of reviewing, and
+// TruncatedByCap says more was found than the caller asked to see. Counting one and
+// swallowing the others would make the published list quietly unreadable — the same reason
+// dropped-but-uncounted was wrong in the first place.
+type Result struct {
+	Findings          []Finding
+	DroppedUngrounded int
+	DroppedEcho       int
+	TruncatedByCap    int
+}
+
+// Report turns the seat's raw finding lines into what the caller is shown: template echoes
+// removed, parsed, grounded against the diff's own files, severity-ranked, capped — with a
+// count for each of the three ways a line can fail to reach the caller.
+func Report(lines []string, diff string, max int) Result {
+	lines, echoed := dropTemplateEchoes(lines)
+	kept, ungrounded := Ground(ParseFindings(lines), FilesInDiff(diff))
+	ranked := rankFindings(kept, capFindings(max))
+	return Result{
+		Findings:          ranked,
+		DroppedUngrounded: ungrounded,
+		DroppedEcho:       echoed,
+		// rankFindings reorders and truncates and does nothing else, so the difference
+		// between what went in and what came out IS the cap's doing.
+		TruncatedByCap: len(kept) - len(ranked),
+	}
+}
+
+// dropTemplateEchoes removes lines that are the prompt's own field spec or worked example
+// handed straight back, and counts them.
+//
+// This converts a human judgement into a machine check. The worked example is parseable and
+// grounds against any diff touching a file with that base name, so an echo of it would reach
+// the caller as an ordinary finding — and echoing the example is not hypothetical: it was
+// MEASURED on this seat while building the lane (the first example described the same defect
+// class as the planted one, and the reply came back in the example's exact wording). Choosing
+// a neutral example makes an echo distinguishable to a person reading the output; it does
+// nothing for the harness. This does.
+//
+// It is a byte-equality test after the same normalisation ParseFindings applies, never a
+// similarity test: a finding that merely resembles the example is a finding, and dropping it
+// would be the quality judgement this package's own comment argues against.
+func dropTemplateEchoes(lines []string) ([]string, int) {
+	out := make([]string, 0, len(lines))
+	dropped := 0
+	for _, ln := range lines {
+		if t := normalizeLine(ln); t == fieldSpec || t == exampleFinding {
+			dropped++
+			continue
+		}
+		out = append(out, ln)
+	}
+	return out, dropped
+}
+
+// noneVerdictRe matches the NONE token promptFormatTail asks for when a diff has no defects.
+var noneVerdictRe = regexp.MustCompile(`(?i)\bnone\b`)
+
+// minCleanVerdictChars is the shortest raw answer that may stand in for the NONE token. It
+// separates "the seat said something" from "the seat said nothing" — NOT "the seat said
+// something good", which is a judgement this lane does not make. A one-sentence clean verdict
+// ("no defects found in this diff") clears it; "ok" does not, and neither does "".
+const minCleanVerdictChars = 16
+
+// VerdictReadsClean reports whether the seat's OWN raw answer supports publishing an empty
+// findings list as a genuine clean review rather than as a broken run.
+//
+// This closes the hole that made the two indistinguishable. The traced path: agent/loop.go
+// returns stop_reason "done" the moment the model stops requesting tools, with no check that
+// the final message has any CONTENT — and empty content is live-measured in this codebase
+// (pipeline/agenttask.go's re-pack comment: a GBNF + thinking seat puts its answer in
+// reasoning_content and leaves content empty). agenttask.go special-cases only "budget", so
+// "done" with an empty Output reaches repackStructured, which extracts findings from an empty
+// string and returns a schema-valid {"findings":[]}. Nothing downstream could tell that from
+// a real clean review: steps:1 and stop_reason "done" describe both, and Output — the one
+// field that differs — was consumed by the re-pack and thrown away.
+//
+// So the caller checks it here. This asks ONLY for the explicit "I looked and found nothing"
+// signal the prompt already requests; it does not grade the answer.
+func VerdictReadsClean(output string) bool {
+	t := strings.TrimSpace(output)
+	switch {
+	case t == "":
+		return false // the traced broken-run shape: the seat said nothing at all
+	case noneVerdictRe.MatchString(t):
+		return true // the token the prompt asks for
+	default:
+		// A seat that wrote a sentence instead of the token still reviewed something.
+		return len(t) >= minCleanVerdictChars
+	}
 }
 
 // capFindings resolves the caller's cap: unset or over the ceiling means DefaultMaxFindings,
@@ -244,14 +379,7 @@ const listMarkers = "-*•‣— \t"
 func ParseFindings(lines []string) []Finding {
 	out := make([]Finding, 0, len(lines))
 	for _, raw := range lines {
-		s := strings.TrimSpace(raw)
-		s = strings.TrimLeft(s, listMarkers)
-		// A numbered list ("1. severe | ...") — strip the ordinal, not a real digit-led
-		// claim, so the dot/paren is required.
-		if i := strings.IndexAny(s, ".)"); i > 0 && i <= 3 && isDigits(s[:i]) {
-			s = strings.TrimSpace(s[i+1:])
-		}
-		s = strings.TrimSpace(strings.Trim(s, "`"))
+		s := normalizeLine(raw)
 		if s == "" || strings.EqualFold(strings.TrimRight(s, "."), "none") {
 			continue
 		}
@@ -260,7 +388,25 @@ func ParseFindings(lines []string) []Finding {
 			parts[i] = strings.TrimSpace(parts[i])
 		}
 		f := Finding{}
-		if sev := strings.ToLower(strings.Trim(parts[0], " \t*_`")); len(parts) > 1 && isKnownSeverity(sev) {
+		sev := strings.ToLower(strings.Trim(parts[0], " \t*_`"))
+		switch {
+		case len(parts) > 1 && isKnownSeverity(sev):
+			f.Severity = sev
+			parts = parts[1:]
+		case len(parts) > 1 && !looksLikePath(parts[0]) && looksLikePath(parts[1]):
+			// An UNRECOGNISED label sitting in the severity slot — "critical", "high",
+			// "blocker", "P0". Small seats drift to these routinely, and leaving the
+			// slot unconsumed used to SHRED the line: looksLikePath rejected the label
+			// too, so it became the Claim and the real claim, path and why were rejoined
+			// into Why. Worse, File came out empty, so Ground skipped the wreckage
+			// (it only judges findings that name a file) and it reached the caller
+			// uncounted, looking like a normal finding — breaking this function's own
+			// promise that a badly formatted line survives as an unranked claim.
+			//
+			// The label is kept rather than discarded: rankFindings sorts any unknown
+			// severity last, so it costs nothing and tells the reader what the seat
+			// actually said. The next field being path-shaped is what makes this a
+			// severity slot rather than a guess.
 			f.Severity = sev
 			parts = parts[1:]
 		}
@@ -268,6 +414,10 @@ func ParseFindings(lines []string) []Finding {
 			f.File, f.Line = splitFileLine(parts[0])
 			parts = parts[1:]
 		}
+		// Whatever is left leads the claim. A two-field line ("severe | run.go:5", a shape
+		// Run 1 of the live exercise actually emitted) lands here with the path still in
+		// parts[0]: it becomes the Claim, with File empty. That is deliberate — the text is
+		// preserved verbatim rather than half-parsed into a File the seat never confirmed.
 		f.Claim = parts[0]
 		if len(parts) > 1 {
 			// Everything after the claim is the why, rejoined: a seat that used a pipe
@@ -277,6 +427,21 @@ func ParseFindings(lines []string) []Finding {
 		out = append(out, f)
 	}
 	return out
+}
+
+// normalizeLine strips the decoration a seat adds around a line it was told to write bare:
+// surrounding space, a bullet, an ordinal, wrapping backticks. Shared by ParseFindings and
+// dropTemplateEchoes so the echo guard and the parser can never disagree about what a line
+// "is" — a guard that normalises differently from the parser it protects is a guard that
+// misses.
+func normalizeLine(s string) string {
+	s = strings.TrimLeft(strings.TrimSpace(s), listMarkers)
+	// A numbered list ("1. severe | ...") — strip the ordinal, not a real digit-led claim,
+	// so the dot/paren is required.
+	if i := strings.IndexAny(s, ".)"); i > 0 && i <= 3 && isDigits(s[:i]) {
+		s = strings.TrimSpace(s[i+1:])
+	}
+	return strings.TrimSpace(strings.Trim(s, "`"))
 }
 
 func isKnownSeverity(s string) bool { _, ok := sevRank[s]; return ok }
