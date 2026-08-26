@@ -292,6 +292,11 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 	// and could even deal two subtasks against different snapshots.
 	if route == "spread" {
 		r.spreadViews, r.spreadBases, r.spreadProbeErrs = r.fetchViews(ctx)
+		// The deal is computed HERE, once, over every subtask at once —
+		// dealSpread's comment carries the proof that a per-subtask pick cannot
+		// hold the one-per-seat-per-cycle invariant. It must run before the
+		// goroutines below: they read it, they never build it.
+		r.spreadDeal = r.dealSpread(subtasks, r.localView())
 	}
 	results := make([]PlacedResult, len(subtasks))
 	sem := make(chan struct{}, runConcurrency)
@@ -413,6 +418,9 @@ type runner struct {
 	spreadViews     []NodeView
 	spreadBases     []string
 	spreadProbeErrs []string
+	// spreadDeal is the whole run's placement, computed by dealSpread in Run
+	// before any subtask goroutine starts and READ-ONLY from then on.
+	spreadDeal []spreadSlot
 }
 
 // placement is a resolved "run it HERE" — the node, its dial base ("" for
@@ -495,9 +503,16 @@ func retryable(pr PlacedResult) bool {
 // when the first attempt ran locally (probing the fleet now if this run has
 // not yet), the local seat when it ran remotely. ok=false when no different
 // node can take the contract.
+//
+// Note the asymmetry and its cost: recovering a wrong REMOTE answer puts the
+// work back on the local box the harness exists to keep free — so a placement
+// the fit score reads too cheap is paid for in local GPU time, not just in
+// latency. That is accepted deliberately (local is the one seat always able to
+// take the contract, and a second remote hop would need a fresh gate pass
+// mid-timeout), but it is a real cost, not a free retry.
 func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contract core.AgentContract) (placement, bool) {
 	st := Subtask{Contract: contract, EstTokens: EstimateTokens(contract)}
-	localView := NodeView{NodeID: r.localNodeID(), AgentSeat: r.cfg.AgentPlannerModel(""), Local: true}
+	localView := r.localView()
 	why := attemptOutcome(first)
 	if !first.ranLocal {
 		return placement{view: localView, reason: "retry on local after " + first.Node + " " + why}, true
@@ -556,14 +571,83 @@ func baseFor(chosen NodeView, views []NodeView, bases []string) string {
 	return ""
 }
 
-// placeSpread deals subtask i across the run's fleet snapshot: slot 0 is the
+// dealSpread computes the spread placement for EVERY subtask of the run in ONE
+// ordered pass, before any dispatch goroutine starts. It is a deal, not N
+// independent picks, and that is forced rather than stylistic:
+//
+// The invariant spread exists to hold is that within each deal CYCLE — each
+// aligned window of len(nodes) slots — every eligible seat receives at most one
+// subtask, so `runConcurrency` sibling subtasks never queue behind each other on
+// one seat while another seat idles. A fit score that re-picks freely breaks it
+// immediately: the smallest seat wins EVERY mechanical slot and the roomiest
+// wins every reasoning slot, which is the stacking spread was built to remove.
+//
+// That invariant cannot be recovered by any per-subtask pure function of
+// (index, own shape, roster). Proof, because it decided the shape of this code:
+// let f(slot, shape) be such a function. Distinctness within a cycle forces
+// f(·, shape) to be a bijection over the seats for each shape. Distinctness
+// across a MIXED-shape cycle additionally forces f(p, mechanical) != f(q,
+// reasoning) for all p != q — and since both are bijections, that holds only if
+// f(p, mechanical) == f(p, reasoning) for every p, i.e. only if the shape does
+// not influence the placement at all. Fit scoring and the invariant coexist only
+// when the deal can see its siblings, so the deal is computed jointly, once,
+// with every subtask's shape in hand.
+//
+// Computing it up front also keeps placement DETERMINISTIC and free of shared
+// mutable state: the cycle bookkeeping lives in this single-threaded pass, the
+// result is read-only by the time the goroutines start (same posture as the
+// spreadViews snapshot), and the same contracts always produce the same deal.
+func (r *runner) dealSpread(contracts []core.AgentContract, localView NodeView) []spreadSlot {
+	// dealt holds the node ids already given a subtask in the CURRENT cycle.
+	dealt := make(map[string]bool, len(r.spreadViews))
+	out := make([]spreadSlot, len(contracts))
+	for i, c := range contracts {
+		st := Subtask{Contract: c, EstTokens: EstimateTokens(c)}
+		out[i] = r.placeSpread(i, st, localView, dealt)
+	}
+	return out
+}
+
+// spreadSlot is one subtask's resolved spread placement plus the deadFleet flag
+// route=auto also raises — see PlacedResult.remotesUnreachable.
+type spreadSlot struct {
+	placement
+	deadFleet bool
+}
+
+// placeSpread deals ONE subtask across the run's fleet snapshot: slot 0 is the
 // local seat, then every remote that passes the hard gate FOR THIS SUBTASK in
-// roster order; i mod len picks the slot. The eligible set is per subtask on
-// purpose — a contract too big for the 8k seat must not be dealt to it just
-// because its sibling fit. With nothing eligible the subtask runs local and
-// the reason says why; an infrastructure-class reason is flagged deadFleet
+// roster order; i mod len picks the rotation slot. The eligible set is per
+// subtask on purpose — a contract too big for the 8k seat must not be dealt to
+// it just because its sibling fit. With nothing eligible the subtask runs local
+// and the reason says why; an infrastructure-class reason is flagged deadFleet
 // exactly as route=auto flags it.
-func (r *runner) placeSpread(i int, st Subtask, localView NodeView) (placement, bool) {
+//
+// A remote slot goes to the best-FIT-SCORED seat (fit.go) among the seats not
+// yet dealt in this cycle — fit decides WHICH seat inside the cycle, never a
+// free re-pick, so the one-subtask-per-seat-per-cycle invariant survives and a
+// same-shaped fan-out still reaches every seat. `dealt` is the cycle's
+// bookkeeping and is mutated here; dealSpread owns it. Ties fall back to the
+// rotation order, so an all-equal roster deals exactly as it did before fit
+// scoring existed.
+//
+// The LOCAL rotation slot is never contested, and that is a deliberate bound on
+// this heuristic, not an oversight:
+//
+//   - Subtask 0 lands local, whatever its shape — the documented guarantee that
+//     a spread's first subtask (and therefore a SINGLE-subtask spread, the
+//     riskiest case for any shape heuristic) stays on-box. One regex match must
+//     not be able to send an entire run off-box.
+//   - The same holds for every later local slot (i mod len == 0), because the
+//     fit score ranks seats by their ADVERTISED context ceiling and the local
+//     seat advertises none in a delegator run. Scoring it would mean inventing
+//     a number for it; leaving it in the rotation keeps its share of the fan-out
+//     exactly as before, which is also what stops an all-reasoning fan-out from
+//     collapsing back onto one seat.
+//
+// Widening the contest to the local slot is a small change once the local seat
+// advertises a ceiling of its own — it is not blocked, it is unearned.
+func (r *runner) placeSpread(i int, st Subtask, localView NodeView, dealt map[string]bool) spreadSlot {
 	nodes := []NodeView{localView}
 	bases := []string{""}
 	for j, v := range r.spreadViews {
@@ -574,14 +658,54 @@ func (r *runner) placeSpread(i int, st Subtask, localView NodeView) (placement, 
 	}
 	if len(nodes) == 1 {
 		why, class := r.noEligibleRemote(st, r.spreadViews, r.spreadProbeErrs)
-		return placement{view: localView, reason: "route=spread: no eligible remote — local (" + why + ")"}, class == core.DeferClassInfrastructure
+		return spreadSlot{placement{view: localView, reason: "route=spread: no eligible remote — local (" + why + ")"}, class == core.DeferClassInfrastructure}
 	}
-	k := i % len(nodes)
-	name := "local"
-	if !nodes[k].Local {
-		name = nodes[k].NodeID
+	slot := i % len(nodes)
+	if nodes[slot].Local {
+		// A local slot opens a new cycle: the deck of remotes is reshuffled, so
+		// the next len(nodes)-1 subtasks deal one to each seat again.
+		clear(dealt)
+		return spreadSlot{placement{view: localView, reason: fmt.Sprintf("route=spread → local (slot %d of %d)", slot+1, len(nodes))}, false}
 	}
-	return placement{view: nodes[k], base: bases[k], reason: fmt.Sprintf("route=spread → %s (slot %d of %d)", name, k+1, len(nodes))}, false
+	k := fitPick(st, nodes, slot, dealt)
+	if k < 0 {
+		// Every eligible remote has already taken a subtask this cycle — which a
+		// ragged eligible set can reach without passing through a local slot.
+		// Reshuffle rather than stack: after the clear a pick always exists,
+		// because len(nodes) > 1 guarantees at least one remote.
+		clear(dealt)
+		k = fitPick(st, nodes, slot, dealt)
+	}
+	dealt[nodes[k].NodeID] = true
+	kind, rule := shapeOf(st)
+	return spreadSlot{placement{view: nodes[k], base: bases[k],
+		reason: fmt.Sprintf("route=spread → %s (slot %d of %d, fit=%s/%s)", nodes[k].NodeID, slot+1, len(nodes), kind, rule)}, false}
+}
+
+// fitPick returns the index of the best-scoring seat in nodes that is neither
+// local nor already dealt this cycle, or -1 when the cycle has no seat left.
+// The scan starts at the rotation slot and wraps, and only a STRICTLY better
+// score displaces the incumbent — so equal seats are dealt in rotation order
+// and an all-equal roster behaves exactly as blind round-robin did.
+func fitPick(st Subtask, nodes []NodeView, slot int, dealt map[string]bool) int {
+	k, best := -1, 0
+	for c := 0; c < len(nodes); c++ {
+		j := (slot + c) % len(nodes)
+		if nodes[j].Local || dealt[nodes[j].NodeID] {
+			continue
+		}
+		if s := scoreFit(st, nodes[j]); k < 0 || s > best {
+			k, best = j, s
+		}
+	}
+	return k
+}
+
+// localView is THE local seat's NodeView. One constructor because the deal and
+// the retry's alternativeNode must describe the same seat — two literals here
+// is how a node id drifts between a placement and its telemetry.
+func (r *runner) localView() NodeView {
+	return NodeView{NodeID: r.localNodeID(), AgentSeat: r.cfg.AgentPlannerModel(""), Local: true}
 }
 
 // attempt places (per route, or as forced by a retry) and executes one
@@ -608,7 +732,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 	}
 
 	st := Subtask{Contract: contract, EstTokens: EstimateTokens(contract)}
-	localView := NodeView{NodeID: r.localNodeID(), AgentSeat: r.cfg.AgentPlannerModel(""), Local: true}
+	localView := r.localView()
 
 	var chosen NodeView
 	var base, reason string
@@ -619,9 +743,12 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 	case forced != nil:
 		chosen, base, reason = forced.view, forced.base, forced.reason
 	case r.route == "spread":
-		var p placement
-		p, deadFleet = r.placeSpread(i, st, localView)
-		chosen, base, reason = p.view, p.base, p.reason
+		// Read, never re-derive: the deal is a joint assignment across all the
+		// subtasks, so recomputing one subtask's slot in isolation here would
+		// throw away the very constraint that makes it correct.
+		d := r.spreadDeal[i]
+		deadFleet = d.deadFleet
+		chosen, base, reason = d.view, d.base, d.reason
 	default:
 		// Placement. Health is fetched ONLY when a remote could actually be
 		// chosen (route=remote, or route=auto with the local GPU spoken for):

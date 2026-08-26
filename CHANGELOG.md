@@ -6,6 +6,80 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.99.0] - 2026-08-26
+
+### Changed — `route:"spread"`: the remote slots are fit-scored instead of dealt blind
+- `placeSpread` dealt every slot by `k := i % len(nodes)` and nothing else. Across heterogeneous
+  seats that is a coin flip on the thing that matters: a mechanical triage contract and a
+  cross-file reasoning contract had exactly the same chance of landing on the biggest seat.
+  The remote slots now go to the seat that suits the contract's **shape**, inferred from the
+  contract's own goal text — chosen from the seats not yet dealt in the current cycle, so the
+  fan-out itself is untouched.
+- **Shape is a deterministic ORDERED pre-filter (`internal/delegate/fit.go`), not a classifier
+  call.** `mechanical` (extraction, listing, counting, filtering, digesting) or `reasoning`
+  (explanation, causation, cross-file interaction, tracing, comparison), decided by a quantity
+  rule, then an explanation rule, then a mechanical-verb rule. Asking a model which seat to use
+  would spend a round-trip per subtask to save one — a net loss on exactly the cheap contracts
+  this lane exists for — so nothing here leaves the process, and a placement is reproducible from
+  the recorded contract alone.
+- **Rule ORDER is the fix, not a cleverer pattern.** A bare `how ` alternative inside the
+  explanation pattern reads "how many files changed" as reasoning — a trivial count sent to the
+  expensive seat. RE2 has no lookahead, so "how, but not how many" cannot be written as one
+  expression; the quantity rule runs first and takes every quantity phrasing off the table, which
+  is what leaves the bare `how ` alternative safe for genuine how-questions. Pinned by a
+  table-driven routing test over realistic goal strings.
+- **An unmatched goal is `mechanical` — the CHEAP seat.** A harness whose purpose is moving grunt
+  work off the expensive seat must let ambiguity fall toward cheap, never toward capable:
+  defaulting the unmatched case to the big seat silently rebuilds the round-robin problem for
+  every goal the vocabulary does not cover. A wrong cheap placement costs a retry, which the
+  engine already runs on a different seat; a wrong expensive placement costs the capable seat,
+  which is the whole resource being protected. The unmatched branch is reported honestly
+  (`matchShape` returns `ok=false`) and is the single seam a better fallback would plug into.
+- **"Smallest adequate seat" is now arithmetic, not a phrase.** `adequate()` is
+  `est_tokens + specReserve <= agent_ctx_tokens` — the same check the hard gate makes, extracted
+  so `remoteEligible` and `scoreFit` share ONE definition of "fits" and cannot drift. Reasoning
+  takes the roomiest adequate seat; mechanical takes the smallest adequate one. An unadvertised
+  ceiling is never adequate: unknown is not a capacity, and a seat that published no number must
+  not win the mechanical contest by looking like the smallest on the roster.
+- **Unchanged, deliberately: subtask 0 still lands local**, whatever its shape — and so does every
+  later local rotation slot. A single-subtask spread is the riskiest case for a shape heuristic,
+  and one regex match must not be able to send an entire run off-box. The local seat also
+  advertises no context ceiling in a delegator run, so scoring it would mean inventing a number
+  for it. The documented pair shape (a 2-contract spread = one local + one remote) therefore
+  still holds, and the existing spread distribution test passes unchanged.
+- **Fit chooses WITHIN a deal cycle; it never re-picks freely.** A subtask takes the best-fitting
+  seat *among those not yet dealt in the current cycle*, and a local slot reshuffles the deck, so
+  each aligned window of `len(nodes)` slots still gives every eligible seat at most one subtask.
+  This is not a refinement, it is the whole safety property: an unconstrained re-pick sends the
+  smallest seat every mechanical subtask and the roomiest every reasoning one. Measured on a
+  `{local, qube 131k, aorus 32k, lenovo 32k}` roster — 8 mechanical subtasks landed
+  `local 2 / aorus 4 / lenovo 2 / qube 0` and 8 reasoning subtasks landed `local 2 / qube 6`, with
+  `runConcurrency = 4` dispatching siblings to the same seat while another sat idle. That is the
+  stacking `route:"spread"` was built to remove. Constrained, both deal `2/2/2/2`, mechanical
+  dispatching the small seats first and reasoning the roomiest first.
+- **The deal is JOINT — computed for the whole run in one pass before dispatch — because it cannot
+  be anything else.** No per-subtask function of (index, own shape, roster) can hold the invariant:
+  distinctness within a cycle forces the slot-to-seat map to be a bijection for each shape, and
+  distinctness within a MIXED-shape cycle then forces both shapes' bijections to be identical —
+  which is to say, forces the shape to have no effect at all. Fit scoring and one-per-seat coexist
+  only when the deal can see its siblings. Computing it up front also keeps placement deterministic
+  and free of shared mutable state: the dispatch goroutines read the deal, they never build it.
+- **Ties keep rotating** (the comparison is strict), so an all-equal roster deals exactly as it did
+  before fit scoring existed.
+- `results[].placement` now names the deciding RULE as well as the shape
+  (`route=spread → node-a (slot 2 of 4, fit=mechanical/mechanical-verb)`). `slot N of M` remains the
+  rotation slot, not the winner's roster index — an operator reading placements counts subtasks —
+  and `fit=mechanical/default` versus `fit=mechanical/mechanical-verb` is the difference between
+  "rephrase the goal" and "the vocabulary read it correctly". The local slot's reason is
+  byte-identical to before.
+- **Mutation-proven, twice.** (a) Make `placeSpread` ignore the fit score — a compiling mutant that
+  leaves the rotation's pick in place — and the placement test goes red in both directions, the
+  mechanical contract landing on the big seat and the reasoning one on the small seat. (b) Drop the
+  cycle bookkeeping so the fit score re-picks freely, and the fan-out test goes red reproducing the
+  collapse above exactly (`qube 0` under mechanical, `qube 6` under reasoning). The fan-out test
+  uses an UNEQUAL-ceiling roster on purpose: with equal ceilings every implementation passes, which
+  is how such a collapse ships green.
+
 ## [0.98.0] - 2026-08-26
 
 ### Added — `offload_ask` result cache: an identical repeat stops costing a seat run
