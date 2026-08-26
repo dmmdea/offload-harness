@@ -155,6 +155,81 @@ func TestAskHandlerReportsUnverified(t *testing.T) {
 	}
 }
 
+// TestAskHandlerGradesTheAnswerItPublishesNotTheProseItDiscards is the pin for the layer
+// this lane added. core.evalText prefers wire.Output whenever it is non-empty, and
+// runAgentTask always sets Output before the re-pack — so grading the wire as it arrives
+// grades the loop's final PROSE, which this handler never publishes. The caller receives
+// only the condensed {answer, evidence} pair.
+//
+// The divergence runs one way: prose is longer than the pair, so it is likelier to contain
+// one of the three frequent tokens. The error mode is therefore verified:true printed
+// beside a published answer that cites nothing from the files — "reads as verified while
+// nothing verified it", one layer up from where the anchor design closes it.
+//
+// This fixture is exactly that shape: the prose carries the anchor, the pair does not.
+func TestAskHandlerGradesTheAnswerItPublishesNotTheProseItDiscards(t *testing.T) {
+	dir, p := askFixture(t)
+	s := askTestServer(t, func(_ context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+		anchor := anchorsOf(t, c)[0]
+		return core.AgentWireResult{
+			SchemaVersion: core.AgentWireSchemaVersion,
+			Seat:          "fake-seat",
+			// The PROSE cites the file...
+			Output: "Reading the attached file, the cap is set by " + anchor + " = 32.",
+			// ...but the pair the caller actually receives cites nothing.
+			Structured: json.RawMessage(`{"answer":"the cap is 32","evidence":"it is in the config"}`),
+			Steps:      2,
+			StopReason: "done",
+		}, nil
+	})
+
+	res, err := s.handleAsk(context.Background(), callReq(askArgs("what is the queue cap", p, dir)))
+	if err != nil {
+		t.Fatalf("handleAsk: %v", err)
+	}
+	m := decodeResult(t, res)
+	if m["verified"] != false {
+		t.Fatalf("the verdict must grade the PUBLISHED pair, not the discarded prose: %v", m)
+	}
+	fails, _ := m["acceptance_failures"].([]any)
+	if len(fails) != 1 {
+		t.Fatalf("exactly the grounding check should fail here: %v", m["acceptance_failures"])
+	}
+	// And the published fields really are the pair, not the prose — otherwise the test
+	// would pass for the wrong reason.
+	if m["answer"] != "the cap is 32" || m["evidence"] != "it is in the config" {
+		t.Fatalf("the handler must publish the structured pair: %v", m)
+	}
+}
+
+// TestAskHandlerGradesProseWhenThereIsNoStructured: the other half of the rule. With no
+// structured pair the handler publishes the prose, so grading the prose is what keeps the
+// verdict about the text the caller actually got.
+func TestAskHandlerGradesProseWhenThereIsNoStructured(t *testing.T) {
+	dir, p := askFixture(t)
+	s := askTestServer(t, func(_ context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+		return core.AgentWireResult{
+			SchemaVersion: core.AgentWireSchemaVersion,
+			Seat:          "fake-seat",
+			Output:        "the cap is 32, set by " + anchorsOf(t, c)[0],
+			Steps:         1,
+			StopReason:    "done",
+		}, nil
+	})
+
+	res, err := s.handleAsk(context.Background(), callReq(askArgs("what is the queue cap", p, dir)))
+	if err != nil {
+		t.Fatalf("handleAsk: %v", err)
+	}
+	m := decodeResult(t, res)
+	// The grounding check passes on the prose that IS published; only nonempty:evidence
+	// fails, because a re-packless result genuinely has no evidence field.
+	fails, _ := m["acceptance_failures"].([]any)
+	if len(fails) != 1 || !strings.Contains(fails[0].(string), "nonempty:evidence") {
+		t.Fatalf("only the missing evidence should fail here: %v", m["acceptance_failures"])
+	}
+}
+
 // TestAskHandlerRefusesBeforePlacement: a refusal is a REFUSAL — it must cost no seat time.
 func TestAskHandlerRefusesBeforePlacement(t *testing.T) {
 	dir := t.TempDir()

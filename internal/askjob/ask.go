@@ -59,6 +59,17 @@ var (
 // wrong answer contains by accident, so a check anchored on one verifies nothing.
 const anchorMinLen = 8
 
+// anchorMaxLen is the longest token that can still be a NAME rather than a blob. identRe
+// has no upper bound and identifierShaped answers yes to anything carrying a digit, so a
+// lockfile hash, a checksum table, an integrity map, a minified bundle or a data URI puts
+// 40-to-500-character strings into the pool as "identifiers". At count 1 the tie-break can
+// seat one, and the result is an acceptance check hundreds of characters long that no
+// answer will ever cite: a guaranteed false verified:false and an absurd `acceptance` field
+// in the response. Reachable from an ordinary input — a config directory holding a
+// lockfile — so it is bounded here rather than left to luck. Beyond this length it is a
+// blob, not a name.
+const anchorMaxLen = 40
+
 // identRe matches source-identifier-shaped tokens of at least anchorMinLen characters.
 //
 // Deliberately NOT internal/grounding's reWord: that one is `[A-Za-z][A-Za-z0-9'\-]+`,
@@ -232,8 +243,8 @@ func dedupePaths(paths []string, readRoot string) []string {
 }
 
 // pickAnchors returns up to anchorAlternatives tokens that appear in the docs and NOWHERE
-// in the goal, MOST FREQUENT first, preferring identifier-shaped tokens over prose (see the
-// tier comment below).
+// in the goal, MOST FREQUENT first, filling the slots with identifier-shaped tokens before
+// topping up from plain ones (see the tier comment below).
 //
 // Most-frequent-wins, and the inversion is the whole point. The original rule was
 // rarest-wins, on the reasoning that a token used once is likelier to be the specific thing
@@ -264,34 +275,57 @@ func dedupePaths(paths []string, readRoot string) []string {
 // while under-excluding ships a check that verifies nothing.
 func pickAnchors(goal string, docs []core.ContextDoc) ([]string, error) {
 	lowerGoal := strings.ToLower(goal)
-	counts := map[string]int{}
-	shaped := map[string]int{}
+	shaped := map[string]int{} // identifier-shaped: fills the slots first
+	plain := map[string]int{}  // everything else: tops up whatever is left over
 	for _, d := range docs {
 		for _, m := range identRe.FindAllString(d.Text, -1) {
+			if len(m) > anchorMaxLen {
+				continue // a blob, not a name (see anchorMaxLen)
+			}
 			if strings.Contains(lowerGoal, strings.ToLower(m)) {
 				continue // already in the goal: a parrot passes it for free
 			}
-			counts[m]++
 			if identifierShaped(m) {
 				shaped[m]++
+			} else {
+				plain[m]++
 			}
 		}
 	}
-	// Identifier-shaped tokens FIRST, and this tier is not cosmetic. Measured while
-	// building this: on a realistic Go file, rarity alone picked "delegate" out of a
-	// comment ("a full delegate call is 8 subtasks") — grounded, lint-clean, and
-	// something no correct answer to the question would ever cite. The brief asks for
-	// the rarest sufficiently-long IDENTIFIER, and a prose word inside a comment is not
-	// one. The wider pool stays as a FALLBACK because attaching prose (markdown, a log,
-	// a spec) is a legitimate use of this tool, and refusing every such file outright
-	// would be a worse failure than a weaker anchor.
-	if len(shaped) > 0 {
-		counts = shaped
+	if len(shaped) == 0 && len(plain) == 0 {
+		return nil, fmt.Errorf("%w: no token of %d-%d characters appears in the attached files without also appearing in the goal (your question plus the instructions the harness adds around it) — there is nothing here a right answer could cite that a restatement of the question could not, so read the files yourself, or attach a file that names what you are asking about",
+			ErrNoAnchor, anchorMinLen, anchorMaxLen)
 	}
-	if len(counts) == 0 {
-		return nil, fmt.Errorf("%w: no token of %d+ characters appears in the attached files without also appearing in the question — there is nothing here a right answer could cite that a restatement of the question could not, so read the files yourself, or attach a file that names what you are asking about",
-			ErrNoAnchor, anchorMinLen)
+	// Identifier-shaped tokens FILL the slots first, and the tier is not cosmetic:
+	// measured while building this, ranking alone picked "delegate" out of a comment
+	// ("a full delegate call is 8 subtasks") — grounded, lint-clean, and something no
+	// correct answer to the question would ever cite. A prose word inside a comment is
+	// not an identifier.
+	//
+	// But the tier TOPS UP rather than REPLACES. When fewer than anchorAlternatives
+	// identifiers survive, the spare slots go to the best plain tokens instead of being
+	// left empty — those went through the very same goal exclusion, so grounding and
+	// anti-parrot are untouched, and because a spare slot is another branch of an OR it
+	// can only ease passing, never block it. Replacing the pool outright also silently
+	// dropped good candidates: `buildinfo` is nine characters and not question-named, yet
+	// it never reached the pool on the live run because buildinfo.go had shaped tokens.
+	picked := rankByCentrality(shaped)
+	if len(picked) > anchorAlternatives {
+		picked = picked[:anchorAlternatives]
 	}
+	if spare := anchorAlternatives - len(picked); spare > 0 {
+		topUp := rankByCentrality(plain)
+		if len(topUp) > spare {
+			topUp = topUp[:spare]
+		}
+		picked = append(picked, topUp...)
+	}
+	return picked, nil
+}
+
+// rankByCentrality orders one pool MOST FREQUENT first, ties broken lexicographically so
+// the same question over the same files is always the same contract.
+func rankByCentrality(counts map[string]int) []string {
 	keys := make([]string, 0, len(counts))
 	for k := range counts {
 		keys = append(keys, k)
@@ -302,10 +336,7 @@ func pickAnchors(goal string, docs []core.ContextDoc) ([]string, error) {
 		}
 		return keys[i] < keys[j] // deterministic tie-break
 	})
-	if len(keys) > anchorAlternatives {
-		keys = keys[:anchorAlternatives]
-	}
-	return keys, nil
+	return keys
 }
 
 // deCollideNames makes the doc names unique IN PLACE, keeping them flat.

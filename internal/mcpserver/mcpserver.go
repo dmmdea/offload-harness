@@ -37,7 +37,8 @@ import (
 
 type Server struct {
 	p *pipeline.Pipeline
-	// localAgent is agent_delegate's LOCAL execution seam: nil (production)
+	// localAgent is the LOCAL execution seam shared by agent_delegate and offload_ask:
+	// nil (production)
 	// resolves to p.RunAgentContract at call time; tests inject a fake so the
 	// handler is exercisable without a live planner.
 	localAgent delegate.LocalRunner
@@ -246,7 +247,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// only question + paths.
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_ask",
-		Description: "Ask a bounded question ABOUT SPECIFIC FILES and have a FREE local seat answer it — the one-call form of agent_delegate. You supply question + paths and nothing else: the harness builds the whole contract (goal, {answer,evidence} output schema, and an acceptance check ANCHORED to distinctive tokens mined from the files themselves) and runs it on the local agent seat. REACH FOR IT THE MOMENT YOU ARE ABOUT TO OPEN MORE THAN TWO FILES to answer something bounded — that is exactly where reading them yourself costs more than asking. The files are read and inlined by the HARNESS under read_root, so your own context never pays for them. Good fits: \"which key sets the queue cap\" over three config files; \"which function does this handler call before dispatch\" over a handler plus its helpers; \"what changed between these two versions of the spec\". NOT this tool: unbounded exploration with no file list (use agent_run — it searches for its own files); anything that writes or runs (this lane is read-only); a multi-part job needing several contracts (agent_delegate); and above all anything whose answer is a JUDGEMENT rather than a fact the files state — security or credential review, an architecture decision, or the final does-it-actually-work verification. A free seat reports what the files say; it does not own a call you are accountable for. Returns {answer, evidence, verified, acceptance, seat, steps, stop_reason} — evidence is the exact lines the seat relied on so you can spot-check instead of re-reading. verified means the answer quoted something that appears ONLY in these files, checked mechanically against acceptance; verified:false is a prompt to read the evidence, not proof the answer is wrong — a question whose subject is a short or question-named identifier can leave nothing anchorable. Caps: at most 16 files, 128 KiB per file, 256 KiB total. It REFUSES (deferred:true) when the files hold no token distinctive enough to ground the check, rather than handing back an answer nothing verified. On any failure it returns deferred:true with a reason and you read the files yourself.",
+		Description: "Ask a bounded question ABOUT SPECIFIC FILES and have a FREE local seat answer it — the one-call form of agent_delegate. You supply question + paths and nothing else: the harness builds the whole contract (goal, {answer,evidence} output schema, and an acceptance check ANCHORED to distinctive tokens mined from the files themselves) and runs it on the local agent seat. REACH FOR IT THE MOMENT YOU ARE ABOUT TO OPEN MORE THAN TWO FILES to answer something bounded — that is exactly where reading them yourself costs more than asking. The files are read and inlined by the HARNESS under read_root, so your own context never pays for them. Good fits: \"which key sets the queue cap\" over three config files; \"which function does this handler call before dispatch\" over a handler plus its helpers; \"what changed between these two versions of the spec\". NOT this tool: unbounded exploration with no file list (use agent_run — it searches for its own files); anything that writes or runs (this lane is read-only); a multi-part job needing several contracts (agent_delegate); and above all anything whose answer is a JUDGEMENT rather than a fact the files state — security or credential review, an architecture decision, or the final does-it-actually-work verification. A free seat reports what the files say; it does not own a call you are accountable for. Returns {answer, evidence, verified, acceptance, acceptance_failures?, seat, steps, stop_reason} — evidence is the exact lines the seat relied on so you can spot-check instead of re-reading. verified is a CITATION check, not a correctness verdict: it asks whether the answer quoted something that appears ONLY in these files, never whether the answer is right. On verified:false read acceptance_failures (which names the check that did not match) and then the evidence — it is a prompt to look, not proof the answer is wrong, and a question whose subject is a short or question-named identifier can leave nothing anchorable at all. Typical latency is 30-90 s: this buys back the context those files would have cost you, not wall-clock. Caps: at most 16 files, 128 KiB per file, 256 KiB total. It REFUSES (deferred:true) when the files hold no token distinctive enough to ground the check, rather than handing back an answer nothing verified. On any failure it returns deferred:true with a reason and you read the files yourself.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"question":{"type":"string","description":"the bounded question to answer FROM THESE FILES — one question, answerable from what you attach"},"paths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":16,"description":"the files to answer from, relative to read_root or absolute inside it (<=16 files, <=128 KiB each, <=256 KiB total)"},"read_root":{"type":"string","description":"absolute directory the paths are read from; nothing outside it can be read (default: the server working dir)"}},"required":["question","paths"]}`),
 	}, s.handleAsk)
 
@@ -1602,7 +1603,29 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 			"steps":       wire.Steps,
 		})
 	}
-	failures := delegate.EvalAcceptance(contract, wire)
+	// Grade what the caller RECEIVES. core.evalText prefers wire.Output whenever it is
+	// non-empty, and runAgentTask always sets Output before the re-pack — so grading the
+	// wire as-is would grade the loop's final prose, which this handler never publishes.
+	// The divergence is one-directional: the prose is longer than the condensed
+	// {answer, evidence} pair and therefore likelier to contain a top-3 frequent token,
+	// so the error mode is verified:true beside a published answer that cites nothing
+	// from the files — the "reads as verified while nothing verified it" pathology this
+	// feature exists to close, moved up one layer. Blanking Output makes evalText fall
+	// through to the structured bytes, which are exactly what ships.
+	//
+	// delegate.Run grades the prose and PUBLISHES the prose, so it stays coherent and is
+	// left alone; this is the first lane that publishes only the structured pair.
+	//
+	// Grading the raw JSON cannot self-match on its own field names: "answer" is 6
+	// characters, under askjob's 8-character anchor bound, and "evidence" is 8 but
+	// appears in the goal, so neither can ever be mined as an anchor.
+	graded := wire
+	if len(wire.Structured) > 0 {
+		graded.Output = ""
+	}
+	// When there is no Structured at all, graded == wire: that path grades prose and
+	// publishes prose (see the fallback above), so it is consistent either way.
+	failures := delegate.EvalAcceptance(contract, graded)
 	out := map[string]any{
 		"answer":      structured.Answer,
 		"evidence":    structured.Evidence,

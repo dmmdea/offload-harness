@@ -408,14 +408,37 @@ func TestPickAnchorPrefersIdentifiersOverCommentProse(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(got) == 0 || got[0] != "admitOneJob" {
-		t.Fatalf("pickAnchors = %v, want the identifier admitOneJob over the comment word", got)
+		t.Fatalf("pickAnchors = %v, want the identifier admitOneJob to LEAD", got)
 	}
-	// The shaped tier REPLACES the pool, it does not merely reorder it: prose must not
-	// ride along as an alternative when real identifiers exist.
-	for _, a := range got {
-		if a == "unsurprising" {
-			t.Fatalf("prose leaked into the anchor set alongside identifiers: %v", got)
-		}
+	// ...and the tier TOPS UP rather than replaces: only one identifier survives here, so
+	// the two spare slots go to the best plain tokens instead of being left empty. Those
+	// passed the same goal exclusion, and a spare alternative is another branch of an OR —
+	// it can only ease passing, never block it. (This assertion previously demanded the
+	// opposite; replacing the pool outright was silently dropping good plain candidates.)
+	if !slices.Contains(got, "unsurprising") {
+		t.Fatalf("a spare slot must be topped up from the plain pool, got %v", got)
+	}
+}
+
+// TestPickAnchorsDoNotDisplaceIdentifiersWithProse: topping up fills only what is LEFT.
+// When enough identifiers survive, plain tokens get no slot at all — otherwise the tier
+// would be decorative.
+func TestPickAnchorsDoNotDisplaceIdentifiersWithProse(t *testing.T) {
+	docs := []core.ContextDoc{{
+		Name: "a.go",
+		Text: "unsurprising unsurprising unsurprising unsurprising " +
+			"admitOneJob admitOneJob rotateOneFile rotateOneFile flushOneBatch",
+	}}
+	got, err := pickAnchors("goal with nothing distinctive", docs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"admitOneJob", "rotateOneFile", "flushOneBatch"}
+	if len(got) != len(want) {
+		t.Fatalf("pickAnchors = %v, want the three identifiers %v", got, want)
+	}
+	if slices.Contains(got, "unsurprising") {
+		t.Fatalf("the most frequent PLAIN token took a slot from an identifier: %v", got)
 	}
 }
 
@@ -453,6 +476,42 @@ func TestPickAnchorsRankMostFrequentFirst(t *testing.T) {
 	want := []string{"CommonHelper", "RareSingleton"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("pickAnchors = %v, want %v (most frequent first)", got, want)
+	}
+}
+
+// TestPickAnchorsRejectBlobs: identRe has no upper bound and identifierShaped says yes to
+// anything carrying a digit, so a lockfile hash or an integrity map would otherwise seat a
+// 40-to-500-character string as an "identifier" — an acceptance check no answer could ever
+// cite, and an absurd `acceptance` field in the response. Reachable from an ordinary input:
+// a config directory that happens to hold a lockfile.
+func TestPickAnchorsRejectBlobs(t *testing.T) {
+	blob := "sha512" + strings.Repeat("a1b2c3d4", 12) // 102 chars, digit-bearing, count 1
+	docs := []core.ContextDoc{{
+		Name: "lock.json",
+		Text: blob + " " + blob + "X realIdentifierName realIdentifierName",
+	}}
+	got, err := pickAnchors("goal with nothing distinctive", docs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range got {
+		if len(a) > anchorMaxLen {
+			t.Fatalf("a %d-character blob was seated as an anchor: %q", len(a), a)
+		}
+	}
+	if !slices.Contains(got, "realIdentifierName") {
+		t.Fatalf("the real identifier must survive the blob filter: %v", got)
+	}
+}
+
+// TestBuildContractRefusesWhenOnlyBlobsRemain: with nothing but blobs there is no anchor,
+// and a refusal is the honest answer — never a check built on a 100-character hash.
+func TestBuildContractRefusesWhenOnlyBlobsRemain(t *testing.T) {
+	dir := t.TempDir()
+	blob := strings.Repeat("9f8e7d6c", 14) // 112 chars
+	p := write(t, dir, "lock.json", blob+" "+blob+"a "+blob+"b")
+	if _, err := BuildContract("what is here", []string{p}, dir); !errors.Is(err, ErrNoAnchor) {
+		t.Fatalf("a blob-only file must refuse, got %v", err)
 	}
 }
 

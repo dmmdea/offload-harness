@@ -43,10 +43,34 @@ Versioning: [SemVer](https://semver.org/).
   would pass garbage. Pinned by `LintAcceptance(BuildContract(...))` returning zero warnings
   on a realistic source file, and by a check that a right answer PASSES while the goal text
   itself does not.
+- The verdict grades the text the caller RECEIVES. `core.evalText` prefers `wire.Output`
+  whenever it is non-empty and `runAgentTask` always sets it before the re-pack, so grading
+  the wire as it arrives would grade the loop's final prose — which this lane never
+  publishes, since the caller gets only the condensed `{answer, evidence}` pair. The
+  divergence is one-directional (prose is longer, so likelier to contain a frequent token),
+  which made the error mode `verified:true` beside a published answer citing nothing from
+  the files: the "reads as verified while nothing verified it" pathology, one layer up from
+  where the anchor design closes it. `handleAsk` now blanks `Output` when `Structured` is
+  present so `evalText` falls through to the bytes that actually ship. `delegate.Run` grades
+  prose and publishes prose, so it is coherent and untouched — this is the first lane that
+  publishes only the structured pair. Grading the raw JSON cannot self-match on its own
+  field names: `answer` is 6 characters (under the 8-character anchor bound) and `evidence`
+  is 8 but appears in the goal.
+- Anchor candidates are bounded at 40 characters (`anchorMaxLen`). `identRe` has no upper
+  bound and identifier-shaped says yes to anything carrying a digit, so a lockfile hash,
+  checksum table or minified bundle could seat a 40-to-500-character blob as a "name" — an
+  acceptance check no answer could cite, and an absurd `acceptance` field. Reachable from an
+  ordinary input (a config directory holding a lockfile).
+- The identifier-shaped tier TOPS UP instead of REPLACING. Shaped tokens fill the three
+  alternation slots first; any spare slots go to the best plain tokens rather than being
+  left empty. Those passed the same goal exclusion, and a spare alternative is one more
+  branch of an OR — it can only ease passing, never block it. Replacing outright was
+  silently dropping good candidates: `buildinfo` is nine characters and not question-named,
+  yet never reached the pool on the live run purely because that file had shaped tokens.
 - Known limitation, stated rather than hidden: a question whose answer turns on a SHORT
   (<8-character) or question-named identifier can leave nothing anchorable — `verified` then
-  reads false on a correct answer. The tool description says so; it is a prompt to read the
-  evidence, never proof the answer is wrong.
+  reads false on a correct answer. `verified` is a CITATION check, not a correctness verdict:
+  it asks whether the answer quoted the files, never whether the answer is right.
 - The ask lane writes **no delegation ledger or corpus row**: `delegate.Run` records one per
   subtask, `Pipeline.RunAgentContract` on its own does not. The pipeline's own task ledger
   still sees the run. Recorded so an empty delegation corpus is never misread as "nobody used

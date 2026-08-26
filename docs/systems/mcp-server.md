@@ -76,10 +76,14 @@ anchor is excluded against the FULL BUILT GOAL (the lint measures parrot-passabi
 `c.Goal`, whose boilerplate carries its own long words), and when no distinctive anchor survives
 the builder REFUSES instead of emitting a check that would pass anything. The generated
 acceptance is evaluated by the handler and published as `verified` / `acceptance_failures` —
-this lane does not go through `delegate.Run`, and a check nothing evaluates is decoration. `verified` is a MACHINE
-check, not a quality verdict: the anchor is mined mechanically, so `verified: false` is often just
-a correct answer that had no reason to cite the token that was picked (measured on the first live
-run). It is a prompt to read the evidence, never a reason to discard the answer.
+this lane does not go through `delegate.Run`, and a check nothing evaluates is decoration. `verified` is a
+CITATION check, not a correctness verdict: it asks whether the answer quoted something that
+appears only in the attached files, never whether the answer is right. `verified: true` means the
+published `{answer, evidence}` pair matched one of the mined tokens — the pair is what is graded,
+not the loop's prose, which this lane discards. `verified: false` is a prompt to read
+`acceptance_failures` and then the evidence, never a reason to discard the answer: the residual
+case is a question whose subject is a SHORT (<8-character) or question-named identifier, which
+leaves nothing anchorable at all.
 
 One deliberate gap to know about: the ask lane writes **no delegation ledger or corpus row**.
 `delegate.Run` records one per subtask; `Pipeline.RunAgentContract` on its own does not, so
