@@ -139,9 +139,14 @@ Four properties are load-bearing:
   weaker spelling of a boundary the process already draws exactly, and adding a required input
   to the one-call tool would undercut the friction removal the tool exists for.
 
-Measured live on the 27B seat: a cold call took **3 m 22 s**, the identical repeat returned the
-byte-identical answer in **5 ms**, and editing one attached file made the next call miss and go
-back to the seat.
+The repeat returns without touching the seat at all, and editing one attached file makes the
+next call miss and go back to the seat. That is not a timed measurement — no run log exists to
+attribute a number to, and the only number ever in hand was a cold-swap-degraded figure (the
+seat's llama-swap slot was mid-load for a different model during the attempt) that does not
+belong here. What IS provable: `TestAskSecondIdenticalCallSkipsTheSeatAndSaysSo` asserts the
+seat ran exactly once across two identical calls, and the mutation proof named in the "Keyed on
+CONTENT" property above (key on the path instead and both the unit test and the wired
+front-door test go red) pins the edited-file-misses behaviour directly.
 
 One deliberate gap to know about: the ask lane writes **no delegation ledger or corpus row**.
 `delegate.Run` records one per subtask; `Pipeline.RunAgentContract` on its own does not, so

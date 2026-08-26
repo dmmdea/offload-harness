@@ -52,8 +52,11 @@ import (
 const MaxEntries = 32
 
 // keySchema is mixed into every key so a future change to what the key covers cannot
-// collide with a key minted under the old rules. Cheap insurance; the cache is per-process,
-// so it only ever matters within one build.
+// collide with a key minted under the old rules. It is inert today: every key minted within
+// one build carries the same constant, and the cache never outlives the process, so there is
+// nothing here for it to invalidate. It is kept as a hook for a possible future PERSISTENT
+// cache — the one scenario where an old key could still be sitting around when the schema
+// changes — not because it is doing any work now.
 const keySchema = "askcache/v1"
 
 // Cache is a bounded, content-addressed map from an ask's inputs to its finished result.
@@ -103,7 +106,11 @@ func field(s string) string { return strconv.Itoa(len(s)) + ":" + s }
 // A copy because the caller stamps cache_hit onto what it returns; handing back the stored
 // map would let that stamp — or any later edit — leak into the cache and into every
 // subsequent hit. Shallow is sufficient and deliberate: the stored values are the response's
-// own scalars and slices, which nothing mutates in place.
+// own scalars and slices, which nothing mutates in place. GUARD: this holds only as long as
+// that stays true. Any new value ever added to the response map that is itself a map, or a
+// slice that something later appends to in place, needs clone (below) deepened to cover it —
+// a shallow copy would let that mutation alias back through the stored entry into every
+// future hit.
 func (c *Cache) Get(key string) (map[string]any, bool) {
 	if c == nil {
 		return nil, false

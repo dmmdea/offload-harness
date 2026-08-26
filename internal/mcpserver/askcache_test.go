@@ -219,6 +219,18 @@ func TestAskToolDescriptionDocumentsTheCacheAndItsLimit(t *testing.T) {
 	if !strings.Contains(strings.ToLower(desc), "identical") {
 		t.Fatal("the description must say the cache pays only on an IDENTICAL repeat, not imply a general speedup")
 	}
+	// The identical/cache_hit checks above pass even if the actual LIMITATION sentence —
+	// "Do NOT read this as a general speedup: a DIFFERENT question over the same files pays
+	// full seat time..." — is deleted outright, because "identical" also appears earlier in
+	// the description describing what triggers a hit. Assert on the limitation itself, not
+	// just on words that happen to co-occur with it.
+	lower := strings.ToLower(desc)
+	if !strings.Contains(lower, "different question") {
+		t.Fatal("the description must warn that a DIFFERENT question over the same files is not helped by the cache")
+	}
+	if !strings.Contains(lower, "full seat time") {
+		t.Fatal("the description must state that a cache miss pays FULL seat time, not a discounted one")
+	}
 }
 
 // TestAskCacheKeyMatchesTheContractTheSeatWouldSee guards against the subtle version of a

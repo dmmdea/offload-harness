@@ -11,8 +11,12 @@ Versioning: [SemVer](https://semver.org/).
 ### Added — `offload_ask` result cache: an identical repeat stops costing a seat run
 - An IDENTICAL `offload_ask` call — same question, same `read_root`, and the same file **bytes**
   — now returns the answer the seat already produced instead of running the seat again, and the
-  response says which it was via a new `cache_hit` field. Measured live on the 27B seat: a cold
-  call took **3 m 22 s**, the identical repeat returned the byte-identical answer in **5 ms**.
+  response says which it was via a new `cache_hit` field. The repeat returns without touching
+  the seat at all — pinned by the wired front-door test (`TestAskSecondIdenticalCallSkipsTheSeatAndSaysSo`,
+  which asserts the seat ran exactly once across two identical calls) plus the two mutation
+  proofs below, not by a timed measurement: there is no run log to attribute a number to, and
+  the only number ever in hand was a cold-swap-degraded figure (llama-swap loading a different
+  model into the seat's slot mid-measurement) that does not belong here.
 - **The limitation, stated plainly, because it is easy to oversell.** This pays on an EXACT
   repeat and on nothing else. A *different* question over the same files still pays full seat
   time (46–75 s measured), because the seat has to reason about the new question. The only
@@ -42,7 +46,11 @@ Versioning: [SemVer](https://semver.org/).
   connection. That is why there is **no `session_id` argument**: it would be a second, weaker
   spelling of a boundary the process already draws exactly, and adding a required input to the
   one-call tool would undercut the friction removal `offload_ask` exists for.
-- New package `internal/askcache`. `-race` clean, including a concurrent Put/Get/Len test.
+- New package `internal/askcache`, with a concurrent Put/Get/Len test (`TestConcurrentUseIsSafe`)
+  guarding the mutex around every map access. `-race` was **not** run against it — this build
+  box has no cgo toolchain (`CGO_ENABLED=1 go test -race` fails with `C compiler "gcc" not
+  found`) — so the mutex rests on code inspection plus Go's runtime concurrent-map-write
+  detector, not on an instrumented run.
 
 ## [0.97.0] - 2026-08-26
 

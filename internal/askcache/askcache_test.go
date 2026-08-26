@@ -58,9 +58,15 @@ func TestKeyChangesWithEveryOtherInput(t *testing.T) {
 	if Key("what is the cap", "/repo", append(append([]core.ContextDoc(nil), base...), doc("b.go", "x"))) == k {
 		t.Fatal("attaching another file must be a different key")
 	}
-	// Field-boundary safety: the two halves of the key must not be able to slide into
-	// each other and collide (question "ab"+root "c" vs question "a"+root "bc").
-	if Key("ab", "c", nil) == Key("a", "bc", nil) {
+	// Field-boundary safety: this is what field()'s length-prefixing actually buys, and the
+	// fixture has to put a NUL byte INSIDE a field to prove it. cache.Key joins parts with a
+	// NUL separator on its own, so Key("ab","c",nil) vs Key("a","bc",nil) would already
+	// differ ("ab\x00c" vs "a\x00bc") even without field() — that pair proves nothing about
+	// length-prefixing. Without field(), a NUL embedded IN a value collides with the
+	// separator itself: Key("a\x00b","c",nil) and Key("a","b\x00c",nil) would both raw-join
+	// to the identical byte string "a\x00b\x00c". field()'s length prefix is what keeps them
+	// apart. Strip field() from Key and this is the assertion that goes red.
+	if Key("a\x00b", "c", nil) == Key("a", "b\x00c", nil) {
 		t.Fatal("key fields must not run together")
 	}
 }
@@ -114,17 +120,29 @@ func TestBoundedAtMaxEntries(t *testing.T) {
 
 // TestOverwriteDoesNotDoubleCountOrder: re-putting a live key must not consume a second
 // eviction slot, or a repeatedly-refreshed entry would evict the rest of the working set.
+//
+// Len() alone cannot catch a double-count here: len(c.m) reads the MAP, which stays 1 either
+// way because both Puts share the same key — the bug this guards against is `order` growing
+// to [k,k], which is invisible until the eviction loop actually fires. So after the repeated
+// Put this fills the cache with MaxEntries-1 MORE distinct keys and asserts Len() lands
+// exactly on MaxEntries: if the duplicate went uncaught, `order` carries one extra ghost entry
+// and Len() reads MaxEntries-1 once the real eviction loop runs. Removing the exists-guard in
+// Put (the `if _, exists := c.m[key]; !exists` check) makes this go red.
 func TestOverwriteDoesNotDoubleCountOrder(t *testing.T) {
 	c := New()
 	k := Key("q", "/repo", nil)
 	c.Put(k, map[string]any{"answer": "first"})
 	c.Put(k, map[string]any{"answer": "second"})
-	if n := c.Len(); n != 1 {
-		t.Fatalf("overwrite made %d entries, want 1", n)
-	}
 	got, _ := c.Get(k)
 	if got["answer"] != "second" {
 		t.Fatalf("overwrite did not replace: %v", got)
+	}
+	for i := 0; i < MaxEntries-1; i++ {
+		c.Put(Key("other"+strconv.Itoa(i), "/repo", nil), map[string]any{"answer": i})
+	}
+	if n := c.Len(); n != MaxEntries {
+		t.Fatalf("cache holds %d entries after filling to the bound, want %d — a double-counted "+
+			"overwrite left a ghost slot in the eviction order", n, MaxEntries)
 	}
 }
 
