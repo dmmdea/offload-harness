@@ -256,7 +256,8 @@ func TestRun400ClassRefusalIsNeverReplaced(t *testing.T) {
 // TestRunReplacementNeverExceedsTheContractBudget: re-placement lives INSIDE
 // the subtask's own timeout_sec, exactly as the verification retry does. The
 // replacement node must be handed what is LEFT of the budget, never a fresh
-// copy of it — the caller was told that number is the per-subtask wall ceiling.
+// copy of it — that number is the per-subtask EXECUTION budget, shared by every
+// placement the subtask makes.
 func TestRunReplacementNeverExceedsTheContractBudget(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	// The refusing node spends real wall clock before refusing, so "what is
@@ -283,12 +284,208 @@ func TestRunReplacementNeverExceedsTheContractBudget(t *testing.T) {
 		t.Fatalf("summary = %+v, want the re-placement to have succeeded", sum)
 	}
 	replaced := int(got.Load())
-	if replaced <= 0 || replaced >= contract.TimeoutSec {
-		t.Fatalf("re-placed contract carried timeout_sec=%d, want 0 < t < %d (the remaining budget, never a fresh one)",
-			replaced, contract.TimeoutSec)
+	// The upper bound is the load-bearing assertion and it is deliberately
+	// tight enough to catch a change in ROUNDING DIRECTION, not merely a
+	// missing subtraction: with ~1.2 s spent, rounding elapsed UP yields 28 and
+	// rounding it DOWN yields 29.
+	//
+	// Its predecessor was `> TimeoutSec-1`, which can only fire for values the
+	// `>= TimeoutSec` check above already caught — a dead assertion. A mutant
+	// rounding elapsed down survived both, while rounding UP is the pillar the
+	// whole deadline argument rests on (never credit a 1.2 s attempt as 1 s).
+	if replaced > contract.TimeoutSec-2 {
+		t.Fatalf("re-placed contract carried timeout_sec=%d, want <= %d — ~1.2s was spent and elapsed must be charged and rounded UP",
+			replaced, contract.TimeoutSec-2)
 	}
-	if replaced > contract.TimeoutSec-1 {
-		t.Fatalf("re-placed timeout_sec=%d does not reflect the ~1.2s already spent", replaced)
+	if replaced < minRetrySec {
+		t.Fatalf("re-placed contract carried timeout_sec=%d, under the %ds floor — such a placement should not have been made at all",
+			replaced, minRetrySec)
+	}
+}
+
+// busyLocal holds the machine-wide GPU lease for the test's duration, so
+// LocalBusy reads busy=true inside Run and route=auto will consider remotes.
+func busyLocal(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "lease")
+	m, err := gpulease.OpenAt(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "delegate-replace-test", TTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lease.Release() })
+	return dir
+}
+
+// TestRunRetryNeverLandsOnASeatTheSubtaskAlreadyUsed is the round-3 review's
+// traced defect. The exclusion set used to be per placeAndRun CALL, and runOne
+// calls it twice — so:
+//
+//	route=auto, local busy, two remotes refuse
+//	→ the first attempt is re-placed onto LOCAL, which fails acceptance
+//	→ retryable; alternativeNode forces a remote; nothing untried is left
+//	→ the retry's OWN fresh map has no record of local, so it lands local again
+//
+// and the result published "this result is the retry" over two runs of the same
+// seat. That defeats the measured premise of the retry entirely: the 27B and the
+// 4B each missed a DIFFERENT contract, and a second opinion from the same seat
+// is not a second opinion.
+func TestRunRetryNeverLandsOnASeatTheSubtaskAlreadyUsed(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	a, aURL := refusingNode(t, "node-a", http.StatusServiceUnavailable, nil)
+	b, bURL := refusingNode(t, "node-b", http.StatusServiceUnavailable, nil)
+
+	cfg := testCfg(t)
+	cfg.GPULockPath = busyLocal(t)
+
+	var localCalls atomic.Int64
+	results, sum, err := Run(t.Context(), cfg, failingLocal(&localCalls),
+		[]core.AgentContract{remoteContract()}, "auto", []string{aURL, bURL})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// The local seat took the re-placed work and its answer failed acceptance.
+	// There is nowhere left to retry, so no retry runs at all — which is the
+	// honest outcome, and strictly better than running the same seat twice.
+	if localCalls.Load() != 1 {
+		t.Fatalf("local runner called %d times, want exactly 1 — a retry on the seat that already answered is not a second opinion",
+			localCalls.Load())
+	}
+	if sum.Retried != 0 || results[0].RetriedOn != "" || results[0].RetryNote != "" {
+		t.Fatalf("summary = %+v, retried_on = %q, note = %q — no retry was possible here",
+			sum, results[0].RetriedOn, results[0].RetryNote)
+	}
+	if sum.FailedVerification != 1 || sum.Replaced != 1 || sum.ReplacementRecovered != 1 {
+		t.Fatalf("summary = %+v, want one re-placed subtask whose answer then failed verification", sum)
+	}
+	if a.dispatches.Load() != 1 || b.dispatches.Load() != 1 {
+		t.Fatalf("dispatches a=%d b=%d, want each remote asked exactly once", a.dispatches.Load(), b.dispatches.Load())
+	}
+}
+
+// TestRunReplacementBoundIsPerSubtaskNotPerAttempt pins the other half of the
+// same defect: the BOUND was per placeAndRun call too, so a subtask could make
+// eight placements while the constant, the CHANGELOG and the docs all said four.
+//
+// SIX refusing remotes, a busy local seat and a local answer that fails
+// acceptance. The roster is deliberately WIDER than the bound, which is what
+// makes the shared counter observable — with only four remotes, `tried` alone
+// blocked every later placement and a mutant that reset the bound per call
+// survived the whole battery:
+//
+//	first attempt   a refused → b (1st re-placement) → c (2nd — bound spent)
+//	                → local (reserved, never charged) → fails acceptance
+//	retry           d (best untried remote, chosen by alternativeNode, not
+//	                charged) refuses → bound ALREADY spent and local ALREADY
+//	                used → placement refused
+//
+// so e and f are never asked. Five placements, five DISTINCT targets, every
+// asked node asked exactly once. Under per-call state the retry chain would
+// start a fresh bound (reaching e and f) over a fresh empty map (re-dispatching
+// to nodes that had already refused).
+func TestRunReplacementBoundIsPerSubtaskNotPerAttempt(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	ids := []string{"node-a", "node-b", "node-c", "node-d", "node-e", "node-f"}
+	var nodes []*fakeNode
+	var urls []string
+	for _, id := range ids {
+		n, u := refusingNode(t, id, http.StatusServiceUnavailable, nil)
+		nodes = append(nodes, n)
+		urls = append(urls, u)
+	}
+
+	cfg := testCfg(t)
+	cfg.GPULockPath = busyLocal(t)
+
+	var localCalls atomic.Int64
+	results, sum, err := Run(t.Context(), cfg, failingLocal(&localCalls), []core.AgentContract{remoteContract()}, "auto", urls)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// a..d asked exactly once each; e and f never — the bound is spent ACROSS
+	// both chains, not refreshed for the retry.
+	for i, n := range nodes {
+		want := int64(1)
+		if i >= 4 {
+			want = 0
+		}
+		if got := n.dispatches.Load(); got != want {
+			t.Fatalf("%s saw %d dispatches, want %d — the re-placement bound and the exclusion set are per SUBTASK",
+				ids[i], got, want)
+		}
+	}
+	if localCalls.Load() != 1 {
+		t.Fatalf("local runner called %d times, want exactly 1", localCalls.Load())
+	}
+	// 4 remote dispatches + 1 local run = 5, the documented per-subtask ceiling.
+	var asked int
+	for _, n := range nodes {
+		asked += int(n.dispatches.Load())
+	}
+	if total := asked + int(localCalls.Load()); total != 5 {
+		t.Fatalf("%d placements, want the documented ceiling of 5", total)
+	}
+	// A retry DID run (on node-d) and no node took it; the first attempt's
+	// verified-wrong answer is what gets published.
+	if sum.Retried != 1 || sum.FailedVerification != 1 || sum.RetryRecovered != 0 {
+		t.Fatalf("summary = %+v, want one retry that recovered nothing", sum)
+	}
+	if results[0].Replacements != 3 {
+		t.Fatalf("replacements = %d, want 3 (b, c, local)", results[0].Replacements)
+	}
+	if !strings.Contains(results[0].RetryNote, replacementExhaustedPrefix) {
+		t.Fatalf("retry_note = %q, want it to report that the retry's own placement was refused", results[0].RetryNote)
+	}
+}
+
+// TestExhaustedResultClaimsNoNode: a subtask no node ran must not be attributed
+// to the node that refused it LAST. Every node asked, and what each said, is in
+// the error verbatim; the result itself names none.
+func TestExhaustedResultClaimsNoNode(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	_, aURL := refusingNode(t, "node-a", http.StatusServiceUnavailable, nil)
+	_, bURL := refusingNode(t, "node-b", http.StatusServiceUnavailable, nil)
+
+	results, _, err := Run(t.Context(), testCfg(t), neverLocal(t),
+		[]core.AgentContract{remoteContract()}, "remote", []string{aURL, bURL})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if results[0].Node != "" || results[0].Seat != "" {
+		t.Fatalf("node=%q seat=%q, want both empty — no node ran this subtask",
+			results[0].Node, results[0].Seat)
+	}
+	if !strings.Contains(results[0].Err, "node-a") || !strings.Contains(results[0].Err, "node-b") {
+		t.Fatalf("err = %q must still name every node that was asked", results[0].Err)
+	}
+}
+
+// TestSingleRefusalWithNowhereToGoIsCoherentOnTheWire: one refusal and no
+// second node means NOTHING was re-placed. `replacements` is 0 and correctly
+// so, and a `replacement_note` shipping beside it — while summary.replaced does
+// not count it either — read as a contradiction. The error carries the same
+// refusal list, so the note is simply omitted.
+func TestSingleRefusalWithNowhereToGoIsCoherentOnTheWire(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	_, url := refusingNode(t, "node-only", http.StatusServiceUnavailable, nil)
+
+	results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t),
+		[]core.AgentContract{remoteContract()}, "remote", []string{url})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sum != (Summary{Failed: 1}) {
+		t.Fatalf("summary = %+v, want a plain failure — nothing was re-placed", sum)
+	}
+	if results[0].Replacements != 0 || results[0].ReplacementNote != "" {
+		t.Fatalf("replacements=%d note=%q — a subtask that was never re-placed must publish neither",
+			results[0].Replacements, results[0].ReplacementNote)
+	}
+	if !strings.Contains(results[0].Err, "node-only") || !strings.Contains(results[0].Err, "503") {
+		t.Fatalf("err = %q must carry the refusal the note would have carried", results[0].Err)
 	}
 }
 
@@ -556,5 +753,80 @@ func TestWireResponsePublishesReplacement(t *testing.T) {
 		if strings.Contains(string(clean), forbidden) {
 			t.Fatalf("a clean run published %s, want the fields omitted entirely", clean)
 		}
+	}
+}
+
+// TestRunReplacementBudgetIsRemeasuredAfterSelection (IMPORTANT 1): the budget
+// handed to a re-placement must be measured AFTER choosing the node, not
+// before.
+//
+// Selecting a node blocks: fetchViews probes every remote SEQUENTIALLY at
+// fetchNodeViewTimeout each, and Run derives no deadline of its own. A number
+// taken before that probe can be minutes stale on a roster with blackholing
+// nodes, and writing it into the replacement's contract hands a seat execution
+// time the subtask no longer owns.
+//
+// The fixture makes the probe cost 1.2 s of real wall clock (node-taker's
+// health handler sleeps), so two probes run before the second dispatch:
+//
+//	t≈1.2s  first probe done → node-slow refuses instantly
+//	t≈1.2s  pre-selection measure would say 30-2 = 28
+//	t≈2.4s  second probe done
+//	t≈2.4s  post-selection measure says 30-3 = 27   ← what must be dispatched
+//
+// so an implementation that skips the re-measure ships 28 and this test fails.
+func TestRunReplacementBudgetIsRemeasuredAfterSelection(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	_, slowURL := refusingNode(t, "node-slow", http.StatusServiceUnavailable, nil)
+	var got atomic.Int64
+	_, takerURL := acceptingNode(t, "node-taker", "qube from the taker", func(f *fakeNode) {
+		f.healthDelay = 1200 * time.Millisecond
+		f.onDispatch = func(_ string, c core.AgentContract) { got.Store(int64(c.TimeoutSec)) }
+	})
+
+	contract := remoteContract() // TimeoutSec: 30
+	_, sum, err := Run(t.Context(), testCfg(t), neverLocal(t),
+		[]core.AgentContract{contract}, "remote", []string{slowURL, takerURL})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sum.Succeeded != 1 {
+		t.Fatalf("summary = %+v, want the re-placement to have succeeded", sum)
+	}
+	// <= 27 rather than == 27 so a slower box (which spends MORE, not less)
+	// still passes, while the un-re-measured 28 fails.
+	if replaced := int(got.Load()); replaced > contract.TimeoutSec-3 {
+		t.Fatalf("re-placed contract carried timeout_sec=%d, want <= %d — the ~1.2s spent CHOOSING the node must be charged too",
+			replaced, contract.TimeoutSec-3)
+	}
+}
+
+// TestCarryReplacementsKeepsChronologicalOrder (MINOR 5): the published result
+// carries both attempts' refusal history, and the note reads first-then-retry
+// whichever attempt won. The predecessor folded "the loser" onto "the winner"
+// and joined with "; then ", so on the losing-retry path it rendered the
+// RETRY's refusals before the first attempt's under a word asserting the
+// opposite order.
+func TestCarryReplacementsKeepsChronologicalOrder(t *testing.T) {
+	first := PlacedResult{Node: "n1", Replacements: 1, ReplacementNote: "FIRST-NOTE"}
+	second := PlacedResult{Node: "n2", Replacements: 1, ReplacementNote: "RETRY-NOTE"}
+	const want = "FIRST-NOTE; then RETRY-NOTE"
+
+	for _, tc := range []struct {
+		name      string
+		published PlacedResult
+	}{
+		{"the retry is published", second},
+		{"the first attempt is published", first},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := carryReplacements(first, second, tc.published)
+			if got.ReplacementNote != want {
+				t.Fatalf("note = %q, want %q — chronological order does not depend on which attempt won", got.ReplacementNote, want)
+			}
+			if got.Replacements != 2 {
+				t.Fatalf("replacements = %d, want 2 (both attempts summed)", got.Replacements)
+			}
+		})
 	}
 }

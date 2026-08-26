@@ -27,16 +27,27 @@ Versioning: [SemVer](https://semver.org/).
   only collects the same answer N times while spending the contract's budget. The `401`/`403` line
   has a stated bound: one shared `fleet_auth_token` per fleet is the documented posture, so a
   rejected credential is an operator fix, not a routing one.
-- **Bounded.** The first choice plus at most `maxRemoteReplacements` = 2 further remotes, then local
-  — four placements per subtask at the very most, each node tried at most once. Local is not charged
-  against the bound, so a wide roster can never spend it before reaching the one seat that is always
-  able to take the work. A refusal that survives three DISTINCT nodes is a fleet-wide condition, and
-  each refused placement can cost up to `dispatchAttempts` × 30 s of dial time before a transport
-  verdict.
-- **Deadline-safe.** Every placement is handed what is LEFT of the contract's `timeout_sec` (elapsed
-  rounded UP), and below the 10 s floor there is no placement left to make — the same discipline
-  0.100.0's queued-time credit and the verification retry already follow. A re-placed subtask can
-  never be given more execution time than its contract granted.
+- **Bounded, per SUBTASK.** The bound and the exclusion set live in one per-subtask ledger that every
+  placement consults — the first attempt's re-placement loop and the verification retry's both. The
+  ceiling is **five** placements: the first choice, at most `maxRemoteReplacements` = 2 re-placements
+  onto further remotes, at most one fall-back to the local seat, and at most one verification-retry
+  placement (a separate mechanism with its own bound of exactly one, deliberately not folded in).
+  **Every one of the five targets a dial base the subtask has not used before.** Local is not charged
+  against the numeric bound — it is the one seat always able to take the work, so a wide roster must
+  not spend the bound before reaching it — but it is in the exclusion set, which is what holds it to
+  one use. A refusal that survives three DISTINCT nodes is a fleet-wide condition, and each refused
+  placement can cost up to `dispatchAttempts` × 30 s of dial time before a transport verdict.
+- **Deadline-safe, and stated precisely.** Every placement is handed what is LEFT of the contract's
+  `timeout_sec` (elapsed rounded UP), **re-measured immediately before dispatch** — selecting a node
+  blocks on a sequential fleet probe, so the number taken before selection can be badly stale by the
+  time it would be written into a contract. That probe is itself bounded by a context carrying
+  whatever the contract has left, so a roster of blackholing nodes cannot spend a budget the subtask
+  no longer owns. A re-placed subtask can never be given more **execution** time than its contract
+  granted. `timeout_sec` is the execution budget and **not** an end-to-end wall ceiling: placement
+  overhead (the fleet probe, and up to `dispatchAttempts` × `dispatchRequestTimeout` of dial time)
+  and 0.100.0's queued-time credit are both bounded but neither is charged to it. Anything that
+  called `timeout_sec` a wall ceiling — including a comment added earlier in this release — was
+  wrong and has been corrected.
 - **Dispatch time ONLY, and that is a safety property.** A refusal is a NON-ack: the node never took
   ownership, so no seat can be running the contract and re-placing it cannot produce two concurrent
   runs. Nothing after a `202` is ever moved — a poll `404`, a queue deadline, a poll deadline all
@@ -76,9 +87,13 @@ Versioning: [SemVer](https://semver.org/).
   `queue_depth == 0` as proof on its own, so a completely idle node publishing no limits is not
   demoted below a loaded node that does.
 - **Saturation is a RANKING input, not a capability.** `remoteEligible` is unchanged and a saturated
-  node is still chosen when nothing better exists: health is a cached read on the node side, so
-  "full" is a fact about a moment ago, and hard-excluding on it would discard a node that has since
-  drained. Re-placement covers the case where the snapshot was right.
+  node is still chosen when nothing better exists, because the DELEGATOR'S COPY of these numbers is
+  stale by construction: the snapshot ages between the health GET and the dispatch POST, and this
+  run's own concurrent siblings (`runConcurrency`) eat the headroom it measured. Hard-excluding on a
+  number that is stale by construction would strand a node that has since drained; re-placement
+  covers the case where the reading was right. (Note for anyone who read an earlier draft: the node
+  does **not** cache these counters — `handleHealth` walks the job store live in the same request.
+  What is cached over there is the VRAM snapshot and `agent_seat_resident`.)
 
 ### Added — the response says when the fleet is shedding load
 

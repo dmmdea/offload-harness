@@ -107,11 +107,10 @@ func Place(st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeV
 //     with no published ceiling is not, and must win. This is the key that
 //     makes placement capacity-aware.
 //
-//     It DEMOTES, it does not exclude, and that is deliberate: health is a
-//     CACHED read on the node side, so "full" is a fact about a moment ago, and
-//     hard-excluding on stale data would strand a node that has since drained.
-//     Re-placement (run.go) is the net that catches the case where this
-//     demotion guessed wrong in the other direction.
+//     It DEMOTES, it does not exclude, and that is deliberate — see saturated()
+//     for why the delegator's copy of these numbers is stale BY CONSTRUCTION
+//     rather than by caching. Re-placement (run.go) is the net that catches the
+//     case where this demotion guessed wrong in the other direction.
 //
 //  2. A provably free execution slot beats one that is not provable. The job
 //     starts NOW there rather than waiting in `accepted` — which is exactly
@@ -138,10 +137,28 @@ func betterRemote(candidate, incumbent NodeView) bool {
 // be REFUSED: its admission ceiling on queue_depth is already met.
 //
 // It is a RANKING input, never a capability: remoteEligible is untouched, and a
-// saturated node is still chosen when nothing better exists. Health is a cached
-// read on the node side, so "full" is a fact about a moment ago — hard-excluding
-// on it would discard a node that has since drained, and re-placement (run.go)
-// is what covers the case where the snapshot was right.
+// saturated node is still chosen when nothing better exists.
+//
+// The reason is that the DELEGATOR'S COPY of these numbers is stale by
+// construction. (Not because the node caches them — it does not. fleetnode's
+// health handler walks the job store live, in the same request, for exactly
+// these counters; what IS cached over there is the VRAM snapshot and
+// agent_seat_resident. An earlier draft of this comment said "cached read on
+// the node side", which was simply false about how the node works.) Two things
+// make the number old the moment it arrives:
+//
+//   - The snapshot ages between the health GET and the dispatch POST. Placement
+//     is not atomic with admission, and any node can admit or finish jobs in
+//     that gap in either direction.
+//   - This run's own siblings eat the headroom it measured. Run fans out at
+//     runConcurrency, and those subtasks probe within milliseconds of each
+//     other — so several of them can read the same free slot and then compete
+//     for it.
+//
+// Hard-excluding on a number that is stale by construction would strand a node
+// that has since drained, on evidence that was never current. Demoting costs
+// nothing when the reading was right and forfeits nothing when it was wrong,
+// and re-placement (run.go) is what covers the case where it WAS right.
 //
 // MaxQueueDepth == 0 is UNKNOWN, not unlimited and not full: the node publishes
 // 0 for unlimited and a node too old to publish the field decodes to 0 as well.

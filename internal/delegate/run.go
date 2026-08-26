@@ -97,7 +97,12 @@ type PlacedResult struct {
 	// the first attempt did not (Summary.RetryRecovered). ranLocal records where
 	// the attempt ran so the retry can pick a DIFFERENT node.
 	retryRecovered bool
-	ranLocal       bool
+	// retried: a verification retry actually RAN for this subtask. Deliberately
+	// not `RetriedOn != ""`: a retry whose own placement was refused by every
+	// node names no node at all, and keying the tally off the string silently
+	// dropped exactly the retries most worth counting.
+	retried  bool
+	ranLocal bool
 	// ranBase is the dial base this attempt used ("" for local). It is what the
 	// re-placement loop excludes on, rather than the node id: a node that
 	// answered health without a node_id would otherwise collide with every
@@ -242,11 +247,27 @@ const (
 	// re-POSTing forever would re-run the contract on every node restart.
 	maxRedispatches = 2
 	// maxRemoteReplacements bounds how many ADDITIONAL REMOTE nodes one subtask
-	// may be offered to after its first-choice node refused it at dispatch.
+	// may be offered to after a node refused it at dispatch. It is spent from
+	// ONE per-subtask ledger (see the placements struct), so the verification
+	// retry draws from what the first attempt left rather than starting a fresh
+	// copy of the bound.
+	//
 	// Local is NOT counted against it — the fallback to the one seat that
 	// always exists is reserved, so a wide roster can never spend the bound
-	// before reaching it. Total placements per subtask are therefore at most
-	// 1 (first choice) + maxRemoteReplacements + 1 (local) = 4.
+	// before reaching it.
+	//
+	// The resulting ceiling per subtask is FIVE placements, and the arithmetic
+	// is worth spelling out because a shorter number was wrong once already:
+	//
+	//	1  the first placement
+	//	2  at most maxRemoteReplacements re-placements onto further remotes
+	//	1  at most one fall-back to the local seat (bounded by the ledger's
+	//	   `tried` set, not by this constant)
+	//	1  at most one verification-retry placement — a SEPARATE mechanism with
+	//	   its own bound of exactly one, which is why it is not folded in here
+	//
+	// and every one of those five targets a dial base the subtask has not used
+	// before, because they all consult the same `tried` set.
 	//
 	// Why 2, and why a bound at all:
 	//
@@ -395,7 +416,7 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 
 	var sum Summary
 	for _, pr := range results {
-		if pr.RetriedOn != "" {
+		if pr.retried {
 			sum.Retried++
 		}
 		if pr.retryRecovered {
@@ -555,20 +576,25 @@ func (r *runner) reportTelemetryLoss() {
 // and the retry is what turns "caught" into "recovered".
 func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract) PlacedResult {
 	start := time.Now()
-	// The subtask's timeout_sec is the WALL CEILING the caller was told about,
-	// and every mechanism inside runOne spends from this one budget: the
-	// re-placement loop below and the verification retry both measure what is
-	// left against `start`, so neither can silently extend the other's.
+	// timeout_sec is the EXECUTION budget, and every mechanism inside runOne
+	// spends from this one copy of it: the re-placement loop and the
+	// verification retry both measure what is left against this `start`, so
+	// neither can silently extend the other's.
+	//
+	// It is NOT the end-to-end wall — see placeAndRun for what else the wall
+	// contains and why none of it can be charged here.
 	budget := contract.TimeoutSec
 	if budget <= 0 {
 		budget = core.AgentTimeoutSecDefault
 	}
-	first := r.placeAndRun(ctx, i, contract, nil, start, budget)
+	// ONE ledger per subtask, shared by every placeAndRun below. See placements.
+	pl := newPlacements()
+	first := r.placeAndRun(ctx, i, contract, nil, start, budget, pl)
 	if !retryable(first) {
 		return first
 	}
 	// The retry lives INSIDE the subtask's own timeout_sec: the caller was told
-	// that number is the wall ceiling per subtask, and a second full attempt would
+	// that number bounds the work per subtask, and a second full attempt would
 	// have doubled it silently. What is left after the first attempt is the
 	// retry's budget; under the floor there is no honest retry to run.
 	remaining := remainingSec(start, budget)
@@ -576,15 +602,61 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after the first attempt (floor %ds)", remaining, budget, minRetrySec)
 		return first
 	}
-	alt, ok := r.alternativeNode(ctx, first, contract)
+	// alternativeNode BLOCKS — it probes the fleet. Bound that probe by what
+	// the contract still has, so a roster of blackholing nodes cannot spend a
+	// budget the subtask no longer owns (fetchViews is sequential at
+	// fetchNodeViewTimeout per remote and Run derives no deadline of its own).
+	altCtx, cancel := context.WithTimeout(ctx, time.Duration(remaining)*time.Second)
+	alt, ok := r.alternativeNode(altCtx, first, contract, pl)
+	cancel()
 	if !ok {
+		return first
+	}
+	// RE-MEASURE after the probe. `remaining` above was true when it was taken
+	// and can be minutes stale by now; writing that stale number into the retry
+	// contract is what would hand a seat time the subtask no longer has.
+	remaining = remainingSec(start, budget)
+	if remaining < minRetrySec {
+		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after choosing a retry node (floor %ds)", remaining, budget, minRetrySec)
 		return first
 	}
 	retryContract := contract
 	retryContract.TimeoutSec = remaining
-	second := r.placeAndRun(ctx, i, retryContract, &alt, start, budget)
+	second := r.placeAndRun(ctx, i, retryContract, &alt, start, budget, pl)
 	return mergeAttempts(first, second)
 }
+
+// placements is ONE SUBTASK's placement ledger. runOne owns it and hands the
+// same pointer to every placeAndRun call it makes, which is the whole point:
+// the exclusion set and the re-placement bound are properties of the SUBTASK,
+// not of one placeAndRun invocation.
+//
+// Round-3 review found what per-call state actually cost, and neither symptom
+// was visible from inside a single call:
+//
+//   - The bound doubled. runOne calls placeAndRun twice (first attempt, then
+//     the verification retry) and each built its own counter, so a subtask
+//     could make eight placements while the constant, the CHANGELOG and the
+//     docs all said four.
+//   - The retry could run on the seat the first attempt already used. Traced:
+//     route=auto with the local GPU busy, two remotes refuse, the first attempt
+//     falls to LOCAL and fails acceptance; the retry is forced remote, that
+//     remote refuses, the bound trips, and the retry's own fresh map has no
+//     record of local — so it lands local a second time and publishes
+//     "this result is the retry" over two runs of the same seat. That defeats
+//     the measured premise of the retry (the 27B and the 4B each missed a
+//     DIFFERENT contract); a retry on the same seat is not a second opinion.
+type placements struct {
+	// tried is every dial base this subtask has been placed on ("" = the local
+	// seat). EVERY attempt records itself here, including one that SUCCEEDED —
+	// the retry's whole premise is a different seat, so the seat that just
+	// answered has to be excluded from it.
+	tried map[string]bool
+	// used counts remote re-placements spent across the whole subtask.
+	used int
+}
+
+func newPlacements() *placements { return &placements{tried: map[string]bool{}} }
 
 // remainingSec is what is LEFT of a subtask's timeout_sec budget. Elapsed
 // rounds UP: crediting a 1.2 s attempt as 1 s overstates what is left, and no
@@ -627,31 +699,86 @@ const replacementExhaustedPrefix = "placement refused"
 // The one honest residual: when both dispatch attempts fail at TRANSPORT level
 // (status 0), the first POST may have landed and had its ack lost, so the
 // abandoned node could still run the contract once. That costs wasted compute
-// on a node nobody is polling any more — the agent lane is the read-only
-// agent.Build path, so there are no effects to duplicate — and the alternative
-// is losing the work with certainty. Named here rather than left implicit.
-func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentContract, forced *placement, start time.Time, budget int) PlacedResult {
+// on a node nobody is polling any more and the alternative is losing the work
+// with certainty. It is safe because the fleet agent loop is built with no
+// write/run/fetch capability (internal/pipeline/agenttask.go) and the node
+// registers no delegate tool (internal/fleetnode/tasks.go) — so a duplicate run
+// has nothing to duplicate. Note where that guarantee LIVES, though: in another
+// package, and agenttask.go already anticipates a v2 delegate tool. If the
+// fleet lane ever gains a mutating tool, this residual stops being free.
+//
+// WHAT THE BUDGET DOES AND DOES NOT BOUND. Every placement is handed what is
+// LEFT of the contract's timeout_sec, re-measured immediately before dispatch,
+// so no seat is ever promised execution time the subtask no longer owns. That
+// is a claim about EXECUTION, not about end-to-end wall, and the difference is
+// real rather than pedantic: two legs of a placement are bounded but are not
+// charged to timeout_sec, because neither can be known before it is paid —
+//
+//	selection  fetchViews probes remotes SEQUENTIALLY at fetchNodeViewTimeout
+//	           each. Bounded below by a ctx of whatever the contract has left,
+//	           which is what stops a roster of blackholing nodes from spending
+//	           a budget the subtask no longer owns.
+//	dispatch   up to dispatchAttempts × dispatchRequestTimeout before a
+//	           transport verdict.
+//
+// and 0.100.0's queued-time credit already extends the poll wall past
+// timeout_sec by design (bounded by maxQueuedWait). So the wall a subtask can
+// consume is timeout_sec + pollGrace + queued credit + this placement overhead,
+// all bounded, and the loop CONVERGES because every blocking leg is charged to
+// the next measurement and the floor is re-checked immediately before dispatch.
+// Anything that says timeout_sec is an end-to-end wall ceiling is wrong; it is
+// the execution budget.
+func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentContract, forced *placement, start time.Time, budget int, pl *placements) PlacedResult {
 	pr := r.attempt(ctx, i, contract, forced)
+	// Recorded whatever the outcome — a SUCCESSFUL placement must exclude its
+	// own seat from the verification retry just as firmly as a refused one.
+	pl.tried[pr.ranBase] = true
 	if !isReplaceable(pr) {
 		return pr
 	}
-	tried := map[string]bool{pr.ranBase: true}
 	refusals := []string{refusalLine(pr)}
 	for {
-		// Deadline discipline, identical to the retry's: a re-placement is
-		// handed what is LEFT of the contract's own timeout_sec, never a fresh
-		// copy of it, and under the floor there is no honest placement to make.
 		remaining := remainingSec(start, budget)
 		if remaining < minRetrySec {
-			return exhausted(pr, refusals, fmt.Sprintf(
-				"%ds of the %ds timeout_sec budget was left after %d placement(s), under the %ds floor for another",
-				remaining, budget, len(refusals), minRetrySec))
+			return exhausted(pr, refusals, budgetSpent(remaining, budget, len(refusals)))
 		}
-		next, why, ok := r.replacementNode(ctx, contract, tried, len(refusals)-1)
+		// Selection BLOCKS (fetchViews). Bound it by what is actually left, so
+		// the probe cannot outlive the budget it is probing on behalf of.
+		selCtx, cancel := context.WithTimeout(ctx, time.Duration(remaining)*time.Second)
+		next, why, ok := r.replacementNode(selCtx, contract, pl, len(refusals))
+		cancel()
 		if !ok {
 			return exhausted(pr, refusals, why)
 		}
-		tried[next.base] = true
+		// RE-MEASURE. `remaining` above was true when taken and the probe may
+		// have consumed most of it; committing the stale number to the wire is
+		// exactly how a seat gets handed time the subtask no longer has. The
+		// ledger is not touched until this check passes, so a placement
+		// abandoned here costs neither a slot in the bound nor an exclusion.
+		remaining = remainingSec(start, budget)
+		if remaining < minRetrySec {
+			return exhausted(pr, refusals, budgetSpent(remaining, budget, len(refusals)))
+		}
+		pl.tried[next.base] = true
+		if next.base != "" {
+			// REMOTE re-placements only. Charging the local fall-back against
+			// the bound would contradict the whole reason local is reserved: a
+			// wide roster could then spend the bound before reaching the one
+			// seat that is always able to take the work. Local is held to one
+			// use per subtask by pl.tried instead.
+			//
+			// HONESTLY: under today's control flow this guard changes no
+			// outcome, and the mutation battery confirmed it — charging local
+			// too is semantically inert. Proof: replacementNode returns local
+			// only when the untried remote pool is EMPTY (so no later remote
+			// placement is possible at all, `tried` only grows) or when the
+			// bound is ALREADY spent (used >= maxRemoteReplacements, so one
+			// more makes no difference). It is kept because it encodes the
+			// documented rule at the point the rule applies, and it becomes
+			// load-bearing the moment the bound, the ordering or local's
+			// reservation changes. It is not claimed as tested.
+			pl.used++
+		}
 		replaced := contract
 		replaced.TimeoutSec = remaining
 		pr = r.attempt(ctx, i, replaced, &next)
@@ -664,6 +791,15 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		}
 		refusals = append(refusals, refusalLine(pr))
 	}
+}
+
+// budgetSpent is the exhausted-message tail for a subtask that ran out of
+// contract budget rather than out of nodes. One function because it is now
+// produced from two places in the loop (before selection and after it), and two
+// copies of a sentence drift.
+func budgetSpent(remaining, budget, placements int) string {
+	return fmt.Sprintf("%ds of the %ds timeout_sec budget was left after %d placement(s), under the %ds floor for another",
+		remaining, budget, placements, minRetrySec)
 }
 
 // isReplaceable: this attempt ended because a node DECLINED the job at
@@ -730,16 +866,22 @@ func replaceableRefusal(status int) bool {
 // replacementNode picks where a refused subtask goes next: the best eligible
 // remote not yet tried, and — reserved as the last resort — the local seat.
 //
-// used is how many re-placements have already been made, checked against
-// maxRemoteReplacements. Local is deliberately NOT charged against that bound:
-// it is the one seat always able to take the contract, so a wide roster must
-// not be able to spend the bound before reaching it.
+// The bound and the exclusion set both come from the SUBTASK's ledger, not
+// from this call: pl.used is every re-placement the subtask has spent (across
+// the first attempt AND the verification retry) and pl.tried is every dial base
+// it has already been placed on. Local is deliberately not charged against the
+// bound — it is the one seat always able to take the contract, so a wide roster
+// must not be able to spend the bound before reaching it — but it IS in
+// pl.tried, which is what keeps it to one use per subtask.
+//
+// refused is this chain's refusal count, used only for the human-readable
+// reason; the bound is pl.used and nothing else.
 //
 // ok=false returns the sentence the exhausted message ends with. It is built
 // from BOTH facts (the bound, and whether local was available) because a reader
 // who is told only one of them will look in the wrong place.
-func (r *runner) replacementNode(ctx context.Context, contract core.AgentContract, tried map[string]bool, used int) (placement, string, bool) {
-	boundHit := used >= maxRemoteReplacements
+func (r *runner) replacementNode(ctx context.Context, contract core.AgentContract, pl *placements, refused int) (placement, string, bool) {
+	boundHit := pl.used >= maxRemoteReplacements
 	if r.route != "local" && !boundHit {
 		st := Subtask{Contract: contract, EstTokens: EstimateTokens(contract)}
 		views, bases := r.spreadViews, r.spreadBases
@@ -749,12 +891,12 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 			// the only thing that can say which of the others has room.
 			views, bases, _ = r.fetchViews(ctx)
 		}
-		freshViews, freshBases := untried(views, bases, tried)
+		freshViews, freshBases := untried(views, bases, pl.tried)
 		if chosen := Place(st, r.localView(), freshViews, true); !chosen.Local {
 			return placement{
 				view:   chosen,
 				base:   baseFor(chosen, freshViews, freshBases),
-				reason: fmt.Sprintf("re-placed on %s after %d refusal(s)", chosen.NodeID, used+1),
+				reason: fmt.Sprintf("re-placed on %s after %d refusal(s)", chosen.NodeID, refused),
 			}, "", true
 		}
 	}
@@ -768,12 +910,12 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 	if r.route == "remote" {
 		return placement{}, head + ", and route=remote never falls back to local", false
 	}
-	if tried[""] {
+	if pl.tried[""] {
 		return placement{}, head + ", and the local seat had already been tried", false
 	}
 	return placement{
 		view:   r.localView(),
-		reason: fmt.Sprintf("re-placed on the local seat after %d refusal(s) — queued-local beats work nobody ran", used+1),
+		reason: fmt.Sprintf("re-placed on the local seat after %d refusal(s) — queued-local beats work nobody ran", refused),
 	}, "", true
 }
 
@@ -824,9 +966,25 @@ func replacementNote(refusals []string, landed bool) string {
 // stopped asking. last is the final refused attempt, whose telemetry row was
 // already written by finish(); only what is PUBLISHED is rewritten here (the
 // same posture mergeAttempts takes with its retry annotations).
+//
+// Node and Seat are CLEARED. `last` carries the id of the node that refused
+// LAST, and publishing it as the result's node attributes the subtask to a box
+// that explicitly declined it — the one attribution nobody in this path earned.
+// No node ran this subtask, so it names none; every node that was asked, and
+// exactly what each said, is in Err verbatim.
+//
+// The note is omitted when nothing was actually RE-placed (a single refusal
+// with nowhere to go). Replacements is 0 there and correctly so, and shipping a
+// `replacement_note` beside `replacements: 0` — with summary.replaced not
+// counting it either — read as a contradiction on the wire. Err already carries
+// the same refusal list, so nothing is lost by the omission.
 func exhausted(last PlacedResult, refusals []string, why string) PlacedResult {
+	last.Node, last.Seat = "", ""
 	last.Replacements = len(refusals) - 1
-	last.ReplacementNote = replacementNote(refusals, false)
+	last.ReplacementNote = ""
+	if last.Replacements > 0 {
+		last.ReplacementNote = replacementNote(refusals, false)
+	}
 	last.Err = fmt.Sprintf("%s: %d node(s) refused this subtask and none of them ran it (%s); %s",
 		replacementExhaustedPrefix, len(refusals), strings.Join(refusals, "; "), why)
 	return last
@@ -862,12 +1020,30 @@ func retryable(pr PlacedResult) bool {
 // latency. That is accepted deliberately (local is the one seat always able to
 // take the contract, and a second remote hop would need a fresh gate pass
 // mid-timeout), but it is a real cost, not a free retry.
-func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contract core.AgentContract) (placement, bool) {
+// It consults the SUBTASK's placement ledger, which is what makes "a DIFFERENT
+// node" true rather than merely intended: a seat the first attempt already used
+// — including one it reached by re-placement, and including the local seat — is
+// excluded here. Without that, a first attempt that ended up local after two
+// remotes refused could be "retried" on local again.
+func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contract core.AgentContract, pl *placements) (placement, bool) {
 	st := Subtask{Contract: contract, EstTokens: EstimateTokens(contract)}
 	localView := r.localView()
 	why := attemptOutcome(first)
 	if !first.ranLocal {
-		return placement{view: localView, reason: "retry on local after " + first.Node + " " + why}, true
+		// No pl.tried[""] check here, and that is a proof rather than an
+		// oversight: a LOCAL placement is always terminal for its chain,
+		// because only runRemote can set `refused` and therefore local can
+		// never be re-placed away from. So pl.tried[""] implies first.ranLocal,
+		// and this branch cannot run with local already used.
+		//
+		// A guard was written here first. The mutation battery could not kill
+		// it from any fixture — which is the tell for a branch that reads as
+		// protection while protecting nothing — so it is stated as an invariant
+		// instead. If local ever becomes re-placeable, this is the line to
+		// revisit, and the other direction (a retry's own chain falling back
+		// onto an already-used local seat) is guarded in replacementNode, where
+		// it IS reachable and IS covered.
+		return placement{view: localView, reason: "retry on local after " + nodeLabel(first) + " " + why}, true
 	}
 	if r.route == "local" {
 		return placement{}, false
@@ -876,11 +1052,22 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 	if r.route != "spread" {
 		views, bases, _ = r.fetchViews(ctx)
 	}
-	chosen := Place(st, localView, views, true)
+	freshViews, freshBases := untried(views, bases, pl.tried)
+	chosen := Place(st, localView, freshViews, true)
 	if chosen.Local {
 		return placement{}, false
 	}
-	return placement{view: chosen, base: baseFor(chosen, views, bases), reason: "retry on " + chosen.NodeID + " after local " + why}, true
+	return placement{view: chosen, base: baseFor(chosen, freshViews, freshBases), reason: "retry on " + chosen.NodeID + " after local " + why}, true
+}
+
+// nodeLabel names an attempt's node for an operator-facing annotation. An
+// attempt NO node took (an exhausted re-placement) has no node to name — say so
+// rather than rendering an empty string mid-sentence.
+func nodeLabel(pr PlacedResult) string {
+	if pr.Node == "" {
+		return "(no node took it)"
+	}
+	return pr.Node
 }
 
 // attemptOutcome names an attempt's outcome for the retry annotations.
@@ -902,33 +1089,52 @@ func attemptOutcome(pr PlacedResult) string {
 // with what the retry did. Both attempts were recorded by finish() already.
 func mergeAttempts(first, second PlacedResult) PlacedResult {
 	clean := second.Err == "" && !second.Result.Deferred && len(second.AcceptanceFailures) == 0
+	var published PlacedResult
 	if clean {
 		second.RetriedOn = second.Node
-		second.RetryNote = "first attempt on " + first.Node + " " + attemptOutcome(first) + "; this result is the retry"
+		second.RetryNote = "first attempt on " + nodeLabel(first) + " " + attemptOutcome(first) + "; this result is the retry"
 		second.retryRecovered = true
-		return carryReplacements(first, second)
+		published = second
+	} else {
+		first.RetriedOn = second.Node
+		first.RetryNote = "retry on " + nodeLabel(second) + " also " + attemptOutcome(second) + "; this result is the first attempt"
+		published = first
 	}
-	first.RetriedOn = second.Node
-	first.RetryNote = "retry on " + second.Node + " also " + attemptOutcome(second) + "; this result is the first attempt"
-	return carryReplacements(second, first)
+	published.retried = true
+	return carryReplacements(first, second, published)
 }
 
-// carryReplacements folds the LOSING attempt's re-placement history onto the
-// published one. A node that refused the first attempt still refused it even
-// when the retry is what gets published, and dropping that would make
+// carryReplacements folds BOTH attempts' re-placement history onto whichever
+// one is published. A node that refused the first attempt still refused it when
+// the retry is what gets published, and dropping that would make
 // summary.replaced silently under-report a fleet shedding load — the exact
 // blindness this release exists to remove.
-func carryReplacements(from, to PlacedResult) PlacedResult {
-	if from.Replacements == 0 {
-		return to
+//
+// The note is assembled in CHRONOLOGICAL order — first attempt, then retry —
+// independently of which attempt won. The predecessor folded "the loser" onto
+// "the winner" and joined with "; then ", so on the losing-retry path it
+// rendered the retry's refusals BEFORE the first attempt's under a word that
+// asserts the opposite order.
+func carryReplacements(first, second, published PlacedResult) PlacedResult {
+	total := first.Replacements + second.Replacements
+	if total == 0 {
+		return published
 	}
-	to.Replacements += from.Replacements
-	if to.ReplacementNote == "" {
-		to.ReplacementNote = from.ReplacementNote
-	} else {
-		to.ReplacementNote = from.ReplacementNote + "; then " + to.ReplacementNote
+	published.Replacements = total
+	published.ReplacementNote = joinNotes(first.ReplacementNote, second.ReplacementNote)
+	return published
+}
+
+// joinNotes concatenates two replacement notes in the order given, tolerating
+// an empty one on either side.
+func joinNotes(earlier, later string) string {
+	switch {
+	case earlier == "":
+		return later
+	case later == "":
+		return earlier
 	}
-	return to
+	return earlier + "; then " + later
 }
 
 // baseFor resolves the dial base of a chosen remote view ("" when absent).

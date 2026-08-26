@@ -184,7 +184,7 @@ func TestRunRetryBothFailKeepsFirstAttemptAnnotated(t *testing.T) {
 
 // TestRunRetryStaysInsideTimeoutBudget: the retry gets what the first attempt
 // left of timeout_sec, and is skipped under the floor — timeout_sec remains the
-// per-subtask wall ceiling the caller was told it is.
+// per-subtask EXECUTION budget the caller was told it is.
 func TestRunRetryStaysInsideTimeoutBudget(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
 	node, url := eligibleNode(t, "node-a", "qube from A")

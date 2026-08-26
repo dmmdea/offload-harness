@@ -614,18 +614,43 @@ capacity-aware ranking as the original placement, excluding every node already t
 local seat. `route=remote` never falls back to local: an explicit remote route is not silently
 overridden, exactly as with "no eligible remote".
 
-**The bound.** The first choice plus at most `maxRemoteReplacements` = **2** further remotes, then
-local; four placements per subtask at the very most. Local is not charged against the bound, so a wide
-roster can never spend it before reaching the one seat that is always able to take the work. Rationale:
-each refused placement costs up to `dispatchAttempts` × 30 s of dial time before a transport verdict,
-so walking a roster unbounded turns one saturated fleet into minutes of wall clock spent collecting
-refusals; and a refusal that survives three DISTINCT nodes is a fleet-wide condition, which a fourth
-dial does not fix. Each node is also tried at most once.
+**The bound, per SUBTASK.** The bound and the exclusion set live in ONE per-subtask ledger that every
+placement consults — the first attempt's re-placement loop and the verification retry's both — so the
+retry draws from what the first attempt left rather than starting a fresh copy. The ceiling is **five**
+placements, and the arithmetic is worth spelling out:
+
+| | |
+|---|---|
+| 1 | the first placement |
+| 2 | at most `maxRemoteReplacements` re-placements onto further remotes |
+| 1 | at most one fall-back to the local seat |
+| 1 | at most one verification-retry placement — a **separate** mechanism, bounded at exactly one, deliberately not folded into the number above |
+
+**Every one of those five targets a dial base the subtask has not used before.** Local is not charged
+against the numeric bound — it is the one seat always able to take the contract, so a wide roster must
+not spend the bound before reaching it — but it is in the exclusion set, which is what holds it to one
+use per subtask (and therefore stops a "retry" from landing on the seat the first attempt already
+used). Rationale for bounding at all: each refused placement costs up to `dispatchAttempts` × 30 s of
+dial time before a transport verdict, so walking a roster unbounded turns one saturated fleet into
+minutes of wall clock spent collecting refusals; and a refusal that survives three DISTINCT nodes is a
+fleet-wide condition, which a fourth dial does not fix.
 
 **Deadline.** Re-placement lives INSIDE the subtask's `timeout_sec`, the same discipline the
-verification retry follows: every placement is handed what is LEFT of the budget (elapsed rounded UP),
-and below a 10 s floor there is no placement left to make. A re-placed subtask can never be given more
-execution time than its contract granted.
+verification retry follows: every placement is handed what is LEFT of the budget (elapsed rounded UP)
+and below a 10 s floor there is no placement left to make. The remaining budget is **re-measured
+immediately before dispatch**, because choosing a node blocks on a sequential fleet probe and the
+number taken before that probe can be badly stale by the time it would be written into a contract;
+the probe itself runs under a context carrying whatever the contract has left, so a roster of
+blackholing nodes cannot spend a budget the subtask no longer owns.
+
+> **`timeout_sec` is the EXECUTION budget, not an end-to-end wall ceiling.** A re-placed subtask can
+> never be given more *execution* time than its contract granted — that part is exact. But two legs
+> are bounded without being charged to it, because neither can be known before it is paid: placement
+> overhead (the fleet probe, plus up to `dispatchAttempts` × `dispatchRequestTimeout` of dial time
+> before a transport verdict) and 0.100.0's queued-time credit, which extends the poll wall past
+> `timeout_sec` by design and is bounded by `maxQueuedWait`. So the wall a subtask can consume is
+> `timeout_sec` + `pollGrace` + queued credit + placement overhead — all bounded, and the
+> re-placement loop converges because every blocking leg is charged to the next measurement.
 
 **Dispatch time only.** A refusal is a NON-ack: the node never took ownership, so no seat can be
 running the contract and re-placing it cannot produce two concurrent runs. Everything after a `202` —
@@ -675,9 +700,18 @@ tell those apart. An unknown node is neither credited nor blamed — which is wh
 demoted below a loaded node that does.
 
 Saturation is a RANKING input, not a capability: `remoteEligible` is unchanged, and a saturated node
-is still chosen when nothing better exists. Health is a cached read on the node side, so "full" is a
-fact about a moment ago; hard-excluding on it would discard a node that has since drained, and
-re-placement covers the case where the snapshot was right.
+is still chosen when nothing better exists. The reason is that the **delegator's copy** of these
+numbers is stale by construction — the snapshot ages between the health `GET` and the dispatch `POST`
+(placement is not atomic with admission), and this run's own concurrent siblings (`runConcurrency`)
+eat the headroom it measured, since they probe within milliseconds of each other and can all read the
+same free slot. Hard-excluding on a number that is stale by construction would strand a node that has
+since drained, on evidence that was never current; demoting costs nothing when the reading was right
+and forfeits nothing when it was wrong, and re-placement covers the case where it WAS right.
+
+> The node itself does **not** cache these counters: `handleHealth` walks the job store live, in the
+> same request, so `queue_depth` / `jobs_queued` / `jobs_running` are current as of the moment it
+> answered. What *is* cached on the node side is the VRAM snapshot (max 30 s, `503` past that) and
+> `agent_seat_resident`. An earlier draft of this section said otherwise; it was wrong about the node.
 
 ### Job ids and polling (what a delegator does)
 

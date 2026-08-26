@@ -95,6 +95,11 @@ type fakeNode struct {
 	// test uses to script "refuse the first dispatch, take the second" and to
 	// spend wall clock before refusing.
 	dispatchHook func(n int64) int
+	// healthDelay makes this node's /fleet/health spend real wall clock, which
+	// is how a test makes the SELECTION step expensive: fetchViews probes every
+	// remote sequentially, so a slow health handler is time the delegator
+	// spends between measuring its remaining budget and using it.
+	healthDelay time.Duration
 	// killOnDispatch models a node the delegator can never REACH: the dispatch
 	// connection is hijacked and dropped with no HTTP answer at all, so both
 	// dispatch attempts end as transport errors. Distinct from a node that is
@@ -122,6 +127,13 @@ type fakeNode struct {
 func (f *fakeNode) server() *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /fleet/health", func(w http.ResponseWriter, r *http.Request) {
+		if f.healthDelay > 0 {
+			select {
+			case <-time.After(f.healthDelay):
+			case <-r.Context().Done():
+				return
+			}
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"node_id":             f.nodeID,
 			"queue_depth":         f.queueDepth,
