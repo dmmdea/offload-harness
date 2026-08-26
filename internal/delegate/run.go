@@ -558,11 +558,33 @@ func baseFor(chosen NodeView, views []NodeView, bases []string) string {
 
 // placeSpread deals subtask i across the run's fleet snapshot: slot 0 is the
 // local seat, then every remote that passes the hard gate FOR THIS SUBTASK in
-// roster order; i mod len picks the slot. The eligible set is per subtask on
-// purpose — a contract too big for the 8k seat must not be dealt to it just
-// because its sibling fit. With nothing eligible the subtask runs local and
-// the reason says why; an infrastructure-class reason is flagged deadFleet
+// roster order; i mod len picks the STARTING slot. The eligible set is per
+// subtask on purpose — a contract too big for the 8k seat must not be dealt to
+// it just because its sibling fit. With nothing eligible the subtask runs local
+// and the reason says why; an infrastructure-class reason is flagged deadFleet
 // exactly as route=auto flags it.
+//
+// The remote slots are then FIT-SCORED (fit.go) rather than taken blind: the
+// rotation only picks where the contest starts, and a strictly-better seat
+// wins it. Ties keep the rotation, so a fan-out of same-shaped contracts still
+// deals one per seat instead of stacking on whichever seat scores highest.
+//
+// The LOCAL rotation slot is never contested, and that is a deliberate bound
+// on this heuristic, not an oversight:
+//
+//   - Subtask 0 lands local, whatever its shape — the documented guarantee that
+//     a spread's first subtask (and therefore a SINGLE-subtask spread, the
+//     riskiest case for any shape heuristic) stays on-box. One regex match must
+//     not be able to send an entire run off-box.
+//   - The same holds for every later local slot (i mod len == 0), because the
+//     fit score ranks seats by their ADVERTISED context ceiling and the local
+//     seat advertises none in a delegator run. Scoring it would mean inventing
+//     a number for it; leaving it in the rotation keeps its share of the fan-out
+//     exactly as before, which is also what stops an all-reasoning fan-out from
+//     collapsing back onto one seat.
+//
+// Widening the contest to the local slot is a small change once the local seat
+// advertises a ceiling of its own — it is not blocked, it is unearned.
 func (r *runner) placeSpread(i int, st Subtask, localView NodeView) (placement, bool) {
 	nodes := []NodeView{localView}
 	bases := []string{""}
@@ -577,11 +599,21 @@ func (r *runner) placeSpread(i int, st Subtask, localView NodeView) (placement, 
 		return placement{view: localView, reason: "route=spread: no eligible remote — local (" + why + ")"}, class == core.DeferClassInfrastructure
 	}
 	k := i % len(nodes)
-	name := "local"
 	if !nodes[k].Local {
-		name = nodes[k].NodeID
+		best := scoreFit(st, nodes[k])
+		for c := 1; c < len(nodes); c++ {
+			j := (i + c) % len(nodes)
+			if nodes[j].Local {
+				continue // the local rotation slot is not in the contest
+			}
+			if s := scoreFit(st, nodes[j]); s > best { // strict: a tie keeps the rotation
+				best, k = s, j
+			}
+		}
+		return placement{view: nodes[k], base: bases[k],
+			reason: fmt.Sprintf("route=spread → %s (slot %d of %d, fit=%s)", nodes[k].NodeID, k+1, len(nodes), inferKind(st))}, false
 	}
-	return placement{view: nodes[k], base: bases[k], reason: fmt.Sprintf("route=spread → %s (slot %d of %d)", name, k+1, len(nodes))}, false
+	return placement{view: nodes[k], base: bases[k], reason: fmt.Sprintf("route=spread → local (slot %d of %d)", k+1, len(nodes))}, false
 }
 
 // attempt places (per route, or as forced by a retry) and executes one

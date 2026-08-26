@@ -96,9 +96,12 @@ func Place(st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeV
 //   - AgentEnabled: the node's operator opted it into the agent lane.
 //   - AgentResident: the seat is roster-VERIFIED on the node (advertised from
 //     its cached probe), not merely configured.
-//   - EstTokens+specReserve <= AgentCtxTokens: the contract provably fits the
-//     advertised ceiling with room for the loop itself. An unadvertised
-//     ceiling (0) can never fit — "unknown" is not a capacity.
+//   - adequate: EstTokens+specReserve <= AgentCtxTokens — the contract provably
+//     fits the advertised ceiling with room for the loop itself. An
+//     unadvertised ceiling (0) can never fit — "unknown" is not a capacity.
+//     The arithmetic lives in fit.go's adequate() so the gate and the
+//     smallest-ADEQUATE-seat fit score can never drift apart on what "fits"
+//     means.
 //   - OutputSchema present (len>0 — bytes, not merely non-nil): the reshaped
 //     verifiability requirement (roast delta 3). Remote output merges only
 //     after mechanical verification, and the schema is what makes the result
@@ -109,7 +112,7 @@ func Place(st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeV
 func remoteEligible(st Subtask, r NodeView) bool {
 	return r.AgentEnabled &&
 		r.AgentResident &&
-		st.EstTokens+specReserve <= r.AgentCtxTokens &&
+		adequate(st, r) &&
 		len(st.Contract.OutputSchema) > 0 &&
 		st.Contract.Depth == 0
 }

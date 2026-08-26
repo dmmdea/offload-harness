@@ -6,6 +6,56 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.99.0] - 2026-08-26
+
+### Changed — `route:"spread"`: the remote slots are fit-scored instead of dealt blind
+- `placeSpread` dealt every slot by `k := i % len(nodes)` and nothing else. Across heterogeneous
+  seats that is a coin flip on the thing that matters: a mechanical triage contract and a
+  cross-file reasoning contract had exactly the same chance of landing on the biggest seat.
+  The remote slots now go to the seat that suits the contract's **shape**, inferred from the
+  contract's own goal text. The rotation still picks where the contest starts, so the change is
+  strictly a re-pick among seats the hard gate had already cleared.
+- **Shape is a deterministic ORDERED pre-filter (`internal/delegate/fit.go`), not a classifier
+  call.** `mechanical` (extraction, listing, counting, filtering, digesting) or `reasoning`
+  (explanation, causation, cross-file interaction, tracing, comparison), decided by a quantity
+  rule, then an explanation rule, then a mechanical-verb rule. Asking a model which seat to use
+  would spend a round-trip per subtask to save one — a net loss on exactly the cheap contracts
+  this lane exists for — so nothing here leaves the process, and a placement is reproducible from
+  the recorded contract alone.
+- **Rule ORDER is the fix, not a cleverer pattern.** A bare `how ` alternative inside the
+  explanation pattern reads "how many files changed" as reasoning — a trivial count sent to the
+  expensive seat. RE2 has no lookahead, so "how, but not how many" cannot be written as one
+  expression; the quantity rule runs first and takes every quantity phrasing off the table, which
+  is what leaves the bare `how ` alternative safe for genuine how-questions. Pinned by a
+  table-driven routing test over realistic goal strings.
+- **An unmatched goal is `mechanical` — the CHEAP seat.** A harness whose purpose is moving grunt
+  work off the expensive seat must let ambiguity fall toward cheap, never toward capable:
+  defaulting the unmatched case to the big seat silently rebuilds the round-robin problem for
+  every goal the vocabulary does not cover. A wrong cheap placement costs a retry, which the
+  engine already runs on a different seat; a wrong expensive placement costs the capable seat,
+  which is the whole resource being protected. The unmatched branch is reported honestly
+  (`matchShape` returns `ok=false`) and is the single seam a better fallback would plug into.
+- **"Smallest adequate seat" is now arithmetic, not a phrase.** `adequate()` is
+  `est_tokens + specReserve <= agent_ctx_tokens` — the same check the hard gate makes, extracted
+  so `remoteEligible` and `scoreFit` share ONE definition of "fits" and cannot drift. Reasoning
+  takes the roomiest adequate seat; mechanical takes the smallest adequate one. An unadvertised
+  ceiling is never adequate: unknown is not a capacity, and a seat that published no number must
+  not win the mechanical contest by looking like the smallest on the roster.
+- **Unchanged, deliberately: subtask 0 still lands local**, whatever its shape — and so does every
+  later local rotation slot. A single-subtask spread is the riskiest case for a shape heuristic,
+  and one regex match must not be able to send an entire run off-box. The local seat also
+  advertises no context ceiling in a delegator run, so scoring it would mean inventing a number
+  for it. The documented pair shape (a 2-contract spread = one local + one remote) therefore
+  still holds, and the existing spread distribution test passes unchanged.
+- **Ties keep rotating** (the comparison is strict), so a fan-out of same-shaped contracts across
+  equal-ceiling seats still deals one per seat instead of stacking on one.
+- `results[].placement` now names the shape a remote placement was scored on
+  (`route=spread → node-a (slot 2 of 3, fit=mechanical)`); the local slot's reason is byte-identical
+  to before.
+- **Mutation-proven**: make `placeSpread` ignore the fit score (a compiling mutant that leaves the
+  rotation's pick in place) and the placement test goes red in BOTH directions — the mechanical
+  contract lands on the big seat and the reasoning contract on the small one.
+
 ## [0.98.0] - 2026-08-26
 
 ### Added — `offload_ask` result cache: an identical repeat stops costing a seat run
