@@ -6,6 +6,44 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.98.0] - 2026-08-26
+
+### Added — `offload_ask` result cache: an identical repeat stops costing a seat run
+- An IDENTICAL `offload_ask` call — same question, same `read_root`, and the same file **bytes**
+  — now returns the answer the seat already produced instead of running the seat again, and the
+  response says which it was via a new `cache_hit` field. Measured live on the 27B seat: a cold
+  call took **3 m 22 s**, the identical repeat returned the byte-identical answer in **5 ms**.
+- **The limitation, stated plainly, because it is easy to oversell.** This pays on an EXACT
+  repeat and on nothing else. A *different* question over the same files still pays full seat
+  time (46–75 s measured), because the seat has to reason about the new question. The only
+  mechanism that would fix that is keeping a model context resident between calls, which
+  requires llama-swap slot pinning — trading a seat's availability for cache warmth, and
+  explicitly declined by the operator. **Nothing here is a general speedup**, and the tool
+  description says so at the decision point rather than only here.
+- **Keyed on CONTENT, never on path**, and that is the entire safety argument. The key covers the
+  question, the resolved `read_root`, and each resolved doc's name plus the SHA-256 of its bytes,
+  so a file edited between two otherwise-identical calls is a *different key* and the seat runs
+  again. A stale answer is not merely unlikely, it is unreachable. Mutation-proven: key on the
+  path instead and both the unit test and the wired front-door test go red — the live e2e shows
+  the same thing, an edited file going straight back to the seat.
+- **Wired, not decorative.** The cache is consulted inside `handleAsk` and a hit is observable in
+  the response; a result cache that nothing calls is dead code with a test suite. The lookup sits
+  *after* `askjob.BuildContract`, because the key IS the resolved file content and `BuildContract`
+  is what resolves it — which also means every refusal (no anchor, over a cap, outside
+  `read_root`) still happens on every call. Only a finished answer is short-circuited.
+- **Only successful, non-deferred results are stored.** A defer, a refusal or a runner error is a
+  statement about this minute, not about these files; caching one would turn a transient seat
+  failure into a lane that stays dead for the rest of the connection. A deferred result therefore
+  carries no `cache_hit` at all — by design, not omission: it is always a fresh run. A
+  `verified: false` answer IS cached (the seat ran and answered; only the citation check missed),
+  so an identical repeat returns the same unverified answer rather than re-rolling the seat.
+- **Bounded at 32 entries, oldest out, scoped to the process.** The MCP server is spawned per
+  client over stdio, so one connection is one process is one cache — born and destroyed with the
+  connection. That is why there is **no `session_id` argument**: it would be a second, weaker
+  spelling of a boundary the process already draws exactly, and adding a required input to the
+  one-call tool would undercut the friction removal `offload_ask` exists for.
+- New package `internal/askcache`. `-race` clean, including a concurrent Put/Get/Len test.
+
 ## [0.97.0] - 2026-08-26
 
 ### Added — `offload_review_diff`: the clean-context review lane
