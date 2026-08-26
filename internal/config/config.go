@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
@@ -1201,6 +1202,32 @@ func Default() Config {
 // (LO-4: config.example.json ships "~/.local-offload/..." paths that were
 // previously taken literally, silently creating a "~" directory in the cwd).
 func Load(path string) (Config, error) {
+	c, err := load(path)
+	// Arm the model-affinity LOAD gate here and nowhere else, for the same reason
+	// netguard.SetTailnetSuffix below is installed from inside a load: the GPU lease
+	// location is a property of the MACHINE decided by two config fields
+	// (gpu_lock_path/state_dir), and every entry point that can make a text call
+	// funnels through this function. Threading it down instead would mean 60-odd
+	// client construction sites, where the ONE that forgot would be an ungated text
+	// lane with nothing to report it. Wrapping load() rather than calling this before
+	// each return means no exit path can skip it, error paths included — a caller that
+	// proceeds on a partially-loaded config still gets an armed gate.
+	//
+	// A refusal (gpulease.LeaseDir rejects a cloud-synced root) DISARMS and says so
+	// rather than failing the load: the same refusal reaches gpulease.OpenAt on the
+	// media path, so no media lease can exist on such a box and there is nothing for
+	// the gate to protect. Turning that into a fatal config error would break every
+	// subcommand over a condition that is already fatal only to media.
+	if lerr := modelaffinity.SetGPULease(c.GPULockPath, c.StateDir); lerr != nil {
+		fmt.Fprintf(os.Stderr, "warning: GPU load gate disabled: %v\n"+
+			"  Text calls will not wait for a media render to finish with the card.\n", lerr)
+	}
+	return c, err
+}
+
+// load is Load's body: merge, expand, validate. Split out so Load can arm the
+// process-wide gate on every exit without a call before each return.
+func load(path string) (Config, error) {
 	c := Default()
 	if path == "" {
 		return c, nil

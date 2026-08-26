@@ -37,6 +37,16 @@
 // stands: a filesystem lease per text request is off the table. This gate is
 // two uncontended mutex acquisitions and no allocation on the fast path.
 //
+// IT DOES, HOWEVER, READ THAT LEASE — never acquire it. Arbitrating text against
+// text still let a text lane load a multi-GB model into VRAM a media render had
+// just been handed, because the lease's text carve-out left nothing on this side
+// to observe it. gpuwait.go closes that: the admissions that can CHANGE llama-swap
+// residency (an idle base, a promoted switch) wait for a ClassMedia holder to
+// finish, while a request joining the resident model's in-flight batch — which
+// cannot move VRAM — never looks at the lease at all. Reading costs one ReadFile,
+// not an epoch bump, so the carve-out's reasoning is untouched. Details, and the
+// ClassText and pid decisions, live in gpuwait.go.
+//
 // CROSS-PROCESS LIMIT — STATED PLAINLY. The registry lives in this process. Two
 // harness processes on one box (an MCP server and a CLI invocation, two MCP
 // servers under two editors) still thrash each other exactly as before: neither
@@ -105,7 +115,12 @@ type gate struct {
 	mu       sync.Mutex
 	current  string // the model this base's in-flight batch names
 	inflight int
-	queue    []*waiter
+	// pending counts admissions that have been GRANTED but are still waiting for the
+	// machine-wide GPU lease before their request goes out (admitPromoted). While it
+	// is above zero the batch's model is not loaded, so inflight > 0 does not imply
+	// residency and tryJoin must refuse.
+	pending int
+	queue   []*waiter
 }
 
 var (
@@ -151,6 +166,27 @@ func Admit(ctx context.Context, base, model string, budget time.Duration) (Ticke
 	}
 	g := gateFor(base)
 
+	// TWO GATES, IN THIS ORDER. A request that JOINS an in-flight batch of the
+	// model llama-swap is serving RIGHT NOW cannot change what is resident, so it
+	// is not a load and skips the machine-wide gate entirely — that is what keeps
+	// a burst of the resident model from paying a lease read each. Every other
+	// outcome (an idle base, or a park that becomes a switch) can move VRAM, so it
+	// waits for the card first (gpuwait.go). The wait is taken BEFORE g.mu and
+	// never under it: it is seconds-to-minutes and holding mu across it would wedge
+	// the base for everyone, including the batch whose drain would end the wait.
+	if tk, ok := g.tryJoin(model); ok {
+		return tk, nil
+	}
+	// ONE deadline for every lease wait this admission makes. The pre-park wait below
+	// and admitPromoted's wait after promotion share it, so an admission that waits,
+	// gets in, parks, is promoted and finds the card taken again cannot spend the
+	// caller's budget TWICE over. (The park bound is deliberately separate and larger —
+	// see waitBound: budget is its unit, not its total.)
+	leaseDeadline := time.Now().Add(budget)
+	if err := awaitCard(ctx, base, model, leaseDeadline); err != nil {
+		return Ticket{}, err
+	}
+
 	g.mu.Lock()
 	// Idle base: take it, name it, go. This is the overwhelmingly common path.
 	if g.inflight == 0 {
@@ -160,13 +196,10 @@ func Admit(ctx context.Context, base, model string, budget time.Duration) (Ticke
 		return Ticket{g: g}, nil
 	}
 	// Running batch of the same model with nobody parked: join it. llama-swap
-	// queues these harmlessly and no switch is involved.
-	//
-	// The `len(g.queue) == 0` half is the anti-starvation barrier and is
-	// load-bearing: without it a steady stream of the resident model would
-	// keep inflight above zero forever and the parked switch would never run.
-	// It also CLOSES the batch at the instant someone parks, which is what
-	// makes waitBound provable.
+	// queues these harmlessly and no switch is involved. tryJoin above already
+	// took this case for everyone who could; it is re-tested because awaitCard
+	// released the lock in between and the base may have become joinable while we
+	// waited — dropping it would park a request that no longer needs to.
 	if g.current == model && len(g.queue) == 0 {
 		g.inflight++
 		g.mu.Unlock()
@@ -188,7 +221,7 @@ func Admit(ctx context.Context, base, model string, budget time.Duration) (Ticke
 	var cause error
 	select {
 	case <-w.admitted:
-		return Ticket{g: g}, nil
+		return admitPromoted(ctx, g, base, model, leaseDeadline)
 	case <-timer.C:
 		cause = context.DeadlineExceeded
 	case <-ctx.Done():
@@ -203,7 +236,7 @@ func Admit(ctx context.Context, base, model string, budget time.Duration) (Ticke
 	select {
 	case <-w.admitted:
 		g.mu.Unlock()
-		return Ticket{g: g}, nil
+		return admitPromoted(ctx, g, base, model, leaseDeadline)
 	default:
 	}
 	for i, x := range g.queue {
@@ -224,6 +257,67 @@ func Admit(ctx context.Context, base, model string, budget time.Duration) (Ticke
 		Bound:        bound,
 		cause:        cause,
 	}
+}
+
+// tryJoin takes an admission ONLY in the case that provably cannot change what
+// llama-swap holds resident: a batch of this very model already in flight with
+// nobody parked behind it. It is Admit's join branch, hoisted so the question "is
+// this admission a LOAD?" can be answered before the machine-wide wait.
+//
+// The `len(g.queue) == 0` half is the anti-starvation barrier and is load-bearing:
+// without it a steady stream of the resident model would keep inflight above zero
+// forever and the parked switch would never run. It also CLOSES the batch at the
+// instant someone parks, which is what makes waitBound provable.
+//
+// The `pending == 0` half is what keeps "provably resident" TRUE. A promoted batch
+// increments inflight before its members have sent anything, and while any of them
+// is still waiting for the card (admitPromoted) the model it names is NOT loaded —
+// so a joiner reading inflight > 0 would be joining a batch whose load has not
+// happened, slip past the machine-wide gate, and force exactly the load the promoted
+// waiter is waiting to avoid. Every other window here is an unavoidable
+// check-then-act race against a lease taken a microsecond later; this one is not,
+// because the gate KNOWS the card is held while pending > 0.
+func (g *gate) tryJoin(model string) (Ticket, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.inflight > 0 && g.pending == 0 && g.current == model && len(g.queue) == 0 {
+		g.inflight++
+		return Ticket{g: g}, true
+	}
+	return Ticket{}, false
+}
+
+// admitPromoted completes a promoted waiter's admission.
+//
+// A promotion is a model SWITCH — the one event that pulls new weights into VRAM —
+// and the card can have been taken by a render at any point during the park, so the
+// machine-wide gate is RE-READ here rather than trusted from park time. Trusting it
+// would leave a hole exactly one batch-drain wide, and the direction of that hole is
+// "text loads a model on top of a running render", which is the defect being fixed.
+//
+// The admission is held while we wait, which is correct: nobody else should be
+// loading either, and the wait shares ONE deadline with this caller's earlier
+// pre-park wait, so the base is wedged for no longer than one ordinary request would
+// have wedged it. An exhausted wait gives the admission back, which promotes the next
+// batch — so a held card drains the queue with one honest error each rather than
+// silently stalling it.
+//
+// pending is raised for the whole wait so tryJoin cannot hand this batch's model to
+// a newcomer while its load has not happened yet — see tryJoin.
+func admitPromoted(ctx context.Context, g *gate, base, model string, deadline time.Time) (Ticket, error) {
+	tk := Ticket{g: g}
+	g.mu.Lock()
+	g.pending++
+	g.mu.Unlock()
+	err := awaitCard(ctx, base, model, deadline)
+	g.mu.Lock()
+	g.pending--
+	g.mu.Unlock()
+	if err != nil {
+		tk.Release()
+		return Ticket{}, err
+	}
+	return tk, nil
 }
 
 // batchesAheadLocked counts the model switches that must happen before this
@@ -353,4 +447,11 @@ func inFlight(base string) int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.inflight
+}
+
+func pendingLoads(base string) int {
+	g := gateFor(base)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.pending
 }

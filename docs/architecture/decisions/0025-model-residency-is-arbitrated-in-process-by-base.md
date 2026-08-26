@@ -96,6 +96,12 @@ rather than joining the running batch, and promotion always takes the model at t
 - Hot-path cost: two uncontended mutex acquisitions and no allocation for an admission that does not
   block.
 
+- **Extended 2026-08-26 by ADR [0026](0026-text-load-admissions-wait-for-the-media-lease.md).** This
+  gate turned out to be the only chokepoint that knows which admissions can change llama-swap
+  residency, so it also became where text stops trampling a running render: a load-triggering
+  admission now waits out a `media` lease holder. It READS `gpulease`, never acquires — the text
+  exclusion above is about the write path and still stands.
+
 ## Alternatives considered
 
 - **A `gpulease` text class per request.** Rejected: ADR 0018 already weighed and refused this for
