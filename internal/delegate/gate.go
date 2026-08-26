@@ -107,6 +107,12 @@ func Place(st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeV
 //     with no published ceiling is not, and must win. This is the key that
 //     makes placement capacity-aware.
 //
+//     It DEMOTES, it does not exclude, and that is deliberate: health is a
+//     CACHED read on the node side, so "full" is a fact about a moment ago, and
+//     hard-excluding on stale data would strand a node that has since drained.
+//     Re-placement (run.go) is the net that catches the case where this
+//     demotion guessed wrong in the other direction.
+//
 //  2. A provably free execution slot beats one that is not provable. The job
 //     starts NOW there rather than waiting in `accepted` — which is exactly
 //     the state 0.100.0's `queue deadline` failure reports, so preferring it

@@ -425,6 +425,20 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 		// the merged count.
 		lost := pr.Result.Deferred && BrokenStackDefer(pr.Result.DeferClass)
 		infra := pr.remotesUnreachable || lost
+		// DO NOT add "every remote refused" to this. It is tempting after
+		// 0.101.0 — a fleet that 503s every dispatch and leaves the local seat
+		// carrying the run feels like it should be loud — and it is wrong twice.
+		// Infrastructure means THE FLEET IS BROKEN: a node that answered its
+		// health probe and then declined a job is working exactly as designed
+		// (back-pressure), and a local placement that SUCCEEDED is not a broken
+		// stack by any reading. remotesUnreachable is deliberately narrower: it
+		// is set only when the remotes failed their HEALTH PROBE, which is a
+		// different fact from refusing work. Widening this field would flag
+		// finished, verified work as infrastructure failure on both surfaces
+		// (non-zero CLI exit, IsError to the MCP caller) — the exact
+		// flag-on-successful-work defect delegateIsError was rewritten to
+		// remove. The audibility for a shedding fleet is Summary.Replaced, which
+		// exists for it and says the true thing without redefining this one.
 		switch {
 		case pr.Err != "":
 			sum.Failed++

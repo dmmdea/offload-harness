@@ -649,9 +649,13 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	// drain-in-progress flat-503'd a re-dispatch of a job_id this node
 	// ALREADY OWNED, even one it had already finished. The dispatcher's
 	// documented contract treats ANY non-202 dispatch response as an outright
-	// REFUSAL and may re-dispatch the same job_id to another node — so that
-	// flat 503 could buy a duplicate render fleet-wide for work this node had
-	// already done. A known job_id is NOT new work, so it is never subject to
+	// REFUSAL: the MEDIA dispatcher (a different repository) may then
+	// re-dispatch the SAME job_id to another node — so that flat 503 could buy
+	// a duplicate render fleet-wide for work this node had already done. (This
+	// repo's delegator refuses differently since 0.101.0: it re-places the
+	// subtask on another node under a FRESH id, and never for a job already
+	// acked. Same hazard class, different id — the ordering below is what
+	// protects both.) A known job_id is NOT new work, so it is never subject to
 	// the drain refusal below, whatever state it's in:
 	//   - JobError (previously failed here)            → 409, drain or not.
 	//   - accepted/running/done (this node owns it)     → 202 re-ack, drain or not.
@@ -703,20 +707,40 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	// 0.99.0's: the comparison is the same expression over the same
 	// QueueDepth() (accepted+running) against the same config key.
 	//
-	// This 503 is TERMINAL for the delegator in this repo: internal/delegate's
-	// dispatcher surfaces any non-202 as an error and does not re-place the
-	// subtask (run.go, the dispatch loop). Widening the backlog rather than
-	// the concurrency is therefore the safer half of the split — a job that
-	// waits is work that still gets done; a job that is refused is not.
+	// This 503 is NO LONGER TERMINAL for the delegator in this repo. Until
+	// delegator 0.101.0 internal/delegate surfaced any non-202 as an error and
+	// the subtask's work was simply not done; it now classifies the refusal by
+	// STATUS and re-places a 503 on another eligible node and then on the local
+	// seat, bounded (internal/delegate/run.go — replaceableRefusal,
+	// placeAndRun). What it still will NOT re-place is a 4xx other than
+	// 404/408/409/429, so the `400` BuildRequest can return below still ends
+	// that subtask.
+	//
+	// Widening the backlog rather than the concurrency is STILL the safer half
+	// of the split, and now for a sharper reason than "a refused job is lost":
+	// a job that WAITS gets done on the node whose seat is already warm, while
+	// a refused one pays a fresh placement out of the CONTRACT'S OWN
+	// timeout_sec and can still end up nowhere once the re-placement bound is
+	// spent.
 	if limit := s.opts.Cfg.FleetQueueLimit(); limit > 0 {
 		if d := s.jobs.QueueDepth(); d >= limit {
-			// Wording matters here more than anywhere else in this file: this
-			// string is what an operator actually reads. It used to say
-			// "re-dispatch elsewhere", which is true of the media dispatcher
-			// (a different repository) and FALSE of this repo's delegator,
-			// which treats any non-202 as terminal and does not re-place the
-			// subtask. Promising a recovery that does not happen sent people
-			// looking for a rebalancer that was never there.
+			// Wording matters here more than anywhere else in this file:
+			// this string is what an operator actually reads, and it also
+			// travels VERBATIM inside the delegator's `placement refused: ...`
+			// message when no node takes the subtask.
+			//
+			// It deliberately says NOTHING about what the caller should do
+			// instead, and that silence is the durable fix rather than a third
+			// rewrite. It once said "re-dispatch elsewhere" — true of the media
+			// dispatcher, false of this repo's delegator at the time, and
+			// promising a recovery that did not happen sent people looking for
+			// a rebalancer that was never there. Asserting the opposite went
+			// stale the moment delegator 0.101.0 began re-placing. This node
+			// cannot know which caller it is answering — media dispatcher,
+			// delegator, or a human with curl — so it states ITS OWN state and
+			// the one lever the operator holds, and leaves the routing to
+			// whoever made the request. Both halves stay true whatever any
+			// caller does next.
 			writeError(w, http.StatusServiceUnavailable,
 				fmt.Sprintf("queue full (%d jobs accepted+running, limit %d): retry later, or raise fleet_max_queue_depth", d, limit))
 			return
@@ -775,14 +799,19 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Contract refusal semantics: the dispatcher treats ANY non-202
-		// dispatch response as a REFUSAL and may re-dispatch the same job_id
-		// to another node. So a duplicate for a job in accepted/running — or
-		// DONE (the lost-ack + fast-render scenario) — must re-ack 202, or a
-		// lost ack would buy a duplicate render fleet-wide; after the re-ack
-		// the dispatcher's tracker polls /fleet/jobs/{id} and immediately
-		// finds the terminal state with data. Only a previously FAILED job
-		// answers non-202: 409 is an explicit refusal, so the dispatcher may
-		// legitimately try the failed job on another node.
+		// dispatch response as a REFUSAL, and the media dispatcher may then
+		// re-dispatch the same job_id to another node. So a duplicate for a
+		// job in accepted/running — or DONE (the lost-ack + fast-render
+		// scenario) — must re-ack 202, or a lost ack would buy a duplicate
+		// render fleet-wide; after the re-ack the dispatcher's tracker polls
+		// /fleet/jobs/{id} and immediately finds the terminal state with data.
+		// Only a previously FAILED job answers non-202: 409 is an explicit
+		// refusal, so the dispatcher may legitimately try the failed job on
+		// another node. That pays off on this repo's delegator too since
+		// 0.101.0 — it classes 409 as re-placeable precisely because the
+		// message below says "on this node", and no other node holds that
+		// record — though it re-places under a FRESH id rather than re-sending
+		// this one.
 		if view.State == JobError {
 			writeError(w, http.StatusConflict, "job previously failed on this node: "+view.Error)
 			return
