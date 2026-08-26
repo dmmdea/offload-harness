@@ -6,6 +6,67 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.103.0] - 2026-08-26
+
+### Fixed - text no longer loads a model into VRAM a running render is using
+
+- **The defect.** ADR 0018 left ordinary interactive text outside the machine-wide GPU lease -
+  "thousands per day at ~46 ms, and leasing them is untenable" - and that was read as *a short text
+  call inside a media lease pays a reload*. The real cost is larger: a `media` holder calls
+  `freeLlamaSwap` **once per lease**, so the card is CLEARED for the render, and the very next text
+  call made llama-swap pull a multi-GB model straight back into the VRAM the render had just been
+  given. Render and text tier resident together on one card. Reported symptom: the box becomes
+  unusable under a render.
+- **Nothing on the text side observed the lease.** The vision gate reads it, `delegate.LocalBusy`
+  reads it to place work remotely, `cascade_remote_lanes` reads it to fail a *configured* lane
+  off-box - but a plain text call on a box with no lanes configured went straight to the local base.
+  A lease one side reads and the other ignores is not mutual exclusion.
+- **The fix: gate the LOAD, not the request** (`internal/modelaffinity/gpuwait.go`). An admission
+  that can change what llama-swap holds resident - an idle base, or a promoted switch - waits while a
+  `media` lease is held. An admission that JOINS the in-flight batch of the model already being
+  served cannot move VRAM and is not gated at all, so a burst against the resident model still costs
+  nothing. Hot-path cost on an idle box: one `os.ReadFile` of a lease record that does not exist.
+- **Reads the lease, never acquires it.** Via `gpulease.InspectDir`, the one inspection path (the
+  vision gate and `delegate.LocalBusy` use the same one). ADR 0018's arithmetic was about the WRITE
+  path - epoch bump, claim file, heartbeat, release - and none of that happens here.
+- **A promotion is re-checked at wake.** The park IS the model switch, and a render can start during
+  it; trusting the park-time read left a hole exactly one batch-drain wide, pointing the wrong way.
+  Pinned by `TestPromotedSwitchRechecksTheCard` and by a mutant.
+- **A promoted batch is not resident until its request goes out.** Promotion raises the in-flight
+  count before anything is sent, so a newcomer naming that model would otherwise be handed a join and
+  slip past the gate — forcing the exact load the promoted waiter was waiting to avoid. The gate now
+  counts `pending` admissions and refuses joins while any exist. Found by the clean-context review
+  lane; pinned by `TestJoinIsRefusedWhileAPromotedBatchWaitsForTheCard` and by a mutant.
+- **One deadline per admission.** All lease waiting for a single `Admit` shares one wall-clock
+  deadline derived from the caller's budget, so waiting, parking, then being promoted onto a card
+  that has been taken again cannot spend that budget twice.
+- **Waits, does not refuse.** An image render clears in tens of seconds, so a blocked caller polls
+  until the card frees, bounded by its OWN budget (the resolved `http.Client.Timeout`) and by `ctx` -
+  the same two bounds the in-process park uses. Deliberately NOT bounded by the holder's declared
+  TTL: `DefaultTTL = 1h` is a reservation, not an estimate, so reading it as an ETA would turn every
+  wait into an instant refusal.
+- **`media` only.** A `text` reservation is a benchmark holding the tier steady; its holder unloads
+  nothing, so a switch underneath it costs a measurement rather than the machine, while blocking
+  every interactive call for the length of an eval run would be a bigger regression than the one it
+  prevents.
+- **Only an INHERITED lease exempts a caller** (`GPU_LEASE_EPOCH`, compared by value so a stale
+  variable cannot exempt anything), because `gpu reserve --class media -- local-offload ...` runs the
+  harness as the holder's child. The holder's own **pid is deliberately not exempt**: `fleet-serve`
+  and the MCP server render and serve text in ONE process, so a pid exemption would un-gate exactly
+  the calls that trampled the render.
+- **Armed from `config.Load`**, the one funnel every entry point that can make a text call passes
+  through, resolving via `gpulease.LeaseDir` so a second resolution order cannot appear - the same
+  wiring, for the same reason, as `netguard.SetTailnetSuffix` beside it. Pinned by
+  `TestLoadArmsTheGPULoadGate` on `modelaffinity.GPULeaseDir()` and by a mutant.
+- **Named outcome.** Exhaustion returns a `*modelaffinity.LeaseError` carrying the holder's class,
+  pid, reason and how long it has held the card; its wording carries the substring
+  `pipeline.classifyErr` buckets congestion by, so the ledger files it as `timeout`, not `other`.
+- **Cost, stated.** Under a LONG media lease, text admissions needing a load now spend their budget
+  waiting and then fail. That is the intended trade. `delegate.LocalBusy` already routes fleet work
+  away from a busy local GPU before it reaches this gate.
+- ADR [0026](docs/architecture/decisions/0026-text-load-admissions-wait-for-the-media-lease.md);
+  `docs/systems/gpu-lease.md` corrected where it described the carve-out.
+
 ## [0.102.0] - 2026-08-26
 
 ### Fixed - two text lanes no longer thrash one llama-swap by asking it for different models

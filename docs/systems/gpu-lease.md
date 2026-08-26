@@ -23,6 +23,7 @@ other on a single shared card.
 | `gpu_hide_windows.go`, `gpu_hide_other.go` | hidden spawn for the detached holder (a visible console gets closed, killing the hold) |
 | `render/gpu-lock.mjs` | READ-ONLY participant: honours + fences an inherited lease, elects one unloader, drains, ComfyUI lifecycle. **Does not acquire.** |
 | `internal/gpulock` | the read-only vision gate; delegates wholesale to `gpulease.InspectDir` |
+| `internal/modelaffinity/gpuwait.go` | READ-ONLY: text admissions that would make llama-swap load a model wait out a `media` holder (ADR 0026); armed from `config.Load` via `LeaseDir` |
 | `internal/config` | `state_dir`, `gpu_lock_path` |
 
 ## Why it exists
@@ -145,15 +146,26 @@ the job refuses instead of quietly taking a fresh one, so a lost reservation is 
 
 Both are exclusive — one card, one holder. The label carries intent, not access control.
 
-**Ordinary interactive text calls are deliberately NOT lease participants.** There are thousands
-a day at ~46 ms and leasing them is untenable. This is a known limit, not an oversight: a short
-interactive call can still land inside a media lease and pay a reload.
+**Ordinary interactive text calls still do not ACQUIRE the lease.** There are thousands a day at
+~46 ms and leasing them is untenable. That remains a known limit, not an oversight.
 
-Text calls do have their own arbitration, one layer down and for a different problem: the Model
-Affinity Gate (`internal/modelaffinity`) keeps one llama-swap serving slot on one model at a time so
-two text lanes cannot thrash it with competing model names. It is IN-PROCESS and costs two mutex
-acquisitions, which is exactly why it can sit on a path this lease refuses. It does not arbitrate the
-card, does not know about media, and does not close the cross-process gap named above. See
+**They do READ it.** Corrected 2026-08-26: the carve-out was read as "a short call inside a media
+lease pays a reload", and the real cost is larger. A `media` holder unloads llama-swap once per
+lease, so the card is CLEARED for the render — and the next text call pulled a multi-GB model
+straight back into the VRAM that render had just been given. Reported symptom: the box becomes
+unusable under a render.
+
+So the Model Affinity Gate (`internal/modelaffinity`), which is the one chokepoint that knows which
+admissions can change what llama-swap holds resident, now waits for a `media` holder before granting
+one — and grants a request that JOINS the resident model's in-flight batch without reading the lease
+at all, because that cannot move VRAM. It reads with `InspectDir` and never acquires, so the write-path
+cost this lease refused for text is untouched. A `text` reservation does not block text, and only an
+INHERITED lease (`GPU_LEASE_EPOCH`) exempts a caller — the holder's own pid deliberately does not, or
+`fleet-serve` would un-gate itself. See
+[ADR 0026](../architecture/decisions/0026-text-load-admissions-wait-for-the-media-lease.md).
+
+The gate's OTHER job — keeping two text lanes from thrashing one serving slot with competing model
+names — is in-process only and does not close the cross-process gap named above. See
 [ADR 0025](../architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md).
 
 ## How it stays correct

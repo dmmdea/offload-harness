@@ -97,9 +97,12 @@ until the in-flight batch drains, so N interleaved model switches become one swi
 on the **resolved base URL** — two models served by two llama-swap instances do not contend — and
 taken by both the cascade lane (`internal/llamaclient`) and the agent seat
 (`internal/agent.LLMClient.Chat`). It is process-local: two harness processes on one box still
-contend. Distinct from the GPU Lock, which arbitrates whole GPU-heavy jobs across processes and
-deliberately excludes interactive text. See
-[architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md](architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md).
+contend. Distinct from the GPU Lock, which arbitrates whole GPU-heavy jobs across processes — but not
+independent of it: an admission that would make llama-swap LOAD a model (an idle base, a promoted
+switch) waits out a `media` lease holder, while one joining the resident model's in-flight batch is
+not gated at all. The gate reads that lease, never acquires it. See
+[architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md](architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md)
+and [architecture/decisions/0026-text-load-admissions-wait-for-the-media-lease.md](architecture/decisions/0026-text-load-admissions-wait-for-the-media-lease.md).
 
 ## Node Manifest
 
