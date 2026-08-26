@@ -40,15 +40,65 @@ job_id this node has never seen get 503; a re-dispatch of a job_id this node alr
 about (running, done, or previously failed) still re-acks 202 — or 409 if it previously
 failed — even mid-drain, since that's not new work.
 
-**Queue-depth back-pressure** (`fleet_max_queue_depth`, 0.95.0): a NEW dispatch is refused
-`503` ("queue full") once accepted+running jobs reach the cap — default 32, configurable,
-negative = unlimited. Any non-202 already means "re-dispatch elsewhere" to the dispatcher,
-so a full node sheds load to its siblings with no dispatcher change. The check runs before
-request materialization; re-acks of jobs this node owns and result polls are never refused
-by it. The default is deliberately generous (a full `agent_delegate` call is 8 subtasks;
-the delegator runs 4 at a time): it guards runaway pile-up latency behind the single
-inference slot, and an over-tight cap suppressing real use is the worse defect. In-flight renders get up to 30s to finish, survivors are marked terminal
-`error:"interrupted"` so pollers always reach a terminal state.
+**Backlog and concurrency are two different limits** (0.100.0). Before 0.100.0 they were
+one: accepting a job started it, so `accepted` lasted microseconds and the single cap
+`fleet_max_queue_depth` bounded *simultaneous execution* while being named and documented as
+a backlog. A node reporting "depth 31" was running 31 jobs at once against one llama-swap
+endpoint. A dispatch is now **admitted** and waits its turn.
+
+| Key | Bounds | Default | Refuses? |
+|---|---|---|---|
+| `fleet_max_queue_depth` | `accepted` + `running` (health's `queue_depth`), **all task types** | 32 | Yes — `503 queue full` |
+| `fleet_max_concurrent_jobs` | jobs actually executing, **`agent` only** | 4 | No — extra jobs WAIT in `accepted` |
+
+**The concurrency cap governs the text lane only.** It exists to protect one thing — the shared
+llama-swap endpoint, where the measured defect was N simultaneous inferences against a single
+serving slot. `image-gen`, `video-gen`, `audio-gen`, `run-graph`, `stt` and every configured
+pipeline route are **exempt**, because capping them would be both redundant and backwards: media
+already serializes itself at capacity **one** (the in-process `mediaSlot`, under the machine-wide
+`gpulease` ClassMedia), and a media job blocked waiting for the card would hold a fleet execution
+slot while doing no work — four of them would starve the very lane the cap protects. It would also
+suppress media's own back-pressure, since a job held in `accepted` never reaches the wait that
+produces a `gpu_busy` defer. An unrecognized future task type is capped by default: that way of
+being wrong is visible, the other is silent. Media scheduling is therefore unchanged from 0.99.0.
+
+> **Deploy note.** The media dispatcher (a different repository) sets its poll deadline at dispatch
+> time and has no queued-time credit. The exemption above is what keeps it correct — media jobs
+> never linger in `accepted`, so they never spend a contract's budget waiting for a slot. **Do not
+> cap a media task type until that dispatcher credits queued time.**
+
+Both take `0` = built-in default and a negative value = unlimited. `fleet_max_queue_depth`
+keeps exactly the meaning it has always had — the ceiling on `queue_depth`, which still
+counts `accepted` + `running` — so the refusal boundary did not move; what it no longer does
+is double as the concurrency limit. Under any setting, actual concurrency is now less than
+or equal to what the same config produced in 0.99.0.
+
+A **busy node is not a full node**: with `fleet_max_concurrent_jobs: 4` and
+`fleet_max_queue_depth: 32`, the 5th dispatch is accepted and queued, and only the 33rd is
+refused. The refusal check runs before request materialization; re-acks of jobs this node
+owns and result polls are never refused by it. The queue-depth default is deliberately
+generous (a full `agent_delegate` call is 8 subtasks; the delegator runs 4 at a time), and
+an over-tight cap suppressing real use is the worse defect.
+
+> **The `503` is terminal for this repo's delegator.** `internal/delegate` surfaces any
+> non-`202` dispatch response as an error and does **not** re-place the subtask on another
+> node — the work simply does not get done. The "any non-202 means re-dispatch elsewhere, so
+> a full node sheds load to its siblings" behaviour belongs to the **media dispatcher, which
+> lives in a different repository**; it was never true of the delegator here. Re-placement on
+> the delegator side is a separate change. Until it lands, prefer widening
+> `fleet_max_queue_depth` (a job that waits still gets done) over lowering it.
+
+On shutdown, in-flight renders get up to 30s to finish. Survivors are then marked terminal so
+pollers always reach a terminal state, with the two cases kept **distinct**: a job that was
+executing becomes `error: "interrupted"`, and a job still sitting in the backlog becomes
+`error: "not started: node shut down while this job was queued"` — it never ran, which is a
+different fact about the node and much cheaper to act on. Drain finishes what it started; it
+does not start what it never began.
+
+Health publishes the split additively: `queue_depth` keeps its original meaning and shape,
+and `jobs_running`, `jobs_queued`, `max_concurrent_jobs`, `max_queue_depth` sit alongside it
+(always present — `0` is a real value, and for the two limits it means *unlimited*, which a
+reader must be able to tell apart from a pre-0.100.0 node that publishes no limit at all).
 
 ## Running as a Windows scheduled task
 
@@ -533,7 +583,29 @@ second run. The delegator polls every 3 s; a poll `404` triggers a bounded re-di
 same id (max 2); past `timeout_sec` + 60 s grace it stops polling — the node may still finish
 server-side, and the job id in the delegation log lets you reconcile by hand.
 
-What the deadline produces depends on whether the node ever **answered** about the job:
+**Queued time does not consume the execution budget** (0.100.0). `timeout_sec` + grace is a
+budget for *work*, and since nodes gained a real backlog a job can sit in `accepted` without any
+work having started. The delegator credits that wait back: the deadline moves out by the time the
+job provably spent queued, so a busy node costs a subtask latency, never its budget. Deadline
+messages name the credit (`poll deadline after 5m0s (+42s credited back for time queued on the
+node)`) and say nothing extra when there was none.
+
+The wait is **bounded** — a job may wait for a slot at most as long as it was allowed to run, and
+never more than **5 minutes**. Hitting that bound while the job is *still queued* is a **failure**,
+not a defer, with its own stable prefix:
+
+```
+queue deadline after <d>: the node accepted the job but never started it — it waited in
+the node's backlog and never reached running (<n> poll(s), every one `accepted`)
+```
+
+That is deliberately distinct from the `poll deadline` shapes below, which all concern a job that
+was *running*. A defer is a report about the work, stamped with the node's id and seat; a job that
+never started has no such report to make, and manufacturing one would be the delegator inventing a
+sentence no seat earned.
+
+What the deadline produces for a job that DID reach `running` depends on whether the node ever
+**answered** about it:
 
 - it answered (any `202`/`200` job state) → the subtask is **deferred**, reason prefixed
   `poll deadline after <d>: node accepted the job but did not reach a terminal state` (class

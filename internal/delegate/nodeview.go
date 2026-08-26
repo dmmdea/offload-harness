@@ -27,7 +27,17 @@ type NodeView struct {
 	AgentResident  bool
 	AgentCtxTokens int
 	QueueDepth     int
-	Local          bool
+	// JobsRunning / JobsQueued split QueueDepth, and MaxConcurrentJobs is the
+	// node's execution limit (0 = unlimited, or "not advertised" by a node too
+	// old to publish it — both decode to 0 here, so a consumer must treat 0 as
+	// "no usable number" rather than as a limit). Read-only reporting: nothing
+	// in gate.go consults them, so placement is unchanged. They exist because
+	// a `queue deadline` failure sends an operator straight to "is that node
+	// saturated?", and depth alone cannot answer it.
+	JobsRunning       int
+	JobsQueued        int
+	MaxConcurrentJobs int
+	Local             bool
 }
 
 // fetchNodeViewTimeout is the transport-level backstop for one health GET —
@@ -63,6 +73,11 @@ type healthWire struct {
 	AgentCtxTokens int    `json:"agent_ctx_tokens"`
 	AgentResident  bool   `json:"agent_seat_resident"`
 	AgentEnabled   bool   `json:"agent_enabled"`
+	// Additive (0.100.0). Absent on a pre-0.100.0 node, which decodes to 0 —
+	// the same tolerance every other field here relies on.
+	JobsRunning       int `json:"jobs_running"`
+	JobsQueued        int `json:"jobs_queued"`
+	MaxConcurrentJobs int `json:"max_concurrent_jobs"`
 }
 
 // FetchNodeView reads one node's /fleet/health into a NodeView (Local=false —
@@ -106,7 +121,11 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		AgentResident:  w.AgentResident,
 		AgentCtxTokens: w.AgentCtxTokens,
 		QueueDepth:     w.QueueDepth,
-		Local:          false,
+
+		JobsRunning:       w.JobsRunning,
+		JobsQueued:        w.JobsQueued,
+		MaxConcurrentJobs: w.MaxConcurrentJobs,
+		Local:             false,
 	}, nil
 }
 

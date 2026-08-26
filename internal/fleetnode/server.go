@@ -353,7 +353,37 @@ type healthPayload struct {
 	SupportedTaskTypes    []string         `json:"supported_task_types"`
 	LoadableModelFamilies []string         `json:"loadable_model_families"`
 	ModelFootprints       []FootprintEntry `json:"model_footprints"`
-	QueueDepth            int              `json:"queue_depth"`
+	// QueueDepth keeps its ORIGINAL meaning and shape across the 0.100.0
+	// backlog/concurrency split: accepted + running, i.e. every job this node
+	// owns that has not reached a terminal state. Every existing reader (the
+	// delegator's placement tie-break at internal/delegate/gate.go, the media
+	// dispatcher in its own repo) keeps working unchanged.
+	QueueDepth int `json:"queue_depth"`
+	// The four fields below are the 0.100.0 ADDITIVE capacity advertisement.
+	// They are always present (never omitempty) on purpose: 0 is a real,
+	// meaningful value for each — zero jobs, or "unlimited" for a limit — so a
+	// reader must be able to tell a published 0 from a pre-0.100.0 node that
+	// publishes nothing at all. omitempty would collapse those two into the
+	// same absent key, and "unlimited" and "unknown" route very differently.
+	//
+	// jobs_queued + jobs_running == queue_depth, always (QueueDepth is their
+	// sum by construction).
+	JobsQueued  int `json:"jobs_queued"`  // admitted, waiting for a worker
+	JobsRunning int `json:"jobs_running"` // executing right now
+	// MaxConcurrentJobs is this node's execution limit (fleet_max_concurrent_jobs);
+	// 0 = unlimited. MaxQueueDepth is its admission ceiling on queue_depth
+	// (fleet_max_queue_depth); 0 = unlimited. A delegator could previously see
+	// only how loaded a node was and never how much it could take — publishing
+	// both limits is the point of the pair.
+	//
+	// Each is read from whatever actually ENFORCES it: the concurrency number
+	// comes from the Jobs store (Jobs.MaxConcurrent), the admission number from
+	// the config this handler's own gate consults. A store constructed with a
+	// limit other than the config's would then be reported as it truly is,
+	// rather than as the config wishes it were — health must never advertise a
+	// capacity the node does not have.
+	MaxConcurrentJobs int `json:"max_concurrent_jobs"`
+	MaxQueueDepth     int `json:"max_queue_depth"`
 	// HarnessVersion closes the node/repo drift gap: fleet drift used to be found
 	// by hand, and a node several releases behind is debugged against known-fixed
 	// bugs.
@@ -426,6 +456,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if families == nil {
 		families = []string{}
 	}
+	// ONE walk of the job store feeds queue_depth and the split beside it, so
+	// the three numbers are consistent by construction rather than by luck —
+	// two separate reads could straddle a job's accepted→running transition and
+	// publish a queue_depth that is not jobs_queued + jobs_running.
+	queued, running := s.jobs.Counts()
 	payload := healthPayload{
 		NodeID:                s.opts.NodeID,
 		SchemaVersion:         1,
@@ -438,7 +473,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		SupportedTaskTypes:    tasks,
 		LoadableModelFamilies: families,
 		ModelFootprints:       fps,
-		QueueDepth:            s.jobs.QueueDepth(),
+		QueueDepth:            queued + running,
+		JobsQueued:            queued,
+		JobsRunning:           running,
+		MaxConcurrentJobs:     s.jobs.MaxConcurrent(),
+		MaxQueueDepth:         s.opts.Cfg.FleetQueueLimit(),
 		HarnessVersion:        s.opts.Version,
 	}
 	// Reclaim is advertised ONLY when measured. An unknown verdict omits both
@@ -467,6 +506,51 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		payload.AgentResident = s.agentResident()
 	}
 	writeJSON(w, http.StatusOK, payload)
+}
+
+// concurrencyCapped reports whether a job of this task type counts against
+// fleet_max_concurrent_jobs.
+//
+// THE RULE: the cap exists to protect ONE thing — the shared llama-swap text
+// endpoint, where the measured defect was N simultaneous inferences against a
+// single serving slot. A task type is exempt when its execution cannot cause
+// that, and every exemption below is a fact about how the pipeline runs it, not
+// a preference:
+//
+//   - image-gen / video-gen / audio-gen / run-graph and every configured
+//     pipeline route go through Pipeline.acquireMediaLease, which takes the
+//     in-process mediaSlot (capacity ONE) and then the machine-wide gpulease
+//     ClassMedia. They are already serialized far harder than this cap would
+//     serialize them.
+//   - stt runs against whisper-server, a different process with a different
+//     endpoint. It never touches llama-swap.
+//
+// Capping those would be both redundant and actively harmful. A media job
+// blocked inside takeMediaSlot holds a fleet execution slot while doing NO
+// work; with mediaSlot at capacity one, four queued media dispatches would
+// occupy all four slots while three of them sit parked — starving the agent
+// lane, which is the lane the cap was written to protect. It would also destroy
+// media's own designed back-pressure: a media job that cannot get the card
+// waits gpu_wait_ms and defers `gpu_busy`, a bounded and well-tested signal a
+// job held in `accepted` never reaches.
+//
+// DEFAULT IS CAPPED, deliberately. An unrecognized (future) task type is
+// assumed to contend for the text endpoint, because of the two ways to be
+// wrong that one fails loudly — queue latency, then a visible `queue deadline`
+// — while the other silently reinstates the exact unbounded-inference defect
+// this release exists to remove.
+func (s *Server) concurrencyCapped(taskType string) bool {
+	switch taskType {
+	case "image-gen", "video-gen", "audio-gen", "run-graph", "stt":
+		return false
+	}
+	// Config-driven pipeline routes run through runPipelineJob, which takes the
+	// same mediaSlot. Their names are operator-chosen, so they cannot be listed
+	// above and must be recognized from config.
+	if _, ok := s.opts.Cfg.Pipelines[taskType]; ok {
+		return false
+	}
+	return true
 }
 
 // dispatchEnvelope is the strict dispatch wire shape. DisallowUnknownFields
@@ -605,17 +689,36 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 
 	// Queue-depth back-pressure, NEW work only — known jobs re-acked above are
 	// never refused by it, and result polls don't come through here at all.
-	// A non-202 is the dispatch contract's "re-dispatch elsewhere", so a full
-	// node sheds load to its siblings with no delegator change. Checked before
-	// BuildRequest so a refused dispatch materializes nothing. Two concurrent
-	// dispatches can both pass and overshoot the cap by a few — this is
-	// back-pressure against unbounded queue latency behind the single
-	// inference slot, not an exact invariant, and exactness under a lock is
-	// not worth coupling admission to the jobs mutex.
+	// Checked before BuildRequest so a refused dispatch materializes nothing.
+	// Two concurrent dispatches can both pass and overshoot the cap by a few —
+	// this is back-pressure against unbounded queue latency, not an exact
+	// invariant, and exactness is not worth coupling admission to the jobs
+	// mutex.
+	//
+	// This is the BACKLOG limit, and since 0.100.0 it is ONLY that. Admitted
+	// jobs no longer all execute on arrival: fleet_max_concurrent_jobs bounds
+	// execution inside the store, so a node whose workers are all busy still
+	// ADMITS — busy is not full — and refuses only once accepted+running
+	// reaches this cap. The refusal boundary itself is byte-identical to
+	// 0.99.0's: the comparison is the same expression over the same
+	// QueueDepth() (accepted+running) against the same config key.
+	//
+	// This 503 is TERMINAL for the delegator in this repo: internal/delegate's
+	// dispatcher surfaces any non-202 as an error and does not re-place the
+	// subtask (run.go, the dispatch loop). Widening the backlog rather than
+	// the concurrency is therefore the safer half of the split — a job that
+	// waits is work that still gets done; a job that is refused is not.
 	if limit := s.opts.Cfg.FleetQueueLimit(); limit > 0 {
 		if d := s.jobs.QueueDepth(); d >= limit {
+			// Wording matters here more than anywhere else in this file: this
+			// string is what an operator actually reads. It used to say
+			// "re-dispatch elsewhere", which is true of the media dispatcher
+			// (a different repository) and FALSE of this repo's delegator,
+			// which treats any non-202 as terminal and does not re-place the
+			// subtask. Promising a recovery that does not happen sent people
+			// looking for a rebalancer that was never there.
 			writeError(w, http.StatusServiceUnavailable,
-				fmt.Sprintf("queue full (depth %d at limit %d): re-dispatch elsewhere or retry later", d, limit))
+				fmt.Sprintf("queue full (%d jobs accepted+running, limit %d): retry later, or raise fleet_max_queue_depth", d, limit))
 			return
 		}
 	}
@@ -644,16 +747,25 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		return nil, errors.New(reason)
 	}
 
-	// An agent dispatch (already authorized above) creates its job through
-	// AcceptAgent so the record carries the marker handleJob's poll auth keys
-	// on. Dead until Task 4 registers the "agent" task (BuildRequest 400s it
-	// today), but wired now so the poll gate is complete the moment the task
-	// lands, not a follow-up.
-	accept := s.jobs.Accept
-	if env.TaskType == string(core.TaskAgentRun) {
-		accept = s.jobs.AcceptAgent
+	// An agent dispatch (already authorized above) is admitted with Agent set,
+	// so the record carries the marker handleJob's poll auth keys on.
+	//
+	// OnDropped is the OTHER half of the `defer cleanup()` above. That defer
+	// was airtight while Accept was start — every admitted job's closure ran,
+	// so every materialization was released. Since 0.100.0 a job can be
+	// admitted and then marked terminal WITHOUT its closure ever executing
+	// (drain's never-started arm), and the deferred cleanup then never fires.
+	// For run-graph that strands an os.CreateTemp file in the OS temp dir that
+	// nothing on this machine ever reclaims; for agent and pipeline jobs it
+	// strands a directory under pipeline-jobs/ until the next start sweeps it.
+	// The store clears the hook at claim, so exactly one of the two paths ever
+	// runs the cleanup.
+	spec := AcceptSpec{
+		Agent:     env.TaskType == string(core.TaskAgentRun),
+		Uncapped:  !s.concurrencyCapped(env.TaskType),
+		OnDropped: cleanup,
 	}
-	if !accept(env.JobID, run) {
+	if !s.jobs.Admit(env.JobID, spec, run) {
 		cleanup() // duplicate/drain refusal: this request's materialized files never run
 		view, ok := s.jobs.Get(env.JobID)
 		if !ok {

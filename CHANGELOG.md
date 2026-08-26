@@ -6,6 +6,240 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.100.0] - 2026-08-26
+
+### Added — the fleet node has an actual job queue; backlog and concurrency are now two limits
+- **`Accept` used to BE `start`.** It wrote the record and immediately launched
+  `go func(){ … markRunning … }`, so `JobAccepted` lasted microseconds, there was no pending
+  list, no worker pool and no scheduler anywhere in `internal/fleetnode/`. The consequence is
+  the part that matters: `fleet_max_queue_depth` (default 32) did not bound a backlog, it
+  bounded **simultaneously executing jobs**. A node reporting "depth 31" was running 31 jobs
+  at once against ONE llama-swap endpoint, and `QueueDepth()` — counting `accepted || running`
+  — was really reporting "in flight".
+- **Admit-then-schedule.** `Accept` now admits: it writes the record and appends the id to a
+  FIFO. One scheduler goroutine claims a job only while an execution slot is free, and
+  dequeue plus `accepted → running` happen in a **single critical section**. `accepted` is a
+  real state a job can sit in. Everything a poller can observe is otherwise unchanged — same
+  ids, same idempotent re-ack and `409`-on-failed asymmetry, same write-once terminal states,
+  same TTL janitor — except that `accepted` may now legitimately last a while.
+- **Two independent limits**, both configurable, both taking `0` = built-in default and a
+  negative value = unlimited (one rule for both, matching the existing `FleetQueueLimit`
+  convention):
+  - `fleet_max_queue_depth` (32) — the admission ceiling on `accepted + running`. The only
+    thing that produces `503 queue full`.
+  - `fleet_max_concurrent_jobs` (**new**, 4) — how many admitted jobs execute at once. Never
+    refuses anything; extra jobs wait. This is what protects the shared endpoint.
+- **A busy node is no longer a full node.** With the defaults, the 5th dispatch is accepted
+  and queued; only the 33rd is refused.
+
+### Changed — the config-key decision, and why `fleet_max_queue_depth` was NOT redefined
+- A config key that quietly changes meaning between versions is worse than an awkward name,
+  so the existing key keeps the meaning its own name, its own doc comment and the health
+  field it caps all already stated: **the ceiling on `queue_depth`, which counts
+  `accepted + running`**. That sentence was true in 0.99.0 and is true now. What changed is
+  what it no longer *also* does — before this release it doubled as the concurrency limit,
+  because with no waiting state "accepted+running" and "executing right now" were the same
+  number. Concurrency now has its own key.
+- The alternative — keeping the old key as the *concurrency* limit and adding a new key for
+  the backlog — was rejected because it would break the one invariant that makes the pair
+  legible: `fleet_max_queue_depth` would no longer bound `queue_depth`. Two names sharing a
+  word would have meant two different things, on the same payload.
+- **Migration is a no-op, and provably safe in the conservative direction.** The refusal
+  boundary is byte-identical: the same expression over the same `QueueDepth()` against the
+  same key. And under *any* existing setting, actual concurrency after this release is **less
+  than or equal to** what that setting produced before it (`fleet_max_queue_depth: 2` ran at
+  most 2 concurrently and still does; the default 32 now runs at most 4). No node starts doing
+  more at once than it did in 0.99.0, and nothing that was admitted before is refused now.
+- **OPERATORS WILL SEE FEWER CONCURRENT JOBS PER NODE, and that is the point.** Stated plainly
+  because it is a real throughput change, not a footnote: before this release a node ran up to
+  `fleet_max_queue_depth` jobs simultaneously — 32 by default. It now runs 4. That is an **8x
+  reduction in node parallelism** at the default settings, and anyone who tuned
+  `fleet_max_queue_depth` upward expecting it to buy parallelism will get backlog instead.
+- Why 4, rather than leaving it to be discovered: it is the concurrency this fleet already
+  operates at — the delegator dispatches a fan-out four subtasks at a time — so it preserves the
+  observed steady state rather than inventing a new one. And the parallelism being removed was
+  mostly fictitious: a node fronts ONE llama-swap, which serializes model residency, so the 5th
+  through 32nd concurrent jobs were manufacturing contention (swap thrash, VRAM pressure, longer
+  wall clock for every job in the set) rather than doing more work. A job that waits is strictly
+  better than a job that thrashes, and far better than one that is refused. Operators whose box
+  genuinely runs more at once should set `fleet_max_concurrent_jobs` explicitly — it is now the
+  key that means what they want, which was never true of the one they were reaching for before.
+
+### Added — `/fleet/health` publishes capacity, not just depth
+- `queue_depth` keeps its **exact** meaning and shape for existing readers (the delegator's
+  placement tie-break at `internal/delegate/gate.go`, and the media dispatcher in its own
+  repo). It is now computed as `jobs_queued + jobs_running` from one walk of the store, so the
+  three numbers cannot disagree.
+- Added alongside it: `jobs_running`, `jobs_queued`, `max_concurrent_jobs`, `max_queue_depth`.
+  A delegator could previously see how loaded a node was but never how much it could take.
+- These four are **always present, never `omitempty`**: `0` is a meaningful value for each —
+  and for the two limits it means *unlimited* — so omitting it would make "unlimited"
+  indistinguishable from "a node too old to publish a limit", and those route in opposite
+  directions. Wire compatibility is pinned by an external-package test that runs the
+  delegator's real `FetchNodeView` decoder against the real health handler.
+- `offload_status` publishes `jobs_running` / `jobs_queued` / `max_concurrent_jobs` per node
+  alongside `queue_depth` — the exact surface a `queue deadline` failure sends an operator to.
+- **`queue_depth`'s meaning is unchanged but its DISTRIBUTION shifts sharply.** It always counted
+  `accepted` + `running`; before this release those were all executing, so the number topped out
+  near what a box could sustain and a high reading was a real alarm. Now most of it can be
+  backlog, and a healthy node can legitimately read 31. Placement is unaffected (lower is still
+  better, and the tie-break compares like with like), but an operator meeting it cold will
+  misjudge it — read `jobs_running` / `jobs_queued` beside it.
+
+### Changed — drain tells "never started" from "interrupted"
+- `DrainAndStop` marked every non-terminal survivor `error:"interrupted"`. With a real backlog
+  that would have the node claim it began work it never touched. Survivors are now marked by
+  state — which the scheduler's atomic claim makes trustworthy: `running` → `"interrupted"`,
+  still `accepted` → `"not started: node shut down while this job was queued"`.
+- Drain **finishes what it started and does not start what it never began**: the backlog is
+  dropped when drain begins rather than worked through, so shutdown never launches an
+  inference it cannot finish.
+- **`TestJobsDrainWaitsForFastJobs` was adjusted, and here is exactly what changed.** Before: it
+  called `Accept` with a 30 ms run and immediately called `DrainAndStop(5s)`, asserting the job
+  ended `done` with its data. After: it waits for the job to reach `running` (via a channel the
+  run closes plus `waitJobState`) and only then drains, asserting the same `done` + data. Nothing
+  else about the assertion changed. The reason the old form had to go is that it silently relied
+  on `Accept` being `start` — with admission and execution separated, `Accept` and `DrainAndStop`
+  contend for the same mutex and neither ordering is guaranteed, so "was this job claimed before
+  drain began?" became a genuine coin flip *in production as much as in the test*: the same code
+  would legitimately produce `done` sometimes and `not started` other times. Keeping the old
+  assertion would have made the test flaky rather than made the behaviour deterministic. The
+  test's intent — a job that completes inside the drain timeout drains clean rather than being
+  marked `interrupted` — is preserved exactly; what it no longer *incidentally* covers is "a
+  just-accepted job gets started", which was an artifact of the old design and is now covered
+  deliberately (and correctly) by the queue tests instead.
+
+### Fixed — docs asserted a load-shedding behaviour this repo does not have
+- `docs/FLEET-NODE.md` claimed "Any non-202 already means 're-dispatch elsewhere' to the
+  dispatcher, so a full node sheds load to its siblings with no dispatcher change." That is
+  **false here**. `internal/delegate/run.go` is the only POST to `/fleet/dispatch` in this
+  repo and it surfaces any non-`202` as an error without re-placing the subtask: the work
+  simply does not get done. The described behaviour belongs to the **media dispatcher, which
+  lives in a different repository**. The claim is corrected (not fixed — delegator-side
+  re-placement is a separate change) in `docs/FLEET-NODE.md`, `docs/systems/fleet-node.md`,
+  `docs/flows/fleet-job-lifecycle.md` and the same sentence copied into `server.go`'s
+  admission comment.
+
+### Fixed — a job that never started leaked its materialized request
+- `handleDispatch` parks its temp-file cleanup in a `defer` **inside** the run closure. That was
+  airtight while `Accept` was `start` — every admitted job's closure ran, so every
+  materialization was released. Once a job can be admitted and then marked terminal without its
+  closure ever executing (drain's never-started arm), the deferred cleanup never fires.
+- Scope, checked per builder: `run-graph` materializes `os.CreateTemp("", "fleet-run-graph-*.json")`
+  in the **OS temp dir, which nothing ever reclaims**; `agent` and pipeline jobs land under
+  `pipeline-jobs/`, which `SweepOrphanedPipelineJobs` wipes at next start. With this release's own
+  worked example of 28 queued jobs at shutdown, that is 28 skipped cleanups.
+- Fixed with `AcceptSpec.OnDropped`, carried on the record beside `run`, **cleared at claim** (the
+  run's own defer owns cleanup from then on, and firing both would double-free) and invoked by
+  drain's never-started arm — outside the store mutex, since it touches the filesystem. It is
+  deliberately NOT fired when admission is REFUSED: a refusal never took ownership, and
+  `handleDispatch` already releases its own materialization there.
+
+### Fixed — queued time no longer consumes a subtask's execution budget (delegator side)
+- **This regression was caused by the queue above and is fixed in the same release.** The
+  delegator sets its poll deadline at DISPATCH time (`pollBudget = timeout_sec + 60s grace`).
+  That was harmless while `Accept` was `start` — dispatch → running was microseconds, so the whole
+  budget went to execution by construction. With a real backlog, a job waiting for a slot spent
+  the contract's own timeout doing nothing, which converted a node's **loud, immediate
+  `503 queue full`** into a **slow timeout that burned the budget and then manufactured a defer**
+  ("node accepted the job but did not reach a terminal state", stamped with that node's id and
+  seat). Same lost work, less signal, more wall clock — strictly worse than the refusal it
+  replaced.
+- **Queued time is credited back.** While a job is observed in `accepted`, the delegator moves the
+  deadline out by the wait, so the contract still gets the execution budget it asked for. Only
+  intervals bracketed by two CONSECUTIVE `accepted` observations are banked — the partial spans
+  either side are at most one poll each, and under-crediting is the safe direction (over-crediting
+  would hand a job more budget than the contract granted, which is the same class of defect in the
+  other direction). A node with no queue accrues no credit and behaves byte-identically.
+- **The "consecutive" part is a fix in its own right.** The first implementation cleared its span
+  marker only in the `running` arm, so the transport-error, `404` and `5xx` arms all left it open:
+  an interval bracketed by two `accepted` answers was banked IN FULL even when the node spent the
+  middle of it returning 503s — or denying, with a `404`, that it had ever held the job. Measured:
+  a node scripted `accepted` / 503 for 500 ms / `accepted` credited the whole 500 ms as backlog
+  wait. Both harms point the wrong way — more execution budget than the contract granted, and a
+  give-up message *asserting* the job "waited in the node's backlog" across a window the node
+  spent failing. Every observation now closes the span and only `accepted` re-opens it, so a
+  future poll arm cannot silently inherit an open one.
+- **The wait is bounded**: `min(timeout_sec + grace, 5 minutes)`. An unbounded wait is its own
+  failure mode. A subtask that has not been given a worker in five minutes is behind a backlog no
+  fan-out will clear in time, and the caller is better served by a loud failure than a longer wait
+  it did not ask for.
+- **Giving up while QUEUED is distinguishable from giving up while RUNNING.** A never-started job
+  yields a FAILURE with the stable prefix `queue deadline after <d>: the node accepted the job but
+  never started it — it waited in the node's backlog and never reached running (<n> poll(s)
+  answered `accepted`)`. The count is of polls that ACTUALLY answered `accepted`, not the total —
+  a run that also saw 404s must not have them folded into a claim about queueing. Deliberately a failure and not a defer, for three reasons — and note that
+  "a defer carries the node id and seat" is **not** one of them, since the failure path is stamped
+  with those too: (1) a defer manufactures an `AgentWireResult{Deferred:true}`, a payload shaped
+  like something the *seat* produced, and no seat ever saw this contract; (2) the only honest class
+  would be `budget`, which teaches every consumer of that class — the sizing path especially —
+  that the seat needed more time, when the seat was never asked; and (3) decisively, **what this
+  replaces was already a failure** (a saturated node answered `503` at dispatch → `pr.Err` →
+  `summary.failed`), so filing it as a defer would quietly downgrade the severity of a refusal
+  while changing nothing about the work not getting done.
+  A job that reached `running` still produces the existing `poll deadline` defer, unchanged.
+- Deadline messages now name the credit (`poll deadline after 5m0s (+42s credited back for time
+  queued on the node): …`) and render nothing at all when there was none, so every pre-queue
+  node's message — and the tests pinning that wording — stay byte-identical.
+- Scope note: this is the budget-accounting half only. **Re-placement on refusal and
+  capacity-aware placement are still a separate change** — a `503 queue full` remains terminal.
+
+### Changed — the concurrency cap governs the TEXT lane only; media is exempt
+- **An earlier draft of this entry claimed "the media/`gpulease` path is untouched". That was
+  false.** `handleDispatch` routes every task type through one store, so media, video, STT,
+  run-graph and pipeline dispatches were admitted, queued and capped exactly like agent jobs —
+  the `gpulease` *code* was untouched, but media *scheduling* took the same 8x cut. Corrected
+  here rather than quietly dropped, because a media operator reading the old sentence would
+  have had no reason to look.
+- **DECISION: `fleet_max_concurrent_jobs` applies to `agent` only.** `image-gen`, `video-gen`,
+  `audio-gen`, `run-graph`, `stt` and every configured pipeline route are exempt. An
+  unrecognized (future) task type is **capped by default** — of the two ways to be wrong, that
+  one fails loudly (queue latency, then a visible `queue deadline`) while the other silently
+  reinstates the unbounded-inference defect this release exists to remove.
+- Why exempt, in order of weight:
+  1. **Redundant.** Media goes through `Pipeline.acquireMediaLease`, which takes the in-process
+     `mediaSlot` — capacity **one** — and then the machine-wide `gpulease` ClassMedia. A cap of
+     4 above a cap of 1 changes nothing about how much media runs at once.
+  2. **Actively harmful, and precisely backwards.** A media job blocked inside `takeMediaSlot`
+     holds a fleet execution slot while doing NO work. With `mediaSlot` at one, four queued
+     media dispatches occupy all four slots while three sit parked — starving the agent lane,
+     which is the lane the cap was written to protect.
+  3. **It destroys media's own back-pressure.** A media job that cannot get the card waits
+     `gpu_wait_ms` and defers `gpu_busy` — bounded, well-tested, and immediately actionable.
+     Held in `accepted` it never reaches `takeMediaSlot`, so `gpu_busy` never fires and the
+     caller gets queue latency instead of a fast, honest defer.
+  4. **It makes "media untouched" true again.** With the exemption, media scheduling is
+     byte-identical to 0.99.0: admitted up to `fleet_max_queue_depth`, goroutine-per-job,
+     arbitrated by `mediaSlot` + `gpulease`.
+- The store keeps arrival order **within** a lane but scans past a blocked entry across lanes,
+  so an uncapped media job never queues behind four running agent jobs — otherwise FIFO
+  position would reinstate the coupling the exemption removes.
+
+### DEPLOY NOTE — the out-of-repo media dispatcher
+- The deployed media dispatcher (0.62.1, a **different repository**) is an ack-then-poll client
+  that sets its poll deadline at dispatch time, exactly as `internal/delegate` did before the
+  fix below. It has no queued-time credit and cannot get one from this repo.
+- **The media exemption is what keeps it correct**, not a documentation note: media jobs never
+  linger in `accepted`, so that dispatcher never spends a contract's budget waiting for a slot.
+- **Therefore: do not cap a media task type until that dispatcher credits queued time.** If a
+  future change adds a media type to the capped set, it inherits precisely the regression that
+  made this merge-blocking here — a loud immediate `503` replaced by a slow timeout that burns
+  the budget — with no fix available from this side. `Server.concurrencyCapped` carries the
+  rule; this is the reason behind it.
+
+### Notes
+- No durability was added: the store stays in-memory, and a node restart still loses its
+  backlog (now reported honestly as never-started). No pull/claim endpoint — placement stays
+  PUSH. The `gpulease` / reclaim code is untouched, and with the exemption above media
+  SCHEDULING is unchanged from 0.99.0 too.
+- `-race` could not be run: it requires cgo and this box has no C toolchain
+  (`go: -race requires cgo`). Compensated with single-mutex lock discipline (one `sync.Cond`
+  over the same mutex that guards the store, so deciding and claiming are one critical
+  section), a 24-job concurrent burst test sampling peak overlap from inside the runs, the
+  pre-existing 32-goroutine concurrent-`Accept` test now running through the scheduler,
+  repeated `-count` runs, and `go vet ./...`. The delegator-side change adds no shared mutable
+  state (the queued accumulator is local to one `runRemote` call, on the goroutine that owns it).
+
 ## [0.99.0] - 2026-08-26
 
 ### Changed — `route:"spread"`: the remote slots are fit-scored instead of dealt blind

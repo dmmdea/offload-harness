@@ -808,10 +808,21 @@ type Config struct {
 	// resolved at serve time (so a shared config never bakes one box's name).
 	FleetNodeID string `json:"fleet_node_id,omitempty"`
 	// FleetMaxQueueDepth caps how many jobs this node will hold in
-	// accepted/running at once; a NEW dispatch beyond it is refused 503, which
-	// the dispatch contract already defines as "re-dispatch elsewhere" — so a
-	// full node sheds load to its siblings with no delegator change. 0 = the
-	// built-in default (32); negative = unlimited (the pre-cap behavior).
+	// accepted/running at once — i.e. it is the ceiling on health's
+	// `queue_depth` field, which counts exactly those two states. A NEW
+	// dispatch beyond it is refused 503. 0 = the built-in default (32);
+	// negative = unlimited (the pre-cap behavior).
+	//
+	// 0.100.0 SPLIT NOTE — this key's meaning is UNCHANGED, but what it is
+	// no longer doing matters. Before 0.100.0 a job started executing the
+	// instant it was accepted, so "accepted+running" and "executing right
+	// now" were the same number and this one key silently did two jobs: it
+	// bounded the backlog AND the concurrency. Admitted jobs now WAIT in
+	// `accepted` for a bounded worker pool, so concurrency has its own key
+	// (FleetMaxConcurrentJobs) and this one keeps only the meaning its name,
+	// its old doc comment and the health field it caps all already stated.
+	// The refusal boundary is byte-identical to 0.99.0's; actual concurrency
+	// under any setting of this key is now less than or equal to what it was.
 	//
 	// The default is deliberately GENEROUS: normal use never touches it (a full
 	// agent_delegate call is 8 subtasks; the delegator runs 4 at a time), so it
@@ -822,6 +833,20 @@ type Config struct {
 	// Enforced at ack time before any request materialization; re-acks of jobs
 	// this node already owns and result polls are never refused by it.
 	FleetMaxQueueDepth int `json:"fleet_max_queue_depth,omitempty"`
+	// FleetMaxConcurrentJobs caps how many ADMITTED jobs execute at the same
+	// time (0.100.0). This is the limit that protects the shared llama-swap
+	// endpoint and the single GPU behind it: jobs beyond it are admitted and
+	// WAIT in `accepted` until a worker frees, they are never refused — that
+	// is FleetMaxQueueDepth's job. 0 = the built-in default (4); negative =
+	// unlimited (goroutine-per-job, the pre-0.100.0 execution behaviour).
+	//
+	// The default is 4 because that is what this fleet actually runs: the
+	// delegator dispatches a delegation fan-out four subtasks at a time, so 4
+	// preserves the observed steady state while bounding the pathological one
+	// the split exists to kill (a node at "depth 31" was 31 simultaneous
+	// inferences against ONE llama-swap slot). A job that waits is strictly
+	// better than a job that thrashes: nothing is refused that 0.99.0 admitted.
+	FleetMaxConcurrentJobs int `json:"fleet_max_concurrent_jobs,omitempty"`
 	// FleetAuthToken, when non-empty, bearer-gates the fleet's AGENT lane:
 	// POST /fleet/dispatch with task_type "agent" and GET /fleet/jobs/{id} for
 	// jobs an agent dispatch created require `Authorization: Bearer <token>`
@@ -1158,6 +1183,7 @@ func Default() Config {
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
 		FleetMaxQueueDepth:            0,                 // 0 = built-in default (32 accepted+running); negative = unlimited
+		FleetMaxConcurrentJobs:        0,                 // 0 = built-in default (4 executing at once); negative = unlimited
 		FleetAuthToken:                "",                // "" = no agent-lane auth → agent dispatch loopback-only; media lane never auths (v1 scope)
 		FleetAgentEnabled:             false,             // node-side agent-lane worker role: explicit operator opt-in
 		AgentDelegationEnabled:        false,             // delegator-side surfaces (agent_delegate MCP + CLI placement): opt-in
@@ -1534,6 +1560,21 @@ func (c Config) FleetQueueLimit() int {
 		return 32
 	default:
 		return c.FleetMaxQueueDepth
+	}
+}
+
+// FleetConcurrencyLimit resolves FleetMaxConcurrentJobs: 0 → the built-in
+// default (4), negative → 0 meaning unlimited. The worker pool treats <= 0 as
+// unlimited, matching FleetQueueLimit's convention exactly so an operator
+// learns one rule for both fleet caps.
+func (c Config) FleetConcurrencyLimit() int {
+	switch {
+	case c.FleetMaxConcurrentJobs < 0:
+		return 0
+	case c.FleetMaxConcurrentJobs == 0:
+		return 4
+	default:
+		return c.FleetMaxConcurrentJobs
 	}
 }
 

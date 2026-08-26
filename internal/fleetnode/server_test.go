@@ -57,7 +57,7 @@ func goodSnapshot() (Snapshot, bool) {
 // at test end so its goroutines stop.
 func newTestServer(t *testing.T, cfg config.Config, r Runner, opts *Options) (*Server, *Jobs) {
 	t.Helper()
-	jobs := NewJobs(time.Hour)
+	jobs := NewJobs(time.Hour, cfg.FleetConcurrencyLimit())
 	t.Cleanup(func() { jobs.DrainAndStop(2 * time.Second) })
 	o := Options{
 		NodeID:     "testnode",
@@ -135,6 +135,12 @@ func pollJob(t *testing.T, s *Server, id string, want JobState) map[string]any {
 	}
 }
 
+// TestHealthGoldenShape pins the WHOLE payload by exact equality, so any field
+// added to health has to be added here deliberately. The four 0.100.0 capacity
+// fields (jobs_queued/jobs_running/max_concurrent_jobs/max_queue_depth) are
+// always present — 0 is a meaningful value for each, so omitempty would make an
+// unlimited limit indistinguishable from a node too old to publish one. The
+// values here are the built-in defaults an unconfigured node resolves.
 func TestHealthGoldenShape(t *testing.T) {
 	opts := &Options{
 		NodeID:   "node-a",
@@ -162,7 +168,9 @@ func TestHealthGoldenShape(t *testing.T) {
 		"supported_task_types": ["image-gen", "run-graph"],
 		"loadable_model_families": ["sdxl", "comfy-graph"],
 		"model_footprints": [{"model_family":"sdxl","quant":"bf16","task_type":"image-gen","vram_peak_gb":9.6}],
-		"queue_depth": 0
+		"queue_depth": 0,
+		"jobs_queued": 0, "jobs_running": 0,
+		"max_concurrent_jobs": 4, "max_queue_depth": 32
 	}`
 	if err := json.Unmarshal([]byte(golden), &want); err != nil {
 		t.Fatalf("golden not JSON: %v", err)

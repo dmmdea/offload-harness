@@ -581,6 +581,13 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 		n["agent_ctx_tokens"] = r.view.AgentCtxTokens
 		n["agent_seat_resident"] = r.view.AgentResident
 		n["queue_depth"] = r.view.QueueDepth
+		// The saturation triad. queue_depth alone cannot distinguish "this node
+		// is chewing through work" from "this node is full and everything is
+		// waiting", and since 0.100.0 those are different states with different
+		// fixes. A `queue deadline` failure sends an operator here first.
+		n["jobs_running"] = r.view.JobsRunning
+		n["jobs_queued"] = r.view.JobsQueued
+		n["max_concurrent_jobs"] = r.view.MaxConcurrentJobs
 		if r.view.AgentEnabled {
 			capable++
 			if r.view.QueueDepth == 0 {

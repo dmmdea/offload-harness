@@ -28,7 +28,7 @@ func waitJobState(t *testing.T, j *Jobs, id string, want JobState) *JobView {
 // TestJobsStateMachineDone: accepted -> running -> done{data}, and the terminal
 // result stays queryable (retention is the janitor's business, not completion's).
 func TestJobsStateMachineDone(t *testing.T) {
-	j := newJobs(time.Hour, time.Now, time.Hour)
+	j := newJobs(time.Hour, time.Now, time.Hour, 0)
 	defer j.DrainAndStop(time.Second)
 
 	release := make(chan struct{})
@@ -57,7 +57,7 @@ func TestJobsStateMachineDone(t *testing.T) {
 
 // TestJobsStateMachineError: a failing run lands in state error with the reason.
 func TestJobsStateMachineError(t *testing.T) {
-	j := newJobs(time.Hour, time.Now, time.Hour)
+	j := newJobs(time.Hour, time.Now, time.Hour, 0)
 	defer j.DrainAndStop(time.Second)
 
 	j.Accept("job-e", func(ctx context.Context) (json.RawMessage, error) {
@@ -75,7 +75,7 @@ func TestJobsStateMachineError(t *testing.T) {
 // TestJobsIdempotentAccept: a duplicate job_id never starts a second run — the
 // contract's idempotency rule (once acked, the job is ours; re-POSTs are lookups).
 func TestJobsIdempotentAccept(t *testing.T) {
-	j := newJobs(time.Hour, time.Now, time.Hour)
+	j := newJobs(time.Hour, time.Now, time.Hour, 0)
 	defer j.DrainAndStop(time.Second)
 
 	var runs atomic.Int32
@@ -103,7 +103,7 @@ func TestJobsIdempotentAccept(t *testing.T) {
 // TestJobsConcurrentAcceptExactlyOnce: hammering the same id from many goroutines
 // yields exactly one created=true and exactly one run execution.
 func TestJobsConcurrentAcceptExactlyOnce(t *testing.T) {
-	j := newJobs(time.Hour, time.Now, time.Hour)
+	j := newJobs(time.Hour, time.Now, time.Hour, 0)
 	defer j.DrainAndStop(time.Second)
 
 	var created, runs atomic.Int32
@@ -132,7 +132,7 @@ func TestJobsConcurrentAcceptExactlyOnce(t *testing.T) {
 
 // TestJobsQueueDepth: accepted+running count; terminal jobs do not.
 func TestJobsQueueDepth(t *testing.T) {
-	j := newJobs(time.Hour, time.Now, time.Hour)
+	j := newJobs(time.Hour, time.Now, time.Hour, 0)
 	defer j.DrainAndStop(time.Second)
 
 	if d := j.QueueDepth(); d != 0 {
@@ -158,7 +158,7 @@ func TestJobsQueueDepth(t *testing.T) {
 
 // TestJobsGetUnknown: unknown id -> not found (the server's 404).
 func TestJobsGetUnknown(t *testing.T) {
-	j := newJobs(time.Hour, time.Now, time.Hour)
+	j := newJobs(time.Hour, time.Now, time.Hour, 0)
 	defer j.DrainAndStop(time.Second)
 	if _, ok := j.Get("nope"); ok {
 		t.Fatal("unknown id must not be found")
@@ -173,7 +173,7 @@ func TestJobsJanitorEvictsTerminal(t *testing.T) {
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 	advance := func(d time.Duration) { mu.Lock(); now = now.Add(d); mu.Unlock() }
 
-	j := newJobs(time.Hour, clock, time.Hour)
+	j := newJobs(time.Hour, clock, time.Hour, 0)
 	defer j.DrainAndStop(time.Second)
 
 	j.Accept("old", func(ctx context.Context) (json.RawMessage, error) { return json.RawMessage(`1`), nil })
@@ -207,7 +207,7 @@ func TestJobsJanitorEvictsTerminal(t *testing.T) {
 // TestJobsJanitorGoroutineRuns (live): with a tiny ttl+tick the janitor loop
 // itself evicts without any manual sweep call.
 func TestJobsJanitorGoroutineRuns(t *testing.T) {
-	j := newJobs(time.Millisecond, time.Now, 10*time.Millisecond)
+	j := newJobs(time.Millisecond, time.Now, 10*time.Millisecond, 0)
 	defer j.DrainAndStop(time.Second)
 
 	j.Accept("gone", func(ctx context.Context) (json.RawMessage, error) { return nil, nil })
@@ -226,7 +226,7 @@ func TestJobsJanitorGoroutineRuns(t *testing.T) {
 // marked terminal error:"interrupted" (pollers always reach a terminal state), its
 // context is cancelled, and its late completion must NOT overwrite the mark.
 func TestJobsDrainMarksSurvivorsInterrupted(t *testing.T) {
-	j := newJobs(time.Hour, time.Now, time.Hour)
+	j := newJobs(time.Hour, time.Now, time.Hour, 0)
 
 	finished := make(chan struct{})
 	j.Accept("stuck", func(ctx context.Context) (json.RawMessage, error) {
@@ -258,7 +258,7 @@ func TestJobsDrainMarksSurvivorsInterrupted(t *testing.T) {
 // by CommandContext on that cancel, and on Windows children survive parent
 // death: exiting before the kill lands orphans ComfyUI and pins VRAM.
 func TestJobsDrainWaitsForKillDelivery(t *testing.T) {
-	j := newJobs(time.Hour, time.Now, time.Hour)
+	j := newJobs(time.Hour, time.Now, time.Hour, 0)
 
 	var finished atomic.Bool
 	j.Accept("slow-kill", func(ctx context.Context) (json.RawMessage, error) {
@@ -288,7 +288,7 @@ func TestJobsDrainWaitsForKillDelivery(t *testing.T) {
 // TestJobsDrainRejectsNewAccepts: after drain begins, Accept refuses (the server
 // turns this into 503 node draining) and Draining() reports it.
 func TestJobsDrainRejectsNewAccepts(t *testing.T) {
-	j := newJobs(time.Hour, time.Now, time.Hour)
+	j := newJobs(time.Hour, time.Now, time.Hour, 0)
 	j.DrainAndStop(10 * time.Millisecond)
 	if !j.Draining() {
 		t.Fatal("Draining() must be true after DrainAndStop")
@@ -301,14 +301,27 @@ func TestJobsDrainRejectsNewAccepts(t *testing.T) {
 	}
 }
 
-// TestJobsDrainWaitsForFastJobs: a run that completes inside the timeout drains
-// clean — done with data, never "interrupted".
+// TestJobsDrainWaitsForFastJobs: a RUNNING job that completes inside the timeout
+// drains clean — done with data, never "interrupted".
+//
+// The wait for JobRunning before draining is load-bearing since 0.100.0, and is
+// not test-hygiene padding: admission and execution are now separate steps, so
+// "was this job claimed before drain began?" is a genuine race for a job
+// accepted microseconds earlier — in production and here alike. Drain
+// deliberately finishes what it STARTED and never starts what it did not (see
+// DrainAndStop), so without this wait the test would be asserting a coin flip
+// between JobDone and ErrNeverStarted. Pinning the job as running first is what
+// makes this test about the drain timeout, which is what it was always for.
 func TestJobsDrainWaitsForFastJobs(t *testing.T) {
-	j := newJobs(time.Hour, time.Now, time.Hour)
+	j := newJobs(time.Hour, time.Now, time.Hour, 0)
+	started := make(chan struct{})
 	j.Accept("quick", func(ctx context.Context) (json.RawMessage, error) {
+		close(started)
 		time.Sleep(30 * time.Millisecond)
 		return json.RawMessage(`"ok"`), nil
 	})
+	<-started
+	waitJobState(t, j, "quick", JobRunning)
 	j.DrainAndStop(5 * time.Second)
 	v, ok := j.Get("quick")
 	if !ok || v.State != JobDone || string(v.Data) != `"ok"` {

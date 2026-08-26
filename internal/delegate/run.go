@@ -219,6 +219,22 @@ var (
 	pollGrace = 60 * time.Second
 )
 
+// maxQueuedWait is the ABSOLUTE ceiling on how long a subtask may sit in a
+// node's backlog before the delegator gives up on it, whatever the contract's
+// own timeout says.
+//
+// Why a second ceiling on top of the contract budget: a subtask that has not
+// been handed a worker in five minutes is behind a backlog no fan-out is going
+// to clear in time, and the caller is better served by a loud, immediate
+// failure than by a longer wait it did not ask for. Without this, a contract
+// declaring the 900s cap could park a delegation for a quarter of an hour
+// before reporting that nothing ever happened.
+//
+// It is a CEILING, not the bound itself: the effective bound is
+// min(pollBudget, maxQueuedWait), so a short contract never waits longer for a
+// slot than it was willing to spend on the work.
+const maxQueuedWait = 5 * time.Minute
+
 // fleetClient rides netguard.SafeTransport like the health client: the
 // delegation lane may only ever reach loopback or the operator's tailnet
 // (never-cloud, ADR 0001), enforced at every dial. No client-level Timeout —
@@ -883,8 +899,48 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	if timeoutSec <= 0 {
 		timeoutSec = core.AgentTimeoutSecDefault
 	}
+	// pollBudget is the budget for WORK. Before the node gained a real queue
+	// (0.100.0) that distinction did not exist: the node's Accept was its
+	// start, so dispatch → running was microseconds and the whole budget went
+	// to execution by construction. Now a job can legitimately sit in the
+	// node's backlog in state `accepted`, and charging that wait to the
+	// contract's own timeout would convert a node's loud, immediate
+	// "503 queue full" into a slow timeout that burns the entire budget and
+	// then hands back a manufactured "node accepted the job but did not reach
+	// a terminal state" defer — the same lost work with less signal and more
+	// wall clock. So QUEUED TIME IS CREDITED BACK: the deadline moves out by
+	// the time the job provably spent waiting, and the contract still gets the
+	// execution budget it asked for.
 	pollBudget := time.Duration(timeoutSec)*time.Second + pollGrace
-	deadline := time.Now().Add(pollBudget)
+	start := time.Now()
+	deadline := start.Add(pollBudget)
+	// queuedWaitBudget bounds the credit — an unbounded wait is its own
+	// failure mode. A job may wait for a slot at most as long as it was
+	// allowed to run, and never more than maxQueuedWait. Total wall clock is
+	// therefore bounded by pollBudget + queuedWaitBudget.
+	queuedWaitBudget := pollBudget
+	if queuedWaitBudget > maxQueuedWait {
+		queuedWaitBudget = maxQueuedWait
+	}
+	// queuedCredit is time PROVABLY spent in the backlog: an interval is banked
+	// only when it is bracketed by two CONSECUTIVE `accepted` observations with
+	// nothing else in between — see the reset at the top of the poll loop. The
+	// partial spans either side (dispatch → first queued poll, last queued poll
+	// → first running poll) and any interval interrupted by a transport error,
+	// a 404 or a 5xx are deliberately NOT credited. Each omission is at most
+	// one pollEvery of real backlog, and under-crediting is the safe direction:
+	// over-crediting silently hands a job more execution budget than the
+	// contract granted, and makes the give-up message assert the job "waited in
+	// the node's backlog" across time the node was doing something else.
+	var queuedCredit time.Duration
+	var lastQueuedAt time.Time
+	// queuedPolls counts ONLY the polls that actually answered `accepted`.
+	// Deliberately not the total poll count: this run may also have seen 404s
+	// and 5xxs, and a message saying "N polls, every one queued" over a total
+	// that included them would be the delegator authoring a claim the node
+	// never made — the exact failure the shapes in unownedDetail exist to
+	// prevent.
+	queuedPolls := 0
 	redispatches := 0
 	// A poll failure is NOT nothing. Before these, pollOnce's error was bound
 	// and dropped, so a node that died after acking (refused dial, per-poll
@@ -931,7 +987,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 				// job, so there is no defer to report. A FAILURE (Summary.Failed,
 				// non-zero CLI exit) is the honest outcome — a broken node, or one
 				// denying the job, must read broken.
-				pr.Err = fmt.Sprintf("poll deadline after %s: %s", pollBudget, unownedDetail(sawNodeAnswer, saw404, redispatches, lastPollErr))
+				pr.Err = fmt.Sprintf("poll deadline after %s%s: %s", pollBudget, queuedNote(queuedCredit), unownedDetail(sawNodeAnswer, saw404, redispatches, lastPollErr))
 				return pr
 			}
 			// Roast delta 14: mark deferred, reason PREFIXED "poll deadline"
@@ -939,7 +995,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			// job id in the telemetry line lets an operator reconcile by hand.
 			// The wording says only what is known: it acked and it never reached
 			// a terminal state — not that it "could not complete the contract".
-			reason := fmt.Sprintf("poll deadline after %s: node accepted the job but did not reach a terminal state", pollBudget)
+			reason := fmt.Sprintf("poll deadline after %s%s: node accepted the job but did not reach a terminal state", pollBudget, queuedNote(queuedCredit))
 			// A node that answered every poll normally simply ran out of clock:
 			// a BUDGET defer. One whose last answer we could not use (a 5xx, an
 			// unknown state) is a broken box, and classing the two alike is how
@@ -963,6 +1019,17 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			return pr
 		}
 		state, data, jobErr, status, perr := r.pollOnce(ctx, base, jobID)
+		// EVERY observation closes the queued span; only the `accepted` arm
+		// below re-opens it. Reset-then-re-arm is deliberate structure, not
+		// style: lastQueuedAt used to be cleared only in the `running` arm, so
+		// the transport-error, 404 and 5xx arms all left it set — and an
+		// interval bracketed by two `accepted` answers was banked IN FULL even
+		// when the node spent the middle of it returning 503s, or denying with
+		// a 404 that it had ever held the job. The endpoints being `accepted`
+		// does not make the interior backlog wait. Written this way a future
+		// poll arm cannot silently inherit an open span.
+		prevQueuedAt := lastQueuedAt
+		lastQueuedAt = time.Time{}
 		switch {
 		case perr != nil:
 			// Transient transport noise: keep polling until the deadline —
@@ -1016,6 +1083,58 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			// The node answered AND says it owns the job: the only shape that
 			// earns a defer at the deadline.
 			sawNodeAnswer, sawJobOwned = true, true
+			// `accepted` and `running` are no longer the same fact. Since
+			// 0.100.0 `accepted` means ADMITTED BUT NOT STARTED — the job is in
+			// the node's backlog waiting for one of its concurrency slots — and
+			// `running` means a seat is actually working on it. A node too old
+			// to have a queue simply never lingers in `accepted`, so it accrues
+			// no credit and behaves exactly as it did before.
+			if state == "accepted" {
+				queuedPolls++
+				now := time.Now()
+				if !prevQueuedAt.IsZero() {
+					queuedCredit += now.Sub(prevQueuedAt)
+					if queuedCredit > queuedWaitBudget {
+						queuedCredit = queuedWaitBudget
+					}
+					// Push the execution deadline out by the wait. Recomputed
+					// from `start` rather than incremented, so a capped credit
+					// cannot drift the deadline past the intended bound.
+					deadline = start.Add(pollBudget + queuedCredit)
+				}
+				lastQueuedAt = now
+				if queuedCredit >= queuedWaitBudget {
+					// Bounded give-up while STILL QUEUED. Deliberately an
+					// ERROR, not a defer, for three reasons — and note that
+					// "a defer carries the node id and seat" is NOT among them:
+					// runOne stamps those onto the failure path too.
+					//
+					//  1. A defer manufactures an AgentWireResult{Deferred:
+					//     true} — a payload shaped like something the SEAT
+					//     produced. No seat ever saw this contract.
+					//  2. The only honest class would be `budget`, which
+					//     teaches every consumer of that class (the sizing
+					//     path especially) that the seat needed more time.
+					//     The seat needed nothing; it was never asked.
+					//  3. Decisive: what this replaces was ALREADY A FAILURE.
+					//     Before the node had a queue, a saturated node
+					//     answered 503 at dispatch, which becomes pr.Err and
+					//     counts in summary.failed. Filing this as a defer
+					//     would quietly downgrade the severity of a refusal
+					//     while changing nothing about the work not getting
+					//     done.
+					//
+					// The message says only what was observed: the node acked
+					// it, and N polls answered `accepted`. The "queue deadline"
+					// prefix is stable and distinct from the "poll deadline"
+					// one a job that actually ran produces.
+					pr.Err = fmt.Sprintf("queue deadline after %s: the node accepted the job but never started it — it waited in the node's backlog and never reached running (%d poll(s) answered `accepted`)",
+						queuedWaitBudget, queuedPolls)
+					return pr
+				}
+			}
+			// `running`: the span stays closed by the reset above. Anything
+			// already banked stays banked — the job earned that credit.
 			// A healthy answer RETIRES the previous failure. lastPollErr was
 			// assigned and never cleared, so ONE early 503 followed by fifty
 			// clean `running` answers still ended classed infrastructure, exited
@@ -1042,6 +1161,20 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 		case <-time.After(pollEvery):
 		}
 	}
+}
+
+// queuedNote renders the backlog credit for a deadline message, and renders
+// NOTHING when there was none. The empty case is load-bearing: a node with no
+// queue (or a job that started at once) must produce the exact message it
+// produced before this accounting existed, so an operator grepping for the old
+// wording — and the tests pinning it — still match. When it IS non-empty it
+// answers the first question a deadline raises on a queued fleet: was this job
+// slow, or was it merely late to start?
+func queuedNote(queuedCredit time.Duration) string {
+	if queuedCredit <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (+%s credited back for time queued on the node)", queuedCredit.Round(time.Millisecond))
 }
 
 // errText renders a possibly-nil error for an operator-facing message. A
