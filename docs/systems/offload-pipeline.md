@@ -283,12 +283,22 @@ than compiled in.
 3. The recordless path writes nothing — no ledger, no cache, no shadow capture.
 4. Infrastructure failures do not escalate.
 5. The reasoning Tier never fabricates a pass: garbage from it still defers.
+6. **One llama-swap serving slot holds one model at a time.** Every generation request passes
+   through the Model Affinity Gate (`internal/modelaffinity`) before it is sent. Same model on the
+   same base is concurrent; a different model parks until the in-flight batch drains. See
+   [ADR 0025](../architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md).
 
 ## Error handling
 
 Recoverable model-quality failures escalate. Infrastructure failures defer with `err_class`
 (`oom`, `timeout`, `http_5xx`, `conn_refused`, `gpu_busy`). Exhausting the chain defers with the last
 reason and any partial output preserved in `Partial`.
+
+A request can also fail without reaching llama-swap at all: if the Model Affinity Gate's bound
+expires while the request is parked behind another model, it returns a `*modelaffinity.WaitError`
+naming the base, the model wanted, the model that held the slot, and how many switches were queued
+ahead. Its wording carries the substring `classifyErr` buckets congestion by, so it files as
+`timeout` rather than `other`.
 
 ## Security and privacy notes
 
@@ -378,10 +388,17 @@ their own unit tests.
 - [`internal/grounding/grounding.go`](../../internal/grounding/grounding.go)
 - [`internal/ledger/ledger.go`](../../internal/ledger/ledger.go)
 - [`internal/config/config.go`](../../internal/config/config.go) — tier aliases and threshold defaults
+- [`internal/modelaffinity/affinity.go`](../../internal/modelaffinity/affinity.go) — the Model
+  Affinity Gate: admission keyed on the resolved base, batching, the bound
+- [`internal/llamaclient/client.go`](../../internal/llamaclient/client.go) — the three generation
+  methods and where the gate is taken
+- [`internal/llamaclient/lanes.go`](../../internal/llamaclient/lanes.go) — `resolveEndpoint`, whose
+  base decision the gate consumes and never re-decides
 
 ## Related docs
 
 - [../architecture/decisions/0001-defer-never-cloud-fallback.md](../architecture/decisions/0001-defer-never-cloud-fallback.md)
 - [../architecture/decisions/0002-grammar-reliable-serving-flags.md](../architecture/decisions/0002-grammar-reliable-serving-flags.md)
+- [../architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md](../architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md)
 - [../architecture/decisions/0010-tier-optimization-before-latency-defer.md](../architecture/decisions/0010-tier-optimization-before-latency-defer.md)
 - [../glossary.md](../glossary.md)

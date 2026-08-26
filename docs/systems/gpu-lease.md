@@ -149,6 +149,13 @@ Both are exclusive — one card, one holder. The label carries intent, not acces
 a day at ~46 ms and leasing them is untenable. This is a known limit, not an oversight: a short
 interactive call can still land inside a media lease and pay a reload.
 
+Text calls do have their own arbitration, one layer down and for a different problem: the Model
+Affinity Gate (`internal/modelaffinity`) keeps one llama-swap serving slot on one model at a time so
+two text lanes cannot thrash it with competing model names. It is IN-PROCESS and costs two mutex
+acquisitions, which is exactly why it can sit on a path this lease refuses. It does not arbitrate the
+card, does not know about media, and does not close the cross-process gap named above. See
+[ADR 0025](../architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md).
+
 ## How it stays correct
 
 - **Machine-wide.** The previous lock defaulted under the OS temp dir, which is per-user on

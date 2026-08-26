@@ -6,6 +6,77 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.102.0] - 2026-08-26
+
+### Fixed - two text lanes no longer thrash one llama-swap by asking it for different models
+
+- **The defect, in one line.** Every text seat in the default config points at one endpoint
+  (`agent_model`, `model`, `reasoning_model`, `escalation_model`, `triage_model`, `vision_model`, all
+  on `http://127.0.0.1:11436`), llama-swap serializes model residency, and **nothing in the harness
+  serialized by model**. Two lanes naming different models forced an evict-and-reload each time they
+  interleaved. Measured cost: the agent seat (`qwen3.8-27b`) degraded ~4x, 72 s to 307 s per call.
+- **Not fixed by the fleet queue (0.100.0) or re-placement (0.101.0).** Both competing calls were on
+  the SAME box; a queue that distributes across machines has nothing to distribute away from.
+- **The gate: `internal/modelaffinity`.** An in-process admission gate every llama-swap generation
+  request passes through. Same model on the same base -> concurrent, untouched (llama-swap already
+  queues those harmlessly; the expensive event is the SWITCH). A different model on a base that has
+  in-flight requests -> parks until they drain, then proceeds. N interleaved switches become one
+  switch per batch.
+- **Keyed on the RESOLVED BASE, never on the model.** `llamaclient.resolveEndpoint` can hand two
+  models two different bases (a `seat_endpoints` pin, a `cascade_remote_lanes` failover, or the
+  default), and two models on two llama-swap instances do not contend at all. The gate consumes the
+  base that function already decided and never re-decides it. Keying on the model instead would
+  serialise lanes that never conflicted - pinned by a mutant.
+- **Both lanes take it, because a lock only one side takes is not mutual exclusion.** The gate is
+  wired into `llamaclient.Generate` / `GenerateVision` / `GenerateVisionInterleaved` **and** into
+  `agent.LLMClient.Chat`, which posts to `/v1/chat/completions` on its own and never went through
+  `llamaclient`. The agent seat is the lane the incident degraded; gating only the cascade side would
+  have left it exactly as it was.
+- **Bounded, with an honest outcome.** A park is bounded by `(batches ahead + 1) x budget`, where
+  budget is the resolved `http.Client`'s own request timeout (120 s by default) - fixed at park time,
+  never extended by progress. Each batch ahead drains within one budget because every member is a
+  single request bounded by that timeout and the barrier stops a batch taking new members once
+  someone parks. Exhaustion returns a `*modelaffinity.WaitError` naming the base, the model wanted,
+  the model that held the slot, the in-flight count and the switches queued ahead - not a bare
+  timeout. The caller's own `ctx` bounds the wait too and is usually the tighter of the two.
+- **No starvation.** Once a caller parks, later arrivals naming the RESIDENT model park behind it
+  instead of joining the running batch, so a steady stream of the resident model cannot hold the slot
+  forever. Promotion always takes the model at the HEAD of the queue, so every parked caller reaches
+  the head in bounded time.
+- **Cost on the hot path**: two uncontended mutex acquisitions and zero allocation for an admission
+  that does not block. This is deliberately NOT a `gpulease` participant - that package excludes
+  ordinary interactive text ("thousands per day at ~46 ms, and leasing them is untenable"), and that
+  judgement stands: a filesystem lease per text call remains off the table.
+
+### Known limits (stated, not worked around)
+
+- **Process-local.** The registry lives in one harness process. Two harness processes on one box - an
+  MCP server plus a CLI invocation, or two MCP servers under two editors - still thrash each other
+  exactly as before, because neither can see the other's in-flight set. Making it machine-wide would
+  require the same fenced, pid-recycle-safe, machine-wide state root `internal/gpulease` uses, i.e.
+  an acquire/release round trip through the filesystem on **every** text call. That is precisely the
+  cost gpulease refused for text, so it is named here rather than built.
+- **Two load-triggering routes stay outside the gate**: `internal/agent`'s
+  `/upstream/{model}/props` probes (`ProbeSeatPin` exists to WARM a seat, so gating it would fight
+  its purpose) and `internal/tokclient`'s `/upstream/{model}/tokenize`. Both are affine to their own
+  caller's seat and neither is a burst source; a tokenize is also a separate admission from the
+  generation that follows it, so gating it could not batch the two anyway. Holding one admission
+  across tokenize-then-generate is a larger change through `internal/pipeline`.
+- **STT and media are untouched by design** - `internal/sttclient` talks to whisper-server in a
+  different process behind its own `inferMu`, and the media path is arbitrated by `mediaSlot` plus
+  the `gpulease` media class.
+
+### Docs
+
+- New ADR [0025](docs/architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md).
+- `docs/systems/offload-pipeline.md`, `docs/systems/coding-agent.md`, `docs/systems/gpu-lease.md` and
+  `docs/glossary.md` updated in the same change.
+
+### Repo hygiene
+
+- `internal/agent/client.go` had a pre-existing `gofmt` deviation (a missing blank line before
+  `type wireReq`); fixed while editing that file.
+
 ## [0.101.0] - 2026-08-26
 
 ### Fixed — a node refusing a job no longer loses the work

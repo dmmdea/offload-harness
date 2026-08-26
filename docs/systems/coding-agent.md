@@ -497,10 +497,20 @@ MCP. Capability defaults are an interface, not an implementation detail.
 4. The audit trail lives outside the worktree, enforced at build time.
 5. An action that cannot be audited does not happen.
 6. `--serve` refuses a non-loopback bind without `--listen-trusted-network`.
+7. **Every `Chat` call takes the Model Affinity Gate** (`internal/modelaffinity`) before it POSTs.
+   The agent seat shares one llama-swap endpoint with every cascade text seat in the default config,
+   and this path does NOT go through `internal/llamaclient` — so a gate installed only on the
+   cascade side would be a lock only one side takes, and the agent seat would keep losing its model
+   mid-run (measured: 72 s -> 307 s per call). Sequential steps of one loop always name the same
+   model, so the gate is a no-op for a run that has the seat to itself. See
+   [ADR 0025](../architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md).
 
 ## Error handling
 
 Tool errors become `is_error` results the model can react to; the loop never panics on tool failure.
+A `Chat` call can also fail before it reaches llama-swap, with a `*modelaffinity.WaitError`: the
+seat was parked behind another model's batch for longer than its bound. The error names the base,
+the model wanted and the model that held the slot.
 Throttle refusals are fed back as ordinary tool results with explicit instructions to move on.
 
 ## Security and privacy notes
@@ -579,10 +589,14 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
   through this loop (local and fleet placements alike)
 - [`internal/sandbox/`](../../internal/sandbox/) — platform cages
 - [`cmd/local-agent/`](../../cmd/local-agent/) — CLI and server
+- [`internal/agent/client.go`](../../internal/agent/client.go) — `LLMClient.Chat`, the OpenAI wire
+  types, and where the Model Affinity Gate is taken
+- [`internal/modelaffinity/affinity.go`](../../internal/modelaffinity/affinity.go) — the gate
 
 ## Related docs
 
 - [../architecture/decisions/0003-policy-broker-and-capability-flags-off-by-default.md](../architecture/decisions/0003-policy-broker-and-capability-flags-off-by-default.md)
 - [../architecture/decisions/0004-worktree-confinement-audit-outside.md](../architecture/decisions/0004-worktree-confinement-audit-outside.md)
 - [../architecture/decisions/0005-loopback-only-serve.md](../architecture/decisions/0005-loopback-only-serve.md)
+- [../architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md](../architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md)
 - [../OPERATOR-GUIDE.md](../OPERATOR-GUIDE.md)

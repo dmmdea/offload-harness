@@ -34,6 +34,7 @@ code, treat everything else as background.
 | [0022](0022-escalation-repacks-from-the-original.md) | Accepted | The escalation boundary repacks from the original; the cache key is the logical request |
 | [0023](0023-agent-lane-tailnet-auth-and-locality.md) | Accepted | The agent lane is tailnet-only, bearer-gated, quality-first-placed, and hop-limited |
 | [0024](0024-accelerators-are-additive-to-the-gpu-tier.md) | Accepted | Accelerators are additive to the GPU tier |
+| [0025](0025-model-residency-is-arbitrated-in-process-by-base.md) | Accepted | Model residency is arbitrated in process, keyed on the resolved base |
 
 
 ## Lifecycle
