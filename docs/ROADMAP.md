@@ -1,16 +1,32 @@
-# Local-Offload Media Build — ROADMAP (decided order)
+# Local-Offload — ROADMAP (decided order)
 
-> Single source of truth for the BUILD SEQUENCE. The design detail lives in the chapter briefs (linked at the bottom); this file owns the ORDER, and the order is **decided** — not a menu. Last updated 2026-06-26.
+> Single source of truth for the BUILD SEQUENCE. The design detail lives in the chapter briefs and ADRs (linked at the bottom); this file owns the ORDER, and the order is **decided** — not a menu. **Last updated 2026-08-26** (frontier-update refresh; the file had gone ~100 minor versions stale at 2026-06-26 / 0.4.1).
 
 ## Framing
-Extend the local-offload harness with local **media** capabilities — image · audio · video, each across 3 angles (**understand · generate · edit**), dual-track (public generalist + private **Danmar Auto Reviews**-optimized). Hard rules carried through every phase:
-- **never-call-cloud** (defer to Opus on low confidence)
+Give the harness local capability — text · image · audio · video, each across 3 angles (**understand · generate · edit**) — so grunt work never reaches a paid context. Dual-track: public generalist + a private **Danmar Auto Reviews**-optimized track. Hard rules carried through every phase:
+- **never-call-cloud** (defer to Opus on low confidence; `offload_nim` is the one opt-in exception)
 - **GBNF grammar path is sacred** (raw `grammar` field; never `--json-schema`)
 - **zero-always-warm** (llama-swap `ttl:300` + force-unload; ComfyUI `--disable-smart-memory --cache-none` + `/free`)
 - **editing is Claude-driven** (Opus decides cuts; local tools execute)
-- **8 GB single-user** box (RTX 3070 Mobile + 64 GB RAM); the load-bearing memory stack (embeddinggemma + bge-reranker, CPU) must never break.
+- **quality-first on every tier** — a slow tier gets its binding fixed, never a defer-to-cloud gate
+- the load-bearing memory stack (embeddinggemma + bge-reranker) must never break.
 
-## Done
+### Scope correction (2026-08-26)
+This file used to say the target was an "**8 GB single-user** box (RTX 3070 Mobile + 64 GB RAM)". **That has not been true since ~0.29.0.** The harness is now a **multi-node fleet** with a hardware-tier system (`docs/tiers/`), a fleet-node server, and cross-node delegation:
+
+| node | tier | role |
+|---|---|---|
+| **Qube** | `blackwell-2x16` — RTX 5070 Ti 16GB + RTX 5060 Ti 16GB, 128 GB RAM, Win 11 | primary; agent seat `qwen3.8-27b`, all media engines, mem0 authority |
+| **Aorus 15P-XD** | `ampere-8` — RTX 3070 8GB, 64 GB RAM | fleet node, agent seat `qwen3.5-9b-agent` |
+| **Lenovo M720q** | `ampere-6` — RTX 3050 6GB, 32 GB RAM, Kubuntu | fleet node, agent seat `qwen3.5-4b-agent` |
+| **Dell OptiPlex 7060** | `ampere-8` + Hailo-8L NPU | editor box / accelerator tier |
+
+A tier is a **hardware class, not a Windows class** (0.29.0), and **deployment state is never a constraint** hardened into a spec — nodes are addressed by endpoint, never by assumed placement.
+
+## Done — through 2026-06-28 (0.4.1 era)
+
+> Kept verbatim for the verdicts it records (FLUX no-go, ik_llama reject, the qwythos bench). For everything shipped **after** 0.4.1, see "Status as of 2026-08-26" below and `CHANGELOG.md`.
+
 - ✅ **SVG component kit** — a brand-agnostic, pure-Go parametric `internal/svgkit` (gauge, comparison-bar, chromatogram, icon set) exposed as the `offload_generate_svg` MCP tool + `generate-svg` CLI. The #1 image-gen item: crisp, 100% legible, FREE data-viz with **no model, no ComfyUI, no GPU lock, no grammar, no cache** — a dedicated `core.TaskGenerateSVG` branch (`runGenerateSVG`) renders the SVG from a JSON spec, writes it under `cfg.SVGDir`, and returns `{svg_path,width,height}`; any bad kind/spec/write **DEFERS** (consistent with the harness, never cloud). **Brand-agnostic invariant:** every color/datum is a caller input; defaults are a neutral slate palette (`#1e293b`/`#ffffff`/`#0ea5e9`/`#94a3b8`) with **zero brand tokens** — pass a `theme {fg,bg,accent,muted,font}` to brand it. Pure + deterministic (same spec → byte-identical SVG); all caller text XML-escaped. Visually verified by rasterizing each component to PNG (headless Edge) and eyeballing it: gauge dial sweeps proportionally with centered value, bars scale with a distinct highlight, chromatogram shows clean Gaussian peaks on a labeled-axis baseline, icons legible. One visual fix (right-align comparison-bar labels to stop gutter clipping). Commits `4981ea1`→`4babaff`. Plan: `docs/superpowers/plans/2026-06-27-svg-component-kit.md`.
 - ✅ **Image** — vision (`vqa`/`ocr`/`extract-image`/`assess-image`) + **generation now a live MCP tool** (`offload_generate_image` / CLI `generate-image`, local ComfyUI SDXL — was only a `render/` runner). **5 image MCP tools live.** Gen runs the zero-always-warm GPU lifecycle (single-slot file-lock → free only the GPU-tier llama-swap models → ComfyUI cold-start `--disable-smart-memory --cache-none` → render → process-tree teardown + `/free`) and **DEFERS** on any failure (never cloud). Returns `{image_path,width,height,seed}`. Live-verified end-to-end (CLI + MCP, real PNGs, memory stack intact). Adversarial pre-commit review found + fixed 7 bugs, all re-verified: HIGH lock/VRAM leak on the Go timeout-kill (JS `finally` bypassed by `os.Kill` → now Go-side `taskkill /T` tree-kill + defer `/free`); HIGH gpu-lock 1h deadlock (now reclaims on confirmed-dead pid in 2 ms); MED `freeLlamaSwap` unload-ALL tore down the CPU memory stack (now per-model unload of GPU tiers only); MED `seed:0` (now mints + reports the real seed). Commits `9142987`. Plan: `docs/superpowers/plans/2026-06-16-phase2-video-gen.md`.
 - ✅ **Video understanding** — `video-describe` (Phase A.1): ffmpeg frame-sampler → interleaved-timestamp Qwen3-VL path. Shipped, merged to `master`, live-verified (temporal understanding). Plan: `docs/superpowers/plans/2026-06-16-video-describe.md`.
@@ -22,7 +38,152 @@ Extend the local-offload harness with local **media** capabilities — image · 
   - ✅ **kNN entry-tier pre-filter (zero-training bridge, 2026-06-27)** — a `KNNPreFilterEnabled` (**off by default**) substrate that, *before* the LR router has its ≥200 rows, embeds a classify/triage input (embeddinggemma) and skips the E2B tier when the k nearest past inputs were mostly rejected at E2B. The substrate (`knn-index.jsonl`, `{task,vec,accept}`) accrues **only inside `shadow-label`** when the flag is on (reuses the existing B1 E2B-counterfactual labels — no new inference). It is **fail-open everywhere** (nil receiver / missing substrate / unreachable embedder / thin substrate → keep default E2B entry) and **yields to the LR router** once `HasTask` is true, so its hot-path embed cost disappears automatically. Never touches the GBNF/cache/savings-ledger paths. Plan: `docs/superpowers/plans/2026-06-27-knn-entry-tier-prefilter.md`.
   - ✅ **Flywheel actually flows now (0.4.1, 2026-06-28)** — diagnosed why the flywheel had manufactured ~0 labels for weeks despite "LIVE": **two compounding bugs.** (1) The MCP server (`local-offload.exe mcp`, registered with no `--config` and an empty env) silently ran on built-in **defaults with shadow capture OFF** — `~/.local-offload/config.json` was never loaded. Fixed: `loadCfg`/`resolveCfgPath` now auto-discovers `~/.local-offload/config.json` when neither `--config` nor `$LOCAL_OFFLOAD_CONFIG` is set. (2) `internal/health` had flagged **all three tiers DEGRADED on drift/throughput** (single-GPU non-stationarity), and the cascade routes *around* any DEGRADED tier — so the accurate E2B entry (eval: triage 100 %, classify ~90 %, ewma_margin 0.957) was being skipped to a larger, slower tier, starving the flywheel of E2B-entry rows. Fixed: health now route-skips **only on a genuine quality collapse** (`route_skip` = margin far below the tier's own baseline); drift/throughput stay observability-only. e2e-verified: live `health` degraded list `[…3 tiers] → []`; a bare invocation auto-loads config and captures an `entry_tier:gemma4-e2b` row; the drain manufactures confhead + router labels. Adoption (`-AutoAdoptStats`) enabled via the operator's nightly scheduler (published default stays OFF).
 
-## Decided order (next → last)
+## Status as of 2026-08-26 (0.103.0)
+
+The 2026-06 build order below is **closed**. What it called Phase 2 shipped in full, plus several arcs it never anticipated. Detail lives in `CHANGELOG.md`; this is the reconciliation.
+
+**Closed since the last roadmap update (0.4.1 → 0.103.0):**
+- **Generation — all three media, done.** image (0.16.0, quality-first), video, audio music + voice, `run-graph` primitive (0.18.0), warm batch (0.19.0), generative inpaint (0.20.0), deterministic edit-op pack (0.21.0), generative instruction edit (0.44.0), ESRGAN upscale (0.77.0). The GPU single-slot lock this file asked for became the **machine-wide media lease** (`internal/gpulease`, ADR 0018/0026).
+- **The fleet.** fleet-node server (0.22.0), node acceptance gate (0.33.0), Linux install path (0.34.0), hardware tiers as a first-class concept (0.29.0–0.42.0), multi-node sub-agent delegation (0.66.0), `route: spread` + cross-seat retry (0.80.0), fleet-node job queue (0.100.0), fit-scored placement (0.99.0).
+- **The agent loop.** dedicated planner seat (0.43.0), vision + hearing (0.24.0), the compaction ladder + eval harness (0.22.17–0.23.1), per-tier `agent_profile` (0.70.0).
+- **Delegation entry points.** `offload_ask` (0.96.0) + result cache (0.98.0), `offload_review_diff` clean-context review lane (0.97.0), acceptance lint (0.88.0), live fleet roster in `offload_status` (0.95.0).
+- **Beyond the original scope.** Hailo-8L accelerator tier (0.82.0–0.86.0, ADR 0024), vendored printed CLIs under `tools/` (0.50.0–0.54.0), `video_watch` end-to-end viewing (0.93.0), in-tree opencode integration (0.91.0), the repo-local docs system (0.22.1).
+
+**Still open from the old order:** Phase 3 **video** editing / DaVinci Resolve (image editing shipped; the video cut-list path did not) and the **Danmar Auto Reviews capstone**. Both are parked below, behind the frontier update.
+
+---
+
+## Decided order — frontier update (2026-08-26)
+
+Source: `2026-08-26-offload-stack-frontier-update-handover.md` (research session). **Every version number below was re-verified live on Qube on 2026-08-26** before being written here — §8 of that handover warned its own numbers were single-sourced, and four of its cautions turned out to be already satisfied (recorded in "Corrections" at the end of this section).
+
+### T1. Qwen3.8-Flash-Next — **THE CURRENT FOCUS (operator, 2026-08-26)**
+
+> Operator direction: *"qwen 3.8 NEXT is the focus right now..... careful...."* The caution is the **laguna-s-2.1 precedent** — a seat built on a fork binary whose arch mainline never absorbed, which produced non-terminating thinking (EOG tokens unregistered in the fork build) and was eventually deleted for 72.1 GB back.
+
+**Verdict as of 2026-08-27 00:55Z: do NOT build a production seat, and do NOT spend the 78.9 GB yet.** This is not a policy reflex — it is what the PR's own state says.
+
+**Live PR state** (`gh pr view 27742 --repo ggml-org/llama.cpp`, checked 2026-08-27):
+
+| field | value |
+|---|---|
+| state | **OPEN**, `mergedAt: null` |
+| mergeable / mergeStateStatus | MERGEABLE / **BLOCKED** |
+| size | 2859 additions, 39 deletions, 23 files, 27 commits |
+| activity | **76 comments in ~11 hours**; 20+ report crashes, asserts or garbage output |
+| author | `danielhanchen` (Unsloth) |
+
+**Blockers that are ours specifically:**
+
+1. 🔴 **Quantized KV cache crashes — and it is exactly how we run Qwen3.8 today.** `build_attn_qsa` is missing Hadamard rotation handling and asserts at `qwen4exp.cpp:544` under `--cache-type-k q8_0` (reported by `GsonZhao`, with an unmerged community patch). **Both** our Qwen3.8 seats are on this path: `qwen3.8-27b` runs `--cache-type-k q8_0 --cache-type-v q8_0` at 131k, and `qwen3.8-27b-262k` runs `q4_0/q4_0` at 262k. If Flash-Next lands and we serve it the way we serve our current Qwen seats, it crashes.
+2. 🔴 **MTP is explicitly WIP.** The author's own 2026-08-27 comment: *"Adding MTP (WIP I think it works)"*. `--spec-type draft-mtp --spec-draft-n-max 3` is already producing reported failures. The MTP drafter is the entire speed argument, so there is nothing trustworthy to measure yet.
+3. 🟠 **ggerganov has requested a structural refactor** of the `llama-kv-cache` / `llama-memory-hybrid` changes into a separate `llama-memory-hybrid-idx`. That is the subsystem our slot save/restore depends on, and it means **the PR will change shape before merging** — any measurement taken now measures code that will not be what ships.
+4. 🟠 **ngxson's context save/load concern stands:** `predecessors` should live in `llama_memory`, *"otherwise a context save/load will corrupt it."* Mitigating detail from our own measurements: slot restore is **already inert** on the Qwen3.8 GDN-hybrid path (it re-prefills rather than restoring; rewind/hibernation is iSWA-only), so we are not currently relying on what this would break — but that also means we cannot use restore to make the 79 GB model cheap to re-load.
+5. 🟢 **`-np 2` crash does not affect us.** `LLM_ARCH_QWEN4EXP` is missing from the `graph_max_nodes()` large-budget list, crashing at `-np 2`; `-np 1` is fine and **both our seats already run `--parallel 1`**.
+
+**Adoption gate — every line must be true before this becomes a seat:**
+- [ ] PR #27742 **merged to master** (not a fork, not a branch build)
+- [ ] quantized-KV path fixed — verify `--cache-type-k q8_0` runs without the `qwen4exp.cpp` assert
+- [ ] MTP out of WIP, and `--spec-type draft-mtp` measured on our own contracts at draft depth 2 **and** 3
+- [ ] `predecessors` resolved in `llama_memory`, or confirmed irrelevant because we do not restore on this arch
+- [ ] the ggerganov memory-hybrid refactor has landed, so the measured build is the shipped shape
+- [ ] re-verify the GGUF quants still load — a re-shaped conversion path can invalidate quants published against the old one
+
+**What is safe to do now, in order:**
+1. **Hosted-endpoint quality eval on our own agent contracts** — §7's cheap path, no disk, no fork. ⚠️ **Blocked on a credential:** NIM (`integrate.api.nvidia.com`) carries 84 models and **zero Qwen**, and this box has no OpenRouter/DashScope key. Needs Daniel to supply one, or the eval waits.
+2. **Optional throwaway fork build for an early read** — permitted by §7 *only* in a scratch location, never in `llama-swap.yaml`. `C:\llama.cpp-next` already exists as a scratch tree. Costs the 78.9 GB download to be meaningful.
+3. **Watch for merge.** Sizing stays favourable when it lands: UD-Q2_K_XL **78.9 GB** (85.2% top-1) against 128 GB RAM + 32.6 GB VRAM, and this box already ran DeepSeek V4-Flash at 90.2 GB with `--n-cpu-moe`. With 6B active params, decode should beat V4's measured 12.56 t/s.
+
+**Model facts, for when the gate opens:** 125B total (+51B N-gram embedding table; HF counter shows 180B), **6B active per token**, 262,144 native context (1M via YaRN). 3 of every 4 layers are Gated DeltaNet, the 4th is Qwen Sparse Attention. Only two variants exist — `Qwen/Qwen3.8-Flash-Next` and `-FP8`; **no smaller variant.** vLLM is out of reach (FP8 needs 172.78 GiB). Sampling: thinking → temp 1.0 / top-p 0.95 / top-k 20; instruct → temp 0.7 / top-p 0.80 / top-k 20 / presence 1.5. Use `--load-mode none`, not `--no-mmap`. PLE/N-gram layers are 4-bit minimum.
+
+### T1-adjacent. `Qwen3.8-27B-NVFP4-MTP` agent-seat A/B (downloaded, ready, not the focus)
+
+**T1a. `Qwen3.8-27B-NVFP4-MTP-Q8attn` agent-seat A/B.** The cheapest large win on the text side and independent of everything else. An MTP drafter the uploader claims roughly **doubles** decode: 193 NVFP4 MLP tensors via NVIDIA ModelOpt, ~5.60 bpw, with attention projections deliberately held at Q8_0 to protect long-context accuracy.
+
+⚠️ **Footprint correction (measured on disk 2026-08-26).** The handover called this "the same footprint" as the incumbent by comparing **17.81 GiB** against **17.92 GB** — different units. Actual bytes:
+
+| seat | bytes | GiB | GB |
+|---|---|---|---|
+| candidate `Qwen3.8-27B-NVFP4-MTP-Q8attn.gguf` | 19,128,349,888 | 17.81 | 19.13 |
+| incumbent `Qwen3.8-27B-UD-Q4_K_XL.gguf` | 17,923,394,624 | 16.69 | 17.92 |
+
+The candidate is **~1.2 GB (6.7%) larger**, not equal. Still comfortably inside the 32.6 GB pooled tier alongside its 0.93 GB mmproj, so the A/B stands — but the win has to pay for real extra VRAM, and any "free speedup" framing is wrong.
+- Add as a **side-by-side seat**, never in place of the incumbent — the A/B needs both.
+- Flags: `--spec-type draft-mtp`, `--spec-draft-n-max <2|3>`, `-ngl 999`, `-fa` pinned explicitly.
+- **Sweep draft depth 2 and 3.** The card states acceptance collapses at depth ≥4; treat depth as a swept parameter, not a default.
+- Bench on **real harness agent contracts**, not a synthetic prompt.
+- ⚠️ The ~2× is the uploader's claim, not our measurement. NVFP4 in *llama.cpp* is a different code path from ComfyUI's NVFP4 (which measured weak — see T3).
+- Adopt only on a measured win, and **update the tier matrix FIRST** (house rule).
+
+
+### T2. Security + toolchain — **run in parallel with everything below**
+
+Promoted out of housekeeping by §11.1/§13.4: five Go stdlib CVEs and a sandbox that has been silently inert.
+- **Go 1.26.5 → 1.26.7.** Fixes GO-2026-6218/6090/6089/5972/5026. **Skip 1.26.6 — it broke unencrypted HTTP/2.** Do **not** jump to 1.27.0: it switches to the `encoding/json` v2 engine, is *not* gated on go.mod, and this harness is JSON-heavy. That is a separate, tested migration.
+- **`landlock-lsm/go-landlock` v0.9.0 → v0.10.0.** GHSA-vv6c-69r6-chg9 — best-effort mode **silently stopped restricting TCP bind/connect**. We have been running the vulnerable version.
+- **`golang.org/x/sys` v0.46.0 → v0.47.0.** CVE-2026-39824, integer overflow in `windows.NewNTUnicodeString` — directly in scope on a Windows box.
+- **`golang.org/x/text` v0.38.0 → v0.41.0** (CVE-2026-56852, infinite loop on invalid input). Plus `x/net` v0.58.0, `modernc.org/sqlite` v1.57.0, `jsonschema/v6` v6.0.3.
+- **Hold `modelcontextprotocol/go-sdk` at v1.6.1.** We are already past its four advisories; v1.7.0 is a **breaking protocol change** and needs its own migration.
+- **Node v24.18.0 → v24.20.0** (v24.18.1 fixed 11 CVEs, 3 HIGH).
+
+### T3. The cu130 chain — the hard gate for all media work
+
+**Nothing in the media stack may be benchmarked or bake-off'd until this passes.** ComfyUI hard-disables `comfy_kitchen`'s CUDA backend whenever `torch.version.cuda < 13`, and that backend is the only provider of tensor-core kernels for NVFP4 / FP8 / ConvRot-W4A4 / INT8. With it off, our quantized checkpoints fall back to dequantize-to-bf16. Measured on this box: **W4A4 runs at 0.29× BF16 today and 1.85× with the backend on** — a 3.4–6.3× matmul penalty on the LTX-2.5 pipeline we already run.
+
+**Do not work around the gate — satisfy it.** Force-enabling on cu128 throws `cuBLASLt 13.x library not found` on most layer shapes; the gate is correct.
+
+1. **Copy the venv.** `C:\ComfyUI\.venv` → `.venv-cu130`. Side-by-side, never in place.
+2. **torch 2.11.0+cu128 → 2.13.0+cu130** (+ torchvision 0.28.0+cu130). ⚠️ **torchaudio tops out at 2.11.0 on the cu130 index** — check what depends on it first. cu128 was removed in torch 2.13.
+3. **Rebuild every compiled sidecar against cu130:** SageAttention (2.2.0 today), triton-windows, any custom-node CUDA extension.
+4. ⚠️ **Wheel trap:** `comfy-kitchen` publishes both a compiled `cp312-abi3-win_amd64` wheel and a pure-Python `py3-none-any` fallback. If pip resolves the pure-Python one there are **no CUDA kernels at all**, regardless of torch. Verify from the startup log.
+5. **HARD GATE — do not proceed until all three hold:**
+   - the `You need pytorch with cu130 or higher` banner is **GONE**
+   - the log contains `Found comfy_kitchen backend cuda: ...`
+   - the microbenchmark shows **W4A4 ≥ 1.8× BF16 at 4096³**, and the previously-failing shapes (1024/2048/3072/5120/6144) now succeed
+6. **ComfyUI 0.32.0 → 0.34.0**, frontend 1.49.6, comfy-kitchen 0.2.31, comfy-aimdo 0.4.15, and the four stale custom nodes (Manager, VideoHelperSuite, Inpaint-CropAndStitch, RMBG).
+7. **Re-measure the real pipeline.** `render/wf-ltx25-i2v.mjs` at 1920×1088@24fps ×121 is the regression test. Record seconds-per-render and peak VRAM before/after. Expect LTX-2.5 22B to go from ~39 GB loaded (does not fit the 32.6 GB pool — hence today's reduced-resolution workaround) to ~20 GB.
+
+**Format verdict — we already own the better one.** With the backend enabled, W4A4 measured **~1.75× faster than NVFP4** on this hardware, because W4A4 has a real kernel in `comfy_kitchen` and NVFP4 does not (`scaled_mm_nvfp4` is absent from the cuda backend's capability list). **Do not buy an NVFP4 LTX-2.5 checkpoint as a first move.** NVIDIA's "20% faster" claim is against bf16, not against W4A4. Revisit only if comfy-kitchen ships `scaled_mm_nvfp4` in its CUDA backend.
+
+⚠️ ComfyUI issue **#11864** (open) reports native NVFP4 loading silently falling back to fp16/fp8 upcast. **Verify 4-bit residency from the load log; never assume it.**
+
+### T4. The two new media models — strictly after T3's gate
+
+- **MiniMax-H3.** Core weights have been on disk and unwired since download; ComfyUI core already ships `MiniMaxH3ImageToVideo` / `MiniMaxH3ReferenceToVideo` / `MiniMaxH3SigmaShift`. ⚠️ **The turbo LoRAs and style embeddings were MISSING** — they are the speed lever, and benchmarking without them measures the slow path against an LTX-2.5 recipe that is already distilled. Downloading now. Use the official `video_minimax_h3_{i2v,t2v,r2v}.json` templates — **do not hand-build the graph**. (Our installed `comfyui_workflow_templates` 0.11.40 ships zero JSON templates, so they arrive with the 0.34.0 upgrade or come from the repo.)
+- **WAN-Animate-2.** Genuinely new capability — we have image-to-video but no character animation / video-driven retargeting. `wan_animate_2_distill_int8_convrot` (16.65 GB) is the only variant that fits a single 16 GB card, and only if it loads natively rather than upcasting. `WanAnimate2Cache` caches the pose branch and roughly halves generation time. Aux already on disk: `umt5_xxl` (both), `wan2.2_vae`, `wan_2.1_vae` — but **`clip_vision_h` is absent** and must come with it.
+- ⚠️ **Do not chase WAN NVFP4** — the only published community NVFP4 (`lightx2v/Wan-NVFP4`) ships wan**2.1** files, i.e. the wrong model version.
+- Bar for a roster slot, both models: **beat LTX-2.5 on something we care about, not merely work.**
+
+### T5. llama.cpp + llama-swap — one fleet-wide pass
+
+- **llama.cpp b10435 → b10639.** Urgent for a second, unrelated reason: **b10435 sits inside a confirmed 10–15× generation-throughput regression window** (#27084/#27126); the fix `22b8e310b` is 12 commits past our build. Blast radius is CPU-side generation, so the **Lenovo 6GB tier, the Aorus node, and every `--n-cpu-moe` path** are directly exposed. Land on b10639, not an intermediate build — three merge/revert pairs sit inside the window. CLI surface is identical (two added flags, zero removals), so launch lines carry over verbatim. Rollback: b10435 and b10356 are still on disk.
+  - Watch **#26347** (`/v1/models` now needs the API key when `--api-key` is set) and **#27626** (server rejects prefilled assistant messages carrying tool calls — an agent loop replaying a partial turn will error).
+  - `-sm tensor` is new but still **EXPERIMENTAL** — do not adopt for the dual-GPU seats.
+- **llama-swap v249 → v251.** Config schema identical. Fixes a v249 log-flood regression.
+
+### T6. Config fix — the media lease TTL (§9)
+
+`imagegen_timeout_sec` is passed **both** as the render's process-tree-kill timeout **and** as the media lease TTL (`internal/pipeline/pipeline.go` → `acquireMediaLease("image-gen", timeout, …)`). Deployed on Qube it is **3600** — a 60-minute machine-wide media lease for a job that finishes in one to two minutes. With 14 concurrent `local-offload` processes contending on one machine-wide lease, **one wedged render denies media to every other session for up to an hour.**
+
+Set it to **600**. The code default is already 720 (`config.go:1102`); only the deployed `~/.local-offload/config.json` carries 3600. Config change, not code.
+
+### Corrections to the handover, from live verification (2026-08-26)
+
+Four of its cautions were already satisfied, and one number was wrong:
+
+| Handover said | Live on Qube | Consequence |
+|---|---|---|
+| NVIDIA driver 610.88 → upgrade to 616.56 | **already 616.56** | §4 step 1 is **done**; drop it |
+| Qube MCP process stale at 0.101.0 | delegation result reports **`harness_version: 0.103.0`** | §11.0 **resolved**; no restart needed |
+| Pin `-fa` explicitly per seat (#27137, 2.3× risk) | **already pinned** — 11 seats carry `--flash-attn on`, **zero** `-fa auto` | no action |
+| ffmpeg 9 removed `-vsync`/`-filter_complex_script`/etc. — grep first | **zero hits** across `render/` + `internal/` | ffmpeg bump is unblocked |
+| llama-swap v251 error envelope will break string parsing | `gpugen.ClassifyErr` matches **substrings** (`out of memory`, `cudamalloc`) that survive JSON encapsulation; `"llama-server 5"` is our own `Error()` format | low risk — confirm, don't fear |
+
+Still true and still blocking: **Aorus unreachable** (ping 100% loss, `fleet/health` deadline exceeded), so it is off parity at 0.102.0 while the fleet is at 0.103.0. House rule treats parity as first-class — deploy the moment it answers.
+
+---
+
+## Historical build order (2026-06 → 2026-07) — CLOSED, kept for the verdicts
 
 ### 1. Phase A.2 — STT / `offload_transcribe`  ✅ DONE (2026-06-16)
 Completes the *understanding* angle (the lowest-risk, highest-reuse tier). Build whisper.cpp `whisper-server` (CUDA + `WHISPER_BUILD_SERVER`), download `ggml-large-v3-turbo.bin`, and **register it as a llama-swap `ttl:300` upstream** in the **LOAD-BEARING** `~/llama-swap/config.yaml` (do it ONLY via the backup → validate → restart → verify-memory-stack → **rollback-on-any-failure** ritual). Go `offload_transcribe` verb returns **`{gist, segments[]}`** (timestamped spans = the fastcontext citation-pattern, so Claude pulls only the spans it needs) + an SRT writer + MCP tool + CLI subcommand. Design: CHAPTER-audio brief, ANGLE 1 (whisper-large-v3-turbo; WhisperX/Parakeet as later quality/fast tiers).
@@ -61,12 +222,22 @@ Claude-driven cut-lists (WhisperX-JSON → OTIO/EDL + `auto-editor`) + cleanup (
 The private optimized track: no-avatar (chest-cam + b-roll), 6-month backlog, short+long form, two machines (3070 + editor's 5060). Deep channel analysis via the **Youtube-Analyst** skill. Built once the generalist capabilities exist.
 
 ### Parallel / needs Daniel (not on the critical path)
-- **Docker leftovers** — open-webui keep/kill? Docker leave-running/quit? (his decision)
-- **Resolve purchase** — at Phase 3.
-- **DiffusionGemma** — WATCH only; re-eval when PR #24423 merges with `llama-server` AND grammar-under-diffusion lands in llama.cpp.
+- **Docker leftovers** — open-webui keep/kill? Docker leave-running/quit? (his decision) — *status unverified as of 2026-08-26.*
+- **Resolve purchase** — at Phase 3, still unpurchased.
+- **DiffusionGemma** — WATCH only; re-eval when PR #24423 merges with `llama-server` AND grammar-under-diffusion lands in llama.cpp. *Merge status not re-checked in the 2026-08-26 refresh.*
+
+---
+
+## Parked (behind the frontier update)
+
+- **Phase 3 — video editing / DaVinci Resolve.** The image half of "edit" shipped (op pack 0.21.0, generative edit 0.44.0, inpaint 0.20.0, upscale 0.77.0). The **video** cut-list path — WhisperX-JSON → OTIO/EDL + `auto-editor`, cleanup via DeepFilterNet3, two-pass loudnorm — did not. Needs the Resolve Studio spend, which is approved but only made **with Daniel at this phase**. A `davinci-resolve` skill exists outside the harness; the harness has no editing verb.
+- **Danmar Auto Reviews capstone.** The private optimized track (no-avatar chest-cam + b-roll, 6-month backlog, short + long form, two machines). Built once the generalist capabilities exist — unchanged.
+- **The empty `stt_hq` slot.** Empty **by decision**, not oversight: `qwen3-asr` was removed 2026-08-14 after tying whisper-turbo on every clean house sample, and `stt_model_hq` was deliberately cleared (empty falls back to `stt_model` by design). **Re-open only with field/noisy audio as the test set.** Candidates then: `nvidia/parakeet-tdt-0.6b-v3` (whisper.cpp has Parakeet code present but **not built** in our tree), `ggml-large-v3` full, `nvidia/canary-1b-v2`.
+- **Roster challengers, none adopted, all need a bake-off.** Gemma-4 QAT chat-template re-pull (the unsloth repos were re-committed 2026-07-17 with a fix under the **same filenames** — verify by hub revision, not filename); MTP drafters exist for every Gemma-4 size but we wire one only on `gemma-4-12b`; `PaddlePaddle/PaddleOCR-VL-1.6-GGUF` vs `qwen3-vl-8b`; `nvidia/Nemotron-3-Embed-8B-BF16` as an embedding challenger.
+- **sd.cpp on Qube.** Not installed (`sdcpp_bin` empty) though the harness has first-class config keys and `render/sdcpp-generate.mjs`; it **is** live on the Lenovo. Interesting only because sd.cpp has day-1 MiniMax-H3 support — but issue **#1871 "Poor video and audio quality with Minimax H3"** is **OPEN**, so treat it as a fallback, not the primary. Wire H3 in ComfyUI first (T4).
 
 ## Source briefs (design detail)
-In `D:\My Drive\AI Ecosystem\Ecosystem\Local-Offload-Harness\`:
+Kept in the operator's ecosystem notes, outside this repo (the previously-listed absolute path went stale when the drive letter changed):
 - `CHAPTER-video-2026-06-15.md` — video understand · gen · avatar · DaVinci
 - `CHAPTER-audio-2026-06-15.md` — audio listen · generate · edit (3 angles)
 - `ADDENDUM-frontier-sources-2026-06-16.md` — ik_llama.cpp / DiffusionGemma / fastcontext verdicts
