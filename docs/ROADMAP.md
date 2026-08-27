@@ -61,7 +61,7 @@ Source: `2026-08-26-offload-stack-frontier-update-handover.md` (research session
 
 > Operator direction: *"qwen 3.8 NEXT is the focus right now..... careful...."* The caution is the **laguna-s-2.1 precedent** — a seat built on a fork binary whose arch mainline never absorbed, which produced non-terminating thinking (EOG tokens unregistered in the fork build) and was eventually deleted for 72.1 GB back.
 
-**Verdict as of 2026-08-27 00:55Z: do NOT build a production seat, and do NOT spend the 78.9 GB yet.** This is not a policy reflex — it is what the PR's own state says.
+**Verdict: build and measure it LOCALLY now; do not make it a seat until the PR merges.** The code-level objections have been resolved upstream (table below), so an early local read is worth having. What has *not* changed is the laguna rule: **nothing enters `llama-swap.yaml` until the arch is in mainline.**
 
 **Live PR state** (`gh pr view 27742 --repo ggml-org/llama.cpp`, checked 2026-08-27):
 
@@ -73,26 +73,38 @@ Source: `2026-08-26-offload-stack-frontier-update-handover.md` (research session
 | activity | **76 comments in ~11 hours**; 20+ report crashes, asserts or garbage output |
 | author | `danielhanchen` (Unsloth) |
 
-**Blockers that are ours specifically:**
+**⚠️ Read the code, not the comment thread.** The 76-comment thread is a **lagging indicator**. Every blocker below was first recorded from the discussion, then re-checked against the actual source at PR head (`0b19188`, checked out locally 2026-08-27). **All four had already been fixed in code.** Anyone triaging this PR from its comments will reach a conclusion that is roughly a day out of date.
 
-1. 🔴 **Quantized KV cache crashes — and it is exactly how we run Qwen3.8 today.** `build_attn_qsa` is missing Hadamard rotation handling and asserts at `qwen4exp.cpp:544` under `--cache-type-k q8_0` (reported by `GsonZhao`, with an unmerged community patch). **Both** our Qwen3.8 seats are on this path: `qwen3.8-27b` runs `--cache-type-k q8_0 --cache-type-v q8_0` at 131k, and `qwen3.8-27b-262k` runs `q4_0/q4_0` at 262k. If Flash-Next lands and we serve it the way we serve our current Qwen seats, it crashes.
-2. 🔴 **MTP is explicitly WIP.** The author's own 2026-08-27 comment: *"Adding MTP (WIP I think it works)"*. `--spec-type draft-mtp --spec-draft-n-max 3` is already producing reported failures. The MTP drafter is the entire speed argument, so there is nothing trustworthy to measure yet.
-3. 🟠 **ggerganov has requested a structural refactor** of the `llama-kv-cache` / `llama-memory-hybrid` changes into a separate `llama-memory-hybrid-idx`. That is the subsystem our slot save/restore depends on, and it means **the PR will change shape before merging** — any measurement taken now measures code that will not be what ships.
-4. 🟠 **ngxson's context save/load concern stands:** `predecessors` should live in `llama_memory`, *"otherwise a context save/load will corrupt it."* Mitigating detail from our own measurements: slot restore is **already inert** on the Qwen3.8 GDN-hybrid path (it re-prefills rather than restoring; rewind/hibernation is iSWA-only), so we are not currently relying on what this would break — but that also means we cannot use restore to make the 79 GB model cheap to re-load.
-5. 🟢 **`-np 2` crash does not affect us.** `LLM_ARCH_QWEN4EXP` is missing from the `graph_max_nodes()` large-budget list, crashing at `-np 2`; `-np 1` is fine and **both our seats already run `--parallel 1`**.
+| blocker (from the thread) | state in the code at head `0b19188` | evidence |
+|---|---|---|
+| Quantized KV crashes — `build_attn_qsa` lacks Hadamard rotation, asserts at `qwen4exp.cpp:544` under `--cache-type-k q8_0` | ✅ **FIXED** | `build_attn_qsa` now rotates q/k/v via `llama_mul_mat_hadamard` before the quantized cache and un-rotates on the value side; the code comment reads *"rotate q/k/v before they reach a quantized cache, as the dense path does"* |
+| `-np 2` crashes — `LLM_ARCH_QWEN4EXP` missing from the `graph_max_nodes()` large-budget list | ✅ **FIXED** | `src/llama-context.cpp:2304` now lists `LLM_ARCH_QWEN4EXP` alongside `QWEN3NEXT` |
+| MTP is WIP / `--spec-type draft-mtp` unusable | ✅ **WIRED** | `COMMON_SPECULATIVE_TYPE_DRAFT_MTP` plumbed through `common/arg.cpp` (flag parse + `opts.download_mtp` sidecar auto-download) and `common/common.cpp`. Implemented — correctness still ours to measure |
+| ggerganov: isolate the `llama-kv-cache` / `llama-memory-hybrid` changes into a new `llama-memory-hybrid-idx` | ✅ **DONE** | `src/llama-memory-hybrid-idx.{cpp,h}` exist (676 + 185 lines); `llama-kv-cache.cpp` **shrank by 307 lines** as the logic moved out |
+| ngxson: `predecessors` must live in `llama_memory` or context save/load corrupts | ✅ **appears addressed** | `predecessors` now survives only as a **comment** at `qwen4exp.cpp:905` — no state variable outside the memory module |
+
+**Why this mattered to us specifically:** the quantized-KV crash was not academic — **both** our Qwen3.8 seats run quantized KV (`qwen3.8-27b` at `q8_0/q8_0` 131k, `qwen3.8-27b-262k` at `q4_0/q4_0` 262k), so had it still been broken, serving Flash-Next the way we serve our current Qwen seats would have crashed on load. Both seats already run `--parallel 1`, so the `-np 2` bug never applied to us.
+
+**What actually remains** is not a code defect: the PR is **unmerged and not yet approved** (`mergeStateStatus: BLOCKED` is branch protection awaiting review, not a conflict). The laguna rule therefore still holds — **keep it out of `llama-swap.yaml` until it is in mainline** — but an early **local** read is well justified, and is what we are doing.
 
 **Adoption gate — every line must be true before this becomes a seat:**
-- [ ] PR #27742 **merged to master** (not a fork, not a branch build)
-- [ ] quantized-KV path fixed — verify `--cache-type-k q8_0` runs without the `qwen4exp.cpp` assert
-- [ ] MTP out of WIP, and `--spec-type draft-mtp` measured on our own contracts at draft depth 2 **and** 3
-- [ ] `predecessors` resolved in `llama_memory`, or confirmed irrelevant because we do not restore on this arch
-- [ ] the ggerganov memory-hybrid refactor has landed, so the measured build is the shipped shape
-- [ ] re-verify the GGUF quants still load — a re-shaped conversion path can invalidate quants published against the old one
+- [x] quantized-KV path fixed — Hadamard rotation lands before the quantized cache (verified in source at `0b19188`)
+- [x] `-np`/graph-budget crash fixed — `LLM_ARCH_QWEN4EXP` in the `graph_max_nodes()` large-budget list
+- [x] MTP wired — `--spec-type draft-mtp` plumbed through `common/arg.cpp`
+- [x] the ggerganov memory-hybrid refactor has landed — `llama-memory-hybrid-idx.{cpp,h}` exist
+- [x] `predecessors` no longer lives outside the memory module
+- [ ] **measured here:** decode t/s vs the incumbent `qwen3.8-27b` seat on **real harness agent contracts**, MTP draft depth swept at **2 and 3** (the card says acceptance collapses at ≥4)
+- [ ] **quality** holds on our own contracts at UD-Q2_K_XL — 85.2% top-1 is the vendor's number, not ours
+- [ ] PR #27742 **merged to master** — the laguna rule; a fork binary never becomes a seat
+- [ ] re-verify the GGUF quants still load after merge — a re-shaped conversion path can invalidate quants published against the old one
+- [ ] tier matrix updated **first** (house rule)
 
-**What is safe to do now, in order:**
-1. **Hosted-endpoint quality eval on our own agent contracts** — §7's cheap path, no disk, no fork. ⚠️ **Blocked on a credential:** NIM (`integrate.api.nvidia.com`) carries 84 models and **zero Qwen**, and this box has no OpenRouter/DashScope key. Needs Daniel to supply one, or the eval waits.
-2. **Optional throwaway fork build for an early read** — permitted by §7 *only* in a scratch location, never in `llama-swap.yaml`. `C:\llama.cpp-next` already exists as a scratch tree. Costs the 78.9 GB download to be meaningful.
-3. **Watch for merge.** Sizing stays favourable when it lands: UD-Q2_K_XL **78.9 GB** (85.2% top-1) against 128 GB RAM + 32.6 GB VRAM, and this box already ran DeepSeek V4-Flash at 90.2 GB with `--n-cpu-moe`. With 6B active params, decode should beat V4's measured 12.56 t/s.
+**In flight now (local, scratch, out of `llama-swap.yaml`):**
+1. **Source build of PR head** in `C:\llama.cpp-next` (`build-fn/`, MSVC 19.44 + CUDA 12.8, `CMAKE_CUDA_ARCHITECTURES=120`). Note our production binary is an **official prebuilt** (`llama-b10435-bin-win-cuda-13.3-x64.zip`), not a source build — there is no prebuilt for an unmerged PR, so this had to be compiled.
+2. **UD-Q2_K_XL download** (3 shards, 78.9 GB) to `V:\models\_scratch-qwen3.8-flash-next` — the `_scratch-` prefix marks it deletable.
+3. **Then measure.** Serve with all experts on CPU (`--n-cpu-moe`), `-fa` pinned explicitly, `--parallel 1`, `--load-mode none` (not `--no-mmap`, which the thread reports has been ignored for weeks).
+
+Sizing is favourable: 78.9 GB against 128 GB RAM + 32.6 GB VRAM, and this box already ran DeepSeek V4-Flash at 90.2 GB with `--n-cpu-moe`. With **6B active params** vs V4's larger active set, decode should beat V4's measured **12.56 t/s** — that is the number to beat.
 
 **Model facts, for when the gate opens:** 125B total (+51B N-gram embedding table; HF counter shows 180B), **6B active per token**, 262,144 native context (1M via YaRN). 3 of every 4 layers are Gated DeltaNet, the 4th is Qwen Sparse Attention. Only two variants exist — `Qwen/Qwen3.8-Flash-Next` and `-FP8`; **no smaller variant.** vLLM is out of reach (FP8 needs 172.78 GiB). Sampling: thinking → temp 1.0 / top-p 0.95 / top-k 20; instruct → temp 0.7 / top-p 0.80 / top-k 20 / presence 1.5. Use `--load-mode none`, not `--no-mmap`. PLE/N-gram layers are 4-bit minimum.
 
