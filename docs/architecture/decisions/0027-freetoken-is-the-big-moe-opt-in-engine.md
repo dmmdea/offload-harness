@@ -1,3 +1,8 @@
+---
+status: Accepted
+date: "2026-08-27"
+---
+
 # 0027 — FreeToken is the big-MoE opt-in engine on the blackwell-2x16 tier
 
 - Status: **Accepted** (operator-approved 2026-08-27)
