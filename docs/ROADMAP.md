@@ -99,12 +99,77 @@ Source: `2026-08-26-offload-stack-frontier-update-handover.md` (research session
 - [ ] re-verify the GGUF quants still load after merge — a re-shaped conversion path can invalidate quants published against the old one
 - [ ] tier matrix updated **first** (house rule)
 
-**In flight now (local, scratch, out of `llama-swap.yaml`):**
-1. **Source build of PR head** in `C:\llama.cpp-next` (`build-fn/`, MSVC 19.44 + CUDA 12.8, `CMAKE_CUDA_ARCHITECTURES=120`). Note our production binary is an **official prebuilt** (`llama-b10435-bin-win-cuda-13.3-x64.zip`), not a source build — there is no prebuilt for an unmerged PR, so this had to be compiled.
-2. **UD-Q2_K_XL download** (3 shards, 78.9 GB) to `V:\models\_scratch-qwen3.8-flash-next` — the `_scratch-` prefix marks it deletable.
-3. **Then measure.** Serve with all experts on CPU (`--n-cpu-moe`), `-fa` pinned explicitly, `--parallel 1`, `--load-mode none` (not `--no-mmap`, which the thread reports has been ignored for weeks).
+### T1 — MEASURED ON QUBE, 2026-08-26
 
-Sizing is favourable: 78.9 GB against 128 GB RAM + 32.6 GB VRAM, and this box already ran DeepSeek V4-Flash at 90.2 GB with `--n-cpu-moe`. With **6B active params** vs V4's larger active set, decode should beat V4's measured **12.56 t/s** — that is the number to beat.
+**It runs.** Built PR head `0b19188` from source (MSVC 19.44 + CUDA 12.8, `CMAKE_CUDA_ARCHITECTURES=120`), pulled `unsloth/Qwen3.8-Flash-Next-GGUF` UD-Q2_K_XL and byte-verified all three shards (78,869,128,864 exact). Loads in 20.8 s under mmap and returns coherent output with visible reasoning.
+
+**Architecture, from the GGUF header** (`general.architecture = qwen4exp`):
+
+| | |
+|---|---|
+| layers / experts | **48** blocks, **512** experts, **10 used per token** |
+| attention | 24 heads / **2** KV heads, key+value length 256 |
+| **`full_attention_interval`** | **4** — only **12 of 48** layers carry a growing KV cache; the other 36 are Gated DeltaNet with fixed recurrent state |
+| context | 262,144 native |
+| size label | `512x56B` |
+
+That hybrid layout makes long context genuinely cheap: ~24 KB/token, so **131k ≈ 3.2 GB and the full 262k ≈ 6.4 GB** of KV. On a dense model every layer would pay.
+
+**Expert placement is the dominant throughput lever, and it has a cliff.** `--n-cpu-moe N` pins layers `[0,N)`'s experts to CPU. Measured, 8k ctx, mmap, 3 reps each:
+
+| `-ncmoe` | `--tensor-split` | decode t/s | free VRAM 5060 / 5070 | verdict |
+|---|---|---|---|---|
+| 48 (all CPU) | default | 8.29 / 8.34 / 8.48 | ~7 GB | safe, slowest |
+| 40 | default | 8.82 / 9.29 / 9.48 | ~4 GB | safe |
+| 32 | `40,8` | 11.01 / 11.22 / 11.09 | 8545 / 2432 MiB | safe |
+| **30** | **`37,11`** | **11.17 / 11.36 / 11.35** | 5010 / 3605 MiB | **safe, best balanced — recommended** |
+| 28 | `38,10` | 11.71 / 12.15 / **12.24** | 5992 / **754 MiB** | fastest, **fragile** |
+| 24 | `36,12` | **0.85** | — / 565 MiB | **silent spill** |
+| 20 | `34,14` | — | — | hard OOM at load |
+
+Three things that cost real time and are worth not re-learning:
+
+1. **`--n-cpu-moe` disables llama.cpp's auto-fitter.** With `-ngl 999` it aborts with *"n_gpu_layers already set by user"*; with `-ngl auto` it aborts with *"tensor_buft_overrides already set by user"*. `-ngl auto` does **not** rescue you — `--n-cpu-moe` sets the overrides itself. Placement must be explicit.
+2. **`-sm layer` splits by layer COUNT, but expert-bearing layers are ~10× heavier** (~0.9 GB each vs attention-only). An even split hands the whole heavy tail to one card and OOMs it at ~23 GB of 32.6 GB while the other sits half empty. `--tensor-split` must equalise *expert* layers, not layers.
+3. **Between "fine" and "OOM" there is a silent-spill band.** `-ncmoe 24` loaded, answered correctly, and ran **13× slower** because one card had 565 MiB free and the driver fell back to host memory. **A successful load is not evidence of correct placement — only throughput is.** The threshold here sits between 565 and 754 MiB free.
+
+**Recommended config if this is ever seated:** `-ngl 999 --n-cpu-moe 30 -sm layer --tensor-split 37,11 --load-mode auto --parallel 1`, `-fa` pinned, and **never `--load-mode none`** — see below.
+
+**`--load-mode none` is barred on this box, and the handover's advice to use it was wrong.** `none` means *no mmap*, turning 78.87 GB of weights into private commit. Measured: `CommitLimit` 147.7 GB, `CommitFree` **56.8 GB**, `C:\pagefile.sys` fixed (`AutomaticManagedPagefile = False`). It does not fit, and Windows cannot grow a fixed pagefile; commit exhaustion lands on whichever process allocates next — most likely the WSL VM hosting mem0 (`:18791`) and Qdrant. `--no-mmap` and `--load-mode none` set the *same* enum, so the stated rationale ("`--no-mmap` has been ignored for weeks") described no real difference. Revisiting it requires raising the pagefile to ≥96 GB first — a consequential system change needing explicit approval, i.e. a separate experiment.
+
+**MTP is architecturally absent — the ~2× claim cannot be realised on llama.cpp at all.** Not a missing download: `grep -ic "nextn|mtp" src/models/qwen4exp.cpp` returns **0**, so `hparams.n_layer_nextn` stays 0, the MTP guard returns `nullptr`, and the server aborts *after* loading ~73 GiB. Flash-Next's GGUF declares no `nextn`/`mtp` keys, while the **incumbent's** GGUF *does* declare `qwen35.nextn_predict_layers=1` — the incumbent is the seat that could use MTP, not the candidate. No GGUF MTP sidecar exists in any repo (only MLX/Apple-Silicon builds). Report this as *"MTP absent from the arch implementation"*, never as *"MTP did not help"*. Also: `qwen4exp` is absent from `llm_arch_supports_rs_rollback`, so a rejected draft would force a full checkpoint restore of 36 Gated-DeltaNet layers — speculation here is plausibly net-negative even once implemented. The viable substitute arm is `--spec-type ngram-mod`, which needs neither a draft model nor nextn tensors.
+
+### T1 — HEAD-TO-HEAD vs THE INCUMBENT
+
+The comparator runs the **incumbent on the same PR binary** (`B_pr`), so an A-vs-B gap is a *model* gap and not a compiler/CUDA-major gap. A second arm (`B_prod`) runs the incumbent on the production `b10435` prebuilt purely to size that confound. Neither goes through llama-swap `:11436` — that seat is `--parallel 1`, so benchmarking through it would serialise with live sessions in both directions.
+
+| arm | binary | decode t/s (3 reps) | median |
+|---|---|---|---|
+| **A** Flash-Next, best safe (`-ncmoe 30`) | PR build | 11.17 / 11.36 / 11.35 | **11.36** |
+| A Flash-Next, fastest (`-ncmoe 28`, fragile) | PR build | 11.71 / 12.15 / 12.24 | 12.15 |
+| **B_pr** incumbent `qwen3.8-27b` | PR build | 24.88 / 25.03 / 24.95 | **24.95** |
+| B_prod incumbent `qwen3.8-27b` | b10435 prebuilt | 25.12 / 25.12 / 25.09 | 25.12 |
+
+**The build confound is measured at 0.7%** (`B_prod − B_pr`), far below the 10% that would have forced a Clang-cl rebuild of the PR to make the comparison safe. So the numbers stand as a model comparison.
+
+**Flash-Next runs at 0.46× the incumbent's decode** (0.49× in the fragile config).
+
+⚠️ **Do not quote a prefill ratio from the table above.** Those `pp_tps` figures come from 4–40 token prompts and are dominated by per-request overhead, not throughput — on the real 24k-token prompt Flash-Next's batched prefill measures **113 t/s**, an order of magnitude above the "~15 t/s" a short-prompt reading suggests. The only valid prefill comparison is the depth measurement below, at a realistic prompt length, with `cache_prompt: false`.
+
+**Depth test — the last thing that could have saved it.** Flash-Next's `full_attention_interval = 4` means only 12 of 48 layers grow a KV cache, so in principle it should degrade *less* with depth than the dense incumbent. Measured on an identical **23,541-token** prompt, `cache_prompt: false`, `cache_n = 0` (no cache reuse), both on the PR binary:
+
+| arm @ 24k depth | prefill t/s | decode t/s |
+|---|---|---|
+| Flash-Next `-ncmoe 30` | 159.5 / 177.9 | 9.61 / 10.30 |
+| Incumbent `qwen3.8-27b` | **1382.4 / 1387.6** | **22.44 / 22.61** |
+
+**It does not gain at depth — it loses slightly more.** 0.44× decode at 24k versus 0.46× at 8k, and **0.12× prefill** (8× slower to ingest). The KV advantage is real but irrelevant: the bottleneck is reading CPU-resident expert weights over DDR, not the KV cache. The "long-context specialist" outcome required **≥1.5×** decode at ≥32k depth; measured **0.44×**.
+
+**Verdict: REJECT — both as the agent seat and as a long-context specialist.** It is roughly half the decode speed and an eighth the prefill speed of a model one quarter its size that is fully GPU-resident and multi-tenant friendly. The candidate holds ~70 GiB of RAM and makes the box effectively single-tenant while loaded.
+
+Three limitations belong in the same sentence as any future re-read of this result: **Q2_K-only** (the only quant that fits), **PR-build-only** (unmerged, MSVC/CUDA 12.8), and **CPU-resident experts**.
+
+*Retired from the decision criteria:* the "beat DeepSeek V4-Flash's 12.56 t/s" target. Different model, footprint, binary and depth — it is a sanity line, not a bar. Likewise the vendor's 85.2% top-1 figure is unreproducible here (the fp reference does not fit) and was never ours to accept.
 
 **Model facts, for when the gate opens:** 125B total (+51B N-gram embedding table; HF counter shows 180B), **6B active per token**, 262,144 native context (1M via YaRN). 3 of every 4 layers are Gated DeltaNet, the 4th is Qwen Sparse Attention. Only two variants exist — `Qwen/Qwen3.8-Flash-Next` and `-FP8`; **no smaller variant.** vLLM is out of reach (FP8 needs 172.78 GiB). Sampling: thinking → temp 1.0 / top-p 0.95 / top-k 20; instruct → temp 0.7 / top-p 0.80 / top-k 20 / presence 1.5. Use `--load-mode none`, not `--no-mmap`. PLE/N-gram layers are 4-bit minimum.
 
