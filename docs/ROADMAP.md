@@ -90,6 +90,8 @@ Toolathlon +6.4, SWE-multilingual +7.2 → the claimed edges are agentic/tool/mu
 | **FreeToken gpt-oss-120b (1 card)** | **18/18** | **678 s** |
 | Flash-Next IQ4_XS (llama.cpp PR, 2 cards) | 18/18 | 1828 s |
 
+> **APPROVED (operator, 2026-08-27): FreeToken seated as the big-MoE opt-in engine — ADR 0027.** Flash-Next: operator direction is to WAIT for upstream updates before a fair re-measure; re-eval triggers = PR #27742 merged to master, MTP implemented for qwen4exp, or FreeToken gaining the arch. The IQ4_XS weights stay on V: for that re-measure.
+
 **The 120B row is the FreeToken verdict:** a model class this box could never usably serve
 runs perfect-scoring on ONE 16 GB card, faster than Flash-Next on two. It earns the big-MoE
 seat. Flash-Next: quality parity persists even on card-informed differential tiers; its
