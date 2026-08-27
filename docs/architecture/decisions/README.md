@@ -36,6 +36,7 @@ code, treat everything else as background.
 | [0024](0024-accelerators-are-additive-to-the-gpu-tier.md) | Accepted | Accelerators are additive to the GPU tier |
 | [0025](0025-model-residency-is-arbitrated-in-process-by-base.md) | Accepted | Model residency is arbitrated in process, keyed on the resolved base |
 | [0026](0026-text-load-admissions-wait-for-the-media-lease.md) | Accepted | Text admissions that would load a model wait for the media lease |
+| [0027](0027-freetoken-is-the-big-moe-opt-in-engine.md) | Accepted | FreeToken is the big-MoE opt-in engine on the blackwell-2x16 tier |
 
 
 ## Lifecycle
