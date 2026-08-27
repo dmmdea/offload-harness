@@ -288,10 +288,16 @@ visibility via `cudaVisibleEnv()` (env-based, operator-overridable, multi-GPU sp
 denies machine-wide media for at most 10 minutes, not 60.
 
 **Deferred, with reasons:**
-- **SageAttention cu130 rebuild** — three attempts fail identically: setuptools picks the
-  VS18 BuildTools toolchain (MSVC 14.51) and torch 2.13 headers C2988-cascade regardless
-  of `/std` flags. Uninstalled cleanly (opt-in feature; ComfyUI runs without it). CUDA
-  12.8 stays installed until this verifies (operator's removal condition not yet met).
+- ~~SageAttention cu130 rebuild~~ **SOLVED 2026-08-27 (operator: "try harder")**: the
+  upstream `setup.py` uses GCC-style flags MSVC ignores — the source build was never
+  going to work on Windows. The maintained Windows-wheel fork ships exactly our stack:
+  `woct0rdho/SageAttention` `v2.2.0-windows.post6` →
+  `sageattention-2.2.0+cu130torch2.10.0andhigher.post6-cp310-abi3-win_amd64.whl`
+  (abi3 covers Python 3.14). Kernel verified on sm120 + ComfyUI boots "Using sage
+  attention". **CUDA 12.8 then RETIRED the same night**: all five NVI2 packages
+  uninstalled (0 registry entries remain), machine `CUDA_PATH` → v13.3, v12.8 PATH
+  segments removed; a 12 KB empty dir husk remains (unregistered, harmless). nvcc
+  13.3.73 is the only toolkit; torch cu130 + llama.cpp b10621 verified after.
 - **Aorus** — offline throughout; parity debt now spans harness 0.102.0→0.105.0 AND the
   whole stack. First action when it answers.
 - **Go 1.27.0** — deliberate hold (encoding/json v2 is its own migration).
