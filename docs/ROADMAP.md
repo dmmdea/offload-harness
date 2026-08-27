@@ -57,6 +57,50 @@ The 2026-06 build order below is **closed**. What it called Phase 2 shipped in f
 
 Source: `2026-08-26-offload-stack-frontier-update-handover.md` (research session). **Every version number below was re-verified live on Qube on 2026-08-26** before being written here — §8 of that handover warned its own numbers were single-sourced, and four of its cautions turned out to be already satisfied (recorded in "Corrections" at the end of this section).
 
+### NIGHTSHIFT 2026-08-27 — FreeToken measured on both nodes; Flash-Next testing COMPLETE
+
+**FreeToken** (FlashML-org, arxiv 2608.16157 — edge-native MoE serving; Apache-2.0, 8.5k stars),
+tested per operator direction on Qube and Lenovo with a calibrated 18-task exact-answer
+instrument (dead-endpoint 0/N proven before any number was trusted):
+
+| node | model | result | comparator |
+|---|---|---|---|
+| Qube (1×16GB via WSL distro `freetoken`) | Qwen3.6-35B-A3B-FP8 | **24/24**, warm decode 15.5 tok/s | incumbent 27B (2 cards): 24/24, 20.2 tok/s |
+| **Lenovo (6GB RTX 3050)** | **gpt-oss-20b MXFP4** | **36/36 in 712 s** | **4B seat: 32/36 in 1368 s** |
+
+The Lenovo row is the headline: a **5× bigger model, more correct, half the wall, same 6 GB
+card**. On Qube the wall gap vs the incumbent is Qwen3.6's 4.2× thinking-token verbosity, not
+engine speed. Constraints that bound integration: **no grammar/json_schema** (the GBNF cascade
+can never ride it); the GGUF loader rejects Unsloth UD quants (our whole GGUF library —
+safetensors/MXFP4/q4_0 only); on a 6 GB box FreeToken and the llama-swap seat are mutually
+exclusive tenants (measured: 502s while ft held the card); Linux-only CLI (Qube = dedicated WSL
+distro, isolated from mem0's; Lenovo = ZFS pool install — home-dir quota kills `[accel]`,
+`UV_CACHE_DIR`+`HF_HOME` must live on the pool). `--moe-backend` auto-selection is already
+optimal for FP8 checkpoints (hybrid/cpu reject `fp8_block` experts).
+
+**Integration verdict:** a real adoption case on the **ampere-6 tier agent/delegation lane**
+(tool-call parser present, quality win measured) and as the **opt-in >VRAM MoE engine** on
+Qube (the colibri niche). The harness reaches it as a plain OpenAI endpoint — config, not
+code. Needs an ADR + port-file rows (Qube :1919 WSL, Lenovo :1920) before production wiring —
+surfaced for the operator, not wired unattended.
+
+**Flash-Next, completed on the correct quant.** UD-IQ4_XS (93.68 GB byte-verified, the best
+quality that fits stably — not the Q2 the first pass used). Placement ladder (3 reps/arm,
+expert-balanced splits, spill guards): best-safe **`-ncmoe 36 (42,6)` = 9.6 t/s**; fragile
+10.4 at 172 MiB free; no Q2-style spill collapse. **Ready-to-adopt seat config** (full 131k
+context, q8_0 KV, healthy 2.8/2.1 GB headroom):
+
+```
+-ngl 999 --n-cpu-moe 40 -sm layer --tensor-split 44,4 -c 131072
+--cache-type-k q8_0 --cache-type-v q8_0 --flash-attn on --parallel 1 --load-mode auto
+```
+→ 8.3–8.7 t/s. **Quality: parity with the incumbent at every measurable difficulty** — base
+(12), hard (6), and frontier competition-style (5, hand-verified) tiers, card sampling both
+sides: 46/46 each. No separation found; the candidate costs ~2× wall and ~70 GB RAM for it.
+**Verdict unchanged: no adoption today; the laguna rule holds (PR #27742 still unmerged).**
+The config above is the drop-in seat entry if the PR merges and a real long-context workload
+shows the 262k-native advantage. FreeToken is not an alternative path (arch unsupported).
+
 ### T1. Qwen3.8-Flash-Next — **THE CURRENT FOCUS (operator, 2026-08-26)**
 
 > Operator direction: *"qwen 3.8 NEXT is the focus right now..... careful...."* The caution is the **laguna-s-2.1 precedent** — a seat built on a fork binary whose arch mainline never absorbed, which produced non-terminating thinking (EOG tokens unregistered in the fork build) and was eventually deleted for 72.1 GB back.
