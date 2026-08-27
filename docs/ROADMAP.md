@@ -57,6 +57,62 @@ The 2026-06 build order below is **closed**. What it called Phase 2 shipped in f
 
 Source: `2026-08-26-offload-stack-frontier-update-handover.md` (research session). **Every version number below was re-verified live on Qube on 2026-08-26** before being written here — §8 of that handover warned its own numbers were single-sourced, and four of its cautions turned out to be already satisfied (recorded in "Corrections" at the end of this section).
 
+### ROUND 2 — 2026-08-27 morning (operator review feedback, 9 items, all executed)
+
+**Corrected claim** (operator caught an inference dressed as a fact): "GGUF is dead for us"
+was wrong scope. Verified: qwen4exp GGUF → verbatim `GGUF architecture 'qwen4exp' is not
+supported (known: ['gemma4'])`; gemma4 **UD** quants fail a dtype assert (`layers/base.py:45`)
+on BOTH 0.1.2 and git main; standard Q4_0 QAT gemma untested (none on disk).
+
+**Freshness (operator bet right twice):** FreeToken git main > pip (new `--gpu` flag, fla
+l2norm perf fix) — both nodes upgraded to `main@9ef3651`. PR #27742 +3 commits (fused-QKV
+segmentation for tensor split; still no MTP; still unmerged) — scratch build now
+`build 511 / 250b614`, on CUDA 13.3.
+
+**Same-model race blocked by a real upstream bug:** `ft serve Qwen/Qwen3.8-27B-FP8` is
+ACCEPTED at config level (`cache_type=hybrid_radix` — it knows the GDN-hybrid arch) but the
+fp8 weight loader dies (`qwen3_5_moe/weight.py:_iter_weights_fp8` → "CUDA driver error:
+device not ready") while Qwen3.6-35B-FP8 loads fine in the same distro — an upstream-issue
+candidate, surfaced (not filed unattended).
+
+**Tuning fact that changed a verdict:** `--moe-cache-auto` sizes KV down to ~8.2k tokens —
+long prompts 400 with "Input sequence length 22193 exceeds 8202". `--num-tokens 32768`
+costs only 0.62 GiB and fixed it. Any FreeToken deployment here MUST set explicit KV.
+
+**Suite v2** (built from the model card's OWN gap chart — JobBench +22.3, DeepSWE +16.5,
+Toolathlon +6.4, SWE-multilingual +7.2 → the claimed edges are agentic/tool/multilingual):
+8 tool-call-fidelity (OpenAI tools) + 5 multi-hop joins inside 22k-token docs + 5 Spanish.
+
+| engine | score | total wall |
+|---|---|---|
+| incumbent qwen3.8-27b (llama.cpp, 2 cards) | 18/18 | **271 s** |
+| FreeToken Qwen3.6-35B-FP8 (1 card, tuned) | 18/18 | 410 s |
+| **FreeToken gpt-oss-120b (1 card)** | **18/18** | **678 s** |
+| Flash-Next IQ4_XS (llama.cpp PR, 2 cards) | 18/18 | 1828 s |
+
+**The 120B row is the FreeToken verdict:** a model class this box could never usably serve
+runs perfect-scoring on ONE 16 GB card, faster than Flash-Next on two. It earns the big-MoE
+seat. Flash-Next: quality parity persists even on card-informed differential tiers; its
+measured cost (6.7× wall vs incumbent) stands; verdict unchanged.
+
+**Agentic tier: instrument invalid, honestly.** A throwaway-config `delegate --contract` run
+produced EMPTY structured output on BOTH the candidate and the production incumbent —
+both-arms-empty = my harness config, not the models (the incumbent passes real contracts
+daily). A production-representative agentic A/B needs the real delegation path, which only
+serves roster seats — recorded as the follow-up, not faked.
+
+### STANDING PROCESS — monthly whole-system update & upgrade (operator, 2026-08-27)
+
+On the first nightshift of each month, run the full stack sweep exactly as executed
+2026-08-26/27: (1) re-read every component's RELEASED version (semver-blessed tag, never
+newest nightly) — llama.cpp, llama-swap, whisper.cpp, ComfyUI + pinned frontend/kitchen/
+aimdo + custom nodes, torch/CUDA, FreeToken, Go/Node/Python/ffmpeg/GIMP, Go module
+advisories; (2) verify against live state, upgrade side-by-side with backups, one elevated
+batch; (3) prove every upgrade with a named live check (not exit codes); (4) fold in the
+deliberate holds — Go major (json v2) and go-sdk v1.7 (breaking MCP protocol) — as their
+own tested migrations when their month comes; (5) update ROADMAP + tier matrix + port files
++ mem0 in the same pass. Fleet rule: Qube + Lenovo same night; Aorus the moment it answers.
+
 ### NIGHTSHIFT 2026-08-27 — FreeToken measured on both nodes; Flash-Next testing COMPLETE
 
 **FreeToken** (FlashML-org, arxiv 2608.16157 — edge-native MoE serving; Apache-2.0, 8.5k stars),
