@@ -545,6 +545,26 @@ type Config struct {
 	VideoGenPoolVvramGB float64 `json:"videogen_pool_vvram_gb,omitempty"`
 	VideoGenPoolCompute string  `json:"videogen_pool_compute,omitempty"`
 	VideoGenPoolDonor   string  `json:"videogen_pool_donor,omitempty"`
+	// AnimateGenScript is the path to render/comfy-animate.mjs (WAN-Animate-2
+	// character animation: driver video + reference image → retargeted clip).
+	// Empty = the route defers ("no animate route configured").
+	AnimateGenScript string `json:"animategen_script,omitempty"`
+	// AnimateGenTimeoutSec bounds one animate render: ComfyUI cold-start + an
+	// 81-frame Motion Transfer chunk (measured 298.5s warm at 480x854 on the
+	// reference box) + decode. Default 1800 (30min).
+	AnimateGenTimeoutSec int `json:"animategen_timeout_sec,omitempty"`
+	// AnimateGenUnet / AnimateGenTextEncoder / AnimateGenClipVision / AnimateGenVAE
+	// bind THIS machine's WAN-Animate-2 files by ComfyUI filename (quality-first
+	// weight binding, same pattern as the videogen_* keys). Unset = the render
+	// script's defaults (the reference box's on-disk names).
+	AnimateGenUnet        string `json:"animategen_unet,omitempty"`
+	AnimateGenTextEncoder string `json:"animategen_text_encoder,omitempty"`
+	AnimateGenClipVision  string `json:"animategen_clip_vision,omitempty"`
+	AnimateGenVAE         string `json:"animategen_vae,omitempty"`
+	// AnimateGenWidth / AnimateGenHeight are this machine's default working
+	// resolution for the driver resize (0 = the builder's 482x854 template default).
+	AnimateGenWidth  int `json:"animategen_width,omitempty"`
+	AnimateGenHeight int `json:"animategen_height,omitempty"`
 	// AudioGenTimeoutSec bounds one audio synthesis (TTS or ACE-Step). Default 720 (12min).
 	AudioGenTimeoutSec int `json:"audiogen_timeout_sec,omitempty"`
 	// GPUWaitMs is how long ANY GPU job queues behind the current lease holder before it
@@ -1127,6 +1147,8 @@ func Default() Config {
 		VoiceGenFTRepetitionPenalty: 0,
 		MusicGenScript:              "render/comfy-music.mjs", // B3 ACE-Step music worker; "" => music defers
 		VideoGenTimeoutSec:          1500,
+		AnimateGenScript:            "render/comfy-animate.mjs",
+		AnimateGenTimeoutSec:        1800, // cold ComfyUI + one 81f Motion Transfer chunk (298.5s warm measured) + margin
 		AudioGenTimeoutSec:          720,
 		EditTimeoutSec:              300,   // edit_image / media ops (CPU; no GPU lock)
 		GPUWaitMs:                   90000, // 90s — queue behind a holder, then defer with an ETA
@@ -1507,7 +1529,7 @@ func pathFields(c *Config) []*string {
 		&c.ImageGenScript, &c.NodePath, &c.ComfyDir,
 		&c.SdcppScript, &c.SdcppBin, &c.SdcppModel, &c.SdcppVAE, &c.SdcppClipL, &c.SdcppClipG, &c.SdcppT5, &c.SdcppLLM,
 		&c.InpaintScript, &c.GenEditScript, &c.UpscaleScript,
-		&c.VideoGenScript, &c.RunGraphScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath, &c.StateDir,
+		&c.VideoGenScript, &c.AnimateGenScript, &c.RunGraphScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath, &c.StateDir,
 		&c.VoiceGenRef, &c.VoiceGenFTModel, &c.VoiceGenFTBaseDir, &c.VoiceGenFTRef,
 		&c.EditPython, &c.GimpConsolePath,
 		&c.CachePath, &c.LedgerPath,

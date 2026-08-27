@@ -40,6 +40,7 @@ func bare() config.Config {
 	cfg := config.Default()
 	cfg.ImageGenScript, cfg.InpaintScript, cfg.InpaintCkpt = "", "", ""
 	cfg.VideoGenScript, cfg.VoiceGenScript, cfg.MusicGenScript, cfg.RunGraphScript = "", "", "", ""
+	cfg.AnimateGenScript = ""
 	cfg.ImageGenEngine, cfg.SdcppBin, cfg.SdcppModel, cfg.SdcppScript = "", "", "", ""
 	cfg.EditPython, cfg.GimpConsolePath, cfg.FFmpegPath, cfg.NodePath = "", "", "", ""
 	cfg.ComfyDir = ""
