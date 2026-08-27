@@ -389,6 +389,28 @@ denies machine-wide media for at most 10 minutes, not 60.
 - ⚠️ **Do not chase WAN NVFP4** — the only published community NVFP4 (`lightx2v/Wan-NVFP4`) ships wan**2.1** files, i.e. the wrong model version.
 - Bar for a roster slot, both models: **beat LTX-2.5 on something we care about, not merely work.**
 
+### T4 — EXECUTED 2026-08-27. Both models wired from the official templates and validated live
+
+**Corrections to the plan above, from disk:** the templates live in the **`comfyui_workflow_templates_json`** package (the old `comfyui_workflow_templates` package is an empty shell — that's why 0.11.40 "shipped zero JSONs"); `clip_vision_h.safetensors` is present (the "absent" warning is stale); all i2v/t2v aux files carry the exact template filenames. ⚠️ **`api_minimax_h3_*.json` are PAID Comfy-Cloud API-node workflows** (`MinimaxHailuo03*` nodes, no local models) — the local templates are `video_minimax_h3_*.json`. Never confuse the two.
+
+**Wiring method (no harness code touched):** the official UI-format template (subgraph included) was converted 1:1 to an API-format graph — node ids preserved, only the two V3 dynamic nodes constant-folded (turbo switch, frame-count expression) — and run through `offload_run_graph`, which owns the ComfyUI lifecycle + GPU lock. Emitters + graphs archived in the session scratchpad (`t4/emit_h3_graph.py`, `t4/emit_wan_animate2.py`). Worked **first try** for H3.
+
+**MiniMax-H3 bake-off vs the seated LTX-2.5** (same source still, same motion prompt + audio cue, same seed 757358688076805, ~5 s, ~0.9 MP, each on its own recipe — LTX deployed recipe vs H3 official turbo-8):
+
+| axis | LTX-2.5 22B distilled (seated) | MiniMax-H3 fl2va int8-convrot turbo-8 |
+|---|---|---|
+| engine wall ("Prompt executed") | **233.7 s** @1280×704×121f | 457.8 s @1280×736×124f (DisTorch-pooled) |
+| prompt adherence | never reached the scripted leap; wardrobe morph; source dusk grade lost | **full arc executed: turn → sprint → crouch → leap → lands on the next roof** (independent vision-seat confirmation, no artifacts noted) |
+| i2v source fidelity | drifted dark, geometry ambiguous | **lighting/fog/wardrobe of the still preserved throughout** |
+| audio (joint A/V both) | low-band wind/rumble wash, rolls off ~7 kHz | **structured sound design: footstep/impact transients, score swell into the leap, landing hit** (spectrogram-verified) |
+| t2v / direction | not wired in our lane | **4-shot storyboard with hard cuts followed at 0.4 MP/207 s** — a capability the roster lacks entirely |
+
+**Verdict: H3 clears the bar** — beats the incumbent on prompt adherence / multi-shot direction, i2v fidelity, and audio design; loses ~2× on speed. The matrix row-22 "3-way verdict (beat MiniMax-H3)" measured the **pre-turbo slow path** the plan warned about. Memory facts: H3 DiT 20.97 GB disk → **37.46 GB pooled** (DisTorch upcasts int8 to bf16, per the loaded-size rule) or runs single-card partial-offload (9.8 GB GPU + 10.2 GB CPU, 141 lowvram patches, native `convrot_w4a4` ops confirmed); text encoder `qwen3vl_32b nvfp4` 15.7 GB loads partially. Gap: the r2v lane needs the un-downloaded `minimax_h3_ref2va_pruned_int8_convrot` DiT (~21 GB) — optional.
+
+**WAN-Animate-2 distilled: NEW capability validated.** Single-chunk Motion Transfer from the official `video_wan_animate2_distilled.json`: identity-preserving retargeting of a human dance driver onto a vinyl-toy character (radically different proportions) at 81f@480×854, 10-step lcm, **298.5 s**, loading **native int8 on one 16 GB card (15.9 GB total, no upcast)** — the plan's single-card fear cleared. ⚠️ **The template's `WanAnimate2Cache` `gpu`/`int8` setting hard-kills ComfyUI** mid-step-1 on this box (silent process death → harness 240 s watchdog abort); `cpu`/`default` works at both 49f and 81f. Aux used: `umt5_xxl_fp8_e4m3fn_scaled` + `clip_vision_h` + `wan_2.1_vae` (all on disk; template's `Wan2_1_VAE_bf16` name maps to our `wan_2.1_vae`).
+
+**Follow-ups (not sprawled here):** (1) harness integration decision — H3 as a `videogen_family` option (code) and/or a WanAnimate media route; seating stays an operator call, matrix candidate rows added 2026-08-27; (2) optional r2v DiT download; (3) file the WanAnimate2Cache gpu-crash upstream once reproduced against a clean ComfyUI.
+
 ### T5. llama.cpp + llama-swap — one fleet-wide pass
 
 - **llama.cpp b10435 → b10639.** Urgent for a second, unrelated reason: **b10435 sits inside a confirmed 10–15× generation-throughput regression window** (#27084/#27126); the fix `22b8e310b` is 12 commits past our build. Blast radius is CPU-side generation, so the **Lenovo 6GB tier, the Aorus node, and every `--n-cpu-moe` path** are directly exposed. Land on b10639, not an intermediate build — three merge/revert pairs sit inside the window. CLI surface is identical (two added flags, zero removals), so launch lines carry over verbatim. Rollback: b10435 and b10356 are still on disk.
