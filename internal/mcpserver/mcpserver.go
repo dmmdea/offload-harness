@@ -195,6 +195,12 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	}, s.handleGenerateVideo)
 
 	srv.AddTool(&mcp.Tool{
+		Name:        "offload_animate_character",
+		Description: "CHARACTER ANIMATION on the LOCAL ComfyUI for FREE — retargets the motion of a driver VIDEO onto a reference character IMAGE (WAN-Animate-2 distilled: identity-preserving motion transfer, the only route that does video-driven retargeting; the other video tools generate motion from text). ref = a full-body image of the character to animate (person, mascot, stylized figure); driver = a video of a person performing the motion (full body in frame, static camera works best); prompt describes the CHARACTER + BACKGROUND the output should show. One call renders ONE native chunk (default 81 frames ≈ 3.4s at 24fps — the distilled recipe's unit; measured ~5min warm at the 482x854 template default on the reference box). Optional: motion_prompt (describe the driver's motion), negative, width/height, frames, steps, seed, pose_strength/ref_strength (0-1 floats as strings), reserve_vram, out. The output keeps the driver's own audio track. It auto-starts ComfyUI and takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait for the slot before deferring. Returns {video_path, seed}. On any failure it returns deferred:true — then make the clip another way.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"ref":{"type":"string","description":"local path to the reference character image (full body visible works best)"},"driver":{"type":"string","description":"local path to the driver video whose motion is transferred"},"prompt":{"type":"string","description":"character appearance + background description for the OUTPUT clip"},"motion_prompt":{"type":"string","description":"one-line description of the driver video's motion (default: a generic motion-reference line)"},"negative":{"type":"string","description":"hard exclusions (default: the model's official training negative)"},"width":{"type":"integer","description":"working width px (default 482, the official template's portrait default)"},"height":{"type":"integer","description":"working height px (default 854)"},"frames":{"type":"integer","description":"frame count (default 81 — one native chunk; longer needs multiple calls)"},"steps":{"type":"integer","description":"sampler steps (default 10 — the distilled lcm recipe; do not raise casually)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"pose_strength":{"type":"string","description":"0-1: how strongly the driver's pose drives the output (default 1.0)"},"ref_strength":{"type":"string","description":"0-1: how strongly the reference image pins identity (default 1.0)"},"reserve_vram":{"type":"number","description":"VRAM held back for the display (per-workflow override)"},"out":{"type":"string","description":"output .mp4 path (optional; default under the media dir)"}},"required":["ref","driver","prompt"]}`),
+	}, s.handleAnimateCharacter)
+
+	srv.AddTool(&mcp.Tool{
 		Name:        "offload_generate_audio",
 		Description: "Synthesize AUDIO on the LOCAL GPU for FREE — no cloud. kind=voice (default) is text-to-speech narration via Chatterbox Multilingual (commercial-safe, default Spanish; pass clone=<ref.wav> for zero-shot voice cloning, lang for the language). kind=music is a text-to-music bed via ACE-Step (style-tag prompt; seconds for length; optional lyrics). text is the narration text or the music style prompt. Optional: out (output path; default under the media dir), seed, reserve_vram (music only). It takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait before deferring. Returns {audio_path, kind, seed}. On any failure (GPU busy, no route, worker error, timeout) it returns deferred:true — then synthesize it another way.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"narration text (voice) or music style prompt (music)"},"kind":{"type":"string","description":"voice (default, Chatterbox TTS) | music (ACE-Step)"},"voice":{"type":"string","description":"generalist | finetuned (default generalist; finetuned requires this machine's voicegen_ft_* config)"},"clone":{"type":"string","description":"voice: local path to a reference .wav for zero-shot voice cloning"},"lang":{"type":"string","description":"voice: language code (default es)"},"seconds":{"type":"integer","description":"music: clip length in seconds"},"out":{"type":"string","description":"output audio path (optional; default under the media dir)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"music: VRAM held back for the display (per-workflow override)"}},"required":["text"]}`),
@@ -1200,6 +1206,69 @@ func (s *Server) handleGenerateVideo(ctx context.Context, req *mcp.CallToolReque
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
 	}
 	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateVideo, Input: in.Prompt, Image: in.Still, Params: params}))
+}
+
+func (s *Server) handleAnimateCharacter(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var in struct {
+		Ref          string  `json:"ref"`
+		Driver       string  `json:"driver"`
+		Prompt       string  `json:"prompt"`
+		MotionPrompt string  `json:"motion_prompt"`
+		Negative     string  `json:"negative"`
+		Width        int     `json:"width"`
+		Height       int     `json:"height"`
+		Frames       int     `json:"frames"`
+		Steps        int     `json:"steps"`
+		Seed         int     `json:"seed"`
+		PoseStrength string  `json:"pose_strength"`
+		RefStrength  string  `json:"ref_strength"`
+		ReserveVRAM  float64 `json:"reserve_vram"`
+		Out          string  `json:"out"`
+	}
+	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+		return bad, nil
+	}
+	params := map[string]any{}
+	if in.Ref != "" {
+		params["ref"] = in.Ref
+	}
+	if in.Driver != "" {
+		params["driver"] = in.Driver
+	}
+	if in.MotionPrompt != "" {
+		params["motion_prompt"] = in.MotionPrompt
+	}
+	if in.Negative != "" {
+		params["negative"] = in.Negative
+	}
+	if in.Out != "" {
+		params["out"] = in.Out
+	}
+	if in.Width > 0 {
+		params["width"] = in.Width
+	}
+	if in.Height > 0 {
+		params["height"] = in.Height
+	}
+	if in.Frames > 0 {
+		params["frames"] = in.Frames
+	}
+	if in.Steps > 0 {
+		params["steps"] = in.Steps
+	}
+	if in.Seed > 0 {
+		params["seed"] = in.Seed
+	}
+	if in.PoseStrength != "" {
+		params["pose_strength"] = in.PoseStrength
+	}
+	if in.RefStrength != "" {
+		params["ref_strength"] = in.RefStrength
+	}
+	if in.ReserveVRAM > 0 {
+		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
+	}
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskAnimateCharacter, Input: in.Prompt, Image: in.Ref, Video: in.Driver, Params: params}))
 }
 
 func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

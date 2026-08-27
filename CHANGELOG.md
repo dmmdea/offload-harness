@@ -6,6 +6,35 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.106.0] - 2026-08-27
+
+### Added — `offload_animate_character`: WAN-Animate-2 motion retargeting as a first-class media route
+
+The T4 validation (2026-08-27) proved WAN-Animate-2 distilled as a genuinely new
+capability — identity-preserving retargeting of a driver video's motion onto a
+reference character image, native int8 on one 16 GB card. The operator approved
+routing it; this release wires it through every layer the video route has:
+
+- **MCP tool `offload_animate_character`** + **CLI `animate-character`**
+  (`<out.mp4> <ref.png> <driver.mp4> "<prompt>"`): new task
+  `animate_character`, its own pipeline branch (media lease class `animate`,
+  footprint family `wan-animate2`, defer-on-any-failure).
+- **`render/comfy-animate.mjs` + `render/wf-wan-animate2.mjs`** (+ unit tests):
+  the official `video_wan_animate2_distilled` template's Motion Transfer
+  subgraph, flattened to API format with the subgraph's node ids, single
+  81-frame chunk. The distilled recipe is pinned (10-step lcm, cfg 1, shift 5);
+  the pose cache is pinned **cpu/default** — the template's shipped `gpu/int8`
+  cache hard-kills ComfyUI mid-step-1 on the reference box (silent process
+  death; the watchdog then aborts at 240 s). Output keeps the driver's audio.
+- **Config**: `animategen_script` (default `render/comfy-animate.mjs`),
+  `animategen_timeout_sec` (default 1800), per-machine weight bindings
+  `animategen_unet` / `animategen_text_encoder` / `animategen_clip_vision` /
+  `animategen_vae`, and `animategen_width`/`animategen_height` working-res
+  defaults (0 = the template's 482×854).
+- **Fleet**: task `animate` advertised when `animategen_script` is set
+  (family `wan-animate2`), with the same payload the MCP tool takes.
+- **mediacap**: `animate_character` route row in `offload_status` media.
+
 ## [0.105.0] - 2026-08-27
 
 ### Fixed — ComfyUI >= 0.34 hid every GPU but the first on Windows, breaking the pooled tiers

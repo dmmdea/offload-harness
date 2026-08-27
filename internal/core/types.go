@@ -75,6 +75,14 @@ const (
 	// internal/gpugen, which takes the shared single-slot GPU lock and starts/stops
 	// ComfyUI with process-tree-kill on timeout. Returns {video_path, seed}.
 	TaskGenerateVideo TaskType = "generate_video"
+	// TaskAnimateCharacter retargets the motion of a driver VIDEO onto a reference
+	// character IMAGE on the LOCAL ComfyUI (WAN-Animate-2 distilled — identity-
+	// preserving character animation, the roster's only video-driven retargeting).
+	// Its own branch in pipeline.Run (no text cascade, no grammar) — it shells out
+	// to render/comfy-animate.mjs via internal/gpugen, which takes the shared
+	// single-slot GPU lock and starts/stops ComfyUI with process-tree-kill on
+	// timeout. Returns {video_path, seed}.
+	TaskAnimateCharacter TaskType = "animate_character"
 	// TaskGenerateAudio synthesizes audio on the LOCAL GPU: kind=voice (Chatterbox
 	// TTS via render/tts.mjs, no ComfyUI) or kind=music (ACE-Step via ComfyUI). Its
 	// own branch in pipeline.Run, dispatching by kind to VoiceGenScript/MusicGenScript
@@ -118,7 +126,7 @@ const (
 // Valid reports whether t is a known task type.
 func (t TaskType) Valid() bool {
 	switch t {
-	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskVideoWatch, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskUpscaleImage, TaskGenerateSVG, TaskGenerateVideo, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskRunGraph, TaskPipelineJob, TaskAgentRun:
+	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskVideoWatch, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskUpscaleImage, TaskGenerateSVG, TaskGenerateVideo, TaskAnimateCharacter, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskRunGraph, TaskPipelineJob, TaskAgentRun:
 		return true
 	}
 	return false

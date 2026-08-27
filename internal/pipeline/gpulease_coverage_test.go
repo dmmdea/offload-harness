@@ -177,6 +177,25 @@ func gpuLeaseCases() []gpuLeaseCase {
 			invoke: genReq(core.TaskGenerateVideo, nil),
 		},
 		{
+			name:   "animate_character",
+			runner: "comfy-animate.mjs",
+			setup: func(t *testing.T, cfg *config.Config, stub, dir string) {
+				t.Helper()
+				cfg.AnimateGenScript = stub
+				for _, n := range []string{"ref.png", "drive.mp4"} {
+					if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			invoke: func(t *testing.T, p *Pipeline, dir string) {
+				t.Helper()
+				p.Run(context.Background(), core.Request{Task: core.TaskAnimateCharacter,
+					Input: "a toy astronaut in a studio",
+					Params: map[string]any{"ref": filepath.Join(dir, "ref.png"), "driver": filepath.Join(dir, "drive.mp4")}})
+			},
+		},
+		{
 			name:   "generate_audio (voice)",
 			runner: "tts.mjs",
 			setup: func(_ *testing.T, cfg *config.Config, stub, _ string) {

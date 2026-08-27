@@ -416,6 +416,13 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 		return p.runGenerateVideo(ctx, req, meta, start)
 	}
 
+	// animate_character retargets the motion of req.Video (a driver clip) onto
+	// req.Image (a reference character) on the local ComfyUI by shelling out (via
+	// internal/gpugen) to comfy-animate.mjs. Its own branch — no text cascade.
+	if req.Task == core.TaskAnimateCharacter {
+		return p.runAnimateCharacter(ctx, req, meta, start)
+	}
+
 	// generate_audio synthesizes audio on the local GPU: kind=voice (Chatterbox via
 	// tts.mjs, no ComfyUI) or kind=music (ACE-Step via ComfyUI). Its own branch,
 	// dispatching by kind to VoiceGenScript/MusicGenScript through internal/gpugen.
@@ -2445,6 +2452,130 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	if gerr != nil {
 		meta.ErrClass = gpugen.ClassifyErr(gerr)
 		return p.deferGen(req, meta, start, len(req.Input), "video generation failed: "+gerr.Error())
+	}
+	meta.LatencyMs = time.Since(start).Milliseconds()
+	data, _ := json.Marshal(map[string]any{"video_path": outPath, "seed": seed})
+	p.record(req.Task, meta, len(prompt))
+	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// runAnimateCharacter retargets the motion of a driver video (req.Video / params.driver)
+// onto a reference character image (req.Image / params.ref) on the LOCAL ComfyUI by
+// shelling out (via internal/gpugen) to comfy-animate.mjs — WAN-Animate-2 distilled,
+// single 81-frame Motion Transfer chunk, pose cache pinned cpu (the template's gpu/int8
+// cache hard-kills ComfyUI; see the T4 closeout in docs/ROADMAP.md). Its own branch —
+// no text models, no grammar. Any failure defers. params: ref (string image path),
+// driver (string video path), motion_prompt/negative (string), width/height/frames/
+// steps/seed (int), pose_strength/ref_strength (float), reserve_vram (float).
+func (p *Pipeline) runAnimateCharacter(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+	if p.cfg.AnimateGenScript == "" {
+		return p.deferGen(req, meta, start, len(req.Input), "no animate route configured")
+	}
+	prompt := strings.TrimSpace(req.Input)
+	if prompt == "" {
+		return p.deferGen(req, meta, start, len(req.Input), "empty character/background prompt")
+	}
+	ref := paramStr(req.Params, "ref")
+	if ref == "" {
+		ref = req.Image
+	}
+	driver := paramStr(req.Params, "driver")
+	if driver == "" {
+		driver = req.Video
+	}
+	if ref == "" || driver == "" {
+		return p.deferGen(req, meta, start, len(req.Input), "animate needs both a reference image and a driver video")
+	}
+	script, serr := gpugen.ResolveScript(p.cfg.AnimateGenScript)
+	if serr != nil {
+		return p.deferGen(req, meta, start, len(req.Input), serr.Error())
+	}
+	meta.Model = "comfyui-animate:wan-animate2"
+
+	seed := paramIntOr(req.Params, "seed", 0)
+	if seed <= 0 {
+		seed = mintSeed()
+		if req.Params == nil {
+			req.Params = map[string]any{}
+		}
+		req.Params["seed"] = seed
+	}
+	out := paramStr(req.Params, "out")
+	if out == "" {
+		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
+		out = filepath.Join(p.cfg.MediaDir, "animate-"+sha256hex(prompt + tasks.StableParamsKey(req.Params))[:8]+".mp4")
+	}
+
+	// comfy-animate.mjs CLI: <out> <ref> <driver> "<prompt>" [flags]
+	args := []string{out, ref, driver, prompt}
+	if mp := paramStr(req.Params, "motion_prompt"); mp != "" {
+		args = append(args, "--motion-prompt", mp)
+	}
+	if n := paramStr(req.Params, "negative"); n != "" {
+		args = append(args, "--negative", n)
+	}
+	// Per-machine resolution defaults; a per-request value wins; 0 config default
+	// means "use the builder's 482x854 template default". frames/steps/seed have
+	// no machine default (map lookup -> 0 -> unaffected).
+	machineDefault := map[string]int{"width": p.cfg.AnimateGenWidth, "height": p.cfg.AnimateGenHeight}
+	for _, k := range []string{"width", "height", "frames", "steps", "seed"} {
+		v := paramIntOr(req.Params, k, 0)
+		if v <= 0 {
+			v = machineDefault[k]
+		}
+		if v > 0 {
+			args = append(args, "--"+k, strconv.Itoa(v))
+		}
+	}
+	for _, k := range []string{"pose_strength", "ref_strength"} {
+		if v := paramStr(req.Params, k); v != "" {
+			args = append(args, "--"+strings.ReplaceAll(k, "_", "-"), v)
+		}
+	}
+	if rv := paramStr(req.Params, "reserve_vram"); rv != "" {
+		args = append(args, "--reserve-vram", rv)
+	}
+	// Per-machine WAN-Animate-2 weight binding (quality-first, same pattern as the
+	// videogen flags). Unset = the render script's defaults (unchanged).
+	if p.cfg.AnimateGenUnet != "" {
+		args = append(args, "--unet", p.cfg.AnimateGenUnet)
+	}
+	if p.cfg.AnimateGenTextEncoder != "" {
+		args = append(args, "--text-encoder", p.cfg.AnimateGenTextEncoder)
+	}
+	if p.cfg.AnimateGenClipVision != "" {
+		args = append(args, "--clip-vision", p.cfg.AnimateGenClipVision)
+	}
+	if p.cfg.AnimateGenVAE != "" {
+		args = append(args, "--vae", p.cfg.AnimateGenVAE)
+	}
+
+	timeout := time.Duration(p.cfg.AnimateGenTimeoutSec) * time.Second
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease("animate", timeout, p.gpuWait())
+	if lerr != nil {
+		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
+	}
+	defer releaseLease()
+	env := append(p.genEnv(), leaseEnv...)
+	if timeout > 0 {
+		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
+	}
+	spec := gpugen.Spec{
+		Exe:     p.cfg.NodePath,
+		Script:  script,
+		Args:    args,
+		Env:     env,
+		Out:     out,
+		Timeout: timeout,
+	}
+	// Passive fleet footprint under the route's own family key (int8 is the only
+	// shipped WAN-Animate-2 variant; the quant slot follows the videogen rule of
+	// reporting a quant only where it names a real recipe axis).
+	p.footprintSampling("wan-animate2", "", "animate").ApplyTo(&spec)
+	outPath, gerr := gpugen.Generate(ctx, spec)
+	if gerr != nil {
+		meta.ErrClass = gpugen.ClassifyErr(gerr)
+		return p.deferGen(req, meta, start, len(req.Input), "character animation failed: "+gerr.Error())
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	data, _ := json.Marshal(map[string]any{"video_path": outPath, "seed": seed})

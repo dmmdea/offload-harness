@@ -97,6 +97,8 @@ func main() {
 		err = runGenerateAudio(args)
 	case "generate-video":
 		err = runGenerateVideo(args)
+	case "animate-character":
+		err = runAnimateCharacter(args)
 	case "run-graph":
 		err = runRunGraph(args)
 	case "edit-image":
@@ -243,6 +245,7 @@ Usage:
   local-offload inpaint-image <image> --mask m.png --prompt "..."   re-render ONLY the masked region (white=repaint)
   local-offload upscale-image <image> [--scale F] [--width N --height N] [--method lanczos] [--model name] [--out path]   ESRGAN enlarge (this machine's upscale_model)
   local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F]
+  local-offload animate-character <out.mp4> <ref.png> <driver.mp4> "<prompt>" [--motion-prompt "..."] [--frames 81] [--seed N]
   local-offload run-graph --graph <g.json> [--manifest <m.json>] [--out-dir <d>] [--reserve-vram F] [--json]
   local-offload nim <file|-|"text"> [--model id] [--base url] [--system "..."] [--max-tokens N] [--temp F] [--json]
   local-offload nim --list-models        list a NIM endpoint's model ids (free hosted catalog or self-hosted)
@@ -1465,6 +1468,111 @@ func runGenerateVideo(args []string) error {
 	})
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
+}
+
+// runAnimateCharacter handles `local-offload animate-character <out.mp4> <ref.png>
+// <driver.mp4> "<prompt>" [--motion-prompt "..."] [--negative "..."] [--width N]
+// [--height N] [--frames 81] [--steps N] [--seed N] [--pose-strength F]
+// [--ref-strength F] [--reserve-vram F] [--json]`. The FOUR positionals are the
+// output path, the reference character image, the driver video whose motion is
+// transferred, and the character/background prompt — mirroring the raw
+// `node render/comfy-animate.mjs` CLI. Runs the same runAnimateCharacter pipeline
+// branch the MCP tool uses. The pose-cache device is SETTLED inside the workflow
+// builder (cpu — the template's gpu/int8 cache hard-kills ComfyUI) and is
+// intentionally NOT exposed here so a caller can't regress it.
+func runAnimateCharacter(args []string) error {
+	fs := flag.NewFlagSet("animate-character", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	motionPrompt := fs.String("motion-prompt", "", "one-line description of the driver video's motion")
+	negative := fs.String("negative", "", "hard exclusions")
+	width := fs.Int("width", 0, "working width px (0 = the 482x854 template default)")
+	height := fs.Int("height", 0, "working height px")
+	frames := fs.Int("frames", 0, "frame count (default 81 — one native chunk)")
+	steps := fs.Int("steps", 0, "sampler steps (0 = the distilled recipe's 10)")
+	seed := fs.Int("seed", 0, "RNG seed for reproducibility")
+	poseStrength := fs.Float64("pose-strength", 0, "0-1: how strongly the driver's pose drives the output (0 = builder default 1.0)")
+	refStrength := fs.Float64("ref-strength", 0, "0-1: how strongly the reference image pins identity (0 = builder default 1.0)")
+	reserveVRAM := fs.Float64("reserve-vram", 0, "VRAM held back for the display (per-workflow override)")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+
+	out, ref, driver, prompt, flagArgs := splitFourArgs(args, map[string]bool{
+		"config": true, "motion-prompt": true, "negative": true, "width": true,
+		"height": true, "frames": true, "steps": true, "seed": true,
+		"pose-strength": true, "ref-strength": true, "reserve-vram": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	if out == "" || ref == "" || driver == "" || prompt == "" {
+		return fmt.Errorf("animate-character requires an output path, a reference image, a driver video, and a prompt: local-offload animate-character <out.mp4> <ref.png> <driver.mp4> \"<prompt>\" [--frames 81]")
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	params := map[string]any{"ref": ref, "driver": driver, "out": out}
+	if *motionPrompt != "" {
+		params["motion_prompt"] = *motionPrompt
+	}
+	if *negative != "" {
+		params["negative"] = *negative
+	}
+	for k, v := range map[string]int{"width": *width, "height": *height, "frames": *frames, "steps": *steps, "seed": *seed} {
+		if v > 0 {
+			params[k] = v
+		}
+	}
+	if *poseStrength > 0 {
+		params["pose_strength"] = strconv.FormatFloat(*poseStrength, 'f', -1, 64)
+	}
+	if *refStrength > 0 {
+		params["ref_strength"] = strconv.FormatFloat(*refStrength, 'f', -1, 64)
+	}
+	if *reserveVRAM > 0 {
+		params["reserve_vram"] = strconv.FormatFloat(*reserveVRAM, 'f', -1, 64)
+	}
+	res := p.Run(context.Background(), core.Request{
+		Task:   core.TaskAnimateCharacter,
+		Input:  prompt,
+		Image:  ref,
+		Video:  driver,
+		Params: params,
+	})
+	emitResult(res, *asJSON, "", *compactFlag)
+	return nil
+}
+
+// splitFourArgs separates the FIRST FOUR positionals (out path + ref image +
+// driver video + prompt) from flags, mirroring splitThreeArgs. Used by
+// animate-character, whose CLI shape is `<out> <ref> <driver> "<prompt>" [flags]`.
+func splitFourArgs(args []string, valueFlags map[string]bool) (first, second, third, fourth string, flags []string) {
+	var pos []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "-") && a != "-" {
+			flags = append(flags, a)
+			name := strings.TrimLeft(a, "-")
+			if strings.ContainsRune(name, '=') {
+				continue
+			}
+			if valueFlags[name] && i+1 < len(args) {
+				i++
+				flags = append(flags, args[i])
+			}
+			continue
+		}
+		if len(pos) < 4 {
+			pos = append(pos, a)
+		} else {
+			flags = append(flags, a)
+		}
+	}
+	pos = append(pos, "", "", "", "")
+	return pos[0], pos[1], pos[2], pos[3], flags
 }
 
 // splitThreeArgs separates the FIRST THREE positionals (e.g. out path + still +

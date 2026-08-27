@@ -167,6 +167,7 @@ func routesIn(cfg config.Config, exeDir string) []Route {
 		comfy                    bool
 	}{
 		{"generate_video", "comfyui", "videogen_script", cfg.VideoGenScript, true},
+		{"animate_character", "comfyui", "animategen_script", cfg.AnimateGenScript, true},
 		{"generate_audio:voice", "chatterbox-tts", "voicegen_script", cfg.VoiceGenScript, false},
 		{"generate_audio:music", "acestep", "musicgen_script", cfg.MusicGenScript, true},
 		{"run_graph", "comfyui", "run_graph_script", cfg.RunGraphScript, true},

@@ -28,7 +28,7 @@ import (
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
 // messages). Membership is decided per-config by taskConfiguredFor.
-var fleetTaskOrder = []string{"image-gen", "video-gen", "stt", "audio-gen", "run-graph", "agent"}
+var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", "agent"}
 
 // taskConfiguredFor reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
@@ -49,6 +49,8 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 		return cfg.ImageRouteConfigured() // ComfyUI script OR the sdcpp engine (J2)
 	case "video-gen":
 		return cfg.VideoGenScript != ""
+	case "animate":
+		return cfg.AnimateGenScript != ""
 	case "stt":
 		return cfg.STTModel != ""
 	case "audio-gen":
@@ -207,6 +209,10 @@ func familyFor(cfg config.Config, taskType string) string {
 		default:
 			return "wan2.2"
 		}
+	case "animate":
+		// One shipped variant; must agree with what the pipeline writes into the
+		// footprint store (pipeline.runAnimateCharacter samples under this key).
+		return "wan-animate2"
 	case "stt":
 		return "whisper"
 	case "audio-gen":
@@ -267,6 +273,8 @@ func BuildRequest(ctx context.Context, cfg config.Config, loopbackListener bool,
 		return buildImageGen(payload)
 	case "video-gen":
 		return buildVideoGen(payload)
+	case "animate":
+		return buildAnimate(payload)
 	case "stt":
 		return buildSTT(payload)
 	case "audio-gen":
@@ -394,6 +402,72 @@ func buildVideoGen(payload json.RawMessage) (core.Request, func(), error) {
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
 	}
 	return core.Request{Task: core.TaskGenerateVideo, Input: in.Prompt, Params: params}, noop, nil
+}
+
+// buildAnimate mirrors mcpserver.handleAnimateCharacter. Paths in the payload
+// (ref/driver/out) are node-local, like every other fleet media payload.
+func buildAnimate(payload json.RawMessage) (core.Request, func(), error) {
+	noop := func() {}
+	var in struct {
+		Ref          string  `json:"ref"`
+		Driver       string  `json:"driver"`
+		Prompt       string  `json:"prompt"`
+		MotionPrompt string  `json:"motion_prompt"`
+		Negative     string  `json:"negative"`
+		Out          string  `json:"out"`
+		Width        int     `json:"width"`
+		Height       int     `json:"height"`
+		Frames       int     `json:"frames"`
+		Steps        int     `json:"steps"`
+		Seed         int     `json:"seed"`
+		PoseStrength string  `json:"pose_strength"`
+		RefStrength  string  `json:"ref_strength"`
+		ReserveVRAM  float64 `json:"reserve_vram"`
+	}
+	if err := json.Unmarshal(payload, &in); err != nil {
+		return core.Request{}, noop, fmt.Errorf("animate payload: %w", err)
+	}
+	if in.Prompt == "" {
+		return core.Request{}, noop, fmt.Errorf("animate payload: prompt required")
+	}
+	if in.Ref == "" || in.Driver == "" {
+		return core.Request{}, noop, fmt.Errorf("animate payload: ref and driver required")
+	}
+	params := map[string]any{"ref": in.Ref, "driver": in.Driver}
+	if in.MotionPrompt != "" {
+		params["motion_prompt"] = in.MotionPrompt
+	}
+	if in.Negative != "" {
+		params["negative"] = in.Negative
+	}
+	if in.Out != "" {
+		params["out"] = in.Out
+	}
+	if in.Width > 0 {
+		params["width"] = in.Width
+	}
+	if in.Height > 0 {
+		params["height"] = in.Height
+	}
+	if in.Frames > 0 {
+		params["frames"] = in.Frames
+	}
+	if in.Steps > 0 {
+		params["steps"] = in.Steps
+	}
+	if in.Seed > 0 {
+		params["seed"] = in.Seed
+	}
+	if in.PoseStrength != "" {
+		params["pose_strength"] = in.PoseStrength
+	}
+	if in.RefStrength != "" {
+		params["ref_strength"] = in.RefStrength
+	}
+	if in.ReserveVRAM > 0 {
+		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
+	}
+	return core.Request{Task: core.TaskAnimateCharacter, Input: in.Prompt, Image: in.Ref, Video: in.Driver, Params: params}, noop, nil
 }
 
 // buildSTT mirrors mcpserver.handleTranscribe (minus the MCP-only select
