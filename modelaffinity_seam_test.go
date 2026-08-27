@@ -23,6 +23,18 @@ import (
 // the other, so a gate living in either one alone cannot fix this — the check
 // has to be here, where both lanes exist at once.
 func TestAgentSeatAndCascadeSeatDoNotThrashOneBase(t *testing.T) {
+	// Hermetic lease state. Other tests in this package load the real config,
+	// which arms modelaffinity's machine-wide GPU-lease gate at the REAL state
+	// root (C:\ProgramData\local-offload on Windows). On a developer box where
+	// another session holds a live media lease, that made agentClient.Chat wait
+	// out the full lease budget and this test deadlock on <-entered until the
+	// package's 10m limit (observed 2026-08-27: "a media job holds the GPU
+	// (pid 40588)"). Point the gate at an empty throwaway dir instead: this test
+	// is about the PROCESS-LOCAL seam between the two text lanes, not the lease.
+	if err := modelaffinity.SetGPULease("", t.TempDir()); err != nil {
+		t.Fatalf("arming hermetic lease dir: %v", err)
+	}
+
 	var mu sync.Mutex
 	live := map[string]int{}
 	var overlaps []string
@@ -70,8 +82,14 @@ func TestAgentSeatAndCascadeSeatDoNotThrashOneBase(t *testing.T) {
 			t.Errorf("agent Chat: %v", err)
 		}
 	}()
-	if got := <-entered; got != "agent-seat" {
-		t.Fatalf("first request into llama-swap was %q, want agent-seat", got)
+	select {
+	case got := <-entered:
+		if got != "agent-seat" {
+			t.Fatalf("first request into llama-swap was %q, want agent-seat", got)
+		}
+	case <-time.After(30 * time.Second):
+		close(hold)
+		t.Fatal("agent seat's first request never reached llama-swap within 30s — the admission gate is blocking it (is the lease gate armed at real machine state?)")
 	}
 
 	// The cascade call arrives while the agent seat is mid-generation. Before
