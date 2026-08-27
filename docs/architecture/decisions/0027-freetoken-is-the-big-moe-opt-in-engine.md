@@ -38,9 +38,9 @@ with `gpt-oss-120b` as its seated model.
   `/v1/messages` also served). The harness or any client reaches it as a plain
   endpoint — config, not code.
 - **Install locations (both nodes, isolated from production):**
-  - Qube: WSL distro `freetoken` (separate from `Ubuntu-ML`/mem0), venv at
+  - Qube: WSL distro `freetoken` (separate from the production WSL distro that hosts the memory stack), venv at
     `/opt/freetoken`, engine from git main.
-  - Lenovo: `/srv/ecosystem_backup/apps/offload-stack/freetoken` (ZFS pool;
+  - Lenovo: the node's ZFS app pool under `offload-stack/freetoken` (pool storage;
     `UV_CACHE_DIR` and `HF_HOME` MUST live on the pool — a home-dir quota killed
     the first `[accel]` install).
 - **Canonical launch (Qube):**
