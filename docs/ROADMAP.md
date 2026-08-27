@@ -203,6 +203,56 @@ Promoted out of housekeeping by §11.1/§13.4: five Go stdlib CVEs and a sandbox
 - **Hold `modelcontextprotocol/go-sdk` at v1.6.1.** We are already past its four advisories; v1.7.0 is a **breaking protocol change** and needs its own migration.
 - **Node v24.18.0 → v24.20.0** (v24.18.1 fixed 11 CVEs, 3 HIGH).
 
+### STACK UPDATE — EXECUTED 2026-08-27 (T2, T3, T5, T6 complete)
+
+Operator direction: "the full system update — dependencies, libraries, EVERYTHING GETS
+UPDATED RIGHT NOW." Executed same-night; every row below is live-verified, not assumed.
+
+| component | before | after | verification |
+|---|---|---|---|
+| llama.cpp | b10435 nightly | **b10621** (= the nightly blessed by semver v0.3.0) | agent contracts ran on it (`seat_config_basis: b10621-c1d0e7a00`) |
+| llama-swap | v249 | **v251** | serving; embeddinggemma child spawned from the b10621 path |
+| whisper.cpp | 080bbbe8 (Jul) | **v1.9.3**, CUDA 13.3 build | JFK sample transcribed perfectly through the harness |
+| torch | 2.11.0+cu128 | **2.13.0+cu130** (+tv 0.28.0, +ta 2.11.0) | kitchen CUDA gate open; 8/8 W4A4 shapes pass (cu128 failed 5/8) |
+| ComfyUI | 0.32.0 | **v0.34.0** (frontend 1.49.6 as pinned) | E2E 1920×1088 image render through the harness |
+| CUDA toolkit | 12.8 | **13.3.1** side-by-side (12.8 kept — see SageAttention) | nvcc V13.3.73; driver 616.56 untouched (13.x installer ships no driver) |
+| Go / Node / Python / GIMP / ffmpeg | 1.26.5 / 24.18.0 / 3.14.6 / 3.2 / 7.1 | **1.26.7 / 24.20.0 / 3.14.7 / 3.2.4 / 9.0.1** | installers exit 0; ffmpeg out of the venv at `D:\Dev	oolsfmpeg-9.0.1`, config repointed |
+| harness | 0.103.0 | **0.105.0** (PRs #187, #188) | deployed Qube + Lenovo, `fleet/health` verified |
+| custom nodes | 4 stale | all at remote HEAD | Manager, VideoHelperSuite, Inpaint-CropAndStitch, RMBG |
+
+**Version policy adopted (operator-prompted): take the project's RELEASED version, never
+the newest build.** llama.cpp semver releases carry one asset — `nightly-tag.txt` naming
+the blessed b-build (v0.3.0 → b10621). ComfyUI had a `v0.34.1` tag with **no release**
+behind it. b10435 — an arbitrary nightly inside a 10–15× regression window — is the
+cautionary tale.
+
+**T3 payoff, measured.** The full native LTX-2.5 recipe — 1920×1088, 121 frames, joint
+audio+video — now renders end-to-end through the harness: **"Prompt executed in 259.26 s"**
+(326 s wall including ComfyUI cold start), producing a real 5.04 s A/V clip. Before cu130
+this recipe was impossible at full resolution: the W4A4 DiT upcast-loaded at ~39 GB and
+did not fit the 32.6 GB pool (the standing "pool at reduced resolution" workaround).
+`scaled_mm_nvfp4` is also PRESENT in the kitchen CUDA backend (the research handover said
+absent) — the W4A4-vs-NVFP4 question deserves a re-measure before any NVFP4 purchase.
+
+**A second 0.34 break found and fixed (0.105.0, PR #188):** ComfyUI now hides every GPU
+but the first on Windows (upstream #15737/#15813) — every pooled DisTorch2 graph failed
+validation with `donor_device: 'cuda:1' not in ['cpu','cuda:0']`. `ensureComfy` restores
+visibility via `cudaVisibleEnv()` (env-based, operator-overridable, multi-GPU spawns get
+`--disable-pinned-memory` per upstream's own guidance).
+
+**T6 applied:** deployed `imagegen_timeout_sec` 3600 → **600** — a wedged image render now
+denies machine-wide media for at most 10 minutes, not 60.
+
+**Deferred, with reasons:**
+- **SageAttention cu130 rebuild** — three attempts fail identically: setuptools picks the
+  VS18 BuildTools toolchain (MSVC 14.51) and torch 2.13 headers C2988-cascade regardless
+  of `/std` flags. Uninstalled cleanly (opt-in feature; ComfyUI runs without it). CUDA
+  12.8 stays installed until this verifies (operator's removal condition not yet met).
+- **Aorus** — offline throughout; parity debt now spans harness 0.102.0→0.105.0 AND the
+  whole stack. First action when it answers.
+- **Go 1.27.0** — deliberate hold (encoding/json v2 is its own migration).
+- **go-sdk v1.7.0** — deliberate hold (breaking protocol change).
+
 ### T3. The cu130 chain — the hard gate for all media work
 
 **Nothing in the media stack may be benchmarked or bake-off'd until this passes.** ComfyUI hard-disables `comfy_kitchen`'s CUDA backend whenever `torch.version.cuda < 13`, and that backend is the only provider of tensor-core kernels for NVFP4 / FP8 / ConvRot-W4A4 / INT8. With it off, our quantized checkpoints fall back to dequantize-to-bf16. Measured on this box: **W4A4 runs at 0.29× BF16 today and 1.85× with the backend on** — a 3.4–6.3× matmul penalty on the LTX-2.5 pipeline we already run.
