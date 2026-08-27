@@ -6,6 +6,35 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.104.0] - 2026-08-27
+
+### Security — dependency bumps (5 Go-stdlib-adjacent advisories closed)
+
+- `landlock-lsm/go-landlock` v0.9.0 → v0.10.0 — GHSA-vv6c-69r6-chg9: best-effort mode
+  had silently stopped restricting TCP bind/connect; we had been running the vulnerable
+  version since adoption.
+- `golang.org/x/sys` v0.46.0 → v0.47.0 — CVE-2026-39824, integer overflow in
+  `windows.NewNTUnicodeString`; directly in scope on the Windows fleet.
+- `golang.org/x/text` v0.38.0 → v0.41.0 — CVE-2026-56852, infinite loop on invalid input.
+- `golang.org/x/net` v0.41.0 → v0.58.0, `modernc.org/sqlite` v1.37.0 → v1.57.0,
+  `santhosh-tekuri/jsonschema/v6` v6.0.2 → v6.0.3 (transitives came along).
+- `modelcontextprotocol/go-sdk` deliberately HELD at v1.6.1: we are already past its four
+  advisories, and v1.7.0 is a breaking protocol change that gets its own migration.
+- Toolchain: built and tested on Go 1.26.7 (five stdlib CVEs fixed vs 1.26.5; 1.26.6
+  skipped — it broke unencrypted HTTP/2). Go 1.27.0 deferred: its encoding/json v2
+  switch is not gated on go.mod and this harness is JSON-heavy.
+
+### Fixed — the root-package seam test no longer deadlocks under a live render
+
+- `TestAgentSeatAndCascadeSeatDoNotThrashOneBase` inherited the machine-wide GPU-lease
+  gate armed at the REAL state root by earlier tests in the same binary. On a box where
+  another session held a live media lease, the agent seat's admission waited out the
+  full lease budget and the test hung on an unbounded channel receive until the
+  package's 10m limit (observed live: "a media job holds the GPU (pid 40588)").
+  The test now arms the gate at an empty `t.TempDir()` — it is about the process-local
+  seam between the two text lanes, not the lease — and the first-request wait is
+  bounded at 30s so a regression fails fast instead of timing out the suite.
+
 ## [0.103.0] - 2026-08-26
 
 ### Fixed - text no longer loads a model into VRAM a running render is using
