@@ -350,7 +350,7 @@ byte-expert allocation string is deliberately unused (its reservation half is a 
 no-op — the node reads only the post-`#` segment expert mode leaves empty). Pooled
 safetensor serving additionally requires launching ComfyUI with `--disable-dynamic-vram`
 until ComfyUI-MultiGPU #191 lands — carried per-box by the `COMFY_EXTRA_ARGS` launch seam,
-never by shared code. Zero/empty pool keys render single-GPU (the small-fleet shape).
+never by shared code. **Windows multi-GPU visibility (ComfyUI >= 0.34):** upstream hides every CUDA device but the first on Windows unless devices are explicitly selected; `ensureComfy` restores full visibility for the spawned child via `cudaVisibleEnv()` (env-based; multi-GPU spawns also get `--disable-pinned-memory` per upstream guidance) whenever the operator has not already scoped devices — without this, every pooled graph fails prompt validation with `donor_device: 'cuda:1' not in ['cpu', 'cuda:0']`. Zero/empty pool keys render single-GPU (the small-fleet shape).
 
 The recommended **≥16 GB image-*edit* primitive is Qwen-Image-Edit-2511** (Apache-2.0). Since the
 generative-edit route landed (0.44.0) it is a first-class `gen_edit_*` config binding — set

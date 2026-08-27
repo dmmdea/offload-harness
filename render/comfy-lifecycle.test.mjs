@@ -8,7 +8,7 @@ import assert from "node:assert";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureComfy, resolveComfyPy, resolveComfyDir } from "./comfy-lifecycle.mjs";
+import { ensureComfy, resolveComfyPy, resolveComfyDir, cudaVisibleEnv } from "./comfy-lifecycle.mjs";
 
 // A bound ComfyUI dir, injected so the lifecycle tests exercise the SPAWN path on
 // every OS. Without it they inherited the platform default — "C:/ComfyUI" on Windows,
@@ -20,7 +20,7 @@ const BOUND_DIR = "/fake/comfyui";
 test("already running => returns null (don't manage someone else's ComfyUI)", async () => {
   const child = await ensureComfy({
     comfyUp: async () => true,
-    spawn: () => { throw new Error("should not spawn when already up"); },
+    spawn: () => { throw new Error("should not spawn when already up"); }, envFor: () => process.env, envFor: () => process.env,
   });
   assert.equal(child, null);
 });
@@ -31,7 +31,7 @@ test("down => spawns with zero-always-warm flags + default --reserve-vram 1.0", 
   const fake = { kill() {} };
   const child = await ensureComfy({
     comfyUp: async () => (ups++ > 0), // first poll: down; then up
-    spawn: (py, args) => { spawnedArgs = args; return fake; },
+    spawn: (py, args) => { spawnedArgs = args; return fake; }, envFor: () => process.env,
     comfyDir: BOUND_DIR,
     pollMs: 1,
   });
@@ -92,7 +92,7 @@ test("never ready => kills the child and throws", async () => {
   await assert.rejects(
     ensureComfy({
       comfyUp: async () => false, // always down
-      spawn: () => ({ kill() { killed++; } }),
+      spawn: () => ({ kill() { killed++; } }), envFor: () => process.env,
       comfyDir: BOUND_DIR,
       pollMs: 1,
       maxPolls: 3,
@@ -110,6 +110,7 @@ test("COMFY_EXTRA_ARGS appends verbatim launch flags (J4 seam); unset = byte-ide
       comfyUp: async () => spawnedArgs !== null, // down first, up after spawn
       spawn: (_py, args) => { spawnedArgs = args; return { kill() {} }; },
       comfyDir: BOUND_DIR,
+      envFor: () => process.env,
       pollMs: 1,
     });
   } finally {
@@ -122,6 +123,7 @@ test("COMFY_EXTRA_ARGS appends verbatim launch flags (J4 seam); unset = byte-ide
     comfyUp: async () => plainArgs !== null,
     spawn: (_py, args) => { plainArgs = args; return { kill() {} }; },
     comfyDir: BOUND_DIR,
+    envFor: () => process.env,
     pollMs: 1,
   });
   assert.equal(plainArgs.includes("--directml"), false);
@@ -179,7 +181,47 @@ test("resolveComfyDir: the Windows default is Windows-only", () => {
 
 test("ensureComfy: an unbound COMFY_DIR fails with a reason, not a bad cwd", async () => {
   await assert.rejects(
-    () => ensureComfy({ comfyUp: async () => false, comfyDir: "", spawn: () => { throw new Error("must not spawn"); }, pollMs: 1 }),
+    () => ensureComfy({ comfyUp: async () => false, comfyDir: "", spawn: () => { throw new Error("must not spawn"); }, envFor: () => process.env, envFor: () => process.env, pollMs: 1 }),
     /COMFY_DIR/,
   );
+});
+
+// ComfyUI >=0.34 hides all but the first CUDA device on Windows unless told
+// otherwise (upstream #15737/#15813); cudaVisibleEnv restores full visibility for
+// the spawned child, and ONLY when the operator has not already scoped devices.
+test("cudaVisibleEnv: multi-GPU Windows box gets every device listed", () => {
+  const got = cudaVisibleEnv({}, () => 2);
+  if (process.platform === "win32") {
+    assert.equal(got.CUDA_VISIBLE_DEVICES, "0,1");
+  } else {
+    assert.equal(got.CUDA_VISIBLE_DEVICES, undefined);
+  }
+});
+
+test("cudaVisibleEnv: an operator-set CUDA_VISIBLE_DEVICES always wins", () => {
+  const env = { CUDA_VISIBLE_DEVICES: "1" };
+  assert.equal(cudaVisibleEnv(env, () => 2), env);
+});
+
+test("cudaVisibleEnv: a --cuda-device in COMFY_EXTRA_ARGS wins (per-box escape hatch)", () => {
+  const env = { COMFY_EXTRA_ARGS: "--cuda-device 0" };
+  assert.equal(cudaVisibleEnv(env, () => 2), env);
+});
+
+test("cudaVisibleEnv: single-GPU and no-nvidia-smi boxes are left on the upstream default", () => {
+  assert.equal(cudaVisibleEnv({}, () => 1).CUDA_VISIBLE_DEVICES, undefined);
+  assert.equal(cudaVisibleEnv({}, () => 0).CUDA_VISIBLE_DEVICES, undefined);
+});
+
+test("multi-GPU spawn env carries --disable-pinned-memory (upstream #15737 guidance)", async () => {
+  let got = null;
+  const fakeSpawn = (cmd, args, opts) => { got = { args, env: opts.env }; return { kill() {} }; };
+  const fakeEnv = { ...process.env, CUDA_VISIBLE_DEVICES: "0,1" };
+  await ensureComfy({
+    comfyDir: "C:/x", py: "py", comfyUp: async () => got !== null,
+    spawn: fakeSpawn, envFor: () => fakeEnv, pollMs: 1, maxPolls: 3,
+  }).catch(() => {});
+  assert.ok(got, "spawn was not called");
+  assert.ok(got.args.includes("--disable-pinned-memory"), "flag missing: " + got.args.join(" "));
+  assert.equal(got.env.CUDA_VISIBLE_DEVICES, "0,1");
 });

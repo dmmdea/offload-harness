@@ -6,6 +6,26 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.105.0] - 2026-08-27
+
+### Fixed — ComfyUI >= 0.34 hid every GPU but the first on Windows, breaking the pooled tiers
+
+ComfyUI 0.34.0 defaults Windows to `CUDA_VISIBLE_DEVICES=0` when the operator passed no
+device selection (upstream #15737 "Limit Windows multi-GPU visibility" + #15813). On the
+`blackwell-2x16` tier every DisTorch2 pooled graph then failed prompt validation —
+`donor_device: 'cuda:1' not in ['cpu', 'cuda:0']` — so image and video generation
+deferred on a box with two healthy cards.
+
+`ensureComfy` now spawns ComfyUI through `cudaVisibleEnv()`: on Windows, when the
+operator has not already scoped devices (env `CUDA_VISIBLE_DEVICES`, or a
+`--cuda-device` in `COMFY_EXTRA_ARGS`) and more than one NVIDIA GPU is present, the
+child gets every device listed. Env-based rather than `--cuda-device all` so older
+ComfyUI versions (integer-only flag) keep working. Multi-GPU spawns also carry
+`--disable-pinned-memory` — the second half of upstream's own guidance, avoiding the
+Windows CUDA host-transfer failures that motivated their change. Single-GPU boxes and
+non-Windows nodes are byte-identical. Live-verified on the 2-card box: the DisTorch2
+donor enum returns `["cpu","cuda:0","cuda:1"]` and the krea2 pooled graph validates.
+
 ## [0.104.0] - 2026-08-27
 
 ### Security — dependency bumps (5 Go-stdlib-adjacent advisories closed)
