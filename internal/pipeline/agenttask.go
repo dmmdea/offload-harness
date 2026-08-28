@@ -489,6 +489,9 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 		}
 		content := []byte(strings.TrimSpace(gres.Content))
 		if verr := validator.Validate(content, schema); verr != nil {
+			if fixed, ok := coerceToSchema(content, schema); ok {
+				return json.RawMessage(fixed), gres.TokensOut, false, nil
+			}
 			lastErr = verr
 			continue
 		}
@@ -555,9 +558,76 @@ func (p *Pipeline) repackViaChat(ctx context.Context, seat string, schema map[st
 		content = content[i : j+1]
 	}
 	if verr := validator.Validate([]byte(content), schema); verr != nil {
-		return nil, 0, false
+		fixed, ok := coerceToSchema([]byte(content), schema)
+		if !ok {
+			return nil, 0, false
+		}
+		return json.RawMessage(fixed), gres.TokensOut, true
 	}
 	return json.RawMessage(content), gres.TokensOut, true
+}
+
+// coerceToSchema repairs the ONE failure shape a grammar would have prevented
+// and no prompt reliably does: scalar TYPE mismatches from a grammar-less
+// seat — "7" where the schema wants a number, "true" where it wants a bool.
+// Found live on the FreeToken gpt-oss seat (2026-08-27/28): the model answers
+// correctly and quotes every scalar, so each typed contract abstained after a
+// CORRECT answer. Coercion is deterministic and lossless — a string is
+// converted only when the schema demands the type AND the value parses as it —
+// and the result must re-validate in full before it counts. Anything beyond
+// scalar re-typing (missing fields, wrong structure) still fails honestly.
+func coerceToSchema(content []byte, schema map[string]any) ([]byte, bool) {
+	var obj map[string]any
+	if json.Unmarshal(content, &obj) != nil {
+		return nil, false
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	changed := false
+	for name, raw := range props {
+		spec, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		want, _ := spec["type"].(string)
+		got, present := obj[name]
+		str, isStr := got.(string)
+		if !present || !isStr {
+			continue
+		}
+		switch want {
+		case "number", "integer":
+			var n json.Number
+			if err := json.Unmarshal([]byte(strings.TrimSpace(str)), &n); err == nil {
+				if f, ferr := n.Float64(); ferr == nil {
+					obj[name] = f
+					changed = true
+				}
+			}
+		case "boolean":
+			switch strings.ToLower(strings.TrimSpace(str)) {
+			case "true":
+				obj[name] = true
+				changed = true
+			case "false":
+				obj[name] = false
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return nil, false
+	}
+	fixed, merr := json.Marshal(obj)
+	if merr != nil {
+		return nil, false
+	}
+	if validator.Validate(fixed, schema) != nil {
+		return nil, false
+	}
+	return fixed, true
 }
 
 // genErrIsTransport reports whether a Generate error means the SEAT COULD NOT

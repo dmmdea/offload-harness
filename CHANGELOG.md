@@ -6,6 +6,17 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.2] - 2026-08-28
+
+### Fixed — repack coerces string-typed scalars a grammar-less seat cannot type
+
+Second live FreeToken shape: the seat answers CORRECTLY but quotes every
+scalar ({"pallet_count":"7"} against a number schema), so typed contracts
+abstained after right answers. Both repack lanes now run a deterministic,
+lossless coercion on validation failure — a string converts only when the
+schema demands the type AND the value parses as it, and the result must
+re-validate in full. Structural failures still fail honestly.
+
 ## [0.108.1] - 2026-08-28
 
 ### Fixed — agent re-pack falls back to the chat route when the seat has no native completion path
