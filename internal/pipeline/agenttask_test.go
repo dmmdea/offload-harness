@@ -963,3 +963,56 @@ func TestRunAgentTaskRepackFallsBackToChatWhenGrammarRouteMissing(t *testing.T) 
 		t.Fatalf("chat-fallback attempts = %d, want exactly 1", got)
 	}
 }
+
+// TestRunAgentTaskRepackCoercesStringTypedScalars is the second live FreeToken
+// shape (2026-08-28): the grammar-less seat answers CORRECTLY but quotes every
+// scalar — {"pallet_count":"7"} against a number-typed schema — so each typed
+// contract abstained after a right answer. Coercion converts only what the
+// schema demands and the value parses as, and the result re-validates in full.
+func TestRunAgentTaskRepackCoercesStringTypedScalars(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop:      func(int64) string { return doneChat("The answer is 42.") },
+		// The grammar lane itself returns the string-typed scalar (an engine
+		// that accepts the request but cannot honor the grammar).
+		repack: func(int64) string { return `{"answer_num":"42"}` },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	contract := testContract()
+	contract.OutputSchema = json.RawMessage(`{"type":"object","properties":{"answer_num":{"type":"number"}}}`)
+
+	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, contract))
+	wire := decodeWire(t, res)
+
+	if wire.Deferred {
+		t.Fatalf("coercion must recover the typed scalar, got defer: %s", wire.Reason)
+	}
+	var out struct {
+		AnswerNum float64 `json:"answer_num"`
+	}
+	if err := json.Unmarshal(wire.Structured, &out); err != nil || out.AnswerNum != 42 {
+		t.Fatalf("structured = %s (err %v), want answer_num 42 as a NUMBER", wire.Structured, err)
+	}
+	if got := fake.grammarCNT.Load(); got != 1 {
+		t.Fatalf("grammar attempts = %d, want 1 (coercion recovers the first)", got)
+	}
+}
+
+// TestCoerceToSchemaRefusesNonScalarRepairs: coercion never invents structure —
+// a missing field or an unparseable string still fails.
+func TestCoerceToSchemaRefusesNonScalarRepairs(t *testing.T) {
+	schema := map[string]any{"type": "object", "properties": map[string]any{
+		"n": map[string]any{"type": "number"},
+	}, "required": []any{"n"}}
+	if _, ok := coerceToSchema([]byte(`{"n":"seven"}`), schema); ok {
+		t.Fatal("an unparseable number string must not coerce")
+	}
+	if _, ok := coerceToSchema([]byte(`{"other":1}`), schema); ok {
+		t.Fatal("a missing required field must not coerce")
+	}
+	if fixed, ok := coerceToSchema([]byte(`{"n":"3.5"}`), schema); !ok || !strings.Contains(string(fixed), "3.5") {
+		t.Fatalf("a parseable number string must coerce, got ok=%v %s", ok, fixed)
+	}
+}
