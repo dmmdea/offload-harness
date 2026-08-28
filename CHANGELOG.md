@@ -6,6 +6,31 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.0] - 2026-08-27
+
+### Added — delegation durability: the push-side intent ledger (ADR 0028, pull-queue Option A)
+
+Operator-decided close of the consolidated-pull-queue question: keep push
+placement, add delegator-death durability; the pull inversion (Option B) stays
+parked until the delegation scoreboard shows real contention.
+
+- Every ACKED remote dispatch persists an intent line to
+  `<state-root>/delegate-intent.jsonl` BEFORE polling; a terminal answer
+  observed by the dispatching process closes it. The orphanable exits —
+  cancellation, the owned-job poll deadline, the queued give-up — leave it
+  OPEN on purpose: those are the shapes where the node may still finish.
+- A once-per-process background pass re-polls open intents and files finished
+  results to `<state-root>/delegate-recovered/<job>.json` (logged per
+  recovery); positive 404 denials and 48h-stale entries close honestly as
+  lost/expired. The ledger is NEVER rewritten (round-1 review): many harness
+  processes append to it concurrently and a rename-replace compaction would
+  lose appends landing in the rename window — past 20k lines recovery logs
+  the size and the operator truncates cold. Recovery is one poll, never a
+  re-run — the node's duplicate-job path re-acks idempotently.
+- A nil ledger (unresolvable state root) is inert: dispatch gains no new
+  failure mode. `runner.pollOnce` now delegates to the shared `pollJobOnce`
+  so recovery polls by exactly the runner's rules.
+
 ## [0.107.0] - 2026-08-27
 
 ### Added — `h3`: MiniMax-H3 joint-AV as an opt-in videogen family
