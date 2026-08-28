@@ -53,6 +53,23 @@ The 2026-06 build order below is **closed**. What it called Phase 2 shipped in f
 
 ---
 
+## CHECKPOINT 2026-08-28 — the post-approval execution sweep (T-items all closed; the board is clean)
+
+Everything the operator approved on 2026-08-27/28 shipped, deployed, and behavior-verified in one arc — PRs #195–#203, each CI-green and merged by `dmmdea`:
+
+- **T4 closed** (#195): MiniMax-H3 + WAN-Animate-2 wired from the official templates, bake-off verdicts recorded above. **H3 then SEATED** as the opt-in `model:"h3"` videogen family (#198, 0.107.0, deployed-path render verified); the **r2v DiT** (20.97 GB) is on disk for the reference-to-video lane. **WAN-Animate ROUTED** (#196, 0.106.0): `offload_animate_character` + `animate-character` + fleet task `animate`, live-verified; the template's `gpu/int8` pose cache hard-kills ComfyUI under ComfyUI-MultiGPU (filed as MultiGPU#219 after a clean-ComfyUI differential exonerated core).
+- **Delegation durability shipped** (#199, ADR 0028, 0.108.0): the push-side intent ledger + orphan recovery. **Option B built DARK** (#203, ADR 0030, 0.109.0): `internal/fleetqueue` + claim loops + `route:"queue"`, inert until its three config keys are bound — enabling stays scoreboard-gated.
+- **Lenovo FreeToken agent lane: attempted, REVERSED** (ADR 0029, #202): fully wired (pool install under systemd hardening, llama-swap-managed seat), then the real delegation path caught **cross-request response contamination** — reverted to the 4B seat (re-verified). The arc's harness fixes stay fleet-wide: grammar-free chat re-pack fallback (#200, 0.108.1) + schema-guided scalar coercion (#201, 0.108.2) — prerequisites for ANY OpenAI-only seat.
+- **video_watch at scale proven**: a 44-min 4K published video fully analyzed (45 windows @1024px + whisper), catching a leftover Veo AI-stock watermark; the tail-window/ffmpeg-9 fixes + the WaitFree deflake shipped in #197 (0.106.1, closes #81).
+- **Fleet parity**: Qube + Lenovo at **0.109.0**; Aorus at 0.108.2 (behaviorally identical — 0.109.0 is the dark queue), both harness copies + native llama.cpp **b10621** + llama-swap v251, restored after its 2-day outage. Its WSL llama stack is RETIRED (native flip 2026-08-25) — rebuilt as a spare, unit disabled; do not start it (WSL mirrored networking port-collides with the native listener).
+- **sd.cpp on the reference box** (0.109.0 changelog): master-829-0a565f2 official win-cuda12 + the Lenovo's exact sdxl-turbo Q4_0, bound as `sdcpp_bin`/`sdcpp_model` in both deployed configs, render-verified; **fallback only** — `imagegen_engine` unchanged, H3-via-sd.cpp stays parked on upstream #1871 (open). *(The "sd.cpp on Qube" entry in Parked below is superseded by this.)*
+- **T1-A hibernation verified LIVE on b10621** (operator-ordered check): seat_start → save → committed vault blob at `U:\kvstate`, no scheduled task involved; the old "one UAC consent blocks go-live" claim was stale.
+- Also closed: disk reclaim (old llama.cpp trees + cu128 venv), leak-scan hooks on all 7 public-origin clones, Docker-leftovers resolved on the reference box, pull-queue decision doc retired into ADRs 0028/0030.
+
+**Standing next actions:** Aorus 0.109.0 top-up + fleet-node boot trigger (admin run) when it pings; the monthly sweep (first October nightshift) carries the watches — FreeToken#240, llama.cpp PR#27742 (Flash-Next), MultiGPU#219, sd.cpp#1871, ADR 0029's contamination differential, ADR 0030's enabling scoreboard.
+
+---
+
 ## Decided order — frontier update (2026-08-26)
 
 Source: `2026-08-26-offload-stack-frontier-update-handover.md` (research session). **Every version number below was re-verified live on Qube on 2026-08-26** before being written here — §8 of that handover warned its own numbers were single-sourced, and four of its cautions turned out to be already satisfied (recorded in "Corrections" at the end of this section).
