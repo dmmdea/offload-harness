@@ -3248,6 +3248,7 @@ func resolveVideoFamily(cfg config.Config, reqModel string) (argModel, renderFam
 // dispatch literals so a family added there cannot drift away from this resolver.
 var videoRunnerFamilies = map[string]string{
 	"ltx25":   "ltx25",
+	"h3":      "h3",
 	"hunyuan": "hunyuan",
 	"ace":     "ace",
 }

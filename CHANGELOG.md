@@ -6,6 +6,25 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.107.0] - 2026-08-27
+
+### Added — `h3`: MiniMax-H3 joint-AV as an opt-in videogen family
+
+Operator-approved on the T4 bake-off verdict (matched still/prompt/seed vs the
+seated LTX-2.5): H3 turbo-8 wins prompt adherence (full scripted action arcs,
+multi-shot storyboards with hard cuts), i2v source fidelity, and audio design,
+at ~2x the wall. LTX-2.5 remains the default family; pass `model:"h3"`.
+
+- `render/wf-h3-av.mjs` (+ tests): the official `video_minimax_h3` template's
+  subgraph in API format. Turbo-8 is the DEFAULT (the verdict recipe;
+  `hero:true` = the template's non-LoRA 20-step alternative). The still is
+  OPTIONAL — t2v without, i2v with. NATIVE single-card loader only, no
+  DisTorch option: pooling upcasts the int8 DiT 20.97 GB → 37.46 GB (measured),
+  while the plain loader keeps native convrot-W4A4 with partial offload.
+- Family allowlists extended in lockstep (runner dispatch, pipeline
+  provenance/footprint, fleet advertisement) per the writer/advertiser
+  one-namespace rule; MCP schema + CLI help document the new enum value.
+
 ## [0.106.1] - 2026-08-27
 
 ### Fixed — video_watch tail windows and ffmpeg 9 mjpeg strictness

@@ -204,7 +204,7 @@ func familyFor(cfg config.Config, taskType string) string {
 		// TestVideoFootprintFamilyMatchesTheAdvertisedFamily pins the two
 		// packages together over that full input space.
 		switch f := strings.TrimSpace(cfg.VideoGenFamily); f {
-		case "ltx25", "hunyuan", "ace":
+		case "ltx25", "h3", "hunyuan", "ace":
 			return f
 		default:
 			return "wan2.2"

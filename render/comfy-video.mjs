@@ -20,6 +20,7 @@ import { firstOutputFile } from "./comfy-output.mjs";
 import { buildHunyuan15I2V } from "./wf-hunyuan15-i2v.mjs";
 import { buildWan22I2V } from "./wf-wan22-i2v.mjs";
 import { buildLtx25I2V } from "./wf-ltx25-i2v.mjs";
+import { buildH3AV } from "./wf-h3-av.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
 
@@ -71,6 +72,23 @@ async function generate() {
     const common = { prompt, seed, seconds: Number(flags.seconds || 30) };
     if (flags.steps) common.steps = Number(flags.steps);
     graph = buildAceStep(common);
+  } else if (flags.model === "h3") {
+    // MiniMax-H3 joint-AV (opt-in family, T4 verdict recipe): the still is
+    // OPTIONAL — no still = t2v (storyboard direction, which H3 uniquely
+    // follows), still = i2v. Same positional flexibility as the ace branch.
+    const still = pos[2] ? pos[1] : "";
+    const prompt = pos[2] || pos[1] || flags.prompt;
+    if (!prompt) { console.error('error: --model h3 needs a "<prompt>" (still optional: t2v without, i2v with)'); process.exit(2); }
+    const common = { prompt, seed };
+    if (still) common.imagePath = stageInput(still);
+    if (flags.width) common.width = Number(flags.width);
+    if (flags.height) common.height = Number(flags.height);
+    if (flags.frames) common.length = Number(flags.frames);
+    if (flags.seconds) common.seconds = Number(flags.seconds);
+    if (flags.steps) common.steps = Number(flags.steps);
+    if (flags.hero) common.hero = true; // non-LoRA 20-step path; turbo-8 is the default
+    if (flags.fps) common.frameRate = Number(flags.fps);
+    graph = buildH3AV(common);
   } else {
     const still = pos[1], prompt = pos[2] || flags.prompt;
     if (!still || !prompt) { console.error('error: need <still> and "<prompt>" (or --graph)'); process.exit(2); }

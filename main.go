@@ -1424,7 +1424,7 @@ func runGenerateVideo(args []string) error {
 	fs := flag.NewFlagSet("generate-video", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "print full result JSON")
-	model := fs.String("model", "", "I2V family override: wan | ltx25 | hunyuan. Empty = the machine's videogen_family seat (falls back to wan when no family is configured)")
+	model := fs.String("model", "", "family override: wan | ltx25 | h3 | hunyuan (h3: still optional — t2v without). Empty = the machine's videogen_family seat (falls back to wan when no family is configured)")
 	negative := fs.String("negative", "", "hard exclusions, e.g. 'blurry, distorted'")
 	frames := fs.Int("frames", 0, "frame count (default ~33; realistic ceiling ~49)")
 	width := fs.Int("width", 0, "width px")
