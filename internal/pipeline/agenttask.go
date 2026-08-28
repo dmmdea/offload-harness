@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +50,9 @@ const (
 	// budget buildExtract gives the extract task's grammar output (the re-pack
 	// IS an extract over the loop's final text).
 	agentRepackMaxTokens = 512
+	// agentRepackChatTimeout bounds the grammar-free chat fallback: one
+	// completion over already-finished text, generously padded for a cold seat.
+	agentRepackChatTimeout = 120 * time.Second
 	// agentRosterProbeTimeout bounds the seat-residency roster fetch — the same
 	// 10s mcpserver's plannerUnserved uses.
 	agentRosterProbeTimeout = 10 * time.Second
@@ -490,6 +494,20 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 		}
 		return json.RawMessage(content), gres.TokensOut, false, nil
 	}
+	// FINAL fallback: one grammar-FREE attempt over /v1/chat/completions.
+	// Found live wiring the Lenovo FreeToken agent seat (2026-08-27): the two
+	// attempts above ride cfg.CompletionPath — llama-server's NATIVE completion
+	// route, which an OpenAI-only engine does not serve. llama-swap proxies the
+	// call anyway, the engine 404s with an HTML body, and the re-pack read
+	// "invalid json: invalid character '<'" — so a seat that had just produced
+	// a CORRECT final answer abstained on every schema'd contract, making the
+	// seat unusable for remote placement (which requires a schema). The chat
+	// route is the one surface every seat serves; the schema validator still
+	// gates the result, so this trades the grammar's shape-constraint for
+	// reach while conceding nothing on correctness.
+	if structured, tokensOut, ok := p.repackViaChat(ctx, seat, schema, output); ok {
+		return structured, tokensOut, false, nil
+	}
 	if transportErr != nil {
 		// Report the TRANSPORT failure itself, not whatever the other attempt
 		// produced: the caller prefixes this with "structured re-pack
@@ -498,6 +516,48 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 		return nil, 0, true, transportErr
 	}
 	return nil, 0, false, lastErr
+}
+
+// repackViaChat is the grammar-free re-pack lane: a plain chat completion on
+// the seat asking for ONLY a JSON object, field types spelled out in the
+// prompt (a grammar would have enforced them; without one, "7" vs 7 is exactly
+// the miss a type-annotated prompt prevents — measured on gpt-oss-20b). The
+// answer is trimmed to its outermost {...} span before validation, because
+// chat-route answers legitimately arrive fenced or prefixed where the native
+// grammar route could not.
+func (p *Pipeline) repackViaChat(ctx context.Context, seat string, schema map[string]any, output string) (json.RawMessage, int, bool) {
+	names := make([]string, 0, 8)
+	if props, ok := schema["properties"].(map[string]any); ok {
+		for name, raw := range props {
+			typ := "string"
+			if m, ok := raw.(map[string]any); ok {
+				if t, ok := m["type"].(string); ok {
+					typ = t
+				}
+			}
+			names = append(names, fmt.Sprintf("%q (%s)", name, typ))
+		}
+	}
+	sort.Strings(names)
+	system := "You extract structured data from text. Output ONLY a JSON object — no prose, no code fences. Respect the field types exactly: numbers unquoted, strings quoted."
+	user := fmt.Sprintf("Extract these fields from the text as a JSON object: %s.\n\nTEXT:\n%s", strings.Join(names, ", "), output)
+	// A dedicated chat-path client, seat-endpoint routing mirrored from the
+	// main client's construction (recordless.go): the pipeline's own client is
+	// pinned to the native completion path and cannot make this call.
+	cc := llamaclient.New(p.cfg.Endpoint, "/v1/chat/completions", p.cfg.Model, agentRepackChatTimeout).
+		WithSeatEndpoints(p.cfg.SeatEndpoints)
+	gres, gerr := cc.Generate(ctx, seat, system, user, "", agentRepackMaxTokens, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
+	if gerr != nil {
+		return nil, 0, false
+	}
+	content := strings.TrimSpace(gres.Content)
+	if i, j := strings.Index(content, "{"), strings.LastIndex(content, "}"); i >= 0 && j > i {
+		content = content[i : j+1]
+	}
+	if verr := validator.Validate([]byte(content), schema); verr != nil {
+		return nil, 0, false
+	}
+	return json.RawMessage(content), gres.TokensOut, true
 }
 
 // genErrIsTransport reports whether a Generate error means the SEAT COULD NOT

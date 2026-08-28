@@ -111,7 +111,11 @@ func integrationSeatServer(t *testing.T, loopCalls *atomic.Int64, repackStatus i
 				return
 			}
 			if g, _ := body["grammar"].(string); g == "" {
-				t.Errorf("chat request with neither tools nor grammar: %v", body)
+				// The grammar-free chat fallback lane (repackViaChat, 0.108.1).
+				// This fake 404s it so the unreachable-repack scenario keeps its
+				// lost-work semantics: BOTH re-pack lanes down = work lost.
+				http.NotFound(w, r)
+				return
 			}
 			if repackStatus != 0 {
 				w.WriteHeader(repackStatus)
