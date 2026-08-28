@@ -350,15 +350,20 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 	switch route {
 	case "":
 		route = "auto"
-	case "auto", "local", "remote", "spread":
+	case "auto", "local", "remote", "spread", "queue":
 	default:
-		return nil, Summary{}, fmt.Errorf("delegate: route %q not recognized (want auto, spread, local, or remote)", route)
+		return nil, Summary{}, fmt.Errorf("delegate: route %q not recognized (want auto, spread, local, remote, or queue)", route)
 	}
 	if len(subtasks) == 0 {
 		return nil, Summary{}, fmt.Errorf("delegate: at least one subtask required")
 	}
 	if len(subtasks) > maxSubtasks {
 		return nil, Summary{}, fmt.Errorf("delegate: %d subtasks exceeds the max of %d", len(subtasks), maxSubtasks)
+	}
+	// route "queue" bypasses the whole push machinery (ADR 0030): the holder
+	// owns durability and the claim loops own placement.
+	if route == "queue" {
+		return runQueued(ctx, cfg, subtasks)
 	}
 	// Fleet membership is configuration: a call that names no remotes uses the
 	// config's delegate_remotes. A call's own list REPLACES it (never merges) so

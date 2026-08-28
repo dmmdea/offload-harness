@@ -5,6 +5,8 @@
 package main
 
 import (
+	"log"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"context"
 	"encoding/json"
 	"errors"
@@ -2331,6 +2333,25 @@ func runFleetServe(args []string) error {
 		nodeID, listen, total, prov.Source, prov.Vendor, prov.Arch, umaLabel, devicesLabel, strings.Join(fleetnode.SupportedTasksFor(cfg, loopbackListener), ", "))
 
 	errCh := make(chan error, 1)
+	// Option B pull queue (ADR 0030) — both halves DARK unless configured:
+	// this node HOSTS the durable queue when fleet_queue_host is set, and PULLS
+	// work from the configured holder when fleet_queue_holder+fleet_queue_claim
+	// are. An unconfigured box runs byte-identically to pre-0.109.0.
+	if cfg.FleetQueueHost {
+		root, rerr := gpulease.ResolveStateRoot(cfg.StateDir)
+		if rerr != nil {
+			return fmt.Errorf("fleet_queue_host: no state root for the queue store: %w", rerr)
+		}
+		q, qerr := srv.EnableQueueHost(filepath.Join(root, "fleet-queue.db"))
+		if qerr != nil {
+			return fmt.Errorf("fleet_queue_host: %w", qerr)
+		}
+		defer q.Close()
+		log.Printf("fleet-serve: hosting the consolidated queue at %s", filepath.Join(root, "fleet-queue.db"))
+	}
+	if cfg.FleetQueueHolder != "" && cfg.FleetQueueClaim {
+		go srv.StartClaimLoop(ctx, cfg)
+	}
 	go func() { errCh <- srv.Serve(ln) }()
 	select {
 	case err := <-errCh:

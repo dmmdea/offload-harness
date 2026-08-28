@@ -868,6 +868,19 @@ type Config struct {
 	// inferences against ONE llama-swap slot). A job that waits is strictly
 	// better than a job that thrashes: nothing is refused that 0.99.0 admitted.
 	FleetMaxConcurrentJobs int `json:"fleet_max_concurrent_jobs,omitempty"`
+	// FleetQueueHost — Option B, ADR 0030, DARK by default: when true THIS
+	// node's fleet server also hosts the consolidated pull queue (durable
+	// bbolt store at <state-root>/fleet-queue.db + the /fleet/queue/* routes).
+	// One node per fleet hosts; the always-on box is the intended holder.
+	FleetQueueHost bool `json:"fleet_queue_host,omitempty"`
+	// FleetQueueHolder is the holder's base URL (e.g. http://qube:18793).
+	// Non-empty enables queue participation: delegators may submit with
+	// route:"queue", and a node that also sets FleetQueueClaim pulls eligible
+	// work from it. Tailnet-vetted at load like every fleet URL; empty = the
+	// whole Option B surface is inert (the shipped default).
+	FleetQueueHolder string `json:"fleet_queue_holder,omitempty"`
+	// FleetQueueClaim starts this node's claim loop against FleetQueueHolder.
+	FleetQueueClaim bool `json:"fleet_queue_claim,omitempty"`
 	// FleetAuthToken, when non-empty, bearer-gates the fleet's AGENT lane:
 	// POST /fleet/dispatch with task_type "agent" and GET /fleet/jobs/{id} for
 	// jobs an agent dispatch created require `Authorization: Bearer <token>`
@@ -1240,6 +1253,11 @@ func Load(path string) (Config, error) {
 	// media path, so no media lease can exist on such a box and there is nothing for
 	// the gate to protect. Turning that into a fatal config error would break every
 	// subcommand over a condition that is already fatal only to media.
+	if strings.TrimSpace(c.FleetQueueHolder) != "" {
+		if err := netguard.TailnetURL(c.FleetQueueHolder); err != nil {
+			return c, fmt.Errorf("fleet_queue_holder: %w", err)
+		}
+	}
 	if lerr := modelaffinity.SetGPULease(c.GPULockPath, c.StateDir); lerr != nil {
 		fmt.Fprintf(os.Stderr, "warning: GPU load gate disabled: %v\n"+
 			"  Text calls will not wait for a media render to finish with the card.\n", lerr)

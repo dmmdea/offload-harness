@@ -6,6 +6,34 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.0] - 2026-08-28
+
+### Added — the consolidated pull queue ships DARK (Option B, ADR 0030)
+
+Operator-directed build of the queue inversion, inert until its three config
+keys are bound (an unconfigured fleet runs byte-identically):
+
+- internal/fleetqueue: durable bbolt store + /fleet/queue/* holder routes
+  (submit/claim/ack/nack/jobs), bearer-gated by the agent lane's rule.
+  At-least-once: leases = contract timeout + 5min slack, expiry requeues with
+  history (bounded, then loud failure), first ack wins.
+- fleet-node claim loop (fleet_queue_holder + fleet_queue_claim): pulls
+  eligible work and runs it through the SAME BuildRequest + jobs surface a
+  pushed dispatch uses; back-pressure by the node's own queue-depth cap.
+- delegate route "queue": submit-all-then-poll against the holder; queue
+  wait credited like the push backlog credit; requires output_schema; skips
+  the ADR 0028 intent ledger on purpose — the holder IS the durable record.
+- Enabling stays scoreboard-gated per ADR 0028/0030.
+
+### Added — sd.cpp on the reference box (fallback engine binding)
+
+stable-diffusion.cpp master-829-0a565f2 (official win-cuda12) at
+C:/sd.cpp-<commit> with the Lenovo's exact sdxl-turbo Q4_0 GGUF mirrored;
+sdcpp_bin/sdcpp_model bound in both deployed configs, imagegen_engine
+UNCHANGED (ComfyUI/krea2 stays primary). Live render verified through
+render/sdcpp-generate.mjs under a GPU lease. H3-via-sd.cpp stays parked on
+upstream #1871 (open).
+
 ## [0.108.2] - 2026-08-28
 
 ### Fixed — repack coerces string-typed scalars a grammar-less seat cannot type
