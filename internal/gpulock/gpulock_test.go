@@ -185,16 +185,38 @@ func TestWaitFreeBoundedWait(t *testing.T) {
 	if !info.Held {
 		t.Fatal("still-held lease must report held after the bounded wait")
 	}
-	if el := time.Since(start); el < 120*time.Millisecond {
-		t.Errorf("WaitFree returned after %v, want >= the 120ms wait window", el)
+	// 15ms epsilon: the Windows system timer ticks at ~15.6ms, so a sleep-based
+	// wait can legitimately return a hair under its nominal window.
+	if el := time.Since(start); el < 105*time.Millisecond {
+		t.Errorf("WaitFree returned after %v, want >= the 120ms wait window (minus timer granularity)", el)
 	}
 }
 
 func TestWaitFreeReleasedMidWait(t *testing.T) {
 	lock := writeLease(t, os.Getpid(), nil)
+	released := make(chan error, 1)
 	go func() {
 		time.Sleep(60 * time.Millisecond)
-		_ = os.Remove(filepath.Join(lock, "meta.json"))
+		// Retry the release: under full-tree parallel load on Windows a
+		// concurrent WaitFree poll holding meta.json open can make a single
+		// os.Remove fail with a sharing violation — the old one-shot remove
+		// swallowed that error and the test then "flaked" by honestly
+		// reporting a lease nothing had released (issue #81).
+		var err error
+		for i := 0; i < 200; i++ {
+			err = os.Remove(filepath.Join(lock, "meta.json"))
+			if err == nil || os.IsNotExist(err) {
+				err = nil
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		released <- err
+	}()
+	defer func() {
+		if err := <-released; err != nil {
+			t.Fatalf("test harness never managed to release the lease: %v", err)
+		}
 	}()
 	start := time.Now()
 	info := WaitFree(context.Background(), lock, 5*time.Second, 10*time.Millisecond)

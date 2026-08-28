@@ -6,6 +6,29 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.106.1] - 2026-08-27
+
+### Fixed — video_watch tail windows and ffmpeg 9 mjpeg strictness
+
+- **`videoio`: a tail window shorter than one sampling interval no longer defers.**
+  Found live on a 44-min sweep: the final 1.25 s window at fps 0.2 starved the
+  `fps` filter (zero frames), and ffmpeg 9's lazily-opened mjpeg encoder then
+  failed at EOF-flush on limited-range YUV (exit -1). Such windows now sample as
+  ONE plain frame; both samplers also pass `-strict unofficial` — ffmpeg 9
+  rejects limited-range YUV (normal camera footage) at default mjpeg strictness
+  where 8.x only warned. Reproduced and fix-verified against the real file.
+- **`gpulock`: the two flaky WaitFree window tests are deterministic** (closes #81).
+  `TestWaitFreeReleasedMidWait`'s release goroutine did a one-shot `os.Remove`
+  with the error swallowed — under full-tree parallel load on Windows a
+  concurrent poll's open handle can fail that single remove with a sharing
+  violation, and the test then honestly reported a lease nothing had released.
+  The release now retries (bounded) and the test fails loudly if the release
+  itself never lands. `TestWaitFreeBoundedWait` gets a 15 ms epsilon for the
+  ~15.6 ms Windows system-timer granularity.
+- **docs**: ROADMAP corrections — Phase 3's Resolve-spend gate was stale (Studio
+  is purchased + activated on the editor rig; only the cut-list/cleanup
+  automation half remains); Docker-leftovers resolved on the reference box.
+
 ## [0.106.0] - 2026-08-27
 
 ### Added — `offload_animate_character`: WAN-Animate-2 motion retargeting as a first-class media route

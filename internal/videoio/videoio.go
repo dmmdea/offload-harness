@@ -24,6 +24,8 @@ func buildFFmpegArgs(videoPath, outPattern string, fps float64, maxFrames, width
 		"-hide_banner", "-loglevel", "error", "-y",
 		"-i", videoPath,
 		"-vf", vf,
+		// ffmpeg 9 mjpeg strictness — see buildFFmpegWindowArgs.
+		"-strict", "unofficial",
 		"-frames:v", strconv.Itoa(maxFrames),
 		outPattern,
 	}
@@ -35,12 +37,23 @@ func buildFFmpegArgs(videoPath, outPattern string, fps float64, maxFrames, width
 // the output are relative to the window; callers add start back.
 func buildFFmpegWindowArgs(videoPath, outPattern string, start, dur, fps float64, maxFrames, width int) []string {
 	vf := fmt.Sprintf("fps=%s,scale=%d:-1", strconv.FormatFloat(fps, 'g', -1, 64), width)
+	// A tail stub shorter than one sampling interval starves the fps filter —
+	// it emits nothing, and (measured on ffmpeg 9, 2026-08-27) the lazily-opened
+	// mjpeg encoder then fails at EOF-flush on limited-range YUV input, exit -1.
+	// Sample such a window as ONE plain frame instead of deferring it.
+	if dur*fps < 1 {
+		vf = fmt.Sprintf("scale=%d:-1", width)
+		maxFrames = 1
+	}
 	return []string{
 		"-hide_banner", "-loglevel", "error", "-y",
 		"-ss", strconv.FormatFloat(start, 'f', 3, 64),
 		"-t", strconv.FormatFloat(dur, 'f', 3, 64),
 		"-i", videoPath,
 		"-vf", vf,
+		// ffmpeg 9 makes the mjpeg encoder REJECT limited-range YUV (the norm
+		// for camera/edited footage) at default strictness; 8.x only warned.
+		"-strict", "unofficial",
 		"-frames:v", strconv.Itoa(maxFrames),
 		outPattern,
 	}
