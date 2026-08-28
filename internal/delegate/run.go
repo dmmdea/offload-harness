@@ -67,6 +67,12 @@ type PlacedResult struct {
 	Result             core.AgentWireResult
 	AcceptanceFailures []string
 	JobID              string
+	// intentRecorded / orphanable steer the intent ledger (intent.go): the
+	// first says a "d" line exists for JobID; the second marks the exits
+	// (cancel, owned-job poll deadline, queued give-up) where the node may
+	// still finish the job — those stay OPEN for the recovery pass.
+	intentRecorded bool
+	orphanable     bool
 	PlacementReason    string
 	// Err is non-empty when the subtask FAILED for transport/config reasons
 	// (dispatch refused, auth rejected, undecodable result). Counted in
@@ -388,7 +394,12 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 		}
 	}
 
-	r := &runner{cfg: cfg, local: local, route: route, remotes: remotes, led: led, ledgerUnopened: ledgerUnopened}
+	// Option A durability (intent.go): open the intent ledger for this run and
+	// fire the once-per-process orphan recovery in the background. Both are
+	// additions — a nil ledger and a failed recovery change nothing about how
+	// this run places or reports.
+	maybeRecoverOrphans(cfg)
+	r := &runner{cfg: cfg, local: local, route: route, remotes: remotes, intent: openIntentLedger(cfg), led: led, ledgerUnopened: ledgerUnopened}
 	// route=spread probes the fleet ONCE per run: every subtask deals itself
 	// across the same roster, so per-subtask probing would be N identical GETs
 	// and could even deal two subtasks against different snapshots.
@@ -512,6 +523,9 @@ type runner struct {
 	local   LocalRunner
 	route   string
 	remotes []string
+	// intent is the delegator-death durability ledger (Option A, intent.go).
+	// nil = inert (state root unresolvable); dispatch never depends on it.
+	intent  *intentLedger
 	led     *ledger.Ledger
 	// ledgerUnopened marks the TOTAL-loss case: a LedgerPath was configured and
 	// ledger.Open failed, so there is no handle to try. record() must still
@@ -1297,6 +1311,13 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 	finish := func(pr PlacedResult) PlacedResult {
 		pr.JobID = jobID
 		pr.wallMs = time.Since(start).Milliseconds()
+		// Intent ledger close-out (Option A, intent.go): an acked job whose
+		// terminal answer THIS process observed is closed; the orphanable
+		// exits (cancel / owned-deadline / queued give-up) stay open for the
+		// recovery pass — that gap IS the durability feature.
+		if pr.intentRecorded && !pr.orphanable {
+			r.intent.done(jobID, "terminal observed")
+		}
 		r.record(contract, pr)
 		return pr
 	}
@@ -1459,6 +1480,10 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 		pr.refused, pr.refusalStatus = refused, status
 		return pr
 	}
+	// The node ACKED: from here the job can be orphaned by delegator death,
+	// so persist the intent before any polling (Option A, intent.go).
+	r.intent.dispatched(jobID, base, contract.Goal)
+	pr.intentRecorded = true
 
 	timeoutSec := contract.TimeoutSec
 	if timeoutSec <= 0 {
@@ -1544,6 +1569,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	for {
 		if err := ctx.Err(); err != nil {
 			pr.Err = "canceled: " + err.Error()
+			pr.orphanable = true // the node may still finish it — recovery's case
 			return pr
 		}
 		if time.Now().After(deadline) {
@@ -1581,6 +1607,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 				class = core.DeferClassInfrastructure
 			}
 			pr.Result = core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Deferred: true, DeferClass: class, Reason: reason}
+			pr.orphanable = true // acked, owned, no terminal state seen — recovery's case
 			return pr
 		}
 		state, data, jobErr, status, perr := r.pollOnce(ctx, base, jobID)
@@ -1699,6 +1726,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 					// it, and N polls answered `accepted`. The "queue deadline"
 					// prefix is stable and distinct from the "poll deadline"
 					// one a job that actually ran produces.
+					pr.orphanable = true // still queued on the node — it may run later; recovery's case
 					pr.Err = fmt.Sprintf("queue deadline after %s: the node accepted the job but never started it — it waited in the node's backlog and never reached running (%d poll(s) answered `accepted`)",
 						queuedWaitBudget, queuedPolls)
 					return pr
@@ -1927,36 +1955,9 @@ func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.
 // pollOnce GETs the job state. perr covers transport-level failure only; an
 // HTTP answer (any status) comes back as (state, data, jobErr, status, nil).
 func (r *runner) pollOnce(ctx context.Context, base, jobID string) (state string, data json.RawMessage, jobErr string, status int, perr error) {
-	u := strings.TrimRight(strings.TrimSpace(base), "/") + "/fleet/jobs/" + jobID
-	rctx, cancel := context.WithTimeout(ctx, pollRequestTimeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(rctx, http.MethodGet, u, nil)
-	if err != nil {
-		return "", nil, "", 0, err
-	}
-	if r.cfg.FleetAuthToken != "" {
-		req.Header.Set("Authorization", "Bearer "+r.cfg.FleetAuthToken)
-	}
-	resp, err := fleetClient.Do(req)
-	if err != nil {
-		return "", nil, "", 0, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFleetBody))
-	if err != nil {
-		return "", nil, "", 0, err
-	}
-	var wire struct {
-		State string          `json:"state"`
-		Data  json.RawMessage `json:"data"`
-		Error string          `json:"error"`
-	}
-	if resp.StatusCode == http.StatusOK {
-		if uerr := json.Unmarshal(body, &wire); uerr != nil {
-			return "", nil, "", 0, fmt.Errorf("job poll %s: not JSON: %w", u, uerr)
-		}
-	}
-	return wire.State, wire.Data, wire.Error, resp.StatusCode, nil
+	// One poll implementation, two callers: the recovery pass (intent.go)
+	// polls by these same rules through the shared package function.
+	return pollJobOnce(ctx, r.cfg, base, jobID)
 }
 
 // EvalAcceptance runs every contract acceptance check against the result —
