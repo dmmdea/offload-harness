@@ -83,6 +83,11 @@ type agentFake struct {
 	propsCNT atomic.Int64
 	loopCalls    atomic.Int64
 	grammarCNT   atomic.Int64
+	// chatFallback scripts the grammar-FREE re-pack lane (repackViaChat): a
+	// chat request with neither tools nor grammar. nil = the route 404s, so
+	// every pre-fallback test keeps its exact outcome.
+	chatFallback    func(int64) string
+	chatFallbackCNT atomic.Int64
 }
 
 // repackDisablesThinking reports whether a captured grammar-completion body
@@ -124,7 +129,15 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 				return
 			}
 			if g, _ := body["grammar"].(string); g == "" {
-				t.Errorf("chat request with neither tools nor grammar: %v", body)
+				// The grammar-free chat fallback lane (repackViaChat).
+				n := f.chatFallbackCNT.Add(1)
+				if f.chatFallback == nil {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(f.chatFallback(n)))
+				return
 			}
 			n := f.grammarCNT.Add(1)
 			if f.repackBodies != nil {
@@ -911,5 +924,42 @@ func TestRunAgentTaskThinkingSeatRepackSucceeds(t *testing.T) {
 	// above while doubling the cost of every re-pack on a thinking seat.
 	if got := fake.grammarCNT.Load(); got != 1 {
 		t.Fatalf("re-pack completions = %d, want exactly 1 — the non-thinking flag belongs on the first attempt", got)
+	}
+}
+
+// TestRunAgentTaskRepackFallsBackToChatWhenGrammarRouteMissing is the Lenovo
+// FreeToken shape found live 2026-08-27: an OpenAI-only engine serves no
+// native completion route, so both grammar re-pack attempts read an HTML 404
+// ("invalid character '<'") — and before the fallback, a seat that had just
+// produced a CORRECT answer abstained on every schema'd contract. The
+// grammar-free chat lane must recover it, fences and all, with the validator
+// still enforcing types.
+func TestRunAgentTaskRepackFallsBackToChatWhenGrammarRouteMissing(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs:     []string{agentTestSeat},
+		loop:          func(int64) string { return doneChat("Shipment RF-9082 holds 7 pallets.") },
+		repackRawBody: func(int64) string { return "<html><body>404 not found</body></html>" },
+		chatFallback: func(int64) string {
+			// Fenced + prefixed, as a chat-route answer legitimately arrives.
+			return doneChat("Here you go:\n```json\n{\"answer\":\"RF-9082: 7 pallets\"}\n```")
+		},
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+	wire := decodeWire(t, res)
+
+	if wire.Deferred {
+		t.Fatalf("fallback must recover the re-pack, got defer: %s", wire.Reason)
+	}
+	if got := string(wire.Structured); !strings.Contains(got, "RF-9082") {
+		t.Fatalf("structured = %s, want the chat-lane JSON", got)
+	}
+	if got := fake.grammarCNT.Load(); got != 2 {
+		t.Fatalf("grammar attempts = %d, want 2 before the fallback", got)
+	}
+	if got := fake.chatFallbackCNT.Load(); got != 1 {
+		t.Fatalf("chat-fallback attempts = %d, want exactly 1", got)
 	}
 }

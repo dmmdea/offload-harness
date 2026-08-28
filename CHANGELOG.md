@@ -6,6 +6,21 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.1] - 2026-08-28
+
+### Fixed — agent re-pack falls back to the chat route when the seat has no native completion path
+
+Found live wiring the Lenovo FreeToken agent seat: the structured re-pack's
+grammar call rides the native llama-server completion route, which an
+OpenAI-only engine does not serve — llama-swap proxies it, the engine 404s
+with HTML, and the re-pack read "invalid json: invalid character '<'". A seat
+that had just produced a CORRECT final answer abstained on every schema'd
+contract, and since remote placement requires a schema, the seat was unusable
+for fleet work. After the two grammar attempts fail, repackStructured now runs
+ONE grammar-free completion over /v1/chat/completions (the surface every seat
+serves) with field types spelled out in the prompt and the answer trimmed to
+its outermost JSON object; the schema validator still gates the result.
+
 ## [0.108.0] - 2026-08-27
 
 ### Added — delegation durability: the push-side intent ledger (ADR 0028, pull-queue Option A)
