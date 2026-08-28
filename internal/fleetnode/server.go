@@ -25,6 +25,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/fleetqueue"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
@@ -96,6 +97,10 @@ type Server struct {
 	runner   Runner
 	jobs     *Jobs
 	opts     Options
+	// queue is the Option B consolidated pull queue (ADR 0030) — non-nil ONLY
+	// when this node is the config-elected holder (fleet_queue_host). Opened
+	// by EnableQueueHost; the routes mount only when it is non-nil.
+	queue *fleetqueue.Queue
 	tasks    []string
 	families []string
 	// agentSeat is the resolved agent planner seat (config.AgentPlannerModel:
@@ -307,7 +312,33 @@ func (s *Server) Handler() http.Handler {
 	// validation ever runs — every malformed name gets this file's one 400
 	// JSON shape, not the mux's bare-text 404.
 	mux.HandleFunc("GET /fleet/media/{filename...}", s.handleMedia)
+	if s.queue != nil {
+		// Option B holder surface (ADR 0030). Auth = the SAME bearer rule as
+		// the agent lane: the queue carries agent contracts, so it inherits
+		// that lane's gate — token required when configured, else loopback
+		// trust only (the queue is pointless on a loopback-only fleet, but
+		// failing open beyond loopback without a token would be the RCE-class
+		// surface the agent lane refuses).
+		fleetqueue.Mount(mux, s.queue, func(r *http.Request) bool {
+			if s.opts.Cfg.FleetAuthToken == "" {
+				return s.opts.LoopbackListener
+			}
+			return bearerOK(r, s.opts.Cfg.FleetAuthToken)
+		})
+	}
 	return mux
+}
+
+// EnableQueueHost opens the durable queue store and arms the holder surface —
+// called by the serve verb ONLY when cfg.FleetQueueHost is set. Idempotent
+// enough for one process; returns the store so the caller owns Close.
+func (s *Server) EnableQueueHost(dbPath string) (*fleetqueue.Queue, error) {
+	q, err := fleetqueue.Open(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	s.queue = q
+	return q, nil
 }
 
 // httpServer builds the *http.Server with the spec's timeout table

@@ -240,7 +240,12 @@ func RecoverOrphans(ctx context.Context, cfg config.Config) (int, error) {
 // (which has no runner) polls by the SAME rules. The runner method delegates
 // here — one poll implementation, two callers.
 func pollJobOnce(ctx context.Context, cfg config.Config, base, jobID string) (state string, data json.RawMessage, jobErr string, status int, perr error) {
-	u := strings.TrimRight(strings.TrimSpace(base), "/") + "/fleet/jobs/" + jobID
+	return pollJobOnceAt(ctx, cfg, strings.TrimRight(strings.TrimSpace(base), "/")+"/fleet/jobs/"+jobID)
+}
+
+// pollJobOnceAt polls an EXPLICIT job URL — the queue holder's results route
+// (ADR 0030) shares the wire shape but not the push path's URL layout.
+func pollJobOnceAt(ctx context.Context, cfg config.Config, u string) (state string, data json.RawMessage, jobErr string, status int, perr error) {
 	rctx, cancel := context.WithTimeout(ctx, pollRequestTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, http.MethodGet, u, nil)
