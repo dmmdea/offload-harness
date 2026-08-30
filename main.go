@@ -5,14 +5,14 @@
 package main
 
 import (
-	"log"
-	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -49,6 +49,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/nimoracle"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/report"
+	"github.com/dmmdea/offload-harness/internal/research"
 	"github.com/dmmdea/offload-harness/internal/router"
 	"github.com/dmmdea/offload-harness/internal/shadow"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
@@ -119,6 +120,8 @@ func main() {
 		err = runMCP(args)
 	case "delegate":
 		err = runDelegate(args)
+	case "research":
+		err = runResearch(args)
 	case "fleet-serve":
 		err = runFleetServe(args)
 	case "fleet-measure":
@@ -3628,4 +3631,88 @@ func runStats(args []string) error {
 	b, _ := json.MarshalIndent(m, "", "  ")
 	fmt.Println(string(b))
 	return nil
+}
+
+// runResearch — `local-offload research`: the CLI face of offload_research.
+// URLs in, fetched delegator-side under the public-web guard, one grounded
+// digest contract per page, the same delegate.Run path as `delegate`.
+func runResearch(args []string) error {
+	fs := flag.NewFlagSet("research", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	goal := fs.String("goal", "", "what to extract from EVERY page (self-contained; the seat sees only this + the page text)")
+	var urls repeatedFlag
+	fs.Var(&urls, "url", "public http(s) URL to fetch (repeatable, max 12)")
+	var questions repeatedFlag
+	fs.Var(&questions, "question", "extra ask appended to the goal for every page (repeatable)")
+	var accept repeatedFlag
+	fs.Var(&accept, "accept", "extra acceptance check appended to the grounded default (repeatable)")
+	schemaPath := fs.String("schema", "", "path to a JSON Schema for the per-page digest (default: key_facts/numbers/quotes/verdict)")
+	route := fs.String("route", "spread", "placement: spread (default) | auto | local | remote")
+	timeout := fs.Int("timeout", 0, "per-page contract budget in seconds (default 300, cap 900)")
+	fetchTimeout := fs.Int("fetch-timeout", 0, "per-page fetch timeout in seconds (default 30)")
+	_ = fs.Parse(args)
+	if err := leftoverArgErr(fs, "research"); err != nil {
+		return err
+	}
+	cfg := loadCfg(fs)
+	if !cfg.AgentDelegationEnabled {
+		return fmt.Errorf("agent delegation is disabled on this box — set \"agent_delegation_enabled\": true in the config")
+	}
+	if strings.TrimSpace(*goal) == "" || len(urls) == 0 {
+		return fmt.Errorf("--goal and at least one --url are required")
+	}
+	if len(urls) > research.MaxURLsPerCall {
+		return fmt.Errorf("at most %d --url per call (got %d)", research.MaxURLsPerCall, len(urls))
+	}
+	var schema json.RawMessage
+	if *schemaPath != "" {
+		b, err := os.ReadFile(*schemaPath)
+		if err != nil {
+			return fmt.Errorf("--schema: %w", err)
+		}
+		schema = json.RawMessage(b)
+	}
+	opt := research.Options{}
+	if *fetchTimeout > 0 {
+		opt.Timeout = time.Duration(*fetchTimeout) * time.Second
+	}
+	fetched := research.FetchAll(context.Background(), urls, opt, 4)
+	specs, sources := research.Build(research.Request{
+		Goal: *goal, URLs: urls, Questions: questions, OutputSchema: schema, Acceptance: accept, TimeoutSec: *timeout,
+	}, fetched)
+	if len(specs) == 0 {
+		out, _ := json.MarshalIndent(map[string]any{"deferred": true, "reason": "no usable source: every fetch failed or was refused", "sources": sources}, "", "  ")
+		fmt.Println(string(out))
+		return fmt.Errorf("no usable source")
+	}
+	contracts := make([]core.AgentContract, 0, len(specs))
+	lints := make([][]string, 0, len(specs))
+	for i, spec := range specs {
+		c, perr := delegate.PrepareContract(spec, "")
+		if perr != nil {
+			return fmt.Errorf("source %d: %w", i, perr)
+		}
+		contracts = append(contracts, c)
+		lints = append(lints, delegate.LintAcceptance(c))
+	}
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	results, sum, err := delegate.Run(context.Background(), cfg, p.RunAgentContract, contracts, *route, nil)
+	if err != nil {
+		return err
+	}
+	wire := delegate.WireResponse(results, sum, lints)
+	out, err := json.MarshalIndent(struct {
+		Summary any               `json:"summary"`
+		Sources []research.Source `json:"sources"`
+		Results any               `json:"results"`
+	}{wire.Summary, sources, wire.Results}, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(out))
+	return delegateExitErr(sum)
 }

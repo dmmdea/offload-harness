@@ -49,7 +49,13 @@ const (
 	// agentRepackMaxTokens bounds the structured re-pack completion — the same
 	// budget buildExtract gives the extract task's grammar output (the re-pack
 	// IS an extract over the loop's final text).
-	agentRepackMaxTokens = 512
+	// Raised 512 → 1024 on 2026-08-30: a four-field digest schema (three short
+	// lists + a verdict) overflowed 512 on BOTH the 27B and the 4B seats —
+	// "invalid json: unexpected end of JSON input", surfaced as an abstention
+	// the caller could not tell from a real one. The 2026-08-28 long-extraction
+	// abstentions on the 9B/4B were the same class. 1024 fits a bounded digest
+	// with headroom and stays well inside every seat's window.
+	agentRepackMaxTokens = 1024
 	// agentRepackChatTimeout bounds the grammar-free chat fallback: one
 	// completion over already-finished text, generously padded for a cold seat.
 	agentRepackChatTimeout = 120 * time.Second
