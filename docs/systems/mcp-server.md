@@ -49,6 +49,7 @@ than any number written down:
 | Media editing | `offload_edit_image`, `offload_inpaint_image`, `offload_edit_image_generative`, `offload_upscale_image`, `offload_media` |
 | Graph execution | `offload_run_graph` |
 | Agent | `agent_run`, `offload_ask`, `offload_review_diff` |
+| Delegation (opt-in: `agent_delegation_enabled`) | `agent_delegate`, `offload_research` |
 | Remote (opt-in) | `offload_nim` |
 | Status | `offload_status` |
 
@@ -95,6 +96,26 @@ cites nothing, and grading the bytes gives `verified: false` when the re-pack re
 `acceptance_failures` and then the evidence, never a reason to discard the answer: the residual
 case is a question whose subject is a SHORT (<8-character) or question-named identifier, which
 leaves nothing anchorable at all.
+
+### The research lane (`offload_research`)
+
+`offload_research` is the one-call answer to "this leg needs the web, so it goes to a cloud
+subagent". It takes a goal and up to 12 public URLs, fetches every page DELEGATOR-side under
+a public-web guard (`internal/research.ValidateURL`: http/https only; loopback, RFC 1918,
+link-local, `.local`/`.internal`, the configured tailnet zone and the CGNAT range are
+refused, and every redirect hop is re-checked), strips it to text (dependency-free
+HTML→text: scripts, styles and page chrome dropped, block boundaries kept; 2 MiB read cap,
+96 KiB text cap), and builds ONE delegation contract per usable page — then runs the same
+`delegate.Run` path `agent_delegate` uses (route `spread` by default, so pages are dealt
+across the local seat and every eligible fleet node).
+
+Two contract rules are baked in because they were measured on the seats (2026-08-28): the
+goal names the context document as *already provided* (a goal that says "read the document"
+sends a small seat hunting for a file and fails acceptance), and acceptance is anchored to
+a token that appears only in the page — never in the goal — plus a shape check on the
+schema's first array field, so an echoed goal cannot pass as verified. The seats never gain
+network access; the agent loop's egress cage is untouched. Failed or refused fetches come
+back as `sources[].skipped` and produce no result — a broken page never reads as a digest.
 
 ### The ask lane's result cache
 

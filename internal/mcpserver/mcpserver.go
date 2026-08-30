@@ -32,6 +32,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
+	"github.com/dmmdea/offload-harness/internal/research"
 	"github.com/dmmdea/offload-harness/internal/reviewlane"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
@@ -44,6 +45,9 @@ type Server struct {
 	// resolves to p.RunAgentContract at call time; tests inject a fake so the
 	// handler is exercisable without a live planner.
 	localAgent delegate.LocalRunner
+	// researchFetch is offload_research's fetch seam (tests inject pages; nil =
+	// research.FetchAll against the public web).
+	researchFetch func(ctx context.Context, urls []string, opt research.Options) []research.Fetched
 	// hailo is the lazily-built accelerator lane (ADR 0024): one Sidecar shared
 	// by every NPU tool so concurrent first calls share a single spawn.
 	hailo     *hailoclient.Sidecar
@@ -295,6 +299,15 @@ func (s *Server) buildServer(version string) *mcp.Server {
 			Description: "Fan out 1-8 self-contained subtasks to the FREE local delegation engine: each subtask is a contract {goal, context docs, output_schema, acceptance} run by an autonomous read-only agent loop on THIS box or on a fleet node over the operator's tailnet (never cloud). Placement is quality-first: an idle local box always runs the work; a remote node is used only when the local GPU is busy AND the node passes the capability gate (route=auto; force with local|remote). context_paths inlines files DELEGATOR-side (confined to read_root) so your context never pays for them. SIZE CONTRACTS FROM THE LIVE CEILING, never from a remembered or written figure: offload_status's fleet section reports each seat's agent_ctx_tokens. Written guidance drifted to a quarter of the real window and work that fits trivially was declined as 'too big for the seat' for weeks, so a figure you did not just read from offload_status is not a number. acceptance is a machine-checkable DSL evaluated by the delegator before a result counts as done: contains:<s>, not_contains:<s>, regex:<re>, min_items:<field>:<n>, nonempty:<field> — a schema-valid result failing a check comes back as failed_verification, NOT a success. Returns {summary:{succeeded,deferred,failed_verification,failed,infrastructure,corpus_rows_lost,ledger_rows_lost}, results:[{node,seat,placement,job_id,output,structured,deferred,reason,defer_class,failed,acceptance_failures,wall_ms,acceptance_lint}]} — read summary FIRST. results[].acceptance_lint (warn-only, the run still happened) flags acceptance that verifies less than it looks: PARROT-PASSABLE (every content check also matches the goal text, so an echoed question passes as verified and the retry never fires), UNGROUNDED (a contains:/regex: matching nothing in the contract's own context docs — fails right answers), or SHAPE-ONLY (nonempty:/min_items: alone — passes garbage). When present, fix the acceptance (anchor >=1 contains:/regex: to content that appears only in the docs) before reusing the contract. summary.infrastructure counts the results whose story is a broken STACK rather than the work: defers whose defer_class is infrastructure|config, plus a local placement taken while every configured remote failed its health probe. Non-zero means a node is broken or misconfigured, so do NOT read those subtasks as work the local stack honestly could not do — and the call comes back flagged as an error, with this same JSON body intact. defer_class \"contract\" is YOUR contract, not a box: no output_schema for a remote placement, past the origin hop, or bigger than any node's advertised context — rewrite the contract and retry. abstention|budget defers and failed_verification are ordinary result shapes. On any refusal before placement it returns deferred:true with a reason and you do the work yourself.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"subtasks":{"type":"array","minItems":1,"maxItems":8,"description":"the delegation contracts to place and run","items":{"type":"object","properties":{"goal":{"type":"string","description":"the self-contained task for the sub-agent (it sees ONLY this + the context docs)"},"context":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"text":{"type":"string"}},"required":["name","text"]},"description":"inline context documents (name is a flat filename; total across docs <= 256 KiB)"},"context_paths":{"type":"array","items":{"type":"string"},"description":"files to inline as context docs, read by the DELEGATOR under read_root confinement (<=128 KiB each)"},"output_schema":{"type":"object","description":"JSON Schema with a properties map; the sub-agent's final answer is re-packed into it. REQUIRED for any remote placement"},"acceptance":{"type":"array","items":{"type":"string"},"description":"machine-checkable checks evaluated delegator-side: contains:<s> | not_contains:<s> | regex:<re> | min_items:<field>:<n> | nonempty:<field>"},"profile":{"type":"string","description":"agent task profile. Default = the EXECUTING box's configured agent_profile, else general — a per-SEAT property: small tiers seed research (narrowing measured 0%->72% there), big planners run un-narrowed (research measured 94% and 5x slower vs general 100% on the 27B). Omit unless the task genuinely needs a specific toolset"},"max_steps":{"type":"integer","description":"loop step budget (default 12, cap 12)"},"timeout_sec":{"type":"integer","description":"EXECUTION budget per subtask (default 300, cap 900), shared by every placement it makes: a cross-seat retry and any re-placement after a node refuses the job run only inside what is LEFT of it, and are skipped with a note under 10 s. Not an end-to-end wall: placement overhead (fleet health probe, dispatch dial) and time the job provably spent queued on a node are bounded but not charged to it, so observed wall can exceed this"}},"required":["goal"]}},"route":{"type":"string","enum":["auto","spread","local","remote","queue"],"description":"placement: auto (default; idle-local wins, busy-local considers remotes), spread (deal the subtasks across the local seat AND every eligible fleet node, concurrently — use for any fan-out of 2+ contracts. The deal is deterministic: subtask 0 ALWAYS lands on the local seat, so a 2-contract spread with an eligible remote is guaranteed one local + one remote — the local+server pair. The REMOTE slots are FIT-SCORED from the goal text, no model call: reasoning-shaped goals (explain/why/trace/compare/across these files) take the roomiest eligible seat, mechanical ones (extract/list/count/summarize/how many) take the smallest eligible seat so the roomier one stays free, a goal matching neither reads as mechanical, and equal seats rotate — phrase the goal with the verb you mean. Eligibility is PER SUBTASK — a contract with no output_schema, or too big for every node, silently deals local; read results[].placement to confirm the pair landed), local (force in-process), remote (force a fleet node; defers if none eligible), queue (ADR 0030, DARK unless fleet_queue_holder is configured: submit every subtask to the consolidated pull queue and let claiming nodes take them — durability lives on the holder; requires output_schema on every subtask). A subtask whose answer fails acceptance (or abstains) is retried once on a different node and the better attempt is published (retried_on / retry_note)"},"read_root":{"type":"string","description":"absolute directory context_paths may be read from (default: the server working dir)"},"remotes":{"type":"array","items":{"type":"string"},"description":"fleet node base URLs, tailnet-only (e.g. http://node-c:18811)"}},"required":["subtasks"]}`),
 		}, s.handleAgentDelegate)
+
+		// offload_research (2026-08-30): the one-call research lane. Same gate as
+		// agent_delegate — it IS a delegation, with the fetch done delegator-side —
+		// so tools/list stays byte-identical when the delegator role is off.
+		srv.AddTool(&mcp.Tool{
+			Name:        "offload_research",
+			Description: "RESEARCH on the FREE local seats: hand over URLs + a goal; the harness fetches each page DELEGATOR-side (public http/https only — loopback, private, tailnet hosts are refused), strips it to text, and fans one digest contract per page across the fleet (route spread by default). The seats never touch the network; your context never pays for the pages. This is the lane for any leg that would otherwise be a cloud research subagent — WebSearch to find URLs, then call this. Each contract is written the way the seats pass (the document is named as already provided) and acceptance is anchored to a token that appears only in the page, so an echoed goal cannot pass as verified. Returns {summary, sources:[{index,url,final_url,title,status,bytes,text_bytes,truncated,error,doc_name,anchor,skipped}], results:[...agent_delegate result rows, one per usable source, in source order], result_sources:[source index per result]}. Read summary FIRST; a source with `skipped` produced no result (fetch failed, non-public host, unsupported content type). Default output_schema {key_facts[],numbers[],quotes[],verdict} — pass your own to shape the digest; pass questions to add per-page asks. Caps: 12 URLs per call, 2 MiB fetched / 96 KiB text per page, 30 s per fetch.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"goal":{"type":"string","description":"what to extract from EVERY page, self-contained (the seat sees only this + the page text)"},"urls":{"type":"array","minItems":1,"maxItems":12,"items":{"type":"string"},"description":"public http(s) URLs to fetch delegator-side"},"questions":{"type":"array","items":{"type":"string"},"description":"optional extra asks appended to the goal for every page"},"output_schema":{"type":"object","description":"JSON Schema with a properties map for the per-page digest (default: key_facts/numbers/quotes/verdict)"},"acceptance":{"type":"array","items":{"type":"string"},"description":"optional extra delegator-side checks (contains:/not_contains:/regex:/min_items:/nonempty:) appended to the grounded default"},"route":{"type":"string","enum":["auto","spread","local","remote"],"description":"placement (default spread: pages are dealt across the local seat and every eligible fleet node)"},"timeout_sec":{"type":"integer","description":"per-page contract budget (default 300, cap 900)"},"fetch_timeout_sec":{"type":"integer","description":"per-page fetch timeout (default 30)"}},"required":["goal","urls"]}`),
+		}, s.handleResearch)
 	}
 
 	// Accelerator tools (ADR 0024): registered ONLY when the box lists the
@@ -2250,4 +2263,93 @@ func result(r core.Result) (*mcp.CallToolResult, error) {
 		return nil, err
 	}
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(b)}}}, nil
+}
+
+// handleResearch — offload_research. Fetch (guarded, delegator-side) → Build
+// (one grounded contract per usable page) → the SAME delegate.Run path as
+// agent_delegate. The seam s.researchFetch lets tests supply pages without
+// network; production uses research.FetchAll.
+func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var in struct {
+		Goal            string          `json:"goal"`
+		URLs            []string        `json:"urls"`
+		Questions       []string        `json:"questions"`
+		OutputSchema    json.RawMessage `json:"output_schema"`
+		Acceptance      []string        `json:"acceptance"`
+		Route           string          `json:"route"`
+		TimeoutSec      int             `json:"timeout_sec"`
+		FetchTimeoutSec int             `json:"fetch_timeout_sec"`
+	}
+	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+		return bad, nil
+	}
+	if strings.TrimSpace(in.Goal) == "" {
+		return jsonResult(map[string]any{"deferred": true, "reason": "goal required"})
+	}
+	if len(in.URLs) == 0 {
+		return jsonResult(map[string]any{"deferred": true, "reason": "at least one url required"})
+	}
+	if len(in.URLs) > research.MaxURLsPerCall {
+		return jsonResult(map[string]any{"deferred": true, "reason": fmt.Sprintf("at most %d urls per call (got %d) — split the batch", research.MaxURLsPerCall, len(in.URLs))})
+	}
+	route := in.Route
+	if route == "" {
+		route = "spread"
+	}
+	opt := research.Options{}
+	if in.FetchTimeoutSec > 0 {
+		opt.Timeout = time.Duration(in.FetchTimeoutSec) * time.Second
+	}
+	fetch := s.researchFetch
+	if fetch == nil {
+		fetch = func(ctx context.Context, urls []string, opt research.Options) []research.Fetched {
+			return research.FetchAll(ctx, urls, opt, 4)
+		}
+	}
+	fetched := fetch(ctx, in.URLs, opt)
+	specs, sources := research.Build(research.Request{
+		Goal: in.Goal, URLs: in.URLs, Questions: in.Questions, OutputSchema: in.OutputSchema,
+		Acceptance: in.Acceptance, TimeoutSec: in.TimeoutSec,
+	}, fetched)
+	if len(specs) == 0 {
+		return jsonResult(map[string]any{"deferred": true, "reason": "no usable source: every fetch failed or was refused (see sources)", "sources": sources})
+	}
+	contracts := make([]core.AgentContract, 0, len(specs))
+	lints := make([][]string, 0, len(specs))
+	resultSources := make([]int, 0, len(specs))
+	for _, src := range sources {
+		if src.Skipped == "" {
+			resultSources = append(resultSources, src.Index)
+		}
+	}
+	for i, spec := range specs {
+		c, perr := delegate.PrepareContract(spec, "")
+		if perr != nil {
+			return jsonResult(map[string]any{"deferred": true, "reason": fmt.Sprintf("source %d: %v", resultSources[i], perr), "sources": sources})
+		}
+		contracts = append(contracts, c)
+		lints = append(lints, delegate.LintAcceptance(c))
+	}
+	localRun := s.localAgent
+	if localRun == nil {
+		localRun = s.p.RunAgentContract
+	}
+	results, sum, rerr := delegate.Run(ctx, s.p.Cfg(), localRun, contracts, route, nil)
+	if rerr != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error(), "sources": sources})
+	}
+	wire := delegate.WireResponse(results, sum, lints)
+	res, jerr := jsonResult(struct {
+		Summary       any               `json:"summary"`
+		Sources       []research.Source `json:"sources"`
+		Results       any               `json:"results"`
+		ResultSources []int             `json:"result_sources"`
+	}{wire.Summary, sources, wire.Results, resultSources})
+	if jerr != nil || res == nil {
+		return res, jerr
+	}
+	if delegateIsError(sum) {
+		res.IsError = true
+	}
+	return res, nil
 }

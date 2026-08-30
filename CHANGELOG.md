@@ -6,6 +6,33 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.110.0] - 2026-08-30
+
+### Added — `offload_research`: the one-call research lane (harness-first, operator directive)
+
+Every "web research" leg was going to a cloud subagent because the seats have no
+network, while the digest — the expensive part — is what the seats do all day.
+Now the harness fetches the pages DELEGATOR-side and the seats digest them:
+
+- internal/research: guarded fetch (public http/https only — loopback, private,
+  link-local, `.local`, the tailnet zone and the CGNAT range are refused, and
+  every redirect hop is re-checked), 2 MiB read cap / 96 KiB text cap per page,
+  dependency-free HTML→text stripper (scripts, styles and page chrome dropped,
+  block boundaries kept), bounded-concurrency FetchAll.
+- Contracts are built the way the seats were measured to pass (2026-08-28): the
+  document is named as ALREADY PROVIDED (a goal that says "read the document"
+  sends a small seat hunting for a file), and acceptance is anchored to a token
+  present only in the page — never in the goal — plus a shape check on the
+  schema's first array, so an echoed goal cannot pass as verified.
+- MCP `offload_research` {goal, urls≤12, questions?, output_schema?,
+  acceptance?, route?=spread, timeout_sec?, fetch_timeout_sec?} → {summary,
+  sources, results, result_sources}; gated with agent_delegate (it IS a
+  delegation) so tools/list stays byte-identical when the delegator role is off.
+- CLI `local-offload research --goal … --url … [--url …] [--schema f]
+  [--accept …] [--route …]`.
+- The seats never gain network access; the agent loop's egress cage is untouched.
+
+
 ## [0.109.0] - 2026-08-28
 
 ### Added — the consolidated pull queue ships DARK (Option B, ADR 0030)

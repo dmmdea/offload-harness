@@ -65,16 +65,18 @@ func TestAgentDelegateRegistrationGated(t *testing.T) {
 	// strip it from the on-list and byte-compare the remainder to the
 	// off-list (the delta-13 "tools/list byte-identical when off" pin).
 	var stripped []*mcp.Tool
-	found := false
+	found := map[string]bool{}
 	for _, tool := range on {
-		if tool.Name == "agent_delegate" {
-			found = true
+		// offload_research rides the same gate (it IS a delegation, fetched
+		// delegator-side), so the flag adds exactly these two and nothing else.
+		if tool.Name == "agent_delegate" || tool.Name == "offload_research" {
+			found[tool.Name] = true
 			continue
 		}
 		stripped = append(stripped, tool)
 	}
-	if !found {
-		t.Fatal("agent_delegate not advertised with agent_delegation_enabled ON")
+	if !found["agent_delegate"] || !found["offload_research"] {
+		t.Fatalf("agent_delegate/offload_research not both advertised with agent_delegation_enabled ON: %v", found)
 	}
 	offJSON, err := json.Marshal(off)
 	if err != nil {
