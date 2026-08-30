@@ -106,7 +106,7 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 		// list overflowed the structured re-pack on the 27B AND the 4B seats
 		// (2026-08-30, "invalid json: unexpected end of JSON input") — the seat
 		// abstained, not the caller. Bounded lists fit every seat's re-pack budget.
-		fullGoal := head + goal + " Answer only from the file; omit anything it does not contain rather than inventing it. Keep every list to at most 8 items of at most 25 words each — the most important first — and every string field under 60 words."
+		fullGoal := head + goal + " Answer only from the file; omit anything it does not contain rather than inventing it. Keep every list to at most 6 items of at most 18 words each — the most important first — and every string field under 40 words."
 
 		acc := []string{}
 		if anchor != "" {

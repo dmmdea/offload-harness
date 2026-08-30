@@ -32,6 +32,13 @@ Now the harness fetches the pages DELEGATOR-side and the seats digest them:
   [--accept …] [--route …]`.
 - The seats never gain network access; the agent loop's egress cage is untouched.
 
+### Changed — structured re-pack budget 512 → 1024 tokens
+
+A four-field digest schema overflowed the 512-token re-pack on the 27B and the 4B
+seats alike ("invalid json: unexpected end of JSON input"), surfacing as an
+abstention indistinguishable from a real one; the 2026-08-28 long-extraction
+abstentions were the same class. Research goals also bound their list lengths.
+
 
 ## [0.109.0] - 2026-08-28
 
