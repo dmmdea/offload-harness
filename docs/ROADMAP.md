@@ -184,6 +184,43 @@ sides: 46/46 each. No separation found; the candidate costs ~2× wall and ~70 GB
 The config above is the drop-in seat entry if the PR merges and a real long-context workload
 shows the 262k-native advantage. FreeToken is not an alternative path (arch unsupported).
 
+### 48GB GATES + 3-CARD OPTIMIZATION — 2026-08-31 → 09-01 (operator-decided via lavish review)
+
+Every §6.5 measurement gate ran; the operator approved seatings from the evidence; the
+3-card placement law was enforced fleet-wide on Qube. Full ledger:
+`Benchmarks and Optimizations/2026-08-31-48gb-gates-NOTES.md` (Drive). Canonical matrix
+updated first per house rule. Highlights, each with its named check:
+
+- **llama.cpp b10621 → b10720** (Flash-Next arch mainline). T1-A slot-restore proven by
+  prompt_n 131→1 across an evict/reload; the pre-merge qwen4exp q8_0-KV crash is CLEARED.
+- **Placement law (operator): 2-card seats on the 5060 Ti PAIR only; the 5070 Ti serves
+  interactive first and joins only for 3-card work (first-class).** All incumbents re-pinned;
+  singles balanced across both 5060s; verified by card telemetry (27B: 11.9+14.1 GB on the
+  pair, 5070 Ti at desktop-idle).
+- **Seated:** `qwen3.8-flash-next` (opt-in big seat, ncmoe28 28,10,10, q8 KV, 131k;
+  12.5–12.9 t/s) + `qwen3.8-flash-next-262k` twin (native window, batch-class: pp 69 t/s) +
+  `qwen3-vl-32b` (vision/vqa split seat) — the 8B keeps OCR (32B wins MMMU +11 but refuses
+  verbatim transcription: invoice NED 0.773 vs 1.000). `qwen3.8-27b-262k` upgraded to q8_0 KV
+  (drafter dropped — fidelity-over-speed on the longctx seat; q8+MTP does not fit the pair).
+- **Real-path A/B (20 doc-grounded contracts/arm, CLI `delegate --contract`):** incumbent
+  27B **20/20 PASS median 28 s**; Flash-Next **15/20 median 539 s (15× wall)** — slow decode
+  compounds across loop steps into budget-defers. **Routing verdict: FN strictly opt-in;
+  general delegation stays on the 27B.** The instrument-parity story (15/16 both) does not
+  survive the production path — measure there before seating anything as a router target.
+- **Rejected on evidence:** 27B Q6 re-quant (14/16, OOMs the seat contract), stt_hq
+  large-v3 (loses to turbo on the house set), Krea 2 RAW (terminal noise under every recipe
+  on ComfyUI 0.34; no official serving recipe exists — files deleted, 37 GB back).
+- **Disk-swap casualties #2 and #3 found live and fixed:** krea2_turbo_bf16 restored into
+  the wrong model-class dir (enum-invisible to UNETLoader) and the missing H3 turbo LoRA
+  (re-fetched). H3 lane verified: 6.2 min joint-AV r2v on the 48 GB pool (was VRAM-tight).
+- **UPSTREAM BUG (open): ComfyUI-MultiGPU `wrap_for_dlpack_with_device_guard` breaks int8
+  DiTs on non-default CUDA devices** — loads `libcudart.so` by POSIX name on Windows, then
+  cudaErrorIllegalAddress once shimmed. Caught via a ctypes diagnostic shim (kept in the
+  ComfyUI venv, logs + maps POSIX CUDA names). Local == upstream HEAD; report queued.
+  Interim law-exception: int8 video DiTs compute on the 5070 Ti; bf16 image pools run on the
+  pair (proven). Fleet-node bug also open: the Lenovo seat intermittently answers a phantom
+  "Go version" goal (7+ repros logged) — dispatch-path contamination, needs a fix here.
+
 ### T1. Qwen3.8-Flash-Next — **THE CURRENT FOCUS (operator, 2026-08-26)**
 
 > Operator direction: *"qwen 3.8 NEXT is the focus right now..... careful...."* The caution is the **laguna-s-2.1 precedent** — a seat built on a fork binary whose arch mainline never absorbed, which produced non-terminating thinking (EOG tokens unregistered in the fork build) and was eventually deleted for 72.1 GB back.
