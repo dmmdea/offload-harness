@@ -8,10 +8,10 @@
   "python_exe": "C:/Program Files/GIMP 3/bin/python.exe",
   "pygobject": "3.56.2",
   "batch_eval_plugin": "C:\\Program Files\\GIMP 3\\lib\\gimp\\3.0\\plug-ins\\python-eval\\python-eval.py",
-  "profile_dir": "C:\\Users\\dmmde\\AppData\\Roaming\\GIMP\\3.2",
+  "profile_dir": "C:\\Users\\<user>\\AppData\\Roaming\\GIMP\\3.2",
   "data_dir": "C:\\Program Files\\GIMP 3\\share\\gimp\\3.0",
   "sysconf_dir": "C:\\Program Files\\GIMP 3\\etc\\gimp\\3.0",
-  "temp_dir_pattern": "C:\\Users\\dmmde\\AppData\\Local\\Temp\\gimp-3.2-XE0NBV3",
+  "temp_dir_pattern": "C:\\Users\\<user>\\AppData\\Local\\Temp\\gimp-3.2-XE0NBV3",
   "pdb_count": 1033,
   "pdb_count_by_type": {
    "internal": 722,
