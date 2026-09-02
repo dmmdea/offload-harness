@@ -1,0 +1,205 @@
+Selecting streams with the -map option
+
+    Simple examples
+
+    Default behavior
+
+    Syntax
+
+        Modifiers
+
+        Order
+
+    Examples
+
+        Choose all streams
+
+        Video streams only
+
+        Audio streams only
+
+        A specific video stream only
+
+        Video and audio from different files
+
+        Everything except audio
+
+        Specific language
+
+        Choose outputs from filters
+
+        Multiple outputs
+
+        Optional mapping
+
+        Re-order streams
+
+    See also
+
+The -map option is used to choose which streams from the input(s) should be included in the output(s). The -map option can also be used to exclude specific streams with negative mapping.
+
+The commands in the diagram above will select the video from input0.mp4 and the 3rd audio stream from input1.mkv to output.mp4. The commands do the same thing, but use different syntax to map streams:
+
+The top command does not use any stream specifiers. This is an absolute method of mapping and will choose a specific stream regardless of type. -map 1:3 refers to "second input:fourth stream".
+
+The bottom command includes stream specifiers (v for video, a for audio) to limit the streams to a specific type. -map 1:a:2 refers to "second input:audio only:third audio stream".
+
+Simple examples
+
+-map 0 From input index #0 (the 1st input) select all streams.
+
+-map 1:a From input index #1 (the 2nd input) select all audio streams.
+
+-map 3:s:4 From input index #3 (the 4th input) select subtitle stream index #4 (the fifth subtitle stream).
+
+-map 0 -map -0:s Will select all streams from input index #0 (the 1st input) except subtitles. The - indicates negative mapping.
+
+Default behavior
+
+If you do not use the -map option then the default stream selection behavior will automatically choose streams.
+
+Default stream selection will not automatically choose all of the streams.
+
+Only 1 stream per type will be selected. For example, if the input has 3 video streams it will only choose 1.
+
+The default stream selection will choose streams based upon specific criteria.
+
+Using the -map option disables the default stream selection behavior and allows you to manually choose streams.
+
+Syntax
+
+The syntax is:
+
+-map input_file_index:stream_type_specifier:stream_index
+
+input_file_index refers to an input and by default will include all of its streams.
+
+stream_type_specifier (optional) is a stream specifier which will limit the selection to a specific stream type. Stream specifiers include video, audio, subtitles, data, attachments. Most of the examples below use stream specifiers.
+
+stream_index (optional) will select a specific stream. If stream_type_specifier is used then the stream_index only refers to the selected stream type and ignores all other stream types.
+
+Note: input_file_index numbers start from 0. The first -i input or stream is #0, second -i input or stream is #1, third -i input or stream is #2, etc.
+
+Modifiers
+
+A - character before the input_file_index, such as -map -0:v, creates a negative mapping. This excludes streams already selected by a previous map. See example.
+
+A trailing ?, such as -map 1:a?, will allow the map to be optional. If the map matches no streams the map will be ignored instead of failing. Note the mapping will still fail if an invalid input_file_index is used; such as if the map refers to an input that does not exist. See example.
+
+Order
+
+The order of -map options is important:
+
+-map order determines the stream order in the output(s).
+
+Mapping is applied in order. This is useful when using negative mapping.
+
+Examples
+
+Tip: You can add -c copy to many of these examples to enable stream copy mode. This is useful if you want to mux only and avoid encoding.
+
+Choose all streams
+
+Single input:
+
+ffmpeg -i input.avi -map 0 output.mkv
+
+Multiple inputs:
+
+ffmpeg -i input0.mkv -i input1.mp4 -i input2.wav -map 0 -map 1 -map 2 output.mkv
+
+Using stream copy to remux (no encoding):
+
+ffmpeg -i input.avi -map 0 -c copy output.mkv
+
+Video streams only
+
+ffmpeg -i input.mp4 -map 0:v output.mp4
+
+Audio streams only
+
+ffmpeg -i input.mp4 -map 0:a output.mp4
+
+A specific video stream only
+
+Choose the 5th video stream:
+
+ffmpeg -i input.mkv -map 0:v:4 output.mp4
+
+Note that counting starts from 0.
+
+Video and audio from different files
+
+ffmpeg -i video.mp4 -i audio.m4a -map 0:v -map 1:a output.mp4
+
+Everything except audio
+
+Using negative mapping:
+
+ffmpeg -i input.mp4 -map 0 -map -0:a output.mp4
+
+Specific language
+
+Include all video and all streams with Spanish language metadata:
+
+ffmpeg -i input.mkv -map 0:v -map 0:m:language:spa output.mp4
+
+See ​List of ISO 639-1 codes for the 3 letter language names.
+
+Choose outputs from filters
+
+In this example the filtered video is named [v] and the filtered audio is named [a]:
+
+ffmpeg -i input.mp4 -i logo.png -i audio.mp3 -filter_complex "[0]scale=1280:-1[bg];[bg][1]overlay[v];[2:a]volume=-3dB[a]" -map "[v]" -map "[a]" output.mp4
+
+You can use almost any arbitrary names to label the filter outputs.
+
+Multiple outputs
+
+Output video to video.mp4. Output audio stream index #1 (the 2nd audio stream) to audio_1.mp3. Output audio stream index #3 (the 4th audio stream) to audio_3.wav:
+
+ffmpeg -i input.mkv -map 0:v video.mp4 -map 0:a:1 audio_1.mp3 -map 0:a:3 audio_3.wav
+
+Note that counting starts from 0.
+
+Optional mapping
+
+Adding a trailing question mark (?) to -map will ignore the mapping if the stream does not exist.
+
+To map the video and audio streams and ignore the audio mapping if no audio streams exist:
+
+ffmpeg -i input.webm -map 0:v -map 0:a? output.mkv
+
+If -map 0:a is used instead, and there are no audio streams, then ffmpeg will fail with Stream map '0:a' matches no streams. To ignore this, add a trailing '?' to the map..
+
+Re-order streams
+
+The order of your -map options determines the order of the streams in the output. In this example the input file has audio as stream #0 and video as stream #1 (which is possible but unusual). Example to re-position video so it is listed first, followed by the audio:
+
+ffmpeg -i input.mp4 -map 0:v -map 0:a -c copy output.mp4
+
+This example stream copies (re-mux) with -c copy to avoid re-encoding.
+
+See also
+
+-map option documentation
+
+            Last modified
+ 19 months ago
+
+            Last modified on Feb 4, 2025, 9:48:18 AM
+
+    Attachments
+    (1)
+
+        map.png​
+ (22.5 KB
+) - added by llogan 6 years ago.
+        diagram of -map option
+
+  Download all attachments as:
+  .zip
+
+  Note:
+ See   TracWiki
+ for help on using the wiki.

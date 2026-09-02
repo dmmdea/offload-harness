@@ -1,0 +1,133 @@
+How to Encode Videos for YouTube, Facebook, Vimeo, twitch, and other Video Sharing Sites
+
+Contents
+
+    Basic Examples
+
+    Live Streaming
+
+    faststart for MP4/M4V/MOV files
+
+    Upscaling video for higher peak quality
+
+    Utilizing the included album cover/art
+
+    Using filters
+
+    FAQ
+
+Because YouTube, Vimeo, and other similar sites will re-encode anything you give it the best practice is to provide the highest quality video that is practical for you to upload. Uploading the original content is the first recommendation, but this is not always a choice due to the file size or format, so re-encoding may be required. This guide will show you how to create a high quality video using ffmpeg.
+
+First read the H.264 guide; specifically the section on CRF. The examples below use the same method as shown in the encoding guide but optimized for YouTube.
+
+Basic Examples
+
+Re-encode the video and stream copy the audio. The output should be a similar quality as the input and will hopefully be a more manageable size.
+
+ffmpeg -i input.avi -c:v libx264 -preset slow -crf 18 -c:a copy -pix_fmt yuv420p output.mkv
+
+Same as above, but also re-encode the audio using AAC instead of stream copying it:
+
+ffmpeg -i input.mov -c:v libx264 -preset slow -crf 18 -c:a aac -b:a 192k -pix_fmt yuv420p output.mkv
+
+Create a video with a still image (input.png) and an audio file (audio.m4a):
+
+ffmpeg -loop 1 -framerate 2 -i input.png -i audio.m4a -c:v libx264 -preset medium -tune stillimage -crf 18 -c:a copy -shortest -pix_fmt yuv420p output.mkv
+
+Live Streaming
+
+See Encoding for Streaming Sites.
+
+faststart for MP4/M4V/MOV files
+
+If uploading MP4/M4V/MOV files ​YouTube recommends that the moov atom should be at the beginning of the file. You can do this with the following option:
+
+-movflags +faststart
+
+If you already have a MP4/M4V/MOV file and want to "faststart" it then you can do so without needing to re-encode by using stream copy mode:
+
+ffmpeg -i input.mp4 -c copy -movflags +faststart output.mp4
+
+Note:
+͏    For Matroska (MKV, MKA, WebM), "-movflags +faststart" is no-op.
+͏    Use "-cues_to_front 1" to accomplish the same.
+͏    See also: ​https://github.com/exiftool/exiftool/issues/252#issuecomment-2063495009
+
+Upscaling video for higher peak quality
+
+Due to the encoding ladders that Youtube and other streaming sites utilise to re-encode uploaded videos in different qualities, higher resolution videos receive a higher bitrate. It's possible to use upscaling to exploit this for higher peak viewing quality.
+
+The following will use nearest neighbor scaling to upscale a video by 2x in each direction for 4 times the total resolution and minimal scaling artifacts:
+
+ffmpeg -i input.mkv -vf scale=iw*2:ih*2:flags=neighbor -c:v libx264 -preset slow -crf 18 output.mkv
+
+To upscale by 4x or 8x, use scale=iw*4:ih*4:flags=neighbor and scale=iw*8:ih*8:flags=neighbor respectively. This can be useful for low-resolution material such as VHS captures, DVD video, and gameplay capture of old video games that would otherwise suffer from excessive loss of detail if uploaded in 480p or lower resolution.
+
+Utilizing the included album cover/art
+
+Some music files contain the album cover.
+
+You can see if your music file contains the album cover with ffmpeg. Look for a video stream:
+
+$ ffmpeg -i input.mp3
+...
+  Duration: 00:04:09.70, start: 0.025056, bitrate: 243 kb/s
+    Stream #0:0: Audio: mp3, 44100 Hz, stereo, s16p, 235 kb/s
+    Stream #0:1: Video: mjpeg, yuvj420p(pc), 600x600 [SAR 1:1 DAR 1:1], 90k tbr, 90k tbn, 90k tbc
+
+Or simply play it with ffplay and it will show the album cover and play the music:
+
+ffplay -i input.mp3
+
+Then you can use it as the video for your music that you want to upload to YouTube:
+
+ffmpeg -i input.mp3 -c copy output.mkv
+
+If your music file does not contain album art then see the Create a video with a still image example above.
+
+Using filters
+
+You can use filters to create effects and to add text. This example will use the avectorscope, showspectrum, and showwaves filters to create effects, the overlay filter to place each effect, and the drawtext filter to add text:
+
+ffmpeg -i input.mp3 -filter_complex \
+"[0:a]avectorscope=s=640x518[left]; \
+ [0:a]showspectrum=mode=separate:color=intensity:scale=cbrt:s=640x518[right]; \
+ [0:a]showwaves=s=1280x202:mode=line[bottom]; \
+ [left][right]hstack[top]; \
+ [top][bottom]vstack,drawtext=fontfile=/usr/share/fonts/TTF/Vera.ttf:fontcolor=white:x=10:y=10:text='\"Song Title\" by Artist'[out]" \
+-map "[out]" -map 0:a -c:v libx264 -preset fast -crf 18 -c:a copy output.mkv
+
+FAQ
+
+Encoding is too slow. What should I do?
+
+Use a faster -preset value, but note that this will increase the file size when using CRF mode. See the H.264 guide for more information.
+
+My video colors are messed up in my computer's media player or the video sharing site I uploaded my video to. Now what?
+
+Add -pix_fmt yuv420p as an output option. Most (or perhaps all) non-FFmpeg based players do not support proper decoding of YUV 4:2:2 or YUV 4:4:4. YouTube works however.
+
+            Last modified
+ 23 months ago
+
+            Last modified on Oct 12, 2024, 5:55:24 PM
+
+    Attachments
+    (2)
+
+        musicfilter.jpg​
+ (26.1 KB
+) - added by llogan 12 years ago.
+        Effects for audio
+
+        album.jpg​
+ (18.1 KB
+) - added by llogan 12 years ago.
+        fake album example
+
+  Download all attachments as:
+  .zip
+
+  Note:
+ See   TracWiki
+ for help on using the wiki.

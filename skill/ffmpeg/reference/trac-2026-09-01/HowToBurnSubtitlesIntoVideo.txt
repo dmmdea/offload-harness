@@ -1,0 +1,54 @@
+You can burn text subtitles (hardsubs) with one of two filters: subtitles or ass.
+
+subtitles filter
+
+Draw subtitles on top of input video using the libass library. This filter requires ffmpeg to be compiled with --enable-libass. See the ​subtitles video filter documentation for more details.
+
+If the subtitle is a separate file called subtitle.srt, you can use this command:
+
+ffmpeg -i video.avi -vf subtitles=subtitle.srt out.avi
+
+If the subtitle is embedded in the container video.mkv, you can do this:
+
+ffmpeg -i video.mkv -vf subtitles=video.mkv out.avi
+
+Note that the subtitles video filter opens the file separately, so if you are also Seeking in the same step, then the subtitles will start at the beginning of the subtitle file. This may or may not be what you want. If you want the burned-in subtitles to start at the same timestamp as the video, you will need to copy the timestamps to the output with -copyts, and then additionally seek in output again with the same values that were used for the input. For example, if you wish to start both the output video and subtitles to start 5 minutes into the input file, then you can use a command line this:
+
+ffmpeg -ss 5:00.00 -copyts -i video.avi -ss 5:00.00 -vf subtitles=subtitles.srt out.avi
+
+ass filter
+
+Same as the subtitles filter, except that it doesn’t require libavcodec and libavformat to work. This filter requires ffmpeg to be compiled with --enable-libass. On the other hand, it is limited to ​ASS (Advanced Substation Alpha) subtitles files. See the ​ass video filter documentation for more details.
+
+ffmpeg -i video.avi -vf "ass=subtitle.ass" out.avi
+
+If your subtitle is in SubRip, MicroDVD or any other supported text subtitles, you have to convert it to ASS before using this filter:
+
+ffmpeg -i subtitle.srt subtitle.ass
+
+Windows users will have to ​setup font paths to get libass to work
+
+Picture-based subtitles
+
+You can burn "picture-based" subtitles into a movie as well, by using the ​overlay video filter to overlay the images. For instance, dvdsub is a type of picture-based overlay subtitles. Example of an MKV with dvdsub subtitles in a separate stream:
+
+ffmpeg -i input.mkv -filter_complex "[0:v][0:s]overlay[v]" -map "[v]" -map 0:a <output options> output.mkv
+
+If you have multiple subtitle streams, you can select which one to use by replacing [0:s] with [0:s:0] to select the first subtitle stream or [0:s:1] to select the second subtitle stream, and so on. See also ​the official documentation; search for "hardcode".
+
+Sometimes adding this filter have a side effect of breaking encoding when input file has multiple audio streams and some of those may have problems; in this case selecting one (or more) of the audio streams should fix the problem:
+
+ffmpeg -i input.ts -filter_complex "[0:v][0:s]overlay[v]" -map "[v]" -map 0:a:0 <output options> output.mkv
+
+Windows
+
+Note that on windows you may have to take added measures to setup your fontconfig appropriately, etc: ​https://web.archive.org/web/20200511024225/https://ffmpeg.zeranoe.com/forum/viewtopic.php?f=7&t=2554
+
+            Last modified
+ 5 years ago
+
+            Last modified on Dec 7, 2021, 7:52:31 PM
+
+  Note:
+ See   TracWiki
+ for help on using the wiki.

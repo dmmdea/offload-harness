@@ -1,0 +1,175 @@
+Contents
+
+    Introduction
+
+    Input seeking
+
+    Output seeking
+
+    Combined seeking
+
+    Notes
+
+        Cutting small sections
+
+        Time unit syntax
+
+        Seeking while codec copy
+
+Introduction
+
+͏    To extract specific part of input: seeking has to be performed on which first.
+͏    ͏"-ss" can be used to seek within the input several ways.
+
+Input seeking
+
+Specify "-ss" before "-i":
+
+ffmpeg -ss 00:23:00 -i "Mononoke.Hime.mkv" -frames:v 1 "out1.jpg"
+
+͏    The demo produces 1 image frame at 23 min from the beginning of the movie.
+͏    The input will be parsed by keyframe, which is very fast.
+
+͏    As of FFmpeg 2.1, when transcoding with `ffmpeg` (i.e. not stream copying): "-ss" is also "frame-accurate" even as input option.
+͏    Previous behavior (seek only to nearest preceding keyframe, despite inaccuracy) can be restored with "-noaccurate_seek".
+
+͏    There's no general rule on setting times for inaccurate seeking appropriately:
+͏    For that depends on the keyframe interval used when encoding.
+
+͏    As reference, "libx264" by default uses GOP (Group of Pictures) size of 250:
+͏    Which means 1 keyframe every 10 s if 25 FPS.
+
+Output seeking
+
+Specify "-ss" after "-i":
+
+ffmpeg -i "Mononoke.Hime.mkv" -ss 23:00 -frames:v 1 "out2.jpg"
+
+͏    The demo also produces 1 image frame precisely at 23 min from the beginning of the movie.
+
+͏    Here, the input is decoded (and discarded) until it reaches the position indicated by "-ss".
+͏    This will be done relatively slow, frame-by-frame.
+
+͏    The main advantage is that when applying filters to output stream: the timestamps aren't reset prior to filtering.
+͏    E.g. when burning subtitles onto video, the subtitle timestamps don't have to be modified.
+͏    But the drawback is that may take long for excessive decoding: bigger the offset, longer the time.
+
+Combined seeking
+
+Specify "-ss" both before/after "-i":
+
+ffmpeg -ss 22:30 -i "Mononoke.Hime.mkv" -ss 30 -frames:v 1 "out3.jpg"
+
+͏    As of FFmpeg 2.1, combined seeking is still possible.
+͏    But I (c-14) have yet to find which a valid use case: for "-ss" as input option shall be both fast and accurate.
+
+͏    The demo seeks via keyframe to ~ 22:30, then accurately to 23:00 (22:30 + 30).
+͏    Semantically valid, but mostly useless.
+
+Notes
+
+Cutting small sections
+
+͏    To extract a small segment amid a movie, it can be used in combination with "-t":
+͏    Which specifies the duration, like "-ss 60 -t 10" to capture from 60 s to 70 s.
+͏    Or use "-to" to specify an out point: like "-ss 60 -to 70" to capture the same.
+͏    "-t", "-to" are mutually exclusive: when both specified, "-t" takes precedence.
+
+͏    Note when "-ss" used before "-i" only: ("-ss" as input option) the timestamps will be reset according to 0.
+͏    So "-t" and "-to" shall be the same.
+͏    To keep original timestamps unmodified: add "-copyts".
+͏    E.g.
+͏    (outdated, see # Input seeking)
+
+ffmpeg -ss 1:00 -i "video.mp4" -to 2:00 -c copy "cut.mp4"
+ffmpeg -ss 1:00 -i "video.mp4" -to 2:00 -c copy -copyts "cut.mp4"
+ffmpeg -i "video.mp4" -ss 1:00 -to 2:00 -c copy "cut.mp4"
+
+͏    #1 cut from 1:00 to 3:00 (of original), using faster (inaccurate) seek.
+͏    #2 cut from 1:00 to 2:00 intended, using faster (inaccurate) seek.
+͏    #3 cut from 1:00 to 2:00 intended, using slower (accurate) seek.
+͏    [ #1, #2 are essentially Combined seeking: now mostly meaningless. ]
+
+͏    Enable ͏"-avoid_negative_ts" when "-c copy" alike (stream copy): if intended to reuse with ͏"concat" demuxer.
+͏    E.g.
+
+ffmpeg -ss 3:00 -i "video.mp4" -t 60 -c copy -avoid_negative_ts 2 "cut.mp4"
+
+[ "-avoid_negative_ts"
+͏    int, output
+͏    Shift timestamps so they start at 0.
+͏    Default: -1
+
+͏    |-1| "auto": Enable when required by target format.
+͏    |0| "disabled": Shift no timestamp. [ Doesn't mean "-copyts". ]
+͏    |1| "make_non_negative": [
+͏    Shift to make timestamps non-negative. (based on the 1st timestamp)
+͏    Affects not following non-monotonic timestamps. ]
+͏    .
+͏    |2| "make_zero": Shift to make timestamps start at 0.
+
+͏    When enabled, all output timestamps are shifted by equal amount.
+͏    Stream desync and relative timestamp differences are preserved as before shifting.
+
+͏    "-copyts" takes precedence of "-avoid_negative_ts" when both specified. ]
+
+͏    [ Unclear Unverified:
+​https://trac.ffmpeg.org/wiki/Seeking?action=diff&version=24
+͏    If have to re-encode anyway, e.g. to apply filters like ͏"afade" that can be very slow.
+͏    Make sure to use `-ss 120 -i "some.mov" -to 60` alike to get the 1 min: from 120 s to (( 120 + 60 )) s.
+͏    Not "-to 180" for the 3 min starting at 120 s. ]
+
+Time unit syntax
+
+͏    2 formats supported:
+͏    |*| Sexagesimal ("Hour:MM:SS.Millisecond", as in "01:23:45.678")
+͏    |*| Seconds
+
+͏    If the fraction part presents (e.g. "02:30.05"): it's interpreted as "2 m 30.05 s", not the 6th frame of 02:30. (per SMPTE timecode)
+͏    Equivalent as "150.05" in seconds.
+
+͏    Example of SMPTE timecode:
+͏    ​https://trac.ffmpeg.org/attachment/ticket/11055/Ticket_11055.m2ts.xml
+
+Seeking while codec copy
+
+͏    Using "-ss" with "-c copy" alike may not be accurate: since `ffmpeg` may only split on I-frame (keyframe independently decodable) alike.
+͏    Though it may, if applicable: auto-adjust the stream's start time to negative to compensate.
+
+͏    E.g. (with typical video) requested timestamp 157 s; but no keyframe until 159 s:
+͏    It shall include ~ 2 s audio (no video) at the start, and start from the 1st keyframe.
+͏    [ ^ ​https://trac.ffmpeg.org/ticket/11018#comment:2 ]
+
+͏    So be careful when splitting and doing codec copy.
+
+            Last modified
+ 16 months ago
+
+            Last modified on May 1, 2025, 12:52:49 AM
+
+    Attachments
+    (4)
+
+        out1.jpg​
+ (34.9 KB
+) - added by burek 14 years ago.
+
+        out2.jpg​
+ (39.6 KB
+) - added by burek 14 years ago.
+
+        out3.jpg​
+ (39.6 KB
+) - added by burek 14 years ago.
+
+        out.jpg​
+ (84.8 KB
+) - added by c-14 12 years ago.
+        Example output for "Seeking with FFmpeg".
+
+  Download all attachments as:
+  .zip
+
+  Note:
+ See   TracWiki
+ for help on using the wiki.
