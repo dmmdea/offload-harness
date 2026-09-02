@@ -28,13 +28,13 @@ if (-not (Test-Path $Contract)) { throw "contract file not found: $Contract (an 
 
 # the "other session": one long streamed chat holding a slot on the same seat
 $chatBody = @{ model = $Model; messages = @(@{ role = "user"; content = "Write 600 words about pipeline parallelism." }); max_tokens = 700; stream = $false } | ConvertTo-Json -Depth 5
-$peer = Start-ThreadJob -ArgumentList $Endpoint, $chatBody -ScriptBlock { param($ep, $b); try { Invoke-WebRequest -Uri "$ep/v1/chat/completions" -Method POST -ContentType "application/json" -Body $b -TimeoutSec 900 -SkipHttpErrorCheck | Out-Null } catch {} }
+$peer = Start-ThreadJob -ThrottleLimit ($K + 2) -ArgumentList $Endpoint, $chatBody -ScriptBlock { param($ep, $b); try { Invoke-WebRequest -Uri "$ep/v1/chat/completions" -Method POST -ContentType "application/json" -Body $b -TimeoutSec 900 -SkipHttpErrorCheck | Out-Null } catch {} }
 
 $t0 = Get-Date
 $runs = 1..$K | ForEach-Object {
   $i = $_
   $log = Join-Path $OutDir "run-$i.json"
-  Start-ThreadJob -ArgumentList $Binary, $Contract, $log, $i -ScriptBlock {
+  Start-ThreadJob -ThrottleLimit ($K + 2) -ArgumentList $Binary, $Contract, $log, $i -ScriptBlock {
     param($bin, $c, $log, $i)
     $t = [DateTime]::UtcNow
     $out = & $bin delegate --contract $c --route local 2>&1

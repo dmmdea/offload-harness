@@ -19,7 +19,9 @@ param(
 $ErrorActionPreference = "Continue"
 $body = @{ model = $Model; messages = @(@{ role = "user"; content = "Reply with one word." }); max_tokens = 1; stream = $false } | ConvertTo-Json -Depth 5
 $jobs = 1..$N | ForEach-Object {
-  Start-ThreadJob -ArgumentList $_, $Endpoint, $body -ScriptBlock {
+  # -ThrottleLimit: Start-ThreadJob's default is FIVE concurrent jobs, which silently turns an
+  # N-wide probe into a 5-wide one (found 2026-09-02: 64 calls, 5 at a time, zero 429s).
+  Start-ThreadJob -ThrottleLimit $N -ArgumentList $_, $Endpoint, $body -ScriptBlock {
     param($i, $ep, $b)
     $t0 = [DateTime]::UtcNow
     try {
