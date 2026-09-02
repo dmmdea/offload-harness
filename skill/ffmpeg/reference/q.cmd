@@ -44,18 +44,18 @@ ffmpeg -hide_banner -loglevel error -y -ss 0.5 -i ..\src1080.mp4 -vf "drawtext=f
 echo V8 cmd rc=%ERRORLEVEL%
 type q_err.txt
 echo --- V9 cmd argv:
-"%PY%" argv.py -ss 1.5 -vf "subtitles='C\:/Users/<user>/AppData/Local/Temp/claude/g--My-Drive-AI-Ecosystem/577ca2ce-2189-4694-b542-e300ee53918b/scratchpad/ff/test.srt'"
-ffmpeg -hide_banner -loglevel error -y  -i ..\src1080.mp4 -ss 1.5 -vf "subtitles='C\:/Users/<user>/AppData/Local/Temp/claude/g--My-Drive-AI-Ecosystem/577ca2ce-2189-4694-b542-e300ee53918b/scratchpad/ff/test.srt'" -frames:v 1 q9_cmd.png 2>q_err.txt
+"%PY%" argv.py -ss 1.5 -vf "subtitles='C\:/<scratch>/test.srt'"
+ffmpeg -hide_banner -loglevel error -y  -i ..\src1080.mp4 -ss 1.5 -vf "subtitles='C\:/<scratch>/test.srt'" -frames:v 1 q9_cmd.png 2>q_err.txt
 echo V9 cmd rc=%ERRORLEVEL%
 type q_err.txt
 echo --- V10 cmd argv:
-"%PY%" argv.py -ss 1.5 -vf "subtitles=C\:/Users/<user>/AppData/Local/Temp/claude/g--My-Drive-AI-Ecosystem/577ca2ce-2189-4694-b542-e300ee53918b/scratchpad/ff/test.srt"
-ffmpeg -hide_banner -loglevel error -y  -i ..\src1080.mp4 -ss 1.5 -vf "subtitles=C\:/Users/<user>/AppData/Local/Temp/claude/g--My-Drive-AI-Ecosystem/577ca2ce-2189-4694-b542-e300ee53918b/scratchpad/ff/test.srt" -frames:v 1 q10_cmd.png 2>q_err.txt
+"%PY%" argv.py -ss 1.5 -vf "subtitles=C\:/<scratch>/test.srt"
+ffmpeg -hide_banner -loglevel error -y  -i ..\src1080.mp4 -ss 1.5 -vf "subtitles=C\:/<scratch>/test.srt" -frames:v 1 q10_cmd.png 2>q_err.txt
 echo V10 cmd rc=%ERRORLEVEL%
 type q_err.txt
 echo --- V11 cmd argv:
-"%PY%" argv.py -ss 1.5 -vf "subtitles=/Users/<user>/AppData/Local/Temp/claude/g--My-Drive-AI-Ecosystem/577ca2ce-2189-4694-b542-e300ee53918b/scratchpad/ff/test.srt"
-ffmpeg -hide_banner -loglevel error -y  -i ..\src1080.mp4 -ss 1.5 -vf "subtitles=/Users/<user>/AppData/Local/Temp/claude/g--My-Drive-AI-Ecosystem/577ca2ce-2189-4694-b542-e300ee53918b/scratchpad/ff/test.srt" -frames:v 1 q11_cmd.png 2>q_err.txt
+"%PY%" argv.py -ss 1.5 -vf "subtitles=/<scratch>/test.srt"
+ffmpeg -hide_banner -loglevel error -y  -i ..\src1080.mp4 -ss 1.5 -vf "subtitles=/<scratch>/test.srt" -frames:v 1 q11_cmd.png 2>q_err.txt
 echo V11 cmd rc=%ERRORLEVEL%
 type q_err.txt
 echo --- V12 cmd argv:
