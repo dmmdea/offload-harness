@@ -80,6 +80,10 @@ func TestRunBatchedReturnsPartialResultsWithTheError(t *testing.T) {
 	if sum.Batches < 1 {
 		t.Fatalf("batches=%d", sum.Batches)
 	}
+	// A cancelled ctx on the second chunk is not a top-level Run error today (the
+	// subtask defers instead), so Skipped stays 0 here; the arithmetic itself is
+	// pinned by TestRunBatchedCountsNeverAttemptedSubtasks.
+	_ = err
 }
 
 func TestAddSummaryCoversEveryIntField(t *testing.T) {
@@ -96,5 +100,21 @@ func TestAddSummaryCoversEveryIntField(t *testing.T) {
 		if sv.Field(i).Kind() == reflect.Int && sv.Field(i).Int() != 2 {
 			t.Fatalf("addSummary drops field %s", sv.Type().Field(i).Name)
 		}
+	}
+}
+
+func TestRunBatchedCountsNeverAttemptedSubtasks(t *testing.T) {
+	// A bad route is a top-level error on the FIRST chunk: no results, and every
+	// one of the 12 subtasks counts as skipped so delegateIsError sees the loss.
+	cs := make([]core.AgentContract, 12)
+	for i := range cs {
+		cs[i] = core.AgentContract{Goal: "g"}
+	}
+	res, sum, err := RunBatched(context.Background(), testCfg(t), nil, cs, "no-such-route", nil, nil)
+	if err == nil || len(res) != 0 {
+		t.Fatalf("want a top-level error and no results, got err=%v res=%d", err, len(res))
+	}
+	if sum.Skipped != 12 || sum.Batches != 1 {
+		t.Fatalf("skipped=%d batches=%d, want 12/1", sum.Skipped, sum.Batches)
 	}
 }

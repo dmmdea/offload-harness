@@ -8,8 +8,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"unicode"
 	"sync"
+	"unicode"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
@@ -44,7 +44,11 @@ type Source struct {
 	Fetched
 	DocName string `json:"doc_name,omitempty"`
 	Anchor  string `json:"anchor,omitempty"`
-	Skipped string `json:"skipped,omitempty"`
+	// Fingerprinted says whether DocFingerprint produced the wrong-document
+	// tripwire for this page; false = the page was too thin (< 6 distinctive
+	// tokens) and an off-document answer cannot be caught by it.
+	Fingerprinted bool   `json:"fingerprinted"`
+	Skipped       string `json:"skipped,omitempty"`
 }
 
 // FetchAll fetches every URL with bounded concurrency, preserving order.
@@ -113,7 +117,10 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 		if anchor != "" {
 			acc = append(acc, anchor)
 		}
-		acc = append(acc, DocFingerprint(f.Text)...)
+		fp := DocFingerprint(f.Text)
+		src.Fingerprinted = len(fp) > 0
+		sources[len(sources)-1] = src
+		acc = append(acc, fp...)
 		acc = append(acc, firstArrayCheck(schema)...)
 		acc = append(acc, req.Acceptance...)
 

@@ -236,7 +236,7 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 		tk.Release()
 		if seatwait.Retryable(r.StatusCode, string(b)) {
 			if d, ok := budget.NextFor(r.StatusCode, retryAfter); ok {
-				if serr := seatwait.Sleep(ctx, d); serr != nil {
+				if serr := budget.Sleep(ctx, d); serr != nil {
 					return Completion{}, serr
 				}
 				continue

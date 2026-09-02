@@ -25,7 +25,6 @@
 package delegate
 
 import (
-	"reflect"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -37,6 +36,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,9 +72,9 @@ type PlacedResult struct {
 	// first says a "d" line exists for JobID; the second marks the exits
 	// (cancel, owned-job poll deadline, queued give-up) where the node may
 	// still finish the job — those stay OPEN for the recovery pass.
-	intentRecorded bool
-	orphanable     bool
-	PlacementReason    string
+	intentRecorded  bool
+	orphanable      bool
+	PlacementReason string
 	// Err is non-empty when the subtask FAILED for transport/config reasons
 	// (dispatch refused, auth rejected, undecodable result). Counted in
 	// Summary.Failed, never in Deferred — eight quiet defers and one broken
@@ -243,6 +243,10 @@ type Summary struct {
 	// sequential chunks RunBatched ran (1 for a plain Run).
 	Quarantined int
 	Batches     int
+	// Skipped counts subtasks RunBatched never attempted because an earlier
+	// chunk returned a top-level error — they are in no result and in no other
+	// counter, so without this they would vanish from the summary.
+	Skipped int
 }
 
 const (
@@ -389,6 +393,10 @@ func RunBatched(ctx context.Context, cfg config.Config, local LocalRunner, subta
 		total = addSummary(total, sum)
 		total.Batches++
 		if err != nil {
+			// The erroring chunk's own subtasks (no results came back) plus every
+			// chunk after it were never attempted: count them, or the summary
+			// reads as if the batch simply ended (silent-failure review, 2026-09-02).
+			total.Skipped += (end - start - len(res)) + (len(subtasks) - end)
 			return all, total, err
 		}
 	}
@@ -601,8 +609,8 @@ type runner struct {
 	remotes []string
 	// intent is the delegator-death durability ledger (Option A, intent.go).
 	// nil = inert (state root unresolvable); dispatch never depends on it.
-	intent  *intentLedger
-	led     *ledger.Ledger
+	intent *intentLedger
+	led    *ledger.Ledger
 	// ledgerUnopened marks the TOTAL-loss case: a LedgerPath was configured and
 	// ledger.Open failed, so there is no handle to try. record() must still
 	// count a lost row per result — with the plain `if r.led != nil` guard it
@@ -1538,6 +1546,10 @@ func (r *runner) runLocal(ctx context.Context, contract core.AgentContract, view
 		// never claimed — turning an honest defer into a verification failure
 		// in the ledger and the corpus.
 		pr.AcceptanceFailures = EvalAcceptance(contract, wire)
+		// No strikeOnFingerprint here ON PURPOSE: the local seat is the one
+		// placement always able to take a contract (replacementNode reserves it
+		// as the last resort), so quarantining it would strand every subtask.
+		// A local off-document answer still fails verification and is counted.
 	}
 	return pr
 }

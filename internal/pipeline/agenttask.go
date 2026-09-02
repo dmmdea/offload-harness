@@ -100,7 +100,8 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		}
 	}
 	var contention *seatwait.Budget // set once the wall exists; finish reads it
-	var admitted time.Duration     // the admission pre-flight, if any; finish reports it
+	var admitted time.Duration      // the admission pre-flight, if any; finish reports it
+	var admitNote string            // why the pre-flight could not settle residency (probe error / budget)
 	wire := core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: nodeID, Seat: seat}
 
 	// finish is the ONE exit for every terminal wire result (success or defer):
@@ -115,6 +116,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		if admitted > 0 {
 			w.AdmissionWaitSec = admitted.Seconds()
 		}
+		w.AdmissionNote = admitNote
 		meta.LatencyMs = w.WallMs
 		meta.TokensOut = w.TokensOut
 		data, merr := json.Marshal(w)
@@ -163,7 +165,6 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// the clock. Known bound: the drain phase before a swap shows nothing
 	// non-ready, so a swap that begins a second later is still charged to the
 	// wall — this removes the swap WINDOW from the wall, not the race.
-	var admitNote string
 	admitted, admitNote = awaitSeatAdmission(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec))
 	if admitNote != "" {
 		log.Printf("agent task: seat admission (%s): %s", seat, admitNote)
@@ -290,10 +291,13 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// Wall timeout is its own defer shape — the delegator sizes future
 		// contracts off it, so it must be distinguishable from a planner error.
 		if errors.Is(cctx.Err(), context.DeadlineExceeded) {
-			if r, ok := contendedReason(seat, contention); ok {
+			if contention.CausedTimeout(wall) {
 				// The wall was eaten by WAITING on peers, not by the model's own
 				// work: filing it as a budget defer would poison the delegator's
-				// contract sizing (the council's finding, 2026-09-02).
+				// contract sizing (the council's finding, 2026-09-02). An early
+				// 429 that resolved does not qualify — CausedTimeout needs a sleep
+				// in flight at expiry or waits covering half the wall.
+				r, _ := contendedReason(seat, contention)
 				return deferWire(core.DeferClassInfrastructure, r+"; the wall expired during the wait")
 			}
 			return deferWire(core.DeferClassBudget, fmt.Sprintf("wall timeout after %ds", timeoutSec))
@@ -303,7 +307,8 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// is capacity (llama-swap concurrencyLimit / --parallel), not a box.
 		var se *agent.StatusError
 		if errors.As(rerr, &se) && seatwait.Retryable(se.Code, se.Body) {
-			contention.NextFor(se.Code, "") // no sleep is reserved past the budget; this only records the status
+			// The client's own loop already recorded this status on the budget
+			// (NextFor on its last, refused attempt); nothing to add here.
 			r, _ := contendedReason(seat, contention)
 			return deferWire(core.DeferClassInfrastructure, r+" — "+rerr.Error())
 		}
@@ -370,9 +375,10 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			// The wall expired DURING the re-pack. That is the timeout shape,
 			// not a schema shape — reporting it as "output failed schema" sends
 			// the operator to rewrite a schema that was never the problem.
-			if r, ok := contendedReason(seat, contention); ok {
+			if contention.CausedTimeout(wall) {
 				// Same stable prefix as the transport arm below (§S2 keys on it);
 				// the contention detail rides after it.
+				r, _ := contendedReason(seat, contention)
 				return deferWire(core.DeferClassInfrastructure, "structured re-pack unreachable: "+r+"; the wall expired during the wait")
 			}
 			return deferWire(core.DeferClassBudget, fmt.Sprintf("wall timeout after %ds", timeoutSec))
@@ -385,7 +391,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			// model's control stopped the run.
 			return deferWire(core.DeferClassBudget, "canceled during the structured re-pack (the caller's context ended)")
 		case transport:
-			if r, ok := contendedReason(seat, contention); ok {
+			var lse *llamaclient.StatusError
+			if errors.As(serr, &lse) && seatwait.Retryable(lse.StatusCode, lse.Body) {
+				// THIS failure is a busy answer that outlived the budget — name
+				// the contention. Any other transport error keeps its own text.
+				r, _ := contendedReason(seat, contention)
 				return deferWire(core.DeferClassInfrastructure, "structured re-pack unreachable: "+serr.Error()+" ("+r+")")
 			}
 			// The seat could not be REACHED (llama-swap down/500/dial refused).
@@ -754,7 +764,7 @@ func contendedReason(seat string, b *seatwait.Budget) (string, bool) {
 	if b == nil || b.LastStatus() == 0 {
 		return "", false
 	}
-	return fmt.Sprintf("seat contended: %s answered %d %d time(s); waited %.0fs (peers hold its slots — raise concurrencyLimit or retry)",
+	return fmt.Sprintf("seat contended: %s answered HTTP %d on %d attempt(s), waited %.0fs in total (peers hold its slots — raise concurrencyLimit or retry)",
 		seat, b.LastStatus(), b.Attempts(), b.Spent().Seconds()), true
 }
 

@@ -68,3 +68,23 @@ func TestGenerateDoesNotRetryARealServerFault(t *testing.T) {
 		t.Fatalf("a CUDA OOM is not a wait: %v calls=%d spent=%v", err, calls.Load(), b.Spent())
 	}
 }
+
+func TestGenerateVisionWaitsOutA429Too(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"a cat"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "/v1/chat/completions", "m", 10*time.Second)
+	b := seatwait.NewBudget(5)
+	res, err := c.GenerateVision(seatwait.WithBudget(context.Background(), b), "m", "sys", "what is this", []string{"data:image/png;base64,AAAA"}, "", 16, 0, 0)
+	if err != nil || calls.Load() != 2 || res.Content != "a cat" || b.Spent() != time.Second {
+		t.Fatalf("err=%v calls=%d content=%q spent=%v", err, calls.Load(), res.Content, b.Spent())
+	}
+}

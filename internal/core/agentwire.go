@@ -140,6 +140,10 @@ type AgentWireResult struct {
 	// a swap before the wall started (RunAgentTask's admission gate). Zero =
 	// omitted = nothing was swapping or the gate is disabled.
 	AdmissionWaitSec float64 `json:"admission_wait_sec,omitempty"`
+	// AdmissionNote names why the admission gate did NOT settle the seat's
+	// residency — a probe failure (fail-open) or a spent budget — so a wire
+	// reader can tell "nothing was swapping" from "the gate could not tell".
+	AdmissionNote string `json:"admission_note,omitempty"`
 
 	// --- A1 config pinning (0.81.0, Tier 2 of the Phase 2 re-aim). Stamped by
 	// runAgentTask only when the seat DEMONSTRABLY SERVED this run (the loop

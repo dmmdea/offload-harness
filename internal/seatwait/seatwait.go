@@ -45,6 +45,7 @@ type Budget struct {
 	spent      time.Duration
 	attempts   int
 	lastStatus int
+	sleeping   bool // a reserved sleep is in progress (Sleep on this budget)
 }
 
 // NewBudget builds a Budget from the config value in seconds: 0 = the
@@ -160,6 +161,50 @@ func Retryable(status int, body string) bool {
 		return strings.Contains(body, `"src":"llama-swap"`) || strings.Contains(body, "health check timed out")
 	}
 	return false
+}
+
+// Sleeping reports whether a reserved sleep is in progress right now — the
+// fact a wall-timeout classifier needs: "did the wall expire WHILE waiting
+// on peers?" is a different question from "was there ever a busy answer?".
+func (b *Budget) Sleeping() bool {
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sleeping
+}
+
+// Sleep is Sleep with the in-flight flag kept on this budget for the duration.
+func (b *Budget) Sleep(ctx context.Context, d time.Duration) error {
+	if b != nil {
+		b.mu.Lock()
+		b.sleeping = true
+		b.mu.Unlock()
+		defer func() {
+			b.mu.Lock()
+			b.sleeping = false
+			b.mu.Unlock()
+		}()
+	}
+	return Sleep(ctx, d)
+}
+
+// CausedTimeout reports whether contention, not the model's own work, is what
+// spent a wall of length `wall`: a sleep was in flight when it expired, or the
+// reserved waits account for at least half of it. A single early 429 that
+// resolved in a second must NOT relabel a genuine budget timeout 15 minutes
+// later as "seat contended" (review finding, 2026-09-02).
+func (b *Budget) CausedTimeout(wall time.Duration) bool {
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.lastStatus == 0 {
+		return false
+	}
+	return b.sleeping || (wall > 0 && b.spent*2 >= wall)
 }
 
 // Sleep waits d, or until ctx ends, whichever comes first.

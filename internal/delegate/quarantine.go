@@ -18,6 +18,11 @@ import (
 // It is never persisted: the node bug it guards against needs a fix on the
 // node, and a file that outlives the process would hide the fix's effect.
 //
+// Coverage: the default, spread and remote routes (fetchViews filters blocked
+// nodes; runRemote strikes). The `queue` route hands placement to the pull
+// holders (ADR 0030) before a runner exists, so it is NOT covered — a known
+// bound, stated rather than hidden. The local seat is never quarantined.
+//
 // Only fingerprint failures strike. A user's over-strict `contains:` or a
 // thin page's `min_items` is the CONTRACT's fault and must never quarantine
 // the seat that answered honestly.

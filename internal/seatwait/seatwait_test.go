@@ -119,3 +119,33 @@ func TestSleepHonoursContext(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCausedTimeoutNeedsCausation(t *testing.T) {
+	b := NewBudget(90)
+	if b.CausedTimeout(time.Minute) {
+		t.Fatal("no busy answer ever: not a contention timeout")
+	}
+	b.NextFor(429, "1") // one early 429, 1 s, resolved
+	if b.CausedTimeout(10 * time.Minute) {
+		t.Fatal("1 s of waiting does not explain a 10-minute wall")
+	}
+	if !b.CausedTimeout(2 * time.Second) {
+		t.Fatal("1 s of waiting IS half of a 2 s wall")
+	}
+	// a sleep in flight at expiry always counts
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan bool, 1)
+	go func() {
+		_ = b.Sleep(ctx, time.Minute)
+		done <- true
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if !b.Sleeping() || !b.CausedTimeout(10*time.Minute) {
+		t.Fatal("a sleep in flight when the wall expires is contention, whatever the ratio")
+	}
+	cancel()
+	<-done
+	if b.Sleeping() {
+		t.Fatal("the in-flight flag must clear when the sleep ends")
+	}
+}

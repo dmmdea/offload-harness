@@ -2078,7 +2078,10 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 	if localRun == nil {
 		localRun = s.p.RunAgentContract
 	}
-	results, sum, rerr := delegate.Run(ctx, s.p.Cfg(), localRun, contracts, in.Route, in.Remotes)
+	// The server-lifetime quarantine rides every delegation, not only research:
+	// a node proven to answer about the wrong document must not keep receiving
+	// agent_delegate work (silent-failure review, 2026-09-02).
+	results, sum, rerr := delegate.RunWith(ctx, s.p.Cfg(), localRun, contracts, in.Route, in.Remotes, &delegate.RunOptions{Quarantine: s.quarantine})
 	if rerr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
 	}
@@ -2145,7 +2148,9 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 // un-fails a Failed one. A fleet-down run that still delivered every subtask
 // stays a quiet success.
 func delegateIsError(sum delegate.Summary) bool {
-	return sum.Failed > 0 || sum.LostToStack > 0
+	// Skipped: subtasks a batched run never attempted because an earlier chunk
+	// errored — lost work the prose `error` field alone must not hide.
+	return sum.Failed > 0 || sum.LostToStack > 0 || sum.Skipped > 0
 }
 
 // addEffects folds a run's effect ledger into an agent_run response — counts

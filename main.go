@@ -3701,18 +3701,30 @@ func runResearch(args []string) error {
 	}
 	defer cleanup()
 	results, sum, err := delegate.RunBatched(context.Background(), cfg, p.RunAgentContract, contracts, *route, nil, nil)
-	if err != nil {
+	if err != nil && len(results) == 0 {
 		return err
+	}
+	// A chunk error after some pages finished: render the finished pages and
+	// name the error (partial), never drop the work (same rule as the MCP tool).
+	partialErr := ""
+	if err != nil {
+		partialErr = err.Error()
+		lints = lints[:len(results)]
 	}
 	wire := delegate.WireResponse(results, sum, lints)
 	out, err := json.MarshalIndent(struct {
 		Summary any               `json:"summary"`
 		Sources []research.Source `json:"sources"`
 		Results any               `json:"results"`
-	}{wire.Summary, sources, wire.Results}, "", "  ")
+		Partial bool              `json:"partial,omitempty"`
+		Error   string            `json:"error,omitempty"`
+	}{wire.Summary, sources, wire.Results, partialErr != "", partialErr}, "", "  ")
 	if err != nil {
 		return err
 	}
 	fmt.Println(string(out))
+	if partialErr != "" {
+		return fmt.Errorf("research: partial — %d of %d pages ran before: %s", len(results), len(contracts), partialErr)
+	}
 	return delegateExitErr(sum)
 }

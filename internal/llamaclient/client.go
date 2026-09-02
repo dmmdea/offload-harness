@@ -228,10 +228,17 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 	}
 	start := time.Now()
 	base, hc := c.resolveEndpoint(model) // ONE decision: base and client must never split (lanes.go)
-	// One busy-seat budget per CONTRACT (seatwait): a 429 / 503 not-ready /
-	// 500 src=llama-swap is peers holding the seat, re-sent after a counted
-	// sleep with the affinity ticket released (the contention is other
-	// processes' load; a parked ticket only wedges this process's lanes).
+	return c.sendWithSeatWait(ctx, base, hc, model, buf, start)
+}
+
+// sendWithSeatWait is the ONE request loop every generate path shares: build
+// the request, take the affinity ticket, send, and on a llama-swap "peers hold
+// the seat" answer (429 / 503 not-ready / 500 src=llama-swap) release the
+// ticket, sleep on the contract's seatwait budget, and re-send. Any other
+// non-200 is returned as a *StatusError; the ticket is held through the body
+// decode on success (llama-swap only stops needing the model resident once the
+// response is fully served). Vision paths use it too (review, 2026-09-02).
+func (c *Client) sendWithSeatWait(ctx context.Context, base string, hc *http.Client, model string, buf []byte, start time.Time) (GenResult, error) {
 	budget := seatwait.FromContext(ctx)
 	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+c.path, bytes.NewReader(buf))
@@ -239,11 +246,6 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 			return GenResult{}, err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		// Admission is keyed on the base resolveEndpoint just decided, never on the
-		// model: two models on two llama-swap instances do not contend, and gating
-		// them together would serialise lanes that never conflicted. The ticket is
-		// held until decodeGenResult has finished with the body, because llama-swap
-		// only stops needing the model resident when the response is fully served.
 		tk, err := modelaffinity.Admit(ctx, base, model, hc.Timeout)
 		if err != nil {
 			return GenResult{}, err
@@ -260,7 +262,7 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 			tk.Release()
 			if seatwait.Retryable(resp.StatusCode, string(b)) {
 				if d, ok := budget.NextFor(resp.StatusCode, retryAfter); ok {
-					if serr := seatwait.Sleep(ctx, d); serr != nil {
+					if serr := budget.Sleep(ctx, d); serr != nil {
 						return GenResult{}, serr
 					}
 					continue
@@ -313,26 +315,7 @@ func (c *Client) GenerateVision(ctx context.Context, model, system, user string,
 	}
 	start := time.Now()
 	base, hc := c.resolveEndpoint(model) // ONE decision: base and client must never split (lanes.go)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+c.path, bytes.NewReader(buf))
-	if err != nil {
-		return GenResult{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	// Admission is keyed on the base resolveEndpoint just decided, never on the
-	// model: two models on two llama-swap instances do not contend, and gating
-	// them together would serialise lanes that never conflicted. The ticket is
-	// held until decodeGenResult has finished with the body, because llama-swap
-	// only stops needing the model resident when the response is fully served.
-	tk, err := modelaffinity.Admit(ctx, base, model, hc.Timeout)
-	if err != nil {
-		return GenResult{}, err
-	}
-	defer tk.Release()
-	resp, err := hc.Do(req)
-	if err != nil {
-		return GenResult{}, err
-	}
-	return decodeGenResult(resp, start)
+	return c.sendWithSeatWait(ctx, base, hc, model, buf, start)
 }
 
 // GenerateVisionInterleaved sends a multimodal chat request whose user content
@@ -380,26 +363,7 @@ func (c *Client) GenerateVisionInterleaved(ctx context.Context, model, system st
 	}
 	start := time.Now()
 	base, hc := c.resolveEndpoint(model) // ONE decision: base and client must never split (lanes.go)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+c.path, bytes.NewReader(buf))
-	if err != nil {
-		return GenResult{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	// Admission is keyed on the base resolveEndpoint just decided, never on the
-	// model: two models on two llama-swap instances do not contend, and gating
-	// them together would serialise lanes that never conflicted. The ticket is
-	// held until decodeGenResult has finished with the body, because llama-swap
-	// only stops needing the model resident when the response is fully served.
-	tk, err := modelaffinity.Admit(ctx, base, model, hc.Timeout)
-	if err != nil {
-		return GenResult{}, err
-	}
-	defer tk.Release()
-	resp, err := hc.Do(req)
-	if err != nil {
-		return GenResult{}, err
-	}
-	return decodeGenResult(resp, start)
+	return c.sendWithSeatWait(ctx, base, hc, model, buf, start)
 }
 
 // StatusError is a non-200 ANSWER from the server — as opposed to a failure to
