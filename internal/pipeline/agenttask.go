@@ -100,6 +100,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		}
 	}
 	var contention *seatwait.Budget // set once the wall exists; finish reads it
+	var admitted time.Duration     // the admission pre-flight, if any; finish reports it
 	wire := core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: nodeID, Seat: seat}
 
 	// finish is the ONE exit for every terminal wire result (success or defer):
@@ -110,6 +111,9 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		w.WallMs = time.Since(start).Milliseconds()
 		if contention != nil {
 			w.ContentionWaitSec = contention.Spent().Seconds()
+		}
+		if admitted > 0 {
+			w.AdmissionWaitSec = admitted.Seconds()
 		}
 		meta.LatencyMs = w.WallMs
 		meta.TokensOut = w.TokensOut
@@ -150,6 +154,20 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		timeoutSec = core.AgentTimeoutSecDefault
 	}
 	wall := time.Duration(timeoutSec) * time.Second
+	// Admission pre-flight (2026-09-02): the wall must not pay for ANOTHER
+	// session's model swap. llama-swap queues a request silently while it
+	// evicts and loads, so a contract that arrived mid-swap spent its whole
+	// wall in that queue and reported "wall timeout" — the 600 s failures
+	// several parallel sessions reported on 2026-09-01. Wait, bounded and
+	// OUTSIDE the wall, until nothing on the endpoint is mid-swap; then start
+	// the clock. Known bound: the drain phase before a swap shows nothing
+	// non-ready, so a swap that begins a second later is still charged to the
+	// wall — this removes the swap WINDOW from the wall, not the race.
+	var admitNote string
+	admitted, admitNote = awaitSeatAdmission(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec))
+	if admitNote != "" {
+		log.Printf("agent task: seat admission (%s): %s", seat, admitNote)
+	}
 	cctx, cancel := context.WithTimeout(ctx, wall)
 	defer cancel()
 	// One busy-seat budget for the WHOLE contract (seatwait): every chat step
@@ -667,6 +685,65 @@ func coerceToSchema(content []byte, schema map[string]any) ([]byte, bool) {
 		return nil, false
 	}
 	return fixed, true
+}
+
+const admissionPoll = 3 * time.Second
+
+func admissionBudget(sec int) time.Duration {
+	switch {
+	case sec < 0:
+		return 0
+	case sec == 0:
+		return 120 * time.Second
+	}
+	return time.Duration(sec) * time.Second
+}
+
+// awaitSeatAdmission polls llama-swap's GET /running until `seat` is ready,
+// or nothing on the endpoint is mid-swap (an absent seat then loads on
+// demand — the normal cold path, charged to the wall as today), or the
+// budget is spent. Any non-"ready" state counts as busy: llama-swap's
+// vocabulary is stopped|starting|ready|stopping|shutdown and a row in any of
+// the transitional ones means the GPU is being re-arranged. A probe failure
+// proceeds (fail-open, logged): the loop's first chat call surfaces the real
+// transport error with far more detail.
+func awaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string) {
+	if budget <= 0 || strings.TrimSpace(endpoint) == "" {
+		return 0, ""
+	}
+	sc, err := swapclient.New(endpoint, admissionPoll)
+	if err != nil {
+		return 0, "no swap client (proceeding): " + err.Error()
+	}
+	// waited counts only the SLEEPS, never the probe round-trips: an
+	// immediate admission reports zero, which is what "nothing was swapping"
+	// must read as on the wire.
+	var waited time.Duration
+	for {
+		rows, rerr := sc.Running(ctx)
+		if rerr != nil {
+			return waited, "running probe failed (proceeding): " + rerr.Error()
+		}
+		busy := ""
+		for _, r := range rows {
+			if strings.EqualFold(r.ID, seat) && r.State == "ready" {
+				return waited, ""
+			}
+			if r.State != "ready" {
+				busy = r.ID + ":" + r.State
+			}
+		}
+		if busy == "" {
+			return waited, ""
+		}
+		if waited+admissionPoll > budget {
+			return waited, "budget spent while " + busy + " (proceeding into the wall)"
+		}
+		if serr := seatwait.Sleep(ctx, admissionPoll); serr != nil {
+			return waited, serr.Error()
+		}
+		waited += admissionPoll
+	}
 }
 
 // contendedReason renders the "seat contended:" defer reason when the

@@ -43,6 +43,12 @@ type agentFake struct {
 	// instead of a body: the seat ANSWERED with that status rather than with a
 	// result. 5xx = unreachable-class; 4xx = the seat refusing THIS request.
 	repackStatus int
+	// running, when set, scripts GET /running (llama-swap's residency view)
+	// for the admission pre-flight; n counts the polls. Unset = 404, which the
+	// pre-flight treats as "probe failed, proceed" — so every older test keeps
+	// its exact shape.
+	running    func(n int64) string
+	runningCNT atomic.Int64
 	// repackStatusFor, when set, wins over repackStatus and scripts the status
 	// per attempt (1-based) — the seam a transport-THEN-validation test needs,
 	// since the two attempts must fail differently.
@@ -106,6 +112,13 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/running":
+			if f.running == nil {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(f.running(f.runningCNT.Add(1))))
 		case "/v1/models":
 			if f.rosterStatus != 0 {
 				w.WriteHeader(f.rosterStatus)
