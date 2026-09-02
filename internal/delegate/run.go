@@ -25,6 +25,7 @@
 package delegate
 
 import (
+	"reflect"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -237,11 +238,18 @@ type Summary struct {
 	// say what the answer was. Annotations, not buckets.
 	Replaced             int
 	ReplacementRecovered int
+	// Quarantined counts nodes that FLIPPED into quarantine during this run
+	// (two document-fingerprint failures inside the TTL). Batches counts the
+	// sequential chunks RunBatched ran (1 for a plain Run).
+	Quarantined int
+	Batches     int
 }
 
 const (
 	// maxSubtasks bounds one Run (the MCP arg schema mirrors it).
 	maxSubtasks = 8
+	// MaxSubtasks is the same bound, exported for callers that batch (RunBatched).
+	MaxSubtasks = maxSubtasks
 	// runConcurrency bounds the fan-out. 4: enough to overlap remote polls,
 	// small enough that a local fallback burst cannot stampede the one GPU.
 	runConcurrency = 4
@@ -346,7 +354,66 @@ var fleetClient = &http.Client{Transport: netguard.SafeTransport(nil)}
 // bounds, a non-tailnet remote) where nothing executed; per-subtask transport
 // failures land in PlacedResult.Err / Summary.Failed instead, so one broken
 // node cannot void seven finished results.
+// RunOptions carries caller-owned state a Run consults but does not own.
+type RunOptions struct {
+	// Quarantine, when set, excludes nodes it blocks from placement and is
+	// struck on every document-fingerprint verification failure. Owned by the
+	// caller so it survives RunBatched's chunks (and, in the MCP server, the
+	// process lifetime).
+	Quarantine *Quarantine
+}
+
+// Run is RunWith without options — the signature every existing caller uses.
 func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []core.AgentContract, route string, remotes []string) ([]PlacedResult, Summary, error) {
+	return RunWith(ctx, cfg, local, subtasks, route, remotes, nil)
+}
+
+// RunBatched runs contracts in consecutive chunks of MaxSubtasks, in order.
+// offload_research builds ONE contract per usable page and allows 12 URLs per
+// call, so a 9–12-page call hit Run's 8-subtask refusal and every page was
+// lost (2026-09-01, three sessions). Chunks run SEQUENTIALLY on purpose: the
+// fan-out bound exists to keep one GPU from being stampeded, and two chunks in
+// flight would be a 16-wide fan-out by another name. Results come back in
+// input order; Summary counters are summed; the first error is returned WITH
+// the results collected before it, so a caller can render the partial work.
+func RunBatched(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []core.AgentContract, route string, remotes []string, opts *RunOptions) ([]PlacedResult, Summary, error) {
+	var all []PlacedResult
+	var total Summary
+	for start := 0; start < len(subtasks); start += MaxSubtasks {
+		end := start + MaxSubtasks
+		if end > len(subtasks) {
+			end = len(subtasks)
+		}
+		res, sum, err := RunWith(ctx, cfg, local, subtasks[start:end], route, remotes, opts)
+		all = append(all, res...)
+		total = addSummary(total, sum)
+		total.Batches++
+		if err != nil {
+			return all, total, err
+		}
+	}
+	if len(subtasks) == 0 {
+		return RunWith(ctx, cfg, local, subtasks, route, remotes, opts) // the "at least one subtask" error, unchanged
+	}
+	return all, total, nil
+}
+
+// addSummary sums every int counter of Summary by reflection, so a counter
+// added later cannot be silently dropped from a batched total (the reflection
+// test pins it). Non-int fields (none today) would need explicit handling.
+func addSummary(a, b Summary) Summary {
+	av := reflect.ValueOf(&a).Elem()
+	bv := reflect.ValueOf(b)
+	for i := 0; i < av.NumField(); i++ {
+		if av.Field(i).Kind() == reflect.Int && av.Field(i).CanSet() {
+			av.Field(i).SetInt(av.Field(i).Int() + bv.Field(i).Int())
+		}
+	}
+	return a
+}
+
+// RunWith is Run with caller-owned options (see RunOptions).
+func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []core.AgentContract, route string, remotes []string, opts *RunOptions) ([]PlacedResult, Summary, error) {
 	switch route {
 	case "":
 		route = "auto"
@@ -405,6 +472,9 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 	// this run places or reports.
 	maybeRecoverOrphans(cfg)
 	r := &runner{cfg: cfg, local: local, route: route, remotes: remotes, intent: openIntentLedger(cfg), led: led, ledgerUnopened: ledgerUnopened}
+	if opts != nil {
+		r.quarantine = opts.Quarantine
+	}
 	// route=spread probes the fleet ONCE per run: every subtask deals itself
 	// across the same roster, so per-subtask probing would be N identical GETs
 	// and could even deal two subtasks against different snapshots.
@@ -496,6 +566,7 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 	// The denominators are carried only WITH a loss — one decision point, here,
 	// so the wire renderer stays a straight copy and a healthy run's Summary
 	// keeps the zero-valued telemetry block every caller already compares against.
+	sum.Quarantined = int(r.quarantined.Load())
 	if sum.CorpusRowsLost = int(r.corpusLost.Load()); sum.CorpusRowsLost > 0 {
 		sum.CorpusRowsAttempted = int(r.corpusTried.Load())
 	}
@@ -565,6 +636,10 @@ type runner struct {
 	// spreadDeal is the whole run's placement, computed by dealSpread in Run
 	// before any subtask goroutine starts and READ-ONLY from then on.
 	spreadDeal []spreadSlot
+
+	// quarantine is the caller's Quarantine (RunOptions), nil = inert.
+	quarantine  *Quarantine
+	quarantined atomic.Int64
 }
 
 // placement is a resolved "run it HERE" — the node, its dial base ("" for
@@ -1677,6 +1752,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			pr.Seat = wire.Seat
 			if !wire.Deferred {
 				pr.AcceptanceFailures = EvalAcceptance(contract, wire)
+				r.strikeOnFingerprint(base, pr.AcceptanceFailures)
 			}
 			return pr
 		case status == http.StatusOK && state == "error":
@@ -1997,8 +2073,33 @@ func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []st
 // wrong token (401), a node that is down (dial refused), and a stale VRAM
 // snapshot (503) all end as "not a candidate", and dropping the error made
 // them indistinguishable from a node that merely failed the gate.
+// strikeOnFingerprint strikes base in the caller's Quarantine when any failed
+// acceptance is a DOCUMENT FINGERPRINT check (research.DocFingerprint tags its
+// regex with the named group `docanchor`). Contract-caused failures — a
+// user's over-strict contains:, a thin page's min_items — never strike.
+func (r *runner) strikeOnFingerprint(base string, failures []string) {
+	if r.quarantine == nil {
+		return
+	}
+	for _, f := range failures {
+		if strings.Contains(f, "(?P<docanchor>") {
+			if r.quarantine.Strike(base) {
+				r.quarantined.Add(1)
+				log.Printf("delegate: node %s quarantined for %s after 2 off-document answers (document fingerprint failed twice)", base, DefaultQuarantineTTL)
+			}
+			return
+		}
+	}
+}
+
 func (r *runner) fetchViews(ctx context.Context) (views []NodeView, bases []string, probeErrs []string) {
 	for _, base := range r.remotes {
+		if r.quarantine.Blocked(base) {
+			// Two fingerprint failures inside the TTL: the node is producing
+			// answers about the wrong document. Not a candidate until it expires.
+			probeErrs = append(probeErrs, fmt.Sprintf("%s: quarantined until %s (repeated off-document answers)", base, r.quarantine.Until(base).Format(time.Kitchen)))
+			continue
+		}
 		v, err := FetchNodeView(ctx, base, r.cfg.FleetAuthToken)
 		if err != nil {
 			// Logged once per BASE per RUN, not once per (base, subtask):

@@ -3700,7 +3700,7 @@ func runResearch(args []string) error {
 		return err
 	}
 	defer cleanup()
-	results, sum, err := delegate.Run(context.Background(), cfg, p.RunAgentContract, contracts, *route, nil)
+	results, sum, err := delegate.RunBatched(context.Background(), cfg, p.RunAgentContract, contracts, *route, nil, nil)
 	if err != nil {
 		return err
 	}
