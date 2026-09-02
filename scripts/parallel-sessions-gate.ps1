@@ -46,25 +46,36 @@ $runs = 1..$K | ForEach-Object {
 $runRows = $runs | Wait-Job | Receive-Job | Sort-Object run
 $peer | Wait-Job | Out-Null
 
-$contended = 0; $failedVerification = 0; $waited = 0; $admitted = 0; $succeeded = 0; $total = 0
+$contended = 0; $failedVerification = 0; $waited = 0; $admitted = 0; $succeeded = 0; $total = 0; $wallTimeouts = 0; $otherDefers = 0
 foreach ($r in $runRows) {
-  $txt = Get-Content $r.log -Raw
-  try { $j = $txt | ConvertFrom-Json } catch { Write-Host "run $($r.run): output is not JSON (exit $($r.exit)); first line: $($txt.Split("`n")[0])"; continue }
+  $raw = Get-Content $r.log -Raw
+  # the CLI prints config notes before the JSON and an error line after it: take the JSON object only
+  $start = $raw.IndexOf("{"); $end = $raw.LastIndexOf("}")
+  if ($start -lt 0 -or $end -le $start) { Write-Host "run $($r.run): no JSON in output (exit $($r.exit))"; continue }
+  try { $j = $raw.Substring($start, $end - $start + 1) | ConvertFrom-Json } catch { Write-Host "run $($r.run): output is not JSON (exit $($r.exit)): $($_.Exception.Message)"; continue }
   $sum = $j.summary
   if ($sum) { $failedVerification += [int]$sum.failed_verification; $succeeded += [int]$sum.succeeded }
   foreach ($res in @($j.results)) {
     $total++
-    $reason = "$($res.result.reason)"
+    $reason = "$($res.reason)"
     if ($reason -like "seat contended:*") { $contended++ }
-    if ([double]$res.result.contention_wait_sec -gt 0) { $waited++ }
-    if ([double]$res.result.admission_wait_sec -gt 0) { $admitted++ }
+    elseif ($reason -like "wall timeout*") { $wallTimeouts++ }
+    elseif ($res.deferred) { $otherDefers++ }
+    if ([double]$res.contention_wait_sec -gt 0) { $waited++ }
+    if ([double]$res.admission_wait_sec -gt 0) { $admitted++ }
   }
 }
-$verdict = if ($contended -gt 0 -or $failedVerification -gt 0) { "FAIL" } elseif ($waited -eq 0) { "INCONCLUSIVE (no contention observed: no result waited; rerun with a higher -K or a busier peer)" } else { "PASS" }
+# PASS needs the wait to have FIRED (a result waited and still succeeded) with no contended defers and no
+# verification failures. Contended defers after a full budget, or wall timeouts, are CAPACITY: the seat cannot
+# serve this many concurrent loops — report it as such, never as a pass.
+$verdict = if ($failedVerification -gt 0) { "FAIL (verification failures)" }
+  elseif ($contended -gt 0 -or $wallTimeouts -gt 0) { "CAPACITY-LIMITED: $contended contended after the full budget, $wallTimeouts wall timeouts, $succeeded/$total succeeded (raise concurrencyLimit/--parallel or lower K)" }
+  elseif ($waited -eq 0) { "INCONCLUSIVE (no contention observed: no result waited; rerun with a higher -K or a busier peer)" }
+  else { "PASS ($waited results waited and succeeded)" }
 $report = [pscustomobject]@{
   binary = $Binary; k = $K; contract = $Contract; ran_at = (Get-Date -Format s)
   runs = $runRows; results_total = $total; succeeded = $succeeded; seat_contended_defers = $contended
-  failed_verification = $failedVerification; results_that_waited = $waited; results_that_waited_for_admission = $admitted
+  failed_verification = $failedVerification; wall_timeouts = $wallTimeouts; other_defers = $otherDefers; results_that_waited = $waited; results_that_waited_for_admission = $admitted
   median_wall_ms = ($runRows.wall_ms | Sort-Object)[[int]([Math]::Floor(($runRows.Count - 1) / 2))]
   wall_total_s = [int]((Get-Date) - $t0).TotalSeconds
   verdict = $verdict

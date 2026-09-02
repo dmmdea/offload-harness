@@ -118,3 +118,14 @@ func TestRunBatchedCountsNeverAttemptedSubtasks(t *testing.T) {
 		t.Fatalf("skipped=%d batches=%d, want 12/1", sum.Skipped, sum.Batches)
 	}
 }
+
+func TestWireResponseCarriesWaitFieldsAndBatchCounters(t *testing.T) {
+	pr := PlacedResult{Result: core.AgentWireResult{ContentionWaitSec: 3, AdmissionWaitSec: 6, AdmissionNote: "budget spent while other:starting"}}
+	w := WireResponse([]PlacedResult{pr}, Summary{Quarantined: 1, Batches: 2, Skipped: 4}, [][]string{nil})
+	if w.Results[0].ContentionWaitSec != 3 || w.Results[0].AdmissionWaitSec != 6 || w.Results[0].AdmissionNote == "" {
+		t.Fatalf("wait fields must reach the wire: %+v", w.Results[0])
+	}
+	if w.Summary.Quarantined != 1 || w.Summary.Batches != 2 || w.Summary.Skipped != 4 {
+		t.Fatalf("batch/quarantine counters must reach the wire: %+v", w.Summary)
+	}
+}
