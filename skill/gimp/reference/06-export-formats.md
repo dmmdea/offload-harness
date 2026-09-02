@@ -1,6 +1,6 @@
 # 06 — Export formats: what `Gimp.file_save` actually wrote here
 
-Measured 2026-09-01 on the Qube, GIMP 3.2.4, from a 1280×720 RGBA u8 image with 4 layers (fill,
+Measured 2026-09-01 on the workstation, GIMP 3.2.4, from a 1280×720 RGBA u8 image with 4 layers (fill,
 outline, text with baked drop shadow overflowing the canvas, background) at 300 dpi, via
 `Gimp.file_save(Gimp.RunMode.NONINTERACTIVE, img, Gio.File.new_for_path(path), None)`. Verified
 with ffprobe 8.1.2 + Pillow 12.3.0 (+ pdfinfo, zipfile, hexdump). The exporter is chosen by

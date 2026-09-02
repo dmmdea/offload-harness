@@ -37,7 +37,7 @@ class MyPlugIn(Gimp.PlugIn):
         # ImageProcedure: run(procedure, run_mode, image, drawables, config, run_data) — for Filters-menu tools
         proc = Gimp.ImageProcedure.new(self, name, Gimp.PDBProcType.PLUGIN, self.run, None)
         proc.set_image_types("*"); proc.set_sensitivity_mask(Gimp.ProcedureSensitivityMask.DRAWABLE)
-        proc.set_menu_label("My tool"); proc.add_menu_path('<Image>/Filters/Danmar/')
+        proc.set_menu_label("My tool"); proc.add_menu_path('<Image>/Filters/MyTools/')
         proc.set_documentation("blurb", "help", name); proc.set_attribution("author", "copyright", "2026")
         proc.add_double_argument("radius", "Radius", "Blur radius", 0.0, 100.0, 5.0, GObject.ParamFlags.READWRITE)
         return proc

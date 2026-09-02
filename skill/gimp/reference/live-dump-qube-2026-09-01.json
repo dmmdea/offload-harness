@@ -1,6 +1,6 @@
 {
  "meta": {
-  "host": "Qube",
+  "host": "workstation",
   "date": "2026-09-01",
   "gimp": "3.2.4",
   "gimp_dir": "C:\\Program Files\\GIMP 3",
@@ -31238,9 +31238,9 @@
   "get_state_snapshot_stdio_headless": "works: open_image raises 'constructor returned NULL' (Display.new) but image is loaded; get_state_snapshot(max_size=256) -> image/png 4430 B 256x144 rgb24 0.34 s; region crop 128x106 0.65 s; get_image_bitmap(max_width=200) -> image content 6152 B b64",
   "apng_export": "Gimp.file_save(*.apng) -> False 'Unknown file type'; PDB has file-apng-load only; file-png-export has no animation arg",
   "other_hosts": {
-   "lenovo-m720q": "Linux (ssh as anield): no gimp/flatpak/snap/dpkg GIMP",
-   "aorus15p-xd": "offline (Tailscale last seen 7h ago)",
-   "optiplex7060": "offline (Tailscale last seen 5h ago)"
+   "edge-node": "Linux (ssh as the edge user): no gimp/flatpak/snap/dpkg GIMP",
+   "laptop": "offline (Tailscale last seen 7h ago)",
+   "editing-rig": "offline (Tailscale last seen 5h ago)"
   }
  }
 }

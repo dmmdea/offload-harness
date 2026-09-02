@@ -1,10 +1,9 @@
 # 01 — Hosts, install, paths, tools
 
-Check `hostname` first. All facts below were measured on the **Qube** on 2026-09-01 unless tagged
-otherwise. GIMP presence on the other machines (OptiPlex `optiplex7060`, `aorus15p-xd`,
-`lenovo-m720q`) is **unverified** — do not assume; check `Test-Path 'C:\Program Files\GIMP 3\bin'`.
+Check `hostname` first. All facts below were measured on the **workstation** on 2026-09-01 unless tagged
+otherwise. GIMP presence on the other machines (the editing rig, the laptop, the edge node) is **unverified** — do not assume; check `Test-Path 'C:\Program Files\GIMP 3\bin'`.
 
-## Qube — GIMP 3.2.4 [measured]
+## workstation — GIMP 3.2.4 [measured]
 
 | Item | Value |
 |---|---|
@@ -26,7 +25,7 @@ otherwise. GIMP presence on the other machines (OptiPlex `optiplex7060`, `aorus1
 
 ### Per-user profile (`Gimp.directory()`) [measured]
 
-`C:\Users\dmmde\AppData\Roaming\GIMP\3.2` = `%APPDATA%\GIMP\3.2`. GIMP names it after
+`%APPDATA%\GIMP\3.2` = `%APPDATA%\GIMP\3.2`. GIMP names it after
 **major.minor** and creates a fresh one per minor upgrade (3.0 → 3.2 moved it) [doc: gimp-mcp
 README + measured folder name]. Contents that matter:
 
@@ -53,10 +52,10 @@ README + measured folder name]. Contents that matter:
 "Arial Bold", "Segoe UI Black", "Bahnschrift SemiBold Condensed", "Sans-serif Bold" (the
 built-in alias). `Font.get_by_name("Impact")` / `("Arial")` → **None**; `("Impact Regular")`
 / `("Arial Regular")` → Font. **Brand fonts Montserrat / Anton / League Gothic are NOT
-installed on the Qube** (they live on the OptiPlex per the Resolve reference) — install them
+installed on the workstation** (they live on the editing rig per the Resolve reference) — install them
 machine-wide or per-user (`%APPDATA%\GIMP\3.2\fonts`) before rendering brand titles here.
 
-### Verifier tools on the Qube [measured]
+### Verifier tools on the workstation [measured]
 | Tool | Where | Use |
 |---|---|---|
 | `ffprobe` | on PATH (Gyan ffmpeg 8.1.2 winget build); harness also has `D:\Dev\tools\ffmpeg-9.0.1\bin` | codec, WxH, pix_fmt for png/jpg/webp/tif/gif/bmp/avif/heic/jxl/jp2/tga/exr/qoi/psd/ico |
@@ -68,16 +67,16 @@ machine-wide or per-user (`%APPDATA%\GIMP\3.2\fonts`) before rendering brand tit
 ### Related installs
 - gimp-mcp source: `D:\Dev\tools\gimp-mcp` (git remote github.com/maorcc/gimp-mcp, HEAD 09bfb2d
   "Address CodeRabbit nitpicks"); deps via `uv` (`pyproject`: mcp, fastmcp; python ≥3.11).
-- On-demand MCP launcher: `C:\Users\dmmde\.claude\mcp-ondemand\mcp-ondemand.ps1` + `stash.json`
+- On-demand MCP launcher: `%USERPROFILE%\.claude\mcp-ondemand\mcp-ondemand.ps1` + `stash.json`
   (gimp-mcp stashed as user-scope stdio: `uv run --directory D:/Dev/tools/gimp-mcp gimp_mcp_server.py`).
 - local-offload harness `flatten_design` route is bound to `gimp_console_path=C:/Program Files/GIMP 3/bin/gimp-console-3.2.exe` [measured via offload_status]; mem0 evidence: fresh-install host-tool discovery configures the GIMP console path and `edit_python` only best-effort and never modifies an existing config.
 
 ### Other hosts [probed 2026-09-01 22:40]
 | Host | Result |
 |---|---|
-| `lenovo-m720q` (Linux, ssh as **anield** — `dmmde` is refused) | **no GIMP**: no `gimp`/`gimp-3.0`/`gimp-console` on PATH, no flatpak/snap/dpkg GIMP [measured] |
-| `aorus15p-xd` (Windows) | **offline** — Tailscale "last seen 7h ago", SSH timed out; unverified |
-| `optiplex7060` (Windows, editing rig) | **offline** — Tailscale "last seen 5h ago", SSH timed out; unverified. Brand fonts (League Gothic, Montserrat, Anton) live there per `davinci-resolve/reference/01` |
-So today the Qube is the only GIMP host. If GIMP is installed on another Windows box the layout
+| the edge node (Linux, ssh as the edge user) | **no GIMP**: no `gimp`/`gimp-3.0`/`gimp-console` on PATH, no flatpak/snap/dpkg GIMP [measured] |
+| the laptop (Windows) | **offline** — Tailscale "last seen 7h ago", SSH timed out; unverified |
+| the editing rig (Windows, editing rig) | **offline** — Tailscale "last seen 5h ago", SSH timed out; unverified. Brand fonts (League Gothic, Montserrat, Anton) live there |
+So today the workstation is the only GIMP host. If GIMP is installed on another Windows box the layout
 above transfers 1:1 (same installer); the profile is under that user's `%APPDATA%\GIMP\3.2`.
-Re-probe with: `ssh dmmde@<host> 'powershell -NoProfile -Command "Test-Path \"C:\Program Files\GIMP 3\bin\gimp-console-3.2.exe\""'`.
+Re-probe with: `ssh <user>@<host> 'powershell -NoProfile -Command "Test-Path \"C:\Program Files\GIMP 3\bin\gimp-console-3.2.exe\""'`.

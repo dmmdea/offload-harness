@@ -2,7 +2,7 @@
 
 Condensed catalog. Exact PDB signatures for 902 procedures, `dir()` of every class, 28 enums and
 GEGL property tables are in `live-dump-qube-2026-09-01.json` — grep it instead of guessing.
-Tags: [measured] on the Qube 2026-09-01 · [doc] developer.gimp.org · [community] · [inferred].
+Tags: [measured] on the workstation 2026-09-01 · [doc] developer.gimp.org · [community] · [inferred].
 
 ## Boilerplate [measured]
 ```python

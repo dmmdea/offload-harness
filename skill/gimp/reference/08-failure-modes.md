@@ -1,6 +1,6 @@
 # 08 — Failure modes, traps, and the fix for each
 
-Ordered by how likely they are to bite an autonomous run. Tags: [measured] on the Qube 2026-09-01 · [doc] · [community] · [inferred].
+Ordered by how likely they are to bite an autonomous run. Tags: [measured] on the workstation 2026-09-01 · [doc] · [community] · [inferred].
 
 | # | Symptom | Cause | Fix |
 |---|---|---|---|
@@ -49,7 +49,7 @@ Ordered by how likely they are to bite an autonomous run. Tags: [measured] on th
 | 37 | GUI window left open / plug-in processes after a session | forgot teardown | 02 §4 kill-tree snippet; check `Get-NetTCPConnection -LocalPort 9877` |
 | 38 | PDB dump shows `GimpUnit` defaults as `<Gimp.Unit object …>` | live objects, not serialisable | use `Gimp.Unit.pixel()/point()` in code |
 | 39 | `Gegl.list_operations()` returns [] with `g_hash_table` assertion warnings [measured in the dump run] | GEGL not initialised in that plug-in process before use | `Gegl.init(None)` first (then 258 ops) — or use `gegl.exe --list-all` |
-| 40 | Brand fonts render as Sans-serif [measured: Montserrat/Anton/League Gothic absent] | not installed on the Qube | install machine-wide or into `%APPDATA%\GIMP\3.2\fonts`; assert `Font.get_by_name` is not None before rendering |
+| 40 | Brand fonts render as Sans-serif [measured: Montserrat/Anton/League Gothic absent] | not installed on the workstation | install machine-wide or into `%APPDATA%\GIMP\3.2\fonts`; assert `Font.get_by_name` is not None before rendering |
 
 ## Diagnostic ladder
 1. Exit code + stderr (`GIMP-Error`, `Warning: … out of range`, `Stopping at failing batch command`).

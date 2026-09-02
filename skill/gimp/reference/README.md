@@ -1,6 +1,6 @@
 # GIMP 3.2 autonomous-driving reference (skill documentation)
 
-Built 2026-09-01 from: live probes on the Qube against GIMP **3.2.4** (`C:\Program Files\GIMP 3`,
+Built 2026-09-01 from: live probes on the workstation against GIMP **3.2.4** (`C:\Program Files\GIMP 3`,
 embedded CPython 3.14.4, PyGObject 3.56.2) — a full PDB dump (1033 procedures), 77+40-step
 editing/export probes, GUI and headless MCP lifecycle runs, Script-Fu batch runs; the gimp-mcp
 source (`D:\Dev\tools\gimp-mcp`, upstream maorcc/gimp-mcp @ 09bfb2d) and its README/protocol
@@ -8,7 +8,7 @@ docs; the on-demand MCP launcher (`~/.claude/mcp-ondemand/mcp-ondemand.ps1` + `s
 official docs (developer.gimp.org API 3.0, docs.gimp.org 3.2 "Starting GIMP", Script-Fu Tools,
 GIMP 3.0/3.2 release notes, the 2.10→3.0 porting guide "Removed Functions"), and community
 notes (hnbdr migration gist). Every claim is tagged: **[measured]** = observed live on the
-Qube on 2026-09-01, **[doc]** = official GIMP text, **[community]** = third-party report,
+workstation on 2026-09-01, **[doc]** = official GIMP text, **[community]** = third-party report,
 **[inferred]** = my reasoning, verify before relying.
 
 Purpose: stop re-researching, stop guessing procedure names, translate designer instructions

@@ -2,7 +2,7 @@
 
 Pick the mode from the task. Default for autonomous work is **A (console batch)**; use **C
 (MCP)** only when a human is looking at a GIMP window or you need a long-lived session with
-visual snapshots. Timings measured on the Qube 2026-09-01.
+visual snapshots. Timings measured on the workstation 2026-09-01.
 
 | Mode | Process | Sees GUI images? | Start | When |
 |---|---|---|---|---|

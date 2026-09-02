@@ -1,6 +1,6 @@
 # 05 — Editing playbook: designer vocabulary → GIMP operations
 
-Everything below ran headless on the Qube (GIMP 3.2.4) on 2026-09-01 unless tagged [doc]/[community]/[inferred].
+Everything below ran headless on the workstation (GIMP 3.2.4) on 2026-09-01 unless tagged [doc]/[community]/[inferred].
 Pattern for every job: **load → (add alpha) → geometry → layers/text/effects → resolution → export → verify by file → delete image**.
 Colours are `Gegl.Color.new("#rrggbb" | "white" | "rgb(0..1,0..1,0..1)")`; sizes are integer pixels; opacity 0–100 on layers, 0–1 in GEGL ops.
 
@@ -47,7 +47,7 @@ tl.set_outline_color(Gegl.Color.new("black")); tl.set_outline_width(8.0, Gimp.Un
 # centre horizontally: tl.set_offsets((img.get_width()-tl.get_width())//2, y)   (read tl.get_width() AFTER styling)
 ```
 - Size units: `Gimp.Unit.pixel()` for px, `Gimp.Unit.point()` for pt (48 pt at 300 dpi = 200 px — huge; thumbnails want pixels).
-- Font names: list with `[f.get_name() for f in Gimp.fonts_get_list("(?i)impact|segoe")]`; 453 on the Qube; brand fonts (Montserrat/Anton/League Gothic) are **absent here** (01).
+- Font names: list with `[f.get_name() for f in Gimp.fonts_get_list("(?i)impact|segoe")]`; 453 on the workstation; brand fonts (Montserrat/Anton/League Gothic) are **absent here** (01).
 - Never run with `-f`: 0 fonts → `TextLayer.new` cannot get a font.
 - Outline the "classic" way (separate layer, any colour/blur, for glow effects):
   `img.select_item(Gimp.ChannelOps.REPLACE, tl); Gimp.Selection.grow(img, 10); ol = Layer(...RGBA...); img.insert_layer(ol, None, 1); Gimp.context_set_foreground(col); ol.edit_fill(Gimp.FillType.FOREGROUND); Gimp.Selection.none(img)` [measured; bounds came back (60,94)–(909,199)].

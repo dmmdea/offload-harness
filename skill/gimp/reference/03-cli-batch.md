@@ -1,6 +1,6 @@
 # 03 — CLI / batch reference (`gimp-console-3.2.exe`, `gimp-3.2.exe`)
 
-Everything measured on GIMP 3.2.4 / Windows 11 / Qube, 2026-09-01, unless tagged.
+Everything measured on GIMP 3.2.4 / Windows 11 / workstation, 2026-09-01, unless tagged.
 
 ## Options that matter (from `--help-all`) [measured text]
 | Flag | Meaning | Notes |
