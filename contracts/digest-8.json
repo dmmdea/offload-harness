@@ -1,0 +1,274 @@
+[
+  {
+    "goal": "Read the context document 0024-accelerators-are-additive-to-the-gpu-tier.md and digest it: produce at least three concrete findings, each one string that names a decision, mechanism or number stated in the document. Close with a two-sentence summary. Omit anything the document does not contain rather than inventing it; keep every list item under 30 words.",
+    "context": [
+      {
+        "name": "0024-accelerators-are-additive-to-the-gpu-tier.md",
+        "text": "---\nstatus: Accepted\ndate: \"2026-08-22\"\n---\n\n# Accelerators are additive to the GPU tier\n\nDecision provenance: decided by the operator 2026-08-22 (hailo-8l accelerator plan); this ADR\nrecords those already-made decisions per the ownership rule in the index README.\n\n## Context\n\nThe harness classified a box into exactly **one** `profile` string, and that string traveled\nend-to-end: detection picked it, the installer rendered serving from it, `installed.json` and\n`/fleet/health` advertised it, and every tier-id consumer keyed on it. A second compute device\nhad no representation anywhere in that pipeline — a box with an NPU beside its GPU was, as far\nas the harness could say, just its GPU tier.\n\nVision work had the same single-lane shape: every vision-flavored task routed to llama-swap by\nmodel id (the tier's VLM seat), so capabilities a small NPU serves natively and fast — face\ndetection, identity embeddings, object detection, depth, image embeddings — either ran as\nprompt-shaped VLM approximations or were not offered at all.\n\nThe concrete device forcing the question: a Hailo-8L M.2 NPU on an OptiPlex 7060, with a\nworking HTTP inference sidecar in its own repository (Hailo-8L-Analysis-Pipelines).\n\n## Decision\n\n### 1. Accelerators are ADDITIVE — `profile` stays one string\n\n`profile` remains the single GPU tier id. An accelerator never changes it; instead an\n`accelerators: []` list rides beside it in `installed.json`, in `hwdetect.Verdict`, and in the\nharness config (`config.Accelerators`). An empty list serializes to nothing (`omitempty`\neverywhere), so a box with no accelerator is byte-identical to one from before the field\nexisted in its manifest and its health payload; its `tools/list` registers no new tool\neither, though `offload_ocr`'s schema gains an optional `engine` parameter on every box.\n\n### 2. Each accelerator declares the capabilities it OWNS exclusively\n\n`setup/templates/profiles.json` gains an `accelerators` map beside `profiles`. Each entry\ndeclares its `kind`, its detection rule, its `config_seed`, and `owns` — the capability list\nthat accelerator serves **exclusively** when present. Ownership when both devices are present:\n\n- **NPU owns structured vision outputs** — face detect and identity embeddings, object\n  detection, person re-identification, depth, low-light enhancement, image embeddings: results\n  that are boxes, vectors, and maps.\n- **GPU owns language about images** — VQA and description stay on the tier's VLM, untouched.\n- **OCR is GPU-primary** with an explicit caller-selected `engine:\"npu\"` fast path — never an\n  automatic fallback, because the two engines read stylised text differently and a silent\n  switch would change results.\n\n### 3. Runtime is an on-demand loopback sidecar, spawned by the harness, self-exiting idle\n\nThe accelerator's runtime is an HTTP sidecar on loopback (`127.0.0.1:18813`) that the harness\nspawns on the first NPU call (`internal/hailoclient.Sidecar.Ensure`) and that exits itself\nafter a configured idle window. No scheduled task, no always-on service: a clean box stays\nclean, and the device costs nothing while unused. Wire contract: `GET /health` → status dict\n(200); `POST /v1/<tool>` → the tool's dict (200; a `{\"error\":true,...}` dict is a structured\nresult, not a transport error); 404 `unknown_tool`; 400 `bad_request`.\n\n## Alternatives considered\n\n- **Composite tier ids** (e.g. `blackwell-16+hailo-8l`) — rejected: every consumer of the tier\n  id (templates, matrix, tier docs, fleet placement, capability reports) would break or need\n  parsing rules; the additive list costs none of them anything.\n- **A second scalar** (`npu_profile` beside `profile`) — rejected: it hard-codes exactly one\n  accelerator per box and one device class, re-creating today's problem one device later. A\n  list of declared ids generalizes for free.\n- **An always-on sidecar service** (scheduled task / service manager) — rejected: a scheduler\n  on a clean box, idle RAM cost, and a visible operational surface for a device used in\n  bursts. On-demand spawn plus idle self-exit gives the same availability one cold start\n  (~2 s + HEF load) later.\n\n## Consequences\n\n- `tools/list` grows only on boxes that list the device — registration is gated on\n  `config.HasAccelerator`, so every other box registers exactly the same tool set (the one\n  universal schema change is `offload_ocr`'s optional `engine` parameter).\n- Tier docs and templates are untouched: no tier page changes, no serving template changes,\n  and `docs/tiers/` needs no regeneration for an accelerator.\n- The hardware/tier matrix gains an **Accelerators** sheet (declared in `profiles.json`,\n  mirrored in the Arquitechture xlsx per the matrix-first house rule).\n- One sidecar process serialises NPU access: single in-flight inference by construction, which\n  is correct for the device (one PCIe queue) and free of locking code.\n- A second accelerator later is a `profiles.json` entry, a detection probe, and its own client\n  — no schema change anywhere in the pipeline.\n\n## Related code\n\n- [`internal/config/config.go`](../../../internal/config/config.go) — `Accelerators`,\n  `HasAccelerator`, the `hailo_*` keys\n- [`internal/hwdetect/classify.go`](../../../internal/hwdetect/classify.go) —\n  `Verdict.Accelerators`, `DetectAccelerators`, `AcceleratorsFromHailortcli`\n- [`internal/tierseed/tierseed.go`](../../../internal/tierseed/tierseed.go) —\n  `ResolveAccelerators`, `__HAILO_HOME__`\n- [`internal/hailoclient/`](../../../internal/hailoclient/hailoclient.go) — client, sidecar\n  spawn/ensure\n- [`internal/mcpserver/mcpserver.go`](../../../internal/mcpserver/mcpserver.go) — gated tool\n  registration, `offload_ocr` engine switch, status block\n- [`setup/templates/profiles.json`](../../../setup/templates/profiles.json) — the\n  `accelerators` map\n- [`setup/detect.ps1`](../../../setup/detect.ps1), [`setup/install.ps1`](../../../setup/install.ps1)\n  — `Get-Accelerators`, `Get-AcceleratorSeed`, manifest\n\n## Related docs\n\n- [systems/acceler"
+      }
+    ],
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "findings",
+        "summary"
+      ]
+    },
+    "acceptance": [
+      "min_items:findings:3",
+      "nonempty:summary"
+    ],
+    "profile": "research",
+    "max_steps": 8,
+    "timeout_sec": 300
+  },
+  {
+    "goal": "Read the context document 0025-model-residency-is-arbitrated-in-process-by-base.md and digest it: produce at least three concrete findings, each one string that names a decision, mechanism or number stated in the document. Close with a two-sentence summary. Omit anything the document does not contain rather than inventing it; keep every list item under 30 words.",
+    "context": [
+      {
+        "name": "0025-model-residency-is-arbitrated-in-process-by-base.md",
+        "text": "---\nstatus: Accepted\ndate: \"2026-08-26\"\n---\n\n# Model residency is arbitrated in process, keyed on the resolved base\n\n## Context\n\nllama-swap serializes model residency: one serving slot, one model at a time. Every text seat in\nthe default config points at the same endpoint —\n\n| seat | model | endpoint |\n|---|---|---|\n| `agent_model` | `qwen3.8-27b` | `http://127.0.0.1:11436` |\n| `model` | `gemma-4-e4b` | `http://127.0.0.1:11436` |\n| `reasoning_model` | `gemma-4-26b` | `http://127.0.0.1:11436` |\n| `escalation_model` | `gemma-4-12b` | `http://127.0.0.1:11436` |\n| `triage_model` | `gemma-4-e2b` | `http://127.0.0.1:11436` |\n| `vision_model` | `qwen3-vl-8b` | `http://127.0.0.1:11436` |\n\n— so any two lanes that name different models at the same time force an evict-and-reload. The\nharness had nothing that serialized by model. The full audit at the time of this decision:\n`mediaSlot` is media-only and in-process, `gpulease`'s `ClassMedia` never covers interactive text,\n`sttclient`'s `inferMu` guards a different process (whisper-server), `pipeline`'s `swapMu` guards a\ntimestamp map rather than requests, `delegate`'s `sem` caps fan-out width inside one `Run`, and\n`internal/mcpserver` has no limiter at all — every `offload_*` text call went straight through.\n\nMeasured consequence: the agent seat degraded ~4x, from 72 s to 307 s per call, while a cascade text\ncall kept swapping the slot underneath it.\n\nNeither the fleet queue (0.100.0) nor re-placement (0.101.0) addresses this. Both competing calls\nwere on the same box, and a queue that distributes work across machines has nothing to distribute\naway from.\n\nTwo constraints shaped the answer:\n\n- **A filesystem lease per text call is off the table.** ADR [0018](0018-machine-wide-fenced-gpu-lease.md)\n  built exactly that for media and deliberately excluded ordinary interactive text: \"thousands per\n  day at ~46 ms, and leasing them is untenable. That asymmetry is a known limit, not an oversight.\"\n  Nothing since has changed that arithmetic.\n- **The harness never learns what is currently resident.** `llamaclient` marshals `{\"model\": alias,\n  …}` and POSTs; llama-swap queues the request while it loads and there is no \"model loading\" status\n  to detect (see the design note on `pipeline.breakerFailure`). So arbitration cannot be based on\n  observing the server — it has to be based on what this process is asking for.\n\n## Decision\n\n**`internal/modelaffinity` — a process-local admission gate on every llama-swap generation request,\nkeyed on the RESOLVED base URL.**\n\n- Requests naming the **same model on the same base** proceed concurrently. llama-swap already queues\n  those harmlessly; the expensive event is the switch, not the overlap, and serialising them would be\n  a pure regression.\n- A request naming a **different model on a base that has in-flight requests** parks until they\n  drain, then proceeds. N interleaved switches become one switch per batch.\n\n**Keyed on the base, never on the model.** `llamaclient.resolveEndpoint` can return a different base\nper model — a `seat_endpoints` pin, a busy-aware `cascade_remote_lanes` failover, or the default — and\ntwo models served by two llama-swap instances do not contend at all. The gate consumes the base that\nfunction already decided; it never re-decides it.\n\n**Both lanes take it.** The gate is installed in `llamaclient.Generate` / `GenerateVision` /\n`GenerateVisionInterleaved` *and* in `agent.LLMClient.Chat`, which POSTs to `/v1/chat/completions`\nitself and never went through `llamaclient`. The agent seat is the lane the incident degraded, so\ngating only the cascade side would have been a lock only one side takes — the shape ADR 0018 was\nwritten to end.\n\n**Bounded, with a named outcome.** A park is bounded by `(batches ahead + 1) × budget`, where budget\nis the resolved `http.Client`'s own request timeout. The bound is wall-clock, fixed at park time and\nnever extended by progress. Exhaustion returns a `*modelaffinity.WaitError` carrying the base, the\nmodel wanted, the model that held the slot, the in-flight count and the number of switches queued\nahead. The caller's `ctx` bounds the wait too and in production is usually the tighter of the two.\n\n**No starvation.** Once someone parks, later arrivals naming the resident model park behind them\nrather than joining the running batch, and promotion always takes the model at the head of the queue.\n\n## Consequences\n\n- The measured thrash between the agent seat and a cascade seat inside one harness process is gone;\n  interleaved switches become one switch per batch.\n- **Process-local is the limit, and it is a real one.** Two harness processes on one box — an MCP\n  server plus a CLI invocation, or two MCP servers under two editors — still thrash each other\n  exactly as before, because neither can see the other's in-flight set. Closing that would require\n  the machine-wide, fenced, pid-recycle-safe state root of ADR 0018 on every text call, which is the\n  cost that ADR refused for text. It is named here rather than built.\n- Two llama-swap routes that can force a load stay outside the gate: `internal/agent`'s\n  `/upstream/{model}/props` probes (`ProbeSeatPin` exists to *warm* a seat, so gating it would fight\n  its purpose) and `internal/tokclient`'s `/upstream/{model}/tokenize`. Both are affine to their own\n  caller's seat, neither is a burst source, and a tokenize is a separate admission from the\n  generation that follows it — so gating it could not batch the two anyway.\n- A request can now fail for a reason that is neither the model nor the network. The error type is\n  distinct so this is diagnosable, and its wording deliberately carries the substring\n  `pipeline.classifyErr` buckets congestion by, so the ledger files it as `timeout` rather than\n  `other`.\n- Hot-path cost: two uncontended mutex acquisitions and no allocation for an admission that does not\n  block.\n\n- **Extended 2026-08-26 by ADR [0026](0026-text-load-admissions-wait-for-the-media-lease.md).** This\n  gate turned "
+      }
+    ],
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "findings",
+        "summary"
+      ]
+    },
+    "acceptance": [
+      "min_items:findings:3",
+      "nonempty:summary"
+    ],
+    "profile": "research",
+    "max_steps": 8,
+    "timeout_sec": 300
+  },
+  {
+    "goal": "Read the context document 0026-text-load-admissions-wait-for-the-media-lease.md and digest it: produce at least three concrete findings, each one string that names a decision, mechanism or number stated in the document. Close with a two-sentence summary. Omit anything the document does not contain rather than inventing it; keep every list item under 30 words.",
+    "context": [
+      {
+        "name": "0026-text-load-admissions-wait-for-the-media-lease.md",
+        "text": "---\nstatus: Accepted\ndate: \"2026-08-26\"\n---\n\n# Text admissions that would load a model wait for the media lease\n\n## Context\n\nADR [0018](0018-machine-wide-fenced-gpu-lease.md) made the GPU lease machine-wide and fenced, and\ndeliberately left ordinary interactive text outside it: \"thousands per day at ~46 ms, and leasing\nthem is untenable. That asymmetry is a known limit, not an oversight.\"\n\nThat limit was read as *a short text call inside a media lease pays a reload*. The observed cost is\nlarger. A `media` holder calls `freeLlamaSwap` once per lease, so the card is **cleared** for the\nrender — and the very next text call then makes llama-swap pull a multi-GB model straight back into\nthe VRAM the render was just given. The render and the text tier end up resident together on one\ncard. Reported symptom: the box becomes unusable under a render.\n\nNothing on the text side observed the lease. `internal/gpulock` (the vision gate) reads it,\n`delegate.LocalBusy` reads it to consider remote placement, `llamaclient`'s `cascade_remote_lanes`\nreads it to fail a *configured* lane off-box — but a plain text call on a box with no lanes\nconfigured went straight to the local base. A lease that one side reads and the other ignores is not\nmutual exclusion, which is the sentence ADR 0018 exists to stop being true.\n\nADR [0025](0025-model-residency-is-arbitrated-in-process-by-base.md) built the one chokepoint that\nknows which admissions can move VRAM: `internal/modelaffinity`. A request joining an in-flight batch\nof the model llama-swap is already serving cannot change residency. An idle-base take, or a promoted\nswitch, can. That distinction is what makes this affordable.\n\n## Decision\n\n**An admission that can change llama-swap residency waits while a `media` lease is held; one that\nprovably cannot is not gated at all.**\n\n- The gate **reads** the lease with `gpulease.InspectDir` — the one inspection path, the same one\n  the vision gate and `delegate.LocalBusy` use. It never acquires, never bumps an epoch, never\n  writes. ADR 0018's arithmetic was about the *write* path; one `ReadFile` of a path that usually\n  does not exist is not that cost.\n- **Only load-triggering admissions pay it.** `tryJoin` takes the \"same model, in flight, nobody\n  parked\" case before the lease is ever read, so a burst against the resident model costs nothing.\n- **A promoted batch is not \"resident\" until its request goes out.** Promotion raises the in-flight\n  count before anything has been sent, so while a promoted admission is still waiting for the card,\n  a newcomer naming that same model must NOT be handed a join — it would slip past this gate and\n  force exactly the load the promoted waiter is avoiding. The gate counts those `pending` admissions\n  and refuses joins while any exist. Every other window here is an unavoidable check-then-act race\n  against a lease taken a microsecond later; this one is not, because the gate knows the card is held.\n- **One deadline per admission.** All lease waiting for a single `Admit` — before parking and again\n  after promotion — shares one wall-clock deadline derived from the caller's budget, so a caller that\n  waits, parks, and is promoted onto a card that has been taken again cannot spend that budget twice.\n- **A promotion is re-checked at wake.** The park is a switch by definition, and a render can start\n  during it; trusting the park-time read would leave a hole exactly one batch-drain wide, pointing\n  the wrong way.\n- **Waiting, not refusing.** A held card is congestion: an image render clears in tens of seconds\n  and the caller then gets its answer. The wait is bounded by the caller's OWN budget (its resolved\n  `http.Client.Timeout`) and by `ctx` — the same two bounds ADR 0025's in-process park uses. It is\n  deliberately **not** bounded by the holder's declared TTL: `gpulease` stamps `DefaultTTL = 1h` as a\n  reservation, not an estimate, so reading it as an ETA would turn every wait into an instant refusal.\n- **Armed from `config.Load`**, the one funnel every entry point that can make a text call passes\n  through, resolving via `gpulease.LeaseDir` so a second resolution order cannot appear. Same wiring,\n  same reason, as `netguard.SetTailnetSuffix` beside it.\n- Exhaustion returns a `*modelaffinity.LeaseError` naming the holder's class, pid, reason and how\n  long it has held the card. Its wording carries the substring `pipeline.classifyErr` buckets\n  congestion by, so the ledger files it as `timeout` rather than `other`.\n\n**`media` only.** A `text` reservation is a benchmark holding the tier steady; its holder unloads\nnothing, so a switch underneath it costs a measurement rather than the machine — while blocking every\ninteractive call for the length of an eval run would be a larger regression than the one it prevents.\n\n**The holder's own process is NOT exempt.** Exempting by pid reads as obviously safe and would\nsilently reopen the incident in the deployment where it happened: `fleet-serve` and the MCP server\nrun a render and serve text tool calls in ONE process. Only an **inherited** lease exempts — the\n`GPU_LEASE_EPOCH` that `pipeline.ambientLeaseEnv` reads, compared by value so a stale variable cannot\nexempt anything — because `gpu reserve --class media -- local-offload …` runs the harness as the\nholder's child and a text call there must not queue behind its own parent. There is no in-process\ntext call to deadlock: the one text step on the media path, the image prompt refiner, is hoisted\nabove `acquireMediaLease` on both the single and batch routes precisely so \"the text call never\ncontends with our own render\", and `runPipelineJob` takes only the in-process `mediaSlot`.\n\n## Consequences\n\n- Text no longer loads a model on top of a running render. Under a media lease a text call waits for\n  the card, and on a short render it then succeeds instead of failing.\n- **A render now costs text latency.** Under a long media lease, text admissions that need a load\n  spend their whole budget waiting and t"
+      }
+    ],
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "findings",
+        "summary"
+      ]
+    },
+    "acceptance": [
+      "min_items:findings:3",
+      "nonempty:summary"
+    ],
+    "profile": "research",
+    "max_steps": 8,
+    "timeout_sec": 300
+  },
+  {
+    "goal": "Read the context document 0027-freetoken-is-the-big-moe-opt-in-engine.md and digest it: produce at least three concrete findings, each one string that names a decision, mechanism or number stated in the document. Close with a two-sentence summary. Omit anything the document does not contain rather than inventing it; keep every list item under 30 words.",
+    "context": [
+      {
+        "name": "0027-freetoken-is-the-big-moe-opt-in-engine.md",
+        "text": "---\nstatus: Accepted\ndate: \"2026-08-27\"\n---\n\n# 0027 — FreeToken is the big-MoE opt-in engine on the blackwell-2x16 tier\n\n- Status: **Accepted** (operator-approved 2026-08-27)\n- Deciders: operator (Daniel), on measured evidence from the 2026-08-27 nightshift\n- Related: ADR 0018 (media lease), ADR 0025 (model residency), `docs/ROADMAP.md`\n  nightshift + round-2 sections, mem0 `b7799371` / `18ac82da` / `af2fa8b9`\n\n## Context\n\nThe tier's serving engine (llama.cpp via llama-swap) covers every roster seat, but\nmodels materially larger than pooled VRAM have never had a usable home here. The\nprior answer for the >RAM class was colibri (mem0: \"colibri only >RAM engine\"), and\nthe >VRAM-but-fits-RAM MoE class simply went unserved: DeepSeek V4-Flash ran at\n12.56 t/s under `--n-cpu-moe` and was deleted for lack of consumers; Flash-Next\nmeasured 0.44–0.46× the incumbent the same way.\n\nFreeToken (FlashML-org, arxiv 2608.16157, Apache-2.0) is an edge-native MoE serving\nengine whose thesis is bandwidth-adaptive expert streaming — exactly this niche. It\nwas evaluated on both nodes on 2026-08-26/27 with a calibrated exact-answer\ninstrument (proven able to score 0 on a dead endpoint).\n\n**The deciding measurement:** `openai/gpt-oss-120b` (MXFP4) served on ONE 16 GB\ncard scored **18/18** on the differential suite (tool-call fidelity, 22k-token\nmulti-hop joins, Spanish) in 678 s total — faster than Flash-Next on two cards\n(1828 s), on a model class this box previously could not usably serve at all. On\nLenovo's 6 GB card, `gpt-oss-20b` beat the resident 4B seat on both correctness\n(36/36 vs 32/36) and wall (712 s vs 1368 s).\n\n## Decision\n\nFreeToken is adopted as the **big-MoE opt-in engine** on the blackwell-2x16 tier,\nwith `gpt-oss-120b` as its seated model.\n\n- **Opt-in, hand-launched, never a service.** No scheduler, no daemon (house rule).\n  It is started for a work session and killed after. It is NOT part of llama-swap\n  and NOT part of the cascade.\n- **Endpoint:** OpenAI-compatible `http://127.0.0.1:1919/v1` (Anthropic-style\n  `/v1/messages` also served). The harness or any client reaches it as a plain\n  endpoint — config, not code.\n- **Install locations (both nodes, isolated from production):**\n  - Qube: WSL distro `freetoken` (separate from the production WSL distro that hosts the memory stack), venv at\n    `/opt/freetoken`, engine from git main.\n  - Lenovo: the node's ZFS app pool under `offload-stack/freetoken` (pool storage;\n    `UV_CACHE_DIR` and `HF_HOME` MUST live on the pool — a home-dir quota killed\n    the first `[accel]` install).\n- **Canonical launch (Qube):**\n  ```\n  wsl -d freetoken -u root -- bash /opt/freetoken/serve-bigmoe.sh\n  # which runs:\n  #   CUDA_VISIBLE_DEVICES=<card> ft serve --model openai/gpt-oss-120b \\\n  #     --port 1919 --num-tokens 32768\n  ```\n\n## Constraints that bound this seat (all measured, not read)\n\n1. **No grammar / json_schema / response_format.** The GBNF cascade path can never\n   ride this engine. Cascade seats stay on llama.cpp, permanently.\n2. **`--num-tokens 32768` is mandatory.** `--moe-cache-auto` silently sizes KV to\n   ~8.2k tokens; longer prompts get HTTP 400 (\"Input sequence length … exceeds\").\n   The explicit 32k KV costs only 0.62 GiB.\n3. **Device selection via `CUDA_VISIBLE_DEVICES`.** The git-main `--gpu` flag was\n   present in a run that failed with \"device not ready\" on WSL; the env method is\n   the proven path here.\n4. **Mutual exclusion with pooled seats.** While the engine holds a card, pooled\n   llama-swap seats (and on a 6 GB node, ANY seat) cannot co-reside — measured as\n   502s on Lenovo. Callers take a text-class GPU lease for the session\n   (`local-offload gpu reserve --class text …`).\n5. **GGUF reuse is off the table today:** arch gate (`known: ['gemma4']`) and a\n   dtype assert on gemma UD quants (both 0.1.2 and main@9ef3651). HF safetensors /\n   MXFP4 / FP8 checkpoints are the real path.\n6. **Qwen3.8-27B-FP8 does not load** (upstream fp8-loader bug, filed as\n   FlashML-org/FreeToken#240) — the same-model llama.cpp-vs-FreeToken race stays\n   open until it is fixed.\n\n## Consequences\n\n- The >VRAM MoE class (gpt-oss-120b now; GLM/M2.5-class NVFP4 checkpoints when\n  disk allows) becomes usable on this tier at quality parity with the incumbent\n  on everything measured.\n- Ports: Qube `:1919` (WSL), Lenovo `:1920` — rows recorded in the port files.\n- The engine tracks git main under the monthly whole-system update process\n  (ROADMAP standing section), released-tag-first once upstream starts tagging\n  meaningfully.\n- Rollback: kill the process; delete the WSL distro / pool dir. Nothing in\n  llama-swap, the harness config, or the cascade references it.\n"
+      }
+    ],
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "findings",
+        "summary"
+      ]
+    },
+    "acceptance": [
+      "min_items:findings:3",
+      "nonempty:summary"
+    ],
+    "profile": "research",
+    "max_steps": 8,
+    "timeout_sec": 300
+  },
+  {
+    "goal": "Read the context document 0028-delegation-durability-is-a-push-side-intent-ledger.md and digest it: produce at least three concrete findings, each one string that names a decision, mechanism or number stated in the document. Close with a two-sentence summary. Omit anything the document does not contain rather than inventing it; keep every list item under 30 words.",
+    "context": [
+      {
+        "name": "0028-delegation-durability-is-a-push-side-intent-ledger.md",
+        "text": "---\nstatus: Accepted\ndate: \"2026-08-27\"\n---\n\n# 0028 — Delegation durability is a push-side intent ledger, not a pull queue\n\n## Context\n\nThe consolidated-pull-queue decision document (2026-08-26) laid out three ways\nto finish the \"send several jobs and lose nothing\" requirement after builds\n0.100.0–0.102.0 made push placement correct: **A** — keep push, add\ndelegator-death durability; **B** — invert to a pull queue hosted in a fleet\nnode (claim/ack endpoints, durable store, lease TTLs); **C** — a cloud-hosted\nqueue. The one gap A leaves is \"nodes take jobs dynamically from one queue\";\nthe one gap it closes is the only one observed at current volume: a delegator\nthat dies mid-poll orphans work a node may still finish.\n\n## Decision\n\nOperator-approved 2026-08-27: **do A now; judge B against the delegation\nscoreboard, not against the design document.** Contention arguments for B\ncannot be evaluated at near-zero delegation volume.\n\nMechanics (`internal/delegate/intent.go`): every ACKED remote dispatch appends\nan intent line to `<state-root>/delegate-intent.jsonl` before polling begins;\nterminal answers observed by the dispatching process close the entry; the\norphanable exits (cancellation, owned-job poll deadline, queued give-up) leave\nit OPEN. A once-per-process background pass re-polls open entries and files\nfinished results under `<state-root>/delegate-recovered/<job>.json`, closing\nentries a node positively denies (restarted stores) or that age past 48 h.\nA nil ledger is inert — durability is an addition, never a new dispatch\nfailure mode.\n\n## Consequences\n\n- Delegator death no longer loses remote work a node completes; recovery is a\n  poll, never a re-run (the node's duplicate-job path re-acks idempotently).\n- The queue remains N per-delegator queues that shed well; genuinely dynamic\n  cross-node take stays unbuilt until the scoreboard shows contention.\n- Re-open trigger for B: sustained multi-session delegation volume with\n  measured node imbalance, or a real incident A's recovery cannot cover.\n"
+      }
+    ],
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "findings",
+        "summary"
+      ]
+    },
+    "acceptance": [
+      "min_items:findings:3",
+      "nonempty:summary"
+    ],
+    "profile": "research",
+    "max_steps": 8,
+    "timeout_sec": 300
+  },
+  {
+    "goal": "Read the context document 0030-pull-queue-ships-dark.md and digest it: produce at least three concrete findings, each one string that names a decision, mechanism or number stated in the document. Close with a two-sentence summary. Omit anything the document does not contain rather than inventing it; keep every list item under 30 words.",
+    "context": [
+      {
+        "name": "0030-pull-queue-ships-dark.md",
+        "text": "---\nstatus: Accepted\ndate: \"2026-08-28\"\n---\n\n# 0030 — The consolidated pull queue (Option B) ships complete and DARK\n\n## Context\n\nADR 0028 chose Option A (push-side intent ledger) and parked Option B — the\ngenuine \"one queue, nodes take work dynamically\" inversion — against the\ndelegation scoreboard. The operator then directed Option B built (2026-08-28).\nBoth directions hold at once by shipping B **dark**: the code is complete and\ntested, and an unconfigured fleet runs byte-identically to 0.108.x.\n\n## Decision\n\n`internal/fleetqueue` + the fleet-node claim loop + delegate `route:\"queue\"`,\ninert until three config keys are bound:\n\n- `fleet_queue_host` (holder only) — the always-on node's fleet server also\n  hosts the durable queue (bbolt at `<state-root>/fleet-queue.db`) and the\n  `/fleet/queue/{submit,claim,ack,nack,jobs/{id}}` routes, bearer-gated by the\n  fleet's existing agent-lane rule.\n- `fleet_queue_holder` (every participant) — the holder's base URL,\n  tailnet-vetted at load.\n- `fleet_queue_claim` (worker nodes) — starts the claim loop: pull an eligible\n  job, run it through the SAME `BuildRequest` + jobs surface a pushed dispatch\n  uses, ack the result; back-pressure by the node's own queue-depth cap.\n\nSemantics: at-least-once. Leases are the contract timeout + 5 min slack;\nexpiry requeues with history, bounded at 2 requeues then a loud failure; the\nfirst ack wins and late duplicates are ignored. The results route mirrors the\npush path's `{state,data,error}` wire so one poller reads both. The delegator\nqueue route deliberately skips ADR 0028's intent ledger: the holder itself is\nthe durable record — a dead delegator re-polls the holder and loses nothing.\n\n## Consequences and the enabling bar\n\n- The holder is a SPOF for queue-routed work only; push (`auto`/`spread`)\n  remains the default and untouched — the mitigation the decision doc asked\n  for is structural, not a fallback mode.\n- ENABLING (binding the keys) is a separate operator decision, judged against\n  the delegation scoreboard: sustained multi-session volume with measured node\n  imbalance. Turning the keys on without that evidence buys queue latency for\n  nothing — the same reasoning that parked B in ADR 0028.\n- First-enable checklist: holder = the always-on box; token REQUIRED once any\n  listener leaves loopback; watch `fleet-queue.db` size and the abandoned-job\n  rate before widening use.\n"
+      }
+    ],
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "findings",
+        "summary"
+      ]
+    },
+    "acceptance": [
+      "min_items:findings:3",
+      "nonempty:summary"
+    ],
+    "profile": "research",
+    "max_steps": 8,
+    "timeout_sec": 300
+  },
+  {
+    "goal": "Read the context document 0031-harness-first-is-enforced.md and digest it: produce at least three concrete findings, each one string that names a decision, mechanism or number stated in the document. Close with a two-sentence summary. Omit anything the document does not contain rather than inventing it; keep every list item under 30 words.",
+    "context": [
+      {
+        "name": "0031-harness-first-is-enforced.md",
+        "text": "---\nstatus: Accepted\ndate: \"2026-08-30\"\n---\n\n# 0031 — Harness-first is enforced, and web research is a harness lane\n\n## Context\n\nEvery measurement since the agent lanes shipped said the same thing: the seats sit\nidle while the expensive context does their work. The 2026-08-18 autopsy found zero\norganic `agent_run`/`agent_delegate` use; the 2026-08-21 audit found 72 % of bulk-read\nsessions used no offload at all. Each finding was answered with more steering — a rules\nfile, a nudge hook, a skeleton generator — and the 2026-08-25 overhaul deliberately\nremoved the last blocking gate on the theory that management beats compliance.\n\nOn 2026-08-30 the operator watched a session dispatch three cloud subagents for digest\nwork and run a 37-request HEAD loop through its own context, with zero harness contracts,\nand set the rule: the harness gets used correctly or the sessions are not worth running.\nTwo facts decide the design. First, the only steering that has ever changed behaviour on\nthis box is a hook that DENIES (the gh-account guard, the Actions guard, the blast-radius\nguard); advisory text has not moved this metric once. Second, the recurring excuse for a\ncloud spawn was \"the seats have no network\" — true of the agent loop, and irrelevant: the\nCALLER names the URLs, so the harness can fetch them delegator-side and hand the seats\ninline text, exactly as it inlines `context_paths`.\n\n## Decision\n\n1. **A read-only subagent spawn is denied** (PreToolUse `Agent`, `offload-first-guard.js`)\n   unless its prompt carries an auditable exemption — `harness-exempt: <web|write|judgment|\n   capacity> — <reason>`. The H15 classifier is unchanged: judgment and implementation legs\n   pass untouched; the deny message hands back the local call ready to run (the\n   `agent_delegate` skeleton, or `offload_research` when the leg names URLs). Every\n   decision is logged to the dispatch log; `HARNESS_GUARD=off` overrides an inspected case.\n2. **A bulk network loop in the session shell is denied** (PreToolUse `Bash|PowerShell`,\n   `harness-loop-guard.js`): a loop with a network verb and ≥ 8 numeric iterations or a\n   list-driven body. Probes under 8 and loops without network verbs are untouched.\n3. **`offload_research` makes web research a harness lane**: `{goal, urls ≤ 12}` → fetch\n   delegator-side under a public-web guard (http/https only; loopback, private, link-local,\n   `.local`/`.internal`, the tailnet zone and the CGNAT range refused; every redirect hop\n   re-checked; 2 MiB / 96 KiB caps) → one contract per page, written the way the seats were\n   measured to pass (document named as already provided; acceptance anchored to a page-only\n   token plus a shape check) → the same `delegate.Run` path as `agent_delegate`, route\n   `spread`. The seats never gain network access; the agent loop's egress cage is untouched.\n   Same registration gate as `agent_delegate`.\n4. The constitution states the enforced contract in the delegation section and names the\n   research lane as the answer to \"needs the web\".\n\n## Consequences\n\n- A session must now decide, at the tool call, why a leg cannot run locally — and say so\n  in a form the dispatch log records. Declines become countable; the scoreboard stops\n  measuring silence.\n- False positives fall on the override and the exemption, both explicit and logged. A leg\n  that genuinely needs Claude costs one extra line, not a denied task.\n- The research lane's quality is bounded by the seats' digest quality (measured 2026-08-28:\n  contracts pass on the 27B, 9B and 4B seats when the document is named as provided) and by\n  the stripper; a page that strips to nothing is reported as skipped, never digested.\n- Re-measure against the 2026-08-21 audit's metric — organic `agent_delegate` /\n  `offload_research` calls in non-harness-dev sessions — before touching the classifier\n  again. The nudge's skeleton builder is reused, not duplicated.\n"
+      }
+    ],
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "findings",
+        "summary"
+      ]
+    },
+    "acceptance": [
+      "min_items:findings:3",
+      "nonempty:summary"
+    ],
+    "profile": "research",
+    "max_steps": 8,
+    "timeout_sec": 300
+  },
+  {
+    "goal": "Read the context document 0032-a-peer-held-seat-is-waited-for-not-deferred.md and digest it: produce at least three concrete findings, each one string that names a decision, mechanism or number stated in the document. Close with a two-sentence summary. Omit anything the document does not contain rather than inventing it; keep every list item under 30 words.",
+    "context": [
+      {
+        "name": "0032-a-peer-held-seat-is-waited-for-not-deferred.md",
+        "text": "---\nstatus: Accepted\ndate: \"2026-09-02\"\n---\n\n# 0032 — A peer-held seat is waited for, not deferred\n\n- Deciders: operator (masterplan #1, 2026-09-01 22:10), harness session\n- Supersedes: the reading in `internal/pipeline/agenttask.go` (pre-0.111) that \"llama-server does not rate-limit, so a 429 means something in front of the seat answered instead of it\"\n\n## Context\n\nOn 2026-09-01 several Claude Code sessions delegating in parallel reported the harness \"failing to\nschedule work and failing to deliver quality\":\n\n- \"the 27B seat timed out at 600 s and then hit llama-swap 429s (another session held the slots)\"\n- \"the Lenovo 4B seat returned the known phantom 'Go version' answer on 6 of 7 pages\"\n- \"the two `offload_research` calls deferred (first exceeded the 8-contract cap, then llama-swap\n  answered 429 concurrency and the Lenovo seat produced the known off-goal digests), so I digested\n  the official pages with direct fetches instead\"\n\nEvery failure ended the same way: the session bypassed the harness and spent cloud tokens — the\nexact waste the harness exists to prevent.\n\n### What llama-swap actually does (verified against the v251 source, 2026-09-02)\n\n- **429** is emitted at admission when a model's *reserved* requests (queued + in-flight) reach its\n  `concurrencyLimit` (default 10). It carries `Retry-After: 1` and the body `code:\"concurrency_limit\"`,\n  `src:\"llama-swap\"`. It means *peers already hold the seat's slots* — every parallel session's MCP\n  process fans out (`runConcurrency = 4`) against the same limit.\n- **Swaps never 429.** A request that needs a model llama-swap is loading, or that would evict a\n  busy model, is *queued with no timeout*. That queue is where the \"600 s\" went: a contract that\n  arrived mid-swap spent its whole wall waiting for another session's model to load.\n- A process that is not up yet answers **503 \"process is not ready\"**; a health-check timeout\n  answers **500 \"unspecific error: health check timed out\"** with `src:\"llama-swap\"`; a generation\n  that dies mid-body is a **502**.\n- `GET /running` reports residency with the states `stopped|starting|ready|stopping|shutdown`.\n\n### What the harness did with those answers (pre-0.111)\n\n`agent.LLMClient.Chat` returned a plain `chat 429: …` error; `RunAgentTask` filed it as\n`DeferClassInfrastructure`; `delegate.Run`'s local placement does not re-place an infrastructure\ndefer. So a peer-held seat produced a terminal defer and the **caller** re-routed the work to a\nweaker seat by hand. (The first draft of this change assumed the harness itself re-placed on 429;\nthe roast council showed from the code that it did not. The mechanism was corrected before anything\nwas built.)\n\n`offload_research` allows 12 URLs and builds one contract per usable page, but `delegate.Run`\nrefuses more than 8 subtasks — a 9–12-page call lost every page.\n\nA research contract's acceptance was the goal-derived anchor (`AnchorCheck`) plus the schema's\nfirst-array check; on pages where no goal token appears, the anchor is empty, and an answer about a\ndifferent document entirely (\"The latest stable Go version is 1.26…\") passed as a result.\n\n## Decision\n\nFour delegator-side changes, all additive, no new wire-schema verb (older fleet nodes keep\nvalidating contracts), no daemon, every wait counted on the wire:\n\n1. **`internal/seatwait` — a contract-scoped wait for a peer-held seat.** One `Budget` per\n   `RunAgentTask`, carried in `ctx` and shared by every chat step and the structured re-pack, so a\n   10-step loop cannot spend ten budgets. Ladder 1/2/4/8/15 s; a server `Retry-After` wins over the\n   ladder and **counts against the budget** (a server that always says \"1\" still runs out). Retryable\n   answers: 429, 503 \"process is not ready\", 500 with `src:\"llama-swap\"` / \"health check timed out\".\n   Both seat clients (`agent.LLMClient.Chat`, `llamaclient.Generate`) re-send after the sleep with the\n   `modelaffinity` ticket **released** — the contention is other processes' load, and a parked ticket\n   only wedged this process's other lanes. Config `seat_contention_wait_sec` (0 = 90 s, −1 = off).\n   The wire result carries `contention_wait_sec`; a defer after the budget starts with\n   `seat contended:`; a wall consumed by waiting is filed as contention (infrastructure), never as\n   a budget defer the delegator would size future contracts from.\n2. **Admission pre-flight** (`awaitSeatAdmission`): before the contract's wall starts, poll\n   `GET /running` (vendored client) while *any* model on the endpoint is in a non-`ready` state,\n   bounded by `agent_admission_wait_sec` (0 = 120 s, −1 = off), fail-open on a probe error; the\n   slept time is `admission_wait_sec` on the wire. **Known bound:** the drain phase before a swap\n   shows nothing non-ready, so a swap that begins a second later is still charged to the wall — this\n   removes the swap *window* from the wall, not the race. The remote-placement poll deadline in\n   `runRemote` is unchanged.\n3. **`delegate.RunBatched`** runs sequential chunks of `MaxSubtasks` (order kept, `Summary` summed\n   by reflection, first error returned *with* the results already obtained); `offload_research` and\n   `local-offload research` use it and render a chunk error as `partial: true` instead of dropping\n   everything. Sequential on purpose: two chunks in flight would be a 16-wide fan-out.\n4. **Document fingerprint + quarantine.** `research.DocFingerprint` appends two regex acceptance\n   checks per page — the 12 most frequent distinctive tokens (≥ 6 letters, alphabetic, not in a\n   boilerplate stop-list) split alternately, each half an `(?i)` alternation tagged\n   `(?P<docanchor>…)`; both must match. A `delegate.Quarantine` (process-scoped, owned by the MCP\n   server and passed via `RunOptions`, 30-minute TTL) blocks a fleet node after two fingerprint\n   failures inside the TTL; the runner strikes **only** on `docanchor` failures — a user's over-strict\n   `contains:` or a thin page's `min_items` never quarantines a seat. `Summ"
+      }
+    ],
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "findings",
+        "summary"
+      ]
+    },
+    "acceptance": [
+      "min_items:findings:3",
+      "nonempty:summary"
+    ],
+    "profile": "research",
+    "max_steps": 8,
+    "timeout_sec": 300
+  }
+]
