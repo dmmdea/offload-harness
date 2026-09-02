@@ -620,6 +620,58 @@ over the projected table when they differ.
 | agent stops with `stop=step-cap` / loops | Raise `--max-steps`, or the model is stuck — lower `--max-same-tool`, narrow the prompt (edit+upload shape). |
 | GitHub tool refuses | `$GITHUB_TOKEN` unset or under-scoped, or `$GITHUB_REPO` unset. See §6. |
 
+### Parallel sessions on one llama-swap (0.111.0)
+
+Several Claude Code sessions each run their own `local-offload mcp` process and fan out
+(`runConcurrency = 4`) against the SAME llama-swap. llama-swap answers **429** once a model's
+reserved requests (queued + in-flight) reach its `concurrencyLimit` (default **10**), queues
+requests *silently* while it swaps a model, answers **503 "process is not ready"** while a process
+is starting, and **500** with `src:"llama-swap"` when a health check times out. The harness treats
+all of those as *peers hold the seat* ([ADR 0032](architecture/decisions/0032-a-peer-held-seat-is-waited-for-not-deferred.md)):
+
+| key (`config.json`) | default | meaning |
+|---|---|---|
+| `seat_contention_wait_sec` | `0` → 90 s | one wait budget per agent contract, shared by every chat step and the re-pack; `-1` = never wait (first busy answer defers) |
+| `agent_admission_wait_sec` | `0` → 120 s | pre-flight: wait while any model on the endpoint is mid-swap BEFORE the contract's wall starts; `-1` = off |
+
+What you will see on the wire and in the ledger: `contention_wait_sec` and `admission_wait_sec`
+on every agent result; a defer whose reason starts with **`seat contended:`** when the budget was
+spent (`grep "seat contended:" ~/.local-offload/ledger.jsonl`); `summary.batches` on research
+calls that ran more than 8 pages; `summary.quarantined` when a fleet node was blocked for 30 min
+after two off-document answers (its reason appears among `probe_errors` as "quarantined until …").
+
+**Capacity is your step — the wait only makes contention honest.** The 429 exists because ten
+reserved requests per model are shared by every session. Ready to paste into
+`C:\llama-swap\llama-swap.yaml` (Qube; back it up first), on the seats the harness binds
+(`agent_model` qwen3.8-27b; cascade gemma-4-e2b / e4b / 12b / 26b):
+
+```yaml
+  qwen3.8-27b:
+    concurrencyLimit: 32   # was the implicit default 10; queues in llama-swap instead of 429
+  gemma-4-26b:
+    concurrencyLimit: 32
+  gemma-4-e4b:
+    concurrencyLimit: 32
+```
+
+Then the elevated restart (the `llama-swap` scheduled task is elevated; an unelevated stop is
+denied while the OLD process keeps answering 200):
+
+```powershell
+Start-Process powershell -Verb RunAs -WindowStyle Hidden -ArgumentList '-NoProfile','-Command',
+  'Stop-ScheduledTask llama-swap; Stop-Process -Name llama-swap -Force -ErrorAction SilentlyContinue; Start-ScheduledTask llama-swap'
+# proof of apply: C:\llama-swap\llama-swap.log shows a fresh startup banner, then
+Invoke-RestMethod http://127.0.0.1:11436/running
+```
+
+Raising `--parallel` on the 27B seat (4 today; the 2026-09-01 fairness arms measured ~110–120 tok/s
+aggregate at 8 slots on the 5060 Ti pair) adds real throughput rather than queue depth — that is a
+seat change and stays your call.
+
+**Deploying this build:** `go build -o bin\local-offload.exe .` in the repo, then restart the
+Claude Code sessions (each one spawns its own `local-offload mcp`; a running session keeps the
+old binary until it restarts).
+
 ### Delegate subtasks across fleet nodes (`agent_delegate` / `delegate`)
 
 Fan self-contained sub-agent contracts out to this box or to fleet nodes on your tailnet

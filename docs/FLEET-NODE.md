@@ -779,3 +779,12 @@ What the deadline produces for a job that DID reach `running` depends on whether
   [The agent task](#the-agent-task-task_type-agent)); its accepted v1 weaknesses — one shared
   token, no rotation — are recorded in
   [ADR 0023](architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md).
+
+## Quarantine (0.111.0)
+
+A delegator quarantines a node for **30 minutes** after two results inside that window fail the
+**document fingerprint** (the `(?P<docanchor>…)` regex acceptance `offload_research` attaches to
+every page): the node answered about a different document. Quarantine is held in the delegator's
+process (the MCP server), never persisted; a blocked node is skipped by placement and named in the
+run's `probe_errors` as `quarantined until <time>`. Contract-caused acceptance failures (a strict
+`contains:`, a thin page's `min_items`) never strike. `summary.quarantined` counts the flips.

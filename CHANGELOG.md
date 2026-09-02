@@ -6,6 +6,44 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.111.0] — 2026-09-02 — scheduling + delivery quality under parallel sessions (masterplan #1)
+
+Several parallel sessions reported on 2026-09-01: 27B seat "timed out at 600 s", llama-swap 429s
+while another session held the slots, the Lenovo 4B seat's phantom "Go version" digests passing as
+results, `offload_research` deferring on the 8-contract cap — and every session then bypassed the
+harness. Mechanism verified against llama-swap v251's source before anything was built
+([ADR 0032](docs/architecture/decisions/0032-a-peer-held-seat-is-waited-for-not-deferred.md)).
+
+### Added
+- **`internal/seatwait`** — one CONTRACT-scoped wait budget for a peer-held seat (429 /
+  503 "process is not ready" / 500 `src:"llama-swap"`), ladder 1/2/4/8/15 s, `Retry-After` counted
+  against the budget, 90 s default; config `seat_contention_wait_sec` (−1 disables). Both seat
+  clients re-send after the sleep with the `modelaffinity` ticket released. Wire:
+  `contention_wait_sec`; defer reason prefix `seat contended:`; a wall consumed by waiting is filed
+  as contention (infrastructure), never as a budget defer.
+- **Admission pre-flight** in `RunAgentTask`: polls llama-swap `GET /running` while any model is
+  mid-swap, BEFORE the wall starts; `agent_admission_wait_sec` (120 s default, −1 off); wire
+  `admission_wait_sec`; fail-open on a probe error.
+- **`delegate.RunBatched` / `RunWith` / `RunOptions`** — sequential chunks of `MaxSubtasks`, order
+  kept, `Summary` summed (reflection-pinned), first error returned WITH the partial results;
+  `offload_research` and `local-offload research` use it and report `partial: true` on a chunk
+  error instead of dropping every page.
+- **`delegate.Quarantine`** — process-scoped (MCP server lifetime), 30-min TTL, two strikes;
+  struck ONLY on document-fingerprint failures; blocked nodes are skipped by placement and named
+  in the probe errors. `Summary.quarantined`, `Summary.batches`.
+- **`research.DocFingerprint`** — two `(?P<docanchor>…)` regex acceptance halves from the page's
+  12 most frequent distinctive tokens (boilerplate stop-listed); a digest of a different document
+  fails, an abstractive summary of the page passes. No new acceptance verb.
+
+### Changed
+- `agent.LLMClient.Chat` returns a typed `*agent.StatusError` on non-200 (message text unchanged).
+- `genErrIsTransport`'s comment corrected: a 429 is llama-swap saying peers hold the seat.
+
+### Operator steps (not applied by this release)
+- Capacity: raise `concurrencyLimit` on the agent seats in `llama-swap.yaml` (see
+  OPERATOR-GUIDE → "Parallel sessions on one llama-swap"); deploy the binary; restart MCP sessions.
+
+
 ### Added — `skill/gimp/`: GIMP 3.2 autonomous-driving reference library
 
 Canonical home for the GIMP skill (installed copy: `~/.claude/skills/gimp`). Lean `SKILL.md` router plus
