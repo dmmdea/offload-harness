@@ -11,6 +11,8 @@
   "agent_model": "",
   "agent_profile": "",
   "agent_timeout_sec": 0,
+  "seat_contention_wait_sec": 0,
+  "agent_admission_wait_sec": 0,
   "agent_ctx_tokens": 0,
   "vision_model": "",
   "ocr_model": "",

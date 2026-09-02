@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
@@ -43,7 +44,11 @@ type Source struct {
 	Fetched
 	DocName string `json:"doc_name,omitempty"`
 	Anchor  string `json:"anchor,omitempty"`
-	Skipped string `json:"skipped,omitempty"`
+	// Fingerprinted says whether DocFingerprint produced the wrong-document
+	// tripwire for this page; false = the page was too thin (< 6 distinctive
+	// tokens) and an off-document answer cannot be caught by it.
+	Fingerprinted bool   `json:"fingerprinted"`
+	Skipped       string `json:"skipped,omitempty"`
 }
 
 // FetchAll fetches every URL with bounded concurrency, preserving order.
@@ -112,6 +117,10 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 		if anchor != "" {
 			acc = append(acc, anchor)
 		}
+		fp := DocFingerprint(f.Text)
+		src.Fingerprinted = len(fp) > 0
+		sources[len(sources)-1] = src
+		acc = append(acc, fp...)
 		acc = append(acc, firstArrayCheck(schema)...)
 		acc = append(acc, req.Acceptance...)
 
@@ -244,6 +253,96 @@ func Anchors(text, goal string, n int) []string {
 // AnchorCheck is the acceptance line the research lane emits: a case-insensitive
 // regex alternation of the top page-only tokens, so a faithful digest passes by
 // restating ANY of them while an echoed goal (which contains none) cannot.
+// boilerplate are the ≥6-letter words that appear on almost every software
+// page and in almost every plausible phantom answer; a fingerprint built from
+// them would match a digest written about a different page entirely (the
+// council's example: "latest stable Go version… download" hit "version",
+// "download", "release" on a page about ffmpeg).
+var boilerplate = map[string]struct{}{}
+
+// fingerprintCutset strips the punctuation that clings to words in fetched text.
+const fingerprintCutset = ".,;:!?()[]{}<>|/*#-_\"'"
+
+func init() {
+	for _, w := range strings.Fields("version versions release releases download downloads install installation installed " +
+		"license licensed documentation documented latest stable update updates updated support supported github " +
+		"package packages website contact privacy cookies cookie copyright rights reserved search navigation " +
+		"content contents example examples section sections default defaults option options available " +
+		"information general important following however without between through should before after " +
+		"because during another others others others please thanks") {
+		boilerplate[w] = struct{}{}
+	}
+}
+
+// DocFingerprint is the page's OWN fingerprint as acceptance: the 12 most
+// frequent distinctive tokens (≥6 letters, alphabetic, not boilerplate),
+// split alternately into two halves, each an (?i) alternation tagged with the
+// named group `docanchor`. Both checks must pass, so a digest has to touch at
+// least one distinctive token from EACH half — an abstractive summary of the
+// page does that trivially; a digest of some other document (the Lenovo 4B's
+// phantom "latest Go version" answer, 2026-08-31…09-01) does not.
+//
+// It is a WRONG-DOCUMENT tripwire, not a quality gate: lexical overlap is a
+// poor faithfulness metric (Maynez et al. 2020; Cao et al. 2022), which is why
+// the bar is "one token from each half of twelve", not "many tokens". Pages
+// with fewer than 6 distinctive tokens return nil — nothing to fingerprint.
+// The `docanchor` tag is what delegate.strikeOnFingerprint keys on, so
+// contract-caused acceptance failures never quarantine a node.
+func DocFingerprint(text string) []string {
+	counts := map[string]int{}
+	for _, w := range strings.Fields(strings.ToLower(text)) {
+		w = strings.Trim(w, fingerprintCutset)
+		if len(w) < 6 || !isAlpha(w) {
+			continue
+		}
+		if _, b := boilerplate[w]; b {
+			continue
+		}
+		counts[w]++
+	}
+	if len(counts) < 6 {
+		return nil
+	}
+	type kv struct {
+		w string
+		c int
+	}
+	kvs := make([]kv, 0, len(counts))
+	for w, c := range counts {
+		kvs = append(kvs, kv{w, c})
+	}
+	sort.Slice(kvs, func(i, j int) bool {
+		if kvs[i].c != kvs[j].c {
+			return kvs[i].c > kvs[j].c
+		}
+		return kvs[i].w < kvs[j].w
+	})
+	if len(kvs) > 12 {
+		kvs = kvs[:12]
+	}
+	var a, b []string
+	for i, e := range kvs {
+		if i%2 == 0 {
+			a = append(a, regexp.QuoteMeta(e.w))
+		} else {
+			b = append(b, regexp.QuoteMeta(e.w))
+		}
+	}
+	return []string{
+		"regex:(?i)(?P<docanchor>" + strings.Join(a, "|") + ")",
+		"regex:(?i)(?P<docanchor>" + strings.Join(b, "|") + ")",
+	}
+}
+
+func isAlpha(s string) bool {
+	for _, r := range s {
+		if !unicode.IsLetter(r) {
+			return false
+		}
+	}
+	return true
+}
+
 func AnchorCheck(text, goal string) string {
 	toks := Anchors(text, goal, 6)
 	if len(toks) == 0 {

@@ -70,6 +70,9 @@ type SummaryWire struct {
 	// nowhere left to go.
 	Replaced             int `json:"replaced,omitempty"`
 	ReplacementRecovered int `json:"replacement_recovered,omitempty"`
+	Quarantined          int `json:"quarantined,omitempty"`
+	Batches              int `json:"batches,omitempty"`
+	Skipped              int `json:"skipped,omitempty"`
 }
 
 // ResultWire is one subtask's published outcome. Failed marks a
@@ -89,6 +92,13 @@ type ResultWire struct {
 	Failed             bool            `json:"failed,omitempty"`
 	AcceptanceFailures []string        `json:"acceptance_failures,omitempty"`
 	WallMs             int64           `json:"wall_ms"`
+	// ContentionWaitSec / AdmissionWaitSec / AdmissionNote carry the agent
+	// result's own wait accounting (ADR 0032) up to the delegating caller —
+	// without them the CLI/MCP reader could not see that a wait fired at all
+	// (found by the parallel-sessions gate, 2026-09-02).
+	ContentionWaitSec float64 `json:"contention_wait_sec,omitempty"`
+	AdmissionWaitSec  float64 `json:"admission_wait_sec,omitempty"`
+	AdmissionNote     string  `json:"admission_note,omitempty"`
 	// RetriedOn / RetryNote: the published result is the better of two attempts
 	// when a retry ran; the note says what the other attempt did.
 	RetriedOn string `json:"retried_on,omitempty"`
@@ -151,6 +161,9 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 
 			Replaced:             sum.Replaced,
 			ReplacementRecovered: sum.ReplacementRecovered,
+			Quarantined:          sum.Quarantined,
+			Batches:              sum.Batches,
+			Skipped:              sum.Skipped,
 		},
 		Results: make([]ResultWire, 0, len(results)),
 	}
@@ -167,6 +180,9 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			DeferClass:         pr.Result.DeferClass,
 			AcceptanceFailures: pr.AcceptanceFailures,
 			WallMs:             pr.wallMs,
+			ContentionWaitSec:  pr.Result.ContentionWaitSec,
+			AdmissionWaitSec:   pr.Result.AdmissionWaitSec,
+			AdmissionNote:      pr.Result.AdmissionNote,
 			RetriedOn:          pr.RetriedOn,
 			RetryNote:          pr.RetryNote,
 			Replacements:       pr.Replacements,

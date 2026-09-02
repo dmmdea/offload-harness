@@ -76,3 +76,4 @@ tools/*/captures.jsonl
 # integrations/* are per-agent integration paths with their own package managers
 integrations/**/node_modules/
 integrations/**/bun.lock
+parallel-gate-out/

@@ -130,6 +130,20 @@ type AgentWireResult struct {
 	DeferClass string `json:"defer_class,omitempty"`
 	WallMs     int64  `json:"wall_ms"`
 	TokensOut  int    `json:"tokens_out,omitempty"`
+	// ContentionWaitSec is the wall this contract spent waiting on a peer-held
+	// seat (seatwait: llama-swap 429 / 503 not-ready / 500 src=llama-swap).
+	// Counted, never silent: the number that says whether the fix traded
+	// defers for latency. Omitted when zero; a pre-0.111 node's result reads as
+	// "not measured".
+	ContentionWaitSec float64 `json:"contention_wait_sec,omitempty"`
+	// AdmissionWaitSec is the pre-flight spent waiting for llama-swap to finish
+	// a swap before the wall started (RunAgentTask's admission gate). Zero =
+	// omitted = nothing was swapping or the gate is disabled.
+	AdmissionWaitSec float64 `json:"admission_wait_sec,omitempty"`
+	// AdmissionNote names why the admission gate did NOT settle the seat's
+	// residency — a probe failure (fail-open) or a spent budget — so a wire
+	// reader can tell "nothing was swapping" from "the gate could not tell".
+	AdmissionNote string `json:"admission_note,omitempty"`
 
 	// --- A1 config pinning (0.81.0, Tier 2 of the Phase 2 re-aim). Stamped by
 	// runAgentTask only when the seat DEMONSTRABLY SERVED this run (the loop

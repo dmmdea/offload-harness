@@ -77,3 +77,9 @@ Read the response's `summary` block first (`succeeded` / `deferred` / `failed_ve
 `failed` / `infrastructure`); exit 0 covers honest defers and failed verification, non-zero is
 transport/config failures **and** `infrastructure > 0` — the defers whose `defer_class` blames
 a broken or misconfigured node rather than the work.
+
+## `digest-8.json` — the parallel-sessions gate fixture (0.111.0)
+
+Eight self-contained digest subtasks (inline `context`: this repo's own ADRs), used by
+`scripts/parallel-sessions-gate.ps1` to run K concurrent 8-wide fan-outs against one llama-swap
+and prove the seat-contention wait fires instead of deferring (ADR 0032). Needs no `--read-root`.

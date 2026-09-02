@@ -48,6 +48,11 @@ type Server struct {
 	// researchFetch is offload_research's fetch seam (tests inject pages; nil =
 	// research.FetchAll against the public web).
 	researchFetch func(ctx context.Context, urls []string, opt research.Options) []research.Fetched
+	// quarantine remembers fleet nodes whose answers failed the document
+	// fingerprint twice (delegate.Quarantine) for this server's lifetime, so
+	// a research call's later chunks and later calls stop placing work there
+	// until the TTL expires.
+	quarantine *delegate.Quarantine
 	// hailo is the lazily-built accelerator lane (ADR 0024): one Sidecar shared
 	// by every NPU tool so concurrent first calls share a single spawn.
 	hailo     *hailoclient.Sidecar
@@ -65,7 +70,9 @@ type Server struct {
 	askCache *askcache.Cache
 }
 
-func New(p *pipeline.Pipeline) *Server { return &Server{p: p, askCache: askcache.New()} }
+func New(p *pipeline.Pipeline) *Server {
+	return &Server{p: p, askCache: askcache.New(), quarantine: delegate.NewQuarantine(0)}
+}
 
 // parseArgs unmarshals the raw tool arguments into in. On a decode error it
 // returns a non-nil {deferred:true, reason:"bad arguments: <err>"} result that
@@ -2071,7 +2078,10 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 	if localRun == nil {
 		localRun = s.p.RunAgentContract
 	}
-	results, sum, rerr := delegate.Run(ctx, s.p.Cfg(), localRun, contracts, in.Route, in.Remotes)
+	// The server-lifetime quarantine rides every delegation, not only research:
+	// a node proven to answer about the wrong document must not keep receiving
+	// agent_delegate work (silent-failure review, 2026-09-02).
+	results, sum, rerr := delegate.RunWith(ctx, s.p.Cfg(), localRun, contracts, in.Route, in.Remotes, &delegate.RunOptions{Quarantine: s.quarantine})
 	if rerr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
 	}
@@ -2138,7 +2148,9 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 // un-fails a Failed one. A fleet-down run that still delivered every subtask
 // stays a quiet success.
 func delegateIsError(sum delegate.Summary) bool {
-	return sum.Failed > 0 || sum.LostToStack > 0
+	// Skipped: subtasks a batched run never attempted because an earlier chunk
+	// errored — lost work the prose `error` field alone must not hide.
+	return sum.Failed > 0 || sum.LostToStack > 0 || sum.Skipped > 0
 }
 
 // addEffects folds a run's effect ledger into an agent_run response — counts
@@ -2334,17 +2346,26 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 	if localRun == nil {
 		localRun = s.p.RunAgentContract
 	}
-	results, sum, rerr := delegate.Run(ctx, s.p.Cfg(), localRun, contracts, route, nil)
-	if rerr != nil {
+	// RunBatched: 9–12 usable pages used to hit Run's 8-subtask refusal and lose
+	// every page (2026-09-01). Chunks run in order; a chunk error returns WITH
+	// the results already obtained, rendered as partial rather than dropped.
+	results, sum, rerr := delegate.RunBatched(ctx, s.p.Cfg(), localRun, contracts, route, nil, &delegate.RunOptions{Quarantine: s.quarantine})
+	if rerr != nil && len(results) == 0 {
 		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error(), "sources": sources})
 	}
-	wire := delegate.WireResponse(results, sum, lints)
+	wire := delegate.WireResponse(results, sum, lints[:len(results)])
+	partialErr := ""
+	if rerr != nil {
+		partialErr = rerr.Error()
+	}
 	res, jerr := jsonResult(struct {
 		Summary       any               `json:"summary"`
 		Sources       []research.Source `json:"sources"`
 		Results       any               `json:"results"`
 		ResultSources []int             `json:"result_sources"`
-	}{wire.Summary, sources, wire.Results, resultSources})
+		Partial       bool              `json:"partial,omitempty"`
+		Error         string            `json:"error,omitempty"`
+	}{wire.Summary, sources, wire.Results, resultSources[:len(results)], rerr != nil, partialErr})
 	if jerr != nil || res == nil {
 		return res, jerr
 	}
