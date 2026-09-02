@@ -1,0 +1,213 @@
+Contents
+
+    Fraunhofer FDK AAC (libfdk_aac)
+
+    Native FFmpeg AAC Encoder (aac)
+
+    audiotoolbox Encoder (aac_at)
+
+    Metadata
+
+    Progressive Download
+
+    FAQ
+
+    Also See
+
+​Advanced Audio Coding (AAC) is the successor format to MP3, and is defined in MPEG-4 part 3 (ISO/IEC 14496-3). It is often used within an MP4 container format; for music the .m4a extension (m4a actually is different in the bitstream so it is not enough to change the .mp4 to m4a) is customarily used. The second-most common use is within MKV and .mka (Matroska) files because it has better support for embedded text-based soft subtitles than MP4. The examples in this guide will use the extensions MP4 and M4A.
+
+FFmpeg supports three AAC-LC encoders (aac, libfdk_aac, aac_at) and two HE-AAC (v1/2) encoders (libfdk_aac, aac_at). The license of libfdk_aac is not compatible with GPL, so the GPL does not permit distribution of binaries containing incompatible code when GPL-licensed code is also included. Therefore this encoder have been designated as "non-free", and you cannot download a pre-built ffmpeg that supports it. This can be resolved by compiling ffmpeg yourself.
+
+See also Encode/HighQualityAudio for general guidelines on FFmpeg audio encoding (which also includes a comparison of which AAC encoder is best quality).
+
+Fraunhofer FDK AAC (libfdk_aac)
+
+The Fraunhofer FDK AAC codec library. This is currently the 3rd highest-quality AAC encoder available with ffmpeg in Linux or Windows. Requires ffmpeg to be configured with --enable-libfdk-aac (and additionally --enable-nonfree if you're also using --enable-gpl).
+
+Detailed information about the FDK AAC library (not FFmpeg specific) can be found at ​HydrogenAudio Knowledgebase: Fraunhofer FDK AAC.
+
+Note: libfdk_aac defaults to a low-pass filter of around 14kHz (​details). If you want to preserve higher frequencies, use -cutoff 18000.  Adjust the number to the upper frequency limit only if you need to; keeping in mind that a higher limit may audibly reduce the overall quality.
+
+Constant Bit Rate (CBR) mode
+
+These settings target a specific bit rate, with less variation between samples. It gives you greater control over file size, and it is compatible with the HE-AAC profile. As a rule of thumb, for audible transparency, use 64 kBit/s for each channel (so 128 kBit/s for stereo, 384 kBit/s for 5.1 surround sound).
+
+Set the bit rate with the -b:a option.
+
+Examples
+
+Convert an audio file to AAC in an M4A (MP4) container:
+
+ffmpeg -i input.wav -c:a libfdk_aac -b:a 128k output.m4a
+
+Convert 5.1 surround sound audio of a video, leaving the video alone:
+
+ffmpeg -i input.mp4 -c:v copy -c:a libfdk_aac -b:a 384k output.mp4
+
+Convert the video with libx264, with a target of fitting a 90-minute movie on a 700 MB (=5734400 KB) CD-ROM, mixing the audio down to two channels (Windows users should use NUL rather than /dev/null and ^ instead of \):
+
+ffmpeg -y -i input.mp4 -c:v libx264 -b:v 933k -preset:v veryfast -pass 1 -an /dev/null && \
+ffmpeg -i input.mp4 -c:v libx264 -b:v 933k -preset:v veryfast -pass 2 \
+-ac 2 -c:a libfdk_aac -b:a 128k output.mp4
+
+Variable Bit Rate (VBR) mode
+
+Target a quality, rather than a specific bit rate. 1 is lowest quality and 5 is highest quality.
+
+Set the VBR level with the -vbr flag.
+
+VBR modes gives roughly the following bit rates per channel (​details):
+
+VBRkbps/channelAOTs
+
+120-32LC,HE,HEv2
+
+232-40LC,HE,HEv2
+
+348-56LC,HE,HEv2
+
+464-72LC
+
+596-112LC
+
+HE bit rates will be much lower.
+
+Note: A bug exists in libfdk-aac 0.1.3 and earlier that will cause a crash when using high sample rates, such as 96kHz, with VBR mode 5. (​details).
+
+Examples
+
+Convert an audio file to AAC in an M4A (MP4) container:
+
+ffmpeg -i input.wav -c:a libfdk_aac -vbr 3 output.m4a
+
+From a video file, convert only the audio stream:
+
+ffmpeg -i input.mp4 -c:v copy -c:a libfdk_aac -vbr 3 output.mp4
+
+Convert the video with libx264, and mix down audio to two channels:
+
+ffmpeg -i input.mp4 -c:v libx264 -crf 22 -preset:v veryfast \
+-ac 2 -c:a libfdk_aac -vbr 3 output.mp4
+
+High-Efficiency AAC
+
+This is a pair of AAC profiles tailored for low bit rates (version 1 and version 2). HE-AAC version 1 is suited for bit rates below 64kb/s (for stereo audio) down to about 48 kb/s, while HE-AAC version 2 is suited for bit rates as low as 32 kb/s (again, for stereo).
+
+Note: HE-AAC version 2 only handles stereo. If you have mono, or want to down-mix to mono, use HE-AAC version 1.
+
+Unfortunately, many devices that can play AAC-LC (the default profile for libfdk_aac) simply cannot play either version of HE-AAC, so this is not recommended for surround sound audio, which normally needs to be compatible with such hardware players, and the bug exists that LFE is not correctly decoded in ffmpeg decoder in HE-AAC. If you are only going to play it on your computer, or you are sure that your hardware player supports HE-AAC, you can aim for a bit rate of 160kb/s for version 1, or 128kb/s for version 2. As always, experiment to see what works for your ears.
+
+Examples
+
+HE-AAC version 1:
+
+ffmpeg -i input.wav -c:a libfdk_aac -profile:a aac_he -b:a 64k output.m4a
+
+HE-AAC version 2:
+
+ffmpeg -i input.wav -c:a libfdk_aac -profile:a aac_he_v2 -b:a 32k output.m4a
+
+Native FFmpeg AAC Encoder (aac)
+
+The native FFmpeg AAC encoder, highest quality. This is the default AAC encoder and since 9.1 nmr coder is used which is better than other coders, but even twoloop is better than FDK AAC.
+
+By default, the native encoder produces AAC-LC, which is a "low complexity" profile of baseline AAC. It actually supports "long-term prediction" profile, but "main" profile was removed (documentation).
+
+Examples
+
+Constant bit rate using -b:a:
+
+ffmpeg -i input.wav -c:a aac -b:a 160k output.m4a
+
+Variable bit rate using -q:a:
+
+ffmpeg -i input.wav -c:a aac -q:a 2 output.m4a
+
+Effective range for -q:a is around 0.1-2. This VBR is experimental and not guaranteed to give better results than the CBR.
+Native FFmpeg AAC Encoder does not really do CBR audio encoding, just very close. For Bluetooth Headphones an option was added to force CBR but that instead makes quality subpar as the bitrate falls apart (-bt:a 0). See b92af7b64e7acd015aea3ae1da2228c5a7e677bf. Version 9.1 adds Apple NMR in  native encoder and is helps -bt:a 0 a little bit.
+
+audiotoolbox Encoder (aac_at)
+
+When a build is configured with --enable-audiotoolbox, Apple's audioToolbox.framework (normally available only on macOS) will provide a series of codecs suffixed _at. Apple's encoder ​is even better than FDK-AAC according to HydrogenAudio. You may have come across this implementation on other platforms as "QAAC" or "audioToolboxWrapper", but licensing issues for these modifications is too much for FFmpeg to deal with.
+
+Bitrate control is done by global flags. -q:a can range from 0~14 for VBR and -b:a by default gives CBR. -aac_at_mode can be used to instead cause -b:a to provide AVR and CVBR. All profiles for libfdk_aac's -profile:a option, including both versions of HE-AAC, are available, e.g. AOT_MP2_AAC_LC pseudo-profile number 129 which is AOT_AAC_LC with PNS disabled.
+
+Note: -profile option only accepts numeric values for aac_at encoder, e.g. 4 works as aac_he and 28 as aac_he_v2. (​https://trac.ffmpeg.org/ticket/9574).
+
+Metadata
+
+You can add metadata to any of the examples on this guide:
+
+ffmpeg -i input ... \
+-metadata author="FFmpeg Bayou Jug Band" \
+-metadata title="Decode my Heart (Let's Mux)" \
+output.mp4
+
+For more info, see ​the Metadata API description and the ​MultimediaWiki entry on FFmpeg metadata.
+
+Progressive Download
+
+By default the MP4 muxer writes the 'moov' atom after the audio stream ('mdat' atom) at the end of the file. This results in the user requiring to download the file completely before playback can occur. Relocating this moov atom to the beginning of the file can facilitate playback before the file is completely downloaded by the client.
+
+You can do this with the -movflags +faststart option:
+
+ffmpeg -i input.wav -c:a libfdk_aac -movflags +faststart output.m4a
+
+You can also use this option on existing MP4/M4A files. Since the audio is simply being stream copied there is no re-encoding occurring, just re-muxing, so therefore there is no quality loss:
+
+ffmpeg -i input.m4a -c:a copy -movflags +faststart output.m4a
+
+FAQ
+
+Which encoder provides the best quality?
+
+For AAC-LC: 9.1 native FFmpeg AAC encoder (aac) using Apple's NMR and other coding tools > aac_at > libfdk_aac.
+
+For HE-AAC it's unclear whether aac_at or libfdk_aac is better.
+
+Should I use AAC-LC or HE-AAC?
+
+If you require a low audio bitrate, such as ≤ 32kbs/channel, then HE-AAC would be worth considering if your player or device can support HE-AAC decoding. Anything higher may benefit more from AAC-LC due to less processing. If in doubt use AAC-LC. All players supporting HE-AAC also support AAC-LC.
+
+You might see that FDK AAC and audiotoolkit also support AAC-LD and AAC-ELD. These are low delay variants rarely used in music (hence unlikely to be supported), but useful for VoIP. In general, you will only turn it on when the receiving side  explicitly requires one of these variants.
+
+Also See
+
+Guidelines for high quality lossy audio encoding
+
+            Last modified
+ 7 weeks ago
+
+            Last modified on Jul 13, 2026, 4:07:54 AM
+
+    Attachments
+    (5)
+
+        Original.png​
+ (1.1 MB
+) - added by Rostislav Pehlivanov 11 years ago.
+        Original spectrum of a file prior to encoding
+
+        PNS_NO.png​
+ (753.8 KB
+) - added by Rostislav Pehlivanov 11 years ago.
+        Spectral representation of file after being encoded without PNS
+
+        PNS1.2.png​
+ (820.5 KB
+) - added by Rostislav Pehlivanov 11 years ago.
+        File encoded with new PNS implementation
+
+        PNS_2.2.png​
+ (757.5 KB
+) - added by Rostislav Pehlivanov 11 years ago.
+        File encoded with old PNS implementation
+
+        Difference1.png​
+ (757.1 KB
+) - added by Rostislav Pehlivanov 11 years ago.
+        Spectral difference of the file encoded with new vs old PNS implementation
+
+  Note:
+ See   TracWiki
+ for help on using the wiki.

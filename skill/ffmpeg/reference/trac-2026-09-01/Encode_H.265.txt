@@ -1,0 +1,132 @@
+H.265/HEVC Video Encoding Guide
+
+Contents
+
+    Getting ffmpeg with libx265 support
+
+    Viewing options
+
+    Rate control modes
+
+    Passing Options
+
+    Lossless encoding
+
+    Intra encoding
+
+    Setting Profiles
+
+    Final Cut and Apple stuff compatibility
+
+    Further Info
+
+This guide focuses on the encoder libx265 which can offer around 25–50% bitrate savings compared to H.264 video encoded with libx264, while retaining the same visual quality. These gains will be most pronounced at resolutions of 1080p and higher.
+
+See HWAccelIntro for information on supported hardware H.265/HEVC encoders.
+
+Getting ffmpeg with libx265 support
+
+ffmpeg needs to be built with the --enable-gpl --enable-libx265 configuration flags and requires x265 to be installed on your system. The Compilation Guides show you how to do that.
+
+You can also download a static build, all of which bundle libx265.
+
+Viewing options
+
+You can list private options available in this encoder with ffmpeg -h encoder=libx265.
+
+Rate control modes
+
+Similar to x264, the x265 encoder has multiple rate control algorithms, including:
+
+1-pass target bitrate (by setting -b:v)
+
+2-pass target bitrate
+
+Constant Rate Factor (CRF)
+
+In this guide we are going to focus on CRF and Two-Pass encoding, as 1-pass target bitrate encoding is not recommended.
+
+Constant Rate Factor (CRF)
+
+Use this mode if you want to retain good visual quality and don't care about the exact bitrate or filesize of the encoded file. The mode works exactly the same as in x264, except that maximum value is always 51, even with 10-bit support, so please read the H.264 guide for more info.
+
+As with x264, you need to make several choices:
+
+Choose a CRF. CRF affects the quality. The default is 28, and it should visually correspond to libx264 video at CRF 23, but result in about half the file size. CRF works just like in x264, so choose the highest value that provides an acceptable quality.
+
+Choose a preset. The default is medium. The preset determines compression options and efficiency and therefore affects encoding speed and size. Valid presets are ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow, and placebo. Use the slowest preset you have patience for, with a crf that is acceptable, given that preset.  Ignore placebo as it provides insignificant returns for a significant increase in encoding time.  Note that CRF values are different based on which preset you select, a "slower" preset generates more compression/bit, but may increase filesize.  If you compare "ultrafast" with "veryslow" at the same CRF value, "veryslow" may generate a larger file, with overall better compression.  So for instance if -preset ultrafast with -crf 15 generates a file with comparable size to "veryslow" -crf 20, the veryslow preset file will have better quality for the same file size.  You can also specify a bitrate for a preset (see below), instead of crf, for controlling file size with a certain compression level.
+
+Choose a tune (optional). By default, this is disabled, and it is generally not required to set a tune option. x265 supports the following -tune options: psnr, ssim, grain, zerolatency, fastdecode. They are explained in the H.264 guide.
+
+For example:
+
+ffmpeg -i input -c:v libx265 -crf 26 -preset fast -c:a aac -b:a 128k output.mp4
+
+This example uses AAC audio at 128 kBit/s. This uses the native FFmpeg AAC encoder, but under AAC you will find info about more options.
+
+Two-Pass Encoding
+
+This method is generally used if you are targeting a specific output file size and output quality from frame to frame is of less importance. This is best explained with an example. Your video is 10 minutes (600 seconds) long and an output of 200 MiB is desired. Since bitrate = file size / duration:
+
+(200 MiB * 8388.608 [converts MiB to kBit; note: not 8192 as 1 kBit is always 1000 bit]) / 600 seconds = ~2796 kBit/s total bitrate
+2796 - 128 kBit/s (desired audio bitrate) = 2668 kBit/s video bitrate
+
+You can also forgo the bitrate calculation if you already know what final (average) bitrate you need.
+
+Two-Pass Example
+
+For two-pass, you need to run ffmpeg twice, with almost the same settings, except for:
+
+In pass 1 and 2, use the -x265-params pass=1 and -x265-params pass=2 options, respectively.
+
+In pass 1, output to a null file descriptor, not an actual file. (This will generate a logfile that ffmpeg needs for the second pass.)
+
+In pass 1, you can leave audio out by specifying -an.
+
+For libx265, the -pass option (that you would use for libx264) is not applicable.
+
+ffmpeg -y -i input -c:v libx265 -b:v 2600k -x265-params pass=1 -an -f null /dev/null && \
+ffmpeg -i input -c:v libx265 -b:v 2600k -x265-params pass=2 -c:a aac -b:a 128k output.mp4
+
+Note: Windows users should use NUL instead of /dev/null and ^ instead of \.
+
+As with CRF, choose the slowest -preset you can tolerate, and optionally apply a -tune setting. Note that when using faster presets with the same target bitrate, the resulting quality will be lower and vice-versa.
+
+Passing Options
+
+Generally, options are passed to x265 with the -x265-params argument, as in -x265-params "keyint=1:lossless=1". For fine-tuning the encoding process, you can therefore pass any option that is listed in the ​x265 documentation. Keep in mind that fine-tuning any of the options is generally not necessary, unless you absolutely know what you need to change.
+
+Lossless encoding
+
+Use the -x265-params lossless=1 option. Adding -crf 0 is not required.
+
+You can verify lossless encoding by looking for x265 [info]: lossless compression ratio in the console output from your encoding command, or refer to the hash demuxer for verification.
+
+Intra encoding
+
+Use the -g 1 option for FFmpeg 4.3 and newer or if you're using a build from the git master branch. Older versions must use -x265-params keyint=1.
+
+Setting Profiles
+
+Profiles can be set via the -profile:v option, similar to libx264. See a ​list of available x265 profiles.
+
+Final Cut and Apple stuff compatibility
+
+To make your file compatible with Apple "industry standard" H.265 you have to add the following argument -tag:v hvc1
+
+Further Info
+
+​x265 API documentation
+
+​Netflix Tech Blog — A Large-Scale Comparison of x264, x265, and libvpx (​link to paper)
+
+P. Hanhart et al., Subjective quality evaluation of the upcoming HEVC video compression standard (​PDF)
+
+            Last modified
+ 2 years ago
+
+            Last modified on Apr 18, 2024, 2:27:05 AM
+
+  Note:
+ See   TracWiki
+ for help on using the wiki.

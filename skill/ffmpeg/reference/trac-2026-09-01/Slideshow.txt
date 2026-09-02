@@ -1,0 +1,146 @@
+Basic examples
+
+        Sequential
+
+            Starting with a specific image
+
+        Glob pattern
+
+        Pipe
+
+        Concat demuxer
+
+        Single image
+
+    Additional Info
+
+        Frame rates
+
+        If your video does not show the frames correctly
+
+        Color space conversion and chroma sub-sampling
+
+        Adding audio
+
+        Also see
+
+Basic examples
+
+You can input images sequentially, with a glob pattern, via piping, or with the concat demuxer. You can also make a video from a single image.
+
+Sequential
+
+In this example the input images are sequentially named img001.png, img002.png, img003.png, etc.
+
+ffmpeg -framerate 24 -i img%03d.png output.mp4
+
+When outputting H.264, adding -vf format=yuv420p or -pix_fmt yuv420p will ensure compatibility so crappy players can decode the video. See the colorspace and chroma-subsampling for more info.
+
+If -framerate option is omitted the default will input and output 25 frames per second. See Frame rates for more info.
+
+Starting with a specific image
+
+For example if you want to start with img126.png then use the -start_number option:
+
+ffmpeg -start_number 126 -i img%03d.png -pix_fmt yuv420p out.mp4
+
+Glob pattern
+
+Bash-style globbing (* represents any number of any characters) is useful if your images are sequential but not necessarily in a numerically sequential order as in the previous example.
+
+ffmpeg -framerate 10 -pattern_type glob -i '*.jpg' -c:v libx264 -pix_fmt yuv420p out.mp4
+
+The glob pattern is not available on Windows builds.
+
+Pipe
+
+You can use cat or other tools to pipe to ffmpeg:
+
+cat *.png | ffmpeg -f image2pipe -i - output.mkv
+
+Concat demuxer
+
+You can use the concat demuxer to manually order images and to provide a specific duration for each image.
+
+First, make a text file with the appropriate info:
+
+file '/path/to/dog.png'
+duration 5
+file '/path/to/cat.png'
+duration 1
+file '/path/to/rat.png'
+duration 3
+file '/path/to/tapeworm.png'
+duration 2
+file '/path/to/tapeworm.png'
+
+(Due to a quirk, the last image has to be specified twice - the 2nd time without any duration directive)
+
+Then run the ffmpeg command:
+
+ffmpeg -f concat -i input.txt -vsync vfr -pix_fmt yuv420p output.mp4
+
+Single image
+
+Example with output video duration set to 30 seconds with -t 30:
+
+ffmpeg -loop 1 -i img.jpg -c:v libx264 -t 30 -pix_fmt yuv420p out.mp4
+
+Additional Info
+
+Frame rates
+
+You can specify two frame rates: input and output.
+
+Set input frame rate with the -framerate input option (before -i). The default for reading inputs is -framerate 25 which will be set if no -framerate is specified.
+
+The output frame rate for the video stream by setting -r after -i or by using the fps filter. If you want the input and output frame rates to be the same, then just declare an input -framerate and the output will inherit the same value (meaning you can omit the -r).
+
+By using a separate frame rate for the input and output you can control the duration at which each input is displayed and tell ffmpeg the frame rate you want for the output file. This is useful if your player cannot handle a non-standard frame rate. If the input -framerate is lower than the output -r then ffmpeg will duplicate frames to reach your desired output frame rate. If the input -framerate is higher than the output -r then ffmpeg will drop frames to reach your desired output frame rate.
+
+In this example each image will have a duration of 5 seconds (the inverse of 1/5 frames per second). The video stream will have a frame rate of 30 fps by duplicating the frames accordingly:
+
+ffmpeg -framerate 1/5 -i img%03d.png -c:v libx264 -r 30 -pix_fmt yuv420p out.mp4
+
+If your video does not show the frames correctly
+
+If you encounter problems, such as the first image is skipped or only shows for one frame, then use the ​fps video filter instead of -r for the output framerate (see ticket:1578 and ticket:2674 / ticket:3164 for more info):
+
+ffmpeg -framerate 1/5 -i img%03d.png -c:v libx264 -vf fps=25 -pix_fmt yuv420p out.mp4
+
+Alternatively the ​format video filter can be added to the ​filterchain to replace -pix_fmt yuv420p. The advantage to this method is that you can control which filter goes first:
+
+ffmpeg -framerate 1/5 -i img%03d.png -c:v libx264 -vf "fps=25,format=yuv420p" out.mp4
+
+Color space conversion and chroma sub-sampling
+
+By default when using libx264, and depending on your input, ffmpeg will attempt to avoid color subsampling. Technically this is preferred, but unfortunately almost all video players, excluding FFmpeg based players, and many online video services only support the YUV color space with 4:2:0 chroma subsampling. Using the options -pix_fmt yuv420p or -vf format=yuv420p will maximize compatibility.
+
+Adding audio
+
+If you want to add audio (e.g. audio.wav) to one "poster" image, you need -shortest to tell it to stop after the audio stream is finished. The internal AAC encoder is used in this example, but you can use any other supported AAC encoder as well:
+
+ffmpeg -loop 1 -i img.jpg -i audio.wav -c:v libx264 -c:a aac -b:a 192k -shortest out.mp4
+
+If your audio file is using a codec that the output container supports (e.g. MP3 audio in AVI or M4A/AAC audio in MP4), you can stream copy (re-mux) it instead of re-encoding, which will preserve the audio quality:
+
+ffmpeg -loop 1 -i img.jpg -i audio.m4a -c:v libx264 -c:a copy -shortest out.mp4
+
+Also see
+
+​FFmpeg image file demuxer documentation
+
+Create a thumbnail image every X seconds of the video
+
+H.264 Encoding Guide
+
+H.265 Encoding Guide
+
+            Last modified
+ 9 years ago
+
+            Last modified on Sep 15, 2017, 9:28:24 PM
+
+  Note:
+ See   TracWiki
+ for help on using the wiki.

@@ -1,0 +1,95 @@
+Solutions to some ffmpeg errors and messages
+
+Could not write header for output file #0 (incorrect codec parameters ?): Invalid argument
+
+When encountered this message is usually the last line in the console output. By itself is not very informative, but it is always accompanied by a more specific message that explains the actual issue, so scroll up for the actual error.
+
+Invalid input file index: 2
+
+The -map option is used to choose what inputs you want when default stream selection behavior does not fit your needs. This message can occur when the -map option is used to reference an input that does not exist. For example, if you have two inputs, but you're tyring to map a non-existing third input with -map 2 (note that ffmpeg starts counting from 0) then this error will appear.
+
+Properly define your -map file index values. See the -map option documentation and FFmpeg Wiki: Map for more examples.
+
+Stream map '0:a:0' matches no streams
+
+Similar to the above error, but instead of an incorrect file index there is an incorrect stream index. For example, if the first input contains four video streams, but you use -map 0:v:4, then you are referencing a non-existing video stream (note that ffmpeg starts counting from 0).
+
+Properly define your -map stream index values. See the -map option documentation and FFmpeg Wiki: Map for more examples. Alternatively, add a trailing ? to your map option, such as -map 0:v:4?, to make the map optional.
+
+Output file is empty, nothing was encoded (check -ss / -t / -frames parameters if used)
+
+The -ss option allows you to skip to a certain point. This message is often seen when the -ss option value is greater than the duration of the input. For example, if -ss 30 is used for a 15 second input you may see this message.
+
+Make sure your -ss, -t, -to, and/or -frames value does not exceed the input duration.
+
+Unknown encoder 'foo'
+
+Your ffmpeg build does not support the encoder you are trying to use.
+
+If it is an external encoder, usually named with the "lib-" prefix, then the build must be compiled to support it. See ffmpeg -encoders for a list of encoders supported by your particular build.
+
+You may be using an old, unsupoprted build. Development is very active, so it is recommended to use builds from the current git master branch. See the FFmpeg Download page for options.
+
+The issue could be a simple typo so check the spelling of the encoder name.
+
+Use a current ffmpeg build. You may need to compile it to support your desired encoder. Alternatively, you may simply download a static build of ffmpeg–these builds usually support the most common encoders.
+
+Trailing options were found on the commandline
+
+This message is often overlooked by users and is caused by improper option placement. Placement of options matters, and trailing options are often ignored. Placement is as follows:
+
+ffmpeg [global options] [input options] -i input [output options] output
+
+The documentation will often specify if an option is global, input, and/or output.
+
+Place your options in the correct location. Options before -i will be applied to the input, and options before the output name will be applied to the output. Options after the last output may be ignored.
+
+No pixel format specified, yuv444p for H.264 encoding chosen.
+Use -pix_fmt yuv420p for compatibility with outdated media players.
+
+Your input and output may vary in supported pixel formats. ffmpeg will attempt to choose the "best" supported pixel format for your encoder. For libx264 it may use a pixel format that is not decodable by many non-FFmpeg based media players.
+
+Adding -pix_fmt yuv420p or -vf format=yuv420p will ensure compatibility with dumb players.
+
+[image2 @ 0x2e43320] Could not open file : images/output.png.tmp
+av_interleaved_write_frame(): Input/output error
+
+In this example the output was images/output.png, but the images directory did not exist.
+
+Check that your directory exists and/or that the permissions are correct.
+
+[image2 @ 0x3841320] Could not get frame filename number 2 from pattern 'output.png' (either set updatefirst or use a pattern like %03d within the filename pattern)
+av_interleaved_write_frame(): Invalid argument
+
+This usually occurs because the output name is incorrect or some option was omitted.
+
+If outputting a single image you need to include -frames:v 1.
+
+If outputting a series of images you need to use the proper naming pattern as described in the image muxer documentation. For example, output_%03d.png will make a series named output_001.png, output_002.png, output_003.png, etc.
+
+If outputting a single image that is continuously overwritten with new images, add -update 1.
+
+[mp4 @ 0x563cd3fa4700] Could not find tag for codec foo in stream #0, codec not currently supported in container
+
+As the message says, the particular codec is not supported in your output container format.
+
+Change the codec and/or output container format.
+
+Streamcopy requested for output stream 0:0, which is fed from a complex filtergraph. Filtering and streamcopy cannot be used together
+
+You can't stream copy (-c copy, -codec copy, etc) an output from a filter.
+
+Remove this option or change copy to your desired encoder.
+
+WASAPI can't initialize audio client error
+
+That Windows oddity can affect FFplay, just set SDL_AUDIODRIVER=directsound in the environment of the shell, i.e., a cmd.exe window on your desktop. Maybe setx SDL_AUDIODRIVER=directsound in the environment of the current user (HKCU) or local machine (HKLM), effective for all command line windows after a reboot, or (untested) after logging off + in again, or (untested) after killing + restarting explorer. Credits: ​autodidact (2018-02-27).
+
+            Last modified
+ 7 years ago
+
+            Last modified on May 21, 2019, 11:06:47 PM
+
+  Note:
+ See   TracWiki
+ for help on using the wiki.
