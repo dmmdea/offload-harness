@@ -141,6 +141,7 @@ prompt/exemplars; can only narrow — UNSET resolves to config `agent_profile`, 
 | `internal/mcpserver/` | MCP tool surface (incl. `agent_run`). |
 | `setup/` | Cross-vendor installer: `detect.ps1`, `install.ps1`, `selftest.ps1`, `templates/`, `SETUP-AGENT.md`. |
 | `skill/local-offload-setup/` | Thin setup-skill wrapper pointing at `setup/SETUP-AGENT.md`. |
+| `skill/gimp/` | GIMP 3.2 autonomous-driving reference (canonical source; installed copy lives in `~/.claude/skills/gimp`). Lean `SKILL.md` router + `reference/` (ten rules, hosts, connection modes, CLI/batch, Python API, editing playbook, export formats, scripting, failure modes, live PDB/GEGL dump measured on the Qube 2026-09-01). Backs the `flatten_design` / `instantiate_design` GIMP ops. |
 | `config.example.json` | Full config with defaults (kept in lockstep via `go generate ./...`). |
 
 ## When lost

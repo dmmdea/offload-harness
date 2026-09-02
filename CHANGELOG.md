@@ -6,6 +6,15 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — `skill/gimp/`: GIMP 3.2 autonomous-driving reference library
+
+Canonical home for the GIMP skill (installed copy: `~/.claude/skills/gimp`). Lean `SKILL.md` router plus
+`reference/` — README with ten rules, hosts/install, connection modes (console, GUI, gimp-mcp, Script-Fu
+server), CLI/batch, Python API, editing playbook, export formats (23 verified), scripting, 46-row failure
+catalog, and `live-dump-qube-2026-09-01.json` (902 PDB signatures, 28 enums, 258 GEGL ops with property
+tables, 79 gimp-mcp tools, export choice nicks). Every fact tagged measured/doc/community/inferred; measured
+on the Qube against GIMP 3.2.4. Backs the `flatten_design` / `instantiate_design` image ops.
+
 ## [0.110.0] - 2026-08-30
 
 ### Added — `offload_research`: the one-call research lane (harness-first, operator directive)
