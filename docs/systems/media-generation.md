@@ -121,7 +121,7 @@ raw prompt with the `refine` knob stripped from the hash, so re-runs keep reusin
 **Image editing** is one verb (`edit-image` / `offload_edit_image`) carrying an `ops` list, not a
 family of verbs. The full op set (validated in `mediaops.ValidateOps`) is `crop`, `resize`,
 `convert`, `composite`, `text`, `mask_boxes`, `grade`, `lut_cube`, `perspective_composite`, `finish`,
-`flatten_design`, and `instantiate_design` (the last two drive GIMP). `finish` is delivery sharpening
+`flatten_design`, and `instantiate_design` (the last two drive GIMP — how GIMP 3.2 is driven headless, what its batch mode, PDB, GEGL filters and export procedures really do on this build, and every measured trap, is documented in [`skill/gimp/reference/`](../../skill/gimp/reference/README.md)). `finish` is delivery sharpening
 and should come **last** — sharpening before a resize is undone by the resampling — but this is a
 caller convention that the validator documents, not an ordering it enforces (mask and rendition
 chains may legitimately follow). `renditions` is a top-level parameter, not an op: it re-runs the
