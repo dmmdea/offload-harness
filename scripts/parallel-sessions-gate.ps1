@@ -37,7 +37,10 @@ $runs = 1..$K | ForEach-Object {
   Start-ThreadJob -ThrottleLimit ($K + 2) -ArgumentList $Binary, $Contract, $log, $i -ScriptBlock {
     param($bin, $c, $log, $i)
     $t = [DateTime]::UtcNow
-    $out = & $bin delegate --contract $c --route local 2>&1
+    # stdout and stderr to SEPARATE files: merged, the CLI's trailing error line interleaves into
+    # the JSON and the run becomes unparseable (seen 2026-09-02 on every run that deferred)
+    $errLog = [System.IO.Path]::ChangeExtension($log, '.stderr.txt')
+    $out = & $bin delegate --contract $c --route local 2>$errLog
     $ms = [int]([DateTime]::UtcNow - $t).TotalMilliseconds
     $out | Out-File -Encoding UTF8 $log
     [pscustomobject]@{ run = $i; wall_ms = $ms; exit = $LASTEXITCODE; log = $log }
