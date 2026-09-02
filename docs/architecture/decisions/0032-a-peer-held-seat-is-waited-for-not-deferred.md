@@ -1,6 +1,10 @@
+---
+status: Accepted
+date: "2026-09-02"
+---
+
 # 0032 — A peer-held seat is waited for, not deferred
 
-- Status: accepted (2026-09-02)
 - Deciders: operator (masterplan #1, 2026-09-01 22:10), harness session
 - Supersedes: the reading in `internal/pipeline/agenttask.go` (pre-0.111) that "llama-server does not rate-limit, so a 429 means something in front of the seat answered instead of it"
 
