@@ -40,6 +40,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gbnf"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
+	"github.com/dmmdea/offload-harness/internal/seatwait"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
 	"github.com/dmmdea/offload-harness/internal/validator"
@@ -98,6 +99,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			nodeID = hn
 		}
 	}
+	var contention *seatwait.Budget // set once the wall exists; finish reads it
 	wire := core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: nodeID, Seat: seat}
 
 	// finish is the ONE exit for every terminal wire result (success or defer):
@@ -106,6 +108,9 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// contract or the telemetry.
 	finish := func(w core.AgentWireResult) core.Result {
 		w.WallMs = time.Since(start).Milliseconds()
+		if contention != nil {
+			w.ContentionWaitSec = contention.Spent().Seconds()
+		}
 		meta.LatencyMs = w.WallMs
 		meta.TokensOut = w.TokensOut
 		data, merr := json.Marshal(w)
@@ -147,6 +152,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	wall := time.Duration(timeoutSec) * time.Second
 	cctx, cancel := context.WithTimeout(ctx, wall)
 	defer cancel()
+	// One busy-seat budget for the WHOLE contract (seatwait): every chat step
+	// and the re-pack draw on it, so a 10-step loop cannot spend ten budgets,
+	// and the wait it consumed is reported on the wire (contention_wait_sec).
+	contention = seatwait.NewBudget(p.cfg.SeatContentionWaitSec)
+	cctx = seatwait.WithBudget(cctx, contention)
 
 	// Seat-residency probe — the mirror of mcpserver's plannerUnserved gate: a
 	// POSITIVE "roster answered and the seat is absent" defers before any
@@ -262,7 +272,22 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// Wall timeout is its own defer shape — the delegator sizes future
 		// contracts off it, so it must be distinguishable from a planner error.
 		if errors.Is(cctx.Err(), context.DeadlineExceeded) {
+			if r, ok := contendedReason(seat, contention); ok {
+				// The wall was eaten by WAITING on peers, not by the model's own
+				// work: filing it as a budget defer would poison the delegator's
+				// contract sizing (the council's finding, 2026-09-02).
+				return deferWire(core.DeferClassInfrastructure, r+"; the wall expired during the wait")
+			}
 			return deferWire(core.DeferClassBudget, fmt.Sprintf("wall timeout after %ds", timeoutSec))
+		}
+		// A busy seat that outlived the contention budget is its OWN reason:
+		// "seat contended:" is the ledger/audit grep key, and the operator's fix
+		// is capacity (llama-swap concurrencyLimit / --parallel), not a box.
+		var se *agent.StatusError
+		if errors.As(rerr, &se) && seatwait.Retryable(se.Code, se.Body) {
+			contention.NextFor(se.Code, "") // no sleep is reserved past the budget; this only records the status
+			r, _ := contendedReason(seat, contention)
+			return deferWire(core.DeferClassInfrastructure, r+" — "+rerr.Error())
 		}
 		return deferWire(core.DeferClassInfrastructure, "agent loop: "+rerr.Error())
 	}
@@ -327,6 +352,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			// The wall expired DURING the re-pack. That is the timeout shape,
 			// not a schema shape — reporting it as "output failed schema" sends
 			// the operator to rewrite a schema that was never the problem.
+			if r, ok := contendedReason(seat, contention); ok {
+				// Same stable prefix as the transport arm below (§S2 keys on it);
+				// the contention detail rides after it.
+				return deferWire(core.DeferClassInfrastructure, "structured re-pack unreachable: "+r+"; the wall expired during the wait")
+			}
 			return deferWire(core.DeferClassBudget, fmt.Sprintf("wall timeout after %ds", timeoutSec))
 		case errors.Is(cctx.Err(), context.Canceled):
 			// The PARENT went away mid-re-pack (the delegator abandoned the
@@ -337,6 +367,9 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			// model's control stopped the run.
 			return deferWire(core.DeferClassBudget, "canceled during the structured re-pack (the caller's context ended)")
 		case transport:
+			if r, ok := contendedReason(seat, contention); ok {
+				return deferWire(core.DeferClassInfrastructure, "structured re-pack unreachable: "+serr.Error()+" ("+r+")")
+			}
 			// The seat could not be REACHED (llama-swap down/500/dial refused).
 			// Its own prefix and class: a transport failure filed under
 			// "output failed schema" is what makes a dead endpoint read as a
@@ -636,6 +669,18 @@ func coerceToSchema(content []byte, schema map[string]any) ([]byte, bool) {
 	return fixed, true
 }
 
+// contendedReason renders the "seat contended:" defer reason when the
+// contract's seatwait budget saw at least one busy answer. The prefix is the
+// ledger/audit grep key; the fix it points at is CAPACITY (llama-swap
+// concurrencyLimit / --parallel), never a box.
+func contendedReason(seat string, b *seatwait.Budget) (string, bool) {
+	if b == nil || b.LastStatus() == 0 {
+		return "", false
+	}
+	return fmt.Sprintf("seat contended: %s answered %d %d time(s); waited %.0fs (peers hold its slots — raise concurrencyLimit or retry)",
+		seat, b.LastStatus(), b.Attempts(), b.Spent().Seconds()), true
+}
+
 // genErrIsTransport reports whether a Generate error means the SEAT COULD NOT
 // BE REACHED (or was never what answered), as opposed to reached-and-unusable.
 // What qualifies:
@@ -643,8 +688,12 @@ func coerceToSchema(content []byte, schema map[string]any) ([]byte, bool) {
 //   - the transport's own *url.Error / net.Error — dial refused, TLS, a reset
 //     before the response headers;
 //   - a 5xx — a server saying it is in trouble;
-//   - a 429 — llama-server does not rate-limit, so a 429 means something in
-//     FRONT of the seat answered instead of it;
+//   - a 429 / 503 "process is not ready" / 500 src=llama-swap — llama-swap
+//     saying PEERS HOLD THE SEAT (verified against its scheduler source
+//     2026-09-02: 429 = reserved requests ≥ concurrencyLimit; swaps queue
+//     silently; a health-check timeout is a 500 from llama-swap itself). By
+//     the time one reaches here, seatwait has already waited its budget on the
+//     same seat, so the honest reading is "not reachable IN TIME" — transport;
 //   - a *llamaclient.BodyError — a 200 whose body could not be read or parsed.
 //     A non-JSON body from something claiming to be llama-server means SOMETHING
 //     ELSE ANSWERED (a proxy, a captive portal), and a body that stops mid-read

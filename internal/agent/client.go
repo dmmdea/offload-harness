@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
+	"github.com/dmmdea/offload-harness/internal/seatwait"
 )
 
 // LLMClient is the concrete OpenAI-compatible tool-calling Client. It targets
@@ -23,6 +24,17 @@ type LLMClient struct {
 	apiKey string
 	http   *http.Client
 }
+
+// StatusError is a non-200 from the seat's chat route, typed so callers key
+// on the STATUS (never on body prose — the same rule delegate.replaceableRefusal
+// follows for fleet nodes). Its text is unchanged from the old fmt.Errorf so
+// every existing log grep and reason string still matches.
+type StatusError struct {
+	Code int
+	Body string
+}
+
+func (e *StatusError) Error() string { return fmt.Sprintf("chat %d: %s", e.Code, e.Body) }
 
 // NewLLMClient builds a client. base is the server root (no /v1); apiKey "" =>
 // no Authorization header (local).
@@ -180,34 +192,59 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 	if err != nil {
 		return Completion{}, err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v1/chat/completions", bytes.NewReader(buf))
-	if err != nil {
-		return Completion{}, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
-	// The agent seat shares one llama-swap endpoint with every cascade text seat
-	// in the default config, and this path does NOT go through
-	// internal/llamaclient — so the gate has to be taken here too, or the
-	// cascade side would be the only lane observing it. Keyed on this client's
-	// base; a client pointed at a hosted multi-model endpoint keys on ITS base
-	// and, since one LLMClient names one model, always matches the resident one.
-	tk, err := modelaffinity.Admit(ctx, c.base, c.model, c.http.Timeout)
-	if err != nil {
-		return Completion{}, err
-	}
-	defer tk.Release()
-	resp, err := c.http.Do(httpReq)
-	if err != nil {
-		return Completion{}, err
+	// One busy-seat budget per CONTRACT (seatwait): llama-swap's 429 / 503
+	// not-ready / 500 src=llama-swap mean peers hold the seat, so the request
+	// is re-sent after a counted sleep instead of failing. The affinity ticket
+	// is RELEASED before every sleep — the contention is other processes'
+	// load, and a parked ticket would only wedge this process's other lanes.
+	budget := seatwait.FromContext(ctx)
+	var resp *http.Response
+	for {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v1/chat/completions", bytes.NewReader(buf))
+		if err != nil {
+			return Completion{}, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if c.apiKey != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+		}
+		// The agent seat shares one llama-swap endpoint with every cascade text seat
+		// in the default config, and this path does NOT go through
+		// internal/llamaclient — so the gate has to be taken here too, or the
+		// cascade side would be the only lane observing it. Keyed on this client's
+		// base; a client pointed at a hosted multi-model endpoint keys on ITS base
+		// and, since one LLMClient names one model, always matches the resident one.
+		tk, err := modelaffinity.Admit(ctx, c.base, c.model, c.http.Timeout)
+		if err != nil {
+			return Completion{}, err
+		}
+		r, err := c.http.Do(httpReq)
+		if err != nil {
+			tk.Release()
+			return Completion{}, err
+		}
+		if r.StatusCode == http.StatusOK {
+			// Held until the body below is decoded: llama-swap only stops needing
+			// the model resident once the response is fully served.
+			defer tk.Release()
+			resp = r
+			break
+		}
+		b, _ := io.ReadAll(io.LimitReader(r.Body, 600))
+		retryAfter := r.Header.Get("Retry-After")
+		r.Body.Close()
+		tk.Release()
+		if seatwait.Retryable(r.StatusCode, string(b)) {
+			if d, ok := budget.NextFor(r.StatusCode, retryAfter); ok {
+				if serr := seatwait.Sleep(ctx, d); serr != nil {
+					return Completion{}, serr
+				}
+				continue
+			}
+		}
+		return Completion{}, &StatusError{Code: r.StatusCode, Body: strings.TrimSpace(string(b))}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 600))
-		return Completion{}, fmt.Errorf("chat %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
-	}
 	var wr wireResp
 	if err := json.NewDecoder(resp.Body).Decode(&wr); err != nil {
 		return Completion{}, err

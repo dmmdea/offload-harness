@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
+	"github.com/dmmdea/offload-harness/internal/seatwait"
 )
 
 // connectTimeout bounds only the TCP dial (LO-9): a dead/unreachable endpoint
@@ -227,26 +228,50 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 	}
 	start := time.Now()
 	base, hc := c.resolveEndpoint(model) // ONE decision: base and client must never split (lanes.go)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+c.path, bytes.NewReader(buf))
-	if err != nil {
-		return GenResult{}, err
+	// One busy-seat budget per CONTRACT (seatwait): a 429 / 503 not-ready /
+	// 500 src=llama-swap is peers holding the seat, re-sent after a counted
+	// sleep with the affinity ticket released (the contention is other
+	// processes' load; a parked ticket only wedges this process's lanes).
+	budget := seatwait.FromContext(ctx)
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+c.path, bytes.NewReader(buf))
+		if err != nil {
+			return GenResult{}, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		// Admission is keyed on the base resolveEndpoint just decided, never on the
+		// model: two models on two llama-swap instances do not contend, and gating
+		// them together would serialise lanes that never conflicted. The ticket is
+		// held until decodeGenResult has finished with the body, because llama-swap
+		// only stops needing the model resident when the response is fully served.
+		tk, err := modelaffinity.Admit(ctx, base, model, hc.Timeout)
+		if err != nil {
+			return GenResult{}, err
+		}
+		resp, err := hc.Do(req)
+		if err != nil {
+			tk.Release()
+			return GenResult{}, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			retryAfter := resp.Header.Get("Retry-After")
+			resp.Body.Close()
+			tk.Release()
+			if seatwait.Retryable(resp.StatusCode, string(b)) {
+				if d, ok := budget.NextFor(resp.StatusCode, retryAfter); ok {
+					if serr := seatwait.Sleep(ctx, d); serr != nil {
+						return GenResult{}, serr
+					}
+					continue
+				}
+			}
+			return GenResult{}, &StatusError{StatusCode: resp.StatusCode, Body: truncate(string(b), 300)}
+		}
+		res, derr := decodeGenResult(resp, start)
+		tk.Release()
+		return res, derr
 	}
-	req.Header.Set("Content-Type", "application/json")
-	// Admission is keyed on the base resolveEndpoint just decided, never on the
-	// model: two models on two llama-swap instances do not contend, and gating
-	// them together would serialise lanes that never conflicted. The ticket is
-	// held until decodeGenResult has finished with the body, because llama-swap
-	// only stops needing the model resident when the response is fully served.
-	tk, err := modelaffinity.Admit(ctx, base, model, hc.Timeout)
-	if err != nil {
-		return GenResult{}, err
-	}
-	defer tk.Release()
-	resp, err := hc.Do(req)
-	if err != nil {
-		return GenResult{}, err
-	}
-	return decodeGenResult(resp, start)
 }
 
 // GenerateVision sends a multimodal chat request: the user message carries the

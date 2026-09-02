@@ -179,6 +179,13 @@ type Config struct {
 	// seat seed this higher: a cold big-model load plus low tok/s inside 180s is a
 	// timeout machine, not an agent.
 	AgentTimeoutSec int `json:"agent_timeout_sec,omitempty"`
+	// SeatContentionWaitSec bounds how long ONE agent contract waits on the SAME
+	// seat after llama-swap answers 429 (concurrencyLimit reached by parallel
+	// sessions), 503 "process is not ready" or a 500 from llama-swap itself,
+	// before the failure stands (seatwait). Shared by every chat and re-pack
+	// call of the contract. 0 = 90 s, negative = never wait (the pre-2026-09-02
+	// behaviour: the first busy answer defers the contract).
+	SeatContentionWaitSec int `json:"seat_contention_wait_sec,omitempty"`
 	// AgentCtxTokens is the agent seat's SERVED context window in tokens — the tier
 	// profile's agent_ctx_tokens value (setup/templates/profiles.json; the installer
 	// records it in installed.json). It exists as a config key so /fleet/health can
