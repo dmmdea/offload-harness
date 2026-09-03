@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -274,5 +275,63 @@ func TestNCtxFromProps(t *testing.T) {
 				t.Fatalf("nCtxFromProps(%v) = (%d, %v), want (%d, %v)", c.props, got, ok, c.want, c.ok)
 			}
 		})
+	}
+}
+
+// TestStatusReportsKVCacheServer: the optional cache-server tier is reported in BOTH
+// states — absent/disabled as a described "no tier" (never an error, never a missing
+// key), enabled as its wiring plus a live reachability fact. tools/list is unaffected.
+func TestStatusReportsKVCacheServer(t *testing.T) {
+	off := kvCacheServerView(context.Background(), config.Default())
+	if off["enabled"] != false || off["note"] == nil {
+		t.Fatalf("disabled tier must report enabled:false with a note, got %v", off)
+	}
+	cfg := config.Default()
+	// A closed local port: declared, valid, and provably unreachable within the 1 s dial.
+	cfg.KVCacheServer = &config.KVCacheServer{Enabled: true, Address: "127.0.0.1:1", Seat: "qwen3.8-27b-vllm", KeyPrefix: "qube-seat-v7"}
+	on := kvCacheServerView(context.Background(), cfg)
+	if on["enabled"] != true || on["store"] != "valkey" || on["chunk_size"] != 784 || on["l1_staging_gb"] != 8 || on["key_prefix"] != "qube-seat-v7" {
+		t.Fatalf("enabled tier view wrong: %v", on)
+	}
+	if on["reachable"] != false || on["reachable_error"] == nil {
+		t.Fatalf("a closed port must report reachable:false with the dial error, got %v", on)
+	}
+	// A live listener flips the fact.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	cfg.KVCacheServer.Address = ln.Addr().String()
+	if v := kvCacheServerView(context.Background(), cfg); v["reachable"] != true {
+		t.Fatalf("live listener must report reachable:true, got %v", v)
+	}
+}
+
+// TestStatusDoesNotDialAnInvalidOrNamedStore: a refused block is reported as invalid and
+// never dialed; a hostname store is reported as unprobed; fs_native says "no port".
+func TestStatusDoesNotDialAnInvalidOrNamedStore(t *testing.T) {
+	cfg := config.Default()
+	cfg.KVCacheServer = &config.KVCacheServer{Enabled: true, Address: "8.8.8.8:1", Seat: "s"}
+	v := kvCacheServerView(context.Background(), cfg)
+	if v["invalid"] == nil || v["enabled"] != true {
+		t.Fatalf("refused block must report invalid, got %v", v)
+	}
+	if _, dialed := v["reachable"]; dialed {
+		t.Fatalf("refused block must not be dialed, got %v", v)
+	}
+	cfg.KVCacheServer = &config.KVCacheServer{Enabled: true, Address: "store-box:18799", Seat: "s"}
+	v = kvCacheServerView(context.Background(), cfg)
+	if r, ok := v["reachable"]; !ok || r != nil || v["reachable_note"] == nil {
+		t.Fatalf("hostname store must report reachable:null with a note, got %v", v)
+	}
+	cfg.KVCacheServer = &config.KVCacheServer{Enabled: true, Store: "fs_native", Address: "/mnt/kv", Seat: "s"}
+	v = kvCacheServerView(context.Background(), cfg)
+	if r, ok := v["reachable"]; !ok || r != nil || v["reachable_note"] == nil {
+		t.Fatalf("fs_native must report reachable:null with a note, got %v", v)
+	}
+	off := kvCacheServerView(context.Background(), config.Default())
+	if off["declared"] != false {
+		t.Fatalf("absent block must report declared:false, got %v", off)
 	}
 }

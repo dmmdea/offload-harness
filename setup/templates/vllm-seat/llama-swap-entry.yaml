@@ -1,0 +1,19 @@
+  # ===== <seat id> — a vLLM seat backed by LMCache MP (reference llama-swap entry) ======================
+  # `cmd` runs seat_fg.sh in the FOREGROUND of a client; ending the client reaps the engine (swap-out);
+  # `cmdStop` stops the engine by port and the LMCache MP server. The seat reads seat.env for its layout:
+  #   SEAT_TP=2 (two cards) — the only layout that can use a cache server (SEAT_L2 set);
+  #   SEAT_PP=3 + SEAT_PARTITION — three cards with the same-box RAM tier (SEAT_L1_GB, SEAT_L2 empty).
+  # Swappable like every other seat: cold load 75–190 s, covered by the house templates' top-level
+  # `healthCheckTimeout: 300`. Exclusive with the other interactive seats in the matrix (it owns ~0.9 of
+  # its cards while up); unloadTimeout must exceed seat_stop.sh's worst case (20 s engine + 20 s server).
+  # Prove the tier before binding the harness to it: vllm:external_prefix_cache_hits > 0 after an
+  # eviction, and a planted needle retrieved verbatim after eviction and after a restart.
+  "<seat id>":
+    cmd: "<path to wsl.exe or bash> -d <distro> -u root -e bash /root/g7/seat_fg.sh"
+    cmdStop: "<path to wsl.exe or bash> -d <distro> -u root -e bash /root/g7/seat_stop.sh"
+    proxy: "http://127.0.0.1:18797"
+    checkEndpoint: /health
+    aliases: ["agent-pool"]
+    ttl: 1800
+    unloadTimeout: 60
+    name: "<model> on vLLM — agent-pool seat (fan-out, prefix reuse) [+ cache server on a second device]"

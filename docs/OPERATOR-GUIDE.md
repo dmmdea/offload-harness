@@ -672,6 +672,60 @@ seat change and stays your call.
 Claude Code sessions (each one spawns its own `local-offload mcp`; a running session keeps the
 old binary until it restarts).
 
+### Cache server — an optional second device holding evicted KV (0.112.0)
+
+A vLLM seat's usable KV in VRAM is small on consumer cards (and on a Mamba-hybrid model the
+"GPU KV cache size" banner overstates it: align-mode checkpoint blocks share the pool). Contexts
+that leave VRAM are recomputed. With LMCache MP and a **cache server** — a store on a second
+machine's RAM — they come back at parity cost instead (measured 2026-09-02, Qwen3.8-27B, 24k
+tokens: 20.6 s from a Lenovo over the LAN vs 24.6 s recompute, every token from the store), the GPU
+stays free while the load streams, and they survive a seat swap. Same-box RAM as the tier is faster
+(0.50 s, 49.7×) but spends the serving PC's memory; the second device is the capacity route.
+
+**Off by default; nothing depends on it.** Declare it only when a second device exists:
+
+```json
+"kv_cache_server": {
+  "enabled": true,
+  "store": "valkey",
+  "address": "<store-lan-ip>:18799",
+  "l1_staging_gb": 8,
+  "chunk_size": 784,
+  "key_prefix": "qube-seat-v7",
+  "seat": "qwen3.8-27b-vllm"
+}
+```
+
+- `address` must be private (LAN or tailnet); a public address is refused at load by key name, and so is
+  a URL or host:port under `store: "fs_native"` (which takes the absolute path of the mounted export).
+  Bulk KV prefers the direct LAN (WireGuard measured 6.6× slower).
+- `chunk_size` must equal the engine's unified block size for the model (vLLM logs "Setting
+  attention block size to N tokens"; 784 for Qwen3.8-27B with fp16 KV). The 784 default is that one
+  model's number: status reports `chunk_size_defaulted: true` until you set it.
+- `key_prefix` is one namespace per stack generation: change it (or flush the store) whenever the
+  engine layout, the KV dtype or the LMCache build changes — objects written under another
+  generation fail reads with "value size exceeds buffer capacity" and the tier silently pays nothing.
+- `key_prefix` or `seat` is required when enabled: two seats must never share a namespace by accident.
+- `offload_status` reports the block in both states (`declared`, `enabled`, `invalid` when the load
+  refused it) and, for a Valkey store named by an IP literal, a 1 s TCP `reachable` fact; a hostname
+  is reported as unprobed. The block is declarative: the seat wrapper runs what its `seat.env` says —
+  keep the two in agreement.
+
+The seat itself: `setup/templates/vllm-seat/` has the reference `seat_fg.sh` (starts the LMCache MP
+server and the engine in the foreground of the llama-swap client, so a swap-out reaps the engine
+while the store keeps the pages), `seat_stop.sh`, the llama-swap entry, and the second device's
+`kv-cache-server.service` (a systemd-guaranteed Valkey container; do not rely on docker's restart
+policy). Prove the tier with vLLM's own `vllm:external_prefix_cache_hits` counter around an
+after-eviction request, and prove fidelity with a planted needle retrieved verbatim after eviction
+and after a restart — hit counters alone do not prove the context came back intact.
+
+**Layout constraint (measured 2026-09-03):** LMCache's Valkey adapter sizes L2 reads from one layout
+per model, so a pipeline-parallel seat whose stages hold different numbers of full-attention layers
+(three stages of a 64-layer / 16-attention model: 6/5/5 in any split) fails L2 reads for the odd rank.
+Two-card tensor-parallel seats use the store; a three-card seat uses the same-box L1 tier
+(`l1_staging_gb` sized as the tier, no store) until an upstream fix or a validated `fs_native` path.
+Details: [`docs/systems/cache-server.md`](systems/cache-server.md), ADR 0033.
+
 ### Delegate subtasks across fleet nodes (`agent_delegate` / `delegate`)
 
 Fan self-contained sub-agent contracts out to this box or to fleet nodes on your tailnet

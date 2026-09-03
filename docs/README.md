@@ -25,6 +25,8 @@ where the code lives.
   job semantics, VRAM sampling
 - [systems/accelerators.md](systems/accelerators.md) — devices beside the GPU tier (hailo-8l NPU):
   detection, seeding, the on-demand sidecar, tool ownership
+- [systems/cache-server.md](systems/cache-server.md) — the optional second-device KV tier for a vLLM seat:
+  the `kv_cache_server` block, what it measured, the layout constraint, and the seat templates.
 - [systems/setup-installer.md](systems/setup-installer.md) — hardware detection, profiles, serving
   templates, the install runbook
 - [systems/printed-clis.md](systems/printed-clis.md) — the `tools/` printed CLIs: separate Go

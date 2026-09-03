@@ -151,6 +151,9 @@ Two unrelated meanings, distinguished by context:
   `detect.ps1`, selecting a serving template and a Config seed.
 - **Agent profile** — a named narrowing of the coding agent's toolset plus a tuned prompt
   (`general`, `edit`, `build`, `research`, `github`). An agent profile can only narrow, never widen.
+- **Cache server** — the optional second-device KV tier for a vLLM seat: a store (Valkey or a
+  filesystem export) on another machine's RAM behind LMCache MP's L1 staging buffer, declared by
+  `kv_cache_server`, off by default, scored on capacity at parity cost (ADR 0033).
 
 ## Recordless path
 

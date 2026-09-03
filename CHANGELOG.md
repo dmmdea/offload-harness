@@ -6,6 +6,32 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.112.0] — 2026-09-03 — cache server: an optional second-device KV tier
+
+The 2026-09-01 verdict "LMCache recovers no time" was a benchmark sizing error (the RAM tier was smaller
+than the VRAM pool it backed); re-measured, a 24k-token context comes back from same-box RAM in 0.50 s
+(49.7×) and from a second machine's RAM over the LAN at parity cost (20.6 s vs 24.6 s recompute). The
+operator's metric for the second device is capacity, not speed
+([ADR 0033](docs/architecture/decisions/0033-cache-server-is-an-optional-second-device-tier.md)).
+
+### Added
+- **`kv_cache_server`** config block (`internal/config/kvcacheserver.go`): the optional "cache server"
+  tier — store (`valkey` | `fs_native`), private `address`, `l1_staging_gb` (8), `chunk_size` (784),
+  `key_prefix`, `seat`. Off by default; absent = the pre-key behavior. Refused by key name at load when
+  it could not work (public address, malformed host:port, unknown store, an `fs_native` address that
+  is not an absolute path, no namespace).
+- **`offload_status.kv_cache_server`** — reported in both states (`declared`, `invalid` when the load
+  refused the block); a 1 s TCP reachability fact for a Valkey store named by an IP literal, hostnames
+  and `fs_native` reported as unprobed rather than dialed.
+- **`setup/templates/vllm-seat/`** — reference seat wrapper (`seat_fg.sh`), `seat_stop.sh`, the
+  llama-swap entry, and the second device's `kv-cache-server.service`; documented in
+  `docs/systems/cache-server.md` and the operator guide.
+
+### Measured (not shipped as code)
+- A three-stage pipeline seat of a 64-layer / 16-attention model cannot use LMCache's Valkey L2 (stage
+  attention counts 6/5/5; the odd rank's reads fail on size). Two-card tensor-parallel seats can.
+- fp8 KV does not extend the context on 16 GB cards for this model (block 784→1568 forces batched 3135).
+
 ## [0.111.0] — 2026-09-02 — scheduling + delivery quality under parallel sessions (masterplan #1)
 
 Several parallel sessions reported on 2026-09-01: 27B seat "timed out at 600 s", llama-swap 429s
