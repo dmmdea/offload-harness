@@ -1533,3 +1533,16 @@ func TestHealth_ServedModelsAbsentWhenIDsFetchFailsButResidentTrue(t *testing.T)
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+func TestJobsFeed_ListsMetadataOnly(t *testing.T) {
+	s, jobs := newTestServer(t, imageCfg(), &fakeRunner{}, nil)
+	jobs.Admit("j1", AcceptSpec{Task: "image-gen", Model: "sdxl"}, func(context.Context) (json.RawMessage, error) {
+		return json.RawMessage(`{"png":"..."}`), nil
+	})
+	time.Sleep(50 * time.Millisecond)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/fleet/jobs?limit=5", nil))
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"task":"image-gen"`) || strings.Contains(rr.Body.String(), "png") {
+		t.Fatalf("code=%d body=%s", rr.Code, rr.Body.String())
+	}
+}

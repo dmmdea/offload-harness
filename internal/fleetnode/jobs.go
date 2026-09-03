@@ -31,6 +31,7 @@ package fleetnode
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"sync"
 	"time"
 )
@@ -57,6 +58,13 @@ type JobView struct {
 	// tokenless (auth scope v1 = the agent lane only). Never serialized to the
 	// wire: jobWire's shape is unchanged.
 	Agent bool
+	// Task/Model/AcceptedAt/StartedAt/FinishedAt are the /fleet/jobs feed's
+	// metadata — populated for Recent's callers only. /fleet/jobs/{id} (Get)
+	// does not fill them: that route's shape (jobWire) is unchanged, so they
+	// stay zero there rather than grow a wire field nothing reads.
+	Task                              string
+	Model                             string
+	AcceptedAt, StartedAt, FinishedAt time.Time
 }
 
 // job is the mutable store entry; guarded by Jobs.mu.
@@ -66,6 +74,12 @@ type job struct {
 	err        string
 	agent      bool      // created via AcceptAgent → poll auth applies (server.go handleJob)
 	terminalAt time.Time // set when state turns done|error; drives ttl eviction
+	// task/model/acceptedAt/startedAt/finishedAt are the /fleet/jobs feed's
+	// metadata (see AcceptSpec). Written under mu exactly like every other
+	// field here: acceptedAt in Admit, startedAt in claimLocked's
+	// accepted→running flip, finishedAt in finish.
+	task, model                       string
+	acceptedAt, startedAt, finishedAt time.Time
 	// run is the work itself, parked on the RECORD (not alongside the id in
 	// the pending FIFO) because the FIFO holds ids: an id whose record was
 	// drain-marked or evicted between admission and claim must be skippable by
@@ -199,6 +213,12 @@ type AcceptSpec struct {
 	// promise true now that admission and execution are separate. Never called
 	// for a job that was claimed: the run's own defer owns cleanup from then on.
 	OnDropped func()
+	// Task/Model are the /fleet/jobs feed's metadata (see JobView). Task is
+	// the dispatch's task_type verbatim; Model is the agent seat for
+	// core.TaskAgentRun (the seat is the meaningful "model" for an agent run,
+	// not the caller's model_family) and env.ModelFamily otherwise. Both are
+	// display-only — nothing in this package branches on them.
+	Task, Model string
 }
 
 // Accept ADMITS id — it records the job as `accepted` and queues it for the
@@ -239,11 +259,14 @@ func (j *Jobs) Admit(id string, spec AcceptSpec, run func(context.Context) (json
 		return false
 	}
 	j.m[id] = &job{
-		state:     JobAccepted,
-		agent:     spec.Agent,
-		capped:    !spec.Uncapped,
-		run:       run,
-		onDropped: spec.OnDropped,
+		state:      JobAccepted,
+		agent:      spec.Agent,
+		capped:     !spec.Uncapped,
+		run:        run,
+		onDropped:  spec.OnDropped,
+		task:       spec.Task,
+		model:      spec.Model,
+		acceptedAt: j.now(),
 	}
 	j.pending = append(j.pending, id)
 	j.cond.Broadcast() // wake the scheduler: there is work
@@ -335,6 +358,7 @@ func (j *Jobs) claimLocked() (string, func(context.Context) (json.RawMessage, er
 		jb.run = nil
 		jb.onDropped = nil // the run's own defer owns cleanup from here on
 		jb.state = JobRunning
+		jb.startedAt = j.now()
 		return id, run, true
 	}
 	return "", nil, false
@@ -376,6 +400,31 @@ func (j *Jobs) Get(id string) (*JobView, bool) {
 		return nil, false
 	}
 	return &JobView{ID: id, State: jb.state, Data: jb.data, Error: jb.err, Agent: jb.agent}, true
+}
+
+// Recent returns up to n jobs (n <= 0 = all), newest by acceptedAt first,
+// WITHOUT payloads: this is the cluster jobs feed, and a listing must never
+// leak an agent job's result past the per-job bearer gate on
+// /fleet/jobs/{id} — so Data is never populated here, only Get's copy does
+// that. sort.SliceStable keeps arrival order for any acceptedAt tie (two
+// Admits landing in the same clock tick), rather than leaving tie order to
+// the map's random iteration.
+func (j *Jobs) Recent(n int) []JobView {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	out := make([]JobView, 0, len(j.m))
+	for id, jb := range j.m {
+		out = append(out, JobView{
+			ID: id, State: jb.state, Error: jb.err, Agent: jb.agent,
+			Task: jb.task, Model: jb.model,
+			AcceptedAt: jb.acceptedAt, StartedAt: jb.startedAt, FinishedAt: jb.finishedAt,
+		})
+	}
+	sort.SliceStable(out, func(a, b int) bool { return out[a].AcceptedAt.After(out[b].AcceptedAt) })
+	if n > 0 && len(out) > n {
+		out = out[:n]
+	}
+	return out
 }
 
 // QueueDepth counts accepted+running jobs (the health field). Terminal entries
@@ -510,6 +559,7 @@ func (j *Jobs) finish(id string, data json.RawMessage, errStr string) {
 		jb.data = data
 	}
 	jb.terminalAt = j.now()
+	jb.finishedAt = jb.terminalAt
 }
 
 // janitor sweeps expired terminal entries until DrainAndStop closes stopJanitor.

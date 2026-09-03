@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -368,6 +369,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /fleet/health", s.handleHealth)
 	mux.HandleFunc("POST /fleet/dispatch", s.handleDispatch)
 	mux.HandleFunc("GET /fleet/jobs/{id}", s.handleJob)
+	// GET /fleet/jobs (no {id}) is a distinct ServeMux pattern from the one
+	// above — unauthenticated is deliberate: unlike /fleet/jobs/{id}, this
+	// route never carries a payload (Data is never set; see Jobs.Recent), so
+	// there is nothing here for the per-job bearer gate to protect.
+	mux.HandleFunc("GET /fleet/jobs", s.handleJobs)
 	// {filename...} (not {filename}) is deliberate: it's a multi-segment
 	// wildcard, so a caller-supplied "/" or a %2F-hidden one still reaches the
 	// handler as PART OF filename instead of 404ing at the mux before our
@@ -922,10 +928,16 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	// strands a directory under pipeline-jobs/ until the next start sweeps it.
 	// The store clears the hook at claim, so exactly one of the two paths ever
 	// runs the cleanup.
+	specModel := env.ModelFamily
+	if env.TaskType == string(core.TaskAgentRun) {
+		specModel = s.agentSeat
+	}
 	spec := AcceptSpec{
 		Agent:     env.TaskType == string(core.TaskAgentRun),
 		Uncapped:  !s.concurrencyCapped(env.TaskType),
 		OnDropped: cleanup,
+		Task:      env.TaskType,
+		Model:     specModel,
 	}
 	if !s.jobs.Admit(env.JobID, spec, run) {
 		cleanup() // duplicate/drain refusal: this request's materialized files never run
@@ -982,6 +994,70 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJobView(w, http.StatusOK, view)
+}
+
+// jobFeedRow is /fleet/jobs's per-job shape: metadata only, NEVER a payload.
+// Unlike jobWire (the per-job route), there is no `data` field at all — not
+// even omitempty on a nil — because this row type has nowhere to put one.
+type jobFeedRow struct {
+	ID         string `json:"id"`
+	Task       string `json:"task"`
+	Model      string `json:"model,omitempty"`
+	State      string `json:"state"`
+	Agent      bool   `json:"agent,omitempty"`
+	AcceptedAt int64  `json:"accepted_at"`
+	StartedAt  int64  `json:"started_at,omitempty"`
+	FinishedAt int64  `json:"finished_at,omitempty"`
+	WallMs     int64  `json:"wall_ms,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+// handleJobs is the cluster jobs feed: GET /fleet/jobs?limit=N, newest first,
+// capped at 500 rows. Deliberately unauthenticated — see the route comment in
+// Handler: this listing never carries a payload, so there is nothing here for
+// the per-job bearer gate (handleJob, above) to protect. `error` is truncated
+// to 200 runes so one runaway error string cannot blow up the feed response.
+func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if n, err := strconv.Atoi(q); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	rows := make([]jobFeedRow, 0, limit)
+	for _, v := range s.jobs.Recent(limit) {
+		row := jobFeedRow{
+			ID: v.ID, Task: v.Task, Model: v.Model, State: string(v.State), Agent: v.Agent,
+			AcceptedAt: v.AcceptedAt.Unix(), Error: truncateRunes(v.Error, 200),
+		}
+		if !v.StartedAt.IsZero() {
+			row.StartedAt = v.StartedAt.Unix()
+		}
+		if !v.FinishedAt.IsZero() {
+			row.FinishedAt = v.FinishedAt.Unix()
+			if !v.StartedAt.IsZero() {
+				row.WallMs = v.FinishedAt.Sub(v.StartedAt).Milliseconds()
+			}
+		}
+		rows = append(rows, row)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": rows})
+}
+
+// truncateRunes cuts s to at most n runes, on a rune boundary — the same
+// safety property as intentLedger.dispatched's truncation loop in
+// internal/delegate/intent.go (not imported here: fleetnode is a dependency
+// of delegate, and importing it back would be a cycle), expressed directly in
+// terms of a rune count rather than a byte budget cut back to validity.
+func truncateRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 // handleMedia serves ONE rendered artifact by bare filename out of the same
