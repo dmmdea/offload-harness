@@ -90,6 +90,48 @@ func (p *Poller) tick(ctx context.Context) {
 	}
 	wg.Wait()
 	p.foldDelegationLog()
+
+	p.mu.Lock()
+	p.pruneSeenErrLocked()
+	p.mu.Unlock()
+}
+
+// pruneSeenErrLocked bounds seenErr: a job key ("<nodeLabel>|<jobID>") is
+// kept only while that job id is still present in that node's current Jobs
+// listing, and a "deleg|<job_id>" key only while that job id is still inside
+// the retained Delegations window (last maxDelegations rows). "probe|<base>"
+// keys are left alone — fold already clears those the moment a node answers.
+// With both windows bounded, seenErr is bounded by roughly
+// (nodes*jobsPerNode + maxDelegations + len(bases)). Caller must hold p.mu.
+func (p *Poller) pruneSeenErrLocked() {
+	validJob := map[string]bool{}
+	for _, n := range p.nodes {
+		nodeLabel := n.NodeID
+		if nodeLabel == "" {
+			nodeLabel = n.Base
+		}
+		for _, job := range n.Jobs {
+			validJob[nodeLabel+"|"+str(job, "id")] = true
+		}
+	}
+	validDeleg := map[string]bool{}
+	for _, row := range p.delegations {
+		validDeleg["deleg|"+str(row, "job_id")] = true
+	}
+	for k := range p.seenErr {
+		switch {
+		case strings.HasPrefix(k, "probe|"):
+			// left alone
+		case strings.HasPrefix(k, "deleg|"):
+			if !validDeleg[k] {
+				delete(p.seenErr, k)
+			}
+		default:
+			if !validJob[k] {
+				delete(p.seenErr, k)
+			}
+		}
+	}
 }
 
 func (p *Poller) getJSON(ctx context.Context, u string) (map[string]any, error) {
@@ -238,8 +280,7 @@ func (p *Poller) Snapshot() Overview {
 		copy(ov.Errors, p.errors)
 	}
 	if len(p.delegations) > 0 {
-		ov.Delegations = make([]map[string]any, len(p.delegations))
-		copy(ov.Delegations, p.delegations)
+		ov.Delegations = cloneMaps(p.delegations)
 	}
 	return ov
 }
@@ -247,7 +288,7 @@ func (p *Poller) Snapshot() Overview {
 func copyNode(n *Node) Node {
 	cp := *n
 	if n.Devices != nil {
-		cp.Devices = append([]map[string]any(nil), n.Devices...)
+		cp.Devices = cloneMaps(n.Devices)
 	}
 	if n.ServedModels != nil {
 		cp.ServedModels = append([]string(nil), n.ServedModels...)
@@ -256,9 +297,54 @@ func copyNode(n *Node) Node {
 		cp.History = append([]Point(nil), n.History...)
 	}
 	if n.Jobs != nil {
-		cp.Jobs = append([]map[string]any(nil), n.Jobs...)
+		cp.Jobs = cloneMaps(n.Jobs)
 	}
 	return cp
+}
+
+// cloneMaps deep-copies a []map[string]any so a caller mutating the returned
+// Snapshot can never race with the poller's own goroutine mutating the same
+// maps on the next tick. gpu_devices/jobs/delegation rows are JSON-decoded
+// (map[string]any, []any, or scalars all the way down), so a generic
+// recursive clone handles whatever shape shows up — even though the health
+// payload's gpu_devices rows are flat in practice.
+func cloneMaps(in []map[string]any) []map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make([]map[string]any, len(in))
+	for i, m := range in {
+		out[i] = cloneAnyMap(m)
+	}
+	return out
+}
+
+func cloneAnyMap(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = cloneAnyValue(v)
+	}
+	return out
+}
+
+func cloneAnyValue(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		return cloneAnyMap(t)
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = cloneAnyValue(e)
+		}
+		return out
+	default:
+		// Scalars (string, float64, bool, nil, json.Number) are copied by
+		// value already — nothing further to clone.
+		return v
+	}
 }
 
 // ---- loose-decode helpers for map[string]any health/jobs payloads ----
