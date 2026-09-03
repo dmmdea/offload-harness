@@ -1546,3 +1546,56 @@ func TestJobsFeed_ListsMetadataOnly(t *testing.T) {
 		t.Fatalf("code=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+// TestDispatchTaskModelMetadataThroughJobsFeed drives handleDispatch's
+// Task/Model mapping (server.go, the AcceptSpec{} literal in handleDispatch)
+// through the REAL call site — POST /fleet/dispatch, not a direct Admit —
+// covering both branches: a media envelope's task_type/model_family pass
+// through verbatim, and an "agent" envelope's Model resolves to the node's
+// agent seat (core.TaskAgentRun), never the caller's model_family (the
+// envelope carries none for agent dispatches).
+func TestDispatchTaskModelMetadataThroughJobsFeed(t *testing.T) {
+	cfg := imageCfg()
+	cfg.Home = t.TempDir() // buildAgentRun materializes under BaseDir(); keep it off the real home dir
+	cfg.FleetAgentEnabled = true
+	cfg.AgentModel = "agent-seat"
+	cfg.FleetAuthToken = "tok"
+	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
+
+	rec := do(t, s, http.MethodPost, "/fleet/dispatch",
+		`{"job_id":"media-1","task_type":"image-gen","model_family":"sdxl","payload":{"prompt":"hi"}}`, nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("media dispatch status = %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	agentPayload := `{"schema_version":1,"goal":"g","output_schema":` + agentSchemaJSON + `}`
+	rec = do(t, s, http.MethodPost, "/fleet/dispatch",
+		`{"job_id":"agent-1","task_type":"agent","payload":`+agentPayload+`}`,
+		map[string]string{"Authorization": "Bearer tok"})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("agent dispatch status = %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	rr := do(t, s, http.MethodGet, "/fleet/jobs?limit=10", "", nil)
+	var body struct {
+		Jobs []jobFeedRow `json:"jobs"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode jobs feed: %v body=%s", err, rr.Body.String())
+	}
+	var media, agent *jobFeedRow
+	for i := range body.Jobs {
+		switch body.Jobs[i].ID {
+		case "media-1":
+			media = &body.Jobs[i]
+		case "agent-1":
+			agent = &body.Jobs[i]
+		}
+	}
+	if media == nil || media.Task != "image-gen" || media.Model != "sdxl" {
+		t.Fatalf("media row = %+v (jobs=%+v)", media, body.Jobs)
+	}
+	if agent == nil || agent.Task != "agent" || agent.Model != "agent-seat" {
+		t.Fatalf("agent row = %+v (jobs=%+v)", agent, body.Jobs)
+	}
+}

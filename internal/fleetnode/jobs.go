@@ -406,9 +406,10 @@ func (j *Jobs) Get(id string) (*JobView, bool) {
 // WITHOUT payloads: this is the cluster jobs feed, and a listing must never
 // leak an agent job's result past the per-job bearer gate on
 // /fleet/jobs/{id} — so Data is never populated here, only Get's copy does
-// that. sort.SliceStable keeps arrival order for any acceptedAt tie (two
-// Admits landing in the same clock tick), rather than leaving tie order to
-// the map's random iteration.
+// that. The input comes from ranging j.m, so tie order among equal
+// AcceptedAt values (two Admits landing in the same clock tick) is not
+// deterministic — SliceStable only stops the sort from RESHUFFLING that
+// already-arbitrary order; it does not make ties arrival-ordered.
 func (j *Jobs) Recent(n int) []JobView {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
