@@ -10,6 +10,7 @@
   "reasoning_model": "gemma4-26b-a4b",
   "agent_model": "",
   "agent_profile": "",
+  "kv_cache_server": null,
   "agent_timeout_sec": 0,
   "seat_contention_wait_sec": 0,
   "agent_admission_wait_sec": 0,

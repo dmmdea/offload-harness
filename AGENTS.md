@@ -25,6 +25,8 @@ Detailed documentation lives in `docs/`. This file only routes you there.
   satisfaction, fleet job lifecycle, zero-warm generation).
 - [`docs/systems/printed-clis.md`](docs/systems/printed-clis.md) — the `tools/` printed CLIs: what
   they are, why they are separate Go modules, and the regenerate/re-vendor cycle.
+- [`docs/systems/cache-server.md`](docs/systems/cache-server.md) — the optional second-device KV tier
+  (`kv_cache_server`): off by default, capacity at parity cost, the pipeline-layout constraint.
 - [`docs/systems/opencode-integration.md`](docs/systems/opencode-integration.md) — the harness inside
   opencode: MCP registration, rules parity, and the `opencode-local-offload` plugin.
 - [`docs/architecture/decisions/`](docs/architecture/decisions/README.md) — Architecture Decision

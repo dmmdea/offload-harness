@@ -174,6 +174,10 @@ type Config struct {
 	// door returns a per-call defer naming the valid profiles, because a long-lived
 	// server must not die on a config it can report instead.
 	AgentProfile string `json:"agent_profile,omitempty"`
+	// KVCacheServer is the OPTIONAL "cache server" tier: a second machine's RAM behind
+	// LMCache MP for a vLLM seat (see kvcacheserver.go). nil/disabled = no tier, the
+	// pre-key behavior; nothing in the install depends on it.
+	KVCacheServer *KVCacheServer `json:"kv_cache_server,omitempty"`
 	// AgentTimeoutSec is the default wall-clock budget for an agent run when the call
 	// passes no timeout. 0 = the built-in default (180s). Tiers binding a big planner
 	// seat seed this higher: a cold big-model load plus low tok/s inside 180s is a
@@ -1332,6 +1336,9 @@ func load(path string) (Config, error) {
 		return c, err
 	}
 	if err := validateTailnetEndpoints("cascade_remote_lanes", c.CascadeRemoteLanes); err != nil {
+		return c, err
+	}
+	if err := ValidateKVCacheServer(c.KVCacheServer); err != nil {
 		return c, err
 	}
 	return c, nil

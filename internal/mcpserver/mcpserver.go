@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -516,7 +517,70 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 	if accel != nil {
 		payload["accelerators"] = accel
 	}
+	payload["kv_cache_server"] = kvCacheServerView(ctx, cfg)
 	return jsonResult(payload)
+}
+
+// kvCacheServerView reports the OPTIONAL cache-server tier (config.KVCacheServer): a
+// second machine's RAM holding the KV pages that left a vLLM seat's VRAM. Absent or
+// disabled is a normal, fully-described state — the tier never gates a tool, so
+// tools/list is byte-identical either way. When enabled, the block is re-validated
+// first: a server running on a config whose load was refused (LoadWithSource hands the
+// decoded config back with the error) must say so and must NOT act on the refused
+// address. `reachable` is a 1 s TCP dial of a Valkey store named by an IP LITERAL only —
+// a hostname is vetted by shape, not by what DNS answers, so it is reported as
+// unprobed rather than dialed (the two-layer reasoning behind netguard's tailnet dial
+// gate); fs_native has no port to dial and says so explicitly, never by omission.
+func kvCacheServerView(ctx context.Context, cfg config.Config) map[string]any {
+	k := cfg.KVCacheServer
+	if k == nil || !k.Enabled {
+		return map[string]any{
+			"enabled":  false,
+			"declared": k != nil,
+			"note":     "no cache server: the vLLM seat's KV lives in VRAM only; declare kv_cache_server in config.json when a second device can hold evicted KV (optional tier, off by default)",
+		}
+	}
+	if err := config.ValidateKVCacheServer(k); err != nil {
+		return map[string]any{
+			"enabled":  true,
+			"declared": true,
+			"invalid":  err.Error(),
+			"note":     "kv_cache_server was refused at config load; this server is running on a config that failed validation — fix config.json and restart. The store was not dialed.",
+		}
+	}
+	view := map[string]any{
+		"enabled":              true,
+		"declared":             true,
+		"store":                k.StoreName(),
+		"address":              k.Address,
+		"l1_staging_gb":        k.EffectiveL1StagingGB(),
+		"chunk_size":           k.EffectiveChunkSize(),
+		"chunk_size_defaulted": k.ChunkSizeDefaulted(),
+		"key_prefix":           k.EffectiveKeyPrefix(),
+		"seat":                 k.Seat,
+		"note":                 "as declared in config.json (the seat wrapper's seat.env is what the engine actually runs — keep them in agreement); contexts that leave the seat's VRAM come back from the store at parity cost instead of being recomputed and survive a seat swap; ~255 KB/token as stored",
+	}
+	switch {
+	case k.StoreName() != "valkey":
+		view["reachable"] = nil
+		view["reachable_note"] = "fs_native: a mounted path, no port to probe; not validated end to end in this release"
+	case !k.AddressIsIPLiteral():
+		view["reachable"] = nil
+		view["reachable_note"] = "hostname not probed: only an IP-literal store address is dialed (a name is vetted by shape, not by what DNS answers)"
+	default:
+		dctx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		var d net.Dialer
+		conn, err := d.DialContext(dctx, "tcp", k.Address)
+		if err != nil {
+			view["reachable"] = false
+			view["reachable_error"] = err.Error()
+		} else {
+			_ = conn.Close()
+			view["reachable"] = true
+		}
+	}
+	return view
 }
 
 // fleetProbeTimeout bounds the whole fleet section. Node health is a CACHED
