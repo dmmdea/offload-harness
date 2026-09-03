@@ -84,8 +84,11 @@ func (p *Poller) tick(ctx context.Context) {
 		go func(base string) {
 			defer wg.Done()
 			h, herr := p.getJSON(ctx, base+"/fleet/health")
-			j, _ := p.getJSON(ctx, fmt.Sprintf("%s/fleet/jobs?limit=%d", base, jobsPerNode)) // a pre-0.113.0 node 404s: jobs stay empty
-			p.fold(base, h, herr, j)
+			// jerr covers both a pre-0.113.0 node's permanent 404 and a
+			// transient timeout/5xx on an otherwise-current node — fold
+			// tells those apart from jobsOK, not from the jobs payload.
+			j, jerr := p.getJSON(ctx, fmt.Sprintf("%s/fleet/jobs?limit=%d", base, jobsPerNode))
+			p.fold(base, h, herr, j, jerr == nil)
 		}(base)
 	}
 	wg.Wait()
@@ -159,8 +162,13 @@ func (p *Poller) getJSON(ctx context.Context, u string) (map[string]any, error) 
 }
 
 // fold applies one tick's probe result for base into p.nodes and appends any
-// new errors. Locks p.mu for the duration.
-func (p *Poller) fold(base string, h map[string]any, herr error, j map[string]any) {
+// new errors. Locks p.mu for the duration. jobsOK distinguishes "the jobs
+// fetch failed this tick" from "it succeeded and returned an empty list": on
+// failure n.Jobs is left exactly as the last successful fetch set it, so a
+// transient jobs-endpoint timeout/5xx never wipes a still-ongoing job error
+// out of the node's list — and pruneSeenErrLocked, which derives validity
+// from n.Jobs, then leaves that job's dedupe key alone too.
+func (p *Poller) fold(base string, h map[string]any, herr error, j map[string]any, jobsOK bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -224,6 +232,17 @@ func (p *Poller) fold(base string, h map[string]any, herr error, j map[string]an
 	})
 	if len(n.History) > p.history {
 		n.History = n.History[len(n.History)-p.history:]
+	}
+
+	if !jobsOK {
+		// Fetch failed this tick (timeout, 5xx, a permanently-404 pre-
+		// 0.113.0 node, ...): keep whatever n.Jobs already held rather than
+		// overwriting it with an empty decode of a failed response. Do NOT
+		// touch seenErr here — pruneSeenErrLocked recomputes validity from
+		// n.Jobs, which is now unchanged from last tick, so it naturally
+		// keeps this node's existing job keys instead of pruning them as
+		// "no longer present".
+		return
 	}
 
 	jobs := maps(j, "jobs")

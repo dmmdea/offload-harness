@@ -170,6 +170,81 @@ func TestSeenErrPrunedAfterJobClears(t *testing.T) {
 	}
 }
 
+// TestJobsFetchFailureKeepsPreviousList guards the distinction between "the
+// /fleet/jobs fetch failed this tick" and "it succeeded with an empty list":
+// a transient 500 must never wipe Node.Jobs to nil, and must never let a
+// still-ongoing job error be pruned from seenErr and re-emitted once the
+// node answers again. Sequence: tick 1 succeeds with an error job tagged
+// "v1", tick 2 returns 500, tick 3+ succeeds again with the SAME job id but
+// tagged "v3" — so the test can tell "kept the old list" (v1, during/after
+// the 500) apart from "already got the new one" (v3).
+func TestJobsFetchFailureKeepsPreviousList(t *testing.T) {
+	var reqCount int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /fleet/health", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"node_id": "n1"})
+	})
+	mux.HandleFunc("GET /fleet/jobs", func(w http.ResponseWriter, r *http.Request) {
+		switch atomic.AddInt32(&reqCount, 1) {
+		case 1:
+			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []map[string]any{
+				{"id": "agd-1", "task": "t", "state": "error", "error": "boom", "note": "v1"},
+			}})
+		case 2:
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("boom"))
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []map[string]any{
+				{"id": "agd-1", "task": "t", "state": "error", "error": "boom", "note": "v3"},
+			}})
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Home isolates BaseDir() from this machine's real delegation-log corpus
+	// — otherwise foldDelegationLog would fold in real rows and inflate the
+	// Errors count this test asserts exactly.
+	p := NewPoller(config.Config{Home: t.TempDir()}, []string{srv.URL}, 30*time.Millisecond, 3)
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	go p.Run(ctx)
+
+	var sawSurvived, sawEmptyOrNil bool
+	deadline := time.Now().Add(900 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		n := atomic.LoadInt32(&reqCount)
+		if n >= 4 {
+			break
+		}
+		ov := p.Snapshot()
+		// Only meaningful once tick 1 has definitely folded (req 2 already
+		// issued implies tick 1 fully completed — ticks are sequential).
+		if len(ov.Nodes) == 1 && n >= 2 {
+			jobs := ov.Nodes[0].Jobs
+			switch {
+			case len(jobs) == 0:
+				sawEmptyOrNil = true
+			case jobs[0]["note"] == "v1":
+				sawSurvived = true
+			}
+		}
+		time.Sleep(3 * time.Millisecond)
+	}
+
+	if sawEmptyOrNil {
+		t.Fatalf("Node.Jobs went empty/nil after a jobs-fetch failure — the previous list was not preserved")
+	}
+	if !sawSurvived {
+		t.Fatalf("never observed the previous (v1) jobs list surviving the failed (500) tick")
+	}
+
+	ov := p.Snapshot()
+	if len(ov.Errors) != 1 || ov.Errors[0].Source != "job" {
+		t.Fatalf("want exactly one job Error across the whole run (no duplicate on re-fetch), got: %+v", ov.Errors)
+	}
+}
+
 func TestHistoryIsBounded(t *testing.T) {
 	srv := fakeNode(t, 1)
 	defer srv.Close()
