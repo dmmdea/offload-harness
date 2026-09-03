@@ -955,6 +955,19 @@ func agentHealthCfg(endpoint string) config.Config {
 	return cfg
 }
 
+// agentCfg is agentHealthCfg's sibling for tests that drive the server through
+// newTestServer's DEFAULT Options (opts=nil, LoopbackListener false): it sets
+// FleetAuthToken so AgentLaneSafelyReachable holds without a loopback
+// listener, keeping the lane admissible with no *Options override at all.
+func agentCfg() config.Config {
+	cfg := imageCfg()
+	cfg.FleetAgentEnabled = true
+	cfg.AgentModel = "offload-e4b"
+	cfg.AgentCtxTokens = 8192
+	cfg.FleetAuthToken = "test-token"
+	return cfg
+}
+
 // waitForResidencyProbe blocks until a background refresh has PUBLISHED an
 // answer into the residency cache.
 //
@@ -991,10 +1004,13 @@ func waitForResidencyProbe(t *testing.T, s *Server) {
 // (false) — the cache is cold and the handler must NEVER block on a llama-swap
 // round-trip (same rule as the reclaim tracker) — and turns true once the
 // BACKGROUND probe the first GET kicked off lands. The roster hit count pins
-// the other half of the cache contract: one probe, single-flighted, reused by
-// every request inside the TTL. The fake roster serves the seat ONLY as an
-// alias, pinning alias-awareness (the plannerUnserved idiom): an id-only
-// reader would advertise a correctly-served seat as non-resident forever.
+// the other half of the cache contract: one refresh cycle, single-flighted,
+// reused by every request inside the TTL — TWO roster GETs per cycle
+// (rosterServes for residency, rosterIDs for served_models; see the rosterIDs
+// field doc for why they are not one fetch), never more no matter the request
+// rate. The fake roster serves the seat ONLY as an alias, pinning
+// alias-awareness (the plannerUnserved idiom): an id-only reader would
+// advertise a correctly-served seat as non-resident forever.
 func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 	var probes atomic.Int64
 	roster := fakeRoster(t, &probes, "gemma-4-e4b", "offload-e4b")
@@ -1020,8 +1036,8 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 	if v, present := m["agent_seat_resident"]; present {
 		t.Fatalf("agent_seat_resident = %v on the FIRST health (cache cold) — must fail closed until the probe lands, never block the handler", v)
 	}
-	if n := probes.Load(); n > 1 {
-		t.Fatalf("roster probes after ONE health request = %d, want at most 1", n)
+	if n := probes.Load(); n > 2 {
+		t.Fatalf("roster probes after ONE health request = %d, want at most 2 (rosterServes + rosterIDs)", n)
 	}
 
 	// The background refresh the GET above kicked off is the only thing that
@@ -1031,8 +1047,8 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 	if m["agent_seat_resident"] != true {
 		t.Fatalf("agent_seat_resident = %v after a successful ALIAS-served roster probe, want true", m["agent_seat_resident"])
 	}
-	if n := probes.Load(); n != 1 {
-		t.Fatalf("roster probes = %d, want exactly 1 (single-flight: concurrent/repeat health requests share one probe)", n)
+	if n := probes.Load(); n != 2 {
+		t.Fatalf("roster probes = %d, want exactly 2 (rosterServes + rosterIDs, single-flighted: concurrent/repeat health requests share one refresh cycle)", n)
 	}
 
 	// Inside the TTL every further request is served from the cache — health
@@ -1043,8 +1059,8 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 			t.Fatalf("agent_seat_resident = %v on cached health request %d, want true", m["agent_seat_resident"], i)
 		}
 	}
-	if n := probes.Load(); n != 1 {
-		t.Fatalf("roster probes after 20 more health requests = %d, want still exactly 1 (the %s TTL)", n, agentResidencyTTL)
+	if n := probes.Load(); n != 2 {
+		t.Fatalf("roster probes after 20 more health requests = %d, want still exactly 2 (the %s TTL)", n, agentResidencyTTL)
 	}
 }
 
@@ -1458,4 +1474,31 @@ func TestHealth_HostFieldsAbsentWhenNil(t *testing.T) {
 			t.Fatalf("%s must be absent when Host is nil, got %v", k, m[k])
 		}
 	}
+}
+
+// TestHealth_ServedModelsRideResidencyRefresh: served_models rides the SAME
+// TTL and single-flight latch as agent_seat_resident (agentResident() is the
+// one trigger for both). Driven through health GETs only, like every
+// residency test — see waitForResidencyProbe's rationale.
+func TestHealth_ServedModelsRideResidencyRefresh(t *testing.T) {
+	s, _ := newTestServer(t, agentCfg(), &fakeRunner{}, nil)
+	s.rosterIDs = func(ctx context.Context, endpoint string) ([]string, error) {
+		return []string{"qwen3.5-9b-agent", "gemma-4-e4b"}, nil
+	}
+	s.rosterServes = func(ctx context.Context, endpoint, seat string) (bool, error) { return true, nil }
+	// first call schedules the refresh; poll until published
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rr := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/fleet/health", nil))
+		var got struct {
+			Served []string `json:"served_models"`
+		}
+		_ = json.Unmarshal(rr.Body.Bytes(), &got)
+		if len(got.Served) == 2 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("served_models never published")
 }

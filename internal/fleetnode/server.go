@@ -123,7 +123,17 @@ type Server struct {
 	// (alias-aware). A seam so tests drive the residency cache without a live
 	// llama-swap; production always gets swapRosterServes.
 	rosterServes func(ctx context.Context, endpoint, seat string) (bool, error)
-	agentRes     agentResidency
+	// rosterIDs answers "what model ids does the llama-swap behind endpoint
+	// actually serve?" — the roster's own id list (swapclient.Roster.IDs),
+	// advertised as served_models. A separate seam from rosterServes (tests
+	// need to drive them independently), but production fetches its own
+	// roster per call rather than sharing swapRosterServes's fetch — that
+	// would mean threading a shared Roster through both closures' signatures,
+	// which changes tests that already inject rosterServes alone. Two GETs
+	// per refresh, once per agentResidencyTTL window, is an acceptable cost
+	// for keeping today's residency seam untouched.
+	rosterIDs func(ctx context.Context, endpoint string) ([]string, error)
+	agentRes  agentResidency
 }
 
 // agentResidency caches the roster's answer for the agent seat between health
@@ -142,6 +152,12 @@ type Server struct {
 type agentResidency struct {
 	mu       sync.Mutex
 	resident bool
+	// served is the roster's id list from the SAME refresh that set resident
+	// (rosterIDs, fetched alongside rosterServes in refreshAgentResidency). A
+	// failed id fetch publishes nil — never a stale list — and never flips
+	// resident on its own; a later placement gate reads absent/empty as
+	// UNKNOWN, exactly like a cold or failed residency probe.
+	served   []string
 	at       time.Time
 	inflight bool
 	// idle broadcasts when inflight clears, so a caller that needs the answer
@@ -195,6 +211,7 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		agentSeat:    opts.Cfg.AgentPlannerModel(""),
 		agentLane:    AgentLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		rosterServes: swapRosterServes,
+		rosterIDs:    swapRosterIDs,
 	}
 }
 
@@ -209,6 +226,18 @@ func swapRosterServes(ctx context.Context, endpoint, seat string) (bool, error) 
 		return false, err
 	}
 	return roster.Serves(seat), nil
+}
+
+// swapRosterIDs is the production served_models probe: one GET /v1/models,
+// answered as the roster's own id list. A separate roster fetch from
+// swapRosterServes (see the rosterIDs field doc) — accepted so the existing
+// rosterServes seam and its tests stay untouched.
+func swapRosterIDs(ctx context.Context, endpoint string) ([]string, error) {
+	roster, err := swapclient.FetchRoster(ctx, endpoint, agentResidencyProbeTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return roster.IDs(), nil
 }
 
 // agentResident returns the cached residency answer, kicking off a background
@@ -230,6 +259,21 @@ func (s *Server) agentResident() bool {
 	return v
 }
 
+// servedModels returns a copy of the cached roster id list, as of the last
+// residency refresh. It NEVER triggers a probe itself — agentResident()
+// already does, and handleHealth calls both, agentResident() first, so a
+// health request that reads servedModels() first would always see the
+// PREVIOUS window's answer instead of the refresh it just scheduled.
+func (s *Server) servedModels() []string {
+	a := &s.agentRes
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.served == nil {
+		return nil
+	}
+	return append([]string(nil), a.served...)
+}
+
 // refreshAgentResidency runs one bounded roster probe and publishes the
 // answer. THE CALLER MUST ALREADY HOLD the single-flight latch
 // (agentResidency.claimProbe, or the inline claim in agentResident) — this
@@ -247,6 +291,7 @@ func (s *Server) agentResident() bool {
 func (s *Server) refreshAgentResidency() {
 	var resident bool
 	var err error
+	var served []string
 	// The publish is DEFERRED, not tail-appended: the probe below runs outside
 	// any lock, and clearing the latch only on the normal path meant a panic
 	// anywhere in that seam froze residency for the life of the process — never
@@ -258,6 +303,7 @@ func (s *Server) refreshAgentResidency() {
 		a := &s.agentRes
 		a.mu.Lock()
 		a.resident = resident && err == nil
+		a.served = served
 		a.at = time.Now()
 		a.inflight = false
 		a.idleCond().Broadcast() // release any synchronous waiter (RefreshAgentResidency)
@@ -275,6 +321,11 @@ func (s *Server) refreshAgentResidency() {
 		log.Printf("fleet: agent seat %q residency probe against %s failed; advertising agent_seat_resident:false for up to %s: %v",
 			s.agentSeat, s.opts.Cfg.Endpoint, agentResidencyTTL, err)
 	}
+	ids, ierr := s.rosterIDs(ctx, s.opts.Cfg.Endpoint)
+	if ierr != nil {
+		ids = nil // unknown on failure — never keep a stale list, never flip resident
+	}
+	served = ids
 }
 
 // RefreshAgentResidency ensures ONE residency probe has published an answer
@@ -465,6 +516,12 @@ type healthPayload struct {
 	// roster. False/omitted until the first probe lands, and on probe failure.
 	AgentResident bool `json:"agent_seat_resident,omitempty"`
 	AgentEnabled  bool `json:"agent_enabled,omitempty"`
+	// ServedModels is the CACHED roster id list (agentResidency.served),
+	// refreshed on the same TTL/single-flight as AgentResident. Absent/empty
+	// = UNKNOWN (cold cache, or the ids fetch failed) — never a stale list.
+	// A later placement gate uses this to check a specific model is actually
+	// hosted here, not just that the agent seat is resident.
+	ServedModels []string `json:"served_models,omitempty"`
 	// ---- Host CPU/RAM (hostsample) ----
 	// Emitted only when opts.Host is set AND its sample is Known. All three
 	// carry omitempty, unlike GpuUtilPct/GpuUtilKnown (always-present):
@@ -568,6 +625,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		payload.AgentSeat = s.agentSeat
 		payload.AgentCtxTokens = s.opts.Cfg.AgentCtxTokens
 		payload.AgentResident = s.agentResident()
+		payload.ServedModels = s.servedModels()
 	}
 	// Host CPU/RAM: a cached read of the background hostsample.Sampler, same
 	// rule as the VRAM snapshot above — this handler never samples itself.
