@@ -9,8 +9,8 @@
   # Prove the tier before binding the harness to it: vllm:external_prefix_cache_hits > 0 after an
   # eviction, and a planted needle retrieved verbatim after eviction and after a restart.
   "<seat id>":
-    cmd: "<path to wsl.exe or bash> -d <distro> -u root -e bash /root/g7/seat_fg.sh"
-    cmdStop: "<path to wsl.exe or bash> -d <distro> -u root -e bash /root/g7/seat_stop.sh"
+    cmd: "<path to wsl.exe or bash> -d <distro> -u root -e bash /root/g7/seat_fg.sh /root/g7/<seat>.env"
+    cmdStop: "<path to wsl.exe or bash> -d <distro> -u root -e bash /root/g7/seat_stop.sh /root/g7/<seat>.env"
     proxy: "http://127.0.0.1:18797"
     checkEndpoint: /health
     aliases: ["agent-pool"]

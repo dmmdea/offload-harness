@@ -4,7 +4,7 @@
 # clean only this stack's shared-memory segments. Exits non-zero when the port is still bound, so
 # llama-swap records a failed unload instead of a clean one that leaves the next start unable to bind.
 set -u
-CFG="${SEAT_ENV:-/root/g7/seat.env}"
+CFG="${1:-${SEAT_ENV:-/root/g7/seat.env}}"
 [ -f "$CFG" ] && . "$CFG"
 PORT="${SEAT_PORT:-18797}"
 PAT="vllm serve .*--port $PORT"

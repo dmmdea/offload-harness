@@ -18,7 +18,7 @@
 # harness's config.json `kv_cache_server` block, which is what `offload_status` reports — keep them
 # in agreement (the status note says so).
 set -u
-CFG="${SEAT_ENV:-/root/g7/seat.env}"
+CFG="${1:-${SEAT_ENV:-/root/g7/seat.env}}"   # env file as $1 (wsl.exe passes no environment through), else SEAT_ENV, else the default
 [ -f "$CFG" ] && . "$CFG"
 LOG="${SEAT_LOG:-/root/g7/seat.log}"
 MODEL="${SEAT_MODEL:-RedHatAI/Qwen3.8-27B-INT4}"
