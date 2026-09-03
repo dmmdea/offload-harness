@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -74,7 +75,7 @@ func TestFetchNodeViewMapsAgentFields(t *testing.T) {
 		QueueDepth:     2,
 		Local:          false, // a FETCHED view is by definition a remote node
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("NodeView = %+v, want %+v", got, want)
 	}
 }
@@ -89,7 +90,7 @@ func TestFetchNodeViewWithoutAgentFields(t *testing.T) {
 		t.Fatalf("FetchNodeView: %v", err)
 	}
 	want := NodeView{NodeID: "media-only", QueueDepth: 1}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("NodeView = %+v, want %+v", got, want)
 	}
 }

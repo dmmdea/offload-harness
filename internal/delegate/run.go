@@ -1240,9 +1240,12 @@ func joinNotes(earlier, later string) string {
 }
 
 // baseFor resolves the dial base of a chosen remote view ("" when absent).
+// Compares by NodeID rather than struct equality: NodeView carries a slice
+// field (ServedModels) since 0.113.0, which is not comparable with ==, and
+// NodeID is already the fleet's unique identifier for a view.
 func baseFor(chosen NodeView, views []NodeView, bases []string) string {
 	for i := range views {
-		if views[i] == chosen {
+		if views[i].NodeID == chosen.NodeID {
 			return bases[i]
 		}
 	}

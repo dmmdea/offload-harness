@@ -678,6 +678,10 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 		n["jobs_running"] = r.view.JobsRunning
 		n["jobs_queued"] = r.view.JobsQueued
 		n["max_concurrent_jobs"] = r.view.MaxConcurrentJobs
+		n["served_models"] = r.view.ServedModels
+		if r.view.GpuUtilKnown {
+			n["gpu_util_pct"] = r.view.GpuUtilPct
+		}
 		if r.view.AgentEnabled {
 			capable++
 			if r.view.QueueDepth == 0 {

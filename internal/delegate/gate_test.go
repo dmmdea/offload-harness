@@ -287,3 +287,42 @@ func TestLocalBusyUnresolvableLeaseDirReadsIdle(t *testing.T) {
 		t.Fatal("LocalBusy = true on an unresolvable lease dir; must fail toward idle/local")
 	}
 }
+
+func TestRemoteEligible_ServedModelsWithoutSeatIsIneligible(t *testing.T) {
+	r := eligibleRemote()
+	r.ServedModels = []string{"gemma-4-e4b"} // published, seat absent
+	if remoteEligible(schemaSubtask(), r) {
+		t.Fatal("a node whose served_models omits its agent seat must not be placed on")
+	}
+	r.ServedModels = []string{"gemma-4-e4b", r.AgentSeat}
+	if !remoteEligible(schemaSubtask(), r) {
+		t.Fatal("seat present in served_models must be eligible")
+	}
+	r.ServedModels = nil // pre-0.113.0 node: unknown, not a refusal
+	if !remoteEligible(schemaSubtask(), r) {
+		t.Fatal("absent served_models is UNKNOWN and must not gate")
+	}
+}
+
+func TestBetterRemote_UtilizationBreaksQueueTies(t *testing.T) {
+	a, b := eligibleRemote(), eligibleRemote()
+	a.NodeID, b.NodeID = "a", "b"
+	a.GpuUtilPct, a.GpuUtilKnown = 80, true
+	b.GpuUtilPct, b.GpuUtilKnown = 10, true
+	if !betterRemote(b, a) || betterRemote(a, b) {
+		t.Fatal("lower known utilization must win an otherwise equal pair")
+	}
+	// queue depth still outranks utilization
+	b.QueueDepth = a.QueueDepth + 1
+	if betterRemote(b, a) {
+		t.Fatal("utilization must never override QueueDepth")
+	}
+}
+
+func TestBetterRemote_UnknownUtilizationNeverLoses(t *testing.T) {
+	known, unknown := eligibleRemote(), eligibleRemote()
+	known.GpuUtilPct, known.GpuUtilKnown = 5, true
+	if betterRemote(known, unknown) || betterRemote(unknown, known) {
+		t.Fatal("an unknown utilization is neither credited nor blamed — roster order keeps the tie")
+	}
+}
