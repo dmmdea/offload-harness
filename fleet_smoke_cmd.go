@@ -26,12 +26,15 @@ type smokeRow struct {
 	Detail    string `json:"detail,omitempty"`
 }
 
-// smokeContract is the harness's "Test traffic" button: three steps (one
-// tool call, one reply, one spare — a 1-step budget makes the loop report
-// StopReason "budget" on the very first turn, since a tool call or plan step
-// consumes the only step and the loop never reaches a reply), 60 s, and an
-// acceptance anchored on a token that lives ONLY in the context doc, so a
-// seat that echoes the goal cannot pass (the delegation skill's parrot rule).
+// smokeContract is the harness's "Test traffic" button. "Cheap" is the 60 s
+// wall bound (TimeoutSec), not a hand-picked step cap: MaxSteps is left at 0
+// so PrepareContract fills in the harness default (core.AgentMaxStepsDefault)
+// — a hard-coded small budget strangled legitimate smokes (the Lenovo seat
+// needed exactly 3 steps to answer; a smaller cap starves any seat that plans
+// or tool-calls before replying) and the real cost control is the timeout,
+// not an artificially tight step count. The acceptance is anchored on a
+// token that lives ONLY in the context doc, so a seat that echoes the goal
+// cannot pass (the delegation skill's parrot rule).
 func smokeContract(nodeHint string) delegate.SubtaskSpec {
 	token := "PONG-" + nodeHint
 	return delegate.SubtaskSpec{AgentContract: core.AgentContract{
@@ -39,7 +42,7 @@ func smokeContract(nodeHint string) delegate.SubtaskSpec {
 		Context:      []core.ContextDoc{{Name: "smoke.txt", Text: "The token is: " + token}},
 		OutputSchema: json.RawMessage(`{"properties":{"reply":{"type":"string"}}}`),
 		Acceptance:   []string{"contains:" + token},
-		MaxSteps:     3,
+		MaxSteps:     0,
 		TimeoutSec:   60,
 	}}
 }

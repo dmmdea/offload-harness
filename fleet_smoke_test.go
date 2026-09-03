@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
 )
 
@@ -13,8 +14,13 @@ func TestSmokeContractIsGroundedAndCheap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.MaxSteps != 3 || c.TimeoutSec != 60 {
-		t.Fatalf("smoke must be three steps / 60 s, got %d/%d", c.MaxSteps, c.TimeoutSec)
+	// MaxSteps 0 tells PrepareContract to fill in the harness default — the
+	// cheap bound here is the 60s wall timeout, not a hand-picked step cap.
+	if c.MaxSteps != 0 && c.MaxSteps != core.AgentMaxStepsDefault {
+		t.Fatalf("smoke must use the harness default step budget, got %d (want 0 or %d)", c.MaxSteps, core.AgentMaxStepsDefault)
+	}
+	if c.TimeoutSec != 60 {
+		t.Fatalf("smoke must be 60 s wall-bound, got %d", c.TimeoutSec)
 	}
 	if !strings.Contains(strings.Join(c.Acceptance, " "), "contains:PONG-lenovo-ampere6") {
 		t.Fatalf("acceptance must anchor on a token that only the doc carries: %v", c.Acceptance)
