@@ -18,10 +18,10 @@ import (
 // runs exactly as before, and this block exists so a box WITH one can declare it.
 //
 // Why it is a tier and not a speedup: a context that fell out of VRAM comes back at
-// parity cost with recomputing it (measured 2026-09-02, Qwen3.8-27B, 24k tokens:
-// 20.6 s from a second box over the LAN vs 24.6 s recompute, every token from the
-// store) while the GPU is free for other requests and the serving box's RAM is
-// untouched. Sized in tokens: ~255 KB per token as stored, so a 45 GB store holds
+// parity cost or better with recomputing it (measured on Qwen3.8-27B, 24k tokens:
+// 3.86 s from a second box over the LAN vs 24.68 s recompute with one store
+// namespace per stack generation; 20.6 s when the store was shared across layouts)
+// while the GPU is free for other requests and the serving box's RAM is untouched. Sized in tokens: ~255 KB per token as stored, so a 45 GB store holds
 // ~175k tokens.
 //
 // The harness does not run the store or the engine. This block is DECLARATIVE: it is

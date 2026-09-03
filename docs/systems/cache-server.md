@@ -117,9 +117,11 @@ keeps serving, the tier just stops paying, which is why the counters must be rea
 | layout | tier | 24k-token context restored | vs recompute | tokens from tier |
 |---|---|---|---|---|
 | 2 cards (tp2) | same-box RAM L1 32 GB | 0.50 s | 49.7× | 23,520 / 23,520 |
-| 2 cards (tp2) | Lenovo Valkey over 10 GbE, L1 8 GB | 20.6 s | 1.2× (parity) | 23,520 / 23,520 |
+| 2 cards (tp2), 65k | Lenovo Valkey over 10 GbE, L1 8 GB, one namespace per generation | **3.86 s** | **6.4×** | 23,520 / 23,520 |
+| 2 cards (tp2) | same route, store shared across earlier layouts (afternoon run) | 20.6 s | 1.2× | 23,520 / 23,520 |
 | 2 cards (tp2) | Valkey with 8 io-threads + 16 workers | 32.8 s | 0.75× | 4,704 (timeouts) |
-| 3 cards (pp3 26/26/12) | Lenovo Valkey | recomputed | — | 0 (size mismatch, see invariants) |
+| 3 cards (pp3 26/26/12), 131k | same-box RAM L1 32 GB | 0.53 s | 26× | 23,520 / 23,520 |
+| 3 cards (pp3 26/26/12) | Lenovo Valkey | 13.85 s (recomputed) | 1.0× | 0 (size mismatch, see invariants) |
 
 Raw link: ~980 MB/s Qube→Lenovo, ~700 MB/s Lenovo→Qube (iperf3); the Valkey path used ~300 MB/s.
 

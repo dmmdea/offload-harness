@@ -678,7 +678,8 @@ A vLLM seat's usable KV in VRAM is small on consumer cards (and on a Mamba-hybri
 "GPU KV cache size" banner overstates it: align-mode checkpoint blocks share the pool). Contexts
 that leave VRAM are recomputed. With LMCache MP and a **cache server** — a store on a second
 machine's RAM — they come back at parity cost instead (measured 2026-09-02, Qwen3.8-27B, 24k
-tokens: 20.6 s from a Lenovo over the LAN vs 24.6 s recompute, every token from the store), the GPU
+tokens: 3.86 s from a Lenovo over the LAN vs 24.68 s recompute, every token from the store; 20.6 s
+when the store namespace was shared across layouts), the GPU
 stays free while the load streams, and they survive a seat swap. Same-box RAM as the tier is faster
 (0.50 s, 49.7×) but spends the serving PC's memory; the second device is the capacity route.
 
