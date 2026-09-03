@@ -48,11 +48,11 @@ func runFleetUI(args []string) error {
 		return err
 	}
 	cfg, _ := loadCfgWithSource(fs)
-	if !*trusted && !netguard.LoopbackAddr(*listen) {
-		return fmt.Errorf("fleet-ui: %s is not loopback; pass --listen-trusted-network to bind a tailnet address (never 0.0.0.0)", *listen)
-	}
 	if strings.HasPrefix(*listen, "0.0.0.0") || strings.HasPrefix(*listen, "[::]") || strings.HasPrefix(*listen, ":") {
 		return fmt.Errorf("fleet-ui: refusing to bind all interfaces (%s)", *listen)
+	}
+	if !*trusted && !netguard.LoopbackAddr(*listen) {
+		return fmt.Errorf("fleet-ui: %s is not loopback; pass --listen-trusted-network to bind a tailnet address (never 0.0.0.0)", *listen)
 	}
 	bases := fleetUIRemotes(cfg, remotes)
 	if len(bases) == 0 {

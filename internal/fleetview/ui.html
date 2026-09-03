@@ -42,7 +42,7 @@ function spark(hist,n){
 function card(n){
   const st=n.reachable?'<span class="badge ok">online</span>':'<span class="badge err">unreachable</span>';
   const seat=n.agent_enabled?`<span class="badge ${n.agent_seat_resident?'ok':''}">${esc(n.agent_seat)} ${n.agent_seat_resident?'resident':'cold'}</span>`:'<span class="badge">no agent lane</span>';
-  const devs=(n.gpu_devices||[]).map(d=>`<div class="kv"><span>${esc(d.name)}</span><b>${(d.vram_total_gb-d.vram_free_gb).toFixed(1)} / ${d.vram_total_gb.toFixed(1)} GB${d.util_known?` · ${d.util_pct}%`:''}</b></div><div class="bar"><i style="width:${(100*(1-d.vram_free_gb/d.vram_total_gb)).toFixed(0)}%"></i></div>`).join('');
+  const devs=(n.gpu_devices||[]).map(d=>{const tot=d.vram_total_gb||0;const free=d.vram_free_gb||0;const pct=tot?100*(1-free/tot):0;return `<div class="kv"><span>${esc(d.name)}</span><b>${(tot-free).toFixed(1)} / ${tot.toFixed(1)} GB${d.util_known?` · ${d.util_pct}%`:''}</b></div><div class="bar"><i style="width:${pct.toFixed(0)}%"></i></div>`}).join('');
   return `<div class="card"><h2>${esc(n.node_id||n.base)} ${st} ${seat} <span class="badge">${esc(n.harness_version||'')}</span></h2>
   ${n.reachable?'':`<div class="sev-error">${esc(n.probe_error)}</div>`}
   ${spark(n.history,n)}<div class="legend"><span><i style="background:var(--gpu)"></i>GPU ${n.gpu_util_known?n.gpu_util_pct+'%':'n/a'}</span><span><i style="background:var(--cpu)"></i>CPU ${n.host_cpu_pct}%</span><span><i style="background:var(--vram)"></i>VRAM free ${(n.vram_free_gb||0).toFixed(1)} GB</span><span><i style="background:var(--ram)"></i>RAM ${(n.host_ram_used_gb||0).toFixed(0)} / ${(n.host_ram_total_gb||0).toFixed(0)} GB</span></div>
