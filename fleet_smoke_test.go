@@ -13,8 +13,8 @@ func TestSmokeContractIsGroundedAndCheap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.MaxSteps != 1 || c.TimeoutSec != 60 {
-		t.Fatalf("smoke must be one step / 60 s, got %d/%d", c.MaxSteps, c.TimeoutSec)
+	if c.MaxSteps != 3 || c.TimeoutSec != 60 {
+		t.Fatalf("smoke must be three steps / 60 s, got %d/%d", c.MaxSteps, c.TimeoutSec)
 	}
 	if !strings.Contains(strings.Join(c.Acceptance, " "), "contains:PONG-lenovo-ampere6") {
 		t.Fatalf("acceptance must anchor on a token that only the doc carries: %v", c.Acceptance)

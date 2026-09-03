@@ -26,8 +26,11 @@ type smokeRow struct {
 	Detail    string `json:"detail,omitempty"`
 }
 
-// smokeContract is the harness's "Test traffic" button: one step, 60 s, and
-// an acceptance anchored on a token that lives ONLY in the context doc, so a
+// smokeContract is the harness's "Test traffic" button: three steps (one
+// tool call, one reply, one spare — a 1-step budget makes the loop report
+// StopReason "budget" on the very first turn, since a tool call or plan step
+// consumes the only step and the loop never reaches a reply), 60 s, and an
+// acceptance anchored on a token that lives ONLY in the context doc, so a
 // seat that echoes the goal cannot pass (the delegation skill's parrot rule).
 func smokeContract(nodeHint string) delegate.SubtaskSpec {
 	token := "PONG-" + nodeHint
@@ -36,7 +39,7 @@ func smokeContract(nodeHint string) delegate.SubtaskSpec {
 		Context:      []core.ContextDoc{{Name: "smoke.txt", Text: "The token is: " + token}},
 		OutputSchema: json.RawMessage(`{"properties":{"reply":{"type":"string"}}}`),
 		Acceptance:   []string{"contains:" + token},
-		MaxSteps:     1,
+		MaxSteps:     3,
 		TimeoutSec:   60,
 	}}
 }
