@@ -10,7 +10,8 @@ Versioning: [SemVer](https://semver.org/).
 
 The 2026-09-01 verdict "LMCache recovers no time" was a benchmark sizing error (the RAM tier was smaller
 than the VRAM pool it backed); re-measured, a 24k-token context comes back from same-box RAM in 0.50 s
-(49.7×) and from a second machine's RAM over the LAN at parity cost (20.6 s vs 24.6 s recompute). The
+(49.7×) and from a second machine's RAM over the LAN in 3.86 s vs 24.68 s recompute (6.4×; 20.6 s when
+the store namespace was shared across layouts). The
 operator's metric for the second device is capacity, not speed
 ([ADR 0033](docs/architecture/decisions/0033-cache-server-is-an-optional-second-device-tier.md)).
 
