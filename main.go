@@ -127,6 +127,8 @@ func main() {
 		err = runFleetServe(args)
 	case "fleet-measure":
 		err = runFleetMeasure(args)
+	case "fleet-ui":
+		err = runFleetUI(args)
 	case "ledger":
 		err = runLedger(args)
 	// `loupe` is the identity-aware ledger view (memory-frontier Phase 0.1b).
@@ -259,6 +261,7 @@ Usage:
   local-offload delegate --contract file.json [--route auto|spread|local|remote] [--read-root DIR] [--remote http://node:18811]...   place delegation-contract subtasks on this box or tailnet fleet nodes (needs agent_delegation_enabled; remotes default to delegate_remotes)
   local-offload fleet-serve [--listen ADDR] [--listen-trusted-network] [--node-id NAME]   join the fleet-dispatcher fleet (health/dispatch/jobs on :18811; docs/FLEET-NODE.md)
   local-offload fleet-measure            prime the fleet footprint store: one minimal render per configured task, then print the recorded entries
+  local-offload fleet-ui [--listen 127.0.0.1:18813] [--listen-trusted-network] [--interval 5s] [--remote URL]...   live overview page: node cards (GPU/VRAM/CPU/RAM graphs, seat, served models), cluster jobs + errors feed (docs/systems/fleet-overview.md)
   local-offload ledger [--since DAYS]    token-savings report
   local-offload doctor                   check endpoint health + config
   local-offload report [--out FILE]      READ-ONLY capability report for this machine (tier, serving, media routes) — Markdown, safe to send
