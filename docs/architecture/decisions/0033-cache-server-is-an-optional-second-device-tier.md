@@ -15,7 +15,8 @@ banner overstates it (align-mode checkpoint blocks share the pool). Contexts tha
 recomputed. The 2026-09-01 measurement had concluded that an LMCache tier "recovers no time"; the
 2026-09-02 research pass showed that run had sized the tier below the pool it backed, and the
 re-measurement showed a 24k-token context coming back from same-box RAM in 0.50 s (49.7×) and from
-the Lenovo's RAM over the LAN in 20.6 s against a 24.6 s recompute (1.2×).
+the Lenovo's RAM over the LAN in 20.6 s against a 24.6 s recompute (1.2×) — and, with one store namespace
+per stack generation, in 3.86 s against 24.68 s (6.4×, 2026-09-03).
 
 The operator's metric for the second-device route is capacity, not speed: memory the serving PC
 does not have to give, with the GPU free while the load streams, and contexts that survive a swap.
