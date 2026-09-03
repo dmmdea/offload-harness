@@ -38,6 +38,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/grounding"
 	"github.com/dmmdea/offload-harness/internal/health"
+	"github.com/dmmdea/offload-harness/internal/hostsample"
 	"github.com/dmmdea/offload-harness/internal/judge"
 	"github.com/dmmdea/offload-harness/internal/knn"
 	"github.com/dmmdea/offload-harness/internal/ledger"
@@ -2290,6 +2291,8 @@ func runFleetServe(args []string) error {
 	// which must not block on llama-swap) — see fleet_reclaim.go for why the idle
 	// baseline, not free or total, is the right denominator for a shared card.
 	reclaim := startReclaimTracking(ctx, cfg, sampler.Load, 5*time.Second)
+	// Host CPU/RAM, same background-sampler rule: health only ever Loads.
+	host := hostsample.Start(ctx, 5*time.Second)
 	// One resolved answer, used by BOTH the server and the startup banner: the
 	// agent lane's advertisement keys on it (fleetnode.AgentLaneAdmissible), so
 	// a banner computing it separately from the config could print a task list
@@ -2320,6 +2323,7 @@ func runFleetServe(args []string) error {
 		// a loopback bind is still loopback.
 		LoopbackListener: loopbackListener,
 		Cfg:              cfg,
+		Host:             host.Load,
 	})
 
 	ln, err := net.Listen("tcp", listen)

@@ -19,6 +19,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/hostsample"
 )
 
 // fakeRunner injects the test's behavior for Runner.
@@ -1421,5 +1422,40 @@ func TestHealth_GpuUtilAllUnknown(t *testing.T) {
 	}
 	if got.Util != 0 || got.Known {
 		t.Fatalf("got %+v want util=0 known=false", got)
+	}
+}
+
+func TestHealth_HostFieldsPresentWhenSet(t *testing.T) {
+	opts := &Options{
+		Snapshot: goodSnapshot,
+		Host: func() (hostsample.Sample, bool) {
+			return hostsample.Sample{CPUPct: 42, RAMUsedGiB: 12.5, RAMTotalGiB: 128, Known: true}, true
+		},
+	}
+	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, opts)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/fleet/health", nil))
+	m := decodeMap(t, rr)
+	if got, want := m["host_cpu_pct"], float64(42); got != want {
+		t.Fatalf("host_cpu_pct = %v, want %v", got, want)
+	}
+	if got, want := m["host_ram_used_gb"], 12.5; got != want {
+		t.Fatalf("host_ram_used_gb = %v, want %v", got, want)
+	}
+	if got, want := m["host_ram_total_gb"], float64(128); got != want {
+		t.Fatalf("host_ram_total_gb = %v, want %v", got, want)
+	}
+}
+
+func TestHealth_HostFieldsAbsentWhenNil(t *testing.T) {
+	opts := &Options{Snapshot: goodSnapshot}
+	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, opts)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/fleet/health", nil))
+	m := decodeMap(t, rr)
+	for _, k := range []string{"host_cpu_pct", "host_ram_used_gb", "host_ram_total_gb"} {
+		if _, present := m[k]; present {
+			t.Fatalf("%s must be absent when Host is nil, got %v", k, m[k])
+		}
 	}
 }

@@ -26,6 +26,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/fleetqueue"
+	"github.com/dmmdea/offload-harness/internal/hostsample"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
@@ -88,6 +89,9 @@ type Options struct {
 	// media lane never consults it.
 	LoopbackListener bool
 	Cfg              config.Config
+	// Host reports the last host CPU/RAM sample (hostsample.Sampler.Load).
+	// nil omits the host_* fields; the handler never samples itself.
+	Host func() (hostsample.Sample, bool)
 }
 
 // Server is the fleet-node HTTP server: three handlers over a Runner + Jobs
@@ -461,6 +465,17 @@ type healthPayload struct {
 	// roster. False/omitted until the first probe lands, and on probe failure.
 	AgentResident bool `json:"agent_seat_resident,omitempty"`
 	AgentEnabled  bool `json:"agent_enabled,omitempty"`
+	// ---- Host CPU/RAM (hostsample) ----
+	// Emitted only when opts.Host is set AND its sample is Known. All three
+	// carry omitempty, unlike GpuUtilPct/GpuUtilKnown (always-present):
+	// there is no companion *Known flag here, so a genuine 0% HostCPUPct
+	// with omitempty is acceptable ONLY because HostRAMTotalGb is never 0
+	// when known and therefore serves as the presence signal for the group —
+	// a reader must check host_ram_total_gb (or the key's mere presence)
+	// before trusting host_cpu_pct as a real zero rather than an absent field.
+	HostCPUPct     int     `json:"host_cpu_pct,omitempty"`
+	HostRAMUsedGb  float64 `json:"host_ram_used_gb,omitempty"`
+	HostRAMTotalGb float64 `json:"host_ram_total_gb,omitempty"`
 }
 
 // handleHealth assembles the contract health JSON from cached/cheap reads
@@ -553,6 +568,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		payload.AgentSeat = s.agentSeat
 		payload.AgentCtxTokens = s.opts.Cfg.AgentCtxTokens
 		payload.AgentResident = s.agentResident()
+	}
+	// Host CPU/RAM: a cached read of the background hostsample.Sampler, same
+	// rule as the VRAM snapshot above — this handler never samples itself.
+	if s.opts.Host != nil {
+		if h, ok := s.opts.Host(); ok && h.Known {
+			payload.HostCPUPct = h.CPUPct
+			payload.HostRAMUsedGb = h.RAMUsedGiB
+			payload.HostRAMTotalGb = h.RAMTotalGiB
+		}
 	}
 	writeJSON(w, http.StatusOK, payload)
 }
