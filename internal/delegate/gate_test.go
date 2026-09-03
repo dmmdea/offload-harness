@@ -3,6 +3,7 @@ package delegate
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -302,6 +303,10 @@ func TestRemoteEligible_ServedModelsWithoutSeatIsIneligible(t *testing.T) {
 	if !remoteEligible(schemaSubtask(), r) {
 		t.Fatal("absent served_models is UNKNOWN and must not gate")
 	}
+	r.ServedModels = []string{strings.ToUpper(r.AgentSeat)}
+	if !remoteEligible(schemaSubtask(), r) {
+		t.Fatal("seatServed must match case-insensitively, like swapclient.Roster.Serves")
+	}
 }
 
 func TestBetterRemote_UtilizationBreaksQueueTies(t *testing.T) {
@@ -316,6 +321,9 @@ func TestBetterRemote_UtilizationBreaksQueueTies(t *testing.T) {
 	b.QueueDepth = a.QueueDepth + 1
 	if betterRemote(b, a) {
 		t.Fatal("utilization must never override QueueDepth")
+	}
+	if !betterRemote(a, b) {
+		t.Fatal("a's lower QueueDepth must still win once QueueDepth is no longer tied")
 	}
 }
 

@@ -335,3 +335,66 @@ func TestStatusDoesNotDialAnInvalidOrNamedStore(t *testing.T) {
 		t.Fatalf("absent block must report declared:false, got %v", off)
 	}
 }
+
+// TestFleetViewPublishesServedModelsAndUtilization: offload_status is the
+// LIVE surface for the two facts Task 7 taught the gate to consume — a caller
+// must be able to see them without reading gate.go. served_models is
+// published always (nil/absent decodes to a JSON null, same as any other
+// unset field here); gpu_util_pct is published ONLY when the node said
+// gpu_util_known, so an unknown never masquerades as a real number.
+func TestFleetViewPublishesServedModelsAndUtilization(t *testing.T) {
+	known := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"node_id": "known-node", "agent_enabled": true, "agent_seat": "offload-e4b",
+			"agent_seat_resident": true, "agent_ctx_tokens": 8192, "queue_depth": 0,
+			"served_models":   []string{"offload-e4b"},
+			"gpu_util_pct":    42,
+			"gpu_util_known":  true,
+		})
+	}))
+	defer known.Close()
+	unknown := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"node_id": "unknown-node", "agent_enabled": true, "agent_seat": "offload-e4b",
+			"agent_seat_resident": true, "agent_ctx_tokens": 8192, "queue_depth": 0,
+		})
+	}))
+	defer unknown.Close()
+
+	cfg := config.Default()
+	cfg.AgentDelegationEnabled = true
+	cfg.DelegateRemotes = []string{known.URL, unknown.URL}
+
+	s := New(pipeline.New(cfg, nil, nil, nil))
+	out := s.fleetView(context.Background(), cfg)
+	nodes, ok := out["nodes"].([]any)
+	if !ok || len(nodes) != 2 {
+		t.Fatalf("fleet nodes = %v, want 2 entries", out["nodes"])
+	}
+	var knownNode, unknownNode map[string]any
+	for _, n := range nodes {
+		nm := n.(map[string]any)
+		switch nm["node_id"] {
+		case "known-node":
+			knownNode = nm
+		case "unknown-node":
+			unknownNode = nm
+		}
+	}
+	if knownNode == nil || unknownNode == nil {
+		t.Fatalf("missing expected nodes in %v", nodes)
+	}
+	served, ok := knownNode["served_models"].([]string)
+	if !ok || len(served) != 1 || served[0] != "offload-e4b" {
+		t.Errorf("known node served_models = %v, want [\"offload-e4b\"]", knownNode["served_models"])
+	}
+	if knownNode["gpu_util_pct"] != 42 {
+		t.Errorf("known node gpu_util_pct = %v, want 42", knownNode["gpu_util_pct"])
+	}
+	if _, present := unknownNode["gpu_util_pct"]; present {
+		t.Errorf("unknown node must NOT publish gpu_util_pct, got %v", unknownNode["gpu_util_pct"])
+	}
+	if _, present := unknownNode["served_models"]; !present {
+		t.Errorf("served_models key must be present (nil) even when the node publishes none, got %v", unknownNode)
+	}
+}

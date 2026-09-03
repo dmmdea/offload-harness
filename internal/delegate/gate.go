@@ -66,10 +66,10 @@ func EstimateTokens(c core.AgentContract) int {
 //     occupied, never to chase throughput on a weaker seat (quality-first,
 //     operator verbatim: "not a race about speed").
 //   - localBusy true ⇒ the best remote that passes the hard gate, ranked by
-//     capacity then by QueueDepth (ties: first listed, so the caller's roster
-//     order is the stable preference order — see betterRemote). No remote
-//     passes ⇒ LOCAL regardless — queued-local beats ineligible-remote every
-//     time.
+//     capacity, then by QueueDepth, then by GPU utilization (ties: first
+//     listed, so the caller's roster order is the stable preference order —
+//     see betterRemote). No remote passes ⇒ LOCAL regardless — queued-local
+//     beats ineligible-remote every time.
 //
 // Place is pure: it never probes anything. Callers build the inputs from
 // FetchNodeView + LocalBusy.
@@ -97,10 +97,22 @@ func Place(st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeV
 // STRICTLY better candidate displaces, so equal seats are kept in roster order
 // and the caller's list stays the stable preference order it has always been.
 //
-// Four ordered keys, all boolean-or-int, so the ordering is a total preorder
-// and cannot be intransitive on a MIXED fleet (some nodes publish capacity,
-// some do not — a key like "more free slots" is uncomparable across those and
-// would need a number invented for the silent half):
+// Four ordered keys, all boolean-or-int. Keys 1-3 form a total preorder over
+// the WHOLE fleet — some nodes publish capacity, some do not, but "more free
+// slots" is answered for every node by provablyStartsNow's PROVABLY (an
+// unknown reads as false, never as an invented number), so those three keys
+// never go incomparable.
+//
+// Key 4 does not carry that guarantee: it is comparable only within the
+// SUBSET of nodes that publish gpu_util_known, because an unknown utilization
+// is deliberately neither credited nor blamed rather than coerced into an
+// order. That is a real gap in the preorder — A(util 80, known) vs B(unknown)
+// vs C(util 10, known) gives C beats A while both A~B and B~C — so on a mixed
+// fleet where key 4 is the only key left undecided, the tie-break outcome
+// depends on roster order (the single left-to-right scan in Place) BY DESIGN,
+// exactly like every other tie these keys leave open. The fix, when it
+// matters, is operator-side: upgrade every node so gpu_util_known is uniformly
+// true and the ordering is total again.
 //
 //  1. NOT provably saturated beats saturated. `queue_depth` alone was never a
 //     placement signal — it is a count with no scale, and the node that
