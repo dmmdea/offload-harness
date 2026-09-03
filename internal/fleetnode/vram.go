@@ -66,6 +66,11 @@ type GPUDevice struct {
 	Name     string  `json:"name"`
 	TotalGiB float64 `json:"vram_total_gb"`
 	FreeGiB  float64 `json:"vram_free_gb"`
+	// UtilPct is nvidia-smi utilization.gpu (0-100) when the query carried it.
+	// UtilKnown distinguishes "0 %" from "not queried" (a 5-field line from an
+	// older launcher); consumers must never treat an unknown as idle.
+	UtilPct   int  `json:"util_pct"`
+	UtilKnown bool `json:"util_known"`
 }
 
 // ParseSmiMemoryDevices parses `nvidia-smi --query-gpu=index,uuid,name,
@@ -100,7 +105,7 @@ func ParseSmiMemoryDevices(out string) ([]GPUDevice, error) {
 			continue
 		}
 		fields := strings.Split(line, ",")
-		if len(fields) != 5 {
+		if len(fields) != 5 && len(fields) != 6 {
 			continue
 		}
 		idx, err := strconv.Atoi(strings.TrimSpace(fields[0]))
@@ -133,13 +138,21 @@ func ParseSmiMemoryDevices(out string) ([]GPUDevice, error) {
 		if usedMiB > totalMiB {
 			continue
 		}
-		devices = append(devices, GPUDevice{
+		d := GPUDevice{
 			Index:    idx,
 			UUID:     uuid,
 			Name:     name,
 			TotalGiB: totalMiB / 1024,
 			FreeGiB:  (totalMiB - usedMiB) / 1024,
-		})
+		}
+		if len(fields) == 6 {
+			u, err := strconv.Atoi(strings.TrimSpace(fields[5]))
+			if err != nil || u < 0 || u > 100 {
+				continue
+			}
+			d.UtilPct, d.UtilKnown = u, true
+		}
+		devices = append(devices, d)
 	}
 	if len(devices) == 0 {
 		return nil, fmt.Errorf("nvidia-smi multi-device memory query: no valid GPU lines parsed (contract: vram_total_gb <= 0 = failed probe)")

@@ -530,3 +530,29 @@ func TestStartGlobalSamplerStops(t *testing.T) {
 		t.Errorf("sampler kept running after cancel: %d -> %d calls", after, final)
 	}
 }
+
+func TestParseSmiMemoryDevices_SixFieldsCarriesUtilization(t *testing.T) {
+	out := "0, GPU-aaaa, NVIDIA GeForce RTX 5070 Ti, 16303, 2456, 37\r\n" +
+		"1, GPU-bbbb, NVIDIA GeForce RTX 5060 Ti, 16311, 14100, 0\r\n"
+	devs, err := ParseSmiMemoryDevices(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if devs[0].UtilPct != 37 || devs[1].UtilPct != 0 {
+		t.Fatalf("util: got %d,%d want 37,0", devs[0].UtilPct, devs[1].UtilPct)
+	}
+	if !devs[0].UtilKnown || !devs[1].UtilKnown {
+		t.Fatal("6-field line must mark UtilKnown")
+	}
+}
+
+func TestParseSmiMemoryDevices_FiveFieldsStillParses(t *testing.T) {
+	out := "0, GPU-aaaa, NVIDIA GeForce RTX 3050, 6144, 1024\n"
+	devs, err := ParseSmiMemoryDevices(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if devs[0].UtilKnown || devs[0].UtilPct != 0 {
+		t.Fatal("5-field line must leave util UNKNOWN")
+	}
+}

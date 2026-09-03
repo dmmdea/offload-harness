@@ -1352,3 +1352,25 @@ func TestDispatchQueueUnlimitedControlArm(t *testing.T) {
 	pollJob(t, s, "qu-1", JobDone)
 	pollJob(t, s, "qu-2", JobDone)
 }
+
+func TestHealth_GpuUtilIsBusiestDevice(t *testing.T) {
+	opts := &Options{Snapshot: func() (Snapshot, bool) {
+		return Snapshot{TotalGiB: 32, FreeGiB: 20, At: time.Now(), Devices: []GPUDevice{
+			{Index: 0, UUID: "a", UtilPct: 12, UtilKnown: true},
+			{Index: 1, UUID: "b", UtilPct: 37, UtilKnown: true},
+		}}, true
+	}}
+	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, opts)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/fleet/health", nil))
+	var got struct {
+		Util  int  `json:"gpu_util_pct"`
+		Known bool `json:"gpu_util_known"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Util != 37 || !got.Known {
+		t.Fatalf("got %+v want util=37 known=true", got)
+	}
+}

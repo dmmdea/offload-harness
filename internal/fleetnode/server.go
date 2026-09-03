@@ -381,6 +381,11 @@ type healthPayload struct {
 	// means "single-device source" — the exact shape every pre-fix node and
 	// consumer already expects.
 	GpuDevices            []GPUDevice      `json:"gpu_devices,omitempty"`
+	// GpuUtilPct is the BUSIEST device's utilization (PAIR's multi-GPU rule,
+	// adopted deliberately: the shared card is the one that matters). Omitted
+	// when no device published a known utilization — absent ≠ idle.
+	GpuUtilPct   int  `json:"gpu_util_pct,omitempty"`
+	GpuUtilKnown bool `json:"gpu_util_known,omitempty"`
 	SupportedTaskTypes    []string         `json:"supported_task_types"`
 	LoadableModelFamilies []string         `json:"loadable_model_families"`
 	ModelFootprints       []FootprintEntry `json:"model_footprints"`
@@ -510,6 +515,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		MaxConcurrentJobs:     s.jobs.MaxConcurrent(),
 		MaxQueueDepth:         s.opts.Cfg.FleetQueueLimit(),
 		HarnessVersion:        s.opts.Version,
+	}
+	// GPU utilization: advertise the busiest device's utilization when known.
+	// Omitted when no device has published a known utilization — absent ≠ idle.
+	for _, d := range snap.Devices {
+		if !d.UtilKnown {
+			continue
+		}
+		payload.GpuUtilKnown = true
+		if d.UtilPct > payload.GpuUtilPct {
+			payload.GpuUtilPct = d.UtilPct
+		}
 	}
 	// Reclaim is advertised ONLY when measured. An unknown verdict omits both
 	// numbers so a consumer falls back to free VRAM instead of acting on a guess;

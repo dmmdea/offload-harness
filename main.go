@@ -2052,7 +2052,7 @@ func nvidiaSmiMemory() (string, error) {
 // this query at all: index/total-VRAM alone can't reliably identify a card
 // across a reboot or reseat, but the UUID is burned into it).
 func nvidiaSmiMemoryDevices() (string, error) {
-	out, err := exec.Command("nvidia-smi", "--query-gpu=index,uuid,name,memory.total,memory.used", "--format=csv,noheader,nounits").Output()
+	out, err := exec.Command("nvidia-smi", "--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu", "--format=csv,noheader,nounits").Output()
 	return string(out), err
 }
 
