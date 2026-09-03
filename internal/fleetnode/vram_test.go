@@ -556,3 +556,31 @@ func TestParseSmiMemoryDevices_FiveFieldsStillParses(t *testing.T) {
 		t.Fatal("5-field line must leave util UNKNOWN")
 	}
 }
+
+func TestParseSmiMemoryDevices_MalformedUtilizationKeptWithValidMemory(t *testing.T) {
+	// A malformed 6th field ([Not Supported]) must NOT skip the device;
+	// the valid memory data is too valuable to lose.
+	out := "0, GPU-aaaa, NVIDIA GeForce RTX 5070 Ti, 16303, 2456, [Not Supported]\r\n" +
+		"1, GPU-bbbb, NVIDIA GeForce RTX 5060 Ti, 16311, 14100, 150\r\n"
+	devs, err := ParseSmiMemoryDevices(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devs) != 2 {
+		t.Fatalf("got %d devices, want 2 (both kept despite bad util)", len(devs))
+	}
+	// Device 0: [Not Supported] → UtilKnown=false, UtilPct=0
+	if devs[0].UtilKnown || devs[0].UtilPct != 0 {
+		t.Errorf("device 0: UtilKnown=%v UtilPct=%d, want false/0 (malformed field)", devs[0].UtilKnown, devs[0].UtilPct)
+	}
+	if devs[0].TotalGiB == 0 || devs[0].FreeGiB == 0 {
+		t.Errorf("device 0 memory lost: TotalGiB=%v FreeGiB=%v", devs[0].TotalGiB, devs[0].FreeGiB)
+	}
+	// Device 1: 150 (out of range) → UtilKnown=false, UtilPct=0
+	if devs[1].UtilKnown || devs[1].UtilPct != 0 {
+		t.Errorf("device 1: UtilKnown=%v UtilPct=%d, want false/0 (out of range)", devs[1].UtilKnown, devs[1].UtilPct)
+	}
+	if devs[1].TotalGiB == 0 || devs[1].FreeGiB == 0 {
+		t.Errorf("device 1 memory lost: TotalGiB=%v FreeGiB=%v", devs[1].TotalGiB, devs[1].FreeGiB)
+	}
+}

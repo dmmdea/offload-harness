@@ -2051,6 +2051,8 @@ func nvidiaSmiMemory() (string, error) {
 // UUID via the primary_gpu_uuid config key — the uuid field is why it's in
 // this query at all: index/total-VRAM alone can't reliably identify a card
 // across a reboot or reseat, but the UUID is burned into it).
+// utilization.gpu is included to advertise which device is currently busiest,
+// helping the PAIR operator optimize placement and scheduling.
 func nvidiaSmiMemoryDevices() (string, error) {
 	out, err := exec.Command("nvidia-smi", "--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu", "--format=csv,noheader,nounits").Output()
 	return string(out), err

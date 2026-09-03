@@ -382,10 +382,12 @@ type healthPayload struct {
 	// consumer already expects.
 	GpuDevices            []GPUDevice      `json:"gpu_devices,omitempty"`
 	// GpuUtilPct is the BUSIEST device's utilization (PAIR's multi-GPU rule,
-	// adopted deliberately: the shared card is the one that matters). Omitted
-	// when no device published a known utilization — absent ≠ idle.
-	GpuUtilPct   int  `json:"gpu_util_pct,omitempty"`
-	GpuUtilKnown bool `json:"gpu_util_known,omitempty"`
+	// adopted deliberately: the shared card is the one that matters). ALWAYS
+	// present (never omitempty); when GpuUtilKnown is false, the value is 0
+	// and meaningless. GpuUtilKnown is the validity flag: true means nvidia-smi
+	// reported this, false means it was not queried or the query failed.
+	GpuUtilPct   int  `json:"gpu_util_pct"`
+	GpuUtilKnown bool `json:"gpu_util_known"`
 	SupportedTaskTypes    []string         `json:"supported_task_types"`
 	LoadableModelFamilies []string         `json:"loadable_model_families"`
 	ModelFootprints       []FootprintEntry `json:"model_footprints"`

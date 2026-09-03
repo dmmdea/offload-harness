@@ -165,6 +165,7 @@ func TestHealthGoldenShape(t *testing.T) {
 		"node_id": "node-a", "schema_version": 1,
 		"gpu_vendor": "nvidia", "gpu_arch": "blackwell",
 		"vram_total_gb": 16, "vram_free_gb": 12.5,
+		"gpu_util_pct": 0, "gpu_util_known": false,
 		"supported_task_types": ["image-gen", "run-graph"],
 		"loadable_model_families": ["sdxl", "comfy-graph"],
 		"model_footprints": [{"model_family":"sdxl","quant":"bf16","task_type":"image-gen","vram_peak_gb":9.6}],
@@ -1372,5 +1373,53 @@ func TestHealth_GpuUtilIsBusiestDevice(t *testing.T) {
 	}
 	if got.Util != 37 || !got.Known {
 		t.Fatalf("got %+v want util=37 known=true", got)
+	}
+}
+
+func TestHealth_GpuUtilKnownButZero(t *testing.T) {
+	// When the busiest device has UtilPct=0 but UtilKnown=true, both fields
+	// must be present and accurate. This tests that 0 is not collapsed to absent
+	// by omitempty.
+	opts := &Options{Snapshot: func() (Snapshot, bool) {
+		return Snapshot{TotalGiB: 32, FreeGiB: 20, At: time.Now(), Devices: []GPUDevice{
+			{Index: 0, UUID: "a", UtilPct: 0, UtilKnown: true},
+		}}, true
+	}}
+	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, opts)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/fleet/health", nil))
+	var got struct {
+		Util  int  `json:"gpu_util_pct"`
+		Known bool `json:"gpu_util_known"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Util != 0 || !got.Known {
+		t.Fatalf("got %+v want util=0 known=true", got)
+	}
+}
+
+func TestHealth_GpuUtilAllUnknown(t *testing.T) {
+	// When no device has UtilKnown=true, both fields must still be present:
+	// GpuUtilKnown=false and GpuUtilPct=0 (meaningless).
+	opts := &Options{Snapshot: func() (Snapshot, bool) {
+		return Snapshot{TotalGiB: 32, FreeGiB: 20, At: time.Now(), Devices: []GPUDevice{
+			{Index: 0, UUID: "a", UtilPct: 0, UtilKnown: false},
+			{Index: 1, UUID: "b", UtilPct: 0, UtilKnown: false},
+		}}, true
+	}}
+	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, opts)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/fleet/health", nil))
+	var got struct {
+		Util  int  `json:"gpu_util_pct"`
+		Known bool `json:"gpu_util_known"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Util != 0 || got.Known {
+		t.Fatalf("got %+v want util=0 known=false", got)
 	}
 }
