@@ -309,9 +309,9 @@ func (s *Server) refreshAgentResidency() {
 		a.idleCond().Broadcast() // release any synchronous waiter (RefreshAgentResidency)
 		a.mu.Unlock()
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), agentResidencyProbeTimeout)
-	defer cancel()
-	resident, err = s.rosterServes(ctx, s.opts.Cfg.Endpoint, s.agentSeat)
+	residentCtx, residentCancel := context.WithTimeout(context.Background(), agentResidencyProbeTimeout)
+	defer residentCancel()
+	resident, err = s.rosterServes(residentCtx, s.opts.Cfg.Endpoint, s.agentSeat)
 	if err != nil {
 		// agent_seat_resident:false is the one field that stops EVERY remote
 		// placement at this node, and the probe error was the only evidence of
@@ -321,7 +321,14 @@ func (s *Server) refreshAgentResidency() {
 		log.Printf("fleet: agent seat %q residency probe against %s failed; advertising agent_seat_resident:false for up to %s: %v",
 			s.agentSeat, s.opts.Cfg.Endpoint, agentResidencyTTL, err)
 	}
-	ids, ierr := s.rosterIDs(ctx, s.opts.Cfg.Endpoint)
+	// The ids fetch gets its OWN full-length timeout rather than reusing
+	// residentCtx: sharing one context meant a slow-but-healthy rosterServes
+	// call could burn most of the budget before rosterIDs even starts,
+	// starving a perfectly healthy roster and publishing served=nil for a
+	// seat that is, in fact, resident.
+	idsCtx, idsCancel := context.WithTimeout(context.Background(), agentResidencyProbeTimeout)
+	defer idsCancel()
+	ids, ierr := s.rosterIDs(idsCtx, s.opts.Cfg.Endpoint)
 	if ierr != nil {
 		ids = nil // unknown on failure — never keep a stale list, never flip resident
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -1501,4 +1502,34 @@ func TestHealth_ServedModelsRideResidencyRefresh(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("served_models never published")
+}
+
+// TestHealth_ServedModelsAbsentWhenIDsFetchFailsButResidentTrue pins the two
+// probes' independence: rosterServes succeeding and rosterIDs failing in the
+// SAME refresh cycle must publish agent_seat_resident:true (the residency
+// probe's own outcome) with served_models absent (fail closed for the ids
+// probe alone) — a failed ids fetch must never flip resident, and a
+// successful residency probe must never paper over a failed ids fetch with a
+// stale or fabricated list.
+func TestHealth_ServedModelsAbsentWhenIDsFetchFailsButResidentTrue(t *testing.T) {
+	s, _ := newTestServer(t, agentCfg(), &fakeRunner{}, nil)
+	s.rosterServes = func(ctx context.Context, endpoint, seat string) (bool, error) { return true, nil }
+	s.rosterIDs = func(ctx context.Context, endpoint string) ([]string, error) {
+		return nil, errors.New("roster ids fetch failed")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		m := decodeMap(t, do(t, s, http.MethodGet, "/fleet/health", "", nil))
+		if resident, present := m["agent_seat_resident"]; present && resident == true {
+			if v, present := m["served_models"]; present {
+				t.Fatalf("served_models = %v, want absent when the ids fetch failed", v)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("agent_seat_resident never turned true")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
