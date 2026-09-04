@@ -6,6 +6,17 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.7] — 2026-09-04 — vLLM seat template: mount the cache-server share for fs_native, refuse to start without it
+
+**Added.** The clean matrix (chain R, 2026-09-04) measured `fs_native` over the Lenovo's tmpfs on SMB 3.1.1 as the
+best cache-server transport at both KV precisions (fp16: 2.6–2.9 s vs Valkey 3.8 s; fp8: 0.80 s vs 0.92 s for a
+23.7k-token prefix). `setup/templates/vllm-seat/seat_fg.sh` now mounts the share before the MP server starts
+(`SEAT_L2_MOUNT_SRC`, `SEAT_L2_MOUNT_DIR`, optional `SEAT_L2_MOUNT_OPTS` / `SEAT_L2_MOUNT_TYPE`) and refuses to
+start when the mount fails, because an unmounted base_path is a local directory the adapter writes to and the
+seat would look healthy while the cache server held nothing. `docs/systems/cache-server.md` records the transport
+measurements and that a three-stage pipeline seat gets nothing from any L2.
+
+
 ## [0.113.6] — 2026-09-04 — an empty final message is nudged once before it counts as the answer
 
 **Fixed.** After its tool steps the Qube 27B seat sometimes closed with an EMPTY assistant message (delegation

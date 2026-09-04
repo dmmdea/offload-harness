@@ -54,7 +54,15 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    "declared but down" before its first contract waits on it. A block the load refused is reported
    as `invalid` and never dialed. The block is declarative: the seat wrapper runs what its own
    `seat.env` says, and the status note reminds the operator to keep the two in agreement.
-4. The seat wrapper refuses to start when its port is already bound (a foreign listener would otherwise pass
+4. `fs_native` over a network share is the measured transport of choice (Lenovo tmpfs over SMB 3.1.1: a
+   23.7k-token prefix back in 2.6–2.9 s at fp16 and 0.80 s at fp8 KV, vs 3.8 / 0.92 s through Valkey;
+   `--l2-prefetch-policy` / `--l2-store-policy` variants gained nothing; the legacy `fs` adapter was slower).
+   The seat wrapper mounts the share before the MP server starts when `SEAT_L2_MOUNT_SRC` / `SEAT_L2_MOUNT_DIR`
+   (and optionally `SEAT_L2_MOUNT_OPTS`, `SEAT_L2_MOUNT_TYPE`, default `cifs`) are set, and REFUSES to start when
+   the mount fails — an unmounted base_path is a local directory the adapter writes to, so the seat would look
+   healthy while the cache server held nothing. A three-stage pipeline seat gets nothing from any L2 (Valkey or
+   fs_native): keep it on the same-box tier.
+4b. The seat wrapper refuses to start when its port is already bound (a foreign listener would otherwise pass
    llama-swap's health check and serve the seat's traffic — measured 2026-09-03), and names its MP server unit
    from `SEAT_MP_UNIT` (default `lmcache-mp`). A benchmark or scratch engine in the same box must run on its own
    port, its own MP unit/port and its own served model names; it must never reuse the seat's.

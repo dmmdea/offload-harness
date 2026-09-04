@@ -41,6 +41,23 @@ MP_UNIT="${SEAT_MP_UNIT:-lmcache-mp}"
 # Everything the engine prints must reach llama-swap's per-model log AND the seat log.
 exec > >(tee -a "$LOG") 2>&1
 
+# fs_native over a network share (measured 2026-09-04: the Lenovo tmpfs over SMB 3.1.1 recovers a 23.7k-token prefix
+# in 2.6-2.9 s at fp16 and 0.80 s at fp8 KV, vs 3.8 / 0.92 s through Valkey). The share must be mounted BEFORE the
+# MP server opens its base_path, and a mount that fails must stop the seat: an unmounted base_path is a local
+# directory the adapter happily writes to, so the seat looks healthy and the cache server holds nothing.
+#   SEAT_L2_MOUNT_SRC=//cache-server/kvcache  SEAT_L2_MOUNT_DIR=/mnt/kvcache
+#   SEAT_L2_MOUNT_OPTS=credentials=/root/.smbcred,vers=3.1.1,rsize=4194304,wsize=4194304,cache=none,actimeo=1,noserverino,nobrl
+if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
+  mkdir -p "$SEAT_L2_MOUNT_DIR"
+  if ! mountpoint -q "$SEAT_L2_MOUNT_DIR"; then
+    if ! timeout 30 mount -t "${SEAT_L2_MOUNT_TYPE:-cifs}" "$SEAT_L2_MOUNT_SRC" "$SEAT_L2_MOUNT_DIR" -o "${SEAT_L2_MOUNT_OPTS:-}"; then
+      echo "seat_fg: REFUSING to start — cache-server share $SEAT_L2_MOUNT_SRC did not mount at $SEAT_L2_MOUNT_DIR"
+      exit 1
+    fi
+  fi
+  echo "seat_fg: cache-server share mounted: $(df -h "$SEAT_L2_MOUNT_DIR" | tail -1)"
+fi
+
 # Refuse to start on a port something else already owns. vLLM would load for ~2 minutes and then die on
 # "Address already in use" while llama-swap's health check passes against the FOREIGN listener — the seat is
 # then "ready" and serving somebody else's engine. Fail here, at once, and name the squatter.
