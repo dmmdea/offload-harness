@@ -6,6 +6,18 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.5] — 2026-09-04 — a completion budget starved by reasoning is raised once, not returned empty
+
+**Fixed.** On the Qube 27B seat (Qwen3.8 with `--reasoning-parser qwen3`) a digest spent 839 of the loop's
+default 1,024 completion tokens thinking; the visible answer was cut (`finish_reason: length`) or empty, and
+5 of 8 digest contracts came back with no findings and no summary. Reasoning counts against `max_tokens`, so a
+thinking model needs a larger budget than a plain one. The loop now re-issues a step ONCE with a 4× budget
+(cap 8,192) when the step ended on `length` with no content and no tool calls; anything usable falls through
+as before, and the retry does not consume a step. Operators of thinking seats should still set `max_tokens`
+(4,096 measured complete on the 27B: 1,253 tokens in 41 s). Tests:
+`TestReasoningStarvedBudgetIsRetriedOnceWithMoreTokens`, `TestStarvedBudgetRetriesOnlyOnce`.
+
+
 ## [0.113.4] — 2026-09-04 — an empty 502 from llama-swap is a wait, not a lost contract
 
 **Fixed.** When a seat's engine is replaced (seat_stop + reload), llama-swap keeps listing the model ready until

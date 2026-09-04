@@ -663,6 +663,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 	// prompts the server rejects).
 	l.resolveSpecReserve(ctx)
 	msgs := make([]Msg, 0, 8)
+	budgetRaised := false // one budget raise per run when reasoning starves the completion (see below)
 	if l.system != "" {
 		msgs = append(msgs, Msg{Role: "system", Content: l.system})
 	}
@@ -863,6 +864,25 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// which is the very race that gated the calibrator. Observe ignores a nil
 		// Serve, so a backend that reports no timings yields "insufficient_data"
 		// rather than a fabricated 0% reuse.
+		if comp.FinishReason == "length" && strings.TrimSpace(comp.Msg.Content) == "" && len(comp.Msg.ToolCalls) == 0 && !budgetRaised {
+			// 2026-09-04: the Qube 27B seat (Qwen3.8, --reasoning-parser qwen3) spent
+			// 839 of the loop's 1024 completion tokens THINKING; the visible answer
+			// was cut or empty and 5/8 digest contracts came back with nothing.
+			// Reasoning counts against max_tokens, so a thinking model needs a
+			// bigger budget than a plain one — raise it ONCE, to 4x (cap 8192), and
+			// re-issue the same step. Anything usable (partial text, a tool call)
+			// falls through as before; only the empty-and-truncated case retries.
+			budgetRaised = true
+			raised := l.maxTokens * 4
+			if raised > 8192 {
+				raised = 8192
+			}
+			if raised > l.maxTokens {
+				l.maxTokens = raised
+				step-- // re-run this step
+				continue
+			}
+		}
 		l.prefill.Observe(comp.Serve)
 		msgs = append(msgs, comp.Msg)
 
