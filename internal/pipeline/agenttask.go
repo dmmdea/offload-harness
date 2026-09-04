@@ -253,6 +253,15 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		return deferWire(core.DeferClassConfig, perr.Error())
 	}
 	built.Loop.WithProfile(prof)
+	if groundedContract(contract) {
+		// The document is attached, so the few-shot tool cycle teaches nothing the
+		// run needs and, on small seats, its user turn competes with the goal (the
+		// phantom off-document digests of 2026-08-31…09-03, both fleet nodes
+		// quarantined). Profile tools and system prompt stay; only the exemplar
+		// messages go.
+		built.Loop.WithoutExemplars()
+		meta.ExemplarsDropped = true
+	}
 	// Record the RESOLVED profile, not contract.Profile: an empty contract field defaults to
 	// "research" just above, and logging the empty string would misattribute every defaulted
 	// run. Set here, before Loop.Run, so the defer branches below carry it too -- a run that
@@ -821,4 +830,15 @@ func genErrIsTransport(err error) bool {
 	}
 	var nerr net.Error
 	return errors.As(err, &nerr)
+}
+
+// groundedContract reports whether the contract carries context documents — the
+// shape whose answer lives in the attached file rather than in tool calls.
+func groundedContract(c core.AgentContract) bool {
+	for _, d := range c.Context {
+		if len(d.Text) > 0 {
+			return true
+		}
+	}
+	return false
 }

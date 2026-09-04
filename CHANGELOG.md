@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.2] — 2026-09-03 — document-grounded contracts run without few-shot exemplars
+
+**Fixed — the second cut of the phantom-digest defect.** 0.113.1 closed, marked and synthesised the profile
+exemplars; validated on the Lenovo 4B seat, a digest still answered the exemplar's topic ("does not describe
+any maintenance windows") for a goal about eviction policies. On a small seat ANY exemplar user turn competes
+with the objective, whatever its wording. A contract that carries context documents (every `offload_research`
+digest, most delegate fan-outs) has its answer in the attached file and needs no tool-call demonstration, so
+the runner now drops the profile's exemplars for document-grounded contracts (`Loop.WithoutExemplars`,
+`pipeline.groundedContract`), keeping the profile's tool narrowing and tuned system prompt. Interactive
+tool-use runs (`agent_run`, bare-goal contracts) keep their few-shot. The run metadata records
+`exemplars_dropped`. Tests: `TestWithoutExemplarsRemovesTheFewShotFromTheTranscript`,
+`TestGroundedContractIsOneWithAttachedText`.
+
+
 ## [0.113.1] — 2026-09-03 — profile exemplars: closed, marked, synthetic (the phantom "Go version" digests)
 
 **Fixed — the fleet's off-goal "latest stable Go version" answers were the harness's own few-shot.**

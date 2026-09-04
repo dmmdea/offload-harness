@@ -458,6 +458,16 @@ func exemplarsFor(ex []Msg, have map[string]Tool) []Msg {
 // WithMaxSameTool overrides the per-run same-tool call cap (see
 // defaultMaxSameTool). n<=0 disables the cap (unlimited) — use only for tests
 // that specifically need to observe unthrottled repeats.
+// WithoutExemplars drops the profile's few-shot messages for this run. Document-
+// grounded contracts (a goal plus attached context docs — every research digest,
+// most delegate fan-outs) need no tool-call demonstration: the answer is in the
+// file, and on a 4B seat ANY exemplar user turn competes with the objective —
+// measured 2026-09-03 on the Lenovo node: with the closed, marked, synthetic
+// exemplars of 0.113.1 a digest still answered the exemplar's topic ("does not
+// describe any maintenance windows") for a goal about eviction policies. Call it
+// after WithProfile (WithProfile re-installs the profile's exemplars).
+func (l *Loop) WithoutExemplars() *Loop { l.exemplars = nil; return l }
+
 func (l *Loop) WithMaxSameTool(n int) *Loop { l.maxSameTool = n; return l }
 
 // WithParkHighRisk enables unattended parking: a call to a ParkOnHighRisk tool
