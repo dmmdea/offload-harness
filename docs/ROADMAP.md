@@ -218,8 +218,9 @@ updated first per house rule. Highlights, each with its named check:
   cudaErrorIllegalAddress once shimmed. Caught via a ctypes diagnostic shim (kept in the
   ComfyUI venv, logs + maps POSIX CUDA names). Local == upstream HEAD; report queued.
   Interim law-exception: int8 video DiTs compute on the 5070 Ti; bf16 image pools run on the
-  pair (proven). Fleet-node bug also open: the Lenovo seat intermittently answers a phantom
-  "Go version" goal (7+ repros logged) — dispatch-path contamination, needs a fix here.
+  pair (proven). Fleet-node bug FIXED in 0.113.1: the phantom "Go version" goal was the `research` profile's own open-ended
+  few-shot (`internal/agent/profiles.go`), continued by small seats instead of the objective; exemplars are now
+  closed, marked and synthetic, with registry tests.
 
 ### T1. Qwen3.8-Flash-Next — **THE CURRENT FOCUS (operator, 2026-08-26)**
 
