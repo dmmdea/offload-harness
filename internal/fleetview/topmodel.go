@@ -3,6 +3,7 @@ package fleetview
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,7 +18,9 @@ import (
 // rendering of an Overview snapshot, independent of Bubble Tea so it can be
 // unit-tested without a TTY. It builds three sections — a header line, a
 // per-node table, and JOBS/ERRORS feeds — mirroring fleet-ui's page but for
-// headless boxes with no browser.
+// headless boxes with no browser. width bounds the free-text columns (probe
+// errors, error messages) so a long message can't blow a narrow terminal's
+// line wrapping.
 func RenderTop(o Overview, width int) string {
 	var b strings.Builder
 
@@ -41,7 +44,7 @@ func RenderTop(o Overview, width int) string {
 			if name == "" {
 				name = n.Base
 			}
-			fmt.Fprintf(&b, "%-20s unreachable: %s\n", name, n.ProbeError)
+			fmt.Fprintf(&b, "%-20s unreachable: %s\n", name, truncate(n.ProbeError, width-34))
 			continue
 		}
 		name := n.NodeID
@@ -65,9 +68,13 @@ func RenderTop(o Overview, width int) string {
 
 	b.WriteString("\nJOBS\n")
 	for _, j := range recentJobs(o, 15) {
+		wall := ""
+		if w, _ := j.job["wall_ms"].(float64); w > 0 {
+			wall = fmt.Sprintf("%.1fs", w/1000)
+		}
 		fmt.Fprintf(&b, "%-6s %-20s %-12s %-10s %-8s %s\n",
-			jobAge(j.wallMs), j.node, str(j.job, "task"), str(j.job, "model"),
-			str(j.job, "state"), str(j.job, "id"))
+			jobAge(j.acceptedAt), j.node, str(j.job, "task"), str(j.job, "model"),
+			str(j.job, "state"), wall)
 	}
 
 	b.WriteString("\nERRORS\n")
@@ -77,25 +84,42 @@ func RenderTop(o Overview, width int) string {
 	}
 	for i := len(errs) - 1; i >= 0; i-- {
 		e := errs[i]
-		fmt.Fprintf(&b, "%-8s %-8s %-20s %s\n", e.Severity, e.Node, e.Source, e.Message)
+		fmt.Fprintf(&b, "%-8s %-8s %-20s %s\n", e.Severity, e.Node, e.Source, truncate(e.Message, width-39))
 	}
 
 	return b.String()
 }
 
-// jobRow pairs one job map with the node it came from, for the cross-node
-// JOBS feed.
-type jobRow struct {
-	node   string
-	job    map[string]any
-	wallMs float64
+// truncate clips s to at most w runes, appending an ellipsis when it does —
+// used to keep free-text columns (probe errors, error messages) from
+// blowing past the terminal width RenderTop was asked to fit. w<=0 (unknown
+// or too-narrow width) disables truncation rather than mangling the text.
+func truncate(s string, w int) string {
+	r := []rune(s)
+	if w <= 0 || len(r) <= w {
+		return s
+	}
+	if w == 1 {
+		return string(r[:1])
+	}
+	return string(r[:w-1]) + "…"
 }
 
-// recentJobs flattens every node's Jobs slice into one feed capped at n
-// entries. Each node's Jobs slice already arrives newest-first from the
-// poller (internal/fleetview's collector), so this just interleaves nodes in
-// order and truncates — no re-sort needed, and jobs carry no absolute
-// timestamp to sort by anyway (only accepted_at, on the node's own clock).
+// jobRow pairs one job map with the node it came from and its accepted_at
+// (unix seconds, cross-node comparable — unlike wall_ms it is not a
+// per-job duration but a shared clock reading), for the cross-node JOBS feed.
+type jobRow struct {
+	node       string
+	job        map[string]any
+	acceptedAt float64
+}
+
+// recentJobs flattens every node's Jobs slice into one feed, sorted newest
+// `accepted_at` first across ALL nodes, capped at n entries. This mirrors
+// ui.html's `rows.sort((a,b)=>b.t-a.t)` — accepted_at is a real unix
+// timestamp (unlike wall_ms, a per-job duration), so it is safe to compare
+// across nodes. A job missing accepted_at sorts as if it happened at epoch 0
+// (oldest), never as most-recent.
 func recentJobs(o Overview, n int) []jobRow {
 	var rows []jobRow
 	for _, node := range o.Nodes {
@@ -104,24 +128,36 @@ func recentJobs(o Overview, n int) []jobRow {
 			name = node.Base
 		}
 		for _, j := range node.Jobs {
-			wall, _ := j["wall_ms"].(float64)
-			rows = append(rows, jobRow{node: name, job: j, wallMs: wall})
-			if len(rows) >= n {
-				return rows
-			}
+			at, _ := j["accepted_at"].(float64)
+			rows = append(rows, jobRow{node: name, job: j, acceptedAt: at})
 		}
+	}
+	sort.SliceStable(rows, func(i, k int) bool { return rows[i].acceptedAt > rows[k].acceptedAt })
+	if len(rows) > n {
+		rows = rows[:n]
 	}
 	return rows
 }
 
-// jobAge renders a job's wall time as a short duration string; jobs carry no
-// absolute timestamp usable against the delegator's clock, so this reports
-// the job's own duration rather than time-since-now.
-func jobAge(wallMs float64) string {
-	if wallMs <= 0 {
+// jobAge renders time-since-accepted the way ui.html's `ago` does: seconds
+// under a minute, minutes under an hour, else hours. acceptedAt<=0 (missing)
+// renders as "-" rather than a nonsensical multi-decade age.
+func jobAge(acceptedAt float64) string {
+	if acceptedAt <= 0 {
 		return "-"
 	}
-	return (time.Duration(wallMs) * time.Millisecond).String()
+	s := time.Now().Unix() - int64(acceptedAt)
+	if s < 0 {
+		s = 0
+	}
+	switch {
+	case s < 60:
+		return fmt.Sprintf("%ds", s)
+	case s < 3600:
+		return fmt.Sprintf("%dm", s/60)
+	default:
+		return fmt.Sprintf("%dh", s/3600)
+	}
 }
 
 // topModel is the Bubble Tea client of a running fleet-ui: it polls
