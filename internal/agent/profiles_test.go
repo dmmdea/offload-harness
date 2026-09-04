@@ -320,3 +320,57 @@ func TestResearchProfileNPUToolsSurviveNarrowing(t *testing.T) {
 		}
 	}
 }
+
+
+// TestProfileExemplarsCloseWithAFinalAnswer: an exemplar thread that ends on a tool
+// result is an OPEN conversation, and a small seat continues it instead of the
+// objective (the research profile's "latest stable Go version" thread produced the
+// Lenovo 4B's phantom digests, 2026-08-31…09-03, and quarantined both fleet nodes).
+// Every profile's last exemplar must be the assistant's final, tool-less answer.
+func TestProfileExemplarsCloseWithAFinalAnswer(t *testing.T) {
+	for name, p := range profileRegistry {
+		if len(p.Exemplars) == 0 {
+			continue
+		}
+		last := p.Exemplars[len(p.Exemplars)-1]
+		if last.Role != "assistant" || len(last.ToolCalls) != 0 || strings.TrimSpace(last.Content) == "" {
+			t.Errorf("profile %q: exemplar thread must end with a final assistant answer (role=%q, tool_calls=%d, content=%q)",
+				name, last.Role, len(last.ToolCalls), last.Content)
+		}
+	}
+}
+
+// TestProfileExemplarUserTurnsAreMarked: every exemplar user turn says it is a worked
+// example, so nothing in the preamble can be mistaken for the objective.
+func TestProfileExemplarUserTurnsAreMarked(t *testing.T) {
+	for name, p := range profileRegistry {
+		for i, m := range p.Exemplars {
+			if m.Role == "user" && !strings.HasPrefix(m.Content, "(worked example, not the task)") {
+				t.Errorf("profile %q exemplar[%d]: user turn is not marked as a worked example: %q", name, i, m.Content)
+			}
+		}
+	}
+}
+
+// TestProfileExemplarsUseNoRealWorldTopic: exemplar questions and URLs must be
+// synthetic (reserved .invalid hosts, placeholder repos), never a question a seat
+// could try to answer for real.
+func TestProfileExemplarsUseNoRealWorldTopic(t *testing.T) {
+	banned := []string{"go version", "go.dev", "golang"}
+	for name, p := range profileRegistry {
+		for i, m := range p.Exemplars {
+			low := strings.ToLower(m.Content)
+			for _, c := range m.ToolCalls {
+				low += " " + strings.ToLower(c.Args)
+			}
+			for _, b := range banned {
+				if strings.Contains(low, b) {
+					t.Errorf("profile %q exemplar[%d]: real-world topic %q in an exemplar", name, i, b)
+				}
+			}
+			if strings.Contains(low, "http") && !strings.Contains(low, ".invalid") && !strings.Contains(low, "github.com/you/") {
+				t.Errorf("profile %q exemplar[%d]: exemplar URL is not a reserved placeholder: %q", name, i, m.Content)
+			}
+		}
+	}
+}

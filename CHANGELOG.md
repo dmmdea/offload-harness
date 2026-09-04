@@ -6,6 +6,25 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.1] — 2026-09-03 — profile exemplars: closed, marked, synthetic (the phantom "Go version" digests)
+
+**Fixed — the fleet's off-goal "latest stable Go version" answers were the harness's own few-shot.**
+Since 2026-08-31 the Lenovo 4B seat (and, on 2026-09-03, both fleet nodes) intermittently answered research
+digests with "the user's question about the latest stable Go version cannot be answered from this document",
+failed acceptance, and were quarantined for off-document answers. ADR 0029/0032 and the ROADMAP recorded it
+as "dispatch-path contamination"; `internal/research` grew a document fingerprint to *detect* it. The source
+was `internal/agent/profiles.go`: the `research` profile's exemplar — which the small tiers seed as their
+default `agent_profile` — was an OPEN thread whose user turn was literally "What is the latest stable Go
+version?" and whose last message was a tool result, never an answer. A small seat continued that thread
+instead of the objective. Every profile's exemplars are now (1) closed by a final assistant answer,
+(2) marked "(worked example, not the task)" on each user turn, (3) synthetic (reserved `.invalid` hosts, a
+placeholder repo) so nothing in the preamble is a question a seat could answer for real, and (4) each tuned
+system prompt states that the task is always the last user message. Three registry tests enforce it
+(`TestProfileExemplarsCloseWithAFinalAnswer`, `TestProfileExemplarUserTurnsAreMarked`,
+`TestProfileExemplarsUseNoRealWorldTopic`). Reported by an operator session running `offload_research`.
+Nodes quarantined by this defect can be cleared; the document-fingerprint tripwire stays as defence in depth.
+
+
 ## [0.113.0] — 2026-09-03 — fleet overview: the PAIR-inspired operator surface
 
 A 2026-09-03 gap analysis against the PAIR project concluded its live operator page was the part
