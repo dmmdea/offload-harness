@@ -27,6 +27,8 @@ Detailed documentation lives in `docs/`. This file only routes you there.
   they are, why they are separate Go modules, and the regenerate/re-vendor cycle.
 - [`docs/systems/cache-server.md`](docs/systems/cache-server.md) — the optional second-device KV tier
   (`kv_cache_server`): off by default, capacity at parity cost, the pipeline-layout constraint.
+- [`docs/systems/fleet-overview.md`](docs/systems/fleet-overview.md) — `fleet-ui` / `top` /
+  `fleet-smoke`: the read-only operator page on the delegator, its poller, and the jobs/errors feeds.
 - [`docs/systems/opencode-integration.md`](docs/systems/opencode-integration.md) — the harness inside
   opencode: MCP registration, rules parity, and the `opencode-local-offload` plugin.
 - [`docs/architecture/decisions/`](docs/architecture/decisions/README.md) — Architecture Decision

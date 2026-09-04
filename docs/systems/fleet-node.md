@@ -35,13 +35,14 @@ stops accepting work while remaining readable.
 
 ## How the system works
 
-`fleet-serve` exposes three routes:
+`fleet-serve` exposes four routes:
 
 | Route | Purpose |
 |---|---|
-| `GET /fleet/health` | Node identity, GPU vendor and architecture, live total and free VRAM, supported task types, loadable model families, measured footprints, queue depth, and the node's job capacity (running / queued / both limits) |
+| `GET /fleet/health` | Node identity, GPU vendor and architecture, live total and free VRAM, supported task types, loadable model families, measured footprints, queue depth, the node's job capacity (running / queued / both limits), GPU utilization, host CPU/RAM, and the agent lane's served-models roster (0.113.0) |
 | `POST /fleet/dispatch` | Submit a job; returns `202` with an ack |
-| `GET /fleet/jobs/{id}` | Poll job state and result |
+| `GET /fleet/jobs/{id}` | Poll one job's state and result |
+| `GET /fleet/jobs` | Cluster jobs feed: recent jobs across this node, newest first, payload-free (0.113.0) |
 
 The dispatch envelope is parsed **strictly** — unknown fields are rejected, and the body is capped.
 Several contract-reserved fields are accepted and ignored, so the contract can grow without the node
@@ -608,12 +609,43 @@ resolves, AND the listener posture is one dispatch will accept:
 | `agent_seat` | The resolved planner seat (`agent_model`, else the workhorse). |
 | `agent_ctx_tokens` | The seat's serving ceiling, **from config** (`agent_ctx_tokens`) — never probed on the health cadence, because the live-window probe can cold-start a multi-GB model. `0` = omitted = "ceiling unknown", which the delegator's gate reads as never-fits. |
 | `agent_seat_resident` | Roster-**verified**: a cached probe of llama-swap's `/v1/models` (alias-aware) saw the seat. The cache refreshes in the background at most once per 30 s; the handler never blocks on llama-swap. |
+| `served_models` (0.113.0) | The same cached probe's full roster id list — omitted/empty on a cold cache or a failed ids fetch (unknown, never a stale list). `internal/delegate/gate.go`'s `seatServed` uses this to check the roster actually names `agent_seat`, a stronger check than `agent_seat_resident` alone: a node can be roster-resident under one alias while its `served_models` list shows a different one after a rename. |
 
 Residency **fails closed** twice over: until the first probe lands the answer is `false`, and a
 probe *failure* publishes `false` rather than keeping the last good answer — advertising a seat
 off a stale success while llama-swap is down would route agent work at a node that cannot run
 it, whereas `false` only costs a conservative local placement. The failure is still cached for
 a full TTL window, so a dead endpoint is probed once per window, not hammered per request.
+
+### Health advertisement — GPU utilization and host CPU/RAM (0.113.0, fleet-overview)
+
+Four more fields, added for [fleet-overview](fleet-overview.md)'s per-node cards and its placement
+tie-break ([ADR 0034](../architecture/decisions/0034-fleet-overview-is-a-read-only-page-on-the-delegator.md)):
+
+| Field | Meaning |
+|---|---|
+| `gpu_util_pct` / `gpu_util_known` | The **busiest device's** utilization (PAIR's multi-GPU rule). **Always present, never `omitempty`** — unlike the agent fields above, `gpu_util_known: false` is itself meaningful (unknown, not idle), so the key must never simply vanish. Known only when at least one device's snapshot reports a valid reading; the `nvidia-smi`-derived snapshot populates it, the ADAPTER-level WDDM fallback path does not. |
+| `host_cpu_pct` | Coarse host CPU busy %, from a background sampler (`internal/hostsample`) — two cumulative CPU-time readings a sample interval apart. `omitempty`. |
+| `host_ram_used_gb` / `host_ram_total_gb` | Host RAM used/total, same sampler. `omitempty`. |
+
+All three host fields are emitted together only when `internal/hostsample.Sampler.Load()` returns a
+`Known` sample — there is no companion `*_known` flag for them, unlike `gpu_util_known`, because
+`host_ram_total_gb` is never genuinely `0` when known and therefore serves as the group's own
+presence signal: check it (or the key's mere presence) before trusting a `host_cpu_pct` of `0` as a
+real reading rather than an absent field. The handler never samples itself — it only reads the
+sampler's last cached value, the same pattern the VRAM snapshot already uses.
+
+### `GET /fleet/jobs` — the cluster jobs feed (0.113.0)
+
+`GET /fleet/jobs?limit=N` (default 50, capped at 500) returns `{"jobs": [...]}`, newest first,
+**deliberately unauthenticated**: every row is metadata only — `id`, `task`, `model`, `state`,
+`agent`, `accepted_at`/`started_at`/`finished_at`, `wall_ms`, and `error` (truncated to 200 runes) —
+never the job's `payload` or its result, so there is nothing here the per-job bearer gate
+(`handleJob`, `GET /fleet/jobs/{id}`) exists to protect. It exists for
+[fleet-overview](fleet-overview.md)'s cross-node JOBS feed and `fleet-ui`'s per-node job lists; a
+node that predates 0.113.0 answers this route with a permanent 404, which the poller distinguishes
+from a transient failure only by effect (it keeps the node's last-known job list either way) — see
+fleet-overview.md's "A failed `/fleet/jobs` fetch is distinguished from an empty one".
 
 ### Job protocol (delegator ↔ node)
 
@@ -666,3 +698,6 @@ a full TTL window, so a dead endpoint is probed once per window, not hammered pe
 - [../FLEET-NODE.md](../FLEET-NODE.md) — operator guide
 - [../flows/fleet-job-lifecycle.md](../flows/fleet-job-lifecycle.md)
 - [../architecture/decisions/0008-pdh-primary-vram-sampling.md](../architecture/decisions/0008-pdh-primary-vram-sampling.md)
+- [fleet-overview.md](fleet-overview.md) — the delegator-side operator page that reads these health
+  and jobs fields
+- [../architecture/decisions/0034-fleet-overview-is-a-read-only-page-on-the-delegator.md](../architecture/decisions/0034-fleet-overview-is-a-read-only-page-on-the-delegator.md)

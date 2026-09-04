@@ -6,6 +6,36 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.0] — 2026-09-03 — fleet overview: the PAIR-inspired operator surface
+
+A 2026-09-03 gap analysis against the PAIR project concluded its live operator page was the part
+worth porting — its discovery/pairing/mTLS and port takeover were not, since this harness's
+Tailscale-only network and static roster are already a stronger trust boundary
+([ADR 0034](docs/architecture/decisions/0034-fleet-overview-is-a-read-only-page-on-the-delegator.md)).
+
+### Added
+- **`fleet-ui`** verb + `internal/fleetview`: a read-only overview page on the delegator
+  (`127.0.0.1:18813`; tailnet with `--listen-trusted-network`) — one card per node with
+  GPU-utilization/CPU/VRAM/RAM sparklines, seat + residency, served models, queue; a cluster jobs
+  feed (node job stores + the delegation-log corpus) and an errors feed (probe / job / delegation).
+  `/api/overview` is the JSON behind it.
+- **`top`** verb: the same overview in a terminal (Bubble Tea client of a running `fleet-ui`) for
+  headless boxes.
+- **`fleet-smoke`** verb: one grounded, one-step contract per node (harness-default step budget —
+  a 1-step and then a 3-step hand-picked cap both deferred on real seats before final reply; the
+  real cost control is the 60 s timeout), table of node/seat/placement/wall/verdict, non-zero exit
+  unless every node PASSes.
+- **`/fleet/health`** additive fields: `gpu_util_pct` + `gpu_util_known` (busiest device, always
+  present), `host_cpu_pct` + `host_ram_used_gb` + `host_ram_total_gb` (omitempty, presence signalled
+  by `host_ram_total_gb`), `served_models` (omitempty). **`GET /fleet/jobs`**: payload-free job
+  metadata feed, deliberately unauthenticated.
+### Changed
+- **Placement**: a node whose published `served_models` omits its agent seat is ineligible (an
+  unpublished roster stays unknown and eligible); GPU utilization is the FOURTH ranking key, a
+  tie-breaker after queue depth, only when both nodes publish it — comparable only within that
+  subset, so a mixed fleet's tie against an unknown-utilization node resolves by roster order by
+  design (ADR 0034).
+
 ## [0.112.0] — 2026-09-03 — cache server: an optional second-device KV tier
 
 The 2026-09-01 verdict "LMCache recovers no time" was a benchmark sizing error (the RAM tier was smaller

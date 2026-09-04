@@ -39,6 +39,7 @@ code, treat everything else as background.
 | [0027](0027-freetoken-is-the-big-moe-opt-in-engine.md) | Accepted | FreeToken is the big-MoE opt-in engine on the blackwell-2x16 tier |
 | [0032](0032-a-peer-held-seat-is-waited-for-not-deferred.md) | Accepted | A peer-held seat is waited for, not deferred |
 | [0033](0033-cache-server-is-an-optional-second-device-tier.md) | Accepted | A second device's RAM is an optional KV tier, scored on capacity at parity cost |
+| [0034](0034-fleet-overview-is-a-read-only-page-on-the-delegator.md) | Accepted | Fleet overview is a read-only page served by the delegator, from data nodes already publish |
 
 
 ## Lifecycle
