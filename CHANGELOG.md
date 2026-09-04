@@ -6,6 +6,15 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.4] — 2026-09-04 — an empty 502 from llama-swap is a wait, not a lost contract
+
+**Fixed.** When a seat's engine is replaced (seat_stop + reload), llama-swap keeps listing the model ready until
+its wrapper's health grace expires and answers every request with an empty 502 in the meantime; the agent loop
+deferred eight contracts in 34 ms each as `lost_to_stack`. `seatwait.Retryable` now treats a 502 with an EMPTY
+body as retryable on the same bounded budget as a 429 (no generation happened); a 502 with a body is still a
+generation that died and is never retried. Test: `TestRetryableClasses` (two new cases).
+
+
 ## [0.113.3] — 2026-09-04 — vLLM seat template: refuse a bound port, per-seat MP unit
 
 **Fixed — a scratch engine could impersonate the seat.** On 2026-09-03 a benchmark arm bound the production

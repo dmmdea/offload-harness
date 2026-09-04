@@ -99,6 +99,8 @@ func TestRetryableClasses(t *testing.T) {
 		{500, `{"error":{"message":"unspecific error: health check timed out after 120s","src":"llama-swap"}}`, true},
 		{500, `CUDA error: out of memory`, false},
 		{502, `upstream closed`, false},
+		{502, ``, true},
+		{502, `  `, true},
 		{400, `context length exceeded`, false},
 		{200, ``, false},
 	}
