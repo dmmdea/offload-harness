@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,6 +20,9 @@ func runTop(args []string) error {
 	interval := fs.Duration("interval", 5*time.Second, "poll interval")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *interval < time.Second {
+		return fmt.Errorf("top: --interval must be at least 1s, got %s", *interval)
 	}
 	p := tea.NewProgram(fleetview.NewTop(*ui, *interval), tea.WithAltScreen())
 	_, err := p.Run()

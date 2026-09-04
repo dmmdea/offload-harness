@@ -289,15 +289,26 @@ func TestLocalBusyUnresolvableLeaseDirReadsIdle(t *testing.T) {
 	}
 }
 
+// TestRemoteEligible_ServedModelsWithoutSeatIsIneligible is the alias-blind
+// gate regression: eligibleRemote's AgentSeat ("offload-e4b") is an ALIAS,
+// the normal shape for an agent seat (agent-pool -> qwen3.8-27b-vllm,
+// offload-e4b -> gemma-4-e4b — see swapclient.go:9's plannerUnserved
+// lesson), never the canonical id the node's roster actually keys the model
+// by ("gemma-4-e4b"). A served_models list carrying ONLY the canonical id —
+// what an id-only publisher (the pre-fix swapRosterIDs) would have sent —
+// must read as ineligible: the honest negative below documents that the
+// node's job is to publish its aliases too (fleetnode's
+// swapRosterServedModels now does, via swapclient.Roster.Names), not for
+// this gate to special-case alias resolution on the delegator side.
 func TestRemoteEligible_ServedModelsWithoutSeatIsIneligible(t *testing.T) {
 	r := eligibleRemote()
-	r.ServedModels = []string{"gemma-4-e4b"} // published, seat absent
+	r.ServedModels = []string{"gemma-4-e4b"} // canonical id only — the alias seat is absent
 	if remoteEligible(schemaSubtask(), r) {
-		t.Fatal("a node whose served_models omits its agent seat must not be placed on")
+		t.Fatal("a node whose served_models publishes only the canonical id, omitting the alias agent_seat, must not be placed on")
 	}
-	r.ServedModels = []string{"gemma-4-e4b", r.AgentSeat}
+	r.ServedModels = []string{"gemma-4-e4b", r.AgentSeat} // now the alias is published too
 	if !remoteEligible(schemaSubtask(), r) {
-		t.Fatal("seat present in served_models must be eligible")
+		t.Fatal("seat present in served_models (as an alias, alongside the canonical id) must be eligible")
 	}
 	r.ServedModels = nil // pre-0.113.0 node: unknown, not a refusal
 	if !remoteEligible(schemaSubtask(), r) {

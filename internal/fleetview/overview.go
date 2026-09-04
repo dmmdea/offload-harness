@@ -69,6 +69,11 @@ type Error struct {
 }
 
 // Overview is the full snapshot Task 6 serves as JSON.
+//
+// Delegations carries only errors.go's delegationRowFields — operational
+// telemetry (where a contract landed, whether it passed, how long it took),
+// never contract CONTENT. This whole endpoint is unauthenticated, so that
+// exclusion is load-bearing: see delegationRowFields's doc comment.
 type Overview struct {
 	At                int64            `json:"at"`
 	DelegationEnabled bool             `json:"delegation_enabled"`

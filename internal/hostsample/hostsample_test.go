@@ -2,6 +2,7 @@ package hostsample
 
 import (
 	"context"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -21,6 +22,9 @@ func TestCPUPctNoElapsedIsUnknown(t *testing.T) {
 }
 
 func TestStartPublishesWithinTwoIntervals(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
+		t.Skipf("readCPU/readRAM have no implementation on %s; skipping a live sampler test that would just report Known=false forever", runtime.GOOS)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := Start(ctx, 50*time.Millisecond)

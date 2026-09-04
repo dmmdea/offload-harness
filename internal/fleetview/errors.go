@@ -6,18 +6,26 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-	"unicode/utf8"
 )
 
 // maxDelegations bounds Overview.Delegations.
 const maxDelegations = 100
 
 // delegationRowFields are the delegation-log corpus keys this view keeps
-// (internal/delegate/run.go delegationLogLine, ~line 2360) plus "goal",
-// pulled from contract.goal and truncated to 120 runes. Decoded LOOSELY
+// (internal/delegate/run.go delegationLogLine, ~line 2360). Decoded LOOSELY
 // (map[string]any) on purpose: this package must not import internal/delegate
 // just to read its telemetry rows, and a future column should never break
 // this decode.
+//
+// Deliberately NOT here: "goal" (or anything else pulled from the row's
+// "contract"). `/api/overview` is unauthenticated (see the Security section
+// of docs/systems/fleet-overview.md) — the point of this row set is
+// operational telemetry about a delegation (where it landed, whether it
+// passed, how long it took), never the CONTENT of the contract that was
+// dispatched. An earlier revision truncated contract.goal to 120 runes and
+// published it as "goal"; that put contract text on the one route this
+// package serves with no auth at all, which is the exact leak class this
+// list exists to keep out.
 var delegationRowFields = []string{
 	"ts", "job_id", "node", "seat", "placement_reason",
 	"deferred", "defer_class", "acceptance_pass", "wall_ms", "error",
@@ -71,9 +79,10 @@ func (p *Poller) foldDelegationLog() {
 }
 
 // readDelegationShard loosely decodes every JSONL line of path, keeping only
-// delegationRowFields plus a truncated "goal" pulled from row["contract"].
-// A missing file returns nil, nil error handling — never surfaced as a
-// probe/job error, since a fresh install has no corpus yet.
+// delegationRowFields — never row["contract"] (see that var's doc comment for
+// why "goal" specifically must never ride along). A missing file returns nil,
+// nil error handling — never surfaced as a probe/job error, since a fresh
+// install has no corpus yet.
 func readDelegationShard(path string) []map[string]any {
 	f, err := os.Open(path)
 	if err != nil {
@@ -95,26 +104,7 @@ func readDelegationShard(path string) []map[string]any {
 				row[k] = v
 			}
 		}
-		row["goal"] = truncateGoal(goalFromContract(full))
 		out = append(out, row)
 	}
 	return out
-}
-
-func goalFromContract(full map[string]any) string {
-	c, ok := full["contract"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	return str(c, "goal")
-}
-
-// truncateGoal caps goal at 120 runes, cutting on a rune boundary — mirrors
-// intentLedger.dispatched's rule (internal/delegate/intent.go).
-func truncateGoal(goal string) string {
-	if utf8.RuneCountInString(goal) <= 120 {
-		return goal
-	}
-	r := []rune(goal)
-	return string(r[:120])
 }

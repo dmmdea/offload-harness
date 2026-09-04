@@ -61,8 +61,9 @@ to draw a node's sparklines.
 | `job` | `error` | A job in that node's `/fleet/jobs` feed reached state `error`. |
 | `delegation` | `warn` | A row in the delegation-log corpus was deferred, or ran but failed acceptance. |
 
-**`fleet-smoke` contract** — the harness's version of PAIR's "Test traffic" button: one grounded,
-one-step contract dispatched to every configured node with `route=remote` forced.
+**`fleet-smoke` contract** — the harness's version of PAIR's "Test traffic" button: one grounded
+contract (harness default step budget, 60 s cap) dispatched to every configured node with
+`route=remote` forced.
 
 ## How the system works
 
@@ -105,11 +106,12 @@ poller's own goroutine mutating the same maps on the next tick.
 **The delegation-log fold** (`errors.go`) reads today's and yesterday's day-sharded corpus files
 (`BaseDir()/delegation-log/YYYY-MM-DD.jsonl`), keeps the last `maxDelegations` rows, and loosely
 decodes only `delegationRowFields` (`ts`, `job_id`, `node`, `seat`, `placement_reason`, `deferred`,
-`defer_class`, `acceptance_pass`, `wall_ms`, `error`) plus a `goal` pulled out of the row's
-`contract` and truncated to 120 runes — a decode narrow enough that a future corpus column can never
-break it. A missing corpus file (fresh install, a delegator that has never run) is not an error. Every
-row that is `deferred` or failed acceptance becomes one `Error` (severity `warn`, source
-`delegation`), deduped on `"deleg|<job_id>"`.
+`defer_class`, `acceptance_pass`, `wall_ms`, `error`) — a decode narrow enough that a future corpus
+column can never break it, and deliberately excludes `contract` (and any field pulled from it, such
+as `goal`): `/api/overview` is unauthenticated, and contract content has no business on the one route
+this package serves with no auth at all. A missing corpus file (fresh install, a delegator that has
+never run) is not an error. Every row that is `deferred` or failed acceptance becomes one `Error`
+(severity `warn`, source `delegation`), deduped on `"deleg|<job_id>"`.
 
 **The embedded page** (`internal/fleetview/server.go` + `ui.html`) serves three routes: `GET /{$}`
 (the page itself, embedded via `go:embed`), `GET /api/overview` (the live `Overview` as JSON,
@@ -130,8 +132,9 @@ returns, `foldDelegationLog` reads the corpus and appends any new deferred/faile
 `pruneSeenErrLocked` bounds `seenErr`. A browser or `top` client only ever reads the result of the
 *last completed* tick through `Snapshot()`; it never blocks on or triggers a probe itself.
 
-**`fleet-smoke`, one contract per node** (`fleet_smoke_cmd.go`): for each configured base,
-`smokeContract` builds a one-step `AgentContract` whose only context doc carries a token
+**`fleet-smoke`, one grounded contract per node** (harness default step budget, 60 s cap;
+`fleet_smoke_cmd.go`): for each configured base, `smokeContract` builds an `AgentContract` whose
+only context doc carries a token
 (`PONG-<node-hint>`) nowhere else in the prompt, with acceptance `contains:<token>` — so a seat that
 merely echoes the goal text cannot pass (the delegation skill's parrot rule). `MaxSteps` is left at
 `0`, which `PrepareContract` fills in as the harness default (`core.AgentMaxStepsDefault`, 12), not a
@@ -224,11 +227,17 @@ itself exposes no form, button, or mutation of any kind — an operator watching
 dispatch or drain anything from here.
 
 **Unauthenticated on purpose, and safe because of what it carries.** `GET /fleet/jobs` (node side) is
-deliberately unauthenticated: it is metadata only (id, task, model, state, timestamps, a truncated
-error string) and never carries a job's `payload` or result — there is nothing on that route the
-per-job bearer gate (`handleJob`) exists to protect. `fleet-ui`'s own page and `/api/overview` are
-equally unauthenticated, for the same reason: the aggregate view is exactly as sensitive as the
-per-node routes it reads, no more.
+deliberately unauthenticated for id/task/model/state/timestamps — metadata only, and never a job's
+`payload` or result, so there is nothing there the per-job bearer gate (`handleJob`) exists to
+protect. Its `error` string is the one exception: an AGENT row's error text can echo contract content
+(the goal, a tool-result fragment) the way a media row's never does, so `handleJobs` applies the SAME
+bearer check `handleJob` uses — when a token is configured and the request carries no valid bearer, an
+agent row's `error` is omitted while every other field on every row (media rows included) stays as it
+was. `fleet-ui`'s own page and `/api/overview` are equally unauthenticated for the fields they carry:
+the aggregate adds only delegator-local placement/defer metadata on top of what the node routes already
+publish (`internal/fleetview/errors.go`'s `delegationRowFields` — timing, placement, pass/fail, never
+`contract` or anything pulled from it, such as a goal) — never contract text, and never more sensitive
+than the per-node routes it reads.
 
 **Tailnet-only bind, enforced twice.** `fleet-ui` refuses to bind `0.0.0.0`/`[::]`/a bare `:port`
 outright, and refuses any non-loopback address unless `--listen-trusted-network` is passed — the same
@@ -267,9 +276,17 @@ and by loading `fleet-ui` in a browser or running `top` against it.
   `pruneSeenErrLocked` drop its dedupe key. Between two ticks after eviction it can still be visible
   if the poller hasn't re-fetched yet — a one-tick staleness, not a leak.
 - **"Why did a node stop being placed on after I upgraded it?"** Check whether its `served_models`
-  roster now omits its own `agent_seat` — a roster alias mismatch (the seat's llama-swap alias
-  changed but the config's `agent_model`/roster reference did not follow) makes `seatServed` refuse
-  the node, correctly: the node is telling the truth about what it can currently serve.
+  list now omits its own `agent_seat`. As of 0.113.0 the node publishes `served_models` as CANONICAL
+  ids AND every alias (`swapclient.Roster.Names`) — the fix for the earlier alias-blind gate defect,
+  where an agent seat bound by alias (the normal shape: `agent-pool` -> `qwen3.8-27b-vllm`,
+  `offload-e4b` -> `gemma-4-e4b`) could publish only its canonical id and read as not-serving-its-own-
+  seat forever. So a genuinely stopped node usually means a real roster alias mismatch (the seat's
+  llama-swap alias changed but the config's `agent_model`/roster reference did not follow) —
+  `seatServed` refuses it correctly, because the node is telling the truth about what it can currently
+  serve. A pre-0.113.0 node/delegator pairing on either side of the upgrade is unaffected: an
+  unpublished `served_models` roster (empty/absent) reads as UNKNOWN, never a refusal, so an old node
+  talking to a new delegator (or a new node talking to an old delegator that ignores the field) keeps
+  its prior placement behavior exactly.
 - Treating `queue_depth` alone as a load signal on this page the way an older mental model might —
   read `jobs_running`/`jobs_queued` beside it, as [fleet-node.md](fleet-node.md) explains; this page
   shows both, not the ambiguous combined number alone.

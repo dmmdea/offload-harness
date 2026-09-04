@@ -78,12 +78,26 @@ func countNot(rows []smokeRow, verdict string) int {
 	return n
 }
 
+// exitError builds runFleetSmoke's non-zero-exit error for rows, or nil when
+// every row PASSed. Extracted so both output modes (table and --json) run the
+// SAME verdict check — the bug this guards against shipped once already:
+// --json returned right after encoding the rows, before the failed check
+// below ever ran, so a real fleet failure (a DEFER or FAIL row) still exited
+// 0 as long as --json was passed, which is exactly the mode a script checks
+// the exit code from.
+func exitError(rows []smokeRow) error {
+	if n := countNot(rows, "PASS"); n > 0 {
+		return fmt.Errorf("fleet-smoke: %d node(s) did not PASS", n)
+	}
+	return nil
+}
+
 // runFleetSmoke is the harness's version of PAIR's "Test traffic" button: one
-// grounded, one-step, cheap contract dispatched to EVERY configured fleet
-// node with route=remote forced (so it proves the node, never a local
-// fallback), then a table of where each landed. Non-zero exit unless every
-// row is PASS — a DEFER or FAIL here is real fleet signal, not a soft
-// warning to swallow.
+// grounded contract (harness default step budget, 60 s cap) dispatched to
+// EVERY configured fleet node with route=remote forced (so it proves the
+// node, never a local fallback), then a table of where each landed. Non-zero
+// exit unless every row is PASS — a DEFER or FAIL here is real fleet signal,
+// not a soft warning to swallow, in EITHER output mode (table or --json).
 func runFleetSmoke(args []string) error {
 	fs := flag.NewFlagSet("fleet-smoke", flag.ExitOnError)
 	fs.String("config", "", "config file path")
@@ -113,7 +127,6 @@ func runFleetSmoke(args []string) error {
 	}
 
 	rows := make([]smokeRow, 0, len(bases))
-	failed := false
 	for _, base := range bases {
 		hint := strings.TrimPrefix(strings.TrimPrefix(base, "http://"), "https://")
 		hint = strings.Split(hint, ":")[0]
@@ -147,18 +160,15 @@ func runFleetSmoke(args []string) error {
 				row.Verdict = "PASS"
 			}
 		}
-		if row.Verdict != "PASS" {
-			failed = true
-		}
 		rows = append(rows, row)
 	}
 
 	if *asJSON {
-		return json.NewEncoder(os.Stdout).Encode(rows)
+		if err := json.NewEncoder(os.Stdout).Encode(rows); err != nil {
+			return err
+		}
+		return exitError(rows)
 	}
 	fmt.Print(renderSmokeTable(rows))
-	if failed {
-		return fmt.Errorf("fleet-smoke: %d node(s) did not PASS", countNot(rows, "PASS"))
-	}
-	return nil
+	return exitError(rows)
 }

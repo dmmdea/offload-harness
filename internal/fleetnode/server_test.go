@@ -1007,7 +1007,7 @@ func waitForResidencyProbe(t *testing.T, s *Server) {
 // BACKGROUND probe the first GET kicked off lands. The roster hit count pins
 // the other half of the cache contract: one refresh cycle, single-flighted,
 // reused by every request inside the TTL — TWO roster GETs per cycle
-// (rosterServes for residency, rosterIDs for served_models; see the rosterIDs
+// (rosterServes for residency, rosterServedModels for served_models; see the rosterServedModels
 // field doc for why they are not one fetch), never more no matter the request
 // rate. The fake roster serves the seat ONLY as an alias, pinning
 // alias-awareness (the plannerUnserved idiom): an id-only reader would
@@ -1038,7 +1038,7 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 		t.Fatalf("agent_seat_resident = %v on the FIRST health (cache cold) — must fail closed until the probe lands, never block the handler", v)
 	}
 	if n := probes.Load(); n > 2 {
-		t.Fatalf("roster probes after ONE health request = %d, want at most 2 (rosterServes + rosterIDs)", n)
+		t.Fatalf("roster probes after ONE health request = %d, want at most 2 (rosterServes + rosterServedModels)", n)
 	}
 
 	// The background refresh the GET above kicked off is the only thing that
@@ -1049,7 +1049,7 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 		t.Fatalf("agent_seat_resident = %v after a successful ALIAS-served roster probe, want true", m["agent_seat_resident"])
 	}
 	if n := probes.Load(); n != 2 {
-		t.Fatalf("roster probes = %d, want exactly 2 (rosterServes + rosterIDs, single-flighted: concurrent/repeat health requests share one refresh cycle)", n)
+		t.Fatalf("roster probes = %d, want exactly 2 (rosterServes + rosterServedModels, single-flighted: concurrent/repeat health requests share one refresh cycle)", n)
 	}
 
 	// Inside the TTL every further request is served from the cache — health
@@ -1483,7 +1483,7 @@ func TestHealth_HostFieldsAbsentWhenNil(t *testing.T) {
 // residency test — see waitForResidencyProbe's rationale.
 func TestHealth_ServedModelsRideResidencyRefresh(t *testing.T) {
 	s, _ := newTestServer(t, agentCfg(), &fakeRunner{}, nil)
-	s.rosterIDs = func(ctx context.Context, endpoint string) ([]string, error) {
+	s.rosterServedModels = func(ctx context.Context, endpoint string) ([]string, error) {
 		return []string{"qwen3.5-9b-agent", "gemma-4-e4b"}, nil
 	}
 	s.rosterServes = func(ctx context.Context, endpoint, seat string) (bool, error) { return true, nil }
@@ -1505,7 +1505,7 @@ func TestHealth_ServedModelsRideResidencyRefresh(t *testing.T) {
 }
 
 // TestHealth_ServedModelsAbsentWhenIDsFetchFailsButResidentTrue pins the two
-// probes' independence: rosterServes succeeding and rosterIDs failing in the
+// probes' independence: rosterServes succeeding and rosterServedModels failing in the
 // SAME refresh cycle must publish agent_seat_resident:true (the residency
 // probe's own outcome) with served_models absent (fail closed for the ids
 // probe alone) — a failed ids fetch must never flip resident, and a
@@ -1514,7 +1514,7 @@ func TestHealth_ServedModelsRideResidencyRefresh(t *testing.T) {
 func TestHealth_ServedModelsAbsentWhenIDsFetchFailsButResidentTrue(t *testing.T) {
 	s, _ := newTestServer(t, agentCfg(), &fakeRunner{}, nil)
 	s.rosterServes = func(ctx context.Context, endpoint, seat string) (bool, error) { return true, nil }
-	s.rosterIDs = func(ctx context.Context, endpoint string) ([]string, error) {
+	s.rosterServedModels = func(ctx context.Context, endpoint string) ([]string, error) {
 		return nil, errors.New("roster ids fetch failed")
 	}
 
@@ -1531,6 +1531,77 @@ func TestHealth_ServedModelsAbsentWhenIDsFetchFailsButResidentTrue(t *testing.T)
 			t.Fatal("agent_seat_resident never turned true")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestJobsFeed_AgentErrorGatedByBearer is the regression for the served-past-
+// the-bearer-gate finding: /fleet/jobs itself stays unauthenticated (id/task/
+// model/state/timestamps are metadata nobody needed to protect), but an
+// AGENT job's `error` string can echo contract content the way a media job's
+// never does, so it must NOT cross the wire to a caller that fails the same
+// bearer check /fleet/jobs/{id} already applies.
+func TestJobsFeed_AgentErrorGatedByBearer(t *testing.T) {
+	cfg := imageCfg()
+	cfg.FleetAuthToken = "tok"
+	s, jobs := newTestServer(t, cfg, &fakeRunner{}, nil)
+	jobs.Admit("media-err", AcceptSpec{Task: "image-gen", Model: "sdxl"}, func(context.Context) (json.RawMessage, error) {
+		return nil, fmt.Errorf("media boom")
+	})
+	jobs.Admit("agent-err", AcceptSpec{Task: "agent", Model: "agent-seat", Agent: true}, func(context.Context) (json.RawMessage, error) {
+		return nil, fmt.Errorf("agent boom: leaked contract goal text")
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		rr := do(t, s, http.MethodGet, "/fleet/jobs?limit=10", "", nil)
+		if strings.Contains(rr.Body.String(), `"state":"error"`) && strings.Count(rr.Body.String(), `"state":"error"`) == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("both jobs never reached state=error: %s", rr.Body.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	rowsFor := func(rr *httptest.ResponseRecorder) (media, agent jobFeedRow) {
+		var body struct {
+			Jobs []jobFeedRow `json:"jobs"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode jobs feed: %v body=%s", err, rr.Body.String())
+		}
+		for _, row := range body.Jobs {
+			switch row.ID {
+			case "media-err":
+				media = row
+			case "agent-err":
+				agent = row
+			}
+		}
+		return
+	}
+
+	// Unauthenticated GET: the agent row's error is omitted; the media row's
+	// error, and every other field on both rows, is unchanged.
+	unauth := do(t, s, http.MethodGet, "/fleet/jobs?limit=10", "", nil)
+	media, agent := rowsFor(unauth)
+	if media.Error != "media boom" {
+		t.Errorf("unauthenticated media row error = %q, want unchanged \"media boom\"", media.Error)
+	}
+	if agent.Error != "" {
+		t.Errorf("unauthenticated agent row error = %q, want omitted behind the bearer gate", agent.Error)
+	}
+	if agent.ID != "agent-err" || agent.State != "error" || agent.Task != "agent" {
+		t.Errorf("unauthenticated agent row metadata must still be present: %+v", agent)
+	}
+
+	// Authenticated GET: both rows carry their error text.
+	auth := do(t, s, http.MethodGet, "/fleet/jobs?limit=10", "", map[string]string{"Authorization": "Bearer tok"})
+	media, agent = rowsFor(auth)
+	if media.Error != "media boom" {
+		t.Errorf("authenticated media row error = %q, want \"media boom\"", media.Error)
+	}
+	if agent.Error != "agent boom: leaked contract goal text" {
+		t.Errorf("authenticated agent row error = %q, want the full error text", agent.Error)
 	}
 }
 

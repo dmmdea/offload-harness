@@ -609,7 +609,7 @@ resolves, AND the listener posture is one dispatch will accept:
 | `agent_seat` | The resolved planner seat (`agent_model`, else the workhorse). |
 | `agent_ctx_tokens` | The seat's serving ceiling, **from config** (`agent_ctx_tokens`) — never probed on the health cadence, because the live-window probe can cold-start a multi-GB model. `0` = omitted = "ceiling unknown", which the delegator's gate reads as never-fits. |
 | `agent_seat_resident` | Roster-**verified**: a cached probe of llama-swap's `/v1/models` (alias-aware) saw the seat. The cache refreshes in the background at most once per 30 s; the handler never blocks on llama-swap. |
-| `served_models` (0.113.0) | The same cached probe's full roster id list — omitted/empty on a cold cache or a failed ids fetch (unknown, never a stale list). `internal/delegate/gate.go`'s `seatServed` uses this to check the roster actually names `agent_seat`, a stronger check than `agent_seat_resident` alone: a node can be roster-resident under one alias while its `served_models` list shows a different one after a rename. |
+| `served_models` (0.113.0) | The same cached probe's full roster name list — **canonical ids AND every alias** (`swapclient.Roster.Names`, not `IDs` alone) — omitted/empty on a cold cache or a failed fetch (unknown, never a stale list). `internal/delegate/gate.go`'s `seatServed` uses this to check the roster actually names `agent_seat`, a stronger check than `agent_seat_resident` alone: a node can be roster-resident under one alias while its `served_models` list shows a different one after a rename. Publishing aliases too matters because an agent seat is normally bound BY alias (`agent-pool` -> `qwen3.8-27b-vllm`, `offload-e4b` -> `gemma-4-e4b`); an id-only list would have made a correctly-served alias seat read as unserved. A pre-0.113.0 node/delegator pairing is unaffected: an unpublished (empty/absent) `served_models` reads as UNKNOWN, never a refusal. |
 
 Residency **fails closed** twice over: until the first probe lands the answer is `false`, and a
 probe *failure* publishes `false` rather than keeping the last good answer — advertising a seat
@@ -638,10 +638,13 @@ sampler's last cached value, the same pattern the VRAM snapshot already uses.
 ### `GET /fleet/jobs` — the cluster jobs feed (0.113.0)
 
 `GET /fleet/jobs?limit=N` (default 50, capped at 500) returns `{"jobs": [...]}`, newest first,
-**deliberately unauthenticated**: every row is metadata only — `id`, `task`, `model`, `state`,
-`agent`, `accepted_at`/`started_at`/`finished_at`, `wall_ms`, and `error` (truncated to 200 runes) —
-never the job's `payload` or its result, so there is nothing here the per-job bearer gate
-(`handleJob`, `GET /fleet/jobs/{id}`) exists to protect. It exists for
+**unauthenticated for id/task/model/state/`agent`/timestamps/`wall_ms`** — metadata only, never the
+job's `payload` or its result, so there is nothing there the per-job bearer gate (`handleJob`,
+`GET /fleet/jobs/{id}`) exists to protect. Its `error` string (truncated to 200 runes) is the one
+exception: an `agent: true` row's error text can echo contract content (the goal, a tool-result
+fragment) the way a media row's never does, so when `fleet_auth_token` is configured and the request
+carries no valid bearer, `handleJobs` omits `error` on every agent row while leaving it — and every
+other field on every row, media rows included — unchanged. It exists for
 [fleet-overview](fleet-overview.md)'s cross-node JOBS feed and `fleet-ui`'s per-node job lists; a
 node that predates 0.113.0 answers this route with a permanent 404, which the poller distinguishes
 from a transient failure only by effect (it keeps the node's last-known job list either way) — see

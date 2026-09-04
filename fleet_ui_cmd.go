@@ -35,6 +35,26 @@ func fleetUIRemotes(cfg config.Config, explicit []string) []string {
 	return out
 }
 
+// refuseListen is runFleetUI's bind-safety decision, extracted so it is
+// table-testable without a real listener: nil means listen is fine to bind,
+// a non-nil error is the refusal runFleetUI returns verbatim.
+//
+// Two checks, in order, and the order matters: the all-interfaces check must
+// run FIRST and unconditionally — trusted never overrides it, because
+// `--listen-trusted-network` exists to permit a single tailnet address, never
+// 0.0.0.0/[::]/a bare port (that refusal has its own message for exactly that
+// reason). Only past that gate does the loopback-vs-trusted check apply:
+// loopback is always fine, and anything else needs trusted.
+func refuseListen(listen string, trusted bool) error {
+	if strings.HasPrefix(listen, "0.0.0.0") || strings.HasPrefix(listen, "[::]") || strings.HasPrefix(listen, ":") {
+		return fmt.Errorf("fleet-ui: refusing to bind all interfaces (%s)", listen)
+	}
+	if !trusted && !netguard.LoopbackAddr(listen) {
+		return fmt.Errorf("fleet-ui: %s is not loopback; pass --listen-trusted-network to bind a tailnet address (never 0.0.0.0)", listen)
+	}
+	return nil
+}
+
 func runFleetUI(args []string) error {
 	fs := flag.NewFlagSet("fleet-ui", flag.ExitOnError)
 	fs.String("config", "", "config file path")
@@ -48,11 +68,14 @@ func runFleetUI(args []string) error {
 		return err
 	}
 	cfg, _ := loadCfgWithSource(fs)
-	if strings.HasPrefix(*listen, "0.0.0.0") || strings.HasPrefix(*listen, "[::]") || strings.HasPrefix(*listen, ":") {
-		return fmt.Errorf("fleet-ui: refusing to bind all interfaces (%s)", *listen)
+	if err := refuseListen(*listen, *trusted); err != nil {
+		return err
 	}
-	if !*trusted && !netguard.LoopbackAddr(*listen) {
-		return fmt.Errorf("fleet-ui: %s is not loopback; pass --listen-trusted-network to bind a tailnet address (never 0.0.0.0)", *listen)
+	if *interval < time.Second {
+		return fmt.Errorf("fleet-ui: --interval must be at least 1s, got %s", *interval)
+	}
+	if *history < 1 {
+		return fmt.Errorf("fleet-ui: --history must be at least 1, got %d", *history)
 	}
 	bases := fleetUIRemotes(cfg, remotes)
 	if len(bases) == 0 {

@@ -99,9 +99,9 @@ type Options struct {
 // store. Task/family advertisements are derived once at construction (config
 // is immutable while serving).
 type Server struct {
-	runner   Runner
-	jobs     *Jobs
-	opts     Options
+	runner Runner
+	jobs   *Jobs
+	opts   Options
 	// queue is the Option B consolidated pull queue (ADR 0030) — non-nil ONLY
 	// when this node is the config-elected holder (fleet_queue_host). Opened
 	// by EnableQueueHost; the routes mount only when it is non-nil.
@@ -124,17 +124,28 @@ type Server struct {
 	// (alias-aware). A seam so tests drive the residency cache without a live
 	// llama-swap; production always gets swapRosterServes.
 	rosterServes func(ctx context.Context, endpoint, seat string) (bool, error)
-	// rosterIDs answers "what model ids does the llama-swap behind endpoint
-	// actually serve?" — the roster's own id list (swapclient.Roster.IDs),
-	// advertised as served_models. A separate seam from rosterServes (tests
-	// need to drive them independently), but production fetches its own
-	// roster per call rather than sharing swapRosterServes's fetch — that
-	// would mean threading a shared Roster through both closures' signatures,
-	// which changes tests that already inject rosterServes alone. Two GETs
-	// per refresh, once per agentResidencyTTL window, is an acceptable cost
-	// for keeping today's residency seam untouched.
-	rosterIDs func(ctx context.Context, endpoint string) ([]string, error)
-	agentRes  agentResidency
+	// rosterServedModels answers "what names does the llama-swap behind
+	// endpoint actually serve?" — the roster's own canonical ids PLUS every
+	// alias (swapclient.Roster.Names), advertised as served_models.
+	//
+	// It was rosterIDs, publishing IDs() alone, until the alias-blind gate
+	// finding: agent seats are normally bound by ALIAS (agent-pool ->
+	// qwen3.8-27b-vllm, offload-e4b -> gemma-4-e4b — see swapclient.go:9's
+	// plannerUnserved lesson), so a delegator checking an alias seat name
+	// against an id-only served_models list would read a healthy node as
+	// not serving its own advertised agent_seat and silently drop it from
+	// placement. Names() is IDs() plus every alias, so this field is
+	// misnamed as "IDs" now and renamed to say what it actually publishes.
+	//
+	// A separate seam from rosterServes (tests need to drive them
+	// independently), but production fetches its own roster per call rather
+	// than sharing swapRosterServes's fetch — that would mean threading a
+	// shared Roster through both closures' signatures, which changes tests
+	// that already inject rosterServes alone. Two GETs per refresh, once per
+	// agentResidencyTTL window, is an acceptable cost for keeping today's
+	// residency seam untouched.
+	rosterServedModels func(ctx context.Context, endpoint string) ([]string, error)
+	agentRes           agentResidency
 }
 
 // agentResidency caches the roster's answer for the agent seat between health
@@ -153,9 +164,10 @@ type Server struct {
 type agentResidency struct {
 	mu       sync.Mutex
 	resident bool
-	// served is the roster's id list from the SAME refresh that set resident
-	// (rosterIDs, fetched alongside rosterServes in refreshAgentResidency). A
-	// failed id fetch publishes nil — never a stale list — and never flips
+	// served is the roster's ids+aliases list from the SAME refresh that set
+	// resident (rosterServedModels, fetched alongside rosterServes in
+	// refreshAgentResidency). A failed fetch publishes nil — never a stale
+	// list — and never flips
 	// resident on its own; a later placement gate reads absent/empty as
 	// UNKNOWN, exactly like a cold or failed residency probe.
 	served   []string
@@ -204,15 +216,15 @@ func (a *agentResidency) awaitProbe() {
 // per health request — the config cannot change under a running server.
 func New(runner Runner, jobs *Jobs, opts Options) *Server {
 	return &Server{
-		runner:       runner,
-		jobs:         jobs,
-		opts:         opts,
-		tasks:        SupportedTasksFor(opts.Cfg, opts.LoopbackListener),
-		families:     Families(opts.Cfg),
-		agentSeat:    opts.Cfg.AgentPlannerModel(""),
-		agentLane:    AgentLaneAdmissible(opts.Cfg, opts.LoopbackListener),
-		rosterServes: swapRosterServes,
-		rosterIDs:    swapRosterIDs,
+		runner:             runner,
+		jobs:               jobs,
+		opts:               opts,
+		tasks:              SupportedTasksFor(opts.Cfg, opts.LoopbackListener),
+		families:           Families(opts.Cfg),
+		agentSeat:          opts.Cfg.AgentPlannerModel(""),
+		agentLane:          AgentLaneAdmissible(opts.Cfg, opts.LoopbackListener),
+		rosterServes:       swapRosterServes,
+		rosterServedModels: swapRosterServedModels,
 	}
 }
 
@@ -229,16 +241,18 @@ func swapRosterServes(ctx context.Context, endpoint, seat string) (bool, error) 
 	return roster.Serves(seat), nil
 }
 
-// swapRosterIDs is the production served_models probe: one GET /v1/models,
-// answered as the roster's own id list. A separate roster fetch from
-// swapRosterServes (see the rosterIDs field doc) — accepted so the existing
+// swapRosterServedModels is the production served_models probe: one GET
+// /v1/models, answered as the roster's own ids PLUS every alias
+// (swapclient.Roster.Names — see the rosterServedModels field doc for why
+// IDs() alone was the alias-blind gate bug). A separate roster fetch from
+// swapRosterServes (see that field's doc) — accepted so the existing
 // rosterServes seam and its tests stay untouched.
-func swapRosterIDs(ctx context.Context, endpoint string) ([]string, error) {
+func swapRosterServedModels(ctx context.Context, endpoint string) ([]string, error) {
 	roster, err := swapclient.FetchRoster(ctx, endpoint, agentResidencyProbeTimeout)
 	if err != nil {
 		return nil, err
 	}
-	return roster.IDs(), nil
+	return roster.Names(), nil
 }
 
 // agentResident returns the cached residency answer, kicking off a background
@@ -322,18 +336,18 @@ func (s *Server) refreshAgentResidency() {
 		log.Printf("fleet: agent seat %q residency probe against %s failed; advertising agent_seat_resident:false for up to %s: %v",
 			s.agentSeat, s.opts.Cfg.Endpoint, agentResidencyTTL, err)
 	}
-	// The ids fetch gets its OWN full-length timeout rather than reusing
-	// residentCtx: sharing one context meant a slow-but-healthy rosterServes
-	// call could burn most of the budget before rosterIDs even starts,
-	// starving a perfectly healthy roster and publishing served=nil for a
-	// seat that is, in fact, resident.
-	idsCtx, idsCancel := context.WithTimeout(context.Background(), agentResidencyProbeTimeout)
-	defer idsCancel()
-	ids, ierr := s.rosterIDs(idsCtx, s.opts.Cfg.Endpoint)
-	if ierr != nil {
-		ids = nil // unknown on failure — never keep a stale list, never flip resident
+	// The served-models fetch gets its OWN full-length timeout rather than
+	// reusing residentCtx: sharing one context meant a slow-but-healthy
+	// rosterServes call could burn most of the budget before
+	// rosterServedModels even starts, starving a perfectly healthy roster
+	// and publishing served=nil for a seat that is, in fact, resident.
+	namesCtx, namesCancel := context.WithTimeout(context.Background(), agentResidencyProbeTimeout)
+	defer namesCancel()
+	names, nerr := s.rosterServedModels(namesCtx, s.opts.Cfg.Endpoint)
+	if nerr != nil {
+		names = nil // unknown on failure — never keep a stale list, never flip resident
 	}
-	served = ids
+	served = names
 }
 
 // RefreshAgentResidency ensures ONE residency probe has published an answer
@@ -372,7 +386,13 @@ func (s *Server) Handler() http.Handler {
 	// GET /fleet/jobs (no {id}) is a distinct ServeMux pattern from the one
 	// above — unauthenticated is deliberate: unlike /fleet/jobs/{id}, this
 	// route never carries a payload (Data is never set; see Jobs.Recent), so
-	// there is nothing here for the per-job bearer gate to protect.
+	// there is nothing here for the per-job bearer gate to protect on a MEDIA
+	// row. An AGENT row is different: its `error` string can echo contract
+	// content (the goal, a tool result fragment) the way a media job's never
+	// does, so handleJobs applies the SAME bearer check handleJob does and
+	// omits `error` on agent rows for a caller that fails it — id/task/
+	// model/state/timestamps stay unauthenticated on every row, exactly like
+	// before; only an agent row's `error` text is gated.
 	mux.HandleFunc("GET /fleet/jobs", s.handleJobs)
 	// {filename...} (not {filename}) is deliberate: it's a multi-segment
 	// wildcard, so a caller-supplied "/" or a %2F-hidden one still reaches the
@@ -529,11 +549,15 @@ type healthPayload struct {
 	// roster. False/omitted until the first probe lands, and on probe failure.
 	AgentResident bool `json:"agent_seat_resident,omitempty"`
 	AgentEnabled  bool `json:"agent_enabled,omitempty"`
-	// ServedModels is the CACHED roster id list (agentResidency.served),
+	// ServedModels is the CACHED roster name list — canonical ids AND every
+	// alias (agentResidency.served, from swapclient.Roster.Names) —
 	// refreshed on the same TTL/single-flight as AgentResident. Absent/empty
-	// = UNKNOWN (cold cache, or the ids fetch failed) — never a stale list.
-	// A later placement gate uses this to check a specific model is actually
-	// hosted here, not just that the agent seat is resident.
+	// = UNKNOWN (cold cache, or the fetch failed) — never a stale list. A
+	// later placement gate uses this to check a specific model is actually
+	// hosted here, not just that the agent seat is resident; because this
+	// list carries aliases too, an agent seat configured by its alias (the
+	// normal shape) is found here, not just a seat configured by canonical
+	// id.
 	ServedModels []string `json:"served_models,omitempty"`
 	// ---- Host CPU/RAM (hostsample) ----
 	// Emitted only when opts.Host is set AND its sample is Known. All three
@@ -1013,10 +1037,16 @@ type jobFeedRow struct {
 }
 
 // handleJobs is the cluster jobs feed: GET /fleet/jobs?limit=N, newest first,
-// capped at 500 rows. Deliberately unauthenticated — see the route comment in
-// Handler: this listing never carries a payload, so there is nothing here for
-// the per-job bearer gate (handleJob, above) to protect. `error` is truncated
-// to 200 runes so one runaway error string cannot blow up the feed response.
+// capped at 500 rows. The route itself is unauthenticated — id/task/model/
+// state/timestamps never carried anything worth gating (see the route
+// comment in Handler) — but an AGENT row's `error` string can echo contract
+// content (the goal text, a tool-result fragment), unlike a media row's,
+// which never does. So this handler applies the SAME bearer check handleJob
+// uses on /fleet/jobs/{id}: when a token is configured and the request does
+// not carry it, every agent row's `error` is omitted while the rest of the
+// row (and every media row, error included) is unchanged. `error` is
+// truncated to 200 runes so one runaway error string cannot blow up the feed
+// response.
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	if q := r.URL.Query().Get("limit"); q != "" {
@@ -1024,11 +1054,19 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
+	// authed: true when no token is configured (loopback-trust posture) or
+	// the request carries a valid bearer — the same rule handleJob applies
+	// per job. Computed once per request, not per row.
+	authed := s.opts.Cfg.FleetAuthToken == "" || bearerOK(r, s.opts.Cfg.FleetAuthToken)
 	rows := make([]jobFeedRow, 0, limit)
 	for _, v := range s.jobs.Recent(limit) {
+		errStr := v.Error
+		if v.Agent && !authed {
+			errStr = "" // agent error text may echo contract content; media rows are unaffected
+		}
 		row := jobFeedRow{
 			ID: v.ID, Task: v.Task, Model: v.Model, State: string(v.State), Agent: v.Agent,
-			AcceptedAt: v.AcceptedAt.Unix(), Error: truncateRunes(v.Error, 200),
+			AcceptedAt: v.AcceptedAt.Unix(), Error: truncateRunes(errStr, 200),
 		}
 		if !v.StartedAt.IsZero() {
 			row.StartedAt = v.StartedAt.Unix()

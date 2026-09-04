@@ -21,14 +21,16 @@ Tailscale-only network and static roster are already a stronger trust boundary
   `/api/overview` is the JSON behind it.
 - **`top`** verb: the same overview in a terminal (Bubble Tea client of a running `fleet-ui`) for
   headless boxes.
-- **`fleet-smoke`** verb: one grounded, one-step contract per node (harness-default step budget —
+- **`fleet-smoke`** verb: one grounded contract per node (harness default step budget, 60 s cap —
   a 1-step and then a 3-step hand-picked cap both deferred on real seats before final reply; the
   real cost control is the 60 s timeout), table of node/seat/placement/wall/verdict, non-zero exit
   unless every node PASSes.
 - **`/fleet/health`** additive fields: `gpu_util_pct` + `gpu_util_known` (busiest device, always
   present), `host_cpu_pct` + `host_ram_used_gb` + `host_ram_total_gb` (omitempty, presence signalled
-  by `host_ram_total_gb`), `served_models` (omitempty). **`GET /fleet/jobs`**: payload-free job
-  metadata feed, deliberately unauthenticated.
+  by `host_ram_total_gb`), `served_models` (omitempty; canonical ids AND aliases). **`GET
+  /fleet/jobs`**: payload-free job metadata feed, unauthenticated except an agent row's `error`
+  string behind the bearer gate when a token is configured.
+
 ### Changed
 - **Placement**: a node whose published `served_models` omits its agent seat is ineligible (an
   unpublished roster stays unknown and eligible); GPU utilization is the FOURTH ranking key, a

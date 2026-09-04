@@ -158,5 +158,44 @@ func (r Roster) IDs() []string {
 	return ids
 }
 
+// Names returns every name this roster answers Serves(true) for — each
+// canonical id FOLLOWED BY its aliases, in roster order, deduped
+// case-insensitively — for a caller that must publish (not merely check) the
+// full servable-name set.
+//
+// It exists for the same reason the package doc comment (swapclient.go:9)
+// gives for Serves matching aliases at all: llama-swap publishes canonical
+// ids in data[].id, but the names the harness actually binds — agent seats
+// very much included (agent-pool -> qwen3.8-27b-vllm, offload-e4b ->
+// gemma-4-e4b) — live only under meta.llamaswap.aliases. IDs() alone
+// reproduces exactly that defect one level up: a consumer that advertises
+// IDs() as "what this node serves" and a peer that checks the advertisement
+// against an alias seat name will never agree, so a healthy alias-bound seat
+// reads as unserved and the node silently drops out of consideration — the
+// plannerUnserved lesson, again, one hop further down the pipe. Names() is
+// the fix: publish everything Serves() would say yes to, not just the id
+// half of it.
+func (r Roster) Names() []string {
+	seen := make(map[string]bool, len(r.models))
+	names := make([]string, 0, len(r.models))
+	add := func(n string) {
+		key := strings.ToLower(n)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		names = append(names, n)
+	}
+	for _, m := range r.models {
+		add(m.ID)
+	}
+	for _, m := range r.models {
+		for _, a := range m.Aliases {
+			add(a)
+		}
+	}
+	return names
+}
+
 // Len is the number of roster entries.
 func (r Roster) Len() int { return len(r.models) }

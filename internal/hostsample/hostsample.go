@@ -47,8 +47,9 @@ func (s *Sampler) Load() (Sample, bool) {
 	return x.(Sample), true
 }
 
-// Start samples every interval. The first CPU % needs two readings, so the
-// first publish happens at the second tick; RAM is read on every tick.
+// Start samples every interval. The first CPU % needs two readings, but the
+// BASELINE reading is taken before the loop starts (not on the first tick),
+// so the first publish happens at the first tick, not the second.
 func Start(ctx context.Context, interval time.Duration) *Sampler {
 	s := &Sampler{}
 	go func() {
