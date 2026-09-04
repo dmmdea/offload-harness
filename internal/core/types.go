@@ -269,7 +269,7 @@ type Meta struct {
 	// actually reported timings. Present (>0) means the rest were measured; absent means
 	// unmeasured. Without it, prefill_tokens:0 is ambiguous between "the server reused
 	// everything" and "nothing was ever observed" -- opposite conclusions.
-	PrefillSteps  int     `json:"prefill_steps,omitempty"`
+	PrefillSteps int `json:"prefill_steps,omitempty"`
 	// AgentProfile is the agent profile this run actually resolved to.
 	//
 	// It is chosen at internal/pipeline/agenttask.go (contract.Profile, defaulting to
@@ -281,9 +281,12 @@ type Meta struct {
 	// quality figure aggregated across profiles is an average over materially different
 	// configurations. Without it, per-(seat, profile) cost cannot be separated at all.
 	AgentProfile string `json:"agent_profile,omitempty"`
-	PrefillTokens int64   `json:"prefill_tokens,omitempty"`
-	CacheTokens   int64   `json:"cache_tokens,omitempty"`
-	PrefillMS     float64 `json:"prefill_ms,omitempty"`
+	// ExemplarsDropped: the profile's few-shot was withheld because the contract is
+	// document-grounded (0.113.2).
+	ExemplarsDropped bool    `json:"exemplars_dropped,omitempty"`
+	PrefillTokens    int64   `json:"prefill_tokens,omitempty"`
+	CacheTokens      int64   `json:"cache_tokens,omitempty"`
+	PrefillMS        float64 `json:"prefill_ms,omitempty"`
 	// CacheHitInLoop marks a cache hit served from an entry that was WRITTEN by
 	// the agent loop's in-loop offload (T2-D) rather than by a recorded,
 	// caller-facing call.
