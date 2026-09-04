@@ -66,12 +66,19 @@ type GPUDevice struct {
 	Name     string  `json:"name"`
 	TotalGiB float64 `json:"vram_total_gb"`
 	FreeGiB  float64 `json:"vram_free_gb"`
+	// UtilPct is nvidia-smi utilization.gpu (0-100) when the query carried it.
+	// UtilKnown distinguishes "0 %" from "not queried" (a 5-field line from an
+	// older launcher); consumers must never treat an unknown as idle.
+	UtilPct   int  `json:"util_pct"`
+	UtilKnown bool `json:"util_known"`
 }
 
 // ParseSmiMemoryDevices parses `nvidia-smi --query-gpu=index,uuid,name,
-// memory.total,memory.used --format=csv,noheader,nounits` output — one line
-// per GPU, e.g. "0, GPU-1111aaaa-2222-3333-4444-555566667777, NVIDIA GeForce
-// RTX 5060 Ti, 16311, 867" — into an ordered []GPUDevice (nvidia-smi's own
+// memory.total,memory.used[,utilization.gpu] --format=csv,noheader,nounits`
+// output — one line per GPU, e.g. "0, GPU-1111aaaa-2222-3333-4444-555566667777,
+// NVIDIA GeForce RTX 5060 Ti, 16311, 867" (5 fields) or with utilization:
+// "0, GPU-1111aaaa-2222-3333-4444-555566667777, NVIDIA GeForce RTX 5060 Ti,
+// 16311, 867, 37" (6 fields) — into an ordered []GPUDevice (nvidia-smi's own
 // enumeration order, i.e. PCI bus order; NOT necessarily CUDA device order —
 // see HeadlineDevice's doc comment for why that distinction is the whole bug
 // this parser exists to fix, and SelectHeadlineDevice/primary_gpu_uuid for
@@ -80,16 +87,25 @@ type GPUDevice struct {
 // CSV) because it has a caller outside the snapshot/health path (the
 // pipeline's per-process footprint delta sampler), so its behavior cannot
 // change out from under that caller. This is a separate function over a
-// separate (5-field) query instead.
+// separate (5- or 6-field) query instead.
 //
 // CRLF and surrounding whitespace are tolerated (nvidia-smi emits \r\n on
 // Windows). Blank lines and lines that don't parse as "index, uuid, name,
-// total, used" are SKIPPED rather than failing the whole probe — a single
-// garbled/partial row (a transient nvidia-smi hiccup) must not take down
-// every other card's reading. A line whose total is <= 0, whose used is
+// total, used[, utilization]" are SKIPPED rather than failing the whole probe
+// — a single garbled/partial row (a transient nvidia-smi hiccup) must not take
+// down every other card's reading. A line whose total is <= 0, whose used is
 // negative, or whose used EXCEEDS its total is likewise skipped (not a
 // working GPU line — see the used>total check below for why this is a skip,
-// not a clamp). If NO line parses into a valid device, that IS an error: the
+// not a clamp).
+//
+// The optional 6th field (utilization.gpu) is parsed when present. If the 6th
+// field is malformed, out of range (not 0-100), or missing (5-field line), the
+// device is STILL returned with UtilKnown=false and UtilPct=0 — the memory
+// data is too valuable to lose over a transient utilization query failure or an
+// older query format. Only the first five fields are mandatory for a valid device;
+// the 6th is never required.
+//
+// If NO line parses into a valid device (memory fields), that IS an error: the
 // contract treats vram_total_gb <= 0 as a failed probe, so a would-be
 // zero-device snapshot must never reach the caller as success.
 func ParseSmiMemoryDevices(out string) ([]GPUDevice, error) {
@@ -100,7 +116,7 @@ func ParseSmiMemoryDevices(out string) ([]GPUDevice, error) {
 			continue
 		}
 		fields := strings.Split(line, ",")
-		if len(fields) != 5 {
+		if len(fields) != 5 && len(fields) != 6 {
 			continue
 		}
 		idx, err := strconv.Atoi(strings.TrimSpace(fields[0]))
@@ -133,13 +149,23 @@ func ParseSmiMemoryDevices(out string) ([]GPUDevice, error) {
 		if usedMiB > totalMiB {
 			continue
 		}
-		devices = append(devices, GPUDevice{
+		d := GPUDevice{
 			Index:    idx,
 			UUID:     uuid,
 			Name:     name,
 			TotalGiB: totalMiB / 1024,
 			FreeGiB:  (totalMiB - usedMiB) / 1024,
-		})
+		}
+		if len(fields) == 6 {
+			u, err := strconv.Atoi(strings.TrimSpace(fields[5]))
+			if err == nil && u >= 0 && u <= 100 {
+				d.UtilPct, d.UtilKnown = u, true
+			}
+			// If the 6th field is malformed or out-of-range, keep the device
+			// with UtilKnown=false; don't skip the whole device just for bad
+			// utilization data.
+		}
+		devices = append(devices, d)
 	}
 	if len(devices) == 0 {
 		return nil, fmt.Errorf("nvidia-smi multi-device memory query: no valid GPU lines parsed (contract: vram_total_gb <= 0 = failed probe)")

@@ -23,6 +23,8 @@ where the code lives.
   the GPU lifecycle and model bindings
 - [systems/fleet-node.md](systems/fleet-node.md) — `fleet-serve` / `fleet-measure`: the node contract,
   job semantics, VRAM sampling
+- [systems/fleet-overview.md](systems/fleet-overview.md) — `fleet-ui` / `top` / `fleet-smoke`: the
+  read-only operator page, its poller, and the jobs/errors feeds
 - [systems/accelerators.md](systems/accelerators.md) — devices beside the GPU tier (hailo-8l NPU):
   detection, seeding, the on-demand sidecar, tool ownership
 - [systems/cache-server.md](systems/cache-server.md) — the optional second-device KV tier for a vLLM seat:

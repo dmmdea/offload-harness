@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"llamaswap-pp-cli/pkg/llamaswap"
 )
 
 // TestBaseURLNormalization locks the ONE endpoint rule. The three readers this
@@ -76,6 +78,43 @@ func TestRosterServesMatchesIdsAndAliases(t *testing.T) {
 	}
 	if r.IDs()[0] != "gemma-4-e4b" {
 		t.Errorf("IDs() must stay in roster order, got %v", r.IDs())
+	}
+	// Names() is IDs() PLUS every alias — the fix for an alias-bound seat
+	// (agent-pool -> qwen3.8-27b-vllm, offload-e4b -> gemma-4-e4b) reading as
+	// unserved to a peer that only ever checks IDs().
+	names := r.Names()
+	wantNames := []string{
+		"gemma-4-e4b", "gemma-4-26b", "plain-seat", // ids, roster order, first
+		"offload-e4b", "gemma4-26b-a4b", "local-general", // then every alias
+	}
+	if len(names) != len(wantNames) {
+		t.Fatalf("Names() = %v, want %v", names, wantNames)
+	}
+	for i, want := range wantNames {
+		if names[i] != want {
+			t.Errorf("Names()[%d] = %q, want %q (order: ids first, roster order, then aliases)", i, names[i], want)
+		}
+	}
+}
+
+// TestRosterNamesDedupesCaseInsensitively: a model whose id and a sibling's
+// alias collide case-insensitively must appear once in Names() — the caller
+// publishes this list as served_models, and a duplicated entry would just be
+// noise on the wire.
+func TestRosterNamesDedupesCaseInsensitively(t *testing.T) {
+	r := NewRoster([]llamaswap.Model{
+		{ID: "gemma-4-e4b", Aliases: []string{"offload-e4b", "GEMMA-4-E4B"}},
+		{ID: "qwen3.8-27b-vllm", Aliases: []string{"agent-pool", "Offload-E4B"}},
+	})
+	names := r.Names()
+	want := []string{"gemma-4-e4b", "qwen3.8-27b-vllm", "offload-e4b", "agent-pool"}
+	if len(names) != len(want) {
+		t.Fatalf("Names() = %v, want %v (deduped case-insensitively)", names, want)
+	}
+	for i, w := range want {
+		if names[i] != w {
+			t.Errorf("Names()[%d] = %q, want %q", i, names[i], w)
+		}
 	}
 }
 

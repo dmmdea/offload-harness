@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/hostsample"
 )
 
 // fakeRunner injects the test's behavior for Runner.
@@ -165,6 +167,7 @@ func TestHealthGoldenShape(t *testing.T) {
 		"node_id": "node-a", "schema_version": 1,
 		"gpu_vendor": "nvidia", "gpu_arch": "blackwell",
 		"vram_total_gb": 16, "vram_free_gb": 12.5,
+		"gpu_util_pct": 0, "gpu_util_known": false,
 		"supported_task_types": ["image-gen", "run-graph"],
 		"loadable_model_families": ["sdxl", "comfy-graph"],
 		"model_footprints": [{"model_family":"sdxl","quant":"bf16","task_type":"image-gen","vram_peak_gb":9.6}],
@@ -953,6 +956,19 @@ func agentHealthCfg(endpoint string) config.Config {
 	return cfg
 }
 
+// agentCfg is agentHealthCfg's sibling for tests that drive the server through
+// newTestServer's DEFAULT Options (opts=nil, LoopbackListener false): it sets
+// FleetAuthToken so AgentLaneSafelyReachable holds without a loopback
+// listener, keeping the lane admissible with no *Options override at all.
+func agentCfg() config.Config {
+	cfg := imageCfg()
+	cfg.FleetAgentEnabled = true
+	cfg.AgentModel = "offload-e4b"
+	cfg.AgentCtxTokens = 8192
+	cfg.FleetAuthToken = "test-token"
+	return cfg
+}
+
 // waitForResidencyProbe blocks until a background refresh has PUBLISHED an
 // answer into the residency cache.
 //
@@ -989,10 +1005,13 @@ func waitForResidencyProbe(t *testing.T, s *Server) {
 // (false) — the cache is cold and the handler must NEVER block on a llama-swap
 // round-trip (same rule as the reclaim tracker) — and turns true once the
 // BACKGROUND probe the first GET kicked off lands. The roster hit count pins
-// the other half of the cache contract: one probe, single-flighted, reused by
-// every request inside the TTL. The fake roster serves the seat ONLY as an
-// alias, pinning alias-awareness (the plannerUnserved idiom): an id-only
-// reader would advertise a correctly-served seat as non-resident forever.
+// the other half of the cache contract: one refresh cycle, single-flighted,
+// reused by every request inside the TTL — TWO roster GETs per cycle
+// (rosterServes for residency, rosterServedModels for served_models; see the rosterServedModels
+// field doc for why they are not one fetch), never more no matter the request
+// rate. The fake roster serves the seat ONLY as an alias, pinning
+// alias-awareness (the plannerUnserved idiom): an id-only reader would
+// advertise a correctly-served seat as non-resident forever.
 func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 	var probes atomic.Int64
 	roster := fakeRoster(t, &probes, "gemma-4-e4b", "offload-e4b")
@@ -1018,8 +1037,8 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 	if v, present := m["agent_seat_resident"]; present {
 		t.Fatalf("agent_seat_resident = %v on the FIRST health (cache cold) — must fail closed until the probe lands, never block the handler", v)
 	}
-	if n := probes.Load(); n > 1 {
-		t.Fatalf("roster probes after ONE health request = %d, want at most 1", n)
+	if n := probes.Load(); n > 2 {
+		t.Fatalf("roster probes after ONE health request = %d, want at most 2 (rosterServes + rosterServedModels)", n)
 	}
 
 	// The background refresh the GET above kicked off is the only thing that
@@ -1029,8 +1048,8 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 	if m["agent_seat_resident"] != true {
 		t.Fatalf("agent_seat_resident = %v after a successful ALIAS-served roster probe, want true", m["agent_seat_resident"])
 	}
-	if n := probes.Load(); n != 1 {
-		t.Fatalf("roster probes = %d, want exactly 1 (single-flight: concurrent/repeat health requests share one probe)", n)
+	if n := probes.Load(); n != 2 {
+		t.Fatalf("roster probes = %d, want exactly 2 (rosterServes + rosterServedModels, single-flighted: concurrent/repeat health requests share one refresh cycle)", n)
 	}
 
 	// Inside the TTL every further request is served from the cache — health
@@ -1041,8 +1060,8 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 			t.Fatalf("agent_seat_resident = %v on cached health request %d, want true", m["agent_seat_resident"], i)
 		}
 	}
-	if n := probes.Load(); n != 1 {
-		t.Fatalf("roster probes after 20 more health requests = %d, want still exactly 1 (the %s TTL)", n, agentResidencyTTL)
+	if n := probes.Load(); n != 2 {
+		t.Fatalf("roster probes after 20 more health requests = %d, want still exactly 2 (the %s TTL)", n, agentResidencyTTL)
 	}
 }
 
@@ -1351,4 +1370,303 @@ func TestDispatchQueueUnlimitedControlArm(t *testing.T) {
 	close(release)
 	pollJob(t, s, "qu-1", JobDone)
 	pollJob(t, s, "qu-2", JobDone)
+}
+
+func TestHealth_GpuUtilIsBusiestDevice(t *testing.T) {
+	opts := &Options{Snapshot: func() (Snapshot, bool) {
+		return Snapshot{TotalGiB: 32, FreeGiB: 20, At: time.Now(), Devices: []GPUDevice{
+			{Index: 0, UUID: "a", UtilPct: 12, UtilKnown: true},
+			{Index: 1, UUID: "b", UtilPct: 37, UtilKnown: true},
+		}}, true
+	}}
+	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, opts)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/fleet/health", nil))
+	var got struct {
+		Util  int  `json:"gpu_util_pct"`
+		Known bool `json:"gpu_util_known"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Util != 37 || !got.Known {
+		t.Fatalf("got %+v want util=37 known=true", got)
+	}
+}
+
+func TestHealth_GpuUtilKnownButZero(t *testing.T) {
+	// When the busiest device has UtilPct=0 but UtilKnown=true, both fields
+	// must be present and accurate. This tests that 0 is not collapsed to absent
+	// by omitempty.
+	opts := &Options{Snapshot: func() (Snapshot, bool) {
+		return Snapshot{TotalGiB: 32, FreeGiB: 20, At: time.Now(), Devices: []GPUDevice{
+			{Index: 0, UUID: "a", UtilPct: 0, UtilKnown: true},
+		}}, true
+	}}
+	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, opts)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/fleet/health", nil))
+	var got struct {
+		Util  int  `json:"gpu_util_pct"`
+		Known bool `json:"gpu_util_known"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Util != 0 || !got.Known {
+		t.Fatalf("got %+v want util=0 known=true", got)
+	}
+}
+
+func TestHealth_GpuUtilAllUnknown(t *testing.T) {
+	// When no device has UtilKnown=true, both fields must still be present:
+	// GpuUtilKnown=false and GpuUtilPct=0 (meaningless).
+	opts := &Options{Snapshot: func() (Snapshot, bool) {
+		return Snapshot{TotalGiB: 32, FreeGiB: 20, At: time.Now(), Devices: []GPUDevice{
+			{Index: 0, UUID: "a", UtilPct: 0, UtilKnown: false},
+			{Index: 1, UUID: "b", UtilPct: 0, UtilKnown: false},
+		}}, true
+	}}
+	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, opts)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/fleet/health", nil))
+	var got struct {
+		Util  int  `json:"gpu_util_pct"`
+		Known bool `json:"gpu_util_known"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Util != 0 || got.Known {
+		t.Fatalf("got %+v want util=0 known=false", got)
+	}
+}
+
+func TestHealth_HostFieldsPresentWhenSet(t *testing.T) {
+	opts := &Options{
+		Snapshot: goodSnapshot,
+		Host: func() (hostsample.Sample, bool) {
+			return hostsample.Sample{CPUPct: 42, RAMUsedGiB: 12.5, RAMTotalGiB: 128, Known: true}, true
+		},
+	}
+	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, opts)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/fleet/health", nil))
+	m := decodeMap(t, rr)
+	if got, want := m["host_cpu_pct"], float64(42); got != want {
+		t.Fatalf("host_cpu_pct = %v, want %v", got, want)
+	}
+	if got, want := m["host_ram_used_gb"], 12.5; got != want {
+		t.Fatalf("host_ram_used_gb = %v, want %v", got, want)
+	}
+	if got, want := m["host_ram_total_gb"], float64(128); got != want {
+		t.Fatalf("host_ram_total_gb = %v, want %v", got, want)
+	}
+}
+
+func TestHealth_HostFieldsAbsentWhenNil(t *testing.T) {
+	opts := &Options{Snapshot: goodSnapshot}
+	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, opts)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/fleet/health", nil))
+	m := decodeMap(t, rr)
+	for _, k := range []string{"host_cpu_pct", "host_ram_used_gb", "host_ram_total_gb"} {
+		if _, present := m[k]; present {
+			t.Fatalf("%s must be absent when Host is nil, got %v", k, m[k])
+		}
+	}
+}
+
+// TestHealth_ServedModelsRideResidencyRefresh: served_models rides the SAME
+// TTL and single-flight latch as agent_seat_resident (agentResident() is the
+// one trigger for both). Driven through health GETs only, like every
+// residency test — see waitForResidencyProbe's rationale.
+func TestHealth_ServedModelsRideResidencyRefresh(t *testing.T) {
+	s, _ := newTestServer(t, agentCfg(), &fakeRunner{}, nil)
+	s.rosterServedModels = func(ctx context.Context, endpoint string) ([]string, error) {
+		return []string{"qwen3.5-9b-agent", "gemma-4-e4b"}, nil
+	}
+	s.rosterServes = func(ctx context.Context, endpoint, seat string) (bool, error) { return true, nil }
+	// first call schedules the refresh; poll until published
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rr := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/fleet/health", nil))
+		var got struct {
+			Served []string `json:"served_models"`
+		}
+		_ = json.Unmarshal(rr.Body.Bytes(), &got)
+		if len(got.Served) == 2 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("served_models never published")
+}
+
+// TestHealth_ServedModelsAbsentWhenIDsFetchFailsButResidentTrue pins the two
+// probes' independence: rosterServes succeeding and rosterServedModels failing in the
+// SAME refresh cycle must publish agent_seat_resident:true (the residency
+// probe's own outcome) with served_models absent (fail closed for the ids
+// probe alone) — a failed ids fetch must never flip resident, and a
+// successful residency probe must never paper over a failed ids fetch with a
+// stale or fabricated list.
+func TestHealth_ServedModelsAbsentWhenIDsFetchFailsButResidentTrue(t *testing.T) {
+	s, _ := newTestServer(t, agentCfg(), &fakeRunner{}, nil)
+	s.rosterServes = func(ctx context.Context, endpoint, seat string) (bool, error) { return true, nil }
+	s.rosterServedModels = func(ctx context.Context, endpoint string) ([]string, error) {
+		return nil, errors.New("roster ids fetch failed")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		m := decodeMap(t, do(t, s, http.MethodGet, "/fleet/health", "", nil))
+		if resident, present := m["agent_seat_resident"]; present && resident == true {
+			if v, present := m["served_models"]; present {
+				t.Fatalf("served_models = %v, want absent when the ids fetch failed", v)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("agent_seat_resident never turned true")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestJobsFeed_AgentErrorGatedByBearer is the regression for the served-past-
+// the-bearer-gate finding: /fleet/jobs itself stays unauthenticated (id/task/
+// model/state/timestamps are metadata nobody needed to protect), but an
+// AGENT job's `error` string can echo contract content the way a media job's
+// never does, so it must NOT cross the wire to a caller that fails the same
+// bearer check /fleet/jobs/{id} already applies.
+func TestJobsFeed_AgentErrorGatedByBearer(t *testing.T) {
+	cfg := imageCfg()
+	cfg.FleetAuthToken = "tok"
+	s, jobs := newTestServer(t, cfg, &fakeRunner{}, nil)
+	jobs.Admit("media-err", AcceptSpec{Task: "image-gen", Model: "sdxl"}, func(context.Context) (json.RawMessage, error) {
+		return nil, fmt.Errorf("media boom")
+	})
+	jobs.Admit("agent-err", AcceptSpec{Task: "agent", Model: "agent-seat", Agent: true}, func(context.Context) (json.RawMessage, error) {
+		return nil, fmt.Errorf("agent boom: leaked contract goal text")
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		rr := do(t, s, http.MethodGet, "/fleet/jobs?limit=10", "", nil)
+		if strings.Contains(rr.Body.String(), `"state":"error"`) && strings.Count(rr.Body.String(), `"state":"error"`) == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("both jobs never reached state=error: %s", rr.Body.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	rowsFor := func(rr *httptest.ResponseRecorder) (media, agent jobFeedRow) {
+		var body struct {
+			Jobs []jobFeedRow `json:"jobs"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode jobs feed: %v body=%s", err, rr.Body.String())
+		}
+		for _, row := range body.Jobs {
+			switch row.ID {
+			case "media-err":
+				media = row
+			case "agent-err":
+				agent = row
+			}
+		}
+		return
+	}
+
+	// Unauthenticated GET: the agent row's error is omitted; the media row's
+	// error, and every other field on both rows, is unchanged.
+	unauth := do(t, s, http.MethodGet, "/fleet/jobs?limit=10", "", nil)
+	media, agent := rowsFor(unauth)
+	if media.Error != "media boom" {
+		t.Errorf("unauthenticated media row error = %q, want unchanged \"media boom\"", media.Error)
+	}
+	if agent.Error != "" {
+		t.Errorf("unauthenticated agent row error = %q, want omitted behind the bearer gate", agent.Error)
+	}
+	if agent.ID != "agent-err" || agent.State != "error" || agent.Task != "agent" {
+		t.Errorf("unauthenticated agent row metadata must still be present: %+v", agent)
+	}
+
+	// Authenticated GET: both rows carry their error text.
+	auth := do(t, s, http.MethodGet, "/fleet/jobs?limit=10", "", map[string]string{"Authorization": "Bearer tok"})
+	media, agent = rowsFor(auth)
+	if media.Error != "media boom" {
+		t.Errorf("authenticated media row error = %q, want \"media boom\"", media.Error)
+	}
+	if agent.Error != "agent boom: leaked contract goal text" {
+		t.Errorf("authenticated agent row error = %q, want the full error text", agent.Error)
+	}
+}
+
+func TestJobsFeed_ListsMetadataOnly(t *testing.T) {
+	s, jobs := newTestServer(t, imageCfg(), &fakeRunner{}, nil)
+	jobs.Admit("j1", AcceptSpec{Task: "image-gen", Model: "sdxl"}, func(context.Context) (json.RawMessage, error) {
+		return json.RawMessage(`{"png":"..."}`), nil
+	})
+	time.Sleep(50 * time.Millisecond)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/fleet/jobs?limit=5", nil))
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"task":"image-gen"`) || strings.Contains(rr.Body.String(), "png") {
+		t.Fatalf("code=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestDispatchTaskModelMetadataThroughJobsFeed drives handleDispatch's
+// Task/Model mapping (server.go, the AcceptSpec{} literal in handleDispatch)
+// through the REAL call site — POST /fleet/dispatch, not a direct Admit —
+// covering both branches: a media envelope's task_type/model_family pass
+// through verbatim, and an "agent" envelope's Model resolves to the node's
+// agent seat (core.TaskAgentRun), never the caller's model_family (the
+// envelope carries none for agent dispatches).
+func TestDispatchTaskModelMetadataThroughJobsFeed(t *testing.T) {
+	cfg := imageCfg()
+	cfg.Home = t.TempDir() // buildAgentRun materializes under BaseDir(); keep it off the real home dir
+	cfg.FleetAgentEnabled = true
+	cfg.AgentModel = "agent-seat"
+	cfg.FleetAuthToken = "tok"
+	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
+
+	rec := do(t, s, http.MethodPost, "/fleet/dispatch",
+		`{"job_id":"media-1","task_type":"image-gen","model_family":"sdxl","payload":{"prompt":"hi"}}`, nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("media dispatch status = %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	agentPayload := `{"schema_version":1,"goal":"g","output_schema":` + agentSchemaJSON + `}`
+	rec = do(t, s, http.MethodPost, "/fleet/dispatch",
+		`{"job_id":"agent-1","task_type":"agent","payload":`+agentPayload+`}`,
+		map[string]string{"Authorization": "Bearer tok"})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("agent dispatch status = %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	rr := do(t, s, http.MethodGet, "/fleet/jobs?limit=10", "", nil)
+	var body struct {
+		Jobs []jobFeedRow `json:"jobs"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode jobs feed: %v body=%s", err, rr.Body.String())
+	}
+	var media, agent *jobFeedRow
+	for i := range body.Jobs {
+		switch body.Jobs[i].ID {
+		case "media-1":
+			media = &body.Jobs[i]
+		case "agent-1":
+			agent = &body.Jobs[i]
+		}
+	}
+	if media == nil || media.Task != "image-gen" || media.Model != "sdxl" {
+		t.Fatalf("media row = %+v (jobs=%+v)", media, body.Jobs)
+	}
+	if agent == nil || agent.Task != "agent" || agent.Model != "agent-seat" {
+		t.Fatalf("agent row = %+v (jobs=%+v)", agent, body.Jobs)
+	}
 }

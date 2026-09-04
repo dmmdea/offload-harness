@@ -46,7 +46,18 @@ type NodeView struct {
 	JobsQueued        int
 	MaxConcurrentJobs int
 	MaxQueueDepth     int
-	Local             bool
+	// ServedModels is the node's advertised roster (health served_models).
+	// nil/empty = UNKNOWN (a pre-0.113.0 node): never a refusal. When
+	// published, the agent seat must be in it — a stronger check than the
+	// cached residency flag, and the capability gate PAIR calls "the exact
+	// requested model is present".
+	ServedModels []string
+	// GpuUtilPct is the busiest device's utilization; GpuUtilKnown is false
+	// when the node did not publish it. Read by betterRemote as the LAST key —
+	// a tie-breaker, never a primary signal (operator decision 2026-09-03).
+	GpuUtilPct   int
+	GpuUtilKnown bool
+	Local        bool
 }
 
 // fetchNodeViewTimeout is the transport-level backstop for one health GET —
@@ -88,6 +99,11 @@ type healthWire struct {
 	JobsQueued        int `json:"jobs_queued"`
 	MaxConcurrentJobs int `json:"max_concurrent_jobs"`
 	MaxQueueDepth     int `json:"max_queue_depth"`
+	// Additive (0.113.0). Absent on a pre-0.113.0 node, which decodes to the
+	// zero value — nil/false, both read as UNKNOWN by the gate.
+	ServedModels []string `json:"served_models"`
+	GpuUtilPct   int      `json:"gpu_util_pct"`
+	GpuUtilKnown bool     `json:"gpu_util_known"`
 }
 
 // FetchNodeView reads one node's /fleet/health into a NodeView (Local=false —
@@ -136,6 +152,9 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		JobsQueued:        w.JobsQueued,
 		MaxConcurrentJobs: w.MaxConcurrentJobs,
 		MaxQueueDepth:     w.MaxQueueDepth,
+		ServedModels:      w.ServedModels,
+		GpuUtilPct:        w.GpuUtilPct,
+		GpuUtilKnown:      w.GpuUtilKnown,
 		Local:             false,
 	}, nil
 }

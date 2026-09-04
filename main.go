@@ -38,6 +38,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/grounding"
 	"github.com/dmmdea/offload-harness/internal/health"
+	"github.com/dmmdea/offload-harness/internal/hostsample"
 	"github.com/dmmdea/offload-harness/internal/judge"
 	"github.com/dmmdea/offload-harness/internal/knn"
 	"github.com/dmmdea/offload-harness/internal/ledger"
@@ -126,6 +127,12 @@ func main() {
 		err = runFleetServe(args)
 	case "fleet-measure":
 		err = runFleetMeasure(args)
+	case "fleet-ui":
+		err = runFleetUI(args)
+	case "fleet-smoke":
+		err = runFleetSmoke(args)
+	case "top":
+		err = runTop(args)
 	case "ledger":
 		err = runLedger(args)
 	// `loupe` is the identity-aware ledger view (memory-frontier Phase 0.1b).
@@ -258,6 +265,9 @@ Usage:
   local-offload delegate --contract file.json [--route auto|spread|local|remote] [--read-root DIR] [--remote http://node:18811]...   place delegation-contract subtasks on this box or tailnet fleet nodes (needs agent_delegation_enabled; remotes default to delegate_remotes)
   local-offload fleet-serve [--listen ADDR] [--listen-trusted-network] [--node-id NAME]   join the fleet-dispatcher fleet (health/dispatch/jobs on :18811; docs/FLEET-NODE.md)
   local-offload fleet-measure            prime the fleet footprint store: one minimal render per configured task, then print the recorded entries
+  local-offload fleet-ui [--listen 127.0.0.1:18813] [--listen-trusted-network] [--interval 5s] [--remote URL]...   live overview page: node cards (GPU/VRAM/CPU/RAM graphs, seat, served models), cluster jobs + errors feed (docs/systems/fleet-overview.md)
+  local-offload fleet-smoke [--remote URL]... [--timeout 120] [--json]   send one grounded one-step contract to EVERY node and print where each landed (node, seat, placement, wall, verdict); non-zero unless all PASS
+  local-offload top [--ui http://127.0.0.1:18813] [--interval 5s]   terminal view of the fleet overview (for headless boxes; reads a running fleet-ui)
   local-offload ledger [--since DAYS]    token-savings report
   local-offload doctor                   check endpoint health + config
   local-offload report [--out FILE]      READ-ONLY capability report for this machine (tier, serving, media routes) — Markdown, safe to send
@@ -2051,8 +2061,10 @@ func nvidiaSmiMemory() (string, error) {
 // UUID via the primary_gpu_uuid config key — the uuid field is why it's in
 // this query at all: index/total-VRAM alone can't reliably identify a card
 // across a reboot or reseat, but the UUID is burned into it).
+// utilization.gpu is included to advertise which device is currently busiest,
+// helping the PAIR operator optimize placement and scheduling.
 func nvidiaSmiMemoryDevices() (string, error) {
-	out, err := exec.Command("nvidia-smi", "--query-gpu=index,uuid,name,memory.total,memory.used", "--format=csv,noheader,nounits").Output()
+	out, err := exec.Command("nvidia-smi", "--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu", "--format=csv,noheader,nounits").Output()
 	return string(out), err
 }
 
@@ -2288,6 +2300,8 @@ func runFleetServe(args []string) error {
 	// which must not block on llama-swap) — see fleet_reclaim.go for why the idle
 	// baseline, not free or total, is the right denominator for a shared card.
 	reclaim := startReclaimTracking(ctx, cfg, sampler.Load, 5*time.Second)
+	// Host CPU/RAM, same background-sampler rule: health only ever Loads.
+	host := hostsample.Start(ctx, 5*time.Second)
 	// One resolved answer, used by BOTH the server and the startup banner: the
 	// agent lane's advertisement keys on it (fleetnode.AgentLaneAdmissible), so
 	// a banner computing it separately from the config could print a task list
@@ -2318,6 +2332,7 @@ func runFleetServe(args []string) error {
 		// a loopback bind is still loopback.
 		LoopbackListener: loopbackListener,
 		Cfg:              cfg,
+		Host:             host.Load,
 	})
 
 	ln, err := net.Listen("tcp", listen)

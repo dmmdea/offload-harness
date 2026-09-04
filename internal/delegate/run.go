@@ -1240,9 +1240,14 @@ func joinNotes(earlier, later string) string {
 }
 
 // baseFor resolves the dial base of a chosen remote view ("" when absent).
+// Exact-value comparison, not NodeID: NodeID is neither guaranteed unique nor
+// guaranteed present (a node may omit it), and tried is keyed by dial base
+// elsewhere in this file — so the only safe match is the full view itself.
+// NodeView carries a slice field (ServedModels) since 0.113.0, which == can no
+// longer compare, hence reflect.DeepEqual here instead of ==.
 func baseFor(chosen NodeView, views []NodeView, bases []string) string {
 	for i := range views {
-		if views[i] == chosen {
+		if reflect.DeepEqual(views[i], chosen) {
 			return bases[i]
 		}
 	}

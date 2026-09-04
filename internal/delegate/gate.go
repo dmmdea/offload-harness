@@ -8,6 +8,8 @@
 package delegate
 
 import (
+	"strings"
+
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
@@ -64,10 +66,10 @@ func EstimateTokens(c core.AgentContract) int {
 //     occupied, never to chase throughput on a weaker seat (quality-first,
 //     operator verbatim: "not a race about speed").
 //   - localBusy true ⇒ the best remote that passes the hard gate, ranked by
-//     capacity then by QueueDepth (ties: first listed, so the caller's roster
-//     order is the stable preference order — see betterRemote). No remote
-//     passes ⇒ LOCAL regardless — queued-local beats ineligible-remote every
-//     time.
+//     capacity, then by QueueDepth, then by GPU utilization (ties: first
+//     listed, so the caller's roster order is the stable preference order —
+//     see betterRemote). No remote passes ⇒ LOCAL regardless — queued-local
+//     beats ineligible-remote every time.
 //
 // Place is pure: it never probes anything. Callers build the inputs from
 // FetchNodeView + LocalBusy.
@@ -95,10 +97,22 @@ func Place(st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeV
 // STRICTLY better candidate displaces, so equal seats are kept in roster order
 // and the caller's list stays the stable preference order it has always been.
 //
-// Three ordered keys, all boolean-or-int, so the ordering is a total preorder
-// and cannot be intransitive on a MIXED fleet (some nodes publish capacity,
-// some do not — a key like "more free slots" is uncomparable across those and
-// would need a number invented for the silent half):
+// Four ordered keys, all boolean-or-int. Keys 1-3 form a total preorder over
+// the WHOLE fleet — some nodes publish capacity, some do not, but "more free
+// slots" is answered for every node by provablyStartsNow's PROVABLY (an
+// unknown reads as false, never as an invented number), so those three keys
+// never go incomparable.
+//
+// Key 4 does not carry that guarantee: it is comparable only within the
+// SUBSET of nodes that publish gpu_util_known, because an unknown utilization
+// is deliberately neither credited nor blamed rather than coerced into an
+// order. That is a real gap in the preorder — A(util 80, known) vs B(unknown)
+// vs C(util 10, known) gives C beats A while both A~B and B~C — so on a mixed
+// fleet where key 4 is the only key left undecided, the tie-break outcome
+// depends on roster order (the single left-to-right scan in Place) BY DESIGN,
+// exactly like every other tie these keys leave open. The fix, when it
+// matters, is operator-side: upgrade every node so gpu_util_known is uniformly
+// true and the ordering is total again.
 //
 //  1. NOT provably saturated beats saturated. `queue_depth` alone was never a
 //     placement signal — it is a count with no scale, and the node that
@@ -123,6 +137,11 @@ func Place(st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeV
 //  3. Lower QueueDepth — the original rule, with its original meaning
 //     (accepted + running), unchanged and still deciding every case the two
 //     keys above do not.
+//
+//  4. Lower GPU utilization — ONLY when both publish it. An unknown is
+//     neither credited nor blamed (the AgentCtxTokens == 0 rule), so a
+//     pre-0.113.0 node keeps its roster-order tie. A tie-breaker, never a
+//     primary signal — it only ever decides a case QueueDepth left tied.
 func betterRemote(candidate, incumbent NodeView) bool {
 	if c, i := saturated(candidate), saturated(incumbent); c != i {
 		return i // candidate wins only when the incumbent is the saturated one
@@ -130,7 +149,13 @@ func betterRemote(candidate, incumbent NodeView) bool {
 	if c, i := provablyStartsNow(candidate), provablyStartsNow(incumbent); c != i {
 		return c
 	}
-	return candidate.QueueDepth < incumbent.QueueDepth
+	if candidate.QueueDepth != incumbent.QueueDepth {
+		return candidate.QueueDepth < incumbent.QueueDepth
+	}
+	if candidate.GpuUtilKnown && incumbent.GpuUtilKnown {
+		return candidate.GpuUtilPct < incumbent.GpuUtilPct
+	}
+	return false
 }
 
 // saturated reports whether v's own advertisement says the next dispatch will
@@ -197,6 +222,9 @@ func provablyStartsNow(v NodeView) bool {
 //   - AgentEnabled: the node's operator opted it into the agent lane.
 //   - AgentResident: the seat is roster-VERIFIED on the node (advertised from
 //     its cached probe), not merely configured.
+//   - seatServed: the node's served_models roster, when published, names the
+//     agent seat — a stronger check than the cached residency flag above. An
+//     unpublished roster (pre-0.113.0 node) is UNKNOWN and never a refusal.
 //   - adequate: EstTokens+specReserve <= AgentCtxTokens — the contract provably
 //     fits the advertised ceiling with room for the loop itself. An
 //     unadvertised ceiling (0) can never fit — "unknown" is not a capacity.
@@ -213,9 +241,24 @@ func provablyStartsNow(v NodeView) bool {
 func remoteEligible(st Subtask, r NodeView) bool {
 	return r.AgentEnabled &&
 		r.AgentResident &&
+		seatServed(r) &&
 		adequate(st, r) &&
 		len(st.Contract.OutputSchema) > 0 &&
 		st.Contract.Depth == 0
+}
+
+// seatServed: true when the node publishes no roster (unknown) or when the
+// roster names the agent seat (case-insensitive, like swapclient.Roster.Serves).
+func seatServed(v NodeView) bool {
+	if len(v.ServedModels) == 0 {
+		return true
+	}
+	for _, m := range v.ServedModels {
+		if strings.EqualFold(m, v.AgentSeat) {
+			return true
+		}
+	}
+	return false
 }
 
 // LocalBusy reports whether the machine-wide GPU lease is currently held —

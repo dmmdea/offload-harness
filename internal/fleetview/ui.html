@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fleet overview</title>
+<style>
+:root{--bg:#0f1115;--card:#171a21;--fg:#e6e6e6;--mut:#8a919e;--ok:#5fd38d;--warn:#f0c052;--err:#ff6b6b;--gpu:#7aa2ff;--vram:#4ecdc4;--cpu:#c792ea;--ram:#f78c6c}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,sans-serif}
+header{display:flex;gap:16px;align-items:center;padding:12px 20px;border-bottom:1px solid #262a33}
+header h1{font-size:16px;margin:0}
+#cluster{color:var(--mut)}
+main{display:grid;grid-template-columns:1fr;gap:16px;padding:16px 20px}
+#cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:16px}
+.card{background:var(--card);border:1px solid #262a33;border-radius:10px;padding:14px}
+.card h2{font-size:15px;margin:0 0 6px;display:flex;gap:8px;align-items:center}
+.badge{font-size:11px;padding:2px 6px;border-radius:6px;background:#262a33;color:var(--mut)}
+.badge.ok{background:#173d2a;color:var(--ok)}.badge.err{background:#4a1f1f;color:var(--err)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;color:var(--mut);font-size:12px;margin:6px 0}
+.kv b{color:var(--fg);font-weight:500}
+svg.spark{width:100%;height:110px;background:#0b0d11;border-radius:6px}
+.legend{display:flex;gap:12px;font-size:11px;color:var(--mut);margin-top:4px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:middle}
+.bar{height:8px;background:#262a33;border-radius:4px;overflow:hidden;margin:2px 0}.bar i{display:block;height:100%;background:var(--vram)}
+table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #262a33}th{color:var(--mut);font-weight:500}
+.sev-error{color:var(--err)}.sev-warn{color:var(--warn)}
+.models{font-size:11px;color:var(--mut);word-break:break-all}
+</style></head><body>
+<header><h1>Fleet overview</h1><span id="cluster">connecting…</span></header>
+<main>
+<section id="cards"></section>
+<section class="card"><h2>Jobs</h2><table><thead><tr><th>when</th><th>node</th><th>task</th><th>model</th><th>state</th><th>wall</th><th>error / reason</th></tr></thead><tbody id="jobs"></tbody></table></section>
+<section class="card"><h2>Errors</h2><table><thead><tr><th>age</th><th>severity</th><th>node</th><th>source</th><th>message</th></tr></thead><tbody id="errors"></tbody></table></section>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+const ago=t=>{const s=Math.max(0,Math.floor(Date.now()/1000-t));return s<60?s+'s':s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h'};
+const esc=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function spark(hist,n){
+  const W=400,H=110,pad=4;if(!hist||!hist.length)return `<svg class="spark" viewBox="0 0 ${W} ${H}"></svg>`;
+  const x=i=>pad+(W-2*pad)*i/Math.max(1,hist.length-1);
+  const line=(key,max,color)=>{const pts=hist.map((p,i)=>`${x(i).toFixed(1)},${(H-pad-(H-2*pad)*Math.min(1,(p[key]||0)/max)).toFixed(1)}`).join(' ');return `<polyline fill="none" stroke="${color}" stroke-width="1.5" points="${pts}"/>`};
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${line('gpu_util',100,'var(--gpu)')}${line('cpu',100,'var(--cpu)')}${line('vram_free_gb',n.vram_total_gb||1,'var(--vram)')}${line('ram_used_gb',n.host_ram_total_gb||1,'var(--ram)')}</svg>`;
+}
+function card(n){
+  const st=n.reachable?'<span class="badge ok">online</span>':'<span class="badge err">unreachable</span>';
+  const seat=n.agent_enabled?`<span class="badge ${n.agent_seat_resident?'ok':''}">${esc(n.agent_seat)} ${n.agent_seat_resident?'resident':'cold'}</span>`:'<span class="badge">no agent lane</span>';
+  const devs=(n.gpu_devices||[]).map(d=>{const tot=d.vram_total_gb||0;const free=d.vram_free_gb||0;const pct=tot?100*(1-free/tot):0;return `<div class="kv"><span>${esc(d.name)}</span><b>${(tot-free).toFixed(1)} / ${tot.toFixed(1)} GB${d.util_known?` · ${esc(d.util_pct)}%`:''}</b></div><div class="bar"><i style="width:${pct.toFixed(0)}%"></i></div>`}).join('');
+  return `<div class="card"><h2>${esc(n.node_id||n.base)} ${st} ${seat} <span class="badge">${esc(n.harness_version||'')}</span></h2>
+  ${n.reachable?'':`<div class="sev-error">${esc(n.probe_error)}</div>`}
+  ${spark(n.history,n)}<div class="legend"><span><i style="background:var(--gpu)"></i>GPU ${n.gpu_util_known?n.gpu_util_pct+'%':'n/a'}</span><span><i style="background:var(--cpu)"></i>CPU ${n.host_cpu_pct}%</span><span><i style="background:var(--vram)"></i>VRAM free ${(n.vram_free_gb||0).toFixed(1)} GB</span><span><i style="background:var(--ram)"></i>RAM ${(n.host_ram_used_gb||0).toFixed(0)} / ${(n.host_ram_total_gb||0).toFixed(0)} GB</span></div>
+  ${devs}
+  <div class="kv"><span>queue</span><b>${n.jobs_running} running · ${n.jobs_queued} queued · max ${n.max_concurrent_jobs||'?'} / ${n.max_queue_depth||'?'}</b><span>ctx</span><b>${n.agent_ctx_tokens||'?'} tok</b><span>base</span><b>${esc(n.base)}</b></div>
+  <div class="models">${(n.served_models||[]).map(esc).join(' · ')||'served models unknown'}</div></div>`;
+}
+function render(o){
+  const nodes=o.nodes||[];
+  const up=nodes.filter(n=>n.reachable).length;
+  $('#cluster').textContent=`${up}/${nodes.length} nodes reachable · delegation ${o.delegation_enabled?'on':'off'} · ${new Date(o.at*1000).toLocaleTimeString()}`;
+  $('#cards').innerHTML=nodes.map(card).join('');
+  const rows=[];
+  for(const n of nodes)for(const j of (n.jobs||[]))rows.push({t:j.accepted_at,node:n.node_id||n.base,task:j.task,model:j.model,state:j.state,wall:j.wall_ms,msg:j.error});
+  for(const d of (o.delegations||[]))rows.push({t:d.ts,node:d.node,task:'delegate',model:d.seat,state:d.deferred?'deferred':(d.acceptance_pass?'passed':'failed'),wall:d.wall_ms,msg:d.error||d.defer_class||d.placement_reason});
+  rows.sort((a,b)=>b.t-a.t);
+  $('#jobs').innerHTML=rows.slice(0,100).map(r=>`<tr><td>${ago(r.t)}</td><td>${esc(r.node)}</td><td>${esc(r.task)}</td><td>${esc(r.model)}</td><td>${esc(r.state)}</td><td>${typeof r.wall==='number'&&r.wall?(r.wall/1000).toFixed(1)+'s':''}</td><td>${esc(r.msg)}</td></tr>`).join('');
+  $('#errors').innerHTML=(o.errors||[]).slice().reverse().map(e=>`<tr><td>${ago(e.at)}</td><td class="sev-${esc(e.severity)}">${esc(e.severity)}</td><td>${esc(e.node)}</td><td>${esc(e.source)}</td><td>${esc(e.message)}</td></tr>`).join('');
+}
+async function tick(){try{const r=await fetch('/api/overview');render(await r.json())}catch(e){$('#cluster').textContent='overview unavailable: '+e}}
+tick();setInterval(tick,5000);
+</script></body></html>

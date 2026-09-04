@@ -3,6 +3,7 @@ package delegate
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -285,5 +286,62 @@ func TestLocalBusyUnresolvableLeaseDirReadsIdle(t *testing.T) {
 	bad := filepath.Join(t.TempDir(), "My Drive", "lease") // refused by the sync-root guard
 	if LocalBusy(bad, "") {
 		t.Fatal("LocalBusy = true on an unresolvable lease dir; must fail toward idle/local")
+	}
+}
+
+// TestRemoteEligible_ServedModelsWithoutSeatIsIneligible is the alias-blind
+// gate regression: eligibleRemote's AgentSeat ("offload-e4b") is an ALIAS,
+// the normal shape for an agent seat (agent-pool -> qwen3.8-27b-vllm,
+// offload-e4b -> gemma-4-e4b — see swapclient.go:9's plannerUnserved
+// lesson), never the canonical id the node's roster actually keys the model
+// by ("gemma-4-e4b"). A served_models list carrying ONLY the canonical id —
+// what an id-only publisher (the pre-fix swapRosterIDs) would have sent —
+// must read as ineligible: the honest negative below documents that the
+// node's job is to publish its aliases too (fleetnode's
+// swapRosterServedModels now does, via swapclient.Roster.Names), not for
+// this gate to special-case alias resolution on the delegator side.
+func TestRemoteEligible_ServedModelsWithoutSeatIsIneligible(t *testing.T) {
+	r := eligibleRemote()
+	r.ServedModels = []string{"gemma-4-e4b"} // canonical id only — the alias seat is absent
+	if remoteEligible(schemaSubtask(), r) {
+		t.Fatal("a node whose served_models publishes only the canonical id, omitting the alias agent_seat, must not be placed on")
+	}
+	r.ServedModels = []string{"gemma-4-e4b", r.AgentSeat} // now the alias is published too
+	if !remoteEligible(schemaSubtask(), r) {
+		t.Fatal("seat present in served_models (as an alias, alongside the canonical id) must be eligible")
+	}
+	r.ServedModels = nil // pre-0.113.0 node: unknown, not a refusal
+	if !remoteEligible(schemaSubtask(), r) {
+		t.Fatal("absent served_models is UNKNOWN and must not gate")
+	}
+	r.ServedModels = []string{strings.ToUpper(r.AgentSeat)}
+	if !remoteEligible(schemaSubtask(), r) {
+		t.Fatal("seatServed must match case-insensitively, like swapclient.Roster.Serves")
+	}
+}
+
+func TestBetterRemote_UtilizationBreaksQueueTies(t *testing.T) {
+	a, b := eligibleRemote(), eligibleRemote()
+	a.NodeID, b.NodeID = "a", "b"
+	a.GpuUtilPct, a.GpuUtilKnown = 80, true
+	b.GpuUtilPct, b.GpuUtilKnown = 10, true
+	if !betterRemote(b, a) || betterRemote(a, b) {
+		t.Fatal("lower known utilization must win an otherwise equal pair")
+	}
+	// queue depth still outranks utilization
+	b.QueueDepth = a.QueueDepth + 1
+	if betterRemote(b, a) {
+		t.Fatal("utilization must never override QueueDepth")
+	}
+	if !betterRemote(a, b) {
+		t.Fatal("a's lower QueueDepth must still win once QueueDepth is no longer tied")
+	}
+}
+
+func TestBetterRemote_UnknownUtilizationNeverLoses(t *testing.T) {
+	known, unknown := eligibleRemote(), eligibleRemote()
+	known.GpuUtilPct, known.GpuUtilKnown = 5, true
+	if betterRemote(known, unknown) || betterRemote(unknown, known) {
+		t.Fatal("an unknown utilization is neither credited nor blamed — roster order keeps the tie")
 	}
 }

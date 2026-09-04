@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/fleetqueue"
+	"github.com/dmmdea/offload-harness/internal/hostsample"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
@@ -88,15 +90,18 @@ type Options struct {
 	// media lane never consults it.
 	LoopbackListener bool
 	Cfg              config.Config
+	// Host reports the last host CPU/RAM sample (hostsample.Sampler.Load).
+	// nil omits the host_* fields; the handler never samples itself.
+	Host func() (hostsample.Sample, bool)
 }
 
 // Server is the fleet-node HTTP server: three handlers over a Runner + Jobs
 // store. Task/family advertisements are derived once at construction (config
 // is immutable while serving).
 type Server struct {
-	runner   Runner
-	jobs     *Jobs
-	opts     Options
+	runner Runner
+	jobs   *Jobs
+	opts   Options
 	// queue is the Option B consolidated pull queue (ADR 0030) — non-nil ONLY
 	// when this node is the config-elected holder (fleet_queue_host). Opened
 	// by EnableQueueHost; the routes mount only when it is non-nil.
@@ -119,7 +124,28 @@ type Server struct {
 	// (alias-aware). A seam so tests drive the residency cache without a live
 	// llama-swap; production always gets swapRosterServes.
 	rosterServes func(ctx context.Context, endpoint, seat string) (bool, error)
-	agentRes     agentResidency
+	// rosterServedModels answers "what names does the llama-swap behind
+	// endpoint actually serve?" — the roster's own canonical ids PLUS every
+	// alias (swapclient.Roster.Names), advertised as served_models.
+	//
+	// It was rosterIDs, publishing IDs() alone, until the alias-blind gate
+	// finding: agent seats are normally bound by ALIAS (agent-pool ->
+	// qwen3.8-27b-vllm, offload-e4b -> gemma-4-e4b — see swapclient.go:9's
+	// plannerUnserved lesson), so a delegator checking an alias seat name
+	// against an id-only served_models list would read a healthy node as
+	// not serving its own advertised agent_seat and silently drop it from
+	// placement. Names() is IDs() plus every alias, so this field is
+	// misnamed as "IDs" now and renamed to say what it actually publishes.
+	//
+	// A separate seam from rosterServes (tests need to drive them
+	// independently), but production fetches its own roster per call rather
+	// than sharing swapRosterServes's fetch — that would mean threading a
+	// shared Roster through both closures' signatures, which changes tests
+	// that already inject rosterServes alone. Two GETs per refresh, once per
+	// agentResidencyTTL window, is an acceptable cost for keeping today's
+	// residency seam untouched.
+	rosterServedModels func(ctx context.Context, endpoint string) ([]string, error)
+	agentRes           agentResidency
 }
 
 // agentResidency caches the roster's answer for the agent seat between health
@@ -138,6 +164,13 @@ type Server struct {
 type agentResidency struct {
 	mu       sync.Mutex
 	resident bool
+	// served is the roster's ids+aliases list from the SAME refresh that set
+	// resident (rosterServedModels, fetched alongside rosterServes in
+	// refreshAgentResidency). A failed fetch publishes nil — never a stale
+	// list — and never flips
+	// resident on its own; a later placement gate reads absent/empty as
+	// UNKNOWN, exactly like a cold or failed residency probe.
+	served   []string
 	at       time.Time
 	inflight bool
 	// idle broadcasts when inflight clears, so a caller that needs the answer
@@ -183,14 +216,15 @@ func (a *agentResidency) awaitProbe() {
 // per health request — the config cannot change under a running server.
 func New(runner Runner, jobs *Jobs, opts Options) *Server {
 	return &Server{
-		runner:       runner,
-		jobs:         jobs,
-		opts:         opts,
-		tasks:        SupportedTasksFor(opts.Cfg, opts.LoopbackListener),
-		families:     Families(opts.Cfg),
-		agentSeat:    opts.Cfg.AgentPlannerModel(""),
-		agentLane:    AgentLaneAdmissible(opts.Cfg, opts.LoopbackListener),
-		rosterServes: swapRosterServes,
+		runner:             runner,
+		jobs:               jobs,
+		opts:               opts,
+		tasks:              SupportedTasksFor(opts.Cfg, opts.LoopbackListener),
+		families:           Families(opts.Cfg),
+		agentSeat:          opts.Cfg.AgentPlannerModel(""),
+		agentLane:          AgentLaneAdmissible(opts.Cfg, opts.LoopbackListener),
+		rosterServes:       swapRosterServes,
+		rosterServedModels: swapRosterServedModels,
 	}
 }
 
@@ -205,6 +239,20 @@ func swapRosterServes(ctx context.Context, endpoint, seat string) (bool, error) 
 		return false, err
 	}
 	return roster.Serves(seat), nil
+}
+
+// swapRosterServedModels is the production served_models probe: one GET
+// /v1/models, answered as the roster's own ids PLUS every alias
+// (swapclient.Roster.Names — see the rosterServedModels field doc for why
+// IDs() alone was the alias-blind gate bug). A separate roster fetch from
+// swapRosterServes (see that field's doc) — accepted so the existing
+// rosterServes seam and its tests stay untouched.
+func swapRosterServedModels(ctx context.Context, endpoint string) ([]string, error) {
+	roster, err := swapclient.FetchRoster(ctx, endpoint, agentResidencyProbeTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return roster.Names(), nil
 }
 
 // agentResident returns the cached residency answer, kicking off a background
@@ -226,6 +274,21 @@ func (s *Server) agentResident() bool {
 	return v
 }
 
+// servedModels returns a copy of the cached roster id list, as of the last
+// residency refresh. It NEVER triggers a probe itself — agentResident()
+// already does, and handleHealth calls both, agentResident() first, so a
+// health request that reads servedModels() first would always see the
+// PREVIOUS window's answer instead of the refresh it just scheduled.
+func (s *Server) servedModels() []string {
+	a := &s.agentRes
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.served == nil {
+		return nil
+	}
+	return append([]string(nil), a.served...)
+}
+
 // refreshAgentResidency runs one bounded roster probe and publishes the
 // answer. THE CALLER MUST ALREADY HOLD the single-flight latch
 // (agentResidency.claimProbe, or the inline claim in agentResident) — this
@@ -243,6 +306,7 @@ func (s *Server) agentResident() bool {
 func (s *Server) refreshAgentResidency() {
 	var resident bool
 	var err error
+	var served []string
 	// The publish is DEFERRED, not tail-appended: the probe below runs outside
 	// any lock, and clearing the latch only on the normal path meant a panic
 	// anywhere in that seam froze residency for the life of the process — never
@@ -254,14 +318,15 @@ func (s *Server) refreshAgentResidency() {
 		a := &s.agentRes
 		a.mu.Lock()
 		a.resident = resident && err == nil
+		a.served = served
 		a.at = time.Now()
 		a.inflight = false
 		a.idleCond().Broadcast() // release any synchronous waiter (RefreshAgentResidency)
 		a.mu.Unlock()
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), agentResidencyProbeTimeout)
-	defer cancel()
-	resident, err = s.rosterServes(ctx, s.opts.Cfg.Endpoint, s.agentSeat)
+	residentCtx, residentCancel := context.WithTimeout(context.Background(), agentResidencyProbeTimeout)
+	defer residentCancel()
+	resident, err = s.rosterServes(residentCtx, s.opts.Cfg.Endpoint, s.agentSeat)
 	if err != nil {
 		// agent_seat_resident:false is the one field that stops EVERY remote
 		// placement at this node, and the probe error was the only evidence of
@@ -271,6 +336,18 @@ func (s *Server) refreshAgentResidency() {
 		log.Printf("fleet: agent seat %q residency probe against %s failed; advertising agent_seat_resident:false for up to %s: %v",
 			s.agentSeat, s.opts.Cfg.Endpoint, agentResidencyTTL, err)
 	}
+	// The served-models fetch gets its OWN full-length timeout rather than
+	// reusing residentCtx: sharing one context meant a slow-but-healthy
+	// rosterServes call could burn most of the budget before
+	// rosterServedModels even starts, starving a perfectly healthy roster
+	// and publishing served=nil for a seat that is, in fact, resident.
+	namesCtx, namesCancel := context.WithTimeout(context.Background(), agentResidencyProbeTimeout)
+	defer namesCancel()
+	names, nerr := s.rosterServedModels(namesCtx, s.opts.Cfg.Endpoint)
+	if nerr != nil {
+		names = nil // unknown on failure — never keep a stale list, never flip resident
+	}
+	served = names
 }
 
 // RefreshAgentResidency ensures ONE residency probe has published an answer
@@ -306,6 +383,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /fleet/health", s.handleHealth)
 	mux.HandleFunc("POST /fleet/dispatch", s.handleDispatch)
 	mux.HandleFunc("GET /fleet/jobs/{id}", s.handleJob)
+	// GET /fleet/jobs (no {id}) is a distinct ServeMux pattern from the one
+	// above — unauthenticated is deliberate: unlike /fleet/jobs/{id}, this
+	// route never carries a payload (Data is never set; see Jobs.Recent), so
+	// there is nothing here for the per-job bearer gate to protect on a MEDIA
+	// row. An AGENT row is different: its `error` string can echo contract
+	// content (the goal, a tool result fragment) the way a media job's never
+	// does, so handleJobs applies the SAME bearer check handleJob does and
+	// omits `error` on agent rows for a caller that fails it — id/task/
+	// model/state/timestamps stay unauthenticated on every row, exactly like
+	// before; only an agent row's `error` text is gated.
+	mux.HandleFunc("GET /fleet/jobs", s.handleJobs)
 	// {filename...} (not {filename}) is deliberate: it's a multi-segment
 	// wildcard, so a caller-supplied "/" or a %2F-hidden one still reaches the
 	// handler as PART OF filename instead of 404ing at the mux before our
@@ -381,6 +469,13 @@ type healthPayload struct {
 	// means "single-device source" — the exact shape every pre-fix node and
 	// consumer already expects.
 	GpuDevices            []GPUDevice      `json:"gpu_devices,omitempty"`
+	// GpuUtilPct is the BUSIEST device's utilization (PAIR's multi-GPU rule,
+	// adopted deliberately: the shared card is the one that matters). ALWAYS
+	// present (never omitempty); when GpuUtilKnown is false, the value is 0
+	// and meaningless. GpuUtilKnown is the validity flag: true means nvidia-smi
+	// reported this, false means it was not queried or the query failed.
+	GpuUtilPct   int  `json:"gpu_util_pct"`
+	GpuUtilKnown bool `json:"gpu_util_known"`
 	SupportedTaskTypes    []string         `json:"supported_task_types"`
 	LoadableModelFamilies []string         `json:"loadable_model_families"`
 	ModelFootprints       []FootprintEntry `json:"model_footprints"`
@@ -454,6 +549,27 @@ type healthPayload struct {
 	// roster. False/omitted until the first probe lands, and on probe failure.
 	AgentResident bool `json:"agent_seat_resident,omitempty"`
 	AgentEnabled  bool `json:"agent_enabled,omitempty"`
+	// ServedModels is the CACHED roster name list — canonical ids AND every
+	// alias (agentResidency.served, from swapclient.Roster.Names) —
+	// refreshed on the same TTL/single-flight as AgentResident. Absent/empty
+	// = UNKNOWN (cold cache, or the fetch failed) — never a stale list. A
+	// later placement gate uses this to check a specific model is actually
+	// hosted here, not just that the agent seat is resident; because this
+	// list carries aliases too, an agent seat configured by its alias (the
+	// normal shape) is found here, not just a seat configured by canonical
+	// id.
+	ServedModels []string `json:"served_models,omitempty"`
+	// ---- Host CPU/RAM (hostsample) ----
+	// Emitted only when opts.Host is set AND its sample is Known. All three
+	// carry omitempty, unlike GpuUtilPct/GpuUtilKnown (always-present):
+	// there is no companion *Known flag here, so a genuine 0% HostCPUPct
+	// with omitempty is acceptable ONLY because HostRAMTotalGb is never 0
+	// when known and therefore serves as the presence signal for the group —
+	// a reader must check host_ram_total_gb (or the key's mere presence)
+	// before trusting host_cpu_pct as a real zero rather than an absent field.
+	HostCPUPct     int     `json:"host_cpu_pct,omitempty"`
+	HostRAMUsedGb  float64 `json:"host_ram_used_gb,omitempty"`
+	HostRAMTotalGb float64 `json:"host_ram_total_gb,omitempty"`
 }
 
 // handleHealth assembles the contract health JSON from cached/cheap reads
@@ -511,6 +627,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		MaxQueueDepth:         s.opts.Cfg.FleetQueueLimit(),
 		HarnessVersion:        s.opts.Version,
 	}
+	// GPU utilization: advertise the busiest device's utilization when known.
+	// Omitted when no device has published a known utilization — absent ≠ idle.
+	for _, d := range snap.Devices {
+		if !d.UtilKnown {
+			continue
+		}
+		payload.GpuUtilKnown = true
+		if d.UtilPct > payload.GpuUtilPct {
+			payload.GpuUtilPct = d.UtilPct
+		}
+	}
 	// Reclaim is advertised ONLY when measured. An unknown verdict omits both
 	// numbers so a consumer falls back to free VRAM instead of acting on a guess;
 	// the source string is published either way, since "why is it absent?" is the
@@ -535,6 +662,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		payload.AgentSeat = s.agentSeat
 		payload.AgentCtxTokens = s.opts.Cfg.AgentCtxTokens
 		payload.AgentResident = s.agentResident()
+		payload.ServedModels = s.servedModels()
+	}
+	// Host CPU/RAM: a cached read of the background hostsample.Sampler, same
+	// rule as the VRAM snapshot above — this handler never samples itself.
+	if s.opts.Host != nil {
+		if h, ok := s.opts.Host(); ok && h.Known {
+			payload.HostCPUPct = h.CPUPct
+			payload.HostRAMUsedGb = h.RAMUsedGiB
+			payload.HostRAMTotalGb = h.RAMTotalGiB
+		}
 	}
 	writeJSON(w, http.StatusOK, payload)
 }
@@ -815,10 +952,16 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	// strands a directory under pipeline-jobs/ until the next start sweeps it.
 	// The store clears the hook at claim, so exactly one of the two paths ever
 	// runs the cleanup.
+	specModel := env.ModelFamily
+	if env.TaskType == string(core.TaskAgentRun) {
+		specModel = s.agentSeat
+	}
 	spec := AcceptSpec{
 		Agent:     env.TaskType == string(core.TaskAgentRun),
 		Uncapped:  !s.concurrencyCapped(env.TaskType),
 		OnDropped: cleanup,
+		Task:      env.TaskType,
+		Model:     specModel,
 	}
 	if !s.jobs.Admit(env.JobID, spec, run) {
 		cleanup() // duplicate/drain refusal: this request's materialized files never run
@@ -875,6 +1018,84 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJobView(w, http.StatusOK, view)
+}
+
+// jobFeedRow is /fleet/jobs's per-job shape: metadata only, NEVER a payload.
+// Unlike jobWire (the per-job route), there is no `data` field at all — not
+// even omitempty on a nil — because this row type has nowhere to put one.
+type jobFeedRow struct {
+	ID         string `json:"id"`
+	Task       string `json:"task"`
+	Model      string `json:"model,omitempty"`
+	State      string `json:"state"`
+	Agent      bool   `json:"agent,omitempty"`
+	AcceptedAt int64  `json:"accepted_at"`
+	StartedAt  int64  `json:"started_at,omitempty"`
+	FinishedAt int64  `json:"finished_at,omitempty"`
+	WallMs     int64  `json:"wall_ms,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+// handleJobs is the cluster jobs feed: GET /fleet/jobs?limit=N, newest first,
+// capped at 500 rows. The route itself is unauthenticated — id/task/model/
+// state/timestamps never carried anything worth gating (see the route
+// comment in Handler) — but an AGENT row's `error` string can echo contract
+// content (the goal text, a tool-result fragment), unlike a media row's,
+// which never does. So this handler applies the SAME bearer check handleJob
+// uses on /fleet/jobs/{id}: when a token is configured and the request does
+// not carry it, every agent row's `error` is omitted while the rest of the
+// row (and every media row, error included) is unchanged. `error` is
+// truncated to 200 runes so one runaway error string cannot blow up the feed
+// response.
+func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if n, err := strconv.Atoi(q); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	// authed: true when no token is configured (loopback-trust posture) or
+	// the request carries a valid bearer — the same rule handleJob applies
+	// per job. Computed once per request, not per row.
+	authed := s.opts.Cfg.FleetAuthToken == "" || bearerOK(r, s.opts.Cfg.FleetAuthToken)
+	rows := make([]jobFeedRow, 0, limit)
+	for _, v := range s.jobs.Recent(limit) {
+		errStr := v.Error
+		if v.Agent && !authed {
+			errStr = "" // agent error text may echo contract content; media rows are unaffected
+		}
+		row := jobFeedRow{
+			ID: v.ID, Task: v.Task, Model: v.Model, State: string(v.State), Agent: v.Agent,
+			AcceptedAt: v.AcceptedAt.Unix(), Error: truncateRunes(errStr, 200),
+		}
+		if !v.StartedAt.IsZero() {
+			row.StartedAt = v.StartedAt.Unix()
+		}
+		if !v.FinishedAt.IsZero() {
+			row.FinishedAt = v.FinishedAt.Unix()
+			if !v.StartedAt.IsZero() {
+				row.WallMs = v.FinishedAt.Sub(v.StartedAt).Milliseconds()
+			}
+		}
+		rows = append(rows, row)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": rows})
+}
+
+// truncateRunes cuts s to at most n runes, on a rune boundary — the same
+// safety property as intentLedger.dispatched's truncation loop in
+// internal/delegate/intent.go (not imported here: fleetnode is a dependency
+// of delegate, and importing it back would be a cycle), expressed directly in
+// terms of a rune count rather than a byte budget cut back to validity.
+func truncateRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 // handleMedia serves ONE rendered artifact by bare filename out of the same

@@ -328,3 +328,29 @@ func TestJobsDrainWaitsForFastJobs(t *testing.T) {
 		t.Fatalf("fast job must drain clean: ok=%v view=%+v", ok, v)
 	}
 }
+
+func TestRecentNewestFirstWithMetadataAndNoData(t *testing.T) {
+	j := NewJobs(time.Hour, 4)
+	defer j.DrainAndStop(time.Second)
+	run := func(context.Context) (json.RawMessage, error) { return json.RawMessage(`{"secret":1}`), nil }
+	j.Admit("a", AcceptSpec{Task: "agent-run", Model: "qwen3.5-9b-agent", Agent: true}, run)
+	time.Sleep(10 * time.Millisecond)
+	j.Admit("b", AcceptSpec{Task: "image-gen", Model: "sdxl"}, run)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if v, ok := j.Get("b"); ok && v.State == JobDone {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	got := j.Recent(10)
+	if len(got) != 2 || got[0].ID != "b" || got[1].ID != "a" {
+		t.Fatalf("order: %+v", got)
+	}
+	if got[0].Task != "image-gen" || got[0].Model != "sdxl" || got[0].Data != nil {
+		t.Fatalf("metadata/data: %+v", got[0])
+	}
+	if got[0].FinishedAt.IsZero() || got[0].AcceptedAt.IsZero() {
+		t.Fatal("timestamps must be set")
+	}
+}
