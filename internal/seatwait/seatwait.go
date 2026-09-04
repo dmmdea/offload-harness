@@ -159,6 +159,14 @@ func Retryable(status int, body string) bool {
 		return strings.Contains(body, "process is not ready")
 	case 500:
 		return strings.Contains(body, `"src":"llama-swap"`) || strings.Contains(body, "health check timed out")
+	case 502:
+		// An EMPTY 502 is llama-swap's proxy failing to reach an upstream that is
+		// between states (2026-09-04: the seat's engine had been stopped, the
+		// swap still listed it ready for its stub's 30-s grace, and 8 contracts
+		// deferred in 34 ms each as "lost_to_stack"). No generation happened, so
+		// waiting on the same budget as a 429 is correct. A 502 WITH a body is
+		// still a generation that died mid-stream — never retried.
+		return strings.TrimSpace(body) == ""
 	}
 	return false
 }
