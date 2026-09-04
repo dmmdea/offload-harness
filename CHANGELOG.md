@@ -6,6 +6,19 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.3] — 2026-09-04 — vLLM seat template: refuse a bound port, per-seat MP unit
+
+**Fixed — a scratch engine could impersonate the seat.** On 2026-09-03 a benchmark arm bound the production
+seat's port and served the seat's model names; llama-swap's `/health` check passed against the ARM, so contracts
+routed to the local seat were served by an engine without `--enable-auto-tool-choice` (400 "auto tool choice
+requires…"), mid-load (timeouts) or crashing (500), while the real seat died on "Address already in use" after a
+two-minute load and left orphaned engine cores holding the cards. Every seat start also stopped the arm's LMCache
+MP server, because both used the unit name `lmcache-mp`. `setup/templates/vllm-seat/seat_fg.sh` now refuses to
+start when its port is already bound (immediately, naming the listener) and takes the MP unit name from
+`SEAT_MP_UNIT` (default `lmcache-mp`); `seat_stop.sh` reads the same variable. Any scratch or benchmark stack in
+the same box must use its own port and unit name — documented in `docs/systems/cache-server.md`.
+
+
 ## [0.113.2] — 2026-09-03 — document-grounded contracts run without few-shot exemplars
 
 **Fixed — the second cut of the phantom-digest defect.** 0.113.1 closed, marked and synthesised the profile
