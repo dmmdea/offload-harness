@@ -664,6 +664,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 	l.resolveSpecReserve(ctx)
 	msgs := make([]Msg, 0, 8)
 	budgetRaised := false // one budget raise per run when reasoning starves the completion (see below)
+	nudged := false       // one nudge per run when the model closes with an empty message (see below)
 	if l.system != "" {
 		msgs = append(msgs, Msg{Role: "system", Content: l.system})
 	}
@@ -891,6 +892,16 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// some other OpenAI-compatible servers) return tool calls with
 		// finish_reason "stop", so trusting finish_reason drops the tool call
 		// and returns an empty answer.
+		if len(comp.Msg.ToolCalls) == 0 && strings.TrimSpace(comp.Msg.Content) == "" && !nudged {
+			// 2026-09-04: after its tool steps the Qube 27B seat sometimes closes
+			// with an EMPTY assistant message (delegation log: steps 4, stop "done",
+			// tokens_out 17 — a bare think block) and the contract fails with no
+			// findings. An empty final answer is not an answer: ask once, plainly,
+			// for the answer in the requested shape, then accept whatever comes.
+			nudged = true
+			msgs = append(msgs, Msg{Role: "user", Content: "Your last message was empty. Answer the task now, from what you have read, in the requested shape."})
+			continue
+		}
 		if len(comp.Msg.ToolCalls) == 0 {
 			if marker := unparsedToolCallMarker(comp.Msg.Content); marker != "" {
 				// 2026-09-04: the Qube 27B seat answered every digest with
