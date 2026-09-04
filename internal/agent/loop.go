@@ -11,6 +11,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -871,6 +872,17 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// finish_reason "stop", so trusting finish_reason drops the tool call
 		// and returns an empty answer.
 		if len(comp.Msg.ToolCalls) == 0 {
+			if marker := unparsedToolCallMarker(comp.Msg.Content); marker != "" {
+				// 2026-09-04: the Qube 27B seat answered every digest with
+				// "<tool_call><function=list_dir>…" as CONTENT — vLLM ran with
+				// --tool-call-parser hermes while the model's template emits the
+				// Qwen3 XML form, so nothing was parsed, the loop took the text as
+				// the final answer and the structured re-pack produced findings
+				// about "the assistant listing the directory". That is a seat
+				// configuration error, and it must be named, not digested.
+				return Result{Steps: step + 1, StopReason: "unparsed_tool_call", Transcript: msgs, Effects: effects},
+					fmt.Errorf("%w: the seat returned %q as text (its --tool-call-parser does not match the model's chat template)", ErrUnparsedToolCall, marker)
+			}
 			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects}
 			if l.batchJudge {
 				res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
@@ -1126,4 +1138,25 @@ func clip(s string, n int) string {
 		cut = cut[:len(cut)-1]
 	}
 	return cut + "…"
+}
+
+// ErrUnparsedToolCall: the server returned an assistant message with no parsed
+// tool calls whose text still carries a tool-call block. The model DID call a
+// tool; the server's tool-call parser did not recognise the format. Treating
+// that text as a final answer is how a misconfigured seat "answers" every
+// contract with garbage (Qube 27B, 2026-09-04: hermes parser on a Qwen3 XML
+// template, 8/8 digests failed verification with findings about list_dir).
+var ErrUnparsedToolCall = errors.New("unparsed tool call in assistant content")
+
+// unparsedToolCallMarker returns the tool-call syntax found in an assistant
+// message's plain text, or "" when there is none. The forms are the ones the
+// engines we run emit: the Qwen3/Hermes XML wrapper, the Qwen3-coder function
+// tag, and the Llama-3 pythonic tag.
+func unparsedToolCallMarker(content string) string {
+	for _, m := range []string{"<tool_call>", "<function=", "<|python_tag|>"} {
+		if strings.Contains(content, m) {
+			return m
+		}
+	}
+	return ""
 }
