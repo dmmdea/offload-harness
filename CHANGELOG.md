@@ -6,6 +6,28 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.3] — 2026-09-04 — vLLM seat template: refuse a bound port, per-seat MP unit
+
+**Fixed — a scratch engine could impersonate the seat.** On 2026-09-03 a benchmark arm bound the production
+seat's port and served the seat's model names; llama-swap's `/health` check passed against the ARM, so contracts
+routed to the local seat were served by an engine without `--enable-auto-tool-choice` (400 "auto tool choice
+requires…"), mid-load (timeouts) or crashing (500), while the real seat died on "Address already in use" after a
+two-minute load and left orphaned engine cores holding the cards. Every seat start also stopped the arm's LMCache
+MP server, because both used the unit name `lmcache-mp`. `setup/templates/vllm-seat/seat_fg.sh` now refuses to
+start when its port is already bound (immediately, naming the listener) and takes the MP unit name from
+`SEAT_MP_UNIT` (default `lmcache-mp`); `seat_stop.sh` reads the same variable. Any scratch or benchmark stack in
+the same box must use its own port and unit name — documented in `docs/systems/cache-server.md`.
+
+**Fixed — an unparsed tool call is a seat error, not an answer.** With the port freed, the seat served all eight
+digest contracts, and all eight failed verification: the 27B answered `<tool_call><function=list_dir>…` as plain
+text because the seat ran `--tool-call-parser hermes` while the Qwen3.8 chat template emits the Qwen3 XML tool
+form; the loop took that text as the final answer and the structured re-pack produced findings about "the
+assistant listing the directory". The loop now returns `agent.ErrUnparsedToolCall` when an assistant message has
+no parsed tool calls but its text carries a tool-call block (`<tool_call>`, `<function=`, `<|python_tag|>`), and
+the runner maps it to a `config` defer naming the fix (the seat's parser flags). Tests:
+`TestUnparsedToolCallInContentIsAnError`, `TestUnparsedToolCallMarker`.
+
+
 ## [0.113.2] — 2026-09-03 — document-grounded contracts run without few-shot exemplars
 
 **Fixed — the second cut of the phantom-digest defect.** 0.113.1 closed, marked and synthesised the profile

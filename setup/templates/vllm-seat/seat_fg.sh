@@ -32,25 +32,38 @@ CHUNK="${SEAT_CHUNK:-784}"
 L2="${SEAT_L2-}"
 VENV="${SEAT_VENV:-/root/g7/vllm-env}"
 WORK="${SEAT_WORKDIR:-/root/g7}"
+# The MP server unit is per seat stack (default lmcache-mp). A scratch/benchmark stack in the same box MUST use
+# another unit name and port: on 2026-09-03 a benchmark arm on the seat's port and unit made llama-swap's health
+# check pass against the arm, so other sessions' contracts were served by an engine without the tool-call flags,
+# and every seat start stopped the arm's MP server in turn. seat_stop.sh reads the same variable.
+MP_UNIT="${SEAT_MP_UNIT:-lmcache-mp}"
 
 # Everything the engine prints must reach llama-swap's per-model log AND the seat log.
 exec > >(tee -a "$LOG") 2>&1
 
+# Refuse to start on a port something else already owns. vLLM would load for ~2 minutes and then die on
+# "Address already in use" while llama-swap's health check passes against the FOREIGN listener — the seat is
+# then "ready" and serving somebody else's engine. Fail here, at once, and name the squatter.
+if ss -ltnp 2>/dev/null | grep -q ":$PORT "; then
+  echo "seat_fg: REFUSING to start — :$PORT is already bound: $(ss -ltnp 2>/dev/null | grep ":$PORT " | grep -oE 'users:\(.*\)' | head -1)"
+  exit 1
+fi
+
 # One MP server per engine start, with THIS start's settings (a reused unit keeps stale L1/chunk/L2).
 # The store keeps its pages; only the staging buffer is rebuilt.
-systemctl stop lmcache-mp 2>/dev/null; systemctl reset-failed lmcache-mp 2>/dev/null
+systemctl stop "$MP_UNIT" 2>/dev/null; systemctl reset-failed "$MP_UNIT" 2>/dev/null
 L2ARG=(); [ -n "$L2" ] && L2ARG=(--l2-adapter "$L2")
-if ! systemd-run --unit=lmcache-mp --collect --working-directory="$WORK" -p TimeoutStopSec=20 \
+if ! systemd-run --unit="$MP_UNIT" --collect --working-directory="$WORK" -p TimeoutStopSec=20 \
     -p StandardOutput=append:"$WORK/lmcache-mp.log" -p StandardError=append:"$WORK/lmcache-mp.log" \
     -E CUDA_DEVICE_ORDER=PCI_BUS_ID -E HOME=/root -E LMCACHE_DISABLE_BANNER=1 -E LMCACHE_LOG_LEVEL=INFO \
     -E PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin" \
     "$VENV/bin/lmcache" server --host 127.0.0.1 --port "$MP_PORT" --chunk-size "$CHUNK" \
       --separate-object-groups --l1-size-gb "$L1_GB" --eviction-policy LRU --supported-transfer-mode auto "${L2ARG[@]}"; then
-  echo "seat_fg: lmcache-mp failed to start (systemd-run); see $WORK/lmcache-mp.log"; exit 1
+  echo "seat_fg: $MP_UNIT failed to start (systemd-run); see $WORK/lmcache-mp.log"; exit 1
 fi
 for i in $(seq 1 60); do
   ss -ltn 2>/dev/null | grep -q ":$MP_PORT " && break
-  systemctl is-active --quiet lmcache-mp || { echo "seat_fg: lmcache-mp died during start; see $WORK/lmcache-mp.log"; exit 1; }
+  systemctl is-active --quiet "$MP_UNIT" || { echo "seat_fg: $MP_UNIT died during start; see $WORK/lmcache-mp.log"; exit 1; }
   sleep 1
 done
 ss -ltn 2>/dev/null | grep -q ":$MP_PORT " || { echo "seat_fg: lmcache-mp never bound :$MP_PORT in 60 s"; exit 1; }

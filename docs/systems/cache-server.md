@@ -54,7 +54,11 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    "declared but down" before its first contract waits on it. A block the load refused is reported
    as `invalid` and never dialed. The block is declarative: the seat wrapper runs what its own
    `seat.env` says, and the status note reminds the operator to keep the two in agreement.
-4. The seat wrapper (`setup/templates/vllm-seat/seat_fg.sh`) starts the LMCache MP server with the
+4. The seat wrapper refuses to start when its port is already bound (a foreign listener would otherwise pass
+   llama-swap's health check and serve the seat's traffic — measured 2026-09-03), and names its MP server unit
+   from `SEAT_MP_UNIT` (default `lmcache-mp`). A benchmark or scratch engine in the same box must run on its own
+   port, its own MP unit/port and its own served model names; it must never reuse the seat's.
+4a. The seat wrapper (`setup/templates/vllm-seat/seat_fg.sh`) starts the LMCache MP server with the
    L1 size, chunk and L2 adapter, then the engine in the foreground of the llama-swap client, so a
    swap-out reaps the engine while the store keeps the pages.
 

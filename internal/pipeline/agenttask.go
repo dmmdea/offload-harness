@@ -314,6 +314,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// A busy seat that outlived the contention budget is its OWN reason:
 		// "seat contended:" is the ledger/audit grep key, and the operator's fix
 		// is capacity (llama-swap concurrencyLimit / --parallel), not a box.
+		if errors.Is(rerr, agent.ErrUnparsedToolCall) {
+			// The seat, not the box or the contract: fix its --tool-call-parser
+			// (and --reasoning-parser) to match the model's chat template.
+			return deferWire(core.DeferClassConfig, "seat tool-call parser mismatch — "+rerr.Error())
+		}
 		var se *agent.StatusError
 		if errors.As(rerr, &se) && seatwait.Retryable(se.Code, se.Body) {
 			// The client's own loop already recorded this status on the budget
