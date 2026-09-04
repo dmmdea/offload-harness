@@ -6,6 +6,16 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.6] — 2026-09-04 — an empty final message is nudged once before it counts as the answer
+
+**Fixed.** After its tool steps the Qube 27B seat sometimes closed with an EMPTY assistant message (delegation
+log: 4 steps, stop `done`, 17 output tokens — a bare think block), and the contract failed with no findings and
+no summary while the same document digested fine when asked directly. The loop now treats an empty final
+message (no content, no tool calls) as "not an answer yet": it appends one plain user turn asking for the
+answer in the requested shape and continues; a second empty message ends the run as before. Tests:
+`TestEmptyFinalMessageIsNudgedOnce`, `TestEmptyFinalMessageNudgeIsBounded`.
+
+
 ## [0.113.5] — 2026-09-04 — a completion budget starved by reasoning is raised once, not returned empty
 
 **Fixed.** On the Qube 27B seat (Qwen3.8 with `--reasoning-parser qwen3`) a digest spent 839 of the loop's

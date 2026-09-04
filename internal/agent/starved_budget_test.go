@@ -34,21 +34,24 @@ func TestReasoningStarvedBudgetIsRetriedOnceWithMoreTokens(t *testing.T) {
 	}
 }
 
-// TestStarvedBudgetRetriesOnlyOnce: a second empty-and-truncated answer is
-// returned as the (empty) result — no unbounded escalation.
+// TestStarvedBudgetRetriesOnlyOnce: after the one budget raise, a second
+// empty-and-truncated answer gets the one empty-message nudge (0.113.6) and a
+// third empty answer ends the run with an empty output — bounded at three calls,
+// no unbounded escalation.
 func TestStarvedBudgetRetriesOnlyOnce(t *testing.T) {
 	full := mkTools("list_dir")
 	client := &fakeClient{script: []Completion{
 		{Msg: Msg{Role: "assistant", Content: ""}, FinishReason: "length"},
 		{Msg: Msg{Role: "assistant", Content: ""}, FinishReason: "length"},
+		{Msg: Msg{Role: "assistant", Content: ""}, FinishReason: "length"},
 	}}
-	l := NewLoop(client, full, 3).WithMaxTokens(1024)
+	l := NewLoop(client, full, 4).WithMaxTokens(1024)
 	res, err := l.Run(context.Background(), "digest")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(client.seen) != 2 {
-		t.Fatalf("want exactly 2 chat calls, got %d", len(client.seen))
+	if len(client.seen) != 3 {
+		t.Fatalf("want exactly 3 chat calls (starved, raised, nudged), got %d", len(client.seen))
 	}
 	if res.Output != "" {
 		t.Fatalf("output %q", res.Output)
