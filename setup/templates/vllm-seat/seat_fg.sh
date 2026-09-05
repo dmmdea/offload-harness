@@ -47,15 +47,52 @@ exec > >(tee -a "$LOG") 2>&1
 # directory the adapter happily writes to, so the seat looks healthy and the cache server holds nothing.
 #   SEAT_L2_MOUNT_SRC=//cache-server/kvcache  SEAT_L2_MOUNT_DIR=/mnt/kvcache
 #   SEAT_L2_MOUNT_OPTS=credentials=/root/.smbcred,vers=3.1.1,rsize=4194304,wsize=4194304,cache=none,actimeo=1,noserverino,nobrl
+# Name the store by a HOSTNAME this box resolves (tailnet MagicDNS or a static DNS name), never a DHCP address:
+# on 2026-09-04 the store's LAN lease vanished after a reboot and every seat start refused here for hours. A name
+# that resolves is not a path that performs — after any network change re-measure the share (the same store wrote
+# at 4.6 MB/s over a Wi-Fi hop vs ~1 GB/s on its wired path). SEAT_L2_MIN_MBPS (default 0 = off) is a write floor:
+# below it the seat refuses to start, because a crawling share makes the tier slower than recomputing the prefix.
 if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
   mkdir -p "$SEAT_L2_MOUNT_DIR"
   if ! mountpoint -q "$SEAT_L2_MOUNT_DIR"; then
     if ! timeout 30 mount -t "${SEAT_L2_MOUNT_TYPE:-cifs}" "$SEAT_L2_MOUNT_SRC" "$SEAT_L2_MOUNT_DIR" -o "${SEAT_L2_MOUNT_OPTS:-}"; then
-      echo "seat_fg: REFUSING to start — cache-server share $SEAT_L2_MOUNT_SRC did not mount at $SEAT_L2_MOUNT_DIR"
+      # Say WHY, in the terms the operator can act on: name resolution, reachability, or the share itself.
+      host="${SEAT_L2_MOUNT_SRC#//}"; host="${host%%:*}"; host="${host%%/*}"
+      case "${SEAT_L2_MOUNT_TYPE:-cifs}" in nfs|nfs4) port=2049 ;; *) port=445 ;; esac
+      case "$host" in
+        *[!0-9.]*) resolved="$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}')" ;;   # a name: resolve it
+        *)         resolved="$host" ;;                                                          # an IPv4 literal: probe it as is
+      esac
+      if [ -z "$resolved" ]; then
+        why="'$host' does not resolve on this box (use a tailnet MagicDNS or static name, not a DHCP address)"
+      elif ! timeout 3 bash -c "</dev/tcp/$resolved/$port" 2>/dev/null; then
+        why="'$host' = $resolved, port $port unreachable (store down, wrong interface, or the address moved)"
+      else
+        why="'$host' = $resolved answers on $port — check credentials, the share name, and the store's allow-list"
+      fi
+      echo "seat_fg: REFUSING to start — cache-server share $SEAT_L2_MOUNT_SRC did not mount at $SEAT_L2_MOUNT_DIR: $why"
       exit 1
     fi
   fi
   echo "seat_fg: cache-server share mounted: $(df -h "$SEAT_L2_MOUNT_DIR" | tail -1)"
+  MIN_MBPS="${SEAT_L2_MIN_MBPS:-0}"
+  if [ "$MIN_MBPS" -gt 0 ] 2>/dev/null; then
+    probe="$SEAT_L2_MOUNT_DIR/.seat_fg-write-probe.$$"
+    t0=$(date +%s%N)
+    if timeout 120 dd if=/dev/zero of="$probe" bs=4M count=16 conv=fsync status=none 2>/dev/null; then
+      t1=$(date +%s%N); rm -f "$probe"
+      mbps=$(( 67109 / ( (t1 - t0) / 1000000 + 1 ) ))   # 64 MiB = 67,108,864 bytes → decimal MB/s over elapsed ms
+      if [ "$mbps" -lt "$MIN_MBPS" ]; then
+        echo "seat_fg: REFUSING to start — cache-server share writes at ~${mbps} MB/s, below SEAT_L2_MIN_MBPS=${MIN_MBPS}: the tier would be slower than recompute. Fix the path, or run the same-box tier (SEAT_L2= empty, no SEAT_L2_MOUNT_* vars)"
+        exit 1
+      fi
+      echo "seat_fg: cache-server share write probe ~${mbps} MB/s (floor ${MIN_MBPS})"
+    else
+      rm -f "$probe"
+      echo "seat_fg: REFUSING to start — cannot write a 64 MiB probe to the cache-server share at $SEAT_L2_MOUNT_DIR within 120 s"
+      exit 1
+    fi
+  fi
 fi
 
 # Refuse to start on a port something else already owns. vLLM would load for ~2 minutes and then die on

@@ -4,8 +4,10 @@
 # address is given, and this is an unauthenticated bulk-memory store. Boot is guaranteed by THIS unit,
 # not by docker's restart policy (restart policies did not restore containers after a power-cycle on
 # the reference box, 2026-08-17). First start REMOVES a container of the same name (the tier is
-# recomputable; a hand-started store is replaced). Replace <store-lan-ip> and size --maxmemory to the
-# box (~255 KB per token as stored: 45 GB ~ 175k tokens).
+# recomputable; a hand-started store is replaced). Replace <store-static-address> with an address this box
+# HOLDS AT BOOT — a DHCP reservation or the tailnet address — never a plain DHCP lease: when the lease
+# moved (2026-09-04) `docker run -p <old-ip>:…` failed and Restart=always looped 1,489 times. Size
+# --maxmemory to the box (~255 KB per token as stored: 45 GB ~ 175k tokens).
 [Unit]
 Description=kv-cache-server (Valkey L2 for the serving box's LMCache MP tier)
 After=docker.service network-online.target
@@ -15,7 +17,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStartPre=-/usr/bin/docker rm -f kv-cache-server
-ExecStart=/usr/bin/docker run --rm --name kv-cache-server -p <store-lan-ip>:18799:6379 valkey/valkey:8 valkey-server --maxmemory 45gb --maxmemory-policy allkeys-lru --save "" --appendonly no
+ExecStart=/usr/bin/docker run --rm --name kv-cache-server -p <store-static-address>:18799:6379 valkey/valkey:8 valkey-server --maxmemory 45gb --maxmemory-policy allkeys-lru --save "" --appendonly no
 ExecStop=/usr/bin/docker stop -t 10 kv-cache-server
 Restart=always
 RestartSec=5
