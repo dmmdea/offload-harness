@@ -6,6 +6,15 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.13] — 2026-09-05 — optional LMCache overlay for the vLLM seat (SEAT_LMCACHE_PYTHONPATH)
+
+**Added.** `seat_fg.sh` honours an optional `SEAT_LMCACHE_PYTHONPATH`: a directory prepended to `PYTHONPATH` for BOTH the
+LMCache MP server unit and the vLLM engine, so the seat can load LMCache from an overlay (an unreleased upstream fix applied
+to a copy of the installed package) without touching the venv. Empty/unset = the installed package, unchanged behaviour. The
+server and the engine always get the same value, because a mismatched LMCache serializer between them corrupts store/retrieve
+silently. Motivating case: LMCache PR #4253, which fixes fp8-KV / FlashInfer store corruption on GDN-hybrid models (LMCache
+#4247); the overlay + this knob run the fix in production while the PR is unmerged, and drop to one env line when it lands.
+
 ## [0.113.12] — 2026-09-05 — the seat wrapper prunes a persistent fs_native store to its cap
 
 **Fixed.** LMCache's fs_native L2 eviction controller is created per MP-server instance and accounts only for the pages that

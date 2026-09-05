@@ -724,7 +724,16 @@ SEAT_L2_MOUNT_SRC=//cache-server/kvcache   # a HOSTNAME this box resolves (tailn
 SEAT_L2_MOUNT_DIR=/mnt/kvcache
 SEAT_L2_MOUNT_OPTS=credentials=/root/.smbcred,vers=3.1.1,rsize=4194304,wsize=4194304,cache=none,actimeo=1,noserverino,nobrl
 SEAT_L2_MIN_MBPS=200                       # optional write floor: refuse to start on a crawling path (0 = off)
+SEAT_LMCACHE_PYTHONPATH=/root/g7/lmcache-overlay   # optional: load LMCache from an overlay (an unreleased fix), not the venv
 ```
+
+- `SEAT_LMCACHE_PYTHONPATH` (optional, 0.113.13): a directory prepended to `PYTHONPATH` for BOTH the LMCache
+  MP server and the vLLM engine, so the seat imports LMCache from an overlay copy that carries a not-yet-released
+  upstream fix, leaving the installed package untouched. Empty/unset = the installed package. The server and the
+  engine must load the SAME LMCache (a mismatched serializer corrupts store/retrieve silently), which is why the
+  one variable feeds both. Build the overlay from whatever LMCache is installed plus the fix, and REBUILD it after
+  any `pip install -U lmcache` so the patch rides the new base; when the fix ships in a release, unset the variable.
+  First use: LMCache PR #4253 (fp8-KV / FlashInfer store corruption on GDN hybrids, LMCache #4247).
 
 - `address` must be private (LAN or tailnet); a public address is refused at load by key name, and so is
   a URL or host:port under `store: "fs_native"` (which takes the absolute path of the mounted export).
