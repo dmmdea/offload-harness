@@ -28,7 +28,7 @@ import (
 // `version` const aliases it (keeping the VERSION-file agreement test in
 // main_test.go binding), and fleet/pipeline stampers read it directly so no
 // plumbing carries it through config.
-const Version = "0.113.11"
+const Version = "0.113.12"
 
 var (
 	buildOnce sync.Once

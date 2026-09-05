@@ -75,6 +75,28 @@ if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
     fi
   fi
   echo "seat_fg: cache-server share mounted: $(df -h "$SEAT_L2_MOUNT_DIR" | tail -1)"
+  # Prune the persistent store to its cap (0.113.12). LMCache's fs_native L2 eviction controller starts fresh with every MP
+  # server and accounts only for the pages THAT instance writes; pages left by earlier instances are never counted or
+  # evicted, so a store that survives seat restarts grows past max_capacity_gb to the filesystem limit — measured
+  # 2026-09-05: 832 files / 40 GB on a 40 GB tmpfs (100 %, 192 MB free) with max_capacity_gb 38, new pages then fail to land
+  # and the tier stops paying while reads of old pages still hit. SEAT_L2_PRUNE_GB (default 0 = off) deletes the OLDEST
+  # files under SEAT_L2_PRUNE_DIR (default: the adapter's base_path, if SEAT_L2 names one) until the directory is below
+  # the cap. Pages are a recomputable cache; nothing else lives in that directory.
+  PRUNE_GB="${SEAT_L2_PRUNE_GB:-0}"
+  PRUNE_DIR="${SEAT_L2_PRUNE_DIR:-$(printf '%s' "${SEAT_L2-}" | sed -n 's/.*"base_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')}"
+  if [ "$PRUNE_GB" -gt 0 ] 2>/dev/null && [ -n "$PRUNE_DIR" ] && [ -d "$PRUNE_DIR" ]; then
+    used_kb=$(du -sk "$PRUNE_DIR" 2>/dev/null | cut -f1); cap_kb=$(( PRUNE_GB * 1024 * 1024 )); removed=0; freed_kb=0
+    if [ "${used_kb:-0}" -gt "$cap_kb" ]; then
+      while IFS= read -r f; do
+        [ "$used_kb" -le "$cap_kb" ] && break
+        sz=$(( ( $(stat -c %s "$f" 2>/dev/null || echo 0) + 1023 ) / 1024 ))
+        rm -f -- "$f" && { used_kb=$(( used_kb - sz )); freed_kb=$(( freed_kb + sz )); removed=$(( removed + 1 )); }
+      done < <(find "$PRUNE_DIR" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)
+      echo "seat_fg: cache-server store pruned: removed $removed oldest file(s), $(( freed_kb / 1024 )) MiB, now $(( used_kb / 1024 )) MiB of a $(( cap_kb / 1024 )) MiB cap ($PRUNE_DIR)"
+    else
+      echo "seat_fg: cache-server store $(( ${used_kb:-0} / 1024 )) MiB under the $(( cap_kb / 1024 )) MiB cap ($PRUNE_DIR)"
+    fi
+  fi
   MIN_MBPS="${SEAT_L2_MIN_MBPS:-0}"
   if [ "$MIN_MBPS" -gt 0 ] 2>/dev/null; then
     probe="$SEAT_L2_MOUNT_DIR/.seat_fg-write-probe.$$"

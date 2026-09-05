@@ -71,6 +71,11 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    llama-swap's health check and serve the seat's traffic — measured 2026-09-03), and names its MP server unit
    from `SEAT_MP_UNIT` (default `lmcache-mp`). A benchmark or scratch engine in the same box must run on its own
    port, its own MP unit/port and its own served model names; it must never reuse the seat's.
+4e. LMCache's fs_native L2 eviction controller is per MP-server instance and counts only the pages that instance wrote,
+   so a persistent store grows past `max_capacity_gb` across seat restarts until the filesystem is full (measured
+   2026-09-05: 40 GB tmpfs at 100 % with a 38 GB cap; new pages then fail to land while old ones still hit). The seat
+   wrapper prunes the store to `SEAT_L2_PRUNE_GB` at start (oldest files first, `SEAT_L2_PRUNE_DIR` defaults to the
+   adapter's `base_path`); set it a few GB under the share so the controller's own accounting has room.
 4d. `seat_stop.sh` captures the API server's process tree before killing it and reaps the engine children
    (`VLLM::EngineCore`, `VllmWorker-N`) that outlive it, plus any parentless engine process; it then reads the
    seat devices back and warns, naming the holders, when they still hold VRAM. A stop that arrives mid-request
