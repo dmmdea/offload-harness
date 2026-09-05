@@ -6,6 +6,15 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.12] — 2026-09-05 — the seat wrapper prunes a persistent fs_native store to its cap
+
+**Fixed.** LMCache's fs_native L2 eviction controller is created per MP-server instance and accounts only for the pages that
+instance writes; pages left by earlier instances are never counted or evicted, so a store that survives seat restarts (the
+cache server's whole point) grows past `max_capacity_gb` to the filesystem limit — measured 2026-09-05: 832 files / 40 GB on
+a 40 GB tmpfs (100 % full) under a 38 GB cap, new pages failing to land while old ones still hit. `seat_fg.sh` now prunes
+the store to `SEAT_L2_PRUNE_GB` at start (oldest files first; `SEAT_L2_PRUNE_DIR` defaults to the adapter's `base_path`).
+Default 0 = off. Upstream packet candidate F10.
+
 ## [0.113.11] — 2026-09-05 — seat_stop reaps the engine's orphans and reads the cards back
 
 **Fixed.** `seat_stop.sh` killed only the vLLM API server (`vllm serve …--port N`); when the stop arrived mid-request the
