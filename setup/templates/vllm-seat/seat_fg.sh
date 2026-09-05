@@ -129,14 +129,20 @@ fi
 # The store keeps its pages; only the staging buffer is rebuilt.
 systemctl stop "$MP_UNIT" 2>/dev/null; systemctl reset-failed "$MP_UNIT" 2>/dev/null
 L2ARG=(); [ -n "$L2" ] && L2ARG=(--l2-adapter "$L2")
+# SEAT_LMCACHE_PYTHONPATH (optional): a directory prepended to PYTHONPATH so the MP server (and the engine, below) import
+# LMCache from an overlay instead of the installed package — used to run an unreleased upstream fix without touching the
+# venv (0.113.13). Empty = the installed package, unchanged. Both the server and the engine must load the SAME LMCache, so
+# the value is injected in both places. `-E PYTHONPATH=""` would put the CWD on the path, so the flag is added only when set.
+PP_ENV=(); [ -n "${SEAT_LMCACHE_PYTHONPATH:-}" ] && PP_ENV=(-E PYTHONPATH="$SEAT_LMCACHE_PYTHONPATH")
 if ! systemd-run --unit="$MP_UNIT" --collect --working-directory="$WORK" -p TimeoutStopSec=20 \
     -p StandardOutput=append:"$WORK/lmcache-mp.log" -p StandardError=append:"$WORK/lmcache-mp.log" \
     -E CUDA_DEVICE_ORDER=PCI_BUS_ID -E HOME=/root -E LMCACHE_DISABLE_BANNER=1 -E LMCACHE_LOG_LEVEL=INFO \
-    -E PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin" \
+    -E PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin" "${PP_ENV[@]}" \
     "$VENV/bin/lmcache" server --host 127.0.0.1 --port "$MP_PORT" --chunk-size "$CHUNK" \
       --separate-object-groups --l1-size-gb "$L1_GB" --eviction-policy LRU --supported-transfer-mode auto "${L2ARG[@]}"; then
   echo "seat_fg: $MP_UNIT failed to start (systemd-run); see $WORK/lmcache-mp.log"; exit 1
 fi
+[ -n "${SEAT_LMCACHE_PYTHONPATH:-}" ] && echo "seat_fg: LMCache overlay ON: PYTHONPATH=$SEAT_LMCACHE_PYTHONPATH (MP server + engine)"
 for i in $(seq 1 60); do
   ss -ltn 2>/dev/null | grep -q ":$MP_PORT " && break
   systemctl is-active --quiet "$MP_UNIT" || { echo "seat_fg: $MP_UNIT died during start; see $WORK/lmcache-mp.log"; exit 1; }
@@ -178,6 +184,9 @@ fi
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="${SEAT_DEVICES:-0,1}" NCCL_CUMEM_ENABLE=0 NCCL_P2P_DISABLE=1 HF_HUB_OFFLINE=1
 export HOME=/root HF_HOME="${SEAT_HF_HOME:-$WORK/hf}" VLLM_CACHE_ROOT="${SEAT_VLLM_CACHE:-$WORK/vllm-cache}" LMCACHE_LOG_LEVEL=INFO
 export PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin"
+# Same overlay as the MP server above (0.113.13): the engine's LMCache connector must match the server's, or store/retrieve
+# uses two different serializers. Prepend, never replace, so a caller-set PYTHONPATH survives.
+[ -n "${SEAT_LMCACHE_PYTHONPATH:-}" ] && export PYTHONPATH="$SEAT_LMCACHE_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"
 PAR=()
 if [ -n "${SEAT_PP:-}" ]; then
   export VLLM_PP_LAYER_PARTITION="${SEAT_PARTITION:-}"
