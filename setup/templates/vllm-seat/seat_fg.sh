@@ -127,6 +127,32 @@ else
   echo "seat_fg: same-box tier only (L1 ${L1_GB} GB), no cache server"
 fi
 
+# VRAM precheck (0.113.9). A start that follows a swap-out by a few seconds can find the seat's cards still
+# holding the previous engine's memory (or a co-resident seat); vLLM then sizes its KV pool against a smaller
+# card and refuses ("… KV cache is needed, which is larger than the available KV cache memory") — measured
+# 2026-09-04: two cold loads in a row failed at util 0.90 on cards that gate clean 10/10, both ~12 s after the
+# previous engine died; 30 s later the same cards read 0 MiB. Wait up to SEAT_VRAM_WAIT_SEC (default 60) for
+# every seat device to drop below SEAT_VRAM_FLOOR_MIB (default 1024), and name the holders if it does not.
+# A warning, never a refusal: the engine's own error is the final word.
+DEVS="${SEAT_DEVICES:-0,1}"; VWAIT="${SEAT_VRAM_WAIT_SEC:-60}"; VFLOOR="${SEAT_VRAM_FLOOR_MIB:-1024}"
+if command -v nvidia-smi >/dev/null 2>&1 && [ "$VWAIT" -gt 0 ] 2>/dev/null; then
+  deadline=$(( $(date +%s) + VWAIT )); busy=""
+  while :; do
+    busy=""
+    for d in ${DEVS//,/ }; do
+      used="$(CUDA_DEVICE_ORDER=PCI_BUS_ID nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$d" 2>/dev/null | head -1 | tr -d ' ')"
+      if [ -n "$used" ] && [ "$used" -gt "$VFLOOR" ] 2>/dev/null; then busy="$busy dev$d=${used}MiB"; fi
+    done
+    [ -z "$busy" ] && break
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "seat_fg: WARNING — seat devices still hold VRAM above ${VFLOOR} MiB after ${VWAIT} s:$busy — holders: $(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader 2>/dev/null | tr '\n' ';')"
+      break
+    fi
+    sleep 2
+  done
+  [ -z "$busy" ] && echo "seat_fg: seat devices $DEVS below ${VFLOOR} MiB — VRAM clear"
+fi
+
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="${SEAT_DEVICES:-0,1}" NCCL_CUMEM_ENABLE=0 NCCL_P2P_DISABLE=1 HF_HUB_OFFLINE=1
 export HOME=/root HF_HOME="${SEAT_HF_HOME:-$WORK/hf}" VLLM_CACHE_ROOT="${SEAT_VLLM_CACHE:-$WORK/vllm-cache}" LMCACHE_LOG_LEVEL=INFO
 export PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin"

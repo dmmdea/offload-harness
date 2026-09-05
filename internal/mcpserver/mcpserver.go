@@ -1608,6 +1608,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		Model:       model,
 		Timeout:     timeout,
 		MaxSteps:    maxSteps,
+		MaxTokens:   cfg.AgentMaxTokens, // 0 => the loop default (1,024); a thinking seat wants 4096 (agent_max_tokens)
 		ReadRoot:    absRoot,
 		Offload:     offload,
 		NPU:         pipeline.NewLoopNPU(cfg),

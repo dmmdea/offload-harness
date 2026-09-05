@@ -208,6 +208,15 @@ type Config struct {
 	// is the safe reading of "ceiling unknown". Set it to the tier's agent_ctx_tokens
 	// when opting a node in with fleet_agent_enabled.
 	AgentCtxTokens int `json:"agent_ctx_tokens,omitempty"`
+	// AgentMaxTokens is the planner's completion budget per call for agent_run and
+	// for delegated agent jobs served by this node (the loop's max_tokens). 0 = the
+	// loop default (1,024). A THINKING seat spends its reasoning inside this budget:
+	// on the Qube's Qwen3.8-27B seat (`--reasoning-parser qwen3`) a digest used 839
+	// reasoning tokens of 1,024 and returned nothing (2026-09-04). The loop already
+	// raises a starved budget once, to 4x (cap 8,192), but that costs a failed attempt
+	// per contract; set 4096 here for a thinking seat so the first attempt fits. The
+	// local-agent CLI has its own -max-tokens flag (default 4096) and ignores this key.
+	AgentMaxTokens int `json:"agent_max_tokens,omitempty"`
 	// VisionModel is the VLM alias used for the vqa task (multimodal). Empty = no
 	// vision route (vqa defers).
 	VisionModel string `json:"vision_model,omitempty"`

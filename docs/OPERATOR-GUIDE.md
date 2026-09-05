@@ -587,7 +587,11 @@ to `installed.json`. The install seed also binds the agent's planner seat automa
 `agent_model` comes from the profile's explicit `config_seed.agent_model` when it names one (the
 measured seat for that tier), and otherwise is DERIVED from `resident_tier` when that differs from
 the workhorse. So running the agent no longer requires `-model <resident_tier>` — the `-model` flag
-remains an override. A tier may also seed `agent_profile`, the box's DEFAULT agent tool profile when
+remains an override. `agent_max_tokens` (0.113.9) is the planner's completion budget per call for `agent_run`
+and for delegated jobs this node serves (0 = the loop default of 1,024; the loop still raises a starved budget
+once, to 4x) — set 4096 for a THINKING seat, whose reasoning spends the same budget (the Qube 27B seat used 839
+reasoning tokens of 1,024 and returned nothing, 2026-09-04). A key named `max_tokens` is NOT read: the loader
+warns `unknown config key`. A tier may also seed `agent_profile`, the box's DEFAULT agent tool profile when
 a call names none (resolution: explicit `--profile`/argument > config `agent_profile` > `general`).
 `ampere-6` seeds `research` because on that tier the same model scored 0% under `general` and 72%
 narrowed — the profile outweighed the choice of model. `--two-tier` ignores the box default, since

@@ -209,6 +209,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		Model:       seat,
 		Timeout:     wall,
 		MaxSteps:    contract.MaxSteps,
+		MaxTokens:   p.cfg.AgentMaxTokens, // the executing node's budget (its seat's reasoning cost is its own fact)
 		ReadRoot:    contextDir,
 		Offload:     NewRecordlessOffload(p.cfg, p.cfg.Model, wall),
 		NPU:         NewLoopNPU(p.cfg),
