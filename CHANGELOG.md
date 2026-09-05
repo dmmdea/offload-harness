@@ -6,6 +6,15 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.11] — 2026-09-05 — seat_stop reaps the engine's orphans and reads the cards back
+
+**Fixed.** `seat_stop.sh` killed only the vLLM API server (`vllm serve …--port N`); when the stop arrived mid-request the
+server died but its children — `VLLM::EngineCore` and the `VllmWorker-N` processes — lived on with the port free,
+holding 1.8 / 12 / 3.5 GB across three cards for eight minutes (2026-09-05) while llama-swap recorded a clean unload
+and the next start waited on cards nobody was using. The template now captures the server's process tree before
+the kill, reaps what outlives it, reaps any parentless engine process, and reads the seat devices back after the
+stop, warning with the holders when VRAM is still held.
+
 ## [0.113.10] — 2026-09-05 — `ffmpeg_video_encoder`: draft re-encodes can use NVENC
 
 **Added.** `offload_media` re-encodes video in exactly two places — `trim` with `reencode=true` and `convert` with

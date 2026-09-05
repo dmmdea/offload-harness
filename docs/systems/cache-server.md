@@ -71,6 +71,10 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    llama-swap's health check and serve the seat's traffic — measured 2026-09-03), and names its MP server unit
    from `SEAT_MP_UNIT` (default `lmcache-mp`). A benchmark or scratch engine in the same box must run on its own
    port, its own MP unit/port and its own served model names; it must never reuse the seat's.
+4d. `seat_stop.sh` captures the API server's process tree before killing it and reaps the engine children
+   (`VLLM::EngineCore`, `VllmWorker-N`) that outlive it, plus any parentless engine process; it then reads the
+   seat devices back and warns, naming the holders, when they still hold VRAM. A stop that arrives mid-request
+   left an EngineCore alive for 8 minutes on 2026-09-05 with the port free — llama-swap saw a clean unload.
 4c. Before the engine starts, the wrapper waits (`SEAT_VRAM_WAIT_SEC`, default 60) for every seat device to
    fall below `SEAT_VRAM_FLOOR_MIB` (default 1024) and names the holders if they do not — a start a few
    seconds after a swap-out found the cards still holding the previous engine and vLLM refused the KV pool
