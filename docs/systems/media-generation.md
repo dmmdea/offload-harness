@@ -472,3 +472,13 @@ recorded as known offenders with their reason rather than silently skipped — a
 - [../flows/zero-warm-generation.md](../flows/zero-warm-generation.md)
 - [../architecture/decisions/0009-zero-warm-gpu-lifecycle.md](../architecture/decisions/0009-zero-warm-gpu-lifecycle.md)
 - [../architecture/decisions/0011-flux-family-license-prohibition.md](../architecture/decisions/0011-flux-family-license-prohibition.md)
+
+## Re-encoding ops and `ffmpeg_video_encoder` (0.113.10)
+
+Of the `offload_media` ops only two re-encode video: `trim` with `reencode=true` (exact cuts) and `convert`
+when video is kept. Without a setting they use ffmpeg's container default — `libx264` on the CPU. The config
+key `ffmpeg_video_encoder` (e.g. `"h264_nvenc"`) moves those two draft/QA paths to the GPU's NVENC block,
+which frees CPU threads and does not touch CUDA cores, so a re-encode no longer competes with the seats
+for the processor. Stream-copy ops (`trim` default, `concat`, `mux_audio`), `extract_frames` and `probe` are
+unaffected. NVENC at a given bitrate trails a slow x264 preset, so final deliverables should stay on the CPU
+encoder unless a side-by-side viewing says otherwise; an ffmpeg without the encoder fails the op loudly.

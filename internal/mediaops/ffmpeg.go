@@ -29,6 +29,11 @@ type MediaRequest struct {
 	Reencode  bool     // trim: re-encode for exact cuts instead of keyframe-snapped -c copy
 	AudioOnly bool     // convert: drop video (-vn)
 	VideoOnly bool     // convert: drop audio (-an)
+	// VideoEncoder names the ffmpeg video encoder for the two ops that RE-ENCODE video
+	// (trim with Reencode, convert with video kept). "" = ffmpeg's container default
+	// (libx264 on the CPU). "h264_nvenc" moves draft/QA re-encodes to NVENC — measured
+	// 2026-09-05 on the Qube (CUDA-X plan task 4.2); set from config ffmpeg_video_encoder.
+	VideoEncoder string
 }
 
 // BuildFFmpegArgs assembles the ffmpeg argv for one media op. Pure — no filesystem,
@@ -53,6 +58,8 @@ func BuildFFmpegArgs(r MediaRequest) ([]string, error) {
 		args = append(args, "-i", r.In)
 		if !r.Reencode {
 			args = append(args, "-c", "copy")
+		} else if r.VideoEncoder != "" {
+			args = append(args, "-c:v", r.VideoEncoder)
 		}
 		return append(args, r.Out), nil
 
@@ -82,6 +89,9 @@ func BuildFFmpegArgs(r MediaRequest) ([]string, error) {
 		}
 		if r.VideoOnly {
 			args = append(args, "-an")
+		}
+		if !r.AudioOnly && r.VideoEncoder != "" {
+			args = append(args, "-c:v", r.VideoEncoder)
 		}
 		return append(args, r.Out), nil
 

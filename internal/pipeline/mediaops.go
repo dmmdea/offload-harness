@@ -119,7 +119,7 @@ func (p *Pipeline) runMedia(ctx context.Context, req core.Request, meta core.Met
 		ext := defaultMediaExt(mreq)
 		mreq.Out = filepath.Join(p.cfg.MediaDir, "media-"+sha256hex(mreq.Op + mreq.In + fmt.Sprint(mreq.Inputs))[:8]+ext)
 	}
-	cfg := mediaops.MediaConfig{FFmpeg: p.cfg.FFmpegPath, Timeout: time.Duration(p.cfg.EditTimeoutSec) * time.Second}
+	cfg := mediaops.MediaConfig{FFmpeg: p.cfg.FFmpegPath, Timeout: time.Duration(p.cfg.EditTimeoutSec) * time.Second, VideoEncoder: p.cfg.FFmpegVideoEncoder}
 	res, err := mediaops.RunMedia(ctx, cfg, mreq)
 	if err != nil {
 		return deferWith("media " + mreq.Op + ": " + err.Error())
