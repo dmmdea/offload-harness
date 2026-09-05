@@ -6,6 +6,18 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.8] — 2026-09-04 — vLLM seat template: name the cache server by hostname, say why a mount failed, optional write floor
+
+**Fixed / Added.** The production seat env mounted the cache-server share by a LAN IP; the store's DHCP lease vanished
+after a reboot (2026-09-04) and every seat start refused at the mount for hours — the "unhealthy review seat". The
+template's mount refusal now names the cause (`does not resolve` / `port 445|2049 unreachable` / `answers but the share
+refused`) so the next such outage is a one-line diagnosis, and the docs say hostname (tailnet MagicDNS or static DNS),
+never a DHCP address. A resolvable name is not a fast path: the same share wrote at 4.6 MB/s over a Wi-Fi hop, slower
+than recomputing the prefix. `SEAT_L2_MIN_MBPS` (default 0 = off) measures a 64 MiB fsync write after the mount and
+refuses to start below the floor; the fallback is the same-box tier. `kv-cache-server.service` template: the bind
+placeholder is a static or tailnet address (a moved lease made `docker run -p` fail and `Restart=always` loop 1,489
+times). OPERATOR-GUIDE gains the `fs_native` example (config block + seat.env); `cache-server.md` updated.
+
 ## [0.113.7] — 2026-09-04 — vLLM seat template: mount the cache-server share for fs_native, refuse to start without it
 
 **Added.** The clean matrix (chain R, 2026-09-04) measured `fs_native` over the Lenovo's tmpfs on SMB 3.1.1 as the

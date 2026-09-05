@@ -697,9 +697,41 @@ stays free while the load streams, and they survive a seat swap. Same-box RAM as
 }
 ```
 
+The measured transport of choice is `fs_native` over a network share of the store's RAM disk (0.112.1+;
+Lenovo tmpfs over SMB 3.1.1: a 23.7k-token prefix back in 0.56–0.70 s vs 3.8 s through Valkey, 2026-09-04).
+The block then names the mounted path, and the seat's `seat.env` names the share the wrapper mounts first:
+
+```json
+"kv_cache_server": {
+  "enabled": true,
+  "store": "fs_native",
+  "address": "/mnt/kvcache/lmcache-seat-tp2-v2",
+  "l1_staging_gb": 8,
+  "chunk_size": 784,
+  "key_prefix": "qube-seat-tp2-v2",
+  "seat": "qwen3.8-27b-vllm"
+}
+```
+
+```sh
+# seat.env (the wrapper mounts the share before the MP server opens base_path, and refuses to start without it)
+SEAT_L2='{"type":"fs_native","base_path":"/mnt/kvcache/lmcache-seat-tp2-v2","num_workers":8,"use_odirect":false,"max_capacity_gb":38}'
+SEAT_L2_MOUNT_SRC=//cache-server/kvcache   # a HOSTNAME this box resolves (tailnet MagicDNS or static DNS) — never a DHCP address
+SEAT_L2_MOUNT_DIR=/mnt/kvcache
+SEAT_L2_MOUNT_OPTS=credentials=/root/.smbcred,vers=3.1.1,rsize=4194304,wsize=4194304,cache=none,actimeo=1,noserverino,nobrl
+SEAT_L2_MIN_MBPS=200                       # optional write floor: refuse to start on a crawling path (0 = off)
+```
+
 - `address` must be private (LAN or tailnet); a public address is refused at load by key name, and so is
   a URL or host:port under `store: "fs_native"` (which takes the absolute path of the mounted export).
   Bulk KV prefers the direct LAN (WireGuard measured 6.6× slower).
+- Name the store by a hostname, and re-measure the path after any network change. On 2026-09-04 a seat env
+  that mounted `//<lan-ip>/kvcache` refused every start for hours after the store's DHCP lease vanished; the
+  MagicDNS name mounted at once — over a Wi-Fi hop, at 4.6 MB/s, which is slower than recomputing the prefix.
+  `SEAT_L2_MIN_MBPS` turns that into a refusal instead of a silently useless tier; until the path is back,
+  run the same-box tier (`SEAT_L2=` empty, no mount vars, `l1_staging_gb` sized as the tier) and set
+  `enabled: false` here so `offload_status` and the seat agree. The wrapper's refusal message names the
+  cause (does not resolve / port unreachable / answers but the share refused).
 - `chunk_size` must equal the engine's unified block size for the model (vLLM logs "Setting
   attention block size to N tokens"; 784 for Qwen3.8-27B with fp16 KV). The 784 default is that one
   model's number: status reports `chunk_size_defaulted: true` until you set it.
@@ -724,7 +756,8 @@ and after a restart — hit counters alone do not prove the context came back in
 per model, so a pipeline-parallel seat whose stages hold different numbers of full-attention layers
 (three stages of a 64-layer / 16-attention model: 6/5/5 in any split) fails L2 reads for the odd rank.
 Two-card tensor-parallel seats use the store; a three-card seat uses the same-box L1 tier
-(`l1_staging_gb` sized as the tier, no store) until an upstream fix or a validated `fs_native` path.
+(`l1_staging_gb` sized as the tier, no store) until an upstream fix — `fs_native` is validated for two-card
+(tensor-parallel) seats only.
 Details: [`docs/systems/cache-server.md`](systems/cache-server.md), ADR 0033.
 
 ### Delegate subtasks across fleet nodes (`agent_delegate` / `delegate`)

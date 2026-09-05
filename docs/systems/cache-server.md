@@ -60,8 +60,13 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    The seat wrapper mounts the share before the MP server starts when `SEAT_L2_MOUNT_SRC` / `SEAT_L2_MOUNT_DIR`
    (and optionally `SEAT_L2_MOUNT_OPTS`, `SEAT_L2_MOUNT_TYPE`, default `cifs`) are set, and REFUSES to start when
    the mount fails — an unmounted base_path is a local directory the adapter writes to, so the seat would look
-   healthy while the cache server held nothing. A three-stage pipeline seat gets nothing from any L2 (Valkey or
-   fs_native): keep it on the same-box tier.
+   healthy while the cache server held nothing. The share is named by a hostname the box resolves (tailnet
+   MagicDNS or static DNS), never a DHCP address — a vanished lease refused every seat start for hours on
+   2026-09-04 — and the refusal message says why (does not resolve / port unreachable / share refused).
+   `SEAT_L2_MIN_MBPS` (default off) is a write floor measured with a 64 MiB fsync probe after the mount: a path
+   that crawls (4.6 MB/s over a Wi-Fi hop, measured) makes the tier slower than recompute, so the seat refuses
+   rather than serving a useless tier; the same-box tier is the fallback. A three-stage pipeline seat gets
+   nothing from any L2 (Valkey or fs_native): keep it on the same-box tier.
 4b. The seat wrapper refuses to start when its port is already bound (a foreign listener would otherwise pass
    llama-swap's health check and serve the seat's traffic — measured 2026-09-03), and names its MP server unit
    from `SEAT_MP_UNIT` (default `lmcache-mp`). A benchmark or scratch engine in the same box must run on its own
