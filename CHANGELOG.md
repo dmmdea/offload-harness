@@ -6,6 +6,19 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.9] — 2026-09-04 — `agent_max_tokens` is a real config key; the seat wrapper waits for its cards to clear
+
+**Added.** `agent_max_tokens`: the planner's completion budget per call for `agent_run` and for delegated agent jobs the
+node serves (0 = the loop default of 1,024). The 2026-09-04 fix for the starved thinking seat put `max_tokens: 4096` in
+two configs — a key the loader does not read (`warning: unknown config key`); the seat has been running on the loop
+default plus the once-raise of 0.113.5, paying a failed attempt per starved contract. Set 4096 for a thinking seat.
+Wired in the MCP front door, the fleet-node job path and the replay agent; the `local-agent` CLI keeps its own flag.
+
+**Added.** vLLM seat template: a VRAM precheck before the engine — waits up to `SEAT_VRAM_WAIT_SEC` (60) for every seat
+device to fall below `SEAT_VRAM_FLOOR_MIB` (1024) and names the holders when it cannot. Measured: two cold loads in a
+row refused the KV pool ("3.21 GiB KV cache is needed … available 2.48 GiB") when the start came ~12 s after the
+previous engine died; the same cards read 0 MiB 30 s later. Warning only; the engine's error stays final.
+
 ## [0.113.8] — 2026-09-04 — vLLM seat template: name the cache server by hostname, say why a mount failed, optional write floor
 
 **Fixed / Added.** The production seat env mounted the cache-server share by a LAN IP; the store's DHCP lease vanished
