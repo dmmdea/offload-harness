@@ -6,6 +6,14 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.10] — 2026-09-05 — `ffmpeg_video_encoder`: draft re-encodes can use NVENC
+
+**Added.** `offload_media` re-encodes video in exactly two places — `trim` with `reencode=true` and `convert` with
+video kept — and did so on ffmpeg's container default, `libx264` on the CPU (CUDA-X plan task 4.1 inventory). The
+new config key `ffmpeg_video_encoder` (e.g. `h264_nvenc`) names the encoder for those two ops; stream-copy ops,
+frame extraction and probe are untouched, and an absent encoder fails loudly rather than falling back. Measured
+on the Qube (task 4.2) before the key was set there.
+
 ## [0.113.9] — 2026-09-04 — `agent_max_tokens` is a real config key; the seat wrapper waits for its cards to clear
 
 **Added.** `agent_max_tokens`: the planner's completion budget per call for `agent_run` and for delegated agent jobs the

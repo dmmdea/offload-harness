@@ -243,6 +243,15 @@ type Config struct {
 	VideoFrameWidth int `json:"video_frame_width,omitempty"`
 	// FFmpegPath is the ffmpeg executable used to sample frames. Default "ffmpeg".
 	FFmpegPath string `json:"ffmpeg_path,omitempty"`
+	// FFmpegVideoEncoder is the video encoder offload_media uses for the two ops that
+	// RE-ENCODE video: `trim` with reencode=true (exact cuts) and `convert` with video kept.
+	// "" (default) = ffmpeg's container default, libx264 on the CPU. "h264_nvenc" (or
+	// hevc_nvenc / av1_nvenc) moves those draft/QA re-encodes to the GPU's NVENC block,
+	// which frees CPU threads and never touches CUDA cores — measured 2026-09-05 on the
+	// Qube (CUDA-X plan task 4.2). Stream-copy ops (trim default, concat, mux_audio) and
+	// frame extraction are unaffected. Requires an ffmpeg built with the encoder (the
+	// gyan full builds are); an absent encoder fails the op loudly, it does not fall back.
+	FFmpegVideoEncoder string `json:"ffmpeg_video_encoder,omitempty"`
 	// --- STT / transcribe (Phase A.2) ---
 	// STTModel is the llama-swap alias for the default whisper-server upstream
 	// (large-v3-turbo). Empty = no STT route (transcribe defers).

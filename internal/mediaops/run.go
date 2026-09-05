@@ -165,6 +165,9 @@ func runEditWorker(ctx context.Context, cfg EditConfig, image string, ops []Edit
 type MediaConfig struct {
 	FFmpeg  string        // ffmpeg_path ("" = absent)
 	Timeout time.Duration // edit_timeout_sec governs media ops too
+	// VideoEncoder is config ffmpeg_video_encoder: the encoder for re-encoding ops
+	// (trim --reencode, convert with video). "" = ffmpeg default (libx264, CPU).
+	VideoEncoder string
 }
 
 // MediaResult is the op-specific payload (exactly one field group is set).
@@ -184,6 +187,9 @@ func RunMedia(ctx context.Context, cfg MediaConfig, req MediaRequest) (MediaResu
 	}
 	if _, err := os.Stat(cfg.FFmpeg); err != nil {
 		return res, fmt.Errorf("ffmpeg_path %q not found: %w", cfg.FFmpeg, ErrEngineAbsent)
+	}
+	if req.VideoEncoder == "" {
+		req.VideoEncoder = cfg.VideoEncoder // the box's binding; a caller may still name one explicitly
 	}
 
 	switch req.Op {

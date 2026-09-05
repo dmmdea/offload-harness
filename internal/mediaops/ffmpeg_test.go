@@ -188,3 +188,55 @@ func TestParseProbe_GarbageErrors(t *testing.T) {
 		t.Fatal("garbage input must error (banner-format drift must fail loudly)")
 	}
 }
+
+func TestBuildFFmpegArgs_VideoEncoderOnlyOnReencodePaths(t *testing.T) {
+	// trim --reencode with an encoder names it; without one ffmpeg's default stands (no -c:v).
+	a, err := BuildFFmpegArgs(MediaRequest{Op: "trim", In: "in.mp4", Out: "out.mp4", Start: "3", Duration: "2", Reencode: true, VideoEncoder: "h264_nvenc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasPair(a, "-c:v", "h264_nvenc") {
+		t.Fatalf("trim --reencode should carry -c:v h264_nvenc: %v", a)
+	}
+	b, _ := BuildFFmpegArgs(MediaRequest{Op: "trim", In: "in.mp4", Out: "out.mp4", Start: "3", Duration: "2", Reencode: true})
+	if hasFlag(b, "-c:v") {
+		t.Fatalf("trim --reencode without an encoder must not name one: %v", b)
+	}
+	// trim stream copy ignores the encoder entirely.
+	c, _ := BuildFFmpegArgs(MediaRequest{Op: "trim", In: "in.mp4", Out: "out.mp4", Start: "3", VideoEncoder: "h264_nvenc"})
+	if hasFlag(c, "-c:v") || !hasPair(c, "-c", "copy") {
+		t.Fatalf("trim copy must stay a stream copy: %v", c)
+	}
+	// convert with video kept uses the encoder; audio-only never does.
+	d, _ := BuildFFmpegArgs(MediaRequest{Op: "convert", In: "in.mkv", Out: "out.mp4", VideoEncoder: "h264_nvenc"})
+	if !hasPair(d, "-c:v", "h264_nvenc") {
+		t.Fatalf("convert with video should carry the encoder: %v", d)
+	}
+	e, _ := BuildFFmpegArgs(MediaRequest{Op: "convert", In: "in.mp4", Out: "out.m4a", AudioOnly: true, VideoEncoder: "h264_nvenc"})
+	if hasFlag(e, "-c:v") {
+		t.Fatalf("audio-only convert must not name a video encoder: %v", e)
+	}
+	// mux_audio keeps -c:v copy regardless.
+	f, _ := BuildFFmpegArgs(MediaRequest{Op: "mux_audio", In: "v.mp4", Audio: "a.wav", Out: "o.mp4", VideoEncoder: "h264_nvenc"})
+	if !hasPair(f, "-c:v", "copy") {
+		t.Fatalf("mux_audio must keep -c:v copy: %v", f)
+	}
+}
+
+func hasFlag(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPair(args []string, flag, val string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == val {
+			return true
+		}
+	}
+	return false
+}
