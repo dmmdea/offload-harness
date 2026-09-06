@@ -164,6 +164,15 @@ INHERITED lease (`GPU_LEASE_EPOCH`) exempts a caller — the holder's own pid de
 `fleet-serve` would un-gate itself. See
 [ADR 0026](../architecture/decisions/0026-text-load-admissions-wait-for-the-media-lease.md).
 
+**Delegate placement reads a `text` reservation as "not here" (0.113.14).** `internal/delegate`
+resolves the lease through the same `LeaseDir` + `InspectDir` path (`LocalLease`, never acquired) and,
+on route=auto and route=spread, a held `text` lease removes the local seat from placement: an eligible
+remote takes the contract; with none, the runner waits up to `agent_lease_wait_sec` and then defers
+(class `infrastructure`, holder named) rather than loading the reserved cards — the 2026-09-05 case
+where three foreign contracts landed on a reserved two-card seat mid-measurement. `route=local` is
+not gated, and a `media` holder only steers (the affinity gate above arbitrates it), so the sentence
+before this one still holds for interactive text calls: a `text` reservation does not block them.
+
 The gate's OTHER job — keeping two text lanes from thrashing one serving slot with competing model
 names — is in-process only and does not close the cross-process gap named above. See
 [ADR 0025](../architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md).
@@ -262,6 +271,9 @@ renewing holder stale the moment its declared window lapsed.
   rule covers any tool that drives ComfyUI directly, the official Comfy-MCP server included.
   `run-graph` and `gpu reserve --class media` are the supported ways to do the same work
   while holding the lease.
+- ~~A `text` reservation did not gate `agent_delegate` placement.~~ **Closed 0.113.14** — see
+  "Delegate placement reads a `text` reservation" under Classes. Interactive text calls (the
+  ~46 ms ones) still neither acquire nor honour it; that limit stands.
 - **The lease reduces the number of teardowns; the drain is what makes one safe.** Both needed.
 - **Head-of-line blocking is structural** — a 45-minute video blocks everything behind it.
 - ~~`internal/pipeline` does not yet take a `media` lease around its own generation calls.~~

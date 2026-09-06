@@ -67,17 +67,80 @@ func probeWindow(ctx context.Context, base, model string, upstreamOnly bool) (in
 	if b == "" {
 		return 0, false
 	}
-	candidates := []string{b + "/upstream/" + url.PathEscape(model) + "/props", b + "/props"}
+	up := b + "/upstream/" + url.PathEscape(model)
+	// Per-model passthrough first, in two shapes: llama-server's /props (n_ctx),
+	// then the backend's own /v1/models — a vLLM seat behind llama-swap has NO
+	// /props (404) but reports max_model_len there, and before 0.113.14 every run
+	// on such a seat silently budgeted FallbackContextTokens (8,192) against a
+	// 163,840-token window. llama-server's /v1/models carries no max_model_len,
+	// so the order is safe: the second probe answers only where the first cannot.
+	candidates := []struct {
+		u     string
+		fetch func(context.Context, *http.Client, string) (int, bool)
+	}{
+		{up + "/props", fetchNCtx},
+		{up + "/v1/models", func(ctx context.Context, c *http.Client, u string) (int, bool) { return fetchMaxModelLen(ctx, c, u, model) }},
+		{b + "/props", fetchNCtx},
+	}
 	if upstreamOnly {
-		candidates = candidates[:1]
+		candidates = candidates[:2]
 	}
 	client := &http.Client{Timeout: 60 * time.Second} // cold model swap can take tens of seconds
-	for _, u := range candidates {
-		if n, ok := fetchNCtx(ctx, client, u); ok {
+	for _, c := range candidates {
+		if n, ok := c.fetch(ctx, client, c.u); ok {
 			return n, true
 		}
 	}
 	return 0, false
+}
+
+// fetchMaxModelLen GETs a per-model /v1/models URL and extracts the served
+// window from data[].max_model_len (vLLM's field; absent on llama-server).
+// The entry whose id equals model wins; otherwise the list must agree on ONE
+// positive value (vLLM lists every --served-model-name alias with the same
+// window) — a list that disagrees answers nothing rather than guessing.
+func fetchMaxModelLen(ctx context.Context, client *http.Client, u, model string) (int, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return 0, false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return 0, false
+	}
+	var payload struct {
+		Data []struct {
+			ID          string `json:"id"`
+			MaxModelLen int    `json:"max_model_len"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return 0, false
+	}
+	agreed := 0
+	for _, d := range payload.Data {
+		if d.MaxModelLen <= 0 {
+			continue
+		}
+		if d.ID == model {
+			return d.MaxModelLen, true
+		}
+		switch {
+		case agreed == 0:
+			agreed = d.MaxModelLen
+		case agreed != d.MaxModelLen:
+			return 0, false
+		}
+	}
+	return agreed, agreed > 0
 }
 
 // fetchNCtx GETs a /props URL and extracts default_generation_settings.n_ctx.

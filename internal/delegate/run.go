@@ -45,6 +45,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 )
@@ -488,6 +489,7 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	// and could even deal two subtasks against different snapshots.
 	if route == "spread" {
 		r.spreadViews, r.spreadBases, r.spreadProbeErrs = r.fetchViews(ctx)
+		r.spreadLease = LocalLease(cfg.GPULockPath, cfg.StateDir)
 		// The deal is computed HERE, once, over every subtask at once —
 		// dealSpread's comment carries the proof that a per-subtask pick cannot
 		// hold the one-per-seat-per-cycle invariant. It must run before the
@@ -644,6 +646,11 @@ type runner struct {
 	// spreadDeal is the whole run's placement, computed by dealSpread in Run
 	// before any subtask goroutine starts and READ-ONLY from then on.
 	spreadDeal []spreadSlot
+	// spreadLease is the machine-wide GPU lease as read ONCE with the fleet
+	// snapshot: a TEXT holder reserves the local seat (Reserved) and it leaves
+	// the deal — the whole reason 0.113.14 exists. A media lease is not read by
+	// the spread deal (it never was; ADR 0026 arbitrates renders elsewhere).
+	spreadLease gpulease.Info
 
 	// quarantine is the caller's Quarantine (RunOptions), nil = inert.
 	quarantine  *Quarantine
@@ -1296,6 +1303,10 @@ func (r *runner) dealSpread(contracts []core.AgentContract, localView NodeView) 
 type spreadSlot struct {
 	placement
 	deadFleet bool
+	// reserved marks a local slot dealt while a TEXT lease reserves the seat
+	// and no remote was eligible: attempt() must wait on the lease (or defer)
+	// before running it, never run it outright.
+	reserved bool
 }
 
 // placeSpread deals ONE subtask across the run's fleet snapshot: slot 0 is the
@@ -1331,24 +1342,39 @@ type spreadSlot struct {
 // Widening the contest to the local slot is a small change once the local seat
 // advertises a ceiling of its own — it is not blocked, it is unearned.
 func (r *runner) placeSpread(i int, st Subtask, localView NodeView, dealt map[string]bool) spreadSlot {
-	nodes := []NodeView{localView}
-	bases := []string{""}
+	// A TEXT reservation takes the local seat out of the rotation — a spread
+	// used to ignore the lease entirely, which is how three foreign contracts
+	// loaded a reserved seat mid-measurement (2026-09-05 08:04–08:09). A media
+	// lease is deliberately NOT consulted here: spread never read it before
+	// 0.113.14 and its render is arbitrated at the affinity gate (ADR 0026), so
+	// a media holder changes nothing about a spread's deal (review 2026-09-06).
+	var nodes []NodeView
+	var bases []string
+	if !Reserved(r.spreadLease) {
+		nodes, bases = []NodeView{localView}, []string{""}
+	}
 	for j, v := range r.spreadViews {
 		if remoteEligible(st, v) {
 			nodes = append(nodes, v)
 			bases = append(bases, r.spreadBases[j])
 		}
 	}
-	if len(nodes) == 1 {
+	if len(nodes) == 0 || (len(nodes) == 1 && nodes[0].Local) {
 		why, class := r.noEligibleRemote(st, r.spreadViews, r.spreadProbeErrs)
-		return spreadSlot{placement{view: localView, reason: "route=spread: no eligible remote — local (" + why + ")"}, class == core.DeferClassInfrastructure}
+		dead := class == core.DeferClassInfrastructure
+		if Reserved(r.spreadLease) {
+			// The one placement the lease exists to forbid. Dealt local so the
+			// slot has a view, but flagged: attempt() waits or defers.
+			return spreadSlot{placement{view: localView, reason: "route=spread: local seat reserved (" + HolderLine(r.spreadLease) + "); no eligible remote — " + why}, dead, true}
+		}
+		return spreadSlot{placement{view: localView, reason: "route=spread: no eligible remote — local (" + why + ")"}, dead, false}
 	}
 	slot := i % len(nodes)
 	if nodes[slot].Local {
 		// A local slot opens a new cycle: the deck of remotes is reshuffled, so
 		// the next len(nodes)-1 subtasks deal one to each seat again.
 		clear(dealt)
-		return spreadSlot{placement{view: localView, reason: fmt.Sprintf("route=spread → local (slot %d of %d)", slot+1, len(nodes))}, false}
+		return spreadSlot{placement{view: localView, reason: fmt.Sprintf("route=spread → local (slot %d of %d)", slot+1, len(nodes))}, false, false}
 	}
 	k := fitPick(st, nodes, slot, dealt)
 	if k < 0 {
@@ -1362,7 +1388,7 @@ func (r *runner) placeSpread(i int, st Subtask, localView NodeView, dealt map[st
 	dealt[nodes[k].NodeID] = true
 	kind, rule := shapeOf(st)
 	return spreadSlot{placement{view: nodes[k], base: bases[k],
-		reason: fmt.Sprintf("route=spread → %s (slot %d of %d, fit=%s/%s)", nodes[k].NodeID, slot+1, len(nodes), kind, rule)}, false}
+		reason: fmt.Sprintf("route=spread → %s (slot %d of %d, fit=%s/%s)", nodes[k].NodeID, slot+1, len(nodes), kind, rule)}, false, false}
 }
 
 // fitPick returns the index of the best-scoring seat in nodes that is neither
@@ -1439,17 +1465,28 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 		d := r.spreadDeal[i]
 		deadFleet = d.deadFleet
 		chosen, base, reason = d.view, d.base, d.reason
+		if d.reserved {
+			// Reserved at deal time; the lease may have cleared since (a run
+			// can wait minutes in the semaphore), so re-read before deciding.
+			info, waited := r.awaitLease(ctx)
+			if Reserved(info) {
+				return finish(r.reservedDefer(localView, info, waited, reason))
+			}
+			reason += fmt.Sprintf(" — lease cleared after %s, running local", waited.Round(time.Second))
+		}
 	default:
 		// Placement. Health is fetched ONLY when a remote could actually be
 		// chosen (route=remote, or route=auto with the local GPU spoken for):
 		// Place ignores remotes entirely when the local node is idle, so probing
 		// them would be pure chatter.
 		busy := false
+		var leaseInfo gpulease.Info
 		switch r.route {
 		case "remote":
 			busy = true // forced remote behaves as "local unavailable" for Place
 		case "auto":
-			busy = LocalBusy(r.cfg.GPULockPath, r.cfg.StateDir)
+			leaseInfo = LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)
+			busy = leaseInfo.Held
 		}
 		var views []NodeView
 		var bases []string
@@ -1483,6 +1520,18 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			reason = "route=remote forced → " + chosen.NodeID
 		case !busy:
 			reason = "local idle"
+		case chosen.Local && Reserved(leaseInfo):
+			// A TEXT lease reserves the seat: "queued-local beats
+			// ineligible-remote" is exactly the placement the reservation
+			// exists to forbid. Wait for the holder (agent_lease_wait_sec),
+			// then defer naming it — never run on the reserved cards.
+			why, class := r.noEligibleRemote(st, views, probeErrs)
+			info, waited := r.awaitLease(ctx)
+			if Reserved(info) {
+				return finish(r.reservedDefer(localView, info, waited, "local seat reserved ("+HolderLine(info)+"); no eligible remote — "+why))
+			}
+			reason = fmt.Sprintf("local seat was reserved (%s), lease cleared after %s; no eligible remote — %s", HolderLine(leaseInfo), waited.Round(time.Second), why)
+			deadFleet = class == core.DeferClassInfrastructure
 		case chosen.Local:
 			why, class := r.noEligibleRemote(st, views, probeErrs)
 			reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
@@ -2158,6 +2207,54 @@ func (r *runner) fetchViews(ctx context.Context) (views []NodeView, bases []stri
 // evidence about the fleet is never evidence about the contract. When both are
 // true the reason names both and the CLASS is the loud one — a false alarm costs
 // an operator one look, a silent failure costs a night.
+// awaitLease waits up to cfg.AgentLeaseWaitSec for a TEXT lease on the local
+// seat to clear, re-reading the lease once a second (InspectDir applies the
+// full reclaim rule, so a crashed holder clears on its own). Returns the LAST
+// reading and how long it waited; the caller decides. 0 = one read, no wait.
+// The run's ctx bounds the wait as well: a cancelled caller stops waiting.
+func (r *runner) awaitLease(ctx context.Context) (gpulease.Info, time.Duration) {
+	start := time.Now()
+	deadline := start.Add(time.Duration(r.cfg.AgentLeaseWaitSec) * time.Second)
+	for {
+		info := LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)
+		if !Reserved(info) || !time.Now().Before(deadline) {
+			return info, time.Since(start)
+		}
+		select {
+		case <-ctx.Done():
+			return info, time.Since(start)
+		case <-time.After(leasePollInterval):
+		}
+	}
+}
+
+// leasePollInterval is how often awaitLease re-reads a reserved lease. One
+// second matches gpulease's own acquire poll: a waiter starts within a second
+// of the release, and the read is a stat + a small file.
+const leasePollInterval = time.Second
+
+// reservedDefer is the result for a contract that could only have run on a
+// seat a TEXT lease reserves: deferred, class infrastructure (the box needs a
+// human's timing decision, not a rewritten contract), the holder named so the
+// caller can wait, route elsewhere, or ask. It never runs the contract.
+func (r *runner) reservedDefer(local NodeView, info gpulease.Info, waited time.Duration, why string) PlacedResult {
+	reason := why
+	if !strings.Contains(why, "reserved") {
+		reason = "local seat reserved (" + HolderLine(info) + "); " + why
+	}
+	reason += fmt.Sprintf("; waited %s (agent_lease_wait_sec=%d) — set agent_lease_wait_sec to wait longer, add a remote, or release the lease", waited.Round(time.Second), r.cfg.AgentLeaseWaitSec)
+	return PlacedResult{
+		Node: local.NodeID, Seat: local.AgentSeat,
+		PlacementReason: reason,
+		Result: core.AgentWireResult{
+			SchemaVersion: core.AgentWireSchemaVersion,
+			Deferred:      true,
+			DeferClass:    core.DeferClassInfrastructure,
+			Reason:        reason,
+		},
+	}
+}
+
 func (r *runner) noEligibleRemote(st Subtask, views []NodeView, probeErrs []string) (reason, class string) {
 	if len(r.remotes) == 0 {
 		return "no remote fleet nodes are configured (pass --remote / the remotes argument)", core.DeferClassConfig

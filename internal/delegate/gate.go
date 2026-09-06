@@ -8,6 +8,9 @@
 package delegate
 
 import (
+	"fmt"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -281,10 +284,74 @@ func seatServed(v NodeView) bool {
 // dir WITHOUT the config's overrides would re-create the split-lease defect
 // on any box that sets them). Any resolution failure reads as NOT busy:
 // Place then keeps the work local, which is always the safe placement.
-func LocalBusy(gpuLockPath, stateDir string) bool {
+func LocalBusy(gpuLockPath, stateDir string) bool { return LocalLease(gpuLockPath, stateDir).Held }
+
+// LocalLease is LocalBusy's underlying read: the machine-wide lease's Info,
+// resolved and inspected exactly as LocalBusy documents (never acquired, never
+// contended). Any resolution failure returns the zero Info — Held=false, the
+// same fail-toward-idle direction. Callers that need the CLASS or the holder
+// (Reserved, the wait/defer path in run.go) use this; a caller that only asks
+// "is the card spoken for?" keeps the boolean.
+func LocalLease(gpuLockPath, stateDir string) gpulease.Info {
 	dir, err := gpulease.LeaseDir(gpuLockPath, stateDir)
 	if err != nil {
+		return gpulease.Info{}
+	}
+	return gpulease.InspectDir(dir)
+}
+
+// Reserved reports whether info is a held TEXT-class lease: a benchmark, eval
+// or measured run has reserved the cards (`gpu reserve --class text`), so the
+// local seat is not a placement target at all for route auto/spread — not
+// merely a less-preferred one. Before 0.113.14 a held lease only steered
+// placement toward a remote and the contract still ran locally when no remote
+// qualified, which is exactly how three foreign contracts loaded a reserved
+// two-card seat mid-measurement (2026-09-05 08:04–08:09).
+//
+// A media holder is deliberately NOT "reserved" here. Renders are arbitrated at
+// the model-affinity gate (ADR 0026), which waits for the render and then admits
+// the load; turning that into a placement defer would change every single-box
+// render for no measured reason. Media keeps steering (LocalBusy) and nothing
+// more.
+//
+// An INHERITED lease exempts the caller, exactly as the affinity gate's rule
+// (modelaffinity.gpuwait): `gpu reserve --class text -- local-offload delegate …`
+// runs the delegate as the holder's child with GPU_LEASE_EPOCH set, and the
+// holder's own measured work must not be refused by its own reservation. The
+// epoch is compared, never presence-checked, so a stale variable from a lease
+// since handed on exempts nothing; the holder's PID is deliberately not an
+// exemption (the MCP server holds leases and serves foreign calls in one
+// process).
+func Reserved(info gpulease.Info) bool {
+	return info.Held && info.Class == gpulease.ClassText && !inheritedLease(info)
+}
+
+// inheritedLease reports whether this process runs under the lease info
+// describes: GPU_LEASE_EPOCH (threaded to children by gpu reserve and the
+// pipeline's ambient lease env) equals the held epoch.
+func inheritedLease(info gpulease.Info) bool {
+	raw := strings.TrimSpace(os.Getenv("GPU_LEASE_EPOCH"))
+	if raw == "" {
 		return false
 	}
-	return gpulease.InspectDir(dir).Held
+	epoch, err := strconv.ParseUint(raw, 10, 64)
+	return err == nil && epoch != 0 && epoch == info.Epoch
+}
+
+// HolderLine names a lease holder for a placement reason: class, pid, the
+// reason/origin the holder stamped (when it did), and the expiry — what the
+// deferred caller needs to decide whether to wait, route elsewhere, or ask.
+func HolderLine(info gpulease.Info) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "gpu lease class=%s epoch=%d pid=%d", info.Class, info.Epoch, info.PID)
+	if info.Reason != "" {
+		fmt.Fprintf(&b, " reason=%q", info.Reason)
+	}
+	if info.Origin != "" {
+		fmt.Fprintf(&b, " origin=%q", info.Origin)
+	}
+	if !info.ExpiresAt.IsZero() {
+		fmt.Fprintf(&b, " expires=%s", info.ExpiresAt.Local().Format("15:04:05"))
+	}
+	return b.String()
 }

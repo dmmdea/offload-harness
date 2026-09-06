@@ -6,6 +6,25 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.14] — 2026-09-06 — a text GPU lease gates delegate placement; vLLM seats report their real window
+
+**Fixed.** `agent_delegate` / `delegate` read the machine-wide GPU lease only to PREFER a remote (route=auto) and, on
+route=spread, not at all — so a `gpu reserve --class text` (a benchmark, eval or measured run) never kept a foreign contract
+off the reserved cards: three other-session contracts loaded a reserved two-card seat mid-measurement (2026-09-05
+08:04–08:09), and on 2026-09-06 foreign contracts landed on the production seat during a config verification and shared its
+engine death. A held TEXT lease now makes the local seat a non-target on both routes: an eligible remote takes the work;
+with none, the placement waits up to the new `agent_lease_wait_sec` (default 0 = defer at once) and then defers, class
+`infrastructure`, naming the holder (class, pid, reason, origin, expiry). route=local is the caller's explicit choice and is
+not gated; a media lease keeps steering only (arbitrated at the model-affinity gate, ADR 0026) — measured single-box render
+behaviour is unchanged.
+
+**Fixed.** The served-window probe (`agent_run`, `agent_delegate`, the cascade repack, `offload_status`) read llama-server's
+`/props` only; a vLLM seat behind llama-swap has no `/props` (404), so every run on the Qube's 163,840-token agent-pool seat
+silently budgeted the conservative 8,192-token fallback and `offload_status` reported `ctx_probe_error: HTTP 404` whenever the
+seat was warm. The probe now falls back to the backend's own `/upstream/<model>/v1/models` `max_model_len` (vLLM's field;
+absent on llama-server, so the order is safe), and the llama-swap client gains `ContextWindow` with the same loaded-only
+contract as `Props`.
+
 ## [0.113.13] — 2026-09-05 — optional LMCache overlay for the vLLM seat (SEAT_LMCACHE_PYTHONPATH)
 
 **Added.** `seat_fg.sh` honours an optional `SEAT_LMCACHE_PYTHONPATH`: a directory prepended to `PYTHONPATH` for BOTH the

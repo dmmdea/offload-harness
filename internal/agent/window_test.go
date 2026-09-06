@@ -146,3 +146,64 @@ func TestResolveContextTokens(t *testing.T) {
 		}
 	}
 }
+
+// vLLM behind llama-swap (the Qube agent-pool seat): the per-model /props
+// passthrough answers 404 — vLLM has no /props — and the served window is
+// only reported as max_model_len on the backend's own /v1/models. Before
+// 0.113.14 this seat budgeted FallbackContextTokens (8,192) against a
+// 163,840-token window on every run.
+func TestProbeServedWindowVLLMBehindLlamaSwap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/upstream/agent-pool/v1/models":
+			// vLLM lists the canonical name AND every --served-model-name alias,
+			// all with the same window.
+			w.Write([]byte(`{"object":"list","data":[{"id":"qwen3.8-27b-vllm","object":"model","max_model_len":163840},{"id":"agent-pool","object":"model","max_model_len":163840}]}`))
+			return
+		case "/v1/models":
+			// llama-swap's OWN roster — no max_model_len; must never be read as one.
+			w.Write([]byte(`{"object":"list","data":[{"id":"agent-pool"},{"id":"gemma-4-e4b"}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	n, ok := ProbeServedWindow(context.Background(), srv.URL, "agent-pool")
+	if !ok || n != 163840 {
+		t.Fatalf("probe = (%d,%v), want (163840,true) from max_model_len", n, ok)
+	}
+	// The upstream-only probe (the cascade's per-tier repack) gets the same answer.
+	n, ok = ProbeUpstreamWindow(context.Background(), srv.URL, "agent-pool")
+	if !ok || n != 163840 {
+		t.Fatalf("upstream-only probe = (%d,%v), want (163840,true)", n, ok)
+	}
+}
+
+// TestFetchMaxModelLenRules pins the extraction: the entry named like the
+// probed model wins; otherwise the list must AGREE on one positive value; a
+// list that disagrees, or has no max_model_len at all, answers nothing.
+func TestFetchMaxModelLenRules(t *testing.T) {
+	cases := []struct {
+		name  string
+		body  string
+		model string
+		want  int
+		ok    bool
+	}{
+		{"named entry wins", `{"data":[{"id":"a","max_model_len":100},{"id":"m","max_model_len":300}]}`, "m", 300, true},
+		{"aliases agree", `{"data":[{"id":"a","max_model_len":300},{"id":"b","max_model_len":300}]}`, "m", 300, true},
+		{"aliases disagree", `{"data":[{"id":"a","max_model_len":100},{"id":"b","max_model_len":300}]}`, "m", 0, false},
+		{"llama-server list (no field)", `{"data":[{"id":"m","meta":{"n_ctx_train":8192}}]}`, "m", 0, false},
+		{"empty", `{"data":[]}`, "m", 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(c.body)) }))
+			defer srv.Close()
+			n, ok := fetchMaxModelLen(context.Background(), srv.Client(), srv.URL+"/upstream/m/v1/models", c.model)
+			if n != c.want || ok != c.ok {
+				t.Fatalf("fetchMaxModelLen = (%d,%v), want (%d,%v)", n, ok, c.want, c.ok)
+			}
+		})
+	}
+}

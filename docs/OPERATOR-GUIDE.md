@@ -591,7 +591,8 @@ remains an override. `agent_max_tokens` (0.113.9) is the planner's completion bu
 and for delegated jobs this node serves (0 = the loop default of 1,024; the loop still raises a starved budget
 once, to 4x) — set 4096 for a THINKING seat, whose reasoning spends the same budget (the Qube 27B seat used 839
 reasoning tokens of 1,024 and returned nothing, 2026-09-04). A key named `max_tokens` is NOT read: the loader
-warns `unknown config key`. A tier may also seed `agent_profile`, the box's DEFAULT agent tool profile when
+warns `unknown config key`. `agent_lease_wait_sec` (0.113.14) bounds how long a local `agent_delegate` placement waits for a
+foreign TEXT-class GPU lease (`gpu reserve --class text`) to clear before deferring — see the delegate section below. A tier may also seed `agent_profile`, the box's DEFAULT agent tool profile when
 a call names none (resolution: explicit `--profile`/argument > config `agent_profile` > `general`).
 `ampere-6` seeds `research` because on that tier the same model scored 0% under `general` and 72%
 narrowed — the profile outweighed the choice of model. `--two-tier` ignores the box default, since
@@ -780,6 +781,22 @@ Fan self-contained sub-agent contracts out to this box or to fleet nodes on your
 Placement is **quality-first**: an idle local box always runs the work; a remote node is used
 only when the local GPU is busy *and* the node passes the capability gate. Wire details:
 `docs/FLEET-NODE.md`. Template contracts to start from: [`contracts/`](../contracts/README.md).
+
+**A text-class GPU lease reserves the local seat (0.113.14).** `gpu reserve --class text` is how a
+benchmark, eval or measured run keeps everyone else off its cards. Until 0.113.14 delegate placement
+read the lease only to *prefer* a remote (route=auto) — and on route=spread not at all — so a
+contract with no eligible remote still ran on the reserved seat (three foreign contracts loaded a
+reserved two-card seat mid-measurement, 2026-09-05). Now, on route=auto and route=spread, a held
+**text** lease takes the local seat out of placement: an eligible remote takes the work; with none,
+the placement waits up to `agent_lease_wait_sec` (config; default 0 = defer at once), re-reading the
+lease once a second, then defers with class `infrastructure` and a reason naming the holder (class,
+pid, reason, origin, expiry) so the caller can wait, route elsewhere, or ask. `route=local` is the
+caller's explicit choice and is never gated. A **media** lease is not a placement gate: it keeps
+steering toward remotes as before and is arbitrated at the model-affinity gate (ADR 0026), so
+single-box render behaviour is unchanged. The local seat's window is probed live before each run —
+llama-server `/props`, else the backend's `/v1/models` `max_model_len` (a vLLM seat behind
+llama-swap has no `/props`; before 0.113.14 such a seat was budgeted at the 8,192-token fallback
+and `offload_status` showed `ctx_probe_error: HTTP 404` while it was warm).
 
 **Enable — worker node** (the box that will *execute* contracts), in its
 `~/.local-offload/config.json`:

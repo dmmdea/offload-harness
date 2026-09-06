@@ -555,6 +555,91 @@ func (c *Client) Props(ctx context.Context, nameOrAlias string) (map[string]any,
 	return props, nil
 }
 
+// ContextWindow reports a LOADED model's served context window in tokens:
+// llama-server's /props n_ctx (default_generation_settings.n_ctx on current
+// builds, root n_ctx on older ones), else — for a backend with no /props, such
+// as vLLM behind llama-swap, which answers 404 there — the backend's own
+// /v1/models max_model_len. Same loaded-only contract as [Client.Props]: a cold
+// model returns [ErrNotLoaded] rather than being started. Any other /props
+// failure is returned as-is; only a 404 falls through to /v1/models.
+func (c *Client) ContextWindow(ctx context.Context, nameOrAlias string) (int, error) {
+	id, err := c.requireLoaded(ctx, nameOrAlias)
+	if err != nil {
+		return 0, err
+	}
+	// From here on the model is KNOWN resident: every failure below is wrapped
+	// as ErrWindowUnknown so a caller can tell "loaded, window unreadable" from
+	// "residency itself could not be established" (the errors above).
+	props, status, err := c.mc.Props(ctx, id)
+	switch {
+	case err == nil:
+		if n, ok := nCtxFromProps(props); ok {
+			return n, nil
+		}
+	case status != http.StatusNotFound:
+		return 0, &windowUnknownError{id: id, err: c.upstreamErr(err, status, http.MethodGet, "/upstream/"+id+"/props")}
+	}
+	models, status, err := c.mc.UpstreamModels(ctx, id)
+	if err != nil {
+		return 0, &windowUnknownError{id: id, err: c.upstreamErr(err, status, http.MethodGet, "/upstream/"+id+"/v1/models")}
+	}
+	if n := maxModelLen(models, id); n > 0 {
+		return n, nil
+	}
+	return 0, &windowUnknownError{id: id, err: fmt.Errorf("neither /props (n_ctx) nor /v1/models (max_model_len) reports a context window")}
+}
+
+// windowUnknownError is ContextWindow's post-residency failure: the model IS
+// loaded, its window is not readable. errors.Is(err, ErrWindowUnknown) holds,
+// and the underlying HTTP/transport error stays reachable through Unwrap.
+type windowUnknownError struct {
+	id  string
+	err error
+}
+
+func (e *windowUnknownError) Error() string        { return e.id + ": " + ErrWindowUnknown.Error() + ": " + e.err.Error() }
+func (e *windowUnknownError) Unwrap() error        { return e.err }
+func (e *windowUnknownError) Is(target error) bool { return target == ErrWindowUnknown }
+
+// nCtxFromProps pulls the live window out of a llama.cpp /props payload. n_ctx
+// lives under default_generation_settings on current builds and at the root on
+// older ones; both are accepted so a server upgrade cannot silently turn the
+// ceiling into "unknown".
+func nCtxFromProps(props map[string]any) (int, bool) {
+	if dgs, ok := props["default_generation_settings"].(map[string]any); ok {
+		if f, ok := dgs["n_ctx"].(float64); ok && f > 0 {
+			return int(f), true
+		}
+	}
+	if f, ok := props["n_ctx"].(float64); ok && f > 0 {
+		return int(f), true
+	}
+	return 0, false
+}
+
+// maxModelLen picks the served window out of a backend /v1/models list: the
+// entry whose id is the model wins; otherwise the list must agree on ONE
+// positive value (vLLM lists every served alias with the same window) — a
+// list that disagrees answers 0 rather than guessing.
+func maxModelLen(models []mirror.UpstreamModel, id string) int {
+	agreed := 0
+	for _, m := range models {
+		if m.MaxModelLen <= 0 {
+			continue
+		}
+		if m.ID == id {
+			return m.MaxModelLen
+		}
+		switch {
+		case agreed == 0:
+			agreed = m.MaxModelLen
+		case agreed != m.MaxModelLen:
+			return 0
+		}
+	}
+	return agreed
+}
+
 // requireLoaded resolves a name and asserts the model holds VRAM.
 func (c *Client) requireLoaded(ctx context.Context, nameOrAlias string) (string, error) {
 	id, _, err := c.Resolve(ctx, nameOrAlias)

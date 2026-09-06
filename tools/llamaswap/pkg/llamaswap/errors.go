@@ -42,6 +42,13 @@ var (
 	// VRAM and it does not. Returned instead of silently triggering a
 	// multi-GB auto-start via an /upstream probe.
 	ErrNotLoaded = errors.New("model is not loaded")
+
+	// ErrWindowUnknown is ContextWindow's post-residency failure: the model IS
+	// loaded (residency was established first) but neither /props nor
+	// /v1/models reports a usable context window, or the probe itself failed.
+	// Distinct from ErrNotLoaded so a status view can say "loaded, window
+	// unreadable" without ever asserting residency it never established.
+	ErrWindowUnknown = errors.New("model is loaded but its context window is not readable")
 )
 
 // Exit codes mirrored from internal/cli/exitcodes.go. Duplicated here on

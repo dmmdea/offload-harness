@@ -311,6 +311,35 @@ func (c *Client) Props(ctx context.Context, model string) (map[string]any, int, 
 	return out, status, nil
 }
 
+// UpstreamModel is one entry of a backend's own /v1/models list, reduced to
+// the fields the harness reads. MaxModelLen is vLLM's served window; a
+// llama-server backend lists its model without it.
+type UpstreamModel struct {
+	ID          string `json:"id"`
+	MaxModelLen int    `json:"max_model_len"`
+}
+
+// UpstreamModels reads /upstream/{model}/v1/models — the BACKEND's model list
+// through the passthrough (same auto-start caveat as Props). It exists for the
+// backends that have no /props: vLLM reports its context window only here.
+func (c *Client) UpstreamModels(ctx context.Context, model string) ([]UpstreamModel, int, error) {
+	path := "/upstream/" + url.PathEscape(model) + "/v1/models"
+	status, body, err := c.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, status, err
+	}
+	if status < 200 || status >= 300 {
+		return nil, status, &HTTPError{Status: status, Path: path, Body: truncate(string(body), 200)}
+	}
+	var out struct {
+		Data []UpstreamModel `json:"data"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, status, err
+	}
+	return out.Data, status, nil
+}
+
 // UpstreamHealth probes a RUNNING model's own /health through the passthrough.
 // Never call it for a model absent from /running (auto-start trap).
 func (c *Client) UpstreamHealth(ctx context.Context, model string) (int, error) {

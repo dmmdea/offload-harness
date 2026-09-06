@@ -217,6 +217,20 @@ type Config struct {
 	// per contract; set 4096 here for a thinking seat so the first attempt fits. The
 	// local-agent CLI has its own -max-tokens flag (default 4096) and ignores this key.
 	AgentMaxTokens int `json:"agent_max_tokens,omitempty"`
+	// AgentLeaseWaitSec bounds how long a LOCAL agent placement (agent_delegate /
+	// delegate, route auto or spread) waits for a foreign TEXT-class GPU lease to
+	// clear before deferring. `gpu reserve --class text` (a benchmark, eval or
+	// measured run) exists so nobody else loads the reserved cards; until 0.113.14
+	// delegate placement read the lease only to PREFER a remote and still ran the
+	// contract locally when no remote qualified — three foreign contracts landed on
+	// a reserved two-card seat mid-measurement (2026-09-05 08:04–08:09). A held text
+	// lease now makes the local seat a non-target: an eligible remote takes the
+	// work; with none, the placement waits up to this many seconds (re-reading the
+	// lease once a second) and then defers, class infrastructure, naming the holder
+	// and its expiry. 0 (the default) = defer at once. route=local is the caller's
+	// explicit choice and is not gated; a media lease is arbitrated by the
+	// model-affinity gate as before (ADR 0026) and is not a placement gate either.
+	AgentLeaseWaitSec int `json:"agent_lease_wait_sec,omitempty"`
 	// VisionModel is the VLM alias used for the vqa task (multimodal). Empty = no
 	// vision route (vqa defers).
 	VisionModel string `json:"vision_model,omitempty"`
