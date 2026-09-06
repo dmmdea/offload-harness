@@ -74,7 +74,14 @@ foreach ($tier in @('blackwell-16','ampere-16','volta-16')) {
   Assert ($s.videogen_text_encoder -eq 'umt5_xxl_fp16.safetensors')         "$tier seeds the fp16 text encoder"
   Assert ($s.videogen_width -eq 1280 -and $s.videogen_height -eq 720)       "$tier seeds 720p video"
   Assert ($s.videogen_frames -eq 81)                                        "$tier seeds the 81-frame native ceiling"
-  Assert ($s.agent_model -eq 'gemma-4-26b-agent')                           "$tier seats the validated thinking-on 26B agent (model KEY, not alias)"
+  # ampere-16 was corrected 2026-09-06 (0.113.15): measured on an NVIDIA A2 16 GB @ 40 W the 26B seat ran 1/8 digests,
+  # the 4B seat 8/8 — that band seeds qwen3.5-4b-agent; the other 16 GB tiers keep the validated 26B agent.
+  if ($tier -eq 'ampere-16') {
+    Assert ($s.agent_model -eq 'qwen3.5-4b-agent')                        "$tier seats the MEASURED 4B agent (A2 16 GB bake-off 2026-09-04)"
+    Assert ($s.agent_profile -eq 'research')                              "$tier seeds the research profile with the 4B seat"
+  } else {
+    Assert ($s.agent_model -eq 'gemma-4-26b-agent')                       "$tier seats the validated thinking-on 26B agent (model KEY, not alias)"
+  }
 }
 
 Write-Host "== profiles.json: 32GB-class frontier seats (tier-doctrine pass 2026-08-16) =="

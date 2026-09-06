@@ -10,9 +10,9 @@
 | ctx_size | 32768 | the served window (`--ctx-size`) |
 | kv_type | `q8_0` | `--cache-type-k/v`, kept symmetric |
 | flash_attn | `on` | `--flash-attn` (required for a q8_0 V cache) |
-| resident_tier | `gemma4-26b-a4b` | the model that stays hot; seeds the agent planner seat (agent_model) when it differs from the workhorse |
+| resident_tier | `offload-e4b` | the model that stays hot; seeds the agent planner seat (agent_model) when it differs from the workhorse |
 | agent_ctx_tokens | 32768 | the agent's `-ctx-tokens` compaction budget |
-| 26B-A4B | `gpu` | whether the 26B MoE is served, and where its experts live |
+| 26B-A4B | dropped | whether the 26B MoE is served, and where its experts live |
 
 ## Media
 
@@ -55,14 +55,17 @@ here so they are never mistaken for a media capability:
 
 | key | value |
 |---|---|
-| `agent_model` | `gemma-4-26b-agent` |
+| `agent_model` | `qwen3.5-4b-agent` |
+| `agent_profile` | `research` |
+| `escalation_model` | `` |
+| `reasoning_model` | `` |
 
 ## Operator notes
 
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Ampere >=12GB band (3090-class defensive). 26B resident full-GPU. config_seed: quality-first media bindings (bf16 needs no fp8 hardware; verified on the 16GB Blackwell tier — needs the model downloads + >=~48GB system RAM). PROJECTED - H3 confirms OOM ceiling. J-media 2026-07-28: same qwen3-vl-8b seat as the MEASURED blackwell-16, but ctx trimmed 16384->8192 because this band's FLOOR is 12GB ('3090-class defensive') and KV has to fit there too; a 24GB 3090 can raise it. ~10GB seat, swappable so it never shares with another heavy seat. PROJECTED on this exact silicon. The 'ocr' alias rides on this shared VLM (one seat owns screenshots/GUI/document OCR); the harness routes via vision_model, not the alias, so it is a label rather than a separate model. TIER-DOCTRINE PASS 2026-08-16: agent seat pointed at the VALIDATED thinking-on 26B agent entry (0/15->12/15 at D1 with reasoning on, 2026-08-10) instead of the derived reasoning-off cascade seat (measured 0% as agent). Same weights as the 26B — no new download. Capability parity with the twin-arch sibling(s) is field-identical by design; the arch split (sm86/sm120/sm70) is a BUILD concern only.
+> Ampere >=12GB band (3090-class defensive). 26B resident full-GPU. config_seed: quality-first media bindings (bf16 needs no fp8 hardware; verified on the 16GB Blackwell tier — needs the model downloads + >=~48GB system RAM). PROJECTED - H3 confirms OOM ceiling. J-media 2026-07-28: same qwen3-vl-8b seat as the MEASURED blackwell-16, but ctx trimmed 16384->8192 because this band's FLOOR is 12GB ('3090-class defensive') and KV has to fit there too; a 24GB 3090 can raise it. ~10GB seat, swappable so it never shares with another heavy seat. PROJECTED on this exact silicon. The 'ocr' alias rides on this shared VLM (one seat owns screenshots/GUI/document OCR); the harness routes via vision_model, not the alias, so it is a label rather than a separate model. TIER-DOCTRINE PASS 2026-08-16: agent seat pointed at the VALIDATED thinking-on 26B agent entry (0/15->12/15 at D1 with reasoning on, 2026-08-10) instead of the derived reasoning-off cascade seat (measured 0% as agent). Same weights as the 26B — no new download. Capability parity with the twin-arch sibling(s) is field-identical by design; the arch split (sm86/sm120/sm70) is a BUILD concern only. MEASURED 2026-09-04 on the NVIDIA A2 16 GB (Lenovo M720q, 40 W / 1200 MHz lock, harness 0.113.9, 8 digest contracts forced-remote): qwen3.5-4b-agent 8/8 median 159 s; gemma4-12b-agent 8/8 median 237 s (kept as an opt-in llama-swap alias); gemma4-26b-agent 1/8 with seven 300 s timeouts (--n-cpu-moe 16, ~9.4 GB VRAM + ~7 GB host) -> the projected 26B seed was WRONG for this band: resident_tier offload-e4b, 26B dropped, agent seat qwen3.5-4b-agent with the research profile (same lever as ampere-6/8). A 24 GB 3090-class card at full power may re-enable the 26B by hand; the seed stays on what a 15 GB / 40 W card measured.
 
 ## Capability report
 
