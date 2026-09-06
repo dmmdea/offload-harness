@@ -6,6 +6,14 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.17] — 2026-09-06 — a deferral caused by a leased remote names the lease
+
+**Fixed.** With one fitting remote under a text GPU lease, `delegate` correctly refused to place there (0.113.16) but
+explained it with the defensive "no remote passed the capability gate although 1 answered … (placement and gate disagree —
+please report)" line, because the explanation path predates the lease. It now says which remote(s) hold a text lease
+(class infrastructure), and appends the contract-side reason when the others could not take it either. Seen live on the
+first lease on the Lenovo (2026-09-06 17:22); test with a lease-cleared control arm that still reaches the defensive line.
+
 ## [0.113.16] — 2026-09-06 — the fleet node keeps its KV store under budget between turns, and a leased node re-routes instead of dropping
 
 **Added — store steward (`fleet_store_root`, `fleet_store_cap_gb`, `fleet_store_prune_every_jobs`).** A node that owns a
