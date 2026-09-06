@@ -2,7 +2,10 @@ package delegate
 
 import (
 	"context"
+	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 // TestRemoteEligible_TextLeasedNodeIsIneligible: a node advertising a held TEXT
@@ -20,6 +23,30 @@ func TestRemoteEligible_TextLeasedNodeIsIneligible(t *testing.T) {
 	r.LeasedText = false
 	if !remoteEligible(schemaSubtask(), r) {
 		t.Fatal("lease cleared: eligible again")
+	}
+}
+
+// TestNoEligibleRemoteNamesTheLeasedNode: when the only fitting remote holds a
+// text lease, the deferral names it (class infrastructure) instead of the
+// defensive "placement and gate disagree — please report" line; the control
+// arm (lease cleared) still reaches that defensive line, so the wording is
+// the lease's and not a rewrite of the fallback.
+func TestNoEligibleRemoteNamesTheLeasedNode(t *testing.T) {
+	r := &runner{remotes: []string{"http://lenovo:18811"}}
+	v := eligibleRemote()
+	v.NodeID = "lenovo-ampere16"
+	v.LeasedText = true
+	reason, class := r.noEligibleRemote(schemaSubtask(), []NodeView{v}, nil)
+	if !strings.Contains(reason, "text GPU lease") || !strings.Contains(reason, "lenovo-ampere16") || strings.Contains(reason, "please report") {
+		t.Fatalf("reason must name the lease and the node: %q", reason)
+	}
+	if class != core.DeferClassInfrastructure {
+		t.Fatalf("class = %q, want infrastructure (the box needs a timing decision, not a rewritten contract)", class)
+	}
+	v.LeasedText = false
+	reason, _ = r.noEligibleRemote(schemaSubtask(), []NodeView{v}, nil)
+	if !strings.Contains(reason, "please report") {
+		t.Fatalf("control: without a lease the defensive line must still be reached, got %q", reason)
 	}
 }
 

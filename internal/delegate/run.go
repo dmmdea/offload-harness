@@ -2263,6 +2263,18 @@ func (r *runner) noEligibleRemote(st Subtask, views []NodeView, probeErrs []stri
 	contractWhy := contractIneligible(st, lanes, advertisedTooSmall, roomiest, len(unadvertised))
 	nodeWhy, nodeClass := nodeSideVerdict(lanes, unadvertised, views, probeErrs)
 	if nodeClass == "" {
+		// A remote that answered with a fitting lane but holds a TEXT GPU lease
+		// is ineligible by design (0.113.16), not by a bug: name the holder so the
+		// caller can wait or route elsewhere. Before 0.113.17 this fell through to
+		// the "placement and gate disagree — please report" line (seen live on the
+		// first lease, 2026-09-06 17:22).
+		if leased := leasedLanes(views); len(leased) > 0 {
+			why := fmt.Sprintf("%d remote(s) hold a text GPU lease (their cards are reserved for a measurement): %s", len(leased), strings.Join(leased, "; "))
+			if contractWhy != "" {
+				why += "; and the contract could not be placed on the others as written: " + contractWhy
+			}
+			return why, core.DeferClassInfrastructure
+		}
 		// The ONE positively-established quiet case: everything answered, the
 		// lane is offered and sized, so the contract is the whole story.
 		if contractWhy != "" {
@@ -2362,6 +2374,20 @@ func laneStats(st Subtask, views []NodeView) (lanes, advertisedTooSmall, roomies
 		}
 	}
 	return lanes, advertisedTooSmall, roomiest, unadvertised
+}
+
+// leasedLanes names the agent-lane remotes whose health advertised a held TEXT
+// lease (NodeView.LeasedText): eligible by every other measure, reserved by
+// choice. The lease holder's details live on the node (its /fleet/health
+// "lease"), so the name is what a caller needs to go and look.
+func leasedLanes(views []NodeView) []string {
+	var out []string
+	for _, v := range views {
+		if v.AgentEnabled && v.AgentResident && v.LeasedText {
+			out = append(out, laneID(v)+" (text lease held)")
+		}
+	}
+	return out
 }
 
 // laneID names a node for an operator-facing message. A node that answered
