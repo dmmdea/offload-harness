@@ -242,7 +242,13 @@ func provablyStartsNow(v NodeView) bool {
 //     requester's depth is checked here at placement; the receiving node
 //     additionally derives effectiveDepth ≥ 1 for whatever arrives.
 func remoteEligible(st Subtask, r NodeView) bool {
+	// A node advertising a held TEXT lease is not a target at all (0.113.16):
+	// its card is reserved for a measurement, exactly as Reserved() makes the
+	// LOCAL seat a non-target. Before this a leased Lenovo had to STOP its fleet
+	// node to keep foreign digests off the card, and every in-flight remote job
+	// on it was cut ("Lenovo dropped mid-way", 2026-09-06).
 	return r.AgentEnabled &&
+		!r.LeasedText &&
 		r.AgentResident &&
 		seatServed(r) &&
 		adequate(st, r) &&

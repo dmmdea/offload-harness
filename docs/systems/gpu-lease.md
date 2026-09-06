@@ -262,6 +262,29 @@ renewing after a takeover updates something nothing reads. Read-only consumers c
 diverges, and it did: when the heartbeat moved, a record-only view briefly called a live,
 renewing holder stale the moment its declared window lapsed.
 
+## Draining a seat before a window (0.113.16)
+
+```
+local-offload gpu reserve --class text --for 30m --reason "arm B" --drain [--drain-timeout 2m] [--unload-seat] -- <command>
+local-offload gpu reserve --class text --for 30m --reason "arm B" --detach --drain --unload-seat
+local-offload gpu release --warm-seat
+```
+
+Taking a text lease already makes the node a non-target (health `lease`, dispatch 503, the delegator's gate), but work placed
+before the lease can still be in flight. `--drain` waits, after the lease is taken, until the agent seat reports nothing
+running or waiting: llama-swap's `/running` is read first — an unloaded seat is idle by definition, and its `/upstream/<model>/…`
+path is NEVER probed on an unloaded seat because that path loads the model on demand — then the loaded seat's own gauges
+(`vllm:num_requests_running|waiting`, `llamacpp:requests_processing|deferred`) through `/upstream/<model>/metrics`, two
+consecutive zeros required. At `--drain-timeout` the wrapper form releases the lease and exits non-zero; the detach form keeps
+the lease (the card stays reserved, work keeps routing elsewhere) and exits non-zero so the caller does not start.
+`--unload-seat` (requires `--drain`) then frees the cards through `POST /api/models/unload/<model>` (legacy `GET /unload`
+as the fallback). The wrapper form warms the seat back (`GET /upstream/<model>/health`) BEFORE releasing, so the first
+contract placed here again finds a loaded seat; the detach form's counterpart is `gpu release --warm-seat`.
+
+Why: a gate that unloaded the production seat by hand collided with a delegation that made llama-swap reload it mid-profile
+(`No available memory for the cache blocks`, 2026-09-06 15:23), and the Lenovo's measurement windows stopped its fleet node
+outright, cutting in-flight remote work. With the lease advertised and enforced, the window is a lease, not an outage.
+
 ## Known gaps
 
 - **The reservation is a convention.** A raw `curl :11436` loop, a graph posted straight to

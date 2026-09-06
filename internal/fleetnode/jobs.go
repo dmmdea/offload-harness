@@ -133,6 +133,19 @@ type Jobs struct {
 
 	stopJanitor chan struct{}
 	stopOnce    sync.Once
+
+	// onFinish, when set, is called (outside the lock) each time a job reaches a
+	// terminal state — the store steward counts turns with it (0.113.16).
+	onFinish func()
+}
+
+// OnFinish registers fn to run after every job reaches a terminal state. It is
+// called outside the store's lock and must return quickly; anything slow (the
+// steward's directory scan) is the callee's job to move off the goroutine.
+func (j *Jobs) OnFinish(fn func()) {
+	j.mu.Lock()
+	j.onFinish = fn
+	j.mu.Unlock()
 }
 
 // NewJobs builds a store whose terminal entries live for ttl, with the janitor
@@ -547,9 +560,9 @@ func (j *Jobs) DrainAndStop(timeout time.Duration) {
 // completion after a drain-mark (or an eviction) is dropped.
 func (j *Jobs) finish(id string, data json.RawMessage, errStr string) {
 	j.mu.Lock()
-	defer j.mu.Unlock()
 	jb, ok := j.m[id]
 	if !ok || jb.state == JobDone || jb.state == JobError {
+		j.mu.Unlock()
 		return
 	}
 	if errStr != "" {
@@ -561,6 +574,15 @@ func (j *Jobs) finish(id string, data json.RawMessage, errStr string) {
 	}
 	jb.terminalAt = j.now()
 	jb.finishedAt = jb.terminalAt
+	fn := j.onFinish
+	j.mu.Unlock()
+	// OUTSIDE the lock, explicitly: a `defer fn()` registered after `defer
+	// j.mu.Unlock()` runs BEFORE the unlock (LIFO), and a callee that reads the
+	// store (Counts, QueueDepth) then deadlocks — the first draft did exactly
+	// that and TestJobsOnFinishFiresOutsideTheLock hung for 600 s.
+	if fn != nil {
+		fn()
+	}
 }
 
 // janitor sweeps expired terminal entries until DrainAndStop closes stopJanitor.

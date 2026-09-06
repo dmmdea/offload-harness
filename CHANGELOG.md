@@ -6,6 +6,41 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.16] — 2026-09-06 — the fleet node keeps its KV store under budget between turns, and a leased node re-routes instead of dropping
+
+**Added — store steward (`fleet_store_root`, `fleet_store_cap_gb`, `fleet_store_prune_every_jobs`).** A node that owns a
+persistent KV page store on disk (the LMCache fs_native pages the production seat writes over SMB into a dataset on the
+Lenovo) now keeps it under a budget the box computes: `cap = min(fleet_store_cap_gb, 0.8 × (used + free))`, high mark 95 %,
+low mark 85 %, oldest-first by mtime, files younger than 60 s never touched. The steward scans after every
+`fleet_store_prune_every_jobs` completed jobs (default 8, one spread), on any health poll that finds the store above its high
+mark, and once at start; `/fleet/health` publishes `store` (used/cap/high/low, files, last scan/prune, removed, error). Why:
+LMCache evicts only what the running MP server wrote and the seat wrapper's prune (0.113.12) runs at seat start only, so under
+real fan-out the store went 28 → 99 GB against a 100 GB quota in 75 minutes (2026-09-06, ~1 GB/min at peak) — and a ZFS
+dataset at its quota can refuse the deletes that would free it. No scheduler: the fleet's own turns are the trigger. The root must carry a `.storesteward` marker (written into an empty
+root by the steward; a populated root without it is refused at start) and every removed page is one journal line — a mistyped
+root can never become a purge of some other tree, and a prune stays forensically recoverable (review finding, 2026-09-06).
+
+**Added — the node's GPU lease in health and at dispatch.** `/fleet/health` publishes `lease` (class, pid, reason, until)
+whenever the machine-wide lease is HELD; the delegator reads it and treats a node under a TEXT lease as ineligible (the same
+rule that makes the local seat a non-target since 0.113.14), and the node's own `/fleet/dispatch` refuses NEW work under a
+text lease with the re-placeable 503 the queue cap uses, naming the holder — so a delegator of any version places the subtask
+elsewhere. Media leases (renders arbitrated on the node) are untouched. Why: a measurement window on the Lenovo had to STOP
+the fleet node to keep foreign digests off the card, cutting in-flight remote work ("Lenovo dropped mid-way", 2026-09-06).
+
+**Added — `gpu reserve --drain [--drain-timeout 2m] [--unload-seat]`, `gpu release --warm-seat`.** After taking the lease,
+`--drain` waits until the agent seat reports no request in flight (llama-swap `/running` first — an unloaded seat is idle and
+its `/upstream` path, which LOADS on demand, is never probed — then the seat's own vLLM/llama-server gauges) and errors at the
+deadline; `--unload-seat` then frees the cards through llama-swap's API; the wrapper form warms the seat back before the
+release, the detach form via `gpu release --warm-seat`. Why: a gate that unloaded the production seat collided with a
+delegation that made llama-swap reload it mid-profile (`No available memory for the cache blocks`, 2026-09-06 15:23).
+
+**Tests.** Steward: budget math (ceiling vs volume rule, a full volume), prune order, MinAge, no-op at target, tick-only-above-
+high, JobDone every N in the background, an advertised scan error. Node: health `lease`/`store` present only when held/wired,
+dispatch 503 under a text lease with the holder named and a release-control arm, media lease admitted, `OnFinish` outside the
+lock (the first draft deadlocked — the test hung 600 s and stays as the guard). Delegate: `LeasedText` ineligible with a
+control, health decode of text/media/absent. Drain: gauge parsing, unloaded-seat short-circuit without touching `/upstream`,
+two-zero confirmation, deadline error, unload/warm through llama-swap.
+
 ## [0.113.15] — 2026-09-06 — the `ampere-16` tier seed matches what a 16 GB Ampere card measured
 
 **Fixed.** The `ampere-16` profile seeded a full-GPU `gemma4-26b-a4b` resident tier and `gemma-4-26b-agent` as the agent
