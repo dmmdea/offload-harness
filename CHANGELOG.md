@@ -6,6 +6,16 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.15] — 2026-09-06 — the `ampere-16` tier seed matches what a 16 GB Ampere card measured
+
+**Fixed.** The `ampere-16` profile seeded a full-GPU `gemma4-26b-a4b` resident tier and `gemma-4-26b-agent` as the agent
+seat — a PROJECTED band (3090-class, "defensive"). Measured 2026-09-04 on the only card of that band in the fleet, an NVIDIA A2
+16 GB (15,356 MiB) at its 40 W / 1200 MHz operating point: the 26B-A4B agent seat finished 1 of 8 digest contracts (seven 300 s
+timeouts with 16 experts on the CPU), the 4B seat 8/8 at a 159 s median, the 12B seat 8/8 at 237 s. A fresh install on such a
+card would have seeded a seat that times out. The profile now seeds `offload-e4b` as the resident tier, drops the 26B, and
+seeds `qwen3.5-4b-agent` with the `research` profile — the same shape as `ampere-6` / `ampere-8`. Regenerated `docs/tiers`,
+the SETUP-AGENT and OPERATOR-GUIDE tier rows, and the tier matrix workbook. `blackwell-16` is untouched (measured separately).
+
 ## [0.113.14] — 2026-09-06 — a text GPU lease gates delegate placement; vLLM seats report their real window
 
 **Fixed.** `agent_delegate` / `delegate` read the machine-wide GPU lease only to PREFER a remote (route=auto) and, on
