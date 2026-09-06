@@ -57,7 +57,12 @@ type NodeView struct {
 	// a tie-breaker, never a primary signal (operator decision 2026-09-03).
 	GpuUtilPct   int
 	GpuUtilKnown bool
-	Local        bool
+	// LeasedText is true when the node publishes a held TEXT-class GPU lease
+	// (health "lease", 0.113.16): its card is reserved for a measurement and the
+	// gate treats it as ineligible. Absent (older node) or a media lease decodes
+	// to false — a render is arbitrated on the node, never a placement refusal.
+	LeasedText bool
+	Local      bool
 }
 
 // fetchNodeViewTimeout is the transport-level backstop for one health GET —
@@ -104,6 +109,11 @@ type healthWire struct {
 	ServedModels []string `json:"served_models"`
 	GpuUtilPct   int      `json:"gpu_util_pct"`
 	GpuUtilKnown bool     `json:"gpu_util_known"`
+	// Additive (0.113.16). nil on a node that publishes no lease.
+	Lease *struct {
+		Held  bool   `json:"held"`
+		Class string `json:"class"`
+	} `json:"lease"`
 }
 
 // FetchNodeView reads one node's /fleet/health into a NodeView (Local=false —
@@ -155,6 +165,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		ServedModels:      w.ServedModels,
 		GpuUtilPct:        w.GpuUtilPct,
 		GpuUtilKnown:      w.GpuUtilKnown,
+		LeasedText:        w.Lease != nil && w.Lease.Held && strings.EqualFold(w.Lease.Class, "text"),
 		Local:             false,
 	}, nil
 }

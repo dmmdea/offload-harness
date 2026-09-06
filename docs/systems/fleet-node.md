@@ -266,6 +266,29 @@ bypass; `tasks_agent_test.go` the advertisement gate and contract materializatio
 - Binding with `:18811` and expecting it to work as loopback.
 - Treating Afterburner as required.
 
+## The node's lease and its store (0.113.16)
+
+**`lease`** — published in `/fleet/health` only while the machine-wide GPU lease (docs/systems/gpu-lease.md) is HELD:
+`{"held":true,"class":"text|media","pid":N,"reason":"…","until":"RFC3339"}`. Absent = unreserved (or a pre-0.113.16 node;
+both read as eligible). A held **text** lease makes this node a non-target twice over: the delegator's gate skips it
+(`NodeView.LeasedText`, the remote twin of the local `Reserved()` rule from 0.113.14), and this node's own `/fleet/dispatch`
+refuses NEW work with the same re-placeable 503 the queue cap uses — `node leased (gpu lease class=text pid=N reason=… until …)`
+— so a delegator of any version places the subtask elsewhere. Known jobs re-acked and result polls are never refused; a media
+lease (a render arbitrated on the node itself) never refuses. The node stays up, keeps answering health and finishes what it
+holds: a measurement window no longer stops the fleet node to keep foreign digests off the card.
+
+**`store`** — published only when `fleet_store_root` is configured: the store steward's last status
+(`root, used_gb, cap_gb, high_gb, low_gb, files, last_scan, last_prune, last_removed, last_freed_gb, prunes, jobs_since_tick,
+error`). The steward (internal/storesteward) keeps a persistent KV page store this node owns on disk under a budget the box
+computes — `cap = min(fleet_store_cap_gb, 0.8 × (used + free))`, high 95 %, low 85 %, oldest-first by mtime, files younger
+than 60 s never removed — and runs a scan after every `fleet_store_prune_every_jobs` completed jobs (default 8), on any health
+poll whose last status was above the high mark, and once at start. At most one scan runs at a time; a health poll never walks
+the directory itself. The root must carry a `.storesteward` marker file (written by the steward into an empty root; a populated root without it is
+refused at start — a mistyped `fleet_store_root` can never become an oldest-first purge of some other tree); every removed page is
+one journal line. A missing root fails `fleet-serve` at start; a scan or prune error is carried in `store.error`, never
+hidden. Why it exists: LMCache's fs_native eviction counts only pages the running MP server wrote and the seat wrapper prunes
+at seat start only, so the Lenovo's store went 28 → 99 GB against a 100 GB quota in 75 minutes of real fan-out (2026-09-06).
+
 ## The acceptance gate (`local-offload acceptance`)
 
 A node must pass this before it is handed work. It is deliberately NOT `doctor`: doctor

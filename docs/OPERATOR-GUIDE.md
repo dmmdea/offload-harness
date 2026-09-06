@@ -799,6 +799,20 @@ llama-server `/props`, else the backend's `/v1/models` `max_model_len` (a vLLM s
 llama-swap has no `/props`; before 0.113.14 such a seat was budgeted at the 8,192-token fallback
 and `offload_status` showed `ctx_probe_error: HTTP 404` while it was warm).
 
+**Store steward (0.113.16) — `fleet_store_root`, `fleet_store_cap_gb`, `fleet_store_prune_every_jobs`.** A node that owns a
+persistent KV page store on disk (the Lenovo's LMCache fs_native dataset) keeps it under budget between its own turns:
+`cap = min(fleet_store_cap_gb, 0.8 × (used + free))`, prune oldest-first from 95 % of cap down to 85 %, after every N completed
+jobs (default 8) and on any health poll that finds it high. `/fleet/health` shows it under `store`. Set the root to the
+store dataset's mount (for example `/srv/kvstore`) and create the marker file `.storesteward` in it once (the steward
+writes it into an EMPTY root itself; a populated root without it is refused at start, so a mistyped root can never be pruned;
+every removed page is one journal line), the cap to the dataset quota, and keep the seat's own
+`SEAT_L2_PRUNE_GB + max_capacity_gb` under the quota too — LMCache evicts only its own pages.
+
+**Lease in health (0.113.16).** `/fleet/health` carries `lease` while the node's GPU lease is held; a text lease makes the
+node ineligible for new delegated work (and its dispatch answers 503, re-placeable). `gpu reserve --drain --unload-seat` and
+`gpu release --warm-seat` are the maintenance verbs — see docs/systems/gpu-lease.md.
+
+
 **Enable — worker node** (the box that will *execute* contracts), in its
 `~/.local-offload/config.json`:
 

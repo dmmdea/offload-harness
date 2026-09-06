@@ -918,6 +918,24 @@ type Config struct {
 	// inferences against ONE llama-swap slot). A job that waits is strictly
 	// better than a job that thrashes: nothing is refused that 0.99.0 admitted.
 	FleetMaxConcurrentJobs int `json:"fleet_max_concurrent_jobs,omitempty"`
+	// FleetStoreRoot is a persistent KV page store this node OWNS ON DISK and
+	// keeps under a budget between its turns (0.113.16, store steward): the
+	// LMCache fs_native pages the production seat writes over SMB into a
+	// dataset here. LMCache evicts only what the running MP server wrote and
+	// the seat wrapper prunes at seat start only, so under real fan-out the
+	// store filled 28 → 99 GB against a 100 GB quota in 75 minutes (2026-09-06)
+	// — and a ZFS dataset at its quota can refuse the deletes that would free
+	// it. Empty = no steward. The node scans the root after every
+	// FleetStorePruneEveryJobs completed jobs and on any health poll that finds
+	// it above 95 % of its cap, and prunes oldest-first (mtime) to 85 %.
+	// cap = min(FleetStoreCapGB, 0.8 × (used + free on the volume)).
+	FleetStoreRoot string `json:"fleet_store_root,omitempty"`
+	// FleetStoreCapGB is the operator's ceiling on the store, decimal GB;
+	// 0 = the volume rule alone (80 % of used + free).
+	FleetStoreCapGB float64 `json:"fleet_store_cap_gb,omitempty"`
+	// FleetStorePruneEveryJobs is how many completed jobs pass between store
+	// scans; 0 = 8 (one spread).
+	FleetStorePruneEveryJobs int `json:"fleet_store_prune_every_jobs,omitempty"`
 	// FleetQueueHost — Option B, ADR 0030, DARK by default: when true THIS
 	// node's fleet server also hosts the consolidated pull queue (durable
 	// bbolt store at <state-root>/fleet-queue.db + the /fleet/queue/* routes).

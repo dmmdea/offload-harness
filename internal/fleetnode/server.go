@@ -27,7 +27,9 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/fleetqueue"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/hostsample"
+	"github.com/dmmdea/offload-harness/internal/storesteward"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
@@ -93,6 +95,11 @@ type Options struct {
 	// Host reports the last host CPU/RAM sample (hostsample.Sampler.Load).
 	// nil omits the host_* fields; the handler never samples itself.
 	Host func() (hostsample.Sample, bool)
+	// Lease reads this node's machine-wide GPU lease (gpulease.InspectDir over
+	// the config's lease dir). nil = not advertised, never refused.
+	Lease func() gpulease.Info
+	// Store returns the store steward's last status; nil = no steward.
+	Store func() storesteward.Status
 }
 
 // Server is the fleet-node HTTP server: three handlers over a Runner + Jobs
@@ -514,6 +521,17 @@ type healthPayload struct {
 	// by hand, and a node several releases behind is debugged against known-fixed
 	// bugs.
 	HarnessVersion string `json:"harness_version,omitempty"`
+	// Lease is this node's machine-wide GPU lease as gpulease reads it
+	// (0.113.16). Published only when a lease is HELD; absent = the card is
+	// unreserved (or the node predates the field — a delegator treats both as
+	// eligible, exactly as before). A held TEXT lease makes the delegator skip
+	// this node and makes this node's own /fleet/dispatch refuse new work with
+	// a re-placeable 503 — the node stays up, keeps answering health, finishes
+	// what it holds, and is never "dropped" from the fleet for a measurement.
+	Lease *LeaseHealth `json:"lease,omitempty"`
+	// Store is the store steward's last status (0.113.16), published only when
+	// fleet_store_root is configured.
+	Store *storesteward.Status `json:"store,omitempty"`
 	// VramReclaimableGb is how much VRAM this node can FREE by unloading its own
 	// models — the number a scheduler actually needs. vram_free_gb under-counts a
 	// warm node; vram_total_gb over-counts every node whose card is shared (the
@@ -673,7 +691,45 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			payload.HostRAMTotalGb = h.RAMTotalGiB
 		}
 	}
+	// GPU lease: a stat + a small file, the same read every acquirer does.
+	if s.opts.Lease != nil {
+		if info := s.opts.Lease(); info.Held {
+			payload.Lease = leaseHealthOf(info)
+		}
+	}
+	// Store steward: a cached status; Status() itself starts a background
+	// tick when the last scan read above the high mark, so a health poll is a
+	// turn too, without this handler ever walking a directory.
+	if s.opts.Store != nil {
+		st := s.opts.Store()
+		payload.Store = &st
+	}
 	writeJSON(w, http.StatusOK, payload)
+}
+
+// LeaseHealth is the wire shape of a HELD lease in /fleet/health.
+type LeaseHealth struct {
+	Held   bool   `json:"held"`
+	Class  string `json:"class"`
+	PID    int    `json:"pid"`
+	Reason string `json:"reason,omitempty"`
+	Until  string `json:"until"` // RFC3339
+}
+
+func leaseHealthOf(info gpulease.Info) *LeaseHealth {
+	return &LeaseHealth{Held: true, Class: string(info.Class), PID: info.PID, Reason: info.Reason, Until: info.ExpiresAt.UTC().Format(time.RFC3339)}
+}
+
+// textLeased reports whether this node's own card is reserved by a TEXT-class
+// lease. Media leases are renders arbitrated on the node itself and do not
+// refuse dispatch. A lease that cannot be read is NOT held (fail toward
+// serving, the same direction gpuLeaseHeld and LocalBusy take).
+func (s *Server) textLeased() (gpulease.Info, bool) {
+	if s.opts.Lease == nil {
+		return gpulease.Info{}, false
+	}
+	info := s.opts.Lease()
+	return info, info.Held && info.Class == gpulease.ClassText
 }
 
 // concurrencyCapped reports whether a job of this task type counts against
@@ -890,6 +946,17 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	// a refused one pays a fresh placement out of the CONTRACT'S OWN
 	// timeout_sec and can still end up nowhere once the re-placement bound is
 	// spent.
+	// A held TEXT lease reserves this node's card (0.113.16): refuse NEW work
+	// with the same re-placeable 503 the queue cap uses, naming the holder and
+	// the expiry, so a delegator (any version — 503 has been re-placeable since
+	// 0.101.0) puts the subtask on another node instead of loading a reserved
+	// card. Known jobs re-acked above and result polls are never refused.
+	if info, held := s.textLeased(); held {
+		writeError(w, http.StatusServiceUnavailable,
+			fmt.Sprintf("node leased (gpu lease class=%s pid=%d reason=%q until %s): the card is reserved for a measurement; place elsewhere",
+				info.Class, info.PID, info.Reason, info.ExpiresAt.UTC().Format(time.RFC3339)))
+		return
+	}
 	if limit := s.opts.Cfg.FleetQueueLimit(); limit > 0 {
 		if d := s.jobs.QueueDepth(); d >= limit {
 			// Wording matters here more than anywhere else in this file:

@@ -103,8 +103,14 @@ func runGPUReserve(args []string) error {
 	reason := fs.String("reason", "", "why the card is held (shown to whoever is waiting)")
 	origin := fs.String("origin", "", "who asked for it (session/host)")
 	detach := fs.Bool("detach", false, "hold the lease in a hidden background process instead of wrapping a command")
+	drain := fs.Bool("drain", false, "after taking the lease, wait until the agent seat reports no request in flight (llama-swap /running + the seat's own metrics) before continuing; errors at --drain-timeout and releases the lease")
+	drainTimeout := fs.Duration("drain-timeout", 2*time.Minute, "how long --drain waits for in-flight requests to finish")
+	unload := fs.Bool("unload-seat", false, "after the drain, unload the agent seat through llama-swap so the cards are free; the wrapper form warms it back when the command ends (detach: use `gpu release --warm-seat`)")
 	asJSON := fs.Bool("json", false, "emit JSON")
 	_ = fs.Parse(args)
+	if *unload && !*drain {
+		return errors.New("--unload-seat requires --drain: never unload a seat with a request in flight")
+	}
 
 	cmdArgs := fs.Args() // everything after `--`
 	if len(cmdArgs) == 0 && !*detach {
@@ -121,7 +127,19 @@ func runGPUReserve(args []string) error {
 	opts := gpulease.Options{Reason: *reason, Origin: *origin, TTL: *dur}
 
 	if *detach {
-		return detachHolder(fs, *class, *dur, *reason, *origin, *asJSON, m)
+		if err := detachHolder(fs, *class, *dur, *reason, *origin, *asJSON, m); err != nil {
+			return err
+		}
+		// The lease is held by the hidden child FIRST (so no new work is placed
+		// here), then the seat is drained and unloaded. A failed drain leaves the
+		// lease held on purpose — the card stays reserved, work keeps routing
+		// elsewhere — and the exit code tells the caller not to start.
+		if *drain || *unload {
+			if err := maintainSeat(loadCfg(fs), *drain, *drainTimeout, *unload); err != nil {
+				return fmt.Errorf("%w (the lease is still held; `gpu release` frees it)", err)
+			}
+		}
+		return nil
 	}
 
 	lease, err := m.TryAcquire(gpulease.Class(*class), opts)
@@ -129,8 +147,22 @@ func runGPUReserve(args []string) error {
 		return err // *ErrHeld already reports who holds it and for how long
 	}
 	// Release on the way out no matter how we leave, including Ctrl-C: a leaked text
-	// reservation blocks every render until it expires.
-	defer func() { _ = lease.Release() }()
+	// reservation blocks every render until it expires. When the seat was unloaded
+	// for this window it is warmed back BEFORE the release, so the first contract
+	// placed here again finds a loaded seat.
+	cfg := loadCfg(fs)
+	finish := func() {
+		if *unload {
+			warmBack(cfg)
+		}
+		_ = lease.Release()
+	}
+	defer finish()
+	if *drain || *unload {
+		if err := maintainSeat(cfg, *drain, *drainTimeout, *unload); err != nil {
+			return err // deferred finish releases the lease (and warms back if it got that far)
+		}
+	}
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, os.Interrupt)
 	defer signal.Stop(sigc)
@@ -162,7 +194,7 @@ func runGPUReserve(args []string) error {
 		case err := <-done:
 			var ee *exec.ExitError
 			if errors.As(err, &ee) {
-				_ = lease.Release()
+				finish() // os.Exit skips defers: warm back + release explicitly
 				os.Exit(ee.ExitCode()) // propagate so shell loops branch correctly
 			}
 			return err
@@ -315,10 +347,17 @@ func runGPURelease(args []string) error {
 	fs := flag.NewFlagSet("gpu release", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	epoch := fs.Uint64("epoch", 0, "release only if this is still the current lease (0 = release whatever is held)")
+	warm := fs.Bool("warm-seat", false, "after releasing, load the agent seat back through llama-swap (the counterpart of `gpu reserve --detach --drain --unload-seat`)")
 	_ = fs.Parse(args)
 	m, err := openLease(fs)
 	if err != nil {
 		return err
+	}
+	// Warm BEFORE the release so the seat is loaded by the time delegators see
+	// the card free again; a failed warm-back is reported and never blocks the
+	// release (a leaked lease costs every caller, a cold seat costs one load).
+	if *warm {
+		warmBack(loadCfg(fs))
 	}
 	released, err := m.ReleaseByEpoch(*epoch)
 	if err != nil {

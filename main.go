@@ -53,6 +53,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/research"
 	"github.com/dmmdea/offload-harness/internal/router"
 	"github.com/dmmdea/offload-harness/internal/shadow"
+	"github.com/dmmdea/offload-harness/internal/storesteward"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 )
@@ -2307,11 +2308,39 @@ func runFleetServe(args []string) error {
 	// a banner computing it separately from the config could print a task list
 	// health does not serve.
 	loopbackListener := netguard.LoopbackAddr(listen)
+	// Store steward (0.113.16): when this node owns a KV page store on disk,
+	// keep it under budget between turns — every fleet_store_prune_every_jobs
+	// completed jobs, on any health poll that finds it above the high mark, and
+	// once at start. A missing root is loud here, never a silent no-op per tick.
+	var storeStatus func() storesteward.Status
+	if root := strings.TrimSpace(cfg.FleetStoreRoot); root != "" {
+		if err := storesteward.Validate(root); err != nil {
+			return fmt.Errorf("fleet-serve: fleet_store_root %q: %w", root, err)
+		}
+		steward := storesteward.New(root, cfg.FleetStoreCapGB, cfg.FleetStorePruneEveryJobs, nil)
+		steward.SetLogf(log.Printf) // one journal line per removed page: a prune stays forensically recoverable
+		jobs.OnFinish(func() { steward.JobDone() })
+		storeStatus = steward.Status
+		go steward.Tick()
+		log.Printf("fleet-serve: store steward on %s (cap %.0f GB, tick every %d jobs)", root, cfg.FleetStoreCapGB, cfg.FleetStorePruneEveryJobs)
+	}
+	// The node's own GPU lease, advertised in health and enforced at dispatch
+	// (0.113.16). Read through THE one resolver (gpulease.LeaseDir) so the
+	// advertised lease is the same one every acquirer contends on.
+	leaseRead := func() gpulease.Info {
+		dir, err := gpulease.LeaseDir(cfg.GPULockPath, cfg.StateDir)
+		if err != nil {
+			return gpulease.Info{}
+		}
+		return gpulease.InspectDir(dir)
+	}
 	srv := fleetnode.New(p, jobs, fleetnode.Options{
 		NodeID:   nodeID,
 		Version:  version,
 		Reclaim:  reclaim,
 		Snapshot: sampler.Load,
+		Lease:    leaseRead,
+		Store:    storeStatus,
 		Footprints: func() []fleetnode.FootprintEntry {
 			if st := p.FootprintStore(); st != nil {
 				// Pick up records written by OTHER processes (fleet-measure while
