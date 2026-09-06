@@ -398,3 +398,93 @@ func TestFleetViewPublishesServedModelsAndUtilization(t *testing.T) {
 		t.Errorf("served_models key must be present (nil) even when the node publishes none, got %v", unknownNode)
 	}
 }
+
+// TestStatusFleetLocalSeatWarmVLLMReportsItsWindow: the Qube's agent-pool seat
+// is vLLM behind llama-swap — no /props (404) — so a WARM seat reported
+// `ctx_probe_error: HTTP 404` on every status call before 0.113.14. The window
+// vLLM does publish, max_model_len on its own /v1/models, must come back as
+// ctx_tokens; the probe may read the per-model passthrough because the seat is
+// running (that is Props' loaded-only contract, unchanged).
+func TestStatusFleetLocalSeatWarmVLLMReportsItsWindow(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"object": "list",
+				"data":   []map[string]any{{"id": "qwen3.8-27b-vllm", "meta": map[string]any{"llamaswap": map[string]any{"aliases": []string{"agent-pool"}}}}},
+			})
+		case "/running":
+			_ = json.NewEncoder(w).Encode(map[string]any{"running": []map[string]any{{"model": "qwen3.8-27b-vllm", "state": "ready"}}})
+		case "/upstream/qwen3.8-27b-vllm/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"object": "list",
+				"data":   []map[string]any{{"id": "qwen3.8-27b-vllm", "max_model_len": 163840}, {"id": "agent-pool", "max_model_len": 163840}},
+			})
+		default:
+			http.NotFound(w, r) // /upstream/<seat>/props included: vLLM has none
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.Endpoint = upstream.URL
+	cfg.AgentModel = "agent-pool"
+	t.Setenv("NVIDIA_API_KEY", "")
+	t.Setenv("NGC_API_KEY", "")
+
+	s := New(pipeline.New(cfg, nil, nil, nil))
+	res, err := s.handleStatus(context.Background(), callReq(`{}`))
+	if err != nil {
+		t.Fatalf("handleStatus error: %v", err)
+	}
+	m := decodeResult(t, res)
+	seat := m["fleet"].(map[string]any)["local_agent_seat"].(map[string]any)
+	if seat["loaded"] != true {
+		t.Fatalf("warm seat must report loaded=true, got %v", seat)
+	}
+	if got, _ := seat["ctx_tokens"].(float64); got != 163840 {
+		t.Fatalf("ctx_tokens = %v, want 163840 from vLLM's max_model_len (seat: %v)", seat["ctx_tokens"], seat)
+	}
+	if e, present := seat["ctx_probe_error"]; present {
+		t.Fatalf("warm vLLM seat must not report a probe error, got %v", e)
+	}
+}
+
+// TestStatusFleetLocalSeatResidencyUnknownIsNotAssertedLoaded (review
+// 2026-09-06): when the probe fails BEFORE residency is established — here
+// /running answers 500 — the seat view must not claim loaded=true (or false);
+// it reports the probe error and leaves `loaded` absent. Only a post-residency
+// failure (ErrWindowUnknown) may say loaded=true.
+func TestStatusFleetLocalSeatResidencyUnknownIsNotAssertedLoaded(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []map[string]any{{"id": "qwen38-27b"}}})
+		case "/running":
+			http.Error(w, "llama-swap hiccup", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.Endpoint = upstream.URL
+	cfg.AgentModel = "qwen38-27b"
+	t.Setenv("NVIDIA_API_KEY", "")
+	t.Setenv("NGC_API_KEY", "")
+
+	s := New(pipeline.New(cfg, nil, nil, nil))
+	res, err := s.handleStatus(context.Background(), callReq(`{}`))
+	if err != nil {
+		t.Fatalf("handleStatus error: %v", err)
+	}
+	m := decodeResult(t, res)
+	seat := m["fleet"].(map[string]any)["local_agent_seat"].(map[string]any)
+	if _, present := seat["loaded"]; present {
+		t.Fatalf("residency unknown must leave `loaded` absent, got %v", seat)
+	}
+	if _, present := seat["ctx_probe_error"]; !present {
+		t.Fatalf("probe failure must be reported, got %v", seat)
+	}
+}

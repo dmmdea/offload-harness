@@ -734,20 +734,30 @@ func localSeatView(ctx context.Context, cfg config.Config) map[string]any {
 	pctx, cancel := context.WithTimeout(ctx, localSeatProbeTimeout)
 	defer cancel()
 
-	props, err := c.Props(pctx, seat)
+	// ContextWindow keeps Props' loaded-only contract and adds the one fallback
+	// a vLLM seat needs: no /props (404) → its /v1/models max_model_len. Before
+	// 0.113.14 the agent-pool seat reported ctx_probe_error "HTTP 404" here
+	// every time it was warm.
+	n, err := c.ContextWindow(pctx, seat)
 	switch {
 	case errors.Is(err, llamaswap.ErrNotLoaded):
 		v["loaded"] = false
 		v["note"] = "seat is cold; its window is not readable without loading it, and a status call must never trigger a multi-GB load. agent_run/agent_delegate probe the real ceiling when they warm it."
 		return v
+	case errors.Is(err, llamaswap.ErrWindowUnknown):
+		// Residency WAS established (that is what the sentinel means); only
+		// the window is unreadable — say exactly that much.
+		v["loaded"] = true
+		v["ctx_probe_error"] = err.Error()
+		return v
 	case err != nil:
+		// Resolve/running failed: residency is unknown, so `loaded` is left
+		// absent rather than asserted either way.
 		v["ctx_probe_error"] = err.Error()
 		return v
 	}
 	v["loaded"] = true
-	if n, ok := nCtxFromProps(props); ok {
-		v["ctx_tokens"] = n
-	}
+	v["ctx_tokens"] = n
 	return v
 }
 
