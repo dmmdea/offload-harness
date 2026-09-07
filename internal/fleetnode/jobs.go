@@ -426,7 +426,13 @@ func (j *Jobs) runningCappedLocked() int {
 //
 //  1. highest EFFECTIVE band — the stamped band, except that a sheddable job
 //     that has waited agingAfter counts as band 0 (aging: a node that is busy
-//     all afternoon must not starve gate traffic forever);
+//     all afternoon must not starve gate traffic forever). Aging is evaluated
+//     HERE, at claim time, i.e. on the next scheduler wake (an admission or a
+//     finish) rather than on a timer. Under any traffic that is continuous;
+//     and a sheddable job only ever WAITS here when two of them passed the
+//     shed rule's idle check in the same instant (the server admits a
+//     sheddable dispatch into an idle slot only), so a node idle except for a
+//     pending sheddable job does not arise.
 //  2. within a band, the tenant served LEAST RECENTLY (j.served; never served
 //     wins) — round-robin turns across delegators, so session A's 8-spread and
 //     session B's single contract alternate instead of A holding every slot;

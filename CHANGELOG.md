@@ -40,6 +40,12 @@ arithmetic; an older node ranks as before), the capacity wait uses it as "try th
 `text_lease_held`. Seat-level counters (vLLM running/waiting, KV usage) are deliberately not an input yet: the health handler
 never probes the seat, and on this fleet the job counters already describe the load the harness puts on it.
 
+**Review fixes (fresh-context reviewer, 2026-09-06):** a subtask that never made a real dispatch (reserved seat, nothing
+freed) left zero corpus/ledger rows — `settle()` records such an outcome exactly once; a NON-capacity refusal (409/404) that
+emptied the roster while the local seat was reserved skipped the wait and failed "placement refused" — a reserved seat is
+wait-worthy whatever the refusal was, and a node that refused for a non-capacity reason is excluded from the wait rather than
+re-asked every poll.
+
 **Tests:** the wait lands on a node that frees (budget handed intact) · times out as a capacity defer (node re-asked during the
 wait) · sheddable is shed at once · reserved local lands on a remote that frees (L3 complete) · reserved local with nothing
 freeing still names the holder · wait disabled keeps the pre-0.113.18 failure · envelope carries the band only when non-zero

@@ -298,7 +298,6 @@ func TestHealthSaturationTracksTheRefusalStates(t *testing.T) {
 }
 
 
-
 // dispatchImageWith is dispatchImage with an extra envelope field (raw JSON,
 // e.g. `"priority":"high"`) — for the lenient-parse test on the media lane.
 func dispatchImageWith(t *testing.T, s *Server, id, extra string, header map[string]string) *httptest.ResponseRecorder {

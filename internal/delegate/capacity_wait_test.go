@@ -8,6 +8,7 @@ package delegate
 import (
 	"context"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -85,7 +86,10 @@ func TestRunWaitsForCapacityAndLandsWhenTheNodeFrees(t *testing.T) {
 // node was re-asked during the wait rather than written off after one 503.
 func TestRunCapacityWaitTimesOutAsACapacityDefer(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
-	compressWait(t, 20*time.Millisecond, 0)
+	// 50 ms polls, 100 ms cooldown: a handful of real re-asks per second, so
+	// attempt time (charged) stays a small share of the second under CPU
+	// contention from sibling packages — the tolerance below is for the rest.
+	compressWait(t, 50*time.Millisecond, 100*time.Millisecond)
 	node, url := refusingNode(t, "node-full", http.StatusServiceUnavailable, nil)
 	cfg := testCfg(t)
 	cfg.AgentPlacementWaitSec = 1
@@ -115,11 +119,80 @@ func TestRunCapacityWaitTimesOutAsACapacityDefer(t *testing.T) {
 			t.Errorf("reason = %q, want it to contain %q", pr.Result.Reason, s)
 		}
 	}
-	if pr.CapacityWaitSec < 0.9 {
-		t.Errorf("capacity_wait_sec = %.2f, want ~1", pr.CapacityWaitSec)
+	if pr.CapacityWaitSec < 0.7 {
+		t.Errorf("capacity_wait_sec = %.2f, want most of the configured second (idle time only; attempts are charged)", pr.CapacityWaitSec)
 	}
 	if got := node.dispatches.Load(); got < 3 {
 		t.Fatalf("node saw %d dispatches, want it re-asked during the wait (>= 3)", got)
+	}
+}
+
+// TestRunNonCapacityRefusalThenReservedLocalStillWaits (review finding,
+// 2026-09-06): the one remote refuses with a NON-capacity status (409) and the
+// local seat is under a text lease. The lease is still releasable, so the
+// subtask must wait for it — not fail "placement refused" at once because the
+// refusal that emptied the roster was not a 503.
+func TestRunNonCapacityRefusalThenReservedLocalStillWaits(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 20*time.Millisecond, 0)
+	node, url := refusingNode(t, "node-conflict", http.StatusConflict, nil)
+	dir, _ := holdLease(t, gpulease.ClassText, "soak")
+	cfg := testCfg(t)
+	cfg.GPULockPath = dir
+	cfg.AgentPlacementWaitSec = 1
+
+	start := time.Now()
+	results, sum, err := RunWith(t.Context(), cfg, neverLocal(t),
+		[]core.AgentContract{remoteContract()}, "auto", []string{url}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if waited := time.Since(start); waited < time.Second {
+		t.Fatalf("Run returned after %s — it did not wait for the lease", waited)
+	}
+	if sum.Deferred != 1 || sum.Infrastructure != 1 || sum.Failed != 0 {
+		t.Fatalf("summary = %+v, want the holder-naming deferral, not a placement-refused failure", sum)
+	}
+	if r := results[0].Result.Reason; !strings.Contains(r, `reason="soak"`) || !strings.Contains(r, "node-conflict") {
+		t.Fatalf("reason = %q, want the holder AND the 409 named", r)
+	}
+	if got := node.dispatches.Load(); got != 1 {
+		t.Fatalf("a 409 node was asked %d times, want 1 (409 is not a capacity refusal; it is not re-asked)", got)
+	}
+}
+
+// TestRunUnplacedDeferStillRecordsTelemetry (review finding, 2026-09-06): a
+// subtask whose whole life was "reserved seat, nothing freed" never went
+// through attempt()'s finish — before settle() it left ZERO ledger rows. The
+// corpus and the ledger are deliverables of this lane, so the deferral is
+// recorded exactly once.
+func TestRunUnplacedDeferStillRecordsTelemetry(t *testing.T) {
+	compressWait(t, 20*time.Millisecond, 0)
+	dir, _ := holdLease(t, gpulease.ClassText, "soak")
+	cfg := testCfg(t)
+	cfg.GPULockPath = dir
+	cfg.AgentPlacementWaitSec = 1
+
+	_, sum, err := RunWith(t.Context(), cfg, neverLocal(t),
+		[]core.AgentContract{remoteContract()}, "auto", nil, nil)
+	if err != nil || sum.Deferred != 1 {
+		t.Fatalf("Run: err=%v summary=%+v", err, sum)
+	}
+	raw, rerr := os.ReadFile(cfg.LedgerPath)
+	if rerr != nil {
+		t.Fatalf("ledger not written at all: %v", rerr)
+	}
+	rows := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if strings.TrimSpace(line) != "" {
+			rows++
+		}
+	}
+	if rows != 1 {
+		t.Fatalf("ledger rows = %d, want exactly 1 for the deferred subtask", rows)
+	}
+	if sum.LedgerRowsLost != 0 || sum.CorpusRowsLost != 0 {
+		t.Fatalf("telemetry loss reported: %+v", sum)
 	}
 }
 

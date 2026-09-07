@@ -1702,9 +1702,6 @@ func DefaultComfyDir() string {
 	return ""
 }
 
-// FleetQueueLimit resolves FleetMaxQueueDepth: 0 → the built-in default,
-// negative → 0 meaning unlimited. Callers compare depth >= limit only when
-// limit > 0.
 // PlacementWait resolves AgentPlacementWaitSec: 0 → the built-in default
 // (120 s), negative → 0 meaning "do not wait".
 func (c Config) PlacementWait() time.Duration {
@@ -1718,6 +1715,9 @@ func (c Config) PlacementWait() time.Duration {
 	}
 }
 
+// FleetQueueLimit resolves FleetMaxQueueDepth: 0 → the built-in default,
+// negative → 0 meaning unlimited. Callers compare depth >= limit only when
+// limit > 0.
 func (c Config) FleetQueueLimit() int {
 	switch {
 	case c.FleetMaxQueueDepth < 0:
