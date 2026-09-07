@@ -48,6 +48,13 @@ benchmark scores, and data-leakage-shaped besides.
 same contract passes on-seat in 18 s). The `gpt-oss-20b` llama-swap entry
 STAYS as an explicitly-addressed experimental seat — never the agent lane.
 
+## Update 2026-09-06
+
+The seat binding in the Decision above is superseded by [0035](0035-persistent-vllm-seat-behind-llama-swap.md):
+the same box's agent lane now runs on a persistent vLLM seat behind llama-swap (`qwen3.5-4b-vllm`), measured 8/8 at a
+45 s median against this seat's 159 s. The FreeToken finding, the parked `gpt-oss-20b` entry and the re-eval triggers
+below are unchanged.
+
 ## Re-eval triggers
 
 1. Isolate the contamination with a direct-`:1920`-vs-proxied differential

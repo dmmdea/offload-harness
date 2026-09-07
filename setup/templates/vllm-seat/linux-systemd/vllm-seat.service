@@ -1,0 +1,28 @@
+# vllm-seat.service — a persistent vLLM agent seat (reference: NVIDIA A2 16 GB, `ampere-16`, 2026-09-06; ADR 0035).
+# Enabled at boot, Restart=on-failure. Binds the TAILSCALE address (the tailnet is the trust boundary, like the fleet
+# node) — llama-swap's entry proxies to it and owns load/unload through vllm-seat-cmd*.sh (polkit rule
+# 50-llama-swap-vllm-seat.rules). Launch line + rationale: vllm-seat-run.sh. Replace <user>, the paths and the unit name.
+[Unit]
+Description=vLLM agent seat (<seat id> / <pool alias>, :18797 Tailscale)
+# Wants (not Requires) tailscaled: a tailscaled restart (package upgrade) must not restart the seat behind llama-swap's back —
+# the bound Tailscale address survives it; the run script waits for the address at boot.
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=<user>
+Group=<user>
+WorkingDirectory=/srv/offload-stack
+ExecStart=/srv/llama-swap/seat/vllm-seat-run.sh
+Restart=on-failure
+RestartSec=20
+TimeoutStopSec=90
+KillMode=mixed
+StandardOutput=append:/srv/offload-stack/logs/vllm-seat.log
+StandardError=append:/srv/offload-stack/logs/vllm-seat.log
+
+[Install]
+WantedBy=multi-user.target
