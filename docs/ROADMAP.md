@@ -16,10 +16,12 @@ This file used to say the target was an "**8 GB single-user** box (RTX 3070 Mobi
 
 | node | tier | role |
 |---|---|---|
-| **Qube** | `blackwell-2x16` — RTX 5070 Ti 16GB + RTX 5060 Ti 16GB, 128 GB RAM, Win 11 | primary; agent seat `qwen3.8-27b`, all media engines, mem0 authority |
-| **Aorus 15P-XD** | `ampere-8` — RTX 3070 8GB, 64 GB RAM | fleet node, agent seat `qwen3.5-9b-agent` |
-| **Lenovo M720q** | `ampere-6` — RTX 3050 6GB, 32 GB RAM, Kubuntu | fleet node, agent seat `qwen3.5-4b-agent` |
-| **Dell OptiPlex 7060** | `ampere-8` + Hailo-8L NPU | editor box / accelerator tier |
+| **Qube** | **3x Blackwell 16GB = 48.9 GB** since 2026-08-31 (RTX 5060 Ti @17:00 + RTX 5070 Ti @65:00 (display) + RTX 5060 Ti @B5:00), 128 GB RAM, Win 11 — **no tier id covers this shape**; `blackwell-2x16` is what its 2-card seats run as (cards 0+2) | primary; agent seat `agent-pool` (`qwen3.8-27b-vllm`), all media engines, mem0 authority |
+| **Aorus 15P-XD** | `ampere-8` — RTX 3070 **Mobile** 8GB, 64 GB RAM, Win 11 | fleet node, agent seat `qwen3.5-9b-agent` |
+| **Lenovo M720q** | `ampere-16` — **NVIDIA A2 16GB** since 2026-09-04 (was `ampere-6` / RTX 3050 6GB), 64 GB RAM, Ubuntu; Coral Edge TPU on M.2 | fleet node, persistent vLLM agent seat `qwen3.5-4b-vllm`; LMCache L2 store |
+| **Dell OptiPlex 7060** | `blackwell-8` — RTX 5060 8GB (Gen3 x4, PCH slot) + Hailo-8L NPU, 64 GB RAM, Win 11 | editor box / accelerator tier |
+
+> **Fleet-table corrections 2026-09-07.** Three rows above were stale and one was simply wrong, in a file that records the third Qube GPU further down the same page: the Qube gained a third card 2026-08-31, the Lenovo's RTX 3050 was replaced by an A2 16GB 2026-09-04, and the **Dell OptiPlex 7060 was listed as `ampere-8` when every other authority in this repo calls it `blackwell-8`** (`docs/tiers/blackwell-8.md`, CHANGELOG 0.75.0 / 0.84.0 / 0.87.0 / 0.92.0, `docs/systems/setup-installer.md`, and the box's own 2026-08-19 installer verdict `{"profile":"blackwell-8", ...}`). Anyone rebuilding a tier map from this table would have mis-assigned that box. **Known gap, not a typo:** the 3-card Qube has no tier id at all — `blackwell-2x16` requires exactly two GPUs and `blackwell-48` means ONE 48GB card, so `setup/detect.ps1`'s `Get-Profile` files a 3x Blackwell rig as `dual-gpu` (its own self-test asserts `'3x blackwell -> dual-gpu'`), i.e. the fleet's most-measured machine currently classifies into one of its least-measured tiers. A `blackwell-3x16` rule is proposed, not shipped.
 
 A tier is a **hardware class, not a Windows class** (0.29.0), and **deployment state is never a constraint** hardened into a spec — nodes are addressed by endpoint, never by assumed placement.
 
