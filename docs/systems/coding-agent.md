@@ -122,19 +122,24 @@ three interceptors in envharness's order, driven by a CLOSED, validated vocabula
 | key | hook | effect |
 |---|---|---|
 | `deny_tools` / `allow_tools` | filter_action (static) | withheld from the offered specs — structural, like a profile; never grants a tool the flags/profile did not enable |
-| `max_calls_per_tool` | filter_action | the N+1th EXECUTION of a named tool is blocked with a reason the model reads (`NOT executed: … limit`); a breaker refusal spends nothing |
-| `arg_limits` | filter_action | numeric arguments above a per-tool cap are rewritten to the cap; the call still runs; non-numeric/absent arguments untouched |
-| `rewrite_error` | modify_transition | an `is_error` result matching a regexp becomes the operator's short line (first match wins); successes are never rewritten |
-| `observation_strip` | filter_observation | regexps removed from every result (banners, cookie notices, progress bars) |
-| `max_observation_tokens` | filter_observation | one result bounded to tokens×4 chars, head+tail with the elision marker, BEFORE the loop-boundary cap |
+| `max_calls_per_tool` | filter_action | the N+1th EXECUTION of a named tool is blocked with a reason the model reads (`NOT executed: … limit … no longer offered`) AND the tool is withheld from the offered specs for the rest of the run (structural, like the same-name breaker — a text refusal alone lets a fixated seat burn the step budget on blocked calls); a breaker refusal spends no execution |
+| `arg_limits` | filter_action | whole-number caps (≤ 2^53) on numeric arguments per tool; an argument above its cap is rewritten to the cap (marshalled as an integer), the call still runs, and the result carries a `[note: … adjusted this call's arguments …]` line so the clamp is visible to the model; non-numeric/absent arguments untouched |
+| `rewrite_error` | modify_transition | a result of a tool that RAN and errored (`failed`) matching a regexp becomes the operator's short line (first match wins); successes are never rewritten |
+| `observation_strip` | filter_observation | regexps removed from every TOOL result (banners, cookie notices, progress bars) |
+| `max_observation_tokens` | filter_observation | one tool result bounded to tokens×4 chars (minimum 64 tokens — below that the cut has no room for its marker), head+tail with the elision marker, BEFORE the loop-boundary cap, which still applies after it |
 
-`filter_action` runs before the loop's own circuit breakers, so a blocked call spends no counter
-and a rewritten argument is what the breakers and the tool both see; the two observation hooks
-run before `contextbudget.Trim`. Per-run counters live in per-run state (`--serve` shares one
+The two observation hooks run on TOOL OUTPUT only (`committed` / `failed` / `unknown`). Loop-authored
+text — a rule's own block reason, a circuit-breaker refusal, `unknown tool` — is never rewritten or
+stripped: those lines are the loop talking to the model.
+
+`filter_action` runs before the loop's own circuit breakers, so a blocked call spends no execution
+count and a rewritten argument is what the breakers and the tool both see (two asks that clamp to
+the same value are one exact-repeat key — the note on the first result says why); the two
+observation hooks run before `contextbudget.Trim`. Per-run counters live in per-run state (`--serve` shares one
 `Loop`). Every hit is recorded (`Result.RuleHits`, `EffectRecord.Rule`) and reported (`rules_fired`,
 `env_rules` on `agent_run`; the build note `agent env rules: …` names the table and the withheld
 tools). A table that does not validate — bad regexp, negative cap, empty name, unknown key on the
-CLI file — fails the BUILD by name at every door (`local-agent` exit 2, `agent_run` defer, fleet
+CLI file, a name with surrounding whitespace, a fractional cap — fails the BUILD by name at every door (`local-agent` exit 2, `agent_run` defer, fleet
 `config`-class defer); a nil/zero table is byte-identical to the pre-key loop. `local-agent
 --env-rules <file>` replaces the config table for one run (the rigger's scratch validation; `off`
 = none); `examples/agent-env-rules.json` is the starter. These are NOT the structural risk rules

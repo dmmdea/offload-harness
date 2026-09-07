@@ -3,10 +3,22 @@ package core
 import (
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strings"
 )
+
+// ErrAgentEnvRules wraps every Validate failure so a door can classify it
+// (a fleet node defers by CONFIG class: the table is the box's, not the
+// contract's) without matching on message text.
+var ErrAgentEnvRules = errors.New("agent_env_rules")
+
+// AgentEnvRulesMinObservationTokens is the floor for MaxObservationTokens:
+// below ~64 tokens (256 chars) the head+tail cut has no room for its elision
+// marker and degrades to a silent head-only hard cut — a truncated result the
+// model cannot tell was truncated is worse than no cap.
+const AgentEnvRulesMinObservationTokens = 64
 
 // AgentEnvRules is the CLOSED vocabulary of environment rules a seat's agent
 // loop runs under (config key `agent_env_rules`, per box / per fleet node;
@@ -51,7 +63,9 @@ type AgentEnvRules struct {
 	// MaxObservationTokens bounds ONE tool result before it enters the
 	// transcript (chars ≈ tokens×4, the loop's own estimate), head+tail with
 	// an elision marker — the per-seat version of the loop's window-derived
-	// cap, for seats whose window is big but whose attention is not.
+	// cap, for seats whose window is big but whose attention is not. Minimum
+	// AgentEnvRulesMinObservationTokens; the loop-boundary cap still applies
+	// after it, so the effective bound is the smaller of the two.
 	MaxObservationTokens int `json:"max_observation_tokens,omitempty"`
 	// ObservationStrip is a list of Go regexps removed from every tool result
 	// (banners, cookie notices, progress bars, base64 blobs). Each is
@@ -88,42 +102,50 @@ func (r *AgentEnvRules) Validate() error {
 		return nil
 	}
 	var errs []error
-	for i, t := range r.DenyTools {
-		if strings.TrimSpace(t) == "" {
-			errs = append(errs, fmt.Errorf("deny_tools[%d]: empty tool name", i))
+	// Names are taken LITERALLY: a name with surrounding whitespace is a typo
+	// that would otherwise silently collapse onto (or miss) the trimmed one.
+	name := func(where, n string) {
+		switch {
+		case strings.TrimSpace(n) == "":
+			errs = append(errs, fmt.Errorf("%s: empty name", where))
+		case strings.TrimSpace(n) != n:
+			errs = append(errs, fmt.Errorf("%s: %q has surrounding whitespace", where, n))
 		}
+	}
+	for i, t := range r.DenyTools {
+		name(fmt.Sprintf("deny_tools[%d]", i), t)
 	}
 	for i, t := range r.AllowTools {
-		if strings.TrimSpace(t) == "" {
-			errs = append(errs, fmt.Errorf("allow_tools[%d]: empty tool name", i))
-		}
+		name(fmt.Sprintf("allow_tools[%d]", i), t)
 	}
 	for t, n := range r.MaxCallsPerTool {
-		if strings.TrimSpace(t) == "" {
-			errs = append(errs, errors.New("max_calls_per_tool: empty tool name"))
-		}
+		name("max_calls_per_tool", t)
 		if n < 1 {
 			errs = append(errs, fmt.Errorf("max_calls_per_tool[%s]: %d, want ≥ 1 (use deny_tools to remove a tool)", t, n))
 		}
 	}
 	for t, args := range r.ArgLimits {
-		if strings.TrimSpace(t) == "" {
-			errs = append(errs, errors.New("arg_limits: empty tool name"))
-		}
+		name("arg_limits", t)
 		if len(args) == 0 {
 			errs = append(errs, fmt.Errorf("arg_limits[%s]: no arguments listed", t))
 		}
 		for a, cap := range args {
-			if strings.TrimSpace(a) == "" {
-				errs = append(errs, fmt.Errorf("arg_limits[%s]: empty argument name", t))
-			}
-			if cap < 0 {
+			name(fmt.Sprintf("arg_limits[%s]", t), a)
+			switch {
+			case cap < 0:
 				errs = append(errs, fmt.Errorf("arg_limits[%s][%s]: negative cap %v", t, a, cap))
+			case cap != math.Trunc(cap) || cap > 1<<53:
+				// A tool's numeric argument is an int on the Go side (read_file
+				// limit/offset); a fractional or exponent-formatted cap would
+				// turn a valid call into one the tool cannot decode.
+				errs = append(errs, fmt.Errorf("arg_limits[%s][%s]: cap %v must be a whole number ≤ 2^53", t, a, cap))
 			}
 		}
 	}
 	if r.MaxObservationTokens < 0 {
 		errs = append(errs, fmt.Errorf("max_observation_tokens: %d, want ≥ 0", r.MaxObservationTokens))
+	} else if r.MaxObservationTokens > 0 && r.MaxObservationTokens < AgentEnvRulesMinObservationTokens {
+		errs = append(errs, fmt.Errorf("max_observation_tokens: %d, want ≥ %d (below that the cut has no room for its elision marker)", r.MaxObservationTokens, AgentEnvRulesMinObservationTokens))
 	}
 	for i, p := range r.ObservationStrip {
 		if p == "" {
@@ -147,7 +169,7 @@ func (r *AgentEnvRules) Validate() error {
 	if len(errs) == 0 {
 		return nil
 	}
-	return fmt.Errorf("agent_env_rules: %w", errors.Join(errs...))
+	return fmt.Errorf("%w: %w", ErrAgentEnvRules, errors.Join(errs...))
 }
 
 // Summary is the one-line operator description used in notes and status:

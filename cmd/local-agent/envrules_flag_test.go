@@ -46,3 +46,16 @@ func TestResolveEnvRulesPrecedence(t *testing.T) {
 		t.Fatal("a missing file must fail, never fall back to the config table")
 	}
 }
+
+// The shipped starter table must load through the flag that advertises it —
+// the strict decoder rejected the first draft's "_comment" key (review
+// finding 2026-09-07), which no test had exercised.
+func TestShippedEnvRulesExampleLoads(t *testing.T) {
+	got, err := resolveEnvRules(filepath.Join("..", "..", "examples", "agent-env-rules.json"), config.Config{})
+	if err != nil {
+		t.Fatalf("examples/agent-env-rules.json does not load: %v", err)
+	}
+	if got.IsZero() || got.MaxObservationTokens == 0 || len(got.RewriteError) == 0 {
+		t.Fatalf("example decoded empty: %+v", got)
+	}
+}

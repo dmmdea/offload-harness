@@ -553,10 +553,11 @@ gates** — the other two report:
   anything.
 - **Environment rules (`agent_env_rules`, 0.113.22)** — a per-box table that shapes how the SEAT
   behaves inside the loop: `deny_tools` / `allow_tools` (withheld from the offered tools),
-  `max_calls_per_tool` (the N+1th execution is refused with a reason), `arg_limits` (numeric
-  arguments clamped, e.g. `{"read_file":{"limit":400}}`), `max_observation_tokens` (one result
-  bounded, head+tail), `observation_strip` (regexps removed from results), `rewrite_error` (an
-  error matching a pattern becomes a short line the model can act on). Start from
+  `max_calls_per_tool` (the N+1th execution is refused with a reason and the tool is no longer
+  offered), `arg_limits` (whole-number caps on numeric arguments, e.g. `{"read_file":{"limit":400}}`;
+  the result tells the model what was capped), `max_observation_tokens` (one tool result bounded,
+  head+tail, minimum 64), `observation_strip` (regexps removed from tool results), `rewrite_error`
+  (a tool error matching a pattern becomes a short line the model can act on). Start from
   `examples/agent-env-rules.json`; a bad table fails by name (`local-agent` exits 2, `agent_run`
   defers, a fleet node defers with `defer_class: config`). Try a candidate without touching the
   config: `local-agent --env-rules candidate.json …` (`--env-rules off` runs with none). Every

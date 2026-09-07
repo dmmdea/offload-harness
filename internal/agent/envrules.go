@@ -47,10 +47,15 @@ type EnvAction struct {
 }
 
 // EnvBlocked is a filter_action veto: the call never executes and Reason is
-// what the model reads as the (is_error) result.
+// what the model reads as the (is_error) result. Withhold asks the loop to
+// also stop OFFERING the tool for the rest of the run (structural, like the
+// same-name breaker): a weak model does not reliably read a text refusal, and
+// a capped tool it keeps re-calling would otherwise burn the step budget on
+// blocked calls — the very "budget" failure class this exists to diagnose.
 type EnvBlocked struct {
-	Rule   string
-	Reason string
+	Rule     string
+	Reason   string
+	Withhold bool
 }
 
 // EnvObservation is one tool result before it enters the transcript.
@@ -122,8 +127,10 @@ type compiledRewrite struct {
 const envTokenChars = 4
 
 // CompileEnvRules validates and compiles a table. A nil or zero table
-// compiles to nil (no rules) so callers can pass config through unchanged.
-func CompileEnvRules(r *core.AgentEnvRules) (*CompiledEnvRules, error) {
+// compiles to a nil INTERFACE (no rules) so `loop.WithEnvRules(compiled)`
+// is safe without a guard — returning a typed nil pointer here would pass
+// WithEnvRules's nil check and panic on the first call.
+func CompileEnvRules(r *core.AgentEnvRules) (EnvRules, error) {
 	if r.IsZero() {
 		return nil, nil
 	}
@@ -188,9 +195,9 @@ func (c *CompiledEnvRules) DeniedTools(available []string) []string {
 func (c *CompiledEnvRules) FilterAction(st *EnvRuleState, a EnvAction) (EnvAction, *EnvBlocked, []EnvRuleHit) {
 	var hits []EnvRuleHit
 	if capN, ok := c.maxCalls[a.Tool]; ok && st != nil && st.executed[a.Tool] >= capN {
-		reason := fmt.Sprintf("NOT executed: %s has already run %d time(s) in this task, which is its limit here. Continue with what you already have, or use a different tool.", a.Tool, st.executed[a.Tool])
+		reason := fmt.Sprintf("NOT executed: %s has already run %d time(s) in this task, which is its limit here, and it is no longer offered. Continue with what you already have, or use a different tool.", a.Tool, st.executed[a.Tool])
 		hits = append(hits, EnvRuleHit{Step: a.Step, Tool: a.Tool, Rule: "max_calls_per_tool", Effect: "blocked", Note: fmt.Sprintf("cap %d", capN)})
-		return a, &EnvBlocked{Rule: "max_calls_per_tool", Reason: reason}, hits
+		return a, &EnvBlocked{Rule: "max_calls_per_tool", Reason: reason, Withhold: true}, hits
 	}
 	if limits, ok := c.argLimits[a.Tool]; ok && len(limits) > 0 {
 		if rewritten, changed := clampArgs(a.Args, limits); len(changed) > 0 {
@@ -222,9 +229,12 @@ func clampArgs(raw string, limits map[string]float64) (string, []string) {
 			continue // not a number: leave it
 		}
 		if n > capV {
-			b, _ := json.Marshal(capV)
+			// Validate guarantees an integral cap ≤ 2^53: marshal it as an
+			// integer so a tool's int argument still decodes (400, never 400.5
+			// or 1e+21).
+			b, _ := json.Marshal(int64(capV))
 			obj[key] = b
-			changed = append(changed, fmt.Sprintf("%s %v→%v", key, trimFloat(n), trimFloat(capV)))
+			changed = append(changed, fmt.Sprintf("%s %v→%d", key, trimFloat(n), int64(capV)))
 		}
 	}
 	if len(changed) == 0 {

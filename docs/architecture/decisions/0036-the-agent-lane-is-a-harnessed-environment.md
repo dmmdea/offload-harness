@@ -46,11 +46,14 @@ inside the loop is out of policy here, and a rule nobody can read as data cannot
    `config`-class defer) and never silently no-ops. `local-agent --env-rules <file>` replaces the table for one
    run — the rigger's scratch validation — and `off` runs without one.
 2. **The three interceptors wrap every tool call in envharness's order** (`internal/agent/envrules.go`):
-   `FilterAction` runs BEFORE the loop's own breakers (a blocked call spends no counter; a rewritten argument is
-   what the breakers and the tool both see); `ModifyTransition` then `FilterObservation` run on the result before
-   the loop-boundary cap. Denied tools are withheld structurally (the spec is not sent), like a profile's
-   narrowing — a weak model does not reliably read a text refusal. Per-run counters live in per-run state: one
-   `Loop` serves concurrent handlers under `--serve`.
+   `FilterAction` runs BEFORE the loop's own breakers (a blocked call spends no execution count; a rewritten
+   argument is what the breakers and the tool both see, and the clamp is named on the result the model reads);
+   `ModifyTransition` then `FilterObservation` run on TOOL OUTPUT only, before the loop-boundary cap — a
+   loop-authored line (a block reason, a breaker refusal, `unknown tool`) is never rewritten or stripped. Denied
+   tools are withheld structurally (the spec is not sent), like a profile's narrowing, and a tool that reaches
+   its `max_calls_per_tool` cap is withheld the same way for the rest of the run — a weak model does not reliably
+   read a text refusal, and a capped tool it kept re-calling would burn the step budget on blocked calls. Per-run
+   counters live in per-run state: one `Loop` serves concurrent handlers under `--serve`.
 3. **Env rules and risk rules stay two tables.** Risk rules (`--rules`, ADR 0003's broker) decide what an effectful
    action may DO to the world — tighten-only, security. Env rules shape how a WEAK SEAT behaves inside the loop.
    An env rule never grants or denies an effect; a risk rule never rewrites an observation.

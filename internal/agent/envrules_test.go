@@ -46,7 +46,26 @@ func compiled(t *testing.T, r core.AgentEnvRules) *CompiledEnvRules {
 	if c == nil {
 		t.Fatal("compile returned nil for a non-zero table")
 	}
-	return c
+	return c.(*CompiledEnvRules)
+}
+
+// A zero table compiles to a nil INTERFACE, so the idiomatic
+// `loop.WithEnvRules(compiled)` with no guard neither installs hooks nor
+// panics (a typed-nil pointer would have passed the nil check and crashed in
+// DeniedTools — review finding 2026-09-07).
+func TestCompileEnvRulesZeroTableIsSafeToInstall(t *testing.T) {
+	c, err := CompileEnvRules(&core.AgentEnvRules{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{script: []Completion{{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"}}}
+	loop := NewLoop(client, envTools(t, map[string][]string{}), 3).WithEnvRules(c)
+	if loop.envRules != nil {
+		t.Fatal("zero table installed hooks")
+	}
+	if _, err := loop.Run(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestCompileEnvRulesNilAndZeroYieldNoRules(t *testing.T) {
@@ -119,6 +138,20 @@ func TestEnvRulesMaxCallsPerToolBlocksAfterCapAndRecordsHits(t *testing.T) {
 	if len(res.RuleHits) != 1 || res.RuleHits[0].Rule != "max_calls_per_tool" || res.RuleHits[0].Effect != "blocked" || res.RuleHits[0].Step != 3 {
 		t.Fatalf("rule hits = %+v", res.RuleHits)
 	}
+	// Structural withholding: after the block, the tool is no longer OFFERED
+	// (the 4th Chat's specs lack it) — a text refusal alone would let a
+	// fixated seat burn the whole step budget on blocked calls.
+	for _, sp := range client.seenSpecs[3] {
+		if sp.Name == "list_dir" {
+			t.Fatal("capped tool still offered after the block")
+		}
+	}
+	for _, sp := range client.seenSpecs[2] {
+		if sp.Name == "list_dir" {
+			return // offered right up to the block, as it should be
+		}
+	}
+	t.Fatal("list_dir withheld BEFORE the cap was reached")
 	if e := res.Effects[2]; e.Status != EffectNone || e.Rule != "max_calls_per_tool" || e.ObsChars == 0 {
 		t.Fatalf("third effect = %+v", e)
 	}
@@ -190,6 +223,20 @@ func TestEnvRulesArgLimitsClampNumbersOnly(t *testing.T) {
 	if len(res.RuleHits) != 1 || res.RuleHits[0].Rule != "arg_limits" || res.RuleHits[0].Effect != "rewrote_args" || !strings.Contains(res.RuleHits[0].Note, "limit 9000→400") {
 		t.Fatalf("hits = %+v", res.RuleHits)
 	}
+	// The model is TOLD about the clamp on the result it reads (a silent clamp
+	// makes its transcript lie, and the clamped args are the exact-repeat key).
+	var clampedResult Msg
+	for _, m := range client.seen[1] {
+		if m.ToolCallID == "c1" {
+			clampedResult = m
+		}
+	}
+	if !strings.Contains(clampedResult.Content, "adjusted this call's arguments") || !strings.Contains(clampedResult.Content, "limit 9000→400") {
+		t.Fatalf("clamp not surfaced to the model: %q", clampedResult.Content)
+	}
+	if seen["list_dir"][0] == "" || strings.Contains(seen["list_dir"][0], "400.") {
+		t.Fatalf("cap must be marshalled as an integer: %s", seen["list_dir"][0])
+	}
 }
 
 func TestEnvRulesObservationStripThenCapThenRewrite(t *testing.T) {
@@ -249,6 +296,51 @@ func TestEnvRulesRewriteErrorLeavesSuccessAlone(t *testing.T) {
 	o, hits := c.ModifyTransition(EnvAction{Tool: "x"}, EnvObservation{Content: "no such file", IsError: false})
 	if o.Content != "no such file" || len(hits) != 0 {
 		t.Fatalf("non-error rewritten: %+v %+v", o, hits)
+	}
+}
+
+// Loop-authored texts are never rewritten or stripped: a rewrite_error /
+// observation_strip pattern broad enough to match "NOT executed" or
+// "unknown tool" must leave the breaker's refusal, the env rule's own block
+// reason and the unknown-tool line byte-for-byte (review finding 2026-09-07).
+func TestEnvRulesHooksNeverTouchLoopAuthoredText(t *testing.T) {
+	seen := map[string][]string{}
+	client := &fakeClient{script: []Completion{
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "list_dir", `{"path":"a"}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{
+			tc("c2", "list_dir", `{"path":"a"}`),   // exact repeat → breaker refusal
+			tc("c3", "run_shell", `{}`),            // denied → unknown tool
+			tc("c4", "read_file", `{"path":"x"}`),  // executes: cap 1 → next one blocked
+			tc("c5", "read_file", `{"path":"y"}`)}, // env block reason
+		}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
+	}}
+	loop := NewLoop(client, envTools(t, seen), 10).WithEnvRules(compiled(t, core.AgentEnvRules{
+		DenyTools:        []string{"run_shell"},
+		MaxCallsPerTool:  map[string]int{"read_file": 1},
+		ObservationStrip: []string{`(?i)NOT executed.*|error:.*|no longer offered.*`},
+		RewriteError:     []core.AgentErrorRewrite{{Match: `(?i)executed|unknown|limit`, Text: "REWRITTEN"}},
+	}))
+	if _, err := loop.Run(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, m := range client.seen[2] {
+		if m.Role == "tool" {
+			got[m.ToolCallID] = m.Content
+		}
+	}
+	if !strings.Contains(got["c2"], "NOT executed: you already called") {
+		t.Fatalf("breaker refusal altered: %q", got["c2"])
+	}
+	if !strings.Contains(got["c3"], `unknown tool "run_shell"`) {
+		t.Fatalf("unknown-tool line altered: %q", got["c3"])
+	}
+	if !strings.Contains(got["c5"], "NOT executed: read_file has already run 1 time(s)") {
+		t.Fatalf("env block reason altered: %q", got["c5"])
+	}
+	if strings.Contains(got["c4"], "REWRITTEN") {
+		t.Fatalf("a committed result was rewritten as an error: %q", got["c4"])
 	}
 }
 
