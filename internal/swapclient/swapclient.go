@@ -149,6 +149,32 @@ func (r Roster) Serves(nameOrAlias string) bool {
 	return false
 }
 
+// Canonical resolves nameOrAlias to the canonical id llama-swap lists it under
+// — ids first, then `meta.llamaswap.aliases`, case-insensitively like Serves.
+// It exists because llama-swap's /running names models by canonical id ONLY,
+// while the harness binds seats by alias: a reader that matches /running by
+// the bound name reads an alias-bound seat as "not loaded" (the 0.113.16–19
+// drain defect). An empty or unserved name resolves to ("", false).
+func (r Roster) Canonical(nameOrAlias string) (string, bool) {
+	name := strings.TrimSpace(nameOrAlias)
+	if name == "" {
+		return "", false
+	}
+	for _, m := range r.models {
+		if strings.EqualFold(m.ID, name) {
+			return m.ID, true
+		}
+	}
+	for _, m := range r.models {
+		for _, a := range m.Aliases {
+			if strings.EqualFold(a, name) {
+				return m.ID, true
+			}
+		}
+	}
+	return "", false
+}
+
 // IDs returns the canonical model ids in roster order.
 func (r Roster) IDs() []string {
 	ids := make([]string, 0, len(r.models))

@@ -14,168 +14,27 @@ package main
 // wrapper form's exit) loads the seat back so the next contract does not pay a
 // cold start.
 //
-// The read is deliberately two-step: llama-swap's /running says whether the
-// seat is loaded at all, and ONLY a loaded seat is asked for /metrics through
-// /upstream/<model>/… — that path loads a model on demand, so probing it on an
-// unloaded seat would do the exact thing a drain exists to avoid.
+// The in-flight read itself lives in internal/seatload since 0.113.20 (the
+// delegator's spread deal shares it): two-step — llama-swap's /running says
+// whether the seat is loaded, ONLY a loaded seat is asked for /metrics or
+// /slots through /upstream/<model>/… (that path loads a model on demand) — and
+// alias-aware, because /running lists canonical ids while the harness binds
+// seats by alias (the drain was a silent no-op on such a seat before).
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/seatload"
 )
-
-// seatInflightGauges are the counters that mean "a request is in flight" on
-// the engines the harness fronts: vLLM (running + waiting) and llama-server
-// (processing + deferred). Any other gauge is ignored.
-var seatInflightGauges = []string{
-	"vllm:num_requests_running", "vllm:num_requests_waiting",
-	"llamacpp:requests_processing", "llamacpp:requests_deferred",
-}
-
-// seatInflight reads how many requests the seat holds right now. loaded=false
-// means llama-swap does not list the model as running (idle by definition, and
-// the upstream is NOT probed). A metrics fetch that fails on a loaded seat is
-// an error — "could not read" must never pass as "idle".
-func seatInflight(ctx context.Context, client *http.Client, endpoint, model string) (inflight int, loaded bool, err error) {
-	base := strings.TrimRight(endpoint, "/")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/running", nil)
-	if err != nil {
-		return 0, false, err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, false, fmt.Errorf("llama-swap /running: %w", err)
-	}
-	var running struct {
-		Running []struct {
-			Model string `json:"model"`
-			State string `json:"state"`
-		} `json:"running"`
-	}
-	derr := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&running)
-	resp.Body.Close()
-	if derr != nil {
-		return 0, false, fmt.Errorf("llama-swap /running: %w", derr)
-	}
-	for _, m := range running.Running {
-		if strings.EqualFold(m.Model, model) && m.State != "stopped" && m.State != "shutdown" {
-			loaded = true
-		}
-	}
-	if !loaded {
-		return 0, false, nil
-	}
-	req, err = http.NewRequestWithContext(ctx, http.MethodGet, base+"/upstream/"+url.PathEscape(model)+"/metrics", nil)
-	if err != nil {
-		return 0, true, err
-	}
-	resp, err = client.Do(req)
-	if err != nil {
-		return 0, true, fmt.Errorf("seat metrics: %w", err)
-	}
-	defer resp.Body.Close()
-	switch resp.StatusCode {
-	case http.StatusOK:
-		return parseInflight(resp.Body), true, nil
-	case http.StatusNotImplemented, http.StatusNotFound:
-		// llama-server answers 501 (older builds 404) when it runs WITHOUT
-		// --metrics — every llama.cpp seat on this fleet does (2026-09-06:
-		// the Lenovo's drain timed out on a warm seat, "seat metrics: status
-		// 501"). Its /slots endpoint is on by default and reports per-slot
-		// is_processing, which is the in-flight count for a slot-based server.
-		// Only these two statuses fall back: a 500 or a timeout is "could not
-		// read" and must never pass as idle.
-		return slotsInflight(ctx, client, base, model, resp.StatusCode)
-	default:
-		return 0, true, fmt.Errorf("seat metrics: status %d", resp.StatusCode)
-	}
-}
-
-// slotsInflight reads llama-server's GET /slots through llama-swap and counts
-// the slots that are processing. A queued request (llama-server's deferred
-// task queue) is not listed by /slots — it becomes a processing slot the
-// instant one frees — which is why drainSeat asks for TWO consecutive idle
-// reads before it calls the seat drained.
-func slotsInflight(ctx context.Context, client *http.Client, base, model string, metricsStatus int) (inflight int, loaded bool, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/upstream/"+url.PathEscape(model)+"/slots", nil)
-	if err != nil {
-		return 0, true, err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, true, fmt.Errorf("seat slots: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return 0, true, fmt.Errorf("seat metrics: status %d (no --metrics) and seat slots: status %d", metricsStatus, resp.StatusCode)
-	}
-	n, perr := parseSlotsInflight(io.LimitReader(resp.Body, 4<<20))
-	if perr != nil {
-		return 0, true, fmt.Errorf("seat slots: %w", perr)
-	}
-	return n, true, nil
-}
-
-// parseSlotsInflight counts is_processing slots in llama-server's /slots
-// JSON array. Any other field is ignored; a non-array body is an error.
-func parseSlotsInflight(r io.Reader) (int, error) {
-	var slots []struct {
-		IsProcessing bool `json:"is_processing"`
-	}
-	if err := json.NewDecoder(r).Decode(&slots); err != nil {
-		return 0, fmt.Errorf("/slots is not a JSON array: %w", err)
-	}
-	n := 0
-	for _, s := range slots {
-		if s.IsProcessing {
-			n++
-		}
-	}
-	return n, nil
-}
-
-// parseInflight sums the in-flight gauges out of a Prometheus text exposition.
-func parseInflight(r io.Reader) int {
-	total := 0
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 4<<20)
-	for sc.Scan() {
-		line := sc.Text()
-		if line == "" || line[0] == '#' {
-			continue
-		}
-		for _, g := range seatInflightGauges {
-			if !strings.HasPrefix(line, g) {
-				continue
-			}
-			rest := line[len(g):]
-			if rest == "" || (rest[0] != '{' && rest[0] != ' ') {
-				continue // a different gauge sharing the prefix
-			}
-			fields := strings.Fields(line)
-			if len(fields) < 2 {
-				continue
-			}
-			v, err := strconv.ParseFloat(fields[len(fields)-1], 64)
-			if err == nil && v > 0 {
-				total += int(v + 0.5)
-			}
-		}
-	}
-	return total
-}
 
 // drainSeat polls until the seat reports zero in-flight requests on two
 // consecutive reads (a request can land between a zero and the unload) or the
@@ -186,10 +45,18 @@ func drainSeat(ctx context.Context, client *http.Client, endpoint, model string,
 	zeros := 0
 	last := ""
 	for {
-		n, loaded, err := seatInflight(ctx, client, endpoint, model)
+		rd, err := seatload.Inflight(ctx, client, endpoint, model)
+		n, loaded := rd.Inflight, rd.Loaded
 		switch {
 		case err != nil:
 			last = err.Error()
+			zeros = 0
+		case !loaded && rd.Ambiguous:
+			// The bare name is not in /running, the roster could not say what
+			// id the seat is listed under, and /running is not empty: the seat
+			// may be one of those entries mid-request. "Could not tell" is not
+			// "idle" — keep polling, and name the cause at the deadline.
+			last = fmt.Sprintf("cannot tell whether %s is loaded: roster unreadable (%v) and /running lists %d other model(s)", model, rd.RosterErr, rd.RunningOthers)
 			zeros = 0
 		case !loaded:
 			return nil // not loaded: nothing to drain

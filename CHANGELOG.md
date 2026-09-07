@@ -6,6 +6,34 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.20] — 2026-09-07 — spread skips the local rotation slot when the local seat is busy; the drain resolves an alias-bound seat
+
+**Changed — the local rotation slot is contested under load (`agent_spread_local_slot`, default `skip-when-busy`).** `route=spread`
+dealt subtask 0 (and every `i mod len == 0` slot) to the local seat unconditionally. With K delegating sessions that meant K × 3 of every
+8 subtasks stacked on one local seat while the remotes idled — the K×8 gate's remaining tail after the Lenovo seat replacement was
+exactly that (first-local subtask 155–189 s under K=3 vs 91–105 s for its siblings; K=2 wall 1.55× the K=1 wall against a 1.5×
+bound). The deal now reads the local seat's in-flight count ONCE when it is computed (the same reader the drain uses: vLLM
+running + waiting, llama-server processing slots, through llama-swap) and, when the seat already holds a request, deals the local
+slots to the best-fit eligible remote WITH ROOM instead — the remotes' one-per-seat-per-cycle invariant unchanged, `hasRoom`
+filtered, a sheddable run still needing an idle slot. An idle seat keeps every slot it had (a lone session is dealt exactly as
+before), and with no remote that has room the slot stays local and the reason says `local seat busy … no remote with room`.
+`agent_spread_local_slot: "always"` restores the pre-0.113.20 deal. A text lease still removes the local seat in both modes. The
+reason line of every affected subtask names the in-flight count it read. Operator decision 2026-09-06 (item 2 of the 20:5x order).
+
+**Fixed — `gpu reserve --drain` on an ALIAS-bound seat.** The in-flight reader matched llama-swap's `/running` by the CONFIGURED
+seat name, but `/running` lists canonical ids only — on the reference box the seat is bound as `agent-pool` for `qwen3.8-27b-vllm`,
+so the drain read "not loaded: nothing to drain" and returned at once on a seat that could be mid-request (silent since 0.113.16;
+the Lenovo, where the seat is bound by its id, was unaffected, which is why the L7 proofs passed). The reader now lives in
+`internal/seatload`, resolves the name through the roster (`swapclient.Roster.Canonical`: id or alias → id) before consulting
+`/running`, and falls back to the bare name when the roster cannot be read. Tests: an alias-bound seat listed under its id is
+read as loaded with its count; the parsers and the never-touch-an-unloaded-upstream rule move with the code.
+A reading is AMBIGUOUS when the roster could not be read, the bare name is not in `/running`, and `/running` is not empty:
+the seat may be one of those entries under a name the reader could not resolve. The drain never calls that drained — it keeps
+polling and fails at the deadline naming the roster error and the count (review finding on this change: the fallback would
+otherwise have re-created the defect on a slow `/v1/models`); the spread deal treats it as idle (its safe direction, the
+pre-0.113.20 stacking) and logs the degraded read. Every spread run logs one line with the local-slot mode and the reading.
+
+
 **Docs + templates (no code): the Linux persistent-vLLM-seat pattern behind llama-swap.** ADR 0035 records the reference
 `ampere-16` box moving its agent lane from the llama.cpp 4B seat to a persistent vLLM systemd unit fronted by a llama-swap
 entry whose `cmd`/`cmdStop` start and stop the unit through a scoped polkit rule — so the fleet node's `endpoint` stays

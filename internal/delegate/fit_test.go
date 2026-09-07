@@ -337,3 +337,109 @@ func TestDealSpreadReasonNamesTheRotationSlotAndRule(t *testing.T) {
 		t.Errorf("local reason = %q, want the unchanged local form", got)
 	}
 }
+
+// TestDealSpreadSkipsTheLocalSlotWhenTheLocalSeatIsBusy (0.113.20): a local seat
+// that already holds a request loses EVERY rotation slot — subtask 0 included —
+// to the eligible remotes with room, dealt one-per-seat-per-cycle as before,
+// and each reason names the count that was read.
+func TestDealSpreadSkipsTheLocalSlotWhenTheLocalSeatIsBusy(t *testing.T) {
+	r := fitRunner(fitBigRemote, fitSmallRemote)
+	r.spreadLocalBusy = busyReading{busy: true, inflight: 3, note: "metrics"}
+	where, slots := deal(r, repeatGoal(fitMechGoal, 4)...)
+	for i, sl := range slots {
+		if sl.view.Local {
+			t.Errorf("subtask %d landed local (%s) while the local seat was busy", i, where[i])
+		}
+		if !strings.Contains(sl.reason, "local seat busy: 3 in flight") {
+			t.Errorf("subtask %d reason %q must name the in-flight count", i, sl.reason)
+		}
+	}
+	counts := map[string]int{}
+	for _, w := range where {
+		counts[w]++
+	}
+	if counts["big-remote"] != 2 || counts["small-remote"] != 2 {
+		t.Errorf("deal = %v; want two subtasks on each remote (one per seat per cycle)", where)
+	}
+}
+
+// TestDealSpreadBusyLocalStaysLocalWhenNoRemoteHasRoom: the busy rule is an
+// optimisation, never a way to lose work — with every eligible remote saturated
+// the deal falls back to the ordinary rotation and says why.
+func TestDealSpreadBusyLocalStaysLocalWhenNoRemoteHasRoom(t *testing.T) {
+	full := fitBigRemote
+	full.SaturationKnown, full.SaturationHigh = true, true
+	r := fitRunner(full)
+	r.spreadLocalBusy = busyReading{busy: true, inflight: 2}
+	where, slots := deal(r, repeatGoal(fitMechGoal, 2)...)
+	if !slots[0].view.Local {
+		t.Fatalf("subtask 0 landed on %s; with no remote that has room it must stay local", where[0])
+	}
+	if !strings.Contains(slots[0].reason, "local seat busy: 2 in flight; no remote with room") {
+		t.Errorf("reason %q must say the seat was busy and why the slot stayed local", slots[0].reason)
+	}
+	if where[1] != "big-remote" {
+		t.Errorf("subtask 1 landed on %s; the ordinary rotation still deals the remote its slot", where[1])
+	}
+}
+
+// TestDealSpreadAlwaysKeepsTheLocalSlotWhenConfigured: agent_spread_local_slot
+// "always" is the pre-0.113.20 deal — a busy reading changes nothing.
+func TestDealSpreadAlwaysKeepsTheLocalSlotWhenConfigured(t *testing.T) {
+	r := fitRunner(fitBigRemote, fitSmallRemote)
+	r.cfg.AgentSpreadLocalSlot = "always"
+	r.spreadLocalBusy = busyReading{busy: true, inflight: 5}
+	where, _ := deal(r, repeatGoal(fitMechGoal, 4)...)
+	if want := []string{"local-box", "small-remote", "big-remote", "local-box"}; !equalStrings(where, want) {
+		t.Errorf("deal = %v, want %v (the unconditional local slot; mechanical goals take the smallest adequate seat first)", where, want)
+	}
+}
+
+// TestDealSpreadIdleLocalSeatKeepsEverySlot is the control arm of the busy
+// rule: an explicit idle reading deals exactly as every earlier version did.
+func TestDealSpreadIdleLocalSeatKeepsEverySlot(t *testing.T) {
+	r := fitRunner(fitBigRemote, fitSmallRemote)
+	r.spreadLocalBusy = busyReading{busy: false, inflight: 0, note: "metrics"}
+	where, slots := deal(r, repeatGoal(fitMechGoal, 4)...)
+	if want := []string{"local-box", "small-remote", "big-remote", "local-box"}; !equalStrings(where, want) {
+		t.Errorf("deal = %v, want %v", where, want)
+	}
+	for i, sl := range slots {
+		if strings.Contains(sl.reason, "busy") {
+			t.Errorf("subtask %d reason %q mentions busy on an idle seat", i, sl.reason)
+		}
+	}
+}
+
+// TestDealSpreadSheddableBusyLocalNeedsAnIdleRemoteSlot: a sheddable run under
+// the busy rule takes only a remote with an IDLE slot (hasRoom's sheddable arm);
+// a remote that merely is not saturated is not enough for it.
+func TestDealSpreadSheddableBusyLocalNeedsAnIdleRemoteSlot(t *testing.T) {
+	noIdle := fitBigRemote
+	noIdle.SaturationKnown, noIdle.SaturationHigh, noIdle.IdleSlot = true, false, false
+	idle := fitSmallRemote
+	idle.SaturationKnown, idle.SaturationHigh, idle.IdleSlot = true, false, true
+	r := fitRunner(noIdle, idle)
+	r.priority = core.BandSheddable
+	r.spreadLocalBusy = busyReading{busy: true, inflight: 1}
+	where, _ := deal(r, repeatGoal(fitMechGoal, 2)...)
+	for i, w := range where {
+		if w != "small-remote" {
+			t.Errorf("subtask %d landed on %s; a sheddable run may only take the remote with an idle slot", i, w)
+		}
+	}
+}
+
+// TestDealSpreadBusyLocalWithNoEligibleRemoteSaysSo: with no remote able to
+// take the contract at all, the fallback reason says "no eligible remote", not
+// "no remote with room" — an operator must not be sent chasing capacity.
+func TestDealSpreadBusyLocalWithNoEligibleRemoteSaysSo(t *testing.T) {
+	off := fitBigRemote
+	off.AgentEnabled = false
+	r := fitRunner(off)
+	r.spreadLocalBusy = busyReading{busy: true, inflight: 1}
+	_, slots := deal(r, fitMechGoal)
+	if !slots[0].view.Local || !strings.Contains(slots[0].reason, "no eligible remote)") {
+		t.Fatalf("reason %q (local=%v); want local with 'no eligible remote'", slots[0].reason, slots[0].view.Local)
+	}
+}

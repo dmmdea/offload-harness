@@ -246,6 +246,21 @@ type Config struct {
 	// (120 s); negative = do not wait (the pre-0.113.18 behaviour). A sheddable
 	// contract (priority -1) never waits: with no idle node it is shed at once.
 	AgentPlacementWaitSec int `json:"agent_placement_wait_sec,omitempty"`
+	// AgentSpreadLocalSlot (0.113.20) decides what route=spread does with the
+	// LOCAL rotation slot when the local agent seat is already busy at deal time:
+	//   ""/"skip-when-busy" (default) — the local slot is dealt to the best
+	//     eligible remote WITH ROOM instead, so K delegating sessions do not all
+	//     stack their slot-0/3/6 subtasks on one local seat (operator decision
+	//     2026-09-06: the K×8 gate's remaining tail was exactly that stacking —
+	//     first-local subtask 155–189 s under K=3 vs 91–105 s for its siblings).
+	//     Busy = the seat holds at least one request (vLLM running+waiting, or a
+	//     llama-server slot processing), read ONCE through llama-swap when the deal
+	//     is computed; an idle seat keeps every slot it had. With no remote that
+	//     has room the slot stays local and the reason says why.
+	//   "always" — the pre-0.113.20 deal: subtask 0 (and every i mod len == 0
+	//     slot) lands local whatever the seat is doing.
+	// A text lease still removes the local seat from the rotation in both modes.
+	AgentSpreadLocalSlot string `json:"agent_spread_local_slot,omitempty"`
 	// VisionModel is the VLM alias used for the vqa task (multimodal). Empty = no
 	// vision route (vqa defers).
 	VisionModel string `json:"vision_model,omitempty"`
@@ -1713,6 +1728,23 @@ func (c Config) PlacementWait() time.Duration {
 	default:
 		return time.Duration(c.AgentPlacementWaitSec) * time.Second
 	}
+}
+
+// Spread local-slot policies (AgentSpreadLocalSlot).
+const (
+	SpreadLocalSkipWhenBusy = "skip-when-busy"
+	SpreadLocalAlways       = "always"
+)
+
+// SpreadLocalSlot resolves AgentSpreadLocalSlot: "" (and any value that is not
+// "always") → skip-when-busy, the 0.113.20 default; "always" → the old deal.
+// Case-insensitive, whitespace-tolerant, so a hand-edited config cannot fall
+// into a third, unnamed behaviour.
+func (c Config) SpreadLocalSlot() string {
+	if strings.EqualFold(strings.TrimSpace(c.AgentSpreadLocalSlot), SpreadLocalAlways) {
+		return SpreadLocalAlways
+	}
+	return SpreadLocalSkipWhenBusy
 }
 
 // FleetQueueLimit resolves FleetMaxQueueDepth: 0 → the built-in default,

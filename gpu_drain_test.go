@@ -75,19 +75,6 @@ func (f *drainSwap) handler(model string) http.Handler {
 	return mux
 }
 
-func TestParseInflightSumsOnlyTheInflightGauges(t *testing.T) {
-	body := `# HELP
-vllm:num_requests_running{engine="0",model_name="m"} 2.0
-vllm:num_requests_waiting{engine="0",model_name="m"} 1.0
-vllm:num_requests_running_total 500
-llamacpp:requests_processing 1
-vllm:prompt_tokens_total 12345
-`
-	if got := parseInflight(strings.NewReader(body)); got != 4 {
-		t.Fatalf("inflight = %d, want 4 (2 running + 1 waiting + 1 processing; the _total counter must not count)", got)
-	}
-}
-
 func TestDrainReturnsAtOnceWhenTheSeatIsNotLoadedAndNeverTouchesUpstream(t *testing.T) {
 	f := &drainSwap{}
 	srv := httptest.NewServer(f.handler("seat"))
@@ -164,16 +151,6 @@ func TestDrainDoesNotFallBackOnAMetricsServerError(t *testing.T) {
 	}
 }
 
-func TestParseSlotsInflightCountsProcessingSlots(t *testing.T) {
-	n, err := parseSlotsInflight(strings.NewReader(`[{"id":0,"is_processing":true,"n_ctx":65536},{"id":1,"is_processing":false},{"id":2,"is_processing":true}]`))
-	if err != nil || n != 2 {
-		t.Fatalf("parse = %d, %v; want 2 processing", n, err)
-	}
-	if _, err := parseSlotsInflight(strings.NewReader(`{"error":"x"}`)); err == nil {
-		t.Fatal("a non-array body must be an error, never zero in flight")
-	}
-}
-
 func TestDrainErrorsAtTheDeadlineWhileBusy(t *testing.T) {
 	f := &drainSwap{}
 	f.loaded.Store(true)
@@ -202,5 +179,44 @@ func TestUnloadAndWarmGoThroughLlamaSwap(t *testing.T) {
 	}
 	if !f.loaded.Load() || f.warms.Load() != 1 {
 		t.Fatalf("warm did not go through: loaded=%v warms=%d", f.loaded.Load(), f.warms.Load())
+	}
+}
+
+// aliasSwapNoRoster lists the seat in /running under its CANONICAL id only and
+// cannot serve /v1/models — the reading for the ALIAS is then ambiguous.
+func aliasSwapNoRoster(id string, listed bool) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "down", http.StatusBadGateway) })
+	mux.HandleFunc("/running", func(w http.ResponseWriter, r *http.Request) {
+		if listed {
+			_, _ = w.Write([]byte(`{"running":[{"model":"` + id + `","state":"ready"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"running":[]}`))
+	})
+	return mux
+}
+
+// TestDrainRefusesToTrustAnAmbiguousReading is the review finding on 0.113.20:
+// an unreadable roster used to turn an alias-bound, mid-request seat into "not
+// loaded: nothing to drain". Now the drain keeps polling and fails at the
+// deadline naming the roster — never a silent "drained".
+func TestDrainRefusesToTrustAnAmbiguousReading(t *testing.T) {
+	srv := httptest.NewServer(aliasSwapNoRoster("qwen3.8-27b-vllm", true))
+	defer srv.Close()
+	err := drainSeat(context.Background(), srv.Client(), srv.URL, "agent-pool", 40*time.Millisecond, 5*time.Millisecond, nil)
+	if err == nil || !strings.Contains(err.Error(), "roster unreadable") {
+		t.Fatalf("an ambiguous reading must fail the drain naming the roster, got %v", err)
+	}
+}
+
+// TestDrainStillReturnsAtOnceWhenNothingIsRunning is the control arm: the same
+// unreadable roster with an EMPTY /running is plainly idle — no regression for
+// an unloaded seat behind a llama-swap that cannot serve its roster.
+func TestDrainStillReturnsAtOnceWhenNothingIsRunning(t *testing.T) {
+	srv := httptest.NewServer(aliasSwapNoRoster("qwen3.8-27b-vllm", false))
+	defer srv.Close()
+	if err := drainSeat(context.Background(), srv.Client(), srv.URL, "agent-pool", time.Second, time.Millisecond, nil); err != nil {
+		t.Fatalf("empty /running must drain at once, got %v", err)
 	}
 }

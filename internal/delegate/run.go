@@ -48,6 +48,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/netguard"
+	"github.com/dmmdea/offload-harness/internal/seatload"
 )
 
 // LocalRunner executes one contract in-process on the local node — the same
@@ -543,6 +544,16 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	if route == "spread" {
 		r.spreadViews, r.spreadBases, r.spreadProbeErrs = r.fetchViews(ctx)
 		r.spreadLease = LocalLease(cfg.GPULockPath, cfg.StateDir)
+		// The local seat's load is read here, once, for the same reason the
+		// fleet is probed once: every subtask must deal against ONE snapshot.
+		if cfg.SpreadLocalSlot() == config.SpreadLocalAlways {
+			r.spreadLocalBusy = busyReading{note: "agent_spread_local_slot=always"}
+		} else {
+			r.spreadLocalBusy = r.probeLocalBusy(ctx)
+		}
+		// One line per run says which rule dealt the local slot and from what
+		// reading — the placement reasons only mention it when it fired.
+		log.Printf("delegate: spread local slot: mode=%s busy=%v inflight=%d (%s)", cfg.SpreadLocalSlot(), r.spreadLocalBusy.busy, r.spreadLocalBusy.inflight, r.spreadLocalBusy.note)
 		// The deal is computed HERE, once, over every subtask at once —
 		// dealSpread's comment carries the proof that a per-subtask pick cannot
 		// hold the one-per-seat-per-cycle invariant. It must run before the
@@ -712,6 +723,12 @@ type runner struct {
 	// the deal — the whole reason 0.113.14 exists. A media lease is not read by
 	// the spread deal (it never was; ADR 0026 arbitrates renders elsewhere).
 	spreadLease gpulease.Info
+	// spreadLocalBusy is the local seat's in-flight reading taken ONCE with the
+	// fleet snapshot (0.113.20): a seat that already holds a request leaves the
+	// rotation the way a leased one does (placeSpread). localBusyProbe is the
+	// seam tests drive it through; nil = the production probe (seatload).
+	spreadLocalBusy busyReading
+	localBusyProbe  func(ctx context.Context) busyReading
 
 	// quarantine is the caller's Quarantine (RunOptions), nil = inert.
 	quarantine  *Quarantine
@@ -1678,13 +1695,13 @@ type spreadSlot struct {
 // rotation order, so an all-equal roster deals exactly as it did before fit
 // scoring existed.
 //
-// The LOCAL rotation slot is never contested, and that is a deliberate bound on
-// this heuristic, not an oversight:
+// The LOCAL rotation slot is never contested by SHAPE, and that is a deliberate
+// bound on this heuristic, not an oversight:
 //
-//   - Subtask 0 lands local, whatever its shape — the documented guarantee that
-//     a spread's first subtask (and therefore a SINGLE-subtask spread, the
-//     riskiest case for any shape heuristic) stays on-box. One regex match must
-//     not be able to send an entire run off-box.
+//   - With the local seat idle, subtask 0 lands local whatever its shape — the
+//     documented guarantee that a spread's first subtask (and therefore a
+//     SINGLE-subtask spread, the riskiest case for any shape heuristic) stays
+//     on-box. One regex match must not be able to send an entire run off-box.
 //   - The same holds for every later local slot (i mod len == 0), because the
 //     fit score ranks seats by their ADVERTISED context ceiling and the local
 //     seat advertises none in a delegator run. Scoring it would mean inventing
@@ -1692,9 +1709,76 @@ type spreadSlot struct {
 //     exactly as before, which is also what stops an all-reasoning fan-out from
 //     collapsing back onto one seat.
 //
-// Widening the contest to the local slot is a small change once the local seat
-// advertises a ceiling of its own — it is not blocked, it is unearned.
+// It IS contested by LOAD (0.113.20, operator decision 2026-09-06): when the
+// local seat already holds a request at deal time (spreadLocalBusy, read once
+// with the fleet snapshot), every local slot goes to the best-fit eligible
+// remote with room instead — K delegating sessions used to stack K × 3 of every
+// 8 subtasks on one local seat while the remotes idled (first-local subtask
+// 155–189 s under K=3 vs 91–105 s for its siblings). An idle seat keeps every
+// slot it had; `agent_spread_local_slot: "always"` restores the unconditional
+// slot.
 func (r *runner) placeSpread(i int, st Subtask, localView NodeView, dealt map[string]bool) spreadSlot {
+	return r.placeSpreadWith(i, st, localView, dealt, r.skipsBusyLocal())
+}
+
+// busyReading is what the deal knows about the local seat's load at deal time
+// (0.113.20). note says how the reading was obtained, or why there is none.
+type busyReading struct {
+	busy     bool
+	inflight int
+	note     string
+}
+
+// localBusyProbeTimeout bounds the one-shot read of the local seat's load: two
+// loopback GETs (three with the roster). A slow or dead llama-swap deals as
+// idle — the pre-0.113.20 deal — and logs why.
+const localBusyProbeTimeout = 4 * time.Second
+
+var localBusyClient = &http.Client{Timeout: localBusyProbeTimeout}
+
+// probeLocalBusy reads the local agent seat's in-flight count through
+// llama-swap (seatload.Inflight). Any failure deals as idle: the busy rule is
+// an optimisation of the deal, never a gate, so "could not read" must fall
+// toward the behaviour every earlier version had.
+func (r *runner) probeLocalBusy(ctx context.Context) busyReading {
+	if r.localBusyProbe != nil {
+		return r.localBusyProbe(ctx)
+	}
+	endpoint, seat := strings.TrimSpace(r.cfg.Endpoint), strings.TrimSpace(r.cfg.AgentPlannerModel(""))
+	if endpoint == "" || seat == "" {
+		log.Printf("delegate: local seat busy probe skipped (endpoint %q, agent seat %q); dealing the local slot as idle", endpoint, seat)
+		return busyReading{note: "no local endpoint or agent seat configured"}
+	}
+	pctx, cancel := context.WithTimeout(ctx, localBusyProbeTimeout)
+	defer cancel()
+	rd, err := seatload.Inflight(pctx, localBusyClient, endpoint, seat)
+	if err != nil {
+		log.Printf("delegate: local seat busy probe of %s/%s failed; dealing the local slot as idle: %v", endpoint, seat, err)
+		return busyReading{note: "busy probe failed: " + err.Error()}
+	}
+	if !rd.Loaded {
+		if rd.Ambiguous {
+			// Degraded read: the roster could not resolve the seat and /running
+			// holds other entries. Idle is the SAFE reading for a deal (the
+			// worst case is the pre-0.113.20 stacking), but it must be visible.
+			log.Printf("delegate: local seat busy probe of %s/%s is ambiguous (roster unreadable: %v; /running lists %d other model(s)); dealing the local slot as idle", endpoint, seat, rd.RosterErr, rd.RunningOthers)
+			return busyReading{note: "ambiguous: roster unreadable"}
+		}
+		return busyReading{note: "local seat not loaded"}
+	}
+	return busyReading{busy: rd.Inflight > 0, inflight: rd.Inflight, note: rd.Source}
+}
+
+// skipsBusyLocal reports whether this run deals its local rotation slots away:
+// the seat read busy at deal time AND the config did not pin the slot local.
+func (r *runner) skipsBusyLocal() bool {
+	return r.spreadLocalBusy.busy && r.cfg.SpreadLocalSlot() != config.SpreadLocalAlways
+}
+
+// placeSpreadWith is placeSpread with the busy rule as an explicit argument, so
+// the no-remote-with-room fallback can re-deal WITHOUT it and the two paths
+// share one body.
+func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, dealt map[string]bool, skipBusy bool) spreadSlot {
 	// A TEXT reservation takes the local seat out of the rotation — a spread
 	// used to ignore the lease entirely, which is how three foreign contracts
 	// loaded a reserved seat mid-measurement (2026-09-05 08:04–08:09). A media
@@ -1703,14 +1787,38 @@ func (r *runner) placeSpread(i int, st Subtask, localView NodeView, dealt map[st
 	// a media holder changes nothing about a spread's deal (review 2026-09-06).
 	var nodes []NodeView
 	var bases []string
-	if !Reserved(r.spreadLease) {
+	localIn := !Reserved(r.spreadLease)
+	// A BUSY local seat (0.113.20) leaves the rotation exactly like a leased
+	// one, but only while a remote with room exists to take its slots: the
+	// remotes are filtered by hasRoom (a sheddable run needs an idle slot), and
+	// with none left the slot falls back to the ordinary deal below, reason
+	// attached — the busy rule is an optimisation, never a way to lose work.
+	skip := skipBusy && localIn
+	if localIn && !skip {
 		nodes, bases = []NodeView{localView}, []string{""}
 	}
+	eligible := 0
 	for j, v := range r.spreadViews {
-		if remoteEligible(st, v) {
-			nodes = append(nodes, v)
-			bases = append(bases, r.spreadBases[j])
+		if !remoteEligible(st, v) {
+			continue
 		}
+		eligible++
+		if skip && !hasRoom(v, r.priority < core.BandNormal) {
+			continue
+		}
+		nodes = append(nodes, v)
+		bases = append(bases, r.spreadBases[j])
+	}
+	if skip && len(nodes) == 0 {
+		// The reason must not send an operator chasing capacity when no remote
+		// could take this contract at all.
+		sl := r.placeSpreadWith(i, st, localView, dealt, false)
+		if eligible == 0 {
+			sl.reason += fmt.Sprintf(" (local seat busy: %d in flight; no eligible remote)", r.spreadLocalBusy.inflight)
+		} else {
+			sl.reason += fmt.Sprintf(" (local seat busy: %d in flight; no remote with room)", r.spreadLocalBusy.inflight)
+		}
+		return sl
 	}
 	if len(nodes) == 0 || (len(nodes) == 1 && nodes[0].Local) {
 		why, class := r.noEligibleRemote(st, r.spreadViews, r.spreadProbeErrs)
@@ -1740,8 +1848,11 @@ func (r *runner) placeSpread(i int, st Subtask, localView NodeView, dealt map[st
 	}
 	dealt[nodes[k].NodeID] = true
 	kind, rule := shapeOf(st)
-	return spreadSlot{placement{view: nodes[k], base: bases[k],
-		reason: fmt.Sprintf("route=spread → %s (slot %d of %d, fit=%s/%s)", nodes[k].NodeID, slot+1, len(nodes), kind, rule)}, false, false}
+	reason := fmt.Sprintf("route=spread → %s (slot %d of %d, fit=%s/%s)", nodes[k].NodeID, slot+1, len(nodes), kind, rule)
+	if skip {
+		reason += fmt.Sprintf("; local seat busy: %d in flight", r.spreadLocalBusy.inflight)
+	}
+	return spreadSlot{placement{view: nodes[k], base: bases[k], reason: reason}, false, false}
 }
 
 // fitPick returns the index of the best-scoring seat in nodes that is neither

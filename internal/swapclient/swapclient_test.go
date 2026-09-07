@@ -97,6 +97,33 @@ func TestRosterServesMatchesIdsAndAliases(t *testing.T) {
 	}
 }
 
+// TestRosterCanonicalResolvesAliasesToIds: /running names models by canonical
+// id only, so a reader holding the BOUND name (an alias) must be able to ask
+// which id to look for. Ids resolve to themselves; unserved names to ("", false).
+func TestRosterCanonicalResolvesAliasesToIds(t *testing.T) {
+	var path string
+	srv := rosterServer(t, &path)
+	r, err := FetchRoster(context.Background(), srv.URL, 5*time.Second)
+	if err != nil {
+		t.Fatalf("FetchRoster: %v", err)
+	}
+	cases := map[string]string{
+		"offload-e4b": "gemma-4-e4b", "OFFLOAD-E4B": "gemma-4-e4b", "gemma-4-e4b": "gemma-4-e4b",
+		"local-general": "gemma-4-26b", "plain-seat": "plain-seat",
+	}
+	for name, want := range cases {
+		got, ok := r.Canonical(name)
+		if !ok || got != want {
+			t.Errorf("Canonical(%q) = %q, %v; want %q, true", name, got, ok, want)
+		}
+	}
+	for _, name := range []string{"", "  ", "not-served-anywhere", "gemma-4"} {
+		if got, ok := r.Canonical(name); ok || got != "" {
+			t.Errorf("Canonical(%q) = %q, %v; want \"\", false", name, got, ok)
+		}
+	}
+}
+
 // TestRosterNamesDedupesCaseInsensitively: a model whose id and a sibling's
 // alias collide case-insensitively must appear once in Names() — the caller
 // publishes this list as served_models, and a duplicated entry would just be
