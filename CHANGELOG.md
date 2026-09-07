@@ -6,6 +6,19 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.21] — 2026-09-07 — the result cache falls back to a per-process file when the shared one is held
+
+**Fixed — every session but one ran cache-less.** The result cache (`cache_path`, bbolt) is single-writer with an exclusive
+file lock, and a workstation runs several `local-offload` processes at once (one MCP server per Claude session, the CLI, the
+fleet node): measured 2026-09-07, six processes, one holding `cache.db`, five reporting `result_cache: not opened (held by
+another process)` in `offload_status` — `agent_run`'s in-loop offloads re-ran the model on repeated identical input in
+five of six sessions, silently. `cache.OpenPreferred` now falls back to a per-process sibling (`cache.p<pid>.db` beside
+the configured file) when the lock times out, sweeps siblings older than 12 h on the way (pids are reused, so age is the
+rule, not liveness), and both the CLI and `local-agent` say which file they use. `offload_status.reuse.result_cache`
+reports `path` (the file actually opened), `configured`, and `fallback`. A non-lock failure (bad path, permissions) still
+surfaces as the error it is. Item 5 ("harness result cache") of the 2026-09-06 operator order; the correctness gate is the
+existing single-writer + round-trip tests plus the new fallback/sweep/non-lock tests.
+
 ## [0.113.20] — 2026-09-07 — spread skips the local rotation slot when the local seat is busy; the drain resolves an alias-bound seat
 
 **Changed — the local rotation slot is contested under load (`agent_spread_local_slot`, default `skip-when-busy`).** `route=spread`

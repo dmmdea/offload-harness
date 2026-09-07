@@ -503,11 +503,19 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// nowhere. If it failed to open at startup, every agent_run silently loses
 	// the in-loop cache and the only signal was one stderr line an MCP stdio
 	// client never sees.
-	if s.p.Cache() != nil {
+	if c := s.p.Cache(); c != nil {
+		note := "agent_run's in-loop offloads share this cache (nil ledger, shared cache)"
+		if c.Fallback() {
+			// 0.113.21: the configured file is held by another harness process;
+			// this server's hits live in its own per-process sibling.
+			note = "PER-PROCESS fallback: the configured cache is held by another local-offload process, so this server's agent_run hits live in the sibling file named here (not shared with other sessions)"
+		}
 		reuse["result_cache"] = map[string]any{
-			"available": true,
-			"path":      cfg.CachePath,
-			"note":      "agent_run's in-loop offloads share this cache (nil ledger, shared cache)",
+			"available":  true,
+			"path":       c.Path(),
+			"configured": cfg.CachePath,
+			"fallback":   c.Fallback(),
+			"note":       note,
 		}
 	} else {
 		reuse["result_cache"] = map[string]any{
