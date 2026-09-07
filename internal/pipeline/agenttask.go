@@ -899,7 +899,18 @@ func TraceFromEffects(effects []agent.EffectRecord) []core.AgentTraceStep {
 	}
 	out := make([]core.AgentTraceStep, 0, len(effects))
 	for _, e := range effects {
-		out = append(out, core.AgentTraceStep{Step: e.Step, Tool: e.Tool, Status: string(e.Status), ObsChars: e.ObsChars, Rule: e.Rule, Setup: e.Setup})
+		s := core.AgentTraceStep{Step: e.Step, Tool: e.Tool, Status: string(e.Status), ObsChars: e.ObsChars, Rule: e.Rule, Setup: e.Setup}
+		if e.Status != agent.EffectCommitted && e.Note != "" {
+			// the loop's Note is the (bounded) text the model saw for a
+			// non-committed call — clipped again here so the corpus row
+			// carries a line, never a page
+			n := strings.TrimSpace(strings.ReplaceAll(e.Note, "\n", " "))
+			if len(n) > core.AgentTraceNoteMax {
+				n = n[:core.AgentTraceNoteMax]
+			}
+			s.Note = n
+		}
+		out = append(out, s)
 	}
 	return out
 }

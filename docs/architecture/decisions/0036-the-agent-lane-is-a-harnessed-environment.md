@@ -91,6 +91,29 @@ reasons on record:
   grounded, 89 stopping at `list_dir` + `read_file`) re-run on the same seat with and without seeding.
   A step count of 1 is guaranteed by construction and proves only that the plumbing ran.
 
+### Amendment 2026-09-07 — E4, the rigger's first slice (0.113.26)
+
+The full rigger (observe → diagnose → write → validate, plus envharness's difficulty-zone and red-team objectives)
+was roasted before it was built and RESHAPED: the closed rule vocabulary has no lever for ~70 % of the day's
+failures (wall timeouts, seat errors), only 16 corpus rows carried a trace, the row kept a status but not the error
+text a `rewrite_error` rule would need, and the digest-8 gate cannot fail for axes it never exercises — a proposer
+on top of an unvalidated diagnosis would inherit every ambiguity. Decided:
+
+- **A classifier first, as a contract.** `internal/rig` puts every failed row on exactly one axis in a PUBLISHED
+  precedence order (`seat-infra → timeout → budget → abstention → schema-miss → anchor-miss → loop →
+  long-observation → tool-misuse → unclassified`), with a fixture of one row per boundary case pinning the order.
+  Weights are over the rows ELIGIBLE for an axis (trace axes: rows with a trace), never over all rows.
+- **Remedies are a lookup table, said so.** The rigger's value is the weight and the evidence list; the remedy per
+  axis is pre-authored, its value derivation stated in words, and "not a rule matter" is a first-class answer.
+  It proposes nothing on its own and applies nothing.
+- **The trace carries `note`** (≤ 160 bytes of what the model was told) on non-committed calls, so the corpus
+  accumulates the evidence the later proposer needs.
+- **Acceptance is agreement, not a tautology.** A fresh-context reader applied the rules as written to a
+  stratified 41-row sample of real rows: 41/41 agreement; the three coverage gaps that pass surfaced (placement
+  failures with no defer class, "output failed schema" under abstention, contains/regex anchor misses) became rules
+  and were re-labelled blind (41/41 again). A validated remedy remains a measured A/B on the seat (P2's
+  `setup_ab.py` is the model); P3b — proposer, validation gate, objectives — waits for a trace corpus in the hundreds.
+
 ## Consequences
 
 - A nil/zero table is byte-identical to the pre-key loop; every field is additive and `omitempty`, and a

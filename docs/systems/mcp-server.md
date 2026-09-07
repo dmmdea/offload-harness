@@ -70,7 +70,11 @@ paths, the step `trace` (per tool call: tool, status, `obs_chars`, `rule` — 0.
 with `rules_fired` and, when the box has an `agent_env_rules` table, its summary as `env_rules`;
 `setup_actions` (0.113.24, ADR 0036 P2: up to eight `{tool, args}` replayed before the first model
 turn through the same rules and dispatch, spending no step) is reported back as `setup_ran` with
-step-0 `trace` entries marked `setup: true` — the same field on every `agent_delegate` subtask;
+step-0 `trace` entries marked `setup: true` — the same field on every `agent_delegate` subtask; trace steps that did
+not commit carry `note` (≤ 160 bytes of what the model was told, 0.113.26). `agent_rig {seat, since?, node?, markdown?}`
+(0.113.26, ADR 0036 P3a) is the seat rigger's classifier over this box's delegation-log corpus: every failed row of the
+seat on one axis in a published precedence order, weights over eligible rows, evidence job ids, the pre-authored remedy or
+"not a rule matter" — reads files only, proposes nothing, applies nothing; an unknown seat defers naming the seats seen;
 and `judge: true` adds one end-of-run **advisory** same-seat completion (`judge_report`)
 grading the flagged effects for operator review — annotation only, it never gates anything.
 

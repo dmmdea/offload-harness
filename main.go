@@ -132,6 +132,8 @@ func main() {
 		err = runFleetUI(args)
 	case "fleet-smoke":
 		err = runFleetSmoke(args)
+	case "rig":
+		err = runRig(args)
 	case "top":
 		err = runTop(args)
 	case "ledger":
@@ -269,6 +271,7 @@ Usage:
   local-offload fleet-ui [--listen 127.0.0.1:18813] [--listen-trusted-network] [--interval 5s] [--remote URL]...   live overview page: node cards (GPU/VRAM/CPU/RAM graphs, seat, served models), cluster jobs + errors feed (docs/systems/fleet-overview.md)
   local-offload fleet-smoke [--remote URL]... [--timeout 120] [--json]   send one grounded one-step contract to EVERY node and print where each landed (node, seat, placement, wall, verdict); non-zero unless all PASS
   local-offload top [--ui http://127.0.0.1:18813] [--interval 5s]   terminal view of the fleet overview (for headless boxes; reads a running fleet-ui)
+  local-offload rig --seat <alias> [--since 7d] [--node ID] [--out report.json] [--json]   the seat rigger (ADR 0036 P3a): classify this box's delegation-log failures for a seat onto ONE axis each (published precedence), weights over eligible rows, evidence job ids, the pre-authored remedy per axis — proposes and applies nothing
   local-offload ledger [--since DAYS]    token-savings report
   local-offload doctor                   check endpoint health + config
   local-offload report [--out FILE]      READ-ONLY capability report for this machine (tier, serving, media routes) — Markdown, safe to send
