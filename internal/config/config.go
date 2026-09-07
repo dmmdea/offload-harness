@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 )
@@ -175,6 +176,14 @@ type Config struct {
 	// door returns a per-call defer naming the valid profiles, because a long-lived
 	// server must not die on a config it can report instead.
 	AgentProfile string `json:"agent_profile,omitempty"`
+	// AgentEnvRules is this seat's environment-rule table (ADR 0036): the closed
+	// vocabulary of interceptors the agent loop runs every tool call through —
+	// deny/allow tools, per-tool call caps, numeric argument caps, an
+	// observation size cap, strip patterns, error rewrites. nil = no hooks, the
+	// pre-key loop byte-for-byte. Per box because it is a property of the SEAT
+	// (what a 4B needs is not what a 27B needs); the rigger proposes edits to
+	// it, an operator applies them. Validated at every door that builds a loop.
+	AgentEnvRules *core.AgentEnvRules `json:"agent_env_rules,omitempty"`
 	// KVCacheServer is the OPTIONAL "cache server" tier: a second machine's RAM behind
 	// LMCache MP for a vLLM seat (see kvcacheserver.go). nil/disabled = no tier, the
 	// pre-key behavior; nothing in the install depends on it.

@@ -109,7 +109,45 @@ to one whose writes all landed. The model-visible bytes are unchanged (the senti
 to ordinary tool-result content). `agent_run` surfaces the counts plus every non-committed record
 (`effects`, `effects_flagged`) on success AND deferred paths, and the standalone CLI prints the
 flagged records. PARTIAL and ROLLED_BACK are deliberately absent: the loop has no rollback
-machinery, so claiming them would be decoration.
+machinery, so claiming them would be decoration. Since 0.113.22 each record also carries
+`obs_chars` (the size of the result the model actually read, after every rule and cap) and `rule`
+(the environment rule that decided the call, if any) — the per-step facts the trace below is built
+from.
+
+**Environment rules (`agent_env_rules`, ADR 0036).** The loop is an *environment* in
+envharness's sense — a frozen policy (the seat) acting through tools — and every tool call passes
+three interceptors in envharness's order, driven by a CLOSED, validated vocabulary in config
+(`core.AgentEnvRules`, `envrules.go`), a property of the SEAT rather than of the task:
+
+| key | hook | effect |
+|---|---|---|
+| `deny_tools` / `allow_tools` | filter_action (static) | withheld from the offered specs — structural, like a profile; never grants a tool the flags/profile did not enable |
+| `max_calls_per_tool` | filter_action | the N+1th EXECUTION of a named tool is blocked with a reason the model reads (`NOT executed: … limit`); a breaker refusal spends nothing |
+| `arg_limits` | filter_action | numeric arguments above a per-tool cap are rewritten to the cap; the call still runs; non-numeric/absent arguments untouched |
+| `rewrite_error` | modify_transition | an `is_error` result matching a regexp becomes the operator's short line (first match wins); successes are never rewritten |
+| `observation_strip` | filter_observation | regexps removed from every result (banners, cookie notices, progress bars) |
+| `max_observation_tokens` | filter_observation | one result bounded to tokens×4 chars, head+tail with the elision marker, BEFORE the loop-boundary cap |
+
+`filter_action` runs before the loop's own circuit breakers, so a blocked call spends no counter
+and a rewritten argument is what the breakers and the tool both see; the two observation hooks
+run before `contextbudget.Trim`. Per-run counters live in per-run state (`--serve` shares one
+`Loop`). Every hit is recorded (`Result.RuleHits`, `EffectRecord.Rule`) and reported (`rules_fired`,
+`env_rules` on `agent_run`; the build note `agent env rules: …` names the table and the withheld
+tools). A table that does not validate — bad regexp, negative cap, empty name, unknown key on the
+CLI file — fails the BUILD by name at every door (`local-agent` exit 2, `agent_run` defer, fleet
+`config`-class defer); a nil/zero table is byte-identical to the pre-key loop. `local-agent
+--env-rules <file>` replaces the config table for one run (the rigger's scratch validation; `off`
+= none); `examples/agent-env-rules.json` is the starter. These are NOT the structural risk rules
+(`--rules`): a risk rule decides what an effectful action may DO to the world; an env rule shapes
+how a weak seat behaves inside the loop and can neither grant nor deny an effect. envharness's
+LLM-written rule code (`rules_code`) is deliberately not ported — rules are data here.
+
+**The step trace.** Every agent wire result and `agent_run` response carries `trace`: per tool
+call the tool, its effect status, `obs_chars` and `rule` — no transcript bytes — plus
+`rules_fired`. It is set before the defer branches (the budget/timeout runs are the ones a
+diagnosis needs most) and it is what the delegation-log corpus lacked: measured 2026-09-07, 51
+of 58 failed 4B rows stop at exactly two steps with empty schema fields, and the corpus could not
+say what those steps did.
 
 **Unattended risk parking.** Each effectful tool (the write/edit/delete trio, `web_fetch`, `run`,
 `run_shell`, the `github_*` trio) advertises a `security_risk` self-annotation (low/medium/high) in
@@ -497,6 +535,9 @@ MCP. Capability defaults are an interface, not an implementation detail.
 4. The audit trail lives outside the worktree, enforced at build time.
 5. An action that cannot be audited does not happen.
 6. `--serve` refuses a non-loopback bind without `--listen-trusted-network`.
+6a. Environment rules can only NARROW (deny/allow never add a tool; caps only lower) and never
+   touch an EFFECT decision; a table that does not validate fails the build by name; a nil table
+   changes nothing. Per-run rule state never crosses runs of a shared `Loop`.
 7. **Every `Chat` call takes the Model Affinity Gate** (`internal/modelaffinity`) before it POSTs.
    The agent seat shares one llama-swap endpoint with every cascade text seat in the default config,
    and this path does NOT go through `internal/llamaclient` — so a gate installed only on the
@@ -534,7 +575,9 @@ Read the audit trail first — it records what was allowed, denied, and why, inc
 rule fired at what severity. The effect ledger (`effects` / `effects_flagged` on `agent_run`, the
 flagged-effects print on the CLI) answers "did anything end in `unknown` or get parked?".
 `StopReason` distinguishes budget exhaustion from completion. Throttle refusals appear in the
-transcript as "NOT executed" messages.
+transcript as "NOT executed" messages. The step `trace` (`rules_fired`, `env_rules`) on every
+agent result says per call which tool ran, what became of it, how much the model read, and which
+environment rule decided — read it before the transcript.
 
 The build itself warns once, before the loop starts, when an unattended run holds destructive
 capability with the rule table explicitly disabled (`--rules off`): `[local-agent] UNGATED: …` on
@@ -576,7 +619,10 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 - [`examples/agent-rules.json`](../../examples/agent-rules.json) — the shipped starter table for
   operator-authored rules
 - [`internal/agent/effects.go`](../../internal/agent/effects.go) — effect statuses, `NotPerformed`,
-  the `security_risk` park logic
+  the `security_risk` park logic, `obs_chars` / `rule` per record
+- [`internal/agent/envrules.go`](../../internal/agent/envrules.go) — the environment-rule
+  interceptors (ADR 0036); [`internal/core/agentenvrules.go`](../../internal/core/agentenvrules.go)
+  — the vocabulary, `Validate`, the trace step; [`examples/agent-env-rules.json`](../../examples/agent-env-rules.json)
 - [`internal/agent/batchjudge.go`](../../internal/agent/batchjudge.go) — the advisory end-of-run
   judge
 - [`internal/agent/runtool.go`](../../internal/agent/runtool.go) — allowlist, direct exec
@@ -596,6 +642,7 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 ## Related docs
 
 - [../architecture/decisions/0003-policy-broker-and-capability-flags-off-by-default.md](../architecture/decisions/0003-policy-broker-and-capability-flags-off-by-default.md)
+- [../architecture/decisions/0036-the-agent-lane-is-a-harnessed-environment.md](../architecture/decisions/0036-the-agent-lane-is-a-harnessed-environment.md)
 - [../architecture/decisions/0004-worktree-confinement-audit-outside.md](../architecture/decisions/0004-worktree-confinement-audit-outside.md)
 - [../architecture/decisions/0005-loopback-only-serve.md](../architecture/decisions/0005-loopback-only-serve.md)
 - [../architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md](../architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md)
