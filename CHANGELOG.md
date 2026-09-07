@@ -6,6 +6,17 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.19] — 2026-09-06 — `gpu reserve --drain` reads `/slots` on a llama.cpp seat that runs without `--metrics`
+
+**Fixed.** Every llama.cpp seat on this fleet is launched without `--metrics`, so the seat's `/metrics` answers `501` and the
+drain — fail-closed by design, "could not read" is never "idle" — polled until `--drain-timeout` and gave up on a WARM seat
+(the Lenovo, 2026-09-06 20:09, first window of the L7 script migration; the 20:09:02 window had passed only because the seat
+was cold). On `501` (older builds `404`) the drain now reads llama-server's `GET /slots` through llama-swap and counts the
+slots that are `is_processing`; two consecutive idle reads are still required, which also covers llama-server's deferred
+queue (a queued request is not in `/slots` — it becomes a processing slot the instant one frees). Any other non-200 from
+`/metrics` (a `500`, a timeout) is still an error and never falls back. Tests: the fallback drains once the slot goes idle,
+a `500` does not fall back, the `/slots` parser counts processing slots and rejects a non-array body.
+
 ## [0.113.18] — 2026-09-06 — work flows without gaps: the delegator waits for capacity, and nodes schedule by band and tenant
 
 **Added — the capacity wait (`agent_placement_wait_sec`, default 120 s; negative = off).** A delegation subtask that every
