@@ -148,10 +148,18 @@ type PlacedResult struct {
 	CapacityWaitSec float64
 	waited          bool
 	shed            bool
-	// unplaced marks a result NO node ran (a capacity defer or a shed): it
-	// carries Replacements for the refusals it collected, but must never be
-	// tallied as a replacement that RECOVERED — nothing took the work.
-	unplaced bool
+	// Unplaced marks a result NO node ran (a capacity defer, a shed, or a
+	// route=remote with nothing eligible): it carries Replacements for the
+	// refusals it collected, but must never be tallied as a replacement that
+	// RECOVERED — nothing took the work.
+	//
+	// EXPORTED because a SURFACE has to tell "the node answered and deferred"
+	// from "the node was never exercised": both carry Deferred, but only the
+	// first one's Node and Seat describe the box under test. The second stamps
+	// the DECIDING (local) box, and fleet-smoke rendering that as the node under
+	// test made a dead remote read as a failure of the operator's own machine
+	// (issue #250).
+	Unplaced bool
 	// waitCapacity is attempt()'s SENTINEL: the placement it computed can only
 	// run on a seat a text lease reserves, so nothing was dispatched, nothing was
 	// recorded, and placeAndRun must run the capacity wait (awaitCapacity) with
@@ -593,9 +601,9 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 			// "Recovered" is stated on the REFUSAL, not on the answer: Err == ""
 			// means some node took the work and reported on it. Whether that
 			// report was good is what the four buckets below are for. A capacity
-			// defer or a shed (unplaced) is the one Err == "" result no node
+			// defer or a shed (Unplaced) is the one Err == "" result no node
 			// ever ran, and it is not a recovery.
-			if pr.Err == "" && !pr.unplaced {
+			if pr.Err == "" && !pr.Unplaced {
 				sum.ReplacementRecovered++
 			}
 		}
@@ -1237,7 +1245,7 @@ func (r *runner) capacityDefer(local NodeView, seed PlacedResult, idle, wait tim
 		wait, idle.Round(time.Second), r.cfg.AgentPlacementWaitSec, len(refusals), strings.Join(refusals, "; "))
 	return PlacedResult{
 		Node: local.NodeID, Seat: local.AgentSeat, JobID: seed.JobID,
-		PlacementReason: reason, waited: true, unplaced: true, CapacityWaitSec: idle.Seconds(),
+		PlacementReason: reason, waited: true, Unplaced: true, CapacityWaitSec: idle.Seconds(),
 		Replacements: len(refusals),
 		Result: core.AgentWireResult{
 			SchemaVersion: core.AgentWireSchemaVersion,
@@ -1255,7 +1263,7 @@ func (r *runner) shedResult(local NodeView, seed PlacedResult, refusals []string
 		r.priority, len(refusals), strings.Join(refusals, "; "))
 	return PlacedResult{
 		Node: local.NodeID, Seat: local.AgentSeat, JobID: seed.JobID,
-		PlacementReason: reason, shed: true, unplaced: true, Replacements: len(refusals),
+		PlacementReason: reason, shed: true, Unplaced: true, Replacements: len(refusals),
 		Result: core.AgentWireResult{
 			SchemaVersion: core.AgentWireSchemaVersion,
 			Deferred:      true,
@@ -1976,6 +1984,15 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			why, class := r.noEligibleRemote(st, views, probeErrs)
 			return finish(PlacedResult{
 				Node: localView.NodeID, Seat: localView.AgentSeat,
+				// NO node ran this: the route was forced remote and nothing was
+				// eligible, so this is the same "nobody took the work" state a
+				// capacity defer or a shed reports. Node/Seat above are the
+				// DECIDING box, not the box that ran it — a surface that renders
+				// them as the node under test names the operator's own machine
+				// and hides which base failed (issue #250), so it needs this flag
+				// to tell the two apart. Inert for the tallies: the one branch
+				// that reads Unplaced also requires Replacements > 0.
+				Unplaced:        true,
 				PlacementReason: "route=remote: no eligible remote",
 				Result: core.AgentWireResult{
 					SchemaVersion: core.AgentWireSchemaVersion,

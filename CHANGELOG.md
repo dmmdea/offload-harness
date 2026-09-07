@@ -6,6 +6,38 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.28] — 2026-09-07 — three filed defects resolved, and a suite that stops measuring the runner
+
+Housekeeping release: no behaviour change an operator asked for, four defects that were FILED rather than fixed now fixed, each with a
+mutation-red guard. Three were open issues; the fourth surfaced in this release's own gate pass and belongs to the same class as one of them.
+
+**Fixed — the delegate suite read the MACHINE's GPU lease (#249).** `run.go` consults `LocalLease(cfg.GPULockPath, cfg.StateDir)` on the
+placement path, and `gpulease.LeaseDir` falls back to the real machine-wide root when both are empty. `testCfg` left both empty, so
+`TestRunSpread*` and `TestRunRetries*` read whatever lease the box happened to hold and went red whenever another session had reserved the
+cards — a suite whose verdict depended on what else was running on the desk. `testCfg` now pins `StateDir` and `GPULockPath` under the
+test's own temp home. `GPULockPath` specifically, because it is the highest-precedence input and therefore also beats a `GPU_LOCK` set in the
+environment, which `StateDir` alone would not. Two guards pin both halves.
+
+**Fixed — fleet-smoke named the LOCAL box as the node under test (#250).** A forced remote route that finds nothing eligible returns a DEFER
+carrying the local node and seat — the box that made the decision, not one that ran anything — so the row read `Qube / agent-pool / DEFER`
+and the base that was actually unreachable went unnamed. (The issue was filed as "the dispatcher's own local row always DEFERs"; there is in
+fact no separate local row, it is the remote's row coming back local.) The verdict and the non-zero exit were always correct — an unexercised
+node is real fleet signal — so only the label changed: `PlacedResult.Unplaced` is now exported and set on that path, and fleet-smoke drops
+the local node/seat for such a row so the table renders the BASE, with a detail that says the node was not exercised and why. The row
+classification moved into `smokeRowFor`, testable without a fleet, for the same reason `exitError` was extracted. A node that ANSWERED and
+deferred keeps its identity — pinned by its own test, so the fix cannot degrade into "blank the node whenever things look odd".
+
+**Fixed — a capacity-wait assertion measured the runner (#248).** `TestRunCapacityWaitTimesOutAsACapacityDefer` asserted
+`capacity_wait_sec >= 0.7` of a configured 1 s wait. Attempts are real HTTP round-trips whose cost scales with runner load, so a loaded runner
+ate the idle budget and the test reported 0.50 and went green on the re-run. The bar is now a share of the MEASURED wait rather than of the
+configured second. It still catches the regression it exists for: an implementation that CHARGED the wait instead of crediting it reports ~0.
+
+**Fixed — `TestHistoryIsBounded` had the same disease, and never tested boundedness.** It slept 200 ms at a 5 ms interval and asserted
+`len == 3` exactly, which asserted both that the ring is capped and that a loaded runner completed three polls in a fixed window; only the
+first is about the poller, and it flaked under the CPU contention of a full `go test ./...`. Worse, a single sample taken while the ring was
+still filling passes without the cap ever being exercised. It now waits for the ring to fill (deadline-bounded), then keeps polling well past
+the cap and re-checks — which is the actual property.
+
 ## [0.113.27] — 2026-09-07 — the fleet can see a busy card: nine scheduling defects found by audit and fixed
 
 The operator's question — "queueing, scheduling and multi-node exist, so why would a long GPU job collide with anything?" — was right, and a
