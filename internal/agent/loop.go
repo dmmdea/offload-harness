@@ -238,7 +238,7 @@ type Loop struct {
 	// Serve is nil, and its whole purpose is to be present on ordinary runs so
 	// the decision it informs is made from real traffic rather than a special
 	// measurement mode nobody remembers to switch on.
-	prefill   PrefillStats
+	prefill PrefillStats
 	// envRules are the environment-rule interceptors (envrules.go, ADR 0036):
 	// nil = the pre-key loop, byte-for-byte. Installed by WithEnvRules.
 	envRules  EnvRules
@@ -946,30 +946,45 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			var isErr bool
 			var eff EffectStatus
 			var blocked *EnvBlocked
+			var argNotes []string
 			if l.envRules != nil {
 				var hits []EnvRuleHit
 				act, blocked, hits = l.envRules.FilterAction(ruleState, act)
 				ruleHits = append(ruleHits, hits...)
-				if len(hits) > 0 {
-					firedRule = hits[len(hits)-1].Rule
+				for _, h := range hits {
+					firedRule = h.Rule
+					if h.Effect == "rewrote_args" {
+						argNotes = append(argNotes, h.Note)
+					}
 				}
 				call.Args = act.Args
 			}
 			if blocked != nil {
 				content, isErr, eff = blocked.Reason, true, EffectNone
+				if blocked.Withhold {
+					// Structural: the spec is withheld from every later Chat,
+					// exactly like the same-name breaker (disabledTools).
+					disabledTools[call.Name] = true
+				}
 			} else {
 				content, isErr, eff = l.dispatchOrThrottle(ctx, call, msgs, exactCalls, sameNameCalls, disabledTools, firstCallID, pinned, reExecuted)
 				if eff != EffectNone {
 					ruleState.Executed(call.Name)
 				}
 			}
-			if l.envRules != nil {
-				// modify_transition → filter_observation, in envharness's order:
-				// an error is rewritten first, then whatever the model will read
-				// is stripped and bounded.
+			if l.envRules != nil && eff != EffectNone {
+				// modify_transition → filter_observation, in envharness's order,
+				// on TOOL OUTPUT ONLY (committed / failed / unknown). A loop-
+				// authored text — a rule's own block reason, a breaker refusal,
+				// "unknown tool" — is never rewritten or stripped: those lines
+				// are the loop talking to the model, and a rewrite_error pattern
+				// meant for a tool's "no such file" must not replace "do NOT
+				// repeat this call" (review finding 2026-09-07).
 				obs := EnvObservation{Content: content, IsError: isErr}
 				var h1, h2 []EnvRuleHit
-				obs, h1 = l.envRules.ModifyTransition(act, obs)
+				if eff == EffectFailed {
+					obs, h1 = l.envRules.ModifyTransition(act, obs)
+				}
 				obs, h2 = l.envRules.FilterObservation(act, obs)
 				ruleHits = append(ruleHits, h1...)
 				ruleHits = append(ruleHits, h2...)
@@ -977,6 +992,13 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 					firedRule = h.Rule
 				}
 				content, isErr = obs.Content, obs.IsError
+			}
+			if len(argNotes) > 0 {
+				// A clamp the model cannot see is a lie in its transcript: it
+				// asked for limit 9000 and got 400 bytes back with no reason,
+				// and a later, smaller ask keys as an exact repeat of the
+				// clamped call. Say what was capped, once, on the result.
+				content += "\n\n[note: the seat's env rules adjusted this call's arguments: " + strings.Join(argNotes, "; ") + "]"
 			}
 			// Cap ONE result at the loop boundary so no single tool output can blow
 			// the small window — the per-tool caps don't protect us here (read_file's

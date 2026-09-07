@@ -6,15 +6,36 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.23] — 2026-09-07 — the `agent_env_rules` review fixes that 0.113.22 was meant to carry
+
+**Fixed — 0.113.22 shipped the PRE-review draft of `agent_env_rules`.** The commit that became 0.113.22 was cut from a stale
+index (the `git add` in the ship command never ran; the staged first draft was committed, tested by CI, merged and deployed
+to two nodes), while the eight fresh-context review fixes sat unstaged in the worktree — where the mutation guards had been
+measured. This release is that reviewed code, byte-for-byte the state the guards were red on: (1) a capped tool is withheld
+STRUCTURALLY after the N+1th execution (removed from the offered specs via the loop's disabled set, not just refused);
+(2) an `arg_limits` clamp is surfaced in the observation the model reads, so the model knows the number it asked for was
+not the number that ran; (3) `arg_limits` caps are integral (a fractional cap is a validation error, not a silent
+truncation); (4) `max_observation_tokens` has a 64-token floor (below it the elision marker would be most of the
+observation); (5) the observation hooks — strip, cap, `rewrite_error` — touch TOOL OUTPUT only: a breaker refusal, a block
+reason or an `unknown tool` line is never rewritten; (6) rule names with leading/trailing whitespace are rejected at
+`Validate` instead of silently never matching; (7) every `Validate` failure wraps `core.ErrAgentEnvRules`, so the three doors
+classify a bad table by identity, not by string; (8) `examples/agent-env-rules.json` round-trips through the strict decoder
+(an unknown key in the starter file was a deploy-time exit 2). Plus a nil-interface compile fix on the MCP door. Nodes on
+0.113.22 with no `agent_env_rules` table behave identically to 0.113.21 (the table is off by default); the difference is
+only what a configured table does. The ship command now proves the staging before the commit (`git diff --cached --stat`)
+and the emptiness of the worktree after it (`git diff HEAD --stat`).
+
 ## [0.113.22] — 2026-09-07 — environment rules on the agent loop (`agent_env_rules`) and a per-step trace in every agent result
 
 **Added — `agent_env_rules` (ADR 0036).** The coding-agent loop runs every tool call through three interceptors in
 envharness's order — filter_action → modify_transition → filter_observation — driven by a CLOSED, validated vocabulary
 in config, a property of the seat: `deny_tools` / `allow_tools` (withheld structurally, like a profile), `max_calls_per_tool`
-(the N+1th EXECUTION is blocked with a reason the model reads; a breaker refusal spends nothing), `arg_limits` (numeric
-arguments clamped per tool, the call still runs), `max_observation_tokens` (head+tail with the elision marker, before the
-loop-boundary cap), `observation_strip` (regexps removed from every result), `rewrite_error` (an errored result matching a
-pattern becomes a short line the model can act on). A bad table fails by name at every door — `local-agent` exit 2, MCP
+(the N+1th EXECUTION is blocked with a reason the model reads and the tool is withheld from the offered specs for the rest
+of the run; a breaker refusal spends no execution), `arg_limits` (whole-number caps on numeric arguments per tool, the call
+still runs and the result names the clamp), `max_observation_tokens` (≥ 64; head+tail with the elision marker, before the
+loop-boundary cap), `observation_strip` (regexps removed from every tool result), `rewrite_error` (the result of a tool that
+ran and errored, matching a pattern, becomes a short line the model can act on). The observation hooks touch tool output
+only — a breaker refusal, a block reason or an `unknown tool` line is never rewritten. A bad table fails by name at every door — `local-agent` exit 2, MCP
 `agent_run` defer, fleet `config`-class defer — never a silent no-op; a nil/zero table is byte-identical to the previous
 loop. `local-agent --env-rules <file>` replaces the table for one run (`off` = none); `examples/agent-env-rules.json` is
 the starter. This is the P1 slice of the 2026-09-07 envharness/axolotl integration order; envharness's LLM-written rule

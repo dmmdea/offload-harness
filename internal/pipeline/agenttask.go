@@ -217,7 +217,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		EnvRules:    p.cfg.AgentEnvRules,
 	})
 	if berr != nil {
-		if !p.cfg.AgentEnvRules.IsZero() && strings.Contains(berr.Error(), "agent_env_rules") {
+		if errors.Is(berr, core.ErrAgentEnvRules) {
 			// The table is this box's config; nothing about the contract or the
 			// seat can fix it — say so by class.
 			return deferWire(core.DeferClassConfig, "building agent: "+berr.Error())
@@ -873,4 +873,3 @@ func TraceFromEffects(effects []agent.EffectRecord) []core.AgentTraceStep {
 	}
 	return out
 }
-
