@@ -196,10 +196,47 @@ else
 fi
 EXTRA=()
 [ -n "${SEAT_EXTRA_ARGS:-}" ] && read -r -a EXTRA <<< "$SEAT_EXTRA_ARGS"   # e.g. MTP on a tp2 seat
+# KV pool PINNED FROM FREE MEMORY (item 3 "card-0 headroom", 2026-09-07). Off unless SEAT_KV_HEADROOM_GIB is set.
+# --gpu-memory-utilization budgets a FRACTION OF THE CARD whatever the co-residents hold, and the profiler lands the same
+# config at 183k or 191k tokens on different starts (c32 301 vs 230 t/s — a per-start coin flip); worse, the utility seats
+# that share card 0 grow 0.7–1.3 GB by day, so a 0.90 start that fit at launch stalled the engine at noon (nvlddmkm 153,
+# 2026-09-06). With the knob set the pool is computed here, deterministically, from what is ACTUALLY free on the tighter
+# seat card at launch: free − SEAT_NONKV_GIB (the engine's own weights + non-torch + peak activation per worker, read
+# from the profiler's banner: "Actual usage is X GiB … Y GiB for peak activation" → X+Y) − SEAT_KV_HEADROOM_GIB (what
+# must STAY free for the co-residents' growth), floored at SEAT_KV_FLOOR_GIB (a smaller pool is still a seat) and capped
+# at SEAT_KV_CAP_GIB (never more than a profiled start could have taken), passed as --kv-cache-memory-bytes (per worker;
+# vLLM then ignores gpu-memory-utilization). The banner line names every input so a stall can be read back to its cause.
+KVPIN=()
+# nvidia-smi is resolved HERE, not trusted from PATH: the launcher exports a minimal PATH above, and under WSL the binary lives
+# in /usr/lib/wsl/lib — the first pinned start skipped this whole block in silence because `command -v` came back empty.
+NVSMI="$(command -v nvidia-smi 2>/dev/null)"; [ -z "$NVSMI" ] && [ -x /usr/lib/wsl/lib/nvidia-smi ] && NVSMI=/usr/lib/wsl/lib/nvidia-smi
+if [ -n "${SEAT_KV_HEADROOM_GIB:-}" ] && [ -z "$NVSMI" ]; then
+  echo "seat_fg: WARNING — SEAT_KV_HEADROOM_GIB=${SEAT_KV_HEADROOM_GIB} is set but nvidia-smi was not found (PATH=$PATH, no /usr/lib/wsl/lib/nvidia-smi); falling back to --gpu-memory-utilization ${SEAT_UTIL:-0.88} — the pool is NOT pinned"
+fi
+if [ -n "${SEAT_KV_HEADROOM_GIB:-}" ] && [ -n "$NVSMI" ]; then
+  nonkv="${SEAT_NONKV_GIB:-11.19}"; kvfloor="${SEAT_KV_FLOOR_GIB:-2.0}"; kvcap="${SEAT_KV_CAP_GIB:-3.4}"
+  minfree=""
+  for d in ${DEVS//,/ }; do
+    used="$(CUDA_DEVICE_ORDER=PCI_BUS_ID "$NVSMI" --query-gpu=memory.used --format=csv,noheader,nounits -i "$d" 2>/dev/null | head -1 | tr -d ' ')"
+    total="$(CUDA_DEVICE_ORDER=PCI_BUS_ID "$NVSMI" --query-gpu=memory.total --format=csv,noheader,nounits -i "$d" 2>/dev/null | head -1 | tr -d ' ')"
+    if [ -n "$used" ] && [ -n "$total" ]; then
+      free=$(( total - used ))
+      if [ -z "$minfree" ] || [ "$free" -lt "$minfree" ]; then minfree=$free; fi
+    fi
+  done
+  if [ -n "$minfree" ]; then
+    pool_gib="$(awk -v f="$minfree" -v n="$nonkv" -v h="$SEAT_KV_HEADROOM_GIB" -v fl="$kvfloor" -v c="$kvcap" 'BEGIN{p=f/1024-n-h; if(p<fl)p=fl; if(p>c)p=c; printf "%.3f", p}')"
+    pool_bytes="$(awk -v p="$pool_gib" 'BEGIN{printf "%d", p*1073741824}')"
+    KVPIN=(--kv-cache-memory-bytes "$pool_bytes")
+    echo "seat_fg: KV pool PINNED at ${pool_gib} GiB/worker = min free ${minfree} MiB on devices ${DEVS} − non-KV ${nonkv} GiB − headroom ${SEAT_KV_HEADROOM_GIB} GiB (floor ${kvfloor}, cap ${kvcap}) → --kv-cache-memory-bytes ${pool_bytes}; --gpu-memory-utilization ${SEAT_UTIL:-0.88} is ignored by vLLM while the pin is set"
+  else
+    echo "seat_fg: WARNING — SEAT_KV_HEADROOM_GIB set but $NVSMI answered nothing for devices ${DEVS}; falling back to --gpu-memory-utilization ${SEAT_UTIL:-0.88} — the pool is NOT pinned"
+  fi
+fi
 exec "$VENV/bin/vllm" serve "$MODEL" \
   --host 127.0.0.1 --port "$PORT" --served-model-name "$NAME" "${SEAT_ALIAS:-agent-pool}" \
   --max-model-len "${SEAT_MAX_LEN:-131072}" "${PAR[@]}" --gpu-memory-utilization "${SEAT_UTIL:-0.88}" \
   --max-num-seqs "${SEAT_SEQS:-32}" \
-  --mamba-cache-mode align --enable-prefix-caching --max-num-batched-tokens "${SEAT_BATCHED:-1567}" \
+  --mamba-cache-mode align --enable-prefix-caching --max-num-batched-tokens "${SEAT_BATCHED:-1567}" "${KVPIN[@]}" \
   --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.server_urls\":\"127.0.0.1:$MP_PORT\"}}" \
   "${EXTRA[@]}"
