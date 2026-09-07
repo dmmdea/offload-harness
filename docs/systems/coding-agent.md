@@ -154,6 +154,37 @@ diagnosis needs most) and it is what the delegation-log corpus lacked: measured 
 of 58 failed 4B rows stop at exactly two steps with empty schema fields, and the corpus could not
 say what those steps did.
 
+**Setup replay (`setup_actions`, ADR 0036 P2, 0.113.24).** A contract may carry up to eight
+`{tool, args}` actions the loop REPLAYS before the model's first turn (`setup.go`,
+`core.AgentSetupAction`); `local-agent --setup <file>` is the CLI form and a node with
+`agent_seed_context_reads: true` prepends one `read_file` per context doc itself (the node knows the
+file names it just materialized; a delegator would be guessing); the seeded reads and the contract's
+own actions are ONE list per run, clamped to eight — seeded reads first, the contract's tail cut, the
+trace showing exactly what replayed. envharness's Setup component
+replays a fixed action list on reset without charging the episode budget; here the replay is
+charged to the wall and never to `max_steps`. Why: with the trace in place the corpus said what the
+two steps were — 117 failed or deferred 4B rows in six days, every one grounded on context docs,
+89 of them `list_dir` then `read_file` — the two calls it takes to find the document the node
+wrote into the read root. The replay lands in the transcript in the shape the seat produces on its
+own: one assistant turn carrying the tool calls, then one tool result per call — NOT a user
+message holding the document text, because to a small seat a user turn is a question (the
+2026-09-03 few-shot leak), while a tool result is data it asked for. The accounting, stated once:
+`filter_action` applies (deny/allow withhold, `arg_limits` clamp; a `max_calls_per_tool` cap sees
+the per-run counter, which the replay never spends — the model's own budget under that cap stays
+whole); the circuit breakers are neither consulted nor fed (the model never issued these calls, so
+its later identical call is a first call, not a repeat); the observation hooks and the
+loop-boundary cap apply as on any call; the results are PINNED for compaction (the lossy rungs keep
+them) but sit OUTSIDE the protected preamble, and the whole replay is bounded to half the
+compaction budget — past it the remaining actions are recorded not-run (`none`, note `setup
+budget …`) and the model reads for itself, exactly the pre-key behaviour. A failing action (unknown
+tool, tool error) is its error observation, never an abort. Every action is a Step-0
+`EffectRecord` with `Setup: true`; the wire result and `agent_run` report `setup_ran` (executed =
+committed or failed) and the trace's step-0 entries carry `setup: true`. A node one release behind
+ignores the field (the contract decoder keeps unknown fields for exactly this mixed-fleet case) and
+reports no `setup_ran` — read it before crediting a replay. The DESIGN's acceptance is measured,
+not assumed: the corpus's failed 4B contracts re-run on the same seat with and without seeding,
+pass rate first, step count second.
+
 **Unattended risk parking.** Each effectful tool (the write/edit/delete trio, `web_fetch`, `run`,
 `run_shell`, the `github_*` trio) advertises a `security_risk` self-annotation (low/medium/high) in
 its schema, recorded on the call's `EffectRecord` whatever its fate. On an unattended run, an

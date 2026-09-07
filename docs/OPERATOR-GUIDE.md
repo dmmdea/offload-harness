@@ -927,7 +927,15 @@ inputs across subtasks. A contract that does not fit is not an error — it plac
 
 `context_paths` are read and inlined **by the delegator**, confined to `read_root`
 (≤ 128 KiB per file) — your session's context never pays for them, and the wire contract stays
-self-contained (the remote node never reaches back into your filesystem). `acceptance` is
+self-contained (the remote node never reaches back into your filesystem). The node writes them as
+files in the seat's read root; the seat then spends its first steps finding them (measured: 89 of
+117 failed 4B rows in six days stop at `list_dir` + `read_file`). `setup_actions` (0.113.24) lets
+a subtask name up to eight `{tool, args}` calls the node replays before the model's first turn —
+`[{"tool":"read_file","args":{"path":"notes.md"}}]` puts the document in front of the seat at
+step 0, spending no step. Simpler still: set `agent_seed_context_reads: true` in the executing
+node's config and it prepends one `read_file` per context doc by itself (it knows the names).
+Read `setup_ran` on the result before crediting either — a node one release behind ignores the
+field silently. `acceptance` is
 evaluated by the **delegator** after the result returns: a schema-valid result that fails a
 check comes back `failed_verification`, never a success. Read the response's `summary` block
 first — `{succeeded, deferred, failed_verification, failed, infrastructure}` — eight quiet

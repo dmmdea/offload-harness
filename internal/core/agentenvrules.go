@@ -215,4 +215,5 @@ type AgentTraceStep struct {
 	Status   string `json:"status"`              // committed | failed | unknown | none (agent.EffectStatus)
 	ObsChars int    `json:"obs_chars,omitempty"` // size of the result the model saw, after every rule and cap
 	Rule     string `json:"rule,omitempty"`      // env rule that fired on this call, e.g. "max_calls_per_tool"
+	Setup    bool   `json:"setup,omitempty"`     // replayed from the contract's setup_actions before turn 1 (step 0)
 }

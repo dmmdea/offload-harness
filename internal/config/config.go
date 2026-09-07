@@ -184,6 +184,15 @@ type Config struct {
 	// (what a 4B needs is not what a 27B needs); the rigger proposes edits to
 	// it, an operator applies them. Validated at every door that builds a loop.
 	AgentEnvRules *core.AgentEnvRules `json:"agent_env_rules,omitempty"`
+	// AgentSeedContextReads (0.113.24, ADR 0036 P2): when true, a grounded
+	// contract run on THIS box gets one read_file setup action per context doc
+	// prepended to the contract's own setup_actions (core.SeedContextReads),
+	// so the model's first turn already holds the documents the node wrote
+	// into the read root instead of spending its first two steps finding
+	// them (the corpus's dominant 4B failure shape). Node-side because the
+	// node, not the delegator, knows the file names. Off by default until the
+	// A/B on the seat says otherwise; a property of the seat like the rules.
+	AgentSeedContextReads bool `json:"agent_seed_context_reads,omitempty"`
 	// KVCacheServer is the OPTIONAL "cache server" tier: a second machine's RAM behind
 	// LMCache MP for a vLLM seat (see kvcacheserver.go). nil/disabled = no tier, the
 	// pre-key behavior; nothing in the install depends on it.

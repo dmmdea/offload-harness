@@ -41,7 +41,7 @@ type BuildConfig struct {
 	// loop). Also the key the default rule table loads on (see RulesPath): a
 	// future caller granting mutating capability WITHOUT setting Unattended
 	// gets no default table — set this honestly, not as a UI preference.
-	Unattended bool
+	Unattended   bool
 	AuditPath    string // append-only broker audit JSONL; must live OUTSIDE the worktree
 	AskQueuePath string // P5b: reviewable queue of asks deferred on an unattended run (optional)
 	// RulesPath names the structural risk table (rules.go LoadRules); tighten-only.
@@ -53,6 +53,11 @@ type BuildConfig struct {
 	// Compiled here so an invalid table fails the build by name at every door
 	// (CLI exit, MCP defer, fleet defer) instead of no-op'ing at run time.
 	EnvRules *core.AgentEnvRules
+	// SetupActions (setup.go, ADR 0036 P2): tool calls replayed before the
+	// model's first turn. Already validated at the door (core.Validate);
+	// whether a tool exists on this seat is answered by the loop as an
+	// observation. nil = no replay.
+	SetupActions []core.AgentSetupAction
 
 	AllowWrite bool // P2: write_file/delete_file in the worktree
 	AllowFetch bool // P3: web_fetch behind the egress allowlist
@@ -353,6 +358,14 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 			note += " (withheld: " + strings.Join(denied, ", ") + ")"
 		}
 		res.Notes = append(res.Notes, note)
+	}
+	if len(cfg.SetupActions) > 0 {
+		loop = loop.WithSetupActions(cfg.SetupActions)
+		names := make([]string, 0, len(cfg.SetupActions))
+		for _, a := range cfg.SetupActions {
+			names = append(names, a.Tool)
+		}
+		res.Notes = append(res.Notes, "agent setup actions: "+strings.Join(names, ", "))
 	}
 	res.Loop = loop
 	res.Tools = tools

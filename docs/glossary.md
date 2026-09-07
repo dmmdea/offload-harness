@@ -175,6 +175,16 @@ The generic primitive that executes a caller-supplied ComfyUI graph against a No
 returning node-addressed outputs. It is the boundary that lets a workflow repository own graph
 authoring while the harness owns execution.
 
+## Setup action
+
+One entry of a contract's `setup_actions` (ADR 0036 P2, 0.113.24): a `{tool, args}` call the coding-agent
+loop replays before the model's first turn, through the seat's env rules and dispatch, landing in the
+transcript as a tool call plus its result — so the first turn already holds what the model would have
+spent its first steps fetching (a `read_file` of the document it must digest). Charged to the wall, never
+to `max_steps`; bounded to half the compaction budget; a failure is an observation, not an abort. A node
+with `agent_seed_context_reads` on prepends one read per context doc itself. Reported as `setup_ran`
+and as step-0 trace entries marked `setup`.
+
 ## Squash-publish
 
 Historical term, retired with the Mirror model on 2026-07-18. It named the act of publishing to the
