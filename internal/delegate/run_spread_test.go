@@ -3,6 +3,9 @@ package delegate
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -292,5 +295,72 @@ func TestWireCarriesRetryFields(t *testing.T) {
 	clean, _ := json.Marshal(WireResponse([]PlacedResult{{Node: "x"}}, Summary{Succeeded: 1}, nil))
 	if strings.Contains(string(clean), "retr") {
 		t.Errorf("a run without retries must publish no retry fields: %s", clean)
+	}
+}
+
+// busySwap is a llama-swap stand-in for the LOCAL seat: /running lists the seat
+// as ready and /upstream/<seat>/metrics reports the in-flight count the test
+// sets. No /v1/models — the reader's roster fallback (bare-name match) is the
+// path exercised here, exactly as an id-bound seat would be read.
+func busySwap(t *testing.T, seat string, inflight int) string {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/running", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"running":[{"model":"` + seat + `","state":"ready"}]}`))
+	})
+	mux.HandleFunc("/upstream/"+seat+"/metrics", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("vllm:num_requests_running{engine=\"0\"} " + strconv.Itoa(inflight) + "\nvllm:num_requests_waiting{engine=\"0\"} 0\n"))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// TestRunSpreadBusyLocalSeatDealsEveryContractRemote is the 0.113.20 rule end to
+// end through Run: the local seat reads busy (2 in flight through llama-swap),
+// so a 4-contract spread with two eligible remotes runs NOTHING local — two on
+// each remote, every reason naming the count — where the idle deal ran two local.
+func TestRunSpreadBusyLocalSeatDealsEveryContractRemote(t *testing.T) {
+	compressPolls(t, 10*time.Millisecond, 2*time.Second)
+	nodeA, urlA := eligibleNode(t, "node-a", "qube from A")
+	nodeB, urlB := eligibleNode(t, "node-b", "qube from B")
+	cfg := testCfg(t)
+	cfg.Endpoint = busySwap(t, "local-seat", 2)
+	var localCalls atomic.Int64
+	results, sum, err := Run(context.Background(), cfg, passingLocal(&localCalls), contracts(4), "spread", []string{urlA, urlB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Succeeded != 4 {
+		t.Fatalf("summary = %+v, want 4 succeeded", sum)
+	}
+	for i, pr := range results {
+		if pr.ranLocal {
+			t.Errorf("subtask %d ran local while the local seat was busy", i)
+		}
+		if !strings.Contains(pr.PlacementReason, "local seat busy: 2 in flight") {
+			t.Errorf("subtask %d: placement reason %q must name the in-flight count", i, pr.PlacementReason)
+		}
+	}
+	if localCalls.Load() != 0 || nodeA.dispatches.Load() != 2 || nodeB.dispatches.Load() != 2 {
+		t.Fatalf("distribution local=%d A=%d B=%d, want 0/2/2", localCalls.Load(), nodeA.dispatches.Load(), nodeB.dispatches.Load())
+	}
+}
+
+// TestRunSpreadIdleLocalSeatKeepsTheOldDeal is the control arm through Run: the
+// same fake llama-swap with ZERO in flight deals local, A, B, local as before.
+func TestRunSpreadIdleLocalSeatKeepsTheOldDeal(t *testing.T) {
+	compressPolls(t, 10*time.Millisecond, 2*time.Second)
+	nodeA, urlA := eligibleNode(t, "node-a", "qube from A")
+	nodeB, urlB := eligibleNode(t, "node-b", "qube from B")
+	cfg := testCfg(t)
+	cfg.Endpoint = busySwap(t, "local-seat", 0)
+	var localCalls atomic.Int64
+	_, sum, err := Run(context.Background(), cfg, passingLocal(&localCalls), contracts(4), "spread", []string{urlA, urlB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Succeeded != 4 || localCalls.Load() != 2 || nodeA.dispatches.Load() != 1 || nodeB.dispatches.Load() != 1 {
+		t.Fatalf("idle seat: summary=%+v local=%d A=%d B=%d, want 4 succeeded, 2/1/1", sum, localCalls.Load(), nodeA.dispatches.Load(), nodeB.dispatches.Load())
 	}
 }
