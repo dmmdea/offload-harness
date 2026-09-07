@@ -1,0 +1,35 @@
+# llama-swap pieces for a persistent vLLM seat (ADR 0035). Three edits to an existing config:
+# (1) top level — the vLLM cold load is 125–250 s (torch.compile cache warm/cold); the default 120 (or a lower local value) kills
+#     the attach mid-load and cmdStop then stops the engine. llama.cpp seats still fail fast when broken.
+healthCheckTimeout: 480
+
+# (2) the entry — llama-swap's front door to the unit. `cmd` starts the unit and stays attached, `cmdStop` stops it, so the
+#     harness's `gpu reserve --drain --unload-seat` really frees the card and `gpu release --warm-seat` really reloads it.
+#     `proxy` is the LITERAL address the engine binds (on the reference box the MagicDNS name resolved to IPv6 only).
+#     `useModelName`: vLLM 404s names it does not serve, so every alias is rewritten to the id. `ttl: 0` = never idles out.
+#     `concurrencyLimit` must match the engine's --max-num-seqs: llama-swap's per-model default (10) would 429 the streams the
+#     seat was provisioned for (review finding, 2026-09-06).
+models:
+  "<seat id>":
+    cmd: /srv/llama-swap/seat/vllm-seat-cmd.sh
+    cmdStop: /srv/llama-swap/seat/vllm-seat-cmdstop.sh
+    proxy: http://<tailscale-ipv4>:18797
+    checkEndpoint: /health
+    useModelName: "<seat id>"
+    ttl: 0
+    unloadTimeout: 120
+    concurrencyLimit: 32
+    aliases: ["<pool alias>"]
+
+# (3) its group + the startup preload. persistent = no other group can evict it; swap/exclusive false = it evicts nobody
+#     (the box's heavy tier keeps swapping among itself beside it). The preload attaches to the running unit as soon as
+#     llama-swap starts, so /running lists the seat from the first second (the harness's admission wait reads /running).
+groups:
+  vllmseat:
+    persistent: true
+    swap: false
+    exclusive: false
+    members: ["<seat id>"]
+hooks:
+  on_startup:
+    preload: ["<seat id>"]

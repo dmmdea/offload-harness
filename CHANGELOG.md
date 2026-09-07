@@ -6,6 +6,14 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+**Docs + templates (no code): the Linux persistent-vLLM-seat pattern behind llama-swap.** ADR 0035 records the reference
+`ampere-16` box moving its agent lane from the llama.cpp 4B seat to a persistent vLLM systemd unit fronted by a llama-swap
+entry whose `cmd`/`cmdStop` start and stop the unit through a scoped polkit rule — so the fleet node's `endpoint` stays
+llama-swap (STT/media seats unaffected), `served_models`/`agent_seat_resident` stay roster-derived, and `gpu reserve
+--drain --unload-seat` / `gpu release --warm-seat` really free and reload the card (measured 6 s / 35 s). Reference files in
+`setup/templates/vllm-seat/linux-systemd/`; the `ampere-16` tier note and the operator guide's tier table point at them. The
+tier SEED is unchanged (the seat is a hand-installed venv, not something the installer renders).
+
 ## [0.113.19] — 2026-09-06 — `gpu reserve --drain` reads `/slots` on a llama.cpp seat that runs without `--metrics`
 
 **Fixed.** Every llama.cpp seat on this fleet is launched without `--metrics`, so the seat's `/metrics` answers `501` and the
