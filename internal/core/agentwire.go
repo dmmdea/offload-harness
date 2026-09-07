@@ -138,6 +138,11 @@ type AgentContract struct {
 	MaxSteps      int             `json:"max_steps,omitempty"`     // default AgentMaxStepsDefault, clamped to AgentMaxStepsCap
 	TimeoutSec    int             `json:"timeout_sec,omitempty"`   // default AgentTimeoutSecDefault, clamped to AgentTimeoutSecCap
 	Depth         int             `json:"depth"`                   // 0 = origin; ≥1 ⇒ delegate tool NEVER registered
+	// SetupActions (agentsetup.go, 0.113.24): tool calls the loop replays before
+	// the model's first turn; ≤ AgentSetupActionsMax, charged to the wall and
+	// never to max_steps. Optional; a node one release behind ignores it (the
+	// decoder keeps unknown fields) and reports no setup_ran.
+	SetupActions []AgentSetupAction `json:"setup_actions,omitempty"`
 }
 
 // ContextDoc is one inline context document. Name is a future FILENAME on the
@@ -224,6 +229,12 @@ type AgentWireResult struct {
 	Trace []AgentTraceStep `json:"trace,omitempty"`
 	// RulesFired counts environment-rule hits on this run (0 = none / no table).
 	RulesFired int `json:"rules_fired,omitempty"`
+	// SetupRan counts the contract's setup actions (agentsetup.go) that were
+	// EXECUTED before the model's first turn (committed or failed — a refused,
+	// unknown-tool or over-budget action is not counted; the trace's setup
+	// entries carry the per-action status). 0 on a node that predates the
+	// field, so a mixed-version fleet shows where the replay did not happen.
+	SetupRan int `json:"setup_ran,omitempty"`
 }
 
 // DecodeAgentContract reads one contract from r, tolerating unknown fields
@@ -270,6 +281,9 @@ func (c AgentContract) Validate() error {
 	}
 	if c.Depth < 0 {
 		return fmt.Errorf("agent contract: depth %d is negative", c.Depth)
+	}
+	if err := ValidateAgentSetupActions(c.SetupActions); err != nil {
+		return err
 	}
 	if len(c.Context) > AgentContextMaxDocs {
 		return fmt.Errorf("agent contract: %d context docs exceeds the max of %d", len(c.Context), AgentContextMaxDocs)

@@ -11,6 +11,7 @@
   "agent_model": "",
   "agent_profile": "",
   "agent_env_rules": null,
+  "agent_seed_context_reads": false,
   "kv_cache_server": null,
   "agent_timeout_sec": 0,
   "seat_contention_wait_sec": 0,

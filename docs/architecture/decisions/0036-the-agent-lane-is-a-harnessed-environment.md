@@ -64,6 +64,33 @@ inside the loop is out of policy here, and a rule nobody can read as data cannot
 5. **The rigger will PROPOSE, never apply.** Its output (P3) is an edit to this same table plus a before/after
    measurement on the same seat; an operator (or a standing rule) applies it. Fail-loud over autonomous recovery.
 
+### Amendment 2026-09-07 — E3, the setup replay (0.113.24)
+
+envharness's `Setup` replays a fixed action list on `reset()` and does not charge the replay to the
+episode budget. The harness's equivalent is `setup_actions` on the contract (`core.AgentSetupAction`,
+`agent/setup.go`) plus a node-side key, `agent_seed_context_reads`, that prepends one `read_file` per
+context doc — the node, not the delegator, knows the file names it materializes. Decided, with the
+reasons on record:
+
+- **Tool-result shape, not a user message.** The replay is one assistant turn carrying the calls and
+  one tool result per call — the shape the seat itself produces on every later step. The council's
+  alternative (inline the document text as a fenced user message before the objective, like
+  `AGENT.md`) was rejected on a measured fact, not taste: to a small seat a user turn is a question
+  (2026-09-03, the few-shot leak), and grounded contracts already ship system + objective only.
+- **Consistent accounting.** No step is charged (`Steps` counts model turns); the wall is. The circuit
+  breakers are neither consulted nor fed (the model never issued these calls; its later identical
+  call is a first call). `filter_action` applies, but the `max_calls_per_tool` counter is not spent by
+  the replay. The observation hooks and the boundary cap apply. The results are pinned for compaction
+  but sit OUTSIDE the protected preamble, and the replay is bounded to half the compaction budget:
+  past it the rest are recorded not-run, and the model reads for itself — the pre-key behaviour,
+  never a preamble the seat cannot fit.
+- **Per-action truth.** Every action is a Step-0 effect record marked `setup`; `setup_ran` counts
+  only what executed. A node one release behind ignores the field and reports nothing — the
+  decoder keeps unknown fields for exactly this mixed-fleet case (`TestDecodeAgentContractUnknownFieldIgnored`).
+- **Acceptance is pass rate, not step count.** The corpus's failed 4B contracts (117 in six days, all
+  grounded, 89 stopping at `list_dir` + `read_file`) re-run on the same seat with and without seeding.
+  A step count of 1 is guaranteed by construction and proves only that the plumbing ran.
+
 ## Consequences
 
 - A nil/zero table is byte-identical to the pre-key loop; every field is additive and `omitempty`, and a

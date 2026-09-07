@@ -152,6 +152,7 @@ func main() {
 	askQueuePath := fs.String("ask-queue", "", "file where asks deferred on the unattended run are parked for review (default when any mutating capability is enabled: ~/.local-offload/agent-asks.jsonl)")
 	rulesPath := fs.String("rules", "", "structural risk rule table (JSON array of {kind,glob,decision,severity,reason}; tighten-only — rules may deny or ask, never allow). Fails closed on a bad or missing file. Default (empty): the built-in unattended table loads (deletes + config/manifest writes queue for review; evidence/weights/workflow/lockfile mutations deny). Pass a path to REPLACE it, or 'off' to run ungated (measured 2026-08-11: the model's own security_risk annotation is a constant 'low' — 0% recall on destructive calls).")
 	envRulesPath := fs.String("env-rules", "", "environment-rule table (JSON, the config key agent_env_rules) that REPLACES the config's table for this run — the rigger's scratch validation; 'off' runs with no env rules. Validated on load; a bad file exits 2 by name.")
+	setupPath := fs.String("setup", "", "setup actions (JSON array of {tool, args}) REPLAYED before the model's first turn (ADR 0036 P2) — the contract field setup_actions for a CLI run; each runs through the env rules and dispatch like a model call and seeds the transcript as a tool call + result, spending no step. Validated on load; a bad file exits 2 by name. Empty = none.")
 	tracesDir := fs.String("traces", "", "standalone: directory for per-goal trace JSON (default: ~/.local-offload/agent-traces)")
 	goalTimeoutSec := fs.Int("goal-timeout", 300, "standalone: per-goal wall-clock budget in seconds")
 	totalTimeoutSec := fs.Int("total-timeout", 0, "standalone: optional cumulative wall-clock budget for the WHOLE drain in seconds (0 = unbounded; --goal-timeout still bounds each goal)")
@@ -318,6 +319,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", envErr)
 		os.Exit(2)
 	}
+	setupActions, setupErr := resolveSetupActions(*setupPath)
+	if setupErr != nil {
+		fmt.Fprintln(os.Stderr, "error:", setupErr)
+		os.Exit(2)
+	}
 	built, err := agent.Build(agent.BuildConfig{
 		PlannerBase:    plannerBase,
 		Model:          plannerModel,
@@ -326,6 +332,7 @@ func main() {
 		MaxTokens:      *maxTokens,
 		MaxSameTool:    *maxSameTool,
 		EnvRules:       envRules,
+		SetupActions:   setupActions,
 		ReadRoot:       absRoot,
 		Offload:        offload,
 		NPU:            pipeline.NewLoopNPU(cfg),
@@ -502,6 +509,7 @@ func main() {
 			MaxTokens:            *maxTokens,
 			MaxSameTool:          *maxSameTool,
 			EnvRules:             envRules,
+			SetupActions:         setupActions,
 			ReadRoot:             absRoot,
 			Offload:              offload,
 			NPU:                  pipeline.NewLoopNPU(cfg),
@@ -530,6 +538,7 @@ func main() {
 			MaxTokens:            *maxTokens,
 			MaxSameTool:          *maxSameTool,
 			EnvRules:             envRules,
+			SetupActions:         setupActions,
 			ReadRoot:             absRoot,
 			Offload:              offload,
 			NPU:                  pipeline.NewLoopNPU(cfg),
@@ -660,6 +669,32 @@ func printFlaggedEffects(effects []agent.EffectRecord) {
 			fmt.Fprintf(os.Stderr, "[local-agent] effect %s: %s (%s) %s\n", r.Status, r.Tool, r.CallID, r.Note)
 		}
 	}
+}
+
+// resolveSetupActions reads --setup: a JSON array of {tool, args} replayed
+// before the first model turn (core.AgentSetupAction). Empty = none. The file
+// is decoded strictly and validated by the same rule a contract's
+// setup_actions meets at every door, so a bad file exits 2 by name before any
+// network work — the CLI is the rigger's scratch validation of a replay list
+// exactly as --env-rules is of a rule table.
+func resolveSetupActions(flagPath string) ([]core.AgentSetupAction, error) {
+	if strings.TrimSpace(flagPath) == "" {
+		return nil, nil
+	}
+	b, err := os.ReadFile(flagPath)
+	if err != nil {
+		return nil, fmt.Errorf("--setup: %w", err)
+	}
+	var actions []core.AgentSetupAction
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&actions); err != nil {
+		return nil, fmt.Errorf("--setup %s: %w", flagPath, err)
+	}
+	if err := core.ValidateAgentSetupActions(actions); err != nil {
+		return nil, fmt.Errorf("--setup %s: %w", flagPath, err)
+	}
+	return actions, nil
 }
 
 // resolveEnvRules picks the environment-rule table for this run: --env-rules

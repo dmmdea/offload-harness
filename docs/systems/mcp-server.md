@@ -68,6 +68,9 @@ is normally an alias. Every response
 carries the effect ledger (`effects` counts + `effects_flagged` records) on success AND deferred
 paths, the step `trace` (per tool call: tool, status, `obs_chars`, `rule` — 0.113.22, ADR 0036)
 with `rules_fired` and, when the box has an `agent_env_rules` table, its summary as `env_rules`;
+`setup_actions` (0.113.24, ADR 0036 P2: up to eight `{tool, args}` replayed before the first model
+turn through the same rules and dispatch, spending no step) is reported back as `setup_ran` with
+step-0 `trace` entries marked `setup: true` — the same field on every `agent_delegate` subtask;
 and `judge: true` adds one end-of-run **advisory** same-seat completion (`judge_report`)
 grading the flagged effects for operator review — annotation only, it never gates anything.
 

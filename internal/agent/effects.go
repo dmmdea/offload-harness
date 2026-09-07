@@ -95,6 +95,10 @@ type EffectRecord struct {
 	// Rule names the environment rule that fired on this call, if any (the
 	// last one when several did; RuleHits on the Result has them all).
 	Rule string `json:"rule,omitempty"`
+	// Setup marks a call replayed from the contract's setup_actions before
+	// the model's first turn (Step 0): it ran through the same rules, dispatch
+	// and observation hooks as a model call, but the model never issued it.
+	Setup bool `json:"setup,omitempty"`
 }
 
 // EffectCounts aggregates a run's records per status — the summary an MCP

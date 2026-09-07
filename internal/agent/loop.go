@@ -241,7 +241,10 @@ type Loop struct {
 	prefill PrefillStats
 	// envRules are the environment-rule interceptors (envrules.go, ADR 0036):
 	// nil = the pre-key loop, byte-for-byte. Installed by WithEnvRules.
-	envRules  EnvRules
+	envRules EnvRules
+	// setup is the replay list (setup.go): tool calls run before the model's
+	// first turn. Empty = no replay, byte-for-byte the pre-key loop.
+	setup     []SetupAction
 	system    string
 	mem       Memory
 	worktree  string // RW worktree root for durable working memory (AGENT.md + .agent/plan.md); "" disables it
@@ -753,6 +756,11 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 	// counters (envrules.go). Per-Run on purpose: --serve shares one *Loop.
 	var ruleHits []EnvRuleHit
 	ruleState := NewEnvRuleState()
+
+	// Setup replay (setup.go): the contract's pre-actions land AFTER the
+	// protected preamble (pinned, compactable past their budget) and BEFORE
+	// the first model turn; they spend no step and feed no breaker.
+	msgs = l.replaySetup(ctx, msgs, pinned, &effects, &ruleHits, ruleState)
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {

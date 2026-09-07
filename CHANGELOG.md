@@ -6,6 +6,32 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.24] — 2026-09-07 — setup replay on the agent loop (`setup_actions`, `agent_seed_context_reads`)
+
+**Added — `setup_actions` (ADR 0036 amendment, P2 of the envharness port).** A contract may carry up to eight
+`{tool, args}` calls the loop REPLAYS before the model's first turn (`agent/setup.go`, `core.AgentSetupAction`):
+each runs through the seat's env rules (deny/allow withhold, `arg_limits` clamp; the `max_calls_per_tool`
+counter is not spent), dispatch (no circuit breaker consulted or fed — the model never issued these calls),
+the observation hooks and the loop-boundary cap, and lands in the transcript as one assistant turn carrying
+the calls plus one tool result each — the shape the seat produces itself, never a user message holding the
+document (to a small seat a user turn is a question). Charged to the wall, never to `max_steps`; pinned for
+compaction but outside the protected preamble; bounded to half the compaction budget (the rest are recorded
+not-run and the model reads for itself); a failing action is its error observation, never an abort. Doors:
+`local-agent --setup <file>`, MCP `agent_run` / `agent_delegate` `setup_actions`, the CLI `delegate` contract
+file, the fleet wire. Telemetry: Step-0 effect/trace entries with `setup: true`; `setup_ran` (executed count)
+on the wire result and `agent_run`. Validated by name at every door (`core.ErrAgentSetupActions`); a node
+one release behind ignores the field and reports no `setup_ran`.
+
+**Added — `agent_seed_context_reads` (node config, default off).** The node prepends one `read_file` per
+context doc to the replay — it knows the file names it just materialized; a delegator would be guessing. The
+seeded reads and the contract's own actions are one list per run, clamped to eight (seeded first; review
+finding: without the clamp a node could replay 16).
+Why (measured on the 0.113.23 trace): the delegation-log corpus holds 117 failed or deferred 4B-seat rows in
+six days, every one grounded on context docs, 89 of them stopping at exactly `list_dir` then `read_file` —
+the two calls it takes to find the document. Acceptance is the corpus's own failed contracts re-run on the
+same seat with and without seeding, pass rate first, step count second; the key ships off until that A/B
+says otherwise. `examples/agent-setup-actions.json` is the starter.
+
 **Template (no code): `setup/templates/vllm-seat/seat_fg.sh` can pin the KV pool from FREE memory.** `SEAT_KV_HEADROOM_GIB`
 (off unless set) + `SEAT_NONKV_GIB` / `SEAT_KV_FLOOR_GIB` / `SEAT_KV_CAP_GIB`: the pool = min free on the seat devices at launch −
 non-KV − headroom, floored/capped, passed as `--kv-cache-memory-bytes` (per worker) so `--gpu-memory-utilization` no longer
