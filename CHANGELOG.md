@@ -6,6 +6,26 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.29] — 2026-09-07 — blackwell-2x16's served window follows the measurement: 32768 → 131072
+
+Operator rule, stated plainly: *"install defaults have always needed to be updated after we make successful measurements that give us more
+capability."* The tier/model matrix audit found the reverse had been happening — defaults sat where they were first written while the
+reference box moved on.
+
+**`blackwell-2x16` `ctx_size` and `agent_ctx_tokens`: 32768 → 131072.** The reference box for this tier IS the live Qube workstation, and its
+llama-swap serves the tier's OWN seeded agent model at four times the seeded window: `qwen3.8-27b --ctx-size 131072` (the tier's
+`config_seed.agent_model`), `gemma-4-26b-agent --ctx-size 131072` (the 26B-class resident), and the same 27B weights at `--ctx-size 262144` on
+the long-context twin. So 32768 was an un-raised default, not a fit limit — and the tier's own note already said "PROJECTED as a tier; the
+reference box is live — promote values to measured as the bake-offs land". The bake-offs landed. `docs/tiers/blackwell-2x16.md` regenerated.
+
+**Deliberately NOT propagated, and the notes say why.** `blackwell-16` / `volta-16` / `dual-gpu` stay at 32768: that 131072 was measured on the
+Qube's TWO-card pool, and nothing has measured a 26B at 131072 on ONE 16 GB card — which is that entire band. `ampere-16` also stays at 32768:
+its own 131072 datum comes from the persistent vLLM seat, and `setup/templates/vllm-seat/` only DOCUMENTS that as a manual pattern (a grep of
+`setup/*.ps1|*.sh` finds no reference), so a fresh install there still renders the llama.cpp 4B seat that was measured at 32768. Raising a seed
+to a window its rendered seat was never measured at would ship a number, not a capability.
+
+No code paths change — this is a serving template default plus its generated tier page.
+
 ## [0.113.28] — 2026-09-07 — three filed defects resolved, and a suite that stops measuring the runner
 
 Housekeeping release: no behaviour change an operator asked for, four defects that were FILED rather than fixed now fixed, each with a
