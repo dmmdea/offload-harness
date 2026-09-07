@@ -192,7 +192,34 @@ func betterRemote(candidate, incumbent NodeView) bool {
 // 0 for unlimited and a node too old to publish the field decodes to 0 as well.
 // Neither credited nor blamed — the same treatment AgentCtxTokens == 0 gets.
 func saturated(v NodeView) bool {
-	return v.MaxQueueDepth > 0 && v.QueueDepth >= v.MaxQueueDepth
+	// A node that publishes saturation (0.113.18) says it in one word: `high`
+	// is "a new dispatch is refused right now" by the node's OWN arithmetic
+	// (queue cap, drain, text lease). It is OR'd with the local arithmetic, not
+	// substituted for it, so an older node ranks exactly as before.
+	return (v.SaturationKnown && v.SaturationHigh) || (v.MaxQueueDepth > 0 && v.QueueDepth >= v.MaxQueueDepth)
+}
+
+// hasRoom reports whether v would take a NEW dispatch right now by its own
+// advertisement: not saturated, and — for a sheddable contract — holding an
+// idle execution slot. It is the capacity wait's "try this one" predicate
+// (run.go awaitCapacity); like saturated it is a RANKING input over a snapshot
+// that is stale by construction, so a node that passes may still refuse, and
+// the wait loop treats that refusal as one more tick, never as proof.
+//
+// A node that does not publish saturation is judged on the fields it does
+// publish: provablyStartsNow answers "idle slot" for a sheddable contract
+// (unknown is never a yes), and !saturated answers it for a band-0 one.
+func hasRoom(v NodeView, sheddable bool) bool {
+	if saturated(v) {
+		return false
+	}
+	if !sheddable {
+		return true
+	}
+	if v.SaturationKnown {
+		return v.IdleSlot
+	}
+	return provablyStartsNow(v)
 }
 
 // provablyStartsNow reports whether v's own numbers prove the next job begins

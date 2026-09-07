@@ -62,7 +62,16 @@ type NodeView struct {
 	// gate treats it as ineligible. Absent (older node) or a media lease decodes
 	// to false — a render is arbitrated on the node, never a placement refusal.
 	LeasedText bool
-	Local      bool
+	// Saturation* decode health's `saturation` block (0.113.18). SaturationKnown
+	// is false on an older node, and an unknown saturation is neither credited
+	// nor blamed — the same rule every other capacity field follows. High means
+	// the node itself says a new band-0 dispatch would be refused right now;
+	// IdleSlot means a sheddable one would be admitted. Score is 0..1.
+	SaturationKnown bool
+	SaturationScore float64
+	SaturationHigh  bool
+	IdleSlot        bool
+	Local           bool
 }
 
 // fetchNodeViewTimeout is the transport-level backstop for one health GET —
@@ -114,6 +123,12 @@ type healthWire struct {
 		Held  bool   `json:"held"`
 		Class string `json:"class"`
 	} `json:"lease"`
+	// Additive (0.113.18). nil on a node that does not publish saturation.
+	Saturation *struct {
+		Score    float64 `json:"score"`
+		High     bool    `json:"high"`
+		IdleSlot bool    `json:"idle_slot"`
+	} `json:"saturation"`
 }
 
 // FetchNodeView reads one node's /fleet/health into a NodeView (Local=false —
@@ -150,7 +165,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 	if err := json.Unmarshal(body, &w); err != nil {
 		return NodeView{}, fmt.Errorf("delegate: health from %s is not JSON: %w", u, err)
 	}
-	return NodeView{
+	v := NodeView{
 		NodeID:         w.NodeID,
 		AgentEnabled:   w.AgentEnabled,
 		AgentSeat:      w.AgentSeat,
@@ -167,7 +182,14 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		GpuUtilKnown:      w.GpuUtilKnown,
 		LeasedText:        w.Lease != nil && w.Lease.Held && strings.EqualFold(w.Lease.Class, "text"),
 		Local:             false,
-	}, nil
+	}
+	if w.Saturation != nil {
+		v.SaturationKnown = true
+		v.SaturationScore = w.Saturation.Score
+		v.SaturationHigh = w.Saturation.High
+		v.IdleSlot = w.Saturation.IdleSlot
+	}
+	return v, nil
 }
 
 // truncate bounds an error-path body excerpt.

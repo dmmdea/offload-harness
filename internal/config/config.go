@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/netguard"
@@ -231,6 +232,20 @@ type Config struct {
 	// explicit choice and is not gated; a media lease is arbitrated by the
 	// model-affinity gate as before (ADR 0026) and is not a placement gate either.
 	AgentLeaseWaitSec int `json:"agent_lease_wait_sec,omitempty"`
+	// AgentPlacementWaitSec (0.113.18) is how long a delegation subtask WAITS
+	// FOR CAPACITY when every node that could run it is full right now — each
+	// eligible remote refused at dispatch (queue full, leased, draining) and the
+	// local seat is reserved or already used — instead of failing "placement
+	// refused" on the spot. During the wait the delegator re-reads the fleet's
+	// health every few seconds and places the subtask on the FIRST node that
+	// frees (a remote whose saturation clears, or the local lease being
+	// released), so a contract is no longer lost because one node was busy for
+	// the minute it was dispatched ("Qube timed out", 2026-09-06). The wait is
+	// NOT charged to the contract's timeout_sec (like time provably spent queued
+	// on a node); it is bounded by this key alone. 0 = the built-in default
+	// (120 s); negative = do not wait (the pre-0.113.18 behaviour). A sheddable
+	// contract (priority -1) never waits: with no idle node it is shed at once.
+	AgentPlacementWaitSec int `json:"agent_placement_wait_sec,omitempty"`
 	// VisionModel is the VLM alias used for the vqa task (multimodal). Empty = no
 	// vision route (vqa defers).
 	VisionModel string `json:"vision_model,omitempty"`
@@ -1685,6 +1700,19 @@ func DefaultComfyDir() string {
 		return "C:/ComfyUI"
 	}
 	return ""
+}
+
+// PlacementWait resolves AgentPlacementWaitSec: 0 → the built-in default
+// (120 s), negative → 0 meaning "do not wait".
+func (c Config) PlacementWait() time.Duration {
+	switch {
+	case c.AgentPlacementWaitSec < 0:
+		return 0
+	case c.AgentPlacementWaitSec == 0:
+		return 120 * time.Second
+	default:
+		return time.Duration(c.AgentPlacementWaitSec) * time.Second
+	}
 }
 
 // FleetQueueLimit resolves FleetMaxQueueDepth: 0 → the built-in default,

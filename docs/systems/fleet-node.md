@@ -289,6 +289,57 @@ one journal line. A missing root fails `fleet-serve` at start; a scan or prune e
 hidden. Why it exists: LMCache's fs_native eviction counts only pages the running MP server wrote and the seat wrapper prunes
 at seat start only, so the Lenovo's store went 28 → 99 GB against a 100 GB quota in 75 minutes of real fan-out (2026-09-06).
 
+## Bands, tenants, saturation and the capacity wait (0.113.18)
+
+The fleet-flow chapter's L5/L6 (plan `2026-09-02-vllm-27b-seat-and-cache-server-tier.md`): the llm-d shape — a saturation
+signal, priority bands, tenant queues, a TTL instead of a timeout — sized for three boxes and one choke point (the harness).
+
+**Every dispatch carries a band and a tenant.** The band rides the envelope's `priority` (contract-reserved since v2,
+accepted-and-ignored by every older node, sent only when non-zero); the tenant rides the `X-Offload-Tenant` header — a header
+because `dispatchEnvelope` is decoded with `DisallowUnknownFields`, and a new field would `400` on every node one release
+behind. Bands (`core.Band*`): `-1` sheddable (measurement / gate traffic), `0` production (the default and what an older
+delegator sends), `+1` urgent; anything else is clamped, and a non-integer `priority` reads as 0 (lenient on purpose — it
+was ignored before). The tenant is printable ASCII ≤ 96 bytes, else anonymous; the delegator sends `host-pid-start`
+(`delegate.DefaultTenant`, `LOCAL_OFFLOAD_TENANT` overrides) — one MCP server = one Claude session = one tenant.
+
+**The store claims by band → tenant → arrival** (`Jobs.claimLocked`): highest effective band first (a sheddable job that has
+waited `bandAgingAfter` = 60 s counts as band 0), then the claimable tenant served least recently (`Jobs.served`, a claim
+sequence per tenant, pruned by the janitor), then the pending index. Anonymous tenants (older delegators) are one tenant, so
+for them the store is exactly the FIFO it was. The uncapped-lane rule is unchanged: a media job never queues behind capped ones.
+
+**The shed rule** (`handleDispatch`, before the queue cap): a band `-1` dispatch is admitted only into an IDLE execution slot
+(`Jobs.IdleSlot`: empty backlog and a free capped worker, or unlimited concurrency) and otherwise refused
+`503 shed (priority -1): no idle execution slot (…)`. Sheddable work takes idle capacity only — it never queues before OR
+behind production work. The delegator re-places the 503 (any version) and, with no idle node anywhere, sheds the subtask at
+once: deferred, `defer_class: "capacity"`, `summary.shed`. Media task types are uncapped, so a running render leaves the slot
+idle — the rule is about the text seat's lane, which is what the cap protects.
+
+**`saturation`** — always in `/fleet/health`: `{"score":0.5,"high":false,"idle_slot":false}`. `score` =
+max(`jobs_running/max_concurrent_jobs`, `queue_depth/max_queue_depth`) over the limits the node publishes (an unpublished limit
+contributes nothing); `high` = a new band-0 dispatch would be refused right now (backlog at `max_queue_depth`, draining, or a
+held **text** lease — the three refusal states dispatch applies to new work, so the block can never disagree with a
+dispatch); `idle_slot` = `Jobs.IdleSlot`. The delegator (`NodeView.Saturation*`) reads `high` as saturated, OR'd with its own
+arithmetic (an older node ranks as before), and `hasRoom` uses the block as the capacity wait's "try this one" predicate.
+Seat-level counters are deliberately not an input: this handler never probes the seat (a probe of an unloaded seat through
+llama-swap LOADS it), and on this fleet the job counters already describe the load the harness itself puts on a seat. The
+block is the seam a cached seat sampler would feed later, without a wire change.
+
+**The capacity wait (delegator, `agent_placement_wait_sec`, default 120 s, negative = off).** `placeAndRun` used to end a
+refused chain with `placement refused` the moment no untried node was left, and a reserved local seat waited on the LOCAL
+lease alone (`agent_lease_wait_sec`) and then deferred — even when a remote had freed in the meantime. Now, when every node
+that could run the subtask refused for CAPACITY (503/429; `placements.capacityRefusal`) or the only placement is a reserved
+seat, `awaitCapacity` polls every `placementPollInterval` (3 s): the local seat once the lease clears (only reachable when it
+WAS reserved — an unreserved, untried local seat is taken by `replacementNode` first), else the best remote whose health says
+it has room (`hasRoom`), skipping a node that refused inside the wait for `refusalCooldown` (10 s). A node that passes and
+still refuses is one more tick, paced by the poll — never a tight loop. Idle time is credited (`placements.credit`, so
+`remaining()` hands the seat that finally takes the work its whole `timeout_sec`); attempts are charged as always. Outcomes:
+landed (`summary.waited`, `results[].capacity_wait_sec`, `replacements` counts the refusals) · the wait exhausted with the
+local seat still reserved → the holder-naming `infrastructure` deferral of 0.113.14 · exhausted otherwise → deferred, class
+`capacity` (not `BrokenStackDefer`: the fleet is healthy, it was not this contract's turn) · sheddable → shed at once, no wait
+· wait off → the pre-0.113.18 `placement refused` failure, byte for byte. Also closed: `replacementNode`'s local last resort
+now honours a text lease (before, a remote's 503 fell straight onto the reserved cards — the 2026-09-05 incident through a
+side door). The wait is bounded by the config key alone; `agent_lease_wait_sec` still applies when it is the longer of the two.
+
 ## The acceptance gate (`local-offload acceptance`)
 
 A node must pass this before it is handed work. It is deliberately NOT `doctor`: doctor

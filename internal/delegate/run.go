@@ -140,12 +140,34 @@ type PlacedResult struct {
 	// fleet quietly shedding load onto one box otherwise looks identical to a
 	// healthy one.
 	ReplacementNote string
+	// CapacityWaitSec (0.113.18) is how long this subtask waited for a node to
+	// have room before one took it — the capacity wait, agent_placement_wait_sec
+	// — and is NOT part of timeout_sec. waited marks it for Summary.Waited; shed
+	// marks a sheddable subtask that found no idle node (Summary.Shed).
+	CapacityWaitSec float64
+	waited          bool
+	shed            bool
+	// unplaced marks a result NO node ran (a capacity defer or a shed): it
+	// carries Replacements for the refusals it collected, but must never be
+	// tallied as a replacement that RECOVERED — nothing took the work.
+	unplaced bool
+	// waitCapacity is attempt()'s SENTINEL: the placement it computed can only
+	// run on a seat a text lease reserves, so nothing was dispatched, nothing was
+	// recorded, and placeAndRun must run the capacity wait (awaitCapacity) with
+	// pendingReason as the first refusal. Never published.
+	waitCapacity  bool
+	pendingReason string
 }
 
 // Summary is the per-run outcome tally, reported AT THE TOP of every surface's
 // result (roast delta 14): eight quiet defers must read as a loud outcome,
 // not eight green jobs.
 type Summary struct {
+	// Waited / Shed (0.113.18): subtasks that waited for fleet capacity before a
+	// node took them, and sheddable subtasks shed for lack of an idle node.
+	Waited int
+	Shed   int
+
 	Succeeded          int
 	Deferred           int
 	FailedVerification int
@@ -366,7 +388,36 @@ type RunOptions struct {
 	// caller so it survives RunBatched's chunks (and, in the MCP server, the
 	// process lifetime).
 	Quarantine *Quarantine
+	// Priority is the scheduling band every subtask of this run is dispatched
+	// with (core.BandSheddable / BandNormal / BandUrgent; clamped). A sheddable
+	// run takes only idle fleet capacity: a node without an idle slot refuses it
+	// (503, re-placeable), and with no idle node anywhere the subtask is SHED
+	// (deferred, class capacity) instead of waiting or queuing behind
+	// production work. Measurement and gate traffic runs at -1.
+	Priority int
+	// Tenant identifies the delegator to the fleet (one MCP server = one Claude
+	// session; one CLI process = one tenant) so a node can round-robin its
+	// backlog across tenants. Empty = anonymous, arrival order on the node.
+	Tenant string
 }
+
+// DefaultTenant is the tenant id a delegator process identifies itself with
+// when the caller supplies none: host, pid and the process start second — one
+// MCP server (one Claude session) or one CLI invocation is one tenant, which
+// is the granularity the node's round-robin exists for. LOCAL_OFFLOAD_TENANT
+// overrides it (a gate script emulating K sessions names them).
+func DefaultTenant() string {
+	if v := strings.TrimSpace(os.Getenv("LOCAL_OFFLOAD_TENANT")); v != "" {
+		return v
+	}
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "delegator"
+	}
+	return fmt.Sprintf("%s-%d-%d", host, os.Getpid(), processStart.Unix())
+}
+
+var processStart = time.Now()
 
 // Run is RunWith without options — the signature every existing caller uses.
 func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []core.AgentContract, route string, remotes []string) ([]PlacedResult, Summary, error) {
@@ -483,6 +534,8 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	r := &runner{cfg: cfg, local: local, route: route, remotes: remotes, intent: openIntentLedger(cfg), led: led, ledgerUnopened: ledgerUnopened}
 	if opts != nil {
 		r.quarantine = opts.Quarantine
+		r.priority = core.ClampBand(opts.Priority)
+		r.tenant = opts.Tenant
 	}
 	// route=spread probes the fleet ONCE per run: every subtask deals itself
 	// across the same roster, so per-subtask probing would be N identical GETs
@@ -518,12 +571,20 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		if pr.retryRecovered {
 			sum.RetryRecovered++
 		}
+		if pr.waited {
+			sum.Waited++
+		}
+		if pr.shed {
+			sum.Shed++
+		}
 		if pr.Replacements > 0 {
 			sum.Replaced++
 			// "Recovered" is stated on the REFUSAL, not on the answer: Err == ""
 			// means some node took the work and reported on it. Whether that
-			// report was good is what the four buckets below are for.
-			if pr.Err == "" {
+			// report was good is what the four buckets below are for. A capacity
+			// defer or a shed (unplaced) is the one Err == "" result no node
+			// ever ran, and it is not a recovery.
+			if pr.Err == "" && !pr.unplaced {
 				sum.ReplacementRecovered++
 			}
 		}
@@ -655,6 +716,10 @@ type runner struct {
 	// quarantine is the caller's Quarantine (RunOptions), nil = inert.
 	quarantine  *Quarantine
 	quarantined atomic.Int64
+	// priority / tenant are RunOptions.Priority (clamped) and RunOptions.Tenant,
+	// stamped on every dispatch this run makes (see dispatch).
+	priority int
+	tenant   string
 }
 
 // placement is a resolved "run it HERE" — the node, its dial base ("" for
@@ -706,7 +771,7 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// that number bounds the work per subtask, and a second full attempt would
 	// have doubled it silently. What is left after the first attempt is the
 	// retry's budget; under the floor there is no honest retry to run.
-	remaining := remainingSec(start, budget)
+	remaining := pl.remaining(start, budget)
 	if remaining < minRetrySec {
 		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after the first attempt (floor %ds)", remaining, budget, minRetrySec)
 		return first
@@ -724,7 +789,7 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// RE-MEASURE after the probe. `remaining` above was true when it was taken
 	// and can be minutes stale by now; writing that stale number into the retry
 	// contract is what would hand a seat time the subtask no longer has.
-	remaining = remainingSec(start, budget)
+	remaining = pl.remaining(start, budget)
 	if remaining < minRetrySec {
 		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after choosing a retry node (floor %ds)", remaining, budget, minRetrySec)
 		return first
@@ -763,9 +828,64 @@ type placements struct {
 	tried map[string]bool
 	// used counts remote re-placements spent across the whole subtask.
 	used int
+	// credit is time this subtask spent WAITING FOR CAPACITY (awaitCapacity):
+	// idle polling, never an attempt. It is not charged to timeout_sec — the
+	// same rule as time provably spent queued on a node — so remaining() adds
+	// it back. Bounded by agent_placement_wait_sec.
+	credit time.Duration
+	// capacityRefusal records that at least one node refused for CAPACITY
+	// (503/429: queue full, leased, draining, shed) rather than because the
+	// request or the address was wrong. Only then is a capacity wait worth
+	// running: a roster that 404s or is unreachable does not free up.
+	capacityRefusal bool
+	// excluded is every dial base that refused for a NON-capacity reason
+	// (404/408/409, or unreachable): nothing about such a node frees up, so
+	// the capacity wait never asks it again, however much room its health
+	// claims. A capacity refusal (503/429) gets a cooldown instead.
+	excluded map[string]bool
+	// attempts counts REAL placements (a dispatch or a local run — anything
+	// that went through attempt()'s finish and so wrote its telemetry row).
+	// A subtask that ends with none of them (reserved seat, nothing freed) is
+	// recorded by settle(); one that made at least one is already in the
+	// corpus and the ledger through that attempt, the way exhausted() relies on.
+	attempts int
 }
 
-func newPlacements() *placements { return &placements{tried: map[string]bool{}} }
+// settle is the telemetry close-out for an outcome NO attempt produced —
+// a capacity defer, a shed, or the holder-naming deferral reached without a
+// single dispatch. attempt()'s finish records every real placement; these
+// results are built outside it, and before this helper a subtask whose whole
+// life was "reserved seat, nothing freed" left zero corpus rows and zero
+// ledger rows (review finding, 2026-09-06). Recorded once, only when the
+// subtask made no real attempt at all — otherwise the last attempt's row
+// already stands, exactly as exhausted() leaves it.
+func (r *runner) settle(contract core.AgentContract, pr PlacedResult, pl *placements, since time.Time) PlacedResult {
+	if pl.attempts > 0 {
+		return pr
+	}
+	if pr.JobID == "" {
+		pr.JobID = mintJobID()
+	}
+	pr.wallMs = time.Since(since).Milliseconds()
+	r.record(contract, pr)
+	return pr
+}
+
+func newPlacements() *placements {
+	return &placements{tried: map[string]bool{}, excluded: map[string]bool{}}
+}
+
+// noteRefusal files a refused attempt in the ledger: a capacity refusal makes
+// the subtask wait-worthy; any other refusal excludes that node from the wait.
+func (pl *placements) noteRefusal(pr PlacedResult) {
+	if capacityRefusal(pr.refusalStatus) {
+		pl.capacityRefusal = true
+		return
+	}
+	if pr.ranBase != "" {
+		pl.excluded[pr.ranBase] = true
+	}
+}
 
 // remainingSec is what is LEFT of a subtask's timeout_sec budget. Elapsed
 // rounds UP: crediting a 1.2 s attempt as 1 s overstates what is left, and no
@@ -773,6 +893,14 @@ func newPlacements() *placements { return &placements{tried: map[string]bool{}} 
 // negative, which every caller reads as "nothing left" through a floor check.
 func remainingSec(start time.Time, budget int) int {
 	return budget - int((time.Since(start).Milliseconds()+999)/1000)
+}
+
+// remaining is remainingSec with the subtask's capacity-wait credit added
+// back: the ledger's `start` is shifted forward by exactly the idle time the
+// wait spent, so a contract that waited 90 s for a node still owns its whole
+// execution budget when one finally takes it.
+func (pl *placements) remaining(start time.Time, budget int) int {
+	return remainingSec(start.Add(pl.credit), budget)
 }
 
 // replacementExhaustedPrefix opens the message for a subtask NO NODE TOOK. It
@@ -839,15 +967,24 @@ const replacementExhaustedPrefix = "placement refused"
 // the execution budget.
 func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentContract, forced *placement, start time.Time, budget int, pl *placements) PlacedResult {
 	pr := r.attempt(ctx, i, contract, forced)
+	if pr.waitCapacity {
+		// Nothing was dispatched: the only placement was a seat a text lease
+		// reserves. The capacity wait owns it from here (0.113.18) — before this
+		// the subtask waited on the LOCAL lease alone and then deferred, even
+		// when a remote had freed up in the meantime.
+		return r.awaitCapacity(ctx, i, contract, start, budget, pl, pr, []string{pr.pendingReason}, "")
+	}
 	// Recorded whatever the outcome — a SUCCESSFUL placement must exclude its
 	// own seat from the verification retry just as firmly as a refused one.
 	pl.tried[pr.ranBase] = true
+	pl.attempts++
 	if !isReplaceable(pr) {
 		return pr
 	}
 	refusals := []string{refusalLine(pr)}
+	pl.noteRefusal(pr)
 	for {
-		remaining := remainingSec(start, budget)
+		remaining := pl.remaining(start, budget)
 		if remaining < minRetrySec {
 			return exhausted(pr, refusals, budgetSpent(remaining, budget, len(refusals)))
 		}
@@ -857,6 +994,15 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		next, why, ok := r.replacementNode(selCtx, contract, pl, len(refusals))
 		cancel()
 		if !ok {
+			// Every node that could take it is FULL, not broken — or the one
+			// seat left is reserved by a text lease (whatever the refusals
+			// were: a 409 elsewhere does not make the lease less releasable):
+			// wait for something to free rather than fail on a snapshot of one
+			// minute. A roster that only 404s or is unreachable is exhausted.
+			reserved := r.route != "remote" && !pl.tried[""] && Reserved(LocalLease(r.cfg.GPULockPath, r.cfg.StateDir))
+			if pl.capacityRefusal || reserved {
+				return r.awaitCapacity(ctx, i, contract, start, budget, pl, pr, refusals, why)
+			}
 			return exhausted(pr, refusals, why)
 		}
 		// RE-MEASURE. `remaining` above was true when taken and the probe may
@@ -864,7 +1010,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		// exactly how a seat gets handed time the subtask no longer has. The
 		// ledger is not touched until this check passes, so a placement
 		// abandoned here costs neither a slot in the bound nor an exclusion.
-		remaining = remainingSec(start, budget)
+		remaining = pl.remaining(start, budget)
 		if remaining < minRetrySec {
 			return exhausted(pr, refusals, budgetSpent(remaining, budget, len(refusals)))
 		}
@@ -891,6 +1037,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		replaced := contract
 		replaced.TimeoutSec = remaining
 		pr = r.attempt(ctx, i, replaced, &next)
+		pl.attempts++
 		pr.Replacements = len(refusals)
 		if !isReplaceable(pr) {
 			// Some node TOOK it. Whether its answer was any good is the four
@@ -899,6 +1046,205 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 			return pr
 		}
 		refusals = append(refusals, refusalLine(pr))
+		pl.noteRefusal(pr)
+	}
+}
+
+// capacityRefusal: the node declined because it has no room right now (queue
+// full, leased, draining, shed) — the refusals a capacity wait can outlast.
+func capacityRefusal(status int) bool {
+	return status == http.StatusServiceUnavailable || status == http.StatusTooManyRequests
+}
+
+// placementPollInterval is how often the capacity wait re-reads the fleet's
+// health; refusalCooldown keeps a node that just refused INSIDE the wait off
+// the candidate list for a moment, because its health may still advertise the
+// room it just denied (the snapshot is stale by construction — see saturated).
+var (
+	placementPollInterval = 3 * time.Second
+	refusalCooldown       = 10 * time.Second
+)
+
+// awaitCapacity is the delegator's queue (0.113.18, L5 of the fleet-flow
+// chapter): a subtask every fitting node has just refused for CAPACITY — or
+// whose only placement is a seat a text lease reserves — waits here, with a
+// TTL (agent_placement_wait_sec, or agent_lease_wait_sec when that is longer),
+// and is placed on the FIRST node that frees: the local seat once the lease
+// clears, or a remote whose health says it has room (hasRoom). A node that
+// passes the check and still refuses (its snapshot was stale) is one more tick,
+// not a verdict. The idle time is credited to the contract's budget
+// (placements.credit); the attempts themselves are charged as always.
+//
+// A SHEDDABLE run (priority -1) never waits: measurement traffic that finds no
+// idle node is shed at once, class capacity, so it can never queue in front
+// of — or behind — production work anywhere in the fleet.
+//
+// seed is the last refused attempt (or the sentinel); its published fields
+// are reused the way exhausted reuses them. refusals is every refusal so far,
+// oldest first; why is the sentence the refusal chain ended with (exhausted's
+// tail), used verbatim when the wait is switched off.
+//
+// With the wait DISABLED (agent_placement_wait_sec < 0, and no lease wait)
+// the outcome is exactly the pre-0.113.18 one: "placement refused" for a
+// refused chain, the holder-naming deferral for a reserved seat.
+func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentContract, start time.Time, budget int, pl *placements, seed PlacedResult, refusals []string, why string) PlacedResult {
+	localView := r.localView()
+	st := Subtask{Contract: contract, EstTokens: EstimateTokens(contract)}
+	waitStart := time.Now()
+	if r.priority < core.BandNormal {
+		return r.settle(contract, r.shedResult(localView, seed, refusals), pl, waitStart)
+	}
+	wait := r.cfg.PlacementWait()
+	if lw := time.Duration(r.cfg.AgentLeaseWaitSec) * time.Second; lw > wait {
+		wait = lw
+	}
+	if wait <= 0 {
+		if seed.waitCapacity {
+			return r.settle(contract, r.reservedDefer(localView, LocalLease(r.cfg.GPULockPath, r.cfg.StateDir), 0, seed.pendingReason), pl, waitStart)
+		}
+		return exhausted(seed, refusals, why)
+	}
+	deadline := waitStart.Add(wait)
+	spanStart := waitStart
+	var idle time.Duration
+	// credit moves the idle span just ended onto the ledger, so an attempt
+	// started now is measured against a budget that does not include it.
+	credit := func() {
+		now := time.Now()
+		idle += now.Sub(spanStart)
+		pl.credit += now.Sub(spanStart)
+		spanStart = now
+	}
+	refusedAt := map[string]time.Time{}
+	var lease gpulease.Info
+	for wait > 0 && ctx.Err() == nil {
+		if r.route != "remote" && !pl.tried[""] {
+			lease = LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)
+			if !Reserved(lease) {
+				credit()
+				remaining := pl.remaining(start, budget)
+				if remaining < minRetrySec {
+					return exhausted(seed, refusals, budgetSpent(remaining, budget, len(refusals)))
+				}
+				replaced := contract
+				replaced.TimeoutSec = remaining
+				// Reaching here means the local seat WAS reserved when the wait
+				// began (an unreserved, untried local seat is taken by
+				// replacementNode before any wait): the lease cleared.
+				forced := placement{view: localView, reason: fmt.Sprintf("local seat was reserved, lease cleared after %s — running local (capacity wait)", idle.Round(time.Second))}
+				pr := r.attempt(ctx, i, replaced, &forced)
+				pl.tried[""] = true
+				pl.attempts++
+				return r.landedAfterWait(pr, idle, refusals)
+			}
+		}
+		if r.route != "local" {
+			views, bases, _ := r.fetchViews(ctx)
+			best := -1
+			for j, v := range views {
+				if !remoteEligible(st, v) || !hasRoom(v, false) || pl.excluded[bases[j]] {
+					continue
+				}
+				if t, ok := refusedAt[bases[j]]; ok && time.Since(t) < refusalCooldown {
+					continue
+				}
+				if best < 0 || betterRemote(v, views[best]) {
+					best = j
+				}
+			}
+			if best >= 0 {
+				credit()
+				remaining := pl.remaining(start, budget)
+				if remaining < minRetrySec {
+					return exhausted(seed, refusals, budgetSpent(remaining, budget, len(refusals)))
+				}
+				replaced := contract
+				replaced.TimeoutSec = remaining
+				forced := placement{view: views[best], base: bases[best],
+					reason: fmt.Sprintf("capacity wait → %s (room after %s)", views[best].NodeID, idle.Round(time.Second))}
+				pr := r.attempt(ctx, i, replaced, &forced)
+				spanStart = time.Now() // the attempt is charged; the wait resumes here
+				pl.tried[bases[best]] = true
+				pl.attempts++
+				if !isReplaceable(pr) {
+					return r.landedAfterWait(pr, idle, refusals)
+				}
+				seed = pr
+				refusals = append(refusals, refusalLine(pr))
+				refusedAt[bases[best]] = time.Now()
+				pl.noteRefusal(pr) // a non-capacity answer excludes the node from the rest of the wait
+				// Fall through to the sleep: a refusal is charged (its attempt
+				// wrote telemetry and spent budget), so re-asking is paced by the
+				// poll interval — never a tight loop of dispatches.
+			}
+		}
+		if !time.Now().Before(deadline) {
+			break
+		}
+		tick := placementPollInterval
+		if left := time.Until(deadline); left < tick {
+			tick = left
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(tick):
+		}
+	}
+	credit()
+	if r.route != "remote" && Reserved(lease) {
+		// Nothing freed and the local seat is still reserved: the established
+		// deferral, naming the holder (class infrastructure — a human's timing
+		// decision), with the refusals appended.
+		return r.settle(contract, r.reservedDefer(localView, lease, idle, "no eligible remote had room — "+strings.Join(refusals, "; ")), pl, waitStart)
+	}
+	return r.settle(contract, r.capacityDefer(localView, seed, idle, wait, refusals), pl, waitStart)
+}
+
+// landedAfterWait annotates a result some node TOOK after a capacity wait.
+func (r *runner) landedAfterWait(pr PlacedResult, idle time.Duration, refusals []string) PlacedResult {
+	pr.waited = true
+	pr.CapacityWaitSec = idle.Seconds()
+	pr.Replacements = len(refusals)
+	if len(refusals) > 0 {
+		pr.ReplacementNote = replacementNote(refusals, true)
+	}
+	return pr
+}
+
+// capacityDefer is the TTL outcome: every node that could run the subtask was
+// full for the whole wait. Deferred, class capacity — the fleet is healthy and
+// the contract is sound; it was not this contract's turn — with every refusal
+// and the wait named so the caller can re-run, widen the wait, or add a node.
+func (r *runner) capacityDefer(local NodeView, seed PlacedResult, idle, wait time.Duration, refusals []string) PlacedResult {
+	reason := fmt.Sprintf("capacity wait: no node had room within %s (waited %s; agent_placement_wait_sec=%d; %d refusal(s): %s) — re-run later, raise agent_placement_wait_sec, or add a node",
+		wait, idle.Round(time.Second), r.cfg.AgentPlacementWaitSec, len(refusals), strings.Join(refusals, "; "))
+	return PlacedResult{
+		Node: local.NodeID, Seat: local.AgentSeat, JobID: seed.JobID,
+		PlacementReason: reason, waited: true, unplaced: true, CapacityWaitSec: idle.Seconds(),
+		Replacements: len(refusals),
+		Result: core.AgentWireResult{
+			SchemaVersion: core.AgentWireSchemaVersion,
+			Deferred:      true,
+			DeferClass:    core.DeferClassCapacity,
+			Reason:        reason,
+		},
+	}
+}
+
+// shedResult is the sheddable run's outcome when no node had an idle slot:
+// deferred at once, class capacity, marked shed.
+func (r *runner) shedResult(local NodeView, seed PlacedResult, refusals []string) PlacedResult {
+	reason := fmt.Sprintf("shed (priority %d): no node had an idle slot for sheddable work (%d refusal(s): %s) — sheddable contracts take idle capacity only; re-run when the fleet is quieter or drop the priority flag",
+		r.priority, len(refusals), strings.Join(refusals, "; "))
+	return PlacedResult{
+		Node: local.NodeID, Seat: local.AgentSeat, JobID: seed.JobID,
+		PlacementReason: reason, shed: true, unplaced: true, Replacements: len(refusals),
+		Result: core.AgentWireResult{
+			SchemaVersion: core.AgentWireSchemaVersion,
+			Deferred:      true,
+			DeferClass:    core.DeferClassCapacity,
+			Reason:        reason,
+		},
 	}
 }
 
@@ -1021,6 +1367,13 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 	}
 	if pl.tried[""] {
 		return placement{}, head + ", and the local seat had already been tried", false
+	}
+	// A text lease reserves the local seat for re-placement exactly as it does
+	// for first placement (0.113.18; before this a remote's 503 fell straight
+	// onto the reserved cards — the 2026-09-05 incident through a side door).
+	// The capacity wait, not this fall-back, is what watches for the release.
+	if info := LocalLease(r.cfg.GPULockPath, r.cfg.StateDir); Reserved(info) {
+		return placement{}, head + ", and the local seat is reserved (" + HolderLine(info) + ")", false
 	}
 	return placement{
 		view:   r.localView(),
@@ -1468,11 +1821,15 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 		if d.reserved {
 			// Reserved at deal time; the lease may have cleared since (a run
 			// can wait minutes in the semaphore), so re-read before deciding.
-			info, waited := r.awaitLease(ctx)
-			if Reserved(info) {
-				return finish(r.reservedDefer(localView, info, waited, reason))
+			// Still reserved: hand the subtask to the capacity wait (0.113.18),
+			// which watches the lease AND every remote's room — not through
+			// finish(): nothing ran, so there is nothing to record.
+			if Reserved(LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)) {
+				// reason already names the holder and why no remote qualified
+				// (placeSpread built it); it is the deferral's text when nothing frees.
+				return PlacedResult{waitCapacity: true, pendingReason: reason, PlacementReason: reason}
 			}
-			reason += fmt.Sprintf(" — lease cleared after %s, running local", waited.Round(time.Second))
+			reason += " — lease cleared, running local"
 		}
 	default:
 		// Placement. Health is fetched ONLY when a remote could actually be
@@ -1525,13 +1882,11 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// ineligible-remote" is exactly the placement the reservation
 			// exists to forbid. Wait for the holder (agent_lease_wait_sec),
 			// then defer naming it — never run on the reserved cards.
-			why, class := r.noEligibleRemote(st, views, probeErrs)
-			info, waited := r.awaitLease(ctx)
-			if Reserved(info) {
-				return finish(r.reservedDefer(localView, info, waited, "local seat reserved ("+HolderLine(info)+"); no eligible remote — "+why))
-			}
-			reason = fmt.Sprintf("local seat was reserved (%s), lease cleared after %s; no eligible remote — %s", HolderLine(leaseInfo), waited.Round(time.Second), why)
-			deadFleet = class == core.DeferClassInfrastructure
+			// Since 0.113.18 the wait is the capacity wait (awaitCapacity):
+			// it watches the lease AND every remote's room, so a remote that
+			// frees while the local card is reserved takes the work.
+			why, _ := r.noEligibleRemote(st, views, probeErrs)
+			return PlacedResult{waitCapacity: true, pendingReason: "local seat reserved (" + HolderLine(leaseInfo) + "); no eligible remote — " + why}
 		case chosen.Local:
 			why, class := r.noEligibleRemote(st, views, probeErrs)
 			reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
@@ -2055,11 +2410,21 @@ func (p *pollFailLog) summarize() {
 //	                               build). No node said anything, so there is
 //	                               nothing for another node to say differently.
 func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.RawMessage) (refused bool, status int, err error) {
-	env, merr := json.Marshal(map[string]any{
+	envelope := map[string]any{
 		"job_id":    jobID,
 		"task_type": string(core.TaskAgentRun),
 		"payload":   payload,
-	})
+	}
+	// Scheduling band (0.113.18) rides the envelope's contract-reserved
+	// `priority` — a field every node since v2 accepts (older ones ignore it),
+	// sent only when non-zero so a band-0 run's bytes are unchanged. The tenant
+	// rides a header (fleetnode.TenantHeader) because the node's envelope decode
+	// rejects unknown FIELDS, and a new one would 400 on every node a release
+	// behind; a header is ignored by nodes that do not read it.
+	if r.priority != 0 {
+		envelope["priority"] = r.priority
+	}
+	env, merr := json.Marshal(envelope)
 	if merr != nil {
 		return false, 0, fmt.Errorf("marshaling dispatch envelope: %w", merr)
 	}
@@ -2075,6 +2440,9 @@ func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.
 		req.Header.Set("Content-Type", "application/json")
 		if r.cfg.FleetAuthToken != "" {
 			req.Header.Set("Authorization", "Bearer "+r.cfg.FleetAuthToken)
+		}
+		if r.tenant != "" {
+			req.Header.Set(core.TenantHeader, r.tenant)
 		}
 		resp, derr := fleetClient.Do(req)
 		if derr != nil {
@@ -2207,32 +2575,6 @@ func (r *runner) fetchViews(ctx context.Context) (views []NodeView, bases []stri
 // evidence about the fleet is never evidence about the contract. When both are
 // true the reason names both and the CLASS is the loud one — a false alarm costs
 // an operator one look, a silent failure costs a night.
-// awaitLease waits up to cfg.AgentLeaseWaitSec for a TEXT lease on the local
-// seat to clear, re-reading the lease once a second (InspectDir applies the
-// full reclaim rule, so a crashed holder clears on its own). Returns the LAST
-// reading and how long it waited; the caller decides. 0 = one read, no wait.
-// The run's ctx bounds the wait as well: a cancelled caller stops waiting.
-func (r *runner) awaitLease(ctx context.Context) (gpulease.Info, time.Duration) {
-	start := time.Now()
-	deadline := start.Add(time.Duration(r.cfg.AgentLeaseWaitSec) * time.Second)
-	for {
-		info := LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)
-		if !Reserved(info) || !time.Now().Before(deadline) {
-			return info, time.Since(start)
-		}
-		select {
-		case <-ctx.Done():
-			return info, time.Since(start)
-		case <-time.After(leasePollInterval):
-		}
-	}
-}
-
-// leasePollInterval is how often awaitLease re-reads a reserved lease. One
-// second matches gpulease's own acquire poll: a waiter starts within a second
-// of the release, and the read is a stat + a small file.
-const leasePollInterval = time.Second
-
 // reservedDefer is the result for a contract that could only have run on a
 // seat a TEXT lease reserves: deferred, class infrastructure (the box needs a
 // human's timing decision, not a rewritten contract), the holder named so the

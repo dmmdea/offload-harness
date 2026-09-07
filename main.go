@@ -1919,9 +1919,14 @@ func runDelegate(args []string) error {
 	readRoot := fs.String("read-root", "", "directory context_paths may be read from (default: the current dir)")
 	var remotes repeatedFlag
 	fs.Var(&remotes, "remote", "remote fleet node base URL, tailnet-only (repeatable)")
+	priority := fs.Int("priority", 0, "scheduling band for every subtask: 0 (default, production) | -1 (sheddable: measurement/gate traffic — takes idle fleet capacity only, never queues before or behind production work, shed when no node is idle) | 1 (urgent)")
+	tenant := fs.String("tenant", "", "tenant id the fleet round-robins across (default: host-pid-start, or LOCAL_OFFLOAD_TENANT)")
 	_ = fs.Parse(args)
 	if err := leftoverArgErr(fs, "delegate"); err != nil {
 		return err
+	}
+	if *tenant == "" {
+		*tenant = delegate.DefaultTenant()
 	}
 	cfg := loadCfg(fs)
 	// Same switch that gates the MCP tool's registration (roast delta 13): a
@@ -1953,7 +1958,8 @@ func runDelegate(args []string) error {
 		return err
 	}
 	defer cleanup()
-	results, sum, err := delegate.Run(context.Background(), cfg, p.RunAgentContract, contracts, *route, remotes)
+	results, sum, err := delegate.RunWith(context.Background(), cfg, p.RunAgentContract, contracts, *route, remotes,
+		&delegate.RunOptions{Priority: *priority, Tenant: *tenant})
 	if err != nil {
 		return err
 	}
