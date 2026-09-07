@@ -361,7 +361,7 @@ Callers with their own graphs can still reach the model through
 manifest (e.g. the creative-marketing-pipelines scene-swap). **Pin a `_1` GGUF quant
 (`Q4_1`/`Q5_1`), never a `_K_` one:** 2511 K-quants fail `UnetLoaderGGUF` with
 `cannot reshape array` even on byte-perfect files (city96/ComfyUI-GGUF #247). Measured on
-`ampere-16` 2026-07-19: Q5_1 (15.4 GB) + fp8 encoder fits 16 GB with block-swap, composite peak
+`blackwell-16` (<node-b>, then a single RTX 5060 Ti 16 GB) 2026-07-19: Q5_1 (15.4 GB) + fp8 encoder fits 16 GB with block-swap, composite peak
 15,757 MiB. FLUX-family models remain prohibited
 ([ADR 0011](../architecture/decisions/0011-flux-family-license-prohibition.md)).
 

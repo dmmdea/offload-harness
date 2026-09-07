@@ -6,6 +6,27 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.31] — 2026-09-07 — the fleet facts the docs still had wrong
+
+Follow-up to 0.113.30. A staleness sweep across every surface that repeats fleet hardware facts found the docs
+describing machines that have since changed and tiers that have since been measured. Documentation only.
+
+- **`setup/SETUP-AGENT.md`** — named only `ampere-8` and `blackwell-16` as validated on real hardware; seven
+  tiers are measured. `blackwell-16` and `ampere-6` rows carried pre-measurement projections.
+- **`docs/systems/setup-installer.md`** — "each matching the tier it actually runs" is no longer true for two of
+  the three boxes it cites, and the multi-GPU classification row did not say what `Get-Profile` actually returns
+  for three cards (`dual-gpu`).
+- **`docs/systems/fleet-node.md`** described <node-b> in the present tense as a 2x16 GiB box; it has been 3x16 GiB
+  since 2026-08-31. **`docs/systems/accelerators.md`**'s "today that is one device" is a fleet inventory claim that
+  ignores the measured Coral on the Lenovo (device measured, harness lane still an unmerged draft).
+- **`README.md`** generalised a 780M/RDNA3 figure to all AMD: prompt processing is ~4x CPU on RDNA3 but a measured
+  **1.26x** on GCN, because Vega has no matrix cores.
+- **`docs/OPERATOR-GUIDE.md`** had no `blackwell-2x16` row at all — the tier with the most measurements behind it.
+- **`docs/tiers/reports/*`** banners stopped at 2026-08-05 and read as current; ADR 0019's addendum called measured
+  tiers projected.
+
+No code paths change.
+
 ## [0.113.30] — 2026-09-07 — three tiers were measured and the docs said PROJECTED: notes corrected, fleet table corrected
 
 A rebuild of the tier/model matrix's "Tested on (reference hardware)" column searched the evidence instead of the prose,

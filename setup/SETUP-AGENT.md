@@ -116,7 +116,7 @@ projected per-profile serving choices — `selftest.ps1` measures and refines th
 | `blackwell-72` | #15 (RTX PRO 5000 72 GB; PRO 6000 96 GB) | **ALL-RESIDENT** (whole roster hot, no swap group, no ttl) | 128K | **f16** | full-GPU, resident |
 | `blackwell-48` | #14 (RTX PRO 5000 48 GB) | **ALL-RESIDENT** | 128K | **f16** | full-GPU, resident |
 | `blackwell-32` | #13 (RTX 5090 / RTX PRO 4500, 32 GB) | **ALL-RESIDENT** | 64K | q8_0 | full-GPU, resident |
-| `blackwell-16` | #1 (5060 Ti 16 GB) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU — CUDA-13 serves (slower); 12.8 for peak |
+| `blackwell-16` | #1 (5060 Ti 16 GB) — MEASURED on <node-b> 2026-07-12..08-02 | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU — CUDA-13 serves (slower); 12.8 for peak |
 | `volta-16` | #2 (V100 16 GB) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU |
 | `ampere-16` | 3090-class ≥12 GB (defensive) | `offload-e4b` (agent `qwen3.5-4b-agent`, `research`) | 32K | q8_0 | 26B dropped — MEASURED 2026-09-04 on an A2 16 GB @ 40 W: 26B-A4B 1/8, 4B 8/8 |
 | `dual-gpu` | #3/#4 (5060 Ti + V100 32 GB) | 26B architect + E4B editor, both resident | 32K | q8_0 | resident, **zero-swap** two-tier |
@@ -124,7 +124,7 @@ projected per-profile serving choices — `selftest.ps1` measures and refines th
 | `blackwell-8` | #8/#9 (5060 8 GB; +64 GB) | `offload-e4b` | 16K | q8_0 | `--cpu-moe` if RAM ≥ ~56 GB; CUDA-13 serves, 12.8 peak |
 | `amd-rdna3` | #7 (780M + 64 GB, Vulkan) | `offload-e4b` | 16K (floor; canary → 32K) | f16 (floor; canary → q8_0) | `--cpu-moe` floor; canary → full-offload `-ngl 99` (~20–25 t/s measured elsewhere) — see the [AMD RDNA3 chapter](#amd-rdna3--the-780m-class-runbook-for-the-installing-agent) |
 | `amd-rdna3-dgpu` | discrete RDNA3 ≥12 GB (RX 7900-class, Vulkan) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU `-ngl 99` (on 12 GB the OOM remediation flips it to `--cpu-moe`) |
-| `ampere-6` | #10/#11 (3050 6 GB) | `gemma4-e2b` | 16K | q8_0 (**mandatory**) | dropped |
+| `ampere-6` | #10/#11 (3050 6 GB) | `offload-e4b` | 32K | q8_0 (conservative default; f16 measured viable) | dropped |
 | `amd-gcn` | #12 (Vega 7 + 32 GB, Vulkan) | `gemma4-e2b` | 8K | f16, FA off | dropped |
 | `cpu` | no GPU | `offload-e4b` (CPU) | 8K | f16, FA off | `--cpu-moe` if RAM ≥ ~56 GB, else dropped |
 
@@ -182,7 +182,7 @@ non-commercial — ADR 0011).
 > (`Q5_K_S` and friends, including the common unsloth default) **fail to load** in ComfyUI-GGUF's
 > `UnetLoaderGGUF` with `cannot reshape array`, even on a byte-perfect file (verified: disk sha ==
 > upstream LFS oid, gguf 0.19.0, pack at HEAD). Only **`Q4_1` / `Q5_1`** load for 2511 — see
-> city96/ComfyUI-GGUF issue #247. Measured live on `ampere-16` (<node-b>) 2026-07-19 by the
+> city96/ComfyUI-GGUF issue #247. Measured live on `blackwell-16` (<node-b>, then a single RTX 5060 Ti 16 GB) 2026-07-19 by the
 > creative-marketing-pipelines session: **Q5_1 (15.4GB) + fp8 Qwen2.5-VL encoder fits 16GB with
 > block-swap** — composite peak **15,757 MiB** (HiDream for comparison: 15,688 MiB). A manifest that
 > pins a K-quant will download 15GB and then fail at load time, so pin the `_1` quant explicitly.
@@ -408,8 +408,8 @@ else any file drop the human prefers):
 ```
 
 Maintainer side: those numbers replace this chapter's "expect" ranges and `profiles.json`'s
-PROJECTED notes with MEASURED values (same-PR docs), and this box becomes the harness's third
-real-hardware validation profile after `ampere-8` and `blackwell-16`.
+PROJECTED notes with MEASURED values (same-PR docs), and this box joins the harness's
+real-hardware validation set — seven tiers as of 2026-09-07 (`blackwell-2x16`, `blackwell-16`, `blackwell-8`, `ampere-8`, `ampere-6`, `ampere-16`, `amd-gcn`).
 
 ### Media tier (J2) — image generation via stable-diffusion.cpp
 

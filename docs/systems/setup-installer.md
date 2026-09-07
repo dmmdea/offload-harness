@@ -48,7 +48,8 @@ first, because a heterogeneous pair outranks any single-card band:
 
 | Condition | Profile |
 |---|---|
-| ≥2 NVIDIA GPUs | `dual-gpu` (the only path that sets `big_ram`, when RAM ≥ 120 GB) |
+| 2 NVIDIA GPUs, both Blackwell, primary 12–23 GB | `blackwell-2x16` (checked before the generic multi-GPU rule) |
+| ≥2 NVIDIA GPUs, anything else | `dual-gpu` — a 3× Blackwell rig included (`Get-Profile`'s own self-test asserts `'3x blackwell -> dual-gpu'`). The only path that sets `big_ram`, when RAM ≥ 120 GB. |
 | NVIDIA Blackwell ≥64 GB | `blackwell-72` |
 | NVIDIA Blackwell ≥40 GB | `blackwell-48` |
 | NVIDIA Blackwell ≥24 GB | `blackwell-32` |
@@ -257,7 +258,8 @@ gate refuses the node until they are present, which is the intended outcome: a n
 cannot render must not be advertised as one that can.
 
 **Line endings are load-bearing here.** A `.sh` checked out with CRLF fails at exec with
-`env: 'bash': No such file or directory` — a message naming neither the script nor the
+`env: 'bash
+': No such file or directory` — a message naming neither the script nor the
 cause. This repo is developed on Windows and deployed to Linux, so `.gitattributes` pins
 `*.sh`, the serving templates and the generated docs to LF.
 
@@ -289,14 +291,14 @@ would strip it of the entire Vulkan serving path.
 
 Verified on the fleet: <node-b> → `blackwell-2x16` (RTX 5060 Ti 16 GB **+** RTX 5070 Ti 16 GB,
 ~32 GB total), the <node-a> laptop → `ampere-8` (RTX 3070 Laptop, 8 GB), and the Linux node →
-`ampere-6` (RTX 3050, 6 GB), each matching the tier it actually runs.
+`ampere-6` (RTX 3050, 6 GB), each matching the tier that box ran AT THAT TIME. Both have since moved: the Lenovo is `ampere-16` (A2 16 GB) since 2026-09-04, and <node-b> has run three Blackwell cards since 2026-08-31 — a shape no tier id covers, which `Get-Profile` files as `dual-gpu`. [stale-marker added 2026-09-07] Historical text: each matching the tier it actually runs.
 
 > <node-b> read `blackwell-16` (single RTX 5060 Ti, 15.9 GB) until **2026-08-02**, when the
 > 5070 Ti was installed. Detection already handles this — `hwdetect.Classify` returns
 > `blackwell-2x16` for two Blackwell cards, and its test names this exact pair as the
 > reference box — but this sentence lagged, and stale "5060 Ti solo" wording in several
 > places led to the box repeatedly being budgeted as a single 16 GB card. It is 32 GB
-> across two cards. Corrected 2026-08-05.
+> across two cards. Corrected 2026-08-05. **Superseded 2026-08-31 (recorded 2026-09-07):** a THIRD card (RTX 5060 Ti 16 GB) took <node-b> to 3× 16 GB = **48.9 GB**, which `Get-Profile` files as `dual-gpu` — `blackwell-48` means ONE 48 GB card, and `blackwell-3x16` is proposed, not shipped.
 
 ### Tier media seeds (`local-offload install seed`)
 

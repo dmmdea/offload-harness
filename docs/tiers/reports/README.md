@@ -8,9 +8,9 @@ hardware — hardware, drivers and bindings differ per box.
 
 | file | machine | tier | notes |
 |---|---|---|---|
-| [blackwell-16-node-b.md](blackwell-16-node-b.md) | `<node-b>` workstation (RTX 5060 Ti 16 GB, Win 11) — **HISTORICAL, 2026-07-27** | `blackwell-16` | full ComfyUI stack; 11/11 media routes CONFIGURED. ⚠️ this box gained a second card (RTX 5070 Ti 16 GB) on **2026-08-02** and now runs **`blackwell-2x16`, ~32 GB total VRAM**. This report predates that and is kept as a point-in-time record — do NOT read it as the box's current hardware. |
+| [blackwell-16-node-b.md](blackwell-16-node-b.md) | `<node-b>` workstation (RTX 5060 Ti 16 GB, Win 11) — **HISTORICAL, 2026-07-27** | `blackwell-16` | full ComfyUI stack; 11/11 media routes CONFIGURED. ⚠️ this box gained a second card (RTX 5070 Ti 16 GB) on **2026-08-02** and a THIRD (RTX 5060 Ti 16 GB) on **2026-08-31**, so it is now **3× Blackwell 16 GB = 48.9 GB**; `blackwell-2x16` is only what its 2-card seats run as, and no shipped tier id covers a 3-card rig (`Get-Profile` files it as `dual-gpu`; `blackwell-3x16` is proposed, not shipped). This report predates that and is kept as a point-in-time record — do NOT read it as the box's current hardware. |
 | [ampere-8-node-a.md](ampere-8-node-a.md) | `<node-a>` laptop (RTX 3070 8 GB, Win 11) | `ampere-8` | after binding `voicegen_script`; render tree co-located with the binary |
-| [ampere-6-node-c.md](ampere-6-node-c.md) | `<node-c>` mini-PC (RTX 3050 6 GB, Ubuntu) | `ampere-6` | Linux node; `sdcpp` image engine, ComfyUI bound |
+| [ampere-6-node-c.md](ampere-6-node-c.md) | `<node-c>` mini-PC (RTX 3050 6 GB, Ubuntu) — **HISTORICAL, 2026-07-27** | `ampere-6` | Linux node; `sdcpp` image engine, ComfyUI bound. ⚠️ this box's RTX 3050 was replaced by an **NVIDIA A2 16 GB** on **2026-09-04**, so it now runs **`ampere-16`**. This report predates that — do NOT read it as the box's current hardware. |
 
 All three show `hardware tier: UNKNOWN`. None of them was installed by `install.ps1` into the default
 `$OFFLOAD_HOME`, which is the only place the manifest is looked for today — a box installed the
