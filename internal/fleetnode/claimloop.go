@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/fleetqueue"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 )
@@ -109,12 +110,70 @@ func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, node
 		s.settle(ctx, client, holder, cfg, "ack", job.ID, nodeID, res.Data, "")
 		return res.Data, nil
 	}
-	if created := s.jobs.Accept(job.ID, run); !created {
+	// The SAME AcceptSpec the push path builds (server.go's handleDispatch),
+	// because this is the same surface: before 0.113.27 this called bare
+	// Accept, i.e. AcceptSpec{}, and every field it dropped had a consequence.
+	//
+	//   Agent     — handleJob gates an agent job's state AND RESULT behind the
+	//               bearer token by reading this marker. Unset, a PULLED agent
+	//               contract's result was readable without the token while the
+	//               identical contract arriving by dispatch was gated, and
+	//               handleJobs' agent-row error redaction was skipped too.
+	//   Uncapped  — a pulled render consumed a concurrency slot the cap does
+	//               not exist to protect.
+	//   OnDropped — drain's never-started arm could not clean up, stranding
+	//               the materialized job dir.
+	//   Task/Model— the /fleet/jobs feed showed a pulled job with no task and
+	//               no model.
+	//
+	// Band and Tenant are NOT set: fleetqueue.Job does not carry them, so
+	// there is nothing honest to fill them with. A pulled job therefore rides
+	// the default band, which is what it did before this change.
+	spec := s.claimSpec(job.TaskType, cleanup)
+	if created := s.jobs.Admit(job.ID, spec, run); !created {
 		// Already known locally (a lease-expiry re-claim of our own job):
-		// the original run's settle will ack; nothing to do.
+		// the original run's settle will ack; nothing to RUN.
+		//
+		// But this build's materialization is ours and nothing else will free
+		// it: OnDropped is deliberately not invoked when Admit REFUSES (see
+		// its doc), and the original job's own cleanup closes over the
+		// original dir, not this one. Left alone it strands a directory under
+		// pipeline-jobs/ until the next fleet-serve start sweeps it
+		// (0.113.27; the run closure that would have deferred cleanup never
+		// executes on this path).
+		cleanup()
 		return job.ID, true
 	}
 	return job.ID, true
+}
+
+// claimSpec is the AcceptSpec a PULLED job is admitted with. It exists as its
+// own function so the pull path's spec is testable without a live holder — the
+// fields it sets are decided at admission and are not observable afterwards on
+// a job that was admitted wrong.
+//
+// Band and Tenant are deliberately absent: fleetqueue.Job does not carry them,
+// so there is nothing honest to fill them with, and a pulled job rides the
+// default band exactly as it did before 0.113.27.
+func (s *Server) claimSpec(taskType string, cleanup func()) AcceptSpec {
+	spec := AcceptSpec{
+		// Agent gates the bearer check on this job's state AND RESULT
+		// (handleJob), and handleJobs' agent-row error redaction. Unset, a
+		// pulled agent contract's result was readable without the token while
+		// the identical contract arriving by dispatch was gated.
+		Agent: taskType == string(core.TaskAgentRun),
+		// Uncapped keeps a pulled render off the concurrency cap that exists
+		// to protect the shared text endpoint it never touches.
+		Uncapped: !s.concurrencyCapped(taskType),
+		// OnDropped is the only cleanup a job that is admitted and then
+		// drained without ever starting will get.
+		OnDropped: cleanup,
+		Task:      taskType,
+	}
+	if spec.Agent {
+		spec.Model = s.agentSeat
+	}
+	return spec
 }
 
 // settle acks or nacks the holder, best-effort with one retry: a lost settle

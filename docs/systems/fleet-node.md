@@ -277,6 +277,17 @@ refuses NEW work with the same re-placeable 503 the queue cap uses — `node lea
 lease (a render arbitrated on the node itself) never refuses. The node stays up, keeps answering health and finishes what it
 holds: a measurement window no longer stops the fleet node to keep foreign digests off the card.
 
+**Duration, not just class (0.113.27).** The lease block also carries `remaining_sec` and `busy` — this node's OWN verdict that its card is
+spoken for long enough that a delegator should place elsewhere, for a lease of ANY class, decided by `fleet_busy_lease_sec` (default 120
+seconds; negative disables the rule and restores the text-only behaviour). The verdict travels rather than the threshold, so a delegator never
+needs a remote box's config; a node one release behind omits both fields, which decode to false and mean exactly what they meant before. The
+delegator reads it as `NodeView.LeaseBusy`, `remoteEligible` excludes it exactly as it excludes a text lease, and an operator asking why
+nothing landed there sees "long GPU lease held" beside the existing "text lease held". Why: a MEDIA lease never refused, which is correct for
+the 20-second render it was designed around and wrong for the harness's longest jobs — anything holding that lease for hours left this node
+publishing idle slots while its card was gone, and placement routed work TOWARD it. `refusing` and `idle_slot` are now derived together, so a
+node that would turn work away never advertises a free slot; and the saturation SCORE is computed from the CAPPED running set, the same set
+`idle_slot` measures, because feeding it the all-jobs count let a node publish `score 1.0` and `idle_slot true` in one payload.
+
 **`store`** — published only when `fleet_store_root` is configured: the store steward's last status
 (`root, used_gb, cap_gb, high_gb, low_gb, files, last_scan, last_prune, last_removed, last_freed_gb, prunes, jobs_since_tick,
 error`). The steward (internal/storesteward) keeps a persistent KV page store this node owns on disk under a budget the box

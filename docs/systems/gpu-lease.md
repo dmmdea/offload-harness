@@ -45,7 +45,11 @@ local-offload gpu reserve --class text --for 45m --reason "kv bench" -- <command
 ```
 
 `--detach` holds the card in a hidden background process for an interactive session. It is the
-weaker form by design — nothing ties the lease to a command's lifetime:
+weaker form by design — nothing ties the lease to a command's lifetime, so **`--for` is REQUIRED with
+`--detach` (0.113.27)**: the holder exits at that deadline and releases whether or not the work has
+finished, and the old 45-minute default silently freed the card mid-job, after which the next render
+claimed it and unloaded the seat on top of the running work. Declare the real window, or wrap the
+command:
 
 ```
 local-offload gpu reserve --class text --for 45m --reason "kv bench" --detach
@@ -159,7 +163,13 @@ So the Model Affinity Gate (`internal/modelaffinity`), which is the one chokepoi
 admissions can change what llama-swap holds resident, now waits for a `media` holder before granting
 one — and grants a request that JOINS the resident model's in-flight batch without reading the lease
 at all, because that cannot move VRAM. It reads with `InspectDir` and never acquires, so the write-path
-cost this lease refused for text is untouched. A `text` reservation does not block text, and only an
+cost this lease refused for text is untouched. A `text` reservation does not block text — and since
+0.113.27 it no longer makes the VISION lane wait pointlessly either: `gpulock.WaitFree` carries the
+holder's declared `ExpiresAt` and short-circuits when a TEXT window outlasts the caller's wait, the
+same rule `gpulease.Acquire` already applied. Before that, every `vqa`/`ocr`/`assess_image`/
+`video_describe` call burned its full `vision_gpu_wait_sec` (90 s) against a multi-hour hold, for the
+hold's whole life. A MEDIA holder is deliberately never short-circuited: its expiry is a timeout
+CEILING, not a promise. Only an
 INHERITED lease (`GPU_LEASE_EPOCH`) exempts a caller — the holder's own pid deliberately does not, or
 `fleet-serve` would un-gate itself. See
 [ADR 0026](../architecture/decisions/0026-text-load-admissions-wait-for-the-media-lease.md).

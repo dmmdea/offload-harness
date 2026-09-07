@@ -108,6 +108,21 @@ func runGPUReserve(args []string) error {
 	unload := fs.Bool("unload-seat", false, "after the drain, unload the agent seat through llama-swap so the cards are free; the wrapper form warms it back when the command ends (detach: use `gpu release --warm-seat`)")
 	asJSON := fs.Bool("json", false, "emit JSON")
 	_ = fs.Parse(args)
+	// A DETACHED holder exits at --for and releases, whether or not the work is
+	// still running (the loop below). With the 45-minute default that silently
+	// frees the card mid-job: the next render then claims it and unloads the
+	// seat on top of the running work, and the node is left advertising a seat
+	// that is not there (2026-09-07 audit). The wrapper form ties the hold to a
+	// process and needs no window, so the requirement lands only on --detach.
+	forGiven := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "for" {
+			forGiven = true
+		}
+	})
+	if *detach && !forGiven {
+		return errors.New("--detach requires an explicit --for: a detached holder releases the card at that deadline whether or not the work has finished, and the default window would free it mid-job. Declare the real window (e.g. --for 8h), or use the wrapper form `gpu reserve ... -- <command>`, which holds the lease exactly as long as the command runs")
+	}
 	if *unload && !*drain {
 		return errors.New("--unload-seat requires --drain: never unload a seat with a request in flight")
 	}
@@ -194,7 +209,7 @@ func runGPUReserve(args []string) error {
 		case err := <-done:
 			var ee *exec.ExitError
 			if errors.As(err, &ee) {
-				finish() // os.Exit skips defers: warm back + release explicitly
+				finish()               // os.Exit skips defers: warm back + release explicitly
 				os.Exit(ee.ExitCode()) // propagate so shell loops branch correctly
 			}
 			return err

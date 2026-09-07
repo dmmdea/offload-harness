@@ -237,6 +237,18 @@ func (j *Jobs) MaxConcurrent() int {
 // (state running). Terminal entries are results awaiting pollers, not load, and
 // count as neither. QueueDepth is defined as their sum, so the published
 // queue_depth can never drift from the split published beside it.
+// RunningCapped is the count of executing jobs that COUNT AGAINST
+// fleet_max_concurrent_jobs — the same set IdleSlot measures against the cap
+// (runningCappedLocked). Saturation's score must be computed from this, not
+// from Counts' all-jobs running: the two disagree whenever an uncapped job
+// (a render, an stt, a pipeline route) is executing, and a node could then
+// publish score 1.0 and idle_slot true in one payload (2026-09-07 audit).
+func (j *Jobs) RunningCapped() int {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.runningCappedLocked()
+}
+
 func (j *Jobs) Counts() (queued, running int) {
 	j.mu.RLock()
 	defer j.mu.RUnlock()

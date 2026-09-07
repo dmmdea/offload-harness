@@ -112,7 +112,7 @@ type Server struct {
 	// queue is the Option B consolidated pull queue (ADR 0030) — non-nil ONLY
 	// when this node is the config-elected holder (fleet_queue_host). Opened
 	// by EnableQueueHost; the routes mount only when it is non-nil.
-	queue *fleetqueue.Queue
+	queue    *fleetqueue.Queue
 	tasks    []string
 	families []string
 	// agentSeat is the resolved agent planner seat (config.AgentPlannerModel:
@@ -475,14 +475,14 @@ type healthPayload struct {
 	// source can't enumerate devices, so "no gpu_devices key" unambiguously
 	// means "single-device source" — the exact shape every pre-fix node and
 	// consumer already expects.
-	GpuDevices            []GPUDevice      `json:"gpu_devices,omitempty"`
+	GpuDevices []GPUDevice `json:"gpu_devices,omitempty"`
 	// GpuUtilPct is the BUSIEST device's utilization (PAIR's multi-GPU rule,
 	// adopted deliberately: the shared card is the one that matters). ALWAYS
 	// present (never omitempty); when GpuUtilKnown is false, the value is 0
 	// and meaningless. GpuUtilKnown is the validity flag: true means nvidia-smi
 	// reported this, false means it was not queried or the query failed.
-	GpuUtilPct   int  `json:"gpu_util_pct"`
-	GpuUtilKnown bool `json:"gpu_util_known"`
+	GpuUtilPct            int              `json:"gpu_util_pct"`
+	GpuUtilKnown          bool             `json:"gpu_util_known"`
 	SupportedTaskTypes    []string         `json:"supported_task_types"`
 	LoadableModelFamilies []string         `json:"loadable_model_families"`
 	ModelFootprints       []FootprintEntry `json:"model_footprints"`
@@ -695,17 +695,27 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	// GPU lease: a stat + a small file, the same read every acquirer does.
 	leasedText := false
+	leaseBusy := false
 	if s.opts.Lease != nil {
 		if info := s.opts.Lease(); info.Held {
-			payload.Lease = leaseHealthOf(info)
+			payload.Lease = leaseHealthOf(info, time.Now(), s.opts.Cfg.FleetBusyLeaseSec)
 			leasedText = info.Class == gpulease.ClassText
+			// Any class, judged by REMAINING time (0.113.27): a long media
+			// reservation takes the card just as completely as a text one.
+			leaseBusy = payload.Lease.Busy
 		}
 	}
 	// Saturation (0.113.18): derived from the counters above and the two
 	// refusal states dispatch applies to NEW work, so it can never disagree
 	// with what a dispatch would actually get.
-	sat := saturationOf(queued, running, payload.MaxConcurrentJobs, payload.MaxQueueDepth,
-		s.jobs.Draining() || leasedText, s.jobs.IdleSlot())
+	// refusing is the node's own verdict that a NEW dispatch would be turned
+	// away right now. idle_slot must agree with it: it means "a job handed to
+	// me would start immediately", which is false while we refuse. Before
+	// 0.113.27 the two were computed independently, so a draining or leased
+	// node still advertised an idle slot and sheddable work was dealt to it.
+	refusing := s.jobs.Draining() || leasedText || leaseBusy
+	sat := saturationOf(queued, running, s.jobs.RunningCapped(), payload.MaxConcurrentJobs, payload.MaxQueueDepth,
+		refusing, s.jobs.IdleSlot() && !refusing)
 	payload.Saturation = &sat
 	// Store steward: a cached status; Status() itself starts a background
 	// tick when the last scan read above the high mark, so a health poll is a
@@ -782,10 +792,19 @@ type SaturationHealth struct {
 }
 
 // saturationOf computes the block from the same numbers health publishes.
-func saturationOf(queued, running, maxConcurrent, maxDepth int, refusing, idleSlot bool) SaturationHealth {
+// saturationOf derives the published saturation from the counters and the two
+// refusal states dispatch applies to NEW work.
+//
+// runningCapped, NOT running, is what the concurrency term measures (fixed
+// 2026-09-07): maxConcurrent caps only the capped set, which is exactly what
+// IdleSlot compares against, so feeding this the all-jobs count let a node
+// publish score 1.0 and idle_slot true in the same payload whenever an
+// uncapped job was executing. The DEPTH term keeps using the all-jobs count,
+// because max_queue_depth bounds every admitted job regardless of capping.
+func saturationOf(queued, running, runningCapped, maxConcurrent, maxDepth int, refusing, idleSlot bool) SaturationHealth {
 	var score float64
 	if maxConcurrent > 0 {
-		score = float64(running) / float64(maxConcurrent)
+		score = float64(runningCapped) / float64(maxConcurrent)
 	}
 	if maxDepth > 0 {
 		if s := float64(queued+running) / float64(maxDepth); s > score {
@@ -806,10 +825,50 @@ type LeaseHealth struct {
 	PID    int    `json:"pid"`
 	Reason string `json:"reason,omitempty"`
 	Until  string `json:"until"` // RFC3339
+	// RemainingSec and Busy are additive (0.113.27). RemainingSec is how much
+	// longer the card is spoken for; Busy is THIS NODE'S OWN verdict that the
+	// reservation is long enough to make it a non-target (fleet_busy_lease_sec).
+	//
+	// The verdict travels rather than the threshold so a delegator never has to
+	// know a remote box's config, and a node one release behind simply omits
+	// both — decoding to false, i.e. exactly the pre-0.113.27 behaviour.
+	RemainingSec int  `json:"remaining_sec,omitempty"`
+	Busy         bool `json:"busy,omitempty"`
 }
 
-func leaseHealthOf(info gpulease.Info) *LeaseHealth {
-	return &LeaseHealth{Held: true, Class: string(info.Class), PID: info.PID, Reason: info.Reason, Until: info.ExpiresAt.UTC().Format(time.RFC3339)}
+// FleetBusyLeaseSecDefault is the remaining-time threshold above which a held
+// lease of ANY class makes the node a non-target. Two minutes: longer than any
+// ordinary render arbitrated on the node, far shorter than a measurement window
+// or a training run.
+const FleetBusyLeaseSecDefault = 120
+
+// busyLeaseThreshold resolves fleet_busy_lease_sec: 0/unset = the default,
+// negative = the rule is off (text-only refusal, the pre-0.113.27 behaviour).
+func busyLeaseThreshold(cfgSec int) (time.Duration, bool) {
+	switch {
+	case cfgSec < 0:
+		return 0, false
+	case cfgSec == 0:
+		return FleetBusyLeaseSecDefault * time.Second, true
+	default:
+		return time.Duration(cfgSec) * time.Second, true
+	}
+}
+
+func leaseHealthOf(info gpulease.Info, now time.Time, cfgSec int) *LeaseHealth {
+	h := &LeaseHealth{Held: true, Class: string(info.Class), PID: info.PID, Reason: info.Reason, Until: info.ExpiresAt.UTC().Format(time.RFC3339)}
+	if info.ExpiresAt.IsZero() {
+		return h
+	}
+	remaining := info.ExpiresAt.Sub(now)
+	if remaining < 0 {
+		remaining = 0
+	}
+	h.RemainingSec = int(remaining / time.Second)
+	if thr, on := busyLeaseThreshold(cfgSec); on {
+		h.Busy = remaining > thr
+	}
+	return h
 }
 
 // textLeased reports whether this node's own card is reserved by a TEXT-class
@@ -857,7 +916,12 @@ func (s *Server) textLeased() (gpulease.Info, bool) {
 // this release exists to remove.
 func (s *Server) concurrencyCapped(taskType string) bool {
 	switch taskType {
-	case "image-gen", "video-gen", "audio-gen", "run-graph", "stt":
+	// animate joined this list 2026-09-07: it runs a ComfyUI render through
+	// gpugen under acquireMediaLease exactly as image-gen/video-gen do, never
+	// touching the shared text endpoint the cap protects. Capping it made it
+	// hold a fleet execution slot while parked in the capacity-1 media slot —
+	// verbatim the failure the rule above says the exemption exists to prevent.
+	case "image-gen", "video-gen", "animate", "audio-gen", "run-graph", "stt":
 		return false
 	}
 	// Config-driven pipeline routes run through runPipelineJob, which takes the

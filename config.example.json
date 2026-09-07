@@ -206,6 +206,7 @@
   "fleet_node_id": "",
   "fleet_max_queue_depth": 0,
   "fleet_max_concurrent_jobs": 0,
+  "fleet_busy_lease_sec": 0,
   "fleet_store_root": "",
   "fleet_store_cap_gb": 0,
   "fleet_store_prune_every_jobs": 0,
