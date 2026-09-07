@@ -97,7 +97,7 @@ func seatInflight(ctx context.Context, client *http.Client, endpoint, model stri
 		// is_processing, which is the in-flight count for a slot-based server.
 		// Only these two statuses fall back: a 500 or a timeout is "could not
 		// read" and must never pass as idle.
-		return slotsInflight(ctx, client, base, model)
+		return slotsInflight(ctx, client, base, model, resp.StatusCode)
 	default:
 		return 0, true, fmt.Errorf("seat metrics: status %d", resp.StatusCode)
 	}
@@ -108,7 +108,7 @@ func seatInflight(ctx context.Context, client *http.Client, endpoint, model stri
 // task queue) is not listed by /slots — it becomes a processing slot the
 // instant one frees — which is why drainSeat asks for TWO consecutive idle
 // reads before it calls the seat drained.
-func slotsInflight(ctx context.Context, client *http.Client, base, model string) (inflight int, loaded bool, err error) {
+func slotsInflight(ctx context.Context, client *http.Client, base, model string, metricsStatus int) (inflight int, loaded bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/upstream/"+url.PathEscape(model)+"/slots", nil)
 	if err != nil {
 		return 0, true, err
@@ -119,7 +119,7 @@ func slotsInflight(ctx context.Context, client *http.Client, base, model string)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, true, fmt.Errorf("seat metrics: status 501 (no --metrics) and seat slots: status %d", resp.StatusCode)
+		return 0, true, fmt.Errorf("seat metrics: status %d (no --metrics) and seat slots: status %d", metricsStatus, resp.StatusCode)
 	}
 	n, perr := parseSlotsInflight(io.LimitReader(resp.Body, 4<<20))
 	if perr != nil {
