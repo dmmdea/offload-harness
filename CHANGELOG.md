@@ -18,6 +18,10 @@ rule, not liveness), and both the CLI and `local-agent` say which file they use.
 reports `path` (the file actually opened), `configured`, and `fallback`. A non-lock failure (bad path, permissions) still
 surfaces as the error it is. Item 5 ("harness result cache") of the 2026-09-06 operator order; the correctness gate is the
 existing single-writer + round-trip tests plus the new fallback/sweep/non-lock tests.
+Review fixes before merge: the sweep is anchored to the exact `<stem>.p<pid><ext>` shape (an operator's `cache.prev.db` beside the
+cache is never touched — tested), it runs on every open so siblings left by an earlier busy window do not accumulate once
+contention ends, and the status text for an unopened cache now says what it means after this change (both files failed, or
+no path configured) instead of the old benign "held by another process".
 
 ## [0.113.20] — 2026-09-07 — spread skips the local rotation slot when the local seat is busy; the drain resolves an alias-bound seat
 

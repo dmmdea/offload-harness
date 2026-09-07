@@ -518,10 +518,18 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 			"note":       note,
 		}
 	} else {
+		reason := "cache_path is empty: caching is opted out on this box; agent_run re-runs the model on repeated identical input"
+		if cfg.CachePath != "" {
+			// 0.113.21: lock contention alone no longer lands here (the
+			// per-process fallback absorbs it), so an unopened cache with a
+			// configured path means BOTH the shared file and the sibling failed
+			// — disk, permissions, a bad path — and the startup stderr names it.
+			reason = "neither the configured cache nor its per-process fallback could be opened (not lock contention: the fallback absorbs that) — disk, permissions or a bad cache_path; see the server's startup stderr; agent_run re-runs the model on repeated identical input"
+		}
 		reuse["result_cache"] = map[string]any{
 			"available": false,
 			"path":      cfg.CachePath,
-			"reason":    "not opened (cache_path empty, or the file is held by another process); agent_run re-runs the model on repeated identical input",
+			"reason":    reason,
 		}
 	}
 

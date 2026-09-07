@@ -245,3 +245,54 @@ func TestOpenPreferredReportsANonLockFailure(t *testing.T) {
 		t.Fatalf("a missing directory must error without falling back, got fb=%v err=%v", fb, err)
 	}
 }
+
+// TestSweepNeverTouchesFilesItDidNotName is the review finding: an operator's
+// backup beside the cache ("cache.prev.db", "cache.patched.db") shares the
+// "cache.p*" prefix and must survive a sweep however old it is.
+func TestSweepNeverTouchesFilesItDidNotName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache.db")
+	keep := []string{filepath.Join(dir, "cache.prev.db"), filepath.Join(dir, "cache.patched.db"), filepath.Join(dir, "cache.p12x.db"), filepath.Join(dir, "cache.p.db")}
+	stale := siblingPath(path, 777)
+	old := time.Now().Add(-SiblingMaxAge - time.Hour)
+	for _, f := range append(keep, stale) {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(f, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sweepStaleSiblings(path)
+	for _, f := range keep {
+		if _, err := os.Stat(f); err != nil {
+			t.Errorf("%s was removed by the sweep; only <stem>.p<pid><ext> is ours", filepath.Base(f))
+		}
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("the real stale sibling must be removed, stat err=%v", err)
+	}
+}
+
+// TestOpenPreferredSweepsOnThePrimaryPathToo: contention ended, the primary
+// opens fine — the siblings an earlier busy window left behind still get swept.
+func TestOpenPreferredSweepsOnThePrimaryPathToo(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache.db")
+	stale := siblingPath(path, 999)
+	if err := os.WriteFile(stale, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-SiblingMaxAge - time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	c, _, fb, err := OpenPreferred(path)
+	if err != nil || fb {
+		t.Fatalf("primary open expected, got fb=%v err=%v", fb, err)
+	}
+	defer c.Close()
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale sibling must be swept on the primary path too, stat err=%v", err)
+	}
+}

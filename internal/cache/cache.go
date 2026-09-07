@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +51,10 @@ const SiblingMaxAge = 12 * time.Hour
 // actually opened, whether it fell back, and the error when neither could be
 // opened. Stale siblings are swept best-effort on every fallback open.
 func OpenPreferred(path string) (c *Cache, used string, fellBack bool, err error) {
+	// The sweep runs on EVERY open, not only on the fallback path: siblings
+	// created during a contention window would otherwise be revisited only by a
+	// later process that also lost the lock, i.e. never once contention ends.
+	sweepStaleSiblings(path)
 	c, err = Open(path)
 	if err == nil {
 		return c, path, false, nil
@@ -57,7 +62,6 @@ func OpenPreferred(path string) (c *Cache, used string, fellBack bool, err error
 	if !errors.Is(err, bolt.ErrTimeout) {
 		return nil, "", false, err
 	}
-	sweepStaleSiblings(path)
 	sib := siblingPath(path, os.Getpid())
 	c, serr := Open(sib)
 	if serr != nil {
@@ -75,15 +79,22 @@ func siblingPath(path string, pid int) string {
 }
 
 // sweepStaleSiblings removes per-process siblings of path older than
-// SiblingMaxAge. Best-effort: a sibling still held by a live process fails to
-// remove (or is younger than the window) and is simply left alone.
+// SiblingMaxAge. ONLY files this package itself would have named are eligible:
+// "<stem>.p<digits><ext>", with the digits parsed as a pid — an operator's
+// "cache.prev.db" or "cache.patched.db" beside the cache is never touched (the
+// first draft's "<stem>.p*<ext>" glob would have removed them; review finding
+// 2026-09-07). Best-effort: a younger sibling is left alone, and a removal
+// that fails (Windows refuses to unlink a file another process holds open) is
+// ignored. On Linux an unlink of a still-open sibling succeeds and merely
+// detaches its directory entry — the live holder keeps working on its open
+// descriptor, so the age rule costs it nothing but the name.
 func sweepStaleSiblings(path string) {
 	ext := filepath.Ext(path)
 	stem := strings.TrimSuffix(filepath.Base(path), ext)
-	matches, _ := filepath.Glob(filepath.Join(filepath.Dir(path), stem+".p*"+ext))
+	matches, _ := filepath.Glob(filepath.Join(filepath.Dir(path), stem+".p[0-9]*"+ext))
 	own := siblingPath(path, os.Getpid())
 	for _, m := range matches {
-		if m == own {
+		if m == own || !isSiblingName(filepath.Base(m), stem, ext) {
 			continue
 		}
 		st, serr := os.Stat(m)
@@ -92,6 +103,20 @@ func sweepStaleSiblings(path string) {
 		}
 		_ = os.Remove(m)
 	}
+}
+
+// isSiblingName reports whether base is exactly "<stem>.p<pid><ext>" with a
+// numeric pid — the one shape this package creates.
+func isSiblingName(base, stem, ext string) bool {
+	if !strings.HasPrefix(base, stem+".p") || !strings.HasSuffix(base, ext) {
+		return false
+	}
+	mid := strings.TrimSuffix(strings.TrimPrefix(base, stem+".p"), ext)
+	if mid == "" {
+		return false
+	}
+	_, err := strconv.Atoi(mid)
+	return err == nil && !strings.HasPrefix(mid, "-") && !strings.HasPrefix(mid, "+")
 }
 
 // Open opens (creating if needed) the cache db.
