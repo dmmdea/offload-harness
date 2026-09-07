@@ -1650,6 +1650,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		ReadRoot:    absRoot,
 		Offload:     offload,
 		NPU:         pipeline.NewLoopNPU(cfg),
+		EnvRules:    cfg.AgentEnvRules,
 	})
 	if err != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": "building agent: " + err.Error()})
@@ -1702,6 +1703,9 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		// would hide the one record that matters most.
 		dout := map[string]any{"deferred": true, "reason": rerr.Error(), "steps": res.Steps}
 		addEffects(dout, res.Effects)
+		if len(res.RuleHits) > 0 {
+			dout["rules_fired"] = len(res.RuleHits)
+		}
 		return jsonResult(dout)
 	}
 	out := map[string]any{
@@ -1727,6 +1731,15 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		out["compactions_exhausted"] = res.CompactionsExhausted // fit=false telemetry: best-effort over-budget requests were sent
 	}
 	addEffects(out, res.Effects)
+	if !cfg.AgentEnvRules.IsZero() {
+		// The seat's environment-rule table (ADR 0036) shaped this run — say
+		// so, the way profile does: a narrowed or capped run must not be
+		// invisible to its caller.
+		out["env_rules"] = cfg.AgentEnvRules.Summary()
+	}
+	if len(res.RuleHits) > 0 {
+		out["rules_fired"] = len(res.RuleHits)
+	}
 	if res.JudgeReport != "" {
 		out["judge_report"] = res.JudgeReport // ADVISORY end-of-run audit of flagged effects
 	}
@@ -2273,6 +2286,9 @@ func addEffects(out map[string]any, effects []agent.EffectRecord) {
 		return
 	}
 	out["effects"] = counts
+	// The step trace (ADR 0036): what the corpus keeps per call, here for
+	// the caller — the same projection the fleet wire result carries.
+	out["trace"] = pipeline.TraceFromEffects(effects)
 	var flagged []agent.EffectRecord
 	for _, r := range effects {
 		if r.Status != agent.EffectCommitted {

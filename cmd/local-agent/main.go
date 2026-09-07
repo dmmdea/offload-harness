@@ -12,6 +12,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/cache"
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/sandbox"
@@ -149,6 +151,7 @@ func main() {
 	queuePath := fs.String("queue", "", "P5b standalone: drain a JSONL goal queue UNATTENDED (the capability flags become the pre-authorization envelope) instead of a single objective. No resume — a re-run reprocesses the whole queue.")
 	askQueuePath := fs.String("ask-queue", "", "file where asks deferred on the unattended run are parked for review (default when any mutating capability is enabled: ~/.local-offload/agent-asks.jsonl)")
 	rulesPath := fs.String("rules", "", "structural risk rule table (JSON array of {kind,glob,decision,severity,reason}; tighten-only — rules may deny or ask, never allow). Fails closed on a bad or missing file. Default (empty): the built-in unattended table loads (deletes + config/manifest writes queue for review; evidence/weights/workflow/lockfile mutations deny). Pass a path to REPLACE it, or 'off' to run ungated (measured 2026-08-11: the model's own security_risk annotation is a constant 'low' — 0% recall on destructive calls).")
+	envRulesPath := fs.String("env-rules", "", "environment-rule table (JSON, the config key agent_env_rules) that REPLACES the config's table for this run — the rigger's scratch validation; 'off' runs with no env rules. Validated on load; a bad file exits 2 by name.")
 	tracesDir := fs.String("traces", "", "standalone: directory for per-goal trace JSON (default: ~/.local-offload/agent-traces)")
 	goalTimeoutSec := fs.Int("goal-timeout", 300, "standalone: per-goal wall-clock budget in seconds")
 	totalTimeoutSec := fs.Int("total-timeout", 0, "standalone: optional cumulative wall-clock budget for the WHOLE drain in seconds (0 = unbounded; --goal-timeout still bounds each goal)")
@@ -310,6 +313,11 @@ func main() {
 
 	// Build the loop + tools + broker via the SHARED builder — identical across the
 	// CLI, the MCP front door, and standalone (parity by construction).
+	envRules, envErr := resolveEnvRules(*envRulesPath, cfg)
+	if envErr != nil {
+		fmt.Fprintln(os.Stderr, "error:", envErr)
+		os.Exit(2)
+	}
 	built, err := agent.Build(agent.BuildConfig{
 		PlannerBase:    plannerBase,
 		Model:          plannerModel,
@@ -317,6 +325,7 @@ func main() {
 		MaxSteps:       *maxSteps,
 		MaxTokens:      *maxTokens,
 		MaxSameTool:    *maxSameTool,
+		EnvRules:       envRules,
 		ReadRoot:       absRoot,
 		Offload:        offload,
 		NPU:            pipeline.NewLoopNPU(cfg),
@@ -492,6 +501,7 @@ func main() {
 			MaxSteps:             *maxSteps,
 			MaxTokens:            *maxTokens,
 			MaxSameTool:          *maxSameTool,
+			EnvRules:             envRules,
 			ReadRoot:             absRoot,
 			Offload:              offload,
 			NPU:                  pipeline.NewLoopNPU(cfg),
@@ -519,6 +529,7 @@ func main() {
 			MaxSteps:             *maxSteps,
 			MaxTokens:            *maxTokens,
 			MaxSameTool:          *maxSameTool,
+			EnvRules:             envRules,
 			ReadRoot:             absRoot,
 			Offload:              offload,
 			NPU:                  pipeline.NewLoopNPU(cfg),
@@ -650,3 +661,32 @@ func printFlaggedEffects(effects []agent.EffectRecord) {
 		}
 	}
 }
+
+// resolveEnvRules picks the environment-rule table for this run: --env-rules
+// <file> replaces the config's agent_env_rules (validated on load, so a bad
+// file exits 2 by name before any network work); "off" runs with none; empty
+// uses the config. The two-tier seats share the table — it is a property of
+// the box, and an override is a scratch validation of the same box.
+func resolveEnvRules(flagPath string, cfg config.Config) (*core.AgentEnvRules, error) {
+	switch strings.TrimSpace(flagPath) {
+	case "":
+		return cfg.AgentEnvRules, nil
+	case "off":
+		return nil, nil
+	}
+	b, err := os.ReadFile(flagPath)
+	if err != nil {
+		return nil, fmt.Errorf("--env-rules: %w", err)
+	}
+	var r core.AgentEnvRules
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&r); err != nil {
+		return nil, fmt.Errorf("--env-rules %s: %w", flagPath, err)
+	}
+	if err := r.Validate(); err != nil {
+		return nil, fmt.Errorf("--env-rules %s: %w", flagPath, err)
+	}
+	return &r, nil
+}
+

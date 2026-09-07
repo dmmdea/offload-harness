@@ -214,8 +214,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		Offload:     NewRecordlessOffload(p.cfg, p.cfg.Model, wall),
 		NPU:         NewLoopNPU(p.cfg),
 		Unattended:  true,
+		EnvRules:    p.cfg.AgentEnvRules,
 	})
 	if berr != nil {
+		if !p.cfg.AgentEnvRules.IsZero() && strings.Contains(berr.Error(), "agent_env_rules") {
+			// The table is this box's config; nothing about the contract or the
+			// seat can fix it — say so by class.
+			return deferWire(core.DeferClassConfig, "building agent: "+berr.Error())
+		}
 		return deferWire(core.DeferClassInfrastructure, "building agent: "+berr.Error())
 	}
 
@@ -272,6 +278,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	res, rerr := built.Loop.Run(cctx, contract.Goal)
 	wire.Steps = res.Steps
 	wire.StopReason = res.StopReason
+	// Step trace + rule telemetry (ADR 0036) — set HERE, before the defer
+	// branches, for the same reason as the prefill accounting below: the
+	// budget/timeout runs are the ones the rigger most needs to see.
+	wire.Trace = TraceFromEffects(res.Effects)
+	wire.RulesFired = len(res.RuleHits)
 	// T2-B: capture the run's prefill accounting HERE, immediately after the loop and
 	// BEFORE the defer branches below. Every one of those branches still records a
 	// ledger row via finish()/deferWire(), and a budget-exhausted or timed-out run is
@@ -848,3 +859,18 @@ func groundedContract(c core.AgentContract) bool {
 	}
 	return false
 }
+
+// TraceFromEffects projects the loop's effect ledger onto the wire trace
+// (core.AgentTraceStep): the per-call facts the corpus keeps, without the
+// result bytes. nil in, nil out — a run with no tool calls carries no trace.
+func TraceFromEffects(effects []agent.EffectRecord) []core.AgentTraceStep {
+	if len(effects) == 0 {
+		return nil
+	}
+	out := make([]core.AgentTraceStep, 0, len(effects))
+	for _, e := range effects {
+		out = append(out, core.AgentTraceStep{Step: e.Step, Tool: e.Tool, Status: string(e.Status), ObsChars: e.ObsChars, Rule: e.Rule})
+	}
+	return out
+}
+
