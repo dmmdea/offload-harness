@@ -2,8 +2,10 @@ package cache
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func openTemp(t *testing.T) *Cache {
@@ -155,4 +157,142 @@ func TestKeySeparatorCollision(t *testing.T) {
 			"update this test to assert the parts are unambiguous")
 	}
 	t.Logf("known collision: Key(%q, %q) == Key(%q) == %s", "a", "b", "a\x00b", twoParts)
+}
+
+// TestOpenPreferredUsesThePrimaryWhenFree: nothing holds the file → the
+// configured path, no fallback.
+func TestOpenPreferredUsesThePrimaryWhenFree(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	c, used, fb, err := OpenPreferred(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if fb || used != path || c.Path() != path || c.Fallback() {
+		t.Fatalf("used=%q fb=%v Path=%q Fallback=%v; want the primary, no fallback", used, fb, c.Path(), c.Fallback())
+	}
+}
+
+// TestOpenPreferredFallsBackToAPerProcessSibling is the 2026-09-07 finding: six
+// harness processes, one holding cache.db, five running cache-less. A locked
+// primary must yield a working sibling named after this pid.
+func TestOpenPreferredFallsBackToAPerProcessSibling(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	holder, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	c, used, fb, err := OpenPreferred(path)
+	if err != nil {
+		t.Fatalf("locked primary must fall back, got %v", err)
+	}
+	defer c.Close()
+	want := siblingPath(path, os.Getpid())
+	if !fb || used != want || !c.Fallback() || c.Path() != want {
+		t.Fatalf("used=%q fb=%v; want the sibling %q with fallback=true", used, fb, want)
+	}
+	if err := c.Put("k", []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := c.Get("k"); !ok || string(v) != "v" {
+		t.Fatalf("sibling cache must round-trip, got %q %v", v, ok)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("sibling file must exist on disk: %v", err)
+	}
+}
+
+// TestOpenPreferredSweepsStaleSiblingsOnly: an old sibling is removed on a
+// fallback open, a fresh one (another live session) is left alone.
+func TestOpenPreferredSweepsStaleSiblingsOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache.db")
+	stale := siblingPath(path, 4242)
+	fresh := siblingPath(path, 4343)
+	for _, f := range []string{stale, fresh} {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-SiblingMaxAge - time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	c, _, fb, err := OpenPreferred(path)
+	if err != nil || !fb {
+		t.Fatalf("fallback expected, got fb=%v err=%v", fb, err)
+	}
+	defer c.Close()
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale sibling must be swept, stat err=%v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("fresh sibling must be kept: %v", err)
+	}
+}
+
+// TestOpenPreferredReportsANonLockFailure: a bad path is not lock contention
+// and must surface as the error it is, never as a silent fallback.
+func TestOpenPreferredReportsANonLockFailure(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "missing-dir", "cache.db")
+	if _, _, fb, err := OpenPreferred(bad); err == nil || fb {
+		t.Fatalf("a missing directory must error without falling back, got fb=%v err=%v", fb, err)
+	}
+}
+
+// TestSweepNeverTouchesFilesItDidNotName is the review finding: an operator's
+// backup beside the cache ("cache.prev.db", "cache.patched.db") shares the
+// "cache.p*" prefix and must survive a sweep however old it is.
+func TestSweepNeverTouchesFilesItDidNotName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache.db")
+	keep := []string{filepath.Join(dir, "cache.prev.db"), filepath.Join(dir, "cache.patched.db"), filepath.Join(dir, "cache.p12x.db"), filepath.Join(dir, "cache.p.db")}
+	stale := siblingPath(path, 777)
+	old := time.Now().Add(-SiblingMaxAge - time.Hour)
+	for _, f := range append(keep, stale) {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(f, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sweepStaleSiblings(path)
+	for _, f := range keep {
+		if _, err := os.Stat(f); err != nil {
+			t.Errorf("%s was removed by the sweep; only <stem>.p<pid><ext> is ours", filepath.Base(f))
+		}
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("the real stale sibling must be removed, stat err=%v", err)
+	}
+}
+
+// TestOpenPreferredSweepsOnThePrimaryPathToo: contention ended, the primary
+// opens fine — the siblings an earlier busy window left behind still get swept.
+func TestOpenPreferredSweepsOnThePrimaryPathToo(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache.db")
+	stale := siblingPath(path, 999)
+	if err := os.WriteFile(stale, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-SiblingMaxAge - time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	c, _, fb, err := OpenPreferred(path)
+	if err != nil || fb {
+		t.Fatalf("primary open expected, got fb=%v err=%v", fb, err)
+	}
+	defer c.Close()
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale sibling must be swept on the primary path too, stat err=%v", err)
+	}
 }

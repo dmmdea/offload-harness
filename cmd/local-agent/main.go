@@ -232,13 +232,20 @@ func main() {
 	// cache open.
 	var agentCache *cache.Cache
 	if cfg.CachePath != "" {
-		if c, cerr := cache.Open(cfg.CachePath); cerr == nil {
+		c, used, fellBack, cerr := cache.OpenPreferred(cfg.CachePath)
+		switch {
+		case cerr == nil:
 			agentCache = c
 			defer agentCache.Close()
-		} else if errors.Is(cerr, bolt.ErrTimeout) {
-			// The expected, benign case: the MCP server holds the exclusive lock.
-			fmt.Fprintln(os.Stderr, "note: cache is held by another local-offload process; continuing without cache")
-		} else {
+			if fellBack {
+				// 0.113.21: the MCP server holds the shared file; this run keeps
+				// its in-loop hits in a per-process sibling instead of none.
+				fmt.Fprintln(os.Stderr, "note: result cache is held by another local-offload process; using the per-process cache", used)
+			}
+		case errors.Is(cerr, bolt.ErrTimeout):
+			// Both the shared file AND the per-process sibling refused: name it.
+			fmt.Fprintln(os.Stderr, "note: cache is held by another local-offload process and no per-process fallback could be opened; continuing without cache:", cerr)
+		default:
 			// Anything else — permissions, a corrupt file, a bad path — is NOT
 			// lock contention, and reporting it as such sends the operator to
 			// diagnose the wrong thing entirely.

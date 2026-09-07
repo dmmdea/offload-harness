@@ -354,10 +354,17 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 	var ca *cache.Cache
 	if cfg.CachePath != "" { // "" = caller opted out of caching (e.g. the confhead A/B, where a shared cache would cross-contaminate arms)
 		var err error
-		ca, err = cache.Open(cfg.CachePath)
+		var used string
+		var fellBack bool
+		ca, used, fellBack, err = cache.OpenPreferred(cfg.CachePath)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "note: cache unavailable (held by the MCP server?); continuing without cache")
+			fmt.Fprintln(os.Stderr, "note: cache unavailable; continuing without cache:", err)
 			ca = nil
+		} else if fellBack {
+			// 0.113.21: the shared file is held by another harness process (the
+			// MCP server, or a sibling session's); this process keeps its own
+			// in-loop hits in a per-process sibling instead of running cache-less.
+			fmt.Fprintln(os.Stderr, "note: result cache is held by another local-offload process; using the per-process cache", used)
 		}
 	}
 	led, err := ledger.Open(cfg.LedgerPath)
