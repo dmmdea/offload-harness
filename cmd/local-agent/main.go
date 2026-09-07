@@ -689,4 +689,3 @@ func resolveEnvRules(flagPath string, cfg config.Config) (*core.AgentEnvRules, e
 	}
 	return &r, nil
 }
-
