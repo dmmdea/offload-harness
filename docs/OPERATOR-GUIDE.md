@@ -192,7 +192,7 @@ tokens kept local (est.): 2920 (~$0.04 Opus-input value — an estimate, not bil
 |---|---|
 | every call `deferred:true` | Run `doctor`. Usually the endpoint is down or unreachable. A defer on genuinely hard/over-long input is by design. |
 | one media task always defers (`generate_image`, `generate_video`, `generate_audio`, `run_graph`, `edit_image`…) | Run `doctor` and read its **media routes** section. `BOUND-BUT-MISSING` names the exact configured path that is not on disk (relative script bindings resolve against the binary's directory, not your cwd) and exits non-zero; `NOT CONFIGURED` means this box has no such binding and the defer is by design. |
-| `cache unavailable (held by the MCP server?)` | Expected — the bbolt cache is single-writer. The CLI continues cache-less; the ledger still appends. |
+| `result cache is held by another local-offload process; using the per-process cache <path>` | Expected (0.113.21) — the bbolt cache is single-writer; the CLI keeps its own hits in a per-process sibling (`cache.p<pid>.db`, swept after 12 h) instead of running cache-less. `cache unavailable; continuing without cache: <err>` means BOTH the shared file and the sibling failed (disk, permissions, a bad `cache_path`) — not lock contention. The ledger still appends. |
 
 ---
 
@@ -777,7 +777,16 @@ The seat itself: `setup/templates/vllm-seat/` has the reference `seat_fg.sh` (st
 server and the engine in the foreground of the llama-swap client, so a swap-out reaps the engine
 while the store keeps the pages), `seat_stop.sh`, the llama-swap entry, and the second device's
 `kv-cache-server.service` (a systemd-guaranteed Valkey container; do not rely on docker's restart
-policy). Prove the tier with vLLM's own `vllm:external_prefix_cache_hits` counter around an
+policy). **KV pool pinned from free memory (2026-09-07, `seat_fg.sh`):** `--gpu-memory-utilization` budgets a fraction of the
+card whatever the co-residents hold, and the profiler lands the same config at different pool sizes on different starts; set
+`SEAT_KV_HEADROOM_GIB` in the seat's env and the launcher instead computes the pool from what is actually free on the tighter seat
+card at launch — free − `SEAT_NONKV_GIB` (the engine's weights + non-torch + peak activation per worker, read from the profiler's
+own banner) − the headroom (what must stay free for co-residents' growth) — floored at `SEAT_KV_FLOOR_GIB` (2.0) and capped at
+`SEAT_KV_CAP_GIB` (3.4), and passes it as `--kv-cache-memory-bytes` (per worker; vLLM then ignores the utilization). The banner
+line names every input. Off unless the headroom knob is set; measured on the reference workstation after a util-0.90 seat stalled
+(gate verdict 2026-09-07: headroom 0.5 GiB with the utility seats on CPU → the same 209,597-token pool on 10/10 starts, c32
+218.9 tok/s at TTFT p95 11.1 s, a 20-minute soak of 1,624 requests with 0 errors — the run-to-run pool variance is gone) 
+under daytime co-resident growth. Prove the tier with vLLM's own `vllm:external_prefix_cache_hits` counter around an
 after-eviction request, and prove fidelity with a planted needle retrieved verbatim after eviction
 and after a restart — hit counters alone do not prove the context came back intact.
 
