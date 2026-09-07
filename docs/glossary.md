@@ -43,6 +43,15 @@ stopped waiting — effects genuinely unknown), or `none` (never executed: refus
 Distinct from the Ledger, which counts token savings — the effect record answers "what did this
 call do to the world?". See [systems/coding-agent.md](systems/coding-agent.md).
 
+## Environment rule
+
+One entry of a seat's `agent_env_rules` table (ADR 0036): a closed-vocabulary, validated constraint the
+coding-agent loop applies around every tool call — withhold a tool, cap its executions, clamp a numeric
+argument, bound or strip what the model reads, rewrite an error into a line it can act on. Data, never
+generated code; a property of the seat, not of the task. Distinct from a **risk rule** (`--rules`), which
+gates what an effectful action may do to the world. The per-call record of what ran and which rule
+decided is the result's `trace`.
+
 ## Escalation
 
 Moving a task to the next, larger Tier after a recoverable failure — a schema violation, ungrounded

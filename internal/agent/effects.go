@@ -87,6 +87,14 @@ type EffectRecord struct {
 	// not provided) — recorded for every fate so the flywheel can correlate
 	// self-assessed risk with actual outcomes.
 	Risk string `json:"risk,omitempty"`
+	// ObsChars is the size of the result the MODEL saw for this call, after
+	// every environment rule and the loop-boundary cap — the "long
+	// observation" axis the rigger diagnoses on (ADR 0036). 0 for a call that
+	// produced no bytes.
+	ObsChars int `json:"obs_chars,omitempty"`
+	// Rule names the environment rule that fired on this call, if any (the
+	// last one when several did; RuleHits on the Result has them all).
+	Rule string `json:"rule,omitempty"`
 }
 
 // EffectCounts aggregates a run's records per status — the summary an MCP

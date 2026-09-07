@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/dmmdea/offload-harness/internal/core"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/sandbox"
@@ -46,6 +48,11 @@ type BuildConfig struct {
 	// Empty on an UNATTENDED run loads the embedded default table
 	// (unattendedrules.go); the sentinel RulesOff ("off") explicitly disables it.
 	RulesPath string
+	// EnvRules is the seat's environment-rule table (core.AgentEnvRules,
+	// config `agent_env_rules`; envrules.go, ADR 0036). nil/zero = no hooks.
+	// Compiled here so an invalid table fails the build by name at every door
+	// (CLI exit, MCP defer, fleet defer) instead of no-op'ing at run time.
+	EnvRules *core.AgentEnvRules
 
 	AllowWrite bool // P2: write_file/delete_file in the worktree
 	AllowFetch bool // P3: web_fetch behind the egress allowlist
@@ -330,6 +337,22 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 	}
 	if cfg.Memory != nil {
 		loop = loop.WithMemory(cfg.Memory)
+	}
+	if !cfg.EnvRules.IsZero() {
+		compiled, cerr := CompileEnvRules(cfg.EnvRules)
+		if cerr != nil {
+			return nil, cerr
+		}
+		before := make([]string, 0, len(loop.specs))
+		for _, s := range loop.specs {
+			before = append(before, s.Name)
+		}
+		loop = loop.WithEnvRules(compiled)
+		note := "agent env rules: " + cfg.EnvRules.Summary()
+		if denied := compiled.DeniedTools(before); len(denied) > 0 {
+			note += " (withheld: " + strings.Join(denied, ", ") + ")"
+		}
+		res.Notes = append(res.Notes, note)
 	}
 	res.Loop = loop
 	res.Tools = tools

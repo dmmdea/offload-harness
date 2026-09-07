@@ -6,6 +6,28 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.22] — 2026-09-07 — environment rules on the agent loop (`agent_env_rules`) and a per-step trace in every agent result
+
+**Added — `agent_env_rules` (ADR 0036).** The coding-agent loop runs every tool call through three interceptors in
+envharness's order — filter_action → modify_transition → filter_observation — driven by a CLOSED, validated vocabulary
+in config, a property of the seat: `deny_tools` / `allow_tools` (withheld structurally, like a profile), `max_calls_per_tool`
+(the N+1th EXECUTION is blocked with a reason the model reads; a breaker refusal spends nothing), `arg_limits` (numeric
+arguments clamped per tool, the call still runs), `max_observation_tokens` (head+tail with the elision marker, before the
+loop-boundary cap), `observation_strip` (regexps removed from every result), `rewrite_error` (an errored result matching a
+pattern becomes a short line the model can act on). A bad table fails by name at every door — `local-agent` exit 2, MCP
+`agent_run` defer, fleet `config`-class defer — never a silent no-op; a nil/zero table is byte-identical to the previous
+loop. `local-agent --env-rules <file>` replaces the table for one run (`off` = none); `examples/agent-env-rules.json` is
+the starter. This is the P1 slice of the 2026-09-07 envharness/axolotl integration order; envharness's LLM-written rule
+code is deliberately NOT ported (generated code in-process is out of policy — rules are data here).
+
+**Added — the step trace.** Every agent wire result (fleet `agent_run`, so every delegation-log corpus row) and every MCP
+`agent_run` response carries `trace`: per tool call the tool, its effect status, the bytes the model actually read
+(`obs_chars`) and the environment rule that decided (`rule`), plus `rules_fired` and, on the MCP door, `env_rules` (the
+seat's table summary). Set before the defer branches, like the prefill accounting. Why: the corpus recorded contracts and
+results but not steps — 51 of the 58 failed 4B rows of the last six days stop at exactly two steps with empty schema
+fields and 24 of the 27B pool's defers are "step budget exhausted", and nothing on disk said what those steps did. The
+rigger (P3) diagnoses on this trace. `EffectRecord` gains `obs_chars` / `rule` for the same reason.
+
 ## [0.113.21] — 2026-09-07 — the result cache falls back to a per-process file when the shared one is held
 
 **Fixed — every session but one ran cache-less.** The result cache (`cache_path`, bbolt) is single-writer with an exclusive

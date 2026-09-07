@@ -551,6 +551,19 @@ gates** — the other two report:
   run, and `agent_run` returns them (`effects`, `effects_flagged`). `agent_run judge=true` adds one
   end-of-run **advisory** completion grading the flagged records for your review — it never gates
   anything.
+- **Environment rules (`agent_env_rules`, 0.113.22)** — a per-box table that shapes how the SEAT
+  behaves inside the loop: `deny_tools` / `allow_tools` (withheld from the offered tools),
+  `max_calls_per_tool` (the N+1th execution is refused with a reason), `arg_limits` (numeric
+  arguments clamped, e.g. `{"read_file":{"limit":400}}`), `max_observation_tokens` (one result
+  bounded, head+tail), `observation_strip` (regexps removed from results), `rewrite_error` (an
+  error matching a pattern becomes a short line the model can act on). Start from
+  `examples/agent-env-rules.json`; a bad table fails by name (`local-agent` exits 2, `agent_run`
+  defers, a fleet node defers with `defer_class: config`). Try a candidate without touching the
+  config: `local-agent --env-rules candidate.json …` (`--env-rules off` runs with none). Every
+  agent result reports `rules_fired` and a per-call `trace` (tool, status, bytes read, rule) — the
+  same fields land in the delegation-log corpus, so a night of ordinary traffic says which rule a
+  seat needs. These are NOT the risk rules (`--rules`), which gate effects; env rules never grant
+  or deny an effect. ADR 0036; details in [systems/coding-agent.md](systems/coding-agent.md).
 
 Details and rationale: [systems/coding-agent.md](systems/coding-agent.md).
 

@@ -213,6 +213,17 @@ type AgentWireResult struct {
 	PrefillTokens int64   `json:"prefill_tokens,omitempty"`
 	CacheTokens   int64   `json:"cache_tokens,omitempty"`
 	PrefillMS     float64 `json:"prefill_ms,omitempty"`
+
+	// --- Step trace (ADR 0036, 0.113.22). One entry per tool call the loop
+	// handled: tool, fate, how much the model read, which environment rule
+	// decided. Bounded by max_steps × calls-per-step, no transcript bytes.
+	// This is what the corpus lacked for a per-step diagnosis (2026-09-07: 51
+	// of 58 failed 4B rows stop at exactly 2 steps with empty schema fields,
+	// and the corpus could not say what those two steps did). Omitempty: a
+	// pre-0.113.22 node's result reads as "no trace", never as "no calls".
+	Trace []AgentTraceStep `json:"trace,omitempty"`
+	// RulesFired counts environment-rule hits on this run (0 = none / no table).
+	RulesFired int `json:"rules_fired,omitempty"`
 }
 
 // DecodeAgentContract reads one contract from r, tolerating unknown fields

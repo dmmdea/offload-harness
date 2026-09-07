@@ -1,0 +1,11 @@
+{
+  "_comment": "Starter environment-rule table for a SMALL agent seat (config key agent_env_rules, or `local-agent --env-rules <this file>`). Every key is optional; see docs/systems/coding-agent.md 'Environment rules'. Validated on load: a bad regexp or a negative cap fails by name.",
+  "deny_tools": ["web_search"],
+  "max_calls_per_tool": {"list_dir": 3},
+  "arg_limits": {"read_file": {"limit": 400}},
+  "max_observation_tokens": 3000,
+  "observation_strip": ["(?m)^\\s*(Accept|Manage) cookies.*$"],
+  "rewrite_error": [
+    {"match": "no such file or directory|cannot find the (file|path)", "text": "That path does not exist. Call list_dir on its parent directory and use a name from the listing."}
+  ]
+}

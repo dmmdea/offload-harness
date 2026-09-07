@@ -101,6 +101,11 @@ type Result struct {
 	// of silent over-budget requests. 0 on every run that stayed within budget.
 	CompactionsExhausted int
 
+	// RuleHits lists every environment rule that fired this run (envrules.go),
+	// in call order — the rigger's evidence. nil when no rules are installed
+	// or none fired. Present on every return path, like Effects.
+	RuleHits []EnvRuleHit
+
 	// TokenCal reports what the budget calibration actually learned this run
 	// (ADR 0017). A self-tuning mechanism that cannot be inspected is a
 	// mechanism nobody can debug: these fields make its behaviour auditable
@@ -234,6 +239,9 @@ type Loop struct {
 	// the decision it informs is made from real traffic rather than a special
 	// measurement mode nobody remembers to switch on.
 	prefill   PrefillStats
+	// envRules are the environment-rule interceptors (envrules.go, ADR 0036):
+	// nil = the pre-key loop, byte-for-byte. Installed by WithEnvRules.
+	envRules  EnvRules
 	system    string
 	mem       Memory
 	worktree  string // RW worktree root for durable working memory (AGENT.md + .agent/plan.md); "" disables it
@@ -741,10 +749,14 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 	// requested tool call, on EVERY Result return path including errors, so a
 	// caller inspecting a failed run still sees what ran before it died.
 	var effects []EffectRecord
+	// ruleHits / ruleState are the environment-rule telemetry and per-run
+	// counters (envrules.go). Per-Run on purpose: --serve shares one *Loop.
+	var ruleHits []EnvRuleHit
+	ruleState := NewEnvRuleState()
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
-			return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects}, err
+			return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits}, err
 		}
 		specs := l.specs
 		if len(disabledTools) > 0 {
@@ -845,7 +857,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				comp, err = l.client.Chat(ctx, msgs, specs, l.maxTokens)
 			}
 			if err != nil {
-				return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects}, err
+				return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits}, err
 			}
 		}
 		// Learn from the response: estimateTokens(msgs) is what we thought the
@@ -911,10 +923,10 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				// the final answer and the structured re-pack produced findings
 				// about "the assistant listing the directory". That is a seat
 				// configuration error, and it must be named, not digested.
-				return Result{Steps: step + 1, StopReason: "unparsed_tool_call", Transcript: msgs, Effects: effects},
+				return Result{Steps: step + 1, StopReason: "unparsed_tool_call", Transcript: msgs, Effects: effects, RuleHits: ruleHits},
 					fmt.Errorf("%w: the seat returned %q as text (its --tool-call-parser does not match the model's chat template)", ErrUnparsedToolCall, marker)
 			}
-			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects}
+			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits}
 			if l.batchJudge {
 				res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 			}
@@ -924,7 +936,48 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 
 		// Execute every requested tool; defer-not-crash on error/unknown.
 		for _, call := range comp.Msg.ToolCalls {
-			content, isErr, eff := l.dispatchOrThrottle(ctx, call, msgs, exactCalls, sameNameCalls, disabledTools, firstCallID, pinned, reExecuted)
+			// Environment rules (envrules.go): filter_action BEFORE the circuit
+			// breakers — a blocked call never reaches the counters (it changed
+			// nothing), and a rewritten argument is what the breakers and the
+			// tool both see.
+			act := EnvAction{Step: step + 1, CallID: call.ID, Tool: call.Name, Args: call.Args}
+			var firedRule string
+			var content string
+			var isErr bool
+			var eff EffectStatus
+			var blocked *EnvBlocked
+			if l.envRules != nil {
+				var hits []EnvRuleHit
+				act, blocked, hits = l.envRules.FilterAction(ruleState, act)
+				ruleHits = append(ruleHits, hits...)
+				if len(hits) > 0 {
+					firedRule = hits[len(hits)-1].Rule
+				}
+				call.Args = act.Args
+			}
+			if blocked != nil {
+				content, isErr, eff = blocked.Reason, true, EffectNone
+			} else {
+				content, isErr, eff = l.dispatchOrThrottle(ctx, call, msgs, exactCalls, sameNameCalls, disabledTools, firstCallID, pinned, reExecuted)
+				if eff != EffectNone {
+					ruleState.Executed(call.Name)
+				}
+			}
+			if l.envRules != nil {
+				// modify_transition → filter_observation, in envharness's order:
+				// an error is rewritten first, then whatever the model will read
+				// is stripped and bounded.
+				obs := EnvObservation{Content: content, IsError: isErr}
+				var h1, h2 []EnvRuleHit
+				obs, h1 = l.envRules.ModifyTransition(act, obs)
+				obs, h2 = l.envRules.FilterObservation(act, obs)
+				ruleHits = append(ruleHits, h1...)
+				ruleHits = append(ruleHits, h2...)
+				for _, h := range append(h1, h2...) {
+					firedRule = h.Rule
+				}
+				content, isErr = obs.Content, obs.IsError
+			}
 			// Cap ONE result at the loop boundary so no single tool output can blow
 			// the small window — the per-tool caps don't protect us here (read_file's
 			// 256 KB is ~16× the whole input budget). Trim no-ops under the cap, so
@@ -937,7 +990,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			// order, whatever became of it. Note carries the why only for
 			// non-committed statuses — for those, the (bounded) result text IS
 			// the explanation and it is small (refusals/errors are short strings).
-			rec := EffectRecord{Step: step + 1, CallID: call.ID, Tool: call.Name, Status: eff, Risk: securityRisk(call.Args)}
+			rec := EffectRecord{Step: step + 1, CallID: call.ID, Tool: call.Name, Status: eff, Risk: securityRisk(call.Args), ObsChars: len(content), Rule: firedRule}
 			if eff != EffectCommitted {
 				rec.Note = content
 			}
@@ -945,7 +998,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			msgs = append(msgs, Msg{Role: "tool", ToolCallID: call.ID, Content: content, IsError: isErr})
 		}
 	}
-	res := Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects}
+	res := Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits}
 	if l.batchJudge {
 		res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 	}

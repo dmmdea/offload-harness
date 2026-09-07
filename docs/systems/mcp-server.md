@@ -66,7 +66,9 @@ silent seat. A resolved planner absent from the endpoint's served roster fails l
 matched against canonical ids **or** `meta.llamaswap.aliases`, since a tier-seeded `agent_model`
 is normally an alias. Every response
 carries the effect ledger (`effects` counts + `effects_flagged` records) on success AND deferred
-paths, and `judge: true` adds one end-of-run **advisory** same-seat completion (`judge_report`)
+paths, the step `trace` (per tool call: tool, status, `obs_chars`, `rule` — 0.113.22, ADR 0036)
+with `rules_fired` and, when the box has an `agent_env_rules` table, its summary as `env_rules`;
+and `judge: true` adds one end-of-run **advisory** same-seat completion (`judge_report`)
 grading the flagged effects for operator review — annotation only, it never gates anything.
 
 `offload_ask` is the ONE-CALL delegation entry: question + paths in, `{answer, evidence}` out,
