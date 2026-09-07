@@ -5,7 +5,7 @@
 Devices that ride **beside** the GPU tier: a box's `profile` stays one string, and
 `accelerators: []` lists the additive compute devices found next to it
 ([ADR 0024](../architecture/decisions/0024-accelerators-are-additive-to-the-gpu-tier.md)).
-Today that is one device — the Hailo-8L NPU — served through an on-demand loopback HTTP
+Today the harness declares exactly one — the Hailo-8L NPU — served through an on-demand loopback HTTP
 sidecar the harness spawns and that exits itself when idle.
 
 ## Questions this doc answers

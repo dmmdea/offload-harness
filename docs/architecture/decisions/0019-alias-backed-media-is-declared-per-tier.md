@@ -103,7 +103,7 @@ correctly, so the schema gained two per-seat fields and one backend rule — all
   `--flash-attn`, matching the cpu template's own chat models rather than emitting flags a
   GPU-less build would only ignore.
 
-These four tiers are **PROJECTED** — no matching card is in the fleet. The guarantee is the
+Two of these four tiers are **PROJECTED** — `dual-gpu` and `cpu`, with no matching box in the fleet. As of **2026-09-07** the other two are **MEASURED**: `blackwell-8` on the OptiPlex 7060 (RTX 5060 8 GB) and `amd-gcn` on a collaborator's GCN/Vega laptop (2026-07-17). The guarantee is the
 same as every other projected tier param: the rendered config was verified to LOAD in real
 llama-swap (v242), and the seats reproduce a proven reference where one exists (blackwell-8
 is ampere-8's twin; cpu/amd-gcn reuse ampere-6's E4B+mmproj vision). Runtime quality on the

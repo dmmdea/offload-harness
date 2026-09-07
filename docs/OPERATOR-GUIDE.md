@@ -618,6 +618,7 @@ carries any measured override to apply.
 | Profile | Resident/default tier | Served ctx (`-ctx-tokens`) | KV | 26B-A4B |
 |---|---|---|---|---|
 | `blackwell-16` / `volta-16` | `gemma4-26b-a4b` | 32768 | q8_0 | full-GPU resident |
+| `blackwell-2x16` | `gemma4-26b-a4b` | 131072 | q8_0 | full-GPU resident; the served window follows the measurement (0.113.29, 32768 → 131072). Bound only for EXACTLY two Blackwell cards in the 12–23 GB band — three cards classify as `dual-gpu` |
 | `ampere-16` | `offload-e4b` (agent `qwen3.5-4b-agent`, `research`; 26B dropped) | 32768 | q8_0 | measured 2026-09-04 on an NVIDIA A2 16 GB at 40 W: the projected 26B-A4B seat ran 1/8 digests, the 4B seat 8/8 (0.113.15); 2026-09-06 the reference box's agent lane moved to a persistent vLLM seat behind llama-swap (131,072 ctx, 8/8 at 45 s median) — a per-box build, not a seed change: ADR 0035, `setup/templates/vllm-seat/linux-systemd/` |
 | `dual-gpu` | `gemma4-26b-a4b` (architect) + `offload-e4b` (editor), both resident | 32768 | q8_0 | resident (two-tier, **zero swap**) |
 | `ampere-8` / `blackwell-8` | `offload-e4b` | 16384 | q8_0 | via `--cpu-moe` only when RAM ≥ ~56 GB; else dropped |

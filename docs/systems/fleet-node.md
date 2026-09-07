@@ -147,7 +147,7 @@ field on any node — single-GPU included — is silently ignored, not a wire br
 else `fleetnode.HeadlineDevice`'s fallback — the device with the **largest total VRAM** (ties
 broken by more free VRAM) — never nvidia-smi's own line order, which is PCI bus order and has no
 relationship to which device a CUDA app actually computes on (`CUDA_DEVICE_ORDER=FASTEST_FIRST` can
-bind `cuda:0` to a different index). This is the fix for a real mis-report found live on a 2×16 GiB
+bind `cuda:0` to a different index). This is the fix for a real mis-report found live in 2026-08 on what was then a 2×16 GiB
 Blackwell box (<node-b>): the donor card (nvidia-smi index 0, the RTX 5060 Ti) was being advertised as
 the fleet's free VRAM while renders ran on the compute card at index 1 (the RTX 5070 Ti), which
 could over-admit a second job that then contends or OOMs — and because the two cards are a
