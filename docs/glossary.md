@@ -169,6 +169,15 @@ Two unrelated meanings, distinguished by context:
 The pipeline construction the coding agent uses: nil cache, nil ledger, no shadow capture, no
 escalation. It exists so an agent's internal offload calls leave no trace in savings accounting.
 
+## Rigger
+
+The seat rigger (ADR 0036 P3a, 0.113.26): `local-offload rig` / MCP `agent_rig`, a deterministic classifier over
+the delegation-log corpus that puts every failed or deferred row of a seat on exactly one failure axis in a
+published precedence order and reports weights over the rows eligible for each axis, evidence job ids and the
+pre-authored remedy where the closed rule vocabulary has a lever — or "not a rule matter" where it has none. It
+proposes nothing on its own and applies nothing; the envharness objectives (difficulty-zone, red-team) and a
+validated proposer are P3b, after the trace corpus grows.
+
 ## Run-graph
 
 The generic primitive that executes a caller-supplied ComfyUI graph against a Node Manifest,

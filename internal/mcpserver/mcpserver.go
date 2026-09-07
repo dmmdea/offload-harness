@@ -35,6 +35,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/research"
 	"github.com/dmmdea/offload-harness/internal/reviewlane"
+	"github.com/dmmdea/offload-harness/internal/rig"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
 )
@@ -265,6 +266,15 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// fresh nil-cache/nil-ledger pipeline via RunTier(record=false) so the savings
 	// ledger, cache, and shadow store are untouched. Read-only here (no write/exec/
 	// net); a failure is a clean defer, not a server error.
+	// agent_rig (ADR 0036 P3a): the seat rigger's classifier over this box's
+	// delegation-log corpus. Reads files only — no seat, no network; an
+	// unknown seat is a clean defer naming the seats seen.
+	srv.AddTool(&mcp.Tool{
+		Name:        "agent_rig",
+		Description: "The seat rigger, first slice (ADR 0036 P3a): classify THIS box's delegation-log failures for one seat onto exactly ONE failure axis each, in a published precedence order (seat-infra [incl. placement failures with no defer class] → timeout → budget → abstention [an 'output failed schema' reason is schema-miss/invalid] → schema-miss[two-step-grounded|invalid] → anchor-miss[two-step-grounded] → loop → long-observation → tool-misuse → unclassified), and return the triage report: per axis the hits, the ELIGIBLE rows (trace-only axes count only rows that carry a trace), the weight, up to five evidence job ids with the deciding fact, and the pre-authored remedy where the harness's closed vocabulary has a lever (agent_seed_context_reads, max_observation_tokens, max_calls_per_tool, rewrite_error) or the honest 'not a rule matter' where it has none (seat errors, wall timeouts). It PROPOSES NOTHING on its own and applies nothing — adoption is a measured A/B on the seat (P3b). Reads the corpus files only; never calls a seat or the cloud. Use it after a batch of delegations to see what actually failed and why before tuning anything.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"seat":{"type":"string","description":"the seat alias exactly as corpus rows name it (e.g. qwen3.5-4b-vllm, agent-pool)"},"since":{"type":"string","description":"window back from now: <N>d or <N>h (default 7d), or an RFC3339 instant"},"node":{"type":"string","description":"only rows that ran on this node id (optional)"},"markdown":{"type":"boolean","description":"also return the markdown triage table (default false; the JSON report is always returned)"}},"required":["seat"]}`),
+	}, s.handleAgentRig)
+
 	srv.AddTool(&mcp.Tool{
 		Name:        "agent_run",
 		Description: "Run the LOCAL autonomous agent loop on a goal: a free local model plans and iterates over read-only tools (list_dir, read_file) plus the offload_* cascade, multi-step, and returns a final answer. NOTE the advertised set may be NARROWED: a box can set a default agent_profile (small-seat tiers do, because an un-narrowed tool list measurably collapses a small planner), and a narrowed profile such as \"research\" drops search_files and the whole offload_* cascade. The response reports the profile applied and the post-narrowing tool count, so check those rather than assuming the full set. DELEGATE a bounded multi-step read-and-reason job — map how X flows through a repo, summarize a doc set, extract facts across many files — to the local stack to keep that work out of your own context. It is READ-ONLY: it cannot write files, run commands, or touch the network. The savings ledger is untouched (the agent's offload calls run record=false). Returns {output, steps, stop_reason, tools, model}; on any failure it returns deferred:true with a reason and you do the task yourself.",
@@ -2296,6 +2306,46 @@ func delegateIsError(sum delegate.Summary) bool {
 // by BOTH the success and deferred paths so they cannot drift: the one record a
 // caller must never miss is "unknown" — a tool abandoned mid-flight whose
 // effects may exist, which changes whether the run is safe to blindly retry.
+// handleAgentRig runs the rigger's classifier over this box's corpus (rig
+// package). Every failure is a clean defer: an unknown seat names the seats
+// seen, a bad window names the flag.
+func (s *Server) handleAgentRig(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var in struct {
+		Seat     string `json:"seat"`
+		Since    string `json:"since"`
+		Node     string `json:"node"`
+		Markdown bool   `json:"markdown"`
+	}
+	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+		return bad, nil
+	}
+	if strings.TrimSpace(in.Seat) == "" {
+		return jsonResult(map[string]any{"deferred": true, "reason": "seat is required (the alias as the corpus names it)"})
+	}
+	until := time.Now()
+	since, err := rig.ParseSince(in.Since, until)
+	if err != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": err.Error()})
+	}
+	dir := filepath.Join(s.p.Cfg().BaseDir(), "delegation-log")
+	rows, skipped, err := rig.ReadShards(dir, since, until)
+	if err != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": err.Error()})
+	}
+	rep, err := rig.Build(rows, in.Seat, in.Node, since, until)
+	if err != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": err.Error(), "seats_seen": rep.SeatsSeen})
+	}
+	out := map[string]any{"report": rep, "corpus_dir": dir}
+	if skipped > 0 {
+		out["skipped_lines"] = skipped
+	}
+	if in.Markdown {
+		out["markdown"] = rig.Markdown(rep)
+	}
+	return jsonResult(out)
+}
+
 func addEffects(out map[string]any, effects []agent.EffectRecord) {
 	counts := agent.EffectCounts(effects)
 	if counts == nil {

@@ -185,6 +185,25 @@ reports no `setup_ran` — read it before crediting a replay. The DESIGN's accep
 not assumed: the corpus's failed 4B contracts re-run on the same seat with and without seeding,
 pass rate first, step count second.
 
+**The rigger, first slice (`local-offload rig`, MCP `agent_rig`; `internal/rig`, ADR 0036 P3a, 0.113.26).** A
+deterministic classifier over the delegation-log corpus: every failed or deferred row of a seat lands on exactly one
+failure axis, evaluated in a published precedence order and stopping at the first hit — `seat-infra` (a defer class of
+infrastructure/config/contract, or a placement failure with no defer class) → `timeout` → `budget` → `abstention` (an
+"output failed schema" reason is `schema-miss / invalid`) → `schema-miss` (min_items/nonempty; sub-axes
+`two-step-grounded` = context docs and ≤ 2 steps, `invalid`) → `anchor-miss` (contains/not_contains/regex; same sub-axis) →
+`loop` → `long-observation` → `tool-misuse` (the last three on trace-bearing rows only) → `unclassified`. The report gives
+per axis the hits over the rows ELIGIBLE for it (trace axes count only rows with a trace), up to five evidence job ids with
+the deciding fact, the most repeated reason for seat-infra/timeout/unclassified, and the pre-authored remedy where the
+closed vocabulary has a lever (`agent_seed_context_reads`, `agent_env_rules.max_observation_tokens` /
+`max_calls_per_tool` / `rewrite_error`, with the value derivation in words) or "not a rule matter" where it has none.
+`--verdicts` writes every row's verdict for an agreement check. It proposes nothing on its own and applies nothing. Why a
+classifier first: the design council read the day's corpus (1,187 rows, 649 bad) — ~70 % were wall timeouts and seat
+errors no rule shapes, only 16 rows carried a trace, and a digest-8 gate cannot fail for axes it never exercises. P3b (a
+proposer with a validation gate, the difficulty-zone and red-team objectives) waits for a trace corpus in the hundreds.
+The trace now carries `note` (≤ 160 bytes of what the model was told) on non-committed calls, the evidence a
+`rewrite_error` rule needs. Acceptance: a fresh-context reader applying the rules as written to a stratified 41-row
+sample agreed 41/41; the coverage gaps that pass found became the dispatch, invalid and anchor-miss rules.
+
 **Unattended risk parking.** Each effectful tool (the write/edit/delete trio, `web_fetch`, `run`,
 `run_shell`, the `github_*` trio) advertises a `security_risk` self-annotation (low/medium/high) in
 its schema, recorded on the call's `EffectRecord` whatever its fate. On an unattended run, an

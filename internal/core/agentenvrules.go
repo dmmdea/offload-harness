@@ -216,4 +216,14 @@ type AgentTraceStep struct {
 	ObsChars int    `json:"obs_chars,omitempty"` // size of the result the model saw, after every rule and cap
 	Rule     string `json:"rule,omitempty"`      // env rule that fired on this call, e.g. "max_calls_per_tool"
 	Setup    bool   `json:"setup,omitempty"`     // replayed from the contract's setup_actions before turn 1 (step 0)
+	// Note (0.113.26, the rigger's evidence): for a call that did NOT commit —
+	// failed, none, unknown — the first AgentTraceNoteMax bytes of what the
+	// model was told (the tool's error, the breaker's refusal, the rule's
+	// reason). Empty on committed calls: the corpus keeps facts about the
+	// run, never result bytes. Without it a `rewrite_error` rule could not be
+	// authored from the corpus (design council 2026-09-07).
+	Note string `json:"note,omitempty"`
 }
+
+// AgentTraceNoteMax bounds AgentTraceStep.Note.
+const AgentTraceNoteMax = 160

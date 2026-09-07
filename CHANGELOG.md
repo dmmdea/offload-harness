@@ -6,6 +6,36 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.26] — 2026-09-07 — the seat rigger, first slice (`local-offload rig`, MCP `agent_rig`) and a note on failed trace steps
+
+**Added — the rigger's classifier (`internal/rig`, ADR 0036 amendment P3a).** `local-offload rig --seat <alias> [--since 7d]
+[--node ID] [--out report.json] [--verdicts rows.json] [--json]` and MCP `agent_rig {seat, since?, node?, markdown?}` read
+this box's delegation-log corpus and put every failed or deferred row of the seat on exactly ONE failure axis, in a
+PUBLISHED precedence order that the report prints: `seat-infra` (a defer class of infrastructure/config/contract, or a
+placement failure with no defer class at all — a node's 503 shed, a refused dispatch) `→ timeout → budget → abstention`
+(except an "output failed schema" reason, which is `schema-miss / invalid`) `→ schema-miss` (min_items/nonempty misses;
+sub-axes `two-step-grounded`: context docs and ≤ 2 steps, `invalid`) `→ anchor-miss` (contains/not_contains/regex misses —
+a valid answer that missed the document; same sub-axis) `→ loop → long-observation → tool-misuse → unclassified`, the last
+three on trace-bearing rows only. Acceptance measured: a fresh-context reader applying the rules as written to a stratified
+41-row sample of real corpus rows agreed with the classifier on 41/41; the three rule extensions above are what that pass
+found uncovered (rows that fell to `unclassified` or read as `abstention`), re-labelled blind after the change. The report gives, per axis, hits over the rows ELIGIBLE for that axis (trace axes count only
+rows with a trace — a 30 % weight over 11 traced rows and a 3 % weight over 649 rows are different claims), up to five
+evidence job ids with the deciding fact, the most repeated reason text for seat-infra/timeout/unclassified, and the
+pre-authored remedy where the harness's closed vocabulary has a lever (`agent_seed_context_reads`,
+`agent_env_rules.max_observation_tokens` / `max_calls_per_tool` / `rewrite_error`, with the value derivation stated in
+words) or the honest "not a rule matter" where it has none. The rigger PROPOSES NOTHING on its own and applies nothing —
+adoption stays a measured A/B on the seat. Deterministic for a fixed corpus; an unknown seat fails naming the seats seen;
+a clean corpus reports zero hits everywhere. Why this and not the full observe/diagnose/write/validate rigger: the design
+council read the corpus of the day (1,187 rows, 649 bad) — ~70 % were wall timeouts and seat errors no rule shapes, only
+16 rows carried a trace, and a digest-8 gate cannot fail for axes it never exercises — so a proposer built on an
+unvalidated diagnosis would inherit every ambiguity. P3b (proposer + validation gate + difficulty-zone / red-team
+objectives) waits for a trace corpus in the hundreds. Acceptance for this slice: blind-labelled agreement on a stratified
+sample of real rows (an independent reader applying the published rules), reported in the ledger with the ship.
+
+**Added — `trace[].note`.** For a call that did NOT commit (failed, none, unknown) the trace step now carries the first
+160 bytes of what the model was told — the tool's error, the breaker's refusal, the rule's reason — one line, never a
+page; empty on committed calls. Without it a `rewrite_error` rule could not be authored from the corpus (council finding).
+
 ## [0.113.25] — 2026-09-07 — `tts_endpoint`: generate_audio voice through an OpenAI-compatible speech server
 
 **Added — the `tts_endpoint` lane (`internal/ttsclient`, `pipeline/ttsendpoint.go`).** Config `tts_endpoint` (base URL, no
