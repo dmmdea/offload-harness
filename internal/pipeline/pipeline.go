@@ -2604,6 +2604,13 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	default:
 		return p.deferGen(req, meta, start, len(req.Input), "unknown audio kind "+kind)
 	}
+	// tts_endpoint lane (ttsendpoint.go, 0.113.25): an OpenAI-compatible speech
+	// server serves voice when asked for by name (voice=endpoint) or by default
+	// on a box with no local voice script. Decided before the script check so
+	// a script-less box with an endpoint renders instead of deferring.
+	if kind == "voice" && useTTSEndpoint(p.cfg, paramStr(req.Params, "voice")) {
+		return p.runVoiceEndpoint(ctx, req, meta, start)
+	}
 	if script == "" {
 		return p.deferGen(req, meta, start, len(req.Input), "no audio-gen route configured for kind "+kind)
 	}

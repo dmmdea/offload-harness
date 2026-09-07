@@ -186,6 +186,30 @@ func routesIn(cfg config.Config, exeDir string) []Route {
 
 	// --- edit_image (PIL): an explicit python is a binding; an unset one derives
 	// <comfy_dir>/.venv, which is a discovery, so its absence is "not configured".
+	// tts_endpoint (0.113.25): an OpenAI-compatible speech SERVER, not a script —
+	// a URL binding, so "configured" means the key is set (liveness is the
+	// server's /health, probed by the caller, not here). It is the voice
+	// default only when no voicegen_script is bound; otherwise voice=endpoint
+	// selects it.
+	if cfg.TTSEndpoint != "" {
+		detail := "tts_endpoint=" + cfg.TTSEndpoint
+		if cfg.TTSModel != "" {
+			detail += " model=" + cfg.TTSModel
+		}
+		if cfg.TTSVoice != "" {
+			detail += " voice=" + cfg.TTSVoice
+		}
+		if cfg.VoiceGenScript == "" {
+			detail += " (the voice default on this box: no voicegen_script)"
+		} else {
+			detail += " (selected by voice=endpoint; voicegen_script stays the default)"
+		}
+		out = append(out, Route{Name: "generate_audio:voice:endpoint", Engine: "openai-compatible-tts", State: Configured, Detail: detail})
+	} else {
+		out = append(out, Route{Name: "generate_audio:voice:endpoint", Engine: "openai-compatible-tts", State: NotConfigured,
+			Detail: "tts_endpoint is unset"})
+	}
+
 	if py := mediaops.ResolveEditPython(cfg.EditPython, cfg.ComfyDir); py != "" {
 		out = append(out, Route{Name: "edit_image", Engine: "pil", State: Configured,
 			Detail: "edit_python=" + py})
