@@ -100,7 +100,8 @@ func TestRunCapacityWaitTimesOutAsACapacityDefer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if waited := time.Since(start); waited < time.Second {
+	waited := time.Since(start)
+	if waited < time.Second {
 		t.Fatalf("Run returned after %s — it did not wait the configured second", waited)
 	}
 	want := Summary{Deferred: 1, Waited: 1, Replaced: 1}
@@ -119,8 +120,16 @@ func TestRunCapacityWaitTimesOutAsACapacityDefer(t *testing.T) {
 			t.Errorf("reason = %q, want it to contain %q", pr.Result.Reason, s)
 		}
 	}
-	if pr.CapacityWaitSec < 0.7 {
-		t.Errorf("capacity_wait_sec = %.2f, want most of the configured second (idle time only; attempts are charged)", pr.CapacityWaitSec)
+	// The wait must be CREDITED as idle time rather than charged to the
+	// contract. Attempts are real HTTP round-trips whose cost scales with runner
+	// load, so the bar is a share of the MEASURED wait, never of the configured
+	// second: as an absolute 0.7-of-1s this flaked at 0.50 on a loaded runner and
+	// went green on the re-run (issue #248) — a property of the runner, not of the
+	// code. A regression that charged the wait instead of crediting it reports ~0
+	// here, which this still catches.
+	if floor := 0.4 * waited.Seconds(); pr.CapacityWaitSec < floor {
+		t.Errorf("capacity_wait_sec = %.2f, want >= %.2f (the idle share of the %.2fs wait; attempts are charged)",
+			pr.CapacityWaitSec, floor, waited.Seconds())
 	}
 	if got := node.dispatches.Load(); got < 3 {
 		t.Fatalf("node saw %d dispatches, want it re-asked during the wait (>= 3)", got)

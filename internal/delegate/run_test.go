@@ -293,13 +293,22 @@ func remoteWire(output string, structured string) core.AgentWireResult {
 	return w
 }
 
-// testCfg roots every side effect (delegation-log, ledger) in a temp dir.
+// testCfg roots every side effect (delegation-log, ledger, GPU lease) in a temp dir.
 func testCfg(t *testing.T) config.Config {
 	home := t.TempDir()
 	return config.Config{
 		Home:       home,
 		LedgerPath: filepath.Join(home, "ledger.jsonl"),
 		AgentModel: "local-seat",
+		// StateDir + GPULockPath keep the suite off the MACHINE's GPU lease.
+		// run.go reads LocalLease(cfg.GPULockPath, cfg.StateDir) on the placement
+		// path and gpulease.LeaseDir falls back to the real machine-wide root
+		// when both are empty, so an empty pair made every spread/retry test read
+		// whatever lease this box happened to hold — the suite went red whenever
+		// another session reserved the cards (issue #249). GPULockPath is the
+		// highest-precedence input, so it also wins over a GPU_LOCK in the env.
+		StateDir:    filepath.Join(home, "state"),
+		GPULockPath: filepath.Join(home, "gpu-lease"),
 		// The capacity wait (0.113.18) is OFF for the established suite: every
 		// refusal test here pins the immediate "placement refused" / deferral
 		// shape, and the production default (120 s) would turn each into a
@@ -1053,6 +1062,15 @@ func TestRunNoEligibleRemoteNamesTheRealCause(t *testing.T) {
 		reason := results[0].Result.Reason
 		if !strings.Contains(reason, "health probe") || !strings.Contains(reason, base) {
 			t.Fatalf("reason = %q, want the failed probe and the node URL named", reason)
+		}
+		// NO node ran this, so the result must say so. Node/Seat on it are the
+		// DECIDING (local) box, not a box that executed anything: a surface that
+		// renders them as the node under test names the operator's own machine
+		// and hides which base was dead — what fleet-smoke did (issue #250).
+		// Deferred alone cannot carry this, since a node that ANSWERED and
+		// deferred sets the same flag with a real node behind it.
+		if !results[0].Unplaced {
+			t.Error("result is not marked Unplaced: a surface cannot tell 'the node deferred' from 'no node was ever asked'")
 		}
 	})
 

@@ -245,15 +245,47 @@ func TestJobsFetchFailureKeepsPreviousList(t *testing.T) {
 	}
 }
 
+// TestHistoryIsBounded: the per-node history ring holds at its cap however many
+// times the poller ticks.
+//
+// It used to sleep 200 ms at a 5 ms interval and assert len == 3 exactly. That
+// asserted two things at once — the ring is capped AND a loaded runner completed
+// three polls inside a fixed wall window — and only the first is about the
+// poller. The second made it flake ("history len 2 want 3") under the CPU
+// contention of a full `go test ./...`, the same class as issue #248. It also
+// never actually proved BOUNDEDNESS: a single sample taken while the ring was
+// still filling passes without the cap ever being exercised.
+//
+// Now it waits for the ring to FILL (deadline-bounded, not sleep-timed), then
+// keeps polling well past the cap and re-checks — which is the property.
 func TestHistoryIsBounded(t *testing.T) {
 	srv := fakeNode(t, 1)
 	defer srv.Close()
-	p := NewPoller(config.Config{}, []string{srv.URL}, 5*time.Millisecond, 3)
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	const want = 3
+	interval := 5 * time.Millisecond
+	p := NewPoller(config.Config{}, []string{srv.URL}, interval, want)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	go p.Run(ctx)
-	time.Sleep(200 * time.Millisecond)
-	if h := len(p.Snapshot().Nodes[0].History); h != 3 {
-		t.Fatalf("history len %d want 3", h)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		h := len(p.Snapshot().Nodes[0].History)
+		if h > want {
+			t.Fatalf("history len %d exceeds the cap %d", h, want)
+		}
+		if h == want {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("history reached only %d of %d within the deadline", h, want)
+		}
+		time.Sleep(interval)
+	}
+
+	// The ring is full; many more ticks must not grow it.
+	time.Sleep(40 * interval)
+	if h := len(p.Snapshot().Nodes[0].History); h != want {
+		t.Fatalf("history len %d after further ticks, want it pinned at the cap %d", h, want)
 	}
 }

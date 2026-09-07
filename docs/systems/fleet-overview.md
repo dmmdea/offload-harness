@@ -65,6 +65,16 @@ to draw a node's sparklines.
 contract (harness default step budget, 60 s cap) dispatched to every configured node with
 `route=remote` forced.
 
+**`fleet-smoke` rows name the BASE when a node was never exercised.** There is one row per
+configured base, and `smokeRowFor` classifies it. A base that is unreachable or fails the capability
+gate produces a DEFER whose `PlacedResult` carries the LOCAL node and seat — the box that made the
+placement decision, not one that ran anything (`PlacedResult.Unplaced`, set on `route=remote` with
+nothing eligible, is how a surface tells that state from a node that ANSWERED and deferred, since
+both set `Deferred`). Rendering those would name the operator's own machine as the node under test
+and leave the dead base unnamed, so such a row drops the node/seat and shows the base with
+`node not exercised: <why>`. A node that answered keeps its identity. Either way the row is not
+PASS and the verb exits non-zero: an unexercised node is real fleet signal, not a soft warning.
+
 ## How the system works
 
 `fleet-ui` (`fleet_ui_cmd.go`) starts an `internal/fleetview.Poller` against a roster — explicit

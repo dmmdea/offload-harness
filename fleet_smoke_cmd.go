@@ -66,6 +66,48 @@ func renderSmokeTable(rows []smokeRow) string {
 	return b.String()
 }
 
+// smokeRowFor classifies ONE dispatch result into the row an operator reads.
+// Extracted for the same reason exitError was: the classification is the part
+// that gets subtly wrong, and a pure function is testable without a fleet.
+//
+// The case that earned it is Unplaced. A forced remote route that finds nothing
+// eligible comes back Deferred with the LOCAL node and seat stamped on it (the
+// deciding box, not a box that ran anything), so the row used to read
+// "Qube / agent-pool / DEFER" — naming the operator's own machine as the node
+// under test and hiding WHICH configured base was unreachable (issue #250, filed
+// as "the dispatcher's own local row always DEFERs"; there is in fact no
+// separate local row — it is the remote's row coming back local). The verdict
+// and the non-zero exit were always right: an unexercised node is real fleet
+// signal. Only the label was lying.
+func smokeRowFor(base string, r delegate.PlacedResult) smokeRow {
+	row := smokeRow{
+		Base:      base,
+		Node:      r.Node,
+		Seat:      r.Seat,
+		Placement: r.PlacementReason,
+		JobID:     r.JobID,
+		WallMs:    r.Result.WallMs,
+	}
+	switch {
+	case r.Err != "":
+		row.Verdict, row.Detail = "FAIL", r.Err
+	case r.Unplaced:
+		// Nothing ran it: the row belongs to the BASE that was not exercised, so
+		// drop the local node/seat and let the table render the base instead.
+		row.Node, row.Seat = "", ""
+		row.Verdict, row.Detail = "DEFER", "node not exercised: "+r.Result.Reason
+	case r.Result.Deferred:
+		row.Verdict, row.Detail = "DEFER", r.Result.Reason
+	case len(r.AcceptanceFailures) > 0:
+		row.Verdict, row.Detail = "FAIL", strings.Join(r.AcceptanceFailures, "; ")
+	case !strings.HasPrefix(r.PlacementReason, "route=remote"):
+		row.Verdict, row.Detail = "FAIL", "did not land on the node: "+r.PlacementReason
+	default:
+		row.Verdict = "PASS"
+	}
+	return row
+}
+
 // countNot counts rows whose verdict is NOT the given one — used to size the
 // non-zero exit message.
 func countNot(rows []smokeRow, verdict string) int {
@@ -144,21 +186,7 @@ func runFleetSmoke(args []string) error {
 		case len(results) == 0:
 			row.Verdict, row.Detail = "FAIL", "no result row"
 		default:
-			r := results[0]
-			row.Node, row.Seat, row.Placement, row.JobID = r.Node, r.Seat, r.PlacementReason, r.JobID
-			row.WallMs = r.Result.WallMs
-			switch {
-			case r.Err != "":
-				row.Verdict, row.Detail = "FAIL", r.Err
-			case r.Result.Deferred:
-				row.Verdict, row.Detail = "DEFER", r.Result.Reason
-			case len(r.AcceptanceFailures) > 0:
-				row.Verdict, row.Detail = "FAIL", strings.Join(r.AcceptanceFailures, "; ")
-			case !strings.HasPrefix(r.PlacementReason, "route=remote"):
-				row.Verdict, row.Detail = "FAIL", "did not land on the node: "+r.PlacementReason
-			default:
-				row.Verdict = "PASS"
-			}
+			row = smokeRowFor(base, results[0])
 		}
 		rows = append(rows, row)
 	}
