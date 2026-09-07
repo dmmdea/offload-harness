@@ -83,7 +83,46 @@ const (
 	// was down. The fix belongs to whoever wrote the contract, and it is one
 	// they can make without touching a box.
 	DeferClassContract = "contract"
+	// DeferClassCapacity (0.113.18): every node that could run the contract was
+	// full for as long as the delegator was willing to wait (agent_placement_
+	// wait_sec), or the contract was SHEDDABLE (priority -1) and no node had an
+	// idle slot to give it. The fleet is healthy and the contract is sound —
+	// it was simply not this contract's turn. Re-running it later is the fix;
+	// no box and no contract needs touching, so it is not a broken stack
+	// (delegate.BrokenStackDefer) and not a budget the seat ran out of.
+	DeferClassCapacity = "capacity"
 )
+
+// Scheduling bands (0.113.18) — the delegator stamps one on every dispatch
+// (`priority` in the fleet envelope) and the node's job store orders its
+// backlog by it. Shared here because both sides must agree on the vocabulary
+// and neither package may import the other.
+//
+//	BandSheddable (-1)  measurement / gate traffic: admitted only into an idle
+//	                    execution slot, claimed after band 0, shed when no node
+//	                    is idle; ages into band 0 after 60 s in a backlog.
+//	BandNormal (0)      production digests, reviews, research — the default and
+//	                    what a pre-0.113.18 delegator sends.
+//	BandUrgent (+1)     reserved for an interactive caller; claimed first.
+const (
+	BandSheddable = -1
+	BandNormal    = 0
+	BandUrgent    = 1
+)
+
+// ClampBand folds any integer into the three bands.
+func ClampBand(b int) int {
+	if b < BandSheddable {
+		return BandSheddable
+	}
+	if b > BandUrgent {
+		return BandUrgent
+	}
+	return b
+}
+
+// TenantHeader carries the delegator's tenant id on a dispatch (0.113.18).
+const TenantHeader = "X-Offload-Tenant"
 
 // AgentContract is the versioned, self-contained delegation request (§S2).
 // Self-contained means: everything the remote loop may read is INLINE in

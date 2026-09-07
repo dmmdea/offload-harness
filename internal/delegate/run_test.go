@@ -122,6 +122,17 @@ type fakeNode struct {
 	dispatches atomic.Int64
 	polls      atomic.Int64
 	lastJobID  atomic.Value // string
+	// lastPriority / lastTenant record the scheduling keys the LAST dispatch
+	// carried (0.113.18): the envelope's `priority` (nil = absent) and the
+	// X-Offload-Tenant header ("" = absent).
+	lastPriority atomic.Value // *int
+	lastTenant   atomic.Value // string
+	// saturation, when non-nil, is published as health's `saturation` block.
+	saturation *struct {
+		Score    float64 `json:"score"`
+		High     bool    `json:"high"`
+		IdleSlot bool    `json:"idle_slot"`
+	}
 }
 
 func (f *fakeNode) server() *httptest.Server {
@@ -134,7 +145,7 @@ func (f *fakeNode) server() *httptest.Server {
 				return
 			}
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		health := map[string]any{
 			"node_id":             f.nodeID,
 			"queue_depth":         f.queueDepth,
 			"agent_seat":          "remote-seat",
@@ -145,10 +156,24 @@ func (f *fakeNode) server() *httptest.Server {
 			"jobs_running":        f.jobsRunning,
 			"max_concurrent_jobs": f.maxConcurrentJobs,
 			"max_queue_depth":     f.maxQueueDepth,
-		})
+		}
+		if f.saturation != nil {
+			health["saturation"] = f.saturation
+		}
+		_ = json.NewEncoder(w).Encode(health)
 	})
 	mux.HandleFunc("POST /fleet/dispatch", func(w http.ResponseWriter, r *http.Request) {
 		n := f.dispatches.Add(1)
+		// The scheduling keys are recorded on EVERY dispatch, refusals
+		// included — a shed test asserts what a refused dispatch carried.
+		raw, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		var keys struct {
+			Priority *int `json:"priority"`
+		}
+		_ = json.Unmarshal(raw, &keys)
+		f.lastPriority.Store(keys.Priority)
+		f.lastTenant.Store(r.Header.Get(core.TenantHeader))
 		if f.killOnDispatch {
 			// No status line, no body: the delegator sees a transport error and
 			// never an HTTP answer, on both dispatch attempts.
@@ -180,6 +205,7 @@ func (f *fakeNode) server() *httptest.Server {
 			JobID    string          `json:"job_id"`
 			TaskType string          `json:"task_type"`
 			Payload  json.RawMessage `json:"payload"`
+			Priority *int            `json:"priority"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&env); err != nil {
 			f.t.Errorf("dispatch body: %v", err)
@@ -274,6 +300,11 @@ func testCfg(t *testing.T) config.Config {
 		Home:       home,
 		LedgerPath: filepath.Join(home, "ledger.jsonl"),
 		AgentModel: "local-seat",
+		// The capacity wait (0.113.18) is OFF for the established suite: every
+		// refusal test here pins the immediate "placement refused" / deferral
+		// shape, and the production default (120 s) would turn each into a
+		// two-minute stall. Tests of the wait itself set a positive value.
+		AgentPlacementWaitSec: -1,
 	}
 }
 

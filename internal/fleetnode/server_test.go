@@ -173,7 +173,8 @@ func TestHealthGoldenShape(t *testing.T) {
 		"model_footprints": [{"model_family":"sdxl","quant":"bf16","task_type":"image-gen","vram_peak_gb":9.6}],
 		"queue_depth": 0,
 		"jobs_queued": 0, "jobs_running": 0,
-		"max_concurrent_jobs": 4, "max_queue_depth": 32
+		"max_concurrent_jobs": 4, "max_queue_depth": 32,
+		"saturation": {"score": 0, "high": false, "idle_slot": true}
 	}`
 	if err := json.Unmarshal([]byte(golden), &want); err != nil {
 		t.Fatalf("golden not JSON: %v", err)

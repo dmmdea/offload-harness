@@ -34,6 +34,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 // JobState is the contract's job lifecycle: accepted → running → done|error.
@@ -98,7 +100,41 @@ type job struct {
 	// capped records whether this job's EXECUTION counts against
 	// maxConcurrent. See AcceptSpec.Uncapped.
 	capped bool
+	// band / tenant are the scheduling keys (0.113.18): see AcceptSpec.Band and
+	// AcceptSpec.Tenant. Read by claimLocked only.
+	band   int
+	tenant string
 }
+
+// Scheduling bands (0.113.18). A band is an integer priority the CALLER
+// stamps on the dispatch (`priority` in the envelope); the store orders its
+// backlog by band first. The bands are deliberately few:
+//
+//	BandSheddable (-1)  measurement / gate traffic. Admitted only into an IDLE
+//	                    execution slot (the server's shed rule, IdleSlot) and,
+//	                    once admitted, claimed after every band-0 job — unless
+//	                    it has waited bandAgingAfter, at which point it is
+//	                    treated as band 0 so a busy node cannot starve it forever.
+//	BandNormal (0)      production digests, reviews, research: the default, and
+//	                    what every pre-0.113.18 delegator sends (no field).
+//	BandUrgent (+1)     reserved for an interactive caller; claimed first.
+//
+// Anything outside [BandSheddable, BandUrgent] is clamped (ClampBand): a
+// caller cannot buy an arbitrarily high band, and a typo cannot shed itself.
+//
+// The vocabulary is core's (core.Band*, core.ClampBand) — the delegator stamps
+// it and this store reads it; the aliases keep this package's own text honest.
+const (
+	BandSheddable = core.BandSheddable
+	BandNormal    = core.BandNormal
+	BandUrgent    = core.BandUrgent
+	// bandAgingAfter is how long a sheddable job waits in the backlog before it
+	// is claimed as if it were band 0 (aging, DriftSched-style): 60 s.
+	bandAgingAfter = 60 * time.Second
+)
+
+// ClampBand is core.ClampBand.
+func ClampBand(b int) int { return core.ClampBand(b) }
 
 // Jobs is the concurrency-safe ack-then-poll job store AND its scheduler.
 // Terminal results are retained for ttl (contract: ≥ a few minutes; we run 1h)
@@ -137,6 +173,17 @@ type Jobs struct {
 	// onFinish, when set, is called (outside the lock) each time a job reaches a
 	// terminal state — the store steward counts turns with it (0.113.16).
 	onFinish func()
+
+	// served is the tenant round-robin state (0.113.18): tenant → the claim
+	// sequence number at which that tenant was LAST handed a slot. claimLocked
+	// prefers, within a band, the claimable tenant with the SMALLEST value —
+	// never served (absent, 0) first — so one session's 8-spread cannot hold
+	// every slot while another session's first contract waits behind it.
+	// claimSeq is the monotonic counter it is stamped from. Pruned by sweep.
+	served   map[string]uint64
+	claimSeq uint64
+	// agingAfter is bandAgingAfter, on the struct so tests can shorten it.
+	agingAfter time.Duration
 }
 
 // OnFinish registers fn to run after every job reaches a terminal state. It is
@@ -166,6 +213,8 @@ func newJobs(ttl time.Duration, now func() time.Time, janitorTick time.Duration,
 		ctx:           ctx,
 		cancel:        cancel,
 		stopJanitor:   make(chan struct{}),
+		served:        map[string]uint64{},
+		agingAfter:    bandAgingAfter,
 	}
 	j.cond = sync.NewCond(&j.mu)
 	go j.janitor(janitorTick)
@@ -232,6 +281,32 @@ type AcceptSpec struct {
 	// not the caller's model_family) and env.ModelFamily otherwise. Both are
 	// display-only — nothing in this package branches on them.
 	Task, Model string
+	// Band is the scheduling band (BandSheddable / BandNormal / BandUrgent;
+	// callers pass it through ClampBand). The backlog is claimed highest band
+	// first; a sheddable job ages into band 0 after bandAgingAfter.
+	Band int
+	// Tenant identifies the DELEGATOR (one MCP server = one Claude session, or
+	// one CLI process) so the claim order can round-robin across tenants within
+	// a band. Empty = one anonymous tenant, which is exactly the pre-0.113.18
+	// behaviour (pure arrival order) for a fleet of older delegators.
+	Tenant string
+}
+
+// IdleSlot reports whether a job admitted RIGHT NOW would start at once: the
+// backlog is empty and a capped execution slot is free (or execution is
+// unlimited). It is the server's shed predicate for BandSheddable dispatches —
+// measurement traffic takes only capacity nobody is queued for — and health
+// publishes it as saturation.idle_slot so a delegator can read the same answer
+// before it dispatches.
+func (j *Jobs) IdleSlot() bool {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	for _, jb := range j.m {
+		if jb.state == JobAccepted {
+			return false
+		}
+	}
+	return j.maxConcurrent <= 0 || j.runningCappedLocked() < j.maxConcurrent
 }
 
 // Accept ADMITS id — it records the job as `accepted` and queues it for the
@@ -280,6 +355,8 @@ func (j *Jobs) Admit(id string, spec AcceptSpec, run func(context.Context) (json
 		task:       spec.Task,
 		model:      spec.Model,
 		acceptedAt: j.now(),
+		band:       ClampBand(spec.Band),
+		tenant:     spec.Tenant,
 	}
 	j.pending = append(j.pending, id)
 	j.cond.Broadcast() // wake the scheduler: there is work
@@ -340,21 +417,35 @@ func (j *Jobs) runningCappedLocked() int {
 	return n
 }
 
-// claimLocked pops the oldest CLAIMABLE job — the first entry in arrival order
-// whose lane has room — marks it running in the same critical section, and
-// returns its work. Stale ids (evicted, or marked terminal by drain) are
-// discarded as it goes. Caller holds mu.
+// claimLocked pops the best CLAIMABLE job, marks it running in the same
+// critical section, and returns its work. Stale ids (evicted, or marked
+// terminal by drain) are discarded as it goes. Caller holds mu.
+//
+// "Best" is three ordered keys over the claimable entries (0.113.18, the
+// llm-d/Kueue shape sized for three boxes):
+//
+//  1. highest EFFECTIVE band — the stamped band, except that a sheddable job
+//     that has waited agingAfter counts as band 0 (aging: a node that is busy
+//     all afternoon must not starve gate traffic forever);
+//  2. within a band, the tenant served LEAST RECENTLY (j.served; never served
+//     wins) — round-robin turns across delegators, so session A's 8-spread and
+//     session B's single contract alternate instead of A holding every slot;
+//  3. arrival order (the pending index) — the pre-0.113.18 rule, still deciding
+//     everything the two keys above leave tied. A fleet of older delegators
+//     stamps neither band nor tenant, and for them this IS pure FIFO.
 //
 // It scans past a blocked entry rather than stopping at the head, and that is
 // load-bearing rather than an optimization: an uncapped job must not queue
 // behind capped ones, or its exemption would be undone by FIFO position — four
 // running agent jobs would stall every media dispatch behind them, which is
-// precisely the coupling the exemption exists to remove. Arrival order is still
-// strict WITHIN a lane; only across lanes can a later job go first, and only
-// when the earlier one could not have run anyway.
+// precisely the coupling the exemption exists to remove.
 func (j *Jobs) claimLocked() (string, func(context.Context) (json.RawMessage, error), bool) {
 	capped := j.runningCappedLocked()
 	full := j.maxConcurrent > 0 && capped >= j.maxConcurrent
+	now := j.now()
+	best := -1
+	var bestBand int
+	var bestServed uint64
 	for i := 0; i < len(j.pending); i++ {
 		jb, ok := j.m[j.pending[i]]
 		if !ok || jb.state != JobAccepted || jb.run == nil {
@@ -365,16 +456,29 @@ func (j *Jobs) claimLocked() (string, func(context.Context) (json.RawMessage, er
 		if jb.capped && full {
 			continue // this lane is at its limit; a later uncapped entry may still go
 		}
-		id := j.pending[i]
-		j.dropPendingLocked(i)
-		run := jb.run
-		jb.run = nil
-		jb.onDropped = nil // the run's own defer owns cleanup from here on
-		jb.state = JobRunning
-		jb.startedAt = j.now()
-		return id, run, true
+		band := jb.band
+		if band < BandNormal && now.Sub(jb.acceptedAt) >= j.agingAfter {
+			band = BandNormal
+		}
+		served := j.served[jb.tenant]
+		if best < 0 || band > bestBand || (band == bestBand && served < bestServed) {
+			best, bestBand, bestServed = i, band, served
+		}
 	}
-	return "", nil, false
+	if best < 0 {
+		return "", nil, false
+	}
+	id := j.pending[best]
+	jb := j.m[id]
+	j.dropPendingLocked(best)
+	j.claimSeq++
+	j.served[jb.tenant] = j.claimSeq
+	run := jb.run
+	jb.run = nil
+	jb.onDropped = nil // the run's own defer owns cleanup from here on
+	jb.state = JobRunning
+	jb.startedAt = now
+	return id, run, true
 }
 
 // dropPendingLocked removes index i from the FIFO, preserving order. Caller
@@ -608,6 +712,18 @@ func (j *Jobs) sweep() {
 	for id, jb := range j.m {
 		if (jb.state == JobDone || jb.state == JobError) && jb.terminalAt.Before(cutoff) {
 			delete(j.m, id)
+		}
+	}
+	// Tenant turn state lives exactly as long as the tenant has a job here:
+	// tenants are session ids, and a map that only ever grew would hold one
+	// entry per Claude session the node has ever served.
+	live := map[string]bool{}
+	for _, jb := range j.m {
+		live[jb.tenant] = true
+	}
+	for tenant := range j.served {
+		if !live[tenant] {
+			delete(j.served, tenant)
 		}
 	}
 }

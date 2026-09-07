@@ -529,6 +529,8 @@ type healthPayload struct {
 	// a re-placeable 503 — the node stays up, keeps answering health, finishes
 	// what it holds, and is never "dropped" from the fleet for a measurement.
 	Lease *LeaseHealth `json:"lease,omitempty"`
+	// Saturation (0.113.18): always published; see SaturationHealth.
+	Saturation *SaturationHealth `json:"saturation,omitempty"`
 	// Store is the store steward's last status (0.113.16), published only when
 	// fleet_store_root is configured.
 	Store *storesteward.Status `json:"store,omitempty"`
@@ -692,11 +694,19 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// GPU lease: a stat + a small file, the same read every acquirer does.
+	leasedText := false
 	if s.opts.Lease != nil {
 		if info := s.opts.Lease(); info.Held {
 			payload.Lease = leaseHealthOf(info)
+			leasedText = info.Class == gpulease.ClassText
 		}
 	}
+	// Saturation (0.113.18): derived from the counters above and the two
+	// refusal states dispatch applies to NEW work, so it can never disagree
+	// with what a dispatch would actually get.
+	sat := saturationOf(queued, running, payload.MaxConcurrentJobs, payload.MaxQueueDepth,
+		s.jobs.Draining() || leasedText, s.jobs.IdleSlot())
+	payload.Saturation = &sat
 	// Store steward: a cached status; Status() itself starts a background
 	// tick when the last scan read above the high mark, so a health poll is a
 	// turn too, without this handler ever walking a directory.
@@ -705,6 +715,88 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		payload.Store = &st
 	}
 	writeJSON(w, http.StatusOK, payload)
+}
+
+// TenantHeader carries the delegator's tenant id on a dispatch (0.113.18). A
+// header rather than an envelope field because dispatchEnvelope is decoded
+// with DisallowUnknownFields: a new field would 400 on every node one release
+// behind, and a mixed-version fleet is the normal state of a staggered deploy.
+const TenantHeader = core.TenantHeader
+
+// maxTenantLen bounds what the store keys its round-robin map on.
+const maxTenantLen = 96
+
+// bandOf reads the envelope's `priority` as a scheduling band. The field is
+// contract-reserved and was accepted-and-ignored before 0.113.18, so it is read
+// LENIENTLY on purpose: absent, null, or anything that is not a JSON integer
+// (a string, a float, an object from a media dispatcher with its own meaning)
+// is band 0 — the pre-0.113.18 behaviour, never a 400 on a request an older
+// node would have taken. An integer is clamped to the three bands.
+func bandOf(raw json.RawMessage) int {
+	var n int
+	if len(raw) == 0 || json.Unmarshal(raw, &n) != nil {
+		return BandNormal
+	}
+	return ClampBand(n)
+}
+
+// tenantOf reads TenantHeader: trimmed, bounded, printable-ASCII-only (the
+// value keys a map and is echoed in log lines — it must not carry a newline
+// or a control byte). Anything else reads as the anonymous tenant.
+func tenantOf(r *http.Request) string {
+	v := strings.TrimSpace(r.Header.Get(TenantHeader))
+	if len(v) > maxTenantLen {
+		v = v[:maxTenantLen]
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x21 || v[i] > 0x7e {
+			return ""
+		}
+	}
+	return v
+}
+
+// SaturationHealth is /fleet/health's `saturation` block (0.113.18): ONE
+// number and two booleans derived from the counters published beside it, so
+// every reader — the delegator's placement, offload_status, a human with curl
+// — agrees on what "this node is saturated" means without each re-deriving it.
+//
+//	score      max(jobs_running / max_concurrent_jobs, queue_depth / max_queue_depth)
+//	           over the limits the node publishes (an unpublished limit
+//	           contributes nothing); 0 on an idle node, 1.0 at a ceiling.
+//	high       a NEW band-0 dispatch would be refused right now: the backlog is at
+//	           max_queue_depth, the node is draining, or its card is under a
+//	           text lease. The delegator's ranking demotes a high node exactly
+//	           as it demotes one whose queue_depth has reached its ceiling.
+//	idle_slot  Jobs.IdleSlot: a sheddable (priority -1) dispatch would be admitted.
+//
+// Seat-level counters (vLLM running/waiting, KV usage) are deliberately NOT an
+// input yet: the node's health handler never probes the seat (a probe of an
+// unloaded seat through llama-swap LOADS it), and on this fleet the job counters
+// already describe the load the harness itself puts on a seat. The block is the
+// seam a cached seat sampler would feed later, without a wire change.
+type SaturationHealth struct {
+	Score    float64 `json:"score"`
+	High     bool    `json:"high"`
+	IdleSlot bool    `json:"idle_slot"`
+}
+
+// saturationOf computes the block from the same numbers health publishes.
+func saturationOf(queued, running, maxConcurrent, maxDepth int, refusing, idleSlot bool) SaturationHealth {
+	var score float64
+	if maxConcurrent > 0 {
+		score = float64(running) / float64(maxConcurrent)
+	}
+	if maxDepth > 0 {
+		if s := float64(queued+running) / float64(maxDepth); s > score {
+			score = s
+		}
+	}
+	if score > 1 {
+		score = 1
+	}
+	high := refusing || (maxDepth > 0 && queued+running >= maxDepth)
+	return SaturationHealth{Score: score, High: high, IdleSlot: idleSlot}
 }
 
 // LeaseHealth is the wire shape of a HELD lease in /fleet/health.
@@ -957,6 +1049,28 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 				info.Class, info.PID, info.Reason, info.ExpiresAt.UTC().Format(time.RFC3339)))
 		return
 	}
+	// Scheduling keys (0.113.18): the band rides the envelope's `priority`
+	// field — contract-reserved since v2, accepted-and-ignored until now, so a
+	// pre-0.113.18 node still takes the same bytes — and the tenant rides a
+	// header, because the envelope decode rejects unknown FIELDS and a new one
+	// would 400 on every older node in a staggered rollout. A caller that sends
+	// neither is band 0 in one anonymous tenant: pure arrival order, as before.
+	band, tenant := bandOf(env.Priority), tenantOf(r)
+	// Shed rule: a sheddable dispatch is admitted only into an IDLE execution
+	// slot. Measurement and gate traffic takes capacity nobody is queued for
+	// and never queues in front of, or behind, production work; the delegator
+	// re-places the 503 on another node (any version — 503 has been
+	// re-placeable since 0.101.0) and, with no idle node anywhere, sheds the
+	// contract instead of waiting. Checked BEFORE the queue cap on purpose: a
+	// node that is merely busy is not full, and "busy" is the state a
+	// sheddable job must not add to.
+	if band < BandNormal && !s.jobs.IdleSlot() {
+		queued, running := s.jobs.Counts()
+		writeError(w, http.StatusServiceUnavailable,
+			fmt.Sprintf("shed (priority %d): no idle execution slot (%d running, %d queued, limit %d); sheddable work takes idle capacity only",
+				band, running, queued, s.jobs.MaxConcurrent()))
+		return
+	}
 	if limit := s.opts.Cfg.FleetQueueLimit(); limit > 0 {
 		if d := s.jobs.QueueDepth(); d >= limit {
 			// Wording matters here more than anywhere else in this file:
@@ -1029,6 +1143,8 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		OnDropped: cleanup,
 		Task:      env.TaskType,
 		Model:     specModel,
+		Band:      band,
+		Tenant:    tenant,
 	}
 	if !s.jobs.Admit(env.JobID, spec, run) {
 		cleanup() // duplicate/drain refusal: this request's materialized files never run

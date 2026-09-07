@@ -73,6 +73,14 @@ type SummaryWire struct {
 	Quarantined          int `json:"quarantined,omitempty"`
 	Batches              int `json:"batches,omitempty"`
 	Skipped              int `json:"skipped,omitempty"`
+	// Waited / Shed (0.113.18): subtasks that waited for fleet capacity before a
+	// node took them (the capacity wait, agent_placement_wait_sec), and
+	// sheddable subtasks (priority -1) that found no idle node and were shed
+	// (defer_class capacity). omitempty — a run that neither waited nor shed
+	// publishes byte-identically to before. `waited: 5` on a green run is the
+	// line that says the fleet was full and the wait is what saved the work.
+	Waited int `json:"waited,omitempty"`
+	Shed   int `json:"shed,omitempty"`
 }
 
 // ResultWire is one subtask's published outcome. Failed marks a
@@ -108,6 +116,9 @@ type ResultWire struct {
 	// what each of them said.
 	Replacements    int    `json:"replacements,omitempty"`
 	ReplacementNote string `json:"replacement_note,omitempty"`
+	// CapacityWaitSec (0.113.18): how long this subtask waited for a node to
+	// have room (agent_placement_wait_sec) — not charged to timeout_sec.
+	CapacityWaitSec float64 `json:"capacity_wait_sec,omitempty"`
 	// AcceptanceLint carries the intake lint's warnings for THIS subtask's
 	// acceptance (delegate.LintAcceptance): parrot-passable / ungrounded /
 	// shape-only. Warn-only — the run above happened regardless. It rides the
@@ -162,6 +173,8 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			Replaced:             sum.Replaced,
 			ReplacementRecovered: sum.ReplacementRecovered,
 			Quarantined:          sum.Quarantined,
+			Waited:               sum.Waited,
+			Shed:                 sum.Shed,
 			Batches:              sum.Batches,
 			Skipped:              sum.Skipped,
 		},
@@ -187,6 +200,7 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			RetryNote:          pr.RetryNote,
 			Replacements:       pr.Replacements,
 			ReplacementNote:    pr.ReplacementNote,
+			CapacityWaitSec:    pr.CapacityWaitSec,
 			AcceptanceLint:     lintFor(lints, i),
 			HarnessVersion:     pr.Result.HarnessVersion,
 			HarnessBuildSHA256: pr.Result.HarnessBuildSHA256,

@@ -6,6 +6,46 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.18] — 2026-09-06 — work flows without gaps: the delegator waits for capacity, and nodes schedule by band and tenant
+
+**Added — the capacity wait (`agent_placement_wait_sec`, default 120 s; negative = off).** A delegation subtask that every
+fitting node has just refused for CAPACITY (503/429: queue full, leased, draining, shed) — or whose only placement is a seat a
+text GPU lease reserves — no longer ends as `placement refused` / a lease deferral on the spot. It waits, re-reads the fleet's
+health every 3 s, and lands on the FIRST node that frees: the local seat once the lease clears, or a remote whose health says it
+has room (a node that just refused is not re-asked for 10 s). The idle time is credited to the contract's `timeout_sec` (like
+time provably spent queued on a node); the attempts are charged as always. When nothing frees inside the wait the outcome is a
+DEFER of class `capacity` (new: "not this contract's turn" — not a broken stack, not a seat that ran out of budget; the reserved
+case keeps the holder-naming `infrastructure` deferral). Wire: `summary.waited`, `results[].capacity_wait_sec`. Why: the
+2026-09-06 "Qube timed out" incident — a contract dispatched during the one minute a seat was unloaded burned its 300 s on one
+node. Fixed alongside: a remote's 503 used to fall back onto a RESERVED local seat through the re-placement path (the
+2026-09-05 incident through a side door) — the local last resort now honours the lease.
+
+**Added — scheduling bands + tenant fairness on the node.** Every dispatch carries a band (`priority` in the envelope — the
+contract-reserved field nodes have accepted-and-ignored since v2, sent only when non-zero) and a tenant (`X-Offload-Tenant`
+header — a header because the envelope decode rejects unknown fields, and a new one would 400 on every node one release behind).
+`priority` on `agent_delegate` / `--priority` on `delegate`: `-1` SHEDDABLE (measurement/gate traffic), `0` production (default),
+`1` urgent. The node's job store claims its backlog by band, then by the tenant served least recently (round-robin across
+sessions — one session's 8-spread can no longer hold every slot while another's first contract waits), then arrival; a
+sheddable job that has waited 60 s counts as band 0 (aging). The shed rule: a sheddable dispatch is admitted only into an IDLE
+execution slot (empty backlog, free capped worker) and is otherwise refused `503 shed (priority -1)`, so gate traffic takes idle
+capacity only and never queues before or behind production work; the delegator re-places it and, with no idle node anywhere,
+sheds it at once (deferred, class `capacity`, `summary.shed`) instead of waiting. Tenant: one MCP server (one Claude session)
+or one CLI process (`LOCAL_OFFLOAD_TENANT` overrides). Older delegators send neither key and schedule exactly as before (band
+0, arrival order).
+
+**Added — `saturation` in `/fleet/health`:** `{score, high, idle_slot}` derived from the counters published beside it — `score`
+= max(running/limit, depth/ceiling), `high` = a new band-0 dispatch would be refused now (queue cap, drain, text lease),
+`idle_slot` = a sheddable one would be admitted. The delegator's ranking reads `high` as saturated (OR'd with its own
+arithmetic; an older node ranks as before), the capacity wait uses it as "try this one", `offload_status` prints it beside
+`text_lease_held`. Seat-level counters (vLLM running/waiting, KV usage) are deliberately not an input yet: the health handler
+never probes the seat, and on this fleet the job counters already describe the load the harness puts on it.
+
+**Tests:** the wait lands on a node that frees (budget handed intact) · times out as a capacity defer (node re-asked during the
+wait) · sheddable is shed at once · reserved local lands on a remote that frees (L3 complete) · reserved local with nothing
+freeing still names the holder · wait disabled keeps the pre-0.113.18 failure · envelope carries the band only when non-zero
+and the tenant only in the header · node claim order band → tenant → arrival, anonymous tenants stay FIFO, aging, IdleSlot,
+shed 503 with the band-0 control admitted, lenient `priority`, tenant sanitization, saturation across idle/running/full/leased.
+
 ## [0.113.17] — 2026-09-06 — a deferral caused by a leased remote names the lease
 
 **Fixed.** With one fitting remote under a text GPU lease, `delegate` correctly refused to place there (0.113.16) but
