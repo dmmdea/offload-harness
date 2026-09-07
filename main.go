@@ -252,7 +252,7 @@ Usage:
   local-offload ocr       <image-path> [--json]
   local-offload extract-image <image-path> --schema schema.json [--json]
   local-offload assess-image <image-path> [--brief "..."] [--json]
-  local-offload generate-audio <out> "<text>" [--kind voice|music] [--voice generalist|finetuned] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
+  local-offload generate-audio <out> "<text>" [--kind voice|music] [--voice generalist|finetuned|endpoint] [--tts-voice NAME] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
   local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false]
   local-offload generate-image --batch jobs.jsonl    N prompts through ONE warm ComfyUI session (checkpoint loads once)
   local-offload inpaint-image <image> --mask m.png --prompt "..."   re-render ONLY the masked region (white=repaint)
@@ -1274,6 +1274,7 @@ func runGenerateSVG(args []string) error {
 type audioFlags struct {
 	kind        string
 	voice       string
+	ttsVoice    string // voice=endpoint: server-side voice name
 	clone       string
 	lang        string
 	out         string
@@ -1294,6 +1295,9 @@ func buildAudioParams(f audioFlags) map[string]any {
 	params := map[string]any{"kind": kind}
 	if f.voice != "" {
 		params["voice"] = f.voice
+	}
+	if f.ttsVoice != "" {
+		params["tts_voice"] = f.ttsVoice
 	}
 	if f.clone != "" {
 		params["clone"] = f.clone
@@ -1327,7 +1331,8 @@ func runGenerateAudio(args []string) error {
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "print full result JSON")
 	kind := fs.String("kind", "voice", "voice (Chatterbox TTS) | music (ACE-Step)")
-	voice := fs.String("voice", "", "voice: generalist | finetuned (finetuned needs this machine's voicegen_ft_* config)")
+	voice := fs.String("voice", "", "voice: generalist | finetuned | endpoint (finetuned needs this machine's voicegen_ft_* config; endpoint renders through tts_endpoint, the configured OpenAI-compatible speech server — the default on a box with no voicegen_script)")
+	ttsVoice := fs.String("tts-voice", "", "voice=endpoint: the server-side voice/profile name (default: this box's tts_voice, else the server's default)")
 	clone := fs.String("clone", "", "voice: local path to a reference .wav for zero-shot voice cloning")
 	lang := fs.String("lang", "", "voice: language code (default es)")
 	seconds := fs.Int("seconds", 0, "music: clip length in seconds")
@@ -1338,7 +1343,7 @@ func runGenerateAudio(args []string) error {
 	// generate-audio takes TWO positionals (out path, text); the rest are flags.
 	out, text, flagArgs := splitTwoArgs(args, map[string]bool{
 		"config": true, "kind": true, "voice": true, "clone": true, "lang": true,
-		"seconds": true, "seed": true, "reserve-vram": true,
+		"seconds": true, "seed": true, "reserve-vram": true, "tts-voice": true,
 	})
 	_ = fs.Parse(flagArgs)
 
@@ -1354,7 +1359,7 @@ func runGenerateAudio(args []string) error {
 	defer cleanup()
 
 	params := buildAudioParams(audioFlags{
-		kind: *kind, voice: *voice, clone: *clone, lang: *lang, out: out,
+		kind: *kind, voice: *voice, ttsVoice: *ttsVoice, clone: *clone, lang: *lang, out: out,
 		seconds: *seconds, seed: *seed, reserveVRAM: *reserveVRAM,
 	})
 	res := p.Run(context.Background(), core.Request{

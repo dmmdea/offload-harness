@@ -561,6 +561,19 @@ type Config struct {
 	// VoiceGenScript is the path to render/tts.mjs (Chatterbox TTS; comfyManaged:false).
 	// It serves generate_audio kind=voice. Empty = voice defers.
 	VoiceGenScript string `json:"voicegen_script,omitempty"`
+	// TTSEndpoint (0.113.25) is an OpenAI-compatible speech server — base URL,
+	// no /v1 (e.g. VoiceStudio on http://127.0.0.1:3900). It serves
+	// generate_audio kind=voice when the request says voice=endpoint, or by
+	// default when no voicegen_script is bound on this box. The server owns
+	// its GPU: this lane takes no media lease. Empty = the lane is absent.
+	TTSEndpoint string `json:"tts_endpoint,omitempty"`
+	// TTSModel / TTSVoice are what the endpoint is asked for; empty = the
+	// OpenAI alias `tts-1` (every compatible server maps it to its default
+	// engine — VoiceStudio rejects `default` as a model) and the server's
+	// default voice. TTSAPIKey is sent as a bearer token when set.
+	TTSModel  string `json:"tts_model,omitempty"`
+	TTSVoice  string `json:"tts_voice,omitempty"`
+	TTSAPIKey string `json:"tts_api_key,omitempty"`
 	// VoiceGenRef is the default reference clip for the GENERALIST voice path (es-MX
 	// zero-shot clone). Empty = Chatterbox's built-in voice. Used only when the request
 	// has no "clone" param. Per-machine path — never a hardcoded voice.

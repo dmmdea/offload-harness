@@ -6,6 +6,23 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.25] — 2026-09-07 — `tts_endpoint`: generate_audio voice through an OpenAI-compatible speech server
+
+**Added — the `tts_endpoint` lane (`internal/ttsclient`, `pipeline/ttsendpoint.go`).** Config `tts_endpoint` (base URL, no
+`/v1`), `tts_model` (default `tts-1` — the OpenAI alias every compatible server maps to its default engine; VoiceStudio
+0.5.1 rejects `default` as a model, measured), `tts_voice`, `tts_api_key`. `generate_audio kind=voice` renders through the
+server when the request says `voice: endpoint`, or by default on a box with `tts_endpoint` and no `voicegen_script`; a
+box with both keeps Chatterbox as its default voice, byte-for-byte as before. `POST /v1/audio/speech`
+(`response_format: wav`, `language` hint), the body written atomically to the media dir (or `out`), an HTTP error / a
+JSON-or-HTML 200 / a body under 64 bytes is a defer naming the server's own words (`err_class tts_endpoint`), never an
+empty "audio" file. No media lease: the server owns its GPU, the rule for every remote engine. Result carries
+`engine: tts_endpoint`, `endpoint`, `model`, `voice`, `bytes`; `meta.model` = `tts-endpoint:<model>`. Doors: MCP
+`offload_generate_audio` (`voice: endpoint`, `tts_voice`), CLI `generate-audio --voice endpoint [--tts-voice NAME]`; the
+route shows in `offload_status.media.routes` as `generate_audio:voice:endpoint` (a URL binding — configured means the key
+is set; liveness is the server's `/health`). Why: VoiceStudio (item 8 of the 2026-09-07 order) was proven live headless on
+the reference workstation the same day — a render in 80 s at −18.9 LUFS with an exact round-trip transcription — and the
+harness needed a way to render through it, or through any server that speaks that contract, without a python worker.
+
 ## [0.113.24] — 2026-09-07 — setup replay on the agent loop (`setup_actions`, `agent_seed_context_reads`)
 
 **Added — `setup_actions` (ADR 0036 amendment, P2 of the envharness port).** A contract may carry up to eight

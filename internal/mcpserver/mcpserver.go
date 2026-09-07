@@ -219,7 +219,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_generate_audio",
 		Description: "Synthesize AUDIO on the LOCAL GPU for FREE — no cloud. kind=voice (default) is text-to-speech narration via Chatterbox Multilingual (commercial-safe, default Spanish; pass clone=<ref.wav> for zero-shot voice cloning, lang for the language). kind=music is a text-to-music bed via ACE-Step (style-tag prompt; seconds for length; optional lyrics). text is the narration text or the music style prompt. Optional: out (output path; default under the media dir), seed, reserve_vram (music only). It takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait before deferring. Returns {audio_path, kind, seed}. On any failure (GPU busy, no route, worker error, timeout) it returns deferred:true — then synthesize it another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"narration text (voice) or music style prompt (music)"},"kind":{"type":"string","description":"voice (default, Chatterbox TTS) | music (ACE-Step)"},"voice":{"type":"string","description":"generalist | finetuned (default generalist; finetuned requires this machine's voicegen_ft_* config)"},"clone":{"type":"string","description":"voice: local path to a reference .wav for zero-shot voice cloning"},"lang":{"type":"string","description":"voice: language code (default es)"},"seconds":{"type":"integer","description":"music: clip length in seconds"},"out":{"type":"string","description":"output audio path (optional; default under the media dir)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"music: VRAM held back for the display (per-workflow override)"}},"required":["text"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"narration text (voice) or music style prompt (music)"},"kind":{"type":"string","description":"voice (default, Chatterbox TTS) | music (ACE-Step)"},"voice":{"type":"string","description":"generalist | finetuned | endpoint (default generalist — or endpoint by itself on a box with tts_endpoint and no voicegen_script; finetuned requires this machine's voicegen_ft_* config; endpoint renders through the configured OpenAI-compatible speech server, e.g. VoiceStudio, no media lease — pass tts_voice to name a server-side voice)"},"tts_voice":{"type":"string","description":"voice=endpoint only: the server-side voice/profile name (default: this box's tts_voice, else the server's default)"},"clone":{"type":"string","description":"voice: local path to a reference .wav for zero-shot voice cloning"},"lang":{"type":"string","description":"voice: language code (default es)"},"seconds":{"type":"integer","description":"music: clip length in seconds"},"out":{"type":"string","description":"output audio path (optional; default under the media dir)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"music: VRAM held back for the display (per-workflow override)"}},"required":["text"]}`),
 	}, s.handleGenerateAudio)
 
 	srv.AddTool(&mcp.Tool{
@@ -1402,6 +1402,7 @@ func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolReque
 		Text        string  `json:"text"`
 		Kind        string  `json:"kind"`
 		Voice       string  `json:"voice"`
+		TTSVoice    string  `json:"tts_voice"` // voice=endpoint: the server-side voice name
 		Clone       string  `json:"clone"`
 		Lang        string  `json:"lang"`
 		Seconds     int     `json:"seconds"`
@@ -1418,6 +1419,9 @@ func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolReque
 	}
 	if in.Voice != "" {
 		params["voice"] = in.Voice
+	}
+	if in.TTSVoice != "" {
+		params["tts_voice"] = in.TTSVoice
 	}
 	if in.Clone != "" {
 		params["clone"] = in.Clone
