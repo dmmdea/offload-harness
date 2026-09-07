@@ -770,6 +770,8 @@ card at launch — free − `SEAT_NONKV_GIB` (the engine's weights + non-torch +
 own banner) − the headroom (what must stay free for co-residents' growth) — floored at `SEAT_KV_FLOOR_GIB` (2.0) and capped at
 `SEAT_KV_CAP_GIB` (3.4), and passes it as `--kv-cache-memory-bytes` (per worker; vLLM then ignores the utilization). The banner
 line names every input. Off unless the headroom knob is set; measured on the reference workstation after a util-0.90 seat stalled
+(gate verdict 2026-09-07: headroom 0.5 GiB with the utility seats on CPU → the same 209,597-token pool on 10/10 starts, c32
+218.9 tok/s at TTFT p95 11.1 s, a 20-minute soak of 1,624 requests with 0 errors — the run-to-run pool variance is gone) 
 under daytime co-resident growth. Prove the tier with vLLM's own `vllm:external_prefix_cache_hits` counter around an
 after-eviction request, and prove fidelity with a planted needle retrieved verbatim after eviction
 and after a restart — hit counters alone do not prove the context came back intact.

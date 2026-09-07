@@ -12,7 +12,10 @@ non-KV − headroom, floored/capped, passed as `--kv-cache-memory-bytes` (per wo
 budgets a fraction of a card that co-residents also live on. Why: the reference workstation's util-0.90 seat fit at launch and
 stalled at noon when the utility seats sharing its card grew 0.7–1.3 GB (2026-09-06); the profiler also lands the same config
 at 183k or 191k tokens on different starts (a c32 coin flip). The launcher prints every input of the computation. Item 3 of the
-2026-09-06 operator order; measured with the production seat gate (`seat_gate.py`) before it was switched on.
+2026-09-06 operator order; measured with the production seat gate (`seat_gate.py`) before it was switched on: with the
+utility seats moved to CPU and `SEAT_KV_HEADROOM_GIB=0.5`, 10/10 starts landed the same 209,597-token pool (+9 % over the
+profiled 191,884, loads 139–163 s), probe c8 136.4 tok/s (TTFT p95 2.8 s) / c32 218.9 tok/s (TTFT p95 11.1 s, 0 failed),
+soak 1,208 s = 1,624 requests, 0 errors, 0 health failures — STABLE, adopted as the reference workstation's seat config.
 
 ## [0.113.21] — 2026-09-07 — the result cache falls back to a per-process file when the shared one is held
 
