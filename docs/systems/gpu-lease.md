@@ -280,7 +280,11 @@ before the lease can still be in flight. `--drain` waits, after the lease is tak
 running or waiting: llama-swap's `/running` is read first — an unloaded seat is idle by definition, and its `/upstream/<model>/…`
 path is NEVER probed on an unloaded seat because that path loads the model on demand — then the loaded seat's own gauges
 (`vllm:num_requests_running|waiting`, `llamacpp:requests_processing|deferred`) through `/upstream/<model>/metrics`, two
-consecutive zeros required. At `--drain-timeout` the wrapper form releases the lease and exits non-zero; the detach form keeps
+consecutive zeros required. A llama.cpp seat started without `--metrics` answers that path `501` (older builds `404`); since
+0.113.19 the drain then reads llama-server's `GET /slots` and counts `is_processing` slots — llama-server's deferred queue is
+not listed there, and the two-consecutive-zeros rule is what covers it (a queued request becomes a processing slot the instant
+one frees). Any other non-200 from `/metrics` is still "could not read", never idle: the drain fails at the deadline. At
+`--drain-timeout` the wrapper form releases the lease and exits non-zero; the detach form keeps
 the lease (the card stays reserved, work keeps routing elsewhere) and exits non-zero so the caller does not start.
 `--unload-seat` (requires `--drain`) then frees the cards through `POST /api/models/unload/<model>` (legacy `GET /unload`
 as the fallback). The wrapper form warms the seat back (`GET /upstream/<model>/health`) BEFORE releasing, so the first

@@ -86,10 +86,64 @@ func seatInflight(ctx context.Context, client *http.Client, endpoint, model stri
 		return 0, true, fmt.Errorf("seat metrics: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return parseInflight(resp.Body), true, nil
+	case http.StatusNotImplemented, http.StatusNotFound:
+		// llama-server answers 501 (older builds 404) when it runs WITHOUT
+		// --metrics — every llama.cpp seat on this fleet does (2026-09-06:
+		// the Lenovo's drain timed out on a warm seat, "seat metrics: status
+		// 501"). Its /slots endpoint is on by default and reports per-slot
+		// is_processing, which is the in-flight count for a slot-based server.
+		// Only these two statuses fall back: a 500 or a timeout is "could not
+		// read" and must never pass as idle.
+		return slotsInflight(ctx, client, base, model)
+	default:
 		return 0, true, fmt.Errorf("seat metrics: status %d", resp.StatusCode)
 	}
-	return parseInflight(resp.Body), true, nil
+}
+
+// slotsInflight reads llama-server's GET /slots through llama-swap and counts
+// the slots that are processing. A queued request (llama-server's deferred
+// task queue) is not listed by /slots — it becomes a processing slot the
+// instant one frees — which is why drainSeat asks for TWO consecutive idle
+// reads before it calls the seat drained.
+func slotsInflight(ctx context.Context, client *http.Client, base, model string) (inflight int, loaded bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/upstream/"+url.PathEscape(model)+"/slots", nil)
+	if err != nil {
+		return 0, true, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, true, fmt.Errorf("seat slots: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, true, fmt.Errorf("seat metrics: status 501 (no --metrics) and seat slots: status %d", resp.StatusCode)
+	}
+	n, perr := parseSlotsInflight(io.LimitReader(resp.Body, 4<<20))
+	if perr != nil {
+		return 0, true, fmt.Errorf("seat slots: %w", perr)
+	}
+	return n, true, nil
+}
+
+// parseSlotsInflight counts is_processing slots in llama-server's /slots
+// JSON array. Any other field is ignored; a non-array body is an error.
+func parseSlotsInflight(r io.Reader) (int, error) {
+	var slots []struct {
+		IsProcessing bool `json:"is_processing"`
+	}
+	if err := json.NewDecoder(r).Decode(&slots); err != nil {
+		return 0, fmt.Errorf("/slots is not a JSON array: %w", err)
+	}
+	n := 0
+	for _, s := range slots {
+		if s.IsProcessing {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // parseInflight sums the in-flight gauges out of a Prometheus text exposition.

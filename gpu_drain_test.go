@@ -22,6 +22,11 @@ type drainSwap struct {
 	upstreamHitsWhileUnloaded atomic.Int64
 	unloads                   atomic.Int64
 	warms                     atomic.Int64
+	// metricsStatus, when non-zero, is what /metrics answers instead of an
+	// exposition — 501 models a llama-server started without --metrics; /slots
+	// then serves `inflight` processing slots out of two (0.113.19).
+	metricsStatus atomic.Int64
+	slotsHits     atomic.Int64
 }
 
 func (f *drainSwap) handler(model string) http.Handler {
@@ -33,9 +38,25 @@ func (f *drainSwap) handler(model string) http.Handler {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"running": running})
 	})
+	mux.HandleFunc("/upstream/"+model+"/slots", func(w http.ResponseWriter, r *http.Request) {
+		if !f.loaded.Load() {
+			f.upstreamHitsWhileUnloaded.Add(1)
+		}
+		f.slotsHits.Add(1)
+		n := f.inflight.Load()
+		slots := []map[string]any{}
+		for i := 0; i < 2; i++ {
+			slots = append(slots, map[string]any{"id": i, "n_ctx": 65536, "is_processing": int64(i) < n, "id_task": -1})
+		}
+		_ = json.NewEncoder(w).Encode(slots)
+	})
 	mux.HandleFunc("/upstream/"+model+"/metrics", func(w http.ResponseWriter, r *http.Request) {
 		if !f.loaded.Load() {
 			f.upstreamHitsWhileUnloaded.Add(1)
+		}
+		if st := f.metricsStatus.Load(); st != 0 {
+			w.WriteHeader(int(st))
+			return
 		}
 		n := f.inflight.Load()
 		_, _ = w.Write([]byte("# HELP vllm:num_requests_running x\nvllm:num_requests_running{engine=\"0\"} " +
@@ -95,6 +116,61 @@ func TestDrainWaitsForInflightToReachZeroTwice(t *testing.T) {
 	}
 	if time.Since(start) < 30*time.Millisecond {
 		t.Fatal("drain returned while requests were still in flight")
+	}
+}
+
+// TestDrainFallsBackToSlotsWhenTheSeatHasNoMetrics is the 2026-09-06 Lenovo
+// case: a warm llama.cpp seat without --metrics answers /metrics 501, and the
+// drain timed out on it. It now reads /slots: busy while a slot is processing,
+// drained once two consecutive reads see none.
+func TestDrainFallsBackToSlotsWhenTheSeatHasNoMetrics(t *testing.T) {
+	f := &drainSwap{}
+	f.loaded.Store(true)
+	f.inflight.Store(1)
+	f.metricsStatus.Store(http.StatusNotImplemented)
+	srv := httptest.NewServer(f.handler("seat"))
+	defer srv.Close()
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		f.inflight.Store(0)
+	}()
+	start := time.Now()
+	if err := drainSeat(context.Background(), srv.Client(), srv.URL, "seat", 2*time.Second, 5*time.Millisecond, nil); err != nil {
+		t.Fatalf("drain via /slots: %v", err)
+	}
+	if time.Since(start) < 30*time.Millisecond {
+		t.Fatal("drain returned while a slot was still processing")
+	}
+	if f.slotsHits.Load() < 2 {
+		t.Fatalf("/slots read %d time(s), want at least the two idle reads", f.slotsHits.Load())
+	}
+}
+
+// TestDrainDoesNotFallBackOnAMetricsServerError is the control arm: a 500 from
+// /metrics is "could not read", never idle — no /slots read, the drain fails.
+func TestDrainDoesNotFallBackOnAMetricsServerError(t *testing.T) {
+	f := &drainSwap{}
+	f.loaded.Store(true)
+	f.inflight.Store(0)
+	f.metricsStatus.Store(http.StatusInternalServerError)
+	srv := httptest.NewServer(f.handler("seat"))
+	defer srv.Close()
+	err := drainSeat(context.Background(), srv.Client(), srv.URL, "seat", 40*time.Millisecond, 5*time.Millisecond, nil)
+	if err == nil || !strings.Contains(err.Error(), "status 500") {
+		t.Fatalf("a 500 must fail the drain naming the status, got %v", err)
+	}
+	if f.slotsHits.Load() != 0 {
+		t.Fatalf("/slots was read %d time(s) after a 500; only 501/404 fall back", f.slotsHits.Load())
+	}
+}
+
+func TestParseSlotsInflightCountsProcessingSlots(t *testing.T) {
+	n, err := parseSlotsInflight(strings.NewReader(`[{"id":0,"is_processing":true,"n_ctx":65536},{"id":1,"is_processing":false},{"id":2,"is_processing":true}]`))
+	if err != nil || n != 2 {
+		t.Fatalf("parse = %d, %v; want 2 processing", n, err)
+	}
+	if _, err := parseSlotsInflight(strings.NewReader(`{"error":"x"}`)); err == nil {
+		t.Fatal("a non-array body must be an error, never zero in flight")
 	}
 }
 
