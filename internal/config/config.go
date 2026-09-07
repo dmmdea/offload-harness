@@ -979,6 +979,19 @@ type Config struct {
 	// inferences against ONE llama-swap slot). A job that waits is strictly
 	// better than a job that thrashes: nothing is refused that 0.99.0 admitted.
 	FleetMaxConcurrentJobs int `json:"fleet_max_concurrent_jobs,omitempty"`
+	// FleetBusyLeaseSec (0.113.27) is how much REMAINING time on this node's
+	// GPU lease makes the node a non-target for fleet work, whatever the
+	// lease's class. Before it, only a TEXT lease refused, so the harness's
+	// LONGEST job class — a media render, and anything else that takes the
+	// media lease, up to a multi-hour training run — left the node publishing
+	// idle slots while its card was gone, and placement routed work TOWARD it
+	// (2026-09-07 audit).
+	//
+	// It is a DURATION rule, not a class rule, because that is the real
+	// distinction: a 20-second render must not refuse, a six-hour reservation
+	// must. 0 or unset uses FleetBusyLeaseSecDefault (120); negative disables
+	// the rule and restores the text-only behaviour.
+	FleetBusyLeaseSec int `json:"fleet_busy_lease_sec,omitempty"`
 	// FleetStoreRoot is a persistent KV page store this node OWNS ON DISK and
 	// keeps under a budget between its turns (0.113.16, store steward): the
 	// LMCache fs_native pages the production seat writes over SMB into a

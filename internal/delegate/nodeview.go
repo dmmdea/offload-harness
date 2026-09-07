@@ -62,6 +62,13 @@ type NodeView struct {
 	// gate treats it as ineligible. Absent (older node) or a media lease decodes
 	// to false — a render is arbitrated on the node, never a placement refusal.
 	LeasedText bool
+	// LeaseBusy is the node's own "my card is spoken for long enough that you
+	// should place elsewhere" verdict (0.113.27), true for a LONG lease of any
+	// class. It exists because LeasedText alone left the harness's longest job
+	// class — anything holding the MEDIA lease, up to a training run — looking
+	// idle, so placement routed work toward the busy box (2026-09-07 audit).
+	// False on an older node, which is exactly the previous behaviour.
+	LeaseBusy bool
 	// Saturation* decode health's `saturation` block (0.113.18). SaturationKnown
 	// is false on an older node, and an unknown saturation is neither credited
 	// nor blamed — the same rule every other capacity field follows. High means
@@ -122,6 +129,11 @@ type healthWire struct {
 	Lease *struct {
 		Held  bool   `json:"held"`
 		Class string `json:"class"`
+		// Busy is the NODE's own verdict (0.113.27) that its lease is long
+		// enough to make it a non-target, whatever the class. Absent on an
+		// older node, decoding to false = the pre-0.113.27 text-only rule.
+		Busy         bool `json:"busy"`
+		RemainingSec int  `json:"remaining_sec"`
 	} `json:"lease"`
 	// Additive (0.113.18). nil on a node that does not publish saturation.
 	Saturation *struct {
@@ -181,6 +193,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		GpuUtilPct:        w.GpuUtilPct,
 		GpuUtilKnown:      w.GpuUtilKnown,
 		LeasedText:        w.Lease != nil && w.Lease.Held && strings.EqualFold(w.Lease.Class, "text"),
+		LeaseBusy:         w.Lease != nil && w.Lease.Held && w.Lease.Busy,
 		Local:             false,
 	}
 	if w.Saturation != nil {

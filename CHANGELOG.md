@@ -6,6 +6,53 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.27] — 2026-09-07 — the fleet can see a busy card: nine scheduling defects found by audit and fixed
+
+The operator's question — "queueing, scheduling and multi-node exist, so why would a long GPU job collide with anything?" — was right, and a
+20-agent read-plus-refute audit of the scheduling surfaces answered it: **the machinery was there; a long GPU job had no way to tell it.**
+Node availability was expressed in execution SLOTS only, with no DURATION and no GPU-occupancy dimension, so nothing on the wire separated a
+slot that frees in 900 ms from one held for six hours. Nine defects, all fixed here, each with a mutation-red guard.
+
+**Fixed — a long lease of ANY class now refuses (#254).** `/fleet/health`'s lease block gains `remaining_sec` and `busy`, the node's OWN
+verdict that its card is spoken for long enough to place elsewhere, decided by the new `fleet_busy_lease_sec` (default 120; negative disables
+the rule and restores the text-only behaviour). The verdict travels rather than the threshold, so a delegator never needs a remote box's
+config and a node one release behind simply omits both fields, decoding to false — exactly the previous behaviour. It is a DURATION rule, not
+a class rule, because that is the real distinction: a 20-second render must not refuse, a six-hour reservation must. Before this, only a TEXT
+lease refused, so the harness's LONGEST job class — anything holding the media lease — left the node advertising idle slots while its card was
+gone, and placement routed work TOWARD it. The delegator carries the verdict as `NodeView.LeaseBusy`, `remoteEligible` excludes it exactly as
+it excludes a text lease, `leasedLanes` names it to the operator ("long GPU lease held"), and `offload_status` reports `gpu_lease_busy`.
+
+**Fixed — `refusing` and `idle_slot` can no longer contradict each other.** They were computed independently, so a draining or leased node
+still advertised a free slot and sheddable work was dealt to it. `idle_slot` now means what it says: a job handed to me would start now.
+
+**Fixed — the saturation score is computed from the CAPPED running set (#256).** `max_concurrent_jobs` caps only the capped set, which is what
+`IdleSlot` compares against, so feeding the score the all-jobs count let a node publish `score 1.0` and `idle_slot true` in one payload
+whenever an uncapped job was executing. The depth term still counts every admitted job, because `max_queue_depth` bounds them all.
+
+**Fixed — `animate` is exempt from the concurrency cap (#256).** It runs a ComfyUI render through gpugen under the media lease exactly as
+`image-gen` and `video-gen` do, never touching the shared text endpoint the cap protects. Capping it made it hold a fleet execution slot while
+parked in the capacity-1 media slot — verbatim the failure the exemption exists to prevent.
+
+**Fixed — the pull queue's claim loop admits with a real spec (#255, security-shaped).** It called `Jobs.Accept`, an empty `AcceptSpec`, while
+the push path filled one. `Agent` unset took a PULLED agent job out of `handleJob`'s bearer gate, so its state and RESULT were readable without
+the token while the identical contract arriving by dispatch was gated, and the agent-row error redaction was skipped too; `Uncapped` unset made
+a pulled render burn a concurrency slot; `OnDropped` unset left drain's never-started arm unable to clean up. The spec now lives in
+`claimSpec`, a function, so it is testable without a live holder, and a source guard keeps both bare shapes out of production files.
+
+**Fixed — a REFUSED re-claim releases its own materialization.** `Admit` deliberately does not fire `OnDropped` on a refusal, and the
+already-known job's cleanup closes over the ORIGINAL directory, so the second build's job dir was stranded under `pipeline-jobs/` until the
+next fleet-serve start swept it.
+
+**Fixed — `gpu reserve --detach` requires an explicit `--for` (#257).** A detached holder exits at that deadline and releases whether or not
+the work has finished, so the 45-minute default silently freed the card mid-job; the next render then claimed it and unloaded the seat on top
+of the running work, leaving the node advertising a seat that was not there. The wrapper form ties the hold to a process and is unaffected.
+
+**Fixed — the vision lane stops polling a reservation that cannot free (#257).** `gpulock.WaitFree` gained the far-expiry short-circuit
+`gpulease.Acquire` already had, and `Info` now carries the holder's declared `ExpiresAt`. A long TEXT reservation used to cost every
+`vqa`/`ocr`/`assess_image`/`video_describe` call its full `vision_gpu_wait_sec` (90 s) for the reservation's whole life. MEDIA leases are
+deliberately excluded, for the reason `Acquire` gives: a media expiry is a timeout CEILING, not a promise, and a video job that declares 25
+minutes routinely finishes in three.
+
 ## [0.113.26] — 2026-09-07 — the seat rigger, first slice (`local-offload rig`, MCP `agent_rig`) and a note on failed trace steps
 
 **Added — the rigger's classifier (`internal/rig`, ADR 0036 amendment P3a).** `local-offload rig --seat <alias> [--since 7d]

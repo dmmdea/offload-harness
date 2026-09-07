@@ -274,8 +274,12 @@ func remoteEligible(st Subtask, r NodeView) bool {
 	// LOCAL seat a non-target. Before this a leased Lenovo had to STOP its fleet
 	// node to keep foreign digests off the card, and every in-flight remote job
 	// on it was cut ("Lenovo dropped mid-way", 2026-09-06).
+	// LeaseBusy joined the gate 2026-09-07: the same refusal, extended from
+	// "a text lease" to "a lease long enough that the node itself says place
+	// elsewhere". A short render still never refuses; a multi-hour hold does.
 	return r.AgentEnabled &&
 		!r.LeasedText &&
+		!r.LeaseBusy &&
 		r.AgentResident &&
 		seatServed(r) &&
 		adequate(st, r) &&

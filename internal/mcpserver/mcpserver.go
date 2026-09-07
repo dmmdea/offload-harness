@@ -720,6 +720,12 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 		if r.view.LeasedText {
 			n["text_lease_held"] = true
 		}
+		if r.view.LeaseBusy {
+			// 0.113.27: the node says its card is spoken for long enough to
+			// place elsewhere, whatever the lease class. Reported beside the
+			// text flag so "idle_agent_nodes 0" is never unexplained.
+			n["gpu_lease_busy"] = true
+		}
 		if r.view.AgentEnabled {
 			capable++
 			if r.view.QueueDepth == 0 {

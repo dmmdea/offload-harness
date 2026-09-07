@@ -76,6 +76,12 @@ type Info struct {
 	// Class is the holder's lease class (media/text), so a caller can say WHICH kind of
 	// work holds the card instead of assuming it is a generation job.
 	Class string
+	// ExpiresAt is the holder's DECLARED window end (zero when it declared none).
+	// WaitFree uses it to stop polling a reservation that provably cannot free
+	// inside the caller's wait: before 0.113.27 every vision call burned its
+	// full vision_gpu_wait_sec (90 s by default) against a multi-hour hold, so
+	// a long reservation cost 90 s of dead wait PER CALL for its whole life.
+	ExpiresAt time.Time
 }
 
 // Inspect reports whether the lock at lockPath is currently held, using the
@@ -102,7 +108,7 @@ func inspectAt(lockPath string, _ time.Duration, _ time.Time) Info {
 	// sees a frozen RenewedAtMs and calls a live, renewing holder stale as soon as its
 	// declared window lapses. One inspection path, one answer.
 	i := gpulease.InspectDir(lockPath)
-	return Info{Held: i.Held, Age: i.Age, PID: i.PID, Class: string(i.Class)}
+	return Info{Held: i.Held, Age: i.Age, PID: i.PID, Class: string(i.Class), ExpiresAt: i.ExpiresAt}
 }
 
 // WaitFree polls the lock every poll (min bound 1ms; the pipeline passes 2s)
@@ -117,6 +123,21 @@ func WaitFree(ctx context.Context, lockPath string, wait, poll time.Duration) In
 	for {
 		info := Inspect(lockPath)
 		if !info.Held {
+			return info
+		}
+		// NEVER WAIT FOR SOMETHING THAT CANNOT HAPPEN (0.113.27) — the same
+		// rule, and the same reasoning, as gpulease.Acquire's short-circuit.
+		// A TEXT reservation carries an operator's declared duration
+		// (`gpu reserve --for 8h`), so if it outlasts our whole window there
+		// is nothing to wait for: the vision lane used to burn its full
+		// vision_gpu_wait_sec on every call for the entire hold.
+		//
+		// A MEDIA lease is deliberately excluded: its expiry is a timeout
+		// CEILING, not a promise — a video job declares 25 minutes and
+		// routinely finishes in three — so short-circuiting on it would defer
+		// calls that were about to be served. A holder with no declared
+		// window is polled exactly as before.
+		if info.Class == string(gpulease.ClassText) && !info.ExpiresAt.IsZero() && info.ExpiresAt.After(deadline) {
 			return info
 		}
 		remain := time.Until(deadline)

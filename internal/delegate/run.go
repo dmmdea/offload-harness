@@ -2836,8 +2836,15 @@ func laneStats(st Subtask, views []NodeView) (lanes, advertisedTooSmall, roomies
 func leasedLanes(views []NodeView) []string {
 	var out []string
 	for _, v := range views {
-		if v.AgentEnabled && v.AgentResident && v.LeasedText {
+		switch {
+		case !v.AgentEnabled || !v.AgentResident:
+		case v.LeasedText:
 			out = append(out, laneID(v)+" (text lease held)")
+		case v.LeaseBusy:
+			// 0.113.27: a long lease of any class refuses too, and an
+			// operator reading "why did nothing land there" needs the same
+			// sentence for it as for a text lease.
+			out = append(out, laneID(v)+" (long GPU lease held)")
 		}
 	}
 	return out
