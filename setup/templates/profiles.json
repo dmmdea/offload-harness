@@ -620,6 +620,7 @@
         "videogen_timeout_sec": 5400,
         "agent_model": "qwen3.5-4b-agent",
         "agent_profile": "research",
+        "agent_max_tokens": 4096,
         "escalation_model": "",
         "reasoning_model": ""
       },
