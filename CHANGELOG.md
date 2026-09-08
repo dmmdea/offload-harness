@@ -6,6 +6,40 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.37] — 2026-09-08 — two seat-spec defects found by actually launching the arm nobody had launched
+
+The `ampere-16` seat spec was written from one working deployment and generalised without ever being tried on a
+second model. Serving Gemma-4-12B under vLLM on the same card broke it twice before it started.
+
+### Fixed
+- **`--limit-mm-per-prompt` listed only image and video.** The template's own comment said "all 0"; the flag did
+  not. Gemma-4 is audio-multimodal, so vLLM built the audio tower anyway and died at init with
+  `AttributeError: 'Gemma4UnifiedAudioFeatureExtractor' object has no attribute 'fft_length'`. Now lists audio too,
+  with the rule stated: name **every** modality the checkpoint has.
+- **"fp8_e5m2 KV is free on Ampere" is false as a blanket claim.** Measured on the reference A2 (SM86):
+  `FP8 KV cache is not supported by the Triton attention backend on NVIDIA A2 (compute capability 8.6); native FP8
+  (fp8e4nv) requires SM89+`. The tier's Qwen3.5 seat gets fp8 because it runs FlashAttention; Gemma-4 on the **same
+  card** falls back to Triton and refuses to start. It is a per-SEAT, backend-dependent property — a tier that
+  hard-codes it breaks every model whose backend lacks it. Documented on the field.
+
+### Measured while doing it
+`gemma-4-12B-it-qat-w4a16-ct` (8.28 GiB weights) needs util **0.95** on a 15,356 MiB A2 to serve a 32,768 window —
+KV pool 48,925 tokens, 1.49× concurrency, 14,140 MiB. **The 12B gets 32k where the 4B gets 131k on the same card.**
+
+And the quality question it was launched to answer, judged blind by the same instrument (24 judgements, four
+candidates per packet, no model/engine/timing visible):
+
+|  | llama.cpp | vLLM | engine effect |
+|---|---|---|---|
+| Qwen3.5-4B | 7.38 | **7.75** | +0.38 |
+| Gemma-4-12B | 6.21 | 6.50 | +0.29 |
+| **model effect** | **−1.17** | **−1.25** | |
+
+Giving the 12B the winning engine did not rescue it: the engine is worth ~+0.3 to both, the 12B is worse by ~1.2 on
+both, and it took 1 of 24 firsts. The `ampere-16` binding stands on quality evidence. Caveat kept in the record:
+one task shape, and these are different model *families*, not just sizes. Record:
+`Benchmarks and Optimizations/2026-09-08-a2-seat-quality-reeval/`.
+
 ## [0.113.36] — 2026-09-08 — the vLLM seat occupied a GPU forever, and a test demanded that it do so
 
 0.113.33 shipped a rendered vLLM agent seat that never unloads. On the reference A2 that meant **10,338 of

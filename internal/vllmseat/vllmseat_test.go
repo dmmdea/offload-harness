@@ -112,7 +112,9 @@ func TestArtifactsLeaveNoTokens(t *testing.T) {
 		"--max-model-len 131072", "--gpu-memory-utilization 0.65", "--max-num-seqs 32",
 		"--max-num-batched-tokens 4096", "--kv-cache-dtype fp8_e5m2",
 		"--enable-auto-tool-choice", "--tool-call-parser qwen3_xml", "--reasoning-parser qwen3",
-		`--limit-mm-per-prompt '{"image":0,"video":0}'`,
+		// EVERY modality, not just image/video: omitting audio let Gemma-4 build its
+		// audio tower and die at init (measured 2026-09-08).
+		`--limit-mm-per-prompt '{"image":0,"video":0,"audio":0}'`,
 		"--served-model-name qwen3.5-4b-vllm a2-pool agent-pool-a2 qwen35-4b-vllm",
 		"--port 18797", "VLLM_USE_FLASHINFER_SAMPLER=0",
 		"/hf/hub/models--RedHatAI--Qwen3.5-4B-quantized.w4a16/snapshots/deadbeef",
