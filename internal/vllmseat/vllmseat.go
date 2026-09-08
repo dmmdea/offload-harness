@@ -111,6 +111,11 @@ type Spec struct {
 	HealthCheckTimeout int `json:"health_check_timeout,omitempty"`
 	// UnloadTimeout covers the unit's TimeoutStopSec.
 	UnloadTimeout int `json:"unload_timeout,omitempty"`
+	// TTLSeconds is the idle window after which llama-swap unloads the seat, which
+	// for this seat means stopping the engine unit and freeing the whole card.
+	// Defaults to the house 300 (5 minutes). It may NOT be 0: that is "never unload",
+	// which is what this field exists to prevent.
+	TTLSeconds int `json:"ttl_seconds,omitempty"`
 
 	// Fallback is the llama.cpp seat id this tier serves when the vLLM prerequisites
 	// are absent. Required: a tier may not declare an agent seat with no answer for
@@ -201,6 +206,10 @@ func (s Spec) Validate(tier string) error {
 	req(s.ReasoningParser != "", "no reasoning_parser")
 	req(s.Fallback != "", "no fallback_agent_model — a box that has not built the vLLM venv must still get a working agent seat")
 	req(s.Fallback != s.ID, "fallback_agent_model repeats the seat id, so there is no fallback")
+	// 0 is the value that means "never unload". It is the one value this field must
+	// never take; omit it to get the house default instead.
+	req(s.TTLSeconds >= 0, "ttl_seconds cannot be negative")
+	req(s.TTLSeconds != -1, "ttl_seconds -1 means never unload")
 	req(!strings.HasPrefix(s.ModelRepo, "/"),
 		"model_repo must be RELATIVE to the deployment's HF home — an absolute path hardens one box's layout into a hardware tier")
 	if len(problems) == 0 {
@@ -334,6 +343,14 @@ func (s Spec) healthTimeout() int {
 	return 480
 }
 
+// ttl is the idle window before the seat is unloaded and the card freed.
+func (s Spec) ttl() int {
+	if s.TTLSeconds > 0 {
+		return s.TTLSeconds
+	}
+	return 300
+}
+
 func (s Spec) unloadTimeout() int {
 	if s.UnloadTimeout > 0 {
 		return s.UnloadTimeout
@@ -363,9 +380,15 @@ func (s Spec) Entry(r Runtime) string {
 	fmt.Fprintf(&b, "    checkEndpoint: /health\n")
 	// vLLM 404s any name it does not serve, so every alias is rewritten to the id.
 	fmt.Fprintf(&b, "    useModelName: %q\n", s.ID)
-	// ttl 0 = never idles out. The seat is the agent lane; a TTL unload would make
-	// every cold contract pay the 125-250 s load.
-	fmt.Fprintf(&b, "    ttl: 0\n")
+	// THE SEAT IDLES OUT LIKE EVERY OTHER SEAT. It was shipped `ttl: 0` — never
+	// unloads — on the reasoning that the agent lane should not pay a 125-250 s cold
+	// load. That reasoning is rejected: operator rule, "no model gets to be loaded for
+	// more than 5 minutes if it goes unused, as the rest of the harness... 30 minutes
+	// of loading time is way better than no use, and no use is what you cause by
+	// leaving a model loaded and unused." A seat that never unloads is not availability,
+	// it is a card permanently spent on nothing — measured on the reference A2, which
+	// sat at 10,338 of 15,356 MiB with the engine idle.
+	fmt.Fprintf(&b, "    ttl: %d\n", s.ttl())
 	fmt.Fprintf(&b, "    unloadTimeout: %d\n", s.unloadTimeout())
 	fmt.Fprintf(&b, "    concurrencyLimit: %d\n", s.MaxNumSeqs)
 	return b.String()

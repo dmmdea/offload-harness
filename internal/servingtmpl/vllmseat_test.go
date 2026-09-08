@@ -87,6 +87,8 @@ func TestVLLMSeatRendersAsAResidentMatrixMember(t *testing.T) {
 			Vars map[string]string `yaml:"vars"`
 			Sets map[string]string `yaml:"sets"`
 		} `yaml:"matrix"`
+		Groups map[string]any `yaml:"groups"`
+		Hooks  map[string]any `yaml:"hooks"`
 	}
 	if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
 		t.Fatalf("a vLLM seat made the config unparseable: %v", err)
@@ -108,8 +110,18 @@ func TestVLLMSeatRendersAsAResidentMatrixMember(t *testing.T) {
 	if m.ConcurrencyLimit != 32 {
 		t.Errorf("concurrencyLimit must equal --max-num-seqs or llama-swap's default 10 would 429 the streams, got %d", m.ConcurrencyLimit)
 	}
-	if m.TTL == nil || *m.TTL != 0 {
-		t.Errorf("ttl must be 0 — the agent lane must not idle out and pay a cold reload, got %v", m.TTL)
+	// THIS ASSERTION USED TO DEMAND ttl 0 — "the agent lane must not idle out and pay
+	// a cold reload". That is exactly backwards, and because it was a GATE it made the
+	// defect permanent: fixing the seat failed the build. A seat that never unloads is
+	// not availability, it is a card spent on nothing; the reference A2 sat at 10,338
+	// of 15,356 MiB with the engine idle and no request in sight. Operator rule: no
+	// model stays loaded more than 5 minutes unused, as the rest of the harness — a
+	// long cold load is preferable to a permanently occupied card.
+	if m.TTL == nil || *m.TTL <= 0 {
+		t.Errorf("ttl must be a POSITIVE idle window (0 or absent means never unload, which pins the card "+
+			"forever), got %v", m.TTL)
+	} else if *m.TTL > 1800 {
+		t.Errorf("ttl %d s is longer than the 30-minute ceiling any seat may hold a card idle", *m.TTL)
 	}
 
 	// Residency: a var pointing at the seat, joined into the residents set.
@@ -140,6 +152,22 @@ func TestVLLMSeatRendersAsAResidentMatrixMember(t *testing.T) {
 		if strings.Contains(expr, "| "+id) {
 			t.Errorf("set %q joins the agent seat as an ALTERNATIVE (%q) — an ordinary request could evict it", name, expr)
 		}
+	}
+
+	// The other mechanisms that pinned this seat to a card. Each is independently
+	// sufficient, so removing one and leaving another changes nothing.
+	//
+	// Asserted against the PARSED document, never the text: the first version of this
+	// guard grepped for "persistent:" and matched the linux-cuda template's own
+	// comments explaining why `persistent` was abandoned. A regex cannot tell a mapping
+	// from a comment — the same defect this repo shipped in a placement gate.
+	if len(doc.Groups) > 0 {
+		t.Errorf("a `groups:` block is back (%v). A persistent group means nothing may evict the seat, so it can "+
+			"never idle out; matrix residency is how this template states concurrency", keysOf(doc.Groups))
+	}
+	if len(doc.Hooks) > 0 {
+		t.Errorf("a `hooks:` block is back (%v) — an on_startup preload loads the seat whether or not anyone "+
+			"wants it, which defeats the idle window entirely", keysOf(doc.Hooks))
 	}
 
 	// The vLLM cold load is 125-250 s; the default 120 kills the attach mid-load.
@@ -173,6 +201,14 @@ func modelIDs(m map[string]struct {
 	Aliases          []string `yaml:"aliases"`
 	TTL              *int     `yaml:"ttl"`
 }) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func keysOf(m map[string]any) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)

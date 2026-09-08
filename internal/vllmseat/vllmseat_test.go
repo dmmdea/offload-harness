@@ -140,6 +140,28 @@ func TestArtifactsLeaveNoTokens(t *testing.T) {
 			t.Errorf("the unit lost %q", must)
 		}
 	}
+	// A BOOT-ENABLED UNIT OUTLIVES ITS OWN FRONT DOOR. llama-swap's TTL can only unload
+	// what llama-swap started, so an enabled unit holds the card no matter what ttl
+	// says — measured on the reference A2 at 10,338 of 15,356 MiB while idle, with
+	// llama-swap reporting no models running at all.
+	// Line-anchored and comment-aware. This file's own text says "NO [Install]
+	// SECTION ON PURPOSE", and a substring match flags that comment instead of a
+	// directive — the third time today a text match has hit a comment.
+	installed := false
+	for _, ln := range strings.Split(unit, "\n") {
+		ln = strings.TrimSpace(ln)
+		if strings.HasPrefix(ln, "#") {
+			continue
+		}
+		if ln == "[Install]" || strings.HasPrefix(ln, "WantedBy=") {
+			installed = true
+		}
+	}
+	if installed {
+		t.Error("the unit declares an [Install] section, so it can be enabled at boot and will hold the card " +
+			"independently of llama-swap's idle window")
+	}
+
 	// The wrappers must drive the seat's OWN unit — a stale name here stops somebody
 	// else's seat, or nothing at all.
 	if !strings.Contains(files["vllm-seat-cmd.sh"], "U=vllm-a2-seat.service") {
@@ -177,7 +199,7 @@ func TestEntryMatchesTheReferenceTemplate(t *testing.T) {
 	for _, must := range []string{
 		"checkEndpoint: /health",
 		`useModelName: "qwen3.5-4b-vllm"`,
-		"ttl: 0",
+		"ttl: 300", // the house idle window; 0 would mean "never unload"
 		"unloadTimeout: 120",
 		"concurrencyLimit: 32", // must equal --max-num-seqs or llama-swap 429s the streams
 		"proxy: http://192.0.2.10:18797",

@@ -5,6 +5,37 @@ date: "2026-09-06"
 
 # 0035 — A persistent vLLM agent seat lives behind llama-swap as a systemd unit the entry starts and stops
 
+> ## AMENDED 2026-09-08 — THE SEAT IS NOT PERSISTENT. IT IDLES OUT LIKE EVERY OTHER SEAT.
+>
+> This ADR's residency decision was wrong and shipped a seat that occupies a GPU forever. On the reference A2 that
+> meant **10,338 of 15,356 MiB held with the engine idle and llama-swap reporting no models running at all** — the
+> harness's own idle rule could not reach it.
+>
+> **Operator ruling:** *"NO MODEL GETS TO BE LOADED FOR MORE THAN 5 MINUTES IF IT GOES UNUSED, AS THE REST OF THE
+> HARNESS… 30 MINUTES OF LOADING TIME IS WAY BETTER THAN NO USE, AND NO USE IS WHAT YOU CAUSE BY LEAVING A MODEL
+> LOADED AND UNUSED."* A long cold load is a cost paid once, by one request. A pinned card is a cost paid
+> continuously, by everything else that wanted the hardware.
+>
+> **Four independent mechanisms were in force, each sufficient on its own** — removing any three changes nothing:
+>
+> | mechanism | why it defeats the idle rule | now |
+> |---|---|---|
+> | `ttl: 0` on the entry | llama-swap never idles it out | `ttl: 300` |
+> | `groups: {persistent: true}` | nothing may evict it | no `groups:` block |
+> | `hooks.on_startup.preload` | loaded the moment llama-swap starts, wanted or not | no `hooks:` block |
+> | unit `[Install] WantedBy=` + `systemctl enable` | **a boot-enabled unit outlives its own front door** — llama-swap's TTL can only unload what llama-swap started | no `[Install]` section |
+>
+> The last one is the subtle one and it is why the other three were not enough: the engine is a *system* unit, so
+> once enabled it comes back at boot and stays up regardless of what the entry says.
+>
+> **What survives from this ADR:** the front-door design itself. llama-swap stays the one endpoint the node talks
+> to, `cmd`/`cmdStop` still drive the unit through the polkit rule, and `gpu reserve --drain --unload-seat` still
+> frees the card. Only the *residency* claims below are superseded. Gated by
+> `TestVLLMSeatRendersAsAResidentMatrixMember` (positive TTL, no groups, no hooks) and `TestArtifactsLeaveNoTokens`
+> (no `[Install]` section).
+
+
+
 Decision provenance: the operator decided GO on 2026-09-06 16:49 (the measured arm: 8/8 on the harness's
 8-digest set at a 47 s median against the llama.cpp 4B seat's 159 s) and ordered the build the same evening;
 this ADR records the shape the build took and why, per the ownership rule in the index README.
@@ -34,7 +65,7 @@ Two ways to do that were on the table:
 
 ## Decision
 
-- The engine is a **system unit** (`vllm-<seat>.service`): enabled at boot, `Restart=on-failure`,
+- The engine is a **system unit** (`vllm-<seat>.service`): ~~enabled at boot~~ **NOT enabled at boot (amended 2026-09-08 — a boot-enabled unit outlives llama-swap's idle window)**, `Restart=on-failure`,
   `KillMode=mixed` (the engine's worker processes die with the cgroup), binding the **Tailscale IPv4** on
   its port (the tailnet is the trust boundary, as for the fleet node). Its launch line lives in one script
   (`ExecStart`) that waits for the Tailscale address at boot instead of failing into the restart budget.
@@ -43,8 +74,8 @@ Two ways to do that were on the table:
   wrapper, so llama-swap re-attaches and health-waits instead of proxying `ready` to a reloading engine);
   `cmdStop` = `systemctl stop` — a REAL stop, so an unload through llama-swap frees the card. `proxy` is the
   literal address the engine binds; `useModelName` rewrites every alias to the served id (vLLM 404s unknown
-  names); `ttl: 0`; `concurrencyLimit` = the engine's `--max-num-seqs`; the entry sits in a `persistent`,
-  non-swapping, non-exclusive group and is preloaded at llama-swap start. `healthCheckTimeout` is raised for
+  names); ~~`ttl: 0`~~ **`ttl: 300` (amended)**; `concurrencyLimit` = the engine's `--max-num-seqs`; ~~the entry sits in a `persistent`,
+  non-swapping, non-exclusive group and is preloaded at llama-swap start.~~ **No group and no preload (amended).** `healthCheckTimeout` is raised for
   the cold load.
 - llama-swap runs unprivileged under `NoNewPrivileges=yes`, so the start/stop is authorized by a **polkit
   rule scoped to that one unit and that user** (`manage-units`, verbs start/stop/restart/reset-failed) — never

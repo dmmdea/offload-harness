@@ -1,4 +1,7 @@
-# llama-swap pieces for a persistent vLLM seat (ADR 0035). Three edits to an existing config:
+# llama-swap pieces for a vLLM seat (ADR 0035). Two edits to an existing config.
+# THE SEAT IDLES OUT LIKE EVERY OTHER SEAT: it was previously shipped with ttl 0, a `persistent` group and a startup
+# preload — three independent ways to pin a model to a card forever. All three are gone. Operator rule: no model stays
+# loaded more than 5 minutes unused; a long cold load is preferable to a card permanently spent on nothing.
 # (1) top level — the vLLM cold load is 125–250 s (torch.compile cache warm/cold); the default 120 (or a lower local value) kills
 #     the attach mid-load and cmdStop then stops the engine. llama.cpp seats still fail fast when broken.
 healthCheckTimeout: __HEALTH_TIMEOUT__
@@ -6,7 +9,8 @@ healthCheckTimeout: __HEALTH_TIMEOUT__
 # (2) the entry — llama-swap's front door to the unit. `cmd` starts the unit and stays attached, `cmdStop` stops it, so the
 #     harness's `gpu reserve --drain --unload-seat` really frees the card and `gpu release --warm-seat` really reloads it.
 #     `proxy` is the LITERAL address the engine binds (on the reference box the MagicDNS name resolved to IPv6 only).
-#     `useModelName`: vLLM 404s names it does not serve, so every alias is rewritten to the id. `ttl: 0` = never idles out.
+#     `useModelName`: vLLM 404s names it does not serve, so every alias is rewritten to the id. `ttl` is the idle window
+#     after which llama-swap runs cmdStop — which stops the unit and frees the WHOLE card, not just a slot.
 #     `concurrencyLimit` must match the engine's --max-num-seqs: llama-swap's per-model default (10) would 429 the streams the
 #     seat was provisioned for (review finding, 2026-09-06).
 models:
@@ -16,20 +20,12 @@ models:
     proxy: http://__PROXY_HOST__:__PORT__
     checkEndpoint: /health
     useModelName: "__SEAT_ID__"
-    ttl: 0
+    ttl: __TTL__
     unloadTimeout: 120
     concurrencyLimit: __MAX_NUM_SEQS__
     aliases: [__ALIASES__]
 
-# (3) its group + the startup preload. persistent = no other group can evict it; swap/exclusive false = it evicts nobody
-#     (the box's heavy tier keeps swapping among itself beside it). The preload attaches to the running unit as soon as
-#     llama-swap starts, so /running lists the seat from the first second (the harness's admission wait reads /running).
-groups:
-  vllmseat:
-    persistent: true
-    swap: false
-    exclusive: false
-    members: ["__SEAT_ID__"]
-hooks:
-  on_startup:
-    preload: ["__SEAT_ID__"]
+# NO `groups:` BLOCK AND NO STARTUP PRELOAD. A `persistent` group means nothing may evict the seat, and an on_startup
+# preload loads it the moment llama-swap starts whether or not anyone wants it. Together with ttl 0 and a boot-enabled
+# unit they made the engine immortal: the reference A2 held 10,338 of 15,356 MiB with the seat idle and no way for the
+# harness's own idle rule to reach it. The seat now loads on first use and unloads when idle, like every other seat.
