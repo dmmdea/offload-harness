@@ -42,6 +42,17 @@ the Hailo-8L lane (ADR 0024); this release applies it to the Coral, per the revi
   (`internal/mcpserver/acceltools.go`); the agent loop gained `AccelLane`s
   (`pipeline.NewLoopAccel`, `agent.ReadOnlyToolsWithLanes`) in config order, with the old
   single-lane `NPU` path kept for every existing caller.
+- **Every agent builder wires every lane.** The live harness-path gate (a remote contract on the
+  Lenovo calling `offload_classify_image`) found the fleet-node delegation builder and the
+  prompt-replay builder passing the Hailo lane only — the Coral tools existed for a local `agent_run`
+  and were invisible to the same seat via `agent_delegate route=remote`. Both pass `Accel` now, and a
+  root test parses every builder literal and fails on `NPU` without `Accel`. The same gate then
+  caught the launcher: `coral-http.sh` read `$1` as the idle seconds where the harness passes
+  `--idle-sec <n>`, and resolved `CORAL_HOME` one level up, so under the fleet unit it exited 2 before
+  the sidecar started. It now parses the harness call shape, walks up to `venv/` for the home (flat
+  or nested layout), and `test_server.py` runs the launcher with a stub python. Gate result on the
+  Lenovo: `agent_delegate route=remote` → `offload_classify_image` → `Ara macao (Scarlet Macaw)`
+  0.746, 18 s wall, sidecar spawned by the harness.
 - **Two installer gaps closed on the way.** `install.sh` merged NO accelerator seed at all
   (install.ps1 always had) — it now passes detect's verdict to `install seed --accelerators`
   and writes `installed.json`. And `fleet-serve` read `accelerators` only from that manifest,

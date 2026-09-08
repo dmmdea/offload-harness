@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -132,6 +133,43 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             p.kill()
             check("idle self-exit", False, "still alive after 15 s")
+
+    # Launcher contract (needs bash): the harness runs `coral-http.sh --idle-sec <n>` and the deployed
+    # layout may be <home>/accelerators/coral/. Both broke live on 2026-09-08: "$1" was read as the
+    # idle seconds and the home was resolved one level up. A stub "python" records what it was given.
+    bash = shutil.which("bash")
+    if bash is None:
+        print("SKIP launcher contract (no bash on this box)")
+    else:
+        with tempfile.TemporaryDirectory() as home:
+            lane = os.path.join(home, "accelerators", "coral")
+            os.makedirs(lane)
+            for name in ("coral-http.sh", "server.py", "models.json"):
+                shutil.copy(os.path.join(HERE, name), lane)
+            os.makedirs(os.path.join(home, "venv", "bin"))
+            os.makedirs(os.path.join(home, "models"))
+            record = os.path.join(home, "record.json")
+            stub = os.path.join(home, "venv", "bin", "python")
+            with open(stub, "w") as fh:
+                fh.write("#!/usr/bin/env bash\nprintf '{\"argv\":\"%s\",\"idle\":\"%s\",\"home\":\"%s\",\"models\":\"%s\"}' "
+                         "\"$*\" \"$CORAL_IDLE_SEC\" \"$CORAL_HOME\" \"$CORAL_MODELS_DIR\" > \"" + record.replace("\\", "/") + "\"\n")
+            os.chmod(stub, 0o755)
+            env = {k: v for k, v in os.environ.items() if not k.startswith("CORAL_")}
+            env["CORAL_LOG_FILE"] = os.path.join(home, "sidecar.log")
+            r = subprocess.run([bash, os.path.join(lane, "coral-http.sh"), "--idle-sec", "7"], env=env,
+                               capture_output=True, text=True, timeout=20)
+            check("launcher exits 0 under the nested layout", r.returncode == 0, r.stderr.strip())
+            try:
+                with open(record) as fh:
+                    got = json.load(fh)
+            except OSError:
+                got = {}
+            check("launcher parses --idle-sec <n> (harness call shape)", got.get("idle") == "7", str(got))
+            check("launcher resolves CORAL_HOME by walking up to venv/", os.path.normcase(got.get("home", "")) == os.path.normcase(home.replace("\\", "/")) or got.get("home", "").rstrip("/").endswith(os.path.basename(home)), str(got))
+            check("launcher points CORAL_MODELS_DIR at <home>/models", got.get("models", "").rstrip("/").endswith("/models"), str(got))
+            r = subprocess.run([bash, os.path.join(lane, "coral-http.sh"), "--idle-sec", "abc"], env=env,
+                               capture_output=True, text=True, timeout=20)
+            check("launcher refuses a non-integer idle (exit 2)", r.returncode == 2, r.stderr.strip())
 
     print(f"\n{'ALL PASS' if not failures else str(len(failures)) + ' FAILED: ' + ', '.join(failures)}")
     return 0 if not failures else 1

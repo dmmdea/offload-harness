@@ -106,13 +106,15 @@ The seeded keys (coral-edgetpu):
 |---|---|
 | `accelerators` | `["coral-edgetpu"]` — the gate |
 | `coral_endpoint` | sidecar base, `http://127.0.0.1:18814` — loopback only, distinct from the Hailo's 18813 |
-| `coral_sidecar_cmd` | launcher (`__CORAL_HOME__/coral-http.sh <idle_sec>`); empty = never spawn, defer when down |
+| `coral_sidecar_cmd` | launcher; the harness runs it as `<cmd> --idle-sec <coral_idle_sec>` (`accelclient.SpawnCmd`); empty = never spawn, defer when down |
 | `coral_timeout_sec` | one TPU call's bound, default 30 (a cold model load on the TPU is ~0.5–2 s) |
 | `coral_idle_sec` | the sidecar's self-exit idle window, default 300 |
 
 `CORAL_HOME` (`install seed --coral-home`, default `<OFFLOAD_HOME>/coral`) holds the sidecar's
 own venv (`venv/`, built from the box's staged cp314 wheels: ai-edge-litert, numpy, pillow),
-its `models/`, and a copy of `accelerators/coral/`. An empty `__HAILO_HOME__`/`__CORAL_HOME__`
+its `models/`, and `accelerators/coral/` either copied flat (the seed's `__CORAL_HOME__/coral-http.sh`)
+or checked out beneath it (`<home>/accelerators/coral/`, the Lenovo) — the launcher finds the home
+by walking up to `venv/`. An empty `__HAILO_HOME__`/`__CORAL_HOME__`
 is **refused** at seed time (0.114.0) instead of rendering a launcher at the filesystem root.
 
 `install.sh` merged no accelerator seed at all until 0.114.0 — install.ps1 always had. It now

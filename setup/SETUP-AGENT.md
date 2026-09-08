@@ -714,8 +714,9 @@ on Linux). Two knobs:
 - `CORAL_HOME` (`install seed --coral-home`) — the sidecar home `__CORAL_HOME__` expands to in the
   seeded `coral_sidecar_cmd`. Default `<OFFLOAD_HOME>/coral`. It must hold `venv/` (ai-edge-litert +
   numpy + pillow; on the Lenovo built offline from `~/coral-stage/wheels314`), `models/` (run
-  `accelerators/coral/fetch-models.sh`, which verifies every sha256), and a copy of
-  `accelerators/coral/`. An EMPTY home is refused at seed time.
+  `accelerators/coral/fetch-models.sh`, which verifies every sha256), and `accelerators/coral/` —
+  copied flat or checked out beneath the home; the launcher walks up to `venv/`. The harness runs
+  it as `coral-http.sh --idle-sec <coral_idle_sec>`. An EMPTY home is refused at seed time.
 - `OFFLOAD_ACCELERATORS` — the same override as for hailo-8l; list both ids to exercise the
   shared-name rule (`hailo-8l,coral-edgetpu`: the first listed owns `offload_object_detect` and
   `offload_image_embed`).
