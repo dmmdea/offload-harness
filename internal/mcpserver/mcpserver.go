@@ -21,6 +21,7 @@ import (
 
 	"llamaswap-pp-cli/pkg/llamaswap"
 
+	"github.com/dmmdea/offload-harness/internal/accelclient"
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/askcache"
 	"github.com/dmmdea/offload-harness/internal/askjob"
@@ -28,7 +29,6 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/embedmemo"
-	"github.com/dmmdea/offload-harness/internal/hailoclient"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
@@ -61,8 +61,10 @@ type Server struct {
 	tenant string
 	// hailo is the lazily-built accelerator lane (ADR 0024): one Sidecar shared
 	// by every NPU tool so concurrent first calls share a single spawn.
-	hailo     *hailoclient.Sidecar
-	hailoOnce sync.Once
+	// accelSidecars: one on-demand Sidecar per listed accelerator (ADR 0024, Coral
+	// D2/D5), shared by every tool on that device so concurrent first calls share
+	// a single spawn. Was a single Hailo pair until the second device arrived.
+	accelSidecars
 	// askCache short-circuits an IDENTICAL repeat of an offload_ask call — same
 	// question, same read_root, same file BYTES — with the answer the seat
 	// already produced, so the 46-75 s of seat time is not spent twice.
@@ -332,35 +334,15 @@ func (s *Server) buildServer(version string) *mcp.Server {
 		}, s.handleResearch)
 	}
 
-	// Accelerator tools (ADR 0024): registered ONLY when the box lists the
-	// device, so tools/list is byte-identical without it — the same pin as
-	// agent_delegate. Each maps 1:1 to a sidecar tool; ownership is exclusive
-	// (the GPU VLM never serves these; see docs/systems/accelerators.md).
-	if s.p != nil && s.p.Cfg().HasAccelerator("hailo-8l") {
-		type npuTool struct{ name, sidecar, desc, schema string }
-		// requiredArg: the one argument each sidecar tool cannot run without —
-		// image_path for the vision tools, text for the text tower.
-		requiredArg := map[string]string{"text_embed": "text"}
-		img := `"image_path":{"type":"string","description":"local image file path (JPEG/PNG)"}`
-		for _, t := range []npuTool{
-			{"offload_face_detect", "face_detect", "Detect faces in an image on the LOCAL Hailo-8L NPU (free, on-box, ~300 FPS). Returns {faces:[{x,y,w,h,score,kps}],count}; kps = 5 landmarks (eyes, nose, mouth corners) in image pixels.", `{"type":"object","properties":{` + img + `},"required":["image_path"]}`},
-			{"offload_face_embed", "face_embed", "Face IDENTITY vectors on the LOCAL Hailo-8L NPU: every face -> a 512-d ArcFace embedding. Cosine similarity between two is the identity score (same person ~0.5+, different ~0.3-). Use to cluster who appears where across a project, no cloud. Returns {faces:[{x,y,w,h,score,kps,embedding}],count}.", `{"type":"object","properties":{` + img + `,"max_faces":{"type":"integer","description":"strongest-score faces to embed (default 16)"}},"required":["image_path"]}`},
-			{"offload_object_detect", "object_detect", "Detect the 80 COCO object classes (person, car, dog, laptop, ...) on the LOCAL Hailo-8L NPU (YOLOv8s, on-chip NMS). Returns {objects:[{label,class_id,x,y,w,h,score}],count} sorted by score.", `{"type":"object","properties":{` + img + `,"score_threshold":{"type":"number","description":"minimum score (default 0.3)"}},"required":["image_path"]}`},
-			{"offload_person_embed", "person_embed", "Person RE-IDENTIFICATION vectors on the LOCAL Hailo-8L NPU (YOLOv8s person boxes -> OSNet 512-d). Works with NO visible face (clothing/body) — tracks the same person across shots. Returns {people:[{x,y,w,h,score,embedding}],count}.", `{"type":"object","properties":{` + img + `},"required":["image_path"]}`},
-			{"offload_depth", "depth", "Preview-grade relative depth map on the LOCAL Hailo-8L NPU (Depth-Anything-V2, 224 px). Writes an 8-bit PNG (bright = near). Returns {depth_path,min,max,mean}. Shot analysis / parallax previews, not a production depth pass.", `{"type":"object","properties":{` + img + `,"out_path":{"type":"string","description":"output PNG (default: next to the input as <name>.depth.png)"}},"required":["image_path"]}`},
-			{"offload_enhance_low_light", "enhance_low_light", "Brighten an under-exposed frame on the LOCAL Hailo-8L NPU (Zero-DCE) at the original resolution. Returns {enhanced_path,width,height}. Preview-grade.", `{"type":"object","properties":{` + img + `,"out_path":{"type":"string","description":"output PNG (default: <name>.enhanced.png)"}},"required":["image_path"]}`},
-			{"offload_image_embed", "embed", "512-d IMAGE embedding on the LOCAL Hailo-8L NPU (TinyCLIP ViT-61M) for similarity search / clustering of frames and thumbnails. Returns {embedding,dim}.", `{"type":"object","properties":{` + img + `},"required":["image_path"]}`},
-			{"offload_pose", "pose", "Human POSE estimation on the LOCAL Hailo-8L NPU (YOLOv8s-pose): people with 17 named COCO keypoints each (nose, eyes, shoulders, ..., ankles), in the image's own pixel space. Returns {people:[{x,y,w,h,score,keypoints:{nose:{x,y,score},...}}],count}.", `{"type":"object","properties":{` + img + `,"score_threshold":{"type":"number","description":"minimum person score (default 0.3)"}},"required":["image_path"]}`},
-			{"offload_segment", "segment", "Instance SEGMENTATION on the LOCAL Hailo-8L NPU. Default: YOLOv8s-seg, 80 COCO classes; everything=true: FastSAM (class-agnostic segment-everything). Writes an instance-id mask PNG (uint8: 0=background, i=instances[i-1]) next to the input or to out_path. Returns {instances:[{label,class_id,x,y,w,h,score}],mask_path,count}.", `{"type":"object","properties":{` + img + `,"everything":{"type":"boolean","description":"true = FastSAM class-agnostic masks (default false = 80 COCO classes)"},"score_threshold":{"type":"number","description":"minimum instance score (default 0.25)"},"out_path":{"type":"string","description":"output mask PNG (default: <name>.mask.png)"}},"required":["image_path"]}`},
-			{"offload_text_embed", "text_embed", "TEXT embedding computed ON the LOCAL Hailo-8L NPU, in the SAME space as offload_image_embed's image vectors (space=tinyclip, 512-d, the default) — text-to-image similarity search over frames with zero cloud. space=siglip2 (768-d) pairs only with the siglip2 image side used by offload_zero_shot. Returns {embedding,dim,space}.", `{"type":"object","properties":{"text":{"type":"string","description":"the text to embed"},"space":{"type":"string","enum":["tinyclip","siglip2"],"description":"embedding space (default tinyclip = matches offload_image_embed)"}},"required":["text"]}`},
-			{"offload_zero_shot", "zero_shot", "ZERO-SHOT image classification on the LOCAL Hailo-8L NPU — score an image against free-text labels, BOTH towers (image + text) on the NPU. space=tinyclip (default) or siglip2 (stronger: 73.0 vs 67.8 top-1). Returns {results:[{label,similarity,prob}],best} ranked best-first.", `{"type":"object","properties":{` + img + `,"labels":{"type":"array","items":{"type":"string"},"description":"candidate labels, free text"},"space":{"type":"string","enum":["tinyclip","siglip2"],"description":"model pair (default tinyclip)"},"template":{"type":"string","description":"prompt template (default \"a photo of a {}\")"}},"required":["image_path","labels"]}`},
-		} {
-			arg := requiredArg[t.sidecar]
-			if arg == "" {
-				arg = "image_path"
-			}
-			srv.AddTool(&mcp.Tool{Name: t.name, Description: t.desc, InputSchema: json.RawMessage(t.schema)}, s.handleHailoTool(t.sidecar, arg))
-		}
+	// Accelerator tools (ADR 0024): registered ONLY when the box lists a device,
+	// so tools/list is byte-identical without one — the same pin as
+	// agent_delegate. Each device's table (acceltools.go) maps 1:1 to its
+	// sidecar tools; ownership is exclusive (the GPU VLM never serves these),
+	// and across devices the shared-name rule applies: config.Accelerators is
+	// walked in order and the FIRST listed owner of a capability name registers
+	// it (Coral D5; see docs/systems/accelerators.md).
+	if s.p != nil {
+		s.registerAccelTools(srv, s.p.Cfg())
 	}
 
 	return srv
@@ -423,25 +405,10 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 		"note":              "offload_nim is the ONLY remote/cloud tool on this server (opt-in escalation)",
 	}
 
-	// Accelerators (ADR 0024): reported only when listed; a quick health probe
-	// that NEVER spawns the sidecar — status must stay side-effect free.
-	var accel map[string]any
-	if cfg.HasAccelerator("hailo-8l") {
-		pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-		entry := map[string]any{
-			"endpoint":               cfg.HailoEndpoint,
-			"sidecar_cmd_configured": cfg.HailoSidecarCmd != "",
-			"owns":                   []string{"face_detect", "face_embed", "object_detect", "person_embed", "depth", "enhance_low_light", "image_embed", "pose", "segment", "text_embed", "zero_shot"},
-			"note":                   "on-demand loopback sidecar; the first NPU call starts it (cold ~2 s + HEF load), it exits itself after hailo_idle_sec idle",
-		}
-		if h, err := hailoclient.New(cfg.HailoEndpoint, 2*time.Second).Health(pctx); err != nil {
-			entry["health_error"] = err.Error() + " (not running — normal between uses)"
-		} else {
-			entry["health"] = h
-		}
-		accel = map[string]any{"hailo-8l": entry}
-	}
+	// Accelerators (ADR 0024): reported only when listed, one entry per device
+	// in config order; a quick health probe that NEVER spawns the sidecar —
+	// status must stay side-effect free (acceltools.go accelStatus).
+	accel := accelStatus(ctx, cfg)
 
 	// T2-C: the embed memo's live counters. This server owns the bbolt handle, so
 	// it is the ONLY process that can read them while it runs — `loupe` reports
@@ -1676,6 +1643,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		ReadRoot:     absRoot,
 		Offload:      offload,
 		NPU:          pipeline.NewLoopNPU(cfg),
+		Accel:        pipeline.NewLoopAccel(cfg),
 		EnvRules:     cfg.AgentEnvRules,
 		SetupActions: in.SetupActions,
 	})
@@ -2411,51 +2379,20 @@ func plannerUnserved(ctx context.Context, base, model string) (missing, checked 
 // hailoSidecar lazily builds the accelerator lane from config: one client, one
 // spawn function (nil when hailo_sidecar_cmd is unset), one Sidecar shared by
 // every NPU tool so concurrent first calls share a single spawn.
-func (s *Server) hailoSidecar() *hailoclient.Sidecar {
-	s.hailoOnce.Do(func() {
-		cfg := s.p.Cfg()
-		timeout := time.Duration(cfg.HailoTimeoutSec) * time.Second
-		if timeout <= 0 {
-			timeout = 60 * time.Second
-		}
-		var spawn func() error
-		if cfg.HailoSidecarCmd != "" {
-			spawn = hailoclient.SpawnCmd(cfg.HailoSidecarCmd, cfg.HailoIdleSec)
-		}
-		s.hailo = hailoclient.NewSidecar(hailoclient.New(cfg.HailoEndpoint, timeout), spawn, 45*time.Second)
-	})
-	return s.hailo
-}
+func (s *Server) hailoSidecar() *accelclient.Sidecar { return s.accelSidecar("hailo-8l") }
 
 // hailoCall is the one path every NPU tool takes: ensure the sidecar, call the
 // tool, pass the dict through. Transport/spawn failures become defers (the
 // caller does the work another way); the sidecar's own structured refusals
 // ({"error":true,"kind":...}) pass through untouched — they are results.
 func (s *Server) hailoCall(ctx context.Context, tool string, args map[string]any) (*mcp.CallToolResult, error) {
-	sc := s.hailoSidecar()
-	if err := sc.Ensure(ctx); err != nil {
-		return jsonResult(map[string]any{"deferred": true, "reason": "hailo-8l: " + err.Error()})
-	}
-	out, err := sc.Client().Call(ctx, tool, args)
-	if err != nil {
-		return jsonResult(map[string]any{"deferred": true, "reason": "hailo-8l: " + err.Error()})
-	}
-	return jsonResult(out)
+	return s.accelCall(ctx, "hailo-8l", tool, args)
 }
 
 // handleHailoTool adapts one sidecar tool to an MCP handler. The MCP argument
 // names are the sidecar's keyword names, so the JSON passes through unchanged.
 func (s *Server) handleHailoTool(tool, requiredArg string) mcp.ToolHandler {
-	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		var in map[string]any
-		if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
-			return bad, nil
-		}
-		if in[requiredArg] == nil || in[requiredArg] == "" {
-			return jsonResult(map[string]any{"deferred": true, "reason": "empty " + requiredArg})
-		}
-		return s.hailoCall(ctx, tool, in)
-	}
+	return s.handleAccelTool("hailo-8l", tool, requiredArg)
 }
 
 func jsonResult(v any) (*mcp.CallToolResult, error) {

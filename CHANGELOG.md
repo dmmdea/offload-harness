@@ -6,6 +6,69 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.114.0] - 2026-09-08 - the Coral Edge TPU is a second harness accelerator
+
+The Lenovo M720q has carried a Coral Edge TPU since 2026-09-04 — driven, tuned and measured
+(MobileNet v2 iNat p50 3.16 ms / ~300 inf/s, 70-71 C sustained, no throttle) — and nothing in
+the harness knew it existed. The harness had exactly one pattern for "a device beside the GPU",
+the Hailo-8L lane (ADR 0024); this release applies it to the Coral, per the reviewed design in
+`docs/superpowers/specs/2026-09-04-coral-edgetpu-accelerator-design.md` (D1-D9, operator-approved
+2026-09-08).
+
+- **`coral-edgetpu`** is a declared accelerator (`profiles.json`, kind `tpu`, sidecar port
+  18814 so a box carrying both devices never collides with the Hailo's 18813). Detected on Linux
+  when `/sys/class/apex/apex_0/status` reads `ALIVE`; Windows has no apex driver and never
+  matches. `hwdetect.DetectAllAccelerators` is the union of the probes IN ORDER (Hailo, then
+  Coral) and `install detect` uses it.
+- **Four capabilities, one owner per name.** `offload_classify_image` (EfficientNet-EdgeTPU-S
+  ImageNet; MobileNet v2 iNat birds/insects/plants), `offload_object_detect` (EfficientDet-Lite
+  0/1/2, COCO), `offload_semantic_segment` (DeepLabV3 MNv2 Pascal — semantic, NOT the Hailo's
+  instance `segment`), `offload_image_embed` (EfficientNet-EdgeTPU-S extractor, 1280-d, space
+  `efficientnet-edgetpu-s` — not CLIP, so no text tower). Two of those names the Hailo lane also
+  owns, so the **shared-name rule** (ADR 0037) now governs registration on BOTH surfaces: the
+  MCP server and the agent loop walk `config.Accelerators` in order and the FIRST listed owner
+  of a name registers it; a later device's same-named tool is skipped and logged once. Tested in
+  both orders. Today no box lists both, so the rule is a pinned invariant, not a live path.
+- **The sidecar lives in this repo** (`accelerators/coral/`): `server.py` speaks the Hailo wire
+  contract verbatim over loopback, keeps one resident Interpreter per model, refuses a
+  non-loopback bind, serves only manifest-listed files whose sha256 matches
+  (`models.json`, hashes computed from the fetched bytes), reads sysfs `temp`/`status` and never
+  writes it, and exits itself idle. `test_server.py` runs the whole contract with
+  `CORAL_ENABLED=0` on any box; `fetch-models.sh` downloads and verifies the zoo artifacts.
+- **`internal/hailoclient` is `internal/accelclient`** with a `Device` label (`NewDevice`), so
+  every defer reads `<device>: ...` whichever lane produced it. `New()` stays the Hailo
+  constructor and the Hailo tests pass unmodified but for the import path. The MCP server's
+  Hailo-only table, sidecar singleton, call path, handler and status block became per-device
+  (`internal/mcpserver/acceltools.go`); the agent loop gained `AccelLane`s
+  (`pipeline.NewLoopAccel`, `agent.ReadOnlyToolsWithLanes`) in config order, with the old
+  single-lane `NPU` path kept for every existing caller.
+- **Every agent builder wires every lane.** The live harness-path gate (a remote contract on the
+  Lenovo calling `offload_classify_image`) found the fleet-node delegation builder and the
+  prompt-replay builder passing the Hailo lane only — the Coral tools existed for a local `agent_run`
+  and were invisible to the same seat via `agent_delegate route=remote`. Both pass `Accel` now, and a
+  root test parses every builder literal and fails on `NPU` without `Accel`. The same gate then
+  caught the launcher: `coral-http.sh` read `$1` as the idle seconds where the harness passes
+  `--idle-sec <n>`, and resolved `CORAL_HOME` one level up, so under the fleet unit it exited 2 before
+  the sidecar started. It now parses the harness call shape, walks up to `venv/` for the home (flat
+  or nested layout), and `test_server.py` runs the launcher with a stub python. Gate result on the
+  Lenovo: `agent_delegate route=remote` → `offload_classify_image` → `Ara macao (Scarlet Macaw)`
+  0.746, 18 s wall, sidecar spawned by the harness.
+- **Two installer gaps closed on the way.** `install.sh` merged NO accelerator seed at all
+  (install.ps1 always had) — it now passes detect's verdict to `install seed --accelerators`
+  and writes `installed.json`. And `fleet-serve` read `accelerators` only from that manifest,
+  which a hand-built node (the Lenovo, verified) does not have — health now falls back to the
+  config's own list when the manifest lists none (D6), so the device is advertised and a
+  delegator can route to it.
+- **Config keys** `coral_endpoint` / `coral_sidecar_cmd` / `coral_timeout_sec` (30 — a cold
+  model load on the TPU is ~0.5-2 s, unlike the Hailo's HEF-driven 60) / `coral_idle_sec`;
+  `__CORAL_HOME__` in the seed (installer `--coral-home`, env `CORAL_HOME`, default
+  `<OFFLOAD_HOME>/coral`). An EMPTY home token is now REFUSED at seed time for both devices
+  rather than rendering a launcher path at the filesystem root.
+
+Not in this release, by design (D5): face detection and PoseNet on the Coral (follow-ups once
+their artifacts are verified on the box), Phase B proactive routing from a box without the
+device, and the savings ledger for accelerator calls.
+
 ## [0.113.42] - 2026-09-08 - a vLLM seat could not be pinned, so two vLLM arms were never comparable
 
 `ProbeSeatPin` only ever spoke llama.cpp: it GETs `/props`, which vLLM does not serve and

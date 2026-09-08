@@ -34,6 +34,15 @@ const maxReadBytes = 256 * 1024 // P0 read cap: keeps a single read from blowing
 // EvalSymlinks check, which a fresh-context review proved bypassable by a
 // non-privileged Windows junction.
 func ReadOnlyTools(root string, offload OffloadFunc, npu NPUFunc) ([]Tool, error) {
+	return ReadOnlyToolsWithLanes(root, offload, npu, nil)
+}
+
+// ReadOnlyToolsWithLanes is ReadOnlyTools with the box's accelerator lanes
+// (Coral design D5). When lanes are given they are the accelerator surface —
+// every device in config order, the shared-name rule applied — and `npu` is
+// ignored; a nil lane list keeps the pre-Coral behaviour (the Hailo lane alone
+// via npu) so every existing caller and test is unchanged.
+func ReadOnlyToolsWithLanes(root string, offload OffloadFunc, npu NPUFunc, lanes []AccelLane) ([]Tool, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -72,7 +81,9 @@ func ReadOnlyTools(root string, offload OffloadFunc, npu NPUFunc) ([]Tool, error
 	// Accelerator tools (ADR 0024): registered ONLY when the box wires an
 	// NPUFunc, so the advertised tool list is byte-identical without the
 	// device — the same pin as the MCP surface's HasAccelerator gate.
-	if npu != nil {
+	if len(lanes) > 0 {
+		tools = append(tools, accelLaneTools(lanes, tools)...)
+	} else if npu != nil {
 		tools = append(tools, npuTools(npu)...)
 	}
 	return tools, nil

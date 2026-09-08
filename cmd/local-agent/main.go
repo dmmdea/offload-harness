@@ -336,6 +336,7 @@ func main() {
 		ReadRoot:       absRoot,
 		Offload:        offload,
 		NPU:            pipeline.NewLoopNPU(cfg),
+		Accel:          pipeline.NewLoopAccel(cfg),
 		Unattended:     true, // non-interactive CLI: ask → deny-and-queue
 		AuditPath:      auditP,
 		AskQueuePath:   askQ,
@@ -513,6 +514,7 @@ func main() {
 			ReadRoot:             absRoot,
 			Offload:              offload,
 			NPU:                  pipeline.NewLoopNPU(cfg),
+			Accel:                pipeline.NewLoopAccel(cfg),
 			Unattended:           true,
 			AuditPath:            auditP,
 			AskQueuePath:         askQ,
@@ -542,6 +544,7 @@ func main() {
 			ReadRoot:             absRoot,
 			Offload:              offload,
 			NPU:                  pipeline.NewLoopNPU(cfg),
+			Accel:                pipeline.NewLoopAccel(cfg),
 			Unattended:           true,
 			AuditPath:            auditP,
 			AskQueuePath:         askQ,

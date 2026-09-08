@@ -1,6 +1,6 @@
 //go:build windows
 
-package hailoclient
+package accelclient
 
 import (
 	"os/exec"

@@ -1,4 +1,4 @@
-package hailoclient
+package accelclient
 
 import (
 	"context"
@@ -11,8 +11,10 @@ import (
 	"time"
 )
 
-// ErrNoSidecarCmd: the sidecar is down and this box has no way to start it.
-var ErrNoSidecarCmd = errors.New("hailo sidecar not running and no hailo_sidecar_cmd configured")
+// ErrNoSidecarCmd: the sidecar is down and this box has no way to start it
+// (no <device>_sidecar_cmd configured). One sentinel for every device — callers
+// compare identity, and the device is on the wrapping error's prefix.
+var ErrNoSidecarCmd = errors.New("sidecar not running and no launcher configured (hailo_sidecar_cmd / coral_sidecar_cmd)")
 
 // Sidecar starts the HTTP sidecar ON DEMAND (operator decision 2026-08-22: no
 // scheduler, no always-on service — the sidecar self-exits idle, the harness
@@ -45,7 +47,7 @@ func (s *Sidecar) Ensure(ctx context.Context) error {
 		return ErrNoSidecarCmd
 	}
 	if err := s.spawn(); err != nil {
-		return fmt.Errorf("starting hailo sidecar: %w", err)
+		return fmt.Errorf("starting %s sidecar: %w", s.c.device, err)
 	}
 	deadline := time.Now().Add(s.startTimeout)
 	for time.Now().Before(deadline) {
@@ -58,7 +60,7 @@ func (s *Sidecar) Ensure(ctx context.Context) error {
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
-	return fmt.Errorf("hailo sidecar did not become healthy within %s", s.startTimeout)
+	return fmt.Errorf("%s sidecar did not become healthy within %s", s.c.device, s.startTimeout)
 }
 
 // SpawnCmd launches the configured launcher DETACHED (Start, not Run — the

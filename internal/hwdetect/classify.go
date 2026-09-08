@@ -242,3 +242,32 @@ func DetectAccelerators(run func(args ...string) (string, error)) []string {
 	}
 	return AcceleratorsFromHailortcli(scan, ident)
 }
+
+// coralStatusPath is the gasket/apex driver's device status node. Present only
+// on Linux with the apex module bound; Windows has no apex driver and the read
+// fails there, which is "no accelerator", never an error.
+const coralStatusPath = "/sys/class/apex/apex_0/status"
+
+// DetectCoral reports ["coral-edgetpu"] iff the apex device's sysfs status reads
+// ALIVE (Coral design D4). One id for the whole Edge TPU family — USB, M.2 and
+// Dual all run the same _edgetpu.tflite artifacts. read is injected so the rule
+// is testable without a device; any read error is "no accelerator".
+func DetectCoral(read func(path string) (string, error)) []string {
+	s, err := read(coralStatusPath)
+	if err != nil {
+		return nil
+	}
+	if strings.TrimSpace(s) == "ALIVE" {
+		return []string{"coral-edgetpu"}
+	}
+	return nil
+}
+
+// DetectAllAccelerators is the union of every device probe, in the order the
+// ids will be listed in config.Accelerators — Hailo first, then Coral. Order is
+// load-bearing: the tool surface's shared-name rule (Coral D5) gives a name to
+// the FIRST listed accelerator that owns it.
+func DetectAllAccelerators(run func(args ...string) (string, error), read func(path string) (string, error)) []string {
+	out := DetectAccelerators(run)
+	return append(out, DetectCoral(read)...)
+}

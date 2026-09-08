@@ -154,6 +154,12 @@ func runInstallSeed(args []string) error {
 	// values to both commands, or the config will name a model llama-swap never serves.
 	vllmVenv := fs.String("vllm-venv", "", "hand-built vLLM virtualenv (default: <home>/vllm-env)")
 	hfHome := fs.String("hf-home", "", "HF cache root (default: $HF_HOME, else <home>/hf)")
+	// Accelerators ride BESIDE the tier (ADR 0024): their seed keys merge over the
+	// tier's. install.ps1 always did this; install.sh never did (Coral D4 closed
+	// that gap for the Hailo path too) — both now pass detect's verdict here.
+	accelerators := fs.String("accelerators", "", "comma-separated accelerator ids from `install detect` (e.g. hailo-8l,coral-edgetpu); their seeds merge over the tier's")
+	hailoHome := fs.String("hailo-home", "", "Hailo repo checkout __HAILO_HOME__ expands to (default: $HAILO_HOME, else <home>/hailo)")
+	coralHome := fs.String("coral-home", "", "Coral sidecar home __CORAL_HOME__ expands to (default: $CORAL_HOME, else <home>/coral)")
 	_ = fs.Parse(args)
 	if *profile == "" {
 		return fmt.Errorf("install seed needs --profile <tier id>")
@@ -203,6 +209,26 @@ func runInstallSeed(args []string) error {
 	if err != nil {
 		return err
 	}
+	if ids := splitIDs(*accelerators); len(ids) > 0 {
+		doc, err := tierseed.ParseDoc(raw)
+		if err != nil {
+			return err
+		}
+		accSeed, err := tierseed.ResolveAccelerators(doc.Accelerators, ids, tierseed.Options{
+			Home: *home, GOOS: *goos,
+			HailoHome: homeOr(*hailoHome, "HAILO_HOME", *home, "hailo"),
+			CoralHome: homeOr(*coralHome, "CORAL_HOME", *home, "coral"),
+		})
+		if err != nil {
+			return err
+		}
+		if seed == nil {
+			seed = map[string]any{}
+		}
+		for k, v := range accSeed {
+			seed[k] = v
+		}
+	}
 	if seed == nil {
 		fmt.Println("tier", *profile, "ships no media configuration — it serves text only until an operator binds media by hand")
 		return nil
@@ -213,4 +239,31 @@ func runInstallSeed(args []string) error {
 	}
 	fmt.Println(string(b))
 	return nil
+}
+
+// splitIDs turns a comma-separated flag into trimmed, non-empty ids.
+func splitIDs(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// homeOr resolves an accelerator home: the flag, else the environment variable,
+// else <home>/<sub>. Never empty when home is set — an empty token would render
+// a launcher path at the filesystem root (tierseed refuses that anyway).
+func homeOr(flag, env, home, sub string) string {
+	if flag != "" {
+		return flag
+	}
+	if v := os.Getenv(env); v != "" {
+		return v
+	}
+	if home == "" {
+		return ""
+	}
+	return strings.TrimRight(strings.ReplaceAll(home, `\`, "/"), "/") + "/" + sub
 }

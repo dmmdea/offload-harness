@@ -930,6 +930,18 @@ type Config struct {
 	HailoTimeoutSec int `json:"hailo_timeout_sec,omitempty"`
 	// HailoIdleSec is passed to the sidecar as its self-exit idle window. Default 300.
 	HailoIdleSec int `json:"hailo_idle_sec,omitempty"`
+	// CoralEndpoint is the Coral Edge TPU sidecar base (accelerators/coral/server.py),
+	// loopback only, port 18814 so a box carrying both devices never collides with
+	// the Hailo's 18813. Inert while Accelerators lacks "coral-edgetpu" (Coral D3).
+	CoralEndpoint string `json:"coral_endpoint,omitempty"`
+	// CoralSidecarCmd launches the Coral sidecar on demand (coral-http.sh). Empty =
+	// never spawn; the harness defers when /health is unreachable.
+	CoralSidecarCmd string `json:"coral_sidecar_cmd,omitempty"`
+	// CoralTimeoutSec bounds one Edge TPU call. A cold model load on the TPU is
+	// ~0.5-2 s (the 60 s Hailo figure is HEF-load driven), so 30 is ample. Default 30.
+	CoralTimeoutSec int `json:"coral_timeout_sec,omitempty"`
+	// CoralIdleSec is passed to the sidecar as its self-exit idle window. Default 300.
+	CoralIdleSec int `json:"coral_idle_sec,omitempty"`
 	// --- fleet-node server (`fleet-serve` / `fleet-measure`; docs/FLEET-NODE.md) ---
 	// FleetListen is the fleet-serve bind address. Loopback by default; the
 	// production binding is the machine's TAILSCALE address behind
@@ -1358,6 +1370,9 @@ func Default() Config {
 		HailoEndpoint:                 "http://127.0.0.1:18813", // loopback sidecar base; inert while Accelerators is empty
 		HailoTimeoutSec:               60,
 		HailoIdleSec:                  300,
+		CoralEndpoint:                 "http://127.0.0.1:18814", // loopback sidecar base; inert while Accelerators lacks coral-edgetpu
+		CoralTimeoutSec:               30,
+		CoralIdleSec:                  300,
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
 		FleetMaxQueueDepth:            0,                 // 0 = built-in default (32 accepted+running); negative = unlimited

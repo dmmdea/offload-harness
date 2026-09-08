@@ -1,4 +1,4 @@
-package hailoclient
+package accelclient
 
 import (
 	"context"
@@ -35,7 +35,10 @@ func TestEnsureSpawnsThenWaitsForHealth(t *testing.T) {
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
-	spawn := func() error { go func() { time.Sleep(150 * time.Millisecond); atomic.StoreInt32(&up, 1) }(); return nil }
+	spawn := func() error {
+		go func() { time.Sleep(150 * time.Millisecond); atomic.StoreInt32(&up, 1) }()
+		return nil
+	}
 	s := NewSidecar(New(srv.URL, time.Second), spawn, 3*time.Second)
 	if err := s.Ensure(context.Background()); err != nil {
 		t.Fatal(err)

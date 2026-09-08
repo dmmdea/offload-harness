@@ -1,0 +1,84 @@
+{
+  "_comment": "Coral Edge TPU artifact manifest (Coral design D7). Every file from google-coral/test_data (Apache-2.0), fetched by fetch-models.sh from https://raw.githubusercontent.com/google-coral/test_data/master/<file> and verified by sha256 (computed 2026-09-08 on the Qube from the downloaded bytes). The sidecar refuses to serve an unlisted file or one whose hash does not match: an artifact that drifted is a structured model_sha_mismatch, never a silent load.",
+  "models": {
+    "efficientnet-s": {
+      "file": "efficientnet-edgetpu-S_quant_edgetpu.tflite",
+      "sha256": "64e1abc43406dc87cd4e35ced5cea15a04b46e6fec51a48d513722c32b636928",
+      "task": "classify",
+      "domain": "imagenet",
+      "labels": "imagenet_labels.txt",
+      "input": 224
+    },
+    "inat-birds": {
+      "file": "mobilenet_v2_1.0_224_inat_bird_quant_edgetpu.tflite",
+      "sha256": "5b468dfe63ce4d79056bb19b953529e25df0a8d841b204c626576a1b8bd36afe",
+      "task": "classify",
+      "domain": "birds",
+      "labels": "inat_bird_labels.txt",
+      "input": 224
+    },
+    "inat-insects": {
+      "file": "mobilenet_v2_1.0_224_inat_insect_quant_edgetpu.tflite",
+      "sha256": "fc7431f442c6ce3866374b6c7c78375c48f8c460bae72c20433ef22563c487e2",
+      "task": "classify",
+      "domain": "insects",
+      "labels": "inat_insect_labels.txt",
+      "input": 224
+    },
+    "inat-plants": {
+      "file": "mobilenet_v2_1.0_224_inat_plant_quant_edgetpu.tflite",
+      "sha256": "39859e51851c6c1b808cf579faade95ee295be22613e7ae109fdfd19b0263274",
+      "task": "classify",
+      "domain": "plants",
+      "labels": "inat_plant_labels.txt",
+      "input": 224
+    },
+    "efficientdet-lite0": {
+      "file": "efficientdet_lite0_320_ptq_edgetpu.tflite",
+      "sha256": "4b17288c7988973274c63e10c914748363e7795ba715c6d8d7db1a2b909744a5",
+      "task": "object_detect",
+      "labels": "coco_labels.txt",
+      "input": 320
+    },
+    "efficientdet-lite1": {
+      "file": "efficientdet_lite1_384_ptq_edgetpu.tflite",
+      "sha256": "635dd33cf5be42c74996fd582b5dbb73ca5f448e607d8203d66bde1685fdd493",
+      "task": "object_detect",
+      "labels": "coco_labels.txt",
+      "input": 384
+    },
+    "efficientdet-lite2": {
+      "file": "efficientdet_lite2_448_ptq_edgetpu.tflite",
+      "sha256": "420a28a60cf7f9dfd24774aad361ece142a8acc326063c77abf3fdff07cf60cf",
+      "task": "object_detect",
+      "labels": "coco_labels.txt",
+      "input": 448
+    },
+    "deeplab-pascal": {
+      "file": "deeplabv3_mnv2_pascal_quant_edgetpu.tflite",
+      "sha256": "4d899a809ac1d7032880392ef09ee1a891205ecaae2cde288fd3fe7f7dda966e",
+      "task": "semantic_segment",
+      "labels": "pascal_voc_segmentation_labels.txt",
+      "input": 513
+    },
+    "efficientnet-s-embed": {
+      "file": "efficientnet-edgetpu-S_quant_embedding_extractor_edgetpu.tflite",
+      "sha256": "56d453080ba30adf9cd593f2eb08d0551fe5ce8de16d05a99da97c4a1715f179",
+      "task": "embed",
+      "input": 224
+    }
+  },
+  "labels": {
+    "imagenet_labels.txt": "b8aaeb5630c62626a7d124a05c0e14230a7ffdd2136a31d0190a4fb71c1d82f1",
+    "inat_bird_labels.txt": "a16108dfe3f8daff015b87a97ab6a17e717b9b1bccd719f6d8f747746d7b9277",
+    "inat_insect_labels.txt": "e5e03664a8a70eafc3308268eb8cd6aa28652912735bfdd45e436ae9617155bc",
+    "inat_plant_labels.txt": "53b78d1ac5808be1648520472db5d17a75a809e3bc51121887a68d9779fac257",
+    "coco_labels.txt": "dc183f003fc753c4c43fae6fdf7f387559449573f13fa32e517fb7453fd380f1",
+    "pascal_voc_segmentation_labels.txt": "7337a2b06728385fb3e1106416c67bfddf69628598b1f2f0db6a63cd63fb6b1e"
+  },
+  "testdata": {
+    "parrot.jpg": "a8fba9e7e29439fa414c13129aad661f2289ff891231920a7c33641b076f1833",
+    "bird.bmp": "3fd22d6ed352b8e721d9982e38ed655f8429e168bb53ad205c6f3cdfa848e994",
+    "grace_hopper.bmp": "c43444bf3b1b1e3080551ca194bd231da4b67f20fc91454502915a6b806b614f"
+  }
+}

@@ -704,6 +704,26 @@ Confirm health once llama-swap is up:
 # expect: "health:     OK" and each configured alias -> OK
 ```
 
+### Accelerators (coral-edgetpu, 0.114.0)
+
+The Coral Edge TPU is the second accelerator (ADR 0024 + ADR 0037; `docs/systems/accelerators.md`).
+Detection is a sysfs read — `/sys/class/apex/apex_0/status` = `ALIVE` — so it is **Linux only**;
+`install.sh` merges its seed and writes `installed.json` (0.114.0 also closed that gap for hailo-8l
+on Linux). Two knobs:
+
+- `CORAL_HOME` (`install seed --coral-home`) — the sidecar home `__CORAL_HOME__` expands to in the
+  seeded `coral_sidecar_cmd`. Default `<OFFLOAD_HOME>/coral`. It must hold `venv/` (ai-edge-litert +
+  numpy + pillow; on the Lenovo built offline from `~/coral-stage/wheels314`), `models/` (run
+  `accelerators/coral/fetch-models.sh`, which verifies every sha256), and `accelerators/coral/` —
+  copied flat or checked out beneath the home; the launcher walks up to `venv/`. The harness runs
+  it as `coral-http.sh --idle-sec <coral_idle_sec>`. An EMPTY home is refused at seed time.
+- `OFFLOAD_ACCELERATORS` — the same override as for hailo-8l; list both ids to exercise the
+  shared-name rule (`hailo-8l,coral-edgetpu`: the first listed owns `offload_object_detect` and
+  `offload_image_embed`).
+
+The sidecar spawns on demand over loopback :18814 and exits itself after `coral_idle_sec`; the
+fleet node's `ProtectHome=yes` is why `CORAL_HOME` lives under the stack root, not under `~`.
+
 ### Optional: the coding agent + chat GUI (OFF by default)
 
 The `local-agent --serve` endpoint is **unauthenticated** and drives write/GitHub tools, so it is
