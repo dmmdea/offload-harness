@@ -20,7 +20,7 @@ import (
 // live? The answer was previously "$HOME", i.e. the OS drive, on every machine.
 func runInstall(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("install needs a subcommand: detect, plan, render, volumes, seed")
+		return fmt.Errorf("install needs a subcommand: detect, plan, render, volumes, seed, vllm-seat")
 	}
 	switch args[0] {
 	case "detect":
@@ -33,8 +33,10 @@ func runInstall(args []string) error {
 		return runInstallVolumes(args[1:])
 	case "seed":
 		return runInstallSeed(args[1:])
+	case "vllm-seat":
+		return runInstallVLLMSeat(args[1:])
 	default:
-		return fmt.Errorf("unknown install subcommand %q (have: detect, plan, render, volumes, seed)", args[0])
+		return fmt.Errorf("unknown install subcommand %q (have: detect, plan, render, volumes, seed, vllm-seat)", args[0])
 	}
 }
 
@@ -147,6 +149,11 @@ func runInstallSeed(args []string) error {
 	goos := fs.String("os", "", "target OS for binary names: windows|linux (default: this machine)")
 	ramTier := fs.String("ram-tier", "", "apply the config_seed_ram_mid_high overlay: mid|high")
 	root := fs.String("root", ".", "repo root holding setup/templates/profiles.json")
+	// The vLLM agent seat's deployment half, so the BINDING is decided by the same
+	// detection that decides whether `install render` emits the seat. Pass the same
+	// values to both commands, or the config will name a model llama-swap never serves.
+	vllmVenv := fs.String("vllm-venv", "", "hand-built vLLM virtualenv (default: <home>/vllm-env)")
+	hfHome := fs.String("hf-home", "", "HF cache root (default: $HF_HOME, else <home>/hf)")
 	_ = fs.Parse(args)
 	if *profile == "" {
 		return fmt.Errorf("install seed needs --profile <tier id>")
@@ -178,7 +185,21 @@ func runInstallSeed(args []string) error {
 			return fmt.Errorf("tier %s: %w", *profile, err)
 		}
 	}
-	seed, err := tierseed.Resolve(p, *profile, tierseed.Options{Home: *home, GOOS: *goos, RAMTier: *ramTier})
+	// Detect once, here, exactly as install render does. A box without the hand-built
+	// venv binds the seat's declared fallback and says why, rather than advertising an
+	// agent model nothing serves.
+	vllmActive := false
+	if p.VLLMSeat != nil {
+		rt := vllmRuntimeFlags{venv: *vllmVenv, hfHome: *hfHome}.resolve(*home)
+		var why string
+		if vllmActive, why = p.VLLMSeat.Detect(rt); !vllmActive {
+			fmt.Fprintf(os.Stderr, "NOTE  vLLM agent seat %q unavailable (%s); binding %s\n",
+				p.VLLMSeat.ID, why, p.VLLMSeat.Fallback)
+		}
+	}
+	seed, err := tierseed.Resolve(p, *profile, tierseed.Options{
+		Home: *home, GOOS: *goos, RAMTier: *ramTier, VLLMSeatActive: vllmActive,
+	})
 	if err != nil {
 		return err
 	}

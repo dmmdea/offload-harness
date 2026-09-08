@@ -171,8 +171,16 @@ if ($r.verdict -and $r.verdict.render_backend -eq 'triple-blackwell') { Ok 'b3x1
 # THE placement law, asserted mechanically: device 1 is the DISPLAY card and no seat
 # may be pinned to it. A silent flip here starves the operator's desktop - measured
 # 2026-09-04, Windows fell to a 720p-class mode and the box needed a reboot.
-if ($r.yaml -notmatch 'CUDA_VISIBLE_DEVICES=1') { Ok 'b3x16 pins NOTHING to the display card (device 1)' } else { Bad 'b3x16 pinned a seat to device 1 - that is the display card' }
+if ($r.yaml -notmatch 'CUDA_VISIBLE_DEVICES=1\b') { Ok 'b3x16 pins NOTHING to the display card (device 1)' } else { Bad 'b3x16 pinned a seat to device 1 - that is the display card' }
 if ($r.yaml -match 'CUDA_VISIBLE_DEVICES=0' -and $r.yaml -match 'CUDA_VISIBLE_DEVICES=2') { Ok 'b3x16 uses the 5060 Ti pair (devices 0 and 2)' } else { Bad 'b3x16 does not use both 5060 Ti cards' }
+# Per-seat placement, at the RENDER layer (profiles.json is gated in Go by
+# TestTripleBlackwellNeverSchedulesOntoTheDisplayCard). The tier shipped 0.113.32 with
+# its media block copied verbatim from blackwell-2x16 - where 1 IS the fast card - so
+# the vision seat landed on the display card and card 2 was named nowhere.
+$visEnv = @($r.yaml -split "`r?`n" | Select-String -Pattern '^\s{2}qwen3-vl-8b:' -Context 0,3 | ForEach-Object { $_.Context.PostContext } | Where-Object { $_ -match 'env:' })
+if ("$visEnv" -match 'CUDA_VISIBLE_DEVICES=2\b')  { Ok 'b3x16 vision seat pinned to device 2 (5060Ti#2), the measured live placement' } else { Bad "b3x16 vision pin (got: $visEnv)" }
+$sttEnv = @($r.yaml -split "`r?`n" | Select-String -Pattern '^\s{2}whisper-stt:' -Context 0,3 | ForEach-Object { $_.Context.PostContext } | Where-Object { $_ -match 'env:' })
+if ("$sttEnv" -match 'CUDA_VISIBLE_DEVICES=2\b')  { Ok 'b3x16 STT seat pinned to device 2, so it runs CONCURRENTLY with a card-0 seat' } else { Bad "b3x16 stt pin (got: $sttEnv)" }
 # CUDA graphs measured +40-51% gen on the 26B seats (2026-09-05, exact-output gate).
 if (($r.yaml -split "`n" | Where-Object { $_ -match 'env:' -and $_ -match 'GGML_CUDA_DISABLE_GRAPHS' }).Count -eq 0) { Ok 'b3x16 leaves CUDA graphs ON (measured +40-51% gen on the 26B seats)' } else { Bad 'b3x16 still SETS the cargo GGML_CUDA_DISABLE_GRAPHS on a seat' }
 if ($r.yaml -match 'ctx-size 131072') { Ok 'b3x16 serves the measured 131072 window' } else { Bad 'b3x16 ctx is not 131072' }
@@ -186,7 +194,7 @@ if (($r.yaml -split "`n" | Where-Object { $_ -match 'env:' -and $_ -match 'GGML_
 # The whole point of the template: per-CARD pins. Primaries + vision on device 1
 # (the fast card), memory-stack residents + STT on device 0 (the utility card).
 $e4bEnv = @($r.yaml -split "`r?`n" | Select-String -Pattern '^\s{2}offload-e4b:' -Context 0,3 | ForEach-Object { $_.Context.PostContext } | Where-Object { $_ -match 'env:' })
-if ("$e4bEnv" -match 'CUDA_VISIBLE_DEVICES=1')                  { Ok 'b2x16 workhorse pinned to the FAST card (device 1)' } else { Bad "b2x16 e4b pin (got: $e4bEnv)" }
+if ("$e4bEnv" -match 'CUDA_VISIBLE_DEVICES=1\b')                  { Ok 'b2x16 workhorse pinned to the FAST card (device 1)' } else { Bad "b2x16 e4b pin (got: $e4bEnv)" }
 $embEnv = @($r.yaml -split "`r?`n" | Select-String -Pattern '^\s{2}embeddinggemma:' -Context 0,3 | ForEach-Object { $_.Context.PostContext } | Where-Object { $_ -match 'env:' })
 if ("$embEnv" -match 'CUDA_VISIBLE_DEVICES=0')                  { Ok 'b2x16 embedder pinned to the UTILITY card (device 0)' } else { Bad "b2x16 emb pin (got: $embEnv)" }
 if ($r.yaml -match '(?m)^\s{2}bge-reranker-v2-m3:')             { Ok 'b2x16 reranker present (memory-stack parity with the live box)' } else { Bad 'b2x16 reranker missing' }
@@ -318,7 +326,7 @@ $dualSet = @($r.yaml -split "`r?`n" | Where-Object { $_ -match '(?m)^\s{4}\w+:\s
 # inside the conjunction — "(m26 | a26)" — while everything else stays co-resident.
 if ($dualSet.Count -eq 1 -and $dualSet[0] -match 'e4b' -and $dualSet[0] -match '\(m26 \| a26\)') { Ok 'dual-gpu renders ONE co-resident matrix set (architect/agent alternate on device 0)' } else { Bad "dual-gpu co-resident set (got: $($dualSet -join ' / '))" }
 if ($r.yaml -notmatch '(?m)^groups:' -and $r.yaml -notmatch 'swap:\s*true') { Ok 'dual-gpu has no legacy swap group' } else { Bad 'dual-gpu legacy swap topology returned' }
-if ($r.yaml -match 'CUDA_VISIBLE_DEVICES=0' -and $r.yaml -match 'CUDA_VISIBLE_DEVICES=1') { Ok 'dual-gpu pins device 0 AND device 1' } else { Bad 'dual-gpu CUDA_VISIBLE_DEVICES' }
+if ($r.yaml -match 'CUDA_VISIBLE_DEVICES=0' -and $r.yaml -match 'CUDA_VISIBLE_DEVICES=1\b') { Ok 'dual-gpu pins device 0 AND device 1' } else { Bad 'dual-gpu CUDA_VISIBLE_DEVICES' }
 if ($r.yaml -notmatch 'exclusive:\s*true')                     { Ok 'dual-gpu has NO exclusive swap group' } else { Bad 'dual-gpu exclusive:true present' }
 # 26B (architect) block must carry the device-0 pin in its env list.
 $arch26 = ($r.yaml -split "`r?`n" | Where-Object { $_ -match 'GGML_CUDA_DISABLE_GRAPHS' } | Select-Object -First 1)

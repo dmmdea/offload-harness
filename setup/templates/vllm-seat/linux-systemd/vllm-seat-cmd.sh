@@ -8,7 +8,7 @@
 #   - the unit's InvocationID changes = somebody restarted it (systemd after a crash, an operator's `systemctl restart`):
 #     the engine is then 35–250 s from serving and llama-swap must not keep proxying to it as `ready`.
 set -u
-U=vllm-seat.service
+U=__UNIT__.service
 systemctl reset-failed "$U" 2>/dev/null
 systemctl start "$U" || { echo "vllm-seat-cmd: systemctl start $U failed (polkit? unit?)" >&2; exit 1; }
 inv=$(systemctl show -p InvocationID --value "$U" 2>/dev/null)

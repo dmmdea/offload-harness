@@ -1,9 +1,12 @@
 # vllm-seat.service — a persistent vLLM agent seat (reference: NVIDIA A2 16 GB, `ampere-16`, 2026-09-06; ADR 0035).
 # Enabled at boot, Restart=on-failure. Binds the TAILSCALE address (the tailnet is the trust boundary, like the fleet
 # node) — llama-swap's entry proxies to it and owns load/unload through vllm-seat-cmd*.sh (polkit rule
-# 50-llama-swap-vllm-seat.rules). Launch line + rationale: vllm-seat-run.sh. Replace <user>, the paths and the unit name.
+# 50-llama-swap-vllm-seat.rules). Launch line + rationale: vllm-seat-run.sh.
+# RENDERED, not hand-edited, since 0.113.33: `local-offload install vllm-seat` substitutes the double-underscore tokens
+# below from the tier's vllm_seat spec in setup/templates/profiles.json plus the deployment's own paths. Edit the SPEC
+# (or this file's shape), never a rendered copy — the renderer REFUSES to emit a file that still holds a token.
 [Unit]
-Description=vLLM agent seat (<seat id> / <pool alias>, :18797 Tailscale)
+Description=vLLM agent seat (__SEAT_ID__ / __POOL_ALIAS__, :__PORT__ Tailscale)
 # Wants (not Requires) tailscaled: a tailscaled restart (package upgrade) must not restart the seat behind llama-swap's back —
 # the bound Tailscale address survives it; the run script waits for the address at boot.
 After=network-online.target tailscaled.service
@@ -13,16 +16,16 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=<user>
-Group=<user>
-WorkingDirectory=/srv/offload-stack
-ExecStart=/srv/llama-swap/seat/vllm-seat-run.sh
+User=__USER__
+Group=__USER__
+WorkingDirectory=__STACK_DIR__
+ExecStart=__SEAT_DIR__/vllm-seat-run.sh
 Restart=on-failure
 RestartSec=20
 TimeoutStopSec=90
 KillMode=mixed
-StandardOutput=append:/srv/offload-stack/logs/vllm-seat.log
-StandardError=append:/srv/offload-stack/logs/vllm-seat.log
+StandardOutput=append:__STACK_DIR__/logs/__UNIT__.log
+StandardError=append:__STACK_DIR__/logs/__UNIT__.log
 
 [Install]
 WantedBy=multi-user.target

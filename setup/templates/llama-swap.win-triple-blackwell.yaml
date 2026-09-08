@@ -7,12 +7,30 @@
 # PLACEMENT LAW - THE THIRD CARD IS NOT A THIRD WORKER. Measured, operator-set:
 #   devices 0 and 2 (the 5060 Ti PAIR): every seat the harness serves by default.
 #     Anything that fits two cards runs HERE.
-#   device 1 (RTX 5070 Ti, ~896 GB/s, DISPLAY ENABLED): stays interactive-first. It
-#     joins only for the explicitly opt-in over-2-card seats at the end of this file,
-#     under a >=4 GiB desktop floor, and NEVER while the operator is at the desk.
+#   device 1 (RTX 5070 Ti, ~896 GB/s, DISPLAY ENABLED): CONTEXT/KV ONLY - operator
+#     decision 2026-09-07, taken against the numbers below. It joins only for the
+#     explicitly opt-in over-2-card seats at the end of this file, under a >=4 GiB
+#     desktop floor, and NEVER while the operator is at the desk. No tier seat and no
+#     media pool is ever PINNED to it.
 #     Measured 2026-09-04: a 3-card engine at util 0.87-0.90 left this card under 1 GB,
 #     Windows dropped to a 720p-class mode and the operator had to reboot (clean event
 #     log, no TDR - starvation, not a crash).
+#     Why not a seat here: the vision seat measures 11,751 MiB (2026-09-05 CUDA-X
+#     baseline), which after the ~0.5-1.5 GB DWM tax leaves ~3.5 GiB - UNDER the floor.
+#
+# THE MEDIA POOLS RUN ON THE 5060 Ti PAIR, WHICH IS cuda:1/cuda:2 IN ComfyUI'S ORDER.
+# Those keys live in the tier's config_seed, not in this yaml, so nothing here can
+# enforce them - the Go gate TestTripleBlackwellNeverSchedulesOntoTheDisplayCard does.
+#   imagegen  compute cuda:1  donor cuda:2  - bf16 (krea2 turbo), free to sit anywhere;
+#                                             re-verified on the pair 2026-09-01.
+#   videogen  compute cuda:0  donor cuda:1  - THE ONE LAW EXCEPTION, and it must stay:
+#     an int8 DiT cannot compute on a non-default CUDA device (ComfyUI-MultiGPU #220),
+#     and the 2026-09-01 attempt to move it threw cudaErrorIllegalAddress mid-render.
+# 0.113.32 shipped this tier's ENTIRE media block copied byte-for-byte from
+# blackwell-2x16, whose gpu_env map is 0=utility / 1=FAST: that put the vision seat on
+# the display card, left image compute on it too, and named card 2 nowhere - which is
+# also why the 3-card box measured no media difference from the 2-card one. It was a
+# copy nobody adapted, not a hardware result.
 #
 # WHAT THE THIRD CARD ACTUALLY BUYS (operator directive: "bigger context and more
 # capability in general, not necessarily to pool for a bigger model"). Measured:
@@ -45,7 +63,10 @@
 # invariant binds the CASCADE seats; the *-agent and qwen3.8 entries are explicitly
 # reasoning/thinking seats. Do NOT add --swa-full here. q8_0 V requires flash-attn on.
 # q4_0 KV is BANNED (92% prefill degradation, measured).
-healthCheckTimeout: 300
+# 600, not the old 300: this template renders the Flash-Next opt-in seats, whose cold
+# load runs 219 s and beyond (the reference box raised its own ceiling to 600 for
+# exactly them). A CEILING, not a wait - a broken small seat still fails fast.
+healthCheckTimeout: 600
 logLevel: info
 
 macros:
@@ -94,6 +115,18 @@ models:
   # when the tier sets include_qwen38 (the Q38 token pair mirrors the M26 one).
   qwen3.8-27b:
     aliases: [qwen38, local-coder, coder, agent-loop]
+    # PINNED TO THE 5060 Ti PAIR. This seat carries -sm layer -ngl 999, so with all
+    # three cards visible it spreads across the DISPLAY card - which is exactly what
+    # the reference box hit: its own entry records "Old split 21,29 spanned
+    # 5070Ti+5060Ti by CUDA fastest-first" and was RE-PINNED 2026-08-31 under the
+    # operator rule "DUAL-CARD seats -> the 5060 Ti PAIR, pinned by BOTH UUIDs. NEVER
+    # the 5070 Ti." It was the last unpinned default seat in this template.
+    # NO --tensor-split here on purpose. The live box uses 24,26, justified by which
+    # of ITS cards holds the ~2 GB utility residents - and this template puts those
+    # residents on the other card of the pair, so the ratio does not transfer. -sm
+    # layer auto-divides the 16.7 GB evenly, which fits either way; measure on the box
+    # before pinning a ratio. Prefer GPU UUIDs over indices if the cards ever move.
+    env: [CUDA_VISIBLE_DEVICES=0,2]
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.8-27B-UD-Q4_K_XL.gguf
       --mmproj __MODELS__/mmproj-Qwen3.8-27B-F16.gguf -ngl 999 -sm layer --parallel 1
@@ -122,7 +155,7 @@ models:
       --parallel 4 -ngl 99 --port ${PORT} --host 127.0.0.1
     ttl: 600
 
-# RESIDENCY IS DECLARED WITH `  # ===== OPT-IN OVER-2-CARD SEATS - these are the only entries allowed to touch =====
+  # ===== OPT-IN OVER-2-CARD SEATS - these are the only entries allowed to touch =====
   # ===== the display card (device 1). They are NOT in any matrix set: they load  =====
   # ===== only when called by name/alias, and never while the operator is at the  =====
   # ===== desk. Both were measured on the reference box 2026-08-31 / 2026-09-01.  =====
@@ -163,7 +196,7 @@ models:
     ttl: 300
     name: "Qwen3.8-Flash-Next @ native 262k (q8_0 KV, ncmoe32) - batch long-context twin"
 
-matrix:` (llama-swap >= v202; groups' persistent:true was
+# RESIDENCY IS DECLARED WITH `matrix:` (llama-swap >= v202; groups' persistent:true was
 # measured FAILING on this exact box — the memory stack silently degraded mem0 to
 # dense-only). Residents appear in every set, so no request can be satisfied by
 # evicting them. Verified against the real binary: `vars` is mandatory, var keys are
@@ -176,10 +209,23 @@ matrix:` (llama-swap >= v202; groups' persistent:true was
 # whole payoff for the text/STT path.
 #
 # This template accepts tier-declared media seats: `swappable` joins the primary-card
-# alternatives (pin such seats to device 0 via the seat's gpu_env); `resident` joins as
-# a co-resident conjunction (pin those to device 2). NEVER pin a tier media seat to
-# device 1 - that is the display card. A template without this directive refuses seats
-# by name.
+# alternatives, `resident` joins as a co-resident conjunction. THE RESIDENCY ROLE SAYS
+# HOW A SEAT COMBINES, NOT WHICH CARD IT SITS ON - the card is the seat's own gpu_env.
+# On this box the 2026-08-31 singles rebalance put BOTH media seats on device 2
+# (5060Ti#2): whisper, vl-8b/ocr and the embed/rerank alternates moved there while the
+# cascade + memory-stack residents stayed on device 0, and the CUDA-X baseline
+# re-measured vl-8b at 11,751 MiB on card 2. An earlier version of this comment said
+# "swappable -> device 0, resident -> device 2", which was a two-card-era shorthand the
+# reference deployment does not follow.
+# NEVER pin a tier media seat to device 1 - that is the display card. A template
+# without this directive refuses seats by name.
+#
+# WATCH THE ORDERING WHEN YOU READ A "1" HERE. gpu_env is CUDA_VISIBLE_DEVICES under
+# CUDA_DEVICE_ORDER=PCI_BUS_ID, where 1 is the 5070 Ti. The tier's ComfyUI pool keys
+# (imagegen_pool_*/videogen_pool_*, "cuda:N") use ComfyUI's FASTEST-FIRST order, where
+# cuda:0 is the 5070 Ti and cuda:1/cuda:2 are the pair. The same digit means different
+# cards in the two namespaces, and confusing them is how the media block ended up
+# pointing at the display card twice.
 # offload-seats: swappable resident
 matrix:
   vars:

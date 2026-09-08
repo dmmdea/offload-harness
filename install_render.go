@@ -15,6 +15,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/hwdetect"
 	"github.com/dmmdea/offload-harness/internal/mediaseat"
 	"github.com/dmmdea/offload-harness/internal/servingtmpl"
+	"github.com/dmmdea/offload-harness/internal/vllmseat"
 )
 
 // The serving templates are EMBEDDED so a fetched binary can render a config on a
@@ -80,6 +81,11 @@ type servingProfile struct {
 	MediaSeats []mediaseat.Seat `json:"media_seats"`
 	// GPUEnv is added to every model in the rendered config.
 	GPUEnv []string `json:"gpu_env"`
+	// VLLMSeat is the tier's persistent vLLM agent seat (ADR 0035). It renders only
+	// when the box actually has the hand-built venv and the weights — see
+	// vllmRuntimeFor — and otherwise the tier falls back to the llama.cpp seat the
+	// spec names, with the reason printed.
+	VLLMSeat *vllmseat.Spec `json:"vllm_seat,omitempty"`
 	// moeLiteral is set ONLY by fallbackProfile and bypasses moeFlag: the off-matrix
 	// defaults are literal flag strings (`--cpu-moe -ngl 999`, with 999 — not the 99
 	// a declared "gpu" placement renders), and they must stay byte-identical to what
@@ -292,6 +298,14 @@ func runInstallRender(args []string) error {
 	home := fs.String("home", "", "install root, for media seat paths (__OFFLOAD_HOME__)")
 	fallback := fs.String("fallback-backend", "", "render off-matrix defaults for this backend when --profile is unknown or empty (cuda|cuda-resident|dual-cuda|vulkan|cpu)")
 	ramTier := fs.String("ram-tier", "", "min|low|mid|high — gates the RAM-hungry 26B placements. Empty = do not gate (the caller does not know)")
+	// The vLLM seat's DEPLOYMENT half. A tier is a hardware class, so it cannot know
+	// the account llama-swap runs as, the address the engine binds, or where this box
+	// keeps its venv and HF cache. Absent user/proxy = render the fallback seat.
+	vllmUser := fs.String("vllm-user", "", "account llama-swap runs as; the vLLM seat's polkit rule is scoped to it")
+	vllmProxy := fs.String("vllm-proxy-host", "", "LITERAL address the vLLM engine binds (an IP: the reference box's MagicDNS name resolved to IPv6 only)")
+	vllmVenv := fs.String("vllm-venv", "", "hand-built vLLM virtualenv (default: <home>/vllm-env)")
+	vllmSeatDir := fs.String("vllm-seat-dir", "", "where the rendered unit and wrappers live (default: <home>/seat)")
+	hfHome := fs.String("hf-home", "", "HF cache root; KEEP IT SHORT (LMCache page names embed the model path against NAME_MAX 255). Default: $HF_HOME, else <home>/hf")
 	_ = fs.Parse(args)
 
 	target := *goos
@@ -348,12 +362,16 @@ func runInstallRender(args []string) error {
 	if p.moeLiteral != "" {
 		moe, include26B = p.moeLiteral, true // off-matrix defaults are literal flags
 	}
+	seat, seatRT := vllmSeatFor(p, *home, vllmRuntimeFlags{
+		user: *vllmUser, proxyHost: *vllmProxy, venv: *vllmVenv, seatDir: *vllmSeatDir, hfHome: *hfHome,
+	})
 	rendered, err := servingtmpl.Render(tmpl, servingtmpl.Params{
 		LlamaBin: *llamaBin, ModelsDir: *modelsDir, Listen: *listen,
 		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
 		MoE26B: moe, Threads: n, Include26B: include26B, IncludeQ38: p.IncludeQwen38,
 		IncludeQ354B: p.IncludeQwen354B, IncludeQ359B: p.IncludeQwen359B,
 		Seats: p.MediaSeats, Home: *home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
+		VLLMSeat: seat, VLLMRuntime: seatRT,
 	})
 	if err != nil {
 		return fmt.Errorf("tier %s: %w", id, err)

@@ -18,9 +18,11 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/mediaseat"
+	"github.com/dmmdea/offload-harness/internal/vllmseat"
 )
 
 // Params are the per-machine values a tier's template needs. Everything here comes
@@ -84,6 +86,20 @@ type Params struct {
 	// GPU flags (-ngl, --flash-attn) UNLESS this is "cpu", where the template's own
 	// chat models carry neither and a GPU-less build would only ignore them.
 	Backend string
+
+	// VLLMSeat is the tier's persistent vLLM agent seat (ADR 0035), rendered as a
+	// RESIDENT matrix member whose cmd/cmdStop drive a systemd unit. nil is the common
+	// case and MUST render byte-identically to a build with no vLLM support at all —
+	// TestNoVLLMSeatChangesNothing holds that line.
+	//
+	// The caller decides whether to set it: internal/vllmseat.Detect reports whether
+	// the box actually has the hand-built venv and the model snapshot, and a box
+	// without them renders the tier's llama.cpp fallback seat instead. Rendering a
+	// unit that points at a venv nobody built is worse than the fallback.
+	VLLMSeat *vllmseat.Spec
+	// VLLMRuntime carries the two per-BOX values the tier cannot know: the account
+	// llama-swap runs as, and the literal address the engine binds.
+	VLLMRuntime vllmseat.Runtime
 }
 
 // seatAnchors is the TEMPLATE's own declaration of which residency roles it can
@@ -381,7 +397,7 @@ func (p Params) seatExpand(s string) string {
 // seat in memory forever or make the memory stack evictable.
 func insertSeats(tmpl string, p Params) (string, map[string]string, error) {
 	frag := map[string]string{roleSwappable: "", roleResident: ""}
-	if len(p.Seats) == 0 {
+	if len(p.Seats) == 0 && p.VLLMSeat == nil {
 		return tmpl, frag, nil
 	}
 	anchors, err := parseAnchors(tmpl)
@@ -432,7 +448,83 @@ func insertSeats(tmpl string, p Params) (string, map[string]string, error) {
 		}
 		frag[s.Residency] += matrixJoin(s.Residency) + id
 	}
+	if p.VLLMSeat != nil {
+		var err error
+		if out, frag, err = insertVLLMSeat(out, p, anchors, taken, frag); err != nil {
+			return "", nil, err
+		}
+	}
 	return out, frag, nil
+}
+
+// insertVLLMSeat places the tier's persistent vLLM agent seat as a RESIDENT matrix
+// member. Resident, not swappable, and not a legacy `groups: {persistent: true}`
+// block: the seat IS the agent lane, so nothing may evict it, and residents appear in
+// every set by construction — which is the same guarantee `persistent` was reaching
+// for, in the residency system every template in this repo actually uses. (The
+// reference deployment's llama-swap uses `groups`; `persistent: true` was separately
+// measured FAILING on the Qube, where it silently degraded the memory stack to
+// dense-only, which is why the templates moved to `matrix:`.)
+func insertVLLMSeat(out string, p Params, anchors seatAnchors, taken map[string]bool, frag map[string]string) (string, map[string]string, error) {
+	s := *p.VLLMSeat
+	if !anchors.roles[roleResident] {
+		var roles []string
+		for r := range anchors.roles {
+			roles = append(roles, r)
+		}
+		sort.Strings(roles)
+		return "", nil, fmt.Errorf("this tier declares a vllm_seat (%s), which must be RESIDENT — nothing may evict "+
+			"the agent lane — but the target serving template places only: %s. Rendering it as an alternative would "+
+			"let an ordinary chat request unload the agent seat and pay its 125-250 s reload",
+			s.ID, strings.Join(roles, ", "))
+	}
+	if definesModel(out, s.ID) {
+		return "", nil, fmt.Errorf("vllm seat %q is already defined by the template — a tier may not redeclare a seat "+
+			"the template owns", s.ID)
+	}
+	// llama-swap requires a matrix var key to be alphanumeric and 1-8 characters.
+	id := "vagt"
+	for i := 2; taken[id] && i < 10; i++ {
+		id = fmt.Sprintf("vagt%d", i)
+	}
+	if taken[id] {
+		return "", nil, fmt.Errorf("vllm seat %q: no free matrix var id", s.ID)
+	}
+	taken[id] = true
+	var err error
+	if out, err = appendModel(out, s.Entry(p.VLLMRuntime)); err != nil {
+		return "", nil, err
+	}
+	if out, err = addMatrixVar(out, id, s.ID); err != nil {
+		return "", nil, err
+	}
+	// The vLLM cold load is 125-250 s; llama-swap's default healthCheckTimeout (120)
+	// kills the attach mid-load and cmdStop then stops the engine. Raising it is
+	// GLOBAL by design — llama.cpp seats still fail fast when genuinely broken, they
+	// just get a longer ceiling.
+	out = raiseHealthCheckTimeout(out, s)
+	frag[roleResident] += matrixJoin(roleResident) + id
+	return out, frag, nil
+}
+
+var healthCheckLine = regexp.MustCompile(`(?m)^healthCheckTimeout:[ \t]*(\d+)[ \t]*$`)
+
+// raiseHealthCheckTimeout only ever RAISES: a template that already asks for longer
+// than the seat needs knows something this seat does not.
+func raiseHealthCheckTimeout(out string, s vllmseat.Spec) string {
+	want := s.HealthCheckTimeout
+	if want <= 0 {
+		want = 480
+	}
+	m := healthCheckLine.FindStringSubmatchIndex(out)
+	if m == nil {
+		return "healthCheckTimeout: " + strconv.Itoa(want) + "\n" + out
+	}
+	cur, err := strconv.Atoi(out[m[2]:m[3]])
+	if err != nil || cur >= want {
+		return out
+	}
+	return out[:m[0]] + "healthCheckTimeout: " + strconv.Itoa(want) + out[m[1]:]
 }
 
 // Residency roles, mirrored from internal/mediaseat so the template vocabulary and
