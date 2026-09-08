@@ -90,6 +90,36 @@ The seeded keys (hailo-8l):
 | `hailo_timeout_sec` | one NPU call's bound, default 60 (cold HEF load is ~1–8 s) |
 | `hailo_idle_sec` | passed to the sidecar as its self-exit idle window, default 300 |
 
+### Coral Edge TPU detection (0.114.0)
+
+`hwdetect.DetectCoral` reports `["coral-edgetpu"]` iff `/sys/class/apex/apex_0/status` reads
+`ALIVE` (the gasket/apex driver's status node; Linux only — Windows has no apex driver and
+never matches). Any read error is "no accelerator". `hwdetect.DetectAllAccelerators` is the
+union of the Hailo and Coral probes **in that order**, and the order is load-bearing: it is
+the order the ids land in `config.Accelerators`, and the shared-name rule below gives a
+capability name to the first listed owner. `install detect` uses the union on both platforms;
+`OFFLOAD_ACCELERATORS` overrides both probes.
+
+The seeded keys (coral-edgetpu):
+
+| Key | Meaning |
+|---|---|
+| `accelerators` | `["coral-edgetpu"]` — the gate |
+| `coral_endpoint` | sidecar base, `http://127.0.0.1:18814` — loopback only, distinct from the Hailo's 18813 |
+| `coral_sidecar_cmd` | launcher (`__CORAL_HOME__/coral-http.sh <idle_sec>`); empty = never spawn, defer when down |
+| `coral_timeout_sec` | one TPU call's bound, default 30 (a cold model load on the TPU is ~0.5–2 s) |
+| `coral_idle_sec` | the sidecar's self-exit idle window, default 300 |
+
+`CORAL_HOME` (`install seed --coral-home`, default `<OFFLOAD_HOME>/coral`) holds the sidecar's
+own venv (`venv/`, built from the box's staged cp314 wheels: ai-edge-litert, numpy, pillow),
+its `models/`, and a copy of `accelerators/coral/`. An empty `__HAILO_HOME__`/`__CORAL_HOME__`
+is **refused** at seed time (0.114.0) instead of rendering a launcher at the filesystem root.
+
+`install.sh` merged no accelerator seed at all until 0.114.0 — install.ps1 always had. It now
+passes detect's verdict to `install seed --accelerators` and writes `installed.json`; and
+`fleet-serve` falls back to `config.accelerators` when the manifest lists none, so a hand-built
+node (the Lenovo has no `installed.json`) still advertises its device in `/fleet/health`.
+
 ## Runtime — the sidecar
 
 The sidecar is the Hailo repo's `server/http_server.py`, bound to loopback
@@ -104,7 +134,7 @@ contract:
 - The process **self-exits** after `HAILO_SIDECAR_IDLE_SEC` seconds idle (the harness passes
   the config's `hailo_idle_sec` through on spawn).
 
-`internal/hailoclient` is the harness's lane: `Client` (pure net/http, mirrors `nimclient` —
+`internal/accelclient` (was `hailoclient` until 0.114.0) is the harness's lane: `Client` (pure net/http, mirrors `nimclient` —
 a result is a map the caller shapes) and `Sidecar` (`Ensure` is the single entry point every
 NPU tool calls first: healthy → no-op; down + spawnable → spawn **once**, detached and
 window-hidden, then poll `/health` until the start timeout; down + no `hailo_sidecar_cmd` →
@@ -152,12 +182,52 @@ Ownership when both devices are present:
 | Language about images (VQA, description) | **GPU** (the tier's VLM) | untouched by this feature |
 | OCR | **GPU primary**; `engine:"npu"` explicit | the engines read stylised text differently — a silent switch would change results |
 
+### Coral tools and the shared-name rule (0.114.0)
+
+The Coral owns four capabilities, each on an artifact from `google-coral/test_data`
+(Apache-2.0) that the sidecar verifies by sha256 (`accelerators/coral/models.json`):
+
+| MCP / loop tool | Sidecar tool | Model (default; options) | Result |
+|---|---|---|---|
+| `offload_classify_image` **(new capability)** | `classify` | `domain=imagenet` → EfficientNet-EdgeTPU-S (1000 ImageNet); `birds`/`insects`/`plants` → MobileNet v2 1.0/224 iNat | `{results:[{label,score}],best,model,domain}` top-k (default 5) |
+| `offload_object_detect` *(name shared with Hailo)* | `object_detect` | EfficientDet-Lite0 320 COCO; `size=lite1\|lite2` | `{objects:[{label,class_id,x,y,w,h,score}],count}` in image pixels |
+| `offload_semantic_segment` **(new capability)** | `semantic_segment` | DeepLabV3 MobileNet v2 Pascal (21 classes) | per-pixel class-id PNG at `mask_path`; `{mask_path,classes:[{class_id,label,pixels}],width,height}` |
+| `offload_image_embed` *(name shared with Hailo)* | `embed` | EfficientNet-EdgeTPU-S embedding extractor | `{embedding,dim:1280,space:"efficientnet-edgetpu-s"}` |
+
+Deliberately **not** owned by the Coral: `text_embed` and `zero_shot` (no text tower exists for
+the Edge TPU — the EfficientNet space is not CLIP, and the tool description says so), the
+`face_*`, `pose`, `person_embed`, `depth`, `enhance_low_light` tools, and `segment` (instance
+segmentation; the Coral's DeepLab is semantic, hence the distinct name — the two outputs are
+not interchangeable). The `engine:"npu"` switches on `offload_ocr` / `offload_transcribe` stay
+Hailo-only.
+
+**Shared-name rule ([ADR 0037](../architecture/decisions/0037-a-capability-name-has-one-owner-per-box.md)).**
+`offload_object_detect` and `offload_image_embed` are capability names, and a capability has
+exactly one owner per box: registration walks `config.Accelerators` **in order** and the first
+listed accelerator that owns a name registers it; a later one is skipped for that name and
+logged once at startup. Both surfaces apply it identically — `mcpserver.registerAccelTools`
+and `agent.accelLaneTools` — and it is tested in both orders. Today no box lists both devices,
+so the rule is a pinned invariant, not a live path. The tool description names the device that
+serves it, and `offload_image_embed` reports `space` so a caller never mixes a 1280-d
+EfficientNet vector with a 512-d TinyCLIP one.
+
+**Both surfaces, generalised (0.114.0):** the MCP server keeps one per-device table
+(`internal/mcpserver/acceltools.go`) and one on-demand sidecar per device; the agent loop
+receives every device as an `agent.AccelLane` (`pipeline.NewLoopAccel`, config order) and
+registers the same tables through `ReadOnlyToolsWithLanes`. The pre-Coral single-lane `NPU`
+injection still works for every existing caller and test.
+
 ## Status
 
 `offload_status` gains an `accelerators` block — present only when the box lists one. For
 hailo-8l: the endpoint, whether a sidecar command is configured, the owned tool list, and a
 **live health probe that never spawns the sidecar** (status stays side-effect free). A
 `health_error` between uses is normal — the sidecar self-exited.
+
+For coral-edgetpu the same block carries the endpoint, whether a launcher is configured, the
+four owned tools, and the sidecar's `/health` — `{enabled, device:"/dev/apex_0", status,
+temp_c, loaded:[...], models_missing:[...], runtime:{litert, libedgetpu}}` — read from sysfs
+`status`/`temp` (never written).
 
 ## Limits
 
@@ -183,9 +253,9 @@ On a box with the device (config seeded, sidecar repo checked out):
 
 ## Source map
 
-- [`internal/hailoclient/hailoclient.go`](../../internal/hailoclient/hailoclient.go) — the
+- [`internal/accelclient/hailoclient.go`](../../internal/accelclient/accelclient.go) — the
   loopback client
-- [`internal/hailoclient/sidecar.go`](../../internal/hailoclient/sidecar.go) — `Ensure`,
+- [`internal/accelclient/sidecar.go`](../../internal/accelclient/sidecar.go) — `Ensure`,
   `SpawnCmd`, the detached window-hidden spawn
 - [`internal/mcpserver/mcpserver.go`](../../internal/mcpserver/mcpserver.go) — gated tool
   registration, `handleHailoTool`, the `offload_ocr` engine switch, the status block

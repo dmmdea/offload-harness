@@ -2374,8 +2374,11 @@ func runFleetServe(args []string) error {
 		GpuVendor: prov.Vendor,
 		GpuArch:   prov.Arch,
 		// ADR 0024: the manifest's additive-device list, advertised verbatim so
-		// a delegator can route NPU-owned work here.
-		Accelerators: info.Accelerators,
+		// a delegator can route NPU-owned work here. A hand-built node has no
+		// installed.json (the Lenovo, verified) and would never list its device;
+		// the config's own list is the fallback then (Coral D6). The manifest
+		// wins when it lists anything, so the installer path is unchanged.
+		Accelerators: fleetAccelerators(info.Accelerators, cfg.Accelerators),
 		// The agent lane's tokenless-listener refusal keys on where the bind
 		// actually landed (the resolved listen address), not on the
 		// --listen-trusted-network permission flag — a trusted-network flag on
@@ -3793,4 +3796,14 @@ func runResearch(args []string) error {
 		return fmt.Errorf("research: partial — %d of %d pages ran before: %s", len(results), len(contracts), partialErr)
 	}
 	return delegateExitErr(sum)
+}
+
+// fleetAccelerators picks the accelerator list health advertises: the installer
+// manifest's when it lists any, else the harness config's (Coral D6). Pure, so the
+// test can pin both sources.
+func fleetAccelerators(manifest, cfg []string) []string {
+	if len(manifest) > 0 {
+		return manifest
+	}
+	return cfg
 }

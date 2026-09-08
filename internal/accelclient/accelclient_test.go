@@ -1,4 +1,4 @@
-package hailoclient
+package accelclient
 
 import (
 	"context"

@@ -53,6 +53,9 @@ type Options struct {
 	RAMTier string
 	// HailoHome is the Hailo repo checkout __HAILO_HOME__ expands to.
 	HailoHome string
+	// CoralHome is the Coral sidecar home __CORAL_HOME__ expands to (its venv,
+	// models/ and the accelerators/coral/ scripts live under it; Coral D3).
+	CoralHome string
 	// VLLMSeatActive says whether THIS box renders the tier's vLLM agent seat. The
 	// caller decides it with vllmseat.Spec.Detect — the engine is a hand-built venv
 	// the installer does not create, so a box without it binds the fallback seat. The
@@ -233,8 +236,8 @@ type Accelerator struct {
 }
 
 // ResolveAccelerators merges the seeds of the listed accelerator ids, validates
-// every key against config.Config, and expands __HAILO_HOME__ (plus the usual
-// __OFFLOAD_HOME__/__EXE__). An id with no entry is an authoring error — an
+// every key against config.Config, and expands __HAILO_HOME__ / __CORAL_HOME__
+// (plus the usual __OFFLOAD_HOME__/__EXE__). An id with no entry is an authoring error — an
 // installer that detected a device the table does not describe must say so.
 //
 // This function is the single authority on the rule; install.ps1 carries a
@@ -266,11 +269,22 @@ func ResolveAccelerators(accs map[string]Accelerator, ids []string, opt Options)
 	}
 	home := strings.TrimRight(strings.ReplaceAll(opt.Home, `\`, "/"), "/")
 	hailoHome := strings.TrimRight(strings.ReplaceAll(opt.HailoHome, `\`, "/"), "/")
+	coralHome := strings.TrimRight(strings.ReplaceAll(opt.CoralHome, `\`, "/"), "/")
 	out := map[string]any{}
 	for k, v := range merged {
 		ev := expand(v, home, exe)
 		if s, ok := ev.(string); ok {
-			ev = strings.ReplaceAll(s, "__HAILO_HOME__", hailoHome)
+			// A home token left EMPTY would render "/coral-http.sh" — a launcher
+			// at the filesystem root that nothing ever installed, and a sidecar
+			// that never spawns with no hint why. Refuse the render instead.
+			if strings.Contains(s, "__HAILO_HOME__") && hailoHome == "" {
+				return nil, fmt.Errorf("accelerator seed key %q uses __HAILO_HOME__ but no HailoHome was given", k)
+			}
+			if strings.Contains(s, "__CORAL_HOME__") && coralHome == "" {
+				return nil, fmt.Errorf("accelerator seed key %q uses __CORAL_HOME__ but no CoralHome was given", k)
+			}
+			s = strings.ReplaceAll(s, "__HAILO_HOME__", hailoHome)
+			ev = strings.ReplaceAll(s, "__CORAL_HOME__", coralHome)
 		}
 		out[k] = ev
 	}

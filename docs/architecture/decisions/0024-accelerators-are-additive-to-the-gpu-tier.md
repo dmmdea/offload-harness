@@ -85,6 +85,21 @@ result, not a transport error); 404 `unknown_tool`; 400 `bad_request`.
 - A second accelerator later is a `profiles.json` entry, a detection probe, and its own client
   — no schema change anywhere in the pipeline.
 
+## Amendment 2026-09-08 (0.114.0, the second device)
+
+The Coral Edge TPU joined as `coral-edgetpu` under exactly this rule — one more id in the same
+additive list, no schema change. Two wordings of this ADR are amended by it:
+
+- *"the sidecar implementation lives elsewhere"* becomes **"lives with its device"**: the Hailo
+  repo for Hailo (it pre-dated the tier and holds the HEF pipelines); `accelerators/<id>/` in
+  this repo for a device with no repo of its own (the Coral's runtime is ~400 lines of stdlib +
+  litert with no personal paths, and shipping it here means one binary drop + one directory to
+  deploy).
+- *"kind: npu — the only kind today"* becomes `npu | tpu`, the device class.
+
+Capability ownership across two devices that both own a name is decided by
+[ADR 0037](0037-a-capability-name-has-one-owner-per-box.md).
+
 ## Related code
 
 - [`internal/config/config.go`](../../../internal/config/config.go) — `Accelerators`,
@@ -93,8 +108,8 @@ result, not a transport error); 404 `unknown_tool`; 400 `bad_request`.
   `Verdict.Accelerators`, `DetectAccelerators`, `AcceleratorsFromHailortcli`
 - [`internal/tierseed/tierseed.go`](../../../internal/tierseed/tierseed.go) —
   `ResolveAccelerators`, `__HAILO_HOME__`
-- [`internal/hailoclient/`](../../../internal/hailoclient/hailoclient.go) — client, sidecar
-  spawn/ensure
+- [`internal/accelclient/`](../../../internal/accelclient/accelclient.go) — client (with a
+  `Device` label since 0.114.0; it was `hailoclient` until the Coral arrived), sidecar spawn/ensure
 - [`internal/mcpserver/mcpserver.go`](../../../internal/mcpserver/mcpserver.go) — gated tool
   registration, `offload_ocr` engine switch, status block
 - [`setup/templates/profiles.json`](../../../setup/templates/profiles.json) — the

@@ -18,6 +18,15 @@ import (
 // (hwdetect.DetectAccelerators). A package var so tests can stand in a fake
 // device; the real runner's error (tool absent, driver down) is the normal
 // no-NPU case and DetectAccelerators treats it as "no accelerator".
+// sysfsRead is the Coral probe's reader (hwdetect.DetectCoral): a plain read of
+// the apex status node. On Windows the path does not exist and the read fails,
+// which the probe reads as "no accelerator". A package var, like hailortcliRun,
+// so tests can stand in a fake.
+var sysfsRead = func(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	return string(b), err
+}
+
 var hailortcliRun = func(args ...string) (string, error) {
 	out, err := exec.Command("hailortcli", args...).Output()
 	if err != nil {
@@ -45,7 +54,7 @@ func runInstallDetect(args []string) error {
 
 	facts := hwdetect.Detect()
 	verdict := hwdetect.Classify(facts)
-	verdict.Accelerators = hwdetect.DetectAccelerators(hailortcliRun)
+	verdict.Accelerators = hwdetect.DetectAllAccelerators(hailortcliRun, sysfsRead)
 
 	if *asJSON {
 		b, err := json.MarshalIndent(map[string]any{"facts": facts, "verdict": verdict}, "", "  ")
@@ -85,7 +94,7 @@ func runInstallPlan(args []string) error {
 
 	facts := hwdetect.Detect()
 	verdict := hwdetect.Classify(facts)
-	verdict.Accelerators = hwdetect.DetectAccelerators(hailortcliRun)
+	verdict.Accelerators = hwdetect.DetectAllAccelerators(hailortcliRun, sysfsRead)
 	installHome := *home
 	if installHome == "" {
 		installHome = config.DefaultBase()

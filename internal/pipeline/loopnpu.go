@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/accelclient"
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
-	"github.com/dmmdea/offload-harness/internal/hailoclient"
 )
 
 // One Sidecar per endpoint per PROCESS — the loop-side twin of the MCP
@@ -25,10 +25,10 @@ import (
 // between the MCP server and a concurrent CLI run.
 var (
 	loopNPUMu       sync.Mutex
-	loopNPUSidecars = map[string]*hailoclient.Sidecar{}
+	loopNPUSidecars = map[string]*accelclient.Sidecar{}
 )
 
-func loopNPUSidecar(cfg config.Config) *hailoclient.Sidecar {
+func loopNPUSidecar(cfg config.Config) *accelclient.Sidecar {
 	loopNPUMu.Lock()
 	defer loopNPUMu.Unlock()
 	if sc, ok := loopNPUSidecars[cfg.HailoEndpoint]; ok {
@@ -40,9 +40,9 @@ func loopNPUSidecar(cfg config.Config) *hailoclient.Sidecar {
 	}
 	var spawn func() error
 	if cfg.HailoSidecarCmd != "" {
-		spawn = hailoclient.SpawnCmd(cfg.HailoSidecarCmd, cfg.HailoIdleSec)
+		spawn = accelclient.SpawnCmd(cfg.HailoSidecarCmd, cfg.HailoIdleSec)
 	}
-	sc := hailoclient.NewSidecar(hailoclient.New(cfg.HailoEndpoint, timeout), spawn, 45*time.Second)
+	sc := accelclient.NewSidecar(accelclient.New(cfg.HailoEndpoint, timeout), spawn, 45*time.Second)
 	loopNPUSidecars[cfg.HailoEndpoint] = sc
 	return sc
 }

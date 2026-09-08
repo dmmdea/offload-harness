@@ -131,6 +131,13 @@ RAM_TIER="$(printf '%s' "$DETECT_JSON" | jq -r '.verdict.ram_tier // empty')"
 [ -n "$RAM_TIER" ] || die "detect returned no ram_tier — refusing to install with both RAM gates inert"
 say "ram_tier:  $RAM_TIER  ($(printf '%s' "$DETECT_JSON" | jq -r .facts.ram_gb) GB)"
 
+# ADR 0024: accelerators ride BESIDE the tier. This script merged no accelerator seed
+# at all until the Coral tier (D4) — install.ps1 always had. OFFLOAD_ACCELERATORS
+# overrides the probe, exactly as on Windows.
+ACCELERATORS="$(printf '%s' "$DETECT_JSON" | jq -r '(.verdict.accelerators // []) | join(",")')"
+[ -n "${OFFLOAD_ACCELERATORS:-}" ] && ACCELERATORS="$OFFLOAD_ACCELERATORS"
+[ -n "$ACCELERATORS" ] && say "accel:     $ACCELERATORS"
+
 # ---- 2. where should it live? -----------------------------------------------
 if [ -z "$PREFIX" ]; then
   VOL_JSON="$("$BIN" install volumes --json 2>/dev/null || true)"
@@ -166,7 +173,8 @@ fi
 # media bindings is exactly the drift this path exists to end. A tier that
 # genuinely has none says so on stdout and is not an error.
 if ! SEED="$("$BIN" install seed --profile "$TIER" --home "$PREFIX" --os linux --ram-tier "$RAM_TIER" \
-        --vllm-venv "$VLLM_VENV" --hf-home "$HF_HOME_DIR")"; then
+        --vllm-venv "$VLLM_VENV" --hf-home "$HF_HOME_DIR" --accelerators "$ACCELERATORS" \
+        --hailo-home "${HAILO_HOME:-$PREFIX/hailo}" --coral-home "${CORAL_HOME:-$PREFIX/coral}")"; then
   die "could not resolve the media seed for tier $TIER"
 fi
 case "$SEED" in *"ships no media"*) SEED='{}'; say "media:     tier $TIER ships none — text only until bound by hand" ;; esac
@@ -181,6 +189,15 @@ else
     printf '%s\n' "$BODY" > "$CONFIG"
     say "config:    $CONFIG written (home + $(printf '%s' "$SEED" | jq -r 'keys|length') seeded key(s))"
   fi
+fi
+
+# The install manifest the fleet node reads (installed.json: profile + accelerators).
+# Written once; the node falls back to config.json's list when it is absent (Coral D6).
+MANIFEST="$PREFIX/installed.json"
+if [ ! -f "$MANIFEST" ] && [ "$DRY_RUN" -eq 0 ]; then
+  jq -n --arg profile "$TIER" --arg accel "$ACCELERATORS" \
+    '{profile: $profile, accelerators: ($accel | if . == "" then [] else split(",") end)}' > "$MANIFEST"
+  say "manifest:  $MANIFEST written"
 fi
 
 # ---- 5. the serving config --------------------------------------------------

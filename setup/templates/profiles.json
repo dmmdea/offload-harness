@@ -18,7 +18,7 @@
     "notes": "operator-facing caveats."
   },
   "_accelerator_fields": {
-    "kind": "npu — the only kind today. An accelerator is ADDITIVE to a box's GPU tier (ADR 0024): `profile` stays one string and `accelerators` lists what rides beside it.",
+    "kind": "npu | tpu — the device class (hailo-8l is an npu, coral-edgetpu a tpu). An accelerator is ADDITIVE to a box's GPU tier (ADR 0024): `profile` stays one string and `accelerators` lists what rides beside it.",
     "owns": "the offload_* capabilities this accelerator serves EXCLUSIVELY when present; the GPU tier keeps everything else (VQA/description stay on the VLM; OCR stays GPU-primary with engine:npu as the caller's explicit fast path).",
     "config_seed": "config.json keys merged AFTER the GPU tier's seed (internal/tierseed.ResolveAccelerators). __HAILO_HOME__ expands to the Hailo repo checkout (installer env HAILO_HOME, default <OFFLOAD_HOME>/hailo).",
     "detect": "how detect.ps1 / hwdetect recognise the device — documentation of the rule implemented in code."
@@ -36,6 +36,26 @@
         "hailo_idle_sec": 300
       },
       "notes": "Hailo-8L M.2 (HM21LB1C2KAE), HailoRT 4.24.0 + model zoo v2.19.0 hailo8l HEFs — the current matched pair (5.x is the Hailo-10/15 line). Sidecar = harness-spawned on demand over loopback HTTP, self-exits idle (operator decision 2026-08-22: no scheduler, clean box). Measured on the OptiPlex 7060: ArcFace same-person 0.853 vs different ≤0.106; YOLOv8s on-chip NMS; TinyCLIP-61M 512-d. Windows cannot see the device as an NPU (no MCDM driver) — irrelevant to this route."
+    },
+    "coral-edgetpu": {
+      "kind": "tpu",
+      "owns": [
+        "classify_image",
+        "object_detect",
+        "semantic_segment",
+        "image_embed"
+      ],
+      "detect": "/sys/class/apex/apex_0/status reads ALIVE (gasket/apex driver bound; Linux only — Windows has no apex driver and never matches)",
+      "config_seed": {
+        "accelerators": [
+          "coral-edgetpu"
+        ],
+        "coral_endpoint": "http://127.0.0.1:18814",
+        "coral_sidecar_cmd": "__CORAL_HOME__/coral-http.sh",
+        "coral_timeout_sec": 30,
+        "coral_idle_sec": 300
+      },
+      "notes": "Coral Edge TPU (M.2 A+E on the Lenovo M720q, PCI 03:00.0; one id for the whole family — USB/M.2/Dual all run the same _edgetpu.tflite artifacts). Runtime as measured 2026-09-04 (Ecosystem/Lenovo M720q/2026-09-04_coral-tpu/SETUP.md): feranick gasket-dkms 1.0-18.4 + libedgetpu1-std 16.0TF2.19.1 + ai-edge-litert 2.2.0 (cp314); MobileNet v2 iNat p50 3.16 ms / ~300 inf/s, 70-71 C sustained, no throttle; -max measured indistinguishable (the ~3 ms floor is the Gen2 x1 transfer, not compute) and purged. The tier READS that configuration and never rewrites it: the sidecar (accelerators/coral/server.py, harness-spawned on demand over loopback, self-exits idle) reads sysfs temp/status only. Four capabilities in v1, every model from google-coral/test_data (Apache-2.0) and verified by sha256 in accelerators/coral/models.json: classify_image (EfficientNet-EdgeTPU-S ImageNet; MobileNet v2 iNat birds/insects/plants), object_detect (EfficientDet-Lite0/1/2 COCO), semantic_segment (DeepLabV3 MNv2 Pascal, 21 classes — semantic, NOT the Hailo's instance `segment`), image_embed (EfficientNet-EdgeTPU-S extractor, 1280-d, space efficientnet-edgetpu-s — not CLIP, so no text tower and no zero_shot). Shared-name rule (D5): object_detect and image_embed are capability names one owner per box — the FIRST listed accelerator that owns a name registers it. Deploy on the Lenovo (D8): CORAL_HOME=<OFFLOAD_HOME>/coral with its own venv from the staged cp314 wheels; the fleet unit's ProtectHome=yes hides ~/coral-venv, which stays the operator's bench."
     }
   },
   "profiles": {

@@ -30,6 +30,7 @@ type BuildConfig struct {
 	ReadRoot string      // directory the agent may read (P0 scope); required
 	Offload  OffloadFunc // in-process offload (record=false); nil => no offload tools
 	NPU      NPUFunc     // in-process accelerator lane (pipeline.NewLoopNPU); nil => no NPU tools
+	Accel    []AccelLane // every accelerator lane in config order (pipeline.NewLoopAccel); when set it supersedes NPU
 
 	// SystemPromptOverride, when set, replaces the capability-aware system prompt
 	// (P6 flywheel replay evaluates a CANDIDATE planner prompt). Empty => the normal
@@ -118,7 +119,7 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bad ReadRoot %q: %w", cfg.ReadRoot, err)
 	}
-	tools, err := ReadOnlyTools(absRoot, cfg.Offload, cfg.NPU)
+	tools, err := ReadOnlyToolsWithLanes(absRoot, cfg.Offload, cfg.NPU, cfg.Accel)
 	if err != nil {
 		return nil, fmt.Errorf("building read tools: %w", err)
 	}

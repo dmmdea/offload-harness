@@ -125,7 +125,7 @@ func TestEveryShippedAcceleratorSeedIsValid(t *testing.T) {
 	}
 	for id := range d.Accelerators {
 		for _, goos := range []string{"windows", "linux"} {
-			out, err := ResolveAccelerators(d.Accelerators, []string{id}, Options{Home: "/tmp/x", HailoHome: "/tmp/hailo", GOOS: goos})
+			out, err := ResolveAccelerators(d.Accelerators, []string{id}, Options{Home: "/tmp/x", HailoHome: "/tmp/hailo", CoralHome: "/tmp/coral", GOOS: goos})
 			if err != nil {
 				t.Errorf("accelerator %s does not resolve for %s: %v", id, goos, err)
 				continue
