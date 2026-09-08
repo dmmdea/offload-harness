@@ -383,7 +383,7 @@ UPDATED RIGHT NOW." Executed same-night; every row below is live-verified, not a
 | torch | 2.11.0+cu128 | **2.13.0+cu130** (+tv 0.28.0, +ta 2.11.0) | kitchen CUDA gate open; 8/8 W4A4 shapes pass (cu128 failed 5/8) |
 | ComfyUI | 0.32.0 | **v0.34.0** (frontend 1.49.6 as pinned) | E2E 1920×1088 image render through the harness |
 | CUDA toolkit | 12.8 | **13.3.1** side-by-side (12.8 kept — see SageAttention) | nvcc V13.3.73; driver 616.56 untouched (13.x installer ships no driver) |
-| Go / Node / Python / GIMP / ffmpeg | 1.26.5 / 24.18.0 / 3.14.6 / 3.2 / 7.1 | **1.26.7 / 24.20.0 / 3.14.7 / 3.2.4 / 9.0.1** | installers exit 0; ffmpeg out of the venv at `D:\Dev	oolsfmpeg-9.0.1`, config repointed |
+| Go / Node / Python / GIMP / ffmpeg | 1.26.5 / 24.18.0 / 3.14.6 / 3.2 / 7.1 | **1.26.7 / 24.20.0 / 3.14.7 / 3.2.4 / 9.0.1** | installers exit 0; ffmpeg out of the venv at `D:\Dev	oolsfmpeg-9.0.1`, config repointed |
 | harness | 0.103.0 | **0.105.0** (PRs #187, #188) | deployed Qube + Lenovo, `fleet/health` verified |
 | custom nodes | 4 stale | all at remote HEAD | Manager, VideoHelperSuite, Inpaint-CropAndStitch, RMBG |
 

@@ -7,12 +7,25 @@
 # PLACEMENT LAW - THE THIRD CARD IS NOT A THIRD WORKER. Measured, operator-set:
 #   devices 0 and 2 (the 5060 Ti PAIR): every seat the harness serves by default.
 #     Anything that fits two cards runs HERE.
-#   device 1 (RTX 5070 Ti, ~896 GB/s, DISPLAY ENABLED): stays interactive-first. It
-#     joins only for the explicitly opt-in over-2-card seats at the end of this file,
-#     under a >=4 GiB desktop floor, and NEVER while the operator is at the desk.
+#   device 1 (RTX 5070 Ti, ~896 GB/s, DISPLAY ENABLED): CONTEXT/KV ONLY - operator
+#     decision 2026-09-07, taken against the numbers below. It joins only for the
+#     explicitly opt-in over-2-card seats at the end of this file, under a >=4 GiB
+#     desktop floor, and NEVER while the operator is at the desk. No tier seat and no
+#     media pool is ever PINNED to it.
 #     Measured 2026-09-04: a 3-card engine at util 0.87-0.90 left this card under 1 GB,
 #     Windows dropped to a 720p-class mode and the operator had to reboot (clean event
 #     log, no TDR - starvation, not a crash).
+#     Why not a seat here: the vision seat measures 11,751 MiB (2026-09-05 CUDA-X
+#     baseline), which after the ~0.5-1.5 GB DWM tax leaves ~3.5 GiB - UNDER the floor.
+#
+# THE MEDIA POOL DONATES FROM CARD 2, NOT CARD 1. The tier's config_seed pool keys
+# (imagegen_pool_donor / videogen_pool_donor) name cards as "cuda:N" and are NOT part
+# of this yaml, so nothing here can enforce it - the Go gate
+# TestTripleBlackwellNeverSchedulesOntoTheDisplayCard does. 0.113.32 shipped this
+# tier's ENTIRE media block copied byte-for-byte from blackwell-2x16, where device 1
+# IS the fast card: that put the vision seat and both pools on the display card and
+# named card 2 nowhere, which is also why the 3-card box measured no media difference
+# from the 2-card one. It was a copy nobody adapted, not a hardware result.
 #
 # WHAT THE THIRD CARD ACTUALLY BUYS (operator directive: "bigger context and more
 # capability in general, not necessarily to pool for a bigger model"). Measured:
@@ -122,7 +135,7 @@ models:
       --parallel 4 -ngl 99 --port ${PORT} --host 127.0.0.1
     ttl: 600
 
-# RESIDENCY IS DECLARED WITH `  # ===== OPT-IN OVER-2-CARD SEATS - these are the only entries allowed to touch =====
+  # ===== OPT-IN OVER-2-CARD SEATS - these are the only entries allowed to touch =====
   # ===== the display card (device 1). They are NOT in any matrix set: they load  =====
   # ===== only when called by name/alias, and never while the operator is at the  =====
   # ===== desk. Both were measured on the reference box 2026-08-31 / 2026-09-01.  =====
@@ -163,7 +176,7 @@ models:
     ttl: 300
     name: "Qwen3.8-Flash-Next @ native 262k (q8_0 KV, ncmoe32) - batch long-context twin"
 
-matrix:` (llama-swap >= v202; groups' persistent:true was
+# RESIDENCY IS DECLARED WITH `matrix:` (llama-swap >= v202; groups' persistent:true was
 # measured FAILING on this exact box — the memory stack silently degraded mem0 to
 # dense-only). Residents appear in every set, so no request can be satisfied by
 # evicting them. Verified against the real binary: `vars` is mandatory, var keys are

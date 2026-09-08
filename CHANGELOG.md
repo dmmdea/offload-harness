@@ -1675,7 +1675,7 @@ donor enum returns `["cpu","cuda:0","cuda:1"]` and the krea2 pooled graph valida
     answer of 16+ characters, and **the lane caught that itself**: run live against this very
     diff, the seat reported that `"I could not read the diff"` (25 characters, a seat reporting
     FAILURE) would have published an empty findings list instead of deferring, and that a bare
-    `none` match would read `"I tried but none of the tools worked"` as clean. Both verified
+    `\bnone\b` match would read `"I tried but none of the tools worked"` as clean. Both verified
     by running the function on those exact strings, both now pinned as not-clean.
   - **Three counts, published on the same terms**, because a short findings list is the shape a
     reader most easily misreads and each has a different meaning: `dropped_ungrounded` (named a
@@ -2951,8 +2951,8 @@ the literal `--reasoning off` in the rendered block (`${common}` is a llama-swap
 macro the renderer never expands), so only the second check catches that edit.
 
 ### Fixed — the ampere-8 strip assertion could not catch an unsubstituted token
-`setup/render.tests.ps1` gated on `-notmatch 'q354'`, but in `__Q354B_ALT__` the
-character after `354` is `B`, a word character, so `q354` finds no boundary and a
+`setup/render.tests.ps1` gated on `-notmatch '\bq354\b'`, but in `__Q354B_ALT__` the
+character after `354` is `B`, a word character, so `\bq354\b` finds no boundary and a
 leftover token would pass. ampere-6 already had a `__Q354B_` check; ampere-8 now does too.
 
 ### Added — a Go regression test for the `include_qwen35_4b` refusal
