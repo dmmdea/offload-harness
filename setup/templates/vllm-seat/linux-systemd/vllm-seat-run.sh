@@ -4,7 +4,10 @@
 # - --model is the SHORT HF snapshot path (LMCache fs_native page names embed it; the long path exceeded NAME_MAX) — never the repo id.
 # - --gpu-memory-utilization is sized so the box's llama-swap small seats fit beside the engine; read the pool from the
 #   "GPU KV cache size" banner at that utilization before choosing --max-model-len (the pool must hold one max-length sequence).
-# - text-only (--limit-mm-per-prompt all 0) on a multimodal checkpoint drops the weights + the encoder-cache reservation.
+# - text-only (--limit-mm-per-prompt ALL modalities 0) on a multimodal checkpoint drops the weights + the encoder-cache
+#   reservation. LIST EVERY MODALITY THE CHECKPOINT HAS, not just image/video: this flag previously omitted audio, and
+#   Gemma-4 (audio-multimodal) then built its audio tower anyway and died at init with
+#   `AttributeError: 'Gemma4UnifiedAudioFeatureExtractor' object has no attribute 'fft_length'` (measured 2026-09-08).
 # - the three tool flags are what the harness's agent loop needs (it sends tool_choice=auto); the parsers are per model family.
 # - VLLM_USE_FLASHINFER_SAMPLER=0: the FlashInfer sampler spun at 100 % on Ampere in the dummy sampler run.
 # Change the line here, then `sudo systemctl restart <unit>` (llama-swap's entry re-attaches on its next request).
@@ -26,5 +29,5 @@ exec vllm serve __MODEL_PATH__ \
   --host "$IP" --port __PORT__ --served-model-name __SERVED_NAMES__ \
   --max-model-len __MAX_MODEL_LEN__ --gpu-memory-utilization __GPU_UTIL__ --max-num-seqs __MAX_NUM_SEQS__ --max-num-batched-tokens __MAX_BATCHED__ \
   --enable-prefix-caching --mamba-cache-mode align --kv-cache-dtype __KV_DTYPE__ \
-  --limit-mm-per-prompt '{"image":0,"video":0}' \
+  --limit-mm-per-prompt '{"image":0,"video":0,"audio":0}' \
   --enable-auto-tool-choice --tool-call-parser __TOOL_PARSER__ --reasoning-parser __REASONING_PARSER__

@@ -96,8 +96,17 @@ type Spec struct {
 	MaxNumSeqs int `json:"max_num_seqs"`
 	// MaxBatchedTokens is --max-num-batched-tokens.
 	MaxBatchedTokens int `json:"max_num_batched_tokens"`
-	// KVCacheDtype: fp8_e5m2 is free on Ampere and is what brings 262k into reach;
-	// it needs the LMCache PR #4253 overlay before an L2 tier is configured.
+	// KVCacheDtype halves the KV footprint and is what brings a long window into
+	// reach. It needs the LMCache PR #4253 overlay before an L2 tier is configured.
+	//
+	// "fp8 is free on Ampere" IS FALSE AS A BLANKET CLAIM — it is BACKEND-dependent.
+	// Measured on the reference A2 (SM86) 2026-09-08: `FP8 KV cache is not supported
+	// by the Triton attention backend on NVIDIA A2 (compute capability 8.6); native
+	// FP8 (fp8e4nv) requires SM89+`. The tier's Qwen3.5 seat gets fp8 because it runs
+	// the FlashAttention backend; a Gemma-4 seat on the SAME card falls back to Triton
+	// and refuses to start. So this field belongs to the SEAT, not the tier: a tier
+	// that hard-codes fp8 breaks every model whose backend lacks it. Leave it empty
+	// (vLLM's `auto`) unless the exact model+backend pair has been measured with it.
 	KVCacheDtype string `json:"kv_cache_dtype,omitempty"`
 	// ToolCallParser / ReasoningParser are per model family and are NOT optional for
 	// an agent seat: without --enable-auto-tool-choice and a parser every contract
