@@ -5,11 +5,18 @@
 // Why it exists as a schema field rather than a runbook. ADR 0035 originally recorded
 // "the tier SEED is unchanged: the seat is a hand-installed venv and unit, not
 // something the installer renders", and the consequence was exactly the drift this
-// repo keeps re-learning: the reference box moved its agent lane to the vLLM seat and
-// measured 8/8 digests at a 45 s median against the llama.cpp 4B seat's 159 s at 4x
-// the window, the operator accepted it as the tier's answer — and setup/templates/
-// profiles.json went on seeding `agent_model: qwen3.5-4b-agent`, so every fresh
-// ampere-16 install got the arm that LOST. Operator ruling 2026-09-07: "install
+// repo keeps re-learning: the reference box moved its agent lane to the vLLM seat,
+// the operator accepted it as the tier's answer — and setup/templates/profiles.json
+// went on seeding `agent_model: qwen3.5-4b-agent`, so every fresh ampere-16 install
+// got the arm that LOST.
+//
+// LOST ON QUALITY, not on speed. The 2026-09-04 bake-off scored only shape
+// (`len(findings)>=3 and len(summary)>40`), so its 8/8 meant "emitted well-formed
+// output", not "equally good". A blind re-evaluation of the retained answers against
+// the ground-truth ADRs — 3 independent lenses, 24 judgements, no model name, engine
+// or timing visible — put the vLLM seat first on mean overall (7.58 vs 6.79 for the
+// same weights on llama.cpp and 6.38 for the 12B), on specificity, on coverage, and
+// with zero filler findings. Wall time is not why this seat is here. Operator ruling 2026-09-07: "install
 // defaults follow the measurement — the fix is to render the seat, not to ship a
 // smaller number than the hardware was measured at."
 //
