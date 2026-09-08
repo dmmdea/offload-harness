@@ -1,0 +1,200 @@
+# llama-swap.win-triple-blackwell.yaml - offload-harness family on THREE homogeneous
+# Blackwell (sm_120) 16GB cards = 48.9 GB, Windows. Reference box IS the workstation:
+# RTX 5060 Ti @17:00.0 (device 0) + RTX 5070 Ti @65:00.0 (device 1, DISPLAY) +
+# RTX 5060 Ti @B5:00.0 (device 2), X299 / i9-10980XE, quad-channel DDR4-3400 128GB.
+# Shipped 0.113.32. Evidence: Benchmarks and Optimizations/2026-08-31-48gb-gates-NOTES.md.
+#
+# PLACEMENT LAW - THE THIRD CARD IS NOT A THIRD WORKER. Measured, operator-set:
+#   devices 0 and 2 (the 5060 Ti PAIR): every seat the harness serves by default.
+#     Anything that fits two cards runs HERE.
+#   device 1 (RTX 5070 Ti, ~896 GB/s, DISPLAY ENABLED): stays interactive-first. It
+#     joins only for the explicitly opt-in over-2-card seats at the end of this file,
+#     under a >=4 GiB desktop floor, and NEVER while the operator is at the desk.
+#     Measured 2026-09-04: a 3-card engine at util 0.87-0.90 left this card under 1 GB,
+#     Windows dropped to a 720p-class mode and the operator had to reboot (clean event
+#     log, no TDR - starvation, not a crash).
+#
+# WHAT THE THIRD CARD ACTUALLY BUYS (operator directive: "bigger context and more
+# capability in general, not necessarily to pool for a bigger model"). Measured:
+# llama.cpp's 3-way aggregate ceiling is 134.4 tok/s at c32 vs the pair's 110-120
+# (+10-20%), and pipeline-parallel vLLM is ~8% SLOWER single-stream than tensor-parallel
+# on two cards because stages serialize. The real win is KV pool and headroom:
+# 137,898 tokens across three cards vs 78,506 across two.
+#
+# TOPOLOGY RULE - PIN, DON'T SPLIT, for anything that fits one card: splitting a
+# fits-on-one-card model costs 20-33% tg (sequential per-token, harmonic-mean bandwidth).
+# Layer-split is reserved for the >16GB opt-in seats at the end.
+#
+# DEVICE IDENTITY - PIN BY UUID IF THE CARDS MOVE. Indices follow CUDA_DEVICE_ORDER=
+# PCI_BUS_ID (tier gpu_env). TWO OF THE THREE CARDS REPORT THE IDENTICAL BOARD NAME
+# "RTX 5060 Ti", and CUDA/ComfyUI ordering does not match nvidia-smi PCI order, so a
+# name-based check cannot tell them apart. VERIFY with nvidia-smi after any slot change
+# or BIOS reset - this board reorders enumeration on power loss. CUDA_VISIBLE_DEVICES
+# accepts GPU UUIDs; substitute them if the cards moved. A silent flip puts a heavy seat
+# on the display card and starves the desktop.
+#
+# CUDA GRAPHS ARE ON for the 26B seats. The GGML_CUDA_DISABLE_GRAPHS=1 that used to sit
+# here was cargo - it predated every retained yaml backup with no recorded reason.
+# Measured 2026-09-05 (b10720, 3 fresh-serve reps, temp 0, exact-string gate): gen
+# 41.4 -> 58.0 t/s (gemma-4-26b) and 39.0 -> 58.8 t/s (gemma-4-26b-agent), prefill
+# unchanged, output identical, GBNF grammar path fine. GGML_CUDA_GRAPH_OPT stays OFF:
+# it changes exact output on e4b/e2b/vl-8b/26b and crashes the MTP 12b.
+#
+# Serving invariants (grammar reliability - do NOT change): --jinja, --flash-attn on,
+# no MTP flags on models without an MTP graph, reasoning off - the reasoning-off
+# invariant binds the CASCADE seats; the *-agent and qwen3.8 entries are explicitly
+# reasoning/thinking seats. Do NOT add --swa-full here. q8_0 V requires flash-attn on.
+# q4_0 KV is BANNED (92% prefill degradation, measured).
+healthCheckTimeout: 300
+logLevel: info
+
+macros:
+  common: >-
+    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
+    --jinja --reasoning off --port ${PORT} --host 127.0.0.1
+
+models:
+  offload-e4b:
+    aliases: [gemma4-e4b]
+    env: [CUDA_VISIBLE_DEVICES=0]
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf
+      -ngl 99 --parallel 1 ${common}
+    ttl: 300
+  gemma4-e2b:
+    env: [CUDA_VISIBLE_DEVICES=0]
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
+      -ngl 99 ${common}
+    ttl: 300
+  gemma4-26b-a4b:
+    env: [CUDA_VISIBLE_DEVICES=0]
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
+      __MOE_26B__ --parallel 1 ${common}
+    ttl: 300
+  # AGENT seat: the flagship's rollback seat, matching the live reference box. Same
+  # 26B weights and geometry as the cascade seat above; the ONLY difference is
+  # reasoning ON (thinking agent loop). Flags written explicitly rather than via
+  # ${common} because the macro pins reasoning off. Exists whenever the 26B exists:
+  # the renderer strips it together with the 26B when a tier drops it.
+  gemma-4-26b-agent:
+    aliases: [26b-agent, gemma4-26b-agent]
+    env: [CUDA_VISIBLE_DEVICES=0]
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
+      __MOE_26B__ --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --jinja --reasoning on
+      --port ${PORT} --host 127.0.0.1
+    ttl: 300
+  # CODER + AGENT seat: Seat Frontier Leg 1 winner (2026-08-14) — Qwen3.8-27B
+  # UD-Q4_K_XL, pooled across BOTH cards (-sm layer: 16.7GB does not fit one 16GB
+  # card next to KV). Thinking model: it must NOT take ${common} (the macro pins
+  # --reasoning off); sampling is the Unsloth thinking-mode recipe. Rendered only
+  # when the tier sets include_qwen38 (the Q38 token pair mirrors the M26 one).
+  qwen3.8-27b:
+    aliases: [qwen38, local-coder, coder, agent-loop]
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.8-27B-UD-Q4_K_XL.gguf
+      --mmproj __MODELS__/mmproj-Qwen3.8-27B-F16.gguf -ngl 999 -sm layer --parallel 1
+      --jinja --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
+      --ctx-size __CTX__ --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
+      --port ${PORT} --host 127.0.0.1
+    ttl: 300
+  embeddinggemma:
+    env: [CUDA_VISIBLE_DEVICES=2]
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/embeddinggemma-300m-Q8_0.gguf
+      --embedding --pooling mean --ctx-size 2048 --parallel 4 --port ${PORT} --host 127.0.0.1
+    ttl: 600
+  bge-reranker-v2-m3:
+    env: [CUDA_VISIBLE_DEVICES=2]
+    # -ngl 99 on THIS tier (operator decision 2026-08-13): a 16GB-class utility card
+    # fits the ~360MB Q4 weights trivially, and CPU serving cost 2.4-4.6s per 20-doc
+    # rerank vs ~143ms typical / ~1.2s worst-case on GPU (measured on the reference
+    # dual-Blackwell box). The old "-ngl 0 buys back VRAM for ~zero latency cost" note
+    # was an 8GB-era carryover — it remains CORRECT for small-VRAM tiers: the linux
+    # (Lenovo-class) template keeps -ngl 0 deliberately. Raw-logit scores are
+    # device-independent, so admission-gate threshold calibration is unaffected.
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/bge-reranker-v2-m3-Q4_K_M.gguf
+      --reranking --pooling rank --ctx-size 8192 --batch-size 4096 --ubatch-size 4096
+      --parallel 4 -ngl 99 --port ${PORT} --host 127.0.0.1
+    ttl: 600
+
+# RESIDENCY IS DECLARED WITH `  # ===== OPT-IN OVER-2-CARD SEATS - these are the only entries allowed to touch =====
+  # ===== the display card (device 1). They are NOT in any matrix set: they load  =====
+  # ===== only when called by name/alias, and never while the operator is at the  =====
+  # ===== desk. Both were measured on the reference box 2026-08-31 / 2026-09-01.  =====
+  #
+  # qwen3.8-flash-next - the 125B big seat. MEASURED: ncmoe28 with --tensor-split
+  # 28,10,10 and q8_0 KV at 131k = 12.5-12.9 tok/s, +47% over the best 2-card arm, and
+  # 15/16 on the seed-48 decision set = EXACT PARITY with the 27B incumbent's quality.
+  # It exists for 262k-native context and 125B breadth, NOT for speed (5.2x the
+  # incumbent's wall). Experts + PLE/n-gram live in host RAM: ~70 GB held while loaded,
+  # so check free RAM before invoking. Roomier fallback if fragile: --n-cpu-moe 32
+  # --tensor-split 32,8,8 (11.8 tok/s, ~5 GB/card free).
+  qwen3.8-flash-next:
+    env: [CUDA_DEVICE_ORDER=PCI_BUS_ID]
+    cmd: >-
+      ${server} -m ${mdir}/qwen3.8-flash-next/UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf
+      -ngl 999 -sm layer --tensor-split 28,10,10 --n-cpu-moe 28
+      --override-tensor per_layer_token_embd=CPU,ple_ngram_embd=CPU
+      --parallel 1 --jinja --flash-attn on -fit off --cache-type-k q8_0 --cache-type-v q8_0
+      -c 131072 --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --port ${PORT} --host 127.0.0.1
+    aliases: ["flash-next", "fn-125b", "agent-big"]
+    ttl: 300
+    name: "Qwen3.8-Flash-Next UD-IQ4_XS - agent BIG opt-in seat (131k, 3-card + RAM experts)"
+
+  # qwen3.8-flash-next-262k - the native-262k twin. Same weights, zero extra disk.
+  # MEASURED: ncmoe32 (32,8,8) loads 13.0/10.5/12.5 GB (~3 GB/card free), needle exact at
+  # 11.4k depth, pp 69 / tg 11.3 tok/s. HONEST LIMIT: prefill at 69 tok/s makes a full
+  # 200k prompt ~48 minutes, so this is BATCH/async work only, and behaviour beyond 200k
+  # depth is UNPROBED (upstream #27871 / #27901 were reported near 262k on other hardware).
+  qwen3.8-flash-next-262k:
+    env: [CUDA_DEVICE_ORDER=PCI_BUS_ID]
+    cmd: >-
+      ${server} -m ${mdir}/qwen3.8-flash-next/UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf
+      -ngl 999 -sm layer --tensor-split 32,8,8 --n-cpu-moe 32
+      --override-tensor per_layer_token_embd=CPU,ple_ngram_embd=CPU
+      --parallel 1 --jinja --flash-attn on -fit off --cache-type-k q8_0 --cache-type-v q8_0
+      -c 262144 --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --port ${PORT} --host 127.0.0.1
+    aliases: ["fn-262k", "flash-next-262k"]
+    ttl: 300
+    name: "Qwen3.8-Flash-Next @ native 262k (q8_0 KV, ncmoe32) - batch long-context twin"
+
+matrix:` (llama-swap >= v202; groups' persistent:true was
+# measured FAILING on this exact box — the memory stack silently degraded mem0 to
+# dense-only). Residents appear in every set, so no request can be satisfied by
+# evicting them. Verified against the real binary: `vars` is mandatory, var keys are
+# alphanumeric 1-8 chars, set expressions reference ONLY var ids.
+#
+# THE TWO-CARD COMBINATION RULE this file exists for: the fast card's heavy seats are
+# mutually exclusive ALTERNATIVES (one at a time on the 16GB card), while a
+# utility-card seat joins as a CONJUNCTION — it may run CONCURRENTLY with any fast-card
+# model, because it lives on the other card. That concurrency is the second card's
+# whole payoff for the text/STT path.
+#
+# This template accepts tier-declared media seats: `swappable` joins the primary-card
+# alternatives (pin such seats to device 0 via the seat's gpu_env); `resident` joins as
+# a co-resident conjunction (pin those to device 2). NEVER pin a tier media seat to
+# device 1 - that is the display card. A template without this directive refuses seats
+# by name.
+# offload-seats: swappable resident
+matrix:
+  vars:
+    emb: embeddinggemma
+    rer: bge-reranker-v2-m3
+    e4b: offload-e4b
+    e2b: gemma4-e2b
+    m26: gemma4-26b-a4b
+    a26: gemma-4-26b-agent
+    q38: qwen3.8-27b
+  # The memory stack is the most expensive thing on this box to lose and the cheapest
+  # to keep: maximally expensive to stop, so the solver stops something else first.
+  evict_costs:
+    emb: 1000
+    rer: 1000
+  sets:
+    residents: "emb & rer"
+    text: "+residents & (e4b | e2b__M26_ALT____Q38_ALT____SEATS_SWAPPABLE__)__SEATS_RESIDENT__"
