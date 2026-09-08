@@ -187,17 +187,11 @@ type jobWire struct {
 	Error string          `json:"error"`
 }
 
-// resultWire is the pipeline's core.Result as the node serializes it.
-type resultWire struct {
-	OK       bool            `json:"ok"`
-	Deferred bool            `json:"deferred"`
-	Reason   string          `json:"reason"`
-	Result   json.RawMessage `json:"result"`
-}
-
-// wait polls the job until it is done or errored. A job-level error and a
-// deferred result both come back as a deferred dict — they are answers from
-// the node, not transport doubt.
+// wait polls the job until it is done or errored. The node stores a
+// successful run's core.Result.Data — the tool's dict — as the job data, and
+// turns a pipeline defer into job state "error" with the defer reason; both
+// are answers from the node, so an error state comes back as a deferred dict,
+// never as a transport error.
 func wait(ctx context.Context, cfg config.Config, base, jobID string) (map[string]any, error) {
 	for {
 		pctx, cancel := context.WithTimeout(ctx, dispatchTimeout)
@@ -211,24 +205,13 @@ func wait(ctx context.Context, cfg config.Config, base, jobID string) (map[strin
 		}
 		switch j.State {
 		case "done":
-			var r resultWire
-			if len(j.Data) > 0 && json.Unmarshal(j.Data, &r) == nil && (r.Deferred || len(r.Result) > 0 || !r.OK) {
-				if r.Deferred || !r.OK {
-					return map[string]any{"deferred": true, "reason": r.Reason}, nil
-				}
-				var out map[string]any
-				if json.Unmarshal(r.Result, &out) == nil && out != nil {
-					return out, nil
-				}
-				return map[string]any{"result": json.RawMessage(r.Result)}, nil
-			}
 			var out map[string]any
-			if json.Unmarshal(j.Data, &out) == nil && out != nil {
+			if len(j.Data) > 0 && json.Unmarshal(j.Data, &out) == nil && out != nil {
 				return out, nil
 			}
 			return map[string]any{"deferred": true, "reason": "job done with an unreadable result: " + truncate(j.Data)}, nil
 		case "error":
-			return map[string]any{"deferred": true, "reason": "job failed on the node: " + j.Error}, nil
+			return map[string]any{"deferred": true, "reason": j.Error}, nil
 		}
 		select {
 		case <-ctx.Done():

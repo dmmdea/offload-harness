@@ -22,6 +22,7 @@ type fakeNode struct {
 	node     string
 	accels   []string
 	result   string
+	errText  string
 	mu       sync.Mutex
 	dispatch map[string]any
 	auth     string
@@ -48,6 +49,10 @@ func newFakeNode(t *testing.T, node string, accels []string, result string) *fak
 		json.NewEncoder(w).Encode(map[string]any{"job_id": env["job_id"], "state": "accepted"})
 	})
 	mux.HandleFunc("GET /fleet/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if f.errText != "" {
+			json.NewEncoder(w).Encode(map[string]any{"job_id": r.PathValue("id"), "state": "error", "error": f.errText})
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]any{"job_id": r.PathValue("id"), "state": "done", "data": json.RawMessage(result)})
 	})
 	f.srv = httptest.NewServer(mux)
@@ -57,7 +62,7 @@ func newFakeNode(t *testing.T, node string, accels []string, result string) *fak
 
 func TestCallShipsTheImageToTheNodeThatHasTheDevice(t *testing.T) {
 	without := newFakeNode(t, "aorus", nil, `{}`)
-	with := newFakeNode(t, "lenovo", []string{"coral-edgetpu"}, `{"ok":true,"result":{"best":{"label":"Ara macao","score":0.75},"model":"m.tflite"},"meta":{}}`)
+	with := newFakeNode(t, "lenovo", []string{"coral-edgetpu"}, `{"best":{"label":"Ara macao","score":0.75},"model":"m.tflite"}`)
 	img := filepath.Join(t.TempDir(), "parrot.jpg")
 	if err := os.WriteFile(img, []byte("not really a jpeg"), 0o644); err != nil {
 		t.Fatal(err)
@@ -142,7 +147,8 @@ func TestCallRefusesAMissingOrOversizedImageBeforeDispatch(t *testing.T) {
 }
 
 func TestCallPassesTheNodesDeferThrough(t *testing.T) {
-	with := newFakeNode(t, "lenovo", []string{"coral-edgetpu"}, `{"ok":false,"deferred":true,"reason":"coral-edgetpu: sidecar did not become healthy within 45s","meta":{}}`)
+	with := newFakeNode(t, "lenovo", []string{"coral-edgetpu"}, ``)
+	with.errText = "coral-edgetpu: sidecar did not become healthy within 45s"
 	cfg := config.Default()
 	cfg.DelegateRemotes = []string{with.srv.URL}
 	out, err := Call(context.Background(), cfg, "coral-edgetpu", "classify", map[string]any{"domain": "birds"})
