@@ -206,3 +206,78 @@ func TestEveryDefaultTripleBlackwellSeatNamesItsCards(t *testing.T) {
 	}
 	t.Logf("checked %d default seats", checked)
 }
+
+// The tier's vLLM AGENT seat is now a schedulable thing too, and the gate above only
+// ever looked at media seats. A seat spanning the display card is the same 2026-09-04
+// failure by another route: at util 0.90 a three-card engine left the 5070 Ti under
+// 1 GB, Windows fell to a 720p-class mode, and the operator had to reboot (clean event
+// log, no TDR — starvation, not a crash).
+//
+// The seat's device list is CUDA_VISIBLE_DEVICES under CUDA_DEVICE_ORDER=PCI_BUS_ID,
+// which is the ordering where the display card is index 1. Two orderings are in play on
+// this box and the display card has a different index in each, so the ordering is named
+// here rather than left to the reader.
+func TestTripleBlackwellVLLMSeatNeverSpansTheDisplayCard(t *testing.T) {
+	const tier = "blackwell-3x16"
+	const displayByPCI = "1"
+
+	raw, err := os.ReadFile(filepath.Join("setup", "templates", "profiles.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Profiles map[string]struct {
+			VLLMSeat *struct {
+				ID             string `json:"id"`
+				Device         string `json:"device"`
+				TensorParallel int    `json:"tensor_parallel"`
+				TTLSeconds     int    `json:"ttl_seconds"`
+				CacheServer    *struct {
+					Store   string `json:"store"`
+					Address string `json:"address"`
+				} `json:"cache_server"`
+			} `json:"vllm_seat"`
+		} `json:"profiles"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("profiles.json is not valid JSON: %v", err)
+	}
+	p, ok := doc.Profiles[tier]
+	if !ok {
+		t.Fatalf("tier %q not found — this gate went blind", tier)
+	}
+	if p.VLLMSeat == nil {
+		t.Fatalf("tier %q declares no vllm_seat — the tier whose reference box IS the "+
+			"3-card workstation must seed the seat that box actually serves, or a fresh "+
+			"install falls back to the llama.cpp agent seat while the box runs vLLM", tier)
+	}
+	s := p.VLLMSeat
+
+	cards := strings.Split(s.Device, ",")
+	for _, c := range cards {
+		if strings.TrimSpace(c) == displayByPCI {
+			t.Errorf("vllm_seat %s spans device %s, the 5070 Ti DISPLAY card (PCI order): "+
+				"a three-card engine starved the desktop to a 720p-class mode on 2026-09-04 "+
+				"and forced a reboot. The 5070 Ti is context/KV only; no tier seat is pinned to it",
+				s.ID, displayByPCI)
+		}
+	}
+	if len(cards) != s.TensorParallel {
+		t.Errorf("vllm_seat %s names %d card(s) but tensor_parallel is %d — they are two "+
+			"statements of one fact and must agree", s.ID, len(cards), s.TensorParallel)
+	}
+	// The seat holds both cards while up. ttl 0 is "never unload" and 1800 was the
+	// standing live value; both are withdrawn — "no model gets to be loaded for more
+	// than 5 minutes if it goes unused, as the rest of the harness" (operator).
+	if s.TTLSeconds != 300 {
+		t.Errorf("vllm_seat %s ttl_seconds = %d, want the house 300: the seat holds two "+
+			"cards while loaded, and an idle seat that keeps them is a card spent on nothing",
+			s.ID, s.TTLSeconds)
+	}
+	// The flagship tier is the one that HAS a cache server; shipping it without one
+	// throws away the measured 44x restore the second device exists to provide.
+	if s.CacheServer == nil || s.CacheServer.Address == "" {
+		t.Errorf("vllm_seat %s declares no cache_server — the 3-card tier is the tier the "+
+			"cache server was measured on (23.7k tokens back in 0.56-0.70 s over fs_native)", s.ID)
+	}
+}

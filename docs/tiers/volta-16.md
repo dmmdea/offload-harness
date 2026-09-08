@@ -14,6 +14,11 @@
 | agent_ctx_tokens | 32768 | the agent's `-ctx-tokens` compaction budget |
 | 26B-A4B | `gpu` | whether the 26B MoE is served, and where its experts live |
 
+## Agent seat
+
+This tier declares no persistent vLLM agent seat: the agent lane runs on the
+llama.cpp seat named by `agent_model` above, in the tier's own llama-swap config.
+
 ## Media
 
 This tier serves these media **seats** — models in its own llama-swap config, rendered
