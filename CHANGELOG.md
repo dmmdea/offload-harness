@@ -6,6 +6,38 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.42] - 2026-09-08 - a vLLM seat could not be pinned, so two vLLM arms were never comparable
+
+`ProbeSeatPin` only ever spoke llama.cpp: it GETs `/props`, which vLLM does not serve and
+answers 404. Every vLLM seat therefore recorded `seat_config_sha256` / `seat_config_basis` as
+**ABSENT**, and an unpinned row cannot enter a paired experiment - so the harness could not
+tell two vLLM arms apart at all.
+
+That is not theoretical. The 2026-09-08 A2 seat-quality comparison published a 4B-beats-9B
+result whose two vLLM arms differed in `--gpu-memory-utilization` (0.65 vs 0.95) and ran on
+harness builds nine releases apart, with the checkpoint, the engine build and the served
+window all unrecorded on both sides. The conclusion rested on arms nothing in the record
+could distinguish.
+
+A 404 from `/props` now falls through to the shape vLLM DOES serve, verified live against
+vLLM 0.28.0: `GET /version` for the engine build and `GET /v1/models` for the resolved
+checkpoint path (`root`) and the served window (`max_model_len`). The vLLM basis is a
+SEPARATE closed struct led by an `engine` field, so a vLLM pin can never collide with a
+llama.cpp one, and the same refusal discipline applies - a missing discriminator yields no
+pin rather than one hashed over empty strings.
+
+**Stated limit, because a pin is only worth its honesty:** vLLM publishes no sampler defaults
+and no `--tool-call-parser` / `--reasoning-parser` / `--gpu-memory-utilization` values on any
+endpoint. Two seats differing only in those pin identically, and the basis line leads with
+`vllm ` so an analyst reads the coverage class before trusting a match.
+
+Also: `fleetview` labelled `agent_seat_resident` as **resident/cold**, which is simply not what
+the flag means - it is a probe of llama-swap's `/v1/models` ROSTER, so a seat idled out by
+`ttl:300` still reads true. The wording cost a session an hour chasing an imagined cold-seat
+placement deadlock while the real fault was a node whose llama-swap config had been truncated
+to zero models. It now reads **served / not served**, with a title explaining both states, and
+a false value is styled as the error it is.
+
 ## [0.113.41] - 2026-09-08 - `go test ./...` failed on a clean checkout of main
 
 The repo's own documented gate - "go test ./... exit 0, 76 packages" - returned **FAIL** on a

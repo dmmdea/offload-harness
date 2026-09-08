@@ -176,3 +176,168 @@ func TestProbeSeatPinRefusals(t *testing.T) {
 		t.Error("non-JSON body produced a pin")
 	}
 }
+
+// vllmFixture mirrors the live payloads captured from a vLLM 0.28.0 seat on
+// the A2 (2026-09-08): /props 404s, /version and /v1/models answer 200 and
+// carry the engine build, the resolved checkpoint path and the served window.
+func vllmFixture(version, root, served string, maxLen int) (map[string]any, map[string]any) {
+	ver := map[string]any{"version": version}
+	models := map[string]any{
+		"object": "list",
+		"data": []any{map[string]any{
+			"id": served, "object": "model", "owned_by": "vllm",
+			"root": root, "max_model_len": maxLen,
+		}},
+	}
+	return ver, models
+}
+
+// vllmServer serves the vLLM shape: /props 404 (as a real vLLM does), the two
+// metadata endpoints 200. Extra data entries let a test drive the
+// several-aliases and no-match branches.
+func vllmServer(t *testing.T, model string, ver, models map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/upstream/" + model + "/version":
+			_ = json.NewEncoder(w).Encode(ver)
+		case "/upstream/" + model + "/v1/models":
+			_ = json.NewEncoder(w).Encode(models)
+		default:
+			http.NotFound(w, r) // /props included — this is the branch under test
+		}
+	}))
+}
+
+func vllmPin(t *testing.T, model, version, root, served string, maxLen int) (SeatPin, bool) {
+	t.Helper()
+	ver, models := vllmFixture(version, root, served, maxLen)
+	srv := vllmServer(t, model, ver, models)
+	defer srv.Close()
+	return ProbeSeatPin(context.Background(), srv.URL, model)
+}
+
+// A vLLM seat used to get NO pin at all, because ProbeSeatPin only spoke
+// llama.cpp's /props. Unpinned rows cannot enter a paired experiment, which is
+// how an A2 4B-vs-9B comparison shipped with the weights, the engine build and
+// the served window all unrecorded.
+func TestProbeSeatPinVLLMFallbackProducesAPin(t *testing.T) {
+	pin, ok := vllmPin(t, "seat-9b", "0.28.0",
+		"/hf/hub/models--RedHatAI--Qwen3.5-9B-quantized.w4a16/snapshots/a398088", "seat-9b", 131072)
+	if !ok {
+		t.Fatal("a healthy vLLM seat produced no pin — the fallback did not fire")
+	}
+	if len(pin.SHA256) != 64 {
+		t.Errorf("SHA256 = %q, want 64 hex chars", pin.SHA256)
+	}
+	for _, want := range []string{"vllm", "0.28.0", "max_model_len=131072", "served=seat-9b"} {
+		if !strings.Contains(pin.Basis, want) {
+			t.Errorf("basis %q missing %q — an operator cannot read what changed", pin.Basis, want)
+		}
+	}
+}
+
+// The whole point: two arms that differ must not pin the same. Each field is
+// moved ALONE so a test failure names the field that stopped discriminating.
+func TestProbeSeatPinVLLMSensitivity(t *testing.T) {
+	base, ok := vllmPin(t, "seat", "0.28.0", "/hf/hub/models--A/snapshots/aaa", "seat", 131072)
+	if !ok {
+		t.Fatal("baseline pin failed")
+	}
+	for _, c := range []struct {
+		name                  string
+		version, root, served string
+		maxLen                int
+	}{
+		{"different checkpoint", "0.28.0", "/hf/hub/models--B/snapshots/bbb", "seat", 131072},
+		{"different engine version", "0.29.0", "/hf/hub/models--A/snapshots/aaa", "seat", 131072},
+		{"different served window", "0.28.0", "/hf/hub/models--A/snapshots/aaa", "seat", 65536},
+		{"different snapshot of same repo", "0.28.0", "/hf/hub/models--A/snapshots/ccc", "seat", 131072},
+	} {
+		got, ok := vllmPin(t, "seat", c.version, c.root, c.served, c.maxLen)
+		if !ok {
+			t.Fatalf("%s: pin failed", c.name)
+		}
+		if got.SHA256 == base.SHA256 {
+			t.Errorf("%s: pin did NOT move — two different arms would pair as identical", c.name)
+		}
+	}
+}
+
+// A vLLM pin and a llama.cpp pin must never collide: they cover disjoint field
+// sets, so a shared hash would claim two unlike seats are the same config.
+func TestVLLMPinNeverCollidesWithLlamaCpp(t *testing.T) {
+	cpp, ok := probeFixturePin(t, propsFixture())
+	if !ok {
+		t.Fatal("llama.cpp fixture pin failed")
+	}
+	vl, ok := vllmPin(t, "seat", "0.28.0", "/models/Qwen3.5-4B-UD-Q4_K_XL.gguf", "seat", 65536)
+	if !ok {
+		t.Fatal("vllm fixture pin failed")
+	}
+	if cpp.SHA256 == vl.SHA256 {
+		t.Fatal("a vLLM pin collided with a llama.cpp pin")
+	}
+	if strings.HasPrefix(cpp.Basis, "vllm ") {
+		t.Error("llama.cpp basis claims to be vllm")
+	}
+	if !strings.HasPrefix(vl.Basis, "vllm ") {
+		t.Errorf("vllm basis %q does not announce its coverage class", vl.Basis)
+	}
+}
+
+// Same discipline as the llama.cpp path: a missing discriminator yields NO pin
+// rather than one hashed over empty values, which could falsely say "same".
+func TestProbeSeatPinVLLMRefusals(t *testing.T) {
+	cases := []struct {
+		name                  string
+		version, root, served string
+		maxLen                int
+	}{
+		{"no engine version", "", "/hf/hub/models--A/snapshots/aaa", "seat", 131072},
+		{"no resolved checkpoint path", "0.28.0", "", "seat", 131072},
+		{"no served window", "0.28.0", "/hf/hub/models--A/snapshots/aaa", "seat", 0},
+		{"negative served window", "0.28.0", "/hf/hub/models--A/snapshots/aaa", "seat", -1},
+	}
+	for _, c := range cases {
+		if _, ok := vllmPin(t, "seat", c.version, c.root, c.served, c.maxLen); ok {
+			t.Errorf("%s: produced a pin anyway", c.name)
+		}
+	}
+
+	// Several entries and none matching the seat name: pinning an arbitrary one
+	// would attribute another model's config to this run.
+	ver := map[string]any{"version": "0.28.0"}
+	models := map[string]any{"object": "list", "data": []any{
+		map[string]any{"id": "other-a", "root": "/hf/A", "max_model_len": 131072},
+		map[string]any{"id": "other-b", "root": "/hf/B", "max_model_len": 131072},
+	}}
+	srv := vllmServer(t, "seat", ver, models)
+	defer srv.Close()
+	if _, ok := ProbeSeatPin(context.Background(), srv.URL, "seat"); ok {
+		t.Error("ambiguous roster with no name match produced a pin")
+	}
+
+	// Empty roster.
+	srvEmpty := vllmServer(t, "seat", ver, map[string]any{"object": "list", "data": []any{}})
+	defer srvEmpty.Close()
+	if _, ok := ProbeSeatPin(context.Background(), srvEmpty.URL, "seat"); ok {
+		t.Error("empty roster produced a pin")
+	}
+}
+
+// A single unnamed entry IS pinned: a seat whose llama-swap alias differs from
+// its vLLM --served-model-name is the normal deployment on this fleet.
+func TestProbeSeatPinVLLMSingleEntryAliasMismatch(t *testing.T) {
+	ver, models := vllmFixture("0.28.0", "/hf/hub/models--A/snapshots/aaa", "qwen3.5-9b-vllm", 131072)
+	srv := vllmServer(t, "agent-pool", ver, models)
+	defer srv.Close()
+	pin, ok := ProbeSeatPin(context.Background(), srv.URL, "agent-pool")
+	if !ok {
+		t.Fatal("a sole-entry roster under an alias produced no pin")
+	}
+	if !strings.Contains(pin.Basis, "served=qwen3.5-9b-vllm") {
+		t.Errorf("basis %q lost the vLLM served name", pin.Basis)
+	}
+}

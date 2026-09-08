@@ -41,7 +41,14 @@ function spark(hist,n){
 }
 function card(n){
   const st=n.reachable?'<span class="badge ok">online</span>':'<span class="badge err">unreachable</span>';
-  const seat=n.agent_enabled?`<span class="badge ${n.agent_seat_resident?'ok':''}">${esc(n.agent_seat)} ${n.agent_seat_resident?'resident':'cold'}</span>`:'<span class="badge">no agent lane</span>';
+  // "served"/"not served", never "resident"/"cold": agent_seat_resident is a probe of
+  // llama-swap's /v1/models ROSTER (alias-aware), so it says whether that node's llama-swap
+  // KNOWS the seat — not whether the seat currently holds VRAM. Under ttl:300 a healthy seat
+  // idles out constantly and the flag stays true; when it goes false the cause is llama-swap
+  // down, unreachable, or serving a roster without that name. The old wording cost a session
+  // an hour chasing an imagined "cold seat deadlock" while the real fault was a node whose
+  // llama-swap config had been truncated to zero models (2026-09-08).
+  const seat=n.agent_enabled?`<span class="badge ${n.agent_seat_resident?'ok':'err'}" title="${n.agent_seat_resident?'llama-swap’s roster names this seat (alias-aware). Says nothing about VRAM — a seat idled out by ttl still reads served.':'this node’s llama-swap does not name this seat: it is down, unreachable, or serving a roster without it. The node takes no agent work until this clears.'}">${esc(n.agent_seat)} ${n.agent_seat_resident?'served':'not served'}</span>`:'<span class="badge">no agent lane</span>';
   const devs=(n.gpu_devices||[]).map(d=>{const tot=d.vram_total_gb||0;const free=d.vram_free_gb||0;const pct=tot?100*(1-free/tot):0;return `<div class="kv"><span>${esc(d.name)}</span><b>${(tot-free).toFixed(1)} / ${tot.toFixed(1)} GB${d.util_known?` · ${esc(d.util_pct)}%`:''}</b></div><div class="bar"><i style="width:${pct.toFixed(0)}%"></i></div>`}).join('');
   return `<div class="card"><h2>${esc(n.node_id||n.base)} ${st} ${seat} <span class="badge">${esc(n.harness_version||'')}</span></h2>
   ${n.reachable?'':`<div class="sev-error">${esc(n.probe_error)}</div>`}
