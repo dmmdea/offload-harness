@@ -6,6 +6,18 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.114.1] - 2026-09-08 - blackwell-2x16 has no vLLM seat, by measurement
+
+`blackwell-3x16` seeds the 27B vLLM seat on its 5060 Ti pair; the 2-card tier was deliberately
+left without one because its second card is the display card. That reason is now measured
+(`Benchmarks and Optimizations/2026-09-08-blackwell-2x16-fit/`): a TP2 worker of the seat has an
+**11.22 GiB per-card non-KV footprint** (util 0.85 on the utility pair: 2.32 GiB of KV = 141,266
+tokens), and at the operating point that keeps the >= 4 GiB desktop floor on the 5070 Ti (util
+0.50) vLLM profiled **-3.36 GiB** of KV and refused to start. No operating point hosts the seat
+without starving the display. The tier keeps the llama.cpp 27B agent seat at 131,072; the
+`profiles.json` notes carry the numbers and `TestDualBlackwellHasNoVLLMSeatByMeasurement` fails
+any future copy of the seat across without a contradicting measurement. Docs/tiers regenerated.
+
 ## [0.114.0] - 2026-09-08 - the Coral Edge TPU is a second harness accelerator
 
 The Lenovo M720q has carried a Coral Edge TPU since 2026-09-04 — driven, tuned and measured
