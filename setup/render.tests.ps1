@@ -178,9 +178,9 @@ if ($r.yaml -match 'CUDA_VISIBLE_DEVICES=0' -and $r.yaml -match 'CUDA_VISIBLE_DE
 # its media block copied verbatim from blackwell-2x16 - where 1 IS the fast card - so
 # the vision seat landed on the display card and card 2 was named nowhere.
 $visEnv = @($r.yaml -split "`r?`n" | Select-String -Pattern '^\s{2}qwen3-vl-8b:' -Context 0,3 | ForEach-Object { $_.Context.PostContext } | Where-Object { $_ -match 'env:' })
-if ("$visEnv" -match 'CUDA_VISIBLE_DEVICES=0\b')  { Ok 'b3x16 vision seat (swappable) pinned to device 0, off the display card' } else { Bad "b3x16 vision pin (got: $visEnv)" }
+if ("$visEnv" -match 'CUDA_VISIBLE_DEVICES=2\b')  { Ok 'b3x16 vision seat pinned to device 2 (5060Ti#2), the measured live placement' } else { Bad "b3x16 vision pin (got: $visEnv)" }
 $sttEnv = @($r.yaml -split "`r?`n" | Select-String -Pattern '^\s{2}whisper-stt:' -Context 0,3 | ForEach-Object { $_.Context.PostContext } | Where-Object { $_ -match 'env:' })
-if ("$sttEnv" -match 'CUDA_VISIBLE_DEVICES=2\b')  { Ok 'b3x16 STT seat (resident) pinned to device 2, so it runs CONCURRENTLY with a card-0 seat' } else { Bad "b3x16 stt pin (got: $sttEnv)" }
+if ("$sttEnv" -match 'CUDA_VISIBLE_DEVICES=2\b')  { Ok 'b3x16 STT seat pinned to device 2, so it runs CONCURRENTLY with a card-0 seat' } else { Bad "b3x16 stt pin (got: $sttEnv)" }
 # CUDA graphs measured +40-51% gen on the 26B seats (2026-09-05, exact-output gate).
 if (($r.yaml -split "`n" | Where-Object { $_ -match 'env:' -and $_ -match 'GGML_CUDA_DISABLE_GRAPHS' }).Count -eq 0) { Ok 'b3x16 leaves CUDA graphs ON (measured +40-51% gen on the 26B seats)' } else { Bad 'b3x16 still SETS the cargo GGML_CUDA_DISABLE_GRAPHS on a seat' }
 if ($r.yaml -match 'ctx-size 131072') { Ok 'b3x16 serves the measured 131072 window' } else { Bad 'b3x16 ctx is not 131072' }

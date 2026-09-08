@@ -18,14 +18,19 @@
 #     Why not a seat here: the vision seat measures 11,751 MiB (2026-09-05 CUDA-X
 #     baseline), which after the ~0.5-1.5 GB DWM tax leaves ~3.5 GiB - UNDER the floor.
 #
-# THE MEDIA POOL DONATES FROM CARD 2, NOT CARD 1. The tier's config_seed pool keys
-# (imagegen_pool_donor / videogen_pool_donor) name cards as "cuda:N" and are NOT part
-# of this yaml, so nothing here can enforce it - the Go gate
-# TestTripleBlackwellNeverSchedulesOntoTheDisplayCard does. 0.113.32 shipped this
-# tier's ENTIRE media block copied byte-for-byte from blackwell-2x16, where device 1
-# IS the fast card: that put the vision seat and both pools on the display card and
-# named card 2 nowhere, which is also why the 3-card box measured no media difference
-# from the 2-card one. It was a copy nobody adapted, not a hardware result.
+# THE MEDIA POOLS RUN ON THE 5060 Ti PAIR, WHICH IS cuda:1/cuda:2 IN ComfyUI'S ORDER.
+# Those keys live in the tier's config_seed, not in this yaml, so nothing here can
+# enforce them - the Go gate TestTripleBlackwellNeverSchedulesOntoTheDisplayCard does.
+#   imagegen  compute cuda:1  donor cuda:2  - bf16 (krea2 turbo), free to sit anywhere;
+#                                             re-verified on the pair 2026-09-01.
+#   videogen  compute cuda:0  donor cuda:1  - THE ONE LAW EXCEPTION, and it must stay:
+#     an int8 DiT cannot compute on a non-default CUDA device (ComfyUI-MultiGPU #220),
+#     and the 2026-09-01 attempt to move it threw cudaErrorIllegalAddress mid-render.
+# 0.113.32 shipped this tier's ENTIRE media block copied byte-for-byte from
+# blackwell-2x16, whose gpu_env map is 0=utility / 1=FAST: that put the vision seat on
+# the display card, left image compute on it too, and named card 2 nowhere - which is
+# also why the 3-card box measured no media difference from the 2-card one. It was a
+# copy nobody adapted, not a hardware result.
 #
 # WHAT THE THIRD CARD ACTUALLY BUYS (operator directive: "bigger context and more
 # capability in general, not necessarily to pool for a bigger model"). Measured:
@@ -189,10 +194,23 @@ models:
 # whole payoff for the text/STT path.
 #
 # This template accepts tier-declared media seats: `swappable` joins the primary-card
-# alternatives (pin such seats to device 0 via the seat's gpu_env); `resident` joins as
-# a co-resident conjunction (pin those to device 2). NEVER pin a tier media seat to
-# device 1 - that is the display card. A template without this directive refuses seats
-# by name.
+# alternatives, `resident` joins as a co-resident conjunction. THE RESIDENCY ROLE SAYS
+# HOW A SEAT COMBINES, NOT WHICH CARD IT SITS ON - the card is the seat's own gpu_env.
+# On this box the 2026-08-31 singles rebalance put BOTH media seats on device 2
+# (5060Ti#2): whisper, vl-8b/ocr and the embed/rerank alternates moved there while the
+# cascade + memory-stack residents stayed on device 0, and the CUDA-X baseline
+# re-measured vl-8b at 11,751 MiB on card 2. An earlier version of this comment said
+# "swappable -> device 0, resident -> device 2", which was a two-card-era shorthand the
+# reference deployment does not follow.
+# NEVER pin a tier media seat to device 1 - that is the display card. A template
+# without this directive refuses seats by name.
+#
+# WATCH THE ORDERING WHEN YOU READ A "1" HERE. gpu_env is CUDA_VISIBLE_DEVICES under
+# CUDA_DEVICE_ORDER=PCI_BUS_ID, where 1 is the 5070 Ti. The tier's ComfyUI pool keys
+# (imagegen_pool_*/videogen_pool_*, "cuda:N") use ComfyUI's FASTEST-FIRST order, where
+# cuda:0 is the 5070 Ti and cuda:1/cuda:2 are the pair. The same digit means different
+# cards in the two namespaces, and confusing them is how the media block ended up
+# pointing at the display card twice.
 # offload-seats: swappable resident
 matrix:
   vars:
