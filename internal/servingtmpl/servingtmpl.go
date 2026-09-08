@@ -87,6 +87,20 @@ type Params struct {
 	// chat models carry neither and a GPU-less build would only ignore them.
 	Backend string
 
+	// DisableCUDAGraphs emits GGML_CUDA_DISABLE_GRAPHS=1 on the 26B seats.
+	//
+	// FALSE IS THE DEFAULT AND IT IS THE MEASURED ONE. On the reference sm_120 box
+	// (2026-09-05, b10720, 3 fresh-serve reps, temp 0, exact-string gate) turning CUDA
+	// graphs back ON took the 26B seats from 41.4 -> 58.0 t/s and 39.0 -> 58.8 t/s with
+	// prefill unchanged and OUTPUT IDENTICAL. The flag was baked into the win-cuda and
+	// win-cuda-resident templates, so five Blackwell tiers shipped a ~40% generation
+	// loss for no recorded reason.
+	//
+	// It cannot just be deleted: win-cuda also renders the ampere-* and volta-16 tiers,
+	// where graphs-on has never been measured. So the tiers that have not been measured
+	// set this true and keep today's behaviour; every Blackwell tier gets the win.
+	DisableCUDAGraphs bool
+
 	// VLLMSeat is the tier's persistent vLLM agent seat (ADR 0035), rendered as a
 	// RESIDENT matrix member whose cmd/cmdStop drive a systemd unit. nil is the common
 	// case and MUST render byte-identically to a build with no vLLM support at all —
@@ -206,6 +220,17 @@ func Render(tmpl string, p Params) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The 26B seats' graphs flag. Substituted before injectGPUEnv so a tier gpu_env
+	// still merges into the same env line when the flag IS set; when it is not, the
+	// line renders as `env: []` and is removed so the output matches a template that
+	// never carried it.
+	if p.DisableCUDAGraphs {
+		out = strings.ReplaceAll(out, graphsToken, "GGML_CUDA_DISABLE_GRAPHS=1")
+	} else {
+		out = strings.ReplaceAll(out, graphsToken, "")
+		out = emptyEnvLine.ReplaceAllString(out, "")
+	}
+
 	// GPU env lands AFTER seats so a tier's own media seats are pinned to the same
 	// device as everything else — the PowerShell version applied it to every model
 	// block in the map, and a seat is a model block.
@@ -506,6 +531,13 @@ func insertVLLMSeat(out string, p Params, anchors seatAnchors, taken map[string]
 	frag[roleResident] += matrixJoin(roleResident) + id
 	return out, frag, nil
 }
+
+// graphsToken sits INSIDE a list literal so the RAW template stays parseable YAML
+// (a bare token line is not, and TestEveryTemplateIsParseableYAML refuses it).
+// When graphs are on it renders empty and emptyEnvLine drops the leftover line.
+const graphsToken = "__M26_GRAPHS__"
+
+var emptyEnvLine = regexp.MustCompile(`(?m)^[ \t]*env: \[\][ \t]*\n`)
 
 var healthCheckLine = regexp.MustCompile(`(?m)^healthCheckTimeout:[ \t]*(\d+)[ \t]*$`)
 

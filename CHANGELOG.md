@@ -6,6 +6,30 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.38] — 2026-09-08 — five Blackwell tiers were shipping a ~40% generation loss
+
+`GGML_CUDA_DISABLE_GRAPHS=1` was baked into the `win-cuda` and `win-cuda-resident` templates, on the 26B seats. On
+sm_120 that flag is pure loss: measured 2026-09-05 (b10720, 3 fresh-serve reps, temp 0, exact-string gate), turning
+CUDA graphs back **on** took the 26B seats from **41.4 → 58.0 t/s** and **39.0 → 58.8 t/s**, prefill unchanged and
+**output byte-identical**. The triple-blackwell template dropped it as cargo on that evidence; the other two kept
+it, so `blackwell-16`, `blackwell-8`, `blackwell-32`, `blackwell-48` and `blackwell-72` all still paid it.
+
+It could not simply be deleted — `win-cuda` also renders `ampere-16`, `ampere-8`, `ampere-6` and `volta-16`, where
+graphs-on has never been measured. So it becomes a tier field, `disable_cuda_graphs`, **defaulting to false (graphs
+ON, the measured state)** and set true only on those four unmeasured tiers, which keep today's behaviour exactly.
+
+### Gates
+- `blackwell-16` must render **no** `GGML_CUDA_DISABLE_GRAPHS` on any env line, and its 26B env must be the tier
+  `gpu_env` alone — no empty `env: []` left where the flag used to be.
+- **`ampere-8` must still carry it.** It is the tier that both serves the 26B and has no graphs-on measurement, so
+  it is the guard that the sm_120 result does not silently transfer to Ampere.
+
+Both assertions read **env lines**, not the file text. A bare `-match` also hits the template's own comment about
+the flag — the fourth time in this release series that a text match found prose instead of a directive. The first
+attempt at the token also put a bare `__M26_GRAPHS_ENV__` line inside a mapping, which
+`TestEveryTemplateIsParseableYAML` rejected immediately; the token now sits inside a list literal so the raw
+template stays valid YAML.
+
 ## [0.113.37] — 2026-09-08 — two seat-spec defects found by actually launching the arm nobody had launched
 
 The `ampere-16` seat spec was written from one working deployment and generalised without ever being tried on a

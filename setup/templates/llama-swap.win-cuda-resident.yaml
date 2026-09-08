@@ -32,7 +32,7 @@ models:
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
       -ngl 99 ${common}
   gemma4-26b-a4b:
-    env: [GGML_CUDA_DISABLE_GRAPHS=1]
+    env: [__M26_GRAPHS__]
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
       __MOE_26B__ --parallel 1 ${common}

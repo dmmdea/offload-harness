@@ -134,12 +134,27 @@ $b26 = Get-ModelCmd -Yaml $r.yaml -ModelKey 'gemma4-26b-a4b'
 if ($b26 -match '-ngl 99' -and $b26 -notmatch '--cpu-moe')     { Ok 'blackwell-16 26B on GPU (-ngl 99, no cpu-moe)' } else { Bad "blackwell-16 26B gpu (got: $b26)" }
 if ($r.verdict -and $r.verdict.moe_mode -eq 'gpu')             { Ok 'blackwell-16 verdict moe_mode=gpu' } else { Bad 'blackwell-16 moe_mode' }
 # H4 Blackwell runtime env: every model block carries CUDA_VISIBLE_DEVICES=0 +
-# CUDA_MODULE_LOADING=LAZY; the 26B keeps GGML_CUDA_DISABLE_GRAPHS in the same list.
+# CUDA_MODULE_LOADING=LAZY. The 26B no longer carries GGML_CUDA_DISABLE_GRAPHS: on
+# sm_120 that flag cost 40-51% of generation for no recorded reason (2026-09-05,
+# b10720, 3 fresh-serve reps, temp 0, output IDENTICAL), and it is now a tier field
+# set only on the ampere/volta tiers that were never measured without it.
 $envLines = @($r.yaml -split "`r?`n" | Where-Object { $_ -match '^\s{4}env: \[' })
 if ($envLines.Count -ge 4 -and -not ($envLines | Where-Object { $_ -notmatch 'CUDA_VISIBLE_DEVICES=0' -or $_ -notmatch 'CUDA_MODULE_LOADING=LAZY' })) {
   Ok "blackwell-16 H4 runtime env on every model block ($($envLines.Count) blocks)" } else { Bad "blackwell-16 H4 runtime env (env lines: $($envLines.Count))" }
-if ($r.yaml -match '(?m)^\s{4}env: \[GGML_CUDA_DISABLE_GRAPHS=1, CUDA_VISIBLE_DEVICES=0, CUDA_MODULE_LOADING=LAZY\]$') {
-  Ok 'blackwell-16 26B env keeps GGML_CUDA_DISABLE_GRAPHS + gains H4 vars' } else { Bad 'blackwell-16 26B merged env list' }
+# Env LINES only. A bare -match also hits the template's own comment about the flag,
+# which is how three earlier gates in this repo passed or failed on prose.
+$graphLines = @($r.yaml -split "`r?`n" | Where-Object { $_ -match '^\s{4}env: \[' -and $_ -match 'GGML_CUDA_DISABLE_GRAPHS' })
+if ($graphLines.Count -eq 0) {
+  Ok 'blackwell-16 leaves CUDA graphs ON (measured +40-51% gen on the 26B seats, output identical)' } else { Bad 'blackwell-16 still disables CUDA graphs - that is a ~40% generation loss on sm_120' }
+if ($r.yaml -match '(?m)^\s{4}env: \[CUDA_VISIBLE_DEVICES=0, CUDA_MODULE_LOADING=LAZY\]$') {
+  Ok 'blackwell-16 26B env is the tier gpu_env alone (no empty env: [] left behind)' } else { Bad 'blackwell-16 26B merged env list' }
+
+# The flag must SURVIVE on a tier that was never measured without it. ampere-8 is the
+# one that both serves the 26B and has no graphs-on measurement, so it is the guard.
+$ra = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-8' -RamTier 'mid' -BigRam $true
+$graphLinesA = @($ra.yaml -split "`r?`n" | Where-Object { $_ -match '^\s{4}env: \[' -and $_ -match 'GGML_CUDA_DISABLE_GRAPHS=1' })
+if ($graphLinesA.Count -ge 1) {
+  Ok 'ampere-8 KEEPS GGML_CUDA_DISABLE_GRAPHS (never measured with graphs on)' } else { Bad 'ampere-8 lost GGML_CUDA_DISABLE_GRAPHS - the sm_120 measurement does not transfer to Ampere' }
 
 Write-Host "== blackwell-72 - ALL-RESIDENT big-VRAM tier (cuda-resident template, cfg15) =="
 $r = Invoke-Render -Backend 'cuda' -ProfileId 'blackwell-72' -RamTier 'high' -BigRam $false
