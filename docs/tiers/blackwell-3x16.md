@@ -67,8 +67,10 @@ here so they are never mistaken for a media capability:
 
 | key | value |
 |---|---|
+| `agent_max_tokens` | `4096` |
 | `agent_model` | `qwen3.8-27b` |
 | `agent_timeout_sec` | `600` |
+| `ffmpeg_video_encoder` | `h264_nvenc` |
 
 ## Operator notes
 

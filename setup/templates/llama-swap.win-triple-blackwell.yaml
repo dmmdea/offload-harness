@@ -63,7 +63,10 @@
 # invariant binds the CASCADE seats; the *-agent and qwen3.8 entries are explicitly
 # reasoning/thinking seats. Do NOT add --swa-full here. q8_0 V requires flash-attn on.
 # q4_0 KV is BANNED (92% prefill degradation, measured).
-healthCheckTimeout: 300
+# 600, not the old 300: this template renders the Flash-Next opt-in seats, whose cold
+# load runs 219 s and beyond (the reference box raised its own ceiling to 600 for
+# exactly them). A CEILING, not a wait - a broken small seat still fails fast.
+healthCheckTimeout: 600
 logLevel: info
 
 macros:
@@ -112,6 +115,18 @@ models:
   # when the tier sets include_qwen38 (the Q38 token pair mirrors the M26 one).
   qwen3.8-27b:
     aliases: [qwen38, local-coder, coder, agent-loop]
+    # PINNED TO THE 5060 Ti PAIR. This seat carries -sm layer -ngl 999, so with all
+    # three cards visible it spreads across the DISPLAY card - which is exactly what
+    # the reference box hit: its own entry records "Old split 21,29 spanned
+    # 5070Ti+5060Ti by CUDA fastest-first" and was RE-PINNED 2026-08-31 under the
+    # operator rule "DUAL-CARD seats -> the 5060 Ti PAIR, pinned by BOTH UUIDs. NEVER
+    # the 5070 Ti." It was the last unpinned default seat in this template.
+    # NO --tensor-split here on purpose. The live box uses 24,26, justified by which
+    # of ITS cards holds the ~2 GB utility residents - and this template puts those
+    # residents on the other card of the pair, so the ratio does not transfer. -sm
+    # layer auto-divides the 16.7 GB evenly, which fits either way; measure on the box
+    # before pinning a ratio. Prefer GPU UUIDs over indices if the cards ever move.
+    env: [CUDA_VISIBLE_DEVICES=0,2]
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.8-27B-UD-Q4_K_XL.gguf
       --mmproj __MODELS__/mmproj-Qwen3.8-27B-F16.gguf -ngl 999 -sm layer --parallel 1

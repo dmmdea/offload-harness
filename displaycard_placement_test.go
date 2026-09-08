@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -137,4 +138,65 @@ func TestTripleBlackwellNeverSchedulesOntoTheDisplayCard(t *testing.T) {
 			"device maps, so identical bindings mean the three-card tier was never adapted — the state that put "+
 			"the vision seat and both pools on the display card and left card 2 named nowhere", tier)
 	}
+}
+
+// The 27B coder/agent seat shipped with NO device pin at all. It carries
+// `-ngl 999 -sm layer`, so with all three cards visible llama.cpp spreads it across
+// every one of them — including the display card. The reference box hit exactly this
+// and says so in its own config: "Old split 21,29 spanned 5070Ti+5060Ti by CUDA
+// fastest-first", re-pinned 2026-08-31 under the operator rule "DUAL-CARD seats -> the
+// 5060 Ti PAIR, pinned by BOTH UUIDs. NEVER the 5070 Ti."
+//
+// So every DEFAULT seat in the triple template must name the cards it may use. The
+// only exceptions are the opt-in over-2-card seats, which exist precisely to span all
+// three and are never in a matrix set — they load only when called by name.
+func TestEveryDefaultTripleBlackwellSeatNamesItsCards(t *testing.T) {
+	path := filepath.Join("setup", "templates", "llama-swap.win-triple-blackwell.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	i := strings.Index(body, "\nmodels:")
+	if i < 0 {
+		t.Fatal("no models mapping — this gate went blind")
+	}
+	// The opt-in seats span all three cards deliberately (Flash-Next class): they are
+	// in no matrix set and load only by name, under the >=4 GiB desktop floor.
+	optIn := map[string]bool{"qwen3.8-flash-next": true, "qwen3.8-flash-next-262k": true}
+
+	seatRe := regexp.MustCompile(`(?m)^  ([A-Za-z0-9._-]+):$`)
+	locs := seatRe.FindAllStringSubmatchIndex(body[i:], -1)
+	checked := 0
+	for n, loc := range locs {
+		name := body[i:][loc[2]:loc[3]]
+		if name == "vars" || name == "evict_costs" || name == "sets" {
+			continue // matrix sub-keys, not seats
+		}
+		endOff := len(body[i:])
+		if n+1 < len(locs) {
+			endOff = locs[n+1][0]
+		}
+		seg := body[i:][loc[1]:endOff]
+		if optIn[name] {
+			continue
+		}
+		checked++
+		m := regexp.MustCompile(`CUDA_VISIBLE_DEVICES=([^,\]\s]+(?:,[^,\]\s]+)*)`).FindStringSubmatch(seg)
+		if m == nil {
+			t.Errorf("seat %q declares no CUDA_VISIBLE_DEVICES pin. Any seat carrying -sm layer or -ngl 999 then "+
+				"spreads across every visible card, including the display card — the exact state the reference "+
+				"box re-pinned on 2026-08-31", name)
+			continue
+		}
+		for _, d := range strings.Split(m[1], ",") {
+			if strings.TrimSpace(d) == "1" {
+				t.Errorf("seat %q names device 1 (%s) — that is the RTX 5070 Ti driving the display", name, m[1])
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no default seats were checked — this gate went blind")
+	}
+	t.Logf("checked %d default seats", checked)
 }

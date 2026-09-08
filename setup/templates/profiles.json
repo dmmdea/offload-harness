@@ -285,6 +285,8 @@
         "imagegen_vae": "qwen_image_vae.safetensors",
         "imagegen_steps": 8,
         "imagegen_cfg": 1,
+        "agent_max_tokens": 4096,
+        "ffmpeg_video_encoder": "h264_nvenc",
         "imagegen_pool_vvram_gb": 12,
         "imagegen_pool_compute": "cuda:1",
         "imagegen_pool_donor": "cuda:2",
