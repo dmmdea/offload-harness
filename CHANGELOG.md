@@ -6,6 +6,33 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.40] - 2026-09-08 - the flagship seat was declared but never proven to render
+
+0.113.39 gave `blackwell-3x16` its measured vLLM seat. Two green gates covered it and neither
+covered the join between them: `TestEveryDeclaredVLLMSeatValidates` checks the tier's JSON in
+isolation and never renders it, while `setup/render.tests.ps1` renders the tier but exercises the
+FALLBACK path, because the seat renders only when `Detect` finds the hand-built venv and the
+weights - false on CI and on every box but one.
+
+So the question nothing asked was: does the declared seat, put through the template that tier
+actually renders, produce a config llama-swap can load? `insertVLLMSeat` refuses a template whose
+`# offload-seats:` directive places no resident, and `blackwell-3x16` renders
+`llama-swap.win-triple-blackwell.yaml` rather than the linux template every other seat test uses.
+A tier could have shipped a seat that fails to render on the only box able to run it.
+
+It does render, and `TestFlagshipSeatRendersIntoItsOwnTemplate` now holds that: the COMMITTED
+seat read from the tier table, through the real template, parsed as YAML, asserting the entry
+drives the PowerShell stubs, keeps `useModelName`, joins a matrix var, idles at ttl 300, and
+carries every declared alias.
+
+**Mutation testing found the first draft of this gate half-blind.** Three defects were injected;
+one turned it red and two SURVIVED - dropping the seat's aliases, and moving `max_num_seqs`. Both
+assertions compared the render against the same declaration they were derived from, so they could
+not fail when the declaration itself moved: a self-consistency check that certifies nothing. The
+gate now also asserts the MEASURED absolutes a change has to justify - 32 streams, a 163,840
+window, and the `agent-pool` alias the harness binds `agent_model` to. All three mutants now turn
+it red for the stated reason, with a byte-identical restore.
+
 ## [0.113.39] - 2026-09-08 - the flagship tier shipped no vLLM agent seat at all
 
 `blackwell-3x16` is the tier whose reference box **is** the 3-card workstation - the machine that produces most of
