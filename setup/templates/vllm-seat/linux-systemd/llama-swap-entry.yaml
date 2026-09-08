@@ -1,7 +1,7 @@
 # llama-swap pieces for a persistent vLLM seat (ADR 0035). Three edits to an existing config:
 # (1) top level — the vLLM cold load is 125–250 s (torch.compile cache warm/cold); the default 120 (or a lower local value) kills
 #     the attach mid-load and cmdStop then stops the engine. llama.cpp seats still fail fast when broken.
-healthCheckTimeout: 480
+healthCheckTimeout: __HEALTH_TIMEOUT__
 
 # (2) the entry — llama-swap's front door to the unit. `cmd` starts the unit and stays attached, `cmdStop` stops it, so the
 #     harness's `gpu reserve --drain --unload-seat` really frees the card and `gpu release --warm-seat` really reloads it.
@@ -10,16 +10,16 @@ healthCheckTimeout: 480
 #     `concurrencyLimit` must match the engine's --max-num-seqs: llama-swap's per-model default (10) would 429 the streams the
 #     seat was provisioned for (review finding, 2026-09-06).
 models:
-  "<seat id>":
-    cmd: /srv/llama-swap/seat/vllm-seat-cmd.sh
-    cmdStop: /srv/llama-swap/seat/vllm-seat-cmdstop.sh
-    proxy: http://<tailscale-ipv4>:18797
+  "__SEAT_ID__":
+    cmd: __SEAT_DIR__/vllm-seat-cmd.sh
+    cmdStop: __SEAT_DIR__/vllm-seat-cmdstop.sh
+    proxy: http://__PROXY_HOST__:__PORT__
     checkEndpoint: /health
-    useModelName: "<seat id>"
+    useModelName: "__SEAT_ID__"
     ttl: 0
     unloadTimeout: 120
-    concurrencyLimit: 32
-    aliases: ["<pool alias>"]
+    concurrencyLimit: __MAX_NUM_SEQS__
+    aliases: [__ALIASES__]
 
 # (3) its group + the startup preload. persistent = no other group can evict it; swap/exclusive false = it evicts nobody
 #     (the box's heavy tier keeps swapping among itself beside it). The preload attaches to the running unit as soon as
@@ -29,7 +29,7 @@ groups:
     persistent: true
     swap: false
     exclusive: false
-    members: ["<seat id>"]
+    members: ["__SEAT_ID__"]
 hooks:
   on_startup:
-    preload: ["<seat id>"]
+    preload: ["__SEAT_ID__"]

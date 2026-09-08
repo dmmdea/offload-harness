@@ -30,6 +30,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/mediaseat"
+	"github.com/dmmdea/offload-harness/internal/vllmseat"
 )
 
 // Tokens a seed value may carry. They exist so ONE table row renders correctly on
@@ -52,6 +53,12 @@ type Options struct {
 	RAMTier string
 	// HailoHome is the Hailo repo checkout __HAILO_HOME__ expands to.
 	HailoHome string
+	// VLLMSeatActive says whether THIS box renders the tier's vLLM agent seat. The
+	// caller decides it with vllmseat.Spec.Detect — the engine is a hand-built venv
+	// the installer does not create, so a box without it binds the fallback seat. The
+	// binding and the rendered llama-swap entry therefore agree by construction: both
+	// are driven by the same detection.
+	VLLMSeatActive bool
 }
 
 // vaeArgs maps the declared vae_mode to the sd.cpp flag it stands for. Free-text
@@ -73,6 +80,10 @@ type Profile struct {
 	// MediaSeats are the tier's alias-backed media capabilities. They are the SOLE
 	// writer of the config keys they bind — see mediaseat.Bindings.
 	MediaSeats []mediaseat.Seat `json:"media_seats"`
+	// VLLMSeat is the tier's persistent vLLM agent seat (ADR 0035). When the box can
+	// actually run it (Options.VLLMSeatActive), it is the SOLE writer of agent_model
+	// and agent_ctx_tokens; otherwise its declared fallback is.
+	VLLMSeat *vllmseat.Spec `json:"vllm_seat,omitempty"`
 }
 
 // Doc is the whole profiles.json document this package reads: the GPU tier table
@@ -151,6 +162,20 @@ func Resolve(p Profile, id string, opt Options) (map[string]any, error) {
 	//   - derive only when resident_tier DIFFERS from the row's effective
 	//     workhorse — materializing agent_model=workhorse would silently fork the
 	//     live fallback (an operator changing `model` expects the planner to follow).
+	// A declared vLLM agent seat OVERRIDES config_seed's agent_model, unlike every
+	// other seed key. config_seed carries the llama.cpp FALLBACK — which is what a box
+	// without the venv must get — so the seat has to win when the box can run it, or
+	// the tier would render the seat into llama-swap and then route the agent lane at
+	// a different model. That split is the exact defect this field exists to close.
+	if p.VLLMSeat != nil {
+		b := p.VLLMSeat.FallbackBindings()
+		if opt.VLLMSeatActive {
+			b = p.VLLMSeat.Bindings()
+		}
+		for k, v := range b {
+			merged[k] = v
+		}
+	}
 	if _, explicit := merged["agent_model"]; !explicit && p.ResidentTier != "" {
 		workhorse := config.Default().Model
 		if m, ok := merged["model"].(string); ok && m != "" {

@@ -1,11 +1,11 @@
-// llama-swap.service runs as <user> with NoNewPrivileges=yes (sudo is impossible there), and its vLLM seat entry starts
+// llama-swap.service runs as __USER__ with NoNewPrivileges=yes (sudo is impossible there), and its vLLM seat entry starts
 // and stops the persistent vllm-seat.service through cmd/cmdStop wrappers. This rule lets that user manage THAT unit
 // only — start/stop/restart/reset-failed — nothing else. Install to /etc/polkit-1/rules.d/ (root:root 0644).
-// Dry check without a state change: as <user>, `systemctl start vllm-seat.service` on the already-active unit must succeed.
+// Dry check without a state change: as __USER__, `systemctl start __UNIT__.service` on the already-active unit must succeed.
 polkit.addRule(function(action, subject) {
     if (action.id == "org.freedesktop.systemd1.manage-units" &&
-        action.lookup("unit") == "vllm-seat.service" &&
-        subject.user == "<user>") {
+        action.lookup("unit") == "__UNIT__.service" &&
+        subject.user == "__USER__") {
         var verb = action.lookup("verb");
         if (verb == "start" || verb == "stop" || verb == "restart" || verb == "reset-failed") {
             return polkit.Result.YES;

@@ -34,6 +34,23 @@ SERVICE_USER="$(id -un)"
 BIN=""
 DRY_RUN=0
 NO_SERVICE=0
+# The repo this script lives in, for `install vllm-seat --root` (it reads the seat
+# templates under setup/templates/vllm-seat/). Resolved from $0, not $PWD.
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The deployment half of a tier's vLLM agent seat. All three may stay empty: the
+# renderer falls back to the tier's llama.cpp agent seat and prints why, which is the
+# correct outcome on a box that has not hand-built the vLLM venv.
+#   TS_IP        - the LITERAL address the engine binds. A hostname is wrong here: on
+#                  the reference box MagicDNS resolved to IPv6 only while vLLM bound
+#                  the Tailscale IPv4, so llama-swap's health check would never pass.
+#   VLLM_VENV    - default <prefix>/vllm-env, chosen by the renderer.
+#   HF_HOME_DIR  - default $HF_HOME, else <prefix>/hf. KEEP IT SHORT: LMCache's
+#                  fs_native page names embed the resolved model path and a long one
+#                  produced 268-byte names against NAME_MAX 255, failing every L2
+#                  store silently.
+TS_IP="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
+VLLM_VENV=""
+HF_HOME_DIR=""
 
 die() { printf '\nerror: %s\n' "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
@@ -57,6 +74,12 @@ Usage: install.sh [options]
                       IDENTITY-DEPENDENT, so this must be the account that owns the
                       models, venvs and lease.
   --no-service        write configs but do not register systemd units
+  --vllm-venv DIR     hand-built vLLM virtualenv for a tier that declares a vllm_seat
+                      (default: <prefix>/vllm-env). Absent = the tier's llama.cpp
+                      agent seat is rendered instead, with the reason printed.
+  --hf-home DIR       HF cache root (default: $HF_HOME, else <prefix>/hf). Keep it
+                      short: LMCache page names embed the model path (NAME_MAX 255).
+  --tailscale-ip ADDR literal address the vLLM engine binds (default: tailscale ip -4)
   --dry-run           print every decision and command, change nothing
   -h, --help          this text
 USAGE
@@ -72,6 +95,9 @@ while [ $# -gt 0 ]; do
     --node-id) NODE_ID="${2:?}"; shift 2 ;;
     --user) SERVICE_USER="${2:?}"; shift 2 ;;
     --no-service) NO_SERVICE=1; shift ;;
+    --vllm-venv) VLLM_VENV="${2:?}"; shift 2 ;;
+    --hf-home) HF_HOME_DIR="${2:?}"; shift 2 ;;
+    --tailscale-ip) TS_IP="${2:?}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option $1 (try --help)" ;;
@@ -139,7 +165,8 @@ fi
 # A seed failure is FATAL, never a silent '{}': an install that quietly ships no
 # media bindings is exactly the drift this path exists to end. A tier that
 # genuinely has none says so on stdout and is not an error.
-if ! SEED="$("$BIN" install seed --profile "$TIER" --home "$PREFIX" --os linux --ram-tier "$RAM_TIER")"; then
+if ! SEED="$("$BIN" install seed --profile "$TIER" --home "$PREFIX" --os linux --ram-tier "$RAM_TIER" \
+        --vllm-venv "$VLLM_VENV" --hf-home "$HF_HOME_DIR")"; then
   die "could not resolve the media seed for tier $TIER"
 fi
 case "$SEED" in *"ships no media"*) SEED='{}'; say "media:     tier $TIER ships none — text only until bound by hand" ;; esac
@@ -166,7 +193,28 @@ else
   # written a config.json binding those seats' aliases.
   "$BIN" install render --profile "$TIER" --os linux --home "$PREFIX" \
     --ram-tier "$RAM_TIER" \
+    --vllm-user "$SERVICE_USER" --vllm-proxy-host "$TS_IP" \
+    --vllm-venv "$VLLM_VENV" --hf-home "$HF_HOME_DIR" \
     --llama-bin "$LLAMA_BIN" --models "$MODELS" --listen "$LISTEN" --out "$SWAP_YAML"
+fi
+
+# ---- 5b. the persistent vLLM agent seat (ADR 0035), when this box can run it ----
+# The engine is a HAND-BUILT venv (vLLM 0.28, torch 2.13+cu130) holding an HF
+# snapshot; this installer does not create either. So the seat renders only when both
+# are present, and a box without them keeps the tier's llama.cpp fallback -- a unit
+# pointing at a venv nobody built fails at boot, which is worse than the fallback.
+# The two root steps (the unit and the polkit rule) are PRINTED, never taken here:
+# this script runs unprivileged and escalating silently is not its job.
+if [ "$DRY_RUN" -eq 1 ]; then
+  say "  would render the vLLM agent seat for tier $TIER (if its venv + weights are present)"
+elif "$BIN" install vllm-seat --profile "$TIER" --root "$REPO_ROOT" --home "$PREFIX" \
+       --user "$SERVICE_USER" --proxy-host "$TS_IP" \
+       --venv "$VLLM_VENV" --hf-home "$HF_HOME_DIR" 2>/dev/null; then
+  chmod 0755 "$PREFIX"/seat/*.sh 2>/dev/null || true
+  say "vllm seat: rendered under $PREFIX/seat (two root steps printed above)"
+else
+  say "vllm seat: not rendered for tier $TIER (no vllm_seat declared, or its venv/weights are absent) --"
+  say "           the tier's llama.cpp agent seat is what got rendered and bound"
 fi
 
 # ---- 6. services ------------------------------------------------------------
