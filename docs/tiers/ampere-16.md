@@ -74,6 +74,7 @@ here so they are never mistaken for a media capability:
 
 | key | value |
 |---|---|
+| `agent_max_tokens` | `4096` |
 | `agent_model` | `qwen3.5-4b-agent` |
 | `agent_profile` | `research` |
 | `escalation_model` | `` |
