@@ -6,6 +6,17 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.114.2] - 2026-09-08 - blackwell-2x16 seeds the pair's vLLM seat (0.114.1 overturned)
+
+0.114.1 declared the 2-card tier had no vLLM seat, from an arm that spanned the RTX 5070 Ti display
+card. That measured the wrong thing: the tier's two cards ARE the 5060 Ti pair, and the production
+seat has run TP2 on exactly that pair since 2026-09-03 with the Lenovo cache server. Operator
+correction the same afternoon. `blackwell-2x16` now seeds `blackwell-3x16`'s `vllm_seat` verbatim
+except `device: "0,1"` (the pair on a 2-card box), including the fs_native cache server on the Lenovo,
+so a fresh install of the tier serves `agent-pool` at 163,840 instead of falling back to llama.cpp.
+`TestDualBlackwellSeedsThePairSeatWithTheCacheServer` replaces the 0.114.1 test; the display-card arm
+stays in the record only as the reason no seat is pinned to the 5070 Ti. Docs/tiers regenerated.
+
 ## [0.114.1] - 2026-09-08 - blackwell-2x16 has no vLLM seat, by measurement
 
 `blackwell-3x16` seeds the 27B vLLM seat on its 5060 Ti pair; the 2-card tier was deliberately
