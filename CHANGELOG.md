@@ -6,6 +6,44 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.35] — 2026-09-08 — the 3-card tier shipped the loser of its own vision bake-off
+
+### Added
+- **`blackwell-3x16` vision seat: `qwen3-vl-8b` → `qwen3-vl-32b`, with the 8B keeping OCR.** The 48 GB gates measured the two on the
+  reference box and split the roles by which model won which: visioncanary **MMMU 0.740 vs 0.630 (+11 points**, clearing the ≥8 promotion
+  bar) sends VISION to the 32B, while **DocVQA ANLS −3.7 and a dense-transcription regression** keep OCR on the 8B. The split is itself
+  quality-driven — each role goes to the model that measured better *at that role* — which is why it must not be collapsed back to one seat.
+  The decision was **applied on the box** (both live config files bind `vision_model=qwen3-vl-32b` / `ocr_model=qwen3-vl-8b`) and the tier
+  table was never updated, so every fresh install of the tier whose reference box IS that machine got a measured 11-point MMMU regression.
+- Seat schema gains `split_mode` (`-sm`), `tensor_split`, `image_min_tokens`, `top_p` and `top_k`, which is what the measured
+  configuration needs and what previously made this upgrade "blocked". `-sm tensor` at the same `--tensor-split 25,25` produced
+  **byte-identical output 5/5** on a fixed image+prompt while generation went 19.6 → 34.1 t/s — identical output is what makes it free
+  rather than a trade.
+
+### Fixed
+- **The ampere-16 seat justification was a speed argument, and it is withdrawn.** The 2026-09-04 bake-off scored
+  `not deferred AND len(findings)>=3 AND len(summary)>40` — a shape check the harness's own acceptance linter calls `SHAPE-ONLY (passes
+  garbage)`. Its 8/8 meant "emitted well-formed output", not "equally good", and the seats were then separated on wall time.
+  A blind re-evaluation of the retained answers against the ground-truth ADRs (3 lenses × 8 contracts = 24 judgements, candidates
+  anonymised and permuted, no model name/engine/timing visible) puts the vLLM seat first on quality: **overall 7.58 vs 6.79 for the same
+  weights on llama.cpp and 6.38 for the 12B**, first on specificity and coverage, and the only one with zero filler findings. The binding
+  stands — on quality evidence. Record: `Benchmarks and Optimizations/2026-09-08-a2-seat-quality-reeval/`.
+- The display-card gate split multi-device pins: it compared the whole `CUDA_VISIBLE_DEVICES` string against `"1"`, so a pin of `"0,1"`
+  would have passed while putting half a 32B vision seat on the desktop's card.
+
+### Still open
+**The 12B has never been served under vLLM, and that is the question that was actually asked.** The engine alone moved the *same 4B
+weights* +0.79 overall and removed every filler finding; the measured comparison is vLLM-4B vs llama.cpp-12B, confounded by engine. The
+llama.cpp 12B measured 7,512 MiB, so a 12B under vLLM (w4a16 or Q4, `fp8_e5m2` KV) plausibly fits at util ≈0.85 with a 32–64k window.
+That arm is the next measurement, judged with the new instrument rather than the shape gate.
+
+Not propagated to `blackwell-2x16`: the 32B spans both cards of its pair, and on the 2-card tier the second card pays the desktop tax.
+That tier needs its own fit measurement first.
+
+### Gate
+`TestTripleBlackwellVisionSeatIsTheMeasuredWinner` — the tier must declare BOTH a vision and an ocr seat, vision must be the 32B and ocr
+the 8B, and the 32B must carry the flags it was measured with. Mutation-tested against `main`: it reports the collapsed single-seat state.
+
 ## [0.113.34] — 2026-09-07 — blackwell-8 advertised half the window its own agent seat was serving
 
 `agent_ctx_tokens` is what the harness ADVERTISES, and the fleet sizes every delegation contract from it. When it

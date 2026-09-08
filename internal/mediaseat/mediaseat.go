@@ -117,6 +117,32 @@ type Seat struct {
 	// A POINTER so an explicit 0 — PaddleOCR-VL's vendor-required value — survives
 	// JSON omitempty; nil = no --temp flag, the server's default stands.
 	Temp *float64 `json:"temp,omitempty"`
+	// TopP and TopK complete a vendor sampler recipe (vision/ocr only). Pointers for
+	// the same reason as Temp. Qwen3-VL ships an official 0.7 / 0.8 / 20 recipe, and
+	// a VLM run off its own sampler is a quality change nobody measured.
+	TopP *float64 `json:"top_p,omitempty"`
+	TopK *int     `json:"top_k,omitempty"`
+
+	// SplitMode is llama.cpp's -sm for a seat too large for one card: "layer" or
+	// "tensor". Empty = no flag, which is right for every single-card seat.
+	//
+	// The two are NOT interchangeable. Measured on the reference 5060 Ti pair
+	// (2026-09-05 CUDA-X): moving Qwen3-VL-32B from -sm layer to -sm tensor at the
+	// same --tensor-split produced BYTE-IDENTICAL output on a fixed image+prompt 5/5
+	// while raising generation 19.6 -> 34.1 t/s; prefill went 995 -> 926. Identical
+	// output is what makes it a free win rather than a quality trade.
+	SplitMode string `json:"split_mode,omitempty"`
+	// TensorSplit is llama.cpp's --tensor-split proportion list ("25,25"), in the
+	// order of the seat's own visible devices. It is meaningless without SplitMode,
+	// and the proportions are a per-BOX measurement: they encode which card is
+	// already carrying residents or a desktop, so copying a ratio between tiers with
+	// different layouts is how a seat ends up lopsided.
+	TensorSplit string `json:"tensor_split,omitempty"`
+	// ImageMinTokens is llama-server's --image-min-tokens (vision/ocr only): the
+	// FLOOR an image expands to, where ImageMaxTokens is the ceiling. A large VLM
+	// given too few visual tokens answers confidently off a thumbnail; the reference
+	// vision seat pins 1024.
+	ImageMinTokens int `json:"image_min_tokens,omitempty"`
 }
 
 // configKey is the harness config field a seat of this kind binds.
@@ -215,6 +241,36 @@ func Validate(seats []Seat, tier string) error {
 				problems = append(problems, where+": no_flash_attn is a whisper.cpp flag (stt only); a "+s.Kind+" seat's "+
 					"flash-attn comes from the tier's flash_attn")
 			}
+			if s.ImageMinTokens > 0 && s.ImageMaxTokens > 0 && s.ImageMinTokens > s.ImageMaxTokens {
+				problems = append(problems, fmt.Sprintf("%s: image_min_tokens %d exceeds image_max_tokens %d — the floor "+
+					"cannot be above the ceiling", where, s.ImageMinTokens, s.ImageMaxTokens))
+			}
+		}
+		// -sm / --tensor-split belong to any seat too large for one card. They are
+		// checked for every kind because getting them wrong does not fail loudly: a
+		// --tensor-split without -sm is ignored, and a proportion list that does not
+		// match the seat's device count silently lands the model unevenly.
+		if s.SplitMode != "" && s.SplitMode != "layer" && s.SplitMode != "tensor" {
+			problems = append(problems, fmt.Sprintf("%s: split_mode %q is not layer or tensor", where, s.SplitMode))
+		}
+		if s.TensorSplit != "" {
+			if s.SplitMode == "" {
+				problems = append(problems, where+": tensor_split without split_mode — llama.cpp ignores the proportions "+
+					"unless -sm asks for a split, so the seat would silently land on one card")
+			}
+			parts := strings.Split(s.TensorSplit, ",")
+			for _, v := range parts {
+				if strings.TrimSpace(v) == "" {
+					problems = append(problems, fmt.Sprintf("%s: tensor_split %q has an empty proportion", where, s.TensorSplit))
+					break
+				}
+			}
+			// The proportion list is positional over the seat's OWN visible devices,
+			// so a mismatch puts weights where the author did not mean.
+			if n := seatDeviceCount(s); n > 0 && n != len(parts) {
+				problems = append(problems, fmt.Sprintf("%s: tensor_split lists %d proportions but the seat makes %d device(s) "+
+					"visible — the list is positional over the seat's own devices", where, len(parts), n))
+			}
 		}
 		if s.Kind == KindSTT {
 			if s.Bin == "" {
@@ -260,4 +316,21 @@ func Validate(seats []Seat, tier string) error {
 		return fmt.Errorf("tier %q media_seats:\n  - %s", tier, strings.Join(problems, "\n  - "))
 	}
 	return nil
+}
+
+// seatDeviceCount reports how many CUDA devices the seat's own gpu_env makes visible,
+// or 0 when it names none (then the tier-level gpu_env decides and this package
+// cannot know). Used to check a --tensor-split list against the devices it indexes.
+func seatDeviceCount(s Seat) int {
+	for _, e := range s.GPUEnv {
+		v, ok := strings.CutPrefix(strings.TrimSpace(e), "CUDA_VISIBLE_DEVICES=")
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(v) == "" {
+			return 0
+		}
+		return len(strings.Split(v, ","))
+	}
+	return 0
 }

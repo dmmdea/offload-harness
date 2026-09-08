@@ -82,14 +82,20 @@ func TestTripleBlackwellNeverSchedulesOntoTheDisplayCard(t *testing.T) {
 				pin = v
 			}
 		}
-		switch pin {
-		case "":
+		if pin == "" {
 			t.Errorf("%s seat %q (%s) declares no CUDA_VISIBLE_DEVICES pin — on a three-card box an unpinned "+
 				"seat can land on the display card", tier, s.Name, s.Kind)
-		case displayByPCI:
-			t.Errorf("%s seat %q (%s) is pinned to CUDA_VISIBLE_DEVICES=%s — that is the RTX 5070 Ti driving the "+
-				"display; starving it dropped the desktop to 720p and forced a reboot on 2026-09-04",
-				tier, s.Name, s.Kind, displayByPCI)
+			continue
+		}
+		// A seat too large for one card names SEVERAL devices ("0,2"). Checking the
+		// whole string against "1" would pass "0,1" — the exact shape that puts half
+		// a 32B vision seat on the desktop's card.
+		for _, dev := range strings.Split(pin, ",") {
+			if strings.TrimSpace(dev) == displayByPCI {
+				t.Errorf("%s seat %q (%s) is pinned to CUDA_VISIBLE_DEVICES=%s, which includes device %s — that is "+
+					"the RTX 5070 Ti driving the display; starving it dropped the desktop to 720p and forced a "+
+					"reboot on 2026-09-04", tier, s.Name, s.Kind, pin, displayByPCI)
+			}
 		}
 	}
 

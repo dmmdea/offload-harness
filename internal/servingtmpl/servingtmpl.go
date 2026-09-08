@@ -681,6 +681,20 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 		if s.Temp != nil {
 			bound += fmt.Sprintf(" --temp %g", *s.Temp)
 		}
+		// The rest of a vendor sampler recipe. Qwen3-VL ships 0.7 / 0.8 / 20 and a VLM
+		// run off its own sampler is an unmeasured quality change, so a tier that pins
+		// one pins all three.
+		if s.TopP != nil {
+			bound += fmt.Sprintf(" --top-p %g", *s.TopP)
+		}
+		if s.TopK != nil {
+			bound += fmt.Sprintf(" --top-k %d", *s.TopK)
+		}
+		// The FLOOR an image expands to, where ImageMaxTokens is the ceiling. A large
+		// VLM given too few visual tokens answers confidently off a thumbnail.
+		if s.ImageMinTokens > 0 {
+			bound += fmt.Sprintf(" --image-min-tokens %d", s.ImageMinTokens)
+		}
 		// On the cpu backend the template's own chat models carry neither -ngl nor
 		// --flash-attn; a GPU-less build would only ignore them, so the vision seat
 		// omits them too and renders the same shape.
@@ -688,6 +702,15 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 		fa := " --flash-attn __FLASH_ATTN__"
 		if p.Backend == "cpu" {
 			gpuFlags, fa = "", ""
+		}
+		// A seat too large for one card declares how it splits. Order matters only in
+		// that --tensor-split is positional over the seat's OWN visible devices, which
+		// mediaseat.Validate checks against its gpu_env.
+		if p.Backend != "cpu" && s.SplitMode != "" {
+			gpuFlags += " -sm " + s.SplitMode
+			if s.TensorSplit != "" {
+				gpuFlags += " --tensor-split " + s.TensorSplit
+			}
 		}
 		fmt.Fprintf(&b, "    cmd: >-\n"+
 			"      __LLAMA_BIN__/llama-server%s --model __MODELS__/%s --mmproj __MODELS__/%s\n"+
