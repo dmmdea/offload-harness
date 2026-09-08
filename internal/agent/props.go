@@ -99,6 +99,17 @@ func ProbeSeatPin(ctx context.Context, base, model string) (SeatPin, bool) {
 	if b == "" {
 		return SeatPin{}, false
 	}
+	// ONE deadline for the WHOLE probe, not one per HTTP call. seatPinClient's
+	// timeout bounds a single Do(), so once this function could issue more than
+	// one request (the vLLM fallback below) the file's stated contract — pinning
+	// never costs more than seatPinClient.Timeout — would have quietly become
+	// "up to 3x that", on the SYNCHRONOUS path that gates every agent task's
+	// returned result (pipeline/agenttask.go). A shared deadline keeps the
+	// promise for both engines: the llama.cpp path is unchanged (one call, same
+	// bound) and the vLLM path spends the SAME budget across its calls instead
+	// of a fresh one each. A caller's own shorter deadline still wins.
+	ctx, cancel := context.WithTimeout(ctx, seatPinClient.Timeout)
+	defer cancel()
 	u := b + "/upstream/" + url.PathEscape(model) + "/props"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -111,14 +122,25 @@ func ProbeSeatPin(ctx context.Context, base, model string) (SeatPin, bool) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		// /props is llama.cpp's endpoint; vLLM does not serve it and answers
-		// 404. Before this fallback that made seat_config_* permanently ABSENT
-		// on every vLLM seat, which is not a cosmetic gap: an unpinned row
-		// cannot enter a paired experiment, so two vLLM arms could not be
-		// told apart by the record at all. Measured consequence (2026-09-08):
-		// a 4B-vs-9B seat comparison on the A2 was published with the model,
-		// the engine build and the served window all unrecorded, and the
-		// conclusion rested on arms that differed in ways nothing captured.
-		return probeVLLMSeatPin(ctx, b, model)
+		// 404 (verified live against vLLM 0.28.0, 2026-09-08). Before this
+		// fallback that made seat_config_* permanently ABSENT on every vLLM
+		// seat, which is not a cosmetic gap: an unpinned row cannot enter a
+		// paired experiment, so two vLLM arms could not be told apart by the
+		// record at all. Measured consequence: a 4B-vs-9B seat comparison on
+		// the A2 was published with the model, the engine build and the served
+		// window all unrecorded, and the conclusion rested on arms that
+		// differed in ways nothing captured.
+		//
+		// ONLY 404 falls through. A llama.cpp seat answering 500/503 — mid
+		// crash, overloaded, evicted — is a llama.cpp seat having a bad
+		// moment, not a vLLM seat: chasing it with two more GETs would spend
+		// this probe's budget on a request path that cannot answer, on exactly
+		// the run where the seat is already struggling. Every non-404 keeps
+		// the pre-existing behaviour, one request and an honest absent pin.
+		if resp.StatusCode == http.StatusNotFound {
+			return probeVLLMSeatPin(ctx, b, model)
+		}
+		return SeatPin{}, false
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {

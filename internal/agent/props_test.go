@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // propsFixture mirrors the live payload shape captured from a resident seat
@@ -339,5 +341,87 @@ func TestProbeSeatPinVLLMSingleEntryAliasMismatch(t *testing.T) {
 	}
 	if !strings.Contains(pin.Basis, "served=qwen3.5-9b-vllm") {
 		t.Errorf("basis %q lost the vLLM served name", pin.Basis)
+	}
+}
+
+// Only a 404 means "this engine does not have /props". A llama.cpp seat
+// answering 500/503 is a seat having a bad moment, and chasing it with the
+// vLLM fallback would spend the probe's budget on a path that cannot answer —
+// on exactly the run where the seat is already struggling. The request COUNT
+// is the assertion: an ok=false alone would pass even if the fallback fired.
+func TestProbeSeatPinNon404DoesNotTryTheVLLMFallback(t *testing.T) {
+	for _, status := range []int{http.StatusInternalServerError, http.StatusServiceUnavailable, http.StatusBadGateway} {
+		var hits int32
+		ver, models := vllmFixture("0.28.0", "/hf/hub/models--A/snapshots/aaa", "seat", 131072)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&hits, 1)
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/upstream/seat/props":
+				w.WriteHeader(status) // the seat is unwell, NOT a different engine
+			case "/upstream/seat/version":
+				_ = json.NewEncoder(w).Encode(ver)
+			case "/upstream/seat/v1/models":
+				_ = json.NewEncoder(w).Encode(models)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		if pin, ok := ProbeSeatPin(context.Background(), srv.URL, "seat"); ok {
+			t.Errorf("status %d: produced a pin %q — a struggling llama.cpp seat was pinned as if it were vLLM", status, pin.Basis)
+		}
+		if got := atomic.LoadInt32(&hits); got != 1 {
+			t.Errorf("status %d: made %d requests, want exactly 1 — the vLLM fallback fired on a non-404", status, got)
+		}
+		srv.Close()
+	}
+}
+
+// The whole probe must respect ONE budget, not one per HTTP call: it runs
+// inline on the path that returns an agent task's result, and the vLLM route
+// issues three requests where the llama.cpp route issued one.
+//
+// Every endpoint answers CORRECTLY but SLOWLY (delay just over half the
+// budget). That is what makes the two designs separable, and an earlier
+// version of this test got it wrong: with a single stalled call the probe
+// returns after one client timeout either way, so the test passed against a
+// deliberately broken build. Here, with three slow-but-valid endpoints:
+//
+//	shared budget  -> the deadline expires mid-probe: NO pin, ~1 budget
+//	per-call budget-> every call succeeds on its own clock: a pin, ~3 delays
+//
+// so both the verdict and the elapsed time discriminate.
+func TestProbeSeatPinTotalBudgetIsSharedAcrossCalls(t *testing.T) {
+	delay := seatPinClient.Timeout/2 + 200*time.Millisecond
+	ver, models := vllmFixture("0.28.0", "/hf/hub/models--A/snapshots/aaa", "seat", 131072)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(delay):
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/upstream/seat/props":
+			http.NotFound(w, r) // slow 404 -> enters the vLLM fallback having already spent budget
+		case "/upstream/seat/version":
+			_ = json.NewEncoder(w).Encode(ver)
+		case "/upstream/seat/v1/models":
+			_ = json.NewEncoder(w).Encode(models)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	start := time.Now()
+	pin, ok := ProbeSeatPin(context.Background(), srv.URL, "seat")
+	elapsed := time.Since(start)
+
+	if ok {
+		t.Errorf("probe produced a pin %q after %s — each call got its own budget, so the probe outran the bound this file promises", pin.Basis, elapsed)
+	}
+	if ceiling := seatPinClient.Timeout + 900*time.Millisecond; elapsed > ceiling {
+		t.Errorf("probe took %s, want under %s — the budget is being spent per call, not shared", elapsed, ceiling)
 	}
 }
