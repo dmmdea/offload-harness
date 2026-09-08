@@ -6,6 +6,44 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.39] - 2026-09-08 - the flagship tier shipped no vLLM agent seat at all
+
+`blackwell-3x16` is the tier whose reference box **is** the 3-card workstation - the machine that produces most of
+the fleet's numbers. It declared no `vllm_seat`, and `llama-swap.win-triple-blackwell.yaml` carried no seat entry,
+no `agent-pool` alias and no cache server. So a fresh install of that tier bound the agent lane to the llama.cpp
+`qwen3.8-27b` seat, while the box itself served `qwen3.8-27b-vllm` across the 5060 Ti pair with a 163,840-token
+window and a 50 GB warm KV store. That is the defect ADR 0035 and #267 fixed for `ampere-16`, one tier over.
+
+The tier now declares its measured seat, and the schema grew the three things that seat needs and `ampere-16`'s
+single-card seat did not:
+
+- **`tensor_parallel`**, validated against the device list. Two cards declared as one loads the whole model onto the
+  first card and silently ignores the second; one card declared as two refuses to start. Both are authoring mistakes
+  the tier table now catches, and the refusal names which one the engine would do.
+- **`cache_server`**, the seat's binding to the LMCache KV store, with `ConfigBlock` deriving the harness's
+  `kv_cache_server` half from it. Those were two hand-maintained descriptions of one store - `kvcacheserver.go` says
+  so itself - and a chunk size that agrees in one file and not the other produces a store that registers cleanly and
+  then serves nothing.
+- **`launch`**, because a Windows box whose engine lives in WSL starts differently: llama-swap runs as SYSTEM and a
+  WSL distro belongs to the interactive user, so the entry drives PowerShell stubs that trigger a scheduled task in
+  the operator's session. New reference set under `setup/templates/vllm-seat/windows-wsl/`.
+
+**A render-time refusal that prevents silent corruption.** `kv_cache_dtype: fp8` together with a cache server and no
+LMCache overlay is refused outright. Stock LMCache restores fp8 pages corrupt (upstream PR #4253) *and reports
+success while doing it* - the store logs hits, the engine answers, and the recovered context is wrong. A seat that
+serves bad text while looking healthy is the worst thing this package can emit, so it is refused rather than left to
+an operator's memory.
+
+**The third card is deliberately not in this seat.** The 3-card pipeline layout serves a *smaller* window (100,352
+against 163,840), costs 32 GB of host RAM instead of 8, draws in the display card, and can use no cache server at
+all - LMCache's documentation addresses per-TP-rank behaviour and never mentions pipeline parallelism. It also
+failed the delegation gate, deferring at 300,010 ms on a contract the 2-card seat finished in 272 s. `ttl_seconds`
+is the house 300: the seat holds two cards while up, and an idle seat that keeps them is a card spent on nothing.
+
+Gated by `TestTripleBlackwellVLLMSeatNeverSpansTheDisplayCard` (display card, tp/device agreement, ttl, cache
+server), proven able to fail by mutating each of the three back and confirming a byte-identical restore. Tier docs
+gain a generated **Agent seat** section, so a seat is no longer documented only inside a tier's free-text notes.
+
 ## [0.113.38] — 2026-09-08 — five Blackwell tiers were shipping a ~40% generation loss
 
 `GGML_CUDA_DISABLE_GRAPHS=1` was baked into the `win-cuda` and `win-cuda-resident` templates, on the 26B seats. On

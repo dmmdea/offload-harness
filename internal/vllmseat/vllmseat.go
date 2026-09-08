@@ -34,7 +34,9 @@
 package vllmseat
 
 import (
+	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -63,8 +65,53 @@ type Spec struct {
 	Unit string `json:"unit"`
 	// Port is what the engine binds on the Tailscale address.
 	Port int `json:"port"`
-	// Device is CUDA_VISIBLE_DEVICES for the engine.
+	// MPPort is the LMCache MP server's loopback port, used only when CacheServer is
+	// set. 0 = Port-1, which is the reference pairing (18797 engine / 18796 server).
+	//
+	// It is a distinct port and not a detail: a scratch or benchmark stack on the same
+	// box MUST take its own, or it serves the production seat's traffic — a day of
+	// measurements was voided that way.
+	MPPort int `json:"mp_port,omitempty"`
+	// Device is CUDA_VISIBLE_DEVICES for the engine. It may name SEVERAL cards
+	// ("0,2"), in which case TensorParallel must equal how many — see its comment.
 	Device string `json:"device,omitempty"`
+	// TensorParallel is --tensor-parallel-size. 0 and 1 both mean one card.
+	//
+	// It is validated against Device rather than left to agree by convention: a
+	// two-card device list with tensor_parallel 1 starts an engine that loads the
+	// whole model onto the first card and silently ignores the second, and a
+	// one-card list with tensor_parallel 2 refuses to start at all. Both are
+	// authoring mistakes a tier table can catch for free.
+	//
+	// PIPELINE parallelism is deliberately absent. The reference 3-card box can run
+	// the 27B across three cards (pipeline 26/26/12), and that layout measured WORSE
+	// on every axis this seat exists for: 100,352 served window against the 2-card
+	// tensor-parallel seat's 163,072, 32 GB of host RAM against 8, the display card
+	// drawn into the engine, and NO cache server — LMCache's documentation addresses
+	// tensor parallelism (it "classifies per-TP-rank") and never mentions pipeline
+	// parallelism at all, so the store has no per-stage story upstream. The 3-card
+	// layout stays what the tier notes already call it: opt-in long-context work,
+	// started by hand, not the delegation lane.
+	TensorParallel int `json:"tensor_parallel,omitempty"`
+	// Launch selects the artifact set, because a seat is started differently on a
+	// Linux node and on a Windows box whose engine lives in WSL. Empty = the
+	// historical LaunchLinuxSystemd.
+	//
+	// This is a field and not a build tag because the tier table is CROSS-COMPILED
+	// evidence: a Windows workstation's tier is rendered and tested on any machine,
+	// and a test that only passes on the host it describes is not a gate.
+	Launch string `json:"launch,omitempty"`
+	// CacheServer binds this seat to the tier's LMCache KV cache server. Optional:
+	// a seat without one keeps its KV entirely in VRAM plus the L1 staging buffer.
+	//
+	// It lives on the SEAT rather than only in config.json's kv_cache_server block
+	// because the two must agree and nothing checked that they did. The harness
+	// block is declarative — internal/config/kvcacheserver.go validates it BY NAME
+	// and never contacts the store — while the engine reads its own seat env, so a
+	// chunk size changed in one place and not the other produced a store that
+	// registered and then served nothing. ConfigBlock derives the harness half from
+	// this one, so there is a single authority.
+	CacheServer *CacheServer `json:"cache_server,omitempty"`
 
 	// ModelRepo is the HF hub repo directory RELATIVE to the deployment's HF home
 	// (e.g. "hub/models--RedHatAI--Qwen3.5-4B-quantized.w4a16"). Relative because the
@@ -140,6 +187,176 @@ type Spec struct {
 	Measured string `json:"measured,omitempty"`
 }
 
+// The launch shapes. A seat is the same engine either way; what differs is who
+// supervises it and therefore what the llama-swap entry's cmd/cmdStop must run.
+const (
+	// LaunchLinuxSystemd is the default: a systemd unit on a Linux node, driven by
+	// the wrapper scripts through a polkit rule.
+	LaunchLinuxSystemd = "linux-systemd"
+	// LaunchWindowsWSL is a Windows box whose engine runs inside a WSL distro.
+	// llama-swap runs as SYSTEM there and cannot start a WSL session itself, so the
+	// entry shells out through a hidden Windows Script Host launcher — the shape the
+	// reference 3-card workstation already runs.
+	LaunchWindowsWSL = "windows-wsl"
+)
+
+// CacheServer is the seat's half of the LMCache KV cache server binding.
+//
+// Every number here is an operating point that must match the engine's, not a
+// preference. The failure this type exists to prevent is silent: a store whose chunk
+// size disagrees with the engine's unified block registers cleanly and then serves
+// nothing, and a store whose namespace outlives a layout change fails reads with
+// "value size exceeds buffer capacity" while reporting success.
+type CacheServer struct {
+	// Store is the L2 adapter: "fs_native" (a filesystem export mounted on the
+	// serving box) or "valkey" (Redis protocol). Empty = fs_native.
+	Store string `json:"store,omitempty"`
+	// Address is the mount point for fs_native, or host:port for valkey.
+	Address string `json:"address"`
+	// L1StagingGB is LMCache MP's pinned host buffer beside the engine. It is a
+	// staging area, not the tier itself: 8 GB restored a 24k context entirely from
+	// the store. 0 = 8.
+	L1StagingGB int `json:"l1_staging_gb,omitempty"`
+	// ChunkSize is LMCache's chunk in TOKENS and MUST equal the engine's unified
+	// block size for this model and KV dtype (1568 for Qwen3.8-27B with fp8 KV, 784
+	// with fp16). A mismatch fails registration at start, loudly — which is the good
+	// case; the bad case is a stale value that merely halves reuse.
+	ChunkSize int `json:"chunk_size"`
+	// KeyPrefix namespaces the store. It MUST change whenever the engine layout, the
+	// KV dtype or the LMCache build changes, or the seat reads pages written under a
+	// layout it no longer has.
+	KeyPrefix string `json:"key_prefix"`
+	// MaxCapacityGB caps what the running MP server will hold, and PruneGB is what
+	// the wrapper prunes the store down to before starting.
+	//
+	// BOTH are needed and they are not the same number. LMCache's own eviction counts
+	// only pages the RUNNING server wrote (upstream F10), so a store carrying pages
+	// from a previous run is invisible to it — measured 2026-09-06, real fan-out took
+	// the reference store from 28 to 99 GB against a 100 GB quota in 75 minutes, and
+	// a dataset AT its quota can refuse the very deletes that would free it.
+	MaxCapacityGB int `json:"max_capacity_gb,omitempty"`
+	PruneGB       int `json:"prune_gb,omitempty"`
+	// NumWorkers is the fs_native adapter's writer count. 0 = 8.
+	NumWorkers int `json:"num_workers,omitempty"`
+	// MountDir is where an fs_native export is mounted on the serving box. The
+	// EXPORT ITSELF is not here: which machine hosts the store, and the credentials
+	// to reach it, are deployment facts and live on Runtime beside the install root
+	// and the HF home. A tier is a hardware class, and naming one host's share in it
+	// hardens that deployment's LAN into every box that classifies the same way.
+	MountDir string `json:"mount_dir,omitempty"`
+	// MinMBPS is a write-throughput FLOOR the wrapper measures before accepting the
+	// mount, and it is the field that makes a LAN store safe to depend on. The
+	// reference export measured 570 MB/s over the wired path, 124 through WireGuard
+	// and 4.6 over Wi-Fi; without a floor the seat silently ran at the Wi-Fi rate,
+	// which is far below the parity the tier is justified by. 0 = no floor.
+	MinMBPS int `json:"min_mbps,omitempty"`
+}
+
+// StoreName is the adapter, defaulted.
+func (c CacheServer) StoreName() string {
+	if s := strings.ToLower(strings.TrimSpace(c.Store)); s != "" {
+		return s
+	}
+	return "fs_native"
+}
+
+// EffectiveL1StagingGB is the pinned host buffer, defaulted.
+func (c CacheServer) EffectiveL1StagingGB() int {
+	if c.L1StagingGB > 0 {
+		return c.L1StagingGB
+	}
+	return 8
+}
+
+// numWorkers is the fs_native writer count, defaulted.
+func (c CacheServer) numWorkers() int {
+	if c.NumWorkers > 0 {
+		return c.NumWorkers
+	}
+	return 8
+}
+
+// L2JSON is the adapter configuration the seat wrapper hands LMCache, rendered with
+// encoding/json so a path holding a quote or a backslash cannot break out of the
+// string and turn a store into a parse error at seat start.
+func (c CacheServer) L2JSON() string {
+	type fsNative struct {
+		Type          string `json:"type"`
+		BasePath      string `json:"base_path"`
+		NumWorkers    int    `json:"num_workers"`
+		UseODirect    bool   `json:"use_odirect"`
+		MaxCapacityGB int    `json:"max_capacity_gb,omitempty"`
+	}
+	type valkey struct {
+		Type    string `json:"type"`
+		Address string `json:"address"`
+	}
+	var v any
+	switch c.StoreName() {
+	case "valkey":
+		v = valkey{Type: "valkey", Address: c.Address}
+	default:
+		v = fsNative{
+			Type: "fs_native", BasePath: c.Address,
+			NumWorkers: c.numWorkers(), UseODirect: false,
+			MaxCapacityGB: c.MaxCapacityGB,
+		}
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		// Every field is a string or an int; Marshal cannot fail on those. Returning
+		// empty rather than panicking keeps a render honest: an empty SEAT_L2 is "no
+		// cache server", which the wrapper handles, and Artifacts' token sweep would
+		// not catch a silently malformed one.
+		return ""
+	}
+	return string(b)
+}
+
+// Validate refuses a cache-server binding that could not work, at AUTHORING time.
+func (c CacheServer) Validate() error {
+	var problems []string
+	switch c.StoreName() {
+	case "fs_native":
+		if !strings.HasPrefix(c.Address, "/") {
+			problems = append(problems, fmt.Sprintf("address %q must be an absolute mount path for fs_native", c.Address))
+		}
+	case "valkey":
+		if _, _, err := net.SplitHostPort(c.Address); err != nil {
+			problems = append(problems, fmt.Sprintf("address %q must be host:port for valkey", c.Address))
+		}
+	default:
+		problems = append(problems, fmt.Sprintf("store %q is not supported (fs_native, valkey)", c.Store))
+	}
+	if c.ChunkSize <= 0 {
+		problems = append(problems, "no chunk_size — it must equal the engine's unified block size for this model and KV dtype")
+	}
+	if c.KeyPrefix == "" {
+		problems = append(problems, "no key_prefix — the store namespace must be deliberate, never a shared constant")
+	}
+	if c.L1StagingGB < 0 {
+		problems = append(problems, "l1_staging_gb cannot be negative")
+	}
+	// The prune target must leave room for what the running server will then write,
+	// or the seat prunes to a level its own cap immediately exceeds.
+	if c.PruneGB > 0 && c.MaxCapacityGB > 0 && c.PruneGB < c.MaxCapacityGB {
+		problems = append(problems, fmt.Sprintf(
+			"prune_gb %d is below max_capacity_gb %d — the wrapper would prune to a level the running server immediately exceeds",
+			c.PruneGB, c.MaxCapacityGB))
+	}
+	if c.MountDir != "" && c.Address != "" && c.StoreName() == "fs_native" &&
+		!strings.HasPrefix(c.Address, c.MountDir) {
+		problems = append(problems, fmt.Sprintf(
+			"address %q is not under mount_dir %q — the store path would be on the local disk, not the export",
+			c.Address, c.MountDir))
+	}
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		return fmt.Errorf("cache_server: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
 // Runtime is the per-DEPLOYMENT half of a render: the things a tier cannot know
 // because they belong to the box, not the hardware class.
 type Runtime struct {
@@ -161,6 +378,46 @@ type Runtime struct {
 	// names against NAME_MAX 255, failing every L2 store silently. The reference
 	// deployment mounts it at /hf for exactly this reason.
 	HFHome string
+
+	// CacheMountSrc is the fs_native export the seat wrapper mounts before the MP
+	// server starts (e.g. a UNC share on the second device), and CacheMountOpts are
+	// its mount options, which carry the credentials path. Both are per-DEPLOYMENT:
+	// the tier declares that the seat HAS a cache server and how it is shaped, the box
+	// says which machine holds it. Empty CacheMountSrc = already mounted.
+	CacheMountSrc  string
+	CacheMountOpts string
+
+	// LMCacheOverlay is a directory prepended to PYTHONPATH so the MP server and the
+	// engine import a patched LMCache. Empty = stock LMCache.
+	//
+	// It is REQUIRED for an fp8 KV seat with a cache server, and Artifacts refuses the
+	// pair without it: stock LMCache restores fp8 pages CORRUPT (the rank-5 group-edit
+	// bug, upstream PR #4253), and the failure is silent — the store reports hits, the
+	// engine serves, and the text is wrong. A seat that looks healthy while returning
+	// corrupted context is the worst outcome this package can produce, so the render
+	// refuses rather than trusting an operator to remember.
+	LMCacheOverlay string
+
+	// Distro is the WSL distribution the engine runs in. LaunchWindowsWSL only.
+	Distro string
+	// HostPrefix maps the engine's absolute paths into this process's filesystem for
+	// the prerequisite CHECK only — normally `\\wsl.localhost\<distro>`. Empty (the
+	// Linux case) means the two are the same path. It never reaches a rendered file.
+	HostPrefix string
+	// WSLSeatDir is the directory INSIDE that distro holding the seat env file and
+	// the two wrapper scripts. LaunchWindowsWSL only; empty = /root/g7.
+	//
+	// It is a distro path, not a Windows one: the wrappers are executed by bash
+	// inside the distro, and a \\wsl$ path handed to bash is not a path at all.
+	WSLSeatDir string
+}
+
+// wslSeatDir is the in-distro seat directory, defaulted.
+func (r Runtime) wslSeatDir() string {
+	if r.WSLSeatDir != "" {
+		return r.WSLSeatDir
+	}
+	return "/root/g7"
 }
 
 // ModelDir is the absolute HF repo directory for this deployment.
@@ -221,6 +478,28 @@ func (s Spec) Validate(tier string) error {
 	req(s.TTLSeconds != -1, "ttl_seconds -1 means never unload")
 	req(!strings.HasPrefix(s.ModelRepo, "/"),
 		"model_repo must be RELATIVE to the deployment's HF home — an absolute path hardens one box's layout into a hardware tier")
+	switch s.Launch {
+	case "", LaunchLinuxSystemd, LaunchWindowsWSL:
+	default:
+		problems = append(problems, fmt.Sprintf("launch %q is not a launch shape (%s, %s)",
+			s.Launch, LaunchLinuxSystemd, LaunchWindowsWSL))
+	}
+	req(s.TensorParallel >= 0, fmt.Sprintf("tensor_parallel %d cannot be negative", s.TensorParallel))
+	// The device list and the parallel width are two statements of the same fact, and
+	// a tier that lets them disagree ships an engine that ignores a card or refuses to
+	// start. Check them against each other rather than trusting the author.
+	if n := len(s.devices()); n > 0 && s.tensorParallel() != n {
+		problems = append(problems, fmt.Sprintf(
+			"device %q names %d card(s) but tensor_parallel is %d — the engine would %s",
+			s.Device, n, s.tensorParallel(),
+			map[bool]string{true: "load the whole model onto the first card and ignore the rest",
+				false: "refuse to start"}[s.tensorParallel() < n]))
+	}
+	if s.CacheServer != nil {
+		if err := s.CacheServer.Validate(); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
 	if len(problems) == 0 {
 		return nil
 	}
@@ -270,7 +549,7 @@ func (s Spec) Resolve(r Runtime) (Spec, error) {
 // error — it is the documented fallback path, and the reason is returned so the
 // installer can say WHY it fell back instead of silently shipping a lesser seat.
 func (s Spec) Detect(r Runtime) (bool, string) {
-	vllm := filepath.Join(r.VenvDir, "bin", "vllm")
+	vllm := r.hostPath(filepath.Join(r.VenvDir, "bin", "vllm"))
 	if fi, err := os.Stat(vllm); err != nil || fi.IsDir() {
 		return false, "no vllm entry point at " + filepath.ToSlash(vllm)
 	}
@@ -278,10 +557,26 @@ func (s Spec) Detect(r Runtime) (bool, string) {
 	if err != nil {
 		return false, err.Error()
 	}
-	if fi, err := os.Stat(got.ModelPath); err != nil || !fi.IsDir() {
-		return false, "no model snapshot at " + filepath.ToSlash(got.ModelPath)
+	if fi, err := os.Stat(r.hostPath(got.ModelPath)); err != nil || !fi.IsDir() {
+		return false, "no model snapshot at " + filepath.ToSlash(r.hostPath(got.ModelPath))
 	}
 	return true, ""
+}
+
+// hostPath maps a path the ENGINE will see to one this process can stat.
+//
+// They are the same path on a Linux node. On a Windows box whose engine lives in WSL
+// they are not: the venv and the HF cache are distro paths, and statting "/root/g7/..."
+// from Windows reports missing every time — which Detect would report as "build the
+// venv", sending an operator to rebuild something that is already there. The distro's
+// filesystem is reachable from the host under \\wsl.localhost\<distro>, so that is
+// what gets statted. The RENDERED artifacts always carry the distro path, because that
+// is what bash inside the distro must open.
+func (r Runtime) hostPath(p string) string {
+	if r.HostPrefix == "" || !strings.HasPrefix(p, "/") {
+		return p
+	}
+	return r.HostPrefix + filepath.FromSlash(p)
 }
 
 // Bindings are the harness config keys this seat derives. Kept beside the seat so a
@@ -291,7 +586,35 @@ func (s Spec) Bindings() map[string]any {
 	if s.AgentCtxTokens > 0 {
 		out["agent_ctx_tokens"] = s.AgentCtxTokens
 	}
+	if b := s.ConfigBlock(); b != nil {
+		out["kv_cache_server"] = b
+	}
 	return out
+}
+
+// ConfigBlock is the harness's `kv_cache_server` block DERIVED from this seat, or nil
+// when the seat has no cache server.
+//
+// The harness block and the seat env are two descriptions of one store, and until this
+// existed they were maintained by hand in two files — internal/config/kvcacheserver.go
+// says so itself ("the seat wrapper reads its own seat.env, so the operator keeps the
+// two in agreement"). A chunk size or a key prefix that agrees in one place and not the
+// other produces a store that registers cleanly and then serves nothing, which is why
+// this derives rather than duplicates.
+func (s Spec) ConfigBlock() map[string]any {
+	if s.CacheServer == nil {
+		return nil
+	}
+	c := s.CacheServer
+	return map[string]any{
+		"enabled":       true,
+		"store":         c.StoreName(),
+		"address":       c.Address,
+		"l1_staging_gb": c.EffectiveL1StagingGB(),
+		"chunk_size":    c.ChunkSize,
+		"key_prefix":    c.KeyPrefix,
+		"seat":          s.ID,
+	}
 }
 
 // FallbackBindings are what a box WITHOUT the venv binds instead.
@@ -319,9 +642,45 @@ func (s Spec) tokens(r Runtime) map[string]string {
 	if device == "" {
 		device = "0"
 	}
+	cs := s.CacheServer
+	if cs == nil {
+		// A seat with no cache server still renders every token, as empty. The
+		// wrapper reads an empty SEAT_L2 as "no L2 tier" and runs on VRAM plus L1,
+		// which is a supported configuration — whereas leaving the tokens in place
+		// would trip Artifacts' unsubstituted-token sweep and refuse the render.
+		cs = &CacheServer{}
+	}
+	l2, mountSrc, mountDir, mountOpts := "", "", "", ""
+	prune, minMBPS := "", ""
+	if s.CacheServer != nil {
+		l2 = cs.L2JSON()
+		mountSrc, mountDir, mountOpts = r.CacheMountSrc, cs.MountDir, r.CacheMountOpts
+		if cs.PruneGB > 0 {
+			prune = strconv.Itoa(cs.PruneGB)
+		}
+		if cs.MinMBPS > 0 {
+			minMBPS = strconv.Itoa(cs.MinMBPS)
+		}
+	}
 	return map[string]string{
 		"__SEAT_ID__":          s.ID,
 		"__POOL_ALIAS__":       pool,
+		"__TENSOR_PARALLEL__":  strconv.Itoa(s.tensorParallel()),
+		"__MP_PORT__":          strconv.Itoa(s.mpPort()),
+		"__LMCACHE_OVERLAY__":  r.LMCacheOverlay,
+		"__DISTRO__":           r.Distro,
+		"__WSL_SEAT_DIR__":     r.wslSeatDir(),
+		"__SEAT_ENV__":         s.ID + ".env",
+		"__L1_GB__":            strconv.Itoa(cs.EffectiveL1StagingGB()),
+		"__CHUNK__":            strconv.Itoa(cs.ChunkSize),
+		"__KEY_PREFIX__":       cs.KeyPrefix,
+		"__L2_JSON__":          l2,
+		"__MOUNT_SRC__":        mountSrc,
+		"__MOUNT_DIR__":        mountDir,
+		"__MOUNT_OPTS__":       mountOpts,
+		"__PRUNE_GB__":         prune,
+		"__MIN_MBPS__":         minMBPS,
+		"__EXTRA_ARGS__":       s.extraArgs(),
 		"__SERVED_NAMES__":     strings.Join(served, " "),
 		"__ALIASES__":          strings.Join(quoted, ", "),
 		"__UNIT__":             s.Unit,
@@ -343,6 +702,65 @@ func (s Spec) tokens(r Runtime) map[string]string {
 		"__REASONING_PARSER__": s.ReasoningParser,
 		"__HEALTH_TIMEOUT__":   strconv.Itoa(s.healthTimeout()),
 	}
+}
+
+// devices is the CUDA_VISIBLE_DEVICES list, split and trimmed. An empty Device is
+// one implicit card, reported as no list so Validate does not fight the default.
+func (s Spec) devices() []string {
+	if strings.TrimSpace(s.Device) == "" {
+		return nil
+	}
+	var out []string
+	for _, d := range strings.Split(s.Device, ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// tensorParallel is --tensor-parallel-size, defaulted to one card.
+func (s Spec) tensorParallel() int {
+	if s.TensorParallel > 0 {
+		return s.TensorParallel
+	}
+	return 1
+}
+
+// extraArgs is the engine's per-model argument tail, assembled from the fields that
+// already carry those facts so a tier states each of them exactly once.
+//
+// The two parser flags are NOT optional for an agent seat and they travel together:
+// the harness's agent loop sends tool_choice=auto, and vLLM answers 400 unless BOTH
+// --enable-auto-tool-choice and a parser are present.
+func (s Spec) extraArgs() string {
+	args := []string{"--enable-auto-tool-choice"}
+	if s.ToolCallParser != "" {
+		args = append(args, "--tool-call-parser", s.ToolCallParser)
+	}
+	if s.ReasoningParser != "" {
+		args = append(args, "--reasoning-parser", s.ReasoningParser)
+	}
+	if s.KVCacheDtype != "" {
+		args = append(args, "--kv-cache-dtype", s.KVCacheDtype)
+	}
+	return strings.Join(args, " ")
+}
+
+// mpPort is the LMCache MP server's loopback port, defaulted beside the engine's.
+func (s Spec) mpPort() int {
+	if s.MPPort > 0 {
+		return s.MPPort
+	}
+	return s.Port - 1
+}
+
+// launch is the artifact set this seat is started by, defaulted.
+func (s Spec) launch() string {
+	if s.Launch != "" {
+		return s.Launch
+	}
+	return LaunchLinuxSystemd
 }
 
 func (s Spec) healthTimeout() int {
@@ -383,8 +801,18 @@ func (s Spec) Entry(r Runtime) string {
 	if len(s.Aliases) > 0 {
 		fmt.Fprintf(&b, "    aliases: [%s]\n", strings.Join(s.Aliases, ", "))
 	}
-	fmt.Fprintf(&b, "    cmd: %s/vllm-seat-cmd.sh\n", r.SeatDir)
-	fmt.Fprintf(&b, "    cmdStop: %s/vllm-seat-cmdstop.sh\n", r.SeatDir)
+	// The two launch shapes differ ONLY here. On Linux the wrappers are executed
+	// directly; on Windows llama-swap runs as SYSTEM and a WSL distro belongs to the
+	// interactive user, so the wrapper is a PowerShell stub that triggers a scheduled
+	// task in the operator's session (SYSTEM and S4U both measured unable to start the
+	// distro). Everything below this point is identical either way.
+	if s.launch() == LaunchWindowsWSL {
+		fmt.Fprintf(&b, "    cmd: %s\n", strconv.Quote(winStub(r.SeatDir, "seat-cmd.ps1", s.ID)))
+		fmt.Fprintf(&b, "    cmdStop: %s\n", strconv.Quote(winStub(r.SeatDir, "seat-cmdstop.ps1", s.ID)))
+	} else {
+		fmt.Fprintf(&b, "    cmd: %s/vllm-seat-cmd.sh\n", r.SeatDir)
+		fmt.Fprintf(&b, "    cmdStop: %s/vllm-seat-cmdstop.sh\n", r.SeatDir)
+	}
 	fmt.Fprintf(&b, "    proxy: http://%s:%d\n", r.ProxyHost, s.Port)
 	fmt.Fprintf(&b, "    checkEndpoint: /health\n")
 	// vLLM 404s any name it does not serve, so every alias is rewritten to the id.
@@ -403,9 +831,35 @@ func (s Spec) Entry(r Runtime) string {
 	return b.String()
 }
 
+// winStub is the llama-swap cmd/cmdStop command line for a Windows/WSL seat: the
+// 64-bit PowerShell by absolute path, because llama-swap runs as SYSTEM and its PATH
+// is not the operator's — a bare "powershell" resolved to a different host once and
+// the seat never started.
+func winStub(seatDir, script, seat string) string {
+	return `C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -ExecutionPolicy Bypass -File ` +
+		filepath.ToSlash(filepath.Join(seatDir, script)) + ` ` + seat
+}
+
+// TemplatesDir is the reference-template directory for this seat's launch shape.
+func (s Spec) TemplatesDir(root string) string {
+	return filepath.Join(root, "setup", "templates", "vllm-seat", s.launch())
+}
+
 // artifactFiles maps a template file to the name it is installed under. The unit and
 // the polkit rule are named after the unit so two seats never collide on one box.
 func (s Spec) artifactFiles() map[string]string {
+	if s.launch() == LaunchWindowsWSL {
+		// The env file carries the seat ID so the two seats a 3-card box may run
+		// (the tensor-parallel pair and the opt-in 3-card layout) never overwrite
+		// each other's operating point.
+		return map[string]string{
+			"seat.env":                s.ID + ".env",
+			"seat-cmd.ps1":            "seat-cmd.ps1",
+			"seat-cmdstop.ps1":        "seat-cmdstop.ps1",
+			"hidden.vbs":              "hidden.vbs",
+			"register-seat-tasks.ps1": "register-seat-tasks.ps1",
+		}
+	}
 	return map[string]string{
 		"vllm-seat.service":             s.Unit + ".service",
 		"vllm-seat-run.sh":              "vllm-seat-run.sh",
@@ -425,6 +879,19 @@ func (s Spec) Artifacts(templatesDir string, r Runtime) (map[string]string, erro
 	}
 	if err := r.Validate(); err != nil {
 		return nil, err
+	}
+	// fp8 KV pages restore CORRUPT through stock LMCache (rank-5 group edit, upstream
+	// PR #4253) and nothing reports it: the store logs hits, the engine answers, and
+	// the recovered context is wrong. Refuse the combination rather than render a seat
+	// whose failure mode is bad text that looks like good text.
+	if s.CacheServer != nil && strings.HasPrefix(strings.ToLower(s.KVCacheDtype), "fp8") && r.LMCacheOverlay == "" {
+		return nil, fmt.Errorf("vllm seat %s: kv_cache_dtype %q with a cache_server needs an LMCache overlay "+
+			"(Runtime.LMCacheOverlay) — stock LMCache restores fp8 pages corrupt (upstream PR #4253) and reports "+
+			"success while doing it, so this pair would serve wrong context silently", s.ID, s.KVCacheDtype)
+	}
+	if s.launch() == LaunchWindowsWSL && r.Distro == "" {
+		return nil, fmt.Errorf("vllm seat %s: launch %s needs Runtime.Distro — the wrappers must name the WSL "+
+			"distribution the engine runs in", s.ID, LaunchWindowsWSL)
 	}
 	resolved, err := s.Resolve(r)
 	if err != nil {

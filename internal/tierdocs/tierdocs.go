@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/mediaseat"
+	"github.com/dmmdea/offload-harness/internal/vllmseat"
 )
 
 // Profile mirrors the fields setup/templates/profiles.json defines. Unknown keys
@@ -47,6 +48,7 @@ type Profile struct {
 	// models, seed keys become spawn-per-job bindings — and a page that showed only
 	// the seed would understate what the tier delivers.
 	MediaSeats []mediaseat.Seat `json:"media_seats"`
+	VLLMSeat   *vllmseat.Spec   `json:"vllm_seat"`
 	Extra      json.RawMessage  `json:"-"`
 }
 
@@ -236,6 +238,8 @@ func renderTier(name string, p Profile, reports []string) string {
 	// the README's media column then repeated.
 	mediaBase := mediaSeed(p.ConfigSeed)
 	mediaMidHigh := mediaSeed(p.ConfigSeedMidHigh)
+
+	b.WriteString(agentSeatSection(p))
 
 	b.WriteString("\n## Media\n\n")
 	if len(p.MediaSeats) > 0 {
@@ -434,4 +438,49 @@ func dash(s string) string {
 		return "—"
 	}
 	return s
+}
+
+// agentSeatSection documents the tier's persistent vLLM agent seat. Until this existed the
+// seat appeared only inside the tier's free-text notes, so the one thing a reader most needs
+// about the agent lane — which model it is, how many cards it takes, and whether it has a
+// cache server — was buried in prose and absent from every table.
+func agentSeatSection(p Profile) string {
+	var b strings.Builder
+	b.WriteString("\n## Agent seat\n\n")
+	s := p.VLLMSeat
+	if s == nil {
+		b.WriteString("This tier declares no persistent vLLM agent seat: the agent lane runs on the\n" +
+			"llama.cpp seat named by `agent_model` above, in the tier's own llama-swap config.\n")
+		return b.String()
+	}
+	b.WriteString("This tier declares a persistent **vLLM** agent seat, and the installer RENDERS it — the\n" +
+		"llama-swap entry, the start/stop wrappers and the harness `agent_model` binding all derive from\n" +
+		"one declaration, so the seat and the lane routing to it cannot disagree.\n\n" +
+		"| setting | value | what it controls |\n|---|---|---|\n")
+	fmt.Fprintf(&b, "| id | `%s` | the llama-swap model id, `--served-model-name`, and what `agent_model` binds to |\n", s.ID)
+	fmt.Fprintf(&b, "| cards | `%s` | `CUDA_VISIBLE_DEVICES`, in PCI order |\n", dash(s.Device))
+	fmt.Fprintf(&b, "| tensor_parallel | %d | `--tensor-parallel-size`; must equal how many cards are listed |\n", s.TensorParallel)
+	fmt.Fprintf(&b, "| max_model_len | %d | the served window |\n", s.MaxModelLen)
+	fmt.Fprintf(&b, "| kv_cache_dtype | `%s` | KV precision — backend-dependent, not free everywhere |\n", dash(s.KVCacheDtype))
+	fmt.Fprintf(&b, "| ttl_seconds | %d | idle window before the seat unloads and frees its cards |\n", s.TTLSeconds)
+	fmt.Fprintf(&b, "| launch | `%s` | which artifact set starts it |\n", dash(s.Launch))
+	fmt.Fprintf(&b, "| fallback | `%s` | the llama.cpp seat a box WITHOUT the vLLM venv serves instead |\n", dash(s.Fallback))
+	if c := s.CacheServer; c != nil {
+		b.WriteString("\n### Cache server\n\nThis seat is backed by a KV **cache server**: a context that leaves VRAM comes back from\n" +
+			"the store instead of being recomputed, and it survives a seat swap.\n\n| setting | value |\n|---|---|\n")
+		fmt.Fprintf(&b, "| store | `%s` |\n", c.StoreName())
+		fmt.Fprintf(&b, "| address | `%s` |\n", c.Address)
+		fmt.Fprintf(&b, "| chunk_size | %d — must equal the engine's unified block size at this KV dtype |\n", c.ChunkSize)
+		fmt.Fprintf(&b, "| l1_staging_gb | %d |\n", c.EffectiveL1StagingGB())
+		fmt.Fprintf(&b, "| key_prefix | `%s` |\n", c.KeyPrefix)
+		if c.MinMBPS > 0 {
+			fmt.Fprintf(&b, "| min_mbps | %d — a mount slower than this is REFUSED |\n", c.MinMBPS)
+		}
+		b.WriteString("\nThe store is a second device and stays **optional**: a box without one runs the seat on\n" +
+			"VRAM plus the L1 staging buffer.\n")
+	}
+	if s.Measured != "" {
+		fmt.Fprintf(&b, "\n> %s\n", s.Measured)
+	}
+	return b.String()
 }

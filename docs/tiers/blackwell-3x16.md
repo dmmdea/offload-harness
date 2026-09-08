@@ -14,6 +14,42 @@
 | agent_ctx_tokens | 131072 | the agent's `-ctx-tokens` compaction budget |
 | 26B-A4B | `gpu` | whether the 26B MoE is served, and where its experts live |
 
+## Agent seat
+
+This tier declares a persistent **vLLM** agent seat, and the installer RENDERS it — the
+llama-swap entry, the start/stop wrappers and the harness `agent_model` binding all derive from
+one declaration, so the seat and the lane routing to it cannot disagree.
+
+| setting | value | what it controls |
+|---|---|---|
+| id | `qwen3.8-27b-vllm` | the llama-swap model id, `--served-model-name`, and what `agent_model` binds to |
+| cards | `0,2` | `CUDA_VISIBLE_DEVICES`, in PCI order |
+| tensor_parallel | 2 | `--tensor-parallel-size`; must equal how many cards are listed |
+| max_model_len | 163840 | the served window |
+| kv_cache_dtype | `fp8` | KV precision — backend-dependent, not free everywhere |
+| ttl_seconds | 300 | idle window before the seat unloads and frees its cards |
+| launch | `windows-wsl` | which artifact set starts it |
+| fallback | `qwen3.8-27b` | the llama.cpp seat a box WITHOUT the vLLM venv serves instead |
+
+### Cache server
+
+This seat is backed by a KV **cache server**: a context that leaves VRAM comes back from
+the store instead of being recomputed, and it survives a seat swap.
+
+| setting | value |
+|---|---|
+| store | `fs_native` |
+| address | `/mnt/kvcache/lmcache-seat-tp2-fp8` |
+| chunk_size | 1568 — must equal the engine's unified block size at this KV dtype |
+| l1_staging_gb | 8 |
+| key_prefix | `qube-seat-tp2-fp8` |
+| min_mbps | 200 — a mount slower than this is REFUSED |
+
+The store is a second device and stays **optional**: a box without one runs the seat on
+VRAM plus the L1 staging buffer.
+
+> RTX 5060 Ti pair (devices 0 and 2 in PCI order) on the 3-card reference workstation, vLLM 0.28.0 + LMCache MP 0.5.5rc3 in the `freetoken` WSL distro, fp8 KV with the PR #4253 overlay. THE TIER SHIPPED NO vLLM SEAT AT ALL UNTIL NOW: llama-swap.win-triple-blackwell.yaml contained no seat entry, no agent-pool alias and no cache server, so a fresh install of the tier whose reference box IS this workstation fell back to the llama.cpp `qwen3.8-27b` seat while the box itself served the vLLM seat with a 50 GB warm store — the same defect ADR 0035 and PR #267 fixed for ampere-16, one tier over. Operating point is the live seat-tp2.env: window 163,840 at util 0.90 (fp8 pool 177,766 tokens, ~1.08x margin; fp16 served 100,352), batched 3135, seqs 32. Cache server measured 2026-09-04 Phase 8: fs_native over SMB 3.1.1 to the Lenovo export, 23.7k tokens restored in 0.56-0.70 s (44x) against 3.8 s through the Valkey adapter; the wired path measured 570 MB/s, so SEAT_L2_MIN_MBPS 200 refuses the WireGuard (124) and Wi-Fi (4.6) paths. THE THIRD CARD IS NOT IN THIS SEAT AND THAT IS THE MEASURED CHOICE, not an omission: the 3-card pipeline layout (pp 26/26/12) serves a SMALLER window (100,352), costs 32 GB of host RAM instead of 8, draws in the display card, and can use no cache server at all — LMCache documents per-TP-rank behaviour and never addresses pipeline parallelism. It also FAILED the delegation gate, deferring at 300,010 ms on a real digest contract the 2-card seat finished in 272 s. It stays what the tier notes call it: opt-in long-context work, not the delegation lane. Records: Benchmarks and Optimizations/2026-09-01-vllm-lmcache-results/, 2026-09-02-lmcache-research-pass.md, and the live /root/g7/seat-tp2.env.
+
 ## Media
 
 This tier serves these media **seats** — models in its own llama-swap config, rendered
