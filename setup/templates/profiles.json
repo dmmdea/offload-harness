@@ -529,6 +529,7 @@
       ]
     },
     "ampere-16": {
+      "disable_cuda_graphs": true,
       "vllm_seat": {
         "id": "qwen3.5-4b-vllm",
         "aliases": [
@@ -620,6 +621,7 @@
       ]
     },
     "volta-16": {
+      "disable_cuda_graphs": true,
       "ctx_size": 32768,
       "kv_type": "q8_0",
       "agent_ctx_tokens": 32768,
@@ -682,6 +684,7 @@
       ]
     },
     "ampere-8": {
+      "disable_cuda_graphs": true,
       "ctx_size": 32768,
       "kv_type": "q8_0",
       "agent_ctx_tokens": 32768,
@@ -843,6 +846,7 @@
       ]
     },
     "ampere-6": {
+      "disable_cuda_graphs": true,
       "ctx_size": 32768,
       "kv_type": "q8_0",
       "agent_ctx_tokens": 32768,

@@ -81,6 +81,10 @@ type servingProfile struct {
 	MediaSeats []mediaseat.Seat `json:"media_seats"`
 	// GPUEnv is added to every model in the rendered config.
 	GPUEnv []string `json:"gpu_env"`
+	// DisableCUDAGraphs keeps GGML_CUDA_DISABLE_GRAPHS=1 on the 26B seats for tiers
+	// that have never been measured with graphs on. Absent = false = graphs ON, which
+	// is the measured win (+40-51% generation on sm_120, output identical).
+	DisableCUDAGraphs bool `json:"disable_cuda_graphs"`
 	// VLLMSeat is the tier's persistent vLLM agent seat (ADR 0035). It renders only
 	// when the box actually has the hand-built venv and the weights — see
 	// vllmRuntimeFor — and otherwise the tier falls back to the llama.cpp seat the
@@ -371,7 +375,8 @@ func runInstallRender(args []string) error {
 		MoE26B: moe, Threads: n, Include26B: include26B, IncludeQ38: p.IncludeQwen38,
 		IncludeQ354B: p.IncludeQwen354B, IncludeQ359B: p.IncludeQwen359B,
 		Seats: p.MediaSeats, Home: *home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
-		VLLMSeat: seat, VLLMRuntime: seatRT,
+		DisableCUDAGraphs: p.DisableCUDAGraphs,
+		VLLMSeat:          seat, VLLMRuntime: seatRT,
 	})
 	if err != nil {
 		return fmt.Errorf("tier %s: %w", id, err)
