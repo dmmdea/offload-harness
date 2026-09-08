@@ -6,6 +6,32 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.34] — 2026-09-07 — blackwell-8 advertised half the window its own agent seat was serving
+
+`agent_ctx_tokens` is what the harness ADVERTISES, and the fleet sizes every delegation contract from it. When it
+understates what the seat actually serves, the node quietly works at a fraction of its window and nothing ever
+errors — the failure the delegation rules already call out by name ("size contracts from the live ceiling, never
+from a written figure").
+
+### Fixed
+- **`blackwell-8` advertised `agent_ctx_tokens` 16384 while its rendered `qwen3.5-9b-agent` entry carries an
+  explicit `--ctx-size 32768`.** That literal is backed by the tier's own fit measurement on the RTX 5060 (6,344
+  MiB at 16K q8_0, 6,696 MiB at 32K — Qwen3.5's Gated-DeltaNet hybrid KV barely grows with context), and the twin
+  `ampere-8`, same 8 GB class and same seat, has advertised 32768 since its own raise. Every contract to a
+  blackwell-8 node was cut to half the window the seat was already serving.
+
+### Not changed, deliberately
+`blackwell-8.ctx_size` stays **16384**. It governs the CASCADE seats (e4b/e2b and the cpu_moe 26B), not the agent
+seat, and the 32K fit above was measured on the 9B alone — reading it as evidence for the cascade is exactly the
+notes-field-as-measurement error this table keeps being bitten by. `ampere-8` ships 32768 for the cascade on the
+same 8 GB class, so the raise is plausible and probably right; it needs one llama-bench pass on the Dell OptiPlex
+7060 reference box before it ships, not an inference from a sibling.
+
+### Gate
+`TestAgentWindowMatchesWhatTheAgentSeatServes` — for every tier declaring an agent seat, the advertised window must
+equal what the seat serves: a literal `--ctx-size` must match `agent_ctx_tokens` exactly, and a seat carrying
+`__CTX__` must match `ctx_size`. Mutation-tested: it reports blackwell-8's 16384/32768 split.
+
 ## [0.113.33] — 2026-09-07 — the 3-card tier could not load, and the gates that should have caught it were blind
 
 0.113.32 shipped `blackwell-3x16` with a llama-swap config that does not parse, a placement law nothing enforced,
