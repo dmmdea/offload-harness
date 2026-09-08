@@ -7,39 +7,40 @@ import (
 	"testing"
 )
 
-// reasoningBudgetFloor is the completion budget a REASONING seat needs before its
-// answer survives its own thinking, and it is a measured number, not a guess.
+// A reasoning seat must DECLARE its completion budget. There is deliberately no floor:
+// the right value is a property of the seat, measured, and a one-size number is wrong in
+// BOTH directions.
 //
-// The agent loop's built-in default is 1,024 completion tokens, and reasoning counts
-// against that budget. Measured on the Qube 27B seat (2026-09-04): 839 of those 1,024
-// went to thinking and answers came back cut or empty, which is why that box's config
-// was raised to 4,096. Measured again on the A2's Qwen3.5-9B (2026-09-08), where the
-// same shape is total rather than partial:
+// Measured on the A2 (2026-09-08), same eight contracts, blind-judged, paired on the
+// packets both arms answered:
 //
-//	finish_reason: length   content: None   reasoning_tokens: 1024 of 1024
+//	Qwen3.5-9B   1024 -> 4096:  +0.62  (17 wins, 1 tie, 0 losses) - filler findings 6 -> 0
+//	Qwen3.5-4B   1024 -> 4096:  -0.88  ( 6 wins, 0 ties, 15 losses) - filler findings 0 -> 3
 //
-// The entire budget spent thinking, zero tokens of answer, on a seat whose parsers and
-// weights were both fine.
+// Too little budget truncates a thinking-heavy model into degenerate output; too much lets
+// a small one ramble. The 4B's own tier was briefly seeded at 4,096 on the strength of a
+// single-call cliff measured on the 9B, which is exactly the reasoning this comment now
+// exists to prevent: the cliff was real and the inference from it was not.
 //
-// The loop does mitigate — internal/agent/loop.go raises the budget 4x (cap 8,192) and
-// re-runs the step — but that raise is ONCE PER RUN, and it only fires when the step
-// returned neither content nor a tool call. It is a safety net, not a budget.
-const reasoningBudgetFloor = 4096
+// The loop already covers the starvation emergency - internal/agent/loop.go raises the
+// budget 4x (cap 8,192) and re-runs the step - but that raise is ONCE PER RUN and only
+// fires when a step returned neither content nor a tool call. It is a safety net, not a
+// budget, and a seat that relies on it pays a wasted step every run.
 
-// A tier that seats a REASONING model must also seed the completion budget that
-// reasoning costs. The two are one decision and this test refuses to let them separate.
+// A tier that seats a REASONING model must seed a completion budget CHOSEN for that seat,
+// rather than inheriting the loop default by accident. The test enforces the declaration,
+// not a value - see the block above for why a value would be wrong.
 //
 // The defect this exists to prevent, measured end to end on 2026-09-08: `ampere-16`
-// declared a vllm_seat with `reasoning_parser: qwen3` but seeded no `agent_max_tokens`,
-// so the node ran every delegation at the 1,024 default. Nothing errored. What it
-// produced instead was a published seat-quality comparison in which a 4B "beat" the
-// same-family 9B — because a 9B thinks more than a 4B, so a FIXED budget truncates the
-// larger model harder. The measurement ranked how little each model thought, and the
-// conclusion had to be withdrawn.
+// declared a vllm_seat with `reasoning_parser: qwen3` and seeded no `agent_max_tokens`, so
+// the node ran every delegation at 1,024 by default. Nothing errored, and the budget was
+// never a considered choice. It turned out to matter: on the same eight contracts, blind
+// judged, moving 1024 -> 4096 was worth +0.62 to a 9B and -0.88 to the 4B that tier
+// actually seats.
 //
-// That is the same failure shape TestAgentWindowMatchesWhatTheAgentSeatServes guards on
-// the context axis: a tier quietly advertising less than its own seat needs, where
-// nothing errors and only the output quality degrades.
+// Same failure shape as TestAgentWindowMatchesWhatTheAgentSeatServes on the context axis:
+// a tier silently inheriting a number instead of stating one, where nothing errors and
+// only output quality moves.
 func TestAReasoningSeatSeedsItsCompletionBudget(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("setup", "templates", "profiles.json"))
 	if err != nil {
@@ -67,9 +68,10 @@ func TestAReasoningSeatSeedsItsCompletionBudget(t *testing.T) {
 		rawTok, ok := p.ConfigSeed["agent_max_tokens"]
 		if !ok {
 			t.Errorf("tier %q seats %q with reasoning_parser %q but its config_seed sets no agent_max_tokens: "+
-				"every install of this tier runs the agent loop at the 1,024 default, where a thinking seat "+
-				"spends the whole budget on <think> and returns empty content. Seed agent_max_tokens (>= %d).",
-				tier, p.VLLMSeat.ID, p.VLLMSeat.ReasoningParser, reasoningBudgetFloor)
+				"every install of this tier then inherits the loop's 1,024 default by accident rather than by "+
+				"measurement. Seed a value measured for THIS seat - there is no universal right answer "+
+				"(the 9B gained +0.62 going 1024->4096 while the 4B lost 0.88 on the same move).",
+				tier, p.VLLMSeat.ID, p.VLLMSeat.ReasoningParser)
 			continue
 		}
 		var tok int
@@ -77,10 +79,8 @@ func TestAReasoningSeatSeedsItsCompletionBudget(t *testing.T) {
 			t.Errorf("tier %q: agent_max_tokens is not a number: %s", tier, rawTok)
 			continue
 		}
-		if tok < reasoningBudgetFloor {
-			t.Errorf("tier %q seats a reasoning model but seeds agent_max_tokens = %d, below the measured floor %d: "+
-				"reasoning counts against this budget, so the seat's answers get truncated before they are written.",
-				tier, tok, reasoningBudgetFloor)
+		if tok <= 0 {
+			t.Errorf("tier %q seats a reasoning model and seeds agent_max_tokens = %d, which is not a budget", tier, tok)
 		}
 	}
 
