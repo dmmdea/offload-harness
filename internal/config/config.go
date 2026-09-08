@@ -919,6 +919,14 @@ type Config struct {
 	// (today: "hailo-8l"). `profile` stays the one GPU tier; an empty list is
 	// byte-identical to a box with no accelerator — tools/list does not change.
 	Accelerators []string `json:"accelerators,omitempty"`
+	// FleetAccelerators lists accelerator ids this box does NOT carry but may
+	// reach over the fleet (Coral design Phase B, 0.115.0): each id's tools
+	// register locally and forward to the first delegate_remotes node whose
+	// /fleet/health lists the id, the image travelling inside the job (cap
+	// 8 MiB). Explicit opt-in keeps tools/list byte-identical for a box that
+	// declares nothing; a local device always wins over a remote one for the
+	// same capability name.
+	FleetAccelerators []string `json:"fleet_accelerators,omitempty"`
 	// HailoEndpoint is the loopback HTTP sidecar base (server/http_server.py in
 	// the Hailo repo). Loopback only — the sidecar is not an authenticated service.
 	HailoEndpoint string `json:"hailo_endpoint,omitempty"`

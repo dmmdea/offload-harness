@@ -6,6 +6,27 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.0] - 2026-09-08 - accelerator work travels to the box that has the device (Coral Phase B)
+
+The Coral was fully served on the Lenovo and unreachable from the Qube except by a hand-routed
+`agent_delegate` contract naming a path on the Lenovo's disk. Operator: "ship it" (routing),
+"fix it" (the path). Both, per ADR 0038:
+
+- **Fleet task `accel`** — `{accelerator, tool, args, image_b64?, image_name?}`: the node writes the
+  shipped image (cap 8 MiB) into a job-scoped dir, rewrites `args.image_path` to it, runs the tool on
+  its LOCAL lane only (a forwarded call never forwards again), and returns the tool's dict; a mask
+  the tool writes there comes back as `mask_b64`. Served exactly when the node lists a device;
+  exempt from the fleet concurrency cap (it never touches the text endpoint).
+- **`fleet_accelerators: [<id>]`** on a box without the device registers that device's tools
+  locally — MCP surface and agent loop, `[FLEET: …]` in every description — forwarding through the
+  new `internal/accelremote` to the first `delegate_remotes` node whose health lists the id.
+  `image_path` is read on the calling box; its bytes travel with the job. Results carry
+  `placement{node, base, accelerator, job_id, wall_ms, remote:true}`. A local device always wins
+  a shared name (ADR 0037 extended: local first, then fleet, in config order). A box that lists
+  nothing is byte-identical (pinned).
+- `NodeView.Accelerators` decodes health's `accelerators`; `offload_status` lists a fleet device
+  with `fleet: true`. ADR 0037 was missing from the decisions index; both rows added.
+
 ## [0.114.2] - 2026-09-08 - blackwell-2x16 seeds the pair's vLLM seat (0.114.1 overturned)
 
 0.114.1 declared the 2-card tier had no vLLM seat, from an arm that spanned the RTX 5070 Ti display

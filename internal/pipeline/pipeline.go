@@ -402,6 +402,12 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 		return p.runAgentTask(ctx, req, meta, start)
 	}
 
+	// accel runs ONE local accelerator tool for a fleet caller that lacks the
+	// device (acceltask.go). Its own branch: no cascade, no grammar, no GPU.
+	if req.Task == core.TaskAccel {
+		return p.runAccelTask(ctx, req, meta, start)
+	}
+
 	// generate_svg renders a brand-agnostic parametric SVG component (kind + spec in
 	// params) via internal/svgkit. Its own branch — pure Go, no text cascade, no
 	// grammar, no GPU lock.

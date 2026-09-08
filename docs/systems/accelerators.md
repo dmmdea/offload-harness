@@ -219,6 +219,39 @@ receives every device as an `agent.AccelLane` (`pipeline.NewLoopAccel`, config o
 registers the same tables through `ReadOnlyToolsWithLanes`. The pre-Coral single-lane `NPU`
 injection still works for every existing caller and test.
 
+## Fleet routing — reaching a device this box lacks (0.115.0, ADR 0038)
+
+A box that carries no accelerator can still use one over the fleet. Opt in with
+`fleet_accelerators: ["coral-edgetpu"]` (beside `delegate_remotes`): that device's tool table
+registers locally — MCP surface and agent loop alike, so the parity test still holds — with
+`[FLEET: …]` appended to every description, and each call forwards through
+[`internal/accelremote`](../../internal/accelremote/accelremote.go):
+
+1. **`image_path` is read on THIS box** and its bytes travel inside the job (cap 8 MiB); a
+   caller-side `out_path` is dropped. There is no shared filesystem and no mount.
+2. **Placement is a live probe**: `delegate_remotes` in order, first node whose
+   `/fleet/health` lists the id (2 s per probe; every miss is named in the defer).
+3. **The node runs a fleet task `accel`** — `{accelerator, tool, args, image_b64, image_name}`
+   — on its **local** lane only (a forwarded call never forwards again), in a job-scoped dir
+   that lives as long as the job; a mask the tool writes there returns as `mask_b64`. `accel`
+   is exempt from `fleet_max_concurrent_jobs` (it never touches the text endpoint).
+4. **The result is the tool's dict plus `placement{node, base, accelerator, job_id, wall_ms,
+   remote:true}`.** Transport, placement and dispatch failures are device-prefixed defers
+   (`coral-edgetpu (fleet): …`); the node's own defers and the sidecar's refusals pass through.
+
+Ownership across the fleet is ADR 0037 extended: `accelerators` is walked before
+`fleet_accelerators` on both surfaces, so a local device always wins a shared name, and a box
+that lists a device in both registers the local lane only. A box that lists nothing in
+`fleet_accelerators` is byte-identical to 0.114.x (pinned by
+`TestFleetAcceleratorRegistersForwardedToolsOnly`).
+
+`offload_status.accelerators` lists a fleet device with `fleet: true` and no health probe (the
+probe is per call, at the node). The node's `supported_task_types` gains `accel` exactly when it
+lists a device; `NodeView.Accelerators` decodes the same field for the delegator.
+
+Measured 2026-09-08 from the Qube (no device) against the Lenovo (`coral-edgetpu`): see the
+gate lines in the CHANGELOG entry for 0.115.0.
+
 ## Status
 
 `offload_status` gains an `accelerators` block — present only when the box lists one. For
@@ -235,6 +268,8 @@ temp_c, loaded:[...], models_missing:[...], runtime:{litert, libedgetpu}}` — r
 
 - **Single in-flight inference** — one sidecar process serialises NPU access by construction.
 - **NPU calls are not in the savings ledger in v1** — recorded follow-up.
+- **Forwarded calls ship the whole image** (cap 8 MiB, base64 in the job); a fan-out of
+  accelerator calls across several nodes is not a thing yet — one call, one node.
 - Windows cannot see the device as an "NPU" (no MCDM driver) — irrelevant to this route, which
   reaches the device through HailoRT via the sidecar, not through Windows ML.
 
@@ -266,6 +301,11 @@ On a box with the device (config seeded, sidecar repo checked out):
 - [`internal/hwdetect/classify.go`](../../internal/hwdetect/classify.go) — detection
 - [`internal/tierseed/tierseed.go`](../../internal/tierseed/tierseed.go) —
   `ResolveAccelerators`
+- [`internal/accelremote/accelremote.go`](../../internal/accelremote/accelremote.go) — the
+  forwarder (image bytes, node pick, dispatch + poll, placement)
+- [`internal/fleetnode/accel_task.go`](../../internal/fleetnode/accel_task.go),
+  [`internal/pipeline/acceltask.go`](../../internal/pipeline/acceltask.go) — the `accel`
+  fleet task (payload → job dir → local lane → `mask_b64`)
 - [`internal/fleetnode/gpuinfo.go`](../../internal/fleetnode/gpuinfo.go),
   [`internal/fleetnode/server.go`](../../internal/fleetnode/server.go) — manifest read,
   health advertisement
@@ -280,6 +320,8 @@ On a box with the device (config seeded, sidecar repo checked out):
 
 - [ADR 0024](../architecture/decisions/0024-accelerators-are-additive-to-the-gpu-tier.md) —
   the decision record
+- [ADR 0038](../architecture/decisions/0038-accelerator-work-travels-to-the-box-that-has-the-device.md) —
+  fleet routing: the work travels to the device, bytes included
 - [mcp-server.md](mcp-server.md) — the tool surface this extends
 - [setup-installer.md](setup-installer.md) — detection and seeding in the install flow
 - [fleet-node.md](fleet-node.md) — the health payload that advertises the list

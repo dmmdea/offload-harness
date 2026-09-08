@@ -28,7 +28,7 @@ import (
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
 // messages). Membership is decided per-config by taskConfiguredFor.
-var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", "agent"}
+var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", "agent", "accel"}
 
 // taskConfiguredFor reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
@@ -59,6 +59,11 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 		return cfg.RunGraphScript != ""
 	case "agent":
 		return AgentLaneAdmissible(cfg, loopbackListener)
+	case "accel":
+		// One accelerator tool for a box without the device (Phase B): served
+		// exactly when this node lists a device — the same gate that registers
+		// the tools locally, so health never advertises a lane that is not there.
+		return len(cfg.Accelerators) > 0
 	}
 	// Anything else is only "configured" when it is a VALID cfg.Pipelines key
 	// (Task 6): 100% config-driven, so a new pipeline needs no new case here.
@@ -283,6 +288,8 @@ func BuildRequest(ctx context.Context, cfg config.Config, loopbackListener bool,
 		return buildRunGraph(payload)
 	case "agent":
 		return buildAgentRun(cfg, payload)
+	case "accel":
+		return buildAccel(cfg, payload)
 	}
 	// Any other taskType that reaches here (taskConfigured already gated
 	// membership) must be a configured cfg.Pipelines key (Task 6) — 100%
