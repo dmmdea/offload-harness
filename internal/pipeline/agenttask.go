@@ -214,6 +214,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		ReadRoot:    contextDir,
 		Offload:     NewRecordlessOffload(p.cfg, p.cfg.Model, wall),
 		NPU:         NewLoopNPU(p.cfg),
+		Accel:       NewLoopAccel(p.cfg), // every lane the box lists (ADR 0037): a remote contract sees the tools a local run does
 		Unattended:  true,
 		EnvRules:    p.cfg.AgentEnvRules,
 		// The contract's own replay list, behind this box's seeded context
