@@ -135,6 +135,16 @@ func classifyProfile(f Facts) Verdict {
 
 	// Multi-GPU with at least one NVIDIA outranks any single-card band: the
 	// dual-resident rig serves two models at once rather than swapping.
+	// THREE homogeneous Blackwell 16GB cards -> blackwell-3x16, the reference
+	// workstation's own shape since 2026-08-31. Before this rule the fleet's
+	// most-measured machine classified as dual-gpu, a tier no hardware has ever
+	// run. Same strictness as the 2-card rule above.
+	if f.GPUCount == 3 && vendor == "nvidia" && allArchs(f, "blackwell") &&
+		f.VRAMGb >= 12 && f.VRAMGb < 24 {
+		return Verdict{Profile: "blackwell-3x16", BigRAM: f.RAMGb >= 120,
+			Reason: "three homogeneous Blackwell cards in the 16GB band"}
+	}
+
 	if f.GPUCount >= 2 && vendor == "nvidia" {
 		big := f.RAMGb >= 120
 		reason := "2+ GPUs with NVIDIA present -> the dual-resident rig"

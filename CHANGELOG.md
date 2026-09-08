@@ -6,6 +6,48 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.32] — 2026-09-07 — `blackwell-3x16` ships, and three measured wins get wired
+
+The operator asked three times for the 3-card tier and for install defaults to follow the measurements. This is
+that, not another note about the gap.
+
+**`blackwell-3x16` is a real tier.** The fleet's MOST-measured machine — the reference workstation, three
+Blackwell 16 GB cards = 48.9 GB since 2026-08-31 — had no tier id, and `Get-Profile` filed it as `dual-gpu`: a
+tier no hardware has ever run and that the installer refuses to install (CUDA 13 cannot compile sm_70). A fresh
+install on the box that produces most of the fleet's numbers would have seeded a projection. Now shipped end to
+end: a classifier rule in `setup/detect.ps1` and `internal/hwdetect/classify.go` placed BEFORE the generic `-ge 2`
+catch, a `blackwell-3x16` profile, and `setup/templates/llama-swap.win-triple-blackwell.yaml`.
+
+The template encodes the measured **placement law**, which is the whole point of the tier: **devices 0 and 2 (the
+5060 Ti pair) carry every default seat; device 1 (the RTX 5070 Ti) is the DISPLAY card and gets nothing.** A render
+test asserts mechanically that nothing is pinned to device 1 — on 2026-09-04 a 3-card engine at util 0.87-0.90
+left that card under 1 GB, Windows dropped to a 720p-class mode and the operator had to reboot. The third card
+joins only for two opt-in over-2-card seats that earned their place: `qwen3.8-flash-next` at ncmoe28 /
+`--tensor-split 28,10,10` / q8_0 KV / 131k (12.5-12.9 tok/s, **+47%** over the best 2-card arm, and **15/16** on the
+seed-48 decision set = exact parity with the 27B incumbent) and its native-262k twin at ncmoe32 / 32,8,8.
+
+What the tier does NOT claim, because it was measured: the agent seat stays the **2-card-pinned** 27B. The 3-card
+vLLM seat FAILED the delegation gate — a real harness digest contract DEFERRED at 300,010 ms where the two-card
+seat finished the same contract in 272 s. Three-card serving is opt-in long-context work, not the delegation lane.
+And the third card buys context and concurrency, not speed: llama.cpp's 3-way ceiling is 134.4 tok/s at c32 vs the
+pair's 110-120, while pipeline-parallel vLLM is ~8% SLOWER single-stream than tp2 because stages serialize.
+
+**CUDA graphs back ON for the 26B seats** (`blackwell-2x16` and the new tier). `GGML_CUDA_DISABLE_GRAPHS=1` was
+cargo: it predated every retained yaml backup with no recorded reason. Measured 2026-09-05 (b10720, 3 fresh-serve
+reps, temp 0, exact-string gate): gen **41.4 → 58.0 t/s** (`gemma-4-26b`) and **39.0 → 58.8 t/s**
+(`gemma-4-26b-agent`), prefill unchanged, output identical, GBNF fine. Left set on the non-Blackwell templates,
+which that measurement does not cover. `GGML_CUDA_GRAPH_OPT` stays off (changes output; crashes the MTP 12b).
+
+**`ampere-16` serves the window it was measured at: 32768 → 131072.** 0.113.29 held it back because "no installer
+path renders the vLLM seat". That was the wrong call — the fix is to render the seat, not to ship a smaller number
+than the hardware was measured at. On the reference A2 16 GB at its shipped 40 W / 1200 MHz lock the vLLM seat
+serves `max_model_len` 131,072 with a 356,721-token pool at 11,888 MiB, fans out to **293 tok/s at 32 streams**
+with zero failures, and answers the harness's own 8-digest set **8/8 at a 45 s median against the llama.cpp seat's
+159 s**.
+
+Also fixed: `setup/tests/selftest-profile-measure.test.ps1` asserted `ampere-8` at ctx 16384 and had been failing
+on main since that tier's own measurement raised it to 32768.
+
 ## [0.113.31] — 2026-09-07 — the fleet facts the docs still had wrong
 
 Follow-up to 0.113.30. A staleness sweep across every surface that repeats fleet hardware facts found the docs

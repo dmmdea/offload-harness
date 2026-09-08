@@ -183,6 +183,38 @@ function Get-Profile {
     return @{ profile = 'blackwell-2x16'; big_ram = $bigRam }
   }
 
+  # THREE homogeneous Blackwell 16GB cards -> blackwell-3x16 (the reference
+  # workstation's own shape since 2026-08-31). Placed BEFORE the generic
+  # multi-GPU rule for the same reason blackwell-2x16 is: three sm_120 cards
+  # served by one build, with a per-card placement law, is not the heterogeneous
+  # dual-gpu row. Until this rule existed the fleet's MOST-measured machine
+  # classified as `dual-gpu` -- a tier that has never run on any hardware and
+  # that the installer refuses to install (CUDA 13 cannot compile sm_70). Same
+  # strictness as the 2-card rule: one arch captured PER counted GPU, every one
+  # blackwell, and the largest card in the 16GB band.
+  if ($GpuCount -eq 3 -and $Vendor -eq 'nvidia' -and @($ArchsAll).Count -eq 3 -and
+      -not (@($ArchsAll) | Where-Object { $_ -ne 'blackwell' }) -and
+      $VramGb -ge 12 -and $VramGb -lt 24) {
+    if ($RamGb -ge 120) { $bigRam = $true }
+    return @{ profile = 'blackwell-3x16'; big_ram = $bigRam }
+  }
+
+  # THREE homogeneous Blackwell 16GB cards -> blackwell-3x16 (the reference
+  # workstation's own shape since 2026-08-31). Placed BEFORE the generic
+  # multi-GPU rule for the same reason blackwell-2x16 is: three sm_120 cards
+  # served by one build, with a per-card placement law, is not the heterogeneous
+  # dual-gpu row. Until this rule existed the fleet's MOST-measured machine
+  # classified as `dual-gpu` -- a tier that has never run on any hardware and
+  # that the installer refuses to install (CUDA 13 cannot compile sm_70). Same
+  # strictness as the 2-card rule: one arch captured PER counted GPU, every one
+  # blackwell, and the largest card in the 16GB band.
+  if ($GpuCount -eq 3 -and $Vendor -eq 'nvidia' -and @($ArchsAll).Count -eq 3 -and
+      -not (@($ArchsAll) | Where-Object { $_ -ne 'blackwell' }) -and
+      $VramGb -ge 12 -and $VramGb -lt 24) {
+    if ($RamGb -ge 120) { $bigRam = $true }
+    return @{ profile = 'blackwell-3x16'; big_ram = $bigRam }
+  }
+
   # Multi-GPU with at least one NVIDIA -> the 5060 Ti + V100 dual-resident rig
   # (configs 3-4). Two models resident, no swap. Checked first: a heterogeneous
   # pair outranks any single-card band.
@@ -306,7 +338,10 @@ if ($SelfTest) {
   Assert-Profile '2x blackwell, 64GB'   'nvidia' 'blackwell' 16 2 64  'blackwell-2x16' $false @('blackwell','blackwell')
   Assert-Profile 'pair, archs not captured -> dual-gpu' 'nvidia' 'blackwell' 16 2 128 'dual-gpu' $true
   Assert-Profile 'pair, ONE arch captured -> dual-gpu'  'nvidia' 'blackwell' 16 2 128 'dual-gpu' $true @('blackwell')
-  Assert-Profile '3x blackwell -> dual-gpu'             'nvidia' 'blackwell' 16 3 128 'dual-gpu' $true @('blackwell','blackwell','blackwell')
+  Assert-Profile '3x blackwell -> blackwell-3x16'      'nvidia' 'blackwell' 16 3 128 'blackwell-3x16' $true @('blackwell','blackwell','blackwell')
+  Assert-Profile '3x blackwell, low RAM'               'nvidia' 'blackwell' 16 3 64  'blackwell-3x16' $false @('blackwell','blackwell','blackwell')
+  Assert-Profile '3 GPUs mixed arch -> dual-gpu'       'nvidia' 'blackwell' 16 3 128 'dual-gpu' $true @('blackwell','blackwell','ampere')
+  Assert-Profile '4x blackwell -> dual-gpu'            'nvidia' 'blackwell' 16 4 128 'dual-gpu' $true @('blackwell','blackwell','blackwell','blackwell')
   # The 16GB band is ENFORCED (the template pins the 26B + a ~10GB vision seat per card):
   Assert-Profile '2x blackwell 8GB -> dual-gpu (not the 16GB tier)'  'nvidia' 'blackwell' 8  2 128 'dual-gpu' $true @('blackwell','blackwell')
   Assert-Profile '2x blackwell 32GB -> dual-gpu (not the 16GB tier)' 'nvidia' 'blackwell' 32 2 128 'dual-gpu' $true @('blackwell','blackwell')

@@ -98,7 +98,14 @@ func TestHomogeneousBlackwellPairGetsItsOwnTier(t *testing.T) {
 		{"blackwell+volta (cfg3's real shape)", []string{"blackwell", "volta"}, 2, 64, "dual-gpu", false},
 		{"pair counted but archs not captured", nil, 2, 128, "dual-gpu", true},
 		{"pair with only ONE arch captured", []string{"blackwell"}, 2, 128, "dual-gpu", true},
-		{"three blackwell cards", []string{"blackwell", "blackwell", "blackwell"}, 3, 128, "dual-gpu", true},
+		// Three homogeneous Blackwell cards get their OWN tier as of 0.113.32. This row
+		// asserted "dual-gpu" until then, which is how the fleet's most-measured machine
+		// classified into a tier no hardware has ever run.
+		{"three blackwell cards", []string{"blackwell", "blackwell", "blackwell"}, 3, 128, "blackwell-3x16", true},
+		{"three blackwell, 64GB", []string{"blackwell", "blackwell", "blackwell"}, 3, 64, "blackwell-3x16", false},
+		{"three cards, mixed arch", []string{"blackwell", "blackwell", "ampere"}, 3, 128, "dual-gpu", true},
+		{"three counted, archs not captured", nil, 3, 128, "dual-gpu", true},
+		{"FOUR blackwell cards (no tier yet)", []string{"blackwell", "blackwell", "blackwell", "blackwell"}, 4, 128, "dual-gpu", true},
 		{"single blackwell stays in its band", []string{"blackwell"}, 1, 128, "blackwell-16", false},
 	} {
 		got := Classify(Facts{Vendor: "nvidia", Arch: "blackwell", VRAMGb: 16,
@@ -106,7 +113,7 @@ func TestHomogeneousBlackwellPairGetsItsOwnTier(t *testing.T) {
 		if got.Profile != tc.want {
 			t.Errorf("%s: profile = %q, want %q", tc.label, got.Profile, tc.want)
 		}
-		if got.Profile == "blackwell-2x16" && got.BigRAM != tc.wantBig {
+		if (got.Profile == "blackwell-2x16" || got.Profile == "blackwell-3x16") && got.BigRAM != tc.wantBig {
 			t.Errorf("%s: big_ram = %v, want %v", tc.label, got.BigRAM, tc.wantBig)
 		}
 	}

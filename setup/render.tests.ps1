@@ -165,9 +165,24 @@ if ($envLines.Count -ge 4 -and -not ($envLines | Where-Object { $_ -notmatch 'CU
 if ($r.yaml -notmatch '__[A-Z0-9_]+__')                        { Ok 'blackwell-72 no unsubstituted tokens' } else { Bad 'blackwell-72 leftover tokens' }
 if ($r.verdict -and [int]$r.verdict.agent_ctx_tokens -eq 131072) { Ok 'blackwell-72 agent_ctx_tokens=131072' } else { Bad 'blackwell-72 agent_ctx_tokens' }
 
+Write-Host "== blackwell-3x16 - THREE homogeneous sm_120 cards (triple-blackwell template, cfg17) =="
+$r = Invoke-Render -Backend 'cuda' -ProfileId 'blackwell-3x16' -RamTier 'high' -BigRam $true
+if ($r.verdict -and $r.verdict.render_backend -eq 'triple-blackwell') { Ok 'b3x16 renders the triple-blackwell template' } else { Bad "b3x16 render_backend (got: $($r.verdict.render_backend))" }
+# THE placement law, asserted mechanically: device 1 is the DISPLAY card and no seat
+# may be pinned to it. A silent flip here starves the operator's desktop - measured
+# 2026-09-04, Windows fell to a 720p-class mode and the box needed a reboot.
+if ($r.yaml -notmatch 'CUDA_VISIBLE_DEVICES=1') { Ok 'b3x16 pins NOTHING to the display card (device 1)' } else { Bad 'b3x16 pinned a seat to device 1 - that is the display card' }
+if ($r.yaml -match 'CUDA_VISIBLE_DEVICES=0' -and $r.yaml -match 'CUDA_VISIBLE_DEVICES=2') { Ok 'b3x16 uses the 5060 Ti pair (devices 0 and 2)' } else { Bad 'b3x16 does not use both 5060 Ti cards' }
+# CUDA graphs measured +40-51% gen on the 26B seats (2026-09-05, exact-output gate).
+if (($r.yaml -split "`n" | Where-Object { $_ -match 'env:' -and $_ -match 'GGML_CUDA_DISABLE_GRAPHS' }).Count -eq 0) { Ok 'b3x16 leaves CUDA graphs ON (measured +40-51% gen on the 26B seats)' } else { Bad 'b3x16 still SETS the cargo GGML_CUDA_DISABLE_GRAPHS on a seat' }
+if ($r.yaml -match 'ctx-size 131072') { Ok 'b3x16 serves the measured 131072 window' } else { Bad 'b3x16 ctx is not 131072' }
+# The over-2-card seats exist and are opt-in (not in any matrix set).
+if ($r.yaml -match 'qwen3\.8-flash-next' -and $r.yaml -match 'tensor-split 28,10,10') { Ok 'b3x16 renders the measured 3-card Flash-Next seat' } else { Bad 'b3x16 is missing the 3-card Flash-Next seat' }
+
 Write-Host "== blackwell-2x16 - homogeneous dual-sm_120 pair (dual-blackwell template, cfg16) =="
 $r = Invoke-Render -Backend 'cuda' -ProfileId 'blackwell-2x16' -RamTier 'high' -BigRam $true
 if ($r.verdict -and $r.verdict.render_backend -eq 'dual-blackwell') { Ok 'b2x16 renders the dual-blackwell template' } else { Bad "b2x16 render_backend (got: $($r.verdict.render_backend))" }
+if (($r.yaml -split "`n" | Where-Object { $_ -match 'env:' -and $_ -match 'GGML_CUDA_DISABLE_GRAPHS' }).Count -eq 0) { Ok 'b2x16 leaves CUDA graphs ON (measured +40-51% gen on the 26B seats)' } else { Bad 'b2x16 still SETS the cargo GGML_CUDA_DISABLE_GRAPHS on a seat' }
 # The whole point of the template: per-CARD pins. Primaries + vision on device 1
 # (the fast card), memory-stack residents + STT on device 0 (the utility card).
 $e4bEnv = @($r.yaml -split "`r?`n" | Select-String -Pattern '^\s{2}offload-e4b:' -Context 0,3 | ForEach-Object { $_.Context.PostContext } | Where-Object { $_ -match 'env:' })
