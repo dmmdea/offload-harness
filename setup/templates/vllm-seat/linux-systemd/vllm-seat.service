@@ -1,5 +1,9 @@
-# vllm-seat.service — a persistent vLLM agent seat (reference: NVIDIA A2 16 GB, `ampere-16`, 2026-09-06; ADR 0035).
-# Enabled at boot, Restart=on-failure. Binds the TAILSCALE address (the tailnet is the trust boundary, like the fleet
+# vllm-seat.service — the vLLM agent seat engine (reference: NVIDIA A2 16 GB, `ampere-16`, 2026-09-06; ADR 0035).
+# NOT ENABLED AT BOOT, AND IT MUST NOT BE. llama-swap owns this unit's lifetime through vllm-seat-cmd.sh /
+# vllm-seat-cmdstop.sh, so the seat loads on first use and is stopped when llama-swap idles it out. A boot-enabled
+# unit outlives its own front door: llama-swap's TTL can only unload what llama-swap started, so an enabled unit
+# holds the card forever no matter what ttl says — measured on the reference A2 at 10,338 of 15,356 MiB while idle.
+# Restart=on-failure. Binds the TAILSCALE address (the tailnet is the trust boundary, like the fleet
 # node) — llama-swap's entry proxies to it and owns load/unload through vllm-seat-cmd*.sh (polkit rule
 # 50-llama-swap-vllm-seat.rules). Launch line + rationale: vllm-seat-run.sh.
 # RENDERED, not hand-edited, since 0.113.33: `local-offload install vllm-seat` substitutes the double-underscore tokens
@@ -27,5 +31,5 @@ KillMode=mixed
 StandardOutput=append:__STACK_DIR__/logs/__UNIT__.log
 StandardError=append:__STACK_DIR__/logs/__UNIT__.log
 
-[Install]
-WantedBy=multi-user.target
+# NO [Install] SECTION ON PURPOSE. Without WantedBy= the unit cannot be enabled at boot, which is what keeps its
+# lifetime in llama-swap's hands. `systemctl enable` on this unit is a defect, not a deployment step.

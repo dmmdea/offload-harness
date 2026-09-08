@@ -6,6 +6,51 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.36] — 2026-09-08 — the vLLM seat occupied a GPU forever, and a test demanded that it do so
+
+0.113.33 shipped a rendered vLLM agent seat that never unloads. On the reference A2 that meant **10,338 of
+15,356 MiB held with the engine idle and llama-swap reporting no models running at all** — the harness's own idle
+rule could not reach it, because none of the four mechanisms pinning it were things llama-swap controls.
+
+Operator ruling: *"NO MODEL GETS TO BE LOADED FOR MORE THAN 5 MINUTES IF IT GOES UNUSED, AS THE REST OF THE
+HARNESS… 30 MINUTES OF LOADING TIME IS WAY BETTER THAN NO USE, AND NO USE IS WHAT YOU CAUSE BY LEAVING A MODEL
+LOADED AND UNUSED."* A long cold load is paid once, by one request. A pinned card is paid continuously, by
+everything else that wanted the hardware.
+
+### Fixed — four independent mechanisms, each sufficient on its own
+
+| mechanism | why it defeated the idle rule | now |
+|---|---|---|
+| `ttl: 0` on the rendered entry | llama-swap never idles it out | `ttl: 300` (`ttl_seconds`, house default) |
+| `groups: {persistent: true}` | nothing may evict it | no `groups:` block |
+| `hooks.on_startup.preload` | loaded the moment llama-swap starts, wanted or not | no `hooks:` block |
+| unit `[Install] WantedBy=` | **a boot-enabled unit outlives its own front door** — llama-swap's TTL can only unload what llama-swap *started* | no `[Install]` section |
+
+The last is why the other three were not enough: the engine is a *system* unit, so once enabled it returns at boot
+and stays up regardless of what the entry says.
+
+### Fixed — the gate that made it permanent
+
+`TestVLLMSeatRendersAsAResidentMatrixMember` **asserted `ttl` must be 0**, with the comment "the agent lane must not
+idle out and pay a cold reload". Fixing the seat failed the build. The assertion is inverted: TTL must now be
+positive and ≤ 1800, and three further guards refuse the return of a `groups:` block, a `hooks:` block, or an
+`[Install]` section.
+
+Those guards assert against the **parsed** document and against line-anchored, comment-excluded directives. The
+first drafts grepped the text and matched the linux-cuda template's own comments explaining why `persistent` was
+abandoned, and then this file's own "NO `[Install]` SECTION ON PURPOSE" — the same regex-cannot-tell-a-mapping-from-
+a-comment defect fixed in 0.113.33.
+
+### Amended
+ADR 0035's residency decision is superseded in place, with the four mechanisms tabulated so nobody rebuilds it from
+the record. The front-door design survives: llama-swap remains the one endpoint, `cmd`/`cmdStop` still drive the
+unit through polkit, and `gpu reserve --drain --unload-seat` still frees the card.
+
+### Applied to the live reference box
+The A2's resident engine was stopped, `vllm-a2-seat` was `systemctl disable`d, and its llama-swap entry lost the
+preload hook and the persistent group with `ttl: 0 → 300`. Card went from 10,338 MiB to **0 MiB**; the fleet node
+stayed active and still advertises the seat, which now loads on first use.
+
 ## [0.113.35] — 2026-09-08 — the 3-card tier shipped the loser of its own vision bake-off
 
 ### Added
