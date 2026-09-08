@@ -138,7 +138,16 @@ func ProbeSeatPin(ctx context.Context, base, model string) (SeatPin, bool) {
 		// the run where the seat is already struggling. Every non-404 keeps
 		// the pre-existing behaviour, one request and an honest absent pin.
 		if resp.StatusCode == http.StatusNotFound {
-			return probeVLLMSeatPin(ctx, b, model)
+			if pin, ok := probeVLLMSeatPin(ctx, b, model); ok {
+				return pin, true
+			}
+			// Both /upstream/<model>/… probes 404'd. Either llama-swap does not
+			// know this model, or `endpoint` is not llama-swap at all but a
+			// bare engine (the harness pointed straight at a vLLM or llama-server
+			// port, a legitimate configuration the measurement drivers use).
+			// probeBareEnginePin tells those apart by the roster's own shape and
+			// pins only the second — see its doc for the mis-attribution guard.
+			return probeBareEnginePin(ctx, b, model)
 		}
 		return SeatPin{}, false
 	}
@@ -146,6 +155,13 @@ func ProbeSeatPin(ctx context.Context, base, model string) (SeatPin, bool) {
 	if err != nil {
 		return SeatPin{}, false
 	}
+	return pinFromLlamaProps(body)
+}
+
+// pinFromLlamaProps reduces a llama-server /props body to a SeatPin. Shared by
+// the llama-swap passthrough path and the bare-engine path so the two can never
+// hash the same server differently.
+func pinFromLlamaProps(body []byte) (SeatPin, bool) {
 	var payload struct {
 		DGS struct {
 			NCtx   int `json:"n_ctx"`
@@ -311,45 +327,65 @@ func probeVLLMSeatPin(ctx context.Context, b, model string) (SeatPin, bool) {
 		return SeatPin{}, false
 	}
 	var models struct {
-		Data []struct {
-			ID          string `json:"id"`
-			Root        string `json:"root"`
-			MaxModelLen int    `json:"max_model_len"`
-		} `json:"data"`
+		Data []vllmModelEntry `json:"data"`
 	}
 	if err := json.Unmarshal(modBody, &models); err != nil || len(models.Data) == 0 {
 		return SeatPin{}, false
 	}
-	// Pick the entry this seat actually serves. A vLLM server started with
-	// several --served-model-name aliases lists one entry per alias, so
-	// matching by name keeps the pin attributed to the name the run used;
-	// falling back to the sole entry covers a seat whose llama-swap alias
-	// differs from its vLLM served name. With several entries and no match,
-	// refuse rather than pin an arbitrary one.
-	idx := -1
-	for i, m := range models.Data {
-		if strings.EqualFold(m.ID, model) {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		if len(models.Data) != 1 {
-			return SeatPin{}, false
-		}
-		idx = 0
-	}
-	m := models.Data[idx]
-	if m.Root == "" || m.MaxModelLen <= 0 {
+	// Pick the entry this seat actually serves (pickServedEntry): a vLLM server
+	// started with several --served-model-name aliases lists one entry per
+	// alias, so matching by name keeps the pin attributed to the name the run
+	// used; the sole-entry fallback covers a seat whose llama-swap alias differs
+	// from its vLLM served name; several entries and no match is refused.
+	m, ok := pickServedEntry(models.Data, model)
+	if !ok {
 		return SeatPin{}, false
 	}
+	return pinFromVLLM(ver.Version, m.ID, m.Root, m.MaxModelLen)
+}
 
+// vllmModelEntry is the /v1/models row shape both vLLM probes decode. Meta is
+// kept RAW so the bare-engine path can ask one question of it — "is there a
+// meta.llamaswap key?" — which is the one thing that distinguishes llama-swap's
+// roster from an engine's own (a bare llama-server also emits a `meta`, with
+// vocab/size facts, so presence of `meta` alone proves nothing).
+type vllmModelEntry struct {
+	ID          string          `json:"id"`
+	Root        string          `json:"root"`
+	MaxModelLen int             `json:"max_model_len"`
+	Meta        json.RawMessage `json:"meta"`
+}
+
+// pickServedEntry applies the attribution rule shared by every /v1/models
+// reader here: the entry whose id equals the seat name, else the sole entry
+// (a seat bound under a llama-swap alias that differs from its served name),
+// else nothing — several entries with no name match would pin an arbitrary
+// model's config to this run.
+func pickServedEntry(data []vllmModelEntry, model string) (vllmModelEntry, bool) {
+	for _, m := range data {
+		if strings.EqualFold(m.ID, model) {
+			return m, true
+		}
+	}
+	if len(data) == 1 {
+		return data[0], true
+	}
+	return vllmModelEntry{}, false
+}
+
+// pinFromVLLM builds the vLLM pin from the three discriminators the engine
+// publishes. Every one is REQUIRED — the same refusal discipline as the
+// llama.cpp path: no pin beats a pin hashed over empty strings.
+func pinFromVLLM(version, servedName, root string, maxModelLen int) (SeatPin, bool) {
+	if version == "" || root == "" || maxModelLen <= 0 {
+		return SeatPin{}, false
+	}
 	basis := vllmPinBasis{
 		Engine:      "vllm",
-		Version:     ver.Version,
-		ModelRoot:   m.Root,
-		ServedName:  m.ID,
-		MaxModelLen: m.MaxModelLen,
+		Version:     version,
+		ModelRoot:   root,
+		ServedName:  servedName,
+		MaxModelLen: maxModelLen,
 	}
 	canonical, err := json.Marshal(basis)
 	if err != nil {
@@ -362,6 +398,112 @@ func probeVLLMSeatPin(ctx context.Context, b, model string) (SeatPin, bool) {
 			basis.Version, path.Base(strings.ReplaceAll(basis.ModelRoot, `\`, "/")),
 			basis.ServedName, basis.MaxModelLen)),
 	}, true
+}
+
+// isLlamaSwapRoster reports whether a /v1/models answer came from llama-swap:
+// its entries carry `meta.llamaswap` (aliases, type), which no engine emits.
+// Verified live 2026-09-08 on the Qube: every llama-swap entry has it; a bare
+// vLLM 0.28.0 entry has no `meta` at all; a bare llama-server entry has a
+// `meta` (vocab_type, n_ctx_train, …) but never a `llamaswap` key inside it.
+func isLlamaSwapRoster(data []vllmModelEntry) bool {
+	for _, m := range data {
+		if len(m.Meta) == 0 {
+			continue
+		}
+		var meta map[string]json.RawMessage
+		if json.Unmarshal(m.Meta, &meta) == nil {
+			if _, ok := meta["llamaswap"]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// probeBareEnginePin pins a seat when `endpoint` is an ENGINE, not llama-swap.
+//
+// Why it exists: every seat pin used to travel through llama-swap's
+// /upstream/<model>/ passthrough, so a harness whose endpoint pointed straight
+// at a vLLM or llama-server port — exactly what the measurement drivers do to
+// keep a shared llama-swap config untouched — recorded no pin at all. The
+// 2026-09-08 A2 re-run produced four arms with seat_config_* absent on a
+// harness build that HAD the vLLM probe, for this reason alone.
+//
+// Why it is safe, and the one thing it must never do: the file's founding rule
+// is that a bare-root probe "answers for whatever model happens to be loaded",
+// which on llama-swap is a mis-attribution. So this path first reads the bare
+// /v1/models and REFUSES if the roster is llama-swap's (isLlamaSwapRoster) —
+// on llama-swap the passthrough was the authoritative path and it already
+// failed, so the honest answer is "no pin", never "the pin of whatever is warm".
+// Only an engine's own roster proceeds, and only the entry attribution rule
+// admits (pickServedEntry). With that settled, the engine is told apart by what
+// its entry carries: a `root` + `max_model_len` is vLLM (pin from /version +
+// that entry); otherwise it is llama-server (pin from its bare /props, which on
+// a single-model engine can only describe the seat that answered /v1/models).
+//
+// Budget: rides the caller's shared deadline — at most three GETs, all inside
+// seatPinClient.Timeout for the whole probe.
+func probeBareEnginePin(ctx context.Context, b, model string) (SeatPin, bool) {
+	get := func(path string) ([]byte, bool) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, b+path, nil)
+		if err != nil {
+			return nil, false
+		}
+		resp, err := seatPinClient.Do(req)
+		if err != nil {
+			return nil, false
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, false
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		if err != nil {
+			return nil, false
+		}
+		return body, true
+	}
+
+	modBody, ok := get("/v1/models")
+	if !ok {
+		return SeatPin{}, false
+	}
+	var models struct {
+		Data []vllmModelEntry `json:"data"`
+	}
+	if err := json.Unmarshal(modBody, &models); err != nil || len(models.Data) == 0 {
+		return SeatPin{}, false
+	}
+	if isLlamaSwapRoster(models.Data) {
+		// This IS llama-swap and it does not serve `model` under the passthrough.
+		// A bare /props here would describe whichever seat is warm — the exact
+		// mis-attribution this file refuses. No pin.
+		return SeatPin{}, false
+	}
+	m, ok := pickServedEntry(models.Data, model)
+	if !ok {
+		return SeatPin{}, false
+	}
+	if m.Root != "" && m.MaxModelLen > 0 {
+		// vLLM shape. Its /version supplies the engine build.
+		verBody, ok := get("/version")
+		if !ok {
+			return SeatPin{}, false
+		}
+		var ver struct {
+			Version string `json:"version"`
+		}
+		if err := json.Unmarshal(verBody, &ver); err != nil {
+			return SeatPin{}, false
+		}
+		return pinFromVLLM(ver.Version, m.ID, m.Root, m.MaxModelLen)
+	}
+	// llama-server shape: one model per process, /props at the root describes it.
+	propsBody, ok := get("/props")
+	if !ok {
+		return SeatPin{}, false
+	}
+	return pinFromLlamaProps(propsBody)
 }
 
 // orUnset keeps the basis line grep-friendly when a field is absent on an
