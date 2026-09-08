@@ -40,7 +40,7 @@ code, treat everything else as background.
 | [0032](0032-a-peer-held-seat-is-waited-for-not-deferred.md) | Accepted | A peer-held seat is waited for, not deferred |
 | [0033](0033-cache-server-is-an-optional-second-device-tier.md) | Accepted | A second device's RAM is an optional KV tier, scored on capacity at parity cost |
 | [0034](0034-fleet-overview-is-a-read-only-page-on-the-delegator.md) | Accepted | Fleet overview is a read-only page served by the delegator, from data nodes already publish |
-| [0035](0035-persistent-vllm-seat-behind-llama-swap.md) | Accepted | A persistent vLLM agent seat lives behind llama-swap as a systemd unit the entry starts and stops |
+| [0035](0035-persistent-vllm-seat-behind-llama-swap.md) | Accepted (residency **amended 2026-09-08**) | A vLLM agent seat lives behind llama-swap as a systemd unit the entry starts and stops. It is **not** persistent: `ttl: 300`, no group, no preload, no `[Install]` section |
 | [0036](0036-the-agent-lane-is-a-harnessed-environment.md) | Accepted | The agent lane is a harnessed environment: rules are data, the trace is telemetry, the rigger proposes |
 
 

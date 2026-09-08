@@ -1,4 +1,11 @@
-# A persistent vLLM seat behind llama-swap on Linux (systemd + polkit)
+# A vLLM seat behind llama-swap on Linux (systemd + polkit)
+
+> **NOT persistent, as of 2026-09-08.** This pattern originally shipped the seat as a boot-enabled unit with
+> `ttl: 0`, a `persistent` group and a startup preload — four independent ways to pin a model to a GPU forever.
+> The reference A2 then held 10,338 of 15,356 MiB with the engine idle. The seat now loads on first use and
+> **unloads after 300 s idle like every other seat**; the unit has no `[Install]` section so it cannot be
+> enabled at boot. A long cold load is paid once by one request; a pinned card is paid continuously by
+> everything else. See ADR 0035's amendment.
 
 Reference files for the pattern decided in [ADR 0035](../../../../docs/architecture/decisions/0035-persistent-vllm-seat-behind-llama-swap.md):
 the engine is a **persistent system unit** (up at boot, `Restart=on-failure`), and llama-swap — still the one endpoint the
