@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -40,23 +41,37 @@ func TestNoStrayControlCharacters(t *testing.T) {
 		"testdata": true, "dist": true,
 	}
 
+	// Lint the files git TRACKS, not everything on disk.
+	//
+	// The walk used to descend into anything not on a hardcoded skip list, which meant a
+	// gitignored tree in the working directory failed the whole suite: a VoiceStudio
+	// `.tts-venv/` in the repo root put vendored gradio and transformers files in front
+	// of the lint, and `go test ./...` — the repo's own documented gate — reported FAIL
+	// on a clean checkout of main for a reason that had nothing to do with the repo.
+	//
+	// Tracked-only is also the honest scope. This test exists to catch a `\b` mangled
+	// into byte 0x08 in OUR sources; a control byte inside a vendored minified bundle is
+	// normal and nothing here would act on it. Files git does not track cannot carry that
+	// defect into a commit.
+	//
+	// If git is unavailable (a source tarball), fall back to the walk so the gate still
+	// runs rather than silently passing on an empty file list — a lint that quietly
+	// checks nothing is worse than one that over-reports.
+	files, viaGit := trackedFiles(t)
+
 	var offenders []string
-	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // an unreadable path is not this test's business
-		}
-		if info.IsDir() {
-			if skipDirs[info.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
+	check := func(path string) {
 		if !interesting[strings.ToLower(filepath.Ext(path))] {
-			return nil
+			return
+		}
+		for _, part := range strings.Split(filepath.ToSlash(path), "/") {
+			if skipDirs[part] {
+				return
+			}
 		}
 		b, err := os.ReadFile(path)
 		if err != nil {
-			return nil
+			return
 		}
 		for i, c := range b {
 			if c == '\t' || c == '\n' || c == '\r' {
@@ -66,17 +81,64 @@ func TestNoStrayControlCharacters(t *testing.T) {
 				line := 1 + strings.Count(string(b[:i]), "\n")
 				offenders = append(offenders,
 					fmt.Sprintf("%s:%s contains control byte 0x%02x", filepath.ToSlash(path), strconv.Itoa(line), c))
-				return nil // one report per file is enough to act on
+				return // one report per file is enough to act on
 			}
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
+
+	for _, f := range files {
+		check(f)
+	}
+	// A lint that inspected nothing must say so rather than report a clean bill.
+	if len(files) == 0 {
+		t.Fatal("no files to lint — the gate went blind")
+	}
+	t.Logf("linted %d files (source: %s)", len(files),
+		map[bool]string{true: "git ls-files", false: "filesystem walk"}[viaGit])
 	if len(offenders) > 0 {
 		t.Errorf("stray control characters found — a `\\b` written through a double-quoted "+
 			"string becomes byte 0x08 and silently voids the regex containing it:\n  %s",
 			strings.Join(offenders, "\n  "))
 	}
+}
+
+// trackedFiles lists the paths git tracks, falling back to a filesystem walk when git
+// is unavailable (a source tarball, or a checkout with no .git).
+//
+// The bool says WHICH source was used, and the caller logs it. A fallback that looked
+// identical to the real thing would hide the case where the lint silently widened back
+// to everything on disk — which is the behaviour this replaced.
+func trackedFiles(t *testing.T) ([]string, bool) {
+	t.Helper()
+	out, err := exec.Command("git", "ls-files", "-z").Output()
+	if err == nil {
+		var files []string
+		for _, p := range strings.Split(string(out), "\x00") {
+			if p == "" {
+				continue
+			}
+			if fi, err := os.Stat(p); err != nil || fi.IsDir() {
+				continue // a deleted-but-still-indexed path, or a submodule
+			}
+			files = append(files, filepath.FromSlash(p))
+		}
+		if len(files) > 0 {
+			return files, true
+		}
+	}
+	var files []string
+	_ = filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if info.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		files = append(files, path)
+		return nil
+	})
+	return files, false
 }

@@ -6,6 +6,29 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.41] - 2026-09-08 - `go test ./...` failed on a clean checkout of main
+
+The repo's own documented gate - "go test ./... exit 0, 76 packages" - returned **FAIL** on a
+clean checkout of main, and had nothing to do with the repo. `TestNoStrayControlCharacters`
+walked the working directory with a hardcoded skip list, so a gitignored tree in the repo root
+was linted like source: a VoiceStudio `.tts-venv/` put vendored gradio and transformers bundles
+in front of it, and their minified control bytes failed the suite.
+
+It now lints the files **git tracks**, which is also the honest scope. The test exists to catch
+a `\b` mangled into byte 0x08 in OUR sources - the failure that silently voided three gates,
+including the ONE assertion guarding the triple-Blackwell display-card placement law. A control
+byte inside a vendored minified bundle is normal and nothing here would act on it, and a file
+git does not track cannot carry that defect into a commit.
+
+Two things keep the narrowing from turning the gate blind. If git is unavailable (a source
+tarball) it falls back to the filesystem walk and LOGS which source it used, so a silent
+widening cannot masquerade as the real thing; and an empty file list is now a hard failure
+rather than a clean bill.
+
+Proven by mutation: byte 0x08 planted in the tracked `setup/render.tests.ps1` turns it RED
+naming the file and the byte, the same byte planted inside an ignored tree leaves it GREEN,
+and the restore is byte-identical.
+
 ## [0.113.40] - 2026-09-08 - the flagship seat was declared but never proven to render
 
 0.113.39 gave `blackwell-3x16` its measured vLLM seat. Two green gates covered it and neither
