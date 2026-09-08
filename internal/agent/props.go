@@ -99,6 +99,17 @@ func ProbeSeatPin(ctx context.Context, base, model string) (SeatPin, bool) {
 	if b == "" {
 		return SeatPin{}, false
 	}
+	// ONE deadline for the WHOLE probe, not one per HTTP call. seatPinClient's
+	// timeout bounds a single Do(), so once this function could issue more than
+	// one request (the vLLM fallback below) the file's stated contract — pinning
+	// never costs more than seatPinClient.Timeout — would have quietly become
+	// "up to 3x that", on the SYNCHRONOUS path that gates every agent task's
+	// returned result (pipeline/agenttask.go). A shared deadline keeps the
+	// promise for both engines: the llama.cpp path is unchanged (one call, same
+	// bound) and the vLLM path spends the SAME budget across its calls instead
+	// of a fresh one each. A caller's own shorter deadline still wins.
+	ctx, cancel := context.WithTimeout(ctx, seatPinClient.Timeout)
+	defer cancel()
 	u := b + "/upstream/" + url.PathEscape(model) + "/props"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -110,6 +121,25 @@ func ProbeSeatPin(ctx context.Context, base, model string) (SeatPin, bool) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		// /props is llama.cpp's endpoint; vLLM does not serve it and answers
+		// 404 (verified live against vLLM 0.28.0, 2026-09-08). Before this
+		// fallback that made seat_config_* permanently ABSENT on every vLLM
+		// seat, which is not a cosmetic gap: an unpinned row cannot enter a
+		// paired experiment, so two vLLM arms could not be told apart by the
+		// record at all. Measured consequence: a 4B-vs-9B seat comparison on
+		// the A2 was published with the model, the engine build and the served
+		// window all unrecorded, and the conclusion rested on arms that
+		// differed in ways nothing captured.
+		//
+		// ONLY 404 falls through. A llama.cpp seat answering 500/503 — mid
+		// crash, overloaded, evicted — is a llama.cpp seat having a bad
+		// moment, not a vLLM seat: chasing it with two more GETs would spend
+		// this probe's budget on a request path that cannot answer, on exactly
+		// the run where the seat is already struggling. Every non-404 keeps
+		// the pre-existing behaviour, one request and an honest absent pin.
+		if resp.StatusCode == http.StatusNotFound {
+			return probeVLLMSeatPin(ctx, b, model)
+		}
 		return SeatPin{}, false
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -147,13 +177,6 @@ func ProbeSeatPin(ctx context.Context, base, model string) (SeatPin, bool) {
 	if payload.DGS.NCtx <= 0 {
 		return SeatPin{}, false
 	}
-	// build_info and chat_template are REQUIRED discriminators, not optional
-	// decoration: an answer missing either (an older llama.cpp build, a proxy
-	// mangling the payload) would hash the empty string, and two DIFFERENT
-	// builds both missing the field would then produce the SAME pin — a
-	// produced value that is wrong, the worse failure mode. No pin beats a
-	// pin that can falsely say "same config". Every seat on this fleet
-	// reports both (verified live on both node classes).
 	// build_info and chat_template are REQUIRED discriminators, not optional
 	// decoration: an answer missing either (an older llama.cpp build, a proxy
 	// mangling the payload) would hash the empty string, and two DIFFERENT
@@ -214,6 +237,130 @@ func ProbeSeatPin(ctx context.Context, base, model string) (SeatPin, bool) {
 			basis.NCtx, basis.TotalSlots, basis.Temperature, basis.TopK, basis.TopP, basis.MinP,
 			orUnset(basis.ReasoningFormat), basis.ReasoningInContent, orUnset(basis.ChatFormat),
 			orUnset(strings.Join(basis.Samplers, ",")), orUnset(strings.Join(mods, ",")), orUnset(short))),
+	}, true
+}
+
+// vllmPinBasis is the CLOSED field set a vLLM seat's pin is hashed over. It is
+// a SEPARATE struct from seatPinBasis on purpose: the two engines publish
+// disjoint metadata, and reusing seatPinBasis would hash a dozen zero values
+// for every vLLM seat — which is precisely how two different configs come to
+// show the same hash. `Engine` leads the struct so a vLLM pin can never
+// collide with a llama.cpp one even if every other value coincided.
+//
+// What this pin CANNOT see, stated because a pin is only worth its honesty:
+// vLLM publishes no sampler defaults and no --tool-call-parser /
+// --reasoning-parser / --gpu-memory-utilization values on ANY endpoint, so two
+// seats differing only in those pin identically. Callers must not read a
+// matching vllm pin as "identical serving config" — it means "same engine
+// version, same weights, same window". Those three are the ones that silently
+// differed in the mispaired A2 comparison this fallback exists to prevent.
+type vllmPinBasis struct {
+	Engine      string `json:"engine"`
+	Version     string `json:"version"`
+	ModelRoot   string `json:"model_root"`
+	ServedName  string `json:"served_name"`
+	MaxModelLen int    `json:"max_model_len"`
+}
+
+// probeVLLMSeatPin builds a seat pin from the two metadata endpoints a vLLM
+// OpenAI server does serve: GET /version (engine build) and GET /v1/models
+// (the resolved checkpoint path in `root`, plus `max_model_len`). Verified
+// live against vLLM 0.28.0 on 2026-09-08: /props 404s, both of these answer
+// 200.
+//
+// It applies the same refusal discipline as the llama.cpp path — every
+// discriminator is REQUIRED, and a missing one yields no pin rather than a pin
+// hashed over empty strings. ok=false on any transport, status or decode
+// failure.
+func probeVLLMSeatPin(ctx context.Context, b, model string) (SeatPin, bool) {
+	up := b + "/upstream/" + url.PathEscape(model)
+
+	get := func(path string) ([]byte, bool) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, up+path, nil)
+		if err != nil {
+			return nil, false
+		}
+		resp, err := seatPinClient.Do(req)
+		if err != nil {
+			return nil, false
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, false
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		if err != nil {
+			return nil, false
+		}
+		return body, true
+	}
+
+	verBody, ok := get("/version")
+	if !ok {
+		return SeatPin{}, false
+	}
+	var ver struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(verBody, &ver); err != nil || ver.Version == "" {
+		return SeatPin{}, false
+	}
+
+	modBody, ok := get("/v1/models")
+	if !ok {
+		return SeatPin{}, false
+	}
+	var models struct {
+		Data []struct {
+			ID          string `json:"id"`
+			Root        string `json:"root"`
+			MaxModelLen int    `json:"max_model_len"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(modBody, &models); err != nil || len(models.Data) == 0 {
+		return SeatPin{}, false
+	}
+	// Pick the entry this seat actually serves. A vLLM server started with
+	// several --served-model-name aliases lists one entry per alias, so
+	// matching by name keeps the pin attributed to the name the run used;
+	// falling back to the sole entry covers a seat whose llama-swap alias
+	// differs from its vLLM served name. With several entries and no match,
+	// refuse rather than pin an arbitrary one.
+	idx := -1
+	for i, m := range models.Data {
+		if strings.EqualFold(m.ID, model) {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		if len(models.Data) != 1 {
+			return SeatPin{}, false
+		}
+		idx = 0
+	}
+	m := models.Data[idx]
+	if m.Root == "" || m.MaxModelLen <= 0 {
+		return SeatPin{}, false
+	}
+
+	basis := vllmPinBasis{
+		Engine:      "vllm",
+		Version:     ver.Version,
+		ModelRoot:   m.Root,
+		ServedName:  m.ID,
+		MaxModelLen: m.MaxModelLen,
+	}
+	canonical, err := json.Marshal(basis)
+	if err != nil {
+		return SeatPin{}, false
+	}
+	sum := sha256.Sum256(canonical)
+	return SeatPin{
+		SHA256: hex.EncodeToString(sum[:]),
+		Basis: strings.TrimSpace(fmt.Sprintf("vllm %s %s served=%s max_model_len=%d",
+			basis.Version, path.Base(strings.ReplaceAll(basis.ModelRoot, `\`, "/")),
+			basis.ServedName, basis.MaxModelLen)),
 	}, true
 }
 
