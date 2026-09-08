@@ -121,12 +121,24 @@ const (
 	// AgentWireResult; a defer is a SUCCESS shape (job done, contract unmet),
 	// mirroring the cascade's defer semantics.
 	TaskAgentRun TaskType = "agent"
+	// TaskAccel runs ONE accelerator tool (a Hailo/Coral lane) on this node on
+	// behalf of a box that lacks the device (Coral design Phase B, 0.115.0).
+	// Payload {accelerator, tool, args, image_b64?, image_name?}: the image
+	// travels as bytes (cap AccelImageCap), lands in a job-scoped dir and
+	// args.image_path is rewritten to it; a mask the tool writes there comes
+	// back as mask_b64. It never touches the text endpoint, so it is exempt
+	// from the fleet concurrency cap, and it never forwards again (a node runs
+	// only its LOCAL lanes for this task — hop limit 1 by construction).
+	TaskAccel TaskType = "accel"
 )
+
+// AccelImageCap bounds an image shipped inside an accel job, both directions.
+const AccelImageCap = 8 << 20
 
 // Valid reports whether t is a known task type.
 func (t TaskType) Valid() bool {
 	switch t {
-	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskVideoWatch, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskUpscaleImage, TaskGenerateSVG, TaskGenerateVideo, TaskAnimateCharacter, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskRunGraph, TaskPipelineJob, TaskAgentRun:
+	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskVideoWatch, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskUpscaleImage, TaskGenerateSVG, TaskGenerateVideo, TaskAnimateCharacter, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskRunGraph, TaskPipelineJob, TaskAgentRun, TaskAccel:
 		return true
 	}
 	return false

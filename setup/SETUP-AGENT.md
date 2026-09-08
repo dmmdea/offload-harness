@@ -724,6 +724,13 @@ on Linux). Two knobs:
 The sidecar spawns on demand over loopback :18814 and exits itself after `coral_idle_sec`; the
 fleet node's `ProtectHome=yes` is why `CORAL_HOME` lives under the stack root, not under `~`.
 
+**A box WITHOUT the device** (0.115.0, ADR 0038) reaches it over the fleet: add
+`"fleet_accelerators": ["coral-edgetpu"]` to that box's config beside its `delegate_remotes`. The
+four tools then register locally (marked `[FLEET: …]`), `image_path` is read on that box and shipped
+inside the job (cap 8 MiB), and the call runs on the first remote whose `/fleet/health` lists the id;
+the result carries `placement{node, wall_ms}`. Nothing else changes, and a box that lists nothing is
+byte-identical. The node needs 0.115.0 too (it serves the `accel` task).
+
 ### Optional: the coding agent + chat GUI (OFF by default)
 
 The `local-agent --serve` endpoint is **unauthenticated** and drives write/GitHub tools, so it is

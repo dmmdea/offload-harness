@@ -8,9 +8,11 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/accelclient"
+	"github.com/dmmdea/offload-harness/internal/accelremote"
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
 )
@@ -67,7 +69,37 @@ func loopAccelSidecar(id string, lc laneConfig) *accelclient.Sidecar {
 // byte-identical to a box without any device (the registration pin). An id
 // with no lane config (a device this build has no adapter for) is skipped, and
 // the loop registers nothing for it rather than inventing tools.
+// NewLoopAccel is every accelerator lane this box can offer the loop: its LOCAL
+// devices first (config.Accelerators, in order — the shared-name rule's order),
+// then the FLEET devices it reaches through accelremote (config.FleetAccelerators,
+// Coral Phase B). A local device always wins over a remote one for the same
+// name because it is listed first. The fleet task itself (runAccelTask) uses
+// localAccelLanes only, so a forwarded call never forwards again.
 func NewLoopAccel(cfg config.Config) []agent.AccelLane {
+	lanes := localAccelLanes(cfg)
+	for _, id := range cfg.FleetAccelerators {
+		if slices.Contains(cfg.Accelerators, id) {
+			continue
+		}
+		device := id
+		lanes = append(lanes, agent.AccelLane{ID: id, Remote: true, Call: func(ctx context.Context, tool string, args map[string]any) (string, error) {
+			out, err := accelremote.Call(ctx, cfg, device, tool, args)
+			if err != nil {
+				b, _ := json.Marshal(map[string]any{"deferred": true, "reason": device + " (fleet): " + err.Error()})
+				return string(b), nil
+			}
+			b, err := json.Marshal(out)
+			if err != nil {
+				b, _ = json.Marshal(map[string]any{"deferred": true, "reason": device + " (fleet): non-serializable result: " + err.Error()})
+			}
+			return string(b), nil
+		}})
+	}
+	return lanes
+}
+
+// localAccelLanes builds the lanes for the devices physically on this box.
+func localAccelLanes(cfg config.Config) []agent.AccelLane {
 	var lanes []agent.AccelLane
 	for _, id := range cfg.Accelerators {
 		lc, ok := laneConfigFor(cfg, id)

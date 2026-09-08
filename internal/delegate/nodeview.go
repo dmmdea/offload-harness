@@ -52,6 +52,10 @@ type NodeView struct {
 	// cached residency flag, and the capability gate PAIR calls "the exact
 	// requested model is present".
 	ServedModels []string
+	// Accelerators is the node's advertised additive-device list (health
+	// `accelerators`, ADR 0024). Absent = none. Read by accelremote to pick the
+	// node that carries a device this box lacks (Coral Phase B).
+	Accelerators []string
 	// GpuUtilPct is the busiest device's utilization; GpuUtilKnown is false
 	// when the node did not publish it. Read by betterRemote as the LAST key —
 	// a tie-breaker, never a primary signal (operator decision 2026-09-03).
@@ -123,6 +127,7 @@ type healthWire struct {
 	// Additive (0.113.0). Absent on a pre-0.113.0 node, which decodes to the
 	// zero value — nil/false, both read as UNKNOWN by the gate.
 	ServedModels []string `json:"served_models"`
+	Accelerators []string `json:"accelerators"`
 	GpuUtilPct   int      `json:"gpu_util_pct"`
 	GpuUtilKnown bool     `json:"gpu_util_known"`
 	// Additive (0.113.16). nil on a node that publishes no lease.
@@ -190,6 +195,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		MaxConcurrentJobs: w.MaxConcurrentJobs,
 		MaxQueueDepth:     w.MaxQueueDepth,
 		ServedModels:      w.ServedModels,
+		Accelerators:      w.Accelerators,
 		GpuUtilPct:        w.GpuUtilPct,
 		GpuUtilKnown:      w.GpuUtilKnown,
 		LeasedText:        w.Lease != nil && w.Lease.Held && strings.EqualFold(w.Lease.Class, "text"),

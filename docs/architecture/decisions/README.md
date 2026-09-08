@@ -42,6 +42,8 @@ code, treat everything else as background.
 | [0034](0034-fleet-overview-is-a-read-only-page-on-the-delegator.md) | Accepted | Fleet overview is a read-only page served by the delegator, from data nodes already publish |
 | [0035](0035-persistent-vllm-seat-behind-llama-swap.md) | Accepted (residency **amended 2026-09-08**) | A vLLM agent seat lives behind llama-swap as a systemd unit the entry starts and stops. It is **not** persistent: `ttl: 300`, no group, no preload, no `[Install]` section |
 | [0036](0036-the-agent-lane-is-a-harnessed-environment.md) | Accepted | The agent lane is a harnessed environment: rules are data, the trace is telemetry, the rigger proposes |
+| [0037](0037-a-capability-name-has-one-owner-per-box.md) | Accepted | A capability name has one owner per box: the first listed accelerator |
+| [0038](0038-accelerator-work-travels-to-the-box-that-has-the-device.md) | Accepted | Accelerator work travels to the box that has the device, bytes included: fleet task `accel`, `fleet_accelerators`, local device wins a shared name |
 
 
 ## Lifecycle

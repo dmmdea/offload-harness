@@ -14,6 +14,9 @@ import (
 type AccelLane struct {
 	ID   string
 	Call NPUFunc
+	// Remote marks a lane that forwards to a fleet node carrying the device
+	// (accelremote, Coral Phase B); the tool descriptions say so.
+	Remote bool
 }
 
 // laneTool is the one adapter shape every accelerator tool takes, on both the
@@ -102,6 +105,11 @@ func accelLaneTools(lanes []AccelLane, have []Tool) []Tool {
 				continue
 			}
 			taken[t.Name] = true
+			if lane.Remote {
+				// The seat must know the image is read on THIS box and shipped: a
+				// path on the far node would fail here, the reverse of the local lane.
+				t.Description += " [FLEET: this box has no " + lane.ID + " — forwarded to the fleet node that does; image_path is a file on THIS box and its bytes travel with the call (cap 8 MiB); result carries placement{node,wall_ms}]"
+			}
 			out = append(out, t)
 		}
 	}

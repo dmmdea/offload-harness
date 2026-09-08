@@ -198,6 +198,7 @@
   "nim_max_tokens": 1024,
   "nim_timeout_sec": 120,
   "accelerators": null,
+  "fleet_accelerators": null,
   "hailo_endpoint": "http://127.0.0.1:18813",
   "hailo_sidecar_cmd": "",
   "hailo_timeout_sec": 60,

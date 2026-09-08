@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/dmmdea/offload-harness/internal/accelclient"
+	"github.com/dmmdea/offload-harness/internal/accelremote"
 	"github.com/dmmdea/offload-harness/internal/config"
 )
 
@@ -180,17 +182,66 @@ func (s *Server) registerAccelTools(srv *mcp.Server, cfg config.Config) map[stri
 			srv.AddTool(&mcp.Tool{Name: t.name, Description: t.desc, InputSchema: json.RawMessage(t.schema)}, s.handleAccelTool(id, t.sidecar, t.arg))
 		}
 	}
+	// Fleet devices (Coral Phase B, 0.115.0): an id this box does NOT carry but
+	// lists in fleet_accelerators registers the same table, forwarding through
+	// accelremote to the first delegate_remotes node whose health lists it. The
+	// walk is AFTER the local devices, so a local device wins a shared name.
+	for _, id := range cfg.FleetAccelerators {
+		if slices.Contains(cfg.Accelerators, id) {
+			continue // the device is here; the local lane above already owns its names
+		}
+		for _, t := range accelMCPTools(id) {
+			if first, dup := owner[t.name]; dup {
+				log.Printf("fleet accelerator %s: %s is already served by %s on this box; skipped (shared-name rule)", id, t.name, first)
+				continue
+			}
+			owner[t.name] = id + FleetOwnerSuffix
+			desc := t.desc + " [FLEET: this box has no " + id + " — the call is forwarded to the fleet node that does; image_path is read HERE and its bytes travel with the job (cap 8 MiB); the result carries placement{node,wall_ms}]"
+			srv.AddTool(&mcp.Tool{Name: t.name, Description: desc, InputSchema: json.RawMessage(t.schema)}, s.handleFleetAccelTool(id, t.sidecar, t.arg))
+		}
+	}
 	return owner
+}
+
+// FleetOwnerSuffix marks a forwarded owner in registerAccelTools' owner map.
+const FleetOwnerSuffix = "@fleet"
+
+// handleFleetAccelTool adapts one forwarded accelerator tool: parse args,
+// refuse an empty required argument as a defer, hand the rest to accelremote.
+// A forwarding failure is a device-prefixed defer — the caller does the work
+// another way — and the node's own result passes through untouched.
+func (s *Server) handleFleetAccelTool(id, tool, requiredArg string) mcp.ToolHandler {
+	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var in map[string]any
+		if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+			return bad, nil
+		}
+		if in[requiredArg] == nil || in[requiredArg] == "" {
+			return jsonResult(map[string]any{"deferred": true, "reason": "empty " + requiredArg})
+		}
+		out, err := accelremote.Call(ctx, s.p.Cfg(), id, tool, in)
+		if err != nil {
+			return jsonResult(map[string]any{"deferred": true, "reason": id + " (fleet): " + err.Error()})
+		}
+		return jsonResult(out)
+	}
 }
 
 // accelStatus is the status block's `accelerators` entry: one row per listed
 // device with its lane config, owned capabilities and a quick health probe
 // that NEVER spawns the sidecar — status must stay side-effect free.
 func accelStatus(ctx context.Context, cfg config.Config) map[string]any {
-	if len(cfg.Accelerators) == 0 {
+	if len(cfg.Accelerators) == 0 && len(cfg.FleetAccelerators) == 0 {
 		return nil
 	}
 	out := map[string]any{}
+	for _, id := range cfg.FleetAccelerators {
+		if slices.Contains(cfg.Accelerators, id) {
+			continue
+		}
+		out[id] = map[string]any{"owns": accelOwns(id), "fleet": true,
+			"note": "not on this box: its tools forward to the first delegate_remotes node whose /fleet/health lists it (accelremote, cap 8 MiB per image)"}
+	}
 	for _, id := range cfg.Accelerators {
 		lc, ok := accelLaneConfigFor(cfg, id)
 		entry := map[string]any{"owns": accelOwns(id)}

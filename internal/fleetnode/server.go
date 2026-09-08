@@ -923,6 +923,11 @@ func (s *Server) concurrencyCapped(taskType string) bool {
 	// verbatim the failure the rule above says the exemption exists to prevent.
 	case "image-gen", "video-gen", "animate", "audio-gen", "run-graph", "stt":
 		return false
+	// accel (0.115.0) drives a loopback accelerator sidecar — Hailo or Coral —
+	// and never the llama-swap text endpoint; a 3 ms TPU call parked behind a
+	// five-minute digest contract would be the cap protecting nothing.
+	case "accel":
+		return false
 	}
 	// Config-driven pipeline routes run through runPipelineJob, which takes the
 	// same mediaSlot. Their names are operator-chosen, so they cannot be listed
