@@ -6,6 +6,58 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.113.33] — 2026-09-07 — the 3-card tier could not load, and the gates that should have caught it were blind
+
+0.113.32 shipped `blackwell-3x16` with a llama-swap config that does not parse, a placement law nothing enforced,
+a media block copied wholesale from the 2-card tier, and the heaviest seat unpinned. CI passed it 5/5, because
+every render assertion is a regex over the config TEXT and a regex cannot tell a mapping from a comment.
+
+### Fixed
+- **The template is not parseable YAML.** The generator that added the opt-in over-2-card seats anchored on the
+  literal `matrix:` and hit its FIRST occurrence — inside the comment ``RESIDENCY IS DECLARED WITH `matrix:` `` —
+  wedging the seat block into that comment line and leaving its tail at column 0 as a bogus top-level key, with the
+  real mapping duplicated below. `yaml.v3`, the parser llama-swap itself uses, rejects the file outright.
+- **The placement assertion could never fail.** `setup/render.tests.ps1` gated on `'CUDA_VISIBLE_DEVICES=1<0x08>'`:
+  a regex word boundary (`\b`) written through a double-quoted string became byte 0x08, which no config contains,
+  so `-notmatch` was always true. CHANGELOG entries record two earlier instances of the same corruption
+  (`\bnone\b`, `\bq354\b`) — and both were themselves still corrupted in this file. Restored and repaired.
+- **The law was actually being broken.** `blackwell-3x16`'s entire media block was byte-identical to
+  `blackwell-2x16`'s, whose device map is 0=utility / 1=FAST. On three cards 1 is the DISPLAY card, so the copy put
+  the vision seat (11,751 MiB) and image compute on it and named card 2 nowhere — which is also why the 3-card box
+  measured no media difference from the 2-card box. It was an unadapted copy, not a hardware result. Corrected to
+  what the reference box runs: vision and STT to device 2, imagegen compute `cuda:1` / donor `cuda:2`.
+- **The 27B spread onto the display card.** `qwen3.8-27b` was the only default seat with no `CUDA_VISIBLE_DEVICES`
+  pin and it carries `-ngl 999 -sm layer`, so llama.cpp divided it across every visible card. The reference box hit
+  this and re-pinned on 2026-08-31 ("Old split 21,29 spanned 5070Ti+5060Ti by CUDA fastest-first"). Now pinned to
+  the pair.
+
+### Beware
+**Two device orderings are in play and the display card has a different index in each.** `gpu_env` /
+`CUDA_VISIBLE_DEVICES` is PCI_BUS_ID order (display = **1**); the ComfyUI `*_pool_*` keys are ComfyUI's
+fastest-first order (display = **cuda:0**, the pair = cuda:1/cuda:2). Confusing them is how the media block ended up
+pointing at the display card twice, and a first attempt at the fix got it wrong in the opposite direction.
+`videogen_pool_compute` stays `cuda:0` as a documented law exception: an int8 DiT cannot compute on a non-default
+CUDA device (ComfyUI-MultiGPU #220) and moving it threw `cudaErrorIllegalAddress` mid-render.
+
+### Added
+- **The installer renders the `ampere-16` vLLM agent seat** (`internal/vllmseat`, `install vllm-seat`). ADR 0035
+  said the seat was hand-installed and not something the installer renders; the consequence was that fresh installs
+  kept getting `qwen3.5-4b-agent` — the arm that LOST its own bake-off (8/8 at 159 s vs the vLLM seat's 8/8 at 45 s,
+  4x the window, GO-decided 2026-09-06). One Spec now produces the llama-swap entry, the systemd/polkit/wrapper
+  files and the `agent_model` binding, so the seat and the model the agent lane routes to cannot disagree.
+  Prerequisites are NOT rendered on purpose: the venv and weights are hand-built, so a box without them binds the
+  declared llama.cpp fallback and prints why.
+- Three values measured, adopted live, and seeded by no tier: `agent_max_tokens` 4096, `ffmpeg_video_encoder`
+  `h264_nvenc`, and `healthCheckTimeout` 300 → 600 for the Flash-Next cold load.
+
+### Gates (each mutation-tested RED against the shipped state before landing)
+- `TestEveryTemplateIsParseableYAML` / `TestRenderedConfigIsParseableYAML` — every template AND its rendered output
+  must parse with `yaml.v3`, not merely match a regex.
+- `TestNoStrayControlCharacters` — a C0 byte in any source or config file, the mechanism that voids a regex silently.
+- `TestTripleBlackwellNeverSchedulesOntoTheDisplayCard` — both orderings, and it fails if the 3-card media bindings
+  are ever byte-identical to the 2-card tier's again.
+- `TestEveryDefaultTripleBlackwellSeatNamesItsCards` — every default seat must name the cards it may use.
+
 ## [0.113.32] — 2026-09-07 — `blackwell-3x16` ships, and three measured wins get wired
 
 The operator asked three times for the 3-card tier and for install defaults to follow the measurements. This is
