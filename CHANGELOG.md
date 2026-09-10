@@ -6,6 +6,25 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.4] - 2026-09-10 - the cards do the inference: no CPU residents, no bulk-in-RAM seats, ttl 300 in every template
+
+Operator rule, 2026-09-10 02:00, after finding 80 GB of host RAM in use: THE THREE CARDS (and the fleet's
+other two) DO THE INFERENCE — RAM IS OVERFLOW ONLY — and EVERY IDLE MODEL UNLOADS AFTER 5 MINUTES on every
+engine and every node. The live Qube yaml had two `-ngl 0` residents (moved off 5060 Ti #1 by a 09-07
+session) and two Flash-Next entries parking 28–32 expert layers in RAM; the templates rendered the same
+shapes on a fresh install.
+
+- `llama-swap.linux-cuda.yaml`: `bge-reranker-v2-m3` moves to `--n-gpu-layers 99` (it ran on CPU "to buy
+  back ~245 MiB of VRAM"; that trade is forbidden).
+- `llama-swap.win-dual-cuda.yaml`: the two `ttl: 0` entries (`offload-e4b`, `gemma4-26b-a4b`) become `ttl: 300`.
+- `llama-swap.win-triple-blackwell.yaml`: the `qwen3.8-flash-next` and `qwen3.8-flash-next-262k` opt-in
+  seats are removed; the display-card placement test drops their exemption (every rendered seat now answers
+  to the display rule); the blackwell-3x16 note records why. Long context on the tier is the pair's
+  `qwen3.8-27b-262k`.
+- The only sanctioned host-RAM use remains spill of a model that does not fit its card (the 26B's
+  `--n-cpu-moe`). Partner rules recorded in the operator's constitution: the ≥30 % harness-share floor and
+  the Lenovo cache server backing every vLLM seat (a follow-up: `kv_cache_server` still binds one seat).
+
 ## [0.115.3] - 2026-09-10 - the linux template's 26B graphs flag follows the tier, as the windows templates already did
 
 `setup/templates/llama-swap.linux-cuda.yaml` hard-coded `GGML_CUDA_DISABLE_GRAPHS=1` on both 26B seats

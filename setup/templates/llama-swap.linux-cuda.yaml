@@ -139,12 +139,11 @@ models:
   bge-reranker-v2-m3:
     aliases: [reranker-v2-m3]
     env: ["${ld}"]
-    # --n-gpu-layers 0 ON PURPOSE: the reranker on CPU buys back ~245 MiB of VRAM
-    # (measured) and it is never on a latency-critical path.
+    # GPU weights (2026-09-10 operator rule: no CPU inference; RAM is overflow only).
     cmd: >-
       __LLAMA_BIN__/llama-server --model __MODELS__/bge-reranker-v2-m3-Q4_K_M.gguf
       --reranking --pooling rank --ctx-size 8192 --batch-size 4096 --ubatch-size 4096
-      --n-gpu-layers 0 --port ${PORT} --host 127.0.0.1
+      --n-gpu-layers 99 --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
     ttl: 600
 

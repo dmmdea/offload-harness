@@ -167,9 +167,10 @@ func TestEveryDefaultTripleBlackwellSeatNamesItsCards(t *testing.T) {
 	if i < 0 {
 		t.Fatal("no models mapping — this gate went blind")
 	}
-	// The opt-in seats span all three cards deliberately (Flash-Next class): they are
-	// in no matrix set and load only by name, under the >=4 GiB desktop floor.
-	optIn := map[string]bool{"qwen3.8-flash-next": true, "qwen3.8-flash-next-262k": true}
+	// No exemptions since 0.115.4: the Flash-Next opt-in seats that spanned all three
+	// cards parked 28-32 expert layers in host RAM and were removed by operator rule
+	// (2026-09-10: RAM is overflow only). Every rendered seat now answers to the display rule.
+	optIn := map[string]bool{}
 
 	seatRe := regexp.MustCompile(`(?m)^  ([A-Za-z0-9._-]+):$`)
 	locs := seatRe.FindAllStringSubmatchIndex(body[i:], -1)
