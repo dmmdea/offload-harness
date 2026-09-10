@@ -146,6 +146,8 @@ func main() {
 		err = runLoupe(args)
 	case "doctor":
 		err = runDoctor(args)
+	case "audit-yaml":
+		err = runAuditYAML(args)
 	case "report":
 		err = runReport(args)
 	case "acceptance":
@@ -274,6 +276,7 @@ Usage:
   local-offload rig --seat <alias> [--since 7d] [--node ID] [--out report.json] [--json]   the seat rigger (ADR 0036 P3a): classify this box's delegation-log failures for a seat onto ONE axis each (published precedence), weights over eligible rows, evidence job ids, the pre-authored remedy per axis — proposes and applies nothing
   local-offload ledger [--since DAYS]    token-savings report
   local-offload doctor                   check endpoint health + config
+  local-offload audit-yaml FILE...        check live llama-swap config(s) against the operator rules (INV-1/INV-2: no -ngl 0, no empty CUDA_VISIBLE_DEVICES, ttl 300 everywhere, no persistent group, no preload); exit 1 on any violation
   local-offload report [--out FILE]      READ-ONLY capability report for this machine (tier, serving, media routes) — Markdown, safe to send
   local-offload acceptance [--json]      the gate: EXERCISE every bound capability as this identity (lease writable, interpreters runnable, aliases live). Non-zero when a node must not be handed work.
   local-offload install detect [--json]  classify this machine into a hardware tier (works on every OS)
