@@ -6,6 +6,23 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.1] - 2026-09-09 - a slow or missing cache server degrades the vLLM seat, never refuses it
+
+For hours on 2026-09-09 every delegation on the Qube came back HTTP 500: `seat_fg.sh` refused to start
+the 27B seat because the cache-server share wrote at ~36 MB/s (under `SEAT_L2_MIN_MBPS=200`), llama-swap
+turned each refusal into a 500, and sessions concluded "delegation is not viable" and did the work in
+the cloud context — the exact failure the harness exists to prevent, caused by a cache ACCELERATOR being
+slow. (The slowness itself was a degraded WSL mirrored datapath after a Qube reboot: WSL→Lenovo 311 Mbit/s
+while the Windows host wrote 640 MB/s to the same share; a further reboot restored 7.8 Gbit/s.)
+
+- `seat_fg.sh`: a share that will not mount, cannot be probed, or writes under the floor now routes through
+  `degrade_l2` — `SEAT_L2` is emptied (the MP server registers no store), the log says `CACHE SERVER
+  DEGRADED — <why>`, `$WORK/seat-l2.status` records `degraded <when> reason=<why>` / `ok <when> mbps=<n>`,
+  and the seat serves the same-box tier (L1 only). The only refusal left is the port-already-bound case.
+  Verified live on the Qube under the slow share: the next start logged the degradation, pinned its KV
+  pool and loaded. `TestSeatLauncherDegradesInsteadOfRefusingOnACacheServerFault` pins the template.
+- `docs/systems/cache-server.md` describes the degrade path and the status file.
+
 ## [0.115.0] - 2026-09-08 - accelerator work travels to the box that has the device (Coral Phase B)
 
 The Coral was fully served on the Lenovo and unreachable from the Qube except by a hand-routed
