@@ -328,6 +328,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	wire.Calls = CallsFromLoop(res.Calls)
 	wire.StopNote = res.StopNote
 	wire.OutputTruncated = res.OutputTruncated
+	wire.ResponseShape = agent.ResponseShape(res.Calls)
 	// T2-B: capture the run's prefill accounting HERE, immediately after the loop and
 	// BEFORE the defer branches below. Every one of those branches still records a
 	// ledger row via finish()/deferWire(), and a budget-exhausted or timed-out run is

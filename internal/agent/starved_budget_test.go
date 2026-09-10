@@ -167,6 +167,23 @@ func TestThinkingOnModeNeverSendsTheKwarg(t *testing.T) {
 	}
 }
 
+// TestResponseShapeSummarizesTheSeatsAnswerShape pins the D-45 record.
+func TestResponseShapeSummarizesTheSeatsAnswerShape(t *testing.T) {
+	if got := ResponseShape(nil); got != "" {
+		t.Fatalf("no calls must record nothing, got %q", got)
+	}
+	calls := []CallRecord{{ToolCalls: 1}, {ReasoningKey: "reasoning", ReasoningTokens: 200}, {ThinkingOff: true}}
+	got := ResponseShape(calls)
+	for _, want := range []string{"reasoning_key=reasoning", "reasoning_tokens=reported", "tool_calls_parsed=1", "completions=3"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("response shape %q lacks %q", got, want)
+		}
+	}
+	if got := ResponseShape([]CallRecord{{ReasoningKey: "reasoning_content"}}); !strings.Contains(got, "reasoning_key=reasoning_content") || !strings.Contains(got, "reasoning_tokens=unreported") {
+		t.Fatalf("llama.cpp shape = %q", got)
+	}
+}
+
 // TestFinalMaxTokensIsFourTimesCappedNeverBelow pins the final budget rule.
 func TestFinalMaxTokensIsFourTimesCappedNeverBelow(t *testing.T) {
 	for in, want := range map[int]int{0: 4096, 1024: 4096, 2048: 8192, 4096: 8192, 8192: 8192, 16384: 16384} {

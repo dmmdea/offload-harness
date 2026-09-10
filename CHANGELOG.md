@@ -6,6 +6,16 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.13] - 2026-09-10 - the seat's answer shape is on the record
+
+Register D-45. Two seat facts cost a week each because nothing recorded them: the 2026-09-04 tool-call
+parser mismatch (hermes vs qwen3_xml) and the 2026-09-10 reasoning-key blind spot (`reasoning` vs
+`reasoning_content`). The seat pin says what the seat IS; nothing said how it ANSWERED.
+
+- `response_shape` on the wire: `reasoning_key=<reasoning|reasoning_content|none> reasoning_tokens=<reported|unreported>
+  tool_calls_parsed=N completions=N`, derived from the run's `calls[]`; set before the defer branches.
+- Docs: fleet-node result row.
+
 ## [0.115.12] - 2026-09-10 - the seat stops re-reading what it was handed, and stops repeating refused calls
 
 Register D-48 and D-49, both from the 2026-09-10 4B rows: the seat re-read the 41 KB document its setup
