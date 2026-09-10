@@ -39,6 +39,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/gbnf"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/seatwait"
@@ -453,6 +454,15 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		return finish(wire)
 	}
 
+	// The answer may ALREADY be the requested object (0.115.12, D-84): the goal
+	// asks for the shape, thinking-off finals on the vLLM seats answer in it,
+	// and re-packing 19 KB of JSON into the same JSON costs another ~6,000
+	// tokens — the 0.115.10 acceptance run's 27B row spent its last 200 s of
+	// wall there. Validate the loop's own text first; only prose re-packs.
+	if direct, ok := directStructured(res.Output, contract.OutputSchema); ok {
+		wire.Structured = direct
+		return finish(wire)
+	}
 	structured, tokensOut, transport, serr := p.repackStructured(cctx, seat, contract.OutputSchema, res.Output)
 	if serr != nil {
 		// wire.Output stays populated on every branch below so the CALLER still
@@ -638,7 +648,7 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 		// The flag is harmless on a non-thinking template — gemma-4-e4b's output
 		// with it is identical to its output without it — so it rides every
 		// re-pack rather than being gated on a seat guess we cannot make.
-		gres, gerr := p.client.Generate(ctx, seat, system, user, grammar, budget, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
+		gres, gerr := p.repackClient(p.cfg.CompletionPath, budget).Generate(ctx, seat, system, user, grammar, budget, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
 		if gerr != nil {
 			lastErr = gerr
 			if transportErr == nil && genErrIsTransport(gerr) {
@@ -692,6 +702,85 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 	return nil, 0, false, lastErr
 }
 
+// directWrapperMax is the most prose (fences, "Here is the result:", a
+// closing line) that may surround an object for directStructured to take it
+// as the answer when the object is under half of the text.
+const directWrapperMax = 200
+
+// directStructured reports whether the loop's final text, trimmed to its
+// outermost {...} span (fences and prose around it are fine), already
+// validates against the contract's schema — after the same lossless scalar
+// coercion the re-pack lanes apply. ok=false means "re-pack it"; nothing
+// about the text is judged beyond shape.
+func directStructured(output string, rawSchema json.RawMessage) (json.RawMessage, bool) {
+	var schema map[string]any
+	if json.Unmarshal(rawSchema, &schema) != nil {
+		return nil, false
+	}
+	// Only a schema that names fields can be matched by shape: against a
+	// property-less schema the validator checks "is this JSON" and nothing
+	// more, and a stray {} in prose would pass (review finding, 0.115.12).
+	if props, ok := schema["properties"].(map[string]any); !ok || len(props) == 0 {
+		return nil, false
+	}
+	trimmed := strings.TrimSpace(output)
+	i, j := strings.Index(trimmed, "{"), strings.LastIndex(trimmed, "}")
+	if i < 0 || j <= i {
+		return nil, false
+	}
+	// The object must BE the answer, not an aside inside it: either most of
+	// the text, or wrapped in no more than a short preamble/fence/tail — so a
+	// code sample or an "{example}" inside a long prose answer still goes
+	// through the re-pack.
+	if span, outside := j+1-i, len(trimmed)-(j+1-i); span*2 < len(trimmed) && outside > directWrapperMax {
+		return nil, false
+	}
+	content := []byte(strings.TrimSpace(trimmed[i : j+1]))
+	if validator.Validate(content, schema) == nil {
+		return json.RawMessage(content), true
+	}
+	if fixed, ok := coerceToSchema(content, schema); ok {
+		return json.RawMessage(fixed), true
+	}
+	return nil, false
+}
+
+// repackTimeout bounds ONE re-pack HTTP call by the budget it may generate:
+// the seat's per-call `request_timeout_sec` (120 s by default) was sized for
+// a one-line answer, and a 3,283-token re-pack on the 4B at ~20 tok/s (the
+// 0.115.10 acceptance run) died at that timeout as "structured re-pack
+// unreachable" — a transport verdict on a seat that was answering. Six
+// tokens per second is the slowest a fleet seat generates (the 4B under a
+// second job); the contract wall (cctx) still bounds the call above this.
+func repackTimeout(cfg config.Config, budget int) time.Duration {
+	t := time.Duration(cfg.RequestTimeoutSec) * time.Second
+	if t < agentRepackChatTimeout {
+		t = agentRepackChatTimeout
+	}
+	if byBudget := time.Duration(budget/6) * time.Second; byBudget > t {
+		t = byBudget
+	}
+	return t
+}
+
+// repackClient is a seat client for one re-pack lane, on the given path,
+// with a timeout sized to the budget (repackTimeout) and the same
+// seat-endpoint routing the recorded pipeline uses.
+// Construction mirrors openPipeline / NewRecordlessPipeline exactly — seat
+// endpoints AND the cascade remote lanes — so the re-pack keeps the busy-hour
+// failover the pipeline's own client has (review finding, 0.115.12).
+func (p *Pipeline) repackClient(path string, budget int) *llamaclient.Client {
+	c := llamaclient.New(p.cfg.Endpoint, path, p.cfg.Model, repackTimeout(p.cfg, budget)).
+		WithSeatEndpoints(p.cfg.SeatEndpoints)
+	if len(p.cfg.CascadeRemoteLanes) > 0 {
+		gpuLockPath, stateDir := p.cfg.GPULockPath, p.cfg.StateDir
+		c = c.WithRemoteLanes(p.cfg.CascadeRemoteLanes,
+			func() bool { return delegate.LocalBusy(gpuLockPath, stateDir) },
+			llamaclient.RosterResident())
+	}
+	return c
+}
+
 // repackBudget sizes the structured re-pack's completion budget from the text
 // it re-packs (0.115.10). The re-pack is an EXTRACTION over the loop's final
 // answer, so its output is bounded by that answer: about a token per three
@@ -737,9 +826,8 @@ func (p *Pipeline) repackViaChat(ctx context.Context, seat string, schema map[st
 	// A dedicated chat-path client, seat-endpoint routing mirrored from the
 	// main client's construction (recordless.go): the pipeline's own client is
 	// pinned to the native completion path and cannot make this call.
-	cc := llamaclient.New(p.cfg.Endpoint, "/v1/chat/completions", p.cfg.Model, agentRepackChatTimeout).
-		WithSeatEndpoints(p.cfg.SeatEndpoints)
-	gres, gerr := cc.Generate(ctx, seat, system, user, "", repackBudget(output), p.cfg.Temperature, 0, llamaclient.WithoutThinking())
+	budget := repackBudget(output)
+	gres, gerr := p.repackClient("/v1/chat/completions", budget).Generate(ctx, seat, system, user, "", budget, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
 	if gerr != nil || gres.Truncated {
 		return nil, 0, false
 	}

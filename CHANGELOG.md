@@ -6,6 +6,31 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.12] - 2026-09-10 - the seat stops re-reading what it was handed, and stops repeating refused calls
+
+Register D-48 and D-49, both from the 2026-09-10 4B rows: the seat re-read the 41 KB document its setup
+replay had already put in front of it (173,784 prompt tokens, two copies), paged past its end three times,
+and on another contract issued the same refused `list_dir` call eight turns in a row (729 s) before an empty
+final.
+
+- Setup replay feeds the EXACT-REPEAT breaker (D-48): a committed replayed call is registered as the first
+  call of its (tool, args), so the model repeating it byte for byte is refused with "you already have that
+  result" and the pinned result is restored if compaction cut it. The same-name cap and `disabledTools` are
+  still not fed. A replayed `read_file` that reached EOF ends with a `(complete file: N lines — …)` footer.
+  This reverses the 2026-09-07 "feed no breaker" rule on the corpus evidence.
+- A refused call repeated byte for byte (D-49) — breaker, env rule, parked, unknown — is on its SECOND
+  refusal withdrawn from the tool list, and the next turn opens with an answer-now user instruction.
+- Docs: fleet-node `setup_actions` row; tests for all three behaviours.
+- The structured re-pack runs on its OWN seat client whose per-call timeout scales with the budget
+  (`repackTimeout`: max of `request_timeout_sec`, 120 s, budget/6 s). The 0.115.10 acceptance run's 4B row
+  produced its 8,314-char answer and then died in the re-pack at the seat client's 120 s per-call timeout —
+  filed as `structured re-pack unreachable`, a transport verdict on a seat that was answering. The contract
+  wall still bounds every call.
+- An answer that is ALREADY the requested object (register D-84) is validated directly — trimmed to its
+  outermost `{…}`, same scalar coercion as the re-pack lanes — and spends no re-pack completion. The
+  0.115.10 acceptance run's 27B row answered in shape (19,117 chars) and then spent its last 200 s of a
+  900 s wall re-packing that JSON into the same JSON. Prose still re-packs as before.
+
 ## [0.115.11] - 2026-09-10 - a cold seat loads outside the wall
 
 Register D-64. The admission pre-flight (0.111.0) waited for ANOTHER model's swap before starting the

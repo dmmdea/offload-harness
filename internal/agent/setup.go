@@ -25,9 +25,19 @@ import (
 //   - filter_action applies (deny/allow withhold, arg_limits clamp); a
 //     max_calls_per_tool cap sees the per-run counter, which setup never
 //     spends — the model's own budget under that cap stays whole.
-//   - the circuit breakers (exact-repeat, same-name, disabledTools) are NOT
-//     consulted and NOT fed: the model never issued these calls, so a later
-//     identical model call must not read as a repeat of them.
+//   - the EXACT-REPEAT breaker IS fed by a committed replay (0.115.12, D-48):
+//     the replayed (tool, args) is registered as its first call, so a model
+//     call that repeats it byte for byte is refused with "you already have
+//     that result" and the pinned result is restored if compaction cut it —
+//     the 2026-09-10 4B re-read the 41 KB document it had been handed
+//     (173,784 prompt tokens, two copies in the transcript) and paged past
+//     its end three times. The same-name cap and disabledTools are still
+//     neither consulted nor fed: the model's own budget under them stays
+//     whole. (This reverses the 2026-09-07 council's "feed no breaker" — the
+//     corpus showed the repeat, not the refusal, was the cost.)
+//   - a committed read_file replay that reached EOF ends with a "complete
+//     file" footer, so the seat does not page for a continuation that does
+//     not exist.
 //   - the observation hooks and the loop-boundary cap apply as on any call.
 //   - never charged to maxSteps; charged to the wall like everything else.
 //   - the results are PINNED for compaction (the lossy rungs keep them; only
@@ -90,7 +100,7 @@ func SetupRan(effects []EffectRecord) int {
 // with the replay appended (one assistant turn + one tool result per action
 // that was attempted), recording each action in effects/ruleHits and pinning
 // each result id. No actions = the transcript untouched.
-func (l *Loop) replaySetup(ctx context.Context, msgs []Msg, pinned map[string]bool, effects *[]EffectRecord, ruleHits *[]EnvRuleHit, ruleState *EnvRuleState) []Msg {
+func (l *Loop) replaySetup(ctx context.Context, msgs []Msg, pinned map[string]bool, effects *[]EffectRecord, ruleHits *[]EnvRuleHit, ruleState *EnvRuleState, exactCalls map[string]int, firstCallID map[string]string) []Msg {
 	if len(l.setup) == 0 {
 		return msgs
 	}
@@ -155,7 +165,20 @@ func (l *Loop) replaySetup(ctx context.Context, msgs []Msg, pinned map[string]bo
 		if len(argNotes) > 0 {
 			content += "\n\n[note: the seat's env rules adjusted this call's arguments: " + strings.Join(argNotes, "; ") + "]"
 		}
+		if eff == EffectCommitted && a.Tool == "read_file" && !isErr && !strings.Contains(content, "use offset=") && !strings.HasPrefix(content, "(end of file") && len(content) <= l.toolResultCapChars() {
+			// The whole file is in front of the model: say so, in the place a
+			// continuation hint would sit, so a small seat does not page for
+			// more (the 4B read three 213-char "(end of file)" answers).
+			content += fmt.Sprintf("\n(complete file: %d lines — there is no further content; do not read it again or page with offset)", strings.Count(content, "\n")+1)
+		}
 		content, _ = contextbudget.Trim(content, l.toolResultCapChars())
+		if eff == EffectCommitted && exactCalls != nil && firstCallID != nil {
+			key := call.Name + "\x00" + call.Args
+			if _, seen := firstCallID[key]; !seen {
+				exactCalls[key] = 1
+				firstCallID[key] = id
+			}
+		}
 		rec := EffectRecord{Step: 0, CallID: id, Tool: a.Tool, Status: eff, Risk: securityRisk(call.Args), ObsChars: len(content), Rule: firedRule, Setup: true}
 		if eff != EffectCommitted {
 			rec.Note = content
