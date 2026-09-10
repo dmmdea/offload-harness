@@ -44,7 +44,11 @@ type LayerSeat struct {
 	// DisplayFootprintGiB is the VRAM this seat puts on the layer's display
 	// device. The display-floor guard is `free(display) − this ≥ floor`: the
 	// old check compared free VRAM alone and admitted a 10.5 GB load onto a
-	// card with 9 GB free (council R6).
+	// card with 9 GB free (council R6). REQUIRED (> 0) on a display_floor-guarded
+	// layer for every seat whose pin includes the display device — a 0 here
+	// degrades the guard back to that rejected free-VRAM check. Config refuses
+	// the omission at load when display_device is a plain CUDA index; a UUID pin
+	// is resolved at admission, where a 0 footprint refuses as undeclared.
 	DisplayFootprintGiB float64 `json:"display_footprint_gib,omitempty"`
 	// HostRAMGiB is the host RAM the seat holds while loaded (experts on CPU);
 	// the host_ram guard refuses when free host RAM is below it.
@@ -292,6 +296,15 @@ func (c Config) ValidateLayers() error {
 		if len(l.Seats) == 0 {
 			return fmt.Errorf("%s: no seats", at)
 		}
+		// The display_floor guard is `free(display) − seat.DisplayFootprintGiB ≥
+		// floor`. With a 0 footprint that arithmetic degrades to the free-VRAM
+		// check the council rejected (R6: it admitted a 10.5 GB load onto a card
+		// with 9 GB free), so every seat whose pin includes the display device must
+		// declare the number. Config can resolve that match only when
+		// display_device is a plain CUDA index; a UUID pin is resolved at admission
+		// (placement refuses "display footprint undeclared" there, never free − 0).
+		floorGuarded := containsString(l.Guards, "display_floor")
+		display := strings.TrimSpace(l.DisplayDevice)
 		roles := map[string]bool{}
 		for j, s := range l.Seats {
 			sat := fmt.Sprintf("%s seats[%d]", at, j)
@@ -316,6 +329,9 @@ func (c Config) ValidateLayers() error {
 			if s.CtxTokens < 0 || s.MaxInflight < 0 || s.FootprintGiB < 0 || s.DisplayFootprintGiB < 0 || s.HostRAMGiB < 0 || s.PrefillTPS < 0 {
 				return fmt.Errorf("%s: measured numbers must not be negative", sat)
 			}
+			if floorGuarded && isCUDAIndex(display) && containsString(s.DeviceList(), display) && s.DisplayFootprintGiB <= 0 {
+				return fmt.Errorf("%s: display_footprint_gib is undeclared (0) but the pin %q includes display device %q — guard display_floor is free − footprint ≥ floor, and a 0 footprint degrades it to the free-VRAM check", sat, s.Device, display)
+			}
 			if s.CtxTokens > 0 {
 				anyWindow = true
 			}
@@ -335,4 +351,36 @@ func containsString(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// isCUDAIndex reports whether a display_device is a plain CUDA index ("1")
+// rather than a GPU-UUID pin — the only form config can match against a seat's
+// device pin without a live probe.
+func isCUDAIndex(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// stripComposite zeroes the five composite keys (ADR 0039) on a config that
+// Load hands back WITH an error. LoadWithSource returns that value to every
+// subcommand and records the error only in Source.LoadErr, which main's loadCfg
+// discards — so without this `local-offload mcp` would place work onto the exact
+// layer shape the validator refused, and a validator that failed BEFORE
+// ValidateLayers ran would leave unvalidated layers intact. Cleared, the value
+// is the byte-identical non-composite shape no placement can target; every
+// pre-existing key keeps its pre-0.116 failed-load behaviour (a separate
+// decision — exiting on Source.LoadErr would change every subcommand).
+func stripComposite(c *Config) {
+	c.Layers = nil
+	c.Tiers = nil
+	c.TierProfile = ""
+	c.OperatorPresence = ""
+	c.OperatorIdleSec = 0
 }

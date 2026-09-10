@@ -1498,7 +1498,24 @@ func Default() Config {
 // A leading "~/" in any path-typed field is expanded to the user home dir
 // (LO-4: config.example.json ships "~/.local-offload/..." paths that were
 // previously taken literally, silently creating a "~" directory in the cwd).
+//
+// A config returned WITH an error never carries the composite keys (ADR 0039):
+// LoadWithSource hands the value to every subcommand whatever the error, so the
+// layers are stripped here, in the wrapper, for the same reason the GPU gate is
+// armed in one — no exit path (decode, any validator, the fleet_queue_holder
+// check) can hand a placeable layer to a caller that proceeds on the value.
 func Load(path string) (Config, error) {
+	c, err := loadArmed(path)
+	if err != nil {
+		stripComposite(&c)
+	}
+	return c, err
+}
+
+// loadArmed is Load's body: load, then arm the process-wide GPU load gate on
+// every exit. Split out so Load can strip the composite keys from an errored
+// value without a call before each return.
+func loadArmed(path string) (Config, error) {
 	c, err := load(path)
 	// Arm the model-affinity LOAD gate here and nowhere else, for the same reason
 	// netguard.SetTailnetSuffix below is installed from inside a load: the GPU lease
@@ -1587,7 +1604,9 @@ func load(path string) (Config, error) {
 	}
 	// Layers are validated here, in the one door every entry point funnels
 	// through, so a seeded or hand-edited layer that would misplace work fails
-	// at load by name — never at the first contract placed onto it.
+	// at load by name — never at the first contract placed onto it. Load strips
+	// the five composite keys from the value it returns with this error:
+	// LoadWithSource callers proceed on the value, not the error.
 	if err := c.ValidateLayers(); err != nil {
 		return c, err
 	}
