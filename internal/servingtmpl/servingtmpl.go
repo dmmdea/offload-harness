@@ -227,6 +227,14 @@ func Render(tmpl string, p Params) (string, error) {
 	if p.DisableCUDAGraphs {
 		out = strings.ReplaceAll(out, graphsToken, "GGML_CUDA_DISABLE_GRAPHS=1")
 	} else {
+		// The token may share its list with other entries (linux-cuda: `[__M26_GRAPHS__,
+		// "${ld}"]`, the loader-path macro every Linux seat needs). Drop the token WITH
+		// its separator so the list stays valid YAML; a list that held only the token
+		// renders `env: []` and is removed below. Until 0.115.3 the Linux template
+		// hard-coded the flag on both 26B seats, so a tier that measured graphs as a
+		// win (`disable_cuda_graphs: false`) still rendered them off on Linux.
+		out = strings.ReplaceAll(out, graphsToken+", ", "")
+		out = strings.ReplaceAll(out, ", "+graphsToken, "")
 		out = strings.ReplaceAll(out, graphsToken, "")
 		out = emptyEnvLine.ReplaceAllString(out, "")
 	}

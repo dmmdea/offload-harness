@@ -47,6 +47,52 @@ func TestRenderLeavesNoTokens(t *testing.T) {
 	}
 }
 
+// The 26B seats' CUDA-graphs flag is a TIER decision (profiles.json
+// `disable_cuda_graphs`), rendered through __M26_GRAPHS__ on the Windows templates
+// since 0.113.x — while the Linux template hard-coded `GGML_CUDA_DISABLE_GRAPHS=1` on
+// both seats, so a Linux tier that measured graphs as a win could never turn them on
+// (found by the 2026-09-09 A2 A/B; the A2's own verdict stays `true`). Both seats
+// must follow the field, keep their loader-path macro, and render parseable YAML in
+// both states.
+func TestLinuxCudaGraphsFlagFollowsTheTier(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		disable bool
+		wantEnv string
+	}{
+		{"graphs disabled (ampere-16's measured verdict)", true, `env: [GGML_CUDA_DISABLE_GRAPHS=1, "${ld}"]`},
+		{"graphs enabled", false, `env: ["${ld}"]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := params()
+			p.DisableCUDAGraphs = tc.disable
+			got, err := Render(linuxCUDA(t), p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := strings.Count(got, "GGML_CUDA_DISABLE_GRAPHS=1"); (tc.disable && n != 2) || (!tc.disable && n != 0) {
+				t.Errorf("disable=%v: GGML_CUDA_DISABLE_GRAPHS=1 appears %d times, want %d (the two 26B seats)", tc.disable, n, map[bool]int{true: 2, false: 0}[tc.disable])
+			}
+			for _, seat := range []string{"gemma4-26b-a4b:", "gemma-4-26b-agent:"} {
+				i := strings.Index(got, seat)
+				if i < 0 {
+					t.Fatalf("seat %s missing from the render", seat)
+				}
+				block := got[i:]
+				if j := strings.Index(block, "\n    cmd:"); j > 0 {
+					block = block[:j]
+				}
+				if !strings.Contains(block, tc.wantEnv) {
+					t.Errorf("seat %s env line: want %q in\n%s", seat, tc.wantEnv, block)
+				}
+			}
+			if strings.Contains(got, "[,") || strings.Contains(got, ", ]") || strings.Contains(got, "__") {
+				t.Errorf("render left a broken list or a token:\n%s", got)
+			}
+		})
+	}
+}
+
 // TestUnresolvedTokenIsRefused: the check must actually fire, or it is decoration.
 func TestUnresolvedTokenIsRefused(t *testing.T) {
 	_, err := Render("cmd: __LLAMA_BIN__/llama-server --something __FUTURE_TOKEN__", params())

@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.3] - 2026-09-10 - the linux template's 26B graphs flag follows the tier, as the windows templates already did
+
+`setup/templates/llama-swap.linux-cuda.yaml` hard-coded `GGML_CUDA_DISABLE_GRAPHS=1` on both 26B seats
+(lines 47 and 61) while the Windows templates rendered it from `profiles.json` `disable_cuda_graphs` through
+`__M26_GRAPHS__` — so a Linux tier that measured graphs as a win could never turn them on. Found by the
+2026-09-09 A2 CUDA-graphs A/B (+3.8 % gen, no MoE gain on sm_86; ampere-16 keeps `disable_cuda_graphs: true`,
+so its rendered YAML is byte-identical before and after this change).
+
+- Both Linux 26B seats now carry `env: [__M26_GRAPHS__, "${ld}"]`; the renderer drops the token WITH its list
+  separator when graphs are on, so the loader-path macro every Linux seat needs survives in a valid list
+  (`env: ["${ld}"]`), and `env: []` lines are still removed as before.
+- `TestLinuxCudaGraphsFlagFollowsTheTier` pins both states on both seats, the raw template stays parseable
+  YAML (`TestEveryTemplateIsParseableYAML`), and `TestRenderLeavesNoTokens` still holds.
+
 ## [0.115.2] - 2026-09-09 - a held card is a place in line: `gpu reserve` queues, and an unloaded seat stays unloaded
 
 For the tenth time a session refused GPU work — "the harness is live, it pins models to these cards and can
