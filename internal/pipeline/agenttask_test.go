@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
@@ -107,6 +108,18 @@ type agentFake struct {
 // repackDisablesThinking reports whether a captured grammar-completion body
 // carries chat_template_kwargs.enable_thinking=false — the exact wire shape the
 // live fix depends on.
+// isForcedFinalCall reports whether a chat request is the loop's forced final
+// step: its last message is the agent package's answer-now turn.
+func isForcedFinalCall(body map[string]any) bool {
+	msgs, _ := body["messages"].([]any)
+	if len(msgs) == 0 {
+		return false
+	}
+	last, _ := msgs[len(msgs)-1].(map[string]any)
+	content, _ := last["content"].(string)
+	return last["role"] == "user" && content == agent.FinalAnswerTurn
+}
+
 func repackDisablesThinking(body map[string]any) bool {
 	kw, ok := body["chat_template_kwargs"].(map[string]any)
 	if !ok {
@@ -143,7 +156,10 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 		case "/v1/chat/completions":
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			if _, hasTools := body["tools"]; hasTools {
+			// A loop call carries tools — except the forced final step
+			// (0.115.19, D-89), which offers none and opens with the
+			// answer-now turn; recognise it by that turn, not by tools.
+			if _, hasTools := body["tools"]; hasTools || isForcedFinalCall(body) {
 				n := f.loopCalls.Add(1)
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(f.loop(n)))

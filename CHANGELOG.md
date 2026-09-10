@@ -6,6 +6,30 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.19] - 2026-09-10 - the last step asks for the answer
+
+Register D-89, found by the D-43 measurement on 0.115.18: the Qube 27B (thinking off) spent all 12 steps of
+ledger-01 on `read_file` / `search_files` / `list_dir` and the run deferred `step budget exhausted` with nothing,
+although the whole 43 KB document had been replayed into its transcript. The trigger was an ungrounded goal
+instruction in the contract (a SEGMENT-ID the document does not contain — the 27B hunted for it); the harness
+defect is that nothing ended the hunt with an answer: every step, the last included, offered every tool with
+`tool_choice: auto`, and the same-name cap (8) fired on the 9th search — the last step — without an answer-now
+turn.
+
+- **Forced final step.** The last step of a multi-step run offers NO tools, opens with an answer-now user turn
+  (`agent.FinalAnswerTurn`: answer in the requested shape from what you have read; say inside the answer what could
+  not be found), runs at the final completion budget (`finalMaxTokens`) with thinking off unless the seat is pinned
+  to `thinking: on`. Its answer is `done` with `stop_note` "forced final answer"; a tool call returned on it —
+  parsed, or written as text — is never executed and the run ends `budget` with the evidence in `stop_note` (not
+  the tool-call-parser error an unparsed marker means on other steps). `calls[].forced_final` marks the call. A
+  one-step run keeps its tools. `Loop.WithoutForcedFinal()` restores the old last step.
+- **Mechanism, from the deployed sources:** tools are withheld rather than sent with `tool_choice: "none"` —
+  vLLM 0.28.0 still renders the tools under "none" and its engine parser strips a call the model writes anyway (an
+  empty answer); llama.cpp returns it as text. A tool-less request with tool history is accepted on every seat; it
+  costs one re-prefill of the transcript, only on the path that used to return nothing.
+- **Honest setup footer.** The replay's "complete file" footer now names lines `read_file` cut at 2,000 characters
+  (it claimed completeness over them) and says an excerpt is all there is even where it begins or ends mid-sentence.
+
 ## [0.115.18] - 2026-09-10 - in-loop offload tools ride the planner seat
 
 Register D-88, found by the D-43 measurement on 0.115.17: both Qube legs lost their 900 s wall because the 27B

@@ -173,6 +173,9 @@ type CallRecord struct {
 	ToolCalls        int    `json:"tool_calls,omitempty"`
 	ThinkingOff      bool   `json:"thinking_off,omitempty"`
 	ReasoningKey     string `json:"reasoning_key,omitempty"`
+	// ForcedFinal marks the forced final step (D-89): no tools offered, the
+	// answer asked for, the final budget.
+	ForcedFinal bool `json:"forced_final,omitempty"`
 }
 
 func recordOf(step, maxTokens int, c Completion) CallRecord {

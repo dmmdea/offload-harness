@@ -246,6 +246,7 @@ type Loop struct {
 	maxSteps      int
 	maxTokens     int
 	maxSameTool   int
+	noForcedFinal bool                          // WithoutForcedFinal: the last step offers tools like any other (D-89)
 	parkHighRisk  bool                          // unattended: park self-flagged high-risk effectful calls (WithParkHighRisk)
 	parkRecord    func(tool, args, risk string) // durable park record (ask queue); nil = ledger only
 	batchJudge    bool                          // end-of-run advisory judge pass (WithBatchJudge; batchjudge.go)
@@ -332,6 +333,11 @@ const defaultKeepRecent = 4
 // is still a bound. Small-seat tiers that measured better under a tighter cap
 // set it explicitly (builder.Config.MaxSameTool / --max-same-tool).
 const defaultMaxSameTool = 8
+
+// FinalAnswerTurn opens the forced final step (0.115.19, register D-89): the
+// last step of a multi-step run offers no tools and asks for the answer.
+// Exported so a test double standing in for a seat can recognise the call.
+const FinalAnswerTurn = "This is the final step of this run and no tools are available any more. Answer the task now, in the requested shape, from what you have already read. Where something could not be found, say so inside the answer; do not ask for more steps or more tools."
 
 // defaultToolTimeout bounds ONE tool call. Until this existed, Loop.dispatch
 // handed t.Exec the whole run context with no deadline, so a single tool could
@@ -514,6 +520,13 @@ func exemplarsFor(ex []Msg, have map[string]Tool) []Msg {
 func (l *Loop) WithoutExemplars() *Loop { l.exemplars = nil; return l }
 
 func (l *Loop) WithMaxSameTool(n int) *Loop { l.maxSameTool = n; return l }
+
+// WithoutForcedFinal turns the forced final step off (D-89): the last step then
+// offers every tool like any other, and a seat that keeps calling tools ends on
+// `budget` with no answer — the pre-0.115.19 loop. For tests whose subject is
+// another breaker, and for an effect-only run whose last step is meant to be a
+// tool call.
+func (l *Loop) WithoutForcedFinal() *Loop { l.noForcedFinal = true; return l }
 
 // WithParkHighRisk enables unattended parking: a call to a ParkOnHighRisk tool
 // that self-flags security_risk=high is refused (ledgered none, note "parked")
@@ -826,6 +839,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 	// eight consecutive refused list_dir calls, 729 s, then an empty final).
 	refusedRepeat := map[string]int{}
 	answerNowFor := ""
+	finalTurnAdded := false
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
@@ -838,6 +852,31 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				if !disabledTools[s.Name] {
 					specs = append(specs, s)
 				}
+			}
+		}
+		// Forced final step (0.115.19, register D-89): the LAST step of a
+		// multi-step run offers no tools and opens with an answer-now turn, so a
+		// seat that keeps calling tools ends with an answer attempt instead of
+		// `budget` and an empty Output. 2026-09-10: the Qube 27B (thinking off)
+		// spent all 12 steps of ledger-01 on read_file / search_files / list_dir
+		// with the whole 43 KB document already replayed into its transcript;
+		// the same-name cap fired on the 12th step and the run deferred with
+		// nothing. Withholding the specs is the mechanism the same-name cap
+		// already uses (disabledTools), so every seat honours it. It was chosen
+		// over tool_choice "none" from the deployed sources (2026-09-10): vLLM
+		// 0.28.0 still renders the tools under "none" (exclude flag default off)
+		// and its engine parser silently strips a call the model writes anyway,
+		// which comes back as an EMPTY answer; llama.cpp returns it as text. A
+		// tool-less request is accepted everywhere, history included, and costs
+		// one re-prefill of the transcript — on the path that used to return
+		// nothing at all. A one-step run is exempt: its only step may
+		// legitimately be the call.
+		finalStep := !l.noForcedFinal && l.maxSteps >= 2 && step == l.maxSteps-1 && len(l.specs) > 0
+		if finalStep {
+			specs = nil
+			if !finalTurnAdded {
+				finalTurnAdded = true
+				msgs = append(msgs, Msg{Role: "user", Content: FinalAnswerTurn})
 			}
 		}
 		// Plan recitation (Task C5, Manus recitation): every planReinjectInterval
@@ -903,6 +942,17 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				stickyNoThink = true
 			}
 		}
+		if finalStep {
+			// The answer needs room, not more deliberation — the rule the
+			// empty-final re-issue already follows: the final budget, and thinking
+			// off unless the seat is pinned to ThinkingOn.
+			if fb := finalMaxTokens(l.maxTokens); stepMax < fb {
+				stepMax = fb
+			}
+			if l.thinking != ThinkingOn {
+				stepCtx = ContextWithoutThinking(ctx)
+			}
+		}
 		comp, err := l.client.Chat(stepCtx, msgs, specs, stepMax)
 		if err != nil {
 			// Reactive retry (belt-and-suspenders): the token estimate is
@@ -959,7 +1009,9 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			}
 		}
 		noteUsage(comp)
-		calls = append(calls, recordOf(step+1, stepMax, comp))
+		callRec := recordOf(step+1, stepMax, comp)
+		callRec.ForcedFinal = finalStep
+		calls = append(calls, callRec)
 		lastWasReissue = thisIsReissue
 		// Learn from the response: estimateTokens(msgs) is what we thought the
 		// payload cost, comp.Serve.UsagePromptTokens is what it actually cost.
@@ -985,7 +1037,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// answer cut at exactly 1,024 tokens — a JSON prefix no re-pack can
 		// repair). Re-issue it once at the final budget like an empty step;
 		// a second cut is accepted and flagged OutputTruncated.
-		if comp.FinishReason == "length" && len(comp.Msg.ToolCalls) == 0 && strings.TrimSpace(comp.Msg.Content) != "" && !lastWasReissue && reissues < maxReissues {
+		if comp.FinishReason == "length" && len(comp.Msg.ToolCalls) == 0 && strings.TrimSpace(comp.Msg.Content) != "" && !lastWasReissue && reissues < maxReissues && !finalStep {
 			reissues++
 			retryNoThink = true
 			step-- // the re-issue does not spend a step
@@ -1017,6 +1069,27 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			}
 			return Result{Steps: step + 1, StopReason: kind, StopNote: basis, Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}, nil
 		}
+		if finalStep {
+			// No tools were offered and the answer was asked for. A tool call now
+			// (parsed, or written as text because no parser ran on a tool-less
+			// request) cannot be followed by anything: nothing executes, and the
+			// run ends on `budget` with the evidence in stop_note — never the
+			// seat-configuration error an unparsed marker means on other steps.
+			note := ""
+			if n := len(comp.Msg.ToolCalls); n > 0 {
+				note = fmt.Sprintf("forced final step: no tools were offered and the answer was asked for, and the seat answered with %d tool call(s) (first: %s) — nothing executed", n, comp.Msg.ToolCalls[0].Name)
+			} else if marker := unparsedToolCallMarker(comp.Msg.Content); marker != "" {
+				note = fmt.Sprintf("forced final step: no tools were offered and the answer was asked for, and the seat wrote a tool call as text (%q) — nothing executed", marker)
+			}
+			if note != "" {
+				l.prefill.Observe(comp.Serve)
+				res := Result{Steps: step + 1, StopReason: "budget", StopNote: note, Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
+				if l.batchJudge {
+					res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
+				}
+				return res, nil
+			}
+		}
 		l.prefill.Observe(comp.Serve)
 		msgs = append(msgs, comp.Msg)
 
@@ -1040,6 +1113,9 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", OutputTruncated: comp.FinishReason == "length", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
 			if l.batchJudge {
 				res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
+			}
+			if finalStep {
+				res.StopNote = fmt.Sprintf("forced final answer: the %d-step budget was reached, so the last step offered no tools and asked for the answer (D-89)", l.maxSteps)
 			}
 			l.persist(ctx, objective, res.Output)
 			return res, nil

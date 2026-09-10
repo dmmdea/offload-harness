@@ -418,3 +418,30 @@ func TestSetupReplayIsPinnedNotPreamble(t *testing.T) {
 		t.Fatalf("second Chat saw %d messages", len(second))
 	}
 }
+
+// The setup footer is honest about read_file's own line cap (0.115.19): a file
+// with cut lines is not "complete", and a clean excerpt that starts or ends
+// mid-sentence is still all there is.
+func TestSetupFooterNamesTruncatedLinesAndMidTextEnds(t *testing.T) {
+	run := func(body string) string {
+		t.Helper()
+		tools := []Tool{{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) { return body, nil }}}
+		client := &fakeClient{script: []Completion{{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"}}}
+		if _, err := NewLoop(client, tools, 3).WithSetupActions(setupActs(`read_file {"path":"a.txt"}`)).Run(context.Background(), "go"); err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range client.seen[0] {
+			if m.Role == "tool" {
+				return m.Content
+			}
+		}
+		t.Fatal("no setup result in the first turn")
+		return ""
+	}
+	if got := run("line one\nxxxx (line truncated)\nline three"); !strings.Contains(got, "1 over-long line(s) were cut at 2000 characters") {
+		t.Fatalf("a file with a cut line must say so, got footer %q", got[strings.LastIndex(got, "\n"):])
+	}
+	if got := run("line one\nline two ends mid-wo"); !strings.Contains(got, "even where it begins or ends mid-sentence") || strings.Contains(got, "were cut") {
+		t.Fatalf("a clean excerpt must say it is all there is, got footer %q", got[strings.LastIndex(got, "\n"):])
+	}
+}
