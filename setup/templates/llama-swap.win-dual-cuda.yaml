@@ -72,7 +72,7 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/embeddinggemma-300m-Q8_0.gguf
       --embedding --pooling mean --ctx-size 2048 --parallel 4 --port ${PORT} --host 127.0.0.1
-    ttl: 600
+    ttl: 300
 
 # Two NON-exclusive groups: neither unloads the other, so the architect (device 0)
 # and editor (device 1) stay resident together for zero-swap two-tier runs.

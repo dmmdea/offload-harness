@@ -155,7 +155,7 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/embeddinggemma-300m-Q8_0.gguf
       --embedding --pooling mean --ctx-size 2048 --parallel 4 --port ${PORT} --host 127.0.0.1
-    ttl: 600
+    ttl: 300
   bge-reranker-v2-m3:
     env: [CUDA_VISIBLE_DEVICES=2]
     # -ngl 99 on THIS tier (operator decision 2026-08-13): a 16GB-class utility card
@@ -169,7 +169,7 @@ models:
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/bge-reranker-v2-m3-Q4_K_M.gguf
       --reranking --pooling rank --ctx-size 8192 --batch-size 4096 --ubatch-size 4096
       --parallel 4 -ngl 99 --port ${PORT} --host 127.0.0.1
-    ttl: 600
+    ttl: 300
 
 
 

@@ -135,7 +135,7 @@ models:
       --embeddings --pooling mean --ctx-size 2048 --batch-size 2048 --ubatch-size 2048
       --n-gpu-layers 99 --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
-    ttl: 600
+    ttl: 300
   bge-reranker-v2-m3:
     aliases: [reranker-v2-m3]
     env: ["${ld}"]
@@ -145,7 +145,7 @@ models:
       --reranking --pooling rank --ctx-size 8192 --batch-size 4096 --ubatch-size 4096
       --n-gpu-layers 99 --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
-    ttl: 600
+    ttl: 300
 
 # This template accepts tier-declared media seats. A tier declares a residency ROLE,
 # never a set or group name: those are per-template, while a tier is a hardware class

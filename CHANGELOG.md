@@ -6,6 +6,21 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.7] - 2026-09-10 - every template model unloads at five idle minutes
+
+The operator rule (2026-09-08, restated 2026-09-10) is that no model stays loaded past five idle minutes on
+any tier, any engine. The live boxes complied; the templates a fresh install renders did not: eight
+templates still carried `ttl: 600` on `embeddinggemma` / `bge-reranker-v2-m3`, `win-cuda-resident.yaml`
+(blackwell-32/48/72) declared no ttl at all by design, and `ampere-16.vllm_seat` had no `ttl_seconds`.
+0.115.4's "ttl 300 in every template" was true of the swap seats only.
+
+- Every model entry in every `llama-swap.*.yaml` template carries `ttl: 300`; the resident-roster template
+  keeps its concurrency (no swap group) but no longer keeps models hot.
+- `ampere-16.vllm_seat.ttl_seconds` 300.
+- New gate `TestEveryTemplateModelUnloadsAfterFiveIdleMinutes` (`internal/servingtmpl`): fails on any
+  template model without `ttl: 300`.
+- Tier docs: a slow cache mount DEGRADES the seat to the same-box L1 tier (0.115.1); the page said REFUSED.
+
 ## [0.115.6] - 2026-09-10 - the 3-card tier registers the long window its third card buys
 
 The operator's rule for `blackwell-3x16` is that the third card buys CONTEXT, and the tier must register more

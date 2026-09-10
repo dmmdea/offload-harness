@@ -650,6 +650,7 @@
     "ampere-16": {
       "disable_cuda_graphs": true,
       "vllm_seat": {
+        "ttl_seconds": 300,
         "id": "qwen3.5-4b-vllm",
         "aliases": [
           "a2-pool",

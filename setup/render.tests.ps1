@@ -163,7 +163,7 @@ $models = @('offload-e4b','gemma4-e2b','gemma4-26b-a4b','embeddinggemma')
 $missing = @($models | Where-Object { $r.yaml -notmatch "(?m)^\s{2}$([regex]::Escape($_)):" })
 if ($missing.Count -eq 0)                                       { Ok 'blackwell-72 all four models present' } else { Bad "blackwell-72 missing models: $($missing -join ', ')" }
 if ($r.yaml -notmatch 'exclusive:' -and $r.yaml -notmatch '(?m)^\s*swap:' -and $r.yaml -notmatch '(?m)^groups:') { Ok 'blackwell-72 NO swap group (all resident)' } else { Bad 'blackwell-72 swap group present' }
-if ($r.yaml -notmatch '(?m)^\s{4}ttl:')                         { Ok 'blackwell-72 NO ttl (models stay hot)' } else { Bad 'blackwell-72 ttl present' }
+if (($r.yaml -split "`n" | Where-Object { $_ -match '(?m)^\s{4}ttl: 300' }).Count -ge 4 -and $r.yaml -notmatch '(?m)^\s{4}ttl: (?!300)') { Ok 'blackwell-72 every model carries ttl 300 (0.115.7: nothing stays hot past 5 idle minutes, concurrency kept)' } else { Bad 'blackwell-72 has a model without ttl 300' }
 # include_qwen38: the Qwen3.8 coder/agent seat renders on 48/72 (entry + resident-set
 # membership) — the Q38 token pair mirrors the M26 mechanism.
 if ($r.yaml -match '(?m)^\s{2}qwen3\.8-27b:')                   { Ok 'blackwell-72 qwen3.8 coder/agent seat present (include_qwen38)' } else { Bad 'blackwell-72 qwen3.8 seat missing' }
