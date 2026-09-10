@@ -130,12 +130,12 @@ type Params struct {
 type seatAnchors struct {
 	roles map[string]bool // residency roles this template can place
 	env   string          // env macro for llama-backed seats, e.g. "${ld}"
-	// noTTL: this template gives its models NO ttl, so a seat must not get one either.
-	// A ttl on an all-resident tier means llama-swap unloads the seat after an idle
-	// window — the exact opposite of what "resident" promises. It is per-TEMPLATE and
-	// not per-role: win-cuda-resident carries no ttl anywhere, while win-dual-cuda is
-	// also resident-only and DOES use ttl on every model.
-	noTTL bool
+	// (0.115.16) The former `ttl=none` directive — "a resident template gives its
+	// seats no ttl" — is gone: the operator rule of 2026-09-08/10 is ttl 300 on
+	// every entry of every engine on every tier, resident is a ROLE not
+	// permanence (0.115.7), and the H-01 gate found blackwell-72's rendered
+	// vision and STT seats with no ttl the first time it ran. A `ttl=` token in
+	// the directive is now ignored.
 }
 
 var anchorRe = regexp.MustCompile(`(?m)^#\s*offload-seats:\s*(.+)$`)
@@ -158,7 +158,7 @@ func parseAnchors(tmpl string) (seatAnchors, error) {
 			case "env":
 				a.env = v
 			case "ttl":
-				a.noTTL = v == "none"
+				// ignored since 0.115.16 — every seat gets ttl 300 (INV-2)
 			}
 			continue
 		}
@@ -789,13 +789,10 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 	// llama-server's is the same shape — correct for both, and correct ONLY
 	// because neither seat repoints its request path.
 	b.WriteString("    checkEndpoint: /health")
-	// A template that gives its own models no ttl gets seats with no ttl either: on an
-	// all-resident tier a ttl means llama-swap unloads the seat after an idle window,
-	// which is exactly what "resident" is supposed to prevent. Per-TEMPLATE, not
-	// per-role — win-dual-cuda is also resident-only and DOES use ttl on every model.
-	if a.noTTL {
-		return b.String(), nil
-	}
+	// Every seat carries a ttl (INV-2), on the resident template too: resident
+	// is a role in the matrix, not permanence, and an idle seat unloads at five
+	// minutes like every other model (0.115.7 for the template's own entries,
+	// 0.115.16 for the seats the renderer adds).
 	fmt.Fprintf(&b, "\n    ttl: %d", ttl)
 	return b.String(), nil
 }

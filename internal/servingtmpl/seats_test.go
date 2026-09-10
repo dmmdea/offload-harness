@@ -316,12 +316,13 @@ func TestEveryTemplateCanPlaceSeats(t *testing.T) {
 	}
 }
 
-// TestATemplateWithNoTTLGivesItsSeatsNoTTL: win-cuda-resident carries no `ttl` on any
-// model because its whole premise is that everything stays hot. A ttl on a seat there
-// would have llama-swap unload it after an idle window — the opposite of "resident".
-// It is per-TEMPLATE, not per-role: win-dual-cuda is also resident-only and DOES use
-// ttl, so a role-based rule would have been wrong.
-func TestATemplateWithNoTTLGivesItsSeatsNoTTL(t *testing.T) {
+// TestAResidentTemplateGivesItsSeatsTTL300: until 0.115.16 win-cuda-resident's
+// `ttl=none` directive gave its seats NO ttl ("everything stays hot"). The operator
+// rule (2026-09-08/10) is ttl 300 on every entry of every tier — resident is a role,
+// not permanence — and the H-01 gate found blackwell-72's rendered vision and STT
+// seats without a ttl on its first run. The seat carries ttl 300 and the rendered
+// config passes the gate.
+func TestAResidentTemplateGivesItsSeatsTTL300(t *testing.T) {
 	read := func(name string) string {
 		b, err := os.ReadFile(filepath.Join("..", "..", "setup", "templates", name))
 		if err != nil {
@@ -333,15 +334,18 @@ func TestATemplateWithNoTTLGivesItsSeatsNoTTL(t *testing.T) {
 	p.Seats[0].Residency = mediaseat.Resident
 	p.GOOS = "windows"
 
-	noTTL, err := Render(read("llama-swap.win-cuda-resident.yaml"), p)
+	resident, err := Render(read("llama-swap.win-cuda-resident.yaml"), p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(section(noTTL, "  gemma4-e4b-vision:"), "ttl:") {
-		t.Errorf("a ttl=none template must not give its seat a ttl:\n%s", section(noTTL, "  gemma4-e4b-vision:"))
+	if !strings.Contains(section(resident, "  gemma4-e4b-vision:"), "ttl: 300") {
+		t.Errorf("a resident-template seat must carry ttl 300:\n%s", section(resident, "  gemma4-e4b-vision:"))
 	}
-	if !strings.Contains(noTTL, "checkEndpoint: /health") {
-		t.Error("dropping the ttl must not drop the health check with it")
+	if !strings.Contains(resident, "checkEndpoint: /health") {
+		t.Error("the health check must stay")
+	}
+	if vs := Audit(resident); len(vs) != 0 {
+		t.Errorf("the rendered resident config must pass the serving-config gate:\n%s", Violations(vs))
 	}
 
 	// The sibling resident-only template DOES use ttl — the seat must follow it.

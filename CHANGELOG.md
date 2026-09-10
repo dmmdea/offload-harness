@@ -18,6 +18,12 @@ every idle model unloads at five minutes — were enforced by hand: the template
 - `local-offload audit-yaml FILE...` runs the same checker over live files, exit 1 on any violation — the
   session-start audit's (H-02) input.
 - `TestAuditRefusesEveryOperatorRuleBreak` (one red fixture per rule) and `TestEveryTemplatePassesTheAudit`.
+- The gate's first run over the RENDERED tiers found blackwell-72's vision and STT seats with no `ttl`: the
+  resident template's `# offload-seats: … ttl=none` directive (pre-rule, "a resident seat never unloads") made
+  the renderer skip the ttl the 0.115.7 template fix had put on every static entry. The token is now ignored,
+  every rendered seat carries `ttl: 300`, and the old test is inverted. Its first run over the LIVE configs
+  found the Aorus memory-stack lane (embeddinggemma, bge-reranker-v2-m3) still on `--n-gpu-layers 0`; fixed
+  on the box the same hour.
 - Not covered yet: `--n-cpu-moe` above the tier's measured spill (no per-tier spill field exists to compare
   against), seat-unit `[Install]`, and UUID-vs-index pins (A-87) — separate rows.
 
