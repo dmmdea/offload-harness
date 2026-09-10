@@ -16,13 +16,14 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
 
 // askTestServer builds a Server with the ask lane's local execution replaced by fake, and
 // every side effect rooted in a temp dir. Note agent_delegation stays OFF: offload_ask must
 // work on a box that has never enabled the delegator role.
-func askTestServer(t *testing.T, local func(context.Context, core.AgentContract) (core.AgentWireResult, error)) *Server {
+func askTestServer(t *testing.T, local func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error)) *Server {
 	t.Helper()
 	home := t.TempDir()
 	cfg := config.Default()
@@ -76,7 +77,7 @@ func TestAskAdvertisedUnconditionally(t *testing.T) {
 func TestAskHandlerPublishesTheAnswerAndAVerdict(t *testing.T) {
 	dir, p := askFixture(t)
 	var got core.AgentContract
-	s := askTestServer(t, func(_ context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		got = c
 		anchor := anchorsOf(t, c)[0]
 		return core.AgentWireResult{
@@ -126,7 +127,7 @@ func TestAskHandlerPublishesTheAnswerAndAVerdict(t *testing.T) {
 // one that does.
 func TestAskHandlerReportsUnverified(t *testing.T) {
 	dir, p := askFixture(t)
-	s := askTestServer(t, func(_ context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{
 			SchemaVersion: core.AgentWireSchemaVersion,
 			Seat:          "fake-seat",
@@ -169,7 +170,7 @@ func TestAskHandlerReportsUnverified(t *testing.T) {
 // This fixture is exactly that shape: the prose carries the anchor, the pair does not.
 func TestAskHandlerGradesTheAnswerItPublishesNotTheProseItDiscards(t *testing.T) {
 	dir, p := askFixture(t)
-	s := askTestServer(t, func(_ context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		anchor := anchorsOf(t, c)[0]
 		return core.AgentWireResult{
 			SchemaVersion: core.AgentWireSchemaVersion,
@@ -212,7 +213,7 @@ func TestAskHandlerGradesTheAnswerItPublishesNotTheProseItDiscards(t *testing.T)
 func TestAskHandlerGradesTheProseItFallsBackToPublishing(t *testing.T) {
 	dir, p := askFixture(t)
 	var prose string
-	s := askTestServer(t, func(_ context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		anchor := anchorsOf(t, c)[0]
 		prose = "The cap is 32."
 		return core.AgentWireResult{
@@ -244,7 +245,7 @@ func TestAskHandlerGradesTheProseItFallsBackToPublishing(t *testing.T) {
 // verdict about the text the caller actually got.
 func TestAskHandlerGradesProseWhenThereIsNoStructured(t *testing.T) {
 	dir, p := askFixture(t)
-	s := askTestServer(t, func(_ context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{
 			SchemaVersion: core.AgentWireSchemaVersion,
 			Seat:          "fake-seat",
@@ -275,7 +276,7 @@ func TestAskHandlerRefusesBeforePlacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	ran := false
-	s := askTestServer(t, func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
 		ran = true
 		return core.AgentWireResult{}, nil
 	})
@@ -301,7 +302,7 @@ func TestAskHandlerRefusesBeforePlacement(t *testing.T) {
 // theirs or the operator's — losing it would turn "llama-swap is down" into a quiet defer.
 func TestAskHandlerPassesTheSeatsDeferThrough(t *testing.T) {
 	dir, p := askFixture(t)
-	s := askTestServer(t, func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{
 			SchemaVersion: core.AgentWireSchemaVersion,
 			Seat:          "fake-seat",
@@ -330,7 +331,7 @@ func TestAskHandlerPassesTheSeatsDeferThrough(t *testing.T) {
 // reports, so the caller is never handed unchecked prose under a green verdict.
 func TestAskHandlerPublishesProseWhenTheRePackFailed(t *testing.T) {
 	dir, p := askFixture(t)
-	s := askTestServer(t, func(_ context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{
 			SchemaVersion: core.AgentWireSchemaVersion,
 			Seat:          "fake-seat",
@@ -360,7 +361,7 @@ func TestAskHandlerPublishesProseWhenTheRePackFailed(t *testing.T) {
 // instead of reading the files itself.
 func TestAskHandlerDefersWhenTheRunnerErrors(t *testing.T) {
 	dir, p := askFixture(t)
-	s := askTestServer(t, func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{}, errors.New("agent contract: creating job dir: disk full")
 	})
 
@@ -382,7 +383,7 @@ func TestAskHandlerDefersWhenTheRunnerErrors(t *testing.T) {
 // and the answer is nothing", which is the silent shape this lane exists to avoid.
 func TestAskHandlerDefersOnAnEmptyAnswer(t *testing.T) {
 	dir, p := askFixture(t)
-	s := askTestServer(t, func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{
 			SchemaVersion: core.AgentWireSchemaVersion,
 			Seat:          "fake-seat",

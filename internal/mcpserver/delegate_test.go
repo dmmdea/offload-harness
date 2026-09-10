@@ -94,7 +94,7 @@ func TestAgentDelegateRegistrationGated(t *testing.T) {
 // delegateTestServer builds a Server with the delegation flag on, every side
 // effect rooted in a temp dir, and a fake local runner injected through the
 // localAgent seam.
-func delegateTestServer(t *testing.T, local func(context.Context, core.AgentContract) (core.AgentWireResult, error)) *Server {
+func delegateTestServer(t *testing.T, local func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error)) *Server {
 	t.Helper()
 	home := t.TempDir()
 	cfg := config.Default()
@@ -108,7 +108,7 @@ func delegateTestServer(t *testing.T, local func(context.Context, core.AgentCont
 
 func TestAgentDelegateHandlerLocalHappyPath(t *testing.T) {
 	var gotContract core.AgentContract
-	s := delegateTestServer(t, func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	s := delegateTestServer(t, func(ctx context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		gotContract = c
 		return core.AgentWireResult{
 			SchemaVersion: core.AgentWireSchemaVersion,
@@ -163,7 +163,7 @@ func TestAgentDelegateHandlerLocalHappyPath(t *testing.T) {
 // fails acceptance surfaces as failed_verification with the check named —
 // through the FULL handler path, not just the engine.
 func TestAgentDelegateHandlerAcceptanceFailure(t *testing.T) {
-	s := delegateTestServer(t, func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	s := delegateTestServer(t, func(ctx context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "fake-seat",
 			Output: "wrong content", Structured: json.RawMessage(`{"answer":"x"}`), StopReason: "done"}, nil
 	})
@@ -188,13 +188,13 @@ func TestAgentDelegateHandlerAcceptanceFailure(t *testing.T) {
 func TestAgentDelegateHandlerLoudOnFailureAndInfrastructure(t *testing.T) {
 	cases := []struct {
 		name        string
-		local       func(context.Context, core.AgentContract) (core.AgentWireResult, error)
+		local       func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error)
 		wantIsError bool
 		wantKey     string
 	}{
 		{
 			name: "a transport/config failure",
-			local: func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
+			local: func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
 				return core.AgentWireResult{}, errors.New("planner endpoint refused")
 			},
 			wantIsError: true,
@@ -202,7 +202,7 @@ func TestAgentDelegateHandlerLoudOnFailureAndInfrastructure(t *testing.T) {
 		},
 		{
 			name: "a defer that blames the stack",
-			local: func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
+			local: func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
 				return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "fake-seat",
 					Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: "agent loop: llama-server 500"}, nil
 			},
@@ -211,7 +211,7 @@ func TestAgentDelegateHandlerLoudOnFailureAndInfrastructure(t *testing.T) {
 		},
 		{
 			name: "an honest abstention (the control: still a success)",
-			local: func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
+			local: func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
 				return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "fake-seat",
 					Deferred: true, DeferClass: core.DeferClassAbstention, Reason: "output failed schema: missing answer"}, nil
 			},
@@ -245,7 +245,7 @@ func TestAgentDelegateHandlerLoudOnFailureAndInfrastructure(t *testing.T) {
 }
 
 func TestAgentDelegateHandlerBadInputsDefer(t *testing.T) {
-	s := delegateTestServer(t, func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	s := delegateTestServer(t, func(ctx context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		t.Error("local runner must not run on a refused request")
 		return core.AgentWireResult{}, nil
 	})
@@ -355,7 +355,7 @@ func TestDelegateIsErrorRequiresNothingUsableCameBack(t *testing.T) {
 // still a quiet, successful call.
 func TestAgentDelegateHandlerASubtaskLostToTheStackIsAlwaysLoud(t *testing.T) {
 	var calls atomic.Int64
-	s := delegateTestServer(t, func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
+	s := delegateTestServer(t, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
 		if calls.Add(1) == 1 {
 			return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "fake-seat",
 				Output: "done on qube", StopReason: "done"}, nil
@@ -393,7 +393,7 @@ func TestAgentDelegateHandlerASubtaskLostToTheStackIsAlwaysLoud(t *testing.T) {
 // discriminating one on the same call is not. Position must line up with
 // submission order, because that is the only key the caller has.
 func TestAgentDelegateHandlerAcceptanceLint(t *testing.T) {
-	s := delegateTestServer(t, func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	s := delegateTestServer(t, func(ctx context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "this-box",
 			Seat: "fake-seat", Output: "mentions qube and 412", StopReason: "done"}, nil
 	})

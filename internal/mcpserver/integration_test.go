@@ -41,6 +41,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
@@ -189,7 +190,7 @@ func integrationDelegator(t *testing.T, token string) *Server {
 	cfg.AgentDelegationEnabled = true
 	cfg.FleetAuthToken = token
 	s := New(pipeline.New(cfg, nil, nil, nil))
-	s.localAgent = func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
+	s.localAgent = func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
 		t.Error("local runner ran: route=remote must place this on the fleet node")
 		return core.AgentWireResult{}, nil
 	}

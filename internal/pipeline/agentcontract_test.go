@@ -46,7 +46,7 @@ func TestRunAgentContractLocalHappyPath(t *testing.T) {
 	p, home := agentContractPipeline(t, srv.URL)
 	contract := testContract()
 	contract.Depth = 0 // delegator-side origin, unlike the wire fixture
-	wire, err := p.RunAgentContract(context.Background(), contract)
+	wire, err := p.RunAgentContract(context.Background(), contract, AgentContractOptions{})
 	if err != nil {
 		t.Fatalf("RunAgentContract: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestRunAgentContractInvalidContractErrors(t *testing.T) {
 	p, home := agentContractPipeline(t, "http://127.0.0.1:1")
 	bad := testContract()
 	bad.Goal = "   "
-	if _, err := p.RunAgentContract(context.Background(), bad); err == nil {
+	if _, err := p.RunAgentContract(context.Background(), bad, AgentContractOptions{}); err == nil {
 		t.Fatal("a goal-less contract must error before running")
 	}
 	if entries, _ := os.ReadDir(filepath.Join(home, "pipeline-jobs")); len(entries) != 0 {

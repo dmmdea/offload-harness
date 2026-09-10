@@ -2017,7 +2017,7 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	// No context deadline is imposed here: the contract's TimeoutSec is the wall
 	// ceiling and runAgentTask enforces it as its own deadline, so wrapping it
 	// again would give the run two budgets that could disagree.
-	wire, rerr := run(ctx, contract)
+	wire, rerr := run(ctx, contract, delegate.LocalOptions{})
 	if rerr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
 	}
@@ -2220,7 +2220,7 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	// No context deadline is imposed here: the contract's TimeoutSec is the wall
 	// ceiling and runAgentTask enforces it as its own deadline, so wrapping it
 	// again would give the run two budgets that could disagree.
-	wire, rerr := run(ctx, contract)
+	wire, rerr := run(ctx, contract, delegate.LocalOptions{})
 	if rerr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
 	}

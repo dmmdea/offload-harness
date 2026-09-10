@@ -16,7 +16,7 @@ func TestRunBatchedSplitsAtMaxSubtasksAndKeepsOrder(t *testing.T) {
 	var calls atomic.Int64
 	var mu sync.Mutex
 	var seen []string
-	local := LocalRunner(func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	local := LocalRunner(func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		calls.Add(1)
 		mu.Lock()
 		seen = append(seen, c.Goal)
@@ -60,18 +60,18 @@ func TestRunBatchedReturnsPartialResultsWithTheError(t *testing.T) {
 	for i := range cs {
 		cs[i] = core.AgentContract{Goal: fmt.Sprintf("g%d", i)}
 	}
-	local := LocalRunner(func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	local := LocalRunner(func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Output: c.Goal}, nil
 	})
 	// route "queue" bypasses the runner and errors without a holder in the test
 	// config — use a bad route on the SECOND chunk only by cancelling the ctx.
 	ctx, cancel := context.WithCancel(context.Background())
 	var n atomic.Int64
-	localCancelAt8 := LocalRunner(func(c context.Context, ac core.AgentContract) (core.AgentWireResult, error) {
+	localCancelAt8 := LocalRunner(func(c context.Context, ac core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		if n.Add(1) == 8 {
 			cancel() // the second chunk starts with a dead ctx
 		}
-		return local(c, ac)
+		return local(c, ac, LocalOptions{})
 	})
 	res, sum, err := RunBatched(ctx, testCfg(t), localCancelAt8, cs, "local", nil, nil)
 	if len(res) < 8 {

@@ -52,12 +52,31 @@ import (
 	"github.com/dmmdea/offload-harness/internal/seatload"
 )
 
+// LocalOptions is what a delegator that already DECIDED where a contract runs
+// hands the local runner (ADR 0039): the seat to run instead of the planner
+// default and the placement block to publish on the result. It exists because
+// placement is decided once, delegator-side, over the same table a node uses
+// — the runner must not re-derive (and possibly contradict) that decision, so
+// it receives it. The zero value means "decide nothing here": the planner seat
+// runs and no placed block is published, which is every pre-0.116 call.
+// pipeline.AgentContractOptions is this type by alias, so the method value
+// pipeline.RunAgentContract satisfies LocalRunner without a shim.
+type LocalOptions struct {
+	// Seat is the llama-swap id/alias to run the loop and the re-pack on; ""
+	// keeps the box's planner seat.
+	Seat string
+	// Placed is published verbatim as the result's `placed` block; nil
+	// publishes none (the byte-identical constraint for plain boxes).
+	Placed *core.Placed
+}
+
 // LocalRunner executes one contract in-process on the local node — the same
 // read-only agent.Build path a fleet node runs (pipeline.RunAgentContract
 // satisfies it). A seam rather than a *pipeline.Pipeline so this routing
 // package does not drag the whole media pipeline into its dependency graph,
-// and so tests fake local execution with a closure.
-type LocalRunner func(ctx context.Context, contract core.AgentContract) (core.AgentWireResult, error)
+// and so tests fake local execution with a closure. The options carry a
+// decided seat and placement (LocalOptions); the runner never places on its own.
+type LocalRunner func(ctx context.Context, contract core.AgentContract, opts LocalOptions) (core.AgentWireResult, error)
 
 // PlacedResult is one subtask's outcome: where it ran, what came back, and
 // what the delegator-side verification found. Beyond the placement/result
@@ -2275,7 +2294,10 @@ func (r *runner) runLocal(ctx context.Context, contract core.AgentContract, view
 		pr.Err = "no local runner wired (delegator surfaces must supply one)"
 		return pr
 	}
-	wire, err := r.local(ctx, contract)
+	// Zero options: the delegator-side decision (which seat, which layer) is
+	// wired here by the composite-tier runner change; until then the planner
+	// seat runs and nothing is published, exactly as before.
+	wire, err := r.local(ctx, contract, LocalOptions{})
 	if err != nil {
 		pr.Err = "local run: " + err.Error()
 		return pr
