@@ -990,10 +990,21 @@ func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) 
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 	resp.Body.Close()
-	// The swap answered; confirm residency. Two polls one poll-interval apart,
-	// not a wait: llama-swap proxies only after the health check passed, so a
-	// seat that is still not listed is one llama-swap does not know under
-	// this name — say so and go.
+	// The swap answered. A 200 IS the confirmation: llama-swap proxies only
+	// after the upstream's health check passed. /running is read once more
+	// for the note, but a seat listed under another id — the seat name is an
+	// ALIAS on the reference boxes (`agent-pool` → `qwen3.8-27b-vllm`), and
+	// /running carries the real id — is loaded all the same (0.115.17; the
+	// 0.115.15 acceptance run reported "never listed" on a 187 s cold load
+	// that had plainly succeeded).
+	if resp.StatusCode == http.StatusOK {
+		if ok, rerr := ready(); rerr == nil && ok {
+			return time.Since(start), fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())
+		}
+		return time.Since(start), fmt.Sprintf("cold load %.0fs outside the wall (passthrough answered 200; /running lists the seat under another id)", time.Since(start).Seconds())
+	}
+	// A non-200 passthrough answer (404: llama-swap does not know the name)
+	// confirms nothing; two polls one interval apart, then say so and go.
 	for i := 0; i < 2; i++ {
 		if ok, rerr := ready(); rerr == nil && ok {
 			return time.Since(start), fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())
