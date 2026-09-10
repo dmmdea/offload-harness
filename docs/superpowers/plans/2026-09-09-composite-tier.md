@@ -297,7 +297,7 @@ func TestDocValidateRefusesAnUnknownComposedTier(t *testing.T) {
 
 **Files:**
 - Create: `internal/core/placed.go`, `internal/core/placed_test.go`
-- Modify: `internal/core/agentwire.go` (`AgentContract` fields after `SetupActions`; `Validate` → `ValidateWithCap`; `AgentWireResult.Placed`), `internal/core/types.go` (`Meta.Placed`), `internal/core/agentwire_test.go` (`TestAgentWireJSONTags` fixtures + wantContract/wantResult)
+- Modify: `internal/core/agentwire.go` (`AgentContract` fields after `SetupActions`; `Validate` → `ValidateWithCap`; `DecodeAgentContract` → `DecodeAgentContractWithCap`; `AgentWireResult.Placed`), `internal/core/types.go` (`Meta.Placed`), `internal/core/agentwire_test.go` (`TestAgentWireJSONTags` fixtures + wantContract/wantResult), `internal/fleetnode/tasks.go` (`buildAgentRun` decodes through `DecodeAgentContractWithCap(r, cfg.AgentContextCapBytes())` — the node-side half of the Global Constraint; without it a composite remote 400s every long-context dispatch at ACK and its 262k seat is unreachable over the wire), `internal/fleetnode/tasks_agent_test.go` (`TestAgentDispatchCompositeNodeAdmitsAtItsOwnCap`)
 
 **Interfaces (produces):**
 
@@ -317,7 +317,7 @@ type Placed struct {
 }
 ```
 
-`AgentContract.ContextClass string json:"context_class,omitempty"` ("" | "long"), `AgentContract.Layer string json:"layer,omitempty"` (`^[a-z0-9_-]{1,32}$`), `func (c AgentContract) Validate() error { return c.ValidateWithCap(AgentContextMaxBytes) }`, `func (c AgentContract) ValidateWithCap(maxBytes int) error`, `AgentWireResult.Placed *Placed json:"placed,omitempty"`, `Meta.Placed *Placed json:"placed,omitempty"`.
+`AgentContract.ContextClass string json:"context_class,omitempty"` ("" | "long"), `AgentContract.Layer string json:"layer,omitempty"` (`^[a-z0-9_-]{1,32}$`), `func (c AgentContract) Validate() error { return c.ValidateWithCap(AgentContextMaxBytes) }`, `func (c AgentContract) ValidateWithCap(maxBytes int) error`, `func DecodeAgentContract(r io.Reader) (AgentContract, error) { return DecodeAgentContractWithCap(r, AgentContextMaxBytes) }`, `func DecodeAgentContractWithCap(r io.Reader, maxBytes int) (AgentContract, error)`, `AgentWireResult.Placed *Placed json:"placed,omitempty"`, `Meta.Placed *Placed json:"placed,omitempty"`.
 
 - [ ] **Step 1: Failing tests**
 

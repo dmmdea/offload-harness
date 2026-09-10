@@ -650,9 +650,15 @@ func materializeRaw(raw json.RawMessage, pattern string) (string, error) {
 
 // buildAgentRun translates a fleet "agent" dispatch (multi-node delegation,
 // Task 4) into the core.Request pipeline.runAgentTask executes. Strict path:
-// core.DecodeAgentContract owns decode + Validate + the MaxSteps/TimeoutSec
-// ceilings (roast delta 5 — clamped THERE, never re-clamped here), so every
-// error out of it is an ack-time 400 with the decoder's reason intact.
+// core.DecodeAgentContractWithCap owns decode + Validate + the MaxSteps/
+// TimeoutSec ceilings (roast delta 5 — clamped THERE, never re-clamped here),
+// so every error out of it is an ack-time 400 with the decoder's reason
+// intact. The inline-context cap it validates at is THIS node's
+// cfg.AgentContextCapBytes() (0.116.0): 256 KiB on a plain box, the largest
+// layer seat window × 3 on a composite one — the delegator admitted the
+// contract at its own cap, and a remote that re-validated at the fixed default
+// would refuse every long-context dispatch at ACK and leave its 262k seat
+// unreachable over the wire.
 //
 // Two Task-4 rules land here on top of the decoder:
 //
@@ -678,7 +684,7 @@ func materializeRaw(raw json.RawMessage, pattern string) (string, error) {
 // construction instead of a caller-collision 400.
 func buildAgentRun(cfg config.Config, payload json.RawMessage) (core.Request, func(), error) {
 	noop := func() {}
-	contract, err := core.DecodeAgentContract(bytes.NewReader(payload))
+	contract, err := core.DecodeAgentContractWithCap(bytes.NewReader(payload), cfg.AgentContextCapBytes())
 	if err != nil {
 		return core.Request{}, noop, err
 	}

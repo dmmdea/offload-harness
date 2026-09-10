@@ -443,10 +443,24 @@ func ValidateThinking(s string) error {
 // DecodeAgentContract reads one contract from r, tolerating unknown fields
 // (roast delta 4), refusing any schema_version but AgentWireSchemaVersion,
 // clamping MaxSteps/TimeoutSec into their remote ceilings (roast delta 5),
-// then running the full Validate. Errors here are caller mistakes — the fleet
-// server maps them to 400s at ACK time, so a malformed contract dies with a
-// clear reason before any model loads.
+// then running the full Validate at the default transport cap
+// (AgentContextMaxBytes). Errors here are caller mistakes — the fleet server
+// maps them to 400s at ACK time, so a malformed contract dies with a clear
+// reason before any model loads. A node that admits more inline context than
+// the default (a composite box, config.AgentContextCapBytes()) decodes through
+// DecodeAgentContractWithCap — otherwise a contract the delegator admitted at
+// its own cap is refused at the remote's ACK and the remote's long seat is
+// unreachable over the wire.
 func DecodeAgentContract(r io.Reader) (AgentContract, error) {
+	return DecodeAgentContractWithCap(r, AgentContextMaxBytes)
+}
+
+// DecodeAgentContractWithCap is DecodeAgentContract validating through
+// ValidateWithCap(maxBytes) instead of the fixed default: same schema gate,
+// same MaxSteps/TimeoutSec clamps, only the inline-context ceiling is the
+// box's. A non-positive maxBytes falls back to the default cap exactly as
+// ValidateWithCap does — an unset config never admits an unbounded context.
+func DecodeAgentContractWithCap(r io.Reader, maxBytes int) (AgentContract, error) {
 	var c AgentContract
 	if err := json.NewDecoder(r).Decode(&c); err != nil {
 		return AgentContract{}, fmt.Errorf("agent contract: %w", err)
@@ -467,7 +481,7 @@ func DecodeAgentContract(r io.Reader) (AgentContract, error) {
 	} else if c.TimeoutSec > AgentTimeoutSecCap {
 		c.TimeoutSec = AgentTimeoutSecCap
 	}
-	if err := c.Validate(); err != nil {
+	if err := c.ValidateWithCap(maxBytes); err != nil {
 		return AgentContract{}, err
 	}
 	return c, nil
