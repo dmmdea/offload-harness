@@ -707,10 +707,18 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 	// prompts the server rejects).
 	l.resolveSpecReserve(ctx)
 	msgs := make([]Msg, 0, 8)
-	// finalRetried: the ONE re-issue of an empty final step (thinking off at
-	// the final budget) has been spent — see the empty-final branch below.
-	// retryNoThink arms the next Chat call as that re-issue.
-	finalRetried, retryNoThink := false, false
+	// The empty-final re-issue (see the branch below). retryNoThink arms the
+	// next Chat call as the re-issue (thinking off at the final budget);
+	// lastWasReissue records that the completion just received WAS one, so two
+	// empties in a row end the run rather than re-issuing forever; reissues
+	// bounds the episodes per run (a re-issue that yields a tool call lets the
+	// run continue, and a LATER empty final earns its own re-issue — review
+	// finding 2, 0.115.8 — but never more than maxReissues of them).
+	retryNoThink, lastWasReissue, reissues := false, false, 0
+	// recitedStep guards the plan recitation below against the re-issue's
+	// `step--`: the block is keyed on the step index and would otherwise append
+	// the plan a SECOND time to the re-issued transcript (review finding 1).
+	recitedStep := -1
 	// calls is the per-completion record (thinking.go CallRecord), appended on
 	// every successful Chat and carried on every Result return path.
 	var calls []CallRecord
@@ -828,7 +836,8 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// actions) — append the current .agent/plan.md as a fresh USER message so
 		// the plan sits near the context tail and a long task doesn't lose it.
 		// Appending here (before compaction) means it is budgeted like any message.
-		if step > 0 && step%planReinjectInterval == 0 {
+		if step > 0 && step%planReinjectInterval == 0 && recitedStep != step {
+			recitedStep = step
 			if m, ok := loadPlan(l.worktree); ok {
 				msgs = append(msgs, m)
 			}
@@ -870,6 +879,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		if l.thinking == ThinkingOff {
 			stepCtx = ContextWithoutThinking(ctx)
 		}
+		thisIsReissue := retryNoThink
 		if retryNoThink {
 			retryNoThink = false
 			stepMax = finalMaxTokens(l.maxTokens)
@@ -934,6 +944,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		}
 		noteUsage(comp)
 		calls = append(calls, recordOf(step+1, stepMax, comp))
+		lastWasReissue = thisIsReissue
 		// Learn from the response: estimateTokens(msgs) is what we thought the
 		// payload cost, comp.Serve.UsagePromptTokens is what it actually cost.
 		// Observed BEFORE appending the reply, so both refer to the same bytes.
@@ -964,10 +975,14 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			// Now: re-issue THIS step once, at the final budget and (under
 			// ThinkingAuto) with thinking off — the same request, no nudge turn
 			// appended, so the model answers from what it has already read. A
-			// second empty ends the run with the NAMED stop and an empty Output
-			// that the node turns into a defer; nothing downstream re-packs it.
-			if !finalRetried {
-				finalRetried, retryNoThink = true, true
+			// second empty IN A ROW ends the run with the NAMED stop and an empty
+			// Output that the node turns into a defer; nothing downstream
+			// re-packs it. A re-issue that instead yields a tool call keeps the
+			// run going, and a later empty final gets its own re-issue, up to
+			// maxReissues per run.
+			if !lastWasReissue && reissues < maxReissues {
+				reissues++
+				retryNoThink = true
 				step-- // the re-issue does not spend a step
 				continue
 			}

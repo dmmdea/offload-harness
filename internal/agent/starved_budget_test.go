@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -182,8 +184,93 @@ func TestParseThinkingMode(t *testing.T) {
 			t.Errorf("ParseThinkingMode(%q) = %q, %v; want %q", in, got, err, want)
 		}
 	}
-	if _, err := ParseThinkingMode("maybe"); err == nil {
-		t.Fatal("an unknown mode must be refused by name")
+	for _, bad := range []string{"maybe", "true", "false", "1", "0"} {
+		if _, err := ParseThinkingMode(bad); err == nil {
+			t.Fatalf("%q must be refused: the vocabulary is exactly auto/on/off (core.ValidateThinking)", bad)
+		}
+	}
+}
+
+// TestReissueThatYieldsAToolCallLetsALaterEmptyFinalReissueAgain: the
+// re-issue credit is per EPISODE (bounded per run), not one per run — an
+// early empty step whose re-issue produced a tool call must not strip the
+// real final answer of its re-issue.
+func TestReissueThatYieldsAToolCallLetsALaterEmptyFinalReissueAgain(t *testing.T) {
+	full := mkTools("list_dir")
+	client := &fakeClient{script: []Completion{
+		starvedTurn(1024, 1024), // step 1: empty
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "list_dir", `{"path":"."}`)}}, FinishReason: "tool_calls"}, // re-issue: a tool call
+		starvedTurn(1024, 1024), // step 2: empty again
+		{Msg: Msg{Role: "assistant", Content: "the answer"}, FinishReason: "stop"}, // re-issue: the answer
+	}}
+	l := NewLoop(client, full, 6).WithMaxTokens(1024)
+	res, err := l.Run(context.Background(), "digest")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Output != "the answer" || len(client.seen) != 4 {
+		t.Fatalf("output %q calls %d", res.Output, len(client.seen))
+	}
+	if !client.seenNoThink[1] || !client.seenNoThink[3] || client.seenNoThink[2] {
+		t.Fatalf("thinking-off per call = %v, want [false true false true]", client.seenNoThink)
+	}
+}
+
+// TestReissuesAreBoundedPerRun: a third empty episode gets no re-issue.
+func TestReissuesAreBoundedPerRun(t *testing.T) {
+	full := mkTools("list_dir")
+	toolTurn := func(id string) Completion {
+		return Completion{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc(id, "list_dir", `{"path":"`+id+`"}`)}}, FinishReason: "tool_calls"}
+	}
+	client := &fakeClient{script: []Completion{
+		starvedTurn(1024, 1024), toolTurn("c1"),
+		starvedTurn(1024, 1024), toolTurn("c2"),
+		starvedTurn(1024, 1024), // third episode: no credit left
+		{Msg: Msg{Role: "assistant", Content: "never asked"}, FinishReason: "stop"},
+	}}
+	l := NewLoop(client, full, 8).WithMaxTokens(1024)
+	res, err := l.Run(context.Background(), "digest")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(client.seen) != 5 || res.StopReason != StopReasoningStarved {
+		t.Fatalf("calls %d stop %q, want 5 calls and %q", len(client.seen), res.StopReason, StopReasoningStarved)
+	}
+}
+
+// TestReissueDoesNotRecitePlanTwice: the plan-recitation block is keyed on
+// the step index; the re-issue's step-- must not append the plan a second
+// time to the re-issued transcript (review finding 1, 0.115.8).
+func TestReissueDoesNotRecitePlanTwice(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".agent", "plan.md"), []byte("- step one\n- step two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	full := mkTools("list_dir")
+	toolTurn := func(id string) Completion {
+		return Completion{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc(id, "list_dir", `{"path":"`+id+`"}`)}}, FinishReason: "tool_calls"}
+	}
+	client := &fakeClient{script: []Completion{
+		toolTurn("c1"), toolTurn("c2"), toolTurn("c3"), // steps 1-3
+		starvedTurn(1024, 1024), // step 4 (index 3 = recitation step): empty
+		{Msg: Msg{Role: "assistant", Content: "the answer"}, FinishReason: "stop"}, // re-issue
+	}}
+	l := NewLoop(client, full, 8).WithMaxTokens(1024).WithWorktree(dir)
+	if _, err := l.Run(context.Background(), "digest"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	last := client.seen[len(client.seen)-1]
+	plans := 0
+	for _, m := range last {
+		if m.Role == "user" && strings.Contains(m.Content, "step two") {
+			plans++
+		}
+	}
+	if plans != 1 {
+		t.Fatalf("the re-issued transcript carries the plan %d times, want exactly 1", plans)
 	}
 }
 

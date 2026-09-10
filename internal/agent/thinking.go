@@ -60,18 +60,26 @@ const (
 )
 
 // ParseThinkingMode validates a mode string from config or a contract. The
-// empty string is auto. Anything else is a caller error, named.
+// empty string is auto. Anything else is a caller error, named. The
+// vocabulary is exactly core.ValidateThinking's (auto / on / off,
+// case-insensitive) so a value the contract door accepts is one the build
+// accepts, and vice versa.
 func ParseThinkingMode(s string) (ThinkingMode, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "", "auto":
 		return ThinkingAuto, nil
-	case "off", "false", "0":
+	case "off":
 		return ThinkingOff, nil
-	case "on", "true", "1":
+	case "on":
 		return ThinkingOn, nil
 	}
 	return "", fmt.Errorf("thinking mode %q: want auto, on or off", s)
 }
+
+// maxReissues bounds the empty-final re-issues per run: each costs one
+// full-budget generation, and a seat that starves on every final it reaches
+// is not going to answer on the third.
+const maxReissues = 2
 
 // finalBudgetCap bounds the completion budget of the thinking-off retry: the
 // visible answer to a 40 KB / seven-array extraction is a few thousand tokens,

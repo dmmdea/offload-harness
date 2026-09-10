@@ -26,8 +26,11 @@ tokens on the Qube 27B and 9,628 on the Lenovo 4B for zero visible characters, t
   {"enable_thinking": false}`, the re-pack's knob), the final budget (4× the step budget, cap 8,192) and the
   per-call `CallRecord`.
 - `internal/agent/loop.go` (D-42, D-44): the 0.113.5 4× raise and the 0.113.6 nudge are GONE. An empty step is
-  re-issued once — same transcript, thinking off, final budget — and a second empty ends the run on
-  `StopReasoningStarved` / `StopEmpty` with `StopNote`; cost 1× + 1× instead of 1× + 4× + 4×. `Result` carries
+  re-issued once — same transcript, thinking off (under `auto`; `on` keeps thinking), final budget — and a
+  second empty in a row ends the run on `StopReasoningStarved` / `StopEmpty` with `StopNote`; cost 1× + 1×
+  instead of 1× + 4× + 4×. A re-issue that yields a tool call keeps the run going and a later empty final
+  earns its own re-issue, at most two per run. The plan-recitation block is keyed per step so the re-issue
+  cannot append the plan twice. `Result` carries
   `Calls` (D-47: finish reason, completion/reasoning tokens, chars, thinking-off per completion) on every return
   path and `OutputTruncated` when a non-empty final was cut on `length`.
 - `internal/pipeline/agenttask.go` (D-42): an empty final answer DEFERS before any re-pack — class `budget` for
