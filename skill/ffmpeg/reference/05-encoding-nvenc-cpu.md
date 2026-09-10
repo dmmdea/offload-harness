@@ -160,8 +160,9 @@ expected band, keyframes where planned, VMAF/SSIM against the source on real foo
 setting is new, audio untouched (`-c:a copy`) or re-normalized (06).
 
 ## Gaps (not measured here)
-- laptop node (RTX 3070) and editing rig (RTX 5060) throughput and encoder lists — hosts offline; expected h264/hevc NVENC on both, AV1 only on the 5060 [inferred].
+- **editing rig (RTX 5060, ffmpeg 9.0): encoder/filter list MEASURED 2026-09-10 (see 01 — h264/hevc/av1 NVENC all present), throughput still NOT measured.** Deliberate: the editor's console session was Active at probe time, and an encode benchmark on a machine someone is using both disturbs them and produces invalid numbers (a busy host starves the measurement). Run in a quiet window with: `scp reference/measurements-2026-09-01/real.sh <user>@<editing-rig>:D:/Temp/` then a PowerShell equivalent of the 1080p/4K sweep in 01 — and check `query user` + `Get-Process Resolve` first.
+- laptop node (RTX 3070) throughput and encoder list — box was offline on 09-09/09-10; expect h264/hevc NVENC and **no** AV1 NVENC (Ampere, as measured on the Linux node's RTX 3050) [inferred].
 - Quality on real footage is measured above on ONE DJI clip (square 360-camera frame, daylight); re-run `measurements-2026-09-01/real.sh` on a talking-head / night clip before locking a CQ for those.
-- ffmpeg 9.0.1 (`D:\Dev\tools`) behaviour — nothing re-run there.
+- ffmpeg 9.x: the trap/behaviour cases ARE now measured (01 § Version deltas, 2026-09-10) and the capability subsets match 8.1.2, but no throughput or quality sweep has been re-run on 9.x — the fps and VMAF tables above remain 8.1.2 numbers.
 - AMF/QSV/MediaFoundation encoders on the workstation (present, unused — NVIDIA-only box) and QSV on the Linux node iGPU.
 - `-tune uhq` and `-lookahead_level` effect; NVENC 4:2:2 / 4:4:4 modes; hevc_nvenc B-frame counts per preset.

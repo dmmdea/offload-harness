@@ -9,7 +9,7 @@ the digest.
 | Item | Value |
 |---|---|
 | ffmpeg on PATH | **8.1.2-full_build-www.gyan.dev** (winget `Gyan.FFmpeg`), `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.2-full_build\bin\{ffmpeg,ffprobe,ffplay}.exe`; same path resolves from PowerShell 5.1, pwsh 7.6.5 and Git Bash **[measured]** |
-| Second ffmpeg | **9.0.1-full_build-www.gyan.dev** at `<tools dir>\ffmpeg-9.0.1` — this is what the local-offload harness media lane uses (`offload_status.media.routes.media.ffmpeg_path`). NOT on PATH. Nothing in this folder was measured on 9.0.1; re-measure before assuming parity **[measured path + version; behaviour unmeasured]** |
+| Second ffmpeg | **9.0.1-full_build-www.gyan.dev** at `<tools dir>\ffmpeg-9.0.1` — this is what the local-offload harness media lane uses (`offload_status.media.routes.media.ffmpeg_path`). NOT on PATH. The behaviour/trap cases WERE measured on it 2026-09-10 (§ Version deltas) and its capability subsets match 8.1.2; throughput and VMAF were not re-run on it **[measured 2026-09-10]** |
 | Build flags (8.1.2) | gpl, nonfree-free static; libx264, libx265, libsvtav1 (v4.1.0), libaom, librav1e, libvpx, libvvenc, libwebp, libass 0.17.5 (font provider **DirectWrite**), libfreetype+harfbuzz+fribidi, libplacebo+vulkan+shaderc, libvmaf, librubberband, libsoxr, libopus, libmp3lame, whisper; hw: nvenc/nvdec/cuvid, cuda-llvm, amf, libvpl (qsv), d3d11va/d3d12va/dxva2, vaapi, opencl **[measured from `-version`]** |
 | `-hwaccels` | cuda vaapi dxva2 qsv d3d11va opencl vulkan d3d12va amf **[measured]** |
 | Counts | 243 encoders, 557 decoders, 576 filters, 419 formats **[measured]** |
@@ -61,9 +61,9 @@ the digest.
 
 | Item | Value |
 |---|---|
-| Reach | `ssh <node>` (the node user, key auth; `<other user>@<node>` is refused). the tailnet name **[measured]** |
+| Reach | `ssh <node>` (user **<lenovo-ssh-user>**, key auth; `<user>@<linux-node>` is refused). the tailnet name **[measured]** |
 | OS / CPU / RAM | Ubuntu, kernel 7.0.0-30, i9-9900 8C/16T, 62 GB **[measured]** |
-| GPU | RTX 3050 6 GB, driver 610.43.02 **[measured]** |
+| GPU | **NVIDIA A2 16 GB since 2026-09-04** (tier `ampere-16`; fleet node renamed `lenovo-ampere6` → `lenovo-ampere16` the same day) — **not yet dumped**. The encoder/filter rows and every Linux node throughput number below were measured 2026-09-01 on the box's previous **RTX 3050 6 GB, driver 610.43.02**; re-run `ffdump.py` before relying on them **[3050 rows measured 2026-09-01]** |
 | ffmpeg | **8.0.1-3ubuntu2** (`/usr/bin/ffmpeg`, gcc 15), python3 present **[measured]** |
 | `-hwaccels` | vdpau cuda vaapi qsv drm opencl vulkan **[measured]** |
 | Encoders | h264_nvenc, hevc_nvenc, av1_nvenc (listed, **but "No capable devices found" on the RTX 3050** — Ampere has no AV1 NVENC), libx264, libx265 (4.1), libsvtav1 (2.3.0), libaom-av1, librav1e, libvpx-vp9, *_qsv (listed; iGPU untested), prores_ks, dnxhd, libwebp(_anim), aac, libopus, libmp3lame, flac. No AMF/MF (Windows-only), no libvvenc **[measured]** |
@@ -85,8 +85,52 @@ Measured throughput, Linux node, 2026-09-01 (same clips; the fleet agent seat wa
 ## laptop node (laptop node 15P) `<laptop-node>` — NOT MEASURED (offline on Tailscale during the whole session, last seen 5–6 h earlier)
 Known from the Resolve reference: Windows, RTX 3070 8 GB (Ampere → h264/hevc NVENC, **no AV1 NVENC** [inferred from the RTX 3050 result]), 64 GB, `ssh <node>` (user <user>, PowerShell 5.1 remote shell, no `&&`). ffmpeg version and build **unknown** — run `ffdump.py` (below) when it is up.
 
-## editing rig (Dell editing rig 7060) `<editing-rig>` — NOT MEASURED (offline on Tailscale, last seen 2–3 h earlier)
-Known from the Resolve reference [doc-of-ours, 2026-09-01]: Windows 11, RTX 5060 8 GB (Blackwell → h264/hevc/av1 NVENC expected [inferred]), i7-9700T, 64 GB, "ffmpeg on machine PATH" (version unknown), SSH as <user> (PowerShell 5.1, arrives elevated), 8 GB VRAM shared with Resolve/ComfyUI/llama-swap. Editing outputs stay on `<editing exports>`.
+## editing rig (Dell editing rig 7060) `<editing-rig>` — THE editing rig, MEASURED 2026-09-10
+
+| Item | Value [measured 2026-09-10] |
+|---|---|
+| ffmpeg | **9.0-full_build-www.gyan.dev** on PATH at `D:\WinGet\Portable\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-9.0-full_build\bin\{ffmpeg,ffprobe}.exe` — a **different major version** from the workstation's PATH ffmpeg (8.1.2); read § Version deltas before copying a recipe between them |
+| Counts | 241 encoders, 554 decoders, 579 filters, 420 formats (vs 8.1.2's 243/557/576/419) |
+| `-hwaccels` | cuda vaapi dxva2 qsv d3d11va opencl vulkan d3d12va amf — identical set to the workstation |
+| GPU | RTX 5060, **8151 MiB**, driver 616.56. Idle at probe time (0 %, 512 MiB) |
+| Shell | SSH as `<user>` → Windows PowerShell **5.1.26100.9278**, arrives elevated |
+| Python | `C:\Program Files\Python311\python.exe` (3.11) |
+| **`TEMP` = `D:\Temp`** | load-bearing: the default cwd for scripts is on **D:**, and `D:\Windows\Fonts` does not exist — a drive-less `fontfile=/Windows/Fonts/…` therefore segfaults here while the identical command from a cwd on C: works (measured both ways). Always use the quoted `'C\:/…'` form on this box |
+| Console owner | a dedicated local account, session 1 — was Active with no idle time at probe time. Reads and file writes are safe; a throughput benchmark is not (see Gaps) |
+| Harness clone | `<clone dir>` → `https://github.com/<user>a/offload-harness.git`; `git pull` brings `skill/ffmpeg/` (sanitized copy) |
+| Docs deployed | `<skills dir>\{ffmpeg,davinci-resolve}\` — unredacted copies, created 2026-09-10 (the rig had no `skills` dir before; `claude.exe` and a `CLAUDE.md` were already there) |
+| Also present | `<other clone>`, Hailo-8L pipelines under `<dev root>`; editing tree `<editing root>\{Assets,Exports,Footage,Projects,ResolveCache,ResolveDB,ResolveTools,_pp_*}` |
+
+From the Resolve reference [doc-of-ours]: i7-9700T 8C/8T, 64 GB, C: Optane 109 GB / D: T-Force 954 GB / E: Exos 3.7 TB / F: cache. Editing outputs stay on `<editing exports>`; never copy the operator's output to Google Drive.
+
+## Version deltas — 8.1.2 vs 9.0 / 9.0.1 [measured 2026-09-10]
+
+Attribution method: the same cases were run with **both binaries on the workstation** (PATH 8.1.2 and
+`<tools dir>\ffmpeg-9.0.1`), same cwd drive and same font file, so version is the only variable;
+the editing rig's 9.0 then confirmed each 9.x result on a second machine.
+
+| Case | 8.1.2 | 9.0 / 9.0.1 | Verdict |
+|---|---|---|---|
+| `drawtext` `text='100%'` (default `expansion=normal`) | "Stray %", **exit 0, file written, nothing drawn** | "Stray %", **exit −22 (EINVAL), NO output file** | **9.x fails loud** — the silent-render trap is 8.1.2-only |
+| same with `%%` | exit 0, nothing drawn | exit −22, no file | as above |
+| `text='100%':expansion=none` | drawn | drawn | unchanged (the fix on both) |
+| `ffprobe` an animated WebP | `webp,0,0` + "image data not found" | **`webp_anim,320,180`** (`nb_frames` still N/A) | **9.x demuxes it** — verify with ffprobe, PIL only needed on 8.x |
+| `fontfile='C\:/…'` (quoted, escaped) | drawn | drawn | portable, use this |
+| `fontfile='C:/…'` (quoted, colon NOT escaped) | parse error | parse error | quoting alone is not enough |
+| `fontfile=/Windows/Fonts/…` drive-less | drawn *when cwd is on C:* | drawn *when cwd is on C:* | **not a version issue — a cwd-drive issue**; segfaults from a cwd on any other drive |
+| `subtitles=` after input `-ss` | exit 0, nothing drawn | exit 0, nothing drawn | **unchanged silent trap** — `-copyts` or output-side `-ss` |
+| `-c copy` cut off a keyframe | whole GOP, first packet pts −1.0, `KD_` | identical | unchanged |
+| `-n` with the output already present | **exit 0** | **exit 0** | unchanged |
+| `-map_channel` | removed | removed | unchanged (use `pan`/`channelsplit`) |
+| `-pattern_type glob` | "globbing is not supported by this libavformat build" | same | unchanged on Windows builds |
+| `scale_npp` | absent | absent | unchanged (use `scale_cuda`) |
+
+Capability diff, 8.1.2 → 9.0: every encoder, decoder, filter and format this library's recipes
+use exists on **both** (the curated subsets differ by nothing). 9.0 drops the `v308`/`v408`/`v410`
+uncompressed encoders and adds `pdv`; adds the filters **`transpose_cuda`, `frc_amf`,
+`v360_vulkan`**; and NVENC gains the 12-bit pixel formats `p012le`/`p212le` on all three
+(h264/hevc/av1). Practical read: recipes port cleanly 8.1.2 → 9.x, and 9.x is strictly better
+on the two traps above.
 
 ## Re-measuring a host (what produced the dumps)
 The dump script lives at `<skill dir>\reference\ffdump.py` (copied

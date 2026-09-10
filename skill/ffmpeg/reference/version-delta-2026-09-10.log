@@ -1,0 +1,52 @@
+# Raw captured output, 2026-09-10. Method: ff9-traps.ps1 on the editing rig (ffmpeg 9.0);
+# ff-ab.ps1 run twice ON THE workstation against 8.1.2 and 9.0.1 (same machine/cwd/font = version isolated).
+
+=== editing rig7060, ffmpeg 9.0-full_build-www.gyan.dev (ff9-traps.ps1)
+CONFIG_LEN 1861
+LIBS libavfilter    12.  1.100 / 12.  1.100
+FIXTURES src=2812518 plain05=True plain15=True
+CASE pct_normal_single rc=-22 drawn=NOFILE err=[Parsed_drawtext_0] Stray % near ''
+CASE pct_normal_double rc=-22 drawn=NOFILE err=[Parsed_drawtext_0] Stray % near '%'
+CASE pct_expansion_none rc=0 drawn=0.460125
+CASE font_unquoted rc=-22 drawn=NOFILE err=[AVFilterGraph] No option name near '/Windows/Fonts/arial.ttf:text=Hi:...'
+CASE font_quoted rc=0 drawn=0.235512
+CASE font_driveless rc=-1073741819 drawn=NOFILE err=Fontconfig error: Cannot load default config file    <-- cwd was D:\Temp\ff9traps
+CASE font_fontconfig rc=-1073741819 drawn=NOFILE err=Fontconfig error: Cannot load default config file
+CASE pts_expansion rc=0 drawn=0.740303
+CASE subs_input_ss rc=0 drawn=0            <-- SILENT: exit 0, nothing rendered (same as 8.1.2)
+CASE subs_input_ss_copyts rc=0 drawn=0.468261
+CASE subs_output_ss rc=0 drawn=0.468261
+FEAT map_channel rc=-1414549496 msg=Unrecognized option 'map_channel'.
+FEAT glob rc=-40 msg=[in#0] Pattern type 'glob' was selected but globbing is not supported by this build
+FEAT filters scale_npp=0 scale_cuda=1 overlay_cuda=1 libplacebo=1 whisper=1
+FEAT encoders av1_nvenc=1 hevc_nvenc=1 libsvtav1=1 libvvenc=1 libwebp_anim=1
+FEAT webp_probe rc=0 out=webp_anim,320,180,N/A err=          <-- 9.x probes animated webp; 8.1.2 could not
+CUT nb_read_frames=62 start_time=0.000000 duration=2.066667
+CUT first_packets -1.000000,KD_ -0.933333,_D_ -0.966667,_D_  <-- copy-cut keyframe trap unchanged
+RC missing_input=-2  bad_filter=-22  n_existing_output=0  ok=0
+
+# drive mechanism, same box, same command, cwd forced to C:
+TEMP=D:\Temp  TEMP_DRIVE=D  D_WINDOWS=False  C_WINDOWS=True
+CWD=C:\Users\<user>\AppData\Local\Temp\ffdrv
+driveless_from_C_rc=0 exists=True err=            <-- works from C:, segfaults from D:
+
+=== workstation A/B (ff-ab.ps1), same machine, cwd on C:, FONT_EXISTS True
+--- ffmpeg 8.1.2-full_build-www.gyan.dev
+  pct_normal rc=0 drawn=0 err=[Parsed_drawtext_0] Stray % near ''   <-- SILENT
+  font_quoted rc=0 drawn=0.235512
+  font_driveless rc=0 drawn=0.235512
+  font_plain_colon rc=-22 drawn=NOFILE err=[AVFilterGraph] No option name near '/Windows/Fonts/arial.ttf...'
+  webp_probe rc=0 out=webp,0,0 err=[webp] image data not found
+--- ffmpeg 9.0.1-full_build-www.gyan.dev
+  pct_normal rc=-22 drawn=NOFILE err=[Parsed_drawtext_0] Stray % near '' / [vf#0:0] Error while ...   <-- LOUD
+  font_quoted rc=0 drawn=0.235512
+  font_driveless rc=0 drawn=0.235512            <-- so the editing rig segfault is cwd-drive, NOT version
+  font_plain_colon rc=-22 drawn=NOFILE
+  webp_probe rc=0 out=webp_anim,320,180 err=
+
+=== capability diff 8.1.2 -> 9.0 (from the live dumps)
+counts 243/557/576/419 -> 241/554/579/420
+curated encoder/decoder/filter/format subsets: identical availability on both
+encoders dropped in 9.0: v308 v408 v410 | added: pdv
+filters added in 9.0: frc_amf transpose_cuda v360_vulkan | dropped: none
+nvenc pixfmts gain p012le / p212le on 9.0 (h264/hevc/av1)
