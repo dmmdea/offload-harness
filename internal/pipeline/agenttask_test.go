@@ -82,6 +82,11 @@ type agentFake struct {
 	// repackTruncated, when set, marks the n-th grammar completion as cut at
 	// max_tokens (finish_reason "length") — the 0.115.10 truncation shape.
 	repackTruncated func(n int64) bool
+	// upstreamCNT counts GETs on /upstream/<seat>/v1/models — the warm-up
+	// request (0.115.11); the fake answers 404 like a llama-swap that does
+	// not know the seat, unless upstreamModels is set.
+	upstreamCNT    atomic.Int64
+	upstreamModels func(n int64) string
 	// rosterStatus, when non-zero, is the status /v1/models answers with.
 	rosterStatus int
 	// props, when non-nil, is served (as JSON) at the seat's
@@ -222,6 +227,14 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(f.props)
 				return
+			}
+			if r.URL.Path == "/upstream/"+agentTestSeat+"/v1/models" {
+				n := f.upstreamCNT.Add(1)
+				if f.upstreamModels != nil {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(f.upstreamModels(n)))
+					return
+				}
 			}
 			// /upstream/... /props, /tokenize, ...: absent — every consumer
 			// fails open (window fallback, legacy tokenizer rung).

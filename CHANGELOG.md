@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.11] - 2026-09-10 - a cold seat loads outside the wall
+
+Register D-64. The admission pre-flight (0.111.0) waited for ANOTHER model's swap before starting the
+contract's wall, but a seat that was simply not loaded loaded on the loop's first call — inside the wall.
+Under `ttl 300` that is the common case: the Lenovo vLLM seat cold-started seven times in two hours on
+2026-09-10, 125–250 s each plus a Triton JIT, and 89 of the Qube seat's 184 budget defers had `steps: 0`.
+
+- `warmSeat`: when the seat is absent from `/running` after the pre-flight, one GET through llama-swap's
+  per-model passthrough (`/upstream/<seat>/v1/models`) makes it load, bounded by the admission budget's
+  remainder; `/running` is then polled until the seat reads ready. The time rides `admission_wait_sec`; a
+  spent budget or a seat llama-swap never lists is named in `admission_note` and the run proceeds.
+- `agent_admission_wait_sec` default 120 → 300 s (covers a vLLM cold load); negative still disables both.
+- Docs: operator-guide config row.
+
 ## [0.115.10] - 2026-09-10 - the structured re-pack budget scales with the answer
 
 0.115.8 let a thinking seat finish a long answer (the acceptance run's 27B row: 22,865 chars over seven

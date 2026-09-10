@@ -175,6 +175,24 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	if admitNote != "" {
 		log.Printf("agent task: seat admission (%s): %s", seat, admitNote)
 	}
+	// Cold-load warm-up (0.115.11, register D-64): the pre-flight above settles
+	// ANOTHER model's swap, but a seat that is simply not loaded used to load on
+	// the loop's first call — INSIDE the wall. A vLLM seat's cold load is
+	// 125–250 s on the fleet (seven Lenovo cold starts in two hours on
+	// 2026-09-10 under ttl 300), so a 300 s contract could spend most of its
+	// wall before the first token. Warm it here, on the admission budget's
+	// remainder, and start the clock when the seat reads ready.
+	if warmed, warmNote := warmSeat(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted); warmed > 0 || warmNote != "" {
+		admitted += warmed
+		if warmNote != "" {
+			log.Printf("agent task: seat warm-up (%s): %s", seat, warmNote)
+			if admitNote == "" {
+				admitNote = warmNote
+			} else {
+				admitNote += "; " + warmNote
+			}
+		}
+	}
 	cctx, cancel := context.WithTimeout(ctx, wall)
 	defer cancel()
 	// One busy-seat budget for the WHOLE contract (seatwait): every chat step
@@ -809,10 +827,92 @@ func admissionBudget(sec int) time.Duration {
 	case sec < 0:
 		return 0
 	case sec == 0:
-		return 120 * time.Second
+		// 300 s since 0.115.11 (was 120): the budget now also covers the seat's
+		// own cold load (warmSeat), and a vLLM seat takes 125–250 s to load
+		// plus a Triton JIT on its first completion.
+		return 300 * time.Second
 	}
 	return time.Duration(sec) * time.Second
 }
+
+// warmSeat loads an ABSENT seat outside the wall (D-64). One GET through
+// llama-swap's per-model passthrough (`/upstream/<seat>/v1/models`, the same
+// route ProbeServedWindow uses) makes llama-swap swap the seat in and answers
+// only once its health check passes; the call is bounded by `budget`. Then
+// /running is polled (two extra polls at most) until the seat reads ready.
+// Returns the time spent and a note when residency could not be settled —
+// a probe failure, a spent budget — so the wire says "the gate could not
+// tell" rather than "nothing was loading". A seat that is already ready
+// costs one /running probe and returns 0.
+func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string) {
+	if budget < admissionPoll || strings.TrimSpace(endpoint) == "" {
+		return 0, "" // nothing left of the admission budget (or the gate is off): the wall's business, as before
+	}
+	sc, err := swapclient.New(endpoint, admissionPoll)
+	if err != nil {
+		return 0, ""
+	}
+	ready := func() (bool, error) {
+		rows, rerr := sc.Running(ctx)
+		if rerr != nil {
+			return false, rerr
+		}
+		for _, r := range rows {
+			if strings.EqualFold(r.ID, seat) && r.State == "ready" {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	if ok, rerr := ready(); rerr != nil || ok {
+		return 0, "" // ready, or unreadable (awaitSeatAdmission already reported a failed probe)
+	}
+	start := time.Now()
+	b := swapclient.BaseURL(endpoint)
+	if b == "" {
+		return 0, ""
+	}
+	wctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	req, rerr := http.NewRequestWithContext(wctx, http.MethodGet, b+"/upstream/"+url.PathEscape(seat)+"/v1/models", nil)
+	if rerr != nil {
+		return 0, ""
+	}
+	resp, derr := warmClient.Do(req)
+	if derr != nil {
+		spent := time.Since(start)
+		if wctx.Err() != nil && ctx.Err() == nil {
+			return spent, fmt.Sprintf("cold load exceeded the admission budget after %.0fs (proceeding into the wall)", spent.Seconds())
+		}
+		return spent, "warm request failed (proceeding): " + derr.Error()
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	resp.Body.Close()
+	// The swap answered; confirm residency. Two polls one poll-interval apart,
+	// not a wait: llama-swap proxies only after the health check passed, so a
+	// seat that is still not listed is one llama-swap does not know under
+	// this name — say so and go.
+	for i := 0; i < 2; i++ {
+		if ok, rerr := ready(); rerr == nil && ok {
+			return time.Since(start), fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())
+		}
+		// The second poll waits one interval, but only inside what is left of
+		// the budget — the confirmation must not outspend the gate it serves.
+		if i == 0 && time.Since(start)+admissionPoll <= budget {
+			if serr := seatwait.Sleep(ctx, admissionPoll); serr != nil {
+				return time.Since(start), serr.Error()
+			}
+		} else if i == 0 {
+			break
+		}
+	}
+	return time.Since(start), fmt.Sprintf("warm request answered HTTP %d after %.0fs but /running never listed %s ready (proceeding)", resp.StatusCode, time.Since(start).Seconds(), seat)
+}
+
+// warmClient carries no timeout of its own: warmSeat bounds the request by
+// context, and a cold vLLM load is minutes, not the seconds a transport
+// timeout is sized for.
+var warmClient = &http.Client{}
 
 // awaitSeatAdmission polls llama-swap's GET /running until `seat` is ready,
 // or nothing on the endpoint is mid-swap (an absent seat then loads on
