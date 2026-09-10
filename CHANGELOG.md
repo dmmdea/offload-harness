@@ -6,6 +6,23 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.9] - 2026-09-10 - the cross-seat retry is seat-aware
+
+Register D-46. The verification retry ran inside whatever the first attempt left of `timeout_sec` with a
+10 s floor, on whichever different node the placer chose. On 2026-09-10 a 603 s empty first attempt of a
+900 s contract handed the Qube 27B a 296 s retry: it generated 4,178 tokens of think and timed out, on a seat
+that was already mid-generation for another job. Over 318 retries in the corpus the pass rate was 13 %.
+
+- Config `agent_retry_min_sec`: the least remaining budget a retry starts with (0 = the historical 10 s).
+  Reference box: 300 (a cold vLLM load plus one 4,096-token turn at ~30 tok/s). The re-placement floor
+  after a refused dispatch is unchanged.
+- A first attempt that ended on an empty final (`stop_reason` `reasoning_starved` / `empty`) is never
+  retried: the shape is the seat's completion budget, not a wrong answer.
+- The retry never lands on a seat already running another job: a remote publishing `jobs_running > 0`, or
+  the local seat with requests in flight (the same probe `route=spread` deals by).
+- Every skip is named in `retry_note` (floor + knob, empty final, busy seat).
+- Docs: fleet-node retry paragraph, operator guide, `agent_delegate` schema; example config.
+
 ## [0.115.8] - 2026-09-10 - an empty final is a named defer, never an answer
 
 The 2026-09-10 retrospective (register D-01, two independent diagnoses) traced every empty delegation

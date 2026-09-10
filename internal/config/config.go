@@ -262,6 +262,19 @@ type Config struct {
 	// explicit choice and is not gated; a media lease is arbitrated by the
 	// model-affinity gate as before (ADR 0026) and is not a placement gate either.
 	AgentLeaseWaitSec int `json:"agent_lease_wait_sec,omitempty"`
+	// AgentRetryMinSec (0.115.9, register D-46) is the least `timeout_sec`
+	// budget a delegation subtask's cross-seat verification retry is worth
+	// starting with, on THIS delegator. The retry runs inside what the first
+	// attempt left of the subtask's budget; below this floor it is skipped with
+	// a `retry_note`. 0 (the default) keeps the historical 10 s floor. Set it
+	// from the retry seats' own numbers: a cold vLLM load (125–250 s) plus one
+	// turn at max_tokens / tok_s (the 27B at ~30 tok/s needs ~140 s for 4,096
+	// tokens) — 300 on the reference box. Measured motivation (2026-09-10): a
+	// 603 s first attempt of a 900 s contract left the 27B a 296 s retry that
+	// generated 4,178 tokens and timed out mid-think; retries passed 13 % over
+	// 318 rows, 0/9 that day. The re-placement floor after a REFUSED dispatch
+	// (no seat time spent) stays at 10 s and is not this knob.
+	AgentRetryMinSec int `json:"agent_retry_min_sec,omitempty"`
 	// AgentPlacementWaitSec (0.113.18) is how long a delegation subtask WAITS
 	// FOR CAPACITY when every node that could run it is full right now — each
 	// eligible remote refused at dispatch (queue full, leased, draining) and the

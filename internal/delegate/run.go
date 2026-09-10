@@ -792,13 +792,29 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	if !retryable(first) {
 		return first
 	}
+	// An EMPTY final (0.115.8: stop_reason reasoning_starved / empty) is not a
+	// wrong answer another seat can correct — it is the seat's completion
+	// budget or think block, and a second seat handed the wall's leftovers
+	// repeats the shape (2026-09-10: the 4B's 603 s empty final was retried on
+	// the 27B with 296 s, which generated 4,178 tokens of think and timed out).
+	// The reasoning_starved shape is class budget and never reaches here (kept
+	// in the match so the rule reads as one shape, not as a coincidence of the
+	// class table); the `empty` abstention does, and is skipped by name.
+	if stop := first.Result.StopReason; first.Result.Deferred && (stop == "reasoning_starved" || stop == "empty") {
+		first.RetryNote = fmt.Sprintf("retry skipped: the first attempt on %s ended on an empty final (stop_reason %s) — a second seat given the wall's leftovers repeats the shape; the fix is the seat's completion budget or agent_thinking, not a retry", nodeLabel(first), stop)
+		return first
+	}
 	// The retry lives INSIDE the subtask's own timeout_sec: the caller was told
 	// that number bounds the work per subtask, and a second full attempt would
 	// have doubled it silently. What is left after the first attempt is the
-	// retry's budget; under the floor there is no honest retry to run.
+	// retry's budget; under the floor there is no honest retry to run. The
+	// floor is seat-aware through config (agent_retry_min_sec, D-46): a cold
+	// load plus one turn at max_tokens on the retry seat, never the bare 10 s
+	// that let a 296 s retry burn a thinking seat for nothing.
+	floor := r.retryFloorSec()
 	remaining := pl.remaining(start, budget)
-	if remaining < minRetrySec {
-		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after the first attempt (floor %ds)", remaining, budget, minRetrySec)
+	if remaining < floor {
+		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after the first attempt (floor %ds%s)", remaining, budget, floor, retryFloorSource(floor))
 		return first
 	}
 	// alternativeNode BLOCKS — it probes the fleet. Bound that probe by what
@@ -811,18 +827,70 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	if !ok {
 		return first
 	}
+	// Never land the retry on a seat that is already generating for another
+	// job (D-46): the two runs halve each other's tok/s and the retry, on the
+	// leftover budget, is the one that dies (2026-09-10: the ledger-01 retry
+	// joined the 27B mid-generation of ledger-00 and both crawled at 27 tok/s).
+	if busy, why := r.retrySeatBusy(ctx, alt); busy {
+		first.RetryNote = fmt.Sprintf("retry skipped: the retry seat on %s is already running another job (%s); a shared seat would only slow both", alt.view.NodeID, why)
+		return first
+	}
 	// RE-MEASURE after the probe. `remaining` above was true when it was taken
 	// and can be minutes stale by now; writing that stale number into the retry
 	// contract is what would hand a seat time the subtask no longer has.
 	remaining = pl.remaining(start, budget)
-	if remaining < minRetrySec {
-		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after choosing a retry node (floor %ds)", remaining, budget, minRetrySec)
+	if remaining < floor {
+		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after choosing a retry node (floor %ds%s)", remaining, budget, floor, retryFloorSource(floor))
 		return first
 	}
 	retryContract := contract
 	retryContract.TimeoutSec = remaining
 	second := r.placeAndRun(ctx, i, retryContract, &alt, start, budget, pl)
 	return mergeAttempts(first, second)
+}
+
+// retryFloorSec is the least remaining budget a verification retry starts
+// with: the historical 10 s (minRetrySec), raised by config `agent_retry_min_sec`.
+func (r *runner) retryFloorSec() int {
+	if r.cfg.AgentRetryMinSec > minRetrySec {
+		return r.cfg.AgentRetryMinSec
+	}
+	return minRetrySec
+}
+
+// retryFloorSource names, for the retry note, where a raised floor came from.
+func retryFloorSource(floor int) string {
+	if floor > minRetrySec {
+		return ", agent_retry_min_sec"
+	}
+	return ""
+}
+
+// retrySeatBusy reports whether the seat the retry would land on is already
+// generating for another job. A LOCAL landing reads the seat's in-flight count
+// through llama-swap (probeLocalBusy, fail-open to idle); a REMOTE landing
+// reads the node's jobs_running from a FRESH health probe (0 = idle or
+// unknown, never busy). Fresh, not the run's cached view: route=spread probes
+// the fleet once before the batch starts, so the cached view cannot show the
+// load a SIBLING subtask of the same batch has since put on that node — which
+// is exactly how the 2026-09-10 retry joined a seat mid-generation. A failed
+// probe falls back to the cached view (fail-open, like every placement read).
+func (r *runner) retrySeatBusy(ctx context.Context, alt placement) (bool, string) {
+	if alt.base == "" {
+		rd := r.probeLocalBusy(ctx)
+		if rd.busy {
+			return true, fmt.Sprintf("%d in flight on the local seat", rd.inflight)
+		}
+		return false, ""
+	}
+	view, source := alt.view, "cached view"
+	if fresh, err := FetchNodeView(ctx, alt.base, r.cfg.FleetAuthToken); err == nil {
+		view, source = fresh, "fresh health"
+	}
+	if view.JobsRunning > 0 {
+		return true, fmt.Sprintf("jobs_running %d (%s)", view.JobsRunning, source)
+	}
+	return false, ""
 }
 
 // placements is ONE SUBTASK's placement ledger. runOne owns it and hands the
@@ -3072,7 +3140,7 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 			TokensOut:    pr.Result.TokensOut,
 			SeatTokensIn: pr.Result.SeatTokensIn,
 			Deferred:     pr.Result.Deferred || pr.Err != "" || len(pr.AcceptanceFailures) > 0,
-			Reason:    reason,
+			Reason:       reason,
 			// ModelTier carries placement:seat — the ledger has no placement
 			// column, and "which node/seat ran it" is the row's whole story.
 			ModelTier: pr.Node + ":" + pr.Seat,
