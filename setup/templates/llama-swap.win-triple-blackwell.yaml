@@ -155,46 +155,7 @@ models:
       --parallel 4 -ngl 99 --port ${PORT} --host 127.0.0.1
     ttl: 600
 
-  # ===== OPT-IN OVER-2-CARD SEATS - these are the only entries allowed to touch =====
-  # ===== the display card (device 1). They are NOT in any matrix set: they load  =====
-  # ===== only when called by name/alias, and never while the operator is at the  =====
-  # ===== desk. Both were measured on the reference box 2026-08-31 / 2026-09-01.  =====
-  #
-  # qwen3.8-flash-next - the 125B big seat. MEASURED: ncmoe28 with --tensor-split
-  # 28,10,10 and q8_0 KV at 131k = 12.5-12.9 tok/s, +47% over the best 2-card arm, and
-  # 15/16 on the seed-48 decision set = EXACT PARITY with the 27B incumbent's quality.
-  # It exists for 262k-native context and 125B breadth, NOT for speed (5.2x the
-  # incumbent's wall). Experts + PLE/n-gram live in host RAM: ~70 GB held while loaded,
-  # so check free RAM before invoking. Roomier fallback if fragile: --n-cpu-moe 32
-  # --tensor-split 32,8,8 (11.8 tok/s, ~5 GB/card free).
-  qwen3.8-flash-next:
-    env: [CUDA_DEVICE_ORDER=PCI_BUS_ID]
-    cmd: >-
-      ${server} -m ${mdir}/qwen3.8-flash-next/UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf
-      -ngl 999 -sm layer --tensor-split 28,10,10 --n-cpu-moe 28
-      --override-tensor per_layer_token_embd=CPU,ple_ngram_embd=CPU
-      --parallel 1 --jinja --flash-attn on -fit off --cache-type-k q8_0 --cache-type-v q8_0
-      -c 131072 --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --port ${PORT} --host 127.0.0.1
-    aliases: ["flash-next", "fn-125b", "agent-big"]
-    ttl: 300
-    name: "Qwen3.8-Flash-Next UD-IQ4_XS - agent BIG opt-in seat (131k, 3-card + RAM experts)"
 
-  # qwen3.8-flash-next-262k - the native-262k twin. Same weights, zero extra disk.
-  # MEASURED: ncmoe32 (32,8,8) loads 13.0/10.5/12.5 GB (~3 GB/card free), needle exact at
-  # 11.4k depth, pp 69 / tg 11.3 tok/s. HONEST LIMIT: prefill at 69 tok/s makes a full
-  # 200k prompt ~48 minutes, so this is BATCH/async work only, and behaviour beyond 200k
-  # depth is UNPROBED (upstream #27871 / #27901 were reported near 262k on other hardware).
-  qwen3.8-flash-next-262k:
-    env: [CUDA_DEVICE_ORDER=PCI_BUS_ID]
-    cmd: >-
-      ${server} -m ${mdir}/qwen3.8-flash-next/UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf
-      -ngl 999 -sm layer --tensor-split 32,8,8 --n-cpu-moe 32
-      --override-tensor per_layer_token_embd=CPU,ple_ngram_embd=CPU
-      --parallel 1 --jinja --flash-attn on -fit off --cache-type-k q8_0 --cache-type-v q8_0
-      -c 262144 --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --port ${PORT} --host 127.0.0.1
-    aliases: ["fn-262k", "flash-next-262k"]
-    ttl: 300
-    name: "Qwen3.8-Flash-Next @ native 262k (q8_0 KV, ncmoe32) - batch long-context twin"
 
 # RESIDENCY IS DECLARED WITH `matrix:` (llama-swap >= v202; groups' persistent:true was
 # measured FAILING on this exact box — the memory stack silently degraded mem0 to

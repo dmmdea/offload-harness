@@ -36,7 +36,7 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf
       -ngl 99 --parallel 1 ${common}
-    ttl: 0
+    ttl: 300
   # E2B fallback — device 1 (shares the editor card; only one of E4B/E2B is used).
   gemma4-e2b:
     env: [CUDA_VISIBLE_DEVICES=1]
@@ -50,7 +50,7 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
       __MOE_26B__ --parallel 1 ${common}
-    ttl: 0
+    ttl: 300
   # AGENT seat: same 26B weights and device-0 pin as the architect above; the ONLY
   # difference is reasoning ON (thinking agent loop). Flags written explicitly
   # rather than via ${common} because the macro pins reasoning off. It is an
