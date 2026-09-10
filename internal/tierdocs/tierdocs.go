@@ -28,6 +28,7 @@ import (
 // added, instead of silently going undocumented.
 type Profile struct {
 	CtxSize        int            `json:"ctx_size"`
+	LongCtxSize    int            `json:"long_ctx_size"`
 	KVType         string         `json:"kv_type"`
 	AgentCtxTokens int            `json:"agent_ctx_tokens"`
 	ResidentTier   string         `json:"resident_tier"`
@@ -221,6 +222,9 @@ func renderTier(name string, p Profile, reports []string) string {
 	b.WriteString("## Serving\n\n| setting | value | what it controls |\n|---|---|---|\n")
 	fmt.Fprintf(&b, "| backend | `%s` | which `llama-swap.*.yaml` template renders |\n", dash(p.Backend))
 	fmt.Fprintf(&b, "| ctx_size | %d | the served window (`--ctx-size`) |\n", p.CtxSize)
+	if p.LongCtxSize > 0 {
+		fmt.Fprintf(&b, "| long_ctx_size | %d | the LONG window served by the opt-in `-262k` twin seat (literal `--ctx-size`); window overflow routes here |\n", p.LongCtxSize)
+	}
 	fmt.Fprintf(&b, "| kv_type | `%s` | `--cache-type-k/v`, kept symmetric |\n", dash(p.KVType))
 	fmt.Fprintf(&b, "| flash_attn | `%s` | `--flash-attn` (required for a q8_0 V cache) |\n", dash(p.FlashAttn))
 	fmt.Fprintf(&b, "| resident_tier | `%s` | the model that stays hot; seeds the agent planner seat (agent_model) when it differs from the workhorse |\n", dash(p.ResidentTier))

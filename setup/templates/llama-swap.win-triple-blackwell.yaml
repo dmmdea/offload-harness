@@ -134,6 +134,22 @@ models:
       --ctx-size __CTX__ --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
       --port ${PORT} --host 127.0.0.1
     ttl: 300
+  # LONG-CONTEXT TWIN of the 27B (2026-09-10, operator: the third card buys CONTEXT and the
+  # 3-card tier must register more than the 2-card tier). Same weights and pair pin, q8_0 KV,
+  # NO MTP drafter (q8_0 + MTP OOMs at MTP-context init, ledger G3 2026-09-01), no mmproj,
+  # --ctx-size 262144 as a LITERAL (profile long_ctx_size), measured live on the reference box.
+  # Swappable, ttl 300 like every seat. The composite tier routes window overflow here; the
+  # vLLM long layer (pp3, fp8 KV, 262,144 measured Nightshift 2 seat v7) ships with 0.116.0.
+  qwen3.8-27b-262k:
+    aliases: [qwen38-262k, coder-262k, agent-loop-262k]
+    env: [CUDA_VISIBLE_DEVICES=0,2]
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.8-27B-UD-Q4_K_XL.gguf
+      -ngl 999 -sm layer --parallel 1 --jinja --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__
+      --ctx-size 262144 --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
+      --port ${PORT} --host 127.0.0.1
+    ttl: 300
   embeddinggemma:
     env: [CUDA_VISIBLE_DEVICES=2]
     cmd: >-
@@ -197,6 +213,7 @@ matrix:
     m26: gemma4-26b-a4b
     a26: gemma-4-26b-agent
     q38: qwen3.8-27b
+    q38l: qwen3.8-27b-262k
   # The memory stack is the most expensive thing on this box to lose and the cheapest
   # to keep: maximally expensive to stop, so the solver stops something else first.
   evict_costs:
@@ -204,4 +221,4 @@ matrix:
     rer: 1000
   sets:
     residents: "emb & rer"
-    text: "+residents & (e4b | e2b__M26_ALT____Q38_ALT____SEATS_SWAPPABLE__)__SEATS_RESIDENT__"
+    text: "+residents & (e4b | e2b__M26_ALT____Q38_ALT__ | q38l__SEATS_SWAPPABLE__)__SEATS_RESIDENT__"
