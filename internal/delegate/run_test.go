@@ -36,6 +36,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/ledger"
+	placetable "github.com/dmmdea/offload-harness/internal/placement"
 )
 
 // hashOwnExecutable independently hashes the running test binary — the
@@ -126,6 +127,13 @@ type fakeNode struct {
 	maxConcurrentJobs int
 	maxQueueDepth     int
 
+	// layers, when non-nil, is published as health's `layers` rows (a composite
+	// node, ADR 0039); decodeCap is the cap the node decodes a dispatched
+	// contract at (0 = the plain transport cap) — a composite node admits
+	// contracts sized for its long seats.
+	layers    []placetable.LayerRow
+	decodeCap int
+
 	dispatches atomic.Int64
 	polls      atomic.Int64
 	lastJobID  atomic.Value // string
@@ -181,6 +189,9 @@ func (f *fakeNode) server() *httptest.Server {
 		}
 		if f.seatBudget != nil {
 			health["seat_budget"] = f.seatBudget
+		}
+		if f.layers != nil {
+			health["layers"] = f.layers
 		}
 		_ = json.NewEncoder(w).Encode(health)
 	})
@@ -240,7 +251,11 @@ func (f *fakeNode) server() *httptest.Server {
 		}
 		// The payload must be a real v1 contract — decode it exactly as the
 		// node would (schema_version check included).
-		contract, err := core.DecodeAgentContract(strings.NewReader(string(env.Payload)))
+		decodeCap := f.decodeCap
+		if decodeCap <= 0 {
+			decodeCap = core.AgentContextMaxBytes
+		}
+		contract, err := core.DecodeAgentContractWithCap(strings.NewReader(string(env.Payload)), decodeCap)
 		if err != nil {
 			f.t.Errorf("payload is not a dispatchable contract: %v", err)
 		}

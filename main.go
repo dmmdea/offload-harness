@@ -1976,7 +1976,9 @@ func runDelegate(args []string) error {
 	contracts := make([]core.AgentContract, 0, len(specs))
 	lints := make([][]string, 0, len(specs))
 	for i, spec := range specs {
-		c, perr := delegate.PrepareContract(spec, *readRoot)
+		// The BOX's cap (ADR 0039): a composite box admits a contract sized
+		// for its long seats; a plain box keeps the 256 KiB transport cap.
+		c, perr := delegate.PrepareContractWithCap(spec, *readRoot, cfg.AgentContextCapBytes())
 		if perr != nil {
 			return fmt.Errorf("subtask %d: %w", i, perr)
 		}
@@ -3836,7 +3838,7 @@ func runResearch(args []string) error {
 	contracts := make([]core.AgentContract, 0, len(specs))
 	lints := make([][]string, 0, len(specs))
 	for i, spec := range specs {
-		c, perr := delegate.PrepareContract(spec, "")
+		c, perr := delegate.PrepareContractWithCap(spec, "", cfg.AgentContextCapBytes())
 		if perr != nil {
 			return fmt.Errorf("source %d: %w", i, perr)
 		}

@@ -16,6 +16,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
+	placetable "github.com/dmmdea/offload-harness/internal/placement"
 )
 
 // Subtask pairs one delegation contract with its token estimate. EstTokens is
@@ -52,16 +53,11 @@ const specReserve = 3072
 // content) are backstopped by specReserve's padding and the 12-step remote
 // cap. It is used ONLY as an upper-bound GATE — never to claim a fit — and a
 // real-tokenizer count replacing it is the recorded v2 upgrade.
-func EstimateTokens(c core.AgentContract) int {
-	chars := len(c.Goal) + len(c.OutputSchema)
-	for _, d := range c.Context {
-		chars += len(d.Name) + len(d.Text)
-	}
-	for _, a := range c.Acceptance {
-		chars += len(a)
-	}
-	return (chars + 2) / 3 // ceil — a remainder rounds UP, same conservative direction
-}
+//
+// The arithmetic lives in placetable.EstimateTokens since ADR 0039 so the
+// delegator, the placement table and the node size a contract identically;
+// this is the delegate's name for it.
+func EstimateTokens(c core.AgentContract) int { return placetable.EstimateTokens(c) }
 
 // Place decides which node runs st. The rule, exactly as reshaped:
 //
@@ -269,6 +265,16 @@ func provablyStartsNow(v NodeView) bool {
 //   - Depth == 0: only an ORIGIN contract may travel (hop limit 1). The
 //     requester's depth is checked here at placement; the receiving node
 //     additionally derives effectiveDepth ≥ 1 for whatever arrives.
+//   - Layers (ADR 0039, council R5): a node that advertises layer rows is
+//     gated by the SAME placement table the local box and the node itself
+//     use — eligibility is "the table, run over the node's rows, neither
+//     defers nor waits". The residency, roster and ceiling checks above are
+//     the implicit single layer's and apply only to a node without rows: a
+//     composite node's residency is per seat inside the rows, and its
+//     ceiling is whichever layer's window the table picks. A decision that
+//     WAITS (the node's long seat would evict its busy pair) is not
+//     eligible right now — a capacity condition the wait re-polls, never a
+//     dispatch that evicts a remote's busy seat without asking.
 func remoteEligible(st Subtask, r NodeView) bool {
 	// A node advertising a held TEXT lease is not a target at all (0.113.16):
 	// its card is reserved for a measurement, exactly as Reserved() makes the
@@ -278,14 +284,31 @@ func remoteEligible(st Subtask, r NodeView) bool {
 	// LeaseBusy joined the gate 2026-09-07: the same refusal, extended from
 	// "a text lease" to "a lease long enough that the node itself says place
 	// elsewhere". A short render still never refuses; a multi-hour hold does.
-	return r.AgentEnabled &&
-		!r.LeasedText &&
-		!r.LeaseBusy &&
-		r.AgentResident &&
+	if !r.AgentEnabled || r.LeasedText || r.LeaseBusy || len(st.Contract.OutputSchema) == 0 || st.Contract.Depth != 0 {
+		return false
+	}
+	if dec, ok := remoteDecision(st, r); ok {
+		return !dec.Defer && !dec.Wait
+	}
+	return r.AgentResident &&
 		seatServed(r) &&
-		adequate(st, r) &&
-		len(st.Contract.OutputSchema) > 0 &&
-		st.Contract.Depth == 0
+		adequate(st, r)
+}
+
+// remoteDecision runs the placement table over a node's advertised layer rows
+// for st — the delegator's half of council R5 (one rule everywhere). ok=false
+// for a node without rows (the implicit single layer; today's gate applies).
+// The request is the contract's, with the completion budget defaulted: the
+// delegator does not know the remote's agent_max_tokens, and the table's
+// default (1024) is the conservative side of every seat's real setting. The
+// node re-runs the same decision for the dispatched layer with its OWN live
+// guards, so a verdict carried in the rows is never the last word.
+func remoteDecision(st Subtask, r NodeView) (placetable.Decision, bool) {
+	if len(r.Layers) == 0 {
+		return placetable.Decision{}, false
+	}
+	layers, live := placetable.FromRows(r.Layers)
+	return placetable.Decide(placetable.RequestForContract(st.Contract, st.EstTokens, 0), layers, live), true
 }
 
 // PlaceVision picks the fleet node that runs ONE vision task (vqa / ocr /

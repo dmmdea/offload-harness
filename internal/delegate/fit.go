@@ -160,12 +160,27 @@ const fitInadequate = math.MinInt32
 // placeSpread keeps the local rotation slot OUT of the contest instead of
 // scoring it — inventing a ceiling for the local seat would be a fabricated
 // capability claim, and the harness reports what a node advertised, never more.
+//
+// A node with layer rows (ADR 0039) is scored on the window of the seat the
+// placement table DECIDES for the contract — the pair's agent seat for a
+// contract that fits it, the long seat on overflow — not on the single
+// advertised ceiling, which on a composite box is only one layer's. A
+// decision that defers or waits is inadequate here exactly as it is in the
+// gate.
 func scoreFit(st Subtask, v NodeView) int {
-	if !adequate(st, v) {
+	window := v.AgentCtxTokens
+	if dec, ok := remoteDecision(st, v); ok {
+		if dec.Defer || dec.Wait {
+			return fitInadequate
+		}
+		if dec.CtxTokens > 0 {
+			window = dec.CtxTokens
+		}
+	} else if !adequate(st, v) {
 		return fitInadequate
 	}
 	if inferKind(st) == KindReasoning {
-		return v.AgentCtxTokens
+		return window
 	}
-	return -v.AgentCtxTokens
+	return -window
 }

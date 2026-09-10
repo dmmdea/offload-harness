@@ -49,6 +49,10 @@ import (
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/netguard"
+	// Aliased: this file's `placement` struct (a resolved "run it HERE") predates
+	// the package and is used at every placement site; the package is the
+	// composite tier's decision TABLE (ADR 0039), so the alias names what it is.
+	placetable "github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 )
 
@@ -181,11 +185,32 @@ type PlacedResult struct {
 	// (issue #250).
 	Unplaced bool
 	// waitCapacity is attempt()'s SENTINEL: the placement it computed can only
-	// run on a seat a text lease reserves, so nothing was dispatched, nothing was
-	// recorded, and placeAndRun must run the capacity wait (awaitCapacity) with
-	// pendingReason as the first refusal. Never published.
+	// run on a seat a text lease reserves — or, on a composite box, the
+	// decided seat would evict a busy pair seat (decided set) — so nothing was
+	// dispatched, nothing was recorded, and placeAndRun must run the capacity
+	// wait (awaitCapacity) with pendingReason as the first refusal. Never
+	// published.
 	waitCapacity  bool
 	pendingReason string
+	// decided is the placement-table decision behind a waitCapacity sentinel
+	// on a composite box (ADR 0039, council R1: the pair's long seat waits for
+	// the agent seat to drain). It exists so the capacity wait can tell "the
+	// local seat is reserved by a lease" from "the decided seat is waiting for
+	// an eviction to become free": the first ends in the holder-naming
+	// deferral, the second re-runs the decider on every tick and RUNS on the
+	// decided seat once the pair is idle — or when the wait expires — and must
+	// never produce the lease text or a capacity defer. nil on every
+	// pre-composite sentinel.
+	decided *placetable.Decision
+	// Placed (ADR 0039, 0.116.0) is the placement decision this result was
+	// produced under — the block published as `placed` beside the untouched
+	// `placement` reason string. Local: the delegator's own decision, replaced
+	// by the pipeline's stamp once the run answers (identical by construction).
+	// Remote: the delegator's decision over the node's advertised rows until
+	// the node's wire result carries its own (the node re-decides with its live
+	// guards, council R5). nil on a plain box and for a plain node, so every
+	// pre-0.116 result publishes byte-identically.
+	Placed *core.Placed
 }
 
 // Summary is the per-run outcome tally, reported AT THE TOP of every surface's
@@ -428,6 +453,13 @@ type RunOptions struct {
 	// session; one CLI process = one tenant) so a node can round-robin its
 	// backlog across tenants. Empty = anonymous, arrival order on the node.
 	Tenant string
+	// LocalDecider is the placement decision a LOCAL run is made under on a
+	// composite box (ADR 0039). nil = production: placetable.Decide over the
+	// config's layers with ONE memoised placetable.NewSnapshot per run (2 s
+	// TTL), so a 32-subtask spread deciding per subtask per tick execs
+	// nvidia-smi once, not 32 times. Tests inject readers here; a box with no
+	// layers never calls it (the zero Decision is the pre-layer behaviour).
+	LocalDecider func(ctx context.Context, contract core.AgentContract, st Subtask) placetable.Decision
 }
 
 // DefaultTenant is the tenant id a delegator process identifies itself with
@@ -565,6 +597,7 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		r.quarantine = opts.Quarantine
 		r.priority = core.ClampBand(opts.Priority)
 		r.tenant = opts.Tenant
+		r.decider = opts.LocalDecider
 	}
 	// route=spread probes the fleet ONCE per run: every subtask deals itself
 	// across the same roster, so per-subtask probing would be N identical GETs
@@ -765,14 +798,55 @@ type runner struct {
 	// stamped on every dispatch this run makes (see dispatch).
 	priority int
 	tenant   string
+	// decider is RunOptions.LocalDecider; snapshot is the ONE memoised reader
+	// set the production decider reads through (built lazily on the first
+	// composite decision, shared by every subtask goroutine — Snapshot is
+	// mutex-guarded). Both inert on a non-composite box.
+	decider  func(ctx context.Context, contract core.AgentContract, st Subtask) placetable.Decision
+	snapOnce sync.Once
+	snapshot *placetable.Snapshot
+}
+
+// decide is the composite box's placement decision for a contract that is
+// about to run LOCALLY: the zero Decision on a plain box (nothing decided,
+// nothing published — the byte-identical constraint), the injected decider
+// when a caller supplied one, else the production table over the run's
+// memoised snapshot. The request is built exactly as the node builds it
+// (placetable.RequestForContract with the box's agent_max_tokens), so the
+// delegator and the node describe the contract to the table identically.
+func (r *runner) decide(ctx context.Context, contract core.AgentContract, st Subtask) placetable.Decision {
+	if !r.cfg.Composite() {
+		return placetable.Decision{}
+	}
+	if r.decider != nil {
+		return r.decider(ctx, contract, st)
+	}
+	r.snapOnce.Do(func() { r.snapshot = placetable.NewSnapshot(r.cfg, placetable.DefaultSnapshotTTL) })
+	return placetable.Decide(placetable.RequestForContract(contract, st.EstTokens, r.cfg.AgentMaxTokens), r.cfg.Layers, r.snapshot.Live())
+}
+
+// placedOrNil is the block a decision publishes: nil for the zero Decision (a
+// plain box), the decision's Placed otherwise. One helper so no site can
+// publish an empty block with layer "" on a plain box.
+func placedOrNil(dec placetable.Decision) *core.Placed {
+	if dec.Layer == "" && dec.Reason == "" {
+		return nil
+	}
+	p := dec.Placed
+	return &p
 }
 
 // placement is a resolved "run it HERE" — the node, its dial base ("" for
-// local) and the human-readable reason that rides the result.
+// local) and the human-readable reason that rides the result. decided, when
+// set on a forced LOCAL placement, is the placement-table decision the run
+// must use instead of deciding again: the capacity wait re-ran the decider and
+// is handing attempt() the seat it found free (or the expired wait's seat),
+// and a second decision inside attempt could contradict it.
 type placement struct {
-	view   NodeView
-	base   string
-	reason string
+	view    NodeView
+	base    string
+	reason  string
+	decided *placetable.Decision
 }
 
 // reportTelemetryLoss emits the ONE end-of-run line naming how much telemetry
@@ -1183,7 +1257,15 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		// reserves. The capacity wait owns it from here (0.113.18) — before this
 		// the subtask waited on the LOCAL lease alone and then deferred, even
 		// when a remote had freed up in the meantime.
-		return r.awaitCapacity(ctx, i, contract, start, budget, pl, pr, []string{pr.pendingReason}, "")
+		//
+		// A DECIDED sentinel (the pair's long seat waiting for a busy agent
+		// seat to drain, ADR 0039) carries no refusal: nobody declined the
+		// work, so the decision's reason must not be tallied as a replacement.
+		refusals := []string{pr.pendingReason}
+		if pr.decided != nil {
+			refusals = nil
+		}
+		return r.awaitCapacity(ctx, i, contract, start, budget, pl, pr, refusals, "")
 	}
 	// Recorded whatever the outcome — a SUCCESSFUL placement must exclude its
 	// own seat from the verification retry just as firmly as a refused one.
@@ -1248,6 +1330,13 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		replaced := contract
 		replaced.TimeoutSec = remaining
 		pr = r.attempt(ctx, i, replaced, &next)
+		if pr.waitCapacity {
+			// The local last resort's composite decision must WAIT (the
+			// pair's long seat over a busy agent seat): nothing ran, so this
+			// is the capacity wait's from here, carrying the refusals that
+			// emptied the roster — never a published sentinel.
+			return r.awaitCapacity(ctx, i, contract, start, budget, pl, pr, refusals, why)
+		}
 		pl.attempts++
 		pr.Replacements = len(refusals)
 		if !isReplaceable(pr) {
@@ -1302,6 +1391,13 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	localView := r.localView()
 	st := Subtask{Contract: contract, EstTokens: EstimateTokens(contract)}
 	waitStart := time.Now()
+	// decided is the composite decision behind the seed (ADR 0039, council
+	// R1): the decided seat exists and holds the contract, it would only evict
+	// a busy seat. Held in a local so a remote refusal inside the wait (which
+	// replaces `seed`) cannot turn the decided wait into the lease wait — the
+	// lease branch would then run local through attempt(), re-decide, and
+	// hand back the sentinel as a result.
+	decided := seed.decided
 	if r.priority < core.BandNormal {
 		return r.settle(contract, r.shedResult(localView, seed, refusals), pl, waitStart)
 	}
@@ -1310,6 +1406,15 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 		wait = lw
 	}
 	if wait <= 0 {
+		if decided != nil {
+			// The wait is switched off: a zero TTL. The expiry rule applies at
+			// once — RUN on the decided seat (it holds the contract; only the
+			// eviction was worth waiting for), never a capacity defer and
+			// never the holder-naming deferral (no lease is held).
+			note := fmt.Sprintf("capacity wait disabled (agent_placement_wait_sec=%d) — running on the decided seat %s at once; it evicts %s",
+				r.cfg.AgentPlacementWaitSec, decided.Seat, decided.Evicts)
+			return r.runDecided(ctx, i, contract, start, budget, pl, seed, refusals, 0, *decided, false, note, waitStart)
+		}
 		if seed.waitCapacity {
 			return r.settle(contract, r.reservedDefer(localView, LocalLease(r.cfg.GPULockPath, r.cfg.StateDir), 0, seed.pendingReason), pl, waitStart)
 		}
@@ -1329,7 +1434,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	refusedAt := map[string]time.Time{}
 	var lease gpulease.Info
 	for wait > 0 && ctx.Err() == nil {
-		if r.route != "remote" && !pl.tried[""] {
+		if decided == nil && r.route != "remote" && !pl.tried[""] {
 			lease = LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)
 			if !Reserved(lease) {
 				credit()
@@ -1344,6 +1449,14 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 				// replacementNode before any wait): the lease cleared.
 				forced := placement{view: localView, reason: fmt.Sprintf("local seat was reserved, lease cleared after %s — running local (capacity wait)", idle.Round(time.Second))}
 				pr := r.attempt(ctx, i, replaced, &forced)
+				if pr.waitCapacity {
+					// The lease cleared, and the composite decision now asks
+					// to wait for a busy pair seat to drain: the same wait
+					// continues as a DECIDED one (nothing ran, nothing to
+					// record); the tick below re-decides and runs the seat.
+					decided = pr.decided
+					continue
+				}
 				pl.tried[""] = true
 				pl.attempts++
 				return r.landedAfterWait(pr, idle, refusals)
@@ -1400,8 +1513,44 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 		case <-ctx.Done():
 		case <-time.After(tick):
 		}
+		// The decided seed's tick (after the sleep — the decision that sent
+		// the subtask here was made moments ago, so the first re-read is one
+		// poll interval later): re-run the decider with fresh readings and run
+		// on the decided seat the moment nothing has to be evicted. A text
+		// lease that appeared mid-wait keeps the seat off limits; a decision
+		// that now DEFERS (a guard flipped) ends the wait as that defer.
+		if decided != nil && r.route != "remote" && ctx.Err() == nil && !Reserved(LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)) {
+			dec := r.decide(ctx, contract, st)
+			switch {
+			case dec.Defer:
+				credit()
+				pr := r.decidedDefer(localView, dec, seed.PlacementReason)
+				pr.waited, pr.CapacityWaitSec = true, idle.Seconds()
+				return r.settle(contract, pr, pl, waitStart)
+			case !dec.Wait:
+				credit()
+				note := fmt.Sprintf("capacity wait → local seat %s (%s drained after %s)", dec.Seat, decided.Evicts, idle.Round(time.Second))
+				return r.runDecided(ctx, i, contract, start, budget, pl, seed, refusals, idle, dec, true, note, waitStart)
+			}
+			decided = &dec // the freshest reason, for the expiry note
+		}
 	}
 	credit()
+	if decided != nil && r.route != "remote" && !pl.tried[""] {
+		if info := LocalLease(r.cfg.GPULockPath, r.cfg.StateDir); Reserved(info) {
+			// A text lease took the cards during the wait: the holder is real,
+			// and running on the reserved seat is the one thing the lease
+			// forbids. The established deferral, naming the holder.
+			return r.settle(contract, r.reservedDefer(localView, info, idle, decided.Reason), pl, waitStart)
+		}
+		// TTL expiry for a decided seed RUNS on the decided seat (the plan's
+		// rule): the seat holds the contract and is free to load; the wait was
+		// only ever about sparing the seat it evicts. Never capacityDefer —
+		// "no node had room" would be false.
+		note := fmt.Sprintf("capacity wait expired after %s (agent_placement_wait_sec=%d) with %s still busy — running on the decided seat %s; it evicts %s",
+			idle.Round(time.Second), r.cfg.AgentPlacementWaitSec, decided.Evicts, decided.Seat, decided.Evicts)
+		return r.runDecided(ctx, i, contract, start, budget, pl, seed, refusals, idle, *decided, true, note, waitStart)
+	}
 	if r.route != "remote" && Reserved(lease) {
 		// Nothing freed and the local seat is still reserved: the established
 		// deferral, naming the holder (class infrastructure — a human's timing
@@ -1409,6 +1558,78 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 		return r.settle(contract, r.reservedDefer(localView, lease, idle, "no eligible remote had room — "+strings.Join(refusals, "; ")), pl, waitStart)
 	}
 	return r.settle(contract, r.capacityDefer(localView, seed, idle, wait, refusals), pl, waitStart)
+}
+
+// runDecided runs a decided-seed subtask on its decided seat once the capacity
+// wait is over (drained, expired, or disabled): a forced LOCAL placement that
+// carries dec (Wait cleared) so attempt() runs it rather than deciding again,
+// with what is left of the budget after the wait's credit. waited marks the
+// result as one that waited (Summary.Waited, capacity_wait_sec); a disabled
+// wait ran at once and is not counted as one. A budget that cannot start the
+// seat is a BUDGET defer when nobody refused the work (the wait is credited,
+// so this is a contract whose timeout_sec was under the floor to begin with)
+// and the established "placement refused" failure when nodes did.
+func (r *runner) runDecided(ctx context.Context, i int, contract core.AgentContract, start time.Time, budget int, pl *placements, seed PlacedResult, refusals []string, idle time.Duration, dec placetable.Decision, waited bool, note string, waitStart time.Time) PlacedResult {
+	remaining := pl.remaining(start, budget)
+	if remaining < minRetrySec {
+		if len(refusals) > 0 {
+			return exhausted(seed, refusals, budgetSpent(remaining, budget, len(refusals)))
+		}
+		local := r.localView()
+		reason := fmt.Sprintf("%s: %s — the decided seat %s was not started", budgetSpent(remaining, budget, pl.attempts), note, dec.Seat)
+		pr := PlacedResult{
+			Node: local.NodeID, Seat: dec.Seat, PlacementReason: seed.PlacementReason, Placed: placedOrNil(dec), Unplaced: true,
+			waited: waited, CapacityWaitSec: idle.Seconds(),
+			Result: core.AgentWireResult{
+				SchemaVersion: core.AgentWireSchemaVersion,
+				NodeID:        local.NodeID,
+				Seat:          dec.Seat,
+				Deferred:      true,
+				DeferClass:    core.DeferClassBudget,
+				Reason:        reason,
+				Placed:        placedOrNil(dec),
+			},
+		}
+		return r.settle(contract, pr, pl, waitStart)
+	}
+	replaced := contract
+	replaced.TimeoutSec = remaining
+	dec.Wait = false
+	forced := placement{view: r.localView(), reason: note, decided: &dec}
+	pr := r.attempt(ctx, i, replaced, &forced)
+	pl.tried[""] = true
+	pl.attempts++
+	if !waited {
+		return pr
+	}
+	return r.landedAfterWait(pr, idle, refusals)
+}
+
+// decidedDefer is the result for a LOCAL placement the composite decision
+// refused (ADR 0039): a guard refused the layer, or no layer window holds the
+// contract. Deferred under the decision's class with its reason, the placed
+// block naming the guard or the largest window on the wire AND in the ledger
+// row — never a silent trim, never a fall-back seat (spec D4). Nothing ran:
+// Unplaced, and the seat named is the one that was refused (the planner seat
+// never saw the contract).
+func (r *runner) decidedDefer(local NodeView, dec placetable.Decision, reason string) PlacedResult {
+	seat := local.AgentSeat
+	if dec.Seat != "" {
+		seat = dec.Seat
+	}
+	placed := placedOrNil(dec)
+	return PlacedResult{
+		Node: local.NodeID, Seat: seat, PlacementReason: reason, Placed: placed, Unplaced: true,
+		Result: core.AgentWireResult{
+			SchemaVersion: core.AgentWireSchemaVersion,
+			NodeID:        local.NodeID,
+			Seat:          seat,
+			Deferred:      true,
+			DeferClass:    dec.DeferClass,
+			Reason:        dec.Reason,
+			Placed:        placed,
+		},
+	}
 }
 
 // landedAfterWait annotates a result some node TOOK after a capacity wait.
@@ -2144,7 +2365,9 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 
 	// Defensive re-validate: the surfaces run PrepareContract, but Run is an
 	// exported engine — an invalid contract must die here, before any network.
-	if err := contract.Validate(); err != nil {
+	// At the BOX's cap (config.AgentContextCapBytes): a composite box admits a
+	// contract sized for its long seats, a plain box keeps the 256 KiB cap.
+	if err := contract.ValidateWithCap(r.cfg.AgentContextCapBytes()); err != nil {
 		return finish(PlacedResult{Err: err.Error(), PlacementReason: "refused before placement"})
 	}
 
@@ -2265,7 +2488,29 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 	}
 
 	if chosen.Local {
-		pr := r.runLocal(ctx, contract, localView, reason)
+		// The composite decision (ADR 0039): which layer and seat serve this
+		// contract on THIS box. A forced placement from the capacity wait
+		// carries the decision it found; otherwise decide now. The zero
+		// Decision (a plain box) runs the planner seat and publishes nothing.
+		var dec placetable.Decision
+		if forced != nil && forced.decided != nil {
+			dec = *forced.decided
+		} else {
+			dec = r.decide(ctx, contract, st)
+		}
+		switch {
+		case dec.Defer:
+			pr := r.decidedDefer(localView, dec, reason)
+			pr.remotesUnreachable = deadFleet
+			return finish(pr)
+		case dec.Wait:
+			// The decided seat would evict a busy seat (the pair's long seat
+			// over a loaded agent-pool): hold in the capacity wait, which
+			// re-runs the decider per tick and runs here once it drains —
+			// not through finish(): nothing ran, nothing to record yet.
+			return PlacedResult{waitCapacity: true, pendingReason: dec.Reason, PlacementReason: reason, decided: &dec}
+		}
+		pr := r.runLocal(ctx, contract, localView, reason, dec)
 		pr.remotesUnreachable = deadFleet
 		pr.ranLocal = true
 		return finish(pr)
@@ -2275,29 +2520,50 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 		// with no dial target is a bug, not a defer.
 		return finish(PlacedResult{Node: chosen.NodeID, PlacementReason: reason, Err: "internal: placed node has no base URL"})
 	}
-	pr := r.runRemote(ctx, base, jobID, contract)
+	// A composite remote (advertised rows): the dispatched copy names the layer
+	// the table chose so the node runs the same decision for that layer with
+	// its own live guards (council R5); the delegator's block is published
+	// until the node's own arrives on the wire.
+	dispatched := contract
+	var remotePlaced *core.Placed
+	if dec, ok := remoteDecision(st, chosen); ok && !dec.Defer {
+		dispatched.Layer = dec.Layer
+		remotePlaced = placedOrNil(dec)
+	}
+	pr := r.runRemote(ctx, base, jobID, dispatched)
 	pr.ranBase = base
 	pr.PlacementReason = reason
 	if pr.Node == "" {
 		pr.Node = chosen.NodeID
 	}
+	pr.Placed = remotePlaced
+	if pr.Result.Placed != nil {
+		pr.Placed = pr.Result.Placed
+	}
 	if pr.Seat == "" {
 		pr.Seat = chosen.AgentSeat
+		if remotePlaced != nil && remotePlaced.Seat != "" {
+			pr.Seat = remotePlaced.Seat
+		}
 	}
 	return finish(pr)
 }
 
 // runLocal executes in-process via the LocalRunner seam and shapes the result.
-func (r *runner) runLocal(ctx context.Context, contract core.AgentContract, view NodeView, reason string) PlacedResult {
-	pr := PlacedResult{Node: view.NodeID, Seat: view.AgentSeat, PlacementReason: reason}
+// dec is the composite decision the run is made under: its seat and placed
+// block are handed to the runner (LocalOptions) and published on the result;
+// the zero Decision (a plain box) hands zero options, exactly as before.
+func (r *runner) runLocal(ctx context.Context, contract core.AgentContract, view NodeView, reason string, dec placetable.Decision) PlacedResult {
+	pr := PlacedResult{Node: view.NodeID, Seat: view.AgentSeat, PlacementReason: reason, Placed: placedOrNil(dec)}
 	if r.local == nil {
 		pr.Err = "no local runner wired (delegator surfaces must supply one)"
 		return pr
 	}
-	// Zero options: the delegator-side decision (which seat, which layer) is
-	// wired here by the composite-tier runner change; until then the planner
-	// seat runs and nothing is published, exactly as before.
-	wire, err := r.local(ctx, contract, LocalOptions{})
+	opts := LocalOptions{Seat: dec.Seat, Placed: pr.Placed}
+	if dec.Seat != "" {
+		pr.Seat = dec.Seat
+	}
+	wire, err := r.local(ctx, contract, opts)
 	if err != nil {
 		pr.Err = "local run: " + err.Error()
 		return pr
@@ -2308,6 +2574,11 @@ func (r *runner) runLocal(ctx context.Context, contract core.AgentContract, view
 	}
 	if wire.Seat != "" {
 		pr.Seat = wire.Seat
+	}
+	if wire.Placed != nil {
+		// The pipeline's own stamp wins: identical by construction (it was
+		// handed this block), and the one source of truth for the wire.
+		pr.Placed = wire.Placed
 	}
 	if !wire.Deferred {
 		// Same guard runRemote applies: a defer produced no answer, so running
@@ -2977,6 +3248,22 @@ func (r *runner) noEligibleRemote(st Subtask, views []NodeView, probeErrs []stri
 			}
 			return why, core.DeferClassInfrastructure
 		}
+		// Composite nodes (ADR 0039): for a remote-shaped contract (schema,
+		// origin depth) the table's own verdict per layered node is the
+		// reason — a window no layer holds (contract), a guard the node's
+		// rows refused or a busy pair the long seat would evict (capacity) —
+		// because the single-lane ceiling sentence would name agent_ctx_tokens,
+		// which on a composite box is one layer's window, not the box's. The
+		// single-lane sentence rides along for the remotes that have no rows.
+		// A plain fleet has no layered node and keeps every sentence it had.
+		if len(st.Contract.OutputSchema) > 0 && st.Contract.Depth == 0 {
+			if why, class := layerVerdicts(st, views); why != "" {
+				if contractWhy != "" && anySingleLane(views) {
+					why += "; on the remote(s) without layers: " + contractWhy
+				}
+				return why, class
+			}
+		}
 		// The ONE positively-established quiet case: everything answered, the
 		// lane is offered and sized, so the contract is the whole story.
 		if contractWhy != "" {
@@ -2994,6 +3281,48 @@ func (r *runner) noEligibleRemote(st Subtask, views []NodeView, probeErrs []stri
 		return nodeWhy + "; the contract could not be placed as written either: " + contractWhy, nodeClass
 	}
 	return nodeWhy, nodeClass
+}
+
+// layerVerdicts names, per composite node, why the placement table would not
+// place st on its advertised layers, and the class the refusals add up to:
+// contract when every layered node deferred as a contract problem (no window
+// holds it), capacity when any of them refused on a guard or would have to
+// wait for a busy seat. "" when no answering node advertises layers or every
+// layered node was eligible.
+func layerVerdicts(st Subtask, views []NodeView) (reason, class string) {
+	var parts []string
+	class = core.DeferClassContract
+	for _, v := range views {
+		if !v.AgentEnabled || len(v.Layers) == 0 {
+			continue
+		}
+		dec, _ := remoteDecision(st, v)
+		switch {
+		case dec.Defer:
+			parts = append(parts, laneID(v)+": "+dec.Reason)
+			if dec.DeferClass != core.DeferClassContract {
+				class = core.DeferClassCapacity
+			}
+		case dec.Wait:
+			parts = append(parts, laneID(v)+": "+dec.Reason)
+			class = core.DeferClassCapacity
+		}
+	}
+	if len(parts) == 0 {
+		return "", ""
+	}
+	return fmt.Sprintf("no composite remote can place the contract on its layers — %s", strings.Join(parts, "; ")), class
+}
+
+// anySingleLane reports whether some agent-lane remote advertises no layer
+// rows — the single-lane ceiling sentence is only spoken about those.
+func anySingleLane(views []NodeView) bool {
+	for _, v := range views {
+		if v.AgentEnabled && v.AgentResident && len(v.Layers) == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // nodeSideVerdict reports what the NODE SIDE contributes to "nothing eligible".
@@ -3238,6 +3567,10 @@ type delegationLogLine struct {
 	// other end. Omitempty: pre-0.81 rows read as unknown, never as a value.
 	DelegatorVersion     string `json:"delegator_version,omitempty"`
 	DelegatorBuildSHA256 string `json:"delegator_build_sha256,omitempty"`
+	// Placed (ADR 0039) is the placement decision the row was produced under
+	// (PlacedResult.Placed). Omitempty: a plain box's corpus row is unchanged,
+	// and a pre-0.116 row reads as "one implicit layer", never as unplaced.
+	Placed *core.Placed `json:"placed,omitempty"`
 }
 
 // record writes one subtask's telemetry: the delegation-log corpus line and a
@@ -3262,6 +3595,7 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 		DelegatorVersion:   buildinfo.Version,
 		// Computed once per process (sync.Once) — the per-row cost is a read.
 		DelegatorBuildSHA256: buildinfo.BuildSHA256(),
+		Placed:               pr.Placed,
 	}
 	if pr.Err == "" {
 		res := pr.Result
@@ -3294,9 +3628,17 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 		if reason == "" && len(pr.AcceptanceFailures) > 0 {
 			reason = "failed verification: " + pr.AcceptanceFailures[0]
 		}
+		// Layer (council R8): the composite layer this row was placed on, so
+		// the scoreboard can sum work per layer later; "" (omitted) on a
+		// plain box.
+		layer := ""
+		if pr.Placed != nil {
+			layer = pr.Placed.Layer
+		}
 		r.ledgerTried.Add(1)
 		if err := r.led.Record(ledger.Entry{
 			Task:      "agent_delegate",
+			Layer:     layer,
 			LatencyMs: pr.wallMs,
 			// TokensIn stays 0 ON PURPOSE: the summary counts a completed
 			// row's TokensIn as tokens-saved, and a delegation row claiming
