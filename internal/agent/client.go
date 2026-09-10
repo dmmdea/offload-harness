@@ -163,6 +163,11 @@ type ServeStats struct {
 	PredictedMS       float64 `json:"predicted_ms"`
 	UsagePromptTokens int     `json:"usage_prompt_tokens"`
 	UsageCachedTokens int     `json:"usage_cached_tokens"`
+	// UsageCompletionTokens is the server's own count of tokens it GENERATED for
+	// this completion. It is the number the harness ledger needs for "work the seat
+	// did" — until 0.115.5 the loop never summed it, so an agent run that generated
+	// for minutes was ledgered as 0 (only the structured re-pack's tokens counted).
+	UsageCompletionTokens int `json:"usage_completion_tokens"`
 }
 
 // Chat sends the running transcript + tool specs and returns the next completion.
@@ -271,13 +276,14 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 	// Attach server accounting only when the backend actually reported some —
 	// nil means "this backend does not tell us", which a measurement must
 	// report as unmeasured rather than as zero reuse.
-	if wr.Timings.PromptN > 0 || wr.Timings.CacheN > 0 || wr.Usage.PromptTokens > 0 {
+	if wr.Timings.PromptN > 0 || wr.Timings.CacheN > 0 || wr.Usage.PromptTokens > 0 || wr.Usage.CompletionTokens > 0 {
 		comp.Serve = &ServeStats{
 			CacheN: wr.Timings.CacheN, PromptN: wr.Timings.PromptN,
 			PromptMS:   wr.Timings.PromptMS,
 			PredictedN: wr.Timings.PredictedN, PredictedMS: wr.Timings.PredictedMS,
 			UsagePromptTokens: wr.Usage.PromptTokens,
 			UsageCachedTokens: wr.Usage.PromptTokensDetails.CachedTokens,
+			UsageCompletionTokens: wr.Usage.CompletionTokens,
 		}
 	}
 	return comp, nil

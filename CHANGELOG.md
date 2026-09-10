@@ -6,6 +6,22 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.5] - 2026-09-10 - the ledger counts the work the seats actually did
+
+The operator's 30 % harness-share floor (2026-09-10) reads the ledger, and the ledger undercounted the
+cards: an agent row recorded only the structured RE-PACK call's `tokens_out` — never the loop's own
+generation — and nothing on a deferred run, so a 27B run that generated at 29–54 tok/s for six minutes was
+ledgered as 0. Prompt tokens the seat processed were not recorded at all (`tokens_in` stays 0 on agent
+rows on purpose: the summary counts it as tokens saved).
+
+- `agent.Completion.Serve` carries `usage_completion_tokens`; `agent.Result` sums the seat's prompt and
+  completion usage over every turn (`TokensIn`/`TokensOut`) and reports them on EVERY return — done,
+  budget and error alike.
+- `core.AgentWireResult`/`core.Meta` gain `seat_tokens_in` (omitempty); `tokens_out` is the loop's
+  generation plus the re-pack's; both are stamped BEFORE the defer branches, so deferred results carry them.
+- `ledger.Entry.seat_tokens_in` (omitempty), written by the pipeline's `entryFrom` and the delegator's
+  `agent_delegate` row. The summary never adds it to tokens saved. The harness-share gate hook sums it.
+
 ## [0.115.4] - 2026-09-10 - the cards do the inference: no CPU residents, no bulk-in-RAM seats, ttl 300 in every template
 
 Operator rule, 2026-09-10 02:00, after finding 80 GB of host RAM in use: THE THREE CARDS (and the fleet's

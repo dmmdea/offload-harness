@@ -174,6 +174,11 @@ type AgentWireResult struct {
 	DeferClass string `json:"defer_class,omitempty"`
 	WallMs     int64  `json:"wall_ms"`
 	TokensOut  int    `json:"tokens_out,omitempty"`
+	// SeatTokensIn is the prompt-token count the seat processed over the whole
+	// run (every turn, cache hits included) — work the cards did, never a saving:
+	// the ledger keeps it apart from tokens_in, which the summary counts as tokens
+	// saved. Additive, omitempty (0.115.5); carried on DEFERRED results too.
+	SeatTokensIn int `json:"seat_tokens_in,omitempty"`
 	// ContentionWaitSec is the wall this contract spent waiting on a peer-held
 	// seat (seatwait: llama-swap 429 / 503 not-ready / 500 src=llama-swap).
 	// Counted, never silent: the number that says whether the fix traded

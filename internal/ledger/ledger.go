@@ -28,6 +28,9 @@ type Entry struct {
 	Task      string  `json:"task"`
 	TokensIn  int     `json:"tokens_in"`
 	TokensOut int     `json:"tokens_out"`
+	// SeatTokensIn is prompt work a seat did (agent rows), NOT tokens saved:
+	// the summary never adds it to TokensSaved. Absent on pre-0.115.5 rows.
+	SeatTokensIn int `json:"seat_tokens_in,omitempty"`
 	LatencyMs int64   `json:"latency_ms"`
 	TokPerSec float64 `json:"tok_per_s"`
 	CacheHit  bool    `json:"cache_hit"`

@@ -196,6 +196,9 @@ const (
 type Meta struct {
 	TokensIn  int     `json:"tokens_in"`
 	TokensOut int     `json:"tokens_out"`
+	// SeatTokensIn: prompt tokens an agent seat processed for this task (work,
+	// not savings) — see core.AgentWireResult.SeatTokensIn. Omitted when zero.
+	SeatTokensIn int `json:"seat_tokens_in,omitempty"`
 	LatencyMs int64   `json:"latency_ms"`
 	TokPerSec float64 `json:"tok_per_s"`
 	CacheHit  bool    `json:"cache_hit"`

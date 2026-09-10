@@ -120,6 +120,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		w.AdmissionNote = admitNote
 		meta.LatencyMs = w.WallMs
 		meta.TokensOut = w.TokensOut
+		meta.SeatTokensIn = w.SeatTokensIn
 		data, merr := json.Marshal(w)
 		if merr != nil {
 			return core.Result{OK: false, Reason: "agent task: marshaling wire result: " + merr.Error(), Meta: meta}
@@ -286,6 +287,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	res, rerr := built.Loop.Run(cctx, contract.Goal)
 	wire.Steps = res.Steps
 	wire.StopReason = res.StopReason
+	// Seat usage — set HERE, before every defer branch, for the same reason as
+	// the trace below: a budget- or timeout-ended run is exactly the one that
+	// generated for minutes and used to be ledgered as 0 (0.115.5).
+	wire.TokensOut = res.TokensOut
+	wire.SeatTokensIn = res.TokensIn
 	// Step trace + rule telemetry (ADR 0036) — set HERE, before the defer
 	// branches, for the same reason as the prefill accounting below: the
 	// budget/timeout runs are the ones the rigger most needs to see.
@@ -447,7 +453,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		}
 	}
 	wire.Structured = structured
-	wire.TokensOut = tokensOut
+	wire.TokensOut += tokensOut // the re-pack's own generation, on top of the loop's
 	return finish(wire)
 }
 
