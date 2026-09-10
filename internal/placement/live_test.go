@@ -135,3 +135,39 @@ func TestSnapshotFailsClosedOnReaderErrorsAndUnknownOnAmbiguousSeats(t *testing.
 		t.Fatal("a local box has no remote verdict")
 	}
 }
+
+// TestSharedSnapshotIsOnePerPlacementIdentity: the in-loop offload builds one
+// Pipeline per contract, so the memo must live above the pipeline — one
+// Snapshot per box (endpoint + presence + layers) for the whole process. A
+// config that disagrees on any field the readers consume gets its own.
+func TestSharedSnapshotIsOnePerPlacementIdentity(t *testing.T) {
+	cfg := config.CompositeFixture()
+	cfg.Endpoint = "http://shared-snapshot-test-a:1"
+	a1, a2 := SharedSnapshot(cfg), SharedSnapshot(cfg)
+	if a1 != a2 {
+		t.Fatalf("two callers over the same box must share one Snapshot (%p vs %p)", a1, a2)
+	}
+	copyCfg := cfg // a by-value copy of the same config is the same box
+	if SharedSnapshot(copyCfg) != a1 {
+		t.Fatal("a copied config must resolve to the same Snapshot")
+	}
+
+	other := cfg
+	other.Endpoint = "http://shared-snapshot-test-b:1"
+	if SharedSnapshot(other) == a1 {
+		t.Fatal("a different endpoint is a different box and must not share the memo")
+	}
+	away := cfg
+	away.OperatorPresence = "away"
+	if SharedSnapshot(away) == a1 {
+		t.Fatal("a different presence setting changes what the readers answer and must not share the memo")
+	}
+	relayered := cfg
+	relayered.Layers = append([]config.LayerSpec(nil), cfg.Layers[:2]...)
+	if SharedSnapshot(relayered) == a1 {
+		t.Fatal("a different layer set changes which seats exist and must not share the memo")
+	}
+	if SharedSnapshot(cfg) != a1 {
+		t.Fatal("registering other identities must not evict the first")
+	}
+}

@@ -2,6 +2,7 @@ package placement
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"sync"
@@ -83,6 +84,57 @@ func NewSnapshot(cfg config.Config, ttl time.Duration) *Snapshot {
 		},
 		seats: map[string]seatMemo{},
 	}
+}
+
+// sharedSnapshots is the process-wide registry SharedSnapshot serves from:
+// one Snapshot per placement identity, however many pipelines the process
+// builds over the same box.
+var (
+	sharedMu        sync.Mutex
+	sharedSnapshots = map[string]*Snapshot{}
+)
+
+// SharedSnapshot returns the process-wide Snapshot for cfg's placement
+// identity — its endpoint, presence settings and layer seats — building it
+// on first use with DefaultSnapshotTTL.
+//
+// WHY process-wide and not per pipeline: the in-loop offload builds a fresh
+// Pipeline per contract (NewInLoopPipeline per agent_run on the MCP door,
+// NewRecordlessOffload per node-side contract), so a memo owned by the
+// pipeline gives every in-flight contract its own readers — 32 contracts on
+// the pair seat would exec nvidia-smi and GET /running 32 times per window,
+// the exact multiplicity DefaultSnapshotTTL exists to prevent. Keying on the
+// placement identity rather than the endpoint alone keeps two configs that
+// disagree on layers or presence (a test process, a hot-reloaded config)
+// from reading through each other's memo.
+func SharedSnapshot(cfg config.Config) *Snapshot {
+	key := snapshotKey(cfg)
+	sharedMu.Lock()
+	defer sharedMu.Unlock()
+	if s, ok := sharedSnapshots[key]; ok {
+		return s
+	}
+	s := NewSnapshot(cfg, DefaultSnapshotTTL)
+	sharedSnapshots[key] = s
+	return s
+}
+
+// snapshotKey is the placement identity SharedSnapshot memoises on: every
+// config field a Snapshot reads (Endpoint for the seat probe, presence mode
+// and idle threshold for the presence probe, the layers for LayerSeat).
+func snapshotKey(cfg config.Config) string {
+	b, err := json.Marshal(struct {
+		Endpoint string
+		Presence string
+		Idle     time.Duration
+		Layers   []config.LayerSpec
+	}{cfg.Endpoint, cfg.PresenceMode(), cfg.OperatorIdle(), cfg.Layers})
+	if err != nil {
+		// Layers are plain strings, ints and floats; this cannot fail. Fall
+		// back to the endpoint so a shared memo still exists rather than none.
+		return cfg.Endpoint
+	}
+	return string(b)
 }
 
 // LiveFromConfig is the one-liner every local caller uses: a fresh 2 s

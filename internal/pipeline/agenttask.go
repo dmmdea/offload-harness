@@ -187,10 +187,23 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			placement.RequestForContract(contract, placement.EstimateTokens(contract), p.cfg.AgentMaxTokens),
 			p.cfg.Layers, contract.Layer, p.live())
 		// The decision is published whether it admitted or refused: a guard
-		// defer must name the guard (branchable), not just a sentence.
+		// defer must name the guard (branchable), not just a sentence — on
+		// the wire AND on the ledger row. finish reads meta, so the row's
+		// layer/seat are stamped here, before the defer return, or the row
+		// would carry layer "" and the planner seat for a refusal that named
+		// the triple layer's seat (council R8's `layer` column would count
+		// zero guard refusals on that layer).
 		placedPtr = &dec.Placed
 		wire.Placed = placedPtr
+		meta.Placed = placedPtr
 		if dec.Defer {
+			if dec.Placed.Seat != "" {
+				// The seat the guard refused is the seat this defer is about;
+				// the planner default never saw the contract.
+				seat = dec.Placed.Seat
+				wire.Seat = seat
+			}
+			meta.Model = seat
 			return deferWire(dec.DeferClass, dec.Reason)
 		}
 		if dec.Seat != "" {

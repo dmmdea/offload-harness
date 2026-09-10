@@ -8,13 +8,18 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/placement"
 )
@@ -148,6 +153,17 @@ func TestNodeHonoursARequestedLayerThroughDecideAndItsOwnGuards(t *testing.T) {
 	})
 
 	t.Run("triple long → refused by the node's own presence guard", func(t *testing.T) {
+		// A real ledger: the row a guard refusal writes is the surface council
+		// R8 sums by `layer`, so its shape is pinned here, not inferred from
+		// the wire.
+		ledgerPath := filepath.Join(t.TempDir(), "ledger.jsonl")
+		led, err := ledger.Open(ledgerPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.led = led
+		defer func() { p.led = nil; _ = led.Close() }()
+
 		contract := testContract()
 		contract.Layer = placement.LayerTriple
 		contract.ContextClass = core.ContextClassLong
@@ -165,6 +181,32 @@ func TestNodeHonoursARequestedLayerThroughDecideAndItsOwnGuards(t *testing.T) {
 		}
 		if fake.loopCalls.Load() != 1 {
 			t.Fatalf("the refused contract must never reach the planner (loop calls = %d, want the 1 from the pair case)", fake.loopCalls.Load())
+		}
+		// The defer is about the seat the guard refused, on the wire and in the
+		// row alike — never the planner default, which never saw the contract.
+		const refusedSeat = "qwen3.8-flash-next-262k"
+		if wire.Seat != refusedSeat || wire.Placed.Seat != refusedSeat {
+			t.Fatalf("wire.seat = %q / placed.seat = %q, want the refused triple seat %q", wire.Seat, wire.Placed.Seat, refusedSeat)
+		}
+		if res.Meta.Placed == nil || res.Meta.Placed.Layer != placement.LayerTriple || res.Meta.Placed.Guard != "presence" || res.Meta.Model != refusedSeat {
+			t.Fatalf("meta.Placed = %+v / meta.Model = %q: the refusal must reach the ledger row with its layer, guard and seat", res.Meta.Placed, res.Meta.Model)
+		}
+		raw, err := os.ReadFile(ledgerPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := bytes.Split(bytes.TrimSpace(raw), []byte("\n"))
+		var row struct {
+			Layer     string `json:"layer"`
+			ModelTier string `json:"model_tier"`
+			Deferred  bool   `json:"deferred"`
+			Reason    string `json:"reason"`
+		}
+		if err := json.Unmarshal(lines[len(lines)-1], &row); err != nil {
+			t.Fatalf("ledger row: %v (%s)", err, lines[len(lines)-1])
+		}
+		if !row.Deferred || row.Layer != placement.LayerTriple || row.ModelTier != refusedSeat || !strings.Contains(row.Reason, "presence") {
+			t.Fatalf("ledger row = %+v, want deferred=true layer=triple model_tier=%s naming the presence guard", row, refusedSeat)
 		}
 	})
 

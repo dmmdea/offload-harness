@@ -125,13 +125,13 @@ type Pipeline struct {
 	nowFn    func() time.Time
 	// Composite tier (ADR 0039): placementLive is the seam tests use to inject
 	// the machine's live readers (occupancy, free VRAM, host RAM, presence);
-	// nil = the memoised production Snapshot over cfg (placementSnap, built
-	// once per pipeline so a 2 s reading serves every decision in that window
-	// — a spread must not exec nvidia-smi per subtask per tick). Read only
-	// through live(); consulted only when cfg.Composite().
+	// nil = the PROCESS-WIDE memoised Snapshot over cfg
+	// (placement.SharedSnapshot: one 2 s reading serves every decision in
+	// that window across every pipeline in the process — the in-loop offload
+	// builds one Pipeline per contract, and a spread must not exec nvidia-smi
+	// per subtask per tick). Read only through live(); consulted only when
+	// cfg.Composite().
 	placementLive func() placement.Live
-	placementOnce sync.Once
-	placementSnap *placement.Snapshot
 	// LO-1 GPU-lock gate: vision calls check the render runners' single-slot GPU
 	// lock (internal/gpulock) BEFORE hitting llama-swap — while a generation job
 	// owns the GPU the VLM cannot (re)load, so calling anyway just burns a doomed
@@ -3809,15 +3809,17 @@ func (p *Pipeline) attemptReasoning(ctx context.Context, req core.Request, built
 }
 
 // live returns the placement table's view of this machine: the injected
-// seam when a test set one, otherwise one memoised Snapshot per pipeline
-// (placement.DefaultSnapshotTTL) so the readers are read at most once per
-// window however many decisions the window holds.
+// seam when a test set one, otherwise the process-wide memoised Snapshot
+// for this box (placement.SharedSnapshot, placement.DefaultSnapshotTTL) so
+// the readers are read at most once per window however many decisions the
+// window holds — and however many pipelines make them: every in-flight
+// contract's in-loop cascade (NewInLoopPipeline / NewRecordlessOffload
+// build one Pipeline per contract) reads through the same memo.
 func (p *Pipeline) live() placement.Live {
 	if p.placementLive != nil {
 		return p.placementLive()
 	}
-	p.placementOnce.Do(func() { p.placementSnap = placement.NewSnapshot(p.cfg, placement.DefaultSnapshotTTL) })
-	return p.placementSnap.Live()
+	return placement.SharedSnapshot(p.cfg).Live()
 }
 
 // cascadePlacement decides where the mechanical cascade runs on a composite
