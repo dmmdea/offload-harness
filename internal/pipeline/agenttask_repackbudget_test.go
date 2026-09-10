@@ -80,6 +80,24 @@ func TestRunAgentTaskAnswerAlreadyInShapeSkipsTheRepack(t *testing.T) {
 	if fake.grammarCNT.Load() != 0 {
 		t.Fatalf("re-pack completions = %d, want 0 — the answer was already in shape", fake.grammarCNT.Load())
 	}
+	// A stray object inside a prose answer is not the answer, even when it
+	// would validate against a permissive schema.
+	stray := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop: func(int64) string {
+			return doneChat(strings.Repeat("Long prose explaining the ledger in detail. ", 8) + "An example object {\"answer\": \"x\"} is quoted mid-way, " + strings.Repeat("followed by more narrative that is the real answer. ", 8))
+		},
+		repack: func(int64) string { return `{"answer":"42"}` },
+	}
+	srv3 := stray.server(t)
+	defer srv3.Close()
+	res3 := agentTestPipeline(t, srv3.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+	if wire3 := decodeWire(t, res3); wire3.Deferred || stray.grammarCNT.Load() != 1 {
+		t.Fatalf("a stray object in prose must still re-pack: deferred=%v re-packs=%d", wire3.Deferred, stray.grammarCNT.Load())
+	}
+	if _, ok := directStructured("{}", json.RawMessage(`{"type":"object"}`)); ok {
+		t.Fatal("a property-less schema must never be matched by shape")
+	}
 	prose := &agentFake{
 		rosterIDs: []string{agentTestSeat},
 		loop:      func(int64) string { return doneChat("The answer is 42 and {this} is not it.") },

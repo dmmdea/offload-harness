@@ -39,6 +39,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/gbnf"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/seatwait"
@@ -701,6 +702,11 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 	return nil, 0, false, lastErr
 }
 
+// directWrapperMax is the most prose (fences, "Here is the result:", a
+// closing line) that may surround an object for directStructured to take it
+// as the answer when the object is under half of the text.
+const directWrapperMax = 200
+
 // directStructured reports whether the loop's final text, trimmed to its
 // outermost {...} span (fences and prose around it are fine), already
 // validates against the contract's schema — after the same lossless scalar
@@ -711,11 +717,25 @@ func directStructured(output string, rawSchema json.RawMessage) (json.RawMessage
 	if json.Unmarshal(rawSchema, &schema) != nil {
 		return nil, false
 	}
-	i, j := strings.Index(output, "{"), strings.LastIndex(output, "}")
+	// Only a schema that names fields can be matched by shape: against a
+	// property-less schema the validator checks "is this JSON" and nothing
+	// more, and a stray {} in prose would pass (review finding, 0.115.12).
+	if props, ok := schema["properties"].(map[string]any); !ok || len(props) == 0 {
+		return nil, false
+	}
+	trimmed := strings.TrimSpace(output)
+	i, j := strings.Index(trimmed, "{"), strings.LastIndex(trimmed, "}")
 	if i < 0 || j <= i {
 		return nil, false
 	}
-	content := []byte(strings.TrimSpace(output[i : j+1]))
+	// The object must BE the answer, not an aside inside it: either most of
+	// the text, or wrapped in no more than a short preamble/fence/tail — so a
+	// code sample or an "{example}" inside a long prose answer still goes
+	// through the re-pack.
+	if span, outside := j+1-i, len(trimmed)-(j+1-i); span*2 < len(trimmed) && outside > directWrapperMax {
+		return nil, false
+	}
+	content := []byte(strings.TrimSpace(trimmed[i : j+1]))
 	if validator.Validate(content, schema) == nil {
 		return json.RawMessage(content), true
 	}
@@ -746,9 +766,19 @@ func repackTimeout(cfg config.Config, budget int) time.Duration {
 // repackClient is a seat client for one re-pack lane, on the given path,
 // with a timeout sized to the budget (repackTimeout) and the same
 // seat-endpoint routing the recorded pipeline uses.
+// Construction mirrors openPipeline / NewRecordlessPipeline exactly — seat
+// endpoints AND the cascade remote lanes — so the re-pack keeps the busy-hour
+// failover the pipeline's own client has (review finding, 0.115.12).
 func (p *Pipeline) repackClient(path string, budget int) *llamaclient.Client {
-	return llamaclient.New(p.cfg.Endpoint, path, p.cfg.Model, repackTimeout(p.cfg, budget)).
+	c := llamaclient.New(p.cfg.Endpoint, path, p.cfg.Model, repackTimeout(p.cfg, budget)).
 		WithSeatEndpoints(p.cfg.SeatEndpoints)
+	if len(p.cfg.CascadeRemoteLanes) > 0 {
+		gpuLockPath, stateDir := p.cfg.GPULockPath, p.cfg.StateDir
+		c = c.WithRemoteLanes(p.cfg.CascadeRemoteLanes,
+			func() bool { return delegate.LocalBusy(gpuLockPath, stateDir) },
+			llamaclient.RosterResident())
+	}
+	return c
 }
 
 // repackBudget sizes the structured re-pack's completion budget from the text

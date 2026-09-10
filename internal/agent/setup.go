@@ -165,7 +165,7 @@ func (l *Loop) replaySetup(ctx context.Context, msgs []Msg, pinned map[string]bo
 		if len(argNotes) > 0 {
 			content += "\n\n[note: the seat's env rules adjusted this call's arguments: " + strings.Join(argNotes, "; ") + "]"
 		}
-		if eff == EffectCommitted && a.Tool == "read_file" && !isErr && !strings.Contains(content, "use offset=") && len(content) <= l.toolResultCapChars() {
+		if eff == EffectCommitted && a.Tool == "read_file" && !isErr && !strings.Contains(content, "use offset=") && !strings.HasPrefix(content, "(end of file") && len(content) <= l.toolResultCapChars() {
 			// The whole file is in front of the model: say so, in the place a
 			// continuation hint would sit, so a small seat does not page for
 			// more (the 4B read three 213-char "(end of file)" answers).

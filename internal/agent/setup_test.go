@@ -209,6 +209,16 @@ func TestSetupReplayReadFileEndsWithACompleteFileFooter(t *testing.T) {
 	if !strings.Contains(replay, "(complete file: 4 lines") || strings.Contains(replay, "use offset=") {
 		t.Fatalf("replayed read = %q, want the complete-file footer and no continuation hint", replay)
 	}
+	client3 := &fakeClient{script: []Completion{{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"}}}
+	loop3 := NewLoop(client3, tools, 3).WithSetupActions(setupActs(`read_file {"path":"doc.txt","offset":99}`))
+	if _, err := loop3.Run(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range client3.seen[0] {
+		if m.Role == "tool" && m.ToolCallID == "setup-1" && strings.Contains(m.Content, "complete file") {
+			t.Fatalf("a past-EOF replayed read must not get the footer: %q", m.Content)
+		}
+	}
 	client2 := &fakeClient{script: []Completion{{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"}}}
 	loop2 := NewLoop(client2, tools, 3).WithSetupActions(setupActs(`read_file {"path":"doc.txt","limit":2}`))
 	if _, err := loop2.Run(context.Background(), "go"); err != nil {
