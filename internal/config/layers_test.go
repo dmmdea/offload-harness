@@ -83,6 +83,13 @@ func TestValidateLayersRefusesTheShapesThatWouldMisplaceWork(t *testing.T) {
 		}, "no layer seat declares ctx_tokens"},
 		{"display_floor seat without a footprint (triple)", func(c *Config) { c.Layers[2].Seats[0].DisplayFootprintGiB = 0 }, "display_footprint_gib is undeclared"},
 		{"display_floor seat without a footprint (display)", func(c *Config) { c.Layers[3].Seats[0].DisplayFootprintGiB = 0 }, "display_footprint_gib is undeclared"},
+		// The host_ram guard is free ≥ host_ram_gib; a 0 admits every load, so a
+		// seat on a guarded layer without the number is a fail-open guard.
+		{"host_ram guard without host_ram_gib", func(c *Config) { c.Layers[2].Seats[0].HostRAMGiB = 0 }, "host_ram_gib is undeclared"},
+		// tokens ÷ prefill_tps ≤ budget: a 0 rate is a division by zero on the
+		// first long placement — both long seats (pair and triple) owe the number.
+		{"long seat without prefill_tps (pair)", func(c *Config) { c.Layers[1].Seats[1].PrefillTPS = 0 }, "prefill_tps is undeclared"},
+		{"long seat without prefill_tps (triple)", func(c *Config) { c.Layers[2].Seats[0].PrefillTPS = 0 }, "prefill_tps is undeclared"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -203,5 +210,97 @@ func TestDisplayFootprintIsRequiredOnlyWhereConfigCanResolveThePin(t *testing.T)
 	c.Layers[2].Seats[0].DisplayFootprintGiB = 0
 	if err := c.ValidateLayers(); err != nil {
 		t.Fatalf("a UUID pin is resolved at admission, not at load: %v", err)
+	}
+}
+
+// fixtureLayersJSON is the fixture's layers block as bytes, with one key
+// respelt — the shape a hand-edited config.json or the tier table would carry
+// after a typo. Quoted keys, so "footprint_gib" never matches inside
+// "display_footprint_gib".
+func fixtureLayersJSON(t *testing.T, from, to string) []byte {
+	t.Helper()
+	raw, err := json.Marshal(CompositeFixture().Layers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if from == "" {
+		return raw
+	}
+	if !strings.Contains(string(raw), `"`+from+`"`) {
+		t.Fatalf("fixture carries no key %q — the probe would test nothing", from)
+	}
+	return []byte(strings.ReplaceAll(string(raw), `"`+from+`"`, `"`+to+`"`))
+}
+
+// TestValidateLayerKeysRefusesAMisspeltKeyByPath pins the lint itself: a
+// respelt seat key (the finding's host_ram_gb / prefill_tp / footprint_gb) and a
+// respelt layer key are refused with the layer index, its name, the seat index,
+// its role and the offending key — the path a table author edits — while the
+// fixture's own spelling and an absent block both pass. The case-exact rule is
+// pinned too: json would accept Host_RAM_GiB, this lint does not, so a key that
+// passes here decodes on every reader.
+func TestValidateLayerKeysRefusesAMisspeltKeyByPath(t *testing.T) {
+	cases := []struct {
+		from, to string
+		want     []string
+	}{
+		{"host_ram_gib", "host_ram_gb", []string{`layers[2] "triple"`, `seats[0] "long"`, `unknown key "host_ram_gb"`, "fail-open"}},
+		{"prefill_tps", "prefill_tp", []string{`layers[1] "pair"`, `seats[1] "long"`, `unknown key "prefill_tp"`}},
+		{"footprint_gib", "footprint_gb", []string{`layers[0] "single"`, `seats[1] "agent"`, `unknown key "footprint_gb"`}},
+		{"opt_in", "optin", []string{`layers[2] "triple"`, `unknown key "optin"`, "not a layer field"}},
+		{"host_ram_gib", "Host_RAM_GiB", []string{`unknown key "Host_RAM_GiB"`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.to, func(t *testing.T) {
+			err := ValidateLayerKeys(fixtureLayersJSON(t, tc.from, tc.to))
+			if err == nil {
+				t.Fatalf("%s → %s must be refused", tc.from, tc.to)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Fatalf("error must carry %q, got %v", w, err)
+				}
+			}
+		})
+	}
+	if err := ValidateLayerKeys(fixtureLayersJSON(t, "", "")); err != nil {
+		t.Fatalf("the fixture's own keys must pass: %v", err)
+	}
+	if err := ValidateLayerKeys(nil); err != nil {
+		t.Fatalf("no layers block is a plain box: %v", err)
+	}
+	if err := ValidateLayerKeys([]byte("null")); err != nil {
+		t.Fatalf("a null layers block is a plain box: %v", err)
+	}
+	if err := ValidateLayerKeys([]byte(`{"name":"x"}`)); err == nil || !strings.Contains(err.Error(), "layers") {
+		t.Fatalf("a layers block that is not an array must be refused, got %v", err)
+	}
+}
+
+// TestLoadRefusesAMisspeltLayerKeyByName pins the WIRING on the config door:
+// warnUnknownKeys reads only the top level, so before this a config.json whose
+// triple seat said host_ram_gb loaded a well-formed layer with host_ram_gib 0 —
+// a host_ram guard reading free ≥ 0 — and warned about nothing. Load must refuse
+// it by name and hand back the non-composite shape, exactly like a layer
+// ValidateLayers refuses.
+func TestLoadRefusesAMisspeltLayerKeyByName(t *testing.T) {
+	for _, tc := range []struct{ from, to string }{{"host_ram_gib", "host_ram_gb"}, {"prefill_tps", "prefill_tp"}} {
+		t.Run(tc.to, func(t *testing.T) {
+			c := CompositeFixture()
+			raw, err := json.Marshal(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw = []byte(strings.ReplaceAll(string(raw), `"`+tc.from+`"`, `"`+tc.to+`"`))
+			p := filepath.Join(t.TempDir(), "cfg.json")
+			if err := os.WriteFile(p, raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			bad, err := Load(p)
+			if err == nil || !strings.Contains(err.Error(), `unknown key "`+tc.to+`"`) {
+				t.Fatalf("Load must refuse the respelt key by name, got %v", err)
+			}
+			assertNotComposite(t, bad)
+		})
 	}
 }

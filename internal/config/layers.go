@@ -1,8 +1,11 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -304,6 +307,7 @@ func (c Config) ValidateLayers() error {
 		// display_device is a plain CUDA index; a UUID pin is resolved at admission
 		// (placement refuses "display footprint undeclared" there, never free − 0).
 		floorGuarded := containsString(l.Guards, "display_floor")
+		hostRAMGuarded := containsString(l.Guards, "host_ram")
 		display := strings.TrimSpace(l.DisplayDevice)
 		roles := map[string]bool{}
 		for j, s := range l.Seats {
@@ -332,6 +336,22 @@ func (c Config) ValidateLayers() error {
 			if floorGuarded && isCUDAIndex(display) && containsString(s.DeviceList(), display) && s.DisplayFootprintGiB <= 0 {
 				return fmt.Errorf("%s: display_footprint_gib is undeclared (0) but the pin %q includes display device %q — guard display_floor is free − footprint ≥ floor, and a 0 footprint degrades it to the free-VRAM check", sat, s.Device, display)
 			}
+			// The host_ram guard is `free host RAM ≥ seat.HostRAMGiB`. With a 0 it
+			// is `free ≥ 0` — true on every box — so a seat on a host_ram-guarded
+			// layer must declare the number or the guard is fail-OPEN: the ~70 GB
+			// flash-next load would be admitted onto a box with 20 GB free. The
+			// same shape closes a misspelt key (host_ram_gb) that a lenient decode
+			// would drop to 0 without a word.
+			if hostRAMGuarded && s.HostRAMGiB <= 0 {
+				return fmt.Errorf("%s: host_ram_gib is undeclared (0) on a host_ram-guarded layer — the guard is free host RAM ≥ host_ram_gib, and ≥ 0 admits the load on every box", sat)
+			}
+			// A long seat is entered only when tokens ÷ prefill_tps fits the
+			// contract's budget; a 0 rate makes that a division by zero, and a rate
+			// that decodes as 0 from a misspelt key would never be noticed before
+			// the first long placement.
+			if s.Role == "long" && s.PrefillTPS <= 0 {
+				return fmt.Errorf("%s: prefill_tps is undeclared (0) — the feasibility rule is tokens ÷ prefill_tps ≤ budget, and a long seat cannot be entered without its measured rate", sat)
+			}
 			if s.CtxTokens > 0 {
 				anyWindow = true
 			}
@@ -351,6 +371,112 @@ func containsString(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// ValidateLayerKeys is the strict-key companion of ValidateLayers for the two
+// readers that still hold the raw JSON: tierseed.ParseDoc (the tier table, and
+// the copy embedded in the installer) and Load (a hand-edited config.json).
+// encoding/json drops a key it cannot match WITHOUT A WORD, and ValidateLayers
+// sees only the decoded struct — so `host_ram_gb` on the triple layer's seat
+// decoded as host_ram_gib 0, the host_ram guard became `free ≥ 0`, and a ~70 GB
+// load was admissible on a box with 20 GB free, from one dropped character with
+// no signal at authoring, install or load. Every layers[] and layers[].seats[]
+// key must be a json tag on LayerSpec / LayerSeat, spelled exactly (the table is
+// lowercase; a case-insensitive match would let `Host_RAM_GiB` through here and
+// nowhere else). The known sets are read off the structs by reflection so this
+// lint cannot drift from the shape it guards; the error names the JSON path the
+// way ValidateLayers does. A nil / null `layers` is not composite and passes.
+func ValidateLayerKeys(rawLayers []byte) error {
+	if len(rawLayers) == 0 {
+		return nil
+	}
+	var layers []map[string]json.RawMessage
+	if err := json.Unmarshal(rawLayers, &layers); err != nil {
+		return fmt.Errorf("layers: %w", err)
+	}
+	layerKnown := jsonKeys(reflect.TypeOf(LayerSpec{}))
+	seatKnown := jsonKeys(reflect.TypeOf(LayerSeat{}))
+	for i, l := range layers {
+		at := fmt.Sprintf("layers[%d] %q", i, rawString(l["name"]))
+		for _, k := range sortedRawKeys(l) {
+			if !layerKnown[k] {
+				return fmt.Errorf("%s: unknown key %q — not a layer field (%s); it would be dropped on decode and whatever it declared would read as unset", at, k, strings.Join(sortedKeysOf(layerKnown), ", "))
+			}
+		}
+		rawSeats, ok := l["seats"]
+		if !ok {
+			continue
+		}
+		var seats []map[string]json.RawMessage
+		if err := json.Unmarshal(rawSeats, &seats); err != nil {
+			return fmt.Errorf("%s seats: %w", at, err)
+		}
+		for j, s := range seats {
+			sat := fmt.Sprintf("%s seats[%d] %q", at, j, rawString(s["role"]))
+			for _, k := range sortedRawKeys(s) {
+				if !seatKnown[k] {
+					return fmt.Errorf("%s: unknown key %q — not a seat field (%s); a measured number under a misspelt key decodes as 0, and a 0 turns a fail-closed guard fail-open", sat, k, strings.Join(sortedKeysOf(seatKnown), ", "))
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// LayerKeysOf lists the json tags of LayerSpec ("layers[].<key>") and LayerSeat
+// ("layers[].seats[].<key>") in the spelling the tier table's _fields block
+// documents them under, so a table lint can hold the docs and the struct to the
+// same set in both directions.
+func LayerKeysOf() []string {
+	var out []string
+	for _, k := range sortedKeysOf(jsonKeys(reflect.TypeOf(LayerSpec{}))) {
+		out = append(out, "layers[]."+k)
+	}
+	for _, k := range sortedKeysOf(jsonKeys(reflect.TypeOf(LayerSeat{}))) {
+		out = append(out, "layers[].seats[]."+k)
+	}
+	return out
+}
+
+// jsonKeys is every json tag on a struct type — the set a JSON object of that
+// type may carry. The same walk warnUnknownKeys and tierseed do for Config.
+func jsonKeys(t reflect.Type) map[string]bool {
+	out := map[string]bool{}
+	for i := 0; i < t.NumField(); i++ {
+		name := strings.SplitN(t.Field(i).Tag.Get("json"), ",", 2)[0]
+		if name != "" && name != "-" {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+// rawString decodes a raw JSON string for an error path; anything else (absent,
+// not a string) reads as "" so the path is still printed.
+func rawString(raw json.RawMessage) string {
+	var s string
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &s)
+	}
+	return s
+}
+
+func sortedRawKeys(m map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sortedKeysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // isCUDAIndex reports whether a display_device is a plain CUDA index ("1")

@@ -1607,10 +1607,31 @@ func load(path string) (Config, error) {
 	// at load by name — never at the first contract placed onto it. Load strips
 	// the five composite keys from the value it returns with this error:
 	// LoadWithSource callers proceed on the value, not the error.
+	//
+	// The KEYS are checked first, against the raw bytes: warnUnknownKeys above
+	// sees only the top level, and json.Unmarshal drops a misspelt seat key
+	// (host_ram_gb) to a 0 that ValidateLayers cannot tell from "never
+	// measured" — on a guarded seat that 0 is a fail-open guard. Unlike a
+	// top-level typo this REFUSES rather than warns, for the same reason
+	// ValidateLayers does: a layer is placement, not a preference.
+	if err := validateRawLayerKeys(b); err != nil {
+		return c, err
+	}
 	if err := c.ValidateLayers(); err != nil {
 		return c, err
 	}
 	return c, nil
+}
+
+// validateRawLayerKeys lifts the `layers` block out of the config file's bytes
+// and holds it to ValidateLayerKeys. A file without the key is a plain box and
+// is untouched; a file that is not an object was already refused by the decode.
+func validateRawLayerKeys(b []byte) error {
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(b, &raw) != nil {
+		return nil
+	}
+	return ValidateLayerKeys(raw["layers"])
 }
 
 // validateTailnetEndpoints checks every value of a model→base-URL map (the

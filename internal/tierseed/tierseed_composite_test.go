@@ -210,3 +210,108 @@ func TestSeededLayersAreValidatedAtResolve(t *testing.T) {
 		t.Fatalf("an invalid seeded layer must be refused at resolve, got %v", err)
 	}
 }
+
+// TestParseDocRefusesAMisspeltLayerKey is the review's probe, kept as the pin:
+// respell host_ram_gib → host_ram_gb (and prefill_tps → prefill_tp,
+// footprint_gib → footprint_gb) in the shipped table and, before this, ParseDoc
+// returned nil, Resolve returned nil, and the seeded triple/long seat carried NO
+// host_ram_gib — a host_ram guard of free ≥ 0 admitting the ~70 GB load on a
+// box with 20 GB free, from one dropped character with zero signal. Every
+// reader (ParseDoc, Parse — the installer's embedded copy — and Load) must
+// refuse it, naming the tier and the JSON path. The quoted-key replacement
+// keeps "display_footprint_gib" out of the "footprint_gib" case.
+func TestParseDocRefusesAMisspeltLayerKey(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "setup", "templates", "profiles.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		from, to string
+		want     []string
+	}{
+		{"host_ram_gib", "host_ram_gb", []string{`tier "blackwell-3x16"`, `layers[2] "triple"`, `seats[0] "long"`, `unknown key "host_ram_gb"`}},
+		{"prefill_tps", "prefill_tp", []string{`tier "blackwell-3x16"`, `layers[1] "pair"`, `seats[1] "long"`, `unknown key "prefill_tp"`}},
+		{"footprint_gib", "footprint_gb", []string{`tier "blackwell-3x16"`, `layers[0] "single"`, `unknown key "footprint_gb"`}},
+		{"dormant", "dormnt", []string{`tier "blackwell-3x16"`, `layers[3] "display"`, `unknown key "dormnt"`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.to, func(t *testing.T) {
+			if !strings.Contains(string(raw), `"`+tc.from+`"`) {
+				t.Fatalf("the table carries no key %q — the probe would test nothing", tc.from)
+			}
+			b := []byte(strings.ReplaceAll(string(raw), `"`+tc.from+`"`, `"`+tc.to+`"`))
+			for name, parse := range map[string]func([]byte) error{
+				"ParseDoc": func(b []byte) error { _, err := ParseDoc(b); return err },
+				"Parse":    func(b []byte) error { _, err := Parse(b); return err },
+			} {
+				err := parse(b)
+				if err == nil {
+					t.Fatalf("%s must refuse %s → %s", name, tc.from, tc.to)
+				}
+				for _, w := range tc.want {
+					if !strings.Contains(err.Error(), w) {
+						t.Fatalf("%s: error must carry %q, got %v", name, w, err)
+					}
+				}
+			}
+		})
+	}
+	// And the one the strict pass cannot see — a key spelled right but left
+	// out — dies in Validate, which runs config's own validator on the seeded
+	// layers: a host_ram-guarded seat without its number is the same fail-open
+	// guard by a different route.
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	triple := doc["profiles"].(map[string]any)["blackwell-3x16"].(map[string]any)["layers"].([]any)[2].(map[string]any)
+	delete(triple["seats"].([]any)[0].(map[string]any), "host_ram_gib")
+	b, _ := json.Marshal(doc)
+	if _, err := ParseDoc(b); err == nil || !strings.Contains(err.Error(), "host_ram_gib is undeclared") {
+		t.Fatalf("a host_ram-guarded seat without host_ram_gib must be refused at parse, got %v", err)
+	}
+}
+
+// TestFieldsDocumentExactlyTheLayerKeys makes the table's _fields block a
+// lint, not prose: every layers[].* / layers[].seats[].* entry must be a json
+// tag on config.LayerSpec / config.LayerSeat and every tag must have an entry,
+// so the documented spelling IS the accepted spelling — an author who copies a
+// key from _fields cannot copy one the decoder will drop, and a field added to
+// the struct cannot ship undocumented.
+func TestFieldsDocumentExactlyTheLayerKeys(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "setup", "templates", "profiles.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top struct {
+		Fields map[string]string `json:"_fields"`
+	}
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{}
+	for _, k := range config.LayerKeysOf() {
+		want[k] = true
+	}
+	if len(want) == 0 {
+		t.Fatal("config.LayerKeysOf returned nothing — the lint would pass vacuously")
+	}
+	documented := map[string]bool{}
+	for k, v := range top.Fields {
+		if !strings.HasPrefix(k, "layers[].") {
+			continue
+		}
+		if !want[k] {
+			t.Errorf("_fields documents %q, which is not a layer or seat field — the decoder would drop it", k)
+		}
+		if strings.TrimSpace(v) == "" {
+			t.Errorf("_fields %q is empty", k)
+		}
+		documented[k] = true
+	}
+	for k := range want {
+		if !documented[k] {
+			t.Errorf("_fields lacks %q — every layer/seat field the decoder accepts must be documented", k)
+		}
+	}
+}

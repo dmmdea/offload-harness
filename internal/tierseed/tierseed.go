@@ -137,7 +137,15 @@ func Parse(raw []byte) (map[string]Profile, error) {
 	return d.Profiles, nil
 }
 
-// ParseDoc reads the whole document from bytes.
+// ParseDoc reads the whole document from bytes. Every profile's `layers` block
+// is held to config.ValidateLayerKeys BEFORE Validate sees the decoded value:
+// json.Unmarshal drops a key it cannot match without a word, so `host_ram_gb`
+// on the triple layer's seat decoded as host_ram_gib 0, Validate/ValidateLayers
+// saw a well-formed seat, and the installer seeded a host_ram guard that reads
+// `free ≥ 0` — fail-open from one dropped character. The strict pass needs the
+// raw bytes, which is why it lives here and not in Validate; Parse, Load and
+// LoadDoc all route through this function, so the embedded copy the installer
+// ships cannot carry a misspelt layer key either.
 func ParseDoc(raw []byte) (Doc, error) {
 	var d Doc
 	if err := json.Unmarshal(raw, &d); err != nil {
@@ -146,10 +154,37 @@ func ParseDoc(raw []byte) (Doc, error) {
 	if len(d.Profiles) == 0 {
 		return Doc{}, fmt.Errorf("profiles.json has no profiles — the schema moved")
 	}
+	if err := validateLayerKeys(raw); err != nil {
+		return Doc{}, err
+	}
 	if err := d.Validate(); err != nil {
 		return Doc{}, err
 	}
 	return d, nil
+}
+
+// validateLayerKeys re-reads each profile's `layers` block as raw JSON and
+// refuses any layers[] / layers[].seats[] key that is not a config field, by
+// tier and JSON path. Profiles are visited in id order so a table with two
+// mistakes fails deterministically.
+func validateLayerKeys(raw []byte) error {
+	var top struct {
+		Profiles map[string]map[string]json.RawMessage `json:"profiles"`
+	}
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return fmt.Errorf("profiles.json: %w", err)
+	}
+	ids := make([]string, 0, len(top.Profiles))
+	for id := range top.Profiles {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if err := config.ValidateLayerKeys(top.Profiles[id]["layers"]); err != nil {
+			return fmt.Errorf("profiles.json: tier %q %w", id, err)
+		}
+	}
+	return nil
 }
 
 // Validate refuses the composite shapes the table cannot seed truthfully, at
