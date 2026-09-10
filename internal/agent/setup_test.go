@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -141,11 +143,11 @@ func TestSetupReplayFailuresAreObservationsNotAborts(t *testing.T) {
 
 // Setup calls feed no circuit breaker: the model's own identical call
 // afterwards is a first call, not an exact repeat.
-func TestSetupReplayFeedsNoBreaker(t *testing.T) {
+func TestSetupReplayFeedsTheExactRepeatBreakerOnly(t *testing.T) {
 	seen := map[string][]string{}
 	client := &fakeClient{script: []Completion{
-		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "read_file", `{"path":"a.txt"}`)}}, FinishReason: "tool_calls"},
-		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c2", "read_file", `{"path":"a.txt"}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "read_file", `{"path":"a.txt"}`)}}, FinishReason: "tool_calls"}, // byte-identical to setup: refused
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c2", "read_file", `{"path":"b.txt"}`)}}, FinishReason: "tool_calls"}, // a different read: runs
 		{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"},
 	}}
 	loop := NewLoop(client, envTools(t, seen), 5).
@@ -154,21 +156,113 @@ func TestSetupReplayFeedsNoBreaker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// setup + the model's first call execute; the model's exact repeat is
-	// the breaker's business (second identical call is refused) — what must
-	// NOT happen is the FIRST model call being refused because setup ran it.
-	if len(seen["read_file"]) < 2 {
-		t.Fatalf("the model's first read_file must execute after setup ran the same call: %v", seen)
+	// 0.115.12 (D-48): the replayed read IS the first call of that (tool,
+	// args) — the model repeating it byte for byte is refused with the
+	// breaker's "you already have that result", and the transcript holds ONE
+	// copy of the document, not two. A different read still runs, and the
+	// same-name cap is not spent by the replay.
+	if len(seen["read_file"]) != 2 {
+		t.Fatalf("read_file executions = %v, want setup + the model's b.txt read only", seen)
 	}
-	var modelFirst *EffectRecord
+	var modelFirst, modelSecond *EffectRecord
 	for i := range res.Effects {
-		if !res.Effects[i].Setup && res.Effects[i].Tool == "read_file" {
+		if res.Effects[i].Setup || res.Effects[i].Tool != "read_file" {
+			continue
+		}
+		if modelFirst == nil {
 			modelFirst = &res.Effects[i]
-			break
+		} else if modelSecond == nil {
+			modelSecond = &res.Effects[i]
 		}
 	}
-	if modelFirst == nil || modelFirst.Status != EffectCommitted {
-		t.Fatalf("model's first read_file = %+v", modelFirst)
+	if modelFirst == nil || modelFirst.Status != EffectNone || !strings.Contains(modelFirst.Note, "already have that result") {
+		t.Fatalf("model's repeat of the setup read = %+v, want it refused as an exact repeat", modelFirst)
+	}
+	if modelSecond == nil || modelSecond.Status != EffectCommitted {
+		t.Fatalf("model's different read = %+v, want it executed", modelSecond)
+	}
+}
+
+// TestSetupReplayReadFileEndsWithACompleteFileFooter: a replayed read that
+// reached EOF says so where a continuation hint would sit, and a read that
+// did NOT reach EOF keeps the hint and gets no footer.
+func TestSetupReplayReadFileEndsWithACompleteFileFooter(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "doc.txt"), []byte("one\ntwo\nthree\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{script: []Completion{{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"}}}
+	tools, err := ReadOnlyTools(dir, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop := NewLoop(client, tools, 3).WithSetupActions(setupActs(`read_file {"path":"doc.txt"}`))
+	if _, err := loop.Run(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	var replay string
+	for _, m := range client.seen[0] {
+		if m.Role == "tool" && m.ToolCallID == "setup-1" {
+			replay = m.Content
+		}
+	}
+	if !strings.Contains(replay, "(complete file: 4 lines") || strings.Contains(replay, "use offset=") {
+		t.Fatalf("replayed read = %q, want the complete-file footer and no continuation hint", replay)
+	}
+	client2 := &fakeClient{script: []Completion{{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"}}}
+	loop2 := NewLoop(client2, tools, 3).WithSetupActions(setupActs(`read_file {"path":"doc.txt","limit":2}`))
+	if _, err := loop2.Run(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range client2.seen[0] {
+		if m.Role == "tool" && m.ToolCallID == "setup-1" && (!strings.Contains(m.Content, "use offset=") || strings.Contains(m.Content, "complete file")) {
+			t.Fatalf("partial replayed read = %q, want the continuation hint and no footer", m.Content)
+		}
+	}
+}
+
+// TestRefusedCallRepeatedTwiceWithdrawsTheToolAndAsksForTheAnswer (D-49):
+// the first list_dir runs; the second, byte-identical, is refused by the
+// exact-repeat breaker; the third — the second refusal of the same call —
+// withdraws the tool from the spec list and the next Chat opens on an
+// answer-now user turn. Before 0.115.12 the model could burn every step on
+// the same refused call.
+func TestRefusedCallRepeatedTwiceWithdrawsTheToolAndAsksForTheAnswer(t *testing.T) {
+	seen := map[string][]string{}
+	same := func(id string) Completion {
+		return Completion{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc(id, "list_dir", `{"path":"a"}`)}}, FinishReason: "tool_calls"}
+	}
+	client := &fakeClient{script: []Completion{
+		same("c1"), same("c2"), same("c3"),
+		{Msg: Msg{Role: "assistant", Content: "the answer"}, FinishReason: "stop"},
+	}}
+	loop := NewLoop(client, envTools(t, seen), 8)
+	res, err := loop.Run(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Output != "the answer" || len(seen["list_dir"]) != 1 {
+		t.Fatalf("output %q, list_dir executions %d (want 1)", res.Output, len(seen["list_dir"]))
+	}
+	// The 4th Chat: no list_dir spec, and the last message is the answer-now turn.
+	for _, sp := range client.seenSpecs[3] {
+		if sp.Name == "list_dir" {
+			t.Fatal("list_dir still offered after two identical refusals")
+		}
+	}
+	last := client.seen[3][len(client.seen[3])-1]
+	if last.Role != "user" || !strings.Contains(last.Content, "list_dir") || !strings.Contains(last.Content, "Answer the task now") {
+		t.Fatalf("the turn after the second refusal must open with the answer-now instruction, got %+v", last)
+	}
+	// The 3rd Chat still offered it (withdrawn only on the second refusal).
+	offered := false
+	for _, sp := range client.seenSpecs[2] {
+		if sp.Name == "list_dir" {
+			offered = true
+		}
+	}
+	if !offered {
+		t.Fatal("list_dir withdrawn before the second refusal")
 	}
 }
 

@@ -816,7 +816,13 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 	// Setup replay (setup.go): the contract's pre-actions land AFTER the
 	// protected preamble (pinned, compactable past their budget) and BEFORE
 	// the first model turn; they spend no step and feed no breaker.
-	msgs = l.replaySetup(ctx, msgs, pinned, &effects, &ruleHits, ruleState)
+	msgs = l.replaySetup(ctx, msgs, pinned, &effects, &ruleHits, ruleState, exactCalls, firstCallID)
+	// refusedRepeat counts identical calls that did NOT run (D-49): after two,
+	// the tool's spec is withheld and the model is told to answer — a refused
+	// call that keeps its spec costs a full model turn per repeat (2026-09-10:
+	// eight consecutive refused list_dir calls, 729 s, then an empty final).
+	refusedRepeat := map[string]int{}
+	answerNowFor := ""
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
@@ -1054,6 +1060,21 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 					ruleState.Executed(call.Name)
 				}
 			}
+			if eff == EffectNone {
+				// A call that did not run — refused by a breaker, blocked by an
+				// env rule, parked, unknown — repeated byte for byte: the SECOND
+				// time, withdraw the tool (a weak model does not reliably read a
+				// text refusal — the finding that made the same-name cap
+				// structural) and open the next turn with an answer-now
+				// instruction. Before this, each repeat cost a full model turn.
+				rkey := call.Name + "\x00" + call.Args
+				refusedRepeat[rkey]++
+				if refusedRepeat[rkey] >= 2 && !disabledTools[call.Name] {
+					disabledTools[call.Name] = true
+					answerNowFor = call.Name
+					content += fmt.Sprintf("\n%s has now been withdrawn from this run — it is no longer offered. Answer the task from what you already have.", call.Name)
+				}
+			}
 			if l.envRules != nil && eff != EffectNone {
 				// modify_transition → filter_observation, in envharness's order,
 				// on TOOL OUTPUT ONLY (committed / failed / unknown). A loop-
@@ -1100,6 +1121,12 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			}
 			effects = append(effects, rec)
 			msgs = append(msgs, Msg{Role: "tool", ToolCallID: call.ID, Content: content, IsError: isErr})
+		}
+		if answerNowFor != "" {
+			// One user turn, after this step's results, once per withdrawn
+			// tool: the transcript already holds the evidence the model has.
+			msgs = append(msgs, Msg{Role: "user", Content: fmt.Sprintf("%s is not available in this run and has been withdrawn; do not call it again. Answer the task now, in the requested shape, from what you have already read.", answerNowFor)})
+			answerNowFor = ""
 		}
 	}
 	res := Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
