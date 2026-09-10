@@ -968,6 +968,19 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// which is the very race that gated the calibrator. Observe ignores a nil
 		// Serve, so a backend that reports no timings yields "insufficient_data"
 		// rather than a fabricated 0% reuse.
+		// A TRUNCATED final (finish "length", visible content, no tool call) is
+		// the same starvation one step later: the seat began the answer inside
+		// a budget sized for tool turns and was cut (0.115.14; the 2026-09-10
+		// 4B row: 282 reasoning tokens, then 1,935 chars of a seven-array
+		// answer cut at exactly 1,024 tokens — a JSON prefix no re-pack can
+		// repair). Re-issue it once at the final budget like an empty step;
+		// a second cut is accepted and flagged OutputTruncated.
+		if comp.FinishReason == "length" && len(comp.Msg.ToolCalls) == 0 && strings.TrimSpace(comp.Msg.Content) != "" && !lastWasReissue && reissues < maxReissues {
+			reissues++
+			retryNoThink = true
+			step-- // the re-issue does not spend a step
+			continue
+		}
 		if kind, basis, empty := comp.Starvation(); empty {
 			// An empty completion — no tool call, no visible content — is never an
 			// answer. Two shapes, one classifier (thinking.go): the seat spent its

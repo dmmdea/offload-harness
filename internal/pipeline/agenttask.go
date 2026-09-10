@@ -669,7 +669,11 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 			budget = agentRepackMaxTokensCap
 			continue
 		}
-		content := []byte(strings.TrimSpace(gres.Content))
+		// Trim to the outermost {...} before validating: a seat that honours
+		// the grammar returns exactly the object, but vLLM behind llama-swap
+		// IGNORES llama.cpp's `grammar` field and answers fenced (0.115.14:
+		// "invalid character '`' looking for beginning of value" on the 4B).
+		content := []byte(outerObject(gres.Content))
 		if verr := validator.Validate(content, schema); verr != nil {
 			if fixed, ok := coerceToSchema(content, schema); ok {
 				return json.RawMessage(fixed), gres.TokensOut, false, nil
@@ -701,6 +705,16 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 		return nil, 0, true, transportErr
 	}
 	return nil, 0, false, lastErr
+}
+
+// outerObject trims text to its outermost {...} span (fences and prose around
+// it dropped); text with no such span is returned trimmed as is.
+func outerObject(text string) string {
+	t := strings.TrimSpace(text)
+	if i, j := strings.Index(t, "{"), strings.LastIndex(t, "}"); i >= 0 && j > i {
+		return t[i : j+1]
+	}
+	return t
 }
 
 // directWrapperMax is the most prose (fences, "Here is the result:", a
@@ -832,10 +846,7 @@ func (p *Pipeline) repackViaChat(ctx context.Context, seat string, schema map[st
 	if gerr != nil || gres.Truncated {
 		return nil, 0, false
 	}
-	content := strings.TrimSpace(gres.Content)
-	if i, j := strings.Index(content, "{"), strings.LastIndex(content, "}"); i >= 0 && j > i {
-		content = content[i : j+1]
-	}
+	content := outerObject(gres.Content)
 	if verr := validator.Validate([]byte(content), schema); verr != nil {
 		fixed, ok := coerceToSchema([]byte(content), schema)
 		if !ok {

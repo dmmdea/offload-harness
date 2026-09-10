@@ -6,6 +6,19 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.14] - 2026-09-10 - a truncated final answer gets the final budget too
+
+From the 0.115.12 acceptance run's 4B row: the seat thought for 282 tokens, began the seven-array answer, and was
+cut at exactly its 1,024-token tool-turn budget — 1,935 chars of a JSON prefix that no re-pack can repair; the
+re-pack then failed on a backtick, because vLLM behind llama-swap ignores llama.cpp's `grammar` field and answers
+fenced.
+
+- A final cut on `finish_reason: length` with visible content is re-issued once at the final budget (4× the step
+  budget, cap 8,192, thinking off under `auto`) exactly like an empty one; a second cut is accepted and flagged
+  `output_truncated`. Same per-run episode bound (two).
+- The grammar re-pack lane trims its completion to the outermost `{…}` before validating (the chat lane already
+  did), so a fenced answer from a seat that ignores the grammar is not filed as invalid JSON.
+
 ## [0.115.13] - 2026-09-10 - the seat's answer shape is on the record
 
 Register D-45. Two seat facts cost a week each because nothing recorded them: the 2026-09-04 tool-call

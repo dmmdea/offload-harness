@@ -291,18 +291,36 @@ func TestReissueDoesNotRecitePlanTwice(t *testing.T) {
 	}
 }
 
-// TestTruncatedFinalIsFlaggedNotHidden: a NON-empty final cut on "length" is
-// still the answer (the caller may use the partial) but the Result says so.
-func TestTruncatedFinalIsFlaggedNotHidden(t *testing.T) {
+// TestTruncatedFinalIsReissuedAtTheFinalBudgetThenFlagged (0.115.14): a
+// NON-empty final cut on "length" is re-issued once at the final budget with
+// thinking off — the seat began the answer inside a tool-turn budget; a
+// second cut is accepted as the answer and flagged OutputTruncated.
+func TestTruncatedFinalIsReissuedAtTheFinalBudgetThenFlagged(t *testing.T) {
 	full := mkTools("list_dir")
 	client := &fakeClient{script: []Completion{
 		{Msg: Msg{Role: "assistant", Content: "## Decisions\n- one\n- tw"}, FinishReason: "length"},
+		{Msg: Msg{Role: "assistant", Content: "## Decisions\n- one\n- two\n- three"}, FinishReason: "stop"},
 	}}
-	res, err := NewLoop(client, full, 3).Run(context.Background(), "digest")
+	l := NewLoop(client, full, 3).WithMaxTokens(1024)
+	res, err := l.Run(context.Background(), "digest")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !res.OutputTruncated || res.Output == "" || res.StopReason != "done" {
-		t.Fatalf("truncated=%v output=%q stop=%q", res.OutputTruncated, res.Output, res.StopReason)
+	if res.OutputTruncated || res.Output != "## Decisions\n- one\n- two\n- three" || len(client.seen) != 2 {
+		t.Fatalf("truncated=%v output=%q calls=%d", res.OutputTruncated, res.Output, len(client.seen))
+	}
+	if client.seenMax[1] != 4096 || !client.seenNoThink[1] {
+		t.Fatalf("the re-issue must run at the final budget with thinking off: max=%v nothink=%v", client.seenMax, client.seenNoThink)
+	}
+	cut := &fakeClient{script: []Completion{
+		{Msg: Msg{Role: "assistant", Content: "partial"}, FinishReason: "length"},
+		{Msg: Msg{Role: "assistant", Content: "longer partial"}, FinishReason: "length"},
+	}}
+	res2, err := NewLoop(cut, full, 3).WithMaxTokens(1024).Run(context.Background(), "digest")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res2.OutputTruncated || res2.Output != "longer partial" || res2.StopReason != "done" || len(cut.seen) != 2 {
+		t.Fatalf("second cut: truncated=%v output=%q stop=%q calls=%d", res2.OutputTruncated, res2.Output, res2.StopReason, len(cut.seen))
 	}
 }

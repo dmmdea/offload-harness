@@ -111,6 +111,28 @@ func TestRunAgentTaskAnswerAlreadyInShapeSkipsTheRepack(t *testing.T) {
 	}
 }
 
+// TestRunAgentTaskGrammarLaneTrimsAFencedAnswer (0.115.14): vLLM behind
+// llama-swap ignores the grammar and answers fenced; the grammar lane trims
+// to the object instead of failing on the backtick.
+func TestRunAgentTaskGrammarLaneTrimsAFencedAnswer(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop:      func(int64) string { return doneChat("The answer is 42, in prose.") },
+		repack:    func(int64) string { return "```json\n{\"answer\": \"42\"}\n```" },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+	wire := decodeWire(t, res)
+	if wire.Deferred {
+		t.Fatalf("deferred: %s", wire.Reason)
+	}
+	var st map[string]string
+	if err := json.Unmarshal(wire.Structured, &st); err != nil || st["answer"] != "42" || fake.grammarCNT.Load() != 1 {
+		t.Fatalf("structured = %s (%v), re-packs = %d", wire.Structured, err, fake.grammarCNT.Load())
+	}
+}
+
 func TestRepackBudgetScalesWithTheAnswerBetweenFloorAndCap(t *testing.T) {
 	for chars, want := range map[int]int{0: 1024, 900: 1024, 1536: 1024, 3000: 1512, 22865: 8133, 30000: 8192, 100000: 8192} {
 		if got := repackBudget(strings.Repeat("x", chars)); got != want {
