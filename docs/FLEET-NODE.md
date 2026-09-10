@@ -185,7 +185,9 @@ heuristic, not a way to detect which card CUDA will actually pick — nvidia-smi
 signal. On a box with two near-identical-capacity cards it can pick either one; the full
 `gpu_devices[]` breakdown exists precisely so a consumer that needs the real per-card numbers
 (or a smarter dispatcher) isn't limited to the headline guess. Implementation:
-`fleetnode.ParseSmiMemoryDevices` / `fleetnode.HeadlineDevice` in `internal/fleetnode/vram.go`.
+`fleetnode.ParseSmiMemoryDevices` / `fleetnode.HeadlineDevice` in `internal/fleetnode/vram.go` —
+since 0.116.0 aliases over `internal/gpuprobe` (`gpuprobe.Device`, `ParseSmiMemoryDevices`,
+`HeadlineDevice`, `NvidiaSmiRunner`), the leaf the placement guards share so one parser serves both.
 
 ### `primary_gpu_uuid` — pin the headline device deterministically
 

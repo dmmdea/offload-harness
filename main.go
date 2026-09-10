@@ -36,6 +36,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/eval"
 	"github.com/dmmdea/offload-harness/internal/exemplars"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/grounding"
 	"github.com/dmmdea/offload-harness/internal/health"
 	"github.com/dmmdea/offload-harness/internal/hostsample"
@@ -2101,9 +2102,13 @@ func nvidiaSmiMemory() (string, error) {
 // across a reboot or reseat, but the UUID is burned into it).
 // utilization.gpu is included to advertise which device is currently busiest,
 // helping the PAIR operator optimize placement and scheduling.
+//
+// Since 0.116.0 the command itself lives in gpuprobe.NvidiaSmiRunner (the
+// leaf the composite tier's placement guards read through as well): ONE
+// query string, ONE PATH-or-System32 lookup, so the health sampler and the
+// display-card guard can never disagree about what nvidia-smi was asked.
 func nvidiaSmiMemoryDevices() (string, error) {
-	out, err := exec.Command("nvidia-smi", "--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu", "--format=csv,noheader,nounits").Output()
-	return string(out), err
+	return gpuprobe.NvidiaSmiRunner()()
 }
 
 // samplerKind is which VRAM sampler runFleetServe starts for a resolved

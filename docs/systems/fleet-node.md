@@ -133,7 +133,9 @@ per-process path here. A sampling failure keeps the last good snapshot rather th
 zeros, bounded by the 30-second staleness gate.
 
 **Multi-GPU:** a working `nvidia-smi` node runs a per-device query (`index,uuid,name,memory.total,
-memory.used`, one line per GPU — `nvidiaSmiMemoryDevices`/`fleetnode.ParseSmiMemoryDevices`) on
+memory.used`, one line per GPU — `nvidiaSmiMemoryDevices`/`fleetnode.ParseSmiMemoryDevices`; since
+0.116.0 the command and parser live in the leaf `internal/gpuprobe`, and the fleetnode names are
+aliases over it so the composite tier's placement guards read cards through the same parser) on
 that same 2-second sampler instead of the single-value query, and publishes the full breakdown as
 `gpu_devices[]` in health — additive, and **always present when nvidia-smi is the resolved
 source, including a single-GPU box** (a one-element array; there is no single-GPU special case —
@@ -828,6 +830,9 @@ fleet-overview.md's "A failed `/fleet/jobs` fetch is distinguished from an empty
   persistence
 - [`internal/fleetnode/vram.go`](../../internal/fleetnode/vram.go),
   [`vram_windows.go`](../../internal/fleetnode/vram_windows.go) — the two sampling paths
+- [`internal/gpuprobe/`](../../internal/gpuprobe/) — the nvidia-smi command + per-device parser and
+  the host free-RAM reader (leaf; fleetnode's `GPUDevice`/`ParseSmiMemoryDevices`/`HeadlineDevice`
+  alias it)
 - [`fleet_reclaim.go`](../../fleet_reclaim.go) — `oursLoaded` / `anyReclaimable`: the keep-set
   classification above, over `pkg/llamaswap`'s `Running()` + `IsProtected()`
 - [`main.go`](../../main.go) — `fleet-serve` / `fleet-measure` verbs
