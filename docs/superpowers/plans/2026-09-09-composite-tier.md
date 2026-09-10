@@ -21,6 +21,14 @@ R6. **Guards fixed and fail-closed:** floor = `free(display card) − seat.displ
 R7. **A dormant, guarded `display` layer for the small cascade rungs** (e2b 2.6 GB / e4b 6.2 GB fit under the 4 GiB floor beside a busy pair — the only idle VRAM on the box) ships declared with `dormant: true`: template twins pinned to device 1, a concurrent matrix set beside the vLLM seat, one decision row, and the cascade's rung substitution. It is MEASURED once in Task 13 while the operator is away (desktop floor held? summarize wall vs. waiting behind the pair?) and the number goes to the operator; enabling it is one config edit (`dormant: false`) that only the operator makes. If the measurement says no, the layer is deleted before the PR merges.
 R8. **Scope cut:** fleet-overview layer cards, `top` sub-rows and the ledger `by_layer` summary are HELD until placement makes a card show something different (ADR "not in this record"); the ledger keeps a `layer` column so the figure can be summed later.
 
+## Operator rules of 2026-09-10 02:00 that AMEND this plan (read before Tasks 10–13)
+
+- **RAM is overflow only; no model keeps the bulk of its weights in host memory.** The `triple` layer's `qwen3.8-flash-next-262k` seat (28–32 expert layers in RAM) is REMOVED from the live yaml and from the win-triple template (0.115.4). The triple layer therefore has NO long seat; `context_class: long` resolves to the pair's `qwen3.8-27b-262k` only. Task 10 must not render the Flash-Next twins; Task 2's `layers` block for blackwell-3x16 loses the triple layer's `long` seat (keep the layer for KV-only growth if a seat that fits VRAM exists, else drop the layer). Gate G3b/G3c (explicit long on the triple) is void; G3a stays.
+- **Every idle model unloads at 5 minutes on every engine and node (ttl 300).** No rendered seat may carry ttl 0/-1/1800, `persistent`, or `preload`; the layer rows advertise nothing that contradicts this.
+- **No CPU inference.** The display layer's e2b/e4b twins (if the operator ever enables it) are GPU-pinned; nothing renders `-ngl 0`.
+- **The Lenovo cache server backs every vLLM seat whenever the Lenovo is online** — `kv_cache_server` binds per seat (key_prefix per seat), never one seat name; the composite layers carry the store for each vLLM seat they declare.
+- **≥30 % of the session's tokens go through the fleet's cards.** Task 13's review/implementation legs run on the seats (agent_delegate route:spread), not on Claude subagents.
+
 ## Global Constraints
 
 - Version: `0.115.1` → `0.116.0` in ALL FOUR carriers pinned by `TestVersionSourcesAgree`: `VERSION`, `internal/buildinfo/buildinfo.go:31`, `.printing-press.json:4`, and the `## [0.116.0] - 2026-09-09 - <lowercase one-line title>` CHANGELOG entry directly under the empty `## [Unreleased]` header (Task 12). `main.go` aliases buildinfo; fix `CONTRIBUTING.md:63` which says the constant lives in main.go.
