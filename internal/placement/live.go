@@ -1,0 +1,232 @@
+package placement
+
+import (
+	"context"
+	"net/http"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
+	"github.com/dmmdea/offload-harness/internal/seatload"
+)
+
+// gpuProbeTimeout bounds the one nvidia-smi exec a snapshot makes: a wedged
+// driver can hang nvidia-smi for tens of seconds and an admission decision
+// must not wait behind it.
+const gpuProbeTimeout = 5 * time.Second
+
+// seatProbeTimeout bounds the seatload read of one seat (two loopback GETs,
+// three with the roster) — the same budget the delegate's busy probe uses.
+const seatProbeTimeout = 4 * time.Second
+
+// DefaultSnapshotTTL is how long one reading serves: 2 s, so a 32-subtask
+// spread deciding per subtask per tick execs nvidia-smi once, not 32 times.
+const DefaultSnapshotTTL = 2 * time.Second
+
+// Snapshot is the memoised Live of the local box. Every reader is read at most
+// once per ttl — one gpuprobe.Read serves every DeviceFree/DeviceIndex, one
+// HostFreeRAMGiB every HostFree, one ProbePresence every Presence, one
+// seatload.Inflight per (layer, role) — because the table asks several
+// questions per decision and a spread makes many decisions per tick. A
+// snapshot never loads a model: seatload.Inflight stops at /running for a
+// cold seat, and windows come from config.
+type Snapshot struct {
+	cfg config.Config
+	ttl time.Duration
+
+	// injectable for tests; production wiring in NewSnapshot
+	now          func() time.Time
+	readGPU      func(ctx context.Context) ([]gpuprobe.Device, error)
+	readRAM      func() (float64, bool)
+	readPresence func(mode string, idle time.Duration) Presence
+	readSeat     func(ctx context.Context, endpoint, seat string) (seatload.Reading, error)
+
+	mu     sync.Mutex
+	gpuAt  time.Time
+	gpu    []gpuprobe.Device
+	gpuOK  bool
+	ramAt  time.Time
+	ram    float64
+	ramOK  bool
+	presAt time.Time
+	pres   Presence
+	seats  map[string]seatMemo
+}
+
+type seatMemo struct {
+	at    time.Time
+	state SeatState
+}
+
+var seatClient = &http.Client{Timeout: seatProbeTimeout}
+
+// NewSnapshot builds the local box's memoised readers over its config: the
+// layers say which seats exist, Endpoint says where llama-swap answers for
+// them (a layer seat is pinned to a local device, so it is never behind a
+// seat_endpoints override), operator_presence/operator_idle_sec drive the
+// presence probe. ttl ≤ 0 reads as DefaultSnapshotTTL.
+func NewSnapshot(cfg config.Config, ttl time.Duration) *Snapshot {
+	if ttl <= 0 {
+		ttl = DefaultSnapshotTTL
+	}
+	return &Snapshot{
+		cfg:          cfg,
+		ttl:          ttl,
+		now:          time.Now,
+		readGPU:      gpuprobe.Read,
+		readRAM:      gpuprobe.HostFreeRAMGiB,
+		readPresence: ProbePresence,
+		readSeat: func(ctx context.Context, endpoint, seat string) (seatload.Reading, error) {
+			return seatload.Inflight(ctx, seatClient, endpoint, seat)
+		},
+		seats: map[string]seatMemo{},
+	}
+}
+
+// LiveFromConfig is the one-liner every local caller uses: a fresh 2 s
+// snapshot's readers. Callers that make many decisions per tick (the spread)
+// keep one Snapshot and call Live() once instead.
+func LiveFromConfig(cfg config.Config) Live {
+	return NewSnapshot(cfg, DefaultSnapshotTTL).Live()
+}
+
+// Live exposes the snapshot as the table's reader contract. Verdict stays nil:
+// a local box has no remote verdict to carry.
+func (s *Snapshot) Live() Live {
+	return Live{
+		Seat:        s.Seat,
+		DeviceFree:  s.DeviceFree,
+		DeviceIndex: s.DeviceIndex,
+		HostFree:    s.HostFree,
+		Presence:    s.Presence,
+	}
+}
+
+func (s *Snapshot) fresh(at time.Time) bool {
+	return !at.IsZero() && s.now().Sub(at) <= s.ttl
+}
+
+// devices returns the memoised nvidia-smi reading; !ok on a failed probe.
+func (s *Snapshot) devices() ([]gpuprobe.Device, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fresh(s.gpuAt) {
+		return s.gpu, s.gpuOK
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), gpuProbeTimeout)
+	defer cancel()
+	devs, err := s.readGPU(ctx)
+	s.gpuAt = s.now()
+	s.gpu, s.gpuOK = devs, err == nil && len(devs) > 0
+	return s.gpu, s.gpuOK
+}
+
+// DeviceFree reads one card's free VRAM by index or UUID prefix from the
+// memoised probe.
+func (s *Snapshot) DeviceFree(device string) (float64, bool) {
+	devs, ok := s.devices()
+	if !ok {
+		return 0, false
+	}
+	return gpuprobe.FreeGiB(devs, device)
+}
+
+// DeviceIndex resolves a UUID prefix (or echoes an index the probe knows) to
+// the CUDA index nvidia-smi reports, from the same memoised probe. Ambiguous
+// or absent = !ok, so the display-floor guard refuses rather than guessing
+// which card the operator's UUID meant.
+func (s *Snapshot) DeviceIndex(device string) (string, bool) {
+	devs, ok := s.devices()
+	if !ok {
+		return "", false
+	}
+	if idx, err := strconv.Atoi(device); err == nil {
+		for _, d := range devs {
+			if d.Index == idx {
+				return device, true
+			}
+		}
+		return "", false
+	}
+	if _, ok := gpuprobe.FreeGiB(devs, device); !ok {
+		return "", false
+	}
+	lk := lower(device)
+	for _, d := range devs {
+		if hasPrefixFold(d.UUID, lk) {
+			return strconv.Itoa(d.Index), true
+		}
+	}
+	return "", false
+}
+
+// HostFree reads free host RAM from the memoised reader.
+func (s *Snapshot) HostFree() (float64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fresh(s.ramAt) {
+		return s.ram, s.ramOK
+	}
+	s.ram, s.ramOK = s.readRAM()
+	s.ramAt = s.now()
+	return s.ram, s.ramOK
+}
+
+// Presence reads the operator-presence state for the config's mode and idle
+// threshold, memoised.
+func (s *Snapshot) Presence() Presence {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fresh(s.presAt) {
+		return s.pres
+	}
+	s.pres = s.readPresence(s.cfg.PresenceMode(), s.cfg.OperatorIdle())
+	s.presAt = s.now()
+	return s.pres
+}
+
+// Seat reads a (layer, role) seat's occupancy through llama-swap, memoised
+// per seat. Known=false for an undeclared seat, the router role (its rungs
+// are the cascade's, not one seat), a read error, or an ambiguous reading
+// (the roster unreadable and /running holding entries this name cannot be
+// matched against) — "could not tell" is never "idle".
+func (s *Snapshot) Seat(layer, role string) SeatState {
+	seat, ok := s.cfg.LayerSeat(layer, role)
+	if !ok || seat.Model == "" {
+		return SeatState{}
+	}
+	key := layer + "/" + role
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if m, ok := s.seats[key]; ok && s.fresh(m.at) {
+		return m.state
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), seatProbeTimeout)
+	defer cancel()
+	rd, err := s.readSeat(ctx, s.cfg.Endpoint, seat.Model)
+	st := SeatState{}
+	if err == nil && !rd.Ambiguous {
+		st = SeatState{Known: true, Loaded: rd.Loaded, Inflight: rd.Inflight}
+		if !rd.Loaded {
+			st.Inflight = 0
+		}
+	}
+	s.seats[key] = seatMemo{at: s.now(), state: st}
+	return st
+}
+
+func lower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
+func hasPrefixFold(s, lowerPrefix string) bool {
+	return len(s) >= len(lowerPrefix) && lower(s[:len(lowerPrefix)]) == lowerPrefix
+}
