@@ -16,6 +16,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/mediaseat"
 	"github.com/dmmdea/offload-harness/internal/servingtmpl"
 	"github.com/dmmdea/offload-harness/internal/vllmseat"
+	"gopkg.in/yaml.v3"
 )
 
 // The serving templates are EMBEDDED so a fetched binary can render a config on a
@@ -381,6 +382,13 @@ func runInstallRender(args []string) error {
 	if err != nil {
 		return fmt.Errorf("tier %s: %w", id, err)
 	}
+	// The serving-config gate (H-01): a rendered config that runs a model on
+	// the CPU, keeps one loaded past five idle minutes, or preloads is REFUSED
+	// here, before it can be written — the templates were fixed by hand twice
+	// (0.115.4, 0.115.7) and nothing stopped the next regression.
+	if vs := servingtmpl.Audit(rendered); len(vs) != 0 {
+		return fmt.Errorf("tier %s: the rendered config breaks %d operator rule(s) (INV-1/INV-2) — not written:\n%s", id, len(vs), servingtmpl.Violations(vs))
+	}
 
 	warnMissingSeatModels(p.MediaSeats, *modelsDir, target)
 	warnMissingGatedModels(include26B, p.IncludeQwen38, p.IncludeQwen354B, p.IncludeQwen359B, *modelsDir, target)
@@ -397,5 +405,37 @@ func runInstallRender(args []string) error {
 	// a terminating error — which is exactly how the delegated installer first broke.
 	// stdout is free here because the config only goes there when --out is empty.
 	fmt.Printf("wrote %s (tier %s, %s/%s)\n", *out, id, osTag(target), p.Backend)
+	return nil
+}
+
+// runAuditYAML is the session-start half of the serving-config gate (H-01 /
+// H-02): the same checker `install render` refuses on, over LIVE files. One
+// line per violation, exit 1 when any file breaks a rule, so a start audit
+// that pipes it cannot read a broken box as compliant.
+func runAuditYAML(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("audit-yaml: at least one file is required")
+	}
+	bad := 0
+	for _, path := range args {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("audit-yaml: %w", err)
+		}
+		vs := servingtmpl.Audit(string(b))
+		var doc struct {
+			Models map[string]any `yaml:"models"`
+		}
+		_ = yaml.Unmarshal(b, &doc)
+		if len(vs) == 0 {
+			fmt.Printf("%s: OK (%d models, every entry ttl %d, cards only)\n", path, len(doc.Models), servingtmpl.TTLRequired)
+			continue
+		}
+		bad++
+		fmt.Printf("%s: %d violation(s)\n%s\n", path, len(vs), servingtmpl.Violations(vs))
+	}
+	if bad > 0 {
+		return fmt.Errorf("audit-yaml: %d file(s) break the operator rules", bad)
+	}
 	return nil
 }

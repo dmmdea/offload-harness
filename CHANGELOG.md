@@ -6,6 +6,27 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.16] - 2026-09-10 - the serving config has a gate
+
+Register H-01 (INV-1 / INV-2 as a gate that can fail). The operator's hard rules — the cards do the inference,
+every idle model unloads at five minutes — were enforced by hand: the templates were fixed twice (0.115.4,
+0.115.7) and nothing stopped the next regression.
+
+- `servingtmpl.Audit`: one checker over a llama-swap config — every model `ttl: 300`, no `-ngl 0` /
+  `--n-gpu-layers 0`, no empty `CUDA_VISIBLE_DEVICES`, no persistent group, no preload hook, must parse.
+- `install render` REFUSES a rendered config that breaks a rule (nothing is written; every violation named).
+- `local-offload audit-yaml FILE...` runs the same checker over live files, exit 1 on any violation — the
+  session-start audit's (H-02) input.
+- `TestAuditRefusesEveryOperatorRuleBreak` (one red fixture per rule) and `TestEveryTemplatePassesTheAudit`.
+- The gate's first run over the RENDERED tiers found blackwell-72's vision and STT seats with no `ttl`: the
+  resident template's `# offload-seats: … ttl=none` directive (pre-rule, "a resident seat never unloads") made
+  the renderer skip the ttl the 0.115.7 template fix had put on every static entry. The token is now ignored,
+  every rendered seat carries `ttl: 300`, and the old test is inverted. Its first run over the LIVE configs
+  found the Aorus memory-stack lane (embeddinggemma, bge-reranker-v2-m3) still on `--n-gpu-layers 0`; fixed
+  on the box the same hour.
+- Not covered yet: `--n-cpu-moe` above the tier's measured spill (no per-tier spill field exists to compare
+  against), seat-unit `[Install]`, and UUID-vs-index pins (A-87) — separate rows.
+
 ## [0.115.15] - 2026-09-10 - thinking stays off after the first starved step
 
 From the 0.115.12 acceptance run's 27B row: three starved finals (4,096 of 4,096 tokens reasoning each) in
