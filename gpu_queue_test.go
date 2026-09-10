@@ -64,19 +64,20 @@ func TestGPUReserveFailsFastOnlyWhenAskedTo(t *testing.T) {
 		}
 	}
 
-	// A short wait against a holder whose DECLARED window outlasts it returns at
-	// once (gpulease.Acquire's short-circuit) — and says how to queue anyway.
+	// A wait that runs out comes back held — after standing in line for its whole
+	// length (the holder's 1h declaration is reported, not trusted: WaitOut) — and
+	// says how to keep queueing.
 	start := time.Now()
 	args = append([]string{"--config", cfg, "--wait", "300ms"}, helperCmd()...)
 	err = runGPUReserve(args)
 	if err == nil {
 		t.Fatal("a 300ms wait against a 1h text hold must come back held")
 	}
-	if !strings.Contains(err.Error(), "not free within --wait 300ms") || !strings.Contains(err.Error(), "longer than the holder's declared window") {
+	if !strings.Contains(err.Error(), "not free within --wait 300ms") || !strings.Contains(err.Error(), "longer --wait") {
 		t.Errorf("the refusal must name the wait and the fix; got: %v", err)
 	}
-	if el := time.Since(start); el > 2*time.Second {
-		t.Errorf("short-circuit took %s; a declared window past the wait must not be polled", el)
+	if el := time.Since(start); el < 300*time.Millisecond {
+		t.Errorf("gave up after %s; the declared window must not cut a %s wait short", el, 300*time.Millisecond)
 	}
 }
 

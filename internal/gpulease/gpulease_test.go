@@ -113,6 +113,43 @@ func TestExclusiveTextHoldRoundTripsAndNamesItsWindow(t *testing.T) {
 	_ = ml.Release()
 }
 
+// A RESERVATION waits the whole window out. The declared-window short-circuit is
+// right for a tool call with a 90 s budget and wrong for `gpu reserve`, whose caller
+// would otherwise give the job up: holders release before their declared window as a
+// rule (the wrapper form releases when its command ends). Measured live 2026-09-09: a
+// 2 m waiter behind a 3 m holder was refused at once; the holder released 6 s later.
+func TestWaitOutQueuesBehindALongTextHold(t *testing.T) {
+	m, now := newTestManager(t)
+	holder, err := m.TryAcquire(ClassText, Options{Reason: "3m bench", TTL: 3 * time.Minute})
+	if err != nil {
+		t.Fatalf("setup acquire: %v", err)
+	}
+	// Without WaitOut the same call is answered at once (the tool-call rule).
+	probes := 0
+	m.sleep = func(d time.Duration) { probes++; *now = now.Add(d) }
+	if _, err := m.Acquire(ClassText, Options{Reason: "waiter", Wait: 2 * time.Minute}); err == nil || probes != 0 {
+		t.Fatalf("without WaitOut a window past the wait must short-circuit: err=%v probes=%d", err, probes)
+	}
+	// With WaitOut the waiter stays in line and takes the card when the holder frees.
+	m.sleep = func(d time.Duration) {
+		probes++
+		*now = now.Add(d)
+		if probes == 6 {
+			if rerr := holder.Release(); rerr != nil {
+				t.Errorf("holder release: %v", rerr)
+			}
+		}
+	}
+	lease, err := m.Acquire(ClassText, Options{Reason: "waiter", Wait: 2 * time.Minute, WaitOut: true})
+	if err != nil {
+		t.Fatalf("WaitOut dropped a job the holder freed the card for: %v", err)
+	}
+	if probes != 6 {
+		t.Errorf("took the card after %d probes, want 6 (the holder released on the sixth)", probes)
+	}
+	_ = lease.Release()
+}
+
 // THE INCIDENT, as a test: a text reservation is held and a media job arrives.
 // Media must be refused, because acquiring is what would let it call freeLlamaSwap
 // and tear the tier down mid-benchmark.

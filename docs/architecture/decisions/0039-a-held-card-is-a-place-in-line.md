@@ -44,9 +44,13 @@ told a session what to do with a held card other than not use it.
    is the one that took the card; the parent reports success only once that is true, or the
    child's exit when the line did not move in time. The wait prints exactly two stderr lines
    (`queued behind …`, `acquired after …`) — never one per poll, because the session wrapping
-   the command turns each printed line into a notification. `gpulease.Acquire`'s existing
-   short-circuit stands: a text holder whose declared window outlasts `--wait` is answered at
-   once, with the window, and every refusal names the flag that would have queued.
+   the command turns each printed line into a notification. `gpulease.Acquire`'s
+   declared-window short-circuit is **disabled** for a reservation (`Options.WaitOut`): it is
+   right for a tool call with a 90 s budget and wrong for a caller that would otherwise give
+   the job up, because holders release before their declared window as a rule (the wrapper
+   form releases when its command ends). The first live proof of this change found exactly
+   that: a `--wait 2m` waiter behind a `--for 3m` holder was refused at once, and the holder
+   released six seconds later. Every refusal names the flag that would have kept queueing.
 
 2. **`--unload-seat` implies `--exclusive`, and an exclusive text lease gates loads.** The
    lease record gains `exclusive`; `blocksLoad` in the admission gate treats

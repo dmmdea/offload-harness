@@ -197,6 +197,14 @@ type Options struct {
 	// cards and the text-load gate must keep them clear. Ignored for media, whose
 	// holder already blocks loads by class.
 	Exclusive bool
+	// WaitOut keeps Acquire polling for the whole Wait even when a TEXT holder's
+	// declared window outlasts it. The short-circuit in Acquire is right for a tool
+	// call with a 90 s budget, and wrong for a caller that would otherwise give the
+	// job up: a declared window is a ceiling the holder usually releases before —
+	// the wrapper form releases the moment its command ends. Measured live
+	// 2026-09-09: a `gpu reserve --wait 2m` behind a `--for 3m` holder was refused
+	// at once, and the holder released six seconds later.
+	WaitOut bool
 }
 
 // Manager binds a resolved state root. Construct with Open, which performs the
@@ -802,7 +810,10 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 	// CEILING, not a promise — a video job declares a 25-minute budget and routinely
 	// finishes in three — so short-circuiting on it would drop jobs that were about to
 	// be served.
-	if held.Info.Class == ClassText && !held.Info.ExpiresAt.IsZero() &&
+	//
+	// Unless the caller said WaitOut: for it the window is information, not a
+	// verdict (see Options.WaitOut).
+	if !opts.WaitOut && held.Info.Class == ClassText && !held.Info.ExpiresAt.IsZero() &&
 		held.Info.ExpiresAt.After(m.now().Add(opts.Wait)) {
 		return nil, err
 	}

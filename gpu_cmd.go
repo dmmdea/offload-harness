@@ -109,9 +109,9 @@ const queueHint = gpulease.QueueHint
 // defaultReserveWait is how long `gpu reserve` queues behind a holder when the caller
 // says nothing. Eight hours, not 90 s: the media pipeline's ceiling protects ONE tool
 // call from hanging, but a reservation is taken by a session that has a job to run and
-// would otherwise write the job off. The Acquire short-circuit still applies — a text
-// holder whose declared window outlasts the wait comes back at once, with the window,
-// so the caller can lengthen --wait rather than poll for hours toward a known answer.
+// would otherwise write the job off. The whole window is waited out (Options.WaitOut):
+// a text holder's declared window is printed, not trusted, because holders release
+// before it as a rule.
 const defaultReserveWait = 8 * time.Hour
 
 func runGPUReserve(args []string) error {
@@ -125,7 +125,7 @@ func runGPUReserve(args []string) error {
 	drain := fs.Bool("drain", false, "after taking the lease, wait until the agent seat reports no request in flight (llama-swap /running + the seat's own metrics) before continuing; errors at --drain-timeout and releases the lease")
 	drainTimeout := fs.Duration("drain-timeout", 2*time.Minute, "how long --drain waits for in-flight requests to finish")
 	unload := fs.Bool("unload-seat", false, "after the drain, unload the agent seat through llama-swap so the cards are free; the wrapper form warms it back when the command ends (detach: use `gpu release --warm-seat`); implies --exclusive")
-	wait := fs.Duration("wait", defaultReserveWait, "how long to QUEUE behind a current holder before giving up (0 = fail fast); a text holder whose declared window outlasts this returns at once, naming the window")
+	wait := fs.Duration("wait", defaultReserveWait, "how long to QUEUE behind a current holder before giving up (0 = fail fast); the holder's declared window is reported, not trusted — the wait runs its full length")
 	exclusive := fs.Bool("exclusive", false, "stamp a text lease exclusive: the harness's text-load gate then keeps models off these cards for the lease's length (loads ride a cascade remote lane or wait their own budget); implied by --unload-seat")
 	asJSON := fs.Bool("json", false, "emit JSON")
 	_ = fs.Parse(args)
@@ -268,15 +268,12 @@ func acquireQueued(m *gpulease.Manager, class gpulease.Class, opts gpulease.Opti
 	if err == nil || wait <= 0 || !errors.As(err, &held) {
 		return lease, heldHint(err, wait)
 	}
-	// Do not announce a queue we will not stand in: Acquire answers at once when a
-	// TEXT holder's declared window outlasts the wait (its short-circuit), and the
-	// hint on that error is the whole message.
-	if held.Info.Class == gpulease.ClassText && !held.Info.ExpiresAt.IsZero() && held.Info.ExpiresAt.After(time.Now().Add(wait)) {
-		return nil, heldHint(err, wait)
-	}
 	fmt.Fprintf(os.Stderr, "gpu reserve: queued behind %v — waiting up to %s\n", held, wait)
 	start := time.Now()
-	opts.Wait = wait
+	// WaitOut: the holder's declared window is printed above as information, never
+	// treated as a verdict — holders release before it as a rule, and a waiter that
+	// left the line on the declaration was the refusal this verb exists to end.
+	opts.Wait, opts.WaitOut = wait, true
 	lease, err = m.Acquire(class, opts)
 	if err != nil {
 		return nil, heldHint(err, wait)
@@ -295,7 +292,7 @@ func heldHint(err error, wait time.Duration) error {
 	if wait <= 0 {
 		return fmt.Errorf("%w; pass --wait <duration> (default %s) to queue behind it instead of failing", err, defaultReserveWait)
 	}
-	return fmt.Errorf("%w; not free within --wait %s — pass a --wait longer than the holder's declared window to queue behind it", err, wait)
+	return fmt.Errorf("%w; not free within --wait %s — pass a longer --wait to keep queueing", err, wait)
 }
 
 // detachHolder spawns a HIDDEN child that owns the lease, so the lease's holder pid is
@@ -427,7 +424,7 @@ func runGPUHold(args []string) error {
 	// taken by the pid the parent reports and a parent that dies mid-wait leaves
 	// nothing behind but a holder that will release at its own deadline.
 	lease, err := m.Acquire(gpulease.Class(*class), gpulease.Options{
-		Reason: *reason, Origin: *origin, TTL: *dur, Wait: *wait, Exclusive: *exclusive,
+		Reason: *reason, Origin: *origin, TTL: *dur, Wait: *wait, WaitOut: true, Exclusive: *exclusive,
 	})
 	if err != nil {
 		return err

@@ -18,9 +18,11 @@ look reasonable, and no instruction surface said otherwise.
   pipeline underneath had queued renders behind each other since ADR 0018. The detached holder (`gpu hold`)
   is the process that queues, so the pid `reserved:` reports is the one that took the card; the parent waits
   for that, or for the holder's exit when the line did not move in time. Exactly two stderr lines per wait
-  (queued / acquired) — never one per poll. A text holder whose declared window outlasts `--wait` is answered
-  at once, with the window; every refusal names the flag that would have queued. `gpu status` ends with the
-  queue command (`queue_with` in `--json`).
+  (queued / acquired) — never one per poll. The holder's declared window is reported, never trusted
+  (`gpulease.Options.WaitOut`): the declared-window short-circuit is right for a 90 s tool call and wrong for a
+  reservation, since holders release before their window as a rule — the first live proof found a `--wait 2m`
+  waiter refused at once behind a `--for 3m` holder that released six seconds later. Every refusal names the
+  flag that would have kept queueing. `gpu status` ends with the queue command (`queue_with` in `--json`).
 - `--unload-seat` (or an explicit `--exclusive`) stamps the text lease **exclusive**. The text-load admission
   gate (ADR 0026) gated media leases only, on the reasoning that a text holder "unloads nothing" — false the
   moment `--unload-seat` existed: the next interactive text call pulled a model straight back onto the cards a
