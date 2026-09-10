@@ -11,8 +11,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
 
@@ -254,6 +256,54 @@ func TestStatusFleetLocalSeatColdNeverLoads(t *testing.T) {
 // TestNCtxFromProps: the window extractor must read both llama.cpp schema
 // generations (default_generation_settings.n_ctx on current builds, root n_ctx
 // on older ones) and answer "unknown" — never zero-as-a-value — otherwise.
+// offload_status is the call a session makes before deciding whether the local card
+// is usable. Until 0.115.2 it said nothing about the LOCAL lease — only the remote
+// nodes' — so sessions read nvidia-smi instead and concluded "busy, refuse". The block
+// must report the holder AND, held or free, the exact command that queues behind it.
+func TestStatusPublishesTheLocalLeaseWithTheQueueCommand(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }))
+	defer upstream.Close()
+	cfg := config.Default()
+	cfg.Endpoint = upstream.URL
+	cfg.StateDir = t.TempDir()
+	t.Setenv("NVIDIA_API_KEY", "")
+	t.Setenv("NGC_API_KEY", "")
+	s := New(pipeline.New(cfg, nil, nil, nil))
+
+	status := func() map[string]any {
+		res, err := s.handleStatus(context.Background(), callReq(`{}`))
+		if err != nil {
+			t.Fatalf("handleStatus: %v", err)
+		}
+		gl, _ := decodeResult(t, res)["gpu_lease"].(map[string]any)
+		if gl == nil {
+			t.Fatal("status has no gpu_lease block")
+		}
+		return gl
+	}
+	free := status()
+	if free["held"] != false || !strings.Contains(free["queue_with"].(string), "gpu reserve --wait") {
+		t.Fatalf("free card must still carry the queue command: %v", free)
+	}
+
+	m, err := gpulease.OpenAt("", cfg.StateDir)
+	if err != nil {
+		t.Fatalf("open lease: %v", err)
+	}
+	l, err := m.TryAcquire(gpulease.ClassText, gpulease.Options{Reason: "5070 bench", Exclusive: true, TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer func() { _ = l.Release() }()
+	held := status()
+	if held["held"] != true || held["class"] != "text" || held["exclusive"] != true || held["reason"] != "5070 bench" {
+		t.Errorf("held lease misreported: %v", held)
+	}
+	if note, _ := held["note"].(string); !strings.Contains(note, "QUEUE") || !strings.Contains(note, "never be refused") {
+		t.Errorf("the held note must say queue, never refuse: %q", note)
+	}
+}
+
 func TestNCtxFromProps(t *testing.T) {
 	cases := []struct {
 		name  string

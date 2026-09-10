@@ -150,13 +150,24 @@ func awaitCard(ctx context.Context, base, model string, deadline time.Time) erro
 // blocksLoad decides whether info describes a card this process must not pull a
 // model onto.
 //
-// ClassMedia ONLY, and that is a choice with a reason. A ClassText reservation is
-// held by a benchmark or eval; its holder unloads nothing, so a switch underneath
-// it costs a MEASUREMENT, not the machine — while blocking every interactive text
-// call for the length of an eval run would be a larger regression than the one it
-// prevents. Media is the class that clears the card and then needs it kept clear.
+// ClassMedia, or a ClassText lease stamped EXCLUSIVE. A plain text reservation is
+// held by a benchmark whose holder unloaded nothing, so a switch underneath it
+// costs a MEASUREMENT, not the machine — and blocking every interactive text call
+// for the length of an eval would be a larger regression than the one it prevents.
+// That reasoning stopped covering the case where the holder DID clear the cards:
+// `gpu reserve --drain --unload-seat` empties llama-swap for a measurement, and
+// the next interactive text call pulled a multi-GB model straight back onto the
+// card mid-run — the residency switch that voided two 5070 Ti runs and taught
+// sessions to refuse GPU work outright rather than reserve it (0.115.2). Such a
+// holder stamps Exclusive, and its loads are gated exactly like a render's: a
+// call with a cascade remote lane rides the lane, one without waits its own
+// budget and is told who holds the card. Media stays the class that clears the
+// card and needs it kept clear regardless of any flag.
 func blocksLoad(info gpulease.Info) bool {
-	return info.Held && info.Class == gpulease.ClassMedia && !insideLease(info)
+	if !info.Held || insideLease(info) {
+		return false
+	}
+	return info.Class == gpulease.ClassMedia || (info.Class == gpulease.ClassText && info.Exclusive)
 }
 
 // insideLease reports whether this process is running UNDER the very lease that
@@ -193,7 +204,7 @@ func insideLease(info gpulease.Info) bool {
 type LeaseError struct {
 	Base    string         // the resolved llama-swap base the admission was for
 	Want    string         // the model this request named
-	Class   gpulease.Class // the holder's lease class (always media today)
+	Class   gpulease.Class // the holder's lease class (media, or an exclusive text hold)
 	PID     int            // the holder's pid
 	Reason  string         // the holder's declared reason
 	Origin  string         // the holder's declared origin

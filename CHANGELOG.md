@@ -6,6 +6,33 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.2] - 2026-09-09 - a held card is a place in line: `gpu reserve` queues, and an unloaded seat stays unloaded
+
+For the tenth time a session refused GPU work — "the harness is live, it pins models to these cards and can
+spawn on any of them mid-segment, which is what voided two 5070 Ti runs" — on a machine that has had a
+machine-wide GPU queue since 0.113.14 and a fleet to route around it. Two harness defects made that refusal
+look reasonable, and no instruction surface said otherwise.
+
+- `gpu reserve` now **queues** behind a current holder: `--wait` (default **8h**; `0` = the old fail-fast) in
+  both the wrapper and `--detach` forms. The CLI called `TryAcquire`, so a held card was an *error*, while the
+  pipeline underneath had queued renders behind each other since ADR 0018. The detached holder (`gpu hold`)
+  is the process that queues, so the pid `reserved:` reports is the one that took the card; the parent waits
+  for that, or for the holder's exit when the line did not move in time. Exactly two stderr lines per wait
+  (queued / acquired) — never one per poll. A text holder whose declared window outlasts `--wait` is answered
+  at once, with the window; every refusal names the flag that would have queued. `gpu status` ends with the
+  queue command (`queue_with` in `--json`).
+- `--unload-seat` (or an explicit `--exclusive`) stamps the text lease **exclusive**. The text-load admission
+  gate (ADR 0026) gated media leases only, on the reasoning that a text holder "unloads nothing" — false the
+  moment `--unload-seat` existed: the next interactive text call pulled a model straight back onto the cards a
+  measurement had just cleared. An exclusive text hold is now gated like a render: a load rides its
+  `cascade_remote_lanes` lane or waits its own budget and is told who holds the card. Plain text leases are
+  unchanged. `gpulease.Inspect` and `infoFrom` are one builder now, so the stamp cannot reach `ErrHeld` and
+  miss the gate.
+- `offload_status` publishes the LOCAL lease under `gpu_lease` (held/class/reason/expiry/exclusive) with
+  `queue_with`, so a session sees the queue command in the same call that told it the card is held.
+- Docs: `docs/systems/gpu-lease.md` ("A held card is a place in line", "Exclusive text holds"),
+  OPERATOR-GUIDE, ADR 0039.
+
 ## [0.115.1] - 2026-09-09 - a slow or missing cache server degrades the vLLM seat, never refuses it
 
 For hours on 2026-09-09 every delegation on the Qube came back HTTP 500: `seat_fg.sh` refused to start

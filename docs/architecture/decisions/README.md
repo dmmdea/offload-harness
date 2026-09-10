@@ -44,6 +44,7 @@ code, treat everything else as background.
 | [0036](0036-the-agent-lane-is-a-harnessed-environment.md) | Accepted | The agent lane is a harnessed environment: rules are data, the trace is telemetry, the rigger proposes |
 | [0037](0037-a-capability-name-has-one-owner-per-box.md) | Accepted | A capability name has one owner per box: the first listed accelerator |
 | [0038](0038-accelerator-work-travels-to-the-box-that-has-the-device.md) | Accepted | Accelerator work travels to the box that has the device, bytes included: fleet task `accel`, `fleet_accelerators`, local device wins a shared name |
+| [0039](0039-a-held-card-is-a-place-in-line.md) | Accepted | A held card is a place in line, and a cleared seat stays cleared: `gpu reserve --wait` queues (default 8h), `--unload-seat` stamps the text lease exclusive so loads are gated like a render, `offload_status.gpu_lease.queue_with` |
 
 
 ## Lifecycle

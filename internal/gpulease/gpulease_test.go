@@ -71,6 +71,48 @@ func TestSecondAcquireIsRefusedWithHolderDetail(t *testing.T) {
 	}
 }
 
+// An EXCLUSIVE text hold (the holder cleared the cards) must survive the round trip
+// to disk and back through the ONE inspection path, and must never be stamped on a
+// media lease, whose class already means "keep the card clear". The refusal a
+// waiter reads must carry the declared window — "held" alone sends it away, "held
+// until 12:45" lets it queue for the right length (0.115.2).
+func TestExclusiveTextHoldRoundTripsAndNamesItsWindow(t *testing.T) {
+	m, now := newTestManager(t)
+	l, err := m.TryAcquire(ClassText, Options{Reason: "5070 bench", TTL: 45 * time.Minute, Exclusive: true})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if info := m.Inspect(); !info.Held || !info.Exclusive {
+		t.Fatalf("Inspect = %+v, want a held, exclusive text lease", info)
+	}
+	_, err = m.TryAcquire(ClassText, Options{Reason: "second bench"})
+	var held *ErrHeld
+	if !errors.As(err, &held) {
+		t.Fatalf("second acquire = %v, want *ErrHeld", err)
+	}
+	if !held.Info.Exclusive {
+		t.Errorf("ErrHeld lost the Exclusive stamp: %+v", held.Info)
+	}
+	want := now.Add(45 * time.Minute).Local().Format(time.Kitchen)
+	for _, s := range []string{"exclusive", "declared until " + want} {
+		if !strings.Contains(err.Error(), s) {
+			t.Errorf("ErrHeld message %q must carry %q", err.Error(), s)
+		}
+	}
+	if err := l.Release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	// Media ignores the flag: its class is the exclusion.
+	ml, err := m.TryAcquire(ClassMedia, Options{Reason: "render", Exclusive: true})
+	if err != nil {
+		t.Fatalf("media acquire: %v", err)
+	}
+	if m.Inspect().Exclusive {
+		t.Error("Exclusive was stamped on a media lease; the flag is text-only by definition")
+	}
+	_ = ml.Release()
+}
+
 // THE INCIDENT, as a test: a text reservation is held and a media job arrives.
 // Media must be refused, because acquiring is what would let it call freeLlamaSwap
 // and tear the tier down mid-benchmark.

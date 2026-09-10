@@ -106,14 +106,30 @@ const (
 	acquirePollInterval = time.Second
 )
 
+// QueueHint is the one sentence every "the card is held" surface ends with — `gpu
+// status`, `offload_status`, the CLI refusals. It exists because the sessions that
+// read "held" concluded "refuse the work" — ten times over — on a machine that has
+// had a queue since 0.113.14. A held card is a place in line, and the line is one
+// flag. Defined here so the CLI and the MCP status tool cannot drift apart.
+const QueueHint = "local-offload gpu reserve --wait 8h --drain --unload-seat --for <window> --reason <why> -- <cmd>  (queues until the holder releases; --wait 0 fails fast; never refuse GPU work because a card is held)"
+
 // ErrHeld is returned by TryAcquire when the card is legitimately held by someone
 // else. It carries the current holder so a caller can report an honest ETA rather
 // than a bare failure.
 type ErrHeld struct{ Info Info }
 
 func (e *ErrHeld) Error() string {
-	return fmt.Sprintf("GPU held by %s (pid %d, held %s, reason %q)",
+	s := fmt.Sprintf("GPU held by %s (pid %d, held %s, reason %q",
 		e.Info.Class, e.Info.PID, e.Info.Age.Round(time.Second), e.Info.Reason)
+	if e.Info.Exclusive {
+		s += ", exclusive"
+	}
+	// The declared window is what a waiter decides on — "held" alone sends it away,
+	// "held until 11:40" lets it queue for the right length.
+	if !e.Info.ExpiresAt.IsZero() {
+		s += ", declared until " + e.Info.ExpiresAt.Local().Format(time.Kitchen)
+	}
+	return s + ")"
 }
 
 // Holder identifies the process holding the lease. StartTimeMs is an opaque,
@@ -140,6 +156,13 @@ type Meta struct {
 	// RenewedAtMs is the heartbeat. A detached holder is a PROXY process, so pid
 	// liveness cannot detect a benchmark that died behind it — hence the heartbeat.
 	RenewedAtMs int64 `json:"renewed_at_ms"`
+	// Exclusive (0.115.2) is stamped by a TEXT holder that cleared the cards for
+	// itself (`gpu reserve --drain --unload-seat`, or an explicit --exclusive). It
+	// tells the text-load admission gate that a model pulled onto these cards would
+	// land ON TOP of a measurement — the residency switch that voided two 5070 Ti
+	// runs — so such loads wait or route elsewhere for the lease's length. A plain
+	// text lease (the holder unloaded nothing) keeps the old, ungated behaviour.
+	Exclusive bool `json:"exclusive,omitempty"`
 }
 
 // Info is one point-in-time inspection.
@@ -153,6 +176,9 @@ type Info struct {
 	Origin    string
 	JobID     string
 	ExpiresAt time.Time
+	// Exclusive mirrors Meta.Exclusive: the holder cleared the cards and expects
+	// them to stay clear.
+	Exclusive bool
 }
 
 // Options configure an acquisition.
@@ -167,6 +193,10 @@ type Options struct {
 	// someone else. Zero means try exactly once. Only contention is waited out; a
 	// configuration fault is returned immediately, because waiting cannot fix it.
 	Wait time.Duration
+	// Exclusive stamps Meta.Exclusive on a TEXT lease: the holder is clearing the
+	// cards and the text-load gate must keep them clear. Ignored for media, whose
+	// holder already blocks loads by class.
+	Exclusive bool
 }
 
 // Manager binds a resolved state root. Construct with Open, which performs the
@@ -591,6 +621,7 @@ func infoFrom(meta *Meta, now time.Time) Info {
 		Origin:    meta.Origin,
 		JobID:     meta.JobID,
 		ExpiresAt: time.UnixMilli(meta.ExpiresAtMs),
+		Exclusive: meta.Exclusive,
 	}
 }
 
@@ -604,21 +635,10 @@ func (m *Manager) Inspect() Info {
 	if m.reclaimable(meta, now) {
 		return Info{}
 	}
-	age := now.Sub(time.UnixMilli(meta.AcquiredAtMs))
-	if age < 0 {
-		age = 0
-	}
-	return Info{
-		Held:      true,
-		Class:     meta.Class,
-		Epoch:     meta.Epoch,
-		PID:       meta.Holder.PID,
-		Age:       age,
-		Reason:    meta.Reason,
-		Origin:    meta.Origin,
-		JobID:     meta.JobID,
-		ExpiresAt: time.UnixMilli(meta.ExpiresAtMs),
-	}
+	// ONE builder. A second copy of the field list here is how Exclusive would
+	// reach ErrHeld but not Inspect — the vision gate and the load gate read
+	// through this path, and they are the readers the flag exists for.
+	return infoFrom(meta, now)
 }
 
 func (m *Manager) readMeta() (*Meta, error) {
@@ -843,6 +863,7 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 		AcquiredAtMs: now.UnixMilli(),
 		ExpiresAtMs:  now.Add(ttl).UnixMilli(),
 		RenewedAtMs:  now.UnixMilli(),
+		Exclusive:    opts.Exclusive && class == ClassText,
 	}
 	b, err := json.Marshal(&meta)
 	if err != nil {
