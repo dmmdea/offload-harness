@@ -4,10 +4,13 @@ Built 2026-09-01 from: the official ffmpeg.org documentation (ffmpeg.html, ffpro
 ffmpeg-filters.html, ffmpeg-formats.html, ffmpeg-utils.html, downloaded and read that day),
 `ffmpeg -h encoder=…` / `-filters` / `-encoders` dumps of the live builds, and ~180 commands
 run live on the workstation (ffmpeg 8.1.2 Gyan full build) and the Linux node (ffmpeg 8.0.1 Ubuntu) on
-lavfi-generated clips (`testsrc2` + `sine` / `aevalsrc`, no private footage). Every claim is
-tagged: **[measured]** = observed live on our machines (date given when it matters),
-**[doc]** = official ffmpeg.org text, **[community]** = widely reported third-party
-practice not re-verified here, **[inferred]** = my reasoning, verify before relying.
+lavfi-generated clips (`testsrc2` + `sine` / `aevalsrc`, no private footage). Extended
+2026-09-10 with the editing rig editing rig (**ffmpeg 9.0**) and a same-machine 8.1.2-vs-9.0.1
+A/B on the workstation — see `01-hosts-builds.md` § Version deltas; three claims below are
+version-qualified because of it. Every claim is tagged: **[measured]** = observed live on our
+machines (date given when it matters), **[doc]** = official ffmpeg.org text,
+**[community]** = widely reported third-party practice not re-verified here,
+**[inferred]** = my reasoning, verify before relying.
 
 Purpose: stop re-researching filter syntax, stop guessing quoting, make every media output
 verifiable by ffprobe/ebur128/frame counts instead of "exit code 0".
@@ -16,7 +19,7 @@ verifiable by ffprobe/ebur128/frame counts instead of "exit code 0".
 
 | File | Load when |
 |---|---|
-| `01-hosts-builds.md` | any session: which box has which ffmpeg, encoders, GPU, throughput numbers, the second ffmpeg 9.0.1 on the workstation |
+| `01-hosts-builds.md` | any session: which box has which ffmpeg, encoders, GPU, throughput numbers, the second ffmpeg 9.0.1 on the workstation — and **§ Version deltas** (8.1.2 vs 9.x) before porting a recipe between hosts |
 | `02-probing-and-verification.md` | reading a file (streams/format JSON, exact frame counts, keyframes, loudness, silence, frozen frames) and the verification gate every output must pass |
 | `03-cutting-concat-retime.md` | cutting (copy vs re-encode, the keyframe trap, `-ss` placement), concat demuxer vs filter, xfade, speed/slow, pitch |
 | `04-scaling-formats-delivery.md` | 16:9 / 9:16 / thumbnails, fit+pad, scale flags, fps, GIF/WebP, image sequences, stills, intermediates, YouTube/Shorts delivery recipes |
@@ -25,12 +28,12 @@ verifiable by ffprobe/ebur128/frame counts instead of "exit code 0".
 | `07-subtitles-text-overlays.md` | burn SRT/ASS, soft-mux, drawtext lower thirds, alpha PNG / ProRes 4444 overlays, the `%` and `-ss` traps |
 | `08-windows-quoting-and-scripting.md` | any filtergraph typed in PowerShell / cmd / Git Bash; exit codes per shell; `-progress` parsing; `-filter_script` |
 | `09-failure-modes.md` | anything that "ran fine" but is wrong; the catalog of traps with the fix |
-| `live-dump-<workstation>-2026-09-01.json`, `live-dump-<linux-node>-2026-09-01.json` | exact encoder/decoder/filter/format availability, hwaccels, NVENC option enums per host |
+| `live-dump-workstation-2026-09-01.json` (8.1.2), `live-dump-<linux-node>-2026-09-01.json` (8.0.1), `live-dump-<editing-rig>-2026-09-10.json` (9.0) | exact encoder/decoder/filter/format availability, hwaccels, NVENC option enums per host. Regenerate any host with `ffdump.py` |
 
 ## The ten rules (memorize; the rest of the folder is detail)
 
-1. **Exit code 0 is not verification.** `drawtext` with a `%` in the text renders NOTHING and exits 0; `subtitles=` after an input `-ss` renders nothing and exits 0; a `-c copy` cut starts on a keyframe up to 2 s early and exits 0. Verify every output in its own medium: ffprobe frame count and duration, ebur128 for loudness, `silencedetect` for dead air, `freezedetect` for repeated frames, a pixel diff for text/overlays. **[measured 2026-09-01]**
-2. **Never write `fontfile=C\:/…` unquoted.** On 8.1.2 it is a parse error in every shell. Working forms: `fontfile='C\:/Windows/Fonts/arial.ttf'` (quoted inside the graph), `fontfile=C\\:/…` (two backslashes reaching ffmpeg), or a drive-less `/Windows/Fonts/arial.ttf` when cwd is on C:. `font=Arial` (fontconfig) **segfaults** this build (0xC0000005). **[measured on bash, PS 5.1, pwsh 7, cmd]**
+1. **Exit code 0 is not verification.** `subtitles=` after an input `-ss` renders nothing and exits 0 (**on 8.1.2 AND 9.0/9.0.1**); a `-c copy` cut starts on a keyframe up to 2 s early and exits 0 (both); `drawtext` with a `%` in the text renders nothing and exits 0 **on 8.1.2** — 9.x turns that one into a hard `-22`/EINVAL with no output file. Verify every output in its own medium: ffprobe frame count and duration, ebur128 for loudness, `silencedetect` for dead air, `freezedetect` for repeated frames, a pixel diff for text/overlays. **[measured 2026-09-01 and 2026-09-10]**
+2. **The only portable `fontfile` form is quoted AND colon-escaped: `fontfile='C\:/Windows/Fonts/arial.ttf'`** (or `C\\:/…` so one backslash reaches ffmpeg). Measured failures of every other form, on 8.1.2 and 9.x alike: unquoted `C\:/…` is a parse error in every shell; quoted-but-unescaped `'C:/…'` is also a parse error; a drive-less `/Windows/Fonts/…` resolves against the **current drive** and silently falls back to fontconfig — which **segfaults** (0xC0000005) — from any cwd not on the font's drive (that is a live trap: the rig's `TEMP` is `D:\Temp`). `font=Arial` segfaults for the same reason: these Gyan builds have no fontconfig config. **[measured on bash, PS 5.1, pwsh 7, cmd; 8.1.2, 9.0, 9.0.1]**
 3. **Git Bash rewrites arguments that look like paths.** `subtitles=/Users/x.srt` becomes `C:/Program Files/Git/Users/x.srt`; `C\\:/Users/…` becomes `C\\;C:\Program Files\Git\Users\…`. Use relative paths, `-filter_script`, or `MSYS_NO_PATHCONV=1`. PowerShell and cmd pass them untouched. **[measured]**
 4. **Frame-accurate cut = re-encode; `-c copy` cut = keyframe-aligned.** `-ss` before `-i` with copy keeps the whole GOP and emits negative timestamps (first packet pts −1.0 s for `-ss 3` on a 2 s GOP); `-ss` after `-i` with copy drops the packets but leaves a hole with no video until the next keyframe. `-ss` before `-i` + re-encode is exact (120 frames for `-t 4` at 30 fps). **[measured]**
 5. **Input `-ss` resets timestamps to 0.** Anything keyed to absolute time (`subtitles`, `ass`, `enable=between(t,…)`, `-to`) then refers to seek-relative time. Add `-copyts` (and `setpts=PTS-STARTPTS` after the filter) or seek on the output side. `-to` after an input `-ss` is a duration, not an end time (`-ss 3.5 … -to 7.5` gave 7.5 s). **[measured]**

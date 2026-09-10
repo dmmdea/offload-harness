@@ -82,17 +82,19 @@ drawtext=fontfile=/Windows/Fonts/consola.ttf:timecode='01\:00\:00\:00':rate=30:f
 | `a\,b`, `a\;b`, `x\=y`, `Hola\: mundo` (colon escaped) | drawn |
 | `a,b` unescaped comma, `Hola: mundo` unescaped colon | **parse error** ("No option name near…") |
 | `It's` (apostrophe, arrived unquoted) | drawn |
-| `100%`, `100%%`, `100\%` with default `expansion=normal` | **"Stray %" and NOTHING drawn, exit 0** |
+| `100%`, `100%%`, `100\%` with default `expansion=normal` | **8.1.2: "Stray %" and NOTHING drawn, exit 0** · **9.0/9.0.1: "Stray %", exit −22, no output file** (loud) |
 | `100%:expansion=none`, `100%%:expansion=none` | drawn (literal `%`, `%%`) |
 | `textfile=… :expansion=none` with `%` and `"` in the file | drawn |
-Rule: any `%` in text → `expansion=none` (you lose `%{pts}`/`%{n}` in that instance; use two
+Rule (both versions): any `%` in text → `expansion=none` (you lose `%{pts}`/`%{n}` in that instance; use two
 drawtext instances if you need both). The docs say `%%` is a literal percent in normal
 expansion; on 8.1.2 Windows it is not — measured, so tagged as a build quirk to re-test on 9.0.1.
 
-### Fonts [measured]
-- `fontfile=` with a real path always works (Arial, Arial Bold, Consolas tested).
-- `font=Arial` / no font option → `Fontconfig error: Cannot load default config file` then **segfault** (exit −1073741819 / 139). Never rely on fontconfig on the Gyan build.
-- Brand fonts: point `fontfile=` at the .ttf directly (no install), e.g. `<brand fonts dir>\LeagueGothic-Regular.ttf` on the editing rig.
+### Fonts [measured 8.1.2, 9.0, 9.0.1]
+- **One portable form: `fontfile='C\:/Windows/Fonts/arial.ttf'`** — quoted inside the graph AND colon-escaped. `fontfile=C\\:/…` is equivalent (one backslash must reach ffmpeg).
+- `fontfile='C:/…'` — quoted but colon NOT escaped → parse error ("No option name near '/Windows/…'"). Quoting alone does not save you; the `:` is the option separator.
+- **A drive-less path is resolved against the CURRENT DRIVE, not C:.** `fontfile=/Windows/Fonts/arial.ttf` draws fine from a cwd on C: and **segfaults** from a cwd on any drive without `\Windows\Fonts` — measured both ways on the editing rig, whose `TEMP` is `D:\Temp`, so a script's default cwd is on D:. Never ship this form; a pipeline's cwd is not yours to assume.
+- `font=Arial` / no font option, and any unparsable fontfile path, fall back to fontconfig → `Fontconfig error: Cannot load default config file` then **segfault** (0xC0000005 / exit −1073741819 / 139). These Gyan builds carry no fontconfig config on either host. libass (`subtitles=`/`ass=`) is unaffected — it uses DirectWrite.
+- Brand fonts: point `fontfile=` at the .ttf directly (no install), e.g. `<brand fonts dir>\LeagueGothic-Regular.ttf` on the editing rig, written as `'D\:/Editing/Assets/Fonts/LeagueGothic-Regular.ttf'`.
 
 ## Overlays with alpha [measured]
 PNG with alpha (logo/watermark), top-right with 40 px margin, last 3 s only:

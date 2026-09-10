@@ -18,7 +18,7 @@ The doc's own advice: avoid it — use `textfile=` and `-filter_script`.
 | 1 | `"drawtext=fontfile=C\:/Windows/Fonts/arial.ttf:text='Hi'…"` | `C\:/` | same | same | same | **parse error** in all: "No option name near '/Windows/Fonts/…'" |
 | 2 | `"drawtext=fontfile='C\:/Windows/Fonts/arial.ttf':text='Hi'…"` | `'C\:/'` | same | same | same | **drawn** everywhere ← the portable form |
 | 3 | `"drawtext=fontfile=C\\:/…"` (bash needs `C\\\\:`) | `C\\:/` | same | same | same | drawn everywhere |
-| 4 | `"drawtext=fontfile=/Windows/Fonts/arial.ttf…"` | `/Windows/…` | same | same | same | drawn (cwd on C:); bash did NOT rewrite this one (no path-looking prefix) |
+| 4 | `"drawtext=fontfile=/Windows/Fonts/arial.ttf…"` | `/Windows/…` | same | same | same | drawn **only while cwd is on the font's drive** — resolved against the CURRENT DRIVE, so it segfaults via fontconfig from a cwd on D: (measured on the rig, `TEMP=D:\Temp`). Do not ship it. bash did NOT rewrite this one (no path-looking prefix) |
 | 5 | `"drawtext=font=Arial…"` | | | | | Fontconfig error + **segfault** (139 / −1073741819) in every shell |
 | 6 | `"drawtext=fontfile='C\:\\Windows\\Fonts\\arial.ttf'…"` | `'C\:\\Windows\\…'` | same | same | same | drawn (backslash path, escaped) |
 | 7 | `-filter_script:v vf.txt` | file content verbatim | | | | parses; drawn only when the text has no `%` (07) |
@@ -29,8 +29,8 @@ The doc's own advice: avoid it — use `textfile=` and `-filter_script`.
 | 14 | `"…text='%{pts\:hms}'…"` | ok | ok | ok | cmd needs `%%{pts\:hms}` in a .cmd file | drawn |
 | 16 | `'drawtext=fontfile=C\\Windows\\Fonts\\arial.ttf…'` (unescaped colon) | | segfault | segfault | | `C\\Windows` is not a path → fontconfig fallback → crash |
 
-cmd column detail (full 17-variant run from a `.cmd` file via `cmd /c`, 2026-09-01, every line pixel-verified):
-`fontfile='C\:/…'` drawn · `fontfile=C\:/…` unquoted parse error (−22) · drive-less `/Windows/Fonts/arial.ttf` drawn · `font=Arial` segfault · `fontfile='C\:\Windows\Fonts\arial.ttf'` with SINGLE backslashes segfault (cmd does not eat backslashes, ffmpeg treats `\W` as an escape → garbage path → fontconfig) · `-filter_script:v` drawn · `text='Hello\, world\: 100%% done':expansion=none` drawn (the `%%` becomes `%` in a batch file) · `subtitles='C\:/full/test.srt'` drawn · `subtitles=C\:/full/test.srt` unquoted → "Unable to parse original_size" (needs `C\\:` when unquoted) · drive-less `subtitles=/full/test.srt` drawn · `text=\"Hi there\"` drawn with the quotes · `textfile=…:expansion=none` drawn · `text='%%{pts\:hms}'` drawn · `-filter_complex "[0:v]…[v]" -map "[v]"` drawn · `text='50%%':expansion=none` drawn · `text='100%%'` (normal expansion) → "Stray %" and NOT drawn, rc 0.
+cmd column detail (full 17-variant run from a `.cmd` file via `cmd /c`, **ffmpeg 8.1.2**, 2026-09-01, every line pixel-verified; cwd was on C:, which is why the drive-less form drew — see variant 4):
+`fontfile='C\:/…'` drawn · `fontfile=C\:/…` unquoted parse error (−22) · drive-less `/Windows/Fonts/arial.ttf` drawn (cwd-dependent, do not ship) · `font=Arial` segfault · `fontfile='C\:\Windows\Fonts\arial.ttf'` with SINGLE backslashes segfault (cmd does not eat backslashes, ffmpeg treats `\W` as an escape → garbage path → fontconfig) · `-filter_script:v` drawn · `text='Hello\, world\: 100%% done':expansion=none` drawn (the `%%` becomes `%` in a batch file) · `subtitles='C\:/full/test.srt'` drawn · `subtitles=C\:/full/test.srt` unquoted → "Unable to parse original_size" (needs `C\\:` when unquoted) · drive-less `subtitles=/full/test.srt` drawn · `text=\"Hi there\"` drawn with the quotes · `textfile=…:expansion=none` drawn · `text='%%{pts\:hms}'` drawn · `-filter_complex "[0:v]…[v]" -map "[v]"` drawn · `text='50%%':expansion=none` drawn · `text='100%%'` (normal expansion) → "Stray %" and NOT drawn, rc 0.
 
 PowerShell-specific bites [measured]:
 - In a double-quoted PS string `$5` and `$name:` are variables: `"text='cost $5'"` reached ffmpeg as `cost ` and `"text=$t:fontsize=80"` was parsed as the scoped variable `$t:fontsize` (empty). Use **single-quoted** PS strings for filtergraphs, or `${t}`.
@@ -69,6 +69,7 @@ Git Bash-specific [measured]:
 | "No such filter" | AVERROR_FILTER_NOT_FOUND | 8 |
 | segfault (fontconfig) | −1073741819 (0xC0000005) | 139 |
 | `-n` and the output exists ("File … already exists. Exiting.") | **0** | **0** |
+| `drawtext` with a stray `%` (9.0/9.0.1 only; 8.1.2 exits 0) | −22 (EINVAL), no output file | 22 |
 | `-xerror`, `-err_detect explode` on the truncated file | same −1094995529 | 183 |
 | ffprobe missing file / invalid data | 1 | 1 |
 Rules: test `!= 0`; never branch on the value; and because `-n` exits 0, check that the output's
