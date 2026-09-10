@@ -188,6 +188,34 @@ func recordOf(step, maxTokens int, c Completion) CallRecord {
 	return r
 }
 
+// ResponseShape summarizes, from a run's call records, how the seat ANSWERED
+// (register D-45): which key carried hidden reasoning (vLLM `reasoning`,
+// llama.cpp `reasoning_content`, or none), whether the server reported
+// reasoning tokens, and how many tool calls were parsed. The 2026-09-04
+// hermes-vs-qwen3_xml parser mismatch and the 2026-09-10 reasoning-key
+// blind spot were both seat facts the corpus could not show; this is the
+// per-run record that makes the next one visible. Empty when no call ran.
+func ResponseShape(calls []CallRecord) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	key, tokensReported, toolCalls := "none", false, 0
+	for _, c := range calls {
+		if c.ReasoningKey != "" {
+			key = c.ReasoningKey
+		}
+		if c.ReasoningTokens > 0 {
+			tokensReported = true
+		}
+		toolCalls += c.ToolCalls
+	}
+	rt := "unreported"
+	if tokensReported {
+		rt = "reported"
+	}
+	return fmt.Sprintf("reasoning_key=%s reasoning_tokens=%s tool_calls_parsed=%d completions=%d", key, rt, toolCalls, len(calls))
+}
+
 // noteReasoningKey logs, once per (endpoint, model, key), which wire key a
 // seat returns its hidden reasoning under — the response-shape fact D-45
 // wants on record, cheap enough to keep on every run.

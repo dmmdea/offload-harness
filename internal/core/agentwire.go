@@ -230,6 +230,15 @@ type AgentWireResult struct {
 	HarnessBuildSHA256 string `json:"harness_build_sha256,omitempty"`
 	SeatConfigSHA256   string `json:"seat_config_sha256,omitempty"`
 	SeatConfigBasis    string `json:"seat_config_basis,omitempty"`
+	// ResponseShape (0.115.13, register D-45) is the seat's OBSERVED answer
+	// shape on this run — which wire key carried hidden reasoning (`reasoning`
+	// on vLLM, `reasoning_content` on llama.cpp, none), whether reasoning
+	// tokens were reported, how many tool calls parsed, how many completions
+	// ran. The pin above says what the seat IS; this says how it answered —
+	// the two seat facts (parser mismatch 2026-09-04, reasoning-key blind spot
+	// 2026-09-10) the corpus could not show. Omitempty: absent when no
+	// completion ran or on a pre-0.115.13 node.
+	ResponseShape string `json:"response_shape,omitempty"`
 
 	// --- Node-side prefill accounting (T2-B), previously ledger-only. The
 	// node's ledger row already carried these; the DELEGATOR could not see

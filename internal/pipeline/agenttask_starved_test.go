@@ -58,6 +58,9 @@ func TestRunAgentTaskReasoningStarvedFinalDefersAsBudgetWithoutARepack(t *testin
 	if wire.Calls[0].ReasoningTokens != 4096 || wire.Calls[0].FinishReason != "length" || !wire.Calls[1].ThinkingOff {
 		t.Fatalf("call records = %+v", wire.Calls)
 	}
+	if !strings.Contains(wire.ResponseShape, "reasoning_key=reasoning") || !strings.Contains(wire.ResponseShape, "reasoning_tokens=reported") || !strings.Contains(wire.ResponseShape, "completions=2") {
+		t.Fatalf("response_shape = %q, want the observed vLLM shape recorded (D-45)", wire.ResponseShape)
+	}
 	if wire.TokensOut != 8192 || wire.SeatTokensIn != 26000 {
 		t.Fatalf("tokens_out/seat_tokens_in = %d/%d, want both generations ledgered on the deferred row", wire.TokensOut, wire.SeatTokensIn)
 	}
