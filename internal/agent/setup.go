@@ -175,7 +175,7 @@ func (l *Loop) replaySetup(ctx context.Context, msgs []Msg, pinned map[string]bo
 			// still all there is — the 27B re-read ledger-01's cut-off last line
 			// and searched for a missing first-line ID before its budget ran out.
 			lines := strings.Count(content, "\n") + 1
-			if cut := strings.Count(content, " (line truncated)"); cut > 0 {
+			if cut := cutLineCount(content); cut > 0 {
 				content += fmt.Sprintf("\n(complete file: %d lines, of which %d over-long line(s) were cut at %d characters and marked \"(line truncated)\"; everything else is here — there is no further content; do not read it again or page with offset)", lines, cut, maxLineChars)
 			} else {
 				content += fmt.Sprintf("\n(complete file: %d lines — this is all of it, even where it begins or ends mid-sentence; there is no further content; do not read it again or page with offset)", lines)

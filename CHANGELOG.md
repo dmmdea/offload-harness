@@ -29,6 +29,11 @@ turn.
   costs one re-prefill of the transcript, only on the path that used to return nothing.
 - **Honest setup footer.** The replay's "complete file" footer now names lines `read_file` cut at 2,000 characters
   (it claimed completeness over them) and says an excerpt is all there is even where it begins or ends mid-sentence.
+- Reviewer round (PR #303): the footer counts only lines `read_file` itself cut (an `N: ` line of exactly 2,000
+  runes plus the marker) — a whole-content substring count claimed cut lines for any file that merely contains the
+  marker text, this repo's `tools.go` included; the budget defer's `reason` carries `stop_note`
+  (`step budget exhausted (N steps): forced final step: …`, the prefix unchanged); a forced final that is re-issued
+  (empty answer) records two `calls[]` entries with `forced_final`, one per completion like every re-issue.
 
 ## [0.115.18] - 2026-09-10 - in-loop offload tools ride the planner seat
 

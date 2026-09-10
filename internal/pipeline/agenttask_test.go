@@ -698,6 +698,11 @@ func TestRunAgentTaskBudgetDefers(t *testing.T) {
 	if !wire.Deferred || !strings.Contains(wire.Reason, "step budget") {
 		t.Fatalf("deferred/reason = %v/%q, want a step-budget defer", wire.Deferred, wire.Reason)
 	}
+	// 0.115.19 (D-89): the last step was the forced final; the seat still
+	// answered with a tool call, and the reason says so.
+	if !strings.Contains(wire.Reason, "forced final step") || !strings.Contains(wire.StopNote, "forced final step") {
+		t.Fatalf("reason/stop_note = %q/%q, want the forced-final evidence in both", wire.Reason, wire.StopNote)
+	}
 	if wire.DeferClass != core.DeferClassBudget {
 		t.Fatalf("defer_class = %q, want %q", wire.DeferClass, core.DeferClassBudget)
 	}

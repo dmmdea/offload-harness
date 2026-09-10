@@ -287,7 +287,7 @@ func (s *scope) readFile(_ context.Context, args string) (string, error) {
 				}
 				n++
 			}
-			line = line[:cut] + " (line truncated)"
+			line = line[:cut] + lineTruncatedMarker
 		}
 		fmt.Fprintf(&b, "%d: %s", i+1, line)
 		if i < end-1 {
@@ -460,4 +460,33 @@ func offloadTools(offload OffloadFunc, npu NPUFunc) []Tool {
 				return "", p, nil
 			}),
 	}
+}
+
+// lineTruncatedMarker is what read_file appends to a line it cut at maxLineChars.
+const lineTruncatedMarker = " (line truncated)"
+
+// cutLineCount counts the lines read_file ITSELF cut in one of its results: an
+// "N: " line whose text is exactly maxLineChars runes followed by the marker.
+// A document that merely CONTAINS the marker text is not a cut — this file
+// does, twice, and a whole-content substring count made the setup footer claim
+// two cut lines for it (reviewer finding, PR #303).
+func cutLineCount(out string) int {
+	n := 0
+	for _, line := range strings.Split(out, "\n") {
+		i := strings.Index(line, ": ")
+		if i <= 0 || !strings.HasSuffix(line, lineTruncatedMarker) {
+			continue
+		}
+		digits := true
+		for _, r := range line[:i] {
+			if r < '0' || r > '9' {
+				digits = false
+				break
+			}
+		}
+		if digits && utf8.RuneCountInString(strings.TrimSuffix(line[i+2:], lineTruncatedMarker)) == maxLineChars {
+			n++
+		}
+	}
+	return n
 }
