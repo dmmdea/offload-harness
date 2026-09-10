@@ -263,7 +263,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "note: embed memo counters may not have been persisted:", err)
 		}
 	}()
-	offload := pipeline.NewInLoopOffload(cfg, orCfg(*model, cfg.Model), timeout, agentCache)
+	// In-loop offload_* tools follow the single-loop PLANNER (0.115.18, D-88):
+	// on a box whose planner is a separate seat, the workhorse shares the
+	// planner's llama-swap and loading it evicts the planner mid-run. Two-tier
+	// keeps its documented zero-swap architect+editor pair and is not rerouted.
+	offload := pipeline.NewInLoopOffloadForPlanner(cfg, plannerModel, timeout, agentCache)
 
 	// The broker audit trail must live OUTSIDE any worktree; resolve a default
 	// only when a mutating capability is enabled.

@@ -6,6 +6,25 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.18] - 2026-09-10 - in-loop offload tools ride the planner seat
+
+Register D-88, found by the D-43 measurement on 0.115.17: both Qube legs lost their 900 s wall because the 27B
+planner called `offload_triage` three times, and each call loaded the workhorse (`gemma-4-e4b`) on the SAME
+llama-swap — the cascade pin shares the planner's card and the `interactive` set is mutually exclusive by
+design — so llama-swap evicted the 27B and the next step reloaded it: four 3-minute reloads per leg
+(`seat-cmd-tp2.log` 15:44 / 15:48 / 15:56 / 16:00). The tools were kept on the workhorse "for its economics"
+since the agent seat was introduced; the economics were a 6-minute swap per call.
+
+- `pipeline.InLoopOffloadModel(planner, workhorse)`: the in-loop `offload_*` text tools run on the PLANNER SEAT
+  whenever the planner is not the workhorse (it is loaded and idle while the tool runs); a single-model box keeps
+  the workhorse. Applied to all three drive modes — the fleet-node agent task (`NewRecordlessOffloadForPlanner`),
+  the MCP front door and the CLI single-loop planner (`NewInLoopOffloadForPlanner`). Two-tier keeps its documented
+  zero-swap architect+editor pair.
+- On the seat the tier calls render WITHOUT thinking (`chat_template_kwargs.enable_thinking=false`) — a mechanical
+  shape, not a reasoning step; a thinking seat would spend the task's 64–768-token budget inside the think block.
+  `Pipeline.RunTierWith` threads the option; `RunTier` keeps its signature (four consumers hold it as a func value).
+- The fleet-node path logs which model the tools ride and why (ledger evidence).
+
 ## [0.115.17] - 2026-09-10 - a 200 from the passthrough confirms the cold load
 
 The 0.115.15 acceptance run's 27B row: a 187 s cold load kept outside the wall (0.115.11 working) and then

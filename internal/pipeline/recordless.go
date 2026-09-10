@@ -86,6 +86,54 @@ func NewRecordlessOffload(cfg config.Config, model string, timeout time.Duration
 	return offloadClosure(NewRecordlessPipeline(cfg, timeout), model)
 }
 
+// InLoopOffloadModel picks the model the in-loop offload_* tools run on for a
+// loop whose planner is `planner` on a box whose workhorse is `workhorse`
+// (0.115.18, register D-88).
+//
+// The tools used to stay on the workhorse for its economics. But the workhorse
+// and the planner seat are served by the SAME llama-swap, and on every
+// reference box they cannot be resident together (the cascade pin shares the
+// planner's card; the interactive set is mutually exclusive by design) — so
+// loading the workhorse EVICTS the planner mid-run, and the next planner step
+// loads it back. Measured 2026-09-10 on the Qube 27B: three offload_triage
+// calls cost four 3-minute reloads and the entire 900 s wall. The planner
+// seat is already loaded and idle while the tool runs, so it is the free
+// model: onSeat reports that choice, and the caller renders those tier calls
+// WITHOUT thinking (a mechanical shape, not a reasoning step — a thinking
+// seat would spend the task's small budget inside the think block).
+//
+// A single-model box (planner == workhorse, or no planner configured) keeps
+// the workhorse: nothing else is loaded, nothing is evicted.
+func InLoopOffloadModel(planner, workhorse string) (model string, onSeat bool) {
+	if planner == "" || planner == workhorse {
+		return workhorse, false
+	}
+	return planner, true
+}
+
+// NewRecordlessOffloadForPlanner is NewRecordlessOffload with the model chosen
+// by InLoopOffloadModel for the given planner seat (the fleet-node agent task).
+func NewRecordlessOffloadForPlanner(cfg config.Config, planner string, timeout time.Duration) func(ctx context.Context, task, input string, params map[string]any) (string, error) {
+	model, onSeat := InLoopOffloadModel(planner, cfg.Model)
+	return offloadClosure(NewRecordlessPipeline(cfg, timeout), model, seatGenOptions(onSeat)...)
+}
+
+// NewInLoopOffloadForPlanner is NewInLoopOffload with the model chosen by
+// InLoopOffloadModel for the given planner seat (the MCP front door, the CLI).
+func NewInLoopOffloadForPlanner(cfg config.Config, planner string, timeout time.Duration, ca *cache.Cache) func(ctx context.Context, task, input string, params map[string]any) (string, error) {
+	model, onSeat := InLoopOffloadModel(planner, cfg.Model)
+	return offloadClosure(NewInLoopPipeline(cfg, timeout, ca), model, seatGenOptions(onSeat)...)
+}
+
+// seatGenOptions renders tier calls on the planner seat without thinking; on
+// the workhorse the request stays byte-identical to the pre-0.115.18 one.
+func seatGenOptions(onSeat bool) []llamaclient.GenOption {
+	if !onSeat {
+		return nil
+	}
+	return []llamaclient.GenOption{llamaclient.WithoutThinking()}
+}
+
 // NewInLoopOffload is NewRecordlessOffload plus the shared result cache (T2-D).
 // This is what the ordinary drive modes (MCP front door, CLI agent) should use:
 // the ledger stays pristine, and the loop stops paying twice for byte-identical
@@ -97,13 +145,13 @@ func NewInLoopOffload(cfg config.Config, model string, timeout time.Duration, ca
 // offloadClosure is the shared body of both constructors, so the defer-shaping
 // and media-dispatch semantics cannot drift between the cached and uncached
 // variants.
-func offloadClosure(ap *Pipeline, model string) func(ctx context.Context, task, input string, params map[string]any) (string, error) {
+func offloadClosure(ap *Pipeline, model string, opts ...llamaclient.GenOption) func(ctx context.Context, task, input string, params map[string]any) (string, error) {
 	return func(ctx context.Context, task, input string, params map[string]any) (string, error) {
 		req := offloadRequest(task, input, params)
 
 		var res core.Result
 		if textOnlyTask(req.Task) {
-			r, ok := ap.RunTier(ctx, req, model)
+			r, ok := ap.RunTierWith(ctx, req, model, opts...)
 			if !ok {
 				r.Deferred = true
 			}

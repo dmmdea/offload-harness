@@ -229,6 +229,10 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// seat (the in-loop cascade keeps workhorse economics; the PLANNER rides
 	// the agent seat). Unattended=true is honest — a fleet job has no human to
 	// answer a broker ask.
+	if m, onSeat := InLoopOffloadModel(seat, p.cfg.Model); onSeat {
+		// Ledger evidence for D-88: which model the in-loop tools ride, and why.
+		log.Printf("agent task: in-loop offload_* tools run on the planner seat %q without thinking (the workhorse %q shares its llama-swap and loading it would evict the seat)", m, p.cfg.Model)
+	}
 	built, berr := agent.Build(agent.BuildConfig{
 		PlannerBase: p.cfg.Endpoint,
 		Model:       seat,
@@ -236,7 +240,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		MaxSteps:    contract.MaxSteps,
 		MaxTokens:   p.cfg.AgentMaxTokens, // the executing node's budget (its seat's reasoning cost is its own fact)
 		ReadRoot:    contextDir,
-		Offload:     NewRecordlessOffload(p.cfg, p.cfg.Model, wall),
+		Offload:     NewRecordlessOffloadForPlanner(p.cfg, seat, wall), // on the seat itself when the seat is not the workhorse (D-88: the workhorse would evict it)
 		NPU:         NewLoopNPU(p.cfg),
 		Accel:       NewLoopAccel(p.cfg), // every lane the box lists (ADR 0037): a remote contract sees the tools a local run does
 		Unattended:  true,
