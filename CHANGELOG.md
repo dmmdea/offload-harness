@@ -6,6 +6,17 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.17] - 2026-09-10 - a 200 from the passthrough confirms the cold load
+
+The 0.115.15 acceptance run's 27B row: a 187 s cold load kept outside the wall (0.115.11 working) and then
+noted "warm request answered HTTP 200 … but /running never listed agent-pool ready" — because `agent-pool`
+is an ALIAS and `/running` carries the real id. llama-swap proxies only after the upstream's health check
+passed, so the 200 is the confirmation.
+
+- `warmSeat`: a 200 from the passthrough reports "cold load Ns outside the wall" (with a note when `/running`
+  lists the seat under another id) and spends no extra poll interval; a non-200 keeps the two-poll check
+  and the "never listed" note.
+
 ## [0.115.16] - 2026-09-10 - the serving config has a gate
 
 Register H-01 (INV-1 / INV-2 as a gate that can fail). The operator's hard rules — the cards do the inference,

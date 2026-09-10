@@ -124,6 +124,30 @@ func TestRunAgentTaskWarmsAnAbsentSeatOutsideTheWall(t *testing.T) {
 	}
 }
 
+// TestRunAgentTaskWarmUpTrustsA200WhenRunningListsAnAlias (0.115.17): the
+// passthrough answered 200 (llama-swap proxied, so the upstream is up) but
+// /running never lists the seat under the contract's name — an alias. The
+// load is reported as confirmed, with no extra poll interval spent.
+func TestRunAgentTaskWarmUpTrustsA200WhenRunningListsAnAlias(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs:      []string{agentTestSeat},
+		loop:           func(int64) string { return doneChat("The answer is 42.") },
+		repack:         func(int64) string { return `{"answer":"42"}` },
+		running:        func(int64) string { return `{"running":[{"model":"the-real-id","state":"ready","cmd":"y"}]}` },
+		upstreamModels: func(int64) string { return `{"object":"list","data":[{"id":"` + agentTestSeat + `"}]}` },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+	res := admissionTestPipeline(t, srv.URL, 30).Run(context.Background(), agentTestRequest(t, testContract()))
+	wire := decodeWire(t, res)
+	if wire.Deferred {
+		t.Fatalf("deferred: %s", wire.Reason)
+	}
+	if !strings.Contains(wire.AdmissionNote, "outside the wall") || strings.Contains(wire.AdmissionNote, "never listed") || wire.AdmissionWaitSec > 2.5 {
+		t.Fatalf("admission=%v note=%q, want the 200 trusted as the confirmation without a poll interval", wire.AdmissionWaitSec, wire.AdmissionNote)
+	}
+}
+
 // TestRunAgentTaskWarmUpIsBoundedByTheAdmissionBudget: a cold load that
 // outlives the budget proceeds into the wall with a note — never blocks.
 func TestRunAgentTaskWarmUpIsBoundedByTheAdmissionBudget(t *testing.T) {
