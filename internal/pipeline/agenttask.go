@@ -838,8 +838,10 @@ func admissionBudget(sec int) time.Duration {
 // warmSeat loads an ABSENT seat outside the wall (D-64). One GET through
 // llama-swap's per-model passthrough (`/upstream/<seat>/v1/models`, the same
 // route ProbeServedWindow uses) makes llama-swap swap the seat in and answers
-// only once its health check passes; the call is bounded by `budget`. Then
-// /running is polled (two extra polls at most) until the seat reads ready.
+// only once its health check passes; the call is bounded by `budget` (the
+// /running probes around it carry their own admissionPoll timeout each, so
+// the wall-clock spent can exceed the budget by up to two poll intervals).
+// Then /running is polled (two extra polls at most) until the seat reads ready.
 // Returns the time spent and a note when residency could not be settled —
 // a probe failure, a spent budget — so the wire says "the gate could not
 // tell" rather than "nothing was loading". A seat that is already ready
