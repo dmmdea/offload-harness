@@ -1,6 +1,6 @@
 # One box, three tiers: the Qube as a composite of blackwell-16 / 2x16 / 3x16 — design
 
-Date: 2026-09-09 · Status: DRAFT, awaiting operator review · Path: architectural
+Date: 2026-09-09 · Status: APPROVED 2026-09-09 (operator: "implement autonomously"; the three defaults below stand) · Path: architectural
 (touches tier identity, placement, the delegate gate, health, status, the serving renderer,
 docs, tier matrix)
 
