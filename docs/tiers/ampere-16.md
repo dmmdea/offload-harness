@@ -27,7 +27,7 @@ one declaration, so the seat and the lane routing to it cannot disagree.
 | tensor_parallel | 0 | `--tensor-parallel-size`; must equal how many cards are listed |
 | max_model_len | 131072 | the served window |
 | kv_cache_dtype | `fp8_e5m2` | KV precision — backend-dependent, not free everywhere |
-| ttl_seconds | 0 | idle window before the seat unloads and frees its cards |
+| ttl_seconds | 300 | idle window before the seat unloads and frees its cards |
 | launch | `—` | which artifact set starts it |
 | fallback | `qwen3.5-4b-agent` | the llama.cpp seat a box WITHOUT the vLLM venv serves instead |
 

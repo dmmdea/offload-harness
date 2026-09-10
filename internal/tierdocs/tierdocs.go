@@ -478,7 +478,7 @@ func agentSeatSection(p Profile) string {
 		fmt.Fprintf(&b, "| l1_staging_gb | %d |\n", c.EffectiveL1StagingGB())
 		fmt.Fprintf(&b, "| key_prefix | `%s` |\n", c.KeyPrefix)
 		if c.MinMBPS > 0 {
-			fmt.Fprintf(&b, "| min_mbps | %d — a mount slower than this is REFUSED |\n", c.MinMBPS)
+			fmt.Fprintf(&b, "| min_mbps | %d — below this the seat DEGRADES to the same-box L1 tier, loudly (0.115.1); it never refuses to start |\n", c.MinMBPS)
 		}
 		b.WriteString("\nThe store is a second device and stays **optional**: a box without one runs the seat on\n" +
 			"VRAM plus the L1 staging buffer.\n")

@@ -85,7 +85,7 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/embeddinggemma-300m-Q8_0.gguf
       --embedding --pooling mean --ctx-size 2048 --parallel 4 --port ${PORT} --host 127.0.0.1
-    ttl: 600
+    ttl: 300
   bge-reranker-v2-m3:
     env: [CUDA_VISIBLE_DEVICES=0]
     # -ngl 99 on THIS tier (operator decision 2026-08-13): a 16GB-class utility card
@@ -93,13 +93,13 @@ models:
     # rerank vs ~143ms typical / ~1.2s worst-case on GPU (measured on the reference
     # dual-Blackwell box). The old "-ngl 0 buys back VRAM for ~zero latency cost" note
     # was an 8GB-era carryover — it remains CORRECT for small-VRAM tiers: the linux
-    # (Lenovo-class) template keeps -ngl 0 deliberately. Raw-logit scores are
+    # (Lenovo-class) template ran it at -ngl 0 until 0.115.4; every template now serves it on the card (RAM is overflow only, operator 2026-09-10). Raw-logit scores are
     # device-independent, so admission-gate threshold calibration is unaffected.
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/bge-reranker-v2-m3-Q4_K_M.gguf
       --reranking --pooling rank --ctx-size 8192 --batch-size 4096 --ubatch-size 4096
       --parallel 4 -ngl 99 --port ${PORT} --host 127.0.0.1
-    ttl: 600
+    ttl: 300
 
 # RESIDENCY IS DECLARED WITH `matrix:` (llama-swap >= v202; groups' persistent:true was
 # measured FAILING on this exact box — the memory stack silently degraded mem0 to
