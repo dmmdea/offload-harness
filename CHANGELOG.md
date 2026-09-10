@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.10] - 2026-09-10 - the structured re-pack budget scales with the answer
+
+0.115.8 let a thinking seat finish a long answer (the acceptance run's 27B row: 22,865 chars over seven
+arrays; the 4B's: 8,380 chars). The re-pack then failed on both: its completion budget was a fixed 1,024
+tokens (raised from 512 on 2026-08-30 for a four-field digest), so the grammar completion came back as a
+JSON prefix and was filed as `output failed schema: invalid json: unexpected end of JSON input` / `invalid
+character '�' after array element` — an abstention the caller could not tell from a real one.
+
+- `repackBudget(output)`: `len(output)/3 + 512` tokens, floor 1,024, cap 8,192, on both re-pack lanes.
+- A grammar completion cut at `max_tokens` (`finish_reason: length`) is never validated: the reason names
+  `re-pack truncated at N tokens (the answer is M chars…)` and the retry runs at the cap; the chat-fallback
+  lane treats a truncated answer as a miss instead of trimming it to its outer braces.
+- Docs: fleet-node `structured` row.
+
 ## [0.115.9] - 2026-09-10 - the cross-seat retry is seat-aware
 
 Register D-46. The verification retry ran inside whatever the first attempt left of `timeout_sec` with a

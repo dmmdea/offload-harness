@@ -79,16 +79,19 @@ type agentFake struct {
 	// repackBodies records every grammar completion's decoded request body, so
 	// a test can assert on what the re-pack actually sent.
 	repackBodies chan map[string]any
+	// repackTruncated, when set, marks the n-th grammar completion as cut at
+	// max_tokens (finish_reason "length") — the 0.115.10 truncation shape.
+	repackTruncated func(n int64) bool
 	// rosterStatus, when non-zero, is the status /v1/models answers with.
 	rosterStatus int
 	// props, when non-nil, is served (as JSON) at the seat's
 	// /upstream/{seat}/props passthrough — the A1 pin probe's source. Nil
 	// keeps the historical 404, under which every consumer fails open and the
 	// pin stays absent.
-	props    any
-	propsCNT atomic.Int64
-	loopCalls    atomic.Int64
-	grammarCNT   atomic.Int64
+	props      any
+	propsCNT   atomic.Int64
+	loopCalls  atomic.Int64
+	grammarCNT atomic.Int64
 	// chatFallback scripts the grammar-FREE re-pack lane (repackViaChat): a
 	// chat request with neither tools nor grammar. nil = the route 404s, so
 	// every pre-fallback test keeps its exact outcome.
@@ -207,8 +210,12 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 				return
 			}
 			content, _ := json.Marshal(f.repack(n))
+			finish := "stop"
+			if f.repackTruncated != nil && f.repackTruncated(n) {
+				finish = "length"
+			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":` + string(content) + `},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":7}}`))
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":` + string(content) + `},"finish_reason":"` + finish + `"}],"usage":{"prompt_tokens":10,"completion_tokens":7}}`))
 		default:
 			if f.props != nil && r.URL.Path == "/upstream/"+agentTestSeat+"/props" {
 				f.propsCNT.Add(1)
@@ -811,8 +818,8 @@ func TestRunAgentTaskRepackWireFailuresAreInfrastructure(t *testing.T) {
 			wantSub: "body",
 		},
 		{
-			name: "a rate limiter answers 429",
-			script: func(f *agentFake) { f.repackStatus = http.StatusTooManyRequests },
+			name:    "a rate limiter answers 429",
+			script:  func(f *agentFake) { f.repackStatus = http.StatusTooManyRequests },
 			wantSub: "429",
 		},
 	}

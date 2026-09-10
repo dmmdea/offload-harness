@@ -58,6 +58,10 @@ const (
 	// abstentions on the 9B/4B were the same class. 1024 fits a bounded digest
 	// with headroom and stays well inside every seat's window.
 	agentRepackMaxTokens = 1024
+	// agentRepackMaxTokensCap bounds repackBudget: the loop's own final budget
+	// is capped at 8,192 (agent/thinking.go finalBudgetCap), and a re-pack that
+	// must hold MORE than the answer it re-packs is not an extraction.
+	agentRepackMaxTokensCap = 8192
 	// agentRepackChatTimeout bounds the grammar-free chat fallback: one
 	// completion over already-finished text, generously padded for a cold seat.
 	agentRepackChatTimeout = 120 * time.Second
@@ -594,6 +598,7 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 	user := fmt.Sprintf("Extract these fields from the text: %s.\n\nTEXT:\n%s", strings.Join(names, ", "), output)
 
 	var lastErr, transportErr error
+	budget := repackBudget(output)
 	for attempt := 0; attempt < 2; attempt++ {
 		// WithoutThinking: the re-pack is a mechanical shape transformation over
 		// text the loop has ALREADY finished reasoning about, so it should never
@@ -615,12 +620,24 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 		// The flag is harmless on a non-thinking template — gemma-4-e4b's output
 		// with it is identical to its output without it — so it rides every
 		// re-pack rather than being gated on a seat guess we cannot make.
-		gres, gerr := p.client.Generate(ctx, seat, system, user, grammar, agentRepackMaxTokens, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
+		gres, gerr := p.client.Generate(ctx, seat, system, user, grammar, budget, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
 		if gerr != nil {
 			lastErr = gerr
 			if transportErr == nil && genErrIsTransport(gerr) {
 				transportErr = gerr
 			}
+			continue
+		}
+		if gres.Truncated {
+			// The grammar completion hit max_tokens: what came back is a JSON
+			// prefix, and validating it would report "unexpected end of JSON
+			// input" or a cut multibyte character — the operator then rewrites
+			// a schema that was never the problem (2026-09-10: a 22,865-char
+			// answer re-packed at 1,024 tokens on the 27B, an 8,380-char one
+			// on the 4B, both filed as invalid JSON). Name the truncation, and
+			// give the retry the cap.
+			lastErr = fmt.Errorf("re-pack truncated at %d tokens (the answer is %d chars; the structured budget cannot hold it)", budget, len(output))
+			budget = agentRepackMaxTokensCap
 			continue
 		}
 		content := []byte(strings.TrimSpace(gres.Content))
@@ -657,6 +674,25 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 	return nil, 0, false, lastErr
 }
 
+// repackBudget sizes the structured re-pack's completion budget from the text
+// it re-packs (0.115.10). The re-pack is an EXTRACTION over the loop's final
+// answer, so its output is bounded by that answer: about a token per three
+// characters of source plus JSON overhead, never below the historical 1,024
+// and never above agentRepackMaxTokensCap. A fixed 1,024 was right for a
+// one-line answer and wrong the moment 0.115.8 let a thinking seat finish a
+// long one: a 22,865-char, seven-array extraction came back as a JSON prefix
+// and was filed as "invalid json" (2026-09-10, both fleet seats).
+func repackBudget(output string) int {
+	b := len(output)/3 + 512
+	if b < agentRepackMaxTokens {
+		return agentRepackMaxTokens
+	}
+	if b > agentRepackMaxTokensCap {
+		return agentRepackMaxTokensCap
+	}
+	return b
+}
+
 // repackViaChat is the grammar-free re-pack lane: a plain chat completion on
 // the seat asking for ONLY a JSON object, field types spelled out in the
 // prompt (a grammar would have enforced them; without one, "7" vs 7 is exactly
@@ -685,8 +721,8 @@ func (p *Pipeline) repackViaChat(ctx context.Context, seat string, schema map[st
 	// pinned to the native completion path and cannot make this call.
 	cc := llamaclient.New(p.cfg.Endpoint, "/v1/chat/completions", p.cfg.Model, agentRepackChatTimeout).
 		WithSeatEndpoints(p.cfg.SeatEndpoints)
-	gres, gerr := cc.Generate(ctx, seat, system, user, "", agentRepackMaxTokens, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
-	if gerr != nil {
+	gres, gerr := cc.Generate(ctx, seat, system, user, "", repackBudget(output), p.cfg.Temperature, 0, llamaclient.WithoutThinking())
+	if gerr != nil || gres.Truncated {
 		return nil, 0, false
 	}
 	content := strings.TrimSpace(gres.Content)
