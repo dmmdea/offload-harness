@@ -52,6 +52,19 @@ exec > >(tee -a "$LOG") 2>&1
 # that resolves is not a path that performs — after any network change re-measure the share (the same store wrote
 # at 4.6 MB/s over a Wi-Fi hop vs ~1 GB/s on its wired path). SEAT_L2_MIN_MBPS (default 0 = off) is a write floor:
 # below it the seat refuses to start, because a crawling share makes the tier slower than recomputing the prefix.
+# degrade_l2 <reason>: the cache server is not usable, so the seat serves the SAME-BOX tier (L1 only)
+# instead of refusing to start. 2026-09-09: the write floor refused every start for hours while the share
+# crawled at ~36 MB/s, and llama-swap turned each refusal into HTTP 500 — the whole agent lane died over a
+# cache ACCELERATOR being slow. A slow share is still never used (that is what the floor is for); the seat
+# just runs without it and says so, here and in $WORK/seat-l2.status (readback for health/status).
+L2_STATUS="${SEAT_L2_STATUS_FILE:-$WORK/seat-l2.status}"
+degrade_l2() {
+  echo "seat_fg: CACHE SERVER DEGRADED — $1 — serving the same-box tier (L1 ${L1_GB} GB, no L2). Fix the path and restart the seat to get the cache server back."
+  printf 'degraded %s reason=%s\n' "$(date -Is)" "$1" > "$L2_STATUS" 2>/dev/null || true
+  L2=""
+  L2_DEGRADED=1
+}
+L2_DEGRADED=0
 if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
   mkdir -p "$SEAT_L2_MOUNT_DIR"
   if ! mountpoint -q "$SEAT_L2_MOUNT_DIR"; then
@@ -70,10 +83,11 @@ if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
       else
         why="'$host' = $resolved answers on $port — check credentials, the share name, and the store's allow-list"
       fi
-      echo "seat_fg: REFUSING to start — cache-server share $SEAT_L2_MOUNT_SRC did not mount at $SEAT_L2_MOUNT_DIR: $why"
-      exit 1
+      degrade_l2 "share $SEAT_L2_MOUNT_SRC did not mount at $SEAT_L2_MOUNT_DIR: $why"
     fi
   fi
+fi
+if [ "$L2_DEGRADED" -eq 0 ] && [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
   echo "seat_fg: cache-server share mounted: $(df -h "$SEAT_L2_MOUNT_DIR" | tail -1)"
   # Prune the persistent store to its cap (0.113.12). LMCache's fs_native L2 eviction controller starts fresh with every MP
   # server and accounts only for the pages THAT instance writes; pages left by earlier instances are never counted or
@@ -105,15 +119,17 @@ if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
       t1=$(date +%s%N); rm -f "$probe"
       mbps=$(( 67109 / ( (t1 - t0) / 1000000 + 1 ) ))   # 64 MiB = 67,108,864 bytes → decimal MB/s over elapsed ms
       if [ "$mbps" -lt "$MIN_MBPS" ]; then
-        echo "seat_fg: REFUSING to start — cache-server share writes at ~${mbps} MB/s, below SEAT_L2_MIN_MBPS=${MIN_MBPS}: the tier would be slower than recompute. Fix the path, or run the same-box tier (SEAT_L2= empty, no SEAT_L2_MOUNT_* vars)"
-        exit 1
+        degrade_l2 "share writes at ~${mbps} MB/s, below SEAT_L2_MIN_MBPS=${MIN_MBPS} (the tier would be slower than recompute)"
+      else
+        echo "seat_fg: cache-server share write probe ~${mbps} MB/s (floor ${MIN_MBPS})"
       fi
-      echo "seat_fg: cache-server share write probe ~${mbps} MB/s (floor ${MIN_MBPS})"
     else
       rm -f "$probe"
-      echo "seat_fg: REFUSING to start — cannot write a 64 MiB probe to the cache-server share at $SEAT_L2_MOUNT_DIR within 120 s"
-      exit 1
+      degrade_l2 "cannot write a 64 MiB probe to the share at $SEAT_L2_MOUNT_DIR within 120 s"
     fi
+  fi
+  if [ "$L2_DEGRADED" -eq 0 ]; then
+    printf 'ok %s mbps=%s\n' "$(date -Is)" "${mbps:-unmeasured}" > "$L2_STATUS" 2>/dev/null || true
   fi
 fi
 
@@ -152,7 +168,11 @@ ss -ltn 2>/dev/null | grep -q ":$MP_PORT " || { echo "seat_fg: lmcache-mp never 
 if [ -n "$L2" ]; then
   echo "seat_fg: cache server (L2) ON: $L2 — verify vllm:external_prefix_cache_hits > 0 after the first eviction; a size-mismatch warning in $WORK/lmcache-mp.log means the tier is serving nothing"
 else
-  echo "seat_fg: same-box tier only (L1 ${L1_GB} GB), no cache server"
+  if [ "$L2_DEGRADED" -eq 1 ]; then
+    echo "seat_fg: same-box tier only (L1 ${L1_GB} GB) — DEGRADED from the cache-server tier this start (see $L2_STATUS)"
+  else
+    echo "seat_fg: same-box tier only (L1 ${L1_GB} GB), no cache server"
+  fi
 fi
 
 # VRAM precheck (0.113.9). A start that follows a swap-out by a few seconds can find the seat's cards still

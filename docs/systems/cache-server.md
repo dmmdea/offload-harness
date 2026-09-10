@@ -58,14 +58,18 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    23.7k-token prefix back in 2.6–2.9 s at fp16 and 0.80 s at fp8 KV, vs 3.8 / 0.92 s through Valkey;
    `--l2-prefetch-policy` / `--l2-store-policy` variants gained nothing; the legacy `fs` adapter was slower).
    The seat wrapper mounts the share before the MP server starts when `SEAT_L2_MOUNT_SRC` / `SEAT_L2_MOUNT_DIR`
-   (and optionally `SEAT_L2_MOUNT_OPTS`, `SEAT_L2_MOUNT_TYPE`, default `cifs`) are set, and REFUSES to start when
-   the mount fails — an unmounted base_path is a local directory the adapter writes to, so the seat would look
-   healthy while the cache server held nothing. The share is named by a hostname the box resolves (tailnet
+   (and optionally `SEAT_L2_MOUNT_OPTS`, `SEAT_L2_MOUNT_TYPE`, default `cifs`) are set. When the mount fails the
+   seat **degrades to the same-box tier** (0.115.1): `SEAT_L2` is emptied so the MP server registers no store — an
+   unmounted base_path is a local directory the adapter would write into while the tier held nothing — the log says
+   `CACHE SERVER DEGRADED — <why>`, and `$WORK/seat-l2.status` records `degraded <when> reason=<why>` (or `ok <when>
+   mbps=<n>`) for readback. Refusing to start was the 0.113.x behaviour; on 2026-09-09 it took the whole agent lane
+   down for hours (llama-swap turns every start failure into HTTP 500) over a cache accelerator that was merely slow. The share is named by a hostname the box resolves (tailnet
    MagicDNS or static DNS), never a DHCP address — a vanished lease refused every seat start for hours on
    2026-09-04 — and the refusal message says why (does not resolve / port unreachable / share refused).
    `SEAT_L2_MIN_MBPS` (default off) is a write floor measured with a 64 MiB fsync probe after the mount: a path
-   that crawls (4.6 MB/s over a Wi-Fi hop, measured) makes the tier slower than recompute, so the seat refuses
-   rather than serving a useless tier; the same-box tier is the fallback. A three-stage pipeline seat gets
+   that crawls (4.6 MB/s over a Wi-Fi hop, measured; ~36 MB/s behind a degraded WSL datapath, 2026-09-09) makes
+   the tier slower than recompute, so the share is NOT used — the seat degrades to the same-box tier and says so,
+   never refuses. Fix the path and restart the seat to get the cache server back. A three-stage pipeline seat gets
    nothing from any L2 (Valkey or fs_native): keep it on the same-box tier.
 4b. The seat wrapper refuses to start when its port is already bound (a foreign listener would otherwise pass
    llama-swap's health check and serve the seat's traffic — measured 2026-09-03), and names its MP server unit
