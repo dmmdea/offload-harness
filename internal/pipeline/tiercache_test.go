@@ -495,3 +495,33 @@ func TestRunTierRecordsCallIdentity(t *testing.T) {
 		t.Errorf("identity drifted across a cache hit: %q vs %q", r2.Meta.InputSHA256, r.Meta.InputSHA256)
 	}
 }
+
+// TestRunTierWithKeysTheCacheOnTheRender (reviewer finding, PR #302): a
+// non-thinking render of a model must never be served from — or write over —
+// that model's thinking-render entry: the two answers differ. The option-free
+// key stays byte-identical, so the live cache survives the upgrade.
+func TestRunTierWithKeysTheCacheOnTheRender(t *testing.T) {
+	var calls atomic.Int64
+	srv := fakeSeat(t, &calls)
+	cfg := tierTestCfg(t, srv.URL)
+	p := NewInLoopPipeline(cfg, 5*time.Second, openTierCache(t))
+	req := triageReq()
+
+	if r, ok := p.RunTier(context.Background(), req, cfg.TriageModel); !ok || r.Meta.CacheHit {
+		t.Fatalf("plain RunTier: ok=%v hit=%v", ok, r.Meta.CacheHit)
+	}
+	r2, ok := p.RunTierWith(context.Background(), req, cfg.TriageModel, llamaclient.WithoutThinking())
+	if !ok || r2.Meta.CacheHit {
+		t.Fatalf("non-thinking render served from the thinking render's entry: ok=%v hit=%v", ok, r2.Meta.CacheHit)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("model calls = %d, want 2 (one per render)", got)
+	}
+	r3, ok := p.RunTierWith(context.Background(), req, cfg.TriageModel, llamaclient.WithoutThinking())
+	if !ok || !r3.Meta.CacheHit {
+		t.Fatalf("the repeat non-thinking render must hit its own entry: ok=%v hit=%v", ok, r3.Meta.CacheHit)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("model calls = %d, want still 2", got)
+	}
+}

@@ -78,3 +78,31 @@ func TestInLoopOffloadOnTheSeatRendersWithoutThinking(t *testing.T) {
 		t.Fatalf("workhorse tier request: model=%v kwargs=%v; want the workhorse with no template kwargs", b["model"], b["chat_template_kwargs"])
 	}
 }
+
+// TestInLoopPipelineHonoursSeatEndpoints (reviewer finding, PR #302): the
+// cached in-loop pipeline behind the MCP front door and the CLI must route an
+// overridden seat exactly as the recordless (fleet-node) one does — the tools
+// can now target a seat with its own endpoint, and a bare client would have
+// sent that request to the base endpoint without an error.
+func TestInLoopPipelineHonoursSeatEndpoints(t *testing.T) {
+	base, baseBodies := tierRecorder(t)
+	defer base.Close()
+	seat, seatBodies := tierRecorder(t)
+	defer seat.Close()
+	cfg := config.Config{Endpoint: base.URL, Model: "workhorse", Temperature: 0.1,
+		SeatEndpoints: map[string]string{"seat-x": seat.URL}}
+	onSeat := NewInLoopOffloadForPlanner(cfg, "seat-x", 10*time.Second, nil)
+	if _, err := onSeat(context.Background(), "triage", "the sky is blue today", map[string]any{"question": "is the sky blue?"}); err != nil {
+		t.Fatalf("closure: %v", err)
+	}
+	select {
+	case b := <-seatBodies:
+		if b["model"] != "seat-x" {
+			t.Fatalf("seat endpoint got model=%v, want seat-x", b["model"])
+		}
+	case b := <-baseBodies:
+		t.Fatalf("the seat request went to the BASE endpoint (model=%v): seat_endpoints ignored", b["model"])
+	case <-time.After(5 * time.Second):
+		t.Fatal("no request recorded")
+	}
+}

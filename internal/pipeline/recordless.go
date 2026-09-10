@@ -19,11 +19,21 @@ import (
 // SINGLE place the nil-store invariant is constructed; NewRecordlessOffload and the
 // agent-trajectory flywheel (agent-trajectory-label) both use it so it can't drift.
 func NewRecordlessPipeline(cfg config.Config, timeout time.Duration) *Pipeline {
-	// WithSeatEndpoints + WithRemoteLanes mirror openPipeline's construction:
-	// the recordless pipeline must route an overridden seat — and fail a busy
-	// hour over to the same cascade lane — exactly as the recorded one does; a
-	// per-model endpoint is a property of the seat, not of which pipeline shape
-	// happens to call it. Absent keys = no-ops, byte-identical client.
+	return New(cfg, inLoopClient(cfg, timeout), nil, nil)
+}
+
+// inLoopClient is the ONE client construction behind both in-loop pipelines.
+// WithSeatEndpoints + WithRemoteLanes mirror openPipeline's construction: an
+// in-loop pipeline must route an overridden seat — and fail a busy hour over
+// to the same cascade lane — exactly as the recorded one does; a per-model
+// endpoint is a property of the seat, not of which pipeline shape happens to
+// call it. Absent keys = no-ops, byte-identical client. Until 0.115.18 only
+// the recordless (fleet-node) shape applied them; the cached shape behind the
+// MCP front door and the CLI built a bare client, which was harmless while
+// the in-loop tools always targeted the workhorse on the base endpoint and
+// became a silent misroute the moment they could target a seat with its own
+// endpoint (reviewer finding, PR #302).
+func inLoopClient(cfg config.Config, timeout time.Duration) *llamaclient.Client {
 	oc := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, timeout).
 		WithSeatEndpoints(cfg.SeatEndpoints)
 	if len(cfg.CascadeRemoteLanes) > 0 {
@@ -32,7 +42,7 @@ func NewRecordlessPipeline(cfg config.Config, timeout time.Duration) *Pipeline {
 			func() bool { return delegate.LocalBusy(gpuLockPath, stateDir) },
 			llamaclient.RosterResident())
 	}
-	return New(cfg, oc, nil, nil)
+	return oc
 }
 
 // NewInLoopPipeline builds the agent loop's offload pipeline: nil LEDGER, but a
@@ -64,8 +74,7 @@ func NewRecordlessPipeline(cfg config.Config, timeout time.Duration) *Pipeline {
 // its full timeout and then fail — the in-loop pipeline would lose a lock race
 // against the very process that owns it, once per construction.
 func NewInLoopPipeline(cfg config.Config, timeout time.Duration, ca *cache.Cache) *Pipeline {
-	oc := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, timeout)
-	p := New(cfg, oc, ca, nil)
+	p := New(cfg, inLoopClient(cfg, timeout), ca, nil)
 	// Opt IN to per-tier caching. RunTier is shared with the shadow-labelling
 	// flywheel, which calls it on the MAIN pipeline (cache open) to evaluate
 	// counterfactual tiers; serving those from cache — or writing them — would

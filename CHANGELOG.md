@@ -24,6 +24,11 @@ since the agent seat was introduced; the economics were a 6-minute swap per call
   shape, not a reasoning step; a thinking seat would spend the task's 64–768-token budget inside the think block.
   `Pipeline.RunTierWith` threads the option; `RunTier` keeps its signature (four consumers hold it as a func value).
 - The fleet-node path logs which model the tools ride and why (ledger evidence).
+- Reviewer round (PR #302): the cached in-loop pipeline behind the MCP front door and the CLI now builds the
+  same seat-routed client as the fleet-node one (`inLoopClient`: `seat_endpoints` + cascade remote lanes) — a
+  bare client would have sent a seat-targeted tool request to the base endpoint without an error; the tier
+  cache keys on the render (`llamaclient.RenderKey`, `cacheKeyForTierRender`) so a seat's non-thinking answer
+  never serves its thinking-render caller — option-free keys stay byte-identical, the live cache survives.
 
 ## [0.115.17] - 2026-09-10 - a 200 from the passthrough confirms the cold load
 

@@ -4334,7 +4334,7 @@ func (p *Pipeline) RunTierWith(ctx context.Context, req core.Request, model stri
 	// ...and it lives in RunTier's OWN keyspace, so Run and RunTier can never
 	// compute the same key and overwrite each other's entries. See
 	// tierKeyspaceTag for why guarding only the read was not enough.
-	ck := cacheKeyForTier(req.Task, req.Input, tasks.StableParamsKey(req.Params), model, built)
+	ck := cacheKeyForTierRender(req.Task, req.Input, tasks.StableParamsKey(req.Params), model, built, llamaclient.RenderKey(opts...))
 	meta := core.Meta{Model: model, Feat: feat}
 	meta.InputSHA256 = inputFingerprint(req.Input)
 	meta.PromptPrefixSHA256 = promptPrefixFingerprint(built.System, userPreambleOf(built.User, req.Input))

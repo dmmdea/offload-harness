@@ -226,8 +226,8 @@ func main() {
 
 	// In-process offload (nil LEDGER, shared result cache) — the SINGLE shared
 	// constructor, so every drive mode's ledger-pristine guarantee is identical.
-	// The in-loop cascade stays on the WORKHORSE (an explicit -model still drives
-	// both, preserving the old override semantics; the agent seat does not).
+	// The in-loop offload_* tools follow the single-loop PLANNER (0.115.18,
+	// D-88); an explicit -model therefore drives both, as before.
 	//
 	// T2-D: this binary owns no pipeline, so it opens the result cache itself.
 	// A failure here is EXPECTED and benign — the MCP server holds the bbolt lock

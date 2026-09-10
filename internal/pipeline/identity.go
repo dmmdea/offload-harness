@@ -95,6 +95,18 @@ const tierKeyspaceTag = "keyspace=runtier"
 //
 // shots is nil because RunTier injects no exemplars.
 func cacheKeyForTier(task core.TaskType, orig, paramsKey, model string, built tasks.Built) string {
+	return cacheKeyForTierRender(task, orig, paramsKey, model, built, "")
+}
+
+// cacheKeyForTierRender is cacheKeyForTier with the call's render folded in.
+// render is llamaclient.RenderKey of the generate options: "" keeps every
+// pre-0.115.18 key byte-identical (cacheKeyForTier IS that case); a non-empty
+// render joins the model ingredient, so a non-thinking render of a seat never
+// shares an entry with that seat's thinking render — the answers differ.
+func cacheKeyForTierRender(task core.TaskType, orig, paramsKey, model string, built tasks.Built, render string) string {
+	if render != "" {
+		model = model + "#" + render
+	}
 	return cache.Key(tierKeyspaceTag, cacheKeyFor(task, orig, paramsKey, model, built, nil))
 }
 

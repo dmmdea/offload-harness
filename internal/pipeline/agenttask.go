@@ -225,10 +225,10 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// registration must key off contract.Depth here.
 	//
 	// The Build mirrors mcpserver.handleAgentRun's read-only front door: NO
-	// write/run/fetch/github capability, recordless offload on the workhorse
-	// seat (the in-loop cascade keeps workhorse economics; the PLANNER rides
-	// the agent seat). Unattended=true is honest — a fleet job has no human to
-	// answer a broker ask.
+	// write/run/fetch/github capability, recordless offload on the PLANNER
+	// seat when it is not the workhorse (0.115.18, D-88: the workhorse shares
+	// the seat's llama-swap and loading it evicts the planner). Unattended=true
+	// is honest — a fleet job has no human to answer a broker ask.
 	if m, onSeat := InLoopOffloadModel(seat, p.cfg.Model); onSeat {
 		// Ledger evidence for D-88: which model the in-loop tools ride, and why.
 		log.Printf("agent task: in-loop offload_* tools run on the planner seat %q without thinking (the workhorse %q shares its llama-swap and loading it would evict the seat)", m, p.cfg.Model)
