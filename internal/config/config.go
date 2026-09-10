@@ -277,6 +277,34 @@ type Config struct {
 	// still an opt-in rather than a default because a node that opens it is
 	// spending its own disk on whatever a 4B decides to write.
 	AgentAllowWrite bool `json:"agent_allow_write,omitempty"`
+	// TierProfile (0.116.0, ADR 0039) is the tier this box is INSTALLED as
+	// (installed.json's profile, e.g. "blackwell-3x16"), seeded by tierseed so
+	// status, health and every placement record carry the identity from CONFIG
+	// rather than re-reading the install. "" = not recorded (a pre-0.116.0 box,
+	// or one seeded from a plain tier); nothing keys on it alone.
+	TierProfile string `json:"tier_profile,omitempty"`
+	// Tiers is every tier this box is a COMPLETE instance of: the installed one
+	// plus the tiers it composes (the Qube is a full blackwell-16 and a full
+	// blackwell-2x16 as well as blackwell-3x16). Advertised in health and status
+	// so the fleet and the matrix reason about three capacity rows, not one.
+	// Must include tier_profile. nil = one tier, byte-identical to before.
+	Tiers []string `json:"tiers,omitempty"`
+	// Layers are the device layers a composite box places work on (see
+	// layers.go). Seeded from the tier table's `layers`; a box that seeds none
+	// has ONE implicit layer and every result, health, status and ledger surface
+	// is byte-identical to the pre-layer build — Composite() is the gate.
+	Layers []LayerSpec `json:"layers,omitempty"`
+	// OperatorPresence is how the presence guard decides whether the display
+	// card may take a load: "present" (never), "away" (always, the operator
+	// says so), "auto" (console session locked ⇒ away; else last input idle
+	// ≥ operator_idle_sec and the shell not busy/fullscreen ⇒ away). Defaults
+	// to present — the display card fails closed until the operator has read
+	// the probe's readings in offload_status and set auto or away.
+	OperatorPresence string `json:"operator_presence,omitempty"`
+	// OperatorIdleSec is the last-input idle threshold behind presence mode
+	// "auto". 0 = 900 (15 min): long enough that a coffee break does not admit
+	// a 10 GB load onto the desktop's card.
+	OperatorIdleSec int `json:"operator_idle_sec,omitempty"`
 	// AgentLeaseWaitSec bounds how long a LOCAL agent placement (agent_delegate /
 	// delegate, route auto or spread) waits for a foreign TEXT-class GPU lease to
 	// clear before deferring. `gpu reserve --class text` (a benchmark, eval or
@@ -1555,6 +1583,12 @@ func load(path string) (Config, error) {
 		return c, err
 	}
 	if err := ValidateKVCacheServers(c.KVCacheServers); err != nil {
+		return c, err
+	}
+	// Layers are validated here, in the one door every entry point funnels
+	// through, so a seeded or hand-edited layer that would misplace work fails
+	// at load by name — never at the first contract placed onto it.
+	if err := c.ValidateLayers(); err != nil {
 		return c, err
 	}
 	return c, nil
