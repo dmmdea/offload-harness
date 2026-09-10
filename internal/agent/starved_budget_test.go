@@ -228,8 +228,10 @@ func TestReissueThatYieldsAToolCallLetsALaterEmptyFinalReissueAgain(t *testing.T
 	if res.Output != "the answer" || len(client.seen) != 4 {
 		t.Fatalf("output %q calls %d", res.Output, len(client.seen))
 	}
-	if !client.seenNoThink[1] || !client.seenNoThink[3] || client.seenNoThink[2] {
-		t.Fatalf("thinking-off per call = %v, want [false true false true]", client.seenNoThink)
+	// 0.115.15: after the first re-issue thinking stays off for the run, so
+	// the tool step between the two episodes renders without thinking too.
+	if client.seenNoThink[0] || !client.seenNoThink[1] || !client.seenNoThink[2] || !client.seenNoThink[3] {
+		t.Fatalf("thinking-off per call = %v, want [false true true true]", client.seenNoThink)
 	}
 }
 
