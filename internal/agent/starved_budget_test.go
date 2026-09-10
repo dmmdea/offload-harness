@@ -233,6 +233,40 @@ func TestReissueThatYieldsAToolCallLetsALaterEmptyFinalReissueAgain(t *testing.T
 	}
 }
 
+// TestThinkingStaysOffAfterTheFirstReissue (0.115.15): a thinking-off
+// re-issue that answers with a tool call must not hand the NEXT step back to
+// thinking — the seat has shown its think block does not fit the budget.
+func TestThinkingStaysOffAfterTheFirstReissue(t *testing.T) {
+	full := mkTools("list_dir")
+	client := &fakeClient{script: []Completion{
+		starvedTurn(4096, 4096), // step 1 thinks and starves
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "list_dir", `{"path":"."}`)}}, FinishReason: "tool_calls"}, // re-issue: a tool call
+		{Msg: Msg{Role: "assistant", Content: "the answer"}, FinishReason: "stop"},                                             // step 2: must run thinking OFF
+	}}
+	l := NewLoop(client, full, 6).WithMaxTokens(4096)
+	res, err := l.Run(context.Background(), "digest")
+	if err != nil || res.Output != "the answer" {
+		t.Fatalf("res %q err %v", res.Output, err)
+	}
+	if client.seenNoThink[0] || !client.seenNoThink[1] || !client.seenNoThink[2] {
+		t.Fatalf("thinking-off per call = %v, want [false true true] — sticky after the first re-issue", client.seenNoThink)
+	}
+	// Under ThinkingOn the kwarg is never sent, sticky or not.
+	on := &fakeClient{script: []Completion{
+		starvedTurn(4096, 4096),
+		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "list_dir", `{"path":"."}`)}}, FinishReason: "tool_calls"},
+		{Msg: Msg{Role: "assistant", Content: "the answer"}, FinishReason: "stop"},
+	}}
+	if _, err := NewLoop(on, full, 6).WithMaxTokens(4096).WithThinking(ThinkingOn).Run(context.Background(), "digest"); err != nil {
+		t.Fatal(err)
+	}
+	for i, off := range on.seenNoThink {
+		if off {
+			t.Fatalf("call %d sent the non-thinking kwarg under ThinkingOn", i)
+		}
+	}
+}
+
 // TestReissuesAreBoundedPerRun: a third empty episode gets no re-issue.
 func TestReissuesAreBoundedPerRun(t *testing.T) {
 	full := mkTools("list_dir")

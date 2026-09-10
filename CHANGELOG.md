@@ -6,6 +6,16 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.15] - 2026-09-10 - thinking stays off after the first starved step
+
+From the 0.115.12 acceptance run's 27B row: three starved finals (4,096 of 4,096 tokens reasoning each) in
+660 s. Each thinking-off re-issue answered with a TOOL CALL, the next step went back to thinking, and the
+seat starved again — it never reached the answer it gives in one no-think turn (6,667 tokens on 0.115.10).
+
+- Under `agent_thinking: auto`, once a re-issue has rendered without thinking, every later planner call in
+  that run does too: the seat has shown its think block does not fit the step budget. `on` still never sends
+  the kwarg; `off` was already every call.
+
 ## [0.115.14] - 2026-09-10 - a truncated final answer gets the final budget too
 
 From the 0.115.12 acceptance run's 4B row: the seat thought for 282 tokens, began the seven-array answer, and was
