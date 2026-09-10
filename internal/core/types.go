@@ -321,6 +321,14 @@ type Meta struct {
 	// it the harness generated for itself. Without this field that split is
 	// unrecoverable after the fact.
 	CacheHitInLoop bool `json:"cache_hit_in_loop,omitempty"`
+	// Placed (ADR 0039, 0.116.0) records which layer and seat a composite box
+	// served this call on, and why. nil — omitted — on a plain box, so the
+	// ledger row and every caller-facing result stay byte-identical where no
+	// layers are declared. It rides on Meta because Meta is the one telemetry
+	// carrier that reaches both the caller and the ledger; a decision recorded
+	// anywhere else would be "computed then discarded", the defect class the
+	// prefill fields above were added to close.
+	Placed *Placed `json:"placed,omitempty"`
 }
 
 // Result is the harness outcome. On success Data holds the validated task output.

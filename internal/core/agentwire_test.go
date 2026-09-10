@@ -446,8 +446,11 @@ func TestAgentWireJSONTags(t *testing.T) {
 		OutputSchema: json.RawMessage(`{"properties":{"a":{"type":"string"}}}`),
 		Acceptance:   []string{"nonempty:a"}, Profile: "research",
 		MaxSteps: 1, TimeoutSec: 1, Depth: 0,
+		// Placement inputs (0.116.0) — set so the enumeration covers them; both
+		// are omitempty and would otherwise slip a renamed tag past this test.
+		ContextClass: "long", Layer: "pair",
 	}
-	wantContract := []string{"schema_version", "goal", "context", "output_schema", "acceptance", "profile", "max_steps", "timeout_sec", "depth"}
+	wantContract := []string{"schema_version", "goal", "context", "output_schema", "acceptance", "profile", "max_steps", "timeout_sec", "depth", "context_class", "layer"}
 	got := keysOf(t, contract)
 	for _, k := range wantContract {
 		if !got[k] {
@@ -467,10 +470,12 @@ func TestAgentWireJSONTags(t *testing.T) {
 		// a renamed json tag slip through this test unseen).
 		HarnessVersion: "0.81.0", HarnessBuildSHA256: "hb", SeatConfigSHA256: "sc", SeatConfigBasis: "b",
 		PrefillSteps: 2, PrefillTokens: 100, CacheTokens: 40, PrefillMS: 3.5,
+		// Placement block (0.116.0) — non-nil so its key is enumerated.
+		Placed: &Placed{Layer: "pair", Reason: "r"},
 	}
 	wantResult := []string{"schema_version", "node_id", "seat", "output", "structured", "steps", "stop_reason", "deferred", "reason", "wall_ms", "tokens_out",
 		"harness_version", "harness_build_sha256", "seat_config_sha256", "seat_config_basis",
-		"prefill_steps", "prefill_tokens", "cache_tokens", "prefill_ms"}
+		"prefill_steps", "prefill_tokens", "cache_tokens", "prefill_ms", "placed"}
 	got = keysOf(t, result)
 	for _, k := range wantResult {
 		if !got[k] {
