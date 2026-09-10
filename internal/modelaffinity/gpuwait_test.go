@@ -146,6 +146,35 @@ func TestTextReservationDoesNotBlockText(t *testing.T) {
 	tk.Release()
 }
 
+// A text holder that CLEARED the cards (`gpu reserve --drain --unload-seat`) stamps
+// Exclusive, and then a load is gated exactly like a render's: pulling a model back
+// onto the card would land on top of the measurement — the switch that voided two
+// 5070 Ti runs. The plain text case above must keep passing beside this one; the
+// flag, not the class, is what changes the answer.
+func TestExclusiveTextReservationBlocksLoads(t *testing.T) {
+	m := armLease(t)
+	l, err := m.TryAcquire(gpulease.ClassText, gpulease.Options{Reason: "5070 bench", Exclusive: true})
+	if err != nil {
+		t.Fatalf("acquire exclusive text: %v", err)
+	}
+	defer func() { _ = l.Release() }()
+	if !m.Inspect().Exclusive {
+		t.Fatal("Inspect lost the Exclusive stamp; the gate reads through Inspect and would let the load through")
+	}
+	_, aerr := Admit(context.Background(), "http://gate-excl", "m", 200*time.Millisecond)
+	var le *LeaseError
+	if !errors.As(aerr, &le) {
+		t.Fatalf("Admit under an exclusive text hold = %v, want a *LeaseError naming the holder", aerr)
+	}
+	if le.Class != gpulease.ClassText || le.Reason != "5070 bench" {
+		t.Errorf("holder detail lost: %+v", le)
+	}
+	// Released → the very next admission proceeds without waiting.
+	_ = l.Release()
+	tk := admitFast(t, "http://gate-excl", "m")
+	tk.Release()
+}
+
 // `gpu reserve --class media -- local-offload …` runs the harness as a CHILD of the
 // holder. A text call in that child must not queue behind its own parent.
 func TestInheritedLeaseEpochExemptsThisProcess(t *testing.T) {

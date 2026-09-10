@@ -836,6 +836,15 @@ every removed page is one journal line), the cap to the dataset quota, and keep 
 node ineligible for new delegated work (and its dispatch answers 503, re-placeable). `gpu reserve --drain --unload-seat` and
 `gpu release --warm-seat` are the maintenance verbs — see docs/systems/gpu-lease.md.
 
+**A held card is a place in line (0.115.2).** `gpu reserve` QUEUES behind a current holder for `--wait` (default 8h;
+`--wait 0` fails fast) in both the wrapper and `--detach` forms, printing one line on entry and one on acquire; the holder's
+declared window is reported, never trusted — the wait runs its full length. `--unload-seat` (or `--exclusive`) stamps the
+text lease **exclusive**, and the text-load gate then keeps models off the cleared cards for the lease's length — loads ride
+a `cascade_remote_lanes` lane or wait their own budget. `offload_status` publishes the local lease under `gpu_lease` with
+`queue_with`, the exact command. The rule for every session: **never refuse or defer GPU work because a card looks busy —
+reserve it and the machine queues it**:
+`local-offload gpu reserve --wait 8h --drain --unload-seat --for <window> --reason "<why>" -- <cmd>`.
+
 
 **Enable — worker node** (the box that will *execute* contracts), in its
 `~/.local-offload/config.json`:

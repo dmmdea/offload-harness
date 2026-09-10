@@ -58,7 +58,44 @@ local-offload gpu release --epoch <N>
 
 `gpu status [--json]` reports the holder, its class, age, reason and declared expiry — and says
 **"free (unreserved)"** explicitly, because an unreserved card is exactly when work is exposed;
-that should be visible, not inferred from silence.
+that should be visible, not inferred from silence. When held it ends with the one line that
+matters: how to **queue behind it** (`queue_with` in the JSON).
+
+### A held card is a place in line, not a refusal (0.115.2)
+
+`gpu reserve` **queues** behind a current holder — `--wait` (default **8h**) is how long it
+stands in line before giving up; `--wait 0` restores the old fail-fast. Both forms queue: the
+wrapper waits in place, and `--detach` passes the wait to the hidden holder (`gpu hold`), which
+is the process that actually takes the card, while the parent reports `reserved:` only once that
+has happened (or the holder's exit, when the line did not move in time). The wait prints exactly
+two lines on stderr — `queued behind <holder> — waiting up to <wait>` on entry and `acquired after
+<n> in the queue` on exit — never one per poll, because the session wrapping this would turn a
+poll line into a notification each.
+
+The declared-window short-circuit below does **not** apply to a reservation (`Options.WaitOut`):
+the holder's window is printed as information, never treated as a verdict, because holders
+release before it as a rule — the wrapper form releases the moment its command ends. Measured
+live on 2026-09-09 before this was fixed: a `--wait 2m` waiter behind a `--for 3m` holder was
+refused at once, and the holder released six seconds later. Every refusal names the flag that
+would have kept queueing.
+
+Why: the CLI called `TryAcquire`, so a held card was an *error*, and every session that hit that
+error read it as "the machine is busy — refuse the work". Ten times over, the operator's answer
+was the same: the machine has a queue, use it. The pipeline had queued renders behind each other
+since ADR 0018; the reservation verb was the one ingress that did not.
+
+### Exclusive text holds (0.115.2)
+
+A text lease that **cleared the cards** (`--drain --unload-seat`, or an explicit `--exclusive`)
+is stamped `exclusive` in its record. The text-load admission gate (`internal/modelaffinity`,
+ADR 0026) then treats it exactly like a media lease: an admission that would make llama-swap pull
+a model onto the cards rides its `cascade_remote_lanes` lane when one serves the model, otherwise
+waits its own budget and is told who holds the card. A plain text lease (holder unloaded nothing)
+is still ungated, for the reason ADR 0026 gives — a switch under it costs a measurement, not the
+machine. The exclusive stamp closes the case that reasoning never covered: a holder that *did*
+empty llama-swap, whose measurement the very next interactive text call refilled the card under —
+the residency switch that voided two 5070 Ti runs and taught sessions to refuse GPU work rather
+than reserve it.
 
 ## One-time Linux setup (required)
 
@@ -93,7 +130,9 @@ holder's class, age and reason. Both halves are deliberate:
   caller that can retry.
 
 `gpu_wait_ms` (default **90 s**, matching `vision_gpu_wait_sec`) is the single ceiling for every
-GPU task. `videogen_wait_ms` and `audiogen_wait_ms` are **retired and ignored** — they existed so
+GPU task placed by a *tool call*. A *reservation* (`gpu reserve`) is a session with a job to run,
+not a tool call that must return, so it queues for `--wait` (default 8h) — see "A held card is a
+place in line" above. `videogen_wait_ms` and `audiogen_wait_ms` are **retired and ignored** — they existed so
 a cheap TTS was not starved behind a 20-minute video, which buys nothing at 90 s, and every
 installed `config.json` still carries `videogen_wait_ms: 1200000`, so honouring them as overrides
 would have quietly restored the old 20-minute wait on upgrade. A config carrying them loads
@@ -105,11 +144,12 @@ failure: `generate-image --batch` exits 0 with `err_class: gpu_busy` rather than
 
 Two things keep the wait from becoming friction:
 
-- **A `text` reservation that outlasts your window is answered immediately.**
-  `gpu reserve --class text --for 45m` is an operator's *declared* duration, so there is nothing
-  to wait for — you get the ETA now instead of 90 s later. A `media` holder is deliberately not
-  treated this way: its expiry is a timeout *ceiling*, and a 25-minute video budget routinely
-  finishes in three, so it is waited out.
+- **A `text` reservation that outlasts your window is answered immediately** — for a tool call.
+  `gpu reserve --class text --for 45m` is an operator's *declared* duration, so a 90 s tool call
+  gets the ETA now instead of 90 s later. A `media` holder is deliberately not treated this way:
+  its expiry is a timeout *ceiling*, and a 25-minute video budget routinely finishes in three, so
+  it is waited out. A *reservation* (`gpu reserve`, `Options.WaitOut`) is not a tool call and
+  waits its whole `--wait` regardless — see "A held card is a place in line".
 - **Two jobs in the SAME process never poll each other.** They queue on an in-process slot and
   the waiter is handed the card the instant the holder releases — no timer, no file reads.
 

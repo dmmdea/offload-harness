@@ -29,6 +29,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/embedmemo"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
@@ -515,7 +516,38 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 		payload["accelerators"] = accel
 	}
 	payload["kv_cache_server"] = kvCacheServerView(ctx, cfg)
+	payload["gpu_lease"] = localLeaseView(cfg)
 	return jsonResult(payload)
+}
+
+// localLeaseView publishes THIS box's machine-wide GPU lease (0.115.2). The fleet
+// block already carried every remote node's lease verdict, while the local card —
+// the one a session at this desk is about to measure on — was reported nowhere in
+// this tool, so sessions read `nvidia-smi` instead and concluded "busy, refuse".
+// Held or free, the block ends with the queue command: a held card is a place in
+// line, and the line is one flag. Read-only (delegate.LocalLease never acquires).
+func localLeaseView(cfg config.Config) map[string]any {
+	info := delegate.LocalLease(cfg.GPULockPath, cfg.StateDir)
+	view := map[string]any{
+		"held":       info.Held,
+		"queue_with": gpulease.QueueHint,
+	}
+	if !info.Held {
+		view["note"] = "free (unreserved): a bench or training run on this box is exposed until it takes the lease — wrap it in the queue_with command"
+		return view
+	}
+	view["class"] = string(info.Class)
+	view["epoch"] = info.Epoch
+	view["pid"] = info.PID
+	view["age_s"] = int(info.Age.Seconds())
+	view["reason"] = info.Reason
+	view["origin"] = info.Origin
+	view["exclusive"] = info.Exclusive
+	if !info.ExpiresAt.IsZero() {
+		view["expires_at"] = info.ExpiresAt.Format(time.RFC3339)
+	}
+	view["note"] = "held: delegations already route to other nodes; a bench or render here must QUEUE behind the holder with queue_with, never be refused or deferred"
+	return view
 }
 
 // kvCacheServerView reports the OPTIONAL cache-server tier (config.KVCacheServer): a
