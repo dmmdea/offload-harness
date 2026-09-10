@@ -11,10 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"sync"
-	"time"
 
-	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/hwdetect"
 	"github.com/dmmdea/offload-harness/internal/mediaseat"
 	"github.com/dmmdea/offload-harness/internal/servingtmpl"
@@ -293,157 +290,6 @@ func osTag(goos string) string {
 	return goos
 }
 
-// renderRequest is every input `install render` was given that is NOT itself a
-// seed: the per-box install layout, the target, and the two flags that gate
-// which seeds apply. The provenance stamp records it (K-02) so
-// `audit-yaml --against-render` can REPLAY the render on another machine -- a
-// binary cannot know another box's install paths or thread count, and
-// re-deriving them from its OWN would report every node in the fleet stale.
-type renderRequest struct {
-	TierID    string // --profile; empty (with no Fallback) classifies this machine
-	Fallback  string // --fallback-backend: non-empty means off-matrix
-	RAMTier   string // --ram-tier, normalised
-	GOOS      string // --os, resolved to a concrete target
-	LlamaBin  string
-	ModelsDir string
-	Listen    string
-	Home      string
-	Threads   int
-	VLLM      vllmRuntimeFlags
-	// PinnedVLLM, when set, REPLACES the vLLM seat resolution instead of running
-	// it. Only the replay sets it: vllmSeatFor inspects the LOCAL box (does this
-	// machine have the hand-built venv and the snapshot?), so re-running the
-	// detection while auditing another node's config would render the llama.cpp
-	// fallback and report a false drift on every node that has the seat.
-	PinnedVLLM *pinnedVLLM
-}
-
-type pinnedVLLM struct {
-	Seat    *vllmseat.Spec
-	Runtime vllmseat.Runtime
-}
-
-// renderResult is one resolved render: the config text plus the provenance basis
-// that describes exactly what produced it.
-type renderResult struct {
-	TierID     string
-	Profile    servingProfile
-	Params     servingtmpl.Params
-	Config     string // rendered, UNSTAMPED -- the bytes body_sha256 covers
-	Basis      servingtmpl.SpecBasis
-	Include26B bool
-}
-
-// deriveRender resolves a tier into a rendered serving config and its
-// provenance basis. It is the ONE derivation: `install render` calls it to
-// write a config, and `audit-yaml --against-render` calls it to re-derive one,
-// so the two can never disagree about what a tier renders to. (A second copy of
-// this logic for the audit is exactly how a gate comes to certify the thing it
-// was written to catch.)
-func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
-	target := req.GOOS
-	if target == "" {
-		target = runtime.GOOS
-	}
-	id := req.TierID
-	// Classifying THIS machine is the convenience default, but it must not happen
-	// when the caller asked for off-matrix defaults: an empty --profile with
-	// --fallback-backend means "this box is not on the matrix", and classifying
-	// anyway silently rendered the RENDERING machine's tier instead (caught by
-	// comparing the delegated output against the PowerShell renderer's).
-	if id == "" && req.Fallback == "" {
-		id = hwdetect.Classify(hwdetect.Detect()).Profile
-	}
-
-	var doc struct {
-		Profiles map[string]servingProfile `json:"profiles"`
-	}
-	if err := json.Unmarshal(profilesRaw, &doc); err != nil {
-		return renderResult{}, fmt.Errorf("profiles.json: %w", err)
-	}
-	// The SAME bytes a second time, unparsed: the provenance stamp hashes the
-	// tier's own entry, and hashing the re-marshalled struct would hash only the
-	// fields this Go type happens to know -- a seed field added to the table and
-	// not yet to servingProfile would then change the render's meaning without
-	// changing its stamp.
-	var rawDoc struct {
-		Profiles map[string]json.RawMessage `json:"profiles"`
-	}
-	if err := json.Unmarshal(profilesRaw, &rawDoc); err != nil {
-		return renderResult{}, fmt.Errorf("profiles.json: %w", err)
-	}
-
-	p, ok := doc.Profiles[id]
-	entry := rawDoc.Profiles[id]
-	if !ok {
-		// Off-matrix is a supported outcome, not an error, WHEN the caller says
-		// which backend to fall back to. install.ps1 has always rendered a valid
-		// config for an unrecognized box; delegating must not take that away.
-		if req.Fallback == "" {
-			return renderResult{}, fmt.Errorf("unknown tier %q (pass --fallback-backend to render off-matrix defaults instead)", id)
-		}
-		var err error
-		if p, err = fallbackProfile(req.Fallback); err != nil {
-			return renderResult{}, err
-		}
-		id = "(off-matrix: " + req.Fallback + " defaults)"
-		entry = nil // an off-matrix render has no tier entry; its hash stays empty
-	}
-
-	tmpl, err := templateFor(target, p.Backend)
-	if err != nil {
-		return renderResult{}, err
-	}
-
-	n := req.Threads
-	if n <= 0 {
-		n = runtime.NumCPU() / 2
-		if n < 1 {
-			n = 1
-		}
-	}
-	ramTier := strings.ToLower(strings.TrimSpace(req.RAMTier))
-	moe, include26B := moePlacement(p, ramTier)
-	if p.moeLiteral != "" {
-		moe, include26B = p.moeLiteral, true // off-matrix defaults are literal flags
-	}
-	var seat *vllmseat.Spec
-	var seatRT vllmseat.Runtime
-	if req.PinnedVLLM != nil {
-		seat, seatRT = req.PinnedVLLM.Seat, req.PinnedVLLM.Runtime
-	} else {
-		seat, seatRT = vllmSeatFor(p, req.Home, req.VLLM)
-	}
-	params := servingtmpl.Params{
-		LlamaBin: req.LlamaBin, ModelsDir: req.ModelsDir, Listen: req.Listen,
-		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
-		MoE26B: moe, Threads: n, Include26B: include26B, IncludeQ38: p.IncludeQwen38,
-		IncludeQ354B: p.IncludeQwen354B, IncludeQ359B: p.IncludeQwen359B,
-		Seats: p.MediaSeats, Home: req.Home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
-		DisableCUDAGraphs: p.DisableCUDAGraphs,
-		VLLMSeat:          seat, VLLMRuntime: seatRT,
-	}
-	rendered, err := servingtmpl.Render(tmpl, params)
-	if err != nil {
-		return renderResult{}, fmt.Errorf("tier %s: %w", id, err)
-	}
-	entrySHA, err := servingtmpl.CanonicalEntrySHA(entry)
-	if err != nil {
-		return renderResult{}, fmt.Errorf("tier %s: hashing its profiles.json entry: %w", id, err)
-	}
-	return renderResult{
-		TierID: id, Profile: p, Params: params, Config: rendered, Include26B: include26B,
-		Basis: servingtmpl.SpecBasis{
-			HarnessVersion:      buildinfo.Version,
-			TierID:              id,
-			TemplateSHA256:      servingtmpl.SHA256Hex([]byte(tmpl)),
-			ProfilesEntrySHA256: entrySHA,
-			Render:              servingtmpl.RenderBasis{RAMTier: ramTier, FallbackBackend: req.Fallback},
-			Params:              servingtmpl.BasisOf(params),
-		},
-	}, nil
-}
-
 func runInstallRender(args []string) error {
 	fs := flag.NewFlagSet("install render", flag.ExitOnError)
 	profileID := fs.String("profile", "", "tier id (default: classify this machine)")
@@ -467,52 +313,98 @@ func runInstallRender(args []string) error {
 	hfHome := fs.String("hf-home", "", "HF cache root; KEEP IT SHORT (LMCache page names embed the model path against NAME_MAX 255). Default: $HF_HOME, else <home>/hf")
 	_ = fs.Parse(args)
 
+	target := *goos
+	if target == "" {
+		target = runtime.GOOS
+	}
+	id := *profileID
+	// Classifying THIS machine is the convenience default, but it must not happen when
+	// the caller asked for off-matrix defaults: an empty --profile with
+	// --fallback-backend means "this box is not on the matrix", and classifying anyway
+	// silently rendered the RENDERING machine's tier instead (caught by comparing the
+	// delegated output against the PowerShell renderer's).
+	if id == "" && *fallback == "" {
+		id = hwdetect.Classify(hwdetect.Detect()).Profile
+	}
+
 	raw, err := profilesJSON(*root)
 	if err != nil {
 		return err
 	}
-	res, err := deriveRender(raw, renderRequest{
-		TierID: *profileID, Fallback: *fallback, RAMTier: *ramTier, GOOS: *goos,
-		LlamaBin: *llamaBin, ModelsDir: *modelsDir, Listen: *listen, Home: *home, Threads: *threads,
-		VLLM: vllmRuntimeFlags{user: *vllmUser, proxyHost: *vllmProxy, venv: *vllmVenv, seatDir: *vllmSeatDir, hfHome: *hfHome},
-	})
+	var doc struct {
+		Profiles map[string]servingProfile `json:"profiles"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return fmt.Errorf("profiles.json: %w", err)
+	}
+	p, ok := doc.Profiles[id]
+	if !ok {
+		// Off-matrix is a supported outcome, not an error, WHEN the caller says which
+		// backend to fall back to. install.ps1 has always rendered a valid config for
+		// an unrecognized box; delegating must not take that away.
+		if *fallback == "" {
+			return fmt.Errorf("unknown tier %q (pass --fallback-backend to render off-matrix defaults instead)", id)
+		}
+		if p, err = fallbackProfile(*fallback); err != nil {
+			return err
+		}
+		id = "(off-matrix: " + *fallback + " defaults)"
+	}
+
+	tmpl, err := templateFor(target, p.Backend)
 	if err != nil {
 		return err
+	}
+
+	n := *threads
+	if n <= 0 {
+		n = runtime.NumCPU() / 2
+		if n < 1 {
+			n = 1
+		}
+	}
+	moe, include26B := moePlacement(p, strings.ToLower(strings.TrimSpace(*ramTier)))
+	if p.moeLiteral != "" {
+		moe, include26B = p.moeLiteral, true // off-matrix defaults are literal flags
+	}
+	seat, seatRT := vllmSeatFor(p, *home, vllmRuntimeFlags{
+		user: *vllmUser, proxyHost: *vllmProxy, venv: *vllmVenv, seatDir: *vllmSeatDir, hfHome: *hfHome,
+	})
+	rendered, err := servingtmpl.Render(tmpl, servingtmpl.Params{
+		LlamaBin: *llamaBin, ModelsDir: *modelsDir, Listen: *listen,
+		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
+		MoE26B: moe, Threads: n, Include26B: include26B, IncludeQ38: p.IncludeQwen38,
+		IncludeQ354B: p.IncludeQwen354B, IncludeQ359B: p.IncludeQwen359B,
+		Seats: p.MediaSeats, Home: *home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
+		DisableCUDAGraphs: p.DisableCUDAGraphs,
+		VLLMSeat:          seat, VLLMRuntime: seatRT,
+	})
+	if err != nil {
+		return fmt.Errorf("tier %s: %w", id, err)
 	}
 	// The serving-config gate (H-01): a rendered config that runs a model on
 	// the CPU, keeps one loaded past five idle minutes, or preloads is REFUSED
 	// here, before it can be written — the templates were fixed by hand twice
 	// (0.115.4, 0.115.7) and nothing stopped the next regression.
-	if vs := servingtmpl.Audit(res.Config); len(vs) != 0 {
-		return fmt.Errorf("tier %s: the rendered config breaks %d operator rule(s) (INV-1/INV-2) — not written:\n%s", res.TierID, len(vs), servingtmpl.Violations(vs))
+	if vs := servingtmpl.Audit(rendered); len(vs) != 0 {
+		return fmt.Errorf("tier %s: the rendered config breaks %d operator rule(s) (INV-1/INV-2) — not written:\n%s", id, len(vs), servingtmpl.Violations(vs))
 	}
 
-	target := res.Params.GOOS
-	warnMissingSeatModels(res.Profile.MediaSeats, *modelsDir, target)
-	warnMissingGatedModels(res.Include26B, res.Profile.IncludeQwen38, res.Profile.IncludeQwen354B, res.Profile.IncludeQwen359B, *modelsDir, target)
-
-	// The provenance stamp (K-02) rides on every rendered config from here on.
-	// It is prepended AFTER the rule audit so the audit sees exactly what a
-	// pre-stamp build saw, and the body it hashes is byte-identical to what
-	// Render produced.
-	stamped, err := servingtmpl.Stamp(res.Config, res.Basis, time.Now().UTC())
-	if err != nil {
-		return err
-	}
+	warnMissingSeatModels(p.MediaSeats, *modelsDir, target)
+	warnMissingGatedModels(include26B, p.IncludeQwen38, p.IncludeQwen354B, p.IncludeQwen359B, *modelsDir, target)
 
 	if *out == "" {
-		fmt.Print(stamped)
+		fmt.Print(rendered)
 		return nil
 	}
-	if err := os.WriteFile(*out, []byte(stamped), 0o644); err != nil {
+	if err := os.WriteFile(*out, []byte(rendered), 0o644); err != nil {
 		return err
 	}
 	// stdout, not stderr: this is a SUCCESS line, and a PowerShell caller with
 	// $ErrorActionPreference='Stop' turns any stderr output from a native command into
 	// a terminating error — which is exactly how the delegated installer first broke.
 	// stdout is free here because the config only goes there when --out is empty.
-	spec, _, _ := servingtmpl.SpecHash(res.Basis)
-	fmt.Printf("wrote %s (tier %s, %s/%s, spec_sha256 %s)\n", *out, res.TierID, osTag(target), res.Profile.Backend, spec)
+	fmt.Printf("wrote %s (tier %s, %s/%s)\n", *out, id, osTag(target), p.Backend)
 	return nil
 }
 
@@ -520,33 +412,12 @@ func runInstallRender(args []string) error {
 // H-02): the same checker `install render` refuses on, over LIVE files. One
 // line per violation, exit 1 when any file breaks a rule, so a start audit
 // that pipes it cannot read a broken box as compliant.
-//
-// --against-render adds the K-02 half: every file is ALSO checked against what
-// THIS binary's seeds would render today, and reported as exactly one of
-// MATCH / STALE(<keys>) / UNSTAMPED / HAND-EDITED. The rule audit alone cannot
-// see staleness — a config a tier revision behind breaks no rule, which is how
-// ampere-16 served a 32768 window for weeks after register A-39 raised it to
-// 131072 while `audit-yaml` reported OK (register K-02).
-//
-// Exit codes, deliberately asymmetric: a rule violation, a STALE config and a
-// HAND-EDITED one exit 1; UNSTAMPED does not. Every config on the fleet today
-// predates stamping, so failing on UNSTAMPED would make the session-start audit
-// red on every box from the moment this ships — a gate that is always red is a
-// gate that gets ignored, and the point of this one is that STALE is rare and
-// means something. UNSTAMPED still prints, as a finding.
-//
-// FLAGS COME BEFORE FILES (`audit-yaml --against-render FILE...`): Go's flag
-// package stops parsing at the first non-flag argument.
 func runAuditYAML(args []string) error {
-	fs := flag.NewFlagSet("audit-yaml", flag.ExitOnError)
-	against := fs.Bool("against-render", false, "also re-derive each file from THIS binary's tier seeds and report MATCH / STALE(keys) / UNSTAMPED / HAND-EDITED")
-	_ = fs.Parse(args)
-	files := fs.Args()
-	if len(files) == 0 {
+	if len(args) == 0 {
 		return fmt.Errorf("audit-yaml: at least one file is required")
 	}
 	bad := 0
-	for _, path := range files {
+	for _, path := range args {
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("audit-yaml: %w", err)
@@ -558,126 +429,13 @@ func runAuditYAML(args []string) error {
 		_ = yaml.Unmarshal(b, &doc)
 		if len(vs) == 0 {
 			fmt.Printf("%s: OK (%d models, every entry ttl %d, cards only)\n", path, len(doc.Models), servingtmpl.TTLRequired)
-		} else {
-			bad++
-			fmt.Printf("%s: %d violation(s)\n%s\n", path, len(vs), servingtmpl.Violations(vs))
-		}
-		if !*against {
 			continue
 		}
-		rep := provenanceOf(string(b))
-		fmt.Println(rep.Line(path))
-		if rep.State == servingtmpl.StateStale || rep.State == servingtmpl.StateHandEdited {
-			bad++
-		}
+		bad++
+		fmt.Printf("%s: %d violation(s)\n%s\n", path, len(vs), servingtmpl.Violations(vs))
 	}
 	if bad > 0 {
-		return fmt.Errorf("audit-yaml: %d finding(s) — see the lines above", bad)
+		return fmt.Errorf("audit-yaml: %d file(s) break the operator rules", bad)
 	}
 	return nil
-}
-
-// provenanceOf re-derives a stamped config from THIS binary's embedded seeds and
-// reports its state. The embedded table is the right source and not --root: the
-// question this answers is "would the binary running right now render this file",
-// and a checkout on the auditing box is not what installs a node.
-func provenanceOf(text string) servingtmpl.Report {
-	st, ok := servingtmpl.ParseStamp(text)
-	if !ok {
-		return servingtmpl.AgainstRender(text, servingtmpl.SpecBasis{}, "")
-	}
-	stamped, err := st.Basis()
-	if err != nil {
-		return servingtmpl.AgainstRender(text, servingtmpl.SpecBasis{}, "")
-	}
-	req, ok := replayRequest(stamped)
-	if !ok {
-		// Nothing to replay against: report the stamp's own integrity and let
-		// AgainstRender call it stale rather than inventing a tier.
-		return servingtmpl.AgainstRender(text, servingtmpl.SpecBasis{HarnessVersion: buildinfo.Version}, "")
-	}
-	res, err := deriveRender(embeddedProfiles, req)
-	if err != nil {
-		// The tier is gone from this binary's table, or its template is. Both are
-		// real drift; AgainstRender says so from the empty body.
-		return servingtmpl.AgainstRender(text, servingtmpl.SpecBasis{HarnessVersion: buildinfo.Version, TierID: stamped.TierID}, "")
-	}
-	return servingtmpl.AgainstRender(text, res.Basis, res.Config)
-}
-
-// replayRequest rebuilds the render inputs from a stamp. ok=false when the stamp
-// names no tier and no fallback backend: deriveRender would then classify the
-// AUDITING machine and compare a config against some other box's tier, which is
-// a wrong answer rather than a missing one.
-func replayRequest(b servingtmpl.SpecBasis) (renderRequest, bool) {
-	req := renderRequest{
-		TierID: b.TierID, Fallback: b.Render.FallbackBackend, RAMTier: b.Render.RAMTier,
-		GOOS: b.Params.GOOS, LlamaBin: b.Params.LlamaBin, ModelsDir: b.Params.ModelsDir,
-		Listen: b.Params.Listen, Home: b.Params.Home, Threads: b.Params.Threads,
-		// The vLLM deployment half is a per-BOX fact (the account, the bound
-		// address, where the venv lives), never a seed. Pinned from the stamp so
-		// the replay measures seed drift and not "the auditing box is not the
-		// node". A change to the tier's own vllm_seat block is still caught —
-		// it moves profiles_entry_sha256, which the basis diff names.
-		PinnedVLLM: &pinnedVLLM{Seat: b.Params.VLLMSeat, Runtime: b.Params.VLLMRuntime},
-	}
-	if b.Render.FallbackBackend != "" {
-		// Off-matrix: the stamped tier id is the human label
-		// "(off-matrix: <backend> defaults)", not a key in the table.
-		req.TierID = ""
-	} else if req.TierID == "" {
-		return renderRequest{}, false
-	}
-	if req.GOOS == "" {
-		return renderRequest{}, false
-	}
-	return req, true
-}
-
-// servingConfigReporter builds the /fleet/health provenance reporter for a
-// node's rendered serving config (K-02). An empty path returns nil: the health
-// fields are then omitted entirely, which is the honest answer for a node that
-// was never told which file it serves.
-//
-// The result is CACHED on the file's (mtime, size). Health is polled every few
-// seconds by every delegator on the fleet, and the verdict costs a re-render;
-// re-deriving per poll would burn the node's CPU to answer a question whose
-// answer only changes when the file does. A file that is replaced with the same
-// size in the same mtime tick keeps a stale verdict for that tick, which is a
-// price worth paying for a config a human re-renders by hand.
-//
-// A read error yields an empty state, which omits both fields: a node that
-// cannot read its own config must not publish a verdict about it.
-func servingConfigReporter(path string) func() (string, string) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return nil
-	}
-	var (
-		mu       sync.Mutex
-		haveKey  bool
-		key      [2]int64 // unix nanos of mtime, size
-		cachedID string
-		cachedSt string
-	)
-	return func() (string, string) {
-		fi, err := os.Stat(path)
-		if err != nil {
-			return "", ""
-		}
-		k := [2]int64{fi.ModTime().UnixNano(), fi.Size()}
-		mu.Lock()
-		defer mu.Unlock()
-		if haveKey && key == k {
-			return cachedID, cachedSt
-		}
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return "", ""
-		}
-		rep := provenanceOf(string(b))
-		haveKey, key = true, k
-		cachedID, cachedSt = rep.SpecSHA256, string(rep.State)
-		return cachedID, cachedSt
-	}
 }

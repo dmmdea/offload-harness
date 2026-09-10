@@ -570,7 +570,7 @@ func localLeaseView(ctx context.Context, cfg config.Config) map[string]any {
 	// session can branch on — working / held-idle / held-working / loaded-idle /
 	// busy-outside / stale-holder / free. A session used to read "held" as
 	// "refuse"; now it can read whether the holder is actually using the cards.
-	act := gpuactivity.Snapshot(ctx, gpuactivity.Options{LockOverride: cfg.GPULockPath, StateDir: cfg.StateDir, Endpoint: cfg.Endpoint, Seat: cfg.AgentPlannerModel(""), SampleGPU: statusSamplesGPU, Sampler: statusGPUSampler})
+	act := gpuactivity.Snapshot(ctx, gpuactivity.Options{LockOverride: cfg.GPULockPath, StateDir: cfg.StateDir, Endpoint: cfg.Endpoint, Seat: cfg.AgentPlannerModel(""), SampleGPU: statusSamplesGPU})
 	view := map[string]any{
 		"held":       info.Held,
 		"queue_with": gpulease.QueueHint,
@@ -2721,16 +2721,6 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 
 // statusSamplesGPU lets a test skip the nvidia-smi sample in offload_status.
 var statusSamplesGPU = true
-
-// statusGPUSampler lets a test FAKE the per-card numbers offload_status samples,
-// instead of only turning the sample on/off. The held vs held-idle vs
-// held-working verdict (internal/gpuactivity.Assess) branches on the actual
-// utilization percentage, so a test asserting held-idle needs idle cards, not
-// merely "no sample" (H-49: on a box where another job holds the GPUs at 100%,
-// the real nvidia-smi answer is legitimately busy, and the held-idle assertion
-// failed on live hardware, not on a bug). Nil (production default) means the
-// real nvidia-smi via gpuactivity.SampleGPUs.
-var statusGPUSampler func(ctx context.Context) ([]gpuactivity.GPU, error)
 
 // agentRunOrigin labels an agent_run registration: this host, this door.
 func agentRunOrigin() string {

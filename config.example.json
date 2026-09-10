@@ -221,7 +221,6 @@
   "fleet_store_root": "",
   "fleet_store_cap_gb": 0,
   "fleet_store_prune_every_jobs": 0,
-  "serving_config_path": "",
   "fleet_queue_host": false,
   "fleet_queue_holder": "",
   "fleet_queue_claim": false,
