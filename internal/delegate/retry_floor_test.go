@@ -103,6 +103,24 @@ func TestRunRetryNeverLandsOnASeatAlreadyRunningAnotherJob(t *testing.T) {
 	if !strings.Contains(pr.RetryNote, "already running another job") || !strings.Contains(pr.RetryNote, "jobs_running 1") {
 		t.Fatalf("retry_note = %q, want the busy seat named", pr.RetryNote)
 	}
+	// LIVENESS (review finding, 0.115.9): route=spread probes the fleet ONCE
+	// before the batch; the busy check must read the node NOW, not that
+	// snapshot. The node is idle at the initial probe and turns busy while the
+	// local first attempt runs — a cached read would let the retry land.
+	live, liveURL := eligibleNode(t, "node-live", "qube from live")
+	var busyNow atomic.Int64
+	live.jobsRunningFn = func() int { return int(busyNow.Load()) }
+	flipThenFail := func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+		busyNow.Store(1) // a sibling job landed on node-live after the fleet probe
+		return failingLocal(&localCalls)(ctx, c)
+	}
+	results, sum, err = Run(context.Background(), testCfg(t), flipThenFail, contracts(1), "spread", []string{liveURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.dispatches.Load() != 0 || sum.Retried != 0 || !strings.Contains(results[0].RetryNote, "fresh health") {
+		t.Fatalf("a node that turned busy AFTER the fleet probe must still block the retry: dispatches=%d retried=%d note=%q", live.dispatches.Load(), sum.Retried, results[0].RetryNote)
+	}
 	// And the local landing reads the seat's in-flight count: a busy reading
 	// skips, an idle one lets the retry run.
 	r := &runner{cfg: testCfg(t), localBusyProbe: func(context.Context) busyReading { return busyReading{busy: true, inflight: 2} }}

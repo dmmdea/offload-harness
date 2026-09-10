@@ -113,9 +113,12 @@ type fakeNode struct {
 	// The capacity advertisement (0.100.0). All zero by default, which is what
 	// a node too old to publish them decodes to — so every pre-existing fake
 	// keeps advertising exactly what it advertised before.
-	queueDepth        int
-	jobsQueued        int
-	jobsRunning       int
+	queueDepth  int
+	jobsQueued  int
+	jobsRunning int
+	// jobsRunningFn, when set, answers jobs_running per health request (a
+	// node whose load CHANGES during the run — the liveness fixture).
+	jobsRunningFn     func() int
 	maxConcurrentJobs int
 	maxQueueDepth     int
 
@@ -133,6 +136,15 @@ type fakeNode struct {
 		High     bool    `json:"high"`
 		IdleSlot bool    `json:"idle_slot"`
 	}
+}
+
+// jobsRunningNow is the health payload's jobs_running: the live function when
+// the fixture has one, else the static field.
+func (f *fakeNode) jobsRunningNow() int {
+	if f.jobsRunningFn != nil {
+		return f.jobsRunningFn()
+	}
+	return f.jobsRunning
 }
 
 func (f *fakeNode) server() *httptest.Server {
@@ -153,7 +165,7 @@ func (f *fakeNode) server() *httptest.Server {
 			"agent_seat_resident": f.resident,
 			"agent_enabled":       f.agentEnabled,
 			"jobs_queued":         f.jobsQueued,
-			"jobs_running":        f.jobsRunning,
+			"jobs_running":        f.jobsRunningNow(),
 			"max_concurrent_jobs": f.maxConcurrentJobs,
 			"max_queue_depth":     f.maxQueueDepth,
 		}

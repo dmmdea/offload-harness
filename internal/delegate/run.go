@@ -797,8 +797,9 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// budget or think block, and a second seat handed the wall's leftovers
 	// repeats the shape (2026-09-10: the 4B's 603 s empty final was retried on
 	// the 27B with 296 s, which generated 4,178 tokens of think and timed out).
-	// The reasoning_starved shape is class budget and never reaches here; the
-	// `empty` abstention does, and is skipped by name.
+	// The reasoning_starved shape is class budget and never reaches here (kept
+	// in the match so the rule reads as one shape, not as a coincidence of the
+	// class table); the `empty` abstention does, and is skipped by name.
 	if stop := first.Result.StopReason; first.Result.Deferred && (stop == "reasoning_starved" || stop == "empty") {
 		first.RetryNote = fmt.Sprintf("retry skipped: the first attempt on %s ended on an empty final (stop_reason %s) — a second seat given the wall's leftovers repeats the shape; the fix is the seat's completion budget or agent_thinking, not a retry", nodeLabel(first), stop)
 		return first
@@ -868,7 +869,12 @@ func retryFloorSource(floor int) string {
 // retrySeatBusy reports whether the seat the retry would land on is already
 // generating for another job. A LOCAL landing reads the seat's in-flight count
 // through llama-swap (probeLocalBusy, fail-open to idle); a REMOTE landing
-// reads the node's published jobs_running (0 = idle or unknown, never busy).
+// reads the node's jobs_running from a FRESH health probe (0 = idle or
+// unknown, never busy). Fresh, not the run's cached view: route=spread probes
+// the fleet once before the batch starts, so the cached view cannot show the
+// load a SIBLING subtask of the same batch has since put on that node — which
+// is exactly how the 2026-09-10 retry joined a seat mid-generation. A failed
+// probe falls back to the cached view (fail-open, like every placement read).
 func (r *runner) retrySeatBusy(ctx context.Context, alt placement) (bool, string) {
 	if alt.base == "" {
 		rd := r.probeLocalBusy(ctx)
@@ -877,8 +883,12 @@ func (r *runner) retrySeatBusy(ctx context.Context, alt placement) (bool, string
 		}
 		return false, ""
 	}
-	if alt.view.JobsRunning > 0 {
-		return true, fmt.Sprintf("jobs_running %d", alt.view.JobsRunning)
+	view, source := alt.view, "cached view"
+	if fresh, err := FetchNodeView(ctx, alt.base, r.cfg.FleetAuthToken); err == nil {
+		view, source = fresh, "fresh health"
+	}
+	if view.JobsRunning > 0 {
+		return true, fmt.Sprintf("jobs_running %d (%s)", view.JobsRunning, source)
 	}
 	return false, ""
 }
