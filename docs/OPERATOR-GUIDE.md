@@ -602,10 +602,18 @@ to `installed.json`. The install seed also binds the agent's planner seat automa
 measured seat for that tier), and otherwise is DERIVED from `resident_tier` when that differs from
 the workhorse. So running the agent no longer requires `-model <resident_tier>` — the `-model` flag
 remains an override. `agent_max_tokens` (0.113.9) is the planner's completion budget per call for `agent_run`
-and for delegated jobs this node serves (0 = the loop default of 1,024; the loop still raises a starved budget
-once, to 4x) — set 4096 for a THINKING seat, whose reasoning spends the same budget (the Qube 27B seat used 839
-reasoning tokens of 1,024 and returned nothing, 2026-09-04). A key named `max_tokens` is NOT read: the loader
-warns `unknown config key`. `agent_lease_wait_sec` (0.113.14) bounds how long a local `agent_delegate` placement waits for a
+and for delegated jobs this node serves (0 = the loop default of 1,024) — set 4096 for a THINKING seat, whose
+reasoning spends the same budget (the Qube 27B seat used 839 reasoning tokens of 1,024 and returned nothing,
+2026-09-04). A key named `max_tokens` is NOT read: the loader warns `unknown config key`. `agent_thinking`
+(0.115.8) is the seat's think-block policy on planner calls: `auto` (default) thinks every step and, when a
+step ends EMPTY (no content, no tool call — a think block that ate the budget, or a bare close), re-issues that
+same step ONCE with thinking off at 4× the step budget (cap 8,192), then stops the run as `reasoning_starved` /
+`empty`, which the node reports as a defer with the arithmetic in `stop_note` and per-call `calls[]` — never as an
+empty answer; `off` renders every planner call in non-thinking mode (`chat_template_kwargs: {"enable_thinking":
+false}`, the same knob the structured re-pack sends) for grounded extraction on a seat measured to starve; `on`
+never sends the kwarg. A contract's own `thinking` overrides the box. Until 0.115.8 the loop raised the budget
+4× on a starved step, nudged once with a user turn and then accepted a second empty as `done` (1× + 4× + 4× the
+budget for nothing; 2026-09-10 retrospective D-01). `agent_lease_wait_sec` (0.113.14) bounds how long a local `agent_delegate` placement waits for a
 foreign TEXT-class GPU lease (`gpu reserve --class text`) to clear before deferring — see the delegate section below. `agent_placement_wait_sec` (0.113.18) bounds the delegator's CAPACITY wait: a subtask every fitting node refused for capacity (queue full, leased, draining, shed), or whose only placement is a reserved seat, waits up to this many seconds (default 120; negative = off) re-reading the fleet's health and lands on the first node that frees — the idle time is not charged to `timeout_sec`; when nothing frees it defers with class `capacity`. `priority` on `agent_delegate` / `--priority` on `delegate` (`-1` sheddable, `0`, `1`) is the scheduling band a node claims by; sheddable work takes idle capacity only and is shed rather than waited (docs/systems/fleet-node.md, "Bands, tenants, saturation and the capacity wait"). `agent_spread_local_slot` (0.113.20) decides what `route=spread` does with the LOCAL rotation slot when the local seat is already busy at deal time: `skip-when-busy` (the default) deals it to the best-fit eligible remote with room, so several delegating sessions do not stack on one local seat; `always` restores the unconditional local slot (docs/systems/fleet-node.md, "The local slot under load"). A tier may also seed `agent_profile`, the box's DEFAULT agent tool profile when
 a call names none (resolution: explicit `--profile`/argument > config `agent_profile` > `general`).
 `ampere-6` seeds `research` because on that tier the same model scored 0% under `general` and 72%

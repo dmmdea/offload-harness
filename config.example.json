@@ -18,6 +18,7 @@
   "agent_admission_wait_sec": 0,
   "agent_ctx_tokens": 0,
   "agent_max_tokens": 0,
+  "agent_thinking": "",
   "agent_lease_wait_sec": 0,
   "agent_placement_wait_sec": 0,
   "agent_spread_local_slot": "",

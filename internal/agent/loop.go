@@ -51,6 +51,14 @@ type Completion struct {
 	Serve        *ServeStats
 	Msg          Msg
 	FinishReason string
+	// Reasoning is the seat's HIDDEN channel for this turn (vLLM `reasoning`,
+	// llama.cpp `reasoning_content`), kept apart from the visible content so an
+	// empty answer can be told from a starved one (thinking.go). ReasoningKey
+	// names the wire key it arrived under ("" = none). ThinkingOff records
+	// that this call was rendered in non-thinking mode.
+	Reasoning    string
+	ReasoningKey string
+	ThinkingOff  bool
 }
 
 // ToolSpec is the declarative surface advertised to the model.
@@ -85,16 +93,28 @@ type Client interface {
 
 // Result is the outcome of a loop run.
 type Result struct {
-	Output     string // the final assistant content
-	Steps      int    // model turns taken
+	Output string // the final assistant content
+	Steps  int    // model turns taken
 	// TokensIn / TokensOut are the SEAT's own usage summed over every model turn of
 	// the run (prompt tokens the server processed, cache hits included; completion
 	// tokens it generated). They are what the ledger reports as work the cards did,
 	// and they are set on EVERY return — a budget- or error-ended run generated
 	// just as many tokens as a finished one. 0 when the backend reports no usage.
-	TokensIn  int
-	TokensOut int
-	StopReason string // "done" (model finished) | "budget" (hit maxSteps) | "error"
+	TokensIn   int
+	TokensOut  int
+	StopReason string // "done" (model finished) | "budget" (hit maxSteps) | "error" | StopReasoningStarved | StopEmpty | "unparsed_tool_call"
+	// StopNote is the one-line evidence behind a StopReasoningStarved / StopEmpty
+	// stop (the starvation arithmetic of the last empty completion). Empty otherwise.
+	StopNote string
+	// OutputTruncated: the final answer ended on finish_reason "length" — a
+	// correct partial the caller must not mistake for the whole (the 2026-09-10
+	// `ledger-02` row: 2,630 chars cut mid-sentence at exactly 1,024 tokens).
+	OutputTruncated bool
+	// Calls is one CallRecord per planner completion, on EVERY return path
+	// (thinking.go, D-47): finish reason, completion/reasoning tokens, visible
+	// and hidden chars, whether thinking was off. The corpus fact the rigger
+	// classifies reasoning-starvation on.
+	Calls      []CallRecord
 	Transcript []Msg
 
 	// Fallback is set only by RunTwoTier (two-tier drive): it records whether the
@@ -220,6 +240,7 @@ func (l *Loop) calReport() TokenCalReport {
 // Loop runs the canonical agent loop over a fixed tool set.
 type Loop struct {
 	client        Client
+	thinking      ThinkingMode // planner think-block policy (thinking.go); "" = ThinkingAuto
 	tools         map[string]Tool
 	specs         []ToolSpec
 	maxSteps      int
@@ -374,6 +395,11 @@ func (l *Loop) WithWorktree(root string) *Loop {
 	}
 	return l
 }
+
+// WithThinking sets the planner think-block policy (thinking.go). An empty
+// mode is ThinkingAuto; the caller validates with ParseThinkingMode first.
+func (l *Loop) WithThinking(m ThinkingMode) *Loop { l.thinking = m; return l }
+
 func (l *Loop) WithMaxTokens(n int) *Loop {
 	if n > 0 {
 		l.maxTokens = n
@@ -681,7 +707,21 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 	// prompts the server rejects).
 	l.resolveSpecReserve(ctx)
 	msgs := make([]Msg, 0, 8)
-	budgetRaised := false // one budget raise per run when reasoning starves the completion (see below)
+	// The empty-final re-issue (see the branch below). retryNoThink arms the
+	// next Chat call as the re-issue (thinking off at the final budget);
+	// lastWasReissue records that the completion just received WAS one, so two
+	// empties in a row end the run rather than re-issuing forever; reissues
+	// bounds the episodes per run (a re-issue that yields a tool call lets the
+	// run continue, and a LATER empty final earns its own re-issue — review
+	// finding 2, 0.115.8 — but never more than maxReissues of them).
+	retryNoThink, lastWasReissue, reissues := false, false, 0
+	// recitedStep guards the plan recitation below against the re-issue's
+	// `step--`: the block is keyed on the step index and would otherwise append
+	// the plan a SECOND time to the re-issued transcript (review finding 1).
+	recitedStep := -1
+	// calls is the per-completion record (thinking.go CallRecord), appended on
+	// every successful Chat and carried on every Result return path.
+	var calls []CallRecord
 	// Seat usage, summed across turns (see Result.TokensIn/TokensOut). Counted on
 	// every successful Chat, including the compaction retry below, so a run that
 	// ends on budget or error still reports the generation it paid for.
@@ -692,7 +732,6 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			tokOut += c.Serve.UsageCompletionTokens
 		}
 	}
-	nudged := false       // one nudge per run when the model closes with an empty message (see below)
 	if l.system != "" {
 		msgs = append(msgs, Msg{Role: "system", Content: l.system})
 	}
@@ -781,7 +820,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
-			return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits}, err
+			return Result{Steps: step, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}, err
 		}
 		specs := l.specs
 		if len(disabledTools) > 0 {
@@ -797,7 +836,8 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// actions) — append the current .agent/plan.md as a fresh USER message so
 		// the plan sits near the context tail and a long task doesn't lose it.
 		// Appending here (before compaction) means it is budgeted like any message.
-		if step > 0 && step%planReinjectInterval == 0 {
+		if step > 0 && step%planReinjectInterval == 0 && recitedStep != step {
+			recitedStep = step
 			if m, ok := loadPlan(l.worktree); ok {
 				msgs = append(msgs, m)
 			}
@@ -830,7 +870,24 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				}
 			}
 		}
-		comp, err := l.client.Chat(ctx, msgs, specs, l.maxTokens)
+		// The call's own context and budget. ThinkingOff renders every planner
+		// call in non-thinking mode; ThinkingAuto/On think, except that the
+		// empty-final re-issue (retryNoThink) runs at the FINAL budget and, under
+		// Auto, with thinking off — the transcript already holds the evidence
+		// and the answer needs room, not more deliberation.
+		stepCtx, stepMax := ctx, l.maxTokens
+		if l.thinking == ThinkingOff {
+			stepCtx = ContextWithoutThinking(ctx)
+		}
+		thisIsReissue := retryNoThink
+		if retryNoThink {
+			retryNoThink = false
+			stepMax = finalMaxTokens(l.maxTokens)
+			if l.thinking != ThinkingOn {
+				stepCtx = ContextWithoutThinking(ctx)
+			}
+		}
+		comp, err := l.client.Chat(stepCtx, msgs, specs, stepMax)
 		if err != nil {
 			// Reactive retry (belt-and-suspenders): the token estimate is
 			// approximate, so a request we thought fit can still be rejected for
@@ -879,13 +936,15 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				} else if rv == fitUnknown && estimateTokens(msgs) > target {
 					exhausted++ // even the last resort could not fit — counted, never silent
 				}
-				comp, err = l.client.Chat(ctx, msgs, specs, l.maxTokens)
+				comp, err = l.client.Chat(stepCtx, msgs, specs, stepMax)
 			}
 			if err != nil {
-				return Result{Steps: step, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits}, err
+				return Result{Steps: step, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}, err
 			}
 		}
 		noteUsage(comp)
+		calls = append(calls, recordOf(step+1, stepMax, comp))
+		lastWasReissue = thisIsReissue
 		// Learn from the response: estimateTokens(msgs) is what we thought the
 		// payload cost, comp.Serve.UsagePromptTokens is what it actually cost.
 		// Observed BEFORE appending the reply, so both refer to the same bytes.
@@ -903,24 +962,31 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// which is the very race that gated the calibrator. Observe ignores a nil
 		// Serve, so a backend that reports no timings yields "insufficient_data"
 		// rather than a fabricated 0% reuse.
-		if comp.FinishReason == "length" && strings.TrimSpace(comp.Msg.Content) == "" && len(comp.Msg.ToolCalls) == 0 && !budgetRaised {
-			// 2026-09-04: the Qube 27B seat (Qwen3.8, --reasoning-parser qwen3) spent
-			// 839 of the loop's 1024 completion tokens THINKING; the visible answer
-			// was cut or empty and 5/8 digest contracts came back with nothing.
-			// Reasoning counts against max_tokens, so a thinking model needs a
-			// bigger budget than a plain one — raise it ONCE, to 4x (cap 8192), and
-			// re-issue the same step. Anything usable (partial text, a tool call)
-			// falls through as before; only the empty-and-truncated case retries.
-			budgetRaised = true
-			raised := l.maxTokens * 4
-			if raised > 8192 {
-				raised = 8192
-			}
-			if raised > l.maxTokens {
-				l.maxTokens = raised
-				step-- // re-run this step
+		if kind, basis, empty := comp.Starvation(); empty {
+			// An empty completion — no tool call, no visible content — is never an
+			// answer. Two shapes, one classifier (thinking.go): the seat spent its
+			// budget inside the think block (StopReasoningStarved: finish "length"
+			// and/or reasoning_tokens >= 0.9 x completion) or closed with nothing
+			// (StopEmpty). Until 0.115.8 the loop raised the budget 4x and re-ran,
+			// then nudged with a user turn and accepted a SECOND empty as "done" —
+			// three full-budget generations (1x + 4x + 4x; 20,526 tokens on the
+			// Qube 27B, 2026-09-10) and an empty final published as a result.
+			//
+			// Now: re-issue THIS step once, at the final budget and (under
+			// ThinkingAuto) with thinking off — the same request, no nudge turn
+			// appended, so the model answers from what it has already read. A
+			// second empty IN A ROW ends the run with the NAMED stop and an empty
+			// Output that the node turns into a defer; nothing downstream
+			// re-packs it. A re-issue that instead yields a tool call keeps the
+			// run going, and a later empty final gets its own re-issue, up to
+			// maxReissues per run.
+			if !lastWasReissue && reissues < maxReissues {
+				reissues++
+				retryNoThink = true
+				step-- // the re-issue does not spend a step
 				continue
 			}
+			return Result{Steps: step + 1, StopReason: kind, StopNote: basis, Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}, nil
 		}
 		l.prefill.Observe(comp.Serve)
 		msgs = append(msgs, comp.Msg)
@@ -930,16 +996,6 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// some other OpenAI-compatible servers) return tool calls with
 		// finish_reason "stop", so trusting finish_reason drops the tool call
 		// and returns an empty answer.
-		if len(comp.Msg.ToolCalls) == 0 && strings.TrimSpace(comp.Msg.Content) == "" && !nudged {
-			// 2026-09-04: after its tool steps the Qube 27B seat sometimes closes
-			// with an EMPTY assistant message (delegation log: steps 4, stop "done",
-			// tokens_out 17 — a bare think block) and the contract fails with no
-			// findings. An empty final answer is not an answer: ask once, plainly,
-			// for the answer in the requested shape, then accept whatever comes.
-			nudged = true
-			msgs = append(msgs, Msg{Role: "user", Content: "Your last message was empty. Answer the task now, from what you have read, in the requested shape."})
-			continue
-		}
 		if len(comp.Msg.ToolCalls) == 0 {
 			if marker := unparsedToolCallMarker(comp.Msg.Content); marker != "" {
 				// 2026-09-04: the Qube 27B seat answered every digest with
@@ -949,10 +1005,10 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				// the final answer and the structured re-pack produced findings
 				// about "the assistant listing the directory". That is a seat
 				// configuration error, and it must be named, not digested.
-				return Result{Steps: step + 1, StopReason: "unparsed_tool_call", Transcript: msgs, Effects: effects, RuleHits: ruleHits},
+				return Result{Steps: step + 1, StopReason: "unparsed_tool_call", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, Effects: effects, RuleHits: ruleHits, Calls: calls},
 					fmt.Errorf("%w: the seat returned %q as text (its --tool-call-parser does not match the model's chat template)", ErrUnparsedToolCall, marker)
 			}
-			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits}
+			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", OutputTruncated: comp.FinishReason == "length", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
 			if l.batchJudge {
 				res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 			}
@@ -1046,7 +1102,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			msgs = append(msgs, Msg{Role: "tool", ToolCallID: call.ID, Content: content, IsError: isErr})
 		}
 	}
-	res := Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits}
+	res := Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
 	if l.batchJudge {
 		res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 	}

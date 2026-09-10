@@ -38,20 +38,21 @@ import (
 type Axis string
 
 const (
-	AxisSeatInfra       Axis = "seat-infra"       // defer_class infrastructure: the seat/engine, not the loop
-	AxisTimeout         Axis = "timeout"          // the contract's wall ran out
-	AxisBudget          Axis = "budget"           // the step budget ran out
-	AxisAbstention      Axis = "abstention"       // defer_class abstention: the seat declined
-	AxisSchemaMiss      Axis = "schema-miss"      // the answer failed acceptance on shape: empty / short fields, or did not validate at all (sub invalid)
-	AxisAnchorMiss      Axis = "anchor-miss"      // a schema-valid answer missed a content anchor (contains:/regex:/not_contains:) — off-document or generic
-	AxisLoop            Axis = "loop"             // trace: the same tool >= 3 times running, or a rule fired
-	AxisLongObservation Axis = "long-observation" // trace: one observation over the long threshold
-	AxisToolMisuse      Axis = "tool-misuse"      // trace: >= 2 calls that failed or never ran
-	AxisUnclassified    Axis = "unclassified"
+	AxisSeatInfra        Axis = "seat-infra"        // defer_class infrastructure: the seat/engine, not the loop
+	AxisTimeout          Axis = "timeout"           // the contract's wall ran out
+	AxisBudget           Axis = "budget"            // the step budget ran out
+	AxisReasoningStarved Axis = "reasoning-starved" // stop_reason reasoning_starved / empty: the completion budget went to the think block, or the seat closed with nothing (0.115.8)
+	AxisAbstention       Axis = "abstention"        // defer_class abstention: the seat declined
+	AxisSchemaMiss       Axis = "schema-miss"       // the answer failed acceptance on shape: empty / short fields, or did not validate at all (sub invalid)
+	AxisAnchorMiss       Axis = "anchor-miss"       // a schema-valid answer missed a content anchor (contains:/regex:/not_contains:) — off-document or generic
+	AxisLoop             Axis = "loop"              // trace: the same tool >= 3 times running, or a rule fired
+	AxisLongObservation  Axis = "long-observation"  // trace: one observation over the long threshold
+	AxisToolMisuse       Axis = "tool-misuse"       // trace: >= 2 calls that failed or never ran
+	AxisUnclassified     Axis = "unclassified"
 )
 
 // Precedence is the evaluation order, published so the report can print it.
-var Precedence = []Axis{AxisSeatInfra, AxisTimeout, AxisBudget, AxisAbstention, AxisSchemaMiss, AxisAnchorMiss, AxisLoop, AxisLongObservation, AxisToolMisuse, AxisUnclassified}
+var Precedence = []Axis{AxisSeatInfra, AxisTimeout, AxisReasoningStarved, AxisBudget, AxisAbstention, AxisSchemaMiss, AxisAnchorMiss, AxisLoop, AxisLongObservation, AxisToolMisuse, AxisUnclassified}
 
 // SubTwoStepGrounded is the sub-axis (of schema-miss and anchor-miss) the P2
 // corpus read found: the contract carried context docs and the run stopped
@@ -125,6 +126,9 @@ var (
 //     shed, a refused dispatch, a dial failure) — no node produced a result.
 //  2. timeout: the reason/error says wall timeout / deadline, or
 //     defer_class == "budget" with stop_reason "error" and no step-budget text.
+//     2b. reasoning-starved: stop_reason "reasoning_starved" or "empty", or the
+//     reason opens with "empty final answer" (0.115.8) — the run produced no
+//     visible final on two attempts; the calls[] records carry the arithmetic.
 //  3. budget: "step budget exhausted" in the reason, or stop_reason "budget".
 //  4. abstention: defer_class == "abstention" — except when the reason says
 //     the OUTPUT FAILED SCHEMA, which is schema-miss / invalid (the seat
@@ -168,6 +172,10 @@ func Classify(r Row) Verdict {
 	}
 	if wallTimeoutRe.MatchString(reason) || (r.DeferClass == core.DeferClassCapacity && wallTimeoutRe.MatchString(reason)) {
 		v.Axis, v.Evidence = AxisTimeout, clip(reason, 120)
+		return v
+	}
+	if stop == "reasoning_starved" || stop == "empty" || strings.HasPrefix(reason, "empty final answer") {
+		v.Axis, v.Evidence = AxisReasoningStarved, clip(firstNonEmpty(reason, "stop_reason "+stop), 120)
 		return v
 	}
 	if stepBudgetRe.MatchString(reason) || stop == "budget" {

@@ -135,9 +135,15 @@ type AgentContract struct {
 	OutputSchema  json.RawMessage `json:"output_schema,omitempty"` // JSON Schema for structured output (gbnf subset)
 	Acceptance    []string        `json:"acceptance,omitempty"`    // AcceptanceCheck DSL strings, delegator-evaluated
 	Profile       string          `json:"profile,omitempty"`       // agent profile name; default "research"-class read-only
-	MaxSteps      int             `json:"max_steps,omitempty"`     // default AgentMaxStepsDefault, clamped to AgentMaxStepsCap
-	TimeoutSec    int             `json:"timeout_sec,omitempty"`   // default AgentTimeoutSecDefault, clamped to AgentTimeoutSecCap
-	Depth         int             `json:"depth"`                   // 0 = origin; ≥1 ⇒ delegate tool NEVER registered
+	// Thinking (0.115.8) is the planner think-block policy for this contract:
+	// "" / "auto" (think; an empty final is re-issued once with thinking off),
+	// "off" (every planner call in non-thinking mode — grounded extraction on
+	// a seat whose think block starves the answer), "on" (never send the
+	// non-thinking kwarg). Overrides the executing node's `agent_thinking`.
+	Thinking   string `json:"thinking,omitempty"`
+	MaxSteps   int    `json:"max_steps,omitempty"`   // default AgentMaxStepsDefault, clamped to AgentMaxStepsCap
+	TimeoutSec int    `json:"timeout_sec,omitempty"` // default AgentTimeoutSecDefault, clamped to AgentTimeoutSecCap
+	Depth      int    `json:"depth"`                 // 0 = origin; ≥1 ⇒ delegate tool NEVER registered
 	// SetupActions (agentsetup.go, 0.113.24): tool calls the loop replays before
 	// the model's first turn; ≤ AgentSetupActionsMax, charged to the wall and
 	// never to max_steps. Optional; a node one release behind ignores it (the
@@ -165,8 +171,16 @@ type AgentWireResult struct {
 	Structured    json.RawMessage `json:"structured,omitempty"` // present iff OutputSchema given AND validated
 	Steps         int             `json:"steps"`
 	StopReason    string          `json:"stop_reason"`
-	Deferred      bool            `json:"deferred"`
-	Reason        string          `json:"reason,omitempty"`
+	// StopNote (0.115.8): the one-line evidence behind a `reasoning_starved` /
+	// `empty` stop — the starvation arithmetic of the last empty completion
+	// (finish reason, reasoning vs completion tokens, which wire key). Empty
+	// on every other stop.
+	StopNote string `json:"stop_note,omitempty"`
+	// OutputTruncated (0.115.8): the final answer ended on finish_reason
+	// "length" — a correct PARTIAL the caller must not read as the whole.
+	OutputTruncated bool   `json:"output_truncated,omitempty"`
+	Deferred        bool   `json:"deferred"`
+	Reason          string `json:"reason,omitempty"`
 	// DeferClass is the machine-branchable WHY behind Deferred (one of the
 	// DeferClass* constants). Additive and omitempty: a pre-0.65 node's result
 	// decodes with an empty class, which readers must treat as "unknown", never
@@ -240,6 +254,38 @@ type AgentWireResult struct {
 	// entries carry the per-action status). 0 on a node that predates the
 	// field, so a mixed-version fleet shows where the replay did not happen.
 	SetupRan int `json:"setup_ran,omitempty"`
+	// Calls (0.115.8, D-47): one entry per planner completion — finish reason,
+	// completion and reasoning tokens, visible and hidden chars, tool-call
+	// count, whether thinking was off. Set before the defer branches, on every
+	// result shape, so a starved run's arithmetic is in the corpus rather than
+	// reconstructed from token totals. Omitempty: a pre-0.115.8 node emits none.
+	Calls []AgentCallRecord `json:"calls,omitempty"`
+}
+
+// AgentCallRecord is one planner completion as the corpus keeps it (the wire
+// projection of agent.CallRecord). No transcript bytes — counts only.
+type AgentCallRecord struct {
+	Step             int    `json:"step"`
+	MaxTokens        int    `json:"max_tokens"`
+	FinishReason     string `json:"finish_reason,omitempty"`
+	CompletionTokens int    `json:"completion_tokens,omitempty"`
+	ReasoningTokens  int    `json:"reasoning_tokens,omitempty"`
+	ContentChars     int    `json:"content_chars,omitempty"`
+	ReasoningChars   int    `json:"reasoning_chars,omitempty"`
+	ToolCalls        int    `json:"tool_calls,omitempty"`
+	ThinkingOff      bool   `json:"thinking_off,omitempty"`
+	ReasoningKey     string `json:"reasoning_key,omitempty"`
+}
+
+// ValidateThinking accepts the closed vocabulary of the planner think-block
+// policy ("" / auto / on / off, case-insensitive). Shared by the contract
+// validator and the config loader so both doors refuse the same strings.
+func ValidateThinking(s string) error {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "auto", "on", "off":
+		return nil
+	}
+	return fmt.Errorf("thinking %q: want auto, on or off", s)
 }
 
 // DecodeAgentContract reads one contract from r, tolerating unknown fields
@@ -286,6 +332,9 @@ func (c AgentContract) Validate() error {
 	}
 	if c.Depth < 0 {
 		return fmt.Errorf("agent contract: depth %d is negative", c.Depth)
+	}
+	if err := ValidateThinking(c.Thinking); err != nil {
+		return fmt.Errorf("agent contract: %w", err)
 	}
 	if err := ValidateAgentSetupActions(c.SetupActions); err != nil {
 		return err

@@ -68,6 +68,15 @@ type wireMsg struct {
 	// reasoning_content. Outgoing messages never set it, so omitempty keeps it off
 	// the request wire.
 	ReasoningContent string `json:"reasoning_content,omitempty"`
+	// Reasoning is the SAME channel under the key vLLM (>= 0.11, every
+	// --reasoning-parser) and the OpenAI-style servers emit: `reasoning`, not
+	// `reasoning_content`. Decode-only, never sent. Until 0.115.8 the client
+	// read only reasoning_content, so a vLLM seat that spent its whole
+	// completion budget inside the think block (content: null, reasoning: the
+	// unclosed block, finish_reason: length) read as SILENCE — the loop raised
+	// the budget, nudged, and published an empty final as "done" (2026-09-10:
+	// 20,526 tokens for zero visible characters on the Qube 27B seat).
+	Reasoning string `json:"reasoning,omitempty"`
 }
 type wireToolDef struct {
 	Type     string `json:"type"`
@@ -121,6 +130,13 @@ type wireReq struct {
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Temperature float64       `json:"temperature"`
 	Stream      bool          `json:"stream"`
+	// ChatTemplateKwargs is set ONLY when the call's context carries
+	// ContextWithoutThinking (thinking.go): `{"enable_thinking": false}` is the
+	// key Qwen3-class templates (and vLLM's reasoning layer) read to render the
+	// turn in non-thinking mode — the same knob the structured re-pack has sent
+	// since 0.81.0 (llamaclient.WithoutThinking). nil = key absent = the
+	// historical request, byte for byte.
+	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 }
 type wireResp struct {
 	Choices []struct {
@@ -138,6 +154,12 @@ type wireResp struct {
 		PromptTokensDetails struct {
 			CachedTokens int `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
+		// CompletionTokensDetails.ReasoningTokens: vLLM's count of the
+		// completion tokens spent inside the think block. Absent on llama.cpp
+		// (0 = not reported, never "no reasoning").
+		CompletionTokensDetails struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
 	} `json:"usage"`
 	Timings struct {
 		CacheN      int     `json:"cache_n"`
@@ -168,6 +190,11 @@ type ServeStats struct {
 	// did" — until 0.115.5 the loop never summed it, so an agent run that generated
 	// for minutes was ledgered as 0 (only the structured re-pack's tokens counted).
 	UsageCompletionTokens int `json:"usage_completion_tokens"`
+	// UsageReasoningTokens is the server's count of completion tokens spent on
+	// hidden reasoning (vLLM `usage.completion_tokens_details.reasoning_tokens`).
+	// 0 when the backend does not report it — a starvation verdict then rests
+	// on the reasoning TEXT and the finish reason instead (Completion.Starvation).
+	UsageReasoningTokens int `json:"usage_reasoning_tokens,omitempty"`
 }
 
 // Chat sends the running transcript + tool specs and returns the next completion.
@@ -191,6 +218,10 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 	req.Tools = wireToolDefs(tools)
 	if len(req.Tools) > 0 {
 		req.ToolChoice = "auto"
+	}
+	thinkingOff := IsThinkingOff(ctx)
+	if thinkingOff {
+		req.ChatTemplateKwargs = map[string]any{"enable_thinking": false}
 	}
 
 	buf, err := json.Marshal(req)
@@ -259,20 +290,41 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 	}
 	ch := wr.Choices[0]
 	out := Msg{Role: "assistant", Content: ch.Message.Content}
+	// The hidden-reasoning channel, under whichever key this seat uses:
+	// `reasoning` (vLLM >= 0.11, OpenAI-style) or `reasoning_content`
+	// (llama.cpp --reasoning-format, DeepSeek, gpt-oss). Which key a seat
+	// answers under is a seat fact worth one log line per seat (D-45's
+	// response-shape record), never a silent guess.
+	reasoning, reasoningKey := ch.Message.Reasoning, ""
+	switch {
+	case ch.Message.Reasoning != "":
+		reasoningKey = "reasoning"
+	case ch.Message.ReasoningContent != "":
+		reasoning, reasoningKey = ch.Message.ReasoningContent, "reasoning_content"
+	}
+	if reasoningKey != "" {
+		noteReasoningKey(c.base, c.model, reasoningKey)
+	}
 	// Reasoning-model fallback (ports nimclient's proven behavior): when content is
-	// empty, no tool call was made, and reasoning_content is populated, the answer is
-	// in the reasoning channel — without this the loop sees an empty turn and a
-	// perfectly good completion is scored as silence. This exact blind spot is what
-	// disqualified gpt-oss-20b's free-text role (2026-08-03 round-2 record) and hid
-	// one eval answer on 2026-08-05. Tool-call turns keep empty content: that is the
-	// normal shape, not a failure.
-	if out.Content == "" && len(ch.Message.ToolCalls) == 0 && ch.Message.ReasoningContent != "" {
-		out.Content = ch.Message.ReasoningContent
+	// empty, no tool call was made, the completion FINISHED, and the reasoning
+	// channel is populated, the answer is in the reasoning channel — without this
+	// the loop sees an empty turn and a perfectly good completion is scored as
+	// silence. This exact blind spot is what disqualified gpt-oss-20b's free-text
+	// role (2026-08-03 round-2 record) and hid one eval answer on 2026-08-05.
+	// Tool-call turns keep empty content: that is the normal shape, not a failure.
+	//
+	// finish_reason "length" is EXCLUDED on purpose (0.115.8): a think block cut
+	// by max_tokens is not an answer, and handing 8,192 tokens of "Thinking
+	// Process: 1. Analyze the request…" to the structured re-pack as if it were
+	// the answer would be worse than the silence it replaces. The loop reads
+	// Completion.Reasoning to classify that turn as reasoning-starved instead.
+	if out.Content == "" && len(ch.Message.ToolCalls) == 0 && reasoning != "" && ch.FinishReason != "length" {
+		out.Content = reasoning
 	}
 	for _, tc := range ch.Message.ToolCalls {
 		out.ToolCalls = append(out.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Args: tc.Function.Arguments})
 	}
-	comp := Completion{Msg: out, FinishReason: ch.FinishReason}
+	comp := Completion{Msg: out, FinishReason: ch.FinishReason, Reasoning: reasoning, ReasoningKey: reasoningKey, ThinkingOff: thinkingOff}
 	// Attach server accounting only when the backend actually reported some —
 	// nil means "this backend does not tell us", which a measurement must
 	// report as unmeasured rather than as zero reuse.
@@ -281,9 +333,10 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 			CacheN: wr.Timings.CacheN, PromptN: wr.Timings.PromptN,
 			PromptMS:   wr.Timings.PromptMS,
 			PredictedN: wr.Timings.PredictedN, PredictedMS: wr.Timings.PredictedMS,
-			UsagePromptTokens: wr.Usage.PromptTokens,
-			UsageCachedTokens: wr.Usage.PromptTokensDetails.CachedTokens,
+			UsagePromptTokens:     wr.Usage.PromptTokens,
+			UsageCachedTokens:     wr.Usage.PromptTokensDetails.CachedTokens,
 			UsageCompletionTokens: wr.Usage.CompletionTokens,
+			UsageReasoningTokens:  wr.Usage.CompletionTokensDetails.ReasoningTokens,
 		}
 	}
 	return comp, nil

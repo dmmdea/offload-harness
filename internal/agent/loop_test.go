@@ -18,11 +18,17 @@ type fakeClient struct {
 	calls     int
 	seen      [][]Msg
 	seenSpecs [][]ToolSpec
+	// seenMax / seenNoThink record, per call, the completion budget asked for
+	// and whether the context asked for a non-thinking render (thinking.go).
+	seenMax     []int
+	seenNoThink []bool
 }
 
-func (f *fakeClient) Chat(_ context.Context, msgs []Msg, specs []ToolSpec, _ int) (Completion, error) {
+func (f *fakeClient) Chat(ctx context.Context, msgs []Msg, specs []ToolSpec, maxTokens int) (Completion, error) {
 	f.seen = append(f.seen, append([]Msg(nil), msgs...))
 	f.seenSpecs = append(f.seenSpecs, append([]ToolSpec(nil), specs...))
+	f.seenMax = append(f.seenMax, maxTokens)
+	f.seenNoThink = append(f.seenNoThink, IsThinkingOff(ctx))
 	if f.calls >= len(f.script) {
 		return Completion{}, errors.New("fakeClient: script exhausted")
 	}

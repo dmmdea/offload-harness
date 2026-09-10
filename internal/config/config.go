@@ -236,6 +236,18 @@ type Config struct {
 	// per contract; set 4096 here for a thinking seat so the first attempt fits. The
 	// local-agent CLI has its own -max-tokens flag (default 4096) and ignores this key.
 	AgentMaxTokens int `json:"agent_max_tokens,omitempty"`
+	// AgentThinking (0.115.8) is this seat's planner think-block policy for
+	// agent_run and the delegated jobs this node serves: "" / "auto" (every
+	// step thinks; an empty final is re-issued ONCE with thinking off at the
+	// final budget, then the run stops as `reasoning_starved` / `empty`),
+	// "off" (every planner call renders in non-thinking mode — for grounded
+	// extraction on a seat measured to spend its whole budget in the think
+	// block), "on" (never send the non-thinking kwarg; for a template that
+	// rejects it). A contract's own `thinking` overrides it. The knob is
+	// `chat_template_kwargs: {"enable_thinking": false}`, the one the
+	// structured re-pack has sent since 0.81.0 — Qwen3/Gemma-class templates;
+	// a Flash-Next-class seat takes `reasoning_effort` instead (register D-80).
+	AgentThinking string `json:"agent_thinking,omitempty"`
 	// AgentLeaseWaitSec bounds how long a LOCAL agent placement (agent_delegate /
 	// delegate, route auto or spread) waits for a foreign TEXT-class GPU lease to
 	// clear before deferring. `gpu reserve --class text` (a benchmark, eval or

@@ -54,6 +54,18 @@ func fixture() []Row {
 			r.Result.Reason = "step budget exhausted (12 steps)"
 			r.Result.StopReason = "budget"
 		}),
+		row("starved", func(r *Row) {
+			r.Deferred = true
+			r.DeferClass = "budget"
+			r.Result.Reason = "empty final answer after 1 steps and 8192 completion tokens: finish length, 4096 of 4096 completion tokens were reasoning"
+			r.Result.StopReason = "reasoning_starved"
+		}),
+		row("empty-stop", func(r *Row) {
+			r.Deferred = true
+			r.DeferClass = "abstention"
+			r.Result.Reason = "empty final answer after 2 steps and 40 completion tokens: finish stop, empty message"
+			r.Result.StopReason = "empty"
+		}),
 		row("abstain", func(r *Row) {
 			r.Deferred = true
 			r.DeferClass = "abstention"
@@ -121,6 +133,8 @@ func TestClassifyEveryAxisAndPrecedence(t *testing.T) {
 		"timeout":                    {Axis: AxisTimeout},
 		"timeout-deadline":           {Axis: AxisTimeout},
 		"budget":                     {Axis: AxisBudget},
+		"starved":                    {Axis: AxisReasoningStarved},
+		"empty-stop":                 {Axis: AxisReasoningStarved},
 		"abstain":                    {Axis: AxisAbstention},
 		"schema":                     {Axis: AxisSchemaMiss},
 		"schema-2step":               {Axis: AxisSchemaMiss, Sub: SubTwoStepGrounded},
@@ -158,7 +172,7 @@ func TestBuildWeightsOverEligibleRowsAndIsDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.Rows != 20 || rep.Bad != 19 {
+	if rep.Rows != 22 || rep.Bad != 21 { // +starved, +empty-stop (0.115.8)
 		t.Fatalf("rows=%d bad=%d", rep.Rows, rep.Bad)
 	}
 	// trace-bearing bad rows: loop-rules, loop-run, longobs, misuse, timeout-with-trace-longobs, schema-with-loop-trace = 6
@@ -177,7 +191,7 @@ func TestBuildWeightsOverEligibleRowsAndIsDeterministic(t *testing.T) {
 	if x := find(AxisLoop, ""); x.Hits != 2 || x.Eligible != 6 || x.Weight < 0.33 || x.Weight > 0.34 {
 		t.Fatalf("loop = %+v (weight must be over the TRACE-bearing bad rows, not all bad rows)", x)
 	}
-	if x := find(AxisSeatInfra, ""); x.Hits != 3 || x.Eligible != 19 || x.Remedy.Key != "" || !strings.Contains(x.TopReason, "x") {
+	if x := find(AxisSeatInfra, ""); x.Hits != 3 || x.Eligible != 21 || x.Remedy.Key != "" || !strings.Contains(x.TopReason, "x") {
 		t.Fatalf("seat-infra = %+v", x)
 	}
 	if x := find(AxisSchemaMiss, SubTwoStepGrounded); x.Hits != 1 || x.Remedy.Key != "agent_seed_context_reads" {

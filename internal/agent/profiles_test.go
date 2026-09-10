@@ -321,7 +321,6 @@ func TestResearchProfileNPUToolsSurviveNarrowing(t *testing.T) {
 	}
 }
 
-
 // TestProfileExemplarsCloseWithAFinalAnswer: an exemplar thread that ends on a tool
 // result is an OPEN conversation, and a small seat continues it instead of the
 // objective (the research profile's "latest stable Go version" thread produced the
