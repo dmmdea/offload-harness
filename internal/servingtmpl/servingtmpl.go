@@ -971,8 +971,23 @@ const modelQ38 = "qwen3.8-27b"
 // strip, keyed on the tier's include_qwen38. Its set membership is handled by the
 // __Q38_*__ tokens.
 func dropQ38(tmpl string) (string, error) {
+	// The long-context twin (2026-09-10) follows its parent: drop it FIRST, so the
+	// parent's leftover scan (a substring match) does not read "qwen3.8-27b-262k" as a
+	// dangling reference, and strip its literal text-set member, which dropModel's
+	// members: pass does not see.
+	if definesModel(tmpl, modelQ38Long) {
+		out, err := dropModel(tmpl, modelQ38Long)
+		if err != nil {
+			return "", err
+		}
+		tmpl = strings.ReplaceAll(out, " | q38l", "")
+	}
 	return dropModel(tmpl, modelQ38)
 }
+
+// modelQ38Long is the 27B's long-context twin (literal --ctx-size 262144, no MTP),
+// rendered by the triple-Blackwell template and gated with its parent.
+const modelQ38Long = "qwen3.8-27b-262k"
 
 // modelQ354B is the Qwen3.5-4B agent entry, gated by the tier's
 // include_qwen35_4b exactly as modelQ38 rides include_qwen38.

@@ -6,6 +6,24 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.6] - 2026-09-10 - the 3-card tier registers the long window its third card buys
+
+The operator's rule for `blackwell-3x16` is that the third card buys CONTEXT, and the tier must register more
+than `blackwell-2x16`. It did not: both tiers declared `ctx_size` 131072 and `agent_ctx_tokens` 131072 on a
+vLLM seat serving 163,840, and the triple template rendered no seat above the 131k window although the
+reference box serves a `qwen3.8-27b-262k` twin live (q8_0 KV, pair pin, KV upgraded 2026-09-01) and the
+3-card vLLM seat was measured at 262,144 with fp8 KV (Nightshift 2 seat v7, needle fidelity PASS x3; 238,592
+at batched 3135 in the seat program).
+
+- `profiles.json`: new optional field `long_ctx_size` (documented in `_fields`); `blackwell-3x16` sets it to
+  262144; `blackwell-2x16` and `blackwell-3x16` advertise `agent_ctx_tokens` 163840 = the declared vLLM
+  seat's served window (was 131072 - every contract was sized to 80 percent of the seat).
+- `llama-swap.win-triple-blackwell.yaml`: renders the `qwen3.8-27b-262k` twin (literal `--ctx-size 262144`,
+  no MTP drafter, pair pin, swappable, ttl 300) and adds it to the text swap set as `q38l`.
+- `docs/tiers`: the tier page carries `long_ctx_size`; `render.tests.ps1` asserts the twin renders on 3x16
+  and not on 2x16.
+- The vLLM long layer (pp3 at 262,144, fp8 KV, desktop floor) is the composite tier's job (0.116.0).
+
 ## [0.115.5] - 2026-09-10 - the ledger counts the work the seats actually did
 
 The operator's 30 % harness-share floor (2026-09-10) reads the ledger, and the ledger undercounted the

@@ -199,8 +199,11 @@ if ("$sttEnv" -match 'CUDA_VISIBLE_DEVICES=2\b')  { Ok 'b3x16 STT seat pinned to
 # CUDA graphs measured +40-51% gen on the 26B seats (2026-09-05, exact-output gate).
 if (($r.yaml -split "`n" | Where-Object { $_ -match 'env:' -and $_ -match 'GGML_CUDA_DISABLE_GRAPHS' }).Count -eq 0) { Ok 'b3x16 leaves CUDA graphs ON (measured +40-51% gen on the 26B seats)' } else { Bad 'b3x16 still SETS the cargo GGML_CUDA_DISABLE_GRAPHS on a seat' }
 if ($r.yaml -match 'ctx-size 131072') { Ok 'b3x16 serves the measured 131072 window' } else { Bad 'b3x16 ctx is not 131072' }
+if ($r.yaml -match 'qwen3\.8-27b-262k' -and $r.yaml -match 'ctx-size 262144') { Ok 'b3x16 renders the 262k long twin (the third card buys context)' } else { Bad 'b3x16 does not render the qwen3.8-27b-262k twin at 262144' }
+if (($r.yaml -split "`n" | Where-Object { $_ -match 'qwen3\.8-27b-262k:' }).Count -eq 1 -and $r.yaml -match 'q38l: qwen3\.8-27b-262k') { Ok 'b3x16 long twin is in the text swap set (q38l)' } else { Bad 'b3x16 long twin missing from the matrix vars/set' }
+if ($r.yaml -notmatch 'spec-type draft-mtp[^\n]*ctx-size 262144') { Ok 'b3x16 long twin carries no MTP drafter (q8_0 + MTP OOMs at 262k)' } else { Bad 'b3x16 long twin renders with an MTP drafter' }
 # The over-2-card seats exist and are opt-in (not in any matrix set).
-if ($r.yaml -match 'qwen3\.8-flash-next' -and $r.yaml -match 'tensor-split 28,10,10') { Ok 'b3x16 renders the measured 3-card Flash-Next seat' } else { Bad 'b3x16 is missing the 3-card Flash-Next seat' }
+if ($r.yaml -notmatch 'qwen3\.8-flash-next') { Ok 'b3x16 renders NO Flash-Next seat (removed in 0.115.4: no installer downloads its shards; the long window is the 27B 262k twin)' } else { Bad 'b3x16 still renders a Flash-Next seat' }
 
 Write-Host "== blackwell-2x16 - homogeneous dual-sm_120 pair (dual-blackwell template, cfg16) =="
 $r = Invoke-Render -Backend 'cuda' -ProfileId 'blackwell-2x16' -RamTier 'high' -BigRam $true
