@@ -3069,8 +3069,9 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 			// TokensIn stays 0 ON PURPOSE: the summary counts a completed
 			// row's TokensIn as tokens-saved, and a delegation row claiming
 			// savings would double-count the node-side agent row.
-			TokensOut: pr.Result.TokensOut,
-			Deferred:  pr.Result.Deferred || pr.Err != "" || len(pr.AcceptanceFailures) > 0,
+			TokensOut:    pr.Result.TokensOut,
+			SeatTokensIn: pr.Result.SeatTokensIn,
+			Deferred:     pr.Result.Deferred || pr.Err != "" || len(pr.AcceptanceFailures) > 0,
 			Reason:    reason,
 			// ModelTier carries placement:seat — the ledger has no placement
 			// column, and "which node/seat ran it" is the row's whole story.

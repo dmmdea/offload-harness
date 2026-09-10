@@ -3847,7 +3847,7 @@ func (p *Pipeline) knnPreferLargerEntry(task core.TaskType, input string) bool {
 // entryFrom builds a ledger entry from per-call meta + the enriched signals.
 func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int) ledger.Entry {
 	return ledger.Entry{
-		Task: string(task), TokensIn: meta.TokensIn, TokensOut: meta.TokensOut,
+		Task: string(task), TokensIn: meta.TokensIn, TokensOut: meta.TokensOut, SeatTokensIn: meta.SeatTokensIn,
 		LatencyMs: meta.LatencyMs, TokPerSec: meta.TokPerSec, CacheHit: meta.CacheHit,
 		Deferred: deferred,
 		Margin:   meta.Margin, ModelTier: meta.Model, Escalations: meta.Escalations,

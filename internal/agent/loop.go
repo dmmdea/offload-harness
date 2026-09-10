@@ -87,6 +87,13 @@ type Client interface {
 type Result struct {
 	Output     string // the final assistant content
 	Steps      int    // model turns taken
+	// TokensIn / TokensOut are the SEAT's own usage summed over every model turn of
+	// the run (prompt tokens the server processed, cache hits included; completion
+	// tokens it generated). They are what the ledger reports as work the cards did,
+	// and they are set on EVERY return — a budget- or error-ended run generated
+	// just as many tokens as a finished one. 0 when the backend reports no usage.
+	TokensIn  int
+	TokensOut int
 	StopReason string // "done" (model finished) | "budget" (hit maxSteps) | "error"
 	Transcript []Msg
 
@@ -675,6 +682,16 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 	l.resolveSpecReserve(ctx)
 	msgs := make([]Msg, 0, 8)
 	budgetRaised := false // one budget raise per run when reasoning starves the completion (see below)
+	// Seat usage, summed across turns (see Result.TokensIn/TokensOut). Counted on
+	// every successful Chat, including the compaction retry below, so a run that
+	// ends on budget or error still reports the generation it paid for.
+	tokIn, tokOut := 0, 0
+	noteUsage := func(c Completion) {
+		if c.Serve != nil {
+			tokIn += c.Serve.UsagePromptTokens
+			tokOut += c.Serve.UsageCompletionTokens
+		}
+	}
 	nudged := false       // one nudge per run when the model closes with an empty message (see below)
 	if l.system != "" {
 		msgs = append(msgs, Msg{Role: "system", Content: l.system})
@@ -865,9 +882,10 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				comp, err = l.client.Chat(ctx, msgs, specs, l.maxTokens)
 			}
 			if err != nil {
-				return Result{Steps: step, StopReason: "error", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits}, err
+				return Result{Steps: step, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits}, err
 			}
 		}
+		noteUsage(comp)
 		// Learn from the response: estimateTokens(msgs) is what we thought the
 		// payload cost, comp.Serve.UsagePromptTokens is what it actually cost.
 		// Observed BEFORE appending the reply, so both refer to the same bytes.
@@ -934,7 +952,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				return Result{Steps: step + 1, StopReason: "unparsed_tool_call", Transcript: msgs, Effects: effects, RuleHits: ruleHits},
 					fmt.Errorf("%w: the seat returned %q as text (its --tool-call-parser does not match the model's chat template)", ErrUnparsedToolCall, marker)
 			}
-			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits}
+			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits}
 			if l.batchJudge {
 				res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 			}
@@ -1028,7 +1046,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			msgs = append(msgs, Msg{Role: "tool", ToolCallID: call.ID, Content: content, IsError: isErr})
 		}
 	}
-	res := Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits}
+	res := Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits}
 	if l.batchJudge {
 		res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 	}
