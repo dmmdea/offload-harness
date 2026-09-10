@@ -1,7 +1,10 @@
 # 01 — Hosts, install, paths, tools
 
-Check `hostname` first. All facts below were measured on the **workstation** on 2026-09-01 unless tagged
-otherwise. GIMP presence on the other machines (the editing rig, the laptop, the edge node) is **unverified** — do not assume; check `Test-Path 'C:\Program Files\GIMP 3\bin'`.
+Check `hostname` first. Facts below were measured on the **workstation** on 2026-09-01 and on the
+**editing rig** on 2026-09-10 unless tagged otherwise. **GIMP runs on exactly two of the four
+machines** — the workstation and the editing rig; the laptop and the edge node have no GIMP at all
+(both re-probed 2026-09-10). The two GIMP hosts are not interchangeable: gimp-mcp exists only on
+the workstation, the brand fonts only on the rig.
 
 ## workstation — GIMP 3.2.4 [measured]
 
@@ -52,8 +55,9 @@ README + measured folder name]. Contents that matter:
 "Arial Bold", "Segoe UI Black", "Bahnschrift SemiBold Condensed", "Sans-serif Bold" (the
 built-in alias). `Font.get_by_name("Impact")` / `("Arial")` → **None**; `("Impact Regular")`
 / `("Arial Regular")` → Font. **Brand fonts Montserrat / Anton / League Gothic are NOT
-installed on the workstation** (they live on the editing rig per the Resolve reference) — install them
-machine-wide or per-user (`%APPDATA%\GIMP\3.2\fonts`) before rendering brand titles here.
+installed on the workstation** — they live on the editing rig, confirmed there through GIMP itself on
+2026-09-10 (see that host's section below). Render brand titles on the rig, or install the fonts
+machine-wide / per-user (`%APPDATA%\GIMP\3.2\fonts`) before rendering them here.
 
 ### Verifier tools on the workstation [measured]
 | Tool | Where | Use |
@@ -71,12 +75,54 @@ machine-wide or per-user (`%APPDATA%\GIMP\3.2\fonts`) before rendering brand tit
   (gimp-mcp stashed as user-scope stdio: `uv run --directory D:/Dev/tools/gimp-mcp gimp_mcp_server.py`).
 - local-offload harness `flatten_design` route is bound to `gimp_console_path=C:/Program Files/GIMP 3/bin/gimp-console-3.2.exe` [measured via offload_status]; mem0 evidence: fresh-install host-tool discovery configures the GIMP console path and `edit_python` only best-effort and never modifies an existing config.
 
-### Other hosts [probed 2026-09-01 22:40]
+## editing-rig — the editing rig, GIMP 3.2.4 [measured 2026-09-10]
+
+**The second GIMP host, and the one with the brand fonts.** Same installer, same layout as the
+workstation, so everything in 02–08 transfers; the differences below are the ones that change what you
+can do there.
+
+| Item | Value |
+|---|---|
+| GIMP | **3.2.4**, `C:\Program Files\GIMP 3\bin\gimp-console-3.2.exe` (+ `gimp-console-3.exe`) |
+| Embedded Python / PyGObject | **3.14.4 / 3.56.2** — identical to the workstation |
+| PDB | **1030 procedures** (workstation: 1033). The delta is exactly the three gimp-mcp procs; `plug-in-mcp-server` is absent here. 60 `file-*-export`, no `file-apng-export` (same as the workstation) |
+| Fonts | **449** loaded (workstation: 453) |
+| GEGL | 258 ops, and `Gegl.list_operations()` returns **0 until `Gegl.init(None)`** (same trap as the workstation, 08 #39) |
+| Profile | `%APPDATA%\GIMP\3.2`, **created by my first run on 2026-09-10** — GIMP had never been launched on this box |
+| Temp | `D:\Temp\gimp-3.2-XXXXXX` — **not** `%LOCALAPPDATA%\Temp` like the workstation (this box redirects TEMP to D:) |
+| gimp-mcp | **not installed** — no plug-in in the profile, no `D:\Dev\tools\gimp-mcp` source. MCP mode (02 §C) is workstation-only |
+| ffprobe | `D:\WinGet\Portable\Gyan.FFmpeg_…\ffmpeg-9.0-full_build\bin\ffprobe.exe` (9.0, portable — **not** the same path as the workstation) |
+| Python (verifier) | `C:\Program Files\Python311\python.exe`. No `magick`, no `uv` |
+| Skills | `~/.claude/skills/{gimp,davinci-resolve,ffmpeg}` deployed 2026-09-10 (11 + 14 + 35 files, byte-verified remotely); `claude.exe` via WinGet |
+| Also on the box | DaVinci Resolve (this is the editing rig — see the `davinci-resolve` skill) |
+
+### The two facts that actually change your script [measured]
+1. **Brand fonts live here, not on the workstation.** `Anton Regular`, `Impact Regular`,
+   `League Gothic Regular` / `Condensed` / `SemiCondensed`, and Montserrat in nine weights
+   (`Thin, ExtraLight, Light, Regular, Medium, SemiBold, Bold, ExtraBold, Black`).
+   Family-only lookup still fails exactly as on the workstation: `Font.get_by_name("Anton")` → **None**,
+   `("Anton Regular")` → Font. Same for Montserrat, League Gothic and Impact. **Render brand
+   titles here; the workstation falls back to Sans-serif.**
+2. **First run on a fresh profile costs ~55 s, not ~8 s.** Measured: 55.4 s for the very first
+   `gimp-console` invocation (it builds `%APPDATA%\GIMP\3.2` and the fontconfig cache), then
+   **3.7 s warm** — the same steady state as the workstation. The first *export* inside that cold run
+   also paid a one-time cost (PNG 7.8 s); the JPEG and WebP right after it took 0.45 s and
+   0.38 s, matching the workstation. Budget the first call on any fresh box accordingly, and do not
+   read the cold number as this machine being slow.
+
+End-to-end proof on this box (console mode, 2026-09-10): 1280×720 canvas → linear gradient →
+`Anton Regular` 110 px title with outline + `gegl:dropshadow` → 300 dpi → exported PNG
+(`png,1280,720,rgba`, 569 578 B), JPEG (`mjpeg,…,yuvj444p`, 31 639 B), WebP
+(`webp,…,yuv420p`, 10 656 B) and XCF, all verified with the local ffprobe; zero GIMP processes
+left behind.
+
+### Other hosts [measured 2026-09-10]
 | Host | Result |
 |---|---|
-| the edge node (Linux, ssh as the edge user) | **no GIMP**: no `gimp`/`gimp-3.0`/`gimp-console` on PATH, no flatpak/snap/dpkg GIMP [measured] |
-| the laptop (Windows) | **offline** — Tailscale "last seen 7h ago", SSH timed out; unverified |
-| the editing rig (Windows, editing rig) | **offline** — Tailscale "last seen 5h ago", SSH timed out; unverified. Brand fonts (League Gothic, Montserrat, Anton) live there |
-So today the workstation is the only GIMP host. If GIMP is installed on another Windows box the layout
-above transfers 1:1 (same installer); the profile is under that user's `%APPDATA%\GIMP\3.2`.
-Re-probe with: `ssh <user>@<host> 'powershell -NoProfile -Command "Test-Path \"C:\Program Files\GIMP 3\bin\gimp-console-3.2.exe\""'`.
+| the laptop (Windows) | **no GIMP** — no `C:\Program Files\GIMP*`, no console binary. Has Resolve, ffprobe 8.1.1, `uv`, and only `impact.ttf` of the brand fonts. Skills deployed here too (gimp/davinci-resolve/ffmpeg) so an agent on this box learns GIMP is absent instead of hunting for it |
+| the edge node (Linux, ssh as the edge user) | **no GIMP**: nothing on PATH, no flatpak/snap/dpkg GIMP [measured 2026-09-01] |
+So GIMP runs on exactly two boxes: the workstation (with gimp-mcp, without brand fonts) and the
+editing rig (brand fonts, no gimp-mcp). Re-probe any host with:
+`ssh <user>@<host> 'powershell -NoProfile -Command "Test-Path \"C:\Program Files\GIMP 3\bin\gimp-console-3.2.exe\""'`
+(the remote login shell is PowerShell, so `$`-expansion happens once before your inner shell sees
+it — for anything longer, send `powershell -EncodedCommand <base64-UTF16>`).

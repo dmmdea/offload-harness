@@ -7,9 +7,12 @@ source (`D:\Dev\tools\gimp-mcp`, upstream maorcc/gimp-mcp @ 09bfb2d) and its REA
 docs; the on-demand MCP launcher (`~/.claude/mcp-ondemand/mcp-ondemand.ps1` + `stash.json`);
 official docs (developer.gimp.org API 3.0, docs.gimp.org 3.2 "Starting GIMP", Script-Fu Tools,
 GIMP 3.0/3.2 release notes, the 2.10→3.0 porting guide "Removed Functions"), and community
-notes (hnbdr migration gist). Every claim is tagged: **[measured]** = observed live on the
-workstation on 2026-09-01, **[doc]** = official GIMP text, **[community]** = third-party report,
-**[inferred]** = my reasoning, verify before relying.
+notes (hnbdr migration gist). Extended 2026-09-10 with the **second GIMP host**, the editing rig
+(the editing rig, same 3.2.4, 1030 procedures, 449 fonts, and the brand fonts the workstation lacks) —
+first-run cost, host differences and an end-to-end brand-title render measured there, plus the
+text-outline correction below. Every claim is tagged: **[measured]** = observed live on one of
+our machines (the host and date are named wherever it matters), **[doc]** = official GIMP text,
+**[community]** = third-party report, **[inferred]** = my reasoning, verify before relying.
 
 Purpose: stop re-researching, stop guessing procedure names, translate designer instructions
 into GIMP operations, run headless over a slow link, and never trust a return code.
@@ -26,7 +29,7 @@ into GIMP operations, run headless over a slow link, and never trust a return co
 | `06-export-formats.md` | which extensions export here (23 measured), per-format args and defaults, what each file really contains, how to verify |
 | `07-scripting-scriptfu-python-plugins.md` | Script-Fu 3 batch and scripts, Python plug-in registration model, interpreters, pluginrc, the gimp-mcp plug-in as a persistent-plug-in example |
 | `08-failure-modes.md` | anything returned None/False/NULL, hung, exited 64/69/70, or wrote the wrong file; the full trap catalog with fixes |
-| `live-dump-qube-2026-09-01.json` | exact signatures of 902 PDB procedures (all `file-*`, `gimp-image/layer/drawable/item/text-layer/selection/context/edit/*`), all 1033 names by type, Python `dir()` of every key class, 28 enums, 258 GEGL op names + property tables for ~120 ops, 453 font names (sample), the 23-format export matrix with verification, every probe step with timing, the 79 MCP tool names |
+| `live-dump-2026-09-01.json` | exact signatures of 902 PDB procedures (all `file-*`, `gimp-image/layer/drawable/item/text-layer/selection/context/edit/*`), all 1033 names by type, Python `dir()` of every key class, 28 enums, 258 GEGL op names + property tables for ~120 ops, 453 font names (sample), the 23-format export matrix with verification, every probe step with timing, the 79 MCP tool names; plus (2026-09-10) a `hosts` block with the editing rig's measured deltas and a `text_outline_modes` block with the STROKE_ONLY/STROKE_FILL pixel counts. The body is still the workstation dump; the second host is additive |
 
 ## The ten rules (memorize; the rest of the folder is detail)
 
@@ -38,8 +41,10 @@ into GIMP operations, run headless over a slow link, and never trust a return co
    ("returned no return values") and the process hangs; `(gimp-quit 0)` likewise crashed
    script-fu.exe and hung. Always pass `--quit` and wrap the call in a timeout. **[measured]**
 3. **Use `gimp-console-3.2.exe -i -d`** for unattended work (cold start ≈ 8 s, warm ≈ 3.4 s,
-   77-step edit + 23 exports in 30 s). Do NOT add `-f`: it loads zero fonts, so text layers
-   and `Font.get_by_name` silently fail. **[measured]**
+   77-step edit + 23 exports in 30 s — but the very first run on a box with no profile yet is
+   ≈ 55 s while it builds the profile and font cache, so give a fresh machine a 120 s timeout).
+   Do NOT add `-f`: it loads zero fonts, so text layers and `Font.get_by_name` silently fail.
+   **[measured]**
 4. **Kill the whole process tree, not just gimp-console.** Plug-ins are separate processes
    (`python.exe`, `script-fu.exe`, `gdbus.exe`); killing the GIMP host leaves them alive —
    the MCP plug-in kept port 9877 open after its GIMP died. Filter `Win32_Process` by
@@ -53,6 +58,10 @@ into GIMP operations, run headless over a slow link, and never trust a return co
    listed name is "Impact Regular"), `file_load` of a missing file returns None, an
    out-of-range export arg is dropped and the export still succeeds with the default. Check
    every return, then verify the FILE with ffprobe/Pillow. **[measured]**
+   Worse than a quiet failure is a **quiet success**: every call returns True and the picture is
+   still wrong. `TextOutline.STROKE_ONLY` renders hollow letters (outline, no fill) at the right
+   size, the right byte count and the right pixel format — `STROKE_FILL` is what "text with an
+   outline" means. Nothing but looking at the image catches that class, so look at it. **[measured]**
 7. **Add alpha BEFORE resizing a layer or canvas.** A layer without alpha grows into the
    background colour (white) — measured pixel (1,1,1,1) after `resize_to_image_size` on a
    no-alpha layer. Remove-background = `add_alpha()` → select → `edit_clear()`. **[measured]**

@@ -96,7 +96,7 @@ Never call `Gimp.get_pdb().run_procedure(...)` — it does not exist (AttributeE
   `region={x,y,width,height}, label` → 128×106 crop in 0.65 s; `get_image_bitmap(max_width=200)`
   → image content too. Over the RAW socket the same tool returned `error: 'args'` (different
   message shape) — always go through the server.
-- Tool inventory (79): see `live-dump-qube-2026-09-01.json → mcp_server.tools`; categories in
+- Tool inventory (79): see `live-dump-2026-09-01.json → mcp_server.tools`; categories in
   the upstream README (adjustments, transforms, selections, layers, drawing, text, filters,
   file ops, info, undo/redo, batch/social/icon exports).
 

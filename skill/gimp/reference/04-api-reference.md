@@ -1,7 +1,7 @@
 # 04 — Python API reference (GIMP 3.2.4, `gi.repository.Gimp`)
 
 Condensed catalog. Exact PDB signatures for 902 procedures, `dir()` of every class, 28 enums and
-GEGL property tables are in `live-dump-qube-2026-09-01.json` — grep it instead of guessing.
+GEGL property tables are in `live-dump-2026-09-01.json` — grep it instead of guessing.
 Tags: [measured] on the workstation 2026-09-01 · [doc] developer.gimp.org · [community] · [inferred].
 
 ## Boilerplate [measured]
@@ -28,6 +28,12 @@ Procedures with several out-values return a **named tuple** (`_ResultTuple`): `i
 → `(True, xresolution=72.0, yresolution=72.0)`; `layer.get_offsets()` → `(True, offset_x, offset_y)`;
 `Gimp.Selection.bounds(img)` → `(True, non_empty, x1, y1, x2, y2)`; `img.pick_color([layer], x, y, True, False, 0.0)`
 → `(True, <Gegl.Color>)` — index `[1]` before `.get_rgba()` [measured].
+**A `_ResultTuple` is a plain Python tuple, so `.index(n)` is `tuple.index` — "find the value n",
+not "give me element n"** (`h.index(5)` → `ValueError: tuple.index(x): x not in tuple`). Subscript
+it (`h[5]`, `h[-2]`) or use the field name. Only a `Gimp.ValueArray` — what `proc.run(cfg)` returns —
+has an `.index(n)` that means "element n" [measured]. Example layout:
+`drawable.histogram(channel, start, end)` → `(True, mean, std_dev, median, pixels, count, percentile)`,
+so the pixel count in the range is `[-2]` [measured 2026-09-10].
 Single-out procedures return the value directly (`img.get_width()` → int, `layer.copy()` → Layer,
 `img.merge_visible_layers(mode)` → Layer). Setters return True/False [measured].
 
@@ -48,7 +54,7 @@ Single-out procedures return the value directly (`img.get_width()` → int, `lay
 deprecated-but-working colour ops: `brightness_contrast(-1..1,-1..1)`, `desaturate(Gimp.DesaturateMode.LUMINANCE)`, `levels/levels_stretch/curves_spline/curves_explicit/hue_saturation/colorize_hsl/color_balance/threshold/posterize/invert/equalize/shadows_highlights` (3.2 marks them deprecated in favour of the GEGL filter — DeprecationWarning printed).
 **Gimp.Item** — `get_name/set_name`, `get_visible/set_visible`, `is_layer/is_text_layer/is_group/is_channel/is_layer_mask/is_path/is_valid`, `get_image`, `get_parent/get_children`, `transform_rotate(rad, auto_center, cx, cy)` → item, `transform_scale(x0,y0,x1,y1)`, `transform_translate(dx,dy)`, `transform_flip_simple(Gimp.OrientationType.HORIZONTAL, auto_center, axis)`, `transform_perspective/shear/matrix/2d`, `get_lock_*/set_lock_*`, `get_tattoo`, `attach_parasite/get_parasite`.
 **Gimp.TextLayer** — `new(img, text, Gimp.Font, size, Gimp.Unit.pixel()|point())` (font is a **Font object**, never a string), `set_text/get_text`, `set_markup/get_markup` (Pango markup; after `set_markup`, `get_text()` → None and `get_markup()` → `<markup>…</markup>`; `set_text` clears markup) [measured], `set_font(Font)/get_font`, `set_font_size(size, unit)/get_font_size` → `(size, unit=…)`,
-`set_color(GeglColor)/get_color`, `set_outline(Gimp.TextOutline.NONE|STROKE_ONLY|STROKE_FILL)`, `set_outline_color(GeglColor)`, `set_outline_width(w, unit)`, `get_outline()` (`.value_nick` → `stroke-only`), `set_outline_direction` [3.2: centered/outer/inner per release notes; enum `Gimp.TextOutlineDirection`], `set_justification(Gimp.TextJustification.LEFT|CENTER|RIGHT|FILL)`, `set_letter_spacing/set_line_spacing/set_indent`, `set_antialias(bool)`, `set_hint_style(Gimp.TextHintStyle.FULL)`, `set_base_direction`, `set_language`, `resize(w,h)` (fixed box: **content beyond the box is clipped** [measured]), `set_offsets` (inherited).
+`set_color(GeglColor)/get_color`, `set_outline(Gimp.TextOutline.NONE|STROKE_ONLY|STROKE_FILL)` — **`STROKE_ONLY` draws the outline and no fill (hollow glyphs); "coloured text with an outline" is `STROKE_FILL`** [measured: 0 vs 16 562 near-white pixels, 05], `set_outline_color(GeglColor)`, `set_outline_width(w, unit)`, `get_outline()` (`.value_nick` → `none`/`stroke-only`/`stroke-fill`), `set_outline_direction` [3.2: centered/outer/inner per release notes; enum `Gimp.TextOutlineDirection`], `set_justification(Gimp.TextJustification.LEFT|CENTER|RIGHT|FILL)`, `set_letter_spacing/set_line_spacing/set_indent`, `set_antialias(bool)`, `set_hint_style(Gimp.TextHintStyle.FULL)`, `set_base_direction`, `set_language`, `resize(w,h)` (fixed box: **content beyond the box is clipped** [measured]), `set_offsets` (inherited).
 **Gimp.Selection** (class methods, image first) — `none/all/invert/is_empty/bounds/value(img,x,y)`, `grow(img,px)/shrink/border/feather(img, radius)/sharpen/flood`, `float(...)`, `save(img)` → Channel.
 **Gimp.GroupLayer** — `new(img, name)`; add with `img.insert_layer(group, None, 0)`; `img.reorder_item(layer, group, 0)` moves a layer inside; `group.get_children()` [measured].
 **Gimp.Font / Gimp.Unit / Gegl.Color** — `Gimp.Font.get_by_name("Impact Regular")` (exact listed name, else None), `Gimp.context_get_font()`, `Gimp.fonts_get_list("regex")` → [Font] (`.get_name()`); `Gimp.Unit.pixel()`, `.point()`, `.inch()`, `.mm()`; `Gegl.Color.new("white" | "#ff2a2a" | "rgb(0.2,0.2,0.9)" | "rgba(…)")` — components are **0.0–1.0 floats**; `c.get_rgba()` → (r,g,b,a); `c.set_rgba(r,g,b,a)`.
@@ -109,7 +115,7 @@ Total ops: 258 (`gegl.exe --list-all` and `Gegl.list_operations()` inside the pl
 - `ImageType`: RGB_IMAGE RGBA_IMAGE GRAY_IMAGE GRAYA_IMAGE INDEXED_IMAGE INDEXEDA_IMAGE · `ImageBaseType`: RGB GRAY INDEXED
 - `InterpolationType`: NONE LINEAR CUBIC NOHALO LOHALO · `Precision`: U8/U16/U32/HALF/FLOAT/DOUBLE × LINEAR/NON_LINEAR/PERCEPTUAL
 - `RunMode`: INTERACTIVE NONINTERACTIVE WITH_LAST_VALS · `PDBStatusType`: EXECUTION_ERROR(0) CALLING_ERROR(1) PASS_THROUGH(2) SUCCESS(3) CANCEL(4) · `PDBProcType`: INTERNAL PLUGIN TEMPORARY PERSISTENT
-- `TextOutline`: NONE STROKE_FILL STROKE_ONLY · `TextJustification`: LEFT RIGHT CENTER FILL · `TextHintStyle`: NONE SLIGHT MEDIUM FULL
+- `TextOutline`: **NONE=0, STROKE_ONLY=1, STROKE_FILL=2** [measured] — the list above each enum is `dir()` order (alphabetical), NOT the numeric order, so never index an enum by position; name the member · `TextJustification`: LEFT RIGHT CENTER FILL · `TextHintStyle`: NONE SLIGHT MEDIUM FULL
 - `AddMaskType`: WHITE BLACK ALPHA ALPHA_TRANSFER SELECTION COPY CHANNEL · `MaskApplyMode`: APPLY DISCARD · `DesaturateMode`: LIGHTNESS LUMA AVERAGE LUMINANCE VALUE
 - `RotationType`: DEGREES90 DEGREES180 DEGREES270 · `OrientationType`: HORIZONTAL VERTICAL UNKNOWN · `GradientType`: LINEAR BILINEAR RADIAL SQUARE CONICAL_* SHAPEBURST_* SPIRAL_* · `StrokeMethod`: LINE PAINT_METHOD
 - `ConvertPaletteType`: GENERATE WEB MONO CUSTOM · `ConvertDitherType`: NONE FS FS_LOWBLEED FIXED · `HistogramChannel`: VALUE RED GREEN BLUE ALPHA LUMINANCE · `ForegroundExtractMode`: MATTING · `MessageHandlerType`: MESSAGE_BOX CONSOLE ERROR_CONSOLE

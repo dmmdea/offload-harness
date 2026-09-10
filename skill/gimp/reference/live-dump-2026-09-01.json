@@ -31242,5 +31242,288 @@
    "laptop": "offline (Tailscale last seen 7h ago)",
    "editing-rig": "offline (Tailscale last seen 5h ago)"
   }
+ },
+ "hosts": {
+  "note": "The dump body above was measured on the workstation 2026-09-01. This block records the SECOND GIMP host, measured 2026-09-10. Same GIMP build, so PDB signatures / GEGL props / enums transfer; the differences are listed here.",
+  "editing-rig": {
+   "measured": "2026-09-10",
+   "role": "editing rig",
+   "gimp": "3.2.4",
+   "python": "3.14.4 (main, Apr 11 2026, 07:13:12)  [MINGW Clang UCRT 22.1.3 64 bit (AMD64) (GCC)]",
+   "pygobject": "3.56.2",
+   "dirs": {
+    "directory": "C:\\Users\\<user>\\AppData\\Roaming\\GIMP\\3.2",
+    "data": "C:\\Program Files\\GIMP 3\\share\\gimp\\3.0",
+    "sysconf": "C:\\Program Files\\GIMP 3\\etc\\gimp\\3.0",
+    "temp": "D:\\Temp\\gimp-3.2-XK9YWV3"
+   },
+   "pdb_count": 1030,
+   "pdb_delta_vs_qube": "1030 vs 1033 = exactly the three gimp-mcp procedures, absent here",
+   "mcp_plugin_registered": false,
+   "has_apng_export": false,
+   "export_proc_count": 60,
+   "font_count": 449,
+   "gegl_count": 258,
+   "gegl_count_before_init": 0,
+   "brand_fonts": [
+    "Anton Regular",
+    "Impact Regular",
+    "League Gothic Condensed Regular",
+    "League Gothic Regular",
+    "League Gothic Regular",
+    "League Gothic SemiCondensed Regular",
+    "Montserrat Black",
+    "Montserrat Bold",
+    "Montserrat ExtraBold",
+    "Montserrat ExtraLight",
+    "Montserrat Light",
+    "Montserrat Medium",
+    "Montserrat Regular",
+    "Montserrat SemiBold",
+    "Montserrat Thin"
+   ],
+   "font_used_in_probe": "Anton Regular",
+   "family_only_lookup": "Anton/Montserrat/League Gothic/Impact all return None; the styled name (e.g. 'Anton Regular') returns a Font",
+   "first_run_seconds": 55.4,
+   "warm_run_seconds": 3.7,
+   "first_run_note": "very first gimp-console call on the box: builds %APPDATA%/GIMP/3.2 + fontconfig cache. First export in that run also one-time (PNG 7.8 s); JPEG 0.45 s and WebP 0.38 s right after match the workstation.",
+   "verified_exports": {
+    "brand.png": "png,1280,720,rgba 569578 B",
+    "brand.jpg": "mjpeg,1280,720,yuvj444p 31639 B",
+    "brand.webp": "webp,1280,720,yuv420p 10656 B",
+    "brand.xcf": "1651116 B"
+   },
+   "tooling": {
+    "ffprobe": "D:/WinGet/Portable/Gyan.FFmpeg_.../ffmpeg-9.0-full_build/bin/ffprobe.exe",
+    "python": "C:/Program Files/Python311/python.exe",
+    "magick": null,
+    "uv": null,
+    "resolve": true,
+    "gimp_mcp_source": false
+   },
+   "skills_deployed": [
+    "gimp",
+    "davinci-resolve",
+    "ffmpeg"
+   ],
+   "probe_steps": [
+    {
+     "step": "image new 1280x720",
+     "ok": true,
+     "result": "<Gimp.Image object at 0x0000012fe59cf440 (GimpImage at 0x0000012fe4c60c00)>",
+     "ms": 5
+    },
+    {
+     "step": "bg layer",
+     "ok": true,
+     "result": "<Gimp.Layer object at 0x0000012fe59e6740 (GimpLayer at 0x0000012fe4c60c40)>",
+     "ms": 4
+    },
+    {
+     "step": "insert bg",
+     "ok": true,
+     "result": "True",
+     "ms": 0
+    },
+    {
+     "step": "gradient fill",
+     "ok": true,
+     "result": "(True, True, True, True)",
+     "ms": 273
+    },
+    {
+     "step": "Font.get_by_name('Anton')",
+     "ok": true,
+     "result": "None",
+     "ms": 0
+    },
+    {
+     "step": "Font.get_by_name('Anton Regular')",
+     "ok": true,
+     "result": "FOUND",
+     "ms": 0
+    },
+    {
+     "step": "Font.get_by_name('Montserrat')",
+     "ok": true,
+     "result": "None",
+     "ms": 0
+    },
+    {
+     "step": "Font.get_by_name('Montserrat Regular')",
+     "ok": true,
+     "result": "FOUND",
+     "ms": 0
+    },
+    {
+     "step": "Font.get_by_name('League Gothic')",
+     "ok": true,
+     "result": "None",
+     "ms": 0
+    },
+    {
+     "step": "Font.get_by_name('League Gothic Regular')",
+     "ok": true,
+     "result": "FOUND",
+     "ms": 0
+    },
+    {
+     "step": "Font.get_by_name('Impact')",
+     "ok": true,
+     "result": "None",
+     "ms": 0
+    },
+    {
+     "step": "Font.get_by_name('Impact Regular')",
+     "ok": true,
+     "result": "FOUND",
+     "ms": 0
+    },
+    {
+     "step": "text layer 110px",
+     "ok": true,
+     "result": "<Gimp.TextLayer object at 0x0000012fe59f7180 (GimpTextLayer at 0x0000012fe4a0ecb0)>",
+     "ms": 84
+    },
+    {
+     "step": "insert text",
+     "ok": true,
+     "result": "True",
+     "ms": 0
+    },
+    {
+     "step": "style text",
+     "ok": true,
+     "result": "(True, True, True, True, True, (507, 179))",
+     "ms": 76
+    },
+    {
+     "step": "merge dropshadow",
+     "ok": true,
+     "result": "True",
+     "ms": 95
+    },
+    {
+     "step": "set 300 dpi",
+     "ok": true,
+     "result": "True",
+     "ms": 1
+    },
+    {
+     "step": "export png",
+     "ok": true,
+     "result": "(True, 569578)",
+     "ms": 7823
+    },
+    {
+     "step": "export jpg",
+     "ok": true,
+     "result": "(True, 31639)",
+     "ms": 452
+    },
+    {
+     "step": "export webp",
+     "ok": true,
+     "result": "(True, 10656)",
+     "ms": 382
+    },
+    {
+     "step": "export xcf",
+     "ok": true,
+     "result": "(True, 1651116)",
+     "ms": 19
+    },
+    {
+     "step": "delete image",
+     "ok": true,
+     "result": "True",
+     "ms": 2
+    }
+   ]
+  },
+  "laptop": {
+   "measured": "2026-09-10",
+   "gimp": "NOT INSTALLED (no C:/Program Files/GIMP*, no console binary)",
+   "has": "Resolve, ffprobe 8.1.1, uv, impact.ttf only",
+   "skills_deployed": [
+    "gimp",
+    "davinci-resolve",
+    "ffmpeg"
+   ]
+  },
+  "edge-node": {
+   "measured": "2026-09-01",
+   "gimp": "NOT INSTALLED (nothing on PATH, no flatpak/snap/dpkg)"
+  }
+ },
+ "text_outline_modes": {
+  "measured": "2026-09-10 editing-rig, Anton Regular 120px white text, black 6px outline, grey bg",
+  "enum_values": {
+   "NONE": 0,
+   "STROKE_ONLY": 1,
+   "STROKE_FILL": 2
+  },
+  "dir_order_warning": "dir(Gimp.TextOutline) is alphabetical (NONE, STROKE_FILL, STROKE_ONLY) and is NOT the numeric order - indexing an enum by position lands on STROKE_ONLY and renders hollow text",
+  "histogram_tuple_layout": "(True, mean, std_dev, median, pixels, count, percentile) - count is [-2]; a _ResultTuple is a Python tuple so .index(n) searches for the VALUE n",
+  "modes": {
+   "NONE": {
+    "enum": 0,
+    "readback": "none",
+    "size": [
+     263,
+     182
+    ],
+    "hist_raw_white": [
+     "True",
+     "255.0",
+     "0.0",
+     "255.0",
+     "17019.156871417537",
+     "17019.156871417537",
+     "1.0"
+    ],
+    "white_count": 17019.156871417537,
+    "black_count": 0.0
+   },
+   "STROKE_ONLY": {
+    "enum": 1,
+    "readback": "stroke-only",
+    "size": [
+     275,
+     194
+    ],
+    "hist_raw_white": [
+     "True",
+     "0.0",
+     "0.0",
+     "-255.0",
+     "10293.415711677633",
+     "0.0",
+     "0.0"
+    ],
+    "white_count": 0.0,
+    "black_count": 10293.415711677633
+   },
+   "STROKE_FILL": {
+    "enum": 2,
+    "readback": "stroke-fill",
+    "size": [
+     275,
+     194
+    ],
+    "hist_raw_white": [
+     "True",
+     "254.9369037555851",
+     "0.9092058405615275",
+     "255.0",
+     "27311.929416073486",
+     "16562.0",
+     "0.6064016843223464"
+    ],
+    "white_count": 16562.0,
+    "black_count": 9554.929416073486
+   }
+  },
+  "verdict": "STROKE_FILL (=2) is what a designer means by 'text with an outline'; STROKE_ONLY (=1) yields ZERO fill pixels"
  }
 }
