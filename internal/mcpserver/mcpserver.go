@@ -1639,16 +1639,15 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	if err != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": "bad read_root: " + err.Error()})
 	}
-	// Planner seat vs cascade seat, resolved separately on purpose: the planner
-	// follows agent_model (per-call > seat > workhorse; config.AgentPlannerModel),
-	// while the IN-LOOP offload cascade stays on the workhorse economics exactly
-	// as before this seat existed. An explicit per-call model still drives both,
-	// preserving the old override semantics.
+	// The planner follows agent_model (per-call > seat > workhorse;
+	// config.AgentPlannerModel). The IN-LOOP offload tools follow the planner
+	// too (0.115.18, register D-88): they used to stay on the workhorse "for
+	// its economics", but the workhorse shares the planner's llama-swap and
+	// loading it EVICTS the planner mid-run — measured 2026-09-10 on the Qube:
+	// three offload_triage calls cost four 3-minute reloads of the 27B seat
+	// and the whole 900 s wall. pipeline.InLoopOffloadModel keeps the
+	// workhorse only when it IS the planner (a single-model box).
 	model := cfg.AgentPlannerModel(in.Model)
-	offloadModel := in.Model
-	if offloadModel == "" {
-		offloadModel = cfg.Model
-	}
 	maxSteps := in.MaxSteps
 	if maxSteps <= 0 {
 		maxSteps = 12
@@ -1678,7 +1677,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// T2-D: the cache handle is the server's own already-open one. This process
 	// holds the bbolt lock, so re-opening by path here would lose a lock race
 	// against itself and silently fall back to no cache on every agent_run.
-	offload := pipeline.NewInLoopOffload(cfg, offloadModel, timeout, s.p.Cache())
+	offload := pipeline.NewInLoopOffloadForPlanner(cfg, model, timeout, s.p.Cache())
 	built, err := agent.Build(agent.BuildConfig{
 		PlannerBase:  cfg.Endpoint,
 		Model:        model,

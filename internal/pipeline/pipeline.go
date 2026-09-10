@@ -3559,7 +3559,7 @@ func (p *Pipeline) runExtractImage(ctx context.Context, req core.Request, meta c
 // repacked tier view, but input_chars is a trained confhead feature (loginput)
 // whose label stream is entry-scale, so every recorded row keeps the entry
 // semantics (round-1 review finding 2026-08-14).
-func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Built, ck, model string, meta core.Meta, start time.Time, record bool, entryChars int) (core.Result, bool) {
+func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Built, ck, model string, meta core.Meta, start time.Time, record bool, entryChars int, opts ...llamaclient.GenOption) (core.Result, bool) {
 	attempts := p.cfg.MaxRetries + 1
 	if attempts < 1 {
 		attempts = 1
@@ -3586,7 +3586,7 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 
 	for i := 0; i < attempts; i++ {
 		meta.Retries = i
-		gen, gerr := p.client.Generate(actx, model, built.System, user, built.Grammar, built.MaxTokens, p.cfg.Temperature, topLP)
+		gen, gerr := p.client.Generate(actx, model, built.System, user, built.Grammar, built.MaxTokens, p.cfg.Temperature, topLP, opts...)
 		if gerr != nil {
 			meta.LatencyMs = time.Since(start).Milliseconds()
 			meta.ErrClass = classifyErr(gerr)
@@ -4299,6 +4299,17 @@ func (p *Pipeline) captureShadow(req core.Request, e ledger.Entry, res core.Resu
 // shadow-labeling flywheel to evaluate a counterfactual tier without polluting
 // the savings stats. Returns the tier's result and whether it was accepted.
 func (p *Pipeline) RunTier(ctx context.Context, req core.Request, model string) (core.Result, bool) {
+	return p.RunTierWith(ctx, req, model)
+}
+
+// RunTierWith is RunTier with per-call generate knobs threaded to the tier
+// request (0.115.18, register D-88): the in-loop offload closure passes
+// WithoutThinking when the tier IS the planner seat, so a thinking seat renders
+// the mechanical shape instead of spending the task's small budget inside a
+// think block. RunTier keeps its option-free signature because four consumers
+// (the NIM oracle, shadow labelling, the trajectory judge, the CLI) hold it as
+// a func value.
+func (p *Pipeline) RunTierWith(ctx context.Context, req core.Request, model string, opts ...llamaclient.GenOption) (core.Result, bool) {
 	start := time.Now()
 
 	built, err := tasks.Build(req)
@@ -4323,7 +4334,7 @@ func (p *Pipeline) RunTier(ctx context.Context, req core.Request, model string) 
 	// ...and it lives in RunTier's OWN keyspace, so Run and RunTier can never
 	// compute the same key and overwrite each other's entries. See
 	// tierKeyspaceTag for why guarding only the read was not enough.
-	ck := cacheKeyForTier(req.Task, req.Input, tasks.StableParamsKey(req.Params), model, built)
+	ck := cacheKeyForTierRender(req.Task, req.Input, tasks.StableParamsKey(req.Params), model, built, llamaclient.RenderKey(opts...))
 	meta := core.Meta{Model: model, Feat: feat}
 	meta.InputSHA256 = inputFingerprint(req.Input)
 	meta.PromptPrefixSHA256 = promptPrefixFingerprint(built.System, userPreambleOf(built.User, req.Input))
@@ -4365,7 +4376,7 @@ func (p *Pipeline) RunTier(ctx context.Context, req core.Request, model string) 
 		}
 	}
 
-	res, _ := p.attempt(ctx, req, built, ck, model, meta, start, false /* record=false: ledger/shadow/exemplars stay untouched */, len(req.Input))
+	res, _ := p.attempt(ctx, req, built, ck, model, meta, start, false /* record=false: ledger/shadow/exemplars stay untouched */, len(req.Input), opts...)
 	// escalatable ignored: RunTier never escalates.
 	//
 	// The Put lives here rather than inside attempt because `record` means "write

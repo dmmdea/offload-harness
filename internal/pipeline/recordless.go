@@ -19,11 +19,21 @@ import (
 // SINGLE place the nil-store invariant is constructed; NewRecordlessOffload and the
 // agent-trajectory flywheel (agent-trajectory-label) both use it so it can't drift.
 func NewRecordlessPipeline(cfg config.Config, timeout time.Duration) *Pipeline {
-	// WithSeatEndpoints + WithRemoteLanes mirror openPipeline's construction:
-	// the recordless pipeline must route an overridden seat — and fail a busy
-	// hour over to the same cascade lane — exactly as the recorded one does; a
-	// per-model endpoint is a property of the seat, not of which pipeline shape
-	// happens to call it. Absent keys = no-ops, byte-identical client.
+	return New(cfg, inLoopClient(cfg, timeout), nil, nil)
+}
+
+// inLoopClient is the ONE client construction behind both in-loop pipelines.
+// WithSeatEndpoints + WithRemoteLanes mirror openPipeline's construction: an
+// in-loop pipeline must route an overridden seat — and fail a busy hour over
+// to the same cascade lane — exactly as the recorded one does; a per-model
+// endpoint is a property of the seat, not of which pipeline shape happens to
+// call it. Absent keys = no-ops, byte-identical client. Until 0.115.18 only
+// the recordless (fleet-node) shape applied them; the cached shape behind the
+// MCP front door and the CLI built a bare client, which was harmless while
+// the in-loop tools always targeted the workhorse on the base endpoint and
+// became a silent misroute the moment they could target a seat with its own
+// endpoint (reviewer finding, PR #302).
+func inLoopClient(cfg config.Config, timeout time.Duration) *llamaclient.Client {
 	oc := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, timeout).
 		WithSeatEndpoints(cfg.SeatEndpoints)
 	if len(cfg.CascadeRemoteLanes) > 0 {
@@ -32,7 +42,7 @@ func NewRecordlessPipeline(cfg config.Config, timeout time.Duration) *Pipeline {
 			func() bool { return delegate.LocalBusy(gpuLockPath, stateDir) },
 			llamaclient.RosterResident())
 	}
-	return New(cfg, oc, nil, nil)
+	return oc
 }
 
 // NewInLoopPipeline builds the agent loop's offload pipeline: nil LEDGER, but a
@@ -64,8 +74,7 @@ func NewRecordlessPipeline(cfg config.Config, timeout time.Duration) *Pipeline {
 // its full timeout and then fail — the in-loop pipeline would lose a lock race
 // against the very process that owns it, once per construction.
 func NewInLoopPipeline(cfg config.Config, timeout time.Duration, ca *cache.Cache) *Pipeline {
-	oc := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, timeout)
-	p := New(cfg, oc, ca, nil)
+	p := New(cfg, inLoopClient(cfg, timeout), ca, nil)
 	// Opt IN to per-tier caching. RunTier is shared with the shadow-labelling
 	// flywheel, which calls it on the MAIN pipeline (cache open) to evaluate
 	// counterfactual tiers; serving those from cache — or writing them — would
@@ -86,6 +95,54 @@ func NewRecordlessOffload(cfg config.Config, model string, timeout time.Duration
 	return offloadClosure(NewRecordlessPipeline(cfg, timeout), model)
 }
 
+// InLoopOffloadModel picks the model the in-loop offload_* tools run on for a
+// loop whose planner is `planner` on a box whose workhorse is `workhorse`
+// (0.115.18, register D-88).
+//
+// The tools used to stay on the workhorse for its economics. But the workhorse
+// and the planner seat are served by the SAME llama-swap, and on every
+// reference box they cannot be resident together (the cascade pin shares the
+// planner's card; the interactive set is mutually exclusive by design) — so
+// loading the workhorse EVICTS the planner mid-run, and the next planner step
+// loads it back. Measured 2026-09-10 on the Qube 27B: three offload_triage
+// calls cost four 3-minute reloads and the entire 900 s wall. The planner
+// seat is already loaded and idle while the tool runs, so it is the free
+// model: onSeat reports that choice, and the caller renders those tier calls
+// WITHOUT thinking (a mechanical shape, not a reasoning step — a thinking
+// seat would spend the task's small budget inside the think block).
+//
+// A single-model box (planner == workhorse, or no planner configured) keeps
+// the workhorse: nothing else is loaded, nothing is evicted.
+func InLoopOffloadModel(planner, workhorse string) (model string, onSeat bool) {
+	if planner == "" || planner == workhorse {
+		return workhorse, false
+	}
+	return planner, true
+}
+
+// NewRecordlessOffloadForPlanner is NewRecordlessOffload with the model chosen
+// by InLoopOffloadModel for the given planner seat (the fleet-node agent task).
+func NewRecordlessOffloadForPlanner(cfg config.Config, planner string, timeout time.Duration) func(ctx context.Context, task, input string, params map[string]any) (string, error) {
+	model, onSeat := InLoopOffloadModel(planner, cfg.Model)
+	return offloadClosure(NewRecordlessPipeline(cfg, timeout), model, seatGenOptions(onSeat)...)
+}
+
+// NewInLoopOffloadForPlanner is NewInLoopOffload with the model chosen by
+// InLoopOffloadModel for the given planner seat (the MCP front door, the CLI).
+func NewInLoopOffloadForPlanner(cfg config.Config, planner string, timeout time.Duration, ca *cache.Cache) func(ctx context.Context, task, input string, params map[string]any) (string, error) {
+	model, onSeat := InLoopOffloadModel(planner, cfg.Model)
+	return offloadClosure(NewInLoopPipeline(cfg, timeout, ca), model, seatGenOptions(onSeat)...)
+}
+
+// seatGenOptions renders tier calls on the planner seat without thinking; on
+// the workhorse the request stays byte-identical to the pre-0.115.18 one.
+func seatGenOptions(onSeat bool) []llamaclient.GenOption {
+	if !onSeat {
+		return nil
+	}
+	return []llamaclient.GenOption{llamaclient.WithoutThinking()}
+}
+
 // NewInLoopOffload is NewRecordlessOffload plus the shared result cache (T2-D).
 // This is what the ordinary drive modes (MCP front door, CLI agent) should use:
 // the ledger stays pristine, and the loop stops paying twice for byte-identical
@@ -97,13 +154,13 @@ func NewInLoopOffload(cfg config.Config, model string, timeout time.Duration, ca
 // offloadClosure is the shared body of both constructors, so the defer-shaping
 // and media-dispatch semantics cannot drift between the cached and uncached
 // variants.
-func offloadClosure(ap *Pipeline, model string) func(ctx context.Context, task, input string, params map[string]any) (string, error) {
+func offloadClosure(ap *Pipeline, model string, opts ...llamaclient.GenOption) func(ctx context.Context, task, input string, params map[string]any) (string, error) {
 	return func(ctx context.Context, task, input string, params map[string]any) (string, error) {
 		req := offloadRequest(task, input, params)
 
 		var res core.Result
 		if textOnlyTask(req.Task) {
-			r, ok := ap.RunTier(ctx, req, model)
+			r, ok := ap.RunTierWith(ctx, req, model, opts...)
 			if !ok {
 				r.Deferred = true
 			}

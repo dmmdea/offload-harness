@@ -226,8 +226,8 @@ func main() {
 
 	// In-process offload (nil LEDGER, shared result cache) — the SINGLE shared
 	// constructor, so every drive mode's ledger-pristine guarantee is identical.
-	// The in-loop cascade stays on the WORKHORSE (an explicit -model still drives
-	// both, preserving the old override semantics; the agent seat does not).
+	// The in-loop offload_* tools follow the single-loop PLANNER (0.115.18,
+	// D-88); an explicit -model therefore drives both, as before.
 	//
 	// T2-D: this binary owns no pipeline, so it opens the result cache itself.
 	// A failure here is EXPECTED and benign — the MCP server holds the bbolt lock
@@ -263,7 +263,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "note: embed memo counters may not have been persisted:", err)
 		}
 	}()
-	offload := pipeline.NewInLoopOffload(cfg, orCfg(*model, cfg.Model), timeout, agentCache)
+	// In-loop offload_* tools follow the single-loop PLANNER (0.115.18, D-88):
+	// on a box whose planner is a separate seat, the workhorse shares the
+	// planner's llama-swap and loading it evicts the planner mid-run. Two-tier
+	// keeps its documented zero-swap architect+editor pair and is not rerouted.
+	offload := pipeline.NewInLoopOffloadForPlanner(cfg, plannerModel, timeout, agentCache)
 
 	// The broker audit trail must live OUTSIDE any worktree; resolve a default
 	// only when a mutating capability is enabled.

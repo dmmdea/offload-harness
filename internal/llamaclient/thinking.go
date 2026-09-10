@@ -26,6 +26,19 @@ func WithoutThinking() GenOption {
 	return func(o *genOpts) { o.noThinking = true }
 }
 
+// RenderKey names the render an option set asks for, for cache keys: "" for
+// the historical (option-free) render and "nothink" for WithoutThinking. Two
+// calls on the SAME model with different renders produce different answers —
+// a thinking seat's grammar answer vs its non-thinking one — so a cache that
+// keys on the model alone would serve one render's answer to the other's
+// caller (0.115.18, reviewer finding on PR #302).
+func RenderKey(opts ...GenOption) string {
+	if applyGenOptions(opts).noThinking {
+		return "nothink"
+	}
+	return ""
+}
+
 // applyGenOptions folds the variadic options into one resolved set.
 func applyGenOptions(opts []GenOption) genOpts {
 	var o genOpts
