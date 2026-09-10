@@ -39,15 +39,28 @@ tl = Gimp.TextLayer.new(img, "THUMB TITLE", font, 120.0, Gimp.Unit.pixel())    #
 img.insert_layer(tl, None, 0); tl.set_offsets(60, 60)
 tl.set_color(Gegl.Color.new("white")); tl.set_justification(Gimp.TextJustification.CENTER)
 tl.set_letter_spacing(2.0); tl.set_line_spacing(-10.0); tl.set_antialias(True); tl.set_hint_style(Gimp.TextHintStyle.FULL)
-# built-in outline (3.2, no extra layer):
-tl.set_outline(Gimp.TextOutline.STROKE_ONLY)      # or STROKE_FILL (stroke behind fill)
+# built-in outline (3.2, no extra layer). USE STROKE_FILL — see the warning below:
+tl.set_outline(Gimp.TextOutline.STROKE_FILL)      # fill + outline. STROKE_ONLY = hollow letters!
 tl.set_outline_color(Gegl.Color.new("black")); tl.set_outline_width(8.0, Gimp.Unit.pixel())
 # rich text: tl.set_markup('<span foreground="#ffcc00" weight="bold">MARK</span>UP')  — Pango markup; get_text() becomes None
 # multi-line: "\n" in the string. Fixed box: tl.resize(800, 300) → text beyond the box is CLIPPED (measured, 2nd line cut).
 # centre horizontally: tl.set_offsets((img.get_width()-tl.get_width())//2, y)   (read tl.get_width() AFTER styling)
 ```
 - Size units: `Gimp.Unit.pixel()` for px, `Gimp.Unit.point()` for pt (48 pt at 300 dpi = 200 px — huge; thumbnails want pixels).
-- Font names: list with `[f.get_name() for f in Gimp.fonts_get_list("(?i)impact|segoe")]`; 453 on the workstation; brand fonts (Montserrat/Anton/League Gothic) are **absent here** (01).
+- **`STROKE_ONLY` means outline and NOTHING ELSE — the glyphs come out hollow.** "White text with
+  a black outline" is `STROKE_FILL`. Measured 2026-09-10 on the editing rig, white text / black
+  6 px outline / grey background, counting near-white pixels inside each layer:
+  `NONE`(=0) 17 019 white · `STROKE_ONLY`(=1) **0 white**, 10 293 black · `STROKE_FILL`(=2)
+  16 562 white + 9 555 black. The enum's numeric order is NONE 0, STROKE_ONLY 1, STROKE_FILL 2 —
+  `dir()` lists it alphabetically, so picking "the second member" gives you the hollow one.
+  Always read back `tl.get_outline().value_nick` (`none` / `stroke-only` / `stroke-fill`), and
+  look at the exported PNG: a hollow title is invisible in a byte count and obvious on screen.
+- Font names: list with `[f.get_name() for f in Gimp.fonts_get_list("(?i)impact|anton")]`; family
+  alone always returns None — you need the styled name (`Anton Regular`, `Montserrat SemiBold`).
+  **Brand fonts are host-specific:** Anton / Montserrat (9 weights) / League Gothic / Impact live
+  on the **editing rig** (449 fonts); the workstation has 453 fonts but **none of the brand family** and
+  silently falls back to Sans-serif. Render brand titles on the rig, or install the fonts first
+  and assert `Font.get_by_name(...) is not None` before rendering (01, 08 #40).
 - Never run with `-f`: 0 fonts → `TextLayer.new` cannot get a font.
 - Outline the "classic" way (separate layer, any colour/blur, for glow effects):
   `img.select_item(Gimp.ChannelOps.REPLACE, tl); Gimp.Selection.grow(img, 10); ol = Layer(...RGBA...); img.insert_layer(ol, None, 1); Gimp.context_set_foreground(col); ol.edit_fill(Gimp.FillType.FOREGROUND); Gimp.Selection.none(img)` [measured; bounds came back (60,94)–(909,199)].

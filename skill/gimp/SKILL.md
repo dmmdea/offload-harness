@@ -23,7 +23,7 @@ plug-in process outlives gimp-console, alpha before resize, exact font names, ve
 | Export formats that actually work here, per-format args, how to verify the file | `reference/06-export-formats.md` |
 | Script-Fu 3, Python plug-in registration, the gimp-mcp plug-in as a model | `reference/07-scripting-scriptfu-python-plugins.md` |
 | Something returned None/False/NULL, hung, or wrote the wrong file | `reference/08-failure-modes.md` |
-| Exact PDB signatures on this build (902 procs), enums, GEGL op properties, fonts, export matrix | `reference/live-dump-qube-2026-09-01.json` (grep it; do not load whole) |
+| Exact PDB signatures on this build (902 procs), enums, GEGL op properties, fonts, export matrix | `reference/live-dump-2026-09-01.json` (grep it; do not load whole) |
 
 Working rules that are not GIMP facts: console mode only unless a human wants to watch;
 kill the whole GIMP process tree when done (never leave a GIMP window or plug-in process);
