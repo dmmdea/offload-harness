@@ -59,6 +59,10 @@ type BuildConfig struct {
 	// whether a tool exists on this seat is answered by the loop as an
 	// observation. nil = no replay.
 	SetupActions []core.AgentSetupAction
+	// Thinking is the planner think-block policy (thinking.go ThinkingMode);
+	// "" = ThinkingAuto. Validated by the caller (core.ValidateThinking /
+	// ParseThinkingMode) — an unparseable value fails the build by name.
+	Thinking string
 
 	AllowWrite bool // P2: write_file/delete_file in the worktree
 	AllowFetch bool // P3: web_fetch behind the egress allowlist
@@ -359,6 +363,11 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 			note += " (withheld: " + strings.Join(denied, ", ") + ")"
 		}
 		res.Notes = append(res.Notes, note)
+	}
+	if mode, merr := ParseThinkingMode(cfg.Thinking); merr != nil {
+		return nil, fmt.Errorf("agent.Build: %w", merr)
+	} else if mode != ThinkingAuto {
+		loop = loop.WithThinking(mode)
 	}
 	if len(cfg.SetupActions) > 0 {
 		loop = loop.WithSetupActions(cfg.SetupActions)

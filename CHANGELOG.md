@@ -6,6 +6,44 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.8] - 2026-09-10 - an empty final is a named defer, never an answer
+
+The 2026-09-10 retrospective (register D-01, two independent diagnoses) traced every empty delegation
+result of the week to one path: on a vLLM thinking seat (`--reasoning-parser qwen3`) the whole per-step
+`max_tokens` goes into the think block; vLLM returns it under `reasoning` with `content: null`, the client
+decoded only `reasoning_content`, so the loop read silence — raised the budget 4x, re-ran, nudged with a user
+turn, re-ran, and published the second empty as `done`; the node re-packed `""` into a schema-valid all-empty
+object; the delegator failed it on acceptance and retried on a cold seat with the wall's leftovers. 20,526
+tokens on the Qube 27B and 9,628 on the Lenovo 4B for zero visible characters, then a retry that timed out.
+
+- `internal/agent/client.go` (D-41): decodes vLLM's `reasoning` key and
+  `usage.completion_tokens_details.reasoning_tokens` alongside `reasoning_content`; a reasoning channel cut on
+  `finish_reason: length` is NEVER promoted to the answer (the 0.81 fallback now applies to finished turns
+  only); which key a seat answers under is logged once per seat.
+- `internal/agent/thinking.go` (new): `Completion.Starvation()` names an empty completion
+  (`reasoning_starved`: reasoning ≥ 0.9 × completion, or finish `length`; `empty`: a bare close), the
+  `ThinkingMode` policy, `ContextWithoutThinking` (the client then sends `chat_template_kwargs:
+  {"enable_thinking": false}`, the re-pack's knob), the final budget (4× the step budget, cap 8,192) and the
+  per-call `CallRecord`.
+- `internal/agent/loop.go` (D-42, D-44): the 0.113.5 4× raise and the 0.113.6 nudge are GONE. An empty step is
+  re-issued once — same transcript, thinking off, final budget — and a second empty ends the run on
+  `StopReasoningStarved` / `StopEmpty` with `StopNote`; cost 1× + 1× instead of 1× + 4× + 4×. `Result` carries
+  `Calls` (D-47: finish reason, completion/reasoning tokens, chars, thinking-off per completion) on every return
+  path and `OutputTruncated` when a non-empty final was cut on `length`.
+- `internal/pipeline/agenttask.go` (D-42): an empty final answer DEFERS before any re-pack — class `budget` for
+  `reasoning_starved`, `abstention` for `empty` — with the loop's arithmetic in the reason; `calls`,
+  `stop_note`, `output_truncated` ride the wire on every result shape.
+- Config `agent_thinking` (D-43) and contract / `agent_run` / `agent_delegate` subtask `thinking`
+  (`auto` | `on` | `off`, validated by name at every door); `agent_run` and `agent_delegate` schemas document it.
+- `internal/rig`: new axis `reasoning-starved` (precedence after `timeout`, before `budget`).
+- Docs: fleet-node wire shapes (contract `thinking`; result `stop_reason` values, `stop_note`,
+  `output_truncated`, `calls`; the new defer shape), operator guide (`agent_thinking`, the retired raise/nudge).
+- Tests: the loop protocol (re-issue once, thinking off, final budget, named stops, both modes), the client's
+  vLLM shape (probe of 2026-09-10 recorded verbatim), the node-side defer without a re-pack, contract validation,
+  the rigger axis.
+- Not in this release (register): D-45 seat response-shape validation into `seat_config_basis`, D-46 the
+  seat-aware retry floor, D-48/D-49 setup-replay and blocked-tool breakers, D-64 admission for vLLM cold loads.
+
 ## [0.115.7] - 2026-09-10 - every template model unloads at five idle minutes
 
 The operator rule (2026-09-08, restated 2026-09-10) is that no model stays loaded past five idle minutes on

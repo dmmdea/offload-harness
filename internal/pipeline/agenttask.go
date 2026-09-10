@@ -218,6 +218,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		Accel:       NewLoopAccel(p.cfg), // every lane the box lists (ADR 0037): a remote contract sees the tools a local run does
 		Unattended:  true,
 		EnvRules:    p.cfg.AgentEnvRules,
+		Thinking:    thinkingFor(p.cfg, contract), // contract > this box's agent_thinking > auto
 		// The contract's own replay list, behind this box's seeded context
 		// reads when agent_seed_context_reads is on (core.SeedContextReads:
 		// the node knows the doc file names it just wrote; the delegator
@@ -298,6 +299,12 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	wire.Trace = TraceFromEffects(res.Effects)
 	wire.RulesFired = len(res.RuleHits)
 	wire.SetupRan = agent.SetupRan(res.Effects)
+	// Per-completion records, the starvation note and the truncation flag
+	// (0.115.8) — same rule: set before every branch, so a deferred run's
+	// arithmetic reaches the corpus.
+	wire.Calls = CallsFromLoop(res.Calls)
+	wire.StopNote = res.StopNote
+	wire.OutputTruncated = res.OutputTruncated
 	// T2-B: capture the run's prefill accounting HERE, immediately after the loop and
 	// BEFORE the defer branches below. Every one of those branches still records a
 	// ledger row via finish()/deferWire(), and a budget-exhausted or timed-out run is
@@ -387,6 +394,27 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// this path, so there is nothing to re-pack — defer, don't dress an
 		// unfinished run as a result.
 		return deferWire(core.DeferClassBudget, fmt.Sprintf("step budget exhausted (%d steps)", res.Steps))
+	}
+	if strings.TrimSpace(res.Output) == "" {
+		// An EMPTY final answer is never a result (0.115.8, register D-42).
+		// Until now this fell through to the re-pack, which turned "" into a
+		// schema-valid all-empty object that then failed acceptance on the
+		// delegator, which then retried the contract on a seat with the wall's
+		// leftovers — three expensive steps that dressed silence as an answer
+		// (2026-09-10: every empty structure in the corpus took this path).
+		// The loop names the shape: reasoning_starved is a budget ceiling (the
+		// completion budget went to the think block twice, thinking on and
+		// off), empty is an abstention (the seat had room and said nothing).
+		// Neither re-packs; both carry the loop's arithmetic in stop_note.
+		class := core.DeferClassAbstention
+		if res.StopReason == agent.StopReasoningStarved {
+			class = core.DeferClassBudget
+		}
+		note := res.StopNote
+		if note == "" {
+			note = "stop_reason " + res.StopReason
+		}
+		return deferWire(class, fmt.Sprintf("empty final answer after %d steps and %d completion tokens: %s", res.Steps, res.TokensOut, note))
 	}
 	wire.Output = res.Output
 
@@ -893,6 +921,35 @@ func setupActionsFor(cfg config.Config, contract core.AgentContract) []core.Agen
 	out = append(out, contract.SetupActions...)
 	if len(out) > core.AgentSetupActionsMax {
 		out = out[:core.AgentSetupActionsMax]
+	}
+	return out
+}
+
+// thinkingFor resolves the planner think-block policy for one run: the
+// contract's own `thinking` wins, then this box's `agent_thinking`, then auto.
+// Both values were validated at their doors (contract decode, config load),
+// so the string is passed through; agent.Build re-parses and refuses by name.
+func thinkingFor(cfg config.Config, contract core.AgentContract) string {
+	if t := strings.TrimSpace(contract.Thinking); t != "" {
+		return t
+	}
+	return strings.TrimSpace(cfg.AgentThinking)
+}
+
+// CallsFromLoop projects the loop's per-completion records onto the wire
+// (core.AgentCallRecord). nil in, nil out.
+func CallsFromLoop(calls []agent.CallRecord) []core.AgentCallRecord {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]core.AgentCallRecord, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, core.AgentCallRecord{
+			Step: c.Step, MaxTokens: c.MaxTokens, FinishReason: c.FinishReason,
+			CompletionTokens: c.CompletionTokens, ReasoningTokens: c.ReasoningTokens,
+			ContentChars: c.ContentChars, ReasoningChars: c.ReasoningChars,
+			ToolCalls: c.ToolCalls, ThinkingOff: c.ThinkingOff, ReasoningKey: c.ReasoningKey,
+		})
 	}
 	return out
 }

@@ -322,15 +322,15 @@ var (
 // VerdictReadsClean reports whether the seat's OWN raw answer supports publishing an empty
 // findings list as a genuine clean review rather than as a broken run.
 //
-// This closes the hole that made the two indistinguishable. The traced path: agent/loop.go
-// returns stop_reason "done" the moment the model stops requesting tools, with no check that
-// the final message has any CONTENT — and empty content is live-measured in this codebase
-// (pipeline/agenttask.go's re-pack comment: a GBNF + thinking seat puts its answer in
-// reasoning_content and leaves content empty). agenttask.go special-cases only "budget", so
-// "done" with an empty Output reaches repackStructured, which extracts findings from an empty
-// string and returns a schema-valid {"findings":[]}. Nothing downstream could tell that from
-// a real clean review: steps:1 and stop_reason "done" describe both, and Output — the one
-// field that differs — was consumed by the re-pack and thrown away.
+// This closes the hole that made the two indistinguishable. The traced path (until 0.115.8):
+// agent/loop.go returned stop_reason "done" the moment the model stopped requesting tools,
+// with no check that the final message had any CONTENT — and empty content is live-measured
+// in this codebase (a thinking seat spending its whole budget in the think block).
+// agenttask.go special-cased only "budget", so "done" with an empty Output reached
+// repackStructured, which extracted findings from an empty string and returned a
+// schema-valid {"findings":[]}. Since 0.115.8 the loop names that stop (reasoning_starved /
+// empty) and the node defers it before any re-pack; this check remains the last line for a
+// seat that produced text which re-packed to nothing.
 //
 // So the caller checks it here. This asks ONLY for the explicit "I looked and found nothing"
 // signal the prompt already requests; it does not grade the answer.
