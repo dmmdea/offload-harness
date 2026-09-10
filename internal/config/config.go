@@ -214,7 +214,9 @@ type Config struct {
 	// a non-"ready" state) BEFORE the contract's wall clock starts. Swaps queue
 	// silently in llama-swap; without this the "600 s timeouts" reported on
 	// 2026-09-01 were contracts paying for another session's model load.
-	// 0 = 120 s, negative = disabled.
+	// Since 0.115.11 the same budget also WARMS an absent seat before the wall
+	// starts (a vLLM cold load is 125–250 s; it used to be charged to the
+	// contract). 0 = 300 s (was 120), negative = disabled.
 	AgentAdmissionWaitSec int `json:"agent_admission_wait_sec,omitempty"`
 	// AgentCtxTokens is the agent seat's SERVED context window in tokens — the tier
 	// profile's agent_ctx_tokens value (setup/templates/profiles.json; the installer

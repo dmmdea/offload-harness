@@ -665,7 +665,7 @@ all of those as *peers hold the seat* ([ADR 0032](architecture/decisions/0032-a-
 | key (`config.json`) | default | meaning |
 |---|---|---|
 | `seat_contention_wait_sec` | `0` → 90 s | one wait budget per agent contract, shared by every chat step and the re-pack; `-1` = never wait (first busy answer defers) |
-| `agent_admission_wait_sec` | `0` → 120 s | pre-flight: wait while any model on the endpoint is mid-swap BEFORE the contract's wall starts; `-1` = off |
+| `agent_admission_wait_sec` | `0` → 300 s | pre-flight: wait while any model on the endpoint is mid-swap, then WARM the seat if it is not loaded (0.115.11: one passthrough GET makes llama-swap swap it in; a vLLM cold load is 125–250 s) — all BEFORE the contract's wall starts; `admission_wait_sec` / `admission_note` on the wire report it; `-1` = off |
 
 What you will see on the wire and in the ledger: `contention_wait_sec` and `admission_wait_sec`
 on every agent result; a defer whose reason starts with **`seat contended:`** when the budget was

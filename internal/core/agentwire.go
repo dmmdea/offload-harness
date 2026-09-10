@@ -199,13 +199,17 @@ type AgentWireResult struct {
 	// defers for latency. Omitted when zero; a pre-0.111 node's result reads as
 	// "not measured".
 	ContentionWaitSec float64 `json:"contention_wait_sec,omitempty"`
-	// AdmissionWaitSec is the pre-flight spent waiting for llama-swap to finish
-	// a swap before the wall started (RunAgentTask's admission gate). Zero =
-	// omitted = nothing was swapping or the gate is disabled.
+	// AdmissionWaitSec is the pre-flight spent BEFORE the wall started
+	// (RunAgentTask's admission gate): waiting for llama-swap to finish another
+	// model's swap and, since 0.115.11, loading the seat itself when it was not
+	// resident (the cold-load warm-up). Zero = omitted = nothing was swapping,
+	// the seat was already loaded, or the gate is disabled.
 	AdmissionWaitSec float64 `json:"admission_wait_sec,omitempty"`
-	// AdmissionNote names why the admission gate did NOT settle the seat's
-	// residency — a probe failure (fail-open) or a spent budget — so a wire
-	// reader can tell "nothing was swapping" from "the gate could not tell".
+	// AdmissionNote names what the admission gate could NOT settle or what it
+	// did — a probe failure (fail-open), a spent budget, the seat's cold load
+	// ("cold load Ns outside the wall"), or a warm-up llama-swap never
+	// confirmed — so a wire reader can tell "nothing was swapping" from "the
+	// gate could not tell" from "the seat was loaded here".
 	AdmissionNote string `json:"admission_note,omitempty"`
 
 	// --- A1 config pinning (0.81.0, Tier 2 of the Phase 2 re-aim). Stamped by
