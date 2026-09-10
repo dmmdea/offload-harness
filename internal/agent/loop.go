@@ -715,6 +715,9 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 	// run continue, and a LATER empty final earns its own re-issue — review
 	// finding 2, 0.115.8 — but never more than maxReissues of them).
 	retryNoThink, lastWasReissue, reissues := false, false, 0
+	// stickyNoThink: once a re-issue rendered without thinking (ThinkingAuto),
+	// every later planner call in this run does too — see the re-issue branch.
+	stickyNoThink := false
 	// recitedStep guards the plan recitation below against the re-issue's
 	// `step--`: the block is keyed on the step index and would otherwise append
 	// the plan a SECOND time to the re-issued transcript (review finding 1).
@@ -882,7 +885,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// Auto, with thinking off — the transcript already holds the evidence
 		// and the answer needs room, not more deliberation.
 		stepCtx, stepMax := ctx, l.maxTokens
-		if l.thinking == ThinkingOff {
+		if l.thinking == ThinkingOff || (stickyNoThink && l.thinking != ThinkingOn) {
 			stepCtx = ContextWithoutThinking(ctx)
 		}
 		thisIsReissue := retryNoThink
@@ -891,6 +894,13 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			stepMax = finalMaxTokens(l.maxTokens)
 			if l.thinking != ThinkingOn {
 				stepCtx = ContextWithoutThinking(ctx)
+				// The seat has shown its think block does not fit the step
+				// budget: keep thinking off for the REST of the run (0.115.15).
+				// Under 0.115.12 a thinking-off re-issue that answered with a
+				// tool call handed the next step back to thinking, which starved
+				// again — the 27B starved three times in 660 s on ledger-01 and
+				// never reached the answer it gives in one no-think turn.
+				stickyNoThink = true
 			}
 		}
 		comp, err := l.client.Chat(stepCtx, msgs, specs, stepMax)
