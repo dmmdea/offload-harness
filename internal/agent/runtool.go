@@ -113,7 +113,7 @@ func runTool(pol *Policy, worktree, scratch string, run shellRunner) Tool {
 				Worktree:           worktree,
 				WorktreeWritable:   true,
 				Scratch:            scratch,
-				ABIFloor:           1,
+				ABIFloor:           sandbox.NetABIFloor,
 				AllowedExecutables: runAllowedExecutables,
 			})
 			if res.Refused {

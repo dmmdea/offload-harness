@@ -6,6 +6,24 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.22] - 2026-09-10 - supply-chain lane (H-26) and the cage's network floor (H-27)
+
+### Changed
+- `go 1.26.7` in go.mod (the built binaries were already on 1.26.7; the directive now says so — 1.26.5 carried
+  five stdlib advisories, 1.26.6 broke unencrypted HTTP/2), `golang.org/x/sys` v0.47.0 → v0.48.0,
+  `modelcontextprotocol/go-sdk` v1.6.1 → v1.7.0 (protocol 2026-07-28 negotiated at connect; backward compatible
+  with 2025-11-25 clients on every endpoint; `ping`/`logging/setLevel`/`resources/subscribe` are rejected on the
+  new revision; tool input/output schemas are validated — every harness tool passed). `go-landlock` stays at
+  v0.10.0 (taken in 0.104.0 on 2026-08-27; GHSA-vv6c-69r6-chg9 closed there, register H-27's "still running v0.9.0"
+  was stale).
+- The Linux cage's Landlock ABI floor is 4 (`sandbox.NetABIFloor`), raised by `Run` for any lower request: the V4
+  rule set denies TCP bind/connect only from ABI 4 on, and below it best-effort mode silently dropped the network
+  rules while the callers asked for floor 1. Fail-closed on a kernel older than 6.7; the fleet's Linux node runs
+  7.0. `TestEffectiveABIFloorCoversTheNetworkGuarantee`.
+- `seat_tok_s` samples only completions of ≥ 1,024 tokens (was 128): the first live probe on the 27B recorded
+  11.5 tok/s from a ~200-token answer whose call wall was mostly the 43 KB prefill — an under-read that would have
+  tripled the next estimate. The wall_note names the threshold.
+
 ## [0.115.21] - 2026-09-10 - walls sized from the seat's own rate
 
 Register D-03: walls sized for a fast seat were spent on a 30 tok/s thinker, and nothing in the harness could say
@@ -15,7 +33,7 @@ result — without touching the wall itself.
 
 ### Added
 - `calls[].ms` (client-measured wall per planner completion) and `seat_tok_s` on the agent result (effective decode
-  rate over the ≥ 128-token completions; also the ledger row's `tok_per_s`, empty on agent rows until now).
+  rate over the ≥ 1,024-token completions; also the ledger row's `tok_per_s`, empty on agent rows until now).
 - `internal/seatrate`: `<state root>/seat-rates.json` (per seat: rate EMA 0.3, the slowest of the last five cold
   loads, samples; load-observe-save under an exclusive lock file with stale-lock takeover, atomic writes; a
   missing or corrupt file is no memory, never an error) and the estimate

@@ -263,9 +263,9 @@ func Run(ctx context.Context, spec Spec) (Result, error) {
 			return Result{}, fmt.Errorf("sandbox.Run: all paths must be absolute, got %q", p)
 		}
 	}
-	if spec.ABIFloor < 1 {
-		spec.ABIFloor = 1
-	}
+	// The network guarantee needs ABI >= NetABIFloor (see sandbox.go); a
+	// lower request is raised, never honoured (0.115.22, register H-27).
+	spec.ABIFloor = EffectiveABIFloor(spec.ABIFloor)
 	if spec.Scratch != "" {
 		if err := os.MkdirAll(spec.Scratch, 0o700); err != nil {
 			return Result{}, fmt.Errorf("create scratch: %w", err)

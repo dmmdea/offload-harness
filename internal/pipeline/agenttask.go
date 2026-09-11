@@ -350,7 +350,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// arithmetic reaches the corpus.
 	wire.Calls = CallsFromLoop(res.Calls)
 	// The seat's measured numbers from THIS run feed the next estimate: the
-	// effective decode rate over the ≥ 128-token completions and the cold
+	// effective decode rate over the ≥ 1,024-token completions and the cold
 	// load the warm-up waited for. Recorded on every branch — a timed-out run
 	// measured the seat just as well.
 	if tokS, n := seatrate.Rate(rateCalls(res.Calls)); n > 0 {

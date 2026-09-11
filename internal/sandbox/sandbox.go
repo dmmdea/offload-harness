@@ -27,6 +27,28 @@ const workerEnv = "OFFLOAD_SANDBOX_WORKER"
 // surface as exit 126/127). Run() sets Result.Refused when it sees this prefix.
 const refusalMarker = "[[SANDBOX-REFUSED]] "
 
+// NetABIFloor is the Landlock ABI the cage's NETWORK guarantee needs: the
+// rule set is landlock.V4 (paths + TCP bind/connect handling), and with FS
+// rules but no ConnectTCP/BindTCP rule every TCP bind and connect is denied
+// — ONLY on a kernel whose Landlock ABI is >= 4 (Linux 6.7). Below that,
+// BestEffort() applies the path rules and silently drops the network ones
+// (register H-27: the shape GHSA-vv6c-69r6-chg9 made worse in go-landlock
+// v0.9.0, fixed upstream in v0.10.0 which this repo took in 0.104.0). The
+// callers used to ask for ABI floor 1, which let a 6.2-era kernel run the
+// cage with the network half of a shipped guarantee missing. Run raises any
+// lower request to this floor; a caller that truly wants a path-only cage
+// has no such mode — the guarantee is one thing, not two.
+const NetABIFloor = 4
+
+// EffectiveABIFloor is the floor Run enforces for a requested one: never
+// below NetABIFloor.
+func EffectiveABIFloor(requested int) int {
+	if requested < NetABIFloor {
+		return NetABIFloor
+	}
+	return requested
+}
+
 // Spec is the cage configuration the parent hands to the re-exec'd worker
 // (serialized into workerEnv). All paths must be absolute.
 type Spec struct {
@@ -36,7 +58,7 @@ type Spec struct {
 	Scratch          string   `json:"scratch"`           // a writable scratch dir (always RW); also HOME/TMPDIR inside the cage
 	ReadDirs         []string `json:"read_dirs"`         // extra read-only dirs (the system dirs below are always added)
 	ReadFiles        []string `json:"read_files"`        // specific read-only (+executable) files to grant, e.g. a static helper binary
-	ABIFloor         int      `json:"abi_floor"`         // minimum achieved Landlock ABI required, else fail-closed (>=1)
+	ABIFloor         int      `json:"abi_floor"`         // minimum achieved Landlock ABI required, else fail-closed; raised to NetABIFloor by Run (0.115.22, H-27)
 
 	// AllowedExecutables is the base-name allowlist of programs the caged command
 	// may launch. WINDOWS ENFORCES it: before spawning, the resolved program's base

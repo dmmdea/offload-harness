@@ -30,10 +30,14 @@ const FileName = "seat-rates.json"
 
 const (
 	// minSampleTokens: a completion counts toward the rate only when it
-	// generated at least this many tokens. Tool-call completions (25–60
-	// tokens on the Qube 27B) are dominated by the prefill of a growing
-	// transcript and would drag the "decode" rate to a fraction of itself.
-	minSampleTokens = 128
+	// generated at least this many tokens. The wall of a call includes its
+	// prefill, so a short answer under-reads the decode rate: at 128 the
+	// first live probe (2026-09-10 21:01, a ~200-token answer over a 43 KB
+	// prefill on the 27B) recorded 11.5 tok/s against a 30 tok/s seat, which
+	// would have tripled the next estimate. At 1,024 tokens (≈ 34 s of decode
+	// on that seat against ≈ 8 s of prefill) the under-read is bounded near
+	// 20 %; the ledger-01 finals (9–19k tokens) read the seat exactly.
+	minSampleTokens = 1024
 	// emaWeight is the weight of the newest run's rate.
 	emaWeight = 0.3
 	// coldLoadWindow: cold_load_sec is the MAX of this many most recent loads —

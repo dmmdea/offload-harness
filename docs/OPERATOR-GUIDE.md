@@ -586,7 +586,7 @@ does NOT contain:
 (128 tokens + 6 s prefill) + final budget`, all at the seat's decode rate. The node computes exactly that before every
 run and publishes it beside the result: `results[].wall_estimate_sec`, `min_turn_sec` (cold load + one turn at the final
 budget — the least a retry is worth, D-46) and `wall_note` (the arithmetic, or why there is none). `seat_tok_s` is the
-run's own measured rate (completion tokens per second of call wall over the completions that generated ≥ 128 tokens;
+run's own measured rate (completion tokens per second of call wall over the completions that generated ≥ 1,024 tokens;
 tool-call completions of 25–60 tokens are prefill-dominated and excluded), `calls[].ms` the wall of each completion. The
 rate and the cold load are remembered per seat in `<state root>/seat-rates.json` (the GPU-lease root: machine-local by
 design; EMA 0.3 on the rate, the slowest of the last five loads, written under an exclusive lock file so two

@@ -64,7 +64,7 @@ func shellTool(pol *Policy, worktree, scratch string, run shellRunner) Tool {
 				Worktree:         worktree,
 				WorktreeWritable: true,
 				Scratch:          scratch,
-				ABIFloor:         1,
+				ABIFloor:         sandbox.NetABIFloor,
 			})
 			if res.Refused {
 				// the CAGE refused to start (setup failure) — not a command exit.
