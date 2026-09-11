@@ -418,3 +418,42 @@ func TestSetupReplayIsPinnedNotPreamble(t *testing.T) {
 		t.Fatalf("second Chat saw %d messages", len(second))
 	}
 }
+
+// The setup footer counts only the lines read_file itself cut (0.115.19,
+// reviewer finding on PR #303), through the REAL read_file: a line over
+// maxLineChars is named as cut, and a document that merely contains the marker
+// text (tools.go does) is not — it gets the clean "all there is" footer.
+func TestSetupFooterNamesTruncatedLinesAndMidTextEnds(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("long.txt", "short line\n"+strings.Repeat("y", maxLineChars+50)+"\nlast line")
+	write("marker.txt", "line one says (line truncated) in its text\nline two ends mid-wo")
+	tools, err := ReadOnlyTools(root, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	footer := func(file string) string {
+		t.Helper()
+		client := &fakeClient{script: []Completion{{Msg: Msg{Role: "assistant", Content: "done"}, FinishReason: "stop"}}}
+		if _, err := NewLoop(client, tools, 3).WithContextTokens(65536).WithSetupActions(setupActs(`read_file {"path":"`+file+`"}`)).Run(context.Background(), "go"); err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range client.seen[0] {
+			if m.Role == "tool" {
+				return m.Content[strings.LastIndex(m.Content, "\n")+1:]
+			}
+		}
+		t.Fatal("no setup result in the first turn")
+		return ""
+	}
+	if got := footer("long.txt"); !strings.Contains(got, "1 over-long line(s) were cut at 2000 characters") {
+		t.Fatalf("a line read_file cut must be named, footer %q", got)
+	}
+	if got := footer("marker.txt"); strings.Contains(got, "were cut") || !strings.Contains(got, "even where it begins or ends mid-sentence") {
+		t.Fatalf("a document that only contains the marker text is not cut, footer %q", got)
+	}
+}

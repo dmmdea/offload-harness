@@ -389,7 +389,9 @@ func TestLoopMaxSameToolDisabledWhenNonPositive(t *testing.T) {
 		execs++
 		return "result", nil
 	}}}
-	loop := NewLoop(client, tools, 5).WithMaxSameTool(0)
+	// WithoutForcedFinal: this test's subject is the disabled name-cap, so the
+	// last step must stay a tool step (D-89's forced final would withhold it).
+	loop := NewLoop(client, tools, 5).WithMaxSameTool(0).WithoutForcedFinal()
 	res, err := loop.Run(context.Background(), "find something")
 	if err != nil {
 		t.Fatalf("Run: %v", err)

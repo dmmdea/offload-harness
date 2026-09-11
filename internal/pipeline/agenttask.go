@@ -421,7 +421,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// The loop burned MaxSteps without a final answer. Output is empty on
 		// this path, so there is nothing to re-pack — defer, don't dress an
 		// unfinished run as a result.
-		return deferWire(core.DeferClassBudget, fmt.Sprintf("step budget exhausted (%d steps)", res.Steps))
+		reason := fmt.Sprintf("step budget exhausted (%d steps)", res.Steps)
+		if res.StopNote != "" {
+			// 0.115.19: the forced final step's evidence (the seat answered a
+			// tool-less "answer now" turn with a tool call) reaches the reason as
+			// well as stop_note; the prefix stays the grep key (rig, ledger).
+			reason += ": " + res.StopNote
+		}
+		return deferWire(core.DeferClassBudget, reason)
 	}
 	if strings.TrimSpace(res.Output) == "" {
 		// An EMPTY final answer is never a result (0.115.8, register D-42).

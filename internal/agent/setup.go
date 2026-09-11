@@ -169,7 +169,17 @@ func (l *Loop) replaySetup(ctx context.Context, msgs []Msg, pinned map[string]bo
 			// The whole file is in front of the model: say so, in the place a
 			// continuation hint would sit, so a small seat does not page for
 			// more (the 4B read three 213-char "(end of file)" answers).
-			content += fmt.Sprintf("\n(complete file: %d lines — there is no further content; do not read it again or page with offset)", strings.Count(content, "\n")+1)
+			// Two honesty fixes (0.115.19, D-89 root cause): a file with lines
+			// read_file cut at maxLineChars is NOT complete, so the footer names
+			// the cut; and a document excerpt that begins or ends mid-sentence is
+			// still all there is — the 27B re-read ledger-01's cut-off last line
+			// and searched for a missing first-line ID before its budget ran out.
+			lines := strings.Count(content, "\n") + 1
+			if cut := cutLineCount(content); cut > 0 {
+				content += fmt.Sprintf("\n(complete file: %d lines, of which %d over-long line(s) were cut at %d characters and marked \"(line truncated)\"; everything else is here — there is no further content; do not read it again or page with offset)", lines, cut, maxLineChars)
+			} else {
+				content += fmt.Sprintf("\n(complete file: %d lines — this is all of it, even where it begins or ends mid-sentence; there is no further content; do not read it again or page with offset)", lines)
+			}
 		}
 		content, _ = contextbudget.Trim(content, l.toolResultCapChars())
 		if eff == EffectCommitted && exactCalls != nil && firstCallID != nil {
