@@ -908,7 +908,7 @@ func TestRepackStructuredDisablesThinking(t *testing.T) {
 
 	p := agentTestPipeline(t, srv.URL)
 	schema := json.RawMessage(`{"properties":{"answer":{"type":"string"}},"required":["answer"]}`)
-	structured, _, _, err := p.repackStructured(context.Background(), agentTestSeat, schema, "The answer is 42.")
+	structured, _, _, _, err := p.repackStructured(context.Background(), agentTestSeat, schema, "The answer is 42.", 0)
 	if err != nil {
 		t.Fatalf("repackStructured: %v", err)
 	}
