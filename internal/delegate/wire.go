@@ -152,6 +152,10 @@ type ResultWire struct {
 	WallEstimateSec int     `json:"wall_estimate_sec,omitempty"`
 	MinTurnSec      int     `json:"min_turn_sec,omitempty"`
 	WallNote        string  `json:"wall_note,omitempty"`
+	// Re-pack accounting (0.115.23, register D-91), passed through.
+	RepackMs       int64  `json:"repack_ms,omitempty"`
+	RepackAttempts int    `json:"repack_attempts,omitempty"`
+	RepackNote     string `json:"repack_note,omitempty"`
 }
 
 // ResponseWire is the full response: summary first, then per-subtask results
@@ -233,6 +237,9 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			WallEstimateSec:    pr.Result.WallEstimateSec,
 			MinTurnSec:         pr.Result.MinTurnSec,
 			WallNote:           pr.Result.WallNote,
+			RepackMs:           pr.Result.RepackMs,
+			RepackAttempts:     pr.Result.RepackAttempts,
+			RepackNote:         pr.Result.RepackNote,
 		}
 		if pr.Err != "" {
 			rw.Failed = true

@@ -202,6 +202,15 @@ type AgentWireResult struct {
 	// budget — the least wall a retry is worth (D-46); WallNote names the
 	// arithmetic, or why there is none. Published, never imposed: the run
 	// proceeds under the contract's timeout_sec exactly as before.
+	// Re-pack accounting (0.115.23, register D-91): how long the structured
+	// re-pack ran, how many seat completions it spent, and why it stopped or
+	// was skipped. A re-pack of a 12 KB length-cut answer on the 4B ran three
+	// full re-generations (~690 s) into the 900 s wall on 2026-09-10 and
+	// turned a finished loop into a budget defer with nothing on the wire to
+	// say where the time went.
+	RepackMs       int64  `json:"repack_ms,omitempty"`
+	RepackAttempts int    `json:"repack_attempts,omitempty"`
+	RepackNote     string `json:"repack_note,omitempty"`
 	SeatTokS        float64 `json:"seat_tok_s,omitempty"`
 	WallEstimateSec int     `json:"wall_estimate_sec,omitempty"`
 	MinTurnSec      int     `json:"min_turn_sec,omitempty"`

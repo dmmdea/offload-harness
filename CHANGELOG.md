@@ -6,6 +6,23 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.23] - 2026-09-10 - the re-pack cannot eat the wall
+
+Register D-91, found by the D-03 live probe: the Lenovo 4B's final answer came back `length`-cut at 4,096 tokens
+(12,100 chars), the loop was `done` after four minutes, and the structured re-pack then ran two grammar attempts
+and the chat lane over the cut text — three full re-generations, ~690 s — into the 900 s wall, so a finished run
+deferred `wall timeout after 900s` with nothing on the wire to say where the time went.
+
+### Changed
+- A `length`-cut final answer (`output_truncated`) is never re-packed: the run abstains at once (`output failed
+  schema: re-pack skipped: the final answer was cut at the completion budget …`) with the partial in `output`;
+  the cross-seat retry stays eligible. `TestRunAgentTaskTruncatedAnswerSkipsTheRepack`.
+- No re-pack attempt starts with under a tenth of the wall left (capped at 45 s, `repackAttemptFloor`); the error names the wall
+  and the attempts that ran. `TestRepackStopsAttemptsTheWallCannotHold`.
+
+### Added
+- `repack_ms`, `repack_attempts`, `repack_note` on the agent result, the delegation log and the delegate response.
+
 ## [0.115.22] - 2026-09-10 - supply-chain lane (H-26) and the cage's network floor (H-27)
 
 ### Changed

@@ -68,6 +68,12 @@ const (
 	// agentRepackChatTimeout bounds the grammar-free chat fallback: one
 	// completion over already-finished text, generously padded for a cold seat.
 	agentRepackChatTimeout = 120 * time.Second
+	// agentRepackAttemptFloor (0.115.23, register D-91) is the least wall a
+	// re-pack attempt is started with: a grammar or chat re-pack of a long
+	// answer is a full re-generation (a 12 KB answer ≈ 4,500 tokens ≈ 190 s on
+	// the 4B), and an attempt that cannot finish only converts a finished
+	// loop into "wall timeout after Ns".
+	agentRepackAttemptFloor = 45 * time.Second
 	// agentRosterProbeTimeout bounds the seat-residency roster fetch — the same
 	// 10s mcpserver's plannerUnserved uses.
 	agentRosterProbeTimeout = 10 * time.Second
@@ -511,8 +517,23 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		wire.Structured = direct
 		return finish(wire)
 	}
-	structured, tokensOut, transport, serr := p.repackStructured(cctx, seat, contract.OutputSchema, res.Output)
+	// D-91 (0.115.23): a final answer cut at the completion budget is a
+	// PARTIAL — a JSON prefix or a truncated narrative — and every re-pack of
+	// it is a full re-generation that cannot produce the whole object. The
+	// 2026-09-10 Lenovo run spent ~690 s (two grammar attempts + the chat
+	// lane over a 12,100-char cut answer) to the 900 s wall and deferred
+	// "wall timeout" on a loop that had finished in four minutes. Name the
+	// shape at once instead; the partial rides in output for the caller.
+	if res.OutputTruncated {
+		wire.RepackNote = "re-pack skipped: the final answer was cut at the completion budget (output_truncated) — a partial cannot be re-packed into the requested object; the partial rides in output"
+		return deferWire(core.DeferClassAbstention, "output failed schema: "+wire.RepackNote)
+	}
+	repackStart := time.Now()
+	structured, tokensOut, transport, attempts, serr := p.repackStructured(cctx, seat, contract.OutputSchema, res.Output, repackAttemptFloor(wall))
+	wire.RepackMs = time.Since(repackStart).Milliseconds()
+	wire.RepackAttempts = attempts
 	if serr != nil {
+		wire.RepackNote = serr.Error()
 		// wire.Output stays populated on every branch below so the CALLER still
 		// receives the loop's answer even when the structured shape never
 		// arrived. It is preserved for the caller, NOT for delegator-side
@@ -651,16 +672,44 @@ func (p *Pipeline) RunAgentContract(ctx context.Context, contract core.AgentCont
 //     wrong") even though the seat had just failed a request; when a transport
 //     failure happened AT ALL, that is the operator's signal, and the returned
 //     error is the transport one so the message names it.
-func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema json.RawMessage, output string) (structured json.RawMessage, tokensOut int, transport bool, err error) {
+// repackAttemptFloor is the least wall a re-pack attempt is started with for a
+// contract of the given wall: a tenth of the wall, capped at
+// agentRepackAttemptFloor — so a 900 s contract keeps 45 s back, a 300 s one
+// 30 s, and a 30 s test contract 3 s.
+func repackAttemptFloor(wall time.Duration) time.Duration {
+	f := wall / 10
+	if f > agentRepackAttemptFloor {
+		f = agentRepackAttemptFloor
+	}
+	return f
+}
+
+// floor is the least remaining wall an attempt may start with (0 = no bound).
+func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema json.RawMessage, output string, floor time.Duration) (structured json.RawMessage, tokensOut int, transport bool, attempts int, err error) {
 	var schema map[string]any
 	if uerr := json.Unmarshal(rawSchema, &schema); uerr != nil {
-		return nil, 0, false, fmt.Errorf("output_schema is not a JSON object: %w", uerr)
+		return nil, 0, false, 0, fmt.Errorf("output_schema is not a JSON object: %w", uerr)
 	}
 	fields := gbnf.FromJSONSchema(schema)
 	if len(fields) == 0 {
 		// Unreachable off the wire (contract Validate gates on this), kept for
 		// in-process callers: an empty grammar would constrain nothing.
-		return nil, 0, false, errors.New("output_schema has no gbnf-compilable properties")
+		return nil, 0, false, 0, errors.New("output_schema has no gbnf-compilable properties")
+	}
+	// wallLeft reports whether an attempt may still START: every attempt is
+	// a full re-generation, and one that cannot finish inside the wall only
+	// converts a finished loop into a budget defer (D-91). No deadline = no
+	// bound, as before.
+	wallLeft := func(what string) bool {
+		dl, ok := ctx.Deadline()
+		if !ok || floor <= 0 {
+			return true
+		}
+		if left := time.Until(dl); left < floor {
+			err = fmt.Errorf("re-pack stopped before the %s: %.0fs of the wall left, under the %.0fs an attempt needs", what, left.Seconds(), floor.Seconds())
+			return false
+		}
+		return true
 	}
 	names := make([]string, 0, len(fields))
 	for _, f := range fields {
@@ -676,6 +725,10 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 	var lastErr, transportErr error
 	budget := repackBudget(output)
 	for attempt := 0; attempt < 2; attempt++ {
+		if !wallLeft("grammar re-pack") {
+			return nil, 0, false, attempts, err
+		}
+		attempts++
 		// WithoutThinking: the re-pack is a mechanical shape transformation over
 		// text the loop has ALREADY finished reasoning about, so it should never
 		// think — and on a thinking seat, thinking is not merely wasted, it
@@ -723,12 +776,12 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 		content := []byte(outerObject(gres.Content))
 		if verr := validator.Validate(content, schema); verr != nil {
 			if fixed, ok := coerceToSchema(content, schema); ok {
-				return json.RawMessage(fixed), gres.TokensOut, false, nil
+				return json.RawMessage(fixed), gres.TokensOut, false, attempts, nil
 			}
 			lastErr = verr
 			continue
 		}
-		return json.RawMessage(content), gres.TokensOut, false, nil
+		return json.RawMessage(content), gres.TokensOut, false, attempts, nil
 	}
 	// FINAL fallback: one grammar-FREE attempt over /v1/chat/completions.
 	// Found live wiring the Lenovo FreeToken agent seat (2026-08-27): the two
@@ -741,17 +794,21 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 	// route is the one surface every seat serves; the schema validator still
 	// gates the result, so this trades the grammar's shape-constraint for
 	// reach while conceding nothing on correctness.
+	if !wallLeft("chat re-pack") {
+		return nil, 0, false, attempts, err
+	}
+	attempts++
 	if structured, tokensOut, ok := p.repackViaChat(ctx, seat, schema, output); ok {
-		return structured, tokensOut, false, nil
+		return structured, tokensOut, false, attempts, nil
 	}
 	if transportErr != nil {
 		// Report the TRANSPORT failure itself, not whatever the other attempt
 		// produced: the caller prefixes this with "structured re-pack
 		// unreachable", and a message pairing that prefix with a schema
 		// validation error would be an unreadable diagnosis.
-		return nil, 0, true, transportErr
+		return nil, 0, true, attempts, transportErr
 	}
-	return nil, 0, false, lastErr
+	return nil, 0, false, attempts, lastErr
 }
 
 // outerObject trims text to its outermost {...} span (fences and prose around
