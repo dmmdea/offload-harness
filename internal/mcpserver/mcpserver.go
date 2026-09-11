@@ -2057,6 +2057,19 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	if berr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": berr.Error()})
 	}
+	// The review's wall is the box's agent_timeout_sec when that is larger than
+	// the wire default (0.115.21, register D-03 — the wall half of D-09): the
+	// 300 s default sized the lane for a fast seat, and on the 30 tok/s 27B a
+	// 51 KB diff spent 9 steps and timed out at exactly 300 s (2026-09-10
+	// 20:4x) while a 13 KB one finished in 3. agent_timeout_sec is the number
+	// the seat's owner set for this seat (600 on the reference box); the wire
+	// ceiling still caps it.
+	if wall := int(agentTimeout(0, s.p.Cfg()).Seconds()); wall > contract.TimeoutSec {
+		contract.TimeoutSec = wall
+		if contract.TimeoutSec > core.AgentTimeoutSecCap {
+			contract.TimeoutSec = core.AgentTimeoutSecCap
+		}
+	}
 	run := s.localAgent // test seam, shared with agent_delegate and offload_ask
 	if run == nil {
 		run = s.p.RunAgentContract

@@ -1,9 +1,11 @@
 package seatrate
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -134,5 +136,61 @@ func TestStoreRoundTripAndCorruptFile(t *testing.T) {
 	}
 	if c.Get("agent-pool").TokS != 0 {
 		t.Fatal("a corrupt store must not hand back stale numbers")
+	}
+}
+
+// TestUpdateSerialisesConcurrentWriters (reviewer finding, 2026-09-10): N
+// writers that each load, observe and save around the same moment must all
+// land — with plain Load/Observe/Save the last save silently dropped the
+// others' samples.
+func TestUpdateSerialisesConcurrentWriters(t *testing.T) {
+	path := Path(t.TempDir())
+	const writers = 12
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs <- Update(path, func(s *Store) {
+				s.Observe("agent-pool", 30+float64(i), 0, time.Now())
+			})
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("update: %v", err)
+		}
+	}
+	s, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Get("agent-pool").Samples; got != writers {
+		t.Fatalf("samples = %d, want %d — a concurrent writer's sample was lost", got, writers)
+	}
+	if _, serr := os.Stat(path + ".lock"); serr == nil {
+		t.Fatal("lock file left behind")
+	}
+	// A dead writer's stale lock is taken over, not waited on forever.
+	if err := os.WriteFile(path+".lock", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * lockStale)
+	if err := os.Chtimes(path+".lock", old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := Update(path, func(s *Store) { s.Observe("agent-pool", 31, 0, time.Now()) }); err != nil {
+		t.Fatalf("stale lock must be taken over: %v", err)
+	}
+	// A live lock held past the wait window returns ErrLocked, never blocks a run.
+	if err := os.WriteFile(path+".lock", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path + ".lock")
+	if err := Update(path, func(s *Store) {}); !errors.Is(err, ErrLocked) {
+		t.Fatalf("live lock: err = %v, want ErrLocked", err)
 	}
 }

@@ -38,6 +38,18 @@ func TestWallEstimateForUsesTheSeatsOwnNumbers(t *testing.T) {
 	if !strings.Contains(auto.Note, "think block 4096 tok") || !auto.Below {
 		t.Fatalf("auto: note = %q below = %v", auto.Note, auto.Below)
 	}
+	// A one-step contract's single completion runs at the plain step budget
+	// (loop.go opens the final-budget turn only on the last of ≥ 2 steps):
+	// its final leg is 4096 tokens, not the 8192 of a multi-step run.
+	one := wallEstimateFor(cfg, core.AgentContract{MaxSteps: 1, Thinking: "off"}, "agent-pool", known, 210, 600)
+	if !strings.Contains(one.Note, "final 4096 tok") || !strings.Contains(one.Note, "0 tool steps") || one.MinTurnSec != 347 {
+		t.Fatalf("one-step: note = %q min_turn = %d (want final 4096 tok, 0 tool steps, 347 s)", one.Note, one.MinTurnSec)
+	}
+	// thinking "on": one think block charged and the note says it is a floor.
+	on := wallEstimateFor(cfg, core.AgentContract{Thinking: "on"}, "agent-pool", known, 210, 600)
+	if !strings.Contains(on.Note, "think block 4096 tok") || !strings.Contains(on.Note, "this is a floor") || on.TotalSec != auto.TotalSec {
+		t.Fatalf("thinking on: note = %q total = %d (auto %d)", on.Note, on.TotalSec, auto.TotalSec)
+	}
 	// No store rate: the config fallback, named as such.
 	fb := wallEstimateFor(cfg, core.AgentContract{}, "agent-pool", seatrate.Seat{}, 0, 300)
 	if !strings.Contains(fb.Note, "12.0 tok/s (config agent_seat_tok_s, 0 samples)") || !strings.Contains(fb.Note, "cold load 0 s") {

@@ -191,7 +191,11 @@ The others compete with "read the file yourself" on cost, and lose — this one 
 a lead cannot produce from inside its own context at all: a reviewer that never saw the work.
 The isolation is the mechanism, so the contract ships the task and the diff and **nothing
 else** (`internal/reviewlane`), and the tool is registered unconditionally beside `offload_ask`
-for the same reason — a lane behind a config flag is one more reason not to take it.
+for the same reason — a lane behind a config flag is one more reason not to take it. Its wall
+is the box's `agent_timeout_sec` when that is larger than the 300 s wire default (0.115.21,
+register D-03/D-09; capped at the wire ceiling): a 51 KB diff on the 30 tok/s 27B spent 9 steps
+and timed out at exactly 300 s on 2026-09-10 while a 13 KB one finished in 3 — size the diff by
+path (`git diff -- <dir>`) when the estimate in the node log says the wall is below it.
 
 On the evidence for it, keep two things apart. Cognition **reports** a dedicated reviewer in
 their Fusion setup catching ~2 bugs per PR, ~58% of them severe; that is the vendor's own

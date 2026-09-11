@@ -147,7 +147,7 @@ func (s *Store) Save() error {
 	if err != nil {
 		return err
 	}
-	tmp := fmt.Sprintf("%s.%d.tmp", s.path, os.Getpid())
+	tmp := fmt.Sprintf("%s.%d.%d.tmp", s.path, os.Getpid(), time.Now().UnixNano())
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return err
 	}
@@ -156,6 +156,71 @@ func (s *Store) Save() error {
 		return err
 	}
 	return nil
+}
+
+const (
+	// lockWait bounds how long Update waits for another process's lock; a
+	// writer that cannot get in within it skips THIS observation (logged by
+	// the caller) rather than blocking a run — the next run records again.
+	lockWait = 2 * time.Second
+	lockPoll = 20 * time.Millisecond
+	// lockStale: a lock file older than this belongs to a process that died
+	// between create and remove; it is taken over.
+	lockStale = 30 * time.Second
+)
+
+// ErrLocked is returned by Update when another writer held the store for the
+// whole lockWait window.
+var ErrLocked = errors.New("seatrate: store locked by another writer")
+
+// Update applies fn to the store at path under an exclusive lock — load, fn,
+// save as ONE step. tmp+rename alone protects a reader from a half-written
+// file but not a writer from another writer: two processes (an MCP server
+// and the CLI share one state root; two delegated subtasks land on one box)
+// that both load, observe and save around the same moment each start from
+// the same snapshot and the last save silently drops the other's sample
+// (reviewer finding, 2026-09-10). The lock is an O_EXCL file beside the
+// store, the same shape the GPU lease uses for the same reason.
+func Update(path string, fn func(*Store)) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("seatrate: store has no path")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	lock := path + ".lock"
+	deadline := time.Now().Add(lockWait)
+	for {
+		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			f.Close()
+			break
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		if st, serr := os.Stat(lock); serr == nil && time.Since(st.ModTime()) > lockStale {
+			os.Remove(lock) // a dead writer's lock; the next attempt takes it
+			continue
+		}
+		if time.Now().After(deadline) {
+			return ErrLocked
+		}
+		time.Sleep(lockPoll)
+	}
+	defer os.Remove(lock)
+	s, lerr := Load(path)
+	if lerr != nil {
+		// A corrupt store is replaced by what this run knows — the error is
+		// returned beside the save so the caller can log the replacement.
+		fn(s)
+		if serr := s.Save(); serr != nil {
+			return serr
+		}
+		return lerr
+	}
+	fn(s)
+	return s.Save()
 }
 
 // Call is the per-completion fact the rate is measured from.
@@ -195,7 +260,11 @@ type Input struct {
 	StepBudget   int // planner tokens per tool step
 	FinalBudget  int // the final answer's budget
 	ThinkingAuto bool
-	TimeoutSec   int
+	// ThinkingOn: the seat thinks on EVERY step (agent_thinking / contract
+	// thinking "on"). The estimate charges one think block like auto and says
+	// it is a FLOOR: how much each tool step thinks is not measured yet.
+	ThinkingOn bool
+	TimeoutSec int
 }
 
 // Estimate is the published sizing.
@@ -239,7 +308,7 @@ func Compute(in Input) Estimate {
 	cold := in.ColdLoadSec
 	finalSec := float64(final) / in.TokS
 	var thinkSec float64
-	if in.ThinkingAuto {
+	if in.ThinkingAuto || in.ThinkingOn {
 		thinkSec = float64(stepBudget) / in.TokS
 	}
 	toolSteps := steps - 1
@@ -263,11 +332,14 @@ func Compute(in Input) Estimate {
 		fmt.Fprintf(&b, "estimate %d s for %s: ", est.TotalSec, seat)
 	}
 	fmt.Fprintf(&b, "cold load %.0f s", cold)
-	if in.ThinkingAuto {
+	if in.ThinkingAuto || in.ThinkingOn {
 		fmt.Fprintf(&b, " + one think block %d tok (%.0f s)", stepBudget, thinkSec)
 	}
 	fmt.Fprintf(&b, " + %d tool steps × (%d tok + %d s prefill) (%.0f s) + final %d tok (%.0f s) at %.1f tok/s (%s, %d samples); min_turn %d s",
 		toolSteps, toolStepTokens, stepOverheadSec, stepsSec, final, finalSec, in.TokS, src, in.RateSamples, est.MinTurnSec)
+	if in.ThinkingOn {
+		b.WriteString(" — thinking on: every tool step may think as well, so this is a floor")
+	}
 	est.Note = b.String()
 	return est
 }

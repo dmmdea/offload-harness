@@ -356,9 +356,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	if tokS, n := seatrate.Rate(rateCalls(res.Calls)); n > 0 {
 		wire.SeatTokS = tokS
 	}
-	if rates.Observe(seat, wire.SeatTokS, coldLoad.Seconds(), time.Now()) {
-		if serr := rates.Save(); serr != nil {
-			log.Printf("agent task: seat-rates store not written: %v", serr)
+	if p.seatRatesPath != "" && (wire.SeatTokS > 0 || coldLoad > 0) {
+		// Load-observe-save under the store's lock (seatrate.Update): the
+		// pre-loop read above was a snapshot for the estimate; another process
+		// may have written since.
+		if uerr := seatrate.Update(p.seatRatesPath, func(s *seatrate.Store) {
+			s.Observe(seat, wire.SeatTokS, coldLoad.Seconds(), time.Now())
+		}); uerr != nil {
+			log.Printf("agent task: seat-rates store not updated: %v", uerr)
 		}
 	}
 	wire.StopNote = res.StopNote
@@ -1263,9 +1268,11 @@ func (p *Pipeline) seatRates() *seatrate.Store {
 	root, err := gpulease.ResolveStateRoot(p.cfg.StateDir)
 	if err != nil {
 		log.Printf("agent task: seat-rates store unavailable: %v", err)
+		p.seatRatesPath = ""
 		return &seatrate.Store{}
 	}
-	s, lerr := seatrate.Load(seatrate.Path(root))
+	p.seatRatesPath = seatrate.Path(root)
+	s, lerr := seatrate.Load(p.seatRatesPath)
 	if lerr != nil {
 		log.Printf("agent task: %v", lerr)
 	}
@@ -1286,10 +1293,18 @@ func wallEstimateFor(cfg config.Config, contract core.AgentContract, seat string
 	if in.StepBudget <= 0 {
 		in.StepBudget = 1024
 	}
+	// The loop opens the final-budget turn only on the LAST of ≥ 2 steps
+	// (loop.go: maxSteps >= 2 && step == maxSteps-1); a one-step contract's
+	// single completion runs at the plain step budget.
 	in.FinalBudget = agent.FinalBudgetFor(in.StepBudget)
+	if in.MaxSteps == 1 {
+		in.FinalBudget = in.StepBudget
+	}
 	switch strings.ToLower(thinkingFor(cfg, contract)) {
 	case "", "auto":
 		in.ThinkingAuto = true
+	case "on":
+		in.ThinkingOn = true
 	}
 	in.ColdLoadSec = known.ColdLoadSec
 	if coldLoadSec > in.ColdLoadSec {

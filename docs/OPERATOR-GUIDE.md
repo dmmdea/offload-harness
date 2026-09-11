@@ -589,7 +589,8 @@ budget — the least a retry is worth, D-46) and `wall_note` (the arithmetic, or
 run's own measured rate (completion tokens per second of call wall over the completions that generated ≥ 128 tokens;
 tool-call completions of 25–60 tokens are prefill-dominated and excluded), `calls[].ms` the wall of each completion. The
 rate and the cold load are remembered per seat in `<state root>/seat-rates.json` (the GPU-lease root: machine-local by
-design; EMA 0.3 on the rate, the slowest of the last five loads); until a seat has a sample, `agent_seat_tok_s` in the
+design; EMA 0.3 on the rate, the slowest of the last five loads, written under an exclusive lock file so two
+processes on one box never drop each other's sample); until a seat has a sample, `agent_seat_tok_s` in the
 box config stands in, and with neither the note says so and no numbers are published. **The estimate never changes the
 wall** — a contract runs under its `timeout_sec` exactly as before; `wall X s is BELOW the estimate` in `wall_note` (and
 the node log) is the caller's signal to size the contract, and the retry floor on the delegator becomes
