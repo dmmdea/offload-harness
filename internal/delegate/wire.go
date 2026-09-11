@@ -133,6 +133,18 @@ type ResultWire struct {
 	HarnessBuildSHA256 string `json:"harness_build_sha256,omitempty"`
 	SeatConfigSHA256   string `json:"seat_config_sha256,omitempty"`
 	SeatConfigBasis    string `json:"seat_config_basis,omitempty"`
+	// Steps / StopReason / StopNote / OutputTruncated (0.115.20): the node's
+	// loop accounting, passed through from core.AgentWireResult. Without them
+	// a `done` that the forced final step extracted at the step cap (D-89,
+	// stop_note "forced final answer: …") and a `length`-cut partial were
+	// indistinguishable from a voluntary, complete answer unless the caller
+	// opened the delegation log — the D-89 acceptance run read as "all four
+	// legs answered" with no trace of WHICH ones the cap forced. omitempty:
+	// a pre-0.115.20 node's result publishes as before.
+	Steps           int    `json:"steps,omitempty"`
+	StopReason      string `json:"stop_reason,omitempty"`
+	StopNote        string `json:"stop_note,omitempty"`
+	OutputTruncated bool   `json:"output_truncated,omitempty"`
 }
 
 // ResponseWire is the full response: summary first, then per-subtask results
@@ -206,6 +218,10 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			HarnessBuildSHA256: pr.Result.HarnessBuildSHA256,
 			SeatConfigSHA256:   pr.Result.SeatConfigSHA256,
 			SeatConfigBasis:    pr.Result.SeatConfigBasis,
+			Steps:              pr.Result.Steps,
+			StopReason:         pr.Result.StopReason,
+			StopNote:           pr.Result.StopNote,
+			OutputTruncated:    pr.Result.OutputTruncated,
 		}
 		if pr.Err != "" {
 			rw.Failed = true

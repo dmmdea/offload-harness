@@ -1849,3 +1849,42 @@ func TestPollFailLogCountsEveryShapePastTheCap(t *testing.T) {
 		t.Errorf("summary line = %q, want the %d occurrences behind the omitted shapes counted", out, residual)
 	}
 }
+
+// TestWireResponseCarriesLoopAccounting (D-89 follow-up, 0.115.20): the forced
+// final step publishes its evidence as stop_note on a `done` result — and the
+// delegate wire dropped steps / stop_reason / stop_note / output_truncated, so
+// the CLI and MCP caller saw a forced answer and a voluntary one as the same
+// bytes. The accounting must ride results[] exactly as the node reported it.
+func TestWireResponseCarriesLoopAccounting(t *testing.T) {
+	forced := PlacedResult{Node: "Qube", Seat: "agent-pool", JobID: "agd-forced", PlacementReason: "route=local forced",
+		Result: core.AgentWireResult{SchemaVersion: 1, NodeID: "Qube", Seat: "agent-pool", Output: "the answer",
+			Steps: 12, StopReason: "done", StopNote: "forced final answer: the 12-step budget was reached (D-89)", OutputTruncated: true}}
+	voluntary := PlacedResult{Node: "Qube", Seat: "agent-pool", JobID: "agd-vol", PlacementReason: "route=local forced",
+		Result: core.AgentWireResult{SchemaVersion: 1, NodeID: "Qube", Seat: "agent-pool", Output: "the answer", Steps: 3, StopReason: "done"}}
+	blob, err := json.Marshal(WireResponse([]PlacedResult{forced, voluntary}, Summary{Succeeded: 2}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published struct {
+		Results []map[string]any `json:"results"`
+	}
+	if err := json.Unmarshal(blob, &published); err != nil {
+		t.Fatal(err)
+	}
+	f, v := published.Results[0], published.Results[1]
+	if f["steps"] != float64(12) || f["stop_reason"] != "done" || f["output_truncated"] != true {
+		t.Errorf("forced result published steps=%v stop_reason=%v output_truncated=%v, want 12/done/true", f["steps"], f["stop_reason"], f["output_truncated"])
+	}
+	if note, _ := f["stop_note"].(string); !strings.Contains(note, "forced final answer") {
+		t.Errorf("stop_note = %q, want the forced-final evidence carried to the caller", note)
+	}
+	if v["steps"] != float64(3) || v["stop_reason"] != "done" {
+		t.Errorf("voluntary result published steps=%v stop_reason=%v, want 3/done", v["steps"], v["stop_reason"])
+	}
+	if _, has := v["stop_note"]; has {
+		t.Errorf("voluntary result published stop_note=%v, want it omitted — an empty note must not read as a value", v["stop_note"])
+	}
+	if _, has := v["output_truncated"]; has {
+		t.Errorf("voluntary result published output_truncated, want it omitted when false")
+	}
+}

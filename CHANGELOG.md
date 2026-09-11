@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.20] - 2026-09-10 - the delegate result carries the loop accounting
+
+Follow-up to D-89, found scoring its live acceptance (`runs/ff-0.115.19/`): the forced final step publishes its
+evidence as `stop_note` on a `done` result, but the delegate wire (`delegate.ResultWire`, what the CLI prints and
+the `agent_delegate` MCP tool returns) never carried `steps`, `stop_reason`, `stop_note` or `output_truncated` —
+a forced answer at the 12-step cap, a `length`-cut partial and a voluntary complete answer published as the same
+bytes, and the only way to tell them apart was the delegation log.
+
+### Added
+- `results[].steps`, `results[].stop_reason`, `results[].stop_note`, `results[].output_truncated` on the delegate
+  response (CLI `delegate` and MCP `agent_delegate`), passed through from the node's `AgentWireResult`; all
+  omitempty, so a pre-0.115.20 node's result publishes as before. `TestWireResponseCarriesLoopAccounting`.
+- OPERATOR-GUIDE: how to read `stop_note` / `output_truncated` before trusting a `done`.
+
 ## [0.115.19] - 2026-09-10 - the last step asks for the answer
 
 Register D-89, found by the D-43 measurement on 0.115.18: the Qube 27B (thinking off) spent all 12 steps of
