@@ -613,7 +613,10 @@ Throttle refusals are fed back as ordinary tool results with explicit instructio
 
 Confinement is **asymmetric by platform, and the weaker side is disclosed**. Linux uses user,
 network, and PID namespaces plus seccomp and Landlock, failing closed if the Landlock ABI floor is
-not met rather than running uncaged. Native Windows uses a Job Object plus a low-integrity token:
+not met rather than running uncaged. The floor is ABI 4 (Linux 6.7, `sandbox.NetABIFloor`, 0.115.22):
+the V4 rule set denies every TCP bind and connect only from that ABI on, and below it best-effort
+mode keeps the path rules and silently drops the network ones — so a lower floor ran the cage with
+half of a shipped guarantee missing (register H-27; the fleet's Linux node runs 7.0). Native Windows uses a Job Object plus a low-integrity token:
 writes outside the worktree are blocked by MIC, but **network egress is not severed and reads outside
 the worktree are not blocked**. The source calls this "HONEST RESIDUAL RISK (documented, not hidden)"
 and the tool description the model sees says the same.

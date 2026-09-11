@@ -195,7 +195,7 @@ type AgentWireResult struct {
 	SeatTokensIn int `json:"seat_tokens_in,omitempty"`
 	// Wall sizing (0.115.21, register D-03). SeatTokS is this run's effective
 	// decode rate (completion tokens per second of call wall over completions
-	// of ≥ 128 tokens; 0 = no qualifying completion). WallEstimateSec is the
+	// of ≥ 1,024 tokens; 0 = no qualifying completion). WallEstimateSec is the
 	// wall the contract was estimated to need on this seat BEFORE the loop ran
 	// (cold load + think block + tool steps + final answer at the seat's
 	// remembered rate); MinTurnSec is a cold load plus one turn at the final

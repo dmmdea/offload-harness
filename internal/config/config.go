@@ -281,7 +281,7 @@ type Config struct {
 	// in tokens per second, used for the wall estimate (`wall_estimate_sec` /
 	// `min_turn_sec` / `wall_note` on every agent result) ONLY until the seat
 	// has recorded a measured rate of its own in <state root>/seat-rates.json
-	// (the first run whose completion generates ≥ 128 tokens records one; the
+	// (the first run whose completion generates ≥ 1,024 tokens records one; the
 	// store then wins). 0 = no estimate until measured. Reference numbers:
 	// the Qube 27B TP2 seat ≈ 30, the Lenovo 4B ≈ 30–35.
 	AgentSeatTokS float64 `json:"agent_seat_tok_s,omitempty"`

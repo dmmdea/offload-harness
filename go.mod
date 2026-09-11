@@ -1,15 +1,15 @@
 module github.com/dmmdea/offload-harness
 
-go 1.26.5
+go 1.26.7
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/elastic/go-seccomp-bpf v1.6.0
 	github.com/landlock-lsm/go-landlock v0.10.0
-	github.com/modelcontextprotocol/go-sdk v1.6.1
+	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	go.etcd.io/bbolt v1.5.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.48.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -34,6 +34,8 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/time v0.15.0 // indirect
 	modernc.org/libc v1.74.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
