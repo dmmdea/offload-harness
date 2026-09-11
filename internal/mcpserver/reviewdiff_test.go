@@ -17,6 +17,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
 
 // reviewDiff is a small unified diff over one file, used by every case below.
@@ -110,6 +111,35 @@ func TestReviewDiffShipsTaskAndDiffAndNothingElse(t *testing.T) {
 	}
 	if len(got.Acceptance) != 0 {
 		t.Errorf("no acceptance check: an empty findings list is a correct outcome here, so any check would punish a clean diff or pass anything; got %v", got.Acceptance)
+	}
+}
+
+// TestReviewDiffWallComesFromTheBoxTimeout (0.115.21, register D-03/D-09):
+// the review contract's wall is the box's agent_timeout_sec when that is
+// larger than the wire default — a 51 KB diff on the 30 tok/s 27B timed out
+// at the 300 s default after 9 steps (2026-09-10). The wire ceiling still
+// caps it, and a box that seeds nothing keeps the default.
+func TestReviewDiffWallComesFromTheBoxTimeout(t *testing.T) {
+	for _, tc := range []struct{ box, want int }{{600, 600}, {0, core.AgentTimeoutSecDefault}, {5000, core.AgentTimeoutSecCap}, {120, core.AgentTimeoutSecDefault}} {
+		var got core.AgentContract
+		home := t.TempDir()
+		cfg := config.Default()
+		cfg.Home = home
+		cfg.LedgerPath = filepath.Join(home, "ledger.jsonl")
+		cfg.AgentTimeoutSec = tc.box
+		s := New(pipeline.New(cfg, nil, nil, nil))
+		s.localAgent = func(_ context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+			got = c
+			return seatFindings(), nil
+		}
+		if _, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
+			"diff": reviewDiff, "task": "iterate over every element exactly once",
+		}))); err != nil {
+			t.Fatalf("handleReviewDiff: %v", err)
+		}
+		if got.TimeoutSec != tc.want {
+			t.Errorf("agent_timeout_sec %d: review wall = %d s, want %d", tc.box, got.TimeoutSec, tc.want)
+		}
 	}
 }
 

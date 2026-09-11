@@ -176,7 +176,16 @@ type CallRecord struct {
 	// ForcedFinal marks the forced final step (D-89): no tools offered, the
 	// answer asked for, the final budget.
 	ForcedFinal bool `json:"forced_final,omitempty"`
+	// Ms (0.115.21, register D-03) is the client-measured wall of this
+	// completion — request sent to reply decoded, the compaction retry of the
+	// same step included. Backend-independent (vLLM reports no timings); the
+	// seat's effective decode rate is derived from it (seatrate.Rate).
+	Ms int64 `json:"ms,omitempty"`
 }
+
+// FinalBudgetFor is the final answer's completion budget for a tool-step
+// budget (finalMaxTokens), exported for the wall estimate (register D-03).
+func FinalBudgetFor(stepBudget int) int { return finalMaxTokens(stepBudget) }
 
 func recordOf(step, maxTokens int, c Completion) CallRecord {
 	r := CallRecord{

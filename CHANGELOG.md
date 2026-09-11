@@ -6,6 +6,31 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.115.21] - 2026-09-10 - walls sized from the seat's own rate
+
+Register D-03: walls sized for a fast seat were spent on a 30 tok/s thinker, and nothing in the harness could say
+what a contract NEEDED on a given seat. Now every agent run measures the seat (the client wall of each planner
+completion, the cold load the warm-up waited for), remembers it per seat, and publishes an estimate beside the
+result — without touching the wall itself.
+
+### Added
+- `calls[].ms` (client-measured wall per planner completion) and `seat_tok_s` on the agent result (effective decode
+  rate over the ≥ 128-token completions; also the ledger row's `tok_per_s`, empty on agent rows until now).
+- `internal/seatrate`: `<state root>/seat-rates.json` (per seat: rate EMA 0.3, the slowest of the last five cold
+  loads, samples; load-observe-save under an exclusive lock file with stale-lock takeover, atomic writes; a
+  missing or corrupt file is no memory, never an error) and the estimate
+  `cold load + (auto ? one think block : 0) + (steps − 1) × (128 tok + 6 s prefill) + final budget` at the seat's rate.
+- `wall_estimate_sec`, `min_turn_sec` (cold load + one turn at the final budget, D-46) and `wall_note` on the agent
+  result, the delegation log and the delegate response; `wall … is BELOW the estimate` logged by the node.
+- Config `agent_seat_tok_s`: the rate to estimate with until the seat has recorded its own.
+- Delegator retry floor = `max(agent_retry_min_sec, first attempt's min_turn_sec)`; the retry note names the source.
+- `offload_review_diff` runs under the box's `agent_timeout_sec` when that is larger than the 300 s wire default
+  (capped at the wire ceiling) — the wall half of register D-09: a 51 KB diff on the 27B spent 9 steps and timed
+  out at exactly 300 s on 2026-09-10 while a 13 KB one finished in 3. `TestReviewDiffWallComesFromTheBoxTimeout`.
+- OPERATOR-GUIDE "The timeout chain": the six clocks a contract crosses (contract → delegator poll + C-27 credit →
+  admission/warm-up → node wall → loop budgets → engine timeouts and the GPU lease vs the media timeouts of C-33),
+  the sizing rule and the measured reference numbers for both fleet seats.
+
 ## [0.115.20] - 2026-09-10 - the delegate result carries the loop accounting
 
 Follow-up to D-89, found scoring its live acceptance (`runs/ff-0.115.19/`): the forced final step publishes its

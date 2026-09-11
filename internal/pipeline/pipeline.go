@@ -67,6 +67,9 @@ type tierOverrides struct {
 }
 
 type Pipeline struct {
+	// seatRatesPath is the per-seat rate store under the state root, resolved
+	// by seatRates() on each agent run (empty = no usable root).
+	seatRatesPath string
 	cfg        config.Config
 	client     *llamaclient.Client
 	stt        *sttclient.Client  // whisper-server transcribe client (audio never hits the text cascade)

@@ -193,6 +193,19 @@ type AgentWireResult struct {
 	// the ledger keeps it apart from tokens_in, which the summary counts as tokens
 	// saved. Additive, omitempty (0.115.5); carried on DEFERRED results too.
 	SeatTokensIn int `json:"seat_tokens_in,omitempty"`
+	// Wall sizing (0.115.21, register D-03). SeatTokS is this run's effective
+	// decode rate (completion tokens per second of call wall over completions
+	// of ≥ 128 tokens; 0 = no qualifying completion). WallEstimateSec is the
+	// wall the contract was estimated to need on this seat BEFORE the loop ran
+	// (cold load + think block + tool steps + final answer at the seat's
+	// remembered rate); MinTurnSec is a cold load plus one turn at the final
+	// budget — the least wall a retry is worth (D-46); WallNote names the
+	// arithmetic, or why there is none. Published, never imposed: the run
+	// proceeds under the contract's timeout_sec exactly as before.
+	SeatTokS        float64 `json:"seat_tok_s,omitempty"`
+	WallEstimateSec int     `json:"wall_estimate_sec,omitempty"`
+	MinTurnSec      int     `json:"min_turn_sec,omitempty"`
+	WallNote        string  `json:"wall_note,omitempty"`
 	// ContentionWaitSec is the wall this contract spent waiting on a peer-held
 	// seat (seatwait: llama-swap 429 / 503 not-ready / 500 src=llama-swap).
 	// Counted, never silent: the number that says whether the fix traded
@@ -288,6 +301,9 @@ type AgentCallRecord struct {
 	ToolCalls        int    `json:"tool_calls,omitempty"`
 	ThinkingOff      bool   `json:"thinking_off,omitempty"`
 	ReasoningKey     string `json:"reasoning_key,omitempty"`
+	ForcedFinal      bool   `json:"forced_final,omitempty"`
+	// Ms (0.115.21): the client-measured wall of the completion.
+	Ms int64 `json:"ms,omitempty"`
 }
 
 // ValidateThinking accepts the closed vocabulary of the planner think-block
