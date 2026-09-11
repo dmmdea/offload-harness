@@ -145,6 +145,13 @@ type ResultWire struct {
 	StopReason      string `json:"stop_reason,omitempty"`
 	StopNote        string `json:"stop_note,omitempty"`
 	OutputTruncated bool   `json:"output_truncated,omitempty"`
+	// Wall sizing (0.115.21, register D-03), passed through from the node: the
+	// run's measured decode rate, the wall the node estimated the contract
+	// needed on that seat, the retry floor it implies, and the arithmetic.
+	SeatTokS        float64 `json:"seat_tok_s,omitempty"`
+	WallEstimateSec int     `json:"wall_estimate_sec,omitempty"`
+	MinTurnSec      int     `json:"min_turn_sec,omitempty"`
+	WallNote        string  `json:"wall_note,omitempty"`
 }
 
 // ResponseWire is the full response: summary first, then per-subtask results
@@ -222,6 +229,10 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			StopReason:         pr.Result.StopReason,
 			StopNote:           pr.Result.StopNote,
 			OutputTruncated:    pr.Result.OutputTruncated,
+			SeatTokS:           pr.Result.SeatTokS,
+			WallEstimateSec:    pr.Result.WallEstimateSec,
+			MinTurnSec:         pr.Result.MinTurnSec,
+			WallNote:           pr.Result.WallNote,
 		}
 		if pr.Err != "" {
 			rw.Failed = true

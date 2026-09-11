@@ -953,6 +953,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				stepCtx = ContextWithoutThinking(ctx)
 			}
 		}
+		callStart := time.Now()
 		comp, err := l.client.Chat(stepCtx, msgs, specs, stepMax)
 		if err != nil {
 			// Reactive retry (belt-and-suspenders): the token estimate is
@@ -1011,6 +1012,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		noteUsage(comp)
 		callRec := recordOf(step+1, stepMax, comp)
 		callRec.ForcedFinal = finalStep
+		callRec.Ms = time.Since(callStart).Milliseconds()
 		calls = append(calls, callRec)
 		lastWasReissue = thisIsReissue
 		// Learn from the response: estimateTokens(msgs) is what we thought the

@@ -811,10 +811,10 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// floor is seat-aware through config (agent_retry_min_sec, D-46): a cold
 	// load plus one turn at max_tokens on the retry seat, never the bare 10 s
 	// that let a 296 s retry burn a thinking seat for nothing.
-	floor := r.retryFloorSec()
+	floor, floorSrc := r.retryFloorFor(first)
 	remaining := pl.remaining(start, budget)
 	if remaining < floor {
-		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after the first attempt (floor %ds%s)", remaining, budget, floor, retryFloorSource(floor))
+		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after the first attempt (floor %ds%s)", remaining, budget, floor, floorSrc)
 		return first
 	}
 	// alternativeNode BLOCKS — it probes the fleet. Bound that probe by what
@@ -840,7 +840,7 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// contract is what would hand a seat time the subtask no longer has.
 	remaining = pl.remaining(start, budget)
 	if remaining < floor {
-		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after choosing a retry node (floor %ds%s)", remaining, budget, floor, retryFloorSource(floor))
+		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after choosing a retry node (floor %ds%s)", remaining, budget, floor, floorSrc)
 		return first
 	}
 	retryContract := contract
@@ -856,6 +856,19 @@ func (r *runner) retryFloorSec() int {
 		return r.cfg.AgentRetryMinSec
 	}
 	return minRetrySec
+}
+
+// retryFloorFor (0.115.21, register D-03) is the seat's OWN floor when the
+// first attempt published one — min_turn_sec: its cold load plus one turn at
+// the final budget at its measured rate — and the configured floor otherwise.
+// The larger wins: a box constant sized for the reference seat can sit under
+// what a slower seat just measured for itself.
+func (r *runner) retryFloorFor(first PlacedResult) (int, string) {
+	floor := r.retryFloorSec()
+	if m := first.Result.MinTurnSec; m > floor {
+		return m, fmt.Sprintf(", min_turn_sec of the seat on %s", nodeLabel(first))
+	}
+	return floor, retryFloorSource(floor)
 }
 
 // retryFloorSource names, for the retry note, where a raised floor came from.

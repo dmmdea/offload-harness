@@ -41,7 +41,9 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/gbnf"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
+	"github.com/dmmdea/offload-harness/internal/seatrate"
 	"github.com/dmmdea/offload-harness/internal/seatwait"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
@@ -123,6 +125,9 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			w.AdmissionWaitSec = admitted.Seconds()
 		}
 		w.AdmissionNote = admitNote
+		if w.SeatTokS > 0 {
+			meta.TokPerSec = w.SeatTokS // the ledger's tok_per_s column, empty on agent rows until 0.115.21
+		}
 		meta.LatencyMs = w.WallMs
 		meta.TokensOut = w.TokensOut
 		meta.SeatTokensIn = w.SeatTokensIn
@@ -183,8 +188,10 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// 2026-09-10 under ttl 300), so a 300 s contract could spend most of its
 	// wall before the first token. Warm it here, on the admission budget's
 	// remainder, and start the clock when the seat reads ready.
+	var coldLoad time.Duration // this run's observed cold load, if the warm-up waited for one (seat-rates.json)
 	if warmed, warmNote := warmSeat(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted); warmed > 0 || warmNote != "" {
 		admitted += warmed
+		coldLoad = warmed
 		if warmNote != "" {
 			log.Printf("agent task: seat warm-up (%s): %s", seat, warmNote)
 			if admitNote == "" {
@@ -312,6 +319,18 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// times out is exactly when knowing its profile matters most.
 	meta.AgentProfile = profileName
 
+	// Wall sizing (0.115.21, register D-03): estimate what this contract needs
+	// on THIS seat from the seat's remembered rate and cold load, publish it
+	// beside the run (wall_estimate_sec / min_turn_sec / wall_note) and log
+	// when the contract's wall is under it. Never changes the wall: sizing is
+	// data for the caller and the operator, not a silent override.
+	rates := p.seatRates()
+	est := wallEstimateFor(p.cfg, contract, seat, rates.Get(seat), coldLoad.Seconds(), timeoutSec)
+	wire.WallEstimateSec, wire.MinTurnSec, wire.WallNote = est.TotalSec, est.MinTurnSec, est.Note
+	if est.Below {
+		log.Printf("agent task: wall sizing (%s): %s", seat, est.Note)
+	}
+
 	res, rerr := built.Loop.Run(cctx, contract.Goal)
 	wire.Steps = res.Steps
 	wire.StopReason = res.StopReason
@@ -330,6 +349,18 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// (0.115.8) — same rule: set before every branch, so a deferred run's
 	// arithmetic reaches the corpus.
 	wire.Calls = CallsFromLoop(res.Calls)
+	// The seat's measured numbers from THIS run feed the next estimate: the
+	// effective decode rate over the ≥ 128-token completions and the cold
+	// load the warm-up waited for. Recorded on every branch — a timed-out run
+	// measured the seat just as well.
+	if tokS, n := seatrate.Rate(rateCalls(res.Calls)); n > 0 {
+		wire.SeatTokS = tokS
+	}
+	if rates.Observe(seat, wire.SeatTokS, coldLoad.Seconds(), time.Now()) {
+		if serr := rates.Save(); serr != nil {
+			log.Printf("agent task: seat-rates store not written: %v", serr)
+		}
+	}
 	wire.StopNote = res.StopNote
 	wire.OutputTruncated = res.OutputTruncated
 	wire.ResponseShape = agent.ResponseShape(res.Calls)
@@ -1209,9 +1240,68 @@ func CallsFromLoop(calls []agent.CallRecord) []core.AgentCallRecord {
 			CompletionTokens: c.CompletionTokens, ReasoningTokens: c.ReasoningTokens,
 			ContentChars: c.ContentChars, ReasoningChars: c.ReasoningChars,
 			ToolCalls: c.ToolCalls, ThinkingOff: c.ThinkingOff, ReasoningKey: c.ReasoningKey,
+			ForcedFinal: c.ForcedFinal, Ms: c.Ms,
 		})
 	}
 	return out
+}
+
+// rateCalls projects the loop's call records onto what seatrate.Rate reads.
+func rateCalls(calls []agent.CallRecord) []seatrate.Call {
+	out := make([]seatrate.Call, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, seatrate.Call{CompletionTokens: c.CompletionTokens, Ms: c.Ms})
+	}
+	return out
+}
+
+// seatRates opens the per-seat rate store under the machine-wide state root
+// (the GPU-lease root: machine-local by design — a seat's rate is a fact about
+// this box's cards). Unresolvable root or a corrupt file = an empty store that
+// cannot save, logged once here, never a failed run.
+func (p *Pipeline) seatRates() *seatrate.Store {
+	root, err := gpulease.ResolveStateRoot(p.cfg.StateDir)
+	if err != nil {
+		log.Printf("agent task: seat-rates store unavailable: %v", err)
+		return &seatrate.Store{}
+	}
+	s, lerr := seatrate.Load(seatrate.Path(root))
+	if lerr != nil {
+		log.Printf("agent task: %v", lerr)
+	}
+	return s
+}
+
+// wallEstimateFor sizes one contract on one seat (register D-03): the seat's
+// remembered rate (else the box's agent_seat_tok_s), the slower of the
+// remembered and the just-observed cold load, the loop's step and final
+// budgets, and whether the run thinks (one starved think block is what `auto`
+// cost on both fleet seats, 2026-09-10).
+func wallEstimateFor(cfg config.Config, contract core.AgentContract, seat string, known seatrate.Seat, coldLoadSec float64, timeoutSec int) seatrate.Estimate {
+	in := seatrate.Input{Seat: seat, MaxSteps: contract.MaxSteps, TimeoutSec: timeoutSec}
+	if in.MaxSteps <= 0 {
+		in.MaxSteps = core.AgentMaxStepsDefault
+	}
+	in.StepBudget = cfg.AgentMaxTokens
+	if in.StepBudget <= 0 {
+		in.StepBudget = 1024
+	}
+	in.FinalBudget = agent.FinalBudgetFor(in.StepBudget)
+	switch strings.ToLower(thinkingFor(cfg, contract)) {
+	case "", "auto":
+		in.ThinkingAuto = true
+	}
+	in.ColdLoadSec = known.ColdLoadSec
+	if coldLoadSec > in.ColdLoadSec {
+		in.ColdLoadSec = coldLoadSec
+	}
+	switch {
+	case known.TokS > 0:
+		in.TokS, in.RateSamples, in.RateSource = known.TokS, known.Samples, "store"
+	case cfg.AgentSeatTokS > 0:
+		in.TokS, in.RateSource = cfg.AgentSeatTokS, "config agent_seat_tok_s"
+	}
+	return seatrate.Compute(in)
 }
 
 // TraceFromEffects projects the loop's effect ledger onto the wire trace

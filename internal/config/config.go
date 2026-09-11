@@ -277,6 +277,14 @@ type Config struct {
 	// 318 rows, 0/9 that day. The re-placement floor after a REFUSED dispatch
 	// (no seat time spent) stays at 10 s and is not this knob.
 	AgentRetryMinSec int `json:"agent_retry_min_sec,omitempty"`
+	// AgentSeatTokS (0.115.21, register D-03) is the planner seat's decode rate
+	// in tokens per second, used for the wall estimate (`wall_estimate_sec` /
+	// `min_turn_sec` / `wall_note` on every agent result) ONLY until the seat
+	// has recorded a measured rate of its own in <state root>/seat-rates.json
+	// (the first run whose completion generates ≥ 128 tokens records one; the
+	// store then wins). 0 = no estimate until measured. Reference numbers:
+	// the Qube 27B TP2 seat ≈ 30, the Lenovo 4B ≈ 30–35.
+	AgentSeatTokS float64 `json:"agent_seat_tok_s,omitempty"`
 	// AgentPlacementWaitSec (0.113.18) is how long a delegation subtask WAITS
 	// FOR CAPACITY when every node that could run it is full right now — each
 	// eligible remote refused at dispatch (queue full, leased, draining) and the

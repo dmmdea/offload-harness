@@ -568,6 +568,36 @@ gates** — the other two report:
 
 Details and rationale: [systems/coding-agent.md](systems/coding-agent.md).
 
+### The timeout chain, and walls sized from the seat's own rate (0.115.21, register D-03)
+
+One contract crosses six clocks. None of them is derived from another; this is where each one is set and what it
+does NOT contain:
+
+| clock | set by | contains | does not contain |
+|---|---|---|---|
+| `timeout_sec` (contract; default 300, box `agent_timeout_sec`) | the caller | the node's whole run: probe, build, loop, structured re-pack | placement wait, admission, cold load, queue time |
+| delegator poll | `timeout_sec` + a grace window; C-27 credits back intervals the node PROVABLY spent queued (both endpoints observed `accepted`), bounded at `min(timeout_sec + grace, 5 min)`; a job that never started is a `queue deadline` FAILURE, never a `budget` defer | waiting for the node's answer | the capacity wait (`agent_placement_wait_sec`, `results[].capacity_wait_sec`) |
+| admission + warm-up (`agent_admission_wait_sec`, default 300) | the node, BEFORE its wall starts (D-64) | another model's swap on the endpoint, then the seat's own cold load (`admission_wait_sec`, `admission_note`) | anything after the first token |
+| node wall | `timeout_sec` as a context deadline over the loop | every planner call, tool execution, the re-pack | — |
+| loop budgets | `agent_max_tokens` per step (default 1,024; 4,096 on a thinking seat), the final answer at 4× (cap 8,192), 12 steps (`max_steps`, cap 12 remote), the forced final step (D-89) | one completion each | the wall — a step that generates for minutes is cut by the wall, not by its token budget |
+| engine + lease | the client's request timeout (split into connect / first token / stream, `llamaclient`), the GPU lease TTL (3,600 s default) against the media timeouts (`imagegen_timeout_sec` 600, `videogen_timeout_sec` 5,400, `gpu_wait_ms` 600,000 — C-33: a 5,400 s video run outlives the default lease; size the lease `--for` window to the job) | one request / one lease | — |
+
+**Sizing rule.** A wall is worth `cold load + (thinking auto ? one think block at the step budget : 0) + (steps − 1) ×
+(128 tokens + 6 s prefill) + final budget`, all at the seat's decode rate. The node computes exactly that before every
+run and publishes it beside the result: `results[].wall_estimate_sec`, `min_turn_sec` (cold load + one turn at the final
+budget — the least a retry is worth, D-46) and `wall_note` (the arithmetic, or why there is none). `seat_tok_s` is the
+run's own measured rate (completion tokens per second of call wall over the completions that generated ≥ 128 tokens;
+tool-call completions of 25–60 tokens are prefill-dominated and excluded), `calls[].ms` the wall of each completion. The
+rate and the cold load are remembered per seat in `<state root>/seat-rates.json` (the GPU-lease root: machine-local by
+design; EMA 0.3 on the rate, the slowest of the last five loads); until a seat has a sample, `agent_seat_tok_s` in the
+box config stands in, and with neither the note says so and no numbers are published. **The estimate never changes the
+wall** — a contract runs under its `timeout_sec` exactly as before; `wall X s is BELOW the estimate` in `wall_note` (and
+the node log) is the caller's signal to size the contract, and the retry floor on the delegator becomes
+`max(agent_retry_min_sec, min_turn_sec)` (the retry note names which). Reference (2026-09-10, ledger-01 on both
+seats): the Qube 27B TP2 seat at ~30 tok/s needs ≈ 600 s thinking off / ≈ 730 s auto INCLUDING a 210 s cold load for a
+12-step, 8,192-token-final contract — a 600 s box default is at the edge and 900 s is the honest wall; the Lenovo 4B at
+~30 tok/s answers the same contract in one step in 250–380 s with a 34 s cold load.
+
 ### Context-budget guidance (why prompt shape matters)
 
 The planner models here have a **~32K context window** and the loop **resends the full growing

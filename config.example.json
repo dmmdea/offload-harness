@@ -21,6 +21,7 @@
   "agent_thinking": "",
   "agent_lease_wait_sec": 0,
   "agent_retry_min_sec": 0,
+  "agent_seat_tok_s": 0,
   "agent_placement_wait_sec": 0,
   "agent_spread_local_slot": "",
   "vision_model": "",
