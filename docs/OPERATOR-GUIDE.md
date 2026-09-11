@@ -998,6 +998,13 @@ also writes a ledger row
 (`task=agent_delegate` in `local-offload ledger`) and a full contract+result+verdict line
 under the harness base dir at `delegation-log/YYYY-MM-DD.jsonl`.
 
+Loop accounting on the wire (0.115.20): every `results[]` row carries the node's `steps`,
+`stop_reason`, `stop_note` and `output_truncated` as the node reported them. Read them before
+trusting a `done`: `stop_note` beginning `forced final answer` means the step budget ran out
+and the last step extracted the answer without tools (0.115.19, register D-89) — a correct
+answer from an incomplete exploration; `output_truncated: true` means the final completion
+ended on `length` and the text is a partial. Both used to be visible only in the delegation log.
+
 Acceptance lint (0.88.0, warn-only): every subtask's acceptance is linted at intake and the
 warnings ride the response as `results[].acceptance_lint` — PARROT-PASSABLE (every content
 check also matches the goal text: an echoed question passes as verified and the retry never
