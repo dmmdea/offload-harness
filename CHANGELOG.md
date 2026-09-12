@@ -6,6 +6,30 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.116.1] - 2026-09-12 - the ampere-16 vision seat is the measured winner
+
+The `ampere-16` tier seeded `qwen3-vl-8b` for vision as a J-media inheritance from `blackwell-16`; it was
+never run on the tier's reference box (the Lenovo M720q's A2 16 GB), which served `gemma4-e4b-vision` by
+hand. The 0.116.0 vision lane made the seat worth measuring: four candidates through the harness's OWN
+`assess_image` / `ocr` / `vqa` over a labelled two-phase set on that box (record:
+`Benchmarks and Optimizations/2026-09-12-a2-vision-bakeoff/`).
+
+### Changed
+- `ampere-16` vision seat: `qwen3-vl-8b` -> **`qwen38-27b-vision`** (Qwen3.8-27B UD-IQ3_S + mmproj-F16,
+  ctx 8192, `reasoning: off`, swappable, ttl 300; aliases `vision` / `vlm` / `ocr`). Phase-2 hard set: the
+  27B was the only candidate that read every serial, email and low-contrast string (OCR 9/9, VQA 5/5) at a
+  14 s median on the 40 W lock; gemma4-12b is the fast runner-up (9/9, 4/5 at 3 s); qwen3.5-9b fabricated
+  text twice and is disqualified for OCR; the old E4B seat missed the small-print codes and deferred once.
+  Chosen on quality (tier doctrine). NOT propagated to `blackwell-16` / `volta-16` / `blackwell-2x16` — their
+  8B seat was not in the bake. `TestAmpere16VisionSeatIsTheMeasuredWinner`; docs/tiers regenerated.
+
+### Fixed
+- `TestGPUReserveAcceptsAnExplicitWindowAndTheWrapperForm` no longer touches the machine's REAL lease: it
+  passed a nonexistent `--config`, which resolves to built-in defaults and therefore the real state dir, so
+  on a box whose card a render held it queued for the default 8 h and timed the root package out (and on an
+  idle box it would have taken a real 8 h `training` lease). It now uses the temp lease fixture, `--wait 0`,
+  and proves the `--detach` guard was passed via the later mutual-exclusion refusal.
+
 ## [0.116.0] - 2026-09-12 - vision work travels to a node with an idle card
 
 The harness could place text work on fleet nodes (`agent_delegate`) but every image call —
