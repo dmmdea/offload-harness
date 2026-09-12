@@ -218,6 +218,13 @@ type Meta struct {
 	Grounded        *bool              `json:"grounded,omitempty"`         // extract/summary values appear in source (nil = N/A)
 	EscalatedAgreed *bool              `json:"escalated_agreed,omitempty"` // higher tier agreed with the smaller (nil = no escalation)
 	ErrClass        string             `json:"err_class,omitempty"`        // oom|timeout|http_5xx|conn_refused on infra failure; gpu_busy = vision call skipped, a gen job held the GPU lock (LO-1)
+	// Node / Placement say WHERE a vision task ran when the route decided
+	// (0.116.0): Node is the fleet node_id that served it, Placement the
+	// route's reason ("remote: local gpu busy", "remote: forced", "local: no
+	// eligible node (…)"). Both omitempty — a plain local call publishes
+	// byte-identically to before the route existed.
+	Node      string `json:"node,omitempty"`
+	Placement string `json:"placement,omitempty"`
 	Feat            map[string]float64 `json:"feat,omitempty"`             // cheap input features for the entry-tier router
 	// TierPack records how a climbed-to tier's input was packed (TO-3): empty
 	// on entry-tier calls; "token-exact (full source)" / "token-exact (cut
@@ -322,9 +329,15 @@ type Result struct {
 	OK       bool            `json:"ok"`
 	Deferred bool            `json:"deferred,omitempty"`
 	Reason   string          `json:"reason,omitempty"`
-	Data     json.RawMessage `json:"result,omitempty"`
-	Partial  string          `json:"partial,omitempty"`
-	Meta     Meta            `json:"meta"`
+	// DeferClass is the defer's class (the DeferClass* vocabulary in
+	// agentwire.go) on the results that carry one — today the vision route's
+	// placement defers (0.116.0), whose "no eligible node" must be branchable
+	// as `capacity` and "no remotes configured" as `config`. Empty on every
+	// other result, so the pipeline's own defers publish byte-identically.
+	DeferClass string          `json:"defer_class,omitempty"`
+	Data       json.RawMessage `json:"result,omitempty"`
+	Partial    string          `json:"partial,omitempty"`
+	Meta       Meta            `json:"meta"`
 }
 
 // Deferf builds a deferred Result (harness could not complete; Claude should).

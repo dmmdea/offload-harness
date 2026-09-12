@@ -60,6 +60,11 @@ type JobView struct {
 	// tokenless (auth scope v1 = the agent lane only). Never serialized to the
 	// wire: jobWire's shape is unchanged.
 	Agent bool
+	// Gated marks a job whose poll rides the SAME bearer rule as an agent
+	// job without being one (0.116.0: the vision lane — its result is the
+	// caller's image judged in prose). Kept apart from Agent so the jobs feed
+	// still says truthfully which rows are agent runs. Never serialized.
+	Gated bool
 	// Task/Model/AcceptedAt/StartedAt/FinishedAt are the /fleet/jobs feed's
 	// metadata — populated for Recent's callers only. /fleet/jobs/{id} (Get)
 	// does not fill them: that route's shape (jobWire) is unchanged, so they
@@ -75,6 +80,7 @@ type job struct {
 	data       json.RawMessage
 	err        string
 	agent      bool      // created via AcceptAgent → poll auth applies (server.go handleJob)
+	gated      bool      // AcceptSpec.Gated → poll auth applies without the agent marker (vision lane)
 	terminalAt time.Time // set when state turns done|error; drives ttl eviction
 	// task/model/acceptedAt/startedAt/finishedAt are the /fleet/jobs feed's
 	// metadata (see AcceptSpec). Written under mu exactly like every other
@@ -274,6 +280,9 @@ type AcceptSpec struct {
 	// where a poller can observe the job before it is marked) and is evicted
 	// WITH the record (an id set would outlive the janitor and leak forever).
 	Agent bool
+	// Gated applies the agent lane's poll-auth rule to a job that is NOT an
+	// agent run (JobView.Gated) — the vision lane sets it.
+	Gated bool
 	// Uncapped exempts this job's EXECUTION from maxConcurrent. The exemption
 	// is for lanes that already serialize themselves and whose work never
 	// touches the shared llama-swap text endpoint the cap exists to protect —
@@ -361,6 +370,7 @@ func (j *Jobs) Admit(id string, spec AcceptSpec, run func(context.Context) (json
 	j.m[id] = &job{
 		state:      JobAccepted,
 		agent:      spec.Agent,
+		gated:      spec.Gated,
 		capped:     !spec.Uncapped,
 		run:        run,
 		onDropped:  spec.OnDropped,
@@ -534,7 +544,7 @@ func (j *Jobs) Get(id string) (*JobView, bool) {
 	if !ok {
 		return nil, false
 	}
-	return &JobView{ID: id, State: jb.state, Data: jb.data, Error: jb.err, Agent: jb.agent}, true
+	return &JobView{ID: id, State: jb.state, Data: jb.data, Error: jb.err, Agent: jb.agent, Gated: jb.gated}, true
 }
 
 // Recent returns up to n jobs (n <= 0 = all), newest by acceptedAt first,
@@ -551,7 +561,7 @@ func (j *Jobs) Recent(n int) []JobView {
 	out := make([]JobView, 0, len(j.m))
 	for id, jb := range j.m {
 		out = append(out, JobView{
-			ID: id, State: jb.state, Error: jb.err, Agent: jb.agent,
+			ID: id, State: jb.state, Error: jb.err, Agent: jb.agent, Gated: jb.gated,
 			Task: jb.task, Model: jb.model,
 			AcceptedAt: jb.acceptedAt, StartedAt: jb.startedAt, FinishedAt: jb.finishedAt,
 		})

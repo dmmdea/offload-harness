@@ -73,7 +73,8 @@ func TestFetchNodeViewMapsAgentFields(t *testing.T) {
 		AgentResident:  true,
 		AgentCtxTokens: 8192,
 		QueueDepth:     2,
-		Local:          false, // a FETCHED view is by definition a remote node
+		Tasks:          []string{"agent"}, // supported_task_types decodes since 0.116.0 (the vision lane is found in it)
+		Local:          false,             // a FETCHED view is by definition a remote node
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("NodeView = %+v, want %+v", got, want)
@@ -89,7 +90,7 @@ func TestFetchNodeViewWithoutAgentFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchNodeView: %v", err)
 	}
-	want := NodeView{NodeID: "media-only", QueueDepth: 1}
+	want := NodeView{NodeID: "media-only", QueueDepth: 1, Tasks: []string{"image-gen"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("NodeView = %+v, want %+v", got, want)
 	}

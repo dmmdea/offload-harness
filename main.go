@@ -56,6 +56,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/storesteward"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"github.com/dmmdea/offload-harness/internal/trajectory"
+	"github.com/dmmdea/offload-harness/internal/visionremote"
 )
 
 // version aliases buildinfo.Version — the const moved to a shared package in
@@ -455,7 +456,11 @@ func runTask(task string, args []string) error {
 	return nil
 }
 
-// runVQA handles `local-offload vqa <image-path> --question "..." [--json]`.
+// visionRouteHelp is the --route flag text shared by vqa / ocr / assess-image
+// (0.116.0) — the MCP tools carry the same vocabulary (visionremote).
+const visionRouteHelp = "where the vision model runs: local (default), auto (a fleet node when the local GPU lease is held), remote (force a fleet node; defers when none is eligible)"
+
+// runVQA handles `local-offload vqa <image-path> --question "..." [--route local|auto|remote] [--json]`.
 // Unlike the text tasks, the positional argument is an IMAGE PATH (or data URI),
 // not stdin text; it is passed through Request.Image and resolved in the pipeline.
 func runVQA(args []string) error {
@@ -463,8 +468,9 @@ func runVQA(args []string) error {
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "print full result JSON")
 	question := fs.String("question", "", "the question to ask about the image")
+	route := fs.String("route", "", visionRouteHelp)
 	positional, flagArgs := splitArgs(args, map[string]bool{
-		"config": true, "question": true,
+		"config": true, "question": true, "route": true,
 	})
 	_ = fs.Parse(flagArgs)
 
@@ -482,11 +488,11 @@ func runVQA(args []string) error {
 	}
 	defer cleanup()
 
-	res := p.Run(context.Background(), core.Request{
+	res := visionremote.Run(context.Background(), cfg, p, core.Request{
 		Task:   core.TaskVQA,
 		Image:  positional,
 		Params: map[string]any{"question": *question},
-	})
+	}, *route)
 	if *asJSON {
 		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))
@@ -1681,8 +1687,9 @@ func runOCR(args []string) error {
 	fs := flag.NewFlagSet("ocr", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "print full result JSON")
+	route := fs.String("route", "", visionRouteHelp)
 	positional, flagArgs := splitArgs(args, map[string]bool{
-		"config": true,
+		"config": true, "route": true,
 	})
 	_ = fs.Parse(flagArgs)
 
@@ -1697,10 +1704,10 @@ func runOCR(args []string) error {
 	}
 	defer cleanup()
 
-	res := p.Run(context.Background(), core.Request{
+	res := visionremote.Run(context.Background(), cfg, p, core.Request{
 		Task:  core.TaskOCR,
 		Image: positional,
-	})
+	}, *route)
 	if *asJSON {
 		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))
@@ -1780,8 +1787,9 @@ func runAssessImage(args []string) error {
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "print full result JSON")
 	brief := fs.String("brief", "", "optional description the image should match")
+	route := fs.String("route", "", visionRouteHelp)
 	positional, flagArgs := splitArgs(args, map[string]bool{
-		"config": true, "brief": true,
+		"config": true, "brief": true, "route": true,
 	})
 	_ = fs.Parse(flagArgs)
 
@@ -1800,11 +1808,11 @@ func runAssessImage(args []string) error {
 	if *brief != "" {
 		params["brief"] = *brief
 	}
-	res := p.Run(context.Background(), core.Request{
+	res := visionremote.Run(context.Background(), cfg, p, core.Request{
 		Task:   core.TaskAssessImage,
 		Image:  positional,
 		Params: params,
-	})
+	}, *route)
 	if *asJSON {
 		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))
