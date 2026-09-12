@@ -38,6 +38,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/reviewlane"
 	"github.com/dmmdea/offload-harness/internal/rig"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
+	"github.com/dmmdea/offload-harness/internal/visionremote"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
 )
 
@@ -150,8 +151,8 @@ func (s *Server) buildServer(version string) *mcp.Server {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_vqa",
-		Description: "Answer a question about an IMAGE on a free local vision model (VQA). image is a local file path or a data:image/... URI; question is what to ask about it. Returns {answer}; if it can't answer confidently it returns deferred:true and you should look at the image yourself.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local image file path or a data:image/...;base64 URI"},"question":{"type":"string","description":"the question to answer about the image"}},"required":["image","question"]}`),
+		Description: "Answer a question about an IMAGE on a free local vision model (VQA). image is a local file path or a data:image/... URI; question is what to ask about it. Returns {answer}; if it can't answer confidently it returns deferred:true and you should look at the image yourself. route (default local) can place the call on a fleet node's vision seat over the tailnet when this box's GPU is busy (auto) or unconditionally (remote); meta.node / meta.placement report where it ran.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local image file path or a data:image/...;base64 URI"},"question":{"type":"string","description":"the question to answer about the image"},` + visionRouteSchema + `},"required":["image","question"]}`),
 	}, s.handleVQA)
 
 	srv.AddTool(&mcp.Tool{
@@ -180,14 +181,14 @@ func (s *Server) buildServer(version string) *mcp.Server {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_assess_image",
-		Description: "QA a generated IMAGE against hard exclusions on a free local vision model. Emits a grammar-constrained {has_people, has_text, matches_brief, notes}: has_people=true if any person/face/body part is visible, has_text=true if any readable letters/words/numbers are rendered, matches_brief=whether it matches the optional brief (true if no brief), notes=one short phrase. image is a local file path or a data:image/... URI; brief is optional. Returns the object or deferred:true.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local image file path or a data:image/...;base64 URI"},"brief":{"type":"string","description":"optional description the image should match"}},"required":["image"]}`),
+		Description: "QA a generated IMAGE against hard exclusions on a free local vision model. Emits a grammar-constrained {has_people, has_text, matches_brief, notes}: has_people=true if any person/face/body part is visible, has_text=true if any readable letters/words/numbers are rendered, matches_brief=whether it matches the optional brief (true if no brief), notes=one short phrase. image is a local file path or a data:image/... URI; brief is optional. Returns the object or deferred:true. route (default local) can place the call on a fleet node's vision seat over the tailnet when this box's GPU is busy (auto) or unconditionally (remote) — the way to QA a batch of renders while the local cards are rendering; meta.node / meta.placement report where it ran.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local image file path or a data:image/...;base64 URI"},"brief":{"type":"string","description":"optional description the image should match"},` + visionRouteSchema + `},"required":["image"]}`),
 	}, s.handleAssessImage)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_ocr",
-		Description: "Transcribe ALL text in an IMAGE on a free local vision model (OCR). image is a local file path or a data:image/... URI. Returns {text} with the transcribed text in reading order; if it can't transcribe confidently it returns deferred:true and you should read the image yourself.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local image file path or a data:image/...;base64 URI"},"engine":{"type":"string","enum":["gpu","npu"],"description":"gpu (default): the local vision model; npu: the Hailo-8L PaddleOCR path when this box has the accelerator (fast batch transcription)"}},"required":["image"]}`),
+		Description: "Transcribe ALL text in an IMAGE on a free local vision model (OCR). image is a local file path or a data:image/... URI. Returns {text} with the transcribed text in reading order; if it can't transcribe confidently it returns deferred:true and you should read the image yourself. route (default local; engine gpu only) can place the call on a fleet node's vision seat over the tailnet when this box's GPU is busy (auto) or unconditionally (remote); meta.node / meta.placement report where it ran.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local image file path or a data:image/...;base64 URI"},"engine":{"type":"string","enum":["gpu","npu"],"description":"gpu (default): the local vision model; npu: the Hailo-8L PaddleOCR path when this box has the accelerator (fast batch transcription)"},` + visionRouteSchema + `},"required":["image"]}`),
 	}, s.handleOCR)
 
 	srv.AddTool(&mcp.Tool{
@@ -888,12 +889,25 @@ func (s *Server) handleVQA(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	var in struct {
 		Image    string `json:"image"`
 		Question string `json:"question"`
+		Route    string `json:"route"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskVQA, Image: in.Image, Params: map[string]any{"question": in.Question}}))
+	return result(s.visionRun(ctx, core.Request{Task: core.TaskVQA, Image: in.Image, Params: map[string]any{"question": in.Question}}, in.Route))
 }
+
+// visionRun is the ONE call behind the three single-image vision tools
+// (0.116.0): route "" / local runs in-process exactly as before, auto and
+// remote go through visionremote — the placement rule and the wire live
+// there so the CLI verbs share them.
+func (s *Server) visionRun(ctx context.Context, req core.Request, route string) core.Result {
+	return visionremote.Run(ctx, s.p.Cfg(), s.p, req, route)
+}
+
+// visionRouteSchema is the `route` property every single-image vision tool
+// carries; one string so the three descriptions cannot drift.
+const visionRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the vision model runs (0.116.0): local (default; this box's vision seat, unchanged behaviour), auto (idle local card runs it; when the machine-wide GPU lease is held — a render in flight or a text reservation — the least-loaded fleet node advertising the vision lane runs it instead, and with no eligible node it still runs local), remote (force a fleet node; with none eligible it returns deferred:true with defer_class capacity — or config when no delegate_remotes are configured — and never touches the local GPU). The image is read on THIS box under vision_max_image_bytes and travels with the job; meta.node / meta.placement say where it ran"}`
 
 func (s *Server) handleVideoDescribe(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
@@ -1008,6 +1022,7 @@ func (s *Server) handleAssessImage(ctx context.Context, req *mcp.CallToolRequest
 	var in struct {
 		Image string `json:"image"`
 		Brief string `json:"brief"`
+		Route string `json:"route"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -1016,13 +1031,14 @@ func (s *Server) handleAssessImage(ctx context.Context, req *mcp.CallToolRequest
 	if in.Brief != "" {
 		params["brief"] = in.Brief
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskAssessImage, Image: in.Image, Params: params}))
+	return result(s.visionRun(ctx, core.Request{Task: core.TaskAssessImage, Image: in.Image, Params: params}, in.Route))
 }
 
 func (s *Server) handleOCR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
 		Image  string `json:"image"`
 		Engine string `json:"engine"`
+		Route  string `json:"route"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -1032,8 +1048,14 @@ func (s *Server) handleOCR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	// read stylised text differently and a silent switch would change results.
 	switch in.Engine {
 	case "", "gpu":
-		return result(s.p.Run(ctx, core.Request{Task: core.TaskOCR, Image: in.Image}))
+		return result(s.visionRun(ctx, core.Request{Task: core.TaskOCR, Image: in.Image}, in.Route))
 	case "npu":
+		if r, ok := visionremote.NormalizeRoute(in.Route); !ok || r != visionremote.RouteLocal {
+			// The route places the GPU vision model; the NPU path is this box's
+			// own sidecar and never travels. Refuse rather than silently run
+			// local under a route the caller asked for.
+			return jsonResult(map[string]any{"deferred": true, "reason": fmt.Sprintf("route %q applies to engine gpu only; engine npu always runs this box's Hailo sidecar", in.Route)})
+		}
 		if !s.p.Cfg().HasAccelerator("hailo-8l") {
 			return jsonResult(map[string]any{"deferred": true, "reason": "engine:npu requested but this box lists no hailo-8l accelerator"})
 		}

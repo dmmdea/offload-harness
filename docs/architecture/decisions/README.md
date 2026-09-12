@@ -45,6 +45,7 @@ code, treat everything else as background.
 | [0037](0037-a-capability-name-has-one-owner-per-box.md) | Accepted | A capability name has one owner per box: the first listed accelerator |
 | [0038](0038-accelerator-work-travels-to-the-box-that-has-the-device.md) | Accepted | Accelerator work travels to the box that has the device, bytes included: fleet task `accel`, `fleet_accelerators`, local device wins a shared name |
 | [0039](0039-a-held-card-is-a-place-in-line.md) | Accepted | A held card is a place in line, and a cleared seat stays cleared: `gpu reserve --wait` queues (default 8h), `--unload-seat` stamps the text lease exclusive so loads are gated like a render, `offload_status.gpu_lease.queue_with` |
+| [0040](0040-vision-work-travels-to-a-node-with-an-idle-card.md) | Accepted | Vision work travels to a node with an idle card: fleet task `vision` on `POST /fleet/vision` (body capped from `vision_max_image_bytes`, then the shared admission path), the full `core.Result` as job data, `route: local|auto|remote` on the three image tools |
 
 
 ## Lifecycle

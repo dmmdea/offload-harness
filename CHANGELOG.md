@@ -6,6 +6,45 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.116.0] - 2026-09-12 - vision work travels to a node with an idle card
+
+The harness could place text work on fleet nodes (`agent_delegate`) but every image call —
+`offload_vqa`, `offload_assess_image`, `offload_ocr` — ran against the local endpoint, so a fleet
+node with an idle card and a vision seat sat unused while image QA queued behind the local render.
+The first question was what `:8080` on the Lenovo wanted a credential for: it is `pzdash` (Basic
+Auth), not an inference server at all, and the node's llama-swap listens on loopback only — so the
+lane proxies through `:18811`, and nothing new is bound.
+
+### Added
+- **Fleet task `vision`** on `POST /fleet/vision` (`fleetnode.VisionPayload`:
+  `{job_id, task: vqa|ocr|assess_image, image: data URI, question?, brief?}`). Its own route only
+  because its body is an image — capped at `vision_max_image_bytes` × 4/3 + slack
+  (`VisionBodyCap`) rather than dispatch's 1 MiB — after which it joins the SAME admission path
+  (`Server.admit`: bearer auth, known-id re-ack, drain, lease, band, queue cap) and the job store's
+  concurrency cap (it contends for the shared llama-swap endpoint). The node runs the task on its
+  own vision seat and stores the FULL `core.Result` as the done job's data, defers included, so a
+  remote judgment and a local one have one shape. Advertised (`supported_task_types` +
+  `vision_model`) exactly when it admits: `VisionLaneAdmissible` = a bound `vision_model` and the
+  agent lane's reachability rule (loopback, or `fleet_auth_token`). Polls of vision jobs ride the
+  agent lane's bearer gate (`JobView.Gated`) without being listed as agent runs.
+- **`route` on the three tools and `--route` on `vqa` / `ocr` / `assess-image`** (`internal/visionremote`):
+  `local` (default — every existing call is byte-identical), `auto` (an idle local card always
+  runs it; when the machine-wide GPU lease is held — a render in flight or a text reservation —
+  the least-loaded node advertising the lane runs it, and with no eligible node it still runs
+  local), `remote` (force a node; none eligible ⇒ `deferred:true` with `defer_class` `capacity`,
+  or `config` with no `delegate_remotes`, never a local run). The image is read on the CALLING box
+  under its own `vision_max_image_bytes` and travels as a data URI; `meta.node` / `meta.placement`
+  say where it ran. `engine: npu` OCR refuses a non-local route rather than silently running local.
+- `core.Result.DeferClass`, `core.Meta.Node` / `Meta.Placement` (all omitempty);
+  `delegate.NodeView.Tasks` / `VisionModel` decode `supported_task_types` / `vision_model`;
+  `delegate.PlaceVision` ranks eligible nodes with the agent lane's `betterRemote` and returns the
+  roster INDEX (an id is not an address).
+
+### Operator notes
+- The Lenovo A2 reports 15,356 MiB, not 16,384, because **ECC is enabled** (`nvidia-smi -q -d ECC`:
+  Current Enabled); GDDR6 ECC is in-band and costs 1/16 of the frame buffer. `nvidia-smi -e 0` +
+  reboot restores the full 16 GiB at the cost of ECC — an operator decision, not made here.
+
 ## [0.115.23] - 2026-09-10 - the re-pack cannot eat the wall
 
 Register D-91, found by the D-03 live probe: the Lenovo 4B's final answer came back `length`-cut at 4,096 tokens

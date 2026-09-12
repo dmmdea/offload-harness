@@ -342,6 +342,7 @@ is not advertised, so the dispatcher can't send work the box would defer:
 | `audio-gen` | `generate_audio` | voice or music script set | `acestep` (music) / `chatterbox` (voice) |
 | `run-graph` | `run_graph` | `run_graph_script` set | payload-declared `model_family`, else `comfy-graph` |
 | `agent` | `agent` | `fleet_agent_enabled` **and** a resolvable agent seat **and** (loopback listener **or** `fleet_auth_token` set) | none — llama-swap-resident text work, no render footprint |
+| `vision` (own route `POST /fleet/vision`) | `vqa` / `ocr` / `assess_image` | `vision_model` set **and** (loopback listener **or** `fleet_auth_token` set) — see [The vision task](#the-vision-task-post-fleetvision) | none — llama-swap-resident VLM, no render footprint |
 | *(config-driven)* | `pipeline-job` | a valid `pipelines.<task_type>` entry (see below) | none — sizing rides on the task-scoped `Record("", "", task_type, peak)` entry |
 
 run-graph payloads carry `graph` and `manifest` as **raw nested JSON** (no base64) and are
@@ -753,6 +754,63 @@ What the deadline produces for a job that DID reach `running` depends on whether
   **failure**, `poll deadline after <d>: node never answered (last: …)`, counted in
   `summary.failed`. A node that said nothing never deferred, and reporting a defer stamped with
   its id and seat would be the delegator inventing an answer on its behalf.
+
+## The vision task (`POST /fleet/vision`)
+
+Since 0.116.0 a node runs ONE single-image vision task — `vqa`, `ocr` or `assess_image` — on its
+own vision seat for a caller whose card is busy (or who asked for a remote outright). The
+delegator side is `internal/visionremote` (the `route` parameter on `offload_vqa` /
+`offload_assess_image` / `offload_ocr` and `--route` on the CLI verbs); decisions in
+[ADR 0040](architecture/decisions/0040-vision-work-travels-to-a-node-with-an-idle-card.md).
+
+### Why its own route
+
+`/fleet/dispatch` caps its body at 1 MiB — right for every media envelope and agent contract,
+and a fifth of one image at the configured cap. `/fleet/vision` sizes its body from THIS node's
+`vision_max_image_bytes` (× 4/3 for base64, plus 64 KiB of envelope slack — `VisionBodyCap`) and
+then joins the **same** admission path as every other job (`Server.admit`): bearer auth, known-id
+re-ack, drain, lease, band, queue cap, then `BuildRequest` and the job store. It stays
+concurrency-CAPPED (it contends for the shared llama-swap endpoint, exactly like agent work).
+
+### Payload
+
+```json
+{"job_id": "vision-…", "task": "assess_image",
+ "image": "data:image/png;base64,…", "brief": "a beach"}
+```
+
+`task` ∈ `vqa` (requires `question`) · `ocr` · `assess_image` (optional `brief`). `image` MUST be a
+data URI — the bytes travel with the job; a path on the caller's disk is refused `400`. An image
+whose decoded size exceeds the node's cap is refused `400` at ack time naming
+`vision_max_image_bytes`; the pipeline's loader re-checks the exact bytes. Unknown fields → `400`.
+
+### Result
+
+The done job's `data` is the node's **full `core.Result`** — `ok`, `deferred`, `reason`,
+`defer_class`, `result`, `meta` — so a remote judgment and a local one have one shape. A pipeline
+defer (`gpu busy`, empty answer, unreadable image) is therefore a `done` job whose data says
+`deferred: true`, the agent lane's convention, never an `error` job.
+
+### Auth and advertisement
+
+The lane rides the agent lane's bearer rule verbatim (`tokenGated`): with `fleet_auth_token` set,
+dispatch AND job polls require the bearer (`401` otherwise); with no token, a non-loopback listener
+refuses `403` and withholds the lane. `VisionLaneAdmissible` (a bound `vision_model` + safe
+reachability) is the ONE predicate behind both the advertisement — `"vision"` in
+`supported_task_types` and the additive `vision_model` health field — and the ack-time admission,
+the `AgentLaneAdmissible` discipline. Vision jobs are token-gated on poll (`JobView.Gated`) but
+are never listed as agent runs in `/fleet/jobs`.
+
+### Placement (delegator side)
+
+`route: local` (default) is byte-identical to before the route existed. `auto`: an idle local
+card always runs the work; only while the machine-wide GPU lease is held (`delegate.LocalBusy`)
+is a node considered, ranked by `delegate.PlaceVision` — eligible = advertises the lane and its
+card is not leased (`lease.class: text` or `lease.busy`), ordered by the agent lane's
+`betterRemote` (not saturated → provably free slot → queue depth → GPU utilization → roster
+order) — and with no eligible node the work still runs local. `remote`: force a node; none
+eligible ⇒ `deferred: true, defer_class: capacity` (or `config` with no `delegate_remotes`),
+never a local run. `meta.node` / `meta.placement` on the result say where it ran.
 
 ## Known limits (v1)
 

@@ -212,6 +212,14 @@ implications.
    `agent` is withheld from the advertised `supported_task_types`.
 7. An agent defer is a `done` job carrying `deferred: true`, never an `error` job.
 8. No transcript crosses the fleet wire — the agent result envelope has no field for one.
+9. The vision lane (`POST /fleet/vision`, 0.116.0) is advertised — `vision` in
+   `supported_task_types`, `vision_model` in health — exactly when `VisionLaneAdmissible` holds
+   (a bound `vision_model` and the agent lane's reachability rule), rides the agent lane's bearer
+   gate on dispatch and on poll, and stores the node's FULL `core.Result` as the done job's data
+   (a defer is a `done` job saying `deferred: true`). Its body cap is `VisionBodyCap`
+   (`vision_max_image_bytes` × 4/3 + slack), not dispatch's 1 MiB; everything after the body read
+   is the shared `admit` path. Details: [FLEET-NODE.md](../FLEET-NODE.md#the-vision-task-post-fleetvision),
+   [ADR 0040](../architecture/decisions/0040-vision-work-travels-to-a-node-with-an-idle-card.md).
 
 ## Security and privacy notes
 
@@ -656,11 +664,13 @@ never arrived, published separately for exactly this reason) rather than on the 
 set includes the `structured re-pack unreachable` shape, whose `output` is populated: what was
 lost is the schema-checked deliverable, not the bytes.
 
-### Auth (v1 scope: the agent lane only)
+### Auth (v1 scope: the agent lane — joined by the vision lane in 0.116.0)
 
-`fleet_auth_token`, when set, bearer-gates exactly two things: agent dispatches, and
-`/fleet/jobs/{id}` polls of jobs an agent dispatch created (the job record carries an agent
-marker, written atomically at creation and evicted with the record). The comparison hashes both
+`fleet_auth_token`, when set, bearer-gates exactly two lanes: agent dispatches (and the vision
+lane's `POST /fleet/vision`, which rides the same rule through `tokenGated`), and
+`/fleet/jobs/{id}` polls of jobs those dispatches created (the job record carries an agent
+marker — or, for a vision job, the `Gated` marker — written atomically at creation and evicted
+with the record). The comparison hashes both
 sides with SHA-256 before a constant-time compare, making it length-independent. Wrong or
 missing credential → `401` with the standard error envelope (`"error": "unauthorized"`),
 checked immediately after the body decode and **before** the job_id validation and the re-ack

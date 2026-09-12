@@ -10,10 +10,12 @@
 package fleetnode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"mime"
 	"net"
@@ -127,6 +129,11 @@ type Server struct {
 	// so a lane advertised past a tokenless non-loopback listener sends it
 	// through placement and straight into a 403.
 	agentLane bool
+	// visionLane is VisionLaneAdmissible over the RESOLVED listener (0.116.0)
+	// — the same one-predicate discipline as agentLane: health publishes
+	// vision_model (and SupportedTasksFor lists "vision") exactly when
+	// POST /fleet/vision will admit.
+	visionLane bool
 	// rosterServes answers "does the llama-swap behind endpoint serve seat?"
 	// (alias-aware). A seam so tests drive the residency cache without a live
 	// llama-swap; production always gets swapRosterServes.
@@ -230,6 +237,7 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		families:           Families(opts.Cfg),
 		agentSeat:          opts.Cfg.AgentPlannerModel(""),
 		agentLane:          AgentLaneAdmissible(opts.Cfg, opts.LoopbackListener),
+		visionLane:         VisionLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		rosterServes:       swapRosterServes,
 		rosterServedModels: swapRosterServedModels,
 	}
@@ -389,6 +397,10 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /fleet/health", s.handleHealth)
 	mux.HandleFunc("POST /fleet/dispatch", s.handleDispatch)
+	// The vision lane (0.116.0): its own route ONLY because its body is an
+	// image — sized from vision_max_image_bytes rather than dispatch's 1 MiB —
+	// after which it joins the same admission path (admit) as every job.
+	mux.HandleFunc("POST /fleet/vision", s.handleVision)
 	mux.HandleFunc("GET /fleet/jobs/{id}", s.handleJob)
 	// GET /fleet/jobs (no {id}) is a distinct ServeMux pattern from the one
 	// above — unauthenticated is deliberate: unlike /fleet/jobs/{id}, this
@@ -579,6 +591,11 @@ type healthPayload struct {
 	// normal shape) is found here, not just a seat configured by canonical
 	// id.
 	ServedModels []string `json:"served_models,omitempty"`
+	// VisionModel is the vision lane's seat (0.116.0), published only when the
+	// lane is admissible — the same moment "vision" appears in
+	// supported_task_types. Additive + omitempty: a node without the lane
+	// emits a byte-identical payload.
+	VisionModel string `json:"vision_model,omitempty"`
 	// ---- Host CPU/RAM (hostsample) ----
 	// Emitted only when opts.Host is set AND its sample is Known. All three
 	// carry omitempty, unlike GpuUtilPct/GpuUtilKnown (always-present):
@@ -683,6 +700,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		payload.AgentCtxTokens = s.opts.Cfg.AgentCtxTokens
 		payload.AgentResident = s.agentResident()
 		payload.ServedModels = s.servedModels()
+	}
+	if s.visionLane {
+		payload.VisionModel = s.opts.Cfg.VisionModel
 	}
 	// Host CPU/RAM: a cached read of the background hostsample.Sampler, same
 	// rule as the VRAM snapshot above — this handler never samples itself.
@@ -992,9 +1012,56 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "malformed dispatch body: "+err.Error())
 		return
 	}
+	s.admit(w, r, env)
+}
 
-	// AGENT-LANE AUTH (v1 scope: the agent lane ONLY — the delegation plan's
-	// reshape delta 10; media task types skip this block entirely so deployed
+// handleVision is the vision lane's ack path (0.116.0): the ONLY thing it
+// does differently from handleDispatch is the body — capped from this node's
+// vision_max_image_bytes (VisionBodyCap) instead of dispatch's 1 MiB, and
+// decoded as a VisionPayload whose job_id rides inside it. The decoded body
+// then becomes a "vision" envelope and joins admit: bearer auth first, then
+// the known-id re-ack, drain, lease, band and queue gates, then BuildRequest
+// (buildVision) and the job store — nothing about admission is re-implemented.
+func (s *Server) handleVision(w http.ResponseWriter, r *http.Request) {
+	cap := VisionBodyCap(s.opts.Cfg)
+	r.Body = http.MaxBytesReader(w, r.Body, cap)
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		if mt, _, err := mime.ParseMediaType(ct); err != nil || mt != "application/json" {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("content-type must be application/json (got %q)", ct))
+			return
+		}
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("request body too large (limit %d bytes: vision_max_image_bytes as base64 plus slack)", cap))
+			return
+		}
+		writeError(w, http.StatusBadRequest, "reading vision body: "+err.Error())
+		return
+	}
+	// Strict decode here mirrors dispatch's DisallowUnknownFields envelope
+	// decode: a caller mistake is a 400 with the field named, never a job.
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	var p VisionPayload
+	if err := dec.Decode(&p); err != nil {
+		writeError(w, http.StatusBadRequest, "malformed vision body: "+err.Error())
+		return
+	}
+	s.admit(w, r, dispatchEnvelope{JobID: p.JobID, TaskType: VisionTask, Payload: body})
+}
+
+// admit is the shared ack path behind /fleet/dispatch and /fleet/vision: the
+// token-gated lanes' auth, the known-job re-ack/409, the drain/lease/band/
+// queue refusals, BuildRequest, and the job store's Admit. The two handlers
+// differ ONLY in how they read and cap their body; everything a node decides
+// about a job happens here, once.
+func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvelope) {
+	// TOKEN-GATED LANES' AUTH (v1 scope: the agent lane ONLY — the delegation
+	// plan's reshape delta 10 — joined by the vision lane in 0.116.0, see
+	// tokenGated; media task types skip this block entirely so deployed
 	// tokenless media clients stay byte-identical, pinned in auth_test.go).
 	// Ordering: the check needs the DECODED task_type, so it cannot precede
 	// the body decode; it sits immediately AFTER decode and BEFORE everything
@@ -1002,7 +1069,7 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	// gate, BuildRequest — so an unauthorized agent caller gets only the auth
 	// verdict (401/403), never a validation 400 to probe the envelope with
 	// and never a re-ack/409 that discloses job existence or state.
-	if env.TaskType == string(core.TaskAgentRun) {
+	if tokenGated(env.TaskType) {
 		if s.opts.Cfg.FleetAuthToken == "" {
 			// The reachability condition is CONSULTED, never re-derived:
 			// AgentLaneSafelyReachable is the same expression AgentLaneAdmissible
@@ -1179,6 +1246,11 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	run := func(ctx context.Context) (json.RawMessage, error) {
 		defer cleanup() // temp files live exactly as long as the job
 		res := s.runner.Run(ctx, req)
+		if env.TaskType == VisionTask {
+			// The vision caller reads the WHOLE core.Result back (defers
+			// included) — see visionJobData; a defer is a done job here.
+			return visionJobData(res)
+		}
 		if res.OK {
 			return res.Data, nil
 		}
@@ -1208,6 +1280,7 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	}
 	spec := AcceptSpec{
 		Agent:     env.TaskType == string(core.TaskAgentRun),
+		Gated:     env.TaskType == VisionTask,
 		Uncapped:  !s.concurrencyCapped(env.TaskType),
 		OnDropped: cleanup,
 		Task:      env.TaskType,
@@ -1265,7 +1338,9 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	// before any state or data crosses the wire. No token configured = the
 	// loopback-only posture, where the lane is open by design (dispatch
 	// enforces that a tokenless listener IS loopback).
-	if view.Agent && s.opts.Cfg.FleetAuthToken != "" && !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
+	// view.Gated (0.116.0) is the vision lane's job: the same rule, the same
+	// reason (its data is the caller's image judged in prose).
+	if (view.Agent || view.Gated) && s.opts.Cfg.FleetAuthToken != "" && !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -1313,8 +1388,8 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	rows := make([]jobFeedRow, 0, limit)
 	for _, v := range s.jobs.Recent(limit) {
 		errStr := v.Error
-		if v.Agent && !authed {
-			errStr = "" // agent error text may echo contract content; media rows are unaffected
+		if (v.Agent || v.Gated) && !authed {
+			errStr = "" // agent/vision error text may echo caller content; media rows are unaffected
 		}
 		row := jobFeedRow{
 			ID: v.ID, Task: v.Task, Model: v.Model, State: string(v.State), Agent: v.Agent,

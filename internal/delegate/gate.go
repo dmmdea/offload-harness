@@ -287,6 +287,48 @@ func remoteEligible(st Subtask, r NodeView) bool {
 		st.Contract.Depth == 0
 }
 
+// PlaceVision picks the fleet node that runs ONE vision task (vqa / ocr /
+// assess_image, 0.116.0) when the caller has decided the work leaves the box
+// (route remote, or route auto on a busy local card — that decision is the
+// caller's, exactly as localBusy is Place's caller's). It returns ok=false
+// when no remote is eligible; the caller then defers (route remote) or runs
+// local (route auto) — never a silent local run under route remote.
+//
+// Eligibility is the vision lane's own gate, not the agent lane's: the node
+// must ADVERTISE the lane (ServesVision — an older node never does, so it is
+// never a target), and its card must not be spoken for (the same LeasedText /
+// LeaseBusy refusals remoteEligible applies: a reserved card is a non-target
+// whatever the lane). AgentEnabled, residency, ctx arithmetic and the
+// output_schema rule are agent-contract facts and do not apply to an image.
+//
+// Ranking reuses betterRemote unchanged — not-saturated, then a provably free
+// slot, then queue depth, then GPU utilization, ties in roster order — so a
+// vision placement and an agent placement agree on which of two nodes is the
+// less loaded one.
+//
+// It returns the INDEX into remotes rather than the view, so a caller that
+// holds a parallel slice of base URLs (a NodeView carries no address) can
+// dispatch to the node it chose without matching on node_id — two
+// misconfigured nodes can share one id, and an id is not an address.
+func PlaceVision(remotes []NodeView) (int, bool) {
+	best := -1
+	for i, r := range remotes {
+		if !visionEligible(r) {
+			continue
+		}
+		if best < 0 || betterRemote(r, remotes[best]) {
+			best = i
+		}
+	}
+	return best, best >= 0
+}
+
+// visionEligible is PlaceVision's hard gate: the lane advertised, the card
+// not reserved.
+func visionEligible(r NodeView) bool {
+	return r.ServesVision() && !r.LeasedText && !r.LeaseBusy
+}
+
 // seatServed: true when the node publishes no roster (unknown) or when the
 // roster names the agent seat (case-insensitive, like swapclient.Roster.Serves).
 func seatServed(v NodeView) bool {

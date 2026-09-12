@@ -82,7 +82,31 @@ type NodeView struct {
 	SaturationScore float64
 	SaturationHigh  bool
 	IdleSlot        bool
-	Local           bool
+	// Tasks is the node's advertised `supported_task_types` (0.116.0). nil on
+	// a node that publishes none. PlaceVision keys on it: a node serves the
+	// vision lane exactly when "vision" is listed, so an older node — which
+	// never lists it — is never a vision target.
+	Tasks []string
+	// VisionModel is the node's advertised vision seat (health
+	// `vision_model`, 0.116.0) — informational, published beside the result so
+	// a caller can see WHICH model judged its image without opening the node.
+	VisionModel string
+	Local       bool
+}
+
+// VisionTask is the fleet task_type of the vision lane (0.116.0): a node
+// lists it in supported_task_types when its vision_model is bound and the lane
+// is safely reachable (fleetnode.taskConfiguredFor).
+const VisionTask = "vision"
+
+// ServesVision reports whether v advertises the vision lane.
+func (v NodeView) ServesVision() bool {
+	for _, t := range v.Tasks {
+		if t == VisionTask {
+			return true
+		}
+	}
+	return false
 }
 
 // fetchNodeViewTimeout is the transport-level backstop for one health GET —
@@ -146,6 +170,10 @@ type healthWire struct {
 		High     bool    `json:"high"`
 		IdleSlot bool    `json:"idle_slot"`
 	} `json:"saturation"`
+	// Additive (0.116.0): the task list every node has always published, now
+	// decoded (the vision lane is found in it), and the vision seat name.
+	SupportedTaskTypes []string `json:"supported_task_types"`
+	VisionModel        string   `json:"vision_model"`
 }
 
 // FetchNodeView reads one node's /fleet/health into a NodeView (Local=false —
@@ -200,6 +228,8 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		GpuUtilKnown:      w.GpuUtilKnown,
 		LeasedText:        w.Lease != nil && w.Lease.Held && strings.EqualFold(w.Lease.Class, "text"),
 		LeaseBusy:         w.Lease != nil && w.Lease.Held && w.Lease.Busy,
+		Tasks:             w.SupportedTaskTypes,
+		VisionModel:       w.VisionModel,
 		Local:             false,
 	}
 	if w.Saturation != nil {
