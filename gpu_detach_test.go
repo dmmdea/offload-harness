@@ -27,13 +27,25 @@ func TestGPUReserveDetachRequiresAnExplicitFor(t *testing.T) {
 // --detach, and the wrapper form with no window at all. Neither may be
 // rejected by the new guard, so these assert we get PAST it — any later error
 // (no command to wrap, an unwritable lease dir) is not this check.
+//
+// HERMETIC since 0.116.1: the first draft passed "\x00nonexistent" as --config,
+// which config.Load maps to built-in DEFAULTS (IsNotExist → defaults, nil error)
+// — i.e. the machine's REAL lease directory. On a box whose card was held by a
+// render the wrapper form queued behind it for the default 8 h wait and the
+// whole root package timed out (2026-09-12, the ReadyPep render's media lease);
+// on an idle box the --detach case would have taken a real 8 h "training"
+// lease. Both calls now arbitrate a temp lease root (leaseFixture) with a
+// fail-fast wait, and the --detach case is steered into the LATER
+// "mutually exclusive" refusal so it proves the guard was passed without ever
+// acquiring anything.
 func TestGPUReserveAcceptsAnExplicitWindowAndTheWrapperForm(t *testing.T) {
-	err := runGPUReserve([]string{"--class", "text", "--for", "8h", "--reason", "training", "--detach", "--config", "\x00nonexistent"})
-	if err != nil && strings.Contains(err.Error(), "--detach requires an explicit --for") {
-		t.Fatalf("an explicit --for must satisfy the guard: %v", err)
+	cfg, _ := leaseFixture(t)
+	err := runGPUReserve([]string{"--class", "text", "--for", "8h", "--reason", "training", "--detach", "--config", cfg, "--wait", "0", "--", "true"})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("an explicit --for must satisfy the guard and fall through to the later mutual-exclusion refusal; got: %v", err)
 	}
 	// The wrapper form declares its window implicitly by wrapping a process.
-	err = runGPUReserve([]string{"--class", "text", "--reason", "training", "--config", "\x00nonexistent", "--", "true"})
+	err = runGPUReserve(append([]string{"--class", "text", "--reason", "training", "--config", cfg, "--wait", "0"}, helperCmd()...))
 	if err != nil && strings.Contains(err.Error(), "--detach requires an explicit --for") {
 		t.Fatalf("the wrapper form must never hit the --detach guard: %v", err)
 	}
