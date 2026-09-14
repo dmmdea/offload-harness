@@ -21,6 +21,8 @@ import (
 	"log"
 	"strings"
 	"sync"
+
+	"github.com/dmmdea/offload-harness/internal/seatrate"
 )
 
 // Stop reasons a run can END on besides "done" / "budget" / "error"
@@ -81,29 +83,16 @@ func ParseThinkingMode(s string) (ThinkingMode, error) {
 // is not going to answer on the third.
 const maxReissues = 2
 
-// finalBudgetCap bounds the completion budget of the thinking-off retry: the
-// visible answer to a 40 KB / seven-array extraction is a few thousand tokens,
-// and the retry exists to give it that room, but a runaway non-thinking seat
-// must still stop.
-const finalBudgetCap = 8192
-
 // finalMaxTokens is the completion budget of the empty-final retry: 4x the
 // step budget, capped, never below the step budget. A step budget sized for
 // tool turns (1,024 on the 4B, 4,096 on the 27B) is not sized for the final
 // answer — the 2026-09-10 `ledger-02` row was cut at exactly 1,024 tokens of
 // a correct partial answer.
 func finalMaxTokens(stepBudget int) int {
-	if stepBudget <= 0 {
-		stepBudget = 1024
-	}
-	b := stepBudget * 4
-	if b > finalBudgetCap {
-		b = finalBudgetCap
-	}
-	if b < stepBudget {
-		b = stepBudget
-	}
-	return b
+	// One rule (seatrate.FinalBudgetFor): the fleet node advertises it on
+	// health and the delegator sizes retry floors by it (0.117.2) — the loop
+	// must never run a different budget than the one those two publish.
+	return seatrate.FinalBudgetFor(stepBudget)
 }
 
 // thinkingCtxKey marks a context whose next Chat call must render the seat's

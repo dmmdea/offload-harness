@@ -194,3 +194,46 @@ func TestUpdateSerialisesConcurrentWriters(t *testing.T) {
 		t.Fatalf("live lock: err = %v, want ErrLocked", err)
 	}
 }
+
+// TestComputeAddsTheRepackTermForASchemaContract (register D-46 follow-up):
+// a contract with an output_schema may pay one more completion for the
+// structured re-pack; the term reaches both the total and min_turn, and the
+// note says when it is skipped.
+func TestComputeAddsTheRepackTermForASchemaContract(t *testing.T) {
+	in := Input{Seat: "agent-pool", TokS: 30, RateSamples: 5, ColdLoadSec: 210, MaxSteps: 12, StepBudget: 4096, FinalBudget: 8192, TimeoutSec: 900}
+	plain := Compute(in)
+	in.RepackBudget = 8192
+	withRepack := Compute(in)
+	if d := withRepack.TotalSec - plain.TotalSec; d < 273 || d > 275 { // 8192/30 = 273.07
+		t.Fatalf("re-pack term adds %d s to the total, want ≈ 274", d)
+	}
+	if d := withRepack.MinTurnSec - plain.MinTurnSec; d < 273 || d > 275 {
+		t.Fatalf("re-pack term adds %d s to min_turn, want ≈ 274 (the retry floor must hold loop + re-pack)", d)
+	}
+	if withRepack.RepackSec < 273 || withRepack.RepackSec > 274 {
+		t.Fatalf("RepackSec = %d, want 274", withRepack.RepackSec)
+	}
+	if !strings.Contains(withRepack.Note, "re-pack ≤ 8192 tok") || !strings.Contains(withRepack.Note, "output_schema set") {
+		t.Fatalf("note must name the re-pack term and its condition: %q", withRepack.Note)
+	}
+	if strings.Contains(plain.Note, "re-pack") || plain.RepackSec != 0 {
+		t.Fatalf("a contract without a schema must carry no re-pack term: %q", plain.Note)
+	}
+}
+
+func TestMinTurnForAndFinalBudgetFor(t *testing.T) {
+	if got := MinTurnFor(210, 8192, 0, 30); got != 484 {
+		t.Fatalf("MinTurnFor(210, 8192, 0, 30) = %d, want 484", got)
+	}
+	if got := MinTurnFor(210, 8192, 8192, 30); got != 757 { // 210 + 16384/30 = 756.13
+		t.Fatalf("MinTurnFor with a re-pack term = %d, want 757", got)
+	}
+	if got := MinTurnFor(210, 8192, 0, 0); got != 0 {
+		t.Fatalf("no rate must yield no floor (0), got %d", got)
+	}
+	for _, c := range []struct{ step, want int }{{1024, 4096}, {4096, 8192}, {8192, 8192}, {0, 4096}, {100, 400}} {
+		if got := FinalBudgetFor(c.step); got != c.want {
+			t.Errorf("FinalBudgetFor(%d) = %d, want %d", c.step, got, c.want)
+		}
+	}
+}

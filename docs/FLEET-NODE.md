@@ -573,7 +573,9 @@ No transcript field exists — remote reasoning never crosses the wire.
 
 ```json
 "agent_enabled": true, "agent_seat": "offload-e4b",
-"agent_ctx_tokens": 16384, "agent_seat_resident": true
+"agent_ctx_tokens": 16384, "agent_seat_resident": true,
+"seat_budget": {"step_tokens": 1024, "final_tokens": 4096, "thinking": "auto"},
+"seat_rate": {"tok_s": 24.6, "cold_load_sec": 34.3, "samples": 2, "min_turn_sec": 201}
 ```
 
 All four fields are published under the SAME predicate that admits a dispatch
@@ -582,6 +584,13 @@ listener or a token, judged on the RESOLVED listener) — a delegator reads only
 advertising a lane dispatch would 403 is a mis-route rather than a near miss.
 
 `agent_ctx_tokens` comes from config (`0` = omitted = the delegator never places here).
+`seat_budget` (0.117.2) is the completion budget THIS node's agent loop runs a contract at — config
+`agent_max_tokens` per tool step, the final answer at 4× (cap 8,192), config `agent_thinking` or `auto`: a
+delegator's config does not travel with the contract, so a caller that needs matched budgets across seats (the
+standard quality instrument, register H-04) reads it here. `seat_rate` (0.117.2) is the seat's remembered decode
+rate and cold load from this node's seat-rates store (`seat-rates.json` under the state root, written by every
+agent run since 0.115.21) with `min_turn_sec` = cold load + one final turn at this node's final budget; absent until
+the seat has a sample; cached for 30 s. The delegator sizes a RETRY that lands here by it (register D-46).
 `agent_seat_resident` is a cached, alias-aware roster probe refreshed in the background at most
 once per 30 s — **fail-closed**: `false` until the first probe lands, and `false` again on any
 probe failure (a stale "resident" while llama-swap is down would route work at a node that

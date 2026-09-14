@@ -155,3 +155,33 @@ func TestFetchNodeViewRefusesOffTailnetBase(t *testing.T) {
 		t.Fatalf("error %q does not come from the tailnet dial gate", err)
 	}
 }
+
+// TestFetchNodeViewMapsSeatRateAndBudget (0.117.2): the node's published seat
+// rate and budget reach the view; an older node that publishes neither decodes
+// to nil, never to zero numbers a floor could be computed from.
+func TestFetchNodeViewMapsSeatRateAndBudget(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"node_id":"n","agent_enabled":true,"agent_seat":"s","agent_seat_resident":true,"agent_ctx_tokens":8192,
+		  "seat_rate":{"tok_s":30.5,"cold_load_sec":210,"samples":5,"min_turn_sec":484},
+		  "seat_budget":{"step_tokens":4096,"final_tokens":8192,"thinking":"off"}}`))
+	}))
+	defer srv.Close()
+	v, err := FetchNodeView(context.Background(), srv.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.SeatRate == nil || v.SeatRate.TokS != 30.5 || v.SeatRate.ColdLoadSec != 210 || v.SeatRate.Samples != 5 || v.SeatRate.MinTurnSec != 484 {
+		t.Fatalf("seat_rate = %+v, want 30.5 tok/s, 210 s cold, 5 samples, min_turn 484", v.SeatRate)
+	}
+	if v.SeatBudget == nil || v.SeatBudget.StepTokens != 4096 || v.SeatBudget.FinalTokens != 8192 || v.SeatBudget.Thinking != "off" {
+		t.Fatalf("seat_budget = %+v, want 4096/8192/off", v.SeatBudget)
+	}
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"node_id":"n","agent_enabled":true,"agent_seat":"s","agent_seat_resident":true,"agent_ctx_tokens":8192}`))
+	}))
+	defer old.Close()
+	v, err = FetchNodeView(context.Background(), old.URL, "")
+	if err != nil || v.SeatRate != nil || v.SeatBudget != nil {
+		t.Fatalf("an older node must decode to nil rate/budget: %+v %+v err=%v", v.SeatRate, v.SeatBudget, err)
+	}
+}

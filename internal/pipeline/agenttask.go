@@ -64,7 +64,7 @@ const (
 	// with headroom and stays well inside every seat's window.
 	agentRepackMaxTokens = 1024
 	// agentRepackMaxTokensCap bounds repackBudget: the loop's own final budget
-	// is capped at 8,192 (agent/thinking.go finalBudgetCap), and a re-pack that
+	// is capped at 8,192 (seatrate.FinalBudgetCap), and a re-pack that
 	// must hold MORE than the answer it re-packs is not an extraction.
 	agentRepackMaxTokensCap = 8192
 	// agentRepackChatTimeout bounds the grammar-free chat fallback: one
@@ -1399,6 +1399,14 @@ func wallEstimateFor(cfg config.Config, contract core.AgentContract, seat string
 	in.FinalBudget = agent.FinalBudgetFor(in.StepBudget)
 	if in.MaxSteps == 1 {
 		in.FinalBudget = in.StepBudget
+	}
+	// A contract with an output_schema may pay one more completion for the
+	// structured re-pack when the final answer is prose (register D-46
+	// follow-up: a 285 s re-pack on the 27B sat outside every floor and
+	// estimate). Charged at the final budget as an upper bound; the note says
+	// when it is skipped.
+	if len(contract.OutputSchema) > 0 {
+		in.RepackBudget = in.FinalBudget
 	}
 	switch strings.ToLower(thinkingFor(cfg, contract)) {
 	case "", "auto":

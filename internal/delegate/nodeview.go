@@ -56,6 +56,14 @@ type NodeView struct {
 	// `accelerators`, ADR 0024). Absent = none. Read by accelremote to pick the
 	// node that carries a device this box lacks (Coral Phase B).
 	Accelerators []string
+	// SeatRate is the node's published seat rate (health `seat_rate`,
+	// 0.117.2): the retry floor a RETRY on that node is sized by (D-46).
+	// nil = the node published none (older node, or no sample yet) — the
+	// delegator then falls back to the first attempt's seat numbers.
+	SeatRate *SeatRateView
+	// SeatBudget is the node's published completion budget (health
+	// `seat_budget`); nil on an older node.
+	SeatBudget *SeatBudgetView
 	// GpuUtilPct is the busiest device's utilization; GpuUtilKnown is false
 	// when the node did not publish it. Read by betterRemote as the LAST key —
 	// a tie-breaker, never a primary signal (operator decision 2026-09-03).
@@ -129,6 +137,21 @@ var healthClient = &http.Client{
 	Timeout:   fetchNodeViewTimeout,
 }
 
+// SeatRateView mirrors fleetnode.SeatRateHealth.
+type SeatRateView struct {
+	TokS        float64 `json:"tok_s"`
+	ColdLoadSec float64 `json:"cold_load_sec"`
+	Samples     int     `json:"samples"`
+	MinTurnSec  int     `json:"min_turn_sec"`
+}
+
+// SeatBudgetView mirrors fleetnode.SeatBudgetHealth.
+type SeatBudgetView struct {
+	StepTokens  int    `json:"step_tokens"`
+	FinalTokens int    `json:"final_tokens"`
+	Thinking    string `json:"thinking"`
+}
+
 // healthWire is the LOOSE decode of GET /fleet/health — only the fields the
 // placement gate consumes. Tolerant on purpose, twice over: unknown health
 // fields (VRAM, footprints, future keys) are ignored so staggered node
@@ -154,6 +177,9 @@ type healthWire struct {
 	Accelerators []string `json:"accelerators"`
 	GpuUtilPct   int      `json:"gpu_util_pct"`
 	GpuUtilKnown bool     `json:"gpu_util_known"`
+	// Additive (0.117.2). nil on a node that publishes neither.
+	SeatRate   *SeatRateView   `json:"seat_rate"`
+	SeatBudget *SeatBudgetView `json:"seat_budget"`
 	// Additive (0.113.16). nil on a node that publishes no lease.
 	Lease *struct {
 		Held  bool   `json:"held"`
@@ -224,6 +250,8 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		MaxQueueDepth:     w.MaxQueueDepth,
 		ServedModels:      w.ServedModels,
 		Accelerators:      w.Accelerators,
+		SeatRate:          w.SeatRate,
+		SeatBudget:        w.SeatBudget,
 		GpuUtilPct:        w.GpuUtilPct,
 		GpuUtilKnown:      w.GpuUtilKnown,
 		LeasedText:        w.Lease != nil && w.Lease.Held && strings.EqualFold(w.Lease.Class, "text"),

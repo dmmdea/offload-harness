@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -59,5 +60,22 @@ func TestWallEstimateForUsesTheSeatsOwnNumbers(t *testing.T) {
 	none := wallEstimateFor(config.Config{}, core.AgentContract{}, "qwen3.5-4b-vllm", seatrate.Seat{}, 34, 300)
 	if none.TotalSec != 0 || !strings.Contains(none.Note, "no decode-rate sample for qwen3.5-4b-vllm") {
 		t.Fatalf("no-rate = %+v", none)
+	}
+}
+
+// TestWallEstimateChargesTheRepackForASchemaContract (register D-46 follow-up):
+// the node's estimate adds one final-budget completion for the structured
+// re-pack when the contract carries an output_schema, and nothing otherwise.
+func TestWallEstimateChargesTheRepackForASchemaContract(t *testing.T) {
+	cfg := config.Config{AgentMaxTokens: 4096, AgentSeatTokS: 30, AgentThinking: "off"}
+	prose := core.AgentContract{Goal: "g", MaxSteps: 12}
+	schema := core.AgentContract{Goal: "g", MaxSteps: 12, OutputSchema: json.RawMessage(`{"properties":{"a":{"type":"string"}}}`)}
+	p := wallEstimateFor(cfg, prose, "seat", seatrate.Seat{}, 210, 900)
+	s := wallEstimateFor(cfg, schema, "seat", seatrate.Seat{}, 210, 900)
+	if p.RepackSec != 0 || strings.Contains(p.Note, "re-pack") {
+		t.Fatalf("no schema, no re-pack term: %+v", p)
+	}
+	if s.RepackSec < 273 || s.RepackSec > 274 || s.TotalSec-p.TotalSec != s.RepackSec || !strings.Contains(s.Note, "re-pack ≤ 8192 tok") {
+		t.Fatalf("schema contract must carry one 8,192-token re-pack term: %+v vs %+v", s, p)
 	}
 }

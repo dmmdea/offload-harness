@@ -133,3 +133,53 @@ func TestRunRetryNeverLandsOnASeatAlreadyRunningAnotherJob(t *testing.T) {
 	}
 	_ = json.Marshal // keep the import honest if helpers change
 }
+
+// TestRunRetryFloorComesFromTheRetrySeat (0.117.2, register D-46 follow-up):
+// the 2026-09-10 retry cleared a floor sized from the FIRST attempt's seat (the
+// 4B's 201 s) and landed on the 27B, whose own floor was ≈ 484 s — with a
+// schema contract's re-pack on top, ≈ 757 s. The floor is now the RETRY
+// seat's: its published rate and cold load at its own final budget, plus the
+// re-pack term for a schema contract. A slow retry seat skips the retry with a
+// note naming the publisher; a fast one lets it run.
+func TestRunRetryFloorComesFromTheRetrySeat(t *testing.T) {
+	compressPolls(t, 10*time.Millisecond, 2*time.Second)
+	slow, slowURL := eligibleNode(t, "node-slow", "qube from slow")
+	slow.seatRate = map[string]any{"tok_s": 30.0, "cold_load_sec": 210.0, "samples": 5, "min_turn_sec": 484}
+	slow.seatBudget = map[string]any{"step_tokens": 4096, "final_tokens": 8192, "thinking": "off"}
+	var localCalls atomic.Int64
+	c := contracts(1)
+	c[0].TimeoutSec = 600 // clears the configured 10 s floor and the first attempt's (none); not the 27B's 757 s
+	results, sum, err := Run(context.Background(), testCfg(t), failingLocal(&localCalls), c, "spread", []string{slowURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := results[0]
+	if slow.dispatches.Load() != 0 || sum.Retried != 0 || pr.RetriedOn != "" {
+		t.Fatalf("retry must be skipped under the RETRY seat's floor: dispatches=%d retried=%d retried_on=%q note=%q", slow.dispatches.Load(), sum.Retried, pr.RetriedOn, pr.RetryNote)
+	}
+	if !strings.Contains(pr.RetryNote, "floor 757s") || !strings.Contains(pr.RetryNote, "min_turn_sec published by node-slow") {
+		t.Fatalf("retry_note = %q, want the retry seat's 757 s floor and its publisher named", pr.RetryNote)
+	}
+	// The same contract with a FAST retry seat: 5 + (4096+4096)/100 = 86.92 → 87 s < 600 → the retry runs.
+	fast, fastURL := eligibleNode(t, "node-fast", "qube from fast")
+	fast.seatRate = map[string]any{"tok_s": 100.0, "cold_load_sec": 5.0, "samples": 3, "min_turn_sec": 46}
+	fast.seatBudget = map[string]any{"step_tokens": 1024, "final_tokens": 4096, "thinking": "off"}
+	c2 := contracts(1)
+	c2[0].TimeoutSec = 600
+	results, sum, err = Run(context.Background(), testCfg(t), failingLocal(&localCalls), c2, "spread", []string{fastURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fast.dispatches.Load() != 1 || sum.Retried != 1 || results[0].RetriedOn != "node-fast" {
+		t.Fatalf("retry must run on a fast seat: dispatches=%d retried=%d retried_on=%q note=%q", fast.dispatches.Load(), sum.Retried, results[0].RetriedOn, results[0].RetryNote)
+	}
+	// A node that publishes no rate keeps the pre-0.117.2 behaviour: the first
+	// attempt's numbers (here none → the configured floor), and the note says so.
+	r := &runner{cfg: testCfg(t)}
+	r.cfg.AgentRetryMinSec = 300
+	first := PlacedResult{Node: "local", Result: core.AgentWireResult{MinTurnSec: 350}}
+	floor, src := r.retryFloorOn(first, placement{base: "http://x", view: NodeView{NodeID: "node-old"}}, remoteContract())
+	if floor != 350 || !strings.Contains(src, "min_turn_sec of the seat on local") || !strings.Contains(src, "retry seat published no rate") {
+		t.Fatalf("no published rate: floor = %d %q, want the first attempt's 350 s with the fallback named", floor, src)
+	}
+}
