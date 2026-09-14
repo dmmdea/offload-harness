@@ -6,7 +6,6 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-<<<<<<< HEAD
 ### Security
 - Operator identity scrubbed from the public tree, and a gate that keeps it out
   (`TestTrackedTreeCarriesNoOperatorIdentity`, root package): a Windows profile path in a plan, the
@@ -20,7 +19,7 @@ Versioning: [SemVer](https://semver.org/).
   public tree (kept in the private evidence repository); `.gitignore` now covers every backup spelling of
   the working config (they carry the fleet token) and the second TTS venv. History is not rewritten: the
   paths it carries were already public and hold no credential (the fleet token never entered history).
-=======
+
 ## [0.117.0] - 2026-09-14 - the drain waits for runs, inside the queue budget; "busy" says what the cards are doing
 
 `gpu reserve --wait 8h --drain --unload-seat` failed twice on 2026-09-14 with `drain of agent-pool did
@@ -85,7 +84,6 @@ what the cards were DOING, only that something held them.
   every 15 s for the drain's length (`TestReserveRenewsTheLeaseWhileDraining`); the cordon, the admission
   pre-flight and the warm-up each had a full `agent_admission_wait_sec` window — one shared deadline now,
   and the cordon wait is reported in `admission_wait_sec` (`TestCordonWaitIsChargedToTheAdmissionBudget`).
->>>>>>> origin/main
 
 ## [0.116.1] - 2026-09-12 - the ampere-16 vision seat is the measured winner
 
