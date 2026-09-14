@@ -21,9 +21,11 @@ type fakeSwap struct {
 	id, alias                 string
 	roster                    bool // serve /v1/models at all (false = roster unreadable)
 	loaded                    atomic.Bool
+	starting                  atomic.Bool // loaded AND listed as `starting` (a load in progress)
 	inflight                  atomic.Int64
 	upstreamHitsWhileUnloaded atomic.Int64
 	metricsStatus             atomic.Int64
+	metricsHits               atomic.Int64 // every /upstream/<name>/metrics request, loaded or not
 }
 
 func (f *fakeSwap) handler() http.Handler {
@@ -38,11 +40,16 @@ func (f *fakeSwap) handler() http.Handler {
 	mux.HandleFunc("/running", func(w http.ResponseWriter, r *http.Request) {
 		var running []map[string]string
 		if f.loaded.Load() {
-			running = append(running, map[string]string{"model": f.id, "state": "ready"})
+			state := "ready"
+			if f.starting.Load() {
+				state = "starting"
+			}
+			running = append(running, map[string]string{"model": f.id, "state": state})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"running": running})
 	})
 	metrics := func(w http.ResponseWriter, r *http.Request) {
+		f.metricsHits.Add(1)
 		if !f.loaded.Load() {
 			f.upstreamHitsWhileUnloaded.Add(1)
 		}
@@ -176,5 +183,36 @@ func TestParseSlotsInflightCountsProcessingSlots(t *testing.T) {
 	}
 	if _, err := ParseSlotsInflight(strings.NewReader(`{"error":"x"}`)); err == nil {
 		t.Fatal("a non-array body must be an error, never zero in flight")
+	}
+}
+
+// TestInflightReportsAStartingSeatWithoutTouchingTheUpstream (register D-92):
+// llama-swap lists a loading seat as `starting` and holds /upstream/<seat>/…
+// until the load completes (4m08s on the 27B, 2026-09-11). The reading must say
+// "starting" from /running alone — one blocked upstream read is what timed
+// out the H-24 gate's drain and stranded its lease.
+func TestInflightReportsAStartingSeatWithoutTouchingTheUpstream(t *testing.T) {
+	f := &fakeSwap{id: "qwen3.8-27b-vllm", alias: "agent-pool", roster: true}
+	f.loaded.Store(true)
+	f.starting.Store(true)
+	f.inflight.Store(7) // whatever the upstream would say, it must not be asked
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	hitsBefore := f.metricsHits.Load()
+	rd, err := Inflight(context.Background(), srv.Client(), srv.URL, "agent-pool")
+	if err != nil {
+		t.Fatalf("Inflight: %v", err)
+	}
+	if !rd.Loaded || !rd.Starting || rd.Inflight != 0 || rd.Source != "running-state:starting" {
+		t.Fatalf("reading = %+v; want loaded + starting, no count, source running-state:starting", rd)
+	}
+	if f.metricsHits.Load() != hitsBefore {
+		t.Fatal("the reader asked the upstream of a STARTING seat — llama-swap holds that request for the whole load")
+	}
+	// Once the seat is ready the same reader asks the upstream as before.
+	f.starting.Store(false)
+	rd, err = Inflight(context.Background(), srv.Client(), srv.URL, "agent-pool")
+	if err != nil || rd.Starting || rd.Inflight != 7 || rd.Source != "metrics" {
+		t.Fatalf("after ready: reading = %+v err=%v; want 7 in flight via metrics", rd, err)
 	}
 }

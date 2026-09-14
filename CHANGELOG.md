@@ -6,6 +6,64 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.117.0] - 2026-09-14 - the drain waits for runs, inside the queue budget; "busy" says what the cards are doing
+
+`gpu reserve --wait 8h --drain --unload-seat` failed twice on 2026-09-14 with `drain of agent-pool did
+not finish within 2m0s (last: 1 in flight)` after printing "1 in flight" sixty-one times. The lease was
+free both times; the "1 in flight" was one legitimate 27B step (3m27s at the seat's measured 23.6 tok/s).
+Three defects, each sufficient (ADR 0041, register D-93): the drain's deadline was a fixed two minutes
+outside the `--wait` budget; `--unload-seat` stamped the lease exclusive at acquire, so the admission
+gate blocked the very run the drain was waiting for; and the drain read the engine's gauge, which reads
+zero between a run's steps — the third attempt unloaded the seat in that gap and the run's next step
+died behind the fence (ledger 10:15:00, `wall timeout after 600s`). Behind all three: no surface said
+what the cards were DOING, only that something held them.
+
+### Added
+- `internal/gpuactivity`: the run registry and the activity reading. Every agent loop launcher
+  (`agent_run`, the contract runner behind local delegation legs and fleet jobs) registers its run under
+  `<state root>/gpu/activity/` before admission — seat, kind, origin, goal excerpt, phase, step, tokens —
+  updates it per step (`agent.RunObserver`, `Loop.WithObserver`) and every 15 s, removes it at the end;
+  stale records (dead/recycled pid, heartbeat > 120 s) are swept by readers. `Snapshot` composes the
+  lease, the seat (`seatload`), the runs and an nvidia-smi sample (utilization, memory, processes) into
+  one `verdict`: `working` | `held-working` | `held-idle` | `loaded-idle` | `busy-outside` |
+  `stale-holder` | `free`, with a note that names the evidence.
+- `gpu status [--json]` prints the verdict, the seat's load state and in-flight count, the registered
+  runs, the cards, and the holder's command; `offload_status.gpu_lease` carries `verdict`, `activity`,
+  `draining`, `command`. The tool description names the vocabulary.
+- Lease record: `draining` and `command` (`gpulease.Meta`/`Info`/`Options`); `Lease.Restamp` /
+  `Manager.Restamp` rewrite the holder's own flags in place under the epoch lock without moving the
+  epoch; `InspectDirDetail` tells a stale record from a free card; `Info.HeartbeatAt`.
+- `modelaffinity.BlocksNewRun` / `AwaitRunSlot`: a DRAINING text hold refuses a NEW run (the launcher
+  holds at the cordon for its admission budget, then defers `capacity` with the holder named) while
+  `blocksLoad` — every request — is unchanged, so runs already in flight finish their steps.
+  `LeaseError.Draining` and a message that says running work is not interrupted.
+- `gpu hold --draining`; `pipeline.AdmissionBudget` (exported for the MCP door).
+- Tests: `TestDrainWaitsForARegisteredRunAcrossTheStepGap`, `TestDrainPrintsOnChangeNotOnEveryTick`,
+  `TestDrainIgnoresRunsOnOtherSeats`, `TestDrainDeadlineFollowsTheQueueBudget`,
+  `TestReserveDrainsUnderADrainingStampAndTurnsExclusiveAfter`, `TestReserveStampsTheWrappedCommand`,
+  `TestRestampTurnsADrainingLeaseExclusiveWithoutMovingTheEpoch`, `TestRestampRefusesAFencedOutEpoch`,
+  `TestInspectDirDetailReportsAStaleRecord`, `TestADrainingTextHoldRefusesNewRunsButAdmitsRunningWork`,
+  `TestAnExclusiveHoldRefusesBothNewRunsAndRequests`, `TestLoopReportsStepsAndTheFinalPhaseToItsObserver`,
+  the `gpuactivity` suite (`TestAssessVocabulary`, staleness by a real dead pid, parsers), and the
+  seat-starting drain tests carried from the unmerged 0.115.24 branch.
+
+### Changed
+- `gpu reserve --drain`: `--drain-timeout` defaults to **the rest of `--wait`** (from when the
+  reservation began queueing), floor 2 min; an explicit value still wins. The lease is stamped
+  `draining` at acquire and `exclusive` only once the seat is idle (`--unload-seat` / `--exclusive`
+  with `--drain`); `--exclusive` without `--drain` stamps at acquire as before. The wrapper form stamps
+  its argv as the record's `command`. The drain waits until the engine's gauge AND the registry are
+  empty on two consecutive reads; a seat listed `starting`/`stopping` counts as busy and its upstream
+  is never probed (register D-92, `seatload.Reading.Starting`). Progress prints on CHANGE (count, load
+  state, a run's step) with a reminder every 5 min; every line and the deadline error carry the seat's
+  own turn arithmetic and how to wait longer.
+- The contract runner registers and holds at the cordon BEFORE its admission pre-flight and warm-up,
+  so the warm-up can no longer load the seat past an exclusive or draining hold (it did at 10:20:03).
+
+### Fixed
+- The drain no longer deadlocks against the run it waits for, no longer fails under one legitimate
+  seat turn, and no longer unloads a seat between a run's steps.
+
 ## [0.116.1] - 2026-09-12 - the ampere-16 vision seat is the measured winner
 
 The `ampere-16` tier seeded `qwen3-vl-8b` for vision as a J-media inheritance from `blackwell-16`; it was

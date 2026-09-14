@@ -163,6 +163,18 @@ type Meta struct {
 	// runs — so such loads wait or route elsewhere for the lease's length. A plain
 	// text lease (the holder unloaded nothing) keeps the old, ungated behaviour.
 	Exclusive bool `json:"exclusive,omitempty"`
+	// Draining (0.117.0, register D-93) is stamped by a holder that is waiting for
+	// the seat's in-flight work to finish before it touches the cards (`gpu reserve
+	// --drain`). It CORDONS the seat: no NEW agent run is admitted while it is set
+	// (modelaffinity.BlocksNewRun), while the requests of runs already in flight
+	// keep flowing. The exclusive stamp — which blocks every admission — is applied
+	// only once the drain has completed (Restamp); stamping it at acquire made the
+	// drain block the very run it was waiting for (2026-09-14).
+	Draining bool `json:"draining,omitempty"`
+	// Command (0.117.0) is what the wrapper form runs under the lease (the wrapped
+	// argv, clipped), so a reader of `gpu status` sees WHAT holds the cards, not
+	// only who.
+	Command string `json:"command,omitempty"`
 }
 
 // Info is one point-in-time inspection.
@@ -179,6 +191,14 @@ type Info struct {
 	// Exclusive mirrors Meta.Exclusive: the holder cleared the cards and expects
 	// them to stay clear.
 	Exclusive bool
+	// Draining mirrors Meta.Draining: the holder is waiting for the seat to go
+	// idle; new runs wait, in-flight runs complete.
+	Draining bool
+	// Command mirrors Meta.Command: what the holder is running, when it said.
+	Command string
+	// HeartbeatAt is the holder's last renewal (the per-epoch heartbeat file,
+	// else the acquisition stamp). Zero when unknown.
+	HeartbeatAt time.Time
 }
 
 // Options configure an acquisition.
@@ -205,6 +225,10 @@ type Options struct {
 	// 2026-09-09: a `gpu reserve --wait 2m` behind a `--for 3m` holder was refused
 	// at once, and the holder released six seconds later.
 	WaitOut bool
+	// Draining stamps Meta.Draining on a TEXT lease (see Meta.Draining).
+	Draining bool
+	// Command is recorded as Meta.Command (clipped to commandClip runes).
+	Command string
 }
 
 // Manager binds a resolved state root. Construct with Open, which performs the
@@ -583,20 +607,36 @@ func (m *Manager) reclaimable(meta *Meta, now time.Time) bool {
 func InspectDir(leaseDir string) Info { return inspectDirAt(leaseDir, time.Now(), DefaultHeartbeatTTL) }
 
 func inspectDirAt(leaseDir string, now time.Time, hbTTL time.Duration) Info {
+	info, _, _ := inspectDirDetailAt(leaseDir, now, hbTTL)
+	return info
+}
+
+// InspectDirDetail is InspectDir plus the record behind the verdict: the raw
+// Meta (nil when no record exists or it is unreadable) and whether it was
+// judged reclaimable. A reader that wants to say "a lease record is left over
+// from a holder that is gone" needs the second half — Inspect's zero Info
+// cannot distinguish that from a free card (gpuactivity, 0.117.0).
+func InspectDirDetail(leaseDir string) (Info, *Meta, bool) {
+	return inspectDirDetailAt(leaseDir, time.Now(), DefaultHeartbeatTTL)
+}
+
+func inspectDirDetailAt(leaseDir string, now time.Time, hbTTL time.Duration) (Info, *Meta, bool) {
 	b, err := os.ReadFile(filepath.Join(leaseDir, metaFileName))
 	if err != nil {
-		return Info{}
+		return Info{}, nil, false
 	}
 	var meta Meta
 	if json.Unmarshal(b, &meta) != nil {
-		return Info{}
+		return Info{}, nil, false
 	}
 	effective := meta
 	effective.RenewedAtMs = heartbeatAt(leaseDir, &meta)
 	if Reclaimable(&effective, now, hbTTL, processStart) {
-		return Info{}
+		return Info{}, &meta, true
 	}
-	return infoFrom(&meta, now)
+	info := infoFrom(&meta, now)
+	info.HeartbeatAt = time.UnixMilli(effective.RenewedAtMs)
+	return info, &meta, false
 }
 
 // heartbeatAt reads the per-epoch heartbeat beside a lease record, falling back to the
@@ -630,6 +670,8 @@ func infoFrom(meta *Meta, now time.Time) Info {
 		JobID:     meta.JobID,
 		ExpiresAt: time.UnixMilli(meta.ExpiresAtMs),
 		Exclusive: meta.Exclusive,
+		Draining:  meta.Draining,
+		Command:   meta.Command,
 	}
 }
 
@@ -646,7 +688,9 @@ func (m *Manager) Inspect() Info {
 	// ONE builder. A second copy of the field list here is how Exclusive would
 	// reach ErrHeld but not Inspect — the vision gate and the load gate read
 	// through this path, and they are the readers the flag exists for.
-	return infoFrom(meta, now)
+	info := infoFrom(meta, now)
+	info.HeartbeatAt = time.UnixMilli(m.lastHeartbeat(meta))
+	return info
 }
 
 func (m *Manager) readMeta() (*Meta, error) {
@@ -875,6 +919,8 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 		ExpiresAtMs:  now.Add(ttl).UnixMilli(),
 		RenewedAtMs:  now.UnixMilli(),
 		Exclusive:    opts.Exclusive && class == ClassText,
+		Draining:     opts.Draining && class == ClassText,
+		Command:      clipCommand(opts.Command),
 	}
 	b, err := json.Marshal(&meta)
 	if err != nil {
@@ -1077,6 +1123,48 @@ func (l *Lease) Renew() error {
 		[]byte(strconv.FormatInt(l.mgr.now().UnixMilli(), 10)), 0o666)
 }
 
+// Restamp rewrites the CURRENT lease record in place: the holder changing its
+// own flags mid-hold (draining -> exclusive once the drain completes, 0.117.0).
+// It runs under the epoch lock, refuses when the record's epoch is not the
+// caller's (fenced out — the record is someone else's now), and replaces the
+// file atomically, so a reader never sees a torn record and the claim never
+// stops existing (a concurrent TryAcquire still meets an existing file). The
+// epoch itself is never moved by this path.
+func (m *Manager) Restamp(epoch uint64, fn func(*Meta)) error {
+	return m.withEpochLock(func() error {
+		meta, err := m.readMeta()
+		if err != nil || meta == nil {
+			return fmt.Errorf("gpulease: restamp: the lease is gone (epoch %d)", epoch)
+		}
+		if meta.Epoch != epoch {
+			return fmt.Errorf("gpulease: restamp: fenced out — our epoch %d, current epoch %d", epoch, meta.Epoch)
+		}
+		fn(meta)
+		meta.Epoch = epoch
+		b, merr := json.Marshal(meta)
+		if merr != nil {
+			return fmt.Errorf("gpulease: encoding lease record: %w", merr)
+		}
+		tmp := m.metaPath() + ".restamp"
+		if werr := os.WriteFile(tmp, b, 0o666); werr != nil {
+			return fmt.Errorf("gpulease: restamp: %w", werr)
+		}
+		if rerr := os.Rename(tmp, m.metaPath()); rerr != nil {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("gpulease: restamp: %w", rerr)
+		}
+		return nil
+	})
+}
+
+// Restamp is Manager.Restamp for the lease's own holder.
+func (l *Lease) Restamp(fn func(*Meta)) error {
+	if l.done {
+		return errors.New("gpulease: lease already released")
+	}
+	return l.mgr.Restamp(l.epoch, fn)
+}
+
 // heartbeatPath is the per-epoch heartbeat file inside the lease directory.
 func (m *Manager) heartbeatPath(epoch uint64) string {
 	return filepath.Join(m.leaseDir(), "hb."+strconv.FormatUint(epoch, 10))
@@ -1141,4 +1229,15 @@ func (l *Lease) Release() error {
 		return fmt.Errorf("gpulease: releasing lease: %w", err)
 	}
 	return nil
+}
+
+// commandClip bounds Meta.Command: enough to recognise the job, never a transcript.
+const commandClip = 240
+
+func clipCommand(s string) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > commandClip {
+		return string(r[:commandClip-1]) + "…"
+	}
+	return s
 }

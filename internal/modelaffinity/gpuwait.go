@@ -109,6 +109,20 @@ func gpuLeaseDir() string {
 // inspection, so a spent caller is told the card is free rather than refused on
 // arithmetic.
 func awaitCard(ctx context.Context, base, model string, deadline time.Time) error {
+	return awaitLease(ctx, base, model, deadline, blocksLoad)
+}
+
+// AwaitRunSlot is awaitCard for the START of an agent run (0.117.0, register
+// D-93): it also waits out a text holder that is DRAINING the seat. The two
+// predicates differ on purpose — see BlocksNewRun. A launcher calls this once,
+// before admission, with its admission budget as the deadline, so a run
+// refused at the cordon defers with the holder named and never spends its
+// wall waiting.
+func AwaitRunSlot(ctx context.Context, base, model string, deadline time.Time) error {
+	return awaitLease(ctx, base, model, deadline, BlocksNewRun)
+}
+
+func awaitLease(ctx context.Context, base, model string, deadline time.Time, blocks func(gpulease.Info) bool) error {
 	dir := gpuLeaseDir()
 	if dir == "" {
 		// Not armed: no config.Load ran in this process. Inert by construction —
@@ -117,7 +131,7 @@ func awaitCard(ctx context.Context, base, model string, deadline time.Time) erro
 		return nil
 	}
 	info := gpulease.InspectDir(dir)
-	if !blocksLoad(info) {
+	if !blocks(info) {
 		return nil
 	}
 	start := time.Now()
@@ -141,7 +155,7 @@ func awaitCard(ctx context.Context, base, model string, deadline time.Time) erro
 			return leaseError(base, model, info, time.Since(start), bound, ctx.Err())
 		case <-time.After(remain):
 		}
-		if info = gpulease.InspectDir(dir); !blocksLoad(info) {
+		if info = gpulease.InspectDir(dir); !blocks(info) {
 			return nil
 		}
 	}
@@ -168,6 +182,21 @@ func blocksLoad(info gpulease.Info) bool {
 		return false
 	}
 	return info.Class == gpulease.ClassMedia || (info.Class == gpulease.ClassText && info.Exclusive)
+}
+
+// BlocksNewRun decides whether info describes a card no NEW agent run may start
+// on: everything blocksLoad refuses, plus a text holder that is DRAINING the
+// seat (0.117.0, register D-93). The distinction is the whole fix: a drain must
+// stop new work from landing (or it never converges under K sessions) while
+// letting the runs already in flight finish their remaining steps (or it
+// blocks the very work it is waiting for — the 2026-09-14 deadlock, resolved
+// only by the run's 600 s wall). Requests of a registered run pass blocksLoad
+// under a draining lease; a run's first admission passes through here.
+func BlocksNewRun(info gpulease.Info) bool {
+	if blocksLoad(info) {
+		return true
+	}
+	return info.Held && !insideLease(info) && info.Class == gpulease.ClassText && info.Draining
 }
 
 // insideLease reports whether this process is running UNDER the very lease that
@@ -212,6 +241,9 @@ type LeaseError struct {
 	HeldFor time.Duration  // how long the holder has owned the card
 	Waited  time.Duration
 	Bound   time.Duration
+	// Draining: the holder is a text lease draining the seat (BlocksNewRun) — the
+	// refusal is of a NEW run, not of a load; running work was never touched.
+	Draining bool
 	cause   error // context.DeadlineExceeded (our bound) or the caller's ctx.Err()
 }
 
@@ -220,6 +252,12 @@ type LeaseError struct {
 // congestion, which that classifier spells "timeout"; the wording is pinned by
 // test so a reword cannot silently reclassify it in the ledger.
 func (e *LeaseError) Error() string {
+	if e.Draining {
+		return fmt.Sprintf(
+			"gpu-lease timeout after %s (bound %s): a %s holder is draining the seat (pid %d, held %s, reason %q): "+
+				"no new run starts on %s at %s until the work already in flight finishes; running work is not interrupted",
+			e.Waited.Round(time.Millisecond), e.Bound, e.Class, e.PID, e.HeldFor.Round(time.Second), e.Reason, e.Want, e.Base)
+	}
 	return fmt.Sprintf(
 		"gpu-lease timeout after %s (bound %s): a %s job holds the GPU (pid %d, held %s, reason %q), "+
 			"and admitting model %q on %s would load it into VRAM that render is using",
@@ -243,6 +281,7 @@ func leaseError(base, model string, info gpulease.Info, waited, bound time.Durat
 		JobID:   info.JobID,
 		HeldFor: info.Age,
 		Waited:  waited,
+		Draining: info.Draining && info.Class == gpulease.ClassText && !info.Exclusive,
 		Bound:   bound,
 		cause:   cause,
 	}

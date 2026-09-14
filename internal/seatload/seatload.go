@@ -80,6 +80,12 @@ type Reading struct {
 	// reading is only an optimisation (the spread deal) may treat it as idle
 	// and say so.
 	Ambiguous bool
+	// Starting reports that llama-swap lists the seat in state `starting` (or
+	// `stopping`): Loaded is true, Inflight is NOT known (0 here means "not
+	// asked"), and the upstream was NOT probed — llama-swap would hold that
+	// request until the load completes (register D-92). A load in progress is
+	// work in flight for the drain and "not yet a target" for the spread deal.
+	Starting bool
 }
 
 // Inflight reads the seat named `seat` (id or alias) behind the llama-swap at
@@ -131,12 +137,26 @@ func Inflight(ctx context.Context, client *http.Client, endpoint, seat string) (
 		}
 		if matched {
 			rd.Loaded = true
+			// A seat that is STARTING or STOPPING is listed, but its upstream is
+			// not there to ask: llama-swap holds `/upstream/<seat>/…` until the
+			// load completes (4m08s on the 27B TP2 seat, 2026-09-11, llama-swap
+			// log line 420399), which is longer than any drain window and is
+			// exactly how the H-24 gate's first run aborted with "0 in flight
+			// (confirming)". The reading says so instead of blocking, and the
+			// caller polls /running until the state settles (register D-92).
+			if st := strings.ToLower(m.State); st == "starting" || st == "stopping" {
+				rd.Starting = true
+				rd.Source = "running-state:" + st
+			}
 		} else {
 			rd.RunningOthers++
 		}
 	}
 	if !rd.Loaded {
 		rd.Ambiguous = rd.RosterErr != nil && rd.RunningOthers > 0
+		return rd, nil
+	}
+	if rd.Starting {
 		return rd, nil
 	}
 	// The upstream path is addressed by the name the caller bound (llama-swap
