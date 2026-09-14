@@ -191,11 +191,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	admissionEnd := time.Now().Add(admissionBudget(p.cfg.AgentAdmissionWaitSec))
 	cordonStart := time.Now()
 	if lerr := modelaffinity.AwaitRunSlot(ctx, p.cfg.Endpoint, seat, admissionEnd); lerr != nil {
-		admitted = time.Since(cordonStart)
+		admitted = cordonWait(cordonStart)
 		admitNote = "held at the cordon for the admission budget"
 		return deferWire(core.DeferClassCapacity, "gpu busy: "+lerr.Error())
 	}
-	admitted = time.Since(cordonStart)
+	admitted = cordonWait(cordonStart)
 	// Admission pre-flight (2026-09-02): the wall must not pay for ANOTHER
 	// session's model swap. llama-swap queues a request silently while it
 	// evicts and loads, so a contract that arrived mid-swap spent its whole
@@ -1065,6 +1065,17 @@ func admissionBudget(sec int) time.Duration {
 		return 300 * time.Second
 	}
 	return time.Duration(sec) * time.Second
+}
+
+// cordonWait is the time a run spent at the cordon, counted only when it
+// actually waited: an ungated pass takes nanoseconds, and stamping those as
+// admission time reported a wait that never happened and shaved the warm-up's
+// budget below its one-poll floor (CI, 2026-09-14 — the Windows clock had hidden it).
+func cordonWait(since time.Time) time.Duration {
+	if w := time.Since(since); w >= time.Millisecond {
+		return w
+	}
+	return 0
 }
 
 // AdmissionBudget is admissionBudget for the other run launchers (the MCP
