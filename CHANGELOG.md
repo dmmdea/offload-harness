@@ -20,6 +20,42 @@ Versioning: [SemVer](https://semver.org/).
   the working config (they carry the fleet token) and the second TTS venv. History is not rewritten: the
   paths it carries were already public and hold no credential (the fleet token never entered history).
 
+## [0.117.2] - 2026-09-14 - the retry floor is the retry seat's; the deal reads a starting seat as busy
+
+The D-46 sizing half of the stranded `fix/drain-starting-seat` branch, rebased onto the 0.117.0 drain. Its D-92
+half (the `starting` reading, the drain's `starting` case, both drain tests, the docs) shipped inside 0.117.0 and
+is dropped here rather than re-applied; what D-92 still lacked was the delegator's side of the same reading.
+
+### Added
+- **Register D-46 follow-up 1 - the retry floor is the RETRY seat's.** The 2026-09-10 retry cleared a 201 s floor
+  sized from the 4B's numbers and landed on the 27B, whose own floor was around 484 s. A fleet node now publishes
+  `seat_rate` on `/fleet/health` (the seat's remembered `tok_s`, `cold_load_sec`, `samples` from its seat-rates
+  store, and `min_turn_sec` at its own final budget; cached 30 s; absent until the seat has a sample) and
+  `seat_budget` (`step_tokens`, `final_tokens`, `thinking`). `runner.retryFloorOn` sizes a retry by the seat it
+  lands on - a remote node's published numbers, or this box's seat-rates store for the local seat - with the
+  re-pack term for a schema contract, and falls back to the first attempt's `min_turn_sec` (named as the
+  fallback in the retry note) when the retry seat published none. `TestRunRetryFloorComesFromTheRetrySeat`,
+  `TestFetchNodeViewMapsSeatRateAndBudget`, `TestHealthPublishesSeatBudgetAndRate`.
+- **Register H-04 (why `seat_budget` exists).** The standard quality instrument's first live arm ran on the Lenovo
+  at the NODE's `agent_max_tokens` (1,024, so a 4,096-token final) while the delegator declared 4,096: a
+  delegator's config does not travel with the contract. Matched budgets across seats are read from `seat_budget`,
+  never assumed from the caller's config.
+
+### Changed
+- **Register D-46 follow-up 2 - the estimate charges the re-pack.** A contract with an `output_schema` may pay one
+  more completion for the structured re-pack when the final answer is prose (a 285 s re-pack on the 27B sat
+  outside every floor and estimate). `wall_estimate_sec` and `min_turn_sec` now include one final-budget
+  completion for such contracts as an upper bound, and `wall_note` says `+ re-pack <= N tok (... s; output_schema
+  set - skipped when the seat answers in the object shape)`. `seatrate.FinalBudgetFor` is now the ONE
+  final-budget rule (4x the step, capped at 8,192); `agent.finalMaxTokens` and the exported
+  `agent.FinalBudgetFor` delegate to it, so the agent loop, the node's health and the delegator's floor can
+  never run three different budgets. `TestComputeAddsTheRepackTermForASchemaContract`,
+  `TestWallEstimateChargesTheRepackForASchemaContract`.
+- **Register D-92, the delegator's half.** `runner.probeLocalBusy` reads a `starting` local seat as BUSY with the
+  count unknown rather than `0 in flight`, and `retrySeatBusy` carries that note through instead of printing
+  `0 in flight on the local seat`. The seatload reading and the drain's own `starting` case landed in 0.117.0;
+  this is the spread deal reading the same state the drain already does.
+
 ## [0.117.1] - 2026-09-14 - live work outranks a stale lease record
 
 Found by the 0.117.0 live proof on the Lenovo: its lease root held a record from a dead bake-off holder, and

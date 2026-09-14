@@ -46,6 +46,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/seatrate"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/seatload"
@@ -811,6 +812,9 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// floor is seat-aware through config (agent_retry_min_sec, D-46): a cold
 	// load plus one turn at max_tokens on the retry seat, never the bare 10 s
 	// that let a 296 s retry burn a thinking seat for nothing.
+	// First pass, BEFORE a retry node is chosen: the configured floor raised by
+	// the first attempt's own min_turn (the seat we know about). This is the
+	// cheap refusal; the retry SEAT's floor is applied below once it is known.
 	floor, floorSrc := r.retryFloorFor(first)
 	remaining := pl.remaining(start, budget)
 	if remaining < floor {
@@ -835,6 +839,12 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 		first.RetryNote = fmt.Sprintf("retry skipped: the retry seat on %s is already running another job (%s); a shared seat would only slow both", alt.view.NodeID, why)
 		return first
 	}
+	// The floor of the seat the retry will actually run on (D-46 follow-up,
+	// 0.117.2): the 2026-09-10 retry cleared a 201 s floor sized from the 4B's
+	// numbers and landed on the 27B, whose own min_turn was ≈ 484 s, with 626 s
+	// — enough for its loop, not for loop + re-pack. A remote node publishes
+	// its seat rate on health; the local seat's is read from this box's store.
+	floor, floorSrc = r.retryFloorOn(first, alt, contract)
 	// RE-MEASURE after the probe. `remaining` above was true when it was taken
 	// and can be minutes stale by now; writing that stale number into the retry
 	// contract is what would hand a seat time the subtask no longer has.
@@ -871,6 +881,73 @@ func (r *runner) retryFloorFor(first PlacedResult) (int, string) {
 	return floor, retryFloorSource(floor)
 }
 
+// retryFloorOn (0.117.2, register D-46) is the floor of the seat the retry
+// LANDS on: the configured floor raised by that seat's own min_turn — its
+// remembered cold load plus one final turn at its measured rate, plus the
+// re-pack term when the contract carries an output_schema. A remote node's
+// numbers come from its health (`seat_rate`, published since 0.117.2); the
+// local seat's from this box's seat-rates store. A seat with no numbers falls
+// back to the first attempt's min_turn (retryFloorFor), and the note says so.
+func (r *runner) retryFloorOn(first PlacedResult, alt placement, contract core.AgentContract) (int, string) {
+	floor := r.retryFloorSec()
+	repack := 0
+	var minTurn int
+	var src string
+	switch {
+	case alt.base != "":
+		if sr := alt.view.SeatRate; sr != nil && sr.TokS > 0 {
+			final := sr.MinTurnSec
+			if b := alt.view.SeatBudget; b != nil {
+				if len(contract.OutputSchema) > 0 {
+					repack = b.FinalTokens
+				}
+				minTurn = seatrate.MinTurnFor(sr.ColdLoadSec, b.FinalTokens, repack, sr.TokS)
+			} else {
+				// A node publishes seat_rate and seat_budget together (one gate
+				// on the health handler), so this branch waits for a future
+				// node that publishes the rate alone: its own floor, no re-pack.
+				minTurn = final
+			}
+			src = fmt.Sprintf(", min_turn_sec published by %s", alt.view.NodeID)
+		}
+	default:
+		if known, ok := r.localSeatRate(); ok {
+			step := r.cfg.AgentMaxTokens
+			if step <= 0 {
+				step = 1024
+			}
+			final := seatrate.FinalBudgetFor(step)
+			if len(contract.OutputSchema) > 0 {
+				repack = final
+			}
+			minTurn = seatrate.MinTurnFor(known.ColdLoadSec, final, repack, known.TokS)
+			src = ", min_turn_sec of the local seat (seat-rates store)"
+		}
+	}
+	if minTurn <= 0 {
+		f, s := r.retryFloorFor(first)
+		if s != "" && strings.Contains(s, "min_turn_sec") {
+			s += " (the retry seat published no rate)"
+		}
+		return f, s
+	}
+	if minTurn > floor {
+		return minTurn, src
+	}
+	return floor, retryFloorSource(floor)
+}
+
+// localSeatRate reads this box's remembered rate for the local agent seat.
+func (r *runner) localSeatRate() (seatrate.Seat, bool) {
+	root, err := gpulease.ResolveStateRoot(r.cfg.StateDir)
+	if err != nil {
+		return seatrate.Seat{}, false
+	}
+	store, _ := seatrate.Load(seatrate.Path(root))
+	known := store.Get(strings.TrimSpace(r.cfg.AgentPlannerModel("")))
+	return known, known.TokS > 0
+}
+
 // retryFloorSource names, for the retry note, where a raised floor came from.
 func retryFloorSource(floor int) string {
 	if floor > minRetrySec {
@@ -892,6 +969,9 @@ func (r *runner) retrySeatBusy(ctx context.Context, alt placement) (bool, string
 	if alt.base == "" {
 		rd := r.probeLocalBusy(ctx)
 		if rd.busy {
+			if rd.inflight == 0 {
+				return true, rd.note // a load in progress: the count is unknown, the note says why
+			}
 			return true, fmt.Sprintf("%d in flight on the local seat", rd.inflight)
 		}
 		return false, ""
@@ -1854,6 +1934,13 @@ func (r *runner) probeLocalBusy(ctx context.Context) busyReading {
 			return busyReading{note: "ambiguous: roster unreadable"}
 		}
 		return busyReading{note: "local seat not loaded"}
+	}
+	if rd.Starting {
+		// A load in progress: the request that triggered it is queued on the
+		// engine, and the probe deliberately did not ask the upstream (it would
+		// have blocked for the whole load — register D-92). Busy, with the count
+		// unknown rather than zero.
+		return busyReading{busy: true, note: "local seat " + strings.TrimPrefix(rd.Source, "running-state:") + " (a load is in progress)"}
 	}
 	return busyReading{busy: rd.Inflight > 0, inflight: rd.Inflight, note: rd.Source}
 }

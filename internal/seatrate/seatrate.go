@@ -269,6 +269,13 @@ type Input struct {
 	// it is a FLOOR: how much each tool step thinks is not measured yet.
 	ThinkingOn bool
 	TimeoutSec int
+	// RepackBudget (register D-46 follow-up, 0.117.2) is the completion budget
+	// of the structured re-pack the node runs when the contract carries an
+	// output_schema and the final answer came back as prose: one more
+	// completion of up to the final budget on the same seat. 0 = no schema, no
+	// term. The term is an UPPER bound — a seat that answers in the object
+	// shape skips the re-pack (directStructured) and pays nothing.
+	RepackBudget int
 }
 
 // Estimate is the published sizing.
@@ -282,6 +289,46 @@ type Estimate struct {
 	Note string
 	// Below is true when the contract's wall is under TotalSec.
 	Below bool
+	// RepackSec is the re-pack term inside TotalSec and MinTurnSec (0 when the
+	// contract carries no output_schema).
+	RepackSec int
+}
+
+// FinalBudgetFor is the final answer's completion budget for a tool-step
+// budget: 4× the step, capped at FinalBudgetCap, never below the step. ONE
+// rule, read by the agent loop (agent.FinalBudgetFor), the fleet node's health
+// advertisement and the delegator's retry floor, so the three never drift.
+func FinalBudgetFor(stepBudget int) int {
+	if stepBudget <= 0 {
+		stepBudget = 1024
+	}
+	b := stepBudget * 4
+	if b > FinalBudgetCap {
+		b = FinalBudgetCap
+	}
+	if b < stepBudget {
+		b = stepBudget
+	}
+	return b
+}
+
+// FinalBudgetCap bounds the final answer's completion budget: the visible
+// answer to a 40 KB / seven-array extraction is a few thousand tokens, and a
+// runaway non-thinking seat must still stop.
+const FinalBudgetCap = 8192
+
+// MinTurnFor is the least wall a retry on a seat is worth starting with: a
+// cold load plus one final turn at the seat's rate, plus the re-pack term when
+// the contract carries an output_schema (register D-46). 0 when the rate is
+// unknown — the caller then falls back to whatever floor it has.
+func MinTurnFor(coldLoadSec float64, finalBudget, repackBudget int, tokS float64) int {
+	if tokS <= 0 {
+		return 0
+	}
+	if finalBudget <= 0 {
+		finalBudget = 1024
+	}
+	return int(math.Ceil(coldLoadSec + float64(finalBudget+repackBudget)/tokS))
 }
 
 // Compute derives the estimate. With no rate it returns only the note.
@@ -317,10 +364,15 @@ func Compute(in Input) Estimate {
 	}
 	toolSteps := steps - 1
 	stepsSec := float64(toolSteps) * (float64(toolStepTokens)/in.TokS + stepOverheadSec)
-	total := cold + thinkSec + stepsSec + finalSec
+	var repackSec float64
+	if in.RepackBudget > 0 {
+		repackSec = float64(in.RepackBudget) / in.TokS
+	}
+	total := cold + thinkSec + stepsSec + finalSec + repackSec
 	est := Estimate{
 		TotalSec:   int(math.Ceil(total)),
-		MinTurnSec: int(math.Ceil(cold + finalSec)),
+		MinTurnSec: int(math.Ceil(cold + finalSec + repackSec)),
+		RepackSec:  int(math.Ceil(repackSec)),
 	}
 	src := in.RateSource
 	if src == "" {
@@ -339,8 +391,12 @@ func Compute(in Input) Estimate {
 	if in.ThinkingAuto || in.ThinkingOn {
 		fmt.Fprintf(&b, " + one think block %d tok (%.0f s)", stepBudget, thinkSec)
 	}
-	fmt.Fprintf(&b, " + %d tool steps × (%d tok + %d s prefill) (%.0f s) + final %d tok (%.0f s) at %.1f tok/s (%s, %d samples); min_turn %d s",
-		toolSteps, toolStepTokens, stepOverheadSec, stepsSec, final, finalSec, in.TokS, src, in.RateSamples, est.MinTurnSec)
+	fmt.Fprintf(&b, " + %d tool steps × (%d tok + %d s prefill) (%.0f s) + final %d tok (%.0f s)",
+		toolSteps, toolStepTokens, stepOverheadSec, stepsSec, final, finalSec)
+	if in.RepackBudget > 0 {
+		fmt.Fprintf(&b, " + re-pack ≤ %d tok (%.0f s; output_schema set — skipped when the seat answers in the object shape)", in.RepackBudget, repackSec)
+	}
+	fmt.Fprintf(&b, " at %.1f tok/s (%s, %d samples); min_turn %d s", in.TokS, src, in.RateSamples, est.MinTurnSec)
 	if in.ThinkingOn {
 		b.WriteString(" — thinking on: every tool step may think as well, so this is a floor")
 	}

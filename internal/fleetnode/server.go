@@ -31,6 +31,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/fleetqueue"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/hostsample"
+	"github.com/dmmdea/offload-harness/internal/seatrate"
 	"github.com/dmmdea/offload-harness/internal/storesteward"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
@@ -134,6 +135,11 @@ type Server struct {
 	// vision_model (and SupportedTasksFor lists "vision") exactly when
 	// POST /fleet/vision will admit.
 	visionLane bool
+	// seatRateCache / seatRateAt / seatRateMu: the health handler's cached
+	// read of the seat-rates store (seatRate).
+	seatRateCache *SeatRateHealth
+	seatRateAt    time.Time
+	seatRateMu    sync.Mutex
 	// rosterServes answers "does the llama-swap behind endpoint serve seat?"
 	// (alias-aware). A seam so tests drive the residency cache without a live
 	// llama-swap; production always gets swapRosterServes.
@@ -581,6 +587,17 @@ type healthPayload struct {
 	// roster. False/omitted until the first probe lands, and on probe failure.
 	AgentResident bool `json:"agent_seat_resident,omitempty"`
 	AgentEnabled  bool `json:"agent_enabled,omitempty"`
+	// SeatBudget (0.117.2, register D-46 / H-04) is the completion budget
+	// THIS node runs a contract at: a delegator's config does not travel with
+	// the contract, so a caller that wants matched budgets across seats — the
+	// standard quality instrument — has to read the executing node's. Additive,
+	// omitted with the lane.
+	SeatBudget *SeatBudgetHealth `json:"seat_budget,omitempty"`
+	// SeatRate is the seat's remembered decode rate and cold load from this
+	// node's seat-rates store (seatrate, 0.115.21), with the retry floor they
+	// imply — what a delegator sizes a RETRY on this seat by, instead of the
+	// first attempt's seat (D-46). nil until the seat has a sample.
+	SeatRate *SeatRateHealth `json:"seat_rate,omitempty"`
 	// ServedModels is the CACHED roster name list — canonical ids AND every
 	// alias (agentResidency.served, from swapclient.Roster.Names) —
 	// refreshed on the same TTL/single-flight as AgentResident. Absent/empty
@@ -700,6 +717,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		payload.AgentCtxTokens = s.opts.Cfg.AgentCtxTokens
 		payload.AgentResident = s.agentResident()
 		payload.ServedModels = s.servedModels()
+		payload.SeatBudget = s.seatBudget()
+		payload.SeatRate = s.seatRate()
 	}
 	if s.visionLane {
 		payload.VisionModel = s.opts.Cfg.VisionModel
@@ -895,6 +914,70 @@ func leaseHealthOf(info gpulease.Info, now time.Time, cfgSec int) *LeaseHealth {
 // lease. Media leases are renders arbitrated on the node itself and do not
 // refuse dispatch. A lease that cannot be read is NOT held (fail toward
 // serving, the same direction gpuLeaseHeld and LocalBusy take).
+// SeatBudgetHealth is the per-step / final completion budget and thinking
+// policy the node's agent loop runs at (config agent_max_tokens, the final
+// answer at agent.FinalBudgetFor, config agent_thinking or "auto").
+type SeatBudgetHealth struct {
+	StepTokens  int    `json:"step_tokens"`
+	FinalTokens int    `json:"final_tokens"`
+	Thinking    string `json:"thinking"`
+}
+
+// SeatRateHealth is the seat-rates store entry for the agent seat, plus the
+// retry floor it implies at this node's final budget (cold load + one final
+// turn; seatrate.MinTurnFor without a re-pack term — the delegator adds that
+// from the contract).
+type SeatRateHealth struct {
+	TokS        float64 `json:"tok_s"`
+	ColdLoadSec float64 `json:"cold_load_sec"`
+	Samples     int     `json:"samples"`
+	MinTurnSec  int     `json:"min_turn_sec"`
+}
+
+// seatRateTTL bounds how often health re-reads the seat-rates file: the
+// fleet overview polls every few seconds and the store changes once per run.
+const seatRateTTL = 30 * time.Second
+
+// seatBudget is what the agent loop on this node runs a contract at.
+func (s *Server) seatBudget() *SeatBudgetHealth {
+	step := s.opts.Cfg.AgentMaxTokens
+	if step <= 0 {
+		step = 1024
+	}
+	thinking := strings.TrimSpace(s.opts.Cfg.AgentThinking)
+	if thinking == "" {
+		thinking = "auto"
+	}
+	return &SeatBudgetHealth{StepTokens: step, FinalTokens: seatrate.FinalBudgetFor(step), Thinking: thinking}
+}
+
+// seatRate reads the agent seat's remembered rate from the machine-wide
+// seat-rates store, cached for seatRateTTL. nil when the store has no sample
+// for the seat (or cannot be resolved): the delegator then keeps its own floor.
+func (s *Server) seatRate() *SeatRateHealth {
+	s.seatRateMu.Lock()
+	defer s.seatRateMu.Unlock()
+	now := time.Now()
+	if now.Sub(s.seatRateAt) < seatRateTTL {
+		return s.seatRateCache
+	}
+	s.seatRateAt = now
+	s.seatRateCache = nil
+	root, err := gpulease.ResolveStateRoot(s.opts.Cfg.StateDir)
+	if err != nil {
+		return nil
+	}
+	store, _ := seatrate.Load(seatrate.Path(root))
+	known := store.Get(s.agentSeat)
+	if known.TokS <= 0 {
+		return nil
+	}
+	b := s.seatBudget()
+	s.seatRateCache = &SeatRateHealth{TokS: known.TokS, ColdLoadSec: known.ColdLoadSec, Samples: known.Samples,
+		MinTurnSec: seatrate.MinTurnFor(known.ColdLoadSec, b.FinalTokens, 0, known.TokS)}
+	return s.seatRateCache
+}
+
 func (s *Server) textLeased() (gpulease.Info, bool) {
 	if s.opts.Lease == nil {
 		return gpulease.Info{}, false

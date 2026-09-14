@@ -593,8 +593,16 @@ design; EMA 0.3 on the rate, the slowest of the last five loads, written under a
 processes on one box never drop each other's sample); until a seat has a sample, `agent_seat_tok_s` in the
 box config stands in, and with neither the note says so and no numbers are published. **The estimate never changes the
 wall** — a contract runs under its `timeout_sec` exactly as before; `wall X s is BELOW the estimate` in `wall_note` (and
-the node log) is the caller's signal to size the contract, and the retry floor on the delegator becomes
-`max(agent_retry_min_sec, min_turn_sec)` (the retry note names which). Reference (2026-09-10, ledger-01 on both
+the node log) is the caller's signal to size the contract. A contract with an `output_schema` carries one more term
+(0.117.2): `+ re-pack ≤ N tok` — one final-budget completion for the structured re-pack of a prose answer, an upper
+bound that a seat answering in the object shape never pays (a 285 s re-pack on the 27B sat outside every floor on
+2026-09-10). The retry floor on the delegator is the RETRY seat's (0.117.2, register D-46): `max(agent_retry_min_sec,
+min_turn of the seat the retry lands on)` — a remote node's `/fleet/health` `seat_rate` (its remembered rate and cold
+load) at its own `seat_budget`, the local seat's `seat-rates.json`, plus the re-pack term for a schema contract; the
+retry note names the publisher, and only a node that publishes no rate falls back to the first attempt's
+`min_turn_sec` (the 2026-09-10 shape: a 201 s floor from the 4B cleared, the retry landed on the 27B whose own floor
+was ≈ 484 s). `seat_budget` is also what a caller reads to MATCH budgets across seats — a delegator's config does not
+travel with the contract. Reference (2026-09-10, ledger-01 on both
 seats): the Qube 27B TP2 seat at ~30 tok/s needs ≈ 600 s thinking off / ≈ 730 s auto INCLUDING a 210 s cold load for a
 12-step, 8,192-token-final contract — a 600 s box default is at the edge and 900 s is the honest wall; the Lenovo 4B at
 ~30 tok/s answers the same contract in one step in 250–380 s with a 34 s cold load.

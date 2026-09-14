@@ -76,6 +76,10 @@ type fakeNode struct {
 	resident     bool
 	ctxTokens    int
 	nodeID       string
+	// seatRate / seatBudget, when set, are published on health as `seat_rate`
+	// / `seat_budget` (0.117.2) — what a retry floor on this node is sized by.
+	seatRate   map[string]any
+	seatBudget map[string]any
 
 	// pollState returns (the jobWire body, HTTP status) for the nth poll (1-based).
 	pollState func(n int64) (map[string]any, int)
@@ -171,6 +175,12 @@ func (f *fakeNode) server() *httptest.Server {
 		}
 		if f.saturation != nil {
 			health["saturation"] = f.saturation
+		}
+		if f.seatRate != nil {
+			health["seat_rate"] = f.seatRate
+		}
+		if f.seatBudget != nil {
+			health["seat_budget"] = f.seatBudget
 		}
 		_ = json.NewEncoder(w).Encode(health)
 	})

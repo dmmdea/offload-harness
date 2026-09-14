@@ -1671,3 +1671,50 @@ func TestDispatchTaskModelMetadataThroughJobsFeed(t *testing.T) {
 		t.Fatalf("agent row = %+v (jobs=%+v)", agent, body.Jobs)
 	}
 }
+
+// TestHealthPublishesSeatBudgetAndRate (0.117.2, register D-46 / H-04): the
+// node advertises the completion budget its loop runs at (a delegator's config
+// does not travel with the contract — the quality instrument found a remote
+// arm at 1,024 while the caller declared 4,096) and the seat's remembered rate
+// with the retry floor it implies. No sample = no seat_rate, never zeros.
+func TestHealthPublishesSeatBudgetAndRate(t *testing.T) {
+	cfg := agentCfg()
+	cfg.AgentMaxTokens = 1024
+	cfg.AgentThinking = "off"
+	cfg.StateDir = t.TempDir()
+	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
+	rec := do(t, s, http.MethodGet, "/fleet/health", "", nil)
+	var h struct {
+		SeatBudget *SeatBudgetHealth `json:"seat_budget"`
+		SeatRate   *SeatRateHealth   `json:"seat_rate"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &h); err != nil {
+		t.Fatal(err)
+	}
+	if h.SeatBudget == nil || h.SeatBudget.StepTokens != 1024 || h.SeatBudget.FinalTokens != 4096 || h.SeatBudget.Thinking != "off" {
+		t.Fatalf("seat_budget = %+v, want step 1024 / final 4096 / off", h.SeatBudget)
+	}
+	if h.SeatRate != nil {
+		t.Fatalf("seat_rate must be absent with no sample, got %+v", h.SeatRate)
+	}
+	// A sample in the store (written by an agent run on this box) is published
+	// with the floor at THIS node's final budget: 34 + 4096/25 = 197.84 → 198.
+	if err := os.WriteFile(filepath.Join(cfg.StateDir, "seat-rates.json"), []byte(`{"seats":{"offload-e4b":{"tok_s":25,"cold_load_sec":34,"samples":3}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.seatRateAt = time.Time{} // expire the health cache
+	rec = do(t, s, http.MethodGet, "/fleet/health", "", nil)
+	if err := json.Unmarshal(rec.Body.Bytes(), &h); err != nil {
+		t.Fatal(err)
+	}
+	if h.SeatRate == nil || h.SeatRate.TokS != 25 || h.SeatRate.ColdLoadSec != 34 || h.SeatRate.Samples != 3 || h.SeatRate.MinTurnSec != 198 {
+		t.Fatalf("seat_rate = %+v, want 25 tok/s, 34 s cold, 3 samples, min_turn 198", h.SeatRate)
+	}
+	// Lane off: neither key, and the disabled payload stays byte-identical
+	// (TestHealthAgentFieldsAbsentWhenDisabled pins that separately).
+	plain, _ := newTestServer(t, imageCfg(), &fakeRunner{}, nil)
+	body := do(t, plain, http.MethodGet, "/fleet/health", "", nil).Body.String()
+	if strings.Contains(body, "seat_budget") || strings.Contains(body, "seat_rate") {
+		t.Fatalf("disabled lane must publish no seat budget/rate: %s", body)
+	}
+}
