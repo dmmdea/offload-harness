@@ -172,13 +172,15 @@ func Assess(v View) (verdict, note string) {
 	cardsBusy := utilKnown && maxUtil >= utilBusyPct
 
 	work := describeWork(v, now)
+	// A stale record never outranks live work: on 2026-09-14 the Lenovo read
+	// `stale-holder — nothing is running under it` while its seat was loading for
+	// a delegated run. The record is reported as a tail on whatever IS running,
+	// and is the verdict only when nothing else is.
+	staleTail := ""
+	if v.Stale && v.Holder != nil {
+		staleTail = fmt.Sprintf("; a lease record left over from a holder that is gone (pid %d, reason %q) sits beside it — the next `gpu reserve` reclaims it", v.Holder.PID, v.Holder.Reason)
+	}
 	switch {
-	case v.Stale:
-		who := ""
-		if v.Holder != nil {
-			who = fmt.Sprintf(" (pid %d, reason %q)", v.Holder.PID, v.Holder.Reason)
-		}
-		return VerdictStaleHolder, "a lease record is left over from a holder that is gone" + who + "; the next `gpu reserve` reclaims it — nothing is running under it"
 	case v.Held && (seatBusy || runs > 0):
 		return VerdictWorking, "the lease is held AND work is in flight on the seat: " + work + holderTail(v)
 	case v.Held && cardsBusy:
@@ -196,11 +198,17 @@ func Assess(v View) (verdict, note string) {
 		n += " — the holder is waiting (a drain, a queue), loading, or stalled" + holderTail(v)
 		return VerdictHeldIdle, n
 	case seatBusy || runs > 0:
-		return VerdictWorking, "unreserved, and work is in flight on the seat: " + work
+		return VerdictWorking, "unreserved, and work is in flight on the seat: " + work + staleTail
+	case v.Stale:
+		who := ""
+		if v.Holder != nil {
+			who = fmt.Sprintf(" (pid %d, reason %q)", v.Holder.PID, v.Holder.Reason)
+		}
+		return VerdictStaleHolder, "a lease record is left over from a holder that is gone" + who + "; the next `gpu reserve` reclaims it — nothing is running under it"
 	case cardsBusy:
-		return VerdictBusyOutside, "no lease and the seat is idle, but the cards are busy — " + busyCard + "; that is work the harness does not own" + processTail(v)
+		return VerdictBusyOutside, "no lease and the seat is idle, but the cards are busy — " + busyCard + "; that is work the harness does not own" + processTail(v) + staleTail
 	case v.Seat.Loaded:
-		return VerdictLoadedIdle, fmt.Sprintf("no lease; %s is resident with nothing in flight and unloads at its ttl", v.Seat.Name)
+		return VerdictLoadedIdle, fmt.Sprintf("no lease; %s is resident with nothing in flight and unloads at its ttl", v.Seat.Name) + staleTail
 	default:
 		return VerdictFree, "no lease, no request in flight, cards quiet"
 	}

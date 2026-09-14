@@ -151,6 +151,8 @@ func TestAssessVocabulary(t *testing.T) {
 		{"held idle unknown util", View{At: now, Held: true, Holder: holder, GPUErr: "nvidia-smi: not found", Seat: SeatState{Name: "agent-pool"}}, VerdictHeldIdle, []string{"utilization unknown"}},
 		{"busy outside", View{At: now, GPUs: busy, Seat: SeatState{Name: "agent-pool"}, Processes: []GPUProcess{{PID: 9, Name: `C:\x\game.exe`}}}, VerdictBusyOutside, []string{"does not own", "game.exe (pid 9)"}},
 		{"stale", View{At: now, Stale: true, Holder: &Holder{PID: 5, Reason: "bench"}}, VerdictStaleHolder, []string{"holder that is gone", "pid 5", "reclaims it"}},
+		{"stale record beside a loading seat", View{At: now, Stale: true, Holder: &Holder{PID: 5, Reason: "bench"}, Seat: SeatState{Name: "agent-pool", Loaded: true, Starting: true}}, VerdictWorking, []string{"agent-pool is loading", "pid 5", "reclaims it"}},
+		{"stale record beside a registered run", View{At: now, Stale: true, Holder: &Holder{PID: 5}, Runs: []Run{run}}, VerdictWorking, []string{"1 registered run(s)", "left over"}},
 	}
 	for _, c := range cases {
 		verdict, note := Assess(c.view)

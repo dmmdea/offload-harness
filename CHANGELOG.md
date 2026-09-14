@@ -20,6 +20,19 @@ Versioning: [SemVer](https://semver.org/).
   the working config (they carry the fleet token) and the second TTS venv. History is not rewritten: the
   paths it carries were already public and hold no credential (the fleet token never entered history).
 
+## [0.117.1] - 2026-09-14 - live work outranks a stale lease record
+
+Found by the 0.117.0 live proof on the Lenovo: its lease root held a record from a dead bake-off holder, and
+while the seat was visibly loading for a delegated run `gpu status` said `stale-holder — nothing is running
+under it`. The stale verdict sat above the working ones.
+
+### Fixed
+- `gpuactivity.Assess`: a stale lease record is the verdict only when nothing else is running; beside a
+  loading seat, an in-flight request or a registered run it is a tail on the `working` (or `loaded-idle` /
+  `busy-outside`) verdict, still naming the dead holder and that the next `gpu reserve` reclaims it
+  (`TestAssessVocabulary`: two new cases).
+- The drain's turn hint is plain ASCII (`~174 s`): the `≈` glyph came through an SSH console as `�`.
+
 ## [0.117.0] - 2026-09-14 - the drain waits for runs, inside the queue budget; "busy" says what the cards are doing
 
 `gpu reserve --wait 8h --drain --unload-seat` failed twice on 2026-09-14 with `drain of agent-pool did
