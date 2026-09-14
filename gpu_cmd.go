@@ -30,6 +30,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -224,8 +225,16 @@ func runGPUReserve(args []string) error {
 	}
 	defer finish()
 	if *drain || *unload {
-		if err := maintainSeat(cfg, lease.Restamp, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter); err != nil {
-			return err // deferred finish releases the lease (and warms back if it got that far)
+		// The drain now runs for the queue budget (hours) and the renewal loop
+		// below starts only once the wrapped command does; the reclaim rule needs
+		// a stale heartbeat AND an expired --for window, so a drain longer than
+		// --for with no renewal handed the card to the next acquirer mid-wait
+		// (reviewer finding, 0.117.0). Heartbeat for the drain's whole length.
+		stopRenew := renewWhile(lease, drainRenewEvery)
+		merr := maintainSeat(cfg, lease.Restamp, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter)
+		stopRenew()
+		if merr != nil {
+			return merr // deferred finish releases the lease (and warms back if it got that far)
 		}
 	}
 	sigc := make(chan os.Signal, 1)
@@ -542,4 +551,33 @@ func printActivity(v gpuactivity.View) {
 	for _, ln := range v.Lines() {
 		fmt.Println("  " + ln)
 	}
+}
+
+// drainRenewEvery is the heartbeat cadence while the wrapper form drains — the
+// same 15 s the run loop uses, well inside the 120 s heartbeat TTL. A variable
+// so a test can watch the heartbeat move within its own window.
+var drainRenewEvery = 15 * time.Second
+
+// renewWhile heartbeats the lease on a ticker until stop is called. Losing the
+// lease mid-drain is reported once and ends the loop; the drain's own Restamp
+// or the wrapped command's Renew then fails loudly on the fenced epoch.
+func renewWhile(l *gpulease.Lease, every time.Duration) (stop func()) {
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				if err := l.Renew(); err != nil {
+					fmt.Fprintf(os.Stderr, "gpu reserve: LEASE LOST while draining (%v)\n", err)
+					return
+				}
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(done) }) }
 }

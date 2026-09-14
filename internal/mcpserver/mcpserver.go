@@ -1732,16 +1732,19 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	if err != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": "building agent: " + err.Error()})
 	}
-	cctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	// Register the run and hold at the cordon (0.117.0, register D-93): a
 	// draining or exclusive text hold, or a media lease, admits no NEW run;
-	// running work completes. The wait is the admission budget, never the wall.
+	// running work completes. The wait runs on the caller's ctx with its own
+	// deadline (the admission budget) and the wall below starts only after it
+	// — waiting on the wall's context charged the cordon to the run (reviewer
+	// finding, 0.117.0), the exact defect class D-64 removed from the other door.
 	act := gpuactivity.Start(cfg.GPULockPath, cfg.StateDir, gpuactivity.Run{Seat: model, Kind: "agent_run", Origin: agentRunOrigin(), Goal: in.Goal, MaxSteps: maxSteps})
 	defer act.End()
-	if lerr := modelaffinity.AwaitRunSlot(cctx, cfg.Endpoint, model, time.Now().Add(pipeline.AdmissionBudget(cfg.AgentAdmissionWaitSec))); lerr != nil {
+	if lerr := modelaffinity.AwaitRunSlot(ctx, cfg.Endpoint, model, time.Now().Add(pipeline.AdmissionBudget(cfg.AgentAdmissionWaitSec))); lerr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": "gpu busy: " + lerr.Error()})
 	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	built.Loop.WithObserver(act)
 	// Budget compaction against the SERVED window (probe; conservative fallback
 	// inside ResolveContextTokens when unanswerable) and run the measured-ON

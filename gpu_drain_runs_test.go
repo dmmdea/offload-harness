@@ -196,6 +196,62 @@ func TestReserveDrainsUnderADrainingStampAndTurnsExclusiveAfter(t *testing.T) {
 	}
 }
 
+// The drain can now run for hours, and the reclaim rule needs a stale heartbeat
+// AND an expired window: the wrapper must heartbeat while it drains, not only
+// once the wrapped command is running (reviewer finding, 0.117.0).
+func TestReserveRenewsTheLeaseWhileDraining(t *testing.T) {
+	f := &drainSwap{}
+	f.loaded.Store(true)
+	f.inflight.Store(1)
+	srv := httptest.NewServer(f.handler("seat"))
+	defer srv.Close()
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "config.json")
+	cfg := `{"state_dir": ` + strconv.Quote(root) + `, "endpoint": ` + strconv.Quote(srv.URL) + `, "agent_model": "seat"}`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := gpulease.OpenAt("", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := drainRenewEvery
+	drainRenewEvery = 30 * time.Millisecond
+	t.Cleanup(func() { drainRenewEvery = old })
+	var first, latest time.Time
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+			if info := m.Inspect(); info.Held && f.inflight.Load() > 0 {
+				if first.IsZero() {
+					first = info.HeartbeatAt
+				}
+				if info.HeartbeatAt.After(latest) {
+					latest = info.HeartbeatAt
+				}
+			}
+		}
+	}()
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		f.inflight.Store(0)
+	}()
+	t.Setenv("LO_HELPER_SLEEP_MS", "0")
+	args := append([]string{"--config", cfgPath, "--wait", "10s", "--drain", "--reason", "long drain"}, helperCmd()...)
+	if err := runGPUReserve(args); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	close(stop)
+	if first.IsZero() || !latest.After(first) {
+		t.Fatalf("the heartbeat must move while the drain waits: first %v latest %v", first, latest)
+	}
+}
+
 // The record names WHAT the wrapper runs, not only who.
 func TestReserveStampsTheWrappedCommand(t *testing.T) {
 	cfg, m := leaseFixture(t)

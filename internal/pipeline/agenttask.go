@@ -185,9 +185,17 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// (10:20:03 on 2026-09-14, onto cards a render held).
 	act := gpuactivity.Start(p.cfg.GPULockPath, p.cfg.StateDir, gpuactivity.Run{Seat: seat, Kind: "contract", Origin: nodeID, Goal: contract.Goal, MaxSteps: contract.MaxSteps, Phase: "admission"})
 	defer act.End()
-	if lerr := modelaffinity.AwaitRunSlot(ctx, p.cfg.Endpoint, seat, time.Now().Add(admissionBudget(p.cfg.AgentAdmissionWaitSec))); lerr != nil {
+	// ONE admission budget for the cordon, the pre-flight and the warm-up: the
+	// three share a deadline, and the time spent at the cordon is reported as
+	// admission time (reviewer finding, 0.117.0: each had its own full window).
+	admissionEnd := time.Now().Add(admissionBudget(p.cfg.AgentAdmissionWaitSec))
+	cordonStart := time.Now()
+	if lerr := modelaffinity.AwaitRunSlot(ctx, p.cfg.Endpoint, seat, admissionEnd); lerr != nil {
+		admitted = time.Since(cordonStart)
+		admitNote = "held at the cordon for the admission budget"
 		return deferWire(core.DeferClassCapacity, "gpu busy: "+lerr.Error())
 	}
+	admitted = time.Since(cordonStart)
 	// Admission pre-flight (2026-09-02): the wall must not pay for ANOTHER
 	// session's model swap. llama-swap queues a request silently while it
 	// evicts and loads, so a contract that arrived mid-swap spent its whole
@@ -197,7 +205,9 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// the clock. Known bound: the drain phase before a swap shows nothing
 	// non-ready, so a swap that begins a second later is still charged to the
 	// wall — this removes the swap WINDOW from the wall, not the race.
-	admitted, admitNote = awaitSeatAdmission(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec))
+	preflight, preNote := awaitSeatAdmission(ctx, p.cfg.Endpoint, seat, time.Until(admissionEnd))
+	admitted += preflight
+	admitNote = preNote
 	if admitNote != "" {
 		log.Printf("agent task: seat admission (%s): %s", seat, admitNote)
 	}

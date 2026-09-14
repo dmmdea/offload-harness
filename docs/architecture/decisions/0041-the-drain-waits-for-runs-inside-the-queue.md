@@ -89,6 +89,13 @@ cards at all. A session that cannot tell "held and working" from "held and idle"
   proceeds unregistered (the drain then relies on the gauge, and says so). The record is
   replaced atomically where the platform allows and written in place after a bounded retry
   where a reader's open handle blocks the rename (Windows).
+- The wrapper form heartbeats its lease for the drain's whole length (the reclaim rule needs a stale
+  heartbeat AND an expired window; a drain that now runs for the queue budget can outlast `--for`).
+  The cordon, the admission pre-flight and the warm-up share one admission deadline, and the cordon
+  wait is reported as admission time; on both doors the wall starts after the cordon.
+- `Restamp` is a read-modify-write of the claim under the epoch lock with an epoch check; the
+  window between its read and its rename is microseconds, and the only writer that could land inside
+  it is an operator `gpu release` (whose effect the holder's next `Renew` reports as a lost lease).
 - Not changed: interactive single-shot text calls (the ~46 ms ones) neither register nor
   hold at the cordon — the seat's own gauge covers them; a `media` lease keeps its class
   rule; the fleet node's `/fleet/health` lease block is unchanged.

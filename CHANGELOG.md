@@ -63,6 +63,13 @@ what the cards were DOING, only that something held them.
 ### Fixed
 - The drain no longer deadlocks against the run it waits for, no longer fails under one legitimate
   seat turn, and no longer unloads a seat between a run's steps.
+- Reviewer round (sonnet, clean context): the `agent_run` door awaited the cordon on the WALL's context,
+  charging the wait to the run — now on the caller's ctx with the admission deadline, the wall starts
+  after; the wrapper form never heartbeat its lease during the drain, so a drain longer than `--for`
+  (now possible: the drain runs for the queue budget) became reclaimable mid-wait — `renewWhile` beats
+  every 15 s for the drain's length (`TestReserveRenewsTheLeaseWhileDraining`); the cordon, the admission
+  pre-flight and the warm-up each had a full `agent_admission_wait_sec` window — one shared deadline now,
+  and the cordon wait is reported in `admission_wait_sec` (`TestCordonWaitIsChargedToTheAdmissionBudget`).
 
 ## [0.116.1] - 2026-09-12 - the ampere-16 vision seat is the measured winner
 
