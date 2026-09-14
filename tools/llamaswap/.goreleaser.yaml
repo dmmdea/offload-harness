@@ -42,9 +42,9 @@ checksum:
 brews:
   - name: llamaswap-pp-cli
     repository:
-      owner: pepsdubai
+      owner: dmmdea
       name: homebrew-tap
-    homepage: "https://github.com/pepsdubai/llamaswap-pp-cli"
+    homepage: "https://github.com/dmmdea/llamaswap-pp-cli"
     description: "The llama-swap operations console — durable history, drain-aware control, and measurement commands that structurally cannot produce the errors operators actually make."
     install: |
       bin.install "llamaswap-pp-cli"

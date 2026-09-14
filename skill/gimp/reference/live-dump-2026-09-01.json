@@ -43,8 +43,8 @@
   "python_globals_across_b": "do NOT persist: -b x=41 then -b print(x) -> NameError; exit 64"
  },
  "mcp_server": {
-  "source": "D:/Dev/tools/gimp-mcp (github maorcc/gimp-mcp @ 09bfb2d)",
-  "transport": "stdio (uv run --directory D:/Dev/tools/gimp-mcp gimp_mcp_server.py) -> TCP JSON 127.0.0.1:9877 -> gimp-mcp-plugin.py running as a GIMP plug-in process",
+  "source": "D:/tools/gimp-mcp (github maorcc/gimp-mcp @ 09bfb2d)",
+  "transport": "stdio (uv run --directory D:/tools/gimp-mcp gimp_mcp_server.py) -> TCP JSON 127.0.0.1:9877 -> gimp-mcp-plugin.py running as a GIMP plug-in process",
   "plugin_file": "%APPDATA%\\GIMP\\3.2\\plug-ins\\gimp-mcp-plugin\\gimp-mcp-plugin.py",
   "pdb_procs": [
    "plug-in-mcp-server",

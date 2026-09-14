@@ -11,6 +11,12 @@ config.json
 config-*.json
 config.json.bak*
 config.json.*.bak
+# every backup spelling a session has used for the working config (they carry the fleet token)
+config.json.backup*
+config.json.bak-*
+config.json.pre-*
+config.backup-*.json
+config.json.*.backup*
 test-config.json
 # ...but the installer's shipped config template IS tracked
 !setup/templates/config.json
@@ -19,8 +25,9 @@ test-config.json
 /offload-family.llama-swap.yaml
 /serve-offload.sh
 
-# local TTS venv (Chatterbox) — not tracked
+# local TTS venvs (Chatterbox) — not tracked, any suffix
 .tts-venv/
+.tts-venv-*/
 
 # prep/utility venv + binary rollback backups — never track (LO-14: two ~14MB
 # exe backups were tracked; the broader patterns catch every rename variant)

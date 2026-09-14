@@ -124,7 +124,7 @@ func TailnetURL(raw string) error {
 
 // tailnetAddrAllowed reports whether one literal/resolved address is inside
 // the boundary delegation may reach: loopback or the tailnet CGNAT range.
-// Unmap() first so an IPv4-mapped IPv6 form (::ffff:100.77.1.9) is judged as
+// Unmap() first so an IPv4-mapped IPv6 form (::ffff: followed by the tailnet address) is judged as
 // its IPv4 self — netip.Prefix.Contains deliberately never matches 4-in-6
 // against a v4 prefix, which would refuse legitimate mapped answers some
 // resolvers return.

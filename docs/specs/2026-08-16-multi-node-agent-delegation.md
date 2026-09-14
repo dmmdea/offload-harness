@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go (stdlib net/http, existing internal/fleetnode + internal/agent + internal/core), llama-swap serving on both nodes, Tailscale MagicDNS transport.
 
-**Spec:** this document, §S (spec) below. Research basis: nightshift-6 synthesis (subagent-fleet-research workflow, 2026-08-16) + the ground-truth seam map (Explore agent, same night, file:line anchors used throughout) — both summarized in `G:\My Drive\AI Ecosystem\Ecosystem\Benchmarks and Optimizations\2026-08-16-nightshift6-notes.md`.
+**Spec:** this document, §S (spec) below. Research basis: nightshift-6 synthesis (subagent-fleet-research workflow, 2026-08-16) + the ground-truth seam map (Explore agent, same night, file:line anchors used throughout) — both summarized in `<ecosystem>\Benchmarks and Optimizations\2026-08-16-nightshift6-notes.md`.
 
 ## Global Constraints
 

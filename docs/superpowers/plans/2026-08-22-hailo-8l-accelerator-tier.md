@@ -20,21 +20,21 @@
 - **Version bump ritual** (memory): `VERSION` + `main.go` const + `.printing-press.json` + CHANGELOG in one commit; run `go test -count=1 ./...` AFTER the bump, unpiped.
 - **`tools/list` byte-identical when the accelerator is absent** — same pin as `agent_delegate` (delta 13).
 - Public repos, `dmmdea` account — re-check `gh api user --jq .login` in its own call before every `gh` write.
-- Work in a worktree per repo (`D:\dev\worktrees\…`); never on `main`.
+- Work in a worktree per repo (`<trees>\…`); never on `main`.
 
 ---
 
 ## File Structure
 
-**Hailo repo** (`D:\Dev\Hailo-8L-Analysis-Pipelines`, Task 1)
+**Hailo repo** (`<hailo repo>`, Task 1)
 - Create `server/http_server.py` — stdlib HTTP wrapper over the existing tool functions; `/health`, `/v1/<tool>`; idle self-exit.
 - Create `server/test_http_server.py` — routing/JSON/404/400/health tests with `HAILO_VISION_ENABLED=0` (runs anywhere).
 - Create `hailo-http.cmd` — launcher pinning the venv interpreter + `PYTHONPATH`.
 - Modify `README.md` — "HTTP sidecar" section.
 
-**Harness** (`D:\Dev\dmmdea\local-offload-public`, Tasks 2–9)
+**Harness** (`<harness repo>`, Tasks 2–9)
 - Modify `setup/templates/profiles.json` — top-level `accelerators` map.
-- Modify `G:\My Drive\AI Ecosystem\Ecosystem\Arquitechture\generate-tier-matrix.py` — "Accelerators" sheet.
+- Modify `<ecosystem>\Ecosystem\Arquitechture\generate-tier-matrix.py` — "Accelerators" sheet.
 - Modify `internal/config/config.go` (+ `config_test.go`) — `Accelerators`, `Hailo*` fields, defaults, `HasAccelerator`.
 - Modify `internal/hwdetect/classify.go` (+ `classify_test.go`) — `Verdict.Accelerators`, `AcceleratorsFromHailortcli`.
 - Modify `setup/detect.ps1` (+ `detect.tests.ps1`) — NPU probe, verdict field.
@@ -63,8 +63,8 @@
 - [ ] **Step 1: Land a worktree in the Hailo repo**
 
 ```bash
-git -C "D:/Dev/Hailo-8L-Analysis-Pipelines" worktree add "D:/dev/worktrees/hailo-http" -b feat/http-sidecar
-cd "D:/dev/worktrees/hailo-http" && git rev-parse --abbrev-ref HEAD && pwd
+git -C "<hailo repo>" worktree add "<trees>/hailo-http" -b feat/http-sidecar
+cd "<trees>/hailo-http" && git rev-parse --abbrev-ref HEAD && pwd
 ```
 Expected: `feat/http-sidecar` and the worktree path.
 
@@ -154,7 +154,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 3: Run it to verify it fails**
 
-Run (from the worktree): `"D:\Dev\Hailo-8L-Analysis-Pipelines\.venv\Scripts\python.exe" -m unittest server/test_http_server.py -v`
+Run (from the worktree): `"<hailo repo>\.venv\Scripts\python.exe" -m unittest server/test_http_server.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'http_server'`.
 
 - [ ] **Step 4: Write the sidecar**
@@ -291,7 +291,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `"D:\Dev\Hailo-8L-Analysis-Pipelines\.venv\Scripts\python.exe" -m unittest server/test_http_server.py -v`
+Run: `"<hailo repo>\.venv\Scripts\python.exe" -m unittest server/test_http_server.py -v`
 Expected: 6 tests, `OK`.
 
 - [ ] **Step 6: Launcher + port record + README**
@@ -306,7 +306,7 @@ REM and the process exits itself after HAILO_SIDECAR_IDLE_SEC (default 300).
 set "HAILO_ROOT=%~dp0"
 set "HAILO_ROOT=%HAILO_ROOT:~0,-1%"
 set "PYTHONPATH=%HAILO_ROOT%\shared"
-if not defined HAILO_MODELS_DIR set "HAILO_MODELS_DIR=D:\Dev\hailo-models"
+if not defined HAILO_MODELS_DIR set "HAILO_MODELS_DIR=D:\x\hailo-models"
 if not defined HAILO_VISION_ENABLED set "HAILO_VISION_ENABLED=1"
 "%HAILO_ROOT%\.venv\Scripts\python.exe" "%HAILO_ROOT%\server\http_server.py" %*
 ```
@@ -341,7 +341,7 @@ Create/append `P:\Port Directory\optiplex7060-ports.md`:
 - [ ] **Step 7: Smoke the real launcher (the only step that touches the NPU)**
 
 Run on the Dell after pulling the branch:
-`cmd /c "D:\Dev\Hailo-8L-Analysis-Pipelines\hailo-http.cmd --idle-sec 20"` in the background, then
+`cmd /c "<hailo repo>\hailo-http.cmd --idle-sec 20"` in the background, then
 `curl -s http://127.0.0.1:18813/health` → `"enabled": true`;
 `curl -s -X POST http://127.0.0.1:18813/v1/object_detect -H "Content-Type: application/json" -d "{\"image_path\":\"<a jpg on D:>\"}"` → `{"objects":[…],"count":N}`.
 Wait 25 s, then `Get-Process python` must not list the sidecar (idle exit observed).
@@ -364,7 +364,7 @@ gh pr merge <n> --repo dmmdea/Hailo-8L-Analysis-Pipelines --merge --delete-branc
 
 **Files:**
 - Modify: `setup/templates/profiles.json` (top level, after `"_fields"`)
-- Modify: `G:\My Drive\AI Ecosystem\Ecosystem\Arquitechture\generate-tier-matrix.py`
+- Modify: `<ecosystem>\Ecosystem\Arquitechture\generate-tier-matrix.py`
 - Create: `docs/superpowers/plans/2026-08-22-hailo-8l-accelerator-tier.md` (copy of this file)
 
 **Interfaces:**
@@ -373,8 +373,8 @@ gh pr merge <n> --repo dmmdea/Hailo-8L-Analysis-Pipelines --merge --delete-branc
 - [ ] **Step 1: Land the harness worktree**
 
 ```bash
-git -C "D:/Dev/dmmdea/local-offload-public" worktree add "D:/dev/worktrees/harness-hailo" -b feat/hailo-8l-accelerator
-cd "D:/dev/worktrees/harness-hailo" && git rev-parse --abbrev-ref HEAD && pwd && go build ./... && echo BUILD-OK
+git -C "<harness repo>" worktree add "<trees>/harness-hailo" -b feat/hailo-8l-accelerator
+cd "<trees>/harness-hailo" && git rev-parse --abbrev-ref HEAD && pwd && go build ./... && echo BUILD-OK
 ```
 
 - [ ] **Step 2: Add the accelerators block**
@@ -461,15 +461,15 @@ acc_ws.row_dimensions[ar + 1].height = 48
 
 - [ ] **Step 5: Regenerate the matrix (close Excel first) and verify the sheet**
 
-Run: `python "G:/My Drive/AI Ecosystem/Ecosystem/Arquitechture/generate-tier-matrix.py" D:/dev/worktrees/harness-hailo/setup/templates/profiles.json`
+Run: `python "<ecosystem>/generate-tier-matrix.py" <trees>/harness-hailo/setup/templates/profiles.json`
 Expected: `saved … sheets: ['GPU Tier x Model Matrix', 'Accelerators', 'Qube Live Seats', 'llama-swap Roster', 'Tiers & Doctrine']`.
-Run: `python -c "import openpyxl; ws=openpyxl.load_workbook(r'G:\My Drive\AI Ecosystem\Ecosystem\Arquitechture\2026-08-16_tier-model-matrix.xlsx')['Accelerators']; print(ws['A2'].value, '|', ws['C2'].value)"`
+Run: `python -c "import openpyxl; ws=openpyxl.load_workbook(r'<ecosystem>\Ecosystem\Arquitechture\2026-08-16_tier-model-matrix.xlsx')['Accelerators']; print(ws['A2'].value, '|', ws['C2'].value)"`
 Expected: `hailo-8l | face_detect, face_embed, object_detect, person_embed, depth, enhance_low_light, image_embed`.
 
 - [ ] **Step 6: Copy the plan into the repo and commit**
 
 ```bash
-mkdir -p docs/superpowers/plans && cp "C:/Users/dmmde/.claude/plans/2026-08-22-hailo-8l-accelerator-tier.md" docs/superpowers/plans/
+mkdir -p docs/superpowers/plans && cp "~/.claude/plans/2026-08-22-hailo-8l-accelerator-tier.md" docs/superpowers/plans/
 git add setup/templates/profiles.json docs/superpowers/plans/2026-08-22-hailo-8l-accelerator-tier.md
 git commit -m "tiers: declare the hailo-8l accelerator (additive to the GPU tier) + plan
 
@@ -783,11 +783,11 @@ func TestResolveAcceleratorsExpandsAndValidates(t *testing.T) {
 			"hailo_sidecar_cmd": "__HAILO_HOME__/hailo-http.cmd", "hailo_timeout_sec": 60,
 		}},
 	}
-	out, err := ResolveAccelerators(accs, []string{"hailo-8l"}, Options{Home: `C:\stack`, HailoHome: `D:\Dev\Hailo`, GOOS: "windows"})
+	out, err := ResolveAccelerators(accs, []string{"hailo-8l"}, Options{Home: `C:\stack`, HailoHome: `D:\x\hailo`, GOOS: "windows"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out["hailo_sidecar_cmd"] != "D:/Dev/Hailo/hailo-http.cmd" {
+	if out["hailo_sidecar_cmd"] != "D:/x/hailo/hailo-http.cmd" {
 		t.Fatalf("token not expanded: %v", out["hailo_sidecar_cmd"])
 	}
 	if _, err := ResolveAccelerators(accs, []string{"tpu"}, Options{}); err == nil {
@@ -885,12 +885,12 @@ If `validate` rejects an empty backend for a key that is backend-gated (`vae_mod
 Write-Host "== accelerator seed: merged after the tier seed, __HAILO_HOME__ expanded =="
 Assert ([bool](Get-Command Get-AcceleratorSeed -ErrorAction SilentlyContinue)) 'dot-source seam defines Get-AcceleratorSeed'
 $pdoc = Get-Content -Raw (Join-Path (Join-Path $setupDir 'templates') 'profiles.json') | ConvertFrom-Json
-$accSeed = Get-AcceleratorSeed -ProfilesDoc $pdoc -Ids @('hailo-8l') -HailoHome 'D:\Dev\Hailo'
+$accSeed = Get-AcceleratorSeed -ProfilesDoc $pdoc -Ids @('hailo-8l') -HailoHome 'D:\x\hailo'
 Assert ($null -ne $accSeed) 'seed returned for hailo-8l'
 $m2 = Merge-ConfigSeed -ConfigText $tplText -Seed $accSeed -OffloadHome 'C:\stack'
 $o2 = $m2 | ConvertFrom-Json
 Assert (@($o2.accelerators) -contains 'hailo-8l') 'config.accelerators lists hailo-8l'
-Assert ($o2.hailo_sidecar_cmd -eq 'D:/Dev/Hailo/hailo-http.cmd') 'hailo_sidecar_cmd expanded __HAILO_HOME__'
+Assert ($o2.hailo_sidecar_cmd -eq 'D:/x/hailo/hailo-http.cmd') 'hailo_sidecar_cmd expanded __HAILO_HOME__'
 Assert ($o2.hailo_endpoint -eq 'http://127.0.0.1:18813') 'hailo_endpoint seeded'
 $none = Get-AcceleratorSeed -ProfilesDoc $pdoc -Ids @() -HailoHome 'D:\x'
 Assert ($null -eq $none) 'no accelerators -> no seed (config byte-identical to today)'
@@ -1660,14 +1660,14 @@ Expected: all green; semgrep exit 0 (exit 2 = the scanner broke, investigate, ne
 
 **Files:** none in-repo (a capability report may be added under `docs/tiers/reports/` later; accelerators have no tier page by design).
 
-- [ ] **Step 1: Build and ship the harness exe** — on Qube: `go build -o offload-harness.exe .` in the merged `main` checkout; `scp offload-harness.exe dmmde@optiplex7060:'D:/offload-harness/offload-harness.exe'`; verify `& D:\offload-harness\offload-harness.exe --version` → `local-offload 0.81.0`.
+- [ ] **Step 1: Build and ship the harness exe** — on Qube: `go build -o offload-harness.exe .` in the merged `main` checkout; `scp offload-harness.exe <user>@<node>:'D:/offload-harness/offload-harness.exe'`; verify `& D:\offload-harness\offload-harness.exe --version` → `local-offload 0.81.0`.
 
-- [ ] **Step 2: Pull the Hailo repo on the Dell** — `git -C D:\Dev\Hailo-8L-Analysis-Pipelines pull` → `hailo-http.cmd` present.
+- [ ] **Step 2: Pull the Hailo repo on the Dell** — `git -C <hailo repo> pull` → `hailo-http.cmd` present.
 
-- [ ] **Step 3: Seed the existing config (installer never rewrites an existing config.json)** — with Node, as done for the image keys, merge into `C:\Users\dmmde\.local-offload\config.json`:
+- [ ] **Step 3: Seed the existing config (installer never rewrites an existing config.json)** — with Node, as done for the image keys, merge into `%USERPROFILE%\.local-offload\config.json`:
 
 ```json
-{"accelerators":["hailo-8l"],"hailo_endpoint":"http://127.0.0.1:18813","hailo_sidecar_cmd":"D:/Dev/Hailo-8L-Analysis-Pipelines/hailo-http.cmd","hailo_timeout_sec":60,"hailo_idle_sec":300}
+{"accelerators":["hailo-8l"],"hailo_endpoint":"http://127.0.0.1:18813","hailo_sidecar_cmd":"<hailo repo>/hailo-http.cmd","hailo_timeout_sec":60,"hailo_idle_sec":300}
 ```
 and append `"accelerators": ["hailo-8l"]` to `D:\offload-stack\installed.json` (so `/fleet/health` advertises it). Back both files up first.
 

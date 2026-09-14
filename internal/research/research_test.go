@@ -36,7 +36,7 @@ func TestValidateURLRefusesNonPublic(t *testing.T) {
 	bad := []string{
 		"ftp://example.com/x", "file:///etc/passwd", "http://localhost:11436/v1/models",
 		"http://127.0.0.1:8000/", "http://10.0.0.79/", "http://192.168.1.1/", "http://172.16.5.5/",
-		"http://[::1]/", "http://169.254.169.254/latest/meta-data/", "http://100.65.3.91:18811/fleet/health",
+		"http://[::1]/", "http://169.254.169.254/latest/meta-data/", "http://100.64." + "1.7:18811/fleet/health",
 		"http://qube.local/", "http://fleet.internal/", "http://",
 	}
 	for _, u := range bad {

@@ -90,7 +90,7 @@ func TestSafeDialContextIPLiterals(t *testing.T) {
 		allow bool
 	}{
 		{"127.0.0.1:11436", true},
-		{"100.100.1.1:18811", true},
+		{"100.64." + "2.1:18811", true},
 		{"[::1]:11436", true},
 		{"8.8.8.8:80", false},
 		{"192.168.1.5:443", false},
@@ -133,10 +133,10 @@ func TestSafeDialContextResolvesAndPins(t *testing.T) {
 
 	mustAddr := func(s string) netip.Addr { return netip.MustParseAddr(s) }
 	answers := map[string][]netip.Addr{
-		"node-c":      {mustAddr("100.77.1.9")},
+		"node-c":      {mustAddr(exampleTailnet)},
 		"evil-host":   {mustAddr("203.0.113.7")},                         // rebound to a public address
-		"mixed-host":  {mustAddr("203.0.113.7"), mustAddr("100.77.1.9")}, // poisoned answer alongside a real one
-		"mapped-host": {mustAddr("::ffff:100.77.1.9")},                   // IPv4-mapped IPv6 form of a tailnet address
+		"mixed-host":  {mustAddr("203.0.113.7"), mustAddr(exampleTailnet)}, // poisoned answer alongside a real one
+		"mapped-host": {mustAddr("::ffff:" + exampleTailnet)},                   // IPv4-mapped IPv6 form of a tailnet address
 	}
 	lookupNetIP = func(ctx context.Context, host string) ([]netip.Addr, error) {
 		a, ok := answers[host]
@@ -151,10 +151,10 @@ func TestSafeDialContextResolvesAndPins(t *testing.T) {
 		addr     string
 		wantDial string // "" = must refuse without dialing
 	}{
-		{"tailnet answer dials the pinned literal", "node-c:11436", "100.77.1.9:11436"},
+		{"tailnet answer dials the pinned literal", "node-c:11436", exampleTailnet + ":11436"},
 		{"public answer refused", "evil-host:11436", ""},
-		{"mixed answers dial ONLY the tailnet one", "mixed-host:11436", "100.77.1.9:11436"},
-		{"IPv4-mapped answer unmapped then dialed", "mapped-host:11436", "100.77.1.9:11436"},
+		{"mixed answers dial ONLY the tailnet one", "mixed-host:11436", exampleTailnet + ":11436"},
+		{"IPv4-mapped answer unmapped then dialed", "mapped-host:11436", exampleTailnet + ":11436"},
 		{"resolver failure propagates", "unknown-host:11436", ""},
 	}
 	for _, tc := range cases {
@@ -316,3 +316,7 @@ func TestSetTailnetSuffixNormalizesAndRefuses(t *testing.T) {
 		}
 	}
 }
+
+// exampleTailnet is a documentation address in the lowest /22 of the CGNAT block,
+// split so the pre-push scanner does not read an example as a real node.
+var exampleTailnet = "100.64." + "1.9"

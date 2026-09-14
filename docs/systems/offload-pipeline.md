@@ -168,7 +168,7 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
     key — so a transient read failure wrote a durable entry that a different file at that path later
     hit, reintroducing the exact false hit this change removes.
   - `media_hash_max_full_bytes` defaults to **0 = always hash the whole file**. The cost is a cold
-    file read, so it is **I/O-bound, not SHA-bound** — on `V:` or a `G:\My Drive` mount a large clip
+    file read, so it is **I/O-bound, not SHA-bound** — on a local NVMe or a cloud-synced (`My Drive`) mount a large clip
     is nowhere near memory-speed. It is still cheap *relative to the work it guards*, because both
     call sites already read the same file through ffmpeg before hashing it. A positive value
     switches larger files to a **sampled** digest (size + up to three 8 MiB windows, de-duplicated);
