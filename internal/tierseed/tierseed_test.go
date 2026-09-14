@@ -93,11 +93,11 @@ func TestResolveAcceleratorsExpandsAndValidates(t *testing.T) {
 			"hailo_sidecar_cmd": "__HAILO_HOME__/hailo-http.cmd", "hailo_timeout_sec": 60,
 		}},
 	}
-	out, err := ResolveAccelerators(accs, []string{"hailo-8l"}, Options{Home: `C:\stack`, HailoHome: `D:\Dev\Hailo`, GOOS: "windows"})
+	out, err := ResolveAccelerators(accs, []string{"hailo-8l"}, Options{Home: `C:\stack`, HailoHome: `D:\x\hailo`, GOOS: "windows"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out["hailo_sidecar_cmd"] != "D:/Dev/Hailo/hailo-http.cmd" {
+	if out["hailo_sidecar_cmd"] != "D:/x/hailo/hailo-http.cmd" {
 		t.Fatalf("token not expanded: %v", out["hailo_sidecar_cmd"])
 	}
 	if _, err := ResolveAccelerators(accs, []string{"tpu"}, Options{}); err == nil {

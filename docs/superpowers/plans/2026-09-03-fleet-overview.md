@@ -20,7 +20,7 @@
 - Docs in the same PR: `docs/systems/fleet-overview.md`, `docs/systems/fleet-node.md` (health fields), `docs/README.md` index, `AGENTS.md` pointer, ADR 0034, CHANGELOG, `P:\Port Directory\qube-ports.md` row for 18813.
 - Placement law unchanged: `Place` returns local when `!localBusy`; the three existing `betterRemote` keys keep their order; new logic only appends.
 - Tests: table-driven, in the package's existing `_test.go` style; every new guard is broken once at its call site during Task verification (clean-ship Consequential rule 3 applies to Task 7, the placement change).
-- Repo root for all paths below: `D:\Dev\dmmdea\local-offload-public` (work in the worktree `D:\Dev\dmmdea\trees\local-offload-public-fleet-overview`, branch `feat/fleet-overview` — create it from `main` at execution time; the plan branch is `docs/fleet-overview-plan`).
+- Repo root for all paths below: `<harness repo>` (work in the worktree `<trees>\fleet-overview`, branch `feat/fleet-overview` — create it from `main` at execution time; the plan branch is `docs/fleet-overview-plan`).
 
 ---
 

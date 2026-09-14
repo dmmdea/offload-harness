@@ -361,8 +361,8 @@ code change, only a new `pipelines.<task_type>` entry:
 {
   "pipelines": {
     "scene-swap": {
-      "script": "D:/Dev/dmmdea/creative-marketing-pipelines/scripts/run-scene-swap.mjs",
-      "workdir": "D:/Dev/dmmdea/creative-marketing-pipelines",
+      "script": "D:/pipelines/creative-marketing-pipelines/scripts/run-scene-swap.mjs",
+      "workdir": "D:/pipelines/creative-marketing-pipelines",
       "timeout_sec": 2400,
       "artifacts": ["final.png", "qa-report.json"],
       "max_ref_mb": 24

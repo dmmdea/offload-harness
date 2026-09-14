@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+- Operator identity scrubbed from the public tree, and a gate that keeps it out
+  (`TestTrackedTreeCarriesNoOperatorIdentity`, root package): a Windows profile path in a plan, the
+  development-drive layout in two plans, a doc, a doc comment and three test fixtures, the cloud-synced
+  workspace path in a spec and a doc, a real node's hostname in a config comment, a collaborator's and the
+  operator's usernames in fixtures (`someone` / `~` / `%USERPROFILE%` now), a tailnet example outside the
+  documentation range (examples stay in the lowest /22 of the CGNAT block), and the vendored llama-swap CLI's
+  metadata and copyright headers naming a second GitHub account (now the repository owner, read from
+  `go.mod`). The rules name shapes, never the values; placeholders the rules admit are documented in the
+  test. The tracked machine-config backup `config.backup-2026-08-11-pre-0.47.0.json` is removed from the
+  public tree (kept in the private evidence repository); `.gitignore` now covers every backup spelling of
+  the working config (they carry the fleet token) and the second TTS venv. History is not rewritten: the
+  paths it carries were already public and hold no credential (the fleet token never entered history).
+
 ## [0.116.1] - 2026-09-12 - the ampere-16 vision seat is the measured winner
 
 The `ampere-16` tier seeded `qwen3-vl-8b` for vision as a J-media inheritance from `blackwell-16`; it was

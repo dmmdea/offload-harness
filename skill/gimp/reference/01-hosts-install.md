@@ -36,7 +36,7 @@ README + measured folder name]. Contents that matter:
 |---|---|
 | `gimprc` | user overrides (currently: `config-version "3.2.4"`, monitor res 140 dpi, fill/stroke options) |
 | `pluginrc` | plug-in registration cache (312 KB); the gimp-mcp plug-in is registered here as `plug-in-mcp-server/-check/-restart` |
-| `plug-ins\gimp-mcp-plugin\gimp-mcp-plugin.py` | the only user plug-in installed (copy of `D:\Dev\tools\gimp-mcp\gimp-mcp-plugin.py`) |
+| `plug-ins\gimp-mcp-plugin\gimp-mcp-plugin.py` | the only user plug-in installed (copy of `D:\tools\gimp-mcp\gimp-mcp-plugin.py`) |
 | `scripts\` | user Script-Fu scripts (empty) |
 | `fonts\` | per-user font dir (empty) — Windows fonts are picked up from the system via fontconfig |
 | `tmp\` | GIMP's own temp; batch runs also create `%LOCALAPPDATA%\Temp\gimp-3.2-XXXXXX` (`Gimp.temp_directory()`) |
@@ -62,17 +62,17 @@ machine-wide / per-user (`%APPDATA%\GIMP\3.2\fonts`) before rendering them here.
 ### Verifier tools on the workstation [measured]
 | Tool | Where | Use |
 |---|---|---|
-| `ffprobe` | on PATH (Gyan ffmpeg 8.1.2 winget build); harness also has `D:\Dev\tools\ffmpeg-9.0.1\bin` | codec, WxH, pix_fmt for png/jpg/webp/tif/gif/bmp/avif/heic/jxl/jp2/tga/exr/qoi/psd/ico |
+| `ffprobe` | on PATH (Gyan ffmpeg 8.1.2 winget build); harness also has `D:\tools\ffmpeg-9.0.1\bin` | codec, WxH, pix_fmt for png/jpg/webp/tif/gif/bmp/avif/heic/jxl/jp2/tga/exr/qoi/psd/ico |
 | Python 3.14 + Pillow 12.3.0 | `C:\Program Files\Python314\python.exe` (system, NOT GIMP's) | size, mode (RGB/RGBA/P), `info['dpi']`, `n_frames`, `getextrema()`; cannot open heic/jxl/psb/exr/xcf/ora |
 | `pdfinfo` | poppler (winget) on PATH | PDF page size/count |
 | `magick` | **not on PATH** | — |
 | `gegl.exe --list-all` | GIMP bin | op inventory without starting GIMP |
 
 ### Related installs
-- gimp-mcp source: `D:\Dev\tools\gimp-mcp` (git remote github.com/maorcc/gimp-mcp, HEAD 09bfb2d
+- gimp-mcp source: `D:\tools\gimp-mcp` (git remote github.com/maorcc/gimp-mcp, HEAD 09bfb2d
   "Address CodeRabbit nitpicks"); deps via `uv` (`pyproject`: mcp, fastmcp; python ≥3.11).
 - On-demand MCP launcher: `%USERPROFILE%\.claude\mcp-ondemand\mcp-ondemand.ps1` + `stash.json`
-  (gimp-mcp stashed as user-scope stdio: `uv run --directory D:/Dev/tools/gimp-mcp gimp_mcp_server.py`).
+  (gimp-mcp stashed as user-scope stdio: `uv run --directory D:/tools/gimp-mcp gimp_mcp_server.py`).
 - local-offload harness `flatten_design` route is bound to `gimp_console_path=C:/Program Files/GIMP 3/bin/gimp-console-3.2.exe` [measured via offload_status]; mem0 evidence: fresh-install host-tool discovery configures the GIMP console path and `edit_python` only best-effort and never modifies an existing config.
 
 ## editing-rig — the editing rig, GIMP 3.2.4 [measured 2026-09-10]
@@ -90,7 +90,7 @@ can do there.
 | GEGL | 258 ops, and `Gegl.list_operations()` returns **0 until `Gegl.init(None)`** (same trap as the workstation, 08 #39) |
 | Profile | `%APPDATA%\GIMP\3.2`, **created by my first run on 2026-09-10** — GIMP had never been launched on this box |
 | Temp | `D:\Temp\gimp-3.2-XXXXXX` — **not** `%LOCALAPPDATA%\Temp` like the workstation (this box redirects TEMP to D:) |
-| gimp-mcp | **not installed** — no plug-in in the profile, no `D:\Dev\tools\gimp-mcp` source. MCP mode (02 §C) is workstation-only |
+| gimp-mcp | **not installed** — no plug-in in the profile, no `D:\tools\gimp-mcp` source. MCP mode (02 §C) is workstation-only |
 | ffprobe | `D:\WinGet\Portable\Gyan.FFmpeg_…\ffmpeg-9.0-full_build\bin\ffprobe.exe` (9.0, portable — **not** the same path as the workstation) |
 | Python (verifier) | `C:\Program Files\Python311\python.exe`. No `magick`, no `uv` |
 | Skills | `~/.claude/skills/{gimp,davinci-resolve,ffmpeg}` deployed 2026-09-10 (11 + 14 + 35 files, byte-verified remotely); `claude.exe` via WinGet |

@@ -6,11 +6,11 @@
   "display_name": "llama-swap",
   "cli_name": "llamaswap-pp-cli",
   "creator": {
-    "handle": "pepsdubai",
+    "handle": "dmmdea",
     "name": "Daniel Martinez"
   },
-  "owner": "pepsdubai",
-  "printer": "pepsdubai",
+  "owner": "dmmdea",
+  "printer": "dmmdea",
   "printer_name": "Daniel Martinez",
   "spec_path": "spec.yaml",
   "spec_format": "internal",

@@ -72,7 +72,7 @@ func TestGolden_AtlasClassification(t *testing.T) {
 		},
 		{
 			name:         "missing render script",
-			reason:       `script not found at D:\Dev\dmmdea\local-offload\bin\render\tts.mjs`,
+			reason:       `script not found at D:\x\harness\bin\render\tts.mjs`,
 			wantObsolete: false,
 			why:          "a config failure, live until the path is fixed",
 		},

@@ -454,7 +454,7 @@ func TestEpochIsMonotonicAcrossReclaims(t *testing.T) {
 // since it is trusted everywhere.
 func TestResolveStateRootRefusesCloudSyncedPaths(t *testing.T) {
 	for _, p := range []string{
-		`G:\My Drive\AI Ecosystem\state`,
+		`G:\My Drive\workspace\state`,
 		`C:\Users\x\OneDrive\state`,
 		`/home/x/Dropbox/state`,
 		`D:\My Drive\state`,
@@ -464,7 +464,7 @@ func TestResolveStateRootRefusesCloudSyncedPaths(t *testing.T) {
 		`C:\Users\x\iCloudDrive\state`,
 		`G:\Shared drives\team\state`,
 		// The same roots spelled POSIX-style, so neither separator can regress unseen.
-		`/mnt/g/My Drive/AI Ecosystem/state`,
+		`/mnt/g/My Drive/workspace/state`,
 		`/home/x/OneDrive/state`,
 		`/home/x/OneDrive - Contoso/state`,
 		`/home/x/Dropbox (Personal)/state`,

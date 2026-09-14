@@ -26,8 +26,8 @@ import (
 // example (see the pipelines doc comment on Config for the full JSON):
 //
 //	"scene-swap": {
-//	  "script": "D:/Dev/dmmdea/creative-marketing-pipelines/scripts/run-scene-swap.mjs",
-//	  "workdir": "D:/Dev/dmmdea/creative-marketing-pipelines",
+//	  "script": "D:/pipelines/creative-marketing-pipelines/scripts/run-scene-swap.mjs",
+//	  "workdir": "D:/pipelines/creative-marketing-pipelines",
 //	  "timeout_sec": 2400,
 //	  "artifacts": ["final.png", "qa-report.json"],
 //	  "max_ref_mb": 24
@@ -1107,7 +1107,7 @@ type Config struct {
 	// be a worker without being a delegator and vice versa.
 	AgentDelegationEnabled bool `json:"agent_delegation_enabled,omitempty"`
 	// DelegateRemotes are the fleet node base URLs (tailnet-only, e.g.
-	// "http://lenovo-m720q:18811") the delegator considers when a call passes no
+	// "http://node-b:18811") the delegator considers when a call passes no
 	// remotes of its own. Durable fleet membership belongs in config, not in every
 	// agent_delegate call: measured 2026-08-21, a delegator whose remotes lived
 	// only in the per-call argument ran every fan-out on one box. A call's own
@@ -1159,8 +1159,8 @@ type Config struct {
 	//
 	//	"pipelines": {
 	//	  "scene-swap": {
-	//	    "script": "D:/Dev/dmmdea/creative-marketing-pipelines/scripts/run-scene-swap.mjs",
-	//	    "workdir": "D:/Dev/dmmdea/creative-marketing-pipelines",
+	//	    "script": "D:/pipelines/creative-marketing-pipelines/scripts/run-scene-swap.mjs",
+	//	    "workdir": "D:/pipelines/creative-marketing-pipelines",
 	//	    "timeout_sec": 2400,
 	//	    "artifacts": ["final.png", "qa-report.json"],
 	//	    "max_ref_mb": 24
