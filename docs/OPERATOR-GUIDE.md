@@ -599,6 +599,27 @@ seats): the Qube 27B TP2 seat at ~30 tok/s needs ≈ 600 s thinking off / ≈ 73
 12-step, 8,192-token-final contract — a 600 s box default is at the edge and 900 s is the honest wall; the Lenovo 4B at
 ~30 tok/s answers the same contract in one step in 250–380 s with a 34 s cold load.
 
+### What is the harness doing on the cards? (0.117.0, ADR 0041)
+
+"Busy" is not an answer. `local-offload gpu status` (and `offload_status.gpu_lease`) now say what the cards
+are DOING: a one-word `verdict` — `working` (a request or a registered agent run is in flight on the seat),
+`held-working` (a lease is held and the cards are busy under it), **`held-idle`** (a lease is held and nothing
+is running: seat idle, cards quiet — the holder is draining, queued, loading, or stalled), `loaded-idle`,
+`busy-outside` (no lease, cards busy with work the harness does not own), `stale-holder`, `free` — and an
+`activity` block with the seat's load state and in-flight count, every registered run (kind, pid, origin,
+goal excerpt, phase, step, tokens, age), a utilization/memory sample per card with the processes on them,
+and the holder's command (the wrapper form stamps its argv). Every agent loop registers itself in
+`<state root>/gpu/activity/` before admission and updates the record per step, so a drain or a status reader
+sees a run between its steps, when the engine's own gauge reads zero.
+
+**The seventh clock: the drain.** `gpu reserve --drain` waits until the seat's gauge AND the registry are
+empty on two consecutive reads. Its deadline is the rest of `--wait` (from when the reservation began
+queueing; floor 2 min) unless `--drain-timeout` is given — a fixed two minutes failed twice on 2026-09-14
+under one legitimate 27B step of 3m27s. While it drains the lease is stamped `draining` (new runs hold at
+the cordon for their admission budget and defer `capacity`; in-flight runs finish their steps) and turns
+`exclusive` only once idle. Progress prints on change with the seat's own turn arithmetic
+("one seat turn is ≈ 174 s at 23.6 tok/s"), never a line per tick.
+
 ### Context-budget guidance (why prompt shape matters)
 
 The planner models here have a **~32K context window** and the loop **resends the full growing

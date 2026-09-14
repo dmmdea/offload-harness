@@ -29,7 +29,9 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/embedmemo"
+	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
@@ -121,7 +123,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// + which media engines this machine has + the (only) remote surface.
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_status",
-		Description: "Discover this harness's capability — call this FIRST when inspecting what the harness can do. Returns {local:{endpoint, roster{workhorse,agent,triage,escalation,reasoning,vision,ocr,stt,stt_hq,embed}, served_now[...] (live model ids from the LOCAL llama-swap endpoint)}, fleet:{delegation_enabled, local_agent_seat{model, loaded, ctx_tokens?}, nodes[{base, reachable, node_id, agent_enabled, agent_seat, agent_ctx_tokens, agent_seat_resident, queue_depth}], agent_capable_nodes, idle_agent_nodes} — the LIVE delegation roster, probed at call time: who the delegation seats are, their real context ceilings, and how deep their queues run. Trust it over any rules file or written figure; idle_agent_nodes > 0 means paid-for capacity is sitting unused, media:{...this machine's configured generation engines}, remote:{nim_endpoint, nim_default_model, nim_key_present}, accelerators:{...} (present only when this box lists an accelerator device, e.g. hailo-8l: its endpoint, sidecar config, owned tools and a live health probe)}. Every offload_* tool except offload_nim runs LOCAL — the GPU roster or a listed accelerator (free, on-box, no cloud); offload_nim is the ONLY remote/cloud surface. An empty roster entry means that capability defers on this machine.",
+		Description: "Discover this harness's capability — call this FIRST when inspecting what the harness can do. Returns {local:{endpoint, roster{workhorse,agent,triage,escalation,reasoning,vision,ocr,stt,stt_hq,embed}, served_now[...] (live model ids from the LOCAL llama-swap endpoint)}, fleet:{delegation_enabled, local_agent_seat{model, loaded, ctx_tokens?}, nodes[{base, reachable, node_id, agent_enabled, agent_seat, agent_ctx_tokens, agent_seat_resident, queue_depth}], agent_capable_nodes, idle_agent_nodes} — the LIVE delegation roster, probed at call time: who the delegation seats are, their real context ceilings, and how deep their queues run. Trust it over any rules file or written figure; idle_agent_nodes > 0 means paid-for capacity is sitting unused, media:{...this machine's configured generation engines}, remote:{nim_endpoint, nim_default_model, nim_key_present}, accelerators:{...} (present only when this box lists an accelerator device, e.g. hailo-8l: its endpoint, sidecar config, owned tools and a live health probe), gpu_lease:{held, verdict, activity, queue_with} — verdict is ONE WORD for what this box's cards are doing right now: working | held-working | held-idle (a lease held over idle cards: the holder is draining, queued, loading or stalled) | loaded-idle | busy-outside | stale-holder | free; activity carries the seat's in-flight count and load state, the registered agent runs (kind, pid, origin, step, tokens), a per-card utilization sample with the processes on them, and the holder's command. Read verdict before concluding anything from \"held\"; a held card is queued behind with queue_with, never refused}. Every offload_* tool except offload_nim runs LOCAL — the GPU roster or a listed accelerator (free, on-box, no cloud); offload_nim is the ONLY remote/cloud surface. An empty roster entry means that capability defers on this machine.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
 	}, s.handleStatus)
 
@@ -517,7 +519,7 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 		payload["accelerators"] = accel
 	}
 	payload["kv_cache_server"] = kvCacheServerView(ctx, cfg)
-	payload["gpu_lease"] = localLeaseView(cfg)
+	payload["gpu_lease"] = localLeaseView(ctx, cfg)
 	return jsonResult(payload)
 }
 
@@ -527,11 +529,20 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 // this tool, so sessions read `nvidia-smi` instead and concluded "busy, refuse".
 // Held or free, the block ends with the queue command: a held card is a place in
 // line, and the line is one flag. Read-only (delegate.LocalLease never acquires).
-func localLeaseView(cfg config.Config) map[string]any {
+func localLeaseView(ctx context.Context, cfg config.Config) map[string]any {
 	info := delegate.LocalLease(cfg.GPULockPath, cfg.StateDir)
+	// What the cards are DOING, not only whether they are held (0.117.0,
+	// register D-93): the seat's in-flight count and load state, the runs the
+	// harness itself has registered, a utilization sample, and one verdict a
+	// session can branch on — working / held-idle / held-working / loaded-idle /
+	// busy-outside / stale-holder / free. A session used to read "held" as
+	// "refuse"; now it can read whether the holder is actually using the cards.
+	act := gpuactivity.Snapshot(ctx, gpuactivity.Options{LockOverride: cfg.GPULockPath, StateDir: cfg.StateDir, Endpoint: cfg.Endpoint, Seat: cfg.AgentPlannerModel(""), SampleGPU: statusSamplesGPU})
 	view := map[string]any{
 		"held":       info.Held,
 		"queue_with": gpulease.QueueHint,
+		"verdict":    act.Verdict,
+		"activity":   act.Map(),
 	}
 	if !info.Held {
 		view["note"] = "free (unreserved): a bench or training run on this box is exposed until it takes the lease — wrap it in the queue_with command"
@@ -544,10 +555,14 @@ func localLeaseView(cfg config.Config) map[string]any {
 	view["reason"] = info.Reason
 	view["origin"] = info.Origin
 	view["exclusive"] = info.Exclusive
+	view["draining"] = info.Draining
+	if info.Command != "" {
+		view["command"] = info.Command
+	}
 	if !info.ExpiresAt.IsZero() {
 		view["expires_at"] = info.ExpiresAt.Format(time.RFC3339)
 	}
-	view["note"] = "held: delegations already route to other nodes; a bench or render here must QUEUE behind the holder with queue_with, never be refused or deferred"
+	view["note"] = "held: delegations already route to other nodes; a bench or render here must QUEUE behind the holder with queue_with, never be refused or deferred; `verdict`/`activity` say whether the holder is actually using the cards (held-working) or sitting on them idle (held-idle)"
 	return view
 }
 
@@ -1717,8 +1732,20 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	if err != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": "building agent: " + err.Error()})
 	}
+	// Register the run and hold at the cordon (0.117.0, register D-93): a
+	// draining or exclusive text hold, or a media lease, admits no NEW run;
+	// running work completes. The wait runs on the caller's ctx with its own
+	// deadline (the admission budget) and the wall below starts only after it
+	// — waiting on the wall's context charged the cordon to the run (reviewer
+	// finding, 0.117.0), the exact defect class D-64 removed from the other door.
+	act := gpuactivity.Start(cfg.GPULockPath, cfg.StateDir, gpuactivity.Run{Seat: model, Kind: "agent_run", Origin: agentRunOrigin(), Goal: in.Goal, MaxSteps: maxSteps})
+	defer act.End()
+	if lerr := modelaffinity.AwaitRunSlot(ctx, cfg.Endpoint, model, time.Now().Add(pipeline.AdmissionBudget(cfg.AgentAdmissionWaitSec))); lerr != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": "gpu busy: " + lerr.Error()})
+	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	built.Loop.WithObserver(act)
 	// Budget compaction against the SERVED window (probe; conservative fallback
 	// inside ResolveContextTokens when unanswerable) and run the measured-ON
 	// ladder rungs — the same defaults as the CLI (flip decision 2026-07-24).
@@ -2591,4 +2618,16 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 		res.IsError = true
 	}
 	return res, nil
+}
+
+// statusSamplesGPU lets a test skip the nvidia-smi sample in offload_status.
+var statusSamplesGPU = true
+
+// agentRunOrigin labels an agent_run registration: this host, this door.
+func agentRunOrigin() string {
+	hn, _ := os.Hostname()
+	if hn == "" {
+		hn = "local"
+	}
+	return hn + ":agent_run"
 }

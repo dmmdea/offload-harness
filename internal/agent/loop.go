@@ -249,6 +249,7 @@ type Loop struct {
 	noForcedFinal bool                          // WithoutForcedFinal: the last step offers tools like any other (D-89)
 	parkHighRisk  bool                          // unattended: park self-flagged high-risk effectful calls (WithParkHighRisk)
 	parkRecord    func(tool, args, risk string) // durable park record (ask queue); nil = ledger only
+	observer      RunObserver                   // WithObserver: per-step progress for the run registry (gpuactivity); nil = none
 	batchJudge    bool                          // end-of-run advisory judge pass (WithBatchJudge; batchjudge.go)
 	ctxTokens     int                           // model context window in tokens; input budget derives from it
 	keepRecent    int                           // most-recent turns kept full during compaction
@@ -544,6 +545,19 @@ func (l *Loop) WithParkHighRisk(on bool) *Loop { l.parkHighRisk = on; return l }
 // promise the plumbing keeps (review finding #3: without it, a parked call's
 // only trace was the ephemeral response JSON). nil = ledger only.
 func (l *Loop) WithParkRecorder(f func(tool, args, risk string)) *Loop { l.parkRecord = f; return l }
+
+// RunObserver hears a run's progress as it happens: the step just completed
+// (1-based) with the seat's completion tokens so far, and phase changes the
+// loop knows about ("final" = the forced final step). The run registry
+// (internal/gpuactivity) implements it so a drain or a status reader can see
+// a run between its steps, when the seat's own gauge reads idle (0.117.0).
+type RunObserver interface {
+	OnStep(step, tokensOut int)
+	OnPhase(phase string)
+}
+
+// WithObserver installs a RunObserver. nil = none.
+func (l *Loop) WithObserver(o RunObserver) *Loop { l.observer = o; return l }
 
 // WithContextTokens sets the model context window (in tokens) that transcript
 // compaction budgets against. Default is defaultCtxTokens (8192, matching the
@@ -872,6 +886,9 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// nothing at all. A one-step run is exempt: its only step may
 		// legitimately be the call.
 		finalStep := !l.noForcedFinal && l.maxSteps >= 2 && step == l.maxSteps-1 && len(l.specs) > 0
+		if finalStep && l.observer != nil {
+			l.observer.OnPhase("final")
+		}
 		if finalStep {
 			specs = nil
 			if !finalTurnAdded {
@@ -1014,6 +1031,9 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		callRec.ForcedFinal = finalStep
 		callRec.Ms = time.Since(callStart).Milliseconds()
 		calls = append(calls, callRec)
+		if l.observer != nil {
+			l.observer.OnStep(step+1, tokOut)
+		}
 		lastWasReissue = thisIsReissue
 		// Learn from the response: estimateTokens(msgs) is what we thought the
 		// payload cost, comp.Serve.UsagePromptTokens is what it actually cost.

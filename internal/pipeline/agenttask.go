@@ -41,7 +41,9 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/gbnf"
+	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 	"github.com/dmmdea/offload-harness/internal/seatwait"
@@ -174,6 +176,26 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		timeoutSec = core.AgentTimeoutSecDefault
 	}
 	wall := time.Duration(timeoutSec) * time.Second
+	// Register the run (0.117.0, register D-93) BEFORE admission, so a drain or
+	// a status reader sees it while the seat is still loading for it, and hold
+	// at the cordon: a draining or exclusive text hold, or a media lease,
+	// admits no NEW run. Running work completes; new work waits its admission
+	// budget here — never inside the wall — and defers with the holder named.
+	// Before this, the warm-up below loaded the seat straight past the fence
+	// (10:20:03 on 2026-09-14, onto cards a render held).
+	act := gpuactivity.Start(p.cfg.GPULockPath, p.cfg.StateDir, gpuactivity.Run{Seat: seat, Kind: "contract", Origin: nodeID, Goal: contract.Goal, MaxSteps: contract.MaxSteps, Phase: "admission"})
+	defer act.End()
+	// ONE admission budget for the cordon, the pre-flight and the warm-up: the
+	// three share a deadline, and the time spent at the cordon is reported as
+	// admission time (reviewer finding, 0.117.0: each had its own full window).
+	admissionEnd := time.Now().Add(admissionBudget(p.cfg.AgentAdmissionWaitSec))
+	cordonStart := time.Now()
+	if lerr := modelaffinity.AwaitRunSlot(ctx, p.cfg.Endpoint, seat, admissionEnd); lerr != nil {
+		admitted = cordonWait(cordonStart)
+		admitNote = "held at the cordon for the admission budget"
+		return deferWire(core.DeferClassCapacity, "gpu busy: "+lerr.Error())
+	}
+	admitted = cordonWait(cordonStart)
 	// Admission pre-flight (2026-09-02): the wall must not pay for ANOTHER
 	// session's model swap. llama-swap queues a request silently while it
 	// evicts and loads, so a contract that arrived mid-swap spent its whole
@@ -183,7 +205,9 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// the clock. Known bound: the drain phase before a swap shows nothing
 	// non-ready, so a swap that begins a second later is still charged to the
 	// wall — this removes the swap WINDOW from the wall, not the race.
-	admitted, admitNote = awaitSeatAdmission(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec))
+	preflight, preNote := awaitSeatAdmission(ctx, p.cfg.Endpoint, seat, time.Until(admissionEnd))
+	admitted += preflight
+	admitNote = preNote
 	if admitNote != "" {
 		log.Printf("agent task: seat admission (%s): %s", seat, admitNote)
 	}
@@ -195,6 +219,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// wall before the first token. Warm it here, on the admission budget's
 	// remainder, and start the clock when the seat reads ready.
 	var coldLoad time.Duration // this run's observed cold load, if the warm-up waited for one (seat-rates.json)
+	act.Phase("cold-load")
 	if warmed, warmNote := warmSeat(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted); warmed > 0 || warmNote != "" {
 		admitted += warmed
 		coldLoad = warmed
@@ -337,6 +362,8 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		log.Printf("agent task: wall sizing (%s): %s", seat, est.Note)
 	}
 
+	built.Loop.WithObserver(act)
+	act.Phase("running")
 	res, rerr := built.Loop.Run(cctx, contract.Goal)
 	wire.Steps = res.Steps
 	wire.StopReason = res.StopReason
@@ -529,6 +556,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		return deferWire(core.DeferClassAbstention, "output failed schema: "+wire.RepackNote)
 	}
 	repackStart := time.Now()
+	act.Phase("repack")
 	structured, tokensOut, transport, attempts, serr := p.repackStructured(cctx, seat, contract.OutputSchema, res.Output, repackAttemptFloor(wall))
 	wire.RepackMs = time.Since(repackStart).Milliseconds()
 	wire.RepackAttempts = attempts
@@ -1038,6 +1066,21 @@ func admissionBudget(sec int) time.Duration {
 	}
 	return time.Duration(sec) * time.Second
 }
+
+// cordonWait is the time a run spent at the cordon, counted only when it
+// actually waited: an ungated pass takes nanoseconds, and stamping those as
+// admission time reported a wait that never happened and shaved the warm-up's
+// budget below its one-poll floor (CI, 2026-09-14 — the Windows clock had hidden it).
+func cordonWait(since time.Time) time.Duration {
+	if w := time.Since(since); w >= time.Millisecond {
+		return w
+	}
+	return 0
+}
+
+// AdmissionBudget is admissionBudget for the other run launchers (the MCP
+// agent_run door), so every door holds at the cordon for the same window.
+func AdmissionBudget(sec int) time.Duration { return admissionBudget(sec) }
 
 // warmSeat loads an ABSENT seat outside the wall (D-64). One GET through
 // llama-swap's per-model passthrough (`/upstream/<seat>/v1/models`, the same

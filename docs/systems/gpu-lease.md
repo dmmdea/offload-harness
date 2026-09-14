@@ -20,6 +20,9 @@ other on a single shared card.
 | `internal/gpulease/proc*.go` | per-platform liveness and process-start identity, exported so no consumer keeps a second copy |
 | `internal/pipeline/pipeline.go` | takes the `media` lease around **every** generation call site (image ComfyUI + sdcpp, inpaint, image batch, run-graph, video, audio) and threads `GPU_LEASE_*` to the runner; inherits an ambient lease instead of re-acquiring; owns the in-process slot (`mediaSlot`) that arbitrates jobs sharing one inherited lease |
 | `gpu_cmd.go` | the `gpu status\|reserve\|release\|hold` verbs, wrapper and `--detach` forms |
+| `gpu_drain.go` | `--drain`: waits until the seat's gauge AND the run registry are empty, inside the queue budget; restamps `draining` → `exclusive`; unload / warm-back |
+| `internal/gpuactivity` | the RUN REGISTRY (`<state root>/gpu/activity/`, one record per agent loop in flight) and the activity reading behind `gpu status` / `offload_status.gpu_lease` (`verdict`, `activity`) — ADR 0041 |
+| `internal/seatload` | the seat's in-flight reading through llama-swap (`/running`, then `/upstream/<seat>/metrics` or `/slots`); a `starting` seat is reported without touching the upstream |
 | `gpu_hide_windows.go`, `gpu_hide_other.go` | hidden spawn for the detached holder (a visible console gets closed, killing the hold) |
 | `render/gpu-lock.mjs` | READ-ONLY participant: honours + fences an inherited lease, elects one unloader, drains, ComfyUI lifecycle. **Does not acquire.** |
 | `internal/gpulock` | the read-only vision gate; delegates wholesale to `gpulease.InspectDir` |
@@ -317,7 +320,13 @@ renewing after a takeover updates something nothing reads. Read-only consumers c
 diverges, and it did: when the heartbeat moved, a record-only view briefly called a live,
 renewing holder stale the moment its declared window lapsed.
 
-## Draining a seat before a window (0.113.16)
+## Draining a seat before a window (0.113.16; rebuilt 0.117.0)
+
+> **0.117.0 (ADR 0041, register D-93).** The paragraph below describes the mechanism as it shipped in
+> 0.113.16–0.113.20; three things changed on 2026-09-14 and are described in the next section: the drain's
+> deadline is now the queue budget (`--drain-timeout` defaults to the rest of `--wait`, floor 2 min); the
+> lease is stamped `draining` during the drain and `exclusive` only after it; and the drain waits for the
+> REGISTERED RUNS on the seat, not only the engine's gauge.
 
 ```
 local-offload gpu reserve --class text --for 30m --reason "arm B" --drain [--drain-timeout 2m] [--unload-seat] -- <command>
@@ -346,6 +355,52 @@ Why: a gate that unloaded the production seat by hand collided with a delegation
 (`No available memory for the cache blocks`, 2026-09-06 15:23), and the Lenovo's measurement windows stopped its fleet node
 outright, cutting in-flight remote work. With the lease advertised and enforced, the window is a lease, not an outage.
 
+## The drain waits for runs, inside the queue budget (0.117.0, ADR 0041)
+
+What went wrong on 2026-09-14, in one line each: the drain's fixed two minutes could not outlast one
+legitimate 27B step (3m27s at 23.6 tok/s); `--unload-seat` stamped the lease exclusive at acquire, so the
+admission gate blocked the very run the drain was waiting for; and the engine's gauge reads zero between a
+run's steps, so the third attempt unloaded the seat in that gap and the run's next step died on its wall.
+
+**Deadline.** `--drain-timeout` defaults to the rest of `--wait`, measured from when the reservation began
+queueing, never under two minutes; an explicit value wins. A reservation queues behind in-flight work
+exactly as it queues behind a holder. The deadline error names what was in flight, the seat's own turn
+arithmetic from `seat-rates.json` ("one seat turn is ≈ 174 s at 23.6 tok/s"), and how to wait longer.
+Work in flight is never interrupted.
+
+**Stamps.** With `--drain` the record carries `draining: true` from acquire until the seat is idle, then
+`Lease.Restamp` turns it into `exclusive: true` (when `--unload-seat` or `--exclusive` asked for it) in
+place, under the epoch lock, without moving the epoch. `draining` CORDONS the seat: `modelaffinity.BlocksNewRun`
+refuses a NEW agent run — the launcher holds at the cordon for its admission budget (never inside its wall)
+and defers `capacity` with the holder's reason — while `blocksLoad`, which every request passes, is
+unchanged, so runs already in flight finish their steps. `--exclusive` without `--drain` stamps at acquire as
+before; a media lease keeps its class rule.
+
+**Runs.** Every agent loop launcher registers its run in `<state root>/gpu/activity/` BEFORE admission
+(seat, kind, origin, goal excerpt, phase, step, tokens; updated per step and every 15 s; removed at the end;
+stale = dead/recycled pid or heartbeat > 120 s, swept by readers). The drain is done when the engine's gauge
+AND the registry are empty on two consecutive reads; a seat listed `starting`/`stopping` counts as busy and
+its upstream is never probed. Registering before the warm-up is also what puts the load path behind the
+fence: the pre-0.117.0 warm-up loaded the seat straight past an exclusive hold.
+
+**Reading it.** `gpu status [--json]` and `offload_status.gpu_lease` carry a one-word `verdict` and an
+`activity` block:
+
+| verdict | meaning |
+|---|---|
+| `working` | a request or a registered run is in flight on the seat (lease held or not) |
+| `held-working` | a lease is held, the seat is idle, and the cards are busy under it (≥ 15 % utilization) — the holder's own job |
+| `held-idle` | a lease is held and NOTHING is running: seat idle, cards quiet — the holder is waiting (a drain, a queue), loading, or stalled |
+| `loaded-idle` | no lease; the seat is resident with nothing in flight (unloads at its ttl) |
+| `busy-outside` | no lease, seat idle, cards busy — work the harness does not own (the processes are listed) |
+| `stale-holder` | a lease record whose holder is gone; the next acquirer reclaims it |
+| `free` | no lease, nothing in flight, cards quiet |
+
+`activity` carries `seat` (name, loaded, starting, inflight, source), `runs[]` (kind, pid, origin, goal,
+phase, step, tokens_out, age), `gpus[]` (index, name, util_pct, mem), `gpu_processes[]`, and `holder`
+(pid, alive, command, heartbeat_age_s, draining, exclusive). The drain's progress line is built from the same
+reading and printed on CHANGE (count, load state, a run's step), with a reminder every five minutes.
+
 ## Known gaps
 
 - **The reservation is a convention.** A raw `curl :11436` loop, a graph posted straight to
@@ -359,6 +414,10 @@ outright, cutting in-flight remote work. With the lease advertised and enforced,
   "Delegate placement reads a `text` reservation" under Classes. Interactive text calls (the
   ~46 ms ones) still neither acquire nor honour it; that limit stands.
 - **The lease reduces the number of teardowns; the drain is what makes one safe.** Both needed.
+- **The run registry is advisory.** A launcher that cannot write the state root logs once and runs
+  unregistered (the drain then relies on the engine's gauge and says so); interactive single-shot text
+  calls never register — the gauge covers them. A run registered by a process that hangs without
+  exiting stays visible for the 120 s heartbeat TTL.
 - **Head-of-line blocking is structural** — a 45-minute video blocks everything behind it.
 - ~~`internal/pipeline` does not yet take a `media` lease around its own generation calls.~~
   **No longer true, corrected 2026-08-19.** `acquireMediaLease` wraps every generation route in

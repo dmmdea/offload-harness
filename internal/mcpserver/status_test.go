@@ -302,6 +302,21 @@ func TestStatusPublishesTheLocalLeaseWithTheQueueCommand(t *testing.T) {
 	if note, _ := held["note"].(string); !strings.Contains(note, "QUEUE") || !strings.Contains(note, "never be refused") {
 		t.Errorf("the held note must say queue, never refuse: %q", note)
 	}
+	// 0.117.0 (register D-93): "held" alone is not an answer. The block carries
+	// what the cards are doing — here a held lease over an idle seat.
+	if free["verdict"] == nil || free["activity"] == nil {
+		t.Fatalf("free card must carry verdict + activity: %v", free)
+	}
+	if held["verdict"] != "held-idle" {
+		t.Errorf("a held lease over an idle seat must read held-idle, got %v", held["verdict"])
+	}
+	act, _ := held["activity"].(map[string]any)
+	if h, _ := act["holder"].(map[string]any); h == nil || h["pid"] == nil {
+		t.Errorf("activity must name the holder: %v", act)
+	}
+	if note, _ := act["note"].(string); !strings.Contains(note, "NOTHING is running") {
+		t.Errorf("the held-idle note must say so: %q", note)
+	}
 }
 
 func TestNCtxFromProps(t *testing.T) {

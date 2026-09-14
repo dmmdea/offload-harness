@@ -27,6 +27,11 @@ type drainSwap struct {
 	// then serves `inflight` processing slots out of two (0.113.19).
 	metricsStatus atomic.Int64
 	slotsHits     atomic.Int64
+	// starting lists the loaded seat as `starting` (a load in progress);
+	// upstreamHitsWhileStarting counts upstream reads in that state — a real
+	// llama-swap would hold each one for the whole load (register D-92).
+	starting                  atomic.Bool
+	upstreamHitsWhileStarting atomic.Int64
 }
 
 func (f *drainSwap) handler(model string) http.Handler {
@@ -34,7 +39,11 @@ func (f *drainSwap) handler(model string) http.Handler {
 	mux.HandleFunc("/running", func(w http.ResponseWriter, r *http.Request) {
 		var running []map[string]string
 		if f.loaded.Load() {
-			running = append(running, map[string]string{"model": model, "state": "ready"})
+			state := "ready"
+			if f.starting.Load() {
+				state = "starting"
+			}
+			running = append(running, map[string]string{"model": model, "state": state})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"running": running})
 	})
@@ -53,6 +62,9 @@ func (f *drainSwap) handler(model string) http.Handler {
 	mux.HandleFunc("/upstream/"+model+"/metrics", func(w http.ResponseWriter, r *http.Request) {
 		if !f.loaded.Load() {
 			f.upstreamHitsWhileUnloaded.Add(1)
+		}
+		if f.starting.Load() {
+			f.upstreamHitsWhileStarting.Add(1)
 		}
 		if st := f.metricsStatus.Load(); st != 0 {
 			w.WriteHeader(int(st))
@@ -218,5 +230,54 @@ func TestDrainStillReturnsAtOnceWhenNothingIsRunning(t *testing.T) {
 	defer srv.Close()
 	if err := drainSeat(context.Background(), srv.Client(), srv.URL, "agent-pool", time.Second, time.Millisecond, nil); err != nil {
 		t.Fatalf("empty /running must drain at once, got %v", err)
+	}
+}
+
+// TestDrainWaitsThroughAStartingSeatWithoutTouchingTheUpstream (register
+// D-92): another caller's contract triggered a cold load just before the lease;
+// llama-swap lists the seat as `starting` and would hold any /upstream read
+// for the whole load. The drain must poll /running until the seat is ready and
+// only then read the in-flight count.
+func TestDrainWaitsThroughAStartingSeatWithoutTouchingTheUpstream(t *testing.T) {
+	f := &drainSwap{}
+	f.loaded.Store(true)
+	f.starting.Store(true)
+	f.inflight.Store(0)
+	srv := httptest.NewServer(f.handler("seat"))
+	defer srv.Close()
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		f.starting.Store(false) // the engine came up; nothing is queued on it
+	}()
+	var out strings.Builder
+	start := time.Now()
+	if err := drainSeat(context.Background(), srv.Client(), srv.URL, "seat", 2*time.Second, 5*time.Millisecond, &out); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if time.Since(start) < 40*time.Millisecond {
+		t.Fatal("drain returned while the seat was still starting")
+	}
+	if f.upstreamHitsWhileStarting.Load() != 0 {
+		t.Fatalf("drain read /upstream %d time(s) while the seat was starting — llama-swap holds that request for the whole load", f.upstreamHitsWhileStarting.Load())
+	}
+	if !strings.Contains(out.String(), "a load is in progress") {
+		t.Fatalf("drain output must name the load in progress; got %q", out.String())
+	}
+}
+
+// TestDrainErrorsAtTheDeadlineWhileStarting: a load that outlasts the drain
+// window is an error that names the state, never a drained verdict.
+func TestDrainErrorsAtTheDeadlineWhileStarting(t *testing.T) {
+	f := &drainSwap{}
+	f.loaded.Store(true)
+	f.starting.Store(true)
+	srv := httptest.NewServer(f.handler("seat"))
+	defer srv.Close()
+	err := drainSeat(context.Background(), srv.Client(), srv.URL, "seat", 30*time.Millisecond, 5*time.Millisecond, nil)
+	if err == nil || !strings.Contains(err.Error(), "seat starting") {
+		t.Fatalf("drain of a seat that never finished starting: err = %v, want a deadline error naming the starting state", err)
+	}
+	if f.upstreamHitsWhileStarting.Load() != 0 {
+		t.Fatal("drain read /upstream while the seat was starting")
 	}
 }
