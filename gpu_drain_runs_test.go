@@ -41,7 +41,7 @@ func TestDrainWaitsForARegisteredRunAcrossTheStepGap(t *testing.T) {
 	}()
 	var out strings.Builder
 	start := time.Now()
-	p := drainProbe{client: srv.Client(), endpoint: srv.URL, model: "seat", runs: reg.OnSeat, every: 5 * time.Millisecond, out: &out, hint: "one seat turn is ≈ 174 s"}
+	p := drainProbe{client: srv.Client(), endpoint: srv.URL, model: "seat", runs: reg.OnSeat, every: 5 * time.Millisecond, out: &out, hint: "one seat turn is ~174 s"}
 	if err := drainUntil(context.Background(), p, time.Now().Add(2*time.Second)); err != nil {
 		t.Fatalf("drain: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestDrainWaitsForARegisteredRunAcrossTheStepGap(t *testing.T) {
 		t.Fatal("drain returned while a run was still registered on the seat")
 	}
 	got := out.String()
-	for _, want := range []string{"0 in flight; 1 run(s) registered", "agent_run pid " + strconv.Itoa(os.Getpid()), "step 3/12", "2310 tokens", "from node-a", "one seat turn is ≈ 174 s"} {
+	for _, want := range []string{"0 in flight; 1 run(s) registered", "agent_run pid " + strconv.Itoa(os.Getpid()), "step 3/12", "2310 tokens", "from node-a", "one seat turn is ~174 s"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("progress must name the run and the turn hint; missing %q in:\n%s", want, got)
 		}

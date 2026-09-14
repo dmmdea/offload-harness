@@ -204,9 +204,9 @@ func seatTurnHint(cfg config.Config, seat string) string {
 	if final > 8192 {
 		final = 8192
 	}
-	hint := fmt.Sprintf("one seat turn is ≈ %.0f s at the seat's measured %.1f tok/s (a %d-token completion)", float64(final)/s.TokS, s.TokS, final)
+	hint := fmt.Sprintf("one seat turn is ~%.0f s at the seat's measured %.1f tok/s (a %d-token completion)", float64(final)/s.TokS, s.TokS, final)
 	if s.ColdLoadSec > 0 {
-		hint += fmt.Sprintf(", plus ≈ %.0f s if it is loading", s.ColdLoadSec)
+		hint += fmt.Sprintf(", plus ~%.0f s if it is loading", s.ColdLoadSec)
 	}
 	return hint
 }
