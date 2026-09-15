@@ -129,7 +129,7 @@ func TestReviewDiffWallComesFromTheBoxTimeout(t *testing.T) {
 		cfg.LedgerPath = filepath.Join(home, "ledger.jsonl")
 		cfg.AgentTimeoutSec = tc.box
 		s := New(pipeline.New(cfg, nil, nil, nil))
-		s.localAgent = func(_ context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+		s.localAgent = func(_ context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 			got = c
 			return seatFindings(), nil
 		}
