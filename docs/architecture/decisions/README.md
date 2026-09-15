@@ -47,6 +47,7 @@ code, treat everything else as background.
 | [0039](0039-a-held-card-is-a-place-in-line.md) | Accepted | A held card is a place in line, and a cleared seat stays cleared: `gpu reserve --wait` queues (default 8h), `--unload-seat` stamps the text lease exclusive so loads are gated like a render, `offload_status.gpu_lease.queue_with` |
 | [0040](0040-vision-work-travels-to-a-node-with-an-idle-card.md) | Accepted | Vision work travels to a node with an idle card: fleet task `vision` on `POST /fleet/vision` (body capped from `vision_max_image_bytes`, then the shared admission path), the full `core.Result` as job data, `route: local|auto|remote` on the three image tools |
 | [0041](0041-the-drain-waits-for-runs-inside-the-queue.md) | Accepted | The drain waits for runs, inside the queue budget: `--drain-timeout` defaults to the rest of `--wait`, the lease is `draining` during the drain and `exclusive` after it (`Restamp`), agent runs register in `<state root>/gpu/activity/`, and `gpu status` / `offload_status.gpu_lease` carry a `verdict` + `activity` saying what the cards are doing |
+| [0042](0042-no-bare-http-client-on-a-caller-named-host.md) | Accepted | No bare HTTP client on a caller-named host: `internal/netguard/publicnet.go` holds the tree's one public-IP predicate (`CheckPublicIP`), one resolution seam (`LookupIP`) and the pinned `PublicDialContext`/`PublicTransport`; the research lane dials the address it validated, on the first hop and every redirect |
 
 
 ## Lifecycle

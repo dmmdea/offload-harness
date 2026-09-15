@@ -133,13 +133,6 @@ func tailnetAddrAllowed(a netip.Addr) bool {
 	return a.IsLoopback() || tailnetCGNAT.Contains(a)
 }
 
-// lookupNetIP resolves a hostname at DIAL time. A package var so the
-// rebinding tests can pin DNS answers; production always rides the default
-// resolver.
-var lookupNetIP = func(ctx context.Context, host string) ([]netip.Addr, error) {
-	return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-}
-
 // DialFunc matches net.Dialer.DialContext's shape.
 type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 
@@ -160,7 +153,7 @@ func SafeDialContext(next DialFunc) DialFunc {
 			}
 			return next(ctx, network, addr)
 		}
-		addrs, err := lookupNetIP(ctx, host)
+		addrs, err := LookupIP(ctx, host)
 		if err != nil {
 			return nil, fmt.Errorf("tailnet guard: resolve %q: %w", host, err)
 		}

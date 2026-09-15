@@ -110,13 +110,25 @@ leaves nothing anchorable at all.
 
 `offload_research` is the one-call answer to "this leg needs the web, so it goes to a cloud
 subagent". It takes a goal and up to 12 public URLs, fetches every page DELEGATOR-side under
-a public-web guard (`internal/research.ValidateURL`: http/https only; loopback, RFC 1918,
-link-local, `.local`/`.internal`, the configured tailnet zone and the CGNAT range are
-refused, and every redirect hop is re-checked), strips it to text (dependency-free
+a public-web guard in TWO halves, strips it to text (dependency-free
 HTML→text: scripts, styles and page chrome dropped, block boundaries kept; 2 MiB read cap,
 96 KiB text cap), and builds ONE delegation contract per usable page — then runs the same
 `delegate.Run` path `agent_delegate` uses (route `spread` by default, so pages are dealt
 across the local seat and every eligible fleet node).
+
+The guard's two halves are the point (ADR 0042, 0.117.3). By NAME,
+`internal/research.ValidateURL` takes http/https only and refuses `localhost`, `.local`,
+`.internal` and the configured tailnet zone — shapes an address cannot express — and it
+refuses without spending a connection. By ADDRESS, the client rides
+`netguard.PublicTransport`: the host is resolved at DIAL time through netguard's single
+resolution seam, every answer is judged by `netguard.CheckPublicIP` (loopback, RFC 1918,
+link-local incl. `169.254.169.254`, multicast, the CGNAT/tailnet range, `0.0.0.0/8`,
+`240.0.0.0/4`, the TEST-NETs, and the IPv6 forms that embed an IPv4 — NAT64, 6to4, Teredo),
+and the dialer is handed the vetted IP LITERAL. Both halves run on the first hop and on
+every redirect hop. Before 0.117.3 only the name half existed and the fetch reconnected by
+name through a bare `http.Client`, so a hostile record with a one-second TTL could validate
+as public and then resolve to `127.0.0.1` at connect time; `internal/research/fetch_rebind_test.go`
+is that regression, and it asserts ZERO accepts on a loopback listener.
 
 Two contract rules are baked in because they were measured on the seats (2026-08-28): the
 goal names the context document as *already provided* (a goal that says "read the document"

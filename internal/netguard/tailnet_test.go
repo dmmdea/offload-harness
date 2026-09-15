@@ -128,8 +128,8 @@ func TestSafeDialContextIPLiterals(t *testing.T) {
 // rebinding bypass ingress.go documents). The resolver is pinned per case so
 // the test controls the "DNS" answers.
 func TestSafeDialContextResolvesAndPins(t *testing.T) {
-	restore := lookupNetIP
-	defer func() { lookupNetIP = restore }()
+	restore := LookupIP
+	defer func() { LookupIP = restore }()
 
 	mustAddr := func(s string) netip.Addr { return netip.MustParseAddr(s) }
 	answers := map[string][]netip.Addr{
@@ -138,7 +138,7 @@ func TestSafeDialContextResolvesAndPins(t *testing.T) {
 		"mixed-host":  {mustAddr("203.0.113.7"), mustAddr(exampleTailnet)}, // poisoned answer alongside a real one
 		"mapped-host": {mustAddr("::ffff:" + exampleTailnet)},                   // IPv4-mapped IPv6 form of a tailnet address
 	}
-	lookupNetIP = func(ctx context.Context, host string) ([]netip.Addr, error) {
+	LookupIP = func(ctx context.Context, host string) ([]netip.Addr, error) {
 		a, ok := answers[host]
 		if !ok {
 			return nil, fmt.Errorf("no such host %q", host)
@@ -205,9 +205,9 @@ func TestSafeTransportEndToEnd(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	restore := lookupNetIP
-	defer func() { lookupNetIP = restore }()
-	lookupNetIP = func(ctx context.Context, host string) ([]netip.Addr, error) {
+	restore := LookupIP
+	defer func() { LookupIP = restore }()
+	LookupIP = func(ctx context.Context, host string) ([]netip.Addr, error) {
 		if host == "workstation.tailnnnnnn.ts.net" {
 			return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
 		}

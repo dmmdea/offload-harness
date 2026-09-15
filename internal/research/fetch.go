@@ -65,12 +65,21 @@ type Options struct {
 	Client *http.Client
 }
 
-// ValidateURL is the SSRF guard: only http(s), only public hosts. Loopback,
-// private (RFC 1918 / ULA), link-local, `.local`, `localhost`, and the
-// operator's tailnet zone are refused — the research lane must never become a
-// way to read a fleet node's admin endpoints or a box's local services through
-// the harness. DNS is resolved here and every returned address is checked, so a
-// public name that resolves to a private address is refused too.
+// ValidateURL is the SSRF guard's NAME half: only http(s), only public hosts.
+// Loopback, private (RFC 1918 / ULA), link-local, `.local`, `localhost`, and
+// the operator's tailnet zone are refused — the research lane must never become
+// a way to read a fleet node's admin endpoints or a box's local services
+// through the harness. DNS is resolved here (through netguard's single seam)
+// and every returned address is judged by netguard.CheckPublicIP, so a public
+// name that resolves to a private address is refused too.
+//
+// It is NOT sufficient on its own and never was: between this lookup and the
+// socket, the name can resolve again to something else (DNS rebinding). The
+// load-bearing half is netguard.PublicTransport in Fetch below, which resolves
+// once more at DIAL time and connects to the vetted IP LITERAL. Keep both:
+// this one refuses by NAME (scheme, `.local`, the tailnet zone) where an
+// address check has nothing to look at, and it refuses without spending a
+// connection.
 func ValidateURL(ctx context.Context, raw string) (*url.URL, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -90,12 +99,12 @@ func ValidateURL(ctx context.Context, raw string) (*url.URL, error) {
 		return nil, fmt.Errorf("host %q is on the tailnet — the research lane reads the public web only", host)
 	}
 	if ip := net.ParseIP(host); ip != nil {
-		if !publicIP(ip) {
-			return nil, fmt.Errorf("address %s is not public", ip)
+		if err := netguard.CheckPublicIP(ip); err != nil {
+			return nil, fmt.Errorf("address %s is not public: %w", ip, err)
 		}
 		return u, nil
 	}
-	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	addrs, err := netguard.LookupIP(ctx, host)
 	if err != nil {
 		return nil, fmt.Errorf("resolving %s: %w", host, err)
 	}
@@ -103,23 +112,11 @@ func ValidateURL(ctx context.Context, raw string) (*url.URL, error) {
 		return nil, fmt.Errorf("resolving %s: no addresses", host)
 	}
 	for _, a := range addrs {
-		if !publicIP(a.IP) {
-			return nil, fmt.Errorf("host %s resolves to non-public address %s", host, a.IP)
+		if err := netguard.CheckPublicIP(net.IP(a.Unmap().AsSlice())); err != nil {
+			return nil, fmt.Errorf("host %s resolves to non-public address %s: %w", host, a, err)
 		}
 	}
 	return u, nil
-}
-
-func publicIP(ip net.IP) bool {
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsMulticast() || ip.IsUnspecified() || ip.IsInterfaceLocalMulticast() {
-		return false
-	}
-	// Tailscale CGNAT range (100.64.0.0/10) — MagicDNS peers and fleet nodes.
-	if v4 := ip.To4(); v4 != nil && v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
-		return false
-	}
-	return true
 }
 
 // Fetch reads one page under the guard and returns it stripped to text. It
@@ -150,10 +147,20 @@ func Fetch(ctx context.Context, raw string, opt Options) Fetched {
 	if client == nil {
 		client = &http.Client{}
 	}
-	// Copy so the caller's client is never mutated; redirects re-run the guard
-	// (an open redirect to a private address is the classic bypass).
+	// Copy so the caller's client is never mutated, and route every dial —
+	// first hop and each redirect hop alike — through netguard's pinned
+	// transport. Before 0.117.3 this reconnected BY NAME through a bare
+	// http.Client: ValidateURL resolved, approved, threw the address away, and
+	// the transport resolved again, so an attacker-controlled record with a
+	// 1 s TTL turned an approved public host into a read of a loopback service
+	// (register K-01). The transport now dials the address it validated.
 	c := *client
+	c.Transport = netguard.PublicTransport(c.Transport)
 	c.Timeout = timeout
+	// Every redirect hop is re-checked by NAME here (scheme, `.local`, the
+	// tailnet zone — things an address cannot express) and by ADDRESS in the
+	// transport when the hop is dialed. An open redirect to a private address
+	// is the classic bypass, and it now has to beat both.
 	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= MaxRedirects {
 			return fmt.Errorf("stopped after %d redirects", MaxRedirects)
