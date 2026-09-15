@@ -34,8 +34,18 @@ func TestCompositeTierSeedsIdentityAndLayersAndPlainTiersDoNot(t *testing.T) {
 		t.Fatalf("tiers = %v", seed["tiers"])
 	}
 	layers, ok := seed["layers"].([]config.LayerSpec)
-	if !ok || len(layers) != 4 {
+	if !ok || len(layers) != 3 {
 		t.Fatalf("layers = %#v", seed["layers"])
+	}
+	// The shipped tier declares NO triple layer: its only seat was the
+	// three-card Flash-Next arm, which parked 28-32 expert layers in host RAM
+	// and was removed by the 2026-09-10 operator rule (RAM is overflow only).
+	// A layer whose seats no longer render is a layer placement can only defer
+	// on, so the tier stops advertising it; context_class long is the pair's.
+	for _, l := range layers {
+		if l.Name == "triple" {
+			t.Fatalf("blackwell-3x16 must declare no triple layer while no three-card seat fits VRAM: %+v", l)
+		}
 	}
 	var pairAgent config.LayerSeat
 	for _, l := range layers {
@@ -225,21 +235,28 @@ func TestParseDocRefusesAMisspeltLayerKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The shipped table declares no host_ram-guarded layer any more (the
+	// 2026-09-10 rule removed the three-card Flash-Next arms, and RAM is
+	// overflow only), so the host_ram case runs against the table PLUS the
+	// three-card layer an operator would re-add the day a seat fits: the
+	// parser's refusal must not depend on today's roster.
+	withThreeCard := docPlusThreeCardLayer(t, raw)
 	cases := []struct {
+		doc      []byte
 		from, to string
 		want     []string
 	}{
-		{"host_ram_gib", "host_ram_gb", []string{`tier "blackwell-3x16"`, `layers[2] "triple"`, `seats[0] "long"`, `unknown key "host_ram_gb"`}},
-		{"prefill_tps", "prefill_tp", []string{`tier "blackwell-3x16"`, `layers[1] "pair"`, `seats[1] "long"`, `unknown key "prefill_tp"`}},
-		{"footprint_gib", "footprint_gb", []string{`tier "blackwell-3x16"`, `layers[0] "single"`, `unknown key "footprint_gb"`}},
-		{"dormant", "dormnt", []string{`tier "blackwell-3x16"`, `layers[3] "display"`, `unknown key "dormnt"`}},
+		{withThreeCard, "host_ram_gib", "host_ram_gb", []string{`tier "blackwell-3x16"`, `layers[3] "triple"`, `seats[0] "long"`, `unknown key "host_ram_gb"`}},
+		{raw, "prefill_tps", "prefill_tp", []string{`tier "blackwell-3x16"`, `layers[1] "pair"`, `seats[1] "long"`, `unknown key "prefill_tp"`}},
+		{raw, "footprint_gib", "footprint_gb", []string{`tier "blackwell-3x16"`, `layers[0] "single"`, `unknown key "footprint_gb"`}},
+		{raw, "dormant", "dormnt", []string{`tier "blackwell-3x16"`, `layers[2] "display"`, `unknown key "dormnt"`}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.to, func(t *testing.T) {
-			if !strings.Contains(string(raw), `"`+tc.from+`"`) {
+			if !strings.Contains(string(tc.doc), `"`+tc.from+`"`) {
 				t.Fatalf("the table carries no key %q — the probe would test nothing", tc.from)
 			}
-			b := []byte(strings.ReplaceAll(string(raw), `"`+tc.from+`"`, `"`+tc.to+`"`))
+			b := []byte(strings.ReplaceAll(string(tc.doc), `"`+tc.from+`"`, `"`+tc.to+`"`))
 			for name, parse := range map[string]func([]byte) error{
 				"ParseDoc": func(b []byte) error { _, err := ParseDoc(b); return err },
 				"Parse":    func(b []byte) error { _, err := Parse(b); return err },
@@ -261,15 +278,45 @@ func TestParseDocRefusesAMisspeltLayerKey(t *testing.T) {
 	// layers: a host_ram-guarded seat without its number is the same fail-open
 	// guard by a different route.
 	var doc map[string]any
-	if err := json.Unmarshal(raw, &doc); err != nil {
+	if err := json.Unmarshal(withThreeCard, &doc); err != nil {
 		t.Fatal(err)
 	}
-	triple := doc["profiles"].(map[string]any)["blackwell-3x16"].(map[string]any)["layers"].([]any)[2].(map[string]any)
-	delete(triple["seats"].([]any)[0].(map[string]any), "host_ram_gib")
+	three := doc["profiles"].(map[string]any)["blackwell-3x16"].(map[string]any)["layers"].([]any)[3].(map[string]any)
+	delete(three["seats"].([]any)[0].(map[string]any), "host_ram_gib")
 	b, _ := json.Marshal(doc)
 	if _, err := ParseDoc(b); err == nil || !strings.Contains(err.Error(), "host_ram_gib is undeclared") {
 		t.Fatalf("a host_ram-guarded seat without host_ram_gib must be refused at parse, got %v", err)
 	}
+}
+
+// docPlusThreeCardLayer returns the shipped table with one extra layer on
+// blackwell-3x16: a three-card, host_ram- and display-guarded long seat, the
+// shape the tier carried until 0.115.4 and the shape it would carry again the
+// day a three-card seat fits inside VRAM. It exists so the parser's refusals
+// stay pinned to the SHAPE rather than to whichever layers ship this week.
+func docPlusThreeCardLayer(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	p := doc["profiles"].(map[string]any)["blackwell-3x16"].(map[string]any)
+	layers := p["layers"].([]any)
+	p["layers"] = append(layers, map[string]any{
+		"name": "triple", "tier": "blackwell-3x16", "devices": []any{"0,1,2"}, "opt_in": true,
+		"display_device": "1", "display_floor_gib": 4.0,
+		"guards": []any{"display_floor", "host_ram", "presence"},
+		"seats": []any{map[string]any{
+			"role": "long", "model": "three-card-long", "device": "0,1,2",
+			"ctx_tokens": 262144.0, "footprint_gib": 13.0, "display_footprint_gib": 10.5,
+			"host_ram_gib": 70.0, "prefill_tps": 69.0,
+		}},
+	})
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // TestFieldsDocumentExactlyTheLayerKeys makes the table's _fields block a

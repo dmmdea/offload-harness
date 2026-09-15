@@ -385,10 +385,20 @@ func (t table) byRole(layer, role, why string) Decision {
 // agent is rows 4–8.
 func (t table) agent() Decision {
 	need := t.req.need()
-	// Row 4: an explicit long ask is the triple's row and nothing else's.
+	// Row 4: an explicit long ask takes the biggest long-context layer the box
+	// declares — the triple's guarded long seat where one exists, otherwise the
+	// pair's. The fallback is the 2026-09-10 operator rule (RAM is overflow
+	// only): the three-card Flash-Next arms held 28-32 expert layers in host
+	// memory and were removed from the tier table (0.115.4), so the reference
+	// box declares NO triple layer and `context_class: long` means the pair's
+	// 262k twin. Refusing it instead would make the field dead on every box
+	// that ships today, and the pair's long seat is measured (pp 1,197 t/s).
 	if t.req.ContextClass == core.ContextClassLong {
 		if l, s, ok := t.seat(LayerTriple, RoleLong); ok {
 			return t.longSeat(l, s, need, fmt.Sprintf("context_class long → %s layer's long seat", l.Name))
+		}
+		if d, ok := t.pairLong(need, fmt.Sprintf("context_class long (~%d tokens) → the pair's long seat", need)); ok {
+			return d
 		}
 		return deferContract("", t.restricted("no layer serves context_class long on this box"))
 	}
@@ -415,29 +425,11 @@ func (t table) agent() Decision {
 	// Row 6: window overflow onto the pair's long seat, waiting out a busy agent seat.
 	if l, s, ok := t.seat(LayerPair, RoleLong); ok {
 		note(s, l.Name)
-		if need <= s.CtxTokens {
-			agentWindow := 0
-			if as, ok := findSeat(l, RoleAgent); ok {
-				agentWindow = as.CtxTokens
-			}
-			d := Decision{Placed: core.Placed{Tier: l.Tier, Layer: l.Name, Role: RoleLong, Seat: s.Model, Devices: s.DeviceList(), CtxTokens: s.CtxTokens}}
-			head := fmt.Sprintf("window overflow (need ~%d > %d); the pair's long seat holds it (%s, window %d)", need, agentWindow, s.Model, s.CtxTokens)
-			agent := t.pairAgentModel()
-			st := t.occupancy(l.Name, RoleAgent)
-			switch {
-			case agent == "":
-				d.Reason = head + " — the pair has no agent seat to evict"
-			case !st.Known:
-				d.Reason = head + fmt.Sprintf(" — %s occupancy unknown (treated as cold; nothing waited on)", agent)
-			case st.Loaded && st.Inflight > 0:
-				d.Wait, d.Evicts = true, agent
-				d.Reason = head + fmt.Sprintf(" — evicts %s (%d in flight): waits for it to drain", agent, st.Inflight)
-			case st.Loaded:
-				d.Evicts = agent
-				d.Reason = head + fmt.Sprintf(" — evicts %s (idle)", agent)
-			default:
-				d.Reason = head + fmt.Sprintf(" — %s is not loaded (cold), nothing to evict", agent)
-			}
+		agentWindow := 0
+		if as, ok := findSeat(l, RoleAgent); ok {
+			agentWindow = as.CtxTokens
+		}
+		if d, ok := t.pairLong(need, fmt.Sprintf("window overflow (need ~%d > %d); the pair's long seat holds it", need, agentWindow)); ok {
 			return d
 		}
 	}
@@ -453,6 +445,43 @@ func (t table) agent() Decision {
 		return deferContract("", t.restricted("no layer serves an agent contract (roles agent / long)"))
 	}
 	return deferContract(largestLayer, t.restricted(fmt.Sprintf("contract needs ~%d tokens; no layer window holds it (largest %d)", need, largest)))
+}
+
+// pairLong is the pair's long-seat row, shared by window overflow (row 6) and
+// an explicit long ask on a box with no three-card layer (row 4). ok=false
+// when the pair declares no long seat or the contract does not fit its window,
+// so the caller falls through to the next row rather than deferring here.
+//
+// The eviction rule is council R1 and it lives HERE so both entries obey it:
+// the long seat and the agent seat share the pair's cards, so loading one
+// evicts the other — a mid-flight agent seat is WAITED for (the capacity wait
+// credits the idle time) and named in Evicts; a cold or idle one is displaced
+// with a note; occupancy that could not be read is treated as cold and waited
+// on by nobody, because a wait on an unknown is a wait that never ends.
+func (t table) pairLong(need int, head string) (Decision, bool) {
+	l, s, ok := t.seat(LayerPair, RoleLong)
+	if !ok || need > s.CtxTokens {
+		return Decision{}, false
+	}
+	d := Decision{Placed: core.Placed{Tier: l.Tier, Layer: l.Name, Role: RoleLong, Seat: s.Model, Devices: s.DeviceList(), CtxTokens: s.CtxTokens}}
+	head = fmt.Sprintf("%s (%s, window %d)", head, s.Model, s.CtxTokens)
+	agent := t.pairAgentModel()
+	st := t.occupancy(l.Name, RoleAgent)
+	switch {
+	case agent == "":
+		d.Reason = head + " — the pair has no agent seat to evict"
+	case !st.Known:
+		d.Reason = head + fmt.Sprintf(" — %s occupancy unknown (treated as cold; nothing waited on)", agent)
+	case st.Loaded && st.Inflight > 0:
+		d.Wait, d.Evicts = true, agent
+		d.Reason = head + fmt.Sprintf(" — evicts %s (%d in flight): waits for it to drain", agent, st.Inflight)
+	case st.Loaded:
+		d.Evicts = agent
+		d.Reason = head + fmt.Sprintf(" — evicts %s (idle)", agent)
+	default:
+		d.Reason = head + fmt.Sprintf(" — %s is not loaded (cold), nothing to evict", agent)
+	}
+	return d, true
 }
 
 // longSeat is the shared body of rows 4 and 7: the prefill feasibility check

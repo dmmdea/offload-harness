@@ -1,9 +1,18 @@
 package config
 
 // CompositeFixture is the reference composite box every placement test reasons
-// about: the Qube's four layers with the measured footprints and windows. Shared
-// across packages so the table, the delegate, the pipeline and the status tests
-// all see one box; never consulted at runtime.
+// about: four layers with the measured footprints and windows. Shared across
+// packages so the table, the delegate, the pipeline and the status tests all
+// see one box; never consulted at runtime.
+//
+// It declares one layer the SHIPPED tier table does not: the three-card
+// `triple` layer, whose only seat (qwen3.8-flash-next-262k) parked 28-32
+// expert layers in host RAM and was removed by the 2026-09-10 operator rule
+// that RAM is overflow only. The fixture keeps it because the TABLE still
+// serves that shape — a guarded, host-RAM-bearing, display-card-spanning
+// layer is exactly what the display_floor / host_ram / presence guards exist
+// for, and the day a three-card seat fits inside VRAM the tier declares one
+// again. Tests that assert what the box SHIPS read profiles.json, not this.
 func CompositeFixture() Config {
 	c := Default()
 	c.TierProfile = "blackwell-3x16"

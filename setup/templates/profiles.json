@@ -388,9 +388,6 @@
           {"role": "agent", "footprint_gib": 15.0},
           {"role": "long", "model": "qwen3.8-27b-262k", "device": "0,2", "ctx_tokens": 262144, "footprint_gib": 15.5, "prefill_tps": 1197},
           {"role": "vision", "model": "qwen3-vl-32b", "device": "0,2", "ctx_tokens": 16384, "footprint_gib": 12.0}]},
-        {"name": "triple", "tier": "blackwell-3x16", "devices": ["0,1,2"], "opt_in": true,
-          "display_device": "1", "display_floor_gib": 4, "guards": ["display_floor", "host_ram", "presence"], "seats": [
-          {"role": "long", "model": "qwen3.8-flash-next-262k", "device": "0,1,2", "ctx_tokens": 262144, "footprint_gib": 13.0, "display_footprint_gib": 10.5, "host_ram_gib": 70, "prefill_tps": 69}]},
         {"name": "display", "tier": "blackwell-16", "devices": ["1"], "opt_in": true, "dormant": true,
           "display_device": "1", "display_floor_gib": 4, "guards": ["display_floor", "presence"], "seats": [
           {"role": "router", "device": "1", "display_footprint_gib": 6.2, "model_map": {"workhorse": "gemma-4-e4b-display", "triage": "gemma-4-e2b-display"}}]}

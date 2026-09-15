@@ -314,17 +314,56 @@ func TestExplicitLongAsksForTheTripleUnderFeasibilityAndGuards(t *testing.T) {
 	}
 }
 
-func TestExplicitLongWithoutATripleLayerDefersLoudly(t *testing.T) {
+// TestExplicitLongFallsBackToThePairsLongSeatWhenNoThreeCardLayerIsDeclared
+// pins the 2026-09-10 operator rule (RAM is overflow only): the three-card
+// Flash-Next arms were removed from the tier table, so the shipped composite
+// box declares no triple layer at all — and an explicit `context_class: long`
+// must then be SERVED by the pair's 262k long seat, under the same eviction
+// rule window overflow takes, not refused as "no layer serves long". A box
+// with no long seat anywhere still defers loudly.
+func TestExplicitLongFallsBackToThePairsLongSeatWhenNoThreeCardLayerIsDeclared(t *testing.T) {
 	var noTriple []config.LayerSpec
 	for _, l := range layers() {
 		if l.Name != "triple" {
 			noTriple = append(noTriple, l)
 		}
 	}
-	req := Request{Class: ClassAgent, EstTokens: 1000, MaxTokens: 100, ContextClass: core.ContextClassLong}
+	req := Request{Class: ClassAgent, EstTokens: 1000, MaxTokens: 100, BudgetSec: 300, ContextClass: core.ContextClassLong}
 	d := Decide(req, noTriple, admitting().live())
+	if d.Defer {
+		t.Fatalf("no triple layer → the pair's long seat serves the explicit long ask, got %+v", d)
+	}
+	if d.Layer != "pair" || d.Role != "long" || d.Seat != "qwen3.8-27b-262k" {
+		t.Fatalf("explicit long without a triple layer → pair/long, got %+v", d.Placed)
+	}
+	if !strings.Contains(d.Reason, "context_class long") {
+		t.Fatalf("the reason must say the ask was explicit: %q", d.Reason)
+	}
+
+	// The pair's agent seat is mid-flight: the same eviction rule window
+	// overflow takes (council R1) — wait for it to drain, name what it evicts.
+	busy := admitting()
+	busy.seats["pair/agent"] = SeatState{Known: true, Loaded: true, Inflight: 5}
+	d = Decide(req, noTriple, busy.live())
+	if !d.Wait || d.Evicts != "agent-pool" || d.Layer != "pair" {
+		t.Fatalf("a busy pair makes the explicit long ask WAIT, got %+v", d)
+	}
+
+	// A box with no long seat at all still defers loudly, naming the ask.
+	var noLong []config.LayerSpec
+	for _, l := range noTriple {
+		var seats []config.LayerSeat
+		for _, s := range l.Seats {
+			if s.Role != RoleLong {
+				seats = append(seats, s)
+			}
+		}
+		l.Seats = seats
+		noLong = append(noLong, l)
+	}
+	d = Decide(req, noLong, admitting().live())
 	if !d.Defer || d.DeferClass != core.DeferClassContract {
-		t.Fatalf("no triple layer → contract defer, never a fallthrough to the pair, got %+v", d)
+		t.Fatalf("no long seat anywhere → contract defer, got %+v", d)
 	}
 	if !strings.Contains(d.Reason, "no layer serves context_class long on this box") {
 		t.Fatalf("reason: %q", d.Reason)
