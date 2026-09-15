@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -954,6 +955,20 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 	// one *Loop across concurrent handlers.
 	repNote := ""
 	repCut := false
+	// The cut-tool-call re-issue's run state (register D-114): cutReissued
+	// bounds it at ONE per run, and the three numbers are the evidence the
+	// second cut's note names — the budget the cut turn ran at, the budget the
+	// re-issue opened at, and how far into the argument the engine got.
+	cutReissued := false
+	cutStepTokens, cutFinalTokens, cutArgChars := 0, 0, 0
+	// cutResult ends the run on StopToolCallCut with that arithmetic. A
+	// closure over the run-locals, like finalTokens above: a *Loop is shared
+	// across --serve handlers, so none of this may live on it.
+	cutResult := func(steps int) Result {
+		return Result{Steps: steps, StopReason: StopToolCallCut, StopNote: cutToolCallNote(cutStepTokens, cutFinalTokens, cutArgChars),
+			Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(),
+			Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
+	}
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
@@ -1093,6 +1108,43 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		callStart := time.Now()
 		comp, err := l.client.Chat(stepCtx, msgs, specs, stepMax)
 		if err != nil {
+			// A CUT TOOL CALL (register D-114) is the seat running out of
+			// COMPLETION budget in the middle of a tool argument: llama.cpp
+			// refuses to parse the half-written JSON and answers HTTP 500
+			// "Failed to parse tool call arguments as JSON … invalid string:
+			// missing closing quote". That is a budget defect — a ~3 KB write
+			// asked for in one call at a 1,024-token step budget — and filing
+			// it as a loop error made the node blame the stack
+			// (defer_class "infrastructure", 2026-09-15 on the Aorus 9B).
+			//
+			// Classified BEFORE the overflow retry on purpose: the cut
+			// argument's own text can carry the words that retry keys on
+			// ("context", "exceed"), and compacting the PROMPT does nothing for
+			// an ANSWER that was too long to finish.
+			if isCutToolCallErr(err) {
+				n := cutArgSizeFromErr(err)
+				// The attempt belongs in results[].calls like any other
+				// completion: the engine refused it, so no Completion came
+				// back, but the seat generated for it and an operator reading
+				// the run must see the budget it generated at.
+				calls = append(calls, cutCallRecord(step+1, stepMax, time.Since(callStart)))
+				if !cutReissued {
+					cutReissued = true
+					cutStepTokens, cutArgChars = stepMax, n
+					cutFinalTokens = finalTokens()
+					// Re-issue the SAME step once at the wall-fitted final
+					// budget (4,096 vs 1,024 on the fleet seats): the
+					// transcript is unchanged, so the seat writes the same
+					// call with room to close it.
+					reissueFloor = cutFinalTokens
+					step-- // the re-issue does not spend a step
+					continue
+				}
+				if n > 0 {
+					cutArgChars = n
+				}
+				return cutResult(step + 1), nil
+			}
 			// Reactive retry (belt-and-suspenders): the token estimate is
 			// approximate, so a request we thought fit can still be rejected for
 			// overflow. On an overflow-looking error, compact HARDER (tighter
@@ -1158,6 +1210,24 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		calls = append(calls, callRec)
 		if l.observer != nil {
 			l.observer.OnStep(step+1, tokOut)
+		}
+		// The SAME defect in the shape an engine that does not validate the
+		// call returns it (register D-114): the completion arrives, cut at the
+		// budget (finish_reason "length"), carrying a tool call whose arguments
+		// are a JSON fragment. Nothing can execute it, and appending it to the
+		// transcript would poison the re-issue — so the cut turn is dropped and
+		// the step re-issued at the final budget, exactly as on the 500 above.
+		if n, cut := cutToolCallInCompletion(comp); cut {
+			l.prefill.Observe(comp.Serve)
+			if !cutReissued {
+				cutReissued = true
+				cutStepTokens, cutFinalTokens, cutArgChars = stepMax, finalTokens(), n
+				reissueFloor = cutFinalTokens
+				step-- // the re-issue does not spend a step
+				continue
+			}
+			cutArgChars = n
+			return cutResult(step + 1), nil
 		}
 		lastWasReissue = thisIsReissue
 		// Learn from the response: estimateTokens(msgs) is what we thought the
@@ -1725,6 +1795,105 @@ func clip(s string, n int) string {
 		cut = cut[:len(cut)-1]
 	}
 	return cut + "…"
+}
+
+// StopToolCallCut (register D-114): the seat's tool-call ARGUMENT was cut by
+// the completion budget twice — once at the step budget, once at the
+// wall-fitted final budget the re-issue opened at. Terminal, with an empty
+// Output and the arithmetic in StopNote; the node files it as a BUDGET defer,
+// never infrastructure. Measured 2026-09-15 on the Aorus 9B llama.cpp seat
+// (step_tokens 1024, a ~3 KB single-call write): llama.cpp answered HTTP 500
+// "Failed to parse tool call arguments as JSON … invalid string: missing
+// closing quote" at column 2847 and the run was filed against the stack.
+const StopToolCallCut = "tool_call_cut"
+
+// isCutToolCallErr reports whether a Chat error is the ENGINE refusing a tool
+// call whose JSON arguments the completion budget cut in half. Anchored on the
+// tool-call parse failure, never on the status: a 500 on its own is an
+// infrastructure defect and must keep reading as one (the CONTROL case in
+// cut_toolcall_test.go). llama.cpp's text is nlohmann's, so the phrasings are
+// pinned to what it and the OpenAI-compatible engines emit.
+func isCutToolCallErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	if !strings.Contains(s, "tool call") && !strings.Contains(s, "tool_call") {
+		return false
+	}
+	return strings.Contains(s, "failed to parse tool call arguments as json") ||
+		strings.Contains(s, "missing closing quote") ||
+		strings.Contains(s, "invalid string")
+}
+
+// cutArgSizeFromErr reads how far into the argument the engine got from its
+// own parse error ("parse error at line 1, column 2847"). 0 when the text
+// names no position — the note then says the size is unreported rather than
+// printing a number nothing measured.
+func cutArgSizeFromErr(err error) int {
+	if err == nil {
+		return 0
+	}
+	s := strings.ToLower(err.Error())
+	for _, key := range []string{"column ", "position ", "offset "} {
+		i := strings.Index(s, key)
+		if i < 0 {
+			continue
+		}
+		j := i + len(key)
+		k := j
+		for k < len(s) && s[k] >= '0' && s[k] <= '9' {
+			k++
+		}
+		if k > j {
+			if n, cerr := strconv.Atoi(s[j:k]); cerr == nil {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+// cutToolCallInCompletion reports a completion that WAS returned but carries
+// the same defect: cut at the budget (finish_reason "length") with a tool call
+// whose arguments do not parse. Returns the partial argument's size. An EMPTY
+// argument is not a cut — that is how a no-argument tool call arrives on some
+// engines, and treating it as one would re-issue every such step.
+func cutToolCallInCompletion(c Completion) (int, bool) {
+	if c.FinishReason != "length" {
+		return 0, false
+	}
+	for _, tc := range c.Msg.ToolCalls {
+		if strings.TrimSpace(tc.Args) == "" {
+			continue
+		}
+		if !json.Valid([]byte(tc.Args)) {
+			return len(tc.Args), true
+		}
+	}
+	return 0, false
+}
+
+// cutCallRecord is the corpus record of an attempt the ENGINE refused: no
+// Completion came back, so only the budget it generated at, the wall it spent
+// and the one tool call it was writing are known. FinishReason carries
+// StopToolCallCut — the loop's classification of a 500, named as such rather
+// than dressed as a finish reason the server reported.
+func cutCallRecord(step, maxTokens int, took time.Duration) CallRecord {
+	return CallRecord{Step: step, MaxTokens: maxTokens, FinishReason: StopToolCallCut, ToolCalls: 1, Ms: took.Milliseconds()}
+}
+
+// cutToolCallNote is the one-line evidence a StopToolCallCut run publishes:
+// both budgets and how much of the argument the seat got out, so the reader
+// can tell "ask for a smaller write" from "raise the step budget".
+func cutToolCallNote(stepTokens, finalTokens, argChars int) string {
+	size := "partial argument size unreported by the engine"
+	if argChars > 0 {
+		size = fmt.Sprintf("partial argument %d chars", argChars)
+	}
+	return fmt.Sprintf("tool-call argument cut at the completion budget twice (step %d tok, re-issued at %d tok; %s): "+
+		"the seat cannot emit a tool call of this size in one call — ask for a smaller write, or raise the seat's step budget",
+		stepTokens, finalTokens, size)
 }
 
 // ErrUnparsedToolCall: the server returned an assistant message with no parsed

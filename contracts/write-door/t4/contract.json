@@ -1,0 +1,16 @@
+{
+  "goal": "release-notes.md is being published. Change the single line `Status: draft` to `Status: final` and leave every other line of the file byte-identical - same headings, same table, same wording, same order, nothing added and nothing removed. Make the change with ONE write_file call that carries the COMPLETE updated file as its content argument (not edit_file, not several calls, not a fragment). Do not merely describe the change.",
+  "context_paths": ["release-notes.md"],
+  "write_root": ".",
+  "thinking": "off",
+  "timeout_sec": 900,
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "summary": {"type": "string", "description": "what was changed in release-notes.md"},
+      "changed_files": {"type": "array", "maxItems": 4, "items": {"type": "string"}, "description": "the files written"}
+    },
+    "required": ["summary", "changed_files"]
+  },
+  "acceptance": ["diff_touches:release-notes.md", "diff_max_files:1", "nonempty:summary"]
+}

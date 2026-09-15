@@ -39,7 +39,12 @@ const agentTestSeat = "seat-x"
 type agentFake struct {
 	rosterIDs []string
 	loop      func(n int64) string // returns the raw chat-completions response body
-	repack    func(n int64) string // content of the grammar completion (a JSON object string)
+	// loopStatus, when set, is the HTTP status the n-th LOOP completion
+	// answers with (0 = 200, as every older test gets); the body is still
+	// f.loop(n), which is how llama.cpp answers a refused tool call: a 500
+	// carrying the parse error (register D-114).
+	loopStatus func(n int64) int
+	repack     func(n int64) string // content of the grammar completion (a JSON object string)
 	// repackStatus, when non-zero, is returned for every grammar completion
 	// instead of a body: the seat ANSWERED with that status rather than with a
 	// result. 5xx = unreachable-class; 4xx = the seat refusing THIS request.
@@ -162,6 +167,11 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 			if _, hasTools := body["tools"]; hasTools || isForcedFinalCall(body) {
 				n := f.loopCalls.Add(1)
 				w.Header().Set("Content-Type", "application/json")
+				if f.loopStatus != nil {
+					if st := f.loopStatus(n); st != 0 {
+						w.WriteHeader(st)
+					}
+				}
 				_, _ = w.Write([]byte(f.loop(n)))
 				return
 			}
