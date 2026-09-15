@@ -290,10 +290,34 @@ func Stamp(rendered string, b SpecBasis, at time.Time) (string, error) {
 	fmt.Fprintf(&sb, "# rendered_by: %s\n", b.HarnessVersion)
 	fmt.Fprintf(&sb, "# tier: %s\n", b.TierID)
 	fmt.Fprintf(&sb, "# rendered_at: %s\n", at.UTC().Format(time.RFC3339))
-	fmt.Fprintf(&sb, "# basis: %s\n", canonical)
+	fmt.Fprintf(&sb, "# basis: %s\n", escapeDoubleUnderscore(canonical))
 	sb.WriteString("\n") // one blank separator; ParseStamp consumes it back
 	sb.WriteString(rendered)
 	return sb.String(), nil
+}
+
+// escapeDoubleUnderscore is the stamp's one transport escape, and it exists for
+// a rule this file would otherwise break.
+//
+// A rendered serving config must contain NO `__TOKEN__`: Render refuses to emit
+// one (a llama-swap started with a literal `--ctx-size __CTX__` fails in a way
+// that reads like a model problem), and setup/render.tests.ps1 greps every
+// rendered config for that pattern on every tier it exercises. The basis,
+// however, legitimately CARRIES such tokens: a tier's media seats declare their
+// binaries as `__OFFLOAD_HOME__/...` and the hash covers the render inputs AS
+// GIVEN, unsubstituted -- substituting them before hashing would hash something
+// `install render` was never handed. Writing that basis into the config verbatim
+// put the forbidden pattern back into four tiers' rendered output (caught by the
+// installer self-test in CI, not by review).
+//
+// So the transport escapes the SECOND underscore of every doubled pair as the
+// JSON escape \u005f. It is the same string after json.Unmarshal, so the
+// basis round-trips and the spec hash -- computed over the UNescaped canonical
+// bytes -- is untouched; the stamp simply stops re-introducing the one pattern a
+// rendered config must never contain. A run of three or more underscores escapes
+// in alternating pairs, which still leaves no doubled pair anywhere in the line.
+func escapeDoubleUnderscore(b []byte) string {
+	return strings.ReplaceAll(string(b), "__", `_\u005f`)
 }
 
 // Stamped is a parsed provenance block plus the exact body bytes beneath it.

@@ -436,3 +436,57 @@ func contains(xs []string, want string) bool {
 	}
 	return false
 }
+
+// TestStampNeverReintroducesAnUnsubstitutedToken is the regression gate for the
+// defect CI caught and review did not: the stamp writes the render basis into
+// the config, the basis legitimately carries a tier's `__OFFLOAD_HOME__` seat
+// paths unsubstituted, and a rendered serving config must contain NO
+// `__TOKEN__` anywhere. Render refuses to emit one and setup/render.tests.ps1
+// greps every rendered config for exactly this pattern on every tier -- four
+// tiers went red.
+//
+// The escape must not cost anything: the basis still decodes to the same struct
+// and the spec hash is unchanged, both asserted here.
+func TestStampNeverReintroducesAnUnsubstitutedToken(t *testing.T) {
+	b := basis()
+	b.Params.Home = "__OFFLOAD_HOME__"
+	b.Params.Seats = []mediaseat.Seat{{
+		Kind: "vision", Name: "vlm", Model: "m.gguf", Residency: "swap",
+		Bin:    "__OFFLOAD_HOME__/bin/llama-server.exe",
+		LibDir: "__OFFLOAD_HOME__/bin",
+	}}
+	stamped, err := Stamp("models: {}\n", b, stampedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokenRe.MatchString(stamped) {
+		t.Errorf("the stamped config carries an unsubstituted token -- Render refuses such a config and the installer self-test greps for it:\n%s", tokenRe.FindString(stamped))
+	}
+	st, ok := ParseStamp(stamped)
+	if !ok {
+		t.Fatal("the escaped stamp did not parse back")
+	}
+	got, err := st.Basis()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The escape is TRANSPORT only: the decoded basis must be the original,
+	// token for token, or the re-derive would diff against a mangled record.
+	if got.Params.Home != "__OFFLOAD_HOME__" || got.Params.Seats[0].Bin != "__OFFLOAD_HOME__/bin/llama-server.exe" {
+		t.Errorf("the escape changed the basis: home=%q bin=%q", got.Params.Home, got.Params.Seats[0].Bin)
+	}
+	want, _, err := SpecHash(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.SpecSHA256 != want {
+		t.Errorf("the escape moved the spec hash (%s, want %s)", short(st.SpecSHA256), short(want))
+	}
+	if again, _, err := SpecHash(got); err != nil || again != want {
+		t.Errorf("the decoded basis does not re-hash to the stamped spec hash (%s, want %s)", short(again), short(want))
+	}
+	// A run of three underscores must not leave a doubled pair behind.
+	if strings.Contains(escapeDoubleUnderscore([]byte("a___b____c")), "__") {
+		t.Error("escapeDoubleUnderscore left a doubled underscore in a longer run")
+	}
+}

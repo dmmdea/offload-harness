@@ -43,6 +43,7 @@ revision stale breaks no rule - so it reported OK on ampere-16 for the whole tim
   `TestPreA39AmpereConfigIsReportedStaleNamingCtxSize` renders the pre-A-39 ampere-16 seed reconstructed from git
   history (`testdata/profiles-pre-a39-ampere-16.json`, the entry at 549f360), stamps it, and asserts the audit says
   `STALE(params.ctx_size, ...)` while the rule audit still says OK. Flags come BEFORE the files.
+- **The stamp never re-introduces an unsubstituted token.** A rendered serving config must contain no `__TOKEN__` (Render refuses one; `setup/render.tests.ps1` greps every tier for the pattern), but the basis legitimately carries them -- a tier's media seats declare their binaries as `__OFFLOAD_HOME__/...` and the hash covers the render inputs AS GIVEN. The basis line therefore escapes the second underscore of every doubled pair as `_`: same string on decode, same spec hash, no forbidden pattern. `TestStampNeverReintroducesAnUnsubstitutedToken`.
 - **`/fleet/health`: `serving_config_spec_sha256` and `serving_config_state`.** NEW KEYS on the EXISTING endpoint -
   no new route and no new bind. Published only when the new `serving_config_path` config key names this node's
   rendered config; both are omitted otherwise, so "this node does not report" stays distinguishable from "this node

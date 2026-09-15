@@ -124,6 +124,7 @@ sweep is then one poll instead of three ssh sessions.
   health is polled by every delegator every few seconds. A file replaced with the same size
   inside one mtime tick keeps a stale verdict for that tick — an acceptable price for a config
   a human re-renders by hand.
+- **The stamp must not re-introduce a token.** The basis carries a tier's `__OFFLOAD_HOME__` seat paths unsubstituted, because the hash covers the render inputs as given. Written verbatim that put the one pattern a rendered config must never contain back into four tiers' output -- caught by the installer self-test in CI, not by review. The basis line escapes the second underscore of every doubled pair as `_`; the string is unchanged on decode and the spec hash, computed over the unescaped canonical bytes, is untouched.
 - **The stamp is inert.** It is a yaml comment block prepended to the render; the body below it
   is byte-identical to what `Render` produced, and the rule audit runs on the unstamped text
   exactly as before. `TestEveryShippedTemplateStampsAndSelfVerifies` renders, stamps and
