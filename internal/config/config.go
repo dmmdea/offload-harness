@@ -250,6 +250,21 @@ type Config struct {
 	// structured re-pack has sent since 0.81.0 — Qwen3/Gemma-class templates;
 	// a Flash-Next-class seat takes `reasoning_effort` instead (register D-80).
 	AgentThinking string `json:"agent_thinking,omitempty"`
+	// AgentAllowWrite (0.119.0, register D-06) is this node's opt-in to the
+	// delegation WRITE door: false (the default, and every config that predates
+	// the key) means a contract carrying `write_root` is REFUSED here — at ack
+	// on the fleet path, so the delegator re-places it on a node that has opted
+	// in, and as a `write`-class defer on the in-process local path, which has
+	// no ack hop to refuse at.
+	//
+	// Opting in grants a delegated seat create+overwrite inside ONE directory
+	// of the node's own throwaway copy of the contract's context docs, capped
+	// at core.AgentWriteMaxFiles / AgentWriteMaxBytes, with no delete, no
+	// shell, no `run`, no fetch and no github. The write set never touches the
+	// delegator: it comes back as a unified diff for a human to apply. It is
+	// still an opt-in rather than a default because a node that opens it is
+	// spending its own disk on whatever a 4B decides to write.
+	AgentAllowWrite bool `json:"agent_allow_write,omitempty"`
 	// AgentLeaseWaitSec bounds how long a LOCAL agent placement (agent_delegate /
 	// delegate, route auto or spread) waits for a foreign TEXT-class GPU lease to
 	// clear before deferring. `gpu reserve --class text` (a benchmark, eval or

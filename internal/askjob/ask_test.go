@@ -206,12 +206,12 @@ func TestBuildContractAcceptanceAcceptsARightAnswerAndRejectsAParrot(t *testing.
 	}
 
 	right := "Admit refuses: once accepted+running reaches defaultMaxQueueDepth (32) it returns ErrQueueSaturated."
-	if pass, reason := chk.Eval(nil, right); !pass {
+	if pass, reason := chk.Eval(core.AgentWireResult{Output: right}); !pass {
 		t.Fatalf("a correct, well-cited answer must PASS the generated check: %s", reason)
 	}
 	// A model that echoes the instructions back must NOT pass — that is the whole point
 	// of excluding every candidate the goal already contains.
-	if pass, _ := chk.Eval(nil, c.Goal); pass {
+	if pass, _ := chk.Eval(core.AgentWireResult{Output: c.Goal}); pass {
 		t.Fatalf("the goal text itself passed the check — it is parrot-passable: %q", c.Acceptance[0])
 	}
 }

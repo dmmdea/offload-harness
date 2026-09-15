@@ -2830,7 +2830,7 @@ func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []st
 			failures = append(failures, err.Error())
 			continue
 		}
-		if pass, reason := chk.Eval(wire.Structured, wire.Output); !pass {
+		if pass, reason := chk.Eval(wire); !pass {
 			failures = append(failures, reason)
 		}
 	}

@@ -19,6 +19,7 @@
   "agent_ctx_tokens": 0,
   "agent_max_tokens": 0,
   "agent_thinking": "",
+  "agent_allow_write": false,
   "agent_lease_wait_sec": 0,
   "agent_retry_min_sec": 0,
   "agent_seat_tok_s": 0,

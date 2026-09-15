@@ -20,6 +20,36 @@ Versioning: [SemVer](https://semver.org/).
   the working config (they carry the fleet token) and the second TTS venv. History is not rewritten: the
   paths it carries were already public and hold no credential (the fleet token never entered history).
 
+## [0.119.0] - 2026-09-14 - a write-capable delegation door, default off (D-06)
+
+### Added
+- **The delegation lane can hand a seat an IMPLEMENTATION leg, and the seat hands back a DIFF.** A
+  contract may now carry `write_root` — a directory, RELATIVE to the run's read root, that the seat may
+  create and change files under. The seat works on the node's own throwaway copy of the inline context
+  docs; what crosses back is a unified diff (`diff`, `diff_files`) plus a `write_note`, and **the harness
+  applies none of it** — reviewing and applying the change stays the caller's job, which is the whole
+  safety story of letting a 4B write anything. Relative and not absolute because the contract is
+  self-contained: the executing node has never seen the delegator's filesystem, so an absolute
+  delegator-box path would name nothing there (`internal/core/agentwire.go`,
+  `internal/pipeline/agentwrite.go`, `internal/writedoor`).
+- **`agent_allow_write`, default FALSE.** A node that has not opted in refuses a write contract at ACK
+  (a 400, so the delegator RE-PLACES it on a node that has) and, on the in-process local path that has no
+  ack hop, defers with the new `defer_class: "write"` — neither a broken stack nor an unplaceable
+  contract, so it is its own class (`internal/config/config.go`, `internal/fleetnode/tasks.go`).
+- **Two acceptance verbs that read the write set rather than the prose**: `diff_touches:<path-prefix>`
+  and `diff_max_files:<n>`. Both fail CLOSED on an empty write set, `diff_max_files` included — a cap
+  assertion that passed because nothing was written would make a contract that verified nothing read as
+  verified. `AcceptanceCheck.Eval` now takes the whole `AgentWireResult`.
+- **ADR 0044** — the write-capable delegation door.
+
+### Security
+- The door grants create+overwrite inside ONE directory and nothing else: no delete (the `edit` profile it
+  defaults to does not advertise `delete_file`), no shell, no `run`, no fetch, no github. Confinement is
+  `os.Root` on both platforms, verified at the write root before the absolute path reaches the write
+  tools — proven against a real Windows junction (a real `mklink /J` spawn) and a real Linux symlink.
+  Caps are enforced twice: `agent.WriteLimit` refuses the offending call at the tool, and the finished
+  write set is re-counted before it crosses the wire. A cap breach publishes NO diff — a truncated patch
+  applies as silent damage.
 ## [0.117.7] - 2026-09-14 - output tokens are priced; the pager gate can fire; the Windows cage builds its child's environment; retries skip a fenced seat
 
 ### Security

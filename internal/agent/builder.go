@@ -65,6 +65,10 @@ type BuildConfig struct {
 	Thinking string
 
 	AllowWrite bool // P2: write_file/delete_file in the worktree
+	// WriteLimit caps how many files and bytes ONE run may write (the D-06
+	// delegation write door). nil = uncapped, which is what the operator's own
+	// CLI worktree has always been; the delegation door always sets one.
+	WriteLimit *WriteLimit
 	AllowFetch bool // P3: web_fetch behind the egress allowlist
 	AllowShell bool // P4.6: run_shell in the LINUX OS cage (granted only on Linux + sandbox.Available)
 	AllowRun   bool // C7b: `run` — allowlisted direct-exec runner in the OS sandbox (Linux AND Windows)
@@ -256,7 +260,7 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 	}
 
 	if cfg.AllowWrite {
-		wtools, terr := WriteTools(absWt, pol)
+		wtools, terr := WriteToolsLimited(absWt, pol, cfg.WriteLimit)
 		if terr != nil {
 			return nil, fmt.Errorf("building write tools: %w", terr)
 		}
@@ -267,6 +271,9 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 			posture = "OPEN — create/overwrite/delete within the worktree"
 		case cfg.AllowOverwrite:
 			posture = "create/overwrite within the worktree; delete refused"
+		}
+		if cfg.WriteLimit != nil {
+			posture += fmt.Sprintf("; capped at %d files / %d bytes for this run", cfg.WriteLimit.maxFiles, cfg.WriteLimit.maxBytes)
 		}
 		res.Notes = append(res.Notes, fmt.Sprintf("write ON — worktree=%s (%s)", absWt, posture))
 	}
