@@ -20,6 +20,48 @@ Versioning: [SemVer](https://semver.org/).
   the working config (they carry the fleet token) and the second TTS venv. History is not rewritten: the
   paths it carries were already public and hold no credential (the fleet token never entered history).
 
+## [0.123.3] - 2026-09-14 - a cut prose final is re-issued; repetition loops are cut; agent_sampling (D-95b)
+
+Register D-95b, from the live readback of 0.122.1 on the Lenovo 4B seat (`qwen3.5-4b-vllm`, vLLM 0.28.0, step 1,024 /
+final 4,096, thinking off, 14.9 tok/s). The `METHODOLOGY.md` digest STILL deferred at 381 s with `output_truncated` and
+`re-pack skipped … a partial cannot be re-packed`, for two reasons 0.122.1 did not cover: the partial was PROSE-shaped
+(`summary (≤100 words):` / `mechanisms:` / `- item` — that seat's normal answer on a schema contract, which the
+ordinary re-pack reads fine), so the JSON-shape gate excluded it; and the answer had degenerated into a REPETITION
+LOOP, one four-line block under `numbers:` repeated about twenty times until the budget ran out, which nothing in the
+harness could see.
+
+### Fixed
+- The list-cap re-issue of a `length`-cut final fires for ANY partial on a schema contract, prose or JSON. The
+  JSON-shape precondition (`jsonShapedPartial`) is gone; the two gates that bound it — an `output_schema` is set, and
+  the wall still holds one more turn at the seat's measured rate — are unchanged, as is the one-re-issue bound.
+  `TestCutProseFinalOnASchemaContractIsReissuedWithListCaps` replaces
+  `TestNoListCapReissueOnProseThatIsNotAPartialObject`; the no-schema and no-wall refusals keep their tests.
+
+### Added
+- **Repetition guard** (`internal/agent/repetition.go`, wired into the loop's final handling). A final whose tail is
+  the same normalised block of 1–32 lines repeated 4 or more times in a row — the last block may be cut off mid-way —
+  is treated as a CUT answer even when the engine reported `stop`: the run records
+  `stop_note: repetition loop (20× "- 100 words cap for summary (enfor…")`, sets `output_truncated`, and re-issues ONCE
+  with the list caps PLUS an explicit "do not repeat any line; write each list item exactly once" sentence. A second
+  loop abstains exactly as a second cut does. `calls[].finish_reason` is NOT rewritten — it stays what the engine said.
+  The repeated tail is trimmed off the partial that rides in `output`: one copy plus `[repetition trimmed ×N]`.
+  Table-tested against the live 20× loop, a 4× loop (the threshold), a 3× repeat that must NOT trigger, a legitimate
+  list of 30 distinct items, single-line loops, prose and blank-line runs.
+- **`agent_sampling` / `agent_sampling_final`** (box config, `core.AgentSampling`): the executing seat's decoding
+  policy for planner calls and, separately, for the thinking-off FINAL answer turn and its re-issues. Objects of
+  optional `temperature` / `top_p` / `top_k` / `presence_penalty` / `repetition_penalty`. Every knob is a pointer: an
+  unset one is ABSENT from the request body, so the seat keeps its own default, and an absent or empty object
+  reproduces today's request byte for byte (`temperature: 0` and no other sampling key — which is also exactly the
+  greedy decoding that produces the loop above). Out-of-range values fail the config LOAD, named by key. The effective
+  policy of every completion is published in `calls[].sampling` (`temperature=0` for the default) on the loop record
+  and the node/delegator wires, so a measurement can prove which decoding produced which answer. No house default and
+  no seeded value: a sampling setting is a per-seat measurement.
+
+### Docs
+- OPERATOR-GUIDE "The timeout chain": the re-issue's gate list drops the JSON-shape condition, plus new paragraphs for
+  the repetition guard (the detector rule, what the caller sees) and for `agent_sampling` / `agent_sampling_final`; the
+  agent config reference block names both keys.
+
 ## [0.123.2] - 2026-09-14 - one box, three tiers: placement is a per-task decision (ADR 0039)
 
 The reference workstation is not one hardware tier. It is three 16 GB Blackwell cards — a

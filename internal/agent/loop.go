@@ -330,6 +330,12 @@ type Loop struct {
 	// rate = fail open.
 	listCap        string
 	listCapMinTurn time.Duration
+	// sampling / samplingFinal are the seat's decoding policy (sampling.go,
+	// register D-95b): the planner policy for tool steps, the optional final
+	// policy for the answer turn. Both nil = temperature 0 and nothing else,
+	// the request this client has always sent.
+	sampling      *Sampling
+	samplingFinal *Sampling
 	// specReserve is the token cost of the tool-spec block, reserved out of the
 	// input budget — the specs ship with EVERY chat request, and on a full
 	// --allow-* build they cost several compactionMargins' worth of tokens
@@ -942,6 +948,12 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 	// SAME budget (the list caps are what makes it fit, not less room).
 	listCapDone := false
 	reissueFloor := 0
+	// repNote / repCut are the repetition guard's run state (D-95b): the note
+	// of the LAST degenerate loop seen, and whether the answer the run ends on
+	// is one. Run-locals, like every other per-run fact here — `--serve` shares
+	// one *Loop across concurrent handlers.
+	repNote := ""
+	repCut := false
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
@@ -1071,6 +1083,13 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			stepMax = reissueFloor
 		}
 		reissueFloor = 0
+		// The call's decoding policy (sampling.go, register D-95b): the final
+		// policy on the answer turn and on every re-issue of it — those are
+		// prose generation with thinking off, which is the shape the
+		// Qwen3-class non-thinking recommendation is written for — and the
+		// planner policy on the tool steps, where greedy decoding is right.
+		samp := l.samplingFor(finalStep || thisIsReissue)
+		stepCtx = ContextWithSampling(stepCtx, samp)
 		callStart := time.Now()
 		comp, err := l.client.Chat(stepCtx, msgs, specs, stepMax)
 		if err != nil {
@@ -1134,6 +1153,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		noteUsage(comp)
 		callRec := recordOf(step+1, stepMax, comp)
 		callRec.ForcedFinal = finalStep
+		callRec.Sampling = samp.Summary()
 		callRec.Ms = time.Since(callStart).Milliseconds()
 		calls = append(calls, callRec)
 		if l.observer != nil {
@@ -1157,18 +1177,39 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		// which is the very race that gated the calibrator. Observe ignores a nil
 		// Serve, so a backend that reports no timings yields "insufficient_data"
 		// rather than a fabricated 0% reuse.
+		// Repetition guard (D-95b). A seat can burn its whole completion budget
+		// on a DEGENERATE LOOP — the Lenovo 4B's METHODOLOGY.md digest of
+		// 2026-09-14 repeated the same four-line block under `numbers:` about
+		// twenty times until the budget ran out, and the engine reported the
+		// run as an ordinary cut. Nothing downstream could tell that from an
+		// answer that merely ran long. A looped final is a CUT final: the
+		// repeated tail is trimmed off the partial that rides in `output` (one
+		// copy plus a "[repetition trimmed ×N]" marker, so the caller sees what
+		// happened), the evidence lands in StopNote, and the re-issue below
+		// gets an explicit do-not-repeat sentence on top of the list caps.
+		// calls[].finish_reason is NOT rewritten — the record above already
+		// holds what the engine said, and the guard is the loop's reading of
+		// the text, not the seat's report.
+		repLoop := ""
+		if len(comp.Msg.ToolCalls) == 0 {
+			if trimmed, note, looped := TrimRepetitionLoop(comp.Msg.Content); looped {
+				repLoop, repNote = note, note
+				comp.Msg.Content = trimmed
+			}
+		}
 		// A TRUNCATED final (finish "length", visible content, no tool call) is
 		// the same starvation one step later: the seat began the answer inside
 		// a budget sized for tool turns and was cut (0.115.14; the 2026-09-10
 		// 4B row: 282 reasoning tokens, then 1,935 chars of a seven-array
 		// answer cut at exactly 1,024 tokens — a JSON prefix no re-pack can
 		// repair). Re-issue it once at the final budget like an empty step;
-		// a second cut is accepted and flagged OutputTruncated.
-		if comp.FinishReason == "length" && len(comp.Msg.ToolCalls) == 0 && strings.TrimSpace(comp.Msg.Content) != "" {
-			// D-95 (0.122.1): on a SCHEMA contract a cut final is a JSON
-			// prefix, and 0.115.23 (D-91) rightly refuses to re-pack a partial
-			// — but abstaining there throws away a run that read the whole
-			// document and only over-answered. The seat was never told how
+		// a second cut is accepted and flagged OutputTruncated. A repetition
+		// loop is treated as exactly the same event.
+		if (comp.FinishReason == "length" || repLoop != "") && len(comp.Msg.ToolCalls) == 0 && strings.TrimSpace(comp.Msg.Content) != "" {
+			// D-95 (0.122.1): on a SCHEMA contract a cut final is an answer the
+			// seat over-sized, and 0.115.23 (D-91) rightly refuses to re-pack a
+			// partial — but abstaining there throws away a run that read the
+			// whole document and only over-answered. The seat was never told how
 			// long the lists could be. Tell it, once: same request, thinking
 			// off, the same budget, plus the schema's own caps spelled out
 			// ("cap every list at N items … keep every string under 200
@@ -1177,10 +1218,19 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			// holding one more turn, so this can never re-create the shape it
 			// fixes; bounded at one, so a seat that cuts the capped answer too
 			// abstains with both finish reasons on the record.
-			if l.listCap != "" && !listCapDone && jsonShapedPartial(comp.Msg.Content) && l.wallHoldsOneMoreTurn(ctx) {
+			//
+			// 0.123.2 (D-95b) drops the JSON-shape precondition the first cut
+			// carried: that seat answers a schema contract in its own
+			// `key:` / `- item` prose, which the ordinary re-pack reads, so the
+			// shape test excluded every run the re-issue existed for.
+			if l.listCap != "" && !listCapDone && l.wallHoldsOneMoreTurn(ctx) {
 				listCapDone = true
 				bs.reissue = FinalReissueListCap
-				msgs = append(msgs, Msg{Role: "user", Content: l.listCap})
+				instr := l.listCap
+				if repLoop != "" {
+					instr += " " + NoRepeatInstruction
+				}
+				msgs = append(msgs, Msg{Role: "user", Content: instr})
 				retryNoThink = true
 				reissueFloor = stepMax
 				step-- // the re-issue does not spend a step
@@ -1191,6 +1241,11 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 				retryNoThink = true
 				step-- // the re-issue does not spend a step
 				continue
+			}
+			// No re-issue left: the loop is the run's outcome, and `done` below
+			// must publish it as a cut answer rather than a finished one.
+			if repLoop != "" {
+				repCut = true
 			}
 		}
 		if kind, basis, empty := comp.Starvation(); empty {
@@ -1260,12 +1315,21 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 				return Result{Steps: step + 1, StopReason: "unparsed_tool_call", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, Pager: l.pager.Report(), Effects: effects, RuleHits: ruleHits, Calls: calls},
 					fmt.Errorf("%w: the seat returned %q as text (its --tool-call-parser does not match the model's chat template)", ErrUnparsedToolCall, marker)
 			}
-			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", OutputTruncated: comp.FinishReason == "length", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
+			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", OutputTruncated: comp.FinishReason == "length" || repCut, Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
 			if l.batchJudge {
 				res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 			}
 			if finalStep {
 				res.StopNote = fmt.Sprintf("forced final answer: the %d-step budget was reached, so the last step offered no tools and asked for the answer (D-89)", l.maxSteps)
+			}
+			// The repetition note leads: it is why this answer is short and
+			// flagged cut, and an operator greps it (D-95b).
+			if repCut {
+				if res.StopNote != "" {
+					res.StopNote = repNote + "; " + res.StopNote
+				} else {
+					res.StopNote = repNote
+				}
 			}
 			l.persist(ctx, objective, res.Output)
 			return res, nil
@@ -1611,20 +1675,6 @@ func (l *Loop) wallHoldsOneMoreTurn(ctx context.Context) bool {
 		return true
 	}
 	return time.Until(dl) >= l.listCapMinTurn
-}
-
-// jsonShapedPartial reports whether a cut answer is a PARTIAL OBJECT — a JSON
-// prefix, fenced or bare — rather than cut prose. Only the former is worth a
-// list-cap re-issue: "cap every list" says nothing to a truncated narrative,
-// and a full re-generation is too expensive to spend on a guess.
-func jsonShapedPartial(s string) bool {
-	t := strings.TrimSpace(s)
-	if strings.HasPrefix(t, "```") {
-		if i := strings.IndexByte(t, '\n'); i >= 0 {
-			t = strings.TrimSpace(t[i+1:])
-		}
-	}
-	return strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[")
 }
 
 // persist best-effort records the run outcome to memory. Defer-not-crash: any

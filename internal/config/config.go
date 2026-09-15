@@ -262,6 +262,22 @@ type Config struct {
 	// structured re-pack has sent since 0.81.0 — Qwen3/Gemma-class templates;
 	// a Flash-Next-class seat takes `reasoning_effort` instead (register D-80).
 	AgentThinking string `json:"agent_thinking,omitempty"`
+	// AgentSampling / AgentSamplingFinal (0.123.3, register D-95b) are this
+	// seat's planner decoding policy and, optionally, a separate one for the
+	// FINAL answer turn (the thinking-off prose turn, which is where a
+	// Qwen3-class family's non-thinking recommendation applies and a tool step
+	// is not). Every knob is optional; an unset one is absent from the request,
+	// so an empty/absent object is the request this harness has always sent —
+	// `temperature: 0` and no other sampling key.
+	//
+	// There is no recommended value here on purpose. Greedy decoding is what
+	// makes a small seat fall into a degenerate repetition loop (the Lenovo 4B
+	// METHODOLOGY.md digest, 2026-09-14, repeated one four-line block ~20 times
+	// until the budget ran out), and the model card's cure — temperature 0.7,
+	// top_p 0.8, top_k 20, presence_penalty 1.5 for Qwen3.5 non-thinking — is a
+	// number to MEASURE on the seat, not a default to inherit fleet-wide.
+	AgentSampling      *core.AgentSampling `json:"agent_sampling,omitempty"`
+	AgentSamplingFinal *core.AgentSampling `json:"agent_sampling_final,omitempty"`
 	// AgentAllowWrite (0.122.0, register D-06) is this node's opt-in to the
 	// delegation WRITE door: false (the default, and every config that predates
 	// the key) means a contract carrying `write_root` is REFUSED here — at ack
@@ -1635,6 +1651,14 @@ func load(path string) (Config, error) {
 		return c, err
 	}
 	if err := c.ValidateLayers(); err != nil {
+		return c, err
+	}
+	// A sampling value no backend accepts must fail at the config door, not as
+	// a 400 in the middle of a delegated run on a remote node.
+	if err := c.AgentSampling.Validate("agent_sampling"); err != nil {
+		return c, err
+	}
+	if err := c.AgentSamplingFinal.Validate("agent_sampling_final"); err != nil {
 		return c, err
 	}
 	return c, nil

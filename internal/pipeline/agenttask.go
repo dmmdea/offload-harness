@@ -360,6 +360,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		Unattended:  true,
 		EnvRules:    p.cfg.AgentEnvRules,
 		Thinking:    thinkingFor(p.cfg, contract), // contract > this box's agent_thinking > auto
+		// The executing node's own decoding policy (D-95b): a sampling setting
+		// is a fact about THIS seat, measured here, so it is never carried on
+		// the contract.
+		Sampling:      p.cfg.AgentSampling,
+		SamplingFinal: p.cfg.AgentSamplingFinal,
 		// The contract's own replay list, behind this box's seeded context
 		// reads when agent_seed_context_reads is on (core.SeedContextReads:
 		// the node knows the doc file names it just wrote; the delegator
@@ -1539,7 +1544,7 @@ func CallsFromLoop(calls []agent.CallRecord) []core.AgentCallRecord {
 			CompletionTokens: c.CompletionTokens, ReasoningTokens: c.ReasoningTokens,
 			ContentChars: c.ContentChars, ReasoningChars: c.ReasoningChars,
 			ToolCalls: c.ToolCalls, ThinkingOff: c.ThinkingOff, ReasoningKey: c.ReasoningKey,
-			ForcedFinal: c.ForcedFinal, Ms: c.Ms,
+			ForcedFinal: c.ForcedFinal, Ms: c.Ms, Sampling: c.Sampling,
 		})
 	}
 	return out

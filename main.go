@@ -3115,6 +3115,8 @@ func runAgentTrajectoryGate(args []string) error {
 		Timeout:              timeout,
 		MaxTokens:            cfg.AgentMaxTokens,
 		Thinking:             cfg.AgentThinking,
+		Sampling:             cfg.AgentSampling,
+		SamplingFinal:        cfg.AgentSamplingFinal,
 		ReadRoot:             absRoot,
 		Offload:              pipeline.NewRecordlessOffload(cfg, plannerModel, timeout),
 		NPU:                  pipeline.NewLoopNPU(cfg),

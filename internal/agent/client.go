@@ -130,6 +130,15 @@ type wireReq struct {
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Temperature float64       `json:"temperature"`
 	Stream      bool          `json:"stream"`
+	// The rest of the decoding policy (sampling.go, register D-95b). Pointers
+	// with omitempty: an unset knob is ABSENT from the body, which is what
+	// lets a seat keep its own default — sending a zero would be an opinion,
+	// not a default. Temperature above is the one exception: the client has
+	// always sent it, and `temperature: 0` is the historical request.
+	TopP              *float64 `json:"top_p,omitempty"`
+	TopK              *int     `json:"top_k,omitempty"`
+	PresencePenalty   *float64 `json:"presence_penalty,omitempty"`
+	RepetitionPenalty *float64 `json:"repetition_penalty,omitempty"`
 	// ChatTemplateKwargs is set ONLY when the call's context carries
 	// ContextWithoutThinking (thinking.go): `{"enable_thinking": false}` is the
 	// key Qwen3-class templates (and vLLM's reasoning layer) read to render the
@@ -222,6 +231,15 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 	thinkingOff := IsThinkingOff(ctx)
 	if thinkingOff {
 		req.ChatTemplateKwargs = map[string]any{"enable_thinking": false}
+	}
+	// The call's decoding policy, when one is installed. No policy leaves the
+	// request exactly as it was: temperature 0, no other sampling key.
+	if s := SamplingFromContext(ctx); !s.IsZero() {
+		if s.Temperature != nil {
+			req.Temperature = *s.Temperature
+		}
+		req.TopP, req.TopK = s.TopP, s.TopK
+		req.PresencePenalty, req.RepetitionPenalty = s.PresencePenalty, s.RepetitionPenalty
 	}
 
 	buf, err := json.Marshal(req)

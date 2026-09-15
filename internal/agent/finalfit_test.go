@@ -9,6 +9,11 @@ import (
 
 const cutJSON = `{"mechanisms":[{"name":"gradient checkpointing","detail":"recompute activations in the backward pass"},{"name":"paged attention","detail":"`
 
+// cutProse is the shape a cut final ACTUALLY has on the Lenovo 4B seat: the
+// seat answers a schema contract in its own `key:` / `- item` prose, which the
+// ordinary re-pack reads fine, and the cut lands mid-item.
+const cutProse = "summary (<=100 words):\nExo-Bench measures per-task prefill and generation TPS across a cluster.\nmechanisms:\n- Prefill TPS = prompt_tokens / prefill_wall_seconds (server-side).\n- Generation TPS = (completion_tokens - 1) / (last_token_time - first"
+
 // TestForcedFinalRunsAtTheFittedBudget (D-95, half A): with a fit installed the
 // forced final step opens at the budget the REMAINING wall can decode, not at
 // the configured 4x rule — and the run publishes both the budget it used and
@@ -186,22 +191,38 @@ func TestNoListCapReissueWhenTheWallCannotHoldOneMoreTurn(t *testing.T) {
 	}
 }
 
-// TestNoListCapReissueOnProseThatIsNotAPartialObject: the re-issue exists for a
-// JSON-shaped partial. A cut NARRATIVE is not one; re-issuing it with list caps
-// would spend a full generation on an instruction that does not apply.
-func TestNoListCapReissueOnProseThatIsNotAPartialObject(t *testing.T) {
+// TestCutProseFinalOnASchemaContractIsReissuedWithListCaps (D-95b): 0.122.1
+// gated the re-issue on the partial being JSON-shaped, and on the Lenovo 4B
+// that excluded exactly the runs it was built for — the seat's normal final
+// shape on a schema contract is prose (`summary:` / `- item`), and the
+// METHODOLOGY.md digest of 2026-09-14 deferred at 381 s with a prose partial
+// and no re-issue at all. A `length`-cut final on a SCHEMA contract now earns
+// the one re-issue whatever shape the partial has; the wall gate bounds it.
+func TestCutProseFinalOnASchemaContractIsReissuedWithListCaps(t *testing.T) {
 	client := &fakeClient{script: []Completion{
 		{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc("c1", "list_dir", `{}`)}}, FinishReason: "tool_calls"},
-		{Msg: Msg{Role: "assistant", Content: "The methodology section describes three phases, the first of which"}, FinishReason: "length"},
+		{Msg: Msg{Role: "assistant", Content: cutProse}, FinishReason: "length"},
+		{Msg: Msg{Role: "assistant", Content: "summary:\nshort and complete.\nmechanisms:\n- one"}, FinishReason: "stop"},
 	}}
-	l := NewLoop(client, mkTools("list_dir"), 2).WithCutFinalReissue("cap every list at 8 items", 30*time.Second)
+	const instr = "cap every list at 8 items"
+	l := NewLoop(client, mkTools("list_dir"), 2).WithCutFinalReissue(instr, 30*time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Second)
 	defer cancel()
 	res, err := l.Run(ctx, "digest")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(client.seen) != 2 || res.FinalReissue != "" {
-		t.Fatalf("a cut narrative must not earn a list-cap re-issue: calls=%d reissue=%q", len(client.seen), res.FinalReissue)
+	if res.FinalReissue != FinalReissueListCap {
+		t.Fatalf("a cut PROSE final on a schema contract must earn the re-issue: final_reissue = %q", res.FinalReissue)
+	}
+	if len(client.seen) != 3 {
+		t.Fatalf("want 3 completions (tool step, cut final, ONE re-issue), got %d", len(client.seen))
+	}
+	last := client.seen[2]
+	if !strings.Contains(last[len(last)-1].Content, instr) {
+		t.Fatalf("the re-issue must carry the list-cap instruction, last turn was %q", last[len(last)-1].Content)
+	}
+	if res.OutputTruncated || !strings.HasPrefix(res.Output, "summary:") {
+		t.Fatalf("the re-issued answer is the output: truncated=%v output=%q", res.OutputTruncated, res.Output)
 	}
 }
