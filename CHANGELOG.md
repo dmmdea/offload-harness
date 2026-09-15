@@ -20,6 +20,27 @@ Versioning: [SemVer](https://semver.org/).
   the working config (they carry the fleet token) and the second TTS venv. History is not rewritten: the
   paths it carries were already public and hold no credential (the fleet token never entered history).
 
+## [0.123.1] - 2026-09-14 - offload_status verdict tests stop reading the live cards (H-49)
+
+Register H-49. `TestStatusPublishesTheLocalLeaseWithTheQueueCommand` asserted a held lease over an idle
+seat reads `held-idle`, but `offload_status`'s `gpuactivity.Snapshot` call always sampled the REAL
+nvidia-smi — the test never wired the existing `statusSamplesGPU` seam to a fake. On any box where the
+cards are genuinely busy, including this repo's own measurement runs, the verdict correctly read
+`held-working` and the test failed on live hardware, reproduced identically on untouched `main` by four
+agents while a measurement ran the pair at 100%.
+
+### Fixed
+- `gpuactivity.Options` gains a `Sampler` field so a test one package up (which cannot reach the
+  package-private `smiRun` seam in `internal/gpuactivity/smi.go`) can inject specific per-card
+  utilization instead of only turning sampling on/off. `internal/mcpserver` threads it through a new
+  `statusGPUSampler` package var, mirroring the existing `statusSamplesGPU` seam.
+  `TestStatusPublishesTheLocalLeaseWithTheQueueCommand` now sets a fake idle sampler for its own
+  scenario; the seam's mutation-tested (a 99%-busy fake correctly flips the verdict to `held-working`
+  and fails the test).
+- Added `TestLiveStatusVerdictReadsTheRealCards`, gated behind `OFFLOAD_LIVE_GPU=1` (the
+  `TestLiveWindowsProbes`/`OFFLOAD_LIVE_PDH` convention), asserting only vocabulary + sanity bounds
+  against the real nvidia-smi — the receipt that the new seam is genuinely wired, not a dead field.
+
 ## [0.123.0] - 2026-09-14 - the rendered serving config carries its provenance
 
 Register K-02. The llama-swap config is rendered ONCE, at install, from the tier table baked into the binary, and
