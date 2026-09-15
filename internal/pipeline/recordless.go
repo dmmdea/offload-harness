@@ -38,9 +38,15 @@ func inLoopClient(cfg config.Config, timeout time.Duration) *llamaclient.Client 
 		WithSeatEndpoints(cfg.SeatEndpoints)
 	if len(cfg.CascadeRemoteLanes) > 0 {
 		gpuLockPath, stateDir := cfg.GPULockPath, cfg.StateDir
+		// FleetLaneGates, not RosterResident alone: a lane base may be a
+		// plain llama-swap OR a fleet node whose own llama-swap binds
+		// loopback (C-41b). The pair shares one probe, so residency and the
+		// route can never disagree about which shape a base is.
+		laneResident, laneRoute := llamaclient.FleetLaneGates(cfg.FleetAuthToken)
 		oc = oc.WithRemoteLanes(cfg.CascadeRemoteLanes,
 			func() bool { return delegate.LocalBusy(gpuLockPath, stateDir) },
-			llamaclient.RosterResident())
+			llamaclient.LocalSwapBusy(cfg.Endpoint),
+			laneResident).WithLaneRoute(laneRoute)
 	}
 	return oc
 }

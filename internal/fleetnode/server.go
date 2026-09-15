@@ -144,6 +144,12 @@ type Server struct {
 	// vision_model (and SupportedTasksFor lists "vision") exactly when
 	// POST /fleet/vision will admit.
 	visionLane bool
+	// chatLane is ChatLaneAdmissible over the RESOLVED listener (C-41b) — the
+	// same one-predicate discipline as agentLane and visionLane: health
+	// publishes `chat_lane` exactly when POST /fleet/chat will admit, because
+	// the delegator reads that one field to decide a cascade lane base is
+	// usable at all.
+	chatLane bool
 	// seatRateCache / seatRateAt / seatRateMu: the health handler's cached
 	// read of the seat-rates store (seatRate).
 	seatRateCache *SeatRateHealth
@@ -253,6 +259,7 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		agentSeat:          opts.Cfg.AgentPlannerModel(""),
 		agentLane:          AgentLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		visionLane:         VisionLaneAdmissible(opts.Cfg, opts.LoopbackListener),
+		chatLane:           ChatLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		rosterServes:       swapRosterServes,
 		rosterServedModels: swapRosterServedModels,
 	}
@@ -416,6 +423,11 @@ func (s *Server) Handler() http.Handler {
 	// image — sized from vision_max_image_bytes rather than dispatch's 1 MiB —
 	// after which it joins the same admission path (admit) as every job.
 	mux.HandleFunc("POST /fleet/vision", s.handleVision)
+	// The cascade chat lane (C-41b): a SYNCHRONOUS forward, not a job — see
+	// chat_lane.go for why a single short cascade call does not belong in the
+	// job store, and why this node's loopback-only llama-swap needs a door of
+	// its own at all.
+	mux.HandleFunc("POST "+ChatLanePath, s.handleChat)
 	mux.HandleFunc("GET /fleet/jobs/{id}", s.handleJob)
 	// GET /fleet/jobs (no {id}) is a distinct ServeMux pattern from the one
 	// above — unauthenticated is deliberate: unlike /fleet/jobs/{id}, this
@@ -640,6 +652,14 @@ type healthPayload struct {
 	// supported_task_types. Additive + omitempty: a node without the lane
 	// emits a byte-identical payload.
 	VisionModel string `json:"vision_model,omitempty"`
+	// ChatLane says POST /fleet/chat will admit here (C-41b), published under
+	// the same one-predicate rule as vision_model. It is what a delegator's
+	// cascade lane reads to tell a FLEET NODE base from a plain llama-swap
+	// base, and therefore whether to route a cascade call through this node's
+	// bearer-gated door instead of a port it cannot reach. Additive,
+	// lane-gated and omitempty: a node without the lane emits a
+	// byte-identical payload.
+	ChatLane bool `json:"chat_lane,omitempty"`
 	// Tiers is every hardware tier this node is a COMPLETE instance of
 	// (config `tiers`, ADR 0039): the composite box is a full blackwell-16
 	// and a full blackwell-2x16 as well as the tier it installed as, and a
@@ -774,6 +794,21 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.visionLane {
 		payload.VisionModel = s.opts.Cfg.VisionModel
+	}
+	// Chat lane (C-41b): the delegator's cascade lane reads `chat_lane` to
+	// learn this base is a fleet node it may route through, and served_models
+	// to learn WHICH models it may route — so served_models must be published
+	// whenever the chat lane is admissible, not only when the agent lane is.
+	// agentResident() is the cached read + at most one background refresh per
+	// TTL that fills it; calling it here for a chat-only node is the same
+	// non-blocking call the agent branch above makes, and the roster fetch it
+	// schedules is what populates servedModels().
+	if s.chatLane {
+		payload.ChatLane = true
+		if !s.agentLane {
+			s.agentResident()
+			payload.ServedModels = s.servedModels()
+		}
 	}
 	// Host CPU/RAM: a cached read of the background hostsample.Sampler, same
 	// rule as the VRAM snapshot above — this handler never samples itself.

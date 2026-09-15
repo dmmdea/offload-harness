@@ -38,12 +38,23 @@ type Client struct {
 	seatEndpoints map[string]string
 	safeHTTP      *http.Client
 	// remoteLanes maps a model id/alias to a busy-aware failover base
-	// (lanes.go, roast delta 7); laneBusy and laneResident are its two
-	// per-call gates. All three stay nil unless WithRemoteLanes installs
+	// (lanes.go, roast delta 7); laneBusy, laneBusyFor and laneResident are
+	// its per-call gates — laneBusy reads the machine-wide GPU lease,
+	// laneBusyFor answers "would a swap for THIS model have to wait?"
+	// (register C-41). All four stay nil unless WithRemoteLanes installs
 	// them — the nil path is byte-identical to a pre-lanes client.
 	remoteLanes  map[string]string
 	laneBusy     func() bool
+	laneBusyFor  func(model string) (bool, string)
 	laneResident func(base, model string) bool
+	// laneRoute answers "how is a call to THIS lane base spoken?" — an empty
+	// path means the lane is a plain llama-swap and the client's own
+	// generation path applies; "/fleet/chat" plus a bearer token means the
+	// lane is a FLEET NODE whose own llama-swap binds loopback only
+	// (register C-41b). Installed by WithLaneRoute; nil keeps every lane on
+	// c.path with no Authorization header, exactly as before node lanes
+	// existed.
+	laneRoute func(base string) (path, token string)
 }
 
 // New builds a client. path is the generation route (default
@@ -227,8 +238,8 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 		return GenResult{}, err
 	}
 	start := time.Now()
-	base, hc := c.resolveEndpoint(model) // ONE decision: base and client must never split (lanes.go)
-	return c.sendWithSeatWait(ctx, base, hc, model, buf, start)
+	ep := c.resolveEndpoint(model) // ONE decision: base, path, credential and client must never split (lanes.go)
+	return c.sendWithSeatWait(ctx, ep, model, buf, start)
 }
 
 // sendWithSeatWait is the ONE request loop every generate path shares: build
@@ -238,19 +249,25 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 // non-200 is returned as a *StatusError; the ticket is held through the body
 // decode on success (llama-swap only stops needing the model resident once the
 // response is fully served). Vision paths use it too (review, 2026-09-02).
-func (c *Client) sendWithSeatWait(ctx context.Context, base string, hc *http.Client, model string, buf []byte, start time.Time) (GenResult, error) {
+func (c *Client) sendWithSeatWait(ctx context.Context, ep endpointChoice, model string, buf []byte, start time.Time) (GenResult, error) {
 	budget := seatwait.FromContext(ctx)
 	for {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+c.path, bytes.NewReader(buf))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, ep.base+ep.path, bytes.NewReader(buf))
 		if err != nil {
 			return GenResult{}, err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		tk, err := modelaffinity.Admit(ctx, base, model, hc.Timeout)
+		// A fleet-node lane is bearer-gated exactly like the agent and vision
+		// lanes (C-41b); every other target carries no credential at all, so
+		// a local or seat-pinned call stays byte-identical to before.
+		if ep.token != "" {
+			req.Header.Set("Authorization", "Bearer "+ep.token)
+		}
+		tk, err := modelaffinity.Admit(ctx, ep.base, model, ep.client.Timeout)
 		if err != nil {
 			return GenResult{}, err
 		}
-		resp, err := hc.Do(req)
+		resp, err := ep.client.Do(req)
 		if err != nil {
 			tk.Release()
 			return GenResult{}, err
@@ -314,8 +331,8 @@ func (c *Client) GenerateVision(ctx context.Context, model, system, user string,
 		return GenResult{}, err
 	}
 	start := time.Now()
-	base, hc := c.resolveEndpoint(model) // ONE decision: base and client must never split (lanes.go)
-	return c.sendWithSeatWait(ctx, base, hc, model, buf, start)
+	ep := c.resolveEndpoint(model) // ONE decision: base, path, credential and client must never split (lanes.go)
+	return c.sendWithSeatWait(ctx, ep, model, buf, start)
 }
 
 // GenerateVisionInterleaved sends a multimodal chat request whose user content
@@ -362,8 +379,8 @@ func (c *Client) GenerateVisionInterleaved(ctx context.Context, model, system st
 		return GenResult{}, err
 	}
 	start := time.Now()
-	base, hc := c.resolveEndpoint(model) // ONE decision: base and client must never split (lanes.go)
-	return c.sendWithSeatWait(ctx, base, hc, model, buf, start)
+	ep := c.resolveEndpoint(model) // ONE decision: base, path, credential and client must never split (lanes.go)
+	return c.sendWithSeatWait(ctx, ep, model, buf, start)
 }
 
 // StatusError is a non-200 ANSWER from the server — as opposed to a failure to

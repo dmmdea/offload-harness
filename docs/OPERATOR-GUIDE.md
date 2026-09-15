@@ -1305,23 +1305,48 @@ should fail over, in its `~/.local-offload/config.json`:
 
 ```json
 {
-  "cascade_remote_lanes": { "offload-e4b": "http://<node-b>:11436" }
+  "cascade_remote_lanes": { "offload-e4b": "http://<node-b>:18811" }
 }
 ```
 
-Key = the exact model id or llama-swap alias a cascade call names; value = a tailnet base
-URL whose llama-swap **serves that same model**. Semantics, in order:
+Key = the exact model id or llama-swap alias a cascade call names; value = a tailnet base URL
+that **serves that same model**. The value may be either shape, and the lane works out which by
+probing it — you never declare it:
+
+| lane base | when to use it | residency read from | the call rides |
+|---|---|---|---|
+| `http://<node>:18811` (a **fleet node**) | the normal case on this fleet | `GET /fleet/health` → `served_models` | `POST /fleet/chat` with `fleet_auth_token` |
+| `http://<node>:11436` (a **llama-swap**) | only where llama-swap is reachable from this box | `GET /v1/models` | `/v1/chat/completions`, no credential |
+
+**Use the `:18811` node form on this fleet.** The Lenovo and the Aorus bind llama-swap to
+`127.0.0.1:11436` and nothing else, so the `:11436` form is unreachable from the Qube and the
+lane will never engage; binding llama-swap to the tailnet instead would be a new unauthenticated
+listener, which is why the node proxies the call behind its own bearer gate (the same door the
+vision lane uses). The node must be running a harness with the chat lane — check
+`curl http://<node-b>:18811/fleet/health` for `"chat_lane": true` and for the model in
+`served_models` — and **this box's `fleet_auth_token` must match the node's**, or the lane
+fails closed to local (one log line per window) rather than collecting 401s.
+
+Semantics, in order:
 
 - A `seat_endpoints` static pin on the same model always wins — a pinned seat is *always*
   remote; a lane is *busy-hours only*.
-- A lane is taken only when the local machine-wide GPU lease is held **and** a roster probe
-  (alias-aware, cached 30 s per lane, fail-closed) confirms the lane serves the model.
-  Idle GPU, probe failure, or a roster miss → the call stays local, silently and safely.
+- A lane is taken only when this box would make the call **wait** — either the machine-wide GPU
+  lease is held, or (register C-41) the local llama-swap holds ANOTHER model that is `starting`
+  or is `ready` with at least one request in flight, so a swap to the cascade tier would queue
+  behind it — **and** a roster probe (alias-aware, cached 30 s per lane, fail-closed) confirms
+  the lane serves the model. Idle GPU with an idle (or absent) local seat, a loaded seat that is
+  the requested model itself, a probe failure, or a roster miss → the call stays local, silently
+  and safely. The local busy reading is cached 5 s.
 - **Quality-identical by construction**: the lane must serve the SAME model — the failover
   never changes *which* model answers, only *where*. Never point a lane at a smaller tier.
-- Every reroute writes one serve-log line: `cascade remote lane: <model> -> <base> (local
-  GPU lease held)`. No lines during a render = the lane never engaged — check that the
-  lane's llama-swap actually serves the alias (`curl http://<node-b>:11436/v1/models`).
+- Every reroute writes one serve-log line naming the reason: `cascade remote lane: <model> ->
+  <base> (local GPU lease held)` or `… (local seat busy: qwen3.8-27b-vllm, 2 in flight)`. No
+  lines while the box is busy = the lane never engaged — check that the lane actually serves the
+  alias, at whichever door the base is: `curl http://<node-b>:18811/fleet/health` (look for
+  `chat_lane` and `served_models`) for a node base, `curl http://<node-b>:11436/v1/models` for a
+  llama-swap base. A failed probe of either side logs its own line once per window, and so does a
+  node that advertises no `chat_lane` or that this box has no `fleet_auth_token` for.
 
 Lane URLs pass the same tailnet guard as everything else here (loopback, `100.64.0.0/10`,
 dotless MagicDNS, or your own tailnet zone; validated at config load naming the key, and

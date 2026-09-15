@@ -364,8 +364,39 @@ The cascade holds no credentials. By default it reaches no network beyond the co
 endpoint; since 0.65.0 two opt-in config keys can route a seat's completions to a base on the
 operator's OWN tailnet, never cloud (ADR 0023): `seat_endpoints` (a static per-model pin — that
 seat is always remote) and `cascade_remote_lanes` (busy-aware failover — the lane is taken per
-call, only while the local machine-wide GPU lease is held and a cached alias-aware roster probe
+call, only while the local box would make the call wait and a cached alias-aware roster probe
 confirms the lane serves the SAME model, fail-closed to local, one serve-log line per reroute).
+
+**Two things make the local box "busy" for a lane (register C-41).** The machine-wide GPU lease
+being held, as before — and, per model, a swap that would have to wait: this box's llama-swap
+lists ANOTHER model (alias-aware) either `starting`/`stopping`, or `ready` with the seat gauge
+(`internal/seatload`, the reader behind `gpu status`'s "N request(s) in flight") reporting at
+least one request in flight. That second trigger is the measured C-41 symptom, which carries no
+lease at all: an agent seat loaded by another session, a mutually-exclusive `interactive` set, so
+every cascade tier needs a swap — and llama-swap swaps only once the loaded model's in-flight
+requests finish (300–900 s contracts), so the tier sat in that queue until its own HTTP deadline
+and deferred. A loaded but IDLE model is not busy (llama-swap swaps it out at once), the
+requested model being the loaded one is never busy (no swap at all), and every unreadable probe
+— `/running`, the roster, the gauge — reads as NOT busy: "could not tell" never moves a call off
+this machine. One reading is cached 5 s per base.
+
+**A lane base is one of two shapes, and the lane finds out which (register C-41b).** One cached
+probe per base per 30 s decides it: a base that answers `GET /fleet/health` with a `node_id` is a
+FLEET NODE — residency is that payload's `served_models` (ids and aliases), and the call rides
+`POST /fleet/chat` on the node's `:18811` carrying `fleet_auth_token`, which the node forwards
+byte for byte to its own loopback llama-swap. Anything else is a plain llama-swap: residency is
+`GET /v1/models` and the call rides the client's own completion path with no credential, exactly
+as before node lanes existed. The node shape exists because both fleet nodes bind llama-swap to
+`127.0.0.1:11436` only, so the llama-swap shape is unreachable from another box and the lane
+would never engage there; binding llama-swap to the tailnet would be a new unauthenticated
+listener, which is what the vision lane refused to do in 0.116.0 (ADR 0040). The node publishes
+`chat_lane` in health under the same one-predicate rule as the agent and vision lanes — health
+advertises it exactly when `POST /fleet/chat` will admit — and it is a SYNCHRONOUS forward, never
+a job: a single short cascade call has no business in the job store, and the queueing it might do
+belongs on the node's llama-swap. Fail-closed on every doubt: no `chat_lane`, the model absent
+from `served_models`, or no `fleet_auth_token` on this box for a base past loopback all read as
+NOT resident, and the call stays local with one log line per window.
+
 Routing never changes WHICH model answers, only WHERE. Both keys are vetted by the tailnet guard
 at config load (naming the offending key) and by the resolve-and-pin `SafeTransport` dial gate on
 every request. Task input passes through the ledger only as metadata and token counts, not as

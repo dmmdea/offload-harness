@@ -21,6 +21,42 @@ Versioning: [SemVer](https://semver.org/).
   argument 2847 chars) ..."). Every cut attempt appends a call record, so `results[].calls` shows the budget
   each one generated at. `internal/pipeline/agenttask.go` maps the new stop reason to `defer_class: budget`
   with that note as the reason. An unrelated 500 still stops on `error` and still reads as infrastructure.
+- **A cascade lane can now REACH a fleet node at all (register C-41b — the second half of C-41).** C-41 taught the
+  lane to fire when a local swap would have to wait. It could still not reach anything: both fleet nodes bind
+  llama-swap to `127.0.0.1:11436` and nothing else, so a lane base of `http://<node>:11436` is unreachable from
+  another box, every residency probe failed, and the lane logged "not resident" for ever while the measured symptom
+  reproduced. Binding llama-swap to the tailnet would be a new unauthenticated listener; the vision lane (0.116.0,
+  ADR 0040) already solved this shape, and the cascade now gets the same door. **Node:** `POST /fleet/chat` on
+  `:18811` forwards ONE OpenAI chat completion, byte for byte (the grammar survives), for a model this node's own
+  roster serves — alias-aware, 404 for anything else, 503 when the roster is unreadable, the upstream status copied
+  back unflattened so the caller's seat-wait loop still sees llama-swap's 429/503. Bearer-gated by the agent lane's
+  rule verbatim (`fleet_auth_token` required past loopback), body capped at 8 MiB, and advertised as `chat_lane` in
+  health exactly when it will admit — with `served_models` now published whenever the chat lane is admissible, not
+  only under the agent lane. It is a synchronous forward, not a job: a short cascade call does not belong in the job
+  store. **Delegator:** `llamaclient.FleetLaneGates(fleet_auth_token)` replaces `RosterResident` at all three client
+  constructions and returns the residency gate and the lane ROUTER over ONE cached probe per base — a base that
+  answers `/fleet/health` with a `node_id` is a fleet node (residency = `served_models`, route = `/fleet/chat` plus
+  the bearer); anything else is a plain llama-swap and behaves exactly as before (`/v1/models`, the client's own
+  path, no credential). Fail-closed throughout: a node that does not advertise `chat_lane`, does not serve the
+  model, or that this box holds no token for past loopback is NOT resident, so the call stays local and logs why
+  once per window.
+- **A cascade tier no longer waits out its HTTP deadline behind another session's seat (register C-41).**
+  `cascade_remote_lanes` already reroutes a cascade call to a node that roster-serves the SAME model, but its
+  only busy gate was `delegate.LocalBusy` — the machine-wide GPU lease. The measured symptom carries no lease:
+  another session's contract holds `qwen3.8-27b-vllm` through llama-swap, the `interactive` set is mutually
+  exclusive, so every cascade tier (e2b / e4b / 12b / 26b) needs a swap — and llama-swap swaps only once the
+  loaded model's in-flight requests finish (300–900 s contracts). The call sat in that queue until its own
+  deadline and the tier deferred, with a fleet node idle and serving the identical GGUF. `WithRemoteLanes` now
+  takes a second, PER-MODEL gate beside the lease one (either firing takes the lane, residency still required):
+  `llamaclient.LocalSwapBusy(endpoint)` reads this box's llama-swap and answers "would a swap to this model
+  have to wait?" — another model listed `starting`/`stopping`, or `ready` with `internal/seatload`'s gauge (the
+  reader behind `gpu status`'s "N request(s) in flight") above zero. Alias-aware through the roster, so a seat
+  bound by alias is not mistaken for a different model; a loaded but idle model, the requested model itself
+  being loaded, and every unreadable probe all read as NOT busy — fail-closed to local, exactly as
+  `RosterResident` does. One reading cached 5 s per base; each reroute logs its reason
+  (`cascade remote lane: gemma-4-e4b -> http://<node>:11436 (local seat busy: qwen3.8-27b-vllm, 1 in flight)`).
+  Wired at all three client constructions (CLI/MCP `openPipeline`, the in-loop pipeline, the re-pack lane), so
+  every cascade door gets the same failover. A config without `cascade_remote_lanes` is unchanged.
 
 ### Added
 - **`results[].calls` on every delegate row (register D-99).** The `agent_delegate` tool description promised the
