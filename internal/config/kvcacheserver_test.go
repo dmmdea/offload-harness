@@ -15,8 +15,11 @@ import (
 // and a block that is present but disabled must never be inspected.
 func TestKVCacheServerAbsentAndDisabledAreInert(t *testing.T) {
 	def := Default()
-	if def.KVCacheServer != nil {
-		t.Fatalf("Default() must not declare a cache server; got %+v", def.KVCacheServer)
+	if len(def.KVCacheServers) != 0 {
+		t.Fatalf("Default() must not declare a cache server; got %+v", def.KVCacheServers)
+	}
+	if len(def.VLLMSeats) != 0 {
+		t.Fatalf("Default() must not declare a vLLM seat roster; got %+v", def.VLLMSeats)
 	}
 	if err := ValidateKVCacheServer(nil); err != nil {
 		t.Fatalf("nil block: %v", err)
@@ -131,10 +134,16 @@ func TestKVCacheServerLoadAttributesTheKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.KVCacheServer == nil || !c.KVCacheServer.Enabled || c.KVCacheServer.Address != "10.1.2.3:18799" || c.KVCacheServer.EffectiveKeyPrefix() != "qube-seat-v7" {
-		t.Fatalf("round-trip lost or failed to normalize the block: %+v", c.KVCacheServer)
+	// The pre-0.121 SINGLE OBJECT still loads — as a one-element list bound to its
+	// own seat. Every config already deployed keeps working.
+	if len(c.KVCacheServers) != 1 {
+		t.Fatalf("the legacy single object must decode to a one-element list, got %+v", c.KVCacheServers)
 	}
-	raw, _ := json.Marshal(c.KVCacheServer)
+	b := c.KVCacheServers.For("qwen3.8-27b-vllm")
+	if b == nil || !b.Enabled || b.Address != "10.1.2.3:18799" || b.EffectiveKeyPrefix() != "qube-seat-v7" {
+		t.Fatalf("round-trip lost or failed to normalize the block: %+v", b)
+	}
+	raw, _ := json.Marshal(b)
 	for _, key := range []string{`"enabled"`, `"store"`, `"address"`, `"l1_staging_gb"`, `"chunk_size"`, `"key_prefix"`, `"seat"`} {
 		if !strings.Contains(string(raw), key) {
 			t.Errorf("marshalled block lacks %s: %s", key, raw)

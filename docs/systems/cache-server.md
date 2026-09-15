@@ -12,11 +12,14 @@ capacity tier, scored on what it adds, not on speedup (operator directive, 2026-
 - What is the "cache server" and when does the harness care about it?
 - What is measured, on which hardware, and what does it not do?
 - How is it declared, and what happens on a box that never declares it?
+- How does a box with SEVERAL vLLM seats bind a store to each of them?
 - Which engine layouts can use a store, and which cannot (and why)?
+- Why does `doctor` fail a vLLM seat that has no binding, and how do I opt one out?
 
 ## Scope
 
-The `kv_cache_server` config block, its validation, the `offload_status` report, and the reference
+The `kv_cache_server` config bindings and the `vllm_seats` roster, their validation, the
+`offload_status` report, `doctor`'s per-seat gate, and the reference
 seat templates under `setup/templates/vllm-seat/`. The harness does **not** run the store or the
 engine: those are the operator's llama-swap seat and a store process on the second device.
 
@@ -37,23 +40,48 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
   model (784 for Qwen3.8-27B with fp16 KV; fp8 KV doubles it to 1568).
 - **Key prefix** — the store namespace for one stack generation (engine layout, KV dtype, LMCache
   build). Objects written under another generation are unreadable, not merely stale.
+- **Binding** — one entry of the `kv_cache_server` LIST: the store one named vLLM seat gets, or an
+  explicit `storeless` opt-out saying why that seat gets none. A binding with no `seat` is the box
+  default and backs every vLLM seat that has no binding of its own.
+- **vLLM roster** — `vllm_seats`, the seats on this box served by a vLLM engine. Declared, because
+  `/v1/models` reports model ids and not engines, and the cascade stays on llama.cpp.
 
 ## How the system works
 
-1. The operator declares the block (`enabled: true`, store, address, sizes, seat) in `config.json`.
-   Absent or `enabled: false` is the default and changes nothing; a single-box install never
-   depends on it.
-2. `config.Load` refuses a block that cannot work, by key name: an unknown store, a missing or
-   malformed `host:port`, a public address (KV pages are unauthenticated bulk memory — the store
-   lives on the LAN or the tailnet only), an `fs_native` address that is a URL or host:port instead of
-   an absolute mounted path, negative sizes, and an enabled block with neither `key_prefix` nor
-   `seat` (no shared namespace by accident). `address` is trimmed at load.
-3. `offload_status` reports the block in both states: `{"enabled": false, "declared": …}` when off;
-   when on, the wiring plus a 1 s TCP reachability fact for a Valkey store named by an IP literal
-   (a hostname is reported as unprobed; `fs_native` as "no port"), so an agent reading status sees
-   "declared but down" before its first contract waits on it. A block the load refused is reported
-   as `invalid` and never dialed. The block is declarative: the seat wrapper runs what its own
-   `seat.env` says, and the status note reminds the operator to keep the two in agreement.
+1. The operator declares a BINDING PER vLLM SEAT — `kv_cache_server` is a LIST of them
+   (`enabled: true`, store, address, sizes, `seat`) — and names the box's vLLM seats in
+   `vllm_seats`. An empty list is the default and changes nothing; a single-box install never
+   depends on it. The pre-0.121 single object still loads, as a one-element list bound to its own
+   `seat` (ADR 0045): the store is not a property of one favoured seat, and the shape that bound it
+   to one seat name made "this seat has no tier" and "this seat was never considered" identical.
+2. `config.Load` refuses a binding that cannot work, by key name AND by binding: an unknown store, a
+   missing or malformed `host:port`, a public address (KV pages are unauthenticated bulk memory — the
+   store lives on the LAN or the tailnet only), an `fs_native` address that is a URL or host:port
+   instead of an absolute mounted path, negative sizes, and an enabled binding with neither
+   `key_prefix` nor `seat` (no shared namespace by accident). `address` is trimmed at load.
+2a. Two rules exist only BETWEEN bindings and are refused the same way: **one binding per seat**
+   (including at most one box default — two bindings for one seat is two stores whose order in the
+   file picks the winner), and **one `key_prefix` per stack generation** (register B-45). A prefix
+   shared by two seats must carry the same `kv_dtype` + `tensor_parallel` on every binding that
+   shares it, and a shared prefix where any binding leaves the generation undeclared is refused too:
+   it cannot be shown to be safe, and the failure it guards against reports success while serving
+   nothing.
+2b. **`doctor` FAILS a vLLM seat with no binding** — one line per seat, non-zero exit — because the
+   operator rule is that the store backs EVERY vLLM seat while the second device is online. The
+   escape hatch is a declaration and never silence: a binding with `storeless: true` and a `reason`
+   passes; an absent binding fails, and so does one merely switched off with no reason. The section
+   prints above the health probe, since its verdicts are pure config and a dead serving layer must
+   not hide them. A box with no `vllm_seats` prints nothing and fails nothing.
+3. `offload_status.kv_cache_server` LISTS every binding: `bindings[]` (seat, store, address,
+   key_prefix, l1_staging_gb, chunk size, declared/enabled — or `storeless` with its reason), plus
+   `unbound_seats`, the same list `doctor` fails on, computed by the same `UnboundSeats` so the
+   report and the gate cannot disagree. Each enabled Valkey store named by an IP literal carries a
+   1 s TCP reachability fact (a hostname is reported as unprobed; `fs_native` as "no port"), so an
+   agent reading status sees "declared but down" before its first contract waits on it. A binding the
+   load refused is reported `invalid` and never dialed. The bindings are declarative: each seat
+   wrapper runs what ITS OWN `seat.env` says — `local-offload install vllm-seat --config
+   <config.json>` renders a seat from the binding that names it, so the two stop being kept in
+   agreement by hand.
 4. `fs_native` over a network share is the measured transport of choice (Lenovo tmpfs over SMB 3.1.1: a
    23.7k-token prefix back in 2.6–2.9 s at fp16 and 0.80 s at fp8 KV, vs 3.8 / 0.92 s through Valkey;
    `--l2-prefetch-policy` / `--l2-store-policy` variants gained nothing; the legacy `fs` adapter was slower).
@@ -109,8 +137,11 @@ prefix whenever the engine layout, the KV dtype or the LMCache build changes.
 
 ## Interfaces and entry points
 
-- `config.json` → `kv_cache_server` (see `internal/config/kvcacheserver.go` for every field).
-- `offload_status` → `kv_cache_server` block.
+- `config.json` → `kv_cache_server` (a LIST of per-seat bindings; `internal/config/kvcacheserver.go`
+  holds every field, `internal/config/kvcacheservers.go` the list rules) and `vllm_seats`.
+- `offload_status` → `kv_cache_server.bindings[]` + `unbound_seats`.
+- `local-offload doctor` → the "cache server" section, one line per vLLM seat.
+- `local-offload install vllm-seat --config <config.json>` → renders a seat from its own binding.
 - `setup/templates/vllm-seat/` → reference seat wrapper, stop script, llama-swap entry, and the
   second device's `kv-cache-server.service`.
 
@@ -132,6 +163,8 @@ eviction and after a restart — hit counters alone do not prove fidelity).
 - The store address is private (LAN/tailnet); public addresses are refused at load.
 - Chunk = engine unified block size; a mismatch fails engine registration loudly.
 - One namespace per stack generation.
+- One binding per seat; at most one box default. A seat with no binding FAILS `doctor` — an
+  unexplained absence is not an opt-out, and the tier stays optional through the explicit one.
 - **Layout constraint (measured 2026-09-03):** LMCache's Valkey adapter sizes L2 reads from one
   layout per model. A pipeline-parallel seat whose stages hold different numbers of full-attention
   layers (three stages of a 64-layer model with attention every 4th layer: 6/5/5 in any split)
@@ -163,15 +196,20 @@ Raw link: ~980 MB/s Qube→Lenovo, ~700 MB/s Lenovo→Qube (iperf3); the Valkey 
 
 | concern | where |
 |---|---|
-| the block, defaults, validation (`validateKVCacheServer`, `privateHost`) | `internal/config/kvcacheserver.go`, wired in `internal/config/config.go` (`Config.KVCacheServer`, `load`) |
-| status report (`kvCacheServerView`) | `internal/mcpserver/mcpserver.go` (`handleStatus`) |
-| tests | `internal/config/kvcacheserver_test.go`, `internal/mcpserver/status_test.go` (`TestStatusReportsKVCacheServer`) |
+| one binding: fields, defaults, validation (`ValidateKVCacheServer`, `privateHost`) | `internal/config/kvcacheserver.go` |
+| the LIST: legacy-object decode, seat selection, cross-binding rules (`ValidateKVCacheServers`) | `internal/config/kvcacheservers.go`, wired in `internal/config/config.go` (`Config.KVCacheServers`, `Config.VLLMSeats`, `load`) |
+| status report (`kvCacheServerView`, `kvCacheBindingView`) | `internal/mcpserver/mcpserver.go` (`handleStatus`) |
+| the per-seat gate (`writeCacheServerSection`) | `main.go` (`doctorRun`) |
+| the render picks a binding by seat name (`applySeatBinding`) | `install_seatbinding.go`, flagged in `install_vllmseat.go` (`--config`) |
+| the seat's own half and the binding a tier derives (`ConfigBlock`, `ConfigBinding`, `Bindings`) | `internal/vllmseat/vllmseat.go` |
+| tests | `internal/config/kvcacheserver_test.go`, `internal/config/kvcacheservers_test.go`, `internal/mcpserver/status_test.go`, `doctor_cacheserver_test.go`, `install_seatbinding_test.go` |
 | reference seat: wrapper, stop, llama-swap entry, store unit | `setup/templates/vllm-seat/` |
 | measurements and the layout constraint | `docs/architecture/decisions/0033-cache-server-is-an-optional-second-device-tier.md` |
 
 ## Related docs
 
-- [ADR 0033](../architecture/decisions/0033-cache-server-is-an-optional-second-device-tier.md)
+- [ADR 0033](../architecture/decisions/0033-cache-server-is-an-optional-second-device-tier.md) — the tier
+- [ADR 0045](../architecture/decisions/0045-a-cache-server-binding-per-vllm-seat.md) — a binding per vLLM seat, and the gate that fails a storeless one
 - [OPERATOR-GUIDE.md](../OPERATOR-GUIDE.md) — "Cache server — an optional second device holding evicted KV"
 - [fleet-node.md](fleet-node.md) — a fleet node runs contracts; a cache server holds KV pages (different roles)
 

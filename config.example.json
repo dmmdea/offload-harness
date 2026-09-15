@@ -13,6 +13,7 @@
   "agent_env_rules": null,
   "agent_seed_context_reads": false,
   "kv_cache_server": null,
+  "vllm_seats": null,
   "agent_timeout_sec": 0,
   "seat_contention_wait_sec": 0,
   "agent_admission_wait_sec": 0,

@@ -353,13 +353,23 @@ func TestStatusReportsKVCacheServer(t *testing.T) {
 	}
 	cfg := config.Default()
 	// A closed local port: declared, valid, and provably unreachable within the 1 s dial.
-	cfg.KVCacheServer = &config.KVCacheServer{Enabled: true, Address: "127.0.0.1:1", Seat: "qwen3.8-27b-vllm", KeyPrefix: "qube-seat-v7"}
+	binding := &config.KVCacheServer{Enabled: true, Address: "127.0.0.1:1", Seat: "qwen3.8-27b-vllm", KeyPrefix: "qube-seat-v7"}
+	cfg.KVCacheServers = config.KVCacheServers{binding}
+	cfg.VLLMSeats = []string{"qwen3.8-27b-vllm"}
 	on := kvCacheServerView(context.Background(), cfg)
-	if on["enabled"] != true || on["store"] != "valkey" || on["chunk_size"] != 784 || on["l1_staging_gb"] != 8 || on["key_prefix"] != "qube-seat-v7" {
+	if on["enabled"] != true || on["declared"] != 1 {
 		t.Fatalf("enabled tier view wrong: %v", on)
 	}
-	if on["reachable"] != false || on["reachable_error"] == nil {
-		t.Fatalf("a closed port must report reachable:false with the dial error, got %v", on)
+	rows, _ := on["bindings"].([]map[string]any)
+	if len(rows) != 1 {
+		t.Fatalf("one binding must be listed, got %v", on["bindings"])
+	}
+	row := rows[0]
+	if row["seat"] != "qwen3.8-27b-vllm" || row["store"] != "valkey" || row["chunk_size"] != 784 || row["l1_staging_gb"] != 8 || row["key_prefix"] != "qube-seat-v7" {
+		t.Fatalf("enabled binding row wrong: %v", row)
+	}
+	if row["reachable"] != false || row["reachable_error"] == nil {
+		t.Fatalf("a closed port must report reachable:false with the dial error, got %v", row)
 	}
 	// A live listener flips the fact.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -367,9 +377,58 @@ func TestStatusReportsKVCacheServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	cfg.KVCacheServer.Address = ln.Addr().String()
-	if v := kvCacheServerView(context.Background(), cfg); v["reachable"] != true {
+	binding.Address = ln.Addr().String()
+	v := kvCacheServerView(context.Background(), cfg)
+	if rows, _ := v["bindings"].([]map[string]any); len(rows) != 1 || rows[0]["reachable"] != true {
 		t.Fatalf("live listener must report reachable:true, got %v", v)
+	}
+}
+
+// B-01: status LISTS every binding, one per vLLM seat, and publishes the seats that
+// have none. The shape this replaces reported a single `seat`, so a session reading
+// status could not tell "the other seats have no tier" from "the other seats were
+// never considered" — and `unbound_seats` is the SAME list `doctor` fails on, so the
+// gate and the report cannot disagree.
+func TestStatusListsEveryBindingAndTheUnboundSeats(t *testing.T) {
+	cfg := config.Default()
+	cfg.VLLMSeats = []string{"pair", "trio", "quiet"}
+	cfg.KVCacheServers = config.KVCacheServers{
+		{Enabled: true, Store: "fs_native", Address: "/mnt/kv/pair", ChunkSize: 1568, KeyPrefix: "qube-pair-fp8", Seat: "pair", KVDtype: "fp8", TensorParallel: 2},
+		{Seat: "trio", Storeless: true, Reason: "three-stage pipeline seat: no L2 layout works"},
+	}
+	v := kvCacheServerView(context.Background(), cfg)
+	if v["declared"] != 2 || v["enabled"] != true {
+		t.Fatalf("both bindings must be declared: %v", v)
+	}
+	rows, _ := v["bindings"].([]map[string]any)
+	if len(rows) != 2 {
+		t.Fatalf("every binding is listed, got %v", v["bindings"])
+	}
+	if rows[0]["seat"] != "pair" || rows[0]["address"] != "/mnt/kv/pair" || rows[0]["key_prefix"] != "qube-pair-fp8" ||
+		rows[0]["kv_dtype"] != "fp8" || rows[0]["tensor_parallel"] != 2 {
+		t.Errorf("the pair's own store dir and namespace must be reported: %v", rows[0])
+	}
+	if rows[1]["storeless"] != true || rows[1]["reason"] == "" {
+		t.Errorf("the opt-out must be reported WITH its reason: %v", rows[1])
+	}
+	unbound, _ := v["unbound_seats"].([]string)
+	if len(unbound) != 1 || unbound[0] != "quiet" {
+		t.Fatalf("the seat with no binding must be named: %v", v["unbound_seats"])
+	}
+	if !strings.Contains(v["note"].(string), "unbound_seats") {
+		t.Errorf("the note must point at the uncovered seats: %v", v["note"])
+	}
+	// A declared-but-disabled binding is NOT coverage: "the tier is off here" and
+	// "nobody considered this seat" must not look alike.
+	cfg.KVCacheServers = append(cfg.KVCacheServers, &config.KVCacheServer{Seat: "quiet"})
+	v = kvCacheServerView(context.Background(), cfg)
+	if unbound, _ := v["unbound_seats"].([]string); len(unbound) != 1 || unbound[0] != "quiet" {
+		t.Fatalf("a disabled binding must not count as coverage: %v", v["unbound_seats"])
+	}
+	// A binding for a seat the box does not list is surfaced, never swallowed.
+	cfg.VLLMSeats = []string{"pair"}
+	if extra, _ := kvCacheServerView(context.Background(), cfg)["bound_seats_not_in_vllm_seats"].([]string); len(extra) != 2 {
+		t.Fatalf("bindings naming unlisted seats must be surfaced: %v", extra)
 	}
 }
 
@@ -377,27 +436,37 @@ func TestStatusReportsKVCacheServer(t *testing.T) {
 // never dialed; a hostname store is reported as unprobed; fs_native says "no port".
 func TestStatusDoesNotDialAnInvalidOrNamedStore(t *testing.T) {
 	cfg := config.Default()
-	cfg.KVCacheServer = &config.KVCacheServer{Enabled: true, Address: "8.8.8.8:1", Seat: "s"}
-	v := kvCacheServerView(context.Background(), cfg)
+	row := func(c config.Config) map[string]any {
+		rows, _ := kvCacheServerView(context.Background(), c)["bindings"].([]map[string]any)
+		if len(rows) != 1 {
+			t.Fatalf("one binding expected, got %v", rows)
+		}
+		return rows[0]
+	}
+	cfg.KVCacheServers = config.KVCacheServers{{Enabled: true, Address: "8.8.8.8:1", Seat: "s"}}
+	v := row(cfg)
 	if v["invalid"] == nil || v["enabled"] != true {
-		t.Fatalf("refused block must report invalid, got %v", v)
+		t.Fatalf("refused binding must report invalid, got %v", v)
 	}
 	if _, dialed := v["reachable"]; dialed {
-		t.Fatalf("refused block must not be dialed, got %v", v)
+		t.Fatalf("refused binding must not be dialed, got %v", v)
 	}
-	cfg.KVCacheServer = &config.KVCacheServer{Enabled: true, Address: "store-box:18799", Seat: "s"}
-	v = kvCacheServerView(context.Background(), cfg)
+	cfg.KVCacheServers = config.KVCacheServers{{Enabled: true, Address: "store-box:18799", Seat: "s"}}
+	v = row(cfg)
 	if r, ok := v["reachable"]; !ok || r != nil || v["reachable_note"] == nil {
 		t.Fatalf("hostname store must report reachable:null with a note, got %v", v)
 	}
-	cfg.KVCacheServer = &config.KVCacheServer{Enabled: true, Store: "fs_native", Address: "/mnt/kv", Seat: "s"}
-	v = kvCacheServerView(context.Background(), cfg)
+	cfg.KVCacheServers = config.KVCacheServers{{Enabled: true, Store: "fs_native", Address: "/mnt/kv", Seat: "s"}}
+	v = row(cfg)
 	if r, ok := v["reachable"]; !ok || r != nil || v["reachable_note"] == nil {
 		t.Fatalf("fs_native must report reachable:null with a note, got %v", v)
 	}
 	off := kvCacheServerView(context.Background(), config.Default())
-	if off["declared"] != false {
-		t.Fatalf("absent block must report declared:false, got %v", off)
+	if off["declared"] != 0 || off["enabled"] != false || off["note"] == nil {
+		t.Fatalf("absent block must report a described zero state, got %v", off)
+	}
+	if rows, _ := off["bindings"].([]map[string]any); len(rows) != 0 {
+		t.Fatalf("no bindings expected, got %v", rows)
 	}
 }
 

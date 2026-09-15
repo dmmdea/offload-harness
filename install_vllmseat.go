@@ -113,6 +113,7 @@ func runInstallVLLMSeat(args []string) error {
 	hfHome := fs.String("hf-home", "", "HF cache root (default: $HF_HOME, else <home>/hf)")
 	modelPath := fs.String("model-path", "", "exact HF snapshot directory, overriding resolution from the tier's model_repo (the hash differs per download, so --force needs this)")
 	force := fs.Bool("force", false, "write the artifacts even when the venv or the weights are absent")
+	cfgPath := fs.String("config", "", "harness config.json whose kv_cache_server binding FOR THIS SEAT overrides the tier's cache_server (per-seat store dir and key_prefix)")
 	_ = fs.Parse(args)
 
 	if *home == "" {
@@ -142,6 +143,13 @@ func runInstallVLLMSeat(args []string) error {
 	s := *p.VLLMSeat
 	if *modelPath != "" {
 		s.ModelPath = *modelPath
+	}
+	if *cfgPath != "" {
+		applied, err := applySeatBinding(s, *cfgPath)
+		if err != nil {
+			return err
+		}
+		s = applied
 	}
 	rt := vllmRuntimeFlags{user: *user, proxyHost: *proxy, venv: *venv, hfHome: *hfHome}.resolve(*home)
 	if err := rt.Validate(); err != nil {
