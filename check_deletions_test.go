@@ -192,14 +192,14 @@ func (r *synthRepo) rm(name string) {
 
 func (r *synthRepo) git(args ...string) {
 	r.t.Helper()
-	if out, err := r.exec("git", args...); err != nil {
+	if out, err := r.exec(args...); err != nil {
 		r.t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
 
 func (r *synthRepo) out(args ...string) string {
 	r.t.Helper()
-	out, err := r.exec("git", args...)
+	out, err := r.exec(args...)
 	if err != nil {
 		r.t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
@@ -214,11 +214,17 @@ func (r *synthRepo) rev(ref string) string {
 // run invokes the guard in the synthetic repo and returns its combined output.
 func (r *synthRepo) run(script string, base, head string) (string, error) {
 	r.t.Helper()
-	return r.exec("bash", script, base, head)
+	return r.finish(exec.Command("bash", script, base, head))
 }
 
-func (r *synthRepo) exec(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+func (r *synthRepo) exec(args ...string) (string, error) {
+	return r.finish(exec.Command("git", args...))
+}
+
+// finish runs a command in the synthetic repo under the sandboxed environment.
+// The two callers above are the only ones, and each names its program as a
+// literal -- this helper never chooses what to execute.
+func (r *synthRepo) finish(cmd *exec.Cmd) (string, error) {
 	cmd.Dir = r.dir
 	cmd.Env = r.env
 	out, err := cmd.CombinedOutput()
