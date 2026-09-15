@@ -621,6 +621,16 @@ writes outside the worktree are blocked by MIC, but **network egress is not seve
 the worktree are not blocked**. The source calls this "HONEST RESIDUAL RISK (documented, not hidden)"
 and the tool description the model sees says the same.
 
+**The caged child's environment is built, never inherited, on both platforms** (`sandbox.cageEnv`,
+`sandbox.EnvAllowlist`). Linux execs with a fixed `PATH` plus `HOME`/`TMPDIR` pointed at the run's
+scratch dir; Windows passes CreateProcess an explicit UTF-16 block of the same shape — a closed
+copy-by-name allowlist (`SystemRoot`, `SystemDrive`, `windir`, `PATH`, `PATHEXT`, `COMSPEC`,
+`NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`, `OS`) plus `USERPROFILE`/`HOME` and
+`TEMP`/`TMP`/`TMPDIR` set to the scratch dir. Nothing else crosses: no `GITHUB_TOKEN`, no
+`MEM0_API_KEY`, no fleet token, no `APPDATA`/`LOCALAPPDATA` pointing at the real profile. Until
+0.117.4 the Windows side passed a nil `lpEnvironment`, which means "inherit the caller's block",
+so a `run` child received the delegator's whole environment.
+
 > **Known gap:** the read-only `.git` mask that protects the shell path is Linux-only. On native
 > Windows the `run` path has no equivalent, while `git` is on the allowlist and the worktree is
 > temporarily low-integrity during a run. The broker's `.git` denial still covers the file tools on

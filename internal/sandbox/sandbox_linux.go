@@ -202,16 +202,27 @@ func runWorker() error {
 	_ = unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: 0, Max: 0})
 	_ = unix.Setrlimit(unix.RLIMIT_FSIZE, &unix.Rlimit{Cur: 1 << 30, Max: 1 << 30})
 
-	// (5) exec the command inside the cage with a minimal env. syscall.Exec
+	// (5) exec the command inside the cage with a minimal env (cageEnv, the
+	// contract shared with the Windows cage — see sandbox.go). syscall.Exec
 	// replaces the process, so the cage (namespaces + seccomp + Landlock) is fully
 	// in effect for it and every descendant.
-	env := []string{
-		"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
-		"HOME=" + spec.Scratch,
-		"TMPDIR=" + spec.Scratch,
-	}
-	return syscall.Exec(spec.Argv[0], spec.Argv, env)
+	return syscall.Exec(spec.Argv[0], spec.Argv, cageEnv(spec, nil))
 }
+
+// The Linux half of the cage's environment contract (sandbox.go). The child gets
+// exactly these three entries, as it always has.
+//
+// envPassthrough is EMPTY and that is the point: nothing is copied out of the
+// harness's environment, so no token can reach the caged command however the
+// parent was launched. PATH does not need copying either — a caged command may
+// only exec what Landlock granted, so the system list is both sufficient and
+// honest.
+var (
+	envFixed       = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
+	envPassthrough []string
+	envHomeNames   = []string{"HOME"}
+	envTempNames   = []string{"TMPDIR"}
+)
 
 // dirExists reports whether p resolves to a directory (symlinks followed). Used
 // before bind-masking <worktree>/.git, which must exist as a real dir to mount over.
