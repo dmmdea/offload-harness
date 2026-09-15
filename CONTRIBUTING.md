@@ -102,7 +102,7 @@ already on `main`. Merge `main` into it — never force the merge, never replay 
 older base — and run again. Run it locally the same way CI does:
 
 ```sh
-./scripts/check-deletions.sh origin/main HEAD
+bash ./scripts/check-deletions.sh origin/main HEAD
 ```
 
 ## Opening a pull request

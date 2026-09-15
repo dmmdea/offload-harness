@@ -33,7 +33,7 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           git fetch --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          ./scripts/check-deletions.sh "origin/$BASE_REF" HEAD
+          bash ./scripts/check-deletions.sh "origin/$BASE_REF" HEAD
 
       - name: Deletions are declared (H-51, merge against its first parent)
         if: github.event_name == 'push'
@@ -42,7 +42,7 @@ jobs:
             echo "check-deletions: HEAD is not a merge commit — the pull request run covered it"
             exit 0
           fi
-          ./scripts/check-deletions.sh 'HEAD^1' HEAD
+          bash ./scripts/check-deletions.sh 'HEAD^1' HEAD
 
       - name: Set up Go
         uses: actions/setup-go@v5
