@@ -63,6 +63,13 @@ type Entry struct {
 	// core.Meta.TierPack). Empty on entry-tier rows; old ledger lines without
 	// the field parse fine.
 	TierPack string `json:"tier_pack,omitempty"`
+	// Layer names the device layer a composite box served this call on (ADR
+	// 0039: single | pair | triple | display), copied from core.Meta.Placed so
+	// the utilization scoreboard can later sum work per layer (council R8 held
+	// the by_layer summary; the column is what makes it summable). Empty — and
+	// omitted — on a plain box, so its rows stay byte-identical; old lines
+	// without the field parse fine.
+	Layer string `json:"layer,omitempty"`
 	// Oracle names a NON-LOCAL counterfactual oracle that produced this label
 	// row's judgment (e.g. "nim" for shadow-label --oracle nim). Empty = the
 	// local escalation tier (the default), so historic rows parse unchanged and

@@ -16,14 +16,15 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/delegate"
 )
 
 // countingSeat returns a local runner that answers correctly and counts how many times the
 // SEAT actually ran. Seat time (46-75 s measured) is the entire cost this cache exists to
 // avoid, so "did the seat run" is the only honest assertion about a hit.
-func countingSeat(t *testing.T, runs *int) func(context.Context, core.AgentContract) (core.AgentWireResult, error) {
+func countingSeat(t *testing.T, runs *int) func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
 	t.Helper()
-	return func(_ context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	return func(_ context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		*runs++
 		anchor := anchorsOf(t, c)[0]
 		return core.AgentWireResult{
@@ -114,7 +115,7 @@ func TestAskDoesNotCacheDeferredResults(t *testing.T) {
 	dir, p := askFixture(t)
 	runs := 0
 	good := countingSeat(t, &runs)
-	s := askTestServer(t, func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(ctx context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		if runs == 0 {
 			runs++
 			return core.AgentWireResult{
@@ -125,7 +126,7 @@ func TestAskDoesNotCacheDeferredResults(t *testing.T) {
 				DeferClass:    core.DeferClassAbstention,
 			}, nil
 		}
-		return good(ctx, c)
+		return good(ctx, c, delegate.LocalOptions{})
 	})
 	args := askArgs("what is the queue cap", p, dir)
 
@@ -157,7 +158,7 @@ func TestAskDoesNotCacheDeferredResults(t *testing.T) {
 func TestAskDoesNotCacheRunnerErrors(t *testing.T) {
 	dir, p := askFixture(t)
 	calls := 0
-	s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		calls++
 		return core.AgentWireResult{}, errors.New("endpoint refused")
 	})

@@ -17,6 +17,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
 
@@ -91,7 +92,7 @@ func TestReviewDiffAdvertisedUnconditionally(t *testing.T) {
 // The mechanism IS the product: the seat must receive the task and the diff, and no history.
 func TestReviewDiffShipsTaskAndDiffAndNothingElse(t *testing.T) {
 	var got core.AgentContract
-	s := askTestServer(t, func(_ context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		got = c
 		return seatFindings(), nil
 	})
@@ -128,7 +129,7 @@ func TestReviewDiffWallComesFromTheBoxTimeout(t *testing.T) {
 		cfg.LedgerPath = filepath.Join(home, "ledger.jsonl")
 		cfg.AgentTimeoutSec = tc.box
 		s := New(pipeline.New(cfg, nil, nil, nil))
-		s.localAgent = func(_ context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+		s.localAgent = func(_ context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 			got = c
 			return seatFindings(), nil
 		}
@@ -144,7 +145,7 @@ func TestReviewDiffWallComesFromTheBoxTimeout(t *testing.T) {
 }
 
 func TestReviewDiffPublishesRankedGroundedFindings(t *testing.T) {
-	s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		return seatFindings(
 			"minor | run.go:9 | naming | cosmetic",
 			"severe | nowhere.go:1 | invented file | this file is not in the diff",
@@ -186,7 +187,7 @@ func TestReviewDiffPublishesRankedGroundedFindings(t *testing.T) {
 // "No findings" is the one result a lead might read as reassurance, so it must say in words
 // what it is not.
 func TestReviewDiffEmptyFindingsSaysWhatItIsNot(t *testing.T) {
-	s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		return seatFindings(), nil
 	})
 	res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
@@ -213,7 +214,7 @@ func TestReviewDiffEmptyFindingsSaysWhatItIsNot(t *testing.T) {
 // that differs, so it is what decides.
 func TestReviewDiffDefersOnAnEmptyReviewItDidNotEarn(t *testing.T) {
 	for name, raw := range map[string]string{"empty": "", "whitespace": "  \n ", "too short to be a verdict": "ok"} {
-		s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
+		s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 			return seatRaw(raw), nil
 		})
 		res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
@@ -239,7 +240,7 @@ func TestReviewDiffDefersOnAnEmptyReviewItDidNotEarn(t *testing.T) {
 // the harness discarded them. An invented path is documented as the ordinary way a small seat
 // fails here, so this combination is live rather than theoretical.
 func TestReviewDiffNoteDoesNotContradictTheDropCount(t *testing.T) {
-	s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		return seatFindings(
 			"severe | ghost.go:1 | invented file | not in the diff",
 			"minor | phantom.go:2 | also invented | still not in the diff",
@@ -271,7 +272,7 @@ func TestReviewDiffNoteDoesNotContradictTheDropCount(t *testing.T) {
 // counted — two structurally identical "we found more than we are showing you" situations
 // treated differently.
 func TestReviewDiffHonoursMaxFindingsAndReportsWhatItHid(t *testing.T) {
-	s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		return seatFindings(
 			"severe | run.go:1 | one | why one",
 			"severe | run.go:2 | two | why two",
@@ -300,7 +301,7 @@ func TestReviewDiffHonoursMaxFindingsAndReportsWhatItHid(t *testing.T) {
 // two drop counts, and dedupe must run before the cap so the genuinely distinct finding still
 // gets published rather than being crowded out by copies of the other one.
 func TestReviewDiffPublishesDroppedDuplicateAndDedupesBeforeTheCap(t *testing.T) {
-	s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		return seatFindings(
 			"minor | run.go:9 | naming issue | cosmetic",
 			"minor | run.go:9 | naming issue | cosmetic",
@@ -332,7 +333,7 @@ func TestReviewDiffPublishesDroppedDuplicateAndDedupesBeforeTheCap(t *testing.T)
 }
 
 func TestReviewDiffRequiresExactlyOneDiffSource(t *testing.T) {
-	s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		t.Error("the seat must never be reached on a caller-input refusal")
 		return core.AgentWireResult{}, nil
 	})
@@ -358,7 +359,7 @@ func TestReviewDiffRequiresExactlyOneDiffSource(t *testing.T) {
 // Every failure is a defer, never an MCP error: a caller told "the call failed" discards
 // the work, while a caller told why reviews the diff itself.
 func TestReviewDiffDefersOnASeatFailure(t *testing.T) {
-	s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{}, errors.New("planner unreachable")
 	})
 	res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
@@ -376,7 +377,7 @@ func TestReviewDiffDefersOnASeatFailure(t *testing.T) {
 // A seat that comes back with no structured findings must DEFER, never degrade into an
 // empty findings list — the one shape a caller could misread as "the diff is clean".
 func TestReviewDiffDefersWhenTheSeatReturnedNoStructuredFindings(t *testing.T) {
-	s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Seat: "fake-seat", Output: "I could not read the diff", StopReason: "done"}, nil
 	})
 	res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
@@ -401,7 +402,7 @@ func TestReviewDiffReadsDiffPathUnderReadRootAndRefusesOutsideIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got core.AgentContract
-	s := askTestServer(t, func(_ context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		got = c
 		return seatFindings("severe | run.go:5 | off-by-one | reads past the end"), nil
 	})

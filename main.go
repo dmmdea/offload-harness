@@ -36,6 +36,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/eval"
 	"github.com/dmmdea/offload-harness/internal/exemplars"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/grounding"
 	"github.com/dmmdea/offload-harness/internal/health"
 	"github.com/dmmdea/offload-harness/internal/hostsample"
@@ -277,10 +278,7 @@ Usage:
   local-offload rig --seat <alias> [--since 7d] [--node ID] [--out report.json] [--json]   the seat rigger (ADR 0036 P3a): classify this box's delegation-log failures for a seat onto ONE axis each (published precedence), weights over eligible rows, evidence job ids, the pre-authored remedy per axis — proposes and applies nothing
   local-offload ledger [--since DAYS]    token-savings report
   local-offload doctor                   check endpoint health + config
-  local-offload audit-yaml [--against-render] FILE...
-                                         check live llama-swap config(s) against the operator rules (INV-1/INV-2: no -ngl 0, no empty CUDA_VISIBLE_DEVICES, ttl 300 everywhere, no persistent group, no preload).
-                                         --against-render also re-derives each file from THIS binary's tier seeds and reports MATCH / STALE(keys) / UNSTAMPED / HAND-EDITED.
-                                         Exit 1 on a violation, a STALE config or a HAND-EDITED one; UNSTAMPED prints as a finding and does not fail. Flags come BEFORE the files.
+  local-offload audit-yaml FILE...        check live llama-swap config(s) against the operator rules (INV-1/INV-2: no -ngl 0, no empty CUDA_VISIBLE_DEVICES, ttl 300 everywhere, no persistent group, no preload); exit 1 on any violation
   local-offload report [--out FILE]      READ-ONLY capability report for this machine (tier, serving, media routes) — Markdown, safe to send
   local-offload acceptance [--json]      the gate: EXERCISE every bound capability as this identity (lease writable, interpreters runnable, aliases live). Non-zero when a node must not be handed work.
   local-offload install detect [--json]  classify this machine into a hardware tier (works on every OS)
@@ -1978,7 +1976,9 @@ func runDelegate(args []string) error {
 	contracts := make([]core.AgentContract, 0, len(specs))
 	lints := make([][]string, 0, len(specs))
 	for i, spec := range specs {
-		c, perr := delegate.PrepareContract(spec, *readRoot)
+		// The BOX's cap (ADR 0039): a composite box admits a contract sized
+		// for its long seats; a plain box keeps the 256 KiB transport cap.
+		c, perr := delegate.PrepareContractWithCap(spec, *readRoot, cfg.AgentContextCapBytes())
 		if perr != nil {
 			return fmt.Errorf("subtask %d: %w", i, perr)
 		}
@@ -2104,9 +2104,13 @@ func nvidiaSmiMemory() (string, error) {
 // across a reboot or reseat, but the UUID is burned into it).
 // utilization.gpu is included to advertise which device is currently busiest,
 // helping the PAIR operator optimize placement and scheduling.
+//
+// Since 0.116.0 the command itself lives in gpuprobe.NvidiaSmiRunner (the
+// leaf the composite tier's placement guards read through as well): ONE
+// query string, ONE PATH-or-System32 lookup, so the health sampler and the
+// display-card guard can never disagree about what nvidia-smi was asked.
 func nvidiaSmiMemoryDevices() (string, error) {
-	out, err := exec.Command("nvidia-smi", "--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu", "--format=csv,noheader,nounits").Output()
-	return string(out), err
+	return gpuprobe.NvidiaSmiRunner()()
 }
 
 // samplerKind is which VRAM sampler runFleetServe starts for a resolved
@@ -2381,10 +2385,6 @@ func runFleetServe(args []string) error {
 		Snapshot: sampler.Load,
 		Lease:    leaseRead,
 		Store:    storeStatus,
-		// The rendered serving config's provenance (K-02): NEW KEYS on the
-		// existing /fleet/health payload, never a new listener. nil when
-		// serving_config_path is unset, which omits both fields.
-		ServingConfig: servingConfigReporter(cfg.ServingConfigPath),
 		Footprints: func() []fleetnode.FootprintEntry {
 			if st := p.FootprintStore(); st != nil {
 				// Pick up records written by OTHER processes (fleet-measure while
@@ -3838,7 +3838,7 @@ func runResearch(args []string) error {
 	contracts := make([]core.AgentContract, 0, len(specs))
 	lints := make([][]string, 0, len(specs))
 	for i, spec := range specs {
-		c, perr := delegate.PrepareContract(spec, "")
+		c, perr := delegate.PrepareContractWithCap(spec, "", cfg.AgentContextCapBytes())
 		if perr != nil {
 			return fmt.Errorf("source %d: %w", i, perr)
 		}

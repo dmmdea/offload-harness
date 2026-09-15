@@ -60,8 +60,9 @@ This project follows [SemVer](https://semver.org/). **Four sources name the vers
 bumped together, in the same commit:**
 
 1. the `VERSION` file
-2. the `version` const in `main.go` (advertised in the MCP handshake — a stale value misreports the
-   server to clients)
+2. the `Version` const in `internal/buildinfo/buildinfo.go` (advertised in the MCP handshake — a
+   stale value misreports the server to clients). `main.go` aliases it as `version`; the fleet and
+   pipeline stampers read `buildinfo.Version` directly, so that file is the one to edit.
 3. the top `## [x.y.z]` entry in `CHANGELOG.md`
 4. the `version` field in `.printing-press.json` (the MCP manifest — it also declares the tool list,
    which a drift test checks against what the code actually registers)

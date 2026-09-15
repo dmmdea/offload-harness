@@ -29,6 +29,9 @@ where the code lives.
   detection, seeding, the on-demand sidecar, tool ownership
 - [systems/cache-server.md](systems/cache-server.md) — the optional second-device KV tier for a vLLM seat:
   the `kv_cache_server` block, what it measured, the layout constraint, and the seat templates.
+- [systems/composite-tier.md](systems/composite-tier.md) — a box that is several hardware tiers at
+  once: the device layers, the per-task placement table, the display-card guards, and what every
+  result records about where it ran
 - [systems/setup-installer.md](systems/setup-installer.md) — hardware detection, profiles, serving
   templates, the install runbook
 - [systems/printed-clis.md](systems/printed-clis.md) — the `tools/` printed CLIs: separate Go

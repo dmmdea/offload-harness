@@ -277,6 +277,34 @@ type Config struct {
 	// still an opt-in rather than a default because a node that opens it is
 	// spending its own disk on whatever a 4B decides to write.
 	AgentAllowWrite bool `json:"agent_allow_write,omitempty"`
+	// TierProfile (0.116.0, ADR 0039) is the tier this box is INSTALLED as
+	// (installed.json's profile, e.g. "blackwell-3x16"), seeded by tierseed so
+	// status, health and every placement record carry the identity from CONFIG
+	// rather than re-reading the install. "" = not recorded (a pre-0.116.0 box,
+	// or one seeded from a plain tier); nothing keys on it alone.
+	TierProfile string `json:"tier_profile,omitempty"`
+	// Tiers is every tier this box is a COMPLETE instance of: the installed one
+	// plus the tiers it composes (the Qube is a full blackwell-16 and a full
+	// blackwell-2x16 as well as blackwell-3x16). Advertised in health and status
+	// so the fleet and the matrix reason about three capacity rows, not one.
+	// Must include tier_profile. nil = one tier, byte-identical to before.
+	Tiers []string `json:"tiers,omitempty"`
+	// Layers are the device layers a composite box places work on (see
+	// layers.go). Seeded from the tier table's `layers`; a box that seeds none
+	// has ONE implicit layer and every result, health, status and ledger surface
+	// is byte-identical to the pre-layer build — Composite() is the gate.
+	Layers []LayerSpec `json:"layers,omitempty"`
+	// OperatorPresence is how the presence guard decides whether the display
+	// card may take a load: "present" (never), "away" (always, the operator
+	// says so), "auto" (console session locked ⇒ away; else last input idle
+	// ≥ operator_idle_sec and the shell not busy/fullscreen ⇒ away). Defaults
+	// to present — the display card fails closed until the operator has read
+	// the probe's readings in offload_status and set auto or away.
+	OperatorPresence string `json:"operator_presence,omitempty"`
+	// OperatorIdleSec is the last-input idle threshold behind presence mode
+	// "auto". 0 = 900 (15 min): long enough that a coffee break does not admit
+	// a 10 GB load onto the desktop's card.
+	OperatorIdleSec int `json:"operator_idle_sec,omitempty"`
 	// AgentLeaseWaitSec bounds how long a LOCAL agent placement (agent_delegate /
 	// delegate, route auto or spread) waits for a foreign TEXT-class GPU lease to
 	// clear before deferring. `gpu reserve --class text` (a benchmark, eval or
@@ -1098,23 +1126,6 @@ type Config struct {
 	// FleetStorePruneEveryJobs is how many completed jobs pass between store
 	// scans; 0 = 8 (one spread).
 	FleetStorePruneEveryJobs int `json:"fleet_store_prune_every_jobs,omitempty"`
-	// ServingConfigPath is the rendered llama-swap config this node actually
-	// serves (K-02). It is a PATH and not a derived default because no default
-	// is right: every node in this fleet keeps it somewhere else (a top-level
-	// llama-swap directory on one Windows box, the install-root stack directory
-	// on another, a service etc/ directory on the Linux node), and a guess that
-	// landed on the wrong file would publish some other config's provenance as
-	// this node's.
-	//
-	// Set, /fleet/health publishes serving_config_spec_sha256 and
-	// serving_config_state so a fleet-wide staleness check is one poll instead of
-	// three ssh sessions. Empty, both fields are OMITTED -- a reader can then tell
-	// "this node does not report" from "this node reports nothing wrong", which a
-	// published empty string could not.
-	//
-	// The node only READS it. Nothing in the harness rewrites a live serving
-	// config; re-rendering is `install render`, run by a human.
-	ServingConfigPath string `json:"serving_config_path,omitempty"`
 	// FleetQueueHost — Option B, ADR 0030, DARK by default: when true THIS
 	// node's fleet server also hosts the consolidated pull queue (durable
 	// bbolt store at <state-root>/fleet-queue.db + the /fleet/queue/* routes).
@@ -1487,7 +1498,24 @@ func Default() Config {
 // A leading "~/" in any path-typed field is expanded to the user home dir
 // (LO-4: config.example.json ships "~/.local-offload/..." paths that were
 // previously taken literally, silently creating a "~" directory in the cwd).
+//
+// A config returned WITH an error never carries the composite keys (ADR 0039):
+// LoadWithSource hands the value to every subcommand whatever the error, so the
+// layers are stripped here, in the wrapper, for the same reason the GPU gate is
+// armed in one — no exit path (decode, any validator, the fleet_queue_holder
+// check) can hand a placeable layer to a caller that proceeds on the value.
 func Load(path string) (Config, error) {
+	c, err := loadArmed(path)
+	if err != nil {
+		stripComposite(&c)
+	}
+	return c, err
+}
+
+// loadArmed is Load's body: load, then arm the process-wide GPU load gate on
+// every exit. Split out so Load can strip the composite keys from an errored
+// value without a call before each return.
+func loadArmed(path string) (Config, error) {
 	c, err := load(path)
 	// Arm the model-affinity LOAD gate here and nowhere else, for the same reason
 	// netguard.SetTailnetSuffix below is installed from inside a load: the GPU lease
@@ -1574,7 +1602,36 @@ func load(path string) (Config, error) {
 	if err := ValidateKVCacheServers(c.KVCacheServers); err != nil {
 		return c, err
 	}
+	// Layers are validated here, in the one door every entry point funnels
+	// through, so a seeded or hand-edited layer that would misplace work fails
+	// at load by name — never at the first contract placed onto it. Load strips
+	// the five composite keys from the value it returns with this error:
+	// LoadWithSource callers proceed on the value, not the error.
+	//
+	// The KEYS are checked first, against the raw bytes: warnUnknownKeys above
+	// sees only the top level, and json.Unmarshal drops a misspelt seat key
+	// (host_ram_gb) to a 0 that ValidateLayers cannot tell from "never
+	// measured" — on a guarded seat that 0 is a fail-open guard. Unlike a
+	// top-level typo this REFUSES rather than warns, for the same reason
+	// ValidateLayers does: a layer is placement, not a preference.
+	if err := validateRawLayerKeys(b); err != nil {
+		return c, err
+	}
+	if err := c.ValidateLayers(); err != nil {
+		return c, err
+	}
 	return c, nil
+}
+
+// validateRawLayerKeys lifts the `layers` block out of the config file's bytes
+// and holds it to ValidateLayerKeys. A file without the key is a plain box and
+// is untouched; a file that is not an object was already refused by the decode.
+func validateRawLayerKeys(b []byte) error {
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(b, &raw) != nil {
+		return nil
+	}
+	return ValidateLayerKeys(raw["layers"])
 }
 
 // validateTailnetEndpoints checks every value of a model→base-URL map (the
@@ -1810,7 +1867,6 @@ func pathFields(c *Config) []*string {
 		&c.ConfHeadThresholdsPath, &c.ExemplarsDir,
 		&c.ShadowQueuePath, &c.AgentTrajectoryQueuePath, &c.AgentTrajectoryLabelsPath,
 		&c.KNNIndexPath, &c.EmbedMemoPath,
-		&c.ServingConfigPath,
 	}
 }
 

@@ -74,6 +74,14 @@ remotes, then the local seat; every placement is handed only what is left of the
 `timeout_sec`. When no node takes it the subtask FAILS with `placement refused: …` naming each node
 and what it said — never a manufactured defer, because no seat ever saw the contract.
 
+On a COMPOSITE node (ADR 0039) the dispatched contract also carries `layer`: the layer the
+delegator chose from the rows that node advertised in health. The node does NOT take it on
+trust — it re-runs the same placement table for that layer with its own live readers before it
+runs, because the display-card guards can only be read where the card is, and a refusal comes
+back as a defer whose `placed.guard` names which guard said no. The job feed names the seat that
+layer resolves to rather than the planner default, so an operator watching `/fleet/jobs` during
+a long-context run sees the seat that actually holds the cards.
+
 > After terminal-state TTL eviction, a re-dispatched id looks new and **will re-render**. Documented
 > and accepted.
 

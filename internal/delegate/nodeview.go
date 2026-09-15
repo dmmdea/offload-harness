@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/netguard"
+	placetable "github.com/dmmdea/offload-harness/internal/placement"
 )
 
 // NodeView is one node's placement-relevant state, built from /fleet/health
@@ -99,7 +100,15 @@ type NodeView struct {
 	// `vision_model`, 0.116.0) — informational, published beside the result so
 	// a caller can see WHICH model judged its image without opening the node.
 	VisionModel string
-	Local       bool
+	// Layers is a composite node's advertised device layers (health `layers`,
+	// ADR 0039): the spec of every layer and seat, live occupancy, and the
+	// node's OWN admissibility verdict per layer. The delegator rebuilds them
+	// with placetable.FromRows and runs the SAME placement table over them
+	// (remoteDecision) — council R5: one placement rule, no second fit
+	// heuristic across layers. nil on a plain node, which keeps today's
+	// single-lane gate (AgentCtxTokens) exactly.
+	Layers []placetable.LayerRow
+	Local  bool
 }
 
 // VisionTask is the fleet task_type of the vision lane (0.116.0): a node
@@ -200,6 +209,9 @@ type healthWire struct {
 	// decoded (the vision lane is found in it), and the vision seat name.
 	SupportedTaskTypes []string `json:"supported_task_types"`
 	VisionModel        string   `json:"vision_model"`
+	// Additive (0.116.0, ADR 0039). nil on a plain or pre-0.116 node; the ONE
+	// row shape fleetnode publishes and offload_status echoes.
+	Layers []placetable.LayerRow `json:"layers"`
 }
 
 // FetchNodeView reads one node's /fleet/health into a NodeView (Local=false —
@@ -258,6 +270,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		LeaseBusy:         w.Lease != nil && w.Lease.Held && w.Lease.Busy,
 		Tasks:             w.SupportedTaskTypes,
 		VisionModel:       w.VisionModel,
+		Layers:            w.Layers,
 		Local:             false,
 	}
 	if w.Saturation != nil {

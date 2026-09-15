@@ -24,9 +24,10 @@ import (
 )
 
 // contextPathMaxBytes caps ONE inlined file at 128 KiB. The contract's total
-// context cap (core.AgentContextMaxBytes, 256 KiB) still applies post-inline
-// via Validate — this per-file bound exists so a single oversized file gets a
-// rejection NAMING the file instead of a total-cap error naming nothing.
+// context cap (the box's — core.AgentContextMaxBytes, 256 KiB, on a plain box;
+// config.AgentContextCapBytes on a composite one) still applies post-inline
+// via ValidateWithCap — this per-file bound exists so a single oversized file
+// gets a rejection NAMING the file instead of a total-cap error naming nothing.
 const contextPathMaxBytes = 128 << 10
 
 // SubtaskSpec is one surface-level subtask: the wire contract's own fields
@@ -44,8 +45,21 @@ type SubtaskSpec struct {
 // MaxSteps/TimeoutSec ceilings DecodeAgentContract applies on the wire (so a
 // locally-run contract obeys the same rules as a dispatched one), inlines
 // context_paths under readRoot confinement, then runs the full Validate —
-// fail before the network, exactly like the wire decoder's posture.
+// fail before the network, exactly like the wire decoder's posture. It
+// validates at the plain transport cap (core.AgentContextMaxBytes); a surface
+// on a composite box passes its own cap through PrepareContractWithCap.
 func PrepareContract(spec SubtaskSpec, readRoot string) (core.AgentContract, error) {
+	return PrepareContractWithCap(spec, readRoot, core.AgentContextMaxBytes)
+}
+
+// PrepareContractWithCap is PrepareContract validating the inline context at
+// capBytes — config.AgentContextCapBytes() for the box the surface runs on
+// (ADR 0039): 256 KiB on a plain box, the largest layer window × 3 on a
+// composite one. Without it a contract sized for the long seats is refused at
+// the door before placement can ever choose them, and both long seats are dead
+// code. capBytes ≤ 0 reads as the plain cap (ValidateWithCap's rule): an unset
+// cap never admits an unbounded context.
+func PrepareContractWithCap(spec SubtaskSpec, readRoot string, capBytes int) (core.AgentContract, error) {
 	c := spec.AgentContract
 	c.SchemaVersion = core.AgentWireSchemaVersion
 	c.Depth = 0
@@ -70,7 +84,7 @@ func PrepareContract(spec SubtaskSpec, readRoot string) (core.AgentContract, err
 		c.Context = append(c.Context, docs...)
 	}
 
-	if err := c.Validate(); err != nil {
+	if err := c.ValidateWithCap(capBytes); err != nil {
 		return core.AgentContract{}, err
 	}
 	return c, nil

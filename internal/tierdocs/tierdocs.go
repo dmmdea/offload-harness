@@ -19,13 +19,15 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/mediaseat"
 	"github.com/dmmdea/offload-harness/internal/vllmseat"
 )
 
 // Profile mirrors the fields setup/templates/profiles.json defines. Unknown keys
-// are preserved in Extra so a new field surfaces in the docs as soon as it is
-// added, instead of silently going undocumented.
+// A field added to the tier table surfaces here only once it is added to this
+// struct and rendered below — `Extra json.RawMessage` used to claim otherwise
+// and was never populated or read (removed 0.120.0).
 type Profile struct {
 	CtxSize        int            `json:"ctx_size"`
 	LongCtxSize    int            `json:"long_ctx_size"`
@@ -50,7 +52,11 @@ type Profile struct {
 	// the seed would understate what the tier delivers.
 	MediaSeats []mediaseat.Seat `json:"media_seats"`
 	VLLMSeat   *vllmseat.Spec   `json:"vllm_seat"`
-	Extra      json.RawMessage  `json:"-"`
+	// Composes and Layers are the composite declaration (ADR 0039): the tiers
+	// this one is a COMPLETE instance of, and the device layers it routes work
+	// to. Absent on every ordinary tier, whose page is unchanged.
+	Composes []string           `json:"composes"`
+	Layers   []config.LayerSpec `json:"layers"`
 }
 
 type doc struct {
@@ -233,6 +239,8 @@ func renderTier(name string, p Profile, reports []string) string {
 	if p.DualResident {
 		b.WriteString("| dual_resident | `true` | two models stay resident; no shared exclusive swap group |\n")
 	}
+
+	b.WriteString(composesSection(p))
 
 	// The seed is PARTITIONED before anything renders from it: only the media
 	// subset may appear under the Media heading or count toward "this tier ships
@@ -487,4 +495,93 @@ func agentSeatSection(p Profile) string {
 		fmt.Fprintf(&b, "\n> %s\n", s.Measured)
 	}
 	return b.String()
+}
+
+// composesSection renders the composite declaration: which tiers this box is a
+// complete instance of, and the device layers work is routed to. It exists
+// because a reader of the page otherwise sees ONE tier and a note claiming the
+// box is three — the table is where that claim has to be checkable.
+func composesSection(p Profile) string {
+	if len(p.Composes) == 0 && len(p.Layers) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n## Composes\n\n")
+	if len(p.Composes) > 0 {
+		b.WriteString("This box is a COMPLETE instance of each of these tiers at once (ADR 0039) — it does not\n" +
+			"merely resemble them, and the fleet reads one capacity row per layer rather than one per box:\n\n")
+		for _, id := range p.Composes {
+			fmt.Fprintf(&b, "- [`%s`](%s.md)\n", id, id)
+		}
+		b.WriteString("\n")
+	}
+	if len(p.Layers) == 0 {
+		return b.String()
+	}
+	b.WriteString("Placement decides per task which LAYER and seat serve it, and records that decision on\n" +
+		"every result (`placed`). A layer marked dormant is declared but never routed to until the\n" +
+		"operator enables it; an opt-in layer is entered only on an explicit ask, under its guards.\n\n" +
+		"| layer | tier | devices | seats | guards | state |\n|---|---|---|---|---|---|\n")
+	for _, l := range p.Layers {
+		var seats []string
+		for _, s := range l.Seats {
+			switch {
+			case s.Model != "":
+				seats = append(seats, fmt.Sprintf("%s → `%s` (device %s%s)", s.Role, s.Model, dash(s.Device), window(s.CtxTokens)))
+			case len(s.ModelMap) > 0:
+				var routes []string
+				for _, route := range sortedKeys(s.ModelMap) {
+					routes = append(routes, fmt.Sprintf("%s → `%s`", route, s.ModelMap[route]))
+				}
+				seats = append(seats, fmt.Sprintf("%s (device %s): %s", s.Role, dash(s.Device), strings.Join(routes, ", ")))
+			case s.Role == "agent":
+				// A bare agent seat is the tier's vLLM seat, filled at seed time
+				// so the seat's numbers live in exactly one place.
+				where := ""
+				if s.Device != "" {
+					where = fmt.Sprintf(" (device %s)", s.Device)
+				}
+				seats = append(seats, fmt.Sprintf("%s → the tier's vLLM seat%s", s.Role, where))
+			default:
+				// The cascade's router rung names no model of its own: it routes to
+				// whichever rung the call's route key resolves to on this layer.
+				seats = append(seats, fmt.Sprintf("%s (device %s) — the cascade's own rungs", s.Role, dash(s.Device)))
+			}
+		}
+		state := "active"
+		switch {
+		case l.Dormant:
+			state = "**dormant** (operator enables)"
+		case l.OptIn:
+			state = "opt-in"
+		}
+		guards := dash(strings.Join(l.Guards, ", "))
+		if l.DisplayFloorGiB > 0 {
+			guards += fmt.Sprintf(" (display device %s, floor %.0f GiB)", dash(l.DisplayDevice), l.DisplayFloorGiB)
+		}
+		fmt.Fprintf(&b, "| `%s` | `%s` | %s | %s | %s | %s |\n",
+			l.Name, dash(l.Tier), "`"+strings.Join(l.Devices, "` / `")+"`", strings.Join(seats, "<br>"), guards, state)
+	}
+	return b.String()
+}
+
+// window renders a seat's declared context window for the layer table, and
+// nothing at all for a seat that declares none (a router rung, a media seat) —
+// a "0" there would read as a measured zero.
+func window(ctx int) string {
+	if ctx <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(", window %d", ctx)
+}
+
+// sortedKeys keeps a model_map's routes in a stable order so the generated page
+// is byte-identical run to run (Go map iteration is not).
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

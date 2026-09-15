@@ -183,10 +183,26 @@ if ($r.verdict -and [int]$r.verdict.agent_ctx_tokens -eq 131072) { Ok 'blackwell
 Write-Host "== blackwell-3x16 - THREE homogeneous sm_120 cards (triple-blackwell template, cfg17) =="
 $r = Invoke-Render -Backend 'cuda' -ProfileId 'blackwell-3x16' -RamTier 'high' -BigRam $true
 if ($r.verdict -and $r.verdict.render_backend -eq 'triple-blackwell') { Ok 'b3x16 renders the triple-blackwell template' } else { Bad "b3x16 render_backend (got: $($r.verdict.render_backend))" }
-# THE placement law, asserted mechanically: device 1 is the DISPLAY card and no seat
-# may be pinned to it. A silent flip here starves the operator's desktop - measured
-# 2026-09-04, Windows fell to a 720p-class mode and the box needed a reboot.
-if ($r.yaml -notmatch 'CUDA_VISIBLE_DEVICES=1\b') { Ok 'b3x16 pins NOTHING to the display card (device 1)' } else { Bad 'b3x16 pinned a seat to device 1 - that is the display card' }
+# THE placement law, asserted mechanically: device 1 is the DISPLAY card. A silent
+# flip here starves the operator's desktop - measured 2026-09-04, Windows fell to a
+# 720p-class mode and the box needed a reboot. The ONLY seats allowed on it are the
+# display layer's dormant twins (ADR 0039): they exist so a small mechanical call has
+# somewhere to run while the pair holds its cards, placement never routes to them
+# until the operator sets dormant:false, and every placement onto them is fenced by
+# the display_floor and presence guards.
+$dev1 = @()
+$curSeat = ''
+foreach ($line in ($r.yaml -split "`r?`n")) {
+  if ($line -match '^  ([A-Za-z0-9._-]+):\s*$') { $curSeat = $Matches[1]; continue }
+  if ($line -match 'CUDA_VISIBLE_DEVICES=1\b') { $dev1 += $curSeat }
+}
+$stray = @($dev1 | Where-Object { $_ -notmatch '-display$' })
+if ($stray.Count -eq 0) { Ok 'b3x16 pins nothing to the display card except the display-layer twins' } else { Bad "b3x16 pinned $($stray -join ', ') to device 1 - that is the display card" }
+if ($dev1.Count -eq 2) { Ok 'b3x16 renders both display-layer twins on the display card' } else { Bad "b3x16 seats on device 1: $($dev1.Count), want exactly the 2 display twins" }
+# A two-card pin must survive YAML: `env: [CUDA_VISIBLE_DEVICES=0,2]` parses as TWO
+# entries and serves ONE card, which is how the 27B and its 262k twin rendered until
+# 0.120.0. The quoted form is the fix; this is the assertion that holds it.
+if ($r.yaml -match 'env: \["CUDA_VISIBLE_DEVICES=0,2"') { Ok 'b3x16 two-card pins are quoted, so YAML keeps them whole' } else { Bad 'b3x16 two-card pin is an unquoted flow entry - YAML tears it and the seat gets ONE card' }
 if ($r.yaml -match 'CUDA_VISIBLE_DEVICES=0' -and $r.yaml -match 'CUDA_VISIBLE_DEVICES=2') { Ok 'b3x16 uses the 5060 Ti pair (devices 0 and 2)' } else { Bad 'b3x16 does not use both 5060 Ti cards' }
 # Per-seat placement, at the RENDER layer (profiles.json is gated in Go by
 # TestTripleBlackwellNeverSchedulesOntoTheDisplayCard). The tier shipped 0.113.32 with
@@ -411,5 +427,84 @@ if ($merged8Obj.agent_model -eq 'qwen3.5-9b-agent') { Ok 'ampere-8 fresh seed-me
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 
 Write-Host ""
+
+Write-Host "== composite tier (ADR 0039): fresh seed-merge writes tier_profile/tiers/layers in PARITY with internal/tierseed =="
+# The runtime reads the composite identity from CONFIG — placement, the health
+# rows, offload_status, the ledger's layer column — and Step 8's raw-merge path
+# bypasses tierseed, so this asserts the mirror actually writes them. Without it
+# a fresh Windows install of the composite tier renders a layered llama-swap
+# config and then declares no layers at all.
+$row3 = $seedProfiles.'blackwell-3x16'
+$merged3 = Merge-ConfigSeed -ConfigText $seedTpl -Seed $row3.config_seed
+$comp = Get-CompositeSeed -ProfileRow $row3 -ProfileId 'blackwell-3x16' -VLLMSeatActive $false
+if ($comp) { $merged3 = Merge-ConfigSeed -ConfigText $merged3 -Seed $comp }
+$obj3 = $merged3 | ConvertFrom-Json
+if ($obj3.tier_profile -eq 'blackwell-3x16') { Ok 'b3x16 seed writes tier_profile' } else { Bad "b3x16 tier_profile (got: '$($obj3.tier_profile)')" }
+if (@($obj3.tiers).Count -eq 3 -and @($obj3.tiers)[0] -eq 'blackwell-16' -and @($obj3.tiers)[2] -eq 'blackwell-3x16') {
+  Ok 'b3x16 seed writes tiers = composes + itself' } else { Bad "b3x16 tiers (got: $(@($obj3.tiers) -join ','))" }
+if (@($obj3.layers).Count -eq 3) { Ok 'b3x16 seed writes all three layers' } else { Bad "b3x16 layers count (got: $(@($obj3.layers).Count))" }
+$pairAgent = @($obj3.layers | Where-Object { $_.name -eq 'pair' }).seats | Where-Object { $_.role -eq 'agent' }
+if ($pairAgent -and [string]$pairAgent.model -eq [string]$row3.vllm_seat.fallback_agent_model) {
+  Ok "b3x16 seed fills the bare pair/agent seat from the tier's fallback ($($pairAgent.model)) - the seat the render actually serves" }
+  else { Bad "b3x16 pair/agent model (got: '$($pairAgent.model)', want '$($row3.vllm_seat.fallback_agent_model)')" }
+if ([string]$pairAgent.device -eq [string]$row3.vllm_seat.device) { Ok 'b3x16 seed fills the pair/agent device pin from vllm_seat' } else { Bad "b3x16 pair/agent device (got: '$($pairAgent.device)')" }
+# A plain tier seeds NONE of it: every non-composite box must stay byte-identical.
+$row2 = $seedProfiles.'blackwell-2x16'
+$merged2 = Merge-ConfigSeed -ConfigText $seedTpl -Seed $row2.config_seed
+$comp2 = Get-CompositeSeed -ProfileRow $row2 -ProfileId 'blackwell-2x16' -VLLMSeatActive $false
+if ($comp2) { $merged2 = Merge-ConfigSeed -ConfigText $merged2 -Seed $comp2 }
+$obj2 = $merged2 | ConvertFrom-Json
+$plainKeys = @('tier_profile','tiers','layers') | Where-Object { $obj2.PSObject.Properties[$_] }
+if ($plainKeys.Count -eq 0) { Ok 'b2x16 (plain tier) seeds no composite keys' } else { Bad "b2x16 seeded composite keys: $($plainKeys -join ', ')" }
+
+# PARITY, measured rather than asserted by eye: the same three keys out of the Go
+# resolver (`install seed`, which every non-Windows install path uses) must match
+# what this script writes. A mirror that drifts is worse than no mirror — it puts
+# a DIFFERENT box in config.json depending on which installer ran.
+# The renderer built at the top of this script lives under $work, which the
+# -RenderOnly runs above treat as their OFFLOAD_HOME and may clear; rebuild if so.
+$seedExe = $env:OFFLOAD_HARNESS_EXE
+if (-not (Test-Path $seedExe)) {
+  $seedExe = Join-Path ([System.IO.Path]::GetTempPath()) ("offload-seed-parity-" + [guid]::NewGuid().ToString("N").Substring(0,8) + ".exe")
+  Push-Location (Split-Path -Parent $here)
+  try {
+    $bo = & go build -o $seedExe . 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "cannot build the seed resolver under test: $($bo -join ' ')" }
+  } finally { Pop-Location }
+}
+# A native command writing to stderr becomes a TERMINATING error under
+# $ErrorActionPreference = 'Stop' (this file sets it, and install.ps1 documents
+# the same trap): `install seed` prints a NOTE when the box has no vLLM venv,
+# which is the NORMAL case on a CI runner. Capture on Continue, judge by the
+# exit code.
+$prevSeedEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try { $goSeedRaw = & $seedExe install seed --profile blackwell-3x16 --home $work --os windows --ram-tier high 2>&1 } finally { $ErrorActionPreference = $prevSeedEap }
+if ($LASTEXITCODE -ne 0) { Bad "install seed failed ($LASTEXITCODE): $($goSeedRaw -join ' ')" }
+# Keep only the JSON body: the NOTE lines are not part of the seed.
+$goSeedRaw = @($goSeedRaw | Where-Object { $_ -is [string] -or $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { [string]$_ })
+$jsonStart = ($goSeedRaw | Select-String -Pattern '^\s*\{' | Select-Object -First 1)
+if ($jsonStart) { $goSeedRaw = $goSeedRaw[($jsonStart.LineNumber - 1)..($goSeedRaw.Count - 1)] }
+$goSeed = ($goSeedRaw -join "`n") | ConvertFrom-Json
+if ($goSeed.tier_profile -eq $obj3.tier_profile) { Ok 'tier_profile matches internal/tierseed' } else { Bad "tier_profile parity (go: '$($goSeed.tier_profile)', ps: '$($obj3.tier_profile)')" }
+if ((@($goSeed.tiers) -join ',') -eq (@($obj3.tiers) -join ',')) { Ok 'tiers match internal/tierseed' } else { Bad "tiers parity (go: $(@($goSeed.tiers) -join ','), ps: $(@($obj3.tiers) -join ','))" }
+# Compared SEMANTICALLY, not byte for byte: both sides emit JSON a Go decoder
+# reads identically, and they legitimately differ in key order and in how a
+# whole float prints (13 vs 13.0). What must match is what placement reads.
+function ConvertTo-CanonicalLayers {
+  param($Layers)
+  $rows = foreach ($l in @($Layers)) {
+    $seats = foreach ($s in @($l.seats)) {
+      "{0}|{1}|{2}|{3}|{4}|{5}" -f $s.role, [string]$s.model, [string]$s.device, [int]$s.ctx_tokens, [int]$s.max_inflight, (@(@($s.model_map.PSObject.Properties) | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ",")
+    }
+    "{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}" -f $l.name, [string]$l.tier, (@($l.devices) -join ","), [bool]$l.opt_in, [bool]$l.dormant, [string]$l.display_device, (@($l.guards) -join ","), ($seats -join ";")
+  }
+  return ($rows -join "`n")
+}
+$goCanon = ConvertTo-CanonicalLayers $goSeed.layers
+$psCanon = ConvertTo-CanonicalLayers $obj3.layers
+if ($goCanon -eq $psCanon) { Ok 'layers match internal/tierseed (every field placement reads)' } else { Bad "layers parity`n  go:`n$goCanon`n  ps:`n$psCanon" }
+
+
 if ($fail -eq 0) { Write-Host 'ALL PASS' -ForegroundColor Green; exit 0 }
 Write-Host "FAILURES: $fail" -ForegroundColor Red; exit 1

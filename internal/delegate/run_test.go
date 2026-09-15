@@ -36,6 +36,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/ledger"
+	placetable "github.com/dmmdea/offload-harness/internal/placement"
 )
 
 // hashOwnExecutable independently hashes the running test binary — the
@@ -126,6 +127,13 @@ type fakeNode struct {
 	maxConcurrentJobs int
 	maxQueueDepth     int
 
+	// layers, when non-nil, is published as health's `layers` rows (a composite
+	// node, ADR 0039); decodeCap is the cap the node decodes a dispatched
+	// contract at (0 = the plain transport cap) — a composite node admits
+	// contracts sized for its long seats.
+	layers    []placetable.LayerRow
+	decodeCap int
+
 	dispatches atomic.Int64
 	polls      atomic.Int64
 	lastJobID  atomic.Value // string
@@ -181,6 +189,9 @@ func (f *fakeNode) server() *httptest.Server {
 		}
 		if f.seatBudget != nil {
 			health["seat_budget"] = f.seatBudget
+		}
+		if f.layers != nil {
+			health["layers"] = f.layers
 		}
 		_ = json.NewEncoder(w).Encode(health)
 	})
@@ -240,7 +251,11 @@ func (f *fakeNode) server() *httptest.Server {
 		}
 		// The payload must be a real v1 contract — decode it exactly as the
 		// node would (schema_version check included).
-		contract, err := core.DecodeAgentContract(strings.NewReader(string(env.Payload)))
+		decodeCap := f.decodeCap
+		if decodeCap <= 0 {
+			decodeCap = core.AgentContextMaxBytes
+		}
+		contract, err := core.DecodeAgentContractWithCap(strings.NewReader(string(env.Payload)), decodeCap)
 		if err != nil {
 			f.t.Errorf("payload is not a dispatchable contract: %v", err)
 		}
@@ -352,7 +367,7 @@ func remoteContract() core.AgentContract {
 
 // neverLocal is a LocalRunner that fails the test if the engine falls local.
 func neverLocal(t *testing.T) LocalRunner {
-	return func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	return func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		t.Error("local runner called; this test expects a remote placement")
 		return core.AgentWireResult{}, nil
 	}
@@ -758,7 +773,7 @@ func TestRunAutoLocalFallbackReportsADeadFleet(t *testing.T) {
 
 	cfg := testCfg(t)
 	cfg.GPULockPath = leaseDir
-	local := func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat",
 			Output: "local qube answer", Structured: json.RawMessage(`{"answer":"local"}`), StopReason: "done"}, nil
 	}
@@ -1149,7 +1164,7 @@ func TestRunAutoBusyFallsLocalWhenNoEligibleRemote(t *testing.T) {
 	cfg.GPULockPath = leaseDir
 
 	localCalls := 0
-	local := func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		localCalls++
 		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat", Output: "local qube answer", Structured: json.RawMessage(`{"answer":"local"}`), StopReason: "done"}, nil
 	}
@@ -1177,7 +1192,7 @@ func TestRunAutoBusyFallsLocalWhenNoEligibleRemote(t *testing.T) {
 // against an answer that was never produced — the ledger row and the corpus
 // then read as a verification failure instead of a defer.
 func TestRunLocalDeferSkipsAcceptance(t *testing.T) {
-	local := func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{
 			SchemaVersion: core.AgentWireSchemaVersion,
 			NodeID:        "this-box", Seat: "local-seat",
@@ -1207,7 +1222,7 @@ func TestRunRouteLocalNeverTouchesTheNetwork(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	local := func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat", Output: "the qube answer", Structured: json.RawMessage(`{"answer":"42"}`), StopReason: "done"}, nil
 	}
 	_, sum, err := Run(t.Context(), testCfg(t), local, []core.AgentContract{remoteContract()}, "local", []string{srv.URL})
@@ -1253,7 +1268,7 @@ func TestRunTelemetryFailureIsLoudOnceAndNeverFailsTheRun(t *testing.T) {
 		AgentModel: "local-seat",
 	}
 
-	local := func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat", Output: "the qube answer", Structured: json.RawMessage(`{"answer":"42"}`), StopReason: "done"}, nil
 	}
 	results, sum, err := Run(t.Context(), cfg, local, []core.AgentContract{remoteContract(), remoteContract()}, "local", nil)
@@ -1296,7 +1311,7 @@ func TestRunTelemetryFailureIsLoudOnceAndNeverFailsTheRun(t *testing.T) {
 // remotes are CONFIG errors — the whole Run refuses, nothing executes.
 func TestRunRejectsBadInputs(t *testing.T) {
 	cfg := testCfg(t)
-	local := func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{}, nil
 	}
 	one := []core.AgentContract{remoteContract()}
@@ -1560,7 +1575,7 @@ func TestRunContractSideClassRequiresAHealthyFleet(t *testing.T) {
 		contract := remoteContract()
 		contract.OutputSchema = nil
 		contract.Acceptance = []string{"contains:qube"} // text-verb only: nothing structured was asked for
-		local := func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+		local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 			return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat",
 				Output: "local qube answer", StopReason: "done"}, nil
 		}
@@ -1792,7 +1807,7 @@ func TestRunTotalLedgerLossIsPublished(t *testing.T) {
 	if err := os.MkdirAll(cfg.LedgerPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	local := func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat",
 			Output: "the qube answer", Structured: json.RawMessage(`{"answer":"42"}`), StopReason: "done"}, nil
 	}

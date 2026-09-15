@@ -21,7 +21,7 @@ import (
 // 0.115.8 node shape — deferred, class abstention (retry-eligible by class),
 // stop_reason "empty".
 func emptyFinalLocal(calls *atomic.Int64) LocalRunner {
-	return func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	return func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		calls.Add(1)
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "local", Seat: "local-seat",
 			Deferred: true, DeferClass: core.DeferClassAbstention, StopReason: "empty", StopNote: "finish stop, empty message",
@@ -110,9 +110,9 @@ func TestRunRetryNeverLandsOnASeatAlreadyRunningAnotherJob(t *testing.T) {
 	live, liveURL := eligibleNode(t, "node-live", "qube from live")
 	var busyNow atomic.Int64
 	live.jobsRunningFn = func() int { return int(busyNow.Load()) }
-	flipThenFail := func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	flipThenFail := func(ctx context.Context, c core.AgentContract, opts LocalOptions) (core.AgentWireResult, error) {
 		busyNow.Store(1) // a sibling job landed on node-live after the fleet probe
-		return failingLocal(&localCalls)(ctx, c)
+		return failingLocal(&localCalls)(ctx, c, opts)
 	}
 	results, sum, err = Run(context.Background(), testCfg(t), flipThenFail, contracts(1), "spread", []string{liveURL})
 	if err != nil {

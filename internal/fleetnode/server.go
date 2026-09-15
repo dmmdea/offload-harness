@@ -31,6 +31,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/fleetqueue"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/hostsample"
+	"github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 	"github.com/dmmdea/offload-harness/internal/storesteward"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
@@ -103,14 +104,6 @@ type Options struct {
 	Lease func() gpulease.Info
 	// Store returns the store steward's last status; nil = no steward.
 	Store func() storesteward.Status
-	// ServingConfig reports the rendered serving config's provenance: its spec
-	// hash and its state (MATCH/STALE/UNSTAMPED/HAND-EDITED). nil, or an empty
-	// state, omits both health fields.
-	//
-	// It is a func and not a path because the re-derive needs the tier table and
-	// the serving templates, which are embedded in the COMMAND (install_render.go)
-	// -- this package serves health, it does not own the seeds.
-	ServingConfig func() (specSHA256, state string)
 }
 
 // Server is the fleet-node HTTP server: three handlers over a Runner + Jobs
@@ -547,24 +540,6 @@ type healthPayload struct {
 	// by hand, and a node several releases behind is debugged against known-fixed
 	// bugs.
 	HarnessVersion string `json:"harness_version,omitempty"`
-	// ServingConfigSpecSHA256 / ServingConfigState are the rendered serving
-	// config's provenance (K-02) -- NEW KEYS on this existing endpoint, not a new
-	// bind and not a new route.
-	//
-	// The spec hash is the config's identity: the sha256 of the closed input set
-	// it was rendered from (tier, render params, template, tier entry, harness
-	// version). The state is this binary's verdict on it -- MATCH, STALE,
-	// UNSTAMPED or HAND-EDITED -- computed by re-rendering from the node's own
-	// embedded seeds. Fleet drift in the SERVING layer used to be found by
-	// hand, one ssh at a time, and was not found at all when the config broke no
-	// operator rule (ampere-16 served a 32768 window for weeks after the tier
-	// table said 131072).
-	//
-	// Both are omitted together when serving_config_path is not configured, or
-	// when the file cannot be read: an absent field means "this node does not
-	// report", which must stay distinguishable from "this node reports MATCH".
-	ServingConfigSpecSHA256 string `json:"serving_config_spec_sha256,omitempty"`
-	ServingConfigState      string `json:"serving_config_state,omitempty"`
 	// Lease is this node's machine-wide GPU lease as gpulease reads it
 	// (0.113.16). Published only when a lease is HELD; absent = the card is
 	// unreserved (or the node predates the field — a delegator treats both as
@@ -639,6 +614,22 @@ type healthPayload struct {
 	// supported_task_types. Additive + omitempty: a node without the lane
 	// emits a byte-identical payload.
 	VisionModel string `json:"vision_model,omitempty"`
+	// Tiers is every hardware tier this node is a COMPLETE instance of
+	// (config `tiers`, ADR 0039): the composite box is a full blackwell-16
+	// and a full blackwell-2x16 as well as the tier it installed as, and a
+	// fleet that reads one row per box cannot see that. Additive, lane-gated
+	// and omitempty: a plain node emits a byte-identical payload.
+	Tiers []string `json:"tiers,omitempty"`
+	// Layers is this node's device layers as the delegator must see them:
+	// the declared spec of every layer and seat, which seats the roster
+	// answers for, and the node's OWN admissibility verdict per layer. The
+	// verdict travels because the display-card guards can only be read where
+	// the card is; the delegator feeds it to the SAME placement table
+	// (placement.FromRows + Decide) and the node re-checks at admission.
+	// Built from cached reads only — the roster the residency refresh already
+	// fetched, the VRAM snapshot the sampler already holds, the host sample —
+	// so publishing it costs no probe and no exec inside the handler.
+	Layers []placement.LayerRow `json:"layers,omitempty"`
 	// ---- Host CPU/RAM (hostsample) ----
 	// Emitted only when opts.Host is set AND its sample is Known. All three
 	// carry omitempty, unlike GpuUtilPct/GpuUtilKnown (always-present):
@@ -707,11 +698,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		MaxQueueDepth:         s.opts.Cfg.FleetQueueLimit(),
 		HarnessVersion:        s.opts.Version,
 	}
-	if s.opts.ServingConfig != nil {
-		if sha, state := s.opts.ServingConfig(); state != "" {
-			payload.ServingConfigSpecSHA256, payload.ServingConfigState = sha, state
-		}
-	}
 	// GPU utilization: advertise the busiest device's utilization when known.
 	// Omitted when no device has published a known utilization — absent ≠ idle.
 	for _, d := range snap.Devices {
@@ -750,6 +736,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		payload.ServedModels = s.servedModels()
 		payload.SeatBudget = s.seatBudget()
 		payload.SeatRate = s.seatRate()
+		if s.opts.Cfg.Composite() {
+			payload.Tiers = s.opts.Cfg.Tiers
+			payload.Layers = s.layerRows(snap)
+		}
 	}
 	if s.visionLane {
 		payload.VisionModel = s.opts.Cfg.VisionModel
@@ -1391,6 +1381,19 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	specModel := env.ModelFamily
 	if env.TaskType == string(core.TaskAgentRun) {
 		specModel = s.agentSeat
+		// A contract dispatched AT A LAYER runs on that layer's seat, so the
+		// feed names it rather than the planner default (ADR 0039). This is
+		// the DECLARED seat: the authoritative decision — guards, window, the
+		// long-seat choice — is made at execution with the live readers
+		// (pipeline.runAgentTask), and a refusal there is published on the
+		// result's placed block. Admission metadata may not wait on a probe,
+		// and a row that says "agent-pool" while the 262k twin holds the
+		// cards is the untruth this build exists to end.
+		if s.opts.Cfg.Composite() {
+			if seat, ok := placement.SeatOnLayer(s.opts.Cfg.Layers, dispatchedLayer(env.Payload)); ok {
+				specModel = seat
+			}
+		}
 	}
 	spec := AcceptSpec{
 		Agent:     env.TaskType == string(core.TaskAgentRun),
@@ -1593,4 +1596,55 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// layerRows renders this node's composite layer rows for health: the declared
+// layers, which of their seats the cached roster answers for, and each layer's
+// own admissibility verdict from the readings the node ALREADY has.
+//
+// Every input is a cached or syscall-cheap read, because health must answer
+// without touching llama-swap or nvidia-smi: the device free-VRAM numbers come
+// from the background sampler's snapshot (the same one the payload's
+// vram_free_gb comes from), host RAM from the background host sampler, and
+// presence from the OS session state. No reader is invented: a missing host
+// sample stays nil, and the guard that needed it refuses — which is the whole
+// point of evaluating the guards HERE, where the cards are, rather than
+// letting a delegator guess.
+//
+// Occupancy is deliberately NOT published: a cached health read knows the
+// roster, not what is loaded, so each seat carries `served` and no `loaded` /
+// `inflight` flag. The delegator's table treats unknown occupancy as neutral,
+// which is the truth, instead of reading a fabricated "cold" as "nothing to
+// evict here".
+func (s *Server) layerRows(snap Snapshot) []placement.LayerRow {
+	cfg := s.opts.Cfg
+	var host *float64
+	if s.opts.Host != nil {
+		if h, ok := s.opts.Host(); ok && h.Known && h.RAMTotalGiB > 0 {
+			free := h.RAMTotalGiB - h.RAMUsedGiB
+			host = &free
+		}
+	}
+	pres := placement.ProbePresence(cfg.PresenceMode(), cfg.OperatorIdle())
+	rows := placement.RowsFromConfig(cfg, placement.LiveFromReadings(snap.Devices, host, &pres))
+	return placement.MarkServed(rows, s.servedModels())
+}
+
+// dispatchedLayer reads just the `layer` field out of an agent contract
+// payload, for admission metadata. It is deliberately tolerant — a payload the
+// decoder will reject a few lines later must not fail here first, and this
+// value only names a job-feed row — so a malformed body yields "" and the feed
+// keeps the planner seat. The contract's own decode (BuildRequest) is what
+// validates the field.
+func dispatchedLayer(payload json.RawMessage) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	var peek struct {
+		Layer string `json:"layer"`
+	}
+	if err := json.Unmarshal(payload, &peek); err != nil {
+		return ""
+	}
+	return peek.Layer
 }

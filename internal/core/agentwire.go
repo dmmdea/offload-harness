@@ -160,7 +160,7 @@ const TenantHeader = "X-Offload-Tenant"
 type AgentContract struct {
 	SchemaVersion int             `json:"schema_version"`          // AgentWireSchemaVersion
 	Goal          string          `json:"goal"`                    // required, self-contained
-	Context       []ContextDoc    `json:"context,omitempty"`       // inline docs, total ≤ AgentContextMaxBytes
+	Context       []ContextDoc    `json:"context,omitempty"`       // inline docs, total ≤ the cap (AgentContextMaxBytes by default; ValidateWithCap for a composite box)
 	OutputSchema  json.RawMessage `json:"output_schema,omitempty"` // JSON Schema for structured output (gbnf subset)
 	Acceptance    []string        `json:"acceptance,omitempty"`    // AcceptanceCheck DSL strings, delegator-evaluated
 	Profile       string          `json:"profile,omitempty"`       // agent profile name; default "research"-class read-only
@@ -194,7 +194,37 @@ type AgentContract struct {
 	// The write set is NEVER applied by the harness. It comes back as a
 	// unified diff (AgentWireResult.Diff) for the caller to review and apply.
 	WriteRoot string `json:"write_root,omitempty"`
+	// ContextClass (ADR 0039, 0.116.0) is the caller's explicit ask for a
+	// long-window seat: "" (the placement table decides from the token
+	// estimate) or ContextClassLong. It is an INPUT to placement, never a seat
+	// name — on a composite box "long" enters the triple layer's 262k seat
+	// under the feasibility check and the display-card guards; on a plain box
+	// it is accepted and ignored, so one contract can go to any node. Closed
+	// vocabulary: an unknown class would silently fall back to the default
+	// layer and the caller would never learn its ask was misspelt.
+	ContextClass string `json:"context_class,omitempty"`
+	// Layer is the layer the DELEGATOR placed this contract on when it chose a
+	// composite remote node (R5: ONE placement rule — the node re-runs the same
+	// Decide for this layer with its OWN live readers, so the display-card
+	// guards are evaluated where the card is). Empty on a local run and on a
+	// dispatch to a single-layer node. Held to the layer-id shape that
+	// config.ValidateLayers enforces because the node uses it as a seat lookup
+	// key, and a name that validates there must always be dispatchable here.
+	Layer string `json:"layer,omitempty"`
 }
+
+// ContextClassLong is the one non-default context_class a contract may carry:
+// "this needs a long window", said explicitly by the caller. Named so the MCP
+// doors' InputSchema, the placement table and ValidateWithCap agree on the
+// literal instead of each spelling it.
+const ContextClassLong = "long"
+
+// layerIDRe is the wire shape of AgentContract.Layer — the same shape
+// config.ValidateLayers holds a layer name to, kept in lock-step by the
+// comment on each side (core cannot import config). Lower-case, ≤ 32 chars, no
+// separators: the receiving node uses it as a lookup key, never as a path, and
+// "../etc" must die at validation on both ends of the wire.
+var layerIDRe = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
 
 // ContextDoc is one inline context document. Name is a future FILENAME on the
 // receiving node (materialized under the job's context dir), which is why
@@ -253,9 +283,9 @@ type AgentWireResult struct {
 	// full re-generations (~690 s) into the 900 s wall on 2026-09-10 and
 	// turned a finished loop into a budget defer with nothing on the wire to
 	// say where the time went.
-	RepackMs       int64  `json:"repack_ms,omitempty"`
-	RepackAttempts int    `json:"repack_attempts,omitempty"`
-	RepackNote     string `json:"repack_note,omitempty"`
+	RepackMs        int64   `json:"repack_ms,omitempty"`
+	RepackAttempts  int     `json:"repack_attempts,omitempty"`
+	RepackNote      string  `json:"repack_note,omitempty"`
 	SeatTokS        float64 `json:"seat_tok_s,omitempty"`
 	WallEstimateSec int     `json:"wall_estimate_sec,omitempty"`
 	MinTurnSec      int     `json:"min_turn_sec,omitempty"`
@@ -373,6 +403,12 @@ type AgentWireResult struct {
 	// result shape, so a starved run's arithmetic is in the corpus rather than
 	// reconstructed from token totals. Omitempty: a pre-0.115.8 node emits none.
 	Calls []AgentCallRecord `json:"calls,omitempty"`
+	// Placed (ADR 0039, 0.116.0) is the placement decision the node made for
+	// this run — layer, seat, device pin and the reason, or the guard that
+	// refused on a defer. nil and omitted on a non-composite node, so a
+	// pre-0.116 node's result and a plain box's result are byte-identical;
+	// a reader treats nil as "one implicit layer", never as "unplaced".
+	Placed *Placed `json:"placed,omitempty"`
 }
 
 // AgentCallRecord is one planner completion as the corpus keeps it (the wire
@@ -393,6 +429,18 @@ type AgentCallRecord struct {
 	Ms int64 `json:"ms,omitempty"`
 }
 
+// ValidateContextClass accepts the closed vocabulary of the placement hint
+// ("" or long). Shared by the contract validator and the MCP front doors so a
+// caller that misspells it is told the same thing on every surface — a hint
+// silently dropped would place a 200k-token contract on the default seat and
+// fail it at the window, far from the typo.
+func ValidateContextClass(s string) error {
+	if s == "" || s == ContextClassLong {
+		return nil
+	}
+	return fmt.Errorf("context_class %q is not one of \"\" or %q", s, ContextClassLong)
+}
+
 // ValidateThinking accepts the closed vocabulary of the planner think-block
 // policy ("" / auto / on / off, case-insensitive). Shared by the contract
 // validator and the config loader so both doors refuse the same strings.
@@ -407,10 +455,24 @@ func ValidateThinking(s string) error {
 // DecodeAgentContract reads one contract from r, tolerating unknown fields
 // (roast delta 4), refusing any schema_version but AgentWireSchemaVersion,
 // clamping MaxSteps/TimeoutSec into their remote ceilings (roast delta 5),
-// then running the full Validate. Errors here are caller mistakes — the fleet
-// server maps them to 400s at ACK time, so a malformed contract dies with a
-// clear reason before any model loads.
+// then running the full Validate at the default transport cap
+// (AgentContextMaxBytes). Errors here are caller mistakes — the fleet server
+// maps them to 400s at ACK time, so a malformed contract dies with a clear
+// reason before any model loads. A node that admits more inline context than
+// the default (a composite box, config.AgentContextCapBytes()) decodes through
+// DecodeAgentContractWithCap — otherwise a contract the delegator admitted at
+// its own cap is refused at the remote's ACK and the remote's long seat is
+// unreachable over the wire.
 func DecodeAgentContract(r io.Reader) (AgentContract, error) {
+	return DecodeAgentContractWithCap(r, AgentContextMaxBytes)
+}
+
+// DecodeAgentContractWithCap is DecodeAgentContract validating through
+// ValidateWithCap(maxBytes) instead of the fixed default: same schema gate,
+// same MaxSteps/TimeoutSec clamps, only the inline-context ceiling is the
+// box's. A non-positive maxBytes falls back to the default cap exactly as
+// ValidateWithCap does — an unset config never admits an unbounded context.
+func DecodeAgentContractWithCap(r io.Reader, maxBytes int) (AgentContract, error) {
 	var c AgentContract
 	if err := json.NewDecoder(r).Decode(&c); err != nil {
 		return AgentContract{}, fmt.Errorf("agent contract: %w", err)
@@ -431,18 +493,35 @@ func DecodeAgentContract(r io.Reader) (AgentContract, error) {
 	} else if c.TimeoutSec > AgentTimeoutSecCap {
 		c.TimeoutSec = AgentTimeoutSecCap
 	}
-	if err := c.Validate(); err != nil {
+	if err := c.ValidateWithCap(maxBytes); err != nil {
 		return AgentContract{}, err
 	}
 	return c, nil
 }
 
 // Validate checks everything about a contract that does not depend on where
-// it runs: required goal, depth sign, context caps and doc-name hygiene,
-// OutputSchema gbnf-compilability, and Acceptance DSL well-formedness. Both
-// sides run it — the delegator before dispatch (fail before the network) and
-// the node inside DecodeAgentContract (never trust the wire).
-func (c AgentContract) Validate() error {
+// it runs: required goal, depth sign, the closed context_class / layer
+// vocabularies, context caps and doc-name hygiene, OutputSchema
+// gbnf-compilability, and Acceptance DSL well-formedness. Both sides run it —
+// the delegator before dispatch (fail before the network) and the node inside
+// DecodeAgentContract (never trust the wire). It validates at the default
+// transport cap (AgentContextMaxBytes); a box that admits more passes its own
+// cap through ValidateWithCap.
+func (c AgentContract) Validate() error { return c.ValidateWithCap(AgentContextMaxBytes) }
+
+// ValidateWithCap is Validate with the inline-context cap chosen by the box
+// (0.116.0). The cap is a parameter because it scales with the hardware: a
+// composite box's config.AgentContextCapBytes() is min(2 MiB, largest layer
+// seat window × 3), and at chars/3 a 256 KiB contract estimates ~87k tokens —
+// a 163,840 window could never overflow, so behind the fixed constant both
+// long seats would be dead code. Every other rule is box-independent and runs
+// identically under both entry points. A non-positive maxBytes falls back to
+// the default cap: tolerance is for vocabulary, never for resource ceilings,
+// so a zero from an unset config must never admit an unbounded context.
+func (c AgentContract) ValidateWithCap(maxBytes int) error {
+	if maxBytes <= 0 {
+		maxBytes = AgentContextMaxBytes
+	}
 	if strings.TrimSpace(c.Goal) == "" {
 		return errors.New("agent contract: goal is required")
 	}
@@ -451,6 +530,12 @@ func (c AgentContract) Validate() error {
 	}
 	if err := ValidateThinking(c.Thinking); err != nil {
 		return fmt.Errorf("agent contract: %w", err)
+	}
+	if err := ValidateContextClass(c.ContextClass); err != nil {
+		return fmt.Errorf("agent contract: %w", err)
+	}
+	if c.Layer != "" && !layerIDRe.MatchString(c.Layer) {
+		return fmt.Errorf("agent contract: layer %q must match %s", c.Layer, layerIDRe)
 	}
 	if err := ValidateAgentSetupActions(c.SetupActions); err != nil {
 		return err
@@ -485,8 +570,8 @@ func (c AgentContract) Validate() error {
 		seen[key] = true
 		total += len(d.Name) + len(d.Text)
 	}
-	if total > AgentContextMaxBytes {
-		return fmt.Errorf("agent contract: context total %d bytes exceeds the %d-byte cap", total, AgentContextMaxBytes)
+	if total > maxBytes {
+		return fmt.Errorf("agent contract: context total %d bytes exceeds the %d-byte cap", total, maxBytes)
 	}
 	if len(c.OutputSchema) > 0 {
 		if err := validateOutputSchema(c.OutputSchema); err != nil {

@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/mediaseat"
 	"github.com/dmmdea/offload-harness/internal/vllmseat"
 )
@@ -75,6 +76,12 @@ type Params struct {
 	Home string
 	GOOS string
 
+	// DisplayLayer is the tier's display layer (ADR 0039) when it declares one:
+	// the dormant rungs pinned to the display card. nil — the common case, and
+	// every tier but the composite one — renders the template's display fences
+	// away entirely, so the output is byte-identical to a build with no display
+	// support (TestDisplayTwinsRenderOnlyForATierThatDeclaresADisplayLayer).
+	DisplayLayer *config.LayerSpec
 	// GPUEnv is added to EVERY model's env list, appended after whatever the template
 	// already declares. It comes from the tier's `gpu_env`, not from a name match: the
 	// Blackwell tiers need CUDA_VISIBLE_DEVICES pinned (a hybrid-graphics trap where
@@ -218,6 +225,17 @@ func Render(tmpl string, p Params) (string, error) {
 	// of the template and are resolved by the one substitution pass below.
 	out, seatFrag, err := insertSeats(out, p)
 	if err != nil {
+		return "", err
+	}
+	// The display layer's fences resolve AFTER the seats, because the display
+	// set names the vLLM seat by the matrix var insertVLLMSeat just allocated,
+	// and BEFORE the substitution pass below, so the twins are written in the
+	// same token vocabulary as every other entry.
+	vllmSeatID := ""
+	if p.VLLMSeat != nil {
+		vllmSeatID = p.VLLMSeat.ID
+	}
+	if out, err = renderDisplayLayer(out, p.DisplayLayer, vllmSeatID); err != nil {
 		return "", err
 	}
 	// The 26B seats' graphs flag. Substituted before injectGPUEnv so a tier gpu_env
@@ -810,7 +828,7 @@ var envLineRe = regexp.MustCompile(`^ {4}env:\s*\[(.*)\]\s*$`)
 // shipped and because appending is the only edit that cannot reorder a template's
 // own intent.
 func injectGPUEnv(tmpl string, vars []string) string {
-	add := strings.Join(vars, ", ")
+	add := strings.Join(flowItems(vars), ", ")
 	lines := strings.Split(tmpl, "\n")
 	out := make([]string, 0, len(lines)+8)
 	inModels := false

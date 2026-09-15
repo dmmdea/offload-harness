@@ -43,8 +43,9 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gbnf"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
-	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
+	"github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 	"github.com/dmmdea/offload-harness/internal/seatwait"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
@@ -105,7 +106,25 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		return core.Result{OK: false, Reason: "agent task: params carry no context_dir (fleetnode.buildAgentRun owns materialization)", Meta: meta}
 	}
 
+	// Seat resolution (ADR 0039): the planner default, overridden by a seat a
+	// delegator already decided (Params "seat"/"placed", from RunAgentContract's
+	// options — the decision was made once, over the same table, and is
+	// published verbatim), else — on a composite box — by the layer a dispatched
+	// contract names, re-decided HERE with this box's own live readers so the
+	// display-card guards are evaluated where the card is (council R5/R6). A
+	// plain box has one implicit layer: contract.layer changes nothing and no
+	// placed block is published (the byte-identical constraint).
 	seat := p.cfg.AgentPlannerModel("")
+	var placedPtr *core.Placed
+	if pl, _ := req.Params["placed"].(*core.Placed); pl != nil {
+		placedPtr = pl
+		if pl.Seat != "" {
+			seat = pl.Seat
+		}
+	}
+	if override, _ := req.Params["seat"].(string); override != "" {
+		seat = override // an explicit seat wins over the block's
+	}
 	meta.Model = seat
 	nodeID := p.cfg.FleetNodeID
 	if nodeID == "" {
@@ -118,7 +137,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	var contention *seatwait.Budget // set once the wall exists; finish reads it
 	var admitted time.Duration      // the admission pre-flight, if any; finish reports it
 	var admitNote string            // why the pre-flight could not settle residency (probe error / budget)
-	wire := core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: nodeID, Seat: seat}
+	wire := core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: nodeID, Seat: seat, Placed: placedPtr}
 
 	// finish is the ONE exit for every terminal wire result (success or defer):
 	// it stamps WallMs, records the ledger row, and wraps the marshaled result
@@ -162,6 +181,38 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		w.Reason = reason
 		return finish(w)
 	}
+
+	if contract.Layer != "" && p.cfg.Composite() && placedPtr == nil {
+		dec := placement.DecideOnLayer(
+			placement.RequestForContract(contract, placement.EstimateTokens(contract), p.cfg.AgentMaxTokens),
+			p.cfg.Layers, contract.Layer, p.live())
+		// The decision is published whether it admitted or refused: a guard
+		// defer must name the guard (branchable), not just a sentence — on
+		// the wire AND on the ledger row. finish reads meta, so the row's
+		// layer/seat are stamped here, before the defer return, or the row
+		// would carry layer "" and the planner seat for a refusal that named
+		// the triple layer's seat (council R8's `layer` column would count
+		// zero guard refusals on that layer).
+		placedPtr = &dec.Placed
+		wire.Placed = placedPtr
+		meta.Placed = placedPtr
+		if dec.Defer {
+			if dec.Placed.Seat != "" {
+				// The seat the guard refused is the seat this defer is about;
+				// the planner default never saw the contract.
+				seat = dec.Placed.Seat
+				wire.Seat = seat
+			}
+			meta.Model = seat
+			return deferWire(dec.DeferClass, dec.Reason)
+		}
+		if dec.Seat != "" {
+			seat = dec.Seat
+			wire.Seat = seat
+		}
+	}
+	meta.Model = seat
+	meta.Placed = placedPtr
 
 	if seat == "" {
 		return deferWire(core.DeferClassConfig, "no agent seat resolvable (agent_model and model both empty)")
@@ -735,6 +786,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	return finish(wire)
 }
 
+// AgentContractOptions is what a caller that already DECIDED where a contract
+// runs hands RunAgentContract (ADR 0039): the seat and the placed block. It is
+// delegate.LocalOptions by alias — the same type, not a copy — so the method
+// value p.RunAgentContract satisfies delegate.LocalRunner directly and the
+// delegate runner, the MCP doors and the fleet smoke all hand over one shape.
+// The zero value runs the planner seat and publishes nothing.
+type AgentContractOptions = delegate.LocalOptions
+
 // RunAgentContract executes one delegation contract IN-PROCESS on this
 // pipeline — the delegator-side LOCAL placement entry (Task 6; it satisfies
 // delegate.LocalRunner). It mirrors fleetnode.buildAgentRun's materialization
@@ -746,9 +805,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 // both deliberate: Depth stays caller-set (a delegator-side local run IS the
 // origin; buildAgentRun derives ≥1 only for wire arrivals), and OutputSchema
 // is NOT required (roast delta 3 gates REMOTE placement on it; a local run's
-// text-verb acceptance can stand alone).
-func (p *Pipeline) RunAgentContract(ctx context.Context, contract core.AgentContract) (core.AgentWireResult, error) {
-	if err := contract.Validate(); err != nil {
+// text-verb acceptance can stand alone). The context cap is the BOX's
+// (config.AgentContextCapBytes: 256 KiB on a plain box, scaled to the largest
+// layer window on a composite one), the same cap the agent doors validate
+// against — otherwise a contract sized for the long seats would pass the door
+// and be refused here. opts carries a decided seat/placement (see
+// AgentContractOptions); the zero value is every pre-0.116 call.
+func (p *Pipeline) RunAgentContract(ctx context.Context, contract core.AgentContract, opts AgentContractOptions) (core.AgentWireResult, error) {
+	if err := contract.ValidateWithCap(p.cfg.AgentContextCapBytes()); err != nil {
 		return core.AgentWireResult{}, err
 	}
 	jobsRoot := filepath.Join(p.cfg.BaseDir(), "pipeline-jobs")
@@ -773,14 +837,23 @@ func (p *Pipeline) RunAgentContract(ctx context.Context, contract core.AgentCont
 			return core.AgentWireResult{}, fmt.Errorf("agent contract: writing context doc %q: %w", d.Name, werr)
 		}
 	}
+	params := map[string]any{
+		"contract":    contract,
+		"context_dir": contextDir,
+		"job_id":      filepath.Base(jobDir),
+	}
+	// Only set when decided: runAgentTask reads absent keys as "the planner
+	// seat, no placed block", so an unset option leaves the wire untouched.
+	if opts.Seat != "" {
+		params["seat"] = opts.Seat
+	}
+	if opts.Placed != nil {
+		params["placed"] = opts.Placed
+	}
 	res := p.Run(ctx, core.Request{
-		Task:  core.TaskAgentRun,
-		Input: contract.Goal,
-		Params: map[string]any{
-			"contract":    contract,
-			"context_dir": contextDir,
-			"job_id":      filepath.Base(jobDir),
-		},
+		Task:   core.TaskAgentRun,
+		Input:  contract.Goal,
+		Params: params,
 	})
 	if !res.OK {
 		// OK:false is runAgentTask's internal-wiring-bug shape (a defer is a

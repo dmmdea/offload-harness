@@ -18,7 +18,7 @@ import (
 // sizedFailingLocal is failingLocal with the node's wall sizing on the result:
 // a 27B-class seat that measured itself at a 500 s minimum turn.
 func sizedFailingLocal(calls *atomic.Int64) LocalRunner {
-	return func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	return func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		calls.Add(1)
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "local", Seat: "agent-pool",
 			Output: "no idea", Structured: json.RawMessage(`{"answer":"no idea"}`), StopReason: "done",

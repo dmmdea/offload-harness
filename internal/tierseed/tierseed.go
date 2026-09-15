@@ -87,6 +87,19 @@ type Profile struct {
 	// actually run it (Options.VLLMSeatActive), it is the SOLE writer of agent_model
 	// and agent_ctx_tokens; otherwise its declared fallback is.
 	VLLMSeat *vllmseat.Spec `json:"vllm_seat,omitempty"`
+	// Composes lists the tiers this tier is a COMPLETE instance of at the same
+	// time (ADR 0039: blackwell-3x16 composes blackwell-16 and blackwell-2x16).
+	// It is seeded as `tiers` = Composes + the tier's own id and `tier_profile`
+	// = the id, so health and status can advertise every tier the box is while
+	// installed.json keeps ONE id and the matrix keeps one row per tier.
+	Composes []string `json:"composes,omitempty"`
+	// Layers are the device layers a composite box places work onto, seeded
+	// VERBATIM into config.layers so at runtime everything reads config and a
+	// box that seeds none is byte-identical on every surface. The pair layer's
+	// agent seat may be declared bare and is derived from VLLMSeat at resolve
+	// time (fillPairAgent), so the delegation seat's model, window, concurrency
+	// and device pin live in exactly one place.
+	Layers []config.LayerSpec `json:"layers,omitempty"`
 }
 
 // Doc is the whole profiles.json document this package reads: the GPU tier table
@@ -124,7 +137,15 @@ func Parse(raw []byte) (map[string]Profile, error) {
 	return d.Profiles, nil
 }
 
-// ParseDoc reads the whole document from bytes.
+// ParseDoc reads the whole document from bytes. Every profile's `layers` block
+// is held to config.ValidateLayerKeys BEFORE Validate sees the decoded value:
+// json.Unmarshal drops a key it cannot match without a word, so `host_ram_gb`
+// on the triple layer's seat decoded as host_ram_gib 0, Validate/ValidateLayers
+// saw a well-formed seat, and the installer seeded a host_ram guard that reads
+// `free ≥ 0` — fail-open from one dropped character. The strict pass needs the
+// raw bytes, which is why it lives here and not in Validate; Parse, Load and
+// LoadDoc all route through this function, so the embedded copy the installer
+// ships cannot carry a misspelt layer key either.
 func ParseDoc(raw []byte) (Doc, error) {
 	var d Doc
 	if err := json.Unmarshal(raw, &d); err != nil {
@@ -133,7 +154,107 @@ func ParseDoc(raw []byte) (Doc, error) {
 	if len(d.Profiles) == 0 {
 		return Doc{}, fmt.Errorf("profiles.json has no profiles — the schema moved")
 	}
+	if err := validateLayerKeys(raw); err != nil {
+		return Doc{}, err
+	}
+	if err := d.Validate(); err != nil {
+		return Doc{}, err
+	}
 	return d, nil
+}
+
+// validateLayerKeys re-reads each profile's `layers` block as raw JSON and
+// refuses any layers[] / layers[].seats[] key that is not a config field, by
+// tier and JSON path. Profiles are visited in id order so a table with two
+// mistakes fails deterministically.
+func validateLayerKeys(raw []byte) error {
+	var top struct {
+		Profiles map[string]map[string]json.RawMessage `json:"profiles"`
+	}
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return fmt.Errorf("profiles.json: %w", err)
+	}
+	ids := make([]string, 0, len(top.Profiles))
+	for id := range top.Profiles {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if err := config.ValidateLayerKeys(top.Profiles[id]["layers"]); err != nil {
+			return fmt.Errorf("profiles.json: tier %q %w", id, err)
+		}
+	}
+	return nil
+}
+
+// Validate refuses the composite shapes the table cannot seed truthfully, at
+// PARSE time so the embedded copy the installer ships cannot carry them: a
+// `composes` id or a layer tier that is not in the table would seed a `tiers`
+// list naming a tier no install can resolve, and health would advertise it to
+// the fleet; composes without layers would seed nothing, silently; a tier
+// composing itself or another composite has no defined layer set. The seeded
+// layers are then run through config's own validator in BOTH bindings (vLLM
+// seat active and fallback), because either is what an install writes. It runs
+// from ParseDoc, which Parse and Load both route through, so every reader of
+// the table gets the same refusal.
+func (d Doc) Validate() error {
+	ids := make([]string, 0, len(d.Profiles))
+	for id := range d.Profiles {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		p := d.Profiles[id]
+		if len(p.Composes) == 0 && len(p.Layers) == 0 {
+			continue
+		}
+		if len(p.Layers) == 0 {
+			return fmt.Errorf("profiles.json: tier %q composes %v but declares no layers — nothing would be seeded", id, p.Composes)
+		}
+		seen := map[string]bool{}
+		for _, c := range p.Composes {
+			if c == id {
+				return fmt.Errorf("profiles.json: tier %q composes itself", id)
+			}
+			cp, ok := d.Profiles[c]
+			if !ok {
+				return fmt.Errorf("profiles.json: tier %q composes unknown tier %q", id, c)
+			}
+			if len(cp.Composes) > 0 || len(cp.Layers) > 0 {
+				return fmt.Errorf("profiles.json: tier %q composes %q, which is itself composite — nesting has no defined layer set", id, c)
+			}
+			if seen[c] {
+				return fmt.Errorf("profiles.json: tier %q composes %q twice", id, c)
+			}
+			seen[c] = true
+		}
+		tiers := append(append([]string{}, p.Composes...), id)
+		for i, l := range p.Layers {
+			if _, ok := d.Profiles[l.Tier]; !ok {
+				return fmt.Errorf("profiles.json: tier %q layers[%d] %q stands for unknown tier %q", id, i, l.Name, l.Tier)
+			}
+			if !containsID(tiers, l.Tier) {
+				return fmt.Errorf("profiles.json: tier %q layers[%d] %q stands for tier %q, which this tier does not compose (%v)", id, i, l.Name, l.Tier, tiers)
+			}
+		}
+		for _, active := range []bool{true, false} {
+			c := config.Config{TierProfile: id, Tiers: tiers, Layers: fillPairAgent(p.Layers, p.VLLMSeat, active)}
+			if err := c.ValidateLayers(); err != nil {
+				return fmt.Errorf("profiles.json: tier %q layers (vllm_seat active=%v): %w", id, active, err)
+			}
+		}
+	}
+	return nil
+}
+
+// containsID is the membership test Validate shares between composes and layers.
+func containsID(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 // Resolve renders one tier's seed for a target machine: overlay applied, tokens
@@ -188,7 +309,7 @@ func Resolve(p Profile, id string, opt Options) (map[string]any, error) {
 			merged["agent_model"] = p.ResidentTier
 		}
 	}
-	if len(merged) == 0 && len(p.MediaSeats) == 0 {
+	if len(merged) == 0 && len(p.MediaSeats) == 0 && len(p.Layers) == 0 {
 		return nil, nil // a text-only tier is a legitimate answer, not an error
 	}
 	if err := validate(merged, p.Backend, id); err != nil {
@@ -222,6 +343,22 @@ func Resolve(p Profile, id string, opt Options) (map[string]any, error) {
 	// config key that routes to it, and the two cannot disagree.
 	for k, v := range mediaseat.Bindings(p.MediaSeats) {
 		out[k] = v
+	}
+	// A composite tier seeds its identity and its layers LAST, like the media
+	// bindings: composes/layers are their sole writer (validate refuses the keys
+	// in config_seed), so what lands in config is exactly what the table declares
+	// plus the one derived seat. Validated here as config.Load would, so a table
+	// that seeds a layer set config refuses dies at authoring time, not on the
+	// first install of the tier.
+	if len(p.Layers) > 0 {
+		layers := fillPairAgent(p.Layers, p.VLLMSeat, opt.VLLMSeatActive)
+		tiers := append(append([]string{}, p.Composes...), id)
+		if err := (config.Config{TierProfile: id, Tiers: tiers, Layers: layers}).ValidateLayers(); err != nil {
+			return nil, fmt.Errorf("tier %q layers: %w", id, err)
+		}
+		out["tier_profile"] = id
+		out["tiers"] = tiers
+		out["layers"] = layers
 	}
 	return out, nil
 }
@@ -308,6 +445,11 @@ func validate(seed map[string]any, backend, id string) error {
 				"declare the seat instead. Two writers is how the binding and the seat it names drifted apart", k))
 			continue
 		}
+		if compositeKeys[k] {
+			problems = append(problems, fmt.Sprintf("%q is written by the tier's composes/layers, not by config_seed — "+
+				"declare them on the profile instead. Two writers is how a binding and the seat it names drift apart", k))
+			continue
+		}
 		if !known[k] {
 			problems = append(problems, fmt.Sprintf("unknown key %q (not a harness config field — it would be dropped on every install of this tier)", k))
 		}
@@ -347,6 +489,68 @@ func validate(seed map[string]any, backend, id string) error {
 		return fmt.Errorf("tier %q config_seed:\n  - %s", id, strings.Join(problems, "\n  - "))
 	}
 	return nil
+}
+
+// compositeKeys are the config keys Resolve derives from a profile's
+// composes/layers. A config_seed (or accelerator seed) carrying one is a second
+// writer of the box's identity, refused by name exactly like a media binding.
+var compositeKeys = map[string]bool{"tier_profile": true, "tiers": true, "layers": true}
+
+// FillPairAgent resolves the tier table's BARE agent seat — the one a
+// composite tier leaves as `{"role": "agent"}` so the seat's numbers live in
+// exactly one place (vllm_seat) — into a full seat: the vLLM seat's first
+// alias, window and max_num_seqs when the box actually runs it, the tier's
+// declared fallback when it does not. Exported because the SEED is not the
+// only consumer: `install render` checks the rendered config against the same
+// resolved layers (servingtmpl.CheckComposite), and a check run against the
+// bare declaration would report the agent seat as placeable on nothing.
+// The input is never mutated.
+func FillPairAgent(layers []config.LayerSpec, seat *vllmseat.Spec, active bool) []config.LayerSpec {
+	return fillPairAgent(layers, seat, active)
+}
+
+// fillPairAgent derives a layer's BARE agent seat ({"role": "agent"} with no
+// model) from the tier's vLLM seat, so the delegation seat's model, window,
+// concurrency and device pin are declared once — in vllm_seat — and the layer
+// cannot drift from the seat it stands for. Active, the seat is the vLLM pool
+// (first alias, the name the fleet routes to; max_model_len; max_num_seqs);
+// otherwise it is the declared llama.cpp fallback on the same device with no
+// concurrency count (a llama.cpp seat is never saturated by count). A field the
+// layer already declares is kept, and the table's own slice is never mutated —
+// one Profile resolves for many boxes.
+func fillPairAgent(layers []config.LayerSpec, seat *vllmseat.Spec, active bool) []config.LayerSpec {
+	out := make([]config.LayerSpec, len(layers))
+	for i, l := range layers {
+		l.Seats = append([]config.LayerSeat(nil), l.Seats...)
+		for j, s := range l.Seats {
+			if s.Role != "agent" || s.Model != "" || seat == nil {
+				continue
+			}
+			if active {
+				s.Model = seat.ID
+				if len(seat.Aliases) > 0 {
+					s.Model = seat.Aliases[0]
+				}
+				if s.CtxTokens == 0 {
+					s.CtxTokens = seat.MaxModelLen
+				}
+				if s.MaxInflight == 0 {
+					s.MaxInflight = seat.MaxNumSeqs
+				}
+			} else {
+				s.Model = seat.Fallback
+				if s.CtxTokens == 0 {
+					s.CtxTokens = seat.FallbackCtx
+				}
+			}
+			if s.Device == "" {
+				s.Device = seat.Device
+			}
+			l.Seats[j] = s
+		}
+		out[i] = l
+	}
+	return out
 }
 
 // configKeys is every json tag on config.Config — the set a seed may write.

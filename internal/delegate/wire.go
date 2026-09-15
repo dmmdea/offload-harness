@@ -7,7 +7,11 @@
 
 package delegate
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/dmmdea/offload-harness/internal/core"
+)
 
 // SummaryWire is the top-of-response tally. Infrastructure is a SUBSET of
 // Deferred (the defers whose class blames the stack or the config, not the
@@ -88,9 +92,16 @@ type SummaryWire struct {
 // wall_ms is the DELEGATOR-observed round trip, not the node's own wall
 // (which stays inside the node's result and the delegation log).
 type ResultWire struct {
-	Node               string          `json:"node"`
-	Seat               string          `json:"seat"`
-	Placement          string          `json:"placement"`
+	Node string `json:"node"`
+	Seat string `json:"seat"`
+	// Placement is the placement REASON, a string — the opencode plugin and
+	// fleet_smoke read it as text (council R4), so the composite decision is
+	// published beside it as Placed, never folded into it.
+	Placement string `json:"placement"`
+	// Placed (ADR 0039, 0.116.0) is the composite placement block: tier,
+	// layer, role, seat, device pin, reason, and on a defer the guard that
+	// refused. omitempty — a plain box publishes byte-identically to before.
+	Placed             *core.Placed    `json:"placed,omitempty"`
 	JobID              string          `json:"job_id"`
 	Output             string          `json:"output,omitempty"`
 	Structured         json.RawMessage `json:"structured,omitempty"`
@@ -223,6 +234,7 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			Node:               pr.Node,
 			Seat:               pr.Seat,
 			Placement:          pr.PlacementReason,
+			Placed:             pr.Placed,
 			JobID:              pr.JobID,
 			Output:             pr.Result.Output,
 			Structured:         pr.Result.Structured,

@@ -172,7 +172,7 @@ func runFleetSmoke(args []string) error {
 	for _, base := range bases {
 		hint := strings.TrimPrefix(strings.TrimPrefix(base, "http://"), "https://")
 		hint = strings.Split(hint, ":")[0]
-		c, perr := delegate.PrepareContract(smokeContract(hint), "")
+		c, perr := delegate.PrepareContractWithCap(smokeContract(hint), "", cfg.AgentContextCapBytes())
 		if perr != nil {
 			return perr
 		}

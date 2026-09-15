@@ -29,7 +29,7 @@ func eligibleNode(t *testing.T, id, output string) (*fakeNode, string) {
 }
 
 func passingLocal(calls *atomic.Int64) LocalRunner {
-	return func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	return func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		calls.Add(1)
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "local", Seat: "local-seat",
 			Output: "qube answered locally", Structured: json.RawMessage(`{"answer":"qube"}`), StopReason: "done"}, nil
@@ -37,7 +37,7 @@ func passingLocal(calls *atomic.Int64) LocalRunner {
 }
 
 func failingLocal(calls *atomic.Int64) LocalRunner {
-	return func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	return func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		calls.Add(1)
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "local", Seat: "local-seat",
 			Output: "no idea", Structured: json.RawMessage(`{"answer":"no idea"}`), StopReason: "done"}, nil
@@ -47,7 +47,7 @@ func failingLocal(calls *atomic.Int64) LocalRunner {
 // abstainingLocal is a local seat that honestly abstains (the retry-eligible
 // defer class) — used where a test needs the retry to run and ALSO fail.
 func abstainingLocal() LocalRunner {
-	return func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	return func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "local", Seat: "local-seat",
 			Deferred: true, DeferClass: core.DeferClassAbstention, Reason: "output failed schema: missing required field answer"}, nil
 	}
@@ -191,7 +191,7 @@ func TestRunRetryBothFailKeepsFirstAttemptAnnotated(t *testing.T) {
 func TestRunRetryStaysInsideTimeoutBudget(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
 	node, url := eligibleNode(t, "node-a", "qube from A")
-	slowWrongLocal := func(ctx context.Context, c core.AgentContract) (core.AgentWireResult, error) {
+	slowWrongLocal := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		time.Sleep(1200 * time.Millisecond)
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "local", Seat: "local-seat",
 			Output: "no idea", Structured: json.RawMessage(`{"answer":"no idea"}`), StopReason: "done"}, nil

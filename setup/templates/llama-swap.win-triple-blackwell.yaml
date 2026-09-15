@@ -236,6 +236,28 @@ models:
 # cuda:0 is the 5070 Ti and cuda:1/cuda:2 are the pair. The same digit means different
 # cards in the two namespaces, and confusing them is how the media block ended up
 # pointing at the display card twice.
+  # __DISPLAY_TWINS_BEGIN__ — the DISPLAY layer (ADR 0039). These two rungs are the
+  # only work this template will ever put on device 1, the RTX 5070 Ti that drives the
+  # desktop: they exist so a small mechanical call has somewhere to run while the pair
+  # holds its cards, instead of time-sharing them with the agent seat and paying its
+  # reload. They are rendered ONLY for a tier that declares a display layer, the layer
+  # ships DORMANT (placement never routes here until the operator sets dormant:false),
+  # and every placement onto it is fenced by the display_floor and presence guards.
+  # The lines below are the literal rendered block; `#|` is the renderer's fence.
+#|  gemma-4-e4b-display:
+#|    env: [CUDA_VISIBLE_DEVICES=1]
+#|    cmd: >-
+#|      __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf
+#|      -ngl 99 --parallel 1 ${common}
+#|    ttl: 300
+#|  gemma-4-e2b-display:
+#|    env: [CUDA_VISIBLE_DEVICES=1]
+#|    cmd: >-
+#|      __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
+#|      -ngl 99 ${common}
+#|    ttl: 300
+  # __DISPLAY_TWINS_END__
+
 # offload-seats: swappable resident
 matrix:
   vars:
@@ -248,6 +270,10 @@ matrix:
     q38: qwen3.8-27b
     q38l: qwen3.8-27b-262k
     q38p: qwen3.8-27b-par8
+    # __DISPLAY_VARS_BEGIN__
+#|    e4bd: gemma-4-e4b-display
+#|    e2bd: gemma-4-e2b-display
+    # __DISPLAY_VARS_END__
   # The memory stack is the most expensive thing on this box to lose and the cheapest
   # to keep: maximally expensive to stop, so the solver stops something else first.
   evict_costs:
@@ -256,3 +282,7 @@ matrix:
   sets:
     residents: "emb & rer"
     text: "+residents & (e4b | e2b__M26_ALT____Q38_ALT__ | q38l | q38p__SEATS_SWAPPABLE__)__SEATS_RESIDENT__"
+    # __DISPLAY_SET_BEGIN__ — the display rung is concurrent with the pair seat, which
+    # is the whole point: the pair keeps its 32 streams and the small call still runs.
+#|    display: "+residents & __VLLM_VAR__(e4bd | e2bd)"
+    # __DISPLAY_SET_END__

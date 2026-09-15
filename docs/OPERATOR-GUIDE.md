@@ -728,7 +728,8 @@ carries any measured override to apply.
 | Profile | Resident/default tier | Served ctx (`-ctx-tokens`) | KV | 26B-A4B |
 |---|---|---|---|---|
 | `blackwell-16` / `volta-16` | `gemma4-26b-a4b` | 32768 | q8_0 | full-GPU resident |
-| `blackwell-2x16` | `gemma4-26b-a4b` | 131072 | q8_0 | full-GPU resident; the served window follows the measurement (0.113.29, 32768 → 131072). Bound only for EXACTLY two Blackwell cards in the 12–23 GB band — three cards classify as `dual-gpu` |
+| `blackwell-2x16` | `gemma4-26b-a4b` | 131072 | q8_0 | full-GPU resident; the served window follows the measurement (0.113.29, 32768 → 131072). Bound only for EXACTLY two Blackwell cards in the 12–23 GB band; three cards are `blackwell-3x16` (shipped 0.113.32) |
+| `blackwell-3x16` | `gemma4-26b-a4b` (single layer) + the vLLM agent seat (pair layer) | 131072 (long twin 262144) | q8_0 | COMPOSITE (ADR 0039): a complete `blackwell-16` AND `blackwell-2x16` as well as itself. Placement decides per task which layer and seat run the work and records it as `placed`; the display card (device 1) is fenced by a ≥4 GiB floor, a host-RAM guard and an operator-presence guard, all failing closed, and its layer ships dormant. See [systems/composite-tier.md](systems/composite-tier.md) |
 | `ampere-16` | `offload-e4b` (agent `qwen3.5-4b-agent`, `research`; 26B dropped) | 32768 | q8_0 | measured 2026-09-04 on an NVIDIA A2 16 GB at 40 W: the projected 26B-A4B seat ran 1/8 digests, the 4B seat 8/8 (0.113.15); 2026-09-06 the reference box's agent lane moved to a vLLM seat behind llama-swap (131,072 ctx). RENDERED by the installer since 0.113.33 and NOT persistent since 0.113.36 (`ttl: 300`, no preload, no boot-enable). Seat choice re-grounded on QUALITY 2026-09-08 (blind 4-way, 24 judgements: 4B-vLLM 7.75 > 4B-llama.cpp 7.38 > 12B-vLLM 6.50 > 12B-llama.cpp 6.21), not on wall time: ADR 0035, `setup/templates/vllm-seat/linux-systemd/` |
 | `dual-gpu` | `gemma4-26b-a4b` (architect) + `offload-e4b` (editor), both resident | 32768 | q8_0 | resident (two-tier, **zero swap**) |
 | `ampere-8` / `blackwell-8` | `offload-e4b` | 16384 | q8_0 | via `--cpu-moe` only when RAM ≥ ~56 GB; else dropped |
@@ -987,18 +988,6 @@ store dataset's mount (for example `/srv/kvstore`) and create the marker file `.
 writes it into an EMPTY root itself; a populated root without it is refused at start, so a mistyped root can never be pruned;
 every removed page is one journal line), the cap to the dataset quota, and keep the seat's own
 `SEAT_L2_PRUNE_GB + max_capacity_gb` under the quota too — LMCache evicts only its own pages.
-
-**Serving-config provenance (0.123.0, ADR 0043) — `serving_config_path`.** The llama-swap config is rendered once, at
-install, and nothing re-renders it: `ampere-16` served a 32768 window for weeks after the tier table said 131072, and
-`audit-yaml` reported OK the whole time because a stale config breaks no operator rule. `install render` now stamps every
-config it writes with `spec_sha256` (a closed input set: tier, render params, template, tier entry, harness version) and
-`body_sha256` (the yaml below the stamp, so a hand edit stays distinguishable). Check a live box with
-`local-offload audit-yaml --against-render <file>` — flags BEFORE the files — which re-derives from the binary's own seeds
-and reports `MATCH` / `STALE(<keys>)` / `UNSTAMPED` / `HAND-EDITED`; STALE names the inputs that moved and exits 1, as does
-HAND-EDITED, while UNSTAMPED (every config rendered before 0.123.0) prints as a finding and does not fail. Point
-`serving_config_path` at the node's rendered config and `/fleet/health` publishes `serving_config_spec_sha256` +
-`serving_config_state` as well, so a fleet-wide sweep is one poll; unset, both keys are omitted. Fix a STALE box by
-re-rendering with `install render`, never by hand-editing the file.
 
 **Lease in health (0.113.16).** `/fleet/health` carries `lease` while the node's GPU lease is held; a text lease makes the
 node ineligible for new delegated work (and its dispatch answers 503, re-placeable). `gpu reserve --drain --unload-seat` and

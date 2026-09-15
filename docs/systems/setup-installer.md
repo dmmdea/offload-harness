@@ -218,64 +218,6 @@ fails in a way that looks like a model problem. A tier that drops the 26B has it
 block **and** its group membership removed together — llama-swap rejects a config whose
 group names a model that does not exist.
 
-#### The provenance stamp (0.123.0, ADR 0043)
-
-Every config `install render` writes now begins with a six-line comment block:
-
-```
-# local-offload serving-config provenance -- generated; re-derive with `local-offload audit-yaml --against-render`
-# spec_sha256: <64 hex>
-# body_sha256: <64 hex>
-# rendered_by: 0.123.0
-# tier: ampere-16
-# rendered_at: 2026-09-14T11:22:33Z
-# basis: {"harness_version":"0.123.0","params":{...},"profiles_entry_sha256":"...","render":{...},"template_sha256":"...","tier_id":"ampere-16"}
-```
-
-`spec_sha256` hashes a **closed, documented input set** (`servingtmpl.SpecBasis`): the tier
-id, the render `Params` mirrored field for field, the serving template's sha256, the tier's
-own `profiles.json` entry canonicalised and hashed, the two flags that gate which seeds apply
-(`--ram-tier`, `--fallback-backend`), and the harness version — canonical JSON, sorted keys,
-number literals preserved. `body_sha256` hashes the yaml **below** the block, which is what
-keeps a hand edit distinguishable from a seed change.
-
-The block is inert yaml, and the body beneath it is byte-identical to what `Render` produced:
-the rule audit still runs on the unstamped text, exactly as before. The config only goes to
-stdout when `--out` is omitted, so `install.ps1` and `install.sh` are unaffected; the `--out`
-success line now also carries the spec hash.
-
-Why it exists: the serving config is rendered ONCE and nothing re-renders it. Register A-39
-raised `ampere-16`'s `ctx_size` 32768 → 131072 and the live file kept serving 32768 while
-`audit-yaml` reported `OK` — honestly, because a config a tier revision stale breaks no
-operator rule. A rule gate cannot see staleness.
-
-#### Re-deriving it: `audit-yaml --against-render`
-
-```
-local-offload audit-yaml --against-render C:/llama-swap/llama-swap.yaml
-```
-
-Flags come **before** the files (Go's flag package stops at the first non-flag argument). Each
-file gets its usual rule line plus one provenance line, reporting exactly one state:
-
-| state | means | exit |
-|---|---|---|
-| `MATCH` | re-rendering from this binary's seeds reproduces the file byte for byte, and no seed input moved | 0 |
-| `STALE(<keys>)` | the seeds moved — the report NAMES the basis keys (`params.ctx_size`, `profiles_entry_sha256`, …) | 1 |
-| `UNSTAMPED` | no provenance block: rendered before 0.123.0, or written by hand | 0 |
-| `HAND-EDITED` | the body no longer hashes to the stamp's record, or the stamp itself was edited | 1 |
-
-The verdict is settled by **re-rendering**, not by comparing hashes — a hash moves on inputs
-that cannot change the output, and a gate that cries stale on a documentation edit gets
-ignored. The replay pins the per-box inputs the stamp recorded (install paths, listen address,
-thread count, the vLLM deployment half) instead of re-deriving them from the auditing machine,
-which would report every node stale; a seed those pin can therefore move without changing the
-rendered text, and that case reports STALE naming `profiles_entry_sha256` with a detail saying
-the served config is unchanged and only the stamp is behind.
-
-`UNSTAMPED` deliberately does not exit 1: every config on the fleet predates stamping, and a
-gate that is red on every box from day one is a gate nobody reads.
-
 **Verified end to end on the Linux node:** the rendered `ampere-6` config was handed to the
 node's own `llama-swap` on a throwaway port, which accepted it and listed exactly
 `offload-e4b`, `gemma4-e2b`, `embeddinggemma`, `bge-reranker-v2-m3` — the 26B correctly
@@ -356,7 +298,7 @@ Verified on the fleet: <node-b> → `blackwell-2x16` (RTX 5060 Ti 16 GB **+** RT
 > `blackwell-2x16` for two Blackwell cards, and its test names this exact pair as the
 > reference box — but this sentence lagged, and stale "5060 Ti solo" wording in several
 > places led to the box repeatedly being budgeted as a single 16 GB card. It is 32 GB
-> across two cards. Corrected 2026-08-05. **Superseded 2026-08-31 (recorded 2026-09-07):** a THIRD card (RTX 5060 Ti 16 GB) took <node-b> to 3× 16 GB = **48.9 GB**, which `Get-Profile` files as `dual-gpu` — `blackwell-48` means ONE 48 GB card, and `blackwell-3x16` is proposed, not shipped.
+> across two cards. Corrected 2026-08-05. **Superseded 2026-08-31 (recorded 2026-09-07):** a THIRD card (RTX 5060 Ti 16 GB) took <node-b> to 3× 16 GB = **48.9 GB**, which used to file as `dual-gpu` — `blackwell-48` means ONE 48 GB card. **`blackwell-3x16` SHIPPED 0.113.32**, and since 0.123.0 it is a COMPOSITE tier (ADR 0039): it declares `composes` (the tiers it is a complete instance of) and `layers` (its device layers, their seats, their guards), and `install seed` writes `tier_profile`, `tiers` and `layers` into config.json beside `config_seed`/`media_seats`. `install render` refuses a composite render that is not the checked union of what it composes. See [composite-tier.md](composite-tier.md).
 
 ### Tier media seeds (`local-offload install seed`)
 

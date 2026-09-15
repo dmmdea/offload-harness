@@ -50,6 +50,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/mediahash"
 	"github.com/dmmdea/offload-harness/internal/parser"
+	"github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/router"
 	"github.com/dmmdea/offload-harness/internal/rungraph"
 	"github.com/dmmdea/offload-harness/internal/shadow"
@@ -122,6 +123,15 @@ type Pipeline struct {
 	swapMu   sync.Mutex
 	tierSeen map[string]time.Time
 	nowFn    func() time.Time
+	// Composite tier (ADR 0039): placementLive is the seam tests use to inject
+	// the machine's live readers (occupancy, free VRAM, host RAM, presence);
+	// nil = the PROCESS-WIDE memoised Snapshot over cfg
+	// (placement.SharedSnapshot: one 2 s reading serves every decision in
+	// that window across every pipeline in the process — the in-loop offload
+	// builds one Pipeline per contract, and a spread must not exec nvidia-smi
+	// per subtask per tick). Read only through live(); consulted only when
+	// cfg.Composite().
+	placementLive func() placement.Live
 	// LO-1 GPU-lock gate: vision calls check the render runners' single-slot GPU
 	// lock (internal/gpulock) BEFORE hitting llama-swap — while a generation job
 	// owns the GPU the VLM cannot (re)load, so calling anyway just burns a doomed
@@ -560,7 +570,10 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	if kn, _ := p.knnSnap(); kn != nil {
 		knnSkip = p.knnPreferLargerEntry(req.Task, req.Input)
 	}
-	chain := p.modelChain(req.Task, meta.Feat, knnSkip)
+	// Composite tier (ADR 0039): ONE placement decision for this call — the
+	// chain is built from it and every rung's result is stamped with it.
+	placed := p.cascadePlacement()
+	chain := p.modelChainOn(req.Task, meta.Feat, knnSkip, placed)
 	var last core.Result
 	// Task 1.5: entry-tier (ci==0) snapshot + candidate, so a later agreeing tier
 	// can record a cascade-agreement correctness-proxy label for classify/triage.
@@ -568,6 +581,7 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	var entryCandidate string       // entry-tier candidate JSON (its Partial)
 	for ci, model := range chain {
 		meta.Model = model
+		meta.Placed = rungPlaced(placed, model)
 		meta.Escalations = ci
 		// TO-3: a climbed-to tier re-reads the ORIGINAL source against its own
 		// served window instead of inheriting the entry cut. Fail-open to the
@@ -636,7 +650,11 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	// Terminal LOCAL reasoning tier (grammar tasks only): after the whole cascade defers, give
 	// a thinking model one shot under a think-wrapped grammar to reclaim the deferral before
 	// falling through to Opus. A failure here defers exactly as before (never calls cloud).
-	if p.cfg.ReasoningModel != "" && built.Grammar != "" && !last.Meta.Truncated {
+	// The reasoning model has no display twin either: on the display layer it
+	// is skipped for the same reason the escalation rung is dropped (it would
+	// evict the pair seat from device 0 — the eviction the layer exists to avoid).
+	if p.cfg.ReasoningModel != "" && built.Grammar != "" && !last.Meta.Truncated && (placed == nil || placed.Layer != placement.LayerDisplay) {
+		meta.Placed = rungPlaced(placed, p.cfg.ReasoningModel)
 		// TO-3: the terminal reasoning tier is a callee too — re-pack from the
 		// original against ITS served window (same fail-open contract). Its
 		// REAL completion request is MaxTokens+reasoningThinkBudget (the
@@ -711,6 +729,28 @@ func (p *Pipeline) visionModelFor(t core.TaskType) string {
 	return p.cfg.VisionModel
 }
 
+// visionPlaced is the documentary placement of a vision call on a composite
+// box (placement row 3: ocr → the single layer's ocr seat, everything else →
+// the pair's vision seat), with Seat = the alias that actually ran so the
+// block never claims a seat the call did not use. nil on a plain box or when
+// no layer declares the role.
+func (p *Pipeline) visionPlaced(task core.TaskType, model string) *core.Placed {
+	if !p.cfg.Composite() {
+		return nil
+	}
+	class := placement.ClassVision
+	if task == core.TaskOCR {
+		class = placement.ClassOCR
+	}
+	dec := placement.Decide(placement.Request{Class: class}, p.cfg.Layers, p.live())
+	if dec.Defer || dec.Layer == "" {
+		return nil
+	}
+	pl := dec.Placed
+	pl.Seat = model
+	return &pl
+}
+
 // runVision handles a single multimodal call on the VLM tier. It mirrors the
 // text path's cache + ledger + defer machinery but uses GenerateVision and has
 // NO grammar/grounding/confidence-margin gate — vqa is free-text, so it rides
@@ -730,6 +770,7 @@ func (p *Pipeline) runVision(ctx context.Context, req core.Request, built tasks.
 		return core.Deferf("no vision model configured", "", meta)
 	}
 	meta.Model = model
+	meta.Placed = p.visionPlaced(req.Task, model)
 	dataURI, err := imageio.LoadImageB64(req.Image, p.cfg.VisionMaxImageBytes)
 	if err != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
@@ -3767,12 +3808,96 @@ func (p *Pipeline) attemptReasoning(ctx context.Context, req core.Request, built
 	return core.Result{OK: true, Data: data, Meta: meta}, true
 }
 
+// live returns the placement table's view of this machine: the injected
+// seam when a test set one, otherwise the process-wide memoised Snapshot
+// for this box (placement.SharedSnapshot, placement.DefaultSnapshotTTL) so
+// the readers are read at most once per window however many decisions the
+// window holds — and however many pipelines make them: every in-flight
+// contract's in-loop cascade (NewInLoopPipeline / NewRecordlessOffload
+// build one Pipeline per contract) reads through the same memo.
+func (p *Pipeline) live() placement.Live {
+	if p.placementLive != nil {
+		return p.placementLive()
+	}
+	return placement.SharedSnapshot(p.cfg).Live()
+}
+
+// cascadePlacement decides where the mechanical cascade runs on a composite
+// box (placement row 2: the single layer's router, or the display layer's
+// twin when the pair holds the cards and the layer is awake and its guards
+// pass). nil on a plain box — the caller then runs the pre-layer chain and
+// stamps nothing — and nil on a decision that could place nothing (a
+// composite box that declares no router seat), where the chain also runs as
+// before: a defer block on a result the rungs then served would be a lie.
+func (p *Pipeline) cascadePlacement() *placement.Decision {
+	if !p.cfg.Composite() {
+		return nil
+	}
+	dec := placement.Decide(placement.Request{Class: placement.ClassMechanical, RouteKey: "workhorse"}, p.cfg.Layers, p.live())
+	if dec.Defer || dec.Layer == "" {
+		// Loud once (the warnSeatPin posture): a composite box that declares no
+		// router seat is an operator's config gap, and repeating it per call
+		// would drown the log the operator needs to see it in.
+		warnUnplacedCascade.Do(func() {
+			log.Printf("cascade placement: no layer placed the mechanical cascade (%s); running the configured rungs unplaced until the config declares a router seat", dec.Reason)
+		})
+		return nil
+	}
+	return &dec
+}
+
+// warnUnplacedCascade gates cascadePlacement's config-gap warning to once per
+// process.
+var warnUnplacedCascade sync.Once
+
+// cascadeRungs is the (triage, workhorse, escalation) trio the chain is built
+// from under a placement: the config's own rungs, or — on the display layer —
+// the router twin's model_map, with escalation dropped because the display
+// layer declares no 26B twin (a cascade that needs escalation there defers as
+// today's "all tiers failed" rather than evicting the pair seat from device 0).
+func (p *Pipeline) cascadeRungs(dec *placement.Decision) (triage, workhorse, escalation string) {
+	if dec == nil || dec.Layer != placement.LayerDisplay {
+		return p.cfg.TriageModel, p.cfg.Model, p.cfg.EscalationModel
+	}
+	twin, ok := p.cfg.LayerSeat(placement.LayerDisplay, placement.RoleRouter)
+	if !ok {
+		return p.cfg.TriageModel, p.cfg.Model, p.cfg.EscalationModel
+	}
+	workhorse = twin.ModelMap["workhorse"]
+	if workhorse == "" {
+		workhorse = dec.Seat
+	}
+	return twin.ModelMap["triage"], workhorse, ""
+}
+
+// rungPlaced is the placed block stamped on the result a cascade rung served:
+// the layer decision with Seat = the rung that actually answered (the
+// decision names the layer and the router's device pin, not which rung of
+// the ladder the input climbed to). nil when there was no decision.
+func rungPlaced(dec *placement.Decision, model string) *core.Placed {
+	if dec == nil {
+		return nil
+	}
+	pl := dec.Placed
+	pl.Seat = model
+	return &pl
+}
+
 // modelChain returns the ascending-capability tiers for a task. Fast tasks enter
 // at the small tier — UNLESS the learned router predicts it will fail on this
 // input (Phase 5) or health marked it degraded (Phase 4), in which case the
 // entry is bumped to E4B. Tiers whose circuit breaker is OPEN (Phase 3) are
-// skipped (routed around). Duplicates collapse; order preserved.
+// skipped (routed around). Duplicates collapse; order preserved. On a
+// composite box the rungs come from the cascade's placement (cascadeRungs).
 func (p *Pipeline) modelChain(task core.TaskType, feat map[string]float64, knnSkip bool) []string {
+	return p.modelChainOn(task, feat, knnSkip, p.cascadePlacement())
+}
+
+// modelChainOn is modelChain under an already-made placement decision, so Run
+// decides once and both the chain and the served-rung stamp read the same
+// decision (nil = the configured rungs, exactly the pre-layer chain).
+func (p *Pipeline) modelChainOn(task core.TaskType, feat map[string]float64, knnSkip bool, dec *placement.Decision) []string {
+	triageModel, workhorse, escalation := p.cascadeRungs(dec)
 	var tiers []string
 	add := func(m string) {
 		if m == "" {
@@ -3789,14 +3914,14 @@ func (p *Pipeline) modelChain(task core.TaskType, feat map[string]float64, knnSk
 		tiers = append(tiers, m)
 	}
 	if task == core.TaskTriage || task == core.TaskClassify {
-		if entry := p.cfg.TriageModel; entry != "" && !p.skipSmallEntry(task, entry, feat, knnSkip) {
+		if entry := triageModel; entry != "" && !p.skipSmallEntry(task, entry, feat, knnSkip) {
 			add(entry)
 		}
 	}
-	add(p.cfg.Model)
-	add(p.cfg.EscalationModel)
+	add(workhorse)
+	add(escalation)
 	if len(tiers) == 0 { // breakers pruned everything — fall back to the workhorse
-		tiers = []string{p.cfg.Model}
+		tiers = []string{workhorse}
 	}
 	return tiers
 }
@@ -3872,11 +3997,21 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		PrefillTokens:      meta.PrefillTokens,
 		CacheTokens:        meta.CacheTokens,
 		PrefillMS:          meta.PrefillMS,
+		Layer:              placedLayer(meta.Placed),
 		// Same read the delegation log does (delegate.record): per-row, so a
 		// long-lived process whose environment never changes still labels
 		// every row consistently, and an untagged process writes nothing.
 		Arm: strings.TrimSpace(os.Getenv("OFFLOAD_DELEGATE_ARM")),
 	}
+}
+
+// placedLayer is the ledger's read of a placed block: the layer, or "" (the
+// column is omitted) when the box published none.
+func placedLayer(pl *core.Placed) string {
+	if pl == nil {
+		return ""
+	}
+	return pl.Layer
 }
 
 func (p *Pipeline) record(task core.TaskType, meta core.Meta, inputChars int) {

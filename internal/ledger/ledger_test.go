@@ -306,3 +306,46 @@ func TestSummaryHonestValueLabel(t *testing.T) {
 		}
 	}
 }
+
+// TestLedgerRoundTripsLayer (ADR 0039): the layer a composite box served a
+// call on persists, is OMITTED when empty (a plain box's row is byte-identical
+// to the pre-layer build), and old lines without the field still parse.
+func TestLedgerRoundTripsLayer(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "ledger.jsonl")
+	l, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Record(Entry{Task: "summarize", ModelTier: "gemma-4-e4b", Layer: "single"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Record(Entry{Task: "summarize", ModelTier: "gemma-4-e4b"}); err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o600)
+	_, _ = f.WriteString(`{"ts":1,"task":"summarize","model_tier":"gemma-4-e4b"}` + "\n")
+	f.Close()
+
+	got, err := ReadAll(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("want 3 entries, got %d", len(got))
+	}
+	if got[0].Layer != "single" {
+		t.Fatalf("layer must round-trip, got %q", got[0].Layer)
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if strings.Contains(lines[1], "layer") {
+		t.Fatalf("a plain box's row must OMIT layer (omitempty), got: %s", lines[1])
+	}
+	if got[2].Layer != "" {
+		t.Fatalf("pre-layer line must parse with empty Layer, got %q", got[2].Layer)
+	}
+}

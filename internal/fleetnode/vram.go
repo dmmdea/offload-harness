@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
 // ParseSmiMemory parses `nvidia-smi --query-gpu=memory.total,memory.used
@@ -54,172 +56,45 @@ func ParseSmiMemory(out string) (totalGiB, usedGiB float64, err error) {
 	return totalMiB / 1024, usedMiB / 1024, nil
 }
 
-// GPUDevice is one parsed nvidia-smi device line: the index/uuid/name
-// nvidia-smi itself reports plus its GiB memory figures. JSON tags match the
-// gpu_devices[] shape documented in docs/FLEET-NODE.md. UUID is what
-// primary_gpu_uuid pins against (config.Config.PrimaryGPUUUID /
+// GPUDevice is one parsed nvidia-smi device line — an ALIAS of
+// gpuprobe.Device since 0.116.0, when the parser moved into that leaf so the
+// composite tier's placement guards and this health sampler read every card
+// through ONE parser (a second reader could disagree with the first about a
+// card's free memory, and the display-card guard fails closed on that
+// number). The alias keeps every caller, the gpu_devices[] JSON shape
+// (docs/FLEET-NODE.md) and every existing test compiling unchanged. UUID is
+// what primary_gpu_uuid pins against (config.Config.PrimaryGPUUUID /
 // SelectHeadlineDevice) — an operator reads it straight off a running node's
 // /fleet/health gpu_devices[] to fill that config key in.
-type GPUDevice struct {
-	Index    int     `json:"index"`
-	UUID     string  `json:"uuid"`
-	Name     string  `json:"name"`
-	TotalGiB float64 `json:"vram_total_gb"`
-	FreeGiB  float64 `json:"vram_free_gb"`
-	// UtilPct is nvidia-smi utilization.gpu (0-100) when the query carried it.
-	// UtilKnown distinguishes "0 %" from "not queried" (a 5-field line from an
-	// older launcher); consumers must never treat an unknown as idle.
-	UtilPct   int  `json:"util_pct"`
-	UtilKnown bool `json:"util_known"`
-}
+type GPUDevice = gpuprobe.Device
 
-// ParseSmiMemoryDevices parses `nvidia-smi --query-gpu=index,uuid,name,
-// memory.total,memory.used[,utilization.gpu] --format=csv,noheader,nounits`
-// output — one line per GPU, e.g. "0, GPU-1111aaaa-2222-3333-4444-555566667777,
-// NVIDIA GeForce RTX 5060 Ti, 16311, 867" (5 fields) or with utilization:
-// "0, GPU-1111aaaa-2222-3333-4444-555566667777, NVIDIA GeForce RTX 5060 Ti,
-// 16311, 867, 37" (6 fields) — into an ordered []GPUDevice (nvidia-smi's own
-// enumeration order, i.e. PCI bus order; NOT necessarily CUDA device order —
-// see HeadlineDevice's doc comment for why that distinction is the whole bug
-// this parser exists to fix, and SelectHeadlineDevice/primary_gpu_uuid for
-// the deterministic override). This is the devices-aware sibling of
-// ParseSmiMemory: that function is kept unchanged (first-line-wins, 2-field
-// CSV) because it has a caller outside the snapshot/health path (the
-// pipeline's per-process footprint delta sampler), so its behavior cannot
-// change out from under that caller. This is a separate function over a
-// separate (5- or 6-field) query instead.
-//
-// CRLF and surrounding whitespace are tolerated (nvidia-smi emits \r\n on
-// Windows). Blank lines and lines that don't parse as "index, uuid, name,
-// total, used[, utilization]" are SKIPPED rather than failing the whole probe
-// — a single garbled/partial row (a transient nvidia-smi hiccup) must not take
-// down every other card's reading. A line whose total is <= 0, whose used is
-// negative, or whose used EXCEEDS its total is likewise skipped (not a
-// working GPU line — see the used>total check below for why this is a skip,
-// not a clamp).
-//
-// The optional 6th field (utilization.gpu) is parsed when present. If the 6th
-// field is malformed, out of range (not 0-100), or missing (5-field line), the
-// device is STILL returned with UtilKnown=false and UtilPct=0 — the memory
-// data is too valuable to lose over a transient utilization query failure or an
-// older query format. Only the first five fields are mandatory for a valid device;
-// the 6th is never required.
-//
-// If NO line parses into a valid device (memory fields), that IS an error: the
-// contract treats vram_total_gb <= 0 as a failed probe, so a would-be
-// zero-device snapshot must never reach the caller as success.
+// ParseSmiMemoryDevices parses the per-device nvidia-smi query (index, uuid,
+// name, memory.total, memory.used[, utilization.gpu]) into an ordered
+// []GPUDevice. It is a thin wrapper over gpuprobe.ParseSmiMemoryDevices —
+// see that function for the full contract (skip-not-fail per line, used >
+// total skipped, zero valid devices is an error) — kept here so the health
+// sampler's callers and the pins in vram_test.go name the fleetnode symbol
+// they always did. ParseSmiMemory (above) stays separate and unchanged: it
+// serves the pipeline's per-process footprint delta sampler over a different
+// (2-field) query, and its behavior cannot change out from under that caller.
 func ParseSmiMemoryDevices(out string) ([]GPUDevice, error) {
-	var devices []GPUDevice
-	for _, rawLine := range strings.Split(out, "\n") {
-		line := strings.TrimSpace(rawLine)
-		if line == "" {
-			continue
-		}
-		fields := strings.Split(line, ",")
-		if len(fields) != 5 && len(fields) != 6 {
-			continue
-		}
-		idx, err := strconv.Atoi(strings.TrimSpace(fields[0]))
-		if err != nil {
-			continue
-		}
-		uuid := strings.TrimSpace(fields[1])
-		name := strings.TrimSpace(fields[2])
-		totalMiB, err := strconv.ParseFloat(strings.TrimSpace(fields[3]), 64)
-		if err != nil {
-			continue
-		}
-		usedMiB, err := strconv.ParseFloat(strings.TrimSpace(fields[4]), 64)
-		if err != nil {
-			continue
-		}
-		if totalMiB <= 0 || usedMiB < 0 {
-			continue
-		}
-		// used > total is a corrupt reading (a broken driver, a query that raced
-		// a hot-unplug, garbled counter values), not a legitimate "over budget"
-		// state nvidia-smi can actually report. The OLD behavior clamped this to
-		// 0 free and published the device anyway — that hides a broken
-		// driver/query behind a plausible-looking number (0 free reads as "this
-		// card is full", not "this reading is garbage"), which is worse than
-		// skipping it: skipping is honest about "this device's line was bad this
-		// tick," and (per the file-level contract) the OTHER devices on the same
-		// box still publish normally, while a fully bad probe still fails via the
-		// "zero valid devices" check below.
-		if usedMiB > totalMiB {
-			continue
-		}
-		d := GPUDevice{
-			Index:    idx,
-			UUID:     uuid,
-			Name:     name,
-			TotalGiB: totalMiB / 1024,
-			FreeGiB:  (totalMiB - usedMiB) / 1024,
-		}
-		if len(fields) == 6 {
-			u, err := strconv.Atoi(strings.TrimSpace(fields[5]))
-			if err == nil && u >= 0 && u <= 100 {
-				d.UtilPct, d.UtilKnown = u, true
-			}
-			// If the 6th field is malformed or out-of-range, keep the device
-			// with UtilKnown=false; don't skip the whole device just for bad
-			// utilization data.
-		}
-		devices = append(devices, d)
-	}
-	if len(devices) == 0 {
-		return nil, fmt.Errorf("nvidia-smi multi-device memory query: no valid GPU lines parsed (contract: vram_total_gb <= 0 = failed probe)")
-	}
-	return devices, nil
+	return gpuprobe.ParseSmiMemoryDevices(out)
 }
 
 // HeadlineDevice picks which parsed device the health payload's single
-// vram_total_gb/vram_free_gb pair describes. A single render job binds to
-// exactly ONE CUDA device — so the admission-relevant number is the biggest
-// device a job could actually land on, never an arbitrary enumeration index.
-// That distinction is the whole bug this fixes: nvidia-smi enumerates in PCI
-// bus order, which has no relationship to which device a CUDA app actually
-// computes on (CUDA_DEVICE_ORDER=FASTEST_FIRST can bind cuda:0 to nvidia-smi
-// index 1) — "index 0 wins" was an artifact of enumeration order dressed up
-// as a measurement, and it silently mis-sizes admission whenever the compute
-// card isn't index 0.
-//
-// Rule: the device with the LARGEST TotalGiB wins. An exact tie in total is
-// broken by whichever has more FreeGiB right now (more headroom to admit a
-// job against). This is deliberately NOT a sum across devices — summing free
-// VRAM would let the dispatcher admit a job that no single card can actually
-// hold, since a render binds to one device, not the fleet of them combined.
-//
-// Documented limitation: on a box with two near-identical-capacity cards
-// (see TestParseSmiMemoryDevices_NodeBShape: 16311 MiB vs 16303 MiB total, an
-// 8 MiB gap from per-SKU driver/firmware reserve, not a real capacity
-// difference), this rule has no way to know which index a CUDA app's device
-// -order policy will actually pick — nvidia-smi carries no such signal. It
-// picks the device with more raw capacity, which is a defensible,
-// deterministic, non-arbitrary choice, but is NOT guaranteed to be "the
-// compute card" on near-twin hardware. The full per-device breakdown in
-// Snapshot.Devices / the health payload's gpu_devices[] exists precisely so
-// a caller that needs to reason about this edge case (or a smarter
-// dispatcher) has the real numbers for every card, not just the headline
-// guess.
+// vram_total_gb/vram_free_gb pair describes: the LARGEST-total card (ties
+// broken by free memory), never enumeration order — a render binds to one
+// CUDA device and nvidia-smi's PCI-bus order says nothing about which. It is
+// a thin wrapper over gpuprobe.HeadlineDevice (the rule, its rationale and
+// its near-twin-card limitation are documented there) so the fallback the
+// health sampler applies is the same function the placement package sees.
+// This is the FALLBACK rule — SelectHeadlineDevice applies it only when no
+// primary_gpu_uuid is pinned (or the pinned UUID isn't present).
 //
 // devices must be non-empty — callers only reach this after a successful
 // parse, which never returns an empty slice.
-//
-// This is the FALLBACK rule — SelectHeadlineDevice applies it only when no
-// primary_gpu_uuid is pinned (or the pinned UUID isn't present), because
-// total VRAM alone cannot reliably identify "the" card either: two
-// same-SKU-size cards can be a near-tie (16311 vs 16303 MiB on <node-b>) that this
-// rule breaks by raw capacity, not by which one is actually doing the compute
-// work.
 func HeadlineDevice(devices []GPUDevice) GPUDevice {
-	head := devices[0]
-	for _, d := range devices[1:] {
-		if d.TotalGiB > head.TotalGiB || (d.TotalGiB == head.TotalGiB && d.FreeGiB > head.FreeGiB) {
-			head = d
-		}
-	}
-	return head
+	return gpuprobe.HeadlineDevice(devices)
 }
 
 // SelectHeadlineDevice is the full headline-selection rule the health sampler

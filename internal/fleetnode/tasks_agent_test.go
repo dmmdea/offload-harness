@@ -309,6 +309,60 @@ func TestAgentLaneAdvertisementMatchesAdmission(t *testing.T) {
 	}
 }
 
+// TestAgentDispatchCompositeNodeAdmitsAtItsOwnCap: the node's decode validates
+// at cfg.AgentContextCapBytes(), not the fixed 256 KiB. A composite delegator
+// admits a ~600 KiB long-context contract at its own cap (largest seat window
+// × 3 = 786432 on the fixture) and dispatches it to a composite remote; if the
+// remote re-validated at core.AgentContextMaxBytes it would answer 400 "cap"
+// at ACK and its 262k seat would be unreachable over the wire — exactly the
+// dead code the cap parameter exists to remove. The same body on a plain node
+// is still refused: a non-composite cfg's cap IS the 256 KiB default.
+func TestAgentDispatchCompositeNodeAdmitsAtItsOwnCap(t *testing.T) {
+	docs := make([]string, 0, 6)
+	for i := 0; i < 6; i++ {
+		d, err := json.Marshal(core.ContextDoc{Name: fmt.Sprintf("part-%d.md", i), Text: strings.Repeat("x", 100<<10)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		docs = append(docs, string(d))
+	}
+	payload := `{"schema_version":1,"goal":"g","context_class":"long","layer":"pair","output_schema":` + agentSchemaJSON +
+		`,"context":[` + strings.Join(docs, ",") + `]}`
+	if len(payload) <= core.AgentContextMaxBytes || len(payload) >= maxDispatchBody {
+		t.Fatalf("payload %d bytes must sit between the 256 KiB contract cap and the 1 MiB body cap to prove anything", len(payload))
+	}
+
+	plain := agentNodeCfg(t)
+	composite := agentNodeCfg(t)
+	fixture := config.CompositeFixture()
+	composite.TierProfile, composite.Tiers, composite.Layers = fixture.TierProfile, fixture.Tiers, fixture.Layers
+	if got := composite.AgentContextCapBytes(); got <= len(payload) {
+		t.Fatalf("composite cap %d must admit the %d-byte payload", got, len(payload))
+	}
+
+	for _, tc := range []struct {
+		name string
+		cfg  config.Config
+		want int
+	}{
+		{"composite node admits at its own cap", composite, http.StatusAccepted},
+		{"plain node keeps the 256 KiB cap", plain, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newTestServer(t, tc.cfg, &fakeRunner{}, authOpts(true))
+			body := `{"job_id":"agd-cap-` + strings.ReplaceAll(tc.name, " ", "-") + `","task_type":"agent","payload":` + payload + `}`
+			rec := do(t, s, http.MethodPost, "/fleet/dispatch", body,
+				map[string]string{"Authorization": "Bearer " + tc.cfg.FleetAuthToken})
+			if rec.Code != tc.want {
+				t.Fatalf("status %d, want %d (body %s)", rec.Code, tc.want, rec.Body.String())
+			}
+			if tc.want == http.StatusBadRequest {
+				wantErrorShape(t, rec, http.StatusBadRequest, "cap")
+			}
+		})
+	}
+}
+
 // TestAgentDispatchAdversarialBodies drives the malformed/oversize contract
 // shapes THROUGH THE MUX with the lane ON. The unit tests around BuildRequest
 // prove the decoder refuses these; only an end-to-end dispatch proves the
