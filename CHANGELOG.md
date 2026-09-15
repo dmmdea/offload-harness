@@ -69,6 +69,20 @@ them, each with the gate that keeps it wired and an assertion that it does NOT a
   vision seat since 0.116.1) and the field did not exist, so every one of them was parsed and dropped. The
   `blackwell-3x16` vision seat now carries its own: the bake-off that chose the model, the CUDA-X numbers behind
   each flag, and the A-25 propagation audit.
+- **`blackwell-2x16` seeds its OWN measured utilization, 0.85 (A-22).** The tier carried
+  `gpu_memory_utilization: 0.9` copied from `blackwell-3x16`, and a test asserted the two were IDENTICAL -- the
+  assertion that kept the copy in place. vLLM has ONE utilization for every rank, so the figure only means what
+  the cards it spans are also doing: on the 3-card box the pair is devices 0 and 2 and the DISPLAY card is
+  outside the seat, which is what makes 0.90 soak-verified there (10/10 cold loads plus a 20-minute soak; 0.92
+  lifted the pool ~10% without staying stable; 0.95 cannot initialise beside the mem0 embedder). On a TWO-card
+  box the pair IS every card the machine has, so one of the two also draws the desktop -- and that failure is
+  measured: 2026-09-04, a 3-card engine at util 0.87-0.90 left the display card under 1 GB, Windows fell to a
+  720p-class mode and the box needed a reboot. The two-card operating point was measured on the pair itself (arm
+  P, 2026-09-08): util 0.85 -> 2.32 GiB KV / 141,266 tokens, "Maximum concurrency for 131,072 tokens per request:
+  1.08x" -- still one full-window request. (Arm F, devices 1+2 at util 0.50, was VOID at -3.36 GiB.) This is a
+  SEED for a fresh 2-card install; the reference box's pair seat runs 0.90 under the H-24 soak and is not
+  redeployed by this change. `TestDualBlackwellSeedsThePairSeatWithTheCacheServer` now asserts each tier's own
+  figure and says why they differ; `max_model_len` and `ttl` stay pinned identical.
 ### Fixed
 - **A multi-device pin rendered as two env entries.** `env: [CUDA_VISIBLE_DEVICES=0,2]` is a YAML flow
   sequence, and YAML reads it as TWO items — `CUDA_VISIBLE_DEVICES=0` and `2` — so every seat that must span
