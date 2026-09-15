@@ -301,7 +301,7 @@ func TestReviewDiffHonoursMaxFindingsAndReportsWhatItHid(t *testing.T) {
 // two drop counts, and dedupe must run before the cap so the genuinely distinct finding still
 // gets published rather than being crowded out by copies of the other one.
 func TestReviewDiffPublishesDroppedDuplicateAndDedupesBeforeTheCap(t *testing.T) {
-	s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		return seatFindings(
 			"minor | run.go:9 | naming issue | cosmetic",
 			"minor | run.go:9 | naming issue | cosmetic",
