@@ -87,13 +87,15 @@ Read the response's `summary` block first (`succeeded` / `deferred` / `failed_ve
 transport/config failures **and** `infrastructure > 0` — the defers whose `defer_class` blames
 a broken or misconfigured node rather than the work.
 
-## `write-door/` — the write door's three-task gate fixtures (register D-06)
+## `write-door/` — the write door's four-task gate fixtures (registers D-06, D-114)
 
-Three staged implementation legs, one directory each with its own `contract.json` (`write_root: "."`,
+Four staged implementation legs, one directory each with its own `contract.json` (`write_root: "."`,
 `thinking: "off"`, diff-verb acceptance): `t1` a one-file Go fix (`Clamp` returns the wrong bound —
 `go test` is RED until it is fixed), `t2` a two-file Go fix plus one table case (`ParsePort` never
 rejects > 65535 — the fix and the case that exercises it), `t3` a JSON + Markdown record edit (flip
-one node's flag and its table cell, nothing else). `scripts/write-door-gate.ps1` sends them to one seat,
+one node's flag and its table cell, nothing else), `t4` a ~3 KB whole-file rewrite asked for in ONE `write_file`
+call (the shape whose cut argument the engine refuses — register D-114 — proved by comparing the applied copy
+line by line against the fixture: exactly the status line may differ). `scripts/write-door-gate.ps1` sends them to one seat,
 applies each returned diff to a FRESH copy and proves it there (`go test`, a JSON parse, exact-row
 checks) — the proof a caller of any write contract owes, since the harness never applies its own
 writes. Run it after opening `agent_allow_write` on a node:
@@ -103,7 +105,8 @@ scripts/write-door-gate.ps1 -Remote http://<node>:18811     # a fleet node's doo
 scripts/write-door-gate.ps1                                  # this box's own seat, route local
 ```
 
-Measured 2026-09-15: 3/3 on a 4B vLLM seat (18 / 45 / 48 s) and t1 in 10 s on a 27B seat. The files
+Measured 2026-09-15: 3/3 on a 4B vLLM seat (18 / 45 / 48 s) and t1 in 10 s on a 27B seat; `t4` is the shape
+measured the same day on the Aorus 9B llama.cpp seat, where a 1,024-token step budget cut the write mid-argument. The files
 are pinned `eol=lf` in `.gitattributes` so a seat's LF diff applies on every checkout.
 
 ## `digest-8.json` — the parallel-sessions gate fixture (0.111.0)

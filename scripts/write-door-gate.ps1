@@ -1,8 +1,8 @@
-﻿# write-door-gate.ps1 - the write door's three-task gate (ADR 0044, register D-06).
+﻿# write-door-gate.ps1 - the write door's four-task gate (ADR 0044, registers D-06 and D-114).
 #
 # Opening `agent_allow_write` on a node is a capability change; this is the proof that goes with it. It sends the
-# three staged implementation legs under contracts/write-door/ (a one-file Go fix, a two-file Go fix + test case,
-# a JSON + Markdown record edit) to ONE seat - a fleet node (`-Remote http://<node>:18811`, route remote) or this
+# four staged implementation legs under contracts/write-door/ (a one-file Go fix, a two-file Go fix + test case,
+# a JSON + Markdown record edit, a ~3 KB whole-file rewrite asked for in ONE write_file call) to ONE seat - a fleet node (`-Remote http://<node>:18811`, route remote) or this
 # box's own seat (no -Remote, route local) - then does what the caller of a write contract must always do: applies
 # each returned unified diff to a FRESH copy of the task and proves it there. The harness never applies its own
 # writes, so a green `summary.succeeded` is not the proof; the test run on the applied copy is.
@@ -11,11 +11,15 @@
 #   t2  go test passes before (the table had no case for the bug) and after, AND the patch must add the
 #       "too large" table row so the new case exercises the fix
 #   t3  nodes.json parses with exactly node-b flipped to true, nodes.md has exactly one row flipped to open
+#   t4  release-notes.md comes back whole with EXACTLY its status line changed - the ~3 KB single-call write whose
+#       cut argument the engine used to refuse (register D-114: llama.cpp answers 500 "Failed to parse tool call
+#       arguments as JSON ... missing closing quote" when the step budget cuts the content mid-string)
 #   all  the CLI exited 0 and the diff touches EXACTLY the task's expected files (the gate pins that set itself)
 #
-# Verdict: PASS only when all three tasks succeed, every diff applies cleanly and every proof holds; any deferred /
+# Verdict: PASS only when all four tasks succeed, every diff applies cleanly and every proof holds; any deferred /
 # failed_verification / refused (400: the node has not opted in) task is a FAIL that names the reason. Measured
-# 2026-09-14 (one task) and 2026-09-15 (these three, 18 / 45 / 48 s on a 4B seat; 10 s for t1 on a 27B seat).
+# 2026-09-14 (one task) and 2026-09-15 (t1-t3, 18 / 45 / 48 s on a 4B seat; 10 s for t1 on a 27B seat); t4 is the
+# shape measured on the Aorus 9B seat the same day, where a 1,024-token step budget cut the write mid-argument.
 param(
   [string]$Binary = "$PSScriptRoot\..\bin\local-offload.exe",
   [string]$Config = "$env:USERPROFILE\.local-offload\config.json",
@@ -27,7 +31,7 @@ $ErrorActionPreference = "Continue"
 if (-not (Test-Path $Binary)) { throw "binary not found: $Binary" }
 if (-not (Test-Path $Config)) { throw "config not found: $Config" }
 $root = Join-Path $PSScriptRoot "..\contracts\write-door"
-$ExpectedFiles = @{ t1 = @("clamp.go"); t2 = @("port.go", "port_test.go"); t3 = @("nodes.json", "nodes.md") }
+$ExpectedFiles = @{ t1 = @("clamp.go"); t2 = @("port.go", "port_test.go"); t3 = @("nodes.json", "nodes.md"); t4 = @("release-notes.md") }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 
@@ -106,12 +110,22 @@ function Prove([hashtable]$t) {
       elseif (-not $rowOk) { $t.ok = $false; $t.why = "nodes.md rows wrong (open=$openRows closed=$closedRows)" }
       else { $t.proof = "JSON parses, exactly node-b true; exactly one row open" }
     }
+    "t4" {
+      $orig = Get-Content (Join-Path (Join-Path $root "t4") "release-notes.md")
+      $now = Get-Content (Join-Path $t.copy "release-notes.md")
+      if ($now.Count -ne $orig.Count) { $t.ok = $false; $t.why = "release-notes.md came back with $($now.Count) lines, the fixture has $($orig.Count) - the single-call write did not carry the whole file"; return $t }
+      $changed = @()
+      for ($i = 0; $i -lt $orig.Count; $i++) { if ($orig[$i] -ne $now[$i]) { $changed += $i } }
+      if ($changed.Count -ne 1) { $t.ok = $false; $t.why = "$($changed.Count) lines differ from the fixture, expected exactly the status line" }
+      elseif ($orig[$changed[0]] -ne "Status: draft" -or $now[$changed[0]] -ne "Status: final") { $t.ok = $false; $t.why = "the changed line is '$($now[$changed[0]])' (was '$($orig[$changed[0]])'), expected 'Status: draft' -> 'Status: final'" }
+      else { $t.proof = "the whole file came back with exactly the status line changed ($($t.bytes) B of diff)" }
+    }
   }
   return $t
 }
 
 $results = @()
-foreach ($name in "t1", "t2", "t3") {
+foreach ($name in "t1", "t2", "t3", "t4") {
   $t = Invoke-Task $name
   $t = Prove $t
   $results += [pscustomobject]$t
@@ -119,8 +133,8 @@ foreach ($name in "t1", "t2", "t3") {
   Write-Host $line
 }
 $passed = @($results | Where-Object { $_.ok }).Count
-$verdict = if ($passed -eq 3) { "PASS (3/3 tasks: succeeded, diff applied to a fresh copy, proof held)" } else { "FAIL ($passed/3)" }
+$verdict = if ($passed -eq 4) { "PASS (4/4 tasks: succeeded, diff applied to a fresh copy, proof held)" } else { "FAIL ($passed/4)" }
 $report = [pscustomobject]@{ binary = $Binary; remote = $Remote; route = $(if ($Remote) { "remote" } else { "local" }); ran_at = (Get-Date -Format s); results = $results; verdict = $verdict }
 $report | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $OutDir "report-$stamp.json")
 Write-Host "VERDICT: $verdict"
-if ($passed -ne 3) { exit 1 }
+if ($passed -ne 4) { exit 1 }

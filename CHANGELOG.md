@@ -6,6 +6,22 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **A cut tool-call argument is a BUDGET defect, never infrastructure (register D-114).** When the seat's
+  completion budget runs out in the middle of a tool call's JSON argument, the engine refuses the call -
+  llama.cpp answers HTTP 500 `Failed to parse tool call arguments as JSON ... invalid string: missing closing
+  quote`, vLLM-shaped engines return the completion on `finish_reason: length` with the fragment attached.
+  The loop returned `stop_reason: error` and the node filed `defer_class: infrastructure` with `write_note:
+  the seat wrote nothing` - the stack blamed for a ~3 KB single-call write asked for at a 1,024-token step
+  budget (measured 2026-09-15, Aorus 9B, 2 steps / 135 s). Now `internal/agent/loop.go` recognises both shapes,
+  re-issues the SAME step ONCE at the wall-fitted final budget (4,096 on the fleet seats) with the transcript
+  unchanged and the fragment never appended or executed, and on a second cut ends the run on the new
+  `stop_reason: tool_call_cut` whose `stop_note` names both budgets and the partial argument size
+  ("tool-call argument cut at the completion budget twice (step 1024 tok, re-issued at 4096 tok; partial
+  argument 2847 chars) ..."). Every cut attempt appends a call record, so `results[].calls` shows the budget
+  each one generated at. `internal/pipeline/agenttask.go` maps the new stop reason to `defer_class: budget`
+  with that note as the reason. An unrelated 500 still stops on `error` and still reads as infrastructure.
+
 ### Added
 - **`results[].calls` on every delegate row (register D-99).** The `agent_delegate` tool description promised the
   per-completion record — `finish_reason`, `completion_tokens`, `reasoning_tokens`, `thinking_off`, `sampling`,
@@ -16,6 +32,11 @@ Versioning: [SemVer](https://semver.org/).
   byte-identical row. Pinned by `TestWireResponseCarriesTheLastEightCalls`, which reads the JSON, not the struct,
   and was red before the field existed. MCP, CLI and the opencode plugin all publish through `WireResponse`,
   so the field appears on every surface at once.
+- `contracts/write-door/t4` (register D-114): the measured shape as a write-door gate leg - a ~3 KB
+  `release-notes.md` whose status line must be flipped with ONE `write_file` call carrying the complete file.
+  `scripts/write-door-gate.ps1` is now a FOUR-task gate and proves t4 by comparing the applied copy line by
+  line against the fixture: same line count, exactly one differing line, and that line `Status: draft` ->
+  `Status: final`.
 - `contracts/digest-8-grounded.json` (register D-100): the eight digest contracts of `digest-8.json` with ONE
   grounded check per subtask on identifiers the document names and the goal does not. The old fixture's
   acceptance is shape-only (`min_items:findings:3` + `nonempty:summary`, which the intake lint says on every

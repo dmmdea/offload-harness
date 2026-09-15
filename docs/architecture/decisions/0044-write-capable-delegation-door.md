@@ -68,6 +68,12 @@ otherwise. `verified: true` on a write contract means a path was touched and the
 Caps are fixed rather than per-contract. A caller cannot raise them — that is what a door is — and does
 not need to lower them, because `diff_max_files:1` already says "this leg may touch one file".
 
+A write the seat cannot fit into ONE completion is a BUDGET defect, not a broken node (register D-114): the
+engine refuses a tool call whose JSON argument the step budget cut mid-string, the loop re-issues that step
+once at the final budget and, cut again, stops on `tool_call_cut` with both budgets and the partial argument
+size in `stop_note` - so the fix reads as "ask for a smaller write, or raise the step budget" instead of
+blaming the stack. `contracts/write-door/t4` is that shape as a gate leg.
+
 A write contract dispatched to a node that has not opted in costs one wasted round trip before it is
 re-placed. Advertising `agent_allow_write` on `/fleet/health` would remove that, at the price of
 changing a health wire pinned across a staggered fleet; the re-placement path already reaches the right

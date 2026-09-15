@@ -665,6 +665,20 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		})
 	}
 
+	if res.StopReason == agent.StopToolCallCut {
+		// The seat's tool-call ARGUMENT was cut by the completion budget twice
+		// (register D-114). The loop's note already names both budgets and the
+		// partial argument, and the class is BUDGET — until 0.124.0 llama.cpp's
+		// 500 reached the generic "agent loop:" branch below and the run was
+		// filed as `infrastructure`, which blames the box for a ~3 KB write
+		// asked for in one call at a 1,024-token step budget. Nothing to
+		// re-pack: Output is empty on this path.
+		reason := res.StopNote
+		if reason == "" {
+			reason = "tool-call argument cut at the completion budget twice"
+		}
+		return deferWire(core.DeferClassBudget, reason)
+	}
 	if res.StopReason == "budget" {
 		// The loop burned MaxSteps without a final answer. Output is empty on
 		// this path, so there is nothing to re-pack — defer, don't dress an
