@@ -579,7 +579,7 @@ does NOT contain:
 | delegator poll | `timeout_sec` + a grace window; C-27 credits back intervals the node PROVABLY spent queued (both endpoints observed `accepted`), bounded at `min(timeout_sec + grace, 5 min)`; a job that never started is a `queue deadline` FAILURE, never a `budget` defer | waiting for the node's answer | the capacity wait (`agent_placement_wait_sec`, `results[].capacity_wait_sec`) |
 | admission + warm-up (`agent_admission_wait_sec`, default 300) | the node, BEFORE its wall starts (D-64) | another model's swap on the endpoint, then the seat's own cold load (`admission_wait_sec`, `admission_note`) | anything after the first token |
 | node wall | `timeout_sec` as a context deadline over the loop | every planner call, tool execution, the re-pack | — |
-| loop budgets | `agent_max_tokens` per step (default 1,024; 4,096 on a thinking seat), the final answer at 4× (cap 8,192), 12 steps (`max_steps`, cap 12 remote), the forced final step (D-89) | one completion each | the wall — a step that generates for minutes is cut by the wall, not by its token budget |
+| loop budgets | `agent_max_tokens` per step (default 1,024; 4,096 on a thinking seat), the final answer at 4× (cap 8,192) **narrowed to what the remaining wall can decode** (0.122.1, D-95), 12 steps (`max_steps`, cap 12 remote), the forced final step (D-89) | one completion each | the wall — a step that generates for minutes is cut by the wall, not by its token budget |
 | engine + lease | the client's request timeout (split into connect / first token / stream, `llamaclient`), the GPU lease TTL (3,600 s default) against the media timeouts (`imagegen_timeout_sec` 600, `videogen_timeout_sec` 5,400, `gpu_wait_ms` 600,000 — C-33: a 5,400 s video run outlives the default lease; size the lease `--for` window to the job) | one request / one lease | — |
 
 **Sizing rule.** A wall is worth `cold load + (thinking auto ? one think block at the step budget : 0) + (steps − 1) ×
@@ -606,6 +606,44 @@ travel with the contract. Reference (2026-09-10, ledger-01 on both
 seats): the Qube 27B TP2 seat at ~30 tok/s needs ≈ 600 s thinking off / ≈ 730 s auto INCLUDING a 210 s cold load for a
 12-step, 8,192-token-final contract — a 600 s box default is at the edge and 900 s is the honest wall; the Lenovo 4B at
 ~30 tok/s answers the same contract in one step in 250–380 s with a 34 s cold load.
+
+**The final budget fits the wall (0.122.1, register D-95).** Sizing told the caller a contract would not fit; it did
+nothing about the run in flight, which still opened its final answer at the configured 4× budget. On the Lenovo 4B seat
+(~15 tok/s) a list-heavy extraction with an `output_schema` owed an 8,192-token final PLUS an 8,192-token re-pack — the
+node's own `wall_note` priced that at 1,166–1,310 s against a 900 s wall, and on 2026-09-14 `METHODOLOGY.md` and
+`SELF-CONTROL.md` hit the wall instead of answering (at the 4,096 budget the same contracts were CUT instead: three of
+ten deferred `output_truncated`). The same arithmetic now runs backwards, before the answer is asked for:
+
+```
+fit   = (remaining_wall − other − safety) × tok_s / turns
+final = min(configured final, fit), floored at 1,024, never raised above the configured cap
+```
+
+`turns` is **2** when the contract carries an `output_schema` (the final answer and its structured re-pack are both
+decoded on this seat inside this wall) and 1 otherwise; `other` is everything the run still owes that is not the answer
+— the estimate's cold load + think block + tool steps (`wall_estimate_sec`'s own non-final terms) at run start, and **0**
+at the forced final step, where those are already spent; `safety` is a tenth of the remaining wall, never less than one
+transcript prefill (6 s). It is computed at run start and again at the forced final step, off the LIVE clock. Worked
+example, the METHODOLOGY case: a 900 s wall, 15 tok/s, a schema, 12 steps, 2,048-token steps — `other` = 331 s (34 s cold
+load + 137 s think block + 160 s tool steps), safety 90 s, so `fit = (900 − 331 − 90) × 15 / 2 = 3,592 tokens`, and the run
+then owes 331 + 2×239 = **810 s of its 900 s wall** instead of 1,423 s. Results publish `final_budget_fit` and
+`budget_note` ("final 8192 → 3592 to fit 900 s at 15.0 tok/s (split with the output_schema re-pack)") on the node and the
+delegator wires. A seat with **no measured rate**, or a wall with room, publishes neither and runs byte-for-byte as
+before — the fit is a ceiling, never a raise. When even the floor does not fit, the floor stands and the note says `the
+wall will be the stop`, which is today's behaviour, named.
+
+**A cut final on a schema contract is re-issued once with list caps (0.122.1, register D-95).** 0.115.23 (D-91) refuses
+to re-pack a `length`-cut final — a partial cannot be re-packed into the requested object — but abstaining there threw
+away a run that had read the whole document and only over-answered: nothing had told the seat how long its lists could
+be. The loop now asks ONCE more, thinking off, at the same budget, with the caps spelled out: *cap every list at N items
+(keep the most important ones and drop the rest), and keep every string under 200 characters*. **N is the smallest
+`maxItems` anywhere in the contract's schema, and never more than 8** — a schema the author shaped is honoured, never
+broken by the retry, so set `maxItems` on your arrays when you know the bound. Three conditions gate it, so it can never
+re-create the shape it fixes: an `output_schema` is set, the partial is JSON-shaped (a cut narrative earns nothing —
+"cap every list" says nothing to it), and the wall still holds one turn at the seat's measured rate (`min_turn`, the
+re-pack term included). It is bounded at ONE: a seat that cuts the capped answer too abstains exactly as before, with
+`final_reissue=list_cap` and BOTH `finish_reason`s on the record (`calls[]`, and named in `repack_note`), so a first cut
+and a second are never read as the same event.
 
 ### What is the harness doing on the cards? (0.117.0, ADR 0041)
 

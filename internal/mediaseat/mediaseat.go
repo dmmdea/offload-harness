@@ -143,6 +143,13 @@ type Seat struct {
 	// given too few visual tokens answers confidently off a thumbnail; the reference
 	// vision seat pins 1024.
 	ImageMinTokens int `json:"image_min_tokens,omitempty"`
+
+	// Measured records what measured this seat -- the box, the build, the bake-off and
+	// the numbers -- so a reader never has to take the roster on faith and a future
+	// edit can see what it would be overturning. It is data, not configuration: it
+	// renders nothing. Tiers carried the key before the field existed, so the records
+	// were parsed and silently dropped.
+	Measured string `json:"measured,omitempty"`
 }
 
 // configKey is the harness config field a seat of this kind binds.

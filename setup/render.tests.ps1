@@ -219,7 +219,7 @@ if ($r.yaml -match '(?m)^\s{2}bge-reranker-v2-m3:')             { Ok 'b2x16 rera
 # The two-card concurrency contract: fast-card seats are alternatives, the STT seat
 # joins as a CONJUNCTION so it may run concurrently from the other card.
 $setLines = @($r.yaml -split "`r?`n" | Where-Object { $_ -match '^\s{4}(text|residents):' }) -join ' / '
-if ($r.yaml -match '(?m)^\s{4}text:\s*"\+residents & \(e4b \| e2b \| m26 \| a26 \| q38 \| vis\) & stt"') { Ok 'b2x16 matrix: one fast-card model (incl. 26b-agent + qwen3.8 alternatives) + concurrent STT + residents' } else { Bad "b2x16 matrix set (got: $setLines)" }
+if ($r.yaml -match '(?m)^\s{4}text:\s*"\+residents & \(e4b \| e2b \| m26 \| a26 \| q38 \| q38p \| vis\) & stt"') { Ok 'b2x16 matrix: one fast-card model (incl. 26b-agent, qwen3.8 and its --parallel 8 fan-out twin as alternatives) + concurrent STT + residents' } else { Bad "b2x16 matrix set (got: $setLines)" }
 if ($r.yaml -match '(?m)^\s{2}qwen3\.8-27b:')                   { Ok 'b2x16 qwen3.8 coder/agent seat present (include_qwen38)' } else { Bad 'b2x16 qwen3.8 seat missing' }
 if ($r.yaml -match '(?m)^\s{2}gemma-4-26b-agent:')              { Ok 'b2x16 26b-agent rollback seat present' } else { Bad 'b2x16 26b-agent seat missing' }
 if ($r.yaml -notmatch '__[A-Z0-9_]+__')                         { Ok 'b2x16 no unsubstituted tokens' } else { Bad 'b2x16 leftover tokens' }

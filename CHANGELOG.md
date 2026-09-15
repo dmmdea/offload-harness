@@ -72,6 +72,131 @@ revision stale breaks no rule - so it reported OK on ampere-16 for the whole tim
   It prints as a finding; STALE and HAND-EDITED exit 1.
 - **Nothing re-renders a live config.** The node only READS `serving_config_path`. Re-rendering stays `install
   render`, run by a human.
+## [0.122.2] - 2026-09-14 - measured winners wired: the 27B fan-out twin, `-sm tensor` everywhere it belongs, the pair seat's own utilization, the 3-card media roster
+
+Four ⚑WINNER rows of the harness master plan v2 (A-70, A-25, A-22, A-15) were measured on the reference box
+and never reached the tier seeds, so a fresh render shipped the loser of each measurement. This release wires
+them, each with the gate that keeps it wired and an assertion that it does NOT appear where it was not measured.
+
+### Added
+- **`qwen3.8-27b-par8`, the 27B's FAN-OUT twin, on both pair-spanning Blackwell templates (A-70).** The 27B
+  llama.cpp seat ships `--parallel 1` and is flat under fan-out — 34.6-37.4 tok/s aggregate at c1..c32, and it
+  answers 429 from c16 (6 of 16 and 22 of 32 requests failed in the baseline arm). On the SAME 5060 Ti pair at
+  the SAME `-c`, `--parallel 8` holds single-stream (W1 43.4 vs 43.6) and roughly TRIPLES aggregate: 78.7 /
+  110.8 / 100.7 / 106.8 at c4/8/16/32 with 0 failures (arm `par8-pair`, 2026-09-01, `llamacpp-par8-pair.json`,
+  ledger "FAIRNESS ARM par8-pair").
+  **It ships as its own entry rather than as a flag on the seat, and that is the whole decision.** llama.cpp
+  divides `-c` among its slots: eight slots at `--ctx-size 131072` serve **16,384 tokens each**. The same
+  night's Lenovo arm measured the mechanism in-house (`--parallel 8 -c 32768` → "16k/32k prompts exceed the
+  4k/slot window"). Both pair tiers declare `qwen3.8-27b` as their fallback agent lane at
+  `fallback_agent_ctx_tokens: 131072`, so moving the flag onto that seat would have served an eighth of the
+  advertised window — the advertise-more-than-you-serve defect `blackwell-8` shipped once already. Both entries
+  are swappable alternatives at `ttl: 300`, so the twin costs nothing until something asks for it.
+  Not `--parallel 16` (fails to start on this pair at `-c 131072` and at `-c 65536`; needs `-c 49152` plus
+  `--tensor-split 27,23`, for 119 vs 111 tok/s at c16) and not 32 (infeasible: ~350 MB of GDN recurrent state
+  PER SLOT → an 11.3 GB rs buffer beside ~9 GB of weights on a 16 GB card). The three-card arm is not what
+  ships: `par8-3c` reached 102.9 at c8 against the pair's 110.8 and it spans the display card, so the twin is
+  pair-pinned on `blackwell-3x16` like every other default seat there.
+  `TestPairSpanningTemplatesShipTheMeasuredFanoutTwin`, `TestDroppingQ38TakesTheFanoutTwinWithIt`,
+  `TestSingleCardTemplatesKeepTheirSingleSlot27B`.
+
+- **`-sm tensor` is now an INVARIANT, not one tier's flag (A-25).** The measurement is what makes it free: at the
+  SAME `--tensor-split 25,25`, moving Qwen3-VL-32B from `-sm layer` to `-sm tensor` produced BYTE-IDENTICAL output
+  5/5 on a fixed image+prompt while generation went 19.6 -> 34.1 tok/s (+74%) and prefill 995 -> 926 (CUDA-X
+  2026-09-05). It reached `blackwell-3x16` only. The audit: that is the ONLY tier in the table seating
+  Qwen3-VL-32B, so there is nothing left to propagate to -- `blackwell-2x16` is excluded on a recorded reason (the
+  seat spans BOTH cards of its pair, and on a 2-card box the second card pays the desktop/DWM tax, so the tier
+  would hand ~25 GB of its 32 GB to a swappable vision seat; it needs its own fit measurement first), and every
+  other tier is single-card or seats a model that fits one card. So the row ships as the rule instead of the copy:
+  a seat spanning more than one device MUST declare a split_mode (llama.cpp's default is the `-sm layer` this
+  measurement beat), a single-device seat must declare NEITHER split_mode nor tensor_split (a meaningless flag
+  copied between tiers is how the 3-card media block became a byte-for-byte copy of the 2-card one), and
+  tensor_split arity must match the pin. `TestEveryMultiCardMediaSeatCarriesTheMeasuredSplitMode`.
+- **The RENDERED vision command is gated, not just the JSON field.** `TestTripleBlackwellVisionSeatIsTheMeasuredWinner`
+  read `split_mode` out of the tier table; nothing asserted that the llama-swap entry servingtmpl builds by hand
+  carries `-sm tensor --tensor-split 25,25` -- and a field nothing renders measured nothing.
+  `TestTripleBlackwellRendersTheMeasuredSplitMode` renders the real committed seats through the tier's own
+  template and asserts the flag present there and absent from every single-card seat.
+- **`mediaseat.Seat.Measured`.** Tiers were already writing `measured` records into media seats (`ampere-16`'s
+  vision seat since 0.116.1) and the field did not exist, so every one of them was parsed and dropped. The
+  `blackwell-3x16` vision seat now carries its own: the bake-off that chose the model, the CUDA-X numbers behind
+  each flag, and the A-25 propagation audit.
+- **`blackwell-2x16` seeds its OWN measured utilization, 0.85 (A-22).** The tier carried
+  `gpu_memory_utilization: 0.9` copied from `blackwell-3x16`, and a test asserted the two were IDENTICAL -- the
+  assertion that kept the copy in place. vLLM has ONE utilization for every rank, so the figure only means what
+  the cards it spans are also doing: on the 3-card box the pair is devices 0 and 2 and the DISPLAY card is
+  outside the seat, which is what makes 0.90 soak-verified there (10/10 cold loads plus a 20-minute soak; 0.92
+  lifted the pool ~10% without staying stable; 0.95 cannot initialise beside the mem0 embedder). On a TWO-card
+  box the pair IS every card the machine has, so one of the two also draws the desktop -- and that failure is
+  measured: 2026-09-04, a 3-card engine at util 0.87-0.90 left the display card under 1 GB, Windows fell to a
+  720p-class mode and the box needed a reboot. The two-card operating point was measured on the pair itself (arm
+  P, 2026-09-08): util 0.85 -> 2.32 GiB KV / 141,266 tokens, "Maximum concurrency for 131,072 tokens per request:
+  1.08x" -- still one full-window request. (Arm F, devices 1+2 at util 0.50, was VOID at -3.36 GiB.) This is a
+  SEED for a fresh 2-card install; the reference box's pair seat runs 0.90 under the H-24 soak and is not
+  redeployed by this change. `TestDualBlackwellSeedsThePairSeatWithTheCacheServer` now asserts each tier's own
+  figure and says why they differ; `max_model_len` and `ttl` stay pinned identical.
+- **The 3-card media roster is audited against its own bake-off and gated (A-15).** The 48 GB bake-off ran the
+  whole media lane on the reference box; the tier shipped a media block copied byte-for-byte from
+  `blackwell-2x16`, which is why the 3-card box measured no media difference from the 2-card one. PR #264
+  corrected the PLACEMENTS and #266 the vision MODEL — nothing ever gated what the bake-off DECIDED about models
+  and precision, so the roster could drift back into a copy without failing anything. Slot by slot: vision
+  qwen3-vl-32b on the pair (MMMU +11); ocr qwen3-vl-8b on card 2 (the 32B regressed there: DocVQA -3.7 plus dense
+  transcription); stt whisper large-v3-TURBO on card 2 (turbo wins or ties every group, es-long WER 0.0652 vs
+  0.0838, at ~2x the speed — the proposed `stt_hq` lane FAILED and stays empty); imagegen Krea 2 TURBO bf16 at
+  8 steps / cfg 1 on pool cuda:1 + donor cuda:2 (Krea 2 RAW is BROKEN on ComfyUI 0.34.0 under every recipe tested
+  — composition correct, buried in terminal noise, same-seed Turbo clean — so RAW is a fine-tuning base, not a
+  servable lane); videogen LTX-2.5 int8-convrot with the CONV video VAE (round 2 of the decoder A/B changed only
+  the VAE: conv resolved more detail on every one of 5 pairs, +15-25% Laplacian energy and +9-11% high-frequency,
+  start-frame fidelity a wash at 0.02-0.26 dB, and conv was 12-15% FASTER — it wins on both measurable axes),
+  compute cuda:0 still the documented ComfyUI-MultiGPU #220 exception. **One slot has no winner and was left
+  alone: TTS.** Chatterbox v3 and both Spanish packs transcribe back verbatim, but naturalness was explicitly
+  left as an operator A/B and adoption needs a contained-venv bump — the seed is unchanged and the gate says
+  nothing about it. `TestTripleBlackwellMediaRosterIsTheMeasuredOne`; the ocr and stt seats carry their own
+  `measured` records now, as the vision seat does.
+### Fixed
+- **A multi-device pin rendered as two env entries.** `env: [CUDA_VISIBLE_DEVICES=0,2]` is a YAML flow
+  sequence, and YAML reads it as TWO items — `CUDA_VISIBLE_DEVICES=0` and `2` — so every seat that must span
+  the 5060 Ti pair was handed ONE card plus a nonsense variable: `qwen3.8-27b` and `qwen3.8-27b-262k` in
+  `llama-swap.win-triple-blackwell.yaml`, and, through the media-seat renderer, the `qwen3-vl-32b` vision seat
+  whose whole point is that a 32B does not fit one 16 GB card. The three template lines are quoted, and
+  `flowItems` now quotes any per-seat env entry containing a flow separator; barewords are kept for everything
+  else so the existing rendered text and its assertions are unchanged.
+## [0.122.1] - 2026-09-14 - the final budget fits the wall; a cut final on a schema contract is re-issued once with list caps
+
+### Fixed
+- **The final answer's completion budget now FITS the wall that is left** (`internal/seatrate`,
+  `internal/agent/loop.go`, `internal/pipeline/agenttask.go`; register D-95). The budget was
+  `FinalBudgetFor` alone — 4x the step budget, cap 8,192 — whatever the wall could actually decode.
+  Measured 2026-09-14 on the Lenovo 4B seat (`qwen3.5-4b-vllm`, ~15 tok/s): list-heavy grounded
+  extractions with an `output_schema` owed a 8,192-token final PLUS an 8,192-token re-pack, which the
+  harness's own `wall_note` priced at 1,166–1,310 s against a 900 s wall. Three of ten contracts died
+  there — at the 4,096 budget they were cut (`finish_reason=length` → `output_truncated` → re-pack
+  skipped → deferred after 309–450 s), and at 8,192 `METHODOLOGY.md` and `SELF-CONTROL.md` hit the
+  900 s wall instead. `seatrate.FitFinalBudget` now computes
+  `fit = (remaining_wall - other - safety) x tok_s / turns` (`turns` = 2 when a schema is set, because
+  the final answer and its re-pack are both decoded inside this wall; `other` = the estimate's cold
+  load + think block + tool steps, 0 once those are spent; `safety` = a tenth of the wall, never less
+  than one transcript prefill) and the run uses `min(configured, fit)`, floored at 1,024 and never
+  raised above the configured cap. Computed at run start and again at the forced final step, where the
+  live clock is the honest input. `Estimate.OtherSec` publishes the non-final terms so the fit
+  subtracts exactly what the estimate charged. Results carry `final_budget_fit` and `budget_note`
+  ("final 8192 → 3592 to fit 900 s at 15.0 tok/s (split with the output_schema re-pack)") on the node
+  and delegator wires; a seat with no measured rate, or a wall with room, publishes neither and runs
+  byte-for-byte as before.
+- **A cut final on a schema contract is re-issued ONCE with explicit list caps** (`internal/agent`,
+  `internal/pipeline`; register D-95). 0.115.23 (D-91) rightly refuses to re-pack a `length`-cut final
+  — a partial cannot be re-packed — but abstaining there threw away a run that had read the whole
+  document and only over-answered: the seat was never told how long its lists could be. The loop now
+  asks once more, thinking off, at the same budget, with the caps spelled out ("cap every list at N
+  items … keep every string under 200 characters"), where N is the SMALLEST `maxItems` in the
+  contract's schema and never more than 8 — a schema the author shaped is honoured, never broken by
+  the retry. Gated on three conditions, so it can never re-create the shape it fixes: an
+  `output_schema` is set, the partial is JSON-shaped (a cut narrative earns nothing), and the wall
+  still holds one turn at the seat's measured rate (`seatrate.MinTurnFor`, re-pack term included).
+  Bounded at one: a seat that cuts the capped answer too abstains exactly as before, with
+  `final_reissue=list_cap` and both `finish_reason`s on the record (`calls[]` and `repack_note`), so a
+  first cut and a second are never read as the same event.
+
 ## [0.122.0] - 2026-09-14 - a write-capable delegation door, default off (D-06)
 
 ### Added
@@ -102,6 +227,96 @@ revision stale breaks no rule - so it reported OK on ampere-16 for the whole tim
   Caps are enforced twice: `agent.WriteLimit` refuses the offending call at the tool, and the finished
   write set is re-counted before it crosses the wire. A cap breach publishes NO diff — a truncated patch
   applies as silent damage.
+
+## [0.121.1] - 2026-09-14 - the result cache opens lazily, and reads without writing
+
+Four ⚑WINNER rows of the harness master plan v2 (A-70, A-25, A-22, A-15) were measured on the reference box
+and never reached the tier seeds, so a fresh render shipped the loser of each measurement. This release wires
+them, each with the gate that keeps it wired and an assertion that it does NOT appear where it was not measured.
+
+### Added
+- **`qwen3.8-27b-par8`, the 27B's FAN-OUT twin, on both pair-spanning Blackwell templates (A-70).** The 27B
+  llama.cpp seat ships `--parallel 1` and is flat under fan-out — 34.6-37.4 tok/s aggregate at c1..c32, and it
+  answers 429 from c16 (6 of 16 and 22 of 32 requests failed in the baseline arm). On the SAME 5060 Ti pair at
+  the SAME `-c`, `--parallel 8` holds single-stream (W1 43.4 vs 43.6) and roughly TRIPLES aggregate: 78.7 /
+  110.8 / 100.7 / 106.8 at c4/8/16/32 with 0 failures (arm `par8-pair`, 2026-09-01, `llamacpp-par8-pair.json`,
+  ledger "FAIRNESS ARM par8-pair").
+  **It ships as its own entry rather than as a flag on the seat, and that is the whole decision.** llama.cpp
+  divides `-c` among its slots: eight slots at `--ctx-size 131072` serve **16,384 tokens each**. The same
+  night's Lenovo arm measured the mechanism in-house (`--parallel 8 -c 32768` → "16k/32k prompts exceed the
+  4k/slot window"). Both pair tiers declare `qwen3.8-27b` as their fallback agent lane at
+  `fallback_agent_ctx_tokens: 131072`, so moving the flag onto that seat would have served an eighth of the
+  advertised window — the advertise-more-than-you-serve defect `blackwell-8` shipped once already. Both entries
+  are swappable alternatives at `ttl: 300`, so the twin costs nothing until something asks for it.
+  Not `--parallel 16` (fails to start on this pair at `-c 131072` and at `-c 65536`; needs `-c 49152` plus
+  `--tensor-split 27,23`, for 119 vs 111 tok/s at c16) and not 32 (infeasible: ~350 MB of GDN recurrent state
+  PER SLOT → an 11.3 GB rs buffer beside ~9 GB of weights on a 16 GB card). The three-card arm is not what
+  ships: `par8-3c` reached 102.9 at c8 against the pair's 110.8 and it spans the display card, so the twin is
+  pair-pinned on `blackwell-3x16` like every other default seat there.
+  `TestPairSpanningTemplatesShipTheMeasuredFanoutTwin`, `TestDroppingQ38TakesTheFanoutTwinWithIt`,
+  `TestSingleCardTemplatesKeepTheirSingleSlot27B`.
+
+- **`-sm tensor` is now an INVARIANT, not one tier's flag (A-25).** The measurement is what makes it free: at the
+  SAME `--tensor-split 25,25`, moving Qwen3-VL-32B from `-sm layer` to `-sm tensor` produced BYTE-IDENTICAL output
+  5/5 on a fixed image+prompt while generation went 19.6 -> 34.1 tok/s (+74%) and prefill 995 -> 926 (CUDA-X
+  2026-09-05). It reached `blackwell-3x16` only. The audit: that is the ONLY tier in the table seating
+  Qwen3-VL-32B, so there is nothing left to propagate to -- `blackwell-2x16` is excluded on a recorded reason (the
+  seat spans BOTH cards of its pair, and on a 2-card box the second card pays the desktop/DWM tax, so the tier
+  would hand ~25 GB of its 32 GB to a swappable vision seat; it needs its own fit measurement first), and every
+  other tier is single-card or seats a model that fits one card. So the row ships as the rule instead of the copy:
+  a seat spanning more than one device MUST declare a split_mode (llama.cpp's default is the `-sm layer` this
+  measurement beat), a single-device seat must declare NEITHER split_mode nor tensor_split (a meaningless flag
+  copied between tiers is how the 3-card media block became a byte-for-byte copy of the 2-card one), and
+  tensor_split arity must match the pin. `TestEveryMultiCardMediaSeatCarriesTheMeasuredSplitMode`.
+- **The RENDERED vision command is gated, not just the JSON field.** `TestTripleBlackwellVisionSeatIsTheMeasuredWinner`
+  read `split_mode` out of the tier table; nothing asserted that the llama-swap entry servingtmpl builds by hand
+  carries `-sm tensor --tensor-split 25,25` -- and a field nothing renders measured nothing.
+  `TestTripleBlackwellRendersTheMeasuredSplitMode` renders the real committed seats through the tier's own
+  template and asserts the flag present there and absent from every single-card seat.
+- **`mediaseat.Seat.Measured`.** Tiers were already writing `measured` records into media seats (`ampere-16`'s
+  vision seat since 0.116.1) and the field did not exist, so every one of them was parsed and dropped. The
+  `blackwell-3x16` vision seat now carries its own: the bake-off that chose the model, the CUDA-X numbers behind
+  each flag, and the A-25 propagation audit.
+- **`blackwell-2x16` seeds its OWN measured utilization, 0.85 (A-22).** The tier carried
+  `gpu_memory_utilization: 0.9` copied from `blackwell-3x16`, and a test asserted the two were IDENTICAL -- the
+  assertion that kept the copy in place. vLLM has ONE utilization for every rank, so the figure only means what
+  the cards it spans are also doing: on the 3-card box the pair is devices 0 and 2 and the DISPLAY card is
+  outside the seat, which is what makes 0.90 soak-verified there (10/10 cold loads plus a 20-minute soak; 0.92
+  lifted the pool ~10% without staying stable; 0.95 cannot initialise beside the mem0 embedder). On a TWO-card
+  box the pair IS every card the machine has, so one of the two also draws the desktop -- and that failure is
+  measured: 2026-09-04, a 3-card engine at util 0.87-0.90 left the display card under 1 GB, Windows fell to a
+  720p-class mode and the box needed a reboot. The two-card operating point was measured on the pair itself (arm
+  P, 2026-09-08): util 0.85 -> 2.32 GiB KV / 141,266 tokens, "Maximum concurrency for 131,072 tokens per request:
+  1.08x" -- still one full-window request. (Arm F, devices 1+2 at util 0.50, was VOID at -3.36 GiB.) This is a
+  SEED for a fresh 2-card install; the reference box's pair seat runs 0.90 under the H-24 soak and is not
+  redeployed by this change. `TestDualBlackwellSeedsThePairSeatWithTheCacheServer` now asserts each tier's own
+  figure and says why they differ; `max_model_len` and `ttl` stay pinned identical.
+- **The 3-card media roster is audited against its own bake-off and gated (A-15).** The 48 GB bake-off ran the
+  whole media lane on the reference box; the tier shipped a media block copied byte-for-byte from
+  `blackwell-2x16`, which is why the 3-card box measured no media difference from the 2-card one. PR #264
+  corrected the PLACEMENTS and #266 the vision MODEL — nothing ever gated what the bake-off DECIDED about models
+  and precision, so the roster could drift back into a copy without failing anything. Slot by slot: vision
+  qwen3-vl-32b on the pair (MMMU +11); ocr qwen3-vl-8b on card 2 (the 32B regressed there: DocVQA -3.7 plus dense
+  transcription); stt whisper large-v3-TURBO on card 2 (turbo wins or ties every group, es-long WER 0.0652 vs
+  0.0838, at ~2x the speed — the proposed `stt_hq` lane FAILED and stays empty); imagegen Krea 2 TURBO bf16 at
+  8 steps / cfg 1 on pool cuda:1 + donor cuda:2 (Krea 2 RAW is BROKEN on ComfyUI 0.34.0 under every recipe tested
+  — composition correct, buried in terminal noise, same-seed Turbo clean — so RAW is a fine-tuning base, not a
+  servable lane); videogen LTX-2.5 int8-convrot with the CONV video VAE (round 2 of the decoder A/B changed only
+  the VAE: conv resolved more detail on every one of 5 pairs, +15-25% Laplacian energy and +9-11% high-frequency,
+  start-frame fidelity a wash at 0.02-0.26 dB, and conv was 12-15% FASTER — it wins on both measurable axes),
+  compute cuda:0 still the documented ComfyUI-MultiGPU #220 exception. **One slot has no winner and was left
+  alone: TTS.** Chatterbox v3 and both Spanish packs transcribe back verbatim, but naturalness was explicitly
+  left as an operator A/B and adoption needs a contained-venv bump — the seed is unchanged and the gate says
+  nothing about it. `TestTripleBlackwellMediaRosterIsTheMeasuredOne`; the ocr and stt seats carry their own
+  `measured` records now, as the vision seat does.
+### Fixed
+- **A multi-device pin rendered as two env entries.** `env: [CUDA_VISIBLE_DEVICES=0,2]` is a YAML flow
+  sequence, and YAML reads it as TWO items — `CUDA_VISIBLE_DEVICES=0` and `2` — so every seat that must span
+  the 5060 Ti pair was handed ONE card plus a nonsense variable: `qwen3.8-27b` and `qwen3.8-27b-262k` in
+  `llama-swap.win-triple-blackwell.yaml`, and, through the media-seat renderer, the `qwen3-vl-32b` vision seat
+  whose whole point is that a 32B does not fit one 16 GB card. The three template lines are quoted, and
+  `flowItems` now quotes any per-seat env entry containing a flow separator; barewords are kept for everything
+  else so the existing rendered text and its assertions are unchanged.
 ## [0.121.1] - 2026-09-14 - the result cache opens lazily, and reads without writing
 
 Register D-05 (P1). `offload_status.reuse.result_cache` on this workstation reported `fallback: true ...
@@ -144,6 +359,7 @@ fix instead.
   the census the D-05 regression is measured in and which nothing reported while 49 files accumulated. It also
   reports `entries` / `entries_from`, counted through the read-only handle. Asking never resolves the server's
   own handle and never creates a file.
+
 ## [0.121.0] - 2026-09-14 - a cache-server binding per vLLM seat
 
 ### Changed
