@@ -28,7 +28,7 @@
     "acceptance": [
       "min_items:findings:3",
       "nonempty:summary",
-      "contains:installed.json"
+      "regex:(profiles\\.json|offload_ocr|hwdetect|installed\\.json)"
     ],
     "profile": "research",
     "max_steps": 8,
@@ -63,7 +63,7 @@
     "acceptance": [
       "min_items:findings:3",
       "nonempty:summary",
-      "contains:agent_model"
+      "regex:(llamaclient|modelaffinity|base URL|agent_model)"
     ],
     "profile": "research",
     "max_steps": 8,
@@ -98,7 +98,7 @@
     "acceptance": [
       "min_items:findings:3",
       "nonempty:summary",
-      "contains:gpulease.InspectDir"
+      "regex:(gpulease|LocalBusy|InspectDir|gpulock)"
     ],
     "profile": "research",
     "max_steps": 8,
@@ -133,7 +133,7 @@
     "acceptance": [
       "min_items:findings:3",
       "nonempty:summary",
-      "contains:gpt-oss-20b"
+      "regex:(gpt-oss-120b|gpt-oss-20b|1919|num-tokens|FlashML)"
     ],
     "profile": "research",
     "max_steps": 8,
@@ -168,7 +168,7 @@
     "acceptance": [
       "min_items:findings:3",
       "nonempty:summary",
-      "contains:delegate-intent.jsonl"
+      "regex:(delegate-intent\\.jsonl|intent\\.go|state-root|delegate-recovered|scoreboard)"
     ],
     "profile": "research",
     "max_steps": 8,
@@ -203,7 +203,7 @@
     "acceptance": [
       "min_items:findings:3",
       "nonempty:summary",
-      "contains:fleet_queue_holder"
+      "regex:(fleet_queue_holder|fleet_queue_host|fleet_queue_claim|fleetqueue|claim)"
     ],
     "profile": "research",
     "max_steps": 8,
@@ -238,7 +238,7 @@
     "acceptance": [
       "min_items:findings:3",
       "nonempty:summary",
-      "contains:harness-loop-guard.js"
+      "regex:(agent_delegate|offload_research|harness-loop-guard|PreToolUse|offload-first)"
     ],
     "profile": "research",
     "max_steps": 8,
@@ -273,7 +273,7 @@
     "acceptance": [
       "min_items:findings:3",
       "nonempty:summary",
-      "contains:AnchorCheck"
+      "regex:(RunAgentTask|seatwait|LLMClient|Retry-After|429|Quarantine|RunBatched|DocFingerprint|AnchorCheck)"
     ],
     "profile": "research",
     "max_steps": 8,

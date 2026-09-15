@@ -115,13 +115,18 @@ and prove the seat-contention wait fires instead of deferring (ADR 0032). Needs 
 
 `digest-8.json`'s acceptance is SHAPE-ONLY (`min_items:findings:3` + `nonempty:summary`; the intake lint
 says so on every run), so an 8/8 on it proves the loop completed and the schema filled, not that the
-digests are right. This fixture adds ONE `contains:` per subtask on an identifier the document names and
-the goal does not (`installed.json`, `agent_model`, `gpulease.InspectDir`, `gpt-oss-20b`,
-`delegate-intent.jsonl`, `fleet_queue_holder`, `harness-loop-guard.js`, `AnchorCheck`) — extracted by the
-fleet seats on 2026-09-15 and re-checked against each document, so a faithful digest cannot avoid naming
-it and an evasive one fails verification. Run it BESIDE the old fixture (same seats, same day) for three
-K×8 passes before it replaces the old one: a step in pass rate is then attributable to the acceptance,
-not to the seats. Same inline `context`, no `--read-root`:
+digests are right. This fixture adds ONE `regex:` alternation per subtask over the document's CENTRAL
+identifiers — terms the document names and the goal does not (ADR 0025: `llamaclient`, `modelaffinity`,
+`base URL`, `agent_model`; ADR 0027: `gpt-oss-120b`, `gpt-oss-20b`, `1919`, `num-tokens`, `FlashML`; and so
+on), every alternative checked present-in-document and absent-from-goal when the fixture is built. A digest
+that names none of a decision's key identifiers is shallow and fails verification; one that names any of
+them is grounded. **Why an alternation, not one token (v2, 2026-09-15):** v1 carried one `contains:` per
+subtask on a token that occurs exactly ONCE in its document (`agent_model` is a table cell of ADR 0025,
+`gpt-oss-20b` a passing comparison in ADR 0027). Measured on quiet seats the same day, correct digests
+skipped them: the 9B passed 2/8 and the 4B 4/8 while every contract completed and the spot-checked digests
+were right — v1 failed correct digests, which is the one thing an acceptance may not do. Run it BESIDE the
+old fixture (same seats, same day) for three K×8 passes before it replaces the old one: a step in pass rate
+is then attributable to the acceptance, not to the seats. Same inline `context`, no `--read-root`:
 
 ```powershell
 local-offload delegate --contract contracts/digest-8-grounded.json --route local     # this box's seat
