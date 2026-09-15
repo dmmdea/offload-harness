@@ -472,7 +472,19 @@ if (-not (Test-Path $seedExe)) {
     if ($LASTEXITCODE -ne 0) { throw "cannot build the seed resolver under test: $($bo -join ' ')" }
   } finally { Pop-Location }
 }
-$goSeedRaw = & $seedExe install seed --profile blackwell-3x16 --home $work --os windows --ram-tier high 2>$null
+# A native command writing to stderr becomes a TERMINATING error under
+# $ErrorActionPreference = 'Stop' (this file sets it, and install.ps1 documents
+# the same trap): `install seed` prints a NOTE when the box has no vLLM venv,
+# which is the NORMAL case on a CI runner. Capture on Continue, judge by the
+# exit code.
+$prevSeedEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try { $goSeedRaw = & $seedExe install seed --profile blackwell-3x16 --home $work --os windows --ram-tier high 2>&1 } finally { $ErrorActionPreference = $prevSeedEap }
+if ($LASTEXITCODE -ne 0) { Bad "install seed failed ($LASTEXITCODE): $($goSeedRaw -join ' ')" }
+# Keep only the JSON body: the NOTE lines are not part of the seed.
+$goSeedRaw = @($goSeedRaw | Where-Object { $_ -is [string] -or $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { [string]$_ })
+$jsonStart = ($goSeedRaw | Select-String -Pattern '^\s*\{' | Select-Object -First 1)
+if ($jsonStart) { $goSeedRaw = $goSeedRaw[($jsonStart.LineNumber - 1)..($goSeedRaw.Count - 1)] }
 $goSeed = ($goSeedRaw -join "`n") | ConvertFrom-Json
 if ($goSeed.tier_profile -eq $obj3.tier_profile) { Ok 'tier_profile matches internal/tierseed' } else { Bad "tier_profile parity (go: '$($goSeed.tier_profile)', ps: '$($obj3.tier_profile)')" }
 if ((@($goSeed.tiers) -join ',') -eq (@($obj3.tiers) -join ',')) { Ok 'tiers match internal/tierseed' } else { Bad "tiers parity (go: $(@($goSeed.tiers) -join ','), ps: $(@($obj3.tiers) -join ','))" }

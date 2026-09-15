@@ -198,11 +198,19 @@ func TestAgentRunPublishesPlacedOnACompositeBoxAndGuardsAnExplicitOptInModel(t *
 
 	// Awake but guarded: operator_presence defaults to present, so the display
 	// card refuses by NAME — the guard, not a generic capacity message.
+	//
+	// The layer is narrowed to the PRESENCE guard alone for this case, and that
+	// is not a convenience: display_floor is evaluated first and reads the live
+	// cards, so on a machine with no nvidia-smi (CI) it refuses as unreadable
+	// and on a machine with cards it depends on what is loaded right now. A
+	// test that asserts which guard refused must not depend on the host it runs
+	// on — the fail-closed floor has its own tests over injected readings.
 	awake := shippedComposite()
 	awake.Endpoint = swap.URL
 	for i := range awake.Layers {
 		if awake.Layers[i].Name == "display" {
 			awake.Layers[i].Dormant = false
+			awake.Layers[i].Guards = []string{"presence"}
 		}
 	}
 	s = New(pipeline.New(awake, nil, nil, nil))
