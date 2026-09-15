@@ -2635,6 +2635,9 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 	// them — a doctor that is red for llama-swap and silent about a broken media
 	// binding is the same blind spot in a different disguise.
 	mediaMissing := writeMediaSection(w, routes)
+	// Same reasoning, same place in the order: the cache-server verdicts are pure
+	// config too, so a serving layer that happens to be down must never hide them.
+	unbound := writeCacheServerSection(w, cfg)
 	client := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, 5*time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2666,7 +2669,58 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 	if mediaMissing > 0 {
 		return fmt.Errorf("%d media route(s) bound to a file that does not exist on this machine", mediaMissing)
 	}
+	if unbound > 0 {
+		return fmt.Errorf("%d vLLM seat(s) with no kv_cache_server binding", unbound)
+	}
 	return nil
+}
+
+// writeCacheServerSection prints ONE LINE PER vLLM SEAT of this box and returns how
+// many have no binding — the number that makes doctor exit non-zero.
+//
+// The rule is the operator directive of 2026-09-10: the second device's KV store
+// backs EVERY vLLM seat while that device is online. What made that rule
+// unenforceable was a config that bound one `kv_cache_server.seat` to a single seat
+// name, so a second seat running with no tier looked exactly like a second seat
+// nobody had thought about. Here the two are different lines.
+//
+// An explicit opt-out PASSES: `{"seat":"…","storeless":true,"reason":"…"}` is a
+// decision, and a tier that is optional by charter must let a box decline it. What
+// does not pass is silence — no binding at all, or a binding switched off with
+// nothing saying why.
+//
+// A box that declares no vllm_seats prints nothing and fails nothing: it runs no
+// vLLM seat, so the gate has no subject — and the cascade deliberately STAYS on
+// llama.cpp (Gemma-4 hybrids crash LMCache's V2 path, upstream #4263), which is why
+// the roster is declared in config rather than sniffed from /v1/models.
+func writeCacheServerSection(w io.Writer, cfg config.Config) int {
+	seats := cfg.VLLMSeats
+	if len(seats) == 0 {
+		return 0
+	}
+	fmt.Fprintln(w, "cache server (one binding per vLLM seat; the store backs every seat while the second device is online):")
+	unbound := 0
+	for _, seat := range seats {
+		b := cfg.KVCacheServers.For(seat)
+		switch {
+		case b == nil:
+			unbound++
+			fmt.Fprintf(w, "  %-24s FAIL  no kv_cache_server binding — give this seat a store, or opt out explicitly with {\"seat\":%q,\"storeless\":true,\"reason\":\"<why>\"}\n",
+				seat+":", seat)
+		case b.Storeless:
+			fmt.Fprintf(w, "  %-24s OK    storeless by declaration: %s\n", seat+":", b.Reason)
+		case !b.Enabled:
+			unbound++
+			fmt.Fprintf(w, "  %-24s FAIL  binding present but enabled:false and no storeless reason — turn the store on, or say why this seat runs without one\n", seat+":")
+		default:
+			fmt.Fprintf(w, "  %-24s OK    %s %s key_prefix=%s l1=%dGB\n",
+				seat+":", b.StoreName(), b.Address, b.EffectiveKeyPrefix(), b.EffectiveL1StagingGB())
+		}
+	}
+	for _, seat := range cfg.KVCacheServers.BoundSeatsNotDeclared(seats) {
+		fmt.Fprintf(w, "  %-24s -     a binding names this seat, but vllm_seats does not list it (a store nothing reads, or a rename that left the binding behind)\n", seat+":")
+	}
+	return unbound
 }
 
 // writeMediaSection prints this machine's DERIVED media capability and returns

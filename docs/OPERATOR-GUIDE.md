@@ -776,26 +776,69 @@ when the store namespace was shared across layouts), the GPU
 stays free while the load streams, and they survive a seat swap. Same-box RAM as the tier is faster
 (0.50 s, 49.7×) but spends the serving PC's memory; the second device is the capacity route.
 
-**Off by default; nothing depends on it.** Declare it only when a second device exists:
+**Off by default; nothing depends on it.** `kv_cache_server` is a LIST of per-seat bindings, one per
+vLLM seat, and `vllm_seats` is this box's vLLM roster (0.121.0 — ADR 0045). Declare both only when a
+second device exists:
 
 ```json
-"kv_cache_server": {
-  "enabled": true,
-  "store": "valkey",
-  "address": "<store-lan-ip>:18799",
-  "l1_staging_gb": 8,
-  "chunk_size": 784,
-  "key_prefix": "qube-seat-v7",
-  "seat": "qwen3.8-27b-vllm"
-}
+"vllm_seats": ["qwen3.8-27b-vllm", "qwen3.8-27b-vllm-3card"],
+"kv_cache_server": [
+  {
+    "enabled": true,
+    "store": "fs_native",
+    "address": "/mnt/kvcache/lmcache-seat-tp2-fp8",
+    "l1_staging_gb": 8,
+    "chunk_size": 1568,
+    "key_prefix": "qube-seat-tp2-fp8",
+    "seat": "qwen3.8-27b-vllm",
+    "kv_dtype": "fp8",
+    "tensor_parallel": 2
+  },
+  {
+    "seat": "qwen3.8-27b-vllm-3card",
+    "storeless": true,
+    "reason": "three-stage pipeline seat: LMCache's L2 adapter has no working layout for it (see the layout constraint below)"
+  }
+]
 ```
+
+- **One binding per seat.** A binding whose `seat` is empty is the BOX DEFAULT and backs every vLLM
+  seat that has no binding of its own; an exact seat match always wins over it. Two bindings for one
+  seat — or two box defaults — are refused at load: that is two stores whose order in the file
+  decides which one the seat gets, not a merge.
+- **The pre-0.121 single object still loads**, as a one-element list bound to its own `seat`. No
+  deployed config has to change. The list is the shape to write from now on.
+- **`vllm_seats` is declared, not sniffed.** `/v1/models` reports model ids, not engines, and the
+  cascade deliberately stays on llama.cpp (Gemma-4 hybrids crash LMCache's V2 path, upstream #4263),
+  so a sniffed roster would fail every seat that must never have a store. Empty = this box runs no
+  vLLM seat and the gate below is inert.
+- **`local-offload doctor` FAILS a vLLM seat with no binding**, one line per seat and a non-zero
+  exit — the operator rule is that the store backs every vLLM seat while the second device is online:
+
+  ```
+  cache server (one binding per vLLM seat; the store backs every seat while the second device is online):
+    qwen3.8-27b-vllm:        OK    fs_native /mnt/kvcache/lmcache-seat-tp2-fp8 key_prefix=qube-seat-tp2-fp8 l1=8GB
+    qwen3.8-27b-vllm-3card:  FAIL  no kv_cache_server binding — give this seat a store, or opt out explicitly with {"seat":"qwen3.8-27b-vllm-3card","storeless":true,"reason":"<why>"}
+  ```
+
+  An explicit `"storeless": true` with a `reason` PASSES. Silence does not — neither an absent
+  binding nor one merely switched off with nothing saying why.
+- **`kv_dtype` + `tensor_parallel` declare the stack generation.** They are needed only when two
+  seats SHARE a `key_prefix`: the load refuses a prefix shared across different generations, and
+  refuses a shared prefix where any binding leaves the generation undeclared (it cannot be shown
+  safe). Give each seat its own prefix and neither field is required.
+- **Rendering a seat from the box's bindings:** `local-offload install vllm-seat --config
+  <config.json> …` picks the binding FOR THAT SEAT by name and renders its adapter, directory,
+  namespace, L1 size and chunk into `seat.env`; the tier keeps the mount point, the write floor, the
+  prune target, the writer count and the cap, which are properties of the share rather than the
+  namespace.
 
 The measured transport of choice is `fs_native` over a network share of the store's RAM disk (0.112.1+;
 Lenovo tmpfs over SMB 3.1.1: a 23.7k-token prefix back in 0.56–0.70 s vs 3.8 s through Valkey, 2026-09-04).
 The block then names the mounted path, and the seat's `seat.env` names the share the wrapper mounts first:
 
 ```json
-"kv_cache_server": {
+"kv_cache_server": [{
   "enabled": true,
   "store": "fs_native",
   "address": "/mnt/kvcache/lmcache-seat-tp2-v2",
@@ -803,7 +846,7 @@ The block then names the mounted path, and the seat's `seat.env` names the share
   "chunk_size": 784,
   "key_prefix": "qube-seat-tp2-v2",
   "seat": "qwen3.8-27b-vllm"
-}
+}]
 ```
 
 ```sh
@@ -841,10 +884,13 @@ SEAT_LMCACHE_PYTHONPATH=/root/g7/lmcache-overlay   # optional: load LMCache from
   engine layout, the KV dtype or the LMCache build changes — objects written under another
   generation fail reads with "value size exceeds buffer capacity" and the tier silently pays nothing.
 - `key_prefix` or `seat` is required when enabled: two seats must never share a namespace by accident.
-- `offload_status` reports the block in both states (`declared`, `enabled`, `invalid` when the load
-  refused it) and, for a Valkey store named by an IP literal, a 1 s TCP `reachable` fact; a hostname
-  is reported as unprobed. The block is declarative: the seat wrapper runs what its `seat.env` says —
-  keep the two in agreement.
+- `offload_status.kv_cache_server` LISTS every binding (`bindings[]`, each with its seat, store,
+  address, key_prefix, l1_staging_gb and declared/enabled state) plus `unbound_seats` — the same
+  list `doctor` fails on, so the report and the gate cannot disagree — and, for a Valkey store named
+  by an IP literal, a 1 s TCP `reachable` fact per binding; a hostname is reported as unprobed. A
+  binding the load refused is reported `invalid` and never dialed. The bindings are declarative: each
+  seat wrapper runs what ITS `seat.env` says — keep them in agreement (`install vllm-seat --config`
+  is how you stop doing that by hand).
 
 The seat itself: `setup/templates/vllm-seat/` has the reference `seat_fg.sh` (starts the LMCache MP
 server and the engine in the foreground of the llama-swap client, so a swap-out reaps the engine
@@ -869,7 +915,7 @@ per model, so a pipeline-parallel seat whose stages hold different numbers of fu
 Two-card tensor-parallel seats use the store; a three-card seat uses the same-box L1 tier
 (`l1_staging_gb` sized as the tier, no store) until an upstream fix — `fs_native` is validated for two-card
 (tensor-parallel) seats only.
-Details: [`docs/systems/cache-server.md`](systems/cache-server.md), ADR 0033.
+Details: [`docs/systems/cache-server.md`](systems/cache-server.md), ADR 0033 (the tier), ADR 0045 (a binding per seat).
 
 ### Delegate subtasks across fleet nodes (`agent_delegate` / `delegate`)
 

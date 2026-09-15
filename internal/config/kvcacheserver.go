@@ -62,9 +62,32 @@ type KVCacheServer struct {
 	// seat name; when both are empty the block is refused (two seats must never share
 	// a namespace by accident).
 	KeyPrefix string `json:"key_prefix,omitempty"`
-	// Seat is the llama-swap model id of the vLLM seat this tier backs (e.g.
-	// "qwen3.8-27b-vllm"). Informational: status reports it next to the store.
+	// Seat is the llama-swap model id of the vLLM seat this binding backs (e.g.
+	// "qwen3.8-27b-vllm"). EMPTY means "the box default": the binding applies to
+	// every vLLM seat that has no binding of its own. One binding per seat and at
+	// most one default — ValidateKVCacheServers refuses a second of either.
 	Seat string `json:"seat,omitempty"`
+	// Storeless is the EXPLICIT opt-out: this seat deliberately runs with no cache
+	// server. It exists because `doctor` FAILS a vLLM seat with no binding
+	// (operator directive 2026-09-10 #1: the second device's store backs every vLLM
+	// seat while it is online), and the only honest way to run one without a store
+	// is to say so and say why — silence is exactly what that gate is against.
+	// Reason is required with it, and the store fields must be empty, so an opt-out
+	// can never be a half-configured store that looks deliberate.
+	Storeless bool `json:"storeless,omitempty"`
+	// Reason is WHY this seat has no store ("three-stage pipeline seat: no L2
+	// layout works for it, see docs/systems/cache-server.md"). Required with
+	// Storeless, refused without it.
+	Reason string `json:"reason,omitempty"`
+	// KVDtype and TensorParallel declare the STACK GENERATION that writes this
+	// namespace — the KV dtype ("fp8", "fp16") and the tensor-parallel width. They
+	// exist for exactly one rule (B-45, "one key_prefix per stack generation"): two
+	// seats may share a key_prefix only when both declare the SAME shape. Pages
+	// written under another layout are not stale, they are unreadable, and the tier
+	// then serves nothing while reporting success. Both may be omitted for a prefix
+	// only one seat uses.
+	KVDtype        string `json:"kv_dtype,omitempty"`
+	TensorParallel int    `json:"tensor_parallel,omitempty"`
 }
 
 // StoreName is the L2 adapter with the default applied.
@@ -124,7 +147,23 @@ func (k KVCacheServer) AddressIsIPLiteral() bool {
 // disabled block is never inspected: the tier is optional and an install that never
 // enables it must not be able to fail on it.
 func ValidateKVCacheServer(k *KVCacheServer) error {
-	if k == nil || !k.Enabled {
+	if k == nil {
+		return nil
+	}
+	// The opt-out is checked whatever `enabled` says: it is a DECLARATION about the
+	// seat, not a store, and a storeless binding with no reason is the silence the
+	// doctor gate exists to refuse — it must not be able to pass by also being
+	// disabled.
+	if k.Storeless {
+		if strings.TrimSpace(k.Reason) == "" {
+			return fmt.Errorf("kv_cache_server.reason: required with storeless:true — an explicit opt-out is allowed, an unexplained one is not (say why this seat runs with no store)")
+		}
+		if strings.TrimSpace(k.Address) != "" || strings.TrimSpace(k.Store) != "" || strings.TrimSpace(k.KeyPrefix) != "" {
+			return fmt.Errorf("kv_cache_server.storeless: a storeless binding must not also name a store (address/store/key_prefix are set) — one binding is either an opt-out or a store, never a half-configured one that reads as deliberate")
+		}
+		return nil
+	}
+	if !k.Enabled {
 		return nil
 	}
 	k.Address = strings.TrimSpace(k.Address)

@@ -193,10 +193,22 @@ type Config struct {
 	// node, not the delegator, knows the file names. Off by default until the
 	// A/B on the seat says otherwise; a property of the seat like the rules.
 	AgentSeedContextReads bool `json:"agent_seed_context_reads,omitempty"`
-	// KVCacheServer is the OPTIONAL "cache server" tier: a second machine's RAM behind
-	// LMCache MP for a vLLM seat (see kvcacheserver.go). nil/disabled = no tier, the
-	// pre-key behavior; nothing in the install depends on it.
-	KVCacheServer *KVCacheServer `json:"kv_cache_server,omitempty"`
+	// KVCacheServers is the OPTIONAL "cache server" tier: a second machine's RAM
+	// behind LMCache MP, bound ONE BINDING PER vLLM SEAT (see kvcacheserver.go and
+	// kvcacheservers.go). Empty = no tier, the pre-key behavior; nothing in the
+	// install depends on it. The pre-0.121 single object still decodes, as a
+	// one-element list.
+	KVCacheServers KVCacheServers `json:"kv_cache_server,omitempty"`
+	// VLLMSeats names the llama-swap seats on THIS box served by a vLLM engine —
+	// the box's vLLM roster, and the only thing that can say which seats the
+	// cache-server gate applies to. It is declared rather than sniffed because
+	// /v1/models reports model ids, not engines: a llama.cpp cascade seat and a vLLM
+	// seat are indistinguishable there, and the cascade deliberately STAYS on
+	// llama.cpp (Gemma-4 hybrids crash LMCache's V2 path, upstream #4263), so a
+	// sniffed roster would fail doctor on every seat that must never have a store.
+	// Empty = this box runs no vLLM seat and the gate is inert, which is the default
+	// and the common case.
+	VLLMSeats []string `json:"vllm_seats,omitempty"`
 	// AgentTimeoutSec is the default wall-clock budget for an agent run when the call
 	// passes no timeout. 0 = the built-in default (180s). Tiers binding a big planner
 	// seat seed this higher: a cold big-model load plus low tok/s inside 180s is a
@@ -1527,7 +1539,7 @@ func load(path string) (Config, error) {
 	if err := validateTailnetEndpoints("cascade_remote_lanes", c.CascadeRemoteLanes); err != nil {
 		return c, err
 	}
-	if err := ValidateKVCacheServer(c.KVCacheServer); err != nil {
+	if err := ValidateKVCacheServers(c.KVCacheServers); err != nil {
 		return c, err
 	}
 	return c, nil

@@ -239,17 +239,44 @@ func TestConfigBlockDerivesTheHarnessHalf(t *testing.T) {
 			t.Errorf("config block %s = %v, want %v", k, b[k], want)
 		}
 	}
-	if got := flagship().Bindings()["kv_cache_server"]; got == nil {
-		t.Error("Bindings must carry the cache server so one declaration feeds both")
+	// The generation that writes the namespace travels with it, so B-45's "one
+	// key_prefix per stack generation" rule is checkable rather than remembered.
+	if b["kv_dtype"] != "fp8" || b["tensor_parallel"] != 2 {
+		t.Errorf("the binding must declare its stack generation: %v", b)
 	}
-	// A seat without a store derives no block, rather than an empty enabled one.
+	// Bindings carries the cache server as a LIST — one binding per seat (B-01) —
+	// and seeds the box's vLLM roster, or doctor's gate would have no subject.
+	list, ok := flagship().Bindings()["kv_cache_server"].([]map[string]any)
+	if !ok || len(list) != 1 || list[0]["seat"] != "qwen3.8-27b-vllm" {
+		t.Errorf("Bindings must carry the cache server as a one-element list: %v", flagship().Bindings()["kv_cache_server"])
+	}
+	if seats, _ := flagship().Bindings()["vllm_seats"].([]string); len(seats) != 1 || seats[0] != "qwen3.8-27b-vllm" {
+		t.Errorf("Bindings must seed the box's vLLM roster: %v", flagship().Bindings()["vllm_seats"])
+	}
+	// A seat without a store derives no BLOCK, rather than an empty enabled one —
+	// but it still derives a BINDING, an explicit storeless opt-out, because a fresh
+	// install must not ship a config its own doctor fails on silence.
 	s := flagship()
 	s.CacheServer = nil
 	if s.ConfigBlock() != nil {
 		t.Error("a seat with no cache server must derive no block")
 	}
-	if _, ok := s.Bindings()["kv_cache_server"]; ok {
-		t.Error("Bindings must not carry a cache server the seat does not have")
+	opt := s.ConfigBinding()
+	if opt["storeless"] != true || opt["reason"] == "" || opt["seat"] != s.ID {
+		t.Errorf("a storeless seat must derive an EXPLAINED opt-out: %v", opt)
+	}
+	list, ok = s.Bindings()["kv_cache_server"].([]map[string]any)
+	if !ok || len(list) != 1 || list[0]["storeless"] != true {
+		t.Errorf("Bindings must carry the opt-out, not silence: %v", s.Bindings()["kv_cache_server"])
+	}
+	// The FALLBACK box runs a llama.cpp seat, so it declares no vLLM roster and no
+	// binding at all — the gate must stay inert there.
+	f := s.FallbackBindings()
+	if _, ok := f["vllm_seats"]; ok {
+		t.Errorf("a box on the llama.cpp fallback declares no vLLM seat: %v", f)
+	}
+	if _, ok := f["kv_cache_server"]; ok {
+		t.Errorf("a box on the llama.cpp fallback declares no cache-server binding: %v", f)
 	}
 }
 

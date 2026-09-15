@@ -599,34 +599,91 @@ func localLeaseView(ctx context.Context, cfg config.Config) map[string]any {
 	return view
 }
 
-// kvCacheServerView reports the OPTIONAL cache-server tier (config.KVCacheServer): a
-// second machine's RAM holding the KV pages that left a vLLM seat's VRAM. Absent or
-// disabled is a normal, fully-described state — the tier never gates a tool, so
-// tools/list is byte-identical either way. When enabled, the block is re-validated
-// first: a server running on a config whose load was refused (LoadWithSource hands the
-// decoded config back with the error) must say so and must NOT act on the refused
-// address. `reachable` is a 1 s TCP dial of a Valkey store named by an IP LITERAL only —
-// a hostname is vetted by shape, not by what DNS answers, so it is reported as
-// unprobed rather than dialed (the two-layer reasoning behind netguard's tailnet dial
-// gate); fs_native has no port to dial and says so explicitly, never by omission.
+// kvCacheServerView reports the OPTIONAL cache-server tier (config.KVCacheServers):
+// a second machine's RAM holding the KV pages that left a vLLM seat's VRAM.
+//
+// It lists EVERY binding, one per vLLM seat, because the tier is not a property of
+// one favoured seat: the operator directive of 2026-09-10 is that the store backs
+// every vLLM seat while the second device is online, and the shape this replaces
+// reported a single `seat` — so a session reading status could not tell "the other
+// seats have no tier" from "the other seats were never considered" (B-01).
+//
+// Absent or disabled is a normal, fully-described state — the tier never gates a
+// tool, so tools/list is byte-identical either way. Each enabled binding is
+// re-validated first: a server running on a config whose load was refused
+// (LoadWithSource hands the decoded config back with the error) must say so and must
+// NOT act on the refused address. `unbound_seats` is the same list `doctor` fails on,
+// computed by the same code, so the gate and this report cannot disagree.
 func kvCacheServerView(ctx context.Context, cfg config.Config) map[string]any {
-	k := cfg.KVCacheServer
-	if k == nil || !k.Enabled {
+	list := cfg.KVCacheServers
+	unbound := list.UnboundSeats(cfg.VLLMSeats)
+	out := map[string]any{
+		"enabled":       list.AnyEnabled(),
+		"declared":      len(list),
+		"vllm_seats":    cfg.VLLMSeats,
+		"unbound_seats": unbound,
+	}
+	bindings := make([]map[string]any, 0, len(list))
+	for _, k := range list {
+		bindings = append(bindings, kvCacheBindingView(ctx, k))
+	}
+	out["bindings"] = bindings
+	switch {
+	case len(list) == 0:
+		out["note"] = "no cache server: every vLLM seat's KV lives in VRAM only; declare kv_cache_server in config.json as a LIST of per-seat bindings when a second device can hold evicted KV (optional tier, off by default)"
+	case len(unbound) > 0:
+		out["note"] = "as declared in config.json (each seat wrapper's seat.env is what that engine actually runs — keep them in agreement); " +
+			"unbound_seats are vLLM seats of this box with NO binding: give each one a store or an explicit {\"storeless\":true,\"reason\":\"…\"} opt-out — `local-offload doctor` fails on them"
+	default:
+		out["note"] = "as declared in config.json (each seat wrapper's seat.env is what that engine actually runs — keep them in agreement); contexts that leave a seat's VRAM come back from its store at parity cost instead of being recomputed and survive a seat swap; ~255 KB/token as stored"
+	}
+	if extra := list.BoundSeatsNotDeclared(cfg.VLLMSeats); len(extra) > 0 {
+		out["bound_seats_not_in_vllm_seats"] = extra
+	}
+	return out
+}
+
+// kvCacheBindingView is ONE binding's row: its wiring, and for a Valkey store named
+// by an IP LITERAL a 1 s TCP reachability fact — a hostname is vetted by shape, not
+// by what DNS answers, so it is reported as unprobed rather than dialed (the
+// two-layer reasoning behind netguard's tailnet dial gate); fs_native has no port to
+// dial and says so explicitly, never by omission.
+func kvCacheBindingView(ctx context.Context, k *config.KVCacheServer) map[string]any {
+	if k == nil {
+		return map[string]any{"invalid": "null binding"}
+	}
+	seat := k.Seat
+	if seat == "" {
+		seat = "(box default: every vLLM seat with no binding of its own)"
+	}
+	if k.Storeless {
 		return map[string]any{
+			"seat":      seat,
+			"enabled":   false,
+			"storeless": true,
+			"reason":    k.Reason,
+			"note":      "explicit opt-out: this seat runs on VRAM plus L1 staging only, on purpose",
+		}
+	}
+	if !k.Enabled {
+		return map[string]any{
+			"seat":     seat,
 			"enabled":  false,
-			"declared": k != nil,
-			"note":     "no cache server: the vLLM seat's KV lives in VRAM only; declare kv_cache_server in config.json when a second device can hold evicted KV (optional tier, off by default)",
+			"declared": true,
+			"note":     "declared but disabled, with no storeless reason — `doctor` treats this seat as unbound, because \"the tier is off here\" and \"nobody considered this seat\" must not look alike",
 		}
 	}
 	if err := config.ValidateKVCacheServer(k); err != nil {
 		return map[string]any{
+			"seat":     seat,
 			"enabled":  true,
 			"declared": true,
 			"invalid":  err.Error(),
-			"note":     "kv_cache_server was refused at config load; this server is running on a config that failed validation — fix config.json and restart. The store was not dialed.",
+			"note":     "this binding was refused at config load; the server is running on a config that failed validation — fix config.json and restart. The store was not dialed.",
 		}
 	}
 	view := map[string]any{
+		"seat":                 seat,
 		"enabled":              true,
 		"declared":             true,
 		"store":                k.StoreName(),
@@ -635,8 +692,12 @@ func kvCacheServerView(ctx context.Context, cfg config.Config) map[string]any {
 		"chunk_size":           k.EffectiveChunkSize(),
 		"chunk_size_defaulted": k.ChunkSizeDefaulted(),
 		"key_prefix":           k.EffectiveKeyPrefix(),
-		"seat":                 k.Seat,
-		"note":                 "as declared in config.json (the seat wrapper's seat.env is what the engine actually runs — keep them in agreement); contexts that leave the seat's VRAM come back from the store at parity cost instead of being recomputed and survive a seat swap; ~255 KB/token as stored",
+	}
+	if k.KVDtype != "" {
+		view["kv_dtype"] = k.KVDtype
+	}
+	if k.TensorParallel > 0 {
+		view["tensor_parallel"] = k.TensorParallel
 	}
 	switch {
 	case k.StoreName() != "valkey":
