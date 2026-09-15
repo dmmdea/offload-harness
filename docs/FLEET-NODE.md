@@ -596,6 +596,38 @@ once per 30 s — **fail-closed**: `false` until the first probe lands, and `fal
 probe failure (a stale "resident" while llama-swap is down would route work at a node that
 cannot run it; `false` only costs a conservative local placement).
 
+### The write door (`agent_allow_write`, default OFF)
+
+A delegation contract may carry `write_root` — a directory, RELATIVE to the run's read root, that the
+seat may create and change files under. A node opens that door only when its config says
+`"agent_allow_write": true`. **The default is false, and a node that has not opted in refuses a write
+contract at ACK** (an HTTP 400, which makes the delegator RE-PLACE the contract on a node that has
+opted in, exactly like any other dispatch refusal). The in-process local path has no ack hop to refuse
+at and defers instead, with `defer_class: "write"`.
+
+What opting in grants, and nothing else:
+
+- `write_file` and `edit_file`, confined by `os.Root` to `write_root` inside the job's own throwaway
+  copy of the contract's inline context docs. Create AND overwrite — a seat that cannot change an
+  existing file cannot do an implementation leg — but the tree it overwrites is the node's copy, which
+  is deleted with the job.
+- **No `delete_file`, no `run_shell`, no `run`, no `web_fetch`, no github.** A write contract that names
+  no profile runs under `edit`, which advertises exactly the six tools the door grants.
+- Caps: 8 files, 64 KiB written, 192 KiB of rendered diff. The first two are enforced at the tool (the
+  model gets a "NOT performed (write budget)" it can correct); all three are re-counted on the finished
+  write set. **A breach publishes no diff at all** — a truncated patch applies as silent damage — and
+  defers `write`.
+
+What comes back is `diff` (a unified patch, `a/`+`b/` prefixed so `git apply -p1` takes it),
+`diff_files` (the touched paths) and `write_note`. **The harness applies none of it.** Reviewing and
+applying the change is the caller's job, and that is the whole reason a small seat can be given this
+work at all. A seat that described the change instead of making it reports `write_note: "... the seat
+wrote nothing"` rather than an empty-but-green result.
+
+The node keeps no audit file for the door: the job directory (contract docs, write root and all) is
+removed when the run ends, so the diff on the wire is the record — which is the point, since it goes to
+a human.
+
 ### Re-placement on refusal
 
 **A node saying no is no longer the end of the subtask** (0.101.0). Before it, `internal/delegate`

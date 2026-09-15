@@ -393,3 +393,47 @@ func TestAgentDispatchAdversarialBodies(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildRequestAgentRefusesTheWriteDoorWithoutOptIn (register D-06): a
+// contract asking for the WRITE door is refused at ACK on a node whose
+// agent_allow_write is false — a 400, not a defer, precisely so the delegator
+// RE-PLACES it on a node that has opted in instead of spending the placement on
+// a box that was never going to open the door. The refusal names the key, so an
+// operator reading it knows what to set.
+func TestBuildRequestAgentRefusesTheWriteDoorWithoutOptIn(t *testing.T) {
+	payload := `{"schema_version":1,"goal":"fix the off-by-one","write_root":"work","output_schema":` + agentSchemaJSON + `}`
+	_, cleanup, err := BuildRequest(context.Background(), agentNodeCfg(t), true, "agent", json.RawMessage(payload))
+	if cleanup != nil {
+		cleanup()
+	}
+	if err == nil {
+		t.Fatal("a write contract was ACCEPTED on a node that has not opted into the write door")
+	}
+	if !strings.Contains(err.Error(), "agent_allow_write") {
+		t.Errorf("refusal %q does not name the key an operator must set", err.Error())
+	}
+}
+
+// TestBuildRequestAgentAcceptsTheWriteDoorWhenOptedIn is the other half: the
+// gate must be the CONFIG, not the presence of write_root. Without this, a
+// refusal that fired unconditionally would pass the test above and ship a door
+// that never opens.
+func TestBuildRequestAgentAcceptsTheWriteDoorWhenOptedIn(t *testing.T) {
+	cfg := agentNodeCfg(t)
+	cfg.AgentAllowWrite = true
+	payload := `{"schema_version":1,"goal":"fix the off-by-one","write_root":"work","output_schema":` + agentSchemaJSON + `}`
+	req, cleanup, err := BuildRequest(context.Background(), cfg, true, "agent", json.RawMessage(payload))
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		t.Fatalf("an opted-in node refused a write contract: %v", err)
+	}
+	contract, ok := req.Params["contract"].(core.AgentContract)
+	if !ok {
+		t.Fatal("the request carries no decoded contract")
+	}
+	if contract.WriteRoot != "work" {
+		t.Fatalf("write_root = %q after the ack, want %q — the node must execute the root the caller asked for", contract.WriteRoot, "work")
+	}
+}

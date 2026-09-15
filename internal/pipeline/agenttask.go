@@ -271,6 +271,31 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// Ledger evidence for D-88: which model the in-loop tools ride, and why.
 		log.Printf("agent task: in-loop offload_* tools run on the planner seat %q without thinking (the workhorse %q shares its llama-swap and loading it would evict the seat)", m, p.cfg.Model)
 	}
+	// The WRITE door (register D-06). Default OFF: a contract that names no
+	// write_root builds exactly the read-only loop it always did, and a node
+	// that has not set agent_allow_write refuses one that does. The refusal is
+	// a `write`-class defer rather than a job error because the contract is
+	// sound and the fleet is healthy — another node may have opted in, and
+	// re-placing it there is the delegator's right reflex.
+	var door *writeDoor
+	if contract.WriteRoot != "" {
+		if !p.cfg.AgentAllowWrite {
+			return deferWire(core.DeferClassWrite, fmt.Sprintf(
+				"this node does not open the write door: agent_allow_write is false in the config it loaded, and the contract asks to write under %q", contract.WriteRoot))
+		}
+		d, derr := openWriteDoor(contextDir, contract)
+		if derr != nil {
+			// A write_root that cannot be resolved or created here is a
+			// node-side condition, not a claim about the contract's work.
+			return deferWire(core.DeferClassWrite, derr.Error())
+		}
+		door = d
+	}
+	writeLimit := (*agent.WriteLimit)(nil)
+	allowWrite, writeWorktree := false, ""
+	if door != nil {
+		writeLimit, allowWrite, writeWorktree = door.limit, true, door.root
+	}
 	built, berr := agent.Build(agent.BuildConfig{
 		PlannerBase: p.cfg.Endpoint,
 		Model:       seat,
@@ -290,6 +315,16 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// would be guessing). Validated at contract decode; the loop answers
 		// "does this tool exist on this seat" as an observation.
 		SetupActions: setupActionsFor(p.cfg, contract),
+		// The write door grants create+overwrite inside write_root and NOTHING
+		// else: no delete (the `edit` profile does not even advertise
+		// delete_file), no shell, no `run`, no fetch, no github. Overwrite is
+		// ON because a seat that cannot change an existing file cannot do an
+		// implementation leg at all, and it is safe because the tree it
+		// overwrites is this node's own throwaway copy of the context docs.
+		AllowWrite:     allowWrite,
+		AllowOverwrite: allowWrite,
+		Worktree:       writeWorktree,
+		WriteLimit:     writeLimit,
 	})
 	if berr != nil {
 		if errors.Is(berr, core.ErrAgentEnvRules) {
@@ -328,6 +363,15 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// loudly with the valid names rather than silently falling back to bare
 	// `general` — the one configuration measured to fail on small planners.
 	profileName := p.cfg.AgentTaskProfile(strings.TrimSpace(contract.Profile))
+	if door != nil && strings.TrimSpace(contract.Profile) == "" {
+		// A write contract that named no profile must not inherit this box's
+		// `agent_profile`: on a small-seat node that is "research", whose tool
+		// subset does not list edit_file or write_file — so the door would be
+		// open, the tools registered, and the model unable to see them. "edit"
+		// is the write door's shape (locate, read, change) and it is the one
+		// profile that advertises exactly the six tools the door grants.
+		profileName = "edit"
+	}
 	prof, perr := agent.LookupProfile(profileName)
 	if perr != nil {
 		// A profile this build does not have can never run here, however healthy
@@ -397,6 +441,22 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			s.Observe(seat, wire.SeatTokS, coldLoad.Seconds(), time.Now())
 		}); uerr != nil {
 			log.Printf("agent task: seat-rates store not updated: %v", uerr)
+		}
+	}
+	// The write set (D-06) — rendered HERE, before every defer branch, for the
+	// same reason as the trace and the prefill accounting above: a run that hit
+	// its step budget or its wall may still have made a real, reviewable change,
+	// and a door that only published on the success path would throw that away
+	// exactly when the caller most needs to see what the seat did.
+	if door != nil {
+		diff, files, note, derr := closeWriteDoor(door)
+		wire.Diff, wire.DiffFiles, wire.WriteNote = diff, files, note
+		if derr != nil {
+			// A cap breach is the door refusing, not the work failing: no diff
+			// is published and the class says which fix applies (a smaller
+			// change), not which box is broken.
+			wire.WriteNote = derr.Error()
+			return deferWire(core.DeferClassWrite, derr.Error())
 		}
 	}
 	wire.StopNote = res.StopNote

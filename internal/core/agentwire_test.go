@@ -405,7 +405,7 @@ func TestAcceptanceCheckEval(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse %q: %v", tt.check, err)
 			}
-			pass, reason := c.Eval(tt.structured, tt.output)
+			pass, reason := c.Eval(AgentWireResult{Structured: tt.structured, Output: tt.output})
 			if pass != tt.wantPass {
 				t.Fatalf("Eval(%q) = %v (%q), want %v", tt.check, pass, reason, tt.wantPass)
 			}
