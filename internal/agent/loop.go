@@ -153,6 +153,15 @@ type Result struct {
 	// reports no timings yields ObservedSteps 0 and Basis "insufficient_data"
 	// rather than a fabricated 0% reuse.
 	Prefill PrefillReport
+	// Pager is the context-pager instrument's report for this run (R2-13,
+	// contextpager.go): how much evicted content the agent came BACK for. It is
+	// the gate that closes — or opens — the whole pager family, and it can only
+	// ever read "insufficient_data" if nothing feeds it, which is exactly what
+	// happened between the instrument landing and 0.117.4: PagerStats had no
+	// production caller at all, so the 10 % gate could never fire in either
+	// direction. Fed here from the compaction path (evictions) and the
+	// tool-result boundary (fetches).
+	Pager PagerReport
 
 	// TokenizerPath reports which drop rung the compaction ladder is on at the
 	// end of the run — the visibility twin of ctx_window for the window probe
@@ -269,6 +278,10 @@ type Loop struct {
 	// the decision it informs is made from real traffic rather than a special
 	// measurement mode nobody remembers to switch on.
 	prefill PrefillStats
+	// pager records what compaction evicted and whether the agent re-fetched it
+	// (R2-13). Mutex-guarded inside, like prefill, because `--serve` shares one
+	// *Loop across concurrent handlers.
+	pager PagerStats
 	// envRules are the environment-rule interceptors (envrules.go, ADR 0036):
 	// nil = the pre-key loop, byte-for-byte. Installed by WithEnvRules.
 	envRules EnvRules
@@ -857,7 +870,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
-			return Result{Steps: step, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}, err
+			return Result{Steps: step, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}, err
 		}
 		specs := l.specs
 		if len(disabledTools) > 0 {
@@ -920,7 +933,13 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			opts := l.ladderOpts()
 			opts.Pinned = pinned
 			var verdict fitVerdict
+			// R2-13: the instrument reads the pass, it does not change it. `before`
+			// is the slice header only — compactWithVerdict works on a copy and
+			// never mutates the caller's backing array, so the two are genuinely
+			// the before and after of this pass.
+			before := msgs
 			msgs, verdict = compactWithVerdict(ctx, msgs, budget, l.keepRecent, preambleLen, opts)
+			l.pager.NoteCompaction(before, msgs)
 			// Exhaustion is judged by the yardstick that actually measured the
 			// transcript: the token-exact verdict when the cut rung ran (the
 			// estimate must neither hide a real overflow nor report a
@@ -1002,7 +1021,9 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				// re-sending anything near the rejected size would only 400 again.
 				ropts.RealBudget = l.inputBudget() / 2
 				var rv fitVerdict
+				beforeHard := msgs
 				msgs, rv = compactWithVerdict(ctx, msgs, target, l.keepRecent/2, preambleLen, ropts)
+				l.pager.NoteCompaction(beforeHard, msgs)
 				// The harder compact can still be a NO-OP when the oversized body
 				// sits inside keepRecent (observed live: a huge newest tool result
 				// made the retry re-send the same overflow). Emergency shrink is
@@ -1013,7 +1034,9 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				// estimate there would destroy exactly the pinned bodies the cut
 				// just refused to drop, on evidence the real tokenizer refutes.
 				if rv != fitReal && estimateTokens(msgs) > target {
+					beforeShrink := msgs
 					msgs = emergencyShrink(msgs, target, preambleLen)
+					l.pager.NoteCompaction(beforeShrink, msgs)
 				}
 				if rv == overReal {
 					exhausted++ // forced keeps over the REAL halved budget — counted
@@ -1023,7 +1046,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				comp, err = l.client.Chat(stepCtx, msgs, specs, stepMax)
 			}
 			if err != nil {
-				return Result{Steps: step, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}, err
+				return Result{Steps: step, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}, err
 			}
 		}
 		noteUsage(comp)
@@ -1089,7 +1112,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				step-- // the re-issue does not spend a step
 				continue
 			}
-			return Result{Steps: step + 1, StopReason: kind, StopNote: basis, Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}, nil
+			return Result{Steps: step + 1, StopReason: kind, StopNote: basis, Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}, nil
 		}
 		if finalStep {
 			// No tools were offered and the answer was asked for. A tool call now
@@ -1105,7 +1128,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			}
 			if note != "" {
 				l.prefill.Observe(comp.Serve)
-				res := Result{Steps: step + 1, StopReason: "budget", StopNote: note, Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
+				res := Result{Steps: step + 1, StopReason: "budget", StopNote: note, Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
 				if l.batchJudge {
 					res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 				}
@@ -1129,10 +1152,10 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				// the final answer and the structured re-pack produced findings
 				// about "the assistant listing the directory". That is a seat
 				// configuration error, and it must be named, not digested.
-				return Result{Steps: step + 1, StopReason: "unparsed_tool_call", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, Effects: effects, RuleHits: ruleHits, Calls: calls},
+				return Result{Steps: step + 1, StopReason: "unparsed_tool_call", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, Pager: l.pager.Report(), Effects: effects, RuleHits: ruleHits, Calls: calls},
 					fmt.Errorf("%w: the seat returned %q as text (its --tool-call-parser does not match the model's chat template)", ErrUnparsedToolCall, marker)
 			}
-			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", OutputTruncated: comp.FinishReason == "length", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
+			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", OutputTruncated: comp.FinishReason == "length", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
 			if l.batchJudge {
 				res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 			}
@@ -1241,6 +1264,11 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 				rec.Note = content
 			}
 			effects = append(effects, rec)
+			// R2-13: the fetch side of the instrument, at the ONE boundary every
+			// tool result crosses — and AFTER the cap/rule rewrites above, so the
+			// bytes hashed here are the bytes the transcript actually carries and
+			// can be compared with what a later compaction takes away.
+			l.pager.NoteFetched(content)
 			msgs = append(msgs, Msg{Role: "tool", ToolCallID: call.ID, Content: content, IsError: isErr})
 		}
 		if answerNowFor != "" {
@@ -1250,7 +1278,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			answerNowFor = ""
 		}
 	}
-	res := Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
+	res := Result{Steps: l.maxSteps, StopReason: "budget", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
 	if l.batchJudge {
 		res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 	}
