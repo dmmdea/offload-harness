@@ -20,48 +20,42 @@ Versioning: [SemVer](https://semver.org/).
   the working config (they carry the fleet token) and the second TTS venv. History is not rewritten: the
   paths it carries were already public and hold no credential (the fleet token never entered history).
 
-## [0.121.1] - 2026-09-14 - the result cache opens lazily, and reads without writing
+## [0.121.1] - 2026-09-14 - measured winners wired: the 27B fan-out twin, `-sm tensor` everywhere it belongs, the pair seat's own utilization, the 3-card media roster
 
-Register D-05 (P1). `offload_status.reuse.result_cache` on this workstation reported `fallback: true ...
-cache.p47084.db`, and the cache directory held **49** per-process sibling files of 32 KB each, accruing at
-roughly 12/h and swept only after 12 h. The cause was placement, not contention: `openPipeline` runs for every
-CLI command and every MCP server start, and it opened the bbolt cache EAGERLY - taking, or losing, an exclusive
-file lock before anything knew whether a cacheable task would ever run. With 21 MCP servers live, one won the
-primary and twenty each created a sibling they then never wrote a single entry into.
-
-D-72's "one cache service" would have solved it with a daemon, which house rules forbid. This is the in-process
-fix instead.
-
-### Changed
-- **The cache handle is LAZY.** `cache.New(path)` opens nothing; the first `Get`/`Put`/`Count` resolves it once.
-  A process that never runs a cacheable task now never touches the cache directory at all - which is the
-  common case for an MCP server that has served only status and fleet calls. The operator note about a lost
-  shared cache moved to a `WithNotify` callback that fires at resolve, so it prints when the fallback is true
-  rather than at startup when it was merely predicted.
-- **The bbolt lock `Timeout` is 250 ms** (was 1 s). With the eager open gone, the opens that remain are ones
-  that will really use the cache, and a loser should reach its sibling in milliseconds.
-- **`SiblingMaxAge` is 1 h** (was 12 h), and the sweep runs at handle CONSTRUCTION rather than at open - a
-  sweep that only ran on a real open would, after this change, essentially never run.
+Four ⚑WINNER rows of the harness master plan v2 (A-70, A-25, A-22, A-15) were measured on the reference box
+and never reached the tier seeds, so a fresh render shipped the loser of each measurement. This release wires
+them, each with the gate that keeps it wired and an assertion that it does NOT appear where it was not measured.
 
 ### Added
-- **A read-only, read-through handle** (`cache.NewReader`). Verified against the vendored bbolt v1.5.0 rather
-  than assumed: `Options.ReadOnly` takes a genuine SHARED lock on every platform (on Windows,
-  `bolt_windows.go` calls `LockFileEx` and adds `LOCKFILE_EXCLUSIVE_LOCK` only for the exclusive case), so many
-  readers coexist with each other - but a shared request still conflicts with a writer's exclusive hold. Since
-  exactly one harness process holds the primary read-write, a reader cannot assume it is reachable, so it reads
-  THROUGH: the primary if free, else this process's own sibling, else nothing. It creates no file on any path
-  (`ReadOnly` opens with `O_RDONLY` and no `O_CREATE`), a miss is answered as a miss, and `Put` returns
-  `ErrReadOnly` rather than quietly opening a sibling. `TestReadOnlyOpensShareWithEachOtherButNotWithAWriter`
-  pins those semantics so a future bbolt bump that changes them fails loudly.
-- **Sibling cleanup on `Close`.** An EMPTY sibling - the 32 KB file every losing process used to strand - is
-  deleted. A non-empty one makes exactly ONE bounded attempt to promote its entries into the primary if that
-  lock happens to be free (<= 1,000 keys, <= 5 s) and is removed only when every entry crossed; an
-  over-budget or un-promotable sibling is kept, because it still holds cached work, and the age sweep takes it.
-- **`offload_status.reuse.result_cache` now reports `mode`** - `primary`, `sibling`, `readonly`, `unavailable`,
-  or `unopened` (the new steady state: lazy, no lock held, not a failure) - plus `siblings` and `sibling_bytes`,
-  the census the D-05 regression is measured in and which nothing reported while 49 files accumulated. It also
-  reports `entries` / `entries_from`, counted through the read-only handle. Asking never resolves the server's
-  own handle and never creates a file.
+- **`qwen3.8-27b-par8`, the 27B's FAN-OUT twin, on both pair-spanning Blackwell templates (A-70).** The 27B
+  llama.cpp seat ships `--parallel 1` and is flat under fan-out — 34.6-37.4 tok/s aggregate at c1..c32, and it
+  answers 429 from c16 (6 of 16 and 22 of 32 requests failed in the baseline arm). On the SAME 5060 Ti pair at
+  the SAME `-c`, `--parallel 8` holds single-stream (W1 43.4 vs 43.6) and roughly TRIPLES aggregate: 78.7 /
+  110.8 / 100.7 / 106.8 at c4/8/16/32 with 0 failures (arm `par8-pair`, 2026-09-01, `llamacpp-par8-pair.json`,
+  ledger "FAIRNESS ARM par8-pair").
+  **It ships as its own entry rather than as a flag on the seat, and that is the whole decision.** llama.cpp
+  divides `-c` among its slots: eight slots at `--ctx-size 131072` serve **16,384 tokens each**. The same
+  night's Lenovo arm measured the mechanism in-house (`--parallel 8 -c 32768` → "16k/32k prompts exceed the
+  4k/slot window"). Both pair tiers declare `qwen3.8-27b` as their fallback agent lane at
+  `fallback_agent_ctx_tokens: 131072`, so moving the flag onto that seat would have served an eighth of the
+  advertised window — the advertise-more-than-you-serve defect `blackwell-8` shipped once already. Both entries
+  are swappable alternatives at `ttl: 300`, so the twin costs nothing until something asks for it.
+  Not `--parallel 16` (fails to start on this pair at `-c 131072` and at `-c 65536`; needs `-c 49152` plus
+  `--tensor-split 27,23`, for 119 vs 111 tok/s at c16) and not 32 (infeasible: ~350 MB of GDN recurrent state
+  PER SLOT → an 11.3 GB rs buffer beside ~9 GB of weights on a 16 GB card). The three-card arm is not what
+  ships: `par8-3c` reached 102.9 at c8 against the pair's 110.8 and it spans the display card, so the twin is
+  pair-pinned on `blackwell-3x16` like every other default seat there.
+  `TestPairSpanningTemplatesShipTheMeasuredFanoutTwin`, `TestDroppingQ38TakesTheFanoutTwinWithIt`,
+  `TestSingleCardTemplatesKeepTheirSingleSlot27B`.
+
+### Fixed
+- **A multi-device pin rendered as two env entries.** `env: [CUDA_VISIBLE_DEVICES=0,2]` is a YAML flow
+  sequence, and YAML reads it as TWO items — `CUDA_VISIBLE_DEVICES=0` and `2` — so every seat that must span
+  the 5060 Ti pair was handed ONE card plus a nonsense variable: `qwen3.8-27b` and `qwen3.8-27b-262k` in
+  `llama-swap.win-triple-blackwell.yaml`, and, through the media-seat renderer, the `qwen3-vl-32b` vision seat
+  whose whole point is that a 32B does not fit one 16 GB card. The three template lines are quoted, and
+  `flowItems` now quotes any per-seat env entry containing a flow separator; barewords are kept for everything
+  else so the existing rendered text and its assertions are unchanged.
 ## [0.121.0] - 2026-09-14 - a cache-server binding per vLLM seat
 
 ### Changed
@@ -110,7 +104,6 @@ fix instead.
   ship a config its own `doctor` rejects.
 - [ADR 0045](docs/architecture/decisions/0045-a-cache-server-binding-per-vllm-seat.md); `docs/systems/cache-server.md`
   and the OPERATOR-GUIDE config reference rewritten around the list shape and the gate.
-
 ## [0.117.7] - 2026-09-14 - output tokens are priced; the pager gate can fire; the Windows cage builds its child's environment; retries skip a fenced seat
 
 ### Security

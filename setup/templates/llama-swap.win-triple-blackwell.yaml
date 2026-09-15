@@ -126,7 +126,7 @@ models:
     # residents on the other card of the pair, so the ratio does not transfer. -sm
     # layer auto-divides the 16.7 GB evenly, which fits either way; measure on the box
     # before pinning a ratio. Prefer GPU UUIDs over indices if the cards ever move.
-    env: [CUDA_VISIBLE_DEVICES=0,2]
+    env: ["CUDA_VISIBLE_DEVICES=0,2"]
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.8-27B-UD-Q4_K_XL.gguf
       --mmproj __MODELS__/mmproj-Qwen3.8-27B-F16.gguf -ngl 999 -sm layer --parallel 1
@@ -140,9 +140,42 @@ models:
   # --ctx-size 262144 as a LITERAL (profile long_ctx_size), measured live on the reference box.
   # Swappable, ttl 300 like every seat. The composite tier routes window overflow here; the
   # vLLM long layer (pp3, fp8 KV, 262,144 measured Nightshift 2 seat v7) ships with 0.116.0.
+  # FAN-OUT TWIN of the 27B (A-70, measured 2026-09-01 on the same 5060 Ti pair this
+  # tier pins). Identical weights, pin and sampling; the ONLY difference is
+  # `--parallel 8`.
+  #
+  # Why a twin and not a flag on the seat above. llama.cpp divides `-c` among its
+  # slots: at --parallel N each slot serves n_ctx/N, measured in-house the same night
+  # (`--parallel 8 -c 32768` on the Lenovo: "16k/32k prompts exceed the 4k/slot
+  # window"). So --parallel 8 on the seat above would cut the tier's fallback agent
+  # window from 131,072 to 16,384 while the profile still advertised 131,072 - the
+  # advertise-more-than-you-serve defect this repo already gates elsewhere. The seat
+  # stays --parallel 1; the throughput is offered as its own entry instead.
+  #
+  # What it buys (arm par8-pair, `llamacpp-par8-pair.json`, ledger "FAIRNESS ARM
+  # par8-pair"): W1 43.4 tok/s (unchanged) and aggregate 78.7 / 110.8 / 100.7 / 106.8
+  # tok/s at c4/8/16/32, against the --parallel 1 seat's flat 34.6-37.4 with 429s from
+  # c16. ~3x aggregate under fan-out, 16,384 tokens per slot. The three-card arm is NOT
+  # what ships here: par8-3c (tensor-split 17,16,17, `-c 65536`) reached 102.9 at c8
+  # against the pair's 110.8 AND it spans the display card, which the placement law
+  # forbids. Pair-pinned, like every other default seat on this tier.
+  # NOT --parallel 16 (needs `-c 49152` AND `--tensor-split 27,23` to start on this
+  # pair, and only lifts the plateau 111 -> 119) and NOT 32 (infeasible: ~350 MB of
+  # recurrent state PER SLOT on this GDN hybrid -> an 11.3 GB rs buffer beside ~9 GB
+  # of weights on a 16 GB card).
+  qwen3.8-27b-par8:
+    aliases: [qwen38-par8, coder-par8, agent-loop-par8, 27b-fanout]
+    env: ["CUDA_VISIBLE_DEVICES=0,2"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.8-27B-UD-Q4_K_XL.gguf
+      --mmproj __MODELS__/mmproj-Qwen3.8-27B-F16.gguf -ngl 999 -sm layer --parallel 8
+      --jinja --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
+      --ctx-size __CTX__ --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
+      --port ${PORT} --host 127.0.0.1
+    ttl: 300
   qwen3.8-27b-262k:
     aliases: [qwen38-262k, coder-262k, agent-loop-262k]
-    env: [CUDA_VISIBLE_DEVICES=0,2]
+    env: ["CUDA_VISIBLE_DEVICES=0,2"]
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.8-27B-UD-Q4_K_XL.gguf
       -ngl 999 -sm layer --parallel 1 --jinja --flash-attn __FLASH_ATTN__
@@ -214,6 +247,7 @@ matrix:
     a26: gemma-4-26b-agent
     q38: qwen3.8-27b
     q38l: qwen3.8-27b-262k
+    q38p: qwen3.8-27b-par8
   # The memory stack is the most expensive thing on this box to lose and the cheapest
   # to keep: maximally expensive to stop, so the solver stops something else first.
   evict_costs:
@@ -221,4 +255,4 @@ matrix:
     rer: 1000
   sets:
     residents: "emb & rer"
-    text: "+residents & (e4b | e2b__M26_ALT____Q38_ALT__ | q38l__SEATS_SWAPPABLE__)__SEATS_RESIDENT__"
+    text: "+residents & (e4b | e2b__M26_ALT____Q38_ALT__ | q38l | q38p__SEATS_SWAPPABLE__)__SEATS_RESIDENT__"
