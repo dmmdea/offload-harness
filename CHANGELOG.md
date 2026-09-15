@@ -20,7 +20,7 @@ Versioning: [SemVer](https://semver.org/).
   the working config (they carry the fleet token) and the second TTS venv. History is not rewritten: the
   paths it carries were already public and hold no credential (the fleet token never entered history).
 
-## [0.122.1] - 2026-09-14 - measured winners wired: the 27B fan-out twin, `-sm tensor` everywhere it belongs, the pair seat's own utilization, the 3-card media roster
+## [0.122.2] - 2026-09-14 - measured winners wired: the 27B fan-out twin, `-sm tensor` everywhere it belongs, the pair seat's own utilization, the 3-card media roster
 
 Four ⚑WINNER rows of the harness master plan v2 (A-70, A-25, A-22, A-15) were measured on the reference box
 and never reached the tier seeds, so a fresh render shipped the loser of each measurement. This release wires
@@ -109,6 +109,42 @@ them, each with the gate that keeps it wired and an assertion that it does NOT a
   whose whole point is that a 32B does not fit one 16 GB card. The three template lines are quoted, and
   `flowItems` now quotes any per-seat env entry containing a flow separator; barewords are kept for everything
   else so the existing rendered text and its assertions are unchanged.
+## [0.122.1] - 2026-09-14 - the final budget fits the wall; a cut final on a schema contract is re-issued once with list caps
+
+### Fixed
+- **The final answer's completion budget now FITS the wall that is left** (`internal/seatrate`,
+  `internal/agent/loop.go`, `internal/pipeline/agenttask.go`; register D-95). The budget was
+  `FinalBudgetFor` alone — 4x the step budget, cap 8,192 — whatever the wall could actually decode.
+  Measured 2026-09-14 on the Lenovo 4B seat (`qwen3.5-4b-vllm`, ~15 tok/s): list-heavy grounded
+  extractions with an `output_schema` owed a 8,192-token final PLUS an 8,192-token re-pack, which the
+  harness's own `wall_note` priced at 1,166–1,310 s against a 900 s wall. Three of ten contracts died
+  there — at the 4,096 budget they were cut (`finish_reason=length` → `output_truncated` → re-pack
+  skipped → deferred after 309–450 s), and at 8,192 `METHODOLOGY.md` and `SELF-CONTROL.md` hit the
+  900 s wall instead. `seatrate.FitFinalBudget` now computes
+  `fit = (remaining_wall - other - safety) x tok_s / turns` (`turns` = 2 when a schema is set, because
+  the final answer and its re-pack are both decoded inside this wall; `other` = the estimate's cold
+  load + think block + tool steps, 0 once those are spent; `safety` = a tenth of the wall, never less
+  than one transcript prefill) and the run uses `min(configured, fit)`, floored at 1,024 and never
+  raised above the configured cap. Computed at run start and again at the forced final step, where the
+  live clock is the honest input. `Estimate.OtherSec` publishes the non-final terms so the fit
+  subtracts exactly what the estimate charged. Results carry `final_budget_fit` and `budget_note`
+  ("final 8192 → 3592 to fit 900 s at 15.0 tok/s (split with the output_schema re-pack)") on the node
+  and delegator wires; a seat with no measured rate, or a wall with room, publishes neither and runs
+  byte-for-byte as before.
+- **A cut final on a schema contract is re-issued ONCE with explicit list caps** (`internal/agent`,
+  `internal/pipeline`; register D-95). 0.115.23 (D-91) rightly refuses to re-pack a `length`-cut final
+  — a partial cannot be re-packed — but abstaining there threw away a run that had read the whole
+  document and only over-answered: the seat was never told how long its lists could be. The loop now
+  asks once more, thinking off, at the same budget, with the caps spelled out ("cap every list at N
+  items … keep every string under 200 characters"), where N is the SMALLEST `maxItems` in the
+  contract's schema and never more than 8 — a schema the author shaped is honoured, never broken by
+  the retry. Gated on three conditions, so it can never re-create the shape it fixes: an
+  `output_schema` is set, the partial is JSON-shaped (a cut narrative earns nothing), and the wall
+  still holds one turn at the seat's measured rate (`seatrate.MinTurnFor`, re-pack term included).
+  Bounded at one: a seat that cuts the capped answer too abstains exactly as before, with
+  `final_reissue=list_cap` and both `finish_reason`s on the record (`calls[]` and `repack_note`), so a
+  first cut and a second are never read as the same event.
+
 ## [0.122.0] - 2026-09-14 - a write-capable delegation door, default off (D-06)
 
 ### Added
@@ -139,6 +175,7 @@ them, each with the gate that keeps it wired and an assertion that it does NOT a
   Caps are enforced twice: `agent.WriteLimit` refuses the offending call at the tool, and the finished
   write set is re-counted before it crosses the wire. A cap breach publishes NO diff — a truncated patch
   applies as silent damage.
+
 ## [0.121.1] - 2026-09-14 - the result cache opens lazily, and reads without writing
 
 Four ⚑WINNER rows of the harness master plan v2 (A-70, A-25, A-22, A-15) were measured on the reference box
@@ -270,6 +307,7 @@ fix instead.
   the census the D-05 regression is measured in and which nothing reported while 49 files accumulated. It also
   reports `entries` / `entries_from`, counted through the read-only handle. Asking never resolves the server's
   own handle and never creates a file.
+
 ## [0.121.0] - 2026-09-14 - a cache-server binding per vLLM seat
 
 ### Changed
