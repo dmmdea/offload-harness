@@ -15,6 +15,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 )
 
 // Subtask pairs one delegation contract with its token estimate. EstTokens is
@@ -403,6 +404,37 @@ func LocalLease(gpuLockPath, stateDir string) gpulease.Info {
 // process).
 func Reserved(info gpulease.Info) bool {
 	return info.Held && info.Class == gpulease.ClassText && !inheritedLease(info)
+}
+
+// Fenced reports whether a lease REFUSES A NEW RUN on the local seat, and names
+// the fence for the note that has to explain it. It is the placement-side reading
+// of modelaffinity.BlocksNewRun — the admission rule the run would meet — and it
+// delegates to that function rather than restating it, so the two can never drift
+// into a placement that dials a seat its own gate will refuse.
+//
+// Three holds fence: an EXCLUSIVE text lease (the holder cleared the cards and a
+// model loaded now would land on top of a measurement), a DRAINING text lease
+// (the seat is cordoned while in-flight work finishes), and a MEDIA lease (a
+// render owns the VRAM). A plain text reservation does NOT fence: it steers
+// placement (Reserved) but the affinity gate still admits the load, so treating
+// it as a fence here would refuse work the box can actually do.
+//
+// Fenced is what a RETRY must consult. Register D-94 (2026-09-14): a retry was
+// placed on the local seat under an exclusive lease, waited the whole
+// `gpu-lease timeout after 5m0s` at the cordon and deferred as capacity, while an
+// idle remote sat unused. The verdict was on disk before the dial.
+func Fenced(info gpulease.Info) (bool, string) {
+	if !modelaffinity.BlocksNewRun(info) {
+		return false, ""
+	}
+	switch {
+	case info.Class == gpulease.ClassMedia:
+		return true, "media render holds the cards"
+	case info.Exclusive:
+		return true, "exclusive text lease (the holder cleared the cards)"
+	default:
+		return true, "draining text lease (the seat is cordoned; no new run is admitted)"
+	}
 }
 
 // inheritedLease reports whether this process runs under the lease info

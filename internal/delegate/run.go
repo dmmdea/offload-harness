@@ -826,9 +826,15 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// budget the subtask no longer owns (fetchViews is sequential at
 	// fetchNodeViewTimeout per remote and Run derives no deadline of its own).
 	altCtx, cancel := context.WithTimeout(ctx, time.Duration(remaining)*time.Second)
-	alt, ok := r.alternativeNode(altCtx, first, contract, pl)
+	alt, fenceNote, ok := r.alternativeNode(altCtx, first, contract, pl)
 	cancel()
 	if !ok {
+		// A fence is a REASON, not a silence: the caller has to be able to tell
+		// "there was nowhere else to go" from "the only seat left is behind a
+		// measurement that has the cards" (D-94).
+		if fenceNote != "" {
+			first.RetryNote = fenceNote
+		}
 		return first
 	}
 	// Never land the retry on a seat that is already generating for another
@@ -1673,11 +1679,30 @@ func retryable(pr PlacedResult) bool {
 // — including one it reached by re-placement, and including the local seat — is
 // excluded here. Without that, a first attempt that ended up local after two
 // remotes refused could be "retried" on local again.
-func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contract core.AgentContract, pl *placements) (placement, bool) {
+func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contract core.AgentContract, pl *placements) (placement, string, bool) {
 	st := Subtask{Contract: contract, EstTokens: EstimateTokens(contract)}
 	localView := r.localView()
 	why := attemptOutcome(first)
 	if !first.ranLocal {
+		// D-94: the local seat is only a retry target if its lease would ADMIT
+		// the run. Read fresh — the deal's snapshot can be minutes old by the
+		// time a first attempt has failed somewhere else — and read the VERDICT
+		// rather than dialling: a fenced seat answers a dial by holding the
+		// request at the affinity cordon for agent_lease_wait_sec and then
+		// deferring as capacity, which is five minutes of a retry's budget spent
+		// discovering something the lease record already said.
+		lease := LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)
+		if fenced, fence := Fenced(lease); fenced {
+			if chosen, base, found := r.remoteAlternative(ctx, st, pl); found {
+				return placement{view: chosen, base: base,
+					reason: "retry on " + chosen.NodeID + " after " + nodeLabel(first) + " " + why +
+						" — the local seat is fenced: " + fence}, "", true
+			}
+			return placement{}, fmt.Sprintf(
+				"retry skipped: the local seat is fenced (%s — %s) and no other node is eligible; "+
+					"a retry placed there would wait out agent_lease_wait_sec at the affinity cordon and defer as capacity anyway",
+				fence, HolderLine(lease)), false
+		}
 		// No pl.tried[""] check here, and that is a proof rather than an
 		// oversight: a LOCAL placement is always terminal for its chain,
 		// because only runRemote can set `refused` and therefore local can
@@ -1691,21 +1716,38 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 		// revisit, and the other direction (a retry's own chain falling back
 		// onto an already-used local seat) is guarded in replacementNode, where
 		// it IS reachable and IS covered.
-		return placement{view: localView, reason: "retry on local after " + nodeLabel(first) + " " + why}, true
+		return placement{view: localView, reason: "retry on local after " + nodeLabel(first) + " " + why}, "", true
 	}
 	if r.route == "local" {
-		return placement{}, false
+		return placement{}, "", false
+	}
+	chosen, base, found := r.remoteAlternative(ctx, st, pl)
+	if !found {
+		return placement{}, "", false
+	}
+	return placement{view: chosen, base: base, reason: "retry on " + chosen.NodeID + " after local " + why}, "", true
+}
+
+// remoteAlternative picks the best UNTRIED remote for a retry, or reports that
+// there is none. It is Place with the local node forced out of contention
+// (localBusy=true), so the preference order is the fleet's own — capacity first,
+// then a provably free execution slot (an IDLE node beats one that would queue),
+// then queue depth, then utilization. Route local has no remotes by definition
+// and is handled by the caller.
+func (r *runner) remoteAlternative(ctx context.Context, st Subtask, pl *placements) (NodeView, string, bool) {
+	if r.route == "local" {
+		return NodeView{}, "", false
 	}
 	views, bases := r.spreadViews, r.spreadBases
 	if r.route != "spread" {
 		views, bases, _ = r.fetchViews(ctx)
 	}
 	freshViews, freshBases := untried(views, bases, pl.tried)
-	chosen := Place(st, localView, freshViews, true)
+	chosen := Place(st, r.localView(), freshViews, true)
 	if chosen.Local {
-		return placement{}, false
+		return NodeView{}, "", false
 	}
-	return placement{view: chosen, base: baseFor(chosen, freshViews, freshBases), reason: "retry on " + chosen.NodeID + " after local " + why}, true
+	return chosen, baseFor(chosen, freshViews, freshBases), true
 }
 
 // nodeLabel names an attempt's node for an operator-facing annotation. An
