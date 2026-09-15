@@ -130,6 +130,15 @@ type ResultWire struct {
 	// CapacityWaitSec (0.113.18): how long this subtask waited for a node to
 	// have room (agent_placement_wait_sec) — not charged to timeout_sec.
 	CapacityWaitSec float64 `json:"capacity_wait_sec,omitempty"`
+	// Calls (register D-99) is the node's per-completion record for this
+	// subtask — finish reason, token counts, thinking_off, sampling — bounded
+	// to the LAST wireCallsMax completions (the final answer and the re-pack
+	// are what a reader wants; a 12-step run records more than that). Before
+	// this field a delegator could read the record only from the node's own
+	// GET /fleet/jobs/{id} with the fleet token, although the tool description
+	// had promised results[].calls. omitempty: a node that recorded nothing
+	// publishes a row byte-identical to before.
+	Calls []core.AgentCallRecord `json:"calls,omitempty"`
 	// AcceptanceLint carries the intake lint's warnings for THIS subtask's
 	// acceptance (delegate.LintAcceptance): parrot-passable / ungrounded /
 	// shape-only. Warn-only — the run above happened regardless. It rides the
@@ -199,6 +208,25 @@ func lintFor(lints [][]string, i int) []string {
 	return nil
 }
 
+// wireCallsMax bounds ResultWire.Calls (register D-99): the last eight
+// completions cover a 12-step run's tail — its tool steps, the final answer,
+// a structured re-pack — without republishing every planner turn.
+const wireCallsMax = 8
+
+// lastCalls returns the trailing n records of calls (all of them when there
+// are fewer), nil when there are none so omitempty holds.
+func lastCalls(calls []core.AgentCallRecord, n int) []core.AgentCallRecord {
+	if len(calls) == 0 {
+		return nil
+	}
+	if len(calls) > n {
+		calls = calls[len(calls)-n:]
+	}
+	out := make([]core.AgentCallRecord, len(calls))
+	copy(out, calls)
+	return out
+}
+
 // WireResponse shapes Run's raw outcome for publication. lints is the intake
 // lint per subtask, indexed in SUBMISSION order (the same order results keep);
 // nil, or a shorter slice, simply leaves the remaining results unlinted —
@@ -251,6 +279,7 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			Replacements:       pr.Replacements,
 			ReplacementNote:    pr.ReplacementNote,
 			CapacityWaitSec:    pr.CapacityWaitSec,
+			Calls:              lastCalls(pr.Result.Calls, wireCallsMax),
 			AcceptanceLint:     lintFor(lints, i),
 			HarnessVersion:     pr.Result.HarnessVersion,
 			HarnessBuildSHA256: pr.Result.HarnessBuildSHA256,
