@@ -8,13 +8,21 @@ Versioning: [SemVer](https://semver.org/).
 
 ### Added
 - `contracts/digest-8-grounded.json` (register D-100): the eight digest contracts of `digest-8.json` with ONE
-  `contains:` per subtask on an identifier the document names and the goal does not (`installed.json`,
-  `agent_model`, `gpulease.InspectDir`, `gpt-oss-20b`, `delegate-intent.jsonl`, `fleet_queue_holder`,
-  `harness-loop-guard.js`, `AnchorCheck` — extracted by the seats on 2026-09-15, each re-checked against its
-  document). The old fixture's acceptance is shape-only (`min_items:findings:3` + `nonempty:summary`, which the
-  intake lint says on every run), so an 8/8 on it proves completion and schema fill, not digest correctness.
-  The grounded fixture runs BESIDE the old one for three K×8 runs before it replaces it, so a step in pass rate
-  is attributable to the acceptance and not to the seats.
+  grounded check per subtask on identifiers the document names and the goal does not. The old fixture's
+  acceptance is shape-only (`min_items:findings:3` + `nonempty:summary`, which the intake lint says on every
+  run), so an 8/8 on it proves completion and schema fill, not digest correctness. The grounded fixture runs
+  BESIDE the old one for three K×8 runs before it replaces it, so a step in pass rate is attributable to the
+  acceptance and not to the seats.
+
+### Changed
+- `contracts/digest-8-grounded.json` v2: the single `contains:` per subtask became a `regex:` alternation over
+  the document's CENTRAL identifiers (each alternative checked present-in-document and absent-from-goal at
+  build time). v1's anchors (`installed.json`, `agent_model`, `gpulease.InspectDir`, `gpt-oss-20b`,
+  `delegate-intent.jsonl`, `fleet_queue_holder`, `harness-loop-guard.js`, `AnchorCheck`) each occur exactly
+  once in their document — a table cell, a passing comparison — and correct digests skipped them: measured
+  2026-09-15 on quiet seats, the 9B passed 2/8 and the 4B 4/8 with every contract completed and the
+  spot-checked digests substantively right. An acceptance that fails correct answers measures the anchor, not
+  the seat; the three side-by-side runs restart with v2.
 
 ## [0.124.0] - 2026-09-15 - every ledger row names the session that asked and the job behind it (D-101)
 
