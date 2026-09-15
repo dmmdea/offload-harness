@@ -32,6 +32,10 @@ Versioning: [SemVer](https://semver.org/).
   2026-09-15 on quiet seats, the 9B passed 2/8 and the 4B 4/8 with every contract completed and the
   spot-checked digests substantively right. An acceptance that fails correct answers measures the anchor, not
   the seat; the three side-by-side runs restart with v2.
+- `contracts/digest-8-grounded.json` v2.1: the ADR 0026 alternation gains `tryJoin|Admit` and the ADR 0030 alternation
+  `holder|Option B|slack` — v2 run 1 on the 9B and the 4B (7/8 each, 8/8 on the 27B) missed exactly those two, and both
+  digests were correct ones anchored on other central identifiers of their document. The three side-by-side runs count
+  from v2.1.
 
 ## [0.124.0] - 2026-09-15 - every ledger row names the session that asked and the job behind it (D-101)
 

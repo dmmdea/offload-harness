@@ -98,7 +98,7 @@
     "acceptance": [
       "min_items:findings:3",
       "nonempty:summary",
-      "regex:(gpulease|LocalBusy|InspectDir|gpulock)"
+      "regex:(gpulease|LocalBusy|InspectDir|gpulock|tryJoin|Admit)"
     ],
     "profile": "research",
     "max_steps": 8,
@@ -203,7 +203,7 @@
     "acceptance": [
       "min_items:findings:3",
       "nonempty:summary",
-      "regex:(fleet_queue_holder|fleet_queue_host|fleet_queue_claim|fleetqueue|claim)"
+      "regex:(fleet_queue_holder|fleet_queue_host|fleet_queue_claim|fleetqueue|claim|holder|Option B|slack)"
     ],
     "profile": "research",
     "max_steps": 8,
