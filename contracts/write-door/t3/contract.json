@@ -1,0 +1,16 @@
+{
+  "goal": "The write door has just been opened on the node node-b and the two records must say so. Make exactly two changes on disk with the edit_file or write_file tool: (1) in nodes.json, set agent_allow_write to true for the node whose node_id is node-b and leave the other two nodes unchanged - the file must remain valid JSON with the same structure; (2) in nodes.md, change the node-b table row's last cell from closed to open and leave every other row and line unchanged. Do not merely describe the changes.",
+  "context_paths": ["nodes.json", "nodes.md"],
+  "write_root": ".",
+  "thinking": "off",
+  "timeout_sec": 900,
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "summary": {"type": "string", "description": "what was changed in nodes.json and nodes.md"},
+      "changed_files": {"type": "array", "maxItems": 4, "items": {"type": "string"}, "description": "the files written"}
+    },
+    "required": ["summary", "changed_files"]
+  },
+  "acceptance": ["diff_touches:nodes.json", "diff_touches:nodes.md", "diff_max_files:2", "nonempty:summary"]
+}

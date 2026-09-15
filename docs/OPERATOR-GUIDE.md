@@ -1191,6 +1191,13 @@ Requirements and limits, all of them refusals rather than surprises:
 - No delete, no shell, no `run`, no network. This lane edits files; it does not verify them. Running the
   tests is still yours.
 
+**Gate it before you rely on it.** `scripts/write-door-gate.ps1` (fixtures under
+[`contracts/write-door/`](../contracts/README.md), section "write-door/")
+sends three staged legs to one seat — `-Remote http://<node>:18811` for a fleet node's door, no
+`-Remote` for this box's own seat — applies each returned diff to a fresh copy and proves it there
+(`go test` red → green, a JSON parse, exact-row checks). PASS means the door on that seat produces
+diffs a caller can apply; it is the measurement that preceded every door opened so far (register D-06).
+
 `context_paths` are read and inlined **by the delegator**, confined to `read_root`
 (≤ 128 KiB per file) — your session's context never pays for them, and the wire contract stays
 self-contained (the remote node never reaches back into your filesystem). The node writes them as

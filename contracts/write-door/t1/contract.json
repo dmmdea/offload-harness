@@ -1,0 +1,16 @@
+{
+  "goal": "clamp.go contains a bug in the Clamp function: when v is greater than hi it returns lo, but a value above the upper bound must be limited to hi. Fix clamp.go so that Clamp returns hi when v > hi. Do not change any other branch of the function, the package name, or the comments. Do not touch clamp_test.go. Use the edit_file or write_file tool to make the change on disk - do not merely describe it.",
+  "context_paths": ["clamp.go", "clamp_test.go"],
+  "write_root": ".",
+  "thinking": "off",
+  "timeout_sec": 900,
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "summary": {"type": "string", "description": "what was changed in clamp.go"},
+      "changed_files": {"type": "array", "maxItems": 4, "items": {"type": "string"}, "description": "the files written"}
+    },
+    "required": ["summary", "changed_files"]
+  },
+  "acceptance": ["diff_touches:clamp.go", "diff_max_files:1", "nonempty:summary"]
+}

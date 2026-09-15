@@ -1,0 +1,16 @@
+{
+  "goal": "port.go's ParsePort rejects ports below 1 but never rejects ports above 65535, although its comment says a valid port is 1..65535. Make two changes on disk with the edit_file or write_file tool: (1) in port.go, after the existing `if n < 1` check, add a check that returns 0 and the same style of \"out of range\" error when n is greater than 65535; (2) in port_test.go, add ONE more table-driven case to the existing cases slice named \"too large\" with in \"65536\" and wantErr true. Keep the package name, the imports, the existing comments and the existing test structure unchanged. Do not merely describe the changes.",
+  "context_paths": ["port.go", "port_test.go"],
+  "write_root": ".",
+  "thinking": "off",
+  "timeout_sec": 900,
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "summary": {"type": "string", "description": "what was changed in port.go and port_test.go"},
+      "changed_files": {"type": "array", "maxItems": 4, "items": {"type": "string"}, "description": "the files written"}
+    },
+    "required": ["summary", "changed_files"]
+  },
+  "acceptance": ["diff_touches:port.go", "diff_touches:port_test.go", "diff_max_files:2", "nonempty:summary"]
+}
