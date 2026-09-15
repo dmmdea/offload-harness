@@ -17,6 +17,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -51,6 +53,25 @@ const (
 	// enforced as a context deadline node-side. 300s default, 900s hard cap.
 	AgentTimeoutSecDefault = 300
 	AgentTimeoutSecCap     = 900
+
+	// --- The write door (register D-06). Fixed ceilings, NOT contract fields.
+	// A caller cannot raise them (that is the point of a door) and does not
+	// need to lower them: `diff_max_files:<n>` already expresses "this leg may
+	// touch one file", and two knobs for one job is how they drift apart.
+	//
+	// AgentWriteMaxFiles caps the distinct paths one contract may touch. Eight
+	// is a small implementation leg — a file, its test, and room to be wrong —
+	// and anything bigger is a leg that should have been split before it was
+	// handed to a 4B.
+	AgentWriteMaxFiles = 8
+	// AgentWriteMaxBytes caps the TOTAL bytes a contract may write. Generous
+	// for an edit and nowhere near enough to matter to the node's disk.
+	AgentWriteMaxBytes = 64 << 10
+	// AgentWriteDiffMaxBytes caps the rendered unified diff that crosses back.
+	// Larger than the write cap because a diff carries context lines and both
+	// sides of every change; a diff past this is REFUSED, never truncated — a
+	// truncated patch applies as silent damage.
+	AgentWriteDiffMaxBytes = 192 << 10
 )
 
 // Defer classes: WHY a defer happened, in the four kinds that call for
@@ -91,6 +112,14 @@ const (
 	// no box and no contract needs touching, so it is not a broken stack
 	// (delegate.BrokenStackDefer) and not a budget the seat ran out of.
 	DeferClassCapacity = "capacity"
+	// DeferClassWrite (0.122.0, register D-06): the contract asked for the
+	// WRITE door and this node will not open it — `agent_allow_write` is false
+	// here, or the finished write set broke a door cap. Neither a broken stack
+	// (nothing is wrong with the box) nor an unplaceable contract (another node
+	// may well have opted in), so it is its own class: the fix is an opt-in on
+	// a node or a smaller change, and re-placing the contract is the right
+	// delegator reflex.
+	DeferClassWrite = "write"
 )
 
 // Scheduling bands (0.113.18) — the delegator stamps one on every dispatch
@@ -149,6 +178,22 @@ type AgentContract struct {
 	// never to max_steps. Optional; a node one release behind ignores it (the
 	// decoder keeps unknown fields) and reports no setup_ran.
 	SetupActions []AgentSetupAction `json:"setup_actions,omitempty"`
+	// WriteRoot (0.122.0, register D-06) opens the WRITE door: the directory,
+	// RELATIVE to the run read root, that the seat may create and change files
+	// under. "" (the default and every pre-0.119 contract) is read-only, with
+	// no write tool registered at all. "." is the whole read root.
+	//
+	// Relative, not absolute, on purpose. The contract is self-contained: the
+	// node materializes its OWN copy of the inline context docs and has never
+	// seen the delegator filesystem, so an absolute delegator-box path would
+	// name nothing on the executing node. A relative root resolves to an
+	// absolute directory inside the read root on whichever box runs it — the
+	// containment the door needs — and it is enforced by os.Root at the
+	// syscall layer rather than by comparing two path strings.
+	//
+	// The write set is NEVER applied by the harness. It comes back as a
+	// unified diff (AgentWireResult.Diff) for the caller to review and apply.
+	WriteRoot string `json:"write_root,omitempty"`
 }
 
 // ContextDoc is one inline context document. Name is a future FILENAME on the
@@ -281,6 +326,21 @@ type AgentWireResult struct {
 	// and the corpus could not say what those two steps did). Omitempty: a
 	// pre-0.113.22 node's result reads as "no trace", never as "no calls".
 	Trace []AgentTraceStep `json:"trace,omitempty"`
+	// --- The write door (0.122.0, register D-06). Present only on a contract
+	// that opened it. Diff is the unified diff of everything that changed under
+	// write_root during the run, a/ and b/ prefixed so it applies with
+	// `git apply -p1`; DiffFiles lists the touched paths in the same order the
+	// diff renders them. The harness applies NEITHER — reviewing and applying
+	// the change is the caller's job, and that is the whole safety story of
+	// letting a 4B write anything at all.
+	//
+	// WriteNote says what the door did when there is no diff to read: the node
+	// has not opted in, the write set broke a cap, nothing was written. Absent
+	// on a read-only contract, which is how a reader tells "no write door" from
+	// "write door, nothing written".
+	Diff      string   `json:"diff,omitempty"`
+	DiffFiles []string `json:"diff_files,omitempty"`
+	WriteNote string   `json:"write_note,omitempty"`
 	// RulesFired counts environment-rule hits on this run (0 = none / no table).
 	RulesFired int `json:"rules_fired,omitempty"`
 	// SetupRan counts the contract's setup actions (agentsetup.go) that were
@@ -376,6 +436,9 @@ func (c AgentContract) Validate() error {
 	}
 	if err := ValidateAgentSetupActions(c.SetupActions); err != nil {
 		return err
+	}
+	if err := ValidateWriteRoot(c.WriteRoot); err != nil {
+		return fmt.Errorf("agent contract: %w", err)
 	}
 	if len(c.Context) > AgentContextMaxDocs {
 		return fmt.Errorf("agent contract: %d context docs exceeds the max of %d", len(c.Context), AgentContextMaxDocs)
@@ -494,6 +557,54 @@ func validDocName(name string) error {
 	return nil
 }
 
+// ValidateWriteRoot holds a contract's write_root to a safe RELATIVE directory
+// path. "" is the read-only default and always valid.
+//
+// The rules are the strictest platform's, applied on every platform, for the
+// same reason validDocName's are: a contract is a WIRE object validated on the
+// delegator and again on a node that may be a different operating system, so a
+// Linux-only check would accept a path the Windows node then resolves somewhere
+// else. os.Root is the real containment; this is the layer that refuses the
+// shapes whose DAMAGE is done before os.Root ever sees them (a caller believing
+// it scoped a write to one directory when it did not).
+func ValidateWriteRoot(root string) error {
+	if root == "" {
+		return nil
+	}
+	if strings.ContainsAny(root, "\x00") {
+		return fmt.Errorf("write_root %q contains NUL", root)
+	}
+	if filepath.IsAbs(root) || filepath.VolumeName(root) != "" || strings.HasPrefix(root, "/") || strings.HasPrefix(root, "\\") {
+		return fmt.Errorf("write_root %q must be RELATIVE to the run's read root (the executing node never sees the delegator's filesystem, so an absolute path names nothing there)", root)
+	}
+	clean := path.Clean(strings.ReplaceAll(root, "\\", "/"))
+	if clean == "." {
+		return nil // the whole read root
+	}
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return fmt.Errorf("write_root %q escapes the read root", root)
+	}
+	// path.Clean above already collapsed empty and "." segments and folded
+	// every interior "..", and a leading ".." was refused just now — so the
+	// loop below only has to police the shapes Clean does NOT normalize away.
+	for _, seg := range strings.Split(clean, "/") {
+		if trimmed := strings.TrimRight(seg, " ."); trimmed != seg {
+			return fmt.Errorf("write_root %q has a segment with a trailing space or dot (Windows strips those, so the door would open somewhere else than it reads)", root)
+		}
+		if strings.ToLower(seg) == ".git" {
+			return fmt.Errorf("write_root %q points into a .git directory", root)
+		}
+		stem := seg
+		if i := strings.Index(stem, "."); i >= 0 {
+			stem = stem[:i]
+		}
+		if windowsDeviceNames[strings.ToLower(stem)] {
+			return fmt.Errorf("write_root %q has the reserved Windows device name %q as a segment", root, seg)
+		}
+	}
+	return nil
+}
+
 // normalizeDocName is the duplicate-detection key: two names that normalize
 // alike would be ONE file on at least one platform the fleet runs on, so the
 // contract must refuse the pair rather than let one shadow the other.
@@ -514,6 +625,14 @@ func normalizeDocName(name string) string {
 //	regex:<re>            output matches Go regexp re
 //	min_items:<field>:<n> structured.<field> is an array with ≥ n items
 //	nonempty:<field>      structured.<field> is present and non-empty
+//	diff_touches:<prefix> the write set holds a path starting with <prefix>
+//	diff_max_files:<n>    the write set is NON-EMPTY and touches <= n files
+//
+// The two diff verbs read the run's write set (write_root, D-06). Both fail
+// CLOSED on a read-only or empty write set, diff_max_files included: a cap
+// assertion that passes because nothing was written would make a contract that
+// verified nothing read as verified, which is the exact shape this DSL exists
+// to refuse.
 //
 // The text verbs read the final assistant Output; when Output is empty and a
 // Structured result exists they fall back to its raw bytes, so a schema-only
@@ -530,6 +649,12 @@ const (
 	AccRegex       AcceptanceKind = "regex"
 	AccMinItems    AcceptanceKind = "min_items"
 	AccNonempty    AcceptanceKind = "nonempty"
+	// The write-door verbs (0.122.0, register D-06) read the RESULT'S WRITE
+	// SET — the paths the seat actually changed — not its prose. They are the
+	// only acceptance a write contract can carry that a talkative seat cannot
+	// satisfy by talking.
+	AccDiffTouches  AcceptanceKind = "diff_touches"
+	AccDiffMaxFiles AcceptanceKind = "diff_max_files"
 )
 
 // AcceptanceCheck is one parsed acceptance assertion. Construct via
@@ -595,8 +720,24 @@ func ParseAcceptanceCheck(s string) (AcceptanceCheck, error) {
 		if rest == "" {
 			return AcceptanceCheck{}, fmt.Errorf("acceptance check %q: field name is required", s)
 		}
+	case AccDiffTouches:
+		if rest == "" {
+			return AcceptanceCheck{}, fmt.Errorf("acceptance check %q: empty path prefix matches every write", s)
+		}
+		// Normalized once, here, so a Windows-authored contract
+		// ("internal\foo") matches a diff whose paths are always slashed.
+		c.Arg = strings.ReplaceAll(rest, "\\", "/")
+	case AccDiffMaxFiles:
+		n, err := strconv.Atoi(rest)
+		if err != nil {
+			return AcceptanceCheck{}, fmt.Errorf("acceptance check %q: %q is not an integer", s, rest)
+		}
+		if n < 0 {
+			return AcceptanceCheck{}, fmt.Errorf("acceptance check %q: a negative file count is not a bound", s)
+		}
+		c.Arg, c.N = "", n
 	default:
-		return AcceptanceCheck{}, fmt.Errorf("acceptance check %q: unknown verb %q (want contains, not_contains, regex, min_items, nonempty)", s, kind)
+		return AcceptanceCheck{}, fmt.Errorf("acceptance check %q: unknown verb %q (want contains, not_contains, regex, min_items, nonempty, diff_touches, diff_max_files)", s, kind)
 	}
 	return c, nil
 }
@@ -612,7 +753,8 @@ func (c AcceptanceCheck) Pattern() *regexp.Regexp { return c.re }
 // true; on failure it names the check and what was observed, because these
 // reasons surface verbatim in the delegator's merge decision and the
 // delegation ledger — "failed" without a why is unactionable telemetry.
-func (c AcceptanceCheck) Eval(structured json.RawMessage, output string) (pass bool, reason string) {
+func (c AcceptanceCheck) Eval(res AgentWireResult) (pass bool, reason string) {
+	structured, output := res.Structured, res.Output
 	switch c.Kind {
 	case AccContains:
 		if strings.Contains(evalText(structured, output), c.Arg) {
@@ -648,6 +790,24 @@ func (c AcceptanceCheck) Eval(structured json.RawMessage, output string) (pass b
 			return false, reason
 		}
 		return nonemptyValue(field, c.Arg, c.raw)
+	case AccDiffTouches:
+		if len(res.DiffFiles) == 0 {
+			return false, fmt.Sprintf("%s: the run produced NO write set (no write_root, or nothing was written)", c.raw)
+		}
+		for _, f := range res.DiffFiles {
+			if strings.HasPrefix(f, c.Arg) {
+				return true, ""
+			}
+		}
+		return false, fmt.Sprintf("%s: no changed path starts with %q (changed: %s)", c.raw, c.Arg, strings.Join(res.DiffFiles, ", "))
+	case AccDiffMaxFiles:
+		if len(res.DiffFiles) == 0 {
+			return false, fmt.Sprintf("%s: the run produced NO write set (no write_root, or nothing was written)", c.raw)
+		}
+		if len(res.DiffFiles) > c.N {
+			return false, fmt.Sprintf("%s: the run changed %d files, want <= %d (changed: %s)", c.raw, len(res.DiffFiles), c.N, strings.Join(res.DiffFiles, ", "))
+		}
+		return true, ""
 	}
 	return false, fmt.Sprintf("%s: unknown check (not built by ParseAcceptanceCheck?)", c.raw)
 }
