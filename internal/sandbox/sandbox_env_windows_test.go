@@ -12,7 +12,7 @@ import (
 // The Windows cage must hand its child an EXPLICIT environment, not the
 // parent's.
 //
-// Until 0.117.4 CreateProcessAsUser was called with a nil lpEnvironment, which
+// Until 0.117.7 CreateProcessAsUser was called with a nil lpEnvironment, which
 // means "inherit the caller's block" — so a `run` child on Windows received the
 // delegator's entire environment: GITHUB_TOKEN, MEM0_API_KEY, the fleet auth
 // token, every credential a shell had exported into the harness. The Linux cage

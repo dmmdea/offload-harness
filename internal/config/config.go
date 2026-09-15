@@ -832,7 +832,7 @@ type Config struct {
 	OpusInputPricePerMTok float64 `json:"opus_input_price_per_mtok"`
 	// OpusOutputPricePerMTok prices the OTHER half of what a local seat produced
 	// ($ per 1M output tokens). Output bills at 5x input on Opus, and the savings
-	// ledger multiplied it by zero until 0.117.4 - so the harness under-reported
+	// ledger multiplied it by zero until 0.117.7 - so the harness under-reported
 	// itself by exactly the expensive half. An absent or non-positive value falls
 	// back to ledger.DefaultPrices.OutputPerMTok rather than re-creating the zero.
 	OpusOutputPricePerMTok float64 `json:"opus_output_price_per_mtok"`

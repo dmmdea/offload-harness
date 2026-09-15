@@ -157,7 +157,7 @@ type Result struct {
 	// contextpager.go): how much evicted content the agent came BACK for. It is
 	// the gate that closes — or opens — the whole pager family, and it can only
 	// ever read "insufficient_data" if nothing feeds it, which is exactly what
-	// happened between the instrument landing and 0.117.4: PagerStats had no
+	// happened between the instrument landing and 0.117.7: PagerStats had no
 	// production caller at all, so the 10 % gate could never fire in either
 	// direction. Fed here from the compaction path (evictions) and the
 	// tool-result boundary (fetches).

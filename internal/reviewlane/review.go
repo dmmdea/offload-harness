@@ -237,37 +237,145 @@ func BuildContract(task, diff string) (core.AgentContract, error) {
 }
 
 // Result is everything one review publishes: the findings the caller is shown, plus the
-// three counts that say what is NOT in that list.
+// four counts that say what is NOT in that list.
 //
 // The counts are not telemetry. A short or empty findings list is the shape a reader most
 // easily misreads, and each count means something different about WHY it is short:
 // DroppedUngrounded says the seat named a file the diff does not touch (it invented a path),
-// DroppedEcho says it handed the prompt's own template back instead of reviewing, and
-// TruncatedByCap says more was found than the caller asked to see. Counting one and
-// swallowing the others would make the published list quietly unreadable — the same reason
-// dropped-but-uncounted was wrong in the first place.
+// DroppedEcho says it handed the prompt's own template back instead of reviewing,
+// DroppedDuplicate says the same defect was reported more than once, and TruncatedByCap says
+// more was found than the caller asked to see. Counting one and swallowing the others would
+// make the published list quietly unreadable — the same reason dropped-but-uncounted was
+// wrong in the first place.
 type Result struct {
 	Findings          []Finding
 	DroppedUngrounded int
 	DroppedEcho       int
+	DroppedDuplicate  int
 	TruncatedByCap    int
 }
 
 // Report turns the seat's raw finding lines into what the caller is shown: template echoes
-// removed, parsed, grounded against the diff's own files, severity-ranked, capped — with a
-// count for each of the three ways a line can fail to reach the caller.
+// removed, parsed, grounded against the diff's own files, deduplicated, severity-ranked,
+// capped — with a count for each of the four ways a line can fail to reach the caller.
+//
+// Dedupe runs BEFORE capFindings on purpose (register D-90): the seat routinely restates the
+// same defect — once per hunk it touches, or once plainly and once with the file:line it
+// already named repeated inside the claim text — and applying the cap first would let those
+// restatements of ONE finding crowd a genuinely different finding out of the published list.
+// That is the same failure class TruncatedByCap's own doc names for an uncounted drop, just
+// reached from the other side: a cap that counts what it hides but still hides the wrong
+// thing because duplicates padded the queue ahead of it.
 func Report(lines []string, diff string, max int) Result {
 	lines, echoed := dropTemplateEchoes(lines)
 	kept, ungrounded := Ground(ParseFindings(lines), FilesInDiff(diff))
-	ranked := rankFindings(kept, capFindings(max))
+	deduped, duplicate := Dedupe(kept)
+	ranked := rankFindings(deduped, capFindings(max))
 	return Result{
 		Findings:          ranked,
 		DroppedUngrounded: ungrounded,
 		DroppedEcho:       echoed,
+		DroppedDuplicate:  duplicate,
 		// rankFindings reorders and truncates and does nothing else, so the difference
-		// between what went in and what came out IS the cap's doing.
-		TruncatedByCap: len(kept) - len(ranked),
+		// between what went in (post-dedupe) and what came out IS the cap's doing.
+		TruncatedByCap: len(deduped) - len(ranked),
 	}
+}
+
+// claimFileLinePrefixRe matches a leading "<path>:<line>" (optionally followed by a colon)
+// that a seat sometimes prepends to Claim itself — ParseFindings's own doc notes the two-field
+// shape ("severe | run.go:5") that leaves the whole "run.go:5" sitting in Claim because there
+// was no third field to hold it. Left in place, that text would make an otherwise identical
+// finding fail to match its properly-parsed sibling on claim text alone.
+var claimFileLinePrefixRe = regexp.MustCompile(`^(\S+):([0-9]+):?\s+`)
+
+// claimPunctRe strips everything but letters, digits and whitespace, so two claims that differ
+// only in a stray period, backtick or dash normalise to the same key.
+var claimPunctRe = regexp.MustCompile(`[^\p{L}\p{N}\s]+`)
+
+// normalizeClaim canonicalises a Claim for duplicate comparison: lowercase, whitespace
+// collapsed to single spaces, punctuation stripped, and a leading file:line prefix removed
+// when the leading token actually looks like a path (looksLikePath) rather than an ordinary
+// word that happens to contain a colon and a number ("step 2: ...").
+func normalizeClaim(claim string) string {
+	c := strings.TrimSpace(claim)
+	if m := claimFileLinePrefixRe.FindStringSubmatch(c); m != nil && looksLikePath(m[1]) {
+		c = strings.TrimSpace(c[len(m[0]):])
+	}
+	c = strings.ToLower(c)
+	c = claimPunctRe.ReplaceAllString(c, " ")
+	return strings.Join(strings.Fields(c), " ")
+}
+
+// baseFileKey normalises a finding's File field the way Ground and Dedupe both compare on:
+// lowercase, Windows separators folded to '/', and only the base name — the seat is quoting a
+// path it read out of the diff and may root it differently (`b/internal/run.go`,
+// `internal/run.go`, bare `run.go`), and all three name the same file.
+func baseFileKey(file string) string {
+	return strings.ToLower(path.Base(strings.ReplaceAll(file, `\`, "/")))
+}
+
+// Dedupe collapses repeated findings that name the same defect more than once — the seat
+// re-describing it a line or two off, with different punctuation, or with the file:line it
+// already reported repeated inside the claim text — into one, keeping the strongest report and
+// counting the rest as DroppedDuplicate. See Report's comment for why this runs before the cap.
+//
+// The key is (file, normalised claim); within that key, lines merge using a CHAINED ±2
+// tolerance rather than exact equality — sorted ascending, a gap of more than 2 between
+// consecutive lines starts a new cluster — because a seat citing the same defect one line off
+// is not a second defect. Within a cluster the most severe report wins; a severity tie keeps
+// whichever occurrence came first in the seat's own answer (lowest original index), so the
+// surviving finding never depends on map or sort iteration order.
+func Dedupe(in []Finding) ([]Finding, int) {
+	type item struct {
+		idx  int
+		f    Finding
+		line int
+	}
+	groups := map[string][]item{}
+	order := make([]string, 0, len(in))
+	for i, f := range in {
+		key := baseFileKey(f.File) + "\x00" + normalizeClaim(f.Claim)
+		if _, ok := groups[key]; !ok {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], item{idx: i, f: f, line: f.Line})
+	}
+
+	keep := make(map[int]bool, len(in))
+	dropped := 0
+	resolveCluster := func(cluster []item) {
+		best := cluster[0]
+		bestRank := severityRank(best.f.Severity)
+		for _, it := range cluster[1:] {
+			r := severityRank(it.f.Severity)
+			if r < bestRank || (r == bestRank && it.idx < best.idx) {
+				best, bestRank = it, r
+			}
+		}
+		keep[best.idx] = true
+		dropped += len(cluster) - 1
+	}
+	for _, key := range order {
+		items := groups[key]
+		sort.SliceStable(items, func(a, b int) bool { return items[a].line < items[b].line })
+		start := 0
+		for i := 1; i < len(items); i++ {
+			if items[i].line-items[i-1].line > 2 {
+				resolveCluster(items[start:i])
+				start = i
+			}
+		}
+		resolveCluster(items[start:])
+	}
+
+	out := make([]Finding, 0, len(keep))
+	for i, f := range in {
+		if keep[i] {
+			out = append(out, f)
+		}
+	}
+	return out, dropped
 }
 
 // dropTemplateEchoes removes lines that are the prompt's own field spec or worked example
@@ -355,20 +463,24 @@ func capFindings(max int) int {
 
 var sevRank = map[string]int{"severe": 0, "moderate": 1, "minor": 2}
 
+// severityRank orders a severity label low-to-high (severe first). An unrecognised or unstated
+// label ranks AFTER everything named rather than defaulting to 0 (severe's own rank via a bare
+// map miss) — a seat inventing "critical" must not outrank a real severe finding. Shared by
+// rankFindings and Dedupe so a duplicate cluster's "most severe" and the published list's
+// "severe first" can never disagree about what severe means.
+func severityRank(sev string) int {
+	if r, ok := sevRank[sev]; ok {
+		return r
+	}
+	return len(sevRank)
+}
+
 // rankFindings orders severe-first and applies the caller's cap. A cap of 0 means no cap.
-// An unrecognised severity sorts LAST rather than first: a bare map miss yields 0, which is
-// severe's own rank, so a seat inventing "critical" would have outranked every real severe
-// finding. SliceStable keeps input order within a rank, so the seat's own most-serious-first
-// ordering survives inside each bucket.
+// SliceStable keeps input order within a rank, so the seat's own most-serious-first ordering
+// survives inside each bucket.
 func rankFindings(in []Finding, max int) []Finding {
 	out := append([]Finding(nil), in...)
-	rank := func(f Finding) int {
-		if r, ok := sevRank[f.Severity]; ok {
-			return r
-		}
-		return len(sevRank) // unknown or unstated: after everything named
-	}
-	sort.SliceStable(out, func(i, j int) bool { return rank(out[i]) < rank(out[j]) })
+	sort.SliceStable(out, func(i, j int) bool { return severityRank(out[i].Severity) < severityRank(out[j].Severity) })
 	if max > 0 && len(out) > max {
 		out = out[:max]
 	}
@@ -548,7 +660,7 @@ func Ground(in []Finding, files map[string]bool) ([]Finding, int) {
 	kept := make([]Finding, 0, len(in))
 	dropped := 0
 	for _, f := range in {
-		if f.File != "" && !files[strings.ToLower(path.Base(strings.ReplaceAll(f.File, `\`, "/")))] {
+		if f.File != "" && !files[baseFileKey(f.File)] {
 			dropped++
 			continue
 		}

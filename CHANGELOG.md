@@ -20,7 +20,7 @@ Versioning: [SemVer](https://semver.org/).
   the working config (they carry the fleet token) and the second TTS venv. History is not rewritten: the
   paths it carries were already public and hold no credential (the fleet token never entered history).
 
-## [0.117.4] - 2026-09-14 - output tokens are priced; the pager gate can fire; the Windows cage builds its child's environment; retries skip a fenced seat
+## [0.117.7] - 2026-09-14 - output tokens are priced; the pager gate can fire; the Windows cage builds its child's environment; retries skip a fenced seat
 
 ### Security
 - **The Windows OS-cage builds its child's environment instead of inheriting it**
@@ -108,6 +108,29 @@ Versioning: [SemVer](https://semver.org/).
 ### Docs
 - `docs/systems/coding-agent.md`: the caged child's environment contract on both platforms.
 - `docs/systems/fleet-node.md`: the retry's fence rule, and what first placement already does.
+
+## [0.117.6] - 2026-09-14 - duplicate review findings no longer crowd a unique one out of the cap
+
+### Added
+- **Register D-90 — `offload_review_diff` dedupes findings before the cap.** A seat restating the
+  same defect more than once (once per hunk it touches, or once plainly and once with the file:line
+  it already reported repeated inside the claim text) used to count as that many findings toward
+  `max_findings`, so duplicate copies of ONE defect could crowd a genuinely different one out of the
+  published list — the same class of bug `TruncatedByCap`'s own doc already named for an uncounted
+  drop, just reached from the other side. `reviewlane.Dedupe` now runs between `Ground` and the cap:
+  it keys on (file, normalised claim) — claim lowercased, whitespace collapsed, punctuation stripped,
+  and a leading file:line prefix the seat folded into the claim text itself removed — and merges lines
+  within a CHAINED ±2 tolerance of each other rather than requiring an exact line match, since a seat
+  citing the same defect one line off is not a second defect. Within a duplicate cluster the most
+  severe report wins; a severity tie keeps whichever occurrence came first in the seat's own answer.
+  The drop count publishes as `dropped_duplicate` on the wire beside `dropped_ungrounded` and
+  `dropped_echo`, and in the tool description's field list.
+  `TestDedupeCollapsesExactAndNearDuplicates`, `TestDedupeChainsLineTolerance`,
+  `TestDedupeKeepsTheMostSevereOfADuplicateCluster`, `TestDedupeSeverityTieBreakKeepsFirstOccurrence`,
+  `TestDedupeStripsARepeatedFileLinePrefixFromTheClaim`,
+  `TestDedupeNeverMergesAcrossFilesOrDistinctClaims`, `TestReportDedupesBeforeApplyingTheCap`
+  (mutation-verified: reordering `Report` to dedupe AFTER the cap makes it fail),
+  `TestReviewDiffPublishesDroppedDuplicateAndDedupesBeforeTheCap`.
 
 ## [0.117.3] - 2026-09-14 - the research lane dials the address it validated
 

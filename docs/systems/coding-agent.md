@@ -628,7 +628,7 @@ copy-by-name allowlist (`SystemRoot`, `SystemDrive`, `windir`, `PATH`, `PATHEXT`
 `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`, `OS`) plus `USERPROFILE`/`HOME` and
 `TEMP`/`TMP`/`TMPDIR` set to the scratch dir. Nothing else crosses: no `GITHUB_TOKEN`, no
 `MEM0_API_KEY`, no fleet token, no `APPDATA`/`LOCALAPPDATA` pointing at the real profile. Until
-0.117.4 the Windows side passed a nil `lpEnvironment`, which means "inherit the caller's block",
+0.117.7 the Windows side passed a nil `lpEnvironment`, which means "inherit the caller's block",
 so a `run` child received the delegator's whole environment.
 
 > **Known gap:** the read-only `.git` mask that protects the shell path is Linux-only. On native

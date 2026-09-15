@@ -249,7 +249,7 @@ type Summary struct {
 	// tokens_saved x opus_input_price_per_mtok + tokens_out x
 	// opus_output_price_per_mtok, both per 1M. BOTH halves are priced — the
 	// input tokens the cloud never received AND the output tokens a local seat
-	// generated in its place (0.117.4; before that output was priced at zero,
+	// generated in its place (0.117.7; before that output was priced at zero,
 	// which is the expensive half on Opus). It is an estimate of avoided cloud
 	// pricing, NOT literal billed dollars saved (LO-12: the old est_dollar_saved
 	// name presented it as money in the bank).
@@ -425,7 +425,7 @@ func SummarizeFile(path string, since int64, prices Prices) (Summary, error) {
 		}
 	}
 	// The est. Opus value of what stayed local, BOTH HALVES priced at their own
-	// rate. Until 0.117.4 this was TokensSaved x the input rate and nothing else,
+	// rate. Until 0.117.7 this was TokensSaved x the input rate and nothing else,
 	// so every output token a seat generated was multiplied by zero — and output
 	// is the half that bills at 5x. The CLAIM is unchanged (LO-12): an estimate of
 	// avoided cloud pricing, never billed savings.

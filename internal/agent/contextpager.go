@@ -88,7 +88,7 @@ func (p *PagerStats) NoteEvicted(content string) {
 // A no-op compaction (the transcript was already under budget) evicts nothing and
 // records nothing, so the happy path stays invisible to the instrument.
 //
-// This is the caller the instrument shipped without. Between R2-13 landing and 0.117.4
+// This is the caller the instrument shipped without. Between R2-13 landing and 0.117.7
 // nothing called NoteEvicted in production, so the gate read insufficient_data on every
 // real run and could close nothing.
 func (p *PagerStats) NoteCompaction(before, after []Msg) {

@@ -95,7 +95,7 @@ var defaultReadDirs = []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib3
 // fleet auth token and whatever else a shell exported, and handing that block to
 // an untrusted command is a credential disclosure that no filesystem or network
 // containment can undo afterwards. Windows passed nil lpEnvironment to
-// CreateProcess until 0.117.4, which means exactly "inherit the caller's block";
+// CreateProcess until 0.117.7, which means exactly "inherit the caller's block";
 // Linux has always built its three entries by hand.
 //
 // The set has two halves, and the split is the rule:

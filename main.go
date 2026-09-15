@@ -2574,7 +2574,7 @@ func runLedger(args []string) error {
 	b, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Println(string(b))
 	// LO-12: honest claim — this is the est. Opus VALUE of the work kept local,
-	// not literal billed savings. Since 0.117.4 it prices BOTH halves (input at
+	// not literal billed savings. Since 0.117.7 it prices BOTH halves (input at
 	// opus_input_price_per_mtok, output at opus_output_price_per_mtok), so the
 	// line names both token counts rather than only the input one.
 	fmt.Printf("tokens kept local (est.): %d in + %d out (~$%.2f Opus value — an estimate, not billed savings)\n",

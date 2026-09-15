@@ -351,6 +351,161 @@ func TestVerdictReadsCleanSeparatesASilentRunFromACleanOne(t *testing.T) {
 	}
 }
 
+// The core fixture for register D-90: 3 EXACT duplicates (same file, same line, same claim
+// text) plus 2 NEAR-duplicates (line ±1 of the group, punctuation/casing differs) all name the
+// SAME defect and must collapse to one survivor; a 6th, textually distinct finding must be
+// untouched. 5 in, 1 out per group: 2 kept overall, 4 dropped_duplicate.
+func TestDedupeCollapsesExactAndNearDuplicates(t *testing.T) {
+	in := []Finding{
+		{Severity: "moderate", File: "run.go", Line: 57, Claim: "the returned error is discarded"},
+		{Severity: "moderate", File: "run.go", Line: 57, Claim: "the returned error is discarded"},
+		{Severity: "moderate", File: "run.go", Line: 57, Claim: "the returned error is discarded"},
+		{Severity: "moderate", File: "run.go", Line: 56, Claim: "The returned error is discarded."},
+		{Severity: "moderate", File: "run.go", Line: 58, Claim: "the returned error is discarded!!"},
+		{Severity: "severe", File: "run.go", Line: 12, Claim: "off-by-one in the loop bound"},
+	}
+	out, dropped := Dedupe(in)
+	if dropped != 4 {
+		t.Fatalf("dropped = %d, want 4", dropped)
+	}
+	if len(out) != 2 {
+		t.Fatalf("kept = %d, want 2: %+v", len(out), out)
+	}
+	claims := map[string]bool{}
+	for _, f := range out {
+		claims[f.Claim] = true
+	}
+	if !claims["off-by-one in the loop bound"] {
+		t.Fatalf("the distinct finding must survive untouched: %+v", out)
+	}
+}
+
+// Duplicates must merge across ANY tolerated pair in the chain even when the two ends are more
+// than 2 lines apart — 57, then 56 (gap 1), then 58 (gap 2 from 56) all chain into one cluster,
+// even though 58-57=1 and 58-56=2 are both within tolerance too; this asserts the CHAINING
+// itself, not just single-pair tolerance.
+func TestDedupeChainsLineTolerance(t *testing.T) {
+	in := []Finding{
+		{Severity: "minor", File: "x.go", Line: 10, Claim: "missing nil check"},
+		{Severity: "minor", File: "x.go", Line: 12, Claim: "missing nil check"},
+	}
+	out, dropped := Dedupe(in)
+	if dropped != 1 || len(out) != 1 {
+		t.Fatalf("a ±2 line gap must still merge: kept=%+v dropped=%d", out, dropped)
+	}
+	// A gap of 3 must NOT merge — this is the boundary the tolerance is supposed to enforce.
+	in2 := []Finding{
+		{Severity: "minor", File: "x.go", Line: 10, Claim: "missing nil check"},
+		{Severity: "minor", File: "x.go", Line: 13, Claim: "missing nil check"},
+	}
+	out2, dropped2 := Dedupe(in2)
+	if dropped2 != 0 || len(out2) != 2 {
+		t.Fatalf("a >2 line gap must NOT merge: kept=%+v dropped=%d", out2, dropped2)
+	}
+}
+
+// Within a duplicate cluster the most severe report wins, regardless of input order or line
+// order — a seat that first under-called a defect "minor" and later, re-describing it,
+// correctly called it "severe" must not have its stronger read thrown away.
+func TestDedupeKeepsTheMostSevereOfADuplicateCluster(t *testing.T) {
+	in := []Finding{
+		{Severity: "minor", File: "run.go", Line: 5, Claim: "off-by-one in the loop bound"},
+		{Severity: "severe", File: "run.go", Line: 6, Claim: "off-by-one in the loop bound"},
+	}
+	out, dropped := Dedupe(in)
+	if dropped != 1 || len(out) != 1 {
+		t.Fatalf("kept=%+v dropped=%d", out, dropped)
+	}
+	if out[0].Severity != "severe" {
+		t.Fatalf("the more severe report must win: %+v", out[0])
+	}
+}
+
+// When severities tie, the FIRST occurrence in the seat's own answer wins — never whichever
+// the sort happened to visit last, and never the one with the lower line number (the fixture
+// deliberately puts the later-in-input finding on the earlier line, so a line-order tie-break
+// would pick the wrong one).
+func TestDedupeSeverityTieBreakKeepsFirstOccurrence(t *testing.T) {
+	in := []Finding{
+		{Severity: "moderate", File: "run.go", Line: 20, Claim: "missing nil check", Why: "first, reported second-in-line"},
+		{Severity: "moderate", File: "run.go", Line: 19, Claim: "missing nil check", Why: "reported first, later line-sort position wins nothing"},
+	}
+	out, dropped := Dedupe(in)
+	if dropped != 1 || len(out) != 1 {
+		t.Fatalf("kept=%+v dropped=%d", out, dropped)
+	}
+	if out[0].Why != "first, reported second-in-line" {
+		t.Fatalf("the first occurrence in input order must survive a severity tie: %+v", out[0])
+	}
+}
+
+// A leading "path:line" the seat folded into Claim itself (ParseFindings's own two-field
+// shape, "severe | run.go:5", leaves the whole "run.go:5" in Claim with File empty) must
+// normalise away so it can still match its properly-parsed sibling on claim text.
+func TestDedupeStripsARepeatedFileLinePrefixFromTheClaim(t *testing.T) {
+	in := []Finding{
+		{Severity: "moderate", File: "run.go", Line: 5, Claim: "off-by-one in the loop bound"},
+		{Severity: "moderate", File: "run.go", Line: 5, Claim: "run.go:5: off-by-one in the loop bound"},
+	}
+	out, dropped := Dedupe(in)
+	if dropped != 1 || len(out) != 1 {
+		t.Fatalf("the repeated file:line prefix must not defeat the match: kept=%+v dropped=%d", out, dropped)
+	}
+}
+
+// Different files, or a genuinely different claim, must never merge — Dedupe only ever
+// narrows what the CAP later sees, never invents a match across unrelated findings.
+func TestDedupeNeverMergesAcrossFilesOrDistinctClaims(t *testing.T) {
+	in := []Finding{
+		{Severity: "moderate", File: "a.go", Line: 5, Claim: "missing nil check"},
+		{Severity: "moderate", File: "b.go", Line: 5, Claim: "missing nil check"},
+		{Severity: "moderate", File: "a.go", Line: 5, Claim: "unrelated defect"},
+	}
+	out, dropped := Dedupe(in)
+	if dropped != 0 || len(out) != 3 {
+		t.Fatalf("nothing here is a duplicate: kept=%+v dropped=%d", out, dropped)
+	}
+}
+
+// The ordering guard for register D-90: dedupe must run BEFORE the cap, or duplicate copies of
+// ONE finding crowd a genuinely different finding out of the published list. Five restatements
+// of the same defect plus one distinct finding, capped at 1: with dedupe-before-cap the
+// distinct finding can still win the cap on its own severity; with dedupe AFTER the cap the
+// five duplicates alone would already have filled the one slot the cap allows, and the
+// distinct finding would never even reach ranking.
+//
+// Mutation-verified: swapping Report's `deduped, duplicate := Dedupe(kept); ranked :=
+// rankFindings(deduped, capFindings(max))` for `ranked := rankFindings(kept, capFindings(max));
+// deduped, duplicate := Dedupe(ranked)` (dedupe after the cap) makes this test FAIL — the cap
+// runs first and keeps only 1 raw (pre-dedupe) finding, so Dedupe then sees a single-item
+// slice and reports DroppedDuplicate=0 instead of 4 (FAIL: "DroppedDuplicate = 0, want 4"),
+// and which single finding survived the cap depends on rankFindings' stable sort over 6
+// still-undeduplicated entries rather than on the real severe/duplicate distinction.
+func TestReportDedupesBeforeApplyingTheCap(t *testing.T) {
+	diff := "--- a/run.go\n+++ b/run.go\n@@ -1 +1 @@\n+x\n"
+	rep := Report([]string{
+		"minor | run.go:10 | missing nil check | panics on empty input",
+		"minor | run.go:10 | missing nil check | panics on empty input",
+		"minor | run.go:11 | missing nil check | panics on empty input",
+		"minor | run.go:9 | missing nil check | panics on empty input",
+		"minor | run.go:12 | missing nil check | panics on empty input",
+		"severe | run.go:40 | off-by-one in the loop bound | reads one past the end",
+	}, diff, 1)
+	if rep.DroppedDuplicate != 4 {
+		t.Fatalf("DroppedDuplicate = %d, want 4", rep.DroppedDuplicate)
+	}
+	if len(rep.Findings) != 1 {
+		t.Fatalf("cap of 1 must still publish exactly 1: %+v", rep.Findings)
+	}
+	if rep.Findings[0].Severity != "severe" {
+		t.Fatalf("the cap must be applied AFTER dedupe, so the distinct severe finding wins it: %+v", rep.Findings[0])
+	}
+	// 6 in, 4 duplicates dropped, 2 survive dedupe, cap keeps 1 of those 2.
+	if rep.TruncatedByCap != 1 {
+		t.Fatalf("TruncatedByCap must count against the POST-dedupe total, not the raw input: %d", rep.TruncatedByCap)
+	}
+}
+
 func TestReportClampsTheCapToWhatTheSeatWasAskedFor(t *testing.T) {
 	if got := capFindings(0); got != DefaultMaxFindings {
 		t.Fatalf("an unset cap must fall back to the default: %d", got)
