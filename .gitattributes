@@ -21,3 +21,7 @@ config.example.json text eol=lf
 # would then diff the ENTIRE tree against an LF source — burying the real change. It
 # also keeps spec.yaml byte-identical to the `spec_checksum` in .printing-press.json.
 tools/**        text eol=lf
+
+# The write door's gate fixtures: a seat returns an LF unified diff and the gate applies it to a copy of these
+# files on whatever box runs it — a CRLF checkout would make every context line miss.
+contracts/write-door/** text eol=lf

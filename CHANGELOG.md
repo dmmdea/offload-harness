@@ -6,6 +6,16 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- The write door's three-task gate: `contracts/write-door/{t1,t2,t3}` (a one-file Go fix, a two-file Go
+  fix plus the table case that exercises it, a JSON + Markdown record edit) and
+  `scripts/write-door-gate.ps1`, which sends them to one seat (`-Remote http://<node>:18811` or this
+  box's own seat), applies each returned diff to a FRESH copy and proves it there (`go test` red → green,
+  a JSON parse, exact-row checks) — the proof a caller of a write contract owes, since the harness never
+  applies its own writes. Measured 2026-09-15: 3/3 on a 4B vLLM fleet seat (18 / 45 / 48 s), t1 in 10 s
+  on a 27B seat (register D-06). The fixtures are pinned `eol=lf` so a seat's LF diff applies on every
+  checkout.
+
 ### Security
 - Operator identity scrubbed from the public tree, and a gate that keeps it out
   (`TestTrackedTreeCarriesNoOperatorIdentity`, root package): a Windows profile path in a plan, the

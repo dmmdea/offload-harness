@@ -622,7 +622,9 @@ cannot run it; `false` only costs a conservative local placement).
 
 A delegation contract may carry `write_root` — a directory, RELATIVE to the run's read root, that the
 seat may create and change files under. A node opens that door only when its config says
-`"agent_allow_write": true`. **The default is false, and a node that has not opted in refuses a write
+`"agent_allow_write": true`. Open it, restart the node, then prove it from a delegator with
+`scripts/write-door-gate.ps1 -Remote http://<node>:18811` (three staged legs, each applied to a fresh copy
+and tested — see `contracts/README.md`). **The default is false, and a node that has not opted in refuses a write
 contract at ACK** (an HTTP 400, which makes the delegator RE-PLACE the contract on a node that has
 opted in, exactly like any other dispatch refusal). The in-process local path has no ack hop to refuse
 at and defers instead, with `defer_class: "write"`.
