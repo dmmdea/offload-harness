@@ -79,6 +79,39 @@ func (p *PagerStats) NoteEvicted(content string) {
 	p.bytes += int64(len(content))
 }
 
+// NoteCompaction records what ONE compaction pass took out of the transcript: every
+// tool body present before that is not present, byte-identical, after.
+//
+// Byte-identical is the right test and not a strict one: the rungs that collapse a body
+// to a dedupe marker, prune it to a skeleton, or drop it outright all leave the agent
+// without the content it had, which is precisely the state a pager would exist to undo.
+// A no-op compaction (the transcript was already under budget) evicts nothing and
+// records nothing, so the happy path stays invisible to the instrument.
+//
+// This is the caller the instrument shipped without. Between R2-13 landing and 0.117.7
+// nothing called NoteEvicted in production, so the gate read insufficient_data on every
+// real run and could close nothing.
+func (p *PagerStats) NoteCompaction(before, after []Msg) {
+	if p == nil || len(before) == 0 {
+		return
+	}
+	kept := make(map[string]bool, len(after))
+	for _, m := range after {
+		if m.Role == "tool" && len(m.Content) >= minPayloadBytes {
+			kept[payloadKey(m.Content)] = true
+		}
+	}
+	for _, m := range before {
+		if m.Role != "tool" || len(m.Content) < minPayloadBytes {
+			continue
+		}
+		if kept[payloadKey(m.Content)] {
+			continue
+		}
+		p.NoteEvicted(m.Content)
+	}
+}
+
 // NoteFetched records a tool result entering the transcript, and counts it as a RE-fetch only
 // if identical content was evicted earlier in this run.
 //

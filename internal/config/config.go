@@ -830,6 +830,12 @@ type Config struct {
 	TargetErrorRate        map[string]float64 `json:"target_error_rate,omitempty"`        // Phase 2: per-task α for calibration
 	// OpusInputPricePerMTok estimates dollar savings ($ per 1M input tokens).
 	OpusInputPricePerMTok float64 `json:"opus_input_price_per_mtok"`
+	// OpusOutputPricePerMTok prices the OTHER half of what a local seat produced
+	// ($ per 1M output tokens). Output bills at 5x input on Opus, and the savings
+	// ledger multiplied it by zero until 0.117.7 - so the harness under-reported
+	// itself by exactly the expensive half. An absent or non-positive value falls
+	// back to ledger.DefaultPrices.OutputPerMTok rather than re-creating the zero.
+	OpusOutputPricePerMTok float64 `json:"opus_output_price_per_mtok"`
 	// RequestTimeoutSec for a single model call.
 	RequestTimeoutSec int `json:"request_timeout_sec"`
 	// --- shadow-labeling flywheel (Phase A.3) ---
@@ -1390,6 +1396,7 @@ func Default() Config {
 		ExemplarShots:          0, // off until the pool is built + measured
 		AutoHeal:               false,
 		OpusInputPricePerMTok:  15.0,
+		OpusOutputPricePerMTok: 75.0,
 		RequestTimeoutSec:      120,
 		ShadowEnabled:          false,
 		ShadowRate:             0.10,

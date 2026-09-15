@@ -427,7 +427,8 @@ Copy `config.example.json` and edit. Config is resolved in precedence order: `--
 | `ledger_path` | `~/.local-offload/ledger.jsonl` | Append-only token-savings ledger. |
 | `exemplar_shots` | `0` | Few-shot exemplars to inject (0 = off). |
 | `auto_heal` | `false` | Auto-warmup a tripped tier's circuit breaker. |
-| `opus_input_price_per_mtok` | `15.0` | Price used to value tokens saved in the ledger. |
+| `opus_input_price_per_mtok` | `15.0` | Price used to value INPUT tokens kept out of the cloud. |
+| `opus_output_price_per_mtok` | `75.0` | Price used to value the tokens a local seat GENERATED. Output bills at 5x input on Opus; before 0.117.7 the ledger priced it at zero. |
 | `request_timeout_sec` | `120` | Per-request timeout. |
 
 These are the core cascade keys. The per-machine **media bindings** — `imagegen_*` (including the

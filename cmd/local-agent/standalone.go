@@ -293,6 +293,18 @@ func runStandalone(ctx context.Context, loop *agent.Loop, o standaloneOpts) erro
 		} else {
 			fmt.Fprintf(os.Stderr, "[standalone] %s: prefill UNMEASURED (backend reported no timings on any step)\n", gid)
 		}
+		// R2-13: the context-pager gate. Same shape as prefill above and for the
+		// same reason - it is a DECISION number, and it decides whether the pager
+		// family gets built at all: under 10 % re-fetch the whole family closes for
+		// free. The instrument shipped with no caller at all, so this printed
+		// nothing and the gate sat unarmed; the basis is printed with the rate so a
+		// run that evicted nothing can never be read as a measured 0 %.
+		if pg := res.Pager; pg.Basis == "measured" && pg.RefetchRate != nil {
+			fmt.Fprintf(os.Stderr, "[standalone] %s: pager gate - %d eviction(s), %d KiB evicted, %d of %d distinct payloads re-fetched (%.1f%%): %s\n",
+				gid, pg.Evictions, pg.EvictedBytes/1024, pg.Refetched, pg.DistinctEvicted, *pg.RefetchRate*100, pg.Verdict)
+		} else {
+			fmt.Fprintf(os.Stderr, "[standalone] %s: pager gate UNEXERCISED (%s)\n", gid, pg.Verdict)
+		}
 		// Degrade transition note (once per process) + per-goal rung in the
 		// trace: --queue is the unattended mode, so the sticky downgrade must
 		// be visible in BOTH the live stderr and the after-the-fact audit

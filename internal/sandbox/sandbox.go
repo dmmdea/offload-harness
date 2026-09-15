@@ -13,7 +13,10 @@
 // unprivileged by design. No sudo, no firewall, no package installs.
 package sandbox
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // workerEnv is the sentinel environment variable. When it is set on a re-exec of
 // this binary, the process is the sandboxed WORKER: it applies the cage and
@@ -84,6 +87,109 @@ type Result struct {
 // /home, /root, /proc, /sys, /dev, /tmp, /mnt — Landlock default-denies anything
 // not granted, so secrets (~/.ssh, ~/.claude, the memory store) are unreadable.
 var defaultReadDirs = []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc"}
+
+// --- the caged child's environment (shared contract, per-platform lists) ------
+//
+// A caged process gets an EXPLICIT environment, never the parent's. The parent
+// here is the harness: its environment carries GITHUB_TOKEN, MEM0_API_KEY, the
+// fleet auth token and whatever else a shell exported, and handing that block to
+// an untrusted command is a credential disclosure that no filesystem or network
+// containment can undo afterwards. Windows passed nil lpEnvironment to
+// CreateProcess until 0.117.7, which means exactly "inherit the caller's block";
+// Linux has always built its three entries by hand.
+//
+// The set has two halves, and the split is the rule:
+//
+//   - DERIVED (derivedEnvNames): a home and a temp dir, whose VALUES come from
+//     Spec.Scratch and never from the parent. This is what keeps the child out of
+//     the operator's real profile and %TEMP%.
+//   - INHERITED (the platform's envPassthrough): the few variables whose values
+//     only the parent OS can supply and that a process needs in order to START.
+//     Linux needs none of them (its PATH is a fixed system list); Windows cannot
+//     synthesise SystemRoot or PATH, so those are copied by name.
+//
+// Anything not named is dropped. Adding a name is a decision with a reason, which
+// is the property inheritance destroyed.
+
+// Each platform file declares the four lists this contract is made of:
+//
+//	envFixed        entries whose VALUE is a constant of the cage (Linux's system PATH)
+//	envPassthrough  names COPIED BY NAME from the parent (Windows' SystemRoot, PATH, ...)
+//	envHomeNames    names set to the run's scratch dir, the child's "home"
+//	envTempNames    names set to the run's scratch dir, the child's temp
+//
+// envFixed + envPassthrough is where the two platforms genuinely differ: a Linux
+// cage can name its own PATH, a Windows one cannot synthesise SystemRoot or the
+// system PATH and must copy them. Everything else is shared here.
+
+// EnvAllowlist is every variable name a caged child can receive on this
+// platform. Exported so the guarantee's test can assert the CLOSED set instead
+// of restating it — a test that re-declares the list proves only that it can
+// copy the list.
+func EnvAllowlist() []string {
+	out := make([]string, 0, len(envFixed)+len(envPassthrough)+len(envHomeNames)+len(envTempNames))
+	for _, e := range envFixed {
+		if k, _, ok := strings.Cut(e, "="); ok {
+			out = append(out, k)
+		}
+	}
+	out = append(out, envPassthrough...)
+	out = append(out, envHomeNames...)
+	out = append(out, envTempNames...)
+	return out
+}
+
+// cageEnv builds the caged command's whole environment. The child sees this and
+// nothing else.
+//
+// Home and temp point at the run's SCRATCH dir, never at the operator's real
+// profile or %TEMP%: the cage grants scratch as writable, so a child that writes
+// where its env tells it to stays inside the cage instead of being refused (or,
+// on Windows, quietly writing into a directory the low-IL token happens to allow).
+// A Spec with no Scratch falls back to the worktree — never to the parent's value,
+// which is the inheritance this exists to remove.
+func cageEnv(spec Spec, environ []string) []string {
+	dir := spec.Scratch
+	if dir == "" {
+		dir = spec.Worktree
+	}
+	env := append([]string(nil), envFixed...)
+	env = append(env, inheritedEnv(envPassthrough, environ)...)
+	for _, n := range envHomeNames {
+		env = append(env, n+"="+dir)
+	}
+	for _, n := range envTempNames {
+		env = append(env, n+"="+dir)
+	}
+	return env
+}
+
+// inheritedEnv copies ONLY the named variables out of the parent environment,
+// matching names case-insensitively (Windows env names are case-insensitive, and
+// a case-sensitive match there is a silently empty allowlist) and emitting the
+// allowlist's own spelling. A name the parent does not set is simply absent — an
+// empty-string entry is not the same as unset, and some Windows APIs treat it
+// differently.
+func inheritedEnv(names []string, environ []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	have := make(map[string]string, len(environ))
+	for _, kv := range environ {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || k == "" {
+			continue // a leading-"=" entry is Windows' per-drive cwd record, never inherited
+		}
+		have[strings.ToUpper(k)] = v
+	}
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if v, ok := have[strings.ToUpper(n)]; ok && v != "" {
+			out = append(out, n+"="+v)
+		}
+	}
+	return out
+}
 
 func (s Spec) encode() (string, error) {
 	b, err := json.Marshal(s)

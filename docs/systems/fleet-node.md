@@ -513,6 +513,28 @@ Remotes come from the call's `remotes` argument, else from the config's `delegat
 
 **Retry on a different seat (0.80.0).** A subtask whose first attempt came back `failed_verification` (the acceptance DSL caught a wrong answer) or an honest `abstention` is re-run ONCE on a different node when one is available — local → the best eligible remote, remote → local — under a fresh job id. The published result is the BETTER attempt (a success beats any failure; otherwise the first attempt stands) and carries `retried_on` + `retry_note`; the summary carries `retried` / `retry_recovered`. Measured motivation: on the same four digest contracts the 27B seat and the 4B seat each missed a different one, and neither miss was silent thanks to acceptance — the retry is what turns "caught" into "recovered". Transport failures and infrastructure/config/contract defers are NOT retried: a broken box or a bad contract does not get better on another seat. The retry lives **inside the subtask's `timeout_sec`** — it gets whatever budget the first attempt left, and is skipped (the result carries a `retry_note` saying so) when less than the retry floor remains — 10 s by default, raised by the delegator's `agent_retry_min_sec` (0.115.9, register D-46: a cold vLLM load plus one turn at `max_tokens` on the retry seat; 300 on the reference box) — so `timeout_sec` stays the wall ceiling the caller was told it is. Two more skips, each named in `retry_note` (0.115.9): a first attempt that ended on an **empty final** (`stop_reason` `reasoning_starved` / `empty`, 0.115.8) is never retried — the shape is the seat's completion budget, not a wrong answer another seat corrects; and the retry never lands on a seat that is **already running another job** (a remote publishing `jobs_running > 0`, or the local seat with requests in flight), which would only halve both runs' tok/s. The re-placement floor after a REFUSED dispatch (no seat time spent) stays at 10 s.
 
+**The retry never lands on a FENCED local seat (0.117.7, register D-94).** Before choosing the local
+seat for a retry the delegator reads the machine-wide lease and asks `delegate.Fenced` — the
+placement-side reading of `modelaffinity.BlocksNewRun`, which it calls rather than restates. Three
+holds fence: an **exclusive** text lease (the holder cleared the cards), a **draining** text lease
+(the seat is cordoned while in-flight work finishes) and a **media** lease (a render owns the VRAM).
+When the seat is fenced the retry goes to the best eligible remote instead — `gate.Place` with the
+local node out of contention, so an idle node beats one that would queue — and when nothing else is
+eligible the subtask defers AT ONCE with a `retry_note` naming the fence and the holder. It is read
+from the lease record, never discovered by dialling: on 2026-09-14 a retry was placed on the local
+seat under an exclusive lease, waited the whole `gpu-lease timeout after 5m0s (bound 5m0s)` at the
+affinity cordon and then deferred as capacity, while an idle remote sat unused for those five
+minutes. A plain (non-exclusive, non-draining) text reservation is NOT a fence here: it already
+removes the local seat from FIRST placement (`Reserved`, below), and the affinity gate admits the
+load, so refusing a retry on it would refuse work the box can do.
+
+FIRST placement already consults the lease and always did: `route=auto` defers to the capacity wait
+when `Reserved(LocalLease(...))` holds (`TestRunAutoReservedLocalDefersNamingTheHolder`) and
+`route=spread` drops the local seat out of the deal (`TestRunSpreadReservedLocalDealsRemotesOnly`).
+A MEDIA lease is deliberately excluded there — renders are arbitrated at the model-affinity gate
+(ADR 0026) — which is why it fences a retry but not a first placement: a retry runs on the leftovers
+of `timeout_sec` and cannot afford to spend them queueing behind a render.
+
 ### Contract wire shape (`core.AgentContract`)
 
 The dispatch envelope's `payload` for an agent job is one contract. The reader is **tolerant on

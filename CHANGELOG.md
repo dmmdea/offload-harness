@@ -20,6 +20,95 @@ Versioning: [SemVer](https://semver.org/).
   the working config (they carry the fleet token) and the second TTS venv. History is not rewritten: the
   paths it carries were already public and hold no credential (the fleet token never entered history).
 
+## [0.117.7] - 2026-09-14 - output tokens are priced; the pager gate can fire; the Windows cage builds its child's environment; retries skip a fenced seat
+
+### Security
+- **The Windows OS-cage builds its child's environment instead of inheriting it**
+  (`internal/sandbox`). `CreateProcessAsUser` was called with a nil `lpEnvironment`, and nil does
+  not mean "empty" — it means "give the child the caller's block". The caller is the harness, so
+  every `run` child on Windows received the delegator's entire environment: `GITHUB_TOKEN`,
+  `MEM0_API_KEY`, the fleet auth token, the session's own messaging token, `AWS_*`, anything a
+  shell had exported. The line's comment justified it with "reads are not contained on Windows
+  anyway", which conflates two things: a cage that does not stop a child GOING AND LOOKING for a
+  secret is no reason to HAND it one, and the Linux cage has exec'd with a hand-built env since it
+  landed.
+  - One contract for both platforms (`sandbox.cageEnv`, `sandbox.EnvAllowlist`,
+    `sandbox.inheritedEnv`), four explicit lists per platform — fixed / copied-by-name / home /
+    temp — so the two files cannot drift apart again.
+  - Linux keeps EXACTLY the env it had: a fixed `PATH`, `HOME` and `TMPDIR` at the scratch dir,
+    nothing copied from the parent at all.
+  - Windows copies by name only what a process needs to START and cannot synthesise: `SystemRoot`,
+    `SystemDrive`, `windir`, `PATH`, `PATHEXT`, `COMSPEC`, `NUMBER_OF_PROCESSORS`,
+    `PROCESSOR_ARCHITECTURE`, `OS`. `USERPROFILE`/`HOME` and `TEMP`/`TMP`/`TMPDIR` are DERIVED from
+    `Spec.Scratch`, the same redirection Linux does, so a child writes inside the cage rather than
+    into the operator's real profile. `APPDATA`/`LOCALAPPDATA`/`USERNAME`/`USERDOMAIN` are
+    deliberately absent: they name or point at that profile. The block is UTF-16, sorted, and
+    passed with `CREATE_UNICODE_ENVIRONMENT` — without that flag the same bytes are read as ANSI
+    and the child gets one truncated entry.
+  - The proof is adversarial: `cmd /c set` inside the cage with three canaries exported in the
+    parent, asserted absent by name AND by value, the allowlist asserted present, and the block
+    asserted CLOSED. On non-Windows the two test names remain as explicit `t.Skip`s rather than
+    vanishing behind a build tag — a guarantee whose test is merely absent reads as passing on
+    every Linux CI run, which is the same silence that let the nil ship.
+
+### Fixed
+- **The savings ledger prices output tokens instead of multiplying them by zero**
+  (`internal/ledger`). `est_value_kept_local` was `tokens_saved x opus_input_price_per_mtok` and
+  nothing else, so every token a local seat GENERATED was worth $0.00 — and output is the expensive
+  half on Opus ($75/MTok against $15/MTok input). 5M locally generated tokens reported nothing
+  instead of $375. The rows were always complete (`tokens_out` from the first version,
+  `seat_tokens_in` since 0.115.5), so this is arithmetic over the existing schema and no ledger
+  field changed.
+  - `ledger.Prices{InputPerMTok, OutputPerMTok}` replaces the single price float; `PricesFrom`
+    resolves each config key against the shipped defaults INDEPENDENTLY, so every config written
+    before `opus_output_price_per_mtok` existed keeps a real output price instead of re-creating
+    the zero on upgrade.
+  - New config key `opus_output_price_per_mtok` (default 75.0), in `config.example.json`, the
+    install template and the README. `local-offload ledger` now prints both token counts, since
+    the dollar figure is no longer a function of the input count alone.
+  - Deferred rows stay at zero on both halves — pinned by its own case, so the fix cannot
+    degenerate into "price every `tokens_out` in the file".
+- **The context-pager gate (R2-13) can now fire in either direction** (`internal/agent`).
+  `PagerStats` shipped complete — eviction hashes, re-fetch counting, a pointer rate, its own gate
+  verdict — and with NO production caller: `NoteEvicted`/`NoteFetched` were reachable only from the
+  instrument's own unit test, so every real run reported `insufficient_data` and the stated gate
+  ("build nothing further until the re-fetch rate clears 10 %") could neither close the pager family
+  nor open it. The instrument was not obsolete, it was unarmed.
+  - `PagerStats.NoteCompaction(before, after)` runs at every compaction pass in the loop (proactive,
+    the harder retry after a context-overflow rejection, and the emergency shrink) and records every
+    tool body that was in the transcript and is not in it byte-identical afterwards — dropped,
+    collapsed to a dedupe marker, or pruned to a skeleton all leave the agent without the content. A
+    no-op pass records nothing, so the happy path stays invisible.
+  - `NoteFetched` runs at the ONE boundary every tool result crosses, AFTER the result cap and the
+    env-rule rewrites, so the bytes hashed are the bytes the transcript carries.
+  - `Result.Pager` carries the report out beside `Result.Prefill`, and `local-agent --queue` prints
+    it beside the prefill line — basis WITH rate, so a run that evicted nothing can never be read as
+    a measured 0 %.
+- **A retry never lands on a fenced local seat** (`internal/delegate`, register D-94). A contract
+  deferred on the 4B seat and its cross-seat retry was placed on the local seat whose GPU lease was
+  EXCLUSIVE, waited the whole `gpu-lease timeout after 5m0s (bound 5m0s)` at the model-affinity
+  cordon and deferred as capacity — while another node was eligible and idle for those five minutes.
+  `alternativeNode` returned the local seat unconditionally whenever the first attempt had run
+  remote, with no lease read at all, and then learned the refusal by dialling.
+  - `delegate.Fenced(info)` reports whether a lease REFUSES A NEW RUN and names it. It CALLS
+    `modelaffinity.BlocksNewRun` rather than restating it, so placement and admission cannot drift
+    into a placement that dials a seat its own gate will refuse. Exclusive text, draining text and
+    media fence; a plain text reservation does not (it already removes the seat from FIRST
+    placement, and the affinity gate admits the load).
+  - Fenced with something else eligible: the retry goes there, through `gate.Place` with local out
+    of contention, so an idle node beats one that would queue. Fenced with nothing else: the
+    subtask defers AT ONCE, `retry_note` naming the fence and the holder. The lease is read fresh
+    and read as a VERDICT — never discovered by dialling.
+  - FIRST placement was audited and needs no change: `route=auto` defers to the capacity wait on
+    `Reserved(LocalLease(...))` and `route=spread` drops the local seat out of the deal, both
+    already covered by tests. A media lease is deliberately not a first-placement fence (ADR 0026)
+    — which is why it fences a RETRY: a retry runs on the leftovers of `timeout_sec` and cannot
+    spend them queueing behind a render.
+
+### Docs
+- `docs/systems/coding-agent.md`: the caged child's environment contract on both platforms.
+- `docs/systems/fleet-node.md`: the retry's fence rule, and what first placement already does.
+
 ## [0.117.6] - 2026-09-14 - duplicate review findings no longer crowd a unique one out of the cap
 
 ### Added

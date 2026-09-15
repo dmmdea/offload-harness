@@ -176,6 +176,7 @@
   "auto_heal": false,
   "target_error_rate": null,
   "opus_input_price_per_mtok": 15,
+  "opus_output_price_per_mtok": 75,
   "request_timeout_sec": 120,
   "shadow_enabled": false,
   "shadow_rate": 0.1,
