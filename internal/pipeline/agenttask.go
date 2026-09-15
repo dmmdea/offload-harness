@@ -362,7 +362,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		log.Printf("agent task: wall sizing (%s): %s", seat, est.Note)
 	}
 
-	// The final budget FITS the wall (0.121.1, register D-95). Sizing the wall
+	// The final budget FITS the wall (0.121.2, register D-95). Sizing the wall
 	// from the seat's rate told the caller the contract would not fit; it did
 	// nothing about the run in flight, which still opened its final answer at
 	// the configured 4× budget and, on a 15 tok/s seat with an output_schema,
@@ -606,7 +606,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// lane over a 12,100-char cut answer) to the 900 s wall and deferred
 	// "wall timeout" on a loop that had finished in four minutes. Name the
 	// shape at once instead; the partial rides in output for the caller.
-	// D-95 (0.121.1) narrowed this branch: the loop now re-issues a cut,
+	// D-95 (0.121.2) narrowed this branch: the loop now re-issues a cut,
 	// JSON-shaped final ONCE with the schema's own list caps before it gets
 	// here, so reaching this point with a schema contract means either the
 	// re-issue was not possible (no wall left, or the partial was prose) or the

@@ -67,7 +67,7 @@ func TestNoFitInstalledKeepsTheConfiguredFinalBudget(t *testing.T) {
 
 // TestCutFinalOnASchemaContractIsReissuedOnceWithListCaps (D-95, half B): a
 // final answer cut at the completion budget on a schema contract is a JSON
-// prefix. Before 0.121.1 the node abstained on it (D-91: a partial cannot be
+// prefix. Before 0.121.2 the node abstained on it (D-91: a partial cannot be
 // re-packed). Now the final turn is re-issued ONCE, thinking off, with the
 // schema's own list caps spelled out — the answer that fits.
 func TestCutFinalOnASchemaContractIsReissuedOnceWithListCaps(t *testing.T) {

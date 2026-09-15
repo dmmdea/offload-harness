@@ -25,6 +25,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/askcache"
 	"github.com/dmmdea/offload-harness/internal/askjob"
+	"github.com/dmmdea/offload-harness/internal/cache"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
@@ -484,33 +485,65 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// nowhere. If it failed to open at startup, every agent_run silently loses
 	// the in-loop cache and the only signal was one stderr line an MCP stdio
 	// client never sees.
+	// 0.121.1 (register D-05): the handle is lazy and this block must NOT resolve
+	// it — a status call that took the bbolt lock would be the very thing that
+	// creates the sibling it is reporting on. Everything here reads state the
+	// handle already holds, plus a stat of the cache directory.
 	if c := s.p.Cache(); c != nil {
-		note := "agent_run's in-loop offloads share this cache (nil ledger, shared cache)"
-		if c.Fallback() {
+		mode := c.Mode()
+		sibCount, sibBytes := cache.SiblingStats(cfg.CachePath)
+		rc := map[string]any{
+			"mode":          string(mode),
+			"available":     mode == cache.ModePrimary || mode == cache.ModeSibling || mode == cache.ModeReadOnly,
+			"path":          c.Path(),
+			"configured":    cfg.CachePath,
+			"fallback":      mode == cache.ModeSibling,
+			"siblings":      sibCount,
+			"sibling_bytes": sibBytes,
+		}
+		// How many results the SHARED cache actually holds is the operator's real
+		// D-05 question ("is everyone running cache-less?"), and answering it is a
+		// pure read — so it goes through the read-only handle, which never creates
+		// a file and never takes the writer's exclusive lock. When this server is
+		// itself the primary holder, its own handle already has the answer and no
+		// second open is needed (nor possible: our own exclusive lock excludes it).
+		if mode == cache.ModePrimary {
+			if n, err := c.Count(); err == nil {
+				rc["entries"], rc["entries_from"] = n, c.Path()
+			}
+		} else if n, from := readOnlyCacheEntries(cfg.CachePath); n >= 0 {
+			rc["entries"], rc["entries_from"] = n, from
+		}
+		switch mode {
+		case cache.ModeUnopened:
+			// The steady state after D-05, and deliberately not called a failure:
+			// nothing on this server has needed the cache yet, so no lock was
+			// taken and no file was created. The first cacheable offload resolves it.
+			rc["available"] = false
+			rc["note"] = "lazy: no cacheable task has run on this server yet, so the cache is not open and no bbolt lock is held — the first agent_run offload opens it"
+		case cache.ModePrimary:
+			rc["note"] = "agent_run's in-loop offloads share this cache (nil ledger, shared cache)"
+		case cache.ModeSibling:
 			// 0.113.21: the configured file is held by another harness process;
 			// this server's hits live in its own per-process sibling.
-			note = "PER-PROCESS fallback: the configured cache is held by another local-offload process, so this server's agent_run hits live in the sibling file named here (not shared with other sessions)"
+			rc["note"] = "PER-PROCESS fallback: the configured cache is held by another local-offload process, so this server's agent_run hits live in the sibling file named here (not shared with other sessions); on shutdown it is deleted if empty, or promoted into the configured cache if the lock is free"
+		case cache.ModeReadOnly:
+			rc["note"] = "read-through reader: this handle can serve hits but never writes and never creates a file"
+		case cache.ModeUnavailable:
+			rc["available"] = false
+			rc["reason"] = unavailableCacheReason(cfg.CachePath, c.OpenErr())
 		}
-		reuse["result_cache"] = map[string]any{
-			"available":  true,
-			"path":       c.Path(),
-			"configured": cfg.CachePath,
-			"fallback":   c.Fallback(),
-			"note":       note,
-		}
+		reuse["result_cache"] = rc
 	} else {
-		reason := "cache_path is empty: caching is opted out on this box; agent_run re-runs the model on repeated identical input"
-		if cfg.CachePath != "" {
-			// 0.113.21: lock contention alone no longer lands here (the
-			// per-process fallback absorbs it), so an unopened cache with a
-			// configured path means BOTH the shared file and the sibling failed
-			// — disk, permissions, a bad path — and the startup stderr names it.
-			reason = "neither the configured cache nor its per-process fallback could be opened (not lock contention: the fallback absorbs that) — disk, permissions or a bad cache_path; see the server's startup stderr; agent_run re-runs the model on repeated identical input"
-		}
+		sibCount, sibBytes := cache.SiblingStats(cfg.CachePath)
 		reuse["result_cache"] = map[string]any{
-			"available": false,
-			"path":      cfg.CachePath,
-			"reason":    reason,
+			"mode":          string(cache.ModeUnavailable),
+			"available":     false,
+			"path":          cfg.CachePath,
+			"configured":    cfg.CachePath,
+			"siblings":      sibCount,
+			"sibling_bytes": sibBytes,
+			"reason":        unavailableCacheReason(cfg.CachePath, nil),
 		}
 	}
 
@@ -2694,4 +2727,37 @@ func agentRunOrigin() string {
 		hn = "local"
 	}
 	return hn + ":agent_run"
+}
+
+// unavailableCacheReason names ONE specific reason a status reader can act on,
+// never a menu of possibilities. Lock contention alone never lands here — the
+// per-process fallback absorbs that, and since 0.121.1 a handle nobody has used
+// reports mode "unopened" rather than any kind of failure.
+func unavailableCacheReason(configured string, openErr error) string {
+	if configured == "" {
+		return "cache_path is empty: caching is opted out on this box; agent_run re-runs the model on repeated identical input"
+	}
+	reason := "neither the configured cache nor its per-process fallback could be opened (not lock contention: the fallback absorbs that) — disk, permissions or a bad cache_path; agent_run re-runs the model on repeated identical input"
+	if openErr != nil {
+		reason += ": " + openErr.Error()
+	}
+	return reason
+}
+
+// readOnlyCacheEntries counts the configured result cache through a READ-ONLY,
+// read-through handle: it creates no file, writes nothing, and gives up in
+// milliseconds when a writer holds the exclusive lock. Returns -1 and "" when
+// the store is not readable from this process right now, which is a normal
+// state, not a failure — some other harness process holds it.
+func readOnlyCacheEntries(configured string) (int, string) {
+	if configured == "" {
+		return -1, ""
+	}
+	r := cache.NewReader(configured)
+	defer r.Close()
+	n, err := r.Count()
+	if err != nil {
+		return -1, ""
+	}
+	return n, r.Path()
 }

@@ -358,21 +358,26 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 	// long-running MCP server holds the lock, a CLI invocation degrades to
 	// cache-less rather than aborting — they speed things up / report savings,
 	// they are not required for correctness.
+	//
+	// 0.121.1 (register D-05): the cache handle is LAZY. openPipeline runs for
+	// every command and every MCP server start, and the eager open made each of
+	// them take (or lose) the bbolt lock before knowing whether a cacheable task
+	// would ever run — which is what produced 49 empty per-process siblings on
+	// this box. Nothing below opens a file; the first Get/Put does, and prints
+	// the operator note then, when it is true rather than merely predicted.
 	var ca *cache.Cache
 	if cfg.CachePath != "" { // "" = caller opted out of caching (e.g. the confhead A/B, where a shared cache would cross-contaminate arms)
-		var err error
-		var used string
-		var fellBack bool
-		ca, used, fellBack, err = cache.OpenPreferred(cfg.CachePath)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "note: cache unavailable; continuing without cache:", err)
-			ca = nil
-		} else if fellBack {
-			// 0.113.21: the shared file is held by another harness process (the
-			// MCP server, or a sibling session's); this process keeps its own
-			// in-loop hits in a per-process sibling instead of running cache-less.
-			fmt.Fprintln(os.Stderr, "note: result cache is held by another local-offload process; using the per-process cache", used)
-		}
+		ca = cache.New(cfg.CachePath).WithNotify(func(mode cache.Mode, used string, err error) {
+			switch mode {
+			case cache.ModeSibling:
+				// 0.113.21: the shared file is held by another harness process (the
+				// MCP server, or a sibling session's); this process keeps its own
+				// in-loop hits in a per-process sibling instead of running cache-less.
+				fmt.Fprintln(os.Stderr, "note: result cache is held by another local-offload process; using the per-process cache", used)
+			case cache.ModeUnavailable:
+				fmt.Fprintln(os.Stderr, "note: cache unavailable; continuing without cache:", err)
+			}
+		})
 	}
 	led, err := ledger.Open(cfg.LedgerPath)
 	if err != nil {

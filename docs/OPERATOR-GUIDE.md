@@ -192,7 +192,7 @@ tokens kept local (est.): 2920 (~$0.04 Opus-input value — an estimate, not bil
 |---|---|
 | every call `deferred:true` | Run `doctor`. Usually the endpoint is down or unreachable. A defer on genuinely hard/over-long input is by design. |
 | one media task always defers (`generate_image`, `generate_video`, `generate_audio`, `run_graph`, `edit_image`…) | Run `doctor` and read its **media routes** section. `BOUND-BUT-MISSING` names the exact configured path that is not on disk (relative script bindings resolve against the binary's directory, not your cwd) and exits non-zero; `NOT CONFIGURED` means this box has no such binding and the defer is by design. |
-| `result cache is held by another local-offload process; using the per-process cache <path>` | Expected (0.113.21) — the bbolt cache is single-writer; the CLI keeps its own hits in a per-process sibling (`cache.p<pid>.db`, swept after 12 h) instead of running cache-less. `cache unavailable; continuing without cache: <err>` means BOTH the shared file and the sibling failed (disk, permissions, a bad `cache_path`) — not lock contention. The ledger still appends. |
+| `result cache is held by another local-offload process; using the per-process cache <path>` | Expected (0.113.21) — the bbolt cache is single-writer; this process keeps its own hits in a per-process sibling (`cache.p<pid>.db`) instead of running cache-less. Since 0.121.1 the note prints at the FIRST cacheable task rather than at startup, the sibling is deleted on exit when empty or promoted into the shared cache when the lock is free, and stale ones are swept after 1 h (was 12 h). `cache unavailable; continuing without cache: <err>` means BOTH the shared file and the sibling failed (disk, permissions, a bad `cache_path`) — not lock contention. The ledger still appends. |
 
 ---
 
@@ -579,7 +579,7 @@ does NOT contain:
 | delegator poll | `timeout_sec` + a grace window; C-27 credits back intervals the node PROVABLY spent queued (both endpoints observed `accepted`), bounded at `min(timeout_sec + grace, 5 min)`; a job that never started is a `queue deadline` FAILURE, never a `budget` defer | waiting for the node's answer | the capacity wait (`agent_placement_wait_sec`, `results[].capacity_wait_sec`) |
 | admission + warm-up (`agent_admission_wait_sec`, default 300) | the node, BEFORE its wall starts (D-64) | another model's swap on the endpoint, then the seat's own cold load (`admission_wait_sec`, `admission_note`) | anything after the first token |
 | node wall | `timeout_sec` as a context deadline over the loop | every planner call, tool execution, the re-pack | — |
-| loop budgets | `agent_max_tokens` per step (default 1,024; 4,096 on a thinking seat), the final answer at 4× (cap 8,192) **narrowed to what the remaining wall can decode** (0.121.1, D-95), 12 steps (`max_steps`, cap 12 remote), the forced final step (D-89) | one completion each | the wall — a step that generates for minutes is cut by the wall, not by its token budget |
+| loop budgets | `agent_max_tokens` per step (default 1,024; 4,096 on a thinking seat), the final answer at 4× (cap 8,192) **narrowed to what the remaining wall can decode** (0.121.2, D-95), 12 steps (`max_steps`, cap 12 remote), the forced final step (D-89) | one completion each | the wall — a step that generates for minutes is cut by the wall, not by its token budget |
 | engine + lease | the client's request timeout (split into connect / first token / stream, `llamaclient`), the GPU lease TTL (3,600 s default) against the media timeouts (`imagegen_timeout_sec` 600, `videogen_timeout_sec` 5,400, `gpu_wait_ms` 600,000 — C-33: a 5,400 s video run outlives the default lease; size the lease `--for` window to the job) | one request / one lease | — |
 
 **Sizing rule.** A wall is worth `cold load + (thinking auto ? one think block at the step budget : 0) + (steps − 1) ×
@@ -607,7 +607,7 @@ seats): the Qube 27B TP2 seat at ~30 tok/s needs ≈ 600 s thinking off / ≈ 73
 12-step, 8,192-token-final contract — a 600 s box default is at the edge and 900 s is the honest wall; the Lenovo 4B at
 ~30 tok/s answers the same contract in one step in 250–380 s with a 34 s cold load.
 
-**The final budget fits the wall (0.121.1, register D-95).** Sizing told the caller a contract would not fit; it did
+**The final budget fits the wall (0.121.2, register D-95).** Sizing told the caller a contract would not fit; it did
 nothing about the run in flight, which still opened its final answer at the configured 4× budget. On the Lenovo 4B seat
 (~15 tok/s) a list-heavy extraction with an `output_schema` owed an 8,192-token final PLUS an 8,192-token re-pack — the
 node's own `wall_note` priced that at 1,166–1,310 s against a 900 s wall, and on 2026-09-14 `METHODOLOGY.md` and
@@ -632,7 +632,7 @@ delegator wires. A seat with **no measured rate**, or a wall with room, publishe
 before — the fit is a ceiling, never a raise. When even the floor does not fit, the floor stands and the note says `the
 wall will be the stop`, which is today's behaviour, named.
 
-**A cut final on a schema contract is re-issued once with list caps (0.121.1, register D-95).** 0.115.23 (D-91) refuses
+**A cut final on a schema contract is re-issued once with list caps (0.121.2, register D-95).** 0.115.23 (D-91) refuses
 to re-pack a `length`-cut final — a partial cannot be re-packed into the requested object — but abstaining there threw
 away a run that had read the whole document and only over-answered: nothing had told the seat how long its lists could
 be. The loop now asks ONCE more, thinking off, at the same budget, with the caps spelled out: *cap every list at N items

@@ -215,7 +215,7 @@ type AgentWireResult struct {
 	WallEstimateSec int     `json:"wall_estimate_sec,omitempty"`
 	MinTurnSec      int     `json:"min_turn_sec,omitempty"`
 	WallNote        string  `json:"wall_note,omitempty"`
-	// Final-budget fit (0.121.1, register D-95). FinalBudgetFit is the
+	// Final-budget fit (0.121.2, register D-95). FinalBudgetFit is the
 	// final-answer completion budget the run actually opened at once the
 	// REMAINING wall was taken into account — never above the configured rule
 	// (4× the step budget, cap 8,192), floored at 1,024; BudgetNote is the

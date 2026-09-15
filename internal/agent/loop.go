@@ -110,7 +110,7 @@ type Result struct {
 	// correct partial the caller must not mistake for the whole (the 2026-09-10
 	// `ledger-02` row: 2,630 chars cut mid-sentence at exactly 1,024 tokens).
 	OutputTruncated bool
-	// FinalBudgetFit / BudgetNote (0.121.1, register D-95) are the wall fit for
+	// FinalBudgetFit / BudgetNote (0.121.2, register D-95) are the wall fit for
 	// the final answer: the budget the final turn actually opened at once the
 	// remaining wall was taken into account, and the arithmetic behind it
 	// ("final 8192 → 3592 to fit 900 s at 15.0 tok/s"). Both zero/empty when no
@@ -1165,7 +1165,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		// repair). Re-issue it once at the final budget like an empty step;
 		// a second cut is accepted and flagged OutputTruncated.
 		if comp.FinishReason == "length" && len(comp.Msg.ToolCalls) == 0 && strings.TrimSpace(comp.Msg.Content) != "" {
-			// D-95 (0.121.1): on a SCHEMA contract a cut final is a JSON
+			// D-95 (0.121.2): on a SCHEMA contract a cut final is a JSON
 			// prefix, and 0.115.23 (D-91) rightly refuses to re-pack a partial
 			// — but abstaining there throws away a run that read the whole
 			// document and only over-answered. The seat was never told how

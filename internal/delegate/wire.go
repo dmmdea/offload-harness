@@ -156,7 +156,7 @@ type ResultWire struct {
 	RepackMs       int64  `json:"repack_ms,omitempty"`
 	RepackAttempts int    `json:"repack_attempts,omitempty"`
 	RepackNote     string `json:"repack_note,omitempty"`
-	// Final-budget fit and the list-cap re-issue (0.121.1, register D-95),
+	// Final-budget fit and the list-cap re-issue (0.121.2, register D-95),
 	// passed through from the node. Without them a caller sizing its next
 	// contract cannot tell an answer that fitted from one the wall narrowed,
 	// nor a partial that was asked again from one that never was.
