@@ -3998,6 +3998,13 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		CacheTokens:        meta.CacheTokens,
 		PrefillMS:          meta.PrefillMS,
 		Layer:              placedLayer(meta.Placed),
+		// The job behind an agent row and the route's placement note (D-101):
+		// empty — omitted — on a plain cascade call.
+		JobID:      meta.JobID,
+		Placement:  meta.Placement,
+		Steps:      meta.Steps,
+		StopReason: meta.StopReason,
+		RepackMs:   meta.RepackMs,
 		// Same read the delegation log does (delegate.record): per-row, so a
 		// long-lived process whose environment never changes still labels
 		// every row consistently, and an untagged process writes nothing.
