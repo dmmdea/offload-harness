@@ -58,7 +58,14 @@ side channel and is not part of the Cascade — nothing escalates or falls back 
 [ADR 0001](../architecture/decisions/0001-defer-never-cloud-fallback.md).
 
 `agent_run` drives the coding agent loop. Its default planner is the **agent seat** (config
-`agent_model`, else the workhorse `model`; a per-call `model` argument overrides both), its default
+`agent_model`, else the workhorse `model`; a per-call `model` argument overrides both — and on a
+composite box (ADR 0039) the placement table decides when no per-call model is given, its seat
+outranking `agent_model`, while a per-call model that belongs to an OPT-IN layer is admitted
+only if that layer's guards admit it right now: a dormant layer refuses outright and the
+display card refuses by the guard's name, before any seat is touched. Both agent doors take
+`context_class: "long"`, an input to placement rather than a seat name, and every result and
+defer on a composite box carries `placed` {tier, layer, role, seat, devices, reason, guard,
+evicts} — absent on a plain box), its default
 timeout honors config `agent_timeout_sec` (else the built-in 180s), and its result reports the
 resolved planner `model` alongside `output`/`steps`/`stop_reason` — visibility is the cure for a
 silent seat. A resolved planner absent from the endpoint's served roster fails loud with
@@ -313,6 +320,12 @@ read-only unless deliberately widened. See
   `media.routes` — this machine's media capability **derived** from its
   bindings (`internal/mediacap`), never declared. See
   [media-generation.md](media-generation.md#capability-is-derived-never-declared) for the verdicts.
+  On a COMPOSITE box it also carries `local.tier_profile`, `local.tiers` and `local.layers` (one
+  row per device layer: the spec, each seat's live occupancy, the layer's admissibility and the
+  reason), and `fleet.nodes[].layers` for each node that publishes them. The rows cost no model
+  load — occupancy stops at `/running` for a cold seat — and the render is bounded: a stalled
+  probe degrades to the spec rows rather than dropping the table. See
+  [composite-tier.md](composite-tier.md).
 - `local-offload doctor` checks the serving layer the tools depend on, and prints the same derived
   media routes — a route bound to a file that is absent exits non-zero.
 - **The most common operational surprise:** an MCP client holds its server process for the session,

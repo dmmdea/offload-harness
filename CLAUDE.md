@@ -29,6 +29,11 @@ The `--serve` endpoint is **unauthenticated** and drives write/GitHub tools → 
 | `embeddinggemma` | (memory stack) | Embeddings. |
 | `qwen3vl-4b`, `whisper-stt`, `whisper-stt-hq` | `vision_model` / `stt_model[_hq]` | Vision + speech. All opt-in and DERIVED: a tier declares a `media_seats` entry, which renders the llama-swap seat and writes the binding together. No seat, no binding, route defers. |
 
+On a COMPOSITE box (ADR 0039) these aliases are not the whole story: the box declares device
+LAYERS, and placement picks the layer and seat per task, recording it on every result as
+`placed`. "Tier" in that sentence is the HARDWARE tier, not a row of this table —
+`docs/systems/composite-tier.md` keeps the two apart.
+
 The cascade enters small and escalates only on validation failure or low decision-confidence; all
 tiers exhausted → **defer**. It is model-family, not vendor, specific — CUDA/Vulkan/CPU all serve the
 same aliases via the templates in `setup/templates/`.
@@ -105,6 +110,13 @@ prompt/exemplars; can only narrow — UNSET resolves to config `agent_profile`, 
    the set its residency ROLE marks (`__SEATS_SWAPPABLE__` joins with `|`, `__SEATS_RESIDENT__`
    with `&`). The same declaration writes `vision_model`/`stt_model`, so a binding can never name
    a seat that was not rendered. Detail: `docs/systems/setup-installer.md`.
+1b. **The display card is never a `single` or `pair` layer device, and the display layer is
+   dormant until the operator enables it** (ADR 0039). On the three-card reference box device 1
+   is the RTX 5070 Ti driving the desktop: no default seat is pinned to it (tests assert the
+   tier table and the rendered yaml), the only entries that may name it are the display layer's
+   twins, and every placement onto it passes a ≥4 GiB free-minus-footprint floor, a host-RAM
+   guard and an operator-presence guard — all failing CLOSED, with `operator_presence`
+   defaulting to `present`.
 2. **Defer, never crash.** A `{"deferred":true,...}` result is a *valid* success signal (low
    confidence / over-long / all tiers failed), not an error. Do not "fix" defers by adding a cloud
    fallback — the harness holds no cloud credentials by design.

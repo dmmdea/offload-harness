@@ -203,9 +203,39 @@ older references resolve.
 
 ## Tier
 
+Two different things wear this word, and the difference decides where to look. **Model tier**
+(this entry) is one model seat in the Cascade. **Hardware tier** is the install profile a machine
+classifies as (`blackwell-2x16`, `ampere-8`) — see Hardware Tier below.
+
 One model seat in the Cascade, referred to by a stable alias (`gemma4-e2b`, `offload-e4b`,
 `gemma4-26b-a4b`, …) rather than by a file or vendor. Configuration binds a role to an alias; the
 serving layer binds the alias to actual weights, so the same config works across backends.
+
+## Hardware Tier
+
+The hardware class a machine installs as (`blackwell-2x16`, `ampere-8`, `cpu`), declared in
+`setup/templates/profiles.json`. It decides the served window, the KV type, the serving template,
+the resident model and the media seats. One page per tier lives in `docs/tiers/`. Distinct from
+the Cascade's model Tiers above.
+
+## Composite Tier
+
+A hardware tier that COMPOSES others: the box is a complete instance of each at once, declares
+them in `composes`, and routes work across device Layers. See
+[systems/composite-tier.md](systems/composite-tier.md) and ADR 0039.
+
+## Layer
+
+One device set of a composite box with its own seats, guards and tier identity (`single`,
+`pair`, `display`). Placement chooses a layer and a seat per task; a layer marked `dormant` is
+declared but never routed to until the operator enables it.
+
+## Placed
+
+The placement block every result carries on a composite box: which tier, layer, role, seat and
+devices ran the work, the reason, and — on a refusal — the guard that said no. Absent on a box
+with no layers. Not to be confused with `results[].placement`, the delegation lane's free-text
+string, which is unchanged.
 
 ## Two-tier
 

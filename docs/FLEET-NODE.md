@@ -533,6 +533,7 @@ one contract. Unknown payload fields are **ignored** (staggered node deploys mus
 | `budget` | a ceiling stopped it; a bigger budget might succeed | `wall timeout after <N>s`, `step budget exhausted (…)`, `canceled during the structured re-pack …`, delegator-side `poll deadline …` on a node that reported OWNING the job |
 | `infrastructure` | something is broken — the contracted output never arrived, and retrying the same contract cannot help | `building agent: …`, `agent loop: …`, `structured re-pack unreachable: …` (dial failure or **5xx**, sticky across the retry), delegator-side `poll deadline …` whose last poll answer was unusable, and "all remotes failed the health probe". **`output` may be POPULATED on this class**: `structured re-pack unreachable` means the agent loop FINISHED and only the re-pack seat was out of reach, so the loop's prose rides along — the CALLER still receives the loop's answer in `output` — with `structured` absent (delegator-side acceptance never reads it: acceptance runs only when `deferred` is false). It still counts into `summary.lost_to_stack` — the checked deliverable the `output_schema` asked for is what did not arrive |
 | `config` | this node's configuration can never run this | no seat resolvable, seat not in the served roster, unknown profile, and the delegator's "no remote passed the capability gate" / "no remotes configured" |
+| `capacity` (composite, ADR 0039) | a LAYER's guard refused this contract right now — `placed.guard` names which (`display_floor`, `host_ram`, `presence`) and `placed.reason` carries the reading. Not a failure and not a retry-elsewhere: the card is the operator's, and the answer changes when the machine's state does |
 | `contract` | the CALLER'S contract cannot be placed anywhere, however healthy the fleet | no `output_schema` for a remote placement, a contract past the origin hop (`depth != 0`), a token estimate too big for every advertised ceiling — and only when **every** agent lane advertised one, since an absent `agent_ctx_tokens` means the ceiling is unknown, not small |
 
 The delegator counts `infrastructure` + `config` defers into `summary.infrastructure` — plus a
@@ -579,6 +580,25 @@ No transcript field exists — remote reasoning never crosses the wire.
 "seat_budget": {"step_tokens": 1024, "final_tokens": 4096, "thinking": "auto"},
 "seat_rate": {"tok_s": 24.6, "cold_load_sec": 34.3, "samples": 2, "min_turn_sec": 201}
 ```
+
+A COMPOSITE node (ADR 0039) publishes two more, under the same lane predicate:
+
+```json
+"tiers": ["blackwell-16", "blackwell-2x16", "blackwell-3x16"],
+"layers": [{"name": "pair", "tier": "blackwell-2x16", "devices": ["0,2"],
+  "seats": [{"role": "agent", "model": "agent-pool", "device": "0,2", "ctx_tokens": 163840,
+             "max_inflight": 32, "served": true}],
+  "admissible": true, "reason": "no guards"}]
+```
+
+`tiers` is every hardware tier this node is a COMPLETE instance of. `layers` is one row per
+device layer: the declared spec, each seat's `served` flag (the ROSTER fact — a cached health
+read knows which seats it can serve, not which are loaded, so no `loaded`/`inflight` is
+claimed), and the node's OWN `admissible`/`reason` verdict. The verdict travels because the
+display-card guards can only be read where the card is; the delegator runs the same placement
+table over these rows and the node re-checks at admission. Both keys are absent on a plain
+node and cost no extra probe — they are built from the roster the residency refresh already
+fetched and the VRAM snapshot the sampler already holds.
 
 All four fields are published under the SAME predicate that admits a dispatch
 (`fleetnode.AgentLaneAdmissible`: `fleet_agent_enabled` + a resolvable seat + a loopback

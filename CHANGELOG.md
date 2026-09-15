@@ -20,6 +20,95 @@ Versioning: [SemVer](https://semver.org/).
   the working config (they carry the fleet token) and the second TTS venv. History is not rewritten: the
   paths it carries were already public and hold no credential (the fleet token never entered history).
 
+## [0.123.0] - 2026-09-14 - one box, three tiers: placement is a per-task decision (ADR 0039)
+
+The reference workstation is not one hardware tier. It is three 16 GB Blackwell cards — a
+measured 5060 Ti pair (devices 0 and 2) and the RTX 5070 Ti that drives the desktop — which makes
+it simultaneously a complete `blackwell-16`, a complete `blackwell-2x16`, and the installed
+`blackwell-3x16`. Filing it as one row made the fleet read one capacity row where three exist and
+turned every placement into a fixed binding. The operator's directive was to make the box *be*
+its tiers ("Qube = blackwell-16 / 2x16 / 3x16 routed per task") and the design council's verdict
+was RESHAPE: window overflow escalates to the PAIR's long seat and only when the pair's agent seat
+is idle, saturation is recorded and never acted on, one placement table serves local and remote
+alike, the display-card guards fail closed with footprint arithmetic, and the display layer ships
+dormant until the operator enables it. Both are recorded in ADR 0039.
+
+### Added
+- **`composes` + `layers` in the tier table, seeded into config.** `blackwell-3x16` declares the
+  tiers it is a complete instance of and the device layers it routes work to; `tierseed` seeds
+  `tier_profile`, `tiers` and `layers` into `config.json` (the pair's agent seat is left bare in
+  the table and filled from `vllm_seat`, so the seat's numbers live in one place). `install.ps1`
+  mirrors it, and `setup/render.tests.ps1` now compares its output against `install seed` field by
+  field.
+- **`internal/placement` — one decision table.** (task class, token need, quality gate,
+  `context_class`, budget, live occupancy, live guards) → a `Decision`, used identically by the
+  local box, the delegator over a remote's advertised rows, and the node's re-check at admission.
+  Live readers are memoised for 2 s, so a 32-subtask spread execs `nvidia-smi` once, not 32 times.
+- **`internal/gpuprobe`** — the nvidia-smi parser, runner and host-RAM reader as a leaf package,
+  with index-or-UUID device resolution (the display card is pinned by UUID because the board
+  reorders CUDA indices on power loss).
+- **`placed` on every result** — `{tier, layer, role, seat, devices, ctx_tokens, reason, guard,
+  evicts}` on the agent wire, `agent_run`, the cascade result and the ledger row. `devices` is the
+  seat's own pin, never the layer's alternatives. `results[].placement` stays the string it was.
+- **`context_class` on both agent doors** (`""` | `"long"`) — the one `tools/list` change in this
+  release, present on every box.
+- **Health advertises `tiers` and `layers`** on a composite node, lane-gated: the layer spec, each
+  seat's `served` flag from the roster the residency refresh already fetched, and the node's own
+  admissibility verdict per layer (the display-card guards can only be read where the card is).
+  Pinned to exactly two roster GETs per TTL across 21 health requests.
+- **`offload_status`** carries `local.tier_profile`, `local.tiers`, `local.layers` and
+  `fleet.nodes[].layers`; the render is bounded and degrades to spec rows rather than dropping the
+  table, and it never loads a model.
+- **A dormant display layer.** Two rungs pinned to the display card render behind a fence in the
+  triple template and join a matrix set that runs them BESIDE the vLLM seat. Placement never routes
+  there until the operator sets `dormant: false`, and every placement onto it passes the
+  display-floor, host-RAM and presence guards.
+- **`servingtmpl.CheckComposite`** — a composite render must be the checked union of what it
+  composes; `install render` refuses one that is not.
+- **`docs/systems/composite-tier.md`** and **ADR 0039**; `docs/tiers/` pages gain a Composes
+  section with the layer/seat/guard table.
+
+### Changed
+- **The contract context cap is the box's.** 256 KiB on a plain box; on a composite box
+  `min(2 MiB, largest layer window × 3)`. At chars/3 a 256 KiB contract estimates ~87k tokens, so
+  without this a composite box's own 262k seat was unreachable through its own front door. Both
+  agent doors, `intake.PrepareContract` and the node's decode validate at that cap.
+- **Seat resolution on `agent_run`.** With no per-call model the placement table decides and its
+  seat outranks `agent_model`; a per-call model that belongs to an opt-in layer is admitted only if
+  that layer's guards admit it right now.
+- **A job dispatched at a layer names that layer's seat on the node's job feed**, instead of the
+  planner default.
+- **`local-offload report`** names the tier from config when no installer manifest exists, saying
+  which source answered and what the tier composes — the composite box reported "hardware tier
+  UNKNOWN" while every placement it made was keyed on `blackwell-3x16`.
+- **The tier table declares no `triple` layer.** Its only seats were the three-card Flash-Next
+  arms, removed by the 2026-09-10 operator rule that RAM is overflow only (0.115.4), so
+  `context_class: long` resolves to the pair's `qwen3.8-27b-262k` under the same eviction rule
+  window overflow takes. The table still serves a three-card layer for a box that declares one.
+- `CONTRIBUTING.md` named `main.go` as the home of the version const; it is
+  `internal/buildinfo/buildinfo.go`.
+
+### Fixed
+- **A two-card device pin was serving ONE card.** `env: [CUDA_VISIBLE_DEVICES=0,2]` is valid YAML
+  that parses as two entries — `"CUDA_VISIBLE_DEVICES=0"` and `2` — in the same parser llama-swap
+  uses. Every seat pinned that way rendered as a one-card seat: the triple template's
+  `qwen3.8-27b` and its `qwen3.8-27b-262k` twin (both `-sm layer --tensor-split 24,26`, both
+  needing the pair) and every media seat with a two-card `gpu_env`. Entries a flow list would tear
+  are now quoted; entries without a comma stay barewords, so every other render is byte-identical.
+  Found by the checked union on its first run over the shipped tier.
+- `internal/tierdocs` carried a dead `Extra json.RawMessage` field whose comment claimed a new
+  tier-table field would surface in the docs automatically. It never could; the field is gone and
+  the generator renders the composite keys explicitly.
+
+### Byte-identity
+A box that seeds no `layers` publishes not one new key on `/fleet/health`, `offload_status`, any
+agent result row, the cascade result or the ledger row, and renders its serving config exactly as
+before. Pinned by `TestStatusOnAPlainBoxCarriesNoLayerKeys`,
+`TestHealthPublishesTiersAndLayerRowsOnlyOnACompositeLane`,
+`TestDisplayTwinsRenderOnlyForATierThatDeclaresADisplayLayer`,
+`TestNoLayersIsNotCompositeAndRoundTripsWithoutTheKeys`,
+`TestAgentDelegateRegistrationGated` and `TestHealthAgentFieldsAbsentWhenDisabled`.
+
 ## [0.122.2] - 2026-09-14 - measured winners wired: the 27B fan-out twin, `-sm tensor` everywhere it belongs, the pair seat's own utilization, the 3-card media roster
 
 Four ⚑WINNER rows of the harness master plan v2 (A-70, A-25, A-22, A-15) were measured on the reference box
