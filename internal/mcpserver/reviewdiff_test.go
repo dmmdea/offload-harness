@@ -295,6 +295,42 @@ func TestReviewDiffHonoursMaxFindingsAndReportsWhatItHid(t *testing.T) {
 	}
 }
 
+// Register D-90: the same defect reported more than once (here, a plain restatement one line
+// off plus a punctuation variant) must publish dropped_duplicate on the wire beside the other
+// two drop counts, and dedupe must run before the cap so the genuinely distinct finding still
+// gets published rather than being crowded out by copies of the other one.
+func TestReviewDiffPublishesDroppedDuplicateAndDedupesBeforeTheCap(t *testing.T) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
+		return seatFindings(
+			"minor | run.go:9 | naming issue | cosmetic",
+			"minor | run.go:9 | naming issue | cosmetic",
+			"minor | run.go:8 | naming issue! | cosmetic",
+			"severe | run.go:5 | off-by-one in the loop bound | indexes one past the end",
+		), nil
+	})
+	res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
+		"diff": reviewDiff, "task": "iterate over every element exactly once", "max_findings": 1,
+	})))
+	if err != nil {
+		t.Fatalf("handleReviewDiff: %v", err)
+	}
+	m := decodeResult(t, res)
+	if m["deferred"] != nil {
+		t.Fatalf("a run that produced text is not the broken-run shape: %v", m)
+	}
+	if m["dropped_duplicate"].(float64) != 2 {
+		t.Fatalf("the 2 restatements of the naming finding must be counted: %v", m["dropped_duplicate"])
+	}
+	findings, _ := m["findings"].([]any)
+	if len(findings) != 1 {
+		t.Fatalf("cap of 1 must still publish exactly 1: %v", findings)
+	}
+	first, _ := findings[0].(map[string]any)
+	if first["severity"] != "severe" {
+		t.Fatalf("dedupe must run BEFORE the cap, or the 3 duplicate copies of the minor finding would have filled the one slot instead of the distinct severe one: %v", first)
+	}
+}
+
 func TestReviewDiffRequiresExactlyOneDiffSource(t *testing.T) {
 	s := askTestServer(t, func(_ context.Context, _ core.AgentContract) (core.AgentWireResult, error) {
 		t.Error("the seat must never be reached on a caller-input refusal")
