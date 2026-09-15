@@ -61,6 +61,7 @@ func TestResolveEndpointOrder(t *testing.T) {
 			c = c.WithRemoteLanes(
 				map[string]string{"offload-e4b": laneBase},
 				func() bool { return busy },
+				nil,
 				func(base, model string) bool { return resident },
 			)
 		}
@@ -82,14 +83,14 @@ func TestResolveEndpointOrder(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := mk(tc.withSeat, tc.withLanes, tc.busy, tc.resident)
-			base, hc := c.resolveEndpoint("offload-e4b")
-			if base != tc.wantBase {
-				t.Errorf("base = %q, want %q", base, tc.wantBase)
+			ep := c.resolveEndpoint("offload-e4b")
+			if ep.base != tc.wantBase {
+				t.Errorf("base = %q, want %q", ep.base, tc.wantBase)
 			}
-			if tc.wantSafe && hc != c.safeHTTP {
+			if tc.wantSafe && ep.client != c.safeHTTP {
 				t.Error("resolved client is not the tailnet-guarded one")
 			}
-			if !tc.wantSafe && hc != c.http {
+			if !tc.wantSafe && ep.client != c.http {
 				t.Error("resolved client is not the default one")
 			}
 		})
@@ -105,25 +106,25 @@ func TestWithRemoteLanesEmptyIsIdentity(t *testing.T) {
 	resident := func(base, model string) bool { return true }
 	pristine := func(t *testing.T, c *Client) {
 		t.Helper()
-		if c.remoteLanes != nil || c.laneBusy != nil || c.laneResident != nil || c.safeHTTP != nil {
+		if c.remoteLanes != nil || c.laneBusy != nil || c.laneBusyFor != nil || c.laneResident != nil || c.laneRoute != nil || c.safeHTTP != nil {
 			t.Fatal("client must stay byte-identical to a pre-lanes build")
 		}
 	}
 
 	c := New("http://127.0.0.1:11436", "", "offload-e4b", time.Second)
-	if got := c.WithRemoteLanes(nil, busy, resident); got != c {
+	if got := c.WithRemoteLanes(nil, busy, nil, resident); got != c {
 		t.Fatal("WithRemoteLanes(nil map) must return the same client")
 	}
 	pristine(t, c)
-	if got := c.WithRemoteLanes(map[string]string{}, busy, resident); got != c {
+	if got := c.WithRemoteLanes(map[string]string{}, busy, nil, resident); got != c {
 		t.Fatal("WithRemoteLanes(empty map) must return the same client")
 	}
 	pristine(t, c)
-	if got := c.WithRemoteLanes(map[string]string{"m": "http://workstation:11436"}, nil, resident); got != c {
-		t.Fatal("WithRemoteLanes(nil busy) must return the same client")
+	if got := c.WithRemoteLanes(map[string]string{"m": "http://workstation:11436"}, nil, nil, resident); got != c {
+		t.Fatal("WithRemoteLanes with NO busy gate at all must return the same client")
 	}
 	pristine(t, c)
-	if got := c.WithRemoteLanes(map[string]string{"m": "http://workstation:11436"}, busy, nil); got != c {
+	if got := c.WithRemoteLanes(map[string]string{"m": "http://workstation:11436"}, busy, nil, nil); got != c {
 		t.Fatal("WithRemoteLanes(nil resident) must return the same client")
 	}
 	pristine(t, c)
@@ -150,7 +151,7 @@ func TestCascadeRemoteLaneMovesWithBusy(t *testing.T) {
 	isBusy := func() bool { mu.Lock(); defer mu.Unlock(); return busy }
 
 	c := New(defSrv.URL, "", "offload-e4b", 5*time.Second).
-		WithRemoteLanes(map[string]string{"offload-e4b": lane.URL}, isBusy, RosterResident())
+		WithRemoteLanes(map[string]string{"offload-e4b": lane.URL}, isBusy, nil, RosterResident())
 
 	gen := func(step string) {
 		t.Helper()
@@ -201,7 +202,7 @@ func TestCascadeRemoteLaneFailsClosedOnProbeError(t *testing.T) {
 
 	c := New(defSrv.URL, "", "offload-e4b", 5*time.Second).
 		WithRemoteLanes(map[string]string{"offload-e4b": dead.URL},
-			func() bool { return true }, RosterResident())
+			func() bool { return true }, nil, RosterResident())
 
 	if _, err := c.Generate(context.Background(), "", "sys", "hi", "", 16, 0, 0); err != nil {
 		t.Fatalf("busy call with an unprobeable lane must still answer locally: %v", err)

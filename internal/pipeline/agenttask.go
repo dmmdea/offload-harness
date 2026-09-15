@@ -1142,9 +1142,15 @@ func (p *Pipeline) repackClient(path string, budget int) *llamaclient.Client {
 		WithSeatEndpoints(p.cfg.SeatEndpoints)
 	if len(p.cfg.CascadeRemoteLanes) > 0 {
 		gpuLockPath, stateDir := p.cfg.GPULockPath, p.cfg.StateDir
+		// FleetLaneGates, not RosterResident alone: a lane base may be a
+		// plain llama-swap OR a fleet node whose own llama-swap binds
+		// loopback (C-41b). The pair shares one probe, so residency and the
+		// route can never disagree about which shape a base is.
+		laneResident, laneRoute := llamaclient.FleetLaneGates(p.cfg.FleetAuthToken)
 		c = c.WithRemoteLanes(p.cfg.CascadeRemoteLanes,
 			func() bool { return delegate.LocalBusy(gpuLockPath, stateDir) },
-			llamaclient.RosterResident())
+			llamaclient.LocalSwapBusy(p.cfg.Endpoint),
+			laneResident).WithLaneRoute(laneRoute)
 	}
 	return c
 }

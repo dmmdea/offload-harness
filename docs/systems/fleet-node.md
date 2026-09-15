@@ -222,6 +222,18 @@ implications.
    (`vision_max_image_bytes` × 4/3 + slack), not dispatch's 1 MiB; everything after the body read
    is the shared `admit` path. Details: [FLEET-NODE.md](../FLEET-NODE.md#the-vision-task-post-fleetvision),
    [ADR 0040](../architecture/decisions/0040-vision-work-travels-to-a-node-with-an-idle-card.md).
+10. The cascade chat lane (`POST /fleet/chat`, register C-41b) is advertised — `chat_lane` in
+    health, alongside `served_models` — exactly when `ChatLaneAdmissible` holds (a bound
+    `endpoint` and the agent lane's reachability rule), and rides the agent lane's bearer gate.
+    It is the ONE surface here that is **not a job**: it forwards a single OpenAI chat completion
+    synchronously, byte for byte, to this node's own llama-swap and copies the answer (and the
+    upstream status, unflattened — the caller's seat-wait loop keys on llama-swap's 429/503) back.
+    It serves only what this node's roster serves, alias-aware: `404` for any other model, `503`
+    when the roster is unreadable, `502` when the forward itself fails. Body cap `ChatBodyCap`
+    (8 MiB — a cascade prompt carries its document). It exists because this node's llama-swap
+    binds loopback only, so a delegator cannot reach it directly; the caller's half is
+    `llamaclient.FleetLaneGates` (see
+    [offload-pipeline.md](offload-pipeline.md#security-and-privacy-notes)).
 
 ## Security and privacy notes
 

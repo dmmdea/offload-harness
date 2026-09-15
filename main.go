@@ -354,9 +354,15 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 	// the local card. Guarded so the absent key stays byte-identical (pinned).
 	if len(cfg.CascadeRemoteLanes) > 0 {
 		gpuLockPath, stateDir := cfg.GPULockPath, cfg.StateDir
+		// FleetLaneGates, not RosterResident alone: a lane base may be a
+		// plain llama-swap OR a fleet node whose own llama-swap binds
+		// loopback (C-41b). The pair shares one probe, so residency and the
+		// route can never disagree about which shape a base is.
+		laneResident, laneRoute := llamaclient.FleetLaneGates(cfg.FleetAuthToken)
 		client = client.WithRemoteLanes(cfg.CascadeRemoteLanes,
 			func() bool { return delegate.LocalBusy(gpuLockPath, stateDir) },
-			llamaclient.RosterResident())
+			llamaclient.LocalSwapBusy(cfg.Endpoint),
+			laneResident).WithLaneRoute(laneRoute)
 	}
 	// Cache + ledger are bbolt (single-writer, exclusive file lock). When the
 	// long-running MCP server holds the lock, a CLI invocation degrades to

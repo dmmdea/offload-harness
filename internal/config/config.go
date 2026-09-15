@@ -118,9 +118,13 @@ type Config struct {
 	// remote OpenAI-compatible base URL that ALSO serves that model — the
 	// busy-aware failover lane for the daily cascade (roast delta 7), distinct
 	// from SeatEndpoints' static always-remote pin: a lane is consulted per call
-	// and taken only while the local machine-wide GPU lease is held AND a cached
-	// roster probe confirms the lane serves the model; every other call stays on
-	// Endpoint. Quality-identical models only — the SAME model id served
+	// and taken only while this box would make the call WAIT — the machine-wide
+	// GPU lease is held, or another model holds the local llama-swap and a swap
+	// to this one would queue behind its in-flight requests (register C-41: the
+	// mutually-exclusive interactive set means every cascade tier needs a swap
+	// while an agent seat is loaded, and the tier used to sit there until its own
+	// HTTP deadline) — AND a cached roster probe confirms the lane serves the
+	// model; every other call stays on Endpoint. Quality-identical models only — the SAME model id served
 	// remotely, never a downgrade: routing never changes WHICH model answers,
 	// only WHERE. Empty/absent = the cascade never leaves this box. Values are
 	// vetted by the same double guard as SeatEndpoints: netguard.TailnetURL at
