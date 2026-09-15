@@ -20,6 +20,48 @@ Versioning: [SemVer](https://semver.org/).
   the working config (they carry the fleet token) and the second TTS venv. History is not rewritten: the
   paths it carries were already public and hold no credential (the fleet token never entered history).
 
+## [0.117.8] - 2026-09-14 - the result cache opens lazily, and reads without writing
+
+Register D-05 (P1). `offload_status.reuse.result_cache` on this workstation reported `fallback: true ...
+cache.p47084.db`, and the cache directory held **49** per-process sibling files of 32 KB each, accruing at
+roughly 12/h and swept only after 12 h. The cause was placement, not contention: `openPipeline` runs for every
+CLI command and every MCP server start, and it opened the bbolt cache EAGERLY - taking, or losing, an exclusive
+file lock before anything knew whether a cacheable task would ever run. With 21 MCP servers live, one won the
+primary and twenty each created a sibling they then never wrote a single entry into.
+
+D-72's "one cache service" would have solved it with a daemon, which house rules forbid. This is the in-process
+fix instead.
+
+### Changed
+- **The cache handle is LAZY.** `cache.New(path)` opens nothing; the first `Get`/`Put`/`Count` resolves it once.
+  A process that never runs a cacheable task now never touches the cache directory at all - which is the
+  common case for an MCP server that has served only status and fleet calls. The operator note about a lost
+  shared cache moved to a `WithNotify` callback that fires at resolve, so it prints when the fallback is true
+  rather than at startup when it was merely predicted.
+- **The bbolt lock `Timeout` is 250 ms** (was 1 s). With the eager open gone, the opens that remain are ones
+  that will really use the cache, and a loser should reach its sibling in milliseconds.
+- **`SiblingMaxAge` is 1 h** (was 12 h), and the sweep runs at handle CONSTRUCTION rather than at open - a
+  sweep that only ran on a real open would, after this change, essentially never run.
+
+### Added
+- **A read-only, read-through handle** (`cache.NewReader`). Verified against the vendored bbolt v1.5.0 rather
+  than assumed: `Options.ReadOnly` takes a genuine SHARED lock on every platform (on Windows,
+  `bolt_windows.go` calls `LockFileEx` and adds `LOCKFILE_EXCLUSIVE_LOCK` only for the exclusive case), so many
+  readers coexist with each other - but a shared request still conflicts with a writer's exclusive hold. Since
+  exactly one harness process holds the primary read-write, a reader cannot assume it is reachable, so it reads
+  THROUGH: the primary if free, else this process's own sibling, else nothing. It creates no file on any path
+  (`ReadOnly` opens with `O_RDONLY` and no `O_CREATE`), a miss is answered as a miss, and `Put` returns
+  `ErrReadOnly` rather than quietly opening a sibling. `TestReadOnlyOpensShareWithEachOtherButNotWithAWriter`
+  pins those semantics so a future bbolt bump that changes them fails loudly.
+- **Sibling cleanup on `Close`.** An EMPTY sibling - the 32 KB file every losing process used to strand - is
+  deleted. A non-empty one makes exactly ONE bounded attempt to promote its entries into the primary if that
+  lock happens to be free (<= 1,000 keys, <= 5 s) and is removed only when every entry crossed; an
+  over-budget or un-promotable sibling is kept, because it still holds cached work, and the age sweep takes it.
+- **`offload_status.reuse.result_cache` now reports `mode`** - `primary`, `sibling`, `readonly`, `unavailable`,
+  or `unopened` (the new steady state: lazy, no lock held, not a failure) - plus `siblings` and `sibling_bytes`,
+  the census the D-05 regression is measured in and which nothing reported while 49 files accumulated. It also
+  reports `entries` / `entries_from`, counted through the read-only handle. Asking never resolves the server's
+  own handle and never creates a file.
 ## [0.117.7] - 2026-09-14 - output tokens are priced; the pager gate can fire; the Windows cage builds its child's environment; retries skip a fenced seat
 
 ### Security

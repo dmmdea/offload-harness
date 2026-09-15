@@ -234,27 +234,31 @@ func main() {
 	// whenever it is running — so it degrades to the previous cache-free
 	// behaviour rather than refusing to start. Same policy as the main binary's
 	// cache open.
+	//
+	// 0.117.8 (register D-05): the handle is LAZY. A local-agent run that never
+	// reaches a cacheable offload — a --help, a config error, a drive mode that
+	// defers on its first step — now takes no bbolt lock and leaves no
+	// per-process sibling behind at all. The notes below fire at the first real
+	// Get/Put, when the diagnosis is a fact rather than a prediction.
 	var agentCache *cache.Cache
 	if cfg.CachePath != "" {
-		c, used, fellBack, cerr := cache.OpenPreferred(cfg.CachePath)
-		switch {
-		case cerr == nil:
-			agentCache = c
-			defer agentCache.Close()
-			if fellBack {
+		agentCache = cache.New(cfg.CachePath).WithNotify(func(mode cache.Mode, used string, cerr error) {
+			switch {
+			case mode == cache.ModeSibling:
 				// 0.113.21: the MCP server holds the shared file; this run keeps
 				// its in-loop hits in a per-process sibling instead of none.
 				fmt.Fprintln(os.Stderr, "note: result cache is held by another local-offload process; using the per-process cache", used)
+			case errors.Is(cerr, bolt.ErrTimeout):
+				// Both the shared file AND the per-process sibling refused: name it.
+				fmt.Fprintln(os.Stderr, "note: cache is held by another local-offload process and no per-process fallback could be opened; continuing without cache:", cerr)
+			default:
+				// Anything else — permissions, a corrupt file, a bad path — is NOT
+				// lock contention, and reporting it as such sends the operator to
+				// diagnose the wrong thing entirely.
+				fmt.Fprintln(os.Stderr, "note: cache unavailable, continuing without it:", cerr)
 			}
-		case errors.Is(cerr, bolt.ErrTimeout):
-			// Both the shared file AND the per-process sibling refused: name it.
-			fmt.Fprintln(os.Stderr, "note: cache is held by another local-offload process and no per-process fallback could be opened; continuing without cache:", cerr)
-		default:
-			// Anything else — permissions, a corrupt file, a bad path — is NOT
-			// lock contention, and reporting it as such sends the operator to
-			// diagnose the wrong thing entirely.
-			fmt.Fprintln(os.Stderr, "note: cache unavailable, continuing without it:", cerr)
-		}
+		})
+		defer agentCache.Close()
 	}
 	// Persist the embed memo's hit/miss totals on the way out; see
 	// embedmemo.CloseShared for why every binary that may open one must do this.
