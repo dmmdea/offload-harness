@@ -146,3 +146,44 @@ func TestWriteRootSurvivesTheWireRoundTrip(t *testing.T) {
 		t.Fatal("the decoder accepted an escaping write_root — never trust the wire")
 	}
 }
+
+// TestValidateWriteRootIsPlatformIndEpendent is the regression test for the
+// defect CI found on 2026-09-14: the absolute/volume-qualified guard was built
+// from filepath.IsAbs + filepath.VolumeName, which answer for the platform the
+// BINARY was built for. On a Linux node those read "C:/Windows" as an ordinary
+// relative directory, so the guard passed it — while the same contract was
+// refused on a Windows delegator. A contract is validated on the delegator and
+// again on the node, and those two can be different operating systems: a check
+// that changes its mind between them is not a check.
+//
+// The assertions below use no filepath call, so they mean the same thing on
+// every platform this ever compiles for.
+func TestValidateWriteRootIsPlatformIndependent(t *testing.T) {
+	windowsShapes := []string{
+		`C:/Windows`,
+		`C:\Windows`,
+		`c:/windows`,
+		`C:x`,
+		`\host\share`,
+		`//host/share`,
+		`work:stream`, // an alternate data stream on NTFS
+	}
+	for _, r := range windowsShapes {
+		if err := ValidateWriteRoot(r); err == nil {
+			t.Errorf("write_root %q was accepted; a Windows-shaped absolute, drive-relative or ADS path must be refused on EVERY platform, not only the one whose filepath package recognizes it", r)
+		}
+	}
+	posixShapes := []string{"/etc", "/", "//etc"}
+	for _, r := range posixShapes {
+		if err := ValidateWriteRoot(r); err == nil {
+			t.Errorf("write_root %q was accepted; a POSIX absolute path must be refused on EVERY platform", r)
+		}
+	}
+	// The shapes that must keep working, spelled with both separators — a
+	// Windows-authored contract must run on a Linux node and vice versa.
+	for _, r := range []string{"work", "internal/pipeline", `internal\pipeline`, "."} {
+		if err := ValidateWriteRoot(r); err != nil {
+			t.Errorf("write_root %q refused: %v", r, err)
+		}
+	}
+}

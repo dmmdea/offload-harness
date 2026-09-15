@@ -574,8 +574,22 @@ func ValidateWriteRoot(root string) error {
 	if strings.ContainsAny(root, "\x00") {
 		return fmt.Errorf("write_root %q contains NUL", root)
 	}
-	if filepath.IsAbs(root) || filepath.VolumeName(root) != "" || strings.HasPrefix(root, "/") || strings.HasPrefix(root, "\\") {
-		return fmt.Errorf("write_root %q must be RELATIVE to the run's read root (the executing node never sees the delegator's filesystem, so an absolute path names nothing there)", root)
+	// Absolute / volume-qualified, decided WITHOUT filepath. filepath.IsAbs and
+	// filepath.VolumeName answer for the platform the binary was built for, so
+	// on a Linux node they read "C:/Windows" as an ordinary relative directory
+	// and this guard passed it — found by CI on 2026-09-14, which is the whole
+	// reason the rules are meant to be the strictest platform's ON EVERY
+	// platform. A contract is validated on the delegator and again on a node
+	// that may be a different OS; a check that changes its mind between them
+	// is not a check.
+	//
+	// A colon is refused ANYWHERE, exactly as validDocName refuses it: it is a
+	// Windows drive prefix ("C:x" is drive-relative and escapes a Join) and an
+	// alternate-data-stream separator, and neither has a legitimate use in a
+	// directory a contract asks to write under.
+	if strings.HasPrefix(root, "/") || strings.HasPrefix(root, "\\") ||
+		strings.Contains(root, ":") || filepath.IsAbs(root) || filepath.VolumeName(root) != "" {
+		return fmt.Errorf("write_root %q must be RELATIVE to the run's read root with no drive letter (the executing node never sees the delegator's filesystem, so an absolute or volume-qualified path names nothing there)", root)
 	}
 	clean := path.Clean(strings.ReplaceAll(root, "\\", "/"))
 	if clean == "." {
