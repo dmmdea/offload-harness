@@ -429,6 +429,18 @@ type AgentCallRecord struct {
 	Ms int64 `json:"ms,omitempty"`
 }
 
+// ValidateContextClass accepts the closed vocabulary of the placement hint
+// ("" or long). Shared by the contract validator and the MCP front doors so a
+// caller that misspells it is told the same thing on every surface — a hint
+// silently dropped would place a 200k-token contract on the default seat and
+// fail it at the window, far from the typo.
+func ValidateContextClass(s string) error {
+	if s == "" || s == ContextClassLong {
+		return nil
+	}
+	return fmt.Errorf("context_class %q is not one of \"\" or %q", s, ContextClassLong)
+}
+
 // ValidateThinking accepts the closed vocabulary of the planner think-block
 // policy ("" / auto / on / off, case-insensitive). Shared by the contract
 // validator and the config loader so both doors refuse the same strings.
@@ -519,8 +531,8 @@ func (c AgentContract) ValidateWithCap(maxBytes int) error {
 	if err := ValidateThinking(c.Thinking); err != nil {
 		return fmt.Errorf("agent contract: %w", err)
 	}
-	if c.ContextClass != "" && c.ContextClass != ContextClassLong {
-		return fmt.Errorf("agent contract: context_class %q is not one of \"\" or %q", c.ContextClass, ContextClassLong)
+	if err := ValidateContextClass(c.ContextClass); err != nil {
+		return fmt.Errorf("agent contract: %w", err)
 	}
 	if c.Layer != "" && !layerIDRe.MatchString(c.Layer) {
 		return fmt.Errorf("agent contract: layer %q must match %s", c.Layer, layerIDRe)

@@ -47,9 +47,13 @@ type reportInput struct {
 	Aliases      []aliasVerdict
 	Routes       []mediacap.Route
 	Profile      string // installer tier id, e.g. "amd-rdna3"
-	Backend      string // serving backend, e.g. "vulkan"
-	ManifestPath string
-	ManifestNote string // why the manifest is absent, when it is
+	// ProfileSource says where Profile came from when it did NOT come from
+	// the installer manifest ("from config; composes …"), so a reader can
+	// tell a recorded install from a configured identity. "" = the manifest.
+	ProfileSource string
+	Backend       string // serving backend, e.g. "vulkan"
+	ManifestPath  string
+	ManifestNote  string // why the manifest is absent, when it is
 }
 
 // renderReport turns the gathered facts into the Markdown a collaborator sends
@@ -63,7 +67,9 @@ func renderReport(in reportInput) string {
 	fmt.Fprintf(&b, "| platform | %s/%s |\n", in.OS, in.Arch)
 	fmt.Fprintf(&b, "| generated | %s |\n", in.Generated)
 	fmt.Fprintf(&b, "| config | %s |\n", orNA(in.ConfigSource))
-	if in.Profile != "" {
+	if in.Profile != "" && in.ProfileSource != "" {
+		fmt.Fprintf(&b, "| hardware tier | %s (%s) |\n", in.Profile, in.ProfileSource)
+	} else if in.Profile != "" {
 		fmt.Fprintf(&b, "| hardware tier | %s (backend %s) |\n", in.Profile, orNA(in.Backend))
 	} else {
 		fmt.Fprintf(&b, "| hardware tier | UNKNOWN — %s |\n", orNA(in.ManifestNote))
@@ -111,6 +117,21 @@ func renderReport(in reportInput) string {
 }
 
 // mdEscape keeps a path with a pipe from breaking the table.
+// composedTiers lists the tiers a composite box is ALSO a complete instance
+// of (config `tiers` minus its own id), for the report's tier line: on the
+// reference box "blackwell-3x16 (from config; composes blackwell-16,
+// blackwell-2x16)" is the whole answer to "what is this machine", which the
+// manifest alone never gave.
+func composedTiers(cfg config.Config) string {
+	var other []string
+	for _, t := range cfg.Tiers {
+		if t != cfg.TierProfile {
+			other = append(other, t)
+		}
+	}
+	return strings.Join(other, ", ")
+}
+
 func mdEscape(s string) string { return strings.ReplaceAll(s, "|", `\|`) }
 
 func orNA(s string) string {
@@ -145,6 +166,19 @@ func gatherReport(cfg config.Config, src config.Source, routes []mediacap.Route,
 	} else {
 		// A hand-built box legitimately has no manifest; say which, don't guess a tier.
 		in.ManifestNote = "no installer manifest at that path (" + err.Error() + ")"
+		// …unless the CONFIG names the tier (tier_profile, seeded by tierseed
+		// — ADR 0039). That is not a guess: it is the identity the box routes,
+		// seeds and advertises on, and the composite box this tier was built
+		// for reported "hardware tier UNKNOWN" while every placement decision
+		// it made was keyed on blackwell-3x16. The manifest still wins when it
+		// exists, and the line always discloses which source answered.
+		if cfg.TierProfile != "" {
+			in.Profile = cfg.TierProfile
+			in.ProfileSource = "from config"
+			if composed := composedTiers(cfg); composed != "" {
+				in.ProfileSource += "; composes " + composed
+			}
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

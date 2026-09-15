@@ -153,3 +153,39 @@ func TestGatherReportReadsTheLiveRoster(t *testing.T) {
 		t.Errorf("config source = %q, want the resolved path with no console padding", in.ConfigSource)
 	}
 }
+
+// TestReportNamesTheTierFromConfigWhenInstalledJSONIsAbsent: the box the
+// composite tier was built for runs from a config that KNOWS its tier
+// (tier_profile, seeded by tierseed), so a missing installer manifest is no
+// longer a reason to report "hardware tier UNKNOWN" on it. The manifest still
+// wins when present — it records what was actually installed — and a box with
+// neither still says it cannot tell, with the reason.
+func TestReportNamesTheTierFromConfigWhenInstalledJSONIsAbsent(t *testing.T) {
+	t.Setenv("OFFLOAD_HOME", t.TempDir()) // no installed.json in there
+	cfg := config.CompositeFixture()
+	cfg.Endpoint = "http://127.0.0.1:1" // the tier identity must not need a live seat
+	in := gatherReport(cfg, config.Source{}, nil, fixedTime)
+	if in.Profile != "blackwell-3x16" {
+		t.Fatalf("profile = %q, want the tier from config", in.Profile)
+	}
+	got := renderReport(in)
+	if strings.Contains(got, "UNKNOWN") {
+		t.Fatalf("a config that names its tier must not report UNKNOWN:\n%s", got)
+	}
+	for _, want := range []string{"blackwell-3x16", "from config", "blackwell-2x16"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("the tier line must name the source and what it composes; missing %q:\n%s", want, got)
+		}
+	}
+
+	// A plain box with no manifest is unchanged: UNKNOWN, with the reason.
+	plain := config.Default()
+	plain.Endpoint = cfg.Endpoint
+	in = gatherReport(plain, config.Source{}, nil, fixedTime)
+	if in.Profile != "" {
+		t.Fatalf("a plain box has no tier to name, got %q", in.Profile)
+	}
+	if got := renderReport(in); !strings.Contains(got, "UNKNOWN") {
+		t.Fatalf("no manifest and no tier_profile must still say UNKNOWN:\n%s", got)
+	}
+}
