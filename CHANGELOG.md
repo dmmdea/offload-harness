@@ -83,6 +83,24 @@ them, each with the gate that keeps it wired and an assertion that it does NOT a
   SEED for a fresh 2-card install; the reference box's pair seat runs 0.90 under the H-24 soak and is not
   redeployed by this change. `TestDualBlackwellSeedsThePairSeatWithTheCacheServer` now asserts each tier's own
   figure and says why they differ; `max_model_len` and `ttl` stay pinned identical.
+- **The 3-card media roster is audited against its own bake-off and gated (A-15).** The 48 GB bake-off ran the
+  whole media lane on the reference box; the tier shipped a media block copied byte-for-byte from
+  `blackwell-2x16`, which is why the 3-card box measured no media difference from the 2-card one. PR #264
+  corrected the PLACEMENTS and #266 the vision MODEL — nothing ever gated what the bake-off DECIDED about models
+  and precision, so the roster could drift back into a copy without failing anything. Slot by slot: vision
+  qwen3-vl-32b on the pair (MMMU +11); ocr qwen3-vl-8b on card 2 (the 32B regressed there: DocVQA -3.7 plus dense
+  transcription); stt whisper large-v3-TURBO on card 2 (turbo wins or ties every group, es-long WER 0.0652 vs
+  0.0838, at ~2x the speed — the proposed `stt_hq` lane FAILED and stays empty); imagegen Krea 2 TURBO bf16 at
+  8 steps / cfg 1 on pool cuda:1 + donor cuda:2 (Krea 2 RAW is BROKEN on ComfyUI 0.34.0 under every recipe tested
+  — composition correct, buried in terminal noise, same-seed Turbo clean — so RAW is a fine-tuning base, not a
+  servable lane); videogen LTX-2.5 int8-convrot with the CONV video VAE (round 2 of the decoder A/B changed only
+  the VAE: conv resolved more detail on every one of 5 pairs, +15-25% Laplacian energy and +9-11% high-frequency,
+  start-frame fidelity a wash at 0.02-0.26 dB, and conv was 12-15% FASTER — it wins on both measurable axes),
+  compute cuda:0 still the documented ComfyUI-MultiGPU #220 exception. **One slot has no winner and was left
+  alone: TTS.** Chatterbox v3 and both Spanish packs transcribe back verbatim, but naturalness was explicitly
+  left as an operator A/B and adoption needs a contained-venv bump — the seed is unchanged and the gate says
+  nothing about it. `TestTripleBlackwellMediaRosterIsTheMeasuredOne`; the ocr and stt seats carry their own
+  `measured` records now, as the vision seat does.
 ### Fixed
 - **A multi-device pin rendered as two env entries.** `env: [CUDA_VISIBLE_DEVICES=0,2]` is a YAML flow
   sequence, and YAML reads it as TWO items — `CUDA_VISIBLE_DEVICES=0` and `2` — so every seat that must span
