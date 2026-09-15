@@ -48,6 +48,27 @@ them, each with the gate that keeps it wired and an assertion that it does NOT a
   `TestPairSpanningTemplatesShipTheMeasuredFanoutTwin`, `TestDroppingQ38TakesTheFanoutTwinWithIt`,
   `TestSingleCardTemplatesKeepTheirSingleSlot27B`.
 
+- **`-sm tensor` is now an INVARIANT, not one tier's flag (A-25).** The measurement is what makes it free: at the
+  SAME `--tensor-split 25,25`, moving Qwen3-VL-32B from `-sm layer` to `-sm tensor` produced BYTE-IDENTICAL output
+  5/5 on a fixed image+prompt while generation went 19.6 -> 34.1 tok/s (+74%) and prefill 995 -> 926 (CUDA-X
+  2026-09-05). It reached `blackwell-3x16` only. The audit: that is the ONLY tier in the table seating
+  Qwen3-VL-32B, so there is nothing left to propagate to -- `blackwell-2x16` is excluded on a recorded reason (the
+  seat spans BOTH cards of its pair, and on a 2-card box the second card pays the desktop/DWM tax, so the tier
+  would hand ~25 GB of its 32 GB to a swappable vision seat; it needs its own fit measurement first), and every
+  other tier is single-card or seats a model that fits one card. So the row ships as the rule instead of the copy:
+  a seat spanning more than one device MUST declare a split_mode (llama.cpp's default is the `-sm layer` this
+  measurement beat), a single-device seat must declare NEITHER split_mode nor tensor_split (a meaningless flag
+  copied between tiers is how the 3-card media block became a byte-for-byte copy of the 2-card one), and
+  tensor_split arity must match the pin. `TestEveryMultiCardMediaSeatCarriesTheMeasuredSplitMode`.
+- **The RENDERED vision command is gated, not just the JSON field.** `TestTripleBlackwellVisionSeatIsTheMeasuredWinner`
+  read `split_mode` out of the tier table; nothing asserted that the llama-swap entry servingtmpl builds by hand
+  carries `-sm tensor --tensor-split 25,25` -- and a field nothing renders measured nothing.
+  `TestTripleBlackwellRendersTheMeasuredSplitMode` renders the real committed seats through the tier's own
+  template and asserts the flag present there and absent from every single-card seat.
+- **`mediaseat.Seat.Measured`.** Tiers were already writing `measured` records into media seats (`ampere-16`'s
+  vision seat since 0.116.1) and the field did not exist, so every one of them was parsed and dropped. The
+  `blackwell-3x16` vision seat now carries its own: the bake-off that chose the model, the CUDA-X numbers behind
+  each flag, and the A-25 propagation audit.
 ### Fixed
 - **A multi-device pin rendered as two env entries.** `env: [CUDA_VISIBLE_DEVICES=0,2]` is a YAML flow
   sequence, and YAML reads it as TWO items — `CUDA_VISIBLE_DEVICES=0` and `2` — so every seat that must span
