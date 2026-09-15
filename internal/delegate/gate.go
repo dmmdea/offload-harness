@@ -460,6 +460,29 @@ func Fenced(info gpulease.Info) (bool, string) {
 	}
 }
 
+// ForeignFence is Fenced asked on behalf of a caller that is NOT the holder:
+// true only when the fence would refuse THIS process's next run. It exists
+// because "the seat is fenced" and "the seat is fenced against me" are different
+// questions, and a lane that routes work off the box must ask the second one.
+//
+// The holder's own child is exempt for exactly the reason Reserved documents:
+// `gpu reserve --drain --unload-seat -- <session>` runs the delegate under
+// GPU_LEASE_EPOCH, and the measured work the lease was taken FOR must keep
+// running on the cards it cleared — routing it to a fleet node would defeat the
+// reservation. The epoch is compared, never presence-checked, so a stale variable
+// from a lease since handed on exempts nothing.
+//
+// Register D-110: offload_review_diff built its local loop unconditionally, so a
+// review under a peer's lease waited the whole cordon bound and was filed as a
+// capacity defer for the lease's entire length. The verdict was on disk before
+// the dial — the same sentence D-94 wrote about the retry path.
+func ForeignFence(info gpulease.Info) (bool, string) {
+	if inheritedLease(info) {
+		return false, ""
+	}
+	return Fenced(info)
+}
+
 // inheritedLease reports whether this process runs under the lease info
 // describes: GPU_LEASE_EPOCH (threaded to children by gpu reserve and the
 // pipeline's ambient lease env) equals the held epoch.

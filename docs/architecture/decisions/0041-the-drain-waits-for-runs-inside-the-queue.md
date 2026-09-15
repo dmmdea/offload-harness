@@ -100,6 +100,12 @@ cards at all. A session that cannot tell "held and working" from "held and idle"
   hold at the cordon — the seat's own gauge covers them; a `media` lease keeps its class
   rule; the fleet node's `/fleet/health` lease block is unchanged.
 
+**Extended 2026-09-15 (0.125.0, register D-110):** the capacity defer this ADR describes is no longer the
+first answer for `offload_review_diff` under a FOREIGN text hold — the handler asks `delegate.ForeignFence`
+before building its local loop and routes the review to an eligible fleet seat (route `remote`, under
+`remoteEligible`'s ctx-fit floor); the wait-then-`capacity` path remains for the holder's own inherited lease
+and for the case where no remote qualifies, and its reason now carries the holder's declared window.
+
 ## Evidence
 
 llama-swap log 2026-09-14 (two drain windows of 61 polls at 7 ms each, the 3m26.9s

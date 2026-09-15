@@ -216,6 +216,29 @@ register D-03/D-09; capped at the wire ceiling): a 51 KB diff on the 30 tok/s 27
 and timed out at exactly 300 s on 2026-09-10 while a 13 KB one finished in 3 — size the diff by
 path (`git diff -- <dir>`) when the estimate in the node log says the wall is below it.
 
+**The lane rides the fleet when the local seat is fenced (0.125.0, register D-110).** Before it
+builds the local loop the handler reads the machine-wide lease (`delegate.LocalLease`) and asks
+`delegate.ForeignFence`: is the seat fenced — an exclusive text hold, a draining cordon, a media
+render — by someone who is NOT this process? If so, the review is shaped as the same contract the
+local seat would have run and handed to `delegate.RunWith` at **route `remote`** over the
+configured `delegate_remotes`. Without that, the local loop waited the whole `agent_lease_wait_sec`
+at the affinity cordon and came back as a capacity defer, for the lease's entire length, however
+idle the fleet was — the one lane a lead reaches for at the moment of deciding, unusable for hours
+because a bench had the cards. The QUALITY FLOOR is `remoteEligible`'s and is not relaxed for this
+lane: the node advertises the agent lane, its own card is not leased, the seat is resident, and the
+contract's estimated tokens plus the loop's reserve fit the node's `agent_ctx_tokens` — a diff that
+does not fit a remote window is not sent to it. Route `remote` rather than `auto` is the other half
+of that floor: `auto` would fall back to the fenced local seat when nothing qualified, so the remote
+route is what makes an accepted result provably off-box. The published result names where it ran
+(`executed_on`, `node`, `placement`, `seat`) and the fence that moved it, and the findings go
+through the SAME filters as a local review (`publishReview` is shared, so the two cannot drift).
+An INHERITED lease is not a fence: `gpu reserve … -- <session>` sets `GPU_LEASE_EPOCH`, and the
+holder's own review stays on the cards its lease cleared. When the fleet takes nothing, today's path
+stands — the wait, then the capacity defer — and the result carries a `fleet` note saying the fleet
+was asked and why it declined. That defer's reason now also carries the holder's DECLARED window
+(`, declared until 11:40PM (~37m0s left)` — `modelaffinity.LeaseError`), so "gpu busy" finally
+answers *when to retry*.
+
 On the evidence for it, keep two things apart. Cognition **reports** a dedicated reviewer in
 their Fusion setup catching ~2 bugs per PR, ~58% of them severe; that is the vendor's own
 published figure, with no sample size, no A/B baseline and no external audit, so treat it as a

@@ -244,7 +244,42 @@ type LeaseError struct {
 	// Draining: the holder is a text lease draining the seat (BlocksNewRun) — the
 	// refusal is of a NEW run, not of a load; running work was never touched.
 	Draining bool
-	cause   error // context.DeadlineExceeded (our bound) or the caller's ctx.Err()
+	// ExpiresAt is the end the holder DECLARED when it acquired the lease; zero
+	// when it declared none. Rendered by window() — see there for why a number
+	// this package refuses to wait on is still worth reporting.
+	ExpiresAt time.Time
+	cause     error // context.DeadlineExceeded (our bound) or the caller's ctx.Err()
+}
+
+// window renders the holder's declared end for the refusal message (register
+// D-110): ", declared until 11:40PM (~37m0s left)".
+//
+// The package header says this wait is deliberately NOT bounded by the holder's
+// TTL, and that stands — a DefaultTTL of an hour is a reservation, not an
+// estimate, and waiting on it would turn every media wait into an instant
+// refusal. Reporting it is the opposite operation: the wait already ended on its
+// own bound, and the caller now has to choose between retrying, routing
+// elsewhere, and coming back later. "a text job holds the GPU" answers none of
+// those; the declared window answers the third. gpulease.ErrHeld has rendered the
+// same field for the same reason since 0.113.14 — this is that idiom, on the
+// refusal a delegation actually reads (agenttask.go files it as the capacity
+// defer's reason).
+//
+// The remaining time is computed at RENDER time, not at build time, so a message
+// formatted after a long unwind still states what is actually left.
+func (e *LeaseError) window() string {
+	if e.ExpiresAt.IsZero() {
+		return ""
+	}
+	until := e.ExpiresAt.Local().Format(time.Kitchen)
+	left := time.Until(e.ExpiresAt).Round(time.Second)
+	if left <= 0 {
+		// Past its declared end and still held: the holder either renewed or
+		// overran. Say so rather than printing a negative duration — "retry now"
+		// is the honest reading either way.
+		return ", declared until " + until + " (that window has already elapsed)"
+	}
+	return fmt.Sprintf(", declared until %s (~%s left)", until, left)
 }
 
 // Error names the render, not the model. It contains the word "timeout" because
@@ -254,14 +289,14 @@ type LeaseError struct {
 func (e *LeaseError) Error() string {
 	if e.Draining {
 		return fmt.Sprintf(
-			"gpu-lease timeout after %s (bound %s): a %s holder is draining the seat (pid %d, held %s, reason %q): "+
+			"gpu-lease timeout after %s (bound %s): a %s holder is draining the seat (pid %d, held %s, reason %q)%s: "+
 				"no new run starts on %s at %s until the work already in flight finishes; running work is not interrupted",
-			e.Waited.Round(time.Millisecond), e.Bound, e.Class, e.PID, e.HeldFor.Round(time.Second), e.Reason, e.Want, e.Base)
+			e.Waited.Round(time.Millisecond), e.Bound, e.Class, e.PID, e.HeldFor.Round(time.Second), e.Reason, e.window(), e.Want, e.Base)
 	}
 	return fmt.Sprintf(
-		"gpu-lease timeout after %s (bound %s): a %s job holds the GPU (pid %d, held %s, reason %q), "+
+		"gpu-lease timeout after %s (bound %s): a %s job holds the GPU (pid %d, held %s, reason %q)%s, "+
 			"and admitting model %q on %s would load it into VRAM that render is using",
-		e.Waited.Round(time.Millisecond), e.Bound, e.Class, e.PID, e.HeldFor.Round(time.Second), e.Reason, e.Want, e.Base)
+		e.Waited.Round(time.Millisecond), e.Bound, e.Class, e.PID, e.HeldFor.Round(time.Second), e.Reason, e.window(), e.Want, e.Base)
 }
 
 // Unwrap exposes the cause so errors.Is(err, context.DeadlineExceeded) and
@@ -272,17 +307,18 @@ func (e *LeaseError) Unwrap() error { return e.cause }
 // holder the caller actually waited on rather than a re-read that may have moved.
 func leaseError(base, model string, info gpulease.Info, waited, bound time.Duration, cause error) error {
 	return &LeaseError{
-		Base:    base,
-		Want:    model,
-		Class:   info.Class,
-		PID:     info.PID,
-		Reason:  info.Reason,
-		Origin:  info.Origin,
-		JobID:   info.JobID,
-		HeldFor: info.Age,
-		Waited:  waited,
-		Draining: info.Draining && info.Class == gpulease.ClassText && !info.Exclusive,
-		Bound:   bound,
-		cause:   cause,
+		Base:      base,
+		Want:      model,
+		Class:     info.Class,
+		PID:       info.PID,
+		Reason:    info.Reason,
+		Origin:    info.Origin,
+		JobID:     info.JobID,
+		HeldFor:   info.Age,
+		Waited:    waited,
+		Draining:  info.Draining && info.Class == gpulease.ClassText && !info.Exclusive,
+		ExpiresAt: info.ExpiresAt,
+		Bound:     bound,
+		cause:     cause,
 	}
 }

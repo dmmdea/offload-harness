@@ -37,6 +37,23 @@ Versioning: [SemVer](https://semver.org/).
   `scripts/write-door-gate.ps1` is now a FOUR-task gate and proves t4 by comparing the applied copy line by
   line against the fixture: same line count, exactly one differing line, and that line `Status: draft` ->
   `Status: final`.
+- **The review lane rides the fleet when the local seat is fenced, and a lease refusal says when to retry
+  (register D-110).** `offload_review_diff` built its local agent loop unconditionally, so under another
+  process's exclusive or draining GPU lease it waited the whole `agent_lease_wait_sec` at the affinity cordon
+  and was filed as a capacity defer — for the lease's entire length, however idle the fleet was. Two changes:
+  (1) `modelaffinity.LeaseError` now appends the holder's DECLARED window to its message
+  (`, declared until 11:40PM (~37m0s left)`) whenever the lease carries one — the idiom `gpulease.ErrHeld`
+  has rendered since 0.113.14, now on the refusal a delegation actually reads; the wait is still never bounded
+  by that TTL. (2) `handleReviewDiff` reads the machine-wide lease first and, when `delegate.ForeignFence`
+  says the seat is fenced by someone who is NOT this process, hands the SAME contract to `delegate.RunWith`
+  at route `remote` over the configured `delegate_remotes`. The quality floor is `remoteEligible`'s, unrelaxed
+  — agent lane advertised, card not leased, seat resident, diff + `specReserve` inside the node's
+  `agent_ctx_tokens` — and route `remote` (never `auto`) is what stops a fallthrough onto the fenced local
+  seat. The result names where it ran (`executed_on`, `node`, `placement`, `seat`) and the fence that moved
+  it, and its findings go through the same grounding/echo/dedupe/cap filters as a local review
+  (`publishReview` is now shared by both paths). An INHERITED lease (`GPU_LEASE_EPOCH`) is not a fence: the
+  holder's own review stays on the cards its lease cleared. When no remote is eligible today's path stands —
+  the wait, then the capacity defer — with a `fleet` note saying the fleet was asked and why it declined.
 - `contracts/digest-8-grounded.json` (register D-100): the eight digest contracts of `digest-8.json` with ONE
   grounded check per subtask on identifiers the document names and the goal does not. The old fixture's
   acceptance is shape-only (`min_items:findings:3` + `nonempty:summary`, which the intake lint says on every
