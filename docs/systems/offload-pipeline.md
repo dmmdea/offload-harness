@@ -13,6 +13,7 @@ else is a surface onto it.
 - Where do the confidence thresholds come from, and what are the defaults?
 - Why does the coding agent get a different path through the same code?
 - Where are token savings recorded?
+- Why does `offload_status` report the result cache as `unopened`, and when is that a problem?
 
 ## Scope
 
@@ -126,6 +127,8 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
 - **Cache** — keyed result reuse. Bypassed on the *recordless* path (`NewRecordlessPipeline`);
   **shared** on the *in-loop* path (`NewInLoopPipeline`) — see Interfaces below for why those are two
   different things.
+  See [The result cache is opened lazily](#the-result-cache-is-opened-lazily) for how the file is
+  actually acquired, and what `offload_status` reports about it.
 - **Media artifact addressing** (`internal/mediahash`) — audio and video cache keys identify the
   source file by `sha256` of its **bytes**, matching what the image path has always done
   (`"img:"+sha256hex(loaded bytes)`).
@@ -232,6 +235,55 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
   A defer on either path is returned as a *successful tool result*
   (`{"deferred": true, "reason": ...}`) rather than an error, because the agent loop should read it
   and move on.
+
+### The result cache is opened lazily
+
+The cache is [bbolt](https://github.com/etcd-io/bbolt), which takes an **exclusive file lock** for the
+whole life of a read-write handle: one process at a time, machine-wide. Until 0.121.1 `openPipeline`
+opened it **eagerly** — and `openPipeline` runs for every CLI command *and* every MCP server start, so
+each process took, or lost, that lock before anything knew whether it would ever run a cacheable task.
+With one MCP server per session (21 live on the workstation, 2026-09-14) one won the primary and every
+other one created a per-process sibling `cache.p<pid>.db` it then never wrote an entry into: **49
+files, 32 KB each**, accruing at roughly 12/h and swept only after 12 h.
+
+Since 0.121.1 (register D-05) the handle **resolves on first use**. A process that never runs a
+cacheable task never touches the cache directory at all — the common case for an MCP server that has
+served only status and fleet calls.
+
+| handle | built by | opens |
+|---|---|---|
+| read-write | `cache.New(path)` | primary if free; else this pid's `cache.p<pid>.db`; else nothing |
+| read-through reader | `cache.NewReader(path)` | primary if free; else this pid's sibling **if it already exists**; else nothing. Creates no file on any path, and `Put` returns `ErrReadOnly`. |
+
+**Why a reader still needs a fallback.** `bolt.Options.ReadOnly` takes a genuine *shared* lock (on
+Windows `bolt_windows.go` calls `LockFileEx` and adds `LOCKFILE_EXCLUSIVE_LOCK` only for the exclusive
+case), so many readers coexist with **each other** — but a shared request still conflicts with a
+writer's exclusive hold. Exactly one harness process holds the primary read-write, so a reader cannot
+assume it is reachable. It reads *through* instead, and a store it cannot reach answers every lookup
+with a **miss** — always a safe answer for a cache, whereas creating a sibling to record one is not.
+`TestReadOnlyOpensShareWithEachOtherButNotWithAWriter` pins these semantics against the vendored bbolt,
+so a future bump that changes them fails loudly instead of silently making this design wrong.
+
+**Sibling lifecycle.** On `Close`, an **empty** sibling is deleted outright. A **non-empty** one makes
+exactly one bounded attempt to promote its entries into the primary if that lock happens to be free
+(≤ 1,000 keys, ≤ 5 s) and is removed only when every entry crossed — an over-budget or un-promotable
+sibling is **kept**, because it still holds cached work, and the age sweep takes it later. Stale
+siblings (`SiblingMaxAge`, 1 h) are swept when a handle is *constructed*, not when one is opened:
+after D-05 most handles never open, so a sweep gated on a real open would essentially never run.
+
+**Reading the status block.** `offload_status.reuse.result_cache` reports `mode`:
+
+| `mode` | meaning |
+|---|---|
+| `unopened` | **Normal.** Lazy, no lock held, nothing has needed the cache yet. Not a failure. |
+| `primary` | This process holds the shared cache. |
+| `sibling` | Another harness process holds the primary; hits here are in-process only. |
+| `readonly` | A read-through reader; serves hits, never writes. |
+| `unavailable` | No file could be opened — disk, permissions, a bad `cache_path`. `reason` names it. |
+
+It also carries `siblings` and `sibling_bytes` (the census the D-05 regression is measured in — a
+rising count is the defect returning), and `entries` / `entries_from` when the store is readable from
+this process. Asking never resolves the server's own handle and never creates a file.
 
 ### Why "recordless" split into two constructors
 
@@ -386,6 +438,8 @@ their own unit tests.
   construction
 - [`internal/core/types.go`](../../internal/core/types.go) — `Result`, `Meta`, `Deferf`
 - [`internal/grounding/grounding.go`](../../internal/grounding/grounding.go)
+- [`internal/cache/cache.go`](../../internal/cache/cache.go) — the lazy handle, the
+  read-through reader, the sibling sweep and the bounded promotion
 - [`internal/ledger/ledger.go`](../../internal/ledger/ledger.go)
 - [`internal/config/config.go`](../../internal/config/config.go) — tier aliases and threshold defaults
 - [`internal/modelaffinity/affinity.go`](../../internal/modelaffinity/affinity.go) — the Model
