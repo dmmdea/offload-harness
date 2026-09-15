@@ -298,6 +298,22 @@ publishing idle slots while its card was gone, and placement routed work TOWARD 
 node that would turn work away never advertises a free slot; and the saturation SCORE is computed from the CAPPED running set, the same set
 `idle_slot` measures, because feeding it the all-jobs count let a node publish `score 1.0` and `idle_slot true` in one payload.
 
+**`serving_config_spec_sha256`** / **`serving_config_state`** (0.123.0, ADR 0043) — the rendered llama-swap config's
+provenance. These are **new keys on this existing endpoint**: no new route, no new bind, and every pre-0.123.0
+delegator keeps decoding the payload unchanged. The spec hash is the config's identity (the sha256 of the closed
+input set it was rendered from: tier, render params, template, tier entry, harness version); the state is this
+node's own verdict on it — `MATCH`, `STALE`, `UNSTAMPED` or `HAND-EDITED` — computed by re-rendering from the
+node's embedded tier seeds, the same derivation `local-offload audit-yaml --against-render` uses.
+
+Published only when `serving_config_path` names this node's rendered config. There is no safe default — every node
+keeps it somewhere else (a top-level `llama-swap/` directory on one Windows box, the install-root stack directory on
+another, a service `etc/` directory on the Linux node) — and a guess landing on the wrong file would publish some
+other config's provenance as this node's. Both keys are **omitted** when the path is unset or the file cannot be read, so "this
+node does not report" stays distinguishable from "this node reports MATCH"; an `UNSTAMPED` file publishes the state
+with no hash, because the state is the finding. The verdict is cached on the file's (mtime, size) — health is polled
+every few seconds by every delegator and the verdict costs a re-render. The node only READS the file; re-rendering
+is `install render`, run by a human.
+
 **`store`** — published only when `fleet_store_root` is configured: the store steward's last status
 (`root, used_gb, cap_gb, high_gb, low_gb, files, last_scan, last_prune, last_removed, last_freed_gb, prunes, jobs_since_tick,
 error`). The steward (internal/storesteward) keeps a persistent KV page store this node owns on disk under a budget the box
@@ -748,7 +764,7 @@ resolves, AND the listener posture is one dispatch will accept:
 | `agent_ctx_tokens` | The seat's serving ceiling, **from config** (`agent_ctx_tokens`) — never probed on the health cadence, because the live-window probe can cold-start a multi-GB model. `0` = omitted = "ceiling unknown", which the delegator's gate reads as never-fits. |
 | `agent_seat_resident` | Roster-**verified**: a cached probe of llama-swap's `/v1/models` (alias-aware) saw the seat. The cache refreshes in the background at most once per 30 s; the handler never blocks on llama-swap. |
 | `served_models` (0.113.0) | The same cached probe's full roster name list — **canonical ids AND every alias** (`swapclient.Roster.Names`, not `IDs` alone) — omitted/empty on a cold cache or a failed fetch (unknown, never a stale list). `internal/delegate/gate.go`'s `seatServed` uses this to check the roster actually names `agent_seat`, a stronger check than `agent_seat_resident` alone: a node can be roster-resident under one alias while its `served_models` list shows a different one after a rename. Publishing aliases too matters because an agent seat is normally bound BY alias (`agent-pool` -> `qwen3.8-27b-vllm`, `offload-e4b` -> `gemma-4-e4b`); an id-only list would have made a correctly-served alias seat read as unserved. A pre-0.113.0 node/delegator pairing is unaffected: an unpublished (empty/absent) `served_models` reads as UNKNOWN, never a refusal. |
-| `tiers` / `layers` (0.123.0, composite only) | What this node IS (every tier it is a complete instance of) and what it can PLACE ON: one row per device layer with the declared seats, each seat's `served` flag from the same cached roster, and the node's own `admissible`/`reason` verdict from its guards. Absent on a plain node; built from cached reads only, so health still never probes. See [composite-tier.md](composite-tier.md). |
+| `tiers` / `layers` (0.123.2, composite only) | What this node IS (every tier it is a complete instance of) and what it can PLACE ON: one row per device layer with the declared seats, each seat's `served` flag from the same cached roster, and the node's own `admissible`/`reason` verdict from its guards. Absent on a plain node; built from cached reads only, so health still never probes. See [composite-tier.md](composite-tier.md). |
 
 Residency **fails closed** twice over: until the first probe lands the answer is `false`, and a
 probe *failure* publishes `false` rather than keeping the last good answer — advertising a seat

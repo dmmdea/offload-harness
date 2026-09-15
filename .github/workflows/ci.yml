@@ -12,6 +12,37 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v4
+        with:
+          # The deletion guard below diffs against the base branch and against
+          # HEAD's first parent; neither ref exists in a depth-1 checkout.
+          fetch-depth: 0
+
+      # H-51. Every other gate reads the tree it is handed, so a tree that is
+      # simply MISSING a merged feature passes all of them — which is how #324
+      # merged a tree rebuilt on an older base and silently dropped two releases.
+      # This is the only check that reads what a change LOST. It runs first
+      # because a branch missing merged work should not cost a build.
+      #
+      # On a pull request the base is the base branch tip; on a push to main it is
+      # HEAD's first parent, which is the shape that went unseen. PR_BODY goes
+      # through the environment, never interpolated into the shell.
+      - name: Deletions are declared (H-51)
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          bash ./scripts/check-deletions.sh "origin/$BASE_REF" HEAD
+
+      - name: Deletions are declared (H-51, merge against its first parent)
+        if: github.event_name == 'push'
+        run: |
+          if [ -z "$(git rev-parse --verify --quiet 'HEAD^2' || true)" ]; then
+            echo "check-deletions: HEAD is not a merge commit — the pull request run covered it"
+            exit 0
+          fi
+          bash ./scripts/check-deletions.sh 'HEAD^1' HEAD
 
       - name: Set up Go
         uses: actions/setup-go@v5

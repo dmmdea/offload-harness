@@ -73,11 +73,45 @@ add a CHANGELOG entry in the same PR. This repository is the canonical source of
 Never let the sources drift — a mismatch once made the version look lower than a separately-published
 copy and triggered a false "we lost work" fire drill.
 
+## Deleting a file is a decision you have to declare
+
+`go build`, `go vet` and `go test` all read the tree they are handed. A tree that is simply
+**missing** a merged feature passes every one of them, so nothing in this repo used to notice work
+disappearing. In 0.123.x a branch was rebuilt by replaying its trees onto an older base and merged:
+its first parent was the release before it, its tree was not, and six files from two merged,
+reviewed, tested pull requests vanished in one commit with CI green (register H-51; the repair is
+0.123.2).
+
+`scripts/check-deletions.sh` (run by the CI `build` job, and exercised by
+`TestDeletionGuardRefusesAnUndeclaredDeletion`) now reads what a change **lost**. It runs twice, for
+the two different failure shapes:
+
+| when | compares | catches |
+|---|---|---|
+| pull request | the base branch tip → your branch | a branch that removes a file `main` has |
+| push to `main` | the merge commit's **first parent** → the merge commit | a merge whose tree drops what its own parent carried — the shape above |
+
+If a deletion is intended, declare it — any one of these is enough, and they cost one line:
+
+* a `Deletes: path/one.go, path/two.go` line in the pull request body,
+* a `Deletes: path/one.go` line in a commit message on the branch,
+* the paths listed in a `DELETIONS` file at the repo root (for a large, deliberate removal).
+
+If the guard fires and you did *not* mean to delete anything, your branch is missing work that is
+already on `main`. Merge `main` into it — never force the merge, never replay the branch onto an
+older base — and run again. Run it locally the same way CI does:
+
+```sh
+bash ./scripts/check-deletions.sh origin/main HEAD
+```
+
 ## Opening a pull request
 
 1. Fork the repo and create a branch off `main`.
 2. Make your change, with `go build ./...`, `go vet ./...`, and `go test ./...` all green.
 3. Open a PR describing what changed and why. Link any related issue.
+4. If it removes any tracked file, say so with a `Deletes:` line (see above) — CI refuses an
+   undeclared deletion.
 
 By contributing, you agree that your contributions are licensed under the
 [Apache License 2.0](LICENSE).

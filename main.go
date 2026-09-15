@@ -278,7 +278,10 @@ Usage:
   local-offload rig --seat <alias> [--since 7d] [--node ID] [--out report.json] [--json]   the seat rigger (ADR 0036 P3a): classify this box's delegation-log failures for a seat onto ONE axis each (published precedence), weights over eligible rows, evidence job ids, the pre-authored remedy per axis — proposes and applies nothing
   local-offload ledger [--since DAYS]    token-savings report
   local-offload doctor                   check endpoint health + config
-  local-offload audit-yaml FILE...        check live llama-swap config(s) against the operator rules (INV-1/INV-2: no -ngl 0, no empty CUDA_VISIBLE_DEVICES, ttl 300 everywhere, no persistent group, no preload); exit 1 on any violation
+  local-offload audit-yaml [--against-render] FILE...
+                                         check live llama-swap config(s) against the operator rules (INV-1/INV-2: no -ngl 0, no empty CUDA_VISIBLE_DEVICES, ttl 300 everywhere, no persistent group, no preload).
+                                         --against-render also re-derives each file from THIS binary's tier seeds and reports MATCH / STALE(keys) / UNSTAMPED / HAND-EDITED.
+                                         Exit 1 on a violation, a STALE config or a HAND-EDITED one; UNSTAMPED prints as a finding and does not fail. Flags come BEFORE the files.
   local-offload report [--out FILE]      READ-ONLY capability report for this machine (tier, serving, media routes) — Markdown, safe to send
   local-offload acceptance [--json]      the gate: EXERCISE every bound capability as this identity (lease writable, interpreters runnable, aliases live). Non-zero when a node must not be handed work.
   local-offload install detect [--json]  classify this machine into a hardware tier (works on every OS)
@@ -2385,6 +2388,10 @@ func runFleetServe(args []string) error {
 		Snapshot: sampler.Load,
 		Lease:    leaseRead,
 		Store:    storeStatus,
+		// The rendered serving config's provenance (K-02): NEW KEYS on the
+		// existing /fleet/health payload, never a new listener. nil when
+		// serving_config_path is unset, which omits both fields.
+		ServingConfig: servingConfigReporter(cfg.ServingConfigPath),
 		Footprints: func() []fleetnode.FootprintEntry {
 			if st := p.FootprintStore(); st != nil {
 				// Pick up records written by OTHER processes (fleet-measure while

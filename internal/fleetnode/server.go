@@ -104,6 +104,14 @@ type Options struct {
 	Lease func() gpulease.Info
 	// Store returns the store steward's last status; nil = no steward.
 	Store func() storesteward.Status
+	// ServingConfig reports the rendered serving config's provenance: its spec
+	// hash and its state (MATCH/STALE/UNSTAMPED/HAND-EDITED). nil, or an empty
+	// state, omits both health fields.
+	//
+	// It is a func and not a path because the re-derive needs the tier table and
+	// the serving templates, which are embedded in the COMMAND (install_render.go)
+	// -- this package serves health, it does not own the seeds.
+	ServingConfig func() (specSHA256, state string)
 }
 
 // Server is the fleet-node HTTP server: three handlers over a Runner + Jobs
@@ -540,6 +548,24 @@ type healthPayload struct {
 	// by hand, and a node several releases behind is debugged against known-fixed
 	// bugs.
 	HarnessVersion string `json:"harness_version,omitempty"`
+	// ServingConfigSpecSHA256 / ServingConfigState are the rendered serving
+	// config's provenance (K-02) -- NEW KEYS on this existing endpoint, not a new
+	// bind and not a new route.
+	//
+	// The spec hash is the config's identity: the sha256 of the closed input set
+	// it was rendered from (tier, render params, template, tier entry, harness
+	// version). The state is this binary's verdict on it -- MATCH, STALE,
+	// UNSTAMPED or HAND-EDITED -- computed by re-rendering from the node's own
+	// embedded seeds. Fleet drift in the SERVING layer used to be found by
+	// hand, one ssh at a time, and was not found at all when the config broke no
+	// operator rule (ampere-16 served a 32768 window for weeks after the tier
+	// table said 131072).
+	//
+	// Both are omitted together when serving_config_path is not configured, or
+	// when the file cannot be read: an absent field means "this node does not
+	// report", which must stay distinguishable from "this node reports MATCH".
+	ServingConfigSpecSHA256 string `json:"serving_config_spec_sha256,omitempty"`
+	ServingConfigState      string `json:"serving_config_state,omitempty"`
 	// Lease is this node's machine-wide GPU lease as gpulease reads it
 	// (0.113.16). Published only when a lease is HELD; absent = the card is
 	// unreserved (or the node predates the field — a delegator treats both as
@@ -697,6 +723,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		MaxConcurrentJobs:     s.jobs.MaxConcurrent(),
 		MaxQueueDepth:         s.opts.Cfg.FleetQueueLimit(),
 		HarnessVersion:        s.opts.Version,
+	}
+	if s.opts.ServingConfig != nil {
+		if sha, state := s.opts.ServingConfig(); state != "" {
+			payload.ServingConfigSpecSHA256, payload.ServingConfigState = sha, state
+		}
 	}
 	// GPU utilization: advertise the busiest device's utilization when known.
 	// Omitted when no device has published a known utilization — absent ≠ idle.
